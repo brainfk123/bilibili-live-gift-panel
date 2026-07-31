@@ -4,6 +4,8 @@ import { AppState } from '../types';
 import { upsertRecentGift } from '../gifts/catalog';
 import { applyGiftToState, recordGiftTotals, TriggerResult } from './rules';
 
+export type { TriggerResult };
+
 const DEDUP_WINDOW_MS = 60000;
 
 export class Engine {

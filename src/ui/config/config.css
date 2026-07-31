@@ -16,7 +16,7 @@ body {
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   font-size: 14px;
 }
-#app { display: flex; min-height: 100vh; }
+.config-root { display: flex; min-height: 100vh; }
 
 .sidebar {
   width: 200px; flex-shrink: 0;
