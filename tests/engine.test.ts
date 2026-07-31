@@ -3,9 +3,16 @@ import { applyGiftToState, recordGiftTotals, resetTodayStats } from '../src/engi
 import { Engine } from '../src/engine';
 import { defaultState } from '../src/storage';
 import { GiftEvent } from '../src/bilibili/messages';
-import { WsLike } from '../src/bilibili/client';
+import { RoomInfo, WsLike } from '../src/bilibili/client';
 import { encodeJson } from '../src/bilibili/protocol';
 import { MAX_LOG } from '../src/types';
+
+const fakeRoomInfo: RoomInfo = {
+  roomId: 1,
+  buvid: 'buvid-test',
+  token: 'token-test',
+  hostList: [{ host: 'chat.test.bilibili.com', wss_port: 2245 }],
+};
 
 function makeGift(overrides: Partial<GiftEvent>): GiftEvent {
   return {
@@ -182,14 +189,14 @@ describe('Engine', () => {
     }
   });
 
-  it('wires gift events from client into rules', () => {
+  it('wires gift events from client into rules', async () => {
     const s = defaultState();
     s.roomId = '1';
     s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '10' });
     const fake = new FakeWs();
     const onTrigger = vi.fn();
-    const engine = new Engine(s, onTrigger, () => fake);
-    engine.start();
+    const engine = new Engine(s, onTrigger, () => fake, async () => fakeRoomInfo);
+    await engine.start();
     fake.open();
     fake.message(encodeGiftMessage());
     expect(s.attributes[0].value).toBe(10);
@@ -206,14 +213,14 @@ describe('Engine', () => {
     expect(factory).not.toHaveBeenCalled();
   });
 
-  it('propagates connection state to listener', () => {
+  it('propagates connection state to listener', async () => {
     const s = defaultState();
     s.roomId = '1';
     const fake = new FakeWs();
-    const engine = new Engine(s, undefined, () => fake);
+    const engine = new Engine(s, undefined, () => fake, async () => fakeRoomInfo);
     const onState = vi.fn();
     engine.setStateListener(onState);
-    engine.start();
+    await engine.start();
     expect(onState).toHaveBeenCalledWith('connecting');
     fake.open();
     expect(onState).toHaveBeenCalledWith('connected');

@@ -1,5 +1,5 @@
 import { GiftEvent, ScEvent } from '../bilibili/messages';
-import { DanmakuClient, ConnState } from '../bilibili/client';
+import { DanmakuClient, ConnState, RoomInfo } from '../bilibili/client';
 import { AppState } from '../types';
 import { upsertRecentGift } from '../gifts/catalog';
 import { applyGiftToState, recordGiftTotals, TriggerResult } from './rules';
@@ -17,10 +17,12 @@ export class Engine {
     private readonly state: AppState,
     private readonly onTrigger?: (r: TriggerResult) => void,
     wsFactory?: (url: string) => any,
+    roomInfoFetcher?: (roomId: number) => Promise<RoomInfo>,
   ) {
     this.client = new DanmakuClient({
       roomId: Number(state.roomId),
       wsFactory,
+      roomInfoFetcher,
       onGift: (ev) => this.handleGift(ev),
       onSc: (ev) => this.handleSc(ev),
       onState: (s) => this.onState?.(s),
@@ -31,9 +33,9 @@ export class Engine {
     this.onState = fn;
   }
 
-  start(): void {
-    if (!this.state.roomId) return;
-    this.client.start();
+  start(): Promise<void> {
+    if (!this.state.roomId) return Promise.resolve();
+    return this.client.start();
   }
 
   stop(): void {

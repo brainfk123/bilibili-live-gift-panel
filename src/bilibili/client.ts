@@ -13,8 +13,16 @@ export interface WsLike {
   close: () => void;
 }
 
+export interface RoomInfo {
+  roomId: number;
+  buvid: string;
+  token: string;
+  hostList: { host: string; wss_port: number }[];
+}
+
 export interface DanmakuClientOptions {
   roomId: number;
+  roomInfoFetcher?: (roomId: number) => Promise<RoomInfo>;
   wsFactory?: (url: string) => WsLike;
   onMessage?: (cmd: string, data: any) => void;
   onGift?: (ev: GiftEvent) => void;
@@ -22,13 +30,14 @@ export interface DanmakuClientOptions {
   onState?: (s: ConnState) => void;
 }
 
-const WS_URL = 'wss://broadcastlv.chat.bilibili.com/sub';
 const HEARTBEAT_MS = 30000;
+const REINIT_PERIOD = 6;
 
-function randomBuvid(): string {
-  let s = 'XY';
-  for (let i = 0; i < 32; i++) s += Math.floor(Math.random() * 16).toString(16);
-  return s;
+async function defaultRoomInfoFetcher(roomId: number): Promise<RoomInfo> {
+  const res = await fetch(`/api/room_info?roomId=${roomId}`);
+  const json = await res.json();
+  if (json.code !== 0) throw new Error(json.message || '获取房间信息失败');
+  return json;
 }
 
 export class DanmakuClient {
@@ -37,11 +46,19 @@ export class DanmakuClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private attempt = 0;
   private stopped = false;
+  private info: RoomInfo | null = null;
 
   constructor(private readonly opts: DanmakuClientOptions) {}
 
-  start(): void {
+  async start(): Promise<void> {
     this.stopped = false;
+    try {
+      await this.initRoomInfo();
+    } catch {
+      this.opts.onState?.('error');
+      this.scheduleRetry();
+      return;
+    }
     this.connect();
   }
 
@@ -53,8 +70,27 @@ export class DanmakuClient {
     this.ws = null;
   }
 
+  private async initRoomInfo(): Promise<void> {
+    const fetcher = this.opts.roomInfoFetcher ?? defaultRoomInfoFetcher;
+    this.info = await fetcher(this.opts.roomId);
+  }
+
+  private scheduleRetry(): void {
+    if (this.stopped) return;
+    this.attempt++;
+    const delay = Math.min(30000, Math.pow(2, this.attempt) * 1000);
+    this.opts.onState?.('reconnecting');
+    this.reconnectTimer = setTimeout(() => void this.start(), delay);
+  }
+
+  private getWsUrl(): string {
+    const list = this.info?.hostList ?? [{ host: 'broadcastlv.chat.bilibili.com', wss_port: 443 }];
+    const server = list[this.attempt % list.length];
+    return `wss://${server.host}:${server.wss_port}/sub`;
+  }
+
   private connect(): void {
-    const ws = this.opts.wsFactory ? this.opts.wsFactory(WS_URL) : this.createWs(WS_URL);
+    const ws = this.opts.wsFactory ? this.opts.wsFactory(this.getWsUrl()) : this.createWs(this.getWsUrl());
     this.ws = ws;
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => this.onOpen();
@@ -71,13 +107,16 @@ export class DanmakuClient {
   private onOpen(): void {
     this.attempt = 0;
     this.opts.onState?.('connected');
+    const info = this.info;
+    if (!info) return;
     this.ws?.send(encodeJson(OP_AUTH, {
       uid: 0,
-      roomid: this.opts.roomId,
+      roomid: info.roomId,
       protover: 2,
       platform: 'web',
-      buvid: randomBuvid(),
+      buvid: info.buvid,
       type: 2,
+      key: info.token,
     }).buffer as ArrayBuffer);
     this.startHeartbeat();
   }
@@ -101,7 +140,7 @@ export class DanmakuClient {
       try {
         const reply = JSON.parse(decodeText(p.body));
         if (reply.code !== 0) {
-          // 认证失败（如房间号错误），关闭连接触发重连兜底
+          // 认证失败（token 失效等），重新获取房间信息后重连
           this.ws?.close();
         }
       } catch {
@@ -146,6 +185,14 @@ export class DanmakuClient {
     this.attempt++;
     const delay = Math.min(30000, Math.pow(2, this.attempt) * 1000);
     this.opts.onState?.('reconnecting');
-    this.reconnectTimer = setTimeout(() => this.connect(), delay);
+    this.reconnectTimer = setTimeout(() => {
+      if (this.stopped) return;
+      if (this.attempt % REINIT_PERIOD === 0) {
+        // 定期重新获取 token，避免过期
+        void this.start();
+      } else {
+        this.connect();
+      }
+    }, delay);
   }
 }

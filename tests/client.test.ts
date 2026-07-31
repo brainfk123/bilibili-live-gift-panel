@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { DanmakuClient, WsLike } from '../src/bilibili/client';
+import { DanmakuClient, RoomInfo, WsLike } from '../src/bilibili/client';
 import { OP_MESSAGE, decodePackets, decodeText, encodeJson, encodePacket } from '../src/bilibili/protocol';
 
 async function deflate(bytes: Uint8Array): Promise<Uint8Array> {
@@ -31,24 +31,61 @@ function giftPacket(): ArrayBuffer {
   return encodeJson(5, gift).buffer as ArrayBuffer;
 }
 
+const fakeRoomInfo: RoomInfo = {
+  roomId: 2145,
+  buvid: 'buvid-test',
+  token: 'token-test',
+  hostList: [{ host: 'chat.test.bilibili.com', wss_port: 2245 }],
+};
+
+function makeClient(extra: any = {}): { client: DanmakuClient; factory: ReturnType<typeof vi.fn>; } {
+  const factory = vi.fn(() => new FakeWs());
+  const client = new DanmakuClient({
+    roomId: 2145,
+    roomInfoFetcher: async () => fakeRoomInfo,
+    wsFactory: factory,
+    ...extra,
+  });
+  return { client, factory };
+}
+
 describe('DanmakuClient', () => {
-  it('sends auth packet on open', () => {
-    const fake = new FakeWs();
-    const client = new DanmakuClient({ roomId: 2145, wsFactory: () => fake });
-    client.start();
+  it('fetches room info and sends auth with key on open', async () => {
+    const { client, factory } = makeClient();
+    await client.start();
+    const fake = factory.mock.results[0].value as FakeWs;
     fake.open();
     expect(fake.sent.length).toBe(1);
     const auth = JSON.parse(decodeText(decodePackets(new Uint8Array(fake.sent[0]))[0].body));
     expect(auth.roomid).toBe(2145);
     expect(auth.uid).toBe(0);
     expect(auth.protover).toBe(2);
+    expect(auth.buvid).toBe('buvid-test');
+    expect(auth.key).toBe('token-test');
   });
 
-  it('dispatches gift event', () => {
-    const fake = new FakeWs();
+  it('connects to the host from room info', async () => {
+    const { client, factory } = makeClient();
+    await client.start();
+    expect(factory.mock.calls[0][0]).toBe('wss://chat.test.bilibili.com:2245/sub');
+  });
+
+  it('emits error state when room info fetch fails', async () => {
+    const onState = vi.fn();
+    const client = new DanmakuClient({
+      roomId: 2145,
+      roomInfoFetcher: async () => { throw new Error('fetch failed'); },
+      onState,
+    });
+    await client.start();
+    expect(onState).toHaveBeenCalledWith('error');
+  });
+
+  it('dispatches gift event', async () => {
     const onGift = vi.fn();
-    const client = new DanmakuClient({ roomId: 2145, wsFactory: () => fake, onGift });
-    client.start();
+    const { client, factory } = makeClient({ onGift });
+    await client.start();
+    const fake = factory.mock.results[0].value as FakeWs;
     fake.open();
     fake.message(giftPacket());
     expect(onGift).toHaveBeenCalledTimes(1);
@@ -58,10 +95,10 @@ describe('DanmakuClient', () => {
   });
 
   it('dispatches gift from a protover=2 zlib frame', async () => {
-    const fake = new FakeWs();
     const onGift = vi.fn();
-    const client = new DanmakuClient({ roomId: 2145, wsFactory: () => fake, onGift });
-    client.start();
+    const { client, factory } = makeClient({ onGift });
+    await client.start();
+    const fake = factory.mock.results[0].value as FakeWs;
     fake.open();
     const gift = {
       cmd: 'SEND_GIFT',
@@ -77,10 +114,10 @@ describe('DanmakuClient', () => {
   });
 
   it('skips a corrupt protover=2 frame and still dispatches the rest of the batch', async () => {
-    const fake = new FakeWs();
     const onGift = vi.fn();
-    const client = new DanmakuClient({ roomId: 2145, wsFactory: () => fake, onGift });
-    client.start();
+    const { client, factory } = makeClient({ onGift });
+    await client.start();
+    const fake = factory.mock.results[0].value as FakeWs;
     fake.open();
     const corrupt = encodePacket(OP_MESSAGE, new Uint8Array([1, 5, 0, 0, 0, 65, 65, 65, 65, 65]), 2);
     const valid = new Uint8Array(giftPacket());
@@ -91,30 +128,34 @@ describe('DanmakuClient', () => {
     await vi.waitFor(() => expect(onGift).toHaveBeenCalledTimes(1));
   });
 
-  it('reconnects on close with backoff', () => {
+  it('reconnects on close with backoff', async () => {
     vi.useFakeTimers();
     const factory = vi.fn(() => new FakeWs());
     const onState = vi.fn();
-    const client = new DanmakuClient({ roomId: 1, wsFactory: factory, onState });
-    client.start();
+    const client = new DanmakuClient({ roomId: 1, roomInfoFetcher: async () => fakeRoomInfo, wsFactory: factory, onState });
+    const startPromise = client.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await startPromise;
     const first = factory.mock.results[0].value as FakeWs;
     first.open();
     first.closeFromServer();
-    vi.advanceTimersByTime(2000);
+    await vi.advanceTimersByTimeAsync(2000);
     expect(factory).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
   });
 
-  it('stop prevents reconnect', () => {
+  it('stop prevents reconnect', async () => {
     vi.useFakeTimers();
     const factory = vi.fn(() => new FakeWs());
-    const client = new DanmakuClient({ roomId: 1, wsFactory: factory });
-    client.start();
+    const client = new DanmakuClient({ roomId: 1, roomInfoFetcher: async () => fakeRoomInfo, wsFactory: factory });
+    const startPromise = client.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await startPromise;
     const first = factory.mock.results[0].value as FakeWs;
     first.open();
     client.stop();
     first.closeFromServer();
-    vi.advanceTimersByTime(60000);
+    await vi.advanceTimersByTimeAsync(60000);
     expect(factory).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
   });
