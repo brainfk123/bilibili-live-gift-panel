@@ -6,7 +6,7 @@ OBS 浏览器源插件：监听直播间礼物，按可配置公式规则累加�
 
 ```
 npm install
-npm run fetch:catalog   # 抓取最新礼物目录（可选，构建会自动抓）
+npm run fetch:catalog   # 抓取最新礼物目录（可选，用于更新内置礼物列表）
 npm run build
 ```
 
