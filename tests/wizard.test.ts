@@ -21,6 +21,11 @@ describe('wizard progress', () => {
     expect(getNextWizardStep(progress)).toBe('rules');
   });
 
+  it('uses the configured room as the first active task after room setup', () => {
+    const progress = getWizardProgress(state('88888888'));
+    expect(getNextWizardStep(progress)).toBe('rules');
+  });
+
   it('is ready for OBS after a rule exists', () => {
     const progress = getWizardProgress(state('88888888', 1));
     expect(progress).toEqual({ room: true, attributes: true, rules: true, obs: true });
