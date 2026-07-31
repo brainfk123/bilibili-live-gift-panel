@@ -8,6 +8,11 @@ export default defineConfig({
     target: 'es2022',
     cssCodeSplit: false,
   },
+  server: {
+    proxy: {
+      '/api': 'http://localhost:12450',
+    },
+  },
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts'],

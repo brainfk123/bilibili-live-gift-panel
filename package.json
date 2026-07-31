@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "dev:server": "bun server/index.ts",
+    "build": "vite build && node scripts/build-go.mjs",
     "fetch:catalog": "node scripts/fetch-gift-catalog.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
