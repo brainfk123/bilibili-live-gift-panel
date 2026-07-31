@@ -2,6 +2,9 @@ import './ui/config/config.css';
 import './ui/display/display.css';
 import { mountDisplay } from './ui/display/display';
 import { mountConfig } from './ui/config/config';
+import { installFavicon } from './ui/brand';
+
+installFavicon();
 
 const root = document.getElementById('app')!;
 const params = new URLSearchParams(location.search);
