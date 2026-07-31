@@ -1,7 +1,16 @@
+import catalog from '../data/gift-catalog.json';
 import { GiftEvent } from '../bilibili/messages';
 import { AppState, GiftInfo, RecentGift } from '../types';
 
+export const builtinCatalog: GiftInfo[] = catalog as GiftInfo[];
+
+export function loadBuiltinCatalog(): GiftInfo[] {
+  return builtinCatalog;
+}
+
 export function findGift(state: AppState, giftId: number): GiftInfo | undefined {
+  const inCatalog = builtinCatalog.find((g) => g.id === giftId);
+  if (inCatalog) return inCatalog;
   return state.recentGifts.find((g) => g.id === giftId);
 }
 
