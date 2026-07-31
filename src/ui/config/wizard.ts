@@ -9,11 +9,26 @@ export interface WizardProgress {
   obs: boolean;
 }
 
+export interface WizardChecklistStep {
+  label: string;
+  target: WizardStep;
+  done: boolean;
+}
+
 export function getWizardProgress(state: Pick<AppState, 'roomId' | 'attributes' | 'rules'>): WizardProgress {
   const room = state.roomId.trim().length > 0;
   const attributes = state.attributes.length > 0;
   const rules = state.rules.length > 0;
   return { room, attributes, rules, obs: room && attributes && rules };
+}
+
+export function getWizardChecklist(progress: WizardProgress): WizardChecklistStep[] {
+  return [
+    { label: '填写房间号', target: 'room', done: progress.room },
+    { label: '创建属性（如加班时间）', target: 'attributes', done: progress.attributes },
+    { label: '配置礼物规则', target: 'rules', done: progress.rules },
+    { label: '在 OBS 中显示', target: 'obs', done: progress.obs },
+  ];
 }
 
 export function getNextWizardStep(progress: WizardProgress): WizardStep | null {

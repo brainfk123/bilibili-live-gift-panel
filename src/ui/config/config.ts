@@ -7,7 +7,7 @@ import { formatValue, todayStr } from '../../format';
 import { parseGift } from '../../bilibili/messages';
 import { DanmakuClient, ConnState } from '../../bilibili/client';
 import { createBrandIcon } from '../brand';
-import { getNextWizardStep, getWizardProgress, type WizardStep } from './wizard';
+import { getNextWizardStep, getWizardChecklist, getWizardProgress, type WizardStep } from './wizard';
 
 export function mountConfig(root: HTMLElement): void {
   let state = loadState();
@@ -70,7 +70,9 @@ export function mountConfig(root: HTMLElement): void {
       item.onclick = () => switchTo(step.key);
       progressNav.append(item);
     }
-    content.append(progressNav);
+    const currentProgress = content.querySelector('.wizard-progress');
+    if (currentProgress) currentProgress.replaceWith(progressNav);
+    else content.append(progressNav);
   }
 
   function switchTo(key: string): void {
@@ -96,6 +98,7 @@ export function mountConfig(root: HTMLElement): void {
 
   function save(): void {
     saveState(state);
+    renderProgress();
   }
 
   function guideCard(text: string, bold?: string): void {
@@ -118,24 +121,17 @@ export function mountConfig(root: HTMLElement): void {
   }
 
   function renderOnboarding(): void {
-    const roomDone = state.roomId.trim() !== '';
-    const attrDone = state.attributes.length > 0;
-    const ruleDone = state.rules.length > 0;
-    const ready = roomDone && attrDone && ruleDone;
-    const nextTarget = !roomDone ? 'room' : !attrDone ? 'attributes' : !ruleDone ? 'rules' : '';
-    const steps: [string, string, boolean][] = [
-      ['填写房间号', 'room', roomDone],
-      ['创建属性（如加班时间）', 'attributes', attrDone],
-      ['配置礼物规则', 'rules', ruleDone],
-      ['在 OBS 中显示', 'room', ready],
-    ];
+    const progress = getWizardProgress(state);
+    const ready = progress.obs;
+    const nextTarget = !progress.room ? 'room' : !progress.attributes ? 'attributes' : !progress.rules ? 'rules' : '';
+    const steps = getWizardChecklist(progress);
     const box = el('div', { class: 'onboard' });
     box.append(
       el('div', { class: 'onboard-title', text: ready ? '🎉 配置完成，接下来放进 OBS' : '🎉 第一次使用？跟着做就好' }),
       el('div', { class: 'onboard-desc', text: ready ? '浏览器里的设置已经完成。把下面的地址添加到 OBS 浏览器源，直播时保持本程序窗口不要关闭。' : '不用懂技术，按顺序完成下面几步。每一步都有说明，点按钮可以直接跳到对应位置。' }),
     );
     const stepsRow = el('div', { class: 'steps' });
-    for (const [label, target, done] of steps) {
+    for (const { label, target, done } of steps) {
       const active = !done && target === nextTarget;
       const s = el('div', { class: done ? 'step done' : active ? 'step active-step' : 'step' }, [
         el('span', { class: 'step-num', text: done ? '✓' : '○' }),
@@ -238,7 +234,7 @@ export function mountConfig(root: HTMLElement): void {
     if (state.roomId && state.rules.length === 0) {
       content.append(el('div', { class: 'tip-banner' }, [
         el('b', { text: '下一步：' }),
-        el('span', { text: '去「礼物规则」里配置，观众送礼物才能累加加班时间。点击左侧「礼物规则」。' }),
+        el('span', { text: '去顶部「绑定礼物」入口配置，观众送礼物才能累加加班时间。' }),
       ]));
     }
   }
