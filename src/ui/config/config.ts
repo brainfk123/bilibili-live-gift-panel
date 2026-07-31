@@ -10,6 +10,7 @@ import { DanmakuClient, ConnState } from '../../bilibili/client';
 export function mountConfig(root: HTMLElement): void {
   let state = loadState();
   let current = 'room';
+  let client: DanmakuClient | null = null;
   const content = el('div', { class: 'content' });
   const sidebar = el('div', { class: 'sidebar' });
   sidebar.append(el('div', { class: 'sidebar-title', text: '直播礼物面板' }));
@@ -30,6 +31,8 @@ export function mountConfig(root: HTMLElement): void {
   root.append(sidebar, content);
 
   function switchTo(key: string): void {
+    client?.stop();
+    client = null;
     current = key;
     for (const [k, item] of Object.entries(navItems)) item.classList.toggle('active', k === key);
     render();
@@ -48,6 +51,17 @@ export function mountConfig(root: HTMLElement): void {
     saveState(state);
   }
 
+  function buildPreviewEnv(s: AppState): Record<string, number> {
+    const env: Record<string, number> = { price: 1000, count: 1 };
+    for (const a of s.attributes) env[a.name] = a.value;
+    return env;
+  }
+
+  const numOrUndef = (v: string): number | undefined => {
+    const n = Number(v);
+    return v.trim() === '' || !Number.isFinite(n) ? undefined : n;
+  };
+
   function renderRoom(): void {
     content.append(el('div', { class: 'section-title', text: '房间设置' }));
     const card = el('div', { class: 'card' });
@@ -56,7 +70,6 @@ export function mountConfig(root: HTMLElement): void {
     const row = el('div', { class: 'row gap' });
     const statusText = el('span', { text: '未连接' });
     const connectBtn = el('button', { class: 'btn', text: '测试连接' }) as HTMLButtonElement;
-    let client: DanmakuClient | null = null;
     connectBtn.onclick = () => {
       const roomId = roomInput.value.trim();
       if (!roomId) { toast('请输入房间号', root); return; }
@@ -163,7 +176,8 @@ export function mountConfig(root: HTMLElement): void {
     const search = el('input', { class: 'field-input' }) as HTMLInputElement;
     search.placeholder = '搜索礼物名称…';
     const giftList = el('div', {});
-    const allGifts = [...state.recentGifts, ...builtinCatalog];
+    const seen = new Set<number>();
+    const allGifts = [...state.recentGifts, ...builtinCatalog].filter((g) => !seen.has(g.id) && (seen.add(g.id), true));
     function renderGiftList(filter: string): void {
       giftList.replaceChildren();
       const list = allGifts.filter((g) => g.name.includes(filter) || String(g.id).includes(filter)).slice(0, 50);
@@ -223,8 +237,7 @@ export function mountConfig(root: HTMLElement): void {
       const formula = formulaInput.value.trim();
       preview.replaceChildren();
       try {
-        const env: Record<string, number> = { price: 1000, count: 1 };
-        for (const a of state.attributes) env[a.name] = a.value;
+        const env = buildPreviewEnv(state);
         const vars = collectVars(formula);
         const missing = vars.filter((v) => v !== 'price' && v !== 'count' && !state.attributes.some((a) => a.name === v));
         const result = evalFormula(formula, env);
@@ -246,7 +259,7 @@ export function mountConfig(root: HTMLElement): void {
       const formula = formulaInput.value.trim();
       if (!formula) { toast('请填写公式', root); return; }
       try {
-        evalFormula(formula, { price: 1000, count: 1 });
+        evalFormula(formula, buildPreviewEnv(state));
       } catch {
         toast('公式有误，无法保存', root);
         return;
@@ -258,9 +271,9 @@ export function mountConfig(root: HTMLElement): void {
         giftId,
         attributeName: attrName,
         formula,
-        minPrice: minInput.value ? Number(minInput.value) : undefined,
-        cap: capInput.value ? Number(capInput.value) : undefined,
-        dailyLimit: limitInput.value ? Number(limitInput.value) : undefined,
+        minPrice: numOrUndef(minInput.value),
+        cap: numOrUndef(capInput.value),
+        dailyLimit: numOrUndef(limitInput.value),
       };
       state.rules.push(rule);
       save();
@@ -346,15 +359,30 @@ export function mountConfig(root: HTMLElement): void {
       const file = importInput.files?.[0];
       if (!file) return;
       file.text().then((text) => {
+        let parsed: Partial<AppState>;
         try {
-          const parsed = JSON.parse(text) as AppState;
-          state = { ...state, ...parsed };
-          save();
-          render();
-          toast('配置已导入', root);
+          parsed = JSON.parse(text) as Partial<AppState>;
         } catch {
           toast('文件解析失败', root);
+          return;
         }
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)
+          || (parsed.attributes !== undefined && !Array.isArray(parsed.attributes))
+          || (parsed.rules !== undefined && !Array.isArray(parsed.rules))
+          || (parsed.settings !== undefined && (typeof parsed.settings !== 'object' || parsed.settings === null))) {
+          toast('配置文件格式不正确', root);
+          return;
+        }
+        state = {
+          ...state,
+          ...parsed,
+          settings: { ...state.settings, ...(parsed.settings ?? {}) },
+          attributes: Array.isArray(parsed.attributes) ? parsed.attributes : state.attributes,
+          rules: Array.isArray(parsed.rules) ? parsed.rules : state.rules,
+        };
+        save();
+        render();
+        toast('配置已导入', root);
       });
     };
     const importBtn = el('button', { class: 'btn ghost', text: '导入配置' });
@@ -370,5 +398,5 @@ export function mountConfig(root: HTMLElement): void {
     content.append(dataCard);
   }
 
-  render();
+  switchTo('room');
 }
