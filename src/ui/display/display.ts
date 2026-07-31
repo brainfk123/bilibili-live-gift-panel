@@ -26,8 +26,8 @@ export function mountDisplay(root: HTMLElement): void {
   }
 
   function updateAll(): void {
-    panel.style.setProperty('--accent', state.settings.accentColor);
-    panel.style.setProperty('--accent2', state.settings.accentColor);
+    root.style.setProperty('--accent', state.settings.accentColor);
+    root.style.setProperty('--accent2', state.settings.accentColor);
     panel.classList.toggle('center', state.settings.align === 'center');
     panel.classList.toggle('right', state.settings.align === 'right');
     for (const attr of state.attributes) {

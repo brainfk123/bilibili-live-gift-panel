@@ -112,8 +112,12 @@ export class DanmakuClient {
     if (p.op !== OP_MESSAGE) return;
     let bodies: Uint8Array[];
     if (p.protover === 2) {
-      const inflated = await inflate(p.body);
-      bodies = decodePackets(inflated).map((x) => x.body);
+      try {
+        const inflated = await inflate(p.body);
+        bodies = decodePackets(inflated).map((x) => x.body);
+      } catch {
+        return;
+      }
     } else {
       bodies = [p.body];
     }

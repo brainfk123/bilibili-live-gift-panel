@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { defaultState, loadState, saveState, resetState } from '../src/storage';
+import { defaultState, loadState, saveState, resetState, pruneLog } from '../src/storage';
+import { LogEntry, MAX_LOG } from '../src/types';
 
 const mem = new Map<string, string>();
 vi.stubGlobal('localStorage', {
@@ -33,5 +34,24 @@ describe('storage', () => {
     saveState(defaultState());
     resetState();
     expect(loadState().roomId).toBe('');
+  });
+
+  it('pruneLog keeps the first MAX_LOG entries, preserving input order', () => {
+    const entry = (time: number): LogEntry => ({
+      time,
+      giftId: 0,
+      giftName: '',
+      num: 0,
+      uname: '',
+      attributeName: '',
+      delta: 0,
+      valueAfter: 0,
+      ruleId: '',
+    });
+    const log = Array.from({ length: MAX_LOG + 5 }, (_, i) => entry(i));
+    const pruned = pruneLog(log);
+    expect(pruned).toHaveLength(MAX_LOG);
+    expect(pruned[0].time).toBe(0);
+    expect(pruned[pruned.length - 1].time).toBe(MAX_LOG - 1);
   });
 });

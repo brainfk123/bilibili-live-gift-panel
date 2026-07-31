@@ -46,5 +46,5 @@ export function resetState(): void {
 }
 
 export function pruneLog(log: AppState['log']): AppState['log'] {
-  return log.slice(-MAX_LOG);
+  return log.slice(0, MAX_LOG);
 }

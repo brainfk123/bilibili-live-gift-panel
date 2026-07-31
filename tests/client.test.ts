@@ -1,6 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
 import { DanmakuClient, WsLike } from '../src/bilibili/client';
-import { decodePackets, decodeText, encodeJson } from '../src/bilibili/protocol';
+import { OP_MESSAGE, decodePackets, decodeText, encodeJson, encodePacket } from '../src/bilibili/protocol';
+
+async function deflate(bytes: Uint8Array): Promise<Uint8Array> {
+  const copy = new Uint8Array(bytes);
+  const stream = new Blob([copy]).stream().pipeThrough(new CompressionStream('deflate'));
+  const buf = await new Response(stream).arrayBuffer();
+  return new Uint8Array(buf);
+}
 
 class FakeWs implements WsLike {
   binaryType = 'arraybuffer';
@@ -48,6 +55,40 @@ describe('DanmakuClient', () => {
     const ev = onGift.mock.calls[0][0];
     expect(ev.giftName).toBe('辣条');
     expect(ev.giftId).toBe(30607);
+  });
+
+  it('dispatches gift from a protover=2 zlib frame', async () => {
+    const fake = new FakeWs();
+    const onGift = vi.fn();
+    const client = new DanmakuClient({ roomId: 2145, wsFactory: () => fake, onGift });
+    client.start();
+    fake.open();
+    const gift = {
+      cmd: 'SEND_GIFT',
+      data: { giftId: 30607, giftName: '辣条', num: 1, price: 20, coin_type: 'gold', uname: 'u', uid: 1, timestamp: 1700000000, gift_info: { img_basic: '' }, rnd: 'r1' },
+    };
+    const compressed = await deflate(encodeJson(OP_MESSAGE, gift));
+    const frame = encodePacket(OP_MESSAGE, compressed, 2).buffer as ArrayBuffer;
+    fake.message(frame);
+    await vi.waitFor(() => expect(onGift).toHaveBeenCalledTimes(1));
+    const ev = onGift.mock.calls[0][0];
+    expect(ev.giftName).toBe('辣条');
+    expect(ev.giftId).toBe(30607);
+  });
+
+  it('skips a corrupt protover=2 frame and still dispatches the rest of the batch', async () => {
+    const fake = new FakeWs();
+    const onGift = vi.fn();
+    const client = new DanmakuClient({ roomId: 2145, wsFactory: () => fake, onGift });
+    client.start();
+    fake.open();
+    const corrupt = encodePacket(OP_MESSAGE, new Uint8Array([1, 5, 0, 0, 0, 65, 65, 65, 65, 65]), 2);
+    const valid = new Uint8Array(giftPacket());
+    const combined = new Uint8Array(corrupt.length + valid.length);
+    combined.set(corrupt, 0);
+    combined.set(valid, corrupt.length);
+    fake.message(combined.buffer as ArrayBuffer);
+    await vi.waitFor(() => expect(onGift).toHaveBeenCalledTimes(1));
   });
 
   it('reconnects on close with backoff', () => {
