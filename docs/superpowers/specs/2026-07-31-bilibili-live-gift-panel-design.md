@@ -89,9 +89,11 @@ Vite+TS 工程
 
 ## 6. 礼物同步（三层机制）
 
-1. **内置礼物目录**：构建时抓取 `https://api.live.bilibili.com/xlive/web-room/v1/giftPanel/giftConfig`（匿名可用，返回全量礼物清单 gift_id/名称/价格），生成内置 JSON 目录打进 HTML。主播可在配置面板按名称搜索整个目录直接选中配规则，无需知道 gift_id。B 站上新礼物 → 重新构建发新版。
+1. **内置礼物目录**：构建时抓取 `https://api.live.bilibili.com/xlive/web-room/v1/giftPanel/giftConfig`（匿名可用，返回全量礼物清单 gift_id/名称/价格/**图标**），生成内置 JSON 目录打进 HTML。主播可在配置面板按名称搜索整个目录直接选中配规则，无需知道 gift_id。B 站上新礼物 → 重新构建发新版。
 2. **自动捕获**：收到任何不在目录里的礼物，自动进入"最近收到的礼物"列表并标记"未配置"，主播一键配置。纯 WebSocket 推送，零 CORS 问题。
 3. **手动添加**：表单填 gift_id 或名称手动建规则。
+
+**礼物图标**：`giftConfig` 响应含 `img_basic`(静态)、`img_dynamic`、`gif`/`webp`(动图)；`SEND_GIFT` 事件含 `gift_info.img_basic`。目录条目保存图标 URL。配置面板礼物列表显示图标（凭图识别）；属性面板触发动画展示礼物图标+名称。
 
 注意：`giftConfig` 接口不带 CORS 头，浏览器直接 fetch 会被跨域拦截——仅构建期由开发机抓取，**插件运行时不需要调用该接口**。
 
