@@ -1,46 +1,58 @@
 # Bilibili 直播礼物属性面板插件 — 设计规格
 
 日期：2026-07-31
-状态：已确认
+状态：已确认（v2：架构调整为本地小服务，2026-07-31 修订）
 
 ## 1. 概述
 
 给 B 站主播使用的 OBS 浏览器源插件。核心功能：监听直播间礼物/SC 事件，按主播自定义的 **Excel 风格公式 + 条件规则** 累加 **多属性值**（如"加班时间"、"积分"），并在 OBS 中以醒目的独立面板实时展示。
 
-分发形态：**单个 `index.html`**（Vite+TS 构建后 `vite-plugin-singlefile` 内联），主播拖进 OBS 浏览器源即用，**零运行时依赖**（仅需 OBS）。各主播通过各自的 OBS localStorage **独立配置**，互不影响。
+分发形态（**v2 修订**）：**单个可执行文件 `gift-panel.exe`**（Bun `build --compile` 编译，内嵌前端静态页面与静态文件服务）。主播双击运行 → 自动打开浏览器进入配置面板；OBS 浏览器源加载 `http://localhost:12450/?mode=display`。**主播电脑无需安装 Node/Python 等任何运行时**，只需 OBS + 双击 exe。
 
 合规提醒：使用 B 站 Web 端非官方弹幕协议，**仅私下分发**，禁止公开传播。
 
 ## 2. 架构
 
 ```
-Vite+TS 工程
-  └─ vite-plugin-singlefile 内联 → 单个 index.html → OBS 浏览器源
-      ├─ 接入层   ：WebSocket 直连 B站弹幕服务器（匿名 uid=0，无需登录）
-      ├─ 事件解析 ：SEND_GIFT（礼物）/ SUPER_CHAT_MESSAGE（醒目留言）
-      ├─ 公式引擎 ：Excel 风格，自研解析器（不用 eval），安全无依赖
-      ├─ 规则引擎 ：礼物 → 公式计算 → 条件校验 → 属性更新（msg_id 去重）
-      ├─ 属性面板 ：?mode=display，OBS 用，只显示面板
-      └─ 配置面板 ：?mode=config，浏览器打开编辑，共享同一份 localStorage
+gift-panel.exe（Bun 编译，内嵌全部前端资源）
+ └─ 本地服务（Bun.serve，监听 http://localhost:12450）
+     ├─ 静态页面：GET /        → 前端（?mode=display / ?mode=config）
+     └─ API 代理：GET /api/room_info?roomId=X
+           ├─ get_info 解析真实房间号（短号→真实号）
+           ├─ finger/spi 获取 buvid3
+           └─ WBI 签名 getDanmuInfo 获取 token + host_list
+     前端（浏览器 / OBS）
+     ├─ fetch /api/room_info （同源 localhost，无 CORS 问题）
+     ├─ WebSocket 直连 host_list 中的弹幕服务器（认证带 key=token）
+     ├─ 事件解析 ：SEND_GIFT（礼物）/ SUPER_CHAT_MESSAGE（醒目留言）
+     ├─ 公式引擎 ：Excel 风格，自研解析器（不用 eval），安全无依赖
+     ├─ 规则引擎 ：礼物 → 公式计算 → 条件校验 → 属性更新（去重）
+     ├─ 属性面板 ：?mode=display，OBS 用，只显示面板
+     └─ 配置面板 ：?mode=config，浏览器打开编辑，共享同一份 localStorage
 ```
 
-两种模式通过 URL 参数区分：`index.html?mode=display`（OBS 用）与 `index.html?mode=config`（浏览器配置用）。同源共享 localStorage。
+**为何需要本地服务（v2 关键修订）**：实测确认（2026-07-31）B 站弹幕认证包**必须携带 `key`**（`getDanmuInfo` 返回的 token），无 key 的匿名直连会被服务端断开（close 1006）。而 `getDanmuInfo` 需要 WBI 签名，且其 CORS 头**仅对 `bilibili.com` 域名放行**，纯前端（`file://` 或 `localhost` 页面）直接 fetch 会被跨域拦截。因此必须有一个本地代理负责：解析真实房间号、获取 buvid、WBI 签名获取 token——这些都在服务端完成（无 CORS 限制），前端只通过同源 `fetch('/api/room_info')` 拿到结果，再直连 B 站弹幕 WebSocket（WebSocket 不受 CORS 限制）。
+
+两种模式通过 URL 参数区分：`?mode=display`（OBS 用）与 `?mode=config`（浏览器配置用）。同源（http://localhost:12450）共享 localStorage。
 
 ## 3. 弹幕接入层（Web 端非官方协议）
 
-流程：
+流程（v2 修订）：
 
 1. 主播输入房间号（或 `live.bilibili.com/xxxx` 链接，自动解析数字）
-2. 浏览器建立 WebSocket 到 `wss://broadcastlv.chat.bilibili.com/sub`
-3. 发送认证包：`{uid:0, roomid:房间号, protover:2, platform:'web', buvid:随机值, type:2}`（匿名接入，**无需登录 B 站账号**）
-4. 每 30 秒发送心跳包（B 站 60s 踢人，30s 安全）
-5. 服务端消息为自定义二进制帧（16 字节 header + payload），`protover=2` 的批量包需 zlib 解压——用浏览器内置 `DecompressionStream('deflate')`，无需第三方库
-6. 解析 payload 中 JSON 的 `cmd` 字段，只关心 `SEND_GIFT` 和 `SUPER_CHAT_MESSAGE`
-7. 断线自动重连（指数退避），面板显示连接状态
+2. 前端 `fetch('/api/room_info?roomId=X')` → 本地服务端完成：
+   - `get_info` 接口解析真实房间号（支持短号：`short_id` → `room_id`）
+   - `finger/spi` 接口获取真实 buvid3（匿名，无需登录）
+   - WBI 签名后调 `getDanmuInfo` 获取 `token` + `host_list`（含各弹幕服务器 host 与 wss_port）
+   - 返回 `{ roomId, buvid, token, hostList }`
+3. 前端建立 WebSocket 到 `host_list` 中第一个服务器的 `wss://{host}:{wss_port}/sub`（WebSocket 不受 CORS 限制，浏览器可直连）
+4. 发送认证包：`{uid:0, roomid:真实房间号, protover:2, platform:'web', buvid, type:2, key:token}`（**必须带 key，否则被断开**；已实测确认）
+5. 每 30 秒发送心跳包（B 站 60s 踢人，30s 安全）
+6. 服务端消息为自定义二进制帧（16 字节 header + payload），`protover=2` 的批量包需 zlib 解压——用浏览器内置 `DecompressionStream('deflate')`，无需第三方库（已实测 protover=2 认证与收消息正常）
+7. 解析 payload 中 JSON 的 `cmd` 字段，只关心 `SEND_GIFT` 和 `SUPER_CHAT_MESSAGE`
+8. 断线自动重连（指数退避），重连 N 次后重新调 `/api/room_info` 刷新 token（token 可能过期）；面板显示连接状态
 
-**匿名兜底**：极少数情况 B 站可能要求先有 Cookie（buvid3）。实现内置"先匿名直连，被拒则先抓取匿名 buvid 再连"逻辑。全程不需要主播账号登录。
-
-**身份确认**：`getDanmuInfo` 接口带风控（返回 -352），不依赖它；弹幕服务器地址 `broadcastlv.chat.bilibili.com` 为固定已知地址。
+**身份确认**：全程匿名（uid=0），**无需登录 B 站账号**。buvid 与 token 由本地服务代理获取，主播无感知。
 
 ## 4. 公式引擎（Excel 风格）
 
@@ -149,6 +161,20 @@ Vite+TS 工程
 - **今日统计**：每日礼物/SC 汇总，属性变动日志（谁送的、何时、+多少）
 - **导出/导入配置**：下载/上传 JSON，方便主播换电脑迁移
 
+### 8.3 新手引导与说明文案（小白友好，重要）
+
+配置面板面向**非技术主播**，每个环节都必须有充分的说明与引导：
+
+- **首次使用引导**：本地无配置（未设置房间号且无规则）时，配置面板顶部显示醒目的**分步引导条**（如"第 1 步：填房间号 → 第 2 步：创建属性 → 第 3 步：配礼物规则 → 第 4 步：在 OBS 中显示"），当前完成的步骤打勾，可点击跳转对应区块。
+- **每个区块顶部说明卡**：简短中文说明"这一步是做什么、为什么需要"。例如房间区说明"填你在 B 站直播间的房间号，插件才能收到礼物提醒"。
+- **输入占位符即教程**：房间号输入框 placeholder 写"例如 12345（你直播间的数字）"，并附"怎么找房间号？"可展开小提示（打开 live.bilibili.com 你直播间页面的网址里的数字）。
+- **公式编辑器的完整教程**：公式框下方有"公式怎么写？"展开面板，包含：
+  - 变量说明表：`price`=礼物单价、`count`=礼物数量、`<属性名>`=当前属性值
+  - 常用示例（可一键填入）：`price/1000*60`（每 1 元加 60 秒加班时间）、`RANDBETWEEN(10,60)`（随机 10~60）
+  - 函数说明表：IF/MAX/MIN/ROUND/ABS/RAND/RANDBETWEEN 及中文解释
+- **空状态引导**：无规则时提示"在下方搜索礼物（或等观众送出第一个礼物后自动捕获）再点击创建规则"。
+- **术语通俗化**：界面文案避免"积分""属性"等可能歧义的词，优先用"加班时间""数值"等具体示例引导；首次默认创建一个"加班时间"示例属性。
+
 ## 9. 持久化（localStorage）
 
 ```
@@ -177,13 +203,15 @@ stats         每日统计
 
 ## 12. 待验证风险
 
-1. **OBS CEF 的 file:// 下 localStorage 持久化**（Chrome/CEF 一般可用，首要验证点）。若不可用：回退为 OBS 本地静态服务（`python -m http.server`）或提示用 config 模式维护。
-2. **匿名直连若被 B 站风控拒绝**：走 buvid 兜底逻辑。
-3. **特殊短房间号**：部分直播间 URL 是短号，真实房间号可能不同。需要房间号解析兜底（若直连认证失败，尝试解析短号 → 真实房间号）。
+1. **（已消除，v2）** 原"file:// 下 localStorage 持久化"风险不再存在——v2 架构通过 `http://localhost:12450` 访问，localStorage 在 HTTP 同源下持久化稳定。
+2. **token 过期/轮换**：`getDanmuInfo` 的 token 可能有时效。重连时若认证失败（服务端 1006 或认证 code≠0），重新调 `/api/room_info` 刷新 token 再连。
+3. **B 站接口变更**：`get_info`/`finger/spi`/`getDanmuInfo`/WBI 签名为 B 站私有接口，可能在无通知下变更。接入层集中在服务端单一模块，变更时单点修改。WBI 签名算法已按 blivedm 实现验证可用。
+4. **端口冲突**：固定 `12450` 端口可能被占用。启动时若绑定失败，回退到随机可用端口并在控制台/浏览器告知实际地址（或提示关闭占用程序）。
+5. **本地服务生命周期**：主播需保持 exe 运行。提供"系统托盘/最小化"说明；exe 退出后 OBS 面板显示断开状态。
 
 ## 13. 技术栈
 
-- Vite + TypeScript
-- `vite-plugin-singlefile`（构建内联为单 HTML）
+- Vite + TypeScript（前端）+ `vite-plugin-singlefile`（内联为单 HTML）
+- **Bun**（本地服务运行时 + `build --compile` 打包单 exe）
 - Vitest（单元测试）
-- 无第三方运行时依赖（WebSocket/DecompressionStream 均为浏览器内置）
+- 前端运行时零第三方依赖（WebSocket/DecompressionStream/localStorage 均为浏览器内置）；本地服务用 Bun 内置 `Bun.serve`/`fetch`，无第三方依赖
