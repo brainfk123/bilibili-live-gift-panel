@@ -2,18 +2,13 @@ import './ui/display/display.css';
 import { mountDisplay } from './ui/display/display';
 import { mountConfig } from './ui/config/config';
 import { installFavicon } from './ui/brand';
+import { startApp } from './runtime/bootstrap';
 
-installFavicon();
-
-const root = document.getElementById('app')!;
-const params = new URLSearchParams(location.search);
-const mode = params.get('mode') ?? 'display';
-if (mode === 'config') {
-  document.body.classList.add('config-mode');
-  root.classList.add('config-root');
-  void import('./ui/config/config.css').then(() => mountConfig(root));
-} else {
-  document.body.classList.add('display-mode');
-  root.classList.add('display-root');
-  mountDisplay(root);
-}
+void startApp({
+  document,
+  search: location.search,
+  installFavicon,
+  loadConfigStyles: async () => (await import('./ui/config/config.css?inline')).default,
+  mountDisplay,
+  mountConfig,
+});

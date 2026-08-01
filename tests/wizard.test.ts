@@ -335,7 +335,7 @@ describe('configuration wizard rendering', () => {
     const lightVariables = configCss.match(/\.config-root\[data-theme="light"\] \{([\s\S]*?)\n\}/)?.[1] ?? '';
 
     expect(mainSource).not.toContain("import './ui/config/config.css';");
-    expect(mainSource).toContain("import('./ui/config/config.css')");
+    expect(mainSource).toContain("import('./ui/config/config.css?inline')");
     expect(configCss).toContain('color: var(--text);');
     expect(defaultVariables).toContain('--button-bg: #fb7299;');
     expect(defaultVariables).toContain('--button-action-text: #3b1020;');
