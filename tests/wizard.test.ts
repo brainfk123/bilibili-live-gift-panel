@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mountConfig } from '../src/ui/config/config';
 import { formatDelta, mountDisplay } from '../src/ui/display/display';
 import { getNextWizardStep, getRoomNumberHint, getWizardChecklist, getWizardProgress } from '../src/ui/config/wizard';
+import type { GiftEvent } from '../src/bilibili/messages';
 
 vi.mock('../src/ui/brand', () => ({
   createBrandIcon: (size = 40, className = 'brand-icon') => {
@@ -13,11 +14,14 @@ vi.mock('../src/ui/brand', () => ({
   },
 }));
 
-const mockedClients = vi.hoisted(() => [] as Array<{ options: { onState?: (state: string) => void }; stop: ReturnType<typeof vi.fn> }>);
+const mockedClients = vi.hoisted(() => [] as Array<{
+  options: { onState?: (state: string) => void; onGift?: (event: GiftEvent) => void };
+  stop: ReturnType<typeof vi.fn>;
+}>);
 
 vi.mock('../src/bilibili/client', () => ({
   DanmakuClient: class {
-    constructor(readonly options: { onState?: (state: string) => void }) {
+    constructor(readonly options: { onState?: (state: string) => void; onGift?: (event: GiftEvent) => void }) {
       mockedClients.push(this);
     }
 
@@ -441,6 +445,72 @@ describe('configuration wizard rendering', () => {
 
     const roomStep = root.querySelector('[data-step="room"]');
     expect(roomStep?.className).toContain('is-done');
+  });
+
+  it('keeps inputs mounted while typing in onboarding and normal settings', () => {
+    const onboardingRoot = new TestElement('div') as unknown as HTMLElement;
+    mountConfig(onboardingRoot);
+    (onboardingRoot.querySelector('[data-step="attributes"]') as unknown as TestElement | null)?.onclick?.();
+
+    const nameInput = Array.from(onboardingRoot.querySelectorAll('input')).find((input) => input.dataset.fieldLabel === '名称') as unknown as (TestElement & { oninput?: () => void }) | undefined;
+    const valueInput = Array.from(onboardingRoot.querySelectorAll('input')).find((input) => input.dataset.fieldLabel === '初始值') as unknown as (TestElement & { oninput?: () => void }) | undefined;
+    expect(nameInput).toBeDefined();
+    expect(valueInput).toBeDefined();
+
+    nameInput!.value = '加';
+    nameInput!.oninput?.();
+    nameInput!.value = '加班';
+    nameInput!.oninput?.();
+    valueInput!.value = '1';
+    valueInput!.oninput?.();
+
+    expect(Array.from(onboardingRoot.querySelectorAll('input')).find((input) => input.dataset.fieldLabel === '名称')).toBe(nameInput);
+    expect(Array.from(onboardingRoot.querySelectorAll('input')).find((input) => input.dataset.fieldLabel === '初始值')).toBe(valueInput);
+
+    const normalRoot = new TestElement('div') as unknown as HTMLElement;
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888', 1)));
+    mountConfig(normalRoot);
+    findByText(normalRoot as unknown as TestElement, '设置')?.onclick?.();
+    const fontSizeInput = Array.from(normalRoot.querySelectorAll('input')).find((input) => input.dataset.fieldLabel === '字体大小（px）') as unknown as (TestElement & { oninput?: () => void }) | undefined;
+    expect(fontSizeInput).toBeDefined();
+
+    fontSizeInput!.value = '4';
+    fontSizeInput!.oninput?.();
+    fontSizeInput!.value = '48';
+    fontSizeInput!.oninput?.();
+
+    expect(Array.from(normalRoot.querySelectorAll('input')).find((input) => input.dataset.fieldLabel === '字体大小（px）')).toBe(fontSizeInput);
+  });
+
+  it('does not leave onboarding view when a gift is received', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888', 1)));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '重新查看向导')?.onclick?.();
+    const roomInput = root.querySelector('input');
+    if (!roomInput) throw new Error('room input not found');
+    findByText(root, '测试连接')?.onclick?.();
+
+    const client = mockedClients[0];
+    if (!client) throw new Error('client not created');
+    client.options.onGift?.({
+      giftId: 30607,
+      giftName: '小心心',
+      num: 1,
+      price: 1000,
+      coinType: 'gold',
+      totalCoin: 1000,
+      uname: 'tester',
+      uid: 1,
+      timestamp: 1,
+      imgBasic: '',
+      rnd: 'test',
+    });
+
+    expect(root.querySelector('.wizard-progress')).not.toBeNull();
+    expect(root.querySelector('.normal-nav')).toBeNull();
+    expect(root.querySelector('h1')?.textContent).toBe('输入你的直播间房间号');
   });
 
   it('advances to attribute setup after the room connection succeeds', () => {

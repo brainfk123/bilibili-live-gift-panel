@@ -13,7 +13,8 @@ export function mountConfig(root: HTMLElement): void {
   let state = loadState();
   const initialProgress = getWizardProgress(state);
   let current: string = getNextWizardStep(initialProgress) ?? 'obs';
-  let showOnboarding = !getWizardProgress(state).obs;
+  let setupComplete = initialProgress.obs;
+  let showOnboarding = !setupComplete;
   let client: DanmakuClient | null = null;
   let connectionState: ConnState = 'idle';
   const shell = el('div', { class: 'wizard-shell' });
@@ -137,9 +138,15 @@ export function mountConfig(root: HTMLElement): void {
   }
 
   function save(): void {
+    const wasSetupComplete = setupComplete;
     saveState(state);
-    showOnboarding = !isSetupComplete();
-    render();
+    setupComplete = isSetupComplete();
+    if (setupComplete !== wasSetupComplete) {
+      showOnboarding = !setupComplete;
+      render();
+      return;
+    }
+    if (showOnboarding) renderProgress();
   }
 
   function guideCard(text: string, bold?: string): void {
