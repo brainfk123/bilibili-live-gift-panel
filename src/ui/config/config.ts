@@ -27,7 +27,6 @@ export function mountConfig(root: HTMLElement): void {
     el('span', { text: '简单四步，开始互动' }),
   ]));
   const themeToggle = el('button', { class: 'theme-toggle', type: 'button' }) as HTMLButtonElement;
-  themeToggle.setAttribute('aria-label', '切换主题');
   const status = el('div', { class: 'app-status' });
   const headerActions = el('div', { class: 'app-header-actions' });
   headerActions.append(themeToggle, status);
@@ -46,8 +45,10 @@ export function mountConfig(root: HTMLElement): void {
 
   function applyConfigTheme(theme: 'dark' | 'light'): void {
     root.dataset.theme = theme;
-    themeToggle.textContent = theme === 'dark' ? '亮色主题' : '深色主题';
-    themeToggle.setAttribute('aria-pressed', theme === 'light' ? 'true' : 'false');
+    const label = theme === 'dark' ? '切换至亮色主题' : '切换至深色主题';
+    themeToggle.textContent = label;
+    themeToggle.setAttribute('aria-label', label);
+    themeToggle.removeAttribute('aria-pressed');
   }
 
   themeToggle.onclick = () => {

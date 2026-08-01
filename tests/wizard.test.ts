@@ -120,6 +120,10 @@ class TestElement {
     return this.attributes[name] ?? null;
   }
 
+  removeAttribute(name: string): void {
+    delete this.attributes[name];
+  }
+
   querySelector(selector: string): TestElement | null {
     return this.querySelectorAll(selector)[0] ?? null;
   }
@@ -154,6 +158,26 @@ function textOf(element: TestElement): string {
 
 function findByText(root: TestElement, text: string): TestElement | undefined {
   return allElements(root).find((element) => element.textContent === text);
+}
+
+function cssVariable(block: string, name: string): string {
+  return block.match(new RegExp(`${name}:\\s*([^;]+);`))?.[1].trim() ?? '';
+}
+
+function relativeLuminance(hex: string): number {
+  const channels = [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16) / 255);
+  const linear = channels.map((channel) => channel <= 0.04045
+    ? channel / 12.92
+    : ((channel + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+}
+
+function contrastRatio(first: string, second: string): number {
+  const firstLuminance = relativeLuminance(first);
+  const secondLuminance = relativeLuminance(second);
+  const lighter = Math.max(firstLuminance, secondLuminance);
+  const darker = Math.min(firstLuminance, secondLuminance);
+  return (lighter + 0.05) / (darker + 0.05);
 }
 
 const storage = new Map<string, string>();
@@ -216,7 +240,7 @@ describe('configuration wizard rendering', () => {
     mountConfig(root as unknown as HTMLElement);
     expect(root.dataset.theme).toBe('dark');
 
-    const toggle = findByText(root, '亮色主题');
+    const toggle = findByText(root, '切换至亮色主题');
     (toggle?.onclick as (() => void) | null)?.();
     expect(root.dataset.theme).toBe('light');
     expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).settings.theme).toBe('light');
@@ -225,19 +249,19 @@ describe('configuration wizard rendering', () => {
   it('restores the saved light theme and toggle state after remounting', () => {
     const firstRoot = new TestElement('div');
     mountConfig(firstRoot as unknown as HTMLElement);
-    const firstToggle = findByText(firstRoot, '亮色主题');
-    expect(firstToggle?.getAttribute('aria-label')).toBe('切换主题');
-    expect(firstToggle?.getAttribute('aria-pressed')).toBe('false');
+    const firstToggle = findByText(firstRoot, '切换至亮色主题');
+    expect(firstToggle?.getAttribute('aria-label')).toBe('切换至亮色主题');
+    expect(firstToggle?.getAttribute('aria-pressed')).toBeNull();
     firstToggle?.onclick?.();
 
     const secondRoot = new TestElement('div');
     mountConfig(secondRoot as unknown as HTMLElement);
 
     expect(secondRoot.dataset.theme).toBe('light');
-    const secondToggle = findByText(secondRoot, '深色主题');
+    const secondToggle = findByText(secondRoot, '切换至深色主题');
     expect(secondToggle).toBeDefined();
-    expect(secondToggle?.getAttribute('aria-label')).toBe('切换主题');
-    expect(secondToggle?.getAttribute('aria-pressed')).toBe('true');
+    expect(secondToggle?.getAttribute('aria-label')).toBe('切换至深色主题');
+    expect(secondToggle?.getAttribute('aria-pressed')).toBeNull();
   });
 
   it('synchronizes the config theme immediately after importing light settings', async () => {
@@ -256,13 +280,13 @@ describe('configuration wizard rendering', () => {
     await Promise.resolve();
 
     expect(root.dataset.theme).toBe('light');
-    expect(findByText(root, '深色主题')).toBeDefined();
+    expect(findByText(root, '切换至深色主题')).toBeDefined();
   });
 
   it('synchronizes the config theme immediately after importing dark settings from light', async () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '亮色主题')?.onclick?.();
+    findByText(root, '切换至亮色主题')?.onclick?.();
     expect(root.dataset.theme).toBe('light');
     findByText(root, '更多设置')?.onclick?.();
     findByText(root, '面板设置')?.onclick?.();
@@ -277,14 +301,15 @@ describe('configuration wizard rendering', () => {
     await Promise.resolve();
 
     expect(root.dataset.theme).toBe('dark');
-    expect(findByText(root, '亮色主题')).toBeDefined();
-    expect(findByText(root, '亮色主题')?.getAttribute('aria-pressed')).toBe('false');
+    expect(findByText(root, '切换至亮色主题')).toBeDefined();
+    expect(findByText(root, '切换至亮色主题')?.getAttribute('aria-label')).toBe('切换至亮色主题');
+    expect(findByText(root, '切换至亮色主题')?.getAttribute('aria-pressed')).toBeNull();
   });
 
   it('falls back to dark when imported settings contain an invalid theme', async () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '亮色主题')?.onclick?.();
+    findByText(root, '切换至亮色主题')?.onclick?.();
     expect(root.dataset.theme).toBe('light');
     findByText(root, '更多设置')?.onclick?.();
     findByText(root, '面板设置')?.onclick?.();
@@ -299,27 +324,58 @@ describe('configuration wizard rendering', () => {
     await Promise.resolve();
 
     expect(root.dataset.theme).toBe('dark');
-    expect(findByText(root, '亮色主题')).toBeDefined();
+    expect(findByText(root, '切换至亮色主题')).toBeDefined();
     expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).settings.theme).toBe('dark');
   });
 
   it('keeps configuration CSS isolated from display mode and exposes readable light variables', () => {
     const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
     const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const defaultVariables = configCss.match(/\.config-root \{([\s\S]*?)\n\}/)?.[1] ?? '';
     const lightVariables = configCss.match(/\.config-root\[data-theme="light"\] \{([\s\S]*?)\n\}/)?.[1] ?? '';
 
     expect(mainSource).not.toContain("import './ui/config/config.css';");
     expect(mainSource).toContain("import('./ui/config/config.css')");
     expect(configCss).toContain('color: var(--text);');
     expect(lightVariables).toContain('--accent-text: #4a1028;');
-    expect(lightVariables).toContain('--button-text: var(--accent-text);');
+    expect(lightVariables).toContain('--button-bg: #c2185b;');
+    expect(lightVariables).toContain('--button-border: #8f173f;');
+    expect(lightVariables).toContain('--button-action-text: #ffffff;');
     expect(lightVariables).toContain('--border-strong: #7f8ca3;');
+    expect(lightVariables).toContain('--text-dim: #4b5563;');
+    expect(lightVariables).toContain('--focus-ring: #1d4ed8;');
     expect(lightVariables).not.toContain('--border: #d9deea;');
-    expect(lightVariables).not.toContain('--button-text: #fff;');
     expect(configCss).not.toContain('.preview .result { color: var(--accent);');
     expect(configCss).toContain('--success:');
     expect(configCss).toContain('--error:');
     expect(configCss).not.toContain('rgba(255,255,255');
+
+    const lightBg = cssVariable(lightVariables, '--bg');
+    const lightBgSoft = cssVariable(lightVariables, '--bg-soft');
+    const lightInputBg = cssVariable(lightVariables, '--input-bg');
+    const lightTextDim = cssVariable(lightVariables, '--text-dim');
+    const lightBorderStrong = cssVariable(lightVariables, '--border-strong');
+    const lightFocusRing = cssVariable(lightVariables, '--focus-ring');
+    const lightButtonBg = cssVariable(lightVariables, '--button-bg');
+    const lightButtonText = cssVariable(lightVariables, '--button-action-text');
+    const darkBg = cssVariable(defaultVariables, '--bg');
+    const darkBgSoft = cssVariable(defaultVariables, '--bg-soft');
+    const darkBorderStrong = cssVariable(defaultVariables, '--border-strong');
+    expect(contrastRatio(lightTextDim, lightBg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightTextDim, lightBgSoft)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightTextDim, lightInputBg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightBorderStrong, lightBgSoft)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(lightBorderStrong, lightInputBg)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(lightFocusRing, lightBg)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(lightFocusRing, lightInputBg)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(lightButtonText, lightButtonBg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(darkBorderStrong, darkBg)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(darkBorderStrong, darkBgSoft)).toBeGreaterThanOrEqual(3);
+    expect(configCss).toContain('.config-root button:focus-visible');
+    expect(configCss).toContain('.config-root input:focus-visible');
+    expect(configCss).toContain('.config-root select:focus-visible');
+    expect(configCss).toContain('outline: 3px solid var(--focus-ring);');
+    expect(configCss).toContain('border: 1px solid var(--button-border);');
   });
 
   it('keeps the room instructions short and puts the exact URL explanation in details', () => {
