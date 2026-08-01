@@ -280,6 +280,10 @@ describe('configuration wizard rendering', () => {
     const formulaTutorial = root.querySelector('.tutorial');
     expect(formulaTutorial?.querySelector('summary')?.textContent).toBe('不会写公式？看示例');
     expect((formulaTutorial as TestElement & { open?: boolean } | null)?.open).not.toBe(true);
+    expect(textOf(root)).toContain('公式结果会直接成为属性的新值');
+    expect(textOf(root)).toContain('触发后');
+    const additiveExample = root.querySelectorAll('.example-chip').find((example) => example.textContent?.includes('当前值加 60 秒'));
+    expect(additiveExample?.textContent).toContain('加班时间+price/1000*60');
     const limits = root.querySelectorAll('.details-card').find((details) => details.querySelector('summary')?.textContent === '可选限制');
     expect(limits).toBeDefined();
     expect((limits as TestElement & { open?: boolean } | undefined)?.open).not.toBe(true);

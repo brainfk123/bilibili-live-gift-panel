@@ -441,9 +441,13 @@ export function mountConfig(root: HTMLElement): void {
     card.append(el('h3', { text: `配置规则：${giftName}` }));
     const attrSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
     attrSelect.innerHTML = state.attributes.map((a) => `<option>${a.name}</option>`).join('');
-    const formulaInput = inputField('公式', 'price/1000*60');
+    const formulaInput = inputField('触发后属性值', 'price/1000*60');
     formulaInput.classList.add('formula');
-    formulaInput.placeholder = '例如 price/1000*60（点下方示例可自动填入）';
+    formulaInput.placeholder = '例如 早播次数+price/1000*60';
+    const assignmentHint = el('div', {
+      class: 'hint assignment-hint',
+      text: '公式结果会直接成为属性的新值。需要累加时，请在公式中写出当前属性名，例如：早播次数+1。',
+    });
     const preview = el('div', { class: 'preview' });
     const minInput = inputField('最低门槛 price≥（可留空）', '');
     const capInput = inputField('上限封顶（可留空）', '');
@@ -455,9 +459,10 @@ export function mountConfig(root: HTMLElement): void {
         const env = buildPreviewEnv(state);
         const vars = collectVars(formula);
         const missing = vars.filter((v) => v !== 'price' && v !== 'count' && !state.attributes.some((a) => a.name === v));
-        const result = evalFormula(formula, env);
         const target = state.attributes[attrSelect.selectedIndex];
-        preview.append(el('div', { text: `示例：单价1000、数量1 时，结果为：` }),
+        const result = evalFormula(formula, env);
+        const before = target?.value ?? 0;
+        preview.append(el('div', { text: `当前值：${formatValue(before, target)} → 触发后：` }),
           el('span', { class: 'result', text: target ? formatValue(result, target) : String(result) }));
         if (missing.length > 0) preview.append(el('div', { class: 'hint error', text: `未定义变量：${missing.join('、')}` }));
         if (vars.length === 0) preview.append(el('div', { class: 'hint', text: '提示：可用变量 price（礼物单价）、count（数量），以及属性名。点上方示例查看写法' }));
@@ -485,12 +490,13 @@ export function mountConfig(root: HTMLElement): void {
       el('tr', {}, [el('td', {}, [el('code', { text: 'RANDBETWEEN(最小, 最大)' })]), el('td', { text: '范围内的随机整数（如抽奖）' })]),
       el('tr', {}, [el('td', {}, [el('code', { text: 'MAX(1,2) / MIN(1,2)' })]), el('td', { text: '取最大 / 最小' })]),
     ]);
+    const targetName = () => state.attributes[attrSelect.selectedIndex]?.name ?? '当前值';
     const examples: [string, string][] = [
-      ['每 1 元礼物加 60 秒', 'price/1000*60'],
-      ['随机加 10~60 秒', 'RANDBETWEEN(10,60)'],
-      ['满 100 元额外加 5 分钟', 'IF(price>=100000, 300, 0)'],
-      ['按礼物数量加，每个 30 秒', 'count*30'],
-      ['1 元 = 1 积分（整数）', 'ROUND(price/1000)'],
+      ['当前值加 60 秒', `${targetName()}+price/1000*60`],
+      ['当前值随机加 10~60 秒', `${targetName()}+RANDBETWEEN(10,60)`],
+      ['满 100 元设置为当前值+5分钟', `IF(price>=100000,${targetName()}+300,${targetName()})`],
+      ['按礼物数量累加，每个30秒', `${targetName()}+count*30`],
+      ['1 元设置为对应积分', 'ROUND(price/1000)'],
     ];
     const exRow = el('div', { class: 'examples' });
     for (const [label, formula] of examples) {
@@ -509,7 +515,7 @@ export function mountConfig(root: HTMLElement): void {
       exTable,
       el('div', { style: 'margin-top:8px;font-weight:600;', text: '点一下就能填入的示例：' }),
       exRow,
-      el('div', { class: 'hint', style: 'margin-top:8px;', text: '提示：加班时间按秒计算，60 秒 = 1 分钟。填完上面会自动显示计算结果，不用自己算。' }),
+      el('div', { class: 'hint', style: 'margin-top:8px;', text: '提示：加班时间按秒计算，60 秒 = 1 分钟。当前值表示所选属性在礼物触发前的值，公式结果就是触发后的值。' }),
     );
     const limits = el('details', { class: 'details-card' });
     limits.append(
@@ -550,6 +556,7 @@ export function mountConfig(root: HTMLElement): void {
     cancelBtn.onclick = () => overlay.remove();
     card.append(
       el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '选择属性' }), attrSelect]),
+      assignmentHint,
       fieldControl(formulaInput),
       tut,
       preview,
