@@ -1,6 +1,6 @@
 export function el<K extends keyof HTMLElementTagNameMap, C extends (HTMLElement | string)[] = (HTMLElement | string)[]>(
   tag: K,
-  props: Omit<Partial<HTMLElementTagNameMap[K]>, 'children'> & { class?: string; text?: string; children?: C } = {} as any,
+  props: Omit<Partial<HTMLElementTagNameMap[K]>, 'children' | 'style'> & { class?: string; text?: string; style?: string; children?: C } = {} as any,
   children?: C,
 ): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -8,6 +8,10 @@ export function el<K extends keyof HTMLElementTagNameMap, C extends (HTMLElement
   if (props.text != null) node.textContent = props.text;
   for (const key of Object.keys(props)) {
     if (key === 'class' || key === 'text' || key === 'children') continue;
+    if (key === 'style') {
+      node.setAttribute('style', (props as any).style);
+      continue;
+    }
     (node as any)[key] = (props as any)[key];
   }
   const kids = props.children ?? children ?? [];
@@ -18,11 +22,18 @@ export function el<K extends keyof HTMLElementTagNameMap, C extends (HTMLElement
 }
 
 export function inputField(label: string, value: string): HTMLInputElement {
-  const wrap = el('label', { class: 'field' });
-  wrap.append(el('span', { class: 'field-label', text: label }));
   const input = el('input', { class: 'field-input', value }) as HTMLInputElement;
-  wrap.append(input);
+  input.dataset.fieldLabel = label;
   return input;
+}
+
+export function fieldControl(input: HTMLInputElement): HTMLLabelElement {
+  const wrap = el('label', { class: 'field' });
+  wrap.append(
+    el('span', { class: 'field-label', text: input.dataset.fieldLabel ?? '' }),
+    input,
+  );
+  return wrap;
 }
 
 export function toast(message: string, root: HTMLElement): void {
