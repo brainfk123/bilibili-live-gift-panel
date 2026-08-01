@@ -281,6 +281,7 @@ describe('configuration wizard rendering', () => {
     expect(formulaTutorial?.querySelector('summary')?.textContent).toBe('不会写公式？看示例');
     expect((formulaTutorial as TestElement & { open?: boolean } | null)?.open).not.toBe(true);
     expect(textOf(root)).toContain('公式结果会直接成为属性的新值');
+    expect(textOf(root)).toContain('已有规则需要复核');
     const preview = root.querySelector('.preview');
     expect(preview).not.toBeNull();
     expect(textOf(preview as TestElement)).toContain('当前值：00:00:00 → 触发后：00:01:00');

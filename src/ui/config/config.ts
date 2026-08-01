@@ -448,6 +448,10 @@ export function mountConfig(root: HTMLElement): void {
       class: 'hint assignment-hint',
       text: '公式结果会直接成为属性的新值。需要累加时，请在公式中写出当前属性名，例如：早播次数+1。',
     });
+    const migrationWarning = el('div', {
+      class: 'hint warning',
+      text: '本版本已改为赋值语义，之前保存的公式请重新检查。已有规则需要复核。',
+    });
     const preview = el('div', { class: 'preview' });
     const minInput = inputField('最低门槛 price≥（可留空）', '');
     const capInput = inputField('上限封顶（可留空）', '');
@@ -560,6 +564,7 @@ export function mountConfig(root: HTMLElement): void {
     card.append(
       el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '选择属性' }), attrSelect]),
       assignmentHint,
+      migrationWarning,
       fieldControl(formulaInput),
       tut,
       preview,
