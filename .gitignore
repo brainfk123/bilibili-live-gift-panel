@@ -1,3 +1,6 @@
 node_modules/
 dist/
+goserver/dist/
+.superpowers/
+.tmp/
 *.local

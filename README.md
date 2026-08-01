@@ -1,38 +1,23 @@
-# Bilibili 直播礼物面板
+# Bilibili 直播礼物属性面板
 
-OBS 浏览器源插件：监听直播间礼物，按可配置公式规则累加属性（如加班时间），实时面板展示。
+OBS 工具：观众送礼物后，按照配置的规则增加“加班时间”“积分”等数值。双击构建后的 `dist/gift-panel.exe` 会启动本地服务并自动打开内置配置向导。
 
-## 构建
+## 开发构建
 
-```
+需要 Node.js 和 Go。在项目根目录运行：
+
+```bash
 npm install
-npm run fetch:catalog   # 抓取最新礼物目录（可选，用于更新内置礼物列表）
 npm run build
+npm test
+npm run typecheck
 ```
 
-产物：`dist/index.html`（单文件，无运行时依赖）。
+Go 服务测试需要以 `goserver` 为工作目录运行：
 
-## 使用
-
-- **显示面板（OBS）**：浏览器源加载 `dist/index.html?mode=display`
-- **配置面板（浏览器）**：打开 `dist/index.html?mode=config`
-  填写房间号、创建属性、配置礼物规则、导出/导入配置。
-  两个模式共享同一 localStorage。
-
-## 注意事项
-
-- 使用 B 站非官方 WebSocket 弹幕协议，仅供个人/私下使用，请勿公开传播
-- 匿名接入，无需登录 B 站账号
-- 若 OBS 的 file:// 下 localStorage 不持久，用本地静态服务加载（见下文）
-
-## 本地静态服务（可选）
-
-```
-python -m http.server 8000 -d dist
+```bash
+cd goserver
+go test ./...
 ```
 
-OBS 加载 `http://localhost:8000/index.html?mode=display`。
-
-## 技术栈
-
-Vite + TypeScript + Vitest，运行时零第三方依赖（WebSocket / DecompressionStream / localStorage 均为浏览器内置）。
+`npm run build` 会构建前端并编译本地服务，产物为 `dist/gift-panel.exe`。EXE 已内嵌前端页面和代理服务，主播电脑不需要安装 Node.js 或 Go。
