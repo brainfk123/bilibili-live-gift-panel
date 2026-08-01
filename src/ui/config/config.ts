@@ -24,8 +24,11 @@ export function mountConfig(root: HTMLElement): void {
     el('strong', { text: '直播礼物面板' }),
     el('span', { text: '简单四步，开始互动' }),
   ]));
+  const themeToggle = el('button', { class: 'theme-toggle', type: 'button' }) as HTMLButtonElement;
   const status = el('div', { class: 'app-status' });
-  header.append(brand, status);
+  const headerActions = el('div', { class: 'app-header-actions' });
+  headerActions.append(themeToggle, status);
+  header.append(brand, headerActions);
 
   const content = el('main', { class: 'wizard-content' });
   shell.append(header, content);
@@ -37,6 +40,18 @@ export function mountConfig(root: HTMLElement): void {
     { key: 'rules', label: '绑定礼物' },
     { key: 'obs', label: '放进 OBS' },
   ];
+
+  function applyConfigTheme(theme: 'dark' | 'light'): void {
+    root.dataset.theme = theme;
+    themeToggle.textContent = theme === 'dark' ? '亮色主题' : '深色主题';
+  }
+
+  themeToggle.onclick = () => {
+    const nextTheme = state.settings.theme === 'dark' ? 'light' : 'dark';
+    state.settings.theme = nextTheme;
+    applyConfigTheme(nextTheme);
+    save();
+  };
 
   function connectionLabel(stateValue: ConnState): string {
     if (stateValue === 'connected') return '已连接';
@@ -797,5 +812,6 @@ export function mountConfig(root: HTMLElement): void {
     content.append(dataCard);
   }
 
+  applyConfigTheme(state.settings.theme);
   render();
 }

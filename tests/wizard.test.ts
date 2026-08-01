@@ -204,6 +204,17 @@ describe('wizard progress', () => {
 });
 
 describe('configuration wizard rendering', () => {
+  it('uses dark theme by default and can persist light theme', () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    expect(root.dataset.theme).toBe('dark');
+
+    const toggle = findByText(root, '亮色主题');
+    (toggle?.onclick as (() => void) | null)?.();
+    expect(root.dataset.theme).toBe('light');
+    expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).settings.theme).toBe('light');
+  });
+
   it('keeps the room instructions short and puts the exact URL explanation in details', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
