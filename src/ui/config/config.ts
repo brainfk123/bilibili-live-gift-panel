@@ -27,6 +27,7 @@ export function mountConfig(root: HTMLElement): void {
     el('span', { text: '简单四步，开始互动' }),
   ]));
   const themeToggle = el('button', { class: 'theme-toggle', type: 'button' }) as HTMLButtonElement;
+  themeToggle.setAttribute('aria-label', '切换主题');
   const status = el('div', { class: 'app-status' });
   const headerActions = el('div', { class: 'app-header-actions' });
   headerActions.append(themeToggle, status);

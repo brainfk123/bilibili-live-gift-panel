@@ -4,9 +4,11 @@
   --bg-soft: #1c1e26;
   --card: #22242e;
   --border: #2e3140;
+  --border-strong: var(--border);
   --text: #e6e8ee;
   --text-dim: #9aa0b0;
   --accent: #fb7299;
+  --accent-text: #fb7299;
   --input-bg: var(--bg);
   --image-bg: #000;
   --overlay-bg: rgba(0,0,0,.55);
@@ -42,10 +44,12 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
   --bg: #f4f6fb;
   --bg-soft: #ffffff;
   --card: #ffffff;
-  --border: #d9deea;
+  --border: #aeb8ca;
+  --border-strong: #7f8ca3;
   --text: #242936;
   --text-dim: #697386;
   --input-bg: #f8f9fc;
+  --accent-text: #4a1028;
   --subtle-border: rgba(47,57,80,.16);
   --success: #15803d;
   --success-text: #166534;
@@ -60,7 +64,7 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
   --danger-text: #b42318;
   --danger-contrast: #fff;
   --error: #b42318;
-  --button-text: #fff;
+  --button-text: var(--accent-text);
   --accent-soft: rgba(190,24,93,.12);
   --warm-soft: rgba(161,92,0,.10);
   --page-glow: rgba(190,24,93,.10);
@@ -125,7 +129,7 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
 .config-root .field-label { color: var(--text-dim); font-size: 13px; }
 .config-root .field-input, .config-root select.field-input {
   background: var(--input-bg); color: var(--text);
-  border: 1px solid var(--border); border-radius: 8px;
+  border: 1px solid var(--border-strong); border-radius: 8px;
   max-width: 100%; min-width: 0; padding: 9px 12px; font-size: 14px; outline: none;
 }
 .config-root .field-input:focus { border-color: var(--accent); }
@@ -137,13 +141,13 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
 }
 .config-root .btn:hover { filter: brightness(1.1); }
 .config-root .btn.ghost {
-  background: transparent; color: var(--text); border: 1px solid var(--border);
+  background: transparent; color: var(--text); border: 1px solid var(--border-strong);
 }
 .config-root .btn.danger { background: var(--danger); color: var(--danger-contrast); }
 
 .config-root .list-item {
   display: flex; align-items: center; gap: 10px;
-  background: var(--input-bg); border: 1px solid var(--border);
+  background: var(--input-bg); border: 1px solid var(--border-strong);
   border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;
 }
 .config-root .gift-img { width: 36px; height: 36px; object-fit: contain; border-radius: 6px; background: var(--image-bg); }
@@ -164,7 +168,7 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
   background: var(--input-bg); border: 1px solid var(--border);
   border-radius: 8px; font-size: 14px;
 }
-.config-root .preview .result { color: var(--accent); font-weight: 700; }
+.config-root .preview .result { color: var(--accent-text); font-weight: 700; }
 .config-root .preview .error { color: var(--error); }
 .config-root .preview .hint { color: var(--text-dim); font-size: 12px; margin-top: 4px; }
 
@@ -175,12 +179,12 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
   padding: 10px 12px;
   background: var(--bg-soft);
 }
-.config-root .details-card summary { cursor: pointer; color: var(--accent); user-select: none; }
+.config-root .details-card summary { cursor: pointer; color: var(--accent-text); user-select: none; }
 .config-root .details-card p { margin-top: 10px; color: var(--text-dim); line-height: 1.7; }
 .config-root .details-card code {
   display: block; max-width: 100%; overflow-x: auto; margin-top: 10px;
   padding: 8px 10px; border-radius: 6px; background: var(--bg);
-  color: var(--accent); font-family: Consolas, monospace; white-space: nowrap;
+  color: var(--accent-text); font-family: Consolas, monospace; white-space: nowrap;
 }
 .config-root .details-card .field { margin-top: 12px; margin-bottom: 0; }
 
@@ -193,7 +197,7 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
   border-radius: 8px; background: var(--bg-soft); color: var(--text-dim);
   font-size: 13px; counter-increment: rule-action;
 }
-.config-root .rule-action::before { content: counter(rule-action) ". "; color: var(--accent); font-weight: 700; }
+.config-root .rule-action::before { content: counter(rule-action) ". "; color: var(--accent-text); font-weight: 700; }
 
 .config-root .completion-card {
   background: linear-gradient(135deg, var(--success-soft), var(--accent-soft));
@@ -214,18 +218,18 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
 .config-root .completion-attribute { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .config-root .completion-attribute + .completion-attribute { margin-top: 8px; }
 .config-root .completion-attribute-name { color: var(--text-dim); }
-.config-root .completion-attribute-value { color: var(--accent); font-family: Consolas, monospace; }
+.config-root .completion-attribute-value { color: var(--accent-text); font-family: Consolas, monospace; }
 .config-root .completion-rule-name { font-weight: 600; }
 .config-root .completion-rule-formula {
   display: block; max-width: 100%; overflow-x: auto; margin-top: 8px;
-  color: var(--accent); font-family: Consolas, monospace; white-space: nowrap;
+  color: var(--accent-text); font-family: Consolas, monospace; white-space: nowrap;
 }
 .config-root .completion-brand-icon { display: block; margin-bottom: 8px; }
 .config-root .completion-title { font-size: 18px; font-weight: 700; }
 .config-root .completion-subtitle { margin-top: 4px; color: var(--text-dim); font-size: 13px; }
 .config-root .completion-card .ready-url { margin-top: 14px; }
 .config-root .obs-steps { display: grid; gap: 6px; margin: 14px 0 0 20px; color: var(--text-dim); line-height: 1.5; }
-.config-root .obs-step::marker { color: var(--accent); font-weight: 700; }
+.config-root .obs-step::marker { color: var(--accent-text); font-weight: 700; }
 
 .config-root .secondary-toggle {
   display: block; margin: 18px auto 0; border: 0; background: transparent;
@@ -270,7 +274,7 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
 .config-root .steps { display: flex; gap: 8px; flex-wrap: wrap; }
 .config-root .step {
   display: flex; align-items: center; gap: 7px;
-  background: var(--bg-soft); border: 1px solid var(--border);
+  background: var(--bg-soft); border: 1px solid var(--border-strong);
   border-radius: 999px; padding: 7px 14px; font-size: 13px;
   cursor: pointer; color: var(--text-dim); transition: all .2s;
 }
@@ -296,7 +300,7 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
   color: var(--text-dim); font-size: 13px; line-height: 1.7;
 }
 .config-root .ready-url { display: flex; gap: 8px; margin-top: 10px; }
-.config-root .ready-url .field-input { flex: 1; min-width: 0; color: var(--accent); font-family: Consolas, monospace; }
+.config-root .ready-url .field-input { flex: 1; min-width: 0; color: var(--accent-text); font-family: Consolas, monospace; }
 .config-root .ready-url .btn { flex-shrink: 0; }
 
 .config-root .guide-card {
@@ -313,7 +317,7 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
 .config-root .guide-card b { color: var(--text); }
 
 .config-root .hint-toggle {
-  background: none; border: none; color: var(--accent);
+  background: none; border: none; color: var(--accent-text);
   cursor: pointer; font-size: 13px; padding: 4px 0;
   text-decoration: underline;
 }
@@ -324,12 +328,12 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
 }
 .config-root .hint-panel code, .config-root .hint-panel .hl {
   background: var(--card); padding: 1px 6px; border-radius: 4px;
-  color: var(--accent); font-family: Consolas, monospace;
+  color: var(--accent-text); font-family: Consolas, monospace;
 }
 
 .config-root .tutorial { margin-top: 10px; }
 .config-root .tutorial summary {
-  cursor: pointer; color: var(--accent); font-size: 13px;
+  cursor: pointer; color: var(--accent-text); font-size: 13px;
   padding: 4px 0; user-select: none;
 }
 .config-root .tutorial table {
@@ -344,7 +348,7 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
 .config-root .tutorial th { color: var(--text-dim); font-weight: 600; }
 .config-root .tutorial td code {
   background: var(--card); padding: 1px 6px; border-radius: 4px;
-  color: var(--accent); font-family: Consolas, monospace; white-space: nowrap;
+  color: var(--accent-text); font-family: Consolas, monospace; white-space: nowrap;
 }
 .config-root .example-chip {
   display: inline-block; margin: 3px 4px 3px 0;
@@ -354,7 +358,7 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
   overflow-wrap: anywhere; white-space: normal;
   transition: all .2s;
 }
-.config-root .example-chip:hover { border-color: var(--accent); color: var(--accent); }
+.config-root .example-chip:hover { border-color: var(--accent); color: var(--accent-text); }
 
 .config-root .tip-banner {
   background: var(--success-soft);

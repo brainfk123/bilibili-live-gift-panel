@@ -226,6 +226,7 @@ describe('configuration wizard rendering', () => {
     const firstRoot = new TestElement('div');
     mountConfig(firstRoot as unknown as HTMLElement);
     const firstToggle = findByText(firstRoot, '亮色主题');
+    expect(firstToggle?.getAttribute('aria-label')).toBe('切换主题');
     expect(firstToggle?.getAttribute('aria-pressed')).toBe('false');
     firstToggle?.onclick?.();
 
@@ -235,6 +236,7 @@ describe('configuration wizard rendering', () => {
     expect(secondRoot.dataset.theme).toBe('light');
     const secondToggle = findByText(secondRoot, '深色主题');
     expect(secondToggle).toBeDefined();
+    expect(secondToggle?.getAttribute('aria-label')).toBe('切换主题');
     expect(secondToggle?.getAttribute('aria-pressed')).toBe('true');
   });
 
@@ -257,9 +259,33 @@ describe('configuration wizard rendering', () => {
     expect(findByText(root, '深色主题')).toBeDefined();
   });
 
+  it('synchronizes the config theme immediately after importing dark settings from light', async () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '亮色主题')?.onclick?.();
+    expect(root.dataset.theme).toBe('light');
+    findByText(root, '更多设置')?.onclick?.();
+    findByText(root, '面板设置')?.onclick?.();
+
+    const importInput = root.querySelectorAll('input').find((input) => input.type === 'file') as TestElement & {
+      files?: Array<{ text: () => Promise<string> }>;
+      onchange?: () => void;
+    } | undefined;
+    expect(importInput).toBeDefined();
+    importInput!.files = [{ text: async () => JSON.stringify({ ...state(), settings: { theme: 'dark' } }) }];
+    importInput!.onchange?.();
+    await Promise.resolve();
+
+    expect(root.dataset.theme).toBe('dark');
+    expect(findByText(root, '亮色主题')).toBeDefined();
+    expect(findByText(root, '亮色主题')?.getAttribute('aria-pressed')).toBe('false');
+  });
+
   it('falls back to dark when imported settings contain an invalid theme', async () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
+    findByText(root, '亮色主题')?.onclick?.();
+    expect(root.dataset.theme).toBe('light');
     findByText(root, '更多设置')?.onclick?.();
     findByText(root, '面板设置')?.onclick?.();
 
@@ -280,10 +306,17 @@ describe('configuration wizard rendering', () => {
   it('keeps configuration CSS isolated from display mode and exposes readable light variables', () => {
     const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
     const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const lightVariables = configCss.match(/\.config-root\[data-theme="light"\] \{([\s\S]*?)\n\}/)?.[1] ?? '';
 
     expect(mainSource).not.toContain("import './ui/config/config.css';");
     expect(mainSource).toContain("import('./ui/config/config.css')");
     expect(configCss).toContain('color: var(--text);');
+    expect(lightVariables).toContain('--accent-text: #4a1028;');
+    expect(lightVariables).toContain('--button-text: var(--accent-text);');
+    expect(lightVariables).toContain('--border-strong: #7f8ca3;');
+    expect(lightVariables).not.toContain('--border: #d9deea;');
+    expect(lightVariables).not.toContain('--button-text: #fff;');
+    expect(configCss).not.toContain('.preview .result { color: var(--accent);');
     expect(configCss).toContain('--success:');
     expect(configCss).toContain('--error:');
     expect(configCss).not.toContain('rgba(255,255,255');
