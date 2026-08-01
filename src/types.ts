@@ -57,6 +57,8 @@ export interface Settings {
   showStats: boolean;
   showConnection: boolean;
   align: 'left' | 'center' | 'right';
+  theme: 'dark' | 'light';
+  giftView: 'list' | 'grid';
 }
 
 export interface AppState {

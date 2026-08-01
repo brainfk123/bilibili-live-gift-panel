@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { defaultState, loadState, saveState, resetState, pruneLog } from '../src/storage';
-import { LogEntry, MAX_LOG } from '../src/types';
+import { LogEntry, MAX_LOG, STORAGE_KEY } from '../src/types';
 
 const mem = new Map<string, string>();
 vi.stubGlobal('localStorage', {
@@ -28,6 +28,15 @@ describe('storage', () => {
     expect(loaded.roomId).toBe('2145');
     expect(loaded.attributes[0].value).toBe(3600);
     expect(loaded.rules).toHaveLength(1);
+  });
+
+  it('defaults new UX settings for old saved data', () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      roomId: '', attributes: [], rules: [], settings: { fontSize: 48, accentColor: '#fb7299', showStats: true, showConnection: true, align: 'center' },
+    }));
+    const loaded = loadState();
+    expect(loaded.settings.theme).toBe('dark');
+    expect(loaded.settings.giftView).toBe('list');
   });
 
   it('resetState removes stored state', () => {

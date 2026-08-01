@@ -13,6 +13,7 @@ export function mountConfig(root: HTMLElement): void {
   let state = loadState();
   const initialProgress = getWizardProgress(state);
   let current: string = getNextWizardStep(initialProgress) ?? 'obs';
+  let showOnboarding = !getWizardProgress(state).obs;
   let client: DanmakuClient | null = null;
   let connectionState: ConnState = 'idle';
   const shell = el('div', { class: 'wizard-shell' });
@@ -52,6 +53,10 @@ export function mountConfig(root: HTMLElement): void {
     );
   }
 
+  function isSetupComplete(): boolean {
+    return getWizardProgress(state).obs;
+  }
+
   function renderProgress(): void {
     const progress = getWizardProgress(state);
     const progressNav = el('nav', { class: 'wizard-progress' });
@@ -75,21 +80,39 @@ export function mountConfig(root: HTMLElement): void {
     else content.append(progressNav);
   }
 
-  function switchTo(key: string, stopClient = false): void {
-    if (stopClient) {
-      client?.stop();
-      client = null;
-      connectionState = 'idle';
-    }
+  function switchTo(key: string): void {
     current = key;
     renderWizardHeader();
     render();
   }
 
-  function render(): void {
-    content.replaceChildren();
-    renderWizardHeader();
-    renderProgress();
+  function renderNormalNav(): void {
+    const nav = el('nav', { class: 'normal-nav' });
+    nav.setAttribute('aria-label', '配置导航');
+    const items: Array<[string, string]> = [
+      ['room', '房间'],
+      ['attributes', '属性'],
+      ['rules', '规则'],
+      ['stats', '统计'],
+      ['settings', '设置'],
+      ['manual', '手动添加礼物'],
+    ];
+    for (const [key, label] of items) {
+      const button = el('button', { class: 'btn ghost', text: label, type: 'button' }) as HTMLButtonElement;
+      button.dataset.section = key;
+      button.onclick = () => switchTo(key);
+      nav.append(button);
+    }
+    const revisitButton = el('button', { class: 'secondary-toggle', text: '重新查看入门', type: 'button' }) as HTMLButtonElement;
+    revisitButton.onclick = () => {
+      showOnboarding = true;
+      render();
+    };
+    nav.append(revisitButton);
+    content.append(nav);
+  }
+
+  function renderCurrentSection(): void {
     if (current === 'room') renderRoom();
     else if (current === 'attributes') renderAttributes();
     else if (current === 'rules') renderRules();
@@ -97,12 +120,26 @@ export function mountConfig(root: HTMLElement): void {
     else if (current === 'stats') renderStats();
     else if (current === 'settings') renderSettings();
     else if (current === 'manual') renderManualAdd();
-    renderMoreSettings();
+  }
+
+  function render(): void {
+    content.replaceChildren();
+    renderWizardHeader();
+    if (showOnboarding) {
+      renderProgress();
+      renderOnboarding();
+      if (current !== 'obs') renderCurrentSection();
+      renderMoreSettings();
+    } else {
+      renderNormalNav();
+      renderCurrentSection();
+    }
   }
 
   function save(): void {
     saveState(state);
-    renderProgress();
+    showOnboarding = !isSetupComplete();
+    render();
   }
 
   function guideCard(text: string, bold?: string): void {
@@ -122,7 +159,7 @@ export function mountConfig(root: HTMLElement): void {
     const progress = getWizardProgress(state);
     const ready = progress.obs;
 
-    if (ready) {
+    if (ready && current === 'obs') {
       const home = el('div', { class: 'completion-home' });
       const statusCard = el('div', { class: 'completion-status' });
       statusCard.append(
@@ -176,8 +213,20 @@ export function mountConfig(root: HTMLElement): void {
         urlRow,
         instructions,
       );
-      const restartButton = el('button', { class: 'secondary-toggle completion-restart', text: '重新查看向导' }) as HTMLButtonElement;
-      restartButton.onclick = () => switchTo('room');
+      const restartButton = el('button', {
+        class: 'secondary-toggle completion-restart',
+        text: showOnboarding ? '返回正常配置' : '重新查看向导',
+      }) as HTMLButtonElement;
+      restartButton.onclick = () => {
+        if (showOnboarding) {
+          showOnboarding = false;
+          current = 'obs';
+        } else {
+          showOnboarding = true;
+          current = 'room';
+        }
+        render();
+      };
       home.append(statusCard, attributeCard, ruleCard, card, restartButton);
       content.append(home);
       return;
@@ -269,7 +318,7 @@ export function mountConfig(root: HTMLElement): void {
         onState: (s: ConnState) => {
           connectionState = s;
           if (s === 'connected' && current === 'room') {
-            switchTo('attributes', false);
+            switchTo('attributes');
             return;
           }
           statusText.textContent = connectionLabel(s);

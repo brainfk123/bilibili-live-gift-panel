@@ -395,12 +395,13 @@ describe('configuration wizard rendering', () => {
     expect(root.querySelector('h1')?.textContent).toBe('输入你的直播间房间号');
   });
 
-  it('shows a check mark for every completed progress step', () => {
+  it('hides wizard progress after setup is complete', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888', 1)));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    expect(root.querySelectorAll('.wizard-progress-number').map((step) => step.textContent)).toEqual(['✓', '✓', '✓', '✓']);
+    expect(root.querySelector('.wizard-progress')).toBeNull();
+    expect(root.querySelector('.normal-nav')).not.toBeNull();
   });
 
   it('keeps manual add behind the secondary settings entry', () => {
@@ -456,7 +457,7 @@ describe('configuration wizard rendering', () => {
     expect(root.querySelector('h1')?.textContent).toBe('设置属性');
   });
 
-  it('advances to the completed OBS view after saving a rule', () => {
+  it('switches to normal navigation after saving the first rule', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
@@ -466,7 +467,8 @@ describe('configuration wizard rendering', () => {
     const saveButton = root.querySelectorAll('button').find((button) => button.textContent === '保存规则');
     (saveButton?.onclick as (() => void) | null)?.();
 
-    expect(root.querySelector('[data-step="obs"]')?.className).toContain('is-active');
+    expect(root.querySelector('.normal-nav')).not.toBeNull();
+    expect(root.querySelector('.wizard-progress')).toBeNull();
     expect(root.querySelector('.completion-card')).not.toBeNull();
   });
 
@@ -481,6 +483,22 @@ describe('configuration wizard rendering', () => {
 
     expect(root.querySelectorAll('h1').filter((heading) => heading.textContent === '手动添加礼物')).toHaveLength(1);
     expect(root.querySelectorAll('h3').filter((heading) => heading.textContent === '手动添加礼物')).toHaveLength(0);
+  });
+
+  it('shows onboarding without permanent top navigation for incomplete setup', () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    expect(root.querySelector('.wizard-progress')).not.toBeNull();
+    expect(root.querySelector('.normal-nav')).toBeNull();
+  });
+
+  it('shows compact top navigation after setup is complete', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888', 1)));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    expect(root.querySelector('.wizard-progress')).toBeNull();
+    expect(root.querySelector('.normal-nav')).not.toBeNull();
+    expect(root.querySelector('.completion-home')).not.toBeNull();
   });
 });
 

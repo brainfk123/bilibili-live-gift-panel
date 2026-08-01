@@ -11,7 +11,9 @@ export const defaultState = (): AppState => ({
     accentColor: '#fb7299',
     showStats: true,
     showConnection: true,
-    align: 'left',
+    align: 'center',
+    theme: 'dark',
+    giftView: 'list',
   },
   giftCatalog: [],
   recentGifts: [],
@@ -28,7 +30,7 @@ export function loadState(): AppState {
     return {
       ...base,
       ...parsed,
-      settings: { ...base.settings, ...(parsed.settings ?? {}) },
+      settings: { ...defaultState().settings, ...(parsed.settings ?? {}) },
       attributes: parsed.attributes ?? base.attributes,
       rules: parsed.rules ?? [],
     };
