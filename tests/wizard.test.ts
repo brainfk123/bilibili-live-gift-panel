@@ -337,6 +337,8 @@ describe('configuration wizard rendering', () => {
     expect(mainSource).not.toContain("import './ui/config/config.css';");
     expect(mainSource).toContain("import('./ui/config/config.css')");
     expect(configCss).toContain('color: var(--text);');
+    expect(defaultVariables).toContain('--button-bg: #fb7299;');
+    expect(defaultVariables).toContain('--button-action-text: #3b1020;');
     expect(lightVariables).toContain('--accent-text: #4a1028;');
     expect(lightVariables).toContain('--button-bg: #c2185b;');
     expect(lightVariables).toContain('--button-border: #8f173f;');
@@ -361,6 +363,8 @@ describe('configuration wizard rendering', () => {
     const darkBg = cssVariable(defaultVariables, '--bg');
     const darkBgSoft = cssVariable(defaultVariables, '--bg-soft');
     const darkBorderStrong = cssVariable(defaultVariables, '--border-strong');
+    const darkButtonBg = cssVariable(defaultVariables, '--button-bg');
+    const darkButtonText = cssVariable(defaultVariables, '--button-action-text');
     expect(contrastRatio(lightTextDim, lightBg)).toBeGreaterThanOrEqual(4.5);
     expect(contrastRatio(lightTextDim, lightBgSoft)).toBeGreaterThanOrEqual(4.5);
     expect(contrastRatio(lightTextDim, lightInputBg)).toBeGreaterThanOrEqual(4.5);
@@ -369,6 +373,7 @@ describe('configuration wizard rendering', () => {
     expect(contrastRatio(lightFocusRing, lightBg)).toBeGreaterThanOrEqual(3);
     expect(contrastRatio(lightFocusRing, lightInputBg)).toBeGreaterThanOrEqual(3);
     expect(contrastRatio(lightButtonText, lightButtonBg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(darkButtonText, darkButtonBg)).toBeGreaterThanOrEqual(4.5);
     expect(contrastRatio(darkBorderStrong, darkBg)).toBeGreaterThanOrEqual(3);
     expect(contrastRatio(darkBorderStrong, darkBgSoft)).toBeGreaterThanOrEqual(3);
     expect(configCss).toContain('.config-root button:focus-visible');
