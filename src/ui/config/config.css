@@ -171,6 +171,19 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
 .config-root .list-item .sub { color: var(--text-dim); font-size: 12px; }
 .config-root .gift-load-more { width: 100%; margin: 8px 0 4px; }
 .config-root .gift-count { padding: 10px 0 2px; color: var(--text-dim); font-size: 12px; text-align: center; }
+.config-root .gift-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+.config-root .gift-grid .list-item {
+  display: flex; min-height: 160px; flex-direction: column; align-items: center; justify-content: center;
+  margin-bottom: 0; text-align: center;
+}
+.config-root .gift-grid .gift-img { width: 64px; height: 64px; }
+.config-root .gift-grid .grow { min-width: 0; width: 100%; }
+.config-root .gift-grid .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.config-root .gift-view-toggle { display: flex; gap: 8px; margin: 10px 0; }
+.config-root .gift-view-toggle .is-active { border-color: var(--accent); color: var(--accent); }
+@media (max-width: 700px) {
+  .config-root .gift-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 
 .config-root .badge {
   background: var(--accent); color: var(--badge-text); border-radius: 999px;

@@ -13,6 +13,7 @@ export function mountConfig(root: HTMLElement): void {
   let state = loadState();
   root.classList.add('config-root');
   state.settings.theme = normalizeConfigTheme(state.settings.theme);
+  state.settings.giftView = state.settings.giftView === 'grid' ? 'grid' : 'list';
   const initialProgress = getWizardProgress(state);
   let current: string = getNextWizardStep(initialProgress) ?? 'obs';
   let setupComplete = initialProgress.obs;
@@ -440,7 +441,14 @@ export function mountConfig(root: HTMLElement): void {
     addCard.append(el('h3', { text: '搜索礼物' }));
     const search = el('input', { class: 'field-input' }) as HTMLInputElement;
     search.placeholder = '搜索礼物名称…';
-    const giftList = el('div', {});
+    const viewToggle = el('div', { class: 'gift-view-toggle' });
+    const listButton = el('button', { class: 'btn ghost', text: '列表', type: 'button' }) as HTMLButtonElement;
+    const gridButton = el('button', { class: 'btn ghost', text: '网格', type: 'button' }) as HTMLButtonElement;
+    const updateViewToggle = (): void => {
+      listButton.classList.toggle('is-active', state.settings.giftView === 'list');
+      gridButton.classList.toggle('is-active', state.settings.giftView === 'grid');
+    };
+    const giftList = el('div', { class: state.settings.giftView === 'grid' ? 'gift-grid' : 'gift-list' });
     const seen = new Set<number>();
     const allGifts = [...state.recentGifts, ...builtinCatalog].filter((g) => !seen.has(g.id) && (seen.add(g.id), true));
     const giftPageSize = 50;
@@ -455,11 +463,10 @@ export function mountConfig(root: HTMLElement): void {
         const img = el('img', { class: 'gift-img' }) as HTMLImageElement;
         img.src = g.imgBasic || 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
         const configured = state.rules.some((r) => r.giftId === g.id);
-        row.append(img,
-          el('div', { class: 'grow' }, [
-            el('div', { class: 'name', text: g.name }),
-            el('div', { class: 'sub', text: `ID ${g.id}` }),
-          ]),
+        const price = `${g.price} ${g.coinType === 'gold' ? '金瓜子' : '银瓜子'}`;
+        const details = [el('div', { class: 'name', text: g.name }), el('div', { class: 'sub', text: price })];
+        if (state.settings.giftView === 'list') details.push(el('div', { class: 'sub', text: `ID ${g.id}` }));
+        row.append(img, el('div', { class: 'grow', children: details }),
           configured ? el('span', { class: 'badge', text: '已设置' }) : el('span', { class: 'badge unset', text: '未配置' }));
         row.onclick = () => openRuleEditor(g.id, g.name, g.imgBasic);
         giftList.append(row);
@@ -478,12 +485,28 @@ export function mountConfig(root: HTMLElement): void {
         giftList.append(el('div', { class: 'gift-count', text: `共 ${matches.length} 个礼物` }));
       }
     }
+    listButton.onclick = () => {
+      state.settings.giftView = 'list';
+      giftList.className = 'gift-list';
+      updateViewToggle();
+      save();
+      renderGiftList(search.value.trim());
+    };
+    gridButton.onclick = () => {
+      state.settings.giftView = 'grid';
+      giftList.className = 'gift-grid';
+      updateViewToggle();
+      save();
+      renderGiftList(search.value.trim());
+    };
+    viewToggle.append(listButton, gridButton);
+    updateViewToggle();
     renderGiftList('');
     search.oninput = () => {
       visibleGiftCount = giftPageSize;
       renderGiftList(search.value.trim());
     };
-    addCard.append(search, giftList);
+    addCard.append(search, viewToggle, giftList);
     content.append(addCard);
 
     if (state.rules.length > 0) {

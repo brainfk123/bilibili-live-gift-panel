@@ -235,6 +235,31 @@ describe('wizard progress', () => {
 });
 
 describe('configuration wizard rendering', () => {
+  it('defaults to list view and switches to grid without losing search', () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    root.querySelector('[data-step="rules"]')?.onclick?.();
+
+    expect(root.querySelector('.gift-list')).not.toBeNull();
+    const search = root.querySelector('input') as TestElement;
+    search.value = '心动';
+    (search as TestElement & { oninput?: () => void }).oninput?.();
+
+    findByText(root, '网格')?.onclick?.();
+    expect(root.querySelector('.gift-grid')).not.toBeNull();
+    expect((root.querySelector('input') as TestElement).value).toBe('心动');
+    expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).settings.giftView).toBe('grid');
+  });
+
+  it('migrates saved states without a gift view to list view', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({ ...state(), settings: { theme: 'dark' } }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    root.querySelector('[data-step="rules"]')?.onclick?.();
+
+    expect(root.querySelector('.gift-list')).not.toBeNull();
+  });
+
   it('uses dark theme by default and can persist light theme', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
