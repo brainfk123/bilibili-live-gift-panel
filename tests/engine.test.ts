@@ -32,14 +32,26 @@ function makeGift(overrides: Partial<GiftEvent>): GiftEvent {
 }
 
 describe('applyGiftToState', () => {
-  it('applies formula delta', () => {
+  it('assigns formula result as the attribute value', () => {
     const s = defaultState();
     s.attributes[0].value = 100;
     s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: 'price/1000*60' });
     const rs = applyGiftToState(s, makeGift({ price: 1000 }));
     expect(rs).toHaveLength(1);
-    expect(rs[0].delta).toBe(60);
-    expect(s.attributes[0].value).toBe(160);
+    expect(rs[0].delta).toBe(-40);
+    expect(rs[0].valueAfter).toBe(60);
+    expect(s.attributes[0].value).toBe(60);
+  });
+
+  it('supports conditional increment then doubling through the current value', () => {
+    const s = defaultState();
+    s.attributes[0] = { name: '早播次数', value: 9, unit: 'none', format: 'number', decimals: 0, suffix: '' };
+    s.rules.push({ id: 'r1', giftId: 32251, attributeName: '早播次数', formula: 'IF(早播次数<10,早播次数+1,早播次数*2)' });
+    const first = applyGiftToState(s, makeGift({ giftId: 32251 }));
+    expect(first[0].valueAfter).toBe(10);
+    s.attributes[0].value = 10;
+    const second = applyGiftToState(s, makeGift({ giftId: 32251, rnd: 'second' }));
+    expect(second[0].valueAfter).toBe(20);
   });
 
   it('respects minPrice threshold', () => {
@@ -49,20 +61,23 @@ describe('applyGiftToState', () => {
     expect(applyGiftToState(s, makeGift({ price: 150 }))).toHaveLength(1);
   });
 
-  it('respects cap', () => {
+  it('clamps the assigned result to cap', () => {
     const s = defaultState();
     s.attributes[0].value = 90;
-    s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '100', cap: 100 });
+    s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '150', cap: 100 });
     const rs = applyGiftToState(s, makeGift({}));
     expect(rs[0].delta).toBe(10);
+    expect(rs[0].valueAfter).toBe(100);
     expect(s.attributes[0].value).toBe(100);
   });
 
-  it('skips when cap already reached', () => {
+  it('assigns a value below the cap even when the current value is at the cap', () => {
     const s = defaultState();
     s.attributes[0].value = 100;
-    s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '100', cap: 100 });
-    expect(applyGiftToState(s, makeGift({}))).toHaveLength(0);
+    s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '50', cap: 100 });
+    const rs = applyGiftToState(s, makeGift({}));
+    expect(rs[0].valueAfter).toBe(50);
+    expect(s.attributes[0].value).toBe(50);
   });
 
   it('respects dailyLimit', () => {
@@ -71,7 +86,7 @@ describe('applyGiftToState', () => {
     applyGiftToState(s, makeGift({}));
     applyGiftToState(s, makeGift({}));
     expect(applyGiftToState(s, makeGift({}))).toHaveLength(0);
-    expect(s.attributes[0].value).toBe(20);
+    expect(s.attributes[0].value).toBe(10);
   });
 
   it('ignores non-matching gift', () => {
@@ -94,11 +109,12 @@ describe('applyGiftToState', () => {
     s.attributes[0].value = 5;
     s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '加班时间+count' });
     const rs = applyGiftToState(s, makeGift({ num: 3 }));
-    expect(rs[0].delta).toBe(8);
-    expect(s.attributes[0].value).toBe(13);
+    expect(rs[0].delta).toBe(3);
+    expect(rs[0].valueAfter).toBe(8);
+    expect(s.attributes[0].value).toBe(8);
   });
 
-  it('skips rule when formula errors or yields non-finite delta', () => {
+  it('skips rule when formula errors or yields non-finite value', () => {
     const s = defaultState();
     s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: 'price/0' });
     expect(applyGiftToState(s, makeGift({}))).toHaveLength(0);
@@ -127,7 +143,7 @@ describe('applyGiftToState', () => {
     s.attributes[0].value = 10;
     s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '5' });
     const rs = applyGiftToState(s, makeGift({}));
-    expect(rs[0].valueAfter).toBe(15);
+    expect(rs[0].valueAfter).toBe(5);
   });
 });
 
@@ -183,7 +199,7 @@ describe('Engine', () => {
       vi.advanceTimersByTime(61000);
       engine.handleGift(gift);
       expect(onTrigger).toHaveBeenCalledTimes(2);
-      expect(s.attributes[0].value).toBe(20);
+      expect(s.attributes[0].value).toBe(10);
     } finally {
       vi.useRealTimers();
     }

@@ -23,19 +23,18 @@ export function applyGiftToState(state: AppState, gift: GiftEvent): TriggerResul
     if (rule.dailyLimit !== undefined && triggerCount >= rule.dailyLimit) continue;
     const env: Record<string, number> = { price: gift.price, count: gift.num };
     for (const a of state.attributes) env[a.name] = a.value;
-    let delta: number;
+    let nextValue: number;
     try {
-      delta = evalFormula(rule.formula, env);
+      nextValue = evalFormula(rule.formula, env);
     } catch {
       continue;
     }
-    if (!Number.isFinite(delta)) continue;
-    if (rule.cap !== undefined) {
-      const room = rule.cap - attr.value;
-      if (room <= 0) continue;
-      if (delta > room) delta = room;
-    }
-    attr.value += delta;
+    if (!Number.isFinite(nextValue)) continue;
+    const before = attr.value;
+    const valueAfter = rule.cap === undefined ? nextValue : Math.min(nextValue, rule.cap);
+    if (!Number.isFinite(valueAfter)) continue;
+    const delta = valueAfter - before;
+    attr.value = valueAfter;
     day.ruleTriggers[rule.id] = triggerCount + 1;
     const entry: LogEntry = {
       time: gift.timestamp,
