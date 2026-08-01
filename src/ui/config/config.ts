@@ -466,8 +466,10 @@ export function mountConfig(root: HTMLElement): void {
         const target = state.attributes[attrSelect.selectedIndex];
         const result = evalFormula(formula, env);
         const before = target?.value ?? 0;
+        const cap = numOrUndef(capInput.value);
+        const valueAfter = cap === undefined ? result : Math.min(result, cap);
         const beforeText = target ? formatValue(before, target) : String(before);
-        const resultText = target ? formatValue(result, target) : String(result);
+        const resultText = target ? formatValue(valueAfter, target) : String(valueAfter);
         preview.append(el('div', { text: `当前值：${beforeText} → 触发后：` }),
           el('span', { class: 'result', text: resultText }));
         if (!target) preview.append(el('div', { class: 'hint error', text: '请先创建属性，再配置礼物规则。' }));
@@ -479,8 +481,6 @@ export function mountConfig(root: HTMLElement): void {
       }
     }
     formulaInput.oninput = updatePreview;
-    attrSelect.onchange = updatePreview;
-    updatePreview();
 
     const tut = el('details', { class: 'tutorial' });
     tut.append(el('summary', { text: '不会写公式？看示例' }));
@@ -498,23 +498,36 @@ export function mountConfig(root: HTMLElement): void {
       el('tr', {}, [el('td', {}, [el('code', { text: 'MAX(1,2) / MIN(1,2)' })]), el('td', { text: '取最大 / 最小' })]),
     ]);
     const targetName = () => state.attributes[attrSelect.selectedIndex]?.name ?? '当前值';
-    const examples: [string, string][] = [
-      ['当前值加 60 秒', `${targetName()}+price/1000*60`],
-      ['当前值随机加 10~60 秒', `${targetName()}+RANDBETWEEN(10,60)`],
-      ['满 100 元设置为当前值+5分钟', `IF(price>=100000,${targetName()}+300,${targetName()})`],
-      ['按礼物数量累加，每个30秒', `${targetName()}+count*30`],
-      ['1 元设置为对应积分', 'ROUND(price/1000)'],
+    const examples: [string, (target: string) => string][] = [
+      ['当前值加 60 秒', (target) => `${target}+price/1000*60`],
+      ['当前值随机加 10~60 秒', (target) => `${target}+RANDBETWEEN(10,60)`],
+      ['满 100 元设置为当前值+5分钟', (target) => `IF(price>=100000,${target}+300,${target})`],
+      ['按礼物数量累加，每个30秒', (target) => `${target}+count*30`],
+      ['随机设置为 10~60', () => 'RANDBETWEEN(10,60)'],
+      ['达到 10 次后翻倍', (target) => `IF(${target}<10,${target}+1,${target}*2)`],
+      ['1 元设置为对应积分', () => 'ROUND(price/1000)'],
     ];
     const exRow = el('div', { class: 'examples' });
-    for (const [label, formula] of examples) {
-      const chip = el('button', { class: 'example-chip', text: `${label} → ${formula}` }) as HTMLButtonElement;
-      chip.title = '点击填入公式框';
-      chip.onclick = () => {
-        formulaInput.value = formula;
-        updatePreview();
-      };
-      exRow.append(chip);
+    function renderExamples(): void {
+      exRow.replaceChildren();
+      for (const [label, makeFormula] of examples) {
+        const formula = makeFormula(targetName());
+        const chip = el('button', { class: 'example-chip', text: `${label} → ${formula}` }) as HTMLButtonElement;
+        chip.title = '点击填入公式框';
+        chip.onclick = () => {
+          formulaInput.value = makeFormula(targetName());
+          updatePreview();
+        };
+        exRow.append(chip);
+      }
     }
+    renderExamples();
+    capInput.oninput = updatePreview;
+    attrSelect.onchange = () => {
+      updatePreview();
+      renderExamples();
+    };
+    updatePreview();
     tut.append(
       el('div', { style: 'margin-top:8px;font-weight:600;', text: '可用的变量（直接在公式里用）：' }),
       varsTable,

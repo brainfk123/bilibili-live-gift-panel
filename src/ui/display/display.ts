@@ -4,6 +4,13 @@ import { createBrandIcon } from '../brand';
 import { Engine, TriggerResult } from '../../engine';
 import { formatValue, todayStr } from '../../format';
 import { ConnState } from '../../bilibili/client';
+import { Attribute } from '../../types';
+
+export function formatDelta(delta: number, attr?: Attribute): string {
+  const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
+  const value = attr ? formatValue(Math.abs(delta), attr) : String(Math.abs(delta));
+  return `${sign}${value}`;
+}
 
 export function mountDisplay(root: HTMLElement): void {
   const state = loadState();
@@ -88,7 +95,7 @@ export function mountDisplay(root: HTMLElement): void {
       img,
       el('div', { class: 'grow' }, [
         el('div', { class: 'gt-name', text: `${r.gift.uname} 送出 ${r.gift.giftName}` }),
-        el('div', { class: 'gt-delta', text: attr ? `${r.rule.attributeName} +${formatValue(r.delta, attr)}` : `+${r.delta}` }),
+        el('div', { class: 'gt-delta', text: `${r.rule.attributeName} ${formatDelta(r.delta, attr)}` }),
       ]),
     ]);
     toastWrap.append(toast);

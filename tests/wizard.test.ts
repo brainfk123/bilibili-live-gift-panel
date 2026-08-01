@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mountConfig } from '../src/ui/config/config';
-import { mountDisplay } from '../src/ui/display/display';
+import { formatDelta, mountDisplay } from '../src/ui/display/display';
 import { getNextWizardStep, getRoomNumberHint, getWizardChecklist, getWizardProgress } from '../src/ui/config/wizard';
 
 vi.mock('../src/ui/brand', () => ({
@@ -309,6 +309,50 @@ describe('configuration wizard rendering', () => {
     expect(textOf(preview as TestElement)).not.toContain('TypeError');
   });
 
+  it('rebuilds assignment examples for the selected attribute', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state(),
+      attributes: [
+        { name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' },
+        { name: '积分', value: 5, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      ],
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    root.querySelector('[data-step="rules"]')?.onclick?.();
+    root.querySelector('.list-item')?.onclick?.();
+
+    const attrSelect = root.querySelector('select') as TestElement & { onchange?: () => void } | null;
+    expect(attrSelect).not.toBeNull();
+    attrSelect!.selectedIndex = 1;
+    attrSelect!.onchange?.();
+
+    const additiveExample = root.querySelectorAll('.example-chip').find((example) => example.textContent?.includes('当前值加 60 秒'));
+    expect(additiveExample?.textContent).toContain('积分+price/1000*60');
+    (additiveExample?.onclick as (() => void) | null)?.();
+    const formulaInput = root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '触发后属性值');
+    expect(formulaInput?.value).toBe('积分+price/1000*60');
+  });
+
+  it('applies the cap and refreshes the formula preview', () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    root.querySelector('[data-step="rules"]')?.onclick?.();
+    root.querySelector('.list-item')?.onclick?.();
+
+    const capInput = root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '上限封顶（可留空）') as TestElement & { oninput?: () => void } | undefined;
+    expect(capInput).toBeDefined();
+    capInput!.value = '30';
+    capInput!.oninput?.();
+    expect(textOf(root.querySelector('.preview') as TestElement)).toContain('当前值：00:00:00 → 触发后：00:00:30');
+
+    capInput!.value = '90';
+    capInput!.oninput?.();
+    expect(textOf(root.querySelector('.preview') as TestElement)).toContain('当前值：00:00:00 → 触发后：00:01:00');
+  });
+
   it('loads the gift catalog in pages instead of hiding matches after 50 items', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
@@ -441,6 +485,13 @@ describe('configuration wizard rendering', () => {
 });
 
 describe('display branding', () => {
+  it('formats positive, negative, and zero deltas with the correct sign', () => {
+    const attr = { name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' } as const;
+    expect(formatDelta(60, attr)).toBe('+00:01:00');
+    expect(formatDelta(-40, attr)).toBe('-00:00:40');
+    expect(formatDelta(0, attr)).toBe('00:00:00');
+  });
+
   it('uses the shared brand icon for gift stats and the empty display state', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state(),
