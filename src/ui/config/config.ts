@@ -11,6 +11,8 @@ import { getNextWizardStep, getWizardChecklist, getWizardProgress, type WizardSt
 
 export function mountConfig(root: HTMLElement): void {
   let state = loadState();
+  root.classList.add('config-root');
+  state.settings.theme = normalizeConfigTheme(state.settings.theme);
   const initialProgress = getWizardProgress(state);
   let current: string = getNextWizardStep(initialProgress) ?? 'obs';
   let setupComplete = initialProgress.obs;
@@ -44,6 +46,7 @@ export function mountConfig(root: HTMLElement): void {
   function applyConfigTheme(theme: 'dark' | 'light'): void {
     root.dataset.theme = theme;
     themeToggle.textContent = theme === 'dark' ? '亮色主题' : '深色主题';
+    themeToggle.setAttribute('aria-pressed', theme === 'light' ? 'true' : 'false');
   }
 
   themeToggle.onclick = () => {
@@ -794,6 +797,8 @@ export function mountConfig(root: HTMLElement): void {
           attributes: Array.isArray(parsed.attributes) ? parsed.attributes : state.attributes,
           rules: Array.isArray(parsed.rules) ? parsed.rules : state.rules,
         };
+        state.settings.theme = normalizeConfigTheme(state.settings.theme);
+        applyConfigTheme(state.settings.theme);
         save();
         render();
         toast('配置已导入', root);
@@ -814,4 +819,8 @@ export function mountConfig(root: HTMLElement): void {
 
   applyConfigTheme(state.settings.theme);
   render();
+}
+
+function normalizeConfigTheme(theme: unknown): 'dark' | 'light' {
+  return theme === 'light' ? 'light' : 'dark';
 }

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { mountConfig } from '../src/ui/config/config';
 import { formatDelta, mountDisplay } from '../src/ui/display/display';
 import { getNextWizardStep, getRoomNumberHint, getWizardChecklist, getWizardProgress } from '../src/ui/config/wizard';
@@ -50,6 +51,7 @@ class TestElement {
     [name: string]: string | ((property: string, value: string) => void);
     setProperty: (name: string, value: string) => void;
   };
+  attributes: Record<string, string> = {};
   classList = {
     add: (...names: string[]) => {
       const classes = new Set(this.className.split(' ').filter(Boolean));
@@ -111,6 +113,11 @@ class TestElement {
   setAttribute(name: string, value: string): void {
     if (name === 'class') this.className = value;
     if (name.startsWith('data-')) this.dataset[name.slice(5)] = value;
+    this.attributes[name] = value;
+  }
+
+  getAttribute(name: string): string | null {
+    return this.attributes[name] ?? null;
   }
 
   querySelector(selector: string): TestElement | null {
@@ -213,6 +220,73 @@ describe('configuration wizard rendering', () => {
     (toggle?.onclick as (() => void) | null)?.();
     expect(root.dataset.theme).toBe('light');
     expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).settings.theme).toBe('light');
+  });
+
+  it('restores the saved light theme and toggle state after remounting', () => {
+    const firstRoot = new TestElement('div');
+    mountConfig(firstRoot as unknown as HTMLElement);
+    const firstToggle = findByText(firstRoot, '亮色主题');
+    expect(firstToggle?.getAttribute('aria-pressed')).toBe('false');
+    firstToggle?.onclick?.();
+
+    const secondRoot = new TestElement('div');
+    mountConfig(secondRoot as unknown as HTMLElement);
+
+    expect(secondRoot.dataset.theme).toBe('light');
+    const secondToggle = findByText(secondRoot, '深色主题');
+    expect(secondToggle).toBeDefined();
+    expect(secondToggle?.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('synchronizes the config theme immediately after importing light settings', async () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '更多设置')?.onclick?.();
+    findByText(root, '面板设置')?.onclick?.();
+
+    const importInput = root.querySelectorAll('input').find((input) => input.type === 'file') as TestElement & {
+      files?: Array<{ text: () => Promise<string> }>;
+      onchange?: () => void;
+    } | undefined;
+    expect(importInput).toBeDefined();
+    importInput!.files = [{ text: async () => JSON.stringify({ ...state(), settings: { theme: 'light' } }) }];
+    importInput!.onchange?.();
+    await Promise.resolve();
+
+    expect(root.dataset.theme).toBe('light');
+    expect(findByText(root, '深色主题')).toBeDefined();
+  });
+
+  it('falls back to dark when imported settings contain an invalid theme', async () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '更多设置')?.onclick?.();
+    findByText(root, '面板设置')?.onclick?.();
+
+    const importInput = root.querySelectorAll('input').find((input) => input.type === 'file') as TestElement & {
+      files?: Array<{ text: () => Promise<string> }>;
+      onchange?: () => void;
+    } | undefined;
+    expect(importInput).toBeDefined();
+    importInput!.files = [{ text: async () => JSON.stringify({ ...state(), settings: { theme: 'sepia' } }) }];
+    importInput!.onchange?.();
+    await Promise.resolve();
+
+    expect(root.dataset.theme).toBe('dark');
+    expect(findByText(root, '亮色主题')).toBeDefined();
+    expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).settings.theme).toBe('dark');
+  });
+
+  it('keeps configuration CSS isolated from display mode and exposes readable light variables', () => {
+    const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+
+    expect(mainSource).not.toContain("import './ui/config/config.css';");
+    expect(mainSource).toContain("import('./ui/config/config.css')");
+    expect(configCss).toContain('color: var(--text);');
+    expect(configCss).toContain('--success:');
+    expect(configCss).toContain('--error:');
+    expect(configCss).not.toContain('rgba(255,255,255');
   });
 
   it('keeps the room instructions short and puts the exact URL explanation in details', () => {

@@ -1,4 +1,3 @@
-import './ui/config/config.css';
 import './ui/display/display.css';
 import { mountDisplay } from './ui/display/display';
 import { mountConfig } from './ui/config/config';
@@ -10,8 +9,9 @@ const root = document.getElementById('app')!;
 const params = new URLSearchParams(location.search);
 const mode = params.get('mode') ?? 'display';
 if (mode === 'config') {
+  document.body.classList.add('config-mode');
   root.classList.add('config-root');
-  mountConfig(root);
+  void import('./ui/config/config.css').then(() => mountConfig(root));
 } else {
   document.body.classList.add('display-mode');
   root.classList.add('display-root');
