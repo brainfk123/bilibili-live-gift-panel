@@ -75,7 +75,7 @@ export function mountConfig(root: HTMLElement): void {
     else content.append(progressNav);
   }
 
-  function switchTo(key: string, stopClient = true): void {
+  function switchTo(key: string, stopClient = false): void {
     if (stopClient) {
       client?.stop();
       client = null;
@@ -367,9 +367,12 @@ export function mountConfig(root: HTMLElement): void {
     const giftList = el('div', {});
     const seen = new Set<number>();
     const allGifts = [...state.recentGifts, ...builtinCatalog].filter((g) => !seen.has(g.id) && (seen.add(g.id), true));
+    const giftPageSize = 50;
+    let visibleGiftCount = giftPageSize;
     function renderGiftList(filter: string): void {
       giftList.replaceChildren();
-      const list = allGifts.filter((g) => g.name.includes(filter) || String(g.id).includes(filter)).slice(0, 50);
+      const matches = allGifts.filter((g) => g.name.includes(filter) || String(g.id).includes(filter));
+      const list = matches.slice(0, visibleGiftCount);
       if (list.length === 0) giftList.append(emptyState('没有匹配的礼物'));
       for (const g of list) {
         const row = el('div', { class: 'list-item' });
@@ -385,9 +388,25 @@ export function mountConfig(root: HTMLElement): void {
         row.onclick = () => openRuleEditor(g.id, g.name, g.imgBasic);
         giftList.append(row);
       }
+      if (matches.length > list.length) {
+        const loadMore = el('button', {
+          class: 'btn ghost gift-load-more',
+          text: `加载更多（已显示 ${list.length}/${matches.length}）`,
+        }) as HTMLButtonElement;
+        loadMore.onclick = () => {
+          visibleGiftCount += giftPageSize;
+          renderGiftList(filter);
+        };
+        giftList.append(loadMore);
+      } else if (matches.length > 0) {
+        giftList.append(el('div', { class: 'gift-count', text: `共 ${matches.length} 个礼物` }));
+      }
     }
     renderGiftList('');
-    search.oninput = () => renderGiftList(search.value.trim());
+    search.oninput = () => {
+      visibleGiftCount = giftPageSize;
+      renderGiftList(search.value.trim());
+    };
     addCard.append(search, giftList);
     content.append(addCard);
 

@@ -13,7 +13,7 @@ vi.mock('../src/ui/brand', () => ({
   },
 }));
 
-const mockedClients = vi.hoisted(() => [] as Array<{ options: { onState?: (state: string) => void }; stop: () => void }>);
+const mockedClients = vi.hoisted(() => [] as Array<{ options: { onState?: (state: string) => void }; stop: ReturnType<typeof vi.fn> }>);
 
 vi.mock('../src/bilibili/client', () => ({
   DanmakuClient: class {
@@ -21,11 +21,11 @@ vi.mock('../src/bilibili/client', () => ({
       mockedClients.push(this);
     }
 
+    stop = vi.fn();
+
     start(): Promise<void> {
       return Promise.resolve();
     }
-
-    stop(): void {}
   },
 }));
 
@@ -219,6 +219,23 @@ describe('configuration wizard rendering', () => {
     expect(root.querySelector('.guide-card')).toBeNull();
   });
 
+  it('keeps the danmaku connection alive while switching wizard steps', () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const roomInput = root.querySelector('input');
+    if (!roomInput) throw new Error('room input not found');
+    roomInput.value = '88888888';
+    findByText(root, '测试连接')?.onclick?.();
+
+    const client = mockedClients[0];
+    if (!client) throw new Error('client not created');
+    client.options.onState?.('connected');
+    root.querySelector('[data-step="rules"]')?.onclick?.();
+
+    expect(client.stop).not.toHaveBeenCalled();
+  });
+
   it('shows common attribute fields first and folds unit settings away', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
@@ -266,6 +283,19 @@ describe('configuration wizard rendering', () => {
     const limits = root.querySelectorAll('.details-card').find((details) => details.querySelector('summary')?.textContent === '可选限制');
     expect(limits).toBeDefined();
     expect((limits as TestElement & { open?: boolean } | undefined)?.open).not.toBe(true);
+  });
+
+  it('loads the gift catalog in pages instead of hiding matches after 50 items', () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const rulesStep = root.querySelector('[data-step="rules"]');
+    (rulesStep?.onclick as (() => void) | null)?.();
+
+    const loadMore = root.querySelector('.gift-load-more');
+    expect(loadMore?.textContent).toMatch(/^加载更多（已显示 50\//);
+    (loadMore?.onclick as (() => void) | null)?.();
+    expect(root.querySelector('.gift-load-more')?.textContent).toMatch(/^加载更多（已显示 100\//);
   });
 
   it('shows a compact OBS completion card with a copyable display URL', () => {

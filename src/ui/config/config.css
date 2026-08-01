@@ -93,6 +93,8 @@ body {
 .list-item .grow { flex: 1; min-width: 0; }
 .list-item .name { font-weight: 600; }
 .list-item .sub { color: var(--text-dim); font-size: 12px; }
+.gift-load-more { width: 100%; margin: 8px 0 4px; }
+.gift-count { padding: 10px 0 2px; color: var(--text-dim); font-size: 12px; text-align: center; }
 
 .badge {
   background: var(--accent); color: #fff; border-radius: 999px;
