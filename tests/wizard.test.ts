@@ -383,6 +383,29 @@ describe('configuration wizard rendering', () => {
     expect(configCss).toContain('border: 1px solid var(--button-border);');
   });
 
+  it('keeps badge and danger button text readable in both themes', () => {
+    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const defaultVariables = configCss.match(/\.config-root \{([\s\S]*?)\n\}/)?.[1] ?? '';
+    const lightVariables = configCss.match(/\.config-root\[data-theme="light"\] \{([\s\S]*?)\n\}/)?.[1] ?? '';
+
+    // Badge: keep the pink brand fill, use a dark readable foreground in both themes.
+    const darkBadgeText = cssVariable(defaultVariables, '--badge-text');
+    const lightBadgeText = cssVariable(lightVariables, '--badge-text');
+    expect(cssVariable(defaultVariables, '--accent')).toBe('#fb7299');
+    expect(darkBadgeText).toBeTruthy();
+    expect(lightBadgeText).toBeTruthy();
+    expect(contrastRatio(darkBadgeText, '#fb7299')).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightBadgeText, '#fb7299')).toBeGreaterThanOrEqual(4.5);
+
+    // Danger button: readable foreground against the danger fill in both themes.
+    const darkDangerText = cssVariable(defaultVariables, '--danger-contrast');
+    const darkDangerBg = cssVariable(defaultVariables, '--danger');
+    const lightDangerText = cssVariable(lightVariables, '--danger-contrast');
+    const lightDangerBg = cssVariable(lightVariables, '--danger');
+    expect(contrastRatio(darkDangerText, darkDangerBg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightDangerText, lightDangerBg)).toBeGreaterThanOrEqual(4.5);
+  });
+
   it('keeps the room instructions short and puts the exact URL explanation in details', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
