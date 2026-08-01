@@ -20,7 +20,7 @@ export function mountConfig(root: HTMLElement): void {
   const brand = el('div', { class: 'app-brand' });
   brand.append(createBrandIcon(40), el('div', { class: 'app-brand-copy' }, [
     el('strong', { text: '直播礼物面板' }),
-    el('span', { text: '简单三步，开始互动' }),
+    el('span', { text: '简单四步，开始互动' }),
   ]));
   const status = el('div', { class: 'app-status' });
   header.append(brand, status);
@@ -94,6 +94,8 @@ export function mountConfig(root: HTMLElement): void {
     else if (current === 'obs') renderOnboarding();
     else if (current === 'stats') renderStats();
     else if (current === 'settings') renderSettings();
+    else if (current === 'manual') renderManualAdd();
+    renderMoreSettings();
   }
 
   function save(): void {
@@ -108,27 +110,46 @@ export function mountConfig(root: HTMLElement): void {
     content.append(card);
   }
 
-  function hintToggle(label: string, panelText: string): void {
-    const panel = el('div', { class: 'hint-panel', text: panelText });
-    panel.style.display = 'none';
-    const btn = el('button', { class: 'hint-toggle', text: label }) as HTMLButtonElement;
-    btn.onclick = () => {
-      const showing = panel.style.display !== 'none';
-      panel.style.display = showing ? 'none' : 'block';
-      btn.textContent = showing ? label : '收起 ▲';
-    };
-    content.append(btn, panel);
-  }
-
   function renderOnboarding(): void {
     const progress = getWizardProgress(state);
     const ready = progress.obs;
+
+    if (ready) {
+      const obsUrl = `${location.origin}/?mode=display`;
+      const card = el('div', { class: 'completion-card' });
+      const urlInput = el('input', { class: 'field-input', value: obsUrl, readOnly: true }) as HTMLInputElement;
+      const copyButton = el('button', { class: 'btn', text: '复制地址' }) as HTMLButtonElement;
+      copyButton.onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(urlInput.value);
+          toast('OBS 地址已复制', root);
+        } catch {
+          urlInput.select();
+          toast('请按 Ctrl+C 复制地址', root);
+        }
+      };
+      const urlRow = el('div', { class: 'ready-url' });
+      urlRow.append(urlInput, copyButton);
+      const instructions = el('ol', { class: 'obs-steps' });
+      for (const text of ['OBS 添加“浏览器”来源。', '粘贴地址并设置宽高。', '保持 gift-panel.exe 运行。']) {
+        instructions.append(el('li', { class: 'obs-step', text }));
+      }
+      card.append(
+        el('div', { class: 'completion-title', text: '配置完成' }),
+        el('p', { class: 'completion-subtitle', text: '把下面的地址添加到 OBS 浏览器源。' }),
+        urlRow,
+        instructions,
+      );
+      content.append(card);
+      return;
+    }
+
     const nextTarget = !progress.room ? 'room' : !progress.attributes ? 'attributes' : !progress.rules ? 'rules' : '';
     const steps = getWizardChecklist(progress);
     const box = el('div', { class: 'onboard' });
     box.append(
-      el('div', { class: 'onboard-title', text: ready ? '🎉 配置完成，接下来放进 OBS' : '🎉 第一次使用？跟着做就好' }),
-      el('div', { class: 'onboard-desc', text: ready ? '浏览器里的设置已经完成。把下面的地址添加到 OBS 浏览器源，直播时保持本程序窗口不要关闭。' : '不用懂技术，按顺序完成下面几步。每一步都有说明，点按钮可以直接跳到对应位置。' }),
+      el('div', { class: 'onboard-title', text: '第一次使用？跟着做就好' }),
+      el('div', { class: 'onboard-desc', text: '按顺序完成下面几步。每一步都有说明，点按钮可以直接跳到对应位置。' }),
     );
     const stepsRow = el('div', { class: 'steps' });
     for (const { label, target, done } of steps) {
@@ -165,24 +186,6 @@ export function mountConfig(root: HTMLElement): void {
       const nextButton = next.querySelector('button') as HTMLButtonElement;
       nextButton.onclick = () => switchTo(nextTarget || 'room');
       box.append(next);
-    } else {
-      const urlRow = el('div', { class: 'ready-url' });
-      const urlInput = el('input', { class: 'field-input', value: `${location.origin}/?mode=display`, readOnly: true }) as HTMLInputElement;
-      const copyButton = el('button', { class: 'btn', text: '复制地址' }) as HTMLButtonElement;
-      copyButton.onclick = async () => {
-        try {
-          await navigator.clipboard.writeText(urlInput.value);
-          toast('OBS 地址已复制', root);
-        } catch {
-          urlInput.select();
-          toast('请按 Ctrl+C 复制地址', root);
-        }
-      };
-      urlRow.append(urlInput, copyButton);
-      box.append(
-        el('div', { class: 'onboard-note', text: 'OBS 操作：来源 → 浏览器 → 粘贴上面的地址 → 勾选“关闭来源时刷新浏览器”不要勾选 → 设置宽度和高度 → 确定。' }),
-        urlRow,
-      );
     }
     content.append(box);
   }
@@ -199,13 +202,21 @@ export function mountConfig(root: HTMLElement): void {
   };
 
   function renderRoom(): void {
-    content.append(el('div', { class: 'section-title', text: '房间设置' }));
-    guideCard('这是第一步：告诉插件去你的哪个直播间听礼物。填写后点「测试连接」，看到「已连接」就成功了。', '为什么需要这一步？');
+    content.append(
+      el('h1', { class: 'wizard-main-title', text: '输入你的直播间房间号' }),
+      el('p', { class: 'wizard-subtitle', text: '填好后点击测试连接。' }),
+    );
+    const roomHelp = el('details', { class: 'details-card' });
+    roomHelp.append(
+      el('summary', { text: '房间号在哪里？' }),
+      el('p', { text: '看地址中 live.bilibili.com/ 后面的数字，不要复制问号后的访问参数。' }),
+      el('code', { text: 'https://live.bilibili.com/88888888?live_from=1111&visit_id=abc123' }),
+      el('p', { text: '要填写：88888888' }),
+    );
     const card = el('div', { class: 'card' });
-    const roomInput = inputField('直播间房间号', state.roomId);
-    roomInput.placeholder = '例如 2145';
-    hintToggle('怎么找到我的房间号？', '打开你的直播间网页（live.bilibili.com/后面那串数字），地址栏里的数字就是房间号。例如网址是 live.bilibili.com/2145，就填 2145。');
-    const row = el('div', { class: 'row gap' });
+    const roomInput = inputField('房间号', state.roomId);
+    roomInput.placeholder = '例如 88888888';
+    const row = el('div', { class: 'row input-row gap' });
     const statusText = el('span', { text: connectionLabel(connectionState) });
     const connectBtn = el('button', { class: 'btn', text: '测试连接' }) as HTMLButtonElement;
     connectBtn.onclick = () => {
@@ -230,18 +241,14 @@ export function mountConfig(root: HTMLElement): void {
     };
     row.append(connectBtn, statusText);
     card.append(fieldControl(roomInput), row);
-    content.append(card);
-    if (state.roomId && state.rules.length === 0) {
-      content.append(el('div', { class: 'tip-banner' }, [
-        el('b', { text: '下一步：' }),
-        el('span', { text: '去顶部「绑定礼物」入口配置，观众送礼物才能累加加班时间。' }),
-      ]));
-    }
+    content.append(roomHelp, card);
   }
 
   function renderAttributes(): void {
-    content.append(el('div', { class: 'section-title', text: '属性管理' }));
-    guideCard('「属性」就是你想让观众用礼物来累加的东西，最常用的是「加班时间」。比如观众送礼物就能给你的直播增加时长。', '属性是什么？');
+    content.append(
+      el('h1', { class: 'wizard-main-title', text: '设置属性' }),
+      el('p', { class: 'wizard-subtitle', text: '属性就是礼物触发后会变化的数字，例如加班时间。' }),
+    );
     if (state.attributes.length === 0) {
       content.append(el('div', { class: 'empty', text: '还没有属性，点击下方「+ 新增属性」创建一个吧（推荐：加班时间）。' }));
     }
@@ -265,12 +272,17 @@ export function mountConfig(root: HTMLElement): void {
       fmtSelect.innerHTML = `<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字+后缀</option>`;
       fmtSelect.value = a.format;
       fmtSelect.onchange = () => { a.format = fmtSelect.value as any; save(); render(); };
+      const advanced = el('details', { class: 'details-card' });
+      advanced.append(
+        el('summary', { text: '更多属性设置' }),
+        el('div', { class: 'field', children: [el('span', { class: 'field-label', text: '单位' }), unitSelect] }),
+      );
       const preview = el('div', { class: 'preview' });
       const updatePreview = () => {
         preview.replaceChildren(el('span', { text: `当前值：` }), el('span', { class: 'result', text: formatValue(a.value, a) }));
       };
       updatePreview();
-      const valueInput = inputField('手动调整当前值', String(a.value));
+      const valueInput = inputField('初始值', String(a.value));
       valueInput.oninput = () => {
         const v = Number(valueInput.value);
         if (Number.isFinite(v)) { a.value = v; save(); updatePreview(); }
@@ -286,9 +298,9 @@ export function mountConfig(root: HTMLElement): void {
       };
       card.append(
         fieldControl(nameInput),
-        el('div', { class: 'field', children: [el('span', { class: 'field-label', text: '单位' }), unitSelect] }),
+        fieldControl(valueInput),
         el('div', { class: 'field', children: [el('span', { class: 'field-label', text: '显示格式' }), fmtSelect] }),
-        fieldControl(valueInput), preview,
+        advanced, preview,
         el('div', { class: 'row' }, [resetBtn, delBtn]),
       );
       content.append(card);
@@ -296,49 +308,17 @@ export function mountConfig(root: HTMLElement): void {
   }
 
   function renderRules(): void {
-    content.append(el('div', { class: 'section-title', text: '礼物规则' }));
-    guideCard('规则就是「观众送哪个礼物 → 你的什么属性加多少」。例如：观众送「辣条」→ 加班时间 +1 分钟。', '规则是什么？');
-    const ruleTutorial = el('details', { class: 'tutorial', open: state.rules.length === 0 });
-    ruleTutorial.append(
-      el('summary', { text: '📖 第一次配规则？照这 3 步做' }),
-      el('div', { class: 'hint-panel', style: 'display:block;' }, [
-        el('div', { text: '1. 在下面搜索礼物名称，例如“辣条”，点击礼物。' }),
-        el('div', { text: '2. 选择要增加的属性，默认推荐“加班时间”。' }),
-        el('div', { text: '3. 公式直接点示例即可，不确定时先用“每 1 元礼物加 60 秒”。' }),
-        el('div', { class: 'hint', style: 'margin-top:6px;', text: '封顶、每日限次、最低门槛都是可选项，第一次使用可以先留空。' }),
-      ]),
+    content.append(
+      el('h1', { class: 'wizard-main-title', text: '绑定礼物规则' }),
+      el('p', { class: 'wizard-subtitle', text: '把观众送的礼物连接到一个属性。' }),
     );
-    content.append(ruleTutorial);
-    if (state.rules.length > 0) {
-      for (const rule of state.rules) {
-        const gi = findGift(state, rule.giftId);
-        const item = el('div', { class: 'list-item' });
-        const img = el('img', { class: 'gift-img' }) as HTMLImageElement;
-        img.src = gi?.imgBasic || 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
-        const del = el('button', { class: 'btn danger', text: '删除' });
-        del.onclick = () => {
-          state.rules = state.rules.filter((r) => r.id !== rule.id);
-          save();
-          render();
-        };
-        item.append(img,
-          el('div', { class: 'grow' }, [
-            el('div', { class: 'name', text: `${gi?.name ?? rule.giftId} → ${rule.attributeName}` }),
-            el('div', { class: 'sub', text: `${rule.formula}` }),
-          ]),
-          del);
-        content.append(item);
-      }
-    } else {
-      content.append(el('div', { class: 'empty', text: '还没有规则。' }));
-      content.append(el('div', { class: 'tip-banner' }, [
-        el('b', { text: '怎么开始？' }),
-        el('span', { text: ' 在下方「搜索礼物名称」里找到你想用的礼物（比如辣条），点它 → 选择加哪个属性 → 填公式 → 保存。也可以等观众送出第一个礼物后，它会自动出现在列表里。' }),
-      ]));
-    }
+    const actions = ['搜索礼物', '选择属性', '选择公式示例', '保存规则'];
+    const actionList = el('ol', { class: 'rule-actions' });
+    for (const action of actions) actionList.append(el('li', { class: 'rule-action', text: action }));
+    content.append(actionList);
 
     const addCard = el('div', { class: 'card' });
-    addCard.append(el('h3', { text: '新增规则' }));
+    addCard.append(el('h3', { text: '搜索礼物' }));
     const search = el('input', { class: 'field-input' }) as HTMLInputElement;
     search.placeholder = '搜索礼物名称…';
     const giftList = el('div', {});
@@ -368,23 +348,29 @@ export function mountConfig(root: HTMLElement): void {
     addCard.append(search, giftList);
     content.append(addCard);
 
-    const manualCard = el('div', { class: 'card' });
-    manualCard.append(el('h3', { text: '手动添加礼物' }));
-    manualCard.append(el('div', { class: 'sub', style: 'margin-bottom:12px;color:var(--text-dim);font-size:13px;', text: '一般用不到这里——观众送过的礼物会自动出现在上方列表。只有当你已经知道礼物 ID、想在别人送之前就配好规则时才用。' }));
-    const gidInput = inputField('礼物 ID', '');
-    const gnameInput = inputField('礼物名称（用于显示）', '');
-    const giconInput = inputField('图标 URL（可选）', '');
-    const addBtn = el('button', { class: 'btn', text: '添加到目录并建规则' });
-    addBtn.onclick = () => {
-      const gid = Number(gidInput.value.trim());
-      if (!gid) { toast('请输入礼物 ID', root); return; }
-      const name = gnameInput.value.trim() || `礼物${gid}`;
-      upsertRecentGift(state, parseGift({ giftId: gid, giftName: name, gift_info: { img_basic: giconInput.value.trim() } }));
-      save();
-      openRuleEditor(gid, name, giconInput.value.trim());
-    };
-    manualCard.append(fieldControl(gidInput), fieldControl(gnameInput), fieldControl(giconInput), addBtn);
-    content.append(manualCard);
+    if (state.rules.length > 0) {
+      for (const rule of state.rules) {
+        const gi = findGift(state, rule.giftId);
+        const item = el('div', { class: 'list-item' });
+        const img = el('img', { class: 'gift-img' }) as HTMLImageElement;
+        img.src = gi?.imgBasic || 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+        const del = el('button', { class: 'btn danger', text: '删除' });
+        del.onclick = () => {
+          state.rules = state.rules.filter((r) => r.id !== rule.id);
+          save();
+          render();
+        };
+        item.append(img,
+          el('div', { class: 'grow' }, [
+            el('div', { class: 'name', text: `${gi?.name ?? rule.giftId} → ${rule.attributeName}` }),
+            el('div', { class: 'sub', text: `${rule.formula}` }),
+          ]),
+          del);
+        content.append(item);
+      }
+    } else {
+      content.append(el('div', { class: 'empty', text: '先搜索一个观众会送的礼物。' }));
+    }
   }
 
   function openRuleEditor(giftId: number, giftName: string, _giftImg: string): void {
@@ -393,7 +379,7 @@ export function mountConfig(root: HTMLElement): void {
     card.append(el('h3', { text: `配置规则：${giftName}` }));
     const attrSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
     attrSelect.innerHTML = state.attributes.map((a) => `<option>${a.name}</option>`).join('');
-    const formulaInput = inputField('计算公式（加减的数值）', 'price/1000*60');
+    const formulaInput = inputField('公式', 'price/1000*60');
     formulaInput.classList.add('formula');
     formulaInput.placeholder = '例如 price/1000*60（点下方示例可自动填入）';
     const preview = el('div', { class: 'preview' });
@@ -412,7 +398,7 @@ export function mountConfig(root: HTMLElement): void {
         preview.append(el('div', { text: `示例：单价1000、数量1 时，结果为：` }),
           el('span', { class: 'result', text: target ? formatValue(result, target) : String(result) }));
         if (missing.length > 0) preview.append(el('div', { class: 'hint error', text: `未定义变量：${missing.join('、')}` }));
-        if (vars.length === 0) preview.append(el('div', { class: 'hint', text: '提示：可用变量 price（礼物单价）、count（数量），以及属性名。点上方「公式怎么写」查看示例' }));
+        if (vars.length === 0) preview.append(el('div', { class: 'hint', text: '提示：可用变量 price（礼物单价）、count（数量），以及属性名。点上方示例查看写法' }));
       } catch (e) {
         const msg = e instanceof FormulaError ? e.message : String(e);
         preview.append(el('div', { class: 'error', text: msg }));
@@ -423,7 +409,7 @@ export function mountConfig(root: HTMLElement): void {
     updatePreview();
 
     const tut = el('details', { class: 'tutorial' });
-    tut.append(el('summary', { text: '📖 公式怎么写？（新手必看）' }));
+    tut.append(el('summary', { text: '不会写公式？看示例' }));
     const varsTable = el('table', {}, [
       el('tr', {}, [el('th', { text: '变量' }), el('th', { text: '代表什么' })]),
       el('tr', {}, [el('td', {}, [el('code', { text: 'price' })]), el('td', { text: '这个礼物的单价（数值越大礼物越贵）' })]),
@@ -463,7 +449,13 @@ export function mountConfig(root: HTMLElement): void {
       exRow,
       el('div', { class: 'hint', style: 'margin-top:8px;', text: '提示：加班时间按秒计算，60 秒 = 1 分钟。填完上面会自动显示计算结果，不用自己算。' }),
     );
-    card.append(tut);
+    const limits = el('details', { class: 'details-card' });
+    limits.append(
+      el('summary', { text: '可选限制' }),
+      fieldControl(minInput),
+      fieldControl(capInput),
+      fieldControl(limitInput),
+    );
 
     const saveBtn = el('button', { class: 'btn', text: '保存规则' });
     saveBtn.onclick = () => {
@@ -495,17 +487,58 @@ export function mountConfig(root: HTMLElement): void {
     const cancelBtn = el('button', { class: 'btn ghost', text: '取消' });
     cancelBtn.onclick = () => overlay.remove();
     card.append(
-      el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '增加哪个属性' }), attrSelect]),
+      el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '选择属性' }), attrSelect]),
       fieldControl(formulaInput),
+      tut,
       preview,
-      fieldControl(minInput),
-      fieldControl(capInput),
-      fieldControl(limitInput),
+      limits,
       el('div', { class: 'row gap' }, [saveBtn, cancelBtn]),
     );
     overlay.append(card);
     overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
     root.append(overlay);
+  }
+
+  function renderManualAdd(): void {
+    content.append(
+      el('h1', { class: 'wizard-main-title', text: '手动添加礼物' }),
+      el('p', { class: 'wizard-subtitle', text: '知道礼物 ID 时，可以在观众送出前创建规则。' }),
+    );
+    const manualCard = el('div', { class: 'card manual-add-card' });
+    manualCard.append(el('h3', { text: '手动添加礼物' }));
+    manualCard.append(el('div', { class: 'sub', style: 'margin-bottom:12px;color:var(--text-dim);font-size:13px;', text: '一般用不到这里——观众送过的礼物会自动出现在礼物列表。' }));
+    const gidInput = inputField('礼物 ID', '');
+    const gnameInput = inputField('礼物名称（用于显示）', '');
+    const giconInput = inputField('图标 URL（可选）', '');
+    const addBtn = el('button', { class: 'btn', text: '添加到目录并建规则' });
+    addBtn.onclick = () => {
+      const gid = Number(gidInput.value.trim());
+      if (!gid) { toast('请输入礼物 ID', root); return; }
+      const name = gnameInput.value.trim() || `礼物${gid}`;
+      upsertRecentGift(state, parseGift({ giftId: gid, giftName: name, gift_info: { img_basic: giconInput.value.trim() } }));
+      save();
+      openRuleEditor(gid, name, giconInput.value.trim());
+    };
+    manualCard.append(fieldControl(gidInput), fieldControl(gnameInput), fieldControl(giconInput), addBtn);
+    content.append(manualCard);
+  }
+
+  function renderMoreSettings(): void {
+    const panel = el('div', { class: 'secondary-panel' });
+    panel.style.display = 'none';
+    const toggle = el('button', { class: 'secondary-toggle', text: '更多设置' }) as HTMLButtonElement;
+    toggle.onclick = () => {
+      const showing = panel.style.display !== 'none';
+      panel.style.display = showing ? 'none' : 'flex';
+    };
+    const statsButton = el('button', { class: 'btn ghost', text: '查看统计' }) as HTMLButtonElement;
+    statsButton.onclick = () => switchTo('stats');
+    const settingsButton = el('button', { class: 'btn ghost', text: '面板设置' }) as HTMLButtonElement;
+    settingsButton.onclick = () => switchTo('settings');
+    const manualButton = el('button', { class: 'btn ghost', text: '手动添加礼物' }) as HTMLButtonElement;
+    manualButton.onclick = () => switchTo('manual');
+    panel.append(statsButton, settingsButton, manualButton);
+    content.append(toggle, panel);
   }
 
   function renderStats(): void {
