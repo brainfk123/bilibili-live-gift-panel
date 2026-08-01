@@ -281,12 +281,31 @@ describe('configuration wizard rendering', () => {
     expect(formulaTutorial?.querySelector('summary')?.textContent).toBe('不会写公式？看示例');
     expect((formulaTutorial as TestElement & { open?: boolean } | null)?.open).not.toBe(true);
     expect(textOf(root)).toContain('公式结果会直接成为属性的新值');
-    expect(textOf(root)).toContain('触发后');
+    const preview = root.querySelector('.preview');
+    expect(preview).not.toBeNull();
+    expect(textOf(preview as TestElement)).toContain('当前值：00:00:00 → 触发后：00:01:00');
     const additiveExample = root.querySelectorAll('.example-chip').find((example) => example.textContent?.includes('当前值加 60 秒'));
     expect(additiveExample?.textContent).toContain('加班时间+price/1000*60');
     const limits = root.querySelectorAll('.details-card').find((details) => details.querySelector('summary')?.textContent === '可选限制');
     expect(limits).toBeDefined();
     expect((limits as TestElement & { open?: boolean } | undefined)?.open).not.toBe(true);
+  });
+
+  it('keeps the formula preview safe when no attribute exists', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({ ...state(), attributes: [] }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const rulesStep = root.querySelector('[data-step="rules"]');
+    (rulesStep?.onclick as (() => void) | null)?.();
+    const gift = root.querySelector('.list-item');
+    (gift?.onclick as (() => void) | null)?.();
+
+    const preview = root.querySelector('.preview');
+    expect(preview).not.toBeNull();
+    expect(textOf(preview as TestElement)).toContain('当前值：0 → 触发后：60');
+    expect(textOf(preview as TestElement)).toContain('请先创建属性');
+    expect(textOf(preview as TestElement)).not.toContain('TypeError');
   });
 
   it('loads the gift catalog in pages instead of hiding matches after 50 items', () => {

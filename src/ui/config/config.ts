@@ -213,7 +213,7 @@ export function mountConfig(root: HTMLElement): void {
         );
       } else if (nextTarget === 'rules') {
         next.append(
-          el('span', { text: '房间已设置。下一步给一个礼物绑定“加多少时间”。' }),
+          el('span', { text: '房间已设置。下一步设置礼物触发后的属性值。' }),
           el('button', { class: 'btn', text: '去配置第一个礼物' }),
         );
       } else {
@@ -462,8 +462,11 @@ export function mountConfig(root: HTMLElement): void {
         const target = state.attributes[attrSelect.selectedIndex];
         const result = evalFormula(formula, env);
         const before = target?.value ?? 0;
-        preview.append(el('div', { text: `当前值：${formatValue(before, target)} → 触发后：` }),
-          el('span', { class: 'result', text: target ? formatValue(result, target) : String(result) }));
+        const beforeText = target ? formatValue(before, target) : String(before);
+        const resultText = target ? formatValue(result, target) : String(result);
+        preview.append(el('div', { text: `当前值：${beforeText} → 触发后：` }),
+          el('span', { class: 'result', text: resultText }));
+        if (!target) preview.append(el('div', { class: 'hint error', text: '请先创建属性，再配置礼物规则。' }));
         if (missing.length > 0) preview.append(el('div', { class: 'hint error', text: `未定义变量：${missing.join('、')}` }));
         if (vars.length === 0) preview.append(el('div', { class: 'hint', text: '提示：可用变量 price（礼物单价）、count（数量），以及属性名。点上方示例查看写法' }));
       } catch (e) {
