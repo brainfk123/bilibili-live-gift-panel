@@ -43,15 +43,18 @@ describe('applyGiftToState', () => {
     expect(s.attributes[0].value).toBe(60);
   });
 
-  it('supports conditional increment then doubling through the current value', () => {
+  it.each([
+    [0, 1],
+    [9, 10],
+    [10, 20],
+    [20, 40],
+  ])('supports conditional increment then doubling: %i to %i', (before, expected) => {
     const s = defaultState();
-    s.attributes[0] = { name: '早播次数', value: 9, unit: 'none', format: 'number', decimals: 0, suffix: '' };
+    s.attributes[0] = { name: '早播次数', value: before, unit: 'none', format: 'number', decimals: 0, suffix: '' };
     s.rules.push({ id: 'r1', giftId: 32251, attributeName: '早播次数', formula: 'IF(早播次数<10,早播次数+1,早播次数*2)' });
-    const first = applyGiftToState(s, makeGift({ giftId: 32251 }));
-    expect(first[0].valueAfter).toBe(10);
-    s.attributes[0].value = 10;
-    const second = applyGiftToState(s, makeGift({ giftId: 32251, rnd: 'second' }));
-    expect(second[0].valueAfter).toBe(20);
+    const results = applyGiftToState(s, makeGift({ giftId: 32251 }));
+    expect(results[0].valueAfter).toBe(expected);
+    expect(s.attributes[0].value).toBe(expected);
   });
 
   it('respects minPrice threshold', () => {
@@ -97,10 +100,12 @@ describe('applyGiftToState', () => {
 
   it('writes log entry', () => {
     const s = defaultState();
-    s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '10' });
+    s.attributes[0].value = 100;
+    s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '60' });
     applyGiftToState(s, makeGift({}));
     expect(s.log).toHaveLength(1);
-    expect(s.log[0].delta).toBe(10);
+    expect(s.log[0].delta).toBe(-40);
+    expect(s.log[0].valueAfter).toBe(60);
     expect(s.log[0].attributeName).toBe('加班时间');
   });
 
