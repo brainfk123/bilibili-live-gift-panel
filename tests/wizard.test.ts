@@ -1,9 +1,32 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mountConfig } from '../src/ui/config/config';
+import { mountDisplay } from '../src/ui/display/display';
 import { getNextWizardStep, getRoomNumberHint, getWizardChecklist, getWizardProgress } from '../src/ui/config/wizard';
 
 vi.mock('../src/ui/brand', () => ({
-  createBrandIcon: () => document.createElement('svg'),
+  createBrandIcon: (size = 40, className = 'brand-icon') => {
+    const icon = document.createElement('svg');
+    icon.setAttribute('width', String(size));
+    icon.setAttribute('height', String(size));
+    icon.setAttribute('class', className);
+    return icon;
+  },
+}));
+
+const mockedClients = vi.hoisted(() => [] as Array<{ options: { onState?: (state: string) => void }; stop: () => void }>);
+
+vi.mock('../src/bilibili/client', () => ({
+  DanmakuClient: class {
+    constructor(readonly options: { onState?: (state: string) => void }) {
+      mockedClients.push(this);
+    }
+
+    start(): Promise<void> {
+      return Promise.resolve();
+    }
+
+    stop(): void {}
+  },
 }));
 
 class TestElement {
@@ -11,25 +34,47 @@ class TestElement {
   dataset: Record<string, string> = {};
   children: TestElement[] = [];
   parent: TestElement | null = null;
-  style: Record<string, string> = {};
   textContent = '';
   value = '';
   innerHTML = '';
   placeholder = '';
   type = '';
   readOnly = false;
+  selectedIndex = 0;
   onclick: (() => void) | null = null;
+  style: {
+    [name: string]: string | ((property: string, value: string) => void);
+    setProperty: (name: string, value: string) => void;
+  };
   classList = {
     add: (...names: string[]) => {
       const classes = new Set(this.className.split(' ').filter(Boolean));
       names.forEach((name) => classes.add(name));
       this.className = [...classes].join(' ');
     },
+    remove: (...names: string[]) => {
+      const classes = new Set(this.className.split(' ').filter(Boolean));
+      names.forEach((name) => classes.delete(name));
+      this.className = [...classes].join(' ');
+    },
+    toggle: (name: string, force?: boolean) => {
+      const has = this.className.split(' ').includes(name);
+      const next = force ?? !has;
+      if (next) this.classList.add(name);
+      else this.classList.remove(name);
+      return next;
+    },
   };
 
   select(): void {}
 
-  constructor(readonly tagName: string) {}
+  constructor(readonly tagName: string) {
+    this.style = {
+      setProperty: (name: string, value: string) => {
+        this.style[name] = value;
+      },
+    };
+  }
 
   append(...children: (TestElement | string)[]): void {
     for (const child of children) {
@@ -50,6 +95,13 @@ class TestElement {
     if (index < 0) return;
     next.parent = this.parent;
     this.parent.children[index] = next;
+  }
+
+  remove(): void {
+    if (!this.parent) return;
+    const index = this.parent.children.indexOf(this);
+    if (index >= 0) this.parent.children.splice(index, 1);
+    this.parent = null;
   }
 
   setAttribute(name: string, value: string): void {
@@ -97,6 +149,7 @@ const storage = new Map<string, string>();
 
 beforeEach(() => {
   storage.clear();
+  mockedClients.length = 0;
   vi.stubGlobal('document', {
     createElement: (tag: string) => new TestElement(tag),
   } as unknown as Document);
@@ -106,6 +159,7 @@ beforeEach(() => {
     removeItem: (key: string) => void storage.delete(key),
   });
   vi.stubGlobal('fetch', () => new Promise(() => {}));
+  vi.stubGlobal('location', { origin: 'http://localhost:12450', reload: () => {} });
 });
 
 const state = (roomId = '', rules = 0) => ({
@@ -199,7 +253,8 @@ describe('configuration wizard rendering', () => {
       '保存规则',
     ]);
     expect(root.querySelector('input')?.placeholder).toBe('搜索礼物名称…');
-    expect(root.querySelectorAll('.empty').map((empty) => empty.textContent)).toEqual(['先搜索一个观众会送的礼物。']);
+    expect(root.querySelectorAll('.empty').map((empty) => textOf(empty))).toEqual(['先搜索一个观众会送的礼物。']);
+    expect(root.querySelector('.empty-brand-icon')).not.toBeNull();
     expect(root.querySelector('.manual-add-card')).toBeNull();
 
     const gift = root.querySelector('.list-item');
@@ -214,8 +269,12 @@ describe('configuration wizard rendering', () => {
   });
 
   it('shows a compact OBS completion card with a copyable display URL', () => {
-    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888', 1)));
-    vi.stubGlobal('location', { origin: 'http://localhost:12450' });
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state('88888888', 1),
+      attributes: [{ name: '加班时间', value: 61, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' }],
+      rules: [{ id: 'r-0', giftId: 999, attributeName: '加班时间', formula: 'price/1000*60' }],
+      recentGifts: [{ id: 999, name: '小心心', price: 1000, coinType: 'gold', imgBasic: '', lastReceived: 1, count: 1 }],
+    }));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
@@ -226,6 +285,24 @@ describe('configuration wizard rendering', () => {
     expect(url?.readOnly).toBe(true);
     expect(findByText(root, '复制地址')).toBeDefined();
     expect(card?.querySelectorAll('.obs-step')).toHaveLength(3);
+    expect(card?.querySelector('.completion-brand-icon')).not.toBeNull();
+    expect(findByText(root, '属性预览')).toBeDefined();
+    expect(findByText(root, '最近规则')).toBeDefined();
+    expect(findByText(root, '00:01:01')).toBeDefined();
+    expect(findByText(root, '小心心 → 加班时间')).toBeDefined();
+    expect(findByText(root, 'price/1000*60')).toBeDefined();
+    expect(findByText(root, '重新查看向导')).toBeDefined();
+
+    (findByText(root, '重新查看向导')?.onclick as (() => void) | null)?.();
+    expect(root.querySelector('h1')?.textContent).toBe('输入你的直播间房间号');
+  });
+
+  it('shows a check mark for every completed progress step', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888', 1)));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    expect(root.querySelectorAll('.wizard-progress-number').map((step) => step.textContent)).toEqual(['✓', '✓', '✓', '✓']);
   });
 
   it('keeps manual add behind the secondary settings entry', () => {
@@ -257,7 +334,7 @@ describe('configuration wizard rendering', () => {
     const root = new TestElement('div') as unknown as HTMLElement;
     mountConfig(root);
 
-    const roomInput = root.querySelector('input') as HTMLInputElement;
+    const roomInput = root.querySelector('input') as unknown as HTMLInputElement;
     roomInput.value = '2145';
     const connectButton = Array.from(root.querySelectorAll('button')).find((button) => button.textContent === '测试连接');
     expect(connectButton).toBeDefined();
@@ -265,6 +342,64 @@ describe('configuration wizard rendering', () => {
 
     const roomStep = root.querySelector('[data-step="room"]');
     expect(roomStep?.className).toContain('is-done');
+  });
+
+  it('advances to attribute setup after the room connection succeeds', () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const roomInput = root.querySelector('input') as unknown as HTMLInputElement;
+    roomInput.value = '2145';
+    const connectButton = Array.from(root.querySelectorAll('button')).find((button) => button.textContent === '测试连接');
+    (connectButton?.onclick as (() => void) | null)?.();
+    mockedClients[0]?.options.onState?.('connected');
+
+    expect(root.querySelector('[data-step="attributes"]')?.className).toContain('is-active');
+    expect(root.querySelector('h1')?.textContent).toBe('设置属性');
+  });
+
+  it('advances to the completed OBS view after saving a rule', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const gift = root.querySelector('.list-item');
+    (gift?.onclick as (() => void) | null)?.();
+    const saveButton = root.querySelectorAll('button').find((button) => button.textContent === '保存规则');
+    (saveButton?.onclick as (() => void) | null)?.();
+
+    expect(root.querySelector('[data-step="obs"]')?.className).toContain('is-active');
+    expect(root.querySelector('.completion-card')).not.toBeNull();
+  });
+
+  it('keeps one manual-add page title instead of repeating the card heading', () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const moreSettings = findByText(root, '更多设置');
+    (moreSettings?.onclick as (() => void) | null)?.();
+    const manualButton = findByText(root, '手动添加礼物');
+    (manualButton?.onclick as (() => void) | null)?.();
+
+    expect(root.querySelectorAll('h1').filter((heading) => heading.textContent === '手动添加礼物')).toHaveLength(1);
+    expect(root.querySelectorAll('h3').filter((heading) => heading.textContent === '手动添加礼物')).toHaveLength(0);
+  });
+});
+
+describe('display branding', () => {
+  it('uses the shared brand icon for gift stats and the empty display state', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state(),
+      attributes: [],
+    }));
+    vi.useFakeTimers();
+    const root = new TestElement('div');
+    mountDisplay(root as unknown as HTMLElement);
+
+    expect(root.querySelector('.stats-brand-icon')).not.toBeNull();
+    expect(root.querySelector('.display-empty-brand-icon')).not.toBeNull();
+    expect(textOf(root)).not.toContain('🎁');
+    vi.useRealTimers();
   });
 });
 

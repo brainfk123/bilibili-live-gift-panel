@@ -64,7 +64,7 @@ export function mountConfig(root: HTMLElement): void {
       }) as HTMLButtonElement;
       item.dataset.step = step.key;
       item.append(
-        el('span', { class: 'wizard-progress-number', text: String(index + 1) }),
+        el('span', { class: 'wizard-progress-number', text: done ? '✓' : String(index + 1) }),
         el('span', { class: 'wizard-progress-label', text: step.label }),
       );
       item.onclick = () => switchTo(step.key);
@@ -75,10 +75,12 @@ export function mountConfig(root: HTMLElement): void {
     else content.append(progressNav);
   }
 
-  function switchTo(key: string): void {
-    client?.stop();
-    client = null;
-    connectionState = 'idle';
+  function switchTo(key: string, stopClient = true): void {
+    if (stopClient) {
+      client?.stop();
+      client = null;
+      connectionState = 'idle';
+    }
     current = key;
     renderWizardHeader();
     render();
@@ -110,11 +112,44 @@ export function mountConfig(root: HTMLElement): void {
     content.append(card);
   }
 
+  function emptyState(text: string): HTMLElement {
+    const empty = el('div', { class: 'empty' });
+    empty.append(createBrandIcon(44, 'empty-brand-icon'), el('span', { text }));
+    return empty;
+  }
+
   function renderOnboarding(): void {
     const progress = getWizardProgress(state);
     const ready = progress.obs;
 
     if (ready) {
+      const home = el('div', { class: 'completion-home' });
+      const statusCard = el('div', { class: 'completion-status' });
+      statusCard.append(
+        el('span', { class: 'completion-status-label', text: '当前连接状态' }),
+        el('strong', { text: connectionLabel(connectionState) }),
+      );
+
+      const attributeCard = el('div', { class: 'completion-summary-card' });
+      attributeCard.append(el('h2', { class: 'completion-section-title', text: '属性预览' }));
+      for (const attribute of state.attributes) {
+        attributeCard.append(el('div', { class: 'completion-attribute' }, [
+          el('span', { class: 'completion-attribute-name', text: attribute.name }),
+          el('strong', { class: 'completion-attribute-value', text: formatValue(attribute.value, attribute) }),
+        ]));
+      }
+
+      const recentRule = state.rules[state.rules.length - 1];
+      const recentGift = recentRule ? findGift(state, recentRule.giftId) : undefined;
+      const ruleCard = el('div', { class: 'completion-summary-card' });
+      ruleCard.append(el('h2', { class: 'completion-section-title', text: '最近规则' }));
+      if (recentRule) {
+        ruleCard.append(
+          el('div', { class: 'completion-rule-name', text: `${recentGift?.name ?? `礼物${recentRule.giftId}`} → ${recentRule.attributeName}` }),
+          el('code', { class: 'completion-rule-formula', text: recentRule.formula }),
+        );
+      }
+
       const obsUrl = `${location.origin}/?mode=display`;
       const card = el('div', { class: 'completion-card' });
       const urlInput = el('input', { class: 'field-input', value: obsUrl, readOnly: true }) as HTMLInputElement;
@@ -135,12 +170,16 @@ export function mountConfig(root: HTMLElement): void {
         instructions.append(el('li', { class: 'obs-step', text }));
       }
       card.append(
+        createBrandIcon(56, 'completion-brand-icon'),
         el('div', { class: 'completion-title', text: '配置完成' }),
         el('p', { class: 'completion-subtitle', text: '把下面的地址添加到 OBS 浏览器源。' }),
         urlRow,
         instructions,
       );
-      content.append(card);
+      const restartButton = el('button', { class: 'secondary-toggle completion-restart', text: '重新查看向导' }) as HTMLButtonElement;
+      restartButton.onclick = () => switchTo('room');
+      home.append(statusCard, attributeCard, ruleCard, card, restartButton);
+      content.append(home);
       return;
     }
 
@@ -229,6 +268,10 @@ export function mountConfig(root: HTMLElement): void {
         roomId: Number(roomId),
         onState: (s: ConnState) => {
           connectionState = s;
+          if (s === 'connected' && current === 'room') {
+            switchTo('attributes', false);
+            return;
+          }
           statusText.textContent = connectionLabel(s);
           renderWizardHeader();
         },
@@ -250,7 +293,7 @@ export function mountConfig(root: HTMLElement): void {
       el('p', { class: 'wizard-subtitle', text: '属性就是礼物触发后会变化的数字，例如加班时间。' }),
     );
     if (state.attributes.length === 0) {
-      content.append(el('div', { class: 'empty', text: '还没有属性，点击下方「+ 新增属性」创建一个吧（推荐：加班时间）。' }));
+      content.append(emptyState('还没有属性，点击下方「+ 新增属性」创建一个吧（推荐：加班时间）。'));
     }
     const addBtn = el('button', { class: 'btn', text: '+ 新增属性' });
     addBtn.onclick = () => {
@@ -327,7 +370,7 @@ export function mountConfig(root: HTMLElement): void {
     function renderGiftList(filter: string): void {
       giftList.replaceChildren();
       const list = allGifts.filter((g) => g.name.includes(filter) || String(g.id).includes(filter)).slice(0, 50);
-      if (list.length === 0) giftList.append(el('div', { class: 'empty', text: '没有匹配的礼物' }));
+      if (list.length === 0) giftList.append(emptyState('没有匹配的礼物'));
       for (const g of list) {
         const row = el('div', { class: 'list-item' });
         const img = el('img', { class: 'gift-img' }) as HTMLImageElement;
@@ -369,7 +412,7 @@ export function mountConfig(root: HTMLElement): void {
         content.append(item);
       }
     } else {
-      content.append(el('div', { class: 'empty', text: '先搜索一个观众会送的礼物。' }));
+      content.append(emptyState('先搜索一个观众会送的礼物。'));
     }
   }
 
@@ -481,7 +524,7 @@ export function mountConfig(root: HTMLElement): void {
       state.rules.push(rule);
       save();
       overlay.remove();
-      render();
+      switchTo('obs');
       toast('规则已保存', root);
     };
     const cancelBtn = el('button', { class: 'btn ghost', text: '取消' });
@@ -505,7 +548,6 @@ export function mountConfig(root: HTMLElement): void {
       el('p', { class: 'wizard-subtitle', text: '知道礼物 ID 时，可以在观众送出前创建规则。' }),
     );
     const manualCard = el('div', { class: 'card manual-add-card' });
-    manualCard.append(el('h3', { text: '手动添加礼物' }));
     manualCard.append(el('div', { class: 'sub', style: 'margin-bottom:12px;color:var(--text-dim);font-size:13px;', text: '一般用不到这里——观众送过的礼物会自动出现在礼物列表。' }));
     const gidInput = inputField('礼物 ID', '');
     const gnameInput = inputField('礼物名称（用于显示）', '');
@@ -554,12 +596,12 @@ export function mountConfig(root: HTMLElement): void {
         ]));
       }
     } else {
-      card.append(el('div', { class: 'empty', text: '今天还没有礼物' }));
+      card.append(emptyState('今天还没有礼物'));
     }
     content.append(card);
     const logCard = el('div', { class: 'card' });
     logCard.append(el('h3', { text: '属性变动日志' }));
-    if (state.log.length === 0) logCard.append(el('div', { class: 'empty', text: '暂无变动记录' }));
+    if (state.log.length === 0) logCard.append(emptyState('暂无变动记录'));
     for (const e of state.log) {
       logCard.append(el('div', { class: 'log-item' }, [
         el('span', { text: `${new Date(e.time * 1000).toLocaleString('zh-CN')} ` }),

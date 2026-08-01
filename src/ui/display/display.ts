@@ -1,5 +1,6 @@
 import { loadState, saveState } from '../../storage';
 import { el } from '../common';
+import { createBrandIcon } from '../brand';
 import { Engine, TriggerResult } from '../../engine';
 import { formatValue, todayStr } from '../../format';
 import { ConnState } from '../../bilibili/client';
@@ -13,6 +14,15 @@ export function mountDisplay(root: HTMLElement): void {
 
   function renderAttrs(): void {
     panel.replaceChildren();
+    attrEls.clear();
+    if (state.attributes.length === 0) {
+      const empty = el('div', { class: 'display-empty' });
+      empty.append(
+        createBrandIcon(64, 'display-empty-brand-icon'),
+        el('div', { text: '还没有可显示的属性' }),
+      );
+      panel.append(empty);
+    }
     for (const attr of state.attributes) {
       const nameEl = el('div', { class: 'attr-name', text: attr.name });
       const valueEl = el('div', { class: 'attr-value' });
@@ -54,9 +64,12 @@ export function mountDisplay(root: HTMLElement): void {
   function updateStats(statsEl: HTMLElement): void {
     const day = state.stats[todayStr()];
     const giftTotal = day ? Object.values(day.giftTotals).reduce((a, b) => a + b, 0) : 0;
-    statsEl.replaceChildren(
-      el('span', { text: `🎁 礼物 ${giftTotal}` }),
+    const giftStat = el('span', { class: 'gift-stat' });
+    giftStat.append(
+      createBrandIcon(16, 'stats-brand-icon'),
+      el('span', { text: `礼物 ${giftTotal}` }),
     );
+    statsEl.replaceChildren(giftStat);
   }
 
   const engine = new Engine(state, (r: TriggerResult) => {
