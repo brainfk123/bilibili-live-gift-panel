@@ -10,6 +10,7 @@ export const defaultState = (): AppState => ({
   attributes: [],
   rules: [],
   timerRules: [],
+  formulaPresets: [],
   settings: {
     fontSize: 48,
     accentColor: '#fb7299',
@@ -101,6 +102,7 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     attributes: parsed.attributes ?? base.attributes,
     rules: parsed.rules ?? base.rules,
     timerRules: parsed.timerRules ?? base.timerRules,
+    formulaPresets: parsed.formulaPresets ?? base.formulaPresets,
   };
 }
 

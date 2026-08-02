@@ -132,6 +132,40 @@ func validateAppState(state appState) error {
 			return fmt.Errorf("定时器 %q 的公式无效：%w", rule.FormulaName, err)
 		}
 	}
+	presetIDs := make(map[string]struct{}, len(state.FormulaPresets))
+	presetNames := make(map[string]struct{}, len(state.FormulaPresets))
+	for _, preset := range state.FormulaPresets {
+		id := strings.TrimSpace(preset.ID)
+		name := strings.TrimSpace(preset.Name)
+		formula := strings.TrimSpace(preset.Formula)
+		sourceAttributeName := strings.TrimSpace(preset.SourceAttributeName)
+		if id == "" || name == "" || formula == "" || sourceAttributeName == "" {
+			return fmt.Errorf("公式预设的 ID、名称、公式和来源属性不能为空")
+		}
+		if preset.Context != "gift" && preset.Context != "timer" {
+			return fmt.Errorf("公式预设 %q 的适用场景无效", name)
+		}
+		if _, exists := presetIDs[id]; exists {
+			return fmt.Errorf("公式预设 ID 不能重复：%s", id)
+		}
+		presetIDs[id] = struct{}{}
+		nameKey := preset.Context + "\x00" + strings.ToLower(name)
+		if _, exists := presetNames[nameKey]; exists {
+			return fmt.Errorf("同类公式预设名称不能重复：%s", name)
+		}
+		presetNames[nameKey] = struct{}{}
+		tokens, err := tokenizeFormula(formula)
+		if err != nil {
+			return fmt.Errorf("公式预设 %q 无效：%w", name, err)
+		}
+		parser := formulaParser{tokens: tokens}
+		if _, err := parser.parseExpression(); err != nil {
+			return fmt.Errorf("公式预设 %q 无效：%w", name, err)
+		}
+		if parser.peek().kind != "eof" {
+			return fmt.Errorf("公式预设 %q 含有多余内容 %q", name, parser.peek().value)
+		}
+	}
 	return nil
 }
 

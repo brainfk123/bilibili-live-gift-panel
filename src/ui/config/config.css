@@ -1296,6 +1296,43 @@ body.config-mode::-webkit-scrollbar-corner,
   border-radius: 0;
 }
 .config-root .formula-assignment-row .field-input:focus { border-color: transparent; }
+.config-root .formula-preset-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--card) 68%, transparent);
+}
+.config-root .formula-preset-label {
+  flex: 0 0 auto;
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.config-root .formula-preset-tools .field-input {
+  height: 34px;
+  margin: 0;
+  padding: 7px 10px;
+  font-size: 11px;
+}
+.config-root .formula-preset-name { flex: 0 1 190px; }
+.config-root .formula-preset-select { flex: 1 1 210px; }
+.config-root .formula-preset-button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 7px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.config-root .formula-preset-button:disabled {
+  cursor: not-allowed;
+  opacity: .42;
+}
 .config-root .formula-editor-meta {
   display: flex;
   align-items: center;

@@ -39,6 +39,14 @@ type timerRule struct {
 	Enabled         bool   `json:"enabled"`
 }
 
+type formulaPreset struct {
+	ID                  string `json:"id"`
+	Name                string `json:"name"`
+	Context             string `json:"context"`
+	Formula             string `json:"formula"`
+	SourceAttributeName string `json:"sourceAttributeName"`
+}
+
 type giftInfo struct {
 	ID       int     `json:"id"`
 	Name     string  `json:"name"`
@@ -118,15 +126,16 @@ type settingsState struct {
 }
 
 type appState struct {
-	RoomID      string              `json:"roomId"`
-	Attributes  []attributeState    `json:"attributes"`
-	Rules       []giftRule          `json:"rules"`
-	TimerRules  []timerRule         `json:"timerRules"`
-	Settings    settingsState       `json:"settings"`
-	GiftCatalog []giftInfo          `json:"giftCatalog"`
-	RecentGifts []recentGift        `json:"recentGifts"`
-	Stats       map[string]dayStats `json:"stats"`
-	Log         []logEntry          `json:"log"`
+	RoomID         string              `json:"roomId"`
+	Attributes     []attributeState    `json:"attributes"`
+	Rules          []giftRule          `json:"rules"`
+	TimerRules     []timerRule         `json:"timerRules"`
+	FormulaPresets []formulaPreset     `json:"formulaPresets"`
+	Settings       settingsState       `json:"settings"`
+	GiftCatalog    []giftInfo          `json:"giftCatalog"`
+	RecentGifts    []recentGift        `json:"recentGifts"`
+	Stats          map[string]dayStats `json:"stats"`
+	Log            []logEntry          `json:"log"`
 }
 
 type giftEvent struct {
@@ -146,13 +155,14 @@ type giftEvent struct {
 func defaultAppState() appState {
 	showTutorial := true
 	return appState{
-		Attributes:  []attributeState{},
-		Rules:       []giftRule{},
-		TimerRules:  []timerRule{},
-		GiftCatalog: []giftInfo{},
-		RecentGifts: []recentGift{},
-		Stats:       map[string]dayStats{},
-		Log:         []logEntry{},
+		Attributes:     []attributeState{},
+		Rules:          []giftRule{},
+		TimerRules:     []timerRule{},
+		FormulaPresets: []formulaPreset{},
+		GiftCatalog:    []giftInfo{},
+		RecentGifts:    []recentGift{},
+		Stats:          map[string]dayStats{},
+		Log:            []logEntry{},
 		Settings: settingsState{
 			FontSize:       48,
 			AccentColor:    "#fb7299",
@@ -175,6 +185,9 @@ func normalizeAppState(state *appState) {
 	}
 	if state.TimerRules == nil {
 		state.TimerRules = []timerRule{}
+	}
+	if state.FormulaPresets == nil {
+		state.FormulaPresets = []formulaPreset{}
 	}
 	if state.GiftCatalog == nil {
 		state.GiftCatalog = []giftInfo{}

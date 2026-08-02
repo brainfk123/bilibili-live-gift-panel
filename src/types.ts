@@ -31,6 +31,16 @@ export interface TimerRule {
   enabled: boolean;
 }
 
+export type FormulaPresetContext = 'gift' | 'timer';
+
+export interface FormulaPreset {
+  id: string;
+  name: string;
+  context: FormulaPresetContext;
+  formula: string;
+  sourceAttributeName: string;
+}
+
 export interface GiftInfo {
   id: number;
   name: string;
@@ -80,6 +90,7 @@ export interface AppState {
   attributes: Attribute[];
   rules: GiftRule[];
   timerRules: TimerRule[];
+  formulaPresets: FormulaPreset[];
   settings: Settings;
   giftCatalog: GiftInfo[];
   recentGifts: RecentGift[];

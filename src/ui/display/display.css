@@ -28,7 +28,7 @@ body.display-mode { overflow: hidden; background: transparent; }
 .attr + .attr { border-top: 1px solid rgba(255, 255, 255, 0.1); padding-top: 20px; }
 .attr-summary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 0.72fr) minmax(0, 1.7fr);
   align-items: center;
   gap: 28px;
   min-height: 132px;
@@ -46,8 +46,13 @@ body.display-mode { overflow: hidden; background: transparent; }
   white-space: nowrap;
 }
 .attr-value {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   font-size: 56px; font-weight: 800; line-height: 1.05;
   font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   background: linear-gradient(135deg, var(--accent), var(--accent2, #ffd166));
   -webkit-background-clip: text;
   background-clip: text;

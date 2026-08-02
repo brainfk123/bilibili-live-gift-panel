@@ -12,6 +12,16 @@ export function formatDelta(delta: number, attr?: Attribute): string {
   return `${sign}${value}`;
 }
 
+export function calculateFittedFontSize(
+  preferredFontSize: number,
+  availableWidth: number,
+  contentWidth: number,
+  minimumFontSize = 14,
+): number {
+  if (availableWidth <= 0 || contentWidth <= availableWidth) return preferredFontSize;
+  return Math.max(minimumFontSize, Math.floor(preferredFontSize * availableWidth / contentWidth));
+}
+
 export function mountDisplay(root: HTMLElement, selectedAttributeName?: string): void {
   let state = loadState();
   let connectionState: RuntimeConnectionState = 'idle';
@@ -81,6 +91,14 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
       if (valueEl) {
         valueEl.style.fontSize = `${state.settings.fontSize}px`;
         valueEl.textContent = formatValue(attr.value, attr);
+        valueEl.title = valueEl.textContent;
+        const fittedFontSize = calculateFittedFontSize(
+          state.settings.fontSize,
+          valueEl.clientWidth,
+          valueEl.scrollWidth,
+        );
+        valueEl.style.fontSize = `${fittedFontSize}px`;
+        valueEl.dataset.fittedFontSize = String(fittedFontSize);
       }
     }
     updateConnection();

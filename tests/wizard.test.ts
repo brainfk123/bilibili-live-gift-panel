@@ -964,6 +964,46 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root)).toContain('加一次挑战');
   });
 
+  it('saves, applies, and deletes a reusable gift formula preset', async () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelector('.gift-choice')?.onclick?.();
+    const formulaInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '触发后属性值') as TestElement & { oninput?: () => void };
+    const presetNameInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '预设名称') as TestElement;
+    const presetTools = root.querySelector('.formula-preset-tools')!;
+    const presetSelect = presetTools.querySelector('.formula-preset-select') as TestElement & { onchange?: () => void };
+
+    formulaInput.value = '加班时间+price/1000*60';
+    formulaInput.oninput?.();
+    presetNameInput.value = '按价格加时';
+    findByText(presetTools, '保存当前公式')?.onclick?.();
+
+    await vi.waitFor(() => expect(loadState().formulaPresets).toHaveLength(1));
+    const preset = loadState().formulaPresets[0];
+    expect(preset).toMatchObject({
+      name: '按价格加时',
+      context: 'gift',
+      formula: '加班时间+price/1000*60',
+      sourceAttributeName: '加班时间',
+    });
+
+    formulaInput.value = '加班时间+1';
+    formulaInput.oninput?.();
+    presetSelect.value = preset.id;
+    presetSelect.onchange?.();
+    findByText(presetTools, '应用')?.onclick?.();
+    expect(formulaInput.value).toBe('加班时间+price/1000*60');
+
+    findByText(presetTools, '删除')?.onclick?.();
+    await vi.waitFor(() => expect(loadState().formulaPresets).toHaveLength(0));
+  });
+
   it('configures a conditional backend timer without adding it to the OBS gift grid', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
     const root = new TestElement('div');

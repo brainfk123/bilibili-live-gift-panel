@@ -125,6 +125,44 @@ func TestConfigStoreRejectsGiftOnlyPriceVariableInTimer(t *testing.T) {
 	}
 }
 
+func TestConfigStorePersistsFormulaPresets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store := &configStore{path: path}
+	payload := `{
+        "formulaPresets":[
+            {"id":"gift-1","name":"按价格加时","context":"gift","formula":"加班时间+price/1000*60","sourceAttributeName":"加班时间"},
+            {"id":"timer-1","name":"每分钟减少","context":"timer","formula":"MAX(加班时间-60,0)","sourceAttributeName":"加班时间"}
+        ]
+    }`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", response.Code, response.Body.String())
+	}
+
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.FormulaPresets) != 2 {
+		t.Fatalf("formula presets = %d, want 2", len(state.FormulaPresets))
+	}
+}
+
+func TestConfigStoreRejectsInvalidFormulaPresetContext(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{
+        "formulaPresets":[
+            {"id":"bad-1","name":"错误预设","context":"other","formula":"积分+1","sourceAttributeName":"积分"}
+        ]
+    }`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", response.Code, response.Body.String())
+	}
+}
+
 func TestLegacyCompletedConfigDefaultsTutorialToHidden(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	legacy := `{
