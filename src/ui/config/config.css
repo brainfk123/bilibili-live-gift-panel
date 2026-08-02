@@ -34,6 +34,9 @@
   --accent-soft: rgba(251,114,153,.14);
   --warm-soft: rgba(255,209,102,.10);
   --page-glow: rgba(251,114,153,.12);
+  --scrollbar-track: #171820;
+  --scrollbar-thumb: #596174;
+  --scrollbar-thumb-hover: #fb7299;
   --shadow: none;
   --radius: 12px;
   min-height: 100vh;
@@ -44,6 +47,14 @@
   font-size: 14px;
 }
 body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
+html:has(body.config-mode),
+body.config-mode {
+  --scrollbar-track: #171820;
+  --scrollbar-thumb: #596174;
+  --scrollbar-thumb-hover: #fb7299;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  scrollbar-width: thin;
+}
 .config-root[data-theme="light"] {
   --bg: #f4f6fb;
   --bg-soft: #ffffff;
@@ -78,7 +89,52 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
   --page-glow: rgba(190,24,93,.10);
   --overlay-bg: rgba(27,36,58,.35);
   --shadow: 0 12px 30px rgba(47, 57, 80, .08);
+  --scrollbar-track: #edf0f6;
+  --scrollbar-thumb: #8792a6;
+  --scrollbar-thumb-hover: #c2185b;
 }
+
+html:has(.config-root[data-theme="light"]),
+body.config-mode:has(.config-root[data-theme="light"]) {
+  --scrollbar-track: #edf0f6;
+  --scrollbar-thumb: #8792a6;
+  --scrollbar-thumb-hover: #c2185b;
+}
+
+.config-root,
+.config-root * {
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  scrollbar-width: thin;
+}
+html:has(body.config-mode)::-webkit-scrollbar,
+body.config-mode::-webkit-scrollbar,
+.config-root::-webkit-scrollbar,
+.config-root *::-webkit-scrollbar { width: 11px; height: 11px; }
+html:has(body.config-mode)::-webkit-scrollbar-track,
+body.config-mode::-webkit-scrollbar-track,
+.config-root::-webkit-scrollbar-track,
+.config-root *::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+html:has(body.config-mode)::-webkit-scrollbar-thumb,
+body.config-mode::-webkit-scrollbar-thumb,
+.config-root::-webkit-scrollbar-thumb,
+.config-root *::-webkit-scrollbar-thumb {
+  min-height: 36px;
+  border: 2px solid var(--scrollbar-track);
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+}
+html:has(body.config-mode)::-webkit-scrollbar-thumb:hover,
+body.config-mode::-webkit-scrollbar-thumb:hover,
+.config-root::-webkit-scrollbar-thumb:hover,
+.config-root *::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+html:has(body.config-mode)::-webkit-scrollbar-button,
+body.config-mode::-webkit-scrollbar-button,
+.config-root::-webkit-scrollbar-button,
+.config-root *::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+html:has(body.config-mode)::-webkit-scrollbar-corner,
+body.config-mode::-webkit-scrollbar-corner,
+.config-root::-webkit-scrollbar-corner,
+.config-root *::-webkit-scrollbar-corner { background: var(--scrollbar-track); }
 
 .config-root[data-theme="light"] .card,
 .config-root[data-theme="light"] .onboard,
@@ -142,12 +198,15 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
 }
 .config-root .field-input:focus { border-color: var(--accent); }
 .config-root .field-input.formula { font-family: "Cascadia Code", Consolas, monospace; }
-.config-root button:focus-visible,
+.config-root button:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
 .config-root input:focus-visible,
 .config-root select:focus-visible,
 .config-root textarea:focus-visible {
-  outline: 3px solid var(--focus-ring);
-  outline-offset: 2px;
+  outline: none;
+  box-shadow: none;
 }
 
 .config-root .btn {
@@ -999,14 +1058,43 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
 .config-root .timer-rule-fields > .field > .field-label { line-height: 18px; }
 .config-root .timer-rule-fields > .field > .field-input,
 .config-root .timer-rule-fields > .field > .timer-interval-row,
-.config-root .timer-rule-fields > .field > .formula-assignment-row { height: 42px; min-height: 42px; }
+.config-root .timer-rule-fields > .field > .formula-assignment-row {
+  align-self: stretch;
+  width: 100%;
+  height: 42px;
+  min-height: 42px;
+  margin: 0;
+}
+.config-root .timer-rule-fields > .field > .field-input { border-radius: 10px; }
 .config-root .timer-interval-row {
+  overflow: hidden;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 72px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--input-bg);
 }
-.config-root .timer-interval-row .field-input { min-width: 0; height: 42px; }
-.config-root .timer-interval-row input { border-radius: 10px 0 0 10px; }
-.config-root .timer-interval-unit { border-left: 0; border-radius: 0 10px 10px 0; }
+.config-root .timer-interval-row:focus-within { border-color: var(--accent); }
+.config-root .timer-interval-row .field-input {
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+}
+.config-root .timer-interval-row input {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.config-root .timer-interval-row input::-webkit-inner-spin-button,
+.config-root .timer-interval-row input::-webkit-outer-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+.config-root .timer-interval-unit {
+  border-left: 1px solid var(--border-strong) !important;
+  border-radius: 0;
+}
 .config-root .attribute-timer-icon {
   display: inline-flex;
   align-items: center;

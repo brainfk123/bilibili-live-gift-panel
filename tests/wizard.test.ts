@@ -845,6 +845,16 @@ describe.skip('legacy configuration wizard rendering', () => {
 });
 
 describe('single-page configuration rendering', () => {
+  it('uses themed scrollbars and keeps focused inputs inside their existing border', () => {
+    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+
+    expect(configCss).toMatch(/\.config-root input:focus-visible,[\s\S]*?outline: none;/);
+    expect(configCss).toContain('scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);');
+    expect(configCss).toContain('::-webkit-scrollbar-thumb');
+    expect(configCss).toContain('.config-root .timer-interval-row:focus-within');
+    expect(configCss).toContain('-webkit-appearance: none;');
+  });
+
   it('keeps the tutorial active from connection through the attribute modal', async () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
