@@ -54,6 +54,8 @@ export function applyGiftToState(state: AppState, gift: GiftEvent): TriggerResul
         giftName: unitGift.giftName,
         num: 1,
         uname: unitGift.uname,
+        avatar: unitGift.avatar,
+        senderUid: unitGift.uid,
         attributeName: attr.name,
         delta,
         valueAfter: attr.value,

@@ -25,6 +25,7 @@ describe('parseGift', () => {
     expect(ev.coinType).toBe('gold');
     expect(ev.imgBasic).toBe('https://img');
     expect(ev.avatar).toBe('https://avatar');
+    expect(ev.uid).toBe(123);
     expect(ev.rnd).toBe('x1');
   });
 

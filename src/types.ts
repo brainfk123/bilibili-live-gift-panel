@@ -68,6 +68,7 @@ export interface LogEntry {
   num: number;
   uname: string;
   avatar?: string;
+  senderUid?: number;
   attributeName: string;
   delta: number;
   valueAfter: number;

@@ -108,6 +108,7 @@ type logEntry struct {
 	Num           int     `json:"num"`
 	Uname         string  `json:"uname"`
 	Avatar        string  `json:"avatar,omitempty"`
+	SenderUID     int64   `json:"senderUid,omitempty"`
 	AttributeName string  `json:"attributeName"`
 	Delta         float64 `json:"delta"`
 	ValueAfter    float64 `json:"valueAfter"`

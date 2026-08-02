@@ -11,7 +11,7 @@ func TestParseBiliGift(t *testing.T) {
 		"data": map[string]any{
 			"giftId": 33012, "giftName": "666", "num": 3, "price": 1000,
 			"coin_type": "gold", "total_coin": 3000, "uname": "观众",
-			"uid": 9, "timestamp": 1700000000, "rnd": "gift-rnd", "face": "https://example.test/avatar.png",
+			"uid": 123456789, "timestamp": 1700000000, "rnd": "gift-rnd", "face": "https://example.test/avatar.png",
 			"gift_info": map[string]any{"img_basic": "https://example.test/666.png"},
 		},
 	})
@@ -24,6 +24,9 @@ func TestParseBiliGift(t *testing.T) {
 	}
 	if gift.Avatar != "https://example.test/avatar.png" {
 		t.Fatalf("avatar = %q", gift.Avatar)
+	}
+	if gift.UID != 123456789 {
+		t.Fatalf("uid = %d", gift.UID)
 	}
 }
 

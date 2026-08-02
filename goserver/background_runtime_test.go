@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -71,7 +74,7 @@ func TestApplyGiftEventAggregatesBatchForAttributeBroadcast(t *testing.T) {
 
 	applyGiftEvent(&state, giftEvent{
 		GiftID: 33300, GiftName: "666", Num: 3, Price: 1000, CoinType: "gold",
-		Uname: "昵称很长的观众", Avatar: "https://example.test/avatar.png",
+		Uname: "昵称很长的观众", Avatar: "https://example.test/avatar.png", UID: 123456789,
 		Timestamp: 1700000000, Rnd: "gift-batch-1",
 	})
 
@@ -85,8 +88,99 @@ func TestApplyGiftEventAggregatesBatchForAttributeBroadcast(t *testing.T) {
 	if entry.Num != 3 || entry.Delta != 180 || entry.ValueAfter != 180 {
 		t.Fatalf("aggregated log = %#v", entry)
 	}
-	if entry.Avatar != "https://example.test/avatar.png" || entry.EventID == "" || entry.Source != "gift" {
+	if entry.Avatar != "https://example.test/avatar.png" || entry.SenderUID != 123456789 || entry.EventID == "" || entry.Source != "gift" {
 		t.Fatalf("broadcast metadata = %#v", entry)
+	}
+}
+
+type fakeUserProfileResolver struct {
+	profile userProfile
+	calls   int
+}
+
+func (resolver *fakeUserProfileResolver) Resolve(_ context.Context, _ int64) (userProfile, error) {
+	resolver.calls++
+	return resolver.profile, nil
+}
+
+func TestBackgroundRuntimeEnrichesMaskedSenderFromAnonymousProfile(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	state := defaultAppState()
+	state.Attributes = []attributeState{{Name: "早播", Value: 0, Unit: "none", Format: "number"}}
+	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "早播", Formula: "早播+1"}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	profiles := &fakeUserProfileResolver{profile: userProfile{
+		UID: 123456789, Name: "完整昵称", Avatar: "https://example.test/full-avatar.png",
+	}}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.profileResolver = profiles
+
+	runtime.handleGift(giftEvent{
+		GiftID: 1, GiftName: "人气票", Num: 1, Price: 100, CoinType: "gold",
+		UID: 123456789, Uname: "字***", Timestamp: 1700000000, Rnd: "masked-gift-1",
+	})
+
+	updated, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Log) != 1 {
+		t.Fatalf("log = %#v", updated.Log)
+	}
+	entry := updated.Log[0]
+	if entry.SenderUID != 123456789 || entry.Uname != "完整昵称" || entry.Avatar != "https://example.test/full-avatar.png" {
+		t.Fatalf("enriched log = %#v", entry)
+	}
+	if profiles.calls != 1 {
+		t.Fatalf("profile resolver calls = %d", profiles.calls)
+	}
+}
+
+func TestBilibiliUserProfileResolverQueriesAnonymousCardAndCaches(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.URL.Query().Get("mid") != "123456789" {
+			t.Errorf("mid = %q", r.URL.Query().Get("mid"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"message":"OK","data":{"card":{"mid":"123456789","name":"完整昵称","face":"https://example.test/avatar.png"}}}`))
+	}))
+	defer server.Close()
+
+	resolver := newBilibiliUserProfileResolver(server.Client(), server.URL)
+	for range 2 {
+		profile, err := resolver.Resolve(context.Background(), 123456789)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if profile.Name != "完整昵称" || profile.Avatar != "https://example.test/avatar.png" {
+			t.Fatalf("profile = %#v", profile)
+		}
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("anonymous profile requests = %d, want 1", requests.Load())
+	}
+}
+
+func TestBilibiliUserProfileResolverCachesFailures(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	resolver := newBilibiliUserProfileResolver(server.Client(), server.URL)
+	for range 2 {
+		if _, err := resolver.Resolve(context.Background(), 123456789); err == nil {
+			t.Fatal("rate-limited profile request unexpectedly succeeded")
+		}
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("failed profile requests = %d, want 1", requests.Load())
 	}
 }
 

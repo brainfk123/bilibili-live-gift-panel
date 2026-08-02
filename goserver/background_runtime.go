@@ -27,16 +27,18 @@ type runtimeStatus struct {
 }
 
 type backgroundRuntime struct {
-	store          *configStore
-	sourceFactory  func() giftEventSource
-	reload         chan struct{}
-	mu             sync.RWMutex
-	status         runtimeStatus
-	seen           map[string]time.Time
-	timerMu        sync.Mutex
-	timerSchedules map[string]timerSchedule
-	timerTicks     <-chan time.Time
-	notifications  *notificationCenter
+	store           *configStore
+	sourceFactory   func() giftEventSource
+	reload          chan struct{}
+	mu              sync.RWMutex
+	status          runtimeStatus
+	seen            map[string]time.Time
+	timerMu         sync.Mutex
+	timerSchedules  map[string]timerSchedule
+	timerTicks      <-chan time.Time
+	notifications   *notificationCenter
+	giftQueue       chan giftEvent
+	profileResolver userProfileResolver
 }
 
 type timerSchedule struct {
@@ -53,17 +55,20 @@ func newBackgroundRuntime(store *configStore, sourceFactory func() giftEventSour
 		center = notifications[0]
 	}
 	return &backgroundRuntime{
-		store:          store,
-		sourceFactory:  sourceFactory,
-		reload:         make(chan struct{}, 1),
-		status:         runtimeStatus{State: "idle"},
-		seen:           map[string]time.Time{},
-		timerSchedules: map[string]timerSchedule{},
-		notifications:  center,
+		store:           store,
+		sourceFactory:   sourceFactory,
+		reload:          make(chan struct{}, 1),
+		status:          runtimeStatus{State: "idle"},
+		seen:            map[string]time.Time{},
+		timerSchedules:  map[string]timerSchedule{},
+		notifications:   center,
+		giftQueue:       make(chan giftEvent, 256),
+		profileResolver: newBilibiliUserProfileResolver(nil, ""),
 	}
 }
 
 func (runtime *backgroundRuntime) Run(ctx context.Context) {
+	go runtime.runGiftLoop(ctx)
 	go runtime.runTimerLoop(ctx)
 	runtime.runConnectionLoop(ctx)
 }
@@ -95,7 +100,9 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 		runtime.setStatus("connecting", roomID, nil)
 		go func() {
 			finished <- source.Run(connectionContext, roomID, runtimeCallbacks{
-				onGift: runtime.handleGift,
+				onGift: func(gift giftEvent) {
+					runtime.enqueueGift(connectionContext, gift)
+				},
 				onState: func(status string) {
 					runtime.setStatus(status, roomID, nil)
 				},
@@ -121,6 +128,24 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 			if !runtime.wait(ctx, 2*time.Second) {
 				return
 			}
+		}
+	}
+}
+
+func (runtime *backgroundRuntime) enqueueGift(ctx context.Context, gift giftEvent) {
+	select {
+	case runtime.giftQueue <- gift:
+	case <-ctx.Done():
+	}
+}
+
+func (runtime *backgroundRuntime) runGiftLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case gift := <-runtime.giftQueue:
+			runtime.handleGift(gift)
 		}
 	}
 }
@@ -217,6 +242,19 @@ func (runtime *backgroundRuntime) Status() runtimeStatus {
 func (runtime *backgroundRuntime) handleGift(gift giftEvent) {
 	if runtime.isDuplicate(gift.Rnd) {
 		return
+	}
+	if needsUserProfile(gift) && runtime.profileResolver != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		profile, err := runtime.profileResolver.Resolve(ctx, gift.UID)
+		cancel()
+		if err == nil {
+			if isMaskedUsername(gift.Uname) && profile.Name != "" {
+				gift.Uname = profile.Name
+			}
+			if strings.TrimSpace(gift.Avatar) == "" && profile.Avatar != "" {
+				gift.Avatar = profile.Avatar
+			}
+		}
 	}
 	_, err := runtime.store.updateState(func(state *appState) error {
 		applyGiftEvent(state, gift)
@@ -342,6 +380,7 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 				Num:           repetitions,
 				Uname:         gift.Uname,
 				Avatar:        gift.Avatar,
+				SenderUID:     gift.UID,
 				AttributeName: attribute.Name,
 				Delta:         delta,
 				ValueAfter:    nextValue,
