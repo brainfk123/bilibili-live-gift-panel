@@ -162,7 +162,7 @@ body.display-mode { overflow: hidden; background: transparent; }
   to { opacity: 0; transform: translateY(-18px); }
 }
 
-.broadcast-default { padding-right: 0; padding-left: 0; }
+.broadcast-default { padding-right: 0; padding-left: 0; font-size: 26px; }
 .broadcast-marquee { width: 100%; overflow: hidden; }
 .broadcast-marquee-text {
   display: inline-block;
@@ -177,7 +177,7 @@ body.display-mode { overflow: hidden; background: transparent; }
   to { transform: translateX(-100%); }
 }
 
-.broadcast-gift { gap: 6px; white-space: nowrap; }
+.broadcast-gift { gap: 6px; font-size: 16px; white-space: nowrap; }
 .broadcast-avatar {
   width: 44px;
   height: 44px;
@@ -203,7 +203,7 @@ body.display-mode { overflow: hidden; background: transparent; }
 .broadcast-delta {
   max-width: 92px;
   color: var(--accent);
-  font-size: 21px;
+  font-size: 17px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -241,7 +241,9 @@ body.display-mode { overflow: hidden; background: transparent; }
   .attr-summary { min-height: 104px; gap: 12px; padding: 16px; }
   .attr-name { font-size: 24px; }
   .attr-value { font-size: 38px; }
-  .broadcast-content { padding: 10px; font-size: 18px; }
+  .broadcast-content { padding: 10px; }
+  .broadcast-default { font-size: 24px; }
+  .broadcast-gift { font-size: 15px; }
   .display-gift-rules { grid-template-columns: 1fr; }
   .display-gift-name { font-size: 18px; }
   .display-formula-name { font-size: 24px; }
@@ -249,7 +251,7 @@ body.display-mode { overflow: hidden; background: transparent; }
   .broadcast-user-name { max-width: 64px; }
   .broadcast-gift-name { max-width: 76px; }
   .broadcast-attribute-name { max-width: 64px; }
-  .broadcast-delta { max-width: 80px; font-size: 19px; }
+  .broadcast-delta { max-width: 80px; font-size: 16px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

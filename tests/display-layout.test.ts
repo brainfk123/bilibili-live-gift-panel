@@ -34,6 +34,12 @@ describe('OBS broadcast panel layout', () => {
     expect(css).toContain('@keyframes broadcastOut');
   });
 
+  it('emphasizes the default message and keeps gift announcements compact', () => {
+    expect(css).toMatch(/\.broadcast-default[\s\S]*?font-size: 26px/);
+    expect(css).toMatch(/\.broadcast-gift[\s\S]*?font-size: 16px/);
+    expect(css).toMatch(/\.broadcast-delta[\s\S]*?font-size: 17px/);
+  });
+
   it('applies configurable opacity to the panel background only', () => {
     expect(css).toContain('background: rgba(14, 15, 20, var(--panel-opacity, 0.55));');
   });
