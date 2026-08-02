@@ -36,6 +36,7 @@ type backgroundRuntime struct {
 	timerMu        sync.Mutex
 	timerSchedules map[string]timerSchedule
 	timerTicks     <-chan time.Time
+	notifications  *notificationCenter
 }
 
 type timerSchedule struct {
@@ -43,9 +44,13 @@ type timerSchedule struct {
 	next     time.Time
 }
 
-func newBackgroundRuntime(store *configStore, sourceFactory func() giftEventSource) *backgroundRuntime {
+func newBackgroundRuntime(store *configStore, sourceFactory func() giftEventSource, notifications ...*notificationCenter) *backgroundRuntime {
 	if sourceFactory == nil {
 		sourceFactory = func() giftEventSource { return &bilibiliGiftSource{} }
+	}
+	var center *notificationCenter
+	if len(notifications) > 0 {
+		center = notifications[0]
 	}
 	return &backgroundRuntime{
 		store:          store,
@@ -54,6 +59,7 @@ func newBackgroundRuntime(store *configStore, sourceFactory func() giftEventSour
 		status:         runtimeStatus{State: "idle"},
 		seen:           map[string]time.Time{},
 		timerSchedules: map[string]timerSchedule{},
+		notifications:  center,
 	}
 }
 
@@ -247,13 +253,25 @@ func (runtime *backgroundRuntime) isDuplicate(key string) bool {
 
 func (runtime *backgroundRuntime) setStatus(state, roomID string, err error) {
 	runtime.mu.Lock()
-	defer runtime.mu.Unlock()
+	previous := runtime.status
 	runtime.status.State = state
 	runtime.status.RoomID = roomID
 	if err == nil {
 		runtime.status.LastError = ""
 	} else {
 		runtime.status.LastError = err.Error()
+	}
+	runtime.mu.Unlock()
+
+	if previous.State != "connected" && state == "connected" {
+		runtime.notifications.Publish(notificationRoomConnected, roomID)
+	}
+	if previous.State == "connected" && state != "connected" {
+		disconnectedRoomID := previous.RoomID
+		if disconnectedRoomID == "" {
+			disconnectedRoomID = roomID
+		}
+		runtime.notifications.Publish(notificationRoomDisconnected, disconnectedRoomID)
 	}
 }
 

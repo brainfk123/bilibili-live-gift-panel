@@ -136,10 +136,11 @@ func main() {
 		showStartupError(err.Error())
 		return
 	}
+	notifications := newNotificationCenter()
+	presence := newPagePresence(notifications)
 	runtimeContext, stopRuntime := context.WithCancel(context.Background())
-	background := newBackgroundRuntime(store, nil)
+	background := newBackgroundRuntime(store, nil, notifications)
 	store.setOnChange(background.NotifyConfigChanged)
-	go background.Run(runtimeContext)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +155,7 @@ func main() {
 	mux.HandleFunc("/api/room_info", handleRoomInfo)
 	mux.HandleFunc("/api/config", store.handle)
 	mux.HandleFunc("/api/formula/preview", handleFormulaPreview(store))
+	mux.Handle("/api/pages/presence/", presence)
 	mux.HandleFunc("/api/runtime", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -178,10 +180,12 @@ func main() {
 			showStartupError(fmt.Sprintf("本地服务已停止：%v", serveErr))
 		}
 	}()
+	notifications.Publish(notificationServiceStarted, "")
+	go background.Run(runtimeContext)
 
 	configURL := fmt.Sprintf("http://localhost:%d/?mode=config", port)
 	go openURL(configURL)
-	if err := runTrayApp(configURL); err != nil {
+	if err := runTrayApp(configURL, notifications); err != nil {
 		showStartupError(fmt.Sprintf("系统托盘启动失败：%v", err))
 	}
 	stopRuntime()

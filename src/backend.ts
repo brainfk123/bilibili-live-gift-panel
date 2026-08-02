@@ -7,6 +7,31 @@ export interface RuntimeStatus {
   lastGiftAt?: number;
 }
 
+export type PagePresenceMode = 'config' | 'display';
+
+export function startPagePresence(mode: PagePresenceMode): () => void {
+  const EventSourceConstructor = globalThis.EventSource;
+  if (typeof EventSourceConstructor !== 'function') return () => {};
+  const sessionID = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const url = `/api/pages/presence/stream?mode=${mode}&id=${encodeURIComponent(sessionID)}`;
+  let source: EventSource | undefined;
+  const connect = (): void => {
+    if (!source) source = new EventSourceConstructor(url);
+  };
+  const disconnect = (): void => {
+    source?.close();
+    source = undefined;
+  };
+  connect();
+  globalThis.addEventListener?.('pagehide', disconnect);
+  globalThis.addEventListener?.('pageshow', connect);
+  return () => {
+    disconnect();
+    globalThis.removeEventListener?.('pagehide', disconnect);
+    globalThis.removeEventListener?.('pageshow', connect);
+  };
+}
+
 interface RuntimeResponse {
   code: number;
   runtime: RuntimeStatus;

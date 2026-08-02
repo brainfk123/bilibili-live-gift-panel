@@ -60,6 +60,7 @@ func (s *configStore) handleGet(w http.ResponseWriter) {
 }
 
 func (s *configStore) handlePut(w http.ResponseWriter, r *http.Request) {
+	previous, previousErr := s.readState()
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxConfigBytes))
 	if err != nil {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"code": -1, "message": "配置文件过大"})
@@ -81,7 +82,9 @@ func (s *configStore) handlePut(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": err.Error()})
 		return
 	}
-	s.notifyChanged()
+	if previousErr != nil || strings.TrimSpace(previous.RoomID) != strings.TrimSpace(state.RoomID) {
+		s.notifyChanged()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"code": 0})
 }
 
@@ -133,6 +136,7 @@ func validateAppState(state appState) error {
 }
 
 func (s *configStore) handleDelete(w http.ResponseWriter) {
+	previous, _ := s.readState()
 	s.mu.Lock()
 	err := os.Remove(s.path)
 	s.mu.Unlock()
@@ -140,7 +144,9 @@ func (s *configStore) handleDelete(w http.ResponseWriter) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": err.Error()})
 		return
 	}
-	s.notifyChanged()
+	if strings.TrimSpace(previous.RoomID) != "" {
+		s.notifyChanged()
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -5,7 +5,9 @@ package main
 import (
 	"fmt"
 	"runtime"
+	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -21,8 +23,11 @@ const (
 	nifMessage = 0x00000001
 	nifIcon    = 0x00000002
 	nifTip     = 0x00000004
+	nifInfo    = 0x00000010
 	nimAdd     = 0x00000000
+	nimModify  = 0x00000001
 	nimDelete  = 0x00000002
+	niifInfo   = 0x00000001
 
 	mfString       = 0x00000000
 	tpmRightButton = 0x00000002
@@ -59,6 +64,8 @@ var (
 	procShellNotifyIconW    = shell32.NewProc("Shell_NotifyIconW")
 	trayConfigURL           string
 	trayIconData            notifyIconData
+	trayIconMu              sync.Mutex
+	trayIconReady           bool
 	trayWindowProcCallback  = syscall.NewCallback(trayWindowProc)
 )
 
@@ -136,7 +143,7 @@ func showStartupError(message string) {
 	_, _, _ = procMessageBoxW.Call(0, uintptr(unsafe.Pointer(body)), uintptr(unsafe.Pointer(title)), mbOK|mbIconError)
 }
 
-func runTrayApp(configURL string) error {
+func runTrayApp(configURL string, notifications *notificationCenter) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	trayConfigURL = configURL
@@ -183,6 +190,20 @@ func runTrayApp(configURL string) error {
 		_, _, _ = procDestroyWindow.Call(hWnd)
 		return fmt.Errorf("添加托盘图标失败：%v", callErr)
 	}
+	trayIconMu.Lock()
+	trayIconReady = true
+	trayIconMu.Unlock()
+	notificationQueue := make(chan desktopNotification, 16)
+	stopNotifications := make(chan struct{})
+	go runTrayNotificationQueue(notificationQueue, stopNotifications)
+	notifications.AttachSink(func(notification desktopNotification) {
+		select {
+		case notificationQueue <- notification:
+		default:
+		}
+	})
+	defer close(stopNotifications)
+	defer notifications.DetachSink()
 
 	var msg message
 	for {
@@ -214,12 +235,50 @@ func trayWindowProc(hWnd, msg, wParam, lParam uintptr) uintptr {
 		}
 		return 0
 	case wmDestroy:
+		trayIconMu.Lock()
+		trayIconReady = false
 		_, _, _ = procShellNotifyIconW.Call(nimDelete, uintptr(unsafe.Pointer(&trayIconData)))
+		trayIconMu.Unlock()
 		_, _, _ = procPostQuitMessage.Call(0)
 		return 0
 	}
 	result, _, _ := procDefWindowProcW.Call(hWnd, msg, wParam, lParam)
 	return result
+}
+
+func showTrayNotification(notification desktopNotification) {
+	trayIconMu.Lock()
+	defer trayIconMu.Unlock()
+	if !trayIconReady {
+		return
+	}
+	data := trayIconData
+	data.uFlags = nifInfo
+	data.timeoutOrVersion = 10000
+	data.infoFlags = niifInfo
+	data.info = [256]uint16{}
+	data.infoTitle = [64]uint16{}
+	copy(data.info[:], syscall.StringToUTF16(notification.Body))
+	copy(data.infoTitle[:], syscall.StringToUTF16(notification.Title))
+	_, _, _ = procShellNotifyIconW.Call(nimModify, uintptr(unsafe.Pointer(&data)))
+}
+
+func runTrayNotificationQueue(queue <-chan desktopNotification, stop <-chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		case notification := <-queue:
+			showTrayNotification(notification)
+			delay := time.NewTimer(2500 * time.Millisecond)
+			select {
+			case <-stop:
+				delay.Stop()
+				return
+			case <-delay.C:
+			}
+		}
+	}
 }
 
 func showTrayMenu(hWnd uintptr) {

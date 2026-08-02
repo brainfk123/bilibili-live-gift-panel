@@ -69,6 +69,29 @@ func TestConfigStoreRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestConfigStoreReconnectsOnlyWhenRoomChanges(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	changes := 0
+	store.setOnChange(func() { changes++ })
+
+	put := func(payload string) {
+		response := httptest.NewRecorder()
+		store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+		if response.Code != http.StatusOK {
+			t.Fatalf("PUT status = %d, body = %s", response.Code, response.Body.String())
+		}
+	}
+	put(`{"roomId":"31567150","attributes":[],"rules":[]}`)
+	put(`{"roomId":"31567150","attributes":[{"name":"积分","value":0,"unit":"number","format":"number"}],"rules":[]}`)
+	if changes != 1 {
+		t.Fatalf("same-room property edit triggered %d reconnects, want 1 initial room change", changes)
+	}
+	put(`{"roomId":"32025114","attributes":[],"rules":[]}`)
+	if changes != 2 {
+		t.Fatalf("room change callbacks = %d, want 2", changes)
+	}
+}
+
 func TestConfigStoreRejectsFormulaThatUsesFrontendOnlyVariable(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	payload := `{
