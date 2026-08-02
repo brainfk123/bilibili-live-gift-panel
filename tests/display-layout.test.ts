@@ -37,6 +37,15 @@ describe('OBS broadcast panel layout', () => {
     expect(css).toMatch(/\.display-formula-name\s*\{[\s\S]*?border-top: 1px solid color-mix/);
   });
 
+  it('does not render disabled gift rules in the OBS panel', () => {
+    expect(source).toContain("state.rules.filter((rule) => rule.attributeName === attr.name && rule.enabled !== false)");
+  });
+
+  it('wraps formula names before truncating them', () => {
+    expect(css).toMatch(/\.display-formula-name\s*\{[^}]*white-space: normal;/);
+    expect(css).toMatch(/\.display-formula-name\s*\{[^}]*-webkit-line-clamp: 2;/);
+  });
+
   it('constrains long broadcast fields and animates message changes', () => {
     expect(css).toMatch(/\.broadcast-user-name[\s\S]*?max-width:/);
     expect(css).toMatch(/\.broadcast-delta[\s\S]*?max-width:/);

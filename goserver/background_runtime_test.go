@@ -96,6 +96,31 @@ func TestApplyGiftEventAggregatesBatchForAttributeBroadcast(t *testing.T) {
 	}
 }
 
+func TestApplyGiftEventUpdatesEveryMatchingAttribute(t *testing.T) {
+	state := defaultAppState()
+	state.Attributes = []attributeState{
+		{Name: "早播", Value: 0, Unit: "none", Format: "number"},
+		{Name: "积分", Value: 10, Unit: "none", Format: "number"},
+	}
+	state.Rules = []giftRule{
+		{ID: "r-early", GiftID: 33300, AttributeName: "早播", Formula: "早播+1"},
+		{ID: "r-score", GiftID: 33300, AttributeName: "积分", Formula: "积分+2"},
+	}
+	state.GiftCatalog = []giftInfo{{ID: 33300, Name: "666", Price: 1000, CoinType: "gold"}}
+
+	applyGiftEvent(&state, giftEvent{
+		GiftID: 33300, GiftName: "666", Num: 1, Price: 1000, CoinType: "gold",
+		Timestamp: 1700000000, Rnd: "multi-attribute-gift-1",
+	})
+
+	if state.Attributes[0].Value != 1 || state.Attributes[1].Value != 12 {
+		t.Fatalf("matching attributes = %#v, want early=1 and score=12", state.Attributes)
+	}
+	if len(state.Log) != 2 {
+		t.Fatalf("log entries = %d, want 2: %#v", len(state.Log), state.Log)
+	}
+}
+
 func TestApplyGiftEventSkipsDisabledGiftRule(t *testing.T) {
 	disabled := false
 	state := defaultAppState()

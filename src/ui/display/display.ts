@@ -69,7 +69,7 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
         el('div', { class: 'attr-value' }),
       ]);
       const giftRules = el('div', { class: 'display-gift-rules' });
-      const rules = state.rules.filter((rule) => rule.attributeName === attr.name);
+      const rules = state.rules.filter((rule) => rule.attributeName === attr.name && rule.enabled !== false);
       if (rules.length === 0) {
         giftRules.append(el('div', { class: 'display-rule-empty', text: '还没有配置礼物公式' }));
       } else {

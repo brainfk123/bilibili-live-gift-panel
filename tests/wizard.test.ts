@@ -1457,7 +1457,8 @@ describe('OBS attribute display', () => {
     expect(formulaName?.className).toContain('is-long');
     expect(formulaName?.textContent).toBe('小于10场+1，大于10场x2');
     const displayCss = readFileSync(new URL('../src/ui/display/display.css', import.meta.url), 'utf8');
-    expect(displayCss).toMatch(/\.display-formula-name\.is-long\s*\{[\s\S]*?-webkit-line-clamp:\s*2;/);
+    expect(displayCss).toMatch(/\.display-formula-name\s*\{[^}]*-webkit-line-clamp:\s*2;/);
+    expect(displayCss).toMatch(/\.display-formula-name\.is-long\s*\{[^}]*font-size:\s*20px;/);
     vi.useRealTimers();
   });
 });

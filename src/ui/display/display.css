@@ -129,22 +129,20 @@ body.display-mode { overflow: hidden; background: transparent; }
   font-size: 20px;
 }
 .display-formula-name {
+  display: -webkit-box;
   margin-top: 6px;
   padding-top: 5px;
   border-top: 1px solid color-mix(in srgb, var(--accent, #fb7299) 35%, rgba(255, 255, 255, 0.24));
   color: #fff;
   font-size: 27px;
-}
-.display-formula-name.is-long {
-  display: -webkit-box;
-  overflow: hidden;
-  font-size: 20px;
   line-height: 1.15;
-  text-overflow: ellipsis;
   white-space: normal;
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+.display-formula-name.is-long {
+  font-size: 20px;
 }
 .display-rule-empty {
   grid-column: 1 / -1;
