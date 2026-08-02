@@ -49,6 +49,7 @@ export function mountConfig(root: HTMLElement): void {
   let authRefreshActive = false;
   let loginModalOpen = false;
   let loginPollTimer: ReturnType<typeof globalThis.setInterval> | undefined;
+  let localStateVersion = 0;
 
   const shell = el('div', { class: 'wizard-shell config-shell' });
   const header = el('header', { class: 'app-header' });
@@ -137,7 +138,10 @@ export function mountConfig(root: HTMLElement): void {
     stateRefreshActive = true;
     try {
       const previousStructure = configStructureSignature(state);
-      state = await refreshStateFromServer();
+      const requestedVersion = localStateVersion;
+      const nextState = await refreshStateFromServer();
+      if (requestedVersion !== localStateVersion) return;
+      state = nextState;
       if (ensureRuleGiftCatalog(state)) await saveState(state);
       if (configStructureSignature(state) !== previousStructure) {
         render();
@@ -157,6 +161,7 @@ export function mountConfig(root: HTMLElement): void {
   }
 
   async function saveAndWait(): Promise<void> {
+    localStateVersion += 1;
     try {
       await saveState(state);
     } catch (error) {

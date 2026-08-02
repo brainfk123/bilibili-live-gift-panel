@@ -1140,6 +1140,70 @@ describe('single-page configuration rendering', () => {
     });
   });
 
+  it('does not let a stale backend refresh overwrite a timer toggle before editing', async () => {
+    const initialState = {
+      ...state('88888888'),
+      settings: { ...defaultState().settings, showTutorial: false },
+      timerRules: [{
+        id: 't-disabled', attributeName: '加班时间', formulaName: '定时规则', intervalSeconds: 60,
+        formula: '加班时间-1', enabled: false,
+      }],
+    };
+    await saveState(initialState);
+    const staleServerState = JSON.parse(JSON.stringify(initialState));
+    let configGetStarted = false;
+    let releaseConfigGet: ((response: Response) => void) | undefined;
+    const configGet = new Promise<Response>((resolve) => {
+      releaseConfigGet = resolve;
+    });
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/config') && !init?.method) {
+        configGetStarted = true;
+        return configGet;
+      }
+      if (url.includes('/api/runtime')) {
+        return new Response(JSON.stringify({
+          code: 0,
+          runtime: { state: mockedRuntimeState, roomId: mockedRuntimeState === 'idle' ? '' : '31567150' },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (url.includes('/api/auth/status')) {
+        return new Response(JSON.stringify({ code: 0, auth: { state: 'anonymous' } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(null, { status: 204 });
+    }));
+
+    vi.useFakeTimers();
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(configGetStarted).toBe(true);
+
+    const summarySwitch = root.querySelector('.timer-rule-enabled-input') as TestElement & {
+      checked: boolean;
+      onchange?: () => void;
+    };
+    summarySwitch.checked = true;
+    summarySwitch.onchange?.();
+    releaseConfigGet?.(new Response(JSON.stringify(staleServerState), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    findByText(root, '编辑')?.onclick?.();
+    const editorSwitch = root.querySelector('.timer-rule-editor')?.querySelectorAll('input')[0] as TestElement & {
+      checked: boolean;
+    };
+    expect(editorSwitch.checked).toBe(true);
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
   it('lists only effective gift calculations with the gift ID and before/after values', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state('88888888', 1),
