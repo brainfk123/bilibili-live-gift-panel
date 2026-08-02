@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -16,9 +17,10 @@ import (
 const maxConfigBytes = 8 << 20
 
 type configStore struct {
-	path     string
-	mu       sync.RWMutex
-	onChange func()
+	path          string
+	mu            sync.RWMutex
+	onChange      func()
+	onTimerChange func()
 }
 
 func newDefaultConfigStore() (*configStore, error) {
@@ -83,8 +85,12 @@ func (s *configStore) handlePut(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": err.Error()})
 		return
 	}
-	if previousErr != nil || strings.TrimSpace(previous.RoomID) != strings.TrimSpace(state.RoomID) {
+	roomChanged := previousErr != nil || strings.TrimSpace(previous.RoomID) != strings.TrimSpace(state.RoomID)
+	if roomChanged {
 		s.notifyChanged()
+	}
+	if previousErr != nil || !reflect.DeepEqual(previous.TimerRules, state.TimerRules) {
+		s.notifyTimerChanged()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"code": 0})
 }
@@ -194,9 +200,24 @@ func (s *configStore) setOnChange(callback func()) {
 	s.mu.Unlock()
 }
 
+func (s *configStore) setOnTimerChange(callback func()) {
+	s.mu.Lock()
+	s.onTimerChange = callback
+	s.mu.Unlock()
+}
+
 func (s *configStore) notifyChanged() {
 	s.mu.RLock()
 	callback := s.onChange
+	s.mu.RUnlock()
+	if callback != nil {
+		callback()
+	}
+}
+
+func (s *configStore) notifyTimerChanged() {
+	s.mu.RLock()
+	callback := s.onTimerChange
 	s.mu.RUnlock()
 	if callback != nil {
 		callback()

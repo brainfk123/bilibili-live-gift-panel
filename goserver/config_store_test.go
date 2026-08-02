@@ -92,6 +92,31 @@ func TestConfigStoreReconnectsOnlyWhenRoomChanges(t *testing.T) {
 	}
 }
 
+func TestConfigStoreNotifiesTimerChangesWithoutReconnect(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	roomChanges := 0
+	timerChanges := 0
+	store.setOnChange(func() { roomChanges++ })
+	store.setOnTimerChange(func() { timerChanges++ })
+
+	put := func(payload string) {
+		response := httptest.NewRecorder()
+		store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+		if response.Code != http.StatusOK {
+			t.Fatalf("PUT status = %d, body = %s", response.Code, response.Body.String())
+		}
+	}
+	put(`{"roomId":"31567150","attributes":[{"name":"加班时间","value":60,"unit":"seconds","format":"hhmmss"}],"timerRules":[{"id":"timer-1","attributeName":"加班时间","formulaName":"每分钟减少","intervalSeconds":60,"formula":"加班时间-60","enabled":false}]}`)
+	put(`{"roomId":"31567150","attributes":[{"name":"加班时间","value":60,"unit":"seconds","format":"hhmmss"}],"timerRules":[{"id":"timer-1","attributeName":"加班时间","formulaName":"每分钟减少","intervalSeconds":60,"formula":"加班时间-60","enabled":true}]}`)
+
+	if roomChanges != 1 {
+		t.Fatalf("timer-only config edit triggered %d reconnects, want 1 initial room change", roomChanges)
+	}
+	if timerChanges != 2 {
+		t.Fatalf("timer config callbacks = %d, want 2 changes", timerChanges)
+	}
+}
+
 func TestConfigStoreRejectsFormulaThatUsesFrontendOnlyVariable(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	payload := `{

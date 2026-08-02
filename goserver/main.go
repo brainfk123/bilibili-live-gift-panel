@@ -149,6 +149,7 @@ func main() {
 		return &bilibiliGiftSource{sessionProvider: login.Session}
 	}, notifications)
 	store.setOnChange(background.NotifyConfigChanged)
+	store.setOnTimerChange(background.NotifyTimerConfigChanged)
 	login.SetOnChange(background.NotifyConfigChanged)
 
 	mux := http.NewServeMux()

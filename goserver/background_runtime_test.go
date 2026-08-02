@@ -326,3 +326,28 @@ func TestTimerScheduleWaitsForAFullFirstInterval(t *testing.T) {
 		t.Fatalf("timer due after one interval = %v", due)
 	}
 }
+
+func TestTimerConfigChangeRestartsScheduleFromReenable(t *testing.T) {
+	runtime := newBackgroundRuntime(nil, nil)
+	state := defaultAppState()
+	state.TimerRules = []timerRule{{ID: "timer-1", IntervalSeconds: 60, Enabled: true}}
+	startedAt := time.Unix(1700000000, 0)
+
+	if due := runtime.dueTimerRuleIDs(state, startedAt); len(due) != 0 {
+		t.Fatalf("timer was due immediately: %v", due)
+	}
+	if due := runtime.dueTimerRuleIDs(state, startedAt.Add(30*time.Second)); len(due) != 0 {
+		t.Fatalf("timer was due before its original interval: %v", due)
+	}
+
+	runtime.NotifyTimerConfigChanged()
+	if due := runtime.dueTimerRuleIDs(state, startedAt.Add(30*time.Second)); len(due) != 0 {
+		t.Fatalf("timer was due immediately after re-enable: %v", due)
+	}
+	if due := runtime.dueTimerRuleIDs(state, startedAt.Add(60*time.Second)); len(due) != 0 {
+		t.Fatalf("timer reused its old schedule after re-enable: %v", due)
+	}
+	if due := runtime.dueTimerRuleIDs(state, startedAt.Add(90*time.Second)); len(due) != 1 || due[0] != "timer-1" {
+		t.Fatalf("timer due after restarted interval = %v", due)
+	}
+}

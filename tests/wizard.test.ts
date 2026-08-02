@@ -1111,6 +1111,35 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root)).not.toContain('已停用');
   });
 
+  it('persists timer enable toggles from their attribute summary cards', async () => {
+    const initialState = {
+      ...state('88888888'),
+      timerRules: [{
+        id: 't-disabled', attributeName: '加班时间', formulaName: '定时规则', intervalSeconds: 60,
+        formula: '加班时间-1', enabled: false,
+      }],
+    };
+    await saveState(initialState);
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockClear();
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const timerSwitch = root.querySelector('.timer-rule-enabled-input') as TestElement & {
+      checked: boolean;
+      onchange?: () => void;
+    };
+    timerSwitch.checked = true;
+    timerSwitch.onchange?.();
+
+    await vi.waitFor(() => {
+      const writes = fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT');
+      expect(writes.length).toBeGreaterThan(0);
+      const lastBody = writes.at(-1)?.[1]?.body;
+      expect(JSON.parse(String(lastBody)).timerRules[0].enabled).toBe(true);
+    });
+  });
+
   it('lists only effective gift calculations with the gift ID and before/after values', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state('88888888', 1),

@@ -233,6 +233,12 @@ func (runtime *backgroundRuntime) NotifyConfigChanged() {
 	}
 }
 
+func (runtime *backgroundRuntime) NotifyTimerConfigChanged() {
+	runtime.timerMu.Lock()
+	clear(runtime.timerSchedules)
+	runtime.timerMu.Unlock()
+}
+
 func (runtime *backgroundRuntime) Status() runtimeStatus {
 	runtime.mu.RLock()
 	defer runtime.mu.RUnlock()
