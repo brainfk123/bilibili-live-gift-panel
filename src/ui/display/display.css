@@ -36,6 +36,15 @@ body.display-mode { overflow: hidden; background: transparent; }
   -webkit-backdrop-filter: blur(14px);
   transition: background 0.3s ease;
 }
+.panel::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border: 1px solid color-mix(in srgb, var(--accent, #fb7299) 48%, transparent);
+  border-radius: 28px;
+  box-shadow: 0 0 18px color-mix(in srgb, var(--accent, #fb7299) 22%, transparent);
+  pointer-events: none;
+}
 
 .attr { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
 .attr + .attr { padding-top: 20px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
@@ -247,6 +256,7 @@ body.display-mode { overflow: hidden; background: transparent; }
   .display-stack { top: 12px; left: 12px; width: calc(100% - 24px); }
   .display-stack.right { right: 12px; left: auto; }
   .panel { padding: 16px; border-radius: 18px; }
+  .panel::after { inset: -3px; border-radius: 22px; }
   .attr-summary { min-height: 104px; gap: 12px; padding: 16px; }
   .attr-name { font-size: 24px; }
   .attr-value { font-size: 38px; }

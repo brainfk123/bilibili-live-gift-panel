@@ -26,6 +26,12 @@ describe('OBS broadcast panel layout', () => {
     expect(css).toMatch(/\.attr-value[\s\S]*?font-size: 56px/);
   });
 
+  it('adds a visible accent outline around the complete OBS panel', () => {
+    expect(css).toMatch(/\.panel::after\s*\{[\s\S]*?border: 1px solid color-mix/);
+    expect(css).toMatch(/\.panel::after\s*\{[\s\S]*?box-shadow: 0 0 18px color-mix/);
+    expect(css).toContain('pointer-events: none;');
+  });
+
   it('constrains long broadcast fields and animates message changes', () => {
     expect(css).toMatch(/\.broadcast-user-name[\s\S]*?max-width:/);
     expect(css).toMatch(/\.broadcast-delta[\s\S]*?max-width:/);
