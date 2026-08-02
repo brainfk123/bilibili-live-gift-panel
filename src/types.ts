@@ -14,10 +14,21 @@ export interface GiftRule {
   id: string;
   giftId: number;
   attributeName: string;
+  formulaName?: string;
   formula: string;
   minPrice?: number;
   cap?: number;
   dailyLimit?: number;
+}
+
+export interface TimerRule {
+  id: string;
+  attributeName: string;
+  formulaName: string;
+  intervalSeconds: number;
+  condition?: string;
+  formula: string;
+  enabled: boolean;
 }
 
 export interface GiftInfo {
@@ -49,6 +60,8 @@ export interface LogEntry {
   delta: number;
   valueAfter: number;
   ruleId: string;
+  source?: 'gift' | 'timer';
+  triggerName?: string;
 }
 
 export interface Settings {
@@ -59,12 +72,14 @@ export interface Settings {
   align: 'left' | 'center' | 'right';
   theme: 'dark' | 'light';
   giftView: 'list' | 'grid';
+  showTutorial: boolean;
 }
 
 export interface AppState {
   roomId: string;
   attributes: Attribute[];
   rules: GiftRule[];
+  timerRules: TimerRule[];
   settings: Settings;
   giftCatalog: GiftInfo[];
   recentGifts: RecentGift[];
@@ -72,5 +87,4 @@ export interface AppState {
   log: LogEntry[];
 }
 
-export const STORAGE_KEY = 'bilibili-live-gift-panel-v1';
 export const MAX_LOG = 200;

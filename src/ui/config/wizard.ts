@@ -38,6 +38,17 @@ export function getNextWizardStep(progress: WizardProgress): WizardStep | null {
   return null;
 }
 
+export function getTutorialStep(
+  state: Pick<AppState, 'attributes' | 'rules'>,
+  connected: boolean,
+  editorOpen: boolean,
+): WizardStep {
+  if (!connected) return 'room';
+  if (state.attributes.length === 0) return editorOpen ? 'rules' : 'attributes';
+  if (state.rules.length === 0) return 'rules';
+  return 'obs';
+}
+
 export function getRoomNumberHint(rawUrl: string): { path: string; query: string } | null {
   try {
     const url = new URL(rawUrl);

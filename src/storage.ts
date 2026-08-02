@@ -1,11 +1,15 @@
-import { AppState, MAX_LOG, STORAGE_KEY } from './types';
+import { AppState, MAX_LOG } from './types';
+
+const CONFIG_ENDPOINT = '/api/config';
+let cachedState: AppState | null = null;
+let persistQueue = Promise.resolve();
+let configMigrationRequired = false;
 
 export const defaultState = (): AppState => ({
   roomId: '',
-  attributes: [
-    { name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' },
-  ],
+  attributes: [],
   rules: [],
+  timerRules: [],
   settings: {
     fontSize: 48,
     accentColor: '#fb7299',
@@ -14,6 +18,7 @@ export const defaultState = (): AppState => ({
     align: 'center',
     theme: 'dark',
     giftView: 'list',
+    showTutorial: true,
   },
   giftCatalog: [],
   recentGifts: [],
@@ -22,29 +27,81 @@ export const defaultState = (): AppState => ({
 });
 
 export function loadState(): AppState {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return defaultState();
-    const parsed = JSON.parse(raw) as Partial<AppState>;
-    const base = defaultState();
-    return {
-      ...base,
-      ...parsed,
-      settings: { ...defaultState().settings, ...(parsed.settings ?? {}) },
-      attributes: parsed.attributes ?? base.attributes,
-      rules: parsed.rules ?? [],
-    };
-  } catch {
-    return defaultState();
-  }
+  if (!cachedState) cachedState = defaultState();
+  return cachedState;
 }
 
-export function saveState(state: AppState): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+export function saveState(state: AppState): Promise<void> {
+  cachedState = normalizeState(state);
+  const serialized = JSON.stringify(cachedState);
+  persistQueue = persistQueue
+    .catch(() => undefined)
+    .then(() => persistStateToServer(serialized));
+  return persistQueue;
 }
 
 export function resetState(): void {
-  localStorage.removeItem(STORAGE_KEY);
+  cachedState = defaultState();
+  configMigrationRequired = false;
+  if (typeof fetch === 'function') {
+    void fetch(CONFIG_ENDPOINT, { method: 'DELETE', keepalive: true }).catch(() => undefined);
+  }
+}
+
+export function consumeConfigMigrationRequired(): boolean {
+  const required = configMigrationRequired;
+  configMigrationRequired = false;
+  return required;
+}
+
+export async function hydrateStateFromServer(): Promise<void> {
+  await refreshStateFromServer();
+}
+
+export async function refreshStateFromServer(): Promise<AppState> {
+  if (typeof fetch !== 'function') return loadState();
+  await persistQueue.catch(() => undefined);
+  try {
+    const response = await fetch(CONFIG_ENDPOINT, { cache: 'no-store' });
+    if (response.status === 204) {
+      cachedState = defaultState();
+      return cachedState;
+    }
+    if (!response.ok) throw new Error(`配置读取失败：HTTP ${response.status}`);
+    cachedState = normalizeState(await response.json() as Partial<AppState>);
+  } catch {
+    // A transient backend read failure must not erase the last visible state.
+    cachedState ??= defaultState();
+  }
+  return cachedState;
+}
+
+async function persistStateToServer(serialized: string): Promise<void> {
+  if (typeof fetch !== 'function') return;
+  const response = await fetch(CONFIG_ENDPOINT, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: serialized,
+    keepalive: true,
+  });
+  if (!response.ok) throw new Error(`配置保存失败：HTTP ${response.status}`);
+}
+
+function normalizeState(parsed: Partial<AppState>): AppState {
+  const base = defaultState();
+  const setupComplete = Boolean(parsed.roomId?.trim())
+    && (parsed.attributes?.length ?? 0) > 0
+    && (parsed.rules?.length ?? 0) > 0;
+  if (parsed.settings?.showTutorial === undefined) configMigrationRequired = true;
+  const showTutorial = parsed.settings?.showTutorial ?? !setupComplete;
+  return {
+    ...base,
+    ...parsed,
+    settings: { ...base.settings, ...(parsed.settings ?? {}), showTutorial },
+    attributes: parsed.attributes ?? base.attributes,
+    rules: parsed.rules ?? base.rules,
+    timerRules: parsed.timerRules ?? base.timerRules,
+  };
 }
 
 export function pruneLog(log: AppState['log']): AppState['log'] {

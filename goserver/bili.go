@@ -117,10 +117,15 @@ func addWbiSign(params map[string]string, wbiKey string) map[string]string {
 }
 
 type roomInfo struct {
-	RoomID   int64          `json:"roomId"`
-	Buvid    string         `json:"buvid"`
-	Token    string         `json:"token"`
-	HostList []any          `json:"hostList"`
+	RoomID   int64       `json:"roomId"`
+	Buvid    string      `json:"buvid"`
+	Token    string      `json:"token"`
+	HostList []danmuHost `json:"hostList"`
+}
+
+type danmuHost struct {
+	Host    string `json:"host"`
+	WSSPort int    `json:"wss_port"`
 }
 
 func getRoomInfo(input string) (roomInfo, error) {
@@ -160,6 +165,13 @@ func getRoomInfo(input string) (roomInfo, error) {
 	}
 	dd := dmData["data"].(map[string]any)
 	token := dd["token"].(string)
-	hosts := dd["host_list"].([]any)
+	hostBytes, err := json.Marshal(dd["host_list"])
+	if err != nil {
+		return roomInfo{}, err
+	}
+	var hosts []danmuHost
+	if err := json.Unmarshal(hostBytes, &hosts); err != nil {
+		return roomInfo{}, err
+	}
 	return roomInfo{RoomID: roomID, Buvid: buvid, Token: token, HostList: hosts}, nil
 }

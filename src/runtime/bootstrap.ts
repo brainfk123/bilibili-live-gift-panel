@@ -5,7 +5,7 @@ export interface AppBootstrapOptions {
   search: string;
   installFavicon: () => void;
   loadConfigStyles: () => Promise<string>;
-  mountDisplay: (root: HTMLElement) => void;
+  mountDisplay: (root: HTMLElement, selectedAttributeName?: string) => void;
   mountConfig: (root: HTMLElement) => void;
 }
 
@@ -27,7 +27,8 @@ export async function startApp(options: AppBootstrapOptions): Promise<void> {
   const root = options.document.getElementById('app');
   if (!root) throw new Error('App root not found');
 
-  const mode = new URLSearchParams(options.search).get('mode') ?? 'display';
+  const params = new URLSearchParams(options.search);
+  const mode = params.get('mode') ?? 'display';
   if (mode === 'config') {
     options.document.body.classList.add('config-mode');
     root.classList.add('config-root');
@@ -39,5 +40,5 @@ export async function startApp(options: AppBootstrapOptions): Promise<void> {
 
   options.document.body.classList.add('display-mode');
   root.classList.add('display-root');
-  options.mountDisplay(root);
+  options.mountDisplay(root, params.get('attribute') ?? undefined);
 }

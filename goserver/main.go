@@ -1,14 +1,13 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"os/exec"
-	"runtime"
 	"time"
 )
 
@@ -33,19 +32,6 @@ func handleRoomInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"code": 0, "roomId": info.RoomID, "buvid": info.Buvid, "token": info.Token, "hostList": info.HostList})
-}
-
-func openBrowser(url string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", "", url)
-	case "darwin":
-		cmd = exec.Command("open", url)
-	default:
-		cmd = exec.Command("xdg-open", url)
-	}
-	_ = cmd.Start()
 }
 
 func listenWithFallback(startPort, attempts int) (net.Listener, int, error) {
@@ -75,19 +61,88 @@ func isExistingPanel(port int) bool {
 	return err == nil && resp.StatusCode == http.StatusOK && string(body) == "bilibili-live-gift-panel"
 }
 
-func waitForStartupError(message string) {
-	fmt.Printf("\n启动失败：%s\n\n请按 Enter 键关闭窗口...\n", message)
-	_, _ = fmt.Scanln()
+func existingPanelURL() string {
+	for port := 12450; port < 12460; port++ {
+		if isExistingPanel(port) {
+			return fmt.Sprintf("http://localhost:%d/?mode=config", port)
+		}
+	}
+	return ""
+}
+
+func handleFormulaPreview(store *configStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"code": -1, "message": "不支持的请求方法"})
+			return
+		}
+		var request struct {
+			Formula        string  `json:"formula"`
+			AttributeName  string  `json:"attributeName"`
+			AttributeValue float64 `json:"attributeValue"`
+			Context        string  `json:"context"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&request); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": "请求格式不正确"})
+			return
+		}
+		state, err := store.readState()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": err.Error()})
+			return
+		}
+		var result float64
+		if request.Context == "timer" {
+			result, err = timerFormulaPreview(state, request.Formula, request.AttributeName, request.AttributeValue)
+		} else {
+			result, err = formulaPreview(state, request.Formula, request.AttributeName, request.AttributeValue)
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"code": 0, "result": result})
+	}
 }
 
 func main() {
+	alreadyRunning, releaseInstance, err := acquireSingleInstance()
+	if err != nil {
+		showStartupError(fmt.Sprintf("单实例检查失败：%v", err))
+		return
+	}
+	if alreadyRunning {
+		for attempt := 0; attempt < 15; attempt++ {
+			if url := existingPanelURL(); url != "" {
+				openURL(url)
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		showStartupError("直播礼物面板已在运行，但暂时无法打开配置页面。")
+		return
+	}
+	defer releaseInstance()
+
 	indexHTML, err := embeddedFS.ReadFile("dist/index.html")
 	if err != nil {
-		waitForStartupError(fmt.Sprintf("内嵌页面读取失败：%v", err))
+		showStartupError(fmt.Sprintf("内嵌页面读取失败：%v", err))
 		return
 	}
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	store, err := newDefaultConfigStore()
+	if err != nil {
+		showStartupError(err.Error())
+		return
+	}
+	runtimeContext, stopRuntime := context.WithCancel(context.Background())
+	background := newBackgroundRuntime(store, nil)
+	store.setOnChange(background.NotifyConfigChanged)
+	go background.Run(runtimeContext)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" && r.URL.Path != "/index.html" {
 			http.NotFound(w, r)
 			return
@@ -96,35 +151,41 @@ func main() {
 		_, _ = w.Write(indexHTML)
 	})
 
-	http.HandleFunc("/api/room_info", handleRoomInfo)
-	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/room_info", handleRoomInfo)
+	mux.HandleFunc("/api/config", store.handle)
+	mux.HandleFunc("/api/formula/preview", handleFormulaPreview(store))
+	mux.HandleFunc("/api/runtime", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"code": -1, "message": "不支持的请求方法"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"code": 0, "runtime": background.Status()})
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("bilibili-live-gift-panel"))
 	})
 
 	listener, port, err := listenWithFallback(12450, 10)
 	if err != nil {
-		waitForStartupError(err.Error())
+		showStartupError(err.Error())
 		return
 	}
-	if port != 12450 && isExistingPanel(12450) {
-		listener.Close()
-		fmt.Println("检测到面板已经在运行，正在打开已有配置页面。")
-		openBrowser("http://localhost:12450/?mode=config")
-		return
-	}
-	if port != 12450 {
-		fmt.Printf("默认端口 12450 已被占用，已改用端口 %d。\n", port)
-	}
+	server := &http.Server{Handler: mux}
+	go func() {
+		if serveErr := server.Serve(listener); serveErr != nil && serveErr != http.ErrServerClosed {
+			showStartupError(fmt.Sprintf("本地服务已停止：%v", serveErr))
+		}
+	}()
 
-	go openBrowser(fmt.Sprintf("http://localhost:%d/?mode=config", port))
-
-	fmt.Printf("Bilibili 直播礼物面板已启动\n")
-	fmt.Printf("  配置面板（浏览器已自动打开）: http://localhost:%d/?mode=config\n", port)
-	fmt.Printf("  OBS 浏览器源请加载: http://localhost:%d/?mode=display\n", port)
-	fmt.Printf("  关闭本窗口即退出。\n")
-
-	if err := http.Serve(listener, nil); err != nil {
-		waitForStartupError(err.Error())
+	configURL := fmt.Sprintf("http://localhost:%d/?mode=config", port)
+	go openURL(configURL)
+	if err := runTrayApp(configURL); err != nil {
+		showStartupError(fmt.Sprintf("系统托盘启动失败：%v", err))
 	}
+	stopRuntime()
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = server.Shutdown(shutdownContext)
 }

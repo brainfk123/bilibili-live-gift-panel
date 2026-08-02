@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { applyGiftToState, recordGiftTotals, resetTodayStats } from '../src/engine/rules';
 import { Engine } from '../src/engine';
-import { defaultState } from '../src/storage';
+import { defaultState as createDefaultState } from '../src/storage';
 import { GiftEvent } from '../src/bilibili/messages';
 import { RoomInfo, WsLike } from '../src/bilibili/client';
 import { encodeJson } from '../src/bilibili/protocol';
@@ -13,6 +13,12 @@ const fakeRoomInfo: RoomInfo = {
   token: 'token-test',
   hostList: [{ host: 'chat.test.bilibili.com', wss_port: 2245 }],
 };
+
+function defaultState(): ReturnType<typeof createDefaultState> {
+  const state = createDefaultState();
+  state.attributes.push({ name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' });
+  return state;
+}
 
 function makeGift(overrides: Partial<GiftEvent>): GiftEvent {
   return {
@@ -83,19 +89,35 @@ describe('applyGiftToState', () => {
     expect(s.attributes[0].value).toBe(50);
   });
 
-  it('respects dailyLimit', () => {
+  it('respects dailyLimit while executing a batch one gift at a time', () => {
     const s = defaultState();
-    s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '10', dailyLimit: 2 });
-    applyGiftToState(s, makeGift({}));
-    applyGiftToState(s, makeGift({}));
-    expect(applyGiftToState(s, makeGift({}))).toHaveLength(0);
-    expect(s.attributes[0].value).toBe(10);
+    s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '加班时间+1', dailyLimit: 2 });
+    const rs = applyGiftToState(s, makeGift({ num: 3 }));
+    expect(rs).toHaveLength(2);
+    expect(s.attributes[0].value).toBe(2);
+    const day = s.stats[Object.keys(s.stats)[0]];
+    expect(day.ruleTriggers.r1).toBe(2);
   });
 
   it('ignores non-matching gift', () => {
     const s = defaultState();
     s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '10' });
     expect(applyGiftToState(s, makeGift({ giftId: 999 }))).toHaveLength(0);
+  });
+
+  it('matches visually identical catalog aliases with different gift IDs', () => {
+    const s = defaultState();
+    s.rules.push({ id: 'r-alias', giftId: 33300, attributeName: '加班时间', formula: '加班时间+60' });
+
+    const results = applyGiftToState(s, makeGift({
+      giftId: 33012,
+      giftName: '666',
+      price: 1000,
+      imgBasic: '',
+    }));
+
+    expect(results).toHaveLength(1);
+    expect(s.attributes[0].value).toBe(60);
   });
 
   it('writes log entry', () => {
@@ -109,14 +131,38 @@ describe('applyGiftToState', () => {
     expect(s.log[0].attributeName).toBe('加班时间');
   });
 
-  it('uses current attribute value in formula env', () => {
+  it('executes a batch sequentially with the current attribute value', () => {
     const s = defaultState();
     s.attributes[0].value = 5;
-    s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '加班时间+count' });
+    s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '加班时间+1' });
     const rs = applyGiftToState(s, makeGift({ num: 3 }));
-    expect(rs[0].delta).toBe(3);
-    expect(rs[0].valueAfter).toBe(8);
+    expect(rs).toHaveLength(3);
+    expect(rs.map((result) => result.delta)).toEqual([1, 1, 1]);
+    expect(rs.map((result) => result.valueAfter)).toEqual([6, 7, 8]);
+    expect(rs.every((result) => result.gift.num === 1)).toBe(true);
     expect(s.attributes[0].value).toBe(8);
+  });
+
+  it('does not expose count as a formula variable', () => {
+    const s = defaultState();
+    s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '加班时间+count' });
+    expect(applyGiftToState(s, makeGift({ num: 3 }))).toHaveLength(0);
+    expect(s.attributes[0].value).toBe(0);
+  });
+
+  it('lets one gift affect multiple attributes on every individual occurrence', () => {
+    const s = defaultState();
+    s.attributes.push({ name: '积分', value: 10, unit: 'none', format: 'number', decimals: 0, suffix: '' });
+    s.rules.push(
+      { id: 'r1', giftId: 30607, attributeName: '加班时间', formula: '加班时间+60' },
+      { id: 'r2', giftId: 30607, attributeName: '积分', formula: '积分+1' },
+    );
+
+    const rs = applyGiftToState(s, makeGift({ num: 2 }));
+
+    expect(rs).toHaveLength(4);
+    expect(s.attributes[0].value).toBe(120);
+    expect(s.attributes[1].value).toBe(12);
   });
 
   it('skips rule when formula errors or yields non-finite value', () => {

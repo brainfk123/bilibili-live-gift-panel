@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { evalFormula, collectVars, FormulaError } from '../src/formula';
 
-const env = { price: 1000, count: 3, 加班时间: 100 };
+const env = { price: 1000, 加班时间: 100 };
 
 describe('formula basic arithmetic', () => {
   it('adds', () => expect(evalFormula('1+2', env)).toBe(3));
@@ -13,7 +13,6 @@ describe('formula basic arithmetic', () => {
   it('handles unary minus', () => expect(evalFormula('-3+5', env)).toBe(2));
   it('uses variables', () => expect(evalFormula('price/1000*60', env)).toBe(60));
   it('uses chinese attribute name', () => expect(evalFormula('加班时间+50', env)).toBe(150));
-  it('uses count', () => expect(evalFormula('count*5', env)).toBe(15));
 });
 
 describe('formula functions', () => {
@@ -44,6 +43,7 @@ describe('formula functions', () => {
 describe('formula errors', () => {
   it('division by zero throws', () => expect(() => evalFormula('1/0', env)).toThrow(/除数为零/));
   it('unknown variable throws', () => expect(() => evalFormula('foo+1', env)).toThrow(/未定义/));
+  it('does not provide the removed count variable', () => expect(() => evalFormula('count+1', env)).toThrow(/未定义/));
   it('missing paren throws', () => expect(() => evalFormula('(1+2', env)).toThrow(/缺少/));
   it('trailing garbage throws', () => expect(() => evalFormula('1+2 abc', env)).toThrow(/多余/));
   it('throws FormulaError with position', () => {
@@ -52,5 +52,5 @@ describe('formula errors', () => {
     expect(caught).toBeInstanceOf(FormulaError);
     expect((caught as FormulaError).pos).toBe(3);
   });
-  it('collectVars finds variables', () => expect(collectVars('price/1000*count').sort()).toEqual(['count', 'price']));
+  it('collectVars finds variables', () => expect(collectVars('price/1000*加班时间').sort()).toEqual(['price', '加班时间'].sort()));
 });

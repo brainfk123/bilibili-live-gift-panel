@@ -1,27 +1,23 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { defaultState, loadState, saveState, resetState, pruneLog } from '../src/storage';
-import { LogEntry, MAX_LOG, STORAGE_KEY } from '../src/types';
+import { consumeConfigMigrationRequired, defaultState, hydrateStateFromServer, loadState, saveState, resetState, pruneLog } from '../src/storage';
+import { LogEntry, MAX_LOG } from '../src/types';
 
-const mem = new Map<string, string>();
-vi.stubGlobal('localStorage', {
-  getItem: (k: string) => mem.get(k) ?? null,
-  setItem: (k: string, v: string) => void mem.set(k, v),
-  removeItem: (k: string) => void mem.delete(k),
+beforeEach(() => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 204 })));
+  resetState();
 });
-
-beforeEach(() => mem.clear());
 
 describe('storage', () => {
   it('loads default state when empty', () => {
     const s = loadState();
-    expect(s.attributes[0].name).toBe('加班时间');
+    expect(s.attributes).toEqual([]);
     expect(s.rules).toEqual([]);
   });
 
   it('round-trips state through save/load', () => {
     const s = defaultState();
     s.roomId = '2145';
-    s.attributes[0].value = 3600;
+    s.attributes.push({ name: '加班时间', value: 3600, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' });
     s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: 'price/1000*60' });
     saveState(s);
     const loaded = loadState();
@@ -30,13 +26,30 @@ describe('storage', () => {
     expect(loaded.rules).toHaveLength(1);
   });
 
-  it('defaults new UX settings for old saved data', () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      roomId: '', attributes: [], rules: [], settings: { fontSize: 48, accentColor: '#fb7299', showStats: true, showConnection: true, align: 'center' },
-    }));
+  it('loads and normalizes the disk configuration from the server', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      roomId: '31567150', attributes: [], rules: [], settings: { fontSize: 48, accentColor: '#fb7299', showStats: true, showConnection: true, align: 'center' },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+    await hydrateStateFromServer();
     const loaded = loadState();
+    expect(loaded.roomId).toBe('31567150');
     expect(loaded.settings.theme).toBe('dark');
     expect(loaded.settings.giftView).toBe('list');
+    expect(loaded.settings.showTutorial).toBe(true);
+    expect(consumeConfigMigrationRequired()).toBe(true);
+  });
+
+  it('hides the tutorial for a completed legacy config and marks the field for persistence', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      roomId: '31567150',
+      attributes: [{ name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' }],
+      rules: [{ id: 'r1', giftId: 1, attributeName: '积分', formula: '积分+1' }],
+      settings: {},
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    await hydrateStateFromServer();
+    expect(loadState().settings.showTutorial).toBe(false);
+    expect(consumeConfigMigrationRequired()).toBe(true);
   });
 
   it('resetState removes stored state', () => {

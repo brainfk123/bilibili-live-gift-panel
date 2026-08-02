@@ -7,15 +7,15 @@
 
 给 B 站主播使用的 OBS 浏览器源插件。核心功能：监听直播间礼物/SC 事件，按主播自定义的 **Excel 风格公式 + 条件规则** 累加 **多属性值**（如"加班时间"、"积分"），并在 OBS 中以醒目的独立面板实时展示。
 
-分发形态（**v2 修订**）：**单个可执行文件 `gift-panel.exe`**（Bun `build --compile` 编译，内嵌前端静态页面与静态文件服务）。主播双击运行 → 自动打开浏览器进入配置面板；OBS 浏览器源加载 `http://localhost:12450/?mode=display`。**主播电脑无需安装 Node/Python 等任何运行时**，只需 OBS + 双击 exe。
+分发形态（**v2 修订**）：**单个可执行文件 `gift-panel.exe`**（Go 静态编译，内嵌前端静态页面与本地代理服务）。主播双击运行 → 自动打开浏览器进入配置面板；OBS 浏览器源加载 `http://localhost:12450/?mode=display`。**主播电脑无需安装 Node/Python/Go 等任何运行时**，只需 OBS + 双击 exe。
 
 合规提醒：使用 B 站 Web 端非官方弹幕协议，**仅私下分发**，禁止公开传播。
 
 ## 2. 架构
 
 ```
-gift-panel.exe（Bun 编译，内嵌全部前端资源）
- └─ 本地服务（Bun.serve，监听 http://localhost:12450）
+gift-panel.exe（Go 静态编译，内嵌全部前端资源）
+ └─ 本地服务（Go net/http，监听 http://localhost:12450）
      ├─ 静态页面：GET /        → 前端（?mode=display / ?mode=config）
      └─ API 代理：GET /api/room_info?roomId=X
            ├─ get_info 解析真实房间号（短号→真实号）
@@ -212,6 +212,6 @@ stats         每日统计
 ## 13. 技术栈
 
 - Vite + TypeScript（前端）+ `vite-plugin-singlefile`（内联为单 HTML）
-- **Bun**（本地服务运行时 + `build --compile` 打包单 exe）
+- **Go**（本地服务 + `go:embed` 内嵌页面 + 静态编译单 exe）
 - Vitest（单元测试）
-- 前端运行时零第三方依赖（WebSocket/DecompressionStream/localStorage 均为浏览器内置）；本地服务用 Bun 内置 `Bun.serve`/`fetch`，无第三方依赖
+- 前端运行时零第三方依赖（WebSocket/DecompressionStream/localStorage 均为浏览器内置）；本地服务只使用 Go 标准库，无第三方依赖

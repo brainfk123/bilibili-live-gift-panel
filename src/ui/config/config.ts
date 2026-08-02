@@ -1,73 +1,69 @@
-import { AppState, GiftRule, STORAGE_KEY } from '../../types';
-import { loadState, saveState } from '../../storage';
+import { AppState, Attribute, GiftInfo, GiftRule, TimerRule } from '../../types';
+import { consumeConfigMigrationRequired, loadState, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { el, fieldControl, inputField, toast } from '../common';
-import { builtinCatalog, findGift, upsertRecentGift } from '../../gifts/catalog';
-import { evalFormula, collectVars, FormulaError } from '../../formula';
-import { formatValue, todayStr } from '../../format';
-import { parseGift } from '../../bilibili/messages';
-import { DanmakuClient, ConnState } from '../../bilibili/client';
+import { builtinCatalog, findGift, giftDisplayKey } from '../../gifts/catalog';
+import { formatValue } from '../../format';
+import { getRuntimeStatus, previewFormula, RuntimeConnectionState } from '../../backend';
 import { createBrandIcon } from '../brand';
-import { getNextWizardStep, getWizardChecklist, getWizardProgress, type WizardStep } from './wizard';
+import { getTutorialStep } from './wizard';
+import { renderSpotlightGuide, type SpotlightGuideElement } from './spotlight-guide';
+
+interface SelectedGiftRule {
+  gift: GiftInfo;
+  formulaName: string;
+  formula: string;
+  previous?: GiftRule;
+}
 
 export function mountConfig(root: HTMLElement): void {
   let state = loadState();
   root.classList.add('config-root');
   state.settings.theme = normalizeConfigTheme(state.settings.theme);
   state.settings.giftView = state.settings.giftView === 'grid' ? 'grid' : 'list';
-  const initialProgress = getWizardProgress(state);
-  let current: string = getNextWizardStep(initialProgress) ?? 'obs';
-  let setupComplete = initialProgress.obs;
-  let showOnboarding = !setupComplete;
-  let client: DanmakuClient | null = null;
-  let connectionState: ConnState = 'idle';
-  const shell = el('div', { class: 'wizard-shell' });
+  const metadataChanged = ensureRuleGiftCatalog(state);
+  if (metadataChanged || consumeConfigMigrationRequired()) void saveState(state);
+
+  let connectionState: RuntimeConnectionState = 'idle';
+  let guideDismissed = !state.settings.showTutorial;
+  let activeGuide: SpotlightGuideElement | null = null;
+  let editorOpen = false;
+  let editorGuideEnabled = false;
+  let runtimeRefreshActive = false;
+  let stateRefreshActive = false;
+
+  const shell = el('div', { class: 'wizard-shell config-shell' });
   const header = el('header', { class: 'app-header' });
   const brand = el('div', { class: 'app-brand' });
   brand.append(createBrandIcon(40), el('div', { class: 'app-brand-copy' }, [
     el('strong', { text: '直播礼物面板' }),
-    el('span', { text: '简单四步，开始互动' }),
   ]));
   const themeToggle = el('button', { class: 'theme-toggle', type: 'button' }) as HTMLButtonElement;
+  const guideToggle = el('button', { class: 'theme-toggle', type: 'button', text: '显示教程' }) as HTMLButtonElement;
   const status = el('div', { class: 'app-status' });
   const headerActions = el('div', { class: 'app-header-actions' });
-  headerActions.append(themeToggle, status);
+  headerActions.append(guideToggle, themeToggle, status);
   header.append(brand, headerActions);
 
-  const content = el('main', { class: 'wizard-content' });
+  const content = el('main', { class: 'wizard-content config-page' });
   shell.append(header, content);
   root.replaceChildren(shell);
-
-  const wizardSteps: { key: WizardStep; label: string }[] = [
-    { key: 'room', label: '连接房间' },
-    { key: 'attributes', label: '设置属性' },
-    { key: 'rules', label: '绑定礼物' },
-    { key: 'obs', label: '放进 OBS' },
-  ];
 
   function applyConfigTheme(theme: 'dark' | 'light'): void {
     root.dataset.theme = theme;
     const label = theme === 'dark' ? '切换至亮色主题' : '切换至深色主题';
     themeToggle.textContent = label;
     themeToggle.setAttribute('aria-label', label);
-    themeToggle.removeAttribute('aria-pressed');
   }
 
-  themeToggle.onclick = () => {
-    const nextTheme = state.settings.theme === 'dark' ? 'light' : 'dark';
-    state.settings.theme = nextTheme;
-    applyConfigTheme(nextTheme);
-    save();
-  };
-
-  function connectionLabel(stateValue: ConnState): string {
-    if (stateValue === 'connected') return '已连接';
-    if (stateValue === 'connecting') return '连接中…';
-    if (stateValue === 'reconnecting') return '重连中…';
-    if (stateValue === 'error') return '连接失败';
+  function connectionLabel(value: RuntimeConnectionState): string {
+    if (value === 'connected') return '已连接';
+    if (value === 'connecting') return '连接中…';
+    if (value === 'reconnecting') return '重连中…';
+    if (value === 'error') return '连接失败';
     return '未连接';
   }
 
-  function renderWizardHeader(): void {
+  function renderHeaderStatus(): void {
     status.className = `app-status is-${connectionState}`;
     status.replaceChildren(
       el('span', { class: 'app-status-dot' }),
@@ -75,732 +71,994 @@ export function mountConfig(root: HTMLElement): void {
     );
   }
 
-  function isSetupComplete(): boolean {
-    return getWizardProgress(state).obs;
-  }
-
-  function renderProgress(): void {
-    const progress = getWizardProgress(state);
-    const progressNav = el('nav', { class: 'wizard-progress' });
-    progressNav.setAttribute('aria-label', '配置进度');
-    for (const [index, step] of wizardSteps.entries()) {
-      const done = progress[step.key];
-      const item = el('button', {
-        class: `wizard-progress-item${current === step.key ? ' is-active' : ''}${done ? ' is-done' : ''}`,
-        type: 'button',
-      }) as HTMLButtonElement;
-      item.dataset.step = step.key;
-      item.append(
-        el('span', { class: 'wizard-progress-number', text: done ? '✓' : String(index + 1) }),
-        el('span', { class: 'wizard-progress-label', text: step.label }),
-      );
-      item.onclick = () => switchTo(step.key);
-      progressNav.append(item);
+  async function refreshRuntime(): Promise<void> {
+    if (runtimeRefreshActive) return;
+    runtimeRefreshActive = true;
+    try {
+      const runtime = await getRuntimeStatus();
+      const previous = connectionState;
+      connectionState = runtime.state;
+      renderHeaderStatus();
+      const inlineStatus = root.querySelector('.connection-inline-status');
+      if (inlineStatus) inlineStatus.textContent = connectionLabel(connectionState);
+      if (!editorOpen && previous !== connectionState && connectionState === 'connected') render();
+    } catch {
+      connectionState = 'error';
+      renderHeaderStatus();
+      const inlineStatus = root.querySelector('.connection-inline-status');
+      if (inlineStatus) inlineStatus.textContent = connectionLabel(connectionState);
+    } finally {
+      runtimeRefreshActive = false;
     }
-    const currentProgress = content.querySelector('.wizard-progress');
-    if (currentProgress) currentProgress.replaceWith(progressNav);
-    else content.append(progressNav);
   }
 
-  function switchTo(key: string): void {
-    current = key;
-    renderWizardHeader();
-    render();
-  }
-
-  function renderNormalNav(): void {
-    const nav = el('nav', { class: 'normal-nav' });
-    nav.setAttribute('aria-label', '配置导航');
-    const items: Array<[string, string]> = [
-      ['room', '房间'],
-      ['attributes', '属性'],
-      ['rules', '规则'],
-      ['stats', '统计'],
-      ['settings', '设置'],
-      ['manual', '手动添加礼物'],
-    ];
-    for (const [key, label] of items) {
-      const button = el('button', { class: 'btn ghost', text: label, type: 'button' }) as HTMLButtonElement;
-      button.dataset.section = key;
-      button.onclick = () => switchTo(key);
-      nav.append(button);
-    }
-    const revisitButton = el('button', { class: 'secondary-toggle', text: '重新查看入门', type: 'button' }) as HTMLButtonElement;
-    revisitButton.onclick = () => {
-      showOnboarding = true;
-      render();
-    };
-    nav.append(revisitButton);
-    content.append(nav);
-  }
-
-  function renderCurrentSection(): void {
-    if (current === 'room') renderRoom();
-    else if (current === 'attributes') renderAttributes();
-    else if (current === 'rules') renderRules();
-    else if (current === 'obs') renderOnboarding();
-    else if (current === 'stats') renderStats();
-    else if (current === 'settings') renderSettings();
-    else if (current === 'manual') renderManualAdd();
-  }
-
-  function render(): void {
-    content.replaceChildren();
-    renderWizardHeader();
-    if (showOnboarding) {
-      renderProgress();
-      renderOnboarding();
-      if (current !== 'obs') renderCurrentSection();
-      renderMoreSettings();
-    } else {
-      renderNormalNav();
-      renderCurrentSection();
+  async function refreshBackendState(): Promise<void> {
+    if (stateRefreshActive || editorOpen) return;
+    stateRefreshActive = true;
+    try {
+      const previousStructure = configStructureSignature(state);
+      state = await refreshStateFromServer();
+      if (ensureRuleGiftCatalog(state)) await saveState(state);
+      if (configStructureSignature(state) !== previousStructure) {
+        render();
+        return;
+      }
+      for (const valueElement of Array.from(root.querySelectorAll('.attribute-current-value'))) {
+        const attribute = state.attributes.find((item) => item.name === (valueElement as HTMLElement).dataset.attributeName);
+        if (attribute) valueElement.textContent = formatValue(attribute.value, attribute);
+      }
+    } finally {
+      stateRefreshActive = false;
     }
   }
 
   function save(): void {
-    const wasSetupComplete = setupComplete;
-    saveState(state);
-    setupComplete = isSetupComplete();
-    if (setupComplete !== wasSetupComplete) {
-      showOnboarding = !setupComplete;
-      render();
-      return;
+    void saveAndWait().catch(() => undefined);
+  }
+
+  async function saveAndWait(): Promise<void> {
+    try {
+      await saveState(state);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '配置保存失败', root);
+      throw error;
     }
-    if (showOnboarding) renderProgress();
   }
 
-  function guideCard(text: string, bold?: string): void {
-    const card = el('div', { class: 'guide-card' });
-    if (bold) card.append(el('b', { text: bold }), el('span', { text: ' ' + text }));
-    else card.append(el('span', { text }));
-    content.append(card);
-  }
-
-  function emptyState(text: string): HTMLElement {
-    const empty = el('div', { class: 'empty' });
-    empty.append(createBrandIcon(44, 'empty-brand-icon'), el('span', { text }));
-    return empty;
-  }
-
-  function renderOnboarding(): void {
-    const progress = getWizardProgress(state);
-    const ready = progress.obs;
-
-    if (ready && current === 'obs') {
-      const home = el('div', { class: 'completion-home' });
-      const statusCard = el('div', { class: 'completion-status' });
-      statusCard.append(
-        el('span', { class: 'completion-status-label', text: '当前连接状态' }),
-        el('strong', { text: connectionLabel(connectionState) }),
-      );
-
-      const attributeCard = el('div', { class: 'completion-summary-card' });
-      attributeCard.append(el('h2', { class: 'completion-section-title', text: '属性预览' }));
-      for (const attribute of state.attributes) {
-        attributeCard.append(el('div', { class: 'completion-attribute' }, [
-          el('span', { class: 'completion-attribute-name', text: attribute.name }),
-          el('strong', { class: 'completion-attribute-value', text: formatValue(attribute.value, attribute) }),
-        ]));
-      }
-
-      const recentRule = state.rules[state.rules.length - 1];
-      const recentGift = recentRule ? findGift(state, recentRule.giftId) : undefined;
-      const ruleCard = el('div', { class: 'completion-summary-card' });
-      ruleCard.append(el('h2', { class: 'completion-section-title', text: '最近规则' }));
-      if (recentRule) {
-        ruleCard.append(
-          el('div', { class: 'completion-rule-name', text: `${recentGift?.name ?? `礼物${recentRule.giftId}`} → ${recentRule.attributeName}` }),
-          el('code', { class: 'completion-rule-formula', text: recentRule.formula }),
-        );
-      }
-
-      const obsUrl = `${location.origin}/?mode=display`;
-      const card = el('div', { class: 'completion-card' });
-      const urlInput = el('input', { class: 'field-input', value: obsUrl, readOnly: true }) as HTMLInputElement;
-      const copyButton = el('button', { class: 'btn', text: '复制地址' }) as HTMLButtonElement;
-      copyButton.onclick = async () => {
-        try {
-          await navigator.clipboard.writeText(urlInput.value);
-          toast('OBS 地址已复制', root);
-        } catch {
-          urlInput.select();
-          toast('请按 Ctrl+C 复制地址', root);
-        }
-      };
-      const urlRow = el('div', { class: 'ready-url' });
-      urlRow.append(urlInput, copyButton);
-      const instructions = el('ol', { class: 'obs-steps' });
-      for (const text of ['OBS 添加“浏览器”来源。', '粘贴地址并设置宽高。', '保持 gift-panel.exe 运行。']) {
-        instructions.append(el('li', { class: 'obs-step', text }));
-      }
-      card.append(
-        createBrandIcon(56, 'completion-brand-icon'),
-        el('div', { class: 'completion-title', text: '配置完成' }),
-        el('p', { class: 'completion-subtitle', text: '把下面的地址添加到 OBS 浏览器源。' }),
-        urlRow,
-        instructions,
-      );
-      const restartButton = el('button', {
-        class: 'secondary-toggle completion-restart',
-        text: showOnboarding ? '返回正常配置' : '重新查看向导',
-      }) as HTMLButtonElement;
-      restartButton.onclick = () => {
-        if (showOnboarding) {
-          showOnboarding = false;
-          current = 'obs';
-        } else {
-          showOnboarding = true;
-          current = 'room';
-        }
-        render();
-      };
-      home.append(statusCard, attributeCard, ruleCard, card, restartButton);
-      content.append(home);
-      return;
-    }
-
-    const nextTarget = !progress.room ? 'room' : !progress.attributes ? 'attributes' : !progress.rules ? 'rules' : '';
-    const steps = getWizardChecklist(progress);
-    const box = el('div', { class: 'onboard' });
-    box.append(
-      el('div', { class: 'onboard-title', text: '第一次使用？跟着做就好' }),
-      el('div', { class: 'onboard-desc', text: '按顺序完成下面几步。每一步都有说明，点按钮可以直接跳到对应位置。' }),
-    );
-    const stepsRow = el('div', { class: 'steps' });
-    for (const { label, target, done } of steps) {
-      const active = !done && target === nextTarget;
-      const s = el('div', { class: done ? 'step done' : active ? 'step active-step' : 'step' }, [
-        el('span', { class: 'step-num', text: done ? '✓' : '○' }),
-        el('span', { text: label }),
-      ]);
-      s.onclick = () => {
-        if (!done || target !== 'room') switchTo(target);
-      };
-      stepsRow.append(s);
-    }
-    box.append(stepsRow);
-
-    if (!ready) {
-      const next = el('div', { class: 'onboard-next' });
-      if (nextTarget === 'room') {
-        next.append(
-          el('span', { text: '现在先填你的直播间房间号。' }),
-          el('button', { class: 'btn', text: '去填写房间号' }),
-        );
-      } else if (nextTarget === 'rules') {
-        next.append(
-          el('span', { text: '房间已设置。下一步设置礼物触发后的属性值。' }),
-          el('button', { class: 'btn', text: '去配置第一个礼物' }),
-        );
-      } else {
-        next.append(
-          el('span', { text: '属性已经准备好了，可以继续下一步。' }),
-          el('button', { class: 'btn', text: '去看属性设置' }),
-        );
-      }
-      const nextButton = next.querySelector('button') as HTMLButtonElement;
-      nextButton.onclick = () => switchTo(nextTarget || 'room');
-      box.append(next);
-    }
-    content.append(box);
-  }
-
-  function buildPreviewEnv(s: AppState): Record<string, number> {
-    const env: Record<string, number> = { price: 1000, count: 1 };
-    for (const a of s.attributes) env[a.name] = a.value;
-    return env;
-  }
-
-  const numOrUndef = (v: string): number | undefined => {
-    const n = Number(v);
-    return v.trim() === '' || !Number.isFinite(n) ? undefined : n;
+  themeToggle.onclick = () => {
+    state.settings.theme = state.settings.theme === 'dark' ? 'light' : 'dark';
+    applyConfigTheme(state.settings.theme);
+    save();
+  };
+  guideToggle.onclick = () => {
+    guideDismissed = false;
+    state.settings.showTutorial = true;
+    save();
+    renderGuide();
   };
 
-  function renderRoom(): void {
-    content.append(
-      el('h1', { class: 'wizard-main-title', text: '输入你的直播间房间号' }),
-      el('p', { class: 'wizard-subtitle', text: '填好后点击测试连接。' }),
-    );
-    const roomHelp = el('details', { class: 'details-card' });
-    roomHelp.append(
-      el('summary', { text: '房间号在哪里？' }),
-      el('p', { text: '看地址中 live.bilibili.com/ 后面的数字，不要复制问号后的访问参数。' }),
-      el('code', { text: 'https://live.bilibili.com/88888888?live_from=1111&visit_id=abc123' }),
-      el('p', { text: '要填写：88888888' }),
-    );
-    const card = el('div', { class: 'card' });
-    const roomInput = inputField('房间号', state.roomId);
-    roomInput.placeholder = '例如 88888888';
-    const row = el('div', { class: 'row input-row gap' });
-    const statusText = el('span', { text: connectionLabel(connectionState) });
-    const connectBtn = el('button', { class: 'btn', text: '测试连接' }) as HTMLButtonElement;
-    connectBtn.onclick = () => {
-      const roomId = roomInput.value.trim();
-      if (!roomId) { toast('请输入房间号', root); return; }
-      state.roomId = roomId;
-      save();
-      client?.stop();
-      client = new DanmakuClient({
-        roomId: Number(roomId),
-        onState: (s: ConnState) => {
-          connectionState = s;
-          if (s === 'connected' && current === 'room') {
-            switchTo('attributes');
-            return;
-          }
-          statusText.textContent = connectionLabel(s);
-          renderWizardHeader();
-        },
-        onGift: (ev) => {
-          upsertRecentGift(state, ev);
-          save();
-        },
-      });
-      void client.start();
-    };
-    row.append(connectBtn, statusText);
-    card.append(fieldControl(roomInput), row);
-    content.append(roomHelp, card);
-  }
-
-  function renderAttributes(): void {
-    content.append(
-      el('h1', { class: 'wizard-main-title', text: '设置属性' }),
-      el('p', { class: 'wizard-subtitle', text: '属性就是礼物触发后会变化的数字，例如加班时间。' }),
-    );
-    if (state.attributes.length === 0) {
-      content.append(emptyState('还没有属性，点击下方「+ 新增属性」创建一个吧（推荐：加班时间）。'));
-    }
-    const addBtn = el('button', { class: 'btn', text: '+ 新增属性' });
-    addBtn.onclick = () => {
-      state.attributes.push({ name: `属性${state.attributes.length + 1}`, value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' });
-      save();
-      render();
-    };
-    content.append(addBtn, el('div', { class: 'gap' }));
-    for (let i = 0; i < state.attributes.length; i++) {
-      const a = state.attributes[i];
-      const card = el('div', { class: 'card' });
-      const nameInput = inputField('名称', a.name);
-      nameInput.oninput = () => { a.name = nameInput.value; save(); };
-      const unitSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
-      unitSelect.innerHTML = `<option value="seconds">秒（时间类）</option><option value="none">无单位（数值类）</option>`;
-      unitSelect.value = a.unit;
-      unitSelect.onchange = () => { a.unit = unitSelect.value as any; save(); render(); };
-      const fmtSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
-      fmtSelect.innerHTML = `<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字+后缀</option>`;
-      fmtSelect.value = a.format;
-      fmtSelect.onchange = () => { a.format = fmtSelect.value as any; save(); render(); };
-      const advanced = el('details', { class: 'details-card' });
-      advanced.append(
-        el('summary', { text: '更多属性设置' }),
-        el('div', { class: 'field', children: [el('span', { class: 'field-label', text: '单位' }), unitSelect] }),
-      );
-      const preview = el('div', { class: 'preview' });
-      const updatePreview = () => {
-        preview.replaceChildren(el('span', { text: `当前值：` }), el('span', { class: 'result', text: formatValue(a.value, a) }));
-      };
-      updatePreview();
-      const valueInput = inputField('初始值', String(a.value));
-      valueInput.oninput = () => {
-        const v = Number(valueInput.value);
-        if (Number.isFinite(v)) { a.value = v; save(); updatePreview(); }
-      };
-      const resetBtn = el('button', { class: 'btn ghost', text: '清零' });
-      resetBtn.onclick = () => { a.value = 0; valueInput.value = '0'; save(); updatePreview(); };
-      const delBtn = el('button', { class: 'btn danger', text: '删除' });
-      delBtn.onclick = () => {
-        state.attributes.splice(i, 1);
-        state.rules = state.rules.filter((r) => r.attributeName !== a.name);
+  function renderGuide(): void {
+    activeGuide?.dispose();
+    activeGuide = null;
+    if (guideDismissed) return;
+    const step = getTutorialStep(state, connectionState === 'connected', editorOpen);
+    if (editorOpen && !editorGuideEnabled) return;
+    if (editorOpen && step === 'obs') return;
+    activeGuide = renderSpotlightGuide({
+      host: root,
+      step,
+      editorOpen,
+      onDismiss: () => {
+        guideDismissed = true;
+        state.settings.showTutorial = false;
         save();
-        render();
-      };
-      card.append(
-        fieldControl(nameInput),
-        fieldControl(valueInput),
-        el('div', { class: 'field', children: [el('span', { class: 'field-label', text: '显示格式' }), fmtSelect] }),
-        advanced, preview,
-        el('div', { class: 'row' }, [resetBtn, delBtn]),
-      );
-      content.append(card);
-    }
+        activeGuide = null;
+      },
+    });
   }
 
-  function renderRules(): void {
-    content.append(
-      el('h1', { class: 'wizard-main-title', text: '绑定礼物规则' }),
-      el('p', { class: 'wizard-subtitle', text: '把观众送的礼物连接到一个属性。' }),
-    );
-    const actions = ['搜索礼物', '选择属性', '选择公式示例', '保存规则'];
-    const actionList = el('ol', { class: 'rule-actions' });
-    for (const action of actions) actionList.append(el('li', { class: 'rule-action', text: action }));
-    content.append(actionList);
-
-    const addCard = el('div', { class: 'card' });
-    addCard.append(el('h3', { text: '搜索礼物' }));
-    const search = el('input', { class: 'field-input' }) as HTMLInputElement;
-    search.placeholder = '搜索礼物名称…';
-    const viewToggle = el('div', { class: 'gift-view-toggle' });
-    const listButton = el('button', { class: 'btn ghost', text: '列表', type: 'button' }) as HTMLButtonElement;
-    const gridButton = el('button', { class: 'btn ghost', text: '网格', type: 'button' }) as HTMLButtonElement;
-    const updateViewToggle = (): void => {
-      listButton.classList.toggle('is-active', state.settings.giftView === 'list');
-      gridButton.classList.toggle('is-active', state.settings.giftView === 'grid');
-    };
-    const giftList = el('div', { class: state.settings.giftView === 'grid' ? 'gift-grid' : 'gift-list' });
-    const seen = new Set<number>();
-    const allGifts = [...state.recentGifts, ...builtinCatalog].filter((g) => !seen.has(g.id) && (seen.add(g.id), true));
-    const giftPageSize = 50;
-    let visibleGiftCount = giftPageSize;
-    function renderGiftList(filter: string): void {
-      giftList.replaceChildren();
-      const matches = allGifts.filter((g) => g.name.includes(filter) || String(g.id).includes(filter));
-      const list = matches.slice(0, visibleGiftCount);
-      if (list.length === 0) giftList.append(emptyState('没有匹配的礼物'));
-      for (const g of list) {
-        const row = el('div', { class: 'list-item' });
-        const img = el('img', { class: 'gift-img' }) as HTMLImageElement;
-        img.src = g.imgBasic || 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
-        const configured = state.rules.some((r) => r.giftId === g.id);
-        const price = `${g.price} ${g.coinType === 'gold' ? '金瓜子' : '银瓜子'}`;
-        const details = [el('div', { class: 'name', text: g.name }), el('div', { class: 'sub', text: price })];
-        if (state.settings.giftView === 'list') details.push(el('div', { class: 'sub', text: `ID ${g.id}` }));
-        row.append(img, el('div', { class: 'grow', children: details }),
-          configured ? el('span', { class: 'badge', text: '已设置' }) : el('span', { class: 'badge unset', text: '未配置' }));
-        row.onclick = () => openRuleEditor(g.id, g.name, g.imgBasic);
-        giftList.append(row);
-      }
-      if (matches.length > list.length) {
-        const loadMore = el('button', {
-          class: 'btn ghost gift-load-more',
-          text: `加载更多（已显示 ${list.length}/${matches.length}）`,
-        }) as HTMLButtonElement;
-        loadMore.onclick = () => {
-          visibleGiftCount += giftPageSize;
-          renderGiftList(filter);
-        };
-        giftList.append(loadMore);
-      } else if (matches.length > 0) {
-        giftList.append(el('div', { class: 'gift-count', text: `共 ${matches.length} 个礼物` }));
-      }
-    }
-    listButton.onclick = () => {
-      state.settings.giftView = 'list';
-      giftList.className = 'gift-list';
-      updateViewToggle();
-      save();
-      renderGiftList(search.value.trim());
-    };
-    gridButton.onclick = () => {
-      state.settings.giftView = 'grid';
-      giftList.className = 'gift-grid';
-      updateViewToggle();
-      save();
-      renderGiftList(search.value.trim());
-    };
-    viewToggle.append(listButton, gridButton);
-    updateViewToggle();
-    renderGiftList('');
-    search.oninput = () => {
-      visibleGiftCount = giftPageSize;
-      renderGiftList(search.value.trim());
-    };
-    addCard.append(search, viewToggle, giftList);
-    content.append(addCard);
-
-    if (state.rules.length > 0) {
-      for (const rule of state.rules) {
-        const gi = findGift(state, rule.giftId);
-        const item = el('div', { class: 'list-item' });
-        const img = el('img', { class: 'gift-img' }) as HTMLImageElement;
-        img.src = gi?.imgBasic || 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
-        const del = el('button', { class: 'btn danger', text: '删除' });
-        del.onclick = () => {
-          state.rules = state.rules.filter((r) => r.id !== rule.id);
-          save();
-          render();
-        };
-        item.append(img,
-          el('div', { class: 'grow' }, [
-            el('div', { class: 'name', text: `${gi?.name ?? rule.giftId} → ${rule.attributeName}` }),
-            el('div', { class: 'sub', text: `${rule.formula}` }),
-          ]),
-          del);
-        content.append(item);
-      }
-    } else {
-      content.append(emptyState('先搜索一个观众会送的礼物。'));
-    }
+  function render(): void {
+    activeGuide?.dispose();
+    activeGuide = null;
+    content.replaceChildren();
+    renderHeaderStatus();
+    renderConnectionWorkspace();
+    renderAttributesWorkspace();
+    renderAdvancedSettings();
+    renderGuide();
   }
 
-  function openRuleEditor(giftId: number, giftName: string, _giftImg: string): void {
-    const overlay = el('div', { class: 'overlay' });
-    const card = el('div', { class: 'card' });
-    card.append(el('h3', { text: `配置规则：${giftName}` }));
-    const attrSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
-    attrSelect.innerHTML = state.attributes.map((a) => `<option>${a.name}</option>`).join('');
-    const formulaInput = inputField('触发后属性值', 'price/1000*60');
-    formulaInput.classList.add('formula');
-    formulaInput.placeholder = '例如 早播次数+price/1000*60';
-    const assignmentHint = el('div', {
-      class: 'hint assignment-hint',
-      text: '公式结果会直接成为属性的新值。需要累加时，请在公式中写出当前属性名，例如：早播次数+1。',
-    });
-    const migrationWarning = el('div', {
-      class: 'hint warning',
-      text: '本版本已改为赋值语义，之前保存的公式请重新检查。已有规则需要复核。',
-    });
-    const preview = el('div', { class: 'preview' });
-    const minInput = inputField('最低门槛 price≥（可留空）', '');
-    const capInput = inputField('上限封顶（可留空）', '');
-    const limitInput = inputField('当日限次（可留空）', '');
-    function updatePreview(): void {
-      const formula = formulaInput.value.trim();
-      preview.replaceChildren();
-      try {
-        const env = buildPreviewEnv(state);
-        const vars = collectVars(formula);
-        const missing = vars.filter((v) => v !== 'price' && v !== 'count' && !state.attributes.some((a) => a.name === v));
-        const target = state.attributes[attrSelect.selectedIndex];
-        const result = evalFormula(formula, env);
-        const before = target?.value ?? 0;
-        const cap = numOrUndef(capInput.value);
-        const valueAfter = cap === undefined ? result : Math.min(result, cap);
-        const beforeText = target ? formatValue(before, target) : String(before);
-        const resultText = target ? formatValue(valueAfter, target) : String(valueAfter);
-        preview.append(el('div', { text: `当前值：${beforeText} → 触发后：` }),
-          el('span', { class: 'result', text: resultText }));
-        if (!target) preview.append(el('div', { class: 'hint error', text: '请先创建属性，再配置礼物规则。' }));
-        if (missing.length > 0) preview.append(el('div', { class: 'hint error', text: `未定义变量：${missing.join('、')}` }));
-        if (vars.length === 0) preview.append(el('div', { class: 'hint', text: '提示：可用变量 price（礼物单价）、count（数量），以及属性名。点上方示例查看写法' }));
-      } catch (e) {
-        const msg = e instanceof FormulaError ? e.message : String(e);
-        preview.append(el('div', { class: 'error', text: msg }));
-      }
-    }
-    formulaInput.oninput = updatePreview;
-
-    const tut = el('details', { class: 'tutorial' });
-    tut.append(el('summary', { text: '不会写公式？看示例' }));
-    const varsTable = el('table', {}, [
-      el('tr', {}, [el('th', { text: '变量' }), el('th', { text: '代表什么' })]),
-      el('tr', {}, [el('td', {}, [el('code', { text: 'price' })]), el('td', { text: '这个礼物的单价（数值越大礼物越贵）' })]),
-      el('tr', {}, [el('td', {}, [el('code', { text: 'count' })]), el('td', { text: '观众一次送的数量' })]),
-      ...state.attributes.map((a) => el('tr', {}, [el('td', {}, [el('code', { text: a.name })]), el('td', { text: `${a.name} 当前的值` })])),
+  function sectionHeading(kicker: string, title: string, description: string): HTMLElement {
+    return el('div', { class: 'section-heading' }, [
+      el('span', { class: 'section-kicker', text: kicker }),
+      el('h2', { text: title }),
+      el('p', { text: description }),
     ]);
-    const exTable = el('table', {}, [
-      el('tr', {}, [el('th', { text: '函数' }), el('th', { text: '作用' })]),
-      el('tr', {}, [el('td', {}, [el('code', { text: 'IF(条件, 是, 否)' })]), el('td', { text: '如果条件成立返回"是"，否则返回"否"' })]),
-      el('tr', {}, [el('td', {}, [el('code', { text: 'RAND()' })]), el('td', { text: '0~1 之间的随机数' })]),
-      el('tr', {}, [el('td', {}, [el('code', { text: 'RANDBETWEEN(最小, 最大)' })]), el('td', { text: '范围内的随机整数（如抽奖）' })]),
-      el('tr', {}, [el('td', {}, [el('code', { text: 'MAX(1,2) / MIN(1,2)' })]), el('td', { text: '取最大 / 最小' })]),
-    ]);
-    const targetName = () => state.attributes[attrSelect.selectedIndex]?.name ?? '当前值';
-    const examples: [string, (target: string) => string][] = [
-      ['当前值加 60 秒', (target) => `${target}+price/1000*60`],
-      ['当前值随机加 10~60 秒', (target) => `${target}+RANDBETWEEN(10,60)`],
-      ['满 100 元设置为当前值+5分钟', (target) => `IF(price>=100000,${target}+300,${target})`],
-      ['按礼物数量累加，每个30秒', (target) => `${target}+count*30`],
-      ['随机设置为 10~60', () => 'RANDBETWEEN(10,60)'],
-      ['达到 10 次后翻倍', (target) => `IF(${target}<10,${target}+1,${target}*2)`],
-      ['1 元设置为对应积分', () => 'ROUND(price/1000)'],
-    ];
-    const exRow = el('div', { class: 'examples' });
-    function renderExamples(): void {
-      exRow.replaceChildren();
-      for (const [label, makeFormula] of examples) {
-        const formula = makeFormula(targetName());
-        const chip = el('button', { class: 'example-chip', text: `${label} → ${formula}` }) as HTMLButtonElement;
-        chip.title = '点击填入公式框';
-        chip.onclick = () => {
-          formulaInput.value = makeFormula(targetName());
-          updatePreview();
-        };
-        exRow.append(chip);
-      }
-    }
-    renderExamples();
-    capInput.oninput = updatePreview;
-    attrSelect.onchange = () => {
-      updatePreview();
-      renderExamples();
-    };
-    updatePreview();
-    tut.append(
-      el('div', { style: 'margin-top:8px;font-weight:600;', text: '可用的变量（直接在公式里用）：' }),
-      varsTable,
-      el('div', { style: 'margin-top:8px;font-weight:600;', text: '常用函数：' }),
-      exTable,
-      el('div', { style: 'margin-top:8px;font-weight:600;', text: '点一下就能填入的示例：' }),
-      exRow,
-      el('div', { class: 'hint', style: 'margin-top:8px;', text: '提示：加班时间按秒计算，60 秒 = 1 分钟。当前值表示所选属性在礼物触发前的值，公式结果就是触发后的值。' }),
-    );
-    const limits = el('details', { class: 'details-card' });
-    limits.append(
-      el('summary', { text: '可选限制' }),
-      fieldControl(minInput),
-      fieldControl(capInput),
-      fieldControl(limitInput),
-    );
+  }
 
-    const saveBtn = el('button', { class: 'btn', text: '保存规则' });
-    saveBtn.onclick = () => {
-      const formula = formulaInput.value.trim();
-      if (!formula) { toast('请填写公式', root); return; }
-      try {
-        evalFormula(formula, buildPreviewEnv(state));
-      } catch {
-        toast('公式有误，无法保存', root);
+  function renderConnectionWorkspace(): void {
+    const grid = el('section', { class: 'connection-grid' });
+    const roomCard = el('article', { class: 'workspace-card room-card' });
+    roomCard.append(sectionHeading('直播来源', '连接直播间', '输入房间号并测试连接，礼物目录会随着直播事件自动补充。'));
+
+    const roomInput = inputField('房间号', state.roomId);
+    roomInput.classList.add('guide-room-input');
+    roomInput.placeholder = '例如 88888888';
+    roomInput.inputMode = 'numeric';
+    roomInput.oninput = () => undefined;
+    const connectionText = el('span', { class: 'connection-inline-status', text: connectionLabel(connectionState) });
+    const connectButton = el('button', { class: 'btn', type: 'button', text: '测试连接' }) as HTMLButtonElement;
+    connectButton.onclick = () => {
+      const roomId = roomInput.value.trim();
+      if (!roomId) {
+        toast('请输入房间号', root);
+        roomInput.focus();
         return;
       }
-      const attrName = state.attributes[attrSelect.selectedIndex]?.name;
-      if (!attrName) { toast('请先创建属性', root); return; }
-      const rule: GiftRule = {
-        id: `r-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        giftId,
-        attributeName: attrName,
-        formula,
-        minPrice: numOrUndef(minInput.value),
-        cap: numOrUndef(capInput.value),
-        dailyLimit: numOrUndef(limitInput.value),
-      };
-      state.rules.push(rule);
-      save();
-      overlay.remove();
-      switchTo('obs');
-      toast('规则已保存', root);
+      state.roomId = roomId;
+      connectionState = 'connecting';
+      connectionText.textContent = connectionLabel(connectionState);
+      renderHeaderStatus();
+      void saveAndWait().then(refreshRuntime).catch(() => undefined);
     };
-    const cancelBtn = el('button', { class: 'btn ghost', text: '取消' });
-    cancelBtn.onclick = () => overlay.remove();
-    card.append(
-      el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '选择属性' }), attrSelect]),
-      assignmentHint,
-      migrationWarning,
-      fieldControl(formulaInput),
-      tut,
-      preview,
-      limits,
-      el('div', { class: 'row gap' }, [saveBtn, cancelBtn]),
+    roomCard.append(
+      fieldControl(roomInput),
+      el('div', { class: 'row connection-actions' }, [connectButton, connectionText]),
+      el('details', { class: 'inline-help' }, [
+        el('summary', { text: '房间号在哪里？' }),
+        el('p', { text: '直播地址 live.bilibili.com/88888888 中的 88888888 就是房间号，不要复制问号后的参数。' }),
+      ]),
     );
-    overlay.append(card);
-    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
-    root.append(overlay);
+
+    grid.append(roomCard);
+    content.append(grid);
   }
 
-  function renderManualAdd(): void {
-    content.append(
-      el('h1', { class: 'wizard-main-title', text: '手动添加礼物' }),
-      el('p', { class: 'wizard-subtitle', text: '知道礼物 ID 时，可以在观众送出前创建规则。' }),
+  function renderAttributesWorkspace(): void {
+    const section = el('section', { class: 'attributes-section' });
+    const headingRow = el('div', { class: 'attributes-heading-row' });
+    headingRow.append(
+      sectionHeading('互动逻辑', '属性与礼物公式', '一个属性可以被多个礼物影响；连送 N 个会按单个礼物连续执行 N 次公式。'),
     );
-    const manualCard = el('div', { class: 'card manual-add-card' });
-    manualCard.append(el('div', { class: 'sub', style: 'margin-bottom:12px;color:var(--text-dim);font-size:13px;', text: '一般用不到这里——观众送过的礼物会自动出现在礼物列表。' }));
-    const gidInput = inputField('礼物 ID', '');
-    const gnameInput = inputField('礼物名称（用于显示）', '');
-    const giconInput = inputField('图标 URL（可选）', '');
-    const addBtn = el('button', { class: 'btn', text: '添加到目录并建规则' });
-    addBtn.onclick = () => {
-      const gid = Number(gidInput.value.trim());
-      if (!gid) { toast('请输入礼物 ID', root); return; }
-      const name = gnameInput.value.trim() || `礼物${gid}`;
-      upsertRecentGift(state, parseGift({ giftId: gid, giftName: name, gift_info: { img_basic: giconInput.value.trim() } }));
+    const addButton = el('button', { class: 'btn guide-attribute-add', type: 'button', text: '+ 添加属性' }) as HTMLButtonElement;
+    addButton.onclick = () => openAttributeEditor();
+    headingRow.append(addButton);
+    section.append(headingRow);
+
+    if (state.attributes.length === 0) {
+      const empty = emptyState('还没有属性。添加属性后，可以在同一个窗口里选择任意数量的礼物。');
+      empty.classList.add('attribute-empty');
+      section.append(empty);
+    } else {
+      const list = el('div', { class: 'attribute-list' });
+      state.attributes.forEach((attribute, index) => list.append(renderAttributeCard(attribute, index)));
+      section.append(list);
+    }
+    content.append(section);
+  }
+
+  function renderAttributeCard(attribute: Attribute, index: number): HTMLElement {
+    const rules = state.rules.filter((rule) => rule.attributeName === attribute.name);
+    const timerRules = state.timerRules.filter((rule) => rule.attributeName === attribute.name);
+    const card = el('article', { class: 'attribute-card' });
+    const editButton = el('button', { class: `btn ghost attribute-action-button${index === 0 ? ' guide-attribute-edit' : ''}`, type: 'button', text: '编辑' }) as HTMLButtonElement;
+    editButton.onclick = () => openAttributeEditor(index);
+    const deleteButton = el('button', { class: 'btn text-danger attribute-action-button', type: 'button', text: '删除' }) as HTMLButtonElement;
+    deleteButton.onclick = () => {
+      if (!confirm(`删除属性“${attribute.name}”及其全部触发规则？`)) return;
+      state.attributes.splice(index, 1);
+      state.rules = state.rules.filter((rule) => rule.attributeName !== attribute.name);
+      state.timerRules = state.timerRules.filter((rule) => rule.attributeName !== attribute.name);
       save();
-      openRuleEditor(gid, name, giconInput.value.trim());
+      render();
+      toast('属性已删除', root);
     };
-    manualCard.append(fieldControl(gidInput), fieldControl(gnameInput), fieldControl(giconInput), addBtn);
-    content.append(manualCard);
-  }
+    const title = el('div', { class: 'attribute-card-title' });
+    title.append(
+      el('div', { class: 'attribute-title-copy' }, [
+        el('div', { class: 'attribute-name-row' }, [
+          el('h3', { text: attribute.name }),
+          attributeValueElement(attribute),
+        ]),
+        el('span', { class: 'attribute-meta', text: `${displayFormatLabel(attribute)} · ${rules.length} 条礼物公式 · ${timerRules.length} 个定时器` }),
+      ]),
+      el('div', { class: 'attribute-actions' }, [editButton, deleteButton]),
+    );
 
-  function renderMoreSettings(): void {
-    const panel = el('div', { class: 'secondary-panel' });
-    panel.style.display = 'none';
-    const toggle = el('button', { class: 'secondary-toggle', text: '更多设置' }) as HTMLButtonElement;
-    toggle.onclick = () => {
-      const showing = panel.style.display !== 'none';
-      panel.style.display = showing ? 'none' : 'flex';
-    };
-    const statsButton = el('button', { class: 'btn ghost', text: '查看统计' }) as HTMLButtonElement;
-    statsButton.onclick = () => switchTo('stats');
-    const settingsButton = el('button', { class: 'btn ghost', text: '面板设置' }) as HTMLButtonElement;
-    settingsButton.onclick = () => switchTo('settings');
-    const manualButton = el('button', { class: 'btn ghost', text: '手动添加礼物' }) as HTMLButtonElement;
-    manualButton.onclick = () => switchTo('manual');
-    panel.append(statsButton, settingsButton, manualButton);
-    content.append(toggle, panel);
-  }
-
-  function renderStats(): void {
-    content.append(el('div', { class: 'section-title', text: '统计' }));
-    guideCard('这里是今天收到礼物的汇总，以及每次礼物触发规则后属性的变动记录，方便你核对。', '这里能看到什么？');
-    const day = state.stats[todayStr()];
-    const card = el('div', { class: 'card' });
-    if (day && Object.keys(day.giftTotals).length > 0) {
-      for (const [gid, cnt] of Object.entries(day.giftTotals)) {
-        const g = findGift(state, Number(gid));
-        card.append(el('div', { class: 'list-item' }, [
-          el('span', { text: `${g?.name ?? gid} x${cnt}` }),
+    const formulas = el('div', { class: 'attribute-formulas' });
+    if (rules.length === 0 && timerRules.length === 0) {
+      formulas.append(el('div', { class: 'formula-empty', text: '尚未配置触发规则，点击“编辑”即可添加。' }));
+    } else {
+      for (const rule of rules) {
+        const gift = findGift(state, rule.giftId);
+        const giftImage = el('img', { class: 'attribute-gift-image', alt: '' }) as HTMLImageElement;
+        giftImage.src = gift?.imgBasic || transparentPixel();
+        formulas.append(el('div', { class: 'attribute-gift-rule' }, [
+          giftImage,
+          el('div', { class: 'attribute-gift-copy' }, [
+            el('strong', { text: gift?.name ?? `礼物 ${rule.giftId}` }),
+            el('span', { text: rule.formulaName?.trim() || '未命名公式' }),
+          ]),
         ]));
       }
-    } else {
-      card.append(emptyState('今天还没有礼物'));
+      for (const rule of timerRules) {
+        formulas.append(el('div', { class: 'attribute-gift-rule attribute-timer-rule' }, [
+          el('span', { class: 'attribute-timer-icon', text: '⏱' }),
+          el('div', { class: 'attribute-gift-copy' }, [
+            el('strong', { text: rule.formulaName || '未命名定时器' }),
+            el('span', { text: `每 ${formatInterval(rule.intervalSeconds)}${rule.enabled ? '' : ' · 已停用'}` }),
+          ]),
+        ]));
+      }
     }
-    content.append(card);
-    const logCard = el('div', { class: 'card' });
-    logCard.append(el('h3', { text: '属性变动日志' }));
-    if (state.log.length === 0) logCard.append(emptyState('暂无变动记录'));
-    for (const e of state.log) {
-      logCard.append(el('div', { class: 'log-item' }, [
-        el('span', { text: `${new Date(e.time * 1000).toLocaleString('zh-CN')} ` }),
-        el('b', { text: `${e.uname} 送出 ${e.giftName} ` }),
-        el('span', { text: `${e.attributeName} ${e.delta > 0 ? '+' : ''}${e.delta} → ${e.valueAfter}` }),
-      ]));
-    }
-    content.append(logCard);
+
+    const obsUrl = `${location.origin}/?mode=display&attribute=${encodeURIComponent(attribute.name)}`;
+    const obsInput = el('input', {
+      class: 'field-input attribute-obs-input',
+      value: obsUrl,
+      readOnly: true,
+      ariaLabel: `${attribute.name} 的 OBS 专属链接`,
+    } as any) as HTMLInputElement;
+    const copyObsButton = el('button', {
+      class: `btn attribute-obs-copy${index === 0 ? ' guide-obs-copy' : ''}`,
+      type: 'button',
+      text: '复制 OBS 链接',
+    }) as HTMLButtonElement;
+    copyObsButton.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(obsUrl);
+        toast(`“${attribute.name}”的 OBS 链接已复制`, root);
+      } catch {
+        obsInput.select();
+        toast('请按 Ctrl+C 复制地址', root);
+      }
+    };
+    const obsRow = el('div', { class: 'attribute-obs-row' }, [
+      el('span', { class: 'attribute-obs-label', text: 'OBS 专属链接' }),
+      obsInput,
+      copyObsButton,
+    ]);
+
+    card.append(title, formulas, obsRow);
+    return card;
   }
 
-  function renderSettings(): void {
-    content.append(el('div', { class: 'section-title', text: '设置' }));
-    guideCard('调整面板在直播画面里的样子，以及备份/迁移你的配置。', '设置里能做什么？');
-    const card = el('div', { class: 'card' });
+  function openAttributeEditor(index?: number): void {
+    activeGuide?.dispose();
+    activeGuide = null;
+    root.querySelector('.attribute-overlay')?.remove();
+    const stepBeforeOpen = getTutorialStep(state, connectionState === 'connected', false);
+    editorOpen = true;
+    editorGuideEnabled = index === undefined
+      && !guideDismissed
+      && (stepBeforeOpen === 'attributes' || stepBeforeOpen === 'rules');
+
+    const original = index === undefined ? undefined : state.attributes[index];
+    const originalName = original?.name ?? '';
+    const timerRules = original
+      ? state.timerRules.filter((rule) => rule.attributeName === original.name).map((rule) => ({ ...rule }))
+      : [];
+    let allGifts = availableGifts(state);
+    const selected = new Map<number, SelectedGiftRule>();
+    if (original) {
+      for (const rule of state.rules.filter((item) => item.attributeName === original.name)) {
+        const gift = findGift(state, rule.giftId);
+        if (gift && !selected.has(gift.id)) {
+          selected.set(gift.id, {
+            gift,
+            formulaName: rule.formulaName?.trim() || `${gift.name}规则`,
+            formula: rule.formula,
+            previous: rule,
+          });
+        }
+      }
+    }
+
+    const overlay = el('div', { class: 'overlay attribute-overlay' });
+    const modal = el('section', { class: 'card attribute-modal', role: 'dialog', ariaLabel: original ? `编辑属性 ${original.name}` : '添加属性' } as any);
+    const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭' } as any) as HTMLButtonElement;
+    const close = (): void => {
+      overlay.remove();
+      editorOpen = false;
+      editorGuideEnabled = false;
+      renderGuide();
+    };
+    closeButton.onclick = close;
+    modal.append(el('header', { class: 'modal-header' }, [
+      el('div', {}, [
+        el('span', { class: 'section-kicker', text: original ? '编辑互动属性' : '新建互动属性' }),
+        el('h2', { text: original ? `配置“${original.name}”` : '添加属性并绑定礼物' }),
+        el('p', { text: '属性基础信息、礼物选择和每个礼物的公式都在这里完成。' }),
+      ]),
+      closeButton,
+    ]));
+
+    const nameInput = inputField('属性名称', original?.name ?? `属性${state.attributes.length + 1}`);
+    nameInput.placeholder = '例如 加班时间';
+    nameInput.oninput = () => {
+      const targetName = nameInput.value.trim() || '属性';
+      for (const label of Array.from(modal.querySelectorAll('.formula-target-name'))) {
+        label.textContent = `${targetName} =`;
+      }
+    };
+    const valueInput = inputField('当前值', String(original?.value ?? 0));
+    valueInput.inputMode = 'decimal';
+    const formatSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
+    formatSelect.innerHTML = '<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字 + 后缀</option>';
+    formatSelect.value = original?.format ?? 'hhmmss';
+    const suffixInput = inputField('数值后缀', original?.suffix ?? '');
+    suffixInput.placeholder = '例如 次、分、点';
+    const suffixControl = fieldControl(suffixInput);
+    const updateSuffixVisibility = (): void => {
+      suffixControl.hidden = formatSelect.value !== 'suffix';
+    };
+    formatSelect.onchange = updateSuffixVisibility;
+    updateSuffixVisibility();
+    const basics = el('div', { class: 'attribute-basics' }, [
+      fieldControl(nameInput),
+      fieldControl(valueInput),
+      el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '显示格式' }), formatSelect]),
+      suffixControl,
+    ]);
+
+    const timerList = el('div', { class: 'timer-rule-list' });
+    const timerCount = el('span', { class: 'selection-count' });
+
+    function renderTimerRules(): void {
+      timerCount.textContent = timerRules.length === 0 ? '未启用' : `${timerRules.length} 个定时器`;
+      timerList.replaceChildren();
+      if (timerRules.length === 0) {
+        timerList.append(el('div', {
+          class: 'timer-rule-empty',
+          text: '没有定时器。添加后，即使配置页和 OBS 都关闭，托盘后台仍会按间隔执行公式。',
+        }));
+        return;
+      }
+      timerRules.forEach((rule) => timerList.append(renderTimerRuleEditor(rule)));
+    }
+
+    function renderTimerRuleEditor(rule: TimerRule): HTMLElement {
+      const editor = el('article', { class: 'timer-rule-editor' });
+      const removeButton = el('button', { class: 'rule-remove', type: 'button', text: '移除' }) as HTMLButtonElement;
+      removeButton.onclick = () => {
+        const timerIndex = timerRules.findIndex((candidate) => candidate.id === rule.id);
+        if (timerIndex >= 0) timerRules.splice(timerIndex, 1);
+        renderTimerRules();
+      };
+      const enabledInput = el('input', { type: 'checkbox' }) as HTMLInputElement;
+      enabledInput.checked = rule.enabled;
+      enabledInput.onchange = () => {
+        rule.enabled = enabledInput.checked;
+        editor.classList.toggle('is-disabled', !rule.enabled);
+      };
+      editor.classList.toggle('is-disabled', !rule.enabled);
+      editor.append(el('div', { class: 'timer-rule-header' }, [
+        el('div', { class: 'timer-rule-title' }, [
+          el('span', { class: 'timer-rule-clock', text: '⏱' }),
+          el('div', {}, [
+            el('strong', { text: '后台定时触发' }),
+            el('small', { text: '从保存或服务启动后开始计算第一个完整间隔' }),
+          ]),
+        ]),
+        el('div', { class: 'timer-rule-actions' }, [
+          el('label', { class: 'timer-enabled-toggle' }, [enabledInput, el('span', { text: '启用' })]),
+          removeButton,
+        ]),
+      ]));
+
+      const formulaNameInput = inputField('触发器名称', rule.formulaName);
+      formulaNameInput.placeholder = '例如 每分钟自动减少';
+      formulaNameInput.oninput = () => {
+        rule.formulaName = formulaNameInput.value;
+      };
+
+      const intervalParts = splitInterval(rule.intervalSeconds);
+      const intervalInput = inputField('触发间隔', String(intervalParts.value));
+      intervalInput.type = 'number';
+      intervalInput.min = '1';
+      intervalInput.step = '1';
+      const intervalUnit = el('select', { class: 'field-input timer-interval-unit' }) as HTMLSelectElement;
+      intervalUnit.innerHTML = '<option value="1">秒</option><option value="60">分钟</option><option value="3600">小时</option>';
+      intervalUnit.value = String(intervalParts.multiplier);
+      const syncInterval = (): void => {
+        const amount = Math.max(1, Math.floor(Number(intervalInput.value) || 1));
+        rule.intervalSeconds = amount * Number(intervalUnit.value);
+      };
+      intervalInput.oninput = syncInterval;
+      intervalUnit.onchange = syncInterval;
+      const intervalControl = el('label', { class: 'field timer-interval-field' }, [
+        el('span', { class: 'field-label', text: '触发间隔' }),
+        el('div', { class: 'timer-interval-row' }, [intervalInput, intervalUnit]),
+      ]);
+
+      const conditionInput = inputField('运行条件（可留空）', rule.condition ?? '');
+      conditionInput.classList.add('formula');
+      conditionInput.placeholder = `${nameInput.value.trim() || '属性'}>0`;
+      conditionInput.oninput = () => {
+        rule.condition = conditionInput.value;
+        updatePreview();
+      };
+
+      const formulaInput = inputField('定时触发后属性值', rule.formula);
+      formulaInput.classList.add('formula');
+      formulaInput.placeholder = `MAX(${nameInput.value.trim() || '属性'}-60,0)`;
+      const formulaControl = el('label', { class: 'field formula-assignment-field' });
+      const assignmentRow = el('div', { class: 'formula-assignment-row' });
+      assignmentRow.append(
+        el('code', { class: 'formula-target-name', text: `${nameInput.value.trim() || '属性'} =` }),
+        formulaInput,
+      );
+      formulaControl.append(
+        el('span', { class: 'field-label', text: '触发后属性值' }),
+        assignmentRow,
+      );
+
+      const preview = el('div', { class: 'formula-preview' });
+      let previewVersion = 0;
+      const updatePreview = (): void => {
+        rule.formula = formulaInput.value;
+        const name = nameInput.value.trim() || originalName || '属性';
+        const value = Number(valueInput.value);
+        const currentValue = Number.isFinite(value) ? value : 0;
+        const condition = originalName && originalName !== name
+          ? replaceFormulaVariable((rule.condition ?? '').trim(), originalName, name)
+          : (rule.condition ?? '').trim();
+        const formula = originalName && originalName !== name
+          ? replaceFormulaVariable(rule.formula.trim(), originalName, name)
+          : rule.formula.trim();
+        const requestVersion = ++previewVersion;
+        preview.replaceChildren(el('span', { text: '由后台计算预览…' }));
+        void (async () => {
+          if (condition) {
+            const conditionResult = await previewFormula(condition, name, currentValue, 'timer');
+            if (conditionResult === 0) return { skipped: true as const, result: currentValue };
+          }
+          return { skipped: false as const, result: await previewFormula(formula, name, currentValue, 'timer') };
+        })().then(({ skipped, result }) => {
+          if (requestVersion !== previewVersion) return;
+          if (skipped) {
+            preview.replaceChildren(el('span', { text: '当前条件不满足，本次会跳过' }));
+            return;
+          }
+          preview.replaceChildren(
+            el('span', { text: `预览：${currentValue} → ` }),
+            el('strong', { text: String(result) }),
+          );
+        }).catch((error) => {
+          if (requestVersion !== previewVersion) return;
+          preview.replaceChildren(el('span', {
+            class: 'error',
+            text: error instanceof Error ? error.message : String(error),
+          }));
+        });
+      };
+      formulaInput.oninput = updatePreview;
+
+      const examples = el('div', { class: 'formula-examples' });
+      const timerExamples: Array<[string, () => string]> = [
+        ['每次 -1', () => `MAX(${nameInput.value.trim() || '属性'}-1,0)`],
+        ['每次 -60', () => `MAX(${nameInput.value.trim() || '属性'}-60,0)`],
+        ['直接归零', () => '0'],
+      ];
+      for (const [label, makeFormula] of timerExamples) {
+        const example = el('button', { class: 'formula-example', type: 'button', text: label }) as HTMLButtonElement;
+        example.onclick = () => {
+          formulaInput.value = makeFormula();
+          updatePreview();
+        };
+        examples.append(example);
+      }
+
+      editor.append(
+        el('div', { class: 'timer-rule-fields' }, [
+          fieldControl(formulaNameInput),
+          intervalControl,
+          fieldControl(conditionInput),
+          formulaControl,
+        ]),
+        el('div', { class: 'formula-editor-meta' }, [examples, preview]),
+      );
+      updatePreview();
+      return editor;
+    }
+
+    const addTimerButton = el('button', { class: 'btn ghost add-timer-button', type: 'button', text: '+ 添加定时器' }) as HTMLButtonElement;
+    addTimerButton.onclick = () => {
+      const attributeName = nameInput.value.trim() || '属性';
+      timerRules.push({
+        id: createTimerRuleId(),
+        attributeName,
+        formulaName: '每分钟自动减少',
+        intervalSeconds: 60,
+        condition: `${attributeName}>0`,
+        formula: `MAX(${attributeName}-60,0)`,
+        enabled: true,
+      });
+      renderTimerRules();
+      timerList.querySelector('.timer-rule-editor:last-child')?.scrollIntoView({ block: 'nearest' });
+    };
+    const timerPanel = el('section', { class: 'timer-binding-panel' }, [
+      el('div', { class: 'modal-section-heading' }, [
+        el('div', {}, [
+          el('h3', { text: '定时触发器' }),
+          el('p', { text: '按固定间隔独立执行公式，不依赖直播连接、配置页或 OBS 页面。' }),
+        ]),
+        el('div', { class: 'timer-heading-actions' }, [timerCount, addTimerButton]),
+      ]),
+      el('p', {
+        class: 'timer-condition-help',
+        text: '运行条件留空时每次都执行；也可使用属性名和 >、>=、<、<=、=，例如“加班时间 > 0”。定时器只修改属性值，不会显示在 OBS 面板中。',
+      }),
+      timerList,
+    ]);
+
+    const giftSearch = el('input', { class: 'field-input gift-search guide-gift-search', placeholder: '搜索礼物名称或 ID…' }) as HTMLInputElement;
+    const giftPicker = el('div', { class: 'gift-picker-grid' });
+    const selectedRules = el('div', { class: 'selected-rules' });
+    const selectionCount = el('span', { class: 'selection-count' });
+
+    const defaultFormula = (): string => `${nameInput.value.trim() || '属性'}+price/1000*60`;
+
+    function renderGiftPicker(): void {
+      const query = giftSearch.value.trim().toLowerCase();
+      const matches = allGifts
+        .filter((gift) => gift.name.toLowerCase().includes(query) || String(gift.id).includes(query))
+        .slice(0, 80);
+      giftPicker.replaceChildren();
+      if (matches.length === 0) giftPicker.append(el('div', { class: 'picker-empty', text: '没有匹配的礼物，可在下方手动添加。' }));
+      for (const gift of matches) {
+        const selectedNow = selected.has(gift.id);
+        const button = el('button', { class: `gift-choice${selectedNow ? ' is-selected' : ''}`, type: 'button' }) as HTMLButtonElement;
+        const image = el('img', { class: 'gift-choice-image', alt: '' }) as HTMLImageElement;
+        image.src = gift.imgBasic || transparentPixel();
+        button.append(
+          image,
+          el('span', { class: 'gift-choice-copy' }, [
+            el('strong', { text: gift.name }),
+            el('small', { text: giftPriceLabel(gift) }),
+          ]),
+          el('span', { class: 'gift-choice-check', text: selectedNow ? '✓' : '+' }),
+        );
+        button.onclick = () => {
+          if (selected.has(gift.id)) selected.delete(gift.id);
+          else selected.set(gift.id, { gift, formulaName: `${gift.name}规则`, formula: defaultFormula() });
+          renderGiftPicker();
+          renderSelectedRules();
+        };
+        giftPicker.append(button);
+      }
+    }
+
+    function renderSelectedRules(): void {
+      selectionCount.textContent = `已选择 ${selected.size} 个礼物`;
+      selectedRules.replaceChildren();
+      if (selected.size === 0) {
+        selectedRules.append(el('div', { class: 'selected-rules-empty', text: '还没有选择礼物。属性可以先单独保存，之后再回来绑定。' }));
+        return;
+      }
+      for (const item of selected.values()) selectedRules.append(renderFormulaEditor(item));
+    }
+
+    function renderFormulaEditor(item: SelectedGiftRule): HTMLElement {
+      const row = el('article', { class: 'selected-gift-rule' });
+      const removeButton = el('button', { class: 'rule-remove', type: 'button', text: '移除' }) as HTMLButtonElement;
+      removeButton.onclick = () => {
+        selected.delete(item.gift.id);
+        renderGiftPicker();
+        renderSelectedRules();
+      };
+      const giftImage = el('img', { class: 'selected-rule-gift-image', alt: '' }) as HTMLImageElement;
+      giftImage.src = item.gift.imgBasic || transparentPixel();
+      row.append(el('div', { class: 'selected-rule-header' }, [
+        el('div', { class: 'selected-rule-gift' }, [
+          giftImage,
+          el('div', {}, [
+            el('strong', { text: item.gift.name }),
+            el('small', { text: `每收到 1 个执行一次 · ${giftPriceLabel(item.gift)}` }),
+          ]),
+        ]),
+        removeButton,
+      ]));
+      const formulaNameInput = inputField('公式名称', item.formulaName);
+      formulaNameInput.placeholder = `例如 ${item.gift.name}加时`;
+      formulaNameInput.oninput = () => {
+        item.formulaName = formulaNameInput.value;
+      };
+      const formulaInput = inputField('触发后属性值', item.formula);
+      formulaInput.classList.add('formula');
+      formulaInput.placeholder = `${nameInput.value.trim() || '属性'}+60`;
+      const formulaControl = el('label', { class: 'field formula-assignment-field' });
+      const assignmentRow = el('div', { class: 'formula-assignment-row' });
+      assignmentRow.append(
+        el('code', { class: 'formula-target-name', text: `${nameInput.value.trim() || '属性'} =` }),
+        formulaInput,
+      );
+      formulaControl.append(
+        el('span', { class: 'field-label', text: '触发后属性值' }),
+        assignmentRow,
+      );
+      const preview = el('div', { class: 'formula-preview' });
+      let previewVersion = 0;
+      const updatePreview = (): void => {
+        item.formula = formulaInput.value;
+        preview.replaceChildren();
+        const name = nameInput.value.trim() || originalName || '属性';
+        const value = Number(valueInput.value);
+        const formula = originalName && originalName !== name
+          ? replaceFormulaVariable(item.formula.trim(), originalName, name)
+          : item.formula.trim();
+        const currentValue = Number.isFinite(value) ? value : 0;
+        const requestVersion = ++previewVersion;
+        preview.append(el('span', { text: '由后台计算预览…' }));
+        void previewFormula(formula, name, currentValue).then((result) => {
+          if (requestVersion !== previewVersion) return;
+          preview.replaceChildren(
+            el('span', { text: `预览：${currentValue} → ` }),
+            el('strong', { text: String(result) }),
+          );
+        }).catch((error) => {
+          if (requestVersion !== previewVersion) return;
+          preview.replaceChildren(
+            el('span', { class: 'error', text: error instanceof Error ? error.message : String(error) }),
+          );
+        });
+      };
+      formulaInput.oninput = updatePreview;
+      const examples = el('div', { class: 'formula-examples' });
+      const exampleFactories: Array<[string, () => string]> = [
+        ['每个 +1', () => `${nameInput.value.trim() || '属性'}+1`],
+        ['按价格增加时间', () => `${nameInput.value.trim() || '属性'}+price/1000*60`],
+        ['随机 +10~60', () => `${nameInput.value.trim() || '属性'}+RANDBETWEEN(10,60)`],
+      ];
+      for (const [label, makeFormula] of exampleFactories) {
+        const example = el('button', { class: 'formula-example', type: 'button', text: label }) as HTMLButtonElement;
+        example.onclick = () => {
+          formulaInput.value = makeFormula();
+          updatePreview();
+        };
+        examples.append(example);
+      }
+      const editorFields = el('div', { class: 'rule-editor-fields' }, [
+        fieldControl(formulaNameInput),
+        formulaControl,
+      ]);
+      const editorMeta = el('div', { class: 'formula-editor-meta' }, [examples, preview]);
+      row.append(editorFields, editorMeta);
+      updatePreview();
+      return row;
+    }
+
+    giftSearch.oninput = renderGiftPicker;
+    const manualGift = renderManualGiftAdder(() => {
+      allGifts = availableGifts(state);
+      renderGiftPicker();
+      renderSelectedRules();
+    }, selected, defaultFormula);
+
+    const giftsPanel = el('section', { class: 'gift-binding-panel' });
+    giftsPanel.append(
+      el('div', { class: 'modal-section-heading' }, [
+        el('div', {}, [
+          el('h3', { text: '选择会影响这个属性的礼物' }),
+          el('p', { text: '可选择任意数量；同一个礼物也可以出现在其他属性中。' }),
+        ]),
+        selectionCount,
+      ]),
+      giftSearch,
+      giftPicker,
+      manualGift,
+    );
+
+    const formulasPanel = el('section', { class: 'formula-binding-panel' });
+    const formulaHelp = renderFormulaHelp(nameInput.value.trim() || '属性');
+    formulasPanel.append(
+      el('div', { class: 'modal-section-heading' }, [
+        el('div', {}, [
+          el('h3', { text: '为每个礼物配置公式' }),
+          el('p', {}, [
+            '可用变量：',
+            el('code', { text: 'price' }),
+            ' 和任意属性名。连送会按单个礼物逐次执行。',
+          ]),
+        ]),
+      ]),
+      formulaHelp,
+      selectedRules,
+    );
+
+    const cancelButton = el('button', { class: 'btn ghost', type: 'button', text: '取消' }) as HTMLButtonElement;
+    cancelButton.onclick = close;
+    const saveButton = el('button', { class: 'btn', type: 'button', text: original ? '保存修改' : '创建属性' }) as HTMLButtonElement;
+    saveButton.onclick = () => {
+      void saveAttributeEditor(index, original, nameInput, valueInput, formatSelect, suffixInput, selected, timerRules, overlay, saveButton);
+    };
+
+    modal.append(
+      basics,
+      el('div', { class: 'modal-tip', text: '礼物公式和定时公式都由托盘后台执行；关闭配置页或 OBS 不会停止计算。' }),
+      timerPanel,
+      giftsPanel,
+      formulasPanel,
+      el('footer', { class: 'modal-actions' }, [cancelButton, saveButton]),
+    );
+    overlay.append(modal);
+    overlay.onclick = (event) => {
+      if (event.target === overlay) close();
+    };
+    root.append(overlay);
+    renderGiftPicker();
+    renderSelectedRules();
+    renderTimerRules();
+    renderGuide();
+    nameInput.focus();
+  }
+
+  function renderManualGiftAdder(
+    onAdded: () => void,
+    selected: Map<number, SelectedGiftRule>,
+    defaultFormula: () => string,
+  ): HTMLElement {
+    const details = el('details', { class: 'manual-gift-adder' });
+    details.append(el('summary', { text: '找不到礼物？按 ID 手动添加' }));
+    const idInput = inputField('礼物 ID', '');
+    const nameInput = inputField('礼物名称', '');
+    const priceInput = inputField('单价 price（可填 0）', '0');
+    const addButton = el('button', { class: 'btn ghost', type: 'button', text: '添加并选中' }) as HTMLButtonElement;
+    addButton.onclick = () => {
+      const id = Number(idInput.value.trim());
+      const price = Number(priceInput.value.trim());
+      if (!Number.isInteger(id) || id <= 0) {
+        toast('请输入有效的礼物 ID', root);
+        return;
+      }
+      const gift: GiftInfo = {
+        id,
+        name: nameInput.value.trim() || `礼物 ${id}`,
+        price: Number.isFinite(price) ? price : 0,
+        coinType: 'gold',
+        imgBasic: '',
+      };
+      const recentIndex = state.recentGifts.findIndex((item) => item.id === id);
+      const recent = { ...gift, lastReceived: 0, count: recentIndex >= 0 ? state.recentGifts[recentIndex].count : 0 };
+      if (recentIndex >= 0) state.recentGifts[recentIndex] = recent;
+      else state.recentGifts.unshift(recent);
+      selected.set(id, { gift, formulaName: `${gift.name}规则`, formula: defaultFormula() });
+      save();
+      onAdded();
+      details.open = false;
+    };
+    details.append(el('div', { class: 'manual-gift-fields' }, [
+      fieldControl(idInput),
+      fieldControl(nameInput),
+      fieldControl(priceInput),
+      addButton,
+    ]));
+    return details;
+  }
+
+  function saveAttributeEditor(
+    index: number | undefined,
+    original: Attribute | undefined,
+    nameInput: HTMLInputElement,
+    valueInput: HTMLInputElement,
+    formatSelect: HTMLSelectElement,
+    suffixInput: HTMLInputElement,
+    selected: Map<number, SelectedGiftRule>,
+    timerRules: TimerRule[],
+    overlay: HTMLElement,
+    saveButton: HTMLButtonElement,
+  ): Promise<void> {
+    return saveAttributeEditorAsync(index, original, nameInput, valueInput, formatSelect, suffixInput, selected, timerRules, overlay, saveButton);
+  }
+
+  async function saveAttributeEditorAsync(
+    index: number | undefined,
+    original: Attribute | undefined,
+    nameInput: HTMLInputElement,
+    valueInput: HTMLInputElement,
+    formatSelect: HTMLSelectElement,
+    suffixInput: HTMLInputElement,
+    selected: Map<number, SelectedGiftRule>,
+    timerRules: TimerRule[],
+    overlay: HTMLElement,
+    saveButton: HTMLButtonElement,
+  ): Promise<void> {
+    const name = nameInput.value.trim();
+    const value = Number(valueInput.value);
+    if (!name) {
+      toast('请填写属性名称', root);
+      nameInput.focus();
+      return;
+    }
+    if (state.attributes.some((attribute, attributeIndex) => attribute.name === name && attributeIndex !== index)) {
+      toast('属性名称不能重复', root);
+      nameInput.focus();
+      return;
+    }
+    if (!Number.isFinite(value)) {
+      toast('当前值必须是数字', root);
+      valueInput.focus();
+      return;
+    }
+
+    const originalName = original?.name ?? '';
+    const normalizedRules: SelectedGiftRule[] = [];
+    const normalizedTimers: TimerRule[] = [];
+    for (const item of selected.values()) {
+      const formulaName = item.formulaName.trim();
+      if (!formulaName) {
+        toast(`请填写“${item.gift.name}”的公式名称`, root);
+        return;
+      }
+      const formula = originalName && originalName !== name
+        ? replaceFormulaVariable(item.formula.trim(), originalName, name)
+        : item.formula.trim();
+      if (!formula) {
+        toast(`请填写“${item.gift.name}”的公式`, root);
+        return;
+      }
+      normalizedRules.push({ ...item, formulaName, formula });
+    }
+
+    for (const timer of timerRules) {
+      const formulaName = timer.formulaName.trim();
+      if (!formulaName) {
+        toast('请填写定时器名称', root);
+        return;
+      }
+      if (!Number.isInteger(timer.intervalSeconds) || timer.intervalSeconds < 1) {
+        toast(`“${formulaName}”的触发间隔必须至少为 1 秒`, root);
+        return;
+      }
+      const condition = originalName && originalName !== name
+        ? replaceFormulaVariable((timer.condition ?? '').trim(), originalName, name)
+        : (timer.condition ?? '').trim();
+      const formula = originalName && originalName !== name
+        ? replaceFormulaVariable(timer.formula.trim(), originalName, name)
+        : timer.formula.trim();
+      if (!formula) {
+        toast(`请填写“${formulaName}”的公式`, root);
+        return;
+      }
+      normalizedTimers.push({ ...timer, attributeName: name, formulaName, condition, formula });
+    }
+
+    saveButton.disabled = true;
+    saveButton.textContent = '后台校验中…';
+    try {
+      for (const item of normalizedRules) {
+        await previewFormula(item.formula, name, value);
+      }
+      for (const timer of normalizedTimers) {
+        if (timer.condition) await previewFormula(timer.condition, name, value, 'timer');
+        await previewFormula(timer.formula, name, value, 'timer');
+      }
+    } catch (error) {
+      toast(error instanceof Error ? `公式有误：${error.message}` : '公式有误', root);
+      saveButton.disabled = false;
+      saveButton.textContent = original ? '保存修改' : '创建属性';
+      return;
+    }
+
+    const format = formatSelect.value as Attribute['format'];
+    const nextAttribute: Attribute = {
+      name,
+      value,
+      unit: format === 'hhmmss' ? 'seconds' : 'none',
+      format,
+      decimals: original?.decimals ?? 0,
+      suffix: format === 'suffix' ? suffixInput.value : '',
+      ...(original?.color ? { color: original.color } : {}),
+    };
+    if (index === undefined) state.attributes.push(nextAttribute);
+    else state.attributes[index] = nextAttribute;
+
+    const renamedRules = state.rules.map((rule) => ({
+      ...rule,
+      attributeName: originalName && rule.attributeName === originalName ? name : rule.attributeName,
+      formula: originalName && originalName !== name ? replaceFormulaVariable(rule.formula, originalName, name) : rule.formula,
+    }));
+    const unrelatedRules = renamedRules.filter((rule) => rule.attributeName !== name);
+    const replacementRules: GiftRule[] = normalizedRules.map((item) => ({
+      id: item.previous?.id ?? createRuleId(),
+      giftId: item.gift.id,
+      attributeName: name,
+      formulaName: item.formulaName,
+      formula: item.formula,
+      ...(item.previous?.minPrice !== undefined ? { minPrice: item.previous.minPrice } : {}),
+      ...(item.previous?.cap !== undefined ? { cap: item.previous.cap } : {}),
+      ...(item.previous?.dailyLimit !== undefined ? { dailyLimit: item.previous.dailyLimit } : {}),
+    }));
+    state.rules = [...unrelatedRules, ...replacementRules];
+    const renamedTimers = state.timerRules.map((rule) => ({
+      ...rule,
+      attributeName: originalName && rule.attributeName === originalName ? name : rule.attributeName,
+      condition: originalName && originalName !== name
+        ? replaceFormulaVariable(rule.condition ?? '', originalName, name)
+        : rule.condition,
+      formula: originalName && originalName !== name
+        ? replaceFormulaVariable(rule.formula, originalName, name)
+        : rule.formula,
+    }));
+    const unrelatedTimers = renamedTimers.filter((rule) => rule.attributeName !== name);
+    state.timerRules = [...unrelatedTimers, ...normalizedTimers];
+    for (const item of normalizedRules) upsertGiftCatalog(state, item.gift);
+    try {
+      await saveAndWait();
+    } catch {
+      saveButton.disabled = false;
+      saveButton.textContent = original ? '保存修改' : '创建属性';
+      return;
+    }
+    overlay.remove();
+    editorOpen = false;
+    editorGuideEnabled = false;
+    render();
+    toast(index === undefined ? '属性已创建' : '属性配置已保存', root);
+  }
+
+  function renderAdvancedSettings(): void {
+    const details = el('details', { class: 'advanced-settings' });
+    details.append(el('summary', {}, [
+      el('span', { text: '外观与数据' }),
+      el('small', { text: '面板字号、颜色、对齐和配置备份' }),
+    ]));
+    const settingsGrid = el('div', { class: 'advanced-settings-grid' });
+
+    const appearance = el('section', { class: 'workspace-card advanced-card' });
+    appearance.append(el('h3', { text: 'OBS 面板外观' }));
     const fontSize = inputField('字体大小（px）', String(state.settings.fontSize));
-    fontSize.oninput = () => { state.settings.fontSize = Number(fontSize.value) || 48; save(); };
-    const accent = inputField('强调色（十六进制）', state.settings.accentColor);
-    accent.oninput = () => { state.settings.accentColor = accent.value; save(); };
+    fontSize.onchange = () => {
+      state.settings.fontSize = Number(fontSize.value) || 48;
+      save();
+    };
+    const accent = inputField('强调色', state.settings.accentColor);
+    accent.onchange = () => {
+      state.settings.accentColor = accent.value;
+      save();
+    };
     const align = el('select', { class: 'field-input' }) as HTMLSelectElement;
-    align.innerHTML = `<option value="left">左对齐</option><option value="center">居中</option><option value="right">右对齐</option>`;
+    align.innerHTML = '<option value="left">左对齐</option><option value="center">居中</option><option value="right">右对齐</option>';
     align.value = state.settings.align;
-    align.onchange = () => { state.settings.align = align.value as any; save(); };
-    const showStats = el('input', { type: 'checkbox' }) as HTMLInputElement;
-    showStats.checked = state.settings.showStats;
-    showStats.onchange = () => { state.settings.showStats = showStats.checked; save(); };
-    const showConn = el('input', { type: 'checkbox' }) as HTMLInputElement;
-    showConn.checked = state.settings.showConnection;
-    showConn.onchange = () => { state.settings.showConnection = showConn.checked; save(); };
-    card.append(
+    align.onchange = () => {
+      state.settings.align = align.value as AppState['settings']['align'];
+      save();
+    };
+    const showStats = checkboxField('显示今日统计', state.settings.showStats, (checked) => {
+      state.settings.showStats = checked;
+      save();
+    });
+    const showConnection = checkboxField('显示连接状态', state.settings.showConnection, (checked) => {
+      state.settings.showConnection = checked;
+      save();
+    });
+    appearance.append(
       fieldControl(fontSize),
       fieldControl(accent),
-      el('div', { class: 'field', children: [el('span', { class: 'field-label', text: '对齐' }), align] }),
-      el('div', { class: 'field', children: [el('label', { text: '显示今日统计' }), showStats] }),
-      el('div', { class: 'field', children: [el('label', { text: '显示连接状态' }), showConn] }),
+      el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '对齐' }), align]),
+      showStats,
+      showConnection,
     );
-    content.append(card);
 
-    const dataCard = el('div', { class: 'card' });
-    dataCard.append(el('h3', { text: '数据管理' }));
-    const exportBtn = el('button', { class: 'btn', text: '导出配置' });
-    exportBtn.onclick = () => {
+    const dataCard = el('section', { class: 'workspace-card advanced-card' });
+    dataCard.append(
+      el('h3', { text: '配置与数据' }),
+      el('p', { class: 'advanced-copy', text: `当前有 ${state.attributes.length} 个属性、${state.rules.length} 条礼物公式、${state.timerRules.length} 个定时器和 ${state.log.length} 条变动记录。` }),
+    );
+    const exportButton = el('button', { class: 'btn', type: 'button', text: '导出配置' }) as HTMLButtonElement;
+    exportButton.onclick = () => {
       const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
-      const a = el('a', { href: url, download: `gift-panel-config-${new Date().toISOString().slice(0, 10)}.json` }) as HTMLAnchorElement;
-      a.click();
+      const link = el('a', { href: url, download: `gift-panel-config-${new Date().toISOString().slice(0, 10)}.json` }) as HTMLAnchorElement;
+      link.click();
       URL.revokeObjectURL(url);
     };
     const importInput = el('input', { type: 'file', accept: '.json' }) as HTMLInputElement;
-    importInput.style.display = 'none';
+    importInput.hidden = true;
     importInput.onchange = () => {
       const file = importInput.files?.[0];
       if (!file) return;
-      file.text().then((text) => {
+      void file.text().then((text) => {
         let parsed: Partial<AppState>;
         try {
           parsed = JSON.parse(text) as Partial<AppState>;
@@ -808,10 +1066,7 @@ export function mountConfig(root: HTMLElement): void {
           toast('文件解析失败', root);
           return;
         }
-        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)
-          || (parsed.attributes !== undefined && !Array.isArray(parsed.attributes))
-          || (parsed.rules !== undefined && !Array.isArray(parsed.rules))
-          || (parsed.settings !== undefined && (typeof parsed.settings !== 'object' || parsed.settings === null))) {
+        if (!validImportedState(parsed)) {
           toast('配置文件格式不正确', root);
           return;
         }
@@ -819,8 +1074,9 @@ export function mountConfig(root: HTMLElement): void {
           ...state,
           ...parsed,
           settings: { ...state.settings, ...(parsed.settings ?? {}) },
-          attributes: Array.isArray(parsed.attributes) ? parsed.attributes : state.attributes,
-          rules: Array.isArray(parsed.rules) ? parsed.rules : state.rules,
+          attributes: parsed.attributes ?? state.attributes,
+          rules: parsed.rules ?? state.rules,
+          timerRules: parsed.timerRules ?? state.timerRules,
         };
         state.settings.theme = normalizeConfigTheme(state.settings.theme);
         applyConfigTheme(state.settings.theme);
@@ -829,21 +1085,187 @@ export function mountConfig(root: HTMLElement): void {
         toast('配置已导入', root);
       });
     };
-    const importBtn = el('button', { class: 'btn ghost', text: '导入配置' });
-    importBtn.onclick = () => importInput.click();
-    const resetBtn = el('button', { class: 'btn danger', text: '恢复默认' });
-    resetBtn.onclick = () => {
-      if (confirm('确定恢复默认设置？当前配置将被清除。')) {
-        localStorage.removeItem(STORAGE_KEY);
-        location.reload();
-      }
+    const importButton = el('button', { class: 'btn ghost', type: 'button', text: '导入配置' }) as HTMLButtonElement;
+    importButton.onclick = () => importInput.click();
+    const resetButton = el('button', { class: 'btn text-danger', type: 'button', text: '恢复默认' }) as HTMLButtonElement;
+    resetButton.onclick = () => {
+      if (!confirm('确定恢复默认设置？当前配置将被清除。')) return;
+      resetState();
+      location.reload();
     };
-    dataCard.append(exportBtn, importBtn, importInput, resetBtn);
-    content.append(dataCard);
+    dataCard.append(el('div', { class: 'data-actions' }, [exportButton, importButton, importInput, resetButton]));
+    settingsGrid.append(appearance, dataCard);
+    details.append(settingsGrid);
+    content.append(details);
+  }
+
+  function checkboxField(label: string, checked: boolean, onChange: (checked: boolean) => void): HTMLElement {
+    const input = el('input', { type: 'checkbox' }) as HTMLInputElement;
+    input.checked = checked;
+    input.onchange = () => onChange(input.checked);
+    return el('label', { class: 'checkbox-field' }, [input, el('span', { text: label })]);
+  }
+
+  function renderFormulaHelp(attributeName: string): HTMLElement {
+    const details = el('details', { class: 'formula-help' }) as HTMLDetailsElement;
+    const current = attributeName || '属性';
+    details.append(
+      el('summary', { text: '公式怎么用？查看完整说明' }),
+      el('div', { class: 'formula-help-content' }, [
+        el('p', { text: '等号右侧的计算结果会成为属性的新值。要在原值上增加或减少，公式中必须写上当前属性名；只写数字会直接把属性设成该数字。' }),
+        el('div', { class: 'formula-help-grid' }, [
+          formulaHelpBlock('变量', [
+            ['price', '当前单个礼物的价格'],
+            [current, '触发前的当前属性值'],
+            ['其他属性名', '可读取其他属性当前值'],
+          ]),
+          formulaHelpBlock('运算与函数', [
+            ['+  -  *  /  ( )', '基础四则运算与括号'],
+            ['IF(条件,A,B)', '按条件选择结果'],
+            ['MIN / MAX', '限制最小值或最大值'],
+            ['ROUND / ABS', '四舍五入或取绝对值'],
+            ['RAND()', '生成 0 到 1 之间的随机数'],
+            ['RANDBETWEEN(A,B)', '生成 A 到 B 的随机整数'],
+          ]),
+        ]),
+        el('div', { class: 'formula-help-examples' }, [
+          el('code', { text: `${current}+60` }), el('span', { text: '在当前值上增加 60' }),
+          el('code', { text: `${current}+price/1000*60` }), el('span', { text: '每 1000 金瓜子增加 60' }),
+          el('code', { text: `MIN(${current}+60,3600)` }), el('span', { text: '增加 60，但最大不超过 3600' }),
+          el('code', { text: `IF(price>=1000,${current}+60,${current}+10)` }), el('span', { text: '按礼物价格选择增加量' }),
+        ]),
+        el('p', { class: 'formula-help-note', text: '连送会拆成单个礼物逐次执行：例如一次连送 3 个，就依次计算 3 次。' }),
+      ]),
+    );
+    return details;
+  }
+
+  function formulaHelpBlock(title: string, rows: Array<[string, string]>): HTMLElement {
+    const block = el('section', { class: 'formula-help-block' }, [el('strong', { text: title })]);
+    for (const [syntax, description] of rows) {
+      block.append(el('div', { class: 'formula-help-row' }, [
+        el('code', { text: syntax }),
+        el('span', { text: description }),
+      ]));
+    }
+    return block;
   }
 
   applyConfigTheme(state.settings.theme);
   render();
+  void refreshRuntime();
+  const pollTimer = globalThis.setInterval(() => {
+    void refreshRuntime();
+    void refreshBackendState();
+  }, 1000);
+  const disposePolling = (): void => globalThis.clearInterval(pollTimer);
+  if (typeof globalThis.addEventListener === 'function') globalThis.addEventListener('beforeunload', disposePolling, { once: true });
+}
+
+function availableGifts(state: AppState): GiftInfo[] {
+  const configuredGifts = state.rules
+    .map((rule) => findGift(state, rule.giftId))
+    .filter((gift): gift is GiftInfo => gift !== undefined);
+  const seen = new Set<string>();
+  return [...configuredGifts, ...state.recentGifts, ...builtinCatalog].filter((gift) => {
+    const key = giftDisplayKey(gift);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function configStructureSignature(state: AppState): string {
+  return JSON.stringify({
+    roomId: state.roomId,
+    attributes: state.attributes.map(({ value: _value, ...attribute }) => attribute),
+    rules: state.rules,
+    timerRules: state.timerRules,
+    settings: state.settings,
+    giftCatalog: state.giftCatalog,
+  });
+}
+
+function attributeValueElement(attribute: Attribute): HTMLElement {
+  const value = el('strong', { class: 'attribute-current-value', text: formatValue(attribute.value, attribute) });
+  value.dataset.attributeName = attribute.name;
+  return value;
+}
+
+function upsertGiftCatalog(state: AppState, gift: GiftInfo): void {
+  const index = state.giftCatalog.findIndex((item) => item.id === gift.id);
+  if (index >= 0) state.giftCatalog[index] = { ...gift };
+  else state.giftCatalog.push({ ...gift });
+}
+
+function ensureRuleGiftCatalog(state: AppState): boolean {
+  let changed = false;
+  for (const rule of state.rules) {
+    if (state.giftCatalog.some((gift) => gift.id === rule.giftId)) continue;
+    const gift = findGift(state, rule.giftId);
+    if (!gift) continue;
+    state.giftCatalog.push({ ...gift });
+    changed = true;
+  }
+  return changed;
+}
+
+function displayFormatLabel(attribute: Attribute): string {
+  if (attribute.format === 'hhmmss') return '计时器';
+  if (attribute.format === 'suffix') return `数字${attribute.suffix ? ` · ${attribute.suffix}` : ' + 后缀'}`;
+  return '纯数字';
+}
+
+function giftPriceLabel(gift: GiftInfo): string {
+  return `${gift.price} ${gift.coinType === 'gold' ? '金瓜子' : '银瓜子'}`;
+}
+
+function emptyState(text: string): HTMLElement {
+  const empty = el('div', { class: 'empty' });
+  empty.append(createBrandIcon(44, 'empty-brand-icon'), el('span', { text }));
+  return empty;
+}
+
+function transparentPixel(): string {
+  return 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+}
+
+function createRuleId(): string {
+  return `r-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function createTimerRuleId(): string {
+  return `t-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function splitInterval(intervalSeconds: number): { value: number; multiplier: 1 | 60 | 3600 } {
+  const seconds = Math.max(1, Math.floor(intervalSeconds || 1));
+  if (seconds % 3600 === 0) return { value: seconds / 3600, multiplier: 3600 };
+  if (seconds % 60 === 0) return { value: seconds / 60, multiplier: 60 };
+  return { value: seconds, multiplier: 1 };
+}
+
+function formatInterval(intervalSeconds: number): string {
+  const interval = splitInterval(intervalSeconds);
+  if (interval.multiplier === 3600) return `${interval.value} 小时`;
+  if (interval.multiplier === 60) return `${interval.value} 分钟`;
+  return `${interval.value} 秒`;
+}
+
+function replaceFormulaVariable(formula: string, from: string, to: string): string {
+  if (!from || from === to) return formula;
+  const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return formula.replace(new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'gu'), to);
+}
+
+function validImportedState(parsed: Partial<AppState> | null): parsed is Partial<AppState> {
+  return parsed !== null
+    && typeof parsed === 'object'
+    && !Array.isArray(parsed)
+    && (parsed.attributes === undefined || Array.isArray(parsed.attributes))
+    && (parsed.rules === undefined || Array.isArray(parsed.rules))
+    && (parsed.timerRules === undefined || Array.isArray(parsed.timerRules))
+    && (parsed.settings === undefined || (typeof parsed.settings === 'object' && parsed.settings !== null));
 }
 
 function normalizeConfigTheme(theme: unknown): 'dark' | 'light' {

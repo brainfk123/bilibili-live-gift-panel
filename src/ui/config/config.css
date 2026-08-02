@@ -411,3 +411,877 @@ body.config-mode { height: 100%; margin: 0; overflow-x: hidden; }
   .config-root .card, .config-root .guide-card { min-width: 0; }
   .config-root .tutorial { min-width: 0; overflow-x: auto; }
 }
+
+/* Throwaway UI prototype: compare three focused onboarding treatments with ?variant=. */
+.config-root .tour-prototype {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  pointer-events: none;
+}
+.config-root .tour-prototype.is-modal-step { z-index: 120; }
+.config-root .tour-prototype.is-modal-step .tour-focus { z-index: 121; }
+.config-root .tour-prototype.is-modal-step .tour-bubble { z-index: 122; }
+.config-root .tour-prototype.is-dismissed .tour-focus,
+.config-root .tour-prototype.is-dismissed .tour-bubble,
+.config-root .tour-prototype.is-dismissed .tour-rail { display: none; }
+.config-root .tour-focus {
+  position: fixed;
+  z-index: 81;
+  min-width: 44px;
+  min-height: 44px;
+  border: 2px solid var(--accent);
+  border-radius: 12px;
+  background: transparent;
+  box-shadow: 0 0 0 100vmax rgba(6, 8, 15, .72), 0 0 0 5px rgba(251, 114, 153, .22), 0 0 24px rgba(251, 114, 153, .55);
+  pointer-events: none;
+  transition: left .18s ease, top .18s ease, width .18s ease, height .18s ease;
+}
+.config-root .tour-bubble {
+  position: fixed;
+  z-index: 92;
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+  padding: 17px 18px 15px;
+  border: 1px solid var(--accent);
+  border-radius: 16px;
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 18px 44px rgba(4, 6, 14, .38);
+  pointer-events: auto;
+}
+.config-root .tour-bubble::before {
+  content: '';
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  left: 50%;
+  bottom: -6px;
+  transform: translateX(-50%) rotate(45deg);
+  border-right: 1px solid var(--accent);
+  border-bottom: 1px solid var(--accent);
+  background: var(--card);
+}
+.config-root .tour-variant-rail .tour-bubble::before {
+  left: 0;
+  bottom: auto;
+  top: 32px;
+  transform: translateX(-6px) rotate(135deg);
+}
+.config-root .tour-variant-bottom .tour-bubble::before {
+  top: -6px;
+  bottom: auto;
+  transform: translateX(-50%) rotate(225deg);
+}
+.config-root .tour-bubble-eyebrow {
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.config-root .tour-bubble-title {
+  margin-top: 6px;
+  font-size: 19px;
+  letter-spacing: -.025em;
+}
+.config-root .tour-bubble-body {
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.config-root .tour-bubble-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+}
+.config-root .tour-bubble-skip {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.config-root .tour-bubble-skip:hover { color: var(--text); }
+.config-root .tour-bubble-action { white-space: nowrap; }
+.config-root .tour-rail {
+  position: fixed;
+  z-index: 90;
+  top: 142px;
+  left: max(14px, calc((100vw - 960px) / 2 - 216px));
+  width: 194px;
+  padding: 15px 12px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: 0 16px 38px rgba(4, 6, 14, .3);
+  pointer-events: auto;
+}
+.config-root .tour-rail-kicker,
+.config-root .tour-rail-title { display: block; }
+.config-root .tour-rail-kicker {
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+.config-root .tour-rail-title { margin: 4px 0 14px; font-size: 17px; }
+.config-root .tour-rail-step {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 9px;
+  border: 0;
+  border-radius: 10px;
+  padding: 9px 8px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.config-root .tour-rail-step + .tour-rail-step { margin-top: 3px; }
+.config-root .tour-rail-step:hover,
+.config-root .tour-rail-step.is-active { background: var(--accent-soft); color: var(--text); }
+.config-root .tour-rail-step.is-done { color: var(--success-text); }
+.config-root .tour-rail-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 23px;
+  height: 23px;
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-size: 11px;
+}
+.config-root .tour-rail-step.is-active .tour-rail-number {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--button-action-text);
+}
+.config-root .tour-switcher {
+  position: fixed;
+  z-index: 95;
+  right: 50%;
+  bottom: 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  transform: translateX(50%);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 5px 7px;
+  background: var(--card);
+  box-shadow: 0 10px 28px rgba(4, 6, 14, .28);
+  pointer-events: auto;
+}
+.config-root .tour-switcher-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 16px;
+}
+.config-root .tour-switcher-button:hover { background: var(--accent); color: var(--button-action-text); }
+.config-root .tour-switcher-label { color: var(--text); font-size: 12px; white-space: nowrap; }
+.config-root[data-theme="light"] .tour-focus {
+  box-shadow: 0 0 0 100vmax rgba(27, 36, 58, .53), 0 0 0 5px rgba(251, 114, 153, .24), 0 0 24px rgba(194, 24, 91, .46);
+}
+.config-root[data-theme="light"] .tour-rail,
+.config-root[data-theme="light"] .tour-bubble,
+.config-root[data-theme="light"] .tour-switcher { box-shadow: 0 16px 38px rgba(47, 57, 80, .18); }
+@media (max-width: 980px) {
+  .config-root .tour-rail { left: 14px; }
+}
+@media (max-width: 700px) {
+  .config-root .tour-rail {
+    top: 90px;
+    right: 14px;
+    left: 14px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: auto;
+    padding: 8px;
+    overflow-x: auto;
+  }
+  .config-root .tour-rail-kicker,
+  .config-root .tour-rail-title { display: none; }
+  .config-root .tour-rail-step {
+    width: auto;
+    flex: 1 0 auto;
+    justify-content: center;
+    white-space: nowrap;
+  }
+  .config-root .tour-bubble {
+    max-height: calc(100vh - 170px);
+  }
+  .config-root .tour-switcher { bottom: 10px; }
+}
+
+/* Final single-page configuration workspace. */
+.config-root .config-shell { width: min(calc(100% - 48px), 1120px); }
+.config-root .config-page { display: grid; gap: 22px; }
+.config-root .config-intro {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 28px;
+  padding: 24px 26px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: linear-gradient(135deg, var(--accent-soft), transparent 58%), var(--card);
+  box-shadow: var(--shadow);
+}
+.config-root .config-intro-copy { max-width: 650px; }
+.config-root .section-kicker {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.config-root .config-intro h1 {
+  font-size: clamp(26px, 3vw, 38px);
+  line-height: 1.18;
+  letter-spacing: -.045em;
+}
+.config-root .config-intro p,
+.config-root .section-heading p,
+.config-root .modal-header p,
+.config-root .modal-section-heading p {
+  margin-top: 8px;
+  color: var(--text-dim);
+  line-height: 1.65;
+}
+.config-root .config-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(78px, 1fr));
+  min-width: 310px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--input-bg);
+}
+.config-root .summary-metric { padding: 12px 14px; text-align: center; }
+.config-root .summary-metric + .summary-metric { border-left: 1px solid var(--border); }
+.config-root .summary-metric strong,
+.config-root .summary-metric span { display: block; }
+.config-root .summary-metric strong { color: var(--text); font-size: 16px; }
+.config-root .summary-metric span { margin-top: 3px; color: var(--text-dim); font-size: 11px; }
+
+.config-root .connection-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+.config-root .workspace-card {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 21px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+.config-root .section-heading h2 { font-size: 21px; letter-spacing: -.025em; }
+.config-root .section-heading p { font-size: 13px; }
+.config-root .workspace-card > .field { margin-top: 20px; }
+.config-root .connection-actions { margin-top: 2px; }
+.config-root .connection-inline-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.config-root .inline-help { margin-top: 16px; color: var(--text-dim); font-size: 12px; }
+.config-root .inline-help summary { color: var(--accent-text); cursor: pointer; }
+.config-root .inline-help p { margin-top: 8px; line-height: 1.6; }
+.config-root .attributes-section {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 24px;
+  background: color-mix(in srgb, var(--card) 72%, transparent);
+}
+.config-root .attributes-heading-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+.config-root .attributes-heading-row .section-heading { max-width: 720px; }
+.config-root .attribute-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
+  gap: 14px;
+}
+.config-root .attribute-card {
+  display: flex;
+  min-width: 0;
+  min-height: 190px;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px;
+  background: var(--card);
+}
+.config-root .attribute-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 15px;
+  border-bottom: 1px solid var(--border);
+}
+.config-root .attribute-title-copy { min-width: 0; }
+.config-root .attribute-name-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; }
+.config-root .attribute-card-title h3 { font-size: 18px; }
+.config-root .attribute-meta { display: block; margin-top: 5px; color: var(--text-dim); font-size: 12px; }
+.config-root .attribute-current-value {
+  color: var(--accent-text);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 17px;
+  white-space: nowrap;
+}
+.config-root .attribute-formulas {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 240px));
+  align-content: start;
+  flex: 1;
+  gap: 8px;
+  padding: 15px 0;
+}
+.config-root .attribute-gift-rule {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 10px;
+  background: var(--input-bg);
+}
+.config-root .attribute-gift-image {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  background: var(--image-bg);
+  object-fit: contain;
+}
+.config-root .attribute-gift-copy { min-width: 0; }
+.config-root .attribute-gift-copy strong,
+.config-root .attribute-gift-copy span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.config-root .attribute-gift-copy strong { font-size: 13px; }
+.config-root .attribute-gift-copy span { margin-top: 3px; color: var(--text-dim); font-size: 11px; }
+.config-root .formula-empty { color: var(--text-dim); font-size: 13px; }
+.config-root .attribute-obs-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+.config-root .attribute-obs-label {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.config-root .attribute-obs-input {
+  min-width: 0;
+  height: 36px;
+  padding: 7px 10px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+}
+.config-root .attribute-obs-copy { min-height: 36px; padding: 7px 11px; font-size: 12px; white-space: nowrap; }
+.config-root .attribute-actions { display: flex; align-items: center; justify-content: flex-end; flex: 0 0 auto; gap: 6px; }
+.config-root .attribute-action-button { padding: 6px 10px; font-size: 12px; }
+.config-root .btn.text-danger {
+  border-color: transparent;
+  background: transparent;
+  color: var(--danger-text);
+}
+.config-root .btn.text-danger:hover { border-color: var(--danger); filter: none; }
+.config-root .attribute-empty {
+  border: 1px dashed var(--border-strong);
+  border-radius: 14px;
+  background: var(--input-bg);
+}
+
+.config-root .advanced-settings {
+  border-top: 1px solid var(--border);
+  padding-top: 2px;
+}
+.config-root .advanced-settings > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 4px;
+  color: var(--text);
+  cursor: pointer;
+  list-style: none;
+}
+.config-root .advanced-settings > summary::-webkit-details-marker { display: none; }
+.config-root .advanced-settings > summary::after { content: '＋'; color: var(--accent-text); font-size: 18px; }
+.config-root .advanced-settings[open] > summary::after { content: '－'; }
+.config-root .advanced-settings > summary span { font-weight: 700; }
+.config-root .advanced-settings > summary small { color: var(--text-dim); }
+.config-root .advanced-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  padding-top: 8px;
+}
+.config-root .advanced-card h3 { margin-bottom: 16px; }
+.config-root .advanced-copy { margin-bottom: 20px; color: var(--text-dim); line-height: 1.6; }
+.config-root .checkbox-field { display: flex; align-items: center; gap: 9px; margin-top: 10px; color: var(--text-dim); }
+.config-root .checkbox-field input { width: 17px; height: 17px; accent-color: var(--accent); }
+.config-root .data-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+
+.config-root .overlay .attribute-modal {
+  width: min(100%, 1040px);
+  max-width: 1040px;
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-radius: 18px;
+}
+.config-root [hidden] { display: none !important; }
+.config-root .modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 23px 26px 20px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(135deg, var(--accent-soft), transparent 72%);
+}
+.config-root .modal-header h2 { font-size: 24px; letter-spacing: -.03em; }
+.config-root .modal-header p { font-size: 13px; }
+.config-root .modal-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--card);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 24px;
+  line-height: 1;
+}
+.config-root .attribute-basics {
+  display: grid;
+  grid-template-columns: 1.4fr .75fr 1fr .75fr;
+  gap: 12px;
+  padding: 20px 26px 8px;
+}
+.config-root .modal-tip {
+  margin: 0 26px 20px;
+  border: 1px solid var(--success-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--success-soft);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.config-root .timer-binding-panel,
+.config-root .gift-binding-panel,
+.config-root .formula-binding-panel { padding: 0 26px 22px; }
+.config-root .timer-binding-panel { padding-top: 21px; border-top: 1px solid var(--border); }
+.config-root .formula-binding-panel { padding-top: 21px; border-top: 1px solid var(--border); }
+.config-root .timer-heading-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 10px;
+}
+.config-root .add-timer-button { min-height: 34px; padding: 6px 11px; font-size: 11px; }
+.config-root .timer-condition-help {
+  margin: -2px 0 12px;
+  border-left: 2px solid var(--accent);
+  padding: 7px 10px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.config-root .timer-rule-list { display: grid; gap: 10px; }
+.config-root .timer-rule-empty {
+  border: 1px dashed var(--border-strong);
+  border-radius: 12px;
+  padding: 20px;
+  color: var(--text-dim);
+  text-align: center;
+}
+.config-root .timer-rule-editor {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  background: var(--input-bg);
+  transition: opacity .15s ease;
+}
+.config-root .timer-rule-editor.is-disabled { opacity: .58; }
+.config-root .timer-rule-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 13px;
+}
+.config-root .timer-rule-title,
+.config-root .timer-rule-actions,
+.config-root .timer-enabled-toggle { display: flex; align-items: center; }
+.config-root .timer-rule-title { min-width: 0; gap: 10px; }
+.config-root .timer-rule-title strong,
+.config-root .timer-rule-title small { display: block; }
+.config-root .timer-rule-title small { margin-top: 3px; color: var(--text-dim); font-size: 10px; }
+.config-root .timer-rule-clock {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 18px;
+}
+.config-root .timer-rule-actions { gap: 12px; }
+.config-root .timer-enabled-toggle { gap: 6px; color: var(--text-dim); font-size: 11px; }
+.config-root .timer-enabled-toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
+.config-root .timer-rule-fields {
+  display: grid;
+  grid-template-columns: minmax(160px, .72fr) minmax(150px, .58fr) minmax(190px, .9fr) minmax(300px, 1.7fr);
+  align-items: start;
+  gap: 14px;
+}
+.config-root .timer-rule-fields > .field {
+  display: grid;
+  grid-template-rows: 18px 42px;
+  min-width: 0;
+  gap: 6px;
+  margin-bottom: 0;
+}
+.config-root .timer-rule-fields > .field > .field-label { line-height: 18px; }
+.config-root .timer-rule-fields > .field > .field-input,
+.config-root .timer-rule-fields > .field > .timer-interval-row,
+.config-root .timer-rule-fields > .field > .formula-assignment-row { height: 42px; min-height: 42px; }
+.config-root .timer-interval-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 72px;
+}
+.config-root .timer-interval-row .field-input { min-width: 0; height: 42px; }
+.config-root .timer-interval-row input { border-radius: 10px 0 0 10px; }
+.config-root .timer-interval-unit { border-left: 0; border-radius: 0 10px 10px 0; }
+.config-root .attribute-timer-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.config-root .formula-help {
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+}
+.config-root .formula-help > summary {
+  padding: 11px 14px;
+  color: var(--accent-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+.config-root .formula-help-content {
+  display: grid;
+  gap: 12px;
+  padding: 0 14px 14px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.65;
+}
+.config-root .formula-help-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.config-root .formula-help-block { min-width: 0; border-radius: 9px; padding: 10px; background: var(--input-bg); }
+.config-root .formula-help-block > strong { display: block; margin-bottom: 7px; color: var(--text); font-size: 11px; }
+.config-root .formula-help-row { display: grid; grid-template-columns: minmax(110px, .8fr) 1.2fr; gap: 9px; }
+.config-root .formula-help-row + .formula-help-row { margin-top: 5px; }
+.config-root .formula-help code { color: var(--accent-text); font-family: "Cascadia Code", Consolas, monospace; }
+.config-root .formula-help-examples { display: grid; grid-template-columns: minmax(240px, auto) 1fr; gap: 5px 12px; }
+.config-root .formula-help-note { color: var(--success-text); }
+.config-root .modal-section-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 12px;
+}
+.config-root .modal-section-heading h3 { font-size: 16px; }
+.config-root .modal-section-heading p { margin-top: 4px; font-size: 12px; }
+.config-root .modal-section-heading code { color: var(--accent-text); font-family: Consolas, monospace; }
+.config-root .selection-count { color: var(--accent-text); font-size: 12px; white-space: nowrap; }
+.config-root .gift-search { width: 100%; margin-bottom: 10px; }
+.config-root .gift-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 244px;
+  overflow-y: auto;
+  padding: 1px 3px 1px 1px;
+}
+.config-root .gift-choice {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px;
+  background: var(--input-bg);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.config-root .gift-choice:hover { border-color: var(--border-strong); }
+.config-root .gift-choice.is-selected { border-color: var(--accent); background: var(--accent-soft); }
+.config-root .gift-choice-image { width: 34px; height: 34px; flex: 0 0 auto; object-fit: contain; border-radius: 7px; background: var(--image-bg); }
+.config-root .gift-choice-copy { min-width: 0; flex: 1; }
+.config-root .gift-choice-copy strong,
+.config-root .gift-choice-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.config-root .gift-choice-copy strong { font-size: 12px; }
+.config-root .gift-choice-copy small { margin-top: 3px; color: var(--text-dim); font-size: 10px; }
+.config-root .gift-choice-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 21px;
+  height: 21px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.config-root .gift-choice.is-selected .gift-choice-check { border-color: var(--accent); background: var(--accent); color: var(--button-action-text); }
+.config-root .picker-empty { grid-column: 1 / -1; padding: 22px; color: var(--text-dim); text-align: center; }
+.config-root .manual-gift-adder { margin-top: 10px; color: var(--text-dim); font-size: 12px; }
+.config-root .manual-gift-adder summary { color: var(--accent-text); cursor: pointer; }
+.config-root .manual-gift-fields {
+  display: grid;
+  grid-template-columns: .8fr 1.2fr .8fr auto;
+  align-items: end;
+  gap: 10px;
+  margin-top: 12px;
+}
+.config-root .manual-gift-fields .field { margin-bottom: 0; }
+.config-root .selected-rules {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+.config-root .selected-rules-empty {
+  grid-column: 1 / -1;
+  border: 1px dashed var(--border-strong);
+  border-radius: 12px;
+  padding: 22px;
+  color: var(--text-dim);
+  text-align: center;
+}
+.config-root .selected-gift-rule {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  background: var(--input-bg);
+}
+.config-root .selected-rule-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 13px;
+}
+.config-root .selected-rule-gift { display: flex; align-items: center; min-width: 0; gap: 10px; }
+.config-root .selected-rule-gift-image {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  border-radius: 9px;
+  background: var(--image-bg);
+  object-fit: contain;
+}
+.config-root .selected-rule-header strong,
+.config-root .selected-rule-header small { display: block; }
+.config-root .selected-rule-header small { margin-top: 3px; color: var(--text-dim); font-size: 10px; }
+.config-root .rule-remove { border: 0; background: transparent; color: var(--danger-text); cursor: pointer; font: inherit; font-size: 11px; }
+.config-root .rule-editor-fields {
+  display: grid;
+  grid-template-columns: minmax(240px, .62fr) minmax(420px, 1.7fr);
+  align-items: start;
+  gap: 14px;
+}
+.config-root .selected-gift-rule .field { min-width: 0; margin-bottom: 0; }
+.config-root .rule-editor-fields > .field {
+  display: grid;
+  grid-template-rows: 18px 42px;
+  gap: 6px;
+}
+.config-root .rule-editor-fields > .field > .field-label {
+  line-height: 18px;
+}
+.config-root .rule-editor-fields > .field > .field-input,
+.config-root .rule-editor-fields > .field > .formula-assignment-row {
+  height: 42px;
+  min-height: 42px;
+}
+.config-root .formula-assignment-row {
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: minmax(116px, max-content) minmax(0, 1fr);
+  align-items: stretch;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--input-bg);
+}
+.config-root .formula-assignment-row:focus-within { border-color: var(--accent); }
+.config-root .formula-target-name {
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  border-right: 1px solid var(--border-strong);
+  padding: 0 12px;
+  background: var(--card);
+  color: var(--accent-text);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.config-root .formula-assignment-row .field-input {
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+}
+.config-root .formula-assignment-row .field-input:focus { border-color: transparent; }
+.config-root .formula-editor-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+}
+.config-root .formula-examples { display: flex; flex-wrap: wrap; gap: 6px; }
+.config-root .formula-example {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--card);
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+}
+.config-root .formula-example:hover { border-color: var(--accent); color: var(--accent-text); }
+.config-root .formula-preview { min-height: 18px; color: var(--text-dim); font-size: 11px; white-space: nowrap; }
+.config-root .formula-preview strong { color: var(--success-text); }
+.config-root .formula-preview .error { color: var(--danger-text); }
+.config-root .modal-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 15px 26px;
+  border-top: 1px solid var(--border);
+  background: var(--card);
+}
+.config-root .tour-bubble.is-below::before {
+  top: -6px;
+  bottom: auto;
+  transform: translateX(-50%) rotate(225deg);
+}
+
+@media (max-width: 900px) {
+  .config-root .config-intro { align-items: stretch; flex-direction: column; }
+  .config-root .config-summary { min-width: 0; }
+  .config-root .attribute-list,
+  .config-root .advanced-settings-grid { grid-template-columns: 1fr; }
+  .config-root .attribute-basics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .config-root .gift-picker-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .config-root .rule-editor-fields,
+  .config-root .timer-rule-fields,
+  .config-root .formula-help-grid { grid-template-columns: 1fr; }
+  .config-root .formula-help-examples { grid-template-columns: 1fr; }
+  .config-root .formula-editor-meta { align-items: flex-start; flex-direction: column; }
+}
+
+@media (max-width: 700px) {
+  .config-root .config-shell { width: min(calc(100% - 28px), 1120px); }
+  .config-root .app-header-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
+  .config-root .connection-grid { grid-template-columns: 1fr; }
+  .config-root .config-intro,
+  .config-root .attributes-section { padding: 18px; }
+  .config-root .attributes-heading-row { align-items: stretch; flex-direction: column; }
+  .config-root .attributes-heading-row .btn { align-self: flex-start; }
+  .config-root .attribute-obs-row { grid-template-columns: 1fr auto; }
+  .config-root .attribute-obs-label { grid-column: 1 / -1; }
+  .config-root .attribute-basics,
+  .config-root .selected-rules { grid-template-columns: 1fr; }
+  .config-root .attribute-formulas { grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr)); }
+  .config-root .gift-picker-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 300px; }
+  .config-root .manual-gift-fields { grid-template-columns: 1fr; }
+  .config-root .formula-target-name { max-width: 42%; }
+  .config-root .manual-gift-fields .btn { justify-self: start; }
+  .config-root .modal-header,
+  .config-root .attribute-basics,
+  .config-root .timer-binding-panel,
+  .config-root .gift-binding-panel,
+  .config-root .formula-binding-panel,
+  .config-root .modal-actions { padding-right: 18px; padding-left: 18px; }
+  .config-root .modal-tip { margin-right: 18px; margin-left: 18px; }
+}

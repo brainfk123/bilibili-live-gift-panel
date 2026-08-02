@@ -3,12 +3,18 @@ import { mountDisplay } from './ui/display/display';
 import { mountConfig } from './ui/config/config';
 import { installFavicon } from './ui/brand';
 import { startApp } from './runtime/bootstrap';
+import { hydrateStateFromServer } from './storage';
 
-void startApp({
-  document,
-  search: location.search,
-  installFavicon,
-  loadConfigStyles: async () => (await import('./ui/config/config.css?inline')).default,
-  mountDisplay,
-  mountConfig,
-});
+async function boot(): Promise<void> {
+  await hydrateStateFromServer();
+  await startApp({
+    document,
+    search: location.search,
+    installFavicon,
+    loadConfigStyles: async () => (await import('./ui/config/config.css?inline')).default,
+    mountDisplay,
+    mountConfig,
+  });
+}
+
+void boot();

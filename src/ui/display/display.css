@@ -1,6 +1,12 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body.display-mode { overflow: hidden; background: transparent; }
-.display-root { width: 100%; height: 100%; background: transparent; }
+.display-root {
+  --panel-outline: rgba(255, 255, 255, 0.28);
+  --panel-inner-outline: rgba(255, 255, 255, 0.08);
+  width: 100%;
+  height: 100%;
+  background: transparent;
+}
 
 .panel {
   position: absolute; top: 20px; left: 20px;
@@ -8,24 +14,39 @@ body.display-mode { overflow: hidden; background: transparent; }
   background: rgba(14, 15, 20, 0.55);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
-  border: 1px solid rgba(255, 255, 255, 0.10);
-  border-radius: 18px;
-  padding: 18px 22px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
-  max-width: 480px;
+  border: 1px solid var(--panel-outline);
+  border-radius: 24px;
+  padding: 24px;
+  box-shadow: inset 0 0 0 1px var(--panel-inner-outline), 0 12px 40px rgba(0, 0, 0, 0.45);
+  width: min(720px, calc(100% - 40px));
   transition: all 0.3s ease;
 }
 .panel.center { left: 50%; transform: translateX(-50%); }
 .panel.right { left: auto; right: 20px; }
 
-.attr { display: flex; flex-direction: column; gap: 4px; }
+.attr { display: flex; flex-direction: column; gap: 20px; }
+.attr + .attr { border-top: 1px solid rgba(255, 255, 255, 0.1); padding-top: 20px; }
+.attr-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 28px;
+  min-height: 132px;
+  border: 1px solid var(--panel-outline);
+  border-radius: 18px;
+  padding: 24px 34px;
+  background: rgba(8, 9, 13, 0.34);
+  box-shadow: inset 0 0 0 1px var(--panel-inner-outline);
+}
 .attr-name {
-  font-size: 15px; font-weight: 600; letter-spacing: 0.06em;
+  overflow: hidden;
+  font-size: 21px; font-weight: 700; letter-spacing: 0.04em;
   color: rgba(255, 255, 255, 0.75);
-  text-transform: uppercase;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .attr-value {
-  font-size: 44px; font-weight: 700; line-height: 1.15;
+  font-size: 56px; font-weight: 800; line-height: 1.05;
   font-variant-numeric: tabular-nums;
   background: linear-gradient(135deg, var(--accent), var(--accent2, #ffd166));
   -webkit-background-clip: text;
@@ -34,6 +55,49 @@ body.display-mode { overflow: hidden; background: transparent; }
   transition: transform 0.15s ease;
 }
 .attr.flash .attr-value { animation: flash 0.6s ease; }
+.display-gift-rules {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.display-gift-rule {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 78px;
+  gap: 14px;
+  border: 1px solid var(--panel-outline);
+  border-radius: 15px;
+  padding: 11px 14px;
+  background: rgba(8, 9, 13, 0.28);
+  box-shadow: inset 0 0 0 1px var(--panel-inner-outline);
+}
+.display-gift-image {
+  width: 54px;
+  height: 54px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
+  object-fit: contain;
+}
+.display-gift-copy { min-width: 0; }
+.display-gift-name,
+.display-formula-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.display-gift-name { color: rgba(255, 255, 255, 0.58); font-size: 13px; }
+.display-formula-name { margin-top: 4px; color: #fff; font-size: 18px; }
+.display-rule-empty {
+  grid-column: 1 / -1;
+  border: 1px dashed var(--panel-outline);
+  border-radius: 14px;
+  padding: 18px;
+  color: rgba(255, 255, 255, 0.5);
+  text-align: center;
+}
 @keyframes flash {
   0% { transform: scale(1.18); filter: brightness(1.4); }
   100% { transform: scale(1); filter: brightness(1); }
@@ -73,3 +137,12 @@ body.display-mode { overflow: hidden; background: transparent; }
 .gift-toast .gt-delta { color: var(--accent); font-weight: 700; font-variant-numeric: tabular-nums; }
 @keyframes toastIn { from { opacity: 0; transform: translateY(16px) scale(0.9); } to { opacity: 1; transform: none; } }
 @keyframes toastOut { to { opacity: 0; transform: translateY(8px); } }
+
+@media (max-width: 620px) {
+  .panel { top: 12px; left: 12px; width: calc(100% - 24px); padding: 16px; border-radius: 18px; }
+  .panel.right { right: 12px; }
+  .attr-summary { min-height: 104px; gap: 14px; padding: 18px; }
+  .attr-name { font-size: 16px; }
+  .attr-value { font-size: 38px; }
+  .display-gift-rules { grid-template-columns: 1fr; }
+}

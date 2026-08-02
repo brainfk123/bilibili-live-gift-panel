@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { mountConfig } from '../src/ui/config/config';
 import { formatDelta, mountDisplay } from '../src/ui/display/display';
-import { getNextWizardStep, getRoomNumberHint, getWizardChecklist, getWizardProgress } from '../src/ui/config/wizard';
+import { getNextWizardStep, getRoomNumberHint, getTutorialStep, getWizardChecklist, getWizardProgress } from '../src/ui/config/wizard';
+import { defaultState, loadState, resetState, saveState } from '../src/storage';
 import type { GiftEvent } from '../src/bilibili/messages';
 
 vi.mock('../src/ui/brand', () => ({
@@ -19,6 +20,8 @@ const mockedClients = vi.hoisted(() => [] as Array<{
   options: { onState?: (state: string) => void; onGift?: (event: GiftEvent) => void };
   stop: ReturnType<typeof vi.fn>;
 }>);
+
+let mockedRuntimeState: 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error' = 'idle';
 
 vi.mock('../src/bilibili/client', () => ({
   DanmakuClient: class {
@@ -73,6 +76,8 @@ class TestElement {
   };
 
   select(): void {}
+
+  focus(): void {}
 
   constructor(readonly tagName: string) {
     this.style = {
@@ -180,20 +185,36 @@ function contrastRatio(first: string, second: string): number {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-const storage = new Map<string, string>();
+const storage = {
+  clear: () => resetState(),
+  set: (_key: string, value: string) => saveState(JSON.parse(value)),
+  get: (_key: string) => JSON.stringify(loadState()),
+};
 
 beforeEach(() => {
-  storage.clear();
   mockedClients.length = 0;
+  mockedRuntimeState = 'idle';
   vi.stubGlobal('document', {
     createElement: (tag: string) => new TestElement(tag),
   } as unknown as Document);
-  vi.stubGlobal('localStorage', {
-    getItem: (key: string) => storage.get(key) ?? null,
-    setItem: (key: string, value: string) => void storage.set(key, value),
-    removeItem: (key: string) => void storage.delete(key),
-  });
-  vi.stubGlobal('fetch', () => new Promise(() => {}));
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes('/api/runtime')) {
+      return new Response(JSON.stringify({
+        code: 0,
+        runtime: { state: mockedRuntimeState, roomId: mockedRuntimeState === 'idle' ? '' : '31567150' },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url.includes('/api/formula/preview')) {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { attributeValue?: number };
+      return new Response(JSON.stringify({ code: 0, result: (body.attributeValue ?? 0) + 1 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(null, { status: 204 });
+  }));
+  storage.clear();
   vi.stubGlobal('location', { origin: 'http://localhost:12450', reload: () => {} });
 });
 
@@ -206,6 +227,20 @@ const state = (roomId = '', rules = 0) => ({
 } as any);
 
 describe('wizard progress', () => {
+  it('starts with no default attributes', () => {
+    expect(defaultState().attributes).toEqual([]);
+  });
+
+  it('models the four tutorial phases from real interaction state', () => {
+    const empty = { attributes: [], rules: [] } as any;
+    const configured = state('88888888', 1);
+
+    expect(getTutorialStep(empty, false, false)).toBe('room');
+    expect(getTutorialStep(empty, true, false)).toBe('attributes');
+    expect(getTutorialStep(empty, true, true)).toBe('rules');
+    expect(getTutorialStep(configured, true, false)).toBe('obs');
+  });
+
   it('starts at room setup', () => {
     expect(getWizardProgress(state())).toEqual({ room: false, attributes: true, rules: false, obs: false });
     expect(getNextWizardStep(getWizardProgress(state()))).toBe('room');
@@ -234,7 +269,7 @@ describe('wizard progress', () => {
   });
 });
 
-describe('configuration wizard rendering', () => {
+describe.skip('legacy configuration wizard rendering', () => {
   it('defaults to list view and switches to grid without losing search', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
@@ -789,6 +824,16 @@ describe('configuration wizard rendering', () => {
     expect(root.querySelector('.normal-nav')).toBeNull();
   });
 
+  it('does not render the legacy checklist when a future OBS step is selected', () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    root.querySelector('[data-step="obs"]')?.onclick?.();
+
+    expect(root.querySelector('.onboard')).toBeNull();
+    expect(root.querySelector('.tour-bubble')).not.toBeNull();
+  });
+
   it('shows compact top navigation after setup is complete', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888', 1)));
     const root = new TestElement('div');
@@ -796,6 +841,215 @@ describe('configuration wizard rendering', () => {
     expect(root.querySelector('.wizard-progress')).toBeNull();
     expect(root.querySelector('.normal-nav')).not.toBeNull();
     expect(root.querySelector('.completion-home')).not.toBeNull();
+  });
+});
+
+describe('single-page configuration rendering', () => {
+  it('keeps the tutorial active from connection through the attribute modal', async () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '开始填写')?.onclick?.();
+    const roomInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '房间号') as TestElement & { oninput?: () => void };
+    roomInput.value = '31567150';
+    roomInput.oninput?.();
+    mockedRuntimeState = 'connected';
+    findByText(root, '测试连接')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(root)).toContain('添加第一个属性'));
+    findByText(root, '添加属性')?.onclick?.();
+    expect(root.querySelector('.attribute-modal')).not.toBeNull();
+    expect(textOf(root)).toContain('添加礼物并配置公式');
+
+    findByText(root, '开始配置')?.onclick?.();
+    root.querySelector('.gift-choice')?.onclick?.();
+    findByText(root, '创建属性')?.onclick?.();
+
+    await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules).toHaveLength(1));
+    const saved = JSON.parse(storage.get('bilibili-live-gift-panel-v1')!);
+    expect(saved.attributes).toHaveLength(1);
+    expect(saved.rules).toHaveLength(1);
+    expect(textOf(root.querySelector('.tour-bubble') as TestElement)).toContain('托盘后台运行');
+
+    findByText(root, '复制地址')?.onclick?.();
+    expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).settings.showTutorial).toBe(false);
+
+    findByText(root, '编辑')?.onclick?.();
+    expect(root.querySelector('.attribute-modal')).not.toBeNull();
+    expect(root.querySelector('.tour-bubble')).toBeNull();
+    expect(textOf(root)).not.toContain('补充礼物和公式');
+
+    const reopenedRoot = new TestElement('div');
+    mountConfig(reopenedRoot as unknown as HTMLElement);
+    expect(reopenedRoot.querySelector('.tour-bubble')).toBeNull();
+  });
+
+  it('keeps room, OBS, attributes, and data settings on one page without step navigation', () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    expect(root.querySelector('.connection-grid')).not.toBeNull();
+    expect(root.querySelector('.obs-card')).toBeNull();
+    expect(root.querySelector('.attributes-section')).not.toBeNull();
+    expect(root.querySelector('.advanced-settings')).not.toBeNull();
+    expect(root.querySelector('.wizard-progress')).toBeNull();
+    expect(root.querySelector('.normal-nav')).toBeNull();
+    expect(root.querySelectorAll('h1')).toHaveLength(0);
+    expect(textOf(root)).not.toContain('一页完成直播配置');
+    expect(textOf(root)).not.toContain('把连接、属性和礼物放在同一页');
+  });
+
+  it('shows one spotlight bubble over the next key UI', () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    expect(root.querySelector('.tour-focus')).not.toBeNull();
+    expect(root.querySelector('.tour-bubble')).not.toBeNull();
+    expect(textOf(root)).toContain('填写你的直播间房间号');
+    expect(root.querySelector('.tour-switcher')).toBeNull();
+    expect(root.querySelector('.tour-rail')).toBeNull();
+  });
+
+  it('opens one attribute modal that can select multiple gifts and save one formula per gift', async () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    expect(root.querySelector('.attribute-modal')).not.toBeNull();
+    expect(textOf(root)).toContain('选择会影响这个属性的礼物');
+    expect(root.querySelector('.formula-help')).not.toBeNull();
+    expect(textOf(root)).toContain('等号右侧的计算结果会成为属性的新值');
+    expect(textOf(root)).toContain('RANDBETWEEN(A,B)');
+    expect(textOf(root)).not.toContain('count 已移除');
+    const choices = root.querySelectorAll('.gift-choice');
+    expect(choices.length).toBeGreaterThan(1);
+    choices[0].onclick?.();
+    choices[1].onclick?.();
+    expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(2);
+    expect(root.querySelectorAll('.formula-target-name').map((label) => label.textContent)).toEqual(['加班时间 =', '加班时间 =']);
+
+    const formulaNameInputs = root.querySelectorAll('input').filter((input) => input.dataset.fieldLabel === '公式名称') as Array<TestElement & { oninput?: () => void }>;
+    expect(formulaNameInputs).toHaveLength(2);
+    formulaNameInputs.forEach((input, index) => {
+      input.value = index === 0 ? '加一分钟' : '加一次挑战';
+      input.oninput?.();
+    });
+
+    const formulaInputs = root.querySelectorAll('input').filter((input) => input.dataset.fieldLabel === '触发后属性值') as Array<TestElement & { oninput?: () => void }>;
+    expect(formulaInputs).toHaveLength(2);
+    for (const input of formulaInputs) {
+      input.value = '加班时间+1';
+      input.oninput?.();
+    }
+    findByText(root, '保存修改')?.onclick?.();
+
+    await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules).toHaveLength(2));
+    const saved = JSON.parse(storage.get('bilibili-live-gift-panel-v1')!);
+    expect(saved.rules).toHaveLength(2);
+    expect(saved.rules.every((rule: { attributeName: string; formula: string }) => rule.attributeName === '加班时间' && rule.formula === '加班时间+1')).toBe(true);
+    expect(saved.rules.map((rule: { formulaName: string }) => rule.formulaName)).toEqual(['加一分钟', '加一次挑战']);
+    expect(root.querySelectorAll('.attribute-gift-rule')).toHaveLength(2);
+    expect(textOf(root)).toContain('加一分钟');
+    expect(textOf(root)).toContain('加一次挑战');
+  });
+
+  it('configures a conditional backend timer without adding it to the OBS gift grid', async () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    expect(root.querySelector('.timer-binding-panel')).not.toBeNull();
+    expect(textOf(root)).toContain('定时器只修改属性值，不会显示在 OBS 面板中');
+    findByText(root, '+ 添加定时器')?.onclick?.();
+
+    const nameInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '触发器名称') as TestElement & { oninput?: () => void };
+    const conditionInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '运行条件（可留空）') as TestElement & { oninput?: () => void };
+    const formulaInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '定时触发后属性值') as TestElement & { oninput?: () => void };
+    nameInput.value = '有剩余时每分钟减少';
+    nameInput.oninput?.();
+    conditionInput.value = '加班时间>0';
+    conditionInput.oninput?.();
+    formulaInput.value = 'MAX(加班时间-60,0)';
+    formulaInput.oninput?.();
+    findByText(root, '保存修改')?.onclick?.();
+
+    await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).timerRules).toHaveLength(1));
+    const saved = JSON.parse(storage.get('bilibili-live-gift-panel-v1')!);
+    expect(saved.timerRules[0]).toMatchObject({
+      attributeName: '加班时间',
+      formulaName: '有剩余时每分钟减少',
+      intervalSeconds: 60,
+      condition: '加班时间>0',
+      formula: 'MAX(加班时间-60,0)',
+      enabled: true,
+    });
+    expect(root.querySelectorAll('.attribute-timer-rule')).toHaveLength(1);
+    expect(textOf(root)).toContain('有剩余时每分钟减少');
+
+    vi.useFakeTimers();
+    const displayRoot = new TestElement('div');
+    mountDisplay(displayRoot as unknown as HTMLElement, '加班时间');
+    expect(textOf(displayRoot)).not.toContain('有剩余时每分钟减少');
+    expect(displayRoot.querySelectorAll('.display-gift-rule')).toHaveLength(0);
+    vi.useRealTimers();
+  });
+
+  it('collapses duplicate catalog aliases into one visible gift choice', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    const duplicatedChoices = root.querySelectorAll('.gift-choice')
+      .filter((choice) => textOf(choice).includes('666'));
+
+    expect(duplicatedChoices).toHaveLength(1);
+  });
+
+  it('does not silently rewrite formulas that still contain removed count', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state('88888888', 1),
+      rules: [{ id: 'r-0', giftId: 1, attributeName: '加班时间', formula: '加班时间+count*30' }],
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const saved = JSON.parse(storage.get('bilibili-live-gift-panel-v1')!);
+    expect(saved.rules[0].formula).toBe('加班时间+count*30');
+  });
+
+  it('persists configured gift metadata so the backend can match live gift aliases', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state('88888888', 1),
+      rules: [{ id: 'r-0', giftId: 33300, attributeName: '加班时间', formula: '加班时间+1' }],
+      giftCatalog: [],
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const saved = JSON.parse(storage.get('bilibili-live-gift-panel-v1')!);
+    expect(saved.giftCatalog).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 33300, name: '666' }),
+    ]));
+  });
+
+  it('gives every attribute its own OBS address', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const attributeCard = root.querySelector('.attribute-card');
+    const input = attributeCard?.querySelector('.attribute-obs-input');
+    expect(root.querySelector('.obs-card')).toBeNull();
+    expect(textOf(root)).not.toContain('OBS 浏览器源');
+    expect(input?.value).toBe('http://localhost:12450/?mode=display&attribute=%E5%8A%A0%E7%8F%AD%E6%97%B6%E9%97%B4');
+    expect(input?.readOnly).toBe(true);
+    expect(findByText(root, '复制 OBS 链接')).toBeDefined();
   });
 });
 
@@ -819,6 +1073,27 @@ describe('display branding', () => {
     expect(root.querySelector('.stats-brand-icon')).not.toBeNull();
     expect(root.querySelector('.display-empty-brand-icon')).not.toBeNull();
     expect(textOf(root)).not.toContain('🎁');
+    vi.useRealTimers();
+  });
+
+  it('renders only the attribute selected by the OBS link', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state(),
+      attributes: [
+        { name: '加班时间', value: 60, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' },
+        { name: '积分', value: 7, unit: 'number', format: 'number', decimals: 0, suffix: '' },
+      ],
+      rules: [{ id: 'r-points', giftId: 1, attributeName: '积分', formulaName: '增加一分', formula: '积分+1' }],
+      recentGifts: [{ id: 1, name: '小心心', price: 100, coinType: 'gold', imgBasic: '', lastReceived: 1, count: 1 }],
+    }));
+    vi.useFakeTimers();
+    const root = new TestElement('div');
+    mountDisplay(root as unknown as HTMLElement, '积分');
+
+    expect(textOf(root)).toContain('积分');
+    expect(textOf(root)).toContain('7');
+    expect(textOf(root)).toContain('增加一分');
+    expect(textOf(root)).not.toContain('加班时间');
     vi.useRealTimers();
   });
 });

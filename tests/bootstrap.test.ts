@@ -59,9 +59,25 @@ describe('application bootstrap', () => {
 
     expect(loadConfigStyles).not.toHaveBeenCalled();
     expect(document.head.children.filter((child) => child.tagName === 'style')).toHaveLength(0);
-    expect(mountDisplay).toHaveBeenCalledWith(document.app);
+    expect(mountDisplay).toHaveBeenCalledWith(document.app, undefined);
     expect(mountConfig).not.toHaveBeenCalled();
     expect(document.body.classList.contains('display-mode')).toBe(true);
+  });
+
+  it('passes the selected attribute to display mode', async () => {
+    const document = new FakeDocument();
+    const mountDisplay = vi.fn();
+
+    await startApp({
+      document: document as unknown as Document,
+      search: '?mode=display&attribute=%E5%8A%A0%E7%8F%AD%E6%97%B6%E9%97%B4',
+      installFavicon: vi.fn(),
+      loadConfigStyles: vi.fn(async () => ''),
+      mountDisplay,
+      mountConfig: vi.fn(),
+    });
+
+    expect(mountDisplay).toHaveBeenCalledWith(document.app, '加班时间');
   });
 
   it('injects configuration styles before mounting config mode', async () => {

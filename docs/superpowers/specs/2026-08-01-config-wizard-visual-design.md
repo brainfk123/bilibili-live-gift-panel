@@ -41,8 +41,8 @@
 - 可展开提示标题：`房间号在哪里？`
 - 展开内容必须准确说明：房间号是 URL 中 `live.bilibili.com/` 后、查询参数 `?` 前的路径数字，不是整条 URL 最后出现的数字。
 - 示例：
-  `https://live.bilibili.com/31567150?live_from=76001&visit_id=...`
-  应填写 `31567150`。
+  `https://live.bilibili.com/88888888?live_from=1111&visit_id=...`
+  应填写 `88888888`。
 
 #### 步骤二：设置属性
 

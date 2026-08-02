@@ -25,7 +25,7 @@ let built = false;
 let lastError;
 for (const go of candidates) {
   try {
-    execFileSync(go, ['build', '-ldflags', '-s -w', '-o', out, '.'], {
+    execFileSync(go, ['build', '-ldflags', '-s -w -H windowsgui', '-o', out, '.'], {
       cwd: join(root, 'goserver'),
       stdio: 'inherit',
     });
