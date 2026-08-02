@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 const maxConfigBytes = 8 << 20
@@ -99,6 +100,9 @@ func validateAppState(state appState) error {
 			return fmt.Errorf("属性名不能重复：%s", name)
 		}
 		attributeNames[name] = struct{}{}
+		if utf8.RuneCountInString(attribute.BroadcastMessage) > 200 {
+			return fmt.Errorf("属性 %q 的默认播报消息不能超过 200 个字符", name)
+		}
 	}
 	for _, rule := range state.Rules {
 		attribute := state.findAttribute(rule.AttributeName)

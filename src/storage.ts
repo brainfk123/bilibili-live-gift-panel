@@ -19,6 +19,7 @@ export const defaultState = (): AppState => ({
     align: 'center',
     theme: 'dark',
     giftView: 'list',
+    panelOpacity: 55,
     showTutorial: true,
   },
   giftCatalog: [],
@@ -95,10 +96,12 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     && (parsed.rules?.length ?? 0) > 0;
   if (parsed.settings?.showTutorial === undefined) configMigrationRequired = true;
   const showTutorial = parsed.settings?.showTutorial ?? !setupComplete;
+  const settings = { ...base.settings, ...(parsed.settings ?? {}), showTutorial };
+  settings.panelOpacity = Math.min(100, Math.max(10, Number(settings.panelOpacity) || base.settings.panelOpacity));
   return {
     ...base,
     ...parsed,
-    settings: { ...base.settings, ...(parsed.settings ?? {}), showTutorial },
+    settings,
     attributes: parsed.attributes ?? base.attributes,
     rules: parsed.rules ?? base.rules,
     timerRules: parsed.timerRules ?? base.timerRules,

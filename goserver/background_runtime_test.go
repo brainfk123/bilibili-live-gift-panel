@@ -63,6 +63,33 @@ func TestBackgroundRuntimeProcessesGiftWithoutDisplayPage(t *testing.T) {
 	t.Fatal("gift did not update the attribute in the disk configuration")
 }
 
+func TestApplyGiftEventAggregatesBatchForAttributeBroadcast(t *testing.T) {
+	state := defaultAppState()
+	state.Attributes = []attributeState{{Name: "加班时间", Value: 0, Unit: "seconds", Format: "hhmmss"}}
+	state.Rules = []giftRule{{ID: "r1", GiftID: 33300, AttributeName: "加班时间", Formula: "加班时间+60"}}
+	state.GiftCatalog = []giftInfo{{ID: 33300, Name: "666", Price: 1000, CoinType: "gold"}}
+
+	applyGiftEvent(&state, giftEvent{
+		GiftID: 33300, GiftName: "666", Num: 3, Price: 1000, CoinType: "gold",
+		Uname: "昵称很长的观众", Avatar: "https://example.test/avatar.png",
+		Timestamp: 1700000000, Rnd: "gift-batch-1",
+	})
+
+	if state.Attributes[0].Value != 180 {
+		t.Fatalf("attribute value = %v", state.Attributes[0].Value)
+	}
+	if len(state.Log) != 1 {
+		t.Fatalf("log entries = %d, want 1: %#v", len(state.Log), state.Log)
+	}
+	entry := state.Log[0]
+	if entry.Num != 3 || entry.Delta != 180 || entry.ValueAfter != 180 {
+		t.Fatalf("aggregated log = %#v", entry)
+	}
+	if entry.Avatar != "https://example.test/avatar.png" || entry.EventID == "" || entry.Source != "gift" {
+		t.Fatalf("broadcast metadata = %#v", entry)
+	}
+}
+
 func TestBackgroundRuntimeProcessesTimerWithoutRoomOrDisplayPage(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	state := defaultAppState()

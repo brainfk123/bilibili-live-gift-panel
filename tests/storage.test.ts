@@ -12,6 +12,7 @@ describe('storage', () => {
     const s = loadState();
     expect(s.attributes).toEqual([]);
     expect(s.rules).toEqual([]);
+    expect(s.settings.panelOpacity).toBe(55);
   });
 
   it('round-trips state through save/load', () => {
@@ -35,6 +36,7 @@ describe('storage', () => {
     expect(loaded.roomId).toBe('31567150');
     expect(loaded.settings.theme).toBe('dark');
     expect(loaded.settings.giftView).toBe('list');
+    expect(loaded.settings.panelOpacity).toBe(55);
     expect(loaded.settings.showTutorial).toBe(true);
     expect(consumeConfigMigrationRequired()).toBe(true);
   });

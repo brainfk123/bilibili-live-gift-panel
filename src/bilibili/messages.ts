@@ -6,6 +6,7 @@ export interface GiftEvent {
   coinType: 'gold' | 'silver';
   totalCoin: number;
   uname: string;
+  avatar?: string;
   uid: number;
   timestamp: number;
   imgBasic: string;
@@ -31,6 +32,7 @@ export function parseGift(data: any): GiftEvent {
     coinType: data.coin_type === 'gold' ? 'gold' : 'silver',
     totalCoin: data.total_coin ?? 0,
     uname: data.uname ?? '',
+    avatar: data.face ?? '',
     uid: data.uid ?? 0,
     timestamp: data.timestamp ?? Math.floor(Date.now() / 1000),
     imgBasic: data.gift_info?.img_basic ?? '',

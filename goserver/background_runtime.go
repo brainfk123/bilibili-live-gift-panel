@@ -294,6 +294,8 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 	stats := state.todayStats()
 	stats.GiftTotals[giftKey(gift.GiftID)] += maxInt(1, gift.Num)
 	repetitions := maxInt(1, gift.Num)
+	changes := []logEntry{}
+	changeIndexes := map[string]int{}
 	for occurrence := 0; occurrence < repetitions; occurrence++ {
 		for _, rule := range state.Rules {
 			configuredGift := state.findGift(rule.GiftID)
@@ -326,20 +328,33 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 			before := attribute.Value
 			attribute.Value = nextValue
 			stats.RuleTriggers[rule.ID] = triggerCount + 1
-			state.Log = append([]logEntry{{
+			delta := nextValue - before
+			if index, exists := changeIndexes[attribute.Name]; exists {
+				changes[index].Delta += delta
+				changes[index].ValueAfter = nextValue
+				continue
+			}
+			changeIndexes[attribute.Name] = len(changes)
+			changes = append(changes, logEntry{
 				Time:          gift.Timestamp,
 				GiftID:        gift.GiftID,
 				GiftName:      gift.GiftName,
-				Num:           1,
+				Num:           repetitions,
 				Uname:         gift.Uname,
+				Avatar:        gift.Avatar,
 				AttributeName: attribute.Name,
-				Delta:         nextValue - before,
+				Delta:         delta,
 				ValueAfter:    nextValue,
 				RuleID:        rule.ID,
-			}}, state.Log...)
-			if len(state.Log) > maxLogEntries {
-				state.Log = state.Log[:maxLogEntries]
-			}
+				Source:        "gift",
+				EventID:       fmt.Sprintf("%s:%s", gift.Rnd, attribute.Name),
+			})
+		}
+	}
+	if len(changes) > 0 {
+		state.Log = append(changes, state.Log...)
+		if len(state.Log) > maxLogEntries {
+			state.Log = state.Log[:maxLogEntries]
 		}
 	}
 	state.Stats[stats.Date] = stats

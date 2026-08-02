@@ -9,13 +9,14 @@ import (
 const maxLogEntries = 200
 
 type attributeState struct {
-	Name     string  `json:"name"`
-	Value    float64 `json:"value"`
-	Unit     string  `json:"unit"`
-	Format   string  `json:"format"`
-	Decimals int     `json:"decimals"`
-	Suffix   string  `json:"suffix"`
-	Color    string  `json:"color,omitempty"`
+	Name             string  `json:"name"`
+	Value            float64 `json:"value"`
+	Unit             string  `json:"unit"`
+	Format           string  `json:"format"`
+	Decimals         int     `json:"decimals"`
+	Suffix           string  `json:"suffix"`
+	Color            string  `json:"color,omitempty"`
+	BroadcastMessage string  `json:"broadcastMessage,omitempty"`
 }
 
 type giftRule struct {
@@ -106,12 +107,14 @@ type logEntry struct {
 	GiftName      string  `json:"giftName"`
 	Num           int     `json:"num"`
 	Uname         string  `json:"uname"`
+	Avatar        string  `json:"avatar,omitempty"`
 	AttributeName string  `json:"attributeName"`
 	Delta         float64 `json:"delta"`
 	ValueAfter    float64 `json:"valueAfter"`
 	RuleID        string  `json:"ruleId"`
 	Source        string  `json:"source,omitempty"`
 	TriggerName   string  `json:"triggerName,omitempty"`
+	EventID       string  `json:"eventId,omitempty"`
 }
 
 type settingsState struct {
@@ -122,6 +125,7 @@ type settingsState struct {
 	Align          string `json:"align"`
 	Theme          string `json:"theme"`
 	GiftView       string `json:"giftView"`
+	PanelOpacity   int    `json:"panelOpacity"`
 	ShowTutorial   *bool  `json:"showTutorial"`
 }
 
@@ -146,6 +150,7 @@ type giftEvent struct {
 	CoinType  string
 	TotalCoin float64
 	Uname     string
+	Avatar    string
 	UID       int64
 	Timestamp int64
 	ImgBasic  string
@@ -171,6 +176,7 @@ func defaultAppState() appState {
 			Align:          "center",
 			Theme:          "dark",
 			GiftView:       "list",
+			PanelOpacity:   55,
 			ShowTutorial:   &showTutorial,
 		},
 	}
@@ -216,6 +222,15 @@ func normalizeAppState(state *appState) {
 	}
 	if state.Settings.GiftView == "" {
 		state.Settings.GiftView = defaults.GiftView
+	}
+	if state.Settings.PanelOpacity <= 0 {
+		state.Settings.PanelOpacity = defaults.PanelOpacity
+	}
+	if state.Settings.PanelOpacity < 10 {
+		state.Settings.PanelOpacity = 10
+	}
+	if state.Settings.PanelOpacity > 100 {
+		state.Settings.PanelOpacity = 100
 	}
 	if state.Settings.ShowTutorial == nil {
 		showTutorial := !(strings.TrimSpace(state.RoomID) != "" && len(state.Attributes) > 0 && len(state.Rules) > 0)

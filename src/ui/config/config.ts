@@ -390,6 +390,11 @@ export function mountConfig(root: HTMLElement): void {
     const suffixInput = inputField('数值后缀', original?.suffix ?? '');
     suffixInput.placeholder = '例如 次、分、点';
     const suffixControl = fieldControl(suffixInput);
+    const broadcastMessageInput = inputField('默认播报消息', original?.broadcastMessage ?? '');
+    broadcastMessageInput.placeholder = '例如 感谢大家的支持，欢迎投喂礼物';
+    broadcastMessageInput.maxLength = 200;
+    const broadcastMessageControl = fieldControl(broadcastMessageInput);
+    broadcastMessageControl.classList.add('attribute-broadcast-message');
     const updateSuffixVisibility = (): void => {
       suffixControl.hidden = formatSelect.value !== 'suffix';
     };
@@ -400,6 +405,7 @@ export function mountConfig(root: HTMLElement): void {
       fieldControl(valueInput),
       el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '显示格式' }), formatSelect]),
       suffixControl,
+      broadcastMessageControl,
     ]);
 
     const currentAttributeName = (): string => nameInput.value.trim() || originalName || '属性';
@@ -914,7 +920,7 @@ export function mountConfig(root: HTMLElement): void {
     cancelButton.onclick = close;
     const saveButton = el('button', { class: 'btn', type: 'button', text: original ? '保存修改' : '创建属性' }) as HTMLButtonElement;
     saveButton.onclick = () => {
-      void saveAttributeEditor(index, original, nameInput, valueInput, formatSelect, suffixInput, selected, timerRules, overlay, saveButton);
+      void saveAttributeEditor(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, selected, timerRules, overlay, saveButton);
     };
 
     modal.append(
@@ -987,12 +993,13 @@ export function mountConfig(root: HTMLElement): void {
     valueInput: HTMLInputElement,
     formatSelect: HTMLSelectElement,
     suffixInput: HTMLInputElement,
+    broadcastMessageInput: HTMLInputElement,
     selected: Map<number, SelectedGiftRule>,
     timerRules: TimerRule[],
     overlay: HTMLElement,
     saveButton: HTMLButtonElement,
   ): Promise<void> {
-    return saveAttributeEditorAsync(index, original, nameInput, valueInput, formatSelect, suffixInput, selected, timerRules, overlay, saveButton);
+    return saveAttributeEditorAsync(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, selected, timerRules, overlay, saveButton);
   }
 
   async function saveAttributeEditorAsync(
@@ -1002,6 +1009,7 @@ export function mountConfig(root: HTMLElement): void {
     valueInput: HTMLInputElement,
     formatSelect: HTMLSelectElement,
     suffixInput: HTMLInputElement,
+    broadcastMessageInput: HTMLInputElement,
     selected: Map<number, SelectedGiftRule>,
     timerRules: TimerRule[],
     overlay: HTMLElement,
@@ -1092,6 +1100,7 @@ export function mountConfig(root: HTMLElement): void {
       format,
       decimals: original?.decimals ?? 0,
       suffix: format === 'suffix' ? suffixInput.value : '',
+      broadcastMessage: broadcastMessageInput.value.trim(),
       ...(original?.color ? { color: original.color } : {}),
     };
     if (index === undefined) state.attributes.push(nextAttribute);
@@ -1168,10 +1177,16 @@ export function mountConfig(root: HTMLElement): void {
       state.settings.align = align.value as AppState['settings']['align'];
       save();
     };
-    const showStats = checkboxField('显示今日统计', state.settings.showStats, (checked) => {
-      state.settings.showStats = checked;
+    const panelOpacity = inputField('面板透明度（%）', String(state.settings.panelOpacity));
+    panelOpacity.type = 'number';
+    panelOpacity.min = '10';
+    panelOpacity.max = '100';
+    panelOpacity.step = '1';
+    panelOpacity.onchange = () => {
+      state.settings.panelOpacity = Math.min(100, Math.max(10, Number(panelOpacity.value) || 55));
+      panelOpacity.value = String(state.settings.panelOpacity);
       save();
-    });
+    };
     const showConnection = checkboxField('显示连接状态', state.settings.showConnection, (checked) => {
       state.settings.showConnection = checked;
       save();
@@ -1180,7 +1195,7 @@ export function mountConfig(root: HTMLElement): void {
       fieldControl(fontSize),
       fieldControl(accent),
       el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '对齐' }), align]),
-      showStats,
+      fieldControl(panelOpacity),
       showConnection,
     );
 

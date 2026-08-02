@@ -1,10 +1,14 @@
 import { getRuntimeStatus, RuntimeConnectionState } from '../../backend';
+import { formatValue } from '../../format';
 import { findGift } from '../../gifts/catalog';
-import { formatValue, todayStr } from '../../format';
 import { loadState, refreshStateFromServer } from '../../storage';
 import { AppState, Attribute, LogEntry } from '../../types';
 import { createBrandIcon } from '../brand';
 import { el } from '../common';
+
+const DEFAULT_BROADCAST_MESSAGE = '感谢大家的支持，欢迎投喂礼物';
+const GIFT_BROADCAST_DURATION = 5500;
+const BROADCAST_TRANSITION_DURATION = 450;
 
 export function formatDelta(delta: number, attr?: Attribute): string {
   const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
@@ -27,18 +31,31 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
   let connectionState: RuntimeConnectionState = 'idle';
   let lastLogKey = state.log[0] ? logKey(state.log[0]) : '';
   let stateRefreshActive = false;
+  const stack = el('div', { class: 'display-stack' });
   const panel = el('div', { class: 'panel' });
+  const broadcastArea = el('div', { class: 'display-broadcast-area' });
   const attrEls = new Map<string, HTMLElement>();
-  const toastWrap = el('div', { class: 'toast-wrap' });
-  root.replaceChildren(panel, toastWrap);
+  const broadcastStages = new Map<string, HTMLElement>();
+  const broadcastReturnTimers = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
+  stack.append(panel, broadcastArea);
+  root.replaceChildren(stack);
 
   const visibleAttributes = (): Attribute[] => selectedAttributeName
     ? state.attributes.filter((attribute) => attribute.name === selectedAttributeName)
     : state.attributes;
 
+  function clearBroadcastReturnTimer(attributeName: string): void {
+    const timer = broadcastReturnTimers.get(attributeName);
+    if (timer !== undefined) globalThis.clearTimeout(timer);
+    broadcastReturnTimers.delete(attributeName);
+  }
+
   function renderAttrs(): void {
+    for (const attributeName of broadcastReturnTimers.keys()) clearBroadcastReturnTimer(attributeName);
     panel.replaceChildren();
+    broadcastArea.replaceChildren();
     attrEls.clear();
+    broadcastStages.clear();
     const attributes = visibleAttributes();
     if (attributes.length === 0) {
       const empty = el('div', { class: 'display-empty' });
@@ -50,7 +67,7 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
     }
     for (const attr of attributes) {
       const summary = el('div', { class: 'attr-summary' }, [
-        el('div', { class: 'attr-name', text: attr.name }),
+        el('div', { class: 'attr-name', text: attr.name, title: attr.name }),
         el('div', { class: 'attr-value' }),
       ]);
       const giftRules = el('div', { class: 'display-gift-rules' });
@@ -72,6 +89,9 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
         }
       }
       const block = el('section', { class: 'attr' }, [summary, giftRules]);
+      const stage = el('div', { class: 'broadcast-stage' }, [createDefaultBroadcast(attr)]);
+      broadcastStages.set(attr.name, stage);
+      broadcastArea.append(el('div', { class: 'broadcast-ticker' }, [stage]));
       attrEls.set(attr.name, block);
       panel.append(block);
     }
@@ -80,10 +100,13 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
   }
 
   function updateAll(): void {
+    const opacity = Math.min(100, Math.max(10, Number(state.settings.panelOpacity) || 55)) / 100;
     root.style.setProperty('--accent', state.settings.accentColor);
     root.style.setProperty('--accent2', state.settings.accentColor);
-    panel.classList.toggle('center', state.settings.align === 'center');
-    panel.classList.toggle('right', state.settings.align === 'right');
+    root.style.setProperty('--panel-opacity', String(opacity));
+    root.style.setProperty('--panel-surface-opacity', String(opacity * 0.62));
+    stack.classList.toggle('center', state.settings.align === 'center');
+    stack.classList.toggle('right', state.settings.align === 'right');
     for (const attr of visibleAttributes()) {
       const block = attrEls.get(attr.name);
       if (!block) continue;
@@ -102,14 +125,6 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
       }
     }
     updateConnection();
-    const stats = panel.querySelector('.stats') as HTMLElement | null;
-    if (state.settings.showStats) {
-      const nextStats = stats ?? el('div', { class: 'stats' });
-      if (!stats) panel.append(nextStats);
-      updateStats(nextStats);
-    } else {
-      stats?.remove();
-    }
   }
 
   function updateConnection(): void {
@@ -122,36 +137,36 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
     conn.style.display = state.settings.showConnection ? '' : 'none';
   }
 
-  function updateStats(statsEl: HTMLElement): void {
-    const day = state.stats[todayStr()];
-    const giftTotal = day ? Object.values(day.giftTotals).reduce((sum, value) => sum + value, 0) : 0;
-    const giftStat = el('span', { class: 'gift-stat' });
-    giftStat.append(createBrandIcon(16, 'stats-brand-icon'), el('span', { text: `礼物 ${giftTotal}` }));
-    statsEl.replaceChildren(giftStat);
+  function swapBroadcastContent(attributeName: string, next: HTMLElement): void {
+    const stage = broadcastStages.get(attributeName);
+    if (!stage) return;
+    const previous = stage.children[stage.children.length - 1] as HTMLElement | undefined;
+    next.classList.add('is-entering');
+    stage.append(next);
+    previous?.classList.add('is-leaving');
+    globalThis.setTimeout(() => {
+      previous?.remove();
+      next.classList.remove('is-entering');
+    }, BROADCAST_TRANSITION_DURATION);
   }
 
-  function showGiftChange(entry: LogEntry): void {
+  function showGiftBroadcast(entry: LogEntry): void {
     if (selectedAttributeName && entry.attributeName !== selectedAttributeName) return;
     const block = attrEls.get(entry.attributeName);
-    if (block) {
-      block.classList.remove('flash');
-      void block.offsetWidth;
-      block.classList.add('flash');
-      globalThis.setTimeout(() => block.classList.remove('flash'), 700);
-    }
-    const gift = findGift(state, entry.giftId);
-    const image = el('img') as HTMLImageElement;
-    image.src = gift?.imgBasic || transparentPixel();
     const attribute = state.attributes.find((item) => item.name === entry.attributeName);
-    const notification = el('div', { class: 'gift-toast' }, [
-      image,
-      el('div', { class: 'grow' }, [
-        el('div', { class: 'gt-name', text: `${entry.uname} 送出 ${entry.giftName}` }),
-        el('div', { class: 'gt-delta', text: `${entry.attributeName} ${formatDelta(entry.delta, attribute)}` }),
-      ]),
-    ]);
-    toastWrap.append(notification);
-    globalThis.setTimeout(() => notification.remove(), 3200);
+    if (!block || !attribute) return;
+    block.classList.remove('flash');
+    void block.offsetWidth;
+    block.classList.add('flash');
+    globalThis.setTimeout(() => block.classList.remove('flash'), 700);
+    clearBroadcastReturnTimer(entry.attributeName);
+    swapBroadcastContent(entry.attributeName, createGiftBroadcast(entry, attribute));
+    const timer = globalThis.setTimeout(() => {
+      const latestAttribute = state.attributes.find((item) => item.name === entry.attributeName);
+      if (latestAttribute) swapBroadcastContent(entry.attributeName, createDefaultBroadcast(latestAttribute));
+      broadcastReturnTimers.delete(entry.attributeName);
+    }, GIFT_BROADCAST_DURATION);
+    broadcastReturnTimers.set(entry.attributeName, timer);
   }
 
   async function refreshState(): Promise<void> {
@@ -162,10 +177,10 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
       state = await refreshStateFromServer();
       if (displayStructureSignature(state) !== structure) renderAttrs();
       else updateAll();
-      const latest = state.log[0];
-      if (latest && logKey(latest) !== lastLogKey) {
-        lastLogKey = logKey(latest);
-        if (latest.source !== 'timer') showGiftChange(latest);
+      const newEntries = entriesSince(state.log, lastLogKey);
+      lastLogKey = state.log[0] ? logKey(state.log[0]) : lastLogKey;
+      for (const entry of newEntries.reverse()) {
+        if (entry.source !== 'timer') showGiftBroadcast(entry);
       }
     } finally {
       stateRefreshActive = false;
@@ -188,8 +203,47 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
     void refreshRuntime();
   }, 750);
   if (typeof globalThis.addEventListener === 'function') {
-    globalThis.addEventListener('beforeunload', () => globalThis.clearInterval(pollTimer), { once: true });
+    globalThis.addEventListener('beforeunload', () => {
+      globalThis.clearInterval(pollTimer);
+      for (const attributeName of broadcastReturnTimers.keys()) clearBroadcastReturnTimer(attributeName);
+    }, { once: true });
   }
+}
+
+function createDefaultBroadcast(attribute: Attribute): HTMLElement {
+  const message = attribute.broadcastMessage?.trim() || DEFAULT_BROADCAST_MESSAGE;
+  return el('div', { class: 'broadcast-content broadcast-default' }, [
+    el('div', { class: 'broadcast-marquee' }, [
+      el('span', { class: 'broadcast-marquee-text', text: message, title: message }),
+    ]),
+  ]);
+}
+
+function createGiftBroadcast(entry: LogEntry, attribute: Attribute): HTMLElement {
+  const avatar = el('img', {
+    class: 'broadcast-avatar',
+    alt: entry.uname ? `${entry.uname}的头像` : '用户头像',
+  }) as HTMLImageElement;
+  avatar.src = entry.avatar || transparentPixel();
+  const nickname = entry.uname?.trim() || '匿名观众';
+  const delta = formatDelta(entry.delta, attribute);
+  return el('div', { class: 'broadcast-content broadcast-gift' }, [
+    avatar,
+    el('strong', { class: 'broadcast-user-name', text: nickname, title: nickname }),
+    el('span', { class: 'broadcast-action', text: '投喂了' }),
+    el('span', { class: 'broadcast-gift-name', text: `${entry.giftName || '礼物'}x${Math.max(1, entry.num || 1)}` }),
+    el('span', { class: 'broadcast-attribute-name', text: entry.attributeName, title: entry.attributeName }),
+    el('strong', { class: 'broadcast-delta', text: delta, title: delta }),
+  ]);
+}
+
+function entriesSince(log: LogEntry[], previousKey: string): LogEntry[] {
+  const entries: LogEntry[] = [];
+  for (const entry of log) {
+    if (previousKey && logKey(entry) === previousKey) break;
+    entries.push(entry);
+  }
+  return entries;
 }
 
 function displayStructureSignature(state: AppState): string {
@@ -202,7 +256,7 @@ function displayStructureSignature(state: AppState): string {
 }
 
 function logKey(entry: LogEntry): string {
-  return `${entry.time}:${entry.ruleId}:${entry.valueAfter}`;
+  return entry.eventId || `${entry.time}:${entry.ruleId}:${entry.attributeName}:${entry.valueAfter}`;
 }
 
 function transparentPixel(): string {

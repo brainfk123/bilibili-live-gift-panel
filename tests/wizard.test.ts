@@ -932,6 +932,10 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root)).toContain('等号右侧的计算结果会成为属性的新值');
     expect(textOf(root)).toContain('RANDBETWEEN(A,B)');
     expect(textOf(root)).not.toContain('count 已移除');
+    const broadcastMessageInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '默认播报消息') as TestElement;
+    expect(broadcastMessageInput).toBeDefined();
+    broadcastMessageInput.value = '欢迎来到直播间，感谢大家的支持';
     const choices = root.querySelectorAll('.gift-choice');
     expect(choices.length).toBeGreaterThan(1);
     choices[0].onclick?.();
@@ -957,6 +961,7 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules).toHaveLength(2));
     const saved = JSON.parse(storage.get('bilibili-live-gift-panel-v1')!);
     expect(saved.rules).toHaveLength(2);
+    expect(saved.attributes[0].broadcastMessage).toBe('欢迎来到直播间，感谢大家的支持');
     expect(saved.rules.every((rule: { attributeName: string; formula: string }) => rule.attributeName === '加班时间' && rule.formula === '加班时间+1')).toBe(true);
     expect(saved.rules.map((rule: { formulaName: string }) => rule.formulaName)).toEqual(['加一分钟', '加一次挑战']);
     expect(root.querySelectorAll('.attribute-gift-rule')).toHaveLength(2);
@@ -1102,9 +1107,22 @@ describe('single-page configuration rendering', () => {
     expect(input?.readOnly).toBe(true);
     expect(findByText(root, '复制 OBS 链接')).toBeDefined();
   });
+
+  it('persists the OBS panel opacity setting', async () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const opacity = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '面板透明度（%）') as TestElement & { onchange?: () => void };
+    expect(opacity.value).toBe('55');
+    opacity.value = '72';
+    opacity.onchange?.();
+
+    await vi.waitFor(() => expect(loadState().settings.panelOpacity).toBe(72));
+  });
 });
 
-describe('display branding', () => {
+describe('OBS attribute display', () => {
   it('formats positive, negative, and zero deltas with the correct sign', () => {
     const attr = { name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' } as const;
     expect(formatDelta(60, attr)).toBe('+00:01:00');
@@ -1112,7 +1130,7 @@ describe('display branding', () => {
     expect(formatDelta(0, attr)).toBe('00:00:00');
   });
 
-  it('uses the shared brand icon for gift stats and the empty display state', () => {
+  it('uses the shared brand icon only for the empty display state', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state(),
       attributes: [],
@@ -1121,7 +1139,7 @@ describe('display branding', () => {
     const root = new TestElement('div');
     mountDisplay(root as unknown as HTMLElement);
 
-    expect(root.querySelector('.stats-brand-icon')).not.toBeNull();
+    expect(root.querySelector('.stats')).toBeNull();
     expect(root.querySelector('.display-empty-brand-icon')).not.toBeNull();
     expect(textOf(root)).not.toContain('🎁');
     vi.useRealTimers();
@@ -1132,7 +1150,7 @@ describe('display branding', () => {
       ...state(),
       attributes: [
         { name: '加班时间', value: 60, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' },
-        { name: '积分', value: 7, unit: 'number', format: 'number', decimals: 0, suffix: '' },
+        { name: '积分', value: 7, unit: 'number', format: 'number', decimals: 0, suffix: '', broadcastMessage: '欢迎参与积分挑战' },
       ],
       rules: [{ id: 'r-points', giftId: 1, attributeName: '积分', formulaName: '增加一分', formula: '积分+1' }],
       recentGifts: [{ id: 1, name: '小心心', price: 100, coinType: 'gold', imgBasic: '', lastReceived: 1, count: 1 }],
@@ -1144,6 +1162,11 @@ describe('display branding', () => {
     expect(textOf(root)).toContain('积分');
     expect(textOf(root)).toContain('7');
     expect(textOf(root)).toContain('增加一分');
+    expect(textOf(root)).toContain('欢迎参与积分挑战');
+    expect(root.querySelectorAll('.display-gift-rule')).toHaveLength(1);
+    expect(root.querySelector('.broadcast-ticker')).not.toBeNull();
+    expect(root.querySelector('.panel')?.querySelector('.broadcast-ticker')).toBeNull();
+    expect(root.querySelector('.display-broadcast-area')?.querySelector('.broadcast-ticker')).not.toBeNull();
     expect(textOf(root)).not.toContain('加班时间');
     vi.useRealTimers();
   });

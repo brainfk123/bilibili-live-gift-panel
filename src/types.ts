@@ -8,6 +8,7 @@ export interface Attribute {
   decimals: number;
   suffix: string;
   color?: string;
+  broadcastMessage?: string;
 }
 
 export interface GiftRule {
@@ -66,12 +67,14 @@ export interface LogEntry {
   giftName: string;
   num: number;
   uname: string;
+  avatar?: string;
   attributeName: string;
   delta: number;
   valueAfter: number;
   ruleId: string;
   source?: 'gift' | 'timer';
   triggerName?: string;
+  eventId?: string;
 }
 
 export interface Settings {
@@ -82,6 +85,7 @@ export interface Settings {
   align: 'left' | 'center' | 'right';
   theme: 'dark' | 'light';
   giftView: 'list' | 'grid';
+  panelOpacity: number;
   showTutorial: boolean;
 }
 

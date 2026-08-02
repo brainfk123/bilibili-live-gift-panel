@@ -183,6 +183,7 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 		CoinType  string          `json:"coin_type"`
 		TotalCoin float64         `json:"total_coin"`
 		Uname     string          `json:"uname"`
+		Face      string          `json:"face"`
 		UID       int64           `json:"uid"`
 		Timestamp int64           `json:"timestamp"`
 		Rnd       json.RawMessage `json:"rnd"`
@@ -202,7 +203,7 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 	}
 	return giftEvent{
 		GiftID: data.GiftID, GiftName: data.GiftName, Num: data.Num, Price: data.Price,
-		CoinType: data.CoinType, TotalCoin: data.TotalCoin, Uname: data.Uname, UID: data.UID,
+		CoinType: data.CoinType, TotalCoin: data.TotalCoin, Uname: data.Uname, Avatar: data.Face, UID: data.UID,
 		Timestamp: data.Timestamp, ImgBasic: data.GiftInfo.ImgBasic, Rnd: rnd,
 	}, true
 }

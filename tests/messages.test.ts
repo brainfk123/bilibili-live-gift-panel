@@ -13,6 +13,7 @@ describe('parseGift', () => {
       coin_type: 'gold',
       total_coin: 40,
       uname: 'user',
+      face: 'https://avatar',
       uid: 123,
       timestamp: 1700000000,
       gift_info: { img_basic: 'https://img' },
@@ -23,6 +24,7 @@ describe('parseGift', () => {
     expect(ev.price).toBe(20);
     expect(ev.coinType).toBe('gold');
     expect(ev.imgBasic).toBe('https://img');
+    expect(ev.avatar).toBe('https://avatar');
     expect(ev.rnd).toBe('x1');
   });
 

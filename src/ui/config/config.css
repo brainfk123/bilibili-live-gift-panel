@@ -964,6 +964,7 @@ body.config-mode::-webkit-scrollbar-corner,
   gap: 12px;
   padding: 20px 26px 8px;
 }
+.config-root .attribute-broadcast-message { grid-column: 1 / -1; }
 .config-root .modal-tip {
   margin: 0 26px 20px;
   border: 1px solid var(--success-border);

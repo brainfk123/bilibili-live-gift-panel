@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { calculateFittedFontSize } from '../src/ui/display/display';
 
 describe('OBS attribute value fitting', () => {
@@ -12,5 +13,28 @@ describe('OBS attribute value fitting', () => {
 
   it('uses a readable lower bound for extreme values', () => {
     expect(calculateFittedFontSize(48, 200, 4000)).toBe(14);
+  });
+});
+
+describe('OBS broadcast panel layout', () => {
+  const css = readFileSync(new URL('../src/ui/display/display.css', import.meta.url), 'utf8');
+
+  it('uses a one-third narrower panel without shrinking the primary value typography', () => {
+    expect(css).toContain('width: min(480px, calc(100% - 40px));');
+    expect(css).toMatch(/\.attr-name[\s\S]*?font-size: 32px/);
+    expect(css).toMatch(/\.attr-value[\s\S]*?font-size: 56px/);
+  });
+
+  it('constrains long broadcast fields and animates message changes', () => {
+    expect(css).toMatch(/\.broadcast-user-name[\s\S]*?max-width:/);
+    expect(css).toMatch(/\.broadcast-delta[\s\S]*?max-width:/);
+    expect(css).toContain('text-overflow: ellipsis;');
+    expect(css).toContain('@keyframes broadcastScroll');
+    expect(css).toContain('@keyframes broadcastIn');
+    expect(css).toContain('@keyframes broadcastOut');
+  });
+
+  it('applies configurable opacity to the panel background only', () => {
+    expect(css).toContain('background: rgba(14, 15, 20, var(--panel-opacity, 0.55));');
   });
 });
