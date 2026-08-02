@@ -966,7 +966,6 @@ describe('single-page configuration rendering', () => {
 
   it('saves, applies, and deletes a reusable gift formula preset', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
-    vi.stubGlobal('confirm', vi.fn(() => true));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
@@ -974,17 +973,19 @@ describe('single-page configuration rendering', () => {
     root.querySelector('.gift-choice')?.onclick?.();
     const formulaInput = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '触发后属性值') as TestElement & { oninput?: () => void };
-    const presetNameInput = root.querySelectorAll('input')
-      .find((input) => input.dataset.fieldLabel === '预设名称') as TestElement;
-    const presetTools = root.querySelector('.formula-preset-tools')!;
-    const presetSelect = presetTools.querySelector('.formula-preset-select') as TestElement & { onchange?: () => void };
 
     formulaInput.value = '加班时间+price/1000*60';
     formulaInput.oninput?.();
+    findByText(root, '保存预设')?.onclick?.();
+    const nameDialog = root.querySelector('.formula-preset-name-dialog')!;
+    const presetNameInput = nameDialog.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '预设名称') as TestElement;
     presetNameInput.value = '按价格加时';
-    findByText(presetTools, '保存当前公式')?.onclick?.();
+    findByText(nameDialog, '保存')?.onclick?.();
 
     await vi.waitFor(() => expect(loadState().formulaPresets).toHaveLength(1));
+    expect(root.querySelector('.formula-preset-name-dialog')).toBeNull();
+    expect(root.querySelector('.formula-preset-tools')).toBeNull();
     const preset = loadState().formulaPresets[0];
     expect(preset).toMatchObject({
       name: '按价格加时',
@@ -995,12 +996,12 @@ describe('single-page configuration rendering', () => {
 
     formulaInput.value = '加班时间+1';
     formulaInput.oninput?.();
-    presetSelect.value = preset.id;
-    presetSelect.onchange?.();
-    findByText(presetTools, '应用')?.onclick?.();
+    const presetChip = root.querySelector('.formula-preset-chip')!;
+    presetChip.querySelector('.formula-preset-apply')?.onclick?.();
     expect(formulaInput.value).toBe('加班时间+price/1000*60');
 
-    findByText(presetTools, '删除')?.onclick?.();
+    expect(presetChip.querySelector('.formula-preset-delete')?.textContent).toBe('×');
+    presetChip.querySelector('.formula-preset-delete')?.onclick?.();
     await vi.waitFor(() => expect(loadState().formulaPresets).toHaveLength(0));
   });
 

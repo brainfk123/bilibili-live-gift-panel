@@ -409,114 +409,126 @@ export function mountConfig(root: HTMLElement): void {
         : formula.trim()
     );
 
-    function populateFormulaPresetSelect(select: HTMLSelectElement, preferredId = select.value): void {
-      const context = select.dataset.presetContext as FormulaPresetContext;
-      const presets = state.formulaPresets.filter((preset) => preset.context === context);
-      select.replaceChildren(el('option', { value: '', text: presets.length === 0 ? '还没有同类预设' : '选择已保存的预设' }));
-      for (const preset of presets) {
-        select.append(el('option', { value: preset.id, text: preset.name }));
-      }
-      select.value = presets.some((preset) => preset.id === preferredId) ? preferredId : '';
+    type RefreshablePresetList = HTMLElement & { refreshPresets?: () => void };
+
+    function refreshFormulaPresetLists(context: FormulaPresetContext): void {
+      const lists = Array.from(modal.querySelectorAll<RefreshablePresetList>('.formula-preset-list'))
+        .filter((list) => list.dataset.presetContext === context);
+      for (const list of lists) list.refreshPresets?.();
     }
 
-    function refreshFormulaPresetTools(context: FormulaPresetContext, preferredId = ''): void {
-      const presetTools = Array.from(modal.querySelectorAll<HTMLElement>('.formula-preset-tools'))
-        .filter((tools) => tools.dataset.presetContext === context);
-      for (const tools of presetTools) {
-        const select = tools.querySelector<HTMLSelectElement>('.formula-preset-select');
-        if (!select) continue;
-        populateFormulaPresetSelect(select, preferredId || select.value);
-        const hasSelection = Boolean(select.value);
-        const applyButton = tools.querySelector<HTMLButtonElement>('.formula-preset-apply');
-        const deleteButton = tools.querySelector<HTMLButtonElement>('.formula-preset-delete');
-        if (applyButton) applyButton.disabled = !hasSelection;
-        if (deleteButton) deleteButton.disabled = !hasSelection;
-      }
-    }
-
-    function renderFormulaPresetTools(
+    function openFormulaPresetNameDialog(
       context: FormulaPresetContext,
       formulaInput: HTMLInputElement,
       formulaNameInput: HTMLInputElement,
-      updatePreview: () => void,
-    ): HTMLElement {
-      const tools = el('div', { class: 'formula-preset-tools' });
-      tools.dataset.presetContext = context;
+    ): void {
+      root.querySelector('.formula-preset-name-overlay')?.remove();
+      const nameOverlay = el('div', { class: 'overlay formula-preset-name-overlay' });
+      const nameDialog = el('section', {
+        class: 'card formula-preset-name-dialog',
+        role: 'dialog',
+        ariaLabel: '命名公式预设',
+      } as any);
       const presetNameInput = inputField('预设名称', formulaNameInput.value.trim());
-      presetNameInput.classList.add('formula-preset-name');
-      presetNameInput.placeholder = '输入预设名称';
-      presetNameInput.setAttribute('aria-label', '预设名称');
-      const presetSelect = el('select', {
-        class: 'field-input formula-preset-select',
-        ariaLabel: context === 'gift' ? '选择礼物公式预设' : '选择定时公式预设',
-      } as any) as HTMLSelectElement;
-      presetSelect.dataset.presetContext = context;
-      const savePresetButton = el('button', { class: 'btn ghost formula-preset-button', type: 'button', text: '保存当前公式' }) as HTMLButtonElement;
-      const applyPresetButton = el('button', { class: 'btn ghost formula-preset-button formula-preset-apply', type: 'button', text: '应用' }) as HTMLButtonElement;
-      const deletePresetButton = el('button', { class: 'btn text-danger formula-preset-button formula-preset-delete', type: 'button', text: '删除' }) as HTMLButtonElement;
-
-      const syncSelectionActions = (): void => {
-        const hasSelection = Boolean(presetSelect.value);
-        applyPresetButton.disabled = !hasSelection;
-        deletePresetButton.disabled = !hasSelection;
-      };
-      presetSelect.onchange = syncSelectionActions;
-      savePresetButton.onclick = () => {
+      presetNameInput.placeholder = '例如 按价格增加时间';
+      const cancelButton = el('button', { class: 'btn ghost', type: 'button', text: '取消' }) as HTMLButtonElement;
+      const confirmButton = el('button', { class: 'btn', type: 'button', text: '保存' }) as HTMLButtonElement;
+      const close = (): void => nameOverlay.remove();
+      cancelButton.onclick = close;
+      const commit = (): void => {
+        if (confirmButton.disabled) return;
         void (async () => {
           const attributeName = currentAttributeName();
           const formula = formulaForCurrentAttribute(formulaInput.value);
-          const presetName = presetNameInput.value.trim() || formulaNameInput.value.trim();
-          savePresetButton.disabled = true;
-          savePresetButton.textContent = '校验中…';
+          confirmButton.disabled = true;
+          confirmButton.textContent = '校验中…';
           try {
             const value = Number(valueInput.value);
             await previewFormula(formula, attributeName, Number.isFinite(value) ? value : 0, context === 'timer' ? 'timer' : undefined);
             const result = saveFormulaPreset(state.formulaPresets, {
-              name: presetName,
+              name: presetNameInput.value,
               context,
               formula,
               sourceAttributeName: attributeName,
             });
             state.formulaPresets = result.presets;
-            presetNameInput.value = result.preset.name;
             await saveAndWait();
-            refreshFormulaPresetTools(context, result.preset.id);
+            refreshFormulaPresetLists(context);
+            close();
             toast(result.created ? '公式预设已保存' : '同名公式预设已更新', root);
           } catch (error) {
             toast(error instanceof Error ? error.message : '公式预设保存失败', root);
           } finally {
-            savePresetButton.disabled = false;
-            savePresetButton.textContent = '保存当前公式';
+            confirmButton.disabled = false;
+            confirmButton.textContent = '保存';
           }
         })();
       };
-      applyPresetButton.onclick = () => {
-        const preset = state.formulaPresets.find((item) => item.id === presetSelect.value && item.context === context);
-        if (!preset) return;
-        formulaInput.value = applyFormulaPreset(preset, currentAttributeName());
-        updatePreview();
-        toast(`已应用预设“${preset.name}”`, root);
+      confirmButton.onclick = commit;
+      presetNameInput.onkeydown = (event) => {
+        if (event.key === 'Enter') commit();
+        if (event.key === 'Escape') close();
       };
-      deletePresetButton.onclick = () => {
-        const preset = state.formulaPresets.find((item) => item.id === presetSelect.value && item.context === context);
-        if (!preset || !confirm(`删除公式预设“${preset.name}”？`)) return;
-        state.formulaPresets = state.formulaPresets.filter((item) => item.id !== preset.id);
-        save();
-        refreshFormulaPresetTools(context);
-        toast('公式预设已删除', root);
-      };
-
-      populateFormulaPresetSelect(presetSelect);
-      syncSelectionActions();
-      tools.append(
-        el('span', { class: 'formula-preset-label', text: context === 'gift' ? '礼物公式预设' : '定时公式预设' }),
-        presetNameInput,
-        savePresetButton,
-        presetSelect,
-        applyPresetButton,
-        deletePresetButton,
+      nameDialog.append(
+        el('div', { class: 'formula-preset-name-header' }, [
+          el('h3', { text: '保存公式预设' }),
+          el('p', { text: '给当前公式起个容易识别的名字。' }),
+        ]),
+        fieldControl(presetNameInput),
+        el('div', { class: 'formula-preset-name-actions' }, [cancelButton, confirmButton]),
       );
-      return tools;
+      nameOverlay.append(nameDialog);
+      root.append(nameOverlay);
+      presetNameInput.focus();
+    }
+
+    function renderFormulaPresetControls(
+      context: FormulaPresetContext,
+      formulaInput: HTMLInputElement,
+      formulaNameInput: HTMLInputElement,
+      updatePreview: () => void,
+    ): { saveButton: HTMLButtonElement; presetList: HTMLElement } {
+      const saveButton = el('button', {
+        class: 'formula-save-preset',
+        type: 'button',
+        text: '保存预设',
+      }) as HTMLButtonElement;
+      saveButton.onclick = () => openFormulaPresetNameDialog(context, formulaInput, formulaNameInput);
+
+      const presetList = el('div', { class: 'formula-preset-list' }) as RefreshablePresetList;
+      presetList.dataset.presetContext = context;
+      presetList.refreshPresets = () => {
+        presetList.replaceChildren();
+        for (const preset of state.formulaPresets.filter((item) => item.context === context)) {
+          const applyButton = el('button', {
+            class: 'formula-preset-apply',
+            type: 'button',
+            text: preset.name,
+            title: `应用预设“${preset.name}”`,
+          }) as HTMLButtonElement;
+          applyButton.onclick = () => {
+            formulaInput.value = applyFormulaPreset(preset, currentAttributeName());
+            updatePreview();
+            toast(`已应用预设“${preset.name}”`, root);
+          };
+          const deleteButton = el('button', {
+            class: 'formula-preset-delete',
+            type: 'button',
+            text: '×',
+            ariaLabel: `删除预设 ${preset.name}`,
+          } as any) as HTMLButtonElement;
+          deleteButton.onclick = () => {
+            state.formulaPresets = state.formulaPresets.filter((item) => item.id !== preset.id);
+            void saveAndWait().then(() => {
+              refreshFormulaPresetLists(context);
+              toast('公式预设已删除', root);
+            });
+          };
+          presetList.append(el('span', { class: 'formula-preset-chip' }, [applyButton, deleteButton]));
+        }
+      };
+      presetList.refreshPresets();
+      return { saveButton, presetList };
     }
 
     const timerList = el('div', { class: 'timer-rule-list' });
@@ -600,14 +612,18 @@ export function mountConfig(root: HTMLElement): void {
       const formulaInput = inputField('定时触发后属性值', rule.formula);
       formulaInput.classList.add('formula');
       formulaInput.placeholder = `MAX(${nameInput.value.trim() || '属性'}-60,0)`;
-      const formulaControl = el('label', { class: 'field formula-assignment-field' });
+      formulaInput.setAttribute('aria-label', '定时触发后属性值');
+      const formulaControl = el('div', { class: 'field formula-assignment-field' });
+      const formulaHeading = el('div', { class: 'formula-field-heading' }, [
+        el('span', { class: 'field-label', text: '触发后属性值' }),
+      ]);
       const assignmentRow = el('div', { class: 'formula-assignment-row' });
       assignmentRow.append(
         el('code', { class: 'formula-target-name', text: `${nameInput.value.trim() || '属性'} =` }),
         formulaInput,
       );
       formulaControl.append(
-        el('span', { class: 'field-label', text: '触发后属性值' }),
+        formulaHeading,
         assignmentRow,
       );
 
@@ -653,6 +669,8 @@ export function mountConfig(root: HTMLElement): void {
       formulaInput.oninput = updatePreview;
 
       const examples = el('div', { class: 'formula-examples' });
+      const presetControls = renderFormulaPresetControls('timer', formulaInput, formulaNameInput, updatePreview);
+      formulaHeading.append(presetControls.saveButton);
       const timerExamples: Array<[string, () => string]> = [
         ['每次 -1', () => `MAX(${nameInput.value.trim() || '属性'}-1,0)`],
         ['每次 -60', () => `MAX(${nameInput.value.trim() || '属性'}-60,0)`],
@@ -666,6 +684,7 @@ export function mountConfig(root: HTMLElement): void {
         };
         examples.append(example);
       }
+      examples.append(presetControls.presetList);
 
       editor.append(
         el('div', { class: 'timer-rule-fields' }, [
@@ -674,7 +693,6 @@ export function mountConfig(root: HTMLElement): void {
           fieldControl(conditionInput),
           formulaControl,
         ]),
-        renderFormulaPresetTools('timer', formulaInput, formulaNameInput, updatePreview),
         el('div', { class: 'formula-editor-meta' }, [examples, preview]),
       );
       updatePreview();
@@ -786,14 +804,18 @@ export function mountConfig(root: HTMLElement): void {
       const formulaInput = inputField('触发后属性值', item.formula);
       formulaInput.classList.add('formula');
       formulaInput.placeholder = `${nameInput.value.trim() || '属性'}+60`;
-      const formulaControl = el('label', { class: 'field formula-assignment-field' });
+      formulaInput.setAttribute('aria-label', '触发后属性值');
+      const formulaControl = el('div', { class: 'field formula-assignment-field' });
+      const formulaHeading = el('div', { class: 'formula-field-heading' }, [
+        el('span', { class: 'field-label', text: '触发后属性值' }),
+      ]);
       const assignmentRow = el('div', { class: 'formula-assignment-row' });
       assignmentRow.append(
         el('code', { class: 'formula-target-name', text: `${nameInput.value.trim() || '属性'} =` }),
         formulaInput,
       );
       formulaControl.append(
-        el('span', { class: 'field-label', text: '触发后属性值' }),
+        formulaHeading,
         assignmentRow,
       );
       const preview = el('div', { class: 'formula-preview' });
@@ -824,6 +846,8 @@ export function mountConfig(root: HTMLElement): void {
       };
       formulaInput.oninput = updatePreview;
       const examples = el('div', { class: 'formula-examples' });
+      const presetControls = renderFormulaPresetControls('gift', formulaInput, formulaNameInput, updatePreview);
+      formulaHeading.append(presetControls.saveButton);
       const exampleFactories: Array<[string, () => string]> = [
         ['每个 +1', () => `${nameInput.value.trim() || '属性'}+1`],
         ['按价格增加时间', () => `${nameInput.value.trim() || '属性'}+price/1000*60`],
@@ -837,12 +861,13 @@ export function mountConfig(root: HTMLElement): void {
         };
         examples.append(example);
       }
+      examples.append(presetControls.presetList);
       const editorFields = el('div', { class: 'rule-editor-fields' }, [
         fieldControl(formulaNameInput),
         formulaControl,
       ]);
       const editorMeta = el('div', { class: 'formula-editor-meta' }, [examples, preview]);
-      row.append(editorFields, renderFormulaPresetTools('gift', formulaInput, formulaNameInput, updatePreview), editorMeta);
+      row.append(editorFields, editorMeta);
       updatePreview();
       return row;
     }
