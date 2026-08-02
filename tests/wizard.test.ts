@@ -1137,6 +1137,45 @@ describe('single-page configuration rendering', () => {
 
     await vi.waitFor(() => expect(loadState().settings.panelOpacity).toBe(72));
   });
+
+  it('uses field-specific controls for OBS panel appearance', async () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const fontSize = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '字体大小（px）') as TestElement & { onchange?: () => void };
+    const accent = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '强调色') as TestElement & { onchange?: () => void };
+    const opacity = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '面板透明度（%）') as TestElement & { onchange?: () => void };
+    const alignmentOptions = root.querySelectorAll('.alignment-option');
+    const connectionSwitch = root.querySelector('.setting-switch-input') as TestElement & { checked?: boolean; onchange?: () => void };
+
+    expect(fontSize.type).toBe('range');
+    expect(fontSize.attributes.min).toBe('24');
+    expect(fontSize.attributes.max).toBe('96');
+    expect(accent.type).toBe('color');
+    expect(opacity.type).toBe('range');
+    expect(alignmentOptions.map((option) => option.textContent)).toEqual(['左对齐', '居中', '右对齐']);
+    expect(connectionSwitch).not.toBeNull();
+
+    fontSize.value = '64';
+    fontSize.onchange?.();
+    accent.value = '#123456';
+    accent.onchange?.();
+    alignmentOptions[2].onclick?.();
+    connectionSwitch.checked = true;
+    connectionSwitch.onchange?.();
+
+    await vi.waitFor(() => {
+      expect(loadState().settings).toEqual(expect.objectContaining({
+        fontSize: 64,
+        accentColor: '#123456',
+        align: 'right',
+        showConnection: true,
+      }));
+    });
+  });
 });
 
 describe('OBS attribute display', () => {

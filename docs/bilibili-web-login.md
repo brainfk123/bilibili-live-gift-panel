@@ -134,7 +134,7 @@ GET https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByUser?room_id=
 nav.data.mid == 房间主播 UID
 ```
 
-若不相等，应显示“登录账号不是当前房间主播”，并且不要声称可以解除脱敏。
+若不相等，应显示“普通登录身份”：仍可使用有效登录态建立连接，但不要声称该账号拥有主播的匿名资料查看权限，也不要承诺解除脱敏。
 
 ### 5. 匿名主页查询仍可作为补充，不应成为主链路
 
@@ -185,7 +185,7 @@ nav.data.mid == 房间主播 UID
 - 维护一个只用于 B 站域名的 Cookie Jar；Cookie 域名、Secure、Expires/Max-Age 由服务端响应决定。
 - 保存轮询成功返回的 `refresh_token` 和 `timestamp`，但第一版不必冒险实现未经验证的自动刷新。
 - 使用 `nav` 获取登录状态和 `mid`，使用房间信息验证主播身份。
-- 用登录 Cookie 请求 `getInfoByUser`、`getDanmuInfo`，WebSocket 认证使用真实主播 UID。
+- 用登录 Cookie 请求 `getInfoByUser`、`getDanmuInfo`，WebSocket 认证使用当前登录用户 UID；主播身份作为额外能力提示，不作为启用登录连接的硬门槛。
 - 解析现代 `sender_uinfo`；房间匿名资料按当前官方前端协议处理。任何解析失败都回退到原始脱敏值。
 - 前端 API 只能获得 `{ loggedIn, mid, name, face, isRoomOwner, expiresState }` 等状态，不得返回原始 Cookie 或 refresh token。
 

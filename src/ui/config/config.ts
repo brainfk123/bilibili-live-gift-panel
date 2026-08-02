@@ -269,7 +269,7 @@ export function mountConfig(root: HTMLElement): void {
         avatar,
         el('div', { class: 'login-identity-copy' }, [
           el('strong', { text: biliAuth.uname || `用户 ${biliAuth.uid ?? ''}` }),
-          el('span', { text: `已登录 · UID ${biliAuth.uid ?? ''}${biliAuth.isRoomOwner === true ? ' · 主播身份已验证' : biliAuth.isRoomOwner === false ? ' · 不是当前房间主播' : ' · 填写房间号后验证身份'}` }),
+          el('span', { text: `已登录 · UID ${biliAuth.uid ?? ''}${biliAuth.isRoomOwner === true ? ' · 主播身份已验证' : biliAuth.isRoomOwner === false ? ' · 普通登录身份' : ' · 填写房间号后识别身份'}` }),
         ]),
       );
     } else {
@@ -304,9 +304,9 @@ export function mountConfig(root: HTMLElement): void {
     card.append(
       identity,
       el('p', {
-        class: `login-fallback-note${biliAuth.isRoomOwner === false ? ' is-warning' : ''}`,
+        class: `login-fallback-note${biliAuth.isRoomOwner === false ? ' is-info' : ''}`,
         text: biliAuth.isRoomOwner === false
-          ? '当前账号不是这个直播间的主播，后台会继续匿名连接。无法识别时仍保留 B 站返回的脱敏昵称。'
+          ? '后台会使用当前登录账号连接；普通账号不一定有查看完整匿名资料的权限，无法识别时仍保留脱敏昵称。'
           : '无法识别时保留 B 站返回的脱敏昵称，不影响礼物公式执行。',
       }),
       actions,
@@ -1338,42 +1338,114 @@ export function mountConfig(root: HTMLElement): void {
 
     const appearance = el('section', { class: 'workspace-card advanced-card' });
     appearance.append(el('h3', { text: 'OBS 面板外观' }));
-    const fontSize = inputField('字体大小（px）', String(state.settings.fontSize));
-    fontSize.onchange = () => {
-      state.settings.fontSize = Number(fontSize.value) || 48;
-      save();
+
+    const rangeSetting = (
+      label: string,
+      value: number,
+      min: number,
+      max: number,
+      unit: string,
+      commit: (next: number) => void,
+    ): HTMLElement => {
+      const output = el('output', { class: 'setting-value', text: `${value}${unit}` });
+      const range = el('input', {
+        class: 'setting-range',
+        type: 'range',
+        value: String(value),
+      }) as HTMLInputElement;
+      range.dataset.fieldLabel = label;
+      range.setAttribute('min', String(min));
+      range.setAttribute('max', String(max));
+      range.setAttribute('step', '1');
+      const updateVisual = (): number => {
+        const next = Math.min(max, Math.max(min, Number(range.value) || value));
+        output.textContent = `${next}${unit}`;
+        range.style.setProperty('--range-progress', `${((next - min) / (max - min)) * 100}%`);
+        return next;
+      };
+      range.oninput = () => { updateVisual(); };
+      range.onchange = () => {
+        const next = updateVisual();
+        range.value = String(next);
+        commit(next);
+        save();
+      };
+      updateVisual();
+      return el('label', { class: 'field setting-control range-setting' }, [
+        el('span', { class: 'setting-control-head' }, [el('span', { class: 'field-label', text: label }), output]),
+        range,
+      ]);
     };
-    const accent = inputField('强调色', state.settings.accentColor);
+
+    const fontSize = rangeSetting('字体大小（px）', state.settings.fontSize, 24, 96, ' px', (next) => {
+      state.settings.fontSize = next;
+    });
+
+    const accentValue = el('output', { class: 'setting-value color-value', text: state.settings.accentColor.toUpperCase() });
+    const accent = el('input', { class: 'setting-color-input', type: 'color', value: state.settings.accentColor }) as HTMLInputElement;
+    accent.dataset.fieldLabel = '强调色';
+    accent.oninput = () => { accentValue.textContent = accent.value.toUpperCase(); };
     accent.onchange = () => {
       state.settings.accentColor = accent.value;
+      accentValue.textContent = accent.value.toUpperCase();
       save();
     };
-    const align = el('select', { class: 'field-input' }) as HTMLSelectElement;
-    align.innerHTML = '<option value="left">左对齐</option><option value="center">居中</option><option value="right">右对齐</option>';
-    align.value = state.settings.align;
-    align.onchange = () => {
-      state.settings.align = align.value as AppState['settings']['align'];
-      save();
-    };
-    const panelOpacity = inputField('面板透明度（%）', String(state.settings.panelOpacity));
-    panelOpacity.type = 'number';
-    panelOpacity.min = '10';
-    panelOpacity.max = '100';
-    panelOpacity.step = '1';
-    panelOpacity.onchange = () => {
-      state.settings.panelOpacity = Math.min(100, Math.max(10, Number(panelOpacity.value) || 55));
-      panelOpacity.value = String(state.settings.panelOpacity);
-      save();
-    };
-    const showConnection = checkboxField('显示连接状态', state.settings.showConnection, (checked) => {
-      state.settings.showConnection = checked;
-      save();
+    const accentControl = el('label', { class: 'field setting-control color-setting' }, [
+      el('span', { class: 'setting-control-head' }, [el('span', { class: 'field-label', text: '强调色' }), accentValue]),
+      el('span', { class: 'color-picker-row' }, [accent, el('span', { class: 'color-picker-copy', text: '点击色块选择颜色' })]),
+    ]);
+
+    const alignControl = el('fieldset', { class: 'field setting-control alignment-setting' });
+    alignControl.append(el('legend', { class: 'field-label', text: '对齐' }));
+    const alignOptions = el('div', { class: 'alignment-control', role: 'group', ariaLabel: 'OBS 面板对齐方式' });
+    const alignments: Array<{ value: AppState['settings']['align']; label: string }> = [
+      { value: 'left', label: '左对齐' },
+      { value: 'center', label: '居中' },
+      { value: 'right', label: '右对齐' },
+    ];
+    for (const option of alignments) {
+      const button = el('button', {
+        class: `alignment-option${state.settings.align === option.value ? ' is-active' : ''}`,
+        type: 'button',
+        text: option.label,
+        ariaPressed: String(state.settings.align === option.value),
+      }) as HTMLButtonElement;
+      button.onclick = () => {
+        state.settings.align = option.value;
+        for (const candidate of Array.from(alignOptions.querySelectorAll('.alignment-option'))) {
+          const active = candidate === button;
+          candidate.classList.toggle('is-active', active);
+          candidate.setAttribute('aria-pressed', String(active));
+        }
+        save();
+      };
+      alignOptions.append(button);
+    }
+    alignControl.append(alignOptions);
+
+    const panelOpacity = rangeSetting('面板透明度（%）', state.settings.panelOpacity, 10, 100, '%', (next) => {
+      state.settings.panelOpacity = next;
     });
+
+    const showConnectionInput = el('input', { class: 'setting-switch-input', type: 'checkbox' }) as HTMLInputElement;
+    showConnectionInput.checked = state.settings.showConnection;
+    showConnectionInput.onchange = () => {
+      state.settings.showConnection = showConnectionInput.checked;
+      save();
+    };
+    const showConnection = el('label', { class: 'setting-switch' }, [
+      showConnectionInput,
+      el('span', { class: 'setting-switch-track', ariaHidden: 'true' }),
+      el('span', { class: 'setting-switch-copy' }, [
+        el('strong', { text: '显示连接状态' }),
+        el('small', { text: '在 OBS 属性面板中显示当前连接状态' }),
+      ]),
+    ]);
     appearance.append(
-      fieldControl(fontSize),
-      fieldControl(accent),
-      el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '对齐' }), align]),
-      fieldControl(panelOpacity),
+      fontSize,
+      accentControl,
+      alignControl,
+      panelOpacity,
       showConnection,
     );
 
@@ -1435,13 +1507,6 @@ export function mountConfig(root: HTMLElement): void {
     settingsGrid.append(appearance, dataCard);
     details.append(settingsGrid);
     content.append(details);
-  }
-
-  function checkboxField(label: string, checked: boolean, onChange: (checked: boolean) => void): HTMLElement {
-    const input = el('input', { type: 'checkbox' }) as HTMLInputElement;
-    input.checked = checked;
-    input.onchange = () => onChange(input.checked);
-    return el('label', { class: 'checkbox-field' }, [input, el('span', { text: label })]);
   }
 
   function renderFormulaHelp(attributeName: string): HTMLElement {

@@ -92,7 +92,7 @@ func TestBuildBiliAuthPayloadUsesOptionalLoginSession(t *testing.T) {
 	}
 }
 
-func TestSessionForRoomInfoRejectsNonOwnerLogin(t *testing.T) {
+func TestSessionForRoomInfoKeepsValidNonOwnerLogin(t *testing.T) {
 	session := biliSession{UID: 32249588, CookieHeader: "SESSDATA=secret", Buvid: "login-buvid"}
 	ownerRoom := roomInfo{RoomID: 31567150, AnchorUID: 32249588}
 	if actual := sessionForRoomInfo(ownerRoom, session); actual.UID != session.UID {
@@ -100,7 +100,7 @@ func TestSessionForRoomInfoRejectsNonOwnerLogin(t *testing.T) {
 	}
 
 	otherRoom := roomInfo{RoomID: 31567150, AnchorUID: 999}
-	if actual := sessionForRoomInfo(otherRoom, session); actual.UID != 0 || actual.CookieHeader != "" {
-		t.Fatalf("non-owner session must be anonymous: %#v", actual)
+	if actual := sessionForRoomInfo(otherRoom, session); actual.UID != session.UID || actual.CookieHeader != session.CookieHeader {
+		t.Fatalf("valid non-owner login must remain authenticated: %#v", actual)
 	}
 }

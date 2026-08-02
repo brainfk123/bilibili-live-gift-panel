@@ -362,7 +362,7 @@ func (manager *loginManager) withRoomOwnership(ctx context.Context, state loginP
 	isOwner := ownerUID > 0 && ownerUID == state.UID
 	state.IsRoomOwner = &isOwner
 	if !isOwner {
-		state.Message = "登录账号不是当前房间主播，后台将继续使用匿名模式"
+		state.Message = "已使用普通登录身份连接；完整匿名资料仍取决于 B 站房间权限"
 	}
 	return state
 }

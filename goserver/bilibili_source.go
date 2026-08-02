@@ -155,8 +155,8 @@ func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callba
 	}
 }
 
-func sessionForRoomInfo(info roomInfo, session biliSession) biliSession {
-	if session.UID <= 0 || info.AnchorUID <= 0 || session.UID != info.AnchorUID {
+func sessionForRoomInfo(_ roomInfo, session biliSession) biliSession {
+	if session.UID <= 0 || strings.TrimSpace(session.CookieHeader) == "" {
 		return biliSession{}
 	}
 	return session

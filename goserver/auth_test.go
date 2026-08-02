@@ -190,7 +190,7 @@ func TestLoginManagerStatusVerifiesCurrentRoomOwner(t *testing.T) {
 		t.Fatalf("owner state = %#v", owner)
 	}
 	notOwner := manager.Status(context.Background(), "other-room")
-	if notOwner.IsRoomOwner == nil || *notOwner.IsRoomOwner || !strings.Contains(notOwner.Message, "不是当前房间主播") {
+	if notOwner.IsRoomOwner == nil || *notOwner.IsRoomOwner || !strings.Contains(notOwner.Message, "普通登录身份") {
 		t.Fatalf("non-owner state = %#v", notOwner)
 	}
 }
