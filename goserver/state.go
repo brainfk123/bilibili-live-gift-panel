@@ -26,6 +26,7 @@ type giftRule struct {
 	FormulaName   string   `json:"formulaName,omitempty"`
 	Formula       string   `json:"formula"`
 	Enabled       *bool    `json:"enabled,omitempty"`
+	MatchGiftIDs  []int    `json:"matchGiftIds,omitempty"`
 	MinPrice      *float64 `json:"minPrice,omitempty"`
 	Cap           *float64 `json:"cap,omitempty"`
 	DailyLimit    *int     `json:"dailyLimit,omitempty"`
@@ -33,6 +34,18 @@ type giftRule struct {
 
 func (rule giftRule) enabled() bool {
 	return rule.Enabled == nil || *rule.Enabled
+}
+
+func (rule giftRule) matchesGiftID(giftID int) bool {
+	if rule.GiftID == giftID {
+		return true
+	}
+	for _, candidate := range rule.MatchGiftIDs {
+		if candidate == giftID {
+			return true
+		}
+	}
+	return false
 }
 
 type timerRule struct {
@@ -149,18 +162,19 @@ type appState struct {
 }
 
 type giftEvent struct {
-	GiftID    int
-	GiftName  string
-	Num       int
-	Price     float64
-	CoinType  string
-	TotalCoin float64
-	Uname     string
-	Avatar    string
-	UID       int64
-	Timestamp int64
-	ImgBasic  string
-	Rnd       string
+	GiftID      int
+	BlindGiftID int
+	GiftName    string
+	Num         int
+	Price       float64
+	CoinType    string
+	TotalCoin   float64
+	Uname       string
+	Avatar      string
+	UID         int64
+	Timestamp   int64
+	ImgBasic    string
+	Rnd         string
 }
 
 func defaultAppState() appState {
@@ -213,6 +227,9 @@ func normalizeAppState(state *appState) {
 	if state.Log == nil {
 		state.Log = []logEntry{}
 	}
+	for index := range state.Rules {
+		state.Rules[index].MatchGiftIDs = normalizeGiftIDs(state.Rules[index].MatchGiftIDs)
+	}
 	defaults := defaultAppState().Settings
 	if state.Settings.FontSize == 0 {
 		state.Settings.FontSize = defaults.FontSize
@@ -242,6 +259,28 @@ func normalizeAppState(state *appState) {
 		showTutorial := !(strings.TrimSpace(state.RoomID) != "" && len(state.Attributes) > 0 && len(state.Rules) > 0)
 		state.Settings.ShowTutorial = &showTutorial
 	}
+}
+
+func normalizeGiftIDs(ids []int) []int {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[int]struct{}, len(ids))
+	result := make([]int, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func (state *appState) findAttribute(name string) *attributeState {

@@ -121,6 +121,22 @@ func TestApplyGiftEventUpdatesEveryMatchingAttribute(t *testing.T) {
 	}
 }
 
+func TestApplyGiftEventMatchesBlindBoxParentFromEvent(t *testing.T) {
+	state := defaultAppState()
+	state.Attributes = []attributeState{{Name: "加班时间", Value: 0, Unit: "seconds", Format: "hhmmss"}}
+	state.Rules = []giftRule{{ID: "blind-rule", GiftID: 35800, AttributeName: "加班时间", Formula: "加班时间+60"}}
+	state.GiftCatalog = []giftInfo{{ID: 35800, Name: "小熊虫盲盒", Price: 9000, CoinType: "gold"}}
+
+	applyGiftEvent(&state, giftEvent{
+		GiftID: 35801, BlindGiftID: 35800, GiftName: "心事虫虫", Num: 1, Price: 9000,
+		Timestamp: 1700000000, Rnd: "blind-parent-event",
+	})
+
+	if state.Attributes[0].Value != 60 || len(state.Log) != 1 {
+		t.Fatalf("blind box event did not trigger parent rule: attribute=%v log=%#v", state.Attributes[0].Value, state.Log)
+	}
+}
+
 func TestApplyGiftEventSkipsDisabledGiftRule(t *testing.T) {
 	disabled := false
 	state := defaultAppState()

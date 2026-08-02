@@ -60,6 +60,25 @@ func TestParseBiliGiftUsesSenderUinfoWhenLegacyIdentityIsMasked(t *testing.T) {
 	}
 }
 
+func TestParseBiliGiftExtractsBlindBoxParent(t *testing.T) {
+	payload, _ := json.Marshal(map[string]any{
+		"cmd": "SEND_GIFT",
+		"data": map[string]any{
+			"giftId": 35801, "giftName": "心事虫虫", "num": 1, "price": 9000,
+			"blind_gift": map[string]any{"blind_gift_id": 35800},
+			"uid":        1, "timestamp": 1700000000, "rnd": "blind-rnd",
+		},
+	})
+
+	gift, ok := parseBiliGift(payload)
+	if !ok {
+		t.Fatal("blind SEND_GIFT was not parsed")
+	}
+	if gift.GiftID != 35801 || gift.BlindGiftID != 35800 {
+		t.Fatalf("blind gift identity = %#v", gift)
+	}
+}
+
 func TestBiliPacketRoundTrip(t *testing.T) {
 	payload := encodeBiliPacket(biliOpMessage, []byte(`{"cmd":"SEND_GIFT"}`))
 	packets := decodeBiliPackets(payload)

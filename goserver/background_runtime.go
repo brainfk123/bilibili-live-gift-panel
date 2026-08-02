@@ -341,7 +341,8 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 			}
 			configuredGift := state.findGift(rule.GiftID)
 			matchesAlias := configuredGift != nil && sameGiftIdentity(*configuredGift, gift)
-			if rule.GiftID != gift.GiftID && !matchesAlias {
+			matchesBlindBoxParent := gift.BlindGiftID > 0 && rule.GiftID == gift.BlindGiftID
+			if !rule.matchesGiftID(gift.GiftID) && !matchesAlias && !matchesBlindBoxParent {
 				continue
 			}
 			attribute := state.findAttribute(rule.AttributeName)

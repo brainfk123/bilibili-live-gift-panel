@@ -63,6 +63,18 @@ interface BiliAuthResponse {
   message?: string;
 }
 
+interface BlindBoxResponse {
+  code: number;
+  blindBox?: import('./types').BlindBoxInfo | null;
+  requiresLogin?: boolean;
+  message?: string;
+}
+
+export interface BlindBoxLookup {
+  info: import('./types').BlindBoxInfo | null;
+  requiresLogin: boolean;
+}
+
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
   const response = await fetch('/api/runtime', { cache: 'no-store' });
   if (!response.ok) throw new Error(`后台状态读取失败：HTTP ${response.status}`);
@@ -117,4 +129,16 @@ export async function previewFormula(
     throw new Error(payload.message || `公式计算失败：HTTP ${response.status}`);
   }
   return payload.result;
+}
+
+export async function getBlindBoxInfo(giftId: number): Promise<BlindBoxLookup> {
+  const response = await fetch(`/api/blind-box?giftId=${encodeURIComponent(String(giftId))}`, { cache: 'no-store' });
+  const payload = await response.json() as BlindBoxResponse;
+  if (!response.ok || payload.code !== 0) {
+    throw new Error(payload.message || `盲盒信息读取失败：HTTP ${response.status}`);
+  }
+  return {
+    info: payload.blindBox ?? null,
+    requiresLogin: payload.requiresLogin === true,
+  };
 }

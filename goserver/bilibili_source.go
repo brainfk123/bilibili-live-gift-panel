@@ -225,18 +225,22 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 		return giftEvent{}, false
 	}
 	var data struct {
-		GiftID    int             `json:"giftId"`
-		GiftName  string          `json:"giftName"`
-		Num       int             `json:"num"`
-		Price     float64         `json:"price"`
-		CoinType  string          `json:"coin_type"`
-		TotalCoin float64         `json:"total_coin"`
-		Uname     string          `json:"uname"`
-		Face      string          `json:"face"`
-		UID       biliUID         `json:"uid"`
-		Timestamp int64           `json:"timestamp"`
-		Rnd       json.RawMessage `json:"rnd"`
-		GiftInfo  struct {
+		GiftID      int             `json:"giftId"`
+		BlindGiftID biliUID         `json:"blind_gift_id"`
+		GiftName    string          `json:"giftName"`
+		Num         int             `json:"num"`
+		Price       float64         `json:"price"`
+		CoinType    string          `json:"coin_type"`
+		TotalCoin   float64         `json:"total_coin"`
+		Uname       string          `json:"uname"`
+		Face        string          `json:"face"`
+		UID         biliUID         `json:"uid"`
+		Timestamp   int64           `json:"timestamp"`
+		Rnd         json.RawMessage `json:"rnd"`
+		BlindGift   struct {
+			GiftID biliUID `json:"blind_gift_id"`
+		} `json:"blind_gift"`
+		GiftInfo struct {
 			ImgBasic string `json:"img_basic"`
 		} `json:"gift_info"`
 		SenderUinfo struct {
@@ -253,6 +257,9 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 	}
 	if json.Unmarshal(envelope.Data, &data) != nil {
 		return giftEvent{}, false
+	}
+	if data.BlindGiftID <= 0 {
+		data.BlindGiftID = data.BlindGift.GiftID
 	}
 	uid := int64(data.UID)
 	if uid <= 0 {
@@ -279,7 +286,7 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 		data.Num = 1
 	}
 	return giftEvent{
-		GiftID: data.GiftID, GiftName: data.GiftName, Num: data.Num, Price: data.Price,
+		GiftID: data.GiftID, BlindGiftID: int(data.BlindGiftID), GiftName: data.GiftName, Num: data.Num, Price: data.Price,
 		CoinType: data.CoinType, TotalCoin: data.TotalCoin, Uname: uname, Avatar: avatar, UID: uid,
 		Timestamp: data.Timestamp, ImgBasic: data.GiftInfo.ImgBasic, Rnd: rnd,
 	}, true

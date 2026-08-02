@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  getBlindBoxInfo,
   getBiliAuthStatus,
   logoutBiliAuth,
   pollBiliQRCodeLogin,
@@ -74,5 +75,28 @@ describe('optional Bilibili login API', () => {
       { url: '/api/auth/qrcode?room_id=31567150', method: 'GET' },
       { url: '/api/auth/session', method: 'DELETE' },
     ]);
+  });
+});
+
+describe('blind box metadata API', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('returns exploded gift matching metadata without exposing auth details', async () => {
+    const fetchMock = vi.fn(async () => Response.json({
+      code: 0,
+      blindBox: {
+        giftId: 35800,
+        name: '小熊虫盲盒',
+        gifts: [{ id: 35801, name: '心事虫虫', price: 9000, imgBasic: 'child.png', chance: '50%' }],
+      },
+      requiresLogin: false,
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const lookup = await getBlindBoxInfo(35800);
+    expect(lookup.info?.giftId).toBe(35800);
+    expect(lookup.info?.gifts[0].id).toBe(35801);
+    expect(lookup.requiresLogin).toBe(false);
+    expect(fetchMock).toHaveBeenCalledWith('/api/blind-box?giftId=35800', { cache: 'no-store' });
   });
 });

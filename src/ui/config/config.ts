@@ -6,6 +6,7 @@ import { builtinCatalog, findGift, giftDisplayKey } from '../../gifts/catalog';
 import { formatValue } from '../../format';
 import {
   BiliAuthStatus,
+  getBlindBoxInfo,
   getBiliAuthStatus,
   getRuntimeStatus,
   logoutBiliAuth,
@@ -24,6 +25,9 @@ interface SelectedGiftRule {
   formula: string;
   enabled: boolean;
   previous?: GiftRule;
+  matchGiftIds?: number[];
+  blindBoxName?: string;
+  blindBoxStatus?: 'matched' | 'login-required' | 'not-blind-box' | 'error';
 }
 
 export function mountConfig(root: HTMLElement): void {
@@ -713,17 +717,22 @@ export function mountConfig(root: HTMLElement): void {
       : [];
     let allGifts = availableGifts(state);
     const selected = new Map<number, SelectedGiftRule>();
+    const blindBoxLookups: SelectedGiftRule[] = [];
     if (original) {
       for (const rule of state.rules.filter((item) => item.attributeName === original.name)) {
         const gift = findGift(state, rule.giftId);
         if (gift && !selected.has(gift.id)) {
-          selected.set(gift.id, {
+          const item: SelectedGiftRule = {
             gift,
             formulaName: rule.formulaName?.trim() || `${gift.name}规则`,
             formula: rule.formula,
             enabled: rule.enabled !== false,
             previous: rule,
-          });
+            ...(rule.matchGiftIds ? { matchGiftIds: [...rule.matchGiftIds] } : {}),
+            ...(rule.matchGiftIds && rule.matchGiftIds.length > 1 ? { blindBoxStatus: 'matched' as const } : {}),
+          };
+          selected.set(gift.id, item);
+          if (!item.matchGiftIds || item.matchGiftIds.length <= 1) blindBoxLookups.push(item);
         }
       }
     }
@@ -1150,7 +1159,11 @@ export function mountConfig(root: HTMLElement): void {
       );
       button.onclick = () => {
         if (selected.has(gift.id)) selected.delete(gift.id);
-        else selected.set(gift.id, { gift, formulaName: `${gift.name}规则`, formula: defaultFormula(), enabled: true });
+        else {
+          const item: SelectedGiftRule = { gift, formulaName: `${gift.name}规则`, formula: defaultFormula(), enabled: true };
+          selected.set(gift.id, item);
+          void hydrateBlindBoxRule(item);
+        }
         updateGiftChoice(gift.id);
         renderSelectedRules();
       };
@@ -1209,11 +1222,59 @@ export function mountConfig(root: HTMLElement): void {
         selectedRules.append(el('div', { class: 'selected-rules-empty', text: '还没有选择礼物。属性可以先单独保存，之后再回来绑定。' }));
         return;
       }
-      for (const item of selected.values()) selectedRules.append(renderFormulaEditor(item));
+      for (const item of selected.values()) {
+        selectedRules.append(renderFormulaEditor(item));
+        updateBlindBoxStatus(item);
+      }
+    }
+
+    async function hydrateBlindBoxRule(item: SelectedGiftRule): Promise<void> {
+      if (selected.get(item.gift.id) !== item || (item.matchGiftIds?.length ?? 0) > 1) return;
+      try {
+        const lookup = await getBlindBoxInfo(item.gift.id);
+        if (selected.get(item.gift.id) !== item) return;
+        if (lookup.info && lookup.info.gifts.length > 0) {
+          item.matchGiftIds = Array.from(new Set([
+            item.gift.id,
+            ...lookup.info.gifts.map((gift) => gift.id),
+          ])).filter((id) => id > 0);
+          item.blindBoxName = lookup.info.name;
+          item.blindBoxStatus = 'matched';
+        } else if (lookup.requiresLogin) {
+          item.blindBoxStatus = 'login-required';
+        } else {
+          item.blindBoxStatus = 'not-blind-box';
+        }
+        updateBlindBoxStatus(item);
+      } catch {
+        if (selected.get(item.gift.id) !== item) return;
+        item.blindBoxStatus = 'error';
+        updateBlindBoxStatus(item);
+      }
+    }
+
+    function updateBlindBoxStatus(item: SelectedGiftRule): void {
+      const row = selectedRules.querySelector<HTMLElement>(`.selected-gift-rule[data-gift-id="${item.gift.id}"]`);
+      const status = row?.querySelector<HTMLElement>('.selected-rule-blind-box');
+      if (!status) return;
+      if (item.blindBoxStatus === 'matched' && item.matchGiftIds && item.matchGiftIds.length > 1) {
+        status.textContent = `${item.blindBoxName || '盲盒'}：自动匹配 ${item.matchGiftIds.length - 1} 种爆出礼物`;
+        status.hidden = false;
+      } else if (item.blindBoxStatus === 'login-required') {
+        status.textContent = '登录 B 站后可自动加载盲盒爆出礼物';
+        status.hidden = false;
+      } else if (item.blindBoxStatus === 'error') {
+        status.textContent = '盲盒信息暂时不可用，仍会匹配已配置礼物';
+        status.hidden = false;
+      } else {
+        status.textContent = '';
+        status.hidden = true;
+      }
     }
 
     function renderFormulaEditor(item: SelectedGiftRule): HTMLElement {
       const row = el('article', { class: 'selected-gift-rule' });
+      row.dataset.giftId = String(item.gift.id);
       const removeButton = el('button', { class: 'rule-remove', type: 'button', text: '移除' }) as HTMLButtonElement;
       removeButton.onclick = () => {
         selected.delete(item.gift.id);
@@ -1222,12 +1283,15 @@ export function mountConfig(root: HTMLElement): void {
       };
       const giftImage = el('img', { class: 'selected-rule-gift-image', alt: '' }) as HTMLImageElement;
       giftImage.src = item.gift.imgBasic || transparentPixel();
+      const blindBoxStatus = el('small', { class: 'selected-rule-blind-box' });
+      blindBoxStatus.hidden = true;
       row.append(el('div', { class: 'selected-rule-header' }, [
         el('div', { class: 'selected-rule-gift' }, [
           giftImage,
           el('div', {}, [
             el('strong', { text: item.gift.name }),
             el('small', { text: `每收到 1 个执行一次 · ${giftPriceLabel(item.gift)}` }),
+            blindBoxStatus,
           ]),
         ]),
         removeButton,
@@ -1313,7 +1377,7 @@ export function mountConfig(root: HTMLElement): void {
       allGifts = availableGifts(state);
       renderGiftPicker();
       renderSelectedRules();
-    }, selected, defaultFormula);
+    }, selected, defaultFormula, (item) => { void hydrateBlindBoxRule(item); });
 
     const giftsPanel = el('section', { class: 'gift-binding-panel' });
     giftsPanel.append(
@@ -1338,7 +1402,7 @@ export function mountConfig(root: HTMLElement): void {
           el('p', {}, [
             '可用变量：',
             el('code', { text: 'price' }),
-            ' 和任意属性名。连送会按单个礼物逐次执行。',
+            ' 和任意属性名。连送会按单个礼物逐次执行；盲盒会自动匹配爆出的子礼物。',
           ]),
         ]),
       ]),
@@ -1374,6 +1438,7 @@ export function mountConfig(root: HTMLElement): void {
     root.append(overlay);
     renderGiftPicker();
     renderSelectedRules();
+    for (const item of blindBoxLookups) void hydrateBlindBoxRule(item);
     renderTimerRules();
     renderGuide();
     nameInput.focus();
@@ -1383,6 +1448,7 @@ export function mountConfig(root: HTMLElement): void {
     onAdded: () => void,
     selected: Map<number, SelectedGiftRule>,
     defaultFormula: () => string,
+    hydrateBlindBoxRule?: (item: SelectedGiftRule) => void,
   ): HTMLElement {
     const details = el('details', { class: 'manual-gift-adder' });
     details.append(el('summary', { text: '找不到礼物？按 ID 手动添加' }));
@@ -1408,7 +1474,9 @@ export function mountConfig(root: HTMLElement): void {
       const recent = { ...gift, lastReceived: 0, count: recentIndex >= 0 ? state.recentGifts[recentIndex].count : 0 };
       if (recentIndex >= 0) state.recentGifts[recentIndex] = recent;
       else state.recentGifts.unshift(recent);
-      selected.set(id, { gift, formulaName: `${gift.name}规则`, formula: defaultFormula(), enabled: true });
+      const item: SelectedGiftRule = { gift, formulaName: `${gift.name}规则`, formula: defaultFormula(), enabled: true };
+      selected.set(id, item);
+      hydrateBlindBoxRule?.(item);
       save();
       onAdded();
       details.open = false;
@@ -1555,6 +1623,9 @@ export function mountConfig(root: HTMLElement): void {
       formulaName: item.formulaName,
       formula: item.formula,
       enabled: item.enabled,
+      ...(item.matchGiftIds && item.matchGiftIds.length > 1
+        ? { matchGiftIds: Array.from(new Set(item.matchGiftIds.filter((giftId) => giftId > 0))) }
+        : {}),
       ...(item.previous?.minPrice !== undefined ? { minPrice: item.previous.minPrice } : {}),
       ...(item.previous?.cap !== undefined ? { cap: item.previous.cap } : {}),
       ...(item.previous?.dailyLimit !== undefined ? { dailyLimit: item.previous.dailyLimit } : {}),

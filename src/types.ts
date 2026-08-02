@@ -18,6 +18,8 @@ export interface GiftRule {
   formulaName?: string;
   formula: string;
   enabled?: boolean;
+  /** The parent gift and exploded gifts matched by this rule. */
+  matchGiftIds?: number[];
   minPrice?: number;
   cap?: number;
   dailyLimit?: number;
@@ -49,6 +51,20 @@ export interface GiftInfo {
   price: number;
   coinType: 'gold' | 'silver';
   imgBasic: string;
+}
+
+export interface BlindBoxGift {
+  id: number;
+  name: string;
+  price: number;
+  imgBasic: string;
+  chance?: string;
+}
+
+export interface BlindBoxInfo {
+  giftId: number;
+  name: string;
+  gifts: BlindBoxGift[];
 }
 
 export interface RecentGift extends GiftInfo {
