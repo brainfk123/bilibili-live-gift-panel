@@ -124,8 +124,17 @@ body.display-mode { overflow: hidden; background: transparent; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.display-gift-name { color: rgba(255, 255, 255, 0.58); font-size: 20px; }
-.display-formula-name { margin-top: 4px; color: #fff; font-size: 27px; }
+.display-gift-name {
+  color: color-mix(in srgb, var(--accent, #fb7299) 78%, white);
+  font-size: 20px;
+}
+.display-formula-name {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid color-mix(in srgb, var(--accent, #fb7299) 35%, rgba(255, 255, 255, 0.24));
+  color: #fff;
+  font-size: 27px;
+}
 .display-formula-name.is-long {
   display: -webkit-box;
   overflow: hidden;
