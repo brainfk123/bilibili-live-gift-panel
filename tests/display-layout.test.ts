@@ -18,6 +18,7 @@ describe('OBS attribute value fitting', () => {
 
 describe('OBS broadcast panel layout', () => {
   const css = readFileSync(new URL('../src/ui/display/display.css', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../src/ui/display/display.ts', import.meta.url), 'utf8');
 
   it('uses a one-third narrower panel without shrinking the primary value typography', () => {
     expect(css).toContain('width: min(480px, calc(100% - 40px));');
@@ -42,5 +43,9 @@ describe('OBS broadcast panel layout', () => {
 
   it('applies configurable opacity to the panel background only', () => {
     expect(css).toContain('background: rgba(14, 15, 20, var(--panel-opacity, 0.55));');
+  });
+
+  it('loads Bilibili avatars without sending the localhost referrer', () => {
+    expect(source).toContain("referrerPolicy: 'no-referrer'");
   });
 });

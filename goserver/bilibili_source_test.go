@@ -30,6 +30,36 @@ func TestParseBiliGift(t *testing.T) {
 	}
 }
 
+func TestParseBiliGiftUsesSenderUinfoWhenLegacyIdentityIsMasked(t *testing.T) {
+	payload, _ := json.Marshal(map[string]any{
+		"cmd": "SEND_GIFT",
+		"data": map[string]any{
+			"giftId": 33988, "giftName": "人气票", "num": 1,
+			"uid": 0, "uname": "反***", "face": "https://example.test/masked-avatar.png",
+			"timestamp": 1700000000, "rnd": "masked-gift-rnd",
+			"sender_uinfo": map[string]any{
+				"uid": 123456789,
+				"base": map[string]any{
+					"name": "完整昵称", "face": "https://example.test/full-avatar.png",
+				},
+			},
+		},
+	})
+	gift, ok := parseBiliGift(payload)
+	if !ok {
+		t.Fatal("SEND_GIFT with sender_uinfo was not parsed")
+	}
+	if gift.UID != 123456789 {
+		t.Fatalf("uid = %d, want sender_uinfo uid", gift.UID)
+	}
+	if gift.Uname != "完整昵称" {
+		t.Fatalf("uname = %q, want sender_uinfo name", gift.Uname)
+	}
+	if gift.Avatar != "https://example.test/full-avatar.png" {
+		t.Fatalf("avatar = %q, want sender_uinfo avatar", gift.Avatar)
+	}
+}
+
 func TestBiliPacketRoundTrip(t *testing.T) {
 	payload := encodeBiliPacket(biliOpMessage, []byte(`{"cmd":"SEND_GIFT"}`))
 	packets := decodeBiliPackets(payload)

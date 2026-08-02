@@ -223,6 +223,7 @@ function createGiftBroadcast(entry: LogEntry, attribute: Attribute): HTMLElement
   const avatar = el('img', {
     class: 'broadcast-avatar',
     alt: entry.uname ? `${entry.uname}的头像` : '用户头像',
+    referrerPolicy: 'no-referrer',
   }) as HTMLImageElement;
   avatar.src = entry.avatar || transparentPixel();
   const nickname = entry.uname?.trim() || '匿名观众';

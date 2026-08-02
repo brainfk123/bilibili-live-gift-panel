@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,22 @@ type biliPacket struct {
 	protocolVersion uint16
 	operation       uint32
 	body            []byte
+}
+
+type biliUID int64
+
+func (uid *biliUID) UnmarshalJSON(value []byte) error {
+	text := strings.Trim(strings.TrimSpace(string(value)), `"`)
+	if text == "" || text == "null" {
+		*uid = 0
+		return nil
+	}
+	parsed, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		return err
+	}
+	*uid = biliUID(parsed)
+	return nil
 }
 
 func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callbacks runtimeCallbacks) error {
@@ -184,26 +201,54 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 		TotalCoin float64         `json:"total_coin"`
 		Uname     string          `json:"uname"`
 		Face      string          `json:"face"`
-		UID       int64           `json:"uid"`
+		UID       biliUID         `json:"uid"`
 		Timestamp int64           `json:"timestamp"`
 		Rnd       json.RawMessage `json:"rnd"`
 		GiftInfo  struct {
 			ImgBasic string `json:"img_basic"`
 		} `json:"gift_info"`
+		SenderUinfo struct {
+			UID  biliUID `json:"uid"`
+			Base struct {
+				Name       string `json:"name"`
+				Face       string `json:"face"`
+				OriginInfo struct {
+					Name string `json:"name"`
+					Face string `json:"face"`
+				} `json:"origin_info"`
+			} `json:"base"`
+		} `json:"sender_uinfo"`
 	}
 	if json.Unmarshal(envelope.Data, &data) != nil {
 		return giftEvent{}, false
 	}
+	uid := int64(data.UID)
+	if uid <= 0 {
+		uid = int64(data.SenderUinfo.UID)
+	}
+	uname := strings.TrimSpace(data.Uname)
+	for _, candidate := range []string{data.SenderUinfo.Base.Name, data.SenderUinfo.Base.OriginInfo.Name} {
+		if isMaskedUsername(uname) && !isMaskedUsername(candidate) {
+			uname = strings.TrimSpace(candidate)
+		}
+	}
+	avatar := strings.TrimSpace(data.SenderUinfo.Base.Face)
+	if avatar == "" {
+		avatar = strings.TrimSpace(data.SenderUinfo.Base.OriginInfo.Face)
+	}
+	if avatar == "" {
+		avatar = strings.TrimSpace(data.Face)
+	}
 	rnd := strings.Trim(string(data.Rnd), `"`)
 	if rnd == "" || rnd == "null" {
-		rnd = fmt.Sprintf("%d-%d-%d", data.Timestamp, data.UID, data.GiftID)
+		rnd = fmt.Sprintf("%d-%d-%d", data.Timestamp, uid, data.GiftID)
 	}
 	if data.Num < 1 {
 		data.Num = 1
 	}
 	return giftEvent{
 		GiftID: data.GiftID, GiftName: data.GiftName, Num: data.Num, Price: data.Price,
-		CoinType: data.CoinType, TotalCoin: data.TotalCoin, Uname: data.Uname, Avatar: data.Face, UID: data.UID,
+		CoinType: data.CoinType, TotalCoin: data.TotalCoin, Uname: uname, Avatar: avatar, UID: uid,
 		Timestamp: data.Timestamp, ImgBasic: data.GiftInfo.ImgBasic, Rnd: rnd,
 	}, true
 }
