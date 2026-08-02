@@ -746,7 +746,7 @@ body.config-mode::-webkit-scrollbar-corner,
 
 .config-root .connection-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
 .config-root .workspace-card {
@@ -771,6 +771,67 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .inline-help { margin-top: 16px; color: var(--text-dim); font-size: 12px; }
 .config-root .inline-help summary { color: var(--accent-text); cursor: pointer; }
 .config-root .inline-help p { margin-top: 8px; line-height: 1.6; }
+.config-root .login-identity {
+  display: flex;
+  align-items: center;
+  min-height: 72px;
+  gap: 13px;
+  margin-top: 20px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 12px 14px;
+  background: var(--input-bg);
+}
+.config-root .login-identity.is-logged_in { border-color: color-mix(in srgb, var(--success) 48%, var(--border)); }
+.config-root .login-avatar,
+.config-root .login-mode-icon {
+  width: 46px;
+  height: 46px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+.config-root .login-avatar { background: var(--image-bg); object-fit: cover; }
+.config-root .login-mode-icon {
+  display: grid;
+  place-items: center;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  font-size: 28px;
+}
+.config-root .login-identity-copy { min-width: 0; }
+.config-root .login-identity-copy strong,
+.config-root .login-identity-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.config-root .login-identity-copy strong { color: var(--text); font-size: 15px; }
+.config-root .login-identity-copy span { margin-top: 4px; color: var(--text-dim); font-size: 12px; }
+.config-root .login-fallback-note { margin-top: 12px; color: var(--text-dim); font-size: 12px; line-height: 1.6; }
+.config-root .login-fallback-note.is-warning { color: var(--warning-text, #e7ae62); }
+.config-root .login-actions { margin-top: 13px; }
+.config-root .login-modal {
+  width: min(440px, calc(100vw - 32px));
+  border: 1px solid var(--border-strong);
+  border-radius: 18px;
+  background: var(--card);
+  box-shadow: 0 26px 80px rgba(0, 0, 0, .42);
+}
+.config-root .login-modal-body {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  padding: 24px;
+  text-align: center;
+}
+.config-root .login-loading { padding: 70px 0; color: var(--text-dim); }
+.config-root .login-qr-image {
+  width: 240px;
+  height: 240px;
+  border: 8px solid #fff;
+  border-radius: 14px;
+  background: #fff;
+  object-fit: contain;
+}
+.config-root .login-qr-status { margin-top: 16px; color: var(--text); font-size: 14px; }
+.config-root .login-qr-status.is-error { color: var(--danger-text); }
+.config-root .login-security-note { max-width: 340px; margin: 10px 0 16px; color: var(--text-dim); font-size: 12px; line-height: 1.6; }
 .config-root .attributes-section {
   border: 1px solid var(--border);
   border-radius: 18px;
@@ -1411,6 +1472,7 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .formula-help-grid { grid-template-columns: 1fr; }
   .config-root .formula-help-examples { grid-template-columns: 1fr; }
   .config-root .formula-editor-meta { align-items: flex-start; flex-direction: column; }
+  .config-root .connection-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 700px) {

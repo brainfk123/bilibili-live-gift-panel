@@ -4,7 +4,16 @@ import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '.
 import { el, fieldControl, inputField, toast } from '../common';
 import { builtinCatalog, findGift, giftDisplayKey } from '../../gifts/catalog';
 import { formatValue } from '../../format';
-import { getRuntimeStatus, previewFormula, RuntimeConnectionState } from '../../backend';
+import {
+  BiliAuthStatus,
+  getBiliAuthStatus,
+  getRuntimeStatus,
+  logoutBiliAuth,
+  pollBiliQRCodeLogin,
+  previewFormula,
+  RuntimeConnectionState,
+  startBiliQRCodeLogin,
+} from '../../backend';
 import { createBrandIcon } from '../brand';
 import { getTutorialStep } from './wizard';
 import { renderSpotlightGuide, type SpotlightGuideElement } from './spotlight-guide';
@@ -25,12 +34,16 @@ export function mountConfig(root: HTMLElement): void {
   if (metadataChanged || consumeConfigMigrationRequired()) void saveState(state);
 
   let connectionState: RuntimeConnectionState = 'idle';
+  let biliAuth: BiliAuthStatus = { state: 'anonymous' };
   let guideDismissed = !state.settings.showTutorial;
   let activeGuide: SpotlightGuideElement | null = null;
   let editorOpen = false;
   let editorGuideEnabled = false;
   let runtimeRefreshActive = false;
   let stateRefreshActive = false;
+  let authRefreshActive = false;
+  let loginModalOpen = false;
+  let loginPollTimer: ReturnType<typeof globalThis.setInterval> | undefined;
 
   const shell = el('div', { class: 'wizard-shell config-shell' });
   const header = el('header', { class: 'app-header' });
@@ -90,6 +103,27 @@ export function mountConfig(root: HTMLElement): void {
       if (inlineStatus) inlineStatus.textContent = connectionLabel(connectionState);
     } finally {
       runtimeRefreshActive = false;
+    }
+  }
+
+  async function refreshBiliAuth(): Promise<void> {
+    if (authRefreshActive || loginModalOpen) return;
+    authRefreshActive = true;
+    try {
+      const next = await getBiliAuthStatus(state.roomId);
+      const changed = JSON.stringify(next) !== JSON.stringify(biliAuth);
+      biliAuth = next;
+      if (changed && !editorOpen) render();
+    } catch (error) {
+      const next: BiliAuthStatus = {
+        state: 'error',
+        message: error instanceof Error ? error.message : '登录状态读取失败',
+      };
+      const changed = JSON.stringify(next) !== JSON.stringify(biliAuth);
+      biliAuth = next;
+      if (changed && !editorOpen) render();
+    } finally {
+      authRefreshActive = false;
     }
   }
 
@@ -200,6 +234,7 @@ export function mountConfig(root: HTMLElement): void {
       connectionState = 'connecting';
       connectionText.textContent = connectionLabel(connectionState);
       renderHeaderStatus();
+      void refreshBiliAuth();
       void saveAndWait().then(refreshRuntime).catch(() => undefined);
     };
     roomCard.append(
@@ -211,8 +246,151 @@ export function mountConfig(root: HTMLElement): void {
       ]),
     );
 
-    grid.append(roomCard);
+    grid.append(roomCard, renderLoginCard());
     content.append(grid);
+  }
+
+  function renderLoginCard(): HTMLElement {
+    const card = el('article', { class: 'workspace-card login-card' });
+    card.append(sectionHeading(
+      '可选登录',
+      '主播账号',
+      '登录后优先使用登录态礼物信息；无需申请开发者资格，凭证只加密保存在本机。',
+    ));
+    const identity = el('div', { class: `login-identity is-${biliAuth.state}` });
+    if (biliAuth.state === 'logged_in') {
+      const avatar = el('img', {
+        class: 'login-avatar',
+        alt: biliAuth.uname ? `${biliAuth.uname}的头像` : '主播头像',
+        referrerPolicy: 'no-referrer',
+      }) as HTMLImageElement;
+      avatar.src = biliAuth.avatar || transparentPixel();
+      identity.append(
+        avatar,
+        el('div', { class: 'login-identity-copy' }, [
+          el('strong', { text: biliAuth.uname || `用户 ${biliAuth.uid ?? ''}` }),
+          el('span', { text: `已登录 · UID ${biliAuth.uid ?? ''}${biliAuth.isRoomOwner === true ? ' · 主播身份已验证' : biliAuth.isRoomOwner === false ? ' · 不是当前房间主播' : ' · 填写房间号后验证身份'}` }),
+        ]),
+      );
+    } else {
+      identity.append(
+        el('span', { class: 'login-mode-icon', text: '◌' }),
+        el('div', { class: 'login-identity-copy' }, [
+          el('strong', { text: biliAuth.state === 'expired' ? '登录已失效' : '匿名模式' }),
+          el('span', { text: biliAuth.message || '礼物计算正常，但 B 站可能隐藏观众昵称和 UID。' }),
+        ]),
+      );
+    }
+    const actions = el('div', { class: 'row login-actions' });
+    if (biliAuth.state === 'logged_in') {
+      const logoutButton = el('button', { class: 'btn ghost', type: 'button', text: '退出登录' }) as HTMLButtonElement;
+      logoutButton.onclick = () => {
+        logoutButton.disabled = true;
+        void logoutBiliAuth().then((next) => {
+          biliAuth = next;
+          render();
+          toast('已切换为匿名模式', root);
+        }).catch((error) => {
+          logoutButton.disabled = false;
+          toast(error instanceof Error ? error.message : '退出登录失败', root);
+        });
+      };
+      actions.append(logoutButton);
+    } else {
+      const loginButton = el('button', { class: 'btn', type: 'button', text: '扫码登录' }) as HTMLButtonElement;
+      loginButton.onclick = () => openLoginModal();
+      actions.append(loginButton);
+    }
+    card.append(
+      identity,
+      el('p', {
+        class: `login-fallback-note${biliAuth.isRoomOwner === false ? ' is-warning' : ''}`,
+        text: biliAuth.isRoomOwner === false
+          ? '当前账号不是这个直播间的主播，后台会继续匿名连接。无法识别时仍保留 B 站返回的脱敏昵称。'
+          : '无法识别时保留 B 站返回的脱敏昵称，不影响礼物公式执行。',
+      }),
+      actions,
+    );
+    return card;
+  }
+
+  function openLoginModal(): void {
+    if (loginModalOpen) return;
+    loginModalOpen = true;
+    activeGuide?.dispose();
+    activeGuide = null;
+    const overlay = el('div', { class: 'overlay login-modal-overlay' });
+    const dialog = el('section', { class: 'login-modal', role: 'dialog', ariaModal: 'true' });
+    const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭登录窗口' }) as HTMLButtonElement;
+    const body = el('div', { class: 'login-modal-body' });
+    const close = (): void => {
+      if (loginPollTimer !== undefined) globalThis.clearInterval(loginPollTimer);
+      loginPollTimer = undefined;
+      loginModalOpen = false;
+      overlay.remove();
+      renderGuide();
+    };
+    closeButton.onclick = close;
+    overlay.onclick = (event) => {
+      if (event.target === overlay) close();
+    };
+    dialog.append(
+      el('header', { class: 'modal-header' }, [
+        el('div', {}, [el('span', { class: 'section-kicker', text: 'B 站账号' }), el('h2', { text: '使用哔哩哔哩 App 扫码' })]),
+        closeButton,
+      ]),
+      body,
+    );
+    overlay.append(dialog);
+    root.append(overlay);
+
+    const begin = async (): Promise<void> => {
+      if (loginPollTimer !== undefined) globalThis.clearInterval(loginPollTimer);
+      loginPollTimer = undefined;
+      body.replaceChildren(el('div', { class: 'login-loading', text: '正在生成登录二维码…' }));
+      try {
+        const started = await startBiliQRCodeLogin();
+        const image = el('img', { class: 'login-qr-image', alt: '哔哩哔哩登录二维码' }) as HTMLImageElement;
+        image.src = started.qrImage || transparentPixel();
+        const statusText = el('p', { class: 'login-qr-status', text: '请使用哔哩哔哩 App 扫码，并在手机上确认登录。' });
+        const refreshButton = el('button', { class: 'btn ghost', type: 'button', text: '重新生成' }) as HTMLButtonElement;
+        refreshButton.onclick = () => void begin();
+        body.replaceChildren(
+          image,
+          statusText,
+          el('p', { class: 'login-security-note', text: 'Cookie 不会发送给配置页面，将使用 Windows DPAPI 加密后保存在本机。' }),
+          refreshButton,
+        );
+        const poll = async (): Promise<void> => {
+          try {
+            const next = await pollBiliQRCodeLogin(state.roomId);
+            if (next.state === 'logged_in') {
+              biliAuth = next;
+              close();
+              render();
+              toast(`已登录为 ${next.uname || `UID ${next.uid}`}`, root);
+              return;
+            }
+            statusText.textContent = next.message || (next.state === 'scanned' ? '已扫码，请在手机上确认。' : '等待扫码…');
+            if (next.state === 'expired' || next.state === 'error') {
+              if (loginPollTimer !== undefined) globalThis.clearInterval(loginPollTimer);
+              loginPollTimer = undefined;
+            }
+          } catch (error) {
+            statusText.textContent = error instanceof Error ? error.message : '登录状态读取失败';
+            if (loginPollTimer !== undefined) globalThis.clearInterval(loginPollTimer);
+            loginPollTimer = undefined;
+          }
+        };
+        loginPollTimer = globalThis.setInterval(() => void poll(), 1500);
+      } catch (error) {
+        body.replaceChildren(
+          el('p', { class: 'login-qr-status is-error', text: error instanceof Error ? error.message : '二维码生成失败' }),
+          el('button', { class: 'btn', type: 'button', text: '重试', onclick: () => void begin() }),
+        );
+      }
+    };
+    void begin();
   }
 
   function renderAttributesWorkspace(): void {
@@ -1314,11 +1492,17 @@ export function mountConfig(root: HTMLElement): void {
   applyConfigTheme(state.settings.theme);
   render();
   void refreshRuntime();
+  void refreshBiliAuth();
   const pollTimer = globalThis.setInterval(() => {
     void refreshRuntime();
     void refreshBackendState();
   }, 1000);
-  const disposePolling = (): void => globalThis.clearInterval(pollTimer);
+  const authPollTimer = globalThis.setInterval(() => void refreshBiliAuth(), 10000);
+  const disposePolling = (): void => {
+    globalThis.clearInterval(pollTimer);
+    globalThis.clearInterval(authPollTimer);
+    if (loginPollTimer !== undefined) globalThis.clearInterval(loginPollTimer);
+  };
   if (typeof globalThis.addEventListener === 'function') globalThis.addEventListener('beforeunload', disposePolling, { once: true });
 }
 

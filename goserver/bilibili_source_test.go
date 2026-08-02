@@ -67,3 +67,40 @@ func TestBiliPacketRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected packets: %#v", packets)
 	}
 }
+
+func TestBuildBiliAuthPayloadUsesOptionalLoginSession(t *testing.T) {
+	payload := buildBiliAuthPayload(roomInfo{RoomID: 31567150, Buvid: "anonymous-buvid"}, biliSession{
+		UID: 32249588, Buvid: "logged-in-buvid", CookieHeader: "SESSDATA=secret",
+	})
+	var auth map[string]any
+	if err := json.Unmarshal(payload, &auth); err != nil {
+		t.Fatal(err)
+	}
+	if auth["uid"] != float64(32249588) {
+		t.Fatalf("uid = %#v", auth["uid"])
+	}
+	if auth["buvid"] != "logged-in-buvid" {
+		t.Fatalf("buvid = %#v", auth["buvid"])
+	}
+
+	guestPayload := buildBiliAuthPayload(roomInfo{RoomID: 31567150, Buvid: "anonymous-buvid"}, biliSession{})
+	if err := json.Unmarshal(guestPayload, &auth); err != nil {
+		t.Fatal(err)
+	}
+	if auth["uid"] != float64(0) || auth["buvid"] != "anonymous-buvid" {
+		t.Fatalf("guest auth = %#v", auth)
+	}
+}
+
+func TestSessionForRoomInfoRejectsNonOwnerLogin(t *testing.T) {
+	session := biliSession{UID: 32249588, CookieHeader: "SESSDATA=secret", Buvid: "login-buvid"}
+	ownerRoom := roomInfo{RoomID: 31567150, AnchorUID: 32249588}
+	if actual := sessionForRoomInfo(ownerRoom, session); actual.UID != session.UID {
+		t.Fatalf("owner session = %#v", actual)
+	}
+
+	otherRoom := roomInfo{RoomID: 31567150, AnchorUID: 999}
+	if actual := sessionForRoomInfo(otherRoom, session); actual.UID != 0 || actual.CookieHeader != "" {
+		t.Fatalf("non-owner session must be anonymous: %#v", actual)
+	}
+}

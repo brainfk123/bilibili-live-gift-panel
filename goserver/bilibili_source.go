@@ -25,7 +25,9 @@ const (
 	biliOpAuthReply  = 8
 )
 
-type bilibiliGiftSource struct{}
+type bilibiliGiftSource struct {
+	sessionProvider func(context.Context) (biliSession, bool)
+}
 
 type biliPacket struct {
 	protocolVersion uint16
@@ -51,26 +53,33 @@ func (uid *biliUID) UnmarshalJSON(value []byte) error {
 
 func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callbacks runtimeCallbacks) error {
 	callbacks.onState("connecting")
-	info, err := getRoomInfo(roomID)
+	session := biliSession{}
+	if source.sessionProvider != nil {
+		if authenticated, ok := source.sessionProvider(ctx); ok {
+			session = authenticated
+		}
+	}
+	info, err := getRoomInfoWithSession(roomID, session)
 	if err != nil {
 		return err
 	}
+	session = sessionForRoomInfo(info, session)
 	host := danmuHost{Host: "broadcastlv.chat.bilibili.com", WSSPort: 443}
 	if len(info.HostList) > 0 {
 		host = info.HostList[0]
 	}
 	url := fmt.Sprintf("wss://%s:%d/sub", host.Host, host.WSSPort)
 	headers := http.Header{"User-Agent": []string{userAgent}, "Origin": []string{"https://live.bilibili.com"}}
+	if session.CookieHeader != "" {
+		headers.Set("Cookie", session.CookieHeader)
+	}
 	connection, _, err := websocket.DefaultDialer.DialContext(ctx, url, headers)
 	if err != nil {
 		return err
 	}
 	defer connection.Close()
 
-	auth, _ := json.Marshal(map[string]any{
-		"uid": 0, "roomid": info.RoomID, "protover": 2, "platform": "web",
-		"buvid": info.Buvid, "type": 2, "key": info.Token,
-	})
+	auth := buildBiliAuthPayload(info, session)
 	var writeMu sync.Mutex
 	write := func(payload []byte) error {
 		writeMu.Lock()
@@ -144,6 +153,29 @@ func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callba
 			}
 		}
 	}
+}
+
+func sessionForRoomInfo(info roomInfo, session biliSession) biliSession {
+	if session.UID <= 0 || info.AnchorUID <= 0 || session.UID != info.AnchorUID {
+		return biliSession{}
+	}
+	return session
+}
+
+func buildBiliAuthPayload(info roomInfo, session biliSession) []byte {
+	uid := session.UID
+	if uid < 0 {
+		uid = 0
+	}
+	buvid := strings.TrimSpace(session.Buvid)
+	if buvid == "" {
+		buvid = info.Buvid
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"uid": uid, "roomid": info.RoomID, "protover": 2, "platform": "web",
+		"buvid": buvid, "type": 2, "key": info.Token,
+	})
+	return payload
 }
 
 func encodeBiliPacket(operation uint32, body []byte) []byte {

@@ -117,10 +117,11 @@ func addWbiSign(params map[string]string, wbiKey string) map[string]string {
 }
 
 type roomInfo struct {
-	RoomID   int64       `json:"roomId"`
-	Buvid    string      `json:"buvid"`
-	Token    string      `json:"token"`
-	HostList []danmuHost `json:"hostList"`
+	RoomID    int64       `json:"roomId"`
+	AnchorUID int64       `json:"anchorUid"`
+	Buvid     string      `json:"buvid"`
+	Token     string      `json:"token"`
+	HostList  []danmuHost `json:"hostList"`
 }
 
 type danmuHost struct {
@@ -129,6 +130,10 @@ type danmuHost struct {
 }
 
 func getRoomInfo(input string) (roomInfo, error) {
+	return getRoomInfoWithSession(input, biliSession{})
+}
+
+func getRoomInfoWithSession(input string, session biliSession) (roomInfo, error) {
 	infoData, err := fetchJSON("https://api.live.bilibili.com/room/v1/Room/get_info?room_id="+url.QueryEscape(input), nil)
 	if err != nil {
 		return roomInfo{}, err
@@ -137,13 +142,20 @@ func getRoomInfo(input string) (roomInfo, error) {
 	if code != 0 {
 		return roomInfo{}, fmt.Errorf("%v", infoData["message"])
 	}
-	roomID := int64(infoData["data"].(map[string]any)["room_id"].(float64))
+	roomData := infoData["data"].(map[string]any)
+	roomID := int64(roomData["room_id"].(float64))
+	anchorUID, _ := roomData["uid"].(float64)
+	validatedSession := sessionForRoomInfo(roomInfo{RoomID: roomID, AnchorUID: int64(anchorUID)}, session)
+	session = validatedSession
 
-	spiData, err := fetchJSON("https://api.bilibili.com/x/frontend/finger/spi", nil)
-	if err != nil {
-		return roomInfo{}, err
+	buvid := strings.TrimSpace(session.Buvid)
+	if buvid == "" {
+		spiData, err := fetchJSON("https://api.bilibili.com/x/frontend/finger/spi", nil)
+		if err != nil {
+			return roomInfo{}, err
+		}
+		buvid = spiData["data"].(map[string]any)["b_3"].(string)
 	}
-	buvid := spiData["data"].(map[string]any)["b_3"].(string)
 
 	wbiKey, err := getWbiKey()
 	if err != nil {
@@ -155,7 +167,14 @@ func getRoomInfo(input string) (roomInfo, error) {
 		qs.Set(k, v)
 	}
 	dmURL := "https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo?" + qs.Encode()
-	dmData, err := fetchJSON(dmURL, map[string]string{"Cookie": "buvid3=" + buvid})
+	cookieHeader := strings.TrimSpace(session.CookieHeader)
+	if !strings.Contains(cookieHeader, "buvid3=") {
+		if cookieHeader != "" {
+			cookieHeader += "; "
+		}
+		cookieHeader += "buvid3=" + buvid
+	}
+	dmData, err := fetchJSON(dmURL, map[string]string{"Cookie": cookieHeader})
 	if err != nil {
 		return roomInfo{}, err
 	}
@@ -173,5 +192,5 @@ func getRoomInfo(input string) (roomInfo, error) {
 	if err := json.Unmarshal(hostBytes, &hosts); err != nil {
 		return roomInfo{}, err
 	}
-	return roomInfo{RoomID: roomID, Buvid: buvid, Token: token, HostList: hosts}, nil
+	return roomInfo{RoomID: roomID, AnchorUID: int64(anchorUID), Buvid: buvid, Token: token, HostList: hosts}, nil
 }

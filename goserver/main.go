@@ -136,11 +136,20 @@ func main() {
 		showStartupError(err.Error())
 		return
 	}
+	loginStore, err := newDefaultLoginCredentialStore()
+	if err != nil {
+		showStartupError(err.Error())
+		return
+	}
+	login := newLoginManager(nil, loginStore, nil)
 	notifications := newNotificationCenter()
 	presence := newPagePresence(notifications)
 	runtimeContext, stopRuntime := context.WithCancel(context.Background())
-	background := newBackgroundRuntime(store, nil, notifications)
+	background := newBackgroundRuntime(store, func() giftEventSource {
+		return &bilibiliGiftSource{sessionProvider: login.Session}
+	}, notifications)
 	store.setOnChange(background.NotifyConfigChanged)
+	login.SetOnChange(background.NotifyConfigChanged)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -155,6 +164,7 @@ func main() {
 	mux.HandleFunc("/api/room_info", handleRoomInfo)
 	mux.HandleFunc("/api/config", store.handle)
 	mux.HandleFunc("/api/formula/preview", handleFormulaPreview(store))
+	mux.HandleFunc("/api/auth/", login.handle)
 	mux.Handle("/api/pages/presence/", presence)
 	mux.HandleFunc("/api/runtime", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

@@ -9,6 +9,20 @@ export interface RuntimeStatus {
 
 export type PagePresenceMode = 'config' | 'display';
 
+export type BiliAuthState = 'anonymous' | 'waiting' | 'scanned' | 'logged_in' | 'expired' | 'error';
+
+export interface BiliAuthStatus {
+  state: BiliAuthState;
+  uid?: number;
+  uname?: string;
+  avatar?: string;
+  roomId?: string;
+  isRoomOwner?: boolean;
+  qrImage?: string;
+  expiresAt?: number;
+  message?: string;
+}
+
 export function startPagePresence(mode: PagePresenceMode): () => void {
   const EventSourceConstructor = globalThis.EventSource;
   if (typeof EventSourceConstructor !== 'function') return () => {};
@@ -43,12 +57,48 @@ interface FormulaPreviewResponse {
   message?: string;
 }
 
+interface BiliAuthResponse {
+  code: number;
+  auth?: BiliAuthStatus;
+  message?: string;
+}
+
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
   const response = await fetch('/api/runtime', { cache: 'no-store' });
   if (!response.ok) throw new Error(`后台状态读取失败：HTTP ${response.status}`);
   const payload = await response.json() as RuntimeResponse;
   if (payload.code !== 0 || !payload.runtime) throw new Error('后台状态响应无效');
   return payload.runtime;
+}
+
+async function requestBiliAuth(path: string, init?: RequestInit): Promise<BiliAuthStatus> {
+  const response = await fetch(path, { cache: 'no-store', ...init });
+  const payload = await response.json() as BiliAuthResponse;
+  if (!response.ok || payload.code !== 0 || !payload.auth) {
+    throw new Error(payload.message || `B 站登录请求失败：HTTP ${response.status}`);
+  }
+  return payload.auth;
+}
+
+function authRoomPath(path: string, roomId = ''): string {
+  const normalized = roomId.trim();
+  return normalized ? `${path}?room_id=${encodeURIComponent(normalized)}` : path;
+}
+
+export function getBiliAuthStatus(roomId = ''): Promise<BiliAuthStatus> {
+  return requestBiliAuth(authRoomPath('/api/auth/status', roomId));
+}
+
+export function startBiliQRCodeLogin(): Promise<BiliAuthStatus> {
+  return requestBiliAuth('/api/auth/qrcode', { method: 'POST' });
+}
+
+export function pollBiliQRCodeLogin(roomId = ''): Promise<BiliAuthStatus> {
+  return requestBiliAuth(authRoomPath('/api/auth/qrcode', roomId));
+}
+
+export function logoutBiliAuth(): Promise<BiliAuthStatus> {
+  return requestBiliAuth('/api/auth/session', { method: 'DELETE' });
 }
 
 export async function previewFormula(

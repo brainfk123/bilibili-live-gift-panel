@@ -205,6 +205,12 @@ beforeEach(() => {
         runtime: { state: mockedRuntimeState, roomId: mockedRuntimeState === 'idle' ? '' : '31567150' },
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
+    if (url.includes('/api/auth/status')) {
+      return new Response(JSON.stringify({ code: 0, auth: { state: 'anonymous' } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
     if (url.includes('/api/formula/preview')) {
       const body = JSON.parse(String(init?.body ?? '{}')) as { attributeValue?: number };
       return new Response(JSON.stringify({ code: 0, result: (body.attributeValue ?? 0) + 1 }), {
@@ -907,6 +913,17 @@ describe('single-page configuration rendering', () => {
     expect(root.querySelectorAll('h1')).toHaveLength(0);
     expect(textOf(root)).not.toContain('一页完成直播配置');
     expect(textOf(root)).not.toContain('把连接、属性和礼物放在同一页');
+  });
+
+  it('offers optional streamer login while keeping masked-name fallback explicit', async () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    await vi.waitFor(() => expect(root.querySelector('.login-card')).not.toBeNull());
+    expect(textOf(root)).toContain('可选登录');
+    expect(textOf(root)).toContain('匿名模式');
+    expect(textOf(root)).toContain('无法识别时保留 B 站返回的脱敏昵称');
+    expect(findByText(root, '扫码登录')).not.toBeNull();
   });
 
   it('shows one spotlight bubble over the next key UI', () => {
