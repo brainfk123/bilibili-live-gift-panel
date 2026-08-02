@@ -33,11 +33,10 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
   let stateRefreshActive = false;
   const stack = el('div', { class: 'display-stack' });
   const panel = el('div', { class: 'panel' });
-  const broadcastArea = el('div', { class: 'display-broadcast-area' });
   const attrEls = new Map<string, HTMLElement>();
   const broadcastStages = new Map<string, HTMLElement>();
   const broadcastReturnTimers = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
-  stack.append(panel, broadcastArea);
+  stack.append(panel);
   root.replaceChildren(stack);
 
   const visibleAttributes = (): Attribute[] => selectedAttributeName
@@ -53,7 +52,6 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
   function renderAttrs(): void {
     for (const attributeName of broadcastReturnTimers.keys()) clearBroadcastReturnTimer(attributeName);
     panel.replaceChildren();
-    broadcastArea.replaceChildren();
     attrEls.clear();
     broadcastStages.clear();
     const attributes = visibleAttributes();
@@ -77,21 +75,25 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
       } else {
         for (const rule of rules) {
           const gift = findGift(state, rule.giftId);
+          const formulaName = rule.formulaName?.trim() || '未命名公式';
+          const formulaNameClass = Array.from(formulaName).length > 7
+            ? 'display-formula-name is-long'
+            : 'display-formula-name';
           const image = el('img', { class: 'display-gift-image', alt: gift?.name ?? '' }) as HTMLImageElement;
           image.src = gift?.imgBasic || transparentPixel();
           giftRules.append(el('div', { class: 'display-gift-rule' }, [
             image,
             el('div', { class: 'display-gift-copy' }, [
               el('span', { class: 'display-gift-name', text: gift?.name ?? `礼物 ${rule.giftId}` }),
-              el('strong', { class: 'display-formula-name', text: rule.formulaName?.trim() || '未命名公式' }),
+              el('strong', { class: formulaNameClass, text: formulaName, title: formulaName }),
             ]),
           ]));
         }
       }
-      const block = el('section', { class: 'attr' }, [summary, giftRules]);
       const stage = el('div', { class: 'broadcast-stage' }, [createDefaultBroadcast(attr)]);
+      const ticker = el('div', { class: 'broadcast-ticker' }, [stage]);
+      const block = el('section', { class: 'attr' }, [summary, giftRules, ticker]);
       broadcastStages.set(attr.name, stage);
-      broadcastArea.append(el('div', { class: 'broadcast-ticker' }, [stage]));
       attrEls.set(attr.name, block);
       panel.append(block);
     }

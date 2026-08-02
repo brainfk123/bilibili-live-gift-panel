@@ -1072,6 +1072,149 @@ describe('single-page configuration rendering', () => {
     vi.useRealTimers();
   });
 
+  it('toggles gift rules and timers independently from their attribute summary cards', async () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state('88888888', 1),
+      rules: [{
+        id: 'r-disabled', giftId: 1, attributeName: '加班时间', formulaName: '礼物规则', formula: '加班时间+1', enabled: false,
+      }],
+      timerRules: [{
+        id: 't-disabled', attributeName: '加班时间', formulaName: '定时规则', intervalSeconds: 60,
+        formula: '加班时间-1', enabled: false,
+      }],
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const giftSwitch = root.querySelector('.gift-rule-enabled-input') as TestElement & {
+      checked: boolean;
+      onchange?: () => void;
+    };
+    const timerSwitch = root.querySelector('.timer-rule-enabled-input') as TestElement & {
+      checked: boolean;
+      onchange?: () => void;
+    };
+    expect(giftSwitch.checked).toBe(false);
+    expect(timerSwitch.checked).toBe(false);
+    expect(root.querySelectorAll('.attribute-gift-rule').filter((card) => card.className.includes('is-disabled'))).toHaveLength(2);
+
+    giftSwitch.checked = true;
+    giftSwitch.onchange?.();
+    timerSwitch.checked = true;
+    timerSwitch.onchange?.();
+
+    await vi.waitFor(() => {
+      expect(loadState().rules[0].enabled).toBe(true);
+      expect(loadState().timerRules[0].enabled).toBe(true);
+    });
+    expect(root.querySelectorAll('.attribute-gift-rule').filter((card) => card.className.includes('is-disabled'))).toHaveLength(0);
+    expect(textOf(root)).not.toContain('已停用');
+  });
+
+  it('lists only effective gift calculations with the gift ID and before/after values', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state('88888888', 1),
+      rules: [{
+        id: 'r-movie', giftId: 32125, attributeName: '加班时间', formulaName: '电影票加时', formula: '加班时间+60',
+      }],
+      log: [
+        {
+          time: 1700000000, giftId: 32125, giftName: '电影票', num: 1, uname: '测试用户', senderUid: 123,
+          attributeName: '加班时间', delta: 60, valueAfter: 120, ruleId: 'r-movie', source: 'gift',
+        },
+        {
+          time: 1699999999, giftId: 32128, giftName: '爱心抱枕', num: 2, uname: '旧版用户',
+          attributeName: '加班时间', delta: -30, valueAfter: 60, ruleId: 'r-old',
+        },
+        {
+          time: 1699999998, giftId: 0, giftName: '', num: 1, uname: '', attributeName: '加班时间',
+          delta: -1, valueAfter: 59, ruleId: 't-1', source: 'timer', triggerName: '每分钟减少',
+        },
+      ],
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    expect(root.querySelectorAll('.gift-history-row')).toHaveLength(2);
+    expect(textOf(root.querySelector('.gift-history-section') as TestElement)).toContain('2 条生效记录');
+    expect(textOf(root)).toContain('礼物 ID 32125');
+    expect(textOf(root)).toContain('电影票加时');
+    expect(textOf(root)).toContain('00:01:00 → 00:02:00');
+    expect(textOf(root)).toContain('+00:01:00');
+    expect(textOf(root)).toContain('历史规则');
+    expect(textOf(root)).not.toContain('每分钟减少');
+
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    findByText(root, '清空记录')?.onclick?.();
+    return vi.waitFor(() => {
+      expect(loadState().log).toHaveLength(1);
+      expect(loadState().log[0].source).toBe('timer');
+      expect(root.querySelectorAll('.gift-history-row')).toHaveLength(0);
+      expect(textOf(root)).toContain('还没有送礼公式生效记录');
+    });
+  });
+
+  it('incrementally reveals all retained effective gift records while scrolling', () => {
+    const log = Array.from({ length: 85 }, (_, index) => ({
+      time: 1700000000 - index,
+      giftId: 32125,
+      giftName: '电影票',
+      num: 1,
+      uname: `用户 ${index}`,
+      attributeName: '加班时间',
+      delta: 1,
+      valueAfter: 85 - index,
+      ruleId: 'r-movie',
+      source: 'gift',
+    }));
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state('88888888', 1),
+      rules: [{
+        id: 'r-movie', giftId: 32125, attributeName: '加班时间', formulaName: '电影票加时', formula: '加班时间+1',
+      }],
+      log,
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    const list = root.querySelector('.gift-history-list') as TestElement & {
+      clientHeight?: number;
+      scrollHeight?: number;
+      scrollTop?: number;
+      onscroll?: () => void;
+    };
+
+    expect(list.querySelectorAll('.gift-history-row')).toHaveLength(40);
+    expect(list.querySelector('.gift-history-loader')?.textContent).toContain('40 / 85');
+    list.clientHeight = 300;
+    list.scrollHeight = 900;
+    list.scrollTop = 600;
+    list.onscroll?.();
+    expect(list.querySelectorAll('.gift-history-row')).toHaveLength(80);
+    expect(list.querySelector('.gift-history-loader')?.textContent).toContain('80 / 85');
+  });
+
+  it('preserves disabled rules when an attribute is edited and saved', async () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state('88888888', 1),
+      rules: [{
+        id: 'r-disabled', giftId: 1, attributeName: '加班时间', formulaName: '礼物规则', formula: '加班时间+1', enabled: false,
+      }],
+      timerRules: [{
+        id: 't-disabled', attributeName: '加班时间', formulaName: '定时规则', intervalSeconds: 60,
+        formula: '加班时间-1', enabled: false,
+      }],
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    findByText(root, '保存修改')?.onclick?.();
+
+    await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
+    expect(loadState().rules[0].enabled).toBe(false);
+    expect(loadState().timerRules[0].enabled).toBe(false);
+  });
+
   it('collapses duplicate catalog aliases into one visible gift choice', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
     const root = new TestElement('div');
@@ -1123,6 +1266,72 @@ describe('single-page configuration rendering', () => {
     expect(input?.value).toBe('http://localhost:12450/?mode=display&attribute=%E5%8A%A0%E7%8F%AD%E6%97%B6%E9%97%B4');
     expect(input?.readOnly).toBe(true);
     expect(findByText(root, '复制 OBS 链接')).toBeDefined();
+  });
+
+  it('incrementally appends gift picker items while scrolling and resets after search', () => {
+    const gifts = Array.from({ length: 135 }, (_, index) => ({
+      id: 10000 + index,
+      name: `自定义礼物 ${index}`,
+      price: (index + 1) * 100,
+      coinType: 'gold',
+      imgBasic: '',
+      lastReceived: index,
+      count: 1,
+    }));
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state('88888888', 1),
+      recentGifts: gifts,
+      giftCatalog: gifts,
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '编辑')?.onclick?.();
+
+    const picker = root.querySelector('.gift-picker-grid') as TestElement & {
+      clientHeight?: number;
+      scrollHeight?: number;
+      scrollTop?: number;
+      onscroll?: () => void;
+    };
+    expect(picker.querySelectorAll('.gift-choice')).toHaveLength(40);
+    expect(picker.querySelector('.gift-picker-loader')?.textContent).toContain('40 /');
+
+    picker.clientHeight = 240;
+    picker.scrollHeight = 1000;
+    picker.scrollTop = 800;
+    picker.onscroll?.();
+    expect(picker.querySelectorAll('.gift-choice')).toHaveLength(80);
+
+    picker.scrollHeight = 1800;
+    picker.scrollTop = 1600;
+    picker.onscroll?.();
+    expect(picker.querySelectorAll('.gift-choice')).toHaveLength(120);
+
+    const search = root.querySelector('.gift-search') as TestElement & { oninput?: () => void };
+    search.value = '自定义礼物 134';
+    search.oninput?.();
+    expect(picker.querySelectorAll('.gift-choice')).toHaveLength(1);
+    expect(picker.querySelector('.gift-picker-loader')?.textContent).toContain('已显示全部');
+  });
+
+  it('keeps the attribute editor open when text selection drags outside the panel', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888', 1)));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '编辑')?.onclick?.();
+
+    const overlay = root.querySelector('.attribute-overlay') as TestElement & {
+      onpointerdown?: (event: { target: TestElement }) => void;
+      onclick?: (event: { target: TestElement }) => void;
+    };
+    const input = overlay.querySelector('input') as TestElement;
+    overlay.onpointerdown?.({ target: input });
+    overlay.onclick?.({ target: overlay });
+    expect(root.querySelector('.attribute-overlay')).toBe(overlay);
+
+    overlay.onpointerdown?.({ target: overlay });
+    overlay.onclick?.({ target: overlay });
+    expect(root.querySelector('.attribute-overlay')).toBeNull();
   });
 
   it('persists the OBS panel opacity setting', async () => {
@@ -1221,9 +1430,34 @@ describe('OBS attribute display', () => {
     expect(textOf(root)).toContain('欢迎参与积分挑战');
     expect(root.querySelectorAll('.display-gift-rule')).toHaveLength(1);
     expect(root.querySelector('.broadcast-ticker')).not.toBeNull();
-    expect(root.querySelector('.panel')?.querySelector('.broadcast-ticker')).toBeNull();
-    expect(root.querySelector('.display-broadcast-area')?.querySelector('.broadcast-ticker')).not.toBeNull();
+    expect(root.querySelector('.panel')?.querySelector('.broadcast-ticker')).not.toBeNull();
+    expect(root.querySelector('.attr')?.querySelector('.broadcast-ticker')).not.toBeNull();
+    expect(root.querySelector('.display-broadcast-area')).toBeNull();
     expect(textOf(root)).not.toContain('加班时间');
+    vi.useRealTimers();
+  });
+
+  it('uses a smaller two-line treatment for long OBS formula names', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state(),
+      attributes: [
+        { name: '早播', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '场' },
+      ],
+      rules: [{
+        id: 'r-long', giftId: 1, attributeName: '早播',
+        formulaName: '小于10场+1，大于10场x2', formula: '早播+1',
+      }],
+      recentGifts: [{ id: 1, name: '电影票', price: 100, coinType: 'gold', imgBasic: '', lastReceived: 1, count: 1 }],
+    }));
+    vi.useFakeTimers();
+    const root = new TestElement('div');
+    mountDisplay(root as unknown as HTMLElement, '早播');
+
+    const formulaName = root.querySelector('.display-formula-name');
+    expect(formulaName?.className).toContain('is-long');
+    expect(formulaName?.textContent).toBe('小于10场+1，大于10场x2');
+    const displayCss = readFileSync(new URL('../src/ui/display/display.css', import.meta.url), 'utf8');
+    expect(displayCss).toMatch(/\.display-formula-name\.is-long\s*\{[\s\S]*?-webkit-line-clamp:\s*2;/);
     vi.useRealTimers();
   });
 });

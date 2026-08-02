@@ -33,7 +33,7 @@ func TestBackgroundRuntimeProcessesGiftWithoutDisplayPage(t *testing.T) {
 	state := defaultAppState()
 	state.RoomID = "31567150"
 	state.Attributes = []attributeState{{Name: "加班时间", Value: 0, Unit: "seconds", Format: "hhmmss"}}
-	state.Rules = []giftRule{{ID: "r1", GiftID: 33300, AttributeName: "加班时间", Formula: "加班时间+60"}}
+	state.Rules = []giftRule{{ID: "r1", GiftID: 33300, AttributeName: "加班时间", FormulaName: "每个加一分钟", Formula: "加班时间+60"}}
 	state.GiftCatalog = []giftInfo{{ID: 33300, Name: "666", Price: 1000, CoinType: "gold"}}
 	if err := store.replaceState(state); err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestBackgroundRuntimeProcessesGiftWithoutDisplayPage(t *testing.T) {
 func TestApplyGiftEventAggregatesBatchForAttributeBroadcast(t *testing.T) {
 	state := defaultAppState()
 	state.Attributes = []attributeState{{Name: "加班时间", Value: 0, Unit: "seconds", Format: "hhmmss"}}
-	state.Rules = []giftRule{{ID: "r1", GiftID: 33300, AttributeName: "加班时间", Formula: "加班时间+60"}}
+	state.Rules = []giftRule{{ID: "r1", GiftID: 33300, AttributeName: "加班时间", FormulaName: "每个加一分钟", Formula: "加班时间+60"}}
 	state.GiftCatalog = []giftInfo{{ID: 33300, Name: "666", Price: 1000, CoinType: "gold"}}
 
 	applyGiftEvent(&state, giftEvent{
@@ -88,8 +88,32 @@ func TestApplyGiftEventAggregatesBatchForAttributeBroadcast(t *testing.T) {
 	if entry.Num != 3 || entry.Delta != 180 || entry.ValueAfter != 180 {
 		t.Fatalf("aggregated log = %#v", entry)
 	}
+	if entry.TriggerName != "每个加一分钟" {
+		t.Fatalf("trigger name = %q", entry.TriggerName)
+	}
 	if entry.Avatar != "https://example.test/avatar.png" || entry.SenderUID != 123456789 || entry.EventID == "" || entry.Source != "gift" {
 		t.Fatalf("broadcast metadata = %#v", entry)
+	}
+}
+
+func TestApplyGiftEventSkipsDisabledGiftRule(t *testing.T) {
+	disabled := false
+	state := defaultAppState()
+	state.Attributes = []attributeState{{Name: "加班时间", Value: 120, Unit: "seconds", Format: "hhmmss"}}
+	state.Rules = []giftRule{{
+		ID: "r1", GiftID: 33300, AttributeName: "加班时间", Formula: "加班时间+60", Enabled: &disabled,
+	}}
+
+	applyGiftEvent(&state, giftEvent{
+		GiftID: 33300, GiftName: "666", Num: 1, Price: 1000, CoinType: "gold",
+		Timestamp: 1700000000, Rnd: "disabled-gift-rule",
+	})
+
+	if state.Attributes[0].Value != 120 {
+		t.Fatalf("disabled rule changed attribute value to %v", state.Attributes[0].Value)
+	}
+	if len(state.Log) != 0 {
+		t.Fatalf("disabled rule created log entries: %#v", state.Log)
 	}
 }
 

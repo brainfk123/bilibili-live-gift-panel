@@ -25,9 +25,14 @@ type giftRule struct {
 	AttributeName string   `json:"attributeName"`
 	FormulaName   string   `json:"formulaName,omitempty"`
 	Formula       string   `json:"formula"`
+	Enabled       *bool    `json:"enabled,omitempty"`
 	MinPrice      *float64 `json:"minPrice,omitempty"`
 	Cap           *float64 `json:"cap,omitempty"`
 	DailyLimit    *int     `json:"dailyLimit,omitempty"`
+}
+
+func (rule giftRule) enabled() bool {
+	return rule.Enabled == nil || *rule.Enabled
 }
 
 type timerRule struct {

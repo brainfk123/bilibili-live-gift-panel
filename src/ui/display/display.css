@@ -107,7 +107,7 @@ body.display-mode { overflow: hidden; background: transparent; }
   background: rgba(255, 255, 255, 0.06);
   object-fit: contain;
 }
-.display-gift-copy { min-width: 0; }
+.display-gift-copy { min-width: 0; flex: 1; }
 .display-gift-name,
 .display-formula-name {
   display: block;
@@ -117,6 +117,17 @@ body.display-mode { overflow: hidden; background: transparent; }
 }
 .display-gift-name { color: rgba(255, 255, 255, 0.58); font-size: 20px; }
 .display-formula-name { margin-top: 4px; color: #fff; font-size: 27px; }
+.display-formula-name.is-long {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 20px;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
 .display-rule-empty {
   grid-column: 1 / -1;
   padding: 18px;
@@ -136,8 +147,6 @@ body.display-mode { overflow: hidden; background: transparent; }
   background: rgba(8, 9, 13, var(--panel-surface-opacity, 0.3));
   box-shadow: inset 0 0 0 1px var(--panel-inner-outline);
 }
-.display-broadcast-area { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.display-broadcast-area:empty { display: none; }
 .broadcast-stage { position: relative; height: 100%; overflow: hidden; }
 .broadcast-content {
   position: absolute;

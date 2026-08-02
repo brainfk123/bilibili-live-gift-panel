@@ -1,4 +1,4 @@
-import { AppState, Attribute, FormulaPresetContext, GiftInfo, GiftRule, TimerRule } from '../../types';
+import { AppState, Attribute, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule } from '../../types';
 import { consumeConfigMigrationRequired, loadState, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { el, fieldControl, inputField, toast } from '../common';
@@ -22,6 +22,7 @@ interface SelectedGiftRule {
   gift: GiftInfo;
   formulaName: string;
   formula: string;
+  enabled: boolean;
   previous?: GiftRule;
 }
 
@@ -199,6 +200,7 @@ export function mountConfig(root: HTMLElement): void {
     renderHeaderStatus();
     renderConnectionWorkspace();
     renderAttributesWorkspace();
+    renderGiftHistory();
     renderAdvancedSettings();
     renderGuide();
   }
@@ -450,24 +452,70 @@ export function mountConfig(root: HTMLElement): void {
     } else {
       for (const rule of rules) {
         const gift = findGift(state, rule.giftId);
+        const toggleLabel = `启用礼物规则 ${rule.formulaName?.trim() || gift?.name || rule.giftId}`;
         const giftImage = el('img', { class: 'attribute-gift-image', alt: '' }) as HTMLImageElement;
         giftImage.src = gift?.imgBasic || transparentPixel();
-        formulas.append(el('div', { class: 'attribute-gift-rule' }, [
+        const ruleCard = el('div', { class: 'attribute-gift-rule' });
+        const enabledInput = el('input', {
+          class: 'attribute-rule-enabled-input gift-rule-enabled-input',
+          type: 'checkbox',
+          ariaLabel: toggleLabel,
+        } as any) as HTMLInputElement;
+        enabledInput.checked = rule.enabled !== false;
+        const updateEnabledAppearance = (): void => {
+          ruleCard.classList.toggle('is-disabled', !enabledInput.checked);
+        };
+        enabledInput.onchange = () => {
+          rule.enabled = enabledInput.checked;
+          updateEnabledAppearance();
+          save();
+        };
+        ruleCard.append(
           giftImage,
           el('div', { class: 'attribute-gift-copy' }, [
             el('strong', { text: gift?.name ?? `礼物 ${rule.giftId}` }),
             el('span', { text: rule.formulaName?.trim() || '未命名公式' }),
           ]),
-        ]));
+          el('label', { class: 'attribute-rule-enabled', title: toggleLabel }, [
+            enabledInput,
+            el('span', { class: 'attribute-rule-enabled-track' }),
+          ]),
+        );
+        updateEnabledAppearance();
+        formulas.append(ruleCard);
       }
       for (const rule of timerRules) {
-        formulas.append(el('div', { class: 'attribute-gift-rule attribute-timer-rule' }, [
+        const toggleLabel = `启用定时器 ${rule.formulaName || rule.id}`;
+        const ruleCard = el('div', { class: 'attribute-gift-rule attribute-timer-rule' });
+        const status = el('span');
+        const enabledInput = el('input', {
+          class: 'attribute-rule-enabled-input timer-rule-enabled-input',
+          type: 'checkbox',
+          ariaLabel: toggleLabel,
+        } as any) as HTMLInputElement;
+        enabledInput.checked = rule.enabled;
+        const updateEnabledAppearance = (): void => {
+          ruleCard.classList.toggle('is-disabled', !enabledInput.checked);
+          status.textContent = `每 ${formatInterval(rule.intervalSeconds)}${enabledInput.checked ? '' : ' · 已停用'}`;
+        };
+        enabledInput.onchange = () => {
+          rule.enabled = enabledInput.checked;
+          updateEnabledAppearance();
+          save();
+        };
+        ruleCard.append(
           el('span', { class: 'attribute-timer-icon', text: '⏱' }),
           el('div', { class: 'attribute-gift-copy' }, [
             el('strong', { text: rule.formulaName || '未命名定时器' }),
-            el('span', { text: `每 ${formatInterval(rule.intervalSeconds)}${rule.enabled ? '' : ' · 已停用'}` }),
+            status,
           ]),
-        ]));
+          el('label', { class: 'attribute-rule-enabled', title: toggleLabel }, [
+            enabledInput,
+            el('span', { class: 'attribute-rule-enabled-track' }),
+          ]),
+        );
+        updateEnabledAppearance();
+        formulas.append(ruleCard);
       }
     }
 
@@ -502,6 +550,152 @@ export function mountConfig(root: HTMLElement): void {
     return card;
   }
 
+  function renderGiftHistory(): void {
+    const entries = state.log.filter((entry) => entry.source !== 'timer');
+    const section = el('section', { class: 'gift-history-section' });
+    const clearButton = el('button', {
+      class: 'btn ghost gift-history-clear',
+      type: 'button',
+      text: '清空记录',
+    }) as HTMLButtonElement;
+    clearButton.disabled = entries.length === 0;
+    clearButton.onclick = () => {
+      if (!confirm('清空全部送礼生效记录？属性值、礼物规则和定时器日志不会受影响。')) return;
+      const previousLog = state.log;
+      state.log = state.log.filter((entry) => entry.source === 'timer');
+      clearButton.disabled = true;
+      void saveAndWait().then(() => {
+        render();
+        toast('送礼生效记录已清空', root);
+      }).catch(() => {
+        state.log = previousLog;
+        clearButton.disabled = false;
+      });
+    };
+    const heading = el('div', { class: 'gift-history-heading' }, [
+      sectionHeading(
+        '运行核对',
+        '送礼生效记录',
+        `只显示真正执行过礼物公式的事件；未命中规则的礼物不会出现。最多保留最近 ${MAX_LOG} 条计算日志。`,
+      ),
+      el('div', { class: 'gift-history-actions' }, [
+        el('div', { class: 'gift-history-count', text: `${entries.length} 条生效记录` }),
+        clearButton,
+      ]),
+    ]);
+    section.append(heading);
+
+    if (entries.length === 0) {
+      section.append(el('div', {
+        class: 'gift-history-empty',
+        text: '还没有送礼公式生效记录。收到命中规则的礼物后，会在这里显示完整的数值变化。',
+      }));
+      content.append(section);
+      return;
+    }
+
+    const distinctGifts = new Set(entries.map((entry) => entry.giftId));
+    const attributeTotals = new Map<string, { count: number; delta: number }>();
+    for (const entry of entries) {
+      const total = attributeTotals.get(entry.attributeName) ?? { count: 0, delta: 0 };
+      total.count += 1;
+      total.delta += entry.delta;
+      attributeTotals.set(entry.attributeName, total);
+    }
+    const summary = el('div', { class: 'gift-history-summary' }, [
+      el('span', { text: `${distinctGifts.size} 种礼物` }),
+    ]);
+    for (const [attributeName, total] of attributeTotals) {
+      const attribute = state.attributes.find((item) => item.name === attributeName);
+      const fullSummary = `${attributeName}：${total.count} 次 · 净变化 ${formatHistoryDelta(total.delta, attribute)}`;
+      summary.append(el('span', {
+        text: `${attributeName}：${total.count} 次 · 净变化 ${formatHistorySummaryDelta(total.delta, attribute)}`,
+        title: fullSummary,
+      }));
+    }
+    section.append(summary);
+
+    const list = el('div', { class: 'gift-history-list' });
+    const batchSize = 40;
+    let visibleCount = 0;
+    const loader = el('button', { class: 'gift-history-loader', type: 'button' }) as HTMLButtonElement;
+    const appendBatch = (): void => {
+      const nextVisibleCount = Math.min(entries.length, visibleCount + batchSize);
+      loader.remove();
+      for (const entry of entries.slice(visibleCount, nextVisibleCount)) {
+        list.append(renderGiftHistoryRow(entry));
+      }
+      visibleCount = nextVisibleCount;
+      loader.textContent = visibleCount < entries.length
+        ? `继续下滑加载 · ${visibleCount} / ${entries.length}`
+        : `已显示全部 ${entries.length} 条记录`;
+      loader.disabled = visibleCount >= entries.length;
+      loader.classList.toggle('is-complete', loader.disabled);
+      list.append(loader);
+    };
+    loader.onclick = appendBatch;
+    list.onscroll = () => {
+      if (list.scrollTop + list.clientHeight >= list.scrollHeight - 80) appendBatch();
+    };
+    appendBatch();
+    section.append(list);
+    content.append(section);
+  }
+
+  function renderGiftHistoryRow(entry: LogEntry): HTMLElement {
+    const attribute = state.attributes.find((item) => item.name === entry.attributeName);
+    const rule = state.rules.find((item) => item.id === entry.ruleId);
+    const gift = findGift(state, entry.giftId);
+    const triggerName = entry.triggerName?.trim() || rule?.formulaName?.trim() || '历史规则';
+    const before = entry.valueAfter - entry.delta;
+    const avatar = el('img', {
+      class: 'gift-history-avatar',
+      alt: entry.uname ? `${entry.uname}的头像` : '用户头像',
+      referrerPolicy: 'no-referrer',
+    }) as HTMLImageElement;
+    avatar.src = entry.avatar || transparentPixel();
+    const giftImage = el('img', { class: 'gift-history-gift-image', alt: gift?.name || entry.giftName }) as HTMLImageElement;
+    giftImage.src = gift?.imgBasic || transparentPixel();
+    const time = new Date(entry.time < 1_000_000_000_000 ? entry.time * 1000 : entry.time);
+    const timeText = time.toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+    const beforeText = formatHistoryValue(before, attribute);
+    const afterText = formatHistoryValue(entry.valueAfter, attribute);
+    const deltaText = formatHistoryDelta(entry.delta, attribute);
+    const transitionText = `${beforeText} → ${afterText}`;
+    return el('article', { class: 'gift-history-row' }, [
+      el('time', { class: 'gift-history-time', dateTime: time.toISOString(), text: timeText, title: time.toLocaleString('zh-CN') }),
+      el('div', { class: 'gift-history-person' }, [
+        avatar,
+        el('div', { class: 'gift-history-copy' }, [
+          el('strong', { text: entry.uname?.trim() || '匿名观众', title: entry.uname?.trim() || '匿名观众' }),
+          el('span', { text: entry.senderUid ? `UID ${entry.senderUid}` : 'UID 未提供' }),
+        ]),
+      ]),
+      el('div', { class: 'gift-history-gift' }, [
+        giftImage,
+        el('div', { class: 'gift-history-copy' }, [
+          el('strong', { text: `${entry.giftName || gift?.name || '礼物'} ×${Math.max(1, entry.num || 1)}` }),
+          el('span', { text: `礼物 ID ${entry.giftId}` }),
+        ]),
+      ]),
+      el('div', { class: 'gift-history-effect' }, [
+        el('strong', { text: entry.attributeName }),
+        el('span', { text: triggerName, title: triggerName }),
+      ]),
+      el('div', { class: 'gift-history-change' }, [
+        el('span', { text: transitionText, title: transitionText }),
+        el('strong', { class: entry.delta < 0 ? 'is-negative' : entry.delta > 0 ? 'is-positive' : 'is-zero', text: deltaText, title: deltaText }),
+      ]),
+    ]);
+  }
+
   function openAttributeEditor(index?: number): void {
     activeGuide?.dispose();
     activeGuide = null;
@@ -527,6 +721,7 @@ export function mountConfig(root: HTMLElement): void {
             gift,
             formulaName: rule.formulaName?.trim() || `${gift.name}规则`,
             formula: rule.formula,
+            enabled: rule.enabled !== false,
             previous: rule,
           });
         }
@@ -917,38 +1112,95 @@ export function mountConfig(root: HTMLElement): void {
     const giftPicker = el('div', { class: 'gift-picker-grid' });
     const selectedRules = el('div', { class: 'selected-rules' });
     const selectionCount = el('span', { class: 'selection-count' });
+    const giftChoiceButtons = new Map<number, HTMLButtonElement>();
+    const giftPickerBatchSize = 40;
+    let filteredGifts: GiftInfo[] = [];
+    let visibleGiftCount = 0;
+    let giftPickerLoader: HTMLButtonElement | null = null;
 
     const defaultFormula = (): string => `${nameInput.value.trim() || '属性'}+price/1000*60`;
 
+    function updateGiftChoice(giftId: number): void {
+      const button = giftChoiceButtons.get(giftId);
+      if (!button) return;
+      const selectedNow = selected.has(giftId);
+      button.classList.toggle('is-selected', selectedNow);
+      const check = button.querySelector('.gift-choice-check');
+      if (check) check.textContent = selectedNow ? '✓' : '+';
+      button.setAttribute('aria-pressed', String(selectedNow));
+    }
+
+    function createGiftChoice(gift: GiftInfo): HTMLButtonElement {
+      const selectedNow = selected.has(gift.id);
+      const button = el('button', {
+        class: `gift-choice${selectedNow ? ' is-selected' : ''}`,
+        type: 'button',
+        ariaPressed: String(selectedNow),
+      }) as HTMLButtonElement;
+      button.dataset.giftId = String(gift.id);
+      const image = el('img', { class: 'gift-choice-image', alt: '' }) as HTMLImageElement;
+      image.src = gift.imgBasic || transparentPixel();
+      button.append(
+        image,
+        el('span', { class: 'gift-choice-copy' }, [
+          el('strong', { text: gift.name }),
+          el('small', { text: giftPriceLabel(gift) }),
+        ]),
+        el('span', { class: 'gift-choice-check', text: selectedNow ? '✓' : '+' }),
+      );
+      button.onclick = () => {
+        if (selected.has(gift.id)) selected.delete(gift.id);
+        else selected.set(gift.id, { gift, formulaName: `${gift.name}规则`, formula: defaultFormula(), enabled: true });
+        updateGiftChoice(gift.id);
+        renderSelectedRules();
+      };
+      giftChoiceButtons.set(gift.id, button);
+      return button;
+    }
+
+    function updateGiftPickerLoader(): void {
+      giftPickerLoader?.remove();
+      const complete = visibleGiftCount >= filteredGifts.length;
+      giftPickerLoader = el('button', {
+        class: `gift-picker-loader${complete ? ' is-complete' : ''}`,
+        type: 'button',
+        disabled: complete,
+        text: complete
+          ? `已显示全部 ${filteredGifts.length} 个礼物`
+          : `继续下滑加载 · ${visibleGiftCount} / ${filteredGifts.length}`,
+      }) as HTMLButtonElement;
+      if (!complete) giftPickerLoader.onclick = appendGiftPickerBatch;
+      giftPicker.append(giftPickerLoader);
+    }
+
+    function appendGiftPickerBatch(): void {
+      if (visibleGiftCount >= filteredGifts.length) return;
+      giftPickerLoader?.remove();
+      const nextCount = Math.min(filteredGifts.length, visibleGiftCount + giftPickerBatchSize);
+      for (const gift of filteredGifts.slice(visibleGiftCount, nextCount)) giftPicker.append(createGiftChoice(gift));
+      visibleGiftCount = nextCount;
+      updateGiftPickerLoader();
+    }
+
     function renderGiftPicker(): void {
       const query = giftSearch.value.trim().toLowerCase();
-      const matches = allGifts
-        .filter((gift) => gift.name.toLowerCase().includes(query) || String(gift.id).includes(query))
-        .slice(0, 80);
+      filteredGifts = allGifts.filter((gift) => gift.name.toLowerCase().includes(query) || String(gift.id).includes(query));
+      visibleGiftCount = 0;
+      giftPickerLoader = null;
+      giftChoiceButtons.clear();
       giftPicker.replaceChildren();
-      if (matches.length === 0) giftPicker.append(el('div', { class: 'picker-empty', text: '没有匹配的礼物，可在下方手动添加。' }));
-      for (const gift of matches) {
-        const selectedNow = selected.has(gift.id);
-        const button = el('button', { class: `gift-choice${selectedNow ? ' is-selected' : ''}`, type: 'button' }) as HTMLButtonElement;
-        const image = el('img', { class: 'gift-choice-image', alt: '' }) as HTMLImageElement;
-        image.src = gift.imgBasic || transparentPixel();
-        button.append(
-          image,
-          el('span', { class: 'gift-choice-copy' }, [
-            el('strong', { text: gift.name }),
-            el('small', { text: giftPriceLabel(gift) }),
-          ]),
-          el('span', { class: 'gift-choice-check', text: selectedNow ? '✓' : '+' }),
-        );
-        button.onclick = () => {
-          if (selected.has(gift.id)) selected.delete(gift.id);
-          else selected.set(gift.id, { gift, formulaName: `${gift.name}规则`, formula: defaultFormula() });
-          renderGiftPicker();
-          renderSelectedRules();
-        };
-        giftPicker.append(button);
+      giftPicker.scrollTop = 0;
+      if (filteredGifts.length === 0) {
+        giftPicker.append(el('div', { class: 'picker-empty', text: '没有匹配的礼物，可在下方手动添加。' }));
+        return;
       }
+      appendGiftPickerBatch();
     }
+
+    giftPicker.onscroll = () => {
+      const distanceToBottom = giftPicker.scrollHeight - giftPicker.scrollTop - giftPicker.clientHeight;
+      if (distanceToBottom <= 80) appendGiftPickerBatch();
+    };
 
     function renderSelectedRules(): void {
       selectionCount.textContent = `已选择 ${selected.size} 个礼物`;
@@ -965,7 +1217,7 @@ export function mountConfig(root: HTMLElement): void {
       const removeButton = el('button', { class: 'rule-remove', type: 'button', text: '移除' }) as HTMLButtonElement;
       removeButton.onclick = () => {
         selected.delete(item.gift.id);
-        renderGiftPicker();
+        updateGiftChoice(item.gift.id);
         renderSelectedRules();
       };
       const giftImage = el('img', { class: 'selected-rule-gift-image', alt: '' }) as HTMLImageElement;
@@ -1068,7 +1320,7 @@ export function mountConfig(root: HTMLElement): void {
       el('div', { class: 'modal-section-heading' }, [
         el('div', {}, [
           el('h3', { text: '选择会影响这个属性的礼物' }),
-          el('p', { text: '可选择任意数量；同一个礼物也可以出现在其他属性中。' }),
+          el('p', { text: '可选择任意数量；向下滚动会自动加载更多礼物。' }),
         ]),
         selectionCount,
       ]),
@@ -1110,8 +1362,14 @@ export function mountConfig(root: HTMLElement): void {
       el('footer', { class: 'modal-actions' }, [cancelButton, saveButton]),
     );
     overlay.append(modal);
+    let overlayPointerStartedOutside = false;
+    overlay.onpointerdown = (event) => {
+      overlayPointerStartedOutside = event.target === overlay;
+    };
     overlay.onclick = (event) => {
-      if (event.target === overlay) close();
+      const shouldClose = overlayPointerStartedOutside && event.target === overlay;
+      overlayPointerStartedOutside = false;
+      if (shouldClose) close();
     };
     root.append(overlay);
     renderGiftPicker();
@@ -1150,7 +1408,7 @@ export function mountConfig(root: HTMLElement): void {
       const recent = { ...gift, lastReceived: 0, count: recentIndex >= 0 ? state.recentGifts[recentIndex].count : 0 };
       if (recentIndex >= 0) state.recentGifts[recentIndex] = recent;
       else state.recentGifts.unshift(recent);
-      selected.set(id, { gift, formulaName: `${gift.name}规则`, formula: defaultFormula() });
+      selected.set(id, { gift, formulaName: `${gift.name}规则`, formula: defaultFormula(), enabled: true });
       save();
       onAdded();
       details.open = false;
@@ -1296,6 +1554,7 @@ export function mountConfig(root: HTMLElement): void {
       attributeName: name,
       formulaName: item.formulaName,
       formula: item.formula,
+      enabled: item.enabled,
       ...(item.previous?.minPrice !== undefined ? { minPrice: item.previous.minPrice } : {}),
       ...(item.previous?.cap !== undefined ? { cap: item.previous.cap } : {}),
       ...(item.previous?.dailyLimit !== undefined ? { dailyLimit: item.previous.dailyLimit } : {}),
@@ -1593,7 +1852,29 @@ function configStructureSignature(state: AppState): string {
     formulaPresets: state.formulaPresets,
     settings: state.settings,
     giftCatalog: state.giftCatalog,
+    log: state.log,
   });
+}
+
+function formatHistoryValue(value: number, attribute?: Attribute): string {
+  if (attribute) return formatValue(value, attribute);
+  return value.toLocaleString('zh-CN', { maximumFractionDigits: 4 });
+}
+
+function formatHistoryDelta(delta: number, attribute?: Attribute): string {
+  const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
+  return `${sign}${formatHistoryValue(Math.abs(delta), attribute)}`;
+}
+
+function formatHistorySummaryDelta(delta: number, attribute?: Attribute): string {
+  if (Math.abs(delta) < 1_000_000) return formatHistoryDelta(delta, attribute);
+  const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
+  const unit = attribute?.format === 'suffix' && attribute.suffix
+    ? ` ${attribute.suffix}`
+    : attribute?.unit === 'seconds'
+      ? ' 秒'
+      : '';
+  return `${sign}${Math.abs(delta).toExponential(2)}${unit}`;
 }
 
 function attributeValueElement(attribute: Attribute): HTMLElement {

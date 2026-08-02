@@ -336,6 +336,9 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 	changeIndexes := map[string]int{}
 	for occurrence := 0; occurrence < repetitions; occurrence++ {
 		for _, rule := range state.Rules {
+			if !rule.enabled() {
+				continue
+			}
 			configuredGift := state.findGift(rule.GiftID)
 			matchesAlias := configuredGift != nil && sameGiftIdentity(*configuredGift, gift)
 			if rule.GiftID != gift.GiftID && !matchesAlias {
@@ -386,6 +389,7 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 				ValueAfter:    nextValue,
 				RuleID:        rule.ID,
 				Source:        "gift",
+				TriggerName:   rule.FormulaName,
 				EventID:       fmt.Sprintf("%s:%s", gift.Rnd, attribute.Name),
 			})
 		}

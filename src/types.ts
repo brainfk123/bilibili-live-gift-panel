@@ -17,6 +17,7 @@ export interface GiftRule {
   attributeName: string;
   formulaName?: string;
   formula: string;
+  enabled?: boolean;
   minPrice?: number;
   cap?: number;
   dailyLimit?: number;
