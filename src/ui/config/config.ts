@@ -48,7 +48,7 @@ export function mountConfig(root: HTMLElement): void {
   let activeGuide: SpotlightGuideElement | null = null;
   let editorOpen = false;
   let editorGuideEnabled = false;
-  let runtimeRefreshActive = false;
+  let runtimeRefreshPromise: Promise<void> | null = null;
   let stateRefreshActive = false;
   let authRefreshActive = false;
   let roomGiftCatalogRefreshActive = false;
@@ -104,27 +104,36 @@ export function mountConfig(root: HTMLElement): void {
     );
   }
 
-  async function refreshRuntime(): Promise<void> {
-    if (runtimeRefreshActive) return;
-    runtimeRefreshActive = true;
-    try {
-      const runtime = await getRuntimeStatus();
-      const previous = connectionState;
-      connectionState = runtime.state;
-      renderHeaderStatus();
-      const inlineStatus = root.querySelector('.connection-inline-status');
-      if (inlineStatus) inlineStatus.textContent = connectionLabel(connectionState);
-      if (previous !== connectionState && connectionState === 'connected') {
-        void refreshRoomGiftCatalog(true);
-        if (!editorOpen) render();
+  async function refreshRuntime(forceAfterCurrent = false): Promise<void> {
+    if (runtimeRefreshPromise) {
+      await runtimeRefreshPromise;
+      if (forceAfterCurrent) await refreshRuntime();
+      return;
+    }
+    const refresh = (async () => {
+      try {
+        const runtime = await getRuntimeStatus();
+        const previous = connectionState;
+        connectionState = runtime.state;
+        renderHeaderStatus();
+        const inlineStatus = root.querySelector('.connection-inline-status');
+        if (inlineStatus) inlineStatus.textContent = connectionLabel(connectionState);
+        if (previous !== connectionState && connectionState === 'connected') {
+          void refreshRoomGiftCatalog(true);
+          if (!editorOpen) render();
+        }
+      } catch {
+        connectionState = 'error';
+        renderHeaderStatus();
+        const inlineStatus = root.querySelector('.connection-inline-status');
+        if (inlineStatus) inlineStatus.textContent = connectionLabel(connectionState);
       }
-    } catch {
-      connectionState = 'error';
-      renderHeaderStatus();
-      const inlineStatus = root.querySelector('.connection-inline-status');
-      if (inlineStatus) inlineStatus.textContent = connectionLabel(connectionState);
+    })();
+    runtimeRefreshPromise = refresh;
+    try {
+      await refresh;
     } finally {
-      runtimeRefreshActive = false;
+      if (runtimeRefreshPromise === refresh) runtimeRefreshPromise = null;
     }
   }
 
@@ -315,7 +324,7 @@ export function mountConfig(root: HTMLElement): void {
     roomInput.oninput = () => undefined;
     const connectionText = el('span', { class: 'connection-inline-status', text: connectionLabel(connectionState) });
     const connectButton = el('button', { class: 'btn', type: 'button', text: '测试连接' }) as HTMLButtonElement;
-    connectButton.onclick = () => {
+    connectButton.onclick = async () => {
       const roomId = roomInput.value.trim();
       if (!roomId) {
         toast('请输入房间号', root);
@@ -327,10 +336,13 @@ export function mountConfig(root: HTMLElement): void {
       connectionText.textContent = connectionLabel(connectionState);
       renderHeaderStatus();
       void refreshBiliAuth();
-      void saveAndWait().then(() => {
-        void refreshRuntime();
+      try {
+        await saveAndWait();
+        await refreshRuntime(true);
         void refreshRoomGiftCatalog(true);
-      }).catch(() => undefined);
+      } catch {
+        // saveAndWait already reports the persistence error in the page.
+      }
     };
     roomCard.append(
       fieldControl(roomInput),
