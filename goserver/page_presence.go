@@ -20,6 +20,8 @@ type pagePresence struct {
 	generations   map[pageMode]uint64
 	closeGrace    time.Duration
 	notifications *notificationCenter
+	seenPage      bool
+	onIdle        func()
 }
 
 func newPagePresence(notifications *notificationCenter) *pagePresence {
@@ -98,6 +100,7 @@ func (presence *pagePresence) handleStream(w http.ResponseWriter, r *http.Reques
 
 func (presence *pagePresence) register(mode pageMode) func() {
 	presence.mu.Lock()
+	presence.seenPage = true
 	presence.counts[mode]++
 	presence.generations[mode]++
 	presence.mu.Unlock()
@@ -126,6 +129,8 @@ func (presence *pagePresence) register(mode pageMode) func() {
 func (presence *pagePresence) notifyIfStillEmpty(mode pageMode, generation uint64) {
 	presence.mu.Lock()
 	stillEmpty := presence.counts[mode] == 0 && presence.generations[mode] == generation
+	allPagesClosed := stillEmpty && presence.seenPage && presence.counts[pageModeConfig] == 0 && presence.counts[pageModeDisplay] == 0
+	onIdle := presence.onIdle
 	presence.mu.Unlock()
 	if !stillEmpty {
 		return
@@ -135,10 +140,25 @@ func (presence *pagePresence) notifyIfStillEmpty(mode pageMode, generation uint6
 	} else {
 		presence.notifications.Publish(notificationDisplayPagesClosed, "")
 	}
+	if allPagesClosed && onIdle != nil {
+		onIdle()
+	}
 }
 
 func (presence *pagePresence) Counts() (config, display int) {
 	presence.mu.Lock()
 	defer presence.mu.Unlock()
 	return presence.counts[pageModeConfig], presence.counts[pageModeDisplay]
+}
+
+func (presence *pagePresence) IsIdle() bool {
+	presence.mu.Lock()
+	defer presence.mu.Unlock()
+	return presence.seenPage && presence.counts[pageModeConfig] == 0 && presence.counts[pageModeDisplay] == 0
+}
+
+func (presence *pagePresence) SetOnIdle(onIdle func()) {
+	presence.mu.Lock()
+	presence.onIdle = onIdle
+	presence.mu.Unlock()
 }

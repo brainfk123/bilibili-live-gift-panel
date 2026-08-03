@@ -33,7 +33,7 @@ git push origin v0.1.0
 
 发布标签时，GitHub Actions 会运行测试、构建 `gift-panel-windows-x64.exe`、生成 SHA-256 文件与更新清单，并创建 GitHub Release。
 
-正式 EXE 启动时及每 6 小时会在后台读取 GitHub Latest Release 的静态更新清单，不占用 GitHub API 额度。程序会静默下载并校验 SHA-256，在用户从托盘退出后台程序后替换 EXE。配置页面的“外观与数据 → 程序更新”中可以关闭自动下载或手动检查更新。
+正式 EXE 会在配置页和 OBS 面板全部关闭的空闲状态下读取 GitHub Latest Release 的静态更新清单，不占用 GitHub API 额度；之后每 6 小时最多自动检查一次。程序会静默下载、校验 SHA-256、替换 EXE 并重新启动后台服务。更新后的首次启动只显示系统通知，不会自动打开配置页面。配置页面的“外观与数据 → 程序更新”中可以关闭自动更新或手动检查更新。
 
 本地 `npm run build` 生成的是 `dev` 版本，不会访问在线更新接口。如需在本地构建指定版本，可设置 `APP_VERSION` 和 `APP_COMMIT` 环境变量。发布失败后可在 GitHub Actions 手动运行 Release 工作流并填写已有标签，以重新构建和修复 GitHub Release。
 

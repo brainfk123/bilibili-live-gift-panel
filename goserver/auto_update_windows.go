@@ -28,7 +28,7 @@ func isAutoUpdateSupported() bool {
 	return true
 }
 
-func launchUpdateInstaller(metadataPath string, waitPID int) error {
+func launchUpdateInstaller(metadataPath string, waitPID int, restart bool) error {
 	data, err := os.ReadFile(metadataPath)
 	if err != nil {
 		return err
@@ -40,7 +40,11 @@ func launchUpdateInstaller(metadataPath string, waitPID int) error {
 	if err := verifyFileSHA256(pending.PendingPath, pending.SHA256); err != nil {
 		return err
 	}
-	return startDetachedExecutable(pending.PendingPath, "--apply-update", "--state", metadataPath, strconv.Itoa(waitPID))
+	args := []string{"--apply-update", "--state", metadataPath, strconv.Itoa(waitPID)}
+	if restart {
+		args = append(args, "--restart")
+	}
+	return startDetachedExecutable(pending.PendingPath, args...)
 }
 
 func applyDownloadedUpdate(pending pendingUpdate, waitPID int) error {

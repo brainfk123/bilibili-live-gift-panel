@@ -91,3 +91,35 @@ func TestPagePresenceSuppressesRefreshCloseNotification(t *testing.T) {
 	case <-time.After(60 * time.Millisecond):
 	}
 }
+
+func TestPagePresenceBecomesIdleOnlyAfterEveryPageCloses(t *testing.T) {
+	presence := newPagePresence(nil)
+	presence.closeGrace = 10 * time.Millisecond
+	idle := make(chan struct{}, 1)
+	presence.SetOnIdle(func() { idle <- struct{}{} })
+	if presence.IsIdle() {
+		t.Fatal("presence must not report startup as idle before any page connects")
+	}
+
+	closeConfig := presence.register(pageModeConfig)
+	closeDisplay := presence.register(pageModeDisplay)
+	closeConfig()
+	select {
+	case <-idle:
+		t.Fatal("closing config while an OBS panel is open reported idle")
+	case <-time.After(30 * time.Millisecond):
+	}
+	if presence.IsIdle() {
+		t.Fatal("presence reported idle while an OBS panel remained open")
+	}
+
+	closeDisplay()
+	select {
+	case <-idle:
+	case <-time.After(time.Second):
+		t.Fatal("closing the final page did not report idle")
+	}
+	if !presence.IsIdle() {
+		t.Fatal("presence did not stay idle after all pages closed")
+	}
+}

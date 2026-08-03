@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -13,6 +14,7 @@ import (
 
 const (
 	wmDestroy       = 0x0002
+	wmClose         = 0x0010
 	wmCommand       = 0x0111
 	wmLButtonUp     = 0x0202
 	wmRButtonUp     = 0x0205
@@ -55,6 +57,7 @@ var (
 	procLoadIconW           = user32.NewProc("LoadIconW")
 	procMessageBoxW         = user32.NewProc("MessageBoxW")
 	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
+	procPostMessageW        = user32.NewProc("PostMessageW")
 	procRegisterClassExW    = user32.NewProc("RegisterClassExW")
 	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
 	procTrackPopupMenu      = user32.NewProc("TrackPopupMenu")
@@ -149,7 +152,7 @@ func showStartupError(message string) {
 	_, _, _ = procMessageBoxW.Call(0, uintptr(unsafe.Pointer(body)), uintptr(unsafe.Pointer(title)), mbOK|mbIconError)
 }
 
-func runTrayApp(configURL string, notifications *notificationCenter) error {
+func runTrayApp(configURL string, notifications *notificationCenter, updateExit <-chan struct{}) (bool, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	trayConfigURL = configURL
@@ -170,7 +173,7 @@ func runTrayApp(configURL string, notifications *notificationCenter) error {
 		iconSmall: icon,
 	}
 	if registered, _, callErr := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&class))); registered == 0 {
-		return fmt.Errorf("注册托盘窗口失败：%v", callErr)
+		return false, fmt.Errorf("注册托盘窗口失败：%v", callErr)
 	}
 
 	hWnd, _, callErr := procCreateWindowExW.Call(
@@ -180,7 +183,7 @@ func runTrayApp(configURL string, notifications *notificationCenter) error {
 		0, 0, 0, 0, 0, 0, 0, instance, 0,
 	)
 	if hWnd == 0 {
-		return fmt.Errorf("创建托盘窗口失败：%v", callErr)
+		return false, fmt.Errorf("创建托盘窗口失败：%v", callErr)
 	}
 
 	trayIconData = notifyIconData{
@@ -194,8 +197,19 @@ func runTrayApp(configURL string, notifications *notificationCenter) error {
 	copy(trayIconData.tip[:], syscall.StringToUTF16("直播礼物面板"))
 	if added, _, callErr := procShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&trayIconData))); added == 0 {
 		_, _, _ = procDestroyWindow.Call(hWnd)
-		return fmt.Errorf("添加托盘图标失败：%v", callErr)
+		return false, fmt.Errorf("添加托盘图标失败：%v", callErr)
 	}
+	var updateRequested atomic.Bool
+	trayStopped := make(chan struct{})
+	defer close(trayStopped)
+	go func() {
+		select {
+		case <-updateExit:
+			updateRequested.Store(true)
+			_, _, _ = procPostMessageW.Call(hWnd, wmClose, 0, 0)
+		case <-trayStopped:
+		}
+	}()
 	trayIconMu.Lock()
 	trayIconReady = true
 	trayIconMu.Unlock()
@@ -215,10 +229,10 @@ func runTrayApp(configURL string, notifications *notificationCenter) error {
 	for {
 		result, _, callErr := procGetMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
 		if int32(result) == -1 {
-			return fmt.Errorf("读取托盘消息失败：%v", callErr)
+			return updateRequested.Load(), fmt.Errorf("读取托盘消息失败：%v", callErr)
 		}
 		if result == 0 {
-			return nil
+			return updateRequested.Load(), nil
 		}
 		_, _, _ = procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
 		_, _, _ = procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
@@ -239,6 +253,9 @@ func trayWindowProc(hWnd, msg, wParam, lParam uintptr) uintptr {
 		if uint16(wParam&0xffff) == trayExitCommand {
 			_, _, _ = procDestroyWindow.Call(hWnd)
 		}
+		return 0
+	case wmClose:
+		_, _, _ = procDestroyWindow.Call(hWnd)
 		return 0
 	case wmDestroy:
 		trayIconMu.Lock()

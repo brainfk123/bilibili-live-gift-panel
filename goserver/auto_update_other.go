@@ -8,7 +8,7 @@ func isAutoUpdateSupported() bool {
 	return false
 }
 
-func launchUpdateInstaller(_ string, _ int) error {
+func launchUpdateInstaller(_ string, _ int, _ bool) error {
 	return errors.New("当前系统暂不支持自动更新")
 }
 

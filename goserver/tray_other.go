@@ -27,13 +27,17 @@ func showStartupError(message string) {
 	_, _ = fmt.Fprintln(os.Stderr, message)
 }
 
-func runTrayApp(_ string, notifications *notificationCenter) error {
+func runTrayApp(_ string, notifications *notificationCenter, updateExit <-chan struct{}) (bool, error) {
 	notifications.AttachSink(func(notification desktopNotification) {
 		_, _ = fmt.Fprintf(os.Stderr, "%s：%s\n", notification.Title, notification.Body)
 	})
 	defer notifications.DetachSink()
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
-	return nil
+	select {
+	case <-stop:
+		return false, nil
+	case <-updateExit:
+		return true, nil
+	}
 }

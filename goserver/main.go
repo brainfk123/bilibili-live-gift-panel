@@ -107,6 +107,15 @@ func handleFormulaPreview(store *configStore) http.HandlerFunc {
 	}
 }
 
+func announceStartup(notifications *notificationCenter, installedVersion string) bool {
+	if installedVersion != "" {
+		notifications.Publish(notificationUpdateSucceeded, installedVersion)
+		return false
+	}
+	notifications.Publish(notificationServiceStarted, "")
+	return true
+}
+
 func main() {
 	if handled, updateErr := runUpdateHelper(os.Args[1:]); handled {
 		if updateErr != nil {
@@ -150,8 +159,32 @@ func main() {
 	}
 	login := newLoginManager(nil, loginStore, nil)
 	notifications := newNotificationCenter()
-	updater := newDefaultAutoUpdater(store, notifications)
+	updater := newDefaultAutoUpdater(store)
+	installedVersion := updater.ConsumeInstalledVersion()
+	if installedVersion == "" && updater.HasPending() {
+		if err := updater.InstallOnExit(true); err != nil {
+			showStartupError(err.Error())
+		}
+		return
+	}
 	presence := newPagePresence(notifications)
+	updateExit := make(chan struct{}, 1)
+	requestIdleUpdate := func() {
+		if !presence.IsIdle() {
+			return
+		}
+		if updater.HasPending() {
+			select {
+			case updateExit <- struct{}{}:
+			default:
+			}
+			return
+		}
+		updater.NotifyIdle()
+	}
+	updater.SetAutomaticAllowed(presence.IsIdle)
+	updater.SetOnReady(func(_ string) { requestIdleUpdate() })
+	presence.SetOnIdle(requestIdleUpdate)
 	runtimeContext, stopRuntime := context.WithCancel(context.Background())
 	background := newBackgroundRuntime(store, func() giftEventSource {
 		return &bilibiliGiftSource{sessionProvider: login.Session}
@@ -204,20 +237,23 @@ func main() {
 			showStartupError(fmt.Sprintf("本地服务已停止：%v", serveErr))
 		}
 	}()
-	notifications.Publish(notificationServiceStarted, "")
+	openConfigOnStartup := announceStartup(notifications, installedVersion)
 	go background.Run(runtimeContext)
 	go updater.Run(runtimeContext)
 
 	configURL := fmt.Sprintf("http://localhost:%d/?mode=config", port)
-	go openURL(configURL)
-	if err := runTrayApp(configURL, notifications); err != nil {
-		showStartupError(fmt.Sprintf("系统托盘启动失败：%v", err))
+	if openConfigOnStartup {
+		go openURL(configURL)
+	}
+	restartAfterUpdate, trayErr := runTrayApp(configURL, notifications, updateExit)
+	if trayErr != nil {
+		showStartupError(fmt.Sprintf("系统托盘启动失败：%v", trayErr))
 	}
 	stopRuntime()
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = server.Shutdown(shutdownContext)
-	if err := updater.InstallOnExit(); err != nil {
+	if err := updater.InstallOnExit(restartAfterUpdate); err != nil {
 		showStartupError(err.Error())
 	}
 }

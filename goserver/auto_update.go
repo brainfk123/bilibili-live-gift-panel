@@ -31,6 +31,7 @@ const (
 	updateCheckPeriod      = 6 * time.Hour
 	updateSourceTimeout    = 20 * time.Second
 	updateChecksumMaxBytes = int64(4096)
+	updateInstalledMarker  = "installed-update.json"
 )
 
 type updateStatus struct {
@@ -66,6 +67,10 @@ type pendingUpdate struct {
 	TargetPath  string `json:"targetPath"`
 }
 
+type installedUpdate struct {
+	Version string `json:"version"`
+}
+
 type updateReleaseSource struct {
 	Name   string
 	URL    string
@@ -80,7 +85,6 @@ type updateReleaseCandidate struct {
 
 type autoUpdaterOptions struct {
 	Store          *configStore
-	Notifications  *notificationCenter
 	Client         *http.Client
 	CurrentVersion string
 	ExecutablePath string
@@ -93,17 +97,18 @@ type autoUpdaterOptions struct {
 }
 
 type autoUpdater struct {
-	store          *configStore
-	notifications  *notificationCenter
-	client         *http.Client
-	currentVersion string
-	executablePath string
-	updatesDir     string
-	releaseSources []updateReleaseSource
-	assetName      string
-	checkPeriod    time.Duration
-	now            func() time.Time
-	trigger        chan bool
+	store            *configStore
+	client           *http.Client
+	currentVersion   string
+	executablePath   string
+	updatesDir       string
+	releaseSources   []updateReleaseSource
+	assetName        string
+	checkPeriod      time.Duration
+	now              func() time.Time
+	trigger          chan bool
+	automaticAllowed func() bool
+	onReady          func(string)
 
 	mu      sync.Mutex
 	status  updateStatus
@@ -116,12 +121,11 @@ func defaultUpdateReleaseSources() []updateReleaseSource {
 	}
 }
 
-func newDefaultAutoUpdater(store *configStore, notifications *notificationCenter) *autoUpdater {
+func newDefaultAutoUpdater(store *configStore) *autoUpdater {
 	root, rootErr := os.UserConfigDir()
 	executablePath, executableErr := os.Executable()
 	updater := newAutoUpdater(autoUpdaterOptions{
 		Store:          store,
-		Notifications:  notifications,
 		Client:         &http.Client{Timeout: 10 * time.Minute},
 		CurrentVersion: appVersion,
 		ExecutablePath: executablePath,
@@ -158,17 +162,17 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 		releaseSources = defaultUpdateReleaseSources()
 	}
 	updater := &autoUpdater{
-		store:          options.Store,
-		notifications:  options.Notifications,
-		client:         client,
-		currentVersion: strings.TrimPrefix(strings.TrimSpace(options.CurrentVersion), "v"),
-		executablePath: options.ExecutablePath,
-		updatesDir:     options.UpdatesDir,
-		releaseSources: releaseSources,
-		assetName:      options.AssetName,
-		checkPeriod:    period,
-		now:            now,
-		trigger:        make(chan bool, 1),
+		store:            options.Store,
+		client:           client,
+		currentVersion:   strings.TrimPrefix(strings.TrimSpace(options.CurrentVersion), "v"),
+		executablePath:   options.ExecutablePath,
+		updatesDir:       options.UpdatesDir,
+		releaseSources:   releaseSources,
+		assetName:        options.AssetName,
+		checkPeriod:      period,
+		now:              now,
+		trigger:          make(chan bool, 1),
+		automaticAllowed: func() bool { return true },
 	}
 	if updater.currentVersion == "" {
 		updater.currentVersion = "dev"
@@ -223,7 +227,17 @@ func (updater *autoUpdater) NotifySettingsChanged() {
 		return
 	}
 	select {
-	case updater.trigger <- true:
+	case updater.trigger <- false:
+	default:
+	}
+}
+
+func (updater *autoUpdater) NotifyIdle() {
+	if updater == nil || !updater.autoUpdateEnabled() {
+		return
+	}
+	select {
+	case updater.trigger <- false:
 	default:
 	}
 }
@@ -258,7 +272,33 @@ func (updater *autoUpdater) Status() updateStatus {
 	return status
 }
 
-func (updater *autoUpdater) InstallOnExit() error {
+func (updater *autoUpdater) SetAutomaticAllowed(allowed func() bool) {
+	if updater == nil {
+		return
+	}
+	if allowed == nil {
+		allowed = func() bool { return true }
+	}
+	updater.automaticAllowed = allowed
+}
+
+func (updater *autoUpdater) SetOnReady(onReady func(string)) {
+	if updater == nil {
+		return
+	}
+	updater.onReady = onReady
+}
+
+func (updater *autoUpdater) HasPending() bool {
+	if updater == nil {
+		return false
+	}
+	updater.mu.Lock()
+	defer updater.mu.Unlock()
+	return updater.pending != nil
+}
+
+func (updater *autoUpdater) InstallOnExit(restart bool) error {
 	if updater == nil || !isAutoUpdateSupported() {
 		return nil
 	}
@@ -272,7 +312,7 @@ func (updater *autoUpdater) InstallOnExit() error {
 		return fmt.Errorf("退出更新校验失败：%w", err)
 	}
 	metadataPath := updater.metadataPath()
-	if err := launchUpdateInstaller(metadataPath, os.Getpid()); err != nil {
+	if err := launchUpdateInstaller(metadataPath, os.Getpid(), restart); err != nil {
 		return fmt.Errorf("启动更新替换器失败：%w", err)
 	}
 	return nil
@@ -308,6 +348,21 @@ func (updater *autoUpdater) autoUpdateEnabled() bool {
 	return err == nil && autoUpdateEnabled(state)
 }
 
+func (updater *autoUpdater) automaticUpdateAllowed() bool {
+	return updater.automaticAllowed == nil || updater.automaticAllowed()
+}
+
+func (updater *autoUpdater) automaticCheckDue() bool {
+	status := updater.Status()
+	return status.LastCheckedAt == 0 || updater.now().Sub(time.Unix(status.LastCheckedAt, 0)) >= updater.checkPeriod
+}
+
+func (updater *autoUpdater) notifyReady(version string) {
+	if updater.onReady != nil {
+		updater.onReady(version)
+	}
+}
+
 func (updater *autoUpdater) setStatus(state, latestVersion, message string, progress int, restartRequired bool) {
 	updater.mu.Lock()
 	defer updater.mu.Unlock()
@@ -326,14 +381,18 @@ func (updater *autoUpdater) markChecked() {
 }
 
 func (updater *autoUpdater) checkAndDownload(ctx context.Context, manual bool) {
-	if !updater.canCheck() || (!manual && !updater.autoUpdateEnabled()) {
+	if !updater.canCheck() {
+		return
+	}
+	if !manual && (!updater.autoUpdateEnabled() || !updater.automaticUpdateAllowed() || !updater.automaticCheckDue()) {
 		return
 	}
 	updater.mu.Lock()
 	pending := updater.pending
 	updater.mu.Unlock()
 	if pending != nil {
-		updater.setStatus("ready", pending.Version, fmt.Sprintf("v%s 已下载，退出后台程序后自动安装。", pending.Version), 100, true)
+		updater.setStatus("ready", pending.Version, fmt.Sprintf("v%s 已下载，页面全部关闭后将自动安装。", pending.Version), 100, true)
+		updater.notifyReady(pending.Version)
 		return
 	}
 	if updater.Status().State == "downloading" {
@@ -404,10 +463,8 @@ func (updater *autoUpdater) checkAndDownload(ctx context.Context, manual bool) {
 		updater.mu.Lock()
 		updater.pending = pending
 		updater.mu.Unlock()
-		updater.setStatus("ready", candidate.Version, fmt.Sprintf("v%s 已下载，退出后台程序后自动安装。", candidate.Version), 100, true)
-		if updater.notifications != nil {
-			updater.notifications.Publish(notificationUpdateReady, candidate.Version)
-		}
+		updater.setStatus("ready", candidate.Version, fmt.Sprintf("v%s 已下载，页面全部关闭后将自动安装。", candidate.Version), 100, true)
+		updater.notifyReady(candidate.Version)
 		return
 	}
 	updater.markChecked()
@@ -599,6 +656,76 @@ func (updater *autoUpdater) metadataPath() string {
 	return filepath.Join(updater.updatesDir, "pending-update.json")
 }
 
+func (updater *autoUpdater) installedMarkerPath() string {
+	return filepath.Join(updater.updatesDir, updateInstalledMarker)
+}
+
+func (updater *autoUpdater) ConsumeInstalledVersion() string {
+	if updater == nil || updater.updatesDir == "" {
+		return ""
+	}
+	data, err := os.ReadFile(updater.installedMarkerPath())
+	if err != nil {
+		return ""
+	}
+	_ = os.Remove(updater.installedMarkerPath())
+	var installed installedUpdate
+	if json.Unmarshal(data, &installed) != nil {
+		return ""
+	}
+	version := strings.TrimPrefix(strings.TrimSpace(installed.Version), "v")
+	comparison, err := compareStableVersions(version, updater.currentVersion)
+	if err != nil || comparison != 0 {
+		return ""
+	}
+	updater.cleanupInstalledUpdateArtifacts()
+	return version
+}
+
+func (updater *autoUpdater) cleanupInstalledUpdateArtifacts() {
+	paths := []string{
+		filepath.Join(updater.updatesDir, "gift-panel-pending.exe"),
+		updater.metadataPath(),
+	}
+	if updater.executablePath != "" {
+		paths = append(paths, updater.executablePath+".old", updater.executablePath+".new")
+	}
+	go func() {
+		for attempt := 0; attempt < 20; attempt++ {
+			remaining := false
+			for _, path := range paths {
+				if path == "" {
+					continue
+				}
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					remaining = true
+				}
+			}
+			if !remaining {
+				return
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	}()
+}
+
+func writeInstalledUpdateMarker(metadataPath, version string) error {
+	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
+	if _, err := parseStableVersion(version); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(installedUpdate{Version: version}, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	markerPath := filepath.Join(filepath.Dir(metadataPath), updateInstalledMarker)
+	if err := writeFileAtomically(markerPath, data); err != nil {
+		return fmt.Errorf("保存更新完成状态失败：%w", err)
+	}
+	return nil
+}
+
 func (updater *autoUpdater) writePendingMetadata(pending pendingUpdate) error {
 	data, err := json.MarshalIndent(pending, "", "  ")
 	if err != nil {
@@ -635,7 +762,7 @@ func (updater *autoUpdater) restorePendingUpdate() {
 		State:           "ready",
 		CurrentVersion:  updater.currentVersion,
 		LatestVersion:   pending.Version,
-		Message:         fmt.Sprintf("v%s 已下载，退出后台程序后自动安装。", pending.Version),
+		Message:         fmt.Sprintf("v%s 已下载，页面全部关闭后将自动安装。", pending.Version),
 		Progress:        100,
 		RestartRequired: true,
 	}
@@ -747,8 +874,12 @@ func runUpdateHelper(args []string) (bool, error) {
 	if len(args) == 0 || args[0] != "--apply-update" {
 		return false, nil
 	}
-	if len(args) != 4 || args[1] != "--state" || args[3] == "" {
+	if (len(args) != 4 && len(args) != 5) || args[1] != "--state" || args[3] == "" {
 		return true, errors.New("更新替换参数无效")
+	}
+	restart := len(args) == 5 && args[4] == "--restart"
+	if len(args) == 5 && !restart {
+		return true, errors.New("更新重启参数无效")
 	}
 	waitPID, err := strconv.Atoi(args[3])
 	if err != nil || waitPID <= 0 {
@@ -762,7 +893,19 @@ func runUpdateHelper(args []string) (bool, error) {
 	if err := json.Unmarshal(data, &pending); err != nil {
 		return true, err
 	}
-	return true, applyDownloadedUpdate(pending, waitPID)
+	if err := applyDownloadedUpdate(pending, waitPID); err != nil {
+		return true, err
+	}
+	if err := writeInstalledUpdateMarker(args[2], pending.Version); err != nil {
+		return true, err
+	}
+	_ = os.Remove(args[2])
+	if restart {
+		if err := startDetachedExecutable(pending.TargetPath); err != nil {
+			return true, fmt.Errorf("重新启动更新后的程序失败：%w", err)
+		}
+	}
+	return true, nil
 }
 
 func startDetachedExecutable(path string, args ...string) error {

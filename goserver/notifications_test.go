@@ -48,3 +48,13 @@ func TestRuntimePublishesOnlyRealConnectionTransitions(t *testing.T) {
 	default:
 	}
 }
+
+func TestUpdateSucceededNotificationConfirmsBackgroundRestart(t *testing.T) {
+	notification := makeDesktopNotification(notificationUpdateSucceeded, "1.2.3")
+	if notification.Title != "直播礼物面板已更新" {
+		t.Fatalf("update title = %q", notification.Title)
+	}
+	if notification.Body != "已成功更新到 v1.2.3，后台服务已重新启动。" {
+		t.Fatalf("update body = %q", notification.Body)
+	}
+}

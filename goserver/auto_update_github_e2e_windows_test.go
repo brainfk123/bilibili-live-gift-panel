@@ -42,10 +42,27 @@ func TestGitHubAutomaticUpdateEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectedSHA := strings.TrimSpace(string(expectedData))
+	expectedVersionData, err := os.ReadFile(filepath.Join(root, "expected-version.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedVersion := strings.TrimSpace(string(expectedVersionData))
 	targetPath := filepath.Join(root, "gift-panel-e2e.exe")
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		if fileSHA256(targetPath) == expectedSHA {
+			markerData, markerErr := os.ReadFile(filepath.Join(root, "updates", updateInstalledMarker))
+			if markerErr != nil {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			var marker installedUpdate
+			if err := json.Unmarshal(markerData, &marker); err != nil {
+				t.Fatal(err)
+			}
+			if marker.Version != expectedVersion {
+				t.Fatalf("installed marker version = %q, want %q", marker.Version, expectedVersion)
+			}
 			backup, backupErr := os.ReadFile(targetPath + ".old")
 			if backupErr != nil {
 				t.Fatal(backupErr)
@@ -96,7 +113,10 @@ func runGitHubUpdateE2EChild(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "expected-sha256.txt"), []byte(pending.SHA256), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := updater.InstallOnExit(); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "expected-version.txt"), []byte(pending.Version), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := updater.InstallOnExit(false); err != nil {
 		t.Fatal(err)
 	}
 }

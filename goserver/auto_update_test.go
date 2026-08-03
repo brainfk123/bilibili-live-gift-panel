@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -48,6 +49,82 @@ func TestDefaultUpdateSourceUsesStaticGitHubManifest(t *testing.T) {
 	}
 	if strings.Contains(sources[0].URL, "api.github.com") {
 		t.Fatalf("default update URL must not consume GitHub API quota: %q", sources[0].URL)
+	}
+}
+
+func TestAutomaticUpdateWaitsUntilBackgroundIsIdle(t *testing.T) {
+	binary := []byte("idle update executable")
+	digestBytes := sha256.Sum256(binary)
+	digest := hex.EncodeToString(digestBytes[:])
+	var requests atomic.Int32
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		switch r.URL.Path {
+		case "/release":
+			_ = json.NewEncoder(w).Encode(githubRelease{
+				TagName: "v1.1.0",
+				Assets: []githubAsset{{
+					Name: updateAssetName, DownloadURL: server.URL + "/asset", Size: int64(len(binary)), Digest: "sha256:" + digest,
+				}},
+			})
+		case "/asset":
+			_, _ = w.Write(binary)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	updater := newAutoUpdater(autoUpdaterOptions{
+		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
+		UpdatesDir: filepath.Join(root, "updates"), AssetName: updateAssetName, CheckPeriod: time.Hour,
+		ReleaseSources: []updateReleaseSource{{Name: "GitHub", URL: server.URL + "/release", GitHub: true}},
+	})
+	var idle atomic.Bool
+	ready := make(chan string, 1)
+	updater.SetAutomaticAllowed(idle.Load)
+	updater.SetOnReady(func(version string) { ready <- version })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go updater.Run(ctx)
+
+	time.Sleep(40 * time.Millisecond)
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("automatic update made %d request(s) while a page was open", got)
+	}
+	idle.Store(true)
+	updater.NotifyIdle()
+	select {
+	case version := <-ready:
+		if version != "1.1.0" {
+			t.Fatalf("ready version = %q", version)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("idle automatic update did not download")
+	}
+	if status := updater.Status(); status.State != "ready" || !status.RestartRequired {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
+func TestInstalledUpdateMarkerIsConsumedOnce(t *testing.T) {
+	root := t.TempDir()
+	metadataPath := filepath.Join(root, "pending-update.json")
+	if err := writeInstalledUpdateMarker(metadataPath, "v1.2.3"); err != nil {
+		t.Fatal(err)
+	}
+	updater := newAutoUpdater(autoUpdaterOptions{
+		CurrentVersion: "1.2.3", ExecutablePath: filepath.Join(root, "gift-panel.exe"), UpdatesDir: root,
+		ReleaseSources: []updateReleaseSource{{Name: "test", URL: "https://example.com/release"}}, AssetName: updateAssetName,
+	})
+	if version := updater.ConsumeInstalledVersion(); version != "1.2.3" {
+		t.Fatalf("installed version = %q", version)
+	}
+	if version := updater.ConsumeInstalledVersion(); version != "" {
+		t.Fatalf("installed marker was consumed twice: %q", version)
 	}
 }
 
