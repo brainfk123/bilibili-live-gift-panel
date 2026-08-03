@@ -38,13 +38,211 @@ func TestCompareStableVersions(t *testing.T) {
 	}
 }
 
-func TestFindReleaseAssetRequiresGitHubDigest(t *testing.T) {
+func TestFindReleaseAssetRejectsInvalidDigest(t *testing.T) {
 	validDigest := "sha256:" + strings.Repeat("z", 64)
 	_, err := findReleaseAsset(githubRelease{Assets: []githubAsset{{
 		Name: updateAssetName, Size: 10, Digest: validDigest, DownloadURL: "https://example.com/app.exe",
 	}}}, updateAssetName)
 	if err == nil {
 		t.Fatal("non-hex digest must be rejected")
+	}
+}
+
+func TestGitCodeReleaseUsesChecksumAssetAndUnknownDownloadSize(t *testing.T) {
+	binary := []byte("gitcode mirrored executable")
+	digestBytes := sha256.Sum256(binary)
+	digest := hex.EncodeToString(digestBytes[:])
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/release":
+			_ = json.NewEncoder(w).Encode(githubRelease{
+				TagName: "v1.1.0",
+				Assets: []githubAsset{
+					{Name: updateAssetName, DownloadURL: server.URL + "/asset"},
+					{Name: updateAssetName + ".sha256", DownloadURL: server.URL + "/checksum"},
+				},
+			})
+		case "/checksum":
+			_, _ = w.Write([]byte(digest + "  " + updateAssetName))
+		case "/asset":
+			w.Header().Del("Content-Length")
+			_, _ = w.Write(binary)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	updater := newAutoUpdater(autoUpdaterOptions{
+		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
+		UpdatesDir: filepath.Join(root, "updates"), AssetName: updateAssetName,
+		ReleaseSources: []updateReleaseSource{{Name: "GitCode", URL: server.URL + "/release"}},
+	})
+	updater.checkAndDownload(context.Background(), true)
+	status := updater.Status()
+	if status.State != "ready" || status.LatestVersion != "1.1.0" {
+		t.Fatalf("status = %#v", status)
+	}
+	downloaded, err := os.ReadFile(filepath.Join(root, "updates", "gift-panel-pending.exe"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(downloaded) != string(binary) {
+		t.Fatalf("downloaded = %q", downloaded)
+	}
+}
+
+func TestUpdaterFallsBackToGitHubWhenGitCodeFails(t *testing.T) {
+	binary := []byte("fallback executable")
+	digestBytes := sha256.Sum256(binary)
+	digest := hex.EncodeToString(digestBytes[:])
+	gitCodeRequests := 0
+	gitHubRequests := 0
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gitcode":
+			gitCodeRequests++
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		case "/github":
+			gitHubRequests++
+			_ = json.NewEncoder(w).Encode(githubRelease{
+				TagName: "v1.1.0",
+				Assets: []githubAsset{{
+					Name: updateAssetName, DownloadURL: server.URL + "/asset", Size: int64(len(binary)), Digest: "sha256:" + digest,
+				}},
+			})
+		case "/asset":
+			_, _ = w.Write(binary)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	updater := newAutoUpdater(autoUpdaterOptions{
+		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
+		UpdatesDir: filepath.Join(root, "updates"), AssetName: updateAssetName,
+		ReleaseSources: []updateReleaseSource{
+			{Name: "GitCode", URL: server.URL + "/gitcode"},
+			{Name: "GitHub", URL: server.URL + "/github", GitHub: true},
+		},
+	})
+	updater.checkAndDownload(context.Background(), true)
+	if status := updater.Status(); status.State != "ready" {
+		t.Fatalf("status = %#v", status)
+	}
+	if gitCodeRequests != 1 || gitHubRequests != 1 {
+		t.Fatalf("requests: GitCode=%d GitHub=%d", gitCodeRequests, gitHubRequests)
+	}
+}
+
+func TestUpdaterFallsBackToGitHubWhenGitCodeAssetIsIncomplete(t *testing.T) {
+	binary := []byte("fallback after incomplete GitCode asset")
+	digestBytes := sha256.Sum256(binary)
+	digest := hex.EncodeToString(digestBytes[:])
+	gitCodeRequests := 0
+	gitHubRequests := 0
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gitcode":
+			gitCodeRequests++
+			_ = json.NewEncoder(w).Encode(githubRelease{
+				TagName: "v1.1.0",
+				Assets: []githubAsset{{
+					Name: updateAssetName, DownloadURL: server.URL + "/gitcode-asset",
+				}},
+			})
+		case "/github":
+			gitHubRequests++
+			_ = json.NewEncoder(w).Encode(githubRelease{
+				TagName: "v1.1.0",
+				Assets: []githubAsset{{
+					Name: updateAssetName, DownloadURL: server.URL + "/github-asset", Size: int64(len(binary)), Digest: "sha256:" + digest,
+				}},
+			})
+		case "/github-asset":
+			_, _ = w.Write(binary)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	updater := newAutoUpdater(autoUpdaterOptions{
+		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
+		UpdatesDir: filepath.Join(root, "updates"), AssetName: updateAssetName,
+		ReleaseSources: []updateReleaseSource{
+			{Name: "GitCode", URL: server.URL + "/gitcode"},
+			{Name: "GitHub", URL: server.URL + "/github", GitHub: true},
+		},
+	})
+	updater.checkAndDownload(context.Background(), true)
+	if status := updater.Status(); status.State != "ready" || status.LatestVersion != "1.1.0" {
+		t.Fatalf("status = %#v", status)
+	}
+	if gitCodeRequests != 1 || gitHubRequests != 1 {
+		t.Fatalf("requests: GitCode=%d GitHub=%d", gitCodeRequests, gitHubRequests)
+	}
+}
+
+func TestUpdaterChecksGitHubWhenGitCodeMirrorIsBehind(t *testing.T) {
+	binary := []byte("newer GitHub executable")
+	digestBytes := sha256.Sum256(binary)
+	digest := hex.EncodeToString(digestBytes[:])
+	gitHubRequests := 0
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gitcode":
+			_ = json.NewEncoder(w).Encode(githubRelease{TagName: "v1.1.0"})
+		case "/github":
+			gitHubRequests++
+			_ = json.NewEncoder(w).Encode(githubRelease{
+				TagName: "v1.2.0",
+				Assets: []githubAsset{{
+					Name: updateAssetName, DownloadURL: server.URL + "/asset", Size: int64(len(binary)), Digest: "sha256:" + digest,
+				}},
+			})
+		case "/asset":
+			_, _ = w.Write(binary)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	updater := newAutoUpdater(autoUpdaterOptions{
+		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
+		UpdatesDir: filepath.Join(root, "updates"), AssetName: updateAssetName,
+		ReleaseSources: []updateReleaseSource{
+			{Name: "GitCode", URL: server.URL + "/gitcode"},
+			{Name: "GitHub", URL: server.URL + "/github", GitHub: true},
+		},
+	})
+	updater.checkAndDownload(context.Background(), true)
+	if status := updater.Status(); status.State != "ready" || status.LatestVersion != "1.2.0" {
+		t.Fatalf("status = %#v", status)
+	}
+	if gitHubRequests != 1 {
+		t.Fatalf("GitHub requests = %d", gitHubRequests)
+	}
+	downloaded, err := os.ReadFile(filepath.Join(root, "updates", "gift-panel-pending.exe"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(downloaded) != string(binary) {
+		t.Fatalf("downloaded = %q", downloaded)
 	}
 }
 

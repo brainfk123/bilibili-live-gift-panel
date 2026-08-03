@@ -18,6 +18,7 @@ import (
 const (
 	githubUpdateE2EChild = "GIFT_PANEL_UPDATE_E2E_CHILD"
 	githubUpdateE2EDir   = "GIFT_PANEL_UPDATE_E2E_DIR"
+	updateE2EReleaseURL  = "GIFT_PANEL_UPDATE_E2E_RELEASE_URL"
 )
 
 func TestGitHubAutomaticUpdateEndToEnd(t *testing.T) {
@@ -68,11 +69,15 @@ func runGitHubUpdateE2EChild(t *testing.T) {
 	if err := os.WriteFile(targetPath, []byte("old e2e executable"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	releaseURL := strings.TrimSpace(os.Getenv(updateE2EReleaseURL))
+	if releaseURL == "" {
+		releaseURL = updateReleaseURL
+	}
 	updater := newAutoUpdater(autoUpdaterOptions{
 		CurrentVersion: "0.0.9",
 		ExecutablePath: targetPath,
 		UpdatesDir:     filepath.Join(root, "updates"),
-		ReleaseURL:     updateReleaseURL,
+		ReleaseURL:     releaseURL,
 		AssetName:      updateAssetName,
 	})
 	updater.checkAndDownload(context.Background(), true)

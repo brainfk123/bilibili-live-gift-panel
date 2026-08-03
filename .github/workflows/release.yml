@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vMAJOR.MINOR.PATCH tag to publish or repair
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,9 +19,13 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -33,8 +43,8 @@ jobs:
         shell: pwsh
         run: |
           $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          if ("v$packageVersion" -ne $env:GITHUB_REF_NAME) {
-            throw "Tag $env:GITHUB_REF_NAME does not match package.json version $packageVersion"
+          if ("v$packageVersion" -ne $env:RELEASE_TAG) {
+            throw "Tag $env:RELEASE_TAG does not match package.json version $packageVersion"
           }
 
       - name: Install dependencies
@@ -52,7 +62,7 @@ jobs:
       - name: Build release executable
         run: npm run build:exe
         env:
-          APP_VERSION: ${{ github.ref_name }}
+          APP_VERSION: ${{ env.RELEASE_TAG }}
           APP_COMMIT: ${{ github.sha }}
 
       - name: Run backend tests
@@ -71,11 +81,35 @@ jobs:
         with:
           subject-path: dist/gift-panel-windows-x64.exe
 
-      - name: Create draft release and upload assets
+      - name: Create or update GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:GITHUB_REF_NAME --draft --verify-tag --generate-notes --title $env:GITHUB_REF_NAME
-          gh release upload $env:GITHUB_REF_NAME dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256
-          gh release edit $env:GITHUB_REF_NAME --draft=false --latest
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 --clobber
+            gh release edit $env:RELEASE_TAG --draft=false --latest
+          } else {
+            gh release create $env:RELEASE_TAG --draft --verify-tag --generate-notes --title $env:RELEASE_TAG
+            gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256
+            gh release edit $env:RELEASE_TAG --draft=false --latest
+          }
+
+      - name: Mirror release to GitCode
+        id: gitcode-release
+        if: ${{ secrets.GITCODE_TOKEN != '' }}
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          ./scripts/publish-gitcode-release.ps1 `
+            -Token $env:GITCODE_TOKEN `
+            -Tag $env:RELEASE_TAG `
+            -AssetPath dist/gift-panel-windows-x64.exe,dist/gift-panel-windows-x64.exe.sha256
+
+      - name: Report GitCode mirror failure
+        if: ${{ steps.gitcode-release.outcome == 'failure' }}
+        shell: pwsh
+        run: Write-Warning "GitHub Release succeeded, but the GitCode mirror failed. The application will fall back to GitHub until the mirror is repaired."

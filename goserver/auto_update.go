@@ -24,10 +24,14 @@ var (
 )
 
 const (
-	updateReleaseURL  = "https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/latest"
-	updateAssetName   = "gift-panel-windows-x64.exe"
-	updateMaxBytes    = int64(256 << 20)
-	updateCheckPeriod = 6 * time.Hour
+	updateGitCodeReleaseURL = "https://api.gitcode.com/api/v5/repos/brainfk/bilibili-live-gift-panel/releases/latest"
+	updateGitHubReleaseURL  = "https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/latest"
+	updateReleaseURL        = updateGitHubReleaseURL
+	updateAssetName         = "gift-panel-windows-x64.exe"
+	updateMaxBytes          = int64(256 << 20)
+	updateCheckPeriod       = 6 * time.Hour
+	updateSourceTimeout     = 8 * time.Second
+	updateChecksumMaxBytes  = int64(4096)
 )
 
 type updateStatus struct {
@@ -46,6 +50,7 @@ type githubRelease struct {
 	Draft      bool          `json:"draft"`
 	Prerelease bool          `json:"prerelease"`
 	Assets     []githubAsset `json:"assets"`
+	SourceName string        `json:"-"`
 }
 
 type githubAsset struct {
@@ -62,6 +67,18 @@ type pendingUpdate struct {
 	TargetPath  string `json:"targetPath"`
 }
 
+type updateReleaseSource struct {
+	Name   string
+	URL    string
+	GitHub bool
+}
+
+type updateReleaseCandidate struct {
+	Source  updateReleaseSource
+	Release githubRelease
+	Version string
+}
+
 type autoUpdaterOptions struct {
 	Store          *configStore
 	Notifications  *notificationCenter
@@ -70,6 +87,7 @@ type autoUpdaterOptions struct {
 	ExecutablePath string
 	UpdatesDir     string
 	ReleaseURL     string
+	ReleaseSources []updateReleaseSource
 	AssetName      string
 	CheckPeriod    time.Duration
 	Now            func() time.Time
@@ -82,7 +100,7 @@ type autoUpdater struct {
 	currentVersion string
 	executablePath string
 	updatesDir     string
-	releaseURL     string
+	releaseSources []updateReleaseSource
 	assetName      string
 	checkPeriod    time.Duration
 	now            func() time.Time
@@ -91,7 +109,13 @@ type autoUpdater struct {
 	mu      sync.Mutex
 	status  updateStatus
 	pending *pendingUpdate
-	etag    string
+}
+
+func defaultUpdateReleaseSources() []updateReleaseSource {
+	return []updateReleaseSource{
+		{Name: "GitCode", URL: updateGitCodeReleaseURL},
+		{Name: "GitHub", URL: updateGitHubReleaseURL, GitHub: true},
+	}
 }
 
 func newDefaultAutoUpdater(store *configStore, notifications *notificationCenter) *autoUpdater {
@@ -104,7 +128,7 @@ func newDefaultAutoUpdater(store *configStore, notifications *notificationCenter
 		CurrentVersion: appVersion,
 		ExecutablePath: executablePath,
 		UpdatesDir:     filepath.Join(root, "BilibiliLiveGiftPanel", "updates"),
-		ReleaseURL:     updateReleaseURL,
+		ReleaseSources: defaultUpdateReleaseSources(),
 		AssetName:      updateAssetName,
 		CheckPeriod:    updateCheckPeriod,
 		Now:            time.Now,
@@ -128,6 +152,13 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 	if period <= 0 {
 		period = updateCheckPeriod
 	}
+	releaseSources := append([]updateReleaseSource(nil), options.ReleaseSources...)
+	if len(releaseSources) == 0 && strings.TrimSpace(options.ReleaseURL) != "" {
+		releaseSources = []updateReleaseSource{{Name: "更新源", URL: options.ReleaseURL, GitHub: true}}
+	}
+	if len(releaseSources) == 0 {
+		releaseSources = defaultUpdateReleaseSources()
+	}
 	updater := &autoUpdater{
 		store:          options.Store,
 		notifications:  options.Notifications,
@@ -135,7 +166,7 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 		currentVersion: strings.TrimPrefix(strings.TrimSpace(options.CurrentVersion), "v"),
 		executablePath: options.ExecutablePath,
 		updatesDir:     options.UpdatesDir,
-		releaseURL:     options.ReleaseURL,
+		releaseSources: releaseSources,
 		assetName:      options.AssetName,
 		checkPeriod:    period,
 		now:            now,
@@ -143,9 +174,6 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 	}
 	if updater.currentVersion == "" {
 		updater.currentVersion = "dev"
-	}
-	if updater.releaseURL == "" {
-		updater.releaseURL = updateReleaseURL
 	}
 	if updater.assetName == "" {
 		updater.assetName = updateAssetName
@@ -160,7 +188,7 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 		updater.status.Message = "当前系统暂不支持自动更新。"
 	} else if updater.currentVersion == "dev" {
 		updater.status.State = "development"
-		updater.status.Message = "开发版本不会检查 GitHub 更新。"
+		updater.status.Message = "开发版本不会检查在线更新。"
 	} else {
 		updater.restorePendingUpdate()
 	}
@@ -209,7 +237,7 @@ func (updater *autoUpdater) CheckNow() updateStatus {
 	if !updater.canCheck() {
 		return updater.Status()
 	}
-	updater.setStatus("checking", updater.Status().LatestVersion, "正在检查 GitHub 最新版本…", 0, false)
+	updater.setStatus("checking", updater.Status().LatestVersion, "正在检查最新版本…", 0, false)
 	select {
 	case updater.trigger <- true:
 	default:
@@ -271,7 +299,7 @@ func (updater *autoUpdater) handleCheck(w http.ResponseWriter, r *http.Request) 
 }
 
 func (updater *autoUpdater) canCheck() bool {
-	return isAutoUpdateSupported() && updater.currentVersion != "dev" && updater.releaseURL != "" && updater.executablePath != "" && updater.updatesDir != ""
+	return isAutoUpdateSupported() && updater.currentVersion != "dev" && len(updater.releaseSources) > 0 && updater.executablePath != "" && updater.updatesDir != ""
 }
 
 func (updater *autoUpdater) autoUpdateEnabled() bool {
@@ -313,96 +341,117 @@ func (updater *autoUpdater) checkAndDownload(ctx context.Context, manual bool) {
 	if updater.Status().State == "downloading" {
 		return
 	}
-	updater.setStatus("checking", updater.Status().LatestVersion, "正在检查 GitHub 最新版本…", 0, false)
-	release, notModified, err := updater.fetchLatestRelease(ctx)
-	if err != nil {
+	updater.setStatus("checking", updater.Status().LatestVersion, "正在检查最新版本…", 0, false)
+	var sourceErrors []string
+	foundCurrentRelease := false
+	latestVersion := ""
+	var candidates []updateReleaseCandidate
+	for _, source := range updater.releaseSources {
+		release, err := updater.fetchReleaseFromSource(ctx, source)
+		if err != nil {
+			sourceErrors = append(sourceErrors, fmt.Sprintf("%s：%v", source.Name, err))
+			continue
+		}
+		sourceVersion := strings.TrimPrefix(strings.TrimSpace(release.TagName), "v")
+		comparison, err := compareStableVersions(sourceVersion, updater.currentVersion)
+		if err != nil {
+			sourceErrors = append(sourceErrors, fmt.Sprintf("%s：Release 版本号无效：%v", source.Name, err))
+			continue
+		}
+		if comparison <= 0 {
+			foundCurrentRelease = true
+			continue
+		}
+		if latestVersion == "" {
+			latestVersion = sourceVersion
+			candidates = []updateReleaseCandidate{{Source: source, Release: release, Version: sourceVersion}}
+			continue
+		}
+		comparison, _ = compareStableVersions(sourceVersion, latestVersion)
+		if comparison > 0 {
+			latestVersion = sourceVersion
+			candidates = []updateReleaseCandidate{{Source: source, Release: release, Version: sourceVersion}}
+		} else if comparison == 0 {
+			candidates = append(candidates, updateReleaseCandidate{Source: source, Release: release, Version: sourceVersion})
+		}
+	}
+	if len(candidates) == 0 {
 		updater.markChecked()
-		updater.setStatus("error", "", "检查更新失败："+err.Error(), 0, false)
+		if foundCurrentRelease {
+			updater.setStatus("up-to-date", updater.currentVersion, "当前已经是最新版本。", 0, false)
+			return
+		}
+		updater.setStatus("error", "", "检查更新失败："+strings.Join(sourceErrors, "；"), 0, false)
 		return
 	}
-	if notModified {
+	for _, candidate := range candidates {
+		asset, err := updater.resolveReleaseAsset(ctx, candidate.Release, updater.assetName)
+		if err != nil {
+			sourceErrors = append(sourceErrors, fmt.Sprintf("%s：%v", candidate.Source.Name, err))
+			continue
+		}
+		if err := ensureUpdateTargetWritable(updater.executablePath); err != nil {
+			updater.markChecked()
+			updater.setStatus("error", candidate.Version, "程序所在目录不可写，无法静默更新："+err.Error(), 0, false)
+			return
+		}
+		updater.setStatus("downloading", candidate.Version, fmt.Sprintf("正在通过 %s 静默下载 v%s…", candidate.Source.Name, candidate.Version), 0, false)
+		pending, err = updater.downloadAsset(ctx, candidate.Version, asset)
+		if err != nil {
+			sourceErrors = append(sourceErrors, fmt.Sprintf("%s：下载更新失败：%v", candidate.Source.Name, err))
+			updater.setStatus("checking", candidate.Version, "当前更新源下载失败，正在尝试备用源…", 0, false)
+			continue
+		}
 		updater.markChecked()
-		updater.setStatus("up-to-date", updater.Status().LatestVersion, "当前已经是最新版本。", 0, false)
+		updater.mu.Lock()
+		updater.pending = pending
+		updater.mu.Unlock()
+		updater.setStatus("ready", candidate.Version, fmt.Sprintf("v%s 已下载，退出后台程序后自动安装。", candidate.Version), 100, true)
+		if updater.notifications != nil {
+			updater.notifications.Publish(notificationUpdateReady, candidate.Version)
+		}
 		return
 	}
-	latestVersion := strings.TrimPrefix(strings.TrimSpace(release.TagName), "v")
-	comparison, err := compareStableVersions(latestVersion, updater.currentVersion)
-	if err != nil {
-		updater.markChecked()
-		updater.setStatus("error", latestVersion, "Release 版本号无效："+err.Error(), 0, false)
-		return
-	}
-	if comparison <= 0 {
-		updater.markChecked()
-		updater.setStatus("up-to-date", latestVersion, "当前已经是最新版本。", 0, false)
-		return
-	}
-	asset, err := findReleaseAsset(release, updater.assetName)
-	if err != nil {
-		updater.markChecked()
-		updater.setStatus("error", latestVersion, err.Error(), 0, false)
-		return
-	}
-	if err := ensureUpdateTargetWritable(updater.executablePath); err != nil {
-		updater.markChecked()
-		updater.setStatus("error", latestVersion, "程序所在目录不可写，无法静默更新："+err.Error(), 0, false)
-		return
-	}
-	updater.setStatus("downloading", latestVersion, fmt.Sprintf("正在静默下载 v%s…", latestVersion), 0, false)
-	pending, err = updater.downloadAsset(ctx, latestVersion, asset)
 	updater.markChecked()
-	if err != nil {
-		updater.setStatus("error", latestVersion, "下载更新失败："+err.Error(), 0, false)
-		return
-	}
-	updater.mu.Lock()
-	updater.pending = pending
-	updater.mu.Unlock()
-	updater.setStatus("ready", latestVersion, fmt.Sprintf("v%s 已下载，退出后台程序后自动安装。", latestVersion), 100, true)
-	if updater.notifications != nil {
-		updater.notifications.Publish(notificationUpdateReady, latestVersion)
-	}
+	updater.setStatus("error", latestVersion, "检查更新失败："+strings.Join(sourceErrors, "；"), 0, false)
 }
 
-func (updater *autoUpdater) fetchLatestRelease(ctx context.Context) (githubRelease, bool, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, updater.releaseURL, nil)
+func (updater *autoUpdater) fetchReleaseFromSource(ctx context.Context, source updateReleaseSource) (githubRelease, error) {
+	if strings.TrimSpace(source.URL) == "" {
+		return githubRelease{}, errors.New("更新地址为空")
+	}
+	requestContext, cancel := context.WithTimeout(ctx, updateSourceTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, source.URL, nil)
 	if err != nil {
-		return githubRelease{}, false, err
+		return githubRelease{}, err
 	}
-	request.Header.Set("Accept", "application/vnd.github+json")
-	request.Header.Set("X-GitHub-Api-Version", "2026-03-10")
+	request.Header.Set("Accept", "application/json")
+	if source.GitHub {
+		request.Header.Set("Accept", "application/vnd.github+json")
+		request.Header.Set("X-GitHub-Api-Version", "2026-03-10")
+	}
 	request.Header.Set("User-Agent", "bilibili-live-gift-panel/"+updater.currentVersion)
-	updater.mu.Lock()
-	etag := updater.etag
-	updater.mu.Unlock()
-	if etag != "" {
-		request.Header.Set("If-None-Match", etag)
-	}
 	response, err := updater.client.Do(request)
 	if err != nil {
-		return githubRelease{}, false, err
+		return githubRelease{}, err
 	}
 	defer response.Body.Close()
-	if response.StatusCode == http.StatusNotModified {
-		return githubRelease{}, true, nil
-	}
 	if response.StatusCode == http.StatusNotFound {
-		return githubRelease{TagName: "v" + updater.currentVersion}, false, nil
+		return githubRelease{}, errors.New("尚未发布正式版本")
 	}
 	if response.StatusCode != http.StatusOK {
-		return githubRelease{}, false, fmt.Errorf("GitHub 返回 HTTP %d", response.StatusCode)
+		return githubRelease{}, fmt.Errorf("返回 HTTP %d", response.StatusCode)
 	}
 	var release githubRelease
 	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&release); err != nil {
-		return githubRelease{}, false, fmt.Errorf("解析 Release 失败：%w", err)
+		return githubRelease{}, fmt.Errorf("解析 Release 失败：%w", err)
 	}
 	if release.Draft || release.Prerelease || strings.TrimSpace(release.TagName) == "" {
-		return githubRelease{}, false, errors.New("GitHub 最新正式 Release 无效")
+		return githubRelease{}, errors.New("最新正式 Release 无效")
 	}
-	updater.mu.Lock()
-	updater.etag = response.Header.Get("ETag")
-	updater.mu.Unlock()
-	return release, false, nil
+	release.SourceName = source.Name
+	return release, nil
 }
 
 func findReleaseAsset(release githubRelease, assetName string) (githubAsset, error) {
@@ -410,11 +459,13 @@ func findReleaseAsset(release githubRelease, assetName string) (githubAsset, err
 		if asset.Name != assetName {
 			continue
 		}
-		if asset.Size <= 0 || asset.Size > updateMaxBytes {
+		if asset.Size < 0 || asset.Size > updateMaxBytes {
 			return githubAsset{}, fmt.Errorf("Release 中的 %s 文件大小无效", assetName)
 		}
-		if _, err := normalizeSHA256(asset.Digest); err != nil {
-			return githubAsset{}, fmt.Errorf("Release 中的 %s 缺少有效 SHA-256", assetName)
+		if strings.TrimSpace(asset.Digest) != "" {
+			if _, err := normalizeSHA256(asset.Digest); err != nil {
+				return githubAsset{}, fmt.Errorf("Release 中的 %s SHA-256 无效", assetName)
+			}
 		}
 		if strings.TrimSpace(asset.DownloadURL) == "" {
 			return githubAsset{}, fmt.Errorf("Release 中的 %s 缺少下载地址", assetName)
@@ -422,6 +473,60 @@ func findReleaseAsset(release githubRelease, assetName string) (githubAsset, err
 		return asset, nil
 	}
 	return githubAsset{}, fmt.Errorf("Release 中没有找到 %s", assetName)
+}
+
+func (updater *autoUpdater) resolveReleaseAsset(ctx context.Context, release githubRelease, assetName string) (githubAsset, error) {
+	asset, err := findReleaseAsset(release, assetName)
+	if err != nil {
+		return githubAsset{}, err
+	}
+	if strings.TrimSpace(asset.Digest) != "" {
+		return asset, nil
+	}
+	checksumAsset, err := findReleaseAsset(release, assetName+".sha256")
+	if err != nil {
+		return githubAsset{}, fmt.Errorf("Release 中的 %s 缺少 SHA-256，且没有校验文件", assetName)
+	}
+	digest, err := updater.fetchChecksum(ctx, checksumAsset.DownloadURL)
+	if err != nil {
+		return githubAsset{}, fmt.Errorf("读取 %s 校验文件失败：%w", assetName, err)
+	}
+	asset.Digest = "sha256:" + digest
+	return asset, nil
+}
+
+func (updater *autoUpdater) fetchChecksum(ctx context.Context, downloadURL string) (string, error) {
+	requestContext, cancel := context.WithTimeout(ctx, updateSourceTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("User-Agent", "bilibili-live-gift-panel/"+updater.currentVersion)
+	response, err := updater.client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("下载地址返回 HTTP %d", response.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, updateChecksumMaxBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(data)) > updateChecksumMaxBytes {
+		return "", errors.New("校验文件过大")
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return "", errors.New("校验文件为空")
+	}
+	digest, err := normalizeSHA256(fields[0])
+	if err != nil {
+		return "", err
+	}
+	return digest, nil
 }
 
 func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, asset githubAsset) (*pendingUpdate, error) {
@@ -442,6 +547,13 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("下载地址返回 HTTP %d", response.StatusCode)
 	}
+	expectedSize := asset.Size
+	if expectedSize == 0 && response.ContentLength > 0 {
+		expectedSize = response.ContentLength
+	}
+	if expectedSize > updateMaxBytes {
+		return nil, fmt.Errorf("下载文件过大：%d 字节", expectedSize)
+	}
 	temporary, err := os.CreateTemp(updater.updatesDir, "gift-panel-*.download")
 	if err != nil {
 		return nil, err
@@ -457,8 +569,11 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 	if closeErr != nil {
 		return nil, closeErr
 	}
-	if written > updateMaxBytes || written != asset.Size {
-		return nil, fmt.Errorf("下载大小不符：收到 %d 字节，预期 %d 字节", written, asset.Size)
+	if written > updateMaxBytes {
+		return nil, fmt.Errorf("下载文件超过 %d 字节限制", updateMaxBytes)
+	}
+	if expectedSize > 0 && written != expectedSize {
+		return nil, fmt.Errorf("下载大小不符：收到 %d 字节，预期 %d 字节", written, expectedSize)
 	}
 	actualSHA := hex.EncodeToString(hasher.Sum(nil))
 	if actualSHA != expectedSHA {
