@@ -474,21 +474,30 @@ export function mountConfig(root: HTMLElement): void {
         const updateEnabledAppearance = (): void => {
           ruleCard.classList.toggle('is-disabled', !enabledInput.checked);
         };
-        enabledInput.onchange = () => {
+        const syncEnabled = (): void => {
+          if (rule.enabled === enabledInput.checked) {
+            updateEnabledAppearance();
+            return;
+          }
           rule.enabled = enabledInput.checked;
           updateEnabledAppearance();
           save();
         };
+        enabledInput.onclick = syncEnabled;
+        enabledInput.oninput = syncEnabled;
+        enabledInput.onchange = syncEnabled;
+        const enabledToggle = el('label', { class: 'attribute-rule-enabled', title: toggleLabel }) as HTMLLabelElement;
+        enabledToggle.onclick = () => {
+          globalThis.setTimeout(syncEnabled, 0);
+        };
+        enabledToggle.append(enabledInput, el('span', { class: 'attribute-rule-enabled-track' }));
         ruleCard.append(
           giftImage,
           el('div', { class: 'attribute-gift-copy' }, [
             el('strong', { text: gift?.name ?? `礼物 ${rule.giftId}` }),
             el('span', { text: rule.formulaName?.trim() || '未命名公式' }),
           ]),
-          el('label', { class: 'attribute-rule-enabled', title: toggleLabel }, [
-            enabledInput,
-            el('span', { class: 'attribute-rule-enabled-track' }),
-          ]),
+          enabledToggle,
         );
         updateEnabledAppearance();
         formulas.append(ruleCard);
@@ -507,21 +516,30 @@ export function mountConfig(root: HTMLElement): void {
           ruleCard.classList.toggle('is-disabled', !enabledInput.checked);
           status.textContent = `每 ${formatInterval(rule.intervalSeconds)}${enabledInput.checked ? '' : ' · 已停用'}`;
         };
-        enabledInput.onchange = () => {
+        const syncEnabled = (): void => {
+          if (rule.enabled === enabledInput.checked) {
+            updateEnabledAppearance();
+            return;
+          }
           rule.enabled = enabledInput.checked;
           updateEnabledAppearance();
           save();
         };
+        enabledInput.onclick = syncEnabled;
+        enabledInput.oninput = syncEnabled;
+        enabledInput.onchange = syncEnabled;
+        const enabledToggle = el('label', { class: 'attribute-rule-enabled', title: toggleLabel }) as HTMLLabelElement;
+        enabledToggle.onclick = () => {
+          globalThis.setTimeout(syncEnabled, 0);
+        };
+        enabledToggle.append(enabledInput, el('span', { class: 'attribute-rule-enabled-track' }));
         ruleCard.append(
           el('span', { class: 'attribute-timer-icon', text: '⏱' }),
           el('div', { class: 'attribute-gift-copy' }, [
             el('strong', { text: rule.formulaName || '未命名定时器' }),
             status,
           ]),
-          el('label', { class: 'attribute-rule-enabled', title: toggleLabel }, [
-            enabledInput,
-            el('span', { class: 'attribute-rule-enabled-track' }),
-          ]),
+          enabledToggle,
         );
         updateEnabledAppearance();
         formulas.append(ruleCard);
@@ -948,13 +966,28 @@ export function mountConfig(root: HTMLElement): void {
         if (timerIndex >= 0) timerRules.splice(timerIndex, 1);
         renderTimerRules();
       };
-      const enabledInput = el('input', { type: 'checkbox' }) as HTMLInputElement;
+      const enabledInput = el('input', {
+        class: 'attribute-rule-enabled-input timer-editor-enabled-input',
+        type: 'checkbox',
+        ariaLabel: '启用定时器',
+      } as any) as HTMLInputElement;
       enabledInput.checked = rule.enabled;
-      enabledInput.onchange = () => {
+      const syncEnabled = (): void => {
         rule.enabled = enabledInput.checked;
         editor.classList.toggle('is-disabled', !rule.enabled);
       };
+      enabledInput.onclick = syncEnabled;
+      enabledInput.oninput = syncEnabled;
+      enabledInput.onchange = syncEnabled;
       editor.classList.toggle('is-disabled', !rule.enabled);
+      const enabledToggle = el('label', {
+        class: 'attribute-rule-enabled timer-editor-enabled-toggle',
+        title: '启用定时器',
+      }) as HTMLLabelElement;
+      enabledToggle.onclick = () => {
+        globalThis.setTimeout(syncEnabled, 0);
+      };
+      enabledToggle.append(enabledInput, el('span', { class: 'attribute-rule-enabled-track' }));
       editor.append(el('div', { class: 'timer-rule-header' }, [
         el('div', { class: 'timer-rule-title' }, [
           el('span', { class: 'timer-rule-clock', text: '⏱' }),
@@ -964,7 +997,7 @@ export function mountConfig(root: HTMLElement): void {
           ]),
         ]),
         el('div', { class: 'timer-rule-actions' }, [
-          el('label', { class: 'timer-enabled-toggle' }, [enabledInput, el('span', { text: '启用' })]),
+          el('div', { class: 'timer-enabled-toggle' }, [enabledToggle]),
           removeButton,
         ]),
       ]));

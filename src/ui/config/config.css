@@ -1414,7 +1414,6 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 .config-root .timer-rule-actions { gap: 12px; }
 .config-root .timer-enabled-toggle { gap: 6px; color: var(--text-dim); font-size: 11px; }
-.config-root .timer-enabled-toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
 .config-root .timer-rule-fields {
   display: grid;
   grid-template-columns: minmax(160px, .72fr) minmax(150px, .58fr) minmax(190px, .9fr) minmax(300px, 1.7fr);

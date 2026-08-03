@@ -1036,6 +1036,9 @@ describe('single-page configuration rendering', () => {
     expect(root.querySelector('.timer-binding-panel')).not.toBeNull();
     expect(textOf(root)).toContain('定时器只修改属性值，不会显示在 OBS 面板中');
     findByText(root, '+ 添加定时器')?.onclick?.();
+    expect(root.querySelector('.timer-editor-enabled-toggle')).not.toBeNull();
+    expect(root.querySelector('.timer-editor-enabled-toggle')?.querySelector('.attribute-rule-enabled-track')).not.toBeNull();
+    expect(root.querySelector('.timer-enabled-toggle')?.textContent).toBe('');
 
     const nameInput = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '触发器名称') as TestElement & { oninput?: () => void };
@@ -1131,6 +1134,36 @@ describe('single-page configuration rendering', () => {
     };
     timerSwitch.checked = true;
     timerSwitch.onchange?.();
+
+    await vi.waitFor(() => {
+      const writes = fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT');
+      expect(writes.length).toBeGreaterThan(0);
+      const lastBody = writes.at(-1)?.[1]?.body;
+      expect(JSON.parse(String(lastBody)).timerRules[0].enabled).toBe(true);
+    });
+  });
+
+  it('persists timer enable toggles from a card click activation', async () => {
+    const initialState = {
+      ...state('88888888'),
+      settings: { ...defaultState().settings, showTutorial: false },
+      timerRules: [{
+        id: 't-disabled', attributeName: '加班时间', formulaName: '定时规则', intervalSeconds: 60,
+        formula: '加班时间-1', enabled: false,
+      }],
+    };
+    await saveState(initialState);
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockClear();
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const timerSwitch = root.querySelector('.timer-rule-enabled-input') as TestElement & {
+      checked: boolean;
+    };
+    const toggle = root.querySelector('.attribute-rule-enabled') as TestElement;
+    timerSwitch.checked = true;
+    toggle.onclick?.();
 
     await vi.waitFor(() => {
       const writes = fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT');
