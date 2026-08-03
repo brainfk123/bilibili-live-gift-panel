@@ -266,7 +266,7 @@ export function mountConfig(root: HTMLElement): void {
     card.append(sectionHeading(
       '可选登录',
       '主播账号',
-      '登录后优先使用登录态礼物信息；无需申请开发者资格，凭证只加密保存在本机。',
+      '登录是可选的，用普通 B 站账号扫码即可；登录信息只加密保存在本机。',
     ));
     const identity = el('div', { class: `login-identity is-${biliAuth.state}` });
     if (biliAuth.state === 'logged_in') {
@@ -312,17 +312,36 @@ export function mountConfig(root: HTMLElement): void {
       loginButton.onclick = () => openLoginModal();
       actions.append(loginButton);
     }
+    const capabilities = el('div', { class: 'login-capabilities' }, [
+      el('strong', {
+        class: 'login-capabilities-title',
+        text: biliAuth.state === 'logged_in' ? '登录能力已开启' : '登录后可以',
+      }),
+      el('div', { class: 'login-capability-list' }, [
+        loginCapability('自动识别盲盒会开出哪些礼物'),
+        loginCapability('尽量补全送礼人的昵称和头像'),
+        loginCapability('普通 B 站账号也能登录，不一定要主播本人'),
+      ]),
+    ]);
     card.append(
       identity,
+      capabilities,
       el('p', {
         class: `login-fallback-note${biliAuth.isRoomOwner === false ? ' is-info' : ''}`,
-        text: biliAuth.isRoomOwner === false
-          ? '后台会使用当前登录账号连接；普通账号不一定有查看完整匿名资料的权限，无法识别时仍保留脱敏昵称。'
-          : '无法识别时保留 B 站返回的脱敏昵称，不影响礼物规则执行。',
+        text: biliAuth.state === 'logged_in'
+          ? 'B 站仍然隐藏的信息无法补全时，会继续显示脱敏昵称。'
+          : '不登录也能连接直播间和执行礼物规则。',
       }),
       actions,
     );
     return card;
+  }
+
+  function loginCapability(text: string): HTMLElement {
+    return el('div', { class: 'login-capability' }, [
+      el('span', { class: 'login-capability-icon', text: '✓' }),
+      el('span', { text }),
+    ]);
   }
 
   function openLoginModal(): void {

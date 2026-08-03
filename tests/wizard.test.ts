@@ -922,7 +922,11 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(root.querySelector('.login-card')).not.toBeNull());
     expect(textOf(root)).toContain('可选登录');
     expect(textOf(root)).toContain('匿名模式');
-    expect(textOf(root)).toContain('无法识别时保留 B 站返回的脱敏昵称');
+    expect(textOf(root)).toContain('登录后可以');
+    expect(textOf(root)).toContain('自动识别盲盒会开出哪些礼物');
+    expect(textOf(root)).toContain('尽量补全送礼人的昵称和头像');
+    expect(textOf(root)).toContain('普通 B 站账号也能登录，不一定要主播本人');
+    expect(textOf(root)).toContain('不登录也能连接直播间和执行礼物规则');
     expect(findByText(root, '扫码登录')).not.toBeNull();
   });
 
