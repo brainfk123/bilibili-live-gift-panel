@@ -192,7 +192,7 @@ const storage = {
   get: (_key: string) => JSON.stringify(loadState()),
 };
 
-beforeEach(() => {
+beforeEach(async () => {
   mockedClients.length = 0;
   mockedRuntimeState = 'idle';
   vi.stubGlobal('setInterval', vi.fn(() => 0));
@@ -233,6 +233,7 @@ beforeEach(() => {
     return new Response(null, { status: 204 });
   }));
   storage.clear();
+  await saveState(defaultState());
   vi.stubGlobal('location', { origin: 'http://localhost:12450', reload: () => {} });
 });
 
