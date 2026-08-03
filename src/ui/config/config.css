@@ -1312,7 +1312,11 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .setting-switch-copy strong { color: var(--text); font-size: 13px; }
 .config-root .setting-switch-copy small { margin-top: 3px; color: var(--text-dim); font-size: 11px; line-height: 1.4; }
 .config-root .data-actions { display: flex; flex-wrap: wrap; gap: 10px; }
-.config-root .update-settings-card { grid-column: 1 / -1; }
+.config-root .data-update-section {
+  margin-top: 28px;
+  border-top: 1px solid var(--border);
+  padding-top: 24px;
+}
 .config-root .update-heading {
   display: flex;
   align-items: flex-start;

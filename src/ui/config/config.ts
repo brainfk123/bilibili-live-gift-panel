@@ -1916,7 +1916,7 @@ export function mountConfig(root: HTMLElement): void {
       showConnection,
     );
 
-    const dataCard = el('section', { class: 'workspace-card advanced-card' });
+    const dataCard = el('section', { class: 'workspace-card advanced-card data-settings-card' });
     dataCard.append(
       el('h3', { text: '配置与数据' }),
       el('p', { class: 'advanced-copy', text: `当前有 ${state.attributes.length} 个属性、${state.rules.length} 条礼物规则、${state.timerRules.length} 个定时器和 ${state.log.length} 条变动记录。` }),
@@ -1972,7 +1972,7 @@ export function mountConfig(root: HTMLElement): void {
     };
     dataCard.append(el('div', { class: 'data-actions' }, [exportButton, importButton, importInput, resetButton]));
 
-    const updateCard = el('section', { class: 'workspace-card advanced-card update-settings-card' });
+    const updateCard = el('section', { class: 'data-update-section update-settings-card' });
     const versionText = el('strong', { class: 'update-current-version', text: '读取中…' });
     const stateBadge = el('span', { class: 'update-state-badge', text: '读取中' });
     const statusMessage = el('p', { class: 'advanced-copy update-status-message', text: currentUpdateStatus.message });
@@ -1991,11 +1991,11 @@ export function mountConfig(root: HTMLElement): void {
       autoUpdateInput,
       el('span', { class: 'setting-switch-track', ariaHidden: 'true' }),
       el('span', { class: 'setting-switch-copy' }, [
-        el('strong', { text: '自动下载更新' }),
+        el('strong', { text: '自动更新' }),
         el('small', { text: '启动时和每 6 小时检查；下载完成后，在退出后台程序时安装。' }),
       ]),
     ]);
-    const checkUpdateButton = el('button', { class: 'btn update-check-button', type: 'button', text: '手动检查更新' }) as HTMLButtonElement;
+    const checkUpdateButton = el('button', { class: 'btn update-check-button', type: 'button', text: '检查更新' }) as HTMLButtonElement;
     checkUpdateButton.onclick = () => { void runManualUpdateCheck(); };
     const lastChecked = el('small', { class: 'update-last-checked', text: '尚未检查' });
     const updateActions = el('div', { class: 'update-actions' }, [checkUpdateButton, lastChecked]);
@@ -2041,7 +2041,7 @@ export function mountConfig(root: HTMLElement): void {
           ? '正在下载…'
           : updateState === 'ready'
             ? '更新已下载'
-            : '手动检查更新';
+            : '检查更新';
       lastChecked.textContent = currentUpdateStatus.lastCheckedAt
         ? `上次检查：${new Date(currentUpdateStatus.lastCheckedAt * 1000).toLocaleString('zh-CN')}`
         : '尚未检查';
@@ -2049,7 +2049,8 @@ export function mountConfig(root: HTMLElement): void {
     refreshUpdateCard = syncUpdateCard;
     syncUpdateCard();
 
-    settingsGrid.append(appearance, dataCard, updateCard);
+    dataCard.append(updateCard);
+    settingsGrid.append(appearance, dataCard);
     details.append(settingsGrid);
     content.append(details);
   }

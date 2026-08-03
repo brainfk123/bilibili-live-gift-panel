@@ -1006,10 +1006,11 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
+    expect(root.querySelector('.data-settings-card')?.querySelector('.update-settings-card')).not.toBeNull();
     await vi.waitFor(() => expect(textOf(root.querySelector('.update-settings-card') as TestElement)).toContain('v1.0.0'));
     const autoUpdateInput = root.querySelector('.update-auto-switch')?.querySelector('input') as (TestElement & { checked?: boolean }) | null;
     expect(autoUpdateInput?.checked).toBe(true);
-    const checkButton = findByText(root, '手动检查更新');
+    const checkButton = findByText(root, '检查更新');
     expect(checkButton).toBeDefined();
     checkButton?.onclick?.();
 
