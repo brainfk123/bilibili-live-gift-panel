@@ -16,21 +16,24 @@ if ([string]::IsNullOrWhiteSpace($Token)) {
   throw "GitCode token is empty."
 }
 
-$credentialPath = Join-Path $env:RUNNER_TEMP "gitcode-credentials-$PID.txt"
-$encodedUser = [Uri]::EscapeDataString($UserName)
-$encodedToken = [Uri]::EscapeDataString($Token)
 $remoteUrl = "https://gitcode.com/$Owner/$Repository.git"
-$credentialUrl = "https://${encodedUser}:${encodedToken}@gitcode.com"
+$basicCredential = [Convert]::ToBase64String(
+  [Text.Encoding]::UTF8.GetBytes("${UserName}:${Token}")
+)
 
 try {
-  Set-Content -LiteralPath $credentialPath -Value $credentialUrl -Encoding utf8 -NoNewline
   $env:GIT_TERMINAL_PROMPT = "0"
-  & git -c "credential.helper=store --file=$credentialPath" push $remoteUrl @RefSpec
+  $env:GIT_CONFIG_COUNT = "1"
+  $env:GIT_CONFIG_KEY_0 = "http.https://gitcode.com/.extraheader"
+  $env:GIT_CONFIG_VALUE_0 = "Authorization: Basic $basicCredential"
+  & git push $remoteUrl @RefSpec
   if ($LASTEXITCODE -ne 0) {
     throw "Pushing refs to GitCode failed with exit code $LASTEXITCODE."
   }
 } finally {
-  Remove-Item -LiteralPath $credentialPath -Force -ErrorAction SilentlyContinue
+  Remove-Item Env:GIT_CONFIG_COUNT -ErrorAction SilentlyContinue
+  Remove-Item Env:GIT_CONFIG_KEY_0 -ErrorAction SilentlyContinue
+  Remove-Item Env:GIT_CONFIG_VALUE_0 -ErrorAction SilentlyContinue
 }
 
 Write-Host "Pushed $($RefSpec.Count) ref(s) to GitCode."
