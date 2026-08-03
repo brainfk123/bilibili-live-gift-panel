@@ -38,6 +38,19 @@ func TestCompareStableVersions(t *testing.T) {
 	}
 }
 
+func TestDefaultUpdateSourceUsesStaticGitHubManifest(t *testing.T) {
+	sources := defaultUpdateReleaseSources()
+	if len(sources) != 1 {
+		t.Fatalf("default update sources = %d, want 1", len(sources))
+	}
+	if sources[0].URL != updateGitHubReleaseURL {
+		t.Fatalf("default update URL = %q", sources[0].URL)
+	}
+	if strings.Contains(sources[0].URL, "api.github.com") {
+		t.Fatalf("default update URL must not consume GitHub API quota: %q", sources[0].URL)
+	}
+}
+
 func TestFindReleaseAssetRejectsInvalidDigest(t *testing.T) {
 	validDigest := "sha256:" + strings.Repeat("z", 64)
 	_, err := findReleaseAsset(githubRelease{Assets: []githubAsset{{
@@ -48,8 +61,8 @@ func TestFindReleaseAssetRejectsInvalidDigest(t *testing.T) {
 	}
 }
 
-func TestGitCodeReleaseUsesChecksumAssetAndUnknownDownloadSize(t *testing.T) {
-	binary := []byte("gitcode mirrored executable")
+func TestReleaseUsesChecksumAssetAndUnknownDownloadSize(t *testing.T) {
+	binary := []byte("mirrored executable")
 	digestBytes := sha256.Sum256(binary)
 	digest := hex.EncodeToString(digestBytes[:])
 
@@ -79,7 +92,7 @@ func TestGitCodeReleaseUsesChecksumAssetAndUnknownDownloadSize(t *testing.T) {
 	updater := newAutoUpdater(autoUpdaterOptions{
 		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
 		UpdatesDir: filepath.Join(root, "updates"), AssetName: updateAssetName,
-		ReleaseSources: []updateReleaseSource{{Name: "GitCode", URL: server.URL + "/release"}},
+		ReleaseSources: []updateReleaseSource{{Name: "Primary", URL: server.URL + "/release"}},
 	})
 	updater.checkAndDownload(context.Background(), true)
 	status := updater.Status()
@@ -95,18 +108,18 @@ func TestGitCodeReleaseUsesChecksumAssetAndUnknownDownloadSize(t *testing.T) {
 	}
 }
 
-func TestUpdaterFallsBackToGitHubWhenGitCodeFails(t *testing.T) {
+func TestUpdaterFallsBackToGitHubWhenPrimarySourceFails(t *testing.T) {
 	binary := []byte("fallback executable")
 	digestBytes := sha256.Sum256(binary)
 	digest := hex.EncodeToString(digestBytes[:])
-	gitCodeRequests := 0
+	primaryRequests := 0
 	gitHubRequests := 0
 
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/gitcode":
-			gitCodeRequests++
+		case "/primary":
+			primaryRequests++
 			http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		case "/github":
 			gitHubRequests++
@@ -129,7 +142,7 @@ func TestUpdaterFallsBackToGitHubWhenGitCodeFails(t *testing.T) {
 		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
 		UpdatesDir: filepath.Join(root, "updates"), AssetName: updateAssetName,
 		ReleaseSources: []updateReleaseSource{
-			{Name: "GitCode", URL: server.URL + "/gitcode"},
+			{Name: "Primary", URL: server.URL + "/primary"},
 			{Name: "GitHub", URL: server.URL + "/github", GitHub: true},
 		},
 	})
@@ -137,27 +150,27 @@ func TestUpdaterFallsBackToGitHubWhenGitCodeFails(t *testing.T) {
 	if status := updater.Status(); status.State != "ready" {
 		t.Fatalf("status = %#v", status)
 	}
-	if gitCodeRequests != 1 || gitHubRequests != 1 {
-		t.Fatalf("requests: GitCode=%d GitHub=%d", gitCodeRequests, gitHubRequests)
+	if primaryRequests != 1 || gitHubRequests != 1 {
+		t.Fatalf("requests: Primary=%d GitHub=%d", primaryRequests, gitHubRequests)
 	}
 }
 
-func TestUpdaterFallsBackToGitHubWhenGitCodeAssetIsIncomplete(t *testing.T) {
-	binary := []byte("fallback after incomplete GitCode asset")
+func TestUpdaterFallsBackToGitHubWhenPrimaryAssetIsIncomplete(t *testing.T) {
+	binary := []byte("fallback after incomplete primary asset")
 	digestBytes := sha256.Sum256(binary)
 	digest := hex.EncodeToString(digestBytes[:])
-	gitCodeRequests := 0
+	primaryRequests := 0
 	gitHubRequests := 0
 
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/gitcode":
-			gitCodeRequests++
+		case "/primary":
+			primaryRequests++
 			_ = json.NewEncoder(w).Encode(githubRelease{
 				TagName: "v1.1.0",
 				Assets: []githubAsset{{
-					Name: updateAssetName, DownloadURL: server.URL + "/gitcode-asset",
+					Name: updateAssetName, DownloadURL: server.URL + "/primary-asset",
 				}},
 			})
 		case "/github":
@@ -181,7 +194,7 @@ func TestUpdaterFallsBackToGitHubWhenGitCodeAssetIsIncomplete(t *testing.T) {
 		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
 		UpdatesDir: filepath.Join(root, "updates"), AssetName: updateAssetName,
 		ReleaseSources: []updateReleaseSource{
-			{Name: "GitCode", URL: server.URL + "/gitcode"},
+			{Name: "Primary", URL: server.URL + "/primary"},
 			{Name: "GitHub", URL: server.URL + "/github", GitHub: true},
 		},
 	})
@@ -189,12 +202,12 @@ func TestUpdaterFallsBackToGitHubWhenGitCodeAssetIsIncomplete(t *testing.T) {
 	if status := updater.Status(); status.State != "ready" || status.LatestVersion != "1.1.0" {
 		t.Fatalf("status = %#v", status)
 	}
-	if gitCodeRequests != 1 || gitHubRequests != 1 {
-		t.Fatalf("requests: GitCode=%d GitHub=%d", gitCodeRequests, gitHubRequests)
+	if primaryRequests != 1 || gitHubRequests != 1 {
+		t.Fatalf("requests: Primary=%d GitHub=%d", primaryRequests, gitHubRequests)
 	}
 }
 
-func TestUpdaterChecksGitHubWhenGitCodeMirrorIsBehind(t *testing.T) {
+func TestUpdaterChecksGitHubWhenPrimarySourceIsBehind(t *testing.T) {
 	binary := []byte("newer GitHub executable")
 	digestBytes := sha256.Sum256(binary)
 	digest := hex.EncodeToString(digestBytes[:])
@@ -203,7 +216,7 @@ func TestUpdaterChecksGitHubWhenGitCodeMirrorIsBehind(t *testing.T) {
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/gitcode":
+		case "/primary":
 			_ = json.NewEncoder(w).Encode(githubRelease{TagName: "v1.1.0"})
 		case "/github":
 			gitHubRequests++
@@ -226,7 +239,7 @@ func TestUpdaterChecksGitHubWhenGitCodeMirrorIsBehind(t *testing.T) {
 		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
 		UpdatesDir: filepath.Join(root, "updates"), AssetName: updateAssetName,
 		ReleaseSources: []updateReleaseSource{
-			{Name: "GitCode", URL: server.URL + "/gitcode"},
+			{Name: "Primary", URL: server.URL + "/primary"},
 			{Name: "GitHub", URL: server.URL + "/github", GitHub: true},
 		},
 	})

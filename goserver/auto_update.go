@@ -24,14 +24,13 @@ var (
 )
 
 const (
-	updateGitCodeReleaseURL = "https://api.gitcode.com/api/v5/repos/brainfk/bilibili-live-gift-panel/releases/latest"
-	updateGitHubReleaseURL  = "https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/latest"
-	updateReleaseURL        = updateGitHubReleaseURL
-	updateAssetName         = "gift-panel-windows-x64.exe"
-	updateMaxBytes          = int64(256 << 20)
-	updateCheckPeriod       = 6 * time.Hour
-	updateSourceTimeout     = 8 * time.Second
-	updateChecksumMaxBytes  = int64(4096)
+	updateGitHubReleaseURL = "https://github.com/brainfk123/bilibili-live-gift-panel/releases/latest/download/gift-panel-update.json"
+	updateReleaseURL       = updateGitHubReleaseURL
+	updateAssetName        = "gift-panel-windows-x64.exe"
+	updateMaxBytes         = int64(256 << 20)
+	updateCheckPeriod      = 6 * time.Hour
+	updateSourceTimeout    = 20 * time.Second
+	updateChecksumMaxBytes = int64(4096)
 )
 
 type updateStatus struct {
@@ -113,7 +112,6 @@ type autoUpdater struct {
 
 func defaultUpdateReleaseSources() []updateReleaseSource {
 	return []updateReleaseSource{
-		{Name: "GitCode", URL: updateGitCodeReleaseURL},
 		{Name: "GitHub", URL: updateGitHubReleaseURL, GitHub: true},
 	}
 }

@@ -75,7 +75,21 @@ jobs:
         run: |
           Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.exe
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel-windows-x64.exe).Hash.ToLowerInvariant()
+          $size = (Get-Item -LiteralPath dist/gift-panel-windows-x64.exe).Length
           "$hash  gift-panel-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/gift-panel-windows-x64.exe.sha256
+          @{
+            tag_name = $env:RELEASE_TAG
+            draft = $false
+            prerelease = $false
+            assets = @(
+              @{
+                name = "gift-panel-windows-x64.exe"
+                browser_download_url = "https://github.com/brainfk123/bilibili-live-gift-panel/releases/download/$env:RELEASE_TAG/gift-panel-windows-x64.exe"
+                size = $size
+                digest = "sha256:$hash"
+              }
+            )
+          } | ConvertTo-Json -Depth 4 | Set-Content -NoNewline -Encoding utf8 dist/gift-panel-update.json
 
       - name: Attest executable provenance
         uses: actions/attest@v4
@@ -89,48 +103,10 @@ jobs:
         run: |
           gh release view $env:RELEASE_TAG *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 --clobber
+            gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json --clobber
             gh release edit $env:RELEASE_TAG --draft=false --latest
           } else {
             gh release create $env:RELEASE_TAG --draft --verify-tag --generate-notes --title $env:RELEASE_TAG
-            gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256
+            gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json
             gh release edit $env:RELEASE_TAG --draft=false --latest
           }
-
-      - name: Sync release source to GitCode
-        id: gitcode-source
-        continue-on-error: true
-        shell: pwsh
-        env:
-          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:GITCODE_TOKEN)) {
-            Write-Warning "GITCODE_TOKEN is not configured; skipping the GitCode source sync."
-            exit 0
-          }
-          $tagRef = "refs/tags/$env:RELEASE_TAG"
-          ./scripts/push-gitcode.ps1 `
-            -Token $env:GITCODE_TOKEN `
-            -RefSpec "HEAD:refs/heads/master","+${tagRef}:${tagRef}"
-
-      - name: Mirror release to GitCode
-        id: gitcode-release
-        if: ${{ steps.gitcode-source.outcome == 'success' }}
-        continue-on-error: true
-        shell: pwsh
-        env:
-          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:GITCODE_TOKEN)) {
-            Write-Warning "GITCODE_TOKEN is not configured; skipping the GitCode Release mirror."
-            exit 0
-          }
-          ./scripts/publish-gitcode-release.ps1 `
-            -Token $env:GITCODE_TOKEN `
-            -Tag $env:RELEASE_TAG `
-            -AssetPath dist/gift-panel-windows-x64.exe,dist/gift-panel-windows-x64.exe.sha256
-
-      - name: Report GitCode mirror failure
-        if: ${{ steps.gitcode-source.outcome == 'failure' || steps.gitcode-release.outcome == 'failure' }}
-        shell: pwsh
-        run: Write-Warning "GitHub Release succeeded, but the GitCode mirror failed. The application will fall back to GitHub until the mirror is repaired."

@@ -31,11 +31,11 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-GitHub Actions 会把每次推送的分支或标签同步到独立的 GitCode 仓库。发布标签时还会运行测试、构建 `gift-panel-windows-x64.exe`、生成 SHA-256 文件并创建 GitHub Release，再将同一版本和附件发布到 GitCode。GitCode 同步失败不会阻断 GitHub 正常发布。
+发布标签时，GitHub Actions 会运行测试、构建 `gift-panel-windows-x64.exe`、生成 SHA-256 文件与更新清单，并创建 GitHub Release。
 
-正式 EXE 启动时及每 6 小时会在后台检查最新正式 Release：优先访问 GitCode，连接失败或尚无发行版时自动回退 GitHub。程序会静默下载并校验 SHA-256，在用户从托盘退出后台程序后替换 EXE。配置页面的“外观与数据 → 程序更新”中可以关闭自动下载或手动检查更新。
+正式 EXE 启动时及每 6 小时会在后台读取 GitHub Latest Release 的静态更新清单，不占用 GitHub API 额度。程序会静默下载并校验 SHA-256，在用户从托盘退出后台程序后替换 EXE。配置页面的“外观与数据 → 程序更新”中可以关闭自动下载或手动检查更新。
 
-本地 `npm run build` 生成的是 `dev` 版本，不会访问在线更新接口。如需在本地构建指定版本，可设置 `APP_VERSION` 和 `APP_COMMIT` 环境变量。发布失败后可在 GitHub Actions 手动运行 Release 工作流并填写已有标签，以重新构建和修复 Release 镜像。
+本地 `npm run build` 生成的是 `dev` 版本，不会访问在线更新接口。如需在本地构建指定版本，可设置 `APP_VERSION` 和 `APP_COMMIT` 环境变量。发布失败后可在 GitHub Actions 手动运行 Release 工作流并填写已有标签，以重新构建和修复 GitHub Release。
 
 ### 规则语义
 
