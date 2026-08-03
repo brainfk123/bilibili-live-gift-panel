@@ -43,18 +43,21 @@ jobs:
       - name: Run tests
         run: npm test -- --reporter=dot
 
-      - name: Run backend tests
-        working-directory: goserver
-        run: go test ./...
-
       - name: Type check
         run: npm run typecheck
 
+      - name: Build frontend
+        run: npm run build:ui
+
       - name: Build release executable
-        run: npm run build
+        run: npm run build:exe
         env:
           APP_VERSION: ${{ github.ref_name }}
           APP_COMMIT: ${{ github.sha }}
+
+      - name: Run backend tests
+        working-directory: goserver
+        run: go test ./...
 
       - name: Prepare release assets
         shell: pwsh

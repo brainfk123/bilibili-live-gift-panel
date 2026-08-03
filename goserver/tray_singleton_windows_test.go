@@ -2,10 +2,15 @@
 
 package main
 
-import "testing"
+import (
+	"fmt"
+	"os"
+	"testing"
+)
 
 func TestSingleInstanceMutexRejectsSecondOwner(t *testing.T) {
-	alreadyRunning, release, err := acquireSingleInstance()
+	mutexName := fmt.Sprintf("Local\\BilibiliLiveGiftPanelSingletonTest-%d", os.Getpid())
+	alreadyRunning, release, err := acquireNamedSingleInstance(mutexName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -14,7 +19,7 @@ func TestSingleInstanceMutexRejectsSecondOwner(t *testing.T) {
 	}
 	defer release()
 
-	secondAlreadyRunning, releaseSecond, err := acquireSingleInstance()
+	secondAlreadyRunning, releaseSecond, err := acquireNamedSingleInstance(mutexName)
 	if err != nil {
 		t.Fatal(err)
 	}

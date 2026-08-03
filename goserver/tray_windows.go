@@ -35,6 +35,8 @@ const (
 	swShowNormal   = 1
 	mbIconError    = 0x00000010
 	mbOK           = 0x00000000
+
+	singletonMutexName = "Local\\BilibiliLiveGiftPanelSingleton"
 )
 
 var (
@@ -70,7 +72,11 @@ var (
 )
 
 func acquireSingleInstance() (bool, func(), error) {
-	name, _ := syscall.UTF16PtrFromString("Local\\BilibiliLiveGiftPanelSingleton")
+	return acquireNamedSingleInstance(singletonMutexName)
+}
+
+func acquireNamedSingleInstance(mutexName string) (bool, func(), error) {
+	name, _ := syscall.UTF16PtrFromString(mutexName)
 	handle, _, callErr := procCreateMutexW.Call(0, 1, uintptr(unsafe.Pointer(name)))
 	if handle == 0 {
 		return false, func() {}, callErr
