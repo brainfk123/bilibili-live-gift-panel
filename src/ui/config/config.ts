@@ -139,7 +139,7 @@ export function mountConfig(root: HTMLElement): void {
     try {
       const previousStructure = configStructureSignature(state);
       const requestedVersion = localStateVersion;
-      const nextState = await refreshStateFromServer();
+      const nextState = await refreshStateFromServer(() => requestedVersion === localStateVersion);
       if (requestedVersion !== localStateVersion) return;
       state = nextState;
       if (ensureRuleGiftCatalog(state)) await saveState(state);
@@ -456,6 +456,33 @@ export function mountConfig(root: HTMLElement): void {
     );
 
     const formulas = el('div', { class: 'attribute-formulas' });
+    const createEnabledButton = (
+      label: string,
+      className: string,
+      initialEnabled: boolean,
+      onToggle: (enabled: boolean) => void,
+    ): HTMLButtonElement => {
+      let enabled = initialEnabled;
+      const button = el('button', {
+        class: `attribute-rule-enabled attribute-rule-enabled-button ${className}`,
+        type: 'button',
+        ariaLabel: label,
+        title: label,
+      } as any) as HTMLButtonElement;
+      button.setAttribute('role', 'switch');
+      button.append(el('span', { class: 'attribute-rule-enabled-track' }));
+      const renderEnabled = (): void => {
+        button.classList.toggle('is-active', enabled);
+        button.setAttribute('aria-checked', String(enabled));
+      };
+      button.onclick = () => {
+        enabled = !enabled;
+        renderEnabled();
+        onToggle(enabled);
+      };
+      renderEnabled();
+      return button;
+    };
     if (rules.length === 0 && timerRules.length === 0) {
       formulas.append(el('div', { class: 'formula-empty', text: '尚未配置触发规则，点击“编辑”即可添加。' }));
     } else {
@@ -465,83 +492,57 @@ export function mountConfig(root: HTMLElement): void {
         const giftImage = el('img', { class: 'attribute-gift-image', alt: '' }) as HTMLImageElement;
         giftImage.src = gift?.imgBasic || transparentPixel();
         const ruleCard = el('div', { class: 'attribute-gift-rule' });
-        const enabledInput = el('input', {
-          class: 'attribute-rule-enabled-input gift-rule-enabled-input',
-          type: 'checkbox',
-          ariaLabel: toggleLabel,
-        } as any) as HTMLInputElement;
-        enabledInput.checked = rule.enabled !== false;
-        const updateEnabledAppearance = (): void => {
-          ruleCard.classList.toggle('is-disabled', !enabledInput.checked);
+        const updateEnabledAppearance = (enabled: boolean): void => {
+          ruleCard.classList.toggle('is-disabled', !enabled);
         };
-        const syncEnabled = (): void => {
-          if (rule.enabled === enabledInput.checked) {
-            updateEnabledAppearance();
+        const enabledButton = createEnabledButton(toggleLabel, 'gift-rule-enabled-button', rule.enabled !== false, (enabled) => {
+          const currentRule = state.rules.find((candidate) => candidate.id === rule.id);
+          if (!currentRule) {
+            render();
             return;
           }
-          rule.enabled = enabledInput.checked;
-          updateEnabledAppearance();
+          currentRule.enabled = enabled;
+          updateEnabledAppearance(enabled);
           save();
-        };
-        enabledInput.onclick = syncEnabled;
-        enabledInput.oninput = syncEnabled;
-        enabledInput.onchange = syncEnabled;
-        const enabledToggle = el('label', { class: 'attribute-rule-enabled', title: toggleLabel }) as HTMLLabelElement;
-        enabledToggle.onclick = () => {
-          globalThis.setTimeout(syncEnabled, 0);
-        };
-        enabledToggle.append(enabledInput, el('span', { class: 'attribute-rule-enabled-track' }));
+        });
         ruleCard.append(
           giftImage,
           el('div', { class: 'attribute-gift-copy' }, [
             el('strong', { text: gift?.name ?? `礼物 ${rule.giftId}` }),
             el('span', { text: rule.formulaName?.trim() || '未命名公式' }),
           ]),
-          enabledToggle,
+          enabledButton,
         );
-        updateEnabledAppearance();
+        updateEnabledAppearance(rule.enabled !== false);
         formulas.append(ruleCard);
       }
       for (const rule of timerRules) {
         const toggleLabel = `启用定时器 ${rule.formulaName || rule.id}`;
         const ruleCard = el('div', { class: 'attribute-gift-rule attribute-timer-rule' });
         const status = el('span');
-        const enabledInput = el('input', {
-          class: 'attribute-rule-enabled-input timer-rule-enabled-input',
-          type: 'checkbox',
-          ariaLabel: toggleLabel,
-        } as any) as HTMLInputElement;
-        enabledInput.checked = rule.enabled;
-        const updateEnabledAppearance = (): void => {
-          ruleCard.classList.toggle('is-disabled', !enabledInput.checked);
-          status.textContent = `每 ${formatInterval(rule.intervalSeconds)}${enabledInput.checked ? '' : ' · 已停用'}`;
+        const updateEnabledAppearance = (enabled: boolean): void => {
+          ruleCard.classList.toggle('is-disabled', !enabled);
+          status.textContent = `每 ${formatInterval(rule.intervalSeconds)}${enabled ? '' : ' · 已停用'}`;
         };
-        const syncEnabled = (): void => {
-          if (rule.enabled === enabledInput.checked) {
-            updateEnabledAppearance();
+        const enabledButton = createEnabledButton(toggleLabel, 'timer-rule-enabled-button', rule.enabled, (enabled) => {
+          const currentRule = state.timerRules.find((candidate) => candidate.id === rule.id);
+          if (!currentRule) {
+            render();
             return;
           }
-          rule.enabled = enabledInput.checked;
-          updateEnabledAppearance();
+          currentRule.enabled = enabled;
+          updateEnabledAppearance(enabled);
           save();
-        };
-        enabledInput.onclick = syncEnabled;
-        enabledInput.oninput = syncEnabled;
-        enabledInput.onchange = syncEnabled;
-        const enabledToggle = el('label', { class: 'attribute-rule-enabled', title: toggleLabel }) as HTMLLabelElement;
-        enabledToggle.onclick = () => {
-          globalThis.setTimeout(syncEnabled, 0);
-        };
-        enabledToggle.append(enabledInput, el('span', { class: 'attribute-rule-enabled-track' }));
+        });
         ruleCard.append(
           el('span', { class: 'attribute-timer-icon', text: '⏱' }),
           el('div', { class: 'attribute-gift-copy' }, [
             el('strong', { text: rule.formulaName || '未命名定时器' }),
             status,
           ]),
-          enabledToggle,
+          enabledButton,
         );
-        updateEnabledAppearance();
+        updateEnabledAppearance(rule.enabled);
         formulas.append(ruleCard);
       }
     }
@@ -966,28 +967,6 @@ export function mountConfig(root: HTMLElement): void {
         if (timerIndex >= 0) timerRules.splice(timerIndex, 1);
         renderTimerRules();
       };
-      const enabledInput = el('input', {
-        class: 'attribute-rule-enabled-input timer-editor-enabled-input',
-        type: 'checkbox',
-        ariaLabel: '启用定时器',
-      } as any) as HTMLInputElement;
-      enabledInput.checked = rule.enabled;
-      const syncEnabled = (): void => {
-        rule.enabled = enabledInput.checked;
-        editor.classList.toggle('is-disabled', !rule.enabled);
-      };
-      enabledInput.onclick = syncEnabled;
-      enabledInput.oninput = syncEnabled;
-      enabledInput.onchange = syncEnabled;
-      editor.classList.toggle('is-disabled', !rule.enabled);
-      const enabledToggle = el('label', {
-        class: 'attribute-rule-enabled timer-editor-enabled-toggle',
-        title: '启用定时器',
-      }) as HTMLLabelElement;
-      enabledToggle.onclick = () => {
-        globalThis.setTimeout(syncEnabled, 0);
-      };
-      enabledToggle.append(enabledInput, el('span', { class: 'attribute-rule-enabled-track' }));
       editor.append(el('div', { class: 'timer-rule-header' }, [
         el('div', { class: 'timer-rule-title' }, [
           el('span', { class: 'timer-rule-clock', text: '⏱' }),
@@ -997,7 +976,6 @@ export function mountConfig(root: HTMLElement): void {
           ]),
         ]),
         el('div', { class: 'timer-rule-actions' }, [
-          el('div', { class: 'timer-enabled-toggle' }, [enabledToggle]),
           removeButton,
         ]),
       ]));

@@ -1036,9 +1036,7 @@ describe('single-page configuration rendering', () => {
     expect(root.querySelector('.timer-binding-panel')).not.toBeNull();
     expect(textOf(root)).toContain('定时器只修改属性值，不会显示在 OBS 面板中');
     findByText(root, '+ 添加定时器')?.onclick?.();
-    expect(root.querySelector('.timer-editor-enabled-toggle')).not.toBeNull();
-    expect(root.querySelector('.timer-editor-enabled-toggle')?.querySelector('.attribute-rule-enabled-track')).not.toBeNull();
-    expect(root.querySelector('.timer-enabled-toggle')?.textContent).toBe('');
+    expect(root.querySelector('.timer-editor-enabled-toggle')).toBeNull();
 
     const nameInput = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '触发器名称') as TestElement & { oninput?: () => void };
@@ -1089,58 +1087,25 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    const giftSwitch = root.querySelector('.gift-rule-enabled-input') as TestElement & {
-      checked: boolean;
-      onchange?: () => void;
-    };
-    const timerSwitch = root.querySelector('.timer-rule-enabled-input') as TestElement & {
-      checked: boolean;
-      onchange?: () => void;
-    };
-    expect(giftSwitch.checked).toBe(false);
-    expect(timerSwitch.checked).toBe(false);
+    const giftSwitch = root.querySelector('.gift-rule-enabled-button') as TestElement;
+    const timerSwitch = root.querySelector('.timer-rule-enabled-button') as TestElement;
+    expect(giftSwitch.getAttribute('role')).toBe('switch');
+    expect(timerSwitch.getAttribute('role')).toBe('switch');
+    expect(giftSwitch.getAttribute('aria-checked')).toBe('false');
+    expect(timerSwitch.getAttribute('aria-checked')).toBe('false');
     expect(root.querySelectorAll('.attribute-gift-rule').filter((card) => card.className.includes('is-disabled'))).toHaveLength(2);
 
-    giftSwitch.checked = true;
-    giftSwitch.onchange?.();
-    timerSwitch.checked = true;
-    timerSwitch.onchange?.();
+    giftSwitch.onclick?.();
+    timerSwitch.onclick?.();
 
     await vi.waitFor(() => {
       expect(loadState().rules[0].enabled).toBe(true);
       expect(loadState().timerRules[0].enabled).toBe(true);
     });
+    expect(giftSwitch.getAttribute('aria-checked')).toBe('true');
+    expect(timerSwitch.getAttribute('aria-checked')).toBe('true');
     expect(root.querySelectorAll('.attribute-gift-rule').filter((card) => card.className.includes('is-disabled'))).toHaveLength(0);
     expect(textOf(root)).not.toContain('已停用');
-  });
-
-  it('persists timer enable toggles from their attribute summary cards', async () => {
-    const initialState = {
-      ...state('88888888'),
-      timerRules: [{
-        id: 't-disabled', attributeName: '加班时间', formulaName: '定时规则', intervalSeconds: 60,
-        formula: '加班时间-1', enabled: false,
-      }],
-    };
-    await saveState(initialState);
-    const fetchMock = vi.mocked(fetch);
-    fetchMock.mockClear();
-    const root = new TestElement('div');
-    mountConfig(root as unknown as HTMLElement);
-
-    const timerSwitch = root.querySelector('.timer-rule-enabled-input') as TestElement & {
-      checked: boolean;
-      onchange?: () => void;
-    };
-    timerSwitch.checked = true;
-    timerSwitch.onchange?.();
-
-    await vi.waitFor(() => {
-      const writes = fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT');
-      expect(writes.length).toBeGreaterThan(0);
-      const lastBody = writes.at(-1)?.[1]?.body;
-      expect(JSON.parse(String(lastBody)).timerRules[0].enabled).toBe(true);
-    });
   });
 
   it('persists timer enable toggles from a card click activation', async () => {
@@ -1158,12 +1123,11 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    const timerSwitch = root.querySelector('.timer-rule-enabled-input') as TestElement & {
-      checked: boolean;
-    };
-    const toggle = root.querySelector('.attribute-rule-enabled') as TestElement;
-    timerSwitch.checked = true;
+    const toggle = root.querySelector('.timer-rule-enabled-button') as TestElement;
+    expect(toggle.getAttribute('role')).toBe('switch');
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
     toggle.onclick?.();
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
 
     await vi.waitFor(() => {
       const writes = fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT');
@@ -1171,6 +1135,71 @@ describe('single-page configuration rendering', () => {
       const lastBody = writes.at(-1)?.[1]?.body;
       expect(JSON.parse(String(lastBody)).timerRules[0].enabled).toBe(true);
     });
+  });
+
+  it('persists external rule switches after a same-structure backend refresh', async () => {
+    const initialState = {
+      ...state('88888888'),
+      settings: { ...defaultState().settings, showTutorial: false },
+      rules: [{
+        id: 'r-disabled', giftId: 1, attributeName: '加班时间', formulaName: '礼物规则',
+        formula: '加班时间+1', enabled: false,
+      }],
+      timerRules: [{
+        id: 't-disabled', attributeName: '加班时间', formulaName: '定时规则', intervalSeconds: 60,
+        formula: '加班时间-1', enabled: false,
+      }],
+    };
+    await saveState(initialState);
+    let serverState = JSON.parse(JSON.stringify(initialState));
+    const writtenStates: typeof initialState[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/config') && !init?.method) {
+        return new Response(JSON.stringify(serverState), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/api/config') && init?.method === 'PUT') {
+        serverState = JSON.parse(String(init.body));
+        writtenStates.push(serverState);
+        return new Response(null, { status: 204 });
+      }
+      if (url.includes('/api/runtime')) {
+        return new Response(JSON.stringify({ code: 0, runtime: { state: 'idle', roomId: '' } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.includes('/api/auth/status')) {
+        return new Response(JSON.stringify({ code: 0, auth: { state: 'anonymous' } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(null, { status: 204 });
+    }));
+
+    vi.useFakeTimers();
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    const giftSwitch = root.querySelector('.gift-rule-enabled-button') as TestElement;
+    const timerSwitch = root.querySelector('.timer-rule-enabled-button') as TestElement;
+
+    await vi.advanceTimersByTimeAsync(1000);
+    giftSwitch.onclick?.();
+    timerSwitch.onclick?.();
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.waitFor(() => {
+      expect(writtenStates.at(-1)?.rules[0].enabled).toBe(true);
+      expect(writtenStates.at(-1)?.timerRules[0].enabled).toBe(true);
+    });
+    expect(loadState().rules[0].enabled).toBe(true);
+    expect(loadState().timerRules[0].enabled).toBe(true);
+    vi.clearAllTimers();
+    vi.useRealTimers();
   });
 
   it('does not let a stale backend refresh overwrite a timer toggle before editing', async () => {
@@ -1216,23 +1245,18 @@ describe('single-page configuration rendering', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(configGetStarted).toBe(true);
 
-    const summarySwitch = root.querySelector('.timer-rule-enabled-input') as TestElement & {
-      checked: boolean;
-      onchange?: () => void;
-    };
-    summarySwitch.checked = true;
-    summarySwitch.onchange?.();
+    const summarySwitch = root.querySelector('.timer-rule-enabled-button') as TestElement;
+    summarySwitch.onclick?.();
     releaseConfigGet?.(new Response(JSON.stringify(staleServerState), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     }));
     await vi.advanceTimersByTimeAsync(0);
 
+    expect(summarySwitch.getAttribute('aria-checked')).toBe('true');
+    expect(loadState().timerRules[0].enabled).toBe(true);
     findByText(root, '编辑')?.onclick?.();
-    const editorSwitch = root.querySelector('.timer-rule-editor')?.querySelectorAll('input')[0] as TestElement & {
-      checked: boolean;
-    };
-    expect(editorSwitch.checked).toBe(true);
+    expect(root.querySelector('.timer-editor-enabled-toggle')).toBeNull();
     vi.clearAllTimers();
     vi.useRealTimers();
   });

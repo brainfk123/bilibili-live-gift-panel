@@ -60,17 +60,19 @@ export async function hydrateStateFromServer(): Promise<void> {
   await refreshStateFromServer();
 }
 
-export async function refreshStateFromServer(): Promise<AppState> {
+export async function refreshStateFromServer(acceptState: () => boolean = () => true): Promise<AppState> {
   if (typeof fetch !== 'function') return loadState();
   await persistQueue.catch(() => undefined);
   try {
     const response = await fetch(CONFIG_ENDPOINT, { cache: 'no-store' });
+    let nextState: AppState;
     if (response.status === 204) {
-      cachedState = defaultState();
-      return cachedState;
+      nextState = defaultState();
+    } else {
+      if (!response.ok) throw new Error(`配置读取失败：HTTP ${response.status}`);
+      nextState = normalizeState(await response.json() as Partial<AppState>);
     }
-    if (!response.ok) throw new Error(`配置读取失败：HTTP ${response.status}`);
-    cachedState = normalizeState(await response.json() as Partial<AppState>);
+    if (acceptState() || !cachedState) cachedState = nextState;
   } catch {
     // A transient backend read failure must not erase the last visible state.
     cachedState ??= defaultState();

@@ -919,18 +919,15 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .attribute-gift-copy span { margin-top: 3px; color: var(--text-dim); font-size: 11px; }
 .config-root .attribute-rule-enabled {
   position: relative;
+  display: block;
   width: 34px;
   height: 20px;
   flex: 0 0 34px;
-  cursor: pointer;
-}
-.config-root .attribute-rule-enabled-input {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  opacity: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  appearance: none;
   cursor: pointer;
 }
 .config-root .attribute-rule-enabled-track {
@@ -953,15 +950,15 @@ body.config-mode::-webkit-scrollbar-corner,
   background: var(--text-dim);
   transition: transform 160ms ease, background 160ms ease;
 }
-.config-root .attribute-rule-enabled-input:checked + .attribute-rule-enabled-track {
+.config-root .attribute-rule-enabled.is-active .attribute-rule-enabled-track {
   border-color: var(--accent);
   background: var(--accent-soft);
 }
-.config-root .attribute-rule-enabled-input:checked + .attribute-rule-enabled-track::after {
+.config-root .attribute-rule-enabled.is-active .attribute-rule-enabled-track::after {
   background: var(--accent-text);
   transform: translateX(14px);
 }
-.config-root .attribute-rule-enabled-input:focus-visible + .attribute-rule-enabled-track {
+.config-root .attribute-rule-enabled:focus-visible .attribute-rule-enabled-track {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft), 0 0 0 1px var(--accent);
 }
@@ -1394,8 +1391,7 @@ body.config-mode::-webkit-scrollbar-corner,
   padding-bottom: 13px;
 }
 .config-root .timer-rule-title,
-.config-root .timer-rule-actions,
-.config-root .timer-enabled-toggle { display: flex; align-items: center; }
+.config-root .timer-rule-actions { display: flex; align-items: center; }
 .config-root .timer-rule-title { min-width: 0; gap: 10px; }
 .config-root .timer-rule-title strong,
 .config-root .timer-rule-title small { display: block; }
@@ -1413,7 +1409,6 @@ body.config-mode::-webkit-scrollbar-corner,
   font-size: 18px;
 }
 .config-root .timer-rule-actions { gap: 12px; }
-.config-root .timer-enabled-toggle { gap: 6px; color: var(--text-dim); font-size: 11px; }
 .config-root .timer-rule-fields {
   display: grid;
   grid-template-columns: minmax(160px, .72fr) minmax(150px, .58fr) minmax(190px, .9fr) minmax(300px, 1.7fr);

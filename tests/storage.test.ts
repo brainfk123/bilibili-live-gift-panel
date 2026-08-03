@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { consumeConfigMigrationRequired, defaultState, hydrateStateFromServer, loadState, saveState, resetState, pruneLog } from '../src/storage';
+import { consumeConfigMigrationRequired, defaultState, hydrateStateFromServer, loadState, saveState, resetState, pruneLog, refreshStateFromServer } from '../src/storage';
 import { LogEntry, MAX_LOG } from '../src/types';
 
 beforeEach(() => {
@@ -52,6 +52,20 @@ describe('storage', () => {
     await hydrateStateFromServer();
     expect(loadState().settings.showTutorial).toBe(false);
     expect(consumeConfigMigrationRequired()).toBe(true);
+  });
+
+  it('does not apply a server refresh rejected as stale', async () => {
+    const local = defaultState();
+    local.roomId = 'new-room';
+    await saveState(local);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ...defaultState(),
+      roomId: 'stale-room',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    await refreshStateFromServer(() => false);
+
+    expect(loadState().roomId).toBe('new-room');
   });
 
   it('resetState removes stored state', () => {
