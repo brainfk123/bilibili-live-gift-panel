@@ -2,9 +2,31 @@ package main
 
 import (
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestFormulaPreviewUsesSelectedGiftPrice(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{
+		"formula":"加班时间+price/1000*60",
+		"attributeName":"加班时间",
+		"attributeValue":0,
+		"context":"gift",
+		"giftPrice":5200
+	}`))
+	response := httptest.NewRecorder()
+
+	handleFormulaPreview(store)(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"result":312`) {
+		t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
 
 func TestListenWithFallbackSkipsOccupiedPort(t *testing.T) {
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")

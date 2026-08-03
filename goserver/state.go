@@ -137,16 +137,18 @@ type logEntry struct {
 }
 
 type settingsState struct {
-	FontSize       int    `json:"fontSize"`
-	AccentColor    string `json:"accentColor"`
-	ShowStats      bool   `json:"showStats"`
-	ShowConnection bool   `json:"showConnection"`
-	Align          string `json:"align"`
-	Theme          string `json:"theme"`
-	GiftView       string `json:"giftView"`
-	PanelOpacity   int    `json:"panelOpacity"`
-	ShowTutorial   *bool  `json:"showTutorial"`
-	AutoUpdate     *bool  `json:"autoUpdate"`
+	FontSize                 int      `json:"fontSize"`
+	AccentColor              string   `json:"accentColor"`
+	ShowStats                bool     `json:"showStats"`
+	ShowConnection           bool     `json:"showConnection"`
+	Align                    string   `json:"align"`
+	Theme                    string   `json:"theme"`
+	GiftView                 string   `json:"giftView"`
+	PanelOpacity             int      `json:"panelOpacity"`
+	ShowTutorial             *bool    `json:"showTutorial"`
+	TutorialVersion          int      `json:"tutorialVersion"`
+	TutorialCompletedLessons []string `json:"tutorialCompletedLessons"`
+	AutoUpdate               *bool    `json:"autoUpdate"`
 }
 
 type appState struct {
@@ -191,16 +193,18 @@ func defaultAppState() appState {
 		Stats:          map[string]dayStats{},
 		Log:            []logEntry{},
 		Settings: settingsState{
-			FontSize:       48,
-			AccentColor:    "#fb7299",
-			ShowStats:      true,
-			ShowConnection: true,
-			Align:          "center",
-			Theme:          "dark",
-			GiftView:       "list",
-			PanelOpacity:   55,
-			ShowTutorial:   &showTutorial,
-			AutoUpdate:     &autoUpdate,
+			FontSize:                 48,
+			AccentColor:              "#fb7299",
+			ShowStats:                true,
+			ShowConnection:           true,
+			Align:                    "center",
+			Theme:                    "dark",
+			GiftView:                 "list",
+			PanelOpacity:             55,
+			ShowTutorial:             &showTutorial,
+			TutorialVersion:          2,
+			TutorialCompletedLessons: []string{},
+			AutoUpdate:               &autoUpdate,
 		},
 	}
 }
@@ -261,6 +265,12 @@ func normalizeAppState(state *appState) {
 	if state.Settings.ShowTutorial == nil {
 		showTutorial := !(strings.TrimSpace(state.RoomID) != "" && len(state.Attributes) > 0 && len(state.Rules) > 0)
 		state.Settings.ShowTutorial = &showTutorial
+	}
+	if state.Settings.TutorialVersion <= 0 {
+		state.Settings.TutorialVersion = 2
+	}
+	if state.Settings.TutorialCompletedLessons == nil {
+		state.Settings.TutorialCompletedLessons = []string{}
 	}
 	if state.Settings.AutoUpdate == nil {
 		autoUpdate := true

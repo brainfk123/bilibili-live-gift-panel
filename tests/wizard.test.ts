@@ -2,7 +2,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { mountConfig } from '../src/ui/config/config';
 import { formatDelta, mountDisplay } from '../src/ui/display/display';
-import { getNextWizardStep, getRoomNumberHint, getTutorialStep, getWizardChecklist, getWizardProgress } from '../src/ui/config/wizard';
+import {
+  getNextWizardStep,
+  getRoomNumberHint,
+  getTutorialLesson,
+  getTutorialStep,
+  getWizardChecklist,
+  getWizardProgress,
+  markTutorialLessonComplete,
+  type TutorialEditorProgress,
+} from '../src/ui/config/wizard';
 import { defaultState, loadState, resetState, saveState } from '../src/storage';
 import { builtinCatalog } from '../src/gifts/catalog';
 import type { GiftEvent } from '../src/bilibili/messages';
@@ -291,6 +300,45 @@ describe('wizard progress', () => {
     const progress = getWizardProgress(state('88888888', 1));
     expect(progress).toEqual({ room: true, attributes: true, rules: true, obs: true });
     expect(getNextWizardStep(progress)).toBeNull();
+  });
+
+  it('derives all overtime training lessons from real product state', () => {
+    const tutorialState = defaultState();
+    expect(getTutorialLesson(tutorialState, false)).toBe('room');
+    expect(getTutorialLesson(tutorialState, true)).toBe('attribute');
+
+    const editor: TutorialEditorProgress = { open: true, isNew: true };
+    expect(getTutorialLesson(tutorialState, true, editor)).toBe('basics');
+    editor.basicsConfigured = true;
+    expect(getTutorialLesson(tutorialState, true, editor)).toBe('gift');
+    editor.giftCount = 1;
+    expect(getTutorialLesson(tutorialState, true, editor)).toBe('rule');
+    editor.giftPreviewed = true;
+    expect(getTutorialLesson(tutorialState, true, editor)).toBe('timer');
+    editor.timerPreviewed = true;
+    expect(getTutorialLesson(tutorialState, true, editor)).toBe('preset');
+
+    tutorialState.formulaPresets.push({
+      id: 'preset-1', name: '每元加时', context: 'gift', formula: '加班时间+price/1000*60', sourceAttributeName: '加班时间',
+    });
+    expect(getTutorialLesson(tutorialState, true, editor)).toBe('save');
+
+    tutorialState.attributes.push({
+      name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '', broadcastMessage: '',
+    });
+    tutorialState.rules.push({
+      id: 'rule-1', giftId: 1, attributeName: '加班时间', formulaName: '加时', formula: '加班时间+60', enabled: false,
+    });
+    expect(getTutorialLesson(tutorialState, true, { open: false })).toBe('timer');
+    tutorialState.timerRules.push({
+      id: 'timer-1', attributeName: '加班时间', formulaName: '自动减少', intervalSeconds: 60,
+      condition: '加班时间>0', formula: 'MAX(加班时间-60,0)', enabled: true,
+    });
+    expect(getTutorialLesson(tutorialState, true, { open: false })).toBe('enable');
+    tutorialState.rules[0].enabled = true;
+    expect(getTutorialLesson(tutorialState, true, { open: false })).toBe('output');
+    markTutorialLessonComplete(tutorialState.settings, 'output');
+    expect(getTutorialLesson(tutorialState, true, { open: false })).toBeNull();
   });
 });
 
@@ -1002,7 +1050,7 @@ describe('single-page configuration rendering', () => {
     expect(configCss).toContain('-webkit-appearance: none;');
   });
 
-  it('keeps the tutorial active from connection through the attribute modal', async () => {
+  it('runs the game-style overtime tutorial through every workspace', async () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
@@ -1016,20 +1064,36 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root)).toContain('添加第一个属性');
     findByText(root, '添加属性')?.onclick?.();
     expect(root.querySelector('.attribute-modal')).not.toBeNull();
-    expect(textOf(root)).toContain('添加礼物并配置规则');
+    expect(textOf(root)).toContain('套用加班机模板');
 
-    findByText(root, '开始配置')?.onclick?.();
+    findByText(root, '使用加班机模板')?.onclick?.();
+    findByText(root, '添加礼物')?.onclick?.();
     root.querySelector('.gift-choice')?.onclick?.();
+    (root.querySelector('.guide-rule-simulator') as TestElement | null)?.onclick?.();
+    await vi.waitFor(() => expect(textOf(root)).toContain('让时间自动减少'));
+
+    findByText(root, '+ 添加定时器')?.onclick?.();
+    (root.querySelector('.guide-timer-simulator') as TestElement | null)?.onclick?.();
+    await vi.waitFor(() => expect(textOf(root)).toContain('保存可复用的规则'));
+
+    (root.querySelector('.guide-save-preset') as TestElement | null)?.onclick?.();
+    await findByText(root, '保存')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(root)).toContain('保存并交给后台校验'));
     findByText(root, '创建属性')?.onclick?.();
 
     await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules).toHaveLength(1));
     const saved = JSON.parse(storage.get('bilibili-live-gift-panel-v1')!);
     expect(saved.attributes).toHaveLength(1);
     expect(saved.rules).toHaveLength(1);
-    expect(textOf(root.querySelector('.tour-bubble') as TestElement)).toContain('托盘后台运行');
+    expect(saved.timerRules).toHaveLength(1);
+    expect(saved.formulaPresets).toHaveLength(1);
+    expect(saved.rules[0].enabled).toBe(false);
 
-    findByText(root, '复制地址')?.onclick?.();
-    expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).settings.showTutorial).toBe(false);
+    (root.querySelector('.guide-rule-toggle') as TestElement | null)?.onclick?.();
+    expect(textOf(root.querySelector('.tour-bubble') as TestElement)).toContain('托盘后台会继续收礼');
+
+    await findByText(root, '复制 OBS 链接')?.onclick?.();
+    await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).settings.showTutorial).toBe(false));
 
     findByText(root, '编辑')?.onclick?.();
     expect(root.querySelector('.attribute-modal')).not.toBeNull();

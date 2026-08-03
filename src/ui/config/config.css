@@ -471,7 +471,7 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .tutorial { min-width: 0; overflow-x: auto; }
 }
 
-/* Throwaway UI prototype: compare three focused onboarding treatments with ?variant=. */
+/* Focused, game-style onboarding spotlight. */
 .config-root .tour-prototype {
   position: fixed;
   inset: 0;
@@ -689,6 +689,395 @@ body.config-mode::-webkit-scrollbar-corner,
     max-height: calc(100vh - 170px);
   }
   .config-root .tour-switcher { bottom: 10px; }
+}
+
+/* Attribute workbench: one deep workspace with four focused areas. */
+.config-root .overlay.attribute-overlay {
+  align-items: center;
+  padding: 24px;
+  overflow: hidden;
+}
+.config-root .overlay .attribute-workbench {
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr);
+  width: min(100%, 1320px);
+  max-width: 1320px;
+  height: min(860px, calc(100vh - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
+  border-radius: 20px;
+}
+.config-root .overlay .attribute-workbench.is-training-hidden { grid-template-columns: minmax(0, 1fr); }
+.config-root .attribute-training-rail {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  padding: 22px 16px 18px;
+  background: color-mix(in srgb, var(--input-bg) 88%, var(--accent-soft));
+}
+.config-root .attribute-training-title {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 0 7px 18px;
+}
+.config-root .attribute-training-title strong,
+.config-root .attribute-training-title small { display: block; }
+.config-root .attribute-training-title strong { font-size: 14px; }
+.config-root .attribute-training-title small { margin-top: 3px; color: var(--text-dim); font-size: 10px; }
+.config-root .attribute-training-progress {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 46px;
+  height: 34px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 800;
+}
+.config-root .attribute-training-lessons {
+  display: grid;
+  min-height: 0;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.config-root .attribute-training-lesson {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 10px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  padding: 10px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.config-root .attribute-training-lesson:hover { border-color: var(--border-strong); color: var(--text); }
+.config-root .attribute-training-lesson.is-active { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.config-root .attribute-training-lesson.is-done { color: var(--success-text); }
+.config-root .attribute-training-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 800;
+}
+.config-root .attribute-training-copy strong,
+.config-root .attribute-training-copy small { display: block; }
+.config-root .attribute-training-copy strong { font-size: 12px; }
+.config-root .attribute-training-copy small { margin-top: 2px; color: var(--accent-text); font-size: 9px; }
+.config-root .attribute-training-note {
+  margin-top: auto;
+  border-top: 1px solid var(--border);
+  padding: 15px 7px 0;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.6;
+}
+.config-root .attribute-workbench-main {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+.config-root .attribute-workbench-header { padding: 20px 24px 17px; }
+.config-root .attribute-workbench-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  padding: 8px 24px 0;
+  overflow-x: auto;
+}
+.config-root .attribute-workbench-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  gap: 7px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 0 15px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.config-root .attribute-workbench-tab:hover { color: var(--text); }
+.config-root .attribute-workbench-tab.is-active { border-color: var(--accent); color: var(--accent-text); }
+.config-root .attribute-workbench-tab-badge {
+  min-width: 20px;
+  border-radius: 999px;
+  padding: 2px 6px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 9px;
+}
+.config-root .attribute-workbench-panels { position: relative; min-height: 0; overflow: hidden; }
+.config-root .attribute-workbench-panel {
+  position: relative;
+  height: 100%;
+  padding: 22px 24px 28px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.config-root .attribute-workbench-panel > .timer-binding-panel,
+.config-root .attribute-workbench-panel > .formula-binding-panel { border: 0; padding: 0; }
+.config-root .attribute-workbench-actions { position: static; align-items: center; }
+.config-root .attribute-save-note { margin-right: auto; color: var(--text-dim); font-size: 10px; }
+.config-root .workbench-lesson-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+  border: 1px solid var(--accent);
+  border-radius: 14px;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, var(--accent-soft), transparent 78%);
+}
+.config-root .workbench-lesson-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  background: var(--accent);
+  color: var(--button-action-text);
+  font-size: 11px;
+  font-weight: 900;
+}
+.config-root .workbench-lesson-card strong { display: block; font-size: 13px; }
+.config-root .workbench-lesson-card p { margin-top: 4px; color: var(--text-dim); font-size: 11px; line-height: 1.5; }
+.config-root .attribute-workbench .attribute-basics {
+  grid-template-columns: 1.35fr .72fr 1fr .72fr;
+  padding: 0;
+}
+.config-root .attribute-overview-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-top: 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px 20px;
+  background: var(--input-bg);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.config-root .attribute-overview-preview > div { display: flex; align-items: baseline; gap: 24px; }
+.config-root .attribute-overview-preview-name { color: var(--text); font-size: 16px; font-weight: 700; }
+.config-root .attribute-overview-preview-value { color: var(--accent-text); font-size: 30px; }
+.config-root .rules-heading-actions { display: flex; align-items: center; gap: 10px; }
+.config-root .gift-picker-drawer {
+  position: absolute;
+  z-index: 8;
+  inset: 0;
+  border-left: 1px solid var(--accent);
+  background: var(--card);
+  box-shadow: -18px 0 38px rgba(4, 6, 14, .32);
+}
+.config-root .gift-picker-drawer-body {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  padding: 22px 24px !important;
+}
+.config-root .gift-picker-drawer .gift-picker-grid { min-height: 0; max-height: none; flex: 1 1 auto; }
+.config-root .gift-picker-drawer-close { width: 32px; height: 32px; }
+.config-root .quick-rule-builder {
+  display: grid;
+  gap: 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 13px;
+  padding: 14px;
+  background: color-mix(in srgb, var(--card) 72%, var(--input-bg));
+}
+.config-root .quick-rule-heading,
+.config-root .quick-rule-actions,
+.config-root .formula-preview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.config-root .quick-rule-heading strong,
+.config-root .quick-rule-heading small { display: block; }
+.config-root .quick-rule-heading small { margin-top: 3px; color: var(--text-dim); font-size: 10px; }
+.config-root .quick-rule-sentence {
+  display: grid;
+  grid-template-columns: max-content minmax(240px, 1fr) minmax(100px, .4fr) max-content;
+  align-items: center;
+  gap: 9px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.config-root .quick-rule-sentence .field-input { height: 40px; }
+.config-root .quick-rule-sentence input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.config-root .quick-rule-sentence input[type="number"]::-webkit-inner-spin-button,
+.config-root .quick-rule-sentence input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
+.config-root .quick-rule-actions .formula-preset-list { min-width: 0; }
+.config-root .formula-simulate { flex: 0 0 auto; min-height: 36px; padding: 7px 12px; }
+.config-root .rule-advanced-settings {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--card);
+}
+.config-root .rule-advanced-settings > summary {
+  padding: 11px 13px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+.config-root .rule-advanced-settings[open] { padding-bottom: 13px; }
+.config-root .rule-advanced-settings[open] > summary { color: var(--accent-text); }
+.config-root .rule-advanced-settings .formula-assignment-field,
+.config-root .rule-advanced-settings .formula-examples { margin: 0 13px 10px; }
+.config-root .selected-gift-rule > .formula-preview { margin-top: 9px; text-align: right; }
+.config-root .attribute-output-panel { display: grid; gap: 18px; }
+.config-root .runtime-role-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.config-root .runtime-role-grid article {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 15px;
+  background: var(--input-bg);
+}
+.config-root .runtime-role-grid strong,
+.config-root .runtime-role-grid span { display: block; }
+.config-root .runtime-role-grid strong { color: var(--accent-text); font-size: 12px; }
+.config-root .runtime-role-grid span { margin-top: 6px; color: var(--text-dim); font-size: 10px; line-height: 1.5; }
+.config-root .attribute-output-fields { display: grid; grid-template-columns: 1fr; gap: 14px; }
+.config-root .output-link-preview { display: grid; gap: 7px; }
+.config-root .output-link-preview code {
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 12px 13px;
+  background: var(--input-bg);
+  color: var(--text-dim);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.config-root .attribute-output-panel .modal-tip { margin: 0; }
+
+.config-root .overlay .training-center {
+  width: min(100%, 760px);
+  max-width: 760px;
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
+  padding: 0;
+}
+.config-root .training-center-lessons {
+  display: grid;
+  max-height: min(610px, calc(100vh - 260px));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 18px 22px;
+  overflow-y: auto;
+  list-style: none;
+}
+.config-root .training-center-lesson {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 11px;
+  background: var(--input-bg);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.config-root .training-center-lesson:hover,
+.config-root .training-center-lesson.is-active { border-color: var(--accent); background: var(--accent-soft); }
+.config-root .training-center-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 27px;
+  height: 27px;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+.config-root .training-center-lesson.is-done .training-center-number { border-color: var(--success-border); color: var(--success-text); }
+.config-root .training-center-copy strong,
+.config-root .training-center-copy small { display: block; }
+.config-root .training-center-copy strong { font-size: 12px; }
+.config-root .training-center-copy small { margin-top: 3px; color: var(--text-dim); font-size: 9px; line-height: 1.45; }
+.config-root .training-center-action { color: var(--accent-text); font-size: 10px; font-weight: 700; }
+
+@media (max-width: 980px) {
+  .config-root .overlay.attribute-overlay { padding: 12px; }
+  .config-root .overlay .attribute-workbench {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: calc(100vh - 24px);
+    max-height: calc(100vh - 24px);
+  }
+  .config-root .overlay .attribute-workbench.is-training-hidden { grid-template-rows: minmax(0, 1fr); }
+  .config-root .attribute-training-rail {
+    display: block;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    padding: 10px 14px;
+  }
+  .config-root .attribute-training-title { display: none; }
+  .config-root .attribute-training-lessons { display: flex; gap: 6px; overflow-x: auto; }
+  .config-root .attribute-training-lessons li { flex: 0 0 auto; }
+  .config-root .attribute-training-lesson { width: auto; padding: 7px 9px; }
+  .config-root .attribute-training-copy small,
+  .config-root .attribute-training-note { display: none; }
+  .config-root .quick-rule-sentence { grid-template-columns: 1fr 1fr; }
+  .config-root .quick-rule-sentence > span:first-child { grid-column: 1 / -1; }
+  .config-root .runtime-role-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 700px) {
+  .config-root .attribute-workbench-header { padding: 16px 18px 13px; }
+  .config-root .attribute-workbench-tabs { padding-right: 12px; padding-left: 12px; }
+  .config-root .attribute-workbench-panel { padding: 18px; }
+  .config-root .attribute-workbench .attribute-basics,
+  .config-root .training-center-lessons { grid-template-columns: 1fr; }
+  .config-root .workbench-lesson-card { grid-template-columns: auto 1fr; }
+  .config-root .workbench-lesson-card .btn { grid-column: 1 / -1; }
+  .config-root .attribute-overview-preview { align-items: flex-start; flex-direction: column; }
+  .config-root .quick-rule-sentence { grid-template-columns: 1fr; }
+  .config-root .quick-rule-sentence > span:first-child { grid-column: auto; }
+  .config-root .quick-rule-heading,
+  .config-root .quick-rule-actions { align-items: stretch; flex-direction: column; }
+  .config-root .attribute-save-note { display: none; }
+  .config-root .attribute-workbench-actions { padding-right: 14px; padding-left: 14px; }
 }
 
 /* Final single-page configuration workspace. */
@@ -1915,4 +2304,26 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .formula-binding-panel,
   .config-root .modal-actions { padding-right: 18px; padding-left: 18px; }
   .config-root .modal-tip { margin-right: 18px; margin-left: 18px; }
+}
+
+/* Final cascade guards for the workbench against legacy modal rules above. */
+.config-root .overlay .attribute-modal.attribute-workbench {
+  width: min(100%, 1320px);
+  max-width: 1320px;
+  overflow: hidden;
+}
+.config-root .attribute-workbench .attribute-workbench-actions {
+  position: static;
+  padding: 15px 24px;
+}
+.config-root .attribute-workbench .attribute-workbench-panel > .timer-binding-panel,
+.config-root .attribute-workbench .attribute-workbench-panel > .formula-binding-panel {
+  border-top: 0;
+  padding: 0;
+}
+@media (max-width: 980px) {
+  .config-root .overlay .attribute-modal.attribute-workbench {
+    width: 100%;
+    max-width: none;
+  }
 }

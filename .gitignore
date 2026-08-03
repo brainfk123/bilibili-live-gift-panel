@@ -1,6 +1,7 @@
 node_modules/
 dist/
 goserver/dist/
+artifacts/
 .superpowers/
 .tmp/
 *.local

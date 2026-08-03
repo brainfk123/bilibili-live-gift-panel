@@ -1,11 +1,13 @@
 import { el } from '../common';
-import type { WizardStep } from './wizard';
+import type { TutorialLesson } from '../../types';
+import { TUTORIAL_LESSONS } from './wizard';
 
 interface SpotlightGuideContext {
   host: HTMLElement;
-  step: WizardStep;
+  lesson: TutorialLesson;
   editorOpen: boolean;
   onDismiss: () => void;
+  onSkipLesson: () => void;
 }
 
 export interface SpotlightGuideElement extends HTMLElement {
@@ -13,58 +15,74 @@ export interface SpotlightGuideElement extends HTMLElement {
 }
 
 interface GuideCopy {
-  target: string;
-  eyebrow: string;
+  targets: string[];
   title: string;
   body: string;
   action: string;
 }
 
-function guideCopy(step: WizardStep, editorOpen: boolean): GuideCopy {
-  if (step === 'room') {
-    return {
-      target: '.guide-room-input',
-      eyebrow: '先完成直播连接',
-      title: '填写你的直播间房间号',
-      body: '复制 live.bilibili.com/ 后面的数字，填好后点击“测试连接”。',
-      action: '开始填写',
-    };
-  }
-  if (step === 'attributes') {
-    return {
-      target: '.guide-attribute-add',
-      eyebrow: '第 2 步',
-      title: '添加第一个属性',
-      body: '点击“添加属性”打开配置面板，例如创建“加班时间”或“挑战次数”。',
-      action: '添加属性',
-    };
-  }
-  if (step === 'rules' && editorOpen) {
-    return {
-      target: '.guide-gift-search',
-      eyebrow: '第 3 步',
-      title: '添加礼物并配置规则',
-      body: '选择一个或多个礼物，填写各自的规则名称和规则，然后点击“创建属性”保存。',
-      action: '开始配置',
-    };
-  }
-  if (step === 'rules') {
-    return {
-      target: '.guide-attribute-edit',
-      eyebrow: '第 3 步',
-      title: '补充礼物和规则',
-      body: '打开属性，至少选择一个礼物并配置规则；保存后教程会进入 OBS 步骤。',
-      action: '继续配置',
-    };
-  }
-  return {
-    target: '.guide-obs-copy',
-    eyebrow: '第 4 步',
-    title: '复制 OBS 链接',
-    body: '把专属链接添加到 OBS“浏览器”来源后就可以关闭这个网页。托盘后台运行时会继续接收礼物并计算属性；OBS 链接只负责显示，临时关闭也不会中断计算。需要修改时单击托盘图标。',
-    action: '复制地址',
-  };
-}
+const GUIDE_COPY: Record<TutorialLesson, GuideCopy> = {
+  room: {
+    targets: ['.guide-room-input'],
+    title: '填写你的直播间房间号',
+    body: '填写直播间网址末尾的数字，再点击“测试连接”。连接成功后，托盘后台才会接收礼物。',
+    action: '填写房间号',
+  },
+  attribute: {
+    targets: ['.guide-attribute-add'],
+    title: '添加第一个属性',
+    body: '属性是一份会被礼物规则和定时器修改的数据。先打开属性工作台。',
+    action: '添加属性',
+  },
+  basics: {
+    targets: ['.guide-overtime-template'],
+    title: '套用加班机模板',
+    body: '模板会填入“加班时间”、初始值 0 和计时器格式。名称和值参与计算，显示格式只影响 OBS。',
+    action: '使用模板',
+  },
+  gift: {
+    targets: ['.guide-add-gift', '.guide-gift-search'],
+    title: '选择一种观众礼物',
+    body: '一个属性可以绑定任意数量的礼物。先添加一种，之后随时可以回来继续加。',
+    action: '添加礼物',
+  },
+  rule: {
+    targets: ['.guide-rule-simulator', '.guide-add-gift'],
+    title: '决定礼物如何改变时间',
+    body: '选择增加、按价格增加、设为固定值或随机增加，再模拟收到 1 个礼物。模拟只预览，不改真实数值。',
+    action: '模拟一次',
+  },
+  timer: {
+    targets: ['.guide-timer-simulator', '.guide-add-timer'],
+    title: '让时间自动减少',
+    body: '定时器由托盘后台独立运行；条件可限制“只有加班时间大于 0 时”才执行。先添加，再模拟一次。',
+    action: '配置定时器',
+  },
+  preset: {
+    targets: ['.guide-save-preset'],
+    title: '保存可复用的规则',
+    body: '预设保存计算方法。以后配置其他礼物时，可以一键套用，不必重新输入。',
+    action: '保存预设',
+  },
+  save: {
+    targets: ['.guide-attribute-save'],
+    title: '保存并交给后台校验',
+    body: '保存时后台会校验礼物规则和定时器；只有全部有效才会写入本机配置。',
+    action: '创建属性',
+  },
+  enable: {
+    targets: ['.guide-rule-toggle'],
+    title: '启用真正的礼物响应',
+    body: '卡片开关控制后台是否执行这条规则。关闭的规则仍会保留，但不会改变属性，也不会出现在 OBS 中。',
+    action: '启用规则',
+  },
+  output: {
+    targets: ['.guide-obs-copy'],
+    title: '把面板放进 OBS',
+    body: '复制链接并添加为 OBS“浏览器”来源。之后可关闭配置页；托盘后台会继续收礼、计算和更新 OBS。',
+    action: '复制 OBS 链接',
+  },
+};
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
@@ -94,7 +112,7 @@ function positionGuide(target: HTMLElement | null, focus: HTMLElement, bubble: H
   focus.style.width = `${Math.max(44, rect.width + pad * 2)}px`;
   focus.style.height = `${Math.max(44, rect.height + pad * 2)}px`;
 
-  const width = Math.min(360, window.innerWidth - 32);
+  const width = Math.min(380, window.innerWidth - 32);
   bubble.style.width = `${width}px`;
   const left = clamp(rect.left + rect.width / 2 - width / 2, 16, window.innerWidth - width - 16);
   const above = rect.top - bubble.offsetHeight - 18;
@@ -107,20 +125,24 @@ function positionGuide(target: HTMLElement | null, focus: HTMLElement, bubble: H
 }
 
 export function renderSpotlightGuide(context: SpotlightGuideContext): SpotlightGuideElement {
-  const copy = guideCopy(context.step, context.editorOpen);
+  const copy = GUIDE_COPY[context.lesson];
+  const lessonIndex = TUTORIAL_LESSONS.findIndex((lesson) => lesson.id === context.lesson);
   const frame = el('div', { class: 'tour-prototype tour-variant-spotlight' }) as unknown as SpotlightGuideElement;
   frame.classList.toggle('is-modal-step', context.editorOpen);
-  const target = context.host.querySelector(copy.target) as HTMLElement | null;
+  const target = copy.targets
+    .map((selector) => context.host.querySelector(selector) as HTMLElement | null)
+    .find((candidate) => candidate && !candidate.hidden) ?? null;
   const focus = el('div', { class: 'tour-focus', ariaHidden: 'true' } as any);
-  const bubble = el('section', { class: 'tour-bubble', role: 'dialog', ariaLabel: '配置提示' } as any);
+  const bubble = el('section', { class: 'tour-bubble', role: 'dialog', ariaLabel: '训练提示' } as any);
   bubble.append(
-    el('div', { class: 'tour-bubble-eyebrow', text: copy.eyebrow }),
+    el('div', { class: 'tour-bubble-eyebrow', text: `加班机训练 · ${lessonIndex + 1}/${TUTORIAL_LESSONS.length}` }),
     el('h2', { class: 'tour-bubble-title', text: copy.title }),
     el('p', { class: 'tour-bubble-body', text: copy.body }),
   );
 
   const footer = el('div', { class: 'tour-bubble-footer' });
-  const skip = el('button', { class: 'tour-bubble-skip', type: 'button', text: '暂时跳过' }) as HTMLButtonElement;
+  const exit = el('button', { class: 'tour-bubble-skip', type: 'button', text: '退出训练' }) as HTMLButtonElement;
+  const skip = el('button', { class: 'tour-bubble-skip', type: 'button', text: '跳过本关' }) as HTMLButtonElement;
   const action = el('button', { class: 'btn tour-bubble-action', type: 'button', text: copy.action }) as HTMLButtonElement;
   let positionQueued = false;
   const position = (): void => {
@@ -146,19 +168,22 @@ export function renderSpotlightGuide(context: SpotlightGuideContext): SpotlightG
     }
     frame.remove();
   };
-  const skipTutorial = (): void => {
+  exit.onclick = () => {
     frame.dispose();
     context.onDismiss();
   };
-  skip.onclick = skipTutorial;
+  skip.onclick = () => {
+    frame.dispose();
+    context.onSkipLesson();
+  };
   action.onclick = () => {
     frame.dispose();
     if (target?.tagName === 'INPUT') (target as HTMLInputElement).focus();
     else if (typeof target?.click === 'function') target.click();
     else (target as any)?.onclick?.();
-    if (context.step === 'obs') context.onDismiss();
+    if (context.lesson === 'output') context.onDismiss();
   };
-  footer.append(skip, action);
+  footer.append(exit, skip, action);
   bubble.append(footer);
   frame.append(focus, bubble);
   context.host.append(frame);

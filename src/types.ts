@@ -37,6 +37,18 @@ export interface TimerRule {
 
 export type FormulaPresetContext = 'gift' | 'timer';
 
+export type TutorialLesson =
+  | 'room'
+  | 'attribute'
+  | 'basics'
+  | 'gift'
+  | 'rule'
+  | 'timer'
+  | 'preset'
+  | 'save'
+  | 'enable'
+  | 'output';
+
 export interface FormulaPreset {
   id: string;
   name: string;
@@ -107,6 +119,8 @@ export interface Settings {
   giftView: 'list' | 'grid';
   panelOpacity: number;
   showTutorial: boolean;
+  tutorialVersion: number;
+  tutorialCompletedLessons: TutorialLesson[];
   autoUpdate: boolean;
 }
 

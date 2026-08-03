@@ -20,11 +20,14 @@ describe('storage', () => {
     s.roomId = '2145';
     s.attributes.push({ name: '加班时间', value: 3600, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' });
     s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: 'price/1000*60' });
+    s.settings.tutorialCompletedLessons = ['room', 'attribute'];
     saveState(s);
     const loaded = loadState();
     expect(loaded.roomId).toBe('2145');
     expect(loaded.attributes[0].value).toBe(3600);
     expect(loaded.rules).toHaveLength(1);
+    expect(loaded.settings.tutorialVersion).toBe(2);
+    expect(loaded.settings.tutorialCompletedLessons).toEqual(['room', 'attribute']);
   });
 
   it('loads and normalizes the disk configuration from the server', async () => {
@@ -38,6 +41,8 @@ describe('storage', () => {
     expect(loaded.settings.giftView).toBe('list');
     expect(loaded.settings.panelOpacity).toBe(55);
     expect(loaded.settings.showTutorial).toBe(true);
+    expect(loaded.settings.tutorialVersion).toBe(2);
+    expect(loaded.settings.tutorialCompletedLessons).toEqual([]);
     expect(consumeConfigMigrationRequired()).toBe(true);
   });
 

@@ -502,7 +502,11 @@ func maxInt(left, right int) int {
 }
 
 func formulaPreview(state appState, formula, attributeName string, attributeValue float64) (float64, error) {
-	environment := map[string]float64{"price": 1000}
+	return formulaPreviewWithPrice(state, formula, attributeName, attributeValue, 1000)
+}
+
+func formulaPreviewWithPrice(state appState, formula, attributeName string, attributeValue, giftPrice float64) (float64, error) {
+	environment := map[string]float64{"price": giftPrice}
 	for _, attribute := range state.Attributes {
 		environment[attribute.Name] = attribute.Value
 	}

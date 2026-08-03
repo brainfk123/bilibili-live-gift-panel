@@ -1,4 +1,4 @@
-import { AppState, Attribute, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule } from '../../types';
+import { AppState, Attribute, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson } from '../../types';
 import { consumeConfigMigrationRequired, loadState, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { el, fieldControl, inputField, toast } from '../common';
@@ -20,14 +20,25 @@ import {
   UpdateStatus,
 } from '../../backend';
 import { createBrandIcon } from '../brand';
-import { getTutorialStep } from './wizard';
+import {
+  getTutorialLesson,
+  getTutorialLessonStates,
+  markTutorialLessonComplete,
+  resetTutorialProgress,
+  sectionForTutorialLesson,
+  TUTORIAL_LESSONS,
+  type TutorialEditorProgress,
+} from './wizard';
 import { renderSpotlightGuide, type SpotlightGuideElement } from './spotlight-guide';
+import { createAttributeWorkspace, type AttributeWorkspace } from './attribute-workspace';
 
 interface SelectedGiftRule {
   gift: GiftInfo;
   formulaName: string;
   formula: string;
   enabled: boolean;
+  quickOperation?: 'add' | 'price' | 'set' | 'random' | 'advanced';
+  quickAmount?: number;
   previous?: GiftRule;
   matchGiftIds?: number[];
   blindBoxName?: string;
@@ -56,6 +67,9 @@ export function mountConfig(root: HTMLElement): void {
   let activeGuide: SpotlightGuideElement | null = null;
   let editorOpen = false;
   let editorGuideEnabled = false;
+  let forcedTutorialLesson: TutorialLesson | null = null;
+  let editorTutorialProgress: TutorialEditorProgress = { open: false };
+  let activeEditorWorkspace: AttributeWorkspace | null = null;
   let runtimeRefreshPromise: Promise<void> | null = null;
   let stateRefreshActive = false;
   let authRefreshActive = false;
@@ -79,7 +93,7 @@ export function mountConfig(root: HTMLElement): void {
     el('strong', { text: '直播礼物面板' }),
   ]));
   const themeToggle = el('button', { class: 'theme-toggle', type: 'button' }) as HTMLButtonElement;
-  const guideToggle = el('button', { class: 'theme-toggle', type: 'button', text: '显示教程' }) as HTMLButtonElement;
+  const guideToggle = el('button', { class: 'theme-toggle training-toggle', type: 'button', text: '训练任务' }) as HTMLButtonElement;
   const status = el('div', { class: 'app-status' });
   const headerActions = el('div', { class: 'app-header-actions' });
   headerActions.append(guideToggle, themeToggle, status);
@@ -274,28 +288,157 @@ export function mountConfig(root: HTMLElement): void {
     save();
   };
   guideToggle.onclick = () => {
-    guideDismissed = false;
-    state.settings.showTutorial = true;
-    save();
-    renderGuide();
+    openTrainingCenter();
   };
+
+  function activeTutorialLesson(): TutorialLesson | null {
+    return forcedTutorialLesson ?? getTutorialLesson(
+      state,
+      connectionState === 'connected',
+      editorTutorialProgress,
+    );
+  }
+
+  function updateTrainingToggle(): void {
+    const lessons = getTutorialLessonStates(
+      state,
+      connectionState === 'connected',
+      editorTutorialProgress,
+      forcedTutorialLesson,
+    );
+    const done = lessons.filter((lesson) => lesson.done).length;
+    guideToggle.textContent = `训练任务 ${done}/${lessons.length}`;
+  }
+
+  function refreshEditorTutorial(navigate = true): void {
+    const lesson = activeTutorialLesson();
+    const lessons = getTutorialLessonStates(
+      state,
+      connectionState === 'connected',
+      editorTutorialProgress,
+      forcedTutorialLesson,
+    ).filter((item) => item.section);
+    activeEditorWorkspace?.updateLessons(lessons);
+    activeEditorWorkspace?.refreshBadges();
+    activeEditorWorkspace?.setTrainingVisible(!guideDismissed && (editorGuideEnabled || forcedTutorialLesson !== null));
+    if (navigate && lesson && activeEditorWorkspace && (editorGuideEnabled || forcedTutorialLesson !== null)) {
+      activeEditorWorkspace.setSection(sectionForTutorialLesson(lesson));
+    }
+    updateTrainingToggle();
+    renderGuide();
+  }
+
+  function openTrainingCenter(): void {
+    root.querySelector('.training-center-overlay')?.remove();
+    const overlay = el('div', { class: 'overlay training-center-overlay' });
+    const dialog = el('section', {
+      class: 'card training-center',
+      role: 'dialog',
+      ariaLabel: '加班机训练中心',
+    } as any);
+    const close = (): void => overlay.remove();
+    const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭' } as any) as HTMLButtonElement;
+    closeButton.onclick = close;
+    const lessonList = el('ol', { class: 'training-center-lessons' });
+    const lessons = getTutorialLessonStates(
+      state,
+      connectionState === 'connected',
+      editorTutorialProgress,
+      forcedTutorialLesson,
+    );
+    const beginLesson = (lesson: TutorialLesson): void => {
+      forcedTutorialLesson = lesson;
+      guideDismissed = false;
+      state.settings.showTutorial = true;
+      save();
+      close();
+      if (sectionForTutorialLesson(lesson) !== 'overview' || ['basics'].includes(lesson)) {
+        if (!editorOpen) openAttributeEditor(state.attributes.length > 0 ? 0 : undefined);
+        else refreshEditorTutorial();
+        return;
+      }
+      renderGuide();
+    };
+    lessons.forEach((lesson, index) => {
+      const review = el('button', {
+        class: `training-center-lesson${lesson.done ? ' is-done' : ''}${lesson.active ? ' is-active' : ''}`,
+        type: 'button',
+      }) as HTMLButtonElement;
+      review.append(
+        el('span', { class: 'training-center-number', text: lesson.done ? '✓' : String(index + 1) }),
+        el('span', { class: 'training-center-copy' }, [
+          el('strong', { text: lesson.label }),
+          el('small', { text: lesson.summary }),
+        ]),
+        el('span', { class: 'training-center-action', text: lesson.done ? '复习' : '开始' }),
+      );
+      review.onclick = () => beginLesson(lesson.id);
+      lessonList.append(el('li', {}, [review]));
+    });
+    const resetButton = el('button', { class: 'btn ghost', type: 'button', text: '重置训练进度' }) as HTMLButtonElement;
+    resetButton.onclick = () => {
+      resetTutorialProgress(state.settings);
+      forcedTutorialLesson = null;
+      guideDismissed = false;
+      save();
+      close();
+      render();
+    };
+    const resumeLesson = activeTutorialLesson() ?? 'room';
+    const resumeButton = el('button', { class: 'btn', type: 'button', text: '继续训练' }) as HTMLButtonElement;
+    resumeButton.onclick = () => beginLesson(resumeLesson);
+    dialog.append(
+      el('header', { class: 'modal-header training-center-header' }, [
+        el('div', {}, [
+          el('span', { class: 'section-kicker', text: '随时可重玩' }),
+          el('h2', { text: '加班机训练中心' }),
+          el('p', { text: '跟着真实任务做一遍；模拟按钮只计算结果，不会修改直播中的属性值。' }),
+        ]),
+        closeButton,
+      ]),
+      lessonList,
+      el('footer', { class: 'modal-actions' }, [resetButton, resumeButton]),
+    );
+    overlay.append(dialog);
+    overlay.onclick = (event) => {
+      if (event.target === overlay) close();
+    };
+    root.append(overlay);
+  }
 
   function renderGuide(): void {
     activeGuide?.dispose();
     activeGuide = null;
+    updateTrainingToggle();
     if (guideDismissed) return;
-    const step = getTutorialStep(state, connectionState === 'connected', editorOpen);
-    if (editorOpen && !editorGuideEnabled) return;
-    if (editorOpen && step === 'obs') return;
+    const lesson = activeTutorialLesson();
+    if (!lesson) return;
+    if (editorOpen && !editorGuideEnabled && forcedTutorialLesson === null) return;
+    if (editorOpen && activeEditorWorkspace) {
+      activeEditorWorkspace.setSection(sectionForTutorialLesson(lesson));
+    }
     activeGuide = renderSpotlightGuide({
       host: root,
-      step,
+      lesson,
       editorOpen,
       onDismiss: () => {
         guideDismissed = true;
+        editorGuideEnabled = false;
+        forcedTutorialLesson = null;
         state.settings.showTutorial = false;
         save();
+        activeEditorWorkspace?.setTrainingVisible(false);
+        const editorKicker = root.querySelector<HTMLElement>('.attribute-workbench-header .section-kicker');
+        const editorTitle = root.querySelector<HTMLElement>('.attribute-workbench-header h2');
+        if (editorKicker) editorKicker.textContent = '属性工作台';
+        if (editorTitle?.textContent === '制作第一台加班机') editorTitle.textContent = '创建互动属性';
         activeGuide = null;
+      },
+      onSkipLesson: () => {
+        markTutorialLessonComplete(state.settings, lesson);
+        forcedTutorialLesson = null;
+        save();
+        refreshEditorTutorial();
       },
     });
   }
@@ -618,7 +761,7 @@ export function mountConfig(root: HTMLElement): void {
         const updateEnabledAppearance = (enabled: boolean): void => {
           ruleCard.classList.toggle('is-disabled', !enabled);
         };
-        const enabledButton = createEnabledButton(toggleLabel, 'gift-rule-enabled-button', rule.enabled !== false, (enabled) => {
+        const enabledButton = createEnabledButton(toggleLabel, 'gift-rule-enabled-button guide-rule-toggle', rule.enabled !== false, (enabled) => {
           const currentRule = state.rules.find((candidate) => candidate.id === rule.id);
           if (!currentRule) {
             render();
@@ -627,6 +770,7 @@ export function mountConfig(root: HTMLElement): void {
           currentRule.enabled = enabled;
           updateEnabledAppearance(enabled);
           save();
+          renderGuide();
         });
         ruleCard.append(
           giftImage,
@@ -690,6 +834,13 @@ export function mountConfig(root: HTMLElement): void {
         obsInput.select();
         toast('请按 Ctrl+C 复制地址', root);
       }
+      markTutorialLessonComplete(state.settings, 'output');
+      state.settings.showTutorial = false;
+      guideDismissed = true;
+      forcedTutorialLesson = null;
+      activeGuide?.dispose();
+      activeGuide = null;
+      save();
     };
     const obsRow = el('div', { class: 'attribute-obs-row' }, [
       el('span', { class: 'attribute-obs-label', text: 'OBS 专属链接' }),
@@ -851,11 +1002,14 @@ export function mountConfig(root: HTMLElement): void {
     activeGuide?.dispose();
     activeGuide = null;
     root.querySelector('.attribute-overlay')?.remove();
-    const stepBeforeOpen = getTutorialStep(state, connectionState === 'connected', false);
+    const lessonBeforeOpen = activeTutorialLesson();
     editorOpen = true;
-    editorGuideEnabled = index === undefined
-      && !guideDismissed
-      && (stepBeforeOpen === 'attributes' || stepBeforeOpen === 'rules');
+    editorGuideEnabled = !guideDismissed && (
+      (index === undefined && lessonBeforeOpen === 'attribute')
+      || (forcedTutorialLesson !== null && TUTORIAL_LESSONS.some((lesson) => (
+        lesson.id === forcedTutorialLesson && lesson.section
+      )))
+    );
 
     const original = index === undefined ? undefined : state.attributes[index];
     const originalName = original?.name ?? '';
@@ -885,25 +1039,38 @@ export function mountConfig(root: HTMLElement): void {
       }
     }
 
+    editorTutorialProgress = {
+      open: true,
+      isNew: index === undefined,
+      giftCount: selected.size,
+      timerCount: timerRules.length,
+    };
+
     const overlay = el('div', { class: 'overlay attribute-overlay' });
-    const modal = el('section', { class: 'card attribute-modal', role: 'dialog', ariaLabel: original ? `编辑属性 ${original.name}` : '添加属性' } as any);
+    let modal: HTMLElement;
     const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭' } as any) as HTMLButtonElement;
     const close = (): void => {
       overlay.remove();
       editorOpen = false;
       editorGuideEnabled = false;
+      editorTutorialProgress = { open: false };
+      activeEditorWorkspace = null;
+      forcedTutorialLesson = null;
       refreshOpenGiftCatalog = null;
       renderGuide();
     };
     closeButton.onclick = close;
-    modal.append(el('header', { class: 'modal-header' }, [
+    const modalHeader = el('header', { class: 'modal-header attribute-workbench-header' }, [
       el('div', {}, [
-        el('span', { class: 'section-kicker', text: original ? '编辑互动属性' : '新建互动属性' }),
-        el('h2', { text: original ? `配置“${original.name}”` : '添加属性并绑定礼物' }),
-        el('p', { text: '属性基础信息、礼物选择和每个礼物的规则都在这里完成。' }),
+        el('span', {
+          class: 'section-kicker',
+          text: original ? '属性工作台' : editorGuideEnabled ? '新手实战 · 加班机' : '新建互动属性',
+        }),
+        el('h2', { text: original ? `配置“${original.name}”` : editorGuideEnabled ? '制作第一台加班机' : '创建互动属性' }),
+        el('p', { text: '按工作区逐项配置；左侧训练任务会解释每项功能为什么存在。' }),
       ]),
       closeButton,
-    ]));
+    ]);
 
     const nameInput = inputField('属性名称', original?.name ?? `属性${state.attributes.length + 1}`);
     nameInput.placeholder = '例如 加班时间';
@@ -912,6 +1079,7 @@ export function mountConfig(root: HTMLElement): void {
       for (const label of Array.from(modal.querySelectorAll('.formula-target-name'))) {
         label.textContent = `${targetName} =`;
       }
+      updateOverviewPreview();
     };
     const valueInput = inputField('当前值', String(original?.value ?? 0));
     valueInput.inputMode = 'decimal';
@@ -929,15 +1097,72 @@ export function mountConfig(root: HTMLElement): void {
     const updateSuffixVisibility = (): void => {
       suffixControl.hidden = formatSelect.value !== 'suffix';
     };
-    formatSelect.onchange = updateSuffixVisibility;
+    formatSelect.onchange = () => {
+      updateSuffixVisibility();
+      updateOverviewPreview();
+    };
     updateSuffixVisibility();
     const basics = el('div', { class: 'attribute-basics' }, [
       fieldControl(nameInput),
       fieldControl(valueInput),
       el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '显示格式' }), formatSelect]),
       suffixControl,
-      broadcastMessageControl,
     ]);
+    const overviewPreviewName = el('span', { class: 'attribute-overview-preview-name' });
+    const overviewPreviewValue = el('strong', { class: 'attribute-overview-preview-value' });
+    const updateOverviewPreview = (): void => {
+      const value = Number(valueInput.value);
+      const format = formatSelect.value as Attribute['format'];
+      const previewAttribute: Attribute = {
+        name: nameInput.value.trim() || '属性名称',
+        value: Number.isFinite(value) ? value : 0,
+        unit: format === 'hhmmss' ? 'seconds' : 'none',
+        format,
+        decimals: original?.decimals ?? 0,
+        suffix: format === 'suffix' ? suffixInput.value : '',
+        broadcastMessage: broadcastMessageInput.value.trim(),
+      };
+      overviewPreviewName.textContent = previewAttribute.name;
+      overviewPreviewValue.textContent = formatValue(previewAttribute.value, previewAttribute);
+    };
+    valueInput.oninput = updateOverviewPreview;
+    suffixInput.oninput = updateOverviewPreview;
+    const templateButton = el('button', {
+      class: 'btn guide-overtime-template',
+      type: 'button',
+      text: '使用加班机模板',
+    }) as HTMLButtonElement;
+    templateButton.onclick = () => {
+      nameInput.value = '加班时间';
+      valueInput.value = '0';
+      formatSelect.value = 'hhmmss';
+      suffixInput.value = '';
+      if (!broadcastMessageInput.value.trim()) broadcastMessageInput.value = '感谢大家的支持，欢迎投喂礼物';
+      updateSuffixVisibility();
+      for (const label of Array.from(modal.querySelectorAll('.formula-target-name'))) {
+        label.textContent = '加班时间 =';
+      }
+      editorTutorialProgress.basicsConfigured = true;
+      updateOverviewPreview();
+      refreshEditorTutorial();
+      toast('已套用加班机模板', root);
+    };
+    const overviewPanel = el('section', { class: 'attribute-overview-panel' }, [
+      el('div', { class: 'workbench-lesson-card' }, [
+        el('span', { class: 'workbench-lesson-icon', text: '01' }),
+        el('div', {}, [
+          el('strong', { text: '先定义后台要保存的数据' }),
+          el('p', { text: '属性名称会出现在规则中；当前值是计算起点；显示格式只改变 OBS 中的呈现。' }),
+        ]),
+        templateButton,
+      ]),
+      basics,
+      el('div', { class: 'attribute-overview-preview' }, [
+        el('span', { text: 'OBS 数值预览' }),
+        el('div', {}, [overviewPreviewName, overviewPreviewValue]),
+      ]),
+    ]);
+    updateOverviewPreview();
 
     const currentAttributeName = (): string => nameInput.value.trim() || originalName || '属性';
     const formulaForCurrentAttribute = (formula: string): string => (
@@ -992,6 +1217,7 @@ export function mountConfig(root: HTMLElement): void {
             await saveAndWait();
             refreshFormulaPresetLists(context);
             close();
+            refreshEditorTutorial();
             toast(result.created ? '规则预设已保存' : '同名规则预设已更新', root);
           } catch (error) {
             toast(error instanceof Error ? error.message : '规则预设保存失败', root);
@@ -1026,7 +1252,7 @@ export function mountConfig(root: HTMLElement): void {
       updatePreview: () => void,
     ): { saveButton: HTMLButtonElement; presetList: HTMLElement } {
       const saveButton = el('button', {
-        class: 'formula-save-preset',
+        class: `formula-save-preset${context === 'gift' ? ' guide-save-preset' : ''}`,
         type: 'button',
         text: '保存预设',
       }) as HTMLButtonElement;
@@ -1090,7 +1316,10 @@ export function mountConfig(root: HTMLElement): void {
       removeButton.onclick = () => {
         const timerIndex = timerRules.findIndex((candidate) => candidate.id === rule.id);
         if (timerIndex >= 0) timerRules.splice(timerIndex, 1);
+        editorTutorialProgress.timerCount = timerRules.length;
+        editorTutorialProgress.timerPreviewed = false;
         renderTimerRules();
+        refreshEditorTutorial(false);
       };
       editor.append(el('div', { class: 'timer-rule-header' }, [
         el('div', { class: 'timer-rule-title' }, [
@@ -1158,7 +1387,7 @@ export function mountConfig(root: HTMLElement): void {
 
       const preview = el('div', { class: 'formula-preview' });
       let previewVersion = 0;
-      const updatePreview = (): void => {
+      const updatePreview = (completeLesson = false): void => {
         rule.formula = formulaInput.value;
         const name = nameInput.value.trim() || originalName || '属性';
         const value = Number(valueInput.value);
@@ -1181,12 +1410,20 @@ export function mountConfig(root: HTMLElement): void {
           if (requestVersion !== previewVersion) return;
           if (skipped) {
             preview.replaceChildren(el('span', { text: '当前条件不满足，本次会跳过' }));
+            if (completeLesson) {
+              editorTutorialProgress.timerPreviewed = true;
+              refreshEditorTutorial();
+            }
             return;
           }
           preview.replaceChildren(
             el('span', { text: `预览：${currentValue} → ` }),
             el('strong', { text: String(result) }),
           );
+          if (completeLesson) {
+            editorTutorialProgress.timerPreviewed = true;
+            refreshEditorTutorial();
+          }
         }).catch((error) => {
           if (requestVersion !== previewVersion) return;
           preview.replaceChildren(el('span', {
@@ -1195,7 +1432,7 @@ export function mountConfig(root: HTMLElement): void {
           }));
         });
       };
-      formulaInput.oninput = updatePreview;
+      formulaInput.oninput = () => updatePreview();
 
       const examples = el('div', { class: 'formula-examples' });
       const presetControls = renderFormulaPresetControls('timer', formulaInput, formulaNameInput, updatePreview);
@@ -1214,6 +1451,12 @@ export function mountConfig(root: HTMLElement): void {
         examples.append(example);
       }
       examples.append(presetControls.presetList);
+      const simulateButton = el('button', {
+        class: 'btn ghost formula-simulate guide-timer-simulator',
+        type: 'button',
+        text: '模拟执行一次',
+      }) as HTMLButtonElement;
+      simulateButton.onclick = () => updatePreview(true);
 
       editor.append(
         el('div', { class: 'timer-rule-fields' }, [
@@ -1222,13 +1465,13 @@ export function mountConfig(root: HTMLElement): void {
           fieldControl(conditionInput),
           formulaControl,
         ]),
-        el('div', { class: 'formula-editor-meta' }, [examples, preview]),
+        el('div', { class: 'formula-editor-meta' }, [examples, el('div', { class: 'formula-preview-row' }, [preview, simulateButton])]),
       );
       updatePreview();
       return editor;
     }
 
-    const addTimerButton = el('button', { class: 'btn ghost add-timer-button', type: 'button', text: '+ 添加定时器' }) as HTMLButtonElement;
+    const addTimerButton = el('button', { class: 'btn ghost add-timer-button guide-add-timer', type: 'button', text: '+ 添加定时器' }) as HTMLButtonElement;
     addTimerButton.onclick = () => {
       const attributeName = nameInput.value.trim() || '属性';
       timerRules.push({
@@ -1240,8 +1483,11 @@ export function mountConfig(root: HTMLElement): void {
         formula: `MAX(${attributeName}-60,0)`,
         enabled: true,
       });
+      editorTutorialProgress.timerCount = timerRules.length;
+      editorTutorialProgress.timerPreviewed = false;
       renderTimerRules();
       timerList.querySelector('.timer-rule-editor:last-child')?.scrollIntoView({ block: 'nearest' });
+      refreshEditorTutorial(false);
     };
     const timerPanel = el('section', { class: 'timer-binding-panel' }, [
       el('div', { class: 'modal-section-heading' }, [
@@ -1262,6 +1508,13 @@ export function mountConfig(root: HTMLElement): void {
     const giftPicker = el('div', { class: 'gift-picker-grid' });
     const selectedRules = el('div', { class: 'selected-rules' });
     const selectionCount = el('span', { class: 'selection-count' });
+    const giftDrawer = el('aside', { class: 'gift-picker-drawer', ariaLabel: '添加礼物' } as any);
+    giftDrawer.hidden = true;
+    const setGiftDrawerOpen = (open: boolean): void => {
+      giftDrawer.hidden = !open;
+      giftDrawer.classList.toggle('is-open', open);
+      if (open) giftSearch.focus();
+    };
     const giftChoiceButtons = new Map<number, HTMLButtonElement>();
     const giftPickerBatchSize = 40;
     let filteredGifts: GiftInfo[] = [];
@@ -1314,12 +1567,25 @@ export function mountConfig(root: HTMLElement): void {
       button.onclick = () => {
         if (selected.has(gift.id)) selected.delete(gift.id);
         else {
-          const item: SelectedGiftRule = { gift, formulaName: `${gift.name}规则`, formula: defaultFormula(), enabled: true };
+          const item: SelectedGiftRule = {
+            gift,
+            formulaName: `${gift.name}规则`,
+            formula: defaultFormula(),
+            enabled: !editorGuideEnabled,
+            quickOperation: 'price',
+            quickAmount: 60,
+          };
           selected.set(gift.id, item);
           void hydrateBlindBoxRule(item);
         }
+        editorTutorialProgress.giftCount = selected.size;
+        editorTutorialProgress.giftPreviewed = false;
         updateGiftChoice(gift.id);
         renderSelectedRules();
+        if (editorGuideEnabled && selected.size > 0 && activeTutorialLesson() === 'rule') {
+          setGiftDrawerOpen(false);
+        }
+        refreshEditorTutorial();
       };
       giftChoiceButtons.set(gift.id, button);
       return button;
@@ -1438,8 +1704,11 @@ export function mountConfig(root: HTMLElement): void {
       const removeButton = el('button', { class: 'rule-remove', type: 'button', text: '移除' }) as HTMLButtonElement;
       removeButton.onclick = () => {
         selected.delete(item.gift.id);
+        editorTutorialProgress.giftCount = selected.size;
+        editorTutorialProgress.giftPreviewed = false;
         updateGiftChoice(item.gift.id);
         renderSelectedRules();
+        refreshEditorTutorial(false);
       };
       const giftImage = el('img', { class: 'selected-rule-gift-image', alt: '' }) as HTMLImageElement;
       giftImage.src = item.gift.imgBasic || transparentPixel();
@@ -1480,7 +1749,7 @@ export function mountConfig(root: HTMLElement): void {
       );
       const preview = el('div', { class: 'formula-preview' });
       let previewVersion = 0;
-      const updatePreview = (): void => {
+      const updatePreview = (completeLesson = false): void => {
         item.formula = formulaInput.value;
         preview.replaceChildren();
         const name = nameInput.value.trim() || originalName || '属性';
@@ -1491,12 +1760,16 @@ export function mountConfig(root: HTMLElement): void {
         const currentValue = Number.isFinite(value) ? value : 0;
         const requestVersion = ++previewVersion;
         preview.append(el('span', { text: '由后台计算预览…' }));
-        void previewFormula(formula, name, currentValue).then((result) => {
+        void previewFormula(formula, name, currentValue, 'gift', item.gift.price).then((result) => {
           if (requestVersion !== previewVersion) return;
           preview.replaceChildren(
-            el('span', { text: `预览：${currentValue} → ` }),
+            el('span', { text: `模拟 1 个 ${item.gift.name}：${currentValue} → ` }),
             el('strong', { text: String(result) }),
           );
+          if (completeLesson) {
+            editorTutorialProgress.giftPreviewed = true;
+            refreshEditorTutorial();
+          }
         }).catch((error) => {
           if (requestVersion !== previewVersion) return;
           preview.replaceChildren(
@@ -1504,10 +1777,83 @@ export function mountConfig(root: HTMLElement): void {
           );
         });
       };
-      formulaInput.oninput = updatePreview;
+      const attributeName = nameInput.value.trim() || originalName || '属性';
+      const compactFormula = item.formula.replace(/\s+/g, '');
+      if (!item.quickOperation) {
+        if (compactFormula.startsWith(`${attributeName}+price/1000*`)) {
+          const amount = Number(compactFormula.slice(`${attributeName}+price/1000*`.length));
+          item.quickOperation = Number.isFinite(amount) ? 'price' : 'advanced';
+          item.quickAmount = Number.isFinite(amount) ? amount : 60;
+        } else if (compactFormula.startsWith(`${attributeName}+RANDBETWEEN(1,`) && compactFormula.endsWith(')')) {
+          const amount = Number(compactFormula.slice(`${attributeName}+RANDBETWEEN(1,`.length, -1));
+          item.quickOperation = Number.isFinite(amount) ? 'random' : 'advanced';
+          item.quickAmount = Number.isFinite(amount) ? amount : 60;
+        } else if (compactFormula.startsWith(`${attributeName}+`)) {
+          const amount = Number(compactFormula.slice(`${attributeName}+`.length));
+          item.quickOperation = Number.isFinite(amount) ? 'add' : 'advanced';
+          item.quickAmount = Number.isFinite(amount) ? amount : 60;
+        } else if (Number.isFinite(Number(compactFormula))) {
+          item.quickOperation = 'set';
+          item.quickAmount = Number(compactFormula);
+        } else {
+          item.quickOperation = 'advanced';
+          item.quickAmount = 60;
+        }
+      }
+      const operationSelect = el('select', { class: 'field-input quick-rule-operation' }) as HTMLSelectElement;
+      operationSelect.innerHTML = [
+        '<option value="add">固定增加</option>',
+        '<option value="price">按每 1 元增加</option>',
+        '<option value="set">设为固定值</option>',
+        '<option value="random">随机增加</option>',
+        '<option value="advanced">使用高级规则</option>',
+      ].join('');
+      operationSelect.value = item.quickOperation ?? 'advanced';
+      const amountInput = inputField('变化数值', String(item.quickAmount ?? 60));
+      amountInput.type = 'number';
+      amountInput.step = '1';
+      const quickUnit = el('span', { class: 'quick-rule-unit' });
+      const syncQuickCopy = (): void => {
+        const operation = operationSelect.value as SelectedGiftRule['quickOperation'];
+        const targetName = nameInput.value.trim() || originalName || '属性';
+        const labels: Record<NonNullable<SelectedGiftRule['quickOperation']>, string> = {
+          add: `让“${targetName}”增加`,
+          price: `每 1 元让“${targetName}”增加`,
+          set: `把“${targetName}”设为`,
+          random: `让“${targetName}”随机增加 1 到`,
+          advanced: '使用下方高级规则',
+        };
+        for (const option of Array.from(operationSelect.querySelectorAll('option'))) {
+          option.textContent = labels[option.value as NonNullable<SelectedGiftRule['quickOperation']>];
+        }
+        quickUnit.textContent = operation === 'advanced'
+          ? '在下方直接输入表达式'
+          : formatSelect.value === 'hhmmss' ? '秒' : '单位';
+        amountInput.hidden = operation === 'advanced';
+      };
+      const syncQuickRule = (): void => {
+        const operation = operationSelect.value as NonNullable<SelectedGiftRule['quickOperation']>;
+        const amount = Number(amountInput.value);
+        item.quickOperation = operation;
+        item.quickAmount = Number.isFinite(amount) ? amount : 0;
+        const targetName = nameInput.value.trim() || originalName || '属性';
+        if (operation === 'add') formulaInput.value = `${targetName}+${item.quickAmount}`;
+        if (operation === 'price') formulaInput.value = `${targetName}+price/1000*${item.quickAmount}`;
+        if (operation === 'set') formulaInput.value = String(item.quickAmount);
+        if (operation === 'random') formulaInput.value = `${targetName}+RANDBETWEEN(1,${item.quickAmount})`;
+        syncQuickCopy();
+        updatePreview();
+      };
+      operationSelect.onchange = syncQuickRule;
+      amountInput.oninput = syncQuickRule;
+      formulaInput.oninput = () => {
+        item.quickOperation = 'advanced';
+        operationSelect.value = 'advanced';
+        syncQuickCopy();
+        updatePreview();
+      };
       const examples = el('div', { class: 'formula-examples' });
-      const presetControls = renderFormulaPresetControls('gift', formulaInput, formulaNameInput, updatePreview);
-      formulaHeading.append(presetControls.saveButton);
+      const presetControls = renderFormulaPresetControls('gift', formulaInput, formulaNameInput, () => updatePreview());
       const exampleFactories: Array<[string, () => string]> = [
         ['每个 +1', () => `${nameInput.value.trim() || '属性'}+1`],
         ['按价格增加时间', () => `${nameInput.value.trim() || '属性'}+price/1000*60`],
@@ -1517,17 +1863,44 @@ export function mountConfig(root: HTMLElement): void {
         const example = el('button', { class: 'formula-example', type: 'button', text: label }) as HTMLButtonElement;
         example.onclick = () => {
           formulaInput.value = makeFormula();
+          item.quickOperation = 'advanced';
+          operationSelect.value = 'advanced';
+          syncQuickCopy();
           updatePreview();
         };
         examples.append(example);
       }
-      examples.append(presetControls.presetList);
-      const editorFields = el('div', { class: 'rule-editor-fields' }, [
+      const simulateButton = el('button', {
+        class: 'btn formula-simulate guide-rule-simulator',
+        type: 'button',
+        text: '模拟收到 1 个',
+      }) as HTMLButtonElement;
+      simulateButton.onclick = () => updatePreview(true);
+      const quickBuilder = el('section', { class: 'quick-rule-builder' }, [
+        el('div', { class: 'quick-rule-heading' }, [
+          el('div', {}, [
+            el('strong', { text: '小白模式：用一句话配置' }),
+            el('small', { text: '后台仍会保存为同一套规则，可随时切换到高级输入。' }),
+          ]),
+          presetControls.saveButton,
+        ]),
         fieldControl(formulaNameInput),
-        formulaControl,
+        el('div', { class: 'quick-rule-sentence' }, [
+          el('span', { text: `每收到 1 个“${item.gift.name}”后` }),
+          operationSelect,
+          amountInput,
+          quickUnit,
+        ]),
+        el('div', { class: 'quick-rule-actions' }, [presetControls.presetList, simulateButton]),
       ]);
-      const editorMeta = el('div', { class: 'formula-editor-meta' }, [examples, preview]);
-      row.append(editorFields, editorMeta);
+      const advanced = el('details', { class: 'rule-advanced-settings' });
+      advanced.append(
+        el('summary', { text: '高级规则：直接编辑计算表达式' }),
+        formulaControl,
+        examples,
+      );
+      row.append(quickBuilder, advanced, preview);
+      syncQuickCopy();
       updatePreview();
       return row;
     }
@@ -1536,56 +1909,119 @@ export function mountConfig(root: HTMLElement): void {
     const manualGift = renderManualGiftAdder(() => {
       pickerCatalog = buildGiftPickerCatalog(state, roomGiftCatalog);
       allGifts = pickerCatalog.gifts;
+      editorTutorialProgress.giftCount = selected.size;
+      editorTutorialProgress.giftPreviewed = false;
       renderGiftPicker();
       renderSelectedRules();
+      setGiftDrawerOpen(false);
+      refreshEditorTutorial();
     }, selected, defaultFormula, (item) => { void hydrateBlindBoxRule(item); });
 
-    const giftsPanel = el('section', { class: 'gift-binding-panel' });
+    const giftsPanel = el('section', { class: 'gift-binding-panel gift-picker-drawer-body' });
     giftsPanel.append(
       el('div', { class: 'modal-section-heading' }, [
         el('div', {}, [
           el('h3', { text: '选择会影响这个属性的礼物' }),
           el('p', { text: '默认显示已上架和直播中实际收到过的礼物；搜索时会同时显示历史礼物并标注状态。向下滚动会自动加载更多，数字 ID 需要完整匹配。' }),
         ]),
-        selectionCount,
+        el('button', { class: 'modal-close gift-picker-drawer-close', type: 'button', text: '×', ariaLabel: '关闭礼物列表', onclick: () => setGiftDrawerOpen(false) } as any),
       ]),
       giftSearch,
       giftPicker,
       manualGift,
     );
+    giftDrawer.append(giftsPanel);
 
-    const formulasPanel = el('section', { class: 'formula-binding-panel' });
+    const formulasPanel = el('section', { class: 'formula-binding-panel attribute-rules-panel' });
     const formulaHelp = renderFormulaHelp(nameInput.value.trim() || '属性');
+    const addGiftButton = el('button', {
+      class: 'btn guide-add-gift',
+      type: 'button',
+      text: '+ 添加礼物',
+    }) as HTMLButtonElement;
+    addGiftButton.onclick = () => setGiftDrawerOpen(true);
     formulasPanel.append(
       el('div', { class: 'modal-section-heading' }, [
         el('div', {}, [
-          el('h3', { text: '为每个礼物配置规则' }),
-          el('p', {}, [
-            '可用变量：',
-            el('code', { text: 'price' }),
-            ' 和任意属性名。连送会按单个礼物逐次执行；盲盒会自动匹配爆出的子礼物。',
-          ]),
+          el('h3', { text: '礼物规则' }),
+          el('p', { text: '每个礼物独立配置；连送 N 个会由后台按单个礼物连续执行 N 次。' }),
+        ]),
+        el('div', { class: 'rules-heading-actions' }, [selectionCount, addGiftButton]),
+      ]),
+      selectedRules,
+      formulaHelp,
+      giftDrawer,
+    );
+
+    const outputPanel = el('section', { class: 'attribute-output-panel' }, [
+      el('div', { class: 'workbench-lesson-card' }, [
+        el('span', { class: 'workbench-lesson-icon', text: '04' }),
+        el('div', {}, [
+          el('strong', { text: '计算留在后台，页面各司其职' }),
+          el('p', { text: '关闭配置页和 OBS 都不会停止规则；只有退出托盘后台才会停止接收礼物。' }),
         ]),
       ]),
-      formulaHelp,
-      selectedRules,
-    );
+      el('div', { class: 'runtime-role-grid' }, [
+        el('article', {}, [el('strong', { text: '配置页' }), el('span', { text: '修改属性、规则和外观' })]),
+        el('article', {}, [el('strong', { text: '托盘后台' }), el('span', { text: '收礼、计算、定时与保存' })]),
+        el('article', {}, [el('strong', { text: 'OBS 面板' }), el('span', { text: '只显示一个属性的结果' })]),
+      ]),
+      el('div', { class: 'attribute-output-fields' }, [
+        broadcastMessageControl,
+        el('div', { class: 'output-link-preview' }, [
+          el('span', { class: 'field-label', text: 'OBS 专属链接' }),
+          el('code', {
+            text: original
+              ? `${location.origin}/?mode=display&attribute=${encodeURIComponent(original.name)}`
+              : '创建属性后，在属性卡片中复制专属链接',
+          }),
+        ]),
+      ]),
+      el('p', { class: 'modal-tip', text: '默认播报会在没有礼物消息时滚动显示；收到礼物后会临时切换为本次送礼信息。' }),
+    ]);
 
     const cancelButton = el('button', { class: 'btn ghost', type: 'button', text: '取消' }) as HTMLButtonElement;
     cancelButton.onclick = close;
-    const saveButton = el('button', { class: 'btn', type: 'button', text: original ? '保存修改' : '创建属性' }) as HTMLButtonElement;
+    const saveButton = el('button', { class: 'btn guide-attribute-save', type: 'button', text: original ? '保存修改' : '创建属性' }) as HTMLButtonElement;
     saveButton.onclick = () => {
       void saveAttributeEditor(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, selected, timerRules, overlay, saveButton);
     };
-
-    modal.append(
-      basics,
-      el('div', { class: 'modal-tip', text: '礼物规则和定时规则都由托盘后台执行；关闭配置页或 OBS 不会停止计算。' }),
-      timerPanel,
-      giftsPanel,
-      formulasPanel,
-      el('footer', { class: 'modal-actions' }, [cancelButton, saveButton]),
-    );
+    const modalFooter = el('footer', { class: 'modal-actions attribute-workbench-actions' }, [
+      el('span', { class: 'attribute-save-note', text: '保存前会由后台统一校验规则' }),
+      cancelButton,
+      saveButton,
+    ]);
+    const lessonStates = getTutorialLessonStates(
+      state,
+      connectionState === 'connected',
+      editorTutorialProgress,
+      forcedTutorialLesson,
+    ).filter((lesson) => lesson.section);
+    const workspace = createAttributeWorkspace({
+      ariaLabel: original ? `编辑属性 ${original.name}` : '添加属性',
+      header: modalHeader,
+      footer: modalFooter,
+      sections: [
+        { id: 'overview', label: '概览', content: overviewPanel },
+        { id: 'rules', label: '礼物规则', badge: () => String(selected.size), content: formulasPanel },
+        { id: 'timers', label: '定时器', badge: () => String(timerRules.length), content: timerPanel },
+        { id: 'output', label: '输出与预览', content: outputPanel },
+      ],
+      lessons: lessonStates,
+      trainingVisible: !guideDismissed && (editorGuideEnabled || forcedTutorialLesson !== null),
+      initialSection: editorGuideEnabled || forcedTutorialLesson !== null
+        ? sectionForTutorialLesson(activeTutorialLesson())
+        : 'overview',
+      onLessonClick: (lesson) => {
+        forcedTutorialLesson = lesson;
+        guideDismissed = false;
+        state.settings.showTutorial = true;
+        save();
+        refreshEditorTutorial();
+      },
+    });
+    activeEditorWorkspace = workspace;
+    modal = workspace.element;
     overlay.append(modal);
     let overlayPointerStartedOutside = false;
     overlay.onpointerdown = (event) => {
@@ -1607,7 +2043,7 @@ export function mountConfig(root: HTMLElement): void {
     renderSelectedRules();
     for (const item of blindBoxLookups) void hydrateBlindBoxRule(item);
     renderTimerRules();
-    renderGuide();
+    refreshEditorTutorial();
     nameInput.focus();
   }
 
@@ -1641,7 +2077,14 @@ export function mountConfig(root: HTMLElement): void {
       const recent = { ...gift, lastReceived: 0, count: recentIndex >= 0 ? state.recentGifts[recentIndex].count : 0 };
       if (recentIndex >= 0) state.recentGifts[recentIndex] = recent;
       else state.recentGifts.unshift(recent);
-      const item: SelectedGiftRule = { gift, formulaName: `${gift.name}规则`, formula: defaultFormula(), enabled: true };
+      const item: SelectedGiftRule = {
+        gift,
+        formulaName: `${gift.name}规则`,
+        formula: defaultFormula(),
+        enabled: !editorGuideEnabled,
+        quickOperation: 'price',
+        quickAmount: 60,
+      };
       selected.set(id, item);
       hydrateBlindBoxRule?.(item);
       save();
@@ -1821,6 +2264,9 @@ export function mountConfig(root: HTMLElement): void {
     overlay.remove();
     editorOpen = false;
     editorGuideEnabled = false;
+    editorTutorialProgress = { open: false };
+    activeEditorWorkspace = null;
+    forcedTutorialLesson = null;
     refreshOpenGiftCatalog = null;
     render();
     toast(index === undefined ? '属性已创建' : '属性配置已保存', root);

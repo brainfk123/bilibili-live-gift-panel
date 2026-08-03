@@ -145,11 +145,12 @@ export async function previewFormula(
   attributeName: string,
   attributeValue: number,
   context: 'gift' | 'timer' = 'gift',
+  giftPrice?: number,
 ): Promise<number> {
   const response = await fetch('/api/formula/preview', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ formula, attributeName, attributeValue, context }),
+    body: JSON.stringify({ formula, attributeName, attributeValue, context, giftPrice }),
   });
   const payload = await response.json() as FormulaPreviewResponse;
   if (!response.ok || payload.code !== 0 || typeof payload.result !== 'number') {

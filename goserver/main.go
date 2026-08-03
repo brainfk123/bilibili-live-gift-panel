@@ -83,6 +83,7 @@ func handleFormulaPreview(store *configStore) http.HandlerFunc {
 			AttributeName  string  `json:"attributeName"`
 			AttributeValue float64 `json:"attributeValue"`
 			Context        string  `json:"context"`
+			GiftPrice      float64 `json:"giftPrice"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&request); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": "请求格式不正确"})
@@ -97,7 +98,11 @@ func handleFormulaPreview(store *configStore) http.HandlerFunc {
 		if request.Context == "timer" {
 			result, err = timerFormulaPreview(state, request.Formula, request.AttributeName, request.AttributeValue)
 		} else {
-			result, err = formulaPreview(state, request.Formula, request.AttributeName, request.AttributeValue)
+			price := request.GiftPrice
+			if price <= 0 {
+				price = 1000
+			}
+			result, err = formulaPreviewWithPrice(state, request.Formula, request.AttributeName, request.AttributeValue, price)
 		}
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})

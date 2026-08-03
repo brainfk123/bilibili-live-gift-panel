@@ -21,6 +21,8 @@ export const defaultState = (): AppState => ({
     giftView: 'list',
     panelOpacity: 55,
     showTutorial: true,
+    tutorialVersion: 2,
+    tutorialCompletedLessons: [],
     autoUpdate: true,
   },
   giftCatalog: [],
@@ -98,9 +100,21 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     && (parsed.attributes?.length ?? 0) > 0
     && (parsed.rules?.length ?? 0) > 0;
   if (parsed.settings?.showTutorial === undefined) configMigrationRequired = true;
+  if (parsed.settings?.tutorialVersion === undefined || !Array.isArray(parsed.settings?.tutorialCompletedLessons)) configMigrationRequired = true;
   if (parsed.settings?.autoUpdate === undefined) configMigrationRequired = true;
   const showTutorial = parsed.settings?.showTutorial ?? !setupComplete;
-  const settings = { ...base.settings, ...(parsed.settings ?? {}), showTutorial };
+  const tutorialCompletedLessons = Array.isArray(parsed.settings?.tutorialCompletedLessons)
+    ? parsed.settings.tutorialCompletedLessons.filter((lesson): lesson is AppState['settings']['tutorialCompletedLessons'][number] => (
+      ['room', 'attribute', 'basics', 'gift', 'rule', 'timer', 'preset', 'save', 'enable', 'output'].includes(String(lesson))
+    ))
+    : [];
+  const settings = {
+    ...base.settings,
+    ...(parsed.settings ?? {}),
+    showTutorial,
+    tutorialVersion: 2,
+    tutorialCompletedLessons: Array.from(new Set(tutorialCompletedLessons)),
+  };
   settings.panelOpacity = Math.min(100, Math.max(10, Number(settings.panelOpacity) || base.settings.panelOpacity));
   return {
     ...base,
