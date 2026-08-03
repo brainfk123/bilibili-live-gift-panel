@@ -121,7 +121,7 @@ func TestConfigStoreRejectsFormulaThatUsesFrontendOnlyVariable(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	payload := `{
         "attributes":[{"name":"积分","value":0,"unit":"none","format":"number","decimals":0,"suffix":""}],
-        "rules":[{"id":"r1","giftId":1,"attributeName":"积分","formulaName":"旧公式","formula":"积分+count"}]
+        "rules":[{"id":"r1","giftId":1,"attributeName":"积分","formulaName":"旧规则","formula":"积分+count"}]
     }`
 	response := httptest.NewRecorder()
 	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))

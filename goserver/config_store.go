@@ -113,13 +113,13 @@ func validateAppState(state appState) error {
 	for _, rule := range state.Rules {
 		attribute := state.findAttribute(rule.AttributeName)
 		if attribute == nil {
-			return fmt.Errorf("公式 %q 引用了不存在的属性 %q", rule.FormulaName, rule.AttributeName)
+			return fmt.Errorf("规则 %q 引用了不存在的属性 %q", rule.FormulaName, rule.AttributeName)
 		}
 		if strings.TrimSpace(rule.Formula) == "" {
-			return fmt.Errorf("公式 %q 不能为空", rule.FormulaName)
+			return fmt.Errorf("规则 %q 不能为空", rule.FormulaName)
 		}
 		if _, err := formulaPreview(state, rule.Formula, attribute.Name, attribute.Value); err != nil {
-			return fmt.Errorf("公式 %q 无效：%w", rule.FormulaName, err)
+			return fmt.Errorf("规则 %q 无效：%w", rule.FormulaName, err)
 		}
 	}
 	for _, rule := range state.TimerRules {
@@ -131,7 +131,7 @@ func validateAppState(state appState) error {
 			return fmt.Errorf("定时器 %q 的间隔必须至少为 1 秒", rule.FormulaName)
 		}
 		if strings.TrimSpace(rule.Formula) == "" {
-			return fmt.Errorf("定时器 %q 的公式不能为空", rule.FormulaName)
+			return fmt.Errorf("定时器 %q 的规则不能为空", rule.FormulaName)
 		}
 		if strings.TrimSpace(rule.Condition) != "" {
 			if _, err := timerFormulaPreview(state, rule.Condition, attribute.Name, attribute.Value); err != nil {
@@ -139,7 +139,7 @@ func validateAppState(state appState) error {
 			}
 		}
 		if _, err := timerFormulaPreview(state, rule.Formula, attribute.Name, attribute.Value); err != nil {
-			return fmt.Errorf("定时器 %q 的公式无效：%w", rule.FormulaName, err)
+			return fmt.Errorf("定时器 %q 的规则无效：%w", rule.FormulaName, err)
 		}
 	}
 	presetIDs := make(map[string]struct{}, len(state.FormulaPresets))
@@ -150,30 +150,30 @@ func validateAppState(state appState) error {
 		formula := strings.TrimSpace(preset.Formula)
 		sourceAttributeName := strings.TrimSpace(preset.SourceAttributeName)
 		if id == "" || name == "" || formula == "" || sourceAttributeName == "" {
-			return fmt.Errorf("公式预设的 ID、名称、公式和来源属性不能为空")
+			return fmt.Errorf("规则预设的 ID、名称、规则和来源属性不能为空")
 		}
 		if preset.Context != "gift" && preset.Context != "timer" {
-			return fmt.Errorf("公式预设 %q 的适用场景无效", name)
+			return fmt.Errorf("规则预设 %q 的适用场景无效", name)
 		}
 		if _, exists := presetIDs[id]; exists {
-			return fmt.Errorf("公式预设 ID 不能重复：%s", id)
+			return fmt.Errorf("规则预设 ID 不能重复：%s", id)
 		}
 		presetIDs[id] = struct{}{}
 		nameKey := preset.Context + "\x00" + strings.ToLower(name)
 		if _, exists := presetNames[nameKey]; exists {
-			return fmt.Errorf("同类公式预设名称不能重复：%s", name)
+			return fmt.Errorf("同类规则预设名称不能重复：%s", name)
 		}
 		presetNames[nameKey] = struct{}{}
 		tokens, err := tokenizeFormula(formula)
 		if err != nil {
-			return fmt.Errorf("公式预设 %q 无效：%w", name, err)
+			return fmt.Errorf("规则预设 %q 无效：%w", name, err)
 		}
 		parser := formulaParser{tokens: tokens}
 		if _, err := parser.parseExpression(); err != nil {
-			return fmt.Errorf("公式预设 %q 无效：%w", name, err)
+			return fmt.Errorf("规则预设 %q 无效：%w", name, err)
 		}
 		if parser.peek().kind != "eof" {
-			return fmt.Errorf("公式预设 %q 含有多余内容 %q", name, parser.peek().value)
+			return fmt.Errorf("规则预设 %q 含有多余内容 %q", name, parser.peek().value)
 		}
 	}
 	return nil

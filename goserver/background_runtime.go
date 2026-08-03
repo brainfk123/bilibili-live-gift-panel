@@ -515,7 +515,7 @@ func formulaPreview(state appState, formula, attributeName string, attributeValu
 		return 0, err
 	}
 	if math.IsInf(result, 0) || math.IsNaN(result) {
-		return 0, fmt.Errorf("公式结果不是有效数字")
+		return 0, fmt.Errorf("规则结果不是有效数字")
 	}
 	return result, nil
 }
@@ -531,7 +531,7 @@ func timerFormulaPreview(state appState, formula, attributeName string, attribut
 		return 0, err
 	}
 	if math.IsInf(result, 0) || math.IsNaN(result) {
-		return 0, fmt.Errorf("公式结果不是有效数字")
+		return 0, fmt.Errorf("规则结果不是有效数字")
 	}
 	return result, nil
 }

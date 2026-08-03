@@ -43,8 +43,8 @@ function guideCopy(step: WizardStep, editorOpen: boolean): GuideCopy {
     return {
       target: '.guide-gift-search',
       eyebrow: '第 3 步',
-      title: '添加礼物并配置公式',
-      body: '选择一个或多个礼物，填写各自的公式名称和公式，然后点击“创建属性”保存。',
+      title: '添加礼物并配置规则',
+      body: '选择一个或多个礼物，填写各自的规则名称和规则，然后点击“创建属性”保存。',
       action: '开始配置',
     };
   }
@@ -52,8 +52,8 @@ function guideCopy(step: WizardStep, editorOpen: boolean): GuideCopy {
     return {
       target: '.guide-attribute-edit',
       eyebrow: '第 3 步',
-      title: '补充礼物和公式',
-      body: '打开属性，至少选择一个礼物并配置公式；保存后教程会进入 OBS 步骤。',
+      title: '补充礼物和规则',
+      body: '打开属性，至少选择一个礼物并配置规则；保存后教程会进入 OBS 步骤。',
       action: '继续配置',
     };
   }

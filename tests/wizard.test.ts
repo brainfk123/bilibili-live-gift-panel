@@ -538,7 +538,7 @@ describe.skip('legacy configuration wizard rendering', () => {
     expect(root.querySelectorAll('.rule-action').map((action) => action.textContent)).toEqual([
       '搜索礼物',
       '选择属性',
-      '选择公式示例',
+      '选择规则示例',
       '保存规则',
     ]);
     expect(root.querySelector('input')?.placeholder).toBe('搜索礼物名称…');
@@ -550,9 +550,9 @@ describe.skip('legacy configuration wizard rendering', () => {
     (gift?.onclick as (() => void) | null)?.();
 
     const formulaTutorial = root.querySelector('.tutorial');
-    expect(formulaTutorial?.querySelector('summary')?.textContent).toBe('不会写公式？看示例');
+    expect(formulaTutorial?.querySelector('summary')?.textContent).toBe('不会写规则？看示例');
     expect((formulaTutorial as TestElement & { open?: boolean } | null)?.open).not.toBe(true);
-    expect(textOf(root)).toContain('公式结果会直接成为属性的新值');
+    expect(textOf(root)).toContain('规则结果会直接成为属性的新值');
     expect(textOf(root)).toContain('已有规则需要复核');
     const preview = root.querySelector('.preview');
     expect(preview).not.toBeNull();
@@ -875,7 +875,7 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(textOf(root)).toContain('添加第一个属性'));
     findByText(root, '添加属性')?.onclick?.();
     expect(root.querySelector('.attribute-modal')).not.toBeNull();
-    expect(textOf(root)).toContain('添加礼物并配置公式');
+    expect(textOf(root)).toContain('添加礼物并配置规则');
 
     findByText(root, '开始配置')?.onclick?.();
     root.querySelector('.gift-choice')?.onclick?.();
@@ -893,7 +893,7 @@ describe('single-page configuration rendering', () => {
     findByText(root, '编辑')?.onclick?.();
     expect(root.querySelector('.attribute-modal')).not.toBeNull();
     expect(root.querySelector('.tour-bubble')).toBeNull();
-    expect(textOf(root)).not.toContain('补充礼物和公式');
+    expect(textOf(root)).not.toContain('补充礼物和规则');
 
     const reopenedRoot = new TestElement('div');
     mountConfig(reopenedRoot as unknown as HTMLElement);
@@ -960,7 +960,7 @@ describe('single-page configuration rendering', () => {
     expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(2);
     expect(root.querySelectorAll('.formula-target-name').map((label) => label.textContent)).toEqual(['加班时间 =', '加班时间 =']);
 
-    const formulaNameInputs = root.querySelectorAll('input').filter((input) => input.dataset.fieldLabel === '公式名称') as Array<TestElement & { oninput?: () => void }>;
+    const formulaNameInputs = root.querySelectorAll('input').filter((input) => input.dataset.fieldLabel === '规则名称') as Array<TestElement & { oninput?: () => void }>;
     expect(formulaNameInputs).toHaveLength(2);
     formulaNameInputs.forEach((input, index) => {
       input.value = index === 0 ? '加一分钟' : '加一次挑战';
@@ -1300,7 +1300,7 @@ describe('single-page configuration rendering', () => {
       expect(loadState().log).toHaveLength(1);
       expect(loadState().log[0].source).toBe('timer');
       expect(root.querySelectorAll('.gift-history-row')).toHaveLength(0);
-      expect(textOf(root)).toContain('还没有送礼公式生效记录');
+      expect(textOf(root)).toContain('还没有送礼规则生效记录');
     });
   });
 

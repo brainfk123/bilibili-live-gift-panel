@@ -50,7 +50,7 @@ function normalizeDraft(draft: FormulaPresetDraft): FormulaPresetDraft {
   const formula = draft.formula.trim();
   const sourceAttributeName = draft.sourceAttributeName.trim();
   if (!name) throw new Error('预设名称不能为空');
-  if (!formula) throw new Error('预设公式不能为空');
+  if (!formula) throw new Error('预设规则不能为空');
   if (!sourceAttributeName) throw new Error('预设来源属性不能为空');
   return { name, context: draft.context, formula, sourceAttributeName };
 }

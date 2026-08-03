@@ -71,11 +71,11 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
       const giftRules = el('div', { class: 'display-gift-rules' });
       const rules = state.rules.filter((rule) => rule.attributeName === attr.name && rule.enabled !== false);
       if (rules.length === 0) {
-        giftRules.append(el('div', { class: 'display-rule-empty', text: '还没有配置礼物公式' }));
+        giftRules.append(el('div', { class: 'display-rule-empty', text: '还没有配置礼物规则' }));
       } else {
         for (const rule of rules) {
           const gift = findGift(state, rule.giftId);
-          const formulaName = rule.formulaName?.trim() || '未命名公式';
+          const formulaName = rule.formulaName?.trim() || '未命名规则';
           const formulaNameClass = Array.from(formulaName).length > 7
             ? 'display-formula-name is-long'
             : 'display-formula-name';

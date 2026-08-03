@@ -126,7 +126,7 @@ export async function previewFormula(
   });
   const payload = await response.json() as FormulaPreviewResponse;
   if (!response.ok || payload.code !== 0 || typeof payload.result !== 'number') {
-    throw new Error(payload.message || `公式计算失败：HTTP ${response.status}`);
+    throw new Error(payload.message || `规则计算失败：HTTP ${response.status}`);
   }
   return payload.result;
 }

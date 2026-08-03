@@ -318,7 +318,7 @@ export function mountConfig(root: HTMLElement): void {
         class: `login-fallback-note${biliAuth.isRoomOwner === false ? ' is-info' : ''}`,
         text: biliAuth.isRoomOwner === false
           ? '后台会使用当前登录账号连接；普通账号不一定有查看完整匿名资料的权限，无法识别时仍保留脱敏昵称。'
-          : '无法识别时保留 B 站返回的脱敏昵称，不影响礼物公式执行。',
+          : '无法识别时保留 B 站返回的脱敏昵称，不影响礼物规则执行。',
       }),
       actions,
     );
@@ -408,7 +408,7 @@ export function mountConfig(root: HTMLElement): void {
     const section = el('section', { class: 'attributes-section' });
     const headingRow = el('div', { class: 'attributes-heading-row' });
     headingRow.append(
-      sectionHeading('互动逻辑', '属性与礼物公式', '一个属性可以被多个礼物影响；连送 N 个会按单个礼物连续执行 N 次公式。'),
+      sectionHeading('互动逻辑', '属性与礼物规则', '一个属性可以被多个礼物影响；连送 N 个会按单个礼物连续执行 N 次规则。'),
     );
     const addButton = el('button', { class: 'btn guide-attribute-add', type: 'button', text: '+ 添加属性' }) as HTMLButtonElement;
     addButton.onclick = () => openAttributeEditor();
@@ -450,7 +450,7 @@ export function mountConfig(root: HTMLElement): void {
           el('h3', { text: attribute.name }),
           attributeValueElement(attribute),
         ]),
-        el('span', { class: 'attribute-meta', text: `${displayFormatLabel(attribute)} · ${rules.length} 条礼物公式 · ${timerRules.length} 个定时器` }),
+        el('span', { class: 'attribute-meta', text: `${displayFormatLabel(attribute)} · ${rules.length} 条礼物规则 · ${timerRules.length} 个定时器` }),
       ]),
       el('div', { class: 'attribute-actions' }, [editButton, deleteButton]),
     );
@@ -509,7 +509,7 @@ export function mountConfig(root: HTMLElement): void {
           giftImage,
           el('div', { class: 'attribute-gift-copy' }, [
             el('strong', { text: gift?.name ?? `礼物 ${rule.giftId}` }),
-            el('span', { text: rule.formulaName?.trim() || '未命名公式' }),
+            el('span', { text: rule.formulaName?.trim() || '未命名规则' }),
           ]),
           enabledButton,
         );
@@ -604,7 +604,7 @@ export function mountConfig(root: HTMLElement): void {
       sectionHeading(
         '运行核对',
         '送礼生效记录',
-        `只显示真正执行过礼物公式的事件；未命中规则的礼物不会出现。最多保留最近 ${MAX_LOG} 条计算日志。`,
+        `只显示真正执行过礼物规则的事件；未命中规则的礼物不会出现。最多保留最近 ${MAX_LOG} 条计算日志。`,
       ),
       el('div', { class: 'gift-history-actions' }, [
         el('div', { class: 'gift-history-count', text: `${entries.length} 条生效记录` }),
@@ -616,7 +616,7 @@ export function mountConfig(root: HTMLElement): void {
     if (entries.length === 0) {
       section.append(el('div', {
         class: 'gift-history-empty',
-        text: '还没有送礼公式生效记录。收到命中规则的礼物后，会在这里显示完整的数值变化。',
+        text: '还没有送礼规则生效记录。收到命中规则的礼物后，会在这里显示完整的数值变化。',
       }));
       content.append(section);
       return;
@@ -775,7 +775,7 @@ export function mountConfig(root: HTMLElement): void {
       el('div', {}, [
         el('span', { class: 'section-kicker', text: original ? '编辑互动属性' : '新建互动属性' }),
         el('h2', { text: original ? `配置“${original.name}”` : '添加属性并绑定礼物' }),
-        el('p', { text: '属性基础信息、礼物选择和每个礼物的公式都在这里完成。' }),
+        el('p', { text: '属性基础信息、礼物选择和每个礼物的规则都在这里完成。' }),
       ]),
       closeButton,
     ]));
@@ -839,7 +839,7 @@ export function mountConfig(root: HTMLElement): void {
       const nameDialog = el('section', {
         class: 'card formula-preset-name-dialog',
         role: 'dialog',
-        ariaLabel: '命名公式预设',
+        ariaLabel: '命名规则预设',
       } as any);
       const presetNameInput = inputField('预设名称', formulaNameInput.value.trim());
       presetNameInput.placeholder = '例如 按价格增加时间';
@@ -867,9 +867,9 @@ export function mountConfig(root: HTMLElement): void {
             await saveAndWait();
             refreshFormulaPresetLists(context);
             close();
-            toast(result.created ? '公式预设已保存' : '同名公式预设已更新', root);
+            toast(result.created ? '规则预设已保存' : '同名规则预设已更新', root);
           } catch (error) {
-            toast(error instanceof Error ? error.message : '公式预设保存失败', root);
+            toast(error instanceof Error ? error.message : '规则预设保存失败', root);
           } finally {
             confirmButton.disabled = false;
             confirmButton.textContent = '保存';
@@ -883,8 +883,8 @@ export function mountConfig(root: HTMLElement): void {
       };
       nameDialog.append(
         el('div', { class: 'formula-preset-name-header' }, [
-          el('h3', { text: '保存公式预设' }),
-          el('p', { text: '给当前公式起个容易识别的名字。' }),
+          el('h3', { text: '保存规则预设' }),
+          el('p', { text: '给当前规则起个容易识别的名字。' }),
         ]),
         fieldControl(presetNameInput),
         el('div', { class: 'formula-preset-name-actions' }, [cancelButton, confirmButton]),
@@ -933,7 +933,7 @@ export function mountConfig(root: HTMLElement): void {
             state.formulaPresets = state.formulaPresets.filter((item) => item.id !== preset.id);
             void saveAndWait().then(() => {
               refreshFormulaPresetLists(context);
-              toast('公式预设已删除', root);
+              toast('规则预设已删除', root);
             });
           };
           presetList.append(el('span', { class: 'formula-preset-chip' }, [applyButton, deleteButton]));
@@ -952,7 +952,7 @@ export function mountConfig(root: HTMLElement): void {
       if (timerRules.length === 0) {
         timerList.append(el('div', {
           class: 'timer-rule-empty',
-          text: '没有定时器。添加后，即使配置页和 OBS 都关闭，托盘后台仍会按间隔执行公式。',
+          text: '没有定时器。添加后，即使配置页和 OBS 都关闭，托盘后台仍会按间隔执行规则。',
         }));
         return;
       }
@@ -1122,7 +1122,7 @@ export function mountConfig(root: HTMLElement): void {
       el('div', { class: 'modal-section-heading' }, [
         el('div', {}, [
           el('h3', { text: '定时触发器' }),
-          el('p', { text: '按固定间隔独立执行公式，不依赖直播连接、配置页或 OBS 页面。' }),
+          el('p', { text: '按固定间隔独立执行规则，不依赖直播连接、配置页或 OBS 页面。' }),
         ]),
         el('div', { class: 'timer-heading-actions' }, [timerCount, addTimerButton]),
       ]),
@@ -1312,7 +1312,7 @@ export function mountConfig(root: HTMLElement): void {
         ]),
         removeButton,
       ]));
-      const formulaNameInput = inputField('公式名称', item.formulaName);
+      const formulaNameInput = inputField('规则名称', item.formulaName);
       formulaNameInput.placeholder = `例如 ${item.gift.name}加时`;
       formulaNameInput.oninput = () => {
         item.formulaName = formulaNameInput.value;
@@ -1414,7 +1414,7 @@ export function mountConfig(root: HTMLElement): void {
     formulasPanel.append(
       el('div', { class: 'modal-section-heading' }, [
         el('div', {}, [
-          el('h3', { text: '为每个礼物配置公式' }),
+          el('h3', { text: '为每个礼物配置规则' }),
           el('p', {}, [
             '可用变量：',
             el('code', { text: 'price' }),
@@ -1435,7 +1435,7 @@ export function mountConfig(root: HTMLElement): void {
 
     modal.append(
       basics,
-      el('div', { class: 'modal-tip', text: '礼物公式和定时公式都由托盘后台执行；关闭配置页或 OBS 不会停止计算。' }),
+      el('div', { class: 'modal-tip', text: '礼物规则和定时规则都由托盘后台执行；关闭配置页或 OBS 不会停止计算。' }),
       timerPanel,
       giftsPanel,
       formulasPanel,
@@ -1559,14 +1559,14 @@ export function mountConfig(root: HTMLElement): void {
     for (const item of selected.values()) {
       const formulaName = item.formulaName.trim();
       if (!formulaName) {
-        toast(`请填写“${item.gift.name}”的公式名称`, root);
+        toast(`请填写“${item.gift.name}”的规则名称`, root);
         return;
       }
       const formula = originalName && originalName !== name
         ? replaceFormulaVariable(item.formula.trim(), originalName, name)
         : item.formula.trim();
       if (!formula) {
-        toast(`请填写“${item.gift.name}”的公式`, root);
+        toast(`请填写“${item.gift.name}”的规则`, root);
         return;
       }
       normalizedRules.push({ ...item, formulaName, formula });
@@ -1589,7 +1589,7 @@ export function mountConfig(root: HTMLElement): void {
         ? replaceFormulaVariable(timer.formula.trim(), originalName, name)
         : timer.formula.trim();
       if (!formula) {
-        toast(`请填写“${formulaName}”的公式`, root);
+        toast(`请填写“${formulaName}”的规则`, root);
         return;
       }
       normalizedTimers.push({ ...timer, attributeName: name, formulaName, condition, formula });
@@ -1606,7 +1606,7 @@ export function mountConfig(root: HTMLElement): void {
         await previewFormula(timer.formula, name, value, 'timer');
       }
     } catch (error) {
-      toast(error instanceof Error ? `公式有误：${error.message}` : '公式有误', root);
+      toast(error instanceof Error ? `规则有误：${error.message}` : '规则有误', root);
       saveButton.disabled = false;
       saveButton.textContent = original ? '保存修改' : '创建属性';
       return;
@@ -1798,7 +1798,7 @@ export function mountConfig(root: HTMLElement): void {
     const dataCard = el('section', { class: 'workspace-card advanced-card' });
     dataCard.append(
       el('h3', { text: '配置与数据' }),
-      el('p', { class: 'advanced-copy', text: `当前有 ${state.attributes.length} 个属性、${state.rules.length} 条礼物公式、${state.timerRules.length} 个定时器和 ${state.log.length} 条变动记录。` }),
+      el('p', { class: 'advanced-copy', text: `当前有 ${state.attributes.length} 个属性、${state.rules.length} 条礼物规则、${state.timerRules.length} 个定时器和 ${state.log.length} 条变动记录。` }),
     );
     const exportButton = el('button', { class: 'btn', type: 'button', text: '导出配置' }) as HTMLButtonElement;
     exportButton.onclick = () => {
@@ -1859,9 +1859,9 @@ export function mountConfig(root: HTMLElement): void {
     const details = el('details', { class: 'formula-help' }) as HTMLDetailsElement;
     const current = attributeName || '属性';
     details.append(
-      el('summary', { text: '公式怎么用？查看完整说明' }),
+      el('summary', { text: '规则怎么用？查看完整说明' }),
       el('div', { class: 'formula-help-content' }, [
-        el('p', { text: '等号右侧的计算结果会成为属性的新值。要在原值上增加或减少，公式中必须写上当前属性名；只写数字会直接把属性设成该数字。' }),
+        el('p', { text: '等号右侧的计算结果会成为属性的新值。要在原值上增加或减少，规则中必须写上当前属性名；只写数字会直接把属性设成该数字。' }),
         el('div', { class: 'formula-help-grid' }, [
           formulaHelpBlock('变量', [
             ['price', '当前单个礼物的价格'],
