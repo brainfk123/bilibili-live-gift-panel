@@ -120,6 +120,23 @@ describe('applyGiftToState', () => {
     expect(s.attributes[0].value).toBe(60);
   });
 
+  it('keeps matching a gift rule after only its icon and ID change', () => {
+    const s = defaultState();
+    s.attributes.push({ name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' });
+    s.giftCatalog.push({ id: 970001, name: '情书', price: 5200, coinType: 'gold', imgBasic: 'old.png' });
+    s.rules.push({ id: 'r-letter', giftId: 970001, attributeName: '加班时间', formula: '加班时间+60' });
+
+    const results = applyGiftToState(s, makeGift({
+      giftId: 970002,
+      giftName: '情书',
+      price: 5200,
+      imgBasic: 'current.png',
+    }));
+
+    expect(results).toHaveLength(1);
+    expect(s.attributes[0].value).toBe(60);
+  });
+
   it('writes log entry', () => {
     const s = defaultState();
     s.attributes[0].value = 100;

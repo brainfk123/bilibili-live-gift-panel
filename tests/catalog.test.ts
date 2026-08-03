@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { upsertRecentGift, findGift, builtinCatalog, loadBuiltinCatalog } from '../src/gifts/catalog';
+import { upsertRecentGift, findGift, builtinCatalog, giftDisplayKey, loadBuiltinCatalog, matchesGiftSearch, sameGiftIdentity, sortGiftsByUsage } from '../src/gifts/catalog';
 import { defaultState } from '../src/storage';
 import { GiftEvent } from '../src/bilibili/messages';
 
@@ -41,5 +41,35 @@ describe('catalog', () => {
 
   it('loadBuiltinCatalog returns the builtin array', () => {
     expect(loadBuiltinCatalog()).toBe(builtinCatalog);
+  });
+
+  it('treats icon-only revisions as the same display gift and runtime alias', () => {
+    const oldGift = { id: 1, name: '情书', price: 5200, coinType: 'gold' as const, imgBasic: 'old.png' };
+    const currentGift = { id: 2, name: '情书', price: 5200, coinType: 'gold' as const, imgBasic: 'current.png' };
+    expect(giftDisplayKey(oldGift)).toBe(giftDisplayKey(currentGift));
+    expect(sameGiftIdentity(oldGift, currentGift)).toBe(true);
+  });
+
+  it('matches gift names partially but numeric gift IDs only exactly', () => {
+    const gift = { id: 33345, name: '这个好诶' };
+    expect(matchesGiftSearch(gift, '好诶')).toBe(true);
+    expect(matchesGiftSearch(gift, '33')).toBe(false);
+    expect(matchesGiftSearch(gift, '33345')).toBe(true);
+    expect(matchesGiftSearch({ id: 1, name: '33周年礼物' }, '33')).toBe(true);
+  });
+
+  it('sorts configured and frequently received gifts before the room panel order', () => {
+    const panel = [
+      { id: 1, name: '普通礼物', price: 100, coinType: 'gold' as const, imgBasic: '' },
+      { id: 2, name: '常收礼物', price: 200, coinType: 'gold' as const, imgBasic: '' },
+      { id: 3, name: '已配置礼物', price: 300, coinType: 'gold' as const, imgBasic: '' },
+      { id: 4, name: '最近礼物', price: 400, coinType: 'gold' as const, imgBasic: '' },
+    ];
+    const recent = [
+      { ...panel[1], count: 8, lastReceived: 10 },
+      { ...panel[3], count: 2, lastReceived: 20 },
+    ];
+
+    expect(sortGiftsByUsage(panel, [panel[2]], recent).map((gift) => gift.id)).toEqual([3, 2, 4, 1]);
   });
 });

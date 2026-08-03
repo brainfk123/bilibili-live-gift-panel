@@ -2,11 +2,29 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   getBlindBoxInfo,
   getBiliAuthStatus,
+  getRoomGiftCatalog,
   logoutBiliAuth,
   pollBiliQRCodeLogin,
   startBiliQRCodeLogin,
   startPagePresence,
 } from '../src/backend';
+
+describe('current room gift catalog API', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('returns only the gift versions exposed by the current room panel', async () => {
+    const fetchMock = vi.fn(async () => Response.json({
+      code: 0,
+      gifts: [{ id: 35545, name: '情书', price: 5200, coinType: 'gold', imgBasic: 'current.png' }],
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(getRoomGiftCatalog(' 24849407 ')).resolves.toEqual([
+      { id: 35545, name: '情书', price: 5200, coinType: 'gold', imgBasic: 'current.png' },
+    ]);
+    expect(fetchMock).toHaveBeenCalledWith('/api/gifts?roomId=24849407', { cache: 'no-store' });
+  });
+});
 
 describe('page presence', () => {
   afterEach(() => vi.unstubAllGlobals());

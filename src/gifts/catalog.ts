@@ -19,13 +19,52 @@ export function findGift(state: AppState, giftId: number): GiftInfo | undefined 
 }
 
 export function giftDisplayKey(gift: GiftIdentity): string {
-  return [gift.name.trim(), gift.price, gift.coinType, gift.imgBasic.trim()].join('\u0000');
+  return [gift.name.trim(), gift.price, gift.coinType].join('\u0000');
 }
 
 export function sameGiftIdentity(left: GiftIdentity, right: GiftIdentity): boolean {
   if (left.name.trim() !== right.name.trim()) return false;
-  if (left.price !== right.price || left.coinType !== right.coinType) return false;
-  return !left.imgBasic || !right.imgBasic || left.imgBasic === right.imgBasic;
+  return left.price === right.price && left.coinType === right.coinType;
+}
+
+export function matchesGiftSearch(gift: Pick<GiftInfo, 'id' | 'name'>, rawQuery: string): boolean {
+  const query = rawQuery.trim().toLowerCase();
+  if (!query) return true;
+  if (gift.name.toLowerCase().includes(query)) return true;
+  return /^\d+$/.test(query) && String(gift.id) === query;
+}
+
+export function sortGiftsByUsage(
+  gifts: GiftInfo[],
+  configuredGifts: GiftInfo[],
+  recentGifts: RecentGift[],
+): GiftInfo[] {
+  const configuredKeys = new Set(configuredGifts.map(giftDisplayKey));
+  const recentUsage = new Map<string, { count: number; lastReceived: number }>();
+  for (const gift of recentGifts) {
+    const key = giftDisplayKey(gift);
+    const usage = recentUsage.get(key);
+    if (!usage) {
+      recentUsage.set(key, { count: gift.count, lastReceived: gift.lastReceived });
+      continue;
+    }
+    usage.count += gift.count;
+    usage.lastReceived = Math.max(usage.lastReceived, gift.lastReceived);
+  }
+
+  return gifts
+    .map((gift, index) => ({ gift, index, usage: recentUsage.get(giftDisplayKey(gift)) }))
+    .sort((left, right) => {
+      const configuredDifference = Number(configuredKeys.has(giftDisplayKey(right.gift)))
+        - Number(configuredKeys.has(giftDisplayKey(left.gift)));
+      if (configuredDifference !== 0) return configuredDifference;
+      const countDifference = (right.usage?.count ?? 0) - (left.usage?.count ?? 0);
+      if (countDifference !== 0) return countDifference;
+      const recencyDifference = (right.usage?.lastReceived ?? 0) - (left.usage?.lastReceived ?? 0);
+      if (recencyDifference !== 0) return recencyDifference;
+      return left.index - right.index;
+    })
+    .map(({ gift }) => gift);
 }
 
 export function upsertRecentGift(state: AppState, gift: GiftEvent): void {

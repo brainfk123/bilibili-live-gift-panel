@@ -4,6 +4,7 @@ import { mountConfig } from '../src/ui/config/config';
 import { formatDelta, mountDisplay } from '../src/ui/display/display';
 import { getNextWizardStep, getRoomNumberHint, getTutorialStep, getWizardChecklist, getWizardProgress } from '../src/ui/config/wizard';
 import { defaultState, loadState, resetState, saveState } from '../src/storage';
+import { builtinCatalog } from '../src/gifts/catalog';
 import type { GiftEvent } from '../src/bilibili/messages';
 
 vi.mock('../src/ui/brand', () => ({
@@ -851,6 +852,50 @@ describe.skip('legacy configuration wizard rendering', () => {
 });
 
 describe('single-page configuration rendering', () => {
+  it('shows only the currently giftable catalog version of a renamed-icon gift', async () => {
+    const oldGift = { id: 970001, name: '同名礼物', price: 5200, coinType: 'gold' as const, imgBasic: 'https://example.com/old.png' };
+    const currentGift = { id: 970002, name: '同名礼物', price: 5200, coinType: 'gold' as const, imgBasic: 'https://example.com/current.png' };
+    builtinCatalog.push(oldGift);
+    try {
+      await saveState({
+        ...state('88888888'),
+        settings: { ...defaultState().settings, showTutorial: false },
+      });
+      const fetchMock = vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url === '/api/gifts?roomId=88888888') {
+          return Response.json({ code: 0, gifts: [currentGift] });
+        }
+        if (url.includes('/api/runtime')) {
+          return Response.json({ code: 0, runtime: { state: 'idle', roomId: '' } });
+        }
+        if (url.includes('/api/auth/status')) {
+          return Response.json({ code: 0, auth: { state: 'anonymous' } });
+        }
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/gifts?roomId=88888888', { cache: 'no-store' }));
+      await Promise.resolve();
+      findByText(root, '编辑')?.onclick?.();
+      const searchInput = root.querySelectorAll('input')
+        .find((input) => input.placeholder === '搜索礼物名称或 ID…') as TestElement & { oninput?: () => void };
+      searchInput.value = '同名礼物';
+      searchInput.oninput?.();
+
+      await vi.waitFor(() => {
+        const matchingChoices = root.querySelectorAll('.gift-choice')
+          .filter((choice) => textOf(choice).includes('同名礼物'));
+        expect(matchingChoices).toHaveLength(1);
+        expect(matchingChoices[0].dataset.giftId).toBe(String(currentGift.id));
+      });
+    } finally {
+      builtinCatalog.pop();
+    }
+  });
+
   it('uses themed scrollbars and keeps focused inputs inside their existing border', () => {
     const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
 

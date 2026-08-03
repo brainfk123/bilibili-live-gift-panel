@@ -1,3 +1,5 @@
+import type { GiftInfo } from './types';
+
 export type RuntimeConnectionState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
 
 export interface RuntimeStatus {
@@ -67,6 +69,12 @@ interface BlindBoxResponse {
   code: number;
   blindBox?: import('./types').BlindBoxInfo | null;
   requiresLogin?: boolean;
+  message?: string;
+}
+
+interface RoomGiftCatalogResponse {
+  code: number;
+  gifts?: GiftInfo[];
   message?: string;
 }
 
@@ -141,4 +149,15 @@ export async function getBlindBoxInfo(giftId: number): Promise<BlindBoxLookup> {
     info: payload.blindBox ?? null,
     requiresLogin: payload.requiresLogin === true,
   };
+}
+
+export async function getRoomGiftCatalog(roomId: string): Promise<GiftInfo[]> {
+  const normalized = roomId.trim();
+  if (!normalized) return [];
+  const response = await fetch(`/api/gifts?roomId=${encodeURIComponent(normalized)}`, { cache: 'no-store' });
+  const payload = await response.json() as RoomGiftCatalogResponse;
+  if (!response.ok || payload.code !== 0 || !Array.isArray(payload.gifts)) {
+    throw new Error(payload.message || `当前礼物目录读取失败：HTTP ${response.status}`);
+  }
+  return payload.gifts;
 }

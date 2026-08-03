@@ -166,6 +166,7 @@ func main() {
 	mux.HandleFunc("/api/config", store.handle)
 	mux.HandleFunc("/api/formula/preview", handleFormulaPreview(store))
 	mux.HandleFunc("/api/blind-box", handleBlindBoxInfo(login))
+	mux.HandleFunc("/api/gifts", handleRoomGiftCatalog(login))
 	mux.HandleFunc("/api/auth/", login.handle)
 	mux.Handle("/api/pages/presence/", presence)
 	mux.HandleFunc("/api/runtime", func(w http.ResponseWriter, r *http.Request) {

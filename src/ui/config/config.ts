@@ -2,12 +2,13 @@ import { AppState, Attribute, FormulaPresetContext, GiftInfo, GiftRule, LogEntry
 import { consumeConfigMigrationRequired, loadState, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { el, fieldControl, inputField, toast } from '../common';
-import { builtinCatalog, findGift, giftDisplayKey } from '../../gifts/catalog';
+import { builtinCatalog, findGift, giftDisplayKey, matchesGiftSearch, sortGiftsByUsage } from '../../gifts/catalog';
 import { formatValue } from '../../format';
 import {
   BiliAuthStatus,
   getBlindBoxInfo,
   getBiliAuthStatus,
+  getRoomGiftCatalog,
   getRuntimeStatus,
   logoutBiliAuth,
   pollBiliQRCodeLogin,
@@ -47,6 +48,10 @@ export function mountConfig(root: HTMLElement): void {
   let runtimeRefreshActive = false;
   let stateRefreshActive = false;
   let authRefreshActive = false;
+  let roomGiftCatalogRefreshActive = false;
+  let roomGiftCatalogRoomId = '';
+  let roomGiftCatalog: GiftInfo[] = [];
+  let refreshOpenGiftCatalog: (() => void) | null = null;
   let loginModalOpen = false;
   let loginPollTimer: ReturnType<typeof globalThis.setInterval> | undefined;
   let localStateVersion = 0;
@@ -101,7 +106,10 @@ export function mountConfig(root: HTMLElement): void {
       renderHeaderStatus();
       const inlineStatus = root.querySelector('.connection-inline-status');
       if (inlineStatus) inlineStatus.textContent = connectionLabel(connectionState);
-      if (!editorOpen && previous !== connectionState && connectionState === 'connected') render();
+      if (previous !== connectionState && connectionState === 'connected') {
+        void refreshRoomGiftCatalog(true);
+        if (!editorOpen) render();
+      }
     } catch {
       connectionState = 'error';
       renderHeaderStatus();
@@ -119,6 +127,7 @@ export function mountConfig(root: HTMLElement): void {
       const next = await getBiliAuthStatus(state.roomId);
       const changed = JSON.stringify(next) !== JSON.stringify(biliAuth);
       biliAuth = next;
+      if (changed) void refreshRoomGiftCatalog(true);
       if (changed && !editorOpen) render();
     } catch (error) {
       const next: BiliAuthStatus = {
@@ -133,6 +142,32 @@ export function mountConfig(root: HTMLElement): void {
     }
   }
 
+  async function refreshRoomGiftCatalog(force = false): Promise<void> {
+    const requestedRoomId = state.roomId.trim();
+    if (!requestedRoomId) {
+      roomGiftCatalogRoomId = '';
+      roomGiftCatalog = [];
+      return;
+    }
+    if (roomGiftCatalogRefreshActive || (!force && roomGiftCatalogRoomId === requestedRoomId)) return;
+    roomGiftCatalogRefreshActive = true;
+    try {
+      const nextCatalog = await getRoomGiftCatalog(requestedRoomId);
+      if (state.roomId.trim() !== requestedRoomId) return;
+      const changed = roomGiftCatalogRoomId !== requestedRoomId
+        || JSON.stringify(roomGiftCatalog) !== JSON.stringify(nextCatalog);
+      roomGiftCatalogRoomId = requestedRoomId;
+      roomGiftCatalog = nextCatalog;
+      if (!changed) return;
+      if (refreshOpenGiftCatalog) refreshOpenGiftCatalog();
+      else if (!editorOpen) render();
+    } catch {
+      // Keep the local catalog as an offline fallback when Bilibili is unavailable.
+    } finally {
+      roomGiftCatalogRefreshActive = false;
+    }
+  }
+
   async function refreshBackendState(): Promise<void> {
     if (stateRefreshActive || editorOpen) return;
     stateRefreshActive = true;
@@ -142,6 +177,7 @@ export function mountConfig(root: HTMLElement): void {
       const nextState = await refreshStateFromServer(() => requestedVersion === localStateVersion);
       if (requestedVersion !== localStateVersion) return;
       state = nextState;
+      void refreshRoomGiftCatalog();
       if (ensureRuleGiftCatalog(state)) await saveState(state);
       if (configStructureSignature(state) !== previousStructure) {
         render();
@@ -246,7 +282,10 @@ export function mountConfig(root: HTMLElement): void {
       connectionText.textContent = connectionLabel(connectionState);
       renderHeaderStatus();
       void refreshBiliAuth();
-      void saveAndWait().then(refreshRuntime).catch(() => undefined);
+      void saveAndWait().then(() => {
+        void refreshRuntime();
+        void refreshRoomGiftCatalog(true);
+      }).catch(() => undefined);
     };
     roomCard.append(
       fieldControl(roomInput),
@@ -758,7 +797,7 @@ export function mountConfig(root: HTMLElement): void {
     const timerRules = original
       ? state.timerRules.filter((rule) => rule.attributeName === original.name).map((rule) => ({ ...rule }))
       : [];
-    let allGifts = availableGifts(state);
+    let allGifts = availableGifts(state, roomGiftCatalog);
     const selected = new Map<number, SelectedGiftRule>();
     const blindBoxLookups: SelectedGiftRule[] = [];
     if (original) {
@@ -787,6 +826,7 @@ export function mountConfig(root: HTMLElement): void {
       overlay.remove();
       editorOpen = false;
       editorGuideEnabled = false;
+      refreshOpenGiftCatalog = null;
       renderGuide();
     };
     closeButton.onclick = close;
@@ -1231,8 +1271,7 @@ export function mountConfig(root: HTMLElement): void {
     }
 
     function renderGiftPicker(): void {
-      const query = giftSearch.value.trim().toLowerCase();
-      filteredGifts = allGifts.filter((gift) => gift.name.toLowerCase().includes(query) || String(gift.id).includes(query));
+      filteredGifts = allGifts.filter((gift) => matchesGiftSearch(gift, giftSearch.value));
       visibleGiftCount = 0;
       giftPickerLoader = null;
       giftChoiceButtons.clear();
@@ -1409,7 +1448,7 @@ export function mountConfig(root: HTMLElement): void {
 
     giftSearch.oninput = renderGiftPicker;
     const manualGift = renderManualGiftAdder(() => {
-      allGifts = availableGifts(state);
+      allGifts = availableGifts(state, roomGiftCatalog);
       renderGiftPicker();
       renderSelectedRules();
     }, selected, defaultFormula, (item) => { void hydrateBlindBoxRule(item); });
@@ -1419,7 +1458,7 @@ export function mountConfig(root: HTMLElement): void {
       el('div', { class: 'modal-section-heading' }, [
         el('div', {}, [
           el('h3', { text: '选择会影响这个属性的礼物' }),
-          el('p', { text: '可选择任意数量；向下滚动会自动加载更多礼物。' }),
+          el('p', { text: '优先显示当前直播间仍在售的礼物（包含 VIP 专属礼物）；向下滚动会自动加载更多。数字 ID 需要完整匹配。' }),
         ]),
         selectionCount,
       ]),
@@ -1471,6 +1510,11 @@ export function mountConfig(root: HTMLElement): void {
       if (shouldClose) close();
     };
     root.append(overlay);
+    refreshOpenGiftCatalog = () => {
+      allGifts = availableGifts(state, roomGiftCatalog);
+      renderGiftPicker();
+      renderSelectedRules();
+    };
     renderGiftPicker();
     renderSelectedRules();
     for (const item of blindBoxLookups) void hydrateBlindBoxRule(item);
@@ -1689,6 +1733,7 @@ export function mountConfig(root: HTMLElement): void {
     overlay.remove();
     editorOpen = false;
     editorGuideEnabled = false;
+    refreshOpenGiftCatalog = null;
     render();
     toast(index === undefined ? '属性已创建' : '属性配置已保存', root);
   }
@@ -1923,6 +1968,7 @@ export function mountConfig(root: HTMLElement): void {
   render();
   void refreshRuntime();
   void refreshBiliAuth();
+  void refreshRoomGiftCatalog();
   const pollTimer = globalThis.setInterval(() => {
     void refreshRuntime();
     void refreshBackendState();
@@ -1936,17 +1982,28 @@ export function mountConfig(root: HTMLElement): void {
   if (typeof globalThis.addEventListener === 'function') globalThis.addEventListener('beforeunload', disposePolling, { once: true });
 }
 
-function availableGifts(state: AppState): GiftInfo[] {
+function availableGifts(state: AppState, roomGiftCatalog: GiftInfo[]): GiftInfo[] {
   const configuredGifts = state.rules
     .map((rule) => findGift(state, rule.giftId))
     .filter((gift): gift is GiftInfo => gift !== undefined);
+  if (roomGiftCatalog.length > 0) {
+    const seen = new Set<string>();
+    const currentGifts = roomGiftCatalog.filter((gift) => {
+      const key = giftDisplayKey(gift);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    return sortGiftsByUsage(currentGifts, configuredGifts, state.recentGifts);
+  }
   const seen = new Set<string>();
-  return [...configuredGifts, ...state.recentGifts, ...builtinCatalog].filter((gift) => {
+  const fallbackGifts = [...configuredGifts, ...state.recentGifts, ...builtinCatalog].filter((gift) => {
     const key = giftDisplayKey(gift);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+  return sortGiftsByUsage(fallbackGifts, configuredGifts, state.recentGifts);
 }
 
 function configStructureSignature(state: AppState): string {

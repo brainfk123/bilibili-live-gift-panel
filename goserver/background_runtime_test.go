@@ -66,6 +66,14 @@ func TestBackgroundRuntimeProcessesGiftWithoutDisplayPage(t *testing.T) {
 	t.Fatal("gift did not update the attribute in the disk configuration")
 }
 
+func TestSameGiftIdentityKeepsMatchingAfterIconRevision(t *testing.T) {
+	configured := giftInfo{ID: 970001, Name: "情书", Price: 5200, CoinType: "gold", ImgBasic: "old.png"}
+	event := giftEvent{GiftID: 970002, GiftName: "情书", Price: 5200, CoinType: "gold", ImgBasic: "current.png"}
+	if !sameGiftIdentity(configured, event) {
+		t.Fatal("icon-only gift revision should remain a runtime alias")
+	}
+}
+
 func TestApplyGiftEventAggregatesBatchForAttributeBroadcast(t *testing.T) {
 	state := defaultAppState()
 	state.Attributes = []attributeState{{Name: "加班时间", Value: 0, Unit: "seconds", Format: "hhmmss"}}

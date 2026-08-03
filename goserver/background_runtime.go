@@ -491,10 +491,7 @@ func sameGiftIdentity(configured giftInfo, gift giftEvent) bool {
 	if strings.TrimSpace(configured.Name) != strings.TrimSpace(gift.GiftName) {
 		return false
 	}
-	if configured.Price != gift.Price || configured.CoinType != gift.CoinType {
-		return false
-	}
-	return configured.ImgBasic == "" || gift.ImgBasic == "" || configured.ImgBasic == gift.ImgBasic
+	return configured.Price == gift.Price && configured.CoinType == gift.CoinType
 }
 
 func maxInt(left, right int) int {
