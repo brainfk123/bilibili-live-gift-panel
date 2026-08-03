@@ -34,6 +34,14 @@ interface SelectedGiftRule {
   blindBoxStatus?: 'matched' | 'login-required' | 'not-blind-box' | 'error';
 }
 
+type GiftAvailability = 'listed' | 'observed' | 'historical';
+
+interface GiftPickerCatalog {
+  gifts: GiftInfo[];
+  availabilityById: Map<number, GiftAvailability>;
+  hasLiveListingStatus: boolean;
+}
+
 export function mountConfig(root: HTMLElement): void {
   let state = loadState();
   root.classList.add('config-root');
@@ -854,7 +862,8 @@ export function mountConfig(root: HTMLElement): void {
     const timerRules = original
       ? state.timerRules.filter((rule) => rule.attributeName === original.name).map((rule) => ({ ...rule }))
       : [];
-    let allGifts = giftPickerGifts(state, roomGiftCatalog);
+    let pickerCatalog = buildGiftPickerCatalog(state, roomGiftCatalog);
+    let allGifts = pickerCatalog.gifts;
     const selected = new Map<number, SelectedGiftRule>();
     const blindBoxLookups: SelectedGiftRule[] = [];
     if (original) {
@@ -1271,7 +1280,7 @@ export function mountConfig(root: HTMLElement): void {
       button.setAttribute('aria-pressed', String(selectedNow));
     }
 
-    function createGiftChoice(gift: GiftInfo, showListingStatus: boolean): HTMLButtonElement {
+    function createGiftChoice(gift: GiftInfo, showAllStatuses: boolean): HTMLButtonElement {
       const selectedNow = selected.has(gift.id);
       const button = el('button', {
         class: `gift-choice${selectedNow ? ' is-selected' : ''}`,
@@ -1281,16 +1290,22 @@ export function mountConfig(root: HTMLElement): void {
       button.dataset.giftId = String(gift.id);
       const image = el('img', { class: 'gift-choice-image', alt: '' }) as HTMLImageElement;
       image.src = gift.imgBasic || transparentPixel();
-      const listingStatus = gift.listed === true ? '已上架' : '未上架';
+      const availability = pickerCatalog.availabilityById.get(gift.id) ?? 'historical';
+      const statusLabel: Record<GiftAvailability, string> = {
+        listed: '已上架',
+        observed: '直播中收到过',
+        historical: '历史礼物',
+      };
+      const showStatus = showAllStatuses || availability === 'observed';
       button.append(
         image,
         el('span', { class: 'gift-choice-copy' }, [
           el('strong', { text: gift.name }),
           el('span', { class: 'gift-choice-meta' }, [
             el('small', { text: giftPriceLabel(gift) }),
-            ...(showListingStatus ? [el('span', {
-              class: `gift-listing-status ${gift.listed === true ? 'is-listed' : 'is-unlisted'}`,
-              text: listingStatus,
+            ...(showStatus ? [el('span', {
+              class: `gift-listing-status is-${availability}`,
+              text: statusLabel[availability],
             })] : []),
           ]),
         ]),
@@ -1329,9 +1344,9 @@ export function mountConfig(root: HTMLElement): void {
       if (visibleGiftCount >= filteredGifts.length) return;
       giftPickerLoader?.remove();
       const nextCount = Math.min(filteredGifts.length, visibleGiftCount + giftPickerBatchSize);
-      const showListingStatus = giftSearch.value.trim().length > 0;
+      const showAllStatuses = giftSearch.value.trim().length > 0;
       for (const gift of filteredGifts.slice(visibleGiftCount, nextCount)) {
-        giftPicker.append(createGiftChoice(gift, showListingStatus));
+        giftPicker.append(createGiftChoice(gift, showAllStatuses));
       }
       visibleGiftCount = nextCount;
       updateGiftPickerLoader();
@@ -1339,7 +1354,9 @@ export function mountConfig(root: HTMLElement): void {
 
     function renderGiftPicker(): void {
       const query = giftSearch.value.trim();
-      filteredGifts = allGifts.filter((gift) => (query.length > 0 || gift.listed !== false)
+      filteredGifts = allGifts.filter((gift) => (query.length > 0
+        || !pickerCatalog.hasLiveListingStatus
+        || pickerCatalog.availabilityById.get(gift.id) !== 'historical')
         && matchesGiftSearch(gift, query));
       visibleGiftCount = 0;
       giftPickerLoader = null;
@@ -1517,7 +1534,8 @@ export function mountConfig(root: HTMLElement): void {
 
     giftSearch.oninput = renderGiftPicker;
     const manualGift = renderManualGiftAdder(() => {
-      allGifts = giftPickerGifts(state, roomGiftCatalog);
+      pickerCatalog = buildGiftPickerCatalog(state, roomGiftCatalog);
+      allGifts = pickerCatalog.gifts;
       renderGiftPicker();
       renderSelectedRules();
     }, selected, defaultFormula, (item) => { void hydrateBlindBoxRule(item); });
@@ -1527,7 +1545,7 @@ export function mountConfig(root: HTMLElement): void {
       el('div', { class: 'modal-section-heading' }, [
         el('div', {}, [
           el('h3', { text: '选择会影响这个属性的礼物' }),
-          el('p', { text: '默认只显示当前已上架礼物；搜索时会同时显示未上架礼物并标注状态。向下滚动会自动加载更多，数字 ID 需要完整匹配。' }),
+          el('p', { text: '默认显示已上架和直播中实际收到过的礼物；搜索时会同时显示历史礼物并标注状态。向下滚动会自动加载更多，数字 ID 需要完整匹配。' }),
         ]),
         selectionCount,
       ]),
@@ -1580,7 +1598,8 @@ export function mountConfig(root: HTMLElement): void {
     };
     root.append(overlay);
     refreshOpenGiftCatalog = () => {
-      allGifts = giftPickerGifts(state, roomGiftCatalog);
+      pickerCatalog = buildGiftPickerCatalog(state, roomGiftCatalog);
+      allGifts = pickerCatalog.gifts;
       renderGiftPicker();
       renderSelectedRules();
     };
@@ -2133,31 +2152,36 @@ export function mountConfig(root: HTMLElement): void {
   if (typeof globalThis.addEventListener === 'function') globalThis.addEventListener('beforeunload', disposePolling, { once: true });
 }
 
-function giftPickerGifts(state: AppState, roomGiftCatalog: GiftInfo[]): GiftInfo[] {
+function buildGiftPickerCatalog(state: AppState, roomGiftCatalog: GiftInfo[]): GiftPickerCatalog {
   const configuredGifts = state.rules
     .map((rule) => findGift(state, rule.giftId))
     .filter((gift): gift is GiftInfo => gift !== undefined);
-  if (roomGiftCatalog.length > 0) {
-    const seen = new Set<string>();
-    const hasListingStatus = roomGiftCatalog.some((gift) => typeof gift.listed === 'boolean');
-    const knownGifts = [...configuredGifts, ...state.recentGifts, ...builtinCatalog]
-      .map((gift) => hasListingStatus ? { ...gift, listed: false } : gift);
-    const currentGifts = [...roomGiftCatalog, ...knownGifts].filter((gift) => {
-      const key = giftDisplayKey(gift);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-    return sortGiftsByUsage(currentGifts, configuredGifts, state.recentGifts);
+  const hasLiveListingStatus = roomGiftCatalog.some((gift) => typeof gift.listed === 'boolean');
+  const candidates: Array<{ gift: GiftInfo; availability: GiftAvailability }> = [
+    ...roomGiftCatalog.map((gift) => ({
+      gift,
+      availability: (hasLiveListingStatus && gift.listed === false ? 'historical' : 'listed') as GiftAvailability,
+    })),
+    ...state.recentGifts.map((gift) => ({
+      gift,
+      availability: (gift.count > 0 || gift.lastReceived > 0 ? 'observed' : 'historical') as GiftAvailability,
+    })),
+    ...configuredGifts.map((gift) => ({ gift, availability: 'historical' as GiftAvailability })),
+    ...builtinCatalog.map((gift) => ({ gift, availability: 'historical' as GiftAvailability })),
+  ];
+  const priority: Record<GiftAvailability, number> = { listed: 3, observed: 2, historical: 1 };
+  const byDisplayKey = new Map<string, { gift: GiftInfo; availability: GiftAvailability }>();
+  for (const candidate of candidates) {
+    const key = giftDisplayKey(candidate.gift);
+    const existing = byDisplayKey.get(key);
+    if (!existing || priority[candidate.availability] > priority[existing.availability]) {
+      byDisplayKey.set(key, candidate);
+    }
   }
-  const seen = new Set<string>();
-  const fallbackGifts = [...configuredGifts, ...state.recentGifts, ...builtinCatalog].filter((gift) => {
-    const key = giftDisplayKey(gift);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-  return sortGiftsByUsage(fallbackGifts, configuredGifts, state.recentGifts);
+  const merged = Array.from(byDisplayKey.values());
+  const availabilityById = new Map(merged.map(({ gift, availability }) => [gift.id, availability]));
+  const gifts = sortGiftsByUsage(merged.map(({ gift }) => gift), configuredGifts, state.recentGifts);
+  return { gifts, availabilityById, hasLiveListingStatus };
 }
 
 function configStructureSignature(state: AppState): string {

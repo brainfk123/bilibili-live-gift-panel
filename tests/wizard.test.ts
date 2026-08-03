@@ -914,21 +914,39 @@ describe('single-page configuration rendering', () => {
     }
   });
 
-  it('hides unlisted gifts by default and labels both statuses while searching', async () => {
+  it('shows listed and observed gifts by default while keeping historical gifts search-only', async () => {
     const listedGift = {
       id: 980001, name: '状态测试礼物 A', price: 100, coinType: 'gold' as const, imgBasic: '', listed: true,
     };
-    const unlistedGift = {
+    const historicalGift = {
       id: 980002, name: '状态测试礼物 B', price: 200, coinType: 'gold' as const, imgBasic: '', listed: false,
+    };
+    const observedCatalogGift = {
+      id: 980003, name: '状态测试礼物 C', price: 300, coinType: 'gold' as const, imgBasic: '', listed: false,
+    };
+    const manualGift = {
+      id: 980004, name: '状态测试礼物 D', price: 400, coinType: 'gold' as const, imgBasic: '',
     };
     await saveState({
       ...state('88888888'),
       settings: { ...defaultState().settings, showTutorial: false },
+      recentGifts: [
+        {
+          id: observedCatalogGift.id,
+          name: observedCatalogGift.name,
+          price: observedCatalogGift.price,
+          coinType: observedCatalogGift.coinType,
+          imgBasic: observedCatalogGift.imgBasic,
+          lastReceived: 1700000000,
+          count: 1,
+        },
+        { ...manualGift, lastReceived: 0, count: 0 },
+      ],
     });
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       if (url === '/api/gifts?roomId=88888888') {
-        return Response.json({ code: 0, gifts: [listedGift, unlistedGift] });
+        return Response.json({ code: 0, gifts: [listedGift, historicalGift, observedCatalogGift] });
       }
       if (url.includes('/api/runtime')) return Response.json({ code: 0, runtime: { state: 'idle', roomId: '' } });
       if (url.includes('/api/auth/status')) return Response.json({ code: 0, auth: { state: 'anonymous' } });
@@ -945,18 +963,33 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => {
       choices = root.querySelectorAll('.gift-choice')
         .filter((choice) => textOf(choice).includes('状态测试礼物'));
-      expect(choices).toHaveLength(1);
+      const visibleIds = choices.map((choice) => choice.dataset.giftId);
+      expect(visibleIds).toContain(String(listedGift.id));
+      expect(visibleIds).toContain(String(observedCatalogGift.id));
+      expect(visibleIds).not.toContain(String(historicalGift.id));
+      expect(visibleIds).not.toContain(String(manualGift.id));
     });
-    expect(choices[0].dataset.giftId).toBe(String(listedGift.id));
-    expect(choices[0].querySelector('.gift-listing-status')).toBeNull();
+    const defaultById = new Map(choices.map((choice) => [choice.dataset.giftId, choice]));
+    expect(defaultById.has(String(listedGift.id))).toBe(true);
+    expect(defaultById.has(String(observedCatalogGift.id))).toBe(true);
+    expect(defaultById.has(String(historicalGift.id))).toBe(false);
+    expect(defaultById.has(String(manualGift.id))).toBe(false);
+    expect(defaultById.get(String(listedGift.id))?.querySelector('.gift-listing-status')).toBeNull();
+    expect(textOf(defaultById.get(String(observedCatalogGift.id))?.querySelector('.gift-listing-status')!))
+      .toBe('直播中收到过');
 
     const searchInput = root.querySelector('.gift-search') as TestElement & { oninput?: () => void };
     searchInput.value = '状态测试礼物';
     searchInput.oninput?.();
     choices = root.querySelectorAll('.gift-choice')
       .filter((choice) => textOf(choice).includes('状态测试礼物'));
-    expect(choices).toHaveLength(2);
-    expect(choices.map((choice) => textOf(choice.querySelector('.gift-listing-status')!))).toEqual(['已上架', '未上架']);
+    expect(choices).toHaveLength(4);
+    const searchedById = new Map(choices.map((choice) => [choice.dataset.giftId, choice]));
+    expect(textOf(searchedById.get(String(listedGift.id))?.querySelector('.gift-listing-status')!)).toBe('已上架');
+    expect(textOf(searchedById.get(String(observedCatalogGift.id))?.querySelector('.gift-listing-status')!))
+      .toBe('直播中收到过');
+    expect(textOf(searchedById.get(String(historicalGift.id))?.querySelector('.gift-listing-status')!)).toBe('历史礼物');
+    expect(textOf(searchedById.get(String(manualGift.id))?.querySelector('.gift-listing-status')!)).toBe('历史礼物');
   });
 
   it('uses themed scrollbars and keeps focused inputs inside their existing border', () => {
