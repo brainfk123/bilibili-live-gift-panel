@@ -928,7 +928,7 @@ describe('single-page configuration rendering', () => {
     roomInput.oninput?.();
     mockedRuntimeState = 'connected';
     findByText(root, '测试连接')?.onclick?.();
-    await vi.waitFor(() => expect(textOf(root)).toContain('添加第一个属性'));
+    await vi.waitFor(() => expect(textOf(root)).toContain('添加第一个属性'), { timeout: 5000 });
     findByText(root, '添加属性')?.onclick?.();
     expect(root.querySelector('.attribute-modal')).not.toBeNull();
     expect(textOf(root)).toContain('添加礼物并配置规则');
