@@ -111,7 +111,7 @@ jobs:
           $tagRef = "refs/tags/$env:RELEASE_TAG"
           ./scripts/push-gitcode.ps1 `
             -Token $env:GITCODE_TOKEN `
-            -RefSpec "HEAD:refs/heads/master","${tagRef}:${tagRef}"
+            -RefSpec "HEAD:refs/heads/master","+${tagRef}:${tagRef}"
 
       - name: Mirror release to GitCode
         id: gitcode-release
