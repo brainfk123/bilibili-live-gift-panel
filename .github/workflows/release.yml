@@ -26,6 +26,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -96,8 +97,25 @@ jobs:
             gh release edit $env:RELEASE_TAG --draft=false --latest
           }
 
+      - name: Sync release source to GitCode
+        id: gitcode-source
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GITCODE_TOKEN)) {
+            Write-Warning "GITCODE_TOKEN is not configured; skipping the GitCode source sync."
+            exit 0
+          }
+          $tagRef = "refs/tags/$env:RELEASE_TAG"
+          ./scripts/push-gitcode.ps1 `
+            -Token $env:GITCODE_TOKEN `
+            -RefSpec "HEAD:refs/heads/master","${tagRef}:${tagRef}"
+
       - name: Mirror release to GitCode
         id: gitcode-release
+        if: ${{ steps.gitcode-source.outcome == 'success' }}
         continue-on-error: true
         shell: pwsh
         env:
@@ -113,6 +131,6 @@ jobs:
             -AssetPath dist/gift-panel-windows-x64.exe,dist/gift-panel-windows-x64.exe.sha256
 
       - name: Report GitCode mirror failure
-        if: ${{ steps.gitcode-release.outcome == 'failure' }}
+        if: ${{ steps.gitcode-source.outcome == 'failure' || steps.gitcode-release.outcome == 'failure' }}
         shell: pwsh
         run: Write-Warning "GitHub Release succeeded, but the GitCode mirror failed. The application will fall back to GitHub until the mirror is repaired."

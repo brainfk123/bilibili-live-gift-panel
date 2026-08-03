@@ -1,0 +1,33 @@
+name: Sync source to GitCode
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - '**'
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Push current ref to GitCode
+        shell: pwsh
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GITCODE_TOKEN)) {
+            throw "GITCODE_TOKEN is not configured."
+          }
+          $sourceRef = if ($env:GITHUB_REF.StartsWith("refs/tags/")) { $env:GITHUB_REF } else { "HEAD" }
+          ./scripts/push-gitcode.ps1 `
+            -Token $env:GITCODE_TOKEN `
+            -RefSpec "${sourceRef}:$env:GITHUB_REF"
