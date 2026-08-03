@@ -21,6 +21,7 @@ export const defaultState = (): AppState => ({
     giftView: 'list',
     panelOpacity: 55,
     showTutorial: true,
+    autoUpdate: true,
   },
   giftCatalog: [],
   recentGifts: [],
@@ -97,6 +98,7 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     && (parsed.attributes?.length ?? 0) > 0
     && (parsed.rules?.length ?? 0) > 0;
   if (parsed.settings?.showTutorial === undefined) configMigrationRequired = true;
+  if (parsed.settings?.autoUpdate === undefined) configMigrationRequired = true;
   const showTutorial = parsed.settings?.showTutorial ?? !setupComplete;
   const settings = { ...base.settings, ...(parsed.settings ?? {}), showTutorial };
   settings.panelOpacity = Math.min(100, Math.max(10, Number(settings.panelOpacity) || base.settings.panelOpacity));

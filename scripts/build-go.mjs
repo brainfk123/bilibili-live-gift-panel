@@ -16,6 +16,12 @@ mkdirSync(distDir, { recursive: true });
 copyFileSync(join(root, 'dist', 'index.html'), join(distDir, 'index.html'));
 
 const out = join(root, 'dist', 'gift-panel.exe');
+const appVersion = (process.env.APP_VERSION || 'dev').replace(/^v/, '');
+const appCommit = process.env.APP_COMMIT || 'local';
+for (const [label, value] of [['APP_VERSION', appVersion], ['APP_COMMIT', appCommit]]) {
+  if (!/^[0-9A-Za-z.+-]+$/.test(value)) throw new Error(`${label} contains unsupported characters`);
+}
+const ldflags = `-s -w -H windowsgui -X main.appVersion=${appVersion} -X main.appCommit=${appCommit}`;
 const candidates = [
   process.env.GO_BIN,
   'go',
@@ -25,7 +31,7 @@ let built = false;
 let lastError;
 for (const go of candidates) {
   try {
-    execFileSync(go, ['build', '-ldflags', '-s -w -H windowsgui', '-o', out, '.'], {
+    execFileSync(go, ['build', '-ldflags', ldflags, '-o', out, '.'], {
       cwd: join(root, 'goserver'),
       stdio: 'inherit',
     });
@@ -38,4 +44,4 @@ for (const go of candidates) {
 if (!built) {
   throw lastError ?? new Error('Go compiler not found. Install Go or set GO_BIN.');
 }
-console.log('built ' + out);
+console.log(`built ${out} (${appVersion}, ${appCommit})`);

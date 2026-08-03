@@ -22,6 +22,19 @@ go test ./...
 
 `npm run build` 会构建前端并编译本地服务，产物为 `dist/gift-panel.exe`。EXE 已内嵌前端页面和代理服务，主播电脑不需要安装 Node.js 或 Go。
 
+## 发布与自动更新
+
+正式版本使用 `vMAJOR.MINOR.PATCH` 标签发布，且标签必须与 `package.json` 中的版本一致。例如：
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+GitHub Actions 会运行测试、构建 `gift-panel-windows-x64.exe`、生成 SHA-256 文件并创建 GitHub Release。正式 EXE 启动时及每 6 小时会在后台检查最新正式 Release，静默下载通过 SHA-256 校验的新版本，并在用户从托盘退出后台程序后替换 EXE。配置页面的“外观与数据 → 程序更新”中可以关闭自动下载或手动检查更新。
+
+本地 `npm run build` 生成的是 `dev` 版本，不会访问 GitHub 更新接口。如需在本地构建指定版本，可设置 `APP_VERSION` 和 `APP_COMMIT` 环境变量。
+
 ### 规则语义
 
 规则结果现在会直接成为属性的新值。需要累加时，请把当前属性名写进规则，例如 `早播次数+1`。

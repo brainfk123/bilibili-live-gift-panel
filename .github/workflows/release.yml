@@ -1,0 +1,74 @@
+name: Release Windows executable
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: goserver/go.mod
+          cache-dependency-path: goserver/go.sum
+
+      - name: Verify tag matches package version
+        shell: pwsh
+        run: |
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ("v$packageVersion" -ne $env:GITHUB_REF_NAME) {
+            throw "Tag $env:GITHUB_REF_NAME does not match package.json version $packageVersion"
+          }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test -- --reporter=dot
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Build release executable
+        run: npm run build
+        env:
+          APP_VERSION: ${{ github.ref_name }}
+          APP_COMMIT: ${{ github.sha }}
+
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.exe
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel-windows-x64.exe).Hash.ToLowerInvariant()
+          "$hash  gift-panel-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/gift-panel-windows-x64.exe.sha256
+
+      - name: Attest executable provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/gift-panel-windows-x64.exe
+
+      - name: Create draft release and upload assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME --draft --verify-tag --generate-notes --title $env:GITHUB_REF_NAME
+          gh release upload $env:GITHUB_REF_NAME dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256
+          gh release edit $env:GITHUB_REF_NAME --draft=false --latest

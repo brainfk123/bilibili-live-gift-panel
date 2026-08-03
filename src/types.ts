@@ -105,6 +105,7 @@ export interface Settings {
   giftView: 'list' | 'grid';
   panelOpacity: number;
   showTutorial: boolean;
+  autoUpdate: boolean;
 }
 
 export interface AppState {

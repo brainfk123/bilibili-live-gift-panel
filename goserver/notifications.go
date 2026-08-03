@@ -13,6 +13,7 @@ const (
 	notificationDisplayPagesClosed notificationKind = "display-pages-closed"
 	notificationRoomConnected      notificationKind = "room-connected"
 	notificationRoomDisconnected   notificationKind = "room-disconnected"
+	notificationUpdateReady        notificationKind = "update-ready"
 )
 
 type desktopNotification struct {
@@ -100,6 +101,11 @@ func makeDesktopNotification(kind notificationKind, roomID string) desktopNotifi
 		return desktopNotification{
 			Title: "直播间连接已断开",
 			Body:  fmt.Sprintf("直播间 %s 的连接已断开，后台将根据当前配置继续尝试连接。", roomID),
+		}
+	case notificationUpdateReady:
+		return desktopNotification{
+			Title: "新版本已下载",
+			Body:  fmt.Sprintf("v%s 已准备好，退出后台程序后会自动安装。", roomID),
 		}
 	default:
 		return desktopNotification{Title: "直播礼物面板", Body: "后台状态已更新。"}

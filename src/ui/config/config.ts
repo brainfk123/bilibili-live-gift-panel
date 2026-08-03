@@ -6,15 +6,18 @@ import { builtinCatalog, findGift, giftDisplayKey, matchesGiftSearch, sortGiftsB
 import { formatValue } from '../../format';
 import {
   BiliAuthStatus,
+  checkForUpdates,
   getBlindBoxInfo,
   getBiliAuthStatus,
   getRoomGiftCatalog,
   getRuntimeStatus,
+  getUpdateStatus,
   logoutBiliAuth,
   pollBiliQRCodeLogin,
   previewFormula,
   RuntimeConnectionState,
   startBiliQRCodeLogin,
+  UpdateStatus,
 } from '../../backend';
 import { createBrandIcon } from '../brand';
 import { getTutorialStep } from './wizard';
@@ -52,6 +55,11 @@ export function mountConfig(root: HTMLElement): void {
   let roomGiftCatalogRoomId = '';
   let roomGiftCatalog: GiftInfo[] = [];
   let refreshOpenGiftCatalog: (() => void) | null = null;
+  let currentUpdateStatus: UpdateStatus = {
+    state: 'idle', currentVersion: '', message: '正在读取版本信息…', autoUpdate: state.settings.autoUpdate, restartRequired: false,
+  };
+  let updateRefreshActive = false;
+  let refreshUpdateCard: (() => void) | null = null;
   let loginModalOpen = false;
   let loginPollTimer: ReturnType<typeof globalThis.setInterval> | undefined;
   let localStateVersion = 0;
@@ -139,6 +147,43 @@ export function mountConfig(root: HTMLElement): void {
       if (changed && !editorOpen) render();
     } finally {
       authRefreshActive = false;
+    }
+  }
+
+  async function refreshUpdateStatus(): Promise<UpdateStatus> {
+    if (updateRefreshActive) return currentUpdateStatus;
+    updateRefreshActive = true;
+    try {
+      currentUpdateStatus = await getUpdateStatus();
+    } catch (error) {
+      currentUpdateStatus = {
+        ...currentUpdateStatus,
+        state: 'error',
+        message: error instanceof Error ? error.message : '更新状态读取失败',
+        autoUpdate: state.settings.autoUpdate,
+      };
+    } finally {
+      updateRefreshActive = false;
+      refreshUpdateCard?.();
+    }
+    return currentUpdateStatus;
+  }
+
+  async function runManualUpdateCheck(): Promise<void> {
+    try {
+      currentUpdateStatus = await checkForUpdates();
+      refreshUpdateCard?.();
+      for (let attempt = 0; attempt < 120 && ['checking', 'downloading'].includes(currentUpdateStatus.state); attempt++) {
+        await new Promise((resolve) => globalThis.setTimeout(resolve, 500));
+        await refreshUpdateStatus();
+      }
+    } catch (error) {
+      currentUpdateStatus = {
+        ...currentUpdateStatus,
+        state: 'error',
+        message: error instanceof Error ? error.message : '手动检查更新失败',
+      };
+      refreshUpdateCard?.();
     }
   }
 
@@ -1742,7 +1787,7 @@ export function mountConfig(root: HTMLElement): void {
     const details = el('details', { class: 'advanced-settings' });
     details.append(el('summary', {}, [
       el('span', { text: '外观与数据' }),
-      el('small', { text: '面板字号、颜色、对齐和配置备份' }),
+      el('small', { text: '面板外观、自动更新和配置备份' }),
     ]));
     const settingsGrid = el('div', { class: 'advanced-settings-grid' });
 
@@ -1914,7 +1959,85 @@ export function mountConfig(root: HTMLElement): void {
       location.reload();
     };
     dataCard.append(el('div', { class: 'data-actions' }, [exportButton, importButton, importInput, resetButton]));
-    settingsGrid.append(appearance, dataCard);
+
+    const updateCard = el('section', { class: 'workspace-card advanced-card update-settings-card' });
+    const versionText = el('strong', { class: 'update-current-version', text: '读取中…' });
+    const stateBadge = el('span', { class: 'update-state-badge', text: '读取中' });
+    const statusMessage = el('p', { class: 'advanced-copy update-status-message', text: currentUpdateStatus.message });
+    const progressTrack = el('div', { class: 'update-progress-track', ariaLabel: '更新下载进度' } as any);
+    const progressBar = el('span', { class: 'update-progress-bar' });
+    progressTrack.append(progressBar);
+    const autoUpdateInput = el('input', { class: 'setting-switch-input', type: 'checkbox' }) as HTMLInputElement;
+    autoUpdateInput.checked = state.settings.autoUpdate;
+    autoUpdateInput.onchange = () => {
+      state.settings.autoUpdate = autoUpdateInput.checked;
+      currentUpdateStatus = { ...currentUpdateStatus, autoUpdate: autoUpdateInput.checked };
+      refreshUpdateCard?.();
+      void saveAndWait().then(refreshUpdateStatus).catch(() => undefined);
+    };
+    const autoUpdateControl = el('label', { class: 'setting-switch update-auto-switch' }, [
+      autoUpdateInput,
+      el('span', { class: 'setting-switch-track', ariaHidden: 'true' }),
+      el('span', { class: 'setting-switch-copy' }, [
+        el('strong', { text: '自动下载更新' }),
+        el('small', { text: '启动时和每 6 小时检查；下载完成后，在退出后台程序时安装。' }),
+      ]),
+    ]);
+    const checkUpdateButton = el('button', { class: 'btn update-check-button', type: 'button', text: '手动检查更新' }) as HTMLButtonElement;
+    checkUpdateButton.onclick = () => { void runManualUpdateCheck(); };
+    const lastChecked = el('small', { class: 'update-last-checked', text: '尚未检查' });
+    const updateActions = el('div', { class: 'update-actions' }, [checkUpdateButton, lastChecked]);
+    updateCard.append(
+      el('div', { class: 'update-heading' }, [
+        el('div', {}, [el('h3', { text: '程序更新' }), el('span', { class: 'update-version-label', text: '当前版本' }), versionText]),
+        stateBadge,
+      ]),
+      statusMessage,
+      progressTrack,
+      autoUpdateControl,
+      updateActions,
+    );
+
+    const updateStateLabels: Record<UpdateStatus['state'], string> = {
+      idle: '未检查',
+      disabled: '自动更新已关闭',
+      development: '开发版本',
+      unsupported: '不支持',
+      checking: '检查中',
+      downloading: '下载中',
+      ready: '等待安装',
+      'up-to-date': '已是最新',
+      error: '检查失败',
+    };
+    const syncUpdateCard = (): void => {
+      const updateState = currentUpdateStatus.state;
+      updateCard.dataset.updateState = updateState;
+      versionText.textContent = currentUpdateStatus.currentVersion
+        ? currentUpdateStatus.currentVersion === 'dev' ? 'dev' : `v${currentUpdateStatus.currentVersion}`
+        : '读取中…';
+      stateBadge.className = `update-state-badge is-${updateState}`;
+      stateBadge.textContent = updateStateLabels[updateState];
+      statusMessage.textContent = currentUpdateStatus.message;
+      const progress = Math.min(100, Math.max(0, currentUpdateStatus.progress ?? 0));
+      progressTrack.hidden = updateState !== 'downloading';
+      progressBar.style.width = `${progress}%`;
+      autoUpdateInput.checked = state.settings.autoUpdate;
+      checkUpdateButton.disabled = updateState === 'checking' || updateState === 'downloading' || updateState === 'ready';
+      checkUpdateButton.textContent = updateState === 'checking'
+        ? '正在检查…'
+        : updateState === 'downloading'
+          ? '正在下载…'
+          : updateState === 'ready'
+            ? '更新已下载'
+            : '手动检查更新';
+      lastChecked.textContent = currentUpdateStatus.lastCheckedAt
+        ? `上次检查：${new Date(currentUpdateStatus.lastCheckedAt * 1000).toLocaleString('zh-CN')}`
+        : '尚未检查';
+    };
+    refreshUpdateCard = syncUpdateCard;
+    syncUpdateCard();
+
+    settingsGrid.append(appearance, dataCard, updateCard);
     details.append(settingsGrid);
     content.append(details);
   }
@@ -1969,14 +2092,17 @@ export function mountConfig(root: HTMLElement): void {
   void refreshRuntime();
   void refreshBiliAuth();
   void refreshRoomGiftCatalog();
+  void refreshUpdateStatus();
   const pollTimer = globalThis.setInterval(() => {
     void refreshRuntime();
     void refreshBackendState();
   }, 1000);
   const authPollTimer = globalThis.setInterval(() => void refreshBiliAuth(), 10000);
+  const updatePollTimer = globalThis.setInterval(() => void refreshUpdateStatus(), 5000);
   const disposePolling = (): void => {
     globalThis.clearInterval(pollTimer);
     globalThis.clearInterval(authPollTimer);
+    globalThis.clearInterval(updatePollTimer);
     if (loginPollTimer !== undefined) globalThis.clearInterval(loginPollTimer);
   };
   if (typeof globalThis.addEventListener === 'function') globalThis.addEventListener('beforeunload', disposePolling, { once: true });

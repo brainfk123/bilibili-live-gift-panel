@@ -9,6 +9,19 @@ export interface RuntimeStatus {
   lastGiftAt?: number;
 }
 
+export type UpdateState = 'idle' | 'disabled' | 'development' | 'unsupported' | 'checking' | 'downloading' | 'ready' | 'up-to-date' | 'error';
+
+export interface UpdateStatus {
+  state: UpdateState;
+  currentVersion: string;
+  latestVersion?: string;
+  message: string;
+  progress?: number;
+  lastCheckedAt?: number;
+  autoUpdate: boolean;
+  restartRequired: boolean;
+}
+
 export type PagePresenceMode = 'config' | 'display';
 
 export type BiliAuthState = 'anonymous' | 'waiting' | 'scanned' | 'logged_in' | 'expired' | 'error';
@@ -75,6 +88,12 @@ interface BlindBoxResponse {
 interface RoomGiftCatalogResponse {
   code: number;
   gifts?: GiftInfo[];
+  message?: string;
+}
+
+interface UpdateResponse {
+  code: number;
+  update?: UpdateStatus;
   message?: string;
 }
 
@@ -160,4 +179,21 @@ export async function getRoomGiftCatalog(roomId: string): Promise<GiftInfo[]> {
     throw new Error(payload.message || `当前礼物目录读取失败：HTTP ${response.status}`);
   }
   return payload.gifts;
+}
+
+async function requestUpdateStatus(path: string, init?: RequestInit): Promise<UpdateStatus> {
+  const response = await fetch(path, { cache: 'no-store', ...init });
+  const payload = await response.json() as UpdateResponse;
+  if (!response.ok || payload.code !== 0 || !payload.update) {
+    throw new Error(payload.message || `更新状态读取失败：HTTP ${response.status}`);
+  }
+  return payload.update;
+}
+
+export function getUpdateStatus(): Promise<UpdateStatus> {
+  return requestUpdateStatus('/api/update');
+}
+
+export function checkForUpdates(): Promise<UpdateStatus> {
+  return requestUpdateStatus('/api/update/check', { method: 'POST' });
 }

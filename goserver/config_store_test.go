@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -114,6 +115,28 @@ func TestConfigStoreNotifiesTimerChangesWithoutReconnect(t *testing.T) {
 	}
 	if timerChanges != 2 {
 		t.Fatalf("timer config callbacks = %d, want 2 changes", timerChanges)
+	}
+}
+
+func TestConfigStoreNotifiesAutomaticUpdateSettingChanges(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	changes := 0
+	store.setOnUpdateChange(func() { changes++ })
+
+	put := func(enabled bool) {
+		response := httptest.NewRecorder()
+		payload := fmt.Sprintf(`{"settings":{"autoUpdate":%t}}`, enabled)
+		store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+		if response.Code != http.StatusOK {
+			t.Fatalf("PUT status = %d, body = %s", response.Code, response.Body.String())
+		}
+	}
+	put(true)
+	put(false)
+	put(false)
+	put(true)
+	if changes != 2 {
+		t.Fatalf("automatic update callbacks = %d, want 2", changes)
 	}
 }
 

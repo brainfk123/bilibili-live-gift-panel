@@ -1,13 +1,33 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  checkForUpdates,
   getBlindBoxInfo,
   getBiliAuthStatus,
   getRoomGiftCatalog,
+  getUpdateStatus,
   logoutBiliAuth,
   pollBiliQRCodeLogin,
   startBiliQRCodeLogin,
   startPagePresence,
 } from '../src/backend';
+
+describe('automatic update API', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('reads update status and starts a manual check', async () => {
+    const status = {
+      state: 'up-to-date', currentVersion: '1.0.0', latestVersion: '1.0.0', message: '当前已经是最新版本。',
+      autoUpdate: true, restartRequired: false,
+    };
+    const fetchMock = vi.fn(async () => Response.json({ code: 0, update: status }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(getUpdateStatus()).resolves.toEqual(status);
+    await expect(checkForUpdates()).resolves.toEqual(status);
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/update', { cache: 'no-store' });
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/update/check', { cache: 'no-store', method: 'POST' });
+  });
+});
 
 describe('current room gift catalog API', () => {
   afterEach(() => vi.unstubAllGlobals());

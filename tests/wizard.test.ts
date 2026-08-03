@@ -219,6 +219,15 @@ beforeEach(() => {
         headers: { 'Content-Type': 'application/json' },
       });
     }
+    if (url === '/api/update' || url === '/api/update/check') {
+      return Response.json({
+        code: 0,
+        update: {
+          state: 'development', currentVersion: 'dev', message: '开发版本不会检查 GitHub 更新。',
+          autoUpdate: true, restartRequired: false,
+        },
+      }, { status: url.endsWith('/check') ? 202 : 200 });
+    }
     return new Response(null, { status: 204 });
   }));
   storage.clear();
@@ -958,6 +967,46 @@ describe('single-page configuration rendering', () => {
     expect(root.querySelectorAll('h1')).toHaveLength(0);
     expect(textOf(root)).not.toContain('一页完成直播配置');
     expect(textOf(root)).not.toContain('把连接、属性和礼物放在同一页');
+  });
+
+  it('shows automatic update status and supports a manual update check', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === '/api/update/check') {
+        return Response.json({
+          code: 0,
+          update: {
+            state: 'up-to-date', currentVersion: '1.0.0', latestVersion: '1.0.0', message: '当前已经是最新版本。',
+            lastCheckedAt: 1785729600, autoUpdate: true, restartRequired: false,
+          },
+        }, { status: 202 });
+      }
+      if (url === '/api/update') {
+        return Response.json({
+          code: 0,
+          update: {
+            state: 'idle', currentVersion: '1.0.0', message: '尚未检查更新。', autoUpdate: true, restartRequired: false,
+          },
+        });
+      }
+      if (url.includes('/api/runtime')) return Response.json({ code: 0, runtime: { state: 'idle', roomId: '' } });
+      if (url.includes('/api/auth/status')) return Response.json({ code: 0, auth: { state: 'anonymous' } });
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    await vi.waitFor(() => expect(textOf(root.querySelector('.update-settings-card') as TestElement)).toContain('v1.0.0'));
+    const autoUpdateInput = root.querySelector('.update-auto-switch')?.querySelector('input') as (TestElement & { checked?: boolean }) | null;
+    expect(autoUpdateInput?.checked).toBe(true);
+    const checkButton = findByText(root, '手动检查更新');
+    expect(checkButton).toBeDefined();
+    checkButton?.onclick?.();
+
+    await vi.waitFor(() => expect(root.querySelector('.update-settings-card')?.dataset.updateState).toBe('up-to-date'));
+    expect(textOf(root.querySelector('.update-settings-card') as TestElement)).toContain('当前已经是最新版本。');
+    expect(fetchMock).toHaveBeenCalledWith('/api/update/check', { cache: 'no-store', method: 'POST' });
   });
 
   it('offers optional streamer login while keeping masked-name fallback explicit', async () => {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -107,6 +108,12 @@ func handleFormulaPreview(store *configStore) http.HandlerFunc {
 }
 
 func main() {
+	if handled, updateErr := runUpdateHelper(os.Args[1:]); handled {
+		if updateErr != nil {
+			showStartupError(fmt.Sprintf("自动更新失败：%v", updateErr))
+		}
+		return
+	}
 	alreadyRunning, releaseInstance, err := acquireSingleInstance()
 	if err != nil {
 		showStartupError(fmt.Sprintf("单实例检查失败：%v", err))
@@ -143,6 +150,7 @@ func main() {
 	}
 	login := newLoginManager(nil, loginStore, nil)
 	notifications := newNotificationCenter()
+	updater := newDefaultAutoUpdater(store, notifications)
 	presence := newPagePresence(notifications)
 	runtimeContext, stopRuntime := context.WithCancel(context.Background())
 	background := newBackgroundRuntime(store, func() giftEventSource {
@@ -150,6 +158,7 @@ func main() {
 	}, notifications)
 	store.setOnChange(background.NotifyConfigChanged)
 	store.setOnTimerChange(background.NotifyTimerConfigChanged)
+	store.setOnUpdateChange(updater.NotifySettingsChanged)
 	login.SetOnChange(background.NotifyConfigChanged)
 
 	mux := http.NewServeMux()
@@ -167,6 +176,8 @@ func main() {
 	mux.HandleFunc("/api/formula/preview", handleFormulaPreview(store))
 	mux.HandleFunc("/api/blind-box", handleBlindBoxInfo(login))
 	mux.HandleFunc("/api/gifts", handleRoomGiftCatalog(login))
+	mux.HandleFunc("/api/update", updater.handleStatus)
+	mux.HandleFunc("/api/update/check", updater.handleCheck)
 	mux.HandleFunc("/api/auth/", login.handle)
 	mux.Handle("/api/pages/presence/", presence)
 	mux.HandleFunc("/api/runtime", func(w http.ResponseWriter, r *http.Request) {
@@ -195,6 +206,7 @@ func main() {
 	}()
 	notifications.Publish(notificationServiceStarted, "")
 	go background.Run(runtimeContext)
+	go updater.Run(runtimeContext)
 
 	configURL := fmt.Sprintf("http://localhost:%d/?mode=config", port)
 	go openURL(configURL)
@@ -205,4 +217,7 @@ func main() {
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = server.Shutdown(shutdownContext)
+	if err := updater.InstallOnExit(); err != nil {
+		showStartupError(err.Error())
+	}
 }

@@ -17,10 +17,11 @@ import (
 const maxConfigBytes = 8 << 20
 
 type configStore struct {
-	path          string
-	mu            sync.RWMutex
-	onChange      func()
-	onTimerChange func()
+	path           string
+	mu             sync.RWMutex
+	onChange       func()
+	onTimerChange  func()
+	onUpdateChange func()
 }
 
 func newDefaultConfigStore() (*configStore, error) {
@@ -71,6 +72,7 @@ func (s *configStore) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 	state := defaultAppState()
 	state.Settings.ShowTutorial = nil
+	state.Settings.AutoUpdate = nil
 	if err := json.Unmarshal(body, &state); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": "配置必须是有效的 JSON 对象"})
 		return
@@ -91,6 +93,9 @@ func (s *configStore) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 	if previousErr != nil || !reflect.DeepEqual(previous.TimerRules, state.TimerRules) {
 		s.notifyTimerChanged()
+	}
+	if previousErr != nil || autoUpdateEnabled(previous) != autoUpdateEnabled(state) {
+		s.notifyUpdateChanged()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"code": 0})
 }
@@ -191,6 +196,9 @@ func (s *configStore) handleDelete(w http.ResponseWriter) {
 	if strings.TrimSpace(previous.RoomID) != "" {
 		s.notifyChanged()
 	}
+	if !autoUpdateEnabled(previous) {
+		s.notifyUpdateChanged()
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -203,6 +211,12 @@ func (s *configStore) setOnChange(callback func()) {
 func (s *configStore) setOnTimerChange(callback func()) {
 	s.mu.Lock()
 	s.onTimerChange = callback
+	s.mu.Unlock()
+}
+
+func (s *configStore) setOnUpdateChange(callback func()) {
+	s.mu.Lock()
+	s.onUpdateChange = callback
 	s.mu.Unlock()
 }
 
@@ -224,6 +238,15 @@ func (s *configStore) notifyTimerChanged() {
 	}
 }
 
+func (s *configStore) notifyUpdateChanged() {
+	s.mu.RLock()
+	callback := s.onUpdateChange
+	s.mu.RUnlock()
+	if callback != nil {
+		callback()
+	}
+}
+
 func (s *configStore) readState() (appState, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -233,6 +256,7 @@ func (s *configStore) readState() (appState, error) {
 func (s *configStore) readStateLocked() (appState, error) {
 	state := defaultAppState()
 	state.Settings.ShowTutorial = nil
+	state.Settings.AutoUpdate = nil
 	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return state, nil

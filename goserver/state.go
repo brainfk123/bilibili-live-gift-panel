@@ -146,6 +146,7 @@ type settingsState struct {
 	GiftView       string `json:"giftView"`
 	PanelOpacity   int    `json:"panelOpacity"`
 	ShowTutorial   *bool  `json:"showTutorial"`
+	AutoUpdate     *bool  `json:"autoUpdate"`
 }
 
 type appState struct {
@@ -179,6 +180,7 @@ type giftEvent struct {
 
 func defaultAppState() appState {
 	showTutorial := true
+	autoUpdate := true
 	return appState{
 		Attributes:     []attributeState{},
 		Rules:          []giftRule{},
@@ -198,6 +200,7 @@ func defaultAppState() appState {
 			GiftView:       "list",
 			PanelOpacity:   55,
 			ShowTutorial:   &showTutorial,
+			AutoUpdate:     &autoUpdate,
 		},
 	}
 }
@@ -259,6 +262,14 @@ func normalizeAppState(state *appState) {
 		showTutorial := !(strings.TrimSpace(state.RoomID) != "" && len(state.Attributes) > 0 && len(state.Rules) > 0)
 		state.Settings.ShowTutorial = &showTutorial
 	}
+	if state.Settings.AutoUpdate == nil {
+		autoUpdate := true
+		state.Settings.AutoUpdate = &autoUpdate
+	}
+}
+
+func autoUpdateEnabled(state appState) bool {
+	return state.Settings.AutoUpdate == nil || *state.Settings.AutoUpdate
 }
 
 func normalizeGiftIDs(ids []int) []int {
