@@ -15,16 +15,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: goserver/go.mod
           cache-dependency-path: goserver/go.sum
@@ -42,6 +42,10 @@ jobs:
 
       - name: Run tests
         run: npm test -- --reporter=dot
+
+      - name: Run backend tests
+        working-directory: goserver
+        run: go test ./...
 
       - name: Type check
         run: npm run typecheck

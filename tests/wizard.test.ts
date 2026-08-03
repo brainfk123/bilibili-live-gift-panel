@@ -195,6 +195,8 @@ const storage = {
 beforeEach(() => {
   mockedClients.length = 0;
   mockedRuntimeState = 'idle';
+  vi.stubGlobal('setInterval', vi.fn(() => 0));
+  vi.stubGlobal('clearInterval', vi.fn());
   vi.stubGlobal('document', {
     createElement: (tag: string) => new TestElement(tag),
   } as unknown as Document);
