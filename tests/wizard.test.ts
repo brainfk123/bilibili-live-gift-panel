@@ -23,6 +23,8 @@ const mockedClients = vi.hoisted(() => [] as Array<{
 }>);
 
 let mockedRuntimeState: 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error' = 'idle';
+const nativeSetInterval = globalThis.setInterval.bind(globalThis);
+const nativeClearInterval = globalThis.clearInterval.bind(globalThis);
 
 vi.mock('../src/bilibili/client', () => ({
   DanmakuClient: class {
@@ -195,8 +197,12 @@ const storage = {
 beforeEach(async () => {
   mockedClients.length = 0;
   mockedRuntimeState = 'idle';
-  vi.stubGlobal('setInterval', vi.fn(() => 0));
-  vi.stubGlobal('clearInterval', vi.fn());
+  vi.stubGlobal('setInterval', vi.fn((handler: TimerHandler, timeout?: number, ...args: unknown[]) => (
+    (timeout ?? 0) >= 1000 ? 0 : nativeSetInterval(handler, timeout, ...args)
+  )));
+  vi.stubGlobal('clearInterval', vi.fn((id?: number) => {
+    if (id) nativeClearInterval(id);
+  }));
   vi.stubGlobal('document', {
     createElement: (tag: string) => new TestElement(tag),
   } as unknown as Document);
