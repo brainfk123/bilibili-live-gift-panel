@@ -26,6 +26,16 @@ type giftPanelEntry struct {
 	ID     int `json:"id"`
 }
 
+type roomGiftInfo struct {
+	ID             int     `json:"id"`
+	Name           string  `json:"name"`
+	Price          float64 `json:"price"`
+	CoinType       string  `json:"coinType"`
+	ImgBasic       string  `json:"imgBasic"`
+	Listed         bool    `json:"listed"`
+	BlindBoxParent bool    `json:"-"`
+}
+
 func (entry giftPanelEntry) normalizedID() int {
 	if entry.GiftID > 0 {
 		return entry.GiftID
@@ -61,7 +71,7 @@ func handleRoomGiftCatalog(login *loginManager) http.HandlerFunc {
 	}
 }
 
-func fetchCurrentRoomGiftCatalog(roomID string, session biliSession) ([]giftInfo, error) {
+func fetchCurrentRoomGiftCatalog(roomID string, session biliSession) ([]roomGiftInfo, error) {
 	headers := map[string]string{}
 	if strings.TrimSpace(session.CookieHeader) != "" {
 		headers["Cookie"] = session.CookieHeader
@@ -90,7 +100,14 @@ func fetchCurrentRoomGiftCatalog(roomID string, session biliSession) ([]giftInfo
 	if err != nil {
 		return nil, err
 	}
-	return buildCurrentRoomGiftCatalog(configPayload, panelPayload)
+	gifts, err := buildCurrentRoomGiftCatalog(configPayload, panelPayload)
+	if err != nil {
+		return nil, err
+	}
+	markListedBlindBoxChildren(gifts, func(giftID int) (*blindBoxInfo, bool, error) {
+		return fetchBlindBoxInfo(giftID, session)
+	})
+	return gifts, nil
 }
 
 func parseRoomGiftContext(payload map[string]any) (roomGiftContext, error) {
@@ -114,17 +131,19 @@ func parseRoomGiftContext(payload map[string]any) (roomGiftContext, error) {
 	}, nil
 }
 
-func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]giftInfo, error) {
+func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]roomGiftInfo, error) {
 	var configResponse struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 		Data    struct {
 			List []struct {
-				ID       int     `json:"id"`
-				Name     string  `json:"name"`
-				Price    float64 `json:"price"`
-				CoinType string  `json:"coin_type"`
-				ImgBasic string  `json:"img_basic"`
+				ID        int     `json:"id"`
+				Name      string  `json:"name"`
+				Price     float64 `json:"price"`
+				CoinType  string  `json:"coin_type"`
+				ImgBasic  string  `json:"img_basic"`
+				GiftType  int     `json:"gift_type"`
+				GiftAttrs []int   `json:"gift_attrs"`
 			} `json:"list"`
 		} `json:"data"`
 	}
@@ -156,6 +175,8 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 	}
 
 	metadata := make(map[int]giftInfo, len(configResponse.Data.List))
+	blindBoxParents := make(map[int]struct{})
+	metadataOrder := make([]int, 0, len(configResponse.Data.List))
 	for _, gift := range configResponse.Data.List {
 		if gift.ID <= 0 || strings.TrimSpace(gift.Name) == "" {
 			continue
@@ -167,6 +188,10 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 		metadata[gift.ID] = giftInfo{
 			ID: gift.ID, Name: strings.TrimSpace(gift.Name), Price: gift.Price, CoinType: coinType, ImgBasic: strings.TrimSpace(gift.ImgBasic),
 		}
+		if gift.GiftType == 6 || containsGiftAttribute(gift.GiftAttrs, 6) {
+			blindBoxParents[gift.ID] = struct{}{}
+		}
+		metadataOrder = append(metadataOrder, gift.ID)
 	}
 
 	entries := make([]giftPanelEntry, 0, len(panelResponse.Data.RoomGiftList.GoldList)+len(panelResponse.Data.RoomGiftList.SilverList))
@@ -176,7 +201,7 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 		entries = append(entries, tab.List...)
 	}
 	seen := map[int]struct{}{}
-	gifts := make([]giftInfo, 0, len(entries))
+	gifts := make([]roomGiftInfo, 0, len(metadata))
 	for _, entry := range entries {
 		giftID := entry.normalizedID()
 		if giftID <= 0 {
@@ -190,9 +215,55 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 			continue
 		}
 		seen[giftID] = struct{}{}
-		gifts = append(gifts, gift)
+		_, blindBoxParent := blindBoxParents[gift.ID]
+		gifts = append(gifts, roomGiftInfo{
+			ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, ImgBasic: gift.ImgBasic, Listed: true, BlindBoxParent: blindBoxParent,
+		})
+	}
+	for _, giftID := range metadataOrder {
+		if _, exists := seen[giftID]; exists {
+			continue
+		}
+		gift := metadata[giftID]
+		_, blindBoxParent := blindBoxParents[gift.ID]
+		gifts = append(gifts, roomGiftInfo{
+			ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, ImgBasic: gift.ImgBasic, Listed: false, BlindBoxParent: blindBoxParent,
+		})
 	}
 	return gifts, nil
+}
+
+func containsGiftAttribute(attributes []int, target int) bool {
+	for _, attribute := range attributes {
+		if attribute == target {
+			return true
+		}
+	}
+	return false
+}
+
+func markListedBlindBoxChildren(gifts []roomGiftInfo, lookup func(int) (*blindBoxInfo, bool, error)) {
+	if lookup == nil {
+		return
+	}
+	byID := make(map[int]int, len(gifts))
+	for index := range gifts {
+		byID[gifts[index].ID] = index
+	}
+	for _, gift := range gifts {
+		if !gift.Listed || !gift.BlindBoxParent {
+			continue
+		}
+		info, _, err := lookup(gift.ID)
+		if err != nil || info == nil {
+			continue
+		}
+		for _, child := range info.Gifts {
+			if index, exists := byID[child.ID]; exists {
+				gifts[index].Listed = true
+			}
+		}
+	}
 }
 
 func decodeBiliPayload(payload map[string]any, target any) error {

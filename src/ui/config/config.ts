@@ -854,7 +854,7 @@ export function mountConfig(root: HTMLElement): void {
     const timerRules = original
       ? state.timerRules.filter((rule) => rule.attributeName === original.name).map((rule) => ({ ...rule }))
       : [];
-    let allGifts = availableGifts(state, roomGiftCatalog);
+    let allGifts = giftPickerGifts(state, roomGiftCatalog);
     const selected = new Map<number, SelectedGiftRule>();
     const blindBoxLookups: SelectedGiftRule[] = [];
     if (original) {
@@ -1271,7 +1271,7 @@ export function mountConfig(root: HTMLElement): void {
       button.setAttribute('aria-pressed', String(selectedNow));
     }
 
-    function createGiftChoice(gift: GiftInfo): HTMLButtonElement {
+    function createGiftChoice(gift: GiftInfo, showListingStatus: boolean): HTMLButtonElement {
       const selectedNow = selected.has(gift.id);
       const button = el('button', {
         class: `gift-choice${selectedNow ? ' is-selected' : ''}`,
@@ -1281,11 +1281,18 @@ export function mountConfig(root: HTMLElement): void {
       button.dataset.giftId = String(gift.id);
       const image = el('img', { class: 'gift-choice-image', alt: '' }) as HTMLImageElement;
       image.src = gift.imgBasic || transparentPixel();
+      const listingStatus = gift.listed === true ? '已上架' : '未上架';
       button.append(
         image,
         el('span', { class: 'gift-choice-copy' }, [
           el('strong', { text: gift.name }),
-          el('small', { text: giftPriceLabel(gift) }),
+          el('span', { class: 'gift-choice-meta' }, [
+            el('small', { text: giftPriceLabel(gift) }),
+            ...(showListingStatus ? [el('span', {
+              class: `gift-listing-status ${gift.listed === true ? 'is-listed' : 'is-unlisted'}`,
+              text: listingStatus,
+            })] : []),
+          ]),
         ]),
         el('span', { class: 'gift-choice-check', text: selectedNow ? '✓' : '+' }),
       );
@@ -1322,13 +1329,18 @@ export function mountConfig(root: HTMLElement): void {
       if (visibleGiftCount >= filteredGifts.length) return;
       giftPickerLoader?.remove();
       const nextCount = Math.min(filteredGifts.length, visibleGiftCount + giftPickerBatchSize);
-      for (const gift of filteredGifts.slice(visibleGiftCount, nextCount)) giftPicker.append(createGiftChoice(gift));
+      const showListingStatus = giftSearch.value.trim().length > 0;
+      for (const gift of filteredGifts.slice(visibleGiftCount, nextCount)) {
+        giftPicker.append(createGiftChoice(gift, showListingStatus));
+      }
       visibleGiftCount = nextCount;
       updateGiftPickerLoader();
     }
 
     function renderGiftPicker(): void {
-      filteredGifts = allGifts.filter((gift) => matchesGiftSearch(gift, giftSearch.value));
+      const query = giftSearch.value.trim();
+      filteredGifts = allGifts.filter((gift) => (query.length > 0 || gift.listed !== false)
+        && matchesGiftSearch(gift, query));
       visibleGiftCount = 0;
       giftPickerLoader = null;
       giftChoiceButtons.clear();
@@ -1505,7 +1517,7 @@ export function mountConfig(root: HTMLElement): void {
 
     giftSearch.oninput = renderGiftPicker;
     const manualGift = renderManualGiftAdder(() => {
-      allGifts = availableGifts(state, roomGiftCatalog);
+      allGifts = giftPickerGifts(state, roomGiftCatalog);
       renderGiftPicker();
       renderSelectedRules();
     }, selected, defaultFormula, (item) => { void hydrateBlindBoxRule(item); });
@@ -1515,7 +1527,7 @@ export function mountConfig(root: HTMLElement): void {
       el('div', { class: 'modal-section-heading' }, [
         el('div', {}, [
           el('h3', { text: '选择会影响这个属性的礼物' }),
-          el('p', { text: '优先显示当前直播间仍在售的礼物（包含 VIP 专属礼物）；向下滚动会自动加载更多。数字 ID 需要完整匹配。' }),
+          el('p', { text: '默认只显示当前已上架礼物；搜索时会同时显示未上架礼物并标注状态。向下滚动会自动加载更多，数字 ID 需要完整匹配。' }),
         ]),
         selectionCount,
       ]),
@@ -1568,7 +1580,7 @@ export function mountConfig(root: HTMLElement): void {
     };
     root.append(overlay);
     refreshOpenGiftCatalog = () => {
-      allGifts = availableGifts(state, roomGiftCatalog);
+      allGifts = giftPickerGifts(state, roomGiftCatalog);
       renderGiftPicker();
       renderSelectedRules();
     };
@@ -2121,13 +2133,16 @@ export function mountConfig(root: HTMLElement): void {
   if (typeof globalThis.addEventListener === 'function') globalThis.addEventListener('beforeunload', disposePolling, { once: true });
 }
 
-function availableGifts(state: AppState, roomGiftCatalog: GiftInfo[]): GiftInfo[] {
+function giftPickerGifts(state: AppState, roomGiftCatalog: GiftInfo[]): GiftInfo[] {
   const configuredGifts = state.rules
     .map((rule) => findGift(state, rule.giftId))
     .filter((gift): gift is GiftInfo => gift !== undefined);
   if (roomGiftCatalog.length > 0) {
     const seen = new Set<string>();
-    const currentGifts = roomGiftCatalog.filter((gift) => {
+    const hasListingStatus = roomGiftCatalog.some((gift) => typeof gift.listed === 'boolean');
+    const knownGifts = [...configuredGifts, ...state.recentGifts, ...builtinCatalog]
+      .map((gift) => hasListingStatus ? { ...gift, listed: false } : gift);
+    const currentGifts = [...roomGiftCatalog, ...knownGifts].filter((gift) => {
       const key = giftDisplayKey(gift);
       if (seen.has(key)) return false;
       seen.add(key);

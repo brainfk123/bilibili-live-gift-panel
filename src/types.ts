@@ -51,6 +51,8 @@ export interface GiftInfo {
   price: number;
   coinType: 'gold' | 'silver';
   imgBasic: string;
+  /** Whether the gift is currently listed in the connected room. */
+  listed?: boolean;
 }
 
 export interface BlindBoxGift {

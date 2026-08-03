@@ -872,7 +872,7 @@ describe.skip('legacy configuration wizard rendering', () => {
 describe('single-page configuration rendering', () => {
   it('shows only the currently giftable catalog version of a renamed-icon gift', async () => {
     const oldGift = { id: 970001, name: '同名礼物', price: 5200, coinType: 'gold' as const, imgBasic: 'https://example.com/old.png' };
-    const currentGift = { id: 970002, name: '同名礼物', price: 5200, coinType: 'gold' as const, imgBasic: 'https://example.com/current.png' };
+    const currentGift = { id: 970002, name: '同名礼物', price: 5200, coinType: 'gold' as const, imgBasic: 'https://example.com/current.png', listed: true };
     builtinCatalog.push(oldGift);
     try {
       await saveState({
@@ -912,6 +912,51 @@ describe('single-page configuration rendering', () => {
     } finally {
       builtinCatalog.pop();
     }
+  });
+
+  it('hides unlisted gifts by default and labels both statuses while searching', async () => {
+    const listedGift = {
+      id: 980001, name: '状态测试礼物 A', price: 100, coinType: 'gold' as const, imgBasic: '', listed: true,
+    };
+    const unlistedGift = {
+      id: 980002, name: '状态测试礼物 B', price: 200, coinType: 'gold' as const, imgBasic: '', listed: false,
+    };
+    await saveState({
+      ...state('88888888'),
+      settings: { ...defaultState().settings, showTutorial: false },
+    });
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === '/api/gifts?roomId=88888888') {
+        return Response.json({ code: 0, gifts: [listedGift, unlistedGift] });
+      }
+      if (url.includes('/api/runtime')) return Response.json({ code: 0, runtime: { state: 'idle', roomId: '' } });
+      if (url.includes('/api/auth/status')) return Response.json({ code: 0, auth: { state: 'anonymous' } });
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/gifts?roomId=88888888', { cache: 'no-store' }));
+    await Promise.resolve();
+    findByText(root, '编辑')?.onclick?.();
+
+    let choices: TestElement[] = [];
+    await vi.waitFor(() => {
+      choices = root.querySelectorAll('.gift-choice')
+        .filter((choice) => textOf(choice).includes('状态测试礼物'));
+      expect(choices).toHaveLength(1);
+    });
+    expect(choices[0].dataset.giftId).toBe(String(listedGift.id));
+    expect(choices[0].querySelector('.gift-listing-status')).toBeNull();
+
+    const searchInput = root.querySelector('.gift-search') as TestElement & { oninput?: () => void };
+    searchInput.value = '状态测试礼物';
+    searchInput.oninput?.();
+    choices = root.querySelectorAll('.gift-choice')
+      .filter((choice) => textOf(choice).includes('状态测试礼物'));
+    expect(choices).toHaveLength(2);
+    expect(choices.map((choice) => textOf(choice.querySelector('.gift-listing-status')!))).toEqual(['已上架', '未上架']);
   });
 
   it('uses themed scrollbars and keeps focused inputs inside their existing border', () => {

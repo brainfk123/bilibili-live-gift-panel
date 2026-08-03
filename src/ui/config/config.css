@@ -1617,9 +1617,22 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .gift-choice-image { width: 34px; height: 34px; flex: 0 0 auto; object-fit: contain; border-radius: 7px; background: var(--image-bg); }
 .config-root .gift-choice-copy { min-width: 0; flex: 1; }
 .config-root .gift-choice-copy strong,
-.config-root .gift-choice-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.config-root .gift-choice-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.config-root .gift-choice-copy strong { display: block; }
 .config-root .gift-choice-copy strong { font-size: 12px; }
-.config-root .gift-choice-copy small { margin-top: 3px; color: var(--text-dim); font-size: 10px; }
+.config-root .gift-choice-copy small { min-width: 0; flex: 1; color: var(--text-dim); font-size: 10px; }
+.config-root .gift-choice-meta { display: flex; align-items: center; min-width: 0; gap: 6px; margin-top: 3px; }
+.config-root .gift-listing-status {
+  flex: 0 0 auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 1px 5px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+.config-root .gift-listing-status.is-listed { border-color: var(--success-border); background: var(--success-soft); color: var(--success-text); }
+.config-root .gift-listing-status.is-unlisted { background: var(--card); color: var(--text-dim); }
 .config-root .gift-choice-check {
   display: inline-flex;
   align-items: center;
