@@ -98,12 +98,15 @@ jobs:
 
       - name: Mirror release to GitCode
         id: gitcode-release
-        if: ${{ secrets.GITCODE_TOKEN != '' }}
         continue-on-error: true
         shell: pwsh
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:GITCODE_TOKEN)) {
+            Write-Warning "GITCODE_TOKEN is not configured; skipping the GitCode Release mirror."
+            exit 0
+          }
           ./scripts/publish-gitcode-release.ps1 `
             -Token $env:GITCODE_TOKEN `
             -Tag $env:RELEASE_TAG `
