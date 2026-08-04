@@ -164,7 +164,7 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .app-brand-copy strong, .config-root .app-brand-copy span { display: block; }
 .config-root .app-brand-copy strong { font-size: var(--type-title); }
 .config-root .app-brand-copy span { margin-top: 3px; color: var(--text-dim); font-size: var(--type-meta); }
-.config-root .app-header-actions { display: inline-flex; align-items: center; gap: 14px; }
+.config-root .app-header-actions { display: inline-flex; align-items: center; gap: 10px; }
 
 /* Versioned release notes */
 .config-root .changelog-overlay { z-index: 140; display: grid; place-items: center; padding: 24px; }
@@ -335,10 +335,39 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .changelog-broadcast-item:not(.is-first) { display: none; }
 }
 .config-root .theme-toggle {
-  border: 1px solid var(--border-strong); border-radius: 999px; padding: 6px 10px;
-  background: var(--bg-soft); color: var(--text); cursor: pointer; font: inherit; font-size: var(--type-meta);
+  position: relative;
+  display: inline-grid;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  padding: 0;
+  background: var(--bg-soft);
+  color: var(--text);
+  cursor: pointer;
 }
-.config-root .theme-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+.config-root .theme-toggle:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.config-root .theme-toggle:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
+.config-root .header-action-icon { display: block; width: 20px; height: 20px; pointer-events: none; }
+.config-root .training-toggle.is-complete::after {
+  content: "✓";
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  display: grid;
+  width: 15px;
+  height: 15px;
+  place-items: center;
+  border: 2px solid var(--bg);
+  border-radius: 50%;
+  background: var(--success);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 1;
+}
 .config-root .app-status { display: inline-flex; align-items: center; gap: 8px; color: var(--text-dim); font-size: var(--type-body); white-space: nowrap; }
 .config-root .app-status-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--text-dim); }
 .config-root .app-status.is-connected { color: var(--success-text); }

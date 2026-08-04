@@ -85,6 +85,52 @@ interface GiftPickerCatalog {
   hasLiveListingStatus: boolean;
 }
 
+type HeaderActionIcon = 'training' | 'changelog' | 'sun' | 'moon';
+
+function createHeaderActionIcon(kind: HeaderActionIcon): HTMLElement {
+  const namespace = 'http://www.w3.org/2000/svg';
+  const createSvgElement = (tag: 'svg' | 'path'): SVGElement => (
+    typeof document.createElementNS === 'function'
+      ? document.createElementNS(namespace, tag)
+      : document.createElement(tag) as unknown as SVGElement
+  );
+  const paths: Record<HeaderActionIcon, string[]> = {
+    training: [
+      'M8 3h8v3H8z',
+      'M6 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-1',
+      'm7 13 2 2 4-4',
+    ],
+    changelog: [
+      'M3 12a9 9 0 1 0 3-6.7L3 8',
+      'M3 3v5h5',
+      'M12 7v5l3 2',
+    ],
+    sun: [
+      'M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10',
+      'M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42',
+    ],
+    moon: [
+      'M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5 8.7 8.7 0 1 0 20.5 14.2Z',
+    ],
+  };
+  const svg = createSvgElement('svg') as SVGSVGElement;
+  svg.setAttribute('class', 'header-action-icon');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  for (const data of paths[kind]) {
+    const path = createSvgElement('path');
+    path.setAttribute('d', data);
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', 'currentColor');
+    path.setAttribute('stroke-width', '1.8');
+    path.setAttribute('stroke-linecap', 'round');
+    path.setAttribute('stroke-linejoin', 'round');
+    svg.append(path);
+  }
+  return svg as unknown as HTMLElement;
+}
+
 export function mountConfig(root: HTMLElement): void {
   let state = loadState();
   root.classList.add('config-root');
@@ -129,9 +175,11 @@ export function mountConfig(root: HTMLElement): void {
   brand.append(createBrandIcon(40), el('div', { class: 'app-brand-copy' }, [
     el('strong', { text: '直播礼物面板' }),
   ]));
-  const themeToggle = el('button', { class: 'theme-toggle', type: 'button' }) as HTMLButtonElement;
-  const guideToggle = el('button', { class: 'theme-toggle training-toggle', type: 'button', text: '训练任务' }) as HTMLButtonElement;
-  const changelogToggle = el('button', { class: 'theme-toggle changelog-toggle', type: 'button', text: '更新日志' }) as HTMLButtonElement;
+  const themeToggle = el('button', { class: 'theme-toggle config-theme-toggle', type: 'button' }) as HTMLButtonElement;
+  const guideToggle = el('button', { class: 'theme-toggle training-toggle', type: 'button' }, [createHeaderActionIcon('training')]) as HTMLButtonElement;
+  const changelogToggle = el('button', { class: 'theme-toggle changelog-toggle', type: 'button' }, [createHeaderActionIcon('changelog')]) as HTMLButtonElement;
+  changelogToggle.setAttribute('aria-label', '更新日志');
+  changelogToggle.setAttribute('title', '更新日志');
   const status = el('div', { class: 'app-status' });
   const headerActions = el('div', { class: 'app-header-actions' });
   headerActions.append(guideToggle, changelogToggle, themeToggle, status);
@@ -144,8 +192,9 @@ export function mountConfig(root: HTMLElement): void {
   function applyConfigTheme(theme: 'dark' | 'light'): void {
     root.dataset.theme = theme;
     const label = theme === 'dark' ? '切换至亮色主题' : '切换至深色主题';
-    themeToggle.textContent = label;
+    themeToggle.replaceChildren(createHeaderActionIcon(theme === 'dark' ? 'sun' : 'moon'));
     themeToggle.setAttribute('aria-label', label);
+    themeToggle.setAttribute('title', label);
   }
 
   function connectionLabel(value: RuntimeConnectionState): string {
@@ -357,7 +406,10 @@ export function mountConfig(root: HTMLElement): void {
       forcedTutorialLesson,
     );
     const done = lessons.filter((lesson) => lesson.done).length;
-    guideToggle.textContent = `训练任务 ${done}/${lessons.length}`;
+    const label = `训练任务：${done}/${lessons.length}`;
+    guideToggle.setAttribute('aria-label', label);
+    guideToggle.setAttribute('title', label);
+    guideToggle.classList.toggle('is-complete', done === lessons.length);
   }
 
   function refreshEditorTutorial(navigate = true): void {

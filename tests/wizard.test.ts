@@ -467,7 +467,8 @@ describe.skip('legacy configuration wizard rendering', () => {
     mountConfig(root as unknown as HTMLElement);
     expect(root.dataset.theme).toBe('dark');
 
-    const toggle = findByText(root, '切换至亮色主题');
+    const toggle = root.querySelector('.config-theme-toggle');
+    expect(toggle?.getAttribute('aria-label')).toBe('切换至亮色主题');
     (toggle?.onclick as (() => void) | null)?.();
     expect(root.dataset.theme).toBe('light');
     expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).settings.theme).toBe('light');
@@ -476,7 +477,7 @@ describe.skip('legacy configuration wizard rendering', () => {
   it('restores the saved light theme and toggle state after remounting', () => {
     const firstRoot = new TestElement('div');
     mountConfig(firstRoot as unknown as HTMLElement);
-    const firstToggle = findByText(firstRoot, '切换至亮色主题');
+    const firstToggle = firstRoot.querySelector('.config-theme-toggle');
     expect(firstToggle?.getAttribute('aria-label')).toBe('切换至亮色主题');
     expect(firstToggle?.getAttribute('aria-pressed')).toBeNull();
     firstToggle?.onclick?.();
@@ -485,8 +486,8 @@ describe.skip('legacy configuration wizard rendering', () => {
     mountConfig(secondRoot as unknown as HTMLElement);
 
     expect(secondRoot.dataset.theme).toBe('light');
-    const secondToggle = findByText(secondRoot, '切换至深色主题');
-    expect(secondToggle).toBeDefined();
+    const secondToggle = secondRoot.querySelector('.config-theme-toggle');
+    expect(secondToggle).not.toBeNull();
     expect(secondToggle?.getAttribute('aria-label')).toBe('切换至深色主题');
     expect(secondToggle?.getAttribute('aria-pressed')).toBeNull();
   });
@@ -507,13 +508,13 @@ describe.skip('legacy configuration wizard rendering', () => {
     await Promise.resolve();
 
     expect(root.dataset.theme).toBe('light');
-    expect(findByText(root, '切换至深色主题')).toBeDefined();
+    expect(root.querySelector('.config-theme-toggle')?.getAttribute('aria-label')).toBe('切换至深色主题');
   });
 
   it('synchronizes the config theme immediately after importing dark settings from light', async () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '切换至亮色主题')?.onclick?.();
+    root.querySelector('.config-theme-toggle')?.onclick?.();
     expect(root.dataset.theme).toBe('light');
     findByText(root, '更多设置')?.onclick?.();
     findByText(root, '面板设置')?.onclick?.();
@@ -528,15 +529,16 @@ describe.skip('legacy configuration wizard rendering', () => {
     await Promise.resolve();
 
     expect(root.dataset.theme).toBe('dark');
-    expect(findByText(root, '切换至亮色主题')).toBeDefined();
-    expect(findByText(root, '切换至亮色主题')?.getAttribute('aria-label')).toBe('切换至亮色主题');
-    expect(findByText(root, '切换至亮色主题')?.getAttribute('aria-pressed')).toBeNull();
+    const themeToggle = root.querySelector('.config-theme-toggle');
+    expect(themeToggle).not.toBeNull();
+    expect(themeToggle?.getAttribute('aria-label')).toBe('切换至亮色主题');
+    expect(themeToggle?.getAttribute('aria-pressed')).toBeNull();
   });
 
   it('falls back to dark when imported settings contain an invalid theme', async () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '切换至亮色主题')?.onclick?.();
+    root.querySelector('.config-theme-toggle')?.onclick?.();
     expect(root.dataset.theme).toBe('light');
     findByText(root, '更多设置')?.onclick?.();
     findByText(root, '面板设置')?.onclick?.();
@@ -551,7 +553,7 @@ describe.skip('legacy configuration wizard rendering', () => {
     await Promise.resolve();
 
     expect(root.dataset.theme).toBe('dark');
-    expect(findByText(root, '切换至亮色主题')).toBeDefined();
+    expect(root.querySelector('.config-theme-toggle')?.getAttribute('aria-label')).toBe('切换至亮色主题');
     expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).settings.theme).toBe('dark');
   });
 
@@ -1309,8 +1311,9 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    const changelogButton = findByText(root, '更新日志');
-    expect(changelogButton).toBeDefined();
+    const changelogButton = root.querySelector('.changelog-toggle');
+    expect(changelogButton).not.toBeNull();
+    expect(changelogButton?.getAttribute('aria-label')).toBe('更新日志');
     changelogButton?.onclick?.();
 
     const dialog = root.querySelector('.changelog-dialog');
