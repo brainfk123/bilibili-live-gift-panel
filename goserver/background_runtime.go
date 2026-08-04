@@ -15,8 +15,10 @@ type giftEventSource interface {
 }
 
 type runtimeCallbacks struct {
-	onGift  func(giftEvent)
-	onState func(string)
+	onGift             func(giftEvent)
+	onState            func(string)
+	onGiftCatalog      func([]roomGiftInfo)
+	onGiftCatalogError func(error)
 }
 
 type runtimeStatus struct {
@@ -39,6 +41,7 @@ type backgroundRuntime struct {
 	notifications   *notificationCenter
 	giftQueue       chan giftEvent
 	profileResolver userProfileResolver
+	diagnostics     *diagnosticLogger
 }
 
 type timerSchedule struct {
@@ -65,6 +68,10 @@ func newBackgroundRuntime(store *configStore, sourceFactory func() giftEventSour
 		giftQueue:       make(chan giftEvent, 256),
 		profileResolver: newBilibiliUserProfileResolver(nil, ""),
 	}
+}
+
+func (runtime *backgroundRuntime) setDiagnosticLogger(logger *diagnosticLogger) {
+	runtime.diagnostics = logger
 }
 
 func (runtime *backgroundRuntime) Run(ctx context.Context) {
@@ -103,6 +110,12 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 				onGift: func(gift giftEvent) {
 					runtime.enqueueGift(connectionContext, gift)
 				},
+				onGiftCatalog: func(gifts []roomGiftInfo) {
+					runtime.mergeBlindBoxGiftCatalog(gifts)
+				},
+				onGiftCatalogError: func(err error) {
+					runtime.diagnostics.Error("blind_box_catalog_failed", "room_id", roomID, "error", err)
+				},
 				onState: func(status string) {
 					runtime.setStatus(status, roomID, nil)
 				},
@@ -137,6 +150,44 @@ func (runtime *backgroundRuntime) enqueueGift(ctx context.Context, gift giftEven
 	case runtime.giftQueue <- gift:
 	case <-ctx.Done():
 	}
+}
+
+func (runtime *backgroundRuntime) mergeBlindBoxGiftCatalog(gifts []roomGiftInfo) {
+	mappedChildren := 0
+	_, err := runtime.store.updateState(func(state *appState) error {
+		for _, gift := range gifts {
+			if !gift.BlindBoxParent && gift.BlindBoxParentID <= 0 {
+				continue
+			}
+			if gift.BlindBoxParentID > 0 {
+				mappedChildren++
+			}
+			mapped := giftInfo{
+				ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, ImgBasic: gift.ImgBasic,
+				BlindBoxParentID: gift.BlindBoxParentID, BlindBoxParentName: gift.BlindBoxParentName, BlindBoxParentPrice: gift.BlindBoxParentPrice,
+			}
+			if index := findGiftIndex(state.GiftCatalog, gift.ID); index >= 0 {
+				state.GiftCatalog[index] = mapped
+			} else {
+				state.GiftCatalog = append(state.GiftCatalog, mapped)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		runtime.diagnostics.Error("blind_box_catalog_save_failed", "error", err)
+		return
+	}
+	runtime.diagnostics.Info("blind_box_catalog_ready", "mapped_children", mappedChildren)
+}
+
+func findGiftIndex(gifts []giftInfo, giftID int) int {
+	for index := range gifts {
+		if gifts[index].ID == giftID {
+			return index
+		}
+	}
+	return -1
 }
 
 func (runtime *backgroundRuntime) runGiftLoop(ctx context.Context) {
@@ -250,6 +301,7 @@ func (runtime *backgroundRuntime) Status() runtimeStatus {
 
 func (runtime *backgroundRuntime) handleGift(gift giftEvent) {
 	if runtime.isDuplicate(gift.Rnd) {
+		runtime.diagnostics.Info("gift_ignored", "reason", "duplicate", "gift_id", gift.GiftID)
 		return
 	}
 	if needsUserProfile(gift) && runtime.profileResolver != nil {
@@ -265,11 +317,28 @@ func (runtime *backgroundRuntime) handleGift(gift giftEvent) {
 			}
 		}
 	}
+	blindSource := "none"
+	if gift.BlindGiftID > 0 {
+		blindSource = "event"
+	}
+	blindCost := float64(0)
+	blindValue := float64(0)
+	blindPriced := false
 	_, err := runtime.store.updateState(func(state *appState) error {
+		gift = enrichBlindBoxGiftFromCatalog(*state, gift)
+		if blindSource == "none" && gift.BlindGiftID > 0 {
+			blindSource = "catalog"
+		}
+		if gift.BlindGiftID > 0 {
+			count := maxInt(1, gift.Num)
+			blindCost, blindPriced = blindBoxCost(*state, gift, count)
+			blindValue = blindBoxOutputValue(*state, gift, count)
+		}
 		applyGiftEvent(state, gift)
 		return nil
 	})
 	if err != nil {
+		runtime.diagnostics.Error("gift_apply_failed", "gift_id", gift.GiftID, "error", err)
 		status := runtime.Status()
 		runtime.setStatus("error", status.RoomID, err)
 		return
@@ -277,6 +346,18 @@ func (runtime *backgroundRuntime) handleGift(gift giftEvent) {
 	runtime.mu.Lock()
 	runtime.status.LastGiftAt = time.Now().UnixMilli()
 	runtime.mu.Unlock()
+	runtime.diagnostics.Info(
+		"gift_received",
+		"gift_id", gift.GiftID,
+		"gift_name", gift.GiftName,
+		"count", maxInt(1, gift.Num),
+		"viewer_uid", gift.UID,
+		"blind_parent_id", gift.BlindGiftID,
+		"blind_source", blindSource,
+		"blind_cost", blindCost,
+		"blind_value", blindValue,
+		"blind_priced", blindPriced,
+	)
 }
 
 func (runtime *backgroundRuntime) isDuplicate(key string) bool {
@@ -301,14 +382,23 @@ func (runtime *backgroundRuntime) isDuplicate(key string) bool {
 func (runtime *backgroundRuntime) setStatus(state, roomID string, err error) {
 	runtime.mu.Lock()
 	previous := runtime.status
+	nextLastError := ""
 	runtime.status.State = state
 	runtime.status.RoomID = roomID
 	if err == nil {
 		runtime.status.LastError = ""
 	} else {
-		runtime.status.LastError = err.Error()
+		nextLastError = err.Error()
+		runtime.status.LastError = nextLastError
 	}
 	runtime.mu.Unlock()
+	if previous.State != state || previous.RoomID != roomID || previous.LastError != nextLastError {
+		if err != nil {
+			runtime.diagnostics.Error("connection_state", "state", state, "room_id", roomID, "error", err)
+		} else {
+			runtime.diagnostics.Info("connection_state", "state", state, "room_id", roomID)
+		}
+	}
 
 	if previous.State != "connected" && state == "connected" {
 		runtime.notifications.Publish(notificationRoomConnected, roomID)
@@ -337,6 +427,7 @@ func (runtime *backgroundRuntime) wait(ctx context.Context, delay time.Duration)
 
 func applyGiftEvent(state *appState, gift giftEvent) {
 	normalizeAppState(state)
+	gift = enrichBlindBoxGiftFromCatalog(*state, gift)
 	upsertRecentGiftState(state, gift)
 	stats := state.todayStats()
 	stats.GiftTotals[giftKey(gift.GiftID)] += maxInt(1, gift.Num)

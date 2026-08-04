@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -59,6 +60,29 @@ func TestContributionLedgerComputesBlindBoxProfitFromParentCost(t *testing.T) {
 	}
 	if viewer.UnpricedBlindBoxCount != 0 {
 		t.Fatalf("priced blind box marked unpriced: %#v", viewer)
+	}
+}
+
+func TestContributionLedgerUsesCatalogBlindBoxParentWhenEventOmitsMetadata(t *testing.T) {
+	state := defaultAppState()
+	if err := json.Unmarshal([]byte(`{
+		"giftCatalog": [
+			{"id":35800,"name":"小熊虫盲盒","price":9000,"coinType":"gold"},
+			{"id":35801,"name":"心事虫虫","price":12000,"coinType":"gold","blindBoxParentId":35800,"blindBoxParentName":"小熊虫盲盒","blindBoxParentPrice":9000}
+		]
+	}`), &state); err != nil {
+		t.Fatal(err)
+	}
+	normalizeAppState(&state)
+
+	applyGiftEvent(&state, giftEvent{
+		GiftID: 35801, GiftName: "心事虫虫", Num: 1, Price: 12000, CoinType: "gold",
+		UID: 456, Uname: "盲盒观众", Timestamp: 1_700_000_101, Rnd: "blind-profit-catalog-1",
+	})
+
+	viewer := state.Contributions.Viewers[0]
+	if viewer.BlindBoxCount != 1 || viewer.BlindBoxCost != 9000 || viewer.BlindBoxValue != 12000 || viewer.BlindBoxProfit != 3000 {
+		t.Fatalf("catalog-mapped blind box contribution = %#v", viewer)
 	}
 }
 

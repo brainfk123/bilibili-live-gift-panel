@@ -3616,13 +3616,23 @@ export function mountConfig(root: HTMLElement): void {
     };
     const importButton = el('button', { class: 'btn ghost', type: 'button', text: '导入配置' }) as HTMLButtonElement;
     importButton.onclick = () => importInput.click();
+    const diagnosticLogLink = el('a', {
+      class: 'btn ghost diagnostic-log-export',
+      href: '/api/diagnostics/log',
+      download: `gift-panel-runtime-${new Date().toISOString().slice(0, 10)}.log`,
+      text: '导出运行日志',
+      title: '导出连接、礼物解析和盲盒识别日志',
+    }) as HTMLAnchorElement;
     const resetButton = el('button', { class: 'btn text-danger', type: 'button', text: '恢复默认' }) as HTMLButtonElement;
     resetButton.onclick = () => {
       if (!confirm('确定恢复默认设置？当前配置将被清除。')) return;
       resetState();
       location.reload();
     };
-    dataCard.append(el('div', { class: 'data-actions' }, [exportButton, importButton, importInput, resetButton]));
+    dataCard.append(
+      el('div', { class: 'data-actions' }, [exportButton, importButton, diagnosticLogLink, importInput, resetButton]),
+      el('small', { class: 'advanced-copy diagnostic-log-note', text: '运行日志包含连接状态、礼物 ID、发送者 UID 和盲盒识别结果，不包含 Cookie 或登录凭据。' }),
+    );
 
     const updateCard = el('section', { class: 'data-update-section update-settings-card' });
     const versionText = el('strong', { class: 'update-current-version', text: '读取中…' });

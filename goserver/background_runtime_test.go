@@ -66,6 +66,31 @@ func TestBackgroundRuntimeProcessesGiftWithoutDisplayPage(t *testing.T) {
 	t.Fatal("gift did not update the attribute in the disk configuration")
 }
 
+func TestBackgroundRuntimePersistsBlindBoxMappingsFromRoomCatalog(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	if err := store.replaceState(defaultAppState()); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.mergeBlindBoxGiftCatalog([]roomGiftInfo{
+		{ID: 35800, Name: "小熊虫盲盒", Price: 9000, CoinType: "gold", BlindBoxParent: true},
+		{ID: 35801, Name: "心事虫虫", Price: 12000, CoinType: "gold", BlindBoxParentID: 35800, BlindBoxParentName: "小熊虫盲盒", BlindBoxParentPrice: 9000},
+		{ID: 31164, Name: "粉丝团灯牌", Price: 100, CoinType: "gold"},
+	})
+
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.GiftCatalog) != 2 {
+		t.Fatalf("blind box catalog = %#v", state.GiftCatalog)
+	}
+	child := state.findGift(35801)
+	if child == nil || child.BlindBoxParentID != 35800 || child.BlindBoxParentPrice != 9000 {
+		t.Fatalf("blind box child mapping = %#v", child)
+	}
+}
+
 func TestSameGiftIdentityKeepsMatchingAfterIconRevision(t *testing.T) {
 	configured := giftInfo{ID: 970001, Name: "情书", Price: 5200, CoinType: "gold", ImgBasic: "old.png"}
 	event := giftEvent{GiftID: 970002, GiftName: "情书", Price: 5200, CoinType: "gold", ImgBasic: "current.png"}

@@ -2549,6 +2549,7 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .setting-switch-copy strong { color: var(--text); font-size: var(--type-body); }
 .config-root .setting-switch-copy small { margin-top: 3px; color: var(--text-dim); font-size: var(--type-meta); line-height: 1.4; }
 .config-root .data-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.config-root .diagnostic-log-note { display: block; margin-top: 12px; line-height: 1.5; }
 .config-root .data-update-section {
   margin-top: 28px;
   border-top: 1px solid var(--border);

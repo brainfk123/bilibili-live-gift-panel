@@ -20,6 +20,20 @@ type giftContributionOutcome struct {
 	Changes      []logEntry
 }
 
+func enrichBlindBoxGiftFromCatalog(state appState, gift giftEvent) giftEvent {
+	if gift.BlindGiftID > 0 {
+		return gift
+	}
+	child := state.findGift(gift.GiftID)
+	if child == nil || child.BlindBoxParentID <= 0 {
+		return gift
+	}
+	gift.BlindGiftID = child.BlindBoxParentID
+	gift.BlindGiftName = child.BlindBoxParentName
+	gift.BlindGiftPrice = child.BlindBoxParentPrice
+	return gift
+}
+
 func recordGiftContribution(state *appState, gift giftEvent, outcome giftContributionOutcome) {
 	normalizeContributionLedger(&state.Contributions)
 	key := contributionIdentityKey(gift)

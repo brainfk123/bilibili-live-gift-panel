@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -157,6 +158,11 @@ func main() {
 		showStartupError(err.Error())
 		return
 	}
+	diagnostics, diagnosticErr := newDiagnosticLogger(filepath.Join(filepath.Dir(store.path), "runtime.log"))
+	if diagnosticErr == nil {
+		diagnostics.Info("service_start", "version", appVersion)
+		defer diagnostics.Info("service_stop", "version", appVersion)
+	}
 	loginStore, err := newDefaultLoginCredentialStore()
 	if err != nil {
 		showStartupError(err.Error())
@@ -194,6 +200,7 @@ func main() {
 	background := newBackgroundRuntime(store, func() giftEventSource {
 		return &bilibiliGiftSource{sessionProvider: login.Session}
 	}, notifications)
+	background.setDiagnosticLogger(diagnostics)
 	store.setOnChange(background.NotifyConfigChanged)
 	store.setOnTimerChange(background.NotifyTimerConfigChanged)
 	store.setOnUpdateChange(updater.NotifySettingsChanged)
@@ -220,6 +227,13 @@ func main() {
 	mux.HandleFunc("/api/update", updater.handleStatus)
 	mux.HandleFunc("/api/update/check", updater.handleCheck)
 	mux.HandleFunc("/api/changelog", newHostedChangelogHandler(nil, hostedChangelogURL))
+	mux.HandleFunc("/api/diagnostics/log", func(w http.ResponseWriter, r *http.Request) {
+		if diagnostics == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"code": -1, "message": "运行日志暂时不可用"})
+			return
+		}
+		diagnostics.handleExport(w, r)
+	})
 	mux.HandleFunc("/api/auth/", login.handle)
 	mux.Handle("/api/pages/presence/", presence)
 	mux.HandleFunc("/api/runtime", func(w http.ResponseWriter, r *http.Request) {
@@ -237,12 +251,15 @@ func main() {
 
 	listener, port, err := listenWithFallback(12450, 10)
 	if err != nil {
+		diagnostics.Error("http_listen_failed", "error", err)
 		showStartupError(err.Error())
 		return
 	}
+	diagnostics.Info("http_ready", "port", port)
 	server := &http.Server{Handler: mux}
 	go func() {
 		if serveErr := server.Serve(listener); serveErr != nil && serveErr != http.ErrServerClosed {
+			diagnostics.Error("http_server_stopped", "error", serveErr)
 			showStartupError(fmt.Sprintf("本地服务已停止：%v", serveErr))
 		}
 	}()
@@ -256,6 +273,7 @@ func main() {
 	}
 	restartAfterUpdate, trayErr := runTrayApp(configURL, notifications, updateExit)
 	if trayErr != nil {
+		diagnostics.Error("tray_failed", "error", trayErr)
 		showStartupError(fmt.Sprintf("系统托盘启动失败：%v", trayErr))
 	}
 	stopRuntime()
@@ -263,6 +281,7 @@ func main() {
 	defer cancel()
 	_ = server.Shutdown(shutdownContext)
 	if err := updater.InstallOnExit(restartAfterUpdate); err != nil {
+		diagnostics.Error("update_install_failed", "error", err)
 		showStartupError(err.Error())
 	}
 }

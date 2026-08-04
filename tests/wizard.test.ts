@@ -1354,6 +1354,10 @@ describe('single-page configuration rendering', () => {
     mountConfig(root as unknown as HTMLElement);
 
     expect(root.querySelector('.data-settings-card')?.querySelector('.update-settings-card')).not.toBeNull();
+    const diagnosticLogLink = findByText(root, '导出运行日志') as (TestElement & { href?: string; download?: string }) | undefined;
+    expect(diagnosticLogLink?.href).toBe('/api/diagnostics/log');
+    expect(diagnosticLogLink?.download).toContain('gift-panel-runtime-');
+    expect(textOf(root.querySelector('.diagnostic-log-note') as TestElement)).toContain('不包含 Cookie 或登录凭据');
     await vi.waitFor(() => expect(textOf(root.querySelector('.update-settings-card') as TestElement)).toContain('v1.0.0'));
     const autoUpdateInput = root.querySelector('.update-auto-switch')?.querySelector('input') as (TestElement & { checked?: boolean }) | null;
     expect(autoUpdateInput?.checked).toBe(true);

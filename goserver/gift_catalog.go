@@ -27,13 +27,16 @@ type giftPanelEntry struct {
 }
 
 type roomGiftInfo struct {
-	ID             int     `json:"id"`
-	Name           string  `json:"name"`
-	Price          float64 `json:"price"`
-	CoinType       string  `json:"coinType"`
-	ImgBasic       string  `json:"imgBasic"`
-	Listed         bool    `json:"listed"`
-	BlindBoxParent bool    `json:"-"`
+	ID                  int     `json:"id"`
+	Name                string  `json:"name"`
+	Price               float64 `json:"price"`
+	CoinType            string  `json:"coinType"`
+	ImgBasic            string  `json:"imgBasic"`
+	Listed              bool    `json:"listed"`
+	BlindBoxParent      bool    `json:"-"`
+	BlindBoxParentID    int     `json:"blindBoxParentId,omitempty"`
+	BlindBoxParentName  string  `json:"blindBoxParentName,omitempty"`
+	BlindBoxParentPrice float64 `json:"blindBoxParentPrice,omitempty"`
 }
 
 func (entry giftPanelEntry) normalizedID() int {
@@ -261,6 +264,15 @@ func markListedBlindBoxChildren(gifts []roomGiftInfo, lookup func(int) (*blindBo
 		for _, child := range info.Gifts {
 			if index, exists := byID[child.ID]; exists {
 				gifts[index].Listed = true
+				if gifts[index].BlindBoxParentID <= 0 {
+					parentName := strings.TrimSpace(info.Name)
+					if parentName == "" {
+						parentName = gift.Name
+					}
+					gifts[index].BlindBoxParentID = gift.ID
+					gifts[index].BlindBoxParentName = parentName
+					gifts[index].BlindBoxParentPrice = gift.Price
+				}
 			}
 		}
 	}

@@ -81,6 +81,9 @@ func TestMarkListedBlindBoxChildrenMarksRewardsAsListed(t *testing.T) {
 	if !gifts[0].Listed || !gifts[1].Listed {
 		t.Fatalf("listed blind box catalog = %#v", gifts)
 	}
+	if gifts[1].BlindBoxParentID != 35800 || gifts[1].BlindBoxParentName != "小熊虫盲盒" || gifts[1].BlindBoxParentPrice != 9000 {
+		t.Fatalf("blind box parent mapping = %#v", gifts[1])
+	}
 	if gifts[2].Listed {
 		t.Fatalf("unrelated gift should remain unlisted = %#v", gifts[2])
 	}

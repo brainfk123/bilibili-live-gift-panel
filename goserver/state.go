@@ -138,11 +138,14 @@ type formulaPreset struct {
 }
 
 type giftInfo struct {
-	ID       int     `json:"id"`
-	Name     string  `json:"name"`
-	Price    float64 `json:"price"`
-	CoinType string  `json:"coinType"`
-	ImgBasic string  `json:"imgBasic"`
+	ID                  int     `json:"id"`
+	Name                string  `json:"name"`
+	Price               float64 `json:"price"`
+	CoinType            string  `json:"coinType"`
+	ImgBasic            string  `json:"imgBasic"`
+	BlindBoxParentID    int     `json:"blindBoxParentId,omitempty"`
+	BlindBoxParentName  string  `json:"blindBoxParentName,omitempty"`
+	BlindBoxParentPrice float64 `json:"blindBoxParentPrice,omitempty"`
 }
 
 type recentGift struct {

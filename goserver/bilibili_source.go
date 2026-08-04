@@ -64,6 +64,13 @@ func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callba
 		return err
 	}
 	session = sessionForRoomInfo(info, session)
+	if callbacks.onGiftCatalog != nil {
+		if gifts, catalogErr := fetchCurrentRoomGiftCatalog(roomID, session); catalogErr == nil {
+			callbacks.onGiftCatalog(gifts)
+		} else if callbacks.onGiftCatalogError != nil {
+			callbacks.onGiftCatalogError(catalogErr)
+		}
+	}
 	host := danmuHost{Host: "broadcastlv.chat.bilibili.com", WSSPort: 443}
 	if len(info.HostList) > 0 {
 		host = info.HostList[0]
