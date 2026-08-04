@@ -1557,6 +1557,44 @@ body.config-mode::-webkit-scrollbar-corner,
   color: var(--text-dim);
   font-size: var(--type-body);
 }
+.config-root .room-anchor-host {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 11px;
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 10px 12px;
+  background: var(--input-bg);
+}
+.config-root .room-anchor-host:empty { display: none; }
+.config-root .room-anchor-avatar {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: 50%;
+  background: var(--image-bg);
+  object-fit: cover;
+}
+.config-root .room-anchor-avatar.is-fallback {
+  display: grid;
+  place-items: center;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  font-size: var(--type-title);
+  font-weight: 800;
+}
+.config-root .room-anchor-copy { min-width: 0; }
+.config-root .room-anchor-copy strong,
+.config-root .room-anchor-copy span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.config-root .room-anchor-copy strong { color: var(--text); font-size: var(--type-body); }
+.config-root .room-anchor-copy span { margin-top: 3px; color: var(--text-dim); font-size: var(--type-meta); }
 .config-root .inline-help { margin-top: 16px; color: var(--text-dim); font-size: var(--type-meta); }
 .config-root .inline-help summary { color: var(--accent-text); cursor: pointer; }
 .config-root .inline-help p { margin-top: 8px; line-height: 1.6; }
@@ -2250,12 +2288,17 @@ body.config-mode::-webkit-scrollbar-corner,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.config-root .gift-history-list {
-  max-height: 520px;
-  overflow: auto;
+.config-root .gift-history-list-frame {
+  overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 13px;
   background: var(--input-bg);
+}
+.config-root .gift-history-list {
+  max-height: 520px;
+  overflow: auto;
+  border: 0;
+  background: transparent;
   scrollbar-gutter: stable;
 }
 .config-root .gift-history-row {

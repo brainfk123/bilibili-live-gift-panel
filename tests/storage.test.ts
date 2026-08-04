@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { consumeConfigMigrationRequired, createConfigBackup, defaultState, hydrateStateFromServer, loadState, mergeConfigBackup, saveState, resetState, pruneLog, refreshStateFromServer } from '../src/storage';
+import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBackup, defaultState, hydrateStateFromServer, loadState, mergeConfigBackup, saveState, resetState, pruneLog, refreshStateFromServer } from '../src/storage';
 import { LogEntry, MAX_LOG } from '../src/types';
 
 beforeEach(() => {
@@ -16,6 +16,30 @@ describe('storage', () => {
     expect(s.settings.panelOpacity).toBe(55);
     expect(s.settings.trainingCompletedTopics).toEqual([]);
     expect(s.settings.lastSeenChangelogVersion).toBe('');
+  });
+
+  it('clears only room-scoped records when switching rooms', () => {
+    const state = defaultState();
+    state.roomId = '100';
+    state.attributes = [{ name: '积分', value: 7, unit: 'none', format: 'number', decimals: 0, suffix: '' }];
+    state.rules = [{ id: 'r1', giftId: 1, attributeName: '积分', formula: '积分+1' }];
+    state.giftCatalog = [{ id: 1, name: '测试礼物', price: 100, coinType: 'gold', imgBasic: '' }];
+    state.recentGifts = [{ ...state.giftCatalog[0], lastReceived: 1, count: 2 }];
+    state.stats = { today: { date: 'today', giftTotals: { 1: 2 }, ruleTriggers: { r1: 2 } } };
+    state.log = [{ time: 1, giftId: 1, giftName: '测试礼物', num: 1, uname: '观众', attributeName: '积分', delta: 1, valueAfter: 7, ruleId: 'r1' }];
+    state.contributions = { updatedAt: 1, viewers: [{ key: 'uid:1', uid: 1, uname: '观众', giftCount: 2, goldValue: 200, silverValue: 0, ruleTriggers: 2, attributeDeltas: { 积分: 2 }, blindBoxCount: 0, blindBoxCost: 0, blindBoxValue: 0, blindBoxProfit: 0, lastGiftAt: 1 }] };
+
+    const cleared = clearRoomScopedRecords(state);
+
+    expect(cleared.recentGifts).toEqual([]);
+    expect(cleared.stats).toEqual({});
+    expect(cleared.log).toEqual([]);
+    expect(cleared.contributions.viewers).toEqual([]);
+    expect(cleared.contributions.updatedAt).toBeGreaterThan(1);
+    expect(cleared.attributes).toEqual(state.attributes);
+    expect(cleared.rules).toEqual(state.rules);
+    expect(cleared.giftCatalog).toEqual(state.giftCatalog);
+    expect(state.log).toHaveLength(1);
   });
 
   it('round-trips state through save/load', async () => {

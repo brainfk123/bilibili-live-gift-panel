@@ -4,6 +4,7 @@ import {
   clearContributionLedger,
   getBlindBoxInfo,
   getBiliAuthStatus,
+  getRoomAnchorInfo,
   getRoomGiftCatalog,
   getUpdateStatus,
   logoutBiliAuth,
@@ -76,6 +77,27 @@ describe('current room gift catalog API', () => {
       { id: 35545, name: '情书', price: 5200, coinType: 'gold', imgBasic: 'current.png' },
     ]);
     expect(fetchMock).toHaveBeenCalledWith('/api/gifts?roomId=24849407', { cache: 'no-store' });
+  });
+});
+
+describe('room broadcaster API', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('normalizes the broadcaster UID, name, and avatar for the room card', async () => {
+    const fetchMock = vi.fn(async () => Response.json({
+      code: 0,
+      roomId: '31567150',
+      anchor: { uid: 32249588, uname: ' 反重力鱼 ', avatar: ' https://example.test/avatar.png ' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(getRoomAnchorInfo(' 31567150 ')).resolves.toEqual({
+      roomId: '31567150',
+      uid: 32249588,
+      uname: '反重力鱼',
+      avatar: 'https://example.test/avatar.png',
+    });
+    expect(fetchMock).toHaveBeenCalledWith('/api/room/anchor?roomId=31567150', { cache: 'no-store' });
   });
 });
 

@@ -1,5 +1,5 @@
 import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
-import { consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState } from '../../storage';
+import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { el, fieldControl, inputField, toast } from '../common';
 import { builtinCatalog, findGift, giftDisplayKey, matchesGiftSearch, sortGiftsByUsage } from '../../gifts/catalog';
@@ -11,6 +11,7 @@ import {
   getBlindBoxInfo,
   getBiliAuthStatus,
   getHostedChangelog,
+  getRoomAnchorInfo,
   getRoomGiftCatalog,
   getRuntimeStatus,
   getUpdateStatus,
@@ -18,6 +19,7 @@ import {
   pollBiliQRCodeLogin,
   previewFormula,
   RuntimeConnectionState,
+  RoomAnchorInfo,
   startBiliQRCodeLogin,
   UpdateStatus,
 } from '../../backend';
@@ -154,6 +156,9 @@ export function mountConfig(root: HTMLElement): void {
   let roomGiftCatalogRefreshActive = false;
   let roomGiftCatalogRoomId = '';
   let roomGiftCatalog: GiftInfo[] = [];
+  let roomAnchorInfo: RoomAnchorInfo | null = null;
+  let roomAnchorInfoRoomId = '';
+  let roomAnchorRequestVersion = 0;
   let refreshOpenGiftCatalog: (() => void) | null = null;
   let currentUpdateStatus: UpdateStatus = {
     state: 'idle', currentVersion: '', message: '正在读取版本信息…', autoUpdate: state.settings.autoUpdate, restartRequired: false,
@@ -340,6 +345,53 @@ export function mountConfig(root: HTMLElement): void {
     }
   }
 
+  function renderRoomAnchorHosts(): void {
+    const currentRoomId = state.roomId.trim();
+    for (const host of Array.from(root.querySelectorAll<HTMLElement>('.room-anchor-host'))) {
+      host.replaceChildren();
+      if (!roomAnchorInfo || roomAnchorInfoRoomId !== currentRoomId) continue;
+      const avatar = roomAnchorInfo.avatar
+        ? el('img', {
+          class: 'room-anchor-avatar',
+          src: roomAnchorInfo.avatar,
+          alt: roomAnchorInfo.uname ? `${roomAnchorInfo.uname}的头像` : '主播头像',
+          referrerPolicy: 'no-referrer',
+        })
+        : el('span', { class: 'room-anchor-avatar is-fallback', text: '主', ariaHidden: 'true' });
+      host.append(
+        avatar,
+        el('div', { class: 'room-anchor-copy' }, [
+          el('strong', { text: roomAnchorInfo.uname || '直播间主播' }),
+          el('span', { text: `主播 UID ${roomAnchorInfo.uid}` }),
+        ]),
+      );
+    }
+  }
+
+  async function refreshRoomAnchorInfo(force = false): Promise<void> {
+    const requestedRoomId = state.roomId.trim();
+    if (!requestedRoomId) {
+      roomAnchorRequestVersion += 1;
+      roomAnchorInfo = null;
+      roomAnchorInfoRoomId = '';
+      renderRoomAnchorHosts();
+      return;
+    }
+    if (!force && roomAnchorInfoRoomId === requestedRoomId) return;
+    const requestVersion = ++roomAnchorRequestVersion;
+    try {
+      const next = await getRoomAnchorInfo(requestedRoomId);
+      if (requestVersion !== roomAnchorRequestVersion || state.roomId.trim() !== requestedRoomId) return;
+      roomAnchorInfo = next;
+      roomAnchorInfoRoomId = requestedRoomId;
+    } catch {
+      if (requestVersion !== roomAnchorRequestVersion || state.roomId.trim() !== requestedRoomId) return;
+      roomAnchorInfo = null;
+      roomAnchorInfoRoomId = requestedRoomId;
+    }
+    renderRoomAnchorHosts();
+  }
+
   async function refreshBackendState(): Promise<void> {
     if (stateRefreshActive || editorOpen) return;
     stateRefreshActive = true;
@@ -348,7 +400,15 @@ export function mountConfig(root: HTMLElement): void {
       const requestedVersion = localStateVersion;
       const nextState = await refreshStateFromServer(() => requestedVersion === localStateVersion);
       if (requestedVersion !== localStateVersion) return;
+      const previousRoomId = state.roomId.trim();
       state = nextState;
+      if (state.roomId.trim() !== previousRoomId) {
+        roomAnchorInfo = null;
+        roomAnchorInfoRoomId = '';
+        roomGiftCatalogRoomId = '';
+        roomGiftCatalog = [];
+        void refreshRoomAnchorInfo(true);
+      }
       void refreshRoomGiftCatalog();
       if (ensureRuleGiftCatalog(state)) await saveState(state);
       if (configStructureSignature(state) !== previousStructure) {
@@ -366,6 +426,20 @@ export function mountConfig(root: HTMLElement): void {
 
   function save(): void {
     void saveAndWait().catch(() => undefined);
+  }
+
+  function isRoomSwitch(nextRoomId: string): boolean {
+    const currentRoomId = state.roomId.trim();
+    nextRoomId = nextRoomId.trim();
+    return currentRoomId !== '' && nextRoomId !== '' && currentRoomId !== nextRoomId;
+  }
+
+  function confirmRoomSwitch(nextRoomId: string): boolean {
+    if (!isRoomSwitch(nextRoomId)) return true;
+    return confirm(
+      `从房间 ${state.roomId.trim()} 切换到 ${nextRoomId.trim()}？\n\n`
+      + '切换后会清空最近礼物、礼物统计、生效记录和观众排行榜；属性、规则和 OBS 链接会保留。',
+    );
   }
 
   async function saveAndWait(): Promise<void> {
@@ -625,7 +699,7 @@ export function mountConfig(root: HTMLElement): void {
   function renderConnectionWorkspace(): void {
     const grid = el('section', { class: 'connection-grid' });
     const roomCard = el('article', { class: 'workspace-card room-card' });
-    roomCard.append(sectionHeading('直播来源', '连接直播间', '输入房间号并测试连接，礼物目录会随着直播事件自动补充。'));
+    roomCard.append(sectionHeading('直播来源', '连接直播间', '输入房间号并连接，礼物目录会随着直播事件自动补充。'));
 
     const roomInput = inputField('房间号', state.roomId);
     roomInput.classList.add('guide-room-input');
@@ -633,7 +707,7 @@ export function mountConfig(root: HTMLElement): void {
     roomInput.inputMode = 'numeric';
     roomInput.oninput = () => undefined;
     const connectionText = el('span', { class: 'connection-inline-status', text: connectionLabel(connectionState) });
-    const connectButton = el('button', { class: 'btn', type: 'button', text: '测试连接' }) as HTMLButtonElement;
+    const connectButton = el('button', { class: 'btn', type: 'button', text: '连接' }) as HTMLButtonElement;
     connectButton.onclick = async () => {
       const roomId = roomInput.value.trim();
       if (!roomId) {
@@ -641,30 +715,54 @@ export function mountConfig(root: HTMLElement): void {
         roomInput.focus();
         return;
       }
-      state.roomId = roomId;
+      if (!confirmRoomSwitch(roomId)) {
+        roomInput.value = state.roomId;
+        return;
+      }
+      const previousState = state;
+      const connectionBeforeClick = connectionState;
+      const switchingRooms = isRoomSwitch(roomId);
+      state = switchingRooms ? clearRoomScopedRecords({ ...state, roomId }) : { ...state, roomId };
+      if (switchingRooms) {
+        roomGiftCatalogRoomId = '';
+        roomGiftCatalog = [];
+        roomAnchorInfo = null;
+        roomAnchorInfoRoomId = '';
+      }
       connectionState = 'connecting';
       connectionText.textContent = connectionLabel(connectionState);
       renderHeaderStatus();
-      void refreshBiliAuth();
       try {
         await saveAndWait();
+        render();
+        void refreshBiliAuth();
+        void refreshRoomAnchorInfo(true);
         await refreshRuntime(true);
         void refreshRoomGiftCatalog(true);
       } catch {
+        state = previousState;
+        roomInput.value = previousState.roomId;
+        connectionState = connectionBeforeClick;
+        renderHeaderStatus();
+        void refreshBackendState();
+        void refreshRoomAnchorInfo(true);
+        void refreshRoomGiftCatalog(true);
         // saveAndWait already reports the persistence error in the page.
       }
     };
+    const roomAnchorHost = el('div', { class: 'room-anchor-host', ariaLive: 'polite' });
     roomCard.append(
       fieldControl(roomInput),
       el('div', { class: 'row connection-actions' }, [connectButton, connectionText]),
+      roomAnchorHost,
       el('details', { class: 'inline-help' }, [
         el('summary', { text: '房间号在哪里？' }),
         el('p', { text: '直播地址 live.bilibili.com/88888888 中的 88888888 就是房间号，不要复制问号后的参数。' }),
       ]),
     );
-
     grid.append(roomCard, renderLoginCard());
     content.append(grid);
+    renderRoomAnchorHosts();
   }
 
   function renderLoginCard(): HTMLElement {
@@ -1689,7 +1787,7 @@ export function mountConfig(root: HTMLElement): void {
       if (list.scrollTop + list.clientHeight >= list.scrollHeight - 80) appendBatch();
     };
     appendBatch();
-    section.append(list);
+    section.append(el('div', { class: 'gift-history-list-frame' }, [list]));
     content.append(section);
   }
 
@@ -3492,15 +3590,27 @@ export function mountConfig(root: HTMLElement): void {
         let parsed: unknown;
         try {
           parsed = JSON.parse(text) as unknown;
-          state = mergeConfigBackup(state, parsed);
+          const importedState = mergeConfigBackup(state, parsed);
+          if (!confirmRoomSwitch(importedState.roomId)) {
+            importInput.value = '';
+            return;
+          }
+          state = isRoomSwitch(importedState.roomId) ? clearRoomScopedRecords(importedState) : importedState;
         } catch (error) {
           toast(error instanceof Error ? error.message : '文件解析失败', root);
           return;
         }
         state.settings.theme = normalizeConfigTheme(state.settings.theme);
+        roomGiftCatalogRoomId = '';
+        roomGiftCatalog = [];
+        roomAnchorInfo = null;
+        roomAnchorInfoRoomId = '';
         applyConfigTheme(state.settings.theme);
         save();
         render();
+        void refreshBiliAuth();
+        void refreshRoomAnchorInfo(true);
+        void refreshRoomGiftCatalog(true);
         toast('配置已导入', root);
       });
     };
@@ -3646,6 +3756,7 @@ export function mountConfig(root: HTMLElement): void {
   render();
   void refreshRuntime();
   void refreshBiliAuth();
+  void refreshRoomAnchorInfo();
   void refreshRoomGiftCatalog();
   void refreshHostedChangelog();
   void refreshUpdateStatus();

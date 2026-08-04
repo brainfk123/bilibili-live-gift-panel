@@ -28,7 +28,7 @@ export interface MainLessonDetail {
 
 export const MAIN_LESSON_DETAILS: Record<TutorialLesson, MainLessonDetail> = {
   room: {
-    steps: ['找到直播间网址末尾的数字。', '填写房间号并点击“测试连接”。', '看到“已连接”后再继续。'],
+    steps: ['找到直播间网址末尾的数字。', '填写房间号并点击“连接”。', '看到“已连接”后再继续。'],
     outcome: '托盘后台知道该监听哪个直播间，配置页关闭后也能继续接收礼物。',
   },
   attribute: {

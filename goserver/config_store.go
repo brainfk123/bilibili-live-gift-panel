@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -517,6 +518,22 @@ type clientStateReplaceResult struct {
 	State       appState
 }
 
+func roomSwitchRequiresRecordReset(previousRoomID, nextRoomID string) bool {
+	previousRoomID = strings.TrimSpace(previousRoomID)
+	nextRoomID = strings.TrimSpace(nextRoomID)
+	return previousRoomID != "" && nextRoomID != "" && previousRoomID != nextRoomID
+}
+
+func clearRoomScopedRecords(state *appState) {
+	state.RecentGifts = []recentGift{}
+	state.Stats = map[string]dayStats{}
+	state.Log = []logEntry{}
+	state.Contributions = contributionLedgerState{
+		Viewers:   []viewerContribution{},
+		UpdatedAt: time.Now().UnixMilli(),
+	}
+}
+
 func (s *configStore) replaceClientState(state appState) (clientStateReplaceResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -524,7 +541,9 @@ func (s *configStore) replaceClientState(state appState) (clientStateReplaceResu
 	if previousErr != nil {
 		return clientStateReplaceResult{}, previousErr
 	}
-	if previousErr == nil && previous.Contributions.UpdatedAt > state.Contributions.UpdatedAt {
+	if roomSwitchRequiresRecordReset(previous.RoomID, state.RoomID) {
+		clearRoomScopedRecords(&state)
+	} else if previous.Contributions.UpdatedAt > state.Contributions.UpdatedAt {
 		state.Contributions = previous.Contributions
 	}
 	normalizeAppState(&state)
@@ -546,7 +565,9 @@ func (s *configStore) patchClientState(fields map[string]json.RawMessage) (clien
 	if err := applyClientStatePatch(&state, fields); err != nil {
 		return clientStateReplaceResult{}, &configInputError{err: err}
 	}
-	if _, changed := fields["contributions"]; changed && previousContributions.UpdatedAt > state.Contributions.UpdatedAt {
+	if roomSwitchRequiresRecordReset(previous.RoomID, state.RoomID) {
+		clearRoomScopedRecords(&state)
+	} else if _, changed := fields["contributions"]; changed && previousContributions.UpdatedAt > state.Contributions.UpdatedAt {
 		state.Contributions = previousContributions
 	}
 	normalizeAppState(&state)

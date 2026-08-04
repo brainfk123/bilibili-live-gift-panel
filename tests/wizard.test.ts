@@ -231,6 +231,13 @@ beforeEach(async () => {
         headers: { 'Content-Type': 'application/json' },
       });
     }
+    if (url.includes('/api/room/anchor')) {
+      return Response.json({
+        code: 0,
+        roomId: '31567150',
+        anchor: { uid: 32249588, uname: '测试主播', avatar: 'https://example.test/anchor.png' },
+      });
+    }
     if (url.includes('/api/formula/preview')) {
       const body = JSON.parse(String(init?.body ?? '{}')) as { attributeValue?: number };
       return new Response(JSON.stringify({ code: 0, result: (body.attributeValue ?? 0) + 1 }), {
@@ -641,7 +648,7 @@ describe.skip('legacy configuration wizard rendering', () => {
 
     expect(findByText(root, '简单四步，开始互动')).toBeDefined();
     expect(root.querySelector('h1')?.textContent).toBe('输入你的直播间房间号');
-    expect(root.querySelector('p')?.textContent).toBe('填好后点击测试连接。');
+    expect(root.querySelector('p')?.textContent).toBe('填好后点击连接。');
 
     const help = root.querySelector('.details-card');
     expect(help?.querySelector('summary')?.textContent).toBe('房间号在哪里？');
@@ -661,7 +668,7 @@ describe.skip('legacy configuration wizard rendering', () => {
     const roomInput = root.querySelector('input');
     if (!roomInput) throw new Error('room input not found');
     roomInput.value = '88888888';
-    findByText(root, '测试连接')?.onclick?.();
+    findByText(root, '连接')?.onclick?.();
 
     const client = mockedClients[0];
     if (!client) throw new Error('client not created');
@@ -870,12 +877,64 @@ describe.skip('legacy configuration wizard rendering', () => {
 
     const roomInput = root.querySelector('input') as unknown as HTMLInputElement;
     roomInput.value = '2145';
-    const connectButton = Array.from(root.querySelectorAll('button')).find((button) => button.textContent === '测试连接');
+    const connectButton = Array.from(root.querySelectorAll('button')).find((button) => button.textContent === '连接');
     expect(connectButton).toBeDefined();
     (connectButton?.onclick as (() => void) | null)?.();
 
     const roomStep = root.querySelector('[data-step="room"]');
     expect(roomStep?.className).toContain('is-done');
+  });
+
+  it('confirms a room switch and clears only room-scoped records', async () => {
+    const configured = defaultState();
+    configured.settings.showTutorial = false;
+    configured.roomId = '100';
+    configured.attributes = [{ name: '积分', value: 7, unit: 'none', format: 'number', decimals: 0, suffix: '' }];
+    configured.rules = [{ id: 'r1', giftId: 1, attributeName: '积分', formula: '积分+1' }];
+    configured.giftCatalog = [{ id: 1, name: '测试礼物', price: 100, coinType: 'gold', imgBasic: '' }];
+    configured.recentGifts = [{ ...configured.giftCatalog[0], lastReceived: 1, count: 1 }];
+    configured.stats = { today: { date: 'today', giftTotals: { 1: 1 }, ruleTriggers: { r1: 1 } } };
+    configured.log = [{ time: 1, giftId: 1, giftName: '测试礼物', num: 1, uname: '观众', attributeName: '积分', delta: 1, valueAfter: 7, ruleId: 'r1' }];
+    configured.contributions = { viewers: [{ key: 'uid:1', uid: 1, uname: '观众', giftCount: 1, goldValue: 100, silverValue: 0, ruleTriggers: 1, attributeDeltas: { 积分: 1 }, blindBoxCount: 0, blindBoxCost: 0, blindBoxValue: 0, blindBoxProfit: 0, lastGiftAt: 1 }], updatedAt: 1 };
+    await saveState(configured);
+    const confirmSwitch = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirmSwitch);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const input = root.querySelectorAll('input').find((item) => item.dataset.fieldLabel === '房间号') as TestElement;
+    input.value = '200';
+    await (findByText(root, '连接')?.onclick as (() => Promise<void>) | undefined)?.();
+    expect(confirmSwitch).toHaveBeenCalledWith(expect.stringContaining('切换后会清空最近礼物'));
+    expect(loadState().roomId).toBe('100');
+    expect(loadState().log).toHaveLength(1);
+    expect(input.value).toBe('100');
+
+    confirmSwitch.mockReturnValue(true);
+    input.value = '200';
+    await (findByText(root, '连接')?.onclick as (() => Promise<void>) | undefined)?.();
+    expect(loadState().roomId).toBe('200');
+    expect(loadState().recentGifts).toEqual([]);
+    expect(loadState().stats).toEqual({});
+    expect(loadState().log).toEqual([]);
+    expect(loadState().contributions.viewers).toEqual([]);
+    expect(loadState().attributes).toHaveLength(1);
+    expect(loadState().rules).toHaveLength(1);
+    expect(loadState().giftCatalog).toHaveLength(1);
+  });
+
+  it('shows the broadcaster identity resolved from the configured room', async () => {
+    const configured = defaultState();
+    configured.settings.showTutorial = false;
+    configured.roomId = '31567150';
+    await saveState(configured);
+    const root = new TestElement('div');
+
+    mountConfig(root as unknown as HTMLElement);
+
+    await vi.waitFor(() => expect(textOf(root)).toContain('测试主播'));
+    expect(textOf(root)).toContain('主播 UID 32249588');
+    expect((root.querySelector('.room-anchor-avatar') as any)?.src).toBe('https://example.test/anchor.png');
   });
 
   it('keeps inputs mounted while typing in onboarding and normal settings', () => {
@@ -921,7 +980,7 @@ describe.skip('legacy configuration wizard rendering', () => {
     findByText(root, '重新查看向导')?.onclick?.();
     const roomInput = root.querySelector('input');
     if (!roomInput) throw new Error('room input not found');
-    findByText(root, '测试连接')?.onclick?.();
+    findByText(root, '连接')?.onclick?.();
 
     const client = mockedClients[0];
     if (!client) throw new Error('client not created');
@@ -950,7 +1009,7 @@ describe.skip('legacy configuration wizard rendering', () => {
 
     const roomInput = root.querySelector('input') as unknown as HTMLInputElement;
     roomInput.value = '2145';
-    const connectButton = Array.from(root.querySelectorAll('button')).find((button) => button.textContent === '测试连接');
+    const connectButton = Array.from(root.querySelectorAll('button')).find((button) => button.textContent === '连接');
     (connectButton?.onclick as (() => void) | null)?.();
     mockedClients[0]?.options.onState?.('connected');
 
@@ -1156,7 +1215,7 @@ describe('single-page configuration rendering', () => {
     roomInput.value = '31567150';
     roomInput.oninput?.();
     mockedRuntimeState = 'connected';
-    await findByText(root, '测试连接')?.onclick?.();
+    await findByText(root, '连接')?.onclick?.();
     expect(textOf(root)).toContain('添加第一个属性');
     findByText(root, '添加属性')?.onclick?.();
     expect(root.querySelector('.attribute-modal')).not.toBeNull();
@@ -1869,6 +1928,8 @@ describe('single-page configuration rendering', () => {
       scrollTop?: number;
       onscroll?: () => void;
     };
+
+    expect(list.parent?.className).toContain('gift-history-list-frame');
 
     expect(list.querySelectorAll('.gift-history-row')).toHaveLength(40);
     expect(list.querySelector('.gift-history-loader')?.textContent).toContain('40 / 85');

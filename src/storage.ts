@@ -74,6 +74,16 @@ export const defaultState = (): AppState => ({
   contributions: { viewers: [] },
 });
 
+export function clearRoomScopedRecords(state: AppState): AppState {
+  return {
+    ...state,
+    recentGifts: [],
+    stats: {},
+    log: [],
+    contributions: { viewers: [], updatedAt: Date.now() },
+  };
+}
+
 export function loadState(): AppState {
   if (!cachedState) cachedState = defaultState();
   return cachedState;

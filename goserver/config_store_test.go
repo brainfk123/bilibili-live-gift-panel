@@ -246,6 +246,70 @@ func TestConfigStoreReconnectsOnlyWhenRoomChanges(t *testing.T) {
 	}
 }
 
+func TestConfigStoreClearsRoomScopedRecordsWhenRoomChanges(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	initial := defaultAppState()
+	initial.RoomID = "100"
+	initial.Attributes = []attributeState{{Name: "积分", Value: 7, Unit: "none", Format: "number"}}
+	initial.GiftCatalog = []giftInfo{{ID: 1, Name: "测试礼物", Price: 100, CoinType: "gold"}}
+	initial.RecentGifts = []recentGift{{giftInfo: giftInfo{ID: 1, Name: "测试礼物", Price: 100, CoinType: "gold"}, Count: 2}}
+	initial.Stats = map[string]dayStats{"2026-08-04": {Date: "2026-08-04", GiftTotals: map[string]int{"1": 2}}}
+	initial.Log = []logEntry{{Time: 1, GiftID: 1, GiftName: "测试礼物", AttributeName: "积分", Delta: 1, ValueAfter: 7}}
+	initial.Contributions = contributionLedgerState{
+		UpdatedAt: 10,
+		Viewers:   []viewerContribution{{Key: "uid:1", UID: 1, Uname: "观众", GiftCount: 2, AttributeDeltas: map[string]float64{"积分": 2}}},
+	}
+	if err := store.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(`{"roomId":"200"}`)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, body = %s", response.Code, response.Body.String())
+	}
+	updated, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.RoomID != "200" {
+		t.Fatalf("roomId = %q, want 200", updated.RoomID)
+	}
+	if len(updated.RecentGifts) != 0 || len(updated.Stats) != 0 || len(updated.Log) != 0 || len(updated.Contributions.Viewers) != 0 {
+		t.Fatalf("room-scoped records were not cleared: recent=%d stats=%d log=%d viewers=%d", len(updated.RecentGifts), len(updated.Stats), len(updated.Log), len(updated.Contributions.Viewers))
+	}
+	if updated.Contributions.UpdatedAt <= initial.Contributions.UpdatedAt {
+		t.Fatalf("cleared contribution ledger timestamp = %d, want newer than %d", updated.Contributions.UpdatedAt, initial.Contributions.UpdatedAt)
+	}
+	if len(updated.Attributes) != 1 || len(updated.GiftCatalog) != 1 {
+		t.Fatalf("configuration was cleared with records: attributes=%d gifts=%d", len(updated.Attributes), len(updated.GiftCatalog))
+	}
+}
+
+func TestConfigStorePreservesRoomScopedRecordsWhenReconnectingSameRoom(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	initial := defaultAppState()
+	initial.RoomID = "100"
+	initial.Log = []logEntry{{Time: 1, GiftID: 1, GiftName: "测试礼物", AttributeName: "积分", Delta: 1, ValueAfter: 1}}
+	initial.Contributions = contributionLedgerState{UpdatedAt: 10, Viewers: []viewerContribution{{Key: "uid:1", UID: 1, Uname: "观众"}}}
+	if err := store.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(`{"roomId":"100"}`)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, body = %s", response.Code, response.Body.String())
+	}
+	updated, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Log) != 1 || len(updated.Contributions.Viewers) != 1 {
+		t.Fatalf("same-room reconnect cleared records: log=%d viewers=%d", len(updated.Log), len(updated.Contributions.Viewers))
+	}
+}
+
 func TestConfigStoreNotifiesTimerChangesWithoutReconnect(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	roomChanges := 0

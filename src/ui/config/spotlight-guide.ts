@@ -25,7 +25,7 @@ const GUIDE_COPY: Record<TutorialLesson, GuideCopy> = {
   room: {
     targets: ['.guide-room-input'],
     title: '填写你的直播间房间号',
-    body: '填写直播间网址末尾的数字，再点击“测试连接”。连接成功后，托盘后台才会接收礼物。',
+    body: '填写直播间网址末尾的数字，再点击“连接”。连接成功后，托盘后台才会接收礼物。',
     action: '填写房间号',
   },
   attribute: {

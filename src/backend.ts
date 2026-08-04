@@ -40,6 +40,13 @@ export interface BiliAuthStatus {
   message?: string;
 }
 
+export interface RoomAnchorInfo {
+  roomId: string;
+  uid: number;
+  uname?: string;
+  avatar?: string;
+}
+
 export function startPagePresence(mode: PagePresenceMode): () => void {
   const EventSourceConstructor = globalThis.EventSource;
   if (typeof EventSourceConstructor !== 'function') return () => {};
@@ -90,6 +97,17 @@ interface BlindBoxResponse {
 interface RoomGiftCatalogResponse {
   code: number;
   gifts?: GiftInfo[];
+  message?: string;
+}
+
+interface RoomAnchorResponse {
+  code: number;
+  roomId?: string;
+  anchor?: {
+    uid?: number;
+    uname?: string;
+    avatar?: string;
+  };
   message?: string;
 }
 
@@ -205,6 +223,23 @@ export async function getRoomGiftCatalog(roomId: string): Promise<GiftInfo[]> {
     throw new Error(payload.message || `当前礼物目录读取失败：HTTP ${response.status}`);
   }
   return payload.gifts;
+}
+
+export async function getRoomAnchorInfo(roomId: string): Promise<RoomAnchorInfo | null> {
+  const normalized = roomId.trim();
+  if (!normalized) return null;
+  const response = await fetch(`/api/room/anchor?roomId=${encodeURIComponent(normalized)}`, { cache: 'no-store' });
+  const payload = await response.json() as RoomAnchorResponse;
+  const uid = Number(payload.anchor?.uid);
+  if (!response.ok || payload.code !== 0 || !Number.isFinite(uid) || uid <= 0) {
+    throw new Error(payload.message || `主播信息读取失败：HTTP ${response.status}`);
+  }
+  return {
+    roomId: String(payload.roomId ?? normalized),
+    uid: Math.trunc(uid),
+    ...(payload.anchor?.uname?.trim() ? { uname: payload.anchor.uname.trim() } : {}),
+    ...(payload.anchor?.avatar?.trim() ? { avatar: payload.anchor.avatar.trim() } : {}),
+  };
 }
 
 async function requestUpdateStatus(path: string, init?: RequestInit): Promise<UpdateStatus> {
