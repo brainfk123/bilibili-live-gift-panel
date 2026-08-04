@@ -1,5 +1,20 @@
 export type DisplayFormat = 'hhmmss' | 'number' | 'suffix';
 
+export type DisplayThemeId = 'minimal' | 'glass' | 'rpg' | 'pixel' | 'neon' | 'kawaii';
+
+export type DisplayVariant = 'number' | 'timer' | 'progress' | 'health' | 'resource' | 'tug';
+
+export interface AttributeDisplay {
+  variant: DisplayVariant;
+  themeId?: DisplayThemeId;
+  title?: string;
+  min?: number;
+  max?: number;
+  lowThreshold?: number;
+  leftLabel?: string;
+  rightLabel?: string;
+}
+
 export interface Attribute {
   name: string;
   value: number;
@@ -9,6 +24,9 @@ export interface Attribute {
   suffix: string;
   color?: string;
   broadcastMessage?: string;
+  display?: AttributeDisplay;
+  createdFromTemplateId?: string;
+  createdFromTemplateVersion?: number;
 }
 
 export interface GiftRule {
@@ -118,6 +136,7 @@ export interface Settings {
   theme: 'dark' | 'light';
   giftView: 'list' | 'grid';
   panelOpacity: number;
+  defaultDisplayThemeId: DisplayThemeId;
   showTutorial: boolean;
   tutorialVersion: number;
   tutorialCompletedLessons: TutorialLesson[];

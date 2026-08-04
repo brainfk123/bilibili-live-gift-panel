@@ -197,6 +197,39 @@ func TestConfigStorePersistsFormulaPresets(t *testing.T) {
 	}
 }
 
+func TestConfigStorePersistsGameplayTemplateDisplayMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store := &configStore{path: path}
+	payload := `{
+        "attributes":[{
+            "name":"Boss 血量","value":720,"unit":"none","format":"suffix","decimals":0,"suffix":" HP",
+            "display":{"variant":"health","themeId":"rpg","title":"深渊领主","min":0,"max":1000,"lowThreshold":20},
+            "createdFromTemplateId":"boss","createdFromTemplateVersion":1
+        }],
+        "settings":{"defaultDisplayThemeId":"neon"}
+    }`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", response.Code, response.Body.String())
+	}
+
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Settings.DefaultDisplayThemeID != "neon" {
+		t.Fatalf("default display theme = %q, want neon", state.Settings.DefaultDisplayThemeID)
+	}
+	attribute := state.findAttribute("Boss 血量")
+	if attribute == nil || attribute.Display == nil {
+		t.Fatal("template display metadata was not persisted")
+	}
+	if attribute.Display.Variant != "health" || attribute.Display.ThemeID != "rpg" || attribute.CreatedFromTemplateID != "boss" {
+		t.Fatalf("unexpected template metadata: %#v", attribute)
+	}
+}
+
 func TestConfigStoreRejectsInvalidFormulaPresetContext(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	payload := `{

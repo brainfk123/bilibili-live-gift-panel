@@ -1,4 +1,5 @@
 import { AppState, MAX_LOG } from './types';
+import { normalizeDisplayThemeId } from './display-themes';
 
 const CONFIG_ENDPOINT = '/api/config';
 let cachedState: AppState | null = null;
@@ -20,6 +21,7 @@ export const defaultState = (): AppState => ({
     theme: 'dark',
     giftView: 'list',
     panelOpacity: 55,
+    defaultDisplayThemeId: 'glass',
     showTutorial: true,
     tutorialVersion: 2,
     tutorialCompletedLessons: [],
@@ -102,6 +104,7 @@ function normalizeState(parsed: Partial<AppState>): AppState {
   if (parsed.settings?.showTutorial === undefined) configMigrationRequired = true;
   if (parsed.settings?.tutorialVersion === undefined || !Array.isArray(parsed.settings?.tutorialCompletedLessons)) configMigrationRequired = true;
   if (parsed.settings?.autoUpdate === undefined) configMigrationRequired = true;
+  if (parsed.settings?.defaultDisplayThemeId === undefined) configMigrationRequired = true;
   const showTutorial = parsed.settings?.showTutorial ?? !setupComplete;
   const tutorialCompletedLessons = Array.isArray(parsed.settings?.tutorialCompletedLessons)
     ? parsed.settings.tutorialCompletedLessons.filter((lesson): lesson is AppState['settings']['tutorialCompletedLessons'][number] => (
@@ -116,11 +119,22 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     tutorialCompletedLessons: Array.from(new Set(tutorialCompletedLessons)),
   };
   settings.panelOpacity = Math.min(100, Math.max(10, Number(settings.panelOpacity) || base.settings.panelOpacity));
+  settings.defaultDisplayThemeId = normalizeDisplayThemeId(settings.defaultDisplayThemeId);
   return {
     ...base,
     ...parsed,
     settings,
-    attributes: parsed.attributes ?? base.attributes,
+    attributes: (parsed.attributes ?? base.attributes).map((attribute) => (
+      attribute.display
+        ? {
+          ...attribute,
+          display: {
+            ...attribute.display,
+            themeId: normalizeDisplayThemeId(attribute.display.themeId ?? settings.defaultDisplayThemeId),
+          },
+        }
+        : attribute
+    )),
     rules: parsed.rules ?? base.rules,
     timerRules: parsed.timerRules ?? base.timerRules,
     formulaPresets: parsed.formulaPresets ?? base.formulaPresets,

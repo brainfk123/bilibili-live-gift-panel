@@ -9,14 +9,28 @@ import (
 const maxLogEntries = 200
 
 type attributeState struct {
-	Name             string  `json:"name"`
-	Value            float64 `json:"value"`
-	Unit             string  `json:"unit"`
-	Format           string  `json:"format"`
-	Decimals         int     `json:"decimals"`
-	Suffix           string  `json:"suffix"`
-	Color            string  `json:"color,omitempty"`
-	BroadcastMessage string  `json:"broadcastMessage,omitempty"`
+	Name                       string                 `json:"name"`
+	Value                      float64                `json:"value"`
+	Unit                       string                 `json:"unit"`
+	Format                     string                 `json:"format"`
+	Decimals                   int                    `json:"decimals"`
+	Suffix                     string                 `json:"suffix"`
+	Color                      string                 `json:"color,omitempty"`
+	BroadcastMessage           string                 `json:"broadcastMessage,omitempty"`
+	Display                    *attributeDisplayState `json:"display,omitempty"`
+	CreatedFromTemplateID      string                 `json:"createdFromTemplateId,omitempty"`
+	CreatedFromTemplateVersion int                    `json:"createdFromTemplateVersion,omitempty"`
+}
+
+type attributeDisplayState struct {
+	Variant      string   `json:"variant"`
+	ThemeID      string   `json:"themeId,omitempty"`
+	Title        string   `json:"title,omitempty"`
+	Min          *float64 `json:"min,omitempty"`
+	Max          *float64 `json:"max,omitempty"`
+	LowThreshold *float64 `json:"lowThreshold,omitempty"`
+	LeftLabel    string   `json:"leftLabel,omitempty"`
+	RightLabel   string   `json:"rightLabel,omitempty"`
 }
 
 type giftRule struct {
@@ -145,6 +159,7 @@ type settingsState struct {
 	Theme                    string   `json:"theme"`
 	GiftView                 string   `json:"giftView"`
 	PanelOpacity             int      `json:"panelOpacity"`
+	DefaultDisplayThemeID    string   `json:"defaultDisplayThemeId"`
 	ShowTutorial             *bool    `json:"showTutorial"`
 	TutorialVersion          int      `json:"tutorialVersion"`
 	TutorialCompletedLessons []string `json:"tutorialCompletedLessons"`
@@ -201,6 +216,7 @@ func defaultAppState() appState {
 			Theme:                    "dark",
 			GiftView:                 "list",
 			PanelOpacity:             55,
+			DefaultDisplayThemeID:    "glass",
 			ShowTutorial:             &showTutorial,
 			TutorialVersion:          2,
 			TutorialCompletedLessons: []string{},
@@ -262,6 +278,25 @@ func normalizeAppState(state *appState) {
 	if state.Settings.PanelOpacity > 100 {
 		state.Settings.PanelOpacity = 100
 	}
+	if !isDisplayThemeID(state.Settings.DefaultDisplayThemeID) {
+		state.Settings.DefaultDisplayThemeID = defaults.DefaultDisplayThemeID
+	}
+	for index := range state.Attributes {
+		display := state.Attributes[index].Display
+		if display == nil {
+			continue
+		}
+		if !isDisplayThemeID(display.ThemeID) {
+			display.ThemeID = state.Settings.DefaultDisplayThemeID
+		}
+		if !isDisplayVariant(display.Variant) {
+			if state.Attributes[index].Format == "hhmmss" {
+				display.Variant = "timer"
+			} else {
+				display.Variant = "number"
+			}
+		}
+	}
 	if state.Settings.ShowTutorial == nil {
 		showTutorial := !(strings.TrimSpace(state.RoomID) != "" && len(state.Attributes) > 0 && len(state.Rules) > 0)
 		state.Settings.ShowTutorial = &showTutorial
@@ -275,6 +310,24 @@ func normalizeAppState(state *appState) {
 	if state.Settings.AutoUpdate == nil {
 		autoUpdate := true
 		state.Settings.AutoUpdate = &autoUpdate
+	}
+}
+
+func isDisplayThemeID(value string) bool {
+	switch value {
+	case "minimal", "glass", "rpg", "pixel", "neon", "kawaii":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDisplayVariant(value string) bool {
+	switch value {
+	case "number", "timer", "progress", "health", "resource", "tug":
+		return true
+	default:
+		return false
 	}
 }
 

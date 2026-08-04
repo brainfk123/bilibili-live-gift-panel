@@ -114,6 +114,17 @@ func validateAppState(state appState) error {
 		if utf8.RuneCountInString(attribute.BroadcastMessage) > 200 {
 			return fmt.Errorf("属性 %q 的默认播报消息不能超过 200 个字符", name)
 		}
+		if attribute.Display != nil {
+			if !isDisplayVariant(attribute.Display.Variant) {
+				return fmt.Errorf("属性 %q 的 OBS 展示类型无效", name)
+			}
+			if !isDisplayThemeID(attribute.Display.ThemeID) {
+				return fmt.Errorf("属性 %q 的 OBS 主题无效", name)
+			}
+			if attribute.Display.Min != nil && attribute.Display.Max != nil && *attribute.Display.Max <= *attribute.Display.Min {
+				return fmt.Errorf("属性 %q 的 OBS 展示上限必须大于下限", name)
+			}
+		}
 	}
 	for _, rule := range state.Rules {
 		attribute := state.findAttribute(rule.AttributeName)

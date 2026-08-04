@@ -3,6 +3,7 @@ import { formatValue } from '../../format';
 import { findGift } from '../../gifts/catalog';
 import { loadState, refreshStateFromServer } from '../../storage';
 import { AppState, Attribute, LogEntry } from '../../types';
+import { getDisplayTheme, resolveAttributeDisplayTheme, resolveAttributeDisplayVariant } from '../../display-themes';
 import { createBrandIcon } from '../brand';
 import { el } from '../common';
 
@@ -55,6 +56,11 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
     attrEls.clear();
     broadcastStages.clear();
     const attributes = visibleAttributes();
+    const panelThemeId = attributes.length === 1
+      ? resolveAttributeDisplayTheme(attributes[0], state.settings)
+      : state.settings.defaultDisplayThemeId;
+    panel.dataset.theme = panelThemeId;
+    panel.classList.toggle('has-mixed-themes', attributes.length > 1);
     if (attributes.length === 0) {
       const empty = el('div', { class: 'display-empty' });
       empty.append(
@@ -64,10 +70,13 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
       panel.append(empty);
     }
     for (const attr of attributes) {
+      const variant = resolveAttributeDisplayVariant(attr);
+      const themeId = resolveAttributeDisplayTheme(attr, state.settings);
       const summary = el('div', { class: 'attr-summary' }, [
-        el('div', { class: 'attr-name', text: attr.name, title: attr.name }),
+        el('div', { class: 'attr-name', text: attr.display?.title?.trim() || attr.name, title: attr.display?.title?.trim() || attr.name }),
         el('div', { class: 'attr-value' }),
       ]);
+      if (['progress', 'health', 'resource', 'tug'].includes(variant)) summary.append(createAttributeMeter(attr, variant));
       const giftRules = el('div', { class: 'display-gift-rules' });
       const rules = state.rules.filter((rule) => rule.attributeName === attr.name && rule.enabled !== false);
       if (rules.length === 0) {
@@ -92,7 +101,9 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
       }
       const stage = el('div', { class: 'broadcast-stage' }, [createDefaultBroadcast(attr)]);
       const ticker = el('div', { class: 'broadcast-ticker' }, [stage]);
-      const block = el('section', { class: 'attr' }, [summary, giftRules, ticker]);
+      const block = el('section', { class: `attr is-${variant}` }, [summary, giftRules, ticker]);
+      block.dataset.theme = themeId;
+      block.dataset.variant = variant;
       broadcastStages.set(attr.name, stage);
       attrEls.set(attr.name, block);
       panel.append(block);
@@ -107,11 +118,39 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
     root.style.setProperty('--accent2', state.settings.accentColor);
     root.style.setProperty('--panel-opacity', String(opacity));
     root.style.setProperty('--panel-surface-opacity', String(opacity * 0.62));
+    const attributes = visibleAttributes();
+    const panelTheme = getDisplayTheme(attributes.length === 1
+      ? resolveAttributeDisplayTheme(attributes[0], state.settings)
+      : state.settings.defaultDisplayThemeId);
+    panel.dataset.theme = panelTheme.id;
+    panel.style.setProperty('--theme-accent', panelTheme.id === 'glass' ? state.settings.accentColor : panelTheme.accent);
+    panel.style.setProperty('--theme-surface', panelTheme.surface);
     stack.classList.toggle('center', state.settings.align === 'center');
     stack.classList.toggle('right', state.settings.align === 'right');
-    for (const attr of visibleAttributes()) {
+    for (const attr of attributes) {
       const block = attrEls.get(attr.name);
       if (!block) continue;
+      const theme = getDisplayTheme(resolveAttributeDisplayTheme(attr, state.settings));
+      const variant = resolveAttributeDisplayVariant(attr);
+      block.dataset.theme = theme.id;
+      block.dataset.variant = variant;
+      block.style.setProperty('--theme-accent', theme.id === 'glass' ? state.settings.accentColor : theme.accent);
+      block.style.setProperty('--theme-surface', theme.surface);
+      const meter = block.querySelector<HTMLElement>('.attr-meter');
+      if (meter) {
+        const minimum = Number.isFinite(attr.display?.min) ? Number(attr.display?.min) : 0;
+        const defaultMaximum = Math.max(100, Math.abs(attr.value), minimum + 1);
+        const maximum = Number.isFinite(attr.display?.max) && Number(attr.display?.max) > minimum
+          ? Number(attr.display?.max)
+          : defaultMaximum;
+        const progress = Math.max(0, Math.min(100, ((attr.value - minimum) / (maximum - minimum)) * 100));
+        meter.style.setProperty('--meter-progress', `${progress}%`);
+        meter.classList.toggle('is-low', variant === 'health' && progress <= (attr.display?.lowThreshold ?? 20));
+        const minimumLabel = meter.querySelector<HTMLElement>('.attr-meter-min');
+        const maximumLabel = meter.querySelector<HTMLElement>('.attr-meter-max');
+        if (minimumLabel) minimumLabel.textContent = attr.display?.leftLabel?.trim() || formatMeterBoundary(minimum, attr);
+        if (maximumLabel) maximumLabel.textContent = attr.display?.rightLabel?.trim() || formatMeterBoundary(maximum, attr);
+      }
       const valueEl = block.querySelector('.attr-value') as HTMLElement | null;
       if (valueEl) {
         valueEl.style.fontSize = `${state.settings.fontSize}px`;
@@ -210,6 +249,27 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
       for (const attributeName of broadcastReturnTimers.keys()) clearBroadcastReturnTimer(attributeName);
     }, { once: true });
   }
+}
+
+function createAttributeMeter(attribute: Attribute, variant: ReturnType<typeof resolveAttributeDisplayVariant>): HTMLElement {
+  const meter = el('div', { class: `attr-meter attr-meter-${variant}` });
+  const track = el('div', { class: 'attr-meter-track' }, [
+    el('span', { class: 'attr-meter-fill' }),
+    ...(variant === 'tug' ? [el('span', { class: 'attr-meter-center' }), el('span', { class: 'attr-meter-marker' })] : []),
+  ]);
+  meter.append(
+    track,
+    el('div', { class: 'attr-meter-labels' }, [
+      el('span', { class: 'attr-meter-min', text: attribute.display?.leftLabel ?? '' }),
+      el('span', { class: 'attr-meter-max', text: attribute.display?.rightLabel ?? '' }),
+    ]),
+  );
+  return meter;
+}
+
+function formatMeterBoundary(value: number, attribute: Attribute): string {
+  if (attribute.format === 'suffix' && attribute.suffix) return `${value.toLocaleString('zh-CN')} ${attribute.suffix}`;
+  return value.toLocaleString('zh-CN');
 }
 
 function createDefaultBroadcast(attribute: Attribute): HTMLElement {

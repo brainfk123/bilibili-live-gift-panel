@@ -1,4 +1,4 @@
-import { AppState, Attribute, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson } from '../../types';
+import { AppState, Attribute, AttributeDisplay, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson } from '../../types';
 import { consumeConfigMigrationRequired, loadState, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { el, fieldControl, inputField, toast } from '../common';
@@ -41,6 +41,9 @@ import {
   quickGiftOperationUsesAmount,
   type QuickGiftOperation,
 } from './quick-gift-rules';
+import { createGameplayTemplateWizard } from './template-wizard';
+import type { GameplayTemplateBuildResult } from '../../gameplay-templates';
+import { DISPLAY_THEMES, getDisplayTheme } from '../../display-themes';
 
 interface SelectedGiftRule {
   gift: GiftInfo;
@@ -698,7 +701,14 @@ export function mountConfig(root: HTMLElement): void {
       sectionHeading('互动逻辑', '属性与礼物规则', '一个属性可以被多个礼物影响；连送 N 个会按单个礼物连续执行 N 次规则。'),
     );
     const addButton = el('button', { class: 'btn guide-attribute-add', type: 'button', text: '+ 添加属性' }) as HTMLButtonElement;
-    addButton.onclick = () => openAttributeEditor();
+    addButton.onclick = () => {
+      const lesson = activeTutorialLesson();
+      if (!guideDismissed && lesson === 'attribute') {
+        openAttributeEditor();
+        return;
+      }
+      openGameplayTemplateWizard();
+    };
     headingRow.append(addButton);
     section.append(headingRow);
 
@@ -712,6 +722,77 @@ export function mountConfig(root: HTMLElement): void {
       section.append(list);
     }
     content.append(section);
+  }
+
+  function openGameplayTemplateWizard(): void {
+    activeGuide?.dispose();
+    activeGuide = null;
+    root.querySelector('.template-wizard-overlay')?.remove();
+    const catalog = buildGiftPickerCatalog(state, roomGiftCatalog);
+    editorOpen = true;
+    const wizard = createGameplayTemplateWizard({
+      gifts: catalog.gifts,
+      existingAttributeNames: state.attributes.map((attribute) => attribute.name),
+      onBlank: () => openAttributeEditor(),
+      onClose: () => {
+        editorOpen = false;
+        renderGuide();
+      },
+      onCreate: async (result) => {
+        await createFromGameplayTemplate(result);
+      },
+    });
+    root.append(wizard.element);
+  }
+
+  async function createFromGameplayTemplate(result: GameplayTemplateBuildResult): Promise<void> {
+    for (const attribute of result.attributes) {
+      if (state.attributes.some((candidate) => candidate.name === attribute.name)) {
+        throw new Error(`已经存在名为“${attribute.name}”的属性`);
+      }
+    }
+    const attributesByName = new Map(result.attributes.map((attribute) => [attribute.name, attribute]));
+    const giftsById = new Map(result.usedGifts.map((gift) => [gift.id, gift]));
+    try {
+      for (const rule of result.rules) {
+        const attribute = attributesByName.get(rule.attributeName);
+        if (!attribute) throw new Error(`规则引用了不存在的属性“${rule.attributeName}”`);
+        await previewFormula(rule.formula, attribute.name, attribute.value, 'gift', giftsById.get(rule.giftId)?.price);
+      }
+      for (const timer of result.timerRules) {
+        const attribute = attributesByName.get(timer.attributeName);
+        if (!attribute) throw new Error(`定时器引用了不存在的属性“${timer.attributeName}”`);
+        if (timer.condition) await previewFormula(timer.condition, attribute.name, attribute.value, 'timer');
+        await previewFormula(timer.formula, attribute.name, attribute.value, 'timer');
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : '未知错误';
+      throw new Error(`模板规则校验失败：${reason}`);
+    }
+
+    const previous = {
+      attributes: state.attributes,
+      rules: state.rules,
+      timerRules: state.timerRules,
+      giftCatalog: state.giftCatalog,
+    };
+    state.attributes = [...state.attributes, ...result.attributes];
+    state.rules = [...state.rules, ...result.rules];
+    state.timerRules = [...state.timerRules, ...result.timerRules];
+    state.giftCatalog = [...state.giftCatalog];
+    for (const gift of result.usedGifts) upsertGiftCatalog(state, gift);
+    try {
+      await saveAndWait();
+    } catch (error) {
+      state.attributes = previous.attributes;
+      state.rules = previous.rules;
+      state.timerRules = previous.timerRules;
+      state.giftCatalog = previous.giftCatalog;
+      throw error;
+    }
+    editorOpen = false;
+    render();
+    toast(`已创建“${result.attributes.map((attribute) => attribute.name).join('、')}”玩法`, root);
   }
 
   function renderAttributeCard(attribute: Attribute, index: number): HTMLElement {
@@ -1107,6 +1188,13 @@ export function mountConfig(root: HTMLElement): void {
     const formatSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
     formatSelect.innerHTML = '<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字 + 后缀</option>';
     formatSelect.value = original?.format ?? 'hhmmss';
+    const displayConfig: AttributeDisplay = original?.display
+      ? { ...original.display }
+      : {
+        variant: formatSelect.value === 'hhmmss' ? 'timer' : 'number',
+        themeId: state.settings.defaultDisplayThemeId,
+        title: original?.name ?? '',
+      };
     const suffixInput = inputField('数值后缀', original?.suffix ?? '');
     suffixInput.placeholder = '例如 次、分、点';
     const suffixControl = fieldControl(suffixInput);
@@ -1119,6 +1207,9 @@ export function mountConfig(root: HTMLElement): void {
       suffixControl.hidden = formatSelect.value !== 'suffix';
     };
     formatSelect.onchange = () => {
+      if (displayConfig.variant === 'number' || displayConfig.variant === 'timer') {
+        displayConfig.variant = formatSelect.value === 'hhmmss' ? 'timer' : 'number';
+      }
       updateSuffixVisibility();
       updateOverviewPreview();
     };
@@ -2046,6 +2137,12 @@ export function mountConfig(root: HTMLElement): void {
         ]),
     ]);
     outputLessonCard.dataset.tutorialLesson = 'save';
+    const attributeThemeControl = createDisplayThemeControl(
+      displayConfig.themeId ?? state.settings.defaultDisplayThemeId,
+      (themeId) => { displayConfig.themeId = themeId; },
+      '这个属性的 OBS 皮肤',
+      '只影响当前属性；模板已经为玩法选择了推荐皮肤。',
+    );
     const outputPanel = el('section', { class: 'attribute-output-panel' }, [
       outputLessonCard,
       el('div', { class: 'runtime-role-grid' }, [
@@ -2064,6 +2161,7 @@ export function mountConfig(root: HTMLElement): void {
           }),
         ]),
       ]),
+      attributeThemeControl,
       el('p', { class: 'modal-tip', text: '默认播报会在没有礼物消息时滚动显示；收到礼物后会临时切换为本次送礼信息。' }),
     ]);
 
@@ -2071,7 +2169,7 @@ export function mountConfig(root: HTMLElement): void {
     cancelButton.onclick = close;
     const saveButton = el('button', { class: 'btn guide-attribute-save', type: 'button', text: original ? '保存修改' : '创建属性' }) as HTMLButtonElement;
     saveButton.onclick = () => {
-      void saveAttributeEditor(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, selected, timerRules, overlay, saveButton);
+      void saveAttributeEditor(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, overlay, saveButton);
     };
     modalFooter = el('footer', { class: 'modal-actions attribute-workbench-actions' }, [
       el('span', { class: 'attribute-save-note', text: '保存前会由后台统一校验规则' }),
@@ -2195,12 +2293,13 @@ export function mountConfig(root: HTMLElement): void {
     formatSelect: HTMLSelectElement,
     suffixInput: HTMLInputElement,
     broadcastMessageInput: HTMLInputElement,
+    displayConfig: AttributeDisplay,
     selected: Map<number, SelectedGiftRule>,
     timerRules: TimerRule[],
     overlay: HTMLElement,
     saveButton: HTMLButtonElement,
   ): Promise<void> {
-    return saveAttributeEditorAsync(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, selected, timerRules, overlay, saveButton);
+    return saveAttributeEditorAsync(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, overlay, saveButton);
   }
 
   async function saveAttributeEditorAsync(
@@ -2211,6 +2310,7 @@ export function mountConfig(root: HTMLElement): void {
     formatSelect: HTMLSelectElement,
     suffixInput: HTMLInputElement,
     broadcastMessageInput: HTMLInputElement,
+    displayConfig: AttributeDisplay,
     selected: Map<number, SelectedGiftRule>,
     timerRules: TimerRule[],
     overlay: HTMLElement,
@@ -2302,7 +2402,14 @@ export function mountConfig(root: HTMLElement): void {
       decimals: original?.decimals ?? 0,
       suffix: format === 'suffix' ? suffixInput.value : '',
       broadcastMessage: broadcastMessageInput.value.trim(),
+      display: {
+        ...displayConfig,
+        themeId: displayConfig.themeId ?? state.settings.defaultDisplayThemeId,
+        title: !displayConfig.title || displayConfig.title === originalName ? name : displayConfig.title,
+      },
       ...(original?.color ? { color: original.color } : {}),
+      ...(original?.createdFromTemplateId ? { createdFromTemplateId: original.createdFromTemplateId } : {}),
+      ...(original?.createdFromTemplateVersion !== undefined ? { createdFromTemplateVersion: original.createdFromTemplateVersion } : {}),
     };
     if (index === undefined) state.attributes.push(nextAttribute);
     else state.attributes[index] = nextAttribute;
@@ -2359,6 +2466,56 @@ export function mountConfig(root: HTMLElement): void {
     toast(index === undefined ? '属性已创建' : '属性配置已保存', root);
   }
 
+  function createDisplayThemeControl(
+    initialThemeId: DisplayThemeId,
+    onSelect: (themeId: DisplayThemeId) => void,
+    label: string,
+    description: string,
+  ): HTMLElement {
+    let selectedThemeId = initialThemeId;
+    const selectedName = el('span', { class: 'display-theme-current', text: getDisplayTheme(selectedThemeId).name });
+    const grid = el('div', { class: 'display-theme-grid' });
+    const buttons = new Map<DisplayThemeId, HTMLButtonElement>();
+    const refresh = (): void => {
+      selectedName.textContent = getDisplayTheme(selectedThemeId).name;
+      for (const [themeId, button] of buttons) {
+        const active = themeId === selectedThemeId;
+        button.classList.toggle('is-selected', active);
+        button.setAttribute('aria-pressed', String(active));
+        const check = button.querySelector('.display-theme-check');
+        if (check) check.textContent = active ? '✓' : '';
+      }
+    };
+    for (const theme of DISPLAY_THEMES) {
+      const button = el('button', {
+        class: `display-theme-option ${theme.previewClass}`,
+        type: 'button',
+        ariaPressed: String(theme.id === selectedThemeId),
+      } as any) as HTMLButtonElement;
+      const swatch = el('span', { class: 'display-theme-swatch' }, [el('span'), el('span')]);
+      swatch.style.setProperty('--swatch-accent', theme.accent);
+      swatch.style.setProperty('--swatch-bg', theme.surface);
+      button.append(
+        swatch,
+        el('span', {}, [el('strong', { text: theme.name }), el('small', { text: theme.recommendedFor })]),
+        el('span', { class: 'display-theme-check' }),
+      );
+      button.onclick = () => {
+        selectedThemeId = theme.id;
+        onSelect(theme.id);
+        refresh();
+      };
+      buttons.set(theme.id, button);
+      grid.append(button);
+    }
+    refresh();
+    return el('fieldset', { class: 'field setting-control display-theme-setting' }, [
+      el('legend', { class: 'field-label' }, [el('span', { text: label }), selectedName]),
+      el('p', { class: 'display-theme-description', text: description }),
+      grid,
+    ]);
+  }
+
   function renderAdvancedSettings(): void {
     const details = el('details', { class: 'advanced-settings' });
     details.append(el('summary', {}, [
@@ -2369,6 +2526,16 @@ export function mountConfig(root: HTMLElement): void {
 
     const appearance = el('section', { class: 'workspace-card advanced-card' });
     appearance.append(el('h3', { text: 'OBS 面板外观' }));
+
+    const defaultThemeControl = createDisplayThemeControl(
+      state.settings.defaultDisplayThemeId,
+      (themeId) => {
+        state.settings.defaultDisplayThemeId = themeId;
+        save();
+      },
+      '新属性默认皮肤',
+      '未单独指定皮肤的属性会使用这里的选择。',
+    );
 
     const rangeSetting = (
       label: string,
@@ -2473,6 +2640,7 @@ export function mountConfig(root: HTMLElement): void {
       ]),
     ]);
     appearance.append(
+      defaultThemeControl,
       fontSize,
       accentControl,
       alignControl,

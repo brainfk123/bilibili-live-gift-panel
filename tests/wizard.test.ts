@@ -342,6 +342,50 @@ describe('wizard progress', () => {
   });
 });
 
+describe('gameplay template wizard integration', () => {
+  it('opens the template library for a normal add-attribute action', async () => {
+    const configured = defaultState();
+    configured.settings.showTutorial = false;
+    await saveState(configured);
+    const root = new TestElement('div');
+
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '+ 添加属性')?.onclick?.();
+
+    expect(root.querySelector('.template-wizard-overlay')).not.toBeNull();
+    expect(root.querySelectorAll('.gameplay-template-card')).toHaveLength(7);
+    expect(textOf(root.querySelector('.template-wizard') as TestElement)).toContain('创建空白属性（高级）');
+  });
+
+  it('validates and saves a complete overtime template as one configuration', async () => {
+    const configured = defaultState();
+    configured.settings.showTutorial = false;
+    await saveState(configured);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '+ 添加属性')?.onclick?.();
+
+    const overtime = root.querySelectorAll('.gameplay-template-card')
+      .find((card) => textOf(card).includes('加班机'));
+    overtime?.onclick?.();
+    findByText(root, '下一步')?.onclick?.();
+    expect(textOf(root.querySelector('.template-wizard') as TestElement)).toContain('每 1 元增加');
+    findByText(root, '下一步')?.onclick?.();
+    expect(root.querySelector('.template-gift-choice')).not.toBeNull();
+    root.querySelector('.template-gift-choice')?.onclick?.();
+    expect(root.querySelector('.template-gift-choice')?.className).toContain('is-selected');
+    findByText(root, '下一步')?.onclick?.();
+    expect(textOf(root.querySelector('.template-wizard') as TestElement)).toContain('将创建“加班时间”');
+    root.querySelector('.template-wizard-actions')?.querySelectorAll('button').at(-1)?.onclick?.();
+
+    await vi.waitFor(() => expect(loadState().attributes).toHaveLength(1));
+    expect(loadState().attributes[0].createdFromTemplateId).toBe('overtime');
+    expect(loadState().rules).toHaveLength(1);
+    expect(loadState().timerRules).toHaveLength(1);
+    expect(root.querySelector('.template-wizard-overlay')).toBeNull();
+  });
+});
+
 describe.skip('legacy configuration wizard rendering', () => {
   it('defaults to list view and switches to grid without losing search', () => {
     const root = new TestElement('div');
@@ -1895,6 +1939,27 @@ describe('OBS attribute display', () => {
     expect(root.querySelector('.attr')?.querySelector('.broadcast-ticker')).not.toBeNull();
     expect(root.querySelector('.display-broadcast-area')).toBeNull();
     expect(textOf(root)).not.toContain('加班时间');
+    vi.useRealTimers();
+  });
+
+  it('renders the selected theme and gameplay meter for a progress attribute', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state(),
+      settings: { ...defaultState().settings, defaultDisplayThemeId: 'glass' },
+      attributes: [{
+        name: '应援目标', value: 42, unit: 'none', format: 'suffix', decimals: 0, suffix: '%',
+        display: { variant: 'progress', themeId: 'neon', title: '本场应援', min: 0, max: 100 },
+      }],
+      rules: [],
+    }));
+    vi.useFakeTimers();
+    const root = new TestElement('div');
+    mountDisplay(root as unknown as HTMLElement, '应援目标');
+
+    expect(root.querySelector('.panel')?.dataset.theme).toBe('neon');
+    expect(root.querySelector('.attr')?.dataset.variant).toBe('progress');
+    expect(root.querySelector('.attr-meter-progress')).not.toBeNull();
+    expect(textOf(root)).toContain('本场应援');
     vi.useRealTimers();
   });
 
