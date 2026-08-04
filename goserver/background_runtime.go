@@ -343,6 +343,7 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 	repetitions := maxInt(1, gift.Num)
 	changes := []logEntry{}
 	changeIndexes := map[string]int{}
+	appliedRuleTriggers := 0
 	for occurrence := 0; occurrence < repetitions; occurrence++ {
 		for _, rule := range state.Rules {
 			if !rule.enabled() {
@@ -382,6 +383,7 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 			before := attribute.Value
 			attribute.Value = nextValue
 			stats.RuleTriggers[rule.ID] = triggerCount + 1
+			appliedRuleTriggers++
 			delta := nextValue - before
 			if index, exists := changeIndexes[attribute.Name]; exists {
 				changes[index].Delta += delta
@@ -423,6 +425,10 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 		resetActivityGiftTimeouts(state, changedAttributeNames, milestoneTime)
 		evaluateActivityMilestones(state, milestoneTime)
 	}
+	recordGiftContribution(state, gift, giftContributionOutcome{
+		RuleTriggers: appliedRuleTriggers,
+		Changes:      changes,
+	})
 	state.Stats[stats.Date] = stats
 }
 

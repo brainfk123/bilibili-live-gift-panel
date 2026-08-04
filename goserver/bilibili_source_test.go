@@ -65,8 +65,10 @@ func TestParseBiliGiftExtractsBlindBoxParent(t *testing.T) {
 		"cmd": "SEND_GIFT",
 		"data": map[string]any{
 			"giftId": 35801, "giftName": "心事虫虫", "num": 1, "price": 9000,
-			"blind_gift": map[string]any{"blind_gift_id": 35800},
-			"uid":        1, "timestamp": 1700000000, "rnd": "blind-rnd",
+			"blind_gift": map[string]any{
+				"blind_gift_id": 35800, "gift_name": "小熊虫盲盒", "original_gift_price": 6000,
+			},
+			"uid": 1, "timestamp": 1700000000, "rnd": "blind-rnd",
 		},
 	})
 
@@ -74,7 +76,7 @@ func TestParseBiliGiftExtractsBlindBoxParent(t *testing.T) {
 	if !ok {
 		t.Fatal("blind SEND_GIFT was not parsed")
 	}
-	if gift.GiftID != 35801 || gift.BlindGiftID != 35800 {
+	if gift.GiftID != 35801 || gift.BlindGiftID != 35800 || gift.BlindGiftName != "小熊虫盲盒" || gift.BlindGiftPrice != 6000 {
 		t.Fatalf("blind gift identity = %#v", gift)
 	}
 }

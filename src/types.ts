@@ -196,6 +196,29 @@ export interface LogEntry {
   eventId?: string;
 }
 
+export interface ViewerContribution {
+  key: string;
+  uid?: number;
+  uname: string;
+  avatar?: string;
+  giftCount: number;
+  goldValue: number;
+  silverValue: number;
+  ruleTriggers: number;
+  attributeDeltas: Record<string, number>;
+  blindBoxCount: number;
+  blindBoxCost: number;
+  blindBoxValue: number;
+  blindBoxProfit: number;
+  unpricedBlindBoxCount?: number;
+  lastGiftAt: number;
+}
+
+export interface ContributionLedger {
+  viewers: ViewerContribution[];
+  updatedAt?: number;
+}
+
 export interface Settings {
   fontSize: number;
   accentColor: string;
@@ -225,6 +248,7 @@ export interface AppState {
   recentGifts: RecentGift[];
   stats: Record<string, DayStats>;
   log: LogEntry[];
+  contributions: ContributionLedger;
 }
 
 export const MAX_LOG = 200;

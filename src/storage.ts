@@ -35,6 +35,7 @@ export const defaultState = (): AppState => ({
   recentGifts: [],
   stats: {},
   log: [],
+  contributions: { viewers: [] },
 });
 
 export function loadState(): AppState {
@@ -147,7 +148,59 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     rules: parsed.rules ?? base.rules,
     timerRules: parsed.timerRules ?? base.timerRules,
     formulaPresets: parsed.formulaPresets ?? base.formulaPresets,
+    contributions: normalizeContributionLedger(parsed.contributions),
   };
+}
+
+function normalizeContributionLedger(ledger: Partial<AppState['contributions']> | undefined): AppState['contributions'] {
+  const seen = new Set<string>();
+  const viewers: AppState['contributions']['viewers'] = [];
+  for (const raw of Array.isArray(ledger?.viewers) ? ledger.viewers : []) {
+    const uid = Number(raw.uid);
+    const uname = String(raw.uname ?? '').trim().slice(0, 80) || '匿名观众';
+    const key = String(raw.key ?? '').trim() || (Number.isFinite(uid) && uid > 0
+      ? `uid:${Math.trunc(uid)}`
+      : `name:${uname.toLocaleLowerCase()}`);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const attributeDeltas = Object.fromEntries(Object.entries(raw.attributeDeltas ?? {})
+      .map(([name, value]) => [String(name).trim().slice(0, 80), Number(value)] as const)
+      .filter(([name, value]) => Boolean(name) && Number.isFinite(value)));
+    const blindBoxCost = nonNegativeNumber(raw.blindBoxCost);
+    const blindBoxValue = nonNegativeNumber(raw.blindBoxValue);
+    viewers.push({
+      key,
+      ...(Number.isFinite(uid) && uid > 0 ? { uid: Math.trunc(uid) } : {}),
+      uname,
+      ...(String(raw.avatar ?? '').trim() ? { avatar: String(raw.avatar).trim().slice(0, 2048) } : {}),
+      giftCount: nonNegativeInteger(raw.giftCount),
+      goldValue: nonNegativeNumber(raw.goldValue),
+      silverValue: nonNegativeNumber(raw.silverValue),
+      ruleTriggers: nonNegativeInteger(raw.ruleTriggers),
+      attributeDeltas,
+      blindBoxCount: nonNegativeInteger(raw.blindBoxCount),
+      blindBoxCost,
+      blindBoxValue,
+      blindBoxProfit: blindBoxValue - blindBoxCost,
+      ...(nonNegativeInteger(raw.unpricedBlindBoxCount) > 0
+        ? { unpricedBlindBoxCount: nonNegativeInteger(raw.unpricedBlindBoxCount) }
+        : {}),
+      lastGiftAt: nonNegativeNumber(raw.lastGiftAt),
+    });
+    if (viewers.length >= 2000) break;
+  }
+  viewers.sort((left, right) => right.lastGiftAt - left.lastGiftAt);
+  const updatedAt = nonNegativeNumber(ledger?.updatedAt);
+  return { viewers, ...(updatedAt > 0 ? { updatedAt } : {}) };
+}
+
+function nonNegativeNumber(value: unknown): number {
+  const normalized = Number(value);
+  return Number.isFinite(normalized) ? Math.max(0, normalized) : 0;
+}
+
+function nonNegativeInteger(value: unknown): number {
+  return Math.trunc(nonNegativeNumber(value));
 }
 
 function normalizeValueMappings(mappings: Array<Partial<AttributeValueMapping>> | undefined): AttributeValueMapping[] {

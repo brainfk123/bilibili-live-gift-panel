@@ -1,4 +1,4 @@
-import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson } from '../../types';
+import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
 import { consumeConfigMigrationRequired, loadState, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { el, fieldControl, inputField, toast } from '../common';
@@ -7,6 +7,7 @@ import { formatValue } from '../../format';
 import {
   BiliAuthStatus,
   checkForUpdates,
+  clearContributionLedger,
   getBlindBoxInfo,
   getBiliAuthStatus,
   getRoomGiftCatalog,
@@ -63,6 +64,7 @@ interface SelectedGiftRule {
 }
 
 type GiftAvailability = 'listed' | 'observed' | 'historical';
+type LeaderboardMode = 'contribution' | 'rules' | 'blind-box';
 
 interface GiftPickerCatalog {
   gifts: GiftInfo[];
@@ -102,6 +104,7 @@ export function mountConfig(root: HTMLElement): void {
   let loginModalOpen = false;
   let loginPollTimer: ReturnType<typeof globalThis.setInterval> | undefined;
   let localStateVersion = 0;
+  let leaderboardMode: LeaderboardMode = 'contribution';
 
   const shell = el('div', { class: 'wizard-shell config-shell' });
   const header = el('header', { class: 'app-header' });
@@ -478,6 +481,7 @@ export function mountConfig(root: HTMLElement): void {
     renderAttributesWorkspace();
     renderActivities();
     renderDisplayScenes();
+    renderContributionLeaderboard();
     renderGiftHistory();
     renderAdvancedSettings();
     renderGuide();
@@ -1265,6 +1269,209 @@ export function mountConfig(root: HTMLElement): void {
     );
     overlay.append(dialog);
     root.append(overlay);
+  }
+
+  function renderContributionLeaderboard(): void {
+    const viewers = state.contributions.viewers;
+    const section = el('section', { class: 'contribution-section' });
+    const clearButton = el('button', {
+      class: 'btn ghost contribution-clear',
+      type: 'button',
+      text: '清空排行榜',
+    }) as HTMLButtonElement;
+    clearButton.disabled = viewers.length === 0;
+    clearButton.onclick = () => {
+      if (!confirm('清空全部观众贡献和盲盒盈亏统计？送礼生效记录与属性值不会受影响。')) return;
+      clearButton.disabled = true;
+      void clearContributionLedger().then((contributions) => {
+        state.contributions = contributions;
+        render();
+        toast('观众排行榜已清空', root);
+      }).catch((error) => {
+        clearButton.disabled = false;
+        toast(error instanceof Error ? error.message : '排行榜清空失败', root);
+      });
+    };
+    const heading = el('div', { class: 'contribution-heading' }, [
+      sectionHeading(
+        '观众数据',
+        '贡献与盲盒排行榜',
+        '后台统计收到的全部礼物；规则命中只计算真正生效的规则。数据从上次清空开始累计，关闭页面不会中断。',
+      ),
+      el('div', { class: 'contribution-heading-actions' }, [
+        el('span', { class: 'contribution-viewer-count', text: `${viewers.length} 位观众` }),
+        clearButton,
+      ]),
+    ]);
+    section.append(heading);
+
+    const totals = viewers.reduce((summary, viewer) => ({
+      giftCount: summary.giftCount + viewer.giftCount,
+      goldValue: summary.goldValue + viewer.goldValue,
+      ruleTriggers: summary.ruleTriggers + viewer.ruleTriggers,
+      blindBoxCount: summary.blindBoxCount + viewer.blindBoxCount,
+      blindBoxProfit: summary.blindBoxProfit + viewer.blindBoxProfit,
+    }), { giftCount: 0, goldValue: 0, ruleTriggers: 0, blindBoxCount: 0, blindBoxProfit: 0 });
+    section.append(el('div', { class: 'contribution-summary' }, [
+      contributionSummaryItem('收到礼物', `${formatLedgerNumber(totals.giftCount)} 个`),
+      contributionSummaryItem('金瓜子贡献', formatLedgerNumber(totals.goldValue)),
+      contributionSummaryItem('规则命中', `${formatLedgerNumber(totals.ruleTriggers)} 次`),
+      contributionSummaryItem('盲盒净盈亏', formatSignedLedgerNumber(totals.blindBoxProfit), contributionTone(totals.blindBoxProfit)),
+    ]));
+
+    const modeTabs = el('div', { class: 'contribution-tabs', role: 'tablist', ariaLabel: '排行榜类型' } as any);
+    const listHost = el('div', { class: 'contribution-list-host' });
+    const modes: Array<{ id: LeaderboardMode; label: string }> = [
+      { id: 'contribution', label: '礼物贡献' },
+      { id: 'rules', label: '规则命中' },
+      { id: 'blind-box', label: '盲盒盈亏' },
+    ];
+    const renderRows = (): void => {
+      for (const button of Array.from(modeTabs.querySelectorAll<HTMLButtonElement>('.contribution-tab'))) {
+        const active = button.dataset.mode === leaderboardMode;
+        button.classList.toggle('is-active', active);
+        button.setAttribute('aria-selected', String(active));
+      }
+      const ranked = rankContributors(viewers, leaderboardMode);
+      if (ranked.length === 0) {
+        listHost.replaceChildren(el('div', {
+          class: 'contribution-empty',
+          text: leaderboardMode === 'blind-box'
+            ? '还没有收到盲盒礼物。收到后会按实际开出价值计算净盈亏。'
+            : leaderboardMode === 'rules'
+              ? '还没有观众命中过已启用的礼物规则。'
+              : '还没有收到礼物，排行榜会在后台自动累计。',
+        }));
+        return;
+      }
+      const list = el('div', { class: 'contribution-list' });
+      ranked.slice(0, 100).forEach((viewer, index) => list.append(renderContributionRow(viewer, index + 1, leaderboardMode)));
+      listHost.replaceChildren(list);
+    };
+    for (const mode of modes) {
+      const button = el('button', {
+        class: 'contribution-tab',
+        type: 'button',
+        text: mode.label,
+        role: 'tab',
+      } as any) as HTMLButtonElement;
+      button.dataset.mode = mode.id;
+      button.onclick = () => {
+        leaderboardMode = mode.id;
+        renderRows();
+      };
+      modeTabs.append(button);
+    }
+    section.append(modeTabs, listHost);
+    renderRows();
+    content.append(section);
+  }
+
+  function renderContributionRow(viewer: ViewerContribution, rank: number, mode: LeaderboardMode): HTMLElement {
+    const avatar = el('img', {
+      class: 'contribution-avatar',
+      alt: viewer.uname ? `${viewer.uname}的头像` : '用户头像',
+      referrerPolicy: 'no-referrer',
+    }) as HTMLImageElement;
+    avatar.src = viewer.avatar || transparentPixel();
+    const identity = viewer.uid ? `UID ${viewer.uid}` : '昵称由 B 站脱敏或未提供 UID';
+    const metric = contributionMetric(viewer, mode);
+    const details = el('div', { class: 'contribution-details' });
+    if (mode === 'contribution') {
+      details.append(
+        el('span', { text: `${formatLedgerNumber(viewer.giftCount)} 个礼物` }),
+        el('span', { text: `${formatLedgerNumber(viewer.goldValue)} 金瓜子` }),
+        ...(viewer.silverValue > 0 ? [el('span', { text: `${formatLedgerNumber(viewer.silverValue)} 银瓜子` })] : []),
+      );
+    } else if (mode === 'rules') {
+      const deltas = Object.entries(viewer.attributeDeltas)
+        .filter(([, delta]) => Math.abs(delta) > Number.EPSILON)
+        .slice(0, 4);
+      details.append(el('span', { text: `${formatLedgerNumber(viewer.ruleTriggers)} 次规则命中` }));
+      for (const [attributeName, delta] of deltas) {
+        const attribute = state.attributes.find((item) => item.name === attributeName);
+        details.append(el('span', {
+          class: `is-${contributionTone(delta)}`,
+          text: `${attributeName} ${formatHistoryDelta(delta, attribute)}`,
+          title: `${attributeName}净变化 ${formatHistoryDelta(delta, attribute)}`,
+        }));
+      }
+    } else {
+      details.append(
+        el('span', { text: `${formatLedgerNumber(viewer.blindBoxCount)} 个盲盒` }),
+        el('span', { text: `投入 ${formatLedgerNumber(viewer.blindBoxCost)}` }),
+        el('span', { text: `开出 ${formatLedgerNumber(viewer.blindBoxValue)}` }),
+        ...(viewer.unpricedBlindBoxCount
+          ? [el('span', { class: 'is-warning', text: `${viewer.unpricedBlindBoxCount} 个缺少成本价` })]
+          : []),
+      );
+    }
+    const lastGift = new Date(viewer.lastGiftAt < 1_000_000_000_000 ? viewer.lastGiftAt * 1000 : viewer.lastGiftAt);
+    return el('article', { class: 'contribution-row' }, [
+      el('strong', { class: `contribution-rank is-${Math.min(rank, 4)}`, text: String(rank) }),
+      avatar,
+      el('div', { class: 'contribution-person' }, [
+        el('strong', { text: viewer.uname || '匿名观众', title: viewer.uname || '匿名观众' }),
+        el('span', { text: identity, title: identity }),
+      ]),
+      details,
+      el('div', { class: `contribution-metric is-${metric.tone}` }, [
+        el('strong', { text: metric.value, title: metric.title }),
+        el('span', { text: metric.label }),
+      ]),
+      el('time', {
+        class: 'contribution-time',
+        dateTime: Number.isNaN(lastGift.getTime()) ? '' : lastGift.toISOString(),
+        text: Number.isNaN(lastGift.getTime()) ? '' : lastGift.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }),
+      }),
+    ]);
+  }
+
+  function contributionSummaryItem(label: string, value: string, tone = 'neutral'): HTMLElement {
+    return el('div', { class: `contribution-summary-item is-${tone}` }, [
+      el('span', { text: label }),
+      el('strong', { text: value, title: value }),
+    ]);
+  }
+
+  function rankContributors(viewers: ViewerContribution[], mode: LeaderboardMode): ViewerContribution[] {
+    const ranked = viewers.filter((viewer) => (
+      mode === 'rules' ? viewer.ruleTriggers > 0 : mode === 'blind-box' ? viewer.blindBoxCount > 0 : viewer.giftCount > 0
+    ));
+    return ranked.sort((left, right) => {
+      const metric = mode === 'rules'
+        ? right.ruleTriggers - left.ruleTriggers
+        : mode === 'blind-box'
+          ? right.blindBoxProfit - left.blindBoxProfit
+          : right.goldValue - left.goldValue;
+      return metric || right.giftCount - left.giftCount || right.lastGiftAt - left.lastGiftAt;
+    });
+  }
+
+  function contributionMetric(viewer: ViewerContribution, mode: LeaderboardMode): { value: string; label: string; title: string; tone: string } {
+    if (mode === 'rules') {
+      const value = formatLedgerNumber(viewer.ruleTriggers);
+      return { value, label: '次命中', title: `${value} 次规则命中`, tone: 'positive' };
+    }
+    if (mode === 'blind-box') {
+      const value = formatSignedLedgerNumber(viewer.blindBoxProfit);
+      return { value, label: '净盈亏', title: `盲盒净盈亏 ${value} 金瓜子`, tone: contributionTone(viewer.blindBoxProfit) };
+    }
+    const value = formatLedgerNumber(viewer.goldValue);
+    return { value, label: '金瓜子', title: `${value} 金瓜子贡献`, tone: 'positive' };
+  }
+
+  function formatLedgerNumber(value: number): string {
+    return Number(value || 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+  }
+
+  function formatSignedLedgerNumber(value: number): string {
+    const normalized = Number(value || 0);
+    return `${normalized > 0 ? '+' : normalized < 0 ? '-' : ''}${formatLedgerNumber(Math.abs(normalized))}`;
+  }
+
+  function contributionTone(value: number): 'positive' | 'negative' | 'neutral' {
+    return value > 0 ? 'positive' : value < 0 ? 'negative' : 'neutral';
   }
 
   function renderGiftHistory(): void {
@@ -3362,6 +3569,7 @@ function configStructureSignature(state: AppState): string {
     settings: state.settings,
     giftCatalog: state.giftCatalog,
     log: state.log,
+    contributions: state.contributions,
   });
 }
 

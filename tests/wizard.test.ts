@@ -1747,6 +1747,41 @@ describe('single-page configuration rendering', () => {
     expect(list.querySelector('.gift-history-loader')?.textContent).toContain('80 / 85');
   });
 
+  it('renders backend-owned contribution, rule-hit, and blind-box rankings', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state('88888888', 1),
+      contributions: {
+        updatedAt: 200,
+        viewers: [
+          {
+            key: 'uid:1', uid: 1, uname: '盈利观众', giftCount: 5, goldValue: 20000, silverValue: 0,
+            ruleTriggers: 3, attributeDeltas: { 加班时间: 180 }, blindBoxCount: 2,
+            blindBoxCost: 18000, blindBoxValue: 24000, blindBoxProfit: 6000, lastGiftAt: 200,
+          },
+          {
+            key: 'name:反***', uname: '反***', giftCount: 2, goldValue: 10000, silverValue: 0,
+            ruleTriggers: 0, attributeDeltas: {}, blindBoxCount: 1,
+            blindBoxCost: 9000, blindBoxValue: 4000, blindBoxProfit: -5000, lastGiftAt: 100,
+          },
+        ],
+      },
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    expect(root.querySelectorAll('.contribution-row')).toHaveLength(2);
+    expect(textOf(root.querySelector('.contribution-section') as TestElement)).toContain('20,000');
+    const tabs = root.querySelectorAll('.contribution-tab');
+    expect(tabs).toHaveLength(3);
+    tabs[1].onclick?.();
+    expect(root.querySelectorAll('.contribution-row')).toHaveLength(1);
+    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('3 次规则命中');
+    tabs[2].onclick?.();
+    const blindText = textOf(root.querySelector('.contribution-list-host') as TestElement);
+    expect(blindText).toContain('+6,000');
+    expect(blindText).toContain('-5,000');
+  });
+
   it('preserves disabled rules when an attribute is edited and saved', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state('88888888', 1),

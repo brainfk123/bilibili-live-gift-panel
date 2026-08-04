@@ -225,20 +225,26 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 		return giftEvent{}, false
 	}
 	var data struct {
-		GiftID      int             `json:"giftId"`
-		BlindGiftID biliUID         `json:"blind_gift_id"`
-		GiftName    string          `json:"giftName"`
-		Num         int             `json:"num"`
-		Price       float64         `json:"price"`
-		CoinType    string          `json:"coin_type"`
-		TotalCoin   float64         `json:"total_coin"`
-		Uname       string          `json:"uname"`
-		Face        string          `json:"face"`
-		UID         biliUID         `json:"uid"`
-		Timestamp   int64           `json:"timestamp"`
-		Rnd         json.RawMessage `json:"rnd"`
-		BlindGift   struct {
-			GiftID biliUID `json:"blind_gift_id"`
+		GiftID            int             `json:"giftId"`
+		BlindGiftID       biliUID         `json:"blind_gift_id"`
+		BlindGiftName     string          `json:"blind_gift_name"`
+		BlindGiftPrice    float64         `json:"blind_gift_price"`
+		OriginalGiftPrice float64         `json:"original_gift_price"`
+		GiftName          string          `json:"giftName"`
+		Num               int             `json:"num"`
+		Price             float64         `json:"price"`
+		CoinType          string          `json:"coin_type"`
+		TotalCoin         float64         `json:"total_coin"`
+		Uname             string          `json:"uname"`
+		Face              string          `json:"face"`
+		UID               biliUID         `json:"uid"`
+		Timestamp         int64           `json:"timestamp"`
+		Rnd               json.RawMessage `json:"rnd"`
+		BlindGift         struct {
+			GiftID            biliUID `json:"blind_gift_id"`
+			GiftName          string  `json:"gift_name"`
+			GiftPrice         float64 `json:"gift_price"`
+			OriginalGiftPrice float64 `json:"original_gift_price"`
 		} `json:"blind_gift"`
 		GiftInfo struct {
 			ImgBasic string `json:"img_basic"`
@@ -261,6 +267,16 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 	if data.BlindGiftID <= 0 {
 		data.BlindGiftID = data.BlindGift.GiftID
 	}
+	blindGiftName := strings.TrimSpace(data.BlindGiftName)
+	if blindGiftName == "" {
+		blindGiftName = strings.TrimSpace(data.BlindGift.GiftName)
+	}
+	blindGiftPrice := firstPositiveFloat(
+		data.BlindGiftPrice,
+		data.OriginalGiftPrice,
+		data.BlindGift.OriginalGiftPrice,
+		data.BlindGift.GiftPrice,
+	)
 	uid := int64(data.UID)
 	if uid <= 0 {
 		uid = int64(data.SenderUinfo.UID)
@@ -286,8 +302,18 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 		data.Num = 1
 	}
 	return giftEvent{
-		GiftID: data.GiftID, BlindGiftID: int(data.BlindGiftID), GiftName: data.GiftName, Num: data.Num, Price: data.Price,
+		GiftID: data.GiftID, BlindGiftID: int(data.BlindGiftID), BlindGiftName: blindGiftName, BlindGiftPrice: blindGiftPrice,
+		GiftName: data.GiftName, Num: data.Num, Price: data.Price,
 		CoinType: data.CoinType, TotalCoin: data.TotalCoin, Uname: uname, Avatar: avatar, UID: uid,
 		Timestamp: data.Timestamp, ImgBasic: data.GiftInfo.ImgBasic, Rnd: rnd,
 	}, true
+}
+
+func firstPositiveFloat(values ...float64) float64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }

@@ -211,6 +211,7 @@ func main() {
 
 	mux.HandleFunc("/api/room_info", handleRoomInfo)
 	mux.HandleFunc("/api/config", store.handle)
+	mux.HandleFunc("/api/contributions", handleContributionLedger(store))
 	mux.HandleFunc("/api/formula/preview", handleFormulaPreview(store))
 	mux.HandleFunc("/api/activities/transition", handleActivityTransition(store))
 	mux.HandleFunc("/api/blind-box", handleBlindBoxInfo(login))

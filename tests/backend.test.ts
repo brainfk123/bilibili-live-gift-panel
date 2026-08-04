@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   checkForUpdates,
+  clearContributionLedger,
   getBlindBoxInfo,
   getBiliAuthStatus,
   getRoomGiftCatalog,
@@ -11,6 +12,19 @@ import {
   startPagePresence,
   transitionActivity,
 } from '../src/backend';
+
+describe('contribution ledger API', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('clears the backend-owned ranking data', async () => {
+    const contributions = { viewers: [], updatedAt: 123 };
+    const fetchMock = vi.fn(async () => Response.json({ code: 0, contributions }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(clearContributionLedger()).resolves.toEqual(contributions);
+    expect(fetchMock).toHaveBeenCalledWith('/api/contributions', { method: 'DELETE', cache: 'no-store' });
+  });
+});
 
 describe('activity transition API', () => {
   afterEach(() => vi.unstubAllGlobals());

@@ -207,6 +207,29 @@ type logEntry struct {
 	EventID       string  `json:"eventId,omitempty"`
 }
 
+type viewerContribution struct {
+	Key                   string             `json:"key"`
+	UID                   int64              `json:"uid,omitempty"`
+	Uname                 string             `json:"uname"`
+	Avatar                string             `json:"avatar,omitempty"`
+	GiftCount             int                `json:"giftCount"`
+	GoldValue             float64            `json:"goldValue"`
+	SilverValue           float64            `json:"silverValue"`
+	RuleTriggers          int                `json:"ruleTriggers"`
+	AttributeDeltas       map[string]float64 `json:"attributeDeltas"`
+	BlindBoxCount         int                `json:"blindBoxCount"`
+	BlindBoxCost          float64            `json:"blindBoxCost"`
+	BlindBoxValue         float64            `json:"blindBoxValue"`
+	BlindBoxProfit        float64            `json:"blindBoxProfit"`
+	UnpricedBlindBoxCount int                `json:"unpricedBlindBoxCount,omitempty"`
+	LastGiftAt            int64              `json:"lastGiftAt"`
+}
+
+type contributionLedgerState struct {
+	Viewers   []viewerContribution `json:"viewers"`
+	UpdatedAt int64                `json:"updatedAt,omitempty"`
+}
+
 type settingsState struct {
 	FontSize                 int      `json:"fontSize"`
 	AccentColor              string   `json:"accentColor"`
@@ -224,34 +247,37 @@ type settingsState struct {
 }
 
 type appState struct {
-	RoomID         string                 `json:"roomId"`
-	Attributes     []attributeState       `json:"attributes"`
-	DisplayScenes  []displaySceneState    `json:"displayScenes"`
-	Activities     []activitySessionState `json:"activities"`
-	Rules          []giftRule             `json:"rules"`
-	TimerRules     []timerRule            `json:"timerRules"`
-	FormulaPresets []formulaPreset        `json:"formulaPresets"`
-	Settings       settingsState          `json:"settings"`
-	GiftCatalog    []giftInfo             `json:"giftCatalog"`
-	RecentGifts    []recentGift           `json:"recentGifts"`
-	Stats          map[string]dayStats    `json:"stats"`
-	Log            []logEntry             `json:"log"`
+	RoomID         string                  `json:"roomId"`
+	Attributes     []attributeState        `json:"attributes"`
+	DisplayScenes  []displaySceneState     `json:"displayScenes"`
+	Activities     []activitySessionState  `json:"activities"`
+	Rules          []giftRule              `json:"rules"`
+	TimerRules     []timerRule             `json:"timerRules"`
+	FormulaPresets []formulaPreset         `json:"formulaPresets"`
+	Settings       settingsState           `json:"settings"`
+	GiftCatalog    []giftInfo              `json:"giftCatalog"`
+	RecentGifts    []recentGift            `json:"recentGifts"`
+	Stats          map[string]dayStats     `json:"stats"`
+	Log            []logEntry              `json:"log"`
+	Contributions  contributionLedgerState `json:"contributions"`
 }
 
 type giftEvent struct {
-	GiftID      int
-	BlindGiftID int
-	GiftName    string
-	Num         int
-	Price       float64
-	CoinType    string
-	TotalCoin   float64
-	Uname       string
-	Avatar      string
-	UID         int64
-	Timestamp   int64
-	ImgBasic    string
-	Rnd         string
+	GiftID         int
+	BlindGiftID    int
+	BlindGiftName  string
+	BlindGiftPrice float64
+	GiftName       string
+	Num            int
+	Price          float64
+	CoinType       string
+	TotalCoin      float64
+	Uname          string
+	Avatar         string
+	UID            int64
+	Timestamp      int64
+	ImgBasic       string
+	Rnd            string
 }
 
 func defaultAppState() appState {
@@ -268,6 +294,7 @@ func defaultAppState() appState {
 		RecentGifts:    []recentGift{},
 		Stats:          map[string]dayStats{},
 		Log:            []logEntry{},
+		Contributions:  contributionLedgerState{Viewers: []viewerContribution{}},
 		Settings: settingsState{
 			FontSize:                 48,
 			AccentColor:              "#fb7299",
@@ -317,6 +344,7 @@ func normalizeAppState(state *appState) {
 	if state.Log == nil {
 		state.Log = []logEntry{}
 	}
+	normalizeContributionLedger(&state.Contributions)
 	for index := range state.Rules {
 		state.Rules[index].MatchGiftIDs = normalizeGiftIDs(state.Rules[index].MatchGiftIDs)
 	}

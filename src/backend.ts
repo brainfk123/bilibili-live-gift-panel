@@ -1,4 +1,4 @@
-import type { ActivitySession, GiftInfo } from './types';
+import type { ActivitySession, ContributionLedger, GiftInfo } from './types';
 import type { ActivityTransitionAction } from './activities';
 
 export type RuntimeConnectionState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
@@ -102,6 +102,12 @@ interface ActivityTransitionResponse {
   code: number;
   activity?: ActivitySession;
   attributeValues?: Record<string, number>;
+  message?: string;
+}
+
+interface ContributionResponse {
+  code: number;
+  contributions?: ContributionLedger;
   message?: string;
 }
 
@@ -223,4 +229,13 @@ export async function transitionActivity(activityId: string, action: ActivityTra
     throw new Error(payload.message || `活动操作失败：HTTP ${response.status}`);
   }
   return { activity: payload.activity, attributeValues: payload.attributeValues ?? {} };
+}
+
+export async function clearContributionLedger(): Promise<ContributionLedger> {
+  const response = await fetch('/api/contributions', { method: 'DELETE', cache: 'no-store' });
+  const payload = await response.json() as ContributionResponse;
+  if (!response.ok || payload.code !== 0 || !payload.contributions) {
+    throw new Error(payload.message || `排行榜清空失败：HTTP ${response.status}`);
+  }
+  return payload.contributions;
 }

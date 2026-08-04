@@ -64,7 +64,6 @@ func (s *configStore) handleGet(w http.ResponseWriter) {
 }
 
 func (s *configStore) handlePut(w http.ResponseWriter, r *http.Request) {
-	previous, previousErr := s.readState()
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxConfigBytes))
 	if err != nil {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"code": -1, "message": "配置文件过大"})
@@ -82,11 +81,14 @@ func (s *configStore) handlePut(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})
 		return
 	}
-	err = s.replaceState(state)
+	replaced, err := s.replaceClientState(state)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": err.Error()})
 		return
 	}
+	previous := replaced.Previous
+	previousErr := replaced.PreviousErr
+	state = replaced.State
 	roomChanged := previousErr != nil || strings.TrimSpace(previous.RoomID) != strings.TrimSpace(state.RoomID)
 	if roomChanged {
 		s.notifyChanged()
@@ -425,6 +427,31 @@ func (s *configStore) replaceState(state appState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return writeFileAtomically(s.path, data)
+}
+
+type clientStateReplaceResult struct {
+	Previous    appState
+	PreviousErr error
+	State       appState
+}
+
+func (s *configStore) replaceClientState(state appState) (clientStateReplaceResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous, previousErr := s.readStateLocked()
+	if previousErr == nil && previous.Contributions.UpdatedAt > state.Contributions.UpdatedAt {
+		state.Contributions = previous.Contributions
+	}
+	normalizeAppState(&state)
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return clientStateReplaceResult{}, fmt.Errorf("序列化配置失败：%w", err)
+	}
+	data = append(data, '\n')
+	if err := writeFileAtomically(s.path, data); err != nil {
+		return clientStateReplaceResult{}, err
+	}
+	return clientStateReplaceResult{Previous: previous, PreviousErr: previousErr, State: state}, nil
 }
 
 func (s *configStore) updateState(update func(*appState) error) (appState, error) {

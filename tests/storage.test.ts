@@ -12,6 +12,7 @@ describe('storage', () => {
     const s = loadState();
     expect(s.attributes).toEqual([]);
     expect(s.rules).toEqual([]);
+    expect(s.contributions).toEqual({ viewers: [] });
     expect(s.settings.panelOpacity).toBe(55);
   });
 
@@ -68,6 +69,34 @@ describe('storage', () => {
       { value: 1, label: '红队胜', color: '#ff3366', imageUrl: 'https://example.com/red.png' },
       { value: 3, label: '蓝队胜' },
     ]);
+  });
+
+  it('normalizes persisted contribution rankings and recomputes blind-box profit', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ...defaultState(),
+      contributions: {
+        updatedAt: 200,
+        viewers: [
+          {
+            key: 'uid:1', uid: 1, uname: ' 观众 ', giftCount: 3.8, goldValue: 5000, silverValue: -1,
+            ruleTriggers: 2, attributeDeltas: { 积分: 4, '': 99 }, blindBoxCount: 1,
+            blindBoxCost: 9000, blindBoxValue: 12000, blindBoxProfit: -999, lastGiftAt: 100,
+          },
+          { key: 'uid:1', uid: 1, uname: '重复', giftCount: 99 },
+        ],
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    await hydrateStateFromServer();
+
+    expect(loadState().contributions).toEqual({
+      updatedAt: 200,
+      viewers: [{
+        key: 'uid:1', uid: 1, uname: '观众', giftCount: 3, goldValue: 5000, silverValue: 0,
+        ruleTriggers: 2, attributeDeltas: { 积分: 4 }, blindBoxCount: 1,
+        blindBoxCost: 9000, blindBoxValue: 12000, blindBoxProfit: 3000, lastGiftAt: 100,
+      }],
+    });
   });
 
   it('hides the tutorial for a completed legacy config and marks the field for persistence', async () => {
