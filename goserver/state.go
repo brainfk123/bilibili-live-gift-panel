@@ -23,14 +23,22 @@ type attributeState struct {
 }
 
 type attributeDisplayState struct {
-	Variant      string   `json:"variant"`
-	ThemeID      string   `json:"themeId,omitempty"`
-	Title        string   `json:"title,omitempty"`
-	Min          *float64 `json:"min,omitempty"`
-	Max          *float64 `json:"max,omitempty"`
-	LowThreshold *float64 `json:"lowThreshold,omitempty"`
-	LeftLabel    string   `json:"leftLabel,omitempty"`
-	RightLabel   string   `json:"rightLabel,omitempty"`
+	Variant       string                       `json:"variant"`
+	ThemeID       string                       `json:"themeId,omitempty"`
+	Title         string                       `json:"title,omitempty"`
+	Min           *float64                     `json:"min,omitempty"`
+	Max           *float64                     `json:"max,omitempty"`
+	LowThreshold  *float64                     `json:"lowThreshold,omitempty"`
+	LeftLabel     string                       `json:"leftLabel,omitempty"`
+	RightLabel    string                       `json:"rightLabel,omitempty"`
+	ValueMappings []attributeValueMappingState `json:"valueMappings,omitempty"`
+}
+
+type attributeValueMappingState struct {
+	Value    float64 `json:"value"`
+	Label    string  `json:"label"`
+	Color    string  `json:"color,omitempty"`
+	ImageURL string  `json:"imageUrl,omitempty"`
 }
 
 type displaySceneState struct {
@@ -39,6 +47,47 @@ type displaySceneState struct {
 	AttributeNames []string `json:"attributeNames"`
 	Layout         string   `json:"layout"`
 	ThemeID        string   `json:"themeId"`
+}
+
+type activityResultState struct {
+	WinnerAttributeName string             `json:"winnerAttributeName,omitempty"`
+	Values              map[string]float64 `json:"values"`
+}
+
+type activityMilestoneState struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	AttributeName string   `json:"attributeName"`
+	Comparison    string   `json:"comparison"`
+	Threshold     float64  `json:"threshold"`
+	Action        string   `json:"action"`
+	Message       string   `json:"message"`
+	TriggeredAt   int64    `json:"triggeredAt,omitempty"`
+	TriggerValue  *float64 `json:"triggerValue,omitempty"`
+}
+
+type activityGiftTimeoutState struct {
+	Seconds    int    `json:"seconds"`
+	Action     string `json:"action"`
+	LastGiftAt int64  `json:"lastGiftAt,omitempty"`
+	DeadlineAt int64  `json:"deadlineAt,omitempty"`
+}
+
+type activitySessionState struct {
+	ID             string                    `json:"id"`
+	Name           string                    `json:"name"`
+	AttributeNames []string                  `json:"attributeNames"`
+	SceneID        string                    `json:"sceneId,omitempty"`
+	Status         string                    `json:"status"`
+	ResultMode     string                    `json:"resultMode"`
+	GateRules      bool                      `json:"gateRules"`
+	InitialValues  map[string]float64        `json:"initialValues"`
+	Milestones     []activityMilestoneState  `json:"milestones"`
+	GiftTimeout    *activityGiftTimeoutState `json:"giftTimeout,omitempty"`
+	StartedAt      int64                     `json:"startedAt,omitempty"`
+	LockedAt       int64                     `json:"lockedAt,omitempty"`
+	SettledAt      int64                     `json:"settledAt,omitempty"`
+	Result         *activityResultState      `json:"result,omitempty"`
 }
 
 type giftRule struct {
@@ -175,17 +224,18 @@ type settingsState struct {
 }
 
 type appState struct {
-	RoomID         string              `json:"roomId"`
-	Attributes     []attributeState    `json:"attributes"`
-	DisplayScenes  []displaySceneState `json:"displayScenes"`
-	Rules          []giftRule          `json:"rules"`
-	TimerRules     []timerRule         `json:"timerRules"`
-	FormulaPresets []formulaPreset     `json:"formulaPresets"`
-	Settings       settingsState       `json:"settings"`
-	GiftCatalog    []giftInfo          `json:"giftCatalog"`
-	RecentGifts    []recentGift        `json:"recentGifts"`
-	Stats          map[string]dayStats `json:"stats"`
-	Log            []logEntry          `json:"log"`
+	RoomID         string                 `json:"roomId"`
+	Attributes     []attributeState       `json:"attributes"`
+	DisplayScenes  []displaySceneState    `json:"displayScenes"`
+	Activities     []activitySessionState `json:"activities"`
+	Rules          []giftRule             `json:"rules"`
+	TimerRules     []timerRule            `json:"timerRules"`
+	FormulaPresets []formulaPreset        `json:"formulaPresets"`
+	Settings       settingsState          `json:"settings"`
+	GiftCatalog    []giftInfo             `json:"giftCatalog"`
+	RecentGifts    []recentGift           `json:"recentGifts"`
+	Stats          map[string]dayStats    `json:"stats"`
+	Log            []logEntry             `json:"log"`
 }
 
 type giftEvent struct {
@@ -210,6 +260,7 @@ func defaultAppState() appState {
 	return appState{
 		Attributes:     []attributeState{},
 		DisplayScenes:  []displaySceneState{},
+		Activities:     []activitySessionState{},
 		Rules:          []giftRule{},
 		TimerRules:     []timerRule{},
 		FormulaPresets: []formulaPreset{},
@@ -241,6 +292,9 @@ func normalizeAppState(state *appState) {
 	}
 	if state.DisplayScenes == nil {
 		state.DisplayScenes = []displaySceneState{}
+	}
+	if state.Activities == nil {
+		state.Activities = []activitySessionState{}
 	}
 	if state.Rules == nil {
 		state.Rules = []giftRule{}
@@ -309,6 +363,12 @@ func normalizeAppState(state *appState) {
 				display.Variant = "number"
 			}
 		}
+		for mappingIndex := range display.ValueMappings {
+			mapping := &display.ValueMappings[mappingIndex]
+			mapping.Label = strings.TrimSpace(mapping.Label)
+			mapping.Color = strings.TrimSpace(mapping.Color)
+			mapping.ImageURL = strings.TrimSpace(mapping.ImageURL)
+		}
 	}
 	for index := range state.DisplayScenes {
 		scene := &state.DisplayScenes[index]
@@ -320,6 +380,72 @@ func normalizeAppState(state *appState) {
 		}
 		if !isDisplayThemeID(scene.ThemeID) {
 			scene.ThemeID = state.Settings.DefaultDisplayThemeID
+		}
+	}
+	attributeValues := make(map[string]float64, len(state.Attributes))
+	for _, attribute := range state.Attributes {
+		attributeValues[attribute.Name] = attribute.Value
+	}
+	for index := range state.Activities {
+		activity := &state.Activities[index]
+		activity.ID = strings.TrimSpace(activity.ID)
+		activity.Name = strings.TrimSpace(activity.Name)
+		activity.SceneID = strings.TrimSpace(activity.SceneID)
+		activity.AttributeNames = normalizeStrings(activity.AttributeNames)
+		if !isActivityStatus(activity.Status) {
+			activity.Status = "not_started"
+		}
+		if !isActivityResultMode(activity.ResultMode) {
+			activity.ResultMode = "none"
+		}
+		if activity.InitialValues == nil {
+			activity.InitialValues = map[string]float64{}
+		}
+		if activity.Milestones == nil {
+			activity.Milestones = []activityMilestoneState{}
+		}
+		for milestoneIndex := range activity.Milestones {
+			milestone := &activity.Milestones[milestoneIndex]
+			milestone.ID = strings.TrimSpace(milestone.ID)
+			milestone.Name = strings.TrimSpace(milestone.Name)
+			milestone.AttributeName = strings.TrimSpace(milestone.AttributeName)
+			milestone.Message = strings.TrimSpace(milestone.Message)
+			if milestone.Comparison != "lte" {
+				milestone.Comparison = "gte"
+			}
+			if milestone.Action != "lock" && milestone.Action != "settle" {
+				milestone.Action = "announce"
+			}
+		}
+		if activity.GiftTimeout != nil {
+			if activity.GiftTimeout.Action != "settle" && activity.GiftTimeout.Action != "reset" {
+				activity.GiftTimeout.Action = "lock"
+			}
+			if activity.Status != "active" {
+				activity.GiftTimeout.LastGiftAt = 0
+				activity.GiftTimeout.DeadlineAt = 0
+			}
+		}
+		for _, attributeName := range activity.AttributeNames {
+			if _, exists := activity.InitialValues[attributeName]; !exists {
+				activity.InitialValues[attributeName] = attributeValues[attributeName]
+			}
+		}
+		for attributeName := range activity.InitialValues {
+			if !containsString(activity.AttributeNames, attributeName) {
+				delete(activity.InitialValues, attributeName)
+			}
+		}
+		if activity.Result != nil {
+			activity.Result.WinnerAttributeName = strings.TrimSpace(activity.Result.WinnerAttributeName)
+			if activity.Result.Values == nil {
+				activity.Result.Values = map[string]float64{}
+			}
+			for attributeName := range activity.Result.Values {
+				if !containsString(activity.AttributeNames, attributeName) {
+					delete(activity.Result.Values, attributeName)
+				}
+			}
 		}
 	}
 	if state.Settings.ShowTutorial == nil {
@@ -349,7 +475,42 @@ func isDisplayThemeID(value string) bool {
 
 func isDisplayVariant(value string) bool {
 	switch value {
-	case "number", "timer", "progress", "health", "resource", "tug":
+	case "number", "timer", "progress", "health", "resource", "tug", "enum":
+		return true
+	default:
+		return false
+	}
+}
+
+func isHexColor(value string) bool {
+	if len(value) != 7 || value[0] != '#' {
+		return false
+	}
+	for _, char := range value[1:] {
+		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f' || char >= 'A' && char <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func isDisplayImageURL(value string) bool {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "data:image/")
+}
+
+func isActivityStatus(value string) bool {
+	switch value {
+	case "not_started", "active", "locked", "settled":
+		return true
+	default:
+		return false
+	}
+}
+
+func isActivityResultMode(value string) bool {
+	switch value {
+	case "none", "highest", "lowest":
 		return true
 	default:
 		return false
@@ -402,10 +563,28 @@ func normalizeStrings(values []string) []string {
 	return result
 }
 
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 func (state *appState) findAttribute(name string) *attributeState {
 	for index := range state.Attributes {
 		if state.Attributes[index].Name == name {
 			return &state.Attributes[index]
+		}
+	}
+	return nil
+}
+
+func (state *appState) findActivity(id string) *activitySessionState {
+	for index := range state.Activities {
+		if state.Activities[index].ID == id {
+			return &state.Activities[index]
 		}
 	}
 	return nil

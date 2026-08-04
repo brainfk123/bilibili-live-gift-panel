@@ -2,7 +2,7 @@ export type DisplayFormat = 'hhmmss' | 'number' | 'suffix';
 
 export type DisplayThemeId = 'minimal' | 'glass' | 'rpg' | 'pixel' | 'neon' | 'kawaii';
 
-export type DisplayVariant = 'number' | 'timer' | 'progress' | 'health' | 'resource' | 'tug';
+export type DisplayVariant = 'number' | 'timer' | 'progress' | 'health' | 'resource' | 'tug' | 'enum';
 
 export type DisplaySceneLayout = 'stack' | 'grid';
 
@@ -14,6 +14,57 @@ export interface DisplayScene {
   themeId: DisplayThemeId;
 }
 
+export type ActivityStatus = 'not_started' | 'active' | 'locked' | 'settled';
+
+export type ActivityResultMode = 'none' | 'highest' | 'lowest';
+
+export interface ActivityResult {
+  winnerAttributeName?: string;
+  values: Record<string, number>;
+}
+
+export type ActivityMilestoneComparison = 'gte' | 'lte';
+
+export type ActivityMilestoneAction = 'announce' | 'lock' | 'settle';
+
+export interface ActivityMilestone {
+  id: string;
+  name: string;
+  attributeName: string;
+  comparison: ActivityMilestoneComparison;
+  threshold: number;
+  action: ActivityMilestoneAction;
+  message: string;
+  triggeredAt?: number;
+  triggerValue?: number;
+}
+
+export type ActivityGiftTimeoutAction = 'lock' | 'settle' | 'reset';
+
+export interface ActivityGiftTimeout {
+  seconds: number;
+  action: ActivityGiftTimeoutAction;
+  lastGiftAt?: number;
+  deadlineAt?: number;
+}
+
+export interface ActivitySession {
+  id: string;
+  name: string;
+  attributeNames: string[];
+  sceneId?: string;
+  status: ActivityStatus;
+  resultMode: ActivityResultMode;
+  gateRules: boolean;
+  initialValues: Record<string, number>;
+  milestones: ActivityMilestone[];
+  giftTimeout?: ActivityGiftTimeout;
+  startedAt?: number;
+  lockedAt?: number;
+  settledAt?: number;
+  result?: ActivityResult;
+}
+
 export interface AttributeDisplay {
   variant: DisplayVariant;
   themeId?: DisplayThemeId;
@@ -23,6 +74,14 @@ export interface AttributeDisplay {
   lowThreshold?: number;
   leftLabel?: string;
   rightLabel?: string;
+  valueMappings?: AttributeValueMapping[];
+}
+
+export interface AttributeValueMapping {
+  value: number;
+  label: string;
+  color?: string;
+  imageUrl?: string;
 }
 
 export interface Attribute {
@@ -157,6 +216,7 @@ export interface AppState {
   roomId: string;
   attributes: Attribute[];
   displayScenes: DisplayScene[];
+  activities: ActivitySession[];
   rules: GiftRule[];
   timerRules: TimerRule[];
   formulaPresets: FormulaPreset[];

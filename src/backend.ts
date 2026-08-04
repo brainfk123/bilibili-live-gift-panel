@@ -1,4 +1,5 @@
-import type { GiftInfo } from './types';
+import type { ActivitySession, GiftInfo } from './types';
+import type { ActivityTransitionAction } from './activities';
 
 export type RuntimeConnectionState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
 
@@ -95,6 +96,18 @@ interface UpdateResponse {
   code: number;
   update?: UpdateStatus;
   message?: string;
+}
+
+interface ActivityTransitionResponse {
+  code: number;
+  activity?: ActivitySession;
+  attributeValues?: Record<string, number>;
+  message?: string;
+}
+
+export interface ActivityTransitionResult {
+  activity: ActivitySession;
+  attributeValues: Record<string, number>;
 }
 
 export interface BlindBoxLookup {
@@ -197,4 +210,17 @@ export function getUpdateStatus(): Promise<UpdateStatus> {
 
 export function checkForUpdates(): Promise<UpdateStatus> {
   return requestUpdateStatus('/api/update/check', { method: 'POST' });
+}
+
+export async function transitionActivity(activityId: string, action: ActivityTransitionAction): Promise<ActivityTransitionResult> {
+  const response = await fetch('/api/activities/transition', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ activityId, action }),
+  });
+  const payload = await response.json() as ActivityTransitionResponse;
+  if (!response.ok || payload.code !== 0 || !payload.activity) {
+    throw new Error(payload.message || `活动操作失败：HTTP ${response.status}`);
+  }
+  return { activity: payload.activity, attributeValues: payload.attributeValues ?? {} };
 }

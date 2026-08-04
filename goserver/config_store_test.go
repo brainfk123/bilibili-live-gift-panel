@@ -280,6 +280,114 @@ func TestConfigStoreRejectsDisplaySceneWithMissingAttribute(t *testing.T) {
 	}
 }
 
+func TestConfigStorePersistsEnumValueMappings(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{
+        "attributes":[{
+            "name":"比赛结果","value":1,"unit":"none","format":"number","decimals":0,"suffix":"",
+            "display":{"variant":"enum","themeId":"neon","valueMappings":[
+                {"value":1,"label":"红队胜","color":"#ff3366","imageUrl":"https://example.com/red.png"}
+            ]}
+        }]
+    }`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d; body = %s", response.Code, response.Body.String())
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mappings := state.Attributes[0].Display.ValueMappings
+	if len(mappings) != 1 || mappings[0].Label != "红队胜" || mappings[0].Color != "#ff3366" {
+		t.Fatalf("unexpected mappings: %#v", mappings)
+	}
+}
+
+func TestConfigStoreRejectsDuplicateEnumValues(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{
+        "attributes":[{
+            "name":"比赛结果","value":1,"unit":"none","format":"number","decimals":0,"suffix":"",
+            "display":{"variant":"enum","themeId":"glass","valueMappings":[
+                {"value":1,"label":"红队胜"},{"value":1,"label":"蓝队胜"}
+            ]}
+        }]
+    }`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "枚举数值不能重复") {
+		t.Fatalf("status = %d; body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConfigStorePersistsActivitySession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store := &configStore{path: path}
+	payload := `{
+        "attributes":[
+            {"name":"红队","value":0,"unit":"none","format":"number","decimals":0,"suffix":""},
+            {"name":"蓝队","value":0,"unit":"none","format":"number","decimals":0,"suffix":""}
+        ],
+        "displayScenes":[{"id":"scene-match","name":"对战面板","attributeNames":["红队","蓝队"],"layout":"grid","themeId":"neon"}],
+        "activities":[{
+            "id":"activity-match","name":"阵营对抗","attributeNames":["红队","蓝队"],"sceneId":"scene-match",
+            "status":"not_started","resultMode":"highest","gateRules":true,"initialValues":{"红队":0,"蓝队":0},
+            "milestones":[{"id":"target","name":"红队达标","attributeName":"红队","comparison":"gte","threshold":10,"action":"settle","message":"红队达标！"}],
+            "giftTimeout":{"seconds":30,"action":"lock"}
+        }]
+    }`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", response.Code, response.Body.String())
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Activities) != 1 || state.Activities[0].SceneID != "scene-match" || !state.Activities[0].GateRules || len(state.Activities[0].Milestones) != 1 || state.Activities[0].GiftTimeout == nil {
+		t.Fatalf("unexpected activities: %#v", state.Activities)
+	}
+}
+
+func TestConfigStoreRejectsActivityMilestoneForUnlinkedAttribute(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{
+        "attributes":[
+            {"name":"积分","value":0,"unit":"none","format":"number","decimals":0,"suffix":""},
+            {"name":"生命值","value":100,"unit":"none","format":"number","decimals":0,"suffix":""}
+        ],
+        "activities":[{
+            "id":"challenge","name":"积分挑战","attributeNames":["积分"],"status":"not_started","resultMode":"none","gateRules":true,
+            "initialValues":{"积分":0},
+            "milestones":[{"id":"bad","name":"错误目标","attributeName":"生命值","comparison":"gte","threshold":10,"action":"announce","message":""}]
+        }]
+    }`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "未关联的属性") {
+		t.Fatalf("status = %d; body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConfigStoreRejectsOverlappingGatedActivities(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{
+        "attributes":[{"name":"积分","value":0,"unit":"none","format":"number","decimals":0,"suffix":""}],
+        "activities":[
+            {"id":"a","name":"活动 A","attributeNames":["积分"],"status":"not_started","resultMode":"none","gateRules":true,"initialValues":{"积分":0}},
+            {"id":"b","name":"活动 B","attributeNames":["积分"],"status":"not_started","resultMode":"none","gateRules":true,"initialValues":{"积分":0}}
+        ]
+    }`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "不能同时由活动") {
+		t.Fatalf("status = %d; body = %s", response.Code, response.Body.String())
+	}
+}
+
 func TestConfigStoreRejectsInvalidFormulaPresetContext(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	payload := `{

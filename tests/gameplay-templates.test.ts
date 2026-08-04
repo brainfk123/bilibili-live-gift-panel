@@ -28,9 +28,10 @@ function validInput(template: (typeof GAMEPLAY_TEMPLATES)[number]) {
 }
 
 describe('gameplay templates', () => {
-  it('ships the seven prioritized templates', () => {
+  it('ships the original and activity-aware prioritized templates', () => {
     expect(GAMEPLAY_TEMPLATES.map((template) => template.id)).toEqual([
       'overtime', 'countdown', 'counter', 'goal', 'boss', 'resource', 'tug',
+      'team-duel', 'gift-vote', 'combo', 'milestone', 'random-event',
     ]);
   });
 
@@ -38,13 +39,22 @@ describe('gameplay templates', () => {
     for (const template of GAMEPLAY_TEMPLATES) {
       const input = validInput(template);
       const result = buildGameplayTemplate(template, input, ids());
-      const attribute = result.attributes[0];
-      const environment = { [attribute.name]: attribute.value, price: 1000 };
+      const environment = Object.fromEntries(result.attributes.map((attribute) => [attribute.name, attribute.value]));
+      environment.price = 1000;
 
-      expect(result.attributes).toHaveLength(1);
+      expect(result.attributes.length).toBeGreaterThan(0);
       expect(result.rules.map((rule) => rule.giftId)).toEqual(result.usedGifts.map((item) => item.id));
-      expect(attribute.createdFromTemplateId).toBe(template.id);
-      expect(attribute.display?.themeId).toBe(template.recommendedThemeId);
+      for (const attribute of result.attributes) {
+        expect(attribute.createdFromTemplateId).toBe(template.id);
+        expect(attribute.display?.themeId).toBe(template.recommendedThemeId);
+      }
+      for (const scene of result.displayScenes) {
+        expect(scene.attributeNames.every((name) => result.attributes.some((attribute) => attribute.name === name))).toBe(true);
+      }
+      for (const activity of result.activities) {
+        expect(activity.attributeNames.every((name) => result.attributes.some((attribute) => attribute.name === name))).toBe(true);
+        expect(activity.milestones.every((milestone) => activity.attributeNames.includes(milestone.attributeName))).toBe(true);
+      }
       for (const rule of result.rules) expect(Number.isFinite(evalFormula(rule.formula, environment))).toBe(true);
       for (const rule of result.timerRules) {
         expect(Number.isFinite(evalFormula(rule.formula, environment))).toBe(true);
@@ -98,5 +108,31 @@ describe('gameplay templates', () => {
     expect(result.rules.some((rule) => rule.formulaName?.includes('治疗') === true)).toBe(true);
     expect(result.timerRules).toHaveLength(1);
     expect(result.attributes[0].display).toEqual(expect.objectContaining({ variant: 'health', themeId: 'rpg' }));
+  });
+
+  it('builds a team duel with an OBS scene and automatic settlement milestones', () => {
+    const template = GAMEPLAY_TEMPLATES.find((item) => item.id === 'team-duel')!;
+    const result = buildGameplayTemplate(template, validInput(template), ids());
+
+    expect(result.attributes.map((attribute) => attribute.name)).toEqual(['红队', '蓝队']);
+    expect(result.displayScenes).toHaveLength(1);
+    expect(result.activities[0]).toEqual(expect.objectContaining({
+      status: 'not_started', resultMode: 'highest', gateRules: true,
+    }));
+    expect(result.activities[0].milestones).toHaveLength(2);
+    expect(result.activities[0].milestones.every((milestone) => milestone.action === 'settle')).toBe(true);
+  });
+
+  it('builds a resettable combo timeout and an enum-based random event', () => {
+    const combo = GAMEPLAY_TEMPLATES.find((item) => item.id === 'combo')!;
+    const comboResult = buildGameplayTemplate(combo, validInput(combo), ids());
+    expect(comboResult.activities[0].giftTimeout).toEqual({ seconds: 15, action: 'settle' });
+
+    const random = GAMEPLAY_TEMPLATES.find((item) => item.id === 'random-event')!;
+    const randomResult = buildGameplayTemplate(random, validInput(random), ids());
+    expect(randomResult.rules[0].formula).toBe('RANDBETWEEN(1,4)');
+    expect(randomResult.attributes[0].display).toEqual(expect.objectContaining({
+      variant: 'enum', valueMappings: expect.arrayContaining([expect.objectContaining({ value: 1, label: '主播喝水' })]),
+    }));
   });
 });

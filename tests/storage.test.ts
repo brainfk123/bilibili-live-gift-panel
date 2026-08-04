@@ -46,6 +46,30 @@ describe('storage', () => {
     expect(consumeConfigMigrationRequired()).toBe(true);
   });
 
+  it('normalizes enum value mappings and drops invalid or duplicate entries', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ...defaultState(),
+      attributes: [{
+        name: '结果', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '',
+        display: {
+          variant: 'enum', themeId: 'glass', valueMappings: [
+            { value: 1, label: ' 红队胜 ', color: '#ff3366', imageUrl: 'https://example.com/red.png' },
+            { value: 1, label: '重复' },
+            { value: 2, label: '' },
+            { value: 3, label: '蓝队胜', color: 'red', imageUrl: 'javascript:bad' },
+          ],
+        },
+      }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    await hydrateStateFromServer();
+
+    expect(loadState().attributes[0].display?.valueMappings).toEqual([
+      { value: 1, label: '红队胜', color: '#ff3366', imageUrl: 'https://example.com/red.png' },
+      { value: 3, label: '蓝队胜' },
+    ]);
+  });
+
   it('hides the tutorial for a completed legacy config and marks the field for persistence', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       roomId: '31567150',

@@ -124,6 +124,25 @@ func validateAppState(state appState) error {
 			if attribute.Display.Min != nil && attribute.Display.Max != nil && *attribute.Display.Max <= *attribute.Display.Min {
 				return fmt.Errorf("属性 %q 的 OBS 展示上限必须大于下限", name)
 			}
+			if len(attribute.Display.ValueMappings) > 50 {
+				return fmt.Errorf("属性 %q 最多配置 50 条枚举映射", name)
+			}
+			mappingValues := make(map[float64]struct{}, len(attribute.Display.ValueMappings))
+			for _, mapping := range attribute.Display.ValueMappings {
+				if strings.TrimSpace(mapping.Label) == "" || utf8.RuneCountInString(mapping.Label) > 80 {
+					return fmt.Errorf("属性 %q 的枚举文字不能为空且不能超过 80 个字", name)
+				}
+				if _, exists := mappingValues[mapping.Value]; exists {
+					return fmt.Errorf("属性 %q 的枚举数值不能重复：%v", name, mapping.Value)
+				}
+				mappingValues[mapping.Value] = struct{}{}
+				if mapping.Color != "" && !isHexColor(mapping.Color) {
+					return fmt.Errorf("属性 %q 的枚举颜色必须是六位十六进制颜色", name)
+				}
+				if utf8.RuneCountInString(mapping.ImageURL) > 2048 || mapping.ImageURL != "" && !isDisplayImageURL(mapping.ImageURL) {
+					return fmt.Errorf("属性 %q 的枚举图片必须使用 http、https 或 data:image 地址", name)
+				}
+			}
 		}
 	}
 	sceneIDs := make(map[string]struct{}, len(state.DisplayScenes))
@@ -156,6 +175,88 @@ func validateAppState(state appState) error {
 		}
 		if !isDisplayThemeID(scene.ThemeID) {
 			return fmt.Errorf("组合面板 %q 的 OBS 主题无效", name)
+		}
+	}
+	activityIDs := make(map[string]struct{}, len(state.Activities))
+	activityNames := make(map[string]struct{}, len(state.Activities))
+	gatedAttributes := make(map[string]string)
+	linkedScenes := make(map[string]string)
+	for _, activity := range state.Activities {
+		id := strings.TrimSpace(activity.ID)
+		name := strings.TrimSpace(activity.Name)
+		if id == "" || name == "" {
+			return fmt.Errorf("活动会话的 ID 和名称不能为空")
+		}
+		if _, exists := activityIDs[id]; exists {
+			return fmt.Errorf("活动会话 ID 不能重复：%s", id)
+		}
+		activityIDs[id] = struct{}{}
+		nameKey := strings.ToLower(name)
+		if _, exists := activityNames[nameKey]; exists {
+			return fmt.Errorf("活动会话名称不能重复：%s", name)
+		}
+		activityNames[nameKey] = struct{}{}
+		if len(activity.AttributeNames) == 0 || len(activity.AttributeNames) > 12 {
+			return fmt.Errorf("活动会话 %q 必须包含 1 到 12 个属性", name)
+		}
+		for _, attributeName := range activity.AttributeNames {
+			if _, exists := attributeNames[attributeName]; !exists {
+				return fmt.Errorf("活动会话 %q 引用了不存在的属性 %q", name, attributeName)
+			}
+			if activity.GateRules {
+				if owner, exists := gatedAttributes[attributeName]; exists {
+					return fmt.Errorf("属性 %q 不能同时由活动 %q 和 %q 控制", attributeName, owner, name)
+				}
+				gatedAttributes[attributeName] = name
+			}
+		}
+		if !isActivityStatus(activity.Status) || !isActivityResultMode(activity.ResultMode) {
+			return fmt.Errorf("活动会话 %q 的状态或结算方式无效", name)
+		}
+		if activity.SceneID != "" {
+			if _, exists := sceneIDs[activity.SceneID]; !exists {
+				return fmt.Errorf("活动会话 %q 引用了不存在的组合面板", name)
+			}
+			if owner, exists := linkedScenes[activity.SceneID]; exists {
+				return fmt.Errorf("组合面板不能同时关联活动 %q 和 %q", owner, name)
+			}
+			linkedScenes[activity.SceneID] = name
+		}
+		if activity.Result != nil && activity.Result.WinnerAttributeName != "" && !containsString(activity.AttributeNames, activity.Result.WinnerAttributeName) {
+			return fmt.Errorf("活动会话 %q 的胜出属性无效", name)
+		}
+		milestoneIDs := make(map[string]struct{}, len(activity.Milestones))
+		for _, milestone := range activity.Milestones {
+			milestoneID := strings.TrimSpace(milestone.ID)
+			milestoneName := strings.TrimSpace(milestone.Name)
+			attributeName := strings.TrimSpace(milestone.AttributeName)
+			if milestoneID == "" || milestoneName == "" || attributeName == "" {
+				return fmt.Errorf("活动会话 %q 的里程碑 ID、名称和属性不能为空", name)
+			}
+			if _, exists := milestoneIDs[milestoneID]; exists {
+				return fmt.Errorf("活动会话 %q 的里程碑 ID 不能重复：%s", name, milestoneID)
+			}
+			milestoneIDs[milestoneID] = struct{}{}
+			if !containsString(activity.AttributeNames, attributeName) {
+				return fmt.Errorf("活动会话 %q 的里程碑 %q 引用了未关联的属性 %q", name, milestoneName, attributeName)
+			}
+			if milestone.Comparison != "gte" && milestone.Comparison != "lte" {
+				return fmt.Errorf("活动会话 %q 的里程碑 %q 比较方式无效", name, milestoneName)
+			}
+			if milestone.Action != "announce" && milestone.Action != "lock" && milestone.Action != "settle" {
+				return fmt.Errorf("活动会话 %q 的里程碑 %q 动作无效", name, milestoneName)
+			}
+			if utf8.RuneCountInString(strings.TrimSpace(milestone.Message)) > 120 {
+				return fmt.Errorf("活动会话 %q 的里程碑 %q 播报不能超过 120 个字", name, milestoneName)
+			}
+		}
+		if activity.GiftTimeout != nil {
+			if activity.GiftTimeout.Seconds < 1 || activity.GiftTimeout.Seconds > 86_400 {
+				return fmt.Errorf("活动会话 %q 的送礼后倒计时必须在 1 秒到 24 小时之间", name)
+			}
+			if activity.GiftTimeout.Action != "lock" && activity.GiftTimeout.Action != "settle" && activity.GiftTimeout.Action != "reset" {
+				return fmt.Errorf("活动会话 %q 的送礼后倒计时动作无效", name)
+			}
 		}
 	}
 	for _, rule := range state.Rules {

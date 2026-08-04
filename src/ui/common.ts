@@ -27,7 +27,7 @@ export function inputField(label: string, value: string): HTMLInputElement {
   return input;
 }
 
-export function fieldControl(input: HTMLInputElement): HTMLLabelElement {
+export function fieldControl(input: HTMLInputElement | HTMLSelectElement): HTMLLabelElement {
   const wrap = el('label', { class: 'field' });
   wrap.append(
     el('span', { class: 'field-label', text: input.dataset.fieldLabel ?? '' }),

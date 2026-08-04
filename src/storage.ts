@@ -1,6 +1,7 @@
-import { AppState, MAX_LOG } from './types';
+import { AppState, AttributeValueMapping, MAX_LOG } from './types';
 import { normalizeDisplayThemeId } from './display-themes';
 import { normalizeDisplayScenes } from './display-scenes';
+import { normalizeActivities } from './activities';
 
 const CONFIG_ENDPOINT = '/api/config';
 let cachedState: AppState | null = null;
@@ -11,6 +12,7 @@ export const defaultState = (): AppState => ({
   roomId: '',
   attributes: [],
   displayScenes: [],
+  activities: [],
   rules: [],
   timerRules: [],
   formulaPresets: [],
@@ -129,20 +131,44 @@ function normalizeState(parsed: Partial<AppState>): AppState {
         display: {
           ...attribute.display,
           themeId: normalizeDisplayThemeId(attribute.display.themeId ?? settings.defaultDisplayThemeId),
+          valueMappings: normalizeValueMappings(attribute.display.valueMappings),
         },
       }
       : attribute
   ));
+  const displayScenes = normalizeDisplayScenes(parsed.displayScenes, attributes, settings.defaultDisplayThemeId);
   return {
     ...base,
     ...parsed,
     settings,
     attributes,
-    displayScenes: normalizeDisplayScenes(parsed.displayScenes, attributes, settings.defaultDisplayThemeId),
+    displayScenes,
+    activities: normalizeActivities(parsed.activities, attributes, new Set(displayScenes.map((scene) => scene.id))),
     rules: parsed.rules ?? base.rules,
     timerRules: parsed.timerRules ?? base.timerRules,
     formulaPresets: parsed.formulaPresets ?? base.formulaPresets,
   };
+}
+
+function normalizeValueMappings(mappings: Array<Partial<AttributeValueMapping>> | undefined): AttributeValueMapping[] {
+  const values = new Set<number>();
+  const result: AttributeValueMapping[] = [];
+  for (const mapping of mappings ?? []) {
+    const value = Number(mapping.value);
+    const label = String(mapping.label ?? '').trim().slice(0, 80);
+    if (!Number.isFinite(value) || !label || values.has(value)) continue;
+    values.add(value);
+    const color = String(mapping.color ?? '').trim();
+    const imageUrl = String(mapping.imageUrl ?? '').trim().slice(0, 2048);
+    result.push({
+      value,
+      label,
+      ...(/^#[0-9a-f]{6}$/i.test(color) ? { color } : {}),
+      ...(/^(https?:\/\/|data:image\/)/i.test(imageUrl) ? { imageUrl } : {}),
+    });
+    if (result.length >= 50) break;
+  }
+  return result;
 }
 
 export function pruneLog(log: AppState['log']): AppState['log'] {

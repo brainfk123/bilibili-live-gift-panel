@@ -8,6 +8,7 @@ import { createBrandIcon } from '../brand';
 import { el } from '../common';
 import { SequentialBroadcastQueue } from './broadcast-queue';
 import { resolveDisplayTarget, type DisplayTarget } from '../../display-scenes';
+import { activityForScene, activityStatusLabel } from '../../activities';
 
 const DEFAULT_BROADCAST_MESSAGE = '感谢大家的支持，欢迎投喂礼物';
 const GIFT_BROADCAST_DURATION = 5500;
@@ -27,6 +28,18 @@ export function calculateFittedFontSize(
 ): number {
   if (availableWidth <= 0 || contentWidth <= availableWidth) return preferredFontSize;
   return Math.max(minimumFontSize, Math.floor(preferredFontSize * availableWidth / contentWidth));
+}
+
+export function resolveAttributeValuePresentation(attribute: Attribute): { text: string; color?: string; imageUrl?: string } {
+  const mapping = attribute.display?.variant === 'enum'
+    ? attribute.display.valueMappings?.find((candidate) => candidate.value === attribute.value)
+    : undefined;
+  if (!mapping) return { text: formatValue(attribute.value, attribute) };
+  return {
+    text: mapping.label,
+    ...(mapping.color ? { color: mapping.color } : {}),
+    ...(mapping.imageUrl ? { imageUrl: mapping.imageUrl } : {}),
+  };
 }
 
 export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): void {
@@ -75,6 +88,7 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
     const resolved = currentTarget();
     const attributes = resolved.attributes;
     const scene = resolved.scene;
+    const activity = activityForScene(state, scene?.id);
     stack.classList.toggle('is-scene', Boolean(scene));
     stack.classList.toggle('is-scene-grid', scene?.layout === 'grid');
     panel.classList.toggle('is-scene', Boolean(scene));
@@ -91,8 +105,33 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
           el('span', { text: '组合面板' }),
           el('h1', { text: scene.name, title: scene.name }),
         ]),
-        el('strong', { text: `${attributes.length} 个属性` }),
+        el('div', { class: 'display-scene-meta' }, [
+          el('strong', { text: `${attributes.length} 个属性` }),
+          ...(activity ? [el('span', { class: `display-activity-status is-${activity.status}`, text: activityStatusLabel(activity.status) })] : []),
+        ]),
       ]));
+      if (activity?.giftTimeout) {
+        panel.append(el('div', { class: 'display-activity-timeout' }, [
+          el('span', { text: '送礼后倒计时' }),
+          el('strong', { text: '等待活动开始' }),
+        ]));
+      }
+      const latestMilestone = activity?.milestones
+        .filter((milestone) => milestone.triggeredAt)
+        .sort((left, right) => Number(right.triggeredAt) - Number(left.triggeredAt))[0];
+      if (latestMilestone) {
+        panel.append(el('div', { class: 'display-activity-milestone' }, [
+          el('span', { text: '◆ 里程碑达成' }),
+          el('strong', { text: latestMilestone.message || latestMilestone.name, title: latestMilestone.message || latestMilestone.name }),
+        ]));
+      }
+      if (activity?.status === 'settled' && activity.result) {
+        const winner = activity.result.winnerAttributeName;
+        panel.append(el('div', { class: 'display-activity-result' }, [
+          el('span', { text: activity.resultMode === 'none' ? '结算完成' : winner ? '本局胜出' : '本局平局' }),
+          el('strong', { text: winner ?? activity.name }),
+        ]));
+      }
     }
     if (attributes.length === 0) {
       const empty = el('div', { class: 'display-empty' });
@@ -195,9 +234,20 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
       }
       const valueEl = block.querySelector('.attr-value') as HTMLElement | null;
       if (valueEl) {
+        const presentation = resolveAttributeValuePresentation(attr);
         valueEl.style.fontSize = `${state.settings.fontSize}px`;
-        valueEl.textContent = formatValue(attr.value, attr);
-        valueEl.title = valueEl.textContent;
+        const formattedValue = formatValue(attr.value, attr);
+        valueEl.classList.toggle('is-enum-mapped', Boolean(presentation.color || presentation.imageUrl || variant === 'enum' && presentation.text !== formattedValue));
+        valueEl.style.setProperty('--enum-value-color', presentation.color ?? 'var(--theme-accent, var(--accent))');
+        if (presentation.imageUrl) {
+          const image = el('img', { class: 'attr-enum-image', alt: '', referrerPolicy: 'no-referrer' }) as HTMLImageElement;
+          image.src = presentation.imageUrl;
+          image.onerror = () => image.remove();
+          valueEl.replaceChildren(image, el('span', { text: presentation.text }));
+        } else {
+          valueEl.textContent = presentation.text;
+        }
+        valueEl.title = presentation.text;
         const fittedFontSize = calculateFittedFontSize(
           state.settings.fontSize,
           valueEl.clientWidth,
@@ -207,7 +257,30 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
         valueEl.dataset.fittedFontSize = String(fittedFontSize);
       }
     }
+    updateActivityTimeout();
     updateConnection();
+  }
+
+  function updateActivityTimeout(): void {
+    const timeout = panel.querySelector<HTMLElement>('.display-activity-timeout');
+    if (!timeout) return;
+    const resolved = currentTarget();
+    const activity = activityForScene(state, resolved.scene?.id);
+    const value = timeout.querySelector<HTMLElement>('strong');
+    if (!value || !activity?.giftTimeout) return;
+    if (activity.status !== 'active') {
+      value.textContent = activity.status === 'not_started' ? '活动开始后等待礼物' : '已停止';
+      timeout.classList.remove('is-running');
+      return;
+    }
+    if (!activity.giftTimeout.deadlineAt) {
+      value.textContent = '等待第一份生效礼物';
+      timeout.classList.remove('is-running');
+      return;
+    }
+    const remaining = Math.max(0, Math.ceil((activity.giftTimeout.deadlineAt - Date.now()) / 1000));
+    value.textContent = `${formatCountdown(remaining)} 后${timeoutActionText(activity.giftTimeout.action)}`;
+    timeout.classList.add('is-running');
   }
 
   function updateConnection(): void {
@@ -312,6 +385,18 @@ function formatMeterBoundary(value: number, attribute: Attribute): string {
   return value.toLocaleString('zh-CN');
 }
 
+function formatCountdown(totalSeconds: number): string {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function timeoutActionText(action: 'lock' | 'settle' | 'reset'): string {
+  if (action === 'settle') return '自动结算';
+  if (action === 'reset') return '自动重置';
+  return '自动锁定';
+}
+
 function createDefaultBroadcast(attribute: Attribute): HTMLElement {
   const message = attribute.broadcastMessage?.trim() || DEFAULT_BROADCAST_MESSAGE;
   return el('div', { class: 'broadcast-content broadcast-default' }, [
@@ -353,6 +438,7 @@ function displayStructureSignature(state: AppState): string {
   return JSON.stringify({
     attributes: state.attributes.map(({ value: _value, ...attribute }) => attribute),
     displayScenes: state.displayScenes,
+    activities: state.activities,
     rules: state.rules,
     giftCatalog: state.giftCatalog,
     settings: state.settings,

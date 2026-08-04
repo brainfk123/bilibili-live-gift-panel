@@ -419,8 +419,14 @@ export function createGameplayTemplateWizard(options: GameplayTemplateWizardOpti
       el('div', { class: 'template-confirm-grid' }, [
         el('section', { class: 'template-confirm-copy' }, [
           el('span', { class: 'section-kicker', text: selectedTemplate.title }),
-          el('h3', { text: `将创建“${attribute.name}”` }),
+          el('h3', { text: result.attributes.length === 1
+            ? `将创建“${attribute.name}”`
+            : `将创建 ${result.attributes.length} 个属性：${result.attributes.map((item) => item.name).join('、')}` }),
           summary,
+          ...(result.displayScenes.length > 0 || result.activities.length > 0 ? [el('div', { class: 'template-result-artifacts' }, [
+            ...(result.displayScenes.length > 0 ? [el('span', { text: `▦ ${result.displayScenes.length} 个 OBS 组合面板` })] : []),
+            ...(result.activities.length > 0 ? [el('span', { text: `▶ ${result.activities.length} 个活动会话` })] : []),
+          ])] : []),
           rules,
           result.timerRules.length > 0
             ? el('div', { class: 'template-result-timers' }, result.timerRules.map((timerRule) => el('span', { text: `⏱ ${timerRule.formulaName} · 每 ${timerRule.intervalSeconds} 秒` })))
@@ -537,9 +543,6 @@ function createMiniPreview(
 function createResultPreview(result: GameplayTemplateBuildResult): HTMLElement {
   const attribute = result.attributes[0];
   const display = attribute.display;
-  const maximum = display?.max ?? Math.max(100, attribute.value);
-  const minimum = display?.min ?? 0;
-  const progress = Math.max(0, Math.min(100, ((attribute.value - minimum) / Math.max(1, maximum - minimum)) * 100));
   const rules = result.rules.slice(0, 4).map((rule) => {
     const gift = result.usedGifts.find((candidate) => candidate.id === rule.giftId);
     return el('span', { class: 'template-preview-rule' }, [
@@ -549,15 +552,23 @@ function createResultPreview(result: GameplayTemplateBuildResult): HTMLElement {
   });
   return el('div', {
     class: `template-result-preview theme-${display?.themeId ?? 'glass'} is-${display?.variant ?? 'number'}`,
-    style: `--preview-progress:${progress}%`,
   }, [
-    el('div', { class: 'template-preview-summary' }, [
-      el('span', { text: display?.title || attribute.name }),
-      el('strong', { text: formatValue(attribute.value, attribute) }),
-      ...(['progress', 'health', 'resource', 'tug'].includes(display?.variant ?? '')
-        ? [el('span', { class: 'template-preview-meter' }, [el('span')])]
-        : []),
-    ]),
+    el('div', { class: `template-preview-attributes${result.attributes.length > 1 ? ' is-multiple' : ''}` }, result.attributes.map((item) => {
+      const itemDisplay = item.display;
+      const maximum = itemDisplay?.max ?? Math.max(100, item.value);
+      const minimum = itemDisplay?.min ?? 0;
+      const progress = Math.max(0, Math.min(100, ((item.value - minimum) / Math.max(1, maximum - minimum)) * 100));
+      const mapping = itemDisplay?.variant === 'enum'
+        ? itemDisplay.valueMappings?.find((candidate) => candidate.value === item.value)
+        : undefined;
+      return el('div', { class: 'template-preview-summary', style: `--preview-progress:${progress}%` }, [
+        el('span', { text: itemDisplay?.title || item.name }),
+        el('strong', { text: mapping?.label ?? formatValue(item.value, item) }),
+        ...(['progress', 'health', 'resource', 'tug'].includes(itemDisplay?.variant ?? '')
+          ? [el('span', { class: 'template-preview-meter' }, [el('span')])]
+          : []),
+      ]);
+    })),
     el('div', { class: 'template-preview-rules' }, rules),
     el('div', { class: 'template-preview-broadcast', text: attribute.broadcastMessage || '感谢大家的支持' }),
   ]);

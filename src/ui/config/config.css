@@ -1009,6 +1009,17 @@ body.config-mode::-webkit-scrollbar-corner,
   white-space: nowrap;
 }
 .config-root .attribute-output-panel .modal-tip { margin: 0; }
+.config-root .enum-mapping-section { display: grid; gap: 12px; border: 1px solid var(--border); border-radius: 14px; padding: 16px; background: var(--bg-soft); }
+.config-root .enum-mapping-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.config-root .enum-mapping-list { display: grid; gap: 9px; transition: opacity .2s ease; }
+.config-root .enum-mapping-list.is-disabled { opacity: .42; pointer-events: none; }
+.config-root .enum-mapping-empty { border: 1px dashed var(--border-strong); border-radius: 10px; padding: 15px; color: var(--text-dim); font-size: 10px; text-align: center; }
+.config-root .enum-mapping-row { display: grid; grid-template-columns: 110px minmax(150px, .8fr) 130px minmax(220px, 1.25fr) auto; align-items: end; gap: 9px; border: 1px solid var(--border); border-radius: 11px; padding: 11px; background: var(--surface); }
+.config-root .enum-mapping-row .field { min-width: 0; margin: 0; }
+.config-root .enum-color-control { display: flex; min-height: 42px; align-items: center; gap: 8px; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 9px; padding: 5px 8px; background: var(--input-bg); }
+.config-root .enum-color-input { width: 32px; height: 30px; flex: 0 0 32px; padding: 0; border: 0; background: transparent; cursor: pointer; }
+.config-root .enum-color-control > span { overflow: hidden; color: var(--text-dim); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.config-root .enum-mapping-row > .btn { align-self: end; min-height: 42px; }
 
 .config-root .overlay .training-center {
   width: min(100%, 760px);
@@ -1564,6 +1575,124 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .display-scene-theme-control { border: 1px solid var(--border); border-radius: 14px; padding: 16px; background: var(--bg-soft); }
 .config-root .display-scene-theme-control .display-theme-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .config-root .display-scene-dialog-actions { position: static; }
+
+.config-root .activity-workspace-section {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 24px;
+  background: color-mix(in srgb, var(--card) 72%, transparent);
+}
+.config-root .activity-workspace-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+.config-root .activity-workspace-heading .section-heading { max-width: 780px; }
+.config-root .activity-empty {
+  border: 1px dashed var(--border-strong);
+  border-radius: 13px;
+  padding: 17px;
+  background: var(--input-bg);
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: center;
+}
+.config-root .activity-card-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.config-root .activity-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 15px;
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  padding: 18px;
+  background: var(--card);
+}
+.config-root .activity-card.is-active { border-color: color-mix(in srgb, #55d98b 58%, var(--border)); box-shadow: inset 0 0 0 1px color-mix(in srgb, #55d98b 16%, transparent); }
+.config-root .activity-card.is-locked { border-color: color-mix(in srgb, #f2bd57 55%, var(--border)); }
+.config-root .activity-card.is-settled { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+.config-root .activity-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.config-root .activity-card-head > div:first-child { min-width: 0; }
+.config-root .activity-card-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
+.config-root .activity-card-title-row h3 { overflow: hidden; font-size: 17px; text-overflow: ellipsis; white-space: nowrap; }
+.config-root .activity-card-head p { margin-top: 6px; color: var(--text-dim); font-size: 10px; line-height: 1.55; }
+.config-root .activity-status { border: 1px solid var(--border-strong); border-radius: 999px; padding: 4px 8px; color: var(--text-dim); font-size: 9px; font-weight: 800; }
+.config-root .activity-status.is-active { border-color: rgba(85,217,139,.48); background: rgba(85,217,139,.12); color: #86edac; }
+.config-root .activity-status.is-locked { border-color: rgba(242,189,87,.45); background: rgba(242,189,87,.11); color: #f8d58e; }
+.config-root .activity-status.is-settled { border-color: color-mix(in srgb, var(--accent) 52%, transparent); background: var(--accent-soft); color: var(--accent-text); }
+.config-root .activity-card-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.config-root .activity-card-actions .btn { min-height: 30px; padding: 5px 9px; font-size: 10px; }
+.config-root .activity-attribute-chips { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
+.config-root .activity-attribute-chips > span { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px; background: var(--input-bg); }
+.config-root .activity-attribute-chips strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.config-root .activity-attribute-chips small { flex: 0 0 auto; color: var(--accent-text); font-size: 11px; font-weight: 800; }
+.config-root .activity-card-meta { display: flex; flex-wrap: wrap; gap: 7px; }
+.config-root .activity-card-meta span { border-radius: 999px; padding: 4px 8px; background: var(--bg-soft); color: var(--text-dim); font-size: 9px; }
+.config-root .activity-milestone-event { display: flex; align-items: center; gap: 10px; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border)); border-radius: 11px; padding: 10px 12px; background: var(--accent-soft); }
+.config-root .activity-milestone-event > span { color: var(--accent-text); font-size: 13px; }
+.config-root .activity-milestone-event strong,
+.config-root .activity-milestone-event small { display: block; }
+.config-root .activity-milestone-event strong { font-size: 11px; }
+.config-root .activity-milestone-event small { margin-top: 2px; color: var(--text-dim); font-size: 9px; }
+.config-root .activity-result { border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); border-radius: 11px; padding: 12px; background: var(--accent-soft); }
+.config-root .activity-result > strong { color: var(--accent-text); font-size: 12px; }
+.config-root .activity-result > div { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
+.config-root .activity-result span { display: flex; align-items: baseline; gap: 6px; border-radius: 8px; padding: 6px 8px; background: var(--surface); }
+.config-root .activity-result small { color: var(--text-dim); font-size: 9px; }
+.config-root .activity-result b { font-size: 11px; }
+
+.config-root .activity-editor-overlay { z-index: 147; padding: 22px; }
+.config-root .overlay .activity-editor-dialog {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(100%, 980px);
+  max-width: 980px;
+  max-height: min(880px, calc(100vh - 44px));
+  overflow: hidden;
+  padding: 0;
+  border-radius: 20px;
+}
+.config-root .activity-editor-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 24px 26px 19px; border-bottom: 1px solid var(--border); }
+.config-root .activity-editor-header h2 { margin-top: 4px; font-size: 24px; }
+.config-root .activity-editor-header p { margin-top: 5px; color: var(--text-dim); font-size: 12px; }
+.config-root .activity-editor-body { display: grid; gap: 18px; min-height: 0; overflow-y: auto; padding: 22px 26px 28px; }
+.config-root .activity-editor-fields { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+.config-root .activity-editor-fields .field { margin: 0; }
+.config-root .activity-editor-section { border: 1px solid var(--border); border-radius: 14px; padding: 16px; background: var(--bg-soft); }
+.config-root .activity-editor-section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 13px; }
+.config-root .activity-editor-section-head h3 { font-size: 15px; }
+.config-root .activity-editor-section-head p { margin-top: 4px; color: var(--text-dim); font-size: 10px; }
+.config-root .activity-selection-count { flex: 0 0 auto; color: var(--accent-text); font-size: 11px; }
+.config-root .activity-attribute-picker { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.config-root .activity-attribute-option { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid var(--border); border-radius: 10px; padding: 10px; background: var(--surface); color: var(--text); text-align: left; cursor: pointer; }
+.config-root .activity-attribute-option:hover { border-color: var(--border-strong); }
+.config-root .activity-attribute-option.is-selected { border-color: var(--accent); background: var(--accent-soft); }
+.config-root .activity-attribute-option strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.config-root .activity-attribute-option small { flex: 0 0 auto; color: var(--text-dim); font-size: 10px; }
+.config-root .activity-attribute-option.is-selected small { color: var(--accent-text); }
+.config-root .activity-initial-values { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.config-root .activity-initial-values .field { margin: 0; }
+.config-root .activity-gate-switch { border: 1px solid var(--border); border-radius: 13px; padding: 14px; background: var(--bg-soft); }
+.config-root .activity-timeout-section { display: grid; grid-template-columns: minmax(260px, .8fr) minmax(0, 1.2fr); align-items: end; gap: 18px; }
+.config-root .activity-timeout-section > .setting-switch { align-self: center; }
+.config-root .activity-timeout-fields { display: grid; grid-template-columns: minmax(0, .65fr) minmax(0, 1.35fr); gap: 10px; transition: opacity .2s ease; }
+.config-root .activity-timeout-fields.is-disabled { opacity: .45; }
+.config-root .activity-timeout-fields .field { min-width: 0; margin: 0; }
+.config-root .activity-milestone-list { display: grid; gap: 10px; }
+.config-root .activity-milestone-empty { border: 1px dashed var(--border-strong); border-radius: 11px; padding: 17px; color: var(--text-dim); font-size: 10px; text-align: center; }
+.config-root .activity-milestone-editor { border: 1px solid var(--border); border-radius: 12px; padding: 13px; background: var(--surface); }
+.config-root .activity-milestone-editor > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 11px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.config-root .activity-milestone-editor > header strong,
+.config-root .activity-milestone-editor > header small { display: block; }
+.config-root .activity-milestone-editor > header strong { font-size: 12px; }
+.config-root .activity-milestone-editor > header small { margin-top: 3px; color: var(--text-dim); font-size: 9px; }
+.config-root .activity-milestone-editor > header .btn { min-height: 28px; padding: 4px 7px; font-size: 9px; }
+.config-root .activity-milestone-fields { display: grid; grid-template-columns: 1fr .8fr .85fr .65fr .9fr 1.35fr; align-items: end; gap: 9px; }
+.config-root .activity-milestone-fields .field { min-width: 0; margin: 0; }
+.config-root .activity-editor-actions { position: static; }
 
 .config-root .gift-history-section {
   min-width: 0;
@@ -2433,6 +2562,12 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .connection-grid { grid-template-columns: 1fr; }
   .config-root .display-scene-list { grid-template-columns: 1fr; }
   .config-root .display-scene-attribute-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .config-root .activity-card-list { grid-template-columns: 1fr; }
+  .config-root .activity-editor-fields,
+  .config-root .activity-attribute-picker,
+  .config-root .activity-initial-values,
+  .config-root .activity-milestone-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .config-root .activity-timeout-section { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 700px) {
@@ -2444,6 +2579,7 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .gift-history-section { padding: 18px; }
   .config-root .attributes-heading-row { align-items: stretch; flex-direction: column; }
   .config-root .display-scenes-heading { align-items: stretch; flex-direction: column; }
+  .config-root .activity-workspace-heading { align-items: stretch; flex-direction: column; }
   .config-root .gift-history-heading { align-items: flex-start; flex-direction: column; }
   .config-root .attributes-heading-row .btn { align-self: flex-start; }
   .config-root .attribute-obs-row { grid-template-columns: 1fr auto; }
@@ -2460,6 +2596,13 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .display-scene-theme-control .display-theme-grid { grid-template-columns: 1fr; }
   .config-root .display-scene-link-row { grid-template-columns: 1fr; }
   .config-root .display-scene-copy { justify-self: start; }
+  .config-root .activity-card-head { flex-direction: column; }
+  .config-root .activity-card-actions { justify-content: flex-start; }
+  .config-root .activity-editor-fields,
+  .config-root .activity-attribute-picker,
+  .config-root .activity-initial-values,
+  .config-root .activity-milestone-fields { grid-template-columns: 1fr; }
+  .config-root .activity-timeout-fields { grid-template-columns: 1fr; }
   .config-root .formula-target-name { max-width: 42%; }
   .config-root .manual-gift-fields .btn { justify-self: start; }
   .config-root .modal-header,
@@ -2723,6 +2866,8 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .template-result-rule strong { font-size: 10px; }
 .config-root .template-result-rule small { margin-top: 3px; color: var(--text-dim); font-size: 9px; }
 .config-root .template-result-timers { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+.config-root .template-result-artifacts { display: flex; flex-wrap: wrap; gap: 7px; margin: 0 0 12px; }
+.config-root .template-result-artifacts span { border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border)); border-radius: 999px; padding: 5px 8px; background: var(--accent-soft); color: var(--accent-text); font-size: 10px; }
 .config-root .template-result-timers span,
 .config-root .template-result-no-timer { border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); padding: 6px 9px; font-size: 10px; }
 .config-root .template-confirm-preview > p { margin-top: 10px; color: var(--text-dim); font-size: 10px; text-align: center; }
@@ -2744,6 +2889,8 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .template-result-preview.theme-pixel { --preview-accent: #ffe45e; --preview-surface: #17152c; border-radius: 0; box-shadow: 5px 5px 0 #090913; }
 .config-root .template-result-preview.theme-neon { --preview-accent: #63f3ff; --preview-surface: #090d1b; box-shadow: 0 0 20px rgba(99,243,255,.2); }
 .config-root .template-result-preview.theme-kawaii { --preview-accent: #ff6fae; --preview-surface: #fff2f7; color: #4a2637; }
+.config-root .template-preview-attributes { display: grid; gap: 8px; }
+.config-root .template-preview-attributes.is-multiple { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .config-root .template-preview-summary { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); align-items: center; gap: 10px; min-height: 86px; padding: 13px; border: 1px solid color-mix(in srgb, var(--preview-accent) 38%, transparent); border-radius: 12px; background: color-mix(in srgb, var(--preview-surface) 78%, #000); }
 .config-root .template-result-preview.theme-kawaii .template-preview-summary { background: rgba(255,255,255,.58); }
 .config-root .template-preview-summary > span:first-child { overflow: hidden; color: color-mix(in srgb, currentColor 72%, transparent); font-size: 15px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
@@ -2788,6 +2935,8 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .template-confirm-grid { grid-template-columns: 1fr; }
   .config-root .template-gift-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .config-root .display-theme-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .config-root .enum-mapping-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .config-root .enum-mapping-row > .btn { justify-self: start; }
 }
 
 @media (max-width: 700px) {
@@ -2809,4 +2958,7 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .template-gift-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .config-root .template-wizard-footer { grid-template-columns: 1fr; }
   .config-root .template-wizard-actions .btn { flex: 1; }
+  .config-root .enum-mapping-heading { align-items: stretch; flex-direction: column; }
+  .config-root .enum-mapping-row { grid-template-columns: 1fr; }
+  .config-root .template-preview-attributes.is-multiple { grid-template-columns: 1fr; }
 }

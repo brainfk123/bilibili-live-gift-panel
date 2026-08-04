@@ -9,7 +9,26 @@ import {
   pollBiliQRCodeLogin,
   startBiliQRCodeLogin,
   startPagePresence,
+  transitionActivity,
 } from '../src/backend';
+
+describe('activity transition API', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('returns the backend activity state and restored attribute values', async () => {
+    const activity = {
+      id: 'activity-1', name: '对抗', attributeNames: ['红队'], status: 'active', resultMode: 'none',
+      gateRules: true, initialValues: { 红队: 0 }, milestones: [],
+    };
+    const fetchMock = vi.fn(async () => Response.json({ code: 0, activity, attributeValues: { 红队: 0 } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(transitionActivity('activity-1', 'start')).resolves.toEqual({ activity, attributeValues: { 红队: 0 } });
+    expect(fetchMock).toHaveBeenCalledWith('/api/activities/transition', expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ activityId: 'activity-1', action: 'start' }),
+    }));
+  });
+});
 
 describe('automatic update API', () => {
   afterEach(() => vi.unstubAllGlobals());

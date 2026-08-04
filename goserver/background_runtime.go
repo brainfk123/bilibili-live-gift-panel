@@ -181,11 +181,14 @@ func (runtime *backgroundRuntime) handleTimerTick(now time.Time) {
 		return
 	}
 	dueRuleIDs := runtime.dueTimerRuleIDs(state, now)
-	if len(dueRuleIDs) == 0 {
+	dueActivityIDs := dueActivityGiftTimeoutIDs(state, now)
+	if len(dueRuleIDs) == 0 && len(dueActivityIDs) == 0 {
 		return
 	}
 	_, err = runtime.store.updateState(func(current *appState) error {
-		if applyTimerRules(current, dueRuleIDs, now) == 0 {
+		appliedRules := applyTimerRules(current, dueRuleIDs, now)
+		appliedTimeouts := applyActivityGiftTimeouts(current, dueActivityIDs, now)
+		if appliedRules == 0 && appliedTimeouts == 0 {
 			return errNoTimerChanges
 		}
 		return nil
@@ -202,7 +205,7 @@ func (runtime *backgroundRuntime) dueTimerRuleIDs(state appState, now time.Time)
 	valid := make(map[string]struct{}, len(state.TimerRules))
 	due := []string{}
 	for _, rule := range state.TimerRules {
-		if !rule.Enabled || rule.IntervalSeconds < 1 {
+		if !rule.Enabled || rule.IntervalSeconds < 1 || !activityAllowsRulesForAttribute(state, rule.AttributeName) {
 			continue
 		}
 		valid[rule.ID] = struct{}{}
@@ -345,6 +348,9 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 			if !rule.enabled() {
 				continue
 			}
+			if !activityAllowsRulesForAttribute(*state, rule.AttributeName) {
+				continue
+			}
 			configuredGift := state.findGift(rule.GiftID)
 			matchesAlias := configuredGift != nil && sameGiftIdentity(*configuredGift, gift)
 			matchesBlindBoxParent := gift.BlindGiftID > 0 && rule.GiftID == gift.BlindGiftID
@@ -406,6 +412,16 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 		if len(state.Log) > maxLogEntries {
 			state.Log = state.Log[:maxLogEntries]
 		}
+		milestoneTime := time.Now()
+		if gift.Timestamp > 0 {
+			milestoneTime = time.Unix(gift.Timestamp, 0)
+		}
+		changedAttributeNames := make(map[string]struct{}, len(changes))
+		for _, change := range changes {
+			changedAttributeNames[change.AttributeName] = struct{}{}
+		}
+		resetActivityGiftTimeouts(state, changedAttributeNames, milestoneTime)
+		evaluateActivityMilestones(state, milestoneTime)
 	}
 	state.Stats[stats.Date] = stats
 }
@@ -421,7 +437,7 @@ func applyTimerRules(state *appState, dueRuleIDs []string, now time.Time) int {
 	stats := state.todayStats()
 	applied := 0
 	for _, rule := range state.TimerRules {
-		if _, exists := due[rule.ID]; !exists || !rule.Enabled {
+		if _, exists := due[rule.ID]; !exists || !rule.Enabled || !activityAllowsRulesForAttribute(*state, rule.AttributeName) {
 			continue
 		}
 		attribute := state.findAttribute(rule.AttributeName)
@@ -460,6 +476,9 @@ func applyTimerRules(state *appState, dueRuleIDs []string, now time.Time) int {
 		applied++
 	}
 	state.Stats[stats.Date] = stats
+	if applied > 0 {
+		evaluateActivityMilestones(state, now)
+	}
 	return applied
 }
 

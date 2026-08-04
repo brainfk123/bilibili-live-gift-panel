@@ -1,4 +1,4 @@
-import { AppState, Attribute, AttributeDisplay, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson } from '../../types';
+import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson } from '../../types';
 import { consumeConfigMigrationRequired, loadState, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { el, fieldControl, inputField, toast } from '../common';
@@ -45,6 +45,7 @@ import { createGameplayTemplateWizard } from './template-wizard';
 import type { GameplayTemplateBuildResult } from '../../gameplay-templates';
 import { DISPLAY_THEMES, getDisplayTheme } from '../../display-themes';
 import { createDisplaySceneId, displaySceneUrl, MAX_DISPLAY_SCENE_ATTRIBUTES } from '../../display-scenes';
+import { createActivityWorkspace } from './activity-workspace';
 
 interface SelectedGiftRule {
   gift: GiftInfo;
@@ -475,6 +476,7 @@ export function mountConfig(root: HTMLElement): void {
     renderHeaderStatus();
     renderConnectionWorkspace();
     renderAttributesWorkspace();
+    renderActivities();
     renderDisplayScenes();
     renderGiftHistory();
     renderAdvancedSettings();
@@ -753,6 +755,16 @@ export function mountConfig(root: HTMLElement): void {
         throw new Error(`已经存在名为“${attribute.name}”的属性`);
       }
     }
+    for (const scene of result.displayScenes) {
+      if (state.displayScenes.some((candidate) => candidate.name.toLowerCase() === scene.name.toLowerCase())) {
+        throw new Error(`已经存在名为“${scene.name}”的组合面板`);
+      }
+    }
+    for (const activity of result.activities) {
+      if (state.activities.some((candidate) => candidate.name.toLowerCase() === activity.name.toLowerCase())) {
+        throw new Error(`已经存在名为“${activity.name}”的活动会话`);
+      }
+    }
     const attributesByName = new Map(result.attributes.map((attribute) => [attribute.name, attribute]));
     const giftsById = new Map(result.usedGifts.map((gift) => [gift.id, gift]));
     try {
@@ -776,11 +788,15 @@ export function mountConfig(root: HTMLElement): void {
       attributes: state.attributes,
       rules: state.rules,
       timerRules: state.timerRules,
+      displayScenes: state.displayScenes,
+      activities: state.activities,
       giftCatalog: state.giftCatalog,
     };
     state.attributes = [...state.attributes, ...result.attributes];
     state.rules = [...state.rules, ...result.rules];
     state.timerRules = [...state.timerRules, ...result.timerRules];
+    state.displayScenes = [...state.displayScenes, ...result.displayScenes];
+    state.activities = [...state.activities, ...result.activities];
     state.giftCatalog = [...state.giftCatalog];
     for (const gift of result.usedGifts) upsertGiftCatalog(state, gift);
     try {
@@ -789,6 +805,8 @@ export function mountConfig(root: HTMLElement): void {
       state.attributes = previous.attributes;
       state.rules = previous.rules;
       state.timerRules = previous.timerRules;
+      state.displayScenes = previous.displayScenes;
+      state.activities = previous.activities;
       state.giftCatalog = previous.giftCatalog;
       throw error;
     }
@@ -809,6 +827,29 @@ export function mountConfig(root: HTMLElement): void {
       state.attributes.splice(index, 1);
       state.rules = state.rules.filter((rule) => rule.attributeName !== attribute.name);
       state.timerRules = state.timerRules.filter((rule) => rule.attributeName !== attribute.name);
+      state.activities = state.activities.flatMap((activity) => {
+        const attributeNames = activity.attributeNames.filter((name) => name !== attribute.name);
+        if (attributeNames.length === 0) return [];
+        const initialValues = { ...activity.initialValues };
+        delete initialValues[attribute.name];
+        const resultValues = { ...(activity.result?.values ?? {}) };
+        delete resultValues[attribute.name];
+        const result = activity.result
+          ? {
+            values: resultValues,
+            ...(activity.result.winnerAttributeName && activity.result.winnerAttributeName !== attribute.name
+              ? { winnerAttributeName: activity.result.winnerAttributeName }
+              : {}),
+          }
+          : undefined;
+        return [{
+          ...activity,
+          attributeNames,
+          initialValues,
+          milestones: activity.milestones.filter((milestone) => milestone.attributeName !== attribute.name),
+          ...(result ? { result } : {}),
+        }];
+      });
       state.displayScenes = state.displayScenes.flatMap((scene) => {
         const attributeNames = scene.attributeNames.filter((name) => name !== attribute.name);
         return attributeNames.length > 0 ? [{ ...scene, attributeNames }] : [];
@@ -960,6 +1001,24 @@ export function mountConfig(root: HTMLElement): void {
     return card;
   }
 
+  function renderActivities(): void {
+    content.append(createActivityWorkspace({
+      state,
+      root,
+      onPersist: saveAndWait,
+      onRender: render,
+      onEditorOpenChange: (open) => {
+        editorOpen = open;
+        if (open) {
+          activeGuide?.dispose();
+          activeGuide = null;
+        } else {
+          renderGuide();
+        }
+      },
+    }));
+  }
+
   function renderDisplayScenes(): void {
     const section = el('section', { class: 'display-scenes-section' });
     const headingRow = el('div', { class: 'display-scenes-heading' });
@@ -1021,6 +1080,9 @@ export function mountConfig(root: HTMLElement): void {
     deleteButton.onclick = () => {
       if (!confirm(`删除组合面板“${scene.name}”？属性、规则和单属性 OBS 链接不会受影响。`)) return;
       state.displayScenes.splice(index, 1);
+      state.activities = state.activities.map((activity) => activity.sceneId === scene.id
+        ? { ...activity, sceneId: undefined }
+        : activity);
       save();
       render();
       toast('组合面板已删除', root);
@@ -1440,7 +1502,7 @@ export function mountConfig(root: HTMLElement): void {
     formatSelect.innerHTML = '<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字 + 后缀</option>';
     formatSelect.value = original?.format ?? 'hhmmss';
     const displayConfig: AttributeDisplay = original?.display
-      ? { ...original.display }
+      ? { ...original.display, valueMappings: original.display.valueMappings?.map((mapping) => ({ ...mapping })) }
       : {
         variant: formatSelect.value === 'hhmmss' ? 'timer' : 'number',
         themeId: state.settings.defaultDisplayThemeId,
@@ -2394,6 +2456,96 @@ export function mountConfig(root: HTMLElement): void {
       '这个属性的 OBS 皮肤',
       '只影响当前属性；模板已经为玩法选择了推荐皮肤。',
     );
+    let valueMappings: AttributeValueMapping[] = displayConfig.valueMappings?.map((mapping) => ({ ...mapping })) ?? [];
+    const enumEnabled = el('input', { class: 'setting-switch-input', type: 'checkbox' }) as HTMLInputElement;
+    enumEnabled.checked = displayConfig.variant === 'enum';
+    const mappingList = el('div', { class: 'enum-mapping-list' });
+    const addMappingButton = el('button', { class: 'btn ghost', type: 'button', text: '+ 添加状态' }) as HTMLButtonElement;
+    const renderMappings = (): void => {
+      mappingList.replaceChildren();
+      if (valueMappings.length === 0) {
+        mappingList.append(el('div', { class: 'enum-mapping-empty', text: '还没有状态映射；未匹配到的数值仍会按原数字显示。' }));
+      }
+      valueMappings.forEach((mapping, mappingIndex) => {
+        const value = inputField('数值', String(mapping.value));
+        value.type = 'number';
+        value.step = 'any';
+        value.oninput = () => { mapping.value = Number(value.value); };
+        const label = inputField('显示文字', mapping.label);
+        label.maxLength = 80;
+        label.oninput = () => { mapping.label = label.value; };
+        const color = el('input', {
+          class: 'enum-color-input', type: 'color', value: /^#[0-9a-f]{6}$/i.test(mapping.color ?? '') ? mapping.color : '#fb7299',
+          ariaLabel: '状态颜色',
+        } as any) as HTMLInputElement;
+        const colorValue = el('span', { text: (mapping.color ?? '#FB7299').toUpperCase() });
+        color.oninput = () => {
+          mapping.color = color.value;
+          colorValue.textContent = color.value.toUpperCase();
+        };
+        const imageUrl = inputField('图片地址（可选）', mapping.imageUrl ?? '');
+        imageUrl.type = 'url';
+        imageUrl.maxLength = 2048;
+        imageUrl.placeholder = 'https://…';
+        imageUrl.oninput = () => { mapping.imageUrl = imageUrl.value; };
+        const remove = el('button', { class: 'btn text-danger', type: 'button', text: '删除' }) as HTMLButtonElement;
+        remove.onclick = () => {
+          valueMappings.splice(mappingIndex, 1);
+          displayConfig.valueMappings = valueMappings;
+          renderMappings();
+        };
+        mappingList.append(el('article', { class: 'enum-mapping-row' }, [
+          fieldControl(value),
+          fieldControl(label),
+          el('label', { class: 'field enum-color-field' }, [
+            el('span', { class: 'field-label', text: '颜色' }),
+            el('span', { class: 'enum-color-control' }, [color, colorValue]),
+          ]),
+          fieldControl(imageUrl),
+          remove,
+        ]));
+      });
+      addMappingButton.disabled = !enumEnabled.checked || valueMappings.length >= 50;
+    };
+    const syncEnumMode = (): void => {
+      if (enumEnabled.checked) {
+        displayConfig.variant = 'enum';
+        if (valueMappings.length === 0) {
+          valueMappings.push({ value: Number(valueInput.value) || 0, label: '当前状态', color: '#fb7299' });
+        }
+      } else if (displayConfig.variant === 'enum') {
+        displayConfig.variant = formatSelect.value === 'hhmmss' ? 'timer' : 'number';
+      }
+      displayConfig.valueMappings = valueMappings;
+      mappingList.classList.toggle('is-disabled', !enumEnabled.checked);
+      renderMappings();
+    };
+    enumEnabled.onchange = syncEnumMode;
+    addMappingButton.onclick = () => {
+      if (valueMappings.length >= 50) return;
+      const usedValues = new Set(valueMappings.map((mapping) => mapping.value));
+      let value = 0;
+      while (usedValues.has(value)) value++;
+      valueMappings.push({ value, label: `状态 ${value}`, color: '#fb7299' });
+      displayConfig.valueMappings = valueMappings;
+      renderMappings();
+      mappingList.lastElementChild?.scrollIntoView({ block: 'nearest' });
+    };
+    const enumMappingSection = el('section', { class: 'enum-mapping-section' }, [
+      el('div', { class: 'enum-mapping-heading' }, [
+        el('label', { class: 'setting-switch' }, [
+          enumEnabled,
+          el('span', { class: 'setting-switch-track', ariaHidden: 'true' } as any),
+          el('span', { class: 'setting-switch-copy' }, [
+            el('strong', { text: '把数值显示成状态' }),
+            el('small', { text: '后台仍保存数字；OBS 命中指定数值时改为显示文字、颜色和图片。' }),
+          ]),
+        ]),
+        addMappingButton,
+      ]),
+      mappingList,
+    ]);
+    syncEnumMode();
     const outputPanel = el('section', { class: 'attribute-output-panel' }, [
       outputLessonCard,
       el('div', { class: 'runtime-role-grid' }, [
@@ -2412,6 +2564,7 @@ export function mountConfig(root: HTMLElement): void {
           }),
         ]),
       ]),
+      enumMappingSection,
       attributeThemeControl,
       el('p', { class: 'modal-tip', text: '默认播报会在没有礼物消息时滚动显示；收到礼物后会临时切换为本次送礼信息。' }),
     ]);
@@ -2627,6 +2780,34 @@ export function mountConfig(root: HTMLElement): void {
       normalizedTimers.push({ ...timer, attributeName: name, formulaName, condition, formula });
     }
 
+    const mappingValues = new Set<number>();
+    const normalizedMappings: AttributeValueMapping[] = [];
+    for (const mapping of displayConfig.valueMappings ?? []) {
+      const mappingValue = Number(mapping.value);
+      const label = mapping.label.trim();
+      const imageUrl = mapping.imageUrl?.trim() ?? '';
+      if (!Number.isFinite(mappingValue) || !label) {
+        toast('状态映射需要填写有效数值和显示文字', root);
+        return;
+      }
+      if (mappingValues.has(mappingValue)) {
+        toast(`状态映射的数值不能重复：${mappingValue}`, root);
+        return;
+      }
+      if (imageUrl && !/^(https?:\/\/|data:image\/)/i.test(imageUrl)) {
+        toast(`“${label}”的图片需要使用 http、https 或 data:image 地址`, root);
+        return;
+      }
+      mappingValues.add(mappingValue);
+      normalizedMappings.push({
+        value: mappingValue,
+        label,
+        ...(/^#[0-9a-f]{6}$/i.test(mapping.color ?? '') ? { color: mapping.color } : {}),
+        ...(imageUrl ? { imageUrl } : {}),
+      });
+    }
+    displayConfig.valueMappings = normalizedMappings;
+
     saveButton.disabled = true;
     saveButton.textContent = '后台校验中…';
     try {
@@ -2669,6 +2850,33 @@ export function mountConfig(root: HTMLElement): void {
         ...scene,
         attributeNames: scene.attributeNames.map((attributeName) => attributeName === originalName ? name : attributeName),
       }));
+      state.activities = state.activities.map((activity) => {
+        if (!activity.attributeNames.includes(originalName)) return activity;
+        const initialValues = { ...activity.initialValues, [name]: activity.initialValues[originalName] ?? nextAttribute.value };
+        delete initialValues[originalName];
+        const resultValues = { ...(activity.result?.values ?? {}) };
+        if (Object.prototype.hasOwnProperty.call(resultValues, originalName)) {
+          resultValues[name] = resultValues[originalName];
+          delete resultValues[originalName];
+        }
+        return {
+          ...activity,
+          attributeNames: activity.attributeNames.map((attributeName) => attributeName === originalName ? name : attributeName),
+          initialValues,
+          milestones: activity.milestones.map((milestone) => ({
+            ...milestone,
+            attributeName: milestone.attributeName === originalName ? name : milestone.attributeName,
+          })),
+          ...(activity.result ? {
+            result: {
+              values: resultValues,
+              ...(activity.result.winnerAttributeName
+                ? { winnerAttributeName: activity.result.winnerAttributeName === originalName ? name : activity.result.winnerAttributeName }
+                : {}),
+            },
+          } : {}),
+        };
+      });
     }
 
     const renamedRules = state.rules.map((rule) => ({
@@ -3147,6 +3355,7 @@ function configStructureSignature(state: AppState): string {
     roomId: state.roomId,
     attributes: state.attributes.map(({ value: _value, ...attribute }) => attribute),
     displayScenes: state.displayScenes,
+    activities: state.activities,
     rules: state.rules,
     timerRules: state.timerRules,
     formulaPresets: state.formulaPresets,

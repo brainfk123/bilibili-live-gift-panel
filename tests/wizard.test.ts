@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { mountConfig } from '../src/ui/config/config';
-import { formatDelta, mountDisplay } from '../src/ui/display/display';
+import { formatDelta, mountDisplay, resolveAttributeValuePresentation } from '../src/ui/display/display';
 import {
   getNextWizardStep,
   getRoomNumberHint,
@@ -15,6 +15,7 @@ import {
 import { defaultState, loadState, resetState, saveState } from '../src/storage';
 import { builtinCatalog } from '../src/gifts/catalog';
 import type { GiftEvent } from '../src/bilibili/messages';
+import type { Attribute } from '../src/types';
 
 vi.mock('../src/ui/brand', () => ({
   createBrandIcon: (size = 40, className = 'brand-icon') => {
@@ -353,7 +354,7 @@ describe('gameplay template wizard integration', () => {
     findByText(root, '+ 添加属性')?.onclick?.();
 
     expect(root.querySelector('.template-wizard-overlay')).not.toBeNull();
-    expect(root.querySelectorAll('.gameplay-template-card')).toHaveLength(8);
+    expect(root.querySelectorAll('.gameplay-template-card')).toHaveLength(13);
     expect(textOf(root.querySelector('.template-wizard') as TestElement)).toContain('从空白创建');
   });
 
@@ -400,6 +401,37 @@ describe('gameplay template wizard integration', () => {
     expect(loadState().rules).toHaveLength(1);
     expect(loadState().timerRules).toHaveLength(1);
     expect(root.querySelector('.template-wizard-overlay')).toBeNull();
+  });
+
+  it('creates a team duel with two attributes, one scene, and one gated activity transactionally', async () => {
+    const configured = defaultState();
+    configured.settings.showTutorial = false;
+    await saveState(configured);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '+ 添加属性')?.onclick?.();
+
+    root.querySelectorAll('.gameplay-template-card')
+      .find((card) => textOf(card).includes('阵营对战'))?.onclick?.();
+    findByText(root, '下一步')?.onclick?.();
+    findByText(root, '下一步')?.onclick?.();
+    root.querySelectorAll('.template-gift-choice')[0]?.onclick?.();
+    root.querySelectorAll('.template-gift-slot')
+      .find((slot) => textOf(slot).includes('右队礼物'))?.onclick?.();
+    root.querySelectorAll('.template-gift-choice')[1]?.onclick?.();
+    findByText(root, '下一步')?.onclick?.();
+
+    expect(textOf(root.querySelector('.template-wizard') as TestElement)).toContain('将创建 2 个属性');
+    expect(textOf(root.querySelector('.template-wizard') as TestElement)).toContain('1 个活动会话');
+    root.querySelector('.template-wizard-actions')?.querySelectorAll('button').at(-1)?.onclick?.();
+
+    await vi.waitFor(() => expect(loadState().activities).toHaveLength(1));
+    expect(loadState().attributes.map((attribute) => attribute.name)).toEqual(['红队', '蓝队']);
+    expect(loadState().displayScenes).toHaveLength(1);
+    expect(loadState().activities[0]).toEqual(expect.objectContaining({
+      status: 'not_started', resultMode: 'highest', gateRules: true,
+    }));
+    expect(loadState().activities[0].milestones).toHaveLength(2);
   });
 });
 
@@ -1938,12 +1970,75 @@ describe('OBS combination scene configuration', () => {
   });
 });
 
+describe('activity session configuration', () => {
+  it('creates a gated activity from existing attributes', async () => {
+    const configured = defaultState();
+    configured.settings.showTutorial = false;
+    configured.attributes = [
+      { name: '红队', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      { name: '蓝队', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+    ];
+    await saveState(configured);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '+ 新建活动')?.onclick?.();
+    expect(root.querySelector('.activity-editor-dialog')).not.toBeNull();
+    expect(root.querySelectorAll('.activity-attribute-option').filter((item) => item.className.includes('is-selected'))).toHaveLength(2);
+    findByText(root, '创建活动')?.onclick?.();
+
+    await vi.waitFor(() => expect(loadState().activities).toHaveLength(1));
+    expect(loadState().activities[0]).toEqual(expect.objectContaining({
+      name: '活动 1', attributeNames: ['红队', '蓝队'], status: 'not_started', resultMode: 'highest', gateRules: true,
+      initialValues: { 红队: 0, 蓝队: 0 }, milestones: [],
+    }));
+  });
+});
+
 describe('OBS attribute display', () => {
   it('formats positive, negative, and zero deltas with the correct sign', () => {
     const attr = { name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' } as const;
     expect(formatDelta(60, attr)).toBe('+00:01:00');
     expect(formatDelta(-40, attr)).toBe('-00:00:40');
     expect(formatDelta(0, attr)).toBe('00:00:00');
+  });
+
+  it('maps an enum value to OBS text, color, and image while retaining numeric state', () => {
+    const attribute: Attribute = {
+      name: '比赛结果', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '',
+      display: {
+        variant: 'enum', themeId: 'neon', valueMappings: [
+          { value: 1, label: '红队胜', color: '#ff3366', imageUrl: 'https://example.com/red.png' },
+        ],
+      },
+    };
+    expect(resolveAttributeValuePresentation(attribute)).toEqual({
+      text: '红队胜', color: '#ff3366', imageUrl: 'https://example.com/red.png',
+    });
+    expect(attribute.value).toBe(1);
+  });
+
+  it('renders enum text and image in the OBS value block', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state(),
+      attributes: [{
+        name: '比赛结果', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '',
+        display: {
+          variant: 'enum', themeId: 'neon', valueMappings: [
+            { value: 1, label: '红队胜', color: '#ff3366', imageUrl: 'https://example.com/red.png' },
+          ],
+        },
+      }],
+      rules: [],
+    }));
+    vi.useFakeTimers();
+    const root = new TestElement('div');
+    mountDisplay(root as unknown as HTMLElement, { attributeName: '比赛结果' });
+
+    expect(textOf(root)).toContain('红队胜');
+    expect(root.querySelector('.attr-value')?.className).toContain('is-enum-mapped');
+    expect((root.querySelector('.attr-enum-image') as any)?.src).toBe('https://example.com/red.png');
+    vi.useRealTimers();
   });
 
   it('uses the shared brand icon only for the empty display state', () => {
@@ -2014,6 +2109,39 @@ describe('OBS attribute display', () => {
     expect(textOf(root)).toContain('能量');
     expect(textOf(root)).toContain('生命值');
     expect(textOf(root)).not.toContain('隐藏属性');
+    vi.useRealTimers();
+  });
+
+  it('shows the linked activity state and settlement result in a combination scene', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state(),
+      settings: { ...defaultState().settings, defaultDisplayThemeId: 'glass' },
+      attributes: [
+        { name: '红队', value: 12, unit: 'none', format: 'number', decimals: 0, suffix: '票' },
+        { name: '蓝队', value: 18, unit: 'none', format: 'number', decimals: 0, suffix: '票' },
+      ],
+      displayScenes: [{ id: 'scene-match', name: '阵营对抗', attributeNames: ['红队', '蓝队'], layout: 'grid', themeId: 'neon' }],
+      activities: [{
+        id: 'activity-match', name: '阵营对抗', attributeNames: ['红队', '蓝队'], sceneId: 'scene-match',
+        status: 'settled', resultMode: 'highest', gateRules: true, initialValues: { 红队: 0, 蓝队: 0 },
+        milestones: [{
+          id: 'milestone-win', name: '目标达成', attributeName: '蓝队', comparison: 'gte', threshold: 18,
+          action: 'settle', message: '蓝队率先达标！', triggeredAt: 100, triggerValue: 18,
+        }],
+        giftTimeout: { seconds: 30, action: 'settle', lastGiftAt: Date.now() - 1_000, deadlineAt: Date.now() + 29_000 },
+        result: { winnerAttributeName: '蓝队', values: { 红队: 12, 蓝队: 18 } },
+      }],
+      rules: [],
+    }));
+    vi.useFakeTimers();
+    const root = new TestElement('div');
+    mountDisplay(root as unknown as HTMLElement, { sceneId: 'scene-match' });
+
+    expect(textOf(root)).toContain('已结算');
+    expect(textOf(root)).toContain('本局胜出');
+    expect(textOf(root)).toContain('蓝队');
+    expect(textOf(root)).toContain('蓝队率先达标！');
+    expect(textOf(root)).toContain('送礼后倒计时');
     vi.useRealTimers();
   });
 

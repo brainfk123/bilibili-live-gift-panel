@@ -1,5 +1,7 @@
 import type {
+  ActivitySession,
   Attribute,
+  DisplayScene,
   DisplayThemeId,
   GiftInfo,
   GiftRule,
@@ -47,9 +49,16 @@ export interface GameplayTemplateBuildResult {
   attributes: Attribute[];
   rules: GiftRule[];
   timerRules: TimerRule[];
+  displayScenes: DisplayScene[];
+  activities: ActivitySession[];
   usedGifts: GiftInfo[];
   summary: string[];
 }
+
+type GameplayTemplateBuildDraft = Omit<GameplayTemplateBuildResult, 'displayScenes' | 'activities'> & {
+  displayScenes?: DisplayScene[];
+  activities?: ActivitySession[];
+};
 
 export interface GameplayTemplateDefinition {
   id: string;
@@ -63,11 +72,11 @@ export interface GameplayTemplateDefinition {
   recommendedThemeId: DisplayThemeId;
   parameters: readonly TemplateParameterDefinition[];
   giftSlots: readonly TemplateGiftSlotDefinition[];
-  build: (input: GameplayTemplateInput, ids: TemplateIdFactory) => GameplayTemplateBuildResult;
+  build: (input: GameplayTemplateInput, ids: TemplateIdFactory) => GameplayTemplateBuildDraft;
 }
 
 export interface TemplateIdFactory {
-  next: (kind: 'rule' | 'timer') => string;
+  next: (kind: 'rule' | 'timer' | 'scene' | 'activity' | 'milestone') => string;
 }
 
 function valueText(input: GameplayTemplateInput, id: string): string {
@@ -413,6 +422,227 @@ const TEMPLATES: readonly GameplayTemplateDefinition[] = [
       };
     },
   },
+  {
+    id: 'team-duel', version: 1, category: 'versus', title: '阵营对战', difficulty: '进阶', preview: 'tug',
+    summary: '两支队伍分别累计积分，任意一方先达到目标就自动结算。',
+    audiencePlay: '观众选择阵营礼物，为支持的队伍加分并争夺胜利。',
+    recommendedThemeId: 'neon',
+    parameters: [
+      { id: 'activityName', label: '活动名称', kind: 'text', defaultValue: '红蓝阵营对战' },
+      { id: 'leftName', label: '左队名称', kind: 'text', defaultValue: '红队' },
+      { id: 'rightName', label: '右队名称', kind: 'text', defaultValue: '蓝队' },
+      { id: 'target', label: '获胜目标', kind: 'number', defaultValue: 100, min: 1, max: 100000000, step: 1, unit: '分' },
+      { id: 'points', label: '每个礼物增加', kind: 'number', defaultValue: 1, min: 0.01, max: 1000000, step: 1, unit: '分' },
+      commonBroadcast,
+    ],
+    giftSlots: [
+      { id: 'left', label: '左队礼物', description: '收到后只为左队增加积分。', minimum: 1, multiple: true },
+      { id: 'right', label: '右队礼物', description: '收到后只为右队增加积分。', minimum: 1, multiple: true },
+    ],
+    build: (input, ids) => {
+      const activityName = valueText(input, 'activityName') || '阵营对战';
+      const leftName = valueText(input, 'leftName') || '红队';
+      const rightName = valueText(input, 'rightName') || '蓝队';
+      if (leftName === rightName) throw new Error('两支队伍的名称不能相同');
+      const target = Math.max(1, valueNumber(input, 'target'));
+      const points = valueNumber(input, 'points');
+      const sceneId = ids.next('scene');
+      const activityId = ids.next('activity');
+      const attributes: Attribute[] = [leftName, rightName].map((name) => ({
+        ...attributeBase(name, 0, 'suffix', '分', valueText(input, 'broadcastMessage')),
+        display: { variant: 'progress', themeId: themed(input, 'neon'), title: name, min: 0, max: target },
+        createdFromTemplateId: 'team-duel', createdFromTemplateVersion: 1,
+      }));
+      const rules = [
+        ...rulesForSlot(input, 'left', leftName, '为左队加分', `MIN(${leftName}+${formulaNumber(points)},${formulaNumber(target)})`, ids),
+        ...rulesForSlot(input, 'right', rightName, '为右队加分', `MIN(${rightName}+${formulaNumber(points)},${formulaNumber(target)})`, ids),
+      ];
+      return {
+        attributes,
+        rules,
+        timerRules: [],
+        displayScenes: [{ id: sceneId, name: `${activityName}面板`, attributeNames: [leftName, rightName], layout: 'grid', themeId: themed(input, 'neon') }],
+        activities: [{
+          id: activityId, name: activityName, attributeNames: [leftName, rightName], sceneId,
+          status: 'not_started', resultMode: 'highest', gateRules: true,
+          initialValues: { [leftName]: 0, [rightName]: 0 },
+          milestones: [leftName, rightName].map((attributeName) => ({
+            id: ids.next('milestone'), name: `${attributeName}达到获胜目标`, attributeName,
+            comparison: 'gte', threshold: target, action: 'settle', message: `${attributeName}率先达到目标！`,
+          })),
+        }],
+        usedGifts: uniqueGifts(input),
+        summary: [`${leftName} 对战 ${rightName}`, `先达到 ${formulaNumber(target)} 分自动结算`, '创建后需要在活动会话中点击开始'],
+      };
+    },
+  },
+  {
+    id: 'gift-vote', version: 1, category: 'versus', title: '礼物二选一投票', difficulty: '简单', preview: 'counter',
+    summary: '两个选项分别计票，主播随时锁票并结算最高票结果。',
+    audiencePlay: '观众用不同礼物投给两个选项，实时看到票数变化。',
+    recommendedThemeId: 'kawaii',
+    parameters: [
+      { id: 'activityName', label: '投票名称', kind: 'text', defaultValue: '下一项挑战投票' },
+      { id: 'leftName', label: '选项 A', kind: 'text', defaultValue: '继续挑战' },
+      { id: 'rightName', label: '选项 B', kind: 'text', defaultValue: '休息一下' },
+      { id: 'votes', label: '每个礼物计票', kind: 'number', defaultValue: 1, min: 0.01, max: 1000000, step: 1, unit: '票' },
+      commonBroadcast,
+    ],
+    giftSlots: [
+      { id: 'left', label: '选项 A 礼物', description: '每个礼物计入选项 A。', minimum: 1, multiple: true },
+      { id: 'right', label: '选项 B 礼物', description: '每个礼物计入选项 B。', minimum: 1, multiple: true },
+    ],
+    build: (input, ids) => {
+      const activityName = valueText(input, 'activityName') || '礼物投票';
+      const leftName = valueText(input, 'leftName') || '选项 A';
+      const rightName = valueText(input, 'rightName') || '选项 B';
+      if (leftName === rightName) throw new Error('两个投票选项不能同名');
+      const votes = valueNumber(input, 'votes');
+      const sceneId = ids.next('scene');
+      const attributes: Attribute[] = [leftName, rightName].map((name) => ({
+        ...attributeBase(name, 0, 'suffix', '票', valueText(input, 'broadcastMessage')),
+        display: { variant: 'number', themeId: themed(input, 'kawaii'), title: name, min: 0 },
+        createdFromTemplateId: 'gift-vote', createdFromTemplateVersion: 1,
+      }));
+      const rules = [
+        ...rulesForSlot(input, 'left', leftName, '投给选项 A', `${leftName}+${formulaNumber(votes)}`, ids),
+        ...rulesForSlot(input, 'right', rightName, '投给选项 B', `${rightName}+${formulaNumber(votes)}`, ids),
+      ];
+      return {
+        attributes,
+        rules,
+        timerRules: [],
+        displayScenes: [{ id: sceneId, name: `${activityName}面板`, attributeNames: [leftName, rightName], layout: 'grid', themeId: themed(input, 'kawaii') }],
+        activities: [{
+          id: ids.next('activity'), name: activityName, attributeNames: [leftName, rightName], sceneId,
+          status: 'not_started', resultMode: 'highest', gateRules: true,
+          initialValues: { [leftName]: 0, [rightName]: 0 }, milestones: [],
+        }],
+        usedGifts: uniqueGifts(input),
+        summary: [`${leftName} 对 ${rightName}`, '主播锁票后再确认结算', '创建后需要在活动会话中点击开始'],
+      };
+    },
+  },
+  {
+    id: 'combo', version: 1, category: 'challenge', title: '限时连击挑战', difficulty: '进阶', preview: 'counter',
+    summary: '每次命中礼物都会增加连击并重置倒计时，断档后自动结算。',
+    audiencePlay: '观众接力投喂指定礼物，尽量把连击延续得更久。',
+    recommendedThemeId: 'pixel',
+    parameters: [
+      { id: 'name', label: '连击名称', kind: 'text', defaultValue: '全房连击' },
+      { id: 'timeout', label: '断档时间', kind: 'duration', defaultValue: 15, min: 1, max: 3600, durationUnit: 'seconds' },
+      { id: 'goal', label: '提前达成目标（0 为不限）', kind: 'number', defaultValue: 50, min: 0, max: 100000000, step: 1, unit: '连击' },
+      commonBroadcast,
+    ],
+    giftSlots: [{ id: 'combo', label: '连击礼物', description: '任意一个都会增加 1 连击并重新计时。', minimum: 1, multiple: true }],
+    build: (input, ids) => {
+      const name = valueText(input, 'name') || '全房连击';
+      const timeout = Math.max(1, Math.round(valueNumber(input, 'timeout')));
+      const goal = Math.max(0, valueNumber(input, 'goal'));
+      const sceneId = ids.next('scene');
+      const rules = rulesForSlot(input, 'combo', name, '延续连击', `${name}+1`, ids);
+      return {
+        attributes: [{
+          ...attributeBase(name, 0, 'suffix', '连击', valueText(input, 'broadcastMessage')),
+          display: { variant: 'number', themeId: themed(input, 'pixel'), title: name, min: 0, ...(goal > 0 ? { max: goal } : {}) },
+          createdFromTemplateId: 'combo', createdFromTemplateVersion: 1,
+        }],
+        rules,
+        timerRules: [],
+        displayScenes: [{ id: sceneId, name: `${name}面板`, attributeNames: [name], layout: 'stack', themeId: themed(input, 'pixel') }],
+        activities: [{
+          id: ids.next('activity'), name: `${name}挑战`, attributeNames: [name], sceneId,
+          status: 'not_started', resultMode: 'none', gateRules: true, initialValues: { [name]: 0 },
+          milestones: goal > 0 ? [{
+            id: ids.next('milestone'), name: '连击目标达成', attributeName: name,
+            comparison: 'gte', threshold: goal, action: 'settle', message: `${name}达到 ${formulaNumber(goal)}！`,
+          }] : [],
+          giftTimeout: { seconds: timeout, action: 'settle' },
+        }],
+        usedGifts: uniqueGifts(input),
+        summary: [`每份礼物增加 1 连击`, `${timeout} 秒没有新礼物就自动结算`, goal > 0 ? `达到 ${formulaNumber(goal)} 提前结算` : '不设置提前达成目标'],
+      };
+    },
+  },
+  {
+    id: 'milestone', version: 1, category: 'goal', title: '目标冲刺赛', difficulty: '简单', preview: 'progress',
+    summary: '全房推进同一个目标，达到指定数值时自动提示并结算。',
+    audiencePlay: '观众共同投喂，把进度条推到目标线。',
+    recommendedThemeId: 'glass',
+    parameters: [
+      { id: 'name', label: '目标名称', kind: 'text', defaultValue: '应援目标' },
+      { id: 'target', label: '目标值', kind: 'number', defaultValue: 100, min: 1, max: 100000000, step: 1 },
+      { id: 'amount', label: '每个礼物推进', kind: 'number', defaultValue: 1, min: 0.01, max: 1000000, step: 1 },
+      { id: 'message', label: '达成提示', kind: 'text', defaultValue: '全房目标达成！' },
+      commonBroadcast,
+    ],
+    giftSlots: [{ id: 'progress', label: '推进礼物', description: '每个礼物按固定数量推进。', minimum: 1, multiple: true }],
+    build: (input, ids) => {
+      const name = valueText(input, 'name') || '应援目标';
+      const target = Math.max(1, valueNumber(input, 'target'));
+      const amount = valueNumber(input, 'amount');
+      const sceneId = ids.next('scene');
+      const rules = rulesForSlot(input, 'progress', name, '推进目标', `MIN(${name}+${formulaNumber(amount)},${formulaNumber(target)})`, ids);
+      return {
+        attributes: [{
+          ...attributeBase(name, 0, 'number', '', valueText(input, 'broadcastMessage')),
+          display: { variant: 'progress', themeId: themed(input, 'glass'), title: name, min: 0, max: target },
+          createdFromTemplateId: 'milestone', createdFromTemplateVersion: 1,
+        }],
+        rules,
+        timerRules: [],
+        displayScenes: [{ id: sceneId, name: `${name}面板`, attributeNames: [name], layout: 'stack', themeId: themed(input, 'glass') }],
+        activities: [{
+          id: ids.next('activity'), name: `${name}冲刺`, attributeNames: [name], sceneId,
+          status: 'not_started', resultMode: 'none', gateRules: true, initialValues: { [name]: 0 },
+          milestones: [{
+            id: ids.next('milestone'), name: '目标达成', attributeName: name,
+            comparison: 'gte', threshold: target, action: 'settle', message: valueText(input, 'message') || '目标达成！',
+          }],
+        }],
+        usedGifts: uniqueGifts(input),
+        summary: [`目标值 ${formulaNumber(target)}`, `每份礼物推进 ${formulaNumber(amount)}`, '达到目标后自动结算'],
+      };
+    },
+  },
+  {
+    id: 'random-event', version: 1, category: 'challenge', title: '随机事件机', difficulty: '简单', preview: 'counter',
+    summary: '礼物触发一次随机抽取，OBS 把数字结果显示成自定义事件。',
+    audiencePlay: '观众用礼物抽取主播接下来要执行的随机事件。',
+    recommendedThemeId: 'rpg',
+    parameters: [
+      { id: 'name', label: '属性名称', kind: 'text', defaultValue: '随机事件' },
+      { id: 'event1', label: '事件 1', kind: 'text', defaultValue: '主播喝水' },
+      { id: 'event2', label: '事件 2', kind: 'text', defaultValue: '做 10 个深蹲' },
+      { id: 'event3', label: '事件 3', kind: 'text', defaultValue: '唱一句歌' },
+      { id: 'event4', label: '事件 4', kind: 'text', defaultValue: '安全通过' },
+      commonBroadcast,
+    ],
+    giftSlots: [{ id: 'draw', label: '抽取礼物', description: '每收到一个就重新抽取一次。', minimum: 1, multiple: true }],
+    build: (input, ids) => {
+      const name = valueText(input, 'name') || '随机事件';
+      const events = [1, 2, 3, 4].map((index) => valueText(input, `event${index}`) || `事件 ${index}`);
+      const colors = ['#ff6b8f', '#ffd166', '#63f3ff', '#86edac'];
+      const rules = rulesForSlot(input, 'draw', name, '随机抽取', 'RANDBETWEEN(1,4)', ids);
+      return {
+        attributes: [{
+          ...attributeBase(name, 0, 'number', '', valueText(input, 'broadcastMessage')),
+          display: {
+            variant: 'enum', themeId: themed(input, 'rpg'), title: name,
+            valueMappings: [
+              { value: 0, label: '等待抽取', color: '#d8dbe6' },
+              ...events.map((label, index) => ({ value: index + 1, label, color: colors[index] })),
+            ],
+          },
+          createdFromTemplateId: 'random-event', createdFromTemplateVersion: 1,
+        }],
+        rules,
+        timerRules: [],
+        usedGifts: uniqueGifts(input),
+        summary: [`共 ${events.length} 个随机事件`, `${rules.length} 个礼物可以触发抽取`, '可在输出页继续修改文字、颜色和图片'],
+      };
+    },
+  },
 ] as const;
 
 export const GAMEPLAY_TEMPLATES: readonly GameplayTemplateDefinition[] = TEMPLATES;
@@ -476,6 +706,10 @@ export function buildGameplayTemplate(
 ): GameplayTemplateBuildResult {
   const errors = validateGameplayTemplateInput(template, input);
   if (errors.length > 0) throw new Error(errors[0]);
-  return template.build(input, ids);
+  const result = template.build(input, ids);
+  return {
+    displayScenes: [],
+    activities: [],
+    ...result,
+  };
 }
-
