@@ -2,10 +2,11 @@ import { getRuntimeStatus, RuntimeConnectionState } from '../../backend';
 import { formatValue } from '../../format';
 import { findGift } from '../../gifts/catalog';
 import { loadState, refreshStateFromServer } from '../../storage';
-import { AppState, Attribute, LogEntry } from '../../types';
+import { AppState, Attribute, LogEntry, MAX_LOG } from '../../types';
 import { getDisplayTheme, resolveAttributeDisplayTheme, resolveAttributeDisplayVariant } from '../../display-themes';
 import { createBrandIcon } from '../brand';
 import { el } from '../common';
+import { SequentialBroadcastQueue } from './broadcast-queue';
 
 const DEFAULT_BROADCAST_MESSAGE = '感谢大家的支持，欢迎投喂礼物';
 const GIFT_BROADCAST_DURATION = 5500;
@@ -36,7 +37,7 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
   const panel = el('div', { class: 'panel' });
   const attrEls = new Map<string, HTMLElement>();
   const broadcastStages = new Map<string, HTMLElement>();
-  const broadcastReturnTimers = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
+  const broadcastQueues = new Map<string, SequentialBroadcastQueue<LogEntry>>();
   stack.append(panel);
   root.replaceChildren(stack);
 
@@ -44,14 +45,31 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
     ? state.attributes.filter((attribute) => attribute.name === selectedAttributeName)
     : state.attributes;
 
-  function clearBroadcastReturnTimer(attributeName: string): void {
-    const timer = broadcastReturnTimers.get(attributeName);
-    if (timer !== undefined) globalThis.clearTimeout(timer);
-    broadcastReturnTimers.delete(attributeName);
+  function giftBroadcastDuration(pendingCount: number): number {
+    if (pendingCount >= 12) return 2200;
+    if (pendingCount >= 4) return 3500;
+    return GIFT_BROADCAST_DURATION;
+  }
+
+  function ensureBroadcastQueue(attributeName: string): SequentialBroadcastQueue<LogEntry> {
+    const existing = broadcastQueues.get(attributeName);
+    if (existing) return existing;
+    const queue = new SequentialBroadcastQueue<LogEntry>({
+      durationMs: giftBroadcastDuration,
+      keyOf: logKey,
+      maxPending: MAX_LOG,
+      onShow: (entry) => renderGiftBroadcast(entry),
+      onIdle: () => {
+        const latestAttribute = state.attributes.find((item) => item.name === attributeName);
+        if (latestAttribute) swapBroadcastContent(attributeName, createDefaultBroadcast(latestAttribute));
+      },
+    });
+    broadcastQueues.set(attributeName, queue);
+    return queue;
   }
 
   function renderAttrs(): void {
-    for (const attributeName of broadcastReturnTimers.keys()) clearBroadcastReturnTimer(attributeName);
+    for (const queue of broadcastQueues.values()) queue.pause();
     panel.replaceChildren();
     attrEls.clear();
     broadcastStages.clear();
@@ -108,8 +126,15 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
       attrEls.set(attr.name, block);
       panel.append(block);
     }
+    const visibleNames = new Set(attributes.map((attribute) => attribute.name));
+    for (const [attributeName, queue] of broadcastQueues) {
+      if (visibleNames.has(attributeName)) continue;
+      queue.dispose();
+      broadcastQueues.delete(attributeName);
+    }
     panel.append(el('div', { class: 'conn' }));
     updateAll();
+    for (const attribute of attributes) ensureBroadcastQueue(attribute.name).resume();
   }
 
   function updateAll(): void {
@@ -191,8 +216,7 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
     }, BROADCAST_TRANSITION_DURATION);
   }
 
-  function showGiftBroadcast(entry: LogEntry): void {
-    if (selectedAttributeName && entry.attributeName !== selectedAttributeName) return;
+  function renderGiftBroadcast(entry: LogEntry): void {
     const block = attrEls.get(entry.attributeName);
     const attribute = state.attributes.find((item) => item.name === entry.attributeName);
     if (!block || !attribute) return;
@@ -200,14 +224,13 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
     void block.offsetWidth;
     block.classList.add('flash');
     globalThis.setTimeout(() => block.classList.remove('flash'), 700);
-    clearBroadcastReturnTimer(entry.attributeName);
     swapBroadcastContent(entry.attributeName, createGiftBroadcast(entry, attribute));
-    const timer = globalThis.setTimeout(() => {
-      const latestAttribute = state.attributes.find((item) => item.name === entry.attributeName);
-      if (latestAttribute) swapBroadcastContent(entry.attributeName, createDefaultBroadcast(latestAttribute));
-      broadcastReturnTimers.delete(entry.attributeName);
-    }, GIFT_BROADCAST_DURATION);
-    broadcastReturnTimers.set(entry.attributeName, timer);
+  }
+
+  function enqueueGiftBroadcast(entry: LogEntry): void {
+    if (selectedAttributeName && entry.attributeName !== selectedAttributeName) return;
+    if (!attrEls.has(entry.attributeName)) return;
+    ensureBroadcastQueue(entry.attributeName).enqueue(entry);
   }
 
   async function refreshState(): Promise<void> {
@@ -221,7 +244,7 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
       const newEntries = entriesSince(state.log, lastLogKey);
       lastLogKey = state.log[0] ? logKey(state.log[0]) : lastLogKey;
       for (const entry of newEntries.reverse()) {
-        if (entry.source !== 'timer') showGiftBroadcast(entry);
+        if (entry.source !== 'timer') enqueueGiftBroadcast(entry);
       }
     } finally {
       stateRefreshActive = false;
@@ -246,7 +269,8 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
   if (typeof globalThis.addEventListener === 'function') {
     globalThis.addEventListener('beforeunload', () => {
       globalThis.clearInterval(pollTimer);
-      for (const attributeName of broadcastReturnTimers.keys()) clearBroadcastReturnTimer(attributeName);
+      for (const queue of broadcastQueues.values()) queue.dispose();
+      broadcastQueues.clear();
     }, { once: true });
   }
 }

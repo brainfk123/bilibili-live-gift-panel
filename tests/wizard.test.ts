@@ -353,8 +353,25 @@ describe('gameplay template wizard integration', () => {
     findByText(root, '+ 添加属性')?.onclick?.();
 
     expect(root.querySelector('.template-wizard-overlay')).not.toBeNull();
-    expect(root.querySelectorAll('.gameplay-template-card')).toHaveLength(7);
-    expect(textOf(root.querySelector('.template-wizard') as TestElement)).toContain('创建空白属性（高级）');
+    expect(root.querySelectorAll('.gameplay-template-card')).toHaveLength(8);
+    expect(textOf(root.querySelector('.template-wizard') as TestElement)).toContain('从空白创建');
+  });
+
+  it('opens the complete attribute workbench from the blank creation card', async () => {
+    const configured = defaultState();
+    configured.settings.showTutorial = false;
+    await saveState(configured);
+    const root = new TestElement('div');
+
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '+ 添加属性')?.onclick?.();
+    const blank = root.querySelectorAll('.gameplay-template-card')
+      .find((card) => textOf(card).includes('从空白创建'));
+    blank?.onclick?.();
+
+    expect(root.querySelector('.template-wizard-overlay')).toBeNull();
+    expect(root.querySelector('.attribute-workbench')).not.toBeNull();
+    expect(textOf(root.querySelector('.attribute-workbench') as TestElement)).toContain('创建互动属性');
   });
 
   it('validates and saves a complete overtime template as one configuration', async () => {

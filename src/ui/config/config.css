@@ -2460,6 +2460,31 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 .config-root .gameplay-template-card:hover { border-color: var(--border-strong); transform: translateY(-1px); }
 .config-root .gameplay-template-card.is-selected { border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
+.config-root .template-blank-card { border-style: dashed; }
+.config-root .template-blank-card:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent-soft) 22%, var(--bg-soft)); }
+.config-root .template-blank-preview {
+  display: grid;
+  min-width: 0;
+  place-items: center;
+  border-right: 1px dashed var(--border-strong);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 11%, transparent) 25%, transparent 25%) 0 0 / 22px 22px,
+    linear-gradient(315deg, color-mix(in srgb, var(--accent) 8%, transparent) 25%, transparent 25%) 0 0 / 22px 22px,
+    var(--surface);
+}
+.config-root .template-blank-preview > span {
+  display: grid;
+  width: 54px;
+  height: 54px;
+  place-items: center;
+  border: 1px solid var(--accent);
+  border-radius: 15px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 32px;
+  font-weight: 400;
+  line-height: 1;
+}
 .config-root .gameplay-template-copy { display: flex; min-width: 0; flex-direction: column; justify-content: center; gap: 8px; padding: 16px; }
 .config-root .gameplay-template-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .config-root .gameplay-template-title-row strong { font-size: 17px; }

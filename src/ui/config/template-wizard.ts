@@ -34,7 +34,7 @@ export function createGameplayTemplateWizard(options: GameplayTemplateWizardOpti
   const dialog = el('section', {
     class: 'card template-wizard',
     role: 'dialog',
-    ariaLabel: '从玩法模板创建属性',
+    ariaLabel: '创建属性',
   } as any);
   const header = el('header', { class: 'template-wizard-header' });
   const progress = el('ol', { class: 'template-wizard-progress' });
@@ -181,7 +181,7 @@ export function createGameplayTemplateWizard(options: GameplayTemplateWizardOpti
     ][step - 1];
     header.replaceChildren(
       el('div', {}, [
-        el('span', { class: 'section-kicker', text: '玩法模板' }),
+        el('span', { class: 'section-kicker', text: step === 1 ? '创建属性' : '玩法模板' }),
         el('h2', { text: copy[0] }),
         el('p', { text: copy[1] }),
       ]),
@@ -200,12 +200,35 @@ export function createGameplayTemplateWizard(options: GameplayTemplateWizardOpti
   function renderTemplateCards(): void {
     const intro = el('div', { class: 'template-library-intro' }, [
       el('div', {}, [
-        el('h3', { text: '选择一种直播玩法' }),
-        el('p', { text: '模板会一次生成属性、礼物规则、定时器和推荐的 OBS 外观，创建后仍可逐项修改。' }),
+        el('h3', { text: '选择创建方式' }),
+        el('p', { text: '套用模板可以快速开始；从空白创建则由你逐项配置属性、礼物规则、定时器和 OBS 外观。' }),
       ]),
-      el('button', { class: 'btn ghost template-blank-button', type: 'button', text: '创建空白属性（高级）', onclick: () => { close(); options.onBlank(); } }),
     ]);
     const grid = el('div', { class: 'gameplay-template-grid' });
+    const blankCard = el('button', {
+      class: 'gameplay-template-card template-blank-card',
+      type: 'button',
+      ariaLabel: '从空白创建属性',
+    } as any) as HTMLButtonElement;
+    blankCard.onclick = () => { close(); options.onBlank(); };
+    blankCard.append(
+      el('span', { class: 'template-blank-preview', ariaHidden: 'true' } as any, [
+        el('span', { text: '+' }),
+      ]),
+      el('span', { class: 'gameplay-template-copy' }, [
+        el('span', { class: 'gameplay-template-title-row' }, [
+          el('strong', { text: '从空白创建' }),
+          el('small', { text: '完全自定义' }),
+        ]),
+        el('span', { class: 'gameplay-template-summary', text: '不套用任何玩法设定，打开完整属性工作台，从零配置想要的互动效果。' }),
+        el('span', { class: 'gameplay-template-facts' }, [
+          el('small', { text: '不预填规则' }),
+          el('small', { text: '所有功能可用' }),
+        ]),
+      ]),
+      el('span', { class: 'gameplay-template-check', text: '创建' }),
+    );
+    grid.append(blankCard);
     for (const template of GAMEPLAY_TEMPLATES) {
       const selected = selectedTemplate?.id === template.id;
       const card = el('button', {
@@ -543,4 +566,3 @@ function createResultPreview(result: GameplayTemplateBuildResult): HTMLElement {
 function transparentPixel(): string {
   return 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 }
-
