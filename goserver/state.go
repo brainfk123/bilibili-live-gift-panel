@@ -33,6 +33,14 @@ type attributeDisplayState struct {
 	RightLabel   string   `json:"rightLabel,omitempty"`
 }
 
+type displaySceneState struct {
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	AttributeNames []string `json:"attributeNames"`
+	Layout         string   `json:"layout"`
+	ThemeID        string   `json:"themeId"`
+}
+
 type giftRule struct {
 	ID            string   `json:"id"`
 	GiftID        int      `json:"giftId"`
@@ -169,6 +177,7 @@ type settingsState struct {
 type appState struct {
 	RoomID         string              `json:"roomId"`
 	Attributes     []attributeState    `json:"attributes"`
+	DisplayScenes  []displaySceneState `json:"displayScenes"`
 	Rules          []giftRule          `json:"rules"`
 	TimerRules     []timerRule         `json:"timerRules"`
 	FormulaPresets []formulaPreset     `json:"formulaPresets"`
@@ -200,6 +209,7 @@ func defaultAppState() appState {
 	autoUpdate := true
 	return appState{
 		Attributes:     []attributeState{},
+		DisplayScenes:  []displaySceneState{},
 		Rules:          []giftRule{},
 		TimerRules:     []timerRule{},
 		FormulaPresets: []formulaPreset{},
@@ -228,6 +238,9 @@ func defaultAppState() appState {
 func normalizeAppState(state *appState) {
 	if state.Attributes == nil {
 		state.Attributes = []attributeState{}
+	}
+	if state.DisplayScenes == nil {
+		state.DisplayScenes = []displaySceneState{}
 	}
 	if state.Rules == nil {
 		state.Rules = []giftRule{}
@@ -297,6 +310,18 @@ func normalizeAppState(state *appState) {
 			}
 		}
 	}
+	for index := range state.DisplayScenes {
+		scene := &state.DisplayScenes[index]
+		scene.ID = strings.TrimSpace(scene.ID)
+		scene.Name = strings.TrimSpace(scene.Name)
+		scene.AttributeNames = normalizeStrings(scene.AttributeNames)
+		if scene.Layout != "grid" {
+			scene.Layout = "stack"
+		}
+		if !isDisplayThemeID(scene.ThemeID) {
+			scene.ThemeID = state.Settings.DefaultDisplayThemeID
+		}
+	}
 	if state.Settings.ShowTutorial == nil {
 		showTutorial := !(strings.TrimSpace(state.RoomID) != "" && len(state.Attributes) > 0 && len(state.Rules) > 0)
 		state.Settings.ShowTutorial = &showTutorial
@@ -353,6 +378,26 @@ func normalizeGiftIDs(ids []int) []int {
 	}
 	if len(result) == 0 {
 		return nil
+	}
+	return result
+}
+
+func normalizeStrings(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
 	}
 	return result
 }

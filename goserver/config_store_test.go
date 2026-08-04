@@ -230,6 +230,56 @@ func TestConfigStorePersistsGameplayTemplateDisplayMetadata(t *testing.T) {
 	}
 }
 
+func TestConfigStorePersistsDisplayScenes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store := &configStore{path: path}
+	payload := `{
+        "attributes":[
+            {"name":"生命值","value":100,"unit":"none","format":"number","decimals":0,"suffix":""},
+            {"name":"能量","value":50,"unit":"none","format":"number","decimals":0,"suffix":""}
+        ],
+        "displayScenes":[{
+            "id":"scene-status","name":"战斗状态","attributeNames":["能量","生命值"],"layout":"grid","themeId":"neon"
+        }]
+    }`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", response.Code, response.Body.String())
+	}
+
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.DisplayScenes) != 1 {
+		t.Fatalf("display scenes = %d, want 1", len(state.DisplayScenes))
+	}
+	scene := state.DisplayScenes[0]
+	if scene.Name != "战斗状态" || scene.Layout != "grid" || scene.ThemeID != "neon" {
+		t.Fatalf("unexpected display scene: %#v", scene)
+	}
+	if len(scene.AttributeNames) != 2 || scene.AttributeNames[0] != "能量" || scene.AttributeNames[1] != "生命值" {
+		t.Fatalf("scene attribute order = %#v", scene.AttributeNames)
+	}
+}
+
+func TestConfigStoreRejectsDisplaySceneWithMissingAttribute(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{
+        "attributes":[{"name":"生命值","value":100,"unit":"none","format":"number","decimals":0,"suffix":""}],
+        "displayScenes":[{"id":"scene-bad","name":"错误面板","attributeNames":["不存在"],"layout":"stack","themeId":"glass"}]
+    }`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "不存在的属性") {
+		t.Fatalf("error does not explain the missing attribute: %s", response.Body.String())
+	}
+}
+
 func TestConfigStoreRejectsInvalidFormulaPresetContext(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	payload := `{

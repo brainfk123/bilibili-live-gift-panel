@@ -1,4 +1,4 @@
-import { AppState, Attribute, AttributeDisplay, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson } from '../../types';
+import { AppState, Attribute, AttributeDisplay, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson } from '../../types';
 import { consumeConfigMigrationRequired, loadState, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { el, fieldControl, inputField, toast } from '../common';
@@ -44,6 +44,7 @@ import {
 import { createGameplayTemplateWizard } from './template-wizard';
 import type { GameplayTemplateBuildResult } from '../../gameplay-templates';
 import { DISPLAY_THEMES, getDisplayTheme } from '../../display-themes';
+import { createDisplaySceneId, displaySceneUrl, MAX_DISPLAY_SCENE_ATTRIBUTES } from '../../display-scenes';
 
 interface SelectedGiftRule {
   gift: GiftInfo;
@@ -474,6 +475,7 @@ export function mountConfig(root: HTMLElement): void {
     renderHeaderStatus();
     renderConnectionWorkspace();
     renderAttributesWorkspace();
+    renderDisplayScenes();
     renderGiftHistory();
     renderAdvancedSettings();
     renderGuide();
@@ -807,6 +809,10 @@ export function mountConfig(root: HTMLElement): void {
       state.attributes.splice(index, 1);
       state.rules = state.rules.filter((rule) => rule.attributeName !== attribute.name);
       state.timerRules = state.timerRules.filter((rule) => rule.attributeName !== attribute.name);
+      state.displayScenes = state.displayScenes.flatMap((scene) => {
+        const attributeNames = scene.attributeNames.filter((name) => name !== attribute.name);
+        return attributeNames.length > 0 ? [{ ...scene, attributeNames }] : [];
+      });
       save();
       render();
       toast('属性已删除', root);
@@ -952,6 +958,251 @@ export function mountConfig(root: HTMLElement): void {
 
     card.append(title, formulas, obsRow);
     return card;
+  }
+
+  function renderDisplayScenes(): void {
+    const section = el('section', { class: 'display-scenes-section' });
+    const headingRow = el('div', { class: 'display-scenes-heading' });
+    const addButton = el('button', { class: 'btn', type: 'button', text: '+ 新建组合面板' }) as HTMLButtonElement;
+    addButton.disabled = state.attributes.length < 2;
+    addButton.title = addButton.disabled ? '至少创建 2 个属性后才能组合' : '';
+    addButton.onclick = () => openDisplaySceneEditor();
+    headingRow.append(
+      sectionHeading('直播输出', 'OBS 组合面板', '把多个现有属性放进同一个直播画面；不会复制数值或规则，单属性链接仍可继续使用。'),
+      addButton,
+    );
+    section.append(headingRow);
+
+    if (state.attributes.length < 2) {
+      section.append(el('div', { class: 'display-scenes-prerequisite' }, [
+        el('strong', { text: '还需要至少 2 个属性' }),
+        el('span', { text: '创建第二个属性后，就能把它们组合为纵向或双列面板。' }),
+      ]));
+    } else if (state.displayScenes.length === 0) {
+      section.append(emptyState('还没有组合面板。新建后会得到一个独立 OBS 链接。'));
+    } else {
+      const grid = el('div', { class: 'display-scene-list' });
+      state.displayScenes.forEach((scene, index) => grid.append(renderDisplaySceneCard(scene, index)));
+      section.append(grid);
+    }
+    content.append(section);
+  }
+
+  function renderDisplaySceneCard(scene: DisplayScene, index: number): HTMLElement {
+    const theme = getDisplayTheme(scene.themeId);
+    const obsUrl = displaySceneUrl(location.origin, scene.id);
+    const card = el('article', { class: 'display-scene-card' });
+    const preview = el('div', { class: `display-scene-preview ${theme.previewClass} is-${scene.layout}` });
+    preview.style.setProperty('--scene-preview-accent', theme.accent);
+    preview.style.setProperty('--scene-preview-surface', theme.surface);
+    for (const attributeName of scene.attributeNames.slice(0, 4)) {
+      const attribute = state.attributes.find((candidate) => candidate.name === attributeName);
+      preview.append(el('span', {}, [
+        el('small', { text: attributeName }),
+        el('strong', { text: attribute ? formatValue(attribute.value, attribute) : '—' }),
+      ]));
+    }
+    if (scene.attributeNames.length > 4) preview.append(el('em', { text: `+${scene.attributeNames.length - 4}` }));
+
+    const copyButton = el('button', { class: 'btn display-scene-copy', type: 'button', text: '复制 OBS 链接' }) as HTMLButtonElement;
+    const obsInput = el('input', { class: 'field-input display-scene-url', value: obsUrl, readOnly: true, ariaLabel: `${scene.name} 的 OBS 链接` } as any) as HTMLInputElement;
+    copyButton.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(obsUrl);
+        toast(`“${scene.name}”的组合链接已复制`, root);
+      } catch {
+        obsInput.select();
+        toast('请按 Ctrl+C 复制地址', root);
+      }
+    };
+    const editButton = el('button', { class: 'btn ghost', type: 'button', text: '编辑' }) as HTMLButtonElement;
+    editButton.onclick = () => openDisplaySceneEditor(index);
+    const deleteButton = el('button', { class: 'btn text-danger', type: 'button', text: '删除' }) as HTMLButtonElement;
+    deleteButton.onclick = () => {
+      if (!confirm(`删除组合面板“${scene.name}”？属性、规则和单属性 OBS 链接不会受影响。`)) return;
+      state.displayScenes.splice(index, 1);
+      save();
+      render();
+      toast('组合面板已删除', root);
+    };
+
+    card.append(
+      preview,
+      el('div', { class: 'display-scene-card-body' }, [
+        el('div', { class: 'display-scene-card-head' }, [
+          el('div', {}, [
+            el('h3', { text: scene.name }),
+            el('span', { text: `${scene.layout === 'grid' ? '双列布局' : '纵向布局'} · ${theme.name} · ${scene.attributeNames.length} 个属性` }),
+          ]),
+          el('div', { class: 'display-scene-card-actions' }, [editButton, deleteButton]),
+        ]),
+        el('div', { class: 'display-scene-attributes' }, scene.attributeNames.map((name) => el('span', { text: name }))),
+        el('div', { class: 'display-scene-link-row' }, [obsInput, copyButton]),
+      ]),
+    );
+    return card;
+  }
+
+  function openDisplaySceneEditor(index?: number): void {
+    activeGuide?.dispose();
+    activeGuide = null;
+    root.querySelector('.display-scene-overlay')?.remove();
+    editorOpen = true;
+    const original = index === undefined ? undefined : state.displayScenes[index];
+    let selectedNames = original
+      ? [...original.attributeNames]
+      : state.attributes.slice(0, 2).map((attribute) => attribute.name);
+    let layout: DisplaySceneLayout = original?.layout ?? 'grid';
+    let themeId: DisplayThemeId = original?.themeId ?? state.settings.defaultDisplayThemeId;
+    const overlay = el('div', { class: 'overlay display-scene-overlay' });
+    const dialog = el('section', { class: 'card display-scene-dialog', role: 'dialog', ariaLabel: original ? `编辑组合面板 ${original.name}` : '新建组合面板' } as any);
+    const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭组合面板编辑器' } as any) as HTMLButtonElement;
+    const close = (): void => {
+      overlay.remove();
+      editorOpen = false;
+      renderGuide();
+    };
+    closeButton.onclick = close;
+    overlay.onpointerdown = (event) => { overlay.dataset.pointerOutside = String(event.target === overlay); };
+    overlay.onclick = (event) => {
+      const shouldClose = overlay.dataset.pointerOutside === 'true' && event.target === overlay;
+      overlay.dataset.pointerOutside = 'false';
+      if (shouldClose) close();
+    };
+
+    const nameInput = inputField('组合面板名称', original?.name ?? `组合面板 ${state.displayScenes.length + 1}`);
+    nameInput.maxLength = 40;
+    const layoutButtons = new Map<DisplaySceneLayout, HTMLButtonElement>();
+    const layoutControl = el('div', { class: 'display-scene-layout-options' });
+    const refreshLayout = (): void => {
+      for (const [candidate, button] of layoutButtons) {
+        const active = candidate === layout;
+        button.classList.toggle('is-selected', active);
+        button.setAttribute('aria-pressed', String(active));
+      }
+    };
+    ([
+      ['stack', '纵向布局', '适合窄画布，属性从上到下排列'],
+      ['grid', '双列布局', '适合横向画布，同时查看更多属性'],
+    ] as const).forEach(([value, label, description]) => {
+      const button = el('button', { class: 'display-scene-layout-option', type: 'button', ariaPressed: 'false' } as any) as HTMLButtonElement;
+      button.append(el('span', { class: `display-scene-layout-icon is-${value}` }, [el('i'), el('i')]), el('strong', { text: label }), el('small', { text: description }));
+      button.onclick = () => { layout = value; refreshLayout(); };
+      layoutButtons.set(value, button);
+      layoutControl.append(button);
+    });
+    refreshLayout();
+
+    const selectionStatus = el('strong', { class: 'display-scene-selection-count' });
+    const attributeGrid = el('div', { class: 'display-scene-attribute-picker' });
+    const attributeButtons = new Map<string, HTMLButtonElement>();
+    const refreshAttributes = (): void => {
+      selectionStatus.textContent = `已选择 ${selectedNames.length} / ${MAX_DISPLAY_SCENE_ATTRIBUTES}`;
+      for (const [name, button] of attributeButtons) {
+        const order = selectedNames.indexOf(name);
+        button.classList.toggle('is-selected', order >= 0);
+        button.setAttribute('aria-pressed', String(order >= 0));
+        const marker = button.querySelector('.display-scene-attribute-order');
+        if (marker) marker.textContent = order >= 0 ? String(order + 1) : '+';
+      }
+    };
+    for (const attribute of state.attributes) {
+      const button = el('button', { class: 'display-scene-attribute-option', type: 'button', ariaPressed: 'false' } as any) as HTMLButtonElement;
+      button.append(
+        el('span', { class: 'display-scene-attribute-order' }),
+        el('span', {}, [el('strong', { text: attribute.name }), el('small', { text: formatValue(attribute.value, attribute) })]),
+      );
+      button.onclick = () => {
+        const position = selectedNames.indexOf(attribute.name);
+        if (position >= 0) selectedNames.splice(position, 1);
+        else if (selectedNames.length < MAX_DISPLAY_SCENE_ATTRIBUTES) selectedNames.push(attribute.name);
+        else toast(`一个组合面板最多显示 ${MAX_DISPLAY_SCENE_ATTRIBUTES} 个属性`, root);
+        refreshAttributes();
+      };
+      attributeButtons.set(attribute.name, button);
+      attributeGrid.append(button);
+    }
+    refreshAttributes();
+
+    const themeControl = createDisplayThemeControl(
+      themeId,
+      (nextThemeId) => { themeId = nextThemeId; },
+      '组合面板皮肤',
+      '只覆盖这个组合链接中的外观，不改变各属性自己的专属链接。',
+    );
+    themeControl.classList.add('display-scene-theme-control');
+
+    const cancelButton = el('button', { class: 'btn ghost', type: 'button', text: '取消' }) as HTMLButtonElement;
+    cancelButton.onclick = close;
+    const saveButton = el('button', { class: 'btn', type: 'button', text: original ? '保存修改' : '创建组合面板' }) as HTMLButtonElement;
+    saveButton.onclick = async () => {
+      const name = nameInput.value.trim();
+      if (!name) {
+        toast('请填写组合面板名称', root);
+        nameInput.focus();
+        return;
+      }
+      if (state.displayScenes.some((scene, sceneIndex) => sceneIndex !== index && scene.name.toLowerCase() === name.toLowerCase())) {
+        toast('组合面板名称不能重复', root);
+        nameInput.focus();
+        return;
+      }
+      if (selectedNames.length < 2) {
+        toast('请至少选择 2 个属性', root);
+        return;
+      }
+      const nextScene: DisplayScene = {
+        id: original?.id ?? createDisplaySceneId(),
+        name,
+        attributeNames: [...selectedNames],
+        layout,
+        themeId,
+      };
+      const previousScenes = state.displayScenes;
+      state.displayScenes = [...state.displayScenes];
+      if (index === undefined) state.displayScenes.push(nextScene);
+      else state.displayScenes[index] = nextScene;
+      saveButton.disabled = true;
+      saveButton.textContent = '保存中…';
+      try {
+        await saveAndWait();
+      } catch {
+        state.displayScenes = previousScenes;
+        saveButton.disabled = false;
+        saveButton.textContent = original ? '保存修改' : '创建组合面板';
+        return;
+      }
+      overlay.remove();
+      editorOpen = false;
+      render();
+      toast(index === undefined ? '组合面板已创建' : '组合面板已保存', root);
+    };
+
+    dialog.append(
+      el('header', { class: 'display-scene-dialog-header' }, [
+        el('div', {}, [
+          el('span', { class: 'section-kicker', text: 'OBS 组合面板' }),
+          el('h2', { text: original ? `编辑“${original.name}”` : '组合多个属性' }),
+          el('p', { text: '只组合展示，不复制属性数据。编号表示在面板中的显示顺序。' }),
+        ]),
+        closeButton,
+      ]),
+      el('div', { class: 'display-scene-dialog-body' }, [
+        fieldControl(nameInput),
+        el('section', { class: 'display-scene-editor-section' }, [
+          el('div', { class: 'display-scene-editor-heading' }, [el('div', {}, [el('h3', { text: '选择布局' }), el('p', { text: 'OBS 中可随时使用同一个链接切换布局。' })])]),
+          layoutControl,
+        ]),
+        el('section', { class: 'display-scene-editor-section' }, [
+          el('div', { class: 'display-scene-editor-heading' }, [el('div', {}, [el('h3', { text: '选择并排序属性' }), el('p', { text: '至少选择 2 个；取消后重新选择可以调整顺序。' })]), selectionStatus]),
+          attributeGrid,
+        ]),
+        themeControl,
+      ]),
+      el('footer', { class: 'modal-actions display-scene-dialog-actions' }, [cancelButton, saveButton]),
+    );
+    overlay.append(dialog);
+    root.append(overlay);
   }
 
   function renderGiftHistory(): void {
@@ -2413,6 +2664,12 @@ export function mountConfig(root: HTMLElement): void {
     };
     if (index === undefined) state.attributes.push(nextAttribute);
     else state.attributes[index] = nextAttribute;
+    if (originalName && originalName !== name) {
+      state.displayScenes = state.displayScenes.map((scene) => ({
+        ...scene,
+        attributeNames: scene.attributeNames.map((attributeName) => attributeName === originalName ? name : attributeName),
+      }));
+    }
 
     const renamedRules = state.rules.map((rule) => ({
       ...rule,
@@ -2889,6 +3146,7 @@ function configStructureSignature(state: AppState): string {
   return JSON.stringify({
     roomId: state.roomId,
     attributes: state.attributes.map(({ value: _value, ...attribute }) => attribute),
+    displayScenes: state.displayScenes,
     rules: state.rules,
     timerRules: state.timerRules,
     formulaPresets: state.formulaPresets,

@@ -1,3 +1,5 @@
+import type { DisplayTarget } from '../display-scenes';
+
 export const CONFIG_STYLE_ID = 'bilibili-config-style';
 
 export interface AppBootstrapOptions {
@@ -5,7 +7,7 @@ export interface AppBootstrapOptions {
   search: string;
   installFavicon: () => void;
   loadConfigStyles: () => Promise<string>;
-  mountDisplay: (root: HTMLElement, selectedAttributeName?: string) => void;
+  mountDisplay: (root: HTMLElement, target?: DisplayTarget) => void;
   mountConfig: (root: HTMLElement) => void;
 }
 
@@ -40,5 +42,7 @@ export async function startApp(options: AppBootstrapOptions): Promise<void> {
 
   options.document.body.classList.add('display-mode');
   root.classList.add('display-root');
-  options.mountDisplay(root, params.get('attribute') ?? undefined);
+  const attributeName = params.get('attribute') ?? undefined;
+  const sceneId = params.get('scene') ?? undefined;
+  options.mountDisplay(root, attributeName || sceneId ? { attributeName, sceneId } : undefined);
 }

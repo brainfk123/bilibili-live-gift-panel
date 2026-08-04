@@ -7,6 +7,7 @@ import { getDisplayTheme, resolveAttributeDisplayTheme, resolveAttributeDisplayV
 import { createBrandIcon } from '../brand';
 import { el } from '../common';
 import { SequentialBroadcastQueue } from './broadcast-queue';
+import { resolveDisplayTarget, type DisplayTarget } from '../../display-scenes';
 
 const DEFAULT_BROADCAST_MESSAGE = '感谢大家的支持，欢迎投喂礼物';
 const GIFT_BROADCAST_DURATION = 5500;
@@ -28,7 +29,7 @@ export function calculateFittedFontSize(
   return Math.max(minimumFontSize, Math.floor(preferredFontSize * availableWidth / contentWidth));
 }
 
-export function mountDisplay(root: HTMLElement, selectedAttributeName?: string): void {
+export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): void {
   let state = loadState();
   let connectionState: RuntimeConnectionState = 'idle';
   let lastLogKey = state.log[0] ? logKey(state.log[0]) : '';
@@ -41,9 +42,7 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
   stack.append(panel);
   root.replaceChildren(stack);
 
-  const visibleAttributes = (): Attribute[] => selectedAttributeName
-    ? state.attributes.filter((attribute) => attribute.name === selectedAttributeName)
-    : state.attributes;
+  const currentTarget = () => resolveDisplayTarget(state, target);
 
   function giftBroadcastDuration(pendingCount: number): number {
     if (pendingCount >= 12) return 2200;
@@ -73,23 +72,39 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
     panel.replaceChildren();
     attrEls.clear();
     broadcastStages.clear();
-    const attributes = visibleAttributes();
-    const panelThemeId = attributes.length === 1
+    const resolved = currentTarget();
+    const attributes = resolved.attributes;
+    const scene = resolved.scene;
+    stack.classList.toggle('is-scene', Boolean(scene));
+    stack.classList.toggle('is-scene-grid', scene?.layout === 'grid');
+    panel.classList.toggle('is-scene', Boolean(scene));
+    panel.classList.toggle('scene-layout-grid', scene?.layout === 'grid');
+    panel.classList.toggle('scene-layout-stack', scene?.layout === 'stack');
+    const panelThemeId = scene?.themeId ?? (attributes.length === 1
       ? resolveAttributeDisplayTheme(attributes[0], state.settings)
-      : state.settings.defaultDisplayThemeId;
+      : state.settings.defaultDisplayThemeId);
     panel.dataset.theme = panelThemeId;
-    panel.classList.toggle('has-mixed-themes', attributes.length > 1);
+    panel.classList.toggle('has-mixed-themes', attributes.length > 1 && !scene);
+    if (scene) {
+      panel.append(el('header', { class: 'display-scene-header' }, [
+        el('div', {}, [
+          el('span', { text: '组合面板' }),
+          el('h1', { text: scene.name, title: scene.name }),
+        ]),
+        el('strong', { text: `${attributes.length} 个属性` }),
+      ]));
+    }
     if (attributes.length === 0) {
       const empty = el('div', { class: 'display-empty' });
       empty.append(
         createBrandIcon(64, 'display-empty-brand-icon'),
-        el('div', { text: selectedAttributeName ? `找不到属性“${selectedAttributeName}”` : '还没有可显示的属性' }),
+        el('div', { text: resolved.missingLabel ?? '还没有可显示的属性' }),
       );
       panel.append(empty);
     }
     for (const attr of attributes) {
       const variant = resolveAttributeDisplayVariant(attr);
-      const themeId = resolveAttributeDisplayTheme(attr, state.settings);
+      const themeId = scene?.themeId ?? resolveAttributeDisplayTheme(attr, state.settings);
       const summary = el('div', { class: 'attr-summary' }, [
         el('div', { class: 'attr-name', text: attr.display?.title?.trim() || attr.name, title: attr.display?.title?.trim() || attr.name }),
         el('div', { class: 'attr-value' }),
@@ -143,10 +158,12 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
     root.style.setProperty('--accent2', state.settings.accentColor);
     root.style.setProperty('--panel-opacity', String(opacity));
     root.style.setProperty('--panel-surface-opacity', String(opacity * 0.62));
-    const attributes = visibleAttributes();
-    const panelTheme = getDisplayTheme(attributes.length === 1
+    const resolved = currentTarget();
+    const attributes = resolved.attributes;
+    const scene = resolved.scene;
+    const panelTheme = getDisplayTheme(scene?.themeId ?? (attributes.length === 1
       ? resolveAttributeDisplayTheme(attributes[0], state.settings)
-      : state.settings.defaultDisplayThemeId);
+      : state.settings.defaultDisplayThemeId));
     panel.dataset.theme = panelTheme.id;
     panel.style.setProperty('--theme-accent', panelTheme.id === 'glass' ? state.settings.accentColor : panelTheme.accent);
     panel.style.setProperty('--theme-surface', panelTheme.surface);
@@ -155,7 +172,7 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
     for (const attr of attributes) {
       const block = attrEls.get(attr.name);
       if (!block) continue;
-      const theme = getDisplayTheme(resolveAttributeDisplayTheme(attr, state.settings));
+      const theme = getDisplayTheme(scene?.themeId ?? resolveAttributeDisplayTheme(attr, state.settings));
       const variant = resolveAttributeDisplayVariant(attr);
       block.dataset.theme = theme.id;
       block.dataset.variant = variant;
@@ -228,7 +245,6 @@ export function mountDisplay(root: HTMLElement, selectedAttributeName?: string):
   }
 
   function enqueueGiftBroadcast(entry: LogEntry): void {
-    if (selectedAttributeName && entry.attributeName !== selectedAttributeName) return;
     if (!attrEls.has(entry.attributeName)) return;
     ensureBroadcastQueue(entry.attributeName).enqueue(entry);
   }
@@ -336,6 +352,7 @@ function entriesSince(log: LogEntry[], previousKey: string): LogEntry[] {
 function displayStructureSignature(state: AppState): string {
   return JSON.stringify({
     attributes: state.attributes.map(({ value: _value, ...attribute }) => attribute),
+    displayScenes: state.displayScenes,
     rules: state.rules,
     giftCatalog: state.giftCatalog,
     settings: state.settings,

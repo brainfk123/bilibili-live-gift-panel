@@ -1439,7 +1439,7 @@ describe('single-page configuration rendering', () => {
 
     vi.useFakeTimers();
     const displayRoot = new TestElement('div');
-    mountDisplay(displayRoot as unknown as HTMLElement, '加班时间');
+    mountDisplay(displayRoot as unknown as HTMLElement, { attributeName: '加班时间' });
     expect(textOf(displayRoot)).not.toContain('有剩余时每分钟减少');
     expect(displayRoot.querySelectorAll('.display-gift-rule')).toHaveLength(0);
     vi.useRealTimers();
@@ -1909,6 +1909,35 @@ describe('single-page configuration rendering', () => {
   });
 });
 
+describe('OBS combination scene configuration', () => {
+  it('creates a two-attribute scene and exposes its dedicated OBS link', async () => {
+    const configured = defaultState();
+    configured.settings.showTutorial = false;
+    configured.attributes = [
+      { name: '生命值', value: 100, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      { name: '能量', value: 50, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+    ];
+    await saveState(configured);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '+ 新建组合面板')?.onclick?.();
+    expect(root.querySelector('.display-scene-dialog')).not.toBeNull();
+    expect(root.querySelectorAll('.display-scene-attribute-option').filter((item) => item.className.includes('is-selected'))).toHaveLength(2);
+    findByText(root, '创建组合面板')?.onclick?.();
+
+    await vi.waitFor(() => {
+      expect(loadState().displayScenes).toHaveLength(1);
+      expect(root.querySelector('.display-scene-url')).not.toBeNull();
+    });
+    expect(loadState().displayScenes[0]).toEqual(expect.objectContaining({
+      name: '组合面板 1', attributeNames: ['生命值', '能量'], layout: 'grid',
+    }));
+    const url = root.querySelector('.display-scene-url') as TestElement;
+    expect(url.value).toContain('?mode=display&scene=scene-');
+  });
+});
+
 describe('OBS attribute display', () => {
   it('formats positive, negative, and zero deltas with the correct sign', () => {
     const attr = { name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' } as const;
@@ -1944,7 +1973,7 @@ describe('OBS attribute display', () => {
     }));
     vi.useFakeTimers();
     const root = new TestElement('div');
-    mountDisplay(root as unknown as HTMLElement, '积分');
+    mountDisplay(root as unknown as HTMLElement, { attributeName: '积分' });
 
     expect(textOf(root)).toContain('积分');
     expect(textOf(root)).toContain('7');
@@ -1956,6 +1985,35 @@ describe('OBS attribute display', () => {
     expect(root.querySelector('.attr')?.querySelector('.broadcast-ticker')).not.toBeNull();
     expect(root.querySelector('.display-broadcast-area')).toBeNull();
     expect(textOf(root)).not.toContain('加班时间');
+    vi.useRealTimers();
+  });
+
+  it('renders a saved combination scene in its selected order and grid layout', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state(),
+      settings: { ...defaultState().settings, defaultDisplayThemeId: 'glass' },
+      attributes: [
+        { name: '生命值', value: 80, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+        { name: '能量', value: 45, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+        { name: '隐藏属性', value: 9, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      ],
+      displayScenes: [{
+        id: 'scene-status', name: '战斗状态', attributeNames: ['能量', '生命值'], layout: 'grid', themeId: 'neon',
+      }],
+      rules: [],
+    }));
+    vi.useFakeTimers();
+    const root = new TestElement('div');
+    mountDisplay(root as unknown as HTMLElement, { sceneId: 'scene-status' });
+
+    expect(root.querySelector('.display-stack')?.className).toContain('is-scene-grid');
+    expect(root.querySelector('.panel')?.className).toContain('scene-layout-grid');
+    expect(root.querySelector('.panel')?.dataset.theme).toBe('neon');
+    expect(root.querySelectorAll('.attr')).toHaveLength(2);
+    expect(textOf(root)).toContain('战斗状态');
+    expect(textOf(root)).toContain('能量');
+    expect(textOf(root)).toContain('生命值');
+    expect(textOf(root)).not.toContain('隐藏属性');
     vi.useRealTimers();
   });
 
@@ -1971,7 +2029,7 @@ describe('OBS attribute display', () => {
     }));
     vi.useFakeTimers();
     const root = new TestElement('div');
-    mountDisplay(root as unknown as HTMLElement, '应援目标');
+    mountDisplay(root as unknown as HTMLElement, { attributeName: '应援目标' });
 
     expect(root.querySelector('.panel')?.dataset.theme).toBe('neon');
     expect(root.querySelector('.attr')?.dataset.variant).toBe('progress');
@@ -1994,7 +2052,7 @@ describe('OBS attribute display', () => {
     }));
     vi.useFakeTimers();
     const root = new TestElement('div');
-    mountDisplay(root as unknown as HTMLElement, '早播');
+    mountDisplay(root as unknown as HTMLElement, { attributeName: '早播' });
 
     const formulaName = root.querySelector('.display-formula-name');
     expect(formulaName?.className).toContain('is-long');

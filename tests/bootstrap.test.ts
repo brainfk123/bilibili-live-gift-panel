@@ -77,7 +77,23 @@ describe('application bootstrap', () => {
       mountConfig: vi.fn(),
     });
 
-    expect(mountDisplay).toHaveBeenCalledWith(document.app, '加班时间');
+    expect(mountDisplay).toHaveBeenCalledWith(document.app, { attributeName: '加班时间', sceneId: undefined });
+  });
+
+  it('passes a selected combination scene to display mode', async () => {
+    const document = new FakeDocument();
+    const mountDisplay = vi.fn();
+
+    await startApp({
+      document: document as unknown as Document,
+      search: '?mode=display&scene=scene-boss',
+      installFavicon: vi.fn(),
+      loadConfigStyles: vi.fn(async () => ''),
+      mountDisplay,
+      mountConfig: vi.fn(),
+    });
+
+    expect(mountDisplay).toHaveBeenCalledWith(document.app, { attributeName: undefined, sceneId: 'scene-boss' });
   });
 
   it('injects configuration styles before mounting config mode', async () => {

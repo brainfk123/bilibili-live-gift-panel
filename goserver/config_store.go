@@ -126,6 +126,38 @@ func validateAppState(state appState) error {
 			}
 		}
 	}
+	sceneIDs := make(map[string]struct{}, len(state.DisplayScenes))
+	sceneNames := make(map[string]struct{}, len(state.DisplayScenes))
+	for _, scene := range state.DisplayScenes {
+		id := strings.TrimSpace(scene.ID)
+		name := strings.TrimSpace(scene.Name)
+		if id == "" || name == "" {
+			return fmt.Errorf("组合面板的 ID 和名称不能为空")
+		}
+		if _, exists := sceneIDs[id]; exists {
+			return fmt.Errorf("组合面板 ID 不能重复：%s", id)
+		}
+		sceneIDs[id] = struct{}{}
+		nameKey := strings.ToLower(name)
+		if _, exists := sceneNames[nameKey]; exists {
+			return fmt.Errorf("组合面板名称不能重复：%s", name)
+		}
+		sceneNames[nameKey] = struct{}{}
+		if len(scene.AttributeNames) == 0 || len(scene.AttributeNames) > 12 {
+			return fmt.Errorf("组合面板 %q 必须包含 1 到 12 个属性", name)
+		}
+		for _, attributeName := range scene.AttributeNames {
+			if _, exists := attributeNames[attributeName]; !exists {
+				return fmt.Errorf("组合面板 %q 引用了不存在的属性 %q", name, attributeName)
+			}
+		}
+		if scene.Layout != "stack" && scene.Layout != "grid" {
+			return fmt.Errorf("组合面板 %q 的布局无效", name)
+		}
+		if !isDisplayThemeID(scene.ThemeID) {
+			return fmt.Errorf("组合面板 %q 的 OBS 主题无效", name)
+		}
+	}
 	for _, rule := range state.Rules {
 		attribute := state.findAttribute(rule.AttributeName)
 		if attribute == nil {

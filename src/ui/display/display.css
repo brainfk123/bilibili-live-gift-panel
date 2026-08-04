@@ -20,6 +20,8 @@ body.display-mode { overflow: hidden; background: transparent; }
 }
 .display-stack.center { left: 50%; transform: translateX(-50%); }
 .display-stack.right { right: 20px; left: auto; }
+.display-stack.is-scene { width: min(600px, calc(100% - 40px)); }
+.display-stack.is-scene-grid { width: min(1040px, calc(100% - 40px)); }
 
 .panel {
   position: relative;
@@ -45,6 +47,32 @@ body.display-mode { overflow: hidden; background: transparent; }
   box-shadow: 0 0 18px color-mix(in srgb, var(--accent, #fb7299) 22%, transparent);
   pointer-events: none;
 }
+
+.display-scene-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  min-width: 0;
+  padding: 4px 4px 12px;
+  border-bottom: 1px solid var(--theme-outline, var(--panel-outline));
+  color: var(--theme-text, rgba(255,255,255,.88));
+}
+.display-scene-header > div { min-width: 0; }
+.display-scene-header span { display: block; color: var(--theme-muted, rgba(255,255,255,.58)); font-size: 15px; }
+.display-scene-header h1 { overflow: hidden; margin-top: 3px; font-size: 28px; text-overflow: ellipsis; white-space: nowrap; }
+.display-scene-header > strong { flex: 0 0 auto; color: var(--theme-accent, var(--accent)); font-size: 16px; }
+.panel.scene-layout-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+.panel.scene-layout-grid .display-scene-header,
+.panel.scene-layout-grid .display-empty,
+.panel.scene-layout-grid .conn { grid-column: 1 / -1; }
+.panel.scene-layout-grid .attr { height: 100%; padding: 14px; border: 1px solid var(--theme-outline, var(--panel-outline)); border-radius: 18px; }
+.panel.scene-layout-grid .attr + .attr { padding-top: 14px; }
+.panel.scene-layout-grid .attr-summary { min-height: 118px; padding: 18px; }
+.panel.scene-layout-grid .attr-name { font-size: 24px; }
+.panel.scene-layout-grid .display-gift-rules { grid-template-columns: 1fr; }
+.panel.scene-layout-grid .display-gift-rule { min-height: 80px; }
+.panel.scene-layout-grid .broadcast-ticker { margin-top: auto; }
 
 .attr { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
 .attr + .attr { padding-top: 20px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
@@ -456,6 +484,14 @@ body.display-mode { overflow: hidden; background: transparent; }
   .broadcast-content.is-entering,
   .broadcast-content.is-leaving,
   .attr.flash .attr-value { animation-duration: 0.01ms; }
+}
+
+@media (max-width: 760px) {
+  .display-stack.is-scene-grid { width: min(600px, calc(100% - 40px)); }
+  .panel.scene-layout-grid { grid-template-columns: 1fr; }
+  .panel.scene-layout-grid .display-scene-header,
+  .panel.scene-layout-grid .display-empty,
+  .panel.scene-layout-grid .conn { grid-column: 1; }
 }
 
 /* Keep theme tokens authoritative over the shared ticker typography above. */

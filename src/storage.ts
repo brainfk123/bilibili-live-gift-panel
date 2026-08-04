@@ -1,5 +1,6 @@
 import { AppState, MAX_LOG } from './types';
 import { normalizeDisplayThemeId } from './display-themes';
+import { normalizeDisplayScenes } from './display-scenes';
 
 const CONFIG_ENDPOINT = '/api/config';
 let cachedState: AppState | null = null;
@@ -9,6 +10,7 @@ let configMigrationRequired = false;
 export const defaultState = (): AppState => ({
   roomId: '',
   attributes: [],
+  displayScenes: [],
   rules: [],
   timerRules: [],
   formulaPresets: [],
@@ -120,21 +122,23 @@ function normalizeState(parsed: Partial<AppState>): AppState {
   };
   settings.panelOpacity = Math.min(100, Math.max(10, Number(settings.panelOpacity) || base.settings.panelOpacity));
   settings.defaultDisplayThemeId = normalizeDisplayThemeId(settings.defaultDisplayThemeId);
+  const attributes = (parsed.attributes ?? base.attributes).map((attribute) => (
+    attribute.display
+      ? {
+        ...attribute,
+        display: {
+          ...attribute.display,
+          themeId: normalizeDisplayThemeId(attribute.display.themeId ?? settings.defaultDisplayThemeId),
+        },
+      }
+      : attribute
+  ));
   return {
     ...base,
     ...parsed,
     settings,
-    attributes: (parsed.attributes ?? base.attributes).map((attribute) => (
-      attribute.display
-        ? {
-          ...attribute,
-          display: {
-            ...attribute.display,
-            themeId: normalizeDisplayThemeId(attribute.display.themeId ?? settings.defaultDisplayThemeId),
-          },
-        }
-        : attribute
-    )),
+    attributes,
+    displayScenes: normalizeDisplayScenes(parsed.displayScenes, attributes, settings.defaultDisplayThemeId),
     rules: parsed.rules ?? base.rules,
     timerRules: parsed.timerRules ?? base.timerRules,
     formulaPresets: parsed.formulaPresets ?? base.formulaPresets,

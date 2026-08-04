@@ -4,6 +4,16 @@ export type DisplayThemeId = 'minimal' | 'glass' | 'rpg' | 'pixel' | 'neon' | 'k
 
 export type DisplayVariant = 'number' | 'timer' | 'progress' | 'health' | 'resource' | 'tug';
 
+export type DisplaySceneLayout = 'stack' | 'grid';
+
+export interface DisplayScene {
+  id: string;
+  name: string;
+  attributeNames: string[];
+  layout: DisplaySceneLayout;
+  themeId: DisplayThemeId;
+}
+
 export interface AttributeDisplay {
   variant: DisplayVariant;
   themeId?: DisplayThemeId;
@@ -146,6 +156,7 @@ export interface Settings {
 export interface AppState {
   roomId: string;
   attributes: Attribute[];
+  displayScenes: DisplayScene[];
   rules: GiftRule[];
   timerRules: TimerRule[];
   formulaPresets: FormulaPreset[];
