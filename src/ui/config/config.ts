@@ -10,6 +10,7 @@ import {
   clearContributionLedger,
   getBlindBoxInfo,
   getBiliAuthStatus,
+  getHostedChangelog,
   getRoomGiftCatalog,
   getRuntimeStatus,
   getUpdateStatus,
@@ -49,6 +50,15 @@ import { createDisplaySceneId, displaySceneUrl, MAX_DISPLAY_SCENE_ATTRIBUTES } f
 import { createActivityWorkspace } from './activity-workspace';
 import { createTrainingCenter } from './training-center';
 import type { TrainingTopicDefinition } from '../../training';
+import {
+  CHANGELOG_RELEASES,
+  changelogReleaseForVersion,
+  latestChangelogRelease,
+  mergeChangelogReleases,
+  shouldShowChangelog,
+  type ChangelogRelease,
+} from '../../changelog';
+import { createChangelogDialog } from './changelog-dialog';
 
 interface SelectedGiftRule {
   gift: GiftInfo;
@@ -63,6 +73,7 @@ interface SelectedGiftRule {
   matchGiftIds?: number[];
   blindBoxName?: string;
   blindBoxStatus?: 'matched' | 'login-required' | 'not-blind-box' | 'error';
+  simulationPreview?: { currentValue: number; result: number };
 }
 
 type GiftAvailability = 'listed' | 'observed' | 'historical';
@@ -103,6 +114,10 @@ export function mountConfig(root: HTMLElement): void {
   };
   let updateRefreshActive = false;
   let refreshUpdateCard: (() => void) | null = null;
+  let changelogAutoEvaluated = false;
+  let changelogOpen = false;
+  let changelogReleases: ChangelogRelease[] = CHANGELOG_RELEASES;
+  let advancedSettingsOpen = false;
   let loginModalOpen = false;
   let loginPollTimer: ReturnType<typeof globalThis.setInterval> | undefined;
   let localStateVersion = 0;
@@ -116,9 +131,10 @@ export function mountConfig(root: HTMLElement): void {
   ]));
   const themeToggle = el('button', { class: 'theme-toggle', type: 'button' }) as HTMLButtonElement;
   const guideToggle = el('button', { class: 'theme-toggle training-toggle', type: 'button', text: '训练任务' }) as HTMLButtonElement;
+  const changelogToggle = el('button', { class: 'theme-toggle changelog-toggle', type: 'button', text: '更新日志' }) as HTMLButtonElement;
   const status = el('div', { class: 'app-status' });
   const headerActions = el('div', { class: 'app-header-actions' });
-  headerActions.append(guideToggle, themeToggle, status);
+  headerActions.append(guideToggle, changelogToggle, themeToggle, status);
   header.append(brand, headerActions);
 
   const content = el('main', { class: 'wizard-content config-page' });
@@ -219,7 +235,16 @@ export function mountConfig(root: HTMLElement): void {
       updateRefreshActive = false;
       refreshUpdateCard?.();
     }
+    maybeOpenChangelog();
     return currentUpdateStatus;
+  }
+
+  async function refreshHostedChangelog(): Promise<void> {
+    try {
+      changelogReleases = mergeChangelogReleases(await getHostedChangelog());
+    } catch {
+      // The bundled current-version note remains available when GitHub is slow or unavailable.
+    }
   }
 
   async function runManualUpdateCheck(): Promise<void> {
@@ -312,6 +337,9 @@ export function mountConfig(root: HTMLElement): void {
   guideToggle.onclick = () => {
     openTrainingCenter();
   };
+  changelogToggle.onclick = () => {
+    openChangelog(currentUpdateStatus.currentVersion);
+  };
 
   function activeTutorialLesson(): TutorialLesson | null {
     return forcedTutorialLesson ?? getTutorialLesson(
@@ -356,7 +384,7 @@ export function mountConfig(root: HTMLElement): void {
       activeEditorWorkspace.setSection(sectionForTutorialLesson(lesson));
     }
     updateTrainingToggle();
-    renderGuide();
+    renderGuide(navigate);
   }
 
   function openTrainingCenter(): void {
@@ -443,7 +471,46 @@ export function mountConfig(root: HTMLElement): void {
     root.append(overlay);
   }
 
-  function renderGuide(): void {
+  function openChangelog(version?: string): void {
+    if (changelogOpen) return;
+    root.querySelector('.changelog-overlay')?.remove();
+    activeGuide?.dispose();
+    activeGuide = null;
+    changelogOpen = true;
+    const release = changelogReleaseForVersion(version, changelogReleases) ?? latestChangelogRelease(changelogReleases);
+    const overlay = createChangelogDialog({
+      currentVersion: release.version,
+      releases: changelogReleases,
+      onClose: (seenVersion) => {
+        changelogOpen = false;
+        if (state.settings.lastSeenChangelogVersion !== seenVersion) {
+          state.settings.lastSeenChangelogVersion = seenVersion;
+          save();
+        }
+        renderGuide();
+      },
+    });
+    root.append(overlay);
+  }
+
+  function maybeOpenChangelog(): void {
+    if (changelogAutoEvaluated) return;
+    const version = currentUpdateStatus.currentVersion;
+    if (!version) return;
+    if (version === 'dev' || !changelogReleaseForVersion(version, changelogReleases)) {
+      changelogAutoEvaluated = true;
+      return;
+    }
+    if (!shouldShowChangelog(version, state.settings.lastSeenChangelogVersion, changelogReleases)) {
+      changelogAutoEvaluated = true;
+      return;
+    }
+    if (editorOpen || loginModalOpen || changelogOpen || root.querySelector('.overlay')) return;
+    changelogAutoEvaluated = true;
+    openChangelog(version);
+  }
+
+  function renderGuide(navigate = true): void {
     activeGuide?.dispose();
     activeGuide = null;
     updateTrainingToggle();
@@ -451,7 +518,7 @@ export function mountConfig(root: HTMLElement): void {
     const lesson = activeTutorialLesson();
     if (!lesson) return;
     if (editorOpen && !editorGuideEnabled && forcedTutorialLesson === null) return;
-    if (editorOpen && activeEditorWorkspace) {
+    if (navigate && editorOpen && activeEditorWorkspace) {
       activeEditorWorkspace.setSection(sectionForTutorialLesson(lesson));
     }
     activeGuide = renderSpotlightGuide({
@@ -2051,15 +2118,21 @@ export function mountConfig(root: HTMLElement): void {
         })().then(({ skipped, result }) => {
           if (requestVersion !== previewVersion) return;
           if (skipped) {
-            preview.replaceChildren(el('span', { text: '当前条件不满足，本次会跳过' }));
+            preview.replaceChildren(el('span', {
+              text: completeLesson ? '当前条件不满足，本次未执行' : '当前条件不满足，本次会跳过',
+            }));
             if (completeLesson) {
               editorTutorialProgress.timerPreviewed = true;
               refreshEditorTutorial();
             }
             return;
           }
+          if (completeLesson) {
+            valueInput.value = String(result);
+            updateOverviewPreview();
+          }
           preview.replaceChildren(
-            el('span', { text: `预览：${currentValue} → ` }),
+            el('span', { text: `${completeLesson ? '已模拟执行' : '预览'}：${currentValue} → ` }),
             el('strong', { text: String(result) }),
           );
           if (completeLesson) {
@@ -2422,8 +2495,16 @@ export function mountConfig(root: HTMLElement): void {
       );
       const preview = el('div', { class: 'formula-preview' });
       let previewVersion = 0;
+      const renderSimulationPreview = (): void => {
+        if (!item.simulationPreview) return;
+        preview.replaceChildren(
+          el('span', { text: `已模拟 1 个 ${item.gift.name}：${item.simulationPreview.currentValue} → ` }),
+          el('strong', { text: String(item.simulationPreview.result) }),
+        );
+      };
       const updatePreview = (completeLesson = false): void => {
         item.formula = formulaInput.value;
+        if (!completeLesson) item.simulationPreview = undefined;
         preview.replaceChildren();
         const name = nameInput.value.trim() || originalName || '属性';
         const value = Number(valueInput.value);
@@ -2435,13 +2516,19 @@ export function mountConfig(root: HTMLElement): void {
         preview.append(el('span', { text: '由后台计算预览…' }));
         void previewFormula(formula, name, currentValue, 'gift', item.gift.price).then((result) => {
           if (requestVersion !== previewVersion) return;
-          preview.replaceChildren(
-            el('span', { text: `模拟 1 个 ${item.gift.name}：${currentValue} → ` }),
-            el('strong', { text: String(result) }),
-          );
+          if (completeLesson) {
+            valueInput.value = String(result);
+            item.simulationPreview = { currentValue, result };
+            updateOverviewPreview();
+          }
+          if (completeLesson) renderSimulationPreview();
+          else preview.replaceChildren(
+              el('span', { text: `预览收到 1 个 ${item.gift.name}：${currentValue} → ` }),
+              el('strong', { text: String(result) }),
+            );
           if (completeLesson) {
             editorTutorialProgress.giftPreviewed = true;
-            refreshEditorTutorial();
+            refreshEditorTutorial(false);
           }
         }).catch((error) => {
           if (requestVersion !== previewVersion) return;
@@ -2586,7 +2673,8 @@ export function mountConfig(root: HTMLElement): void {
       );
       row.append(quickBuilder, advanced, preview);
       syncQuickCopy();
-      updatePreview();
+      if (item.simulationPreview) renderSimulationPreview();
+      else updatePreview();
       return row;
     }
 
@@ -3198,6 +3286,8 @@ export function mountConfig(root: HTMLElement): void {
 
   function renderAdvancedSettings(): void {
     const details = el('details', { class: 'advanced-settings' });
+    details.open = advancedSettingsOpen;
+    details.ontoggle = () => { advancedSettingsOpen = details.open; };
     details.append(el('summary', {}, [
       el('span', { text: '外观与数据' }),
       el('small', { text: '面板外观、自动更新和配置备份' }),
@@ -3517,6 +3607,7 @@ export function mountConfig(root: HTMLElement): void {
   void refreshRuntime();
   void refreshBiliAuth();
   void refreshRoomGiftCatalog();
+  void refreshHostedChangelog();
   void refreshUpdateStatus();
   const pollTimer = globalThis.setInterval(() => {
     void refreshRuntime();

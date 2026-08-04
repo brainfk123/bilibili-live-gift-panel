@@ -50,8 +50,7 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
   const stack = el('div', { class: 'display-stack' });
   const panel = el('div', { class: 'panel' });
   const attrEls = new Map<string, HTMLElement>();
-  const broadcastStages = new Map<string, HTMLElement>();
-  const broadcastQueues = new Map<string, SequentialBroadcastQueue<LogEntry>>();
+  let broadcastStage: HTMLElement | null = null;
   stack.append(panel);
   root.replaceChildren(stack);
 
@@ -63,28 +62,27 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
     return GIFT_BROADCAST_DURATION;
   }
 
-  function ensureBroadcastQueue(attributeName: string): SequentialBroadcastQueue<LogEntry> {
-    const existing = broadcastQueues.get(attributeName);
-    if (existing) return existing;
-    const queue = new SequentialBroadcastQueue<LogEntry>({
-      durationMs: giftBroadcastDuration,
-      keyOf: logKey,
-      maxPending: MAX_LOG,
-      onShow: (entry) => renderGiftBroadcast(entry),
-      onIdle: () => {
-        const latestAttribute = state.attributes.find((item) => item.name === attributeName);
-        if (latestAttribute) swapBroadcastContent(attributeName, createDefaultBroadcast(latestAttribute));
-      },
-    });
-    broadcastQueues.set(attributeName, queue);
-    return queue;
+  const broadcastQueue = new SequentialBroadcastQueue<LogEntry>({
+    durationMs: giftBroadcastDuration,
+    keyOf: logKey,
+    maxPending: MAX_LOG,
+    onShow: (entry) => renderGiftBroadcast(entry),
+    onIdle: () => {
+      const latestAttribute = defaultBroadcastAttribute();
+      if (latestAttribute) swapBroadcastContent(createDefaultBroadcast(latestAttribute));
+    },
+  });
+
+  function defaultBroadcastAttribute(): Attribute | undefined {
+    const attributes = currentTarget().attributes;
+    return attributes.find((attribute) => attribute.broadcastMessage?.trim()) ?? attributes[0];
   }
 
   function renderAttrs(): void {
-    for (const queue of broadcastQueues.values()) queue.pause();
+    broadcastQueue.pause();
     panel.replaceChildren();
     attrEls.clear();
-    broadcastStages.clear();
+    broadcastStage = null;
     const resolved = currentTarget();
     const attributes = resolved.attributes;
     const scene = resolved.scene;
@@ -171,24 +169,24 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
           ]));
         }
       }
-      const stage = el('div', { class: 'broadcast-stage' }, [createDefaultBroadcast(attr)]);
-      const ticker = el('div', { class: 'broadcast-ticker' }, [stage]);
-      const block = el('section', { class: `attr is-${variant}` }, [summary, giftRules, ticker]);
+      const block = el('section', { class: `attr is-${variant}` }, [summary, giftRules]);
       block.dataset.theme = themeId;
       block.dataset.variant = variant;
-      broadcastStages.set(attr.name, stage);
       attrEls.set(attr.name, block);
       panel.append(block);
     }
-    const visibleNames = new Set(attributes.map((attribute) => attribute.name));
-    for (const [attributeName, queue] of broadcastQueues) {
-      if (visibleNames.has(attributeName)) continue;
-      queue.dispose();
-      broadcastQueues.delete(attributeName);
+    const defaultAttribute = defaultBroadcastAttribute();
+    if (defaultAttribute) {
+      broadcastStage = el('div', { class: 'broadcast-stage' }, [createDefaultBroadcast(defaultAttribute)]);
+      const ticker = el('div', {
+        class: `broadcast-ticker${scene ? ' display-scene-broadcast' : ''}`,
+      }, [broadcastStage]);
+      if (scene) panel.append(ticker);
+      else attrEls.get(defaultAttribute.name)?.append(ticker);
     }
     panel.append(el('div', { class: 'conn' }));
     updateAll();
-    for (const attribute of attributes) ensureBroadcastQueue(attribute.name).resume();
+    if (broadcastStage) broadcastQueue.resume();
   }
 
   function updateAll(): void {
@@ -293,8 +291,8 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
     conn.style.display = state.settings.showConnection ? '' : 'none';
   }
 
-  function swapBroadcastContent(attributeName: string, next: HTMLElement): void {
-    const stage = broadcastStages.get(attributeName);
+  function swapBroadcastContent(next: HTMLElement): void {
+    const stage = broadcastStage;
     if (!stage) return;
     const previous = stage.children[stage.children.length - 1] as HTMLElement | undefined;
     next.classList.add('is-entering');
@@ -314,12 +312,12 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
     void block.offsetWidth;
     block.classList.add('flash');
     globalThis.setTimeout(() => block.classList.remove('flash'), 700);
-    swapBroadcastContent(entry.attributeName, createGiftBroadcast(entry, attribute));
+    swapBroadcastContent(createGiftBroadcast(entry, attribute));
   }
 
   function enqueueGiftBroadcast(entry: LogEntry): void {
     if (!attrEls.has(entry.attributeName)) return;
-    ensureBroadcastQueue(entry.attributeName).enqueue(entry);
+    broadcastQueue.enqueue(entry);
   }
 
   async function refreshState(): Promise<void> {
@@ -358,8 +356,7 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
   if (typeof globalThis.addEventListener === 'function') {
     globalThis.addEventListener('beforeunload', () => {
       globalThis.clearInterval(pollTimer);
-      for (const queue of broadcastQueues.values()) queue.dispose();
-      broadcastQueues.clear();
+      broadcastQueue.dispose();
     }, { once: true });
   }
 }

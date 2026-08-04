@@ -90,6 +90,27 @@ jobs:
               }
             )
           } | ConvertTo-Json -Depth 4 | Set-Content -NoNewline -Encoding utf8 dist/gift-panel-update.json
+          $currentChangelog = Get-Content gift-panel-changelog.json -Raw | ConvertFrom-Json
+          $releaseHistory = @()
+          try {
+            $previousChangelog = Invoke-RestMethod -Uri "https://github.com/brainfk123/bilibili-live-gift-panel/releases/latest/download/gift-panel-changelog.json" -TimeoutSec 20
+            $releaseHistory = @($previousChangelog.releases)
+          } catch {
+            Write-Host "No previous hosted changelog is available; publishing the bundled current release only."
+          }
+          $seenVersions = @{}
+          $mergedReleases = @()
+          foreach ($release in @($currentChangelog.releases) + $releaseHistory) {
+            $version = [string]$release.version
+            if ($version -and -not $seenVersions.ContainsKey($version)) {
+              $seenVersions[$version] = $true
+              $mergedReleases += $release
+            }
+          }
+          @{
+            schemaVersion = 1
+            releases = $mergedReleases
+          } | ConvertTo-Json -Depth 8 | Set-Content -NoNewline -Encoding utf8 dist/gift-panel-changelog.json
 
       - name: Attest executable provenance
         uses: actions/attest@v4
@@ -103,10 +124,10 @@ jobs:
         run: |
           gh release view $env:RELEASE_TAG *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json --clobber
+            gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/gift-panel-changelog.json --clobber
             gh release edit $env:RELEASE_TAG --draft=false --latest
           } else {
             gh release create $env:RELEASE_TAG --draft --verify-tag --generate-notes --title $env:RELEASE_TAG
-            gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json
+            gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/gift-panel-changelog.json
             gh release edit $env:RELEASE_TAG --draft=false --latest
           }

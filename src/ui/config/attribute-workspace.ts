@@ -48,7 +48,7 @@ export function createAttributeWorkspace(options: AttributeWorkspaceOptions): At
       ]),
     ]),
     lessonList,
-    el('p', { class: 'attribute-training-note', text: '每一步都操作真实配置；安全模拟不会修改直播数值。' }),
+    el('p', { class: 'attribute-training-note', text: '模拟只推进本次编辑的草稿值；点击保存前不会影响直播数值。' }),
   );
 
   const main = el('div', { class: 'attribute-workbench-main' });

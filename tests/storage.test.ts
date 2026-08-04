@@ -15,6 +15,7 @@ describe('storage', () => {
     expect(s.contributions).toEqual({ viewers: [] });
     expect(s.settings.panelOpacity).toBe(55);
     expect(s.settings.trainingCompletedTopics).toEqual([]);
+    expect(s.settings.lastSeenChangelogVersion).toBe('');
   });
 
   it('round-trips state through save/load', () => {
@@ -24,6 +25,7 @@ describe('storage', () => {
     s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: 'price/1000*60' });
     s.settings.tutorialCompletedLessons = ['room', 'attribute'];
     s.settings.trainingCompletedTopics = ['blind-box', 'obs-no-change'];
+    s.settings.lastSeenChangelogVersion = '0.2.0';
     saveState(s);
     const loaded = loadState();
     expect(loaded.roomId).toBe('2145');
@@ -32,6 +34,7 @@ describe('storage', () => {
     expect(loaded.settings.tutorialVersion).toBe(2);
     expect(loaded.settings.tutorialCompletedLessons).toEqual(['room', 'attribute']);
     expect(loaded.settings.trainingCompletedTopics).toEqual(['blind-box', 'obs-no-change']);
+    expect(loaded.settings.lastSeenChangelogVersion).toBe('0.2.0');
   });
 
   it('loads and normalizes the disk configuration from the server', async () => {

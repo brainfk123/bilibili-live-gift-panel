@@ -31,6 +31,7 @@ export const defaultState = (): AppState => ({
     tutorialVersion: 2,
     tutorialCompletedLessons: [],
     trainingCompletedTopics: [],
+    lastSeenChangelogVersion: '',
     autoUpdate: true,
   },
   giftCatalog: [],

@@ -1,5 +1,6 @@
 import type { ActivitySession, ContributionLedger, GiftInfo } from './types';
 import type { ActivityTransitionAction } from './activities';
+import { normalizeChangelogReleases, type ChangelogRelease } from './changelog';
 
 export type RuntimeConnectionState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
 
@@ -95,6 +96,11 @@ interface RoomGiftCatalogResponse {
 interface UpdateResponse {
   code: number;
   update?: UpdateStatus;
+  message?: string;
+}
+
+interface ChangelogResponse {
+  releases?: unknown;
   message?: string;
 }
 
@@ -216,6 +222,16 @@ export function getUpdateStatus(): Promise<UpdateStatus> {
 
 export function checkForUpdates(): Promise<UpdateStatus> {
   return requestUpdateStatus('/api/update/check', { method: 'POST' });
+}
+
+export async function getHostedChangelog(): Promise<ChangelogRelease[]> {
+  const response = await fetch('/api/changelog', { cache: 'no-store' });
+  const payload = await response.json() as ChangelogResponse;
+  const releases = normalizeChangelogReleases(payload);
+  if (!response.ok || releases.length === 0) {
+    throw new Error(payload.message || `在线更新日志读取失败：HTTP ${response.status}`);
+  }
+  return releases;
 }
 
 export async function transitionActivity(activityId: string, action: ActivityTransitionAction): Promise<ActivityTransitionResult> {

@@ -445,3 +445,20 @@ func TestConfigStorePreservesTrainingTopicProgress(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigStorePreservesLastSeenChangelogVersion(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{"settings":{"showTutorial":false,"lastSeenChangelogVersion":"0.2.0"}}`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", response.Code, response.Body.String())
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Settings.LastSeenChangelogVersion != "0.2.0" {
+		t.Fatalf("last seen changelog = %q, want %q", state.Settings.LastSeenChangelogVersion, "0.2.0")
+	}
+}

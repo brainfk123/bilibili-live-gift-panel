@@ -34,6 +34,7 @@ const mockedClients = vi.hoisted(() => [] as Array<{
 
 let mockedRuntimeState: 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error' = 'idle';
 const nativeSetInterval = globalThis.setInterval.bind(globalThis);
+const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
 const nativeClearInterval = globalThis.clearInterval.bind(globalThis);
 
 vi.mock('../src/bilibili/client', () => ({
@@ -1166,6 +1167,13 @@ describe('single-page configuration rendering', () => {
     root.querySelector('.guide-confirm-gifts')?.onclick?.();
     (root.querySelector('.guide-rule-simulator') as TestElement | null)?.onclick?.();
     await vi.waitFor(() => expect(textOf(root)).toContain('让时间自动减少'));
+    const activeWorkspaceTab = root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => tab.className.split(' ').includes('is-active'));
+    expect(activeWorkspaceTab).toBeDefined();
+    expect(textOf(activeWorkspaceTab!)).toContain('礼物规则');
+    expect(textOf(root.querySelector('.formula-preview')!)).toContain('已模拟 1 个');
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('定时器'))?.onclick?.();
 
     findByText(root, '+ 添加定时器')?.onclick?.();
     (root.querySelector('.guide-timer-simulator') as TestElement | null)?.onclick?.();
@@ -1295,6 +1303,58 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(root.querySelector('.update-settings-card')?.dataset.updateState).toBe('up-to-date'));
     expect(textOf(root.querySelector('.update-settings-card') as TestElement)).toContain('当前已经是最新版本。');
     expect(fetchMock).toHaveBeenCalledWith('/api/update/check', { cache: 'no-store', method: 'POST' });
+  });
+
+  it('opens a visual changelog manually and remembers the latest viewed version', async () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const changelogButton = findByText(root, '更新日志');
+    expect(changelogButton).toBeDefined();
+    changelogButton?.onclick?.();
+
+    const dialog = root.querySelector('.changelog-dialog');
+    expect(dialog).not.toBeNull();
+    expect(textOf(dialog!)).toContain('这次更新了什么？');
+    expect(textOf(dialog!)).toContain('五套开箱即用的互动模板');
+    expect(root.querySelectorAll('.changelog-visual')).toHaveLength(3);
+    (root.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
+
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.2.0'));
+    expect(root.querySelector('.changelog-dialog')).toBeNull();
+  });
+
+  it('shows the installed version changelog only once', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === '/api/update') {
+        return Response.json({
+          code: 0,
+          update: {
+            state: 'up-to-date', currentVersion: '0.2.0', latestVersion: '0.2.0',
+            message: '当前已经是最新版本。', autoUpdate: true, restartRequired: false,
+          },
+        });
+      }
+      if (url.includes('/api/runtime')) return Response.json({ code: 0, runtime: { state: 'idle', roomId: '' } });
+      if (url.includes('/api/auth/status')) return Response.json({ code: 0, auth: { state: 'anonymous' } });
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const configured = defaultState();
+    configured.settings.showTutorial = false;
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+
+    const firstRoot = new TestElement('div');
+    mountConfig(firstRoot as unknown as HTMLElement);
+    await vi.waitFor(() => expect(firstRoot.querySelector('.changelog-dialog')).not.toBeNull());
+    (firstRoot.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.2.0'));
+
+    const secondRoot = new TestElement('div');
+    mountConfig(secondRoot as unknown as HTMLElement);
+    await new Promise((resolve) => nativeSetTimeout(resolve, 25));
+    expect(secondRoot.querySelector('.changelog-dialog')).toBeNull();
   });
 
   it('offers optional streamer login while keeping masked-name fallback explicit', async () => {
@@ -1467,6 +1527,37 @@ describe('single-page configuration rendering', () => {
     maximum.value = '3600';
     maximum.oninput?.();
     expect(formula.value).toBe('MIN(加班时间+60,3600)');
+  });
+
+  it('advances the editable value when a gift rule is simulated without saving live state', async () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state('88888888', 1),
+      rules: [{
+        id: 'r-preview', giftId: 1, attributeName: '加班时间',
+        formulaName: '模拟加一', formula: '加班时间+1', enabled: true,
+      }],
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    const giftRulesTab = root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'));
+    giftRulesTab?.onclick?.();
+
+    const currentValue = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '当前值') as TestElement;
+    const simulate = findByText(root, '模拟收到 1 个');
+    expect(currentValue.value).toBe('0');
+    expect(simulate).toBeDefined();
+
+    simulate?.onclick?.();
+
+    await vi.waitFor(() => expect(currentValue.value).toBe('1'));
+    expect(textOf(root.querySelector('.formula-preview')!)).toContain('已模拟 1 个');
+    await new Promise((resolve) => nativeSetTimeout(resolve, 60));
+    expect(textOf(root.querySelector('.formula-preview')!)).toContain('已模拟 1 个');
+    expect(loadState().attributes[0].value).toBe(0);
   });
 
   it('configures a conditional backend timer without adding it to the OBS gift grid', async () => {
@@ -2178,6 +2269,9 @@ describe('OBS attribute display', () => {
     expect(root.querySelector('.panel')?.className).toContain('scene-layout-grid');
     expect(root.querySelector('.panel')?.dataset.theme).toBe('neon');
     expect(root.querySelectorAll('.attr')).toHaveLength(2);
+    expect(root.querySelectorAll('.broadcast-ticker')).toHaveLength(1);
+    expect(root.querySelector('.panel')?.querySelector('.broadcast-ticker')).not.toBeNull();
+    expect(root.querySelector('.attr')?.querySelector('.broadcast-ticker')).toBeNull();
     expect(textOf(root)).toContain('战斗状态');
     expect(textOf(root)).toContain('能量');
     expect(textOf(root)).toContain('生命值');

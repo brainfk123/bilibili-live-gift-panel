@@ -248,6 +248,7 @@ export interface Settings {
   tutorialVersion: number;
   tutorialCompletedLessons: TutorialLesson[];
   trainingCompletedTopics: TrainingTopicId[];
+  lastSeenChangelogVersion: string;
   autoUpdate: boolean;
 }
 

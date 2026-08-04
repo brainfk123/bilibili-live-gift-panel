@@ -244,6 +244,7 @@ type settingsState struct {
 	TutorialVersion          int      `json:"tutorialVersion"`
 	TutorialCompletedLessons []string `json:"tutorialCompletedLessons"`
 	TrainingCompletedTopics  []string `json:"trainingCompletedTopics"`
+	LastSeenChangelogVersion string   `json:"lastSeenChangelogVersion"`
 	AutoUpdate               *bool    `json:"autoUpdate"`
 }
 

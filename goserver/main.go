@@ -218,6 +218,7 @@ func main() {
 	mux.HandleFunc("/api/gifts", handleRoomGiftCatalog(login))
 	mux.HandleFunc("/api/update", updater.handleStatus)
 	mux.HandleFunc("/api/update/check", updater.handleCheck)
+	mux.HandleFunc("/api/changelog", newHostedChangelogHandler(nil, hostedChangelogURL))
 	mux.HandleFunc("/api/auth/", login.handle)
 	mux.Handle("/api/pages/presence/", presence)
 	mux.HandleFunc("/api/runtime", func(w http.ResponseWriter, r *http.Request) {
