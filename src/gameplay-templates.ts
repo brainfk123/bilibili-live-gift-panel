@@ -198,9 +198,9 @@ const TEMPLATES: readonly GameplayTemplateDefinition[] = [
           createdFromTemplateId: 'overtime', createdFromTemplateVersion: 1,
         }],
         rules,
-        timerRules: [timer(ids, name, '每分钟自动减少', 60, `MAX(${name}-60,0)`, `${name}>0`)],
+        timerRules: [timer(ids, name, '每秒自动减少', 1, `MAX(${name}-1,0)`, `${name}>0`)],
         usedGifts: uniqueGifts(input),
-        summary: [`${rules.length} 个礼物按价格增加时间`, '每分钟自动减少 1 分钟', maximum > 0 ? `最多累计 ${maximum / 3600} 小时` : '累计时间不封顶'],
+        summary: [`${rules.length} 个礼物按价格增加时间`, '每秒自动减少 1 秒', maximum > 0 ? `最多累计 ${maximum / 3600} 小时` : '累计时间不封顶'],
       };
     },
   },

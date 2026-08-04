@@ -45,6 +45,58 @@ func TestBuildCurrentRoomGiftCatalogMarksPanelVersionsAsListed(t *testing.T) {
 	}
 }
 
+func TestBuildCurrentRoomGiftCatalogIncludesListedUpgradeGiftVariants(t *testing.T) {
+	configPayload := map[string]any{
+		"code": float64(0),
+		"data": map[string]any{"list": []any{
+			map[string]any{"id": float64(35638), "name": "送花花", "price": float64(1000), "coin_type": "gold", "img_basic": "base.png"},
+			map[string]any{"id": float64(35639), "name": "摸摸头", "price": float64(1500), "coin_type": "gold", "img_basic": "touch.png"},
+			map[string]any{"id": float64(35640), "name": "贴贴", "price": float64(1500), "coin_type": "gold", "img_basic": "close.png"},
+			map[string]any{"id": float64(35641), "name": "真好听", "price": float64(1000), "coin_type": "gold", "img_basic": "listen.png"},
+			map[string]any{"id": float64(31044), "name": "历史礼物", "price": float64(100), "coin_type": "gold", "img_basic": "old.png"},
+		}},
+	}
+	panelPayload := map[string]any{
+		"code": float64(0),
+		"data": map[string]any{
+			"room_gift_list": map[string]any{
+				"gold_list": []any{
+					map[string]any{
+						"gift_id": float64(35638),
+						"upgrade_gift": []any{
+							map[string]any{"gift_id": float64(35641), "alias": "真好听", "desc": "+0电池"},
+							map[string]any{"gift_id": float64(35640), "alias": "贴贴", "desc": "+5电池"},
+							map[string]any{"gift_id": float64(35639), "alias": "摸摸头", "desc": "+5电池"},
+						},
+					},
+				},
+				"silver_list": []any{},
+			},
+			"tab_list": []any{},
+		},
+	}
+
+	gifts, err := buildCurrentRoomGiftCatalog(configPayload, panelPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gifts) != 5 {
+		t.Fatalf("room gifts = %#v", gifts)
+	}
+	wantIDs := []int{35638, 35641, 35640, 35639}
+	for index, wantID := range wantIDs {
+		if gifts[index].ID != wantID || !gifts[index].Listed {
+			t.Fatalf("listed gift[%d] = %#v", index, gifts[index])
+		}
+	}
+	if gifts[1].Name != "真好听" || gifts[1].Price != 1000 || gifts[1].ImgBasic != "listen.png" {
+		t.Fatalf("upgrade gift metadata = %#v", gifts[1])
+	}
+	if gifts[4].ID != 31044 || gifts[4].Listed {
+		t.Fatalf("historical gift = %#v", gifts[4])
+	}
+}
+
 func TestMarkListedBlindBoxChildrenMarksRewardsAsListed(t *testing.T) {
 	configPayload := map[string]any{
 		"code": float64(0),

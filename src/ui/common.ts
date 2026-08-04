@@ -42,3 +42,85 @@ export function toast(message: string, root: HTMLElement): void {
   setTimeout(() => t.classList.add('show'), 10);
   setTimeout(() => t.remove(), 2500);
 }
+
+export function bindFloatingDetailCard(
+  card: HTMLElement,
+  cover: HTMLElement,
+  options: { panelWidth?: number; estimatedPanelHeight?: number; onPointerLeave?: () => void } = {},
+): void {
+  const panelWidth = options.panelWidth ?? 560;
+  const estimatedPanelHeight = options.estimatedPanelHeight ?? 420;
+  card.style.setProperty('--hover-detail-panel-width', `${panelWidth}px`);
+
+  const position = (): void => {
+    if (typeof card.getBoundingClientRect !== 'function') return;
+    const rect = card.getBoundingClientRect();
+    const viewportWidth = globalThis.innerWidth || 1024;
+    const viewportHeight = globalThis.innerHeight || 768;
+    const viewportPadding = 16;
+    const actualPanelWidth = Math.min(panelWidth, Math.max(280, viewportWidth - viewportPadding * 2));
+    // Prefer growing from the compact card's own left edge. Only shift the
+    // expanded card when it would otherwise leave the viewport.
+    const preferredLeft = rect.left;
+    const absoluteLeft = Math.min(
+      Math.max(preferredLeft, viewportPadding),
+      Math.max(viewportPadding, viewportWidth - actualPanelWidth - viewportPadding),
+    );
+    card.style.setProperty('--hover-detail-offset-x', `${absoluteLeft - rect.left}px`);
+    card.style.setProperty('--hover-detail-origin-x', `${rect.left + rect.width / 2 - absoluteLeft}px`);
+    card.style.setProperty('--hover-detail-card-origin-x', `${absoluteLeft - rect.left + actualPanelWidth / 2}px`);
+    const coverRect = cover.getBoundingClientRect();
+    if (coverRect.height > 0) card.style.setProperty('--hover-detail-cover-height', `${coverRect.height}px`);
+    const verticalThreshold = Math.min(estimatedPanelHeight, viewportHeight * .52);
+    card.classList.toggle('is-detail-above', viewportHeight - rect.bottom < verticalThreshold && rect.top > verticalThreshold);
+  };
+
+  const resetTilt = (): void => {
+    card.style.setProperty('--hover-card-rotate-x', '0deg');
+    card.style.setProperty('--hover-card-rotate-y', '0deg');
+    card.style.setProperty('--hover-card-glow-x', '50%');
+    card.style.setProperty('--hover-card-glow-y', '20%');
+  };
+
+  card.onpointerenter = position;
+  card.onpointerdown = (event) => {
+    if (event.pointerType === 'mouse') card.classList.add('is-pointer-focus');
+  };
+  card.onkeydown = () => card.classList.remove('is-pointer-focus');
+  card.onfocus = position;
+  (card as any).onfocusin = position;
+  (card as any).onfocusout = (event: FocusEvent) => {
+    if (!(event.relatedTarget instanceof Node) || !card.contains(event.relatedTarget)) {
+      card.classList.remove('is-pointer-focus');
+    }
+  };
+  card.onpointermove = (event) => {
+    if (event.pointerType === 'touch') return;
+    if (typeof globalThis.matchMedia === 'function' && globalThis.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const expandedSurface = card.querySelector<HTMLElement>('.hover-detail-panel-inner');
+    const surface = expandedSurface
+      && typeof globalThis.getComputedStyle === 'function'
+      && globalThis.getComputedStyle(expandedSurface).visibility === 'visible'
+      ? expandedSurface
+      : cover;
+    const rect = surface.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const horizontal = Math.max(-.5, Math.min(.5, (event.clientX - rect.left) / rect.width - .5));
+    const vertical = Math.max(-.5, Math.min(.5, (event.clientY - rect.top) / rect.height - .5));
+    card.style.setProperty('--hover-card-rotate-x', `${(-vertical * 8).toFixed(2)}deg`);
+    card.style.setProperty('--hover-card-rotate-y', `${(horizontal * 10).toFixed(2)}deg`);
+    card.style.setProperty('--hover-card-glow-x', `${((horizontal + .5) * 100).toFixed(1)}%`);
+    card.style.setProperty('--hover-card-glow-y', `${((vertical + .5) * 100).toFixed(1)}%`);
+  };
+  card.onpointerleave = () => {
+    resetTilt();
+    options.onPointerLeave?.();
+  };
+  cover.onclick = () => {
+    if (typeof globalThis.matchMedia === 'function' && globalThis.matchMedia('(hover: none)').matches) {
+      position();
+      card.focus();
+    }
+  };
+  resetTilt();
+}

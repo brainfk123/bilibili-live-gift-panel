@@ -37,6 +37,7 @@
   --scrollbar-track: #171820;
   --scrollbar-thumb: #596174;
   --scrollbar-thumb-hover: #fb7299;
+  --card-shadow-color: rgba(0,0,0,.48);
   --shadow: none;
   --radius: 12px;
   --type-page: clamp(28px, 3vw, 32px);
@@ -108,6 +109,7 @@ body.config-mode {
   --scrollbar-track: #edf0f6;
   --scrollbar-thumb: #8792a6;
   --scrollbar-thumb-hover: #c2185b;
+  --card-shadow-color: rgba(47,57,80,.22);
 }
 
 html:has(.config-root[data-theme="light"]),
@@ -915,6 +917,7 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .overlay.attribute-overlay {
   align-items: center;
   padding: 24px;
+  z-index: 148;
   overflow: hidden;
 }
 .config-root .overlay .attribute-workbench {
@@ -1122,7 +1125,7 @@ body.config-mode::-webkit-scrollbar-corner,
   flex-direction: column;
   padding: 22px 24px !important;
 }
-.config-root .gift-picker-drawer .gift-picker-grid { min-height: 0; max-height: none; flex: 1 1 auto; }
+.config-root .gift-picker-drawer .gift-picker-grid { min-height: 0; max-height: none; flex: 1 1 auto; align-content: start; }
 .config-root .gift-picker-drawer-close { width: 32px; height: 32px; }
 .config-root .gift-picker-drawer-actions {
   display: flex;
@@ -1201,7 +1204,7 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .rule-advanced-settings[open] { padding-bottom: 13px; }
 .config-root .rule-advanced-settings[open] > summary { color: var(--accent-text); }
 .config-root .rule-advanced-settings .formula-assignment-field,
-.config-root .rule-advanced-settings .formula-examples { margin: 0 13px 10px; }
+.config-root .rule-advanced-settings .formula-examples { margin: 12px 13px 10px; }
 .config-root .selected-gift-rule > .formula-preview { margin-top: 9px; text-align: right; }
 .config-root .attribute-output-panel { display: grid; gap: 18px; }
 .config-root .runtime-role-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
@@ -1682,11 +1685,21 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .login-qr-status.is-error { color: var(--danger-text); }
 .config-root .login-security-note { max-width: 340px; margin: 10px 0 16px; color: var(--text-dim); font-size: var(--type-meta); line-height: 1.6; }
 .config-root .attributes-section {
+  position: relative;
+  z-index: 0;
   border: 1px solid var(--border);
   border-radius: 18px;
   padding: 24px;
   background: color-mix(in srgb, var(--card) 72%, transparent);
 }
+.config-root .attributes-section:has(.hover-detail-card:hover),
+.config-root .attributes-section:has(.hover-detail-card:not(.is-pointer-focus):focus-within),
+.config-root .attributes-section:has(.hover-detail-card.is-guide-expanded),
+.config-root .activity-workspace-section:has(.hover-detail-card:hover),
+.config-root .activity-workspace-section:has(.hover-detail-card:not(.is-pointer-focus):focus-within),
+.config-root .activity-workspace-section:has(.hover-detail-card.is-detail-persisted),
+.config-root .display-scenes-section:has(.hover-detail-card:hover),
+.config-root .display-scenes-section:has(.hover-detail-card:not(.is-pointer-focus):focus-within) { z-index: 120; }
 .config-root .attributes-heading-row {
   display: flex;
   align-items: flex-end;
@@ -1697,44 +1710,313 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .attributes-heading-row .section-heading { max-width: 720px; }
 .config-root .attribute-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(245px, 100%), 1fr));
+  align-items: start;
   gap: 14px;
+  isolation: isolate;
+  perspective: 1100px;
 }
-.config-root .attribute-card {
-  display: flex;
+.config-root .hover-detail-card {
+  --hover-card-rotate-x: 0deg;
+  --hover-card-rotate-y: 0deg;
+  --hover-card-glow-x: 50%;
+  --hover-card-glow-y: 20%;
+  --card-visual-depth: 0px;
+  --card-copy-depth: 0px;
+  position: relative;
   min-width: 0;
-  min-height: 190px;
-  flex-direction: column;
+  align-self: start;
+  overflow: visible;
   border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 18px;
-  background: var(--card);
+  border-radius: 16px;
+  padding: 0;
+  outline: none;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--card) 96%, var(--accent) 4%), var(--card));
+  box-shadow: 0 7px 18px color-mix(in srgb, var(--card-shadow-color) 40%, transparent);
+  transform: translateY(0);
+  transform-origin: var(--hover-detail-card-origin-x, 50%) calc(var(--hover-detail-cover-height, 92px) / 2);
+  transform-style: preserve-3d;
+  transition: border-color 180ms ease, box-shadow 220ms ease, transform 120ms ease-out;
+  will-change: transform;
+}
+.config-root .hover-detail-card::before {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(circle at var(--hover-card-glow-x) var(--hover-card-glow-y), color-mix(in srgb, var(--accent) 20%, transparent), transparent 62%);
+  content: "";
+  opacity: .32;
+  pointer-events: none;
+  transition: opacity 180ms ease;
+}
+.config-root .hover-detail-card > .hover-detail-cover {
+  position: relative;
+  z-index: 70;
+  left: 0;
+  width: 100%;
+  transform-style: preserve-3d;
+  transition: left 220ms cubic-bezier(.2, .78, .2, 1), width 220ms cubic-bezier(.2, .78, .2, 1), padding-right 220ms cubic-bezier(.2, .78, .2, 1), padding-left 220ms cubic-bezier(.2, .78, .2, 1);
+}
+.config-root .hover-detail-card:not(.is-pointer-focus):focus-within > .hover-detail-cover,
+.config-root .hover-detail-card.is-guide-expanded > .hover-detail-cover,
+.config-root .hover-detail-card.is-detail-persisted > .hover-detail-cover {
+  left: var(--hover-detail-offset-x, 0px);
+  width: min(var(--hover-detail-panel-width, 560px), calc(100vw - 32px));
+  padding-left: var(--hover-detail-cover-open-padding-left, 0px);
+}
+.config-root .hover-detail-card:not(.is-pointer-focus):focus-within,
+.config-root .hover-detail-card.is-guide-expanded,
+.config-root .hover-detail-card.is-detail-persisted {
+  --card-visual-depth: 20px;
+  --card-copy-depth: 10px;
+  z-index: 40;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  transform: perspective(1100px) translateY(-4px) rotateX(var(--hover-card-rotate-x)) rotateY(var(--hover-card-rotate-y));
+}
+.config-root .hover-detail-card:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft), 0 18px 36px color-mix(in srgb, var(--card-shadow-color) 72%, transparent);
+}
+.config-root .hover-detail-card:not(.is-pointer-focus):focus-within::before,
+.config-root .hover-detail-card.is-guide-expanded::before,
+.config-root .hover-detail-card.is-detail-persisted::before { opacity: 0; }
+.config-root .hover-detail-panel {
+  position: absolute;
+  z-index: 60;
+  top: 0;
+  left: var(--hover-detail-offset-x, 0px);
+  width: min(var(--hover-detail-panel-width, 560px), calc(100vw - 32px));
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(4px) scale(.58, .38);
+  transform-origin: var(--hover-detail-origin-x, 50%) top;
+  transform-style: preserve-3d;
+  transition: opacity 150ms ease, transform 220ms cubic-bezier(.2, .78, .2, 1), visibility 0s linear 220ms;
+  will-change: transform, opacity;
+}
+.config-root .hover-detail-card.is-detail-above .hover-detail-panel {
+  top: auto;
+  bottom: 0;
+  transform: translateY(-4px) scale(.58, .38);
+  transform-origin: var(--hover-detail-origin-x, 50%) bottom;
+}
+.config-root .hover-detail-card:not(.is-pointer-focus):focus-within .hover-detail-panel,
+.config-root .hover-detail-card.is-guide-expanded .hover-detail-panel,
+.config-root .hover-detail-card.is-detail-persisted .hover-detail-panel {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+  transition-delay: 0s;
+}
+.config-root .hover-detail-panel-inner {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: visible;
+  border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--border));
+  border-radius: 17px;
+  padding-top: var(--hover-detail-cover-height, 92px);
+  background:
+    radial-gradient(circle at var(--hover-card-glow-x) var(--hover-card-glow-y), color-mix(in srgb, var(--accent) 16%, transparent), transparent 58%),
+    var(--card);
+  box-shadow: 0 30px 70px color-mix(in srgb, var(--card-shadow-color) 92%, transparent), inset 0 1px 0 color-mix(in srgb, #fff 10%, transparent);
+  transform-style: preserve-3d;
+  backdrop-filter: blur(18px);
+}
+.config-root .hover-detail-panel-inner::before {
+  position: absolute;
+  z-index: 2;
+  top: var(--hover-detail-cover-height, 92px);
+  right: 16px;
+  left: 16px;
+  height: 1px;
+  background: var(--border);
+  content: "";
+  pointer-events: none;
+}
+.config-root .hover-detail-panel-inner::after {
+  position: absolute;
+  right: 15px;
+  bottom: -8px;
+  left: 15px;
+  height: 9px;
+  border-radius: 0 0 12px 12px;
+  background: color-mix(in srgb, var(--accent) 28%, var(--card));
+  content: "";
+  opacity: .72;
+  transform: rotateX(68deg);
+  transform-origin: top;
+  pointer-events: none;
+}
+.config-root .is-detail-above .hover-detail-panel-inner::after {
+  top: -8px;
+  bottom: auto;
+  border-radius: 12px 12px 0 0;
+  transform: rotateX(-68deg);
+  transform-origin: bottom;
+}
+.config-root .is-detail-above .hover-detail-panel-inner {
+  padding-top: 0;
+  padding-bottom: var(--hover-detail-cover-height, 92px);
+}
+.config-root .is-detail-above .hover-detail-panel-inner::before {
+  top: auto;
+  bottom: var(--hover-detail-cover-height, 92px);
+}
+.config-root .hover-detail-panel-content {
+  max-height: min(56vh, 520px);
+  overflow: auto;
+}
+@media (hover: hover) {
+  .config-root .hover-detail-card:hover {
+    --card-visual-depth: 20px;
+    --card-copy-depth: 10px;
+    z-index: 40;
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
+    transform: perspective(1100px) translateY(-4px) rotateX(var(--hover-card-rotate-x)) rotateY(var(--hover-card-rotate-y));
+  }
+  .config-root .hover-detail-card:hover::before { opacity: 0; }
+  .config-root .hover-detail-card:hover > .hover-detail-cover {
+    left: var(--hover-detail-offset-x, 0px);
+    width: min(var(--hover-detail-panel-width, 560px), calc(100vw - 32px));
+    padding-left: var(--hover-detail-cover-open-padding-left, 0px);
+  }
+  .config-root .hover-detail-card:hover .hover-detail-panel {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateY(0) scale(1);
+    transition-delay: 0s;
+  }
+}
+.config-root:has(.overlay) .hover-detail-card .hover-detail-panel {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .config-root .hover-detail-card,
+  .config-root .hover-detail-card::before,
+  .config-root .hover-detail-card > .hover-detail-cover,
+  .config-root .hover-detail-panel { transition: none; }
+  .config-root .hover-detail-card:hover,
+  .config-root .hover-detail-card:not(.is-pointer-focus):focus-within,
+  .config-root .hover-detail-card.is-guide-expanded,
+  .config-root .hover-detail-card.is-detail-persisted,
+  .config-root .hover-detail-card:hover .hover-detail-panel,
+  .config-root .hover-detail-card:not(.is-pointer-focus):focus-within .hover-detail-panel,
+  .config-root .hover-detail-card.is-guide-expanded .hover-detail-panel,
+  .config-root .hover-detail-card.is-detail-persisted .hover-detail-panel,
+  .config-root .hover-detail-card > .hover-detail-cover { transform: none; }
+}
+.config-root .attribute-card { border-radius: 16px; }
+.config-root .attribute-card,
+.config-root .activity-card {
+  --hover-detail-cover-height: 92px;
+  --hover-detail-cover-open-padding-left: 0px;
 }
 .config-root .attribute-card-title {
-  display: flex;
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding-bottom: 15px;
-  border-bottom: 1px solid var(--border);
+  gap: 12px;
+  min-height: 92px;
+  padding: 14px;
+  cursor: default;
 }
-.config-root .attribute-title-copy { min-width: 0; }
-.config-root .attribute-name-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; }
-.config-root .attribute-card-title h3 { font-size: var(--type-title); }
-.config-root .attribute-meta { display: block; margin-top: 5px; color: var(--text-dim); font-size: var(--type-meta); }
+.config-root .attribute-card-visual {
+  position: relative;
+  display: grid;
+  width: 58px;
+  height: 58px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at 30% 25%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 58%),
+    var(--input-bg);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 12%, transparent), 0 8px 16px color-mix(in srgb, var(--card-shadow-color) 48%, transparent);
+  transform: translateZ(var(--card-visual-depth));
+  transition: transform 180ms ease-out;
+}
+.config-root .attribute-cover-image {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 44px;
+  height: 44px;
+  border-radius: 11px;
+  object-fit: contain;
+  transform: translate(-50%, -50%);
+  filter: drop-shadow(0 4px 5px color-mix(in srgb, var(--card-shadow-color) 62%, transparent));
+}
+.config-root .attribute-card-visual.has-multiple .attribute-cover-image { width: 34px; height: 34px; }
+.config-root .attribute-card-visual.has-multiple .attribute-cover-image:nth-child(1) { transform: translate(-68%, -38%) rotate(-9deg); }
+.config-root .attribute-card-visual.has-multiple .attribute-cover-image:nth-child(2) { transform: translate(-28%, -66%) rotate(7deg); }
+.config-root .attribute-card-visual.has-multiple .attribute-cover-image:nth-child(3) { transform: translate(-38%, -20%) rotate(2deg); }
+.config-root .attribute-cover-placeholder {
+  color: var(--accent-text);
+  font-size: 30px;
+  font-weight: 900;
+  line-height: 1;
+}
+.config-root .attribute-title-copy { min-width: 0; transform: translateZ(var(--card-copy-depth)); transition: transform 180ms ease-out; }
+.config-root .attribute-name-row { display: grid; min-width: 0; gap: 3px; }
+.config-root .attribute-card-title h3 { overflow: hidden; font-size: var(--type-title); text-overflow: ellipsis; white-space: nowrap; }
+.config-root .attribute-meta { display: block; overflow: hidden; margin-top: 6px; color: var(--text-dim); font-size: var(--type-meta); text-overflow: ellipsis; white-space: nowrap; }
 .config-root .attribute-current-value {
   color: var(--accent-text);
   font-family: "Cascadia Code", Consolas, monospace;
   font-size: var(--type-title);
   white-space: nowrap;
 }
+.config-root .attribute-card:not(.is-pointer-focus):focus-within > .attribute-card-title,
+.config-root .attribute-card.is-guide-expanded > .attribute-card-title,
+.config-root .attribute-card.is-detail-persisted > .attribute-card-title,
+.config-root .activity-card:not(.is-pointer-focus):focus-within > .activity-card-cover,
+.config-root .activity-card.is-guide-expanded > .activity-card-cover,
+.config-root .activity-card.is-detail-persisted > .activity-card-cover {
+  justify-content: center;
+  padding-right: max(24px, calc((100% - 430px) / 2));
+  padding-left: max(24px, calc((100% - 430px) / 2));
+}
+@media (hover: hover) {
+  .config-root .attribute-card:hover > .attribute-card-title,
+  .config-root .activity-card:hover > .activity-card-cover {
+    justify-content: center;
+    padding-right: max(24px, calc((100% - 430px) / 2));
+    padding-left: max(24px, calc((100% - 430px) / 2));
+  }
+}
+.config-root .attribute-card-details-content { padding: 16px; }
+.config-root .attribute-detail-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.config-root .attribute-detail-copy { min-width: 0; }
+.config-root .attribute-detail-label {
+  color: var(--text-dim);
+  font-size: var(--type-meta);
+  font-weight: 800;
+  letter-spacing: .03em;
+}
 .config-root .attribute-formulas {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(190px, 240px));
   align-content: start;
-  flex: 1;
   gap: 8px;
-  padding: 15px 0;
+  padding: 12px 0 15px;
 }
 .config-root .attribute-gift-rule {
   display: flex;
@@ -1849,6 +2131,8 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 
 .config-root .display-scenes-section {
+  position: relative;
+  z-index: 0;
   min-width: 0;
   border: 1px solid var(--border);
   border-radius: 18px;
@@ -1874,15 +2158,20 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 .config-root .display-scenes-prerequisite strong { color: var(--text); font-size: var(--type-body); }
 .config-root .display-scenes-prerequisite span { color: var(--text-dim); font-size: var(--type-meta); }
-.config-root .display-scene-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.config-root .display-scene-card {
+.config-root .display-scene-list {
   display: grid;
-  grid-template-columns: 170px minmax(0, 1fr);
-  min-width: 0;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 15px;
-  background: var(--card);
+  grid-template-columns: repeat(auto-fill, minmax(min(245px, 100%), 1fr));
+  align-items: start;
+  gap: 14px;
+  isolation: isolate;
+  perspective: 1100px;
+}
+.config-root .display-scene-card { --hover-detail-cover-height: 208px; border-radius: 16px; }
+.config-root .display-scene-card-cover {
+  display: grid;
+  grid-template-rows: 132px auto;
+  min-height: 208px;
+  cursor: default;
 }
 .config-root .display-scene-preview {
   --scene-preview-accent: #fb7299;
@@ -1891,12 +2180,15 @@ body.config-mode::-webkit-scrollbar-corner,
   display: grid;
   align-content: center;
   grid-template-columns: 1fr;
-  gap: 7px;
-  min-height: 210px;
-  padding: 16px;
-  border-right: 1px solid var(--border);
+  gap: 4px;
+  min-height: 132px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+  border-radius: 15px 15px 0 0;
   background: linear-gradient(145deg, color-mix(in srgb, var(--scene-preview-accent) 18%, var(--scene-preview-surface)), var(--scene-preview-surface));
   color: white;
+  transform: translateZ(var(--card-visual-depth));
+  transition: transform 180ms ease-out;
 }
 .config-root .display-scene-preview.is-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .config-root .display-scene-preview::after { content: ""; position: absolute; inset: 8px; border: 1px solid color-mix(in srgb, var(--scene-preview-accent) 42%, transparent); border-radius: 10px; pointer-events: none; }
@@ -1910,18 +2202,52 @@ body.config-mode::-webkit-scrollbar-corner,
   gap: 3px;
   border: 1px solid color-mix(in srgb, var(--scene-preview-accent) 28%, transparent);
   border-radius: 8px;
-  padding: 8px;
+  padding: 4px;
   background: rgba(0,0,0,.24);
 }
 .config-root .display-scene-preview small,
 .config-root .display-scene-preview strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.config-root .display-scene-preview small { color: rgba(255,255,255,.65); font-size: var(--type-meta); }
-.config-root .display-scene-preview strong { color: var(--scene-preview-accent); font-size: var(--type-body); }
-.config-root .display-scene-preview em { position: absolute; right: 12px; bottom: 10px; z-index: 2; color: white; font-size: var(--type-meta); font-style: normal; }
+.config-root .display-scene-preview small { color: rgba(255,255,255,.65); font-size: 9px; }
+.config-root .display-scene-preview strong { color: var(--scene-preview-accent); font-size: 10px; }
+.config-root .display-scene-preview em { position: absolute; right: 8px; bottom: 6px; z-index: 2; color: white; font-size: 9px; font-style: normal; }
 .config-root .display-scene-preview.is-rpg,
 .config-root .display-scene-preview.is-pixel { border-radius: 0; }
+.config-root .display-scene-card:not(.is-pointer-focus):focus-within,
+.config-root .display-scene-card.is-guide-expanded,
+.config-root .display-scene-card.is-detail-persisted {
+  --card-visual-depth: 10px;
+  --card-copy-depth: 6px;
+}
+.config-root .display-scene-card:not(.is-pointer-focus):focus-within .display-scene-preview,
+.config-root .display-scene-card.is-guide-expanded .display-scene-preview,
+.config-root .display-scene-card.is-detail-persisted .display-scene-preview {
+  overflow: hidden;
+  border-radius: 15px;
+}
+@media (hover: hover) {
+  .config-root .display-scene-card:hover {
+    --card-visual-depth: 10px;
+    --card-copy-depth: 6px;
+  }
+  .config-root .display-scene-card:hover .display-scene-preview {
+    overflow: hidden;
+    border-radius: 15px;
+  }
+}
+.config-root .display-scene-card-cover-copy { display: grid; min-width: 0; align-content: center; gap: 5px; min-height: 76px; padding: 13px 14px; transform: translateZ(var(--card-copy-depth)); transition: transform 180ms ease-out; }
+.config-root .display-scene-card-cover-copy h3 {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: var(--type-title);
+  text-overflow: ellipsis;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.config-root .display-scene-card-cover-copy span { overflow: hidden; color: var(--text-dim); font-size: var(--type-meta); text-overflow: ellipsis; white-space: nowrap; }
 .config-root .display-scene-card-body { display: flex; min-width: 0; flex-direction: column; gap: 13px; padding: 16px; }
 .config-root .display-scene-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.config-root .display-scene-detail-label { color: var(--text-dim); font-size: var(--type-meta); font-weight: 800; letter-spacing: .03em; }
 .config-root .display-scene-card-head > div:first-child { min-width: 0; }
 .config-root .display-scene-card-head h3 { overflow: hidden; font-size: var(--type-title); text-overflow: ellipsis; white-space: nowrap; }
 .config-root .display-scene-card-head span { display: block; margin-top: 5px; color: var(--text-dim); font-size: var(--type-meta); }
@@ -1979,6 +2305,8 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .display-scene-dialog-actions { position: static; }
 
 .config-root .activity-workspace-section {
+  position: relative;
+  z-index: 0;
   min-width: 0;
   border: 1px solid var(--border);
   border-radius: 18px;
@@ -2002,25 +2330,51 @@ body.config-mode::-webkit-scrollbar-corner,
   font-size: var(--type-meta);
   text-align: center;
 }
-.config-root .activity-card-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.config-root .activity-card {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 15px;
-  border: 1px solid var(--border);
-  border-radius: 15px;
-  padding: 18px;
-  background: var(--card);
+.config-root .activity-card-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(245px, 100%), 1fr));
+  align-items: start;
+  gap: 14px;
+  isolation: isolate;
+  perspective: 1100px;
 }
-.config-root .activity-card.is-active { border-color: color-mix(in srgb, #55d98b 58%, var(--border)); box-shadow: inset 0 0 0 1px color-mix(in srgb, #55d98b 16%, transparent); }
+.config-root .activity-card { border-radius: 16px; }
+.config-root .activity-card.is-active { border-color: color-mix(in srgb, #55d98b 58%, var(--border)); }
 .config-root .activity-card.is-locked { border-color: color-mix(in srgb, #f2bd57 55%, var(--border)); }
 .config-root .activity-card.is-settled { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
-.config-root .activity-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-.config-root .activity-card-head > div:first-child { min-width: 0; }
+.config-root .activity-card.hover-detail-card:not(.is-pointer-focus):focus-within { border-color: transparent; }
+@media (hover: hover) {
+  .config-root .activity-card.hover-detail-card:hover { border-color: transparent; }
+}
+.config-root .activity-card-cover { display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: center; gap: 12px; min-height: 92px; padding: 14px; cursor: default; }
+.config-root .activity-card-visual {
+  display: grid;
+  width: 58px;
+  height: 58px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 17px;
+  background: var(--bg-soft);
+  color: var(--text-dim);
+  font-size: 22px;
+  font-weight: 900;
+  box-shadow: 0 8px 16px color-mix(in srgb, var(--card-shadow-color) 48%, transparent);
+  transform: translateZ(var(--card-visual-depth));
+  transition: transform 180ms ease-out;
+}
+.config-root .activity-card-visual.is-active { border-color: rgba(85,217,139,.48); background: rgba(85,217,139,.12); color: #86edac; }
+.config-root .activity-card-visual.is-locked { border-color: rgba(242,189,87,.45); background: rgba(242,189,87,.11); color: #f8d58e; }
+.config-root .activity-card-visual.is-settled { border-color: color-mix(in srgb, var(--accent) 52%, transparent); background: var(--accent-soft); color: var(--accent-text); }
+.config-root .activity-card-cover-copy { display: grid; min-width: 0; gap: 5px; transform: translateZ(var(--card-copy-depth)); transition: transform 180ms ease-out; }
+.config-root .activity-card-cover-copy > h3 { overflow: hidden; font-size: var(--type-title); text-overflow: ellipsis; white-space: nowrap; }
+.config-root .activity-card-compact-row { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 7px; }
+.config-root .activity-card-compact-meta { color: var(--text-dim); font-size: var(--type-meta); }
+.config-root .activity-card-compact-row .activity-status { flex: 0 0 auto; padding: 2px 6px; }
+.config-root .activity-card-details-content { display: grid; gap: 15px; padding: 16px; }
+.config-root .activity-card-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .config-root .activity-card-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
 .config-root .activity-card-title-row h3 { overflow: hidden; font-size: var(--type-title); text-overflow: ellipsis; white-space: nowrap; }
-.config-root .activity-card-head p { margin-top: 6px; color: var(--text-dim); font-size: var(--type-meta); line-height: 1.55; }
+.config-root .activity-card-head p { color: var(--text-dim); font-size: var(--type-meta); line-height: 1.55; }
 .config-root .activity-status { border: 1px solid var(--border-strong); border-radius: 999px; padding: 4px 8px; color: var(--text-dim); font-size: var(--type-meta); font-weight: 800; }
 .config-root .activity-status.is-active { border-color: rgba(85,217,139,.48); background: rgba(85,217,139,.12); color: #86edac; }
 .config-root .activity-status.is-locked { border-color: rgba(242,189,87,.45); background: rgba(242,189,87,.11); color: #f8d58e; }
@@ -2787,7 +3141,7 @@ body.config-mode::-webkit-scrollbar-corner,
   color: var(--accent-text);
 }
 .config-root .formula-help {
-  margin-bottom: 14px;
+  margin: 16px 0 14px;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--card);
@@ -2839,6 +3193,7 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .gift-choice {
   display: flex;
   align-items: center;
+  height: 60px;
   min-width: 0;
   gap: 9px;
   border: 1px solid var(--border);
@@ -3115,7 +3470,6 @@ body.config-mode::-webkit-scrollbar-corner,
 @media (max-width: 900px) {
   .config-root .config-intro { align-items: stretch; flex-direction: column; }
   .config-root .config-summary { min-width: 0; }
-  .config-root .attribute-list,
   .config-root .advanced-settings-grid { grid-template-columns: 1fr; }
   .config-root .attribute-basics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .config-root .gift-picker-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -3125,9 +3479,7 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .formula-help-examples { grid-template-columns: 1fr; }
   .config-root .formula-editor-meta { align-items: flex-start; flex-direction: column; }
   .config-root .connection-grid { grid-template-columns: 1fr; }
-  .config-root .display-scene-list { grid-template-columns: 1fr; }
   .config-root .display-scene-attribute-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .config-root .activity-card-list { grid-template-columns: 1fr; }
   .config-root .activity-editor-fields,
   .config-root .activity-attribute-picker,
   .config-root .activity-initial-values,
@@ -3157,13 +3509,12 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .attributes-heading-row .btn { align-self: flex-start; }
   .config-root .attribute-obs-row { grid-template-columns: 1fr auto; }
   .config-root .attribute-obs-label { grid-column: 1 / -1; }
+  .config-root .attribute-card-details-content { padding-right: 14px; padding-bottom: 14px; padding-left: 14px; }
   .config-root .attribute-basics,
   .config-root .selected-rules { grid-template-columns: 1fr; }
   .config-root .attribute-formulas { grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr)); }
   .config-root .gift-picker-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 300px; }
   .config-root .manual-gift-fields { grid-template-columns: 1fr; }
-  .config-root .display-scene-card { grid-template-columns: 1fr; }
-  .config-root .display-scene-preview { min-height: 150px; border-right: 0; border-bottom: 1px solid var(--border); }
   .config-root .display-scene-layout-options,
   .config-root .display-scene-attribute-picker,
   .config-root .display-scene-theme-control .display-theme-grid { grid-template-columns: 1fr; }
@@ -3496,7 +3847,8 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .display-theme-option.is-kawaii .display-theme-swatch { --swatch-accent: #ff6fae; --swatch-bg: #fff2f7; }
 .config-root .display-theme-check { color: var(--accent-text); font-weight: 900; }
 .config-root .display-theme-setting { min-width: 0; margin: 0; padding: 0; border: 0; }
-.config-root .display-theme-setting legend { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; }
+.config-root .display-theme-setting > .field-label { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; }
+.config-root .display-theme-setting.display-scene-theme-control { border: 1px solid var(--border); border-radius: 14px; padding: 16px; background: var(--bg-soft); }
 .config-root .display-theme-current { color: var(--accent-text); font-size: var(--type-meta); font-weight: 800; }
 .config-root .display-theme-description { margin-top: 5px; color: var(--text-dim); font-size: var(--type-meta); }
 .config-root .advanced-card > .display-theme-setting .display-theme-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

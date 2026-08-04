@@ -1,7 +1,7 @@
 import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
 import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
-import { el, fieldControl, inputField, toast } from '../common';
+import { bindFloatingDetailCard, el, fieldControl, inputField, toast } from '../common';
 import { builtinCatalog, findGift, giftDisplayKey, matchesGiftSearch, sortGiftsByUsage } from '../../gifts/catalog';
 import { formatValue } from '../../format';
 import {
@@ -640,8 +640,14 @@ export function mountConfig(root: HTMLElement): void {
     activeGuide?.dispose();
     activeGuide = null;
     updateTrainingToggle();
+    const lesson = guideDismissed ? null : activeTutorialLesson();
+    root.querySelectorAll<HTMLElement>('.attribute-card').forEach((card) => {
+      card.classList.remove('is-guide-expanded');
+    });
+    if (!editorOpen && (lesson === 'enable' || lesson === 'output')) {
+      root.querySelector<HTMLElement>('.attribute-card')?.classList.add('is-guide-expanded');
+    }
     if (guideDismissed) return;
-    const lesson = activeTutorialLesson();
     if (!lesson) return;
     if (editorOpen && !editorGuideEnabled && forcedTutorialLesson === null) return;
     if (navigate && editorOpen && activeEditorWorkspace) {
@@ -655,6 +661,7 @@ export function mountConfig(root: HTMLElement): void {
         guideDismissed = true;
         editorGuideEnabled = false;
         forcedTutorialLesson = null;
+        root.querySelector<HTMLElement>('.attribute-card.is-guide-expanded')?.classList.remove('is-guide-expanded');
         state.settings.showTutorial = false;
         save();
         activeEditorWorkspace?.setTrainingVisible(false);
@@ -1047,7 +1054,11 @@ export function mountConfig(root: HTMLElement): void {
   function renderAttributeCard(attribute: Attribute, index: number): HTMLElement {
     const rules = state.rules.filter((rule) => rule.attributeName === attribute.name);
     const timerRules = state.timerRules.filter((rule) => rule.attributeName === attribute.name);
-    const card = el('article', { class: 'attribute-card' });
+    const card = el('article', {
+      class: 'attribute-card hover-detail-card',
+      tabIndex: 0,
+      ariaLabel: `属性“${attribute.name}”，当前值 ${formatValue(attribute.value, attribute)}。悬停或聚焦查看详细设置。`,
+    } as any);
     const editButton = el('button', { class: `btn ghost attribute-action-button${index === 0 ? ' guide-attribute-edit' : ''}`, type: 'button', text: '编辑' }) as HTMLButtonElement;
     editButton.onclick = () => openAttributeEditor(index);
     const deleteButton = el('button', { class: 'btn text-danger attribute-action-button', type: 'button', text: '删除' }) as HTMLButtonElement;
@@ -1087,16 +1098,44 @@ export function mountConfig(root: HTMLElement): void {
       render();
       toast('属性已删除', root);
     };
-    const title = el('div', { class: 'attribute-card-title' });
+    const mappedImage = attribute.display?.valueMappings
+      ?.find((mapping) => mapping.value === attribute.value)?.imageUrl?.trim();
+    const coverImageSources = [
+      mappedImage,
+      ...rules.map((rule) => findGift(state, rule.giftId)?.imgBasic?.trim()),
+    ].filter((source, sourceIndex, sources): source is string => (
+      Boolean(source) && sources.indexOf(source) === sourceIndex
+    )).slice(0, 3);
+    const visual = el('div', {
+      class: `attribute-card-visual${coverImageSources.length > 1 ? ' has-multiple' : ''}`,
+      ariaHidden: 'true',
+    } as any);
+    if (coverImageSources.length > 0) {
+      coverImageSources.forEach((source) => {
+        const image = el('img', { class: 'attribute-cover-image', alt: '', loading: 'lazy' }) as HTMLImageElement;
+        image.src = source;
+        visual.append(image);
+      });
+    } else {
+      visual.append(el('span', {
+        class: 'attribute-cover-placeholder',
+        text: timerRules.length > 0 ? '⏱' : (Array.from(attribute.name.trim())[0] || '值'),
+      }));
+    }
+
+    const attributeMeta = el('span', {
+      class: 'attribute-meta',
+      text: `${displayFormatLabel(attribute)} · ${rules.length} 条礼物规则 · ${timerRules.length} 个定时器`,
+    });
+    const title = el('div', { class: 'attribute-card-title hover-detail-cover', title: '悬停查看规则与 OBS 输出' });
     title.append(
+      visual,
       el('div', { class: 'attribute-title-copy' }, [
         el('div', { class: 'attribute-name-row' }, [
           el('h3', { text: attribute.name }),
           attributeValueElement(attribute),
         ]),
-        el('span', { class: 'attribute-meta', text: `${displayFormatLabel(attribute)} · ${rules.length} 条礼物规则 · ${timerRules.length} 个定时器` }),
       ]),
-      el('div', { class: 'attribute-actions' }, [editButton, deleteButton]),
     );
 
     const formulas = el('div', { class: 'attribute-formulas' });
@@ -1216,6 +1255,7 @@ export function mountConfig(root: HTMLElement): void {
       state.settings.showTutorial = false;
       guideDismissed = true;
       forcedTutorialLesson = null;
+      card.classList.remove('is-guide-expanded');
       activeGuide?.dispose();
       activeGuide = null;
       save();
@@ -1226,7 +1266,23 @@ export function mountConfig(root: HTMLElement): void {
       copyObsButton,
     ]);
 
-    card.append(title, formulas, obsRow);
+    const detailsContent = el('div', { class: 'attribute-card-details-content hover-detail-panel-content' }, [
+      el('div', { class: 'attribute-detail-toolbar' }, [
+        el('div', { class: 'attribute-detail-copy' }, [
+          el('span', { class: 'attribute-detail-label', text: '规则与输出' }),
+          attributeMeta,
+        ]),
+        el('div', { class: 'attribute-actions' }, [editButton, deleteButton]),
+      ]),
+      formulas,
+      obsRow,
+    ]);
+    const details = el('div', { class: 'attribute-card-details hover-detail-panel' }, [
+      el('div', { class: 'attribute-card-details-inner hover-detail-panel-inner' }, [detailsContent]),
+    ]);
+
+    card.append(title, details);
+    bindFloatingDetailCard(card, title, { panelWidth: 560, estimatedPanelHeight: 420 });
     return card;
   }
 
@@ -1279,7 +1335,11 @@ export function mountConfig(root: HTMLElement): void {
   function renderDisplaySceneCard(scene: DisplayScene, index: number): HTMLElement {
     const theme = getDisplayTheme(scene.themeId);
     const obsUrl = displaySceneUrl(location.origin, scene.id);
-    const card = el('article', { class: 'display-scene-card' });
+    const card = el('article', {
+      class: 'display-scene-card hover-detail-card',
+      tabIndex: 0,
+      ariaLabel: `OBS 组合面板“${scene.name}”，${scene.attributeNames.length} 个属性。悬停或聚焦查看详细设置。`,
+    } as any);
     const preview = el('div', { class: `display-scene-preview ${theme.previewClass} is-${scene.layout}` });
     preview.style.setProperty('--scene-preview-accent', theme.accent);
     preview.style.setProperty('--scene-preview-surface', theme.surface);
@@ -1317,20 +1377,27 @@ export function mountConfig(root: HTMLElement): void {
       toast('组合面板已删除', root);
     };
 
-    card.append(
+    const sceneMeta = `${scene.layout === 'grid' ? '双列布局' : '纵向布局'} · ${theme.name} · ${scene.attributeNames.length} 个属性`;
+    const cover = el('div', { class: 'display-scene-card-cover hover-detail-cover', title: '悬停查看组合面板详情' }, [
       preview,
-      el('div', { class: 'display-scene-card-body' }, [
+      el('div', { class: 'display-scene-card-cover-copy' }, [
+        el('h3', { text: scene.name }),
+        el('span', { text: sceneMeta }),
+      ]),
+    ]);
+    const detailsContent = el('div', { class: 'display-scene-card-body hover-detail-panel-content' }, [
         el('div', { class: 'display-scene-card-head' }, [
-          el('div', {}, [
-            el('h3', { text: scene.name }),
-            el('span', { text: `${scene.layout === 'grid' ? '双列布局' : '纵向布局'} · ${theme.name} · ${scene.attributeNames.length} 个属性` }),
-          ]),
+          el('span', { class: 'display-scene-detail-label', text: '面板内容与输出' }),
           el('div', { class: 'display-scene-card-actions' }, [editButton, deleteButton]),
         ]),
         el('div', { class: 'display-scene-attributes' }, scene.attributeNames.map((name) => el('span', { text: name }))),
         el('div', { class: 'display-scene-link-row' }, [obsInput, copyButton]),
-      ]),
-    );
+    ]);
+    const details = el('div', { class: 'display-scene-card-details hover-detail-panel' }, [
+      el('div', { class: 'display-scene-card-details-inner hover-detail-panel-inner' }, [detailsContent]),
+    ]);
+    card.append(cover, details);
+    bindFloatingDetailCard(card, cover, { panelWidth: 540, estimatedPanelHeight: 300 });
     return card;
   }
 
@@ -3427,8 +3494,8 @@ export function mountConfig(root: HTMLElement): void {
       grid.append(button);
     }
     refresh();
-    return el('fieldset', { class: 'field setting-control display-theme-setting' }, [
-      el('legend', { class: 'field-label' }, [el('span', { text: label }), selectedName]),
+    return el('div', { class: 'field setting-control display-theme-setting', role: 'group', ariaLabel: label }, [
+      el('div', { class: 'field-label' }, [el('span', { text: label }), selectedName]),
       el('p', { class: 'display-theme-description', text: description }),
       grid,
     ]);

@@ -78,10 +78,12 @@ describe('gameplay templates', () => {
     }));
     expect(result.rules[0].formula).toBe('MIN(加班时间+price/1000*120,7200)');
     expect(result.timerRules[0]).toEqual(expect.objectContaining({
-      intervalSeconds: 60,
+      formulaName: '每秒自动减少',
+      intervalSeconds: 1,
       condition: '加班时间>0',
-      formula: 'MAX(加班时间-60,0)',
+      formula: 'MAX(加班时间-1,0)',
     }));
+    expect(result.summary).toContain('每秒自动减少 1 秒');
   });
 
   it('requires each mandatory role and prevents ambiguous duplicate role assignments', () => {

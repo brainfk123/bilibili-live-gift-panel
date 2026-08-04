@@ -2,7 +2,7 @@ import { activityStatusLabel, createActivityId, createActivityMilestoneId, MAX_A
 import { transitionActivity } from '../../backend';
 import { formatValue } from '../../format';
 import type { ActivityGiftTimeoutAction, ActivityMilestone, ActivityResultMode, ActivitySession, AppState } from '../../types';
-import { el, fieldControl, inputField, toast } from '../common';
+import { bindFloatingDetailCard, el, fieldControl, inputField, toast } from '../common';
 
 interface ActivityWorkspaceOptions {
   state: AppState;
@@ -43,26 +43,33 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
   return section;
 
   function renderCard(activity: ActivitySession, index: number): HTMLElement {
-    const card = el('article', { class: `activity-card is-${activity.status}` });
+    const card = el('article', {
+      class: `activity-card hover-detail-card is-${activity.status}${root.dataset.expandedActivityId === activity.id ? ' is-detail-persisted' : ''}`,
+      tabIndex: 0,
+      ariaLabel: `活动“${activity.name}”，${activityStatusLabel(activity.status)}。悬停或聚焦查看详细设置。`,
+    } as any);
     const status = el('span', { class: `activity-status is-${activity.status}`, text: activityStatusLabel(activity.status) });
     const scene = state.displayScenes.find((candidate) => candidate.id === activity.sceneId);
     const actions = el('div', { class: 'activity-card-actions' });
     const transitionButton = (label: string, action: ActivityTransitionAction, className = 'btn'): HTMLButtonElement => {
       const button = el('button', { class: className, type: 'button', text: label }) as HTMLButtonElement;
-      button.onclick = () => void runTransition(activity, action, actions);
+      button.onclick = () => void runTransition(activity, action, actions, card);
       return button;
+    };
+    const remove = el('button', { class: 'btn text-danger', type: 'button', text: '删除' }) as HTMLButtonElement;
+    remove.onclick = () => {
+      const activeWarning = activity.status === 'active' || activity.status === 'locked'
+        ? '活动仍在进行，删除后会立即停止本局控制。'
+        : '';
+      if (!confirm(`${activeWarning}确定删除活动“${activity.name}”？属性、规则和组合面板不会被删除。`)) return;
+      state.activities.splice(index, 1);
+      void options.onPersist().then(options.onRender).catch(() => undefined);
     };
     if (activity.status === 'not_started') {
       actions.append(transitionButton('开始活动', 'start'));
       const edit = el('button', { class: 'btn ghost', type: 'button', text: '编辑' }) as HTMLButtonElement;
       edit.onclick = () => openEditor(index);
-      const remove = el('button', { class: 'btn text-danger', type: 'button', text: '删除' }) as HTMLButtonElement;
-      remove.onclick = () => {
-        if (!confirm(`删除活动“${activity.name}”？属性、规则和组合面板不会被删除。`)) return;
-        state.activities.splice(index, 1);
-        void options.onPersist().then(options.onRender).catch(() => undefined);
-      };
-      actions.append(edit, remove);
+      actions.append(edit);
     } else if (activity.status === 'active') {
       actions.append(transitionButton('锁定结果', 'lock', 'btn ghost'), transitionButton('直接结算', 'settle'));
     } else if (activity.status === 'locked') {
@@ -70,6 +77,7 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
     } else {
       actions.append(transitionButton('重新准备', 'reset', 'btn ghost'));
     }
+    actions.append(remove);
 
     const result = activity.status === 'settled' && activity.result
       ? renderResult(activity)
@@ -77,12 +85,22 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
     const latestMilestone = activity.milestones
       .filter((milestone) => milestone.triggeredAt)
       .sort((left, right) => Number(right.triggeredAt) - Number(left.triggeredAt))[0];
-    card.append(
-      el('div', { class: 'activity-card-head' }, [
-        el('div', {}, [
-          el('div', { class: 'activity-card-title-row' }, [el('h3', { text: activity.name }), status]),
-          el('p', { text: activity.gateRules ? '关联属性只在活动进行中响应规则与定时器' : '仅记录活动状态，不限制规则执行' }),
+    const statusIcon = activity.status === 'active' ? '▶'
+      : activity.status === 'locked' ? '◆'
+        : activity.status === 'settled' ? '✓' : '◇';
+    const cover = el('div', { class: 'activity-card-cover hover-detail-cover', title: '悬停查看活动详情' }, [
+      el('div', { class: `activity-card-visual is-${activity.status}`, text: statusIcon, ariaHidden: 'true' } as any),
+      el('div', { class: 'activity-card-cover-copy' }, [
+        el('h3', { text: activity.name }),
+        el('div', { class: 'activity-card-compact-row' }, [
+          el('span', { class: 'activity-card-compact-meta', text: `${activity.attributeNames.length} 个属性` }),
+          status,
         ]),
+      ]),
+    ]);
+    const detailsContent = el('div', { class: 'activity-card-details-content hover-detail-panel-content' }, [
+      el('div', { class: 'activity-card-head activity-card-detail-head' }, [
+        el('p', { text: activity.gateRules ? '关联属性只在活动进行中响应规则与定时器' : '仅记录活动状态，不限制规则执行' }),
         actions,
       ]),
       el('div', { class: 'activity-attribute-chips' }, activity.attributeNames.map((attributeName) => {
@@ -111,7 +129,19 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
         ]),
       ])] : []),
       ...(result ? [result] : []),
-    );
+    ]);
+    const details = el('div', { class: 'activity-card-details hover-detail-panel' }, [
+      el('div', { class: 'activity-card-details-inner hover-detail-panel-inner' }, [detailsContent]),
+    ]);
+    card.append(cover, details);
+    bindFloatingDetailCard(card, cover, {
+      panelWidth: 560,
+      estimatedPanelHeight: 440,
+      onPointerLeave: () => {
+        if (root.dataset.expandedActivityId === activity.id) delete root.dataset.expandedActivityId;
+        card.classList.remove('is-detail-persisted');
+      },
+    });
     return card;
   }
 
@@ -136,10 +166,16 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
     ]);
   }
 
-  async function runTransition(activity: ActivitySession, action: ActivityTransitionAction, actionRoot: HTMLElement): Promise<void> {
+  async function runTransition(
+    activity: ActivitySession,
+    action: ActivityTransitionAction,
+    actionRoot: HTMLElement,
+    card: HTMLElement,
+  ): Promise<void> {
     if (action === 'reset' && !confirm('重新准备会把关联属性恢复为初始值，继续吗？')) return;
     const buttons = Array.from(actionRoot.querySelectorAll('button')) as HTMLButtonElement[];
     buttons.forEach((button) => { button.disabled = true; });
+    if (card.classList.contains('is-pointer-focus')) root.dataset.expandedActivityId = activity.id;
     try {
       const result = await transitionActivity(activity.id, action);
       const index = state.activities.findIndex((candidate) => candidate.id === activity.id);
@@ -151,6 +187,7 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
       options.onRender();
       toast(transitionSuccessMessage(action), root);
     } catch (error) {
+      if (root.dataset.expandedActivityId === activity.id) delete root.dataset.expandedActivityId;
       buttons.forEach((button) => { button.disabled = false; });
       toast(error instanceof Error ? error.message : '活动操作失败', root);
     }

@@ -1205,6 +1205,27 @@ describe('single-page configuration rendering', () => {
     expect(configCss).toContain('-webkit-appearance: none;');
   });
 
+  it('keeps dense gift rows and separates advanced rule controls', () => {
+    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+
+    expect(configCss).toMatch(/\.gift-picker-drawer \.gift-picker-grid \{[^}]*align-content: start;/);
+    expect(configCss).toMatch(/\.gift-choice \{[^}]*height: 60px;/);
+    expect(configCss).toMatch(/\.rule-advanced-settings \.formula-examples \{[^}]*margin: 12px 13px 10px;/);
+    expect(configCss).toMatch(/\.formula-help \{[^}]*margin: 16px 0 14px;/);
+  });
+
+  it('keeps expanded cards centered and scene editor fieldsets aligned', () => {
+    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const configSource = readFileSync(new URL('../src/ui/config/config.ts', import.meta.url), 'utf8');
+
+    expect(configCss).toContain('.config-root .attribute-card.is-detail-persisted > .attribute-card-title');
+    expect(configCss).toContain('justify-content: center;');
+    expect(configCss).toMatch(/\.display-theme-setting\.display-scene-theme-control \{[^}]*padding: 16px;/);
+    expect(configCss).toContain('.config-root .display-theme-setting > .field-label');
+    expect(configSource).toContain("return el('div', { class: 'field setting-control display-theme-setting', role: 'group'");
+    expect(configCss).toMatch(/\.display-scene-card\.is-detail-persisted \.display-scene-preview \{[\s\S]*?overflow: hidden;[\s\S]*?border-radius: 15px;/);
+  });
+
   it('runs the game-style overtime tutorial through every workspace', async () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
@@ -1256,11 +1277,13 @@ describe('single-page configuration rendering', () => {
     expect(saved.formulaPresets).toHaveLength(1);
     expect(saved.rules[0].enabled).toBe(false);
 
+    expect(root.querySelector('.attribute-card')?.className.split(' ')).toContain('is-guide-expanded');
     (root.querySelector('.guide-rule-toggle') as TestElement | null)?.onclick?.();
     expect(textOf(root.querySelector('.tour-bubble') as TestElement)).toContain('托盘后台会继续收礼');
 
     await findByText(root, '复制 OBS 链接')?.onclick?.();
     await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).settings.showTutorial).toBe(false));
+    expect(root.querySelector('.attribute-card')?.className.split(' ')).not.toContain('is-guide-expanded');
 
     findByText(root, '编辑')?.onclick?.();
     expect(root.querySelector('.attribute-modal')).not.toBeNull();
@@ -2055,6 +2078,50 @@ describe('single-page configuration rendering', () => {
     expect(findByText(root, '复制 OBS 链接')).toBeDefined();
   });
 
+  it('renders compact 3D attribute covers with details reserved for hover or keyboard focus', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const card = root.querySelector('.attribute-card');
+    const cover = card?.querySelector('.attribute-card-title');
+    const details = card?.querySelector('.attribute-card-details');
+    expect(card?.querySelector('.attribute-card-visual')).not.toBeNull();
+    expect(cover?.querySelector('.attribute-current-value')).not.toBeNull();
+    expect(cover?.querySelector('.attribute-actions')).toBeNull();
+    expect(details?.querySelector('.attribute-actions')).not.toBeNull();
+    expect(details?.querySelector('.attribute-formulas')).not.toBeNull();
+    expect(details?.querySelector('.attribute-obs-row')).not.toBeNull();
+    expect(details?.querySelector('.hover-detail-cover')).toBeNull();
+    expect(card?.querySelector('.attribute-expand-hint')).toBeNull();
+
+    const interactiveCover = cover as TestElement & {
+      getBoundingClientRect?: () => { left: number; top: number; width: number; height: number };
+    };
+    const interactiveCard = card as TestElement & {
+      onpointermove?: (event: { pointerType: string; clientX: number; clientY: number }) => void;
+      onpointerdown?: (event: { pointerType: string }) => void;
+      onkeydown?: () => void;
+    };
+    interactiveCover.getBoundingClientRect = () => ({ left: 100, top: 100, width: 200, height: 100 });
+    interactiveCard.onpointermove?.({ pointerType: 'mouse', clientX: 280, clientY: 110 });
+    expect(card?.style['--hover-card-rotate-x']).toBe('3.20deg');
+    expect(card?.style['--hover-card-rotate-y']).toBe('4.00deg');
+    interactiveCard.onpointerdown?.({ pointerType: 'mouse' });
+    expect(card?.className.split(' ')).toContain('is-pointer-focus');
+    interactiveCard.onkeydown?.();
+    expect(card?.className.split(' ')).not.toContain('is-pointer-focus');
+
+    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    expect(configCss).toContain('perspective: 1100px;');
+    expect(configCss).toContain('@media (hover: hover)');
+    expect(configCss).toContain('.config-root .hover-detail-card:hover .hover-detail-panel');
+    expect(configCss).toContain('.config-root .hover-detail-card:not(.is-pointer-focus):focus-within .hover-detail-panel');
+    expect(configCss).toMatch(/\.config-root \.hover-detail-panel \{[\s\S]*?position: absolute;/);
+    expect(configCss).toContain('rotateX(var(--hover-card-rotate-x)) rotateY(var(--hover-card-rotate-y))');
+    expect(configCss).toContain('@media (prefers-reduced-motion: reduce)');
+  });
+
   it('incrementally appends gift picker items while scrolling and resets after search', () => {
     const gifts = Array.from({ length: 135 }, (_, index) => ({
       id: 10000 + index,
@@ -2200,6 +2267,10 @@ describe('OBS combination scene configuration', () => {
     }));
     const url = root.querySelector('.display-scene-url') as TestElement;
     expect(url.value).toContain('?mode=display&scene=scene-');
+    const card = root.querySelector('.display-scene-card');
+    expect(card?.className.split(' ')).toContain('hover-detail-card');
+    expect(card?.querySelector('.display-scene-card-cover')).not.toBeNull();
+    expect(card?.querySelector('.hover-detail-panel')).not.toBeNull();
   });
 });
 
@@ -2225,6 +2296,37 @@ describe('activity session configuration', () => {
       name: '活动 1', attributeNames: ['红队', '蓝队'], status: 'not_started', resultMode: 'highest', gateRules: true,
       initialValues: { 红队: 0, 蓝队: 0 }, milestones: [],
     }));
+    await vi.waitFor(() => expect(root.querySelector('.activity-card')).not.toBeNull());
+    const card = root.querySelector('.activity-card');
+    expect(card?.className.split(' ')).toContain('hover-detail-card');
+    expect(card?.querySelector('.activity-card-cover')).not.toBeNull();
+    expect(card?.querySelector('.hover-detail-panel')).not.toBeNull();
+  });
+
+  it('keeps the delete action available after an activity is settled', async () => {
+    const configured = defaultState();
+    configured.settings.showTutorial = false;
+    configured.attributes = [
+      { name: '红队', value: 12, unit: 'none', format: 'number', decimals: 0, suffix: '票' },
+    ];
+    configured.activities = [{
+      id: 'activity-settled', name: '已结束活动', attributeNames: ['红队'], status: 'settled',
+      resultMode: 'highest', gateRules: true, initialValues: { 红队: 0 }, milestones: [],
+      result: { winnerAttributeName: '红队', values: { 红队: 12 } },
+    }];
+    await saveState(configured);
+    const root = new TestElement('div');
+    root.dataset.expandedActivityId = 'activity-settled';
+    mountConfig(root as unknown as HTMLElement);
+
+    await vi.waitFor(() => expect(root.querySelector('.activity-card')).not.toBeNull());
+    const card = root.querySelector('.activity-card')!;
+    expect(findByText(card, '重新准备')).toBeDefined();
+    expect(findByText(card, '删除')).toBeDefined();
+    expect(card.className.split(' ')).toContain('is-detail-persisted');
+    (card as TestElement & { onpointerleave?: () => void }).onpointerleave?.();
+    expect(card.className.split(' ')).not.toContain('is-detail-persisted');
+    expect(root.dataset.expandedActivityId).toBeUndefined();
   });
 });
 

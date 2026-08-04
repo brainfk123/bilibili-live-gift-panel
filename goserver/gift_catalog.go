@@ -22,8 +22,13 @@ type roomGiftContext struct {
 }
 
 type giftPanelEntry struct {
+	GiftID      int                `json:"gift_id"`
+	ID          int                `json:"id"`
+	UpgradeGift []giftUpgradeEntry `json:"upgrade_gift"`
+}
+
+type giftUpgradeEntry struct {
 	GiftID int `json:"gift_id"`
-	ID     int `json:"id"`
 }
 
 type roomGiftInfo struct {
@@ -198,10 +203,10 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 	}
 
 	entries := make([]giftPanelEntry, 0, len(panelResponse.Data.RoomGiftList.GoldList)+len(panelResponse.Data.RoomGiftList.SilverList))
-	entries = append(entries, panelResponse.Data.RoomGiftList.GoldList...)
-	entries = append(entries, panelResponse.Data.RoomGiftList.SilverList...)
+	entries = appendGiftPanelEntries(entries, panelResponse.Data.RoomGiftList.GoldList)
+	entries = appendGiftPanelEntries(entries, panelResponse.Data.RoomGiftList.SilverList)
 	for _, tab := range panelResponse.Data.TabList {
-		entries = append(entries, tab.List...)
+		entries = appendGiftPanelEntries(entries, tab.List)
 	}
 	seen := map[int]struct{}{}
 	gifts := make([]roomGiftInfo, 0, len(metadata))
@@ -234,6 +239,18 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 		})
 	}
 	return gifts, nil
+}
+
+func appendGiftPanelEntries(target []giftPanelEntry, source []giftPanelEntry) []giftPanelEntry {
+	for _, entry := range source {
+		target = append(target, entry)
+		for _, upgrade := range entry.UpgradeGift {
+			if upgrade.GiftID > 0 {
+				target = append(target, giftPanelEntry{GiftID: upgrade.GiftID})
+			}
+		}
+	}
+	return target
 }
 
 func containsGiftAttribute(attributes []int, target int) bool {
