@@ -1,5 +1,5 @@
 import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
-import { consumeConfigMigrationRequired, loadState, refreshStateFromServer, resetState, saveState } from '../../storage';
+import { consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { el, fieldControl, inputField, toast } from '../common';
 import { builtinCatalog, findGift, giftDisplayKey, matchesGiftSearch, sortGiftsByUsage } from '../../gifts/catalog';
@@ -3477,7 +3477,7 @@ export function mountConfig(root: HTMLElement): void {
     );
     const exportButton = el('button', { class: 'btn', type: 'button', text: '导出配置' }) as HTMLButtonElement;
     exportButton.onclick = () => {
-      const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+      const blob = new Blob([JSON.stringify(createConfigBackup(state), null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const link = el('a', { href: url, download: `gift-panel-config-${new Date().toISOString().slice(0, 10)}.json` }) as HTMLAnchorElement;
       link.click();
@@ -3489,26 +3489,14 @@ export function mountConfig(root: HTMLElement): void {
       const file = importInput.files?.[0];
       if (!file) return;
       void file.text().then((text) => {
-        let parsed: Partial<AppState>;
+        let parsed: unknown;
         try {
-          parsed = JSON.parse(text) as Partial<AppState>;
-        } catch {
-          toast('文件解析失败', root);
+          parsed = JSON.parse(text) as unknown;
+          state = mergeConfigBackup(state, parsed);
+        } catch (error) {
+          toast(error instanceof Error ? error.message : '文件解析失败', root);
           return;
         }
-        if (!validImportedState(parsed)) {
-          toast('配置文件格式不正确', root);
-          return;
-        }
-        state = {
-          ...state,
-          ...parsed,
-          settings: { ...state.settings, ...(parsed.settings ?? {}) },
-          attributes: parsed.attributes ?? state.attributes,
-          rules: parsed.rules ?? state.rules,
-          timerRules: parsed.timerRules ?? state.timerRules,
-          formulaPresets: parsed.formulaPresets ?? state.formulaPresets,
-        };
         state.settings.theme = normalizeConfigTheme(state.settings.theme);
         applyConfigTheme(state.settings.theme);
         save();
@@ -3809,17 +3797,6 @@ function formatInterval(intervalSeconds: number): string {
   if (interval.multiplier === 3600) return `${interval.value} 小时`;
   if (interval.multiplier === 60) return `${interval.value} 分钟`;
   return `${interval.value} 秒`;
-}
-
-function validImportedState(parsed: Partial<AppState> | null): parsed is Partial<AppState> {
-  return parsed !== null
-    && typeof parsed === 'object'
-    && !Array.isArray(parsed)
-    && (parsed.attributes === undefined || Array.isArray(parsed.attributes))
-    && (parsed.rules === undefined || Array.isArray(parsed.rules))
-    && (parsed.timerRules === undefined || Array.isArray(parsed.timerRules))
-    && (parsed.formulaPresets === undefined || Array.isArray(parsed.formulaPresets))
-    && (parsed.settings === undefined || (typeof parsed.settings === 'object' && parsed.settings !== null));
 }
 
 function normalizeConfigTheme(theme: unknown): 'dark' | 'light' {

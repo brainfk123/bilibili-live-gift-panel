@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { consumeConfigMigrationRequired, defaultState, hydrateStateFromServer, loadState, saveState, resetState, pruneLog, refreshStateFromServer } from '../src/storage';
+import { consumeConfigMigrationRequired, createConfigBackup, defaultState, hydrateStateFromServer, loadState, mergeConfigBackup, saveState, resetState, pruneLog, refreshStateFromServer } from '../src/storage';
 import { LogEntry, MAX_LOG } from '../src/types';
 
 beforeEach(() => {
@@ -18,7 +18,7 @@ describe('storage', () => {
     expect(s.settings.lastSeenChangelogVersion).toBe('');
   });
 
-  it('round-trips state through save/load', () => {
+  it('round-trips state through save/load', async () => {
     const s = defaultState();
     s.roomId = '2145';
     s.attributes.push({ name: '加班时间', value: 3600, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' });
@@ -26,7 +26,7 @@ describe('storage', () => {
     s.settings.tutorialCompletedLessons = ['room', 'attribute'];
     s.settings.trainingCompletedTopics = ['blind-box', 'obs-no-change'];
     s.settings.lastSeenChangelogVersion = '0.2.0';
-    saveState(s);
+    await saveState(s);
     const loaded = loadState();
     expect(loaded.roomId).toBe('2145');
     expect(loaded.attributes[0].value).toBe(3600);
@@ -35,6 +35,54 @@ describe('storage', () => {
     expect(loaded.settings.tutorialCompletedLessons).toEqual(['room', 'attribute']);
     expect(loaded.settings.trainingCompletedTopics).toEqual(['blind-box', 'obs-no-change']);
     expect(loaded.settings.lastSeenChangelogVersion).toBe('0.2.0');
+  });
+
+  it('saves only changed settings when history is larger than the keepalive limit', async () => {
+    const serverState = defaultState();
+    serverState.log = Array.from({ length: MAX_LOG }, (_, index) => ({
+      time: index,
+      giftId: index,
+      giftName: '粉丝团灯牌',
+      num: 1,
+      uname: `观众-${index}-${'长昵称'.repeat(80)}`,
+      attributeName: '加班时间',
+      delta: 60,
+      valueAfter: 60,
+      ruleId: `rule-${index}`,
+    }));
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, request?: RequestInit) => (
+      request?.method === 'PATCH'
+        ? new Response(null, { status: 200 })
+        : new Response(JSON.stringify(serverState), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    await hydrateStateFromServer();
+    const state = { ...loadState(), settings: { ...loadState().settings, theme: 'light' as const } };
+
+    await saveState(state);
+
+    const [, request] = fetchMock.mock.calls.at(-1) ?? [];
+    expect(request?.method).toBe('PATCH');
+    expect(JSON.parse(String(request?.body))).toEqual({ settings: state.settings });
+    expect(String(request?.body).length).toBeLessThan(64 * 1024);
+    expect(request?.keepalive).toBe(true);
+  });
+
+  it('omits keepalive when the changed shard itself exceeds the browser limit', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _request?: RequestInit) => new Response(null, { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const state = defaultState();
+    state.log = Array.from({ length: MAX_LOG }, (_, index) => ({
+      time: index, giftId: index, giftName: '礼物', num: 1,
+      uname: `观众-${'长昵称'.repeat(100)}`, attributeName: '积分', delta: 1, valueAfter: 1, ruleId: `r-${index}`,
+    }));
+
+    await saveState(state);
+
+    const [, request] = fetchMock.mock.calls.at(-1) ?? [];
+    expect(request?.method).toBe('PATCH');
+    expect(String(request?.body).length).toBeGreaterThan(64 * 1024);
+    expect(request).not.toHaveProperty('keepalive');
   });
 
   it('loads and normalizes the disk configuration from the server', async () => {
@@ -131,6 +179,59 @@ describe('storage', () => {
     await refreshStateFromServer(() => false);
 
     expect(loadState().roomId).toBe('new-room');
+  });
+
+  it('exports only configuration and gift metadata referenced by rules', () => {
+    const state = defaultState();
+    state.rules = [{ id: 'r1', giftId: 1, matchGiftIds: [2], attributeName: '积分', formula: '积分+1' }];
+    state.giftCatalog = [
+      { id: 1, name: '父礼物', price: 100, coinType: 'gold', imgBasic: '1.png' },
+      { id: 2, name: '子礼物', price: 200, coinType: 'gold', imgBasic: '2.png' },
+      { id: 3, name: '无关礼物', price: 300, coinType: 'gold', imgBasic: '3.png' },
+    ];
+    state.recentGifts = [{ id: 4, name: '历史礼物', price: 400, coinType: 'gold', imgBasic: '4.png', lastReceived: 1, count: 1 }];
+    state.log = [{ time: 1, giftId: 1, giftName: '父礼物', num: 1, uname: '观众', attributeName: '积分', delta: 1, valueAfter: 1, ruleId: 'r1' }];
+    state.stats = { today: { date: 'today', giftTotals: { 1: 1 }, ruleTriggers: { r1: 1 } } };
+    state.contributions = { viewers: [{ key: 'uid:1', uid: 1, uname: '观众', giftCount: 1, goldValue: 100, silverValue: 0, ruleTriggers: 1, attributeDeltas: { 积分: 1 }, blindBoxCount: 0, blindBoxCost: 0, blindBoxValue: 0, blindBoxProfit: 0, lastGiftAt: 1 }] };
+
+    const backup = createConfigBackup(state);
+
+    expect(backup.schemaVersion).toBe(1);
+    expect(backup.giftCatalog.map((gift) => gift.id)).toEqual([1, 2]);
+    expect(backup).not.toHaveProperty('recentGifts');
+    expect(backup).not.toHaveProperty('stats');
+    expect(backup).not.toHaveProperty('log');
+    expect(backup).not.toHaveProperty('contributions');
+  });
+
+  it('imports legacy full backups without replacing local history', () => {
+    const current = defaultState();
+    current.log = [{ time: 9, giftId: 9, giftName: '本地礼物', num: 1, uname: '本地观众', attributeName: '积分', delta: 1, valueAfter: 1, ruleId: 'local' }];
+    current.stats = { local: { date: 'local', giftTotals: {}, ruleTriggers: {} } };
+    current.recentGifts = [{ id: 9, name: '本地礼物', price: 100, coinType: 'gold', imgBasic: 'local.png', lastReceived: 9, count: 1 }];
+    current.contributions = { viewers: [], updatedAt: 9 };
+    const imported = {
+      roomId: '31567150',
+      attributes: [{ name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' }],
+      rules: [],
+      log: [],
+      stats: {},
+      recentGifts: [],
+      contributions: { viewers: [], updatedAt: 1 },
+    };
+
+    const merged = mergeConfigBackup(current, imported);
+
+    expect(merged.roomId).toBe('31567150');
+    expect(merged.attributes[0].name).toBe('积分');
+    expect(merged.log).toEqual(current.log);
+    expect(merged.stats).toEqual(current.stats);
+    expect(merged.recentGifts).toEqual(current.recentGifts);
+    expect(merged.contributions).toEqual(current.contributions);
+  });
+
+  it('rejects backups created by a newer schema', () => {
+    expect(() => mergeConfigBackup(defaultState(), { schemaVersion: 999 })).toThrow('请先更新程序');
   });
 
   it('resetState removes stored state', () => {

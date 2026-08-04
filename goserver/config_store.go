@@ -17,11 +17,12 @@ import (
 const maxConfigBytes = 8 << 20
 
 type configStore struct {
-	path           string
-	mu             sync.RWMutex
-	onChange       func()
-	onTimerChange  func()
-	onUpdateChange func()
+	path              string
+	mu                sync.RWMutex
+	onChange          func()
+	onTimerChange     func()
+	onUpdateChange    func()
+	migrationRequired bool
 }
 
 func newDefaultConfigStore() (*configStore, error) {
@@ -29,7 +30,11 @@ func newDefaultConfigStore() (*configStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("无法确定配置目录：%w", err)
 	}
-	return &configStore{path: filepath.Join(root, "BilibiliLiveGiftPanel", "config.json")}, nil
+	store := &configStore{path: filepath.Join(root, "BilibiliLiveGiftPanel", "config.json")}
+	if err := store.migrateLegacy(); err != nil {
+		return nil, err
+	}
+	return store, nil
 }
 
 func (s *configStore) handle(w http.ResponseWriter, r *http.Request) {
@@ -38,29 +43,33 @@ func (s *configStore) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGet(w)
 	case http.MethodPut:
 		s.handlePut(w, r)
+	case http.MethodPatch:
+		s.handlePatch(w, r)
 	case http.MethodDelete:
 		s.handleDelete(w)
 	default:
-		w.Header().Set("Allow", "GET, PUT, DELETE")
+		w.Header().Set("Allow", "GET, PUT, PATCH, DELETE")
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"code": -1, "message": "不支持的请求方法"})
 	}
 }
 
 func (s *configStore) handleGet(w http.ResponseWriter) {
-	s.mu.RLock()
-	data, err := os.ReadFile(s.path)
-	s.mu.RUnlock()
-	if errors.Is(err, os.ErrNotExist) {
+	s.mu.Lock()
+	if !s.hasStoredStateLocked() {
+		s.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	state, err := s.readStateLocked()
+	s.mu.Unlock()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": err.Error()})
+		writeConfigStoreError(w, err)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(data)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(state)
 }
 
 func (s *configStore) handlePut(w http.ResponseWriter, r *http.Request) {
@@ -83,12 +92,59 @@ func (s *configStore) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 	replaced, err := s.replaceClientState(state)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": err.Error()})
+		writeConfigStoreError(w, err)
 		return
 	}
 	previous := replaced.Previous
 	previousErr := replaced.PreviousErr
 	state = replaced.State
+	s.notifyStateChanges(previous, previousErr, state)
+	writeJSON(w, http.StatusOK, map[string]any{"code": 0})
+}
+
+type configInputError struct {
+	err error
+}
+
+func (e *configInputError) Error() string {
+	return e.err.Error()
+}
+
+func (s *configStore) handlePatch(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxConfigBytes))
+	if err != nil {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"code": -1, "message": "配置补丁过大"})
+		return
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil || fields == nil || len(fields) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": "配置补丁必须是非空 JSON 对象"})
+		return
+	}
+	replaced, err := s.patchClientState(fields)
+	if err != nil {
+		var inputError *configInputError
+		if errors.As(err, &inputError) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": inputError.Error()})
+			return
+		}
+		writeConfigStoreError(w, err)
+		return
+	}
+	s.notifyStateChanges(replaced.Previous, replaced.PreviousErr, replaced.State)
+	writeJSON(w, http.StatusOK, map[string]any{"code": 0})
+}
+
+func writeConfigStoreError(w http.ResponseWriter, err error) {
+	var versionError *unsupportedStateVersionError
+	if errors.As(err, &versionError) {
+		writeJSON(w, http.StatusConflict, map[string]any{"code": -1, "message": versionError.Error()})
+		return
+	}
+	writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": err.Error()})
+}
+
+func (s *configStore) notifyStateChanges(previous appState, previousErr error, state appState) {
 	roomChanged := previousErr != nil || strings.TrimSpace(previous.RoomID) != strings.TrimSpace(state.RoomID)
 	if roomChanged {
 		s.notifyChanged()
@@ -99,7 +155,46 @@ func (s *configStore) handlePut(w http.ResponseWriter, r *http.Request) {
 	if previousErr != nil || autoUpdateEnabled(previous) != autoUpdateEnabled(state) {
 		s.notifyUpdateChanged()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"code": 0})
+}
+
+func applyClientStatePatch(state *appState, fields map[string]json.RawMessage) error {
+	for key, raw := range fields {
+		var target any
+		switch key {
+		case "roomId":
+			target = &state.RoomID
+		case "attributes":
+			target = &state.Attributes
+		case "displayScenes":
+			target = &state.DisplayScenes
+		case "activities":
+			target = &state.Activities
+		case "rules":
+			target = &state.Rules
+		case "timerRules":
+			target = &state.TimerRules
+		case "formulaPresets":
+			target = &state.FormulaPresets
+		case "settings":
+			target = &state.Settings
+		case "giftCatalog":
+			target = &state.GiftCatalog
+		case "recentGifts":
+			target = &state.RecentGifts
+		case "stats":
+			target = &state.Stats
+		case "log":
+			target = &state.Log
+		case "contributions":
+			target = &state.Contributions
+		default:
+			return fmt.Errorf("不支持的配置字段：%s", key)
+		}
+		if err := json.Unmarshal(raw, target); err != nil {
+			return fmt.Errorf("配置字段 %s 格式不正确", key)
+		}
+	}
+	return nil
 }
 
 func validateAppState(state appState) error {
@@ -333,10 +428,16 @@ func validateAppState(state appState) error {
 func (s *configStore) handleDelete(w http.ResponseWriter) {
 	previous, _ := s.readState()
 	s.mu.Lock()
-	err := os.Remove(s.path)
+	var removeErr error
+	for _, path := range s.statePaths() {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) && removeErr == nil {
+			removeErr = err
+		}
+	}
+	s.migrationRequired = false
 	s.mu.Unlock()
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": err.Error()})
+	if removeErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": removeErr.Error()})
 		return
 	}
 	if strings.TrimSpace(previous.RoomID) != "" {
@@ -394,39 +495,20 @@ func (s *configStore) notifyUpdateChanged() {
 }
 
 func (s *configStore) readState() (appState, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.readStateLocked()
-}
-
-func (s *configStore) readStateLocked() (appState, error) {
-	state := defaultAppState()
-	state.Settings.ShowTutorial = nil
-	state.Settings.AutoUpdate = nil
-	data, err := os.ReadFile(s.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return state, nil
-	}
-	if err != nil {
-		return appState{}, err
-	}
-	if err := json.Unmarshal(data, &state); err != nil {
-		return appState{}, fmt.Errorf("读取配置失败：%w", err)
-	}
-	normalizeAppState(&state)
-	return state, nil
 }
 
 func (s *configStore) replaceState(state appState) error {
 	normalizeAppState(&state)
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("序列化配置失败：%w", err)
-	}
-	data = append(data, '\n')
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return writeFileAtomically(s.path, data)
+	previous, err := s.readStateLocked()
+	if err != nil {
+		return err
+	}
+	return s.persistStateLocked(previous, state, false)
 }
 
 type clientStateReplaceResult struct {
@@ -439,16 +521,39 @@ func (s *configStore) replaceClientState(state appState) (clientStateReplaceResu
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	previous, previousErr := s.readStateLocked()
+	if previousErr != nil {
+		return clientStateReplaceResult{}, previousErr
+	}
 	if previousErr == nil && previous.Contributions.UpdatedAt > state.Contributions.UpdatedAt {
 		state.Contributions = previous.Contributions
 	}
 	normalizeAppState(&state)
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return clientStateReplaceResult{}, fmt.Errorf("序列化配置失败：%w", err)
+	if err := s.persistStateLocked(previous, state, previousErr != nil); err != nil {
+		return clientStateReplaceResult{}, err
 	}
-	data = append(data, '\n')
-	if err := writeFileAtomically(s.path, data); err != nil {
+	return clientStateReplaceResult{Previous: previous, PreviousErr: previousErr, State: state}, nil
+}
+
+func (s *configStore) patchClientState(fields map[string]json.RawMessage) (clientStateReplaceResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous, previousErr := s.readStateLocked()
+	if previousErr != nil {
+		return clientStateReplaceResult{}, previousErr
+	}
+	state := previous
+	previousContributions := previous.Contributions
+	if err := applyClientStatePatch(&state, fields); err != nil {
+		return clientStateReplaceResult{}, &configInputError{err: err}
+	}
+	if _, changed := fields["contributions"]; changed && previousContributions.UpdatedAt > state.Contributions.UpdatedAt {
+		state.Contributions = previousContributions
+	}
+	normalizeAppState(&state)
+	if err := validateAppState(state); err != nil {
+		return clientStateReplaceResult{}, &configInputError{err: err}
+	}
+	if err := s.persistStateLocked(previous, state, false); err != nil {
 		return clientStateReplaceResult{}, err
 	}
 	return clientStateReplaceResult{Previous: previous, PreviousErr: previousErr, State: state}, nil
@@ -457,7 +562,11 @@ func (s *configStore) replaceClientState(state appState) (clientStateReplaceResu
 func (s *configStore) updateState(update func(*appState) error) (appState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state, err := s.readStateLocked()
+	previous, err := s.readStateLocked()
+	if err != nil {
+		return appState{}, err
+	}
+	state, err := cloneAppState(previous)
 	if err != nil {
 		return appState{}, err
 	}
@@ -465,12 +574,7 @@ func (s *configStore) updateState(update func(*appState) error) (appState, error
 		return appState{}, err
 	}
 	normalizeAppState(&state)
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return appState{}, fmt.Errorf("序列化配置失败：%w", err)
-	}
-	data = append(data, '\n')
-	if err := writeFileAtomically(s.path, data); err != nil {
+	if err := s.persistStateLocked(previous, state, false); err != nil {
 		return appState{}, err
 	}
 	return state, nil

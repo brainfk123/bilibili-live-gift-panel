@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestConfigStoreLifecycle(t *testing.T) {
@@ -58,6 +59,158 @@ func TestConfigStoreLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("config still exists after DELETE: %v", err)
+	}
+}
+
+func TestConfigStoreMigratesLegacyFileIntoShards(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	legacy := `{
+        "roomId":"31567150",
+        "attributes":[{"name":"积分","value":7,"unit":"none","format":"number","decimals":0,"suffix":""}],
+        "giftCatalog":[{"id":1,"name":"测试礼物","price":100,"coinType":"gold","imgBasic":"gift.png"}],
+        "recentGifts":[{"id":1,"name":"测试礼物","price":100,"coinType":"gold","imgBasic":"gift.png","lastReceived":10,"count":1}],
+        "log":[{"time":10,"giftId":1,"giftName":"测试礼物","num":1,"uname":"观众","attributeName":"积分","delta":1,"valueAfter":7,"ruleId":"r1"}],
+        "contributions":{"viewers":[{"key":"uid:1","uid":1,"uname":"观众","giftCount":1,"goldValue":100,"attributeDeltas":{"积分":1}}]}
+    }`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &configStore{path: path}
+	if err := store.migrateLegacy(); err != nil {
+		t.Fatal(err)
+	}
+
+	configData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(configData), `"log"`) || strings.Contains(string(configData), `"giftCatalog"`) {
+		t.Fatalf("migrated config still contains cache/history fields: %s", configData)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cache.json")); err != nil {
+		t.Fatalf("cache shard was not created: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "history.json")); err != nil {
+		t.Fatalf("history shard was not created: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "events.log")); err != nil {
+		t.Fatalf("event log shard was not created: %v", err)
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Attributes[0].Value != 7 || len(state.GiftCatalog) != 1 || len(state.Log) != 1 || len(state.Contributions.Viewers) != 1 {
+		t.Fatalf("migrated state lost data: %#v", state)
+	}
+}
+
+func TestConfigStorePatchWritesOnlyAffectedShard(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	initial := `{
+        "roomId":"31567150",
+        "giftCatalog":[{"id":1,"name":"测试礼物","price":100,"coinType":"gold","imgBasic":"gift.png"}],
+        "log":[{"time":10,"giftId":1,"giftName":"测试礼物","num":1,"uname":"观众","attributeName":"积分","delta":1,"valueAfter":1,"ruleId":"r1"}]
+    }`
+	put := httptest.NewRecorder()
+	store.handle(put, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(initial)))
+	if put.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", put.Code, put.Body.String())
+	}
+	oldTime := time.Unix(1_700_000_000, 0)
+	cachePath := filepath.Join(dir, "cache.json")
+	historyPath := filepath.Join(dir, "history.json")
+	eventLogPath := filepath.Join(dir, "events.log")
+	if err := os.Chtimes(cachePath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(historyPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(eventLogPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	patch := httptest.NewRecorder()
+	store.handle(patch, httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(`{"settings":{"theme":"light"}}`)))
+	if patch.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, body = %s", patch.Code, patch.Body.String())
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Settings.Theme != "light" || len(state.Log) != 1 || len(state.GiftCatalog) != 1 {
+		t.Fatalf("partial update did not preserve merged state: %#v", state)
+	}
+	for _, sidecar := range []string{cachePath, historyPath, eventLogPath} {
+		info, err := os.Stat(sidecar)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.ModTime().Equal(oldTime) {
+			t.Fatalf("unaffected shard %s was rewritten at %v", sidecar, info.ModTime())
+		}
+	}
+}
+
+func TestConfigStoreMigratesMissingFieldsWithDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	legacy := `{"schemaVersion":0,"roomId":"31567150","settings":{"theme":"light"}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &configStore{path: path}
+	if err := store.migrateLegacy(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Settings.Theme != "light" || state.Settings.FontSize == 0 || state.Settings.AccentColor == "" {
+		t.Fatalf("legacy fields were not merged with current defaults: %#v", state.Settings)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata struct {
+		SchemaVersion int `json:"schemaVersion"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.SchemaVersion != stateShardSchemaVersion {
+		t.Fatalf("schemaVersion = %d, want %d", metadata.SchemaVersion, stateShardSchemaVersion)
+	}
+}
+
+func TestConfigStoreRefusesNewerSchemaWithoutOverwriting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	original := []byte(`{"schemaVersion":999,"roomId":"future","futureField":{"keep":true}}`)
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &configStore{path: path}
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(`{"settings":{"theme":"light"}}`)))
+	if response.Code != http.StatusConflict {
+		t.Fatalf("PATCH status = %d, body = %s, want 409", response.Code, response.Body.String())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(original) {
+		t.Fatalf("newer config was overwritten:\n%s", after)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cache.json")); !os.IsNotExist(err) {
+		t.Fatalf("sidecar was created despite incompatible schema: %v", err)
 	}
 }
 

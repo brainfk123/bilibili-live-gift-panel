@@ -1666,7 +1666,7 @@ describe('single-page configuration rendering', () => {
     expect(toggle.getAttribute('aria-checked')).toBe('true');
 
     await vi.waitFor(() => {
-      const writes = fetchMock.mock.calls.filter(([, init]) => init?.method === 'PUT');
+      const writes = fetchMock.mock.calls.filter(([, init]) => init?.method === 'PATCH');
       expect(writes.length).toBeGreaterThan(0);
       const lastBody = writes.at(-1)?.[1]?.body;
       expect(JSON.parse(String(lastBody)).timerRules[0].enabled).toBe(true);
@@ -1697,9 +1697,10 @@ describe('single-page configuration rendering', () => {
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (url.endsWith('/api/config') && init?.method === 'PUT') {
-        serverState = JSON.parse(String(init.body));
-        writtenStates.push(serverState);
+      if (url.endsWith('/api/config') && init?.method === 'PATCH') {
+        const patch = JSON.parse(String(init.body));
+        serverState = { ...serverState, ...patch };
+        writtenStates.push(JSON.parse(JSON.stringify(serverState)));
         return new Response(null, { status: 204 });
       }
       if (url.includes('/api/runtime')) {

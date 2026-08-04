@@ -5,9 +5,42 @@ import { normalizeActivities } from './activities';
 import { normalizeTrainingTopicIds } from './training';
 
 const CONFIG_ENDPOINT = '/api/config';
+const CONFIG_BACKUP_SCHEMA_VERSION = 1;
+const STATE_FIELD_KEYS = [
+  'roomId',
+  'attributes',
+  'displayScenes',
+  'activities',
+  'rules',
+  'timerRules',
+  'formulaPresets',
+  'settings',
+  'giftCatalog',
+  'recentGifts',
+  'stats',
+  'log',
+  'contributions',
+] as const satisfies ReadonlyArray<keyof AppState>;
+type StateFieldKey = typeof STATE_FIELD_KEYS[number];
+type StateFieldSnapshots = Record<StateFieldKey, string>;
+type ConfigBackupFields = Pick<AppState,
+  | 'roomId'
+  | 'attributes'
+  | 'displayScenes'
+  | 'activities'
+  | 'rules'
+  | 'timerRules'
+  | 'formulaPresets'
+  | 'settings'
+  | 'giftCatalog'>;
+
+export type ConfigBackup = ConfigBackupFields & { schemaVersion: number };
+
 let cachedState: AppState | null = null;
 let persistQueue = Promise.resolve();
 let configMigrationRequired = false;
+let persistedFieldSnapshots: Partial<StateFieldSnapshots> = {};
+const forcePersistFields = new Set<StateFieldKey>();
 
 export const defaultState = (): AppState => ({
   roomId: '',
@@ -48,16 +81,18 @@ export function loadState(): AppState {
 
 export function saveState(state: AppState): Promise<void> {
   cachedState = normalizeState(state);
-  const serialized = JSON.stringify(cachedState);
+  const snapshots = snapshotStateFields(cachedState);
   persistQueue = persistQueue
     .catch(() => undefined)
-    .then(() => persistStateToServer(serialized));
+    .then(() => persistStateToServer(snapshots));
   return persistQueue;
 }
 
 export function resetState(): void {
   cachedState = defaultState();
   configMigrationRequired = false;
+  persistedFieldSnapshots = {};
+  forcePersistFields.clear();
   if (typeof fetch === 'function') {
     void fetch(CONFIG_ENDPOINT, { method: 'DELETE', keepalive: true }).catch(() => undefined);
   }
@@ -79,13 +114,18 @@ export async function refreshStateFromServer(acceptState: () => boolean = () => 
   try {
     const response = await fetch(CONFIG_ENDPOINT, { cache: 'no-store' });
     let nextState: AppState;
+    let hasPersistedState = true;
     if (response.status === 204) {
       nextState = defaultState();
+      hasPersistedState = false;
     } else {
       if (!response.ok) throw new Error(`配置读取失败：HTTP ${response.status}`);
       nextState = normalizeState(await response.json() as Partial<AppState>);
     }
-    if (acceptState() || !cachedState) cachedState = nextState;
+    if (acceptState() || !cachedState) {
+      cachedState = nextState;
+      persistedFieldSnapshots = hasPersistedState ? snapshotStateFields(nextState) : {};
+    }
   } catch {
     // A transient backend read failure must not erase the last visible state.
     cachedState ??= defaultState();
@@ -93,15 +133,105 @@ export async function refreshStateFromServer(acceptState: () => boolean = () => 
   return cachedState;
 }
 
-async function persistStateToServer(serialized: string): Promise<void> {
+async function persistStateToServer(snapshots: StateFieldSnapshots): Promise<void> {
   if (typeof fetch !== 'function') return;
+  const changedFields = STATE_FIELD_KEYS.filter((key) => (
+    forcePersistFields.has(key) || persistedFieldSnapshots[key] !== snapshots[key]
+  ));
+  if (changedFields.length === 0) return;
+  const patch: Record<string, unknown> = {};
+  for (const key of changedFields) patch[key] = JSON.parse(snapshots[key]) as unknown;
+  const serialized = JSON.stringify(patch);
+  const keepalive = new TextEncoder().encode(serialized).byteLength <= 64 * 1024;
   const response = await fetch(CONFIG_ENDPOINT, {
-    method: 'PUT',
+    method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: serialized,
-    keepalive: true,
+    ...(keepalive ? { keepalive: true } : {}),
   });
   if (!response.ok) throw new Error(`配置保存失败：HTTP ${response.status}`);
+  for (const key of changedFields) {
+    persistedFieldSnapshots[key] = snapshots[key];
+    forcePersistFields.delete(key);
+  }
+}
+
+function snapshotStateFields(state: AppState): StateFieldSnapshots {
+  const snapshots = {} as StateFieldSnapshots;
+  for (const key of STATE_FIELD_KEYS) snapshots[key] = JSON.stringify(state[key]);
+  return snapshots;
+}
+
+export function createConfigBackup(state: AppState): ConfigBackup {
+  const referencedGiftIds = new Set<number>();
+  for (const rule of state.rules) {
+    referencedGiftIds.add(rule.giftId);
+    for (const giftId of rule.matchGiftIds ?? []) referencedGiftIds.add(giftId);
+  }
+  const catalogById = new Map<number, AppState['giftCatalog'][number]>();
+  for (const gift of [...state.giftCatalog, ...state.recentGifts]) {
+    if (referencedGiftIds.has(gift.id)) catalogById.set(gift.id, gift);
+  }
+  return {
+    schemaVersion: CONFIG_BACKUP_SCHEMA_VERSION,
+    roomId: state.roomId,
+    attributes: state.attributes,
+    displayScenes: state.displayScenes,
+    activities: state.activities,
+    rules: state.rules,
+    timerRules: state.timerRules,
+    formulaPresets: state.formulaPresets,
+    settings: state.settings,
+    giftCatalog: Array.from(catalogById.values()),
+  };
+}
+
+export function mergeConfigBackup(current: AppState, input: unknown): AppState {
+  if (!isObjectRecord(input)) throw new Error('配置文件格式不正确');
+  const schemaVersion = input.schemaVersion === undefined ? 0 : Number(input.schemaVersion);
+  if (!Number.isInteger(schemaVersion) || schemaVersion < 0) throw new Error('配置文件版本无效');
+  if (schemaVersion > CONFIG_BACKUP_SCHEMA_VERSION) {
+    throw new Error('配置来自更新版本，请先更新程序再导入');
+  }
+  for (const key of ['attributes', 'displayScenes', 'activities', 'rules', 'timerRules', 'formulaPresets', 'giftCatalog'] as const) {
+    if (input[key] !== undefined && !Array.isArray(input[key])) throw new Error(`配置字段 ${key} 格式不正确`);
+  }
+  if (input.settings !== undefined && !isObjectRecord(input.settings)) throw new Error('配置字段 settings 格式不正确');
+  if (input.roomId !== undefined && typeof input.roomId !== 'string') throw new Error('配置字段 roomId 格式不正确');
+
+  const parsed = input as Partial<AppState>;
+  const importedCatalog = Array.isArray(parsed.giftCatalog)
+    ? parsed.giftCatalog.filter((gift) => (
+      isObjectRecord(gift)
+      && Number.isFinite(Number(gift.id))
+      && typeof gift.name === 'string'
+      && Number.isFinite(Number(gift.price))
+    ))
+    : [];
+  const catalogById = new Map(current.giftCatalog.map((gift) => [gift.id, gift]));
+  for (const gift of importedCatalog) catalogById.set(Number(gift.id), gift);
+
+  return normalizeState({
+    ...current,
+    ...(parsed.roomId !== undefined ? { roomId: parsed.roomId } : {}),
+    ...(parsed.attributes !== undefined ? { attributes: parsed.attributes } : {}),
+    ...(parsed.displayScenes !== undefined ? { displayScenes: parsed.displayScenes } : {}),
+    ...(parsed.activities !== undefined ? { activities: parsed.activities } : {}),
+    ...(parsed.rules !== undefined ? { rules: parsed.rules } : {}),
+    ...(parsed.timerRules !== undefined ? { timerRules: parsed.timerRules } : {}),
+    ...(parsed.formulaPresets !== undefined ? { formulaPresets: parsed.formulaPresets } : {}),
+    settings: { ...current.settings, ...(parsed.settings ?? {}) },
+    giftCatalog: Array.from(catalogById.values()),
+    // Runtime/history data intentionally stays local and is never imported.
+    recentGifts: current.recentGifts,
+    stats: current.stats,
+    log: current.log,
+    contributions: current.contributions,
+  });
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function normalizeState(parsed: Partial<AppState>): AppState {
@@ -109,11 +239,11 @@ function normalizeState(parsed: Partial<AppState>): AppState {
   const setupComplete = Boolean(parsed.roomId?.trim())
     && (parsed.attributes?.length ?? 0) > 0
     && (parsed.rules?.length ?? 0) > 0;
-  if (parsed.settings?.showTutorial === undefined) configMigrationRequired = true;
-  if (parsed.settings?.tutorialVersion === undefined || !Array.isArray(parsed.settings?.tutorialCompletedLessons)) configMigrationRequired = true;
-  if (!Array.isArray(parsed.settings?.trainingCompletedTopics)) configMigrationRequired = true;
-  if (parsed.settings?.autoUpdate === undefined) configMigrationRequired = true;
-  if (parsed.settings?.defaultDisplayThemeId === undefined) configMigrationRequired = true;
+  if (parsed.settings?.showTutorial === undefined) markSettingsMigrationRequired();
+  if (parsed.settings?.tutorialVersion === undefined || !Array.isArray(parsed.settings?.tutorialCompletedLessons)) markSettingsMigrationRequired();
+  if (!Array.isArray(parsed.settings?.trainingCompletedTopics)) markSettingsMigrationRequired();
+  if (parsed.settings?.autoUpdate === undefined) markSettingsMigrationRequired();
+  if (parsed.settings?.defaultDisplayThemeId === undefined) markSettingsMigrationRequired();
   const showTutorial = parsed.settings?.showTutorial ?? !setupComplete;
   const tutorialCompletedLessons = Array.isArray(parsed.settings?.tutorialCompletedLessons)
     ? parsed.settings.tutorialCompletedLessons.filter((lesson): lesson is AppState['settings']['tutorialCompletedLessons'][number] => (
@@ -155,6 +285,11 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     formulaPresets: parsed.formulaPresets ?? base.formulaPresets,
     contributions: normalizeContributionLedger(parsed.contributions),
   };
+}
+
+function markSettingsMigrationRequired(): void {
+  configMigrationRequired = true;
+  forcePersistFields.add('settings');
 }
 
 function normalizeContributionLedger(ledger: Partial<AppState['contributions']> | undefined): AppState['contributions'] {
