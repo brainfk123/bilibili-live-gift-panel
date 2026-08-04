@@ -47,6 +47,8 @@ import type { GameplayTemplateBuildResult } from '../../gameplay-templates';
 import { DISPLAY_THEMES, getDisplayTheme } from '../../display-themes';
 import { createDisplaySceneId, displaySceneUrl, MAX_DISPLAY_SCENE_ATTRIBUTES } from '../../display-scenes';
 import { createActivityWorkspace } from './activity-workspace';
+import { createTrainingCenter } from './training-center';
+import type { TrainingTopicDefinition } from '../../training';
 
 interface SelectedGiftRule {
   gift: GiftInfo;
@@ -359,28 +361,25 @@ export function mountConfig(root: HTMLElement): void {
 
   function openTrainingCenter(): void {
     root.querySelector('.training-center-overlay')?.remove();
-    const overlay = el('div', { class: 'overlay training-center-overlay' });
-    const dialog = el('section', {
-      class: 'card training-center',
-      role: 'dialog',
-      ariaLabel: '加班机训练中心',
-    } as any);
-    const close = (): void => overlay.remove();
-    const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭' } as any) as HTMLButtonElement;
-    closeButton.onclick = close;
-    const lessonList = el('ol', { class: 'training-center-lessons' });
+    activeGuide?.dispose();
+    activeGuide = null;
     const lessons = getTutorialLessonStates(
       state,
       connectionState === 'connected',
       editorTutorialProgress,
       forcedTutorialLesson,
     );
+    let overlay: HTMLElement;
+    const close = (): void => {
+      overlay.remove();
+      renderGuide();
+    };
     const beginLesson = (lesson: TutorialLesson): void => {
       forcedTutorialLesson = lesson;
       guideDismissed = false;
       state.settings.showTutorial = true;
       save();
-      close();
+      overlay.remove();
       if (sectionForTutorialLesson(lesson) !== 'overview' || ['basics'].includes(lesson)) {
         if (!editorOpen) openAttributeEditor(state.attributes.length > 0 ? 0 : undefined);
         else refreshEditorTutorial();
@@ -388,50 +387,59 @@ export function mountConfig(root: HTMLElement): void {
       }
       renderGuide();
     };
-    lessons.forEach((lesson, index) => {
-      const review = el('button', {
-        class: `training-center-lesson${lesson.done ? ' is-done' : ''}${lesson.active ? ' is-active' : ''}`,
-        type: 'button',
-      }) as HTMLButtonElement;
-      review.append(
-        el('span', { class: 'training-center-number', text: lesson.done ? '✓' : String(index + 1) }),
-        el('span', { class: 'training-center-copy' }, [
-          el('strong', { text: lesson.label }),
-          el('small', { text: lesson.summary }),
-        ]),
-        el('span', { class: 'training-center-action', text: lesson.done ? '复习' : '开始' }),
-      );
-      review.onclick = () => beginLesson(lesson.id);
-      lessonList.append(el('li', {}, [review]));
-    });
-    const resetButton = el('button', { class: 'btn ghost', type: 'button', text: '重置训练进度' }) as HTMLButtonElement;
-    resetButton.onclick = () => {
-      resetTutorialProgress(state.settings);
-      forcedTutorialLesson = null;
-      guideDismissed = false;
-      save();
-      close();
-      render();
+    const openTopic = (topic: TrainingTopicDefinition): void => {
+      overlay.remove();
+      if (topic.destination.kind === 'editor') {
+        if (!editorOpen) openAttributeEditor(0);
+        activeEditorWorkspace?.setSection(topic.destination.section);
+        if (['multi-gift', 'blind-box', 'manual-gift'].includes(topic.id)) {
+          const addGift = root.querySelector<HTMLButtonElement>('.guide-add-gift');
+          if (typeof addGift?.click === 'function') addGift.click();
+          else (addGift as any)?.onclick?.();
+          if (topic.id === 'manual-gift') {
+            const manualAdder = root.querySelector<HTMLDetailsElement>('.manual-gift-adder');
+            if (manualAdder) manualAdder.open = true;
+          }
+        }
+        if (['advanced-rule', 'cross-attribute'].includes(topic.id)) {
+          const advanced = root.querySelector<HTMLDetailsElement>('.rule-advanced-settings');
+          if (advanced) advanced.open = true;
+        }
+        return;
+      }
+      const target = root.querySelector<HTMLElement>(topic.destination.selector);
+      if (!target) {
+        toast('请先完成这项功能需要的基础配置', root);
+        return;
+      }
+      target.classList.add('training-jump-target');
+      if (typeof target.scrollIntoView === 'function') target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      globalThis.setTimeout(() => target.classList.remove('training-jump-target'), 1800);
     };
     const resumeLesson = activeTutorialLesson() ?? 'room';
-    const resumeButton = el('button', { class: 'btn', type: 'button', text: '继续训练' }) as HTMLButtonElement;
-    resumeButton.onclick = () => beginLesson(resumeLesson);
-    dialog.append(
-      el('header', { class: 'modal-header training-center-header' }, [
-        el('div', {}, [
-          el('span', { class: 'section-kicker', text: '随时可重玩' }),
-          el('h2', { text: '加班机训练中心' }),
-          el('p', { text: '跟着真实任务做一遍；模拟按钮只计算结果，不会修改直播中的属性值。' }),
-        ]),
-        closeButton,
-      ]),
-      lessonList,
-      el('footer', { class: 'modal-actions' }, [resetButton, resumeButton]),
-    );
-    overlay.append(dialog);
-    overlay.onclick = (event) => {
-      if (event.target === overlay) close();
-    };
+    overlay = createTrainingCenter({
+      lessons,
+      completedTopics: state.settings.trainingCompletedTopics,
+      resumeLesson,
+      hasAttribute: state.attributes.length > 0,
+      onClose: close,
+      onBeginLesson: beginLesson,
+      onOpenTopic: openTopic,
+      onTopicCompletionChange: (topic, complete) => {
+        state.settings.trainingCompletedTopics = complete
+          ? Array.from(new Set([...state.settings.trainingCompletedTopics, topic]))
+          : state.settings.trainingCompletedTopics.filter((candidate) => candidate !== topic);
+        save();
+      },
+      onReset: () => {
+        resetTutorialProgress(state.settings);
+        forcedTutorialLesson = null;
+        guideDismissed = false;
+        save();
+        overlay.remove();
+        render();
+      },
+    });
     root.append(overlay);
   }
 

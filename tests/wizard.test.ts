@@ -1203,6 +1203,44 @@ describe('single-page configuration rendering', () => {
     expect(reopenedRoot.querySelector('.tour-bubble')).toBeNull();
   });
 
+  it('provides a searchable training center without stacking it over the spotlight guide', async () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    expect(root.querySelector('.tour-bubble')).not.toBeNull();
+    (root.querySelector('.training-toggle') as TestElement | null)?.onclick?.();
+
+    const center = root.querySelector('.training-center') as TestElement;
+    expect(center).not.toBeNull();
+    expect(root.querySelector('.tour-bubble')).toBeNull();
+    expect(textOf(center)).toContain('实战主线');
+    expect(textOf(center)).toContain('进阶玩法');
+    expect(textOf(center)).toContain('排查问题');
+    expect(textOf(center)).toContain('正确处理盲盒礼物');
+
+    findByText(center, '排查问题')?.onclick?.();
+    expect(textOf(center)).toContain('礼物到了但数值没变化');
+    expect(textOf(center)).not.toContain('多个礼物影响同一属性');
+
+    const search = center.querySelector('.training-center-search') as TestElement & { oninput?: () => void };
+    search.value = 'OBS 没更新';
+    search.oninput?.();
+    expect(textOf(center)).toContain('OBS 面板没有更新');
+    expect(textOf(center)).not.toContain('定时器为什么没有运行');
+
+    const obsCourse = center.querySelectorAll('.training-center-course')
+      .find((course) => textOf(course).includes('OBS 面板没有更新'));
+    obsCourse?.onclick?.();
+    findByText(center, '标记已掌握')?.onclick?.();
+    expect(findByText(center, '标为未掌握')).toBeDefined();
+    expect(textOf(center.querySelector('.training-center-summary') as TestElement)).toContain('专题 1/13');
+    await vi.waitFor(() => expect(loadState().settings.trainingCompletedTopics).toContain('obs-no-change'));
+
+    (center.querySelector('.modal-close') as TestElement | null)?.onclick?.();
+    expect(root.querySelector('.training-center')).toBeNull();
+    expect(root.querySelector('.tour-bubble')).not.toBeNull();
+  });
+
   it('keeps room, OBS, attributes, and data settings on one page without step navigation', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);

@@ -14,6 +14,7 @@ describe('storage', () => {
     expect(s.rules).toEqual([]);
     expect(s.contributions).toEqual({ viewers: [] });
     expect(s.settings.panelOpacity).toBe(55);
+    expect(s.settings.trainingCompletedTopics).toEqual([]);
   });
 
   it('round-trips state through save/load', () => {
@@ -22,6 +23,7 @@ describe('storage', () => {
     s.attributes.push({ name: '加班时间', value: 3600, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' });
     s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: 'price/1000*60' });
     s.settings.tutorialCompletedLessons = ['room', 'attribute'];
+    s.settings.trainingCompletedTopics = ['blind-box', 'obs-no-change'];
     saveState(s);
     const loaded = loadState();
     expect(loaded.roomId).toBe('2145');
@@ -29,6 +31,7 @@ describe('storage', () => {
     expect(loaded.rules).toHaveLength(1);
     expect(loaded.settings.tutorialVersion).toBe(2);
     expect(loaded.settings.tutorialCompletedLessons).toEqual(['room', 'attribute']);
+    expect(loaded.settings.trainingCompletedTopics).toEqual(['blind-box', 'obs-no-change']);
   });
 
   it('loads and normalizes the disk configuration from the server', async () => {
@@ -44,6 +47,7 @@ describe('storage', () => {
     expect(loaded.settings.showTutorial).toBe(true);
     expect(loaded.settings.tutorialVersion).toBe(2);
     expect(loaded.settings.tutorialCompletedLessons).toEqual([]);
+    expect(loaded.settings.trainingCompletedTopics).toEqual([]);
     expect(consumeConfigMigrationRequired()).toBe(true);
   });
 

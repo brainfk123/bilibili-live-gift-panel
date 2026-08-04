@@ -243,6 +243,7 @@ type settingsState struct {
 	ShowTutorial             *bool    `json:"showTutorial"`
 	TutorialVersion          int      `json:"tutorialVersion"`
 	TutorialCompletedLessons []string `json:"tutorialCompletedLessons"`
+	TrainingCompletedTopics  []string `json:"trainingCompletedTopics"`
 	AutoUpdate               *bool    `json:"autoUpdate"`
 }
 
@@ -308,6 +309,7 @@ func defaultAppState() appState {
 			ShowTutorial:             &showTutorial,
 			TutorialVersion:          2,
 			TutorialCompletedLessons: []string{},
+			TrainingCompletedTopics:  []string{},
 			AutoUpdate:               &autoUpdate,
 		},
 	}
@@ -485,6 +487,9 @@ func normalizeAppState(state *appState) {
 	}
 	if state.Settings.TutorialCompletedLessons == nil {
 		state.Settings.TutorialCompletedLessons = []string{}
+	}
+	if state.Settings.TrainingCompletedTopics == nil {
+		state.Settings.TrainingCompletedTopics = []string{}
 	}
 	if state.Settings.AutoUpdate == nil {
 		autoUpdate := true

@@ -2,6 +2,7 @@ import { AppState, AttributeValueMapping, MAX_LOG } from './types';
 import { normalizeDisplayThemeId } from './display-themes';
 import { normalizeDisplayScenes } from './display-scenes';
 import { normalizeActivities } from './activities';
+import { normalizeTrainingTopicIds } from './training';
 
 const CONFIG_ENDPOINT = '/api/config';
 let cachedState: AppState | null = null;
@@ -29,6 +30,7 @@ export const defaultState = (): AppState => ({
     showTutorial: true,
     tutorialVersion: 2,
     tutorialCompletedLessons: [],
+    trainingCompletedTopics: [],
     autoUpdate: true,
   },
   giftCatalog: [],
@@ -108,6 +110,7 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     && (parsed.rules?.length ?? 0) > 0;
   if (parsed.settings?.showTutorial === undefined) configMigrationRequired = true;
   if (parsed.settings?.tutorialVersion === undefined || !Array.isArray(parsed.settings?.tutorialCompletedLessons)) configMigrationRequired = true;
+  if (!Array.isArray(parsed.settings?.trainingCompletedTopics)) configMigrationRequired = true;
   if (parsed.settings?.autoUpdate === undefined) configMigrationRequired = true;
   if (parsed.settings?.defaultDisplayThemeId === undefined) configMigrationRequired = true;
   const showTutorial = parsed.settings?.showTutorial ?? !setupComplete;
@@ -122,6 +125,7 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     showTutorial,
     tutorialVersion: 2,
     tutorialCompletedLessons: Array.from(new Set(tutorialCompletedLessons)),
+    trainingCompletedTopics: normalizeTrainingTopicIds(parsed.settings?.trainingCompletedTopics),
   };
   settings.panelOpacity = Math.min(100, Math.max(10, Number(settings.panelOpacity) || base.settings.panelOpacity));
   settings.defaultDisplayThemeId = normalizeDisplayThemeId(settings.defaultDisplayThemeId);

@@ -422,3 +422,26 @@ func TestLegacyCompletedConfigDefaultsTutorialToHidden(t *testing.T) {
 		t.Fatal("legacy completed setup should not reopen the tutorial")
 	}
 }
+
+func TestConfigStorePreservesTrainingTopicProgress(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{"settings":{"showTutorial":false,"trainingCompletedTopics":["blind-box","obs-no-change"]}}`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", response.Code, response.Body.String())
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"blind-box", "obs-no-change"}
+	if len(state.Settings.TrainingCompletedTopics) != len(want) {
+		t.Fatalf("training topics = %#v, want %#v", state.Settings.TrainingCompletedTopics, want)
+	}
+	for index := range want {
+		if state.Settings.TrainingCompletedTopics[index] != want[index] {
+			t.Fatalf("training topics = %#v, want %#v", state.Settings.TrainingCompletedTopics, want)
+		}
+	}
+}

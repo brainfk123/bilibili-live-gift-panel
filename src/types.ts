@@ -136,6 +136,21 @@ export type TutorialLesson =
   | 'enable'
   | 'output';
 
+export type TrainingTopicId =
+  | 'multi-gift'
+  | 'blind-box'
+  | 'manual-gift'
+  | 'advanced-rule'
+  | 'cross-attribute'
+  | 'display-format'
+  | 'broadcast-output'
+  | 'combined-scenes'
+  | 'activity-session'
+  | 'contribution-ranking'
+  | 'rule-no-effect'
+  | 'timer-skipped'
+  | 'obs-no-change';
+
 export interface FormulaPreset {
   id: string;
   name: string;
@@ -232,6 +247,7 @@ export interface Settings {
   showTutorial: boolean;
   tutorialVersion: number;
   tutorialCompletedLessons: TutorialLesson[];
+  trainingCompletedTopics: TrainingTopicId[];
   autoUpdate: boolean;
 }
 
