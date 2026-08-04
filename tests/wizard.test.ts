@@ -1067,8 +1067,10 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root)).toContain('套用加班机模板');
 
     findByText(root, '使用加班机模板')?.onclick?.();
+    expect((root.querySelector('.workbench-lesson-card') as TestElement & { hidden?: boolean }).hidden).toBe(true);
     findByText(root, '添加礼物')?.onclick?.();
     root.querySelector('.gift-choice')?.onclick?.();
+    root.querySelector('.guide-confirm-gifts')?.onclick?.();
     (root.querySelector('.guide-rule-simulator') as TestElement | null)?.onclick?.();
     await vi.waitFor(() => expect(textOf(root)).toContain('让时间自动减少'));
 
@@ -1076,6 +1078,9 @@ describe('single-page configuration rendering', () => {
     (root.querySelector('.guide-timer-simulator') as TestElement | null)?.onclick?.();
     await vi.waitFor(() => expect(textOf(root)).toContain('保存可复用的规则'));
 
+    const advancedRule = root.querySelector('.rule-advanced-settings') as TestElement & { open?: boolean };
+    expect(advancedRule.open).toBe(true);
+    expect(advancedRule.querySelector('.guide-save-preset')).not.toBeNull();
     (root.querySelector('.guide-save-preset') as TestElement | null)?.onclick?.();
     await findByText(root, '保存')?.onclick?.();
     await vi.waitFor(() => expect(textOf(root)).toContain('保存并交给后台校验'));
@@ -1203,10 +1208,26 @@ describe('single-page configuration rendering', () => {
       .find((input) => input.dataset.fieldLabel === '默认播报消息') as TestElement;
     expect(broadcastMessageInput).toBeDefined();
     broadcastMessageInput.value = '欢迎来到直播间，感谢大家的支持';
-    const choices = root.querySelectorAll('.gift-choice');
+    const editorFooter = root.querySelector('.attribute-workbench-actions') as TestElement & { hidden?: boolean };
+    const giftDrawer = root.querySelector('.gift-picker-drawer') as TestElement & { hidden?: boolean };
+    findByText(root, '+ 添加礼物')?.onclick?.();
+    expect(giftDrawer.hidden).toBe(false);
+    expect(editorFooter.hidden).toBe(true);
+    giftDrawer.querySelector('.gift-choice')?.onclick?.();
+    expect(textOf(giftDrawer)).toContain('确认选择（1）');
+    findByText(giftDrawer, '取消')?.onclick?.();
+    expect(giftDrawer.hidden).toBe(true);
+    expect(editorFooter.hidden).toBe(false);
+    expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(0);
+
+    findByText(root, '+ 添加礼物')?.onclick?.();
+    const choices = giftDrawer.querySelectorAll('.gift-choice');
     expect(choices.length).toBeGreaterThan(1);
     choices[0].onclick?.();
     choices[1].onclick?.();
+    root.querySelector('.guide-confirm-gifts')?.onclick?.();
+    expect(giftDrawer.hidden).toBe(true);
+    expect(editorFooter.hidden).toBe(false);
     expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(2);
     expect(root.querySelectorAll('.formula-target-name').map((label) => label.textContent)).toEqual(['加班时间 =', '加班时间 =']);
 
@@ -1275,6 +1296,46 @@ describe('single-page configuration rendering', () => {
     expect(presetChip.querySelector('.formula-preset-delete')?.textContent).toBe('×');
     presetChip.querySelector('.formula-preset-delete')?.onclick?.();
     await vi.waitFor(() => expect(loadState().formulaPresets).toHaveLength(0));
+  });
+
+  it('offers common beginner rule actions with a safe optional upper limit', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    findByText(root, '+ 添加礼物')?.onclick?.();
+    root.querySelector('.gift-choice')?.onclick?.();
+    root.querySelector('.guide-confirm-gifts')?.onclick?.();
+
+    const operation = root.querySelector('.quick-rule-operation') as TestElement & { onchange?: () => void };
+    const formula = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '触发后属性值') as TestElement;
+    expect(textOf(operation)).toContain('让“加班时间”减少（最低为 0）');
+    expect(textOf(operation)).toContain('把“加班时间”清零');
+    expect(textOf(operation)).toContain('每 1 元让“加班时间”减少（最低为 0）');
+    expect(textOf(operation)).toContain('让“加班时间”随机减少 1 到（最低为 0）');
+
+    operation.value = 'subtract';
+    operation.onchange?.();
+    expect(formula.value).toBe('MAX(加班时间-60,0)');
+    operation.value = 'priceSubtract';
+    operation.onchange?.();
+    expect(formula.value).toBe('MAX(加班时间-price/1000*60,0)');
+    operation.value = 'reset';
+    operation.onchange?.();
+    expect(formula.value).toBe('0');
+
+    operation.value = 'add';
+    operation.onchange?.();
+    const limit = root.querySelector('.quick-rule-limit')!;
+    const toggle = limit.querySelector('.setting-switch-input') as TestElement & { checked?: boolean; onchange?: () => void };
+    const maximum = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '最高不超过') as TestElement & { oninput?: () => void };
+    toggle.checked = true;
+    maximum.value = '3600';
+    maximum.oninput?.();
+    expect(formula.value).toBe('MIN(加班时间+60,3600)');
   });
 
   it('configures a conditional backend timer without adding it to the OBS gift grid', async () => {

@@ -41,9 +41,9 @@ const GUIDE_COPY: Record<TutorialLesson, GuideCopy> = {
     action: '使用模板',
   },
   gift: {
-    targets: ['.guide-add-gift', '.guide-gift-search'],
+    targets: ['.guide-gift-selection-ready', '.guide-gift-search', '.guide-add-gift'],
     title: '选择一种观众礼物',
-    body: '一个属性可以绑定任意数量的礼物。先添加一种，之后随时可以回来继续加。',
+    body: '一个属性可以绑定任意数量的礼物。选好后点击“确认选择”，再配置它的规则。',
     action: '添加礼物',
   },
   rule: {
@@ -86,6 +86,16 @@ const GUIDE_COPY: Record<TutorialLesson, GuideCopy> = {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
+}
+
+function isGuideTargetAvailable(candidate: HTMLElement | null): candidate is HTMLElement {
+  if (!candidate || candidate.hidden) return false;
+  let ancestor = ((candidate as any).parentElement ?? (candidate as any).parent) as HTMLElement | null;
+  while (ancestor) {
+    if (ancestor.hidden) return false;
+    ancestor = ((ancestor as any).parentElement ?? (ancestor as any).parent) as HTMLElement | null;
+  }
+  return true;
 }
 
 function positionGuide(target: HTMLElement | null, focus: HTMLElement, bubble: HTMLElement): void {
@@ -131,7 +141,7 @@ export function renderSpotlightGuide(context: SpotlightGuideContext): SpotlightG
   frame.classList.toggle('is-modal-step', context.editorOpen);
   const target = copy.targets
     .map((selector) => context.host.querySelector(selector) as HTMLElement | null)
-    .find((candidate) => candidate && !candidate.hidden) ?? null;
+    .find(isGuideTargetAvailable) ?? null;
   const focus = el('div', { class: 'tour-focus', ariaHidden: 'true' } as any);
   const bubble = el('section', { class: 'tour-bubble', role: 'dialog', ariaLabel: '训练提示' } as any);
   bubble.append(
@@ -143,7 +153,8 @@ export function renderSpotlightGuide(context: SpotlightGuideContext): SpotlightG
   const footer = el('div', { class: 'tour-bubble-footer' });
   const exit = el('button', { class: 'tour-bubble-skip', type: 'button', text: '退出训练' }) as HTMLButtonElement;
   const skip = el('button', { class: 'tour-bubble-skip', type: 'button', text: '跳过本关' }) as HTMLButtonElement;
-  const action = el('button', { class: 'btn tour-bubble-action', type: 'button', text: copy.action }) as HTMLButtonElement;
+  const actionLabel = target?.className.split(/\s+/).includes('guide-gift-selection-ready') ? '确认选择' : copy.action;
+  const action = el('button', { class: 'btn tour-bubble-action', type: 'button', text: actionLabel }) as HTMLButtonElement;
   let positionQueued = false;
   const position = (): void => {
     positionQueued = false;

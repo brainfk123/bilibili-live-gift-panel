@@ -31,14 +31,26 @@ import {
 } from './wizard';
 import { renderSpotlightGuide, type SpotlightGuideElement } from './spotlight-guide';
 import { createAttributeWorkspace, type AttributeWorkspace } from './attribute-workspace';
+import {
+  buildQuickGiftFormula,
+  detectQuickGiftRule,
+  QUICK_GIFT_OPERATION_GROUPS,
+  quickGiftOperationLabel,
+  quickGiftOperationSupportsMaximum,
+  quickGiftOperationUnit,
+  quickGiftOperationUsesAmount,
+  type QuickGiftOperation,
+} from './quick-gift-rules';
 
 interface SelectedGiftRule {
   gift: GiftInfo;
   formulaName: string;
   formula: string;
   enabled: boolean;
-  quickOperation?: 'add' | 'price' | 'set' | 'random' | 'advanced';
+  quickOperation?: QuickGiftOperation;
   quickAmount?: number;
+  quickMaximum?: number;
+  quickMaximumEnabled?: boolean;
   previous?: GiftRule;
   matchGiftIds?: number[];
   blindBoxName?: string;
@@ -312,6 +324,7 @@ export function mountConfig(root: HTMLElement): void {
 
   function refreshEditorTutorial(navigate = true): void {
     const lesson = activeTutorialLesson();
+    const trainingVisible = !guideDismissed && (editorGuideEnabled || forcedTutorialLesson !== null);
     const lessons = getTutorialLessonStates(
       state,
       connectionState === 'connected',
@@ -320,7 +333,15 @@ export function mountConfig(root: HTMLElement): void {
     ).filter((item) => item.section);
     activeEditorWorkspace?.updateLessons(lessons);
     activeEditorWorkspace?.refreshBadges();
-    activeEditorWorkspace?.setTrainingVisible(!guideDismissed && (editorGuideEnabled || forcedTutorialLesson !== null));
+    activeEditorWorkspace?.setTrainingVisible(trainingVisible);
+    root.querySelectorAll<HTMLElement>('.workbench-lesson-card').forEach((card) => {
+      if (!card.dataset.tutorialLesson) return;
+      card.hidden = !trainingVisible || card.dataset.tutorialLesson !== lesson;
+    });
+    if (trainingVisible && lesson === 'preset') {
+      const advancedRule = root.querySelector<HTMLDetailsElement>('.rule-advanced-settings');
+      if (advancedRule) advancedRule.open = true;
+    }
     if (navigate && lesson && activeEditorWorkspace && (editorGuideEnabled || forcedTutorialLesson !== null)) {
       activeEditorWorkspace.setSection(sectionForTutorialLesson(lesson));
     }
@@ -1147,15 +1168,17 @@ export function mountConfig(root: HTMLElement): void {
       refreshEditorTutorial();
       toast('已套用加班机模板', root);
     };
-    const overviewPanel = el('section', { class: 'attribute-overview-panel' }, [
-      el('div', { class: 'workbench-lesson-card' }, [
+    const overviewLessonCard = el('div', { class: 'workbench-lesson-card' }, [
         el('span', { class: 'workbench-lesson-icon', text: '01' }),
         el('div', {}, [
           el('strong', { text: '先定义后台要保存的数据' }),
           el('p', { text: '属性名称会出现在规则中；当前值是计算起点；显示格式只改变 OBS 中的呈现。' }),
         ]),
         templateButton,
-      ]),
+    ]);
+    overviewLessonCard.dataset.tutorialLesson = 'basics';
+    const overviewPanel = el('section', { class: 'attribute-overview-panel' }, [
+      overviewLessonCard,
       basics,
       el('div', { class: 'attribute-overview-preview' }, [
         el('span', { text: 'OBS 数值预览' }),
@@ -1508,18 +1531,49 @@ export function mountConfig(root: HTMLElement): void {
     const giftPicker = el('div', { class: 'gift-picker-grid' });
     const selectedRules = el('div', { class: 'selected-rules' });
     const selectionCount = el('span', { class: 'selection-count' });
+    const giftDrawerSelectionCount = el('span', { class: 'gift-picker-drawer-selection' });
     const giftDrawer = el('aside', { class: 'gift-picker-drawer', ariaLabel: '添加礼物' } as any);
     giftDrawer.hidden = true;
-    const setGiftDrawerOpen = (open: boolean): void => {
-      giftDrawer.hidden = !open;
-      giftDrawer.classList.toggle('is-open', open);
-      if (open) giftSearch.focus();
-    };
+    let giftSelectionSnapshot: Map<number, SelectedGiftRule> | null = null;
+    let giftPreviewSnapshot = false;
+    let modalFooter: HTMLElement | null = null;
+    let confirmGiftSelectionButton: HTMLButtonElement | null = null;
     const giftChoiceButtons = new Map<number, HTMLButtonElement>();
     const giftPickerBatchSize = 40;
     let filteredGifts: GiftInfo[] = [];
     let visibleGiftCount = 0;
     let giftPickerLoader: HTMLButtonElement | null = null;
+
+    const openGiftDrawer = (): void => {
+      if (!giftDrawer.hidden) return;
+      giftSelectionSnapshot = new Map(selected);
+      giftPreviewSnapshot = editorTutorialProgress.giftPreviewed === true;
+      giftDrawer.hidden = false;
+      giftDrawer.classList.add('is-open');
+      if (modalFooter) modalFooter.hidden = true;
+      giftSearch.focus();
+      renderGuide();
+    };
+
+    const closeGiftDrawer = (commit: boolean): void => {
+      if (giftDrawer.hidden) return;
+      const selectionChanged = giftSelectionSnapshot === null
+        || giftSelectionSnapshot.size !== selected.size
+        || Array.from(selected).some(([giftId, item]) => giftSelectionSnapshot?.get(giftId) !== item);
+      if (!commit && giftSelectionSnapshot) {
+        selected.clear();
+        for (const [giftId, item] of giftSelectionSnapshot) selected.set(giftId, item);
+        renderGiftPicker();
+        renderSelectedRules();
+      }
+      giftSelectionSnapshot = null;
+      giftDrawer.hidden = true;
+      giftDrawer.classList.remove('is-open');
+      if (modalFooter) modalFooter.hidden = false;
+      editorTutorialProgress.giftCount = selected.size;
+      editorTutorialProgress.giftPreviewed = commit && selectionChanged ? false : giftPreviewSnapshot;
+      refreshEditorTutorial();
+    };
 
     const defaultFormula = (): string => `${nameInput.value.trim() || '属性'}+price/1000*60`;
 
@@ -1578,14 +1632,9 @@ export function mountConfig(root: HTMLElement): void {
           selected.set(gift.id, item);
           void hydrateBlindBoxRule(item);
         }
-        editorTutorialProgress.giftCount = selected.size;
-        editorTutorialProgress.giftPreviewed = false;
         updateGiftChoice(gift.id);
         renderSelectedRules();
-        if (editorGuideEnabled && selected.size > 0 && activeTutorialLesson() === 'rule') {
-          setGiftDrawerOpen(false);
-        }
-        refreshEditorTutorial();
+        renderGuide();
       };
       giftChoiceButtons.set(gift.id, button);
       return button;
@@ -1643,6 +1692,11 @@ export function mountConfig(root: HTMLElement): void {
 
     function renderSelectedRules(): void {
       selectionCount.textContent = `已选择 ${selected.size} 个礼物`;
+      giftDrawerSelectionCount.textContent = `本次已选择 ${selected.size} 个礼物`;
+      if (confirmGiftSelectionButton) {
+        confirmGiftSelectionButton.textContent = `确认选择（${selected.size}）`;
+        confirmGiftSelectionButton.classList.toggle('guide-gift-selection-ready', selected.size > 0);
+      }
       selectedRules.replaceChildren();
       if (selected.size === 0) {
         selectedRules.append(el('div', { class: 'selected-rules-empty', text: '还没有选择礼物。属性可以先单独保存，之后再回来绑定。' }));
@@ -1778,74 +1832,85 @@ export function mountConfig(root: HTMLElement): void {
         });
       };
       const attributeName = nameInput.value.trim() || originalName || '属性';
-      const compactFormula = item.formula.replace(/\s+/g, '');
       if (!item.quickOperation) {
-        if (compactFormula.startsWith(`${attributeName}+price/1000*`)) {
-          const amount = Number(compactFormula.slice(`${attributeName}+price/1000*`.length));
-          item.quickOperation = Number.isFinite(amount) ? 'price' : 'advanced';
-          item.quickAmount = Number.isFinite(amount) ? amount : 60;
-        } else if (compactFormula.startsWith(`${attributeName}+RANDBETWEEN(1,`) && compactFormula.endsWith(')')) {
-          const amount = Number(compactFormula.slice(`${attributeName}+RANDBETWEEN(1,`.length, -1));
-          item.quickOperation = Number.isFinite(amount) ? 'random' : 'advanced';
-          item.quickAmount = Number.isFinite(amount) ? amount : 60;
-        } else if (compactFormula.startsWith(`${attributeName}+`)) {
-          const amount = Number(compactFormula.slice(`${attributeName}+`.length));
-          item.quickOperation = Number.isFinite(amount) ? 'add' : 'advanced';
-          item.quickAmount = Number.isFinite(amount) ? amount : 60;
-        } else if (Number.isFinite(Number(compactFormula))) {
-          item.quickOperation = 'set';
-          item.quickAmount = Number(compactFormula);
-        } else {
-          item.quickOperation = 'advanced';
-          item.quickAmount = 60;
-        }
+        const detected = detectQuickGiftRule(item.formula, attributeName);
+        item.quickOperation = detected.operation;
+        item.quickAmount = detected.amount;
+        item.quickMaximum = detected.maximum;
+        item.quickMaximumEnabled = detected.maximum !== undefined;
       }
       const operationSelect = el('select', { class: 'field-input quick-rule-operation' }) as HTMLSelectElement;
-      operationSelect.innerHTML = [
-        '<option value="add">固定增加</option>',
-        '<option value="price">按每 1 元增加</option>',
-        '<option value="set">设为固定值</option>',
-        '<option value="random">随机增加</option>',
-        '<option value="advanced">使用高级规则</option>',
-      ].join('');
+      for (const group of QUICK_GIFT_OPERATION_GROUPS) {
+        const optionGroup = el('optgroup') as HTMLOptGroupElement;
+        optionGroup.label = group.label;
+        for (const operation of group.operations) {
+          const option = el('option', {
+            value: operation,
+            text: quickGiftOperationLabel(operation, attributeName),
+          }) as HTMLOptionElement;
+          optionGroup.append(option);
+        }
+        operationSelect.append(optionGroup);
+      }
       operationSelect.value = item.quickOperation ?? 'advanced';
       const amountInput = inputField('变化数值', String(item.quickAmount ?? 60));
       amountInput.type = 'number';
-      amountInput.step = '1';
+      amountInput.step = 'any';
       const quickUnit = el('span', { class: 'quick-rule-unit' });
+      const maximumToggle = el('input', { class: 'setting-switch-input', type: 'checkbox' }) as HTMLInputElement;
+      maximumToggle.checked = item.quickMaximumEnabled === true;
+      const maximumInput = inputField(
+        '最高不超过',
+        String(item.quickMaximum ?? (formatSelect.value === 'hhmmss' ? 3600 : 100)),
+      );
+      maximumInput.type = 'number';
+      maximumInput.step = 'any';
+      const maximumUnit = el('span', { class: 'quick-rule-unit' });
+      const maximumLimit = el('div', { class: 'quick-rule-limit' }, [
+        el('label', { class: 'quick-rule-limit-toggle' }, [
+          maximumToggle,
+          el('span', { class: 'setting-switch-track', ariaHidden: 'true' } as any),
+          el('span', { text: '最高不超过' }),
+        ]),
+        maximumInput,
+        maximumUnit,
+      ]);
       const syncQuickCopy = (): void => {
-        const operation = operationSelect.value as SelectedGiftRule['quickOperation'];
+        const operation = operationSelect.value as QuickGiftOperation;
         const targetName = nameInput.value.trim() || originalName || '属性';
-        const labels: Record<NonNullable<SelectedGiftRule['quickOperation']>, string> = {
-          add: `让“${targetName}”增加`,
-          price: `每 1 元让“${targetName}”增加`,
-          set: `把“${targetName}”设为`,
-          random: `让“${targetName}”随机增加 1 到`,
-          advanced: '使用下方高级规则',
-        };
         for (const option of Array.from(operationSelect.querySelectorAll('option'))) {
-          option.textContent = labels[option.value as NonNullable<SelectedGiftRule['quickOperation']>];
+          option.textContent = quickGiftOperationLabel(option.value as QuickGiftOperation, targetName);
         }
-        quickUnit.textContent = operation === 'advanced'
-          ? '在下方直接输入表达式'
-          : formatSelect.value === 'hhmmss' ? '秒' : '单位';
-        amountInput.hidden = operation === 'advanced';
+        quickUnit.textContent = quickGiftOperationUnit(operation, formatSelect.value === 'hhmmss');
+        amountInput.hidden = !quickGiftOperationUsesAmount(operation);
+        amountInput.min = operation === 'set' ? '' : operation.startsWith('random') ? '1' : '0';
+        maximumLimit.hidden = !quickGiftOperationSupportsMaximum(operation);
+        maximumInput.disabled = !maximumToggle.checked;
+        maximumUnit.textContent = formatSelect.value === 'hhmmss' ? '秒' : '单位';
       };
       const syncQuickRule = (): void => {
-        const operation = operationSelect.value as NonNullable<SelectedGiftRule['quickOperation']>;
+        const operation = operationSelect.value as QuickGiftOperation;
         const amount = Number(amountInput.value);
         item.quickOperation = operation;
         item.quickAmount = Number.isFinite(amount) ? amount : 0;
+        const maximum = Number(maximumInput.value);
+        item.quickMaximumEnabled = maximumToggle.checked && quickGiftOperationSupportsMaximum(operation);
+        item.quickMaximum = Number.isFinite(maximum) ? maximum : 0;
         const targetName = nameInput.value.trim() || originalName || '属性';
-        if (operation === 'add') formulaInput.value = `${targetName}+${item.quickAmount}`;
-        if (operation === 'price') formulaInput.value = `${targetName}+price/1000*${item.quickAmount}`;
-        if (operation === 'set') formulaInput.value = String(item.quickAmount);
-        if (operation === 'random') formulaInput.value = `${targetName}+RANDBETWEEN(1,${item.quickAmount})`;
+        const formula = buildQuickGiftFormula(
+          operation,
+          targetName,
+          item.quickAmount,
+          item.quickMaximumEnabled ? item.quickMaximum : undefined,
+        );
+        if (formula !== null) formulaInput.value = formula;
         syncQuickCopy();
         updatePreview();
       };
       operationSelect.onchange = syncQuickRule;
       amountInput.oninput = syncQuickRule;
+      maximumToggle.onchange = syncQuickRule;
+      maximumInput.oninput = syncQuickRule;
       formulaInput.oninput = () => {
         item.quickOperation = 'advanced';
         operationSelect.value = 'advanced';
@@ -1854,6 +1919,7 @@ export function mountConfig(root: HTMLElement): void {
       };
       const examples = el('div', { class: 'formula-examples' });
       const presetControls = renderFormulaPresetControls('gift', formulaInput, formulaNameInput, () => updatePreview());
+      formulaHeading.append(presetControls.saveButton);
       const exampleFactories: Array<[string, () => string]> = [
         ['每个 +1', () => `${nameInput.value.trim() || '属性'}+1`],
         ['按价格增加时间', () => `${nameInput.value.trim() || '属性'}+price/1000*60`],
@@ -1882,7 +1948,6 @@ export function mountConfig(root: HTMLElement): void {
             el('strong', { text: '小白模式：用一句话配置' }),
             el('small', { text: '后台仍会保存为同一套规则，可随时切换到高级输入。' }),
           ]),
-          presetControls.saveButton,
         ]),
         fieldControl(formulaNameInput),
         el('div', { class: 'quick-rule-sentence' }, [
@@ -1891,6 +1956,7 @@ export function mountConfig(root: HTMLElement): void {
           amountInput,
           quickUnit,
         ]),
+        maximumLimit,
         el('div', { class: 'quick-rule-actions' }, [presetControls.presetList, simulateButton]),
       ]);
       const advanced = el('details', { class: 'rule-advanced-settings' });
@@ -1909,13 +1975,31 @@ export function mountConfig(root: HTMLElement): void {
     const manualGift = renderManualGiftAdder(() => {
       pickerCatalog = buildGiftPickerCatalog(state, roomGiftCatalog);
       allGifts = pickerCatalog.gifts;
-      editorTutorialProgress.giftCount = selected.size;
-      editorTutorialProgress.giftPreviewed = false;
       renderGiftPicker();
       renderSelectedRules();
-      setGiftDrawerOpen(false);
-      refreshEditorTutorial();
+      renderGuide();
     }, selected, defaultFormula, (item) => { void hydrateBlindBoxRule(item); });
+
+    const cancelGiftSelectionButton = el('button', {
+      class: 'btn ghost',
+      type: 'button',
+      text: '取消',
+    }) as HTMLButtonElement;
+    cancelGiftSelectionButton.onclick = () => closeGiftDrawer(false);
+    confirmGiftSelectionButton = el('button', {
+      class: 'btn guide-confirm-gifts',
+      type: 'button',
+      text: `确认选择（${selected.size}）`,
+    }) as HTMLButtonElement;
+    confirmGiftSelectionButton.classList.toggle('guide-gift-selection-ready', selected.size > 0);
+    confirmGiftSelectionButton.onclick = () => closeGiftDrawer(true);
+    const giftDrawerActions = el('footer', { class: 'gift-picker-drawer-actions' }, [
+      giftDrawerSelectionCount,
+      el('div', { class: 'gift-picker-drawer-action-buttons' }, [
+        cancelGiftSelectionButton,
+        confirmGiftSelectionButton,
+      ]),
+    ]);
 
     const giftsPanel = el('section', { class: 'gift-binding-panel gift-picker-drawer-body' });
     giftsPanel.append(
@@ -1924,11 +2008,12 @@ export function mountConfig(root: HTMLElement): void {
           el('h3', { text: '选择会影响这个属性的礼物' }),
           el('p', { text: '默认显示已上架和直播中实际收到过的礼物；搜索时会同时显示历史礼物并标注状态。向下滚动会自动加载更多，数字 ID 需要完整匹配。' }),
         ]),
-        el('button', { class: 'modal-close gift-picker-drawer-close', type: 'button', text: '×', ariaLabel: '关闭礼物列表', onclick: () => setGiftDrawerOpen(false) } as any),
+        el('button', { class: 'modal-close gift-picker-drawer-close', type: 'button', text: '×', ariaLabel: '取消礼物选择', onclick: () => closeGiftDrawer(false) } as any),
       ]),
       giftSearch,
       giftPicker,
       manualGift,
+      giftDrawerActions,
     );
     giftDrawer.append(giftsPanel);
 
@@ -1939,7 +2024,7 @@ export function mountConfig(root: HTMLElement): void {
       type: 'button',
       text: '+ 添加礼物',
     }) as HTMLButtonElement;
-    addGiftButton.onclick = () => setGiftDrawerOpen(true);
+    addGiftButton.onclick = openGiftDrawer;
     formulasPanel.append(
       el('div', { class: 'modal-section-heading' }, [
         el('div', {}, [
@@ -1953,14 +2038,16 @@ export function mountConfig(root: HTMLElement): void {
       giftDrawer,
     );
 
-    const outputPanel = el('section', { class: 'attribute-output-panel' }, [
-      el('div', { class: 'workbench-lesson-card' }, [
+    const outputLessonCard = el('div', { class: 'workbench-lesson-card' }, [
         el('span', { class: 'workbench-lesson-icon', text: '04' }),
         el('div', {}, [
           el('strong', { text: '计算留在后台，页面各司其职' }),
           el('p', { text: '关闭配置页和 OBS 都不会停止规则；只有退出托盘后台才会停止接收礼物。' }),
         ]),
-      ]),
+    ]);
+    outputLessonCard.dataset.tutorialLesson = 'save';
+    const outputPanel = el('section', { class: 'attribute-output-panel' }, [
+      outputLessonCard,
       el('div', { class: 'runtime-role-grid' }, [
         el('article', {}, [el('strong', { text: '配置页' }), el('span', { text: '修改属性、规则和外观' })]),
         el('article', {}, [el('strong', { text: '托盘后台' }), el('span', { text: '收礼、计算、定时与保存' })]),
@@ -1986,7 +2073,7 @@ export function mountConfig(root: HTMLElement): void {
     saveButton.onclick = () => {
       void saveAttributeEditor(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, selected, timerRules, overlay, saveButton);
     };
-    const modalFooter = el('footer', { class: 'modal-actions attribute-workbench-actions' }, [
+    modalFooter = el('footer', { class: 'modal-actions attribute-workbench-actions' }, [
       el('span', { class: 'attribute-save-note', text: '保存前会由后台统一校验规则' }),
       cancelButton,
       saveButton,

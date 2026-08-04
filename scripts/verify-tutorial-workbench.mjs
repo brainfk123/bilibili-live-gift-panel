@@ -111,12 +111,38 @@ const followDelta = await page.evaluate(async () => {
 if (followDelta > 3) throw new Error(`Tutorial focus did not follow scrolled content: ${followDelta}px`);
 
 await page.locator('.guide-overtime-template').click({ force: true });
+if (await page.locator('.workbench-lesson-card').first().isVisible()) {
+  throw new Error('Completed lesson card should not remain visible');
+}
 await page.locator('.guide-add-gift').click({ force: true });
 await page.locator('.gift-picker-drawer:not([hidden])').waitFor();
+if (await page.locator('.attribute-workbench-actions').isVisible()) {
+  throw new Error('Attribute save footer should be hidden while choosing gifts');
+}
 await page.locator('.gift-choice').filter({ hasText: '666' }).first().click({ force: true });
+await page.getByRole('button', { name: '确认选择（1）' }).waitFor();
+await page.screenshot({ path: resolve(artifactDir, 'tutorial-gift-picker.png'), fullPage: false });
+await page.getByRole('button', { name: '确认选择（1）' }).click({ force: true });
+await page.locator('.gift-picker-drawer').waitFor({ state: 'hidden' });
+if (!await page.locator('.attribute-workbench-actions').isVisible()) {
+  throw new Error('Attribute save footer should return after confirming gifts');
+}
 await page.locator('.quick-rule-builder').first().waitFor();
+const beginnerOperations = await page.locator('.quick-rule-operation option').evaluateAll((options) => (
+  options.map((option) => ({ value: option.value, text: option.textContent?.trim() }))
+));
+for (const expected of ['add', 'subtract', 'set', 'reset', 'price', 'priceSubtract', 'random', 'randomSubtract', 'advanced']) {
+  if (!beginnerOperations.some((option) => option.value === expected)) {
+    throw new Error(`Missing beginner rule operation: ${expected}`);
+  }
+}
+await page.locator('.quick-rule-operation').first().selectOption('add');
+await page.locator('.quick-rule-limit .setting-switch-input').first().check({ force: true });
+await page.locator('input[data-field-label="最高不超过"]').first().fill('3600');
 await page.getByRole('button', { name: '退出训练' }).click({ force: true });
 await page.screenshot({ path: resolve(artifactDir, 'tutorial-workbench-rules.png'), fullPage: false });
+await page.locator('.rule-advanced-settings > summary').first().click();
+await page.screenshot({ path: resolve(artifactDir, 'tutorial-workbench-rule-advanced.png'), fullPage: false });
 
 await page.getByRole('tab', { name: /定时器/ }).click();
 await page.locator('.guide-add-timer').click();
@@ -136,6 +162,7 @@ const checks = await page.evaluate(() => ({
   visiblePanels: Array.from(document.querySelectorAll('.attribute-workbench-panel'))
     .filter((panel) => !panel.hidden).length,
   tabs: Array.from(document.querySelectorAll('.attribute-workbench-tab')).map((tab) => tab.textContent?.trim()),
+  presetInsideAdvanced: Boolean(document.querySelector('.rule-advanced-settings .guide-save-preset')),
 }));
 
 await page.setViewportSize({ width: 1440, height: 1000 });
@@ -149,5 +176,6 @@ await browser.close();
 if (errors.length > 0) throw new Error(`Browser errors:\n${errors.join('\n')}`);
 if (checks.pageOverflow > 1 || checks.modalOverflow > 1) throw new Error(`Horizontal overflow: ${JSON.stringify(checks)}`);
 if (checks.visiblePanels !== 1) throw new Error(`Expected one visible panel: ${JSON.stringify(checks)}`);
+if (!checks.presetInsideAdvanced) throw new Error('Save preset button must stay inside advanced rules');
 if (checks.tabs.length !== 4 || lessonCount !== 10) throw new Error(`Workbench structure mismatch: ${JSON.stringify({ ...checks, lessonCount })}`);
-console.log(JSON.stringify({ ...checks, lessonCount, followDelta, screenshots: 6 }, null, 2));
+console.log(JSON.stringify({ ...checks, lessonCount, followDelta, screenshots: 8 }, null, 2));

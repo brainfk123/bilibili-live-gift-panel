@@ -904,6 +904,18 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 .config-root .gift-picker-drawer .gift-picker-grid { min-height: 0; max-height: none; flex: 1 1 auto; }
 .config-root .gift-picker-drawer-close { width: 32px; height: 32px; }
+.config-root .gift-picker-drawer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 14px -24px -22px;
+  border-top: 1px solid var(--border);
+  padding: 14px 24px;
+  background: var(--card);
+}
+.config-root .gift-picker-drawer-selection { color: var(--text-dim); font-size: 11px; }
+.config-root .gift-picker-drawer-action-buttons { display: flex; align-items: center; gap: 10px; }
 .config-root .quick-rule-builder {
   display: grid;
   gap: 13px;
@@ -932,6 +944,19 @@ body.config-mode::-webkit-scrollbar-corner,
   font-size: 11px;
 }
 .config-root .quick-rule-sentence .field-input { height: 40px; }
+.config-root .quick-rule-limit {
+  display: grid;
+  grid-template-columns: max-content minmax(110px, 180px) max-content;
+  align-items: center;
+  gap: 9px;
+  border-top: 1px solid var(--border);
+  padding-top: 11px;
+}
+.config-root .quick-rule-limit-toggle { display: inline-flex; align-items: center; gap: 9px; cursor: pointer; color: var(--text-dim); }
+.config-root .quick-rule-limit .setting-switch-track { width: 36px; height: 21px; }
+.config-root .quick-rule-limit .setting-switch-track::after { width: 13px; height: 13px; }
+.config-root .quick-rule-limit .setting-switch-input:checked + .setting-switch-track::after { transform: translateX(15px); }
+.config-root .quick-rule-limit .field-input { height: 36px; }
 .config-root .quick-rule-sentence input[type="number"] {
   appearance: textfield;
   -moz-appearance: textfield;
