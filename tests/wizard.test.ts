@@ -1456,7 +1456,9 @@ describe('single-page configuration rendering', () => {
       { id: 'rule-overtime', giftId: 2, attributeName: '加班时间', formulaName: '加时', formula: '加班时间+60', enabled: false },
     );
     configured.settings.showTutorial = false;
-    configured.settings.tutorialCompletedLessons = TUTORIAL_LESSONS.map((lesson) => lesson.id);
+    configured.settings.tutorialCompletedLessons = TUTORIAL_LESSONS
+      .map((lesson) => lesson.id)
+      .filter((lesson) => lesson !== 'enable' && lesson !== 'output');
     await saveState(configured);
     mockedRuntimeState = 'connected';
     const root = new TestElement('div');
@@ -1478,6 +1480,11 @@ describe('single-page configuration rendering', () => {
     const target = saved.attributes.find((attribute) => attribute.name === '加班时间');
     expect(target?.id).toBeTruthy();
     expect(saved.settings.tutorialTargetAttributeId).toBe(target?.id);
+
+    (root.querySelector('.guide-rule-toggle') as TestElement | null)?.onclick?.();
+    await vi.waitFor(() => {
+      expect(textOf(root.querySelector('.tour-bubble') as TestElement)).toContain('把面板放进 OBS');
+    });
   });
 
   it('restarts from attribute creation when a late tutorial lesson has no overtime card', async () => {

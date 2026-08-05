@@ -495,6 +495,11 @@ export function mountConfig(root: HTMLElement): void {
     );
   }
 
+  function completeTutorialLesson(lesson: TutorialLesson): void {
+    markTutorialLessonComplete(state.settings, lesson);
+    if (forcedTutorialLesson === lesson) forcedTutorialLesson = null;
+  }
+
   function updateTrainingToggle(): void {
     const lessons = getTutorialLessonStates(
       state,
@@ -568,6 +573,7 @@ export function mountConfig(root: HTMLElement): void {
       forcedTutorialLesson = lesson;
       guideDismissed = false;
       state.settings.showTutorial = true;
+      state.settings.tutorialReplayMode = true;
       save();
       overlay.remove();
       if (lesson === 'template') {
@@ -1254,8 +1260,8 @@ export function mountConfig(root: HTMLElement): void {
             return;
           }
           currentRule.enabled = enabled;
-          if (enabled && state.settings.tutorialReplayMode) {
-            markTutorialLessonComplete(state.settings, 'enable');
+          if (enabled && !guideDismissed && activeTutorialLesson() === 'enable') {
+            completeTutorialLesson('enable');
           }
           updateEnabledAppearance(enabled);
           save();
