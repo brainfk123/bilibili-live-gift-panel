@@ -552,6 +552,19 @@ export function mountConfig(root: HTMLElement): void {
       renderGuide();
     };
     const beginLesson = (lesson: TutorialLesson): void => {
+      const tutorialAttributeIndex = tutorialLessonRequiresAttribute(lesson)
+        ? ensureTutorialAttributeTarget(state)
+        : -1;
+      if (tutorialLessonRequiresAttribute(lesson) && tutorialAttributeIndex < 0) {
+        resetTutorialProgress(state.settings);
+        forcedTutorialLesson = null;
+        guideDismissed = false;
+        save();
+        overlay.remove();
+        render();
+        toast('还没有“加班时间”，已从创建属性步骤重新开始训练', root);
+        return;
+      }
       forcedTutorialLesson = lesson;
       guideDismissed = false;
       state.settings.showTutorial = true;
@@ -562,7 +575,7 @@ export function mountConfig(root: HTMLElement): void {
         return;
       }
       if (sectionForTutorialLesson(lesson) !== 'overview' || ['basics'].includes(lesson)) {
-        if (!editorOpen) openAttributeEditor(state.attributes.length > 0 ? 0 : undefined);
+        if (!editorOpen) openAttributeEditor(tutorialAttributeIndex >= 0 ? tutorialAttributeIndex : undefined);
         else refreshEditorTutorial();
         return;
       }
@@ -981,7 +994,12 @@ export function mountConfig(root: HTMLElement): void {
       section.append(empty);
     } else {
       const list = el('div', { class: 'attribute-list' });
-      state.attributes.forEach((attribute, index) => list.append(renderAttributeCard(attribute, index)));
+      const tutorialAttributeIndex = findTutorialAttributeIndex(state);
+      state.attributes.forEach((attribute, index) => list.append(renderAttributeCard(
+        attribute,
+        index,
+        index === tutorialAttributeIndex,
+      )));
       section.append(list);
     }
     content.append(section);
@@ -1036,7 +1054,11 @@ export function mountConfig(root: HTMLElement): void {
         throw new Error(`已经存在名为“${activity.name}”的活动会话`);
       }
     }
-    const attributesByName = new Map(result.attributes.map((attribute) => [attribute.name, attribute]));
+    const createdAttributes = result.attributes.map((attribute) => ({
+      ...attribute,
+      id: attribute.id ?? createAttributeId(),
+    }));
+    const attributesByName = new Map(createdAttributes.map((attribute) => [attribute.name, attribute]));
     const giftsById = new Map(result.usedGifts.map((gift) => [gift.id, gift]));
     try {
       for (const rule of result.rules) {
@@ -1062,14 +1084,21 @@ export function mountConfig(root: HTMLElement): void {
       displayScenes: state.displayScenes,
       activities: state.activities,
       giftCatalog: state.giftCatalog,
+      tutorialTargetAttributeId: state.settings.tutorialTargetAttributeId,
     };
-    state.attributes = [...state.attributes, ...result.attributes];
+    state.attributes = [...state.attributes, ...createdAttributes];
     state.rules = [...state.rules, ...result.rules];
     state.timerRules = [...state.timerRules, ...result.timerRules];
     state.displayScenes = [...state.displayScenes, ...result.displayScenes];
     state.activities = [...state.activities, ...result.activities];
     state.giftCatalog = [...state.giftCatalog];
     for (const gift of result.usedGifts) upsertGiftCatalog(state, gift);
+    if (editorGuideEnabled || state.settings.tutorialReplayMode) {
+      const overtimeAttribute = createdAttributes.find((attribute) => (
+        attribute.createdFromTemplateId === 'overtime' || attribute.name === '加班时间'
+      ));
+      if (overtimeAttribute?.id) state.settings.tutorialTargetAttributeId = overtimeAttribute.id;
+    }
     try {
       await saveAndWait();
     } catch (error) {
@@ -1079,6 +1108,7 @@ export function mountConfig(root: HTMLElement): void {
       state.displayScenes = previous.displayScenes;
       state.activities = previous.activities;
       state.giftCatalog = previous.giftCatalog;
+      state.settings.tutorialTargetAttributeId = previous.tutorialTargetAttributeId;
       throw error;
     }
     editorOpen = false;
@@ -1086,11 +1116,9 @@ export function mountConfig(root: HTMLElement): void {
     toast(`已创建“${result.attributes.map((attribute) => attribute.name).join('、')}”玩法`, root);
   }
 
-  function renderAttributeCard(attribute: Attribute, index: number): HTMLElement {
+  function renderAttributeCard(attribute: Attribute, index: number, isTutorialTarget: boolean): HTMLElement {
     const rules = state.rules.filter((rule) => rule.attributeName === attribute.name);
     const timerRules = state.timerRules.filter((rule) => rule.attributeName === attribute.name);
-    const tutorialTargetIndex = state.settings.tutorialReplayMode ? state.attributes.length - 1 : 0;
-    const isTutorialTarget = index === tutorialTargetIndex;
     const card = el('article', {
       class: `attribute-card hover-detail-card${isTutorialTarget ? ' guide-attribute-card' : ''}`,
       tabIndex: 0,
@@ -1102,6 +1130,9 @@ export function mountConfig(root: HTMLElement): void {
     const deleteButton = el('button', { class: 'btn text-danger attribute-action-button', type: 'button', text: '删除' }) as HTMLButtonElement;
     deleteButton.onclick = () => {
       if (!confirm(`删除属性“${attribute.name}”及其全部触发规则？`)) return;
+      if (attribute.id && state.settings.tutorialTargetAttributeId === attribute.id) {
+        delete state.settings.tutorialTargetAttributeId;
+      }
       state.attributes.splice(index, 1);
       state.rules = state.rules.filter((rule) => rule.attributeName !== attribute.name);
       state.timerRules = state.timerRules.filter((rule) => rule.attributeName !== attribute.name);
@@ -3458,6 +3489,7 @@ export function mountConfig(root: HTMLElement): void {
 
     const format = formatSelect.value as Attribute['format'];
     const nextAttribute: Attribute = {
+      id: original?.id ?? createAttributeId(),
       name,
       value,
       unit: format === 'hhmmss' ? 'seconds' : 'none',
@@ -3476,6 +3508,9 @@ export function mountConfig(root: HTMLElement): void {
     };
     if (index === undefined) state.attributes.push(nextAttribute);
     else state.attributes[index] = nextAttribute;
+    if (editorGuideEnabled && state.settings.tutorialReplayMode && nextAttribute.id) {
+      state.settings.tutorialTargetAttributeId = nextAttribute.id;
+    }
     if (originalName && originalName !== name) {
       state.displayScenes = state.displayScenes.map((scene) => ({
         ...scene,
@@ -4100,6 +4135,38 @@ function emptyState(text: string): HTMLElement {
 
 function transparentPixel(): string {
   return 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+}
+
+function tutorialLessonRequiresAttribute(lesson: TutorialLesson): boolean {
+  return !['room', 'attribute', 'template'].includes(lesson);
+}
+
+function findTutorialAttributeIndex(state: Pick<AppState, 'attributes' | 'settings'>): number {
+  const targetId = state.settings.tutorialTargetAttributeId?.trim();
+  if (targetId) {
+    const storedIndex = state.attributes.findIndex((attribute) => attribute.id === targetId);
+    if (storedIndex >= 0) return storedIndex;
+  }
+  const namedIndex = state.attributes.findIndex((attribute) => attribute.name === '加班时间');
+  if (namedIndex >= 0) return namedIndex;
+  return state.attributes.findIndex((attribute) => attribute.createdFromTemplateId === 'overtime');
+}
+
+function ensureTutorialAttributeTarget(state: Pick<AppState, 'attributes' | 'settings'>): number {
+  const index = findTutorialAttributeIndex(state);
+  if (index < 0) {
+    delete state.settings.tutorialTargetAttributeId;
+    return -1;
+  }
+  const attribute = state.attributes[index];
+  attribute.id ??= createAttributeId();
+  state.settings.tutorialTargetAttributeId = attribute.id;
+  return index;
+}
+
+function createAttributeId(): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  return uuid ? `attribute-${uuid}` : `attribute-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
 function createRuleId(): string {

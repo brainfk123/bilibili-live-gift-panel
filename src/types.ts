@@ -85,6 +85,7 @@ export interface AttributeValueMapping {
 }
 
 export interface Attribute {
+  id?: string;
   name: string;
   value: number;
   unit: 'seconds' | 'none';
@@ -254,6 +255,7 @@ export interface Settings {
   tutorialVersion: number;
   tutorialCompletedLessons: TutorialLesson[];
   tutorialReplayMode: boolean;
+  tutorialTargetAttributeId?: string;
   trainingCompletedTopics: TrainingTopicId[];
   lastSeenChangelogVersion: string;
   autoUpdate: boolean;

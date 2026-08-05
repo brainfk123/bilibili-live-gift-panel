@@ -9,6 +9,7 @@ import (
 const maxLogEntries = 200
 
 type attributeState struct {
+	ID                         string                 `json:"id,omitempty"`
 	Name                       string                 `json:"name"`
 	Value                      float64                `json:"value"`
 	Unit                       string                 `json:"unit"`
@@ -234,22 +235,23 @@ type contributionLedgerState struct {
 }
 
 type settingsState struct {
-	FontSize                 int      `json:"fontSize"`
-	AccentColor              string   `json:"accentColor"`
-	ShowStats                bool     `json:"showStats"`
-	ShowConnection           bool     `json:"showConnection"`
-	Align                    string   `json:"align"`
-	Theme                    string   `json:"theme"`
-	GiftView                 string   `json:"giftView"`
-	PanelOpacity             int      `json:"panelOpacity"`
-	DefaultDisplayThemeID    string   `json:"defaultDisplayThemeId"`
-	ShowTutorial             *bool    `json:"showTutorial"`
-	TutorialVersion          int      `json:"tutorialVersion"`
-	TutorialCompletedLessons []string `json:"tutorialCompletedLessons"`
-	TutorialReplayMode       *bool    `json:"tutorialReplayMode"`
-	TrainingCompletedTopics  []string `json:"trainingCompletedTopics"`
-	LastSeenChangelogVersion string   `json:"lastSeenChangelogVersion"`
-	AutoUpdate               *bool    `json:"autoUpdate"`
+	FontSize                  int      `json:"fontSize"`
+	AccentColor               string   `json:"accentColor"`
+	ShowStats                 bool     `json:"showStats"`
+	ShowConnection            bool     `json:"showConnection"`
+	Align                     string   `json:"align"`
+	Theme                     string   `json:"theme"`
+	GiftView                  string   `json:"giftView"`
+	PanelOpacity              int      `json:"panelOpacity"`
+	DefaultDisplayThemeID     string   `json:"defaultDisplayThemeId"`
+	ShowTutorial              *bool    `json:"showTutorial"`
+	TutorialVersion           int      `json:"tutorialVersion"`
+	TutorialCompletedLessons  []string `json:"tutorialCompletedLessons"`
+	TutorialReplayMode        *bool    `json:"tutorialReplayMode"`
+	TutorialTargetAttributeID string   `json:"tutorialTargetAttributeId,omitempty"`
+	TrainingCompletedTopics   []string `json:"trainingCompletedTopics"`
+	LastSeenChangelogVersion  string   `json:"lastSeenChangelogVersion"`
+	AutoUpdate                *bool    `json:"autoUpdate"`
 }
 
 type appState struct {

@@ -11,6 +11,7 @@ import {
   getWizardProgress,
   markTutorialLessonComplete,
   resetTutorialProgress,
+  TUTORIAL_LESSONS,
   type TutorialEditorProgress,
 } from '../src/ui/config/wizard';
 import { defaultState, loadState, resetState, saveState } from '../src/storage';
@@ -1440,6 +1441,73 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root.querySelector('.tour-bubble') as TestElement)).toContain('打开属性创建中心');
     expect(root.querySelector('.attribute-card')?.className.split(' ')).not.toContain('is-guide-expanded');
     expect(loadState().settings.tutorialReplayMode).toBe(true);
+  });
+
+  it('replays the enable lesson on the overtime training attribute instead of the first card', async () => {
+    const configured = defaultState();
+    configured.roomId = '31567150';
+    configured.attributes.push(
+      { name: '挑战次数', value: 10, unit: 'none', format: 'suffix', decimals: 0, suffix: '次' },
+      { name: '红队', value: 0, unit: 'none', format: 'suffix', decimals: 0, suffix: '分' },
+      { name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' },
+    );
+    configured.rules.push(
+      { id: 'rule-count', giftId: 1, attributeName: '挑战次数', formulaName: '增加计数', formula: '挑战次数+1', enabled: true },
+      { id: 'rule-overtime', giftId: 2, attributeName: '加班时间', formulaName: '加时', formula: '加班时间+60', enabled: false },
+    );
+    configured.settings.showTutorial = false;
+    configured.settings.tutorialCompletedLessons = TUTORIAL_LESSONS.map((lesson) => lesson.id);
+    await saveState(configured);
+    mockedRuntimeState = 'connected';
+    const root = new TestElement('div');
+
+    mountConfig(root as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(root)).toContain('已连接'));
+    (root.querySelector('.training-toggle') as TestElement | null)?.onclick?.();
+    const center = root.querySelector('.training-center') as TestElement;
+    center.querySelectorAll('.training-center-course')
+      .find((course) => textOf(course).includes('展开卡片并启用'))
+      ?.onclick?.();
+    findByText(center, '重新练习这一关')?.onclick?.();
+
+    const guideCard = root.querySelector('.guide-attribute-card') as TestElement | null;
+    expect(guideCard).not.toBeNull();
+    expect(textOf(guideCard!)).toContain('加班时间');
+    expect(textOf(guideCard!)).not.toContain('挑战次数');
+    const saved = loadState();
+    const target = saved.attributes.find((attribute) => attribute.name === '加班时间');
+    expect(target?.id).toBeTruthy();
+    expect(saved.settings.tutorialTargetAttributeId).toBe(target?.id);
+  });
+
+  it('restarts from attribute creation when a late tutorial lesson has no overtime card', async () => {
+    const configured = defaultState();
+    configured.roomId = '31567150';
+    configured.attributes.push({
+      name: '挑战次数', value: 10, unit: 'none', format: 'suffix', decimals: 0, suffix: '次',
+    });
+    configured.rules.push({
+      id: 'rule-count', giftId: 1, attributeName: '挑战次数', formulaName: '增加计数', formula: '挑战次数+1', enabled: true,
+    });
+    configured.settings.showTutorial = false;
+    configured.settings.tutorialCompletedLessons = TUTORIAL_LESSONS.map((lesson) => lesson.id);
+    await saveState(configured);
+    mockedRuntimeState = 'connected';
+    const root = new TestElement('div');
+
+    mountConfig(root as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(root)).toContain('已连接'));
+    (root.querySelector('.training-toggle') as TestElement | null)?.onclick?.();
+    const center = root.querySelector('.training-center') as TestElement;
+    center.querySelectorAll('.training-center-course')
+      .find((course) => textOf(course).includes('展开卡片并启用'))
+      ?.onclick?.();
+    findByText(center, '重新练习这一关')?.onclick?.();
+
+    expect(textOf(root.querySelector('.tour-bubble') as TestElement)).toContain('打开属性创建中心');
+    expect(root.querySelector('.guide-attribute-card')).toBeNull();
+    expect(loadState().settings.tutorialReplayMode).toBe(true);
+    expect(loadState().settings.tutorialCompletedLessons).toEqual([]);
   });
 
   it('keeps room, OBS, attributes, and data settings on one page without step navigation', () => {

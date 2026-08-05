@@ -698,9 +698,12 @@ func TestConfigStorePreservesTrainingTopicProgress(t *testing.T) {
 	}
 }
 
-func TestConfigStorePreservesTutorialReplayMode(t *testing.T) {
+func TestConfigStorePreservesTutorialReplayModeAndTargetAttribute(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
-	payload := `{"settings":{"showTutorial":true,"tutorialVersion":3,"tutorialCompletedLessons":[],"tutorialReplayMode":true}}`
+	payload := `{
+		"attributes":[{"id":"attribute-overtime","name":"加班时间","value":0,"unit":"seconds","format":"hhmmss","decimals":0,"suffix":""}],
+		"settings":{"showTutorial":true,"tutorialVersion":3,"tutorialCompletedLessons":[],"tutorialReplayMode":true,"tutorialTargetAttributeId":"attribute-overtime"}
+	}`
 	response := httptest.NewRecorder()
 	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
 	if response.Code != http.StatusOK {
@@ -712,6 +715,12 @@ func TestConfigStorePreservesTutorialReplayMode(t *testing.T) {
 	}
 	if state.Settings.TutorialReplayMode == nil || !*state.Settings.TutorialReplayMode {
 		t.Fatal("tutorial replay mode should survive persistence")
+	}
+	if len(state.Attributes) != 1 || state.Attributes[0].ID != "attribute-overtime" {
+		t.Fatalf("tutorial attribute id = %#v, want attribute-overtime", state.Attributes)
+	}
+	if state.Settings.TutorialTargetAttributeID != "attribute-overtime" {
+		t.Fatalf("tutorial target attribute id = %q, want attribute-overtime", state.Settings.TutorialTargetAttributeID)
 	}
 }
 
