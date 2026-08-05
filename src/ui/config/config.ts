@@ -1,7 +1,7 @@
 import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
 import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
-import { bindFloatingDetailCard, el, fieldControl, inputField, toast } from '../common';
+import { bindFloatingDetailCard, el, fieldControl, inputField, setFloatingDetailGuideExpanded, toast } from '../common';
 import { builtinCatalog, findGift, giftDisplayKey, matchesGiftSearch, sortGiftsByUsage } from '../../gifts/catalog';
 import { formatValue } from '../../format';
 import {
@@ -669,12 +669,12 @@ export function mountConfig(root: HTMLElement): void {
     updateTrainingToggle();
     const lesson = guideDismissed ? null : activeTutorialLesson();
     root.querySelectorAll<HTMLElement>('.attribute-card').forEach((card) => {
-      card.classList.remove('is-guide-expanded');
+      setFloatingDetailGuideExpanded(card, false);
     });
     if (!editorOpen && (lesson === 'enable' || lesson === 'output')) {
-      (root.querySelector<HTMLElement>('.guide-attribute-card')
-        ?? root.querySelector<HTMLElement>('.attribute-card'))
-        ?.classList.add('is-guide-expanded');
+      const guideCard = root.querySelector<HTMLElement>('.guide-attribute-card')
+        ?? root.querySelector<HTMLElement>('.attribute-card');
+      if (guideCard) setFloatingDetailGuideExpanded(guideCard, true);
     }
     if (guideDismissed) return;
     if (!lesson) return;
@@ -690,7 +690,8 @@ export function mountConfig(root: HTMLElement): void {
         guideDismissed = true;
         editorGuideEnabled = false;
         forcedTutorialLesson = null;
-        root.querySelector<HTMLElement>('.attribute-card.is-guide-expanded')?.classList.remove('is-guide-expanded');
+        const guideCard = root.querySelector<HTMLElement>('.attribute-card.is-guide-expanded');
+        if (guideCard) setFloatingDetailGuideExpanded(guideCard, false);
         state.settings.showTutorial = false;
         save();
         activeEditorWorkspace?.setTrainingVisible(false);
@@ -1295,7 +1296,7 @@ export function mountConfig(root: HTMLElement): void {
       state.settings.showTutorial = false;
       guideDismissed = true;
       forcedTutorialLesson = null;
-      card.classList.remove('is-guide-expanded');
+      setFloatingDetailGuideExpanded(card, false);
       activeGuide?.dispose();
       activeGuide = null;
       save();

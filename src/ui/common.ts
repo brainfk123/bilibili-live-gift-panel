@@ -43,6 +43,20 @@ export function toast(message: string, root: HTMLElement): void {
   setTimeout(() => t.remove(), 2500);
 }
 
+interface FloatingDetailController {
+  lockDirection: () => void;
+  releaseDirection: () => void;
+}
+
+const floatingDetailControllers = new WeakMap<HTMLElement, FloatingDetailController>();
+
+export function setFloatingDetailGuideExpanded(card: HTMLElement, expanded: boolean): void {
+  card.classList.toggle('is-guide-expanded', expanded);
+  const controller = floatingDetailControllers.get(card);
+  if (expanded) controller?.lockDirection();
+  else controller?.releaseDirection();
+}
+
 export function bindFloatingDetailCard(
   card: HTMLElement,
   cover: HTMLElement,
@@ -51,8 +65,11 @@ export function bindFloatingDetailCard(
   const panelWidth = options.panelWidth ?? 560;
   const estimatedPanelHeight = options.estimatedPanelHeight ?? 420;
   card.style.setProperty('--hover-detail-panel-width', `${panelWidth}px`);
+  let lockedAbove: boolean | null = card.className.split(/\s+/).includes('is-detail-persisted')
+    ? card.className.split(/\s+/).includes('is-detail-above')
+    : null;
 
-  const position = (): void => {
+  const position = (lockDirection = false): void => {
     if (typeof card.getBoundingClientRect !== 'function') return;
     const rect = card.getBoundingClientRect();
     const viewportWidth = globalThis.innerWidth || 1024;
@@ -70,7 +87,21 @@ export function bindFloatingDetailCard(
     const coverRect = cover.getBoundingClientRect();
     if (coverRect.height > 0) card.style.setProperty('--hover-detail-cover-height', `${coverRect.height}px`);
     const verticalThreshold = Math.min(estimatedPanelHeight, viewportHeight * .52);
-    card.classList.toggle('is-detail-above', viewportHeight - rect.bottom < verticalThreshold && rect.top > verticalThreshold);
+    const shouldOpenAbove = viewportHeight - rect.bottom < verticalThreshold && rect.top > verticalThreshold;
+    if (lockedAbove === null) {
+      card.classList.toggle('is-detail-above', shouldOpenAbove);
+      if (lockDirection) lockedAbove = shouldOpenAbove;
+    } else {
+      card.classList.toggle('is-detail-above', lockedAbove);
+    }
+  };
+
+  const keepsDetailOpen = (): boolean => card.className.split(/\s+/).some((className) => (
+    className === 'is-guide-expanded' || className === 'is-detail-persisted'
+  ));
+
+  const releaseDirection = (): void => {
+    if (!keepsDetailOpen()) lockedAbove = null;
   };
 
   const resetTilt = (): void => {
@@ -80,16 +111,17 @@ export function bindFloatingDetailCard(
     card.style.setProperty('--hover-card-glow-y', '20%');
   };
 
-  card.onpointerenter = position;
+  card.onpointerenter = () => position(true);
   card.onpointerdown = (event) => {
     if (event.pointerType === 'mouse') card.classList.add('is-pointer-focus');
   };
   card.onkeydown = () => card.classList.remove('is-pointer-focus');
-  card.onfocus = position;
-  (card as any).onfocusin = position;
+  card.onfocus = () => position(true);
+  (card as any).onfocusin = () => position(true);
   (card as any).onfocusout = (event: FocusEvent) => {
     if (!(event.relatedTarget instanceof Node) || !card.contains(event.relatedTarget)) {
       card.classList.remove('is-pointer-focus');
+      releaseDirection();
     }
   };
   card.onpointermove = (event) => {
@@ -113,6 +145,7 @@ export function bindFloatingDetailCard(
   card.onpointerleave = () => {
     resetTilt();
     options.onPointerLeave?.();
+    releaseDirection();
   };
   cover.onclick = () => {
     if (typeof globalThis.matchMedia === 'function' && globalThis.matchMedia('(hover: none)').matches) {
@@ -120,6 +153,10 @@ export function bindFloatingDetailCard(
       card.focus();
     }
   };
+  floatingDetailControllers.set(card, {
+    lockDirection: () => position(true),
+    releaseDirection,
+  });
   resetTilt();
   if (card.className.split(/\s+/).includes('is-detail-persisted')) {
     card.classList.add('is-detail-restoring');

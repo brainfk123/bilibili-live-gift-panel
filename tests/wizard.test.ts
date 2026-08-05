@@ -2280,6 +2280,7 @@ describe('single-page configuration rendering', () => {
     const interactiveCard = card as TestElement & {
       getBoundingClientRect?: () => { left: number; top: number; right: number; bottom: number; width: number; height: number };
       onpointerenter?: () => void;
+      onpointerleave?: () => void;
       onpointermove?: (event: { pointerType: string; clientX: number; clientY: number }) => void;
       onpointerdown?: (event: { pointerType: string }) => void;
       onkeydown?: () => void;
@@ -2295,6 +2296,16 @@ describe('single-page configuration rendering', () => {
     expect(card?.className.split(' ')).toContain('is-pointer-focus');
     interactiveCard.onkeydown?.();
     expect(card?.className.split(' ')).not.toContain('is-pointer-focus');
+
+    interactiveCard.onpointerleave?.();
+    interactiveCard.getBoundingClientRect = () => ({ left: 400, top: 600, right: 600, bottom: 700, width: 200, height: 100 });
+    interactiveCard.onpointerenter?.();
+    expect(card?.className.split(' ')).toContain('is-detail-above');
+    card?.classList.add('is-guide-expanded');
+    interactiveCard.onpointerleave?.();
+    interactiveCard.getBoundingClientRect = () => ({ left: 400, top: 100, right: 600, bottom: 200, width: 200, height: 100 });
+    interactiveCard.onpointerenter?.();
+    expect(card?.className.split(' ')).toContain('is-detail-above');
 
     const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
     expect(configCss).toContain('perspective(1100px)');
