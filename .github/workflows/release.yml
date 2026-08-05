@@ -100,7 +100,9 @@ jobs:
             } catch {
               Write-Host "No hosted changelog exists for $previousTag; reading its bundled changelog from Git history."
               $previousChangelogJson = git show "${previousTag}:gift-panel-changelog.json" 2>$null
-              if ($LASTEXITCODE -eq 0 -and $previousChangelogJson) {
+              $gitShowExitCode = $LASTEXITCODE
+              $global:LASTEXITCODE = 0
+              if ($gitShowExitCode -eq 0 -and $previousChangelogJson) {
                 $previousChangelog = $previousChangelogJson | ConvertFrom-Json
                 $releaseHistory = @($previousChangelog.releases)
               } else {
