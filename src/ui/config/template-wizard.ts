@@ -21,7 +21,7 @@ export interface GameplayTemplateWizardOptions {
   existingAttributeNames: string[];
   onCreate: (result: GameplayTemplateBuildResult) => Promise<void>;
   onBlank: () => void;
-  onClose?: () => void;
+  onClose?: (reason: 'cancel' | 'blank' | 'created') => void;
 }
 
 export interface GameplayTemplateWizard {
@@ -52,18 +52,18 @@ export function createGameplayTemplateWizard(options: GameplayTemplateWizardOpti
   let visibleGiftCount = GIFT_PAGE_SIZE;
   let saving = false;
 
-  const close = (): void => {
+  const close = (reason: 'cancel' | 'blank' | 'created' = 'cancel'): void => {
     overlay.remove();
-    options.onClose?.();
+    options.onClose?.(reason);
   };
-  closeButton.onclick = close;
+  closeButton.onclick = () => close('cancel');
   overlay.onpointerdown = (event) => {
     overlay.dataset.pointerOutside = String(event.target === overlay);
   };
   overlay.onclick = (event) => {
     const shouldClose = overlay.dataset.pointerOutside === 'true' && event.target === overlay;
     overlay.dataset.pointerOutside = 'false';
-    if (shouldClose) close();
+    if (shouldClose) close('cancel');
   };
 
   function setMessage(text = '', tone: 'error' | 'normal' = 'normal'): void {
@@ -131,7 +131,7 @@ export function createGameplayTemplateWizard(options: GameplayTemplateWizardOpti
     nextButton.textContent = '后台校验中…';
     try {
       await options.onCreate(result);
-      close();
+      close('created');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '创建失败，请检查配置后重试', 'error');
       saving = false;
@@ -206,11 +206,11 @@ export function createGameplayTemplateWizard(options: GameplayTemplateWizardOpti
     ]);
     const grid = el('div', { class: 'gameplay-template-grid' });
     const blankCard = el('button', {
-      class: 'gameplay-template-card template-blank-card',
+      class: 'gameplay-template-card template-blank-card guide-blank-template',
       type: 'button',
       ariaLabel: '从空白创建属性',
     } as any) as HTMLButtonElement;
-    blankCard.onclick = () => { close(); options.onBlank(); };
+    blankCard.onclick = () => { close('blank'); options.onBlank(); };
     blankCard.append(
       el('span', { class: 'template-blank-preview', ariaHidden: 'true' } as any, [
         el('span', { text: '+' }),
@@ -461,7 +461,7 @@ export function createGameplayTemplateWizard(options: GameplayTemplateWizardOpti
   dialog.append(header, progress, body, footer);
   overlay.append(dialog);
   render();
-  return { element: overlay, close };
+  return { element: overlay, close: () => close('cancel') };
 }
 
 function renderParameter(parameter: TemplateParameterDefinition, input: GameplayTemplateInput): HTMLElement {

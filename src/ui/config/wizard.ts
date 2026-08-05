@@ -18,12 +18,14 @@ export interface WizardChecklistStep {
 
 export interface TutorialEditorProgress {
   open: boolean;
+  templateOpen?: boolean;
   isNew?: boolean;
   basicsConfigured?: boolean;
   giftCount?: number;
   giftPreviewed?: boolean;
   timerCount?: number;
   timerPreviewed?: boolean;
+  outputPreviewed?: boolean;
 }
 
 export interface TutorialLessonDefinition {
@@ -38,19 +40,21 @@ export interface TutorialLessonState extends TutorialLessonDefinition {
   active: boolean;
 }
 
-export const TUTORIAL_VERSION = 2;
+export const TUTORIAL_VERSION = 3;
 
 export const TUTORIAL_LESSONS: TutorialLessonDefinition[] = [
-  { id: 'room', label: '连接直播间', summary: '后台连接成功后才能收到直播间礼物。' },
-  { id: 'attribute', label: '创建加班时间', summary: '创建一个由规则改写的数值属性。' },
+  { id: 'room', label: '连接直播间', summary: '填写房间号并确认托盘后台已经连接。' },
+  { id: 'attribute', label: '打开创建中心', summary: '从配置页进入模板与空白创建入口。' },
+  { id: 'template', label: '从空白开始练习', summary: '模板适合快速开播；空白创建可以逐项学会完整功能。' },
   { id: 'basics', label: '认识属性与显示', summary: '名称和值参与计算，显示格式只改变 OBS 中的样子。', section: 'overview' },
   { id: 'gift', label: '选择礼物', summary: '一个属性可以绑定任意数量的礼物。', section: 'rules' },
   { id: 'rule', label: '配置并模拟规则', summary: '收到单个礼物时，后台把规则结果保存为属性新值。', section: 'rules' },
-  { id: 'timer', label: '定时减少与条件', summary: '定时器不依赖礼物，并可在条件满足时执行。', section: 'timers' },
   { id: 'preset', label: '保存规则预设', summary: '预设保存计算方法，之后可复用到其他礼物。', section: 'rules' },
+  { id: 'timer', label: '定时减少与条件', summary: '定时器不依赖礼物，并可在条件满足时执行。', section: 'timers' },
+  { id: 'appearance', label: '确认 OBS 外观', summary: '预览皮肤、默认播报和专属链接，不会改变后台计算。', section: 'output' },
   { id: 'save', label: '保存可用配置', summary: '后台校验全部规则后再写入本机配置。', section: 'output' },
-  { id: 'enable', label: '启用后台规则', summary: '属性卡片上的开关决定后台是否真正执行。' },
-  { id: 'output', label: '接入 OBS 并后台运行', summary: 'OBS 只负责显示；关闭页面后托盘后台继续计算。' },
+  { id: 'enable', label: '展开卡片并启用', summary: '悬停属性卡片查看详情，再决定哪些规则和定时器生效。' },
+  { id: 'output', label: '复制链接并后台运行', summary: 'OBS 只负责显示；关闭配置页后托盘后台继续计算。' },
 ];
 
 export function getWizardProgress(state: Pick<AppState, 'roomId' | 'attributes' | 'rules'>): WizardProgress {
@@ -88,7 +92,8 @@ export function isTutorialLessonComplete(
 ): boolean {
   if (recordedCompletion(state, lesson)) return true;
   if (lesson === 'room') return connected;
-  if (lesson === 'attribute') return state.attributes.length > 0 || editor.open;
+  if (lesson === 'attribute') return state.attributes.length > 0 || editor.templateOpen === true || editor.open;
+  if (lesson === 'template') return state.attributes.length > 0 || editor.open;
   if (lesson === 'basics') {
     if (editor.open && editor.isNew) return editor.basicsConfigured === true;
     return state.attributes.length > 0;
@@ -100,6 +105,7 @@ export function isTutorialLessonComplete(
     return state.timerRules.length > 0 || editor.timerPreviewed === true;
   }
   if (lesson === 'preset') return state.formulaPresets.length > 0;
+  if (lesson === 'appearance') return state.attributes.length > 0 || editor.outputPreviewed === true;
   if (lesson === 'save') return state.attributes.length > 0 && state.rules.length > 0;
   if (lesson === 'enable') return state.rules.some((rule) => rule.enabled !== false);
   return false;

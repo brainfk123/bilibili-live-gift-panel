@@ -30,14 +30,20 @@ const GUIDE_COPY: Record<TutorialLesson, GuideCopy> = {
   },
   attribute: {
     targets: ['.guide-attribute-add'],
-    title: '添加第一个属性',
-    body: '属性是一份会被礼物规则和定时器修改的数据。先打开属性工作台。',
-    action: '添加属性',
+    title: '打开属性创建中心',
+    body: '这里既有可以直接开播的玩法模板，也能从空白逐项配置。先打开创建中心。',
+    action: '打开创建中心',
+  },
+  template: {
+    targets: ['.guide-blank-template'],
+    title: '从空白创建，完整练习一次',
+    body: '玩法模板适合快速开始；这次选择“从空白创建”，进入属性工作台学习每一项功能。',
+    action: '从空白创建',
   },
   basics: {
     targets: ['.guide-overtime-template'],
     title: '套用加班机模板',
-    body: '模板会填入“加班时间”、初始值 0 和计时器格式。名称和值参与计算，显示格式只影响 OBS。',
+    body: '工作台里的训练模板只填写“加班时间”、起始值和计时器格式，后面的规则仍由你亲手配置。',
     action: '使用模板',
   },
   gift: {
@@ -52,17 +58,23 @@ const GUIDE_COPY: Record<TutorialLesson, GuideCopy> = {
     body: '选择增加、按价格增加、设为固定值或随机增加，再模拟收到 1 个礼物。模拟只预览，不改真实数值。',
     action: '模拟一次',
   },
+  preset: {
+    targets: ['.guide-save-preset'],
+    title: '把这条规则保存为预设',
+    body: '“保存预设”位于高级规则中，只保存计算方法。以后配置其他礼物时可以直接套用。',
+    action: '保存预设',
+  },
   timer: {
     targets: ['.guide-timer-simulator', '.guide-add-timer'],
     title: '让时间自动减少',
-    body: '定时器由托盘后台独立运行；条件可限制“只有加班时间大于 0 时”才执行。先添加，再模拟一次。',
+    body: '添加每秒 -1 的定时器，并设置“加班时间大于 0”时才运行。它由托盘后台独立执行。',
     action: '配置定时器',
   },
-  preset: {
-    targets: ['.guide-save-preset'],
-    title: '保存可复用的规则',
-    body: '预设保存计算方法。以后配置其他礼物时，可以一键套用，不必重新输入。',
-    action: '保存预设',
+  appearance: {
+    targets: ['.guide-output-confirm'],
+    title: '检查 OBS 中会显示什么',
+    body: '这里设置默认播报、数值状态和当前属性的皮肤。它们只改变画面，不会改变后台数值。',
+    action: '确认输出预览',
   },
   save: {
     targets: ['.guide-attribute-save'],
@@ -72,14 +84,14 @@ const GUIDE_COPY: Record<TutorialLesson, GuideCopy> = {
   },
   enable: {
     targets: ['.guide-rule-toggle'],
-    title: '启用真正的礼物响应',
-    body: '卡片开关控制后台是否执行这条规则。关闭的规则仍会保留，但不会改变属性，也不会出现在 OBS 中。',
+    title: '在悬浮详情中启用规则',
+    body: '属性卡片平时只显示关键信息；悬停或键盘聚焦后会展开详情。打开开关，后台才会执行这条礼物规则。',
     action: '启用规则',
   },
   output: {
     targets: ['.guide-obs-copy'],
     title: '把面板放进 OBS',
-    body: '复制链接并添加为 OBS“浏览器”来源。之后可关闭配置页；托盘后台会继续收礼、计算和更新 OBS。',
+    body: '从展开的属性卡片复制专属链接，添加为 OBS“浏览器”来源。之后可以关闭配置页，托盘后台会继续收礼、计算和更新 OBS。',
     action: '复制 OBS 链接',
   },
 };

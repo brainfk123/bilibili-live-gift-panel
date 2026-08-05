@@ -316,6 +316,8 @@ describe('wizard progress', () => {
     expect(getTutorialLesson(tutorialState, false)).toBe('room');
     expect(getTutorialLesson(tutorialState, true)).toBe('attribute');
 
+    const template: TutorialEditorProgress = { open: false, templateOpen: true, isNew: true };
+    expect(getTutorialLesson(tutorialState, true, template)).toBe('template');
     const editor: TutorialEditorProgress = { open: true, isNew: true };
     expect(getTutorialLesson(tutorialState, true, editor)).toBe('basics');
     editor.basicsConfigured = true;
@@ -323,13 +325,15 @@ describe('wizard progress', () => {
     editor.giftCount = 1;
     expect(getTutorialLesson(tutorialState, true, editor)).toBe('rule');
     editor.giftPreviewed = true;
-    expect(getTutorialLesson(tutorialState, true, editor)).toBe('timer');
-    editor.timerPreviewed = true;
     expect(getTutorialLesson(tutorialState, true, editor)).toBe('preset');
 
     tutorialState.formulaPresets.push({
       id: 'preset-1', name: '每元加时', context: 'gift', formula: '加班时间+price/1000*60', sourceAttributeName: '加班时间',
     });
+    expect(getTutorialLesson(tutorialState, true, editor)).toBe('timer');
+    editor.timerPreviewed = true;
+    expect(getTutorialLesson(tutorialState, true, editor)).toBe('appearance');
+    editor.outputPreviewed = true;
     expect(getTutorialLesson(tutorialState, true, editor)).toBe('save');
 
     tutorialState.attributes.push({
@@ -1214,6 +1218,16 @@ describe('single-page configuration rendering', () => {
     expect(configCss).toMatch(/\.formula-help \{[^}]*margin: 16px 0 14px;/);
   });
 
+  it('keeps tutorial spotlights above template and attribute workspaces', () => {
+    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+
+    expect(configCss).toContain('.config-root .tour-prototype.is-modal-step { z-index: 170; }');
+    expect(configCss).toContain('.config-root .tour-prototype.is-modal-step .tour-focus { z-index: 171; }');
+    expect(configCss).toContain('.config-root .tour-prototype.is-modal-step .tour-bubble { z-index: 172; }');
+    expect(configCss).toContain('.config-root .template-wizard-overlay { z-index: 145;');
+    expect(configCss).toMatch(/\.config-root \.overlay\.attribute-overlay \{[\s\S]*?z-index: 148;/);
+  });
+
   it('keeps expanded cards centered and scene editor fieldsets aligned', () => {
     const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
     const configSource = readFileSync(new URL('../src/ui/config/config.ts', import.meta.url), 'utf8');
@@ -1237,8 +1251,11 @@ describe('single-page configuration rendering', () => {
     roomInput.oninput?.();
     mockedRuntimeState = 'connected';
     await findByText(root, '连接')?.onclick?.();
-    expect(textOf(root)).toContain('添加第一个属性');
-    findByText(root, '添加属性')?.onclick?.();
+    expect(textOf(root)).toContain('打开属性创建中心');
+    findByText(root, '打开创建中心')?.onclick?.();
+    expect(root.querySelector('.template-wizard-overlay')).not.toBeNull();
+    expect(textOf(root)).toContain('从空白创建，完整练习一次');
+    (root.querySelector('.guide-blank-template') as TestElement | null)?.onclick?.();
     expect(root.querySelector('.attribute-modal')).not.toBeNull();
     expect(textOf(root)).toContain('套用加班机模板');
 
@@ -1248,24 +1265,24 @@ describe('single-page configuration rendering', () => {
     root.querySelector('.gift-choice')?.onclick?.();
     root.querySelector('.guide-confirm-gifts')?.onclick?.();
     (root.querySelector('.guide-rule-simulator') as TestElement | null)?.onclick?.();
-    await vi.waitFor(() => expect(textOf(root)).toContain('让时间自动减少'));
-    const activeWorkspaceTab = root.querySelectorAll('.attribute-workbench-tab')
-      .find((tab) => tab.className.split(' ').includes('is-active'));
-    expect(activeWorkspaceTab).toBeDefined();
-    expect(textOf(activeWorkspaceTab!)).toContain('礼物规则');
-    expect(textOf(root.querySelector('.formula-preview')!)).toContain('已模拟 1 个');
-    root.querySelectorAll('.attribute-workbench-tab')
-      .find((tab) => textOf(tab).includes('定时器'))?.onclick?.();
-
-    findByText(root, '+ 添加定时器')?.onclick?.();
-    (root.querySelector('.guide-timer-simulator') as TestElement | null)?.onclick?.();
-    await vi.waitFor(() => expect(textOf(root)).toContain('保存可复用的规则'));
-
+    await vi.waitFor(() => expect(textOf(root)).toContain('把这条规则保存为预设'));
     const advancedRule = root.querySelector('.rule-advanced-settings') as TestElement & { open?: boolean };
     expect(advancedRule.open).toBe(true);
     expect(advancedRule.querySelector('.guide-save-preset')).not.toBeNull();
     (root.querySelector('.guide-save-preset') as TestElement | null)?.onclick?.();
     await findByText(root, '保存')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(root)).toContain('让时间自动减少'));
+    const activeWorkspaceTab = root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => tab.className.split(' ').includes('is-active'));
+    expect(activeWorkspaceTab).toBeDefined();
+    expect(textOf(activeWorkspaceTab!)).toContain('定时器');
+    expect(textOf(root.querySelector('.formula-preview')!)).toContain('已模拟 1 个');
+
+    findByText(root, '+ 添加定时器')?.onclick?.();
+    (root.querySelector('.guide-timer-simulator') as TestElement | null)?.onclick?.();
+    await vi.waitFor(() => expect(textOf(root)).toContain('检查 OBS 中会显示什么'));
+    expect(root.querySelector('.guide-output-confirm')).not.toBeNull();
+    (root.querySelector('.guide-output-confirm') as TestElement | null)?.onclick?.();
     await vi.waitFor(() => expect(textOf(root)).toContain('保存并交给后台校验'));
     findByText(root, '创建属性')?.onclick?.();
 

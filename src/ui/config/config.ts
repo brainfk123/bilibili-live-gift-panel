@@ -557,6 +557,10 @@ export function mountConfig(root: HTMLElement): void {
       state.settings.showTutorial = true;
       save();
       overlay.remove();
+      if (lesson === 'template') {
+        openGameplayTemplateWizard();
+        return;
+      }
       if (sectionForTutorialLesson(lesson) !== 'overview' || ['basics'].includes(lesson)) {
         if (!editorOpen) openAttributeEditor(state.attributes.length > 0 ? 0 : undefined);
         else refreshEditorTutorial();
@@ -964,14 +968,7 @@ export function mountConfig(root: HTMLElement): void {
       sectionHeading('互动逻辑', '属性与礼物规则', '一个属性可以被多个礼物影响；连送 N 个会按单个礼物连续执行 N 次规则。'),
     );
     const addButton = el('button', { class: 'btn guide-attribute-add', type: 'button', text: '+ 添加属性' }) as HTMLButtonElement;
-    addButton.onclick = () => {
-      const lesson = activeTutorialLesson();
-      if (!guideDismissed && lesson === 'attribute') {
-        openAttributeEditor();
-        return;
-      }
-      openGameplayTemplateWizard();
-    };
+    addButton.onclick = openGameplayTemplateWizard;
     headingRow.append(addButton);
     section.append(headingRow);
 
@@ -991,14 +988,25 @@ export function mountConfig(root: HTMLElement): void {
     activeGuide?.dispose();
     activeGuide = null;
     root.querySelector('.template-wizard-overlay')?.remove();
+    const lessonBeforeOpen = activeTutorialLesson();
     const catalog = buildGiftPickerCatalog(state, roomGiftCatalog);
     editorOpen = true;
+    editorGuideEnabled = !guideDismissed && (lessonBeforeOpen === 'attribute' || forcedTutorialLesson !== null);
+    if (editorGuideEnabled) {
+      editorTutorialProgress = { open: false, templateOpen: true, isNew: true };
+    }
     const wizard = createGameplayTemplateWizard({
       gifts: catalog.gifts,
       existingAttributeNames: state.attributes.map((attribute) => attribute.name),
-      onBlank: () => openAttributeEditor(),
-      onClose: () => {
+      onBlank: () => {
+        if (forcedTutorialLesson === 'template') forcedTutorialLesson = null;
+        openAttributeEditor();
+      },
+      onClose: (reason) => {
+        if (reason === 'blank') return;
         editorOpen = false;
+        editorGuideEnabled = false;
+        editorTutorialProgress = { open: false };
         renderGuide();
       },
       onCreate: async (result) => {
@@ -1006,6 +1014,7 @@ export function mountConfig(root: HTMLElement): void {
       },
     });
     root.append(wizard.element);
+    renderGuide();
   }
 
   async function createFromGameplayTemplate(result: GameplayTemplateBuildResult): Promise<void> {
@@ -1947,7 +1956,7 @@ export function mountConfig(root: HTMLElement): void {
     const lessonBeforeOpen = activeTutorialLesson();
     editorOpen = true;
     editorGuideEnabled = !guideDismissed && (
-      (index === undefined && lessonBeforeOpen === 'attribute')
+      (index === undefined && (lessonBeforeOpen === 'attribute' || lessonBeforeOpen === 'template'))
       || (forcedTutorialLesson !== null && TUTORIAL_LESSONS.some((lesson) => (
         lesson.id === forcedTutorialLesson && lesson.section
       )))
@@ -2990,14 +2999,25 @@ export function mountConfig(root: HTMLElement): void {
       giftDrawer,
     );
 
+    const confirmOutputPreviewButton = el('button', {
+      class: 'btn guide-output-confirm',
+      type: 'button',
+      text: '确认输出预览',
+    }) as HTMLButtonElement;
+    confirmOutputPreviewButton.onclick = () => {
+      editorTutorialProgress.outputPreviewed = true;
+      refreshEditorTutorial();
+      toast('输出外观已确认', root);
+    };
     const outputLessonCard = el('div', { class: 'workbench-lesson-card' }, [
         el('span', { class: 'workbench-lesson-icon', text: '04' }),
         el('div', {}, [
-          el('strong', { text: '计算留在后台，页面各司其职' }),
-          el('p', { text: '关闭配置页和 OBS 都不会停止规则；只有退出托盘后台才会停止接收礼物。' }),
+          el('strong', { text: '先确认 OBS 中会显示什么' }),
+          el('p', { text: '默认播报、数值状态和皮肤只改变画面；礼物规则与定时计算仍留在托盘后台。' }),
         ]),
+        confirmOutputPreviewButton,
     ]);
-    outputLessonCard.dataset.tutorialLesson = 'save';
+    outputLessonCard.dataset.tutorialLesson = 'appearance';
     const attributeThemeControl = createDisplayThemeControl(
       displayConfig.themeId ?? state.settings.defaultDisplayThemeId,
       (themeId) => { displayConfig.themeId = themeId; },

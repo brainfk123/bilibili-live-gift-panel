@@ -55,7 +55,7 @@ describe('storage', () => {
     expect(loaded.roomId).toBe('2145');
     expect(loaded.attributes[0].value).toBe(3600);
     expect(loaded.rules).toHaveLength(1);
-    expect(loaded.settings.tutorialVersion).toBe(2);
+    expect(loaded.settings.tutorialVersion).toBe(3);
     expect(loaded.settings.tutorialCompletedLessons).toEqual(['room', 'attribute']);
     expect(loaded.settings.trainingCompletedTopics).toEqual(['blind-box', 'obs-no-change']);
     expect(loaded.settings.lastSeenChangelogVersion).toBe('0.2.0');
@@ -120,7 +120,7 @@ describe('storage', () => {
     expect(loaded.settings.giftView).toBe('list');
     expect(loaded.settings.panelOpacity).toBe(55);
     expect(loaded.settings.showTutorial).toBe(true);
-    expect(loaded.settings.tutorialVersion).toBe(2);
+    expect(loaded.settings.tutorialVersion).toBe(3);
     expect(loaded.settings.tutorialCompletedLessons).toEqual([]);
     expect(loaded.settings.trainingCompletedTopics).toEqual([]);
     expect(consumeConfigMigrationRequired()).toBe(true);

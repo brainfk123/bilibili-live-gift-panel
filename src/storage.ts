@@ -61,7 +61,7 @@ export const defaultState = (): AppState => ({
     panelOpacity: 55,
     defaultDisplayThemeId: 'glass',
     showTutorial: true,
-    tutorialVersion: 2,
+    tutorialVersion: 3,
     tutorialCompletedLessons: [],
     trainingCompletedTopics: [],
     lastSeenChangelogVersion: '',
@@ -257,14 +257,14 @@ function normalizeState(parsed: Partial<AppState>): AppState {
   const showTutorial = parsed.settings?.showTutorial ?? !setupComplete;
   const tutorialCompletedLessons = Array.isArray(parsed.settings?.tutorialCompletedLessons)
     ? parsed.settings.tutorialCompletedLessons.filter((lesson): lesson is AppState['settings']['tutorialCompletedLessons'][number] => (
-      ['room', 'attribute', 'basics', 'gift', 'rule', 'timer', 'preset', 'save', 'enable', 'output'].includes(String(lesson))
+      ['room', 'attribute', 'template', 'basics', 'gift', 'rule', 'preset', 'timer', 'appearance', 'save', 'enable', 'output'].includes(String(lesson))
     ))
     : [];
   const settings = {
     ...base.settings,
     ...(parsed.settings ?? {}),
     showTutorial,
-    tutorialVersion: 2,
+    tutorialVersion: 3,
     tutorialCompletedLessons: Array.from(new Set(tutorialCompletedLessons)),
     trainingCompletedTopics: normalizeTrainingTopicIds(parsed.settings?.trainingCompletedTopics),
   };

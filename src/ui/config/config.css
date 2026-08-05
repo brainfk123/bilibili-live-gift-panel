@@ -700,9 +700,9 @@ body.config-mode::-webkit-scrollbar-corner,
   z-index: 80;
   pointer-events: none;
 }
-.config-root .tour-prototype.is-modal-step { z-index: 120; }
-.config-root .tour-prototype.is-modal-step .tour-focus { z-index: 121; }
-.config-root .tour-prototype.is-modal-step .tour-bubble { z-index: 122; }
+.config-root .tour-prototype.is-modal-step { z-index: 170; }
+.config-root .tour-prototype.is-modal-step .tour-focus { z-index: 171; }
+.config-root .tour-prototype.is-modal-step .tour-bubble { z-index: 172; }
 .config-root .tour-prototype.is-dismissed .tour-focus,
 .config-root .tour-prototype.is-dismissed .tour-bubble,
 .config-root .tour-prototype.is-dismissed .tour-rail { display: none; }

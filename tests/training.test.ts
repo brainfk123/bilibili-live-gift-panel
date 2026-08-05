@@ -3,7 +3,7 @@ import { MAIN_LESSON_DETAILS, matchesTrainingTopic, normalizeTrainingTopicIds, T
 
 describe('training catalog', () => {
   it('covers the complete main tutorial with concrete actions and outcomes', () => {
-    expect(Object.keys(MAIN_LESSON_DETAILS)).toHaveLength(10);
+    expect(Object.keys(MAIN_LESSON_DETAILS)).toHaveLength(12);
     for (const detail of Object.values(MAIN_LESSON_DETAILS)) {
       expect(detail.steps.length).toBeGreaterThanOrEqual(3);
       expect(detail.outcome.length).toBeGreaterThan(10);

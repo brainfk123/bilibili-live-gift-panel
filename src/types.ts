@@ -127,11 +127,13 @@ export type FormulaPresetContext = 'gift' | 'timer';
 export type TutorialLesson =
   | 'room'
   | 'attribute'
+  | 'template'
   | 'basics'
   | 'gift'
   | 'rule'
-  | 'timer'
   | 'preset'
+  | 'timer'
+  | 'appearance'
   | 'save'
   | 'enable'
   | 'output';

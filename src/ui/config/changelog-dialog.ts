@@ -133,13 +133,13 @@ function createVisual(type: ChangelogVisual): HTMLElement {
   return el('figure', { class: 'changelog-visual is-training' }, [
     el('figcaption', { text: '训练中心' }),
     el('div', { class: 'changelog-training-progress' }, [
-      el('strong', { text: '10/10' }),
+      el('strong', { text: '12/12' }),
       el('span', { text: '主线任务' }),
     ]),
     el('ol', {}, [
       el('li', { class: 'is-done', text: '连接直播间' }),
-      el('li', { class: 'is-done', text: '配置礼物规则' }),
-      el('li', { class: 'is-active', text: '加入 OBS' }),
+      el('li', { class: 'is-done', text: '从空白创建加班机' }),
+      el('li', { class: 'is-active', text: '预览并加入 OBS' }),
     ]),
   ]);
 }
