@@ -73,8 +73,8 @@ const GUIDE_COPY: Record<TutorialLesson, GuideCopy> = {
     task: '亲手选择一种规则方式，再点击页面里的“模拟收到 1 个”。',
   },
   preset: {
-    targets: ['.guide-save-preset'],
-    panelTargets: ['.rule-advanced-settings', '.selected-gift-rule'],
+    targets: ['.guide-preset-confirm', '.guide-save-preset'],
+    panelTargets: ['.formula-preset-name-dialog', '.rule-advanced-settings', '.selected-gift-rule'],
     title: '把这条规则保存为预设',
     body: '预设只保存计算方法，不会保存属性当前值，之后可快速套用到其他礼物。',
     observe: '看看高级规则里的表达式和已有预设胶囊。',
@@ -106,7 +106,7 @@ const GUIDE_COPY: Record<TutorialLesson, GuideCopy> = {
   },
   enable: {
     targets: ['.guide-rule-toggle'],
-    panelTargets: ['.guide-attribute-card'],
+    panelTargets: ['.guide-attribute-detail', '.guide-attribute-card'],
     title: '在悬浮详情中启用规则',
     body: '属性卡片平时只显示关键信息；悬停或键盘聚焦后会展开详情。打开开关，后台才会执行这条礼物规则。',
     observe: '看看展开卡片里的礼物规则和启用开关。',
@@ -114,7 +114,7 @@ const GUIDE_COPY: Record<TutorialLesson, GuideCopy> = {
   },
   output: {
     targets: ['.guide-obs-copy'],
-    panelTargets: ['.guide-attribute-card'],
+    panelTargets: ['.guide-attribute-detail', '.guide-attribute-card'],
     title: '把面板放进 OBS',
     body: '从展开的属性卡片复制专属链接，添加为 OBS“浏览器”来源。之后可以关闭配置页，托盘后台会继续收礼、计算和更新 OBS。',
     observe: '每个属性都有独立链接，一个链接只显示一个属性面板。',
@@ -189,13 +189,39 @@ function positionGuide(
 
   const width = Math.min(380, window.innerWidth - 32);
   bubble.style.width = `${width}px`;
-  const left = clamp(rect.left + rect.width / 2 - width / 2, 16, window.innerWidth - width - 16);
-  const above = rect.top - bubble.offsetHeight - 18;
-  const placeBelow = above < 16;
-  const below = Math.min(window.innerHeight - bubble.offsetHeight - 16, rect.bottom + 18);
-  bubble.classList.toggle('is-below', placeBelow);
-  bubble.style.left = `${left}px`;
-  bubble.style.top = `${Math.max(16, placeBelow ? below : above)}px`;
+  const height = bubble.offsetHeight;
+  const gap = 18;
+  const above = panelRect.top - height - gap;
+  const below = panelRect.bottom + gap;
+  const right = panelRect.right + gap;
+  const left = panelRect.left - width - gap;
+  const canPlaceAbove = above >= 16;
+  const canPlaceBelow = below + height <= window.innerHeight - 16;
+  const canPlaceRight = right + width <= window.innerWidth - 16;
+  const canPlaceLeft = left >= 16;
+  bubble.classList.remove('is-below', 'is-right', 'is-left');
+  if (canPlaceAbove || canPlaceBelow) {
+    const bubbleLeft = clamp(rect.left + rect.width / 2 - width / 2, 16, window.innerWidth - width - 16);
+    if (!canPlaceAbove) bubble.classList.add('is-below');
+    bubble.style.left = `${bubbleLeft}px`;
+    bubble.style.top = `${canPlaceAbove ? above : below}px`;
+  } else if (canPlaceRight || canPlaceLeft) {
+    const placeRight = canPlaceRight;
+    bubble.classList.add(placeRight ? 'is-right' : 'is-left');
+    bubble.style.left = `${placeRight ? right : left}px`;
+    bubble.style.top = `${clamp(
+      panelRect.top + panelRect.height / 2 - height / 2,
+      16,
+      window.innerHeight - height - 16,
+    )}px`;
+  } else {
+    const bubbleLeft = clamp(rect.left + rect.width / 2 - width / 2, 16, window.innerWidth - width - 16);
+    const targetAbove = rect.top - height - gap;
+    const placeBelow = targetAbove < 16;
+    if (placeBelow) bubble.classList.add('is-below');
+    bubble.style.left = `${bubbleLeft}px`;
+    bubble.style.top = `${Math.max(16, placeBelow ? Math.min(window.innerHeight - height - 16, rect.bottom + gap) : targetAbove)}px`;
+  }
   bubble.style.transform = 'none';
 }
 
@@ -219,6 +245,8 @@ export function renderSpotlightGuide(context: SpotlightGuideContext): SpotlightG
     ? '核对预览里的原值和新值，再点击“确认这次变化”。'
     : targetClasses.includes('guide-timer-preview-confirm')
       ? '核对本次是否执行以及原值和新值，再点击“确认这次变化”。'
+      : targetClasses.includes('guide-preset-confirm')
+        ? '输入预设名称，再点击弹窗里的“保存”。'
       : copy.task;
   bubble.append(
     el('div', { class: 'tour-bubble-eyebrow', text: `加班机训练 · ${lessonIndex + 1}/${TUTORIAL_LESSONS.length}` }),

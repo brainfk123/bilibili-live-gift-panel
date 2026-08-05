@@ -1305,6 +1305,10 @@ describe('single-page configuration rendering', () => {
     expect(advancedRule.open).toBe(true);
     expect(advancedRule.querySelector('.guide-save-preset')).not.toBeNull();
     (root.querySelector('.guide-save-preset') as TestElement | null)?.onclick?.();
+    const presetNameDialog = root.querySelector('.formula-preset-name-dialog') as TestElement | null;
+    expect(presetNameDialog).not.toBeNull();
+    expect(presetNameDialog?.querySelector('.guide-preset-confirm')).not.toBeNull();
+    expect(textOf(root.querySelector('.tour-bubble') as TestElement)).toContain('输入预设名称');
     await findByText(root, '保存')?.onclick?.();
     await vi.waitFor(() => expect(textOf(root)).toContain('让时间自动减少'));
     const activeWorkspaceTab = root.querySelectorAll('.attribute-workbench-tab')
@@ -1335,6 +1339,7 @@ describe('single-page configuration rendering', () => {
     expect(saved.rules[0].enabled).toBe(false);
 
     expect(root.querySelector('.attribute-card')?.className.split(' ')).toContain('is-guide-expanded');
+    expect(root.querySelector('.guide-attribute-detail')).not.toBeNull();
     (root.querySelector('.guide-rule-toggle') as TestElement | null)?.onclick?.();
     expect(textOf(root.querySelector('.tour-bubble') as TestElement)).toContain('托盘后台会继续收礼');
 

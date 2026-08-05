@@ -3536,6 +3536,19 @@ body.config-mode::-webkit-scrollbar-corner,
   bottom: auto;
   transform: translateX(-50%) rotate(225deg);
 }
+.config-root .tour-bubble.is-right::before {
+  top: 50%;
+  bottom: auto;
+  left: -6px;
+  transform: translateY(-50%) rotate(135deg);
+}
+.config-root .tour-bubble.is-left::before {
+  top: 50%;
+  right: -6px;
+  bottom: auto;
+  left: auto;
+  transform: translateY(-50%) rotate(-45deg);
+}
 
 @media (max-width: 900px) {
   .config-root .config-intro { align-items: stretch; flex-direction: column; }

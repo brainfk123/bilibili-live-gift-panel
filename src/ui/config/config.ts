@@ -1317,7 +1317,9 @@ export function mountConfig(root: HTMLElement): void {
       formulas,
       obsRow,
     ]);
-    const details = el('div', { class: 'attribute-card-details hover-detail-panel' }, [
+    const details = el('div', {
+      class: `attribute-card-details hover-detail-panel${isTutorialTarget ? ' guide-attribute-detail' : ''}`,
+    }, [
       el('div', { class: 'attribute-card-details-inner hover-detail-panel-inner' }, [detailsContent]),
     ]);
 
@@ -2141,10 +2143,13 @@ export function mountConfig(root: HTMLElement): void {
         : formula.trim()
     );
 
-    const shouldConfirmTutorialPreview = (lesson: 'rule' | 'timer'): boolean => (
+    const isActiveEditorTutorialLesson = (lesson: TutorialLesson): boolean => (
       !guideDismissed
       && (editorGuideEnabled || forcedTutorialLesson === lesson)
       && activeTutorialLesson() === lesson
+    );
+    const shouldConfirmTutorialPreview = (lesson: 'rule' | 'timer'): boolean => (
+      isActiveEditorTutorialLesson(lesson)
     );
     const appendTutorialPreviewConfirmation = (
       preview: HTMLElement,
@@ -2189,9 +2194,16 @@ export function mountConfig(root: HTMLElement): void {
       const presetNameInput = inputField('预设名称', formulaNameInput.value.trim());
       presetNameInput.placeholder = '例如 按价格增加时间';
       const cancelButton = el('button', { class: 'btn ghost', type: 'button', text: '取消' }) as HTMLButtonElement;
-      const confirmButton = el('button', { class: 'btn', type: 'button', text: '保存' }) as HTMLButtonElement;
-      const close = (): void => nameOverlay.remove();
-      cancelButton.onclick = close;
+      const confirmButton = el('button', {
+        class: `btn${context === 'gift' ? ' guide-preset-confirm' : ''}`,
+        type: 'button',
+        text: '保存',
+      }) as HTMLButtonElement;
+      const close = (refreshGuide = true): void => {
+        nameOverlay.remove();
+        if (refreshGuide && isActiveEditorTutorialLesson('preset')) refreshEditorTutorial(false);
+      };
+      cancelButton.onclick = () => close();
       const commit = (): void => {
         if (confirmButton.disabled) return;
         void (async () => {
@@ -2212,7 +2224,7 @@ export function mountConfig(root: HTMLElement): void {
             await saveAndWait();
             if (context === 'gift') editorTutorialProgress.presetSaved = true;
             refreshFormulaPresetLists(context);
-            close();
+            close(false);
             refreshEditorTutorial();
             toast(result.created ? '规则预设已保存' : '同名规则预设已更新', root);
           } catch (error) {
@@ -2238,6 +2250,7 @@ export function mountConfig(root: HTMLElement): void {
       );
       nameOverlay.append(nameDialog);
       root.append(nameOverlay);
+      if (isActiveEditorTutorialLesson('preset')) refreshEditorTutorial(false);
       presetNameInput.focus();
     }
 
