@@ -697,7 +697,7 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .tour-prototype {
   position: fixed;
   inset: 0;
-  z-index: 80;
+  z-index: 130;
   pointer-events: none;
 }
 .config-root .tour-prototype.is-modal-step { z-index: 170; }
@@ -710,17 +710,17 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .tour-prototype.is-dismissed .tour-rail { display: none; }
 .config-root .tour-focus {
   position: fixed;
-  z-index: 81;
+  z-index: 131;
   border: 0;
   border-radius: 18px;
   background: transparent;
   box-shadow: 0 0 0 100vmax rgba(6, 8, 15, .72);
   pointer-events: none;
-  transition: left .18s ease, top .18s ease, width .18s ease, height .18s ease;
+  transition: none;
 }
 .config-root .tour-target-outline {
   position: fixed;
-  z-index: 82;
+  z-index: 132;
   min-width: 36px;
   min-height: 36px;
   border: 2px solid var(--accent);
@@ -728,11 +728,11 @@ body.config-mode::-webkit-scrollbar-corner,
   background: transparent;
   box-shadow: none;
   pointer-events: none;
-  transition: left .18s ease, top .18s ease, width .18s ease, height .18s ease;
+  transition: none;
 }
 .config-root .tour-bubble {
   position: fixed;
-  z-index: 92;
+  z-index: 133;
   max-height: calc(100vh - 32px);
   overflow: hidden;
   padding: 17px 18px 15px;
@@ -1864,6 +1864,12 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .hover-detail-card.is-detail-restoring::before,
 .config-root .hover-detail-card.is-detail-restoring > .hover-detail-cover,
 .config-root .hover-detail-card.is-detail-restoring .hover-detail-panel {
+  transition: none !important;
+}
+.config-root .hover-detail-card.is-guide-expanded,
+.config-root .hover-detail-card.is-guide-expanded::before,
+.config-root .hover-detail-card.is-guide-expanded > .hover-detail-cover,
+.config-root .hover-detail-card.is-guide-expanded .hover-detail-panel {
   transition: none !important;
 }
 .config-root .hover-detail-panel-inner {

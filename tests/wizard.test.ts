@@ -1248,12 +1248,14 @@ describe('single-page configuration rendering', () => {
   it('keeps tutorial spotlights above template and attribute workspaces', () => {
     const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
 
+    expect(configCss).toMatch(/\.config-root \.tour-prototype \{[\s\S]*?z-index: 130;/);
     expect(configCss).toContain('.config-root .tour-prototype.is-modal-step { z-index: 170; }');
     expect(configCss).toContain('.config-root .tour-prototype.is-modal-step .tour-focus { z-index: 171; }');
     expect(configCss).toContain('.config-root .tour-prototype.is-modal-step .tour-target-outline { z-index: 172; }');
     expect(configCss).toContain('.config-root .tour-prototype.is-modal-step .tour-bubble { z-index: 173; }');
-    expect(configCss).toMatch(/\.config-root \.tour-focus \{[\s\S]*?border: 0;[\s\S]*?box-shadow: 0 0 0 100vmax/);
-    expect(configCss).toMatch(/\.config-root \.tour-target-outline \{[\s\S]*?border: 2px solid var\(--accent\);[\s\S]*?box-shadow: none;/);
+    expect(configCss).toMatch(/\.config-root \.tour-focus \{[\s\S]*?border: 0;[\s\S]*?box-shadow: 0 0 0 100vmax[\s\S]*?transition: none;/);
+    expect(configCss).toMatch(/\.config-root \.tour-target-outline \{[\s\S]*?border: 2px solid var\(--accent\);[\s\S]*?box-shadow: none;[\s\S]*?transition: none;/);
+    expect(configCss).toMatch(/\.config-root \.hover-detail-card\.is-guide-expanded,[\s\S]*?\.config-root \.hover-detail-card\.is-guide-expanded \.hover-detail-panel \{[\s\S]*?transition: none !important;/);
     expect(configCss).toContain('.config-root .template-wizard-overlay { z-index: 145;');
     expect(configCss).toMatch(/\.config-root \.overlay\.attribute-overlay \{[\s\S]*?z-index: 148;/);
   });
