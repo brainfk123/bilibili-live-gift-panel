@@ -1250,7 +1250,10 @@ describe('single-page configuration rendering', () => {
 
     expect(configCss).toContain('.config-root .tour-prototype.is-modal-step { z-index: 170; }');
     expect(configCss).toContain('.config-root .tour-prototype.is-modal-step .tour-focus { z-index: 171; }');
-    expect(configCss).toContain('.config-root .tour-prototype.is-modal-step .tour-bubble { z-index: 172; }');
+    expect(configCss).toContain('.config-root .tour-prototype.is-modal-step .tour-target-outline { z-index: 172; }');
+    expect(configCss).toContain('.config-root .tour-prototype.is-modal-step .tour-bubble { z-index: 173; }');
+    expect(configCss).toMatch(/\.config-root \.tour-focus \{[\s\S]*?border: 0;[\s\S]*?box-shadow: 0 0 0 100vmax/);
+    expect(configCss).toMatch(/\.config-root \.tour-target-outline \{[\s\S]*?border: 2px solid var\(--accent\);[\s\S]*?box-shadow: none;/);
     expect(configCss).toContain('.config-root .template-wizard-overlay { z-index: 145;');
     expect(configCss).toMatch(/\.config-root \.overlay\.attribute-overlay \{[\s\S]*?z-index: 148;/);
   });
@@ -1291,6 +1294,12 @@ describe('single-page configuration rendering', () => {
     root.querySelector('.gift-choice')?.onclick?.();
     root.querySelector('.guide-confirm-gifts')?.onclick?.();
     (root.querySelector('.guide-rule-simulator') as TestElement | null)?.onclick?.();
+    await vi.waitFor(() => expect(textOf(root.querySelector('.formula-preview')!)).toContain('已模拟 1 个'));
+    expect(textOf(root.querySelector('.tour-bubble') as TestElement)).toContain('决定礼物如何改变时间');
+    expect(textOf(root.querySelector('.tour-bubble') as TestElement)).toContain('核对预览里的原值和新值');
+    const rulePreviewConfirm = root.querySelector('.guide-rule-preview-confirm') as TestElement | null;
+    expect(rulePreviewConfirm).not.toBeNull();
+    rulePreviewConfirm?.onclick?.();
     await vi.waitFor(() => expect(textOf(root)).toContain('把这条规则保存为预设'));
     const advancedRule = root.querySelector('.rule-advanced-settings') as TestElement & { open?: boolean };
     expect(advancedRule.open).toBe(true);
@@ -1305,7 +1314,12 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root.querySelector('.formula-preview')!)).toContain('已模拟 1 个');
 
     findByText(root, '+ 添加定时器')?.onclick?.();
+    const timerEditor = root.querySelector('.timer-rule-editor') as TestElement;
     (root.querySelector('.guide-timer-simulator') as TestElement | null)?.onclick?.();
+    await vi.waitFor(() => expect(textOf(timerEditor.querySelector('.formula-preview')!)).toContain('已模拟执行'));
+    expect(textOf(root.querySelector('.tour-bubble') as TestElement)).toContain('让时间自动减少');
+    expect(root.querySelector('.guide-timer-preview-confirm')).not.toBeNull();
+    (root.querySelector('.guide-timer-preview-confirm') as TestElement | null)?.onclick?.();
     await vi.waitFor(() => expect(textOf(root)).toContain('检查 OBS 中会显示什么'));
     expect(root.querySelector('.guide-output-confirm')).not.toBeNull();
     (root.querySelector('.guide-output-confirm') as TestElement | null)?.onclick?.();
@@ -1544,6 +1558,7 @@ describe('single-page configuration rendering', () => {
     mountConfig(root as unknown as HTMLElement);
 
     expect(root.querySelector('.tour-focus')).not.toBeNull();
+    expect(root.querySelector('.tour-target-outline')).not.toBeNull();
     expect(root.querySelector('.tour-bubble')).not.toBeNull();
     expect(textOf(root)).toContain('填写你的直播间房间号');
     expect(root.querySelector('.tour-switcher')).toBeNull();

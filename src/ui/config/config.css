@@ -702,19 +702,31 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 .config-root .tour-prototype.is-modal-step { z-index: 170; }
 .config-root .tour-prototype.is-modal-step .tour-focus { z-index: 171; }
-.config-root .tour-prototype.is-modal-step .tour-bubble { z-index: 172; }
+.config-root .tour-prototype.is-modal-step .tour-target-outline { z-index: 172; }
+.config-root .tour-prototype.is-modal-step .tour-bubble { z-index: 173; }
 .config-root .tour-prototype.is-dismissed .tour-focus,
+.config-root .tour-prototype.is-dismissed .tour-target-outline,
 .config-root .tour-prototype.is-dismissed .tour-bubble,
 .config-root .tour-prototype.is-dismissed .tour-rail { display: none; }
 .config-root .tour-focus {
   position: fixed;
   z-index: 81;
-  min-width: 44px;
-  min-height: 44px;
-  border: 2px solid var(--accent);
-  border-radius: 12px;
+  border: 0;
+  border-radius: 18px;
   background: transparent;
-  box-shadow: 0 0 0 100vmax rgba(6, 8, 15, .72), 0 0 0 5px rgba(251, 114, 153, .22), 0 0 24px rgba(251, 114, 153, .55);
+  box-shadow: 0 0 0 100vmax rgba(6, 8, 15, .72);
+  pointer-events: none;
+  transition: left .18s ease, top .18s ease, width .18s ease, height .18s ease;
+}
+.config-root .tour-target-outline {
+  position: fixed;
+  z-index: 82;
+  min-width: 36px;
+  min-height: 36px;
+  border: 2px solid var(--accent);
+  border-radius: 11px;
+  background: transparent;
+  box-shadow: none;
   pointer-events: none;
   transition: left .18s ease, top .18s ease, width .18s ease, height .18s ease;
 }
@@ -915,7 +927,7 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .tour-switcher-button:hover { background: var(--accent); color: var(--button-action-text); }
 .config-root .tour-switcher-label { color: var(--text); font-size: var(--type-meta); white-space: nowrap; }
 .config-root[data-theme="light"] .tour-focus {
-  box-shadow: 0 0 0 100vmax rgba(27, 36, 58, .53), 0 0 0 5px rgba(251, 114, 153, .24), 0 0 24px rgba(194, 24, 91, .46);
+  box-shadow: 0 0 0 100vmax rgba(27, 36, 58, .53);
 }
 .config-root[data-theme="light"] .tour-rail,
 .config-root[data-theme="light"] .tour-bubble,
@@ -3488,6 +3500,25 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .formula-preset-name-dialog .field { margin-bottom: 18px; }
 .config-root .formula-preset-name-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .config-root .formula-preview { min-height: 18px; color: var(--text-dim); font-size: var(--type-meta); white-space: nowrap; }
+.config-root .formula-preview.has-tutorial-confirmation {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  flex-wrap: wrap;
+  white-space: normal;
+}
+.config-root .formula-preview-confirm {
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+.config-root .formula-preview-confirm:hover { background: var(--accent); color: var(--button-action-text); }
 .config-root .formula-preview strong { color: var(--success-text); }
 .config-root .formula-preview .error { color: var(--danger-text); }
 .config-root .modal-actions {

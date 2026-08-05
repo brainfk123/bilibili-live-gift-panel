@@ -2141,6 +2141,31 @@ export function mountConfig(root: HTMLElement): void {
         : formula.trim()
     );
 
+    const shouldConfirmTutorialPreview = (lesson: 'rule' | 'timer'): boolean => (
+      !guideDismissed
+      && (editorGuideEnabled || forcedTutorialLesson === lesson)
+      && activeTutorialLesson() === lesson
+    );
+    const appendTutorialPreviewConfirmation = (
+      preview: HTMLElement,
+      lesson: 'rule' | 'timer',
+      onConfirm: () => void,
+    ): boolean => {
+      if (!shouldConfirmTutorialPreview(lesson)) return false;
+      preview.classList.add('has-tutorial-confirmation');
+      const confirmButton = el('button', {
+        class: `formula-preview-confirm guide-${lesson}-preview-confirm`,
+        type: 'button',
+        text: '确认这次变化',
+      }) as HTMLButtonElement;
+      confirmButton.onclick = () => {
+        confirmButton.disabled = true;
+        onConfirm();
+      };
+      preview.append(confirmButton);
+      return true;
+    };
+
     type RefreshablePresetList = HTMLElement & { refreshPresets?: () => void };
 
     function refreshFormulaPresetLists(context: FormulaPresetContext): void {
@@ -2370,6 +2395,7 @@ export function mountConfig(root: HTMLElement): void {
           ? replaceFormulaVariable(rule.formula.trim(), originalName, name)
           : rule.formula.trim();
         const requestVersion = ++previewVersion;
+        preview.classList.remove('has-tutorial-confirmation');
         preview.replaceChildren(el('span', { text: '由后台计算预览…' }));
         void (async () => {
           if (condition) {
@@ -2384,8 +2410,12 @@ export function mountConfig(root: HTMLElement): void {
               text: completeLesson ? '当前条件不满足，本次未执行' : '当前条件不满足，本次会跳过',
             }));
             if (completeLesson) {
-              editorTutorialProgress.timerPreviewed = true;
-              refreshEditorTutorial();
+              const awaitingConfirmation = appendTutorialPreviewConfirmation(preview, 'timer', () => {
+                editorTutorialProgress.timerPreviewed = true;
+                refreshEditorTutorial();
+              });
+              if (!awaitingConfirmation) editorTutorialProgress.timerPreviewed = true;
+              refreshEditorTutorial(!awaitingConfirmation);
             }
             return;
           }
@@ -2398,8 +2428,12 @@ export function mountConfig(root: HTMLElement): void {
             el('strong', { text: String(result) }),
           );
           if (completeLesson) {
-            editorTutorialProgress.timerPreviewed = true;
-            refreshEditorTutorial();
+            const awaitingConfirmation = appendTutorialPreviewConfirmation(preview, 'timer', () => {
+              editorTutorialProgress.timerPreviewed = true;
+              refreshEditorTutorial();
+            });
+            if (!awaitingConfirmation) editorTutorialProgress.timerPreviewed = true;
+            refreshEditorTutorial(!awaitingConfirmation);
           }
         }).catch((error) => {
           if (requestVersion !== previewVersion) return;
@@ -2757,16 +2791,22 @@ export function mountConfig(root: HTMLElement): void {
       );
       const preview = el('div', { class: 'formula-preview' });
       let previewVersion = 0;
-      const renderSimulationPreview = (): void => {
-        if (!item.simulationPreview) return;
+      const renderSimulationPreview = (): boolean => {
+        if (!item.simulationPreview) return false;
+        preview.classList.remove('has-tutorial-confirmation');
         preview.replaceChildren(
           el('span', { text: `已模拟 1 个 ${item.gift.name}：${item.simulationPreview.currentValue} → ` }),
           el('strong', { text: String(item.simulationPreview.result) }),
         );
+        return appendTutorialPreviewConfirmation(preview, 'rule', () => {
+          editorTutorialProgress.giftPreviewed = true;
+          refreshEditorTutorial();
+        });
       };
       const updatePreview = (completeLesson = false): void => {
         item.formula = formulaInput.value;
         if (!completeLesson) item.simulationPreview = undefined;
+        preview.classList.remove('has-tutorial-confirmation');
         preview.replaceChildren();
         const name = nameInput.value.trim() || originalName || '属性';
         const value = Number(valueInput.value);
@@ -2783,14 +2823,15 @@ export function mountConfig(root: HTMLElement): void {
             item.simulationPreview = { currentValue, result };
             updateOverviewPreview();
           }
-          if (completeLesson) renderSimulationPreview();
+          let awaitingConfirmation = false;
+          if (completeLesson) awaitingConfirmation = renderSimulationPreview();
           else preview.replaceChildren(
               el('span', { text: `预览收到 1 个 ${item.gift.name}：${currentValue} → ` }),
               el('strong', { text: String(result) }),
             );
           if (completeLesson) {
-            editorTutorialProgress.giftPreviewed = true;
-            refreshEditorTutorial(false);
+            if (!awaitingConfirmation) editorTutorialProgress.giftPreviewed = true;
+            refreshEditorTutorial(!awaitingConfirmation);
           }
         }).catch((error) => {
           if (requestVersion !== previewVersion) return;
