@@ -122,6 +122,15 @@ export function bindFloatingDetailCard(
   };
   resetTilt();
   if (card.className.split(/\s+/).includes('is-detail-persisted')) {
-    globalThis.setTimeout(position, 0);
+    card.classList.add('is-detail-restoring');
+    const finishRestore = (): void => card.classList.remove('is-detail-restoring');
+    globalThis.queueMicrotask(() => {
+      position();
+      if (typeof globalThis.requestAnimationFrame === 'function') {
+        globalThis.requestAnimationFrame(() => globalThis.requestAnimationFrame(finishRestore));
+      } else {
+        globalThis.setTimeout(finishRestore, 0);
+      }
+    });
   }
 }

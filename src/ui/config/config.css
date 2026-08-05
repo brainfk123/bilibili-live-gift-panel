@@ -1812,6 +1812,12 @@ body.config-mode::-webkit-scrollbar-corner,
   transform: translateY(0) scale(1);
   transition-delay: 0s;
 }
+.config-root .hover-detail-card.is-detail-restoring,
+.config-root .hover-detail-card.is-detail-restoring::before,
+.config-root .hover-detail-card.is-detail-restoring > .hover-detail-cover,
+.config-root .hover-detail-card.is-detail-restoring .hover-detail-panel {
+  transition: none !important;
+}
 .config-root .hover-detail-panel-inner {
   position: relative;
   display: flex;

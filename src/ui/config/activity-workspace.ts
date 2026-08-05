@@ -111,9 +111,14 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
       ]),
       el('div', { class: 'activity-attribute-chips' }, activity.attributeNames.map((attributeName) => {
         const attribute = state.attributes.find((candidate) => candidate.name === attributeName);
+        const value = el('small', { text: attribute ? formatValue(attribute.value, attribute) : '—' });
+        if (attribute) {
+          value.classList.add('attribute-live-value');
+          value.dataset.attributeName = attribute.name;
+        }
         return el('span', {}, [
           el('strong', { text: attributeName }),
-          el('small', { text: attribute ? formatValue(attribute.value, attribute) : '—' }),
+          value,
         ]);
       })),
       el('div', { class: 'activity-card-meta' }, [
@@ -184,9 +189,10 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
     if (action === 'reset' && !confirm('重新准备会把关联属性恢复为初始值，继续吗？')) return;
     const buttons = Array.from(actionRoot.querySelectorAll('button')) as HTMLButtonElement[];
     buttons.forEach((button) => { button.disabled = true; });
-    if (card.classList.contains('is-pointer-focus')) {
+    if (card.className.split(/\s+/).includes('is-pointer-focus')) {
       root.dataset.expandedActivityId = activity.id;
-      root.dataset.expandedActivitySide = card.classList.contains('is-detail-above') ? 'above' : 'below';
+      root.dataset.expandedActivitySide = card.className.split(/\s+/).includes('is-detail-above') ? 'above' : 'below';
+      card.classList.add('is-detail-restoring');
     }
     try {
       const result = await transitionActivity(activity.id, action);
@@ -203,6 +209,7 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
         delete root.dataset.expandedActivityId;
         delete root.dataset.expandedActivitySide;
       }
+      card.classList.remove('is-detail-restoring');
       buttons.forEach((button) => { button.disabled = false; });
       toast(error instanceof Error ? error.message : '活动操作失败', root);
     }

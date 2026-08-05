@@ -397,6 +397,9 @@ export function mountConfig(root: HTMLElement): void {
     stateRefreshActive = true;
     try {
       const previousStructure = configStructureSignature(state);
+      const previousActivities = activityStateSignature(state);
+      const previousContributions = contributionStateSignature(state);
+      const previousGiftHistory = giftHistoryStateSignature(state);
       const requestedVersion = localStateVersion;
       const nextState = await refreshStateFromServer(() => requestedVersion === localStateVersion);
       if (requestedVersion !== localStateVersion) return;
@@ -415,13 +418,33 @@ export function mountConfig(root: HTMLElement): void {
         render();
         return;
       }
-      for (const valueElement of Array.from(root.querySelectorAll('.attribute-current-value'))) {
-        const attribute = state.attributes.find((item) => item.name === (valueElement as HTMLElement).dataset.attributeName);
-        if (attribute) valueElement.textContent = formatValue(attribute.value, attribute);
-      }
+      if (activityStateSignature(state) !== previousActivities) renderActivities(true);
+      syncLiveAttributeValues();
+      if (contributionStateSignature(state) !== previousContributions) renderContributionLeaderboard(true);
+      if (giftHistoryStateSignature(state) !== previousGiftHistory) renderGiftHistory(true);
     } finally {
       stateRefreshActive = false;
     }
+  }
+
+  function syncLiveAttributeValues(): void {
+    const attributesByName = new Map(state.attributes.map((attribute) => [attribute.name, attribute]));
+    for (const valueElement of Array.from(root.querySelectorAll<HTMLElement>('.attribute-live-value'))) {
+      const attribute = attributesByName.get(valueElement.dataset.attributeName ?? '');
+      if (attribute) valueElement.textContent = formatValue(attribute.value, attribute);
+    }
+    for (const card of Array.from(root.querySelectorAll<HTMLElement>('.attribute-card'))) {
+      const attribute = attributesByName.get(card.dataset.attributeName ?? '');
+      if (attribute) {
+        card.setAttribute('aria-label', `属性“${attribute.name}”，当前值 ${formatValue(attribute.value, attribute)}。悬停或聚焦查看详细设置。`);
+      }
+    }
+  }
+
+  function appendOrReplaceSection(section: HTMLElement, selector: string, replaceExisting: boolean): void {
+    const existing = replaceExisting ? content.querySelector<HTMLElement>(selector) : null;
+    if (existing) existing.replaceWith(section);
+    else content.append(section);
   }
 
   function save(): void {
@@ -1059,6 +1082,7 @@ export function mountConfig(root: HTMLElement): void {
       tabIndex: 0,
       ariaLabel: `属性“${attribute.name}”，当前值 ${formatValue(attribute.value, attribute)}。悬停或聚焦查看详细设置。`,
     } as any);
+    card.dataset.attributeName = attribute.name;
     const editButton = el('button', { class: `btn ghost attribute-action-button${index === 0 ? ' guide-attribute-edit' : ''}`, type: 'button', text: '编辑' }) as HTMLButtonElement;
     editButton.onclick = () => openAttributeEditor(index);
     const deleteButton = el('button', { class: 'btn text-danger attribute-action-button', type: 'button', text: '删除' }) as HTMLButtonElement;
@@ -1286,12 +1310,15 @@ export function mountConfig(root: HTMLElement): void {
     return card;
   }
 
-  function renderActivities(): void {
-    content.append(createActivityWorkspace({
+  function renderActivities(replaceExisting = false): void {
+    const section = createActivityWorkspace({
       state,
       root,
       onPersist: saveAndWait,
-      onRender: render,
+      onRender: () => {
+        renderActivities(true);
+        syncLiveAttributeValues();
+      },
       onEditorOpenChange: (open) => {
         editorOpen = open;
         if (open) {
@@ -1301,7 +1328,8 @@ export function mountConfig(root: HTMLElement): void {
           renderGuide();
         }
       },
-    }));
+    });
+    appendOrReplaceSection(section, '.activity-workspace-section', replaceExisting);
   }
 
   function renderDisplayScenes(): void {
@@ -1347,7 +1375,7 @@ export function mountConfig(root: HTMLElement): void {
       const attribute = state.attributes.find((candidate) => candidate.name === attributeName);
       preview.append(el('span', {}, [
         el('small', { text: attributeName }),
-        el('strong', { text: attribute ? formatValue(attribute.value, attribute) : '—' }),
+        attribute ? attributeLiveValueElement('strong', attribute) : el('strong', { text: '—' }),
       ]));
     }
     if (scene.attributeNames.length > 4) preview.append(el('em', { text: `+${scene.attributeNames.length - 4}` }));
@@ -1563,7 +1591,7 @@ export function mountConfig(root: HTMLElement): void {
     root.append(overlay);
   }
 
-  function renderContributionLeaderboard(): void {
+  function renderContributionLeaderboard(replaceExisting = false): void {
     const viewers = state.contributions.viewers;
     const section = el('section', { class: 'contribution-section' });
     const clearButton = el('button', {
@@ -1656,7 +1684,7 @@ export function mountConfig(root: HTMLElement): void {
     }
     section.append(modeTabs, listHost);
     renderRows();
-    content.append(section);
+    appendOrReplaceSection(section, '.contribution-section', replaceExisting);
   }
 
   function renderContributionRow(viewer: ViewerContribution, rank: number, mode: LeaderboardMode): HTMLElement {
@@ -1766,7 +1794,7 @@ export function mountConfig(root: HTMLElement): void {
     return value > 0 ? 'positive' : value < 0 ? 'negative' : 'neutral';
   }
 
-  function renderGiftHistory(): void {
+  function renderGiftHistory(replaceExisting = false): void {
     const entries = state.log.filter((entry) => entry.source !== 'timer');
     const section = el('section', { class: 'gift-history-section' });
     const clearButton = el('button', {
@@ -1806,7 +1834,7 @@ export function mountConfig(root: HTMLElement): void {
         class: 'gift-history-empty',
         text: '还没有送礼规则生效记录。收到命中规则的礼物后，会在这里显示完整的数值变化。',
       }));
-      content.append(section);
+      appendOrReplaceSection(section, '.gift-history-section', replaceExisting);
       return;
     }
 
@@ -1855,7 +1883,7 @@ export function mountConfig(root: HTMLElement): void {
     };
     appendBatch();
     section.append(el('div', { class: 'gift-history-list-frame' }, [list]));
-    content.append(section);
+    appendOrReplaceSection(section, '.gift-history-section', replaceExisting);
   }
 
   function renderGiftHistoryRow(entry: LogEntry): HTMLElement {
@@ -3889,15 +3917,24 @@ function configStructureSignature(state: AppState): string {
     roomId: state.roomId,
     attributes: state.attributes.map(({ value: _value, ...attribute }) => attribute),
     displayScenes: state.displayScenes,
-    activities: state.activities,
     rules: state.rules,
     timerRules: state.timerRules,
     formulaPresets: state.formulaPresets,
     settings: state.settings,
     giftCatalog: state.giftCatalog,
-    log: state.log,
-    contributions: state.contributions,
   });
+}
+
+function activityStateSignature(state: AppState): string {
+  return JSON.stringify(state.activities);
+}
+
+function contributionStateSignature(state: AppState): string {
+  return JSON.stringify(state.contributions);
+}
+
+function giftHistoryStateSignature(state: AppState): string {
+  return JSON.stringify(state.log.filter((entry) => entry.source !== 'timer'));
 }
 
 function formatHistoryValue(value: number, attribute?: Attribute): string {
@@ -3921,9 +3958,15 @@ function formatHistorySummaryDelta(delta: number, attribute?: Attribute): string
   return `${sign}${Math.abs(delta).toExponential(2)}${unit}`;
 }
 
-function attributeValueElement(attribute: Attribute): HTMLElement {
-  const value = el('strong', { class: 'attribute-current-value', text: formatValue(attribute.value, attribute) });
+function attributeLiveValueElement(tag: 'small' | 'strong', attribute: Attribute): HTMLElement {
+  const value = el(tag, { class: 'attribute-live-value', text: formatValue(attribute.value, attribute) });
   value.dataset.attributeName = attribute.name;
+  return value;
+}
+
+function attributeValueElement(attribute: Attribute): HTMLElement {
+  const value = attributeLiveValueElement('strong', attribute);
+  value.classList.add('attribute-current-value');
   return value;
 }
 

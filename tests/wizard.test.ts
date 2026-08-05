@@ -1825,6 +1825,63 @@ describe('single-page configuration rendering', () => {
     vi.useRealTimers();
   });
 
+  it('preserves every floating card while a backend timer updates only runtime values and timer logs', async () => {
+    const initialState = defaultState();
+    initialState.settings.showTutorial = false;
+    initialState.attributes = [
+      { name: '加班时间', value: 10, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' },
+      { name: '挑战次数', value: 2, unit: 'none', format: 'suffix', decimals: 0, suffix: '次' },
+    ];
+    initialState.timerRules = [{
+      id: 'timer-overtime', attributeName: '加班时间', formulaName: '每秒减少', intervalSeconds: 1,
+      formula: 'MAX(加班时间-1,0)', condition: '加班时间>0', enabled: true,
+    }];
+    initialState.activities = [{
+      id: 'activity-1', name: '测试活动', attributeNames: ['加班时间', '挑战次数'], status: 'active',
+      resultMode: 'highest', gateRules: false, initialValues: { 加班时间: 10, 挑战次数: 2 }, milestones: [],
+    }];
+    initialState.displayScenes = [{
+      id: 'scene-1', name: '测试组合面板', attributeNames: ['加班时间', '挑战次数'], layout: 'grid', themeId: 'glass',
+    }];
+    await saveState(initialState);
+
+    let serverState = JSON.parse(JSON.stringify(initialState));
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/api/config')) {
+        return Response.json(serverState);
+      }
+      if (url.includes('/api/runtime')) {
+        return Response.json({ code: 0, runtime: { state: 'idle', roomId: '' } });
+      }
+      if (url.includes('/api/auth/status')) {
+        return Response.json({ code: 0, auth: { state: 'anonymous' } });
+      }
+      return new Response(null, { status: 204 });
+    }));
+
+    vi.useFakeTimers();
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    const cardsBefore = root.querySelectorAll('.hover-detail-card');
+    expect(cardsBefore).toHaveLength(4);
+
+    serverState = JSON.parse(JSON.stringify(initialState));
+    serverState.attributes[0].value = 9;
+    serverState.log = [{
+      time: 1, giftId: 0, giftName: '', num: 1, uname: '', attributeName: '加班时间',
+      delta: -1, valueAfter: 9, ruleId: 'timer-overtime', source: 'timer', triggerName: '每秒减少',
+    }];
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const cardsAfter = root.querySelectorAll('.hover-detail-card');
+    expect(cardsAfter.every((card, index) => card === cardsBefore[index])).toBe(true);
+    expect(root.querySelector('.attribute-current-value')?.textContent).toBe('00:00:09');
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
   it('does not let a stale backend refresh overwrite a timer toggle before editing', async () => {
     const initialState = {
       ...state('88888888'),
@@ -2125,6 +2182,8 @@ describe('single-page configuration rendering', () => {
     expect(configCss).toMatch(/\.config-root \.hover-detail-panel \{[\s\S]*?position: absolute;/);
     expect(configCss).toMatch(/\.config-root \.hover-detail-panel \{[\s\S]*?transform-origin: 50% top;/);
     expect(configCss).toMatch(/\.config-root \.hover-detail-card\.is-detail-above \.hover-detail-panel \{[\s\S]*?transform-origin: 50% bottom;/);
+    expect(configCss).toContain('.config-root .hover-detail-card.is-detail-restoring');
+    expect(configCss).toMatch(/\.config-root \.hover-detail-card\.is-detail-restoring[\s\S]*?transition: none !important;/);
     expect(configCss).not.toMatch(/\.config-root \.attribute-list \{[^}]*perspective:/);
     expect(configCss).not.toMatch(/\.config-root \.activity-card-list \{[^}]*perspective:/);
     expect(configCss).not.toMatch(/\.config-root \.display-scene-list \{[^}]*perspective:/);
@@ -2335,11 +2394,64 @@ describe('activity session configuration', () => {
     expect(findByText(card, '重新准备')).toBeDefined();
     expect(findByText(card, '删除')).toBeDefined();
     expect(card.className.split(' ')).toContain('is-detail-persisted');
+    expect(card.className.split(' ')).toContain('is-detail-restoring');
     expect(card.className.split(' ')).toContain('is-detail-above');
     (card as TestElement & { onpointerleave?: () => void }).onpointerleave?.();
     expect(card.className.split(' ')).not.toContain('is-detail-persisted');
     expect(root.dataset.expandedActivityId).toBeUndefined();
     expect(root.dataset.expandedActivitySide).toBeUndefined();
+  });
+
+  it('rerenders only the activity section and restores its open detail without replaying transitions', async () => {
+    const configured = defaultState();
+    configured.settings.showTutorial = false;
+    configured.attributes = [
+      { name: '红队', value: 0, unit: 'none', format: 'suffix', decimals: 0, suffix: '分' },
+      { name: '蓝队', value: 0, unit: 'none', format: 'suffix', decimals: 0, suffix: '分' },
+    ];
+    configured.displayScenes = [{
+      id: 'scene-versus', name: '红蓝面板', attributeNames: ['红队', '蓝队'], layout: 'grid', themeId: 'neon',
+    }];
+    configured.activities = [{
+      id: 'activity-versus', name: '红蓝对战', attributeNames: ['红队', '蓝队'], sceneId: 'scene-versus',
+      status: 'not_started', resultMode: 'highest', gateRules: true, initialValues: { 红队: 0, 蓝队: 0 }, milestones: [],
+    }];
+    await saveState(configured);
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/api/activities/transition')) {
+        return Response.json({
+          code: 0,
+          activity: { ...configured.activities[0], status: 'active', startedAt: 1 },
+          attributeValues: { 红队: 0, 蓝队: 0 },
+        });
+      }
+      if (url.includes('/api/runtime')) {
+        return Response.json({ code: 0, runtime: { state: 'idle', roomId: '' } });
+      }
+      if (url.includes('/api/auth/status')) {
+        return Response.json({ code: 0, auth: { state: 'anonymous' } });
+      }
+      return new Response(null, { status: 204 });
+    }));
+
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    const attributeCard = root.querySelector('.attribute-card');
+    const sceneCard = root.querySelector('.display-scene-card');
+    const activityCard = root.querySelector('.activity-card') as TestElement & {
+      onpointerdown?: (event: { pointerType: string }) => void;
+    };
+    activityCard.onpointerdown?.({ pointerType: 'mouse' });
+    findByText(activityCard, '开始活动')?.onclick?.();
+    expect(activityCard.className.split(' ')).toContain('is-detail-restoring');
+
+    await vi.waitFor(() => expect(findByText(root, '锁定结果')).toBeDefined());
+    expect(root.querySelector('.attribute-card')).toBe(attributeCard);
+    expect(root.querySelector('.display-scene-card')).toBe(sceneCard);
+    const nextActivityCard = root.querySelector('.activity-card');
+    expect(nextActivityCard).not.toBe(activityCard);
+    expect(nextActivityCard?.className.split(' ')).toContain('is-detail-persisted');
   });
 });
 
