@@ -230,6 +230,10 @@ export function renderSpotlightGuide(context: SpotlightGuideContext): SpotlightG
   const lessonIndex = TUTORIAL_LESSONS.findIndex((lesson) => lesson.id === context.lesson);
   const frame = el('div', { class: 'tour-prototype tour-variant-spotlight' }) as unknown as SpotlightGuideElement;
   frame.classList.toggle('is-modal-step', context.editorOpen);
+  frame.classList.toggle(
+    'is-card-detail-step',
+    context.lesson === 'enable' || context.lesson === 'output',
+  );
   const target = copy.targets
     .map((selector) => context.host.querySelector(selector) as HTMLElement | null)
     .find(isGuideTargetAvailable) ?? null;

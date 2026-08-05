@@ -1260,6 +1260,15 @@ describe('single-page configuration rendering', () => {
     expect(configCss).toMatch(/\.config-root \.overlay\.attribute-overlay \{[\s\S]*?z-index: 148;/);
   });
 
+  it('locks non-target cards while the tutorial owns an expanded attribute', () => {
+    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const guideSource = readFileSync(new URL('../src/ui/config/spotlight-guide.ts', import.meta.url), 'utf8');
+
+    expect(guideSource).toMatch(/frame\.classList\.toggle\(\s*'is-card-detail-step',\s*context\.lesson === 'enable' \|\| context\.lesson === 'output',?\s*\)/);
+    expect(configCss).toMatch(/\.config-root:has\(\.tour-prototype\.is-card-detail-step\)[\s\S]*?\.hover-detail-card:not\(\.is-guide-expanded\) \{[\s\S]*?pointer-events: none;[\s\S]*?transform: none !important;/);
+    expect(configCss).toMatch(/\.config-root:has\(\.tour-prototype\.is-card-detail-step\)[\s\S]*?\.hover-detail-card:not\(\.is-guide-expanded\) \.hover-detail-panel \{[\s\S]*?opacity: 0 !important;[\s\S]*?visibility: hidden !important;[\s\S]*?pointer-events: none !important;/);
+  });
+
   it('keeps expanded cards centered and scene editor fieldsets aligned', () => {
     const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
     const configSource = readFileSync(new URL('../src/ui/config/config.ts', import.meta.url), 'utf8');
@@ -1341,6 +1350,7 @@ describe('single-page configuration rendering', () => {
     expect(saved.rules[0].enabled).toBe(false);
 
     expect(root.querySelector('.attribute-card')?.className.split(' ')).toContain('is-guide-expanded');
+    expect(root.querySelector('.tour-prototype')?.className.split(' ')).toContain('is-card-detail-step');
     expect(root.querySelector('.guide-attribute-detail')).not.toBeNull();
     (root.querySelector('.guide-rule-toggle') as TestElement | null)?.onclick?.();
     expect(textOf(root.querySelector('.tour-bubble') as TestElement)).toContain('托盘后台会继续收礼');
