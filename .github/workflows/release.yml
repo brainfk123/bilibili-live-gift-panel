@@ -92,15 +92,37 @@ jobs:
           } | ConvertTo-Json -Depth 4 | Set-Content -NoNewline -Encoding utf8 dist/gift-panel-update.json
           $currentChangelog = Get-Content gift-panel-changelog.json -Raw | ConvertFrom-Json
           $releaseHistory = @()
-          try {
-            $previousChangelog = Invoke-RestMethod -Uri "https://github.com/brainfk123/bilibili-live-gift-panel/releases/latest/download/gift-panel-changelog.json" -TimeoutSec 20
-            $releaseHistory = @($previousChangelog.releases)
-          } catch {
-            Write-Host "No previous hosted changelog is available; publishing the bundled current release only."
+          $previousTag = git tag --sort=-version:refname | Where-Object { $_ -and $_ -ne $env:RELEASE_TAG } | Select-Object -First 1
+          if ($previousTag) {
+            try {
+              $previousChangelog = Invoke-RestMethod -Uri "https://github.com/brainfk123/bilibili-live-gift-panel/releases/download/$previousTag/gift-panel-changelog.json" -TimeoutSec 20
+              $releaseHistory = @($previousChangelog.releases)
+            } catch {
+              Write-Host "No hosted changelog exists for $previousTag; reading its bundled changelog from Git history."
+              $previousChangelogJson = git show "${previousTag}:gift-panel-changelog.json" 2>$null
+              if ($LASTEXITCODE -eq 0 -and $previousChangelogJson) {
+                $previousChangelog = $previousChangelogJson | ConvertFrom-Json
+                $releaseHistory = @($previousChangelog.releases)
+              } else {
+                Write-Host "No previous changelog is available; publishing the bundled current release only."
+              }
+            }
+          }
+          $historySeed = @()
+          if (Test-Path .github/changelog-history.json) {
+            $historySeedDocument = Get-Content .github/changelog-history.json -Raw | ConvertFrom-Json
+            $historySeed = @($historySeedDocument.releases)
+          } else {
+            try {
+              $historySeedDocument = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/brainfk123/bilibili-live-gift-panel/master/.github/changelog-history.json" -TimeoutSec 20
+              $historySeed = @($historySeedDocument.releases)
+            } catch {
+              Write-Host "No changelog history seed is available."
+            }
           }
           $seenVersions = @{}
           $mergedReleases = @()
-          foreach ($release in @($currentChangelog.releases) + $releaseHistory) {
+          foreach ($release in @($currentChangelog.releases) + $releaseHistory + $historySeed) {
             $version = [string]$release.version
             if ($version -and -not $seenVersions.ContainsKey($version)) {
               $seenVersions[$version] = $true
