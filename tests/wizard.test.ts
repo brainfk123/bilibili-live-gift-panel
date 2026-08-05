@@ -2099,11 +2099,16 @@ describe('single-page configuration rendering', () => {
       getBoundingClientRect?: () => { left: number; top: number; width: number; height: number };
     };
     const interactiveCard = card as TestElement & {
+      getBoundingClientRect?: () => { left: number; top: number; right: number; bottom: number; width: number; height: number };
+      onpointerenter?: () => void;
       onpointermove?: (event: { pointerType: string; clientX: number; clientY: number }) => void;
       onpointerdown?: (event: { pointerType: string }) => void;
       onkeydown?: () => void;
     };
     interactiveCover.getBoundingClientRect = () => ({ left: 100, top: 100, width: 200, height: 100 });
+    interactiveCard.getBoundingClientRect = () => ({ left: 400, top: 200, right: 600, bottom: 300, width: 200, height: 100 });
+    interactiveCard.onpointerenter?.();
+    expect(card?.style['--hover-detail-offset-x']).toBe('-180px');
     interactiveCard.onpointermove?.({ pointerType: 'mouse', clientX: 280, clientY: 110 });
     expect(card?.style['--hover-card-rotate-x']).toBe('3.20deg');
     expect(card?.style['--hover-card-rotate-y']).toBe('4.00deg');
@@ -2113,11 +2118,16 @@ describe('single-page configuration rendering', () => {
     expect(card?.className.split(' ')).not.toContain('is-pointer-focus');
 
     const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
-    expect(configCss).toContain('perspective: 1100px;');
+    expect(configCss).toContain('perspective(1100px)');
     expect(configCss).toContain('@media (hover: hover)');
     expect(configCss).toContain('.config-root .hover-detail-card:hover .hover-detail-panel');
     expect(configCss).toContain('.config-root .hover-detail-card:not(.is-pointer-focus):focus-within .hover-detail-panel');
     expect(configCss).toMatch(/\.config-root \.hover-detail-panel \{[\s\S]*?position: absolute;/);
+    expect(configCss).toMatch(/\.config-root \.hover-detail-panel \{[\s\S]*?transform-origin: 50% top;/);
+    expect(configCss).toMatch(/\.config-root \.hover-detail-card\.is-detail-above \.hover-detail-panel \{[\s\S]*?transform-origin: 50% bottom;/);
+    expect(configCss).not.toMatch(/\.config-root \.attribute-list \{[^}]*perspective:/);
+    expect(configCss).not.toMatch(/\.config-root \.activity-card-list \{[^}]*perspective:/);
+    expect(configCss).not.toMatch(/\.config-root \.display-scene-list \{[^}]*perspective:/);
     expect(configCss).toContain('rotateX(var(--hover-card-rotate-x)) rotateY(var(--hover-card-rotate-y))');
     expect(configCss).toContain('@media (prefers-reduced-motion: reduce)');
   });
@@ -2317,6 +2327,7 @@ describe('activity session configuration', () => {
     await saveState(configured);
     const root = new TestElement('div');
     root.dataset.expandedActivityId = 'activity-settled';
+    root.dataset.expandedActivitySide = 'above';
     mountConfig(root as unknown as HTMLElement);
 
     await vi.waitFor(() => expect(root.querySelector('.activity-card')).not.toBeNull());
@@ -2324,9 +2335,11 @@ describe('activity session configuration', () => {
     expect(findByText(card, '重新准备')).toBeDefined();
     expect(findByText(card, '删除')).toBeDefined();
     expect(card.className.split(' ')).toContain('is-detail-persisted');
+    expect(card.className.split(' ')).toContain('is-detail-above');
     (card as TestElement & { onpointerleave?: () => void }).onpointerleave?.();
     expect(card.className.split(' ')).not.toContain('is-detail-persisted');
     expect(root.dataset.expandedActivityId).toBeUndefined();
+    expect(root.dataset.expandedActivitySide).toBeUndefined();
   });
 });
 

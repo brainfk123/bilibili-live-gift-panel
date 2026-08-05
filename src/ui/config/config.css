@@ -1714,7 +1714,6 @@ body.config-mode::-webkit-scrollbar-corner,
   align-items: start;
   gap: 14px;
   isolation: isolate;
-  perspective: 1100px;
 }
 .config-root .hover-detail-card {
   --hover-card-rotate-x: 0deg;
@@ -1734,7 +1733,7 @@ body.config-mode::-webkit-scrollbar-corner,
   background: linear-gradient(145deg, color-mix(in srgb, var(--card) 96%, var(--accent) 4%), var(--card));
   box-shadow: 0 7px 18px color-mix(in srgb, var(--card-shadow-color) 40%, transparent);
   transform: translateY(0);
-  transform-origin: var(--hover-detail-card-origin-x, 50%) calc(var(--hover-detail-cover-height, 92px) / 2);
+  transform-origin: 50% calc(var(--hover-detail-cover-height, 92px) / 2);
   transform-style: preserve-3d;
   transition: border-color 180ms ease, box-shadow 220ms ease, transform 120ms ease-out;
   will-change: transform;
@@ -1793,7 +1792,7 @@ body.config-mode::-webkit-scrollbar-corner,
   visibility: hidden;
   pointer-events: none;
   transform: translateY(4px) scale(.58, .38);
-  transform-origin: var(--hover-detail-origin-x, 50%) top;
+  transform-origin: 50% top;
   transform-style: preserve-3d;
   transition: opacity 150ms ease, transform 220ms cubic-bezier(.2, .78, .2, 1), visibility 0s linear 220ms;
   will-change: transform, opacity;
@@ -1802,7 +1801,7 @@ body.config-mode::-webkit-scrollbar-corner,
   top: auto;
   bottom: 0;
   transform: translateY(-4px) scale(.58, .38);
-  transform-origin: var(--hover-detail-origin-x, 50%) bottom;
+  transform-origin: 50% bottom;
 }
 .config-root .hover-detail-card:not(.is-pointer-focus):focus-within .hover-detail-panel,
 .config-root .hover-detail-card.is-guide-expanded .hover-detail-panel,
@@ -2164,7 +2163,6 @@ body.config-mode::-webkit-scrollbar-corner,
   align-items: start;
   gap: 14px;
   isolation: isolate;
-  perspective: 1100px;
 }
 .config-root .display-scene-card { --hover-detail-cover-height: 208px; border-radius: 16px; }
 .config-root .display-scene-card-cover {
@@ -2336,7 +2334,6 @@ body.config-mode::-webkit-scrollbar-corner,
   align-items: start;
   gap: 14px;
   isolation: isolate;
-  perspective: 1100px;
 }
 .config-root .activity-card { border-radius: 16px; }
 .config-root .activity-card.is-active { border-color: color-mix(in srgb, #55d98b 58%, var(--border)); }

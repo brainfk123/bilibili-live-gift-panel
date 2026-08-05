@@ -560,7 +560,13 @@ func (s *configStore) patchClientState(fields map[string]json.RawMessage) (clien
 	if previousErr != nil {
 		return clientStateReplaceResult{}, previousErr
 	}
-	state := previous
+	// PATCH decoding mutates existing slice elements in place. A shallow copy
+	// would therefore also mutate previous, making persistStateLocked believe
+	// that arrays such as rules and timerRules had not changed.
+	state, err := cloneAppState(previous)
+	if err != nil {
+		return clientStateReplaceResult{}, err
+	}
 	previousContributions := previous.Contributions
 	if err := applyClientStatePatch(&state, fields); err != nil {
 		return clientStateReplaceResult{}, &configInputError{err: err}

@@ -43,8 +43,10 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
   return section;
 
   function renderCard(activity: ActivitySession, index: number): HTMLElement {
+    const detailPersisted = root.dataset.expandedActivityId === activity.id;
+    const detailAbove = detailPersisted && root.dataset.expandedActivitySide === 'above';
     const card = el('article', {
-      class: `activity-card hover-detail-card is-${activity.status}${root.dataset.expandedActivityId === activity.id ? ' is-detail-persisted' : ''}`,
+      class: `activity-card hover-detail-card is-${activity.status}${detailPersisted ? ' is-detail-persisted' : ''}${detailAbove ? ' is-detail-above' : ''}`,
       tabIndex: 0,
       ariaLabel: `活动“${activity.name}”，${activityStatusLabel(activity.status)}。悬停或聚焦查看详细设置。`,
     } as any);
@@ -62,6 +64,10 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
         ? '活动仍在进行，删除后会立即停止本局控制。'
         : '';
       if (!confirm(`${activeWarning}确定删除活动“${activity.name}”？属性、规则和组合面板不会被删除。`)) return;
+      if (root.dataset.expandedActivityId === activity.id) {
+        delete root.dataset.expandedActivityId;
+        delete root.dataset.expandedActivitySide;
+      }
       state.activities.splice(index, 1);
       void options.onPersist().then(options.onRender).catch(() => undefined);
     };
@@ -138,7 +144,10 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
       panelWidth: 560,
       estimatedPanelHeight: 440,
       onPointerLeave: () => {
-        if (root.dataset.expandedActivityId === activity.id) delete root.dataset.expandedActivityId;
+        if (root.dataset.expandedActivityId === activity.id) {
+          delete root.dataset.expandedActivityId;
+          delete root.dataset.expandedActivitySide;
+        }
         card.classList.remove('is-detail-persisted');
       },
     });
@@ -175,7 +184,10 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
     if (action === 'reset' && !confirm('重新准备会把关联属性恢复为初始值，继续吗？')) return;
     const buttons = Array.from(actionRoot.querySelectorAll('button')) as HTMLButtonElement[];
     buttons.forEach((button) => { button.disabled = true; });
-    if (card.classList.contains('is-pointer-focus')) root.dataset.expandedActivityId = activity.id;
+    if (card.classList.contains('is-pointer-focus')) {
+      root.dataset.expandedActivityId = activity.id;
+      root.dataset.expandedActivitySide = card.classList.contains('is-detail-above') ? 'above' : 'below';
+    }
     try {
       const result = await transitionActivity(activity.id, action);
       const index = state.activities.findIndex((candidate) => candidate.id === activity.id);
@@ -187,7 +199,10 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
       options.onRender();
       toast(transitionSuccessMessage(action), root);
     } catch (error) {
-      if (root.dataset.expandedActivityId === activity.id) delete root.dataset.expandedActivityId;
+      if (root.dataset.expandedActivityId === activity.id) {
+        delete root.dataset.expandedActivityId;
+        delete root.dataset.expandedActivitySide;
+      }
       buttons.forEach((button) => { button.disabled = false; });
       toast(error instanceof Error ? error.message : '活动操作失败', root);
     }

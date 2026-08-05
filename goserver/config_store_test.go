@@ -156,6 +156,41 @@ func TestConfigStorePatchWritesOnlyAffectedShard(t *testing.T) {
 	}
 }
 
+func TestConfigStorePatchPreservesExplicitlyDisabledRules(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	initial := `{
+		"attributes":[{"name":"积分","value":0,"unit":"none","format":"number"}],
+		"rules":[{"id":"gift-rule","giftId":1,"attributeName":"积分","formula":"积分+1","enabled":true}],
+		"timerRules":[{"id":"timer-rule","attributeName":"积分","formulaName":"每秒减少","intervalSeconds":1,"formula":"积分-1","enabled":true}]
+	}`
+	put := httptest.NewRecorder()
+	store.handle(put, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(initial)))
+	if put.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", put.Code, put.Body.String())
+	}
+
+	patch := httptest.NewRecorder()
+	store.handle(patch, httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(`{
+		"rules":[{"id":"gift-rule","giftId":1,"attributeName":"积分","formula":"积分+1","enabled":false}],
+		"timerRules":[{"id":"timer-rule","attributeName":"积分","formulaName":"每秒减少","intervalSeconds":1,"formula":"积分-1","enabled":false}]
+	}`)))
+	if patch.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, body = %s", patch.Code, patch.Body.String())
+	}
+
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Rules) != 1 || state.Rules[0].Enabled == nil || *state.Rules[0].Enabled {
+		t.Fatalf("explicit enabled=false was not preserved: %#v", state.Rules)
+	}
+	if len(state.TimerRules) != 1 || state.TimerRules[0].Enabled {
+		t.Fatalf("explicit timer enabled=false was not preserved: %#v", state.TimerRules)
+	}
+}
+
 func TestConfigStoreMigratesMissingFieldsWithDefaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

@@ -59,16 +59,14 @@ export function bindFloatingDetailCard(
     const viewportHeight = globalThis.innerHeight || 768;
     const viewportPadding = 16;
     const actualPanelWidth = Math.min(panelWidth, Math.max(280, viewportWidth - viewportPadding * 2));
-    // Prefer growing from the compact card's own left edge. Only shift the
-    // expanded card when it would otherwise leave the viewport.
-    const preferredLeft = rect.left;
+    // Keep the compact card and expanded panel on the same horizontal axis,
+    // then clamp only when the centered panel would leave the viewport.
+    const preferredLeft = rect.left + rect.width / 2 - actualPanelWidth / 2;
     const absoluteLeft = Math.min(
       Math.max(preferredLeft, viewportPadding),
       Math.max(viewportPadding, viewportWidth - actualPanelWidth - viewportPadding),
     );
     card.style.setProperty('--hover-detail-offset-x', `${absoluteLeft - rect.left}px`);
-    card.style.setProperty('--hover-detail-origin-x', `${rect.left + rect.width / 2 - absoluteLeft}px`);
-    card.style.setProperty('--hover-detail-card-origin-x', `${absoluteLeft - rect.left + actualPanelWidth / 2}px`);
     const coverRect = cover.getBoundingClientRect();
     if (coverRect.height > 0) card.style.setProperty('--hover-detail-cover-height', `${coverRect.height}px`);
     const verticalThreshold = Math.min(estimatedPanelHeight, viewportHeight * .52);
@@ -123,4 +121,7 @@ export function bindFloatingDetailCard(
     }
   };
   resetTilt();
+  if (card.className.split(/\s+/).includes('is-detail-persisted')) {
+    globalThis.setTimeout(position, 0);
+  }
 }
