@@ -772,12 +772,49 @@ body.config-mode::-webkit-scrollbar-corner,
   font-size: var(--type-body);
   line-height: 1.7;
 }
+.config-root .tour-bubble-observe {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  margin-top: 12px;
+  border-left: 2px solid var(--accent);
+  border-radius: 0 10px 10px 0;
+  padding: 9px 11px;
+  background: var(--bg-soft);
+  color: var(--text-dim);
+  font-size: var(--type-meta);
+  line-height: 1.55;
+}
+.config-root .tour-bubble-observe strong { color: var(--accent-text); white-space: nowrap; }
+.config-root .tour-bubble-task {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: 10px;
+  padding: 10px 11px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: var(--type-meta);
+  font-weight: 700;
+  line-height: 1.55;
+}
+.config-root .tour-bubble-task-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  margin-top: .4em;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
 .config-root .tour-bubble-footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 12px;
-  margin-top: 16px;
+  margin-top: 12px;
 }
 .config-root .tour-bubble-skip {
   border: 0;
@@ -789,7 +826,6 @@ body.config-mode::-webkit-scrollbar-corner,
   font-size: var(--type-meta);
 }
 .config-root .tour-bubble-skip:hover { color: var(--text); }
-.config-root .tour-bubble-action { white-space: nowrap; }
 .config-root .tour-rail {
   position: fixed;
   z-index: 90;

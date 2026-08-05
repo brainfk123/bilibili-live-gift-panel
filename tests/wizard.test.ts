@@ -1271,7 +1271,6 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '开始填写')?.onclick?.();
     const roomInput = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '房间号') as TestElement & { oninput?: () => void };
     roomInput.value = '31567150';
@@ -1279,7 +1278,7 @@ describe('single-page configuration rendering', () => {
     mockedRuntimeState = 'connected';
     await findByText(root, '连接')?.onclick?.();
     expect(textOf(root)).toContain('打开属性创建中心');
-    findByText(root, '打开创建中心')?.onclick?.();
+    (root.querySelector('.guide-attribute-add') as TestElement | null)?.onclick?.();
     expect(root.querySelector('.template-wizard-overlay')).not.toBeNull();
     expect(textOf(root)).toContain('从空白创建，完整练习一次');
     (root.querySelector('.guide-blank-template') as TestElement | null)?.onclick?.();
@@ -1288,7 +1287,7 @@ describe('single-page configuration rendering', () => {
 
     findByText(root, '使用加班机模板')?.onclick?.();
     expect((root.querySelector('.workbench-lesson-card') as TestElement & { hidden?: boolean }).hidden).toBe(true);
-    findByText(root, '添加礼物')?.onclick?.();
+    (root.querySelector('.guide-add-gift') as TestElement | null)?.onclick?.();
     root.querySelector('.gift-choice')?.onclick?.();
     root.querySelector('.guide-confirm-gifts')?.onclick?.();
     (root.querySelector('.guide-rule-simulator') as TestElement | null)?.onclick?.();
@@ -1311,7 +1310,7 @@ describe('single-page configuration rendering', () => {
     expect(root.querySelector('.guide-output-confirm')).not.toBeNull();
     (root.querySelector('.guide-output-confirm') as TestElement | null)?.onclick?.();
     await vi.waitFor(() => expect(textOf(root)).toContain('保存并交给后台校验'));
-    findByText(root, '创建属性')?.onclick?.();
+    (root.querySelector('.guide-attribute-save') as TestElement | null)?.onclick?.();
 
     await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules).toHaveLength(1));
     const saved = JSON.parse(storage.get('bilibili-live-gift-panel-v1')!);
@@ -1325,7 +1324,7 @@ describe('single-page configuration rendering', () => {
     (root.querySelector('.guide-rule-toggle') as TestElement | null)?.onclick?.();
     expect(textOf(root.querySelector('.tour-bubble') as TestElement)).toContain('托盘后台会继续收礼');
 
-    await findByText(root, '复制 OBS 链接')?.onclick?.();
+    await (root.querySelector('.guide-obs-copy') as TestElement | null)?.onclick?.();
     await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).settings.showTutorial).toBe(false));
     expect(root.querySelector('.attribute-card')?.className.split(' ')).not.toContain('is-guide-expanded');
 
@@ -1549,6 +1548,18 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root)).toContain('填写你的直播间房间号');
     expect(root.querySelector('.tour-switcher')).toBeNull();
     expect(root.querySelector('.tour-rail')).toBeNull();
+  });
+
+  it('requires the highlighted UI to be operated instead of proxying it from the bubble', () => {
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const bubble = root.querySelector('.tour-bubble') as TestElement;
+    expect(bubble).not.toBeNull();
+    expect(bubble.querySelector('.tour-bubble-action')).toBeNull();
+    expect(bubble.querySelectorAll('button')).toHaveLength(2);
+    expect(textOf(bubble)).toContain('先观察');
+    expect(textOf(bubble)).toContain('亲手填写房间号');
   });
 
   it('opens one attribute modal that can select multiple gifts and save one formula per gift', async () => {

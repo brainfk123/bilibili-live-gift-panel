@@ -18,81 +18,94 @@ interface GuideCopy {
   targets: string[];
   title: string;
   body: string;
-  action: string;
+  observe: string;
+  task: string;
 }
 
 const GUIDE_COPY: Record<TutorialLesson, GuideCopy> = {
   room: {
     targets: ['.guide-room-input'],
     title: '填写你的直播间房间号',
-    body: '填写直播间网址末尾的数字，再点击“连接”。连接成功后，托盘后台才会接收礼物。',
-    action: '填写房间号',
+    body: '房间号决定后台监听哪一个直播间。连接成功后，托盘后台才会开始接收礼物。',
+    observe: '找到房间号输入框和旁边的“连接”按钮。',
+    task: '亲手填写房间号，再点击页面里的“连接”。',
   },
   attribute: {
     targets: ['.guide-attribute-add'],
     title: '打开属性创建中心',
-    body: '这里既有可以直接开播的玩法模板，也能从空白逐项配置。先打开创建中心。',
-    action: '打开创建中心',
+    body: '属性是后台持续保存和计算的数值，礼物规则与定时器都会改变它。',
+    observe: '看看“属性与礼物规则”工作区里已有的属性卡片。',
+    task: '亲手点击高亮的“+ 添加属性”。',
   },
   template: {
     targets: ['.guide-blank-template'],
     title: '从空白创建，完整练习一次',
-    body: '玩法模板适合快速开始；这次选择“从空白创建”，进入属性工作台学习每一项功能。',
-    action: '从空白创建',
+    body: '玩法模板适合快速开始；空白创建会让你逐项认识完整配置。',
+    observe: '比较玩法模板和“从空白创建”卡片的区别。',
+    task: '亲手选择高亮的“从空白创建”。',
   },
   basics: {
     targets: ['.guide-overtime-template'],
     title: '套用加班机模板',
-    body: '工作台里的训练模板只填写“加班时间”、起始值和计时器格式，后面的规则仍由你亲手配置。',
-    action: '使用模板',
+    body: '属性名称和值参与后台计算，显示格式只改变 OBS 中的呈现。',
+    observe: '先看属性名称、当前值和显示格式三个区域。',
+    task: '亲手点击“使用加班机模板”，观察这些字段如何变化。',
   },
   gift: {
     targets: ['.guide-gift-selection-ready', '.guide-gift-search', '.guide-add-gift'],
     title: '选择一种观众礼物',
-    body: '一个属性可以绑定任意数量的礼物。选好后点击“确认选择”，再配置它的规则。',
-    action: '添加礼物',
+    body: '礼物是触发入口；一个属性可以绑定多个礼物，每个礼物都能使用不同规则。',
+    observe: '留意礼物图片、名称、价格和上架状态。',
+    task: '亲手打开礼物列表，选择一个礼物并确认。',
   },
   rule: {
     targets: ['.guide-rule-simulator', '.guide-add-gift'],
     title: '决定礼物如何改变时间',
-    body: '选择增加、按价格增加、设为固定值或随机增加，再模拟收到 1 个礼物。模拟只预览，不改真实数值。',
-    action: '模拟一次',
+    body: '规则名称方便主播辨认；等号右侧的计算结果会成为属性的新值。',
+    observe: '先看规则名称、规则方式、计算表达式和下方预览。',
+    task: '亲手选择一种规则方式，再点击页面里的“模拟收到 1 个”。',
   },
   preset: {
     targets: ['.guide-save-preset'],
     title: '把这条规则保存为预设',
-    body: '“保存预设”位于高级规则中，只保存计算方法。以后配置其他礼物时可以直接套用。',
-    action: '保存预设',
+    body: '预设只保存计算方法，不会保存属性当前值，之后可快速套用到其他礼物。',
+    observe: '看看高级规则里的表达式和已有预设胶囊。',
+    task: '亲手点击“保存预设”并给它命名。',
   },
   timer: {
     targets: ['.guide-timer-simulator', '.guide-add-timer'],
     title: '让时间自动减少',
-    body: '添加每秒 -1 的定时器，并设置“加班时间大于 0”时才运行。它由托盘后台独立执行。',
-    action: '配置定时器',
+    body: '定时器由托盘后台独立运行，不依赖配置页或 OBS 页面保持打开。',
+    observe: '先看触发间隔、运行条件和触发后的属性值。',
+    task: '亲手添加每秒 -1 的定时器，并模拟执行一次。',
   },
   appearance: {
     targets: ['.guide-output-confirm'],
     title: '检查 OBS 中会显示什么',
-    body: '这里设置默认播报、数值状态和当前属性的皮肤。它们只改变画面，不会改变后台数值。',
-    action: '确认输出预览',
+    body: '这里设置默认播报、数值状态和当前属性的皮肤，只改变画面，不改变后台数值。',
+    observe: '观察预览里的属性名、数值、规则卡片和播报区域。',
+    task: '确认画面结构后，亲手点击“确认输出预览”。',
   },
   save: {
     targets: ['.guide-attribute-save'],
     title: '保存并交给后台校验',
     body: '保存时后台会校验礼物规则和定时器；只有全部有效才会写入本机配置。',
-    action: '创建属性',
+    observe: '回顾工作区标签，确认礼物规则、定时器和输出都已配置。',
+    task: '亲手点击页面底部的“创建属性”。',
   },
   enable: {
     targets: ['.guide-rule-toggle'],
     title: '在悬浮详情中启用规则',
     body: '属性卡片平时只显示关键信息；悬停或键盘聚焦后会展开详情。打开开关，后台才会执行这条礼物规则。',
-    action: '启用规则',
+    observe: '看看展开卡片里的礼物规则和启用开关。',
+    task: '亲手打开高亮规则的开关。',
   },
   output: {
     targets: ['.guide-obs-copy'],
     title: '把面板放进 OBS',
     body: '从展开的属性卡片复制专属链接，添加为 OBS“浏览器”来源。之后可以关闭配置页，托盘后台会继续收礼、计算和更新 OBS。',
-    action: '复制 OBS 链接',
+    observe: '每个属性都有独立链接，一个链接只显示一个属性面板。',
+    task: '亲手点击页面里的“复制 OBS 链接”。',
   },
 };
 
@@ -160,13 +173,19 @@ export function renderSpotlightGuide(context: SpotlightGuideContext): SpotlightG
     el('div', { class: 'tour-bubble-eyebrow', text: `加班机训练 · ${lessonIndex + 1}/${TUTORIAL_LESSONS.length}` }),
     el('h2', { class: 'tour-bubble-title', text: copy.title }),
     el('p', { class: 'tour-bubble-body', text: copy.body }),
+    el('div', { class: 'tour-bubble-observe' }, [
+      el('strong', { text: '先观察' }),
+      el('span', { text: copy.observe }),
+    ]),
+    el('div', { class: 'tour-bubble-task', role: 'status', ariaLive: 'polite' } as any, [
+      el('span', { class: 'tour-bubble-task-dot', ariaHidden: 'true' } as any),
+      el('span', { text: copy.task }),
+    ]),
   );
 
   const footer = el('div', { class: 'tour-bubble-footer' });
   const exit = el('button', { class: 'tour-bubble-skip', type: 'button', text: '退出训练' }) as HTMLButtonElement;
   const skip = el('button', { class: 'tour-bubble-skip', type: 'button', text: '跳过本关' }) as HTMLButtonElement;
-  const actionLabel = target?.className.split(/\s+/).includes('guide-gift-selection-ready') ? '确认选择' : copy.action;
-  const action = el('button', { class: 'btn tour-bubble-action', type: 'button', text: actionLabel }) as HTMLButtonElement;
   let positionQueued = false;
   const position = (): void => {
     positionQueued = false;
@@ -199,14 +218,7 @@ export function renderSpotlightGuide(context: SpotlightGuideContext): SpotlightG
     frame.dispose();
     context.onSkipLesson();
   };
-  action.onclick = () => {
-    frame.dispose();
-    if (target?.tagName === 'INPUT') (target as HTMLInputElement).focus();
-    else if (typeof target?.click === 'function') target.click();
-    else (target as any)?.onclick?.();
-    if (context.lesson === 'output') context.onDismiss();
-  };
-  footer.append(exit, skip, action);
+  footer.append(exit, skip);
   bubble.append(footer);
   frame.append(focus, bubble);
   context.host.append(frame);
