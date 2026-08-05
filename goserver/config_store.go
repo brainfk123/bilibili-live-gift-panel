@@ -81,6 +81,7 @@ func (s *configStore) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 	state := defaultAppState()
 	state.Settings.ShowTutorial = nil
+	state.Settings.TutorialReplayMode = nil
 	state.Settings.AutoUpdate = nil
 	if err := json.Unmarshal(body, &state); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": "配置必须是有效的 JSON 对象"})

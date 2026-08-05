@@ -672,7 +672,9 @@ export function mountConfig(root: HTMLElement): void {
       card.classList.remove('is-guide-expanded');
     });
     if (!editorOpen && (lesson === 'enable' || lesson === 'output')) {
-      root.querySelector<HTMLElement>('.attribute-card')?.classList.add('is-guide-expanded');
+      (root.querySelector<HTMLElement>('.guide-attribute-card')
+        ?? root.querySelector<HTMLElement>('.attribute-card'))
+        ?.classList.add('is-guide-expanded');
     }
     if (guideDismissed) return;
     if (!lesson) return;
@@ -1086,8 +1088,10 @@ export function mountConfig(root: HTMLElement): void {
   function renderAttributeCard(attribute: Attribute, index: number): HTMLElement {
     const rules = state.rules.filter((rule) => rule.attributeName === attribute.name);
     const timerRules = state.timerRules.filter((rule) => rule.attributeName === attribute.name);
+    const tutorialTargetIndex = state.settings.tutorialReplayMode ? state.attributes.length - 1 : 0;
+    const isTutorialTarget = index === tutorialTargetIndex;
     const card = el('article', {
-      class: 'attribute-card hover-detail-card',
+      class: `attribute-card hover-detail-card${isTutorialTarget ? ' guide-attribute-card' : ''}`,
       tabIndex: 0,
       ariaLabel: `属性“${attribute.name}”，当前值 ${formatValue(attribute.value, attribute)}。悬停或聚焦查看详细设置。`,
     } as any);
@@ -1211,13 +1215,16 @@ export function mountConfig(root: HTMLElement): void {
         const updateEnabledAppearance = (enabled: boolean): void => {
           ruleCard.classList.toggle('is-disabled', !enabled);
         };
-        const enabledButton = createEnabledButton(toggleLabel, 'gift-rule-enabled-button guide-rule-toggle', rule.enabled !== false, (enabled) => {
+        const enabledButton = createEnabledButton(toggleLabel, `gift-rule-enabled-button${isTutorialTarget && rule === rules[0] ? ' guide-rule-toggle' : ''}`, rule.enabled !== false, (enabled) => {
           const currentRule = state.rules.find((candidate) => candidate.id === rule.id);
           if (!currentRule) {
             render();
             return;
           }
           currentRule.enabled = enabled;
+          if (enabled && state.settings.tutorialReplayMode) {
+            markTutorialLessonComplete(state.settings, 'enable');
+          }
           updateEnabledAppearance(enabled);
           save();
           renderGuide();
@@ -1272,7 +1279,7 @@ export function mountConfig(root: HTMLElement): void {
       ariaLabel: `${attribute.name} 的 OBS 专属链接`,
     } as any) as HTMLInputElement;
     const copyObsButton = el('button', {
-      class: `btn attribute-obs-copy${index === 0 ? ' guide-obs-copy' : ''}`,
+      class: `btn attribute-obs-copy${isTutorialTarget ? ' guide-obs-copy' : ''}`,
       type: 'button',
       text: '复制 OBS 链接',
     }) as HTMLButtonElement;
@@ -2178,6 +2185,7 @@ export function mountConfig(root: HTMLElement): void {
             });
             state.formulaPresets = result.presets;
             await saveAndWait();
+            if (context === 'gift') editorTutorialProgress.presetSaved = true;
             refreshFormulaPresetLists(context);
             close();
             refreshEditorTutorial();
@@ -3481,6 +3489,17 @@ export function mountConfig(root: HTMLElement): void {
     const unrelatedTimers = renamedTimers.filter((rule) => rule.attributeName !== name);
     state.timerRules = [...unrelatedTimers, ...normalizedTimers];
     for (const item of normalizedRules) upsertGiftCatalog(state, item.gift);
+    if (state.settings.tutorialReplayMode) {
+      markTutorialLessonComplete(state.settings, 'attribute');
+      markTutorialLessonComplete(state.settings, 'template');
+      if (editorTutorialProgress.basicsConfigured) markTutorialLessonComplete(state.settings, 'basics');
+      if ((editorTutorialProgress.giftCount ?? 0) > 0) markTutorialLessonComplete(state.settings, 'gift');
+      if (editorTutorialProgress.giftPreviewed) markTutorialLessonComplete(state.settings, 'rule');
+      if (editorTutorialProgress.presetSaved) markTutorialLessonComplete(state.settings, 'preset');
+      if (editorTutorialProgress.timerPreviewed) markTutorialLessonComplete(state.settings, 'timer');
+      if (editorTutorialProgress.outputPreviewed) markTutorialLessonComplete(state.settings, 'appearance');
+      markTutorialLessonComplete(state.settings, 'save');
+    }
     try {
       await saveAndWait();
     } catch {

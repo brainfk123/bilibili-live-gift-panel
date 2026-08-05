@@ -63,6 +63,7 @@ export const defaultState = (): AppState => ({
     showTutorial: true,
     tutorialVersion: 3,
     tutorialCompletedLessons: [],
+    tutorialReplayMode: false,
     trainingCompletedTopics: [],
     lastSeenChangelogVersion: '',
     autoUpdate: true,
@@ -251,6 +252,7 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     && (parsed.rules?.length ?? 0) > 0;
   if (parsed.settings?.showTutorial === undefined) markSettingsMigrationRequired();
   if (parsed.settings?.tutorialVersion === undefined || !Array.isArray(parsed.settings?.tutorialCompletedLessons)) markSettingsMigrationRequired();
+  if (parsed.settings?.tutorialReplayMode === undefined) markSettingsMigrationRequired();
   if (!Array.isArray(parsed.settings?.trainingCompletedTopics)) markSettingsMigrationRequired();
   if (parsed.settings?.autoUpdate === undefined) markSettingsMigrationRequired();
   if (parsed.settings?.defaultDisplayThemeId === undefined) markSettingsMigrationRequired();
@@ -260,12 +262,16 @@ function normalizeState(parsed: Partial<AppState>): AppState {
       ['room', 'attribute', 'template', 'basics', 'gift', 'rule', 'preset', 'timer', 'appearance', 'save', 'enable', 'output'].includes(String(lesson))
     ))
     : [];
+  const tutorialReplayMode = parsed.settings?.tutorialReplayMode === undefined
+    ? showTutorial && setupComplete && tutorialCompletedLessons.length === 0
+    : parsed.settings.tutorialReplayMode === true;
   const settings = {
     ...base.settings,
     ...(parsed.settings ?? {}),
     showTutorial,
     tutorialVersion: 3,
     tutorialCompletedLessons: Array.from(new Set(tutorialCompletedLessons)),
+    tutorialReplayMode,
     trainingCompletedTopics: normalizeTrainingTopicIds(parsed.settings?.trainingCompletedTopics),
   };
   settings.panelOpacity = Math.min(100, Math.max(10, Number(settings.panelOpacity) || base.settings.panelOpacity));

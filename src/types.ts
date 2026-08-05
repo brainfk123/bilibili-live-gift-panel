@@ -253,6 +253,7 @@ export interface Settings {
   showTutorial: boolean;
   tutorialVersion: number;
   tutorialCompletedLessons: TutorialLesson[];
+  tutorialReplayMode: boolean;
   trainingCompletedTopics: TrainingTopicId[];
   lastSeenChangelogVersion: string;
   autoUpdate: boolean;

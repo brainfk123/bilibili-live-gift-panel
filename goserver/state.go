@@ -246,6 +246,7 @@ type settingsState struct {
 	ShowTutorial             *bool    `json:"showTutorial"`
 	TutorialVersion          int      `json:"tutorialVersion"`
 	TutorialCompletedLessons []string `json:"tutorialCompletedLessons"`
+	TutorialReplayMode       *bool    `json:"tutorialReplayMode"`
 	TrainingCompletedTopics  []string `json:"trainingCompletedTopics"`
 	LastSeenChangelogVersion string   `json:"lastSeenChangelogVersion"`
 	AutoUpdate               *bool    `json:"autoUpdate"`
@@ -287,6 +288,7 @@ type giftEvent struct {
 
 func defaultAppState() appState {
 	showTutorial := true
+	tutorialReplayMode := false
 	autoUpdate := true
 	return appState{
 		Attributes:     []attributeState{},
@@ -311,8 +313,9 @@ func defaultAppState() appState {
 			PanelOpacity:             55,
 			DefaultDisplayThemeID:    "glass",
 			ShowTutorial:             &showTutorial,
-			TutorialVersion:          2,
+			TutorialVersion:          3,
 			TutorialCompletedLessons: []string{},
+			TutorialReplayMode:       &tutorialReplayMode,
 			TrainingCompletedTopics:  []string{},
 			AutoUpdate:               &autoUpdate,
 		},
@@ -487,10 +490,19 @@ func normalizeAppState(state *appState) {
 		state.Settings.ShowTutorial = &showTutorial
 	}
 	if state.Settings.TutorialVersion <= 0 {
-		state.Settings.TutorialVersion = 2
+		state.Settings.TutorialVersion = 3
 	}
 	if state.Settings.TutorialCompletedLessons == nil {
 		state.Settings.TutorialCompletedLessons = []string{}
+	}
+	if state.Settings.TutorialReplayMode == nil {
+		tutorialReplayMode := state.Settings.ShowTutorial != nil &&
+			*state.Settings.ShowTutorial &&
+			strings.TrimSpace(state.RoomID) != "" &&
+			len(state.Attributes) > 0 &&
+			len(state.Rules) > 0 &&
+			len(state.Settings.TutorialCompletedLessons) == 0
+		state.Settings.TutorialReplayMode = &tutorialReplayMode
 	}
 	if state.Settings.TrainingCompletedTopics == nil {
 		state.Settings.TrainingCompletedTopics = []string{}

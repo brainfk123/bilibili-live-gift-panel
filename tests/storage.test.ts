@@ -16,6 +16,7 @@ describe('storage', () => {
     expect(s.settings.panelOpacity).toBe(55);
     expect(s.settings.trainingCompletedTopics).toEqual([]);
     expect(s.settings.lastSeenChangelogVersion).toBe('');
+    expect(s.settings.tutorialReplayMode).toBe(false);
   });
 
   it('clears only room-scoped records when switching rooms', () => {
@@ -48,6 +49,7 @@ describe('storage', () => {
     s.attributes.push({ name: '加班时间', value: 3600, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' });
     s.rules.push({ id: 'r1', giftId: 30607, attributeName: '加班时间', formula: 'price/1000*60' });
     s.settings.tutorialCompletedLessons = ['room', 'attribute'];
+    s.settings.tutorialReplayMode = true;
     s.settings.trainingCompletedTopics = ['blind-box', 'obs-no-change'];
     s.settings.lastSeenChangelogVersion = '0.2.0';
     await saveState(s);
@@ -57,6 +59,7 @@ describe('storage', () => {
     expect(loaded.rules).toHaveLength(1);
     expect(loaded.settings.tutorialVersion).toBe(3);
     expect(loaded.settings.tutorialCompletedLessons).toEqual(['room', 'attribute']);
+    expect(loaded.settings.tutorialReplayMode).toBe(true);
     expect(loaded.settings.trainingCompletedTopics).toEqual(['blind-box', 'obs-no-change']);
     expect(loaded.settings.lastSeenChangelogVersion).toBe('0.2.0');
   });
@@ -122,7 +125,24 @@ describe('storage', () => {
     expect(loaded.settings.showTutorial).toBe(true);
     expect(loaded.settings.tutorialVersion).toBe(3);
     expect(loaded.settings.tutorialCompletedLessons).toEqual([]);
+    expect(loaded.settings.tutorialReplayMode).toBe(false);
     expect(loaded.settings.trainingCompletedTopics).toEqual([]);
+    expect(consumeConfigMigrationRequired()).toBe(true);
+  });
+
+  it('infers replay mode for a complete legacy configuration with reset tutorial progress', async () => {
+    const legacy = defaultState();
+    legacy.roomId = '31567150';
+    legacy.attributes.push({ name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' });
+    legacy.rules.push({ id: 'r1', giftId: 1, attributeName: '积分', formula: '积分+1' });
+    const settings = { ...legacy.settings } as Partial<typeof legacy.settings>;
+    delete settings.tutorialReplayMode;
+    legacy.settings = settings as typeof legacy.settings;
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(legacy)));
+
+    await hydrateStateFromServer();
+
+    expect(loadState().settings.tutorialReplayMode).toBe(true);
     expect(consumeConfigMigrationRequired()).toBe(true);
   });
 

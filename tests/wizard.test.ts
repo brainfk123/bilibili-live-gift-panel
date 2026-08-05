@@ -10,6 +10,7 @@ import {
   getWizardChecklist,
   getWizardProgress,
   markTutorialLessonComplete,
+  resetTutorialProgress,
   type TutorialEditorProgress,
 } from '../src/ui/config/wizard';
 import { defaultState, loadState, resetState, saveState } from '../src/storage';
@@ -352,6 +353,32 @@ describe('wizard progress', () => {
     expect(getTutorialLesson(tutorialState, true, { open: false })).toBe('output');
     markTutorialLessonComplete(tutorialState.settings, 'output');
     expect(getTutorialLesson(tutorialState, true, { open: false })).toBeNull();
+  });
+
+  it('replays lessons independently from an existing complete configuration', () => {
+    const tutorialState = defaultState();
+    tutorialState.attributes.push({
+      name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '',
+    });
+    tutorialState.rules.push({
+      id: 'rule-1', giftId: 1, attributeName: '加班时间', formulaName: '加时', formula: '加班时间+60', enabled: true,
+    });
+    tutorialState.timerRules.push({
+      id: 'timer-1', attributeName: '加班时间', formulaName: '自动减少', intervalSeconds: 1,
+      condition: '加班时间>0', formula: 'MAX(加班时间-1,0)', enabled: true,
+    });
+    tutorialState.formulaPresets.push({
+      id: 'preset-1', name: '每元加时', context: 'gift', formula: '加班时间+price/1000*60', sourceAttributeName: '加班时间',
+    });
+
+    expect(getTutorialLesson(tutorialState, true)).toBe('output');
+    resetTutorialProgress(tutorialState.settings);
+
+    expect(tutorialState.settings.tutorialReplayMode).toBe(true);
+    expect(getTutorialLesson(tutorialState, true)).toBe('attribute');
+    expect(getTutorialLesson(tutorialState, true, { open: false, templateOpen: true, isNew: true })).toBe('template');
+    markTutorialLessonComplete(tutorialState.settings, 'output');
+    expect(tutorialState.settings.tutorialReplayMode).toBe(false);
   });
 });
 
@@ -1348,6 +1375,41 @@ describe('single-page configuration rendering', () => {
     (center.querySelector('.modal-close') as TestElement | null)?.onclick?.();
     expect(root.querySelector('.training-center')).toBeNull();
     expect(root.querySelector('.tour-bubble')).not.toBeNull();
+  });
+
+  it('collapses guided attribute details after resetting the main tutorial', async () => {
+    const configured = defaultState();
+    configured.roomId = '31567150';
+    configured.attributes.push({
+      name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '', broadcastMessage: '',
+    });
+    configured.rules.push({
+      id: 'rule-1', giftId: 1, attributeName: '加班时间', formulaName: '加时', formula: '加班时间+60', enabled: true,
+    });
+    configured.timerRules.push({
+      id: 'timer-1', attributeName: '加班时间', formulaName: '自动减少', intervalSeconds: 1,
+      condition: '加班时间>0', formula: 'MAX(加班时间-1,0)', enabled: true,
+    });
+    configured.formulaPresets.push({
+      id: 'preset-1', name: '每元加时', context: 'gift', formula: '加班时间+price/1000*60', sourceAttributeName: '加班时间',
+    });
+    configured.settings.showTutorial = false;
+    await saveState(configured);
+    mockedRuntimeState = 'connected';
+    const root = new TestElement('div');
+
+    mountConfig(root as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(root)).toContain('已连接'));
+    expect(root.querySelector('.attribute-card')?.className.split(' ')).not.toContain('is-guide-expanded');
+
+    (root.querySelector('.training-toggle') as TestElement | null)?.onclick?.();
+    const center = root.querySelector('.training-center') as TestElement;
+    findByText(center, '重置主线进度')?.onclick?.();
+
+    expect(root.querySelector('.training-center')).toBeNull();
+    expect(textOf(root.querySelector('.tour-bubble') as TestElement)).toContain('打开属性创建中心');
+    expect(root.querySelector('.attribute-card')?.className.split(' ')).not.toContain('is-guide-expanded');
+    expect(loadState().settings.tutorialReplayMode).toBe(true);
   });
 
   it('keeps room, OBS, attributes, and data settings on one page without step navigation', () => {

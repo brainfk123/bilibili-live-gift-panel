@@ -698,6 +698,44 @@ func TestConfigStorePreservesTrainingTopicProgress(t *testing.T) {
 	}
 }
 
+func TestConfigStorePreservesTutorialReplayMode(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{"settings":{"showTutorial":true,"tutorialVersion":3,"tutorialCompletedLessons":[],"tutorialReplayMode":true}}`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", response.Code, response.Body.String())
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Settings.TutorialReplayMode == nil || !*state.Settings.TutorialReplayMode {
+		t.Fatal("tutorial replay mode should survive persistence")
+	}
+}
+
+func TestLegacyResetTutorialInfersReplayMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := `{
+        "roomId":"31567150",
+        "attributes":[{"name":"积分","value":0,"unit":"none","format":"number","decimals":0,"suffix":""}],
+        "rules":[{"id":"r1","giftId":1,"attributeName":"积分","formula":"积分+1"}],
+        "settings":{"showTutorial":true,"tutorialVersion":3,"tutorialCompletedLessons":[]}
+    }`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &configStore{path: path}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Settings.TutorialReplayMode == nil || !*state.Settings.TutorialReplayMode {
+		t.Fatal("legacy reset tutorial should resume in replay mode")
+	}
+}
+
 func TestConfigStorePreservesLastSeenChangelogVersion(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	payload := `{"settings":{"showTutorial":false,"lastSeenChangelogVersion":"0.2.0"}}`

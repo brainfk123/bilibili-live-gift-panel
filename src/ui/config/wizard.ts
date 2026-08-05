@@ -23,6 +23,7 @@ export interface TutorialEditorProgress {
   basicsConfigured?: boolean;
   giftCount?: number;
   giftPreviewed?: boolean;
+  presetSaved?: boolean;
   timerCount?: number;
   timerPreviewed?: boolean;
   outputPreviewed?: boolean;
@@ -92,6 +93,17 @@ export function isTutorialLessonComplete(
 ): boolean {
   if (recordedCompletion(state, lesson)) return true;
   if (lesson === 'room') return connected;
+  if (state.settings.tutorialReplayMode) {
+    if (lesson === 'attribute') return editor.templateOpen === true || editor.open;
+    if (lesson === 'template') return editor.open;
+    if (lesson === 'basics') return editor.basicsConfigured === true;
+    if (lesson === 'gift') return (editor.giftCount ?? 0) > 0;
+    if (lesson === 'rule') return editor.giftPreviewed === true;
+    if (lesson === 'preset') return editor.presetSaved === true;
+    if (lesson === 'timer') return editor.timerPreviewed === true;
+    if (lesson === 'appearance') return editor.outputPreviewed === true;
+    return false;
+  }
   if (lesson === 'attribute') return state.attributes.length > 0 || editor.templateOpen === true || editor.open;
   if (lesson === 'template') return state.attributes.length > 0 || editor.open;
   if (lesson === 'basics') {
@@ -146,11 +158,13 @@ export function markTutorialLessonComplete(settings: Settings, lesson: TutorialL
     ...(settings.tutorialCompletedLessons ?? []),
     lesson,
   ]));
+  if (lesson === 'output') settings.tutorialReplayMode = false;
 }
 
 export function resetTutorialProgress(settings: Settings): void {
   settings.tutorialVersion = TUTORIAL_VERSION;
   settings.tutorialCompletedLessons = [];
+  settings.tutorialReplayMode = true;
   settings.showTutorial = true;
 }
 

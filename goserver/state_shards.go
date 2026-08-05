@@ -197,6 +197,9 @@ func prepareOptionalSettingsForDecode(data []byte, state *appState) {
 	if _, exists := settings["showTutorial"]; !exists {
 		state.Settings.ShowTutorial = nil
 	}
+	if _, exists := settings["tutorialReplayMode"]; !exists {
+		state.Settings.TutorialReplayMode = nil
+	}
 	if _, exists := settings["autoUpdate"]; !exists {
 		state.Settings.AutoUpdate = nil
 	}
