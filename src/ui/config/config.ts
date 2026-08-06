@@ -833,7 +833,7 @@ export function mountConfig(root: HTMLElement): void {
     card.append(sectionHeading(
       '可选登录',
       '主播账号',
-      '登录是可选的，用普通 B 站账号扫码即可；登录信息只加密保存在本机。',
+      '登录用于补全盲盒和观众信息；普通 B 站账号即可，不一定要主播本人，登录信息只加密保存在本机。',
     ));
     const identity = el('div', { class: `login-identity is-${biliAuth.state}` });
     if (biliAuth.state === 'logged_in') {
@@ -885,9 +885,9 @@ export function mountConfig(root: HTMLElement): void {
         text: biliAuth.state === 'logged_in' ? '登录能力已开启' : '登录后可以',
       }),
       el('div', { class: 'login-capability-list' }, [
-        loginCapability('自动识别盲盒会开出哪些礼物'),
+        loginCapability('自动识别盲盒及实际开出的礼物'),
+        loginCapability('完整统计盲盒成本、价值和盈亏，驱动 OBS 盈亏榜'),
         loginCapability('尽量补全送礼人的昵称和头像'),
-        loginCapability('普通 B 站账号也能登录，不一定要主播本人'),
       ]),
     ]);
     card.append(
@@ -896,8 +896,8 @@ export function mountConfig(root: HTMLElement): void {
       el('p', {
         class: `login-fallback-note${biliAuth.isRoomOwner === false ? ' is-info' : ''}`,
         text: biliAuth.state === 'logged_in'
-          ? 'B 站仍然隐藏的信息无法补全时，会继续显示脱敏昵称。'
-          : '不登录也能连接直播间和执行礼物规则。',
+          ? '普通 B 站账号即可，不一定要主播本人；B 站仍然隐藏的信息会继续显示脱敏昵称。'
+          : '不登录仍能连接直播间和执行礼物规则；盲盒盈亏榜依赖登录，无法识别的盲盒不会计入统计。',
       }),
       actions,
     );

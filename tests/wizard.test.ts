@@ -1644,10 +1644,12 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root)).toContain('可选登录');
     expect(textOf(root)).toContain('匿名模式');
     expect(textOf(root)).toContain('登录后可以');
-    expect(textOf(root)).toContain('自动识别盲盒会开出哪些礼物');
+    expect(textOf(root)).toContain('自动识别盲盒及实际开出的礼物');
+    expect(textOf(root)).toContain('驱动 OBS 盈亏榜');
     expect(textOf(root)).toContain('尽量补全送礼人的昵称和头像');
-    expect(textOf(root)).toContain('普通 B 站账号也能登录，不一定要主播本人');
-    expect(textOf(root)).toContain('不登录也能连接直播间和执行礼物规则');
+    expect(textOf(root)).toContain('普通 B 站账号即可，不一定要主播本人');
+    expect(textOf(root)).toContain('不登录仍能连接直播间和执行礼物规则');
+    expect(textOf(root)).toContain('盲盒盈亏榜依赖登录');
     expect(findByText(root, '扫码登录')).not.toBeNull();
   });
 
