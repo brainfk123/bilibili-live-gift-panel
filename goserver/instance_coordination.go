@@ -61,6 +61,12 @@ func compareRunningVersion(current, running string) int {
 	if current == running && current != "" {
 		return 0
 	}
+	if current == "dev" {
+		return 1
+	}
+	if running == "dev" {
+		return -1
+	}
 	comparison, err := compareStableVersions(current, running)
 	if err == nil {
 		return comparison
@@ -124,8 +130,7 @@ func newInstanceExitHandler(currentVersion string, exit chan<- struct{}) http.Ha
 			return
 		}
 		requestVersion := r.Header.Get("X-Bilibili-Panel-Takeover")
-		comparison, versionErr := compareStableVersions(requestVersion, currentVersion)
-		if versionErr != nil || comparison <= 0 {
+		if compareRunningVersion(requestVersion, currentVersion) <= 0 {
 			writeJSON(w, http.StatusConflict, map[string]any{"code": -1, "message": "仅允许更新版本接管当前实例"})
 			return
 		}
