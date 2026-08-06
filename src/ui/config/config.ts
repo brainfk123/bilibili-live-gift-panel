@@ -3,6 +3,7 @@ import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBac
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { bindFloatingDetailCard, el, fieldControl, inputField, setFloatingDetailGuideExpanded, toast } from '../common';
 import { builtinCatalog, findGift, giftDisplayKey, matchesGiftSearch, sortGiftsByUsage } from '../../gifts/catalog';
+import { giftPriceDescription, isSpecialEventGift } from '../../gifts/special-events';
 import { formatValue } from '../../format';
 import {
   BiliAuthStatus,
@@ -79,7 +80,7 @@ interface SelectedGiftRule {
   simulationPreview?: { currentValue: number; result: number };
 }
 
-type GiftAvailability = 'listed' | 'observed' | 'historical';
+type GiftAvailability = 'special' | 'listed' | 'observed' | 'historical';
 type LeaderboardMode = 'contribution' | 'rules' | 'blind-box';
 
 interface GiftPickerCatalog {
@@ -2651,11 +2652,12 @@ export function mountConfig(root: HTMLElement): void {
       image.src = gift.imgBasic || transparentPixel();
       const availability = pickerCatalog.availabilityById.get(gift.id) ?? 'historical';
       const statusLabel: Record<GiftAvailability, string> = {
+        special: '直播事件',
         listed: '已上架',
         observed: '直播中收到过',
         historical: '历史礼物',
       };
-      const showStatus = showAllStatuses || availability === 'observed';
+      const showStatus = showAllStatuses || availability === 'observed' || availability === 'special';
       button.append(
         image,
         el('span', { class: 'gift-choice-copy' }, [
@@ -2761,7 +2763,7 @@ export function mountConfig(root: HTMLElement): void {
     }
 
     async function hydrateBlindBoxRule(item: SelectedGiftRule): Promise<void> {
-      if (selected.get(item.gift.id) !== item || (item.matchGiftIds?.length ?? 0) > 1) return;
+      if (isSpecialEventGift(item.gift) || selected.get(item.gift.id) !== item || (item.matchGiftIds?.length ?? 0) > 1) return;
       try {
         const lookup = await getBlindBoxInfo(item.gift.id);
         if (selected.get(item.gift.id) !== item) return;
@@ -2825,7 +2827,11 @@ export function mountConfig(root: HTMLElement): void {
           giftImage,
           el('div', {}, [
             el('strong', { text: item.gift.name }),
-            el('small', { text: `每收到 1 个执行一次 · ${giftPriceLabel(item.gift)}` }),
+            el('small', {
+              text: isSpecialEventGift(item.gift)
+                ? '每次发生时执行一次 · 实际支付金额会传入 price'
+                : `每收到 1 个执行一次 · ${giftPriceLabel(item.gift)}`,
+            }),
             blindBoxStatus,
           ]),
         ]),
@@ -4043,9 +4049,12 @@ function buildGiftPickerCatalog(state: AppState, roomGiftCatalog: GiftInfo[]): G
       availability: (gift.count > 0 || gift.lastReceived > 0 ? 'observed' : 'historical') as GiftAvailability,
     })),
     ...configuredGifts.map((gift) => ({ gift, availability: 'historical' as GiftAvailability })),
-    ...builtinCatalog.map((gift) => ({ gift, availability: 'historical' as GiftAvailability })),
+    ...builtinCatalog.map((gift) => ({
+      gift,
+      availability: (isSpecialEventGift(gift) ? 'special' : 'historical') as GiftAvailability,
+    })),
   ];
-  const priority: Record<GiftAvailability, number> = { listed: 3, observed: 2, historical: 1 };
+  const priority: Record<GiftAvailability, number> = { special: 4, listed: 3, observed: 2, historical: 1 };
   const byDisplayKey = new Map<string, { gift: GiftInfo; availability: GiftAvailability }>();
   for (const candidate of candidates) {
     const key = giftDisplayKey(candidate.gift);
@@ -4056,7 +4065,8 @@ function buildGiftPickerCatalog(state: AppState, roomGiftCatalog: GiftInfo[]): G
   }
   const merged = Array.from(byDisplayKey.values());
   const availabilityById = new Map(merged.map(({ gift, availability }) => [gift.id, availability]));
-  const gifts = sortGiftsByUsage(merged.map(({ gift }) => gift), configuredGifts, state.recentGifts);
+  const gifts = sortGiftsByUsage(merged.map(({ gift }) => gift), configuredGifts, state.recentGifts)
+    .sort((left, right) => Number(isSpecialEventGift(right)) - Number(isSpecialEventGift(left)));
   return { gifts, availabilityById, hasLiveListingStatus };
 }
 
@@ -4143,7 +4153,7 @@ function displayFormatLabel(attribute: Attribute): string {
 }
 
 function giftPriceLabel(gift: GiftInfo): string {
-  return `${gift.price} ${gift.coinType === 'gold' ? '金瓜子' : '银瓜子'}`;
+  return giftPriceDescription(gift);
 }
 
 function emptyState(text: string): HTMLElement {

@@ -81,6 +81,96 @@ func TestParseBiliGiftExtractsBlindBoxParent(t *testing.T) {
 	}
 }
 
+func TestParseBiliPaidEventParsesGuardBuy(t *testing.T) {
+	payload, _ := json.Marshal(map[string]any{
+		"cmd": "GUARD_BUY",
+		"data": map[string]any{
+			"uid": 123456789, "username": "大航海观众", "guard_level": 3,
+			"num": 2, "price": 198000, "start_time": 1700000100, "order_id": "guard-order-1",
+			"sender_uinfo": map[string]any{
+				"uid":  123456789,
+				"base": map[string]any{"name": "完整大航海观众", "face": "https://example.test/guard.png"},
+			},
+		},
+	})
+	gift, ok := parseBiliPaidEvent(payload)
+	if !ok {
+		t.Fatal("GUARD_BUY was not parsed")
+	}
+	if gift.GiftID != specialGiftGuardCaptain || gift.GiftName != "大航海·舰长" || gift.Num != 2 {
+		t.Fatalf("guard identity = %#v", gift)
+	}
+	if gift.Price != 198000 || gift.TotalCoin != 396000 || gift.CoinType != "gold" {
+		t.Fatalf("guard price = %#v", gift)
+	}
+	if gift.UID != 123456789 || gift.Uname != "大航海观众" || gift.Avatar != "https://example.test/guard.png" {
+		t.Fatalf("guard sender = %#v", gift)
+	}
+	if gift.Rnd != "guard:guard-order-1" || gift.Timestamp != 1700000100 || gift.ImgBasic == "" {
+		t.Fatalf("guard metadata = %#v", gift)
+	}
+}
+
+func TestParseBiliPaidEventMapsEveryGuardLevel(t *testing.T) {
+	wants := map[int]int{
+		3: specialGiftGuardCaptain,
+		2: specialGiftGuardAdmiral,
+		1: specialGiftGuardGovernor,
+	}
+	for level, wantID := range wants {
+		payload, _ := json.Marshal(map[string]any{
+			"cmd":  "GUARD_BUY",
+			"data": map[string]any{"guard_level": level, "price": 1, "uid": 1},
+		})
+		gift, ok := parseBiliPaidEvent(payload)
+		if !ok || gift.GiftID != wantID {
+			t.Fatalf("guard level %d = %#v, ok=%v", level, gift, ok)
+		}
+	}
+	payload := []byte(`{"cmd":"GUARD_BUY","data":{"guard_level":0,"price":1}}`)
+	if _, ok := parseBiliPaidEvent(payload); ok {
+		t.Fatal("unknown guard level was accepted")
+	}
+}
+
+func TestParseBiliPaidEventParsesSuperChatInGoldSeedUnits(t *testing.T) {
+	payload, _ := json.Marshal(map[string]any{
+		"cmd": "SUPER_CHAT_MESSAGE",
+		"data": map[string]any{
+			"id": 987654321, "uid": "123456789", "price": 50, "ts": 1700000200,
+			"message":   "测试醒目留言",
+			"user_info": map[string]any{"uname": "醒目留言观众", "face": "https://example.test/sc.png"},
+		},
+	})
+	gift, ok := parseBiliPaidEvent(payload)
+	if !ok {
+		t.Fatal("SUPER_CHAT_MESSAGE was not parsed")
+	}
+	if gift.GiftID != specialGiftSuperChat || gift.GiftName != "Super Chat" || gift.Num != 1 {
+		t.Fatalf("super chat identity = %#v", gift)
+	}
+	if gift.Price != 50000 || gift.TotalCoin != 50000 || gift.CoinType != "gold" {
+		t.Fatalf("super chat unit conversion = %#v", gift)
+	}
+	if gift.UID != 123456789 || gift.Uname != "醒目留言观众" || gift.Avatar != "https://example.test/sc.png" {
+		t.Fatalf("super chat sender = %#v", gift)
+	}
+	if gift.Rnd != "super-chat:987654321" || gift.Timestamp != 1700000200 || gift.ImgBasic == "" {
+		t.Fatalf("super chat metadata = %#v", gift)
+	}
+}
+
+func TestParseBiliPaidEventDeduplicatesSuperChatLanguageVariants(t *testing.T) {
+	base := map[string]any{"id": "sc-duplicate-1", "uid": 1, "price": 30, "ts": 1700000300}
+	normal, _ := json.Marshal(map[string]any{"cmd": "SUPER_CHAT_MESSAGE", "data": base})
+	japanese, _ := json.Marshal(map[string]any{"cmd": "SUPER_CHAT_MESSAGE_JPN:1", "data": base})
+	left, leftOK := parseBiliPaidEvent(normal)
+	right, rightOK := parseBiliPaidEvent(japanese)
+	if !leftOK || !rightOK || left.Rnd == "" || left.Rnd != right.Rnd {
+		t.Fatalf("language variants = %#v / %#v", left, right)
+	}
+}
+
 func TestBiliPacketRoundTrip(t *testing.T) {
 	payload := encodeBiliPacket(biliOpMessage, []byte(`{"cmd":"SEND_GIFT"}`))
 	packets := decodeBiliPackets(payload)

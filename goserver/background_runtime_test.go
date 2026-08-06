@@ -154,6 +154,48 @@ func TestApplyGiftEventUpdatesEveryMatchingAttribute(t *testing.T) {
 	}
 }
 
+func TestApplyGiftEventUsesPaidEventAmountForRulesAndContributions(t *testing.T) {
+	state := defaultAppState()
+	state.Attributes = []attributeState{{Name: "加班时间", Value: 0, Unit: "seconds", Format: "hhmmss"}}
+	state.Rules = []giftRule{{
+		ID: "super-chat-time", GiftID: specialGiftSuperChat, AttributeName: "加班时间",
+		FormulaName: "每元增加一秒", Formula: "加班时间+price/1000",
+	}}
+	state.GiftCatalog = []giftInfo{{ID: specialGiftSuperChat, Name: "Super Chat", Price: 30000, CoinType: "gold"}}
+
+	applyGiftEvent(&state, giftEvent{
+		GiftID: specialGiftSuperChat, GiftName: "Super Chat", Num: 1,
+		Price: 50000, TotalCoin: 50000, CoinType: "gold",
+		UID: 123, Uname: "醒目留言观众", Timestamp: 1700000400, Rnd: "super-chat:runtime-1",
+	})
+
+	if state.Attributes[0].Value != 50 || len(state.Log) != 1 {
+		t.Fatalf("super chat rule result: attribute=%#v log=%#v", state.Attributes, state.Log)
+	}
+	if len(state.Contributions.Viewers) != 1 || state.Contributions.Viewers[0].GoldValue != 50000 {
+		t.Fatalf("super chat contribution = %#v", state.Contributions)
+	}
+}
+
+func TestApplyGiftEventRepeatsGuardRuleForPurchasedQuantity(t *testing.T) {
+	state := defaultAppState()
+	state.Attributes = []attributeState{{Name: "舰长月数", Value: 0, Unit: "none", Format: "number"}}
+	state.Rules = []giftRule{{
+		ID: "captain-months", GiftID: specialGiftGuardCaptain, AttributeName: "舰长月数",
+		Formula: "舰长月数+1",
+	}}
+
+	applyGiftEvent(&state, giftEvent{
+		GiftID: specialGiftGuardCaptain, GiftName: "大航海·舰长", Num: 3,
+		Price: 198000, TotalCoin: 594000, CoinType: "gold",
+		UID: 456, Uname: "大航海观众", Timestamp: 1700000500, Rnd: "guard:runtime-1",
+	})
+
+	if state.Attributes[0].Value != 3 || len(state.Log) != 1 || state.Log[0].Num != 3 {
+		t.Fatalf("guard rule result: attribute=%#v log=%#v", state.Attributes, state.Log)
+	}
+}
+
 func TestApplyGiftEventMatchesBlindBoxParentFromEvent(t *testing.T) {
 	state := defaultAppState()
 	state.Attributes = []attributeState{{Name: "加班时间", Value: 0, Unit: "seconds", Format: "hhmmss"}}

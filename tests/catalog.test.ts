@@ -2,12 +2,20 @@ import { describe, it, expect } from 'vitest';
 import { upsertRecentGift, findGift, builtinCatalog, giftDisplayKey, loadBuiltinCatalog, matchesGiftSearch, sameGiftIdentity, sortGiftsByUsage } from '../src/gifts/catalog';
 import { defaultState } from '../src/storage';
 import { GiftEvent } from '../src/bilibili/messages';
+import { SPECIAL_EVENT_GIFT_IDS, giftPriceDescription, specialEventCatalog } from '../src/gifts/special-events';
 
 function makeGift(id: number, name = '礼物'): GiftEvent {
   return { giftId: id, giftName: name, num: 1, price: 10, coinType: 'gold', totalCoin: 10, uname: 'u', uid: 1, timestamp: 1700000000, imgBasic: '', rnd: `x-${id}` };
 }
 
 describe('catalog', () => {
+  it('includes configurable paid live events before ordinary gifts', () => {
+    expect(builtinCatalog.slice(0, 4)).toEqual(specialEventCatalog);
+    expect(findGift(defaultState(), SPECIAL_EVENT_GIFT_IDS.guardCaptain)?.name).toBe('大航海·舰长');
+    expect(findGift(defaultState(), SPECIAL_EVENT_GIFT_IDS.superChat)?.name).toBe('Super Chat');
+    expect(giftPriceDescription(specialEventCatalog[0])).toBe('按实际支付金额');
+  });
+
   it('upserts new gift to recent', () => {
     const s = defaultState();
     upsertRecentGift(s, makeGift(999));

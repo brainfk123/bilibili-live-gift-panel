@@ -156,6 +156,10 @@ func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callba
 			for _, body := range bodies {
 				if gift, ok := parseBiliGift(body); ok {
 					callbacks.onGift(gift)
+					continue
+				}
+				if paidEvent, ok := parseBiliPaidEvent(body); ok {
+					callbacks.onGift(paidEvent)
 				}
 			}
 		}

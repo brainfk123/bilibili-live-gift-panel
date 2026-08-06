@@ -11,6 +11,7 @@ import {
   type TemplateParameterDefinition,
 } from '../../gameplay-templates';
 import { matchesGiftSearch } from '../../gifts/catalog';
+import { giftPriceDescription } from '../../gifts/special-events';
 import type { GiftInfo } from '../../types';
 import { el } from '../common';
 
@@ -373,7 +374,7 @@ export function createGameplayTemplateWizard(options: GameplayTemplateWizardOpti
       image,
       el('span', { class: 'template-gift-choice-copy' }, [
         el('strong', { text: gift.name, title: gift.name }),
-        el('small', { text: `${gift.price} ${gift.coinType === 'gold' ? '金瓜子' : '银瓜子'}` }),
+        el('small', { text: giftPriceDescription(gift) }),
       ]),
       el('span', { class: 'template-gift-choice-action', text: selected ? '✓' : usedBy ? '移动' : '+' }),
     );

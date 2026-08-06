@@ -3312,6 +3312,7 @@ body.config-mode::-webkit-scrollbar-corner,
   line-height: 1.4;
 }
 .config-root .gift-listing-status.is-listed { border-color: var(--success-border); background: var(--success-soft); color: var(--success-text); }
+.config-root .gift-listing-status.is-special { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-text); }
 .config-root .gift-listing-status.is-observed { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-text); }
 .config-root .gift-listing-status.is-historical { background: var(--card); color: var(--text-dim); }
 .config-root .gift-choice-check {

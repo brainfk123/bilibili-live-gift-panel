@@ -170,6 +170,8 @@ export interface GiftInfo {
   imgBasic: string;
   /** Whether the gift is currently listed in the connected room. */
   listed?: boolean;
+  /** Stable synthetic event used to configure non-SEND_GIFT paid live events. */
+  specialEvent?: 'guard-captain' | 'guard-admiral' | 'guard-governor' | 'super-chat';
   /** Parent blind-box metadata used when SEND_GIFT only contains the opened reward. */
   blindBoxParentId?: number;
   blindBoxParentName?: string;

@@ -1,8 +1,9 @@
 import catalog from '../data/gift-catalog.json';
 import { GiftEvent } from '../bilibili/messages';
 import { AppState, GiftInfo, RecentGift } from '../types';
+import { specialEventCatalog } from './special-events';
 
-export const builtinCatalog: GiftInfo[] = catalog as GiftInfo[];
+export const builtinCatalog: GiftInfo[] = [...specialEventCatalog, ...(catalog as GiftInfo[])];
 
 type GiftIdentity = Pick<GiftInfo, 'name' | 'price' | 'coinType' | 'imgBasic'>;
 
