@@ -461,7 +461,7 @@ const TEMPLATES: readonly GameplayTemplateDefinition[] = [
         attributes,
         rules,
         timerRules: [],
-        displayScenes: [{ id: sceneId, name: `${activityName}面板`, attributeNames: [leftName, rightName], layout: 'grid', themeId: themed(input, 'neon') }],
+        displayScenes: [{ id: sceneId, name: `${activityName}面板`, attributeNames: [leftName, rightName], layout: 'versus', themeId: themed(input, 'neon') }],
         activities: [{
           id: activityId, name: activityName, attributeNames: [leftName, rightName], sceneId,
           status: 'not_started', resultMode: 'highest', gateRules: true,
@@ -512,7 +512,7 @@ const TEMPLATES: readonly GameplayTemplateDefinition[] = [
         attributes,
         rules,
         timerRules: [],
-        displayScenes: [{ id: sceneId, name: `${activityName}面板`, attributeNames: [leftName, rightName], layout: 'grid', themeId: themed(input, 'kawaii') }],
+        displayScenes: [{ id: sceneId, name: `${activityName}面板`, attributeNames: [leftName, rightName], layout: 'versus', themeId: themed(input, 'kawaii') }],
         activities: [{
           id: ids.next('activity'), name: activityName, attributeNames: [leftName, rightName], sceneId,
           status: 'not_started', resultMode: 'highest', gateRules: true,
@@ -549,7 +549,7 @@ const TEMPLATES: readonly GameplayTemplateDefinition[] = [
         }],
         rules,
         timerRules: [],
-        displayScenes: [{ id: sceneId, name: `${name}面板`, attributeNames: [name], layout: 'stack', themeId: themed(input, 'pixel') }],
+        displayScenes: [{ id: sceneId, name: `${name}面板`, attributeNames: [name], layout: 'focus', themeId: themed(input, 'pixel') }],
         activities: [{
           id: ids.next('activity'), name: `${name}挑战`, attributeNames: [name], sceneId,
           status: 'not_started', resultMode: 'none', gateRules: true, initialValues: { [name]: 0 },
@@ -591,7 +591,7 @@ const TEMPLATES: readonly GameplayTemplateDefinition[] = [
         }],
         rules,
         timerRules: [],
-        displayScenes: [{ id: sceneId, name: `${name}面板`, attributeNames: [name], layout: 'stack', themeId: themed(input, 'glass') }],
+        displayScenes: [{ id: sceneId, name: `${name}面板`, attributeNames: [name], layout: 'focus', themeId: themed(input, 'glass') }],
         activities: [{
           id: ids.next('activity'), name: `${name}冲刺`, attributeNames: [name], sceneId,
           status: 'not_started', resultMode: 'none', gateRules: true, initialValues: { [name]: 0 },

@@ -21,7 +21,8 @@ body.display-mode { overflow: hidden; background: transparent; }
 .display-stack.center { left: 50%; transform: translateX(-50%); }
 .display-stack.right { right: 20px; left: auto; }
 .display-stack.is-scene { width: min(600px, calc(100% - 40px)); }
-.display-stack.is-scene-grid { width: min(1040px, calc(100% - 40px)); }
+.display-stack.is-scene-wide { width: min(1040px, calc(100% - 40px)); }
+.display-stack.is-scene-focus { width: min(780px, calc(100% - 40px)); }
 .display-stack.blind-box-stack { width: min(620px, calc(100% - 40px)); }
 
 .panel {
@@ -94,6 +95,101 @@ body.display-mode { overflow: hidden; background: transparent; }
 .panel.scene-layout-grid .display-gift-rules { grid-template-columns: 1fr; }
 .panel.scene-layout-grid .display-gift-rule { min-height: 68px; }
 .panel.scene-layout-grid .display-scene-broadcast { margin-top: -4px; }
+
+/* Scene layouts represent gameplay structure independently from visual themes. */
+.panel.scene-layout-focus,
+.panel.scene-layout-versus,
+.panel.scene-layout-dashboard {
+  display: grid;
+  align-items: stretch;
+}
+.panel.scene-layout-focus > :not(.attr),
+.panel.scene-layout-versus > :not(.attr),
+.panel.scene-layout-dashboard > :not(.attr) { grid-column: 1 / -1; }
+
+.panel.scene-layout-focus { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.panel.scene-layout-focus .attr {
+  padding: 9px;
+  border: 1px solid var(--theme-outline, var(--panel-outline));
+  border-radius: 14px;
+}
+.panel.scene-layout-focus .attr + .attr { padding-top: 9px; }
+.panel.scene-layout-focus .attr.is-primary { grid-column: 1 / -1; padding: 0; border: 0; }
+.panel.scene-layout-focus .attr.is-primary .attr-summary { min-height: 154px; }
+.panel.scene-layout-focus .attr.is-primary .attr-name { font-size: 36px; }
+.panel.scene-layout-focus .attr:not(.is-primary) .attr-summary { min-height: 76px; padding: 9px 11px; }
+.panel.scene-layout-focus .attr:not(.is-primary) .attr-name { font-size: 18px; }
+.panel.scene-layout-focus .attr:not(.is-primary) .display-gift-rules { grid-template-columns: 1fr; }
+.panel.scene-layout-focus .attr:not(.is-primary) .display-gift-rule { min-height: 54px; }
+
+.panel.scene-layout-versus {
+  position: relative;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 20px;
+}
+.panel.scene-layout-versus .attr {
+  padding: 10px;
+  border: 1px solid var(--theme-outline, var(--panel-outline));
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--theme-accent, var(--accent)) 7%, transparent);
+}
+.panel.scene-layout-versus .attr + .attr { padding-top: 10px; }
+.panel.scene-layout-versus .scene-item-1 { text-align: left; }
+.panel.scene-layout-versus .scene-item-2 { text-align: right; }
+.panel.scene-layout-versus .scene-item-2::before {
+  content: "VS";
+  position: absolute;
+  top: 50%;
+  left: -24px;
+  z-index: 2;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid var(--theme-outline, var(--panel-outline));
+  border-radius: 50%;
+  background: var(--theme-surface, #15171f);
+  color: var(--theme-accent, var(--accent));
+  font-size: 10px;
+  font-weight: 900;
+}
+.panel.scene-layout-versus .attr:nth-of-type(n+3) { grid-column: 1 / -1; }
+.panel.scene-layout-versus .attr-summary { grid-template-columns: 1fr; min-height: 132px; text-align: inherit; }
+.panel.scene-layout-versus .scene-item-2 .attr-value,
+.panel.scene-layout-versus .scene-item-2 .attr-value.is-enum-mapped { justify-content: flex-end; }
+.panel.scene-layout-versus .display-gift-rules { grid-template-columns: 1fr; }
+
+.panel.scene-layout-dashboard {
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, .65fr);
+  grid-auto-flow: row;
+}
+.panel.scene-layout-dashboard .attr {
+  grid-column: 2;
+  padding: 8px;
+  border: 1px solid var(--theme-outline, var(--panel-outline));
+  border-radius: 13px;
+}
+.panel.scene-layout-dashboard .attr + .attr { padding-top: 8px; }
+.panel.scene-layout-dashboard .attr.is-primary {
+  grid-column: 1;
+  grid-row: span 12;
+  padding: 0;
+  border: 0;
+}
+.panel.scene-layout-dashboard .attr.is-primary .attr-summary {
+  grid-template-columns: 1fr;
+  align-content: center;
+  min-height: 210px;
+  text-align: center;
+}
+.panel.scene-layout-dashboard .attr.is-primary .attr-name { font-size: 30px; }
+.panel.scene-layout-dashboard .attr:not(.is-primary) .attr-summary {
+  min-height: 66px;
+  padding: 8px 10px;
+  border-radius: 10px;
+}
+.panel.scene-layout-dashboard .attr:not(.is-primary) .attr-name { font-size: 17px; }
+.panel.scene-layout-dashboard .attr:not(.is-primary) .display-gift-rules { display: none; }
 
 .attr { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .attr + .attr { padding-top: 12px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
@@ -701,13 +797,24 @@ body.display-mode { overflow: hidden; background: transparent; }
 }
 
 @media (max-width: 760px) {
-  .display-stack.is-scene-grid { width: min(600px, calc(100% - 40px)); }
-  .panel.scene-layout-grid { grid-template-columns: 1fr; }
+  .display-stack.is-scene-wide { width: min(600px, calc(100% - 40px)); }
+  .panel.scene-layout-grid,
+  .panel.scene-layout-focus,
+  .panel.scene-layout-versus,
+  .panel.scene-layout-dashboard { grid-template-columns: 1fr; }
   .panel.scene-layout-grid .display-scene-header,
   .panel.scene-layout-grid .display-activity-result,
   .panel.scene-layout-grid .display-empty,
   .panel.scene-layout-grid .display-scene-broadcast,
   .panel.scene-layout-grid .conn { grid-column: 1; }
+  .panel.scene-layout-focus > *,
+  .panel.scene-layout-versus > *,
+  .panel.scene-layout-dashboard > *,
+  .panel.scene-layout-focus .attr.is-primary,
+  .panel.scene-layout-versus .attr:nth-of-type(n+3),
+  .panel.scene-layout-dashboard .attr,
+  .panel.scene-layout-dashboard .attr.is-primary { grid-column: 1; grid-row: auto; }
+  .panel.scene-layout-versus .scene-item-2::before { display: none; }
 }
 
 /* Keep theme tokens authoritative over the shared ticker typography above. */

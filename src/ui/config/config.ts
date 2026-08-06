@@ -49,7 +49,7 @@ import {
 import { createGameplayTemplateWizard } from './template-wizard';
 import type { GameplayTemplateBuildResult } from '../../gameplay-templates';
 import { DISPLAY_THEMES, getDisplayTheme } from '../../display-themes';
-import { blindBoxDisplayUrl, createDisplaySceneId, displaySceneUrl, MAX_DISPLAY_SCENE_ATTRIBUTES } from '../../display-scenes';
+import { blindBoxDisplayUrl, createDisplaySceneId, DISPLAY_SCENE_LAYOUTS, displaySceneLayoutName, displaySceneUrl, MAX_DISPLAY_SCENE_ATTRIBUTES } from '../../display-scenes';
 import { buildBlindBoxLeaderboard } from '../../blind-box-leaderboard';
 import { createActivityWorkspace } from './activity-workspace';
 import { createTrainingCenter } from './training-center';
@@ -1478,7 +1478,7 @@ export function mountConfig(root: HTMLElement): void {
       toast('组合面板已删除', root);
     })());
 
-    const sceneMeta = `${scene.layout === 'grid' ? '双列布局' : '纵向布局'} · ${theme.name} · ${scene.attributeNames.length} 个属性`;
+    const sceneMeta = `${displaySceneLayoutName(scene.layout)} · ${theme.name} · ${scene.attributeNames.length} 个属性`;
     const cover = el('div', { class: 'display-scene-card-cover hover-detail-cover', title: '悬停查看组合面板详情' }, [
       preview,
       el('div', { class: 'display-scene-card-cover-copy' }, [
@@ -1540,10 +1540,7 @@ export function mountConfig(root: HTMLElement): void {
         button.setAttribute('aria-pressed', String(active));
       }
     };
-    ([
-      ['stack', '纵向布局', '适合窄画布，属性从上到下排列'],
-      ['grid', '双列布局', '适合横向画布，同时查看更多属性'],
-    ] as const).forEach(([value, label, description]) => {
+    DISPLAY_SCENE_LAYOUTS.forEach(({ id: value, name: label, description }) => {
       const button = el('button', { class: 'display-scene-layout-option', type: 'button', ariaPressed: 'false' } as any) as HTMLButtonElement;
       button.append(el('span', { class: `display-scene-layout-icon is-${value}` }, [el('i'), el('i')]), el('strong', { text: label }), el('small', { text: description }));
       button.onclick = () => { layout = value; refreshLayout(); };

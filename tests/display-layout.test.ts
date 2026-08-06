@@ -42,6 +42,14 @@ describe('OBS broadcast panel layout', () => {
     expect(source).toContain("state.rules.filter((rule) => rule.attributeName === attr.name && rule.enabled !== false)");
   });
 
+  it('provides distinct gameplay scene structures', () => {
+    expect(source).toContain("['grid', 'versus', 'dashboard'].includes(scene.layout)");
+    for (const layout of ['focus', 'versus', 'dashboard']) {
+      expect(css).toContain(`.panel.scene-layout-${layout}`);
+    }
+    expect(css).toContain('content: "VS";');
+  });
+
   it('wraps formula names before truncating them', () => {
     expect(css).toMatch(/\.display-formula-name\s*\{[^}]*white-space: normal;/);
     expect(css).toMatch(/\.display-formula-name\s*\{[^}]*-webkit-line-clamp: 2;/);

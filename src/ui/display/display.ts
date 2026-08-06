@@ -113,10 +113,12 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
     const scene = resolved.scene;
     const activity = activityForScene(state, scene?.id);
     stack.classList.toggle('is-scene', Boolean(scene));
-    stack.classList.toggle('is-scene-grid', scene?.layout === 'grid');
+    stack.classList.toggle('is-scene-wide', Boolean(scene && ['grid', 'versus', 'dashboard'].includes(scene.layout)));
+    stack.classList.toggle('is-scene-focus', scene?.layout === 'focus');
     panel.classList.toggle('is-scene', Boolean(scene));
-    panel.classList.toggle('scene-layout-grid', scene?.layout === 'grid');
-    panel.classList.toggle('scene-layout-stack', scene?.layout === 'stack');
+    for (const layout of ['stack', 'grid', 'focus', 'versus', 'dashboard']) {
+      panel.classList.toggle(`scene-layout-${layout}`, scene?.layout === layout);
+    }
     const panelThemeId = scene?.themeId ?? (attributes.length === 1
       ? resolveAttributeDisplayTheme(attributes[0], state.settings)
       : state.settings.defaultDisplayThemeId);
@@ -164,7 +166,7 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
       );
       panel.append(empty);
     }
-    for (const attr of attributes) {
+    for (const [attributeIndex, attr] of attributes.entries()) {
       const variant = resolveAttributeDisplayVariant(attr);
       const themeId = scene?.themeId ?? resolveAttributeDisplayTheme(attr, state.settings);
       const summary = el('div', { class: 'attr-summary' }, [
@@ -194,7 +196,9 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
           ]));
         }
       }
-      const block = el('section', { class: `attr is-${variant}` }, [summary, giftRules]);
+      const block = el('section', {
+        class: `attr is-${variant} scene-item scene-item-${attributeIndex + 1}${attributeIndex === 0 ? ' is-primary' : ''}`,
+      }, [summary, giftRules]);
       block.dataset.theme = themeId;
       block.dataset.variant = variant;
       attrEls.set(attr.name, block);

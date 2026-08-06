@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { blindBoxDisplayUrl, createDisplaySceneId, displaySceneUrl, normalizeDisplayScenes, resolveDisplayTarget } from '../src/display-scenes';
+import { blindBoxDisplayUrl, createDisplaySceneId, DISPLAY_SCENE_LAYOUTS, displaySceneLayoutName, displaySceneUrl, normalizeDisplayScenes, resolveDisplayTarget } from '../src/display-scenes';
 import { defaultState } from '../src/storage';
 
 const attributes = [
@@ -27,6 +27,16 @@ describe('display scene model', () => {
     const resolved = resolveDisplayTarget(state, { sceneId: 'scene-1' });
     expect(resolved.scene?.name).toBe('状态总览');
     expect(resolved.attributes.map((attribute) => attribute.name)).toEqual(['能量', '生命值']);
+  });
+
+  it('supports gameplay-specific layouts and falls back safely', () => {
+    expect(DISPLAY_SCENE_LAYOUTS.map((layout) => layout.id)).toEqual(['stack', 'grid', 'focus', 'versus', 'dashboard']);
+    expect(displaySceneLayoutName('versus')).toBe('双方对抗');
+    const scenes = normalizeDisplayScenes([
+      { id: 'focus', name: 'Boss', layout: 'focus', themeId: 'rpg', attributeNames: ['生命值', '能量'] },
+      { id: 'old', name: '旧布局', layout: 'unknown' as any, themeId: 'glass', attributeNames: ['生命值'] },
+    ], attributes as any, 'glass');
+    expect(scenes.map((scene) => scene.layout)).toEqual(['focus', 'stack']);
   });
 
   it('builds encoded links and stable prefixed IDs', () => {

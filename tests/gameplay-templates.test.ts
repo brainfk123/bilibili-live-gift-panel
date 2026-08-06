@@ -118,6 +118,7 @@ describe('gameplay templates', () => {
 
     expect(result.attributes.map((attribute) => attribute.name)).toEqual(['红队', '蓝队']);
     expect(result.displayScenes).toHaveLength(1);
+    expect(result.displayScenes[0].layout).toBe('versus');
     expect(result.activities[0]).toEqual(expect.objectContaining({
       status: 'not_started', resultMode: 'highest', gateRules: true,
     }));

@@ -4,7 +4,7 @@ export type DisplayThemeId = 'minimal' | 'glass' | 'rpg' | 'pixel' | 'neon' | 'k
 
 export type DisplayVariant = 'number' | 'timer' | 'progress' | 'health' | 'resource' | 'tug' | 'enum';
 
-export type DisplaySceneLayout = 'stack' | 'grid';
+export type DisplaySceneLayout = 'stack' | 'grid' | 'focus' | 'versus' | 'dashboard';
 
 export interface DisplayAppearance {
   themeId: DisplayThemeId;

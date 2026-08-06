@@ -2911,7 +2911,7 @@ describe('OBS attribute display', () => {
     const root = new TestElement('div');
     mountDisplay(root as unknown as HTMLElement, { sceneId: 'scene-status' });
 
-    expect(root.querySelector('.display-stack')?.className).toContain('is-scene-grid');
+    expect(root.querySelector('.display-stack')?.className).toContain('is-scene-wide');
     expect(root.querySelector('.panel')?.className).toContain('scene-layout-grid');
     expect(root.querySelector('.panel')?.dataset.theme).toBe('neon');
     expect(root.querySelectorAll('.attr')).toHaveLength(2);

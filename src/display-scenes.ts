@@ -16,6 +16,30 @@ export interface ResolvedDisplayTarget {
   missingLabel?: string;
 }
 
+export const DISPLAY_SCENE_LAYOUTS: ReadonlyArray<{
+  id: DisplaySceneLayout;
+  name: string;
+  description: string;
+}> = [
+  { id: 'stack', name: '纵向清单', description: '适合倒计时、流程状态和窄画布' },
+  { id: 'grid', name: '信息网格', description: '适合多资源、多指标同时监控' },
+  { id: 'focus', name: '主角聚焦', description: '第一项突出显示，适合 Boss 和主目标' },
+  { id: 'versus', name: '双方对抗', description: '前两项左右对峙，适合阵营和投票' },
+  { id: 'dashboard', name: '主辅仪表盘', description: '核心指标居左，其余状态排列在右' },
+];
+
+const displaySceneLayoutIds = new Set<DisplaySceneLayout>(DISPLAY_SCENE_LAYOUTS.map((layout) => layout.id));
+
+export function normalizeDisplaySceneLayout(layout: unknown): DisplaySceneLayout {
+  return typeof layout === 'string' && displaySceneLayoutIds.has(layout as DisplaySceneLayout)
+    ? layout as DisplaySceneLayout
+    : 'stack';
+}
+
+export function displaySceneLayoutName(layout: DisplaySceneLayout): string {
+  return DISPLAY_SCENE_LAYOUTS.find((candidate) => candidate.id === layout)?.name ?? '纵向清单';
+}
+
 export function normalizeDisplayScenes(
   scenes: readonly Partial<DisplayScene>[] | undefined,
   attributes: readonly Attribute[],
@@ -38,7 +62,7 @@ export function normalizeDisplayScenes(
       id,
       name,
       attributeNames,
-      layout: candidate.layout === 'grid' ? 'grid' : 'stack',
+      layout: normalizeDisplaySceneLayout(candidate.layout),
       themeId: normalizeDisplayThemeId(candidate.themeId ?? fallbackThemeId),
       ...(candidate.appearance ? { appearance: { ...candidate.appearance } } : {}),
     });
