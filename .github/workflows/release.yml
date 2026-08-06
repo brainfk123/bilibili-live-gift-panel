@@ -70,10 +70,25 @@ jobs:
         working-directory: goserver
         run: go test ./...
 
+      - name: Prepare and sign release executable
+        shell: pwsh
+        env:
+          EVSIGN_KEY: ${{ secrets.EVSIGN_KEY }}
+          EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
+          EVSIGN_CERT: ${{ vars.EVSIGN_CERT }}
+        run: |
+          Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.exe
+          node scripts/sign-evsign.mjs dist/gift-panel-windows-x64.exe
+
+          $signature = Get-AuthenticodeSignature -LiteralPath dist/gift-panel-windows-x64.exe
+          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+            throw "Authenticode verification failed: $($signature.Status) - $($signature.StatusMessage)"
+          }
+          Write-Host "Verified Authenticode signer: $($signature.SignerCertificate.Subject)"
+
       - name: Prepare release assets
         shell: pwsh
         run: |
-          Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.exe
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel-windows-x64.exe).Hash.ToLowerInvariant()
           $size = (Get-Item -LiteralPath dist/gift-panel-windows-x64.exe).Length
           "$hash  gift-panel-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/gift-panel-windows-x64.exe.sha256
