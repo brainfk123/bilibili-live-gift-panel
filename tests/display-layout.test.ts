@@ -78,4 +78,11 @@ describe('OBS broadcast panel layout', () => {
     expect(css).toMatch(/\.blind-box-ranking\s*\{[\s\S]*?border-radius: 16px/);
     expect(css).toMatch(/\.blind-box-row\s*\{[\s\S]*?grid-template-columns:/);
   });
+
+  it('shows blind-box money in yuan on OBS pages', () => {
+    expect(blindBoxSource).toContain('formatYuanFromGoldSeeds');
+    expect(blindBoxSource).toContain('formatSignedYuanFromGoldSeeds');
+    expect(blindBoxSource).not.toContain('金瓜子');
+    expect(blindBoxSource).toContain('金额均以元显示');
+  });
 });

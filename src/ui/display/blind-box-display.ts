@@ -5,6 +5,11 @@ import { loadState, refreshStateFromServer } from '../../storage';
 import type { AppState, ViewerContribution } from '../../types';
 import { createBrandIcon } from '../brand';
 import { el } from '../common';
+import {
+  formatCompactYuanFromGoldSeeds,
+  formatSignedYuanFromGoldSeeds,
+  formatYuanFromGoldSeeds,
+} from './currency';
 
 const MAX_VISIBLE_VIEWERS = 10;
 
@@ -33,16 +38,16 @@ export function mountBlindBoxDisplay(root: HTMLElement): void {
         el('span', { text: '观众净盈亏' }),
         el('strong', {
           class: `is-${numberTone(leaderboard.summary.profit)}`,
-          text: formatSignedNumber(leaderboard.summary.profit),
-          title: `${formatSignedNumber(leaderboard.summary.profit)} 金瓜子`,
+          text: formatSignedYuanFromGoldSeeds(leaderboard.summary.profit),
+          title: formatSignedYuanFromGoldSeeds(leaderboard.summary.profit),
         }),
       ]),
     ]));
 
     panel.append(el('section', { class: 'blind-box-summary', ariaLabel: '全场盲盒汇总' } as any, [
       summaryItem('开盒', `${formatNumber(leaderboard.summary.blindBoxCount)} 个`),
-      summaryItem('投入', formatCompactNumber(leaderboard.summary.cost), formatNumber(leaderboard.summary.cost)),
-      summaryItem('开出', formatCompactNumber(leaderboard.summary.value), formatNumber(leaderboard.summary.value)),
+      summaryItem('投入', formatCompactYuanFromGoldSeeds(leaderboard.summary.cost), formatYuanFromGoldSeeds(leaderboard.summary.cost)),
+      summaryItem('开出', formatCompactYuanFromGoldSeeds(leaderboard.summary.value), formatYuanFromGoldSeeds(leaderboard.summary.value)),
     ]));
 
     if (leaderboard.viewers.length === 0) {
@@ -60,7 +65,7 @@ export function mountBlindBoxDisplay(root: HTMLElement): void {
     }
 
     panel.append(el('footer', { class: 'blind-box-footer' }, [
-      el('span', { text: '净盈亏 = 开出价值 − 盲盒成本' }),
+      el('span', { text: '金额均以元显示 · 净盈亏 = 开出价值 − 盲盒成本' }),
       ...(leaderboard.summary.unpricedCount > 0
         ? [el('strong', {
           class: 'blind-box-warning',
@@ -124,7 +129,7 @@ function viewerRow(viewer: ViewerContribution, rank: number): HTMLElement {
     referrerPolicy: 'no-referrer',
   }) as HTMLImageElement;
   avatar.src = viewer.avatar || transparentPixel();
-  const profit = formatSignedNumber(viewer.blindBoxProfit);
+  const profit = formatSignedYuanFromGoldSeeds(viewer.blindBoxProfit);
   return el('li', { class: 'blind-box-row' }, [
     el('strong', { class: `blind-box-rank is-${Math.min(rank, 4)}`, text: String(rank) }),
     avatar,
@@ -134,8 +139,8 @@ function viewerRow(viewer: ViewerContribution, rank: number): HTMLElement {
     ]),
     el('div', { class: 'blind-box-values' }, [
       el('span', {
-        text: `${formatCompactNumber(viewer.blindBoxCost)} → ${formatCompactNumber(viewer.blindBoxValue)}`,
-        title: `投入 ${formatNumber(viewer.blindBoxCost)}，开出 ${formatNumber(viewer.blindBoxValue)} 金瓜子`,
+        text: `${formatCompactYuanFromGoldSeeds(viewer.blindBoxCost)} → ${formatCompactYuanFromGoldSeeds(viewer.blindBoxValue)}`,
+        title: `投入 ${formatYuanFromGoldSeeds(viewer.blindBoxCost)}，开出 ${formatYuanFromGoldSeeds(viewer.blindBoxValue)}`,
       }),
       ...(viewer.unpricedBlindBoxCount
         ? [el('small', { text: `${formatNumber(viewer.unpricedBlindBoxCount)} 个未计成本` })]
@@ -144,7 +149,7 @@ function viewerRow(viewer: ViewerContribution, rank: number): HTMLElement {
     el('strong', {
       class: `blind-box-row-profit is-${numberTone(viewer.blindBoxProfit)}`,
       text: profit,
-      title: `${profit} 金瓜子`,
+      title: profit,
     }),
   ]);
 }
@@ -184,17 +189,6 @@ function numberTone(value: number): 'positive' | 'negative' | 'neutral' {
 
 function formatNumber(value: number): string {
   return Number(value || 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
-}
-
-function formatSignedNumber(value: number): string {
-  const normalized = Number(value || 0);
-  return `${normalized > 0 ? '+' : normalized < 0 ? '-' : ''}${formatNumber(Math.abs(normalized))}`;
-}
-
-function formatCompactNumber(value: number): string {
-  const normalized = Number(value || 0);
-  if (Math.abs(normalized) < 10_000) return formatNumber(normalized);
-  return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(normalized);
 }
 
 function transparentPixel(): string {
