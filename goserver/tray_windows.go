@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -75,7 +76,15 @@ var (
 )
 
 func acquireSingleInstance() (bool, func(), error) {
-	return acquireNamedSingleInstance(singletonMutexName)
+	return acquireNamedSingleInstance(singleInstanceMutexName(appVersion))
+}
+
+func singleInstanceMutexName(version string) string {
+	version = strings.TrimSpace(strings.TrimPrefix(version, "v"))
+	if version == "" {
+		version = "dev"
+	}
+	return singletonMutexName + "-" + version
 }
 
 func acquireNamedSingleInstance(mutexName string) (bool, func(), error) {
