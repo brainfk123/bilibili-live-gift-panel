@@ -59,6 +59,7 @@ var (
 	procMessageBoxW         = user32.NewProc("MessageBoxW")
 	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
 	procPostMessageW        = user32.NewProc("PostMessageW")
+	procFindWindowW         = user32.NewProc("FindWindowW")
 	procRegisterClassExW    = user32.NewProc("RegisterClassExW")
 	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
 	procTrackPopupMenu      = user32.NewProc("TrackPopupMenu")
@@ -161,7 +162,15 @@ func showStartupError(message string) {
 	_, _, _ = procMessageBoxW.Call(0, uintptr(unsafe.Pointer(body)), uintptr(unsafe.Pointer(title)), mbOK|mbIconError)
 }
 
-func runTrayApp(configURL string, notifications *notificationCenter, updateExit <-chan struct{}) (bool, error) {
+func requestLegacyPanelExit() {
+	className, _ := syscall.UTF16PtrFromString("BilibiliLiveGiftPanelTray")
+	hWnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(className)), 0)
+	if hWnd != 0 {
+		_, _, _ = procPostMessageW.Call(hWnd, wmClose, 0, 0)
+	}
+}
+
+func runTrayApp(configURL string, notifications *notificationCenter, updateExit, instanceExit <-chan struct{}) (bool, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	trayConfigURL = configURL
@@ -215,6 +224,8 @@ func runTrayApp(configURL string, notifications *notificationCenter, updateExit 
 		select {
 		case <-updateExit:
 			updateRequested.Store(true)
+			_, _, _ = procPostMessageW.Call(hWnd, wmClose, 0, 0)
+		case <-instanceExit:
 			_, _, _ = procPostMessageW.Call(hWnd, wmClose, 0, 0)
 		case <-trayStopped:
 		}

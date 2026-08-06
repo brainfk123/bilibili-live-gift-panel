@@ -27,7 +27,9 @@ func showStartupError(message string) {
 	_, _ = fmt.Fprintln(os.Stderr, message)
 }
 
-func runTrayApp(_ string, notifications *notificationCenter, updateExit <-chan struct{}) (bool, error) {
+func requestLegacyPanelExit() {}
+
+func runTrayApp(_ string, notifications *notificationCenter, updateExit, instanceExit <-chan struct{}) (bool, error) {
 	notifications.AttachSink(func(notification desktopNotification) {
 		_, _ = fmt.Fprintf(os.Stderr, "%s：%s\n", notification.Title, notification.Body)
 	})
@@ -39,5 +41,7 @@ func runTrayApp(_ string, notifications *notificationCenter, updateExit <-chan s
 		return false, nil
 	case <-updateExit:
 		return true, nil
+	case <-instanceExit:
+		return false, nil
 	}
 }

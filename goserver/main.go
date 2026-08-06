@@ -5,7 +5,6 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -52,22 +51,10 @@ func listenWithFallback(startPort, attempts int) (net.Listener, int, error) {
 	return nil, 0, fmt.Errorf("无法监听 %d-%d 端口：%w", startPort, startPort+attempts-1, lastErr)
 }
 
-func isExistingPanel(port int) bool {
-	client := http.Client{Timeout: 300 * time.Millisecond}
-	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port))
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
-	return err == nil && resp.StatusCode == http.StatusOK && string(body) == "bilibili-live-gift-panel"
-}
-
 func existingPanelURL() string {
-	for port := 12450; port < 12460; port++ {
-		if isExistingPanel(port) {
-			return fmt.Sprintf("http://localhost:%d/?mode=config", port)
-		}
+	instances := findPanelInstances()
+	if len(instances) > 0 {
+		return panelConfigURL(instances[0])
 	}
 	return ""
 }
@@ -129,6 +116,20 @@ func main() {
 		}
 		return
 	}
+	instances := findPanelInstances()
+	if instance, found := panelToOpen(appVersion, instances); found {
+		openURL(panelConfigURL(instance))
+		return
+	}
+	for _, instance := range instances {
+		if !requestPanelExit(instance, appVersion) {
+			requestLegacyPanelExit()
+		}
+		if !waitForPanelExit(instance.Port) {
+			showStartupError("旧版本仍在退出中，请稍后再次打开新版本。")
+			return
+		}
+	}
 	alreadyRunning, releaseInstance, err := acquireSingleInstance()
 	if err != nil {
 		showStartupError(fmt.Sprintf("单实例检查失败：%v", err))
@@ -180,6 +181,7 @@ func main() {
 	}
 	presence := newPagePresence(notifications)
 	updateExit := make(chan struct{}, 1)
+	instanceExit := make(chan struct{}, 1)
 	requestIdleUpdate := func() {
 		if !presence.IsIdle() {
 			return
@@ -245,9 +247,9 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{"code": 0, "runtime": background.Status()})
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("bilibili-live-gift-panel"))
+		writeJSON(w, http.StatusOK, map[string]any{"name": panelHealthMarker, "version": appVersion})
 	})
+	mux.HandleFunc("/api/instance/exit", newInstanceExitHandler(appVersion, instanceExit))
 
 	listener, port, err := listenWithFallback(12450, 10)
 	if err != nil {
@@ -271,7 +273,7 @@ func main() {
 	if openConfigOnStartup {
 		go openURL(configURL)
 	}
-	restartAfterUpdate, trayErr := runTrayApp(configURL, notifications, updateExit)
+	restartAfterUpdate, trayErr := runTrayApp(configURL, notifications, updateExit, instanceExit)
 	if trayErr != nil {
 		diagnostics.Error("tray_failed", "error", trayErr)
 		showStartupError(fmt.Sprintf("系统托盘启动失败：%v", trayErr))
