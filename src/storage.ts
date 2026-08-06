@@ -160,7 +160,16 @@ async function persistStateToServer(snapshots: StateFieldSnapshots): Promise<voi
     body: serialized,
     ...(keepalive ? { keepalive: true } : {}),
   });
-  if (!response.ok) throw new Error(`配置保存失败：HTTP ${response.status}`);
+  if (!response.ok) {
+    let detail = '';
+    try {
+      const payload = await response.json() as { message?: unknown };
+      if (typeof payload.message === 'string') detail = payload.message.trim();
+    } catch {
+      // Fall back to the status code when the response is not JSON.
+    }
+    throw new Error(detail ? `配置保存失败：${detail}` : `配置保存失败：HTTP ${response.status}`);
+  }
   for (const key of changedFields) {
     persistedFieldSnapshots[key] = snapshots[key];
     forcePersistFields.delete(key);

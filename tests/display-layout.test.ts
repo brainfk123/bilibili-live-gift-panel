@@ -73,10 +73,18 @@ describe('OBS broadcast panel layout', () => {
 
   it('renders a compact live blind-box leaderboard from the contribution ledger', () => {
     expect(source).toContain("target.view === 'blind-box'");
-    expect(blindBoxSource).toContain('buildBlindBoxLeaderboard(state.contributions, MAX_VISIBLE_VIEWERS)');
+    expect(blindBoxSource).toContain('buildBlindBoxLeaderboard(state.contributions, MAX_RANKED_VIEWERS)');
     expect(blindBoxSource).toContain('refreshStateFromServer()');
     expect(css).toMatch(/\.blind-box-ranking\s*\{[\s\S]*?border-radius: 16px/);
+    expect(css).toMatch(/\.blind-box-ranking-track\s*\{[\s\S]*?transition-property: transform/);
     expect(css).toMatch(/\.blind-box-row\s*\{[\s\S]*?grid-template-columns:/);
+  });
+
+  it('scrolls the blind-box ranking down and back up with pauses at both ends', () => {
+    expect(blindBoxSource).toContain('VISIBLE_VIEWER_ROWS = 3');
+    expect(blindBoxSource).toContain('EDGE_PAUSE_MS = 3_200');
+    expect(blindBoxSource).toContain("viewport.dataset.scrollDirection = leaderboardScrollDirection > 0 ? 'down' : 'up'");
+    expect(blindBoxSource).toContain('scheduleNext(atEdge ? EDGE_PAUSE_MS : ROW_DWELL_MS)');
   });
 
   it('shows blind-box money in yuan on OBS pages', () => {

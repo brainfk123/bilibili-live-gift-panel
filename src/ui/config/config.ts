@@ -1452,16 +1452,28 @@ export function mountConfig(root: HTMLElement): void {
     const editButton = el('button', { class: 'btn ghost', type: 'button', text: '编辑' }) as HTMLButtonElement;
     editButton.onclick = () => openDisplaySceneEditor(index);
     const deleteButton = el('button', { class: 'btn text-danger', type: 'button', text: '删除' }) as HTMLButtonElement;
-    deleteButton.onclick = () => {
+    deleteButton.onclick = () => void (async () => {
       if (!confirm(`删除组合面板“${scene.name}”？属性、规则和单属性 OBS 链接不会受影响。`)) return;
-      state.displayScenes.splice(index, 1);
+      const previousScenes = state.displayScenes;
+      const previousActivities = state.activities;
+      state.displayScenes = state.displayScenes.filter((candidate) => candidate.id !== scene.id);
       state.activities = state.activities.map((activity) => activity.sceneId === scene.id
         ? { ...activity, sceneId: undefined }
         : activity);
-      save();
+      deleteButton.disabled = true;
+      deleteButton.textContent = '删除中…';
+      try {
+        await saveAndWait();
+      } catch {
+        state.displayScenes = previousScenes;
+        state.activities = previousActivities;
+        deleteButton.disabled = false;
+        deleteButton.textContent = '删除';
+        return;
+      }
       render();
       toast('组合面板已删除', root);
-    };
+    })();
 
     const sceneMeta = `${scene.layout === 'grid' ? '双列布局' : '纵向布局'} · ${theme.name} · ${scene.attributeNames.length} 个属性`;
     const cover = el('div', { class: 'display-scene-card-cover hover-detail-cover', title: '悬停查看组合面板详情' }, [

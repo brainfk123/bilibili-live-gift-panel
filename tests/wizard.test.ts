@@ -2550,6 +2550,32 @@ describe('OBS combination scene configuration', () => {
     expect(card?.querySelector('.display-scene-card-cover')).not.toBeNull();
     expect(card?.querySelector('.hover-detail-panel')).not.toBeNull();
   });
+
+  it('deletes a combination scene and clears its activity link in the same save', async () => {
+    const configured = defaultState();
+    configured.settings.showTutorial = false;
+    configured.attributes = [
+      { name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      { name: '能量', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+    ];
+    configured.displayScenes = [{
+      id: 'scene-score', name: '积分面板', attributeNames: ['积分', '能量'], layout: 'stack', themeId: 'glass',
+    }];
+    configured.activities = [{
+      id: 'activity-score', name: '积分活动', attributeNames: ['积分'], sceneId: 'scene-score',
+      status: 'not_started', resultMode: 'highest', gateRules: false, initialValues: { 积分: 0 }, milestones: [],
+    }];
+    await saveState(configured);
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const card = root.querySelector('.display-scene-card')!;
+    findByText(card, '删除')?.onclick?.();
+
+    await vi.waitFor(() => expect(loadState().displayScenes).toHaveLength(0));
+    expect(loadState().activities[0].sceneId).toBeUndefined();
+  });
 });
 
 describe('activity session configuration', () => {
@@ -2609,6 +2635,25 @@ describe('activity session configuration', () => {
     expect(card.className.split(' ')).not.toContain('is-detail-persisted');
     expect(root.dataset.expandedActivityId).toBeUndefined();
     expect(root.dataset.expandedActivitySide).toBeUndefined();
+  });
+
+  it('deletes an activity only after the configuration save succeeds', async () => {
+    const configured = defaultState();
+    configured.settings.showTutorial = false;
+    configured.attributes = [{ name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' }];
+    configured.activities = [{
+      id: 'activity-score', name: '积分活动', attributeNames: ['积分'], status: 'not_started',
+      resultMode: 'highest', gateRules: false, initialValues: { 积分: 0 }, milestones: [],
+    }];
+    await saveState(configured);
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const card = root.querySelector('.activity-card')!;
+    findByText(card, '删除')?.onclick?.();
+
+    await vi.waitFor(() => expect(loadState().activities).toHaveLength(0));
   });
 
   it('rerenders only the activity section and restores its open detail without replaying transitions', async () => {

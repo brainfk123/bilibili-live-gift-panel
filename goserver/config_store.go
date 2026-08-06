@@ -192,6 +192,12 @@ func applyClientStatePatch(state *appState, fields map[string]json.RawMessage) e
 		default:
 			return fmt.Errorf("不支持的配置字段：%s", key)
 		}
+		// A PATCH field replaces the complete top-level field. json.Unmarshal
+		// reuses existing slice elements and struct fields, so omitted optional
+		// members (for example an activity's sceneId) would otherwise survive
+		// the replacement and leave stale references behind.
+		targetValue := reflect.ValueOf(target)
+		targetValue.Elem().Set(reflect.Zero(targetValue.Elem().Type()))
 		if err := json.Unmarshal(raw, target); err != nil {
 			return fmt.Errorf("配置字段 %s 格式不正确", key)
 		}

@@ -59,18 +59,30 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
       return button;
     };
     const remove = el('button', { class: 'btn text-danger', type: 'button', text: '删除' }) as HTMLButtonElement;
-    remove.onclick = () => {
+    remove.onclick = () => void (async () => {
       const activeWarning = activity.status === 'active' || activity.status === 'locked'
         ? '活动仍在进行，删除后会立即停止本局控制。'
         : '';
       if (!confirm(`${activeWarning}确定删除活动“${activity.name}”？属性、规则和组合面板不会被删除。`)) return;
+      const previousActivities = state.activities;
+      state.activities = state.activities.filter((candidate) => candidate.id !== activity.id);
+      remove.disabled = true;
+      remove.textContent = '删除中…';
+      try {
+        await options.onPersist();
+      } catch {
+        state.activities = previousActivities;
+        remove.disabled = false;
+        remove.textContent = '删除';
+        return;
+      }
       if (root.dataset.expandedActivityId === activity.id) {
         delete root.dataset.expandedActivityId;
         delete root.dataset.expandedActivitySide;
       }
-      state.activities.splice(index, 1);
-      void options.onPersist().then(options.onRender).catch(() => undefined);
-    };
+      options.onRender();
+      toast('活动已删除', root);
+    })();
     if (activity.status === 'not_started') {
       actions.append(transitionButton('开始活动', 'start'));
       const edit = el('button', { class: 'btn ghost', type: 'button', text: '编辑' }) as HTMLButtonElement;

@@ -191,6 +191,47 @@ func TestConfigStorePatchPreservesExplicitlyDisabledRules(t *testing.T) {
 	}
 }
 
+func TestConfigStorePatchClearsOmittedOptionalFieldsInsideReplacementArrays(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	initial := `{
+		"attributes":[{"name":"积分","value":0,"unit":"none","format":"number"}],
+		"displayScenes":[{"id":"scene-score","name":"积分面板","attributeNames":["积分"],"layout":"stack","themeId":"glass"}],
+		"activities":[{
+			"id":"activity-score","name":"积分活动","attributeNames":["积分"],"sceneId":"scene-score",
+			"status":"not_started","resultMode":"highest","gateRules":false,"initialValues":{"积分":0}
+		}]
+	}`
+	put := httptest.NewRecorder()
+	store.handle(put, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(initial)))
+	if put.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", put.Code, put.Body.String())
+	}
+
+	patch := httptest.NewRecorder()
+	store.handle(patch, httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(`{
+		"displayScenes":[],
+		"activities":[{
+			"id":"activity-score","name":"积分活动","attributeNames":["积分"],
+			"status":"not_started","resultMode":"highest","gateRules":false,"initialValues":{"积分":0}
+		}]
+	}`)))
+	if patch.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, body = %s", patch.Code, patch.Body.String())
+	}
+
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.DisplayScenes) != 0 {
+		t.Fatalf("display scenes = %#v, want none", state.DisplayScenes)
+	}
+	if len(state.Activities) != 1 || state.Activities[0].SceneID != "" {
+		t.Fatalf("activity scene reference was not cleared: %#v", state.Activities)
+	}
+}
+
 func TestConfigStoreMigratesMissingFieldsWithDefaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
