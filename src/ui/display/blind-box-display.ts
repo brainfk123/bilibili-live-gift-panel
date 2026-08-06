@@ -78,7 +78,7 @@ export function mountBlindBoxDisplay(root: HTMLElement): void {
     ]));
 
     panel.append(el('section', { class: 'blind-box-summary', ariaLabel: '全场盲盒汇总' } as any, [
-      summaryItem('开盒', `${formatNumber(leaderboard.summary.blindBoxCount)} 个`),
+      summaryItem('盲盒数量', `${formatNumber(leaderboard.summary.blindBoxCount)} 个`),
       summaryItem('投入', formatCompactYuanFromGoldSeeds(leaderboard.summary.cost), formatYuanFromGoldSeeds(leaderboard.summary.cost)),
       summaryItem('开出', formatCompactYuanFromGoldSeeds(leaderboard.summary.value), formatYuanFromGoldSeeds(leaderboard.summary.value)),
     ]));
