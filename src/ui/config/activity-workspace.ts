@@ -3,6 +3,7 @@ import { transitionActivity } from '../../backend';
 import { formatValue } from '../../format';
 import type { ActivityGiftTimeoutAction, ActivityMilestone, ActivityResultMode, ActivitySession, AppState } from '../../types';
 import { bindFloatingDetailCard, el, fieldControl, inputField, toast } from '../common';
+import { bindTwoStepDelete } from './two-step-delete';
 
 interface ActivityWorkspaceOptions {
   state: AppState;
@@ -59,11 +60,7 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
       return button;
     };
     const remove = el('button', { class: 'btn text-danger', type: 'button', text: '删除' }) as HTMLButtonElement;
-    remove.onclick = () => void (async () => {
-      const activeWarning = activity.status === 'active' || activity.status === 'locked'
-        ? '活动仍在进行，删除后会立即停止本局控制。'
-        : '';
-      if (!confirm(`${activeWarning}确定删除活动“${activity.name}”？属性、规则和组合面板不会被删除。`)) return;
+    bindTwoStepDelete(remove, () => void (async () => {
       const previousActivities = state.activities;
       state.activities = state.activities.filter((candidate) => candidate.id !== activity.id);
       remove.disabled = true;
@@ -82,7 +79,7 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
       }
       options.onRender();
       toast('活动已删除', root);
-    })();
+    })());
     if (activity.status === 'not_started') {
       actions.append(transitionButton('开始活动', 'start'));
       const edit = el('button', { class: 'btn ghost', type: 'button', text: '编辑' }) as HTMLButtonElement;
@@ -405,10 +402,10 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
         message.placeholder = '例如：目标达成！';
         message.oninput = () => { milestone.message = message.value; };
         const remove = el('button', { class: 'btn text-danger', type: 'button', text: '删除' }) as HTMLButtonElement;
-        remove.onclick = () => {
+        bindTwoStepDelete(remove, () => {
           milestones.splice(milestoneIndex, 1);
           renderMilestones();
-        };
+        });
         milestoneList.append(el('article', { class: 'activity-milestone-editor' }, [
           el('header', {}, [
             el('div', {}, [el('strong', { text: `里程碑 ${milestoneIndex + 1}` }), el('small', { text: '每次活动只触发一次，重置后可再次触发' })]),

@@ -2212,6 +2212,11 @@ body.config-mode::-webkit-scrollbar-corner,
   color: var(--danger-text);
 }
 .config-root .btn.text-danger:hover { border-color: var(--danger); filter: none; }
+.config-root .btn.text-danger.is-confirming {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+  color: var(--danger-text);
+}
 .config-root .attribute-empty {
   border: 1px dashed var(--border-strong);
   border-radius: 14px;
@@ -2544,14 +2549,26 @@ body.config-mode::-webkit-scrollbar-corner,
   background: color-mix(in srgb, var(--card) 72%, transparent);
 }
 .config-root .contribution-heading {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 20px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
   margin-bottom: 16px;
 }
-.config-root .contribution-heading .section-heading { max-width: 800px; }
-.config-root .contribution-heading-actions { display: flex; align-items: center; gap: 8px; }
+.config-root .contribution-heading-main {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 16px;
+}
+.config-root .contribution-heading .section-heading { min-width: 0; max-width: 920px; }
+.config-root .contribution-heading-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
 .config-root .contribution-viewer-count {
   border: 1px solid var(--accent-border);
   border-radius: 999px;
@@ -2562,8 +2579,14 @@ body.config-mode::-webkit-scrollbar-corner,
   font-weight: 700;
   white-space: nowrap;
 }
-.config-root .contribution-clear { min-height: 32px; padding: 6px 10px; color: var(--danger-text); font-size: var(--type-meta); }
-.config-root .contribution-obs-copy { min-height: 32px; padding: 6px 10px; color: var(--accent-text); font-size: var(--type-meta); white-space: nowrap; }
+.config-root .contribution-heading-actions .btn {
+  min-height: 34px;
+  padding: 6px 11px;
+  font-size: var(--type-meta);
+  white-space: nowrap;
+}
+.config-root .contribution-clear { color: var(--danger-text); }
+.config-root .contribution-obs-copy { color: var(--accent-text); }
 .config-root .contribution-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -3624,7 +3647,11 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .attributes-heading-row { align-items: stretch; flex-direction: column; }
   .config-root .display-scenes-heading { align-items: stretch; flex-direction: column; }
   .config-root .activity-workspace-heading { align-items: stretch; flex-direction: column; }
-  .config-root .contribution-heading { align-items: flex-start; flex-direction: column; }
+  .config-root .contribution-heading-main { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .config-root .contribution-heading-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
   .config-root .gift-history-heading { align-items: flex-start; flex-direction: column; }
   .config-root .attributes-heading-row .btn { align-self: flex-start; }
   .config-root .attribute-obs-row { grid-template-columns: 1fr auto; }

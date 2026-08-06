@@ -63,6 +63,7 @@ import {
   type ChangelogRelease,
 } from '../../changelog';
 import { createChangelogDialog } from './changelog-dialog';
+import { bindTwoStepDelete } from './two-step-delete';
 
 interface SelectedGiftRule {
   gift: GiftInfo;
@@ -1140,8 +1141,7 @@ export function mountConfig(root: HTMLElement): void {
     const editButton = el('button', { class: `btn ghost attribute-action-button${index === 0 ? ' guide-attribute-edit' : ''}`, type: 'button', text: '编辑' }) as HTMLButtonElement;
     editButton.onclick = () => openAttributeEditor(index);
     const deleteButton = el('button', { class: 'btn text-danger attribute-action-button', type: 'button', text: '删除' }) as HTMLButtonElement;
-    deleteButton.onclick = () => {
-      if (!confirm(`删除属性“${attribute.name}”及其全部触发规则？`)) return;
+    bindTwoStepDelete(deleteButton, () => {
       if (attribute.id && state.settings.tutorialTargetAttributeId === attribute.id) {
         delete state.settings.tutorialTargetAttributeId;
       }
@@ -1178,7 +1178,7 @@ export function mountConfig(root: HTMLElement): void {
       save();
       render();
       toast('属性已删除', root);
-    };
+    });
     const mappedImage = attribute.display?.valueMappings
       ?.find((mapping) => mapping.value === attribute.value)?.imageUrl?.trim();
     const coverImageSources = [
@@ -1456,8 +1456,7 @@ export function mountConfig(root: HTMLElement): void {
     const editButton = el('button', { class: 'btn ghost', type: 'button', text: '编辑' }) as HTMLButtonElement;
     editButton.onclick = () => openDisplaySceneEditor(index);
     const deleteButton = el('button', { class: 'btn text-danger', type: 'button', text: '删除' }) as HTMLButtonElement;
-    deleteButton.onclick = () => void (async () => {
-      if (!confirm(`删除组合面板“${scene.name}”？属性、规则和单属性 OBS 链接不会受影响。`)) return;
+    bindTwoStepDelete(deleteButton, () => void (async () => {
       const previousScenes = state.displayScenes;
       const previousActivities = state.activities;
       state.displayScenes = state.displayScenes.filter((candidate) => candidate.id !== scene.id);
@@ -1477,7 +1476,7 @@ export function mountConfig(root: HTMLElement): void {
       }
       render();
       toast('组合面板已删除', root);
-    })();
+    })());
 
     const sceneMeta = `${scene.layout === 'grid' ? '双列布局' : '纵向布局'} · ${theme.name} · ${scene.attributeNames.length} 个属性`;
     const cover = el('div', { class: 'display-scene-card-cover hover-detail-cover', title: '悬停查看组合面板详情' }, [
@@ -1724,12 +1723,12 @@ export function mountConfig(root: HTMLElement): void {
     const copyObsButton = el('button', {
       class: 'btn ghost contribution-obs-copy',
       type: 'button',
-      text: '复制盈亏榜 OBS 链接',
+      text: '复制 OBS 链接',
     }) as HTMLButtonElement;
     const appearanceButton = el('button', {
       class: 'btn ghost contribution-obs-appearance',
       type: 'button',
-      text: '设置 OBS 外观',
+      text: '外观设置',
     }) as HTMLButtonElement;
     appearanceButton.onclick = openBlindBoxAppearanceEditor;
     copyObsButton.onclick = async () => {
@@ -1759,13 +1758,15 @@ export function mountConfig(root: HTMLElement): void {
       });
     };
     const heading = el('div', { class: 'contribution-heading' }, [
-      sectionHeading(
-        '观众数据',
-        '贡献与盲盒排行榜',
-        '后台统计收到的全部礼物；规则命中只计算真正生效的规则。数据从上次清空开始累计，关闭页面不会中断。',
-      ),
-      el('div', { class: 'contribution-heading-actions' }, [
+      el('div', { class: 'contribution-heading-main' }, [
+        sectionHeading(
+          '观众数据',
+          '贡献与盲盒排行榜',
+          '后台统计收到的全部礼物；规则命中只计算真正生效的规则。数据从上次清空开始累计，关闭页面不会中断。',
+        ),
         el('span', { class: 'contribution-viewer-count', text: `${viewers.length} 位观众` }),
+      ]),
+      el('div', { class: 'contribution-heading-actions' }, [
         appearanceButton,
         copyObsButton,
         clearButton,
@@ -3253,11 +3254,11 @@ export function mountConfig(root: HTMLElement): void {
         imageUrl.placeholder = 'https://…';
         imageUrl.oninput = () => { mapping.imageUrl = imageUrl.value; };
         const remove = el('button', { class: 'btn text-danger', type: 'button', text: '删除' }) as HTMLButtonElement;
-        remove.onclick = () => {
+        bindTwoStepDelete(remove, () => {
           valueMappings.splice(mappingIndex, 1);
           displayConfig.valueMappings = valueMappings;
           renderMappings();
-        };
+        });
         mappingList.append(el('article', { class: 'enum-mapping-row' }, [
           fieldControl(value),
           fieldControl(label),

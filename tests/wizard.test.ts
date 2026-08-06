@@ -2187,7 +2187,11 @@ describe('single-page configuration rendering', () => {
     await new Promise((resolve) => nativeSetTimeout(resolve, 0));
 
     const activityCard = root.querySelector('.activity-card');
-    findByText(activityCard ?? root, '删除')?.onclick?.();
+    const deleteActivity = findByText(activityCard ?? root, '删除')!;
+    deleteActivity.onclick?.();
+    expect(deleteActivity.textContent).toBe('确定');
+    expect(serverState.activities).toHaveLength(1);
+    deleteActivity.onclick?.();
     await new Promise((resolve) => nativeSetTimeout(resolve, 0));
 
     expect(serverState.activities).toEqual([]);
@@ -2227,7 +2231,8 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root)).toContain('历史规则');
     expect(textOf(root)).not.toContain('每分钟减少');
 
-    vi.stubGlobal('confirm', vi.fn(() => true));
+    const confirmMock = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirmMock);
     findByText(root, '清空记录')?.onclick?.();
     return vi.waitFor(() => {
       expect(loadState().log).toHaveLength(1);
@@ -2300,7 +2305,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    expect(findByText(root, '复制盈亏榜 OBS 链接')).toBeDefined();
+    expect(findByText(root, '复制 OBS 链接')).toBeDefined();
     expect(root.querySelectorAll('.contribution-row')).toHaveLength(2);
     expect(textOf(root.querySelector('.contribution-section') as TestElement)).toContain('20,000');
     const tabs = root.querySelectorAll('.contribution-tab');
@@ -2522,6 +2527,25 @@ describe('single-page configuration rendering', () => {
     expect(root.querySelector('.attribute-overlay')).toBeNull();
   });
 
+  it('deletes an attribute only after clicking the delete button twice', async () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888', 1)));
+    const confirmMock = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirmMock);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const card = root.querySelector('.attribute-card')!;
+    const deleteAttribute = findByText(card, '删除')!;
+    deleteAttribute.onclick?.();
+    expect(deleteAttribute.textContent).toBe('确定');
+    expect(loadState().attributes).toHaveLength(1);
+
+    deleteAttribute.onclick?.();
+
+    await vi.waitFor(() => expect(loadState().attributes).toHaveLength(0));
+    expect(confirmMock).not.toHaveBeenCalled();
+  });
+
   it('does not render OBS appearance as a global setting', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
@@ -2626,15 +2650,21 @@ describe('OBS combination scene configuration', () => {
       status: 'not_started', resultMode: 'highest', gateRules: false, initialValues: { 积分: 0 }, milestones: [],
     }];
     await saveState(configured);
-    vi.stubGlobal('confirm', vi.fn(() => true));
+    const confirmMock = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirmMock);
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
     const card = root.querySelector('.display-scene-card')!;
-    findByText(card, '删除')?.onclick?.();
+    const deleteScene = findByText(card, '删除')!;
+    deleteScene.onclick?.();
+    expect(deleteScene.textContent).toBe('确定');
+    expect(loadState().displayScenes).toHaveLength(1);
+    deleteScene.onclick?.();
 
     await vi.waitFor(() => expect(loadState().displayScenes).toHaveLength(0));
     expect(loadState().activities[0].sceneId).toBeUndefined();
+    expect(confirmMock).not.toHaveBeenCalled();
   });
 });
 
@@ -2706,14 +2736,20 @@ describe('activity session configuration', () => {
       resultMode: 'highest', gateRules: false, initialValues: { 积分: 0 }, milestones: [],
     }];
     await saveState(configured);
-    vi.stubGlobal('confirm', vi.fn(() => true));
+    const confirmMock = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirmMock);
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
     const card = root.querySelector('.activity-card')!;
-    findByText(card, '删除')?.onclick?.();
+    const deleteActivity = findByText(card, '删除')!;
+    deleteActivity.onclick?.();
+    expect(deleteActivity.textContent).toBe('确定');
+    expect(loadState().activities).toHaveLength(1);
+    deleteActivity.onclick?.();
 
     await vi.waitFor(() => expect(loadState().activities).toHaveLength(0));
+    expect(confirmMock).not.toHaveBeenCalled();
   });
 
   it('rerenders only the activity section and restores its open detail without replaying transitions', async () => {
