@@ -9,6 +9,7 @@ import { el } from '../common';
 import { SequentialBroadcastQueue } from './broadcast-queue';
 import { resolveDisplayTarget, type DisplayTarget } from '../../display-scenes';
 import { activityForScene, activityStatusLabel } from '../../activities';
+import { mountBlindBoxDisplay } from './blind-box-display';
 
 const DEFAULT_BROADCAST_MESSAGE = '感谢大家的支持，欢迎投喂礼物';
 const GIFT_BROADCAST_DURATION = 5500;
@@ -43,6 +44,10 @@ export function resolveAttributeValuePresentation(attribute: Attribute): { text:
 }
 
 export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): void {
+  if (target.view === 'blind-box') {
+    mountBlindBoxDisplay(root);
+    return;
+  }
   let state = loadState();
   let connectionState: RuntimeConnectionState = 'idle';
   let lastLogKey = state.log[0] ? logKey(state.log[0]) : '';

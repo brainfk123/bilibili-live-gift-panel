@@ -2563,6 +2563,7 @@ body.config-mode::-webkit-scrollbar-corner,
   white-space: nowrap;
 }
 .config-root .contribution-clear { min-height: 32px; padding: 6px 10px; color: var(--danger-text); font-size: var(--type-meta); }
+.config-root .contribution-obs-copy { min-height: 32px; padding: 6px 10px; color: var(--accent-text); font-size: var(--type-meta); white-space: nowrap; }
 .config-root .contribution-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

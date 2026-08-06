@@ -2244,6 +2244,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
+    expect(findByText(root, '复制盈亏榜 OBS 链接')).toBeDefined();
     expect(root.querySelectorAll('.contribution-row')).toHaveLength(2);
     expect(textOf(root.querySelector('.contribution-section') as TestElement)).toContain('20,000');
     const tabs = root.querySelectorAll('.contribution-tab');

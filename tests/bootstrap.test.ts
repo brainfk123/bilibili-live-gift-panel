@@ -96,6 +96,26 @@ describe('application bootstrap', () => {
     expect(mountDisplay).toHaveBeenCalledWith(document.app, { attributeName: undefined, sceneId: 'scene-boss' });
   });
 
+  it('passes the blind-box leaderboard view to display mode', async () => {
+    const document = new FakeDocument();
+    const mountDisplay = vi.fn();
+
+    await startApp({
+      document: document as unknown as Document,
+      search: '?mode=display&view=blind-box',
+      installFavicon: vi.fn(),
+      loadConfigStyles: vi.fn(async () => ''),
+      mountDisplay,
+      mountConfig: vi.fn(),
+    });
+
+    expect(mountDisplay).toHaveBeenCalledWith(document.app, {
+      attributeName: undefined,
+      sceneId: undefined,
+      view: 'blind-box',
+    });
+  });
+
   it('injects configuration styles before mounting config mode', async () => {
     const document = new FakeDocument();
     const cssText = '.config-root { color: red; }';

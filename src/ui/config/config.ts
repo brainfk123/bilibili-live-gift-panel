@@ -48,7 +48,8 @@ import {
 import { createGameplayTemplateWizard } from './template-wizard';
 import type { GameplayTemplateBuildResult } from '../../gameplay-templates';
 import { DISPLAY_THEMES, getDisplayTheme } from '../../display-themes';
-import { createDisplaySceneId, displaySceneUrl, MAX_DISPLAY_SCENE_ATTRIBUTES } from '../../display-scenes';
+import { blindBoxDisplayUrl, createDisplaySceneId, displaySceneUrl, MAX_DISPLAY_SCENE_ATTRIBUTES } from '../../display-scenes';
+import { buildBlindBoxLeaderboard } from '../../blind-box-leaderboard';
 import { createActivityWorkspace } from './activity-workspace';
 import { createTrainingCenter } from './training-center';
 import type { TrainingTopicDefinition } from '../../training';
@@ -1649,7 +1650,21 @@ export function mountConfig(root: HTMLElement): void {
 
   function renderContributionLeaderboard(replaceExisting = false): void {
     const viewers = state.contributions.viewers;
+    const blindBoxLeaderboard = buildBlindBoxLeaderboard(state.contributions);
     const section = el('section', { class: 'contribution-section' });
+    const copyObsButton = el('button', {
+      class: 'btn ghost contribution-obs-copy',
+      type: 'button',
+      text: '复制盈亏榜 OBS 链接',
+    }) as HTMLButtonElement;
+    copyObsButton.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(blindBoxDisplayUrl(location.origin));
+        toast('盲盒盈亏榜 OBS 链接已复制', root);
+      } catch {
+        toast('复制失败，请检查浏览器剪贴板权限', root);
+      }
+    };
     const clearButton = el('button', {
       class: 'btn ghost contribution-clear',
       type: 'button',
@@ -1676,6 +1691,7 @@ export function mountConfig(root: HTMLElement): void {
       ),
       el('div', { class: 'contribution-heading-actions' }, [
         el('span', { class: 'contribution-viewer-count', text: `${viewers.length} 位观众` }),
+        copyObsButton,
         clearButton,
       ]),
     ]);
@@ -1685,14 +1701,12 @@ export function mountConfig(root: HTMLElement): void {
       giftCount: summary.giftCount + viewer.giftCount,
       goldValue: summary.goldValue + viewer.goldValue,
       ruleTriggers: summary.ruleTriggers + viewer.ruleTriggers,
-      blindBoxCount: summary.blindBoxCount + viewer.blindBoxCount,
-      blindBoxProfit: summary.blindBoxProfit + viewer.blindBoxProfit,
-    }), { giftCount: 0, goldValue: 0, ruleTriggers: 0, blindBoxCount: 0, blindBoxProfit: 0 });
+    }), { giftCount: 0, goldValue: 0, ruleTriggers: 0 });
     section.append(el('div', { class: 'contribution-summary' }, [
       contributionSummaryItem('收到礼物', `${formatLedgerNumber(totals.giftCount)} 个`),
       contributionSummaryItem('金瓜子贡献', formatLedgerNumber(totals.goldValue)),
       contributionSummaryItem('规则命中', `${formatLedgerNumber(totals.ruleTriggers)} 次`),
-      contributionSummaryItem('盲盒净盈亏', formatSignedLedgerNumber(totals.blindBoxProfit), contributionTone(totals.blindBoxProfit)),
+      contributionSummaryItem('盲盒净盈亏', formatSignedLedgerNumber(blindBoxLeaderboard.summary.profit), contributionTone(blindBoxLeaderboard.summary.profit)),
     ]));
 
     const modeTabs = el('div', { class: 'contribution-tabs', role: 'tablist', ariaLabel: '排行榜类型' } as any);
@@ -1811,15 +1825,14 @@ export function mountConfig(root: HTMLElement): void {
   }
 
   function rankContributors(viewers: ViewerContribution[], mode: LeaderboardMode): ViewerContribution[] {
+    if (mode === 'blind-box') return buildBlindBoxLeaderboard({ viewers }).viewers;
     const ranked = viewers.filter((viewer) => (
-      mode === 'rules' ? viewer.ruleTriggers > 0 : mode === 'blind-box' ? viewer.blindBoxCount > 0 : viewer.giftCount > 0
+      mode === 'rules' ? viewer.ruleTriggers > 0 : viewer.giftCount > 0
     ));
     return ranked.sort((left, right) => {
       const metric = mode === 'rules'
         ? right.ruleTriggers - left.ruleTriggers
-        : mode === 'blind-box'
-          ? right.blindBoxProfit - left.blindBoxProfit
-          : right.goldValue - left.goldValue;
+        : right.goldValue - left.goldValue;
       return metric || right.giftCount - left.giftCount || right.lastGiftAt - left.lastGiftAt;
     });
   }

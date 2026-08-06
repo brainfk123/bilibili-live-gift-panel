@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createDisplaySceneId, displaySceneUrl, normalizeDisplayScenes, resolveDisplayTarget } from '../src/display-scenes';
+import { blindBoxDisplayUrl, createDisplaySceneId, displaySceneUrl, normalizeDisplayScenes, resolveDisplayTarget } from '../src/display-scenes';
 import { defaultState } from '../src/storage';
 
 const attributes = [
@@ -33,6 +33,7 @@ describe('display scene model', () => {
     vi.stubGlobal('crypto', { randomUUID: () => 'scene-uuid' });
     expect(createDisplaySceneId()).toBe('scene-scene-uuid');
     expect(displaySceneUrl('http://localhost:12450', 'scene 1')).toBe('http://localhost:12450/?mode=display&scene=scene%201');
+    expect(blindBoxDisplayUrl('http://localhost:12450')).toBe('http://localhost:12450/?mode=display&view=blind-box');
     vi.unstubAllGlobals();
   });
 });

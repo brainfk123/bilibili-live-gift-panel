@@ -6,6 +6,7 @@ export const MAX_DISPLAY_SCENE_ATTRIBUTES = 12;
 export interface DisplayTarget {
   attributeName?: string;
   sceneId?: string;
+  view?: 'blind-box';
 }
 
 export interface ResolvedDisplayTarget {
@@ -74,4 +75,8 @@ export function createDisplaySceneId(): string {
 
 export function displaySceneUrl(origin: string, sceneId: string): string {
   return `${origin}/?mode=display&scene=${encodeURIComponent(sceneId)}`;
+}
+
+export function blindBoxDisplayUrl(origin: string): string {
+  return `${origin}/?mode=display&view=blind-box`;
 }

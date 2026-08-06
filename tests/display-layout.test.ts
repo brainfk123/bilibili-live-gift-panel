@@ -19,6 +19,7 @@ describe('OBS attribute value fitting', () => {
 describe('OBS broadcast panel layout', () => {
   const css = readFileSync(new URL('../src/ui/display/display.css', import.meta.url), 'utf8');
   const source = readFileSync(new URL('../src/ui/display/display.ts', import.meta.url), 'utf8');
+  const blindBoxSource = readFileSync(new URL('../src/ui/display/blind-box-display.ts', import.meta.url), 'utf8');
 
   it('uses a one-third narrower panel without shrinking the primary value typography', () => {
     expect(css).toContain('width: min(480px, calc(100% - 40px));');
@@ -67,5 +68,14 @@ describe('OBS broadcast panel layout', () => {
 
   it('loads Bilibili avatars without sending the localhost referrer', () => {
     expect(source).toContain("referrerPolicy: 'no-referrer'");
+    expect(blindBoxSource).toContain("referrerPolicy: 'no-referrer'");
+  });
+
+  it('renders a compact live blind-box leaderboard from the contribution ledger', () => {
+    expect(source).toContain("target.view === 'blind-box'");
+    expect(blindBoxSource).toContain('buildBlindBoxLeaderboard(state.contributions, MAX_VISIBLE_VIEWERS)');
+    expect(blindBoxSource).toContain('refreshStateFromServer()');
+    expect(css).toMatch(/\.blind-box-ranking\s*\{[\s\S]*?border-radius: 16px/);
+    expect(css).toMatch(/\.blind-box-row\s*\{[\s\S]*?grid-template-columns:/);
   });
 });

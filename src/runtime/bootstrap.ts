@@ -44,5 +44,8 @@ export async function startApp(options: AppBootstrapOptions): Promise<void> {
   root.classList.add('display-root');
   const attributeName = params.get('attribute') ?? undefined;
   const sceneId = params.get('scene') ?? undefined;
-  options.mountDisplay(root, attributeName || sceneId ? { attributeName, sceneId } : undefined);
+  const view = params.get('view') === 'blind-box' ? 'blind-box' : undefined;
+  options.mountDisplay(root, attributeName || sceneId || view
+    ? { attributeName, sceneId, ...(view ? { view } : {}) }
+    : undefined);
 }
