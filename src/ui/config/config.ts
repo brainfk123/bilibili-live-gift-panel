@@ -406,7 +406,11 @@ export function mountConfig(root: HTMLElement): void {
       const nextState = await refreshStateFromServer(() => requestedVersion === localStateVersion);
       if (requestedVersion !== localStateVersion) return;
       const previousRoomId = state.roomId.trim();
-      state = nextState;
+      // Mounted workspaces keep references to this state object in their
+      // event handlers. Preserve its identity so a live-value refresh cannot
+      // leave controls mutating an obsolete state while saveAndWait persists
+      // the newer object.
+      Object.assign(state, nextState);
       if (state.roomId.trim() !== previousRoomId) {
         roomAnchorInfo = null;
         roomAnchorInfoRoomId = '';

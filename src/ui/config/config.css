@@ -3914,6 +3914,7 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .template-result-artifacts span { border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border)); border-radius: 999px; padding: 5px 8px; background: var(--accent-soft); color: var(--accent-text); font-size: var(--type-meta); }
 .config-root .template-result-timers span,
 .config-root .template-result-no-timer { border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); padding: 6px 9px; font-size: var(--type-meta); }
+.config-root .template-result-no-timer { margin-top: 12px; }
 .config-root .template-confirm-preview > p { margin-top: 10px; color: var(--text-dim); font-size: var(--type-meta); text-align: center; }
 .config-root .template-result-preview {
   --preview-accent: #fb7299;

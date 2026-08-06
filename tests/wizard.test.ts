@@ -1246,6 +1246,12 @@ describe('single-page configuration rendering', () => {
     expect(configCss).toMatch(/\.formula-help \{[^}]*margin: 16px 0 14px;/);
   });
 
+  it('separates template rule cards from the timer explanation', () => {
+    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+
+    expect(configCss).toMatch(/\.template-result-no-timer \{[^}]*margin-top: 12px;/);
+  });
+
   it('keeps tutorial spotlights above template and attribute workspaces', () => {
     const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
 
@@ -2136,6 +2142,56 @@ describe('single-page configuration rendering', () => {
     expect(root.querySelector('.timer-editor-enabled-toggle')).toBeNull();
     vi.clearAllTimers();
     vi.useRealTimers();
+  });
+
+  it('deletes an activity after a backend refresh replaces live values', async () => {
+    const initialState = defaultState();
+    initialState.settings.showTutorial = false;
+    initialState.attributes = [
+      { name: '红队', value: 0, unit: 'none', format: 'suffix', decimals: 0, suffix: '分' },
+      { name: '蓝队', value: 0, unit: 'none', format: 'suffix', decimals: 0, suffix: '分' },
+    ];
+    initialState.activities = [{
+      id: 'activity-delete', name: '红蓝阵营对战', attributeNames: ['红队', '蓝队'], status: 'not_started',
+      resultMode: 'highest', gateRules: true, initialValues: { 红队: 0, 蓝队: 0 }, milestones: [],
+    }];
+    let serverState = JSON.parse(JSON.stringify(initialState));
+    let pollConfig: (() => void) | undefined;
+    vi.stubGlobal('setInterval', vi.fn((handler: TimerHandler, timeout?: number) => {
+      if (timeout === 1000) pollConfig = handler as () => void;
+      return 0;
+    }));
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/config') && init?.method === 'PATCH') {
+        serverState = { ...serverState, ...JSON.parse(String(init.body ?? '{}')) };
+        return Response.json({ code: 0 });
+      }
+      if (url.endsWith('/api/config')) return Response.json(serverState);
+      if (url.includes('/api/runtime')) {
+        return Response.json({ code: 0, runtime: { state: 'idle', roomId: '' } });
+      }
+      if (url.includes('/api/auth/status')) {
+        return Response.json({ code: 0, auth: { state: 'anonymous' } });
+      }
+      return new Response(null, { status: 204 });
+    }));
+    await saveState(initialState);
+
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    serverState = JSON.parse(JSON.stringify(initialState));
+    serverState.attributes[0].value = 1;
+    pollConfig?.();
+    await new Promise((resolve) => nativeSetTimeout(resolve, 0));
+
+    const activityCard = root.querySelector('.activity-card');
+    findByText(activityCard ?? root, '删除')?.onclick?.();
+    await new Promise((resolve) => nativeSetTimeout(resolve, 0));
+
+    expect(serverState.activities).toEqual([]);
+    expect(root.querySelector('.activity-card')).toBeNull();
   });
 
   it('lists only effective gift calculations with the gift ID and before/after values', () => {
