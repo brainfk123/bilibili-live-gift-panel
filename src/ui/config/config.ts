@@ -1,4 +1,4 @@
-import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
+import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
 import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { bindFloatingDetailCard, el, fieldControl, inputField, setFloatingDetailGuideExpanded, toast } from '../common';
@@ -1513,7 +1513,7 @@ export function mountConfig(root: HTMLElement): void {
       ? [...original.attributeNames]
       : state.attributes.slice(0, 2).map((attribute) => attribute.name);
     let layout: DisplaySceneLayout = original?.layout ?? 'grid';
-    let themeId: DisplayThemeId = original?.themeId ?? state.settings.defaultDisplayThemeId;
+    const appearance = cloneDisplayAppearance(original?.appearance, original?.themeId);
     const overlay = el('div', { class: 'overlay display-scene-overlay' });
     const dialog = el('section', { class: 'card display-scene-dialog', role: 'dialog', ariaLabel: original ? `编辑组合面板 ${original.name}` : '新建组合面板' } as any);
     const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭组合面板编辑器' } as any) as HTMLButtonElement;
@@ -1584,13 +1584,12 @@ export function mountConfig(root: HTMLElement): void {
     }
     refreshAttributes();
 
-    const themeControl = createDisplayThemeControl(
-      themeId,
-      (nextThemeId) => { themeId = nextThemeId; },
-      '组合面板皮肤',
-      '只覆盖这个组合链接中的外观，不改变各属性自己的专属链接。',
+    const appearanceControl = createDisplayAppearanceControl(
+      appearance,
+      '组合面板外观',
+      '只影响这个组合面板链接，不改变各属性自己的专属链接。',
     );
-    themeControl.classList.add('display-scene-theme-control');
+    appearanceControl.classList.add('display-scene-theme-control');
 
     const cancelButton = el('button', { class: 'btn ghost', type: 'button', text: '取消' }) as HTMLButtonElement;
     cancelButton.onclick = close;
@@ -1616,7 +1615,8 @@ export function mountConfig(root: HTMLElement): void {
         name,
         attributeNames: [...selectedNames],
         layout,
-        themeId,
+        themeId: appearance.themeId,
+        appearance: { ...appearance },
       };
       const previousScenes = state.displayScenes;
       state.displayScenes = [...state.displayScenes];
@@ -1657,7 +1657,59 @@ export function mountConfig(root: HTMLElement): void {
           el('div', { class: 'display-scene-editor-heading' }, [el('div', {}, [el('h3', { text: '选择并排序属性' }), el('p', { text: '至少选择 2 个；取消后重新选择可以调整顺序。' })]), selectionStatus]),
           attributeGrid,
         ]),
-        themeControl,
+        appearanceControl,
+      ]),
+      el('footer', { class: 'modal-actions display-scene-dialog-actions' }, [cancelButton, saveButton]),
+    );
+    overlay.append(dialog);
+    root.append(overlay);
+  }
+
+  function openBlindBoxAppearanceEditor(): void {
+    root.querySelector('.blind-box-appearance-overlay')?.remove();
+    const appearance = cloneDisplayAppearance(state.blindBoxDisplay);
+    const overlay = el('div', { class: 'overlay blind-box-appearance-overlay' });
+    const dialog = el('section', { class: 'card display-scene-dialog blind-box-appearance-dialog', role: 'dialog', ariaLabel: '盲盒盈亏榜 OBS 外观' } as any);
+    const close = (): void => { overlay.remove(); };
+    const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭盲盒面板外观设置' } as any) as HTMLButtonElement;
+    closeButton.onclick = close;
+    const cancelButton = el('button', { class: 'btn ghost', type: 'button', text: '取消' }) as HTMLButtonElement;
+    cancelButton.onclick = close;
+    const saveButton = el('button', { class: 'btn', type: 'button', text: '保存外观' }) as HTMLButtonElement;
+    saveButton.onclick = async () => {
+      const previous = state.blindBoxDisplay;
+      state.blindBoxDisplay = { ...appearance };
+      saveButton.disabled = true;
+      saveButton.textContent = '保存中…';
+      try {
+        await saveAndWait();
+      } catch {
+        state.blindBoxDisplay = previous;
+        saveButton.disabled = false;
+        saveButton.textContent = '保存外观';
+        return;
+      }
+      close();
+      render();
+      toast('盲盒盈亏榜外观已保存', root);
+    };
+    overlay.onpointerdown = (event) => { overlay.dataset.pointerOutside = String(event.target === overlay); };
+    overlay.onclick = (event) => {
+      const shouldClose = overlay.dataset.pointerOutside === 'true' && event.target === overlay;
+      overlay.dataset.pointerOutside = 'false';
+      if (shouldClose) close();
+    };
+    dialog.append(
+      el('header', { class: 'display-scene-dialog-header' }, [
+        el('div', {}, [
+          el('span', { class: 'section-kicker', text: 'OBS 独立面板' }),
+          el('h2', { text: '盲盒盈亏榜外观' }),
+          el('p', { text: '这些设置只影响盲盒盈亏榜链接。' }),
+        ]),
+        closeButton,
+      ]),
+      el('div', { class: 'display-scene-dialog-body' }, [
+        createDisplayAppearanceControl(appearance, '面板外观', '字体、颜色、位置和透明度都只属于这个面板。'),
       ]),
       el('footer', { class: 'modal-actions display-scene-dialog-actions' }, [cancelButton, saveButton]),
     );
@@ -1674,6 +1726,12 @@ export function mountConfig(root: HTMLElement): void {
       type: 'button',
       text: '复制盈亏榜 OBS 链接',
     }) as HTMLButtonElement;
+    const appearanceButton = el('button', {
+      class: 'btn ghost contribution-obs-appearance',
+      type: 'button',
+      text: '设置 OBS 外观',
+    }) as HTMLButtonElement;
+    appearanceButton.onclick = openBlindBoxAppearanceEditor;
     copyObsButton.onclick = async () => {
       try {
         await navigator.clipboard.writeText(blindBoxDisplayUrl(location.origin));
@@ -1708,6 +1766,7 @@ export function mountConfig(root: HTMLElement): void {
       ),
       el('div', { class: 'contribution-heading-actions' }, [
         el('span', { class: 'contribution-viewer-count', text: `${viewers.length} 位观众` }),
+        appearanceButton,
         copyObsButton,
         clearButton,
       ]),
@@ -2115,10 +2174,11 @@ export function mountConfig(root: HTMLElement): void {
     formatSelect.innerHTML = '<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字 + 后缀</option>';
     formatSelect.value = original?.format ?? 'hhmmss';
     const displayConfig: AttributeDisplay = original?.display
-      ? { ...original.display, valueMappings: original.display.valueMappings?.map((mapping) => ({ ...mapping })) }
+      ? { ...original.display, appearance: cloneDisplayAppearance(original.display.appearance, original.display.themeId), valueMappings: original.display.valueMappings?.map((mapping) => ({ ...mapping })) }
       : {
         variant: formatSelect.value === 'hhmmss' ? 'timer' : 'number',
         themeId: state.settings.defaultDisplayThemeId,
+        appearance: cloneDisplayAppearance(),
         title: original?.name ?? '',
       };
     const suffixInput = inputField('数值后缀', original?.suffix ?? '');
@@ -3153,11 +3213,12 @@ export function mountConfig(root: HTMLElement): void {
         confirmOutputPreviewButton,
     ]);
     outputLessonCard.dataset.tutorialLesson = 'appearance';
-    const attributeThemeControl = createDisplayThemeControl(
-      displayConfig.themeId ?? state.settings.defaultDisplayThemeId,
-      (themeId) => { displayConfig.themeId = themeId; },
-      '这个属性的 OBS 皮肤',
-      '只影响当前属性；模板已经为玩法选择了推荐皮肤。',
+    const attributeAppearance = displayConfig.appearance ?? cloneDisplayAppearance(undefined, displayConfig.themeId);
+    displayConfig.appearance = attributeAppearance;
+    const attributeAppearanceControl = createDisplayAppearanceControl(
+      attributeAppearance,
+      '这个属性的 OBS 外观',
+      '只影响当前属性的专属 OBS 链接。',
     );
     let valueMappings: AttributeValueMapping[] = displayConfig.valueMappings?.map((mapping) => ({ ...mapping })) ?? [];
     const enumEnabled = el('input', { class: 'setting-switch-input', type: 'checkbox' }) as HTMLInputElement;
@@ -3268,7 +3329,7 @@ export function mountConfig(root: HTMLElement): void {
         ]),
       ]),
       enumMappingSection,
-      attributeThemeControl,
+      attributeAppearanceControl,
       el('p', { class: 'modal-tip', text: '默认播报会在没有礼物消息时滚动显示；收到礼物后会临时切换为本次送礼信息。' }),
     ]);
 
@@ -3540,7 +3601,7 @@ export function mountConfig(root: HTMLElement): void {
       broadcastMessage: broadcastMessageInput.value.trim(),
       display: {
         ...displayConfig,
-        themeId: displayConfig.themeId ?? state.settings.defaultDisplayThemeId,
+        themeId: displayConfig.appearance?.themeId ?? displayConfig.themeId ?? state.settings.defaultDisplayThemeId,
         title: !displayConfig.title || displayConfig.title === originalName ? name : displayConfig.title,
       },
       ...(original?.color ? { color: original.color } : {}),
@@ -3699,13 +3760,127 @@ export function mountConfig(root: HTMLElement): void {
     ]);
   }
 
+  function cloneDisplayAppearance(
+    appearance?: Partial<DisplayAppearance>,
+    fallbackThemeId: DisplayThemeId = state.settings.defaultDisplayThemeId,
+  ): DisplayAppearance {
+    return {
+      themeId: appearance?.themeId ?? fallbackThemeId,
+      fontSize: appearance?.fontSize ?? state.settings.fontSize,
+      accentColor: appearance?.accentColor ?? state.settings.accentColor,
+      showConnection: appearance?.showConnection ?? state.settings.showConnection,
+      align: appearance?.align ?? state.settings.align,
+      panelOpacity: appearance?.panelOpacity ?? state.settings.panelOpacity,
+    };
+  }
+
+  function createDisplayAppearanceControl(
+    appearance: DisplayAppearance,
+    title: string,
+    description: string,
+  ): HTMLElement {
+    const section = el('section', { class: 'display-appearance-control' }, [
+      el('div', { class: 'display-scene-editor-heading' }, [
+        el('div', {}, [el('h3', { text: title }), el('p', { text: description })]),
+      ]),
+    ]);
+    section.append(createDisplayThemeControl(
+      appearance.themeId,
+      (themeId) => { appearance.themeId = themeId; },
+      '面板皮肤',
+      '为这个 OBS 面板选择最适合内容的视觉风格。',
+    ));
+
+    const rangeControl = (
+      label: string,
+      value: number,
+      min: number,
+      max: number,
+      unit: string,
+      commit: (next: number) => void,
+    ): HTMLElement => {
+      const output = el('output', { class: 'setting-value', text: `${value}${unit}` });
+      const range = el('input', { class: 'setting-range', type: 'range', value: String(value) }) as HTMLInputElement;
+      range.dataset.fieldLabel = label;
+      range.setAttribute('min', String(min));
+      range.setAttribute('max', String(max));
+      range.setAttribute('step', '1');
+      const update = (): number => {
+        const next = Math.min(max, Math.max(min, Number(range.value) || value));
+        output.textContent = `${next}${unit}`;
+        range.style.setProperty('--range-progress', `${((next - min) / (max - min)) * 100}%`);
+        return next;
+      };
+      range.oninput = () => { commit(update()); };
+      update();
+      return el('label', { class: 'field setting-control range-setting' }, [
+        el('span', { class: 'setting-control-head' }, [el('span', { class: 'field-label', text: label }), output]),
+        range,
+      ]);
+    };
+
+    const accentValue = el('output', { class: 'setting-value color-value', text: appearance.accentColor.toUpperCase() });
+    const accent = el('input', { class: 'setting-color-input', type: 'color', value: appearance.accentColor }) as HTMLInputElement;
+    accent.dataset.fieldLabel = '强调色';
+    accent.oninput = () => {
+      appearance.accentColor = accent.value;
+      accentValue.textContent = accent.value.toUpperCase();
+    };
+    const accentControl = el('label', { class: 'field setting-control color-setting' }, [
+      el('span', { class: 'setting-control-head' }, [el('span', { class: 'field-label', text: '强调色' }), accentValue]),
+      el('span', { class: 'color-picker-row' }, [accent, el('span', { class: 'color-picker-copy', text: '点击色块选择颜色' })]),
+    ]);
+
+    const alignControl = el('fieldset', { class: 'field setting-control alignment-setting' });
+    alignControl.append(el('legend', { class: 'field-label', text: '对齐' }));
+    const alignOptions = el('div', { class: 'alignment-control', role: 'group', ariaLabel: `${title}对齐方式` });
+    ([['left', '左对齐'], ['center', '居中'], ['right', '右对齐']] as const).forEach(([value, label]) => {
+      const button = el('button', {
+        class: `alignment-option${appearance.align === value ? ' is-active' : ''}`,
+        type: 'button', text: label, ariaPressed: String(appearance.align === value),
+      }) as HTMLButtonElement;
+      button.onclick = () => {
+        appearance.align = value;
+        for (const candidate of Array.from(alignOptions.querySelectorAll('.alignment-option'))) {
+          const active = candidate === button;
+          candidate.classList.toggle('is-active', active);
+          candidate.setAttribute('aria-pressed', String(active));
+        }
+      };
+      alignOptions.append(button);
+    });
+    alignControl.append(alignOptions);
+
+    const showConnectionInput = el('input', { class: 'setting-switch-input', type: 'checkbox' }) as HTMLInputElement;
+    showConnectionInput.checked = appearance.showConnection;
+    showConnectionInput.onchange = () => { appearance.showConnection = showConnectionInput.checked; };
+
+    section.append(
+      el('div', { class: 'display-appearance-fields' }, [
+        rangeControl('字体大小（px）', appearance.fontSize, 24, 96, ' px', (next) => { appearance.fontSize = next; }),
+        accentControl,
+        alignControl,
+        rangeControl('面板透明度（%）', appearance.panelOpacity, 10, 100, '%', (next) => { appearance.panelOpacity = next; }),
+        el('label', { class: 'setting-switch' }, [
+          showConnectionInput,
+          el('span', { class: 'setting-switch-track', ariaHidden: 'true' }),
+          el('span', { class: 'setting-switch-copy' }, [
+            el('strong', { text: '显示连接状态' }),
+            el('small', { text: '只控制这个 OBS 面板右上角的连接状态。' }),
+          ]),
+        ]),
+      ]),
+    );
+    return section;
+  }
+
   function renderAdvancedSettings(): void {
     const details = el('details', { class: 'advanced-settings' });
     details.open = advancedSettingsOpen;
     details.ontoggle = () => { advancedSettingsOpen = details.open; };
     details.append(el('summary', {}, [
-      el('span', { text: '外观与数据' }),
-      el('small', { text: '面板外观、自动更新和配置备份' }),
+      el('span', { text: '程序与数据' }),
+      el('small', { text: '自动更新、诊断和配置备份' }),
     ]));
     const settingsGrid = el('div', { class: 'advanced-settings-grid' });
 
@@ -3977,7 +4152,7 @@ export function mountConfig(root: HTMLElement): void {
     syncUpdateCard();
 
     dataCard.append(updateCard);
-    settingsGrid.append(appearance, dataCard);
+    settingsGrid.append(dataCard);
     details.append(settingsGrid);
     content.append(details);
   }

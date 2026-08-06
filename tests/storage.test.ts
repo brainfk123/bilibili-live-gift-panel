@@ -13,6 +13,7 @@ describe('storage', () => {
     expect(s.attributes).toEqual([]);
     expect(s.rules).toEqual([]);
     expect(s.contributions).toEqual({ viewers: [] });
+    expect(s.blindBoxDisplay).toEqual(expect.objectContaining({ themeId: 'glass', fontSize: 48, panelOpacity: 55 }));
     expect(s.settings.panelOpacity).toBe(55);
     expect(s.settings.trainingCompletedTopics).toEqual([]);
     expect(s.settings.lastSeenChangelogVersion).toBe('');
@@ -122,11 +123,50 @@ describe('storage', () => {
     expect(loaded.settings.theme).toBe('dark');
     expect(loaded.settings.giftView).toBe('list');
     expect(loaded.settings.panelOpacity).toBe(55);
+    expect(loaded.blindBoxDisplay).toEqual(expect.objectContaining({
+      themeId: 'glass', fontSize: 48, accentColor: '#fb7299', align: 'center', panelOpacity: 55,
+    }));
     expect(loaded.settings.showTutorial).toBe(true);
     expect(loaded.settings.tutorialVersion).toBe(3);
     expect(loaded.settings.tutorialCompletedLessons).toEqual([]);
     expect(loaded.settings.tutorialReplayMode).toBe(false);
     expect(loaded.settings.trainingCompletedTopics).toEqual([]);
+    expect(consumeConfigMigrationRequired()).toBe(true);
+  });
+
+  it('migrates legacy global appearance values into each OBS panel', async () => {
+    const legacy = defaultState();
+    legacy.settings = {
+      ...legacy.settings,
+      fontSize: 66,
+      accentColor: '#123456',
+      showConnection: false,
+      align: 'right',
+      panelOpacity: 72,
+      defaultDisplayThemeId: 'neon',
+    };
+    legacy.attributes = [{
+      name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '',
+      display: { variant: 'number', themeId: 'pixel' },
+    }];
+    legacy.displayScenes = [{
+      id: 'scene-1', name: '积分面板', attributeNames: ['积分'], layout: 'stack', themeId: 'kawaii',
+    }];
+    delete (legacy as Partial<typeof legacy>).blindBoxDisplay;
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(legacy)));
+
+    await hydrateStateFromServer();
+
+    const loaded = loadState();
+    expect(loaded.attributes[0].display?.appearance).toEqual({
+      themeId: 'pixel', fontSize: 66, accentColor: '#123456', showConnection: false, align: 'right', panelOpacity: 72,
+    });
+    expect(loaded.displayScenes[0].appearance).toEqual({
+      themeId: 'kawaii', fontSize: 66, accentColor: '#123456', showConnection: false, align: 'right', panelOpacity: 72,
+    });
+    expect(loaded.blindBoxDisplay).toEqual({
+      themeId: 'neon', fontSize: 66, accentColor: '#123456', showConnection: false, align: 'right', panelOpacity: 72,
+    });
     expect(consumeConfigMigrationRequired()).toBe(true);
   });
 
@@ -240,7 +280,7 @@ describe('storage', () => {
 
     const backup = createConfigBackup(state);
 
-    expect(backup.schemaVersion).toBe(1);
+    expect(backup.schemaVersion).toBe(2);
     expect(backup.giftCatalog.map((gift) => gift.id)).toEqual([1, 2]);
     expect(backup).not.toHaveProperty('recentGifts');
     expect(backup).not.toHaveProperty('stats');

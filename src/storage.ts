@@ -1,15 +1,16 @@
-import { AppState, AttributeValueMapping, MAX_LOG } from './types';
+import { AppState, AttributeValueMapping, DisplayAppearance, MAX_LOG } from './types';
 import { normalizeDisplayThemeId } from './display-themes';
 import { normalizeDisplayScenes } from './display-scenes';
 import { normalizeActivities } from './activities';
 import { normalizeTrainingTopicIds } from './training';
 
 const CONFIG_ENDPOINT = '/api/config';
-const CONFIG_BACKUP_SCHEMA_VERSION = 1;
+const CONFIG_BACKUP_SCHEMA_VERSION = 2;
 const STATE_FIELD_KEYS = [
   'roomId',
   'attributes',
   'displayScenes',
+  'blindBoxDisplay',
   'activities',
   'rules',
   'timerRules',
@@ -27,6 +28,7 @@ type ConfigBackupFields = Pick<AppState,
   | 'roomId'
   | 'attributes'
   | 'displayScenes'
+  | 'blindBoxDisplay'
   | 'activities'
   | 'rules'
   | 'timerRules'
@@ -46,6 +48,14 @@ export const defaultState = (): AppState => ({
   roomId: '',
   attributes: [],
   displayScenes: [],
+  blindBoxDisplay: {
+    themeId: 'glass',
+    fontSize: 48,
+    accentColor: '#fb7299',
+    showConnection: true,
+    align: 'center',
+    panelOpacity: 55,
+  },
   activities: [],
   rules: [],
   timerRules: [],
@@ -197,6 +207,7 @@ export function createConfigBackup(state: AppState): ConfigBackup {
     roomId: state.roomId,
     attributes: state.attributes,
     displayScenes: state.displayScenes,
+    blindBoxDisplay: state.blindBoxDisplay,
     activities: state.activities,
     rules: state.rules,
     timerRules: state.timerRules,
@@ -217,6 +228,7 @@ export function mergeConfigBackup(current: AppState, input: unknown): AppState {
     if (input[key] !== undefined && !Array.isArray(input[key])) throw new Error(`配置字段 ${key} 格式不正确`);
   }
   if (input.settings !== undefined && !isObjectRecord(input.settings)) throw new Error('配置字段 settings 格式不正确');
+  if (input.blindBoxDisplay !== undefined && !isObjectRecord(input.blindBoxDisplay)) throw new Error('配置字段 blindBoxDisplay 格式不正确');
   if (input.roomId !== undefined && typeof input.roomId !== 'string') throw new Error('配置字段 roomId 格式不正确');
 
   const parsed = input as Partial<AppState>;
@@ -236,6 +248,7 @@ export function mergeConfigBackup(current: AppState, input: unknown): AppState {
     ...(parsed.roomId !== undefined ? { roomId: parsed.roomId } : {}),
     ...(parsed.attributes !== undefined ? { attributes: parsed.attributes } : {}),
     ...(parsed.displayScenes !== undefined ? { displayScenes: parsed.displayScenes } : {}),
+    ...(parsed.blindBoxDisplay !== undefined ? { blindBoxDisplay: parsed.blindBoxDisplay } : {}),
     ...(parsed.activities !== undefined ? { activities: parsed.activities } : {}),
     ...(parsed.rules !== undefined ? { rules: parsed.rules } : {}),
     ...(parsed.timerRules !== undefined ? { timerRules: parsed.timerRules } : {}),
@@ -285,6 +298,8 @@ function normalizeState(parsed: Partial<AppState>): AppState {
   };
   settings.panelOpacity = Math.min(100, Math.max(10, Number(settings.panelOpacity) || base.settings.panelOpacity));
   settings.defaultDisplayThemeId = normalizeDisplayThemeId(settings.defaultDisplayThemeId);
+  if (parsed.blindBoxDisplay === undefined) markDisplayAppearanceMigrationRequired('blindBoxDisplay');
+  const blindBoxDisplay = normalizeDisplayAppearance(parsed.blindBoxDisplay, settings);
   const attributes = (parsed.attributes ?? base.attributes).map((attribute) => (
     attribute.display
       ? {
@@ -292,24 +307,58 @@ function normalizeState(parsed: Partial<AppState>): AppState {
         display: {
           ...attribute.display,
           themeId: normalizeDisplayThemeId(attribute.display.themeId ?? settings.defaultDisplayThemeId),
+          appearance: normalizeDisplayAppearance(attribute.display.appearance, settings, attribute.display.themeId),
           valueMappings: normalizeValueMappings(attribute.display.valueMappings),
         },
       }
       : attribute
   ));
+  if (attributes.some((attribute, index) => attribute.display && !(parsed.attributes?.[index]?.display?.appearance))) {
+    markDisplayAppearanceMigrationRequired('attributes');
+  }
   const displayScenes = normalizeDisplayScenes(parsed.displayScenes, attributes, settings.defaultDisplayThemeId);
+  for (const scene of displayScenes) {
+    const source = parsed.displayScenes?.find((candidate) => candidate.id === scene.id);
+    scene.appearance = normalizeDisplayAppearance(source?.appearance, settings, scene.themeId);
+    if (!source?.appearance) markDisplayAppearanceMigrationRequired('displayScenes');
+  }
   return {
     ...base,
     ...parsed,
     settings,
     attributes,
     displayScenes,
+    blindBoxDisplay,
     activities: normalizeActivities(parsed.activities, attributes, new Set(displayScenes.map((scene) => scene.id))),
     rules: parsed.rules ?? base.rules,
     timerRules: parsed.timerRules ?? base.timerRules,
     formulaPresets: parsed.formulaPresets ?? base.formulaPresets,
     contributions: normalizeContributionLedger(parsed.contributions),
   };
+}
+
+function normalizeDisplayAppearance(
+  appearance: Partial<DisplayAppearance> | undefined,
+  settings: AppState['settings'],
+  fallbackThemeId: unknown = settings.defaultDisplayThemeId,
+): DisplayAppearance {
+  const fontSize = Number(appearance?.fontSize ?? settings.fontSize);
+  const panelOpacity = Number(appearance?.panelOpacity ?? settings.panelOpacity);
+  const accentColor = String(appearance?.accentColor ?? settings.accentColor);
+  const align = appearance?.align ?? settings.align;
+  return {
+    themeId: normalizeDisplayThemeId(appearance?.themeId ?? fallbackThemeId),
+    fontSize: Math.min(96, Math.max(24, Number.isFinite(fontSize) ? fontSize : 48)),
+    accentColor: /^#[0-9a-f]{6}$/i.test(accentColor) ? accentColor : '#fb7299',
+    showConnection: appearance?.showConnection ?? settings.showConnection,
+    align: align === 'left' || align === 'right' ? align : 'center',
+    panelOpacity: Math.min(100, Math.max(10, Number.isFinite(panelOpacity) ? panelOpacity : 55)),
+  };
+}
+
+function markDisplayAppearanceMigrationRequired(field: StateFieldKey): void {
+  configMigrationRequired = true;
+  forcePersistFields.add(field);
 }
 
 function markSettingsMigrationRequired(): void {

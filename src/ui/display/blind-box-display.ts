@@ -56,10 +56,11 @@ export function mountBlindBoxDisplay(root: HTMLElement): void {
     stopLeaderboardScroll();
     const renderVersion = ++leaderboardRenderVersion;
     const leaderboard = buildBlindBoxLeaderboard(state.contributions, MAX_RANKED_VIEWERS);
-    const theme = getDisplayTheme(state.settings.defaultDisplayThemeId);
+    const appearance = state.blindBoxDisplay;
+    const theme = getDisplayTheme(appearance.themeId);
     const panel = el('main', { class: 'panel blind-box-panel' });
     panel.dataset.theme = theme.id;
-    panel.style.setProperty('--theme-accent', theme.id === 'glass' ? state.settings.accentColor : theme.accent);
+    panel.style.setProperty('--theme-accent', theme.id === 'glass' ? appearance.accentColor : theme.accent);
     panel.style.setProperty('--theme-surface', theme.surface);
 
     panel.append(el('header', { class: 'blind-box-header' }, [
@@ -165,7 +166,7 @@ export function mountBlindBoxDisplay(root: HTMLElement): void {
     const indicator = panel?.querySelector<HTMLElement>('.conn');
     if (!indicator) return;
     indicator.className = connectionClass(connectionState);
-    indicator.style.display = state.settings.showConnection ? '' : 'none';
+    indicator.style.display = state.blindBoxDisplay.showConnection ? '' : 'none';
   }
 
   async function refreshState(): Promise<void> {
@@ -247,19 +248,20 @@ function summaryItem(label: string, value: string, title = value): HTMLElement {
 }
 
 function applyAppearance(stack: HTMLElement, panel: HTMLElement, state: AppState): void {
-  const opacity = Math.min(100, Math.max(10, Number(state.settings.panelOpacity) || 55)) / 100;
+  const appearance = state.blindBoxDisplay;
+  const opacity = Math.min(100, Math.max(10, Number(appearance.panelOpacity) || 55)) / 100;
   const root = stack.parentElement;
-  root?.style.setProperty('--accent', state.settings.accentColor);
-  root?.style.setProperty('--accent2', state.settings.accentColor);
+  root?.style.setProperty('--accent', appearance.accentColor);
+  root?.style.setProperty('--accent2', appearance.accentColor);
   root?.style.setProperty('--panel-opacity', String(opacity));
   root?.style.setProperty('--panel-surface-opacity', String(opacity * 0.62));
-  stack.classList.toggle('center', state.settings.align === 'center');
-  stack.classList.toggle('right', state.settings.align === 'right');
-  panel.style.setProperty('--leaderboard-font-scale', String(Math.max(.8, Math.min(1.35, state.settings.fontSize / 48))));
+  stack.classList.toggle('center', appearance.align === 'center');
+  stack.classList.toggle('right', appearance.align === 'right');
+  panel.style.setProperty('--leaderboard-font-scale', String(Math.max(.8, Math.min(1.35, appearance.fontSize / 48))));
 }
 
 function displaySignature(state: AppState): string {
-  return JSON.stringify({ contributions: state.contributions, settings: state.settings });
+  return JSON.stringify({ contributions: state.contributions, appearance: state.blindBoxDisplay });
 }
 
 function connectionClass(state: RuntimeConnectionState): string {

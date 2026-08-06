@@ -2,7 +2,7 @@ import { getRuntimeStatus, RuntimeConnectionState } from '../../backend';
 import { formatValue } from '../../format';
 import { findGift } from '../../gifts/catalog';
 import { loadState, refreshStateFromServer } from '../../storage';
-import { AppState, Attribute, LogEntry, MAX_LOG } from '../../types';
+import { AppState, Attribute, DisplayAppearance, LogEntry, MAX_LOG } from '../../types';
 import { getDisplayTheme, resolveAttributeDisplayTheme, resolveAttributeDisplayVariant } from '../../display-themes';
 import { createBrandIcon } from '../brand';
 import { el } from '../common';
@@ -60,6 +60,26 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
   root.replaceChildren(stack);
 
   const currentTarget = () => resolveDisplayTarget(state, target);
+
+  const fallbackAppearance = (themeId = state.settings.defaultDisplayThemeId): DisplayAppearance => ({
+    themeId,
+    fontSize: state.settings.fontSize,
+    accentColor: state.settings.accentColor,
+    showConnection: state.settings.showConnection,
+    align: state.settings.align,
+    panelOpacity: state.settings.panelOpacity,
+  });
+
+  const appearanceForAttribute = (attribute: Attribute): DisplayAppearance => (
+    attribute.display?.appearance ?? fallbackAppearance(resolveAttributeDisplayTheme(attribute, state.settings))
+  );
+
+  const appearanceForTarget = (): DisplayAppearance => {
+    const resolved = currentTarget();
+    if (resolved.scene) return resolved.scene.appearance ?? fallbackAppearance(resolved.scene.themeId);
+    if (resolved.attributes.length > 0) return appearanceForAttribute(resolved.attributes[0]);
+    return fallbackAppearance();
+  };
 
   function giftBroadcastDuration(pendingCount: number): number {
     if (pendingCount >= 12) return 2200;
@@ -195,30 +215,30 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
   }
 
   function updateAll(): void {
-    const opacity = Math.min(100, Math.max(10, Number(state.settings.panelOpacity) || 55)) / 100;
-    root.style.setProperty('--accent', state.settings.accentColor);
-    root.style.setProperty('--accent2', state.settings.accentColor);
+    const appearance = appearanceForTarget();
+    const opacity = Math.min(100, Math.max(10, Number(appearance.panelOpacity) || 55)) / 100;
+    root.style.setProperty('--accent', appearance.accentColor);
+    root.style.setProperty('--accent2', appearance.accentColor);
     root.style.setProperty('--panel-opacity', String(opacity));
     root.style.setProperty('--panel-surface-opacity', String(opacity * 0.62));
     const resolved = currentTarget();
     const attributes = resolved.attributes;
     const scene = resolved.scene;
-    const panelTheme = getDisplayTheme(scene?.themeId ?? (attributes.length === 1
-      ? resolveAttributeDisplayTheme(attributes[0], state.settings)
-      : state.settings.defaultDisplayThemeId));
+    const panelTheme = getDisplayTheme(appearance.themeId);
     panel.dataset.theme = panelTheme.id;
-    panel.style.setProperty('--theme-accent', panelTheme.id === 'glass' ? state.settings.accentColor : panelTheme.accent);
+    panel.style.setProperty('--theme-accent', panelTheme.id === 'glass' ? appearance.accentColor : panelTheme.accent);
     panel.style.setProperty('--theme-surface', panelTheme.surface);
-    stack.classList.toggle('center', state.settings.align === 'center');
-    stack.classList.toggle('right', state.settings.align === 'right');
+    stack.classList.toggle('center', appearance.align === 'center');
+    stack.classList.toggle('right', appearance.align === 'right');
     for (const attr of attributes) {
       const block = attrEls.get(attr.name);
       if (!block) continue;
-      const theme = getDisplayTheme(scene?.themeId ?? resolveAttributeDisplayTheme(attr, state.settings));
+      const blockAppearance = scene ? appearance : appearanceForAttribute(attr);
+      const theme = getDisplayTheme(blockAppearance.themeId);
       const variant = resolveAttributeDisplayVariant(attr);
       block.dataset.theme = theme.id;
       block.dataset.variant = variant;
-      block.style.setProperty('--theme-accent', theme.id === 'glass' ? state.settings.accentColor : theme.accent);
+      block.style.setProperty('--theme-accent', theme.id === 'glass' ? blockAppearance.accentColor : theme.accent);
       block.style.setProperty('--theme-surface', theme.surface);
       const meter = block.querySelector<HTMLElement>('.attr-meter');
       if (meter) {
@@ -238,7 +258,7 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
       const valueEl = block.querySelector('.attr-value') as HTMLElement | null;
       if (valueEl) {
         const presentation = resolveAttributeValuePresentation(attr);
-        valueEl.style.fontSize = `${state.settings.fontSize}px`;
+        valueEl.style.fontSize = `${blockAppearance.fontSize}px`;
         const formattedValue = formatValue(attr.value, attr);
         valueEl.classList.toggle('is-enum-mapped', Boolean(presentation.color || presentation.imageUrl || variant === 'enum' && presentation.text !== formattedValue));
         valueEl.style.setProperty('--enum-value-color', presentation.color ?? 'var(--theme-accent, var(--accent))');
@@ -252,7 +272,7 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
         }
         valueEl.title = presentation.text;
         const fittedFontSize = calculateFittedFontSize(
-          state.settings.fontSize,
+          blockAppearance.fontSize,
           valueEl.clientWidth,
           valueEl.scrollWidth,
         );
@@ -293,7 +313,7 @@ export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): voi
     if (connectionState === 'connected') conn.classList.add('connected');
     else if (connectionState === 'connecting' || connectionState === 'reconnecting') conn.classList.add('reconnecting');
     else conn.classList.add('error');
-    conn.style.display = state.settings.showConnection ? '' : 'none';
+    conn.style.display = appearanceForTarget().showConnection ? '' : 'none';
   }
 
   function swapBroadcastContent(next: HTMLElement): void {

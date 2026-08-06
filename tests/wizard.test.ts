@@ -2522,29 +2522,28 @@ describe('single-page configuration rendering', () => {
     expect(root.querySelector('.attribute-overlay')).toBeNull();
   });
 
-  it('persists the OBS panel opacity setting', async () => {
+  it('does not render OBS appearance as a global setting', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
     const opacity = root.querySelectorAll('input')
-      .find((input) => input.dataset.fieldLabel === '面板透明度（%）') as TestElement & { onchange?: () => void };
-    expect(opacity.value).toBe('55');
-    opacity.value = '72';
-    opacity.onchange?.();
-
-    await vi.waitFor(() => expect(loadState().settings.panelOpacity).toBe(72));
+      .find((input) => input.dataset.fieldLabel === '面板透明度（%）');
+    expect(opacity).toBeUndefined();
+    expect(findByText(root, 'OBS 面板外观')).toBeUndefined();
   });
 
-  it('uses field-specific controls for OBS panel appearance', async () => {
+  it('persists field-specific appearance on an attribute OBS panel', async () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888', 1)));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
+    findByText(root, '编辑')?.onclick?.();
 
     const fontSize = root.querySelectorAll('input')
-      .find((input) => input.dataset.fieldLabel === '字体大小（px）') as TestElement & { onchange?: () => void };
+      .find((input) => input.dataset.fieldLabel === '字体大小（px）') as TestElement & { oninput?: () => void };
     const accent = root.querySelectorAll('input')
-      .find((input) => input.dataset.fieldLabel === '强调色') as TestElement & { onchange?: () => void };
+      .find((input) => input.dataset.fieldLabel === '强调色') as TestElement & { oninput?: () => void };
     const opacity = root.querySelectorAll('input')
-      .find((input) => input.dataset.fieldLabel === '面板透明度（%）') as TestElement & { onchange?: () => void };
+      .find((input) => input.dataset.fieldLabel === '面板透明度（%）') as TestElement & { oninput?: () => void };
     const alignmentOptions = root.querySelectorAll('.alignment-option');
     const connectionSwitch = root.querySelector('.setting-switch-input') as TestElement & { checked?: boolean; onchange?: () => void };
 
@@ -2557,18 +2556,22 @@ describe('single-page configuration rendering', () => {
     expect(connectionSwitch).not.toBeNull();
 
     fontSize.value = '64';
-    fontSize.onchange?.();
+    fontSize.oninput?.();
     accent.value = '#123456';
-    accent.onchange?.();
+    accent.oninput?.();
+    opacity.value = '72';
+    opacity.oninput?.();
     alignmentOptions[2].onclick?.();
     connectionSwitch.checked = true;
     connectionSwitch.onchange?.();
+    findByText(root, '保存修改')?.onclick?.();
 
     await vi.waitFor(() => {
-      expect(loadState().settings).toEqual(expect.objectContaining({
+      expect(loadState().attributes[0].display?.appearance).toEqual(expect.objectContaining({
         fontSize: 64,
         accentColor: '#123456',
         align: 'right',
+        panelOpacity: 72,
         showConnection: true,
       }));
     });
@@ -2598,6 +2601,7 @@ describe('OBS combination scene configuration', () => {
     });
     expect(loadState().displayScenes[0]).toEqual(expect.objectContaining({
       name: '组合面板 1', attributeNames: ['生命值', '能量'], layout: 'grid',
+      appearance: expect.objectContaining({ themeId: 'glass', fontSize: 48, panelOpacity: 55 }),
     }));
     const url = root.querySelector('.display-scene-url') as TestElement;
     expect(url.value).toContain('?mode=display&scene=scene-');

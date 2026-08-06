@@ -40,6 +40,7 @@ export function normalizeDisplayScenes(
       attributeNames,
       layout: candidate.layout === 'grid' ? 'grid' : 'stack',
       themeId: normalizeDisplayThemeId(candidate.themeId ?? fallbackThemeId),
+      ...(candidate.appearance ? { appearance: { ...candidate.appearance } } : {}),
     });
   }
   return result;

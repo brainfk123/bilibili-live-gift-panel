@@ -6,12 +6,22 @@ export type DisplayVariant = 'number' | 'timer' | 'progress' | 'health' | 'resou
 
 export type DisplaySceneLayout = 'stack' | 'grid';
 
+export interface DisplayAppearance {
+  themeId: DisplayThemeId;
+  fontSize: number;
+  accentColor: string;
+  showConnection: boolean;
+  align: 'left' | 'center' | 'right';
+  panelOpacity: number;
+}
+
 export interface DisplayScene {
   id: string;
   name: string;
   attributeNames: string[];
   layout: DisplaySceneLayout;
   themeId: DisplayThemeId;
+  appearance?: DisplayAppearance;
 }
 
 export type ActivityStatus = 'not_started' | 'active' | 'locked' | 'settled';
@@ -68,6 +78,7 @@ export interface ActivitySession {
 export interface AttributeDisplay {
   variant: DisplayVariant;
   themeId?: DisplayThemeId;
+  appearance?: DisplayAppearance;
   title?: string;
   min?: number;
   max?: number;
@@ -267,6 +278,7 @@ export interface AppState {
   roomId: string;
   attributes: Attribute[];
   displayScenes: DisplayScene[];
+  blindBoxDisplay: DisplayAppearance;
   activities: ActivitySession[];
   rules: GiftRule[];
   timerRules: TimerRule[];

@@ -3969,6 +3969,14 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .display-theme-check { color: var(--accent-text); font-weight: 900; }
 .config-root .display-theme-setting { min-width: 0; margin: 0; padding: 0; border: 0; }
 .config-root .display-theme-setting > .field-label { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; }
+.config-root .display-appearance-control { display: grid; gap: 16px; }
+.config-root .display-appearance-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.config-root .display-appearance-fields > .setting-switch { align-self: end; min-height: 74px; }
+.config-root .blind-box-appearance-dialog { width: min(920px, calc(100vw - 32px)); }
+
+@media (max-width: 760px) {
+  .config-root .display-appearance-fields { grid-template-columns: 1fr; }
+}
 .config-root .display-theme-setting.display-scene-theme-control { border: 1px solid var(--border); border-radius: 14px; padding: 16px; background: var(--bg-soft); }
 .config-root .display-theme-current { color: var(--accent-text); font-size: var(--type-meta); font-weight: 800; }
 .config-root .display-theme-description { margin-top: 5px; color: var(--text-dim); font-size: var(--type-meta); }

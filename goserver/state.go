@@ -26,6 +26,7 @@ type attributeState struct {
 type attributeDisplayState struct {
 	Variant       string                       `json:"variant"`
 	ThemeID       string                       `json:"themeId,omitempty"`
+	Appearance    *displayAppearanceState      `json:"appearance,omitempty"`
 	Title         string                       `json:"title,omitempty"`
 	Min           *float64                     `json:"min,omitempty"`
 	Max           *float64                     `json:"max,omitempty"`
@@ -33,6 +34,15 @@ type attributeDisplayState struct {
 	LeftLabel     string                       `json:"leftLabel,omitempty"`
 	RightLabel    string                       `json:"rightLabel,omitempty"`
 	ValueMappings []attributeValueMappingState `json:"valueMappings,omitempty"`
+}
+
+type displayAppearanceState struct {
+	ThemeID        string `json:"themeId"`
+	FontSize       int    `json:"fontSize"`
+	AccentColor    string `json:"accentColor"`
+	ShowConnection bool   `json:"showConnection"`
+	Align          string `json:"align"`
+	PanelOpacity   int    `json:"panelOpacity"`
 }
 
 type attributeValueMappingState struct {
@@ -43,11 +53,12 @@ type attributeValueMappingState struct {
 }
 
 type displaySceneState struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	AttributeNames []string `json:"attributeNames"`
-	Layout         string   `json:"layout"`
-	ThemeID        string   `json:"themeId"`
+	ID             string                  `json:"id"`
+	Name           string                  `json:"name"`
+	AttributeNames []string                `json:"attributeNames"`
+	Layout         string                  `json:"layout"`
+	ThemeID        string                  `json:"themeId"`
+	Appearance     *displayAppearanceState `json:"appearance,omitempty"`
 }
 
 type activityResultState struct {
@@ -255,19 +266,20 @@ type settingsState struct {
 }
 
 type appState struct {
-	RoomID         string                  `json:"roomId"`
-	Attributes     []attributeState        `json:"attributes"`
-	DisplayScenes  []displaySceneState     `json:"displayScenes"`
-	Activities     []activitySessionState  `json:"activities"`
-	Rules          []giftRule              `json:"rules"`
-	TimerRules     []timerRule             `json:"timerRules"`
-	FormulaPresets []formulaPreset         `json:"formulaPresets"`
-	Settings       settingsState           `json:"settings"`
-	GiftCatalog    []giftInfo              `json:"giftCatalog"`
-	RecentGifts    []recentGift            `json:"recentGifts"`
-	Stats          map[string]dayStats     `json:"stats"`
-	Log            []logEntry              `json:"log"`
-	Contributions  contributionLedgerState `json:"contributions"`
+	RoomID          string                  `json:"roomId"`
+	Attributes      []attributeState        `json:"attributes"`
+	DisplayScenes   []displaySceneState     `json:"displayScenes"`
+	BlindBoxDisplay displayAppearanceState  `json:"blindBoxDisplay"`
+	Activities      []activitySessionState  `json:"activities"`
+	Rules           []giftRule              `json:"rules"`
+	TimerRules      []timerRule             `json:"timerRules"`
+	FormulaPresets  []formulaPreset         `json:"formulaPresets"`
+	Settings        settingsState           `json:"settings"`
+	GiftCatalog     []giftInfo              `json:"giftCatalog"`
+	RecentGifts     []recentGift            `json:"recentGifts"`
+	Stats           map[string]dayStats     `json:"stats"`
+	Log             []logEntry              `json:"log"`
+	Contributions   contributionLedgerState `json:"contributions"`
 }
 
 type giftEvent struct {
@@ -293,8 +305,12 @@ func defaultAppState() appState {
 	tutorialReplayMode := false
 	autoUpdate := true
 	return appState{
-		Attributes:     []attributeState{},
-		DisplayScenes:  []displaySceneState{},
+		Attributes:    []attributeState{},
+		DisplayScenes: []displaySceneState{},
+		BlindBoxDisplay: displayAppearanceState{
+			ThemeID: "glass", FontSize: 48, AccentColor: "#fb7299",
+			ShowConnection: true, Align: "center", PanelOpacity: 55,
+		},
 		Activities:     []activitySessionState{},
 		Rules:          []giftRule{},
 		TimerRules:     []timerRule{},

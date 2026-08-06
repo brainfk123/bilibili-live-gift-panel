@@ -13,7 +13,7 @@ import (
 // Every persisted shard has its own version. Missing versions are treated as
 // legacy version 0, while newer versions are rejected so an older executable
 // cannot silently discard fields it does not understand.
-const stateShardSchemaVersion = 1
+const stateShardSchemaVersion = 2
 
 type unsupportedStateVersionError struct {
 	Shard   string
@@ -25,15 +25,16 @@ func (e *unsupportedStateVersionError) Error() string {
 }
 
 type configStateShard struct {
-	SchemaVersion  int                    `json:"schemaVersion"`
-	RoomID         string                 `json:"roomId"`
-	Attributes     []attributeState       `json:"attributes"`
-	DisplayScenes  []displaySceneState    `json:"displayScenes"`
-	Activities     []activitySessionState `json:"activities"`
-	Rules          []giftRule             `json:"rules"`
-	TimerRules     []timerRule            `json:"timerRules"`
-	FormulaPresets []formulaPreset        `json:"formulaPresets"`
-	Settings       settingsState          `json:"settings"`
+	SchemaVersion   int                    `json:"schemaVersion"`
+	RoomID          string                 `json:"roomId"`
+	Attributes      []attributeState       `json:"attributes"`
+	DisplayScenes   []displaySceneState    `json:"displayScenes"`
+	BlindBoxDisplay displayAppearanceState `json:"blindBoxDisplay"`
+	Activities      []activitySessionState `json:"activities"`
+	Rules           []giftRule             `json:"rules"`
+	TimerRules      []timerRule            `json:"timerRules"`
+	FormulaPresets  []formulaPreset        `json:"formulaPresets"`
+	Settings        settingsState          `json:"settings"`
 }
 
 type cacheStateShard struct {
@@ -51,15 +52,16 @@ type historyStateShard struct {
 
 func configShardFromState(state appState) configStateShard {
 	return configStateShard{
-		SchemaVersion:  stateShardSchemaVersion,
-		RoomID:         state.RoomID,
-		Attributes:     state.Attributes,
-		DisplayScenes:  state.DisplayScenes,
-		Activities:     state.Activities,
-		Rules:          state.Rules,
-		TimerRules:     state.TimerRules,
-		FormulaPresets: state.FormulaPresets,
-		Settings:       state.Settings,
+		SchemaVersion:   stateShardSchemaVersion,
+		RoomID:          state.RoomID,
+		Attributes:      state.Attributes,
+		DisplayScenes:   state.DisplayScenes,
+		BlindBoxDisplay: state.BlindBoxDisplay,
+		Activities:      state.Activities,
+		Rules:           state.Rules,
+		TimerRules:      state.TimerRules,
+		FormulaPresets:  state.FormulaPresets,
+		Settings:        state.Settings,
 	}
 }
 

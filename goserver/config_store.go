@@ -169,6 +169,8 @@ func applyClientStatePatch(state *appState, fields map[string]json.RawMessage) e
 			target = &state.Attributes
 		case "displayScenes":
 			target = &state.DisplayScenes
+		case "blindBoxDisplay":
+			target = &state.BlindBoxDisplay
 		case "activities":
 			target = &state.Activities
 		case "rules":
