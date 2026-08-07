@@ -2574,7 +2574,7 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 .config-root .gift-kpi-config-section { min-width: 0; border: 1px solid var(--border); border-radius: 18px; padding: 24px; background: color-mix(in srgb, var(--card) 72%, transparent); }
 .config-root .gift-kpi-config-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); align-items: start; gap: 14px; margin-top: 16px; isolation: isolate; }
-.config-root .gift-kpi-config-card { --hover-detail-cover-height: 104px; --kpi-card-visual-depth: 3px; border-radius: 16px; }
+.config-root .gift-kpi-config-card { --hover-detail-cover-height: 104px; --kpi-card-visual-depth: 1px; border-radius: 16px; }
 .config-root .gift-kpi-card-cover { display: grid; grid-template-columns: 82px minmax(0, 1fr); align-items: center; gap: 13px; min-height: 104px; padding: 13px 14px; cursor: default; }
 .config-root .gift-kpi-card-visual { display: grid; grid-template-columns: repeat(2, 1fr); place-items: center; gap: 6px; min-height: 64px; padding: 8px; border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border)); border-radius: 13px; background: color-mix(in srgb, var(--accent-soft) 48%, var(--bg-soft)); box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 12%, transparent), 0 8px 16px color-mix(in srgb, var(--card-shadow-color) 48%, transparent); transform: translateZ(var(--kpi-card-visual-depth)); transition: transform 180ms ease-out; }
 .config-root .gift-kpi-card-preview-image { display: grid; width: 26px; height: 26px; place-items: center; border-radius: 7px; background: transparent; object-fit: contain; font-size: 14px; }

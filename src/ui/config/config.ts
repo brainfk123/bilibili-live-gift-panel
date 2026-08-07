@@ -1778,7 +1778,7 @@ export function mountConfig(root: HTMLElement): void {
           ariaLabel: `礼物 KPI 面板“${panel.name}”，${panel.items.length} 种礼物。悬停或聚焦查看详细设置。`,
         } as any);
         card.append(cover, details);
-        bindFloatingDetailCard(card, cover, { panelWidth: 600, estimatedPanelHeight: 430 });
+        bindFloatingDetailCard(card, cover, { panelWidth: 480, estimatedPanelHeight: 430 });
         grid.append(card);
       });
       section.append(grid);

@@ -3027,8 +3027,8 @@ describe('OBS attribute display', () => {
     expect(configSource.match(/createGiftPickerChoice\(gift,/g)).toHaveLength(2);
     expect(configSource).toContain("class: 'gift-picker-grid gift-kpi-picker-grid'");
     expect(configSource).toContain("'gift-kpi-card-preview-image'");
-    expect(configSource).toContain('panelWidth: 600, estimatedPanelHeight: 430');
-    expect(configCss).toMatch(/\.gift-kpi-config-card\s*\{[^}]*--kpi-card-visual-depth:\s*3px;/);
+    expect(configSource).toContain('panelWidth: 480, estimatedPanelHeight: 430');
+    expect(configCss).toMatch(/\.gift-kpi-config-card\s*\{[^}]*--kpi-card-visual-depth:\s*1px;/);
     expect(configCss).toMatch(/\.gift-kpi-card-visual\s*\{[^}]*translateZ\(var\(--kpi-card-visual-depth\)\)/);
     expect(configCss).toMatch(/\.gift-kpi-card-preview-image\s*\{[^}]*background:\s*transparent;/);
     expect(configCss).toMatch(/\.gift-kpi-card-preview-image\.is-placeholder\s*\{[^}]*background:\s*var\(--image-bg\);/);
