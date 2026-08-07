@@ -2027,7 +2027,7 @@ body.config-mode::-webkit-scrollbar-corner,
   --hover-detail-cover-height: 92px;
   --hover-detail-cover-open-padding-left: 0px;
 }
-.config-root .attribute-card-title {
+.config-root .summary-card-cover {
   display: grid;
   grid-template-columns: 58px minmax(0, 1fr);
   align-items: center;
@@ -2036,7 +2036,7 @@ body.config-mode::-webkit-scrollbar-corner,
   padding: 14px;
   cursor: default;
 }
-.config-root .attribute-card-visual {
+.config-root .summary-card-visual {
   position: relative;
   display: grid;
   width: 58px;
@@ -2046,7 +2046,7 @@ body.config-mode::-webkit-scrollbar-corner,
   border-radius: 16px;
   transform-style: preserve-3d;
 }
-.config-root .attribute-card-visual::before {
+.config-root .summary-card-visual::before {
   position: absolute;
   inset: 0;
   border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
@@ -2059,7 +2059,7 @@ body.config-mode::-webkit-scrollbar-corner,
   transform: translateZ(var(--card-visual-surface-depth));
   transition: transform 180ms ease-out;
 }
-.config-root .attribute-cover-image {
+.config-root .summary-card-cover-image {
   position: absolute;
   top: 50%;
   left: 50%;
@@ -2071,11 +2071,11 @@ body.config-mode::-webkit-scrollbar-corner,
   transition: transform 180ms ease-out;
   filter: drop-shadow(0 3px 4px color-mix(in srgb, var(--card-shadow-color) 45%, transparent));
 }
-.config-root .attribute-card-visual.has-multiple .attribute-cover-image { width: 34px; height: 34px; }
-.config-root .attribute-card-visual.has-multiple .attribute-cover-image:nth-child(1) { transform: translate(-68%, -38%) rotate(-9deg) translateZ(var(--card-visual-depth)); }
-.config-root .attribute-card-visual.has-multiple .attribute-cover-image:nth-child(2) { transform: translate(-28%, -66%) rotate(7deg) translateZ(calc(var(--card-visual-depth) + 6px)); }
-.config-root .attribute-card-visual.has-multiple .attribute-cover-image:nth-child(3) { transform: translate(-38%, -20%) rotate(2deg) translateZ(calc(var(--card-visual-depth) + 12px)); }
-.config-root .attribute-cover-placeholder {
+.config-root .summary-card-visual.has-multiple .summary-card-cover-image { width: 34px; height: 34px; }
+.config-root .summary-card-visual.has-multiple .summary-card-cover-image:nth-child(1) { transform: translate(-68%, -38%) rotate(-9deg) translateZ(var(--card-visual-depth)); }
+.config-root .summary-card-visual.has-multiple .summary-card-cover-image:nth-child(2) { transform: translate(-28%, -66%) rotate(7deg) translateZ(calc(var(--card-visual-depth) + 6px)); }
+.config-root .summary-card-visual.has-multiple .summary-card-cover-image:nth-child(3) { transform: translate(-38%, -20%) rotate(2deg) translateZ(calc(var(--card-visual-depth) + 12px)); }
+.config-root .summary-card-cover-placeholder {
   color: var(--accent-text);
   font-size: 30px;
   font-weight: 900;
@@ -2083,7 +2083,7 @@ body.config-mode::-webkit-scrollbar-corner,
   transform: translateZ(var(--card-visual-depth));
   transition: transform 180ms ease-out;
 }
-.config-root .attribute-title-copy { min-width: 0; transform: translateZ(var(--card-copy-depth)); transition: transform 180ms ease-out; }
+.config-root .summary-card-cover-copy { min-width: 0; transform: translateZ(var(--card-copy-depth)); transition: transform 180ms ease-out; }
 .config-root .attribute-name-row { display: grid; min-width: 0; gap: 3px; }
 .config-root .attribute-card-title h3 { overflow: hidden; font-size: var(--type-title); text-overflow: ellipsis; white-space: nowrap; }
 .config-root .attribute-meta { display: block; overflow: hidden; margin-top: 6px; color: var(--text-dim); font-size: var(--type-meta); text-overflow: ellipsis; white-space: nowrap; }
@@ -2363,7 +2363,7 @@ body.config-mode::-webkit-scrollbar-corner,
     border-radius: 15px;
   }
 }
-.config-root .display-scene-card-cover-copy { display: grid; min-width: 0; align-content: center; gap: 5px; min-height: 76px; padding: 13px 14px; transform: translateZ(var(--card-copy-depth)); transition: transform 180ms ease-out; }
+.config-root .display-scene-card-cover-copy { display: grid; align-content: center; gap: 5px; min-height: 76px; padding: 13px 14px; }
 .config-root .display-scene-card-cover-copy h3 {
   display: -webkit-box;
   overflow: hidden;
@@ -2479,7 +2479,6 @@ body.config-mode::-webkit-scrollbar-corner,
 @media (hover: hover) {
   .config-root .activity-card.hover-detail-card:hover { border-color: transparent; }
 }
-.config-root .activity-card-cover { display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: center; gap: 12px; min-height: 92px; padding: 14px; cursor: default; }
 .config-root .activity-card-visual {
   display: grid;
   width: 58px;
@@ -2498,7 +2497,7 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .activity-card-visual.is-active { border-color: rgba(85,217,139,.48); background: rgba(85,217,139,.12); color: #86edac; }
 .config-root .activity-card-visual.is-locked { border-color: rgba(242,189,87,.45); background: rgba(242,189,87,.11); color: #f8d58e; }
 .config-root .activity-card-visual.is-settled { border-color: color-mix(in srgb, var(--accent) 52%, transparent); background: var(--accent-soft); color: var(--accent-text); }
-.config-root .activity-card-cover-copy { display: grid; min-width: 0; gap: 5px; transform: translateZ(var(--card-copy-depth)); transition: transform 180ms ease-out; }
+.config-root .activity-card-cover-copy { display: grid; gap: 5px; }
 .config-root .activity-card-cover-copy > h3 { overflow: hidden; font-size: var(--type-title); text-overflow: ellipsis; white-space: nowrap; }
 .config-root .activity-card-compact-row { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 7px; }
 .config-root .activity-card-compact-meta { color: var(--text-dim); font-size: var(--type-meta); }
@@ -2598,16 +2597,7 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 .config-root .gift-kpi-config-section { min-width: 0; border: 1px solid var(--border); border-radius: 18px; padding: 24px; background: color-mix(in srgb, var(--card) 72%, transparent); }
 .config-root .gift-kpi-config-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); align-items: start; gap: 14px; margin-top: 16px; isolation: isolate; }
-.config-root .gift-kpi-config-card { --hover-detail-cover-height: 104px; --hover-detail-cover-open-padding-inline: clamp(14px, 8%, 40px); border-radius: 16px; }
-.config-root .gift-kpi-card-cover { display: grid; grid-template-columns: 82px minmax(0, 1fr); align-items: center; gap: 13px; min-height: 104px; padding: 13px 14px; cursor: default; }
-.config-root .gift-kpi-card-visual { display: grid; grid-template-columns: repeat(2, 1fr); place-items: center; gap: 6px; min-height: 64px; padding: 8px; border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border)); border-radius: 13px; background: color-mix(in srgb, var(--accent-soft) 48%, var(--bg-soft)); box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 12%, transparent), 0 8px 16px color-mix(in srgb, var(--card-shadow-color) 48%, transparent); transform: translateZ(var(--card-visual-depth)); transition: transform 180ms ease-out; }
-.config-root .gift-kpi-card-preview-image { display: grid; width: 26px; height: 26px; place-items: center; border-radius: 7px; background: transparent; object-fit: contain; font-size: 14px; }
-.config-root img.gift-kpi-card-preview-image { filter: drop-shadow(0 4px 6px rgba(0,0,0,.28)); }
-.config-root .gift-kpi-card-preview-image.is-placeholder { background: var(--image-bg); }
-.config-root .gift-kpi-card-visual.is-single { grid-template-columns: 1fr; }
-.config-root .gift-kpi-card-visual.is-single .gift-kpi-card-preview-image { width: 52px; height: 52px; font-size: 24px; }
-.config-root .gift-kpi-card-visual.is-pair .gift-kpi-card-preview-image { width: 28px; height: 28px; }
-.config-root .gift-kpi-card-cover-copy { min-width: 0; transform: translateZ(var(--card-copy-depth)); transition: transform 180ms ease-out; }
+.config-root .gift-kpi-config-card { --hover-detail-cover-height: 92px; --hover-detail-cover-open-padding-inline: clamp(14px, 8%, 40px); border-radius: 16px; }
 .config-root .gift-kpi-card-cover-copy h3 { overflow: hidden; font-size: var(--type-title); text-overflow: ellipsis; white-space: nowrap; }
 .config-root .gift-kpi-card-cover-copy small { display: block; overflow: hidden; margin-top: 5px; color: var(--text-dim); font-size: var(--type-meta); text-overflow: ellipsis; white-space: nowrap; }
 .config-root .gift-kpi-card-detail-content { display: grid; gap: 8px; padding: 12px 14px; }

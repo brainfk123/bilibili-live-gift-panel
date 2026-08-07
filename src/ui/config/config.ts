@@ -1197,18 +1197,18 @@ export function mountConfig(root: HTMLElement): void {
       Boolean(source) && sources.indexOf(source) === sourceIndex
     )).slice(0, 3);
     const visual = el('div', {
-      class: `attribute-card-visual${coverImageSources.length > 1 ? ' has-multiple' : ''}`,
+      class: `attribute-card-visual summary-card-visual${coverImageSources.length > 1 ? ' has-multiple' : ''}`,
       ariaHidden: 'true',
     } as any);
     if (coverImageSources.length > 0) {
       coverImageSources.forEach((source) => {
-        const image = el('img', { class: 'attribute-cover-image', alt: '', loading: 'lazy' }) as HTMLImageElement;
+        const image = el('img', { class: 'attribute-cover-image summary-card-cover-image', alt: '', loading: 'lazy' }) as HTMLImageElement;
         image.src = source;
         visual.append(image);
       });
     } else {
       visual.append(el('span', {
-        class: 'attribute-cover-placeholder',
+        class: 'attribute-cover-placeholder summary-card-cover-placeholder',
         text: timerRules.length > 0 ? '⏱' : (Array.from(attribute.name.trim())[0] || '值'),
       }));
     }
@@ -1217,10 +1217,10 @@ export function mountConfig(root: HTMLElement): void {
       class: 'attribute-meta',
       text: `${displayFormatLabel(attribute)} · ${rules.length} 条礼物规则 · ${timerRules.length} 个定时器`,
     });
-    const title = el('div', { class: 'attribute-card-title hover-detail-cover', title: '悬停查看规则与 OBS 输出' });
+    const title = el('div', { class: 'attribute-card-title summary-card-cover hover-detail-cover', title: '悬停查看规则与 OBS 输出' });
     title.append(
       visual,
-      el('div', { class: 'attribute-title-copy' }, [
+      el('div', { class: 'attribute-title-copy summary-card-cover-copy' }, [
         el('div', { class: 'attribute-name-row' }, [
           el('h3', { text: attribute.name }),
           attributeValueElement(attribute),
@@ -1490,7 +1490,7 @@ export function mountConfig(root: HTMLElement): void {
     const sceneMeta = `${displaySceneLayoutName(scene.layout)} · ${theme.name} · ${scene.attributeNames.length} 个属性`;
     const cover = el('div', { class: 'display-scene-card-cover hover-detail-cover', title: '悬停查看组合面板详情' }, [
       preview,
-      el('div', { class: 'display-scene-card-cover-copy' }, [
+      el('div', { class: 'display-scene-card-cover-copy summary-card-cover-copy' }, [
         el('h3', { text: scene.name }),
         el('span', { text: sceneMeta }),
       ]),
@@ -1755,15 +1755,15 @@ export function mountConfig(root: HTMLElement): void {
           ]);
         }));
         const meta = `${panel.items.length} 种礼物 · ${panel.layout === 'grid' ? '信息网格' : panel.layout === 'dashboard' ? '主辅仪表盘' : '纵向清单'}`;
-        const previewItems = panel.items.slice(0, 4);
-        const previewLayout = previewItems.length === 1 ? 'is-single' : previewItems.length === 2 ? 'is-pair' : 'is-grid';
-        const cover = el('div', { class: 'gift-kpi-card-cover hover-detail-cover', title: '悬停查看 KPI 面板详情' }, [
-          el('div', { class: `gift-kpi-card-visual ${previewLayout}` }, previewItems.map((item) => (
+        const previewItems = panel.items.slice(0, 3);
+        const previewLayout = previewItems.length > 1 ? ' has-multiple' : '';
+        const cover = el('div', { class: 'gift-kpi-card-cover summary-card-cover hover-detail-cover', title: '悬停查看 KPI 面板详情' }, [
+          el('div', { class: `gift-kpi-card-visual summary-card-visual${previewLayout}` }, previewItems.map((item) => (
             item.imageUrl
-              ? el('img', { class: 'gift-kpi-card-preview-image', src: item.imageUrl, alt: `${item.giftName}图标`, referrerPolicy: 'no-referrer' })
-              : el('span', { class: 'gift-kpi-card-preview-image is-placeholder', text: '🎁', ariaHidden: 'true' })
+              ? el('img', { class: 'gift-kpi-card-preview-image summary-card-cover-image', src: item.imageUrl, alt: `${item.giftName}图标`, referrerPolicy: 'no-referrer' })
+              : el('span', { class: 'gift-kpi-card-preview-image summary-card-cover-placeholder is-placeholder', text: '🎁', ariaHidden: 'true' })
           ))),
-          el('div', { class: 'gift-kpi-card-cover-copy' }, [el('h3', { text: panel.name }), el('small', { text: meta })]),
+          el('div', { class: 'gift-kpi-card-cover-copy summary-card-cover-copy' }, [el('h3', { text: panel.name }), el('small', { text: meta })]),
         ]);
         const details = el('div', { class: 'gift-kpi-card-details hover-detail-panel' }, [
           el('div', { class: 'gift-kpi-card-details-inner hover-detail-panel-inner' }, [

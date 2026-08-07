@@ -103,9 +103,9 @@ export function createActivityWorkspace(options: ActivityWorkspaceOptions): HTML
     const statusIcon = activity.status === 'active' ? '▶'
       : activity.status === 'locked' ? '◆'
         : activity.status === 'settled' ? '✓' : '◇';
-    const cover = el('div', { class: 'activity-card-cover hover-detail-cover', title: '悬停查看活动详情' }, [
+    const cover = el('div', { class: 'activity-card-cover summary-card-cover hover-detail-cover', title: '悬停查看活动详情' }, [
       el('div', { class: `activity-card-visual is-${activity.status}`, text: statusIcon, ariaHidden: 'true' } as any),
-      el('div', { class: 'activity-card-cover-copy' }, [
+      el('div', { class: 'activity-card-cover-copy summary-card-cover-copy' }, [
         el('h3', { text: activity.name }),
         el('div', { class: 'activity-card-compact-row' }, [
           el('span', { class: 'activity-card-compact-meta', text: `${activity.attributeNames.length} 个属性` }),
