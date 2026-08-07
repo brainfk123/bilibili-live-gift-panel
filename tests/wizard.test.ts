@@ -3005,6 +3005,11 @@ describe('OBS attribute display', () => {
     expect(displayCss).toMatch(/\.display-formula-name\.is-long\s*\{[^}]*font-size:\s*20px;/);
     vi.useRealTimers();
   });
+
+  it('keeps KPI gift choices at their content height inside the scrolling editor', () => {
+    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    expect(configCss).toMatch(/\.gift-kpi-editor-body\s*\{[^}]*grid-auto-rows:\s*max-content;[^}]*align-content:\s*start;/);
+  });
 });
 
 describe('room number hint', () => {
