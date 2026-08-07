@@ -3028,12 +3028,13 @@ describe('OBS attribute display', () => {
     expect(configSource).toContain("class: 'gift-picker-grid gift-kpi-picker-grid'");
     expect(configSource).toContain("'gift-kpi-card-preview-image'");
     expect(configSource).toContain('panelWidth: 480, estimatedPanelHeight: 430');
-    expect(configCss).toMatch(/\.gift-kpi-config-card\s*\{[^}]*--kpi-card-visual-depth:\s*1px;/);
+    expect(configCss).toMatch(/\.gift-kpi-config-card\s*\{[^}]*--kpi-card-visual-depth:\s*3px;/);
     expect(configCss).toMatch(/\.gift-kpi-card-visual\s*\{[^}]*translateZ\(var\(--kpi-card-visual-depth\)\)/);
     expect(configCss).toMatch(/\.gift-kpi-card-preview-image\s*\{[^}]*background:\s*transparent;/);
     expect(configCss).toMatch(/\.gift-kpi-card-preview-image\.is-placeholder\s*\{[^}]*background:\s*var\(--image-bg\);/);
     expect(configCss).toMatch(/\.gift-kpi-card-detail-content\s*\{[^}]*gap:\s*8px;[^}]*padding:\s*12px 14px;/);
     expect(configCss).toMatch(/\.gift-kpi-config-items\s*\{[^}]*margin-top:\s*0;/);
+    expect(configCss).toMatch(/\.gift-kpi-config-card\.is-detail-persisted\s*>\s*\.gift-kpi-card-cover[\s\S]*?padding-right:\s*clamp\(14px, 12\.5%, 60px\);[\s\S]*?padding-left:\s*clamp\(14px, 12\.5%, 60px\);/);
   });
 
   it('fills attribute detail cards symmetrically with gift rules', () => {
