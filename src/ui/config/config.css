@@ -2107,7 +2107,7 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 .config-root .attribute-formulas {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 240px));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-content: start;
   gap: 8px;
   padding: 12px 0 15px;
@@ -2586,13 +2586,13 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .gift-kpi-card-cover-copy { min-width: 0; transform: translateZ(var(--card-copy-depth)); transition: transform 180ms ease-out; }
 .config-root .gift-kpi-card-cover-copy h3 { overflow: hidden; font-size: var(--type-title); text-overflow: ellipsis; white-space: nowrap; }
 .config-root .gift-kpi-card-cover-copy small { display: block; overflow: hidden; margin-top: 5px; color: var(--text-dim); font-size: var(--type-meta); text-overflow: ellipsis; white-space: nowrap; }
-.config-root .gift-kpi-card-detail-content { display: grid; gap: 13px; padding: 16px; }
+.config-root .gift-kpi-card-detail-content { display: grid; gap: 8px; padding: 12px 14px; }
 .config-root .gift-kpi-card-detail-content > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .config-root .gift-kpi-config-card h3 { font-size: var(--type-title); }
 .config-root .gift-kpi-config-card small { color: var(--text-dim); font-size: var(--type-meta); }
 .config-root .gift-kpi-card-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
 .config-root .gift-kpi-card-actions .btn { min-height: 30px; padding: 5px 8px; font-size: var(--type-meta); }
-.config-root .gift-kpi-config-items { display: grid; gap: 7px; margin-top: 12px; }
+.config-root .gift-kpi-config-items { display: grid; gap: 7px; margin-top: 0; }
 .config-root .gift-kpi-config-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; }
 .config-root .gift-kpi-config-item strong,
 .config-root .gift-kpi-config-item span { font-size: var(--type-meta); }

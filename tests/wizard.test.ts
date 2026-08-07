@@ -3032,6 +3032,13 @@ describe('OBS attribute display', () => {
     expect(configCss).toMatch(/\.gift-kpi-card-visual\s*\{[^}]*translateZ\(var\(--kpi-card-visual-depth\)\)/);
     expect(configCss).toMatch(/\.gift-kpi-card-preview-image\s*\{[^}]*background:\s*transparent;/);
     expect(configCss).toMatch(/\.gift-kpi-card-preview-image\.is-placeholder\s*\{[^}]*background:\s*var\(--image-bg\);/);
+    expect(configCss).toMatch(/\.gift-kpi-card-detail-content\s*\{[^}]*gap:\s*8px;[^}]*padding:\s*12px 14px;/);
+    expect(configCss).toMatch(/\.gift-kpi-config-items\s*\{[^}]*margin-top:\s*0;/);
+  });
+
+  it('fills attribute detail cards symmetrically with gift rules', () => {
+    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    expect(configCss).toMatch(/\.attribute-formulas\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\);/);
   });
 });
 
