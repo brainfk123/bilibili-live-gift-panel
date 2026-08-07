@@ -462,6 +462,10 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .gift-view-toggle { display: flex; gap: 8px; margin: 10px 0; }
 .config-root .gift-view-toggle .is-active { border-color: var(--accent); color: var(--accent); }
 @media (max-width: 700px) {
+  .config-root .gift-kpi-config-section { padding: 16px; }
+  .config-root .gift-kpi-card-detail-content > header { align-items: stretch; flex-direction: column; }
+  .config-root .gift-kpi-card-actions { justify-content: flex-start; }
+  .config-root .gift-kpi-editor-item { grid-template-columns: 1fr; }
   .config-root .gift-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
@@ -2566,6 +2570,41 @@ body.config-mode::-webkit-scrollbar-corner,
   gap: 12px;
   margin-bottom: 16px;
 }
+.config-root .gift-kpi-config-section { min-width: 0; border: 1px solid var(--border); border-radius: 18px; padding: 24px; background: color-mix(in srgb, var(--card) 72%, transparent); }
+.config-root .gift-kpi-config-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); align-items: start; gap: 14px; margin-top: 16px; isolation: isolate; }
+.config-root .gift-kpi-config-card { --hover-detail-cover-height: 104px; border-radius: 16px; }
+.config-root .gift-kpi-card-cover { display: grid; grid-template-columns: 82px minmax(0, 1fr); align-items: center; gap: 13px; min-height: 104px; padding: 13px 14px; cursor: default; }
+.config-root .gift-kpi-card-visual { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; padding: 11px; border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border)); border-radius: 13px; background: color-mix(in srgb, var(--accent-soft) 48%, var(--bg-soft)); box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 12%, transparent), 0 8px 16px color-mix(in srgb, var(--card-shadow-color) 48%, transparent); transform: translateZ(var(--card-visual-depth)); transition: transform 180ms ease-out; }
+.config-root .gift-kpi-card-visual > i { display: block; width: 24px; height: 24px; overflow: hidden; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
+.config-root .gift-kpi-card-visual > i > b { display: block; width: var(--kpi-preview); height: 100%; background: var(--accent); }
+.config-root .gift-kpi-card-cover-copy { min-width: 0; transform: translateZ(var(--card-copy-depth)); transition: transform 180ms ease-out; }
+.config-root .gift-kpi-card-cover-copy h3 { overflow: hidden; font-size: var(--type-title); text-overflow: ellipsis; white-space: nowrap; }
+.config-root .gift-kpi-card-cover-copy small { display: block; overflow: hidden; margin-top: 5px; color: var(--text-dim); font-size: var(--type-meta); text-overflow: ellipsis; white-space: nowrap; }
+.config-root .gift-kpi-card-detail-content { display: grid; gap: 13px; padding: 16px; }
+.config-root .gift-kpi-card-detail-content > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.config-root .gift-kpi-config-card h3 { font-size: var(--type-title); }
+.config-root .gift-kpi-config-card small { color: var(--text-dim); font-size: var(--type-meta); }
+.config-root .gift-kpi-card-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+.config-root .gift-kpi-card-actions .btn { min-height: 30px; padding: 5px 8px; font-size: var(--type-meta); }
+.config-root .gift-kpi-config-items { display: grid; gap: 7px; margin-top: 12px; }
+.config-root .gift-kpi-config-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; }
+.config-root .gift-kpi-config-item strong,
+.config-root .gift-kpi-config-item span { font-size: var(--type-meta); }
+.config-root .gift-kpi-config-item span { color: var(--accent-text); font-weight: 700; }
+.config-root .gift-kpi-config-item > i { grid-column: 1 / -1; display: block; height: 7px; overflow: hidden; border-radius: 999px; background: var(--surface); }
+.config-root .gift-kpi-config-item > i > b { display: block; width: var(--kpi-preview); height: 100%; border-radius: inherit; background: var(--accent); }
+.config-root .gift-kpi-editor-overlay { z-index: 150; }
+.config-root .overlay .card.gift-kpi-editor { display: grid; grid-template-rows: auto minmax(0,1fr) auto; width: min(1180px, calc(100vw - 32px)); max-width: 1180px; max-height: calc(100vh - 32px); overflow: hidden; padding: 0; }
+.config-root .gift-kpi-editor-body { display: grid; gap: 13px; overflow-y: auto; padding: 18px 24px 24px; }
+.config-root .gift-kpi-editor-body > .field { margin: 0; }
+.config-root .gift-kpi-editor-body h3 { margin-top: 4px; font-size: var(--type-title); }
+.config-root .gift-kpi-editor-items { display: grid; gap: 7px; }
+.config-root .gift-kpi-editor-item { display: grid; grid-template-columns: minmax(120px, 1fr) 130px 160px auto; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: 10px; padding: 8px; background: var(--bg-soft); }
+.config-root .gift-kpi-editor-item strong { overflow: hidden; font-size: var(--type-meta); text-overflow: ellipsis; white-space: nowrap; }
+.config-root .gift-kpi-editor-item .field-input { height: 34px; min-width: 0; }
+.config-root .gift-kpi-gift-choices { display: flex; max-height: 190px; overflow-y: auto; flex-wrap: wrap; gap: 6px; border: 1px solid var(--border); border-radius: 11px; padding: 10px; background: var(--bg-soft); }
+.config-root .gift-kpi-gift-choice { border: 1px solid var(--border); border-radius: 999px; padding: 6px 10px; background: var(--surface); color: var(--text-dim); cursor: pointer; }
+.config-root .gift-kpi-gift-choice.is-selected { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-text); }
 .config-root .contribution-heading-main {
   display: flex;
   min-width: 0;
@@ -3713,6 +3752,8 @@ body.config-mode::-webkit-scrollbar-corner,
   padding: 0;
 }
 @media (max-width: 980px) {
+  .config-root .gift-kpi-editor-item { grid-template-columns: minmax(140px, 1fr) minmax(110px, .55fr); }
+  .config-root .gift-kpi-editor-item > .btn { justify-self: start; }
   .config-root .overlay .attribute-modal.attribute-workbench {
     width: 100%;
     max-width: none;

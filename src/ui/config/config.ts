@@ -1,4 +1,4 @@
-import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
+import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftKpiBarStyle, GiftKpiLayout, GiftKpiPanel, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
 import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { bindFloatingDetailCard, el, fieldControl, inputField, setFloatingDetailGuideExpanded, toast } from '../common';
@@ -49,7 +49,7 @@ import {
 import { createGameplayTemplateWizard } from './template-wizard';
 import type { GameplayTemplateBuildResult } from '../../gameplay-templates';
 import { DISPLAY_THEMES, getDisplayTheme } from '../../display-themes';
-import { blindBoxDisplayUrl, createDisplaySceneId, DISPLAY_SCENE_LAYOUTS, displaySceneLayoutName, displaySceneUrl, MAX_DISPLAY_SCENE_ATTRIBUTES } from '../../display-scenes';
+import { blindBoxDisplayUrl, createDisplaySceneId, DISPLAY_SCENE_LAYOUTS, displaySceneLayoutName, displaySceneUrl, giftKpiDisplayUrl, MAX_DISPLAY_SCENE_ATTRIBUTES } from '../../display-scenes';
 import { buildBlindBoxLeaderboard } from '../../blind-box-leaderboard';
 import { createActivityWorkspace } from './activity-workspace';
 import { createTrainingCenter } from './training-center';
@@ -745,6 +745,7 @@ export function mountConfig(root: HTMLElement): void {
     renderAttributesWorkspace();
     renderActivities();
     renderDisplayScenes();
+    renderGiftKpiPanels();
     renderContributionLeaderboard();
     renderGiftHistory();
     renderAdvancedSettings();
@@ -1711,6 +1712,127 @@ export function mountConfig(root: HTMLElement): void {
     );
     overlay.append(dialog);
     root.append(overlay);
+  }
+
+  function renderGiftKpiPanels(): void {
+    const section = el('section', { class: 'gift-kpi-config-section' });
+    const add = el('button', { class: 'btn', type: 'button', text: '+ 新建 KPI 面板' }) as HTMLButtonElement;
+    add.onclick = () => openGiftKpiEditor();
+    section.append(el('div', { class: 'display-scenes-heading' }, [
+      sectionHeading('礼物目标', '礼物 KPI 面板', '直接统计指定礼物的收到数量，不依赖属性或礼物规则；需要时由主播手动清零。'),
+      add,
+    ]));
+    if (state.giftKpiPanels.length === 0) {
+      section.append(emptyState('还没有 KPI 面板。创建后可为每种礼物设置独立目标和进度条样式。'));
+    } else {
+      const grid = el('div', { class: 'gift-kpi-config-grid' });
+      state.giftKpiPanels.forEach((panel, index) => {
+        const url = giftKpiDisplayUrl(location.origin, panel.id);
+        const copy = el('button', { class: 'btn ghost', type: 'button', text: '复制 OBS 链接' }) as HTMLButtonElement;
+        copy.onclick = () => void navigator.clipboard.writeText(url).then(() => toast('KPI 面板链接已复制', root));
+        const edit = el('button', { class: 'btn ghost', type: 'button', text: '编辑' }) as HTMLButtonElement;
+        edit.onclick = () => openGiftKpiEditor(index);
+        const clear = el('button', { class: 'btn ghost text-danger', type: 'button', text: '清零' }) as HTMLButtonElement;
+        bindTwoStepDelete(clear, () => {
+          panel.items = panel.items.map((item) => ({ ...item, received: 0 }));
+          save(); render(); toast('KPI 当前数量已清零', root);
+        });
+        const remove = el('button', { class: 'btn text-danger', type: 'button', text: '删除' }) as HTMLButtonElement;
+        bindTwoStepDelete(remove, () => { state.giftKpiPanels.splice(index, 1); save(); render(); });
+        const makeItems = (): HTMLElement => el('div', { class: 'gift-kpi-config-items' }, panel.items.map((item) => {
+          const pct = Math.min(100, item.received / item.target * 100);
+          return el('div', { class: 'gift-kpi-config-item', style: `--kpi-preview:${pct}%` }, [
+            el('strong', { text: item.giftName }), el('span', { text: `${item.received} / ${item.target}` }),
+            el('i', {}, [el('b')]),
+          ]);
+        }));
+        const meta = `${panel.items.length} 种礼物 · ${panel.layout === 'grid' ? '信息网格' : panel.layout === 'dashboard' ? '主辅仪表盘' : '纵向清单'}`;
+        const cover = el('div', { class: 'gift-kpi-card-cover hover-detail-cover', title: '悬停查看 KPI 面板详情' }, [
+          el('div', { class: 'gift-kpi-card-visual' }, panel.items.slice(0, 4).map((item) => {
+            const pct = Math.min(100, item.received / item.target * 100);
+            return el('i', { style: `--kpi-preview:${pct}%` }, [el('b')]);
+          })),
+          el('div', { class: 'gift-kpi-card-cover-copy' }, [el('h3', { text: panel.name }), el('small', { text: meta })]),
+        ]);
+        const details = el('div', { class: 'gift-kpi-card-details hover-detail-panel' }, [
+          el('div', { class: 'gift-kpi-card-details-inner hover-detail-panel-inner' }, [
+            el('div', { class: 'gift-kpi-card-detail-content hover-detail-panel-content' }, [
+              el('header', {}, [el('div', {}, [el('h3', { text: panel.name }), el('small', { text: meta })]), el('div', { class: 'gift-kpi-card-actions' }, [edit, copy, clear, remove])]),
+              makeItems(),
+            ]),
+          ]),
+        ]);
+        const card = el('article', {
+          class: 'gift-kpi-config-card hover-detail-card', tabIndex: 0,
+          ariaLabel: `礼物 KPI 面板“${panel.name}”，${panel.items.length} 种礼物。悬停或聚焦查看详细设置。`,
+        } as any);
+        card.append(cover, details);
+        bindFloatingDetailCard(card, cover, { panelWidth: 720, estimatedPanelHeight: 430 });
+        grid.append(card);
+      });
+      section.append(grid);
+    }
+    content.append(section);
+  }
+
+  function openGiftKpiEditor(index?: number): void {
+    const original = index === undefined ? undefined : state.giftKpiPanels[index];
+    let items = original?.items.map((item) => ({ ...item })) ?? [];
+    let layout: GiftKpiLayout = original?.layout ?? 'grid';
+    const appearance = cloneDisplayAppearance(original?.appearance);
+    const overlay = el('div', { class: 'overlay gift-kpi-editor-overlay' });
+    const dialog = el('section', { class: 'card gift-kpi-editor', role: 'dialog', ariaLabel: original ? '编辑礼物 KPI 面板' : '新建礼物 KPI 面板' } as any);
+    const close = (): void => { overlay.remove(); };
+    const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×' }) as HTMLButtonElement;
+    closeButton.onclick = close;
+    const name = inputField('面板名称', original?.name ?? '本场礼物 KPI');
+    const layoutSelect = el('select', { class: 'field-input', ariaLabel: 'KPI 面板排版' } as any) as HTMLSelectElement;
+    [['grid', '信息网格'], ['stack', '纵向清单'], ['dashboard', '主辅仪表盘']].forEach(([value, label]) => layoutSelect.append(el('option', { value, text: label })));
+    layoutSelect.value = layout;
+    layoutSelect.onchange = () => { layout = layoutSelect.value as GiftKpiLayout; };
+    const selectedHost = el('div', { class: 'gift-kpi-editor-items' });
+    const renderItems = (): void => {
+      selectedHost.replaceChildren();
+      items.forEach((item, itemIndex) => {
+        const target = el('input', { class: 'field-input', type: 'number', min: '1', value: String(item.target), ariaLabel: `${item.giftName}目标数量` } as any) as HTMLInputElement;
+        target.oninput = () => { item.target = Math.max(1, Math.round(Number(target.value) || 1)); };
+        const style = el('select', { class: 'field-input', ariaLabel: `${item.giftName}进度条样式` } as any) as HTMLSelectElement;
+        [['progress', '目标进度条'], ['resource', '能量槽'], ['health', '血条式']].forEach(([value, label]) => style.append(el('option', { value, text: label })));
+        style.value = item.barStyle;
+        style.onchange = () => { item.barStyle = style.value as GiftKpiBarStyle; };
+        const remove = el('button', { class: 'btn text-danger', type: 'button', text: '移除' }) as HTMLButtonElement;
+        remove.onclick = () => { items.splice(itemIndex, 1); renderItems(); renderGiftChoices(); };
+        selectedHost.append(el('div', { class: 'gift-kpi-editor-item' }, [el('strong', { text: item.giftName }), target, style, remove]));
+      });
+    };
+    const giftChoices = el('div', { class: 'gift-kpi-gift-choices' });
+    const availableGifts = Array.from(new Map([...state.recentGifts, ...state.giftCatalog].map((gift) => [gift.id, gift])).values());
+    const renderGiftChoices = (): void => {
+      giftChoices.replaceChildren();
+      for (const gift of availableGifts) {
+        const selected = items.some((item) => item.giftId === gift.id);
+        const button = el('button', { class: `gift-kpi-gift-choice${selected ? ' is-selected' : ''}`, type: 'button', text: selected ? `✓ ${gift.name}` : `+ ${gift.name}` }) as HTMLButtonElement;
+        button.disabled = !selected && items.length >= 12;
+        button.onclick = () => {
+          if (selected) items = items.filter((item) => item.giftId !== gift.id);
+          else items.push({ giftId: gift.id, giftName: gift.name, imageUrl: gift.imgBasic, target: 50, received: 0, barStyle: 'progress' });
+          renderItems(); renderGiftChoices();
+        };
+        giftChoices.append(button);
+      }
+    };
+    renderItems(); renderGiftChoices();
+    const saveButton = el('button', { class: 'btn', type: 'button', text: original ? '保存修改' : '创建面板' }) as HTMLButtonElement;
+    saveButton.onclick = async () => {
+      if (!name.value.trim() || items.length === 0) { toast('请填写名称并至少选择一种礼物', root); return; }
+      const next: GiftKpiPanel = { id: original?.id ?? `kpi-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`, name: name.value.trim(), layout, items, appearance: { ...appearance } };
+      if (index === undefined) state.giftKpiPanels.push(next); else state.giftKpiPanels[index] = next;
+      await saveAndWait(); close(); render();
+    };
+    dialog.append(el('header', { class: 'display-scene-dialog-header' }, [el('div', {}, [el('span', { class: 'section-kicker', text: '礼物 KPI' }), el('h2', { text: original ? '编辑 KPI 面板' : '创建 KPI 面板' }), el('p', { text: '直接按礼物累计；清零只影响这个面板。' })]), closeButton]),
+      el('div', { class: 'gift-kpi-editor-body' }, [fieldControl(name), el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '排版' }), layoutSelect]), el('h3', { text: '已选礼物与目标' }), selectedHost, el('h3', { text: '选择礼物' }), giftChoices, createDisplayAppearanceControl(appearance, '面板外观', '只影响这个 KPI 面板。')]),
+      el('footer', { class: 'modal-actions' }, [el('button', { class: 'btn ghost', type: 'button', text: '取消', onclick: close }), saveButton]));
+    overlay.append(dialog); root.append(overlay);
   }
 
   function renderContributionLeaderboard(replaceExisting = false): void {

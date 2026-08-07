@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { blindBoxDisplayUrl, createDisplaySceneId, DISPLAY_SCENE_LAYOUTS, displaySceneLayoutName, displaySceneUrl, normalizeDisplayScenes, resolveDisplayTarget } from '../src/display-scenes';
+import { blindBoxDisplayUrl, createDisplaySceneId, DISPLAY_SCENE_LAYOUTS, displaySceneLayoutName, displaySceneUrl, giftKpiDisplayUrl, normalizeDisplayScenes, resolveDisplayTarget } from '../src/display-scenes';
 import { defaultState } from '../src/storage';
 
 const attributes = [
@@ -44,6 +44,7 @@ describe('display scene model', () => {
     expect(createDisplaySceneId()).toBe('scene-scene-uuid');
     expect(displaySceneUrl('http://localhost:12450', 'scene 1')).toBe('http://localhost:12450/?mode=display&scene=scene%201');
     expect(blindBoxDisplayUrl('http://localhost:12450')).toBe('http://localhost:12450/?mode=display&view=blind-box');
+    expect(giftKpiDisplayUrl('http://localhost:12450', 'kpi 1')).toBe('http://localhost:12450/?mode=display&view=gift-kpi&panel=kpi%201');
     vi.unstubAllGlobals();
   });
 });

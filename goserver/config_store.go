@@ -171,6 +171,8 @@ func applyClientStatePatch(state *appState, fields map[string]json.RawMessage) e
 			target = &state.DisplayScenes
 		case "blindBoxDisplay":
 			target = &state.BlindBoxDisplay
+		case "giftKpiPanels":
+			target = &state.GiftKPIPanels
 		case "activities":
 			target = &state.Activities
 		case "rules":
@@ -282,6 +284,46 @@ func validateAppState(state appState) error {
 		}
 		if !isDisplayThemeID(scene.ThemeID) {
 			return fmt.Errorf("组合面板 %q 的 OBS 主题无效", name)
+		}
+	}
+	kpiPanelIDs := make(map[string]struct{}, len(state.GiftKPIPanels))
+	for _, panel := range state.GiftKPIPanels {
+		id := strings.TrimSpace(panel.ID)
+		name := strings.TrimSpace(panel.Name)
+		if id == "" || name == "" {
+			return fmt.Errorf("礼物 KPI 面板的 ID 和名称不能为空")
+		}
+		if _, exists := kpiPanelIDs[id]; exists {
+			return fmt.Errorf("礼物 KPI 面板 ID 不能重复：%s", id)
+		}
+		kpiPanelIDs[id] = struct{}{}
+		if panel.Layout != "stack" && panel.Layout != "grid" && panel.Layout != "dashboard" {
+			return fmt.Errorf("礼物 KPI 面板 %q 的布局无效", name)
+		}
+		if len(panel.Items) == 0 || len(panel.Items) > 12 {
+			return fmt.Errorf("礼物 KPI 面板 %q 必须包含 1 到 12 个礼物", name)
+		}
+		giftIDs := make(map[int]struct{}, len(panel.Items))
+		for _, item := range panel.Items {
+			if item.GiftID <= 0 || strings.TrimSpace(item.GiftName) == "" || item.Target < 1 || item.Received < 0 {
+				return fmt.Errorf("礼物 KPI 面板 %q 包含无效的礼物目标", name)
+			}
+			if _, exists := giftIDs[item.GiftID]; exists {
+				return fmt.Errorf("礼物 KPI 面板 %q 不能重复添加同一个礼物", name)
+			}
+			giftIDs[item.GiftID] = struct{}{}
+			if item.BarStyle != "progress" && item.BarStyle != "resource" && item.BarStyle != "health" {
+				return fmt.Errorf("礼物 KPI 面板 %q 的进度条样式无效", name)
+			}
+		}
+		if !isDisplayThemeID(panel.Appearance.ThemeID) || !isHexColor(panel.Appearance.AccentColor) {
+			return fmt.Errorf("礼物 KPI 面板 %q 的 OBS 外观无效", name)
+		}
+		if panel.Appearance.FontSize < 24 || panel.Appearance.FontSize > 96 || panel.Appearance.PanelOpacity < 10 || panel.Appearance.PanelOpacity > 100 {
+			return fmt.Errorf("礼物 KPI 面板 %q 的字号或透明度无效", name)
+		}
+		if panel.Appearance.Align != "left" && panel.Appearance.Align != "center" && panel.Appearance.Align != "right" {
+			return fmt.Errorf("礼物 KPI 面板 %q 的对齐方式无效", name)
 		}
 	}
 	activityIDs := make(map[string]struct{}, len(state.Activities))
@@ -540,6 +582,11 @@ func clearRoomScopedRecords(state *appState) {
 	state.Contributions = contributionLedgerState{
 		Viewers:   []viewerContribution{},
 		UpdatedAt: time.Now().UnixMilli(),
+	}
+	for panelIndex := range state.GiftKPIPanels {
+		for itemIndex := range state.GiftKPIPanels[panelIndex].Items {
+			state.GiftKPIPanels[panelIndex].Items[itemIndex].Received = 0
+		}
 	}
 }
 

@@ -24,6 +24,26 @@ export interface DisplayScene {
   appearance?: DisplayAppearance;
 }
 
+export type GiftKpiBarStyle = 'progress' | 'resource' | 'health';
+export type GiftKpiLayout = 'stack' | 'grid' | 'dashboard';
+
+export interface GiftKpiItem {
+  giftId: number;
+  giftName: string;
+  imageUrl: string;
+  target: number;
+  received: number;
+  barStyle: GiftKpiBarStyle;
+}
+
+export interface GiftKpiPanel {
+  id: string;
+  name: string;
+  layout: GiftKpiLayout;
+  items: GiftKpiItem[];
+  appearance: DisplayAppearance;
+}
+
 export type ActivityStatus = 'not_started' | 'active' | 'locked' | 'settled';
 
 export type ActivityResultMode = 'none' | 'highest' | 'lowest';
@@ -279,6 +299,7 @@ export interface AppState {
   attributes: Attribute[];
   displayScenes: DisplayScene[];
   blindBoxDisplay: DisplayAppearance;
+  giftKpiPanels: GiftKpiPanel[];
   activities: ActivitySession[];
   rules: GiftRule[];
   timerRules: TimerRule[];

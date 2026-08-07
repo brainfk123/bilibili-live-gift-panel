@@ -6,7 +6,8 @@ export const MAX_DISPLAY_SCENE_ATTRIBUTES = 12;
 export interface DisplayTarget {
   attributeName?: string;
   sceneId?: string;
-  view?: 'blind-box';
+  view?: 'blind-box' | 'gift-kpi';
+  panelId?: string;
 }
 
 export interface ResolvedDisplayTarget {
@@ -104,4 +105,8 @@ export function displaySceneUrl(origin: string, sceneId: string): string {
 
 export function blindBoxDisplayUrl(origin: string): string {
   return `${origin}/?mode=display&view=blind-box`;
+}
+
+export function giftKpiDisplayUrl(origin: string, panelId: string): string {
+  return `${origin}/?mode=display&view=gift-kpi&panel=${encodeURIComponent(panelId)}`;
 }

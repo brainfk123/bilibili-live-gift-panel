@@ -1,6 +1,7 @@
 const CONFIRM_TIMEOUT_MS = 3_000;
 
 export function bindTwoStepDelete(button: HTMLButtonElement, action: () => void): void {
+  const idleLabel = button.textContent || '删除';
   let armed = false;
   let resetTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
 
@@ -8,7 +9,7 @@ export function bindTwoStepDelete(button: HTMLButtonElement, action: () => void)
     armed = false;
     if (resetTimer !== undefined) globalThis.clearTimeout(resetTimer);
     resetTimer = undefined;
-    if (!button.disabled) button.textContent = '删除';
+    if (!button.disabled) button.textContent = idleLabel;
     button.classList.remove('is-confirming');
     button.setAttribute('aria-pressed', 'false');
   };

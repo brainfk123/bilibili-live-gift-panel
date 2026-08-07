@@ -5,12 +5,13 @@ import { normalizeActivities } from './activities';
 import { normalizeTrainingTopicIds } from './training';
 
 const CONFIG_ENDPOINT = '/api/config';
-const CONFIG_BACKUP_SCHEMA_VERSION = 2;
+const CONFIG_BACKUP_SCHEMA_VERSION = 3;
 const STATE_FIELD_KEYS = [
   'roomId',
   'attributes',
   'displayScenes',
   'blindBoxDisplay',
+  'giftKpiPanels',
   'activities',
   'rules',
   'timerRules',
@@ -29,6 +30,7 @@ type ConfigBackupFields = Pick<AppState,
   | 'attributes'
   | 'displayScenes'
   | 'blindBoxDisplay'
+  | 'giftKpiPanels'
   | 'activities'
   | 'rules'
   | 'timerRules'
@@ -56,6 +58,7 @@ export const defaultState = (): AppState => ({
     align: 'center',
     panelOpacity: 55,
   },
+  giftKpiPanels: [],
   activities: [],
   rules: [],
   timerRules: [],
@@ -88,6 +91,7 @@ export const defaultState = (): AppState => ({
 export function clearRoomScopedRecords(state: AppState): AppState {
   return {
     ...state,
+    giftKpiPanels: state.giftKpiPanels.map((panel) => ({ ...panel, items: panel.items.map((item) => ({ ...item, received: 0 })) })),
     recentGifts: [],
     stats: {},
     log: [],
@@ -198,6 +202,7 @@ export function createConfigBackup(state: AppState): ConfigBackup {
     referencedGiftIds.add(rule.giftId);
     for (const giftId of rule.matchGiftIds ?? []) referencedGiftIds.add(giftId);
   }
+  for (const panel of state.giftKpiPanels) for (const item of panel.items) referencedGiftIds.add(item.giftId);
   const catalogById = new Map<number, AppState['giftCatalog'][number]>();
   for (const gift of [...state.giftCatalog, ...state.recentGifts]) {
     if (referencedGiftIds.has(gift.id)) catalogById.set(gift.id, gift);
@@ -208,6 +213,7 @@ export function createConfigBackup(state: AppState): ConfigBackup {
     attributes: state.attributes,
     displayScenes: state.displayScenes,
     blindBoxDisplay: state.blindBoxDisplay,
+    giftKpiPanels: state.giftKpiPanels,
     activities: state.activities,
     rules: state.rules,
     timerRules: state.timerRules,
@@ -249,6 +255,7 @@ export function mergeConfigBackup(current: AppState, input: unknown): AppState {
     ...(parsed.attributes !== undefined ? { attributes: parsed.attributes } : {}),
     ...(parsed.displayScenes !== undefined ? { displayScenes: parsed.displayScenes } : {}),
     ...(parsed.blindBoxDisplay !== undefined ? { blindBoxDisplay: parsed.blindBoxDisplay } : {}),
+    ...(parsed.giftKpiPanels !== undefined ? { giftKpiPanels: parsed.giftKpiPanels } : {}),
     ...(parsed.activities !== undefined ? { activities: parsed.activities } : {}),
     ...(parsed.rules !== undefined ? { rules: parsed.rules } : {}),
     ...(parsed.timerRules !== undefined ? { timerRules: parsed.timerRules } : {}),
@@ -300,6 +307,7 @@ function normalizeState(parsed: Partial<AppState>): AppState {
   settings.defaultDisplayThemeId = normalizeDisplayThemeId(settings.defaultDisplayThemeId);
   if (parsed.blindBoxDisplay === undefined) markDisplayAppearanceMigrationRequired('blindBoxDisplay');
   const blindBoxDisplay = normalizeDisplayAppearance(parsed.blindBoxDisplay, settings);
+  const giftKpiPanels = normalizeGiftKpiPanels(parsed.giftKpiPanels, settings);
   const attributes = (parsed.attributes ?? base.attributes).map((attribute) => (
     attribute.display
       ? {
@@ -329,12 +337,45 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     attributes,
     displayScenes,
     blindBoxDisplay,
+    giftKpiPanels,
     activities: normalizeActivities(parsed.activities, attributes, new Set(displayScenes.map((scene) => scene.id))),
     rules: parsed.rules ?? base.rules,
     timerRules: parsed.timerRules ?? base.timerRules,
     formulaPresets: parsed.formulaPresets ?? base.formulaPresets,
     contributions: normalizeContributionLedger(parsed.contributions),
   };
+}
+
+function normalizeGiftKpiPanels(input: AppState['giftKpiPanels'] | undefined, settings: AppState['settings']): AppState['giftKpiPanels'] {
+  const ids = new Set<string>();
+  return (Array.isArray(input) ? input : []).flatMap((candidate) => {
+    const id = String(candidate?.id ?? '').trim();
+    const name = String(candidate?.name ?? '').trim();
+    if (!id || !name || ids.has(id)) return [];
+    ids.add(id);
+    const giftIds = new Set<number>();
+    const items = (Array.isArray(candidate.items) ? candidate.items : []).flatMap((item) => {
+      const giftId = Math.round(Number(item?.giftId));
+      if (giftId <= 0 || giftIds.has(giftId)) return [];
+      giftIds.add(giftId);
+      return [{
+        giftId,
+        giftName: String(item.giftName ?? `礼物 ${giftId}`).trim() || `礼物 ${giftId}`,
+        imageUrl: String(item.imageUrl ?? '').trim(),
+        target: Math.max(1, Math.round(Number(item.target) || 1)),
+        received: Math.max(0, Math.round(Number(item.received) || 0)),
+        barStyle: ['resource', 'health'].includes(item.barStyle) ? item.barStyle : 'progress',
+      }];
+    }).slice(0, 12);
+    if (items.length === 0) return [];
+    return [{
+      id,
+      name,
+      layout: ['stack', 'dashboard'].includes(candidate.layout) ? candidate.layout : 'grid',
+      items,
+      appearance: normalizeDisplayAppearance(candidate.appearance, settings),
+    }];
+  });
 }
 
 function normalizeDisplayAppearance(

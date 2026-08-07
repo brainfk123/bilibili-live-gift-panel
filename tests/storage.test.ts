@@ -13,6 +13,7 @@ describe('storage', () => {
     expect(s.attributes).toEqual([]);
     expect(s.rules).toEqual([]);
     expect(s.contributions).toEqual({ viewers: [] });
+    expect(s.giftKpiPanels).toEqual([]);
     expect(s.blindBoxDisplay).toEqual(expect.objectContaining({ themeId: 'glass', fontSize: 48, panelOpacity: 55 }));
     expect(s.settings.panelOpacity).toBe(55);
     expect(s.settings.trainingCompletedTopics).toEqual([]);
@@ -30,6 +31,11 @@ describe('storage', () => {
     state.stats = { today: { date: 'today', giftTotals: { 1: 2 }, ruleTriggers: { r1: 2 } } };
     state.log = [{ time: 1, giftId: 1, giftName: '测试礼物', num: 1, uname: '观众', attributeName: '积分', delta: 1, valueAfter: 7, ruleId: 'r1' }];
     state.contributions = { updatedAt: 1, viewers: [{ key: 'uid:1', uid: 1, uname: '观众', giftCount: 2, goldValue: 200, silverValue: 0, ruleTriggers: 2, attributeDeltas: { 积分: 2 }, blindBoxCount: 0, blindBoxCost: 0, blindBoxValue: 0, blindBoxProfit: 0, lastGiftAt: 1 }] };
+    state.giftKpiPanels = [{
+      id: 'kpi-1', name: '本场礼物目标', layout: 'grid',
+      items: [{ giftId: 1, giftName: '测试礼物', imageUrl: '', target: 10, received: 4, barStyle: 'progress' }],
+      appearance: { ...state.blindBoxDisplay },
+    }];
 
     const cleared = clearRoomScopedRecords(state);
 
@@ -41,6 +47,8 @@ describe('storage', () => {
     expect(cleared.attributes).toEqual(state.attributes);
     expect(cleared.rules).toEqual(state.rules);
     expect(cleared.giftCatalog).toEqual(state.giftCatalog);
+    expect(cleared.giftKpiPanels[0].items[0].received).toBe(0);
+    expect(cleared.giftKpiPanels[0].items[0].target).toBe(10);
     expect(state.log).toHaveLength(1);
   });
 
@@ -280,7 +288,7 @@ describe('storage', () => {
 
     const backup = createConfigBackup(state);
 
-    expect(backup.schemaVersion).toBe(2);
+    expect(backup.schemaVersion).toBe(3);
     expect(backup.giftCatalog.map((gift) => gift.id)).toEqual([1, 2]);
     expect(backup).not.toHaveProperty('recentGifts');
     expect(backup).not.toHaveProperty('stats');

@@ -61,6 +61,23 @@ type displaySceneState struct {
 	Appearance     *displayAppearanceState `json:"appearance,omitempty"`
 }
 
+type giftKPIItemState struct {
+	GiftID   int    `json:"giftId"`
+	GiftName string `json:"giftName"`
+	ImageURL string `json:"imageUrl,omitempty"`
+	Target   int    `json:"target"`
+	Received int    `json:"received"`
+	BarStyle string `json:"barStyle"`
+}
+
+type giftKPIPanelState struct {
+	ID         string                 `json:"id"`
+	Name       string                 `json:"name"`
+	Layout     string                 `json:"layout"`
+	Items      []giftKPIItemState     `json:"items"`
+	Appearance displayAppearanceState `json:"appearance"`
+}
+
 type activityResultState struct {
 	WinnerAttributeName string             `json:"winnerAttributeName,omitempty"`
 	Values              map[string]float64 `json:"values"`
@@ -270,6 +287,7 @@ type appState struct {
 	Attributes      []attributeState        `json:"attributes"`
 	DisplayScenes   []displaySceneState     `json:"displayScenes"`
 	BlindBoxDisplay displayAppearanceState  `json:"blindBoxDisplay"`
+	GiftKPIPanels   []giftKPIPanelState     `json:"giftKpiPanels"`
 	Activities      []activitySessionState  `json:"activities"`
 	Rules           []giftRule              `json:"rules"`
 	TimerRules      []timerRule             `json:"timerRules"`
@@ -312,6 +330,7 @@ func defaultAppState() appState {
 			ShowConnection: true, Align: "center", PanelOpacity: 55,
 		},
 		Activities:     []activitySessionState{},
+		GiftKPIPanels:  []giftKPIPanelState{},
 		Rules:          []giftRule{},
 		TimerRules:     []timerRule{},
 		FormulaPresets: []formulaPreset{},
@@ -346,6 +365,23 @@ func normalizeAppState(state *appState) {
 	}
 	if state.DisplayScenes == nil {
 		state.DisplayScenes = []displaySceneState{}
+	}
+	if state.GiftKPIPanels == nil {
+		state.GiftKPIPanels = []giftKPIPanelState{}
+	}
+	for panelIndex := range state.GiftKPIPanels {
+		panel := &state.GiftKPIPanels[panelIndex]
+		if panel.Items == nil {
+			panel.Items = []giftKPIItemState{}
+		}
+		for itemIndex := range panel.Items {
+			item := &panel.Items[itemIndex]
+			item.Target = maxInt(1, item.Target)
+			item.Received = maxInt(0, item.Received)
+			if item.BarStyle != "resource" && item.BarStyle != "health" {
+				item.BarStyle = "progress"
+			}
+		}
 	}
 	if state.Activities == nil {
 		state.Activities = []activitySessionState{}

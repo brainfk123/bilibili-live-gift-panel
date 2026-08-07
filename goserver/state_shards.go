@@ -13,7 +13,7 @@ import (
 // Every persisted shard has its own version. Missing versions are treated as
 // legacy version 0, while newer versions are rejected so an older executable
 // cannot silently discard fields it does not understand.
-const stateShardSchemaVersion = 2
+const stateShardSchemaVersion = 3
 
 type unsupportedStateVersionError struct {
 	Shard   string
@@ -30,6 +30,7 @@ type configStateShard struct {
 	Attributes      []attributeState       `json:"attributes"`
 	DisplayScenes   []displaySceneState    `json:"displayScenes"`
 	BlindBoxDisplay displayAppearanceState `json:"blindBoxDisplay"`
+	GiftKPIPanels   []giftKPIPanelState    `json:"giftKpiPanels"`
 	Activities      []activitySessionState `json:"activities"`
 	Rules           []giftRule             `json:"rules"`
 	TimerRules      []timerRule            `json:"timerRules"`
@@ -57,6 +58,7 @@ func configShardFromState(state appState) configStateShard {
 		Attributes:      state.Attributes,
 		DisplayScenes:   state.DisplayScenes,
 		BlindBoxDisplay: state.BlindBoxDisplay,
+		GiftKPIPanels:   state.GiftKPIPanels,
 		Activities:      state.Activities,
 		Rules:           state.Rules,
 		TimerRules:      state.TimerRules,

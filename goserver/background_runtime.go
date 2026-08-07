@@ -431,6 +431,14 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 	upsertRecentGiftState(state, gift)
 	stats := state.todayStats()
 	stats.GiftTotals[giftKey(gift.GiftID)] += maxInt(1, gift.Num)
+	for panelIndex := range state.GiftKPIPanels {
+		for itemIndex := range state.GiftKPIPanels[panelIndex].Items {
+			item := &state.GiftKPIPanels[panelIndex].Items[itemIndex]
+			if item.GiftID == gift.GiftID {
+				item.Received += maxInt(1, gift.Num)
+			}
+		}
+	}
 	repetitions := maxInt(1, gift.Num)
 	changes := []logEntry{}
 	changeIndexes := map[string]int{}

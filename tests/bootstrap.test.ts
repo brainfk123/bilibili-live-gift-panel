@@ -116,6 +116,27 @@ describe('application bootstrap', () => {
     });
   });
 
+  it('passes a selected gift KPI panel to display mode', async () => {
+    const document = new FakeDocument();
+    const mountDisplay = vi.fn();
+
+    await startApp({
+      document: document as unknown as Document,
+      search: '?mode=display&view=gift-kpi&panel=kpi-1',
+      installFavicon: vi.fn(),
+      loadConfigStyles: vi.fn(async () => ''),
+      mountDisplay,
+      mountConfig: vi.fn(),
+    });
+
+    expect(mountDisplay).toHaveBeenCalledWith(document.app, {
+      attributeName: undefined,
+      sceneId: undefined,
+      view: 'gift-kpi',
+      panelId: 'kpi-1',
+    });
+  });
+
   it('injects configuration styles before mounting config mode', async () => {
     const document = new FakeDocument();
     const cssText = '.config-root { color: red; }';

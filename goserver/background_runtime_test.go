@@ -129,6 +129,24 @@ func TestApplyGiftEventAggregatesBatchForAttributeBroadcast(t *testing.T) {
 	}
 }
 
+func TestApplyGiftEventUpdatesGiftKPIWithoutRules(t *testing.T) {
+	state := defaultAppState()
+	state.GiftKPIPanels = []giftKPIPanelState{{
+		ID: "kpi-1", Name: "本场礼物目标", Layout: "grid",
+		Items:      []giftKPIItemState{{GiftID: 33300, GiftName: "666", Target: 10, BarStyle: "progress"}},
+		Appearance: displayAppearanceState{ThemeID: "glass", FontSize: 48, AccentColor: "#fb7299", Align: "center", PanelOpacity: 55},
+	}}
+
+	applyGiftEvent(&state, giftEvent{GiftID: 33300, GiftName: "666", Num: 3, Timestamp: 1700000000})
+
+	if got := state.GiftKPIPanels[0].Items[0].Received; got != 3 {
+		t.Fatalf("received = %d, want 3", got)
+	}
+	if len(state.Rules) != 0 || len(state.Attributes) != 0 {
+		t.Fatalf("gift KPI should not create rules or attributes: state=%#v", state)
+	}
+}
+
 func TestApplyGiftEventUpdatesEveryMatchingAttribute(t *testing.T) {
 	state := defaultAppState()
 	state.Attributes = []attributeState{
