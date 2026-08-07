@@ -2710,10 +2710,10 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .contribution-tab:last-child { border-right: 0; }
 .config-root .contribution-tab.is-active { background: var(--accent-soft); color: var(--accent-text); }
 .config-root .blind-box-scope-bar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(360px, 520px) minmax(0, 1fr);
   min-width: 0;
   align-items: center;
-  justify-content: space-between;
   gap: 14px;
   border: 1px solid var(--border);
   border-top: 0;
@@ -2721,9 +2721,9 @@ body.config-mode::-webkit-scrollbar-corner,
   background: color-mix(in srgb, var(--accent-soft) 42%, var(--input-bg));
 }
 .config-root .blind-box-scope-bar.is-hidden { display: none; }
-.config-root .blind-box-scope-field { display: flex; flex: 0 1 420px; min-width: 260px; align-items: center; gap: 9px; }
-.config-root .blind-box-scope-field > span { flex: 0 0 auto; color: var(--text-dim); font-size: var(--type-meta); font-weight: 700; }
-.config-root .blind-box-scope-select { min-width: 0; height: 34px; padding-block: 5px; font-size: var(--type-meta); }
+.config-root .blind-box-scope-field { display: grid; grid-template-columns: auto minmax(0, 1fr); min-width: 0; align-items: center; gap: 9px; }
+.config-root .blind-box-scope-field > span { color: var(--text-dim); font-size: var(--type-meta); font-weight: 700; white-space: nowrap; }
+.config-root .blind-box-scope-select { width: 100%; min-width: 0; height: 36px; padding: 6px 36px 6px 11px; font-size: var(--type-meta); }
 .config-root .blind-box-scope-summary {
   min-width: 0;
   overflow: hidden;
@@ -3725,6 +3725,8 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .activity-milestone-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .config-root .activity-timeout-section { grid-template-columns: 1fr; }
   .config-root .contribution-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .config-root .blind-box-scope-bar { grid-template-columns: 1fr; gap: 8px; }
+  .config-root .blind-box-scope-summary { text-align: left; white-space: normal; }
   .config-root .contribution-row {
     grid-template-columns: 28px 36px minmax(120px, .85fr) minmax(200px, 1.3fr) minmax(100px, .6fr);
     min-width: 700px;
@@ -3754,9 +3756,7 @@ body.config-mode::-webkit-scrollbar-corner,
     justify-content: flex-start;
     flex-wrap: wrap;
   }
-  .config-root .blind-box-scope-bar { align-items: stretch; flex-direction: column; gap: 8px; }
-  .config-root .blind-box-scope-field { flex-basis: auto; min-width: 0; }
-  .config-root .blind-box-scope-summary { text-align: left; white-space: normal; }
+  .config-root .blind-box-scope-bar { align-items: stretch; }
   .config-root .gift-history-heading { align-items: flex-start; flex-direction: column; }
   .config-root .attributes-heading-row .btn { align-self: flex-start; }
   .config-root .attribute-obs-row { grid-template-columns: 1fr auto; }

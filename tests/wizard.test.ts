@@ -2349,6 +2349,14 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).not.toContain('-5,000');
   });
 
+  it('reserves enough horizontal space for the complete blind-box scope name', () => {
+    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+
+    expect(configCss).toMatch(/\.blind-box-scope-bar\s*\{[^}]*grid-template-columns:\s*minmax\(360px, 520px\) minmax\(0, 1fr\);/);
+    expect(configCss).toMatch(/\.blind-box-scope-field\s*\{[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\);/);
+    expect(configCss).toMatch(/\.blind-box-scope-select\s*\{[^}]*width:\s*100%;[^}]*padding:\s*6px 36px 6px 11px;/);
+  });
+
   it('preserves disabled rules when an attribute is edited and saved', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state('88888888', 1),
