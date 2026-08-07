@@ -1,9 +1,12 @@
 import { el } from '../common';
 import { CONFIG_PAGES, ConfigPageIcon, ConfigPageId } from './config-route';
 
-export interface ConfigNavigation {
+export interface ConfigShell {
   element: HTMLElement;
-  setActive: (page: ConfigPageId) => void;
+  content: HTMLElement;
+  workspace: (page: ConfigPageId) => HTMLElement;
+  activate: (page: ConfigPageId) => void;
+  clearWorkspaces: () => void;
 }
 
 const ICON_PATHS: Record<ConfigPageIcon, string[]> = {
@@ -40,12 +43,14 @@ function createNavigationIcon(kind: ConfigPageIcon): HTMLElement {
   return svg as unknown as HTMLElement;
 }
 
-export function createConfigNavigation(
+export function createConfigShell(
   activePage: ConfigPageId,
   onNavigate: (page: ConfigPageId) => void,
-): ConfigNavigation {
+): ConfigShell {
   const navigation = el('nav', { class: 'config-navigation', ariaLabel: '配置页面' } as any);
   const buttons = new Map<ConfigPageId, HTMLButtonElement>();
+  const workspaces = new Map<ConfigPageId, HTMLElement>();
+  const content = el('main', { class: 'wizard-content config-page' });
 
   for (const page of CONFIG_PAGES) {
     const button = el('button', { class: 'config-nav-button', type: 'button' }) as HTMLButtonElement;
@@ -61,23 +66,47 @@ export function createConfigNavigation(
     button.onclick = () => onNavigate(page.id);
     buttons.set(page.id, button);
     navigation.append(button);
+    const workspace = el('div', {
+      class: 'config-page-workspace',
+      role: 'region',
+      ariaLabel: `${page.label}工作区`,
+    } as any);
+    workspace.dataset.configPageWorkspace = page.id;
+    workspaces.set(page.id, workspace);
+    content.append(workspace);
   }
 
-  const setActive = (page: ConfigPageId): void => {
+  const activate = (page: ConfigPageId): void => {
+    content.dataset.activePage = page;
     for (const [candidate, button] of buttons) {
       const active = candidate === page;
       button.classList.toggle('is-active', active);
       if (active) button.setAttribute('aria-current', 'page');
       else button.removeAttribute('aria-current');
     }
+    for (const [candidate, workspace] of workspaces) {
+      const active = candidate === page;
+      workspace.hidden = !active;
+      workspace.setAttribute('aria-hidden', String(!active));
+    }
   };
-  setActive(activePage);
+  activate(activePage);
 
-  return {
-    element: el('aside', { class: 'config-sidebar' }, [
+  const element = el('div', { class: 'config-workspace-layout' }, [
+    el('aside', { class: 'config-sidebar' }, [
       navigation,
       el('p', { class: 'config-sidebar-note', text: '配置会自动保存，关闭页面不会中断直播监听。' }),
     ]),
-    setActive,
+    content,
+  ]);
+
+  return {
+    element,
+    content,
+    workspace: (page) => workspaces.get(page) as HTMLElement,
+    activate,
+    clearWorkspaces: () => {
+      for (const workspace of workspaces.values()) workspace.replaceChildren();
+    },
   };
 }

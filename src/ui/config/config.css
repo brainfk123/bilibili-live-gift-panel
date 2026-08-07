@@ -1613,7 +1613,8 @@ body.config-mode::-webkit-scrollbar-corner,
   line-height: 1.55;
 }
 .config-root .config-page > [hidden] { display: none !important; }
-.config-root .config-page { display: grid; gap: 22px; }
+.config-root .config-page { min-width: 0; }
+.config-root .config-page-workspace { display: grid; min-width: 0; gap: 22px; }
 .config-root .overview-dashboard,
 .config-root .obs-panel-hub {
   min-width: 0;

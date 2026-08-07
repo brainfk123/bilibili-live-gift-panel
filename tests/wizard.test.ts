@@ -383,6 +383,30 @@ describe('wizard progress', () => {
   });
 });
 
+describe('configuration workspace shell', () => {
+  it('owns one isolated workspace per page and activates only the selected page', async () => {
+    const configured = defaultState();
+    configured.settings.showTutorial = false;
+    await saveState(configured);
+    const root = new TestElement('div');
+
+    mountConfig(root as unknown as HTMLElement);
+
+    const workspaces = root.querySelectorAll('.config-page-workspace') as Array<TestElement & { hidden?: boolean }>;
+    expect(workspaces).toHaveLength(6);
+    expect(workspaces.find((workspace) => workspace.dataset.configPageWorkspace === 'overview')?.hidden).toBe(false);
+    expect(workspaces.find((workspace) => workspace.dataset.configPageWorkspace === 'obs')?.hidden).toBe(true);
+
+    const obsNavigation = root.querySelectorAll('.config-nav-button').find((button) => textOf(button).includes('OBS 面板'));
+    obsNavigation?.onclick?.();
+
+    expect(workspaces.find((workspace) => workspace.dataset.configPageWorkspace === 'overview')?.hidden).toBe(true);
+    expect(workspaces.find((workspace) => workspace.dataset.configPageWorkspace === 'obs')?.hidden).toBe(false);
+    expect(root.querySelector('.obs-panel-hub')?.parent?.dataset.configPageWorkspace).toBe('obs');
+    expect(root.querySelector('.display-scenes-section')?.parent?.dataset.configPageWorkspace).toBe('obs');
+  });
+});
+
 describe('gameplay template wizard integration', () => {
   it('opens the template library for a normal add-attribute action', async () => {
     const configured = defaultState();

@@ -39,4 +39,11 @@ describe('config page routing', () => {
     expect(configPageForSelector('.obs-panel-hub')).toBe('obs');
     expect(CONFIG_PAGES.find((page) => page.id === 'kpi')?.label).toBe('礼物目标');
   });
+
+  it('keeps page metadata and owned section selectors in one registry', () => {
+    const selectors = CONFIG_PAGES.flatMap((page) => [...page.selectors]);
+    expect(new Set(selectors).size).toBe(selectors.length);
+    expect(CONFIG_PAGES.find((page) => page.id === 'obs')?.selectors)
+      .toEqual(['.obs-panel-hub', '.display-scenes-section']);
+  });
 });

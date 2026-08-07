@@ -93,8 +93,7 @@ import {
   ConfigPageId,
   parseConfigPage,
 } from './config-route';
-import { createConfigNavigation } from './config-shell';
-import { applyConfigPageVisibility } from './config-pages';
+import { createConfigShell } from './config-shell';
 
 interface SelectedGiftRule {
   gift: GiftInfo;
@@ -235,16 +234,14 @@ export function mountConfig(root: HTMLElement): void {
   headerActions.append(guideToggle, changelogToggle, programSettingsToggle, themeToggle, status);
   header.append(brand, headerActions);
 
-  const content = el('main', { class: 'wizard-content config-page' });
-  const navigation = createConfigNavigation(activePage, (page) => navigateToPage(page));
-  const workspace = el('div', { class: 'config-workspace-layout' }, [navigation.element, content]);
-  shell.append(header, workspace);
+  const configShell = createConfigShell(activePage, (page) => navigateToPage(page));
+  const content = configShell.content;
+  shell.append(header, configShell.element);
   root.replaceChildren(shell);
 
   function applyActivePage(): void {
-    navigation.setActive(activePage);
+    configShell.activate(activePage);
     activePageDescription.textContent = configPageDefinition(activePage).description;
-    applyConfigPageVisibility(content, activePage);
   }
 
   function navigateToPage(
@@ -529,10 +526,11 @@ export function mountConfig(root: HTMLElement): void {
   }
 
   function appendOrReplaceSection(section: HTMLElement, selector: string, replaceExisting: boolean): void {
-    const existing = replaceExisting ? content.querySelector<HTMLElement>(selector) : null;
+    const page = configPageForSelector(selector);
+    const workspace = page ? configShell.workspace(page) : content;
+    const existing = replaceExisting ? workspace.querySelector<HTMLElement>(selector) : null;
     if (existing) existing.replaceWith(section);
-    else content.append(section);
-    applyConfigPageVisibility(content, activePage);
+    else workspace.append(section);
   }
 
   function save(): void {
@@ -840,7 +838,7 @@ export function mountConfig(root: HTMLElement): void {
   function render(): void {
     activeGuide?.dispose();
     activeGuide = null;
-    content.replaceChildren();
+    configShell.clearWorkspaces();
     renderHeaderStatus();
     renderOverviewDashboard();
     renderConnectionWorkspace();
@@ -928,7 +926,7 @@ export function mountConfig(root: HTMLElement): void {
       ]),
     );
     grid.append(roomCard, renderLoginCard());
-    content.append(grid);
+    configShell.workspace('overview').append(grid);
     renderRoomAnchorHosts();
   }
 
@@ -1119,7 +1117,7 @@ export function mountConfig(root: HTMLElement): void {
       )));
       section.append(list);
     }
-    content.append(section);
+    configShell.workspace('attributes').append(section);
   }
 
   function openGameplayTemplateWizard(): void {
@@ -1523,7 +1521,7 @@ export function mountConfig(root: HTMLElement): void {
       state.displayScenes.forEach((scene, index) => grid.append(renderDisplaySceneCard(scene, index)));
       section.append(grid);
     }
-    content.append(section);
+    configShell.workspace('obs').append(section);
   }
 
   function renderDisplaySceneCard(scene: DisplayScene, index: number): HTMLElement {
@@ -4256,7 +4254,7 @@ export function mountConfig(root: HTMLElement): void {
         dataButton,
       ]),
     );
-    content.append(section);
+    configShell.workspace('overview').append(section);
   }
 
   function renderObsPanelHub(): void {
@@ -4358,7 +4356,7 @@ export function mountConfig(root: HTMLElement): void {
       appendGroup(group, grid);
     }
 
-    content.append(section);
+    configShell.workspace('obs').append(section);
   }
 
   function createDisplayAppearanceControl(
