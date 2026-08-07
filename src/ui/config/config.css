@@ -1633,7 +1633,6 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 .config-root .overview-dashboard-heading .section-heading,
 .config-root .obs-panel-hub-heading .section-heading { max-width: 760px; }
-.config-root .overview-runtime-badge,
 .config-root .obs-panel-count {
   flex: 0 0 auto;
   border: 1px solid var(--border-strong);
@@ -1645,13 +1644,6 @@ body.config-mode::-webkit-scrollbar-corner,
   font-weight: 700;
   white-space: nowrap;
 }
-.config-root .overview-runtime-badge.is-connected {
-  border-color: color-mix(in srgb, var(--success) 55%, var(--border));
-  color: var(--success-text);
-}
-.config-root .overview-runtime-badge.is-connecting,
-.config-root .overview-runtime-badge.is-reconnecting { color: var(--warning-text); }
-.config-root .overview-runtime-badge.is-error { color: var(--danger-text); }
 .config-root .overview-summary-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

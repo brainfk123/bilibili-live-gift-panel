@@ -4167,10 +4167,6 @@ export function mountConfig(root: HTMLElement): void {
     const section = el('section', { class: 'overview-dashboard' });
     const heading = el('div', { class: 'overview-dashboard-heading' }, [
       sectionHeading('工作台概览', '直播控制台', '先确认连接，再进入对应玩法或输出页面；关闭配置页不会中断后台监听。'),
-      el('span', {
-        class: `overview-runtime-badge is-${connectionState}`,
-        text: `${connectionState === 'connected' ? '●' : '○'} ${connectionLabel(connectionState)}`,
-      }),
     ]);
 
     const summaries: Array<{
