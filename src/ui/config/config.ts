@@ -50,7 +50,7 @@ import { createGameplayTemplateWizard } from './template-wizard';
 import type { GameplayTemplateBuildResult } from '../../gameplay-templates';
 import { DISPLAY_THEMES, getDisplayTheme } from '../../display-themes';
 import { blindBoxDisplayUrl, createDisplaySceneId, DISPLAY_SCENE_LAYOUTS, displaySceneLayoutName, displaySceneUrl, giftKpiDisplayUrl, MAX_DISPLAY_SCENE_ATTRIBUTES } from '../../display-scenes';
-import { buildBlindBoxLeaderboard } from '../../blind-box-leaderboard';
+import { buildBlindBoxLeaderboard, listBlindBoxLeaderboardScopes } from '../../blind-box-leaderboard';
 import { createActivityWorkspace } from './activity-workspace';
 import { createTrainingCenter } from './training-center';
 import type { TrainingTopicDefinition } from '../../training';
@@ -179,6 +179,7 @@ export function mountConfig(root: HTMLElement): void {
   let loginPollTimer: ReturnType<typeof globalThis.setInterval> | undefined;
   let localStateVersion = 0;
   let leaderboardMode: LeaderboardMode = 'contribution';
+  let leaderboardBlindBoxGiftId: number | undefined;
 
   const shell = el('div', { class: 'wizard-shell config-shell' });
   const header = el('header', { class: 'app-header' });
@@ -1918,6 +1919,10 @@ export function mountConfig(root: HTMLElement): void {
   function renderContributionLeaderboard(replaceExisting = false): void {
     const viewers = state.contributions.viewers;
     const blindBoxLeaderboard = buildBlindBoxLeaderboard(state.contributions);
+    const blindBoxScopes = listBlindBoxLeaderboardScopes(state.contributions);
+    if (leaderboardBlindBoxGiftId && !blindBoxScopes.some((scope) => scope.giftId === leaderboardBlindBoxGiftId)) {
+      leaderboardBlindBoxGiftId = undefined;
+    }
     const section = el('section', { class: 'contribution-section' });
     const copyObsButton = el('button', {
       class: 'btn ghost contribution-obs-copy',
@@ -1931,9 +1936,10 @@ export function mountConfig(root: HTMLElement): void {
     }) as HTMLButtonElement;
     appearanceButton.onclick = openBlindBoxAppearanceEditor;
     copyObsButton.onclick = async () => {
+      const selectedScope = blindBoxScopes.find((scope) => scope.giftId === leaderboardBlindBoxGiftId);
       try {
-        await navigator.clipboard.writeText(blindBoxDisplayUrl(location.origin));
-        toast('盲盒盈亏榜 OBS 链接已复制', root);
+        await navigator.clipboard.writeText(blindBoxDisplayUrl(location.origin, leaderboardBlindBoxGiftId));
+        toast(`${selectedScope?.giftName ?? '全部盲盒'}盈亏榜 OBS 链接已复制`, root);
       } catch {
         toast('复制失败，请检查浏览器剪贴板权限', root);
       }
@@ -1986,6 +1992,27 @@ export function mountConfig(root: HTMLElement): void {
     ]));
 
     const modeTabs = el('div', { class: 'contribution-tabs', role: 'tablist', ariaLabel: '排行榜类型' } as any);
+    const blindBoxScopeSelect = el('select', {
+      class: 'field-input blind-box-scope-select',
+      ariaLabel: '盲盒统计范围',
+    } as any) as HTMLSelectElement;
+    blindBoxScopeSelect.append(
+      el('option', { value: '', text: '全部盲盒' }),
+      ...blindBoxScopes.map((scope) => el('option', {
+        value: String(scope.giftId),
+        text: `${scope.giftName}（${formatLedgerNumber(scope.count)} 个）`,
+      })),
+    );
+    blindBoxScopeSelect.value = leaderboardBlindBoxGiftId ? String(leaderboardBlindBoxGiftId) : '';
+    blindBoxScopeSelect.disabled = blindBoxScopes.length === 0;
+    const blindBoxScopeSummary = el('span', { class: 'blind-box-scope-summary' });
+    const blindBoxScopeBar = el('div', { class: 'blind-box-scope-bar' }, [
+      el('label', { class: 'blind-box-scope-field' }, [
+        el('span', { text: '统计范围' }),
+        blindBoxScopeSelect,
+      ]),
+      blindBoxScopeSummary,
+    ]);
     const listHost = el('div', { class: 'contribution-list-host' });
     const modes: Array<{ id: LeaderboardMode; label: string }> = [
       { id: 'contribution', label: '礼物贡献' },
@@ -1998,7 +2025,12 @@ export function mountConfig(root: HTMLElement): void {
         button.classList.toggle('is-active', active);
         button.setAttribute('aria-selected', String(active));
       }
-      const ranked = rankContributors(viewers, leaderboardMode);
+      const selectedScope = blindBoxScopes.find((scope) => scope.giftId === leaderboardBlindBoxGiftId);
+      const scopedLeaderboard = buildBlindBoxLeaderboard(state.contributions, Number.POSITIVE_INFINITY, leaderboardBlindBoxGiftId);
+      blindBoxScopeBar.classList.toggle('is-hidden', leaderboardMode !== 'blind-box');
+      blindBoxScopeSummary.textContent = `${selectedScope?.giftName ?? '全部盲盒'} · ${formatLedgerNumber(scopedLeaderboard.summary.viewerCount)} 位观众 · ${formatLedgerNumber(scopedLeaderboard.summary.blindBoxCount)} 个 · 投入 ${formatLedgerNumber(scopedLeaderboard.summary.cost)} · 开出 ${formatLedgerNumber(scopedLeaderboard.summary.value)} · 净盈亏 ${formatSignedLedgerNumber(scopedLeaderboard.summary.profit)}`;
+      copyObsButton.textContent = leaderboardBlindBoxGiftId ? '复制此盲盒 OBS 链接' : '复制 OBS 链接';
+      const ranked = rankContributors(viewers, leaderboardMode, leaderboardBlindBoxGiftId);
       if (ranked.length === 0) {
         listHost.replaceChildren(el('div', {
           class: 'contribution-empty',
@@ -2028,7 +2060,12 @@ export function mountConfig(root: HTMLElement): void {
       };
       modeTabs.append(button);
     }
-    section.append(modeTabs, listHost);
+    blindBoxScopeSelect.onchange = () => {
+      const giftId = Number(blindBoxScopeSelect.value);
+      leaderboardBlindBoxGiftId = Number.isInteger(giftId) && giftId > 0 ? giftId : undefined;
+      renderRows();
+    };
+    section.append(modeTabs, blindBoxScopeBar, listHost);
     renderRows();
     appendOrReplaceSection(section, '.contribution-section', replaceExisting);
   }
@@ -2100,8 +2137,8 @@ export function mountConfig(root: HTMLElement): void {
     ]);
   }
 
-  function rankContributors(viewers: ViewerContribution[], mode: LeaderboardMode): ViewerContribution[] {
-    if (mode === 'blind-box') return buildBlindBoxLeaderboard({ viewers }).viewers;
+  function rankContributors(viewers: ViewerContribution[], mode: LeaderboardMode, blindBoxGiftId?: number): ViewerContribution[] {
+    if (mode === 'blind-box') return buildBlindBoxLeaderboard({ viewers }, Number.POSITIVE_INFINITY, blindBoxGiftId).viewers;
     const ranked = viewers.filter((viewer) => (
       mode === 'rules' ? viewer.ruleTriggers > 0 : viewer.giftCount > 0
     ));

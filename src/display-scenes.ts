@@ -8,6 +8,7 @@ export interface DisplayTarget {
   sceneId?: string;
   view?: 'blind-box' | 'gift-kpi';
   panelId?: string;
+  blindBoxGiftId?: number;
 }
 
 export interface ResolvedDisplayTarget {
@@ -103,8 +104,11 @@ export function displaySceneUrl(origin: string, sceneId: string): string {
   return `${origin}/?mode=display&scene=${encodeURIComponent(sceneId)}`;
 }
 
-export function blindBoxDisplayUrl(origin: string): string {
-  return `${origin}/?mode=display&view=blind-box`;
+export function blindBoxDisplayUrl(origin: string, blindBoxGiftId?: number): string {
+  const base = `${origin}/?mode=display&view=blind-box`;
+  return Number.isInteger(blindBoxGiftId) && Number(blindBoxGiftId) > 0
+    ? `${base}&blindBox=${encodeURIComponent(String(blindBoxGiftId))}`
+    : base;
 }
 
 export function giftKpiDisplayUrl(origin: string, panelId: string): string {

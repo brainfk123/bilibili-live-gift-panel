@@ -44,6 +44,7 @@ describe('display scene model', () => {
     expect(createDisplaySceneId()).toBe('scene-scene-uuid');
     expect(displaySceneUrl('http://localhost:12450', 'scene 1')).toBe('http://localhost:12450/?mode=display&scene=scene%201');
     expect(blindBoxDisplayUrl('http://localhost:12450')).toBe('http://localhost:12450/?mode=display&view=blind-box');
+    expect(blindBoxDisplayUrl('http://localhost:12450', 35800)).toBe('http://localhost:12450/?mode=display&view=blind-box&blindBox=35800');
     expect(giftKpiDisplayUrl('http://localhost:12450', 'kpi 1')).toBe('http://localhost:12450/?mode=display&view=gift-kpi&panel=kpi%201');
     vi.unstubAllGlobals();
   });

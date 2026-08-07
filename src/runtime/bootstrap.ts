@@ -47,7 +47,17 @@ export async function startApp(options: AppBootstrapOptions): Promise<void> {
   const requestedView = params.get('view');
   const view = requestedView === 'blind-box' || requestedView === 'gift-kpi' ? requestedView : undefined;
   const panelId = params.get('panel') ?? undefined;
+  const requestedBlindBoxGiftId = Number(params.get('blindBox'));
+  const blindBoxGiftId = Number.isInteger(requestedBlindBoxGiftId) && requestedBlindBoxGiftId > 0
+    ? requestedBlindBoxGiftId
+    : undefined;
   options.mountDisplay(root, attributeName || sceneId || view
-    ? { attributeName, sceneId, ...(view ? { view } : {}), ...(panelId ? { panelId } : {}) }
+    ? {
+      attributeName,
+      sceneId,
+      ...(view ? { view } : {}),
+      ...(panelId ? { panelId } : {}),
+      ...(view === 'blind-box' && blindBoxGiftId ? { blindBoxGiftId } : {}),
+    }
     : undefined);
 }

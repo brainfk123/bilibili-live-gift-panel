@@ -89,6 +89,7 @@ func recordGiftContribution(state *appState, gift giftEvent, outcome giftContrib
 		if !priced {
 			viewer.UnpricedBlindBoxCount += count
 		}
+		recordBlindBoxBreakdown(state, &viewer, gift, count, cost, value, priced)
 	}
 
 	viewer.LastGiftAt = normalizeGiftTimestamp(gift.Timestamp)
@@ -101,6 +102,44 @@ func recordGiftContribution(state *appState, gift giftEvent, outcome giftContrib
 		updatedAt = state.Contributions.UpdatedAt + 1
 	}
 	state.Contributions.UpdatedAt = updatedAt
+}
+
+func recordBlindBoxBreakdown(state *appState, viewer *viewerContribution, gift giftEvent, count int, cost, value float64, priced bool) {
+	if gift.BlindGiftID <= 0 {
+		return
+	}
+	index := -1
+	for candidate := range viewer.BlindBoxes {
+		if viewer.BlindBoxes[candidate].GiftID == gift.BlindGiftID {
+			index = candidate
+			break
+		}
+	}
+	if index < 0 {
+		viewer.BlindBoxes = append(viewer.BlindBoxes, blindBoxContribution{GiftID: gift.BlindGiftID})
+		index = len(viewer.BlindBoxes) - 1
+	}
+	breakdown := &viewer.BlindBoxes[index]
+	name := strings.TrimSpace(gift.BlindGiftName)
+	if name == "" {
+		if parent := state.findGift(gift.BlindGiftID); parent != nil {
+			name = strings.TrimSpace(parent.Name)
+		}
+	}
+	if name != "" {
+		breakdown.GiftName = truncateContributionText(name, maxContributionNameRunes)
+	}
+	if breakdown.GiftName == "" {
+		breakdown.GiftName = fmt.Sprintf("盲盒 %d", gift.BlindGiftID)
+	}
+	breakdown.Count += count
+	breakdown.Cost += cost
+	breakdown.Value += value
+	breakdown.Profit = breakdown.Value - breakdown.Cost
+	if !priced {
+		breakdown.UnpricedCount += count
+	}
+	breakdown.LastGiftAt = normalizeGiftTimestamp(gift.Timestamp)
 }
 
 func contributionIdentityKey(gift giftEvent) string {
@@ -211,6 +250,7 @@ func normalizeContributionLedger(ledger *contributionLedgerState) {
 		viewer.BlindBoxCost = maxFloat(0, viewer.BlindBoxCost)
 		viewer.BlindBoxValue = maxFloat(0, viewer.BlindBoxValue)
 		viewer.BlindBoxProfit = viewer.BlindBoxValue - viewer.BlindBoxCost
+		viewer.BlindBoxes = normalizeBlindBoxBreakdowns(viewer.BlindBoxes)
 		if viewer.AttributeDeltas == nil {
 			viewer.AttributeDeltas = map[string]float64{}
 		}
@@ -224,6 +264,42 @@ func normalizeContributionLedger(ledger *contributionLedgerState) {
 	})
 	ledger.Viewers = normalized
 	ledger.UpdatedAt = maxInt64(0, ledger.UpdatedAt)
+}
+
+func normalizeBlindBoxBreakdowns(breakdowns []blindBoxContribution) []blindBoxContribution {
+	normalized := make([]blindBoxContribution, 0, len(breakdowns))
+	byGiftID := make(map[int]int, len(breakdowns))
+	for _, breakdown := range breakdowns {
+		if breakdown.GiftID <= 0 {
+			continue
+		}
+		breakdown.GiftName = truncateContributionText(strings.TrimSpace(breakdown.GiftName), maxContributionNameRunes)
+		if breakdown.GiftName == "" {
+			breakdown.GiftName = fmt.Sprintf("盲盒 %d", breakdown.GiftID)
+		}
+		breakdown.Count = maxInt(0, breakdown.Count)
+		breakdown.Cost = maxFloat(0, breakdown.Cost)
+		breakdown.Value = maxFloat(0, breakdown.Value)
+		breakdown.Profit = breakdown.Value - breakdown.Cost
+		breakdown.UnpricedCount = maxInt(0, breakdown.UnpricedCount)
+		breakdown.LastGiftAt = maxInt64(0, breakdown.LastGiftAt)
+		if index, exists := byGiftID[breakdown.GiftID]; exists {
+			current := &normalized[index]
+			current.Count += breakdown.Count
+			current.Cost += breakdown.Cost
+			current.Value += breakdown.Value
+			current.Profit = current.Value - current.Cost
+			current.UnpricedCount += breakdown.UnpricedCount
+			if breakdown.LastGiftAt >= current.LastGiftAt {
+				current.GiftName = breakdown.GiftName
+				current.LastGiftAt = breakdown.LastGiftAt
+			}
+			continue
+		}
+		byGiftID[breakdown.GiftID] = len(normalized)
+		normalized = append(normalized, breakdown)
+	}
+	return normalized
 }
 
 func handleContributionLedger(store *configStore) http.HandlerFunc {

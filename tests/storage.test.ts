@@ -228,6 +228,11 @@ describe('storage', () => {
             key: 'uid:1', uid: 1, uname: ' 观众 ', giftCount: 3.8, goldValue: 5000, silverValue: -1,
             ruleTriggers: 2, attributeDeltas: { 积分: 4, '': 99 }, blindBoxCount: 1,
             blindBoxCost: 9000, blindBoxValue: 12000, blindBoxProfit: -999, lastGiftAt: 100,
+            blindBoxes: [
+              { giftId: 35800, giftName: ' 心动盲盒 ', count: 1, cost: 9000, value: 12000, profit: -999, lastGiftAt: 100 },
+              { giftId: 35800, giftName: '心动盲盒', count: 2, cost: 18000, value: 8000, profit: 999, unpricedCount: 1, lastGiftAt: 200 },
+              { giftId: 0, giftName: '无效盲盒', count: 1, cost: 1, value: 1, profit: 0, lastGiftAt: 300 },
+            ],
           },
           { key: 'uid:1', uid: 1, uname: '重复', giftCount: 99 },
         ],
@@ -242,6 +247,10 @@ describe('storage', () => {
         key: 'uid:1', uid: 1, uname: '观众', giftCount: 3, goldValue: 5000, silverValue: 0,
         ruleTriggers: 2, attributeDeltas: { 积分: 4 }, blindBoxCount: 1,
         blindBoxCost: 9000, blindBoxValue: 12000, blindBoxProfit: 3000, lastGiftAt: 100,
+        blindBoxes: [{
+          giftId: 35800, giftName: '心动盲盒', count: 3, cost: 27000, value: 20000,
+          profit: -7000, unpricedCount: 1, lastGiftAt: 200,
+        }],
       }],
     });
   });

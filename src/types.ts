@@ -266,6 +266,18 @@ export interface ViewerContribution {
   blindBoxValue: number;
   blindBoxProfit: number;
   unpricedBlindBoxCount?: number;
+  blindBoxes?: BlindBoxContribution[];
+  lastGiftAt: number;
+}
+
+export interface BlindBoxContribution {
+  giftId: number;
+  giftName: string;
+  count: number;
+  cost: number;
+  value: number;
+  profit: number;
+  unpricedCount?: number;
   lastGiftAt: number;
 }
 

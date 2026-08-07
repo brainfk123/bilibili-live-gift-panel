@@ -46,7 +46,7 @@ export function resolveAttributeValuePresentation(attribute: Attribute): { text:
 
 export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): void {
   if (target.view === 'blind-box') {
-    mountBlindBoxDisplay(root);
+    mountBlindBoxDisplay(root, target.blindBoxGiftId);
     return;
   }
   if (target.view === 'gift-kpi') {

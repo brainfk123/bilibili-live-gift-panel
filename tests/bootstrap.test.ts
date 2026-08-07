@@ -116,6 +116,27 @@ describe('application bootstrap', () => {
     });
   });
 
+  it('passes the selected blind-box gift to display mode', async () => {
+    const document = new FakeDocument();
+    const mountDisplay = vi.fn();
+
+    await startApp({
+      document: document as unknown as Document,
+      search: '?mode=display&view=blind-box&blindBox=35800',
+      installFavicon: vi.fn(),
+      loadConfigStyles: vi.fn(async () => ''),
+      mountDisplay,
+      mountConfig: vi.fn(),
+    });
+
+    expect(mountDisplay).toHaveBeenCalledWith(document.app, {
+      attributeName: undefined,
+      sceneId: undefined,
+      view: 'blind-box',
+      blindBoxGiftId: 35800,
+    });
+  });
+
   it('passes a selected gift KPI panel to display mode', async () => {
     const document = new FakeDocument();
     const mountDisplay = vi.fn();

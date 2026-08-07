@@ -84,6 +84,39 @@ func TestContributionLedgerUsesCatalogBlindBoxParentWhenEventOmitsMetadata(t *te
 	if viewer.BlindBoxCount != 1 || viewer.BlindBoxCost != 9000 || viewer.BlindBoxValue != 12000 || viewer.BlindBoxProfit != 3000 {
 		t.Fatalf("catalog-mapped blind box contribution = %#v", viewer)
 	}
+	if len(viewer.BlindBoxes) != 1 || viewer.BlindBoxes[0].GiftID != 35800 || viewer.BlindBoxes[0].GiftName != "小熊虫盲盒" {
+		t.Fatalf("catalog-mapped blind box breakdown = %#v", viewer.BlindBoxes)
+	}
+}
+
+func TestContributionLedgerSeparatesBlindBoxBreakdowns(t *testing.T) {
+	state := defaultAppState()
+	state.GiftCatalog = []giftInfo{
+		{ID: 35800, Name: "小熊虫盲盒", Price: 9000, CoinType: "gold"},
+		{ID: 35900, Name: "星愿盲盒", Price: 6000, CoinType: "gold"},
+	}
+
+	applyGiftEvent(&state, giftEvent{
+		GiftID: 35801, BlindGiftID: 35800, BlindGiftName: "小熊虫盲盒", GiftName: "稀有礼物", Num: 2,
+		Price: 12000, CoinType: "gold", UID: 456, Uname: "盲盒观众", Timestamp: 1_700_000_100,
+	})
+	applyGiftEvent(&state, giftEvent{
+		GiftID: 35901, BlindGiftID: 35900, BlindGiftName: "星愿盲盒", GiftName: "安慰礼物", Num: 1,
+		Price: 2000, CoinType: "gold", UID: 456, Uname: "盲盒观众", Timestamp: 1_700_000_101,
+	})
+
+	viewer := state.Contributions.Viewers[0]
+	if len(viewer.BlindBoxes) != 2 {
+		t.Fatalf("blind box breakdowns = %#v, want 2 entries", viewer.BlindBoxes)
+	}
+	first := viewer.BlindBoxes[0]
+	second := viewer.BlindBoxes[1]
+	if first.GiftID != 35800 || first.GiftName != "小熊虫盲盒" || first.Count != 2 || first.Cost != 18000 || first.Value != 24000 || first.Profit != 6000 {
+		t.Fatalf("first blind box breakdown = %#v", first)
+	}
+	if second.GiftID != 35900 || second.GiftName != "星愿盲盒" || second.Count != 1 || second.Cost != 6000 || second.Value != 2000 || second.Profit != -4000 {
+		t.Fatalf("second blind box breakdown = %#v", second)
+	}
 }
 
 func TestContributionLedgerUsesMaskedNameWhenUIDIsMissing(t *testing.T) {

@@ -2308,11 +2308,19 @@ describe('single-page configuration rendering', () => {
             key: 'uid:1', uid: 1, uname: '盈利观众', giftCount: 5, goldValue: 20000, silverValue: 0,
             ruleTriggers: 3, attributeDeltas: { 加班时间: 180 }, blindBoxCount: 2,
             blindBoxCost: 18000, blindBoxValue: 24000, blindBoxProfit: 6000, lastGiftAt: 200,
+            blindBoxes: [{
+              giftId: 35800, giftName: '心动盲盒', count: 2, cost: 18000, value: 24000,
+              profit: 6000, lastGiftAt: 200,
+            }],
           },
           {
             key: 'name:反***', uname: '反***', giftCount: 2, goldValue: 10000, silverValue: 0,
             ruleTriggers: 0, attributeDeltas: {}, blindBoxCount: 1,
             blindBoxCost: 9000, blindBoxValue: 4000, blindBoxProfit: -5000, lastGiftAt: 100,
+            blindBoxes: [{
+              giftId: 35900, giftName: '小熊虫盲盒', count: 1, cost: 9000, value: 4000,
+              profit: -5000, lastGiftAt: 100,
+            }],
           },
         ],
       },
@@ -2332,6 +2340,13 @@ describe('single-page configuration rendering', () => {
     const blindText = textOf(root.querySelector('.contribution-list-host') as TestElement);
     expect(blindText).toContain('+6,000');
     expect(blindText).toContain('-5,000');
+    const scopeSelect = root.querySelector('.blind-box-scope-select') as TestElement & { onchange?: () => void };
+    scopeSelect.value = '35800';
+    scopeSelect.onchange?.();
+    expect(root.querySelectorAll('.contribution-row')).toHaveLength(1);
+    expect(textOf(root.querySelector('.blind-box-scope-bar') as TestElement)).toContain('心动盲盒 · 1 位观众 · 2 个');
+    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('+6,000');
+    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).not.toContain('-5,000');
   });
 
   it('preserves disabled rules when an attribute is edited and saved', async () => {

@@ -1,5 +1,5 @@
 import { getRuntimeStatus, type RuntimeConnectionState } from '../../backend';
-import { buildBlindBoxLeaderboard } from '../../blind-box-leaderboard';
+import { buildBlindBoxLeaderboard, listBlindBoxLeaderboardScopes } from '../../blind-box-leaderboard';
 import { getDisplayTheme } from '../../display-themes';
 import { loadState, refreshStateFromServer } from '../../storage';
 import type { AppState, ViewerContribution } from '../../types';
@@ -40,7 +40,7 @@ export function advanceBlindBoxScroll(
   return { index: nextIndex, direction: nextDirection };
 }
 
-export function mountBlindBoxDisplay(root: HTMLElement): void {
+export function mountBlindBoxDisplay(root: HTMLElement, blindBoxGiftId?: number): void {
   let state = loadState();
   let connectionState: RuntimeConnectionState = 'idle';
   let refreshActive = false;
@@ -55,7 +55,10 @@ export function mountBlindBoxDisplay(root: HTMLElement): void {
   function render(): void {
     stopLeaderboardScroll();
     const renderVersion = ++leaderboardRenderVersion;
-    const leaderboard = buildBlindBoxLeaderboard(state.contributions, MAX_RANKED_VIEWERS);
+    const leaderboard = buildBlindBoxLeaderboard(state.contributions, MAX_RANKED_VIEWERS, blindBoxGiftId);
+    const selectedScope = listBlindBoxLeaderboardScopes(state.contributions)
+      .find((scope) => scope.giftId === blindBoxGiftId);
+    const scopeName = blindBoxGiftId ? selectedScope?.giftName ?? `盲盒 ${blindBoxGiftId}` : '全部盲盒';
     const appearance = state.blindBoxDisplay;
     const theme = getDisplayTheme(appearance.themeId);
     const panel = el('main', { class: 'panel blind-box-panel' });
@@ -65,7 +68,7 @@ export function mountBlindBoxDisplay(root: HTMLElement): void {
 
     panel.append(el('header', { class: 'blind-box-header' }, [
       el('div', { class: 'blind-box-title' }, [
-        el('span', { text: '直播盲盒统计' }),
+        el('span', { text: scopeName }),
         el('h1', { text: '盲盒盈亏榜' }),
       ]),
       el('div', { class: 'blind-box-profit' }, [
@@ -78,7 +81,7 @@ export function mountBlindBoxDisplay(root: HTMLElement): void {
       ]),
     ]));
 
-    panel.append(el('section', { class: 'blind-box-summary', ariaLabel: '全场盲盒汇总' } as any, [
+    panel.append(el('section', { class: 'blind-box-summary', ariaLabel: `${scopeName}汇总` } as any, [
       summaryItem('盲盒数量', `${formatNumber(leaderboard.summary.blindBoxCount)} 个`),
       summaryItem('投入', formatCompactYuanFromGoldSeeds(leaderboard.summary.cost), formatYuanFromGoldSeeds(leaderboard.summary.cost)),
       summaryItem('开出', formatCompactYuanFromGoldSeeds(leaderboard.summary.value), formatYuanFromGoldSeeds(leaderboard.summary.value)),
@@ -88,8 +91,8 @@ export function mountBlindBoxDisplay(root: HTMLElement): void {
       const empty = el('div', { class: 'blind-box-empty' });
       empty.append(
         createBrandIcon(56, 'blind-box-empty-icon'),
-        el('strong', { text: '还没有盲盒记录' }),
-        el('span', { text: '收到盲盒礼物后会自动统计投入、开出价值和盈亏。' }),
+        el('strong', { text: blindBoxGiftId ? `还没有${scopeName}记录` : '还没有盲盒记录' }),
+        el('span', { text: blindBoxGiftId ? `收到${scopeName}后会自动统计投入、开出价值和盈亏。` : '收到盲盒礼物后会自动统计投入、开出价值和盈亏。' }),
       );
       panel.append(empty);
     } else {

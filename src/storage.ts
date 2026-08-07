@@ -423,6 +423,7 @@ function normalizeContributionLedger(ledger: Partial<AppState['contributions']> 
       .filter(([name, value]) => Boolean(name) && Number.isFinite(value)));
     const blindBoxCost = nonNegativeNumber(raw.blindBoxCost);
     const blindBoxValue = nonNegativeNumber(raw.blindBoxValue);
+    const blindBoxes = normalizeBlindBoxContributions(raw.blindBoxes);
     viewers.push({
       key,
       ...(Number.isFinite(uid) && uid > 0 ? { uid: Math.trunc(uid) } : {}),
@@ -440,6 +441,7 @@ function normalizeContributionLedger(ledger: Partial<AppState['contributions']> 
       ...(nonNegativeInteger(raw.unpricedBlindBoxCount) > 0
         ? { unpricedBlindBoxCount: nonNegativeInteger(raw.unpricedBlindBoxCount) }
         : {}),
+      ...(blindBoxes.length > 0 ? { blindBoxes } : {}),
       lastGiftAt: nonNegativeNumber(raw.lastGiftAt),
     });
     if (viewers.length >= 2000) break;
@@ -447,6 +449,47 @@ function normalizeContributionLedger(ledger: Partial<AppState['contributions']> 
   viewers.sort((left, right) => right.lastGiftAt - left.lastGiftAt);
   const updatedAt = nonNegativeNumber(ledger?.updatedAt);
   return { viewers, ...(updatedAt > 0 ? { updatedAt } : {}) };
+}
+
+function normalizeBlindBoxContributions(
+  input: AppState['contributions']['viewers'][number]['blindBoxes'],
+): NonNullable<AppState['contributions']['viewers'][number]['blindBoxes']> {
+  const byGiftId = new Map<number, NonNullable<AppState['contributions']['viewers'][number]['blindBoxes']>[number]>();
+  for (const raw of Array.isArray(input) ? input : []) {
+    const giftId = nonNegativeInteger(raw?.giftId);
+    if (giftId <= 0) continue;
+    const giftName = String(raw?.giftName ?? '').trim().slice(0, 80) || `盲盒 ${giftId}`;
+    const count = nonNegativeInteger(raw?.count);
+    const cost = nonNegativeNumber(raw?.cost);
+    const value = nonNegativeNumber(raw?.value);
+    const unpricedCount = nonNegativeInteger(raw?.unpricedCount);
+    const lastGiftAt = nonNegativeNumber(raw?.lastGiftAt);
+    const current = byGiftId.get(giftId);
+    if (current) {
+      current.count += count;
+      current.cost += cost;
+      current.value += value;
+      current.profit = current.value - current.cost;
+      current.unpricedCount = nonNegativeInteger(current.unpricedCount) + unpricedCount;
+      if (lastGiftAt >= current.lastGiftAt) {
+        current.giftName = giftName;
+        current.lastGiftAt = lastGiftAt;
+      }
+      continue;
+    }
+    byGiftId.set(giftId, {
+      giftId,
+      giftName,
+      count,
+      cost,
+      value,
+      profit: value - cost,
+      ...(unpricedCount > 0 ? { unpricedCount } : {}),
+      lastGiftAt,
+    });
+    if (byGiftId.size >= 200) break;
+  }
+  return Array.from(byGiftId.values());
 }
 
 function nonNegativeNumber(value: unknown): number {

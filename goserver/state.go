@@ -240,21 +240,33 @@ type logEntry struct {
 }
 
 type viewerContribution struct {
-	Key                   string             `json:"key"`
-	UID                   int64              `json:"uid,omitempty"`
-	Uname                 string             `json:"uname"`
-	Avatar                string             `json:"avatar,omitempty"`
-	GiftCount             int                `json:"giftCount"`
-	GoldValue             float64            `json:"goldValue"`
-	SilverValue           float64            `json:"silverValue"`
-	RuleTriggers          int                `json:"ruleTriggers"`
-	AttributeDeltas       map[string]float64 `json:"attributeDeltas"`
-	BlindBoxCount         int                `json:"blindBoxCount"`
-	BlindBoxCost          float64            `json:"blindBoxCost"`
-	BlindBoxValue         float64            `json:"blindBoxValue"`
-	BlindBoxProfit        float64            `json:"blindBoxProfit"`
-	UnpricedBlindBoxCount int                `json:"unpricedBlindBoxCount,omitempty"`
-	LastGiftAt            int64              `json:"lastGiftAt"`
+	Key                   string                 `json:"key"`
+	UID                   int64                  `json:"uid,omitempty"`
+	Uname                 string                 `json:"uname"`
+	Avatar                string                 `json:"avatar,omitempty"`
+	GiftCount             int                    `json:"giftCount"`
+	GoldValue             float64                `json:"goldValue"`
+	SilverValue           float64                `json:"silverValue"`
+	RuleTriggers          int                    `json:"ruleTriggers"`
+	AttributeDeltas       map[string]float64     `json:"attributeDeltas"`
+	BlindBoxCount         int                    `json:"blindBoxCount"`
+	BlindBoxCost          float64                `json:"blindBoxCost"`
+	BlindBoxValue         float64                `json:"blindBoxValue"`
+	BlindBoxProfit        float64                `json:"blindBoxProfit"`
+	UnpricedBlindBoxCount int                    `json:"unpricedBlindBoxCount,omitempty"`
+	BlindBoxes            []blindBoxContribution `json:"blindBoxes,omitempty"`
+	LastGiftAt            int64                  `json:"lastGiftAt"`
+}
+
+type blindBoxContribution struct {
+	GiftID        int     `json:"giftId"`
+	GiftName      string  `json:"giftName"`
+	Count         int     `json:"count"`
+	Cost          float64 `json:"cost"`
+	Value         float64 `json:"value"`
+	Profit        float64 `json:"profit"`
+	UnpricedCount int     `json:"unpricedCount,omitempty"`
+	LastGiftAt    int64   `json:"lastGiftAt"`
 }
 
 type contributionLedgerState struct {
