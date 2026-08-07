@@ -603,8 +603,11 @@ func (s *configStore) replaceClientState(state appState) (clientStateReplaceResu
 	}
 	if roomSwitchRequiresRecordReset(previous.RoomID, state.RoomID) {
 		clearRoomScopedRecords(&state)
-	} else if previous.Contributions.UpdatedAt > state.Contributions.UpdatedAt {
-		state.Contributions = previous.Contributions
+	} else {
+		preserveGiftTargetProgress(previous.GiftKPIPanels, state.GiftKPIPanels)
+		if previous.Contributions.UpdatedAt > state.Contributions.UpdatedAt {
+			state.Contributions = previous.Contributions
+		}
 	}
 	normalizeAppState(&state)
 	if err := s.persistStateLocked(previous, state, previousErr != nil); err != nil {
@@ -633,8 +636,13 @@ func (s *configStore) patchClientState(fields map[string]json.RawMessage) (clien
 	}
 	if roomSwitchRequiresRecordReset(previous.RoomID, state.RoomID) {
 		clearRoomScopedRecords(&state)
-	} else if _, changed := fields["contributions"]; changed && previousContributions.UpdatedAt > state.Contributions.UpdatedAt {
-		state.Contributions = previousContributions
+	} else {
+		if _, changed := fields["giftKpiPanels"]; changed {
+			preserveGiftTargetProgress(previous.GiftKPIPanels, state.GiftKPIPanels)
+		}
+		if _, changed := fields["contributions"]; changed && previousContributions.UpdatedAt > state.Contributions.UpdatedAt {
+			state.Contributions = previousContributions
+		}
 	}
 	normalizeAppState(&state)
 	if err := validateAppState(state); err != nil {

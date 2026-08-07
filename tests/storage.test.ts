@@ -295,7 +295,7 @@ describe('storage', () => {
     expect(loadState().roomId).toBe('new-room');
   });
 
-  it('exports only configuration and gift metadata referenced by rules', () => {
+  it('exports only configuration and referenced gift metadata without runtime progress', () => {
     const state = defaultState();
     state.rules = [{ id: 'r1', giftId: 1, matchGiftIds: [2], attributeName: '积分', formula: '积分+1' }];
     state.giftCatalog = [
@@ -307,15 +307,42 @@ describe('storage', () => {
     state.log = [{ time: 1, giftId: 1, giftName: '父礼物', num: 1, uname: '观众', attributeName: '积分', delta: 1, valueAfter: 1, ruleId: 'r1' }];
     state.stats = { today: { date: 'today', giftTotals: { 1: 1 }, ruleTriggers: { r1: 1 } } };
     state.contributions = { viewers: [{ key: 'uid:1', uid: 1, uname: '观众', giftCount: 1, goldValue: 100, silverValue: 0, ruleTriggers: 1, attributeDeltas: { 积分: 1 }, blindBoxCount: 0, blindBoxCost: 0, blindBoxValue: 0, blindBoxProfit: 0, lastGiftAt: 1 }] };
+    state.giftKpiPanels = [{
+      id: 'target-1', name: '本场目标', layout: 'grid',
+      items: [{ giftId: 2, giftName: '子礼物', imageUrl: '2.png', target: 10, received: 7, barStyle: 'progress' }],
+      appearance: { ...state.blindBoxDisplay },
+    }];
 
     const backup = createConfigBackup(state);
 
-    expect(backup.schemaVersion).toBe(3);
+    expect(backup.schemaVersion).toBe(4);
     expect(backup.giftCatalog.map((gift) => gift.id)).toEqual([1, 2]);
+    expect(backup.giftKpiPanels[0].items[0]).not.toHaveProperty('received');
     expect(backup).not.toHaveProperty('recentGifts');
     expect(backup).not.toHaveProperty('stats');
     expect(backup).not.toHaveProperty('log');
     expect(backup).not.toHaveProperty('contributions');
+  });
+
+  it('imports gift target definitions without replacing local progress', () => {
+    const current = defaultState();
+    current.giftKpiPanels = [{
+      id: 'target-1', name: '旧名称', layout: 'grid',
+      items: [{ giftId: 1, giftName: '小花花', imageUrl: '', target: 10, received: 7, barStyle: 'progress' }],
+      appearance: { ...current.blindBoxDisplay },
+    }];
+
+    const merged = mergeConfigBackup(current, {
+      schemaVersion: 4,
+      giftKpiPanels: [{
+        id: 'target-1', name: '新名称', layout: 'stack',
+        items: [{ giftId: 1, giftName: '小花花', imageUrl: '', target: 30, barStyle: 'health' }],
+        appearance: { ...current.blindBoxDisplay },
+      }],
+    });
+
+    expect(merged.giftKpiPanels[0].name).toBe('新名称');
+    expect(merged.giftKpiPanels[0].items[0]).toEqual(expect.objectContaining({ target: 30, received: 7 }));
   });
 
   it('imports legacy full backups without replacing local history', () => {

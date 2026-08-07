@@ -9,10 +9,26 @@ import {
   getUpdateStatus,
   logoutBiliAuth,
   pollBiliQRCodeLogin,
+  resetGiftTargetProgress,
   startBiliQRCodeLogin,
   startPagePresence,
   transitionActivity,
 } from '../src/backend';
+
+describe('gift target progress API', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('clears one backend-owned target panel', async () => {
+    const progress = { panelId: 'target 1', items: [{ giftId: 1, received: 0 }] };
+    const fetchMock = vi.fn(async () => Response.json({ code: 0, progress }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(resetGiftTargetProgress('target 1')).resolves.toEqual(progress);
+    expect(fetchMock).toHaveBeenCalledWith('/api/gift-targets/progress?panelId=target%201', {
+      method: 'DELETE', cache: 'no-store',
+    });
+  });
+});
 
 describe('contribution ledger API', () => {
   afterEach(() => vi.unstubAllGlobals());

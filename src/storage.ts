@@ -8,9 +8,10 @@ import {
   normalizeDisplayAppearance,
   normalizeGiftTargetLayout,
 } from './output-config';
+import { giftTargetPanelConfig, mergeGiftTargetPanelConfigs, type GiftTargetPanelConfig } from './gift-targets';
 
 const CONFIG_ENDPOINT = '/api/config';
-const CONFIG_BACKUP_SCHEMA_VERSION = 3;
+const CONFIG_BACKUP_SCHEMA_VERSION = 4;
 const STATE_FIELD_KEYS = [
   'roomId',
   'attributes',
@@ -35,13 +36,12 @@ type ConfigBackupFields = Pick<AppState,
   | 'attributes'
   | 'displayScenes'
   | 'blindBoxDisplay'
-  | 'giftKpiPanels'
   | 'activities'
   | 'rules'
   | 'timerRules'
   | 'formulaPresets'
   | 'settings'
-  | 'giftCatalog'>;
+  | 'giftCatalog'> & { giftKpiPanels: GiftTargetPanelConfig[] };
 
 export type ConfigBackup = ConfigBackupFields & { schemaVersion: number };
 
@@ -198,7 +198,11 @@ async function persistStateToServer(snapshots: StateFieldSnapshots): Promise<voi
 
 function snapshotStateFields(state: AppState): StateFieldSnapshots {
   const snapshots = {} as StateFieldSnapshots;
-  for (const key of STATE_FIELD_KEYS) snapshots[key] = JSON.stringify(state[key]);
+  for (const key of STATE_FIELD_KEYS) {
+    snapshots[key] = JSON.stringify(key === 'giftKpiPanels'
+      ? state.giftKpiPanels.map(giftTargetPanelConfig)
+      : state[key]);
+  }
   return snapshots;
 }
 
@@ -219,7 +223,7 @@ export function createConfigBackup(state: AppState): ConfigBackup {
     attributes: state.attributes,
     displayScenes: state.displayScenes,
     blindBoxDisplay: state.blindBoxDisplay,
-    giftKpiPanels: state.giftKpiPanels,
+    giftKpiPanels: state.giftKpiPanels.map(giftTargetPanelConfig),
     activities: state.activities,
     rules: state.rules,
     timerRules: state.timerRules,
@@ -236,7 +240,7 @@ export function mergeConfigBackup(current: AppState, input: unknown): AppState {
   if (schemaVersion > CONFIG_BACKUP_SCHEMA_VERSION) {
     throw new Error('配置来自更新版本，请先更新程序再导入');
   }
-  for (const key of ['attributes', 'displayScenes', 'activities', 'rules', 'timerRules', 'formulaPresets', 'giftCatalog'] as const) {
+  for (const key of ['attributes', 'displayScenes', 'giftKpiPanels', 'activities', 'rules', 'timerRules', 'formulaPresets', 'giftCatalog'] as const) {
     if (input[key] !== undefined && !Array.isArray(input[key])) throw new Error(`配置字段 ${key} 格式不正确`);
   }
   if (input.settings !== undefined && !isObjectRecord(input.settings)) throw new Error('配置字段 settings 格式不正确');
@@ -261,7 +265,9 @@ export function mergeConfigBackup(current: AppState, input: unknown): AppState {
     ...(parsed.attributes !== undefined ? { attributes: parsed.attributes } : {}),
     ...(parsed.displayScenes !== undefined ? { displayScenes: parsed.displayScenes } : {}),
     ...(parsed.blindBoxDisplay !== undefined ? { blindBoxDisplay: parsed.blindBoxDisplay } : {}),
-    ...(parsed.giftKpiPanels !== undefined ? { giftKpiPanels: parsed.giftKpiPanels } : {}),
+    ...(parsed.giftKpiPanels !== undefined ? {
+      giftKpiPanels: mergeGiftTargetPanelConfigs(current.giftKpiPanels, parsed.giftKpiPanels),
+    } : {}),
     ...(parsed.activities !== undefined ? { activities: parsed.activities } : {}),
     ...(parsed.rules !== undefined ? { rules: parsed.rules } : {}),
     ...(parsed.timerRules !== undefined ? { timerRules: parsed.timerRules } : {}),

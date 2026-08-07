@@ -1,6 +1,7 @@
 import type { ActivitySession, ContributionLedger, GiftInfo } from './types';
 import type { ActivityTransitionAction } from './activities';
 import { normalizeChangelogReleases, type ChangelogRelease } from './changelog';
+import type { GiftTargetProgressSnapshot } from './gift-targets';
 
 export type RuntimeConnectionState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
 
@@ -132,6 +133,12 @@ interface ActivityTransitionResponse {
 interface ContributionResponse {
   code: number;
   contributions?: ContributionLedger;
+  message?: string;
+}
+
+interface GiftTargetProgressResponse {
+  code: number;
+  progress?: GiftTargetProgressSnapshot;
   message?: string;
 }
 
@@ -289,4 +296,16 @@ export async function clearContributionLedger(): Promise<ContributionLedger> {
     throw new Error(payload.message || `排行榜清空失败：HTTP ${response.status}`);
   }
   return payload.contributions;
+}
+
+export async function resetGiftTargetProgress(panelId: string): Promise<GiftTargetProgressSnapshot> {
+  const response = await fetch(`/api/gift-targets/progress?panelId=${encodeURIComponent(panelId)}`, {
+    method: 'DELETE',
+    cache: 'no-store',
+  });
+  const payload = await response.json() as GiftTargetProgressResponse;
+  if (!response.ok || payload.code !== 0 || !payload.progress) {
+    throw new Error(payload.message || `礼物目标清零失败：HTTP ${response.status}`);
+  }
+  return payload.progress;
 }

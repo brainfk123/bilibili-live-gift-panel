@@ -13,7 +13,7 @@ import (
 // Every persisted shard has its own version. Missing versions are treated as
 // legacy version 0, while newer versions are rejected so an older executable
 // cannot silently discard fields it does not understand.
-const stateShardSchemaVersion = 5
+const stateShardSchemaVersion = 6
 
 type unsupportedStateVersionError struct {
 	Shard   string
@@ -46,9 +46,10 @@ type cacheStateShard struct {
 
 type historyStateShard struct {
 	// This version also governs the event schema used by events.log.
-	SchemaVersion int                     `json:"schemaVersion"`
-	Stats         map[string]dayStats     `json:"stats"`
-	Contributions contributionLedgerState `json:"contributions"`
+	SchemaVersion      int                     `json:"schemaVersion"`
+	Stats              map[string]dayStats     `json:"stats"`
+	Contributions      contributionLedgerState `json:"contributions"`
+	GiftTargetProgress giftTargetProgressState `json:"giftTargetProgress"`
 }
 
 func configShardFromState(state appState) configStateShard {
@@ -58,7 +59,7 @@ func configShardFromState(state appState) configStateShard {
 		Attributes:      state.Attributes,
 		DisplayScenes:   state.DisplayScenes,
 		BlindBoxDisplay: state.BlindBoxDisplay,
-		GiftKPIPanels:   state.GiftKPIPanels,
+		GiftKPIPanels:   giftTargetConfigPanels(state.GiftKPIPanels),
 		Activities:      state.Activities,
 		Rules:           state.Rules,
 		TimerRules:      state.TimerRules,
@@ -77,9 +78,10 @@ func cacheShardFromState(state appState) cacheStateShard {
 
 func historyShardFromState(state appState) historyStateShard {
 	return historyStateShard{
-		SchemaVersion: stateShardSchemaVersion,
-		Stats:         state.Stats,
-		Contributions: state.Contributions,
+		SchemaVersion:      stateShardSchemaVersion,
+		Stats:              state.Stats,
+		Contributions:      state.Contributions,
+		GiftTargetProgress: giftTargetProgressFromPanels(state.GiftKPIPanels),
 	}
 }
 
@@ -175,6 +177,7 @@ func (s *configStore) readStateLocked() (appState, error) {
 		}
 		state.Stats = history.Stats
 		state.Contributions = history.Contributions
+		applyGiftTargetProgress(state.GiftKPIPanels, history.GiftTargetProgress)
 	}
 
 	eventLog, eventLogExists, err := readEventLog(s.eventLogPath())

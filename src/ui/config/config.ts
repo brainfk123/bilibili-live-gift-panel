@@ -21,9 +21,17 @@ import {
   previewFormula,
   RuntimeConnectionState,
   RoomAnchorInfo,
+  resetGiftTargetProgress,
   startBiliQRCodeLogin,
   UpdateStatus,
 } from '../../backend';
+import {
+  applyGiftTargetProgressSnapshot,
+  giftTargetPanelConfig,
+  giftTargetProgressSignature,
+  mergeGiftTargetPanelConfigs,
+  type GiftTargetItemConfig,
+} from '../../gift-targets';
 import { createBrandIcon } from '../brand';
 import {
   getTutorialLesson,
@@ -462,6 +470,7 @@ export function mountConfig(root: HTMLElement): void {
       const previousActivities = activityStateSignature(state);
       const previousContributions = contributionStateSignature(state);
       const previousGiftHistory = giftHistoryStateSignature(state);
+      const previousGiftTargetProgress = giftTargetProgressSignature(state.giftKpiPanels);
       const requestedVersion = localStateVersion;
       const nextState = await refreshStateFromServer(() => requestedVersion === localStateVersion);
       if (requestedVersion !== localStateVersion) return;
@@ -485,6 +494,7 @@ export function mountConfig(root: HTMLElement): void {
         return;
       }
       if (activityStateSignature(state) !== previousActivities) renderActivities(true);
+      if (giftTargetProgressSignature(state.giftKpiPanels) !== previousGiftTargetProgress) renderGiftKpiPanels(true);
       syncLiveAttributeValues();
       if (contributionStateSignature(state) !== previousContributions) renderContributionLeaderboard(true);
       if (giftHistoryStateSignature(state) !== previousGiftHistory) renderGiftHistory(true);
@@ -1833,7 +1843,7 @@ export function mountConfig(root: HTMLElement): void {
     root.append(overlay);
   }
 
-  function renderGiftKpiPanels(): void {
+  function renderGiftKpiPanels(replaceExisting = false): void {
     const section = el('section', { class: 'gift-kpi-config-section' });
     const add = el('button', { class: 'btn', type: 'button', text: '+ 新建目标面板' }) as HTMLButtonElement;
     add.onclick = () => openGiftKpiEditor();
@@ -1853,8 +1863,11 @@ export function mountConfig(root: HTMLElement): void {
         edit.onclick = () => openGiftKpiEditor(index);
         const clear = el('button', { class: 'btn ghost text-danger', type: 'button', text: '清零' }) as HTMLButtonElement;
         bindTwoStepDelete(clear, () => {
-          panel.items = panel.items.map((item) => ({ ...item, received: 0 }));
-          save(); render(); toast('礼物目标当前数量已清零', root);
+          void resetGiftTargetProgress(panel.id).then((progress) => {
+            applyGiftTargetProgressSnapshot(panel, progress);
+            renderGiftKpiPanels(true);
+            toast('礼物目标当前数量已清零', root);
+          }).catch((error) => toast(error instanceof Error ? error.message : '礼物目标清零失败', root));
         });
         const remove = el('button', { class: 'btn text-danger', type: 'button', text: '删除' }) as HTMLButtonElement;
         bindTwoStepDelete(remove, () => { state.giftKpiPanels.splice(index, 1); save(); render(); });
@@ -1894,12 +1907,12 @@ export function mountConfig(root: HTMLElement): void {
       });
       section.append(grid);
     }
-    content.append(section);
+    appendOrReplaceSection(section, '.gift-kpi-config-section', replaceExisting);
   }
 
   function openGiftKpiEditor(index?: number): void {
     const original = index === undefined ? undefined : state.giftKpiPanels[index];
-    let items = original?.items.map((item) => ({ ...item })) ?? [];
+    let items: GiftTargetItemConfig[] = original?.items.map(({ received: _received, ...item }) => ({ ...item })) ?? [];
     let layout: GiftKpiLayout = original?.layout ?? 'grid';
     const appearance = normalizeDisplayAppearance(original?.appearance, state.settings);
     const overlay = el('div', { class: 'overlay gift-kpi-editor-overlay' });
@@ -1963,7 +1976,7 @@ export function mountConfig(root: HTMLElement): void {
           disabled: !selected && items.length >= 12,
           onToggle: () => {
             if (selected) items = items.filter((item) => item.giftId !== gift.id);
-            else items.push({ giftId: gift.id, giftName: gift.name, imageUrl: gift.imgBasic, target: 50, received: 0, barStyle: 'progress' });
+            else items.push({ giftId: gift.id, giftName: gift.name, imageUrl: gift.imgBasic, target: 50, barStyle: 'progress' });
             renderItems();
             renderGiftChoices();
           },
@@ -2004,7 +2017,11 @@ export function mountConfig(root: HTMLElement): void {
     const saveButton = el('button', { class: 'btn', type: 'button', text: original ? '保存修改' : '创建面板' }) as HTMLButtonElement;
     saveButton.onclick = async () => {
       if (!name.value.trim() || items.length === 0) { toast('请填写名称并至少选择一种礼物', root); return; }
-      const next: GiftKpiPanel = { id: original?.id ?? `kpi-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`, name: name.value.trim(), layout, items, appearance: { ...appearance } };
+      const configured = {
+        id: original?.id ?? `kpi-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`,
+        name: name.value.trim(), layout, items, appearance: { ...appearance },
+      };
+      const next: GiftKpiPanel = mergeGiftTargetPanelConfigs(original ? [original] : [], [configured])[0];
       if (index === undefined) state.giftKpiPanels.push(next); else state.giftKpiPanels[index] = next;
       await saveAndWait(); close(); render();
     };
@@ -4764,7 +4781,7 @@ function configStructureSignature(state: AppState): string {
     roomId: state.roomId,
     attributes: state.attributes.map(({ value: _value, ...attribute }) => attribute),
     displayScenes: state.displayScenes,
-    giftKpiPanels: state.giftKpiPanels,
+    giftKpiPanels: state.giftKpiPanels.map(giftTargetPanelConfig),
     rules: state.rules,
     timerRules: state.timerRules,
     formulaPresets: state.formulaPresets,

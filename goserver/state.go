@@ -71,7 +71,7 @@ type giftKPIItemState struct {
 	GiftName string `json:"giftName"`
 	ImageURL string `json:"imageUrl,omitempty"`
 	Target   int    `json:"target"`
-	Received int    `json:"received"`
+	Received int    `json:"received,omitempty"`
 	BarStyle string `json:"barStyle"`
 }
 

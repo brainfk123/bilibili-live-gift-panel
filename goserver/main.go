@@ -222,6 +222,7 @@ func main() {
 	mux.HandleFunc("/api/room/anchor", newRoomAnchorHandler(login.roomOwnerUID, background.profileResolver))
 	mux.HandleFunc("/api/config", store.handle)
 	mux.HandleFunc("/api/contributions", handleContributionLedger(store))
+	mux.HandleFunc("/api/gift-targets/progress", handleGiftTargetProgress(store))
 	mux.HandleFunc("/api/formula/preview", handleFormulaPreview(store))
 	mux.HandleFunc("/api/activities/transition", handleActivityTransition(store))
 	mux.HandleFunc("/api/blind-box", handleBlindBoxInfo(login))
