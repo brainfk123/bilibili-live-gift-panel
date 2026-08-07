@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CONFIG_PAGES,
   configPageForSelector,
   configPageForTutorialLesson,
   configPageSearch,
@@ -31,5 +32,11 @@ describe('config page routing', () => {
     expect(configPageForSelector('.display-scenes-section')).toBe('obs');
     expect(configPageForSelector('.activity-workspace-section')).toBe('activities');
     expect(configPageForSelector('.contribution-section')).toBe('data');
+  });
+
+  it('owns overview and OBS hub sections and exposes the gift target name', () => {
+    expect(configPageForSelector('.overview-dashboard')).toBe('overview');
+    expect(configPageForSelector('.obs-panel-hub')).toBe('obs');
+    expect(CONFIG_PAGES.find((page) => page.id === 'kpi')?.label).toBe('礼物目标');
   });
 });

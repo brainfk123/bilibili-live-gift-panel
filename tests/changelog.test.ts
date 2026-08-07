@@ -13,7 +13,7 @@ describe('versioned changelog', () => {
   it('keeps the latest release first and resolves v-prefixed versions', () => {
     expect(latestChangelogRelease()).toBe(CHANGELOG_RELEASES[0]);
     expect(normalizeChangelogVersion(' v0.2.3 ')).toBe('0.2.3');
-    expect(changelogReleaseForVersion('v0.2.3')?.title).toBe('礼物 KPI 与多盲盒统计');
+    expect(changelogReleaseForVersion('v0.2.3')?.title).toBe('礼物目标与多盲盒统计');
   });
 
   it('opens once for a known installed version and ignores development builds', () => {

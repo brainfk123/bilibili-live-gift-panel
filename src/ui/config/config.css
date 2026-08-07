@@ -1614,6 +1614,200 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 .config-root .config-page > [hidden] { display: none !important; }
 .config-root .config-page { display: grid; gap: 22px; }
+.config-root .overview-dashboard,
+.config-root .obs-panel-hub {
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 18px;
+  padding: 22px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 72%, transparent), transparent 48%), var(--card);
+  box-shadow: var(--shadow);
+}
+.config-root .overview-dashboard-heading,
+.config-root .obs-panel-hub-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 22px;
+  margin-bottom: 17px;
+}
+.config-root .overview-dashboard-heading .section-heading,
+.config-root .obs-panel-hub-heading .section-heading { max-width: 760px; }
+.config-root .overview-runtime-badge,
+.config-root .obs-panel-count {
+  flex: 0 0 auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 7px 11px;
+  background: var(--input-bg);
+  color: var(--text-dim);
+  font-size: var(--type-meta);
+  font-weight: 700;
+  white-space: nowrap;
+}
+.config-root .overview-runtime-badge.is-connected {
+  border-color: color-mix(in srgb, var(--success) 55%, var(--border));
+  color: var(--success-text);
+}
+.config-root .overview-runtime-badge.is-connecting,
+.config-root .overview-runtime-badge.is-reconnecting { color: var(--warning-text); }
+.config-root .overview-runtime-badge.is-error { color: var(--danger-text); }
+.config-root .overview-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.config-root .overview-summary-card {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 88px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 13px 14px;
+  background: color-mix(in srgb, var(--input-bg) 92%, transparent);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: border-color .16s ease, background .16s ease, transform .16s ease;
+}
+.config-root .overview-summary-card:hover,
+.config-root .overview-summary-card:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 64%, var(--border));
+  outline: 0;
+  background: linear-gradient(120deg, var(--accent-soft), transparent 84%), var(--input-bg);
+  transform: translateY(-2px);
+}
+.config-root .overview-summary-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 46%, var(--border));
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: var(--type-title);
+  font-weight: 800;
+}
+.config-root .overview-summary-copy,
+.config-root .overview-summary-copy small,
+.config-root .overview-summary-copy strong,
+.config-root .overview-summary-copy span { display: block; min-width: 0; }
+.config-root .overview-summary-copy small { color: var(--text-dim); font-size: 11px; font-weight: 700; }
+.config-root .overview-summary-copy strong { margin-top: 1px; font-size: var(--type-title); line-height: 1.25; }
+.config-root .overview-summary-copy span {
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: var(--type-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.config-root .overview-summary-arrow { color: var(--accent-text); font-size: var(--type-title); }
+.config-root .overview-dashboard-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+.config-root .overview-live-summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-dim);
+  font-size: var(--type-meta);
+}
+.config-root .overview-live-summary span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.config-root .overview-live-summary i { width: 1px; height: 14px; flex: 0 0 auto; background: var(--border-strong); }
+.config-root .overview-data-button { flex: 0 0 auto; }
+
+.config-root .obs-panel-hub { display: grid; gap: 0; }
+.config-root .obs-panel-hub-heading { margin-bottom: 2px; }
+.config-root .obs-panel-count { color: var(--accent-text); }
+.config-root .obs-output-group { min-width: 0; padding-top: 18px; }
+.config-root .obs-output-group + .obs-output-group {
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+}
+.config-root .obs-output-group-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 10px;
+}
+.config-root .obs-output-group-heading h3 { color: var(--text); font-size: var(--type-title); }
+.config-root .obs-output-group-heading p { color: var(--text-dim); font-size: var(--type-meta); text-align: right; }
+.config-root .obs-output-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(390px, 100%), 1fr));
+  gap: 10px;
+}
+.config-root .obs-output-card {
+  display: grid;
+  grid-template-columns: 44px minmax(120px, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 11px 12px;
+  background: var(--input-bg);
+}
+.config-root .obs-output-card-icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: 11px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: var(--type-title);
+  font-weight: 800;
+}
+.config-root .obs-output-card-icon.has-image { background: color-mix(in srgb, var(--accent-soft) 68%, transparent); }
+.config-root .obs-output-card-icon img {
+  display: block;
+  width: 38px;
+  height: 38px;
+  object-fit: contain;
+  filter: drop-shadow(0 3px 4px rgb(0 0 0 / 24%));
+}
+.config-root .obs-output-card-copy { display: block; min-width: 0; }
+.config-root .obs-output-card-copy strong,
+.config-root .obs-output-card-copy span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.config-root .obs-output-card-copy strong { color: var(--text); font-size: var(--type-body); }
+.config-root .obs-output-card-copy span { margin-top: 3px; color: var(--text-dim); font-size: var(--type-meta); }
+.config-root .obs-output-card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.config-root .obs-output-card-actions .btn { min-height: 34px; padding: 6px 10px; font-size: var(--type-meta); white-space: nowrap; }
+.config-root .obs-output-empty {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 13px;
+  padding: 13px 14px;
+  color: var(--text-dim);
+  background: var(--input-bg);
+  font-size: var(--type-meta);
+}
 .config-root .config-intro {
   display: flex;
   align-items: flex-end;
@@ -3912,6 +4106,7 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .config-sidebar-note { display: none; }
   .config-root .config-intro { align-items: stretch; flex-direction: column; }
   .config-root .config-summary { min-width: 0; }
+  .config-root .obs-output-grid { grid-template-columns: 1fr; }
   .config-root .attribute-basics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .config-root .gift-picker-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .config-root .rule-editor-fields,
@@ -3947,11 +4142,22 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .program-settings-body .data-settings-card { padding: 18px; }
   .config-root .connection-grid { grid-template-columns: 1fr; }
   .config-root .config-intro,
+  .config-root .overview-dashboard,
+  .config-root .obs-panel-hub,
   .config-root .attributes-section,
   .config-root .contribution-section,
   .config-root .gift-history-section { padding: 18px; }
   .config-root .attributes-heading-row { align-items: stretch; flex-direction: column; }
   .config-root .display-scenes-heading { align-items: stretch; flex-direction: column; }
+  .config-root .overview-dashboard-heading,
+  .config-root .obs-panel-hub-heading,
+  .config-root .obs-output-group-heading { align-items: flex-start; flex-direction: column; gap: 9px; }
+  .config-root .overview-summary-grid { grid-template-columns: 1fr; }
+  .config-root .overview-dashboard-footer { align-items: flex-start; flex-direction: column; }
+  .config-root .obs-output-group-heading p { text-align: left; }
+  .config-root .obs-output-card { grid-template-columns: 44px minmax(0, 1fr); }
+  .config-root .obs-output-card-actions { grid-column: 1 / -1; justify-content: flex-start; padding-top: 3px; }
+  .config-root .obs-output-empty { align-items: flex-start; flex-direction: column; }
   .config-root .activity-workspace-heading { align-items: stretch; flex-direction: column; }
   .config-root .contribution-heading-main { align-items: flex-start; flex-direction: column; gap: 10px; }
   .config-root .contribution-heading-actions {

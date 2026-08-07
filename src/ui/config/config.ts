@@ -32,6 +32,7 @@ import {
   resetTutorialProgress,
   sectionForTutorialLesson,
   TUTORIAL_LESSONS,
+  type AttributeWorkspaceSection,
   type TutorialEditorProgress,
 } from './wizard';
 import { renderSpotlightGuide, type SpotlightGuideElement } from './spotlight-guide';
@@ -819,9 +820,11 @@ export function mountConfig(root: HTMLElement): void {
     activeGuide = null;
     content.replaceChildren();
     renderHeaderStatus();
+    renderOverviewDashboard();
     renderConnectionWorkspace();
     renderAttributesWorkspace();
     renderActivities();
+    renderObsPanelHub();
     renderDisplayScenes();
     renderGiftKpiPanels();
     renderContributionLeaderboard();
@@ -1831,26 +1834,26 @@ export function mountConfig(root: HTMLElement): void {
 
   function renderGiftKpiPanels(): void {
     const section = el('section', { class: 'gift-kpi-config-section' });
-    const add = el('button', { class: 'btn', type: 'button', text: '+ 新建 KPI 面板' }) as HTMLButtonElement;
+    const add = el('button', { class: 'btn', type: 'button', text: '+ 新建目标面板' }) as HTMLButtonElement;
     add.onclick = () => openGiftKpiEditor();
     section.append(el('div', { class: 'display-scenes-heading' }, [
-      sectionHeading('礼物目标', '礼物 KPI 面板', '直接统计指定礼物的收到数量，不依赖属性或礼物规则；需要时由主播手动清零。'),
+      sectionHeading('礼物玩法', '礼物目标', '直接统计指定礼物的收到数量，不依赖属性或礼物规则；需要时由主播手动清零。'),
       add,
     ]));
     if (state.giftKpiPanels.length === 0) {
-      section.append(emptyState('还没有 KPI 面板。创建后可为每种礼物设置独立目标和进度条样式。'));
+      section.append(emptyState('还没有礼物目标面板。创建后可为每种礼物设置独立目标和进度条样式。'));
     } else {
       const grid = el('div', { class: 'gift-kpi-config-grid' });
       state.giftKpiPanels.forEach((panel, index) => {
         const url = giftKpiDisplayUrl(location.origin, panel.id);
         const copy = el('button', { class: 'btn ghost', type: 'button', text: '复制 OBS 链接' }) as HTMLButtonElement;
-        copy.onclick = () => void navigator.clipboard.writeText(url).then(() => toast('KPI 面板链接已复制', root));
+        copy.onclick = () => void navigator.clipboard.writeText(url).then(() => toast('礼物目标链接已复制', root));
         const edit = el('button', { class: 'btn ghost', type: 'button', text: '编辑' }) as HTMLButtonElement;
         edit.onclick = () => openGiftKpiEditor(index);
         const clear = el('button', { class: 'btn ghost text-danger', type: 'button', text: '清零' }) as HTMLButtonElement;
         bindTwoStepDelete(clear, () => {
           panel.items = panel.items.map((item) => ({ ...item, received: 0 }));
-          save(); render(); toast('KPI 当前数量已清零', root);
+          save(); render(); toast('礼物目标当前数量已清零', root);
         });
         const remove = el('button', { class: 'btn text-danger', type: 'button', text: '删除' }) as HTMLButtonElement;
         bindTwoStepDelete(remove, () => { state.giftKpiPanels.splice(index, 1); save(); render(); });
@@ -1864,7 +1867,7 @@ export function mountConfig(root: HTMLElement): void {
         const meta = `${panel.items.length} 种礼物 · ${panel.layout === 'grid' ? '信息网格' : panel.layout === 'dashboard' ? '主辅仪表盘' : '纵向清单'}`;
         const previewItems = panel.items.slice(0, 3);
         const previewLayout = previewItems.length > 1 ? ' has-multiple' : '';
-        const cover = el('div', { class: 'gift-kpi-card-cover summary-card-cover hover-detail-cover', title: '悬停查看 KPI 面板详情' }, [
+        const cover = el('div', { class: 'gift-kpi-card-cover summary-card-cover hover-detail-cover', title: '悬停查看礼物目标详情' }, [
           el('div', { class: `gift-kpi-card-visual summary-card-visual${previewLayout}` }, previewItems.map((item) => (
             item.imageUrl
               ? el('img', { class: 'gift-kpi-card-preview-image summary-card-cover-image', src: item.imageUrl, alt: `${item.giftName}图标`, referrerPolicy: 'no-referrer' })
@@ -1882,7 +1885,7 @@ export function mountConfig(root: HTMLElement): void {
         ]);
         const card = el('article', {
           class: 'gift-kpi-config-card hover-detail-card', tabIndex: 0,
-          ariaLabel: `礼物 KPI 面板“${panel.name}”，${panel.items.length} 种礼物。悬停或聚焦查看详细设置。`,
+          ariaLabel: `礼物目标面板“${panel.name}”，${panel.items.length} 种礼物。悬停或聚焦查看详细设置。`,
         } as any);
         card.append(cover, details);
         bindFloatingDetailCard(card, cover, { panelWidth: 480, estimatedPanelHeight: 430 });
@@ -1899,12 +1902,12 @@ export function mountConfig(root: HTMLElement): void {
     let layout: GiftKpiLayout = original?.layout ?? 'grid';
     const appearance = cloneDisplayAppearance(original?.appearance);
     const overlay = el('div', { class: 'overlay gift-kpi-editor-overlay' });
-    const dialog = el('section', { class: 'card gift-kpi-editor', role: 'dialog', ariaLabel: original ? '编辑礼物 KPI 面板' : '新建礼物 KPI 面板' } as any);
+    const dialog = el('section', { class: 'card gift-kpi-editor', role: 'dialog', ariaLabel: original ? '编辑礼物目标面板' : '新建礼物目标面板' } as any);
     const close = (): void => { overlay.remove(); };
     const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×' }) as HTMLButtonElement;
     closeButton.onclick = close;
-    const name = inputField('面板名称', original?.name ?? '本场礼物 KPI');
-    const layoutSelect = el('select', { class: 'field-input', ariaLabel: 'KPI 面板排版' } as any) as HTMLSelectElement;
+    const name = inputField('面板名称', original?.name ?? '本场礼物目标');
+    const layoutSelect = el('select', { class: 'field-input', ariaLabel: '礼物目标面板排版' } as any) as HTMLSelectElement;
     [['grid', '信息网格'], ['stack', '纵向清单'], ['dashboard', '主辅仪表盘']].forEach(([value, label]) => layoutSelect.append(el('option', { value, text: label })));
     layoutSelect.value = layout;
     layoutSelect.onchange = () => { layout = layoutSelect.value as GiftKpiLayout; };
@@ -2004,7 +2007,7 @@ export function mountConfig(root: HTMLElement): void {
       if (index === undefined) state.giftKpiPanels.push(next); else state.giftKpiPanels[index] = next;
       await saveAndWait(); close(); render();
     };
-    dialog.append(el('header', { class: 'display-scene-dialog-header' }, [el('div', {}, [el('span', { class: 'section-kicker', text: '礼物 KPI' }), el('h2', { text: original ? '编辑 KPI 面板' : '创建 KPI 面板' }), el('p', { text: '直接按礼物累计；清零只影响这个面板。' })]), closeButton]),
+    dialog.append(el('header', { class: 'display-scene-dialog-header' }, [el('div', {}, [el('span', { class: 'section-kicker', text: '礼物目标' }), el('h2', { text: original ? '编辑目标面板' : '创建目标面板' }), el('p', { text: '直接按礼物累计；清零只影响这个面板。' })]), closeButton]),
       el('div', { class: 'gift-kpi-editor-body' }, [
         fieldControl(name),
         el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '排版' }), layoutSelect]),
@@ -2016,7 +2019,7 @@ export function mountConfig(root: HTMLElement): void {
         ]),
         giftSearch,
         giftChoices,
-        createDisplayAppearanceControl(appearance, '面板外观', '只影响这个 KPI 面板。'),
+        createDisplayAppearanceControl(appearance, '面板外观', '只影响这个礼物目标面板。'),
       ]),
       el('footer', { class: 'modal-actions' }, [el('button', { class: 'btn ghost', type: 'button', text: '取消', onclick: close }), saveButton]));
     overlay.append(dialog); root.append(overlay);
@@ -2512,7 +2515,7 @@ export function mountConfig(root: HTMLElement): void {
     ]);
   }
 
-  function openAttributeEditor(index?: number): void {
+  function openAttributeEditor(index?: number, initialSection: AttributeWorkspaceSection = 'overview'): void {
     activeGuide?.dispose();
     activeGuide = null;
     root.querySelector('.attribute-overlay')?.remove();
@@ -3761,7 +3764,7 @@ export function mountConfig(root: HTMLElement): void {
       trainingVisible: !guideDismissed && (editorGuideEnabled || forcedTutorialLesson !== null),
       initialSection: editorGuideEnabled || forcedTutorialLesson !== null
         ? sectionForTutorialLesson(activeTutorialLesson())
-        : 'overview',
+        : initialSection,
       onLessonClick: (lesson) => {
         forcedTutorialLesson = lesson;
         guideDismissed = false;
@@ -4154,6 +4157,179 @@ export function mountConfig(root: HTMLElement): void {
       el('p', { class: 'display-theme-description', text: description }),
       grid,
     ]);
+  }
+
+  function renderOverviewDashboard(): void {
+    const enabledGiftRules = state.rules.filter((rule) => rule.enabled !== false).length;
+    const enabledTimers = state.timerRules.filter((rule) => rule.enabled).length;
+    const activeActivity = state.activities.find((activity) => activity.status === 'active' || activity.status === 'locked');
+    const outputCount = state.attributes.length + state.displayScenes.length + state.giftKpiPanels.length + 1;
+    const section = el('section', { class: 'overview-dashboard' });
+    const heading = el('div', { class: 'overview-dashboard-heading' }, [
+      sectionHeading('工作台概览', '直播控制台', '先确认连接，再进入对应玩法或输出页面；关闭配置页不会中断后台监听。'),
+      el('span', {
+        class: `overview-runtime-badge is-${connectionState}`,
+        text: `${connectionState === 'connected' ? '●' : '○'} ${connectionLabel(connectionState)}`,
+      }),
+    ]);
+
+    const summaries: Array<{
+      page: ConfigPageId;
+      icon: string;
+      label: string;
+      value: string;
+      detail: string;
+    }> = [
+      {
+        page: 'attributes', icon: '◇', label: '属性玩法', value: `${state.attributes.length} 个`,
+        detail: `${enabledGiftRules} 条礼物规则 · ${enabledTimers} 个定时器启用`,
+      },
+      {
+        page: 'activities', icon: '⚑', label: '活动会话', value: `${state.activities.length} 个`,
+        detail: activeActivity ? `${activeActivity.name} · ${activeActivity.status === 'active' ? '进行中' : '已锁定'}` : '当前没有进行中的活动',
+      },
+      {
+        page: 'kpi', icon: '◎', label: '礼物目标', value: `${state.giftKpiPanels.length} 个`,
+        detail: `${state.giftKpiPanels.reduce((count, panel) => count + panel.items.length, 0)} 个礼物目标项`,
+      },
+      {
+        page: 'obs', icon: '▣', label: 'OBS 输出', value: `${outputCount} 个`,
+        detail: `${state.displayScenes.length} 个组合面板 · 含盲盒榜`,
+      },
+    ];
+    const summaryGrid = el('div', { class: 'overview-summary-grid' });
+    for (const summary of summaries) {
+      const button = el('button', { class: 'overview-summary-card', type: 'button' }) as HTMLButtonElement;
+      button.append(
+        el('span', { class: 'overview-summary-icon', text: summary.icon, ariaHidden: 'true' }),
+        el('span', { class: 'overview-summary-copy' }, [
+          el('small', { text: summary.label }),
+          el('strong', { text: summary.value }),
+          el('span', { text: summary.detail }),
+        ]),
+        el('span', { class: 'overview-summary-arrow', text: '→', ariaHidden: 'true' }),
+      );
+      button.onclick = () => navigateToPage(summary.page);
+      summaryGrid.append(button);
+    }
+
+    const roomSummary = state.roomId.trim() ? `房间 ${state.roomId.trim()}` : '尚未填写直播间';
+    const accountSummary = biliAuth.state === 'logged_in'
+      ? `${biliAuth.uname || `UID ${biliAuth.uid ?? ''}`}已登录`
+      : '当前为匿名模式';
+    const dataButton = el('button', { class: 'btn ghost overview-data-button', type: 'button', text: '查看数据中心' }) as HTMLButtonElement;
+    dataButton.onclick = () => navigateToPage('data');
+    section.append(
+      heading,
+      summaryGrid,
+      el('div', { class: 'overview-dashboard-footer' }, [
+        el('div', { class: 'overview-live-summary' }, [
+          el('span', { text: roomSummary }),
+          el('i', { ariaHidden: 'true' }),
+          el('span', { text: accountSummary }),
+        ]),
+        dataButton,
+      ]),
+    );
+    content.append(section);
+  }
+
+  function renderObsPanelHub(): void {
+    const section = el('section', { class: 'obs-panel-hub' });
+    const totalOutputs = state.attributes.length + state.displayScenes.length + state.giftKpiPanels.length + 1;
+    section.append(el('div', { class: 'obs-panel-hub-heading' }, [
+      sectionHeading('直播输出', 'OBS 面板中心', '集中管理所有独立链接；编辑仍回到对应玩法，避免出现两份配置。'),
+      el('span', { class: 'obs-panel-count', text: `${totalOutputs} 个可用链接` }),
+    ]));
+
+    const copyOutput = (url: string, label: string): void => {
+      void navigator.clipboard.writeText(url)
+        .then(() => toast(`${label} OBS 链接已复制`, root))
+        .catch(() => toast('复制失败，请检查剪贴板权限', root));
+    };
+    const createOutputCard = (
+      kind: string,
+      title: string,
+      meta: string,
+      actions: HTMLElement[],
+      visual?: HTMLElement,
+    ): HTMLElement => el('article', { class: `obs-output-card is-${kind}` }, [
+      visual ?? el('span', { class: 'obs-output-card-icon', text: kind === 'attribute' ? '◇' : kind === 'target' ? '◎' : '▥', ariaHidden: 'true' }),
+      el('div', { class: 'obs-output-card-copy' }, [el('strong', { text: title }), el('span', { text: meta })]),
+      el('div', { class: 'obs-output-card-actions' }, actions),
+    ]);
+
+    const appendGroup = (title: string, description: string, body: HTMLElement): void => {
+      section.append(el('section', { class: 'obs-output-group' }, [
+        el('div', { class: 'obs-output-group-heading' }, [
+          el('h3', { text: title }),
+          el('p', { text: description }),
+        ]),
+        body,
+      ]));
+    };
+
+    const attributeGrid = el('div', { class: 'obs-output-grid' });
+    if (state.attributes.length === 0) {
+      const create = el('button', { class: 'btn ghost', type: 'button', text: '前往创建属性' }) as HTMLButtonElement;
+      create.onclick = () => navigateToPage('attributes');
+      attributeGrid.append(el('div', { class: 'obs-output-empty' }, [el('span', { text: '创建属性后会自动生成单属性 OBS 链接。' }), create]));
+    } else {
+      state.attributes.forEach((attribute, index) => {
+        const url = `${location.origin}/?mode=display&attribute=${encodeURIComponent(attribute.name)}`;
+        const edit = el('button', { class: 'btn ghost', type: 'button', text: '编辑外观' }) as HTMLButtonElement;
+        edit.onclick = () => openAttributeEditor(index, 'output');
+        const copy = el('button', { class: 'btn', type: 'button', text: '复制链接' }) as HTMLButtonElement;
+        copy.onclick = () => copyOutput(url, `“${attribute.name}”`);
+        attributeGrid.append(createOutputCard(
+          'attribute',
+          attribute.display?.title?.trim() || attribute.name,
+          `${displayFormatLabel(attribute)} · 当前 ${formatValue(attribute.value, attribute)}`,
+          [edit, copy],
+        ));
+      });
+    }
+    appendGroup('单属性面板', '每个属性自动拥有一个独立链接。', attributeGrid);
+
+    const targetGrid = el('div', { class: 'obs-output-grid' });
+    if (state.giftKpiPanels.length === 0) {
+      const create = el('button', { class: 'btn ghost', type: 'button', text: '前往创建礼物目标' }) as HTMLButtonElement;
+      create.onclick = () => navigateToPage('kpi');
+      targetGrid.append(el('div', { class: 'obs-output-empty' }, [el('span', { text: '还没有礼物目标面板。' }), create]));
+    } else {
+      state.giftKpiPanels.forEach((panel, index) => {
+        const edit = el('button', { class: 'btn ghost', type: 'button', text: '编辑目标' }) as HTMLButtonElement;
+        edit.onclick = () => openGiftKpiEditor(index);
+        const copy = el('button', { class: 'btn', type: 'button', text: '复制链接' }) as HTMLButtonElement;
+        copy.onclick = () => copyOutput(giftKpiDisplayUrl(location.origin, panel.id), `“${panel.name}”`);
+        const firstItem = panel.items.find((item) => item.imageUrl);
+        const visual = firstItem
+          ? el('span', { class: 'obs-output-card-icon has-image' }, [el('img', { src: firstItem.imageUrl, alt: '', referrerPolicy: 'no-referrer' })])
+          : undefined;
+        targetGrid.append(createOutputCard(
+          'target', panel.name,
+          `${panel.items.length} 个礼物 · ${panel.layout === 'grid' ? '信息网格' : panel.layout === 'dashboard' ? '主辅仪表盘' : '纵向清单'}`,
+          [edit, copy], visual,
+        ));
+      });
+    }
+    appendGroup('礼物目标面板', '直接显示指定礼物的目标完成度。', targetGrid);
+
+    const leaderboardGrid = el('div', { class: 'obs-output-grid' });
+    const editLeaderboard = el('button', { class: 'btn ghost', type: 'button', text: '外观设置' }) as HTMLButtonElement;
+    editLeaderboard.onclick = openBlindBoxAppearanceEditor;
+    const viewLeaderboard = el('button', { class: 'btn ghost', type: 'button', text: '选择盲盒' }) as HTMLButtonElement;
+    viewLeaderboard.onclick = () => navigateToPage('data');
+    const copyLeaderboard = el('button', { class: 'btn', type: 'button', text: '复制链接' }) as HTMLButtonElement;
+    copyLeaderboard.onclick = () => copyOutput(blindBoxDisplayUrl(location.origin), '盲盒盈亏榜');
+    leaderboardGrid.append(createOutputCard(
+      'leaderboard', '盲盒盈亏榜',
+      `${biliAuth.state === 'logged_in' ? '登录能力已开启' : '依赖登录识别盲盒'} · 显示 ${state.blindBoxDisplay.viewerSlots} 个观众`,
+      [editLeaderboard, viewLeaderboard, copyLeaderboard],
+    ));
+    appendGroup('排行榜面板', '盲盒盈亏榜可在数据中心选择统计范围。', leaderboardGrid);
+
+    content.append(section);
   }
 
   function cloneDisplayAppearance(

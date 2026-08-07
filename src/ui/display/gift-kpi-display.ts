@@ -12,7 +12,7 @@ export function mountGiftKpiDisplay(root: HTMLElement, panelId?: string): void {
 
   const render = (panel?: GiftKpiPanel): void => {
     if (!panel) {
-      stack.replaceChildren(el('main', { class: 'panel gift-kpi-panel' }, [el('div', { class: 'display-empty', text: '找不到礼物 KPI 面板' })]));
+      stack.replaceChildren(el('main', { class: 'panel gift-kpi-panel' }, [el('div', { class: 'display-empty', text: '找不到礼物目标面板' })]));
       return;
     }
     const appearance = panel.appearance;
@@ -25,7 +25,7 @@ export function mountGiftKpiDisplay(root: HTMLElement, panelId?: string): void {
     card.dataset.theme = theme.id;
     card.style.setProperty('--theme-accent', theme.id === 'glass' ? appearance.accentColor : theme.accent);
     card.append(el('header', { class: 'gift-kpi-header' }, [
-      el('div', {}, [el('span', { text: '礼物 KPI' }), el('h1', { text: panel.name })]),
+      el('div', {}, [el('span', { text: '礼物目标' }), el('h1', { text: panel.name })]),
       el('strong', { text: `${panel.items.filter((item) => item.received >= item.target).length} / ${panel.items.length} 达成` }),
     ]));
     const list = el('div', { class: 'gift-kpi-list' });

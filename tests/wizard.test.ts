@@ -1608,7 +1608,7 @@ describe('single-page configuration rendering', () => {
     const dialog = root.querySelector('.changelog-dialog');
     expect(dialog).not.toBeNull();
     expect(textOf(dialog!)).toContain('这次更新了什么？');
-    expect(textOf(dialog!)).toContain('新增礼物 KPI 面板');
+    expect(textOf(dialog!)).toContain('新增礼物目标面板');
     expect(root.querySelectorAll('.changelog-visual')).toHaveLength(1);
     (root.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
 
