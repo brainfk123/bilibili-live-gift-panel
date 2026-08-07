@@ -1537,8 +1537,82 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .attribute-workbench-actions { padding-right: 14px; padding-left: 14px; }
 }
 
-/* Final single-page configuration workspace. */
-.config-root .config-shell { width: min(calc(100% - 48px), 1120px); }
+/* Route-driven configuration workspace. */
+.config-root .config-shell { width: min(calc(100% - 48px), 1440px); }
+.config-root .config-workspace-layout {
+  display: grid;
+  grid-template-columns: 218px minmax(0, 1fr);
+  align-items: start;
+  gap: 24px;
+}
+.config-root .config-sidebar {
+  position: sticky;
+  top: 18px;
+  z-index: 12;
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 19px;
+  background: color-mix(in srgb, var(--card) 96%, transparent);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+.config-root .config-navigation { display: grid; gap: 6px; }
+.config-root .config-nav-button {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: 13px;
+  color: var(--text-dim);
+  text-align: left;
+  background: transparent;
+  transition: border-color .16s ease, background .16s ease, color .16s ease, transform .16s ease;
+}
+.config-root .config-nav-button:hover {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  color: var(--text);
+  background: var(--bg-soft);
+  transform: translateX(2px);
+}
+.config-root .config-nav-button.is-active {
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
+  color: var(--text);
+  background: linear-gradient(120deg, var(--accent-soft), transparent 88%), var(--bg-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.config-root .config-nav-icon {
+  width: 24px;
+  height: 24px;
+  color: currentColor;
+  justify-self: center;
+}
+.config-root .config-nav-button.is-active .config-nav-icon { color: var(--accent-text); }
+.config-root .config-nav-copy,
+.config-root .config-nav-copy strong,
+.config-root .config-nav-copy small { display: block; min-width: 0; }
+.config-root .config-nav-copy strong { font-size: var(--type-body); line-height: 1.25; }
+.config-root .config-nav-copy small {
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.config-root .config-sidebar-note {
+  padding: 10px 10px 2px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.55;
+}
+.config-root .config-page > [hidden] { display: none !important; }
 .config-root .config-page { display: grid; gap: 22px; }
 .config-root .config-intro {
   display: flex;
@@ -3810,6 +3884,32 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 
 @media (max-width: 900px) {
+  .config-root .config-workspace-layout { grid-template-columns: 1fr; gap: 16px; }
+  .config-root .config-sidebar {
+    top: 8px;
+    display: block;
+    overflow: hidden;
+    padding: 8px;
+    border-radius: 15px;
+  }
+  .config-root .config-navigation {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .config-root .config-navigation::-webkit-scrollbar { display: none; }
+  .config-root .config-nav-button {
+    flex: 0 0 auto;
+    grid-template-columns: 24px auto;
+    width: auto;
+    min-width: max-content;
+    padding: 9px 12px;
+  }
+  .config-root .config-nav-button:hover { transform: translateY(-1px); }
+  .config-root .config-nav-button.is-active { box-shadow: inset 0 -3px 0 var(--accent); }
+  .config-root .config-nav-copy small,
+  .config-root .config-sidebar-note { display: none; }
   .config-root .config-intro { align-items: stretch; flex-direction: column; }
   .config-root .config-summary { min-width: 0; }
   .config-root .attribute-basics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -3837,7 +3937,7 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 
 @media (max-width: 700px) {
-  .config-root .config-shell { width: min(calc(100% - 28px), 1120px); }
+  .config-root .config-shell { width: min(calc(100% - 28px), 1440px); }
   .config-root .app-header-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
   .config-root .program-settings-overlay { padding: 10px; }
   .config-root .overlay .program-settings-dialog { max-height: calc(100vh - 20px); border-radius: 17px; }

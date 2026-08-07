@@ -64,6 +64,16 @@ import {
 } from '../../changelog';
 import { createChangelogDialog } from './changelog-dialog';
 import { bindTwoStepDelete } from './two-step-delete';
+import {
+  configPageDefinition,
+  configPageForSelector,
+  configPageForTutorialLesson,
+  configPageSearch,
+  ConfigPageId,
+  parseConfigPage,
+} from './config-route';
+import { createConfigNavigation } from './config-shell';
+import { applyConfigPageVisibility } from './config-pages';
 
 interface SelectedGiftRule {
   gift: GiftInfo;
@@ -180,12 +190,16 @@ export function mountConfig(root: HTMLElement): void {
   let localStateVersion = 0;
   let leaderboardMode: LeaderboardMode = 'contribution';
   let leaderboardBlindBoxGiftId: number | undefined;
+  let activePage = parseConfigPage(globalThis.location?.search);
+  let activePageIsExplicit = new URLSearchParams(globalThis.location?.search ?? '').has('page');
 
   const shell = el('div', { class: 'wizard-shell config-shell' });
   const header = el('header', { class: 'app-header' });
   const brand = el('div', { class: 'app-brand' });
+  const activePageDescription = el('span', { text: configPageDefinition(activePage).description });
   brand.append(createBrandIcon(40), el('div', { class: 'app-brand-copy' }, [
     el('strong', { text: '直播礼物面板' }),
+    activePageDescription,
   ]));
   const themeToggle = el('button', { class: 'theme-toggle config-theme-toggle', type: 'button' }) as HTMLButtonElement;
   const guideToggle = el('button', { class: 'theme-toggle training-toggle', type: 'button' }, [createHeaderActionIcon('training')]) as HTMLButtonElement;
@@ -201,8 +215,44 @@ export function mountConfig(root: HTMLElement): void {
   header.append(brand, headerActions);
 
   const content = el('main', { class: 'wizard-content config-page' });
-  shell.append(header, content);
+  const navigation = createConfigNavigation(activePage, (page) => navigateToPage(page));
+  const workspace = el('div', { class: 'config-workspace-layout' }, [navigation.element, content]);
+  shell.append(header, workspace);
   root.replaceChildren(shell);
+
+  function applyActivePage(): void {
+    navigation.setActive(activePage);
+    activePageDescription.textContent = configPageDefinition(activePage).description;
+    applyConfigPageVisibility(content, activePage);
+  }
+
+  function navigateToPage(
+    page: ConfigPageId,
+    options: { replace?: boolean; scroll?: boolean; refreshGuide?: boolean; automatic?: boolean } = {},
+  ): void {
+    const changed = page !== activePage;
+    activePage = page;
+    if (!options.automatic) activePageIsExplicit = true;
+    applyActivePage();
+    if (changed && globalThis.history?.pushState) {
+      const nextSearch = configPageSearch(globalThis.location?.search, page);
+      if (options.replace) globalThis.history.replaceState(null, '', nextSearch);
+      else globalThis.history.pushState(null, '', nextSearch);
+    }
+    if (changed && options.scroll !== false && typeof globalThis.scrollTo === 'function') {
+      globalThis.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    if (options.refreshGuide !== false) renderGuide(false);
+  }
+
+  if (typeof globalThis.addEventListener === 'function') {
+    globalThis.addEventListener('popstate', () => {
+      activePage = parseConfigPage(globalThis.location?.search);
+      activePageIsExplicit = new URLSearchParams(globalThis.location?.search ?? '').has('page');
+      applyActivePage();
+      renderGuide(false);
+    });
+  }
 
   function applyConfigTheme(theme: 'dark' | 'light'): void {
     root.dataset.theme = theme;
@@ -459,6 +509,7 @@ export function mountConfig(root: HTMLElement): void {
     const existing = replaceExisting ? content.querySelector<HTMLElement>(selector) : null;
     if (existing) existing.replaceWith(section);
     else content.append(section);
+    applyConfigPageVisibility(content, activePage);
   }
 
   function save(): void {
@@ -574,6 +625,11 @@ export function mountConfig(root: HTMLElement): void {
       renderGuide();
     };
     const beginLesson = (lesson: TutorialLesson): void => {
+      navigateToPage(configPageForTutorialLesson(lesson), {
+        scroll: false,
+        refreshGuide: false,
+        automatic: true,
+      });
       const tutorialAttributeIndex = tutorialLessonRequiresAttribute(lesson)
         ? ensureTutorialAttributeTarget(state)
         : -1;
@@ -607,6 +663,7 @@ export function mountConfig(root: HTMLElement): void {
     const openTopic = (topic: TrainingTopicDefinition): void => {
       overlay.remove();
       if (topic.destination.kind === 'editor') {
+        navigateToPage('attributes', { scroll: false, refreshGuide: false, automatic: true });
         if (!editorOpen) openAttributeEditor(0);
         activeEditorWorkspace?.setSection(topic.destination.section);
         if (['multi-gift', 'blind-box', 'manual-gift'].includes(topic.id)) {
@@ -624,6 +681,8 @@ export function mountConfig(root: HTMLElement): void {
         }
         return;
       }
+      const destinationPage = configPageForSelector(topic.destination.selector);
+      if (destinationPage) navigateToPage(destinationPage, { scroll: false, refreshGuide: false, automatic: true });
       const target = root.querySelector<HTMLElement>(topic.destination.selector);
       if (!target) {
         toast('请先完成这项功能需要的基础配置', root);
@@ -704,6 +763,14 @@ export function mountConfig(root: HTMLElement): void {
     activeGuide = null;
     updateTrainingToggle();
     const lesson = guideDismissed ? null : activeTutorialLesson();
+    if (navigate && lesson && !editorOpen && !activePageIsExplicit) {
+      navigateToPage(configPageForTutorialLesson(lesson), {
+        replace: true,
+        scroll: false,
+        refreshGuide: false,
+        automatic: true,
+      });
+    }
     root.querySelectorAll<HTMLElement>('.attribute-card').forEach((card) => {
       setFloatingDetailGuideExpanded(card, false);
     });
@@ -714,6 +781,7 @@ export function mountConfig(root: HTMLElement): void {
     }
     if (guideDismissed) return;
     if (!lesson) return;
+    if (!editorOpen && configPageForTutorialLesson(lesson) !== activePage) return;
     if (editorOpen && !editorGuideEnabled && forcedTutorialLesson === null) return;
     if (navigate && editorOpen && activeEditorWorkspace) {
       activeEditorWorkspace.setSection(sectionForTutorialLesson(lesson));
@@ -758,6 +826,7 @@ export function mountConfig(root: HTMLElement): void {
     renderGiftKpiPanels();
     renderContributionLeaderboard();
     renderGiftHistory();
+    applyActivePage();
     renderGuide();
   }
 

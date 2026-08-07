@@ -1,0 +1,45 @@
+import type { TutorialLesson } from '../../types';
+
+export const CONFIG_PAGES = [
+  { id: 'overview', label: '概览', description: '直播间与账号', icon: 'overview' },
+  { id: 'attributes', label: '属性玩法', description: '属性、礼物与定时规则', icon: 'attributes' },
+  { id: 'activities', label: '活动会话', description: '开始、锁定与结算', icon: 'activities' },
+  { id: 'kpi', label: '礼物 KPI', description: '礼物目标与进度', icon: 'kpi' },
+  { id: 'obs', label: 'OBS 面板', description: '组合画面与输出', icon: 'obs' },
+  { id: 'data', label: '数据中心', description: '排行榜与生效记录', icon: 'data' },
+] as const;
+
+export type ConfigPageId = (typeof CONFIG_PAGES)[number]['id'];
+export type ConfigPageIcon = (typeof CONFIG_PAGES)[number]['icon'];
+
+const CONFIG_PAGE_IDS = new Set<string>(CONFIG_PAGES.map((page) => page.id));
+
+export function parseConfigPage(search: string | undefined): ConfigPageId {
+  const page = new URLSearchParams(search ?? '').get('page');
+  return page && CONFIG_PAGE_IDS.has(page) ? page as ConfigPageId : 'overview';
+}
+
+export function configPageSearch(search: string | undefined, page: ConfigPageId): string {
+  const params = new URLSearchParams(search ?? '');
+  params.set('mode', 'config');
+  params.set('page', page);
+  return `?${params.toString()}`;
+}
+
+export function configPageDefinition(page: ConfigPageId): (typeof CONFIG_PAGES)[number] {
+  return CONFIG_PAGES.find((candidate) => candidate.id === page) ?? CONFIG_PAGES[0];
+}
+
+export function configPageForTutorialLesson(lesson: TutorialLesson): ConfigPageId {
+  return lesson === 'room' ? 'overview' : 'attributes';
+}
+
+export function configPageForSelector(selector: string): ConfigPageId | undefined {
+  if (selector === '.display-scenes-section') return 'obs';
+  if (selector === '.activity-workspace-section') return 'activities';
+  if (selector === '.contribution-section' || selector === '.gift-history-section') return 'data';
+  if (selector === '.gift-kpi-config-section') return 'kpi';
+  if (selector === '.attributes-section') return 'attributes';
+  if (selector === '.connection-grid') return 'overview';
+  return undefined;
+}
