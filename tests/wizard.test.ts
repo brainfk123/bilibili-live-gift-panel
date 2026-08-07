@@ -3041,6 +3041,15 @@ describe('OBS attribute display', () => {
   it('fills attribute detail cards symmetrically with gift rules', () => {
     const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
     expect(configCss).toMatch(/\.attribute-formulas\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\);/);
+    expect(configCss).toMatch(/\.hover-detail-card\s*\{[^}]*--card-visual-surface-depth:\s*0px;[^}]*--card-detail-icon-depth:\s*0px;/);
+    expect(configCss).toMatch(/\.hover-detail-card\.is-detail-persisted\s*\{[^}]*--card-visual-surface-depth:\s*8px;[^}]*--card-detail-icon-depth:\s*10px;/);
+    expect(configCss).toMatch(/\.attribute-card-visual::before\s*\{[^}]*translateZ\(var\(--card-visual-surface-depth\)\)/);
+    expect(configCss).toMatch(/\.attribute-cover-image\s*\{[^}]*translate\(-50%, -50%\) translateZ\(var\(--card-visual-depth\)\)/);
+    expect(configCss).toMatch(/\.attribute-cover-image\s*\{[^}]*drop-shadow\(0 3px 4px/);
+    expect(configCss).toMatch(/\.attribute-card-visual\.has-multiple \.attribute-cover-image:nth-child\(2\)\s*\{[^}]*translateZ\(calc\(var\(--card-visual-depth\) \+ 6px\)\)/);
+    expect(configCss).toMatch(/\.attribute-card-visual\.has-multiple \.attribute-cover-image:nth-child\(3\)\s*\{[^}]*translateZ\(calc\(var\(--card-visual-depth\) \+ 12px\)\)/);
+    expect(configCss).toMatch(/\.attribute-gift-image\s*\{[^}]*translateZ\(var\(--card-detail-icon-depth\)\)/);
+    expect(configCss).toMatch(/\.attribute-gift-image\s*\{[^}]*drop-shadow\(0 3px 4px/);
   });
 });
 
