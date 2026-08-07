@@ -147,6 +147,50 @@ func TestApplyGiftEventUpdatesGiftKPIWithoutRules(t *testing.T) {
 	}
 }
 
+func TestApplyGiftEventUpdatesBlindBoxParentAndRewardKPI(t *testing.T) {
+	state := defaultAppState()
+	state.GiftKPIPanels = []giftKPIPanelState{{
+		ID: "kpi-blind-box", Name: "盲盒礼物目标", Layout: "grid",
+		Items: []giftKPIItemState{
+			{GiftID: 35800, GiftName: "小熊虫盲盒", Target: 10, BarStyle: "progress"},
+			{GiftID: 35801, GiftName: "心事虫虫", Target: 10, BarStyle: "progress"},
+		},
+		Appearance: displayAppearanceState{ThemeID: "glass", FontSize: 48, AccentColor: "#fb7299", Align: "center", PanelOpacity: 55},
+	}}
+
+	applyGiftEvent(&state, giftEvent{
+		GiftID: 35801, BlindGiftID: 35800, GiftName: "心事虫虫", BlindGiftName: "小熊虫盲盒",
+		Num: 2, Price: 12000, BlindGiftPrice: 9000, CoinType: "gold", Timestamp: 1700000000,
+	})
+
+	parentReceived := state.GiftKPIPanels[0].Items[0].Received
+	rewardReceived := state.GiftKPIPanels[0].Items[1].Received
+	if parentReceived != 2 || rewardReceived != 2 {
+		t.Fatalf("blind box KPI received parent=%d reward=%d, want parent=2 reward=2", parentReceived, rewardReceived)
+	}
+}
+
+func TestApplyGiftEventUpdatesBlindBoxParentKPIFromCatalog(t *testing.T) {
+	state := defaultAppState()
+	state.GiftCatalog = []giftInfo{
+		{ID: 35800, Name: "小熊虫盲盒", Price: 9000, CoinType: "gold"},
+		{ID: 35801, Name: "心事虫虫", Price: 12000, CoinType: "gold", BlindBoxParentID: 35800, BlindBoxParentName: "小熊虫盲盒", BlindBoxParentPrice: 9000},
+	}
+	state.GiftKPIPanels = []giftKPIPanelState{{
+		ID: "kpi-blind-box", Name: "盲盒礼物目标", Layout: "grid",
+		Items:      []giftKPIItemState{{GiftID: 35800, GiftName: "小熊虫盲盒", Target: 10, BarStyle: "progress"}},
+		Appearance: displayAppearanceState{ThemeID: "glass", FontSize: 48, AccentColor: "#fb7299", Align: "center", PanelOpacity: 55},
+	}}
+
+	applyGiftEvent(&state, giftEvent{
+		GiftID: 35801, GiftName: "心事虫虫", Num: 3, Price: 12000, CoinType: "gold", Timestamp: 1700000000,
+	})
+
+	if got := state.GiftKPIPanels[0].Items[0].Received; got != 3 {
+		t.Fatalf("catalog-mapped blind box KPI received = %d, want 3", got)
+	}
+}
+
 func TestApplyGiftEventUpdatesEveryMatchingAttribute(t *testing.T) {
 	state := defaultAppState()
 	state.Attributes = []attributeState{

@@ -434,7 +434,9 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 	for panelIndex := range state.GiftKPIPanels {
 		for itemIndex := range state.GiftKPIPanels[panelIndex].Items {
 			item := &state.GiftKPIPanels[panelIndex].Items[itemIndex]
-			if item.GiftID == gift.GiftID {
+			matchesOpenedGift := item.GiftID == gift.GiftID
+			matchesBlindBox := gift.BlindGiftID > 0 && item.GiftID == gift.BlindGiftID
+			if matchesOpenedGift || matchesBlindBox {
 				item.Received += maxInt(1, gift.Num)
 			}
 		}
