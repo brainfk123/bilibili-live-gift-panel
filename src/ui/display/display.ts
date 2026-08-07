@@ -7,10 +7,10 @@ import { getDisplayTheme, resolveAttributeDisplayTheme, resolveAttributeDisplayV
 import { createBrandIcon } from '../brand';
 import { el } from '../common';
 import { SequentialBroadcastQueue } from './broadcast-queue';
-import { resolveDisplayTarget, type DisplayTarget } from '../../display-scenes';
+import { resolveDisplayTarget } from '../../display-scenes';
+import type { ObsOutputTarget } from '../../obs-outputs';
 import { activityForScene, activityStatusLabel } from '../../activities';
-import { mountBlindBoxDisplay } from './blind-box-display';
-import { mountGiftKpiDisplay } from './gift-kpi-display';
+import { mountSpecializedDisplay } from './display-host';
 
 const DEFAULT_BROADCAST_MESSAGE = '感谢大家的支持，欢迎投喂礼物';
 const GIFT_BROADCAST_DURATION = 5500;
@@ -44,15 +44,8 @@ export function resolveAttributeValuePresentation(attribute: Attribute): { text:
   };
 }
 
-export function mountDisplay(root: HTMLElement, target: DisplayTarget = {}): void {
-  if (target.view === 'blind-box') {
-    mountBlindBoxDisplay(root, target.blindBoxGiftId);
-    return;
-  }
-  if (target.view === 'gift-kpi') {
-    mountGiftKpiDisplay(root, target.panelId);
-    return;
-  }
+export function mountDisplay(root: HTMLElement, target?: ObsOutputTarget): void {
+  if (mountSpecializedDisplay(root, target)) return;
   let state = loadState();
   let connectionState: RuntimeConnectionState = 'idle';
   let lastLogKey = state.log[0] ? logKey(state.log[0]) : '';

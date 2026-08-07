@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { blindBoxDisplayUrl, createDisplaySceneId, DISPLAY_SCENE_LAYOUTS, displaySceneLayoutName, displaySceneUrl, giftKpiDisplayUrl, normalizeDisplayScenes, resolveDisplayTarget } from '../src/display-scenes';
+import { createDisplaySceneId, DISPLAY_SCENE_LAYOUTS, displaySceneLayoutName, normalizeDisplayScenes, resolveDisplayTarget } from '../src/display-scenes';
 import { defaultState } from '../src/storage';
 
 const attributes = [
@@ -24,7 +24,7 @@ describe('display scene model', () => {
     state.attributes = attributes.map((attribute) => ({ ...attribute })) as any;
     state.displayScenes = [{ id: 'scene-1', name: '状态总览', layout: 'stack', themeId: 'glass', attributeNames: ['能量', '生命值'] }];
 
-    const resolved = resolveDisplayTarget(state, { sceneId: 'scene-1' });
+    const resolved = resolveDisplayTarget(state, { kind: 'scene', sceneId: 'scene-1' });
     expect(resolved.scene?.name).toBe('状态总览');
     expect(resolved.attributes.map((attribute) => attribute.name)).toEqual(['能量', '生命值']);
   });
@@ -39,13 +39,9 @@ describe('display scene model', () => {
     expect(scenes.map((scene) => scene.layout)).toEqual(['focus', 'stack']);
   });
 
-  it('builds encoded links and stable prefixed IDs', () => {
+  it('builds stable prefixed IDs', () => {
     vi.stubGlobal('crypto', { randomUUID: () => 'scene-uuid' });
     expect(createDisplaySceneId()).toBe('scene-scene-uuid');
-    expect(displaySceneUrl('http://localhost:12450', 'scene 1')).toBe('http://localhost:12450/?mode=display&scene=scene%201');
-    expect(blindBoxDisplayUrl('http://localhost:12450')).toBe('http://localhost:12450/?mode=display&view=blind-box');
-    expect(blindBoxDisplayUrl('http://localhost:12450', 35800)).toBe('http://localhost:12450/?mode=display&view=blind-box&blindBox=35800');
-    expect(giftKpiDisplayUrl('http://localhost:12450', 'kpi 1')).toBe('http://localhost:12450/?mode=display&view=gift-kpi&panel=kpi%201');
     vi.unstubAllGlobals();
   });
 });

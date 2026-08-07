@@ -1,18 +1,11 @@
 import type { AppState, Attribute, DisplayScene, DisplaySceneLayout, DisplayThemeId } from './types';
+import type { ObsOutputTarget } from './obs-outputs';
 import { normalizeDisplayThemeId } from './display-themes';
 import { normalizeDisplaySceneLayout } from './output-config';
 
 export { normalizeDisplaySceneLayout } from './output-config';
 
 export const MAX_DISPLAY_SCENE_ATTRIBUTES = 12;
-
-export interface DisplayTarget {
-  attributeName?: string;
-  sceneId?: string;
-  view?: 'blind-box' | 'gift-kpi';
-  panelId?: string;
-  blindBoxGiftId?: number;
-}
 
 export interface ResolvedDisplayTarget {
   attributes: Attribute[];
@@ -67,8 +60,8 @@ export function normalizeDisplayScenes(
   return result;
 }
 
-export function resolveDisplayTarget(state: AppState, target: DisplayTarget = {}): ResolvedDisplayTarget {
-  if (target.sceneId) {
+export function resolveDisplayTarget(state: AppState, target?: ObsOutputTarget): ResolvedDisplayTarget {
+  if (target?.kind === 'scene') {
     const scene = state.displayScenes.find((candidate) => candidate.id === target.sceneId);
     if (!scene) return { attributes: [], layout: 'stack', missingLabel: `找不到组合面板“${target.sceneId}”` };
     const byName = new Map(state.attributes.map((attribute) => [attribute.name, attribute]));
@@ -81,7 +74,7 @@ export function resolveDisplayTarget(state: AppState, target: DisplayTarget = {}
       }),
     };
   }
-  if (target.attributeName) {
+  if (target?.kind === 'attribute') {
     const attribute = state.attributes.find((candidate) => candidate.name === target.attributeName);
     return attribute
       ? { attributes: [attribute], layout: 'stack' }
@@ -93,19 +86,4 @@ export function resolveDisplayTarget(state: AppState, target: DisplayTarget = {}
 export function createDisplaySceneId(): string {
   const uuid = globalThis.crypto?.randomUUID?.();
   return uuid ? `scene-${uuid}` : `scene-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-}
-
-export function displaySceneUrl(origin: string, sceneId: string): string {
-  return `${origin}/?mode=display&scene=${encodeURIComponent(sceneId)}`;
-}
-
-export function blindBoxDisplayUrl(origin: string, blindBoxGiftId?: number): string {
-  const base = `${origin}/?mode=display&view=blind-box`;
-  return Number.isInteger(blindBoxGiftId) && Number(blindBoxGiftId) > 0
-    ? `${base}&blindBox=${encodeURIComponent(String(blindBoxGiftId))}`
-    : base;
-}
-
-export function giftKpiDisplayUrl(origin: string, panelId: string): string {
-  return `${origin}/?mode=display&view=gift-kpi&panel=${encodeURIComponent(panelId)}`;
 }

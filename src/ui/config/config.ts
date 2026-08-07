@@ -59,7 +59,18 @@ import { createGameplayTemplateWizard } from './template-wizard';
 import type { GameplayTemplateBuildResult } from '../../gameplay-templates';
 import { DISPLAY_THEMES, getDisplayTheme } from '../../display-themes';
 import { normalizeBlindBoxDisplayAppearance, normalizeDisplayAppearance } from '../../output-config';
-import { blindBoxDisplayUrl, createDisplaySceneId, DISPLAY_SCENE_LAYOUTS, displaySceneLayoutName, displaySceneUrl, giftKpiDisplayUrl, MAX_DISPLAY_SCENE_ATTRIBUTES } from '../../display-scenes';
+import { createDisplaySceneId, DISPLAY_SCENE_LAYOUTS, displaySceneLayoutName, MAX_DISPLAY_SCENE_ATTRIBUTES } from '../../display-scenes';
+import {
+  attributeDisplayUrl,
+  blindBoxDisplayUrl,
+  buildObsOutputCatalog,
+  displaySceneUrl,
+  giftKpiDisplayUrl,
+  obsOutputCount,
+  obsOutputUrl,
+  type ObsOutputCatalogGroup,
+  type ObsOutputCatalogItem,
+} from '../../obs-outputs';
 import { buildBlindBoxLeaderboard, listBlindBoxLeaderboardScopes } from '../../blind-box-leaderboard';
 import { createActivityWorkspace } from './activity-workspace';
 import { createTrainingCenter } from './training-center';
@@ -1408,7 +1419,7 @@ export function mountConfig(root: HTMLElement): void {
       }
     }
 
-    const obsUrl = `${location.origin}/?mode=display&attribute=${encodeURIComponent(attribute.name)}`;
+    const obsUrl = attributeDisplayUrl(location.origin, attribute.name);
     const obsInput = el('input', {
       class: 'field-input attribute-obs-input',
       value: obsUrl,
@@ -3741,7 +3752,7 @@ export function mountConfig(root: HTMLElement): void {
           el('span', { class: 'field-label', text: 'OBS 专属链接' }),
           el('code', {
             text: original
-              ? `${location.origin}/?mode=display&attribute=${encodeURIComponent(original.name)}`
+              ? attributeDisplayUrl(location.origin, original.name)
               : '创建属性后，在属性卡片中复制专属链接',
           }),
         ]),
@@ -4181,7 +4192,7 @@ export function mountConfig(root: HTMLElement): void {
     const enabledGiftRules = state.rules.filter((rule) => rule.enabled !== false).length;
     const enabledTimers = state.timerRules.filter((rule) => rule.enabled).length;
     const activeActivity = state.activities.find((activity) => activity.status === 'active' || activity.status === 'locked');
-    const outputCount = state.attributes.length + state.displayScenes.length + state.giftKpiPanels.length + 1;
+    const outputCount = obsOutputCount(buildObsOutputCatalog(state, { blindBoxLoginEnabled: biliAuth.state === 'logged_in' }));
     const section = el('section', { class: 'overview-dashboard' });
     const heading = el('div', { class: 'overview-dashboard-heading' }, [
       sectionHeading('工作台概览', '直播控制台', '先确认连接，再进入对应玩法或输出页面；关闭配置页不会中断后台监听。'),
@@ -4250,10 +4261,10 @@ export function mountConfig(root: HTMLElement): void {
 
   function renderObsPanelHub(): void {
     const section = el('section', { class: 'obs-panel-hub' });
-    const totalOutputs = state.attributes.length + state.displayScenes.length + state.giftKpiPanels.length + 1;
+    const catalog = buildObsOutputCatalog(state, { blindBoxLoginEnabled: biliAuth.state === 'logged_in' });
     section.append(el('div', { class: 'obs-panel-hub-heading' }, [
       sectionHeading('直播输出', 'OBS 面板中心', '集中管理所有独立链接；编辑仍回到对应玩法，避免出现两份配置。'),
-      el('span', { class: 'obs-panel-count', text: `${totalOutputs} 个可用链接` }),
+      el('span', { class: 'obs-panel-count', text: `${obsOutputCount(catalog)} 个可用链接` }),
     ]));
 
     const copyOutput = (url: string, label: string): void => {
@@ -4261,87 +4272,91 @@ export function mountConfig(root: HTMLElement): void {
         .then(() => toast(`${label} OBS 链接已复制`, root))
         .catch(() => toast('复制失败，请检查剪贴板权限', root));
     };
-    const createOutputCard = (
-      kind: string,
-      title: string,
-      meta: string,
-      actions: HTMLElement[],
-      visual?: HTMLElement,
-    ): HTMLElement => el('article', { class: `obs-output-card is-${kind}` }, [
-      visual ?? el('span', { class: 'obs-output-card-icon', text: kind === 'attribute' ? '◇' : kind === 'target' ? '◎' : '▥', ariaHidden: 'true' }),
-      el('div', { class: 'obs-output-card-copy' }, [el('strong', { text: title }), el('span', { text: meta })]),
-      el('div', { class: 'obs-output-card-actions' }, actions),
-    ]);
-
-    const appendGroup = (title: string, description: string, body: HTMLElement): void => {
+    const appendGroup = (group: ObsOutputCatalogGroup, body: HTMLElement): void => {
       section.append(el('section', { class: 'obs-output-group' }, [
         el('div', { class: 'obs-output-group-heading' }, [
-          el('h3', { text: title }),
-          el('p', { text: description }),
+          el('h3', { text: group.title }),
+          el('p', { text: group.description }),
         ]),
         body,
       ]));
     };
 
-    const attributeGrid = el('div', { class: 'obs-output-grid' });
-    if (state.attributes.length === 0) {
-      const create = el('button', { class: 'btn ghost', type: 'button', text: '前往创建属性' }) as HTMLButtonElement;
-      create.onclick = () => navigateToPage('attributes');
-      attributeGrid.append(el('div', { class: 'obs-output-empty' }, [el('span', { text: '创建属性后会自动生成单属性 OBS 链接。' }), create]));
-    } else {
-      state.attributes.forEach((attribute, index) => {
-        const url = `${location.origin}/?mode=display&attribute=${encodeURIComponent(attribute.name)}`;
-        const edit = el('button', { class: 'btn ghost', type: 'button', text: '编辑外观' }) as HTMLButtonElement;
-        edit.onclick = () => openAttributeEditor(index, 'output');
-        const copy = el('button', { class: 'btn', type: 'button', text: '复制链接' }) as HTMLButtonElement;
-        copy.onclick = () => copyOutput(url, `“${attribute.name}”`);
-        attributeGrid.append(createOutputCard(
-          'attribute',
-          attribute.display?.title?.trim() || attribute.name,
-          `${displayFormatLabel(attribute)} · 当前 ${formatValue(attribute.value, attribute)}`,
-          [edit, copy],
-        ));
-      });
-    }
-    appendGroup('单属性面板', '每个属性自动拥有一个独立链接。', attributeGrid);
+    const createOutputActions = (item: ObsOutputCatalogItem): HTMLElement[] => {
+      const actions: HTMLElement[] = [];
+      const edit = el('button', { class: 'btn ghost', type: 'button' }) as HTMLButtonElement;
+      const target = item.target;
+      if (target.kind === 'attribute') {
+        edit.textContent = '编辑外观';
+        edit.onclick = () => {
+          const index = state.attributes.findIndex((attribute) => attribute.name === target.attributeName);
+          if (index >= 0) openAttributeEditor(index, 'output');
+        };
+      } else if (target.kind === 'scene') {
+        edit.textContent = '编辑组合';
+        edit.onclick = () => {
+          const index = state.displayScenes.findIndex((scene) => scene.id === target.sceneId);
+          if (index >= 0) openDisplaySceneEditor(index);
+        };
+      } else if (target.kind === 'gift-target') {
+        edit.textContent = '编辑目标';
+        edit.onclick = () => {
+          const index = state.giftKpiPanels.findIndex((panel) => panel.id === target.panelId);
+          if (index >= 0) openGiftKpiEditor(index);
+        };
+      } else {
+        edit.textContent = '外观设置';
+        edit.onclick = openBlindBoxAppearanceEditor;
+      }
+      actions.push(edit);
+      if (target.kind === 'blind-box') {
+        const select = el('button', { class: 'btn ghost', type: 'button', text: '选择盲盒' }) as HTMLButtonElement;
+        select.onclick = () => navigateToPage('data');
+        actions.push(select);
+      }
+      const copy = el('button', { class: 'btn', type: 'button', text: '复制链接' }) as HTMLButtonElement;
+      copy.onclick = () => copyOutput(obsOutputUrl(location.origin, item.target), `“${item.title}”`);
+      actions.push(copy);
+      return actions;
+    };
 
-    const targetGrid = el('div', { class: 'obs-output-grid' });
-    if (state.giftKpiPanels.length === 0) {
-      const create = el('button', { class: 'btn ghost', type: 'button', text: '前往创建礼物目标' }) as HTMLButtonElement;
-      create.onclick = () => navigateToPage('kpi');
-      targetGrid.append(el('div', { class: 'obs-output-empty' }, [el('span', { text: '还没有礼物目标面板。' }), create]));
-    } else {
-      state.giftKpiPanels.forEach((panel, index) => {
-        const edit = el('button', { class: 'btn ghost', type: 'button', text: '编辑目标' }) as HTMLButtonElement;
-        edit.onclick = () => openGiftKpiEditor(index);
-        const copy = el('button', { class: 'btn', type: 'button', text: '复制链接' }) as HTMLButtonElement;
-        copy.onclick = () => copyOutput(giftKpiDisplayUrl(location.origin, panel.id), `“${panel.name}”`);
-        const firstItem = panel.items.find((item) => item.imageUrl);
-        const visual = firstItem
-          ? el('span', { class: 'obs-output-card-icon has-image' }, [el('img', { src: firstItem.imageUrl, alt: '', referrerPolicy: 'no-referrer' })])
-          : undefined;
-        targetGrid.append(createOutputCard(
-          'target', panel.name,
-          `${panel.items.length} 个礼物 · ${panel.layout === 'grid' ? '信息网格' : panel.layout === 'dashboard' ? '主辅仪表盘' : '纵向清单'}`,
-          [edit, copy], visual,
-        ));
-      });
-    }
-    appendGroup('礼物目标面板', '直接显示指定礼物的目标完成度。', targetGrid);
+    const createOutputCard = (item: ObsOutputCatalogItem): HTMLElement => {
+      const icon = item.kind === 'attribute' ? '◇' : item.kind === 'target' ? '◎' : '▥';
+      const visual = item.imageUrl
+        ? el('span', { class: 'obs-output-card-icon has-image' }, [el('img', { src: item.imageUrl, alt: '', referrerPolicy: 'no-referrer' })])
+        : el('span', { class: 'obs-output-card-icon', text: icon, ariaHidden: 'true' });
+      return el('article', { class: `obs-output-card is-${item.kind}` }, [
+        visual,
+        el('div', { class: 'obs-output-card-copy' }, [el('strong', { text: item.title }), el('span', { text: item.meta })]),
+        el('div', { class: 'obs-output-card-actions' }, createOutputActions(item)),
+      ]);
+    };
 
-    const leaderboardGrid = el('div', { class: 'obs-output-grid' });
-    const editLeaderboard = el('button', { class: 'btn ghost', type: 'button', text: '外观设置' }) as HTMLButtonElement;
-    editLeaderboard.onclick = openBlindBoxAppearanceEditor;
-    const viewLeaderboard = el('button', { class: 'btn ghost', type: 'button', text: '选择盲盒' }) as HTMLButtonElement;
-    viewLeaderboard.onclick = () => navigateToPage('data');
-    const copyLeaderboard = el('button', { class: 'btn', type: 'button', text: '复制链接' }) as HTMLButtonElement;
-    copyLeaderboard.onclick = () => copyOutput(blindBoxDisplayUrl(location.origin), '盲盒盈亏榜');
-    leaderboardGrid.append(createOutputCard(
-      'leaderboard', '盲盒盈亏榜',
-      `${biliAuth.state === 'logged_in' ? '登录能力已开启' : '依赖登录识别盲盒'} · 显示 ${state.blindBoxDisplay.viewerSlots} 个观众`,
-      [editLeaderboard, viewLeaderboard, copyLeaderboard],
-    ));
-    appendGroup('排行榜面板', '盲盒盈亏榜可在数据中心选择统计范围。', leaderboardGrid);
+    const createEmptyAction = (group: ObsOutputCatalogGroup): HTMLButtonElement | undefined => {
+      if (!group.emptyActionLabel) return undefined;
+      const button = el('button', { class: 'btn ghost', type: 'button', text: group.emptyActionLabel }) as HTMLButtonElement;
+      if (group.id === 'attributes') button.onclick = () => navigateToPage('attributes');
+      else if (group.id === 'scenes') button.onclick = () => {
+        if (state.attributes.length >= 2) openDisplaySceneEditor();
+        else navigateToPage('attributes');
+      };
+      else if (group.id === 'gift-targets') button.onclick = () => navigateToPage('kpi');
+      return button;
+    };
+
+    for (const group of catalog) {
+      const grid = el('div', { class: 'obs-output-grid' });
+      if (group.items.length > 0) {
+        grid.append(...group.items.map(createOutputCard));
+      } else {
+        const action = createEmptyAction(group);
+        grid.append(el('div', { class: 'obs-output-empty' }, [
+          el('span', { text: group.emptyText ?? '暂无可用输出。' }),
+          ...(action ? [action] : []),
+        ]));
+      }
+      appendGroup(group, grid);
+    }
 
     content.append(section);
   }

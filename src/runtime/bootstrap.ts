@@ -1,4 +1,4 @@
-import type { DisplayTarget } from '../display-scenes';
+import { parseObsOutputTarget, type ObsOutputTarget } from '../obs-outputs';
 
 export const CONFIG_STYLE_ID = 'bilibili-config-style';
 
@@ -7,7 +7,7 @@ export interface AppBootstrapOptions {
   search: string;
   installFavicon: () => void;
   loadConfigStyles: () => Promise<string>;
-  mountDisplay: (root: HTMLElement, target?: DisplayTarget) => void;
+  mountDisplay: (root: HTMLElement, target?: ObsOutputTarget) => void;
   mountConfig: (root: HTMLElement) => void;
 }
 
@@ -42,22 +42,5 @@ export async function startApp(options: AppBootstrapOptions): Promise<void> {
 
   options.document.body.classList.add('display-mode');
   root.classList.add('display-root');
-  const attributeName = params.get('attribute') ?? undefined;
-  const sceneId = params.get('scene') ?? undefined;
-  const requestedView = params.get('view');
-  const view = requestedView === 'blind-box' || requestedView === 'gift-kpi' ? requestedView : undefined;
-  const panelId = params.get('panel') ?? undefined;
-  const requestedBlindBoxGiftId = Number(params.get('blindBox'));
-  const blindBoxGiftId = Number.isInteger(requestedBlindBoxGiftId) && requestedBlindBoxGiftId > 0
-    ? requestedBlindBoxGiftId
-    : undefined;
-  options.mountDisplay(root, attributeName || sceneId || view
-    ? {
-      attributeName,
-      sceneId,
-      ...(view ? { view } : {}),
-      ...(panelId ? { panelId } : {}),
-      ...(view === 'blind-box' && blindBoxGiftId ? { blindBoxGiftId } : {}),
-    }
-    : undefined);
+  options.mountDisplay(root, parseObsOutputTarget(options.search));
 }

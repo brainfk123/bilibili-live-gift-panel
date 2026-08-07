@@ -1907,7 +1907,7 @@ describe('single-page configuration rendering', () => {
 
     vi.useFakeTimers();
     const displayRoot = new TestElement('div');
-    mountDisplay(displayRoot as unknown as HTMLElement, { attributeName: '加班时间' });
+    mountDisplay(displayRoot as unknown as HTMLElement, { kind: 'attribute', attributeName: '加班时间' });
     expect(textOf(displayRoot)).not.toContain('有剩余时每分钟减少');
     expect(displayRoot.querySelectorAll('.display-gift-rule')).toHaveLength(0);
     vi.useRealTimers();
@@ -2918,7 +2918,7 @@ describe('OBS attribute display', () => {
     }));
     vi.useFakeTimers();
     const root = new TestElement('div');
-    mountDisplay(root as unknown as HTMLElement, { attributeName: '比赛结果' });
+    mountDisplay(root as unknown as HTMLElement, { kind: 'attribute', attributeName: '比赛结果' });
 
     expect(textOf(root)).toContain('红队胜');
     expect(root.querySelector('.attr-value')?.className).toContain('is-enum-mapped');
@@ -2953,7 +2953,7 @@ describe('OBS attribute display', () => {
     }));
     vi.useFakeTimers();
     const root = new TestElement('div');
-    mountDisplay(root as unknown as HTMLElement, { attributeName: '积分' });
+    mountDisplay(root as unknown as HTMLElement, { kind: 'attribute', attributeName: '积分' });
 
     expect(textOf(root)).toContain('积分');
     expect(textOf(root)).toContain('7');
@@ -2984,7 +2984,7 @@ describe('OBS attribute display', () => {
     }));
     vi.useFakeTimers();
     const root = new TestElement('div');
-    mountDisplay(root as unknown as HTMLElement, { sceneId: 'scene-status' });
+    mountDisplay(root as unknown as HTMLElement, { kind: 'scene', sceneId: 'scene-status' });
 
     expect(root.querySelector('.display-stack')?.className).toContain('is-scene-wide');
     expect(root.querySelector('.panel')?.className).toContain('scene-layout-grid');
@@ -3023,7 +3023,7 @@ describe('OBS attribute display', () => {
     }));
     vi.useFakeTimers();
     const root = new TestElement('div');
-    mountDisplay(root as unknown as HTMLElement, { sceneId: 'scene-match' });
+    mountDisplay(root as unknown as HTMLElement, { kind: 'scene', sceneId: 'scene-match' });
 
     expect(textOf(root)).toContain('已结算');
     expect(textOf(root)).toContain('本局胜出');
@@ -3045,7 +3045,7 @@ describe('OBS attribute display', () => {
     }));
     vi.useFakeTimers();
     const root = new TestElement('div');
-    mountDisplay(root as unknown as HTMLElement, { attributeName: '应援目标' });
+    mountDisplay(root as unknown as HTMLElement, { kind: 'attribute', attributeName: '应援目标' });
 
     expect(root.querySelector('.panel')?.dataset.theme).toBe('neon');
     expect(root.querySelector('.attr')?.dataset.variant).toBe('progress');
@@ -3068,7 +3068,7 @@ describe('OBS attribute display', () => {
     }));
     vi.useFakeTimers();
     const root = new TestElement('div');
-    mountDisplay(root as unknown as HTMLElement, { attributeName: '早播' });
+    mountDisplay(root as unknown as HTMLElement, { kind: 'attribute', attributeName: '早播' });
 
     const formulaName = root.querySelector('.display-formula-name');
     expect(formulaName?.className).toContain('is-long');

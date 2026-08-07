@@ -77,7 +77,7 @@ describe('application bootstrap', () => {
       mountConfig: vi.fn(),
     });
 
-    expect(mountDisplay).toHaveBeenCalledWith(document.app, { attributeName: '加班时间', sceneId: undefined });
+    expect(mountDisplay).toHaveBeenCalledWith(document.app, { kind: 'attribute', attributeName: '加班时间' });
   });
 
   it('passes a selected combination scene to display mode', async () => {
@@ -93,7 +93,7 @@ describe('application bootstrap', () => {
       mountConfig: vi.fn(),
     });
 
-    expect(mountDisplay).toHaveBeenCalledWith(document.app, { attributeName: undefined, sceneId: 'scene-boss' });
+    expect(mountDisplay).toHaveBeenCalledWith(document.app, { kind: 'scene', sceneId: 'scene-boss' });
   });
 
   it('passes the blind-box leaderboard view to display mode', async () => {
@@ -109,11 +109,7 @@ describe('application bootstrap', () => {
       mountConfig: vi.fn(),
     });
 
-    expect(mountDisplay).toHaveBeenCalledWith(document.app, {
-      attributeName: undefined,
-      sceneId: undefined,
-      view: 'blind-box',
-    });
+    expect(mountDisplay).toHaveBeenCalledWith(document.app, { kind: 'blind-box' });
   });
 
   it('passes the selected blind-box gift to display mode', async () => {
@@ -129,12 +125,7 @@ describe('application bootstrap', () => {
       mountConfig: vi.fn(),
     });
 
-    expect(mountDisplay).toHaveBeenCalledWith(document.app, {
-      attributeName: undefined,
-      sceneId: undefined,
-      view: 'blind-box',
-      blindBoxGiftId: 35800,
-    });
+    expect(mountDisplay).toHaveBeenCalledWith(document.app, { kind: 'blind-box', blindBoxGiftId: 35800 });
   });
 
   it('passes a selected gift KPI panel to display mode', async () => {
@@ -150,12 +141,7 @@ describe('application bootstrap', () => {
       mountConfig: vi.fn(),
     });
 
-    expect(mountDisplay).toHaveBeenCalledWith(document.app, {
-      attributeName: undefined,
-      sceneId: undefined,
-      view: 'gift-kpi',
-      panelId: 'kpi-1',
-    });
+    expect(mountDisplay).toHaveBeenCalledWith(document.app, { kind: 'gift-target', panelId: 'kpi-1' });
   });
 
   it('injects configuration styles before mounting config mode', async () => {

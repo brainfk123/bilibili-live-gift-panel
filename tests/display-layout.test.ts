@@ -80,8 +80,7 @@ describe('OBS broadcast panel layout', () => {
   });
 
   it('renders a compact live blind-box leaderboard from the contribution ledger', () => {
-    expect(source).toContain("target.view === 'blind-box'");
-    expect(source).toContain('mountBlindBoxDisplay(root, target.blindBoxGiftId)');
+    expect(source).toContain('mountSpecializedDisplay(root, target)');
     expect(blindBoxSource).toContain('buildBlindBoxLeaderboard(state.contributions, MAX_RANKED_VIEWERS, blindBoxGiftId)');
     expect(blindBoxSource).toContain('refreshStateFromServer()');
     expect(css).toMatch(/\.blind-box-ranking\s*\{[\s\S]*?border-radius: 16px/);
