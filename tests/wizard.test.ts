@@ -3029,6 +3029,8 @@ describe('OBS attribute display', () => {
     expect(configSource).toContain("'gift-kpi-card-preview-image'");
     expect(configCss).toMatch(/\.gift-kpi-config-card\s*\{[^}]*--kpi-card-visual-depth:\s*3px;/);
     expect(configCss).toMatch(/\.gift-kpi-card-visual\s*\{[^}]*translateZ\(var\(--kpi-card-visual-depth\)\)/);
+    expect(configCss).toMatch(/\.gift-kpi-card-preview-image\s*\{[^}]*background:\s*transparent;/);
+    expect(configCss).toMatch(/\.gift-kpi-card-preview-image\.is-placeholder\s*\{[^}]*background:\s*var\(--image-bg\);/);
   });
 });
 
