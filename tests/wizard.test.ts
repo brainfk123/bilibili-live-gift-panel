@@ -2606,6 +2606,37 @@ describe('single-page configuration rendering', () => {
     expect(picker.querySelector('.gift-picker-loader')?.textContent).toContain('已显示全部');
   });
 
+  it('shares the gift picker workflow with the gift target editor', async () => {
+    const configured = {
+      ...defaultState(),
+      ...state('88888888', 1),
+      settings: { ...defaultState().settings, showTutorial: false },
+    };
+    await saveState(configured);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const targetNavigation = root.querySelectorAll('.config-nav-button').find((button) => textOf(button).includes('礼物目标'));
+    targetNavigation?.onclick?.();
+    findByText(root, '+ 新建目标面板')?.onclick?.();
+
+    const editor = root.querySelector('.gift-kpi-editor') as TestElement;
+    const picker = editor.querySelector('.gift-kpi-picker-grid') as TestElement;
+    const choice = picker.querySelector('.gift-choice') as TestElement;
+    expect(choice).not.toBeNull();
+    choice.onclick?.();
+
+    expect(editor.querySelectorAll('.gift-kpi-editor-item')).toHaveLength(1);
+    expect(textOf(editor.querySelector('.selection-count') as TestElement)).toContain('1 / 12');
+    expect(choice.className.split(' ')).toContain('is-selected');
+    expect(choice.getAttribute('aria-pressed')).toBe('true');
+
+    findByText(editor, '移除')?.onclick?.();
+    expect(editor.querySelectorAll('.gift-kpi-editor-item')).toHaveLength(0);
+    expect(choice.className.split(' ')).not.toContain('is-selected');
+    expect(choice.getAttribute('aria-pressed')).toBe('false');
+  });
+
   it('keeps the attribute editor open when text selection drags outside the panel', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888', 1)));
     const root = new TestElement('div');
@@ -3106,11 +3137,14 @@ describe('OBS attribute display', () => {
   it('keeps KPI gift choices at their content height inside the scrolling editor', () => {
     const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
     const configSource = readFileSync(new URL('../src/ui/config/config.ts', import.meta.url), 'utf8');
+    const giftPickerSource = readFileSync(new URL('../src/ui/config/gift-picker.ts', import.meta.url), 'utf8');
     const activitySource = readFileSync(new URL('../src/ui/config/activity-workspace.ts', import.meta.url), 'utf8');
     expect(configCss).toMatch(/\.gift-kpi-editor-body\s*\{[^}]*grid-auto-rows:\s*max-content;[^}]*align-content:\s*start;/);
     expect(configCss).toMatch(/\.gift-kpi-editor-items\s*\{[^}]*grid-template-columns:\s*repeat\(2,/);
-    expect(configSource.match(/createGiftPickerChoice\(gift,/g)).toHaveLength(2);
-    expect(configSource).toContain("class: 'gift-picker-grid gift-kpi-picker-grid'");
+    expect(configSource.match(/createGiftPicker\(\{/g)).toHaveLength(2);
+    expect(configSource).toContain("gridClassName: 'gift-kpi-picker-grid'");
+    expect(giftPickerSource).toContain('export function createGiftPicker(options: GiftPickerOptions)');
+    expect(giftPickerSource).toContain('grid.onscroll = () =>');
     expect(configSource).toContain("class: 'gift-kpi-card-cover summary-card-cover hover-detail-cover'");
     expect(configSource).toContain("gift-kpi-card-visual summary-card-visual");
     expect(configSource).toContain("gift-kpi-card-preview-image summary-card-cover-image");
