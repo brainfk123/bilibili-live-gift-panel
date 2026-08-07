@@ -1790,6 +1790,10 @@ export function mountConfig(root: HTMLElement): void {
     [['grid', '信息网格'], ['stack', '纵向清单'], ['dashboard', '主辅仪表盘']].forEach(([value, label]) => layoutSelect.append(el('option', { value, text: label })));
     layoutSelect.value = layout;
     layoutSelect.onchange = () => { layout = layoutSelect.value as GiftKpiLayout; };
+    const giftIcon = (imageUrl: string, name: string, className: string): HTMLElement => {
+      if (!imageUrl) return el('span', { class: `${className} is-placeholder`, text: '🎁', ariaHidden: 'true' });
+      return el('img', { class: className, src: imageUrl, alt: `${name}图标`, referrerPolicy: 'no-referrer' });
+    };
     const selectedHost = el('div', { class: 'gift-kpi-editor-items' });
     const renderItems = (): void => {
       selectedHost.replaceChildren();
@@ -1802,7 +1806,16 @@ export function mountConfig(root: HTMLElement): void {
         style.onchange = () => { item.barStyle = style.value as GiftKpiBarStyle; };
         const remove = el('button', { class: 'btn text-danger', type: 'button', text: '移除' }) as HTMLButtonElement;
         remove.onclick = () => { items.splice(itemIndex, 1); renderItems(); renderGiftChoices(); };
-        selectedHost.append(el('div', { class: 'gift-kpi-editor-item' }, [el('strong', { text: item.giftName }), target, style, remove]));
+        selectedHost.append(el('div', { class: 'gift-kpi-editor-item' }, [
+          giftIcon(item.imageUrl, item.giftName, 'gift-kpi-editor-item-image'),
+          el('div', { class: 'gift-kpi-editor-item-main' }, [
+            el('div', { class: 'gift-kpi-editor-item-head' }, [el('strong', { text: item.giftName }), remove]),
+            el('div', { class: 'gift-kpi-editor-item-controls' }, [
+              el('label', {}, [el('span', { text: '目标' }), target]),
+              el('label', {}, [el('span', { text: '样式' }), style]),
+            ]),
+          ]),
+        ]));
       });
     };
     const giftChoices = el('div', { class: 'gift-kpi-gift-choices' });
@@ -1811,7 +1824,12 @@ export function mountConfig(root: HTMLElement): void {
       giftChoices.replaceChildren();
       for (const gift of availableGifts) {
         const selected = items.some((item) => item.giftId === gift.id);
-        const button = el('button', { class: `gift-kpi-gift-choice${selected ? ' is-selected' : ''}`, type: 'button', text: selected ? `✓ ${gift.name}` : `+ ${gift.name}` }) as HTMLButtonElement;
+        const button = el('button', { class: `gift-kpi-gift-choice${selected ? ' is-selected' : ''}`, type: 'button' }) as HTMLButtonElement;
+        button.append(
+          giftIcon(gift.imgBasic, gift.name, 'gift-kpi-gift-choice-image'),
+          el('span', { text: gift.name }),
+          el('b', { text: selected ? '✓' : '+' }),
+        );
         button.disabled = !selected && items.length >= 12;
         button.onclick = () => {
           if (selected) items = items.filter((item) => item.giftId !== gift.id);
