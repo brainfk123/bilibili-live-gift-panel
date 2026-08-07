@@ -13,7 +13,7 @@ import (
 // Every persisted shard has its own version. Missing versions are treated as
 // legacy version 0, while newer versions are rejected so an older executable
 // cannot silently discard fields it does not understand.
-const stateShardSchemaVersion = 4
+const stateShardSchemaVersion = 5
 
 type unsupportedStateVersionError struct {
 	Shard   string
@@ -25,17 +25,17 @@ func (e *unsupportedStateVersionError) Error() string {
 }
 
 type configStateShard struct {
-	SchemaVersion   int                    `json:"schemaVersion"`
-	RoomID          string                 `json:"roomId"`
-	Attributes      []attributeState       `json:"attributes"`
-	DisplayScenes   []displaySceneState    `json:"displayScenes"`
-	BlindBoxDisplay displayAppearanceState `json:"blindBoxDisplay"`
-	GiftKPIPanels   []giftKPIPanelState    `json:"giftKpiPanels"`
-	Activities      []activitySessionState `json:"activities"`
-	Rules           []giftRule             `json:"rules"`
-	TimerRules      []timerRule            `json:"timerRules"`
-	FormulaPresets  []formulaPreset        `json:"formulaPresets"`
-	Settings        settingsState          `json:"settings"`
+	SchemaVersion   int                            `json:"schemaVersion"`
+	RoomID          string                         `json:"roomId"`
+	Attributes      []attributeState               `json:"attributes"`
+	DisplayScenes   []displaySceneState            `json:"displayScenes"`
+	BlindBoxDisplay blindBoxDisplayAppearanceState `json:"blindBoxDisplay"`
+	GiftKPIPanels   []giftKPIPanelState            `json:"giftKpiPanels"`
+	Activities      []activitySessionState         `json:"activities"`
+	Rules           []giftRule                     `json:"rules"`
+	TimerRules      []timerRule                    `json:"timerRules"`
+	FormulaPresets  []formulaPreset                `json:"formulaPresets"`
+	Settings        settingsState                  `json:"settings"`
 }
 
 type cacheStateShard struct {

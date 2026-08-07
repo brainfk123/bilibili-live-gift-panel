@@ -45,6 +45,11 @@ type displayAppearanceState struct {
 	PanelOpacity   int    `json:"panelOpacity"`
 }
 
+type blindBoxDisplayAppearanceState struct {
+	displayAppearanceState
+	ViewerSlots int `json:"viewerSlots"`
+}
+
 type attributeValueMappingState struct {
 	Value    float64 `json:"value"`
 	Label    string  `json:"label"`
@@ -295,21 +300,21 @@ type settingsState struct {
 }
 
 type appState struct {
-	RoomID          string                  `json:"roomId"`
-	Attributes      []attributeState        `json:"attributes"`
-	DisplayScenes   []displaySceneState     `json:"displayScenes"`
-	BlindBoxDisplay displayAppearanceState  `json:"blindBoxDisplay"`
-	GiftKPIPanels   []giftKPIPanelState     `json:"giftKpiPanels"`
-	Activities      []activitySessionState  `json:"activities"`
-	Rules           []giftRule              `json:"rules"`
-	TimerRules      []timerRule             `json:"timerRules"`
-	FormulaPresets  []formulaPreset         `json:"formulaPresets"`
-	Settings        settingsState           `json:"settings"`
-	GiftCatalog     []giftInfo              `json:"giftCatalog"`
-	RecentGifts     []recentGift            `json:"recentGifts"`
-	Stats           map[string]dayStats     `json:"stats"`
-	Log             []logEntry              `json:"log"`
-	Contributions   contributionLedgerState `json:"contributions"`
+	RoomID          string                         `json:"roomId"`
+	Attributes      []attributeState               `json:"attributes"`
+	DisplayScenes   []displaySceneState            `json:"displayScenes"`
+	BlindBoxDisplay blindBoxDisplayAppearanceState `json:"blindBoxDisplay"`
+	GiftKPIPanels   []giftKPIPanelState            `json:"giftKpiPanels"`
+	Activities      []activitySessionState         `json:"activities"`
+	Rules           []giftRule                     `json:"rules"`
+	TimerRules      []timerRule                    `json:"timerRules"`
+	FormulaPresets  []formulaPreset                `json:"formulaPresets"`
+	Settings        settingsState                  `json:"settings"`
+	GiftCatalog     []giftInfo                     `json:"giftCatalog"`
+	RecentGifts     []recentGift                   `json:"recentGifts"`
+	Stats           map[string]dayStats            `json:"stats"`
+	Log             []logEntry                     `json:"log"`
+	Contributions   contributionLedgerState        `json:"contributions"`
 }
 
 type giftEvent struct {
@@ -337,9 +342,12 @@ func defaultAppState() appState {
 	return appState{
 		Attributes:    []attributeState{},
 		DisplayScenes: []displaySceneState{},
-		BlindBoxDisplay: displayAppearanceState{
-			ThemeID: "glass", FontSize: 48, AccentColor: "#fb7299",
-			ShowConnection: true, Align: "center", PanelOpacity: 55,
+		BlindBoxDisplay: blindBoxDisplayAppearanceState{
+			displayAppearanceState: displayAppearanceState{
+				ThemeID: "glass", FontSize: displayFontSizeDefault, AccentColor: defaultDisplayAccentColor,
+				ShowConnection: true, Align: "center", PanelOpacity: displayPanelOpacityDefault,
+			},
+			ViewerSlots: blindBoxViewerSlotsDefault,
 		},
 		Activities:     []activitySessionState{},
 		GiftKPIPanels:  []giftKPIPanelState{},
@@ -451,6 +459,13 @@ func normalizeAppState(state *appState) {
 	if !isDisplayThemeID(state.Settings.DefaultDisplayThemeID) {
 		state.Settings.DefaultDisplayThemeID = defaults.DefaultDisplayThemeID
 	}
+	appearanceDefaults := displayAppearanceDefaults(state.Settings)
+	normalizeBlindBoxDisplayAppearanceState(&state.BlindBoxDisplay, appearanceDefaults)
+	for index := range state.GiftKPIPanels {
+		panel := &state.GiftKPIPanels[index]
+		panel.Layout = normalizeGiftTargetLayout(panel.Layout)
+		normalizeDisplayAppearanceState(&panel.Appearance, appearanceDefaults)
+	}
 	for index := range state.Attributes {
 		display := state.Attributes[index].Display
 		if display == nil {
@@ -459,6 +474,7 @@ func normalizeAppState(state *appState) {
 		if !isDisplayThemeID(display.ThemeID) {
 			display.ThemeID = state.Settings.DefaultDisplayThemeID
 		}
+		normalizeDisplayAppearanceState(display.Appearance, appearanceDefaults)
 		if !isDisplayVariant(display.Variant) {
 			if state.Attributes[index].Format == "hhmmss" {
 				display.Variant = "timer"
@@ -478,12 +494,11 @@ func normalizeAppState(state *appState) {
 		scene.ID = strings.TrimSpace(scene.ID)
 		scene.Name = strings.TrimSpace(scene.Name)
 		scene.AttributeNames = normalizeStrings(scene.AttributeNames)
-		if scene.Layout != "grid" {
-			scene.Layout = "stack"
-		}
+		scene.Layout = normalizeDisplaySceneLayout(scene.Layout)
 		if !isDisplayThemeID(scene.ThemeID) {
 			scene.ThemeID = state.Settings.DefaultDisplayThemeID
 		}
+		normalizeDisplayAppearanceState(scene.Appearance, appearanceDefaults)
 	}
 	attributeValues := make(map[string]float64, len(state.Attributes))
 	for _, attribute := range state.Attributes {

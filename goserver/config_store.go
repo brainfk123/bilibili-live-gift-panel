@@ -230,6 +230,9 @@ func validateAppState(state appState) error {
 			if !isDisplayThemeID(attribute.Display.ThemeID) {
 				return fmt.Errorf("属性 %q 的 OBS 主题无效", name)
 			}
+			if attribute.Display.Appearance != nil && !validateDisplayAppearanceState(*attribute.Display.Appearance) {
+				return fmt.Errorf("属性 %q 的 OBS 外观无效", name)
+			}
 			if attribute.Display.Min != nil && attribute.Display.Max != nil && *attribute.Display.Max <= *attribute.Display.Min {
 				return fmt.Errorf("属性 %q 的 OBS 展示上限必须大于下限", name)
 			}
@@ -279,12 +282,19 @@ func validateAppState(state appState) error {
 				return fmt.Errorf("组合面板 %q 引用了不存在的属性 %q", name, attributeName)
 			}
 		}
-		if scene.Layout != "stack" && scene.Layout != "grid" {
+		if !isDisplaySceneLayout(scene.Layout) {
 			return fmt.Errorf("组合面板 %q 的布局无效", name)
 		}
 		if !isDisplayThemeID(scene.ThemeID) {
 			return fmt.Errorf("组合面板 %q 的 OBS 主题无效", name)
 		}
+		if scene.Appearance != nil && !validateDisplayAppearanceState(*scene.Appearance) {
+			return fmt.Errorf("组合面板 %q 的 OBS 外观无效", name)
+		}
+	}
+	if !validateDisplayAppearanceState(state.BlindBoxDisplay.displayAppearanceState) ||
+		state.BlindBoxDisplay.ViewerSlots < blindBoxViewerSlotsMin || state.BlindBoxDisplay.ViewerSlots > blindBoxViewerSlotsMax {
+		return fmt.Errorf("盲盒盈亏榜的 OBS 外观无效")
 	}
 	kpiPanelIDs := make(map[string]struct{}, len(state.GiftKPIPanels))
 	for _, panel := range state.GiftKPIPanels {
@@ -297,7 +307,7 @@ func validateAppState(state appState) error {
 			return fmt.Errorf("礼物目标面板 ID 不能重复：%s", id)
 		}
 		kpiPanelIDs[id] = struct{}{}
-		if panel.Layout != "stack" && panel.Layout != "grid" && panel.Layout != "dashboard" {
+		if !isGiftTargetLayout(panel.Layout) {
 			return fmt.Errorf("礼物目标面板 %q 的布局无效", name)
 		}
 		if len(panel.Items) == 0 || len(panel.Items) > 12 {
@@ -316,14 +326,8 @@ func validateAppState(state appState) error {
 				return fmt.Errorf("礼物目标面板 %q 的进度条样式无效", name)
 			}
 		}
-		if !isDisplayThemeID(panel.Appearance.ThemeID) || !isHexColor(panel.Appearance.AccentColor) {
+		if !validateDisplayAppearanceState(panel.Appearance) {
 			return fmt.Errorf("礼物目标面板 %q 的 OBS 外观无效", name)
-		}
-		if panel.Appearance.FontSize < 24 || panel.Appearance.FontSize > 96 || panel.Appearance.PanelOpacity < 10 || panel.Appearance.PanelOpacity > 100 {
-			return fmt.Errorf("礼物目标面板 %q 的字号或透明度无效", name)
-		}
-		if panel.Appearance.Align != "left" && panel.Appearance.Align != "center" && panel.Appearance.Align != "right" {
-			return fmt.Errorf("礼物目标面板 %q 的对齐方式无效", name)
 		}
 	}
 	activityIDs := make(map[string]struct{}, len(state.Activities))

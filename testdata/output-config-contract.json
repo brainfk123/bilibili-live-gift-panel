@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "displaySceneLayouts": ["stack", "grid", "focus", "versus", "dashboard"],
+  "giftTargetLayouts": ["stack", "grid", "dashboard"],
+  "displayThemeIds": ["minimal", "glass", "rpg", "pixel", "neon", "kawaii"],
+  "appearance": {
+    "fontSize": { "min": 24, "max": 96, "default": 48 },
+    "panelOpacity": { "min": 10, "max": 100, "default": 55 },
+    "accentColor": "#fb7299",
+    "align": "center",
+    "showConnection": true
+  },
+  "blindBoxViewerSlots": { "min": 1, "max": 10, "default": 3 }
+}

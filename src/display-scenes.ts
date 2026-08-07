@@ -1,5 +1,8 @@
 import type { AppState, Attribute, DisplayScene, DisplaySceneLayout, DisplayThemeId } from './types';
 import { normalizeDisplayThemeId } from './display-themes';
+import { normalizeDisplaySceneLayout } from './output-config';
+
+export { normalizeDisplaySceneLayout } from './output-config';
 
 export const MAX_DISPLAY_SCENE_ATTRIBUTES = 12;
 
@@ -29,14 +32,6 @@ export const DISPLAY_SCENE_LAYOUTS: ReadonlyArray<{
   { id: 'versus', name: '双方对抗', description: '前两项左右对峙，适合阵营和投票' },
   { id: 'dashboard', name: '主辅仪表盘', description: '核心指标居左，其余状态排列在右' },
 ];
-
-const displaySceneLayoutIds = new Set<DisplaySceneLayout>(DISPLAY_SCENE_LAYOUTS.map((layout) => layout.id));
-
-export function normalizeDisplaySceneLayout(layout: unknown): DisplaySceneLayout {
-  return typeof layout === 'string' && displaySceneLayoutIds.has(layout as DisplaySceneLayout)
-    ? layout as DisplaySceneLayout
-    : 'stack';
-}
 
 export function displaySceneLayoutName(layout: DisplaySceneLayout): string {
   return DISPLAY_SCENE_LAYOUTS.find((candidate) => candidate.id === layout)?.name ?? '纵向清单';

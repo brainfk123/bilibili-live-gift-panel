@@ -1,4 +1,4 @@
-import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, BlindBoxDisplayAppearance, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftKpiBarStyle, GiftKpiLayout, GiftKpiPanel, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
+import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftKpiBarStyle, GiftKpiLayout, GiftKpiPanel, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
 import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { bindFloatingDetailCard, el, fieldControl, inputField, setFloatingDetailGuideExpanded, toast } from '../common';
@@ -50,6 +50,7 @@ import {
 import { createGameplayTemplateWizard } from './template-wizard';
 import type { GameplayTemplateBuildResult } from '../../gameplay-templates';
 import { DISPLAY_THEMES, getDisplayTheme } from '../../display-themes';
+import { normalizeBlindBoxDisplayAppearance, normalizeDisplayAppearance } from '../../output-config';
 import { blindBoxDisplayUrl, createDisplaySceneId, DISPLAY_SCENE_LAYOUTS, displaySceneLayoutName, displaySceneUrl, giftKpiDisplayUrl, MAX_DISPLAY_SCENE_ATTRIBUTES } from '../../display-scenes';
 import { buildBlindBoxLeaderboard, listBlindBoxLeaderboardScopes } from '../../blind-box-leaderboard';
 import { createActivityWorkspace } from './activity-workspace';
@@ -1594,7 +1595,7 @@ export function mountConfig(root: HTMLElement): void {
       ? [...original.attributeNames]
       : state.attributes.slice(0, 2).map((attribute) => attribute.name);
     let layout: DisplaySceneLayout = original?.layout ?? 'grid';
-    const appearance = cloneDisplayAppearance(original?.appearance, original?.themeId);
+    const appearance = normalizeDisplayAppearance(original?.appearance, state.settings, original?.themeId);
     const overlay = el('div', { class: 'overlay display-scene-overlay' });
     const dialog = el('section', { class: 'card display-scene-dialog', role: 'dialog', ariaLabel: original ? `编辑组合面板 ${original.name}` : '新建组合面板' } as any);
     const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭组合面板编辑器' } as any) as HTMLButtonElement;
@@ -1745,7 +1746,7 @@ export function mountConfig(root: HTMLElement): void {
 
   function openBlindBoxAppearanceEditor(): void {
     root.querySelector('.blind-box-appearance-overlay')?.remove();
-    const appearance = cloneBlindBoxDisplayAppearance(state.blindBoxDisplay);
+    const appearance = normalizeBlindBoxDisplayAppearance(state.blindBoxDisplay, state.settings);
     const overlay = el('div', { class: 'overlay blind-box-appearance-overlay' });
     const dialog = el('section', { class: 'card display-scene-dialog blind-box-appearance-dialog', role: 'dialog', ariaLabel: '盲盒盈亏榜 OBS 外观' } as any);
     const close = (): void => { overlay.remove(); };
@@ -1900,7 +1901,7 @@ export function mountConfig(root: HTMLElement): void {
     const original = index === undefined ? undefined : state.giftKpiPanels[index];
     let items = original?.items.map((item) => ({ ...item })) ?? [];
     let layout: GiftKpiLayout = original?.layout ?? 'grid';
-    const appearance = cloneDisplayAppearance(original?.appearance);
+    const appearance = normalizeDisplayAppearance(original?.appearance, state.settings);
     const overlay = el('div', { class: 'overlay gift-kpi-editor-overlay' });
     const dialog = el('section', { class: 'card gift-kpi-editor', role: 'dialog', ariaLabel: original ? '编辑礼物目标面板' : '新建礼物目标面板' } as any);
     const close = (): void => { overlay.remove(); };
@@ -2603,11 +2604,11 @@ export function mountConfig(root: HTMLElement): void {
     formatSelect.innerHTML = '<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字 + 后缀</option>';
     formatSelect.value = original?.format ?? 'hhmmss';
     const displayConfig: AttributeDisplay = original?.display
-      ? { ...original.display, appearance: cloneDisplayAppearance(original.display.appearance, original.display.themeId), valueMappings: original.display.valueMappings?.map((mapping) => ({ ...mapping })) }
+      ? { ...original.display, appearance: normalizeDisplayAppearance(original.display.appearance, state.settings, original.display.themeId), valueMappings: original.display.valueMappings?.map((mapping) => ({ ...mapping })) }
       : {
         variant: formatSelect.value === 'hhmmss' ? 'timer' : 'number',
         themeId: state.settings.defaultDisplayThemeId,
-        appearance: cloneDisplayAppearance(),
+        appearance: normalizeDisplayAppearance(undefined, state.settings),
         title: original?.name ?? '',
       };
     const suffixInput = inputField('数值后缀', original?.suffix ?? '');
@@ -3613,7 +3614,7 @@ export function mountConfig(root: HTMLElement): void {
         confirmOutputPreviewButton,
     ]);
     outputLessonCard.dataset.tutorialLesson = 'appearance';
-    const attributeAppearance = displayConfig.appearance ?? cloneDisplayAppearance(undefined, displayConfig.themeId);
+    const attributeAppearance = displayConfig.appearance ?? normalizeDisplayAppearance(undefined, state.settings, displayConfig.themeId);
     displayConfig.appearance = attributeAppearance;
     const attributeAppearanceControl = createDisplayAppearanceControl(
       attributeAppearance,
@@ -4326,29 +4327,6 @@ export function mountConfig(root: HTMLElement): void {
     appendGroup('排行榜面板', '盲盒盈亏榜可在数据中心选择统计范围。', leaderboardGrid);
 
     content.append(section);
-  }
-
-  function cloneDisplayAppearance(
-    appearance?: Partial<DisplayAppearance>,
-    fallbackThemeId: DisplayThemeId = state.settings.defaultDisplayThemeId,
-  ): DisplayAppearance {
-    return {
-      themeId: appearance?.themeId ?? fallbackThemeId,
-      fontSize: appearance?.fontSize ?? state.settings.fontSize,
-      accentColor: appearance?.accentColor ?? state.settings.accentColor,
-      showConnection: appearance?.showConnection ?? state.settings.showConnection,
-      align: appearance?.align ?? state.settings.align,
-      panelOpacity: appearance?.panelOpacity ?? state.settings.panelOpacity,
-    };
-  }
-
-  function cloneBlindBoxDisplayAppearance(
-    appearance: Partial<BlindBoxDisplayAppearance>,
-  ): BlindBoxDisplayAppearance {
-    return {
-      ...cloneDisplayAppearance(appearance),
-      viewerSlots: Math.min(10, Math.max(1, Math.trunc(Number(appearance.viewerSlots) || 3))),
-    };
   }
 
   function createDisplayAppearanceControl(

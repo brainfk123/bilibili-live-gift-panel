@@ -1,8 +1,13 @@
-import { AppState, AttributeValueMapping, BlindBoxDisplayAppearance, DisplayAppearance, MAX_LOG } from './types';
+import { AppState, AttributeValueMapping, MAX_LOG } from './types';
 import { normalizeDisplayThemeId } from './display-themes';
 import { normalizeDisplayScenes } from './display-scenes';
 import { normalizeActivities } from './activities';
 import { normalizeTrainingTopicIds } from './training';
+import {
+  normalizeBlindBoxDisplayAppearance,
+  normalizeDisplayAppearance,
+  normalizeGiftTargetLayout,
+} from './output-config';
 
 const CONFIG_ENDPOINT = '/api/config';
 const CONFIG_BACKUP_SCHEMA_VERSION = 3;
@@ -374,42 +379,11 @@ function normalizeGiftKpiPanels(input: AppState['giftKpiPanels'] | undefined, se
     return [{
       id,
       name,
-      layout: ['stack', 'dashboard'].includes(candidate.layout) ? candidate.layout : 'grid',
+      layout: normalizeGiftTargetLayout(candidate.layout),
       items,
       appearance: normalizeDisplayAppearance(candidate.appearance, settings),
     }];
   });
-}
-
-function normalizeDisplayAppearance(
-  appearance: Partial<DisplayAppearance> | undefined,
-  settings: AppState['settings'],
-  fallbackThemeId: unknown = settings.defaultDisplayThemeId,
-): DisplayAppearance {
-  const fontSize = Number(appearance?.fontSize ?? settings.fontSize);
-  const panelOpacity = Number(appearance?.panelOpacity ?? settings.panelOpacity);
-  const accentColor = String(appearance?.accentColor ?? settings.accentColor);
-  const align = appearance?.align ?? settings.align;
-  return {
-    themeId: normalizeDisplayThemeId(appearance?.themeId ?? fallbackThemeId),
-    fontSize: Math.min(96, Math.max(24, Number.isFinite(fontSize) ? fontSize : 48)),
-    accentColor: /^#[0-9a-f]{6}$/i.test(accentColor) ? accentColor : '#fb7299',
-    showConnection: appearance?.showConnection ?? settings.showConnection,
-    align: align === 'left' || align === 'right' ? align : 'center',
-    panelOpacity: Math.min(100, Math.max(10, Number.isFinite(panelOpacity) ? panelOpacity : 55)),
-  };
-}
-
-function normalizeBlindBoxDisplayAppearance(
-  appearance: Partial<BlindBoxDisplayAppearance> | undefined,
-  settings: AppState['settings'],
-): BlindBoxDisplayAppearance {
-  const normalized = normalizeDisplayAppearance(appearance, settings);
-  const viewerSlots = Number(appearance?.viewerSlots ?? 3);
-  return {
-    ...normalized,
-    viewerSlots: Math.min(10, Math.max(1, Number.isFinite(viewerSlots) ? Math.trunc(viewerSlots) : 3)),
-  };
 }
 
 function markDisplayAppearanceMigrationRequired(field: StateFieldKey): void {
