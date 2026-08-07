@@ -2301,6 +2301,10 @@ describe('single-page configuration rendering', () => {
   it('renders backend-owned contribution, rule-hit, and blind-box rankings', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state('88888888', 1),
+      giftCatalog: [
+        { id: 990001, name: '心动盲盒', price: 9000, coinType: 'gold', imgBasic: 'https://example.com/heart-box.png' },
+        { id: 990002, name: '小熊虫盲盒', price: 9000, coinType: 'gold', imgBasic: 'https://example.com/bear-box.png' },
+      ],
       contributions: {
         updatedAt: 200,
         viewers: [
@@ -2309,7 +2313,7 @@ describe('single-page configuration rendering', () => {
             ruleTriggers: 3, attributeDeltas: { 加班时间: 180 }, blindBoxCount: 2,
             blindBoxCost: 18000, blindBoxValue: 24000, blindBoxProfit: 6000, lastGiftAt: 200,
             blindBoxes: [{
-              giftId: 35800, giftName: '心动盲盒', count: 2, cost: 18000, value: 24000,
+              giftId: 990001, giftName: '心动盲盒', count: 2, cost: 18000, value: 24000,
               profit: 6000, lastGiftAt: 200,
             }],
           },
@@ -2318,7 +2322,7 @@ describe('single-page configuration rendering', () => {
             ruleTriggers: 0, attributeDeltas: {}, blindBoxCount: 1,
             blindBoxCost: 9000, blindBoxValue: 4000, blindBoxProfit: -5000, lastGiftAt: 100,
             blindBoxes: [{
-              giftId: 35900, giftName: '小熊虫盲盒', count: 1, cost: 9000, value: 4000,
+              giftId: 990002, giftName: '小熊虫盲盒', count: 1, cost: 9000, value: 4000,
               profit: -5000, lastGiftAt: 100,
             }],
           },
@@ -2340,11 +2344,22 @@ describe('single-page configuration rendering', () => {
     const blindText = textOf(root.querySelector('.contribution-list-host') as TestElement);
     expect(blindText).toContain('+6,000');
     expect(blindText).toContain('-5,000');
-    const scopeSelect = root.querySelector('.blind-box-scope-select') as TestElement & { onchange?: () => void };
-    scopeSelect.value = '35800';
-    scopeSelect.onchange?.();
+    const scopeOptions = root.querySelectorAll('.blind-box-scope-option');
+    expect(scopeOptions).toHaveLength(3);
+    expect(scopeOptions.map((option) => textOf(option))).toEqual([
+      expect.stringContaining('全部盲盒'),
+      expect.stringContaining('心动盲盒'),
+      expect.stringContaining('小熊虫盲盒'),
+    ]);
+    const scopeImages = root.querySelectorAll('.blind-box-scope-option-image') as Array<TestElement & { src?: string }>;
+    expect(scopeImages.map((image) => image.src)).toEqual([
+      'https://example.com/heart-box.png',
+      'https://example.com/bear-box.png',
+    ]);
+    scopeOptions[1].onclick?.();
     expect(root.querySelectorAll('.contribution-row')).toHaveLength(1);
     expect(textOf(root.querySelector('.blind-box-scope-bar') as TestElement)).toContain('心动盲盒 · 1 位观众 · 2 个');
+    expect(textOf(root.querySelector('.blind-box-scope-trigger') as TestElement)).toContain('心动盲盒');
     expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('+6,000');
     expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).not.toContain('-5,000');
   });
@@ -2354,7 +2369,8 @@ describe('single-page configuration rendering', () => {
 
     expect(configCss).toMatch(/\.blind-box-scope-bar\s*\{[^}]*grid-template-columns:\s*minmax\(360px, 520px\) minmax\(0, 1fr\);/);
     expect(configCss).toMatch(/\.blind-box-scope-field\s*\{[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\);/);
-    expect(configCss).toMatch(/\.blind-box-scope-select\s*\{[^}]*width:\s*100%;[^}]*padding:\s*6px 36px 6px 11px;/);
+    expect(configCss).toMatch(/\.blind-box-scope-picker\s*\{[^}]*position:\s*relative;[^}]*width:\s*100%;/);
+    expect(configCss).toMatch(/\.blind-box-scope-trigger\s*\{[^}]*grid-template-columns:\s*36px minmax\(0, 1fr\) 18px;/);
   });
 
   it('preserves disabled rules when an attribute is edited and saved', async () => {

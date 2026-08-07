@@ -1992,24 +1992,103 @@ export function mountConfig(root: HTMLElement): void {
     ]));
 
     const modeTabs = el('div', { class: 'contribution-tabs', role: 'tablist', ariaLabel: '排行榜类型' } as any);
-    const blindBoxScopeSelect = el('select', {
-      class: 'field-input blind-box-scope-select',
+    type BlindBoxScope = (typeof blindBoxScopes)[number];
+    const resolveBlindBoxGift = (scope: BlindBoxScope): GiftInfo | undefined => {
+      const gift = findGift(state, scope.giftId);
+      if (gift?.imgBasic) return gift;
+      return [...state.giftCatalog, ...state.recentGifts, ...builtinCatalog]
+        .find((candidate) => candidate.name === scope.giftName && candidate.imgBasic);
+    };
+    const createBlindBoxScopeVisual = (
+      scope: BlindBoxScope | undefined,
+      variant: 'trigger' | 'option',
+    ): HTMLElement => {
+      const visual = el('span', {
+        class: `blind-box-scope-icon blind-box-scope-${variant}-icon${scope ? '' : ' is-all'}`,
+        ariaHidden: 'true',
+      } as any);
+      if (!scope) {
+        visual.append(el('span', { class: 'blind-box-scope-all-symbol', text: '🎁' }));
+        return visual;
+      }
+      const gift = resolveBlindBoxGift(scope);
+      if (!gift?.imgBasic) {
+        visual.classList.add('is-placeholder');
+        visual.append(el('span', { class: 'blind-box-scope-placeholder', text: '🎁' }));
+        return visual;
+      }
+      const image = el('img', {
+        class: `blind-box-scope-image blind-box-scope-${variant}-image`,
+        alt: '',
+        referrerPolicy: 'no-referrer',
+      }) as HTMLImageElement;
+      image.src = gift.imgBasic;
+      image.onerror = () => {
+        image.remove();
+        visual.classList.add('is-placeholder');
+        visual.append(el('span', { class: 'blind-box-scope-placeholder', text: '🎁' }));
+      };
+      visual.append(image);
+      return visual;
+    };
+    const blindBoxScopePicker = el('details', { class: 'blind-box-scope-picker' }) as HTMLDetailsElement;
+    const blindBoxScopeTriggerIcon = el('span', { class: 'blind-box-scope-trigger-icon-host' });
+    const blindBoxScopeTriggerName = el('strong', { class: 'blind-box-scope-trigger-name' });
+    const blindBoxScopeTriggerCount = el('small', { class: 'blind-box-scope-trigger-count' });
+    const blindBoxScopeTrigger = el('summary', {
+      class: 'blind-box-scope-trigger',
+      ariaLabel: '选择盲盒统计范围',
+    } as any, [
+      blindBoxScopeTriggerIcon,
+      el('span', { class: 'blind-box-scope-trigger-copy' }, [
+        blindBoxScopeTriggerName,
+        blindBoxScopeTriggerCount,
+      ]),
+      el('span', { class: 'blind-box-scope-chevron', ariaHidden: 'true' } as any),
+    ]);
+    const blindBoxScopeMenu = el('div', {
+      class: 'blind-box-scope-menu',
+      role: 'listbox',
       ariaLabel: '盲盒统计范围',
-    } as any) as HTMLSelectElement;
-    blindBoxScopeSelect.append(
-      el('option', { value: '', text: '全部盲盒' }),
-      ...blindBoxScopes.map((scope) => el('option', {
-        value: String(scope.giftId),
-        text: `${scope.giftName}（${formatLedgerNumber(scope.count)} 个）`,
-      })),
+    } as any);
+    const blindBoxScopeOptions: HTMLButtonElement[] = [];
+    const createBlindBoxScopeOption = (scope?: BlindBoxScope): HTMLButtonElement => {
+      const option = el('button', {
+        class: 'blind-box-scope-option',
+        type: 'button',
+        role: 'option',
+      } as any, [
+        createBlindBoxScopeVisual(scope, 'option'),
+        el('span', { class: 'blind-box-scope-option-name', text: scope?.giftName ?? '全部盲盒' }),
+        el('span', {
+          class: 'blind-box-scope-option-count',
+          text: scope ? `${formatLedgerNumber(scope.count)} 个` : `${formatLedgerNumber(blindBoxLeaderboard.summary.blindBoxCount)} 个`,
+        }),
+      ]) as HTMLButtonElement;
+      option.dataset.giftId = scope ? String(scope.giftId) : '';
+      option.onclick = () => {
+        leaderboardBlindBoxGiftId = scope?.giftId;
+        blindBoxScopePicker.open = false;
+        renderRows();
+      };
+      blindBoxScopeOptions.push(option);
+      return option;
+    };
+    blindBoxScopeMenu.append(
+      createBlindBoxScopeOption(),
+      ...blindBoxScopes.map((scope) => createBlindBoxScopeOption(scope)),
     );
-    blindBoxScopeSelect.value = leaderboardBlindBoxGiftId ? String(leaderboardBlindBoxGiftId) : '';
-    blindBoxScopeSelect.disabled = blindBoxScopes.length === 0;
+    blindBoxScopePicker.onkeydown = (event) => {
+      if (event.key !== 'Escape') return;
+      blindBoxScopePicker.open = false;
+      blindBoxScopeTrigger.focus();
+    };
+    blindBoxScopePicker.append(blindBoxScopeTrigger, blindBoxScopeMenu);
     const blindBoxScopeSummary = el('span', { class: 'blind-box-scope-summary' });
     const blindBoxScopeBar = el('div', { class: 'blind-box-scope-bar' }, [
-      el('label', { class: 'blind-box-scope-field' }, [
+      el('div', { class: 'blind-box-scope-field' }, [
         el('span', { text: '统计范围' }),
-        blindBoxScopeSelect,
+        blindBoxScopePicker,
       ]),
       blindBoxScopeSummary,
     ]);
@@ -2028,6 +2107,16 @@ export function mountConfig(root: HTMLElement): void {
       const selectedScope = blindBoxScopes.find((scope) => scope.giftId === leaderboardBlindBoxGiftId);
       const scopedLeaderboard = buildBlindBoxLeaderboard(state.contributions, Number.POSITIVE_INFINITY, leaderboardBlindBoxGiftId);
       blindBoxScopeBar.classList.toggle('is-hidden', leaderboardMode !== 'blind-box');
+      blindBoxScopeTriggerIcon.replaceChildren(createBlindBoxScopeVisual(selectedScope, 'trigger'));
+      blindBoxScopeTriggerName.textContent = selectedScope?.giftName ?? '全部盲盒';
+      blindBoxScopeTriggerCount.textContent = selectedScope
+        ? `${formatLedgerNumber(selectedScope.count)} 个`
+        : `${formatLedgerNumber(scopedLeaderboard.summary.blindBoxCount)} 个盲盒`;
+      for (const option of blindBoxScopeOptions) {
+        const active = option.dataset.giftId === (leaderboardBlindBoxGiftId ? String(leaderboardBlindBoxGiftId) : '');
+        option.classList.toggle('is-selected', active);
+        option.setAttribute('aria-selected', String(active));
+      }
       blindBoxScopeSummary.textContent = `${selectedScope?.giftName ?? '全部盲盒'} · ${formatLedgerNumber(scopedLeaderboard.summary.viewerCount)} 位观众 · ${formatLedgerNumber(scopedLeaderboard.summary.blindBoxCount)} 个 · 投入 ${formatLedgerNumber(scopedLeaderboard.summary.cost)} · 开出 ${formatLedgerNumber(scopedLeaderboard.summary.value)} · 净盈亏 ${formatSignedLedgerNumber(scopedLeaderboard.summary.profit)}`;
       copyObsButton.textContent = leaderboardBlindBoxGiftId ? '复制此盲盒 OBS 链接' : '复制 OBS 链接';
       const ranked = rankContributors(viewers, leaderboardMode, leaderboardBlindBoxGiftId);
@@ -2060,11 +2149,6 @@ export function mountConfig(root: HTMLElement): void {
       };
       modeTabs.append(button);
     }
-    blindBoxScopeSelect.onchange = () => {
-      const giftId = Number(blindBoxScopeSelect.value);
-      leaderboardBlindBoxGiftId = Number.isInteger(giftId) && giftId > 0 ? giftId : undefined;
-      renderRows();
-    };
     section.append(modeTabs, blindBoxScopeBar, listHost);
     renderRows();
     appendOrReplaceSection(section, '.contribution-section', replaceExisting);

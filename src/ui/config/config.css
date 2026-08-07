@@ -2723,7 +2723,107 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .blind-box-scope-bar.is-hidden { display: none; }
 .config-root .blind-box-scope-field { display: grid; grid-template-columns: auto minmax(0, 1fr); min-width: 0; align-items: center; gap: 9px; }
 .config-root .blind-box-scope-field > span { color: var(--text-dim); font-size: var(--type-meta); font-weight: 700; white-space: nowrap; }
-.config-root .blind-box-scope-select { width: 100%; min-width: 0; height: 36px; padding: 6px 36px 6px 11px; font-size: var(--type-meta); }
+.config-root .blind-box-scope-picker { position: relative; width: 100%; min-width: 0; }
+.config-root .blind-box-scope-trigger {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 18px;
+  width: 100%;
+  min-height: 44px;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 4px 9px 4px 5px;
+  background: var(--input-bg);
+  color: var(--text);
+  cursor: pointer;
+  list-style: none;
+}
+.config-root .blind-box-scope-trigger::-webkit-details-marker { display: none; }
+.config-root .blind-box-scope-trigger:hover,
+.config-root .blind-box-scope-trigger:focus-visible,
+.config-root .blind-box-scope-picker[open] .blind-box-scope-trigger {
+  border-color: var(--accent);
+  outline: none;
+}
+.config-root .blind-box-scope-trigger-icon-host,
+.config-root .blind-box-scope-icon {
+  display: grid;
+  place-items: center;
+}
+.config-root .blind-box-scope-icon {
+  width: 34px;
+  height: 34px;
+  overflow: visible;
+}
+.config-root .blind-box-scope-image {
+  display: block;
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+  filter: drop-shadow(0 3px 4px rgb(0 0 0 / 26%));
+}
+.config-root .blind-box-scope-all-symbol,
+.config-root .blind-box-scope-placeholder { font-size: 23px; line-height: 1; }
+.config-root .blind-box-scope-trigger-copy { display: grid; min-width: 0; gap: 1px; text-align: left; }
+.config-root .blind-box-scope-trigger-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--type-meta);
+  line-height: 1.25;
+}
+.config-root .blind-box-scope-trigger-count { color: var(--text-dim); font-size: 11px; line-height: 1.2; }
+.config-root .blind-box-scope-chevron {
+  width: 9px;
+  height: 9px;
+  justify-self: center;
+  border-right: 2px solid var(--text-dim);
+  border-bottom: 2px solid var(--text-dim);
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform 150ms ease;
+}
+.config-root .blind-box-scope-picker[open] .blind-box-scope-chevron { transform: translateY(2px) rotate(225deg); }
+.config-root .blind-box-scope-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  left: 0;
+  display: grid;
+  width: 100%;
+  min-width: 300px;
+  max-height: 280px;
+  overflow-y: auto;
+  gap: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 6px;
+  background: var(--card);
+  box-shadow: 0 16px 36px rgb(0 0 0 / 38%);
+}
+.config-root .blind-box-scope-option {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  width: 100%;
+  min-height: 50px;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 4px 9px 4px 5px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.config-root .blind-box-scope-option:hover,
+.config-root .blind-box-scope-option:focus-visible { border-color: var(--border-strong); background: var(--input-bg); outline: none; }
+.config-root .blind-box-scope-option.is-selected { border-color: var(--accent); background: var(--accent-soft); }
+.config-root .blind-box-scope-option .blind-box-scope-icon { width: 40px; height: 40px; }
+.config-root .blind-box-scope-option-image { width: 38px; height: 38px; }
+.config-root .blind-box-scope-option-name { min-width: 0; overflow-wrap: anywhere; font-size: var(--type-meta); font-weight: 700; }
+.config-root .blind-box-scope-option-count { color: var(--text-dim); font-size: var(--type-meta); white-space: nowrap; }
+.config-root .blind-box-scope-option.is-selected .blind-box-scope-option-count { color: var(--accent-text); }
 .config-root .blind-box-scope-summary {
   min-width: 0;
   overflow: hidden;
