@@ -1,4 +1,4 @@
-import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftKpiBarStyle, GiftKpiLayout, GiftKpiPanel, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
+import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, BlindBoxDisplayAppearance, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftKpiBarStyle, GiftKpiLayout, GiftKpiPanel, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
 import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { bindFloatingDetailCard, el, fieldControl, inputField, setFloatingDetailGuideExpanded, toast } from '../common';
@@ -1673,7 +1673,7 @@ export function mountConfig(root: HTMLElement): void {
 
   function openBlindBoxAppearanceEditor(): void {
     root.querySelector('.blind-box-appearance-overlay')?.remove();
-    const appearance = cloneDisplayAppearance(state.blindBoxDisplay);
+    const appearance = cloneBlindBoxDisplayAppearance(state.blindBoxDisplay);
     const overlay = el('div', { class: 'overlay blind-box-appearance-overlay' });
     const dialog = el('section', { class: 'card display-scene-dialog blind-box-appearance-dialog', role: 'dialog', ariaLabel: '盲盒盈亏榜 OBS 外观' } as any);
     const close = (): void => { overlay.remove(); };
@@ -1705,6 +1705,42 @@ export function mountConfig(root: HTMLElement): void {
       overlay.dataset.pointerOutside = 'false';
       if (shouldClose) close();
     };
+    const viewerSlotsOutput = el('output', {
+      class: 'setting-value',
+      text: `${appearance.viewerSlots} 个`,
+    });
+    const viewerSlotsRange = el('input', {
+      class: 'setting-range blind-box-viewer-slots-range',
+      type: 'range',
+      value: String(appearance.viewerSlots),
+    }) as HTMLInputElement;
+    viewerSlotsRange.dataset.fieldLabel = '观众 ID 栏位';
+    viewerSlotsRange.setAttribute('min', '1');
+    viewerSlotsRange.setAttribute('max', '10');
+    viewerSlotsRange.setAttribute('step', '1');
+    const updateViewerSlots = (): void => {
+      const next = Math.min(10, Math.max(1, Math.trunc(Number(viewerSlotsRange.value) || 3)));
+      appearance.viewerSlots = next;
+      viewerSlotsOutput.textContent = `${next} 个`;
+      viewerSlotsRange.style.setProperty('--range-progress', `${((next - 1) / 9) * 100}%`);
+    };
+    viewerSlotsRange.oninput = updateViewerSlots;
+    updateViewerSlots();
+    const viewerSlotsControl = el('section', { class: 'blind-box-viewer-slots-control' }, [
+      el('div', { class: 'display-scene-editor-heading' }, [
+        el('div', {}, [
+          el('h3', { text: '观众 ID 栏位' }),
+          el('p', { text: '设置 OBS 中同时显示的观众 ID 数量；超出栏位后排行榜会自动滚动。' }),
+        ]),
+      ]),
+      el('label', { class: 'field setting-control range-setting' }, [
+        el('span', { class: 'setting-control-head' }, [
+          el('span', { class: 'field-label', text: '显示数量（1–10）' }),
+          viewerSlotsOutput,
+        ]),
+        viewerSlotsRange,
+      ]),
+    ]);
     dialog.append(
       el('header', { class: 'display-scene-dialog-header' }, [
         el('div', {}, [
@@ -1715,6 +1751,7 @@ export function mountConfig(root: HTMLElement): void {
         closeButton,
       ]),
       el('div', { class: 'display-scene-dialog-body' }, [
+        viewerSlotsControl,
         createDisplayAppearanceControl(appearance, '面板外观', '字体、颜色、位置和透明度都只属于这个面板。'),
       ]),
       el('footer', { class: 'modal-actions display-scene-dialog-actions' }, [cancelButton, saveButton]),
@@ -4061,6 +4098,15 @@ export function mountConfig(root: HTMLElement): void {
       showConnection: appearance?.showConnection ?? state.settings.showConnection,
       align: appearance?.align ?? state.settings.align,
       panelOpacity: appearance?.panelOpacity ?? state.settings.panelOpacity,
+    };
+  }
+
+  function cloneBlindBoxDisplayAppearance(
+    appearance: Partial<BlindBoxDisplayAppearance>,
+  ): BlindBoxDisplayAppearance {
+    return {
+      ...cloneDisplayAppearance(appearance),
+      viewerSlots: Math.min(10, Math.max(1, Math.trunc(Number(appearance.viewerSlots) || 3))),
     };
   }
 

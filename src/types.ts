@@ -15,6 +15,11 @@ export interface DisplayAppearance {
   panelOpacity: number;
 }
 
+export interface BlindBoxDisplayAppearance extends DisplayAppearance {
+  /** Number of viewer rows visible at once before the leaderboard scrolls. */
+  viewerSlots: number;
+}
+
 export interface DisplayScene {
   id: string;
   name: string;
@@ -310,7 +315,7 @@ export interface AppState {
   roomId: string;
   attributes: Attribute[];
   displayScenes: DisplayScene[];
-  blindBoxDisplay: DisplayAppearance;
+  blindBoxDisplay: BlindBoxDisplayAppearance;
   giftKpiPanels: GiftKpiPanel[];
   activities: ActivitySession[];
   rules: GiftRule[];

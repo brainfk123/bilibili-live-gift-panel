@@ -14,7 +14,7 @@ describe('storage', () => {
     expect(s.rules).toEqual([]);
     expect(s.contributions).toEqual({ viewers: [] });
     expect(s.giftKpiPanels).toEqual([]);
-    expect(s.blindBoxDisplay).toEqual(expect.objectContaining({ themeId: 'glass', fontSize: 48, panelOpacity: 55 }));
+    expect(s.blindBoxDisplay).toEqual(expect.objectContaining({ themeId: 'glass', fontSize: 48, panelOpacity: 55, viewerSlots: 3 }));
     expect(s.settings.panelOpacity).toBe(55);
     expect(s.settings.trainingCompletedTopics).toEqual([]);
     expect(s.settings.lastSeenChangelogVersion).toBe('');
@@ -173,9 +173,22 @@ describe('storage', () => {
       themeId: 'kawaii', fontSize: 66, accentColor: '#123456', showConnection: false, align: 'right', panelOpacity: 72,
     });
     expect(loaded.blindBoxDisplay).toEqual({
-      themeId: 'neon', fontSize: 66, accentColor: '#123456', showConnection: false, align: 'right', panelOpacity: 72,
+      themeId: 'neon', fontSize: 66, accentColor: '#123456', showConnection: false, align: 'right', panelOpacity: 72, viewerSlots: 3,
     });
     expect(consumeConfigMigrationRequired()).toBe(true);
+  });
+
+  it('clamps blind-box viewer slots to the supported 1–10 range', async () => {
+    const serverState = defaultState();
+    serverState.blindBoxDisplay.viewerSlots = 99;
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(serverState)));
+
+    await hydrateStateFromServer();
+    expect(loadState().blindBoxDisplay.viewerSlots).toBe(10);
+
+    serverState.blindBoxDisplay.viewerSlots = -4;
+    await refreshStateFromServer();
+    expect(loadState().blindBoxDisplay.viewerSlots).toBe(1);
   });
 
   it('infers replay mode for a complete legacy configuration with reset tutorial progress', async () => {

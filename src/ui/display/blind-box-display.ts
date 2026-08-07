@@ -12,7 +12,6 @@ import {
 } from './currency';
 
 const MAX_RANKED_VIEWERS = 100;
-const VISIBLE_VIEWER_ROWS = 3;
 const ROW_DWELL_MS = 1_400;
 const EDGE_PAUSE_MS = 3_200;
 const ROW_TRANSITION_MS = 700;
@@ -60,6 +59,7 @@ export function mountBlindBoxDisplay(root: HTMLElement, blindBoxGiftId?: number)
       .find((scope) => scope.giftId === blindBoxGiftId);
     const scopeName = blindBoxGiftId ? selectedScope?.giftName ?? `盲盒 ${blindBoxGiftId}` : '全部盲盒';
     const appearance = state.blindBoxDisplay;
+    const viewerSlots = normalizeViewerSlots(state.blindBoxDisplay.viewerSlots);
     const theme = getDisplayTheme(appearance.themeId);
     const panel = el('main', { class: 'panel blind-box-panel' });
     panel.dataset.theme = theme.id;
@@ -102,7 +102,7 @@ export function mountBlindBoxDisplay(root: HTMLElement, blindBoxGiftId?: number)
       viewport.append(list);
       panel.append(viewport);
       globalThis.queueMicrotask(() => {
-        if (renderVersion === leaderboardRenderVersion) startLeaderboardScroll(viewport, list, leaderboard.viewers.length);
+        if (renderVersion === leaderboardRenderVersion) startLeaderboardScroll(viewport, list, leaderboard.viewers.length, viewerSlots);
       });
     }
 
@@ -128,14 +128,14 @@ export function mountBlindBoxDisplay(root: HTMLElement, blindBoxGiftId?: number)
     }
   }
 
-  function startLeaderboardScroll(viewport: HTMLElement, track: HTMLElement, rowCount: number): void {
+  function startLeaderboardScroll(viewport: HTMLElement, track: HTMLElement, rowCount: number, viewerSlots: number): void {
     const rows = Array.from(track.querySelectorAll<HTMLElement>('.blind-box-row'));
     if (rows.length === 0) return;
-    const visibleRows = Math.min(VISIBLE_VIEWER_ROWS, rows.length);
+    const visibleRows = Math.min(viewerSlots, rows.length);
     const rowOffsets = rows.map((row) => row.offsetTop - rows[0].offsetTop);
     const visibleHeight = rows.slice(0, visibleRows).reduce((height, row) => height + row.offsetHeight, 0);
     if (visibleHeight <= 0) {
-      leaderboardScrollTimer = globalThis.setTimeout(() => startLeaderboardScroll(viewport, track, rowCount), 80);
+      leaderboardScrollTimer = globalThis.setTimeout(() => startLeaderboardScroll(viewport, track, rowCount, viewerSlots), 80);
       return;
     }
 
@@ -209,6 +209,11 @@ export function mountBlindBoxDisplay(root: HTMLElement, blindBoxGiftId?: number)
       stopLeaderboardScroll();
     }, { once: true });
   }
+}
+
+function normalizeViewerSlots(value: number | undefined): number {
+  const normalized = Number(value);
+  return Math.min(10, Math.max(1, Number.isFinite(normalized) ? Math.trunc(normalized) : 3));
 }
 
 function viewerRow(viewer: ViewerContribution, rank: number): HTMLElement {

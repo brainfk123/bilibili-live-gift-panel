@@ -2711,7 +2711,7 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .contribution-tab.is-active { background: var(--accent-soft); color: var(--accent-text); }
 .config-root .blind-box-scope-bar {
   display: grid;
-  grid-template-columns: minmax(360px, 520px) minmax(0, 1fr);
+  grid-template-columns: max-content minmax(0, 1fr);
   min-width: 0;
   align-items: center;
   gap: 14px;
@@ -2721,9 +2721,9 @@ body.config-mode::-webkit-scrollbar-corner,
   background: color-mix(in srgb, var(--accent-soft) 42%, var(--input-bg));
 }
 .config-root .blind-box-scope-bar.is-hidden { display: none; }
-.config-root .blind-box-scope-field { display: grid; grid-template-columns: auto minmax(0, 1fr); min-width: 0; align-items: center; gap: 9px; }
+.config-root .blind-box-scope-field { display: grid; grid-template-columns: auto max-content; width: max-content; max-width: 100%; min-width: 0; align-items: center; gap: 9px; }
 .config-root .blind-box-scope-field > span { color: var(--text-dim); font-size: var(--type-meta); font-weight: 700; white-space: nowrap; }
-.config-root .blind-box-scope-picker { position: relative; width: 100%; min-width: 0; }
+.config-root .blind-box-scope-picker { position: relative; width: max-content; min-width: 190px; max-width: min(420px, calc(100vw - 150px)); }
 .config-root .blind-box-scope-trigger {
   display: grid;
   grid-template-columns: 36px minmax(0, 1fr) 18px;
@@ -2789,8 +2789,9 @@ body.config-mode::-webkit-scrollbar-corner,
   top: calc(100% + 6px);
   left: 0;
   display: grid;
-  width: 100%;
-  min-width: 300px;
+  width: max-content;
+  min-width: 100%;
+  max-width: min(420px, calc(100vw - 48px));
   max-height: 280px;
   overflow-y: auto;
   gap: 4px;
@@ -2804,6 +2805,7 @@ body.config-mode::-webkit-scrollbar-corner,
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr) auto;
   width: 100%;
+  min-width: max-content;
   min-height: 50px;
   align-items: center;
   gap: 9px;
@@ -2821,7 +2823,7 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .blind-box-scope-option.is-selected { border-color: var(--accent); background: var(--accent-soft); }
 .config-root .blind-box-scope-option .blind-box-scope-icon { width: 40px; height: 40px; }
 .config-root .blind-box-scope-option-image { width: 38px; height: 38px; }
-.config-root .blind-box-scope-option-name { min-width: 0; overflow-wrap: anywhere; font-size: var(--type-meta); font-weight: 700; }
+.config-root .blind-box-scope-option-name { min-width: 0; font-size: var(--type-meta); font-weight: 700; white-space: nowrap; }
 .config-root .blind-box-scope-option-count { color: var(--text-dim); font-size: var(--type-meta); white-space: nowrap; }
 .config-root .blind-box-scope-option.is-selected .blind-box-scope-option-count { color: var(--accent-text); }
 .config-root .blind-box-scope-summary {
@@ -4206,6 +4208,15 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .display-appearance-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .config-root .display-appearance-fields > .setting-switch { align-self: end; min-height: 74px; }
 .config-root .blind-box-appearance-dialog { width: min(920px, calc(100vw - 32px)); }
+.config-root .blind-box-viewer-slots-control {
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  background: var(--bg-soft);
+}
+.config-root .blind-box-viewer-slots-control .range-setting { margin: 0; }
 
 @media (max-width: 760px) {
   .config-root .display-appearance-fields { grid-template-columns: 1fr; }

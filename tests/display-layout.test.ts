@@ -90,7 +90,8 @@ describe('OBS broadcast panel layout', () => {
   });
 
   it('scrolls the blind-box ranking down and back up with pauses at both ends', () => {
-    expect(blindBoxSource).toContain('VISIBLE_VIEWER_ROWS = 3');
+    expect(blindBoxSource).toContain('normalizeViewerSlots(state.blindBoxDisplay.viewerSlots)');
+    expect(blindBoxSource).toContain('Math.min(viewerSlots, rows.length)');
     expect(blindBoxSource).toContain('EDGE_PAUSE_MS = 3_200');
     expect(blindBoxSource).toContain("viewport.dataset.scrollDirection = leaderboardScrollDirection > 0 ? 'down' : 'up'");
     expect(blindBoxSource).toContain('scheduleNext(atEdge ? EDGE_PAUSE_MS : ROW_DWELL_MS)');

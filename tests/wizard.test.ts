@@ -2367,10 +2367,31 @@ describe('single-page configuration rendering', () => {
   it('reserves enough horizontal space for the complete blind-box scope name', () => {
     const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
 
-    expect(configCss).toMatch(/\.blind-box-scope-bar\s*\{[^}]*grid-template-columns:\s*minmax\(360px, 520px\) minmax\(0, 1fr\);/);
-    expect(configCss).toMatch(/\.blind-box-scope-field\s*\{[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\);/);
-    expect(configCss).toMatch(/\.blind-box-scope-picker\s*\{[^}]*position:\s*relative;[^}]*width:\s*100%;/);
+    expect(configCss).toMatch(/\.blind-box-scope-bar\s*\{[^}]*grid-template-columns:\s*max-content minmax\(0, 1fr\);/);
+    expect(configCss).toMatch(/\.blind-box-scope-field\s*\{[^}]*grid-template-columns:\s*auto max-content;[^}]*width:\s*max-content;/);
+    expect(configCss).toMatch(/\.blind-box-scope-picker\s*\{[^}]*position:\s*relative;[^}]*width:\s*max-content;/);
     expect(configCss).toMatch(/\.blind-box-scope-trigger\s*\{[^}]*grid-template-columns:\s*36px minmax\(0, 1fr\) 18px;/);
+    expect(configCss).toMatch(/\.blind-box-scope-menu\s*\{[^}]*width:\s*max-content;[^}]*min-width:\s*100%;/);
+  });
+
+  it('configures 1–10 visible viewer slots for the blind-box OBS leaderboard', async () => {
+    const configured = defaultState();
+    configured.settings.showTutorial = false;
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    root.querySelector('.contribution-obs-appearance')?.onclick?.();
+    const range = root.querySelector('.blind-box-viewer-slots-range') as TestElement & { oninput?: () => void };
+    expect(range.value).toBe('3');
+    range.value = '8';
+    range.oninput?.();
+    expect(textOf(root.querySelector('.blind-box-viewer-slots-control') as TestElement)).toContain('8 个');
+    findByText(root, '保存外观')?.onclick?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(loadState().blindBoxDisplay.viewerSlots).toBe(8);
   });
 
   it('preserves disabled rules when an attribute is edited and saved', async () => {

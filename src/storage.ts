@@ -1,4 +1,4 @@
-import { AppState, AttributeValueMapping, DisplayAppearance, MAX_LOG } from './types';
+import { AppState, AttributeValueMapping, BlindBoxDisplayAppearance, DisplayAppearance, MAX_LOG } from './types';
 import { normalizeDisplayThemeId } from './display-themes';
 import { normalizeDisplayScenes } from './display-scenes';
 import { normalizeActivities } from './activities';
@@ -57,6 +57,7 @@ export const defaultState = (): AppState => ({
     showConnection: true,
     align: 'center',
     panelOpacity: 55,
+    viewerSlots: 3,
   },
   giftKpiPanels: [],
   activities: [],
@@ -305,8 +306,10 @@ function normalizeState(parsed: Partial<AppState>): AppState {
   };
   settings.panelOpacity = Math.min(100, Math.max(10, Number(settings.panelOpacity) || base.settings.panelOpacity));
   settings.defaultDisplayThemeId = normalizeDisplayThemeId(settings.defaultDisplayThemeId);
-  if (parsed.blindBoxDisplay === undefined) markDisplayAppearanceMigrationRequired('blindBoxDisplay');
-  const blindBoxDisplay = normalizeDisplayAppearance(parsed.blindBoxDisplay, settings);
+  if (parsed.blindBoxDisplay === undefined || parsed.blindBoxDisplay.viewerSlots === undefined) {
+    markDisplayAppearanceMigrationRequired('blindBoxDisplay');
+  }
+  const blindBoxDisplay = normalizeBlindBoxDisplayAppearance(parsed.blindBoxDisplay, settings);
   const giftKpiPanels = normalizeGiftKpiPanels(parsed.giftKpiPanels, settings);
   const attributes = (parsed.attributes ?? base.attributes).map((attribute) => (
     attribute.display
@@ -394,6 +397,18 @@ function normalizeDisplayAppearance(
     showConnection: appearance?.showConnection ?? settings.showConnection,
     align: align === 'left' || align === 'right' ? align : 'center',
     panelOpacity: Math.min(100, Math.max(10, Number.isFinite(panelOpacity) ? panelOpacity : 55)),
+  };
+}
+
+function normalizeBlindBoxDisplayAppearance(
+  appearance: Partial<BlindBoxDisplayAppearance> | undefined,
+  settings: AppState['settings'],
+): BlindBoxDisplayAppearance {
+  const normalized = normalizeDisplayAppearance(appearance, settings);
+  const viewerSlots = Number(appearance?.viewerSlots ?? 3);
+  return {
+    ...normalized,
+    viewerSlots: Math.min(10, Math.max(1, Number.isFinite(viewerSlots) ? Math.trunc(viewerSlots) : 3)),
   };
 }
 
