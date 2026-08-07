@@ -90,7 +90,7 @@ interface GiftPickerCatalog {
   hasLiveListingStatus: boolean;
 }
 
-type HeaderActionIcon = 'training' | 'changelog' | 'sun' | 'moon';
+type HeaderActionIcon = 'training' | 'changelog' | 'settings' | 'sun' | 'moon';
 
 function createHeaderActionIcon(kind: HeaderActionIcon): HTMLElement {
   const namespace = 'http://www.w3.org/2000/svg';
@@ -109,6 +109,10 @@ function createHeaderActionIcon(kind: HeaderActionIcon): HTMLElement {
       'M3 12a9 9 0 1 0 3-6.7L3 8',
       'M3 3v5h5',
       'M12 7v5l3 2',
+    ],
+    settings: [
+      'M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z',
+      'M12.2 2h-.4a2 2 0 0 0-2 2v.2a2 2 0 0 1-1 1.7l-.5.3a2 2 0 0 1-2 0l-.1-.1a2 2 0 0 0-2.7.7l-.2.4a2 2 0 0 0 .7 2.7l.2.1a2 2 0 0 1 1 1.7v.6a2 2 0 0 1-1 1.7l-.2.1a2 2 0 0 0-.7 2.7l.2.4a2 2 0 0 0 2.7.7l.1-.1a2 2 0 0 1 2 0l.5.3a2 2 0 0 1 1 1.7v.2a2 2 0 0 0 2 2h.4a2 2 0 0 0 2-2v-.2a2 2 0 0 1 1-1.7l.5-.3a2 2 0 0 1 2 0l.1.1a2 2 0 0 0 2.7-.7l.2-.4a2 2 0 0 0-.7-2.7l-.2-.1a2 2 0 0 1-1-1.7v-.6a2 2 0 0 1 1-1.7l.2-.1a2 2 0 0 0 .7-2.7l-.2-.4a2 2 0 0 0-2.7-.7l-.1.1a2 2 0 0 1-2 0l-.5-.3a2 2 0 0 1-1-1.7V4a2 2 0 0 0-2-2Z',
     ],
     sun: [
       'M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10',
@@ -171,7 +175,6 @@ export function mountConfig(root: HTMLElement): void {
   let changelogAutoEvaluated = false;
   let changelogOpen = false;
   let changelogReleases: ChangelogRelease[] = CHANGELOG_RELEASES;
-  let advancedSettingsOpen = false;
   let loginModalOpen = false;
   let loginPollTimer: ReturnType<typeof globalThis.setInterval> | undefined;
   let localStateVersion = 0;
@@ -188,9 +191,12 @@ export function mountConfig(root: HTMLElement): void {
   const changelogToggle = el('button', { class: 'theme-toggle changelog-toggle', type: 'button' }, [createHeaderActionIcon('changelog')]) as HTMLButtonElement;
   changelogToggle.setAttribute('aria-label', '更新日志');
   changelogToggle.setAttribute('title', '更新日志');
+  const programSettingsToggle = el('button', { class: 'theme-toggle program-settings-toggle', type: 'button' }, [createHeaderActionIcon('settings')]) as HTMLButtonElement;
+  programSettingsToggle.setAttribute('aria-label', '程序与数据');
+  programSettingsToggle.setAttribute('title', '程序与数据');
   const status = el('div', { class: 'app-status' });
   const headerActions = el('div', { class: 'app-header-actions' });
-  headerActions.append(guideToggle, changelogToggle, themeToggle, status);
+  headerActions.append(guideToggle, changelogToggle, programSettingsToggle, themeToggle, status);
   header.append(brand, headerActions);
 
   const content = el('main', { class: 'wizard-content config-page' });
@@ -493,6 +499,9 @@ export function mountConfig(root: HTMLElement): void {
   changelogToggle.onclick = () => {
     openChangelog(currentUpdateStatus.currentVersion);
   };
+  programSettingsToggle.onclick = () => {
+    openProgramSettings();
+  };
 
   function activeTutorialLesson(): TutorialLesson | null {
     return forcedTutorialLesson ?? getTutorialLesson(
@@ -748,7 +757,6 @@ export function mountConfig(root: HTMLElement): void {
     renderGiftKpiPanels();
     renderContributionLeaderboard();
     renderGiftHistory();
-    renderAdvancedSettings();
     renderGuide();
   }
 
@@ -1747,11 +1755,14 @@ export function mountConfig(root: HTMLElement): void {
           ]);
         }));
         const meta = `${panel.items.length} 种礼物 · ${panel.layout === 'grid' ? '信息网格' : panel.layout === 'dashboard' ? '主辅仪表盘' : '纵向清单'}`;
+        const previewItems = panel.items.slice(0, 4);
+        const previewLayout = previewItems.length === 1 ? 'is-single' : previewItems.length === 2 ? 'is-pair' : 'is-grid';
         const cover = el('div', { class: 'gift-kpi-card-cover hover-detail-cover', title: '悬停查看 KPI 面板详情' }, [
-          el('div', { class: 'gift-kpi-card-visual' }, panel.items.slice(0, 4).map((item) => {
-            const pct = Math.min(100, item.received / item.target * 100);
-            return el('i', { style: `--kpi-preview:${pct}%` }, [el('b')]);
-          })),
+          el('div', { class: `gift-kpi-card-visual ${previewLayout}` }, previewItems.map((item) => (
+            item.imageUrl
+              ? el('img', { class: 'gift-kpi-card-preview-image', src: item.imageUrl, alt: `${item.giftName}图标`, referrerPolicy: 'no-referrer' })
+              : el('span', { class: 'gift-kpi-card-preview-image is-placeholder', text: '🎁', ariaHidden: 'true' })
+          ))),
           el('div', { class: 'gift-kpi-card-cover-copy' }, [el('h3', { text: panel.name }), el('small', { text: meta })]),
         ]);
         const details = el('div', { class: 'gift-kpi-card-details hover-detail-panel' }, [
@@ -4032,140 +4043,26 @@ export function mountConfig(root: HTMLElement): void {
     return section;
   }
 
-  function renderAdvancedSettings(): void {
-    const details = el('details', { class: 'advanced-settings' });
-    details.open = advancedSettingsOpen;
-    details.ontoggle = () => { advancedSettingsOpen = details.open; };
-    details.append(el('summary', {}, [
-      el('span', { text: '程序与数据' }),
-      el('small', { text: '自动更新、诊断和配置备份' }),
-    ]));
-    const settingsGrid = el('div', { class: 'advanced-settings-grid' });
-
-    const appearance = el('section', { class: 'workspace-card advanced-card' });
-    appearance.append(el('h3', { text: 'OBS 面板外观' }));
-
-    const defaultThemeControl = createDisplayThemeControl(
-      state.settings.defaultDisplayThemeId,
-      (themeId) => {
-        state.settings.defaultDisplayThemeId = themeId;
-        save();
-      },
-      '新属性默认皮肤',
-      '未单独指定皮肤的属性会使用这里的选择。',
-    );
-
-    const rangeSetting = (
-      label: string,
-      value: number,
-      min: number,
-      max: number,
-      unit: string,
-      commit: (next: number) => void,
-    ): HTMLElement => {
-      const output = el('output', { class: 'setting-value', text: `${value}${unit}` });
-      const range = el('input', {
-        class: 'setting-range',
-        type: 'range',
-        value: String(value),
-      }) as HTMLInputElement;
-      range.dataset.fieldLabel = label;
-      range.setAttribute('min', String(min));
-      range.setAttribute('max', String(max));
-      range.setAttribute('step', '1');
-      const updateVisual = (): number => {
-        const next = Math.min(max, Math.max(min, Number(range.value) || value));
-        output.textContent = `${next}${unit}`;
-        range.style.setProperty('--range-progress', `${((next - min) / (max - min)) * 100}%`);
-        return next;
-      };
-      range.oninput = () => { updateVisual(); };
-      range.onchange = () => {
-        const next = updateVisual();
-        range.value = String(next);
-        commit(next);
-        save();
-      };
-      updateVisual();
-      return el('label', { class: 'field setting-control range-setting' }, [
-        el('span', { class: 'setting-control-head' }, [el('span', { class: 'field-label', text: label }), output]),
-        range,
-      ]);
+  function openProgramSettings(): void {
+    const overlay = el('div', { class: 'overlay program-settings-overlay' });
+    const dialog = el('section', { class: 'card program-settings-dialog', role: 'dialog', ariaLabel: '程序与数据', ariaModal: 'true' } as any);
+    const closeButton = el('button', { class: 'modal-close program-settings-close', type: 'button', text: '×', ariaLabel: '关闭程序与数据' } as any) as HTMLButtonElement;
+    let localUpdateSync: (() => void) | null = null;
+    const close = (): void => {
+      overlay.remove();
+      if (refreshUpdateCard === localUpdateSync) refreshUpdateCard = null;
     };
-
-    const fontSize = rangeSetting('字体大小（px）', state.settings.fontSize, 24, 96, ' px', (next) => {
-      state.settings.fontSize = next;
-    });
-
-    const accentValue = el('output', { class: 'setting-value color-value', text: state.settings.accentColor.toUpperCase() });
-    const accent = el('input', { class: 'setting-color-input', type: 'color', value: state.settings.accentColor }) as HTMLInputElement;
-    accent.dataset.fieldLabel = '强调色';
-    accent.oninput = () => { accentValue.textContent = accent.value.toUpperCase(); };
-    accent.onchange = () => {
-      state.settings.accentColor = accent.value;
-      accentValue.textContent = accent.value.toUpperCase();
-      save();
-    };
-    const accentControl = el('label', { class: 'field setting-control color-setting' }, [
-      el('span', { class: 'setting-control-head' }, [el('span', { class: 'field-label', text: '强调色' }), accentValue]),
-      el('span', { class: 'color-picker-row' }, [accent, el('span', { class: 'color-picker-copy', text: '点击色块选择颜色' })]),
-    ]);
-
-    const alignControl = el('fieldset', { class: 'field setting-control alignment-setting' });
-    alignControl.append(el('legend', { class: 'field-label', text: '对齐' }));
-    const alignOptions = el('div', { class: 'alignment-control', role: 'group', ariaLabel: 'OBS 面板对齐方式' });
-    const alignments: Array<{ value: AppState['settings']['align']; label: string }> = [
-      { value: 'left', label: '左对齐' },
-      { value: 'center', label: '居中' },
-      { value: 'right', label: '右对齐' },
-    ];
-    for (const option of alignments) {
-      const button = el('button', {
-        class: `alignment-option${state.settings.align === option.value ? ' is-active' : ''}`,
-        type: 'button',
-        text: option.label,
-        ariaPressed: String(state.settings.align === option.value),
-      }) as HTMLButtonElement;
-      button.onclick = () => {
-        state.settings.align = option.value;
-        for (const candidate of Array.from(alignOptions.querySelectorAll('.alignment-option'))) {
-          const active = candidate === button;
-          candidate.classList.toggle('is-active', active);
-          candidate.setAttribute('aria-pressed', String(active));
-        }
-        save();
-      };
-      alignOptions.append(button);
-    }
-    alignControl.append(alignOptions);
-
-    const panelOpacity = rangeSetting('面板透明度（%）', state.settings.panelOpacity, 10, 100, '%', (next) => {
-      state.settings.panelOpacity = next;
-    });
-
-    const showConnectionInput = el('input', { class: 'setting-switch-input', type: 'checkbox' }) as HTMLInputElement;
-    showConnectionInput.checked = state.settings.showConnection;
-    showConnectionInput.onchange = () => {
-      state.settings.showConnection = showConnectionInput.checked;
-      save();
-    };
-    const showConnection = el('label', { class: 'setting-switch' }, [
-      showConnectionInput,
-      el('span', { class: 'setting-switch-track', ariaHidden: 'true' }),
-      el('span', { class: 'setting-switch-copy' }, [
-        el('strong', { text: '显示连接状态' }),
-        el('small', { text: '在 OBS 属性面板中显示当前连接状态' }),
+    closeButton.onclick = close;
+    overlay.onclick = (event) => { if (event.target === overlay) close(); };
+    const header = el('header', { class: 'program-settings-header' }, [
+      el('div', {}, [
+        el('span', { class: 'section-kicker', text: '应用设置' }),
+        el('h2', { text: '程序与数据' }),
+        el('p', { text: '备份配置、导出诊断日志，并管理程序自动更新。' }),
       ]),
+      closeButton,
     ]);
-    appearance.append(
-      defaultThemeControl,
-      fontSize,
-      accentControl,
-      alignControl,
-      panelOpacity,
-      showConnection,
-    );
-
+    const body = el('div', { class: 'program-settings-body' });
     const dataCard = el('section', { class: 'workspace-card advanced-card data-settings-card' });
     dataCard.append(
       el('h3', { text: '配置与数据' }),
@@ -4205,6 +4102,7 @@ export function mountConfig(root: HTMLElement): void {
         roomAnchorInfoRoomId = '';
         applyConfigTheme(state.settings.theme);
         save();
+        close();
         render();
         void refreshBiliAuth();
         void refreshRoomAnchorInfo(true);
@@ -4281,7 +4179,7 @@ export function mountConfig(root: HTMLElement): void {
       'up-to-date': '已是最新',
       error: '检查失败',
     };
-    const syncUpdateCard = (): void => {
+    localUpdateSync = (): void => {
       const updateState = currentUpdateStatus.state;
       updateCard.dataset.updateState = updateState;
       versionText.textContent = currentUpdateStatus.currentVersion
@@ -4306,13 +4204,14 @@ export function mountConfig(root: HTMLElement): void {
         ? `上次检查：${new Date(currentUpdateStatus.lastCheckedAt * 1000).toLocaleString('zh-CN')}`
         : '尚未检查';
     };
-    refreshUpdateCard = syncUpdateCard;
-    syncUpdateCard();
+    refreshUpdateCard = localUpdateSync;
+    localUpdateSync();
 
     dataCard.append(updateCard);
-    settingsGrid.append(dataCard);
-    details.append(settingsGrid);
-    content.append(details);
+    body.append(dataCard);
+    dialog.append(header, body);
+    overlay.append(dialog);
+    root.append(overlay);
   }
 
   function renderFormulaHelp(attributeName: string): HTMLElement {

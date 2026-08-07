@@ -1523,19 +1523,31 @@ describe('single-page configuration rendering', () => {
     expect(loadState().settings.tutorialCompletedLessons).toEqual([]);
   });
 
-  it('keeps room, OBS, attributes, and data settings on one page without step navigation', () => {
+  it('keeps live workspaces on one page and opens program settings from the header', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
     expect(root.querySelector('.connection-grid')).not.toBeNull();
     expect(root.querySelector('.obs-card')).toBeNull();
     expect(root.querySelector('.attributes-section')).not.toBeNull();
-    expect(root.querySelector('.advanced-settings')).not.toBeNull();
+    expect(root.querySelector('.advanced-settings')).toBeNull();
+    expect(root.querySelector('.data-settings-card')).toBeNull();
     expect(root.querySelector('.wizard-progress')).toBeNull();
     expect(root.querySelector('.normal-nav')).toBeNull();
     expect(root.querySelectorAll('h1')).toHaveLength(0);
     expect(textOf(root)).not.toContain('一页完成直播配置');
     expect(textOf(root)).not.toContain('把连接、属性和礼物放在同一页');
+
+    const settingsButton = root.querySelector('.program-settings-toggle');
+    expect(settingsButton?.getAttribute('aria-label')).toBe('程序与数据');
+    settingsButton?.onclick?.();
+    expect(root.querySelector('.program-settings-dialog')).not.toBeNull();
+    expect(root.querySelector('.data-settings-card')).not.toBeNull();
+    expect(textOf(root.querySelector('.program-settings-dialog') as TestElement)).toContain('配置与数据');
+    expect(textOf(root.querySelector('.program-settings-dialog') as TestElement)).not.toContain('OBS 面板外观');
+
+    (root.querySelector('.program-settings-close') as TestElement | null)?.onclick?.();
+    expect(root.querySelector('.program-settings-dialog')).toBeNull();
   });
 
   it('shows automatic update status and supports a manual update check', async () => {
@@ -1565,6 +1577,7 @@ describe('single-page configuration rendering', () => {
     vi.stubGlobal('fetch', fetchMock);
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
+    (root.querySelector('.program-settings-toggle') as TestElement | null)?.onclick?.();
 
     expect(root.querySelector('.data-settings-card')?.querySelector('.update-settings-card')).not.toBeNull();
     const diagnosticLogLink = findByText(root, '导出运行日志') as (TestElement & { href?: string; download?: string }) | undefined;
@@ -3013,6 +3026,9 @@ describe('OBS attribute display', () => {
     expect(configCss).toMatch(/\.gift-kpi-editor-items\s*\{[^}]*grid-template-columns:\s*repeat\(2,/);
     expect(configSource.match(/createGiftPickerChoice\(gift,/g)).toHaveLength(2);
     expect(configSource).toContain("class: 'gift-picker-grid gift-kpi-picker-grid'");
+    expect(configSource).toContain("'gift-kpi-card-preview-image'");
+    expect(configCss).toMatch(/\.gift-kpi-config-card\s*\{[^}]*--kpi-card-visual-depth:\s*3px;/);
+    expect(configCss).toMatch(/\.gift-kpi-card-visual\s*\{[^}]*translateZ\(var\(--kpi-card-visual-depth\)\)/);
   });
 });
 
