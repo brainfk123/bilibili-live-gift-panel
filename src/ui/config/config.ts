@@ -1818,26 +1818,65 @@ export function mountConfig(root: HTMLElement): void {
         ]));
       });
     };
-    const giftChoices = el('div', { class: 'gift-kpi-gift-choices' });
-    const availableGifts = Array.from(new Map([...state.recentGifts, ...state.giftCatalog].map((gift) => [gift.id, gift])).values());
-    const renderGiftChoices = (): void => {
-      giftChoices.replaceChildren();
-      for (const gift of availableGifts) {
+    const kpiPickerCatalog = buildGiftPickerCatalog(state, roomGiftCatalog);
+    const giftSearch = el('input', { class: 'field-input gift-search', placeholder: '搜索礼物名称或 ID…' }) as HTMLInputElement;
+    const giftChoices = el('div', { class: 'gift-picker-grid gift-kpi-picker-grid' });
+    const giftSelectionCount = el('span', { class: 'selection-count' });
+    const giftPickerBatchSize = 40;
+    let filteredGifts: GiftInfo[] = [];
+    let visibleGiftCount = 0;
+    let giftPickerLoader: HTMLButtonElement | null = null;
+    const appendGiftPickerBatch = (): void => {
+      if (visibleGiftCount >= filteredGifts.length) return;
+      giftPickerLoader?.remove();
+      const nextCount = Math.min(filteredGifts.length, visibleGiftCount + giftPickerBatchSize);
+      const showAllStatuses = giftSearch.value.trim().length > 0;
+      for (const gift of filteredGifts.slice(visibleGiftCount, nextCount)) {
         const selected = items.some((item) => item.giftId === gift.id);
-        const button = el('button', { class: `gift-kpi-gift-choice${selected ? ' is-selected' : ''}`, type: 'button' }) as HTMLButtonElement;
-        button.append(
-          giftIcon(gift.imgBasic, gift.name, 'gift-kpi-gift-choice-image'),
-          el('span', { text: gift.name }),
-          el('b', { text: selected ? '✓' : '+' }),
-        );
-        button.disabled = !selected && items.length >= 12;
-        button.onclick = () => {
-          if (selected) items = items.filter((item) => item.giftId !== gift.id);
-          else items.push({ giftId: gift.id, giftName: gift.name, imageUrl: gift.imgBasic, target: 50, received: 0, barStyle: 'progress' });
-          renderItems(); renderGiftChoices();
-        };
-        giftChoices.append(button);
+        const availability = kpiPickerCatalog.availabilityById.get(gift.id) ?? 'historical';
+        giftChoices.append(createGiftPickerChoice(gift, {
+          selected,
+          availability,
+          showStatus: showAllStatuses || availability === 'observed' || availability === 'special',
+          disabled: !selected && items.length >= 12,
+          onToggle: () => {
+            if (selected) items = items.filter((item) => item.giftId !== gift.id);
+            else items.push({ giftId: gift.id, giftName: gift.name, imageUrl: gift.imgBasic, target: 50, received: 0, barStyle: 'progress' });
+            renderItems();
+            renderGiftChoices();
+          },
+        }));
       }
+      visibleGiftCount = nextCount;
+      const complete = visibleGiftCount >= filteredGifts.length;
+      giftPickerLoader = el('button', {
+        class: `gift-picker-loader${complete ? ' is-complete' : ''}`,
+        type: 'button',
+        disabled: complete,
+        text: complete
+          ? `已显示全部 ${filteredGifts.length} 个礼物`
+          : `继续下滑加载 · ${visibleGiftCount} / ${filteredGifts.length}`,
+      }) as HTMLButtonElement;
+      if (!complete) giftPickerLoader.onclick = appendGiftPickerBatch;
+      giftChoices.append(giftPickerLoader);
+    };
+    const renderGiftChoices = (): void => {
+      const query = giftSearch.value.trim();
+      filteredGifts = filterGiftPickerGifts(kpiPickerCatalog, query);
+      visibleGiftCount = 0;
+      giftPickerLoader = null;
+      giftChoices.replaceChildren();
+      giftChoices.scrollTop = 0;
+      giftSelectionCount.textContent = `已选择 ${items.length} / 12 个礼物`;
+      if (filteredGifts.length === 0) {
+        giftChoices.append(el('div', { class: 'picker-empty', text: '没有匹配的礼物。' }));
+        return;
+      }
+      appendGiftPickerBatch();
+    };
+    giftSearch.oninput = renderGiftChoices;
+    giftChoices.onscroll = () => {
+      if (giftChoices.scrollHeight - giftChoices.scrollTop - giftChoices.clientHeight <= 80) appendGiftPickerBatch();
     };
     renderItems(); renderGiftChoices();
     const saveButton = el('button', { class: 'btn', type: 'button', text: original ? '保存修改' : '创建面板' }) as HTMLButtonElement;
@@ -1848,7 +1887,19 @@ export function mountConfig(root: HTMLElement): void {
       await saveAndWait(); close(); render();
     };
     dialog.append(el('header', { class: 'display-scene-dialog-header' }, [el('div', {}, [el('span', { class: 'section-kicker', text: '礼物 KPI' }), el('h2', { text: original ? '编辑 KPI 面板' : '创建 KPI 面板' }), el('p', { text: '直接按礼物累计；清零只影响这个面板。' })]), closeButton]),
-      el('div', { class: 'gift-kpi-editor-body' }, [fieldControl(name), el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '排版' }), layoutSelect]), el('h3', { text: '已选礼物与目标' }), selectedHost, el('h3', { text: '选择礼物' }), giftChoices, createDisplayAppearanceControl(appearance, '面板外观', '只影响这个 KPI 面板。')]),
+      el('div', { class: 'gift-kpi-editor-body' }, [
+        fieldControl(name),
+        el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '排版' }), layoutSelect]),
+        el('h3', { text: '已选礼物与目标' }),
+        selectedHost,
+        el('div', { class: 'modal-section-heading gift-kpi-picker-heading' }, [
+          el('div', {}, [el('h3', { text: '选择礼物' }), el('p', { text: '与属性编辑器使用同一个礼物目录；支持名称和数字 ID 搜索。' })]),
+          giftSelectionCount,
+        ]),
+        giftSearch,
+        giftChoices,
+        createDisplayAppearanceControl(appearance, '面板外观', '只影响这个 KPI 面板。'),
+      ]),
       el('footer', { class: 'modal-actions' }, [el('button', { class: 'btn ghost', type: 'button', text: '取消', onclick: close }), saveButton]));
     overlay.append(dialog); root.append(overlay);
   }
@@ -2242,7 +2293,6 @@ export function mountConfig(root: HTMLElement): void {
       ? state.timerRules.filter((rule) => rule.attributeName === original.name).map((rule) => ({ ...rule }))
       : [];
     let pickerCatalog = buildGiftPickerCatalog(state, roomGiftCatalog);
-    let allGifts = pickerCatalog.gifts;
     const selected = new Map<number, SelectedGiftRule>();
     const blindBoxLookups: SelectedGiftRule[] = [];
     if (original) {
@@ -2848,62 +2898,37 @@ export function mountConfig(root: HTMLElement): void {
       const button = giftChoiceButtons.get(giftId);
       if (!button) return;
       const selectedNow = selected.has(giftId);
-      button.classList.toggle('is-selected', selectedNow);
-      const check = button.querySelector('.gift-choice-check');
-      if (check) check.textContent = selectedNow ? '✓' : '+';
-      button.setAttribute('aria-pressed', String(selectedNow));
+      setGiftPickerChoiceSelected(button, selectedNow);
     }
 
     function createGiftChoice(gift: GiftInfo, showAllStatuses: boolean): HTMLButtonElement {
       const selectedNow = selected.has(gift.id);
-      const button = el('button', {
-        class: `gift-choice${selectedNow ? ' is-selected' : ''}`,
-        type: 'button',
-        ariaPressed: String(selectedNow),
-      }) as HTMLButtonElement;
-      button.dataset.giftId = String(gift.id);
-      const image = el('img', { class: 'gift-choice-image', alt: '' }) as HTMLImageElement;
-      image.src = gift.imgBasic || transparentPixel();
       const availability = pickerCatalog.availabilityById.get(gift.id) ?? 'historical';
-      const statusLabel: Record<GiftAvailability, string> = {
-        special: '直播事件',
-        listed: '已上架',
-        observed: '直播中收到过',
-        historical: '历史礼物',
-      };
       const showStatus = showAllStatuses || availability === 'observed' || availability === 'special';
-      button.append(
-        image,
-        el('span', { class: 'gift-choice-copy' }, [
-          el('strong', { text: gift.name }),
-          el('span', { class: 'gift-choice-meta' }, [
-            el('small', { text: giftPriceLabel(gift) }),
-            ...(showStatus ? [el('span', {
-              class: `gift-listing-status is-${availability}`,
-              text: statusLabel[availability],
-            })] : []),
-          ]),
-        ]),
-        el('span', { class: 'gift-choice-check', text: selectedNow ? '✓' : '+' }),
-      );
-      button.onclick = () => {
-        if (selected.has(gift.id)) selected.delete(gift.id);
-        else {
-          const item: SelectedGiftRule = {
-            gift,
-            formulaName: `${gift.name}规则`,
-            formula: defaultFormula(),
-            enabled: !editorGuideEnabled,
-            quickOperation: 'price',
-            quickAmount: 60,
-          };
-          selected.set(gift.id, item);
-          void hydrateBlindBoxRule(item);
-        }
-        updateGiftChoice(gift.id);
-        renderSelectedRules();
-        renderGuide();
-      };
+      const button = createGiftPickerChoice(gift, {
+        selected: selectedNow,
+        availability,
+        showStatus,
+        onToggle: () => {
+          if (selected.has(gift.id)) selected.delete(gift.id);
+          else {
+            const item: SelectedGiftRule = {
+              gift,
+              formulaName: `${gift.name}规则`,
+              formula: defaultFormula(),
+              enabled: !editorGuideEnabled,
+              quickOperation: 'price',
+              quickAmount: 60,
+            };
+            selected.set(gift.id, item);
+            void hydrateBlindBoxRule(item);
+          }
+          updateGiftChoice(gift.id);
+          renderSelectedRules();
+          renderGuide();
+        },
+      });
+      button.dataset.giftId = String(gift.id);
       giftChoiceButtons.set(gift.id, button);
       return button;
     }
@@ -2937,10 +2962,7 @@ export function mountConfig(root: HTMLElement): void {
 
     function renderGiftPicker(): void {
       const query = giftSearch.value.trim();
-      filteredGifts = allGifts.filter((gift) => (query.length > 0
-        || !pickerCatalog.hasLiveListingStatus
-        || pickerCatalog.availabilityById.get(gift.id) !== 'historical')
-        && matchesGiftSearch(gift, query));
+      filteredGifts = filterGiftPickerGifts(pickerCatalog, query);
       visibleGiftCount = 0;
       giftPickerLoader = null;
       giftChoiceButtons.clear();
@@ -3268,7 +3290,6 @@ export function mountConfig(root: HTMLElement): void {
     giftSearch.oninput = renderGiftPicker;
     const manualGift = renderManualGiftAdder(() => {
       pickerCatalog = buildGiftPickerCatalog(state, roomGiftCatalog);
-      allGifts = pickerCatalog.gifts;
       renderGiftPicker();
       renderSelectedRules();
       renderGuide();
@@ -3526,7 +3547,6 @@ export function mountConfig(root: HTMLElement): void {
     root.append(overlay);
     refreshOpenGiftCatalog = () => {
       pickerCatalog = buildGiftPickerCatalog(state, roomGiftCatalog);
-      allGifts = pickerCatalog.gifts;
       renderGiftPicker();
       renderSelectedRules();
     };
@@ -4377,6 +4397,7 @@ function buildGiftPickerCatalog(state: AppState, roomGiftCatalog: GiftInfo[]): G
       gift,
       availability: (gift.count > 0 || gift.lastReceived > 0 ? 'observed' : 'historical') as GiftAvailability,
     })),
+    ...state.giftCatalog.map((gift) => ({ gift, availability: 'historical' as GiftAvailability })),
     ...configuredGifts.map((gift) => ({ gift, availability: 'historical' as GiftAvailability })),
     ...builtinCatalog.map((gift) => ({
       gift,
@@ -4399,11 +4420,66 @@ function buildGiftPickerCatalog(state: AppState, roomGiftCatalog: GiftInfo[]): G
   return { gifts, availabilityById, hasLiveListingStatus };
 }
 
+interface GiftPickerChoiceOptions {
+  selected: boolean;
+  availability: GiftAvailability;
+  showStatus: boolean;
+  disabled?: boolean;
+  onToggle: () => void;
+}
+
+function createGiftPickerChoice(gift: GiftInfo, options: GiftPickerChoiceOptions): HTMLButtonElement {
+  const statusLabel: Record<GiftAvailability, string> = {
+    special: '直播事件',
+    listed: '已上架',
+    observed: '直播中收到过',
+    historical: '历史礼物',
+  };
+  const button = el('button', {
+    class: `gift-choice${options.selected ? ' is-selected' : ''}`,
+    type: 'button',
+    ariaPressed: String(options.selected),
+    disabled: options.disabled ?? false,
+  } as any) as HTMLButtonElement;
+  const image = el('img', { class: 'gift-choice-image', alt: '', src: gift.imgBasic || transparentPixel(), referrerPolicy: 'no-referrer' });
+  button.append(
+    image,
+    el('span', { class: 'gift-choice-copy' }, [
+      el('strong', { text: gift.name }),
+      el('span', { class: 'gift-choice-meta' }, [
+        el('small', { text: giftPriceLabel(gift) }),
+        ...(options.showStatus ? [el('span', {
+          class: `gift-listing-status is-${options.availability}`,
+          text: statusLabel[options.availability],
+        })] : []),
+      ]),
+    ]),
+    el('span', { class: 'gift-choice-check', text: options.selected ? '✓' : '+' }),
+  );
+  button.onclick = options.onToggle;
+  return button;
+}
+
+function setGiftPickerChoiceSelected(button: HTMLButtonElement, selected: boolean): void {
+  button.classList.toggle('is-selected', selected);
+  const check = button.querySelector('.gift-choice-check');
+  if (check) check.textContent = selected ? '✓' : '+';
+  button.setAttribute('aria-pressed', String(selected));
+}
+
+function filterGiftPickerGifts(catalog: GiftPickerCatalog, query: string): GiftInfo[] {
+  return catalog.gifts.filter((gift) => (query.length > 0
+    || !catalog.hasLiveListingStatus
+    || catalog.availabilityById.get(gift.id) !== 'historical')
+    && matchesGiftSearch(gift, query));
+}
+
 function configStructureSignature(state: AppState): string {
   return JSON.stringify({
     roomId: state.roomId,
     attributes: state.attributes.map(({ value: _value, ...attribute }) => attribute),
     displayScenes: state.displayScenes,
+    giftKpiPanels: state.giftKpiPanels,
     rules: state.rules,
     timerRules: state.timerRules,
     formulaPresets: state.formulaPresets,

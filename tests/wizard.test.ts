@@ -3011,7 +3011,8 @@ describe('OBS attribute display', () => {
     const configSource = readFileSync(new URL('../src/ui/config/config.ts', import.meta.url), 'utf8');
     expect(configCss).toMatch(/\.gift-kpi-editor-body\s*\{[^}]*grid-auto-rows:\s*max-content;[^}]*align-content:\s*start;/);
     expect(configCss).toMatch(/\.gift-kpi-editor-items\s*\{[^}]*grid-template-columns:\s*repeat\(2,/);
-    expect(configSource).toContain("giftIcon(gift.imgBasic, gift.name, 'gift-kpi-gift-choice-image')");
+    expect(configSource.match(/createGiftPickerChoice\(gift,/g)).toHaveLength(2);
+    expect(configSource).toContain("class: 'gift-picker-grid gift-kpi-picker-grid'");
   });
 });
 

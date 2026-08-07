@@ -2610,13 +2610,9 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .gift-kpi-editor-item-controls { display: grid; grid-template-columns: minmax(90px, .7fr) minmax(140px, 1.3fr); gap: 7px; }
 .config-root .gift-kpi-editor-item-controls label { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 6px; color: var(--text-dim); font-size: var(--type-meta); }
 .config-root .gift-kpi-editor-item .field-input { height: 34px; min-width: 0; padding: 6px 8px; }
-.config-root .gift-kpi-gift-choices { display: flex; max-height: 240px; overflow-y: auto; align-content: flex-start; flex-wrap: wrap; gap: 7px; border: 1px solid var(--border); border-radius: 12px; padding: 10px; background: var(--bg-soft); }
-.config-root .gift-kpi-gift-choice { display: inline-grid; grid-template-columns: 26px minmax(0, auto) 18px; align-items: center; gap: 6px; min-height: 38px; border: 1px solid var(--border); border-radius: 999px; padding: 5px 7px 5px 5px; background: var(--surface); color: var(--text-dim); cursor: pointer; }
-.config-root .gift-kpi-gift-choice-image { display: grid; width: 26px; height: 26px; place-items: center; border-radius: 50%; background: var(--image-bg); font-size: 14px; object-fit: contain; }
-.config-root .gift-kpi-gift-choice > span { overflow: hidden; max-width: 130px; text-overflow: ellipsis; white-space: nowrap; }
-.config-root .gift-kpi-gift-choice > b { display: grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; color: var(--text-dim); font-size: var(--type-meta); }
-.config-root .gift-kpi-gift-choice.is-selected { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-text); }
-.config-root .gift-kpi-gift-choice.is-selected > b { background: var(--accent); color: var(--button-action-text); }
+.config-root .gift-kpi-picker-heading { align-items: center; margin: 4px 0 0; }
+.config-root .gift-kpi-picker-grid { max-height: 320px; }
+.config-root .gift-choice:disabled { opacity: .45; cursor: not-allowed; }
 .config-root .contribution-heading-main {
   display: flex;
   min-width: 0;
