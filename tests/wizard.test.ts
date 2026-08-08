@@ -1640,6 +1640,80 @@ describe('single-page configuration rendering', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/update/check', { cache: 'no-store', method: 'POST' });
   });
 
+  it('keeps local model management in program settings instead of the assistant drawer', async () => {
+    const assistantReady = {
+      state: 'ready', message: '', modelVersion: 'qwen3-0.6b-q8_0-official-r1',
+      sizeBytes: 639446688, installedBytes: 639446688,
+    };
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/assistant/status') return Response.json({ code: 0, assistant: assistantReady });
+      if (url === '/api/assistant/model/check-update') {
+        return Response.json({
+          code: 0,
+          assistant: { ...assistantReady, updateAvailable: true, latestVersion: 'qwen3-help-r2' },
+        });
+      }
+      if (url === '/api/assistant/model' && init?.method === 'DELETE') {
+        return Response.json({ code: 0, assistant: { state: 'missing', message: '' } });
+      }
+      if (url === '/api/assistant/chat' && init?.method === 'POST') {
+        return new Response([
+          JSON.stringify({ type: 'sources', sources: [] }),
+          JSON.stringify({ type: 'delta', text: '\n结论：先配置直播间。\n\n1. 填写房间号\n2. 点击 `连接`\n' }),
+          JSON.stringify({ type: 'done', modelVersion: assistantReady.modelVersion, appVersion: '0.3.0' }),
+        ].join('\n'), { headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' } });
+      }
+      if (url === '/api/update') {
+        return Response.json({
+          code: 0,
+          update: {
+            state: 'development', currentVersion: 'dev', message: '开发版本不会检查 GitHub 更新。',
+            autoUpdate: true, restartRequired: false,
+          },
+        });
+      }
+      if (url.includes('/api/runtime')) return Response.json({ code: 0, runtime: { state: 'idle', roomId: '' } });
+      if (url.includes('/api/auth/status')) return Response.json({ code: 0, auth: { state: 'anonymous' } });
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    (root.querySelector('.assistant-toggle') as TestElement | null)?.onclick?.();
+    await vi.waitFor(() => expect(textOf(root.querySelector('.assistant-drawer') as TestElement)).toContain('可以这样问我'));
+    expect(textOf(root.querySelector('.assistant-drawer') as TestElement)).toContain('我还没配置直播间，应该从哪里开始？');
+    expect((root.querySelector('.assistant-question-input') as TestElement).placeholder).toBe('我还没配置直播间，应该从哪里开始？');
+    expect((root.querySelector('.assistant-question-input') as TestElement).placeholder).not.toContain('例如：');
+    expect(root.querySelector('.assistant-model-details')).toBeNull();
+    expect(findByText(root.querySelector('.assistant-drawer') as TestElement, '删除本地模型')).toBeUndefined();
+
+    findByText(root.querySelector('.assistant-drawer') as TestElement, '我还没配置直播间，应该从哪里开始？')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(root.querySelector('.assistant-drawer') as TestElement)).toContain('先配置直播间。'));
+    const userMessage = root.querySelectorAll('.assistant-message').find((message) => message.className.includes('is-user')) as TestElement;
+    const assistantMessage = root.querySelectorAll('.assistant-message').find((message) => message.className.includes('is-assistant')) as TestElement;
+    expect(userMessage.querySelector('strong')).toBeNull();
+    expect(textOf(assistantMessage.querySelector('strong') as TestElement)).toBe('先配置直播间。');
+    expect(textOf(assistantMessage)).not.toContain('结论：');
+
+    (root.querySelector('.program-settings-toggle') as TestElement | null)?.onclick?.();
+    const modelCard = root.querySelector('.assistant-model-settings-card') as TestElement;
+    await vi.waitFor(() => expect(textOf(modelCard)).toContain('qwen3-0.6b-q8_0-official-r1'));
+    expect(findByText(modelCard, '检查模型更新')).toBeDefined();
+    expect(findByText(modelCard, '删除本地模型')).toBeDefined();
+
+    findByText(modelCard, '检查模型更新')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(modelCard)).toContain('qwen3-help-r2'));
+    expect(fetchMock).toHaveBeenCalledWith('/api/assistant/model/check-update', { cache: 'no-store', method: 'POST' });
+
+    findByText(modelCard, '删除本地模型')?.onclick?.();
+    await vi.waitFor(() => expect(modelCard.dataset.modelState).toBe('missing'));
+    expect(fetchMock).toHaveBeenCalledWith('/api/assistant/model', { cache: 'no-store', method: 'DELETE' });
+    expect(findByText(modelCard, '安装本地模型')).toBeDefined();
+  });
+
   it('opens a visual changelog manually and remembers the latest viewed version', async () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);

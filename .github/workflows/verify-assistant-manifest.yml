@@ -1,0 +1,32 @@
+name: Verify assistant model manifest
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify hosted manifest
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out verification code
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Verify hosted manifest signature
+        shell: pwsh
+        env:
+          ASSISTANT_MANIFEST_PUBLIC_KEY_BASE64: ${{ vars.ASSISTANT_MANIFEST_PUBLIC_KEY_BASE64 }}
+          ASSISTANT_MANIFEST_URL: ${{ vars.ASSISTANT_MANIFEST_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:ASSISTANT_MANIFEST_URL)) {
+            throw "The repository is missing ASSISTANT_MANIFEST_URL."
+          }
+          node scripts/verify-assistant-manifest.mjs $env:ASSISTANT_MANIFEST_URL

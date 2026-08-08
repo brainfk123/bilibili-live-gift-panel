@@ -1,4 +1,4 @@
-import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftKpiBarStyle, GiftKpiLayout, GiftKpiPanel, GiftRule, LogEntry, MAX_LOG, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
+import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftKpiBarStyle, GiftKpiLayout, GiftKpiPanel, GiftRule, LogEntry, MAX_LOG, TimerRule, TrainingTopicId, TutorialLesson, ViewerContribution } from '../../types';
 import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { bindFloatingDetailCard, el, fieldControl, inputField, setFloatingDetailGuideExpanded, toast } from '../common';
@@ -95,6 +95,8 @@ import {
 } from './config-route';
 import { createConfigShell } from './config-shell';
 import { buildGiftPickerCatalog, createGiftPicker, type GiftPicker } from './gift-picker';
+import { createAssistantDrawer } from './assistant-drawer';
+import { createAssistantModelSettings } from './assistant-model-settings';
 
 interface SelectedGiftRule {
   gift: GiftInfo;
@@ -114,7 +116,7 @@ interface SelectedGiftRule {
 
 type LeaderboardMode = 'contribution' | 'rules' | 'blind-box';
 
-type HeaderActionIcon = 'training' | 'changelog' | 'settings' | 'sun' | 'moon';
+type HeaderActionIcon = 'assistant' | 'training' | 'changelog' | 'settings' | 'sun' | 'moon';
 
 function createHeaderActionIcon(kind: HeaderActionIcon): HTMLElement {
   const namespace = 'http://www.w3.org/2000/svg';
@@ -124,6 +126,10 @@ function createHeaderActionIcon(kind: HeaderActionIcon): HTMLElement {
       : document.createElement(tag) as unknown as SVGElement
   );
   const paths: Record<HeaderActionIcon, string[]> = {
+    assistant: [
+      'M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-7l-4.5 3v-3H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z',
+      'M8 11h.01M12 11h.01M16 11h.01',
+    ],
     training: [
       'M8 3h8v3H8z',
       'M6 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-1',
@@ -216,6 +222,10 @@ export function mountConfig(root: HTMLElement): void {
     activePageDescription,
   ]));
   const themeToggle = el('button', { class: 'theme-toggle config-theme-toggle', type: 'button' }) as HTMLButtonElement;
+  const assistantToggle = el('button', { class: 'theme-toggle assistant-toggle', type: 'button' }, [createHeaderActionIcon('assistant')]) as HTMLButtonElement;
+  assistantToggle.setAttribute('aria-label', '打开答疑助手 Beta');
+  assistantToggle.setAttribute('aria-pressed', 'false');
+  assistantToggle.setAttribute('title', '答疑助手 Beta');
   const guideToggle = el('button', { class: 'theme-toggle training-toggle', type: 'button' }, [createHeaderActionIcon('training')]) as HTMLButtonElement;
   const changelogToggle = el('button', { class: 'theme-toggle changelog-toggle', type: 'button' }, [createHeaderActionIcon('changelog')]) as HTMLButtonElement;
   changelogToggle.setAttribute('aria-label', '更新日志');
@@ -225,13 +235,23 @@ export function mountConfig(root: HTMLElement): void {
   programSettingsToggle.setAttribute('title', '程序与数据');
   const status = el('div', { class: 'app-status' });
   const headerActions = el('div', { class: 'app-header-actions' });
-  headerActions.append(guideToggle, changelogToggle, programSettingsToggle, themeToggle, status);
+  headerActions.append(assistantToggle, guideToggle, changelogToggle, programSettingsToggle, themeToggle, status);
   header.append(brand, headerActions);
 
   const configShell = createConfigShell(activePage, (page) => navigateToPage(page));
   const content = configShell.content;
   shell.append(header, configShell.element);
-  root.replaceChildren(shell);
+  const assistantDrawer = createAssistantDrawer({
+    getSuggestions: () => assistantSuggestionsForState(state, connectionState),
+    onClose: () => {
+      assistantToggle.classList.remove('is-active');
+      assistantToggle.setAttribute('aria-pressed', 'false');
+    },
+    onNavigatePage: (page) => navigateToPage(page),
+    onOpenTrainingTopic: (topic) => openTrainingCenter(topic),
+    onNotify: (message) => toast(message, root),
+  });
+  root.replaceChildren(shell, assistantDrawer.element);
 
   function applyActivePage(): void {
     configShell.activate(activePage);
@@ -560,6 +580,15 @@ export function mountConfig(root: HTMLElement): void {
     applyConfigTheme(state.settings.theme);
     save();
   };
+  assistantToggle.onclick = () => {
+    if (assistantToggle.getAttribute('aria-pressed') === 'true') {
+      assistantDrawer.close();
+      return;
+    }
+    assistantToggle.classList.add('is-active');
+    assistantToggle.setAttribute('aria-pressed', 'true');
+    assistantDrawer.open();
+  };
   guideToggle.onclick = () => {
     openTrainingCenter();
   };
@@ -624,7 +653,7 @@ export function mountConfig(root: HTMLElement): void {
     renderGuide(navigate);
   }
 
-  function openTrainingCenter(): void {
+  function openTrainingCenter(initialTopic?: TrainingTopicId): void {
     root.querySelector('.training-center-overlay')?.remove();
     activeGuide?.dispose();
     activeGuide = null;
@@ -732,6 +761,11 @@ export function mountConfig(root: HTMLElement): void {
       },
     });
     root.append(overlay);
+    if (initialTopic) {
+      const topicButton = overlay.querySelector<HTMLButtonElement>(`[data-training-item="topic:${initialTopic}"]`);
+      if (typeof topicButton?.click === 'function') topicButton.click();
+      else (topicButton as any)?.onclick?.();
+    }
   }
 
   function openChangelog(version?: string): void {
@@ -4358,7 +4392,9 @@ export function mountConfig(root: HTMLElement): void {
     const dialog = el('section', { class: 'card program-settings-dialog', role: 'dialog', ariaLabel: '程序与数据', ariaModal: 'true' } as any);
     const closeButton = el('button', { class: 'modal-close program-settings-close', type: 'button', text: '×', ariaLabel: '关闭程序与数据' } as any) as HTMLButtonElement;
     let localUpdateSync: (() => void) | null = null;
+    let assistantModelSettings: ReturnType<typeof createAssistantModelSettings> | null = null;
     const close = (): void => {
+      assistantModelSettings?.dispose();
       overlay.remove();
       if (refreshUpdateCard === localUpdateSync) refreshUpdateCard = null;
     };
@@ -4368,7 +4404,7 @@ export function mountConfig(root: HTMLElement): void {
       el('div', {}, [
         el('span', { class: 'section-kicker', text: '应用设置' }),
         el('h2', { text: '程序与数据' }),
-        el('p', { text: '备份配置、导出诊断日志，并管理程序自动更新。' }),
+        el('p', { text: '备份配置、导出诊断日志，并管理程序和本地答疑模型。' }),
       ]),
       closeButton,
     ]);
@@ -4517,7 +4553,11 @@ export function mountConfig(root: HTMLElement): void {
     refreshUpdateCard = localUpdateSync;
     localUpdateSync();
 
-    dataCard.append(updateCard);
+    assistantModelSettings = createAssistantModelSettings({
+      onNotify: (message) => toast(message, root),
+      onChanged: () => { void assistantDrawer.refresh(); },
+    });
+    dataCard.append(updateCard, assistantModelSettings.element);
     body.append(dataCard);
     dialog.append(header, body);
     overlay.append(dialog);
@@ -4588,6 +4628,7 @@ export function mountConfig(root: HTMLElement): void {
     globalThis.clearInterval(authPollTimer);
     globalThis.clearInterval(updatePollTimer);
     if (loginPollTimer !== undefined) globalThis.clearInterval(loginPollTimer);
+    assistantDrawer.dispose();
   };
   if (typeof globalThis.addEventListener === 'function') globalThis.addEventListener('beforeunload', disposePolling, { once: true });
 }
@@ -4745,4 +4786,19 @@ function formatInterval(intervalSeconds: number): string {
 
 function normalizeConfigTheme(theme: unknown): 'dark' | 'light' {
   return theme === 'light' ? 'light' : 'dark';
+}
+
+function assistantSuggestionsForState(
+  state: Pick<AppState, 'roomId' | 'attributes' | 'rules' | 'timerRules'>,
+  connection: RuntimeConnectionState,
+): string[] {
+  const suggestions: string[] = [];
+  if (!state.roomId.trim()) suggestions.push('我还没配置直播间，应该从哪里开始？');
+  else if (connection !== 'connected') suggestions.push('房间号已经填了，为什么还没有连接？');
+  if (state.attributes.length === 0) suggestions.push('我还没有属性，怎么创建第一个？');
+  else if (state.rules.length === 0) suggestions.push(`我有 ${state.attributes.length} 个属性，怎么添加第一条礼物规则？`);
+  else suggestions.push('收到礼物但数值没有变化，应该检查哪里？');
+  if (state.attributes.length > 0 && state.timerRules.length === 0) suggestions.push('怎么为现有属性添加一个定时器？');
+  suggestions.push('怎么把当前面板添加到 OBS？');
+  return suggestions.slice(0, 3);
 }

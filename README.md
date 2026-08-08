@@ -22,6 +22,8 @@ go test ./...
 
 `npm run build` 会构建前端并编译本地服务，产物为 `dist/gift-panel.exe`。EXE 已内嵌前端页面和代理服务，主播电脑不需要安装 Node.js 或 Go。
 
+普通构建不包含答疑模型的原生推理运行时。Windows x64 正式构建、固定工具链、模型清单签名和静态依赖验证见 [答疑助手原生构建说明](docs/assistant-native-build.md)。
+
 ## 发布与自动更新
 
 正式版本使用 `vMAJOR.MINOR.PATCH` 标签发布，且标签必须与 `package.json` 中的版本一致。例如：

@@ -4,4 +4,7 @@ goserver/dist/
 artifacts/
 .superpowers/
 .tmp/
+.native/
 *.local
+*.private.pem
+*.passphrase.dpapi

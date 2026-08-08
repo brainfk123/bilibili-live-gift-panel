@@ -9,7 +9,17 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"bilibili-live-gift-panel/assistant"
+	"bilibili-live-gift-panel/assistant/llamacpp"
+)
+
+var (
+	assistantManifestURL = "https://modelscope.cn/models/brainfk/bilibili-gift-panel-assistant-qwen3-0.6b/resolve/master/manifest.json"
+	// Injected by the release build with -X main.assistantManifestPublicKeyBase64=...
+	assistantManifestPublicKeyBase64 = ""
 )
 
 //go:embed dist/index.html
@@ -207,6 +217,52 @@ func main() {
 	store.setOnTimerChange(background.NotifyTimerConfigChanged)
 	store.setOnUpdateChange(updater.NotifySettingsChanged)
 	login.SetOnChange(background.NotifyConfigChanged)
+	manifestKey, _ := assistant.DecodePublicKeyBase64(assistantManifestPublicKeyBase64)
+	modelStore, err := assistant.NewModelStore(assistant.ModelStoreOptions{
+		Root:        filepath.Join(filepath.Dir(store.path), "assistant"),
+		ManifestURL: assistantManifestURL,
+		PublicKey:   manifestKey,
+	})
+	if err != nil {
+		showStartupError(fmt.Sprintf("答疑助手初始化失败：%v", err))
+		return
+	}
+	assistantService, err := assistant.NewService(assistant.Options{
+		Knowledge:   assistant.EmbeddedKnowledge(),
+		Store:       modelStore,
+		Engine:      llamacpp.New(),
+		AppVersion:  appVersion,
+		IdleTimeout: 5 * time.Minute,
+		ContextSize: 4096,
+		Threads:     4,
+		State: func(ctx context.Context) (assistant.StateSummary, error) {
+			summary := assistant.StateSummary{AppVersion: appVersion}
+			state, stateErr := store.readState()
+			if stateErr != nil {
+				summary.CurrentError = "config_error"
+				return summary, nil
+			}
+			runtimeState := background.Status()
+			summary.Connection = safeAssistantConnectionState(runtimeState.State)
+			summary.RoomConfigured = strings.TrimSpace(state.RoomID) != ""
+			summary.AttributeCount = len(state.Attributes)
+			summary.RuleCount = len(state.Rules)
+			summary.TimerCount = len(state.TimerRules)
+			if runtimeState.LastError != "" {
+				summary.CurrentError = "connection_error"
+			}
+			summary.Login = safeAssistantLoginState(login.Status(ctx, "").State)
+			if summary.Login == "error" && summary.CurrentError == "" {
+				summary.CurrentError = "login_error"
+			}
+			return summary, nil
+		},
+	})
+	if err != nil {
+		showStartupError(fmt.Sprintf("答疑助手初始化失败：%v", err))
+		return
+	}
+	defer assistantService.Close()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -251,6 +307,7 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{"name": panelHealthMarker, "version": appVersion})
 	})
 	mux.HandleFunc("/api/instance/exit", newInstanceExitHandler(appVersion, instanceExit))
+	assistantService.Register(mux)
 
 	listener, port, err := listenWithFallback(12450, 10)
 	if err != nil {
@@ -286,5 +343,23 @@ func main() {
 	if err := updater.InstallOnExit(restartAfterUpdate); err != nil {
 		diagnostics.Error("update_install_failed", "error", err)
 		showStartupError(err.Error())
+	}
+}
+
+func safeAssistantConnectionState(value string) string {
+	switch value {
+	case "idle", "connecting", "connected", "reconnecting", "error":
+		return value
+	default:
+		return "unknown"
+	}
+}
+
+func safeAssistantLoginState(value string) string {
+	switch value {
+	case "anonymous", "waiting", "scanned", "logged_in", "expired", "error":
+		return value
+	default:
+		return "unknown"
 	}
 }
