@@ -98,6 +98,7 @@ export function createAssistantDrawer(options: AssistantDrawerOptions): Assistan
   let pollTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
   let checkingStatus = false;
   let hasCheckedUpdate = false;
+  let suggestionCursor = 0;
 
   const drawer = el('aside', {
     class: 'assistant-drawer',
@@ -226,7 +227,7 @@ export function createAssistantDrawer(options: AssistantDrawerOptions): Assistan
 
     const input = el('textarea', {
       class: 'assistant-question-input',
-      placeholder: suggestions[0] ?? '为什么收到礼物但数值没变化？',
+      placeholder: suggestions[suggestionCursor % suggestions.length] ?? '为什么收到礼物但数值没变化？',
       rows: 2,
       maxLength: 1000,
       disabled: Boolean(generation),
@@ -339,6 +340,7 @@ export function createAssistantDrawer(options: AssistantDrawerOptions): Assistan
   async function submitQuestion(rawQuestion: string): Promise<void> {
     const question = rawQuestion.trim();
     if (!question || generation) return;
+    suggestionCursor += 1;
     messages.push({ role: 'user', content: question });
     const reply: ChatMessage = { role: 'assistant', content: '', question, pending: true };
     messages.push(reply);

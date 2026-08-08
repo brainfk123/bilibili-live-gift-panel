@@ -43,4 +43,13 @@ describe('assistant Markdown', () => {
       '**可以直接添加。**\n\n1. 复制链接',
     );
   });
+
+  it('removes redundant trailing evidence notes but keeps meaningful parentheses', () => {
+    expect(normalizeAssistantMarkdown(
+      '1. 进入属性玩法，点击添加属性。\n2. 选择玩法模板。\n\n（已根据帮助条目完成属性玩法设置）',
+    )).toBe('1. 进入属性玩法，点击添加属性。\n2. 选择玩法模板。');
+    expect(normalizeAssistantMarkdown('操作完成后重新启动（仅首次安装需要）。')).toBe(
+      '**操作完成后重新启动（仅首次安装需要）。**',
+    );
+  });
 });

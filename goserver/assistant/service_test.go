@@ -105,6 +105,9 @@ func TestChatUsesEvidenceAndStripsThinking(t *testing.T) {
 	if !strings.Contains(engine.prompt, "第一句直接回答问题") || strings.Contains(engine.prompt, "加粗结论") {
 		t.Fatalf("prompt must request answer content without a repeatable formatting label: %q", engine.prompt)
 	}
+	if !strings.Contains(engine.prompt, "不要在结尾说明") || !strings.Contains(engine.prompt, "引用由界面单独展示") {
+		t.Fatalf("prompt must keep redundant evidence notes out of the answer: %q", engine.prompt)
+	}
 	last := events[len(events)-1]
 	if last.Type != "done" || last.StateSummary == nil || last.StateSummary.RoomConfigured != true {
 		t.Fatalf("done = %#v", last)

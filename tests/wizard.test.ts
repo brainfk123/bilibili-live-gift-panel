@@ -1691,8 +1691,9 @@ describe('single-page configuration rendering', () => {
     (root.querySelector('.assistant-toggle') as TestElement | null)?.onclick?.();
     await vi.waitFor(() => expect(textOf(root.querySelector('.assistant-drawer') as TestElement)).toContain('可以这样问我'));
     expect(textOf(root.querySelector('.assistant-drawer') as TestElement)).toContain('我还没配置直播间，应该从哪里开始？');
-    expect((root.querySelector('.assistant-question-input') as TestElement).placeholder).toBe('我还没配置直播间，应该从哪里开始？');
-    expect((root.querySelector('.assistant-question-input') as TestElement).placeholder).not.toContain('例如：');
+    const firstPlaceholder = (root.querySelector('.assistant-question-input') as TestElement).placeholder;
+    expect(firstPlaceholder).toBe('我还没配置直播间，应该从哪里开始？');
+    expect(firstPlaceholder).not.toContain('例如：');
     expect(root.querySelector('.assistant-model-details')).toBeNull();
     expect(findByText(root.querySelector('.assistant-drawer') as TestElement, '删除本地模型')).toBeUndefined();
 
@@ -1706,6 +1707,7 @@ describe('single-page configuration rendering', () => {
     expect(userMessage.querySelector('strong')).toBeNull();
     expect(textOf(assistantMessage.querySelector('strong') as TestElement)).toBe('先配置直播间。');
     expect(textOf(assistantMessage)).not.toContain('结论：');
+    expect((root.querySelector('.assistant-question-input') as TestElement).placeholder).toBe('我还没有属性，怎么创建第一个？');
     const references = assistantMessage.querySelector('.assistant-sources') as TestElement;
     expect(references.tagName).toBe('details');
     expect(references.getAttribute('open')).toBeNull();

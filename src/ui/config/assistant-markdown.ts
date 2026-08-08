@@ -12,6 +12,10 @@ export type AssistantMarkdownBlock =
 export function normalizeAssistantMarkdown(input: string): string {
   let value = input.trim();
   if (!value) return '';
+  value = value.replace(
+    /(?:\r?\n){1,2}\s*[（(]\s*(?:本回答\s*)?(?:已\s*)?(?:根据|依据|参考|基于)\s*(?:上述|相关|所提供的|项目)?\s*(?:帮助条目|帮助内容|参考帮助|资料|内容)[^（）()\r\n]{0,40}[）)]\s*$/,
+    '',
+  ).trim();
   const conclusionLabel = '(?:(?:加粗|粗体)\\s*)?结论';
   value = value
     .replace(new RegExp(`^\\*\\*\\s*${conclusionLabel}\\s*[:：]\\s*\\*\\*\\s*`), '')
