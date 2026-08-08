@@ -1293,8 +1293,8 @@ describe('single-page configuration rendering', () => {
     expect(configCss).toContain('.config-root .tour-prototype.is-modal-step .tour-bubble { z-index: 173; }');
     expect(configCss).toMatch(/\.config-root \.tour-focus \{[\s\S]*?border: 0;[\s\S]*?box-shadow: 0 0 0 100vmax[\s\S]*?transition: none;/);
     expect(configCss).toMatch(/\.config-root \.tour-target-outline \{[\s\S]*?border: 0;[\s\S]*?box-shadow: none;[\s\S]*?transition: none;/);
-    expect(configCss).toMatch(/\.config-root \.tour-target-outline::before \{[\s\S]*?conic-gradient\([\s\S]*?animation: tour-outline-flow 1\.8s linear infinite;/);
-    expect(configCss).toContain('@keyframes tour-outline-flow');
+    expect(configCss).toMatch(/\.config-root \.tour-target-outline::before \{[\s\S]*?offset-path: border-box;[\s\S]*?animation: tour-outline-flow 1\.8s linear infinite;/);
+    expect(configCss).toMatch(/@keyframes tour-outline-flow \{[\s\S]*?to \{ offset-distance: 100%; \}/);
     expect(configCss).toMatch(/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.config-root \.tour-target-outline::before \{[\s\S]*?animation: none;/);
     expect(configCss).toMatch(/\.config-root \.hover-detail-card\.is-guide-expanded,[\s\S]*?\.config-root \.hover-detail-card\.is-guide-expanded \.hover-detail-panel \{[\s\S]*?transition: none !important;/);
     expect(configCss).toContain('.config-root .template-wizard-overlay { z-index: 145;');

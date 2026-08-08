@@ -724,13 +724,8 @@ body.config-mode::-webkit-scrollbar-corner,
   pointer-events: none;
   transition: none;
 }
-@property --tour-outline-angle {
-  syntax: '<angle>';
-  initial-value: 0deg;
-  inherits: false;
-}
 @keyframes tour-outline-flow {
-  to { --tour-outline-angle: 1turn; }
+  to { offset-distance: 100%; }
 }
 .config-root .tour-target-outline {
   position: fixed;
@@ -752,22 +747,24 @@ body.config-mode::-webkit-scrollbar-corner,
   pointer-events: none;
 }
 .config-root .tour-target-outline::before {
-  inset: -4px;
-  border-radius: calc(11px + 4px);
-  padding: 3px;
-  background: conic-gradient(
-    from var(--tour-outline-angle),
-    transparent 0 54%,
-    color-mix(in srgb, var(--accent) 22%, transparent) 62%,
-    var(--accent) 70%,
-    color-mix(in srgb, white 86%, var(--accent)) 75%,
-    var(--accent) 80%,
-    transparent 91% 100%
+  top: 0;
+  left: 0;
+  width: clamp(26px, 18%, 72px);
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--accent) 28%, transparent) 28%,
+    var(--accent) 68%,
+    color-mix(in srgb, white 86%, var(--accent)) 84%,
+    transparent
   );
   filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 64%, transparent));
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
+  offset-path: border-box;
+  offset-distance: 0%;
+  offset-rotate: auto;
+  offset-anchor: center;
   animation: tour-outline-flow 1.8s linear infinite;
 }
 .config-root .tour-target-outline::after {
@@ -778,7 +775,7 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 @media (prefers-reduced-motion: reduce) {
   .config-root .tour-target-outline::before {
-    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, white 72%, var(--accent)));
+    display: none;
     animation: none;
   }
 }
