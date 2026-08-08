@@ -630,8 +630,7 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 .config-root .assistant-message.is-user .assistant-message-content { border-color: color-mix(in srgb, var(--accent) 44%, var(--border)); border-radius: 14px 4px 14px 14px; background: var(--accent-soft); }
 .config-root .assistant-message.is-error .assistant-message-content { border-color: var(--danger); color: var(--danger-text); }
-.config-root .assistant-message-content.is-pending { color: var(--text-dim); }
-.config-root .assistant-message-content.is-pending::after { content: " …"; animation: assistantPulse 1.2s ease-in-out infinite; }
+.config-root .assistant-message-content.is-pending { color: var(--text-dim); animation: assistantPulse 1.2s ease-in-out infinite; }
 @keyframes assistantPulse { 50% { opacity: .3; } }
 .config-root .assistant-sources { border-left: 2px solid var(--accent); padding-left: 9px; }
 .config-root .assistant-sources > summary { width: max-content; list-style: none; color: var(--text-dim); font-size: 11px; font-weight: 800; cursor: pointer; }
@@ -671,7 +670,7 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .assistant-drawer-header { padding-top: max(18px, env(safe-area-inset-top)); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .config-root .assistant-message-content.is-pending::after { animation: none; }
+  .config-root .assistant-message-content.is-pending { animation: none; }
   .config-root .assistant-progress-track > span { transition: none; }
 }
 

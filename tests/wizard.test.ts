@@ -1697,6 +1697,9 @@ describe('single-page configuration rendering', () => {
     expect(findByText(root.querySelector('.assistant-drawer') as TestElement, '删除本地模型')).toBeUndefined();
 
     findByText(root.querySelector('.assistant-drawer') as TestElement, '我还没配置直播间，应该从哪里开始？')?.onclick?.();
+    const pendingAnswer = root.querySelector('.is-pending') as TestElement;
+    expect(textOf(pendingAnswer)).toBe('正在思考');
+    expect(textOf(pendingAnswer)).not.toContain('**');
     await vi.waitFor(() => expect(textOf(root.querySelector('.assistant-drawer') as TestElement)).toContain('先配置直播间。'));
     const userMessage = root.querySelectorAll('.assistant-message').find((message) => message.className.includes('is-user')) as TestElement;
     const assistantMessage = root.querySelectorAll('.assistant-message').find((message) => message.className.includes('is-assistant')) as TestElement;

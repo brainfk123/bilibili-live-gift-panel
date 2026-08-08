@@ -272,11 +272,12 @@ export function createAssistantDrawer(options: AssistantDrawerOptions): Assistan
     const article = el('article', { class: `assistant-message is-${message.role}${message.error ? ' is-error' : ''}` });
     article.append(el('span', { class: 'assistant-message-role', text: message.role === 'user' ? '你' : '答疑助手' }));
     const content = el('div', { class: 'assistant-message-content' });
-    const rawDisplayText = message.content || (message.pending ? '正在查找项目帮助…' : '');
-    const displayText = message.role === 'assistant' && !message.error
+    const isWaiting = Boolean(message.pending && !message.content);
+    const rawDisplayText = message.content || (isWaiting ? '正在思考' : '');
+    const displayText = message.role === 'assistant' && !message.error && !isWaiting
       ? normalizeAssistantMarkdown(rawDisplayText)
       : rawDisplayText;
-    if (message.pending && !message.content) content.textContent = displayText;
+    if (isWaiting) content.textContent = displayText;
     else content.append(renderAssistantMarkdown(displayText));
     if (message.pending) content.classList.add('is-pending');
     article.append(content);
