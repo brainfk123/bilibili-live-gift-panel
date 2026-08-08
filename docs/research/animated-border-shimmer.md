@@ -18,7 +18,7 @@ Use an absolutely positioned SVG overlay containing two matching rounded rectang
 
 1. A faint static stroke for the complete outline.
 2. Several synchronized dashed strokes with `stroke-linecap: round`: a long translucent tail, a shorter accent-colored body, and a short bright head. Their overlapping lengths create a directional gradient that still follows the curved path.
-3. Normalize the path with `pathLength="100"`, then animate the bright stroke's numeric `stroke-dashoffset` from `0` to `-100` with a linear timing function.
+3. Normalize the path with `pathLength="100"`, then animate the bright stroke's numeric `stroke-dashoffset` from `0` to `100` with a linear timing function so the beam travels in the chosen visual direction.
 4. Apply a small glow filter to the tail and head, while keeping the stroke widths close to the actual border thickness. A single solid stroke plus `drop-shadow` only softens its outside edge; it does not create a gradient along the direction of travel.
 5. Disable only the moving stroke under `prefers-reduced-motion`, leaving the static outline visible.
 

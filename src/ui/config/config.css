@@ -725,7 +725,7 @@ body.config-mode::-webkit-scrollbar-corner,
   transition: none;
 }
 @keyframes tour-outline-flow {
-  to { stroke-dashoffset: -100; }
+  to { stroke-dashoffset: 100; }
 }
 .config-root .tour-target-outline {
   position: fixed;

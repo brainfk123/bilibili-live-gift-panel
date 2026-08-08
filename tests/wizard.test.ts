@@ -1298,7 +1298,7 @@ describe('single-page configuration rendering', () => {
     expect(configCss).toMatch(/\.config-root \.tour-target-flow-tail \{[\s\S]*?stroke: color-mix\(in srgb, var\(--accent\) 22%, transparent\);/);
     expect(configCss).toMatch(/\.config-root \.tour-target-flow-body \{[\s\S]*?stroke: color-mix\(in srgb, var\(--accent\) 58%, transparent\);/);
     expect(configCss).toMatch(/\.config-root \.tour-target-flow-dash \{[\s\S]*?stroke: color-mix\(in srgb, white 86%, var\(--accent\)\);/);
-    expect(configCss).toMatch(/@keyframes tour-outline-flow \{[\s\S]*?to \{ stroke-dashoffset: -100; \}/);
+    expect(configCss).toMatch(/@keyframes tour-outline-flow \{[\s\S]*?to \{ stroke-dashoffset: 100; \}/);
     expect(configCss).toMatch(/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.config-root \.tour-target-flow-segment \{[\s\S]*?animation: none;/);
     expect(configCss).toMatch(/\.config-root \.hover-detail-card\.is-guide-expanded,[\s\S]*?\.config-root \.hover-detail-card\.is-guide-expanded \.hover-detail-panel \{[\s\S]*?transition: none !important;/);
     expect(configCss).toContain('.config-root .template-wizard-overlay { z-index: 145;');
