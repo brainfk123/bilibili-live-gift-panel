@@ -4,7 +4,6 @@ import {
   installAssistantModel,
   streamAssistantChat,
   type AssistantChatEvent,
-  type AssistantHistoryMessage,
   type AssistantSafeAction,
   type AssistantSource,
   type AssistantStatus,
@@ -336,10 +335,6 @@ export function createAssistantDrawer(options: AssistantDrawerOptions): Assistan
   async function submitQuestion(rawQuestion: string): Promise<void> {
     const question = rawQuestion.trim();
     if (!question || generation) return;
-    const history = messages
-      .filter((message) => !message.pending && !message.error && message.content)
-      .slice(-8)
-      .map<AssistantHistoryMessage>((message) => ({ role: message.role, content: message.content }));
     messages.push({ role: 'user', content: question });
     const reply: ChatMessage = { role: 'assistant', content: '', question, pending: true };
     messages.push(reply);
@@ -347,7 +342,7 @@ export function createAssistantDrawer(options: AssistantDrawerOptions): Assistan
     generation = controller;
     render();
     try {
-      await streamAssistantChat(question, history, (event) => applyChatEvent(reply, event), controller.signal);
+      await streamAssistantChat(question, (event) => applyChatEvent(reply, event), controller.signal);
       reply.pending = false;
       if (!reply.content) reply.content = '没有生成有效回答，请换一种问法重试。';
     } catch (error) {

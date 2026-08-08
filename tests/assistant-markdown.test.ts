@@ -34,4 +34,13 @@ describe('assistant Markdown', () => {
     );
     expect(normalizeAssistantMarkdown('**结论：可以使用。**\n后续说明')).toBe('**可以使用。**\n后续说明');
   });
+
+  it('removes formatting labels repeated by a small model', () => {
+    expect(normalizeAssistantMarkdown(
+      '**加粗结论： 按照步骤：复制专属链接并添加为 OBS 浏览器来源。**\n\n- 在属性卡片中复制 OBS 链接。',
+    )).toBe('**按照步骤：复制专属链接并添加为 OBS 浏览器来源。**\n\n- 在属性卡片中复制 OBS 链接。');
+    expect(normalizeAssistantMarkdown('粗体结论：可以直接添加。\n\n1. 复制链接')).toBe(
+      '**可以直接添加。**\n\n1. 复制链接',
+    );
+  });
 });

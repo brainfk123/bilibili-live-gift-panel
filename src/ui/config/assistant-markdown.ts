@@ -12,9 +12,11 @@ export type AssistantMarkdownBlock =
 export function normalizeAssistantMarkdown(input: string): string {
   let value = input.trim();
   if (!value) return '';
+  const conclusionLabel = '(?:(?:加粗|粗体)\\s*)?结论';
   value = value
-    .replace(/^\*\*\s*结论\s*[:：]\s*([^*\n]+)\*\*/, '**$1**')
-    .replace(/^\s*(?:#{1,3}\s*)?结论\s*[:：]\s*/, '');
+    .replace(new RegExp(`^\\*\\*\\s*${conclusionLabel}\\s*[:：]\\s*\\*\\*\\s*`), '')
+    .replace(new RegExp(`^\\*\\*\\s*${conclusionLabel}\\s*[:：]\\s*`), '**')
+    .replace(new RegExp(`^\\s*(?:#{1,3}\\s*)?${conclusionLabel}\\s*[:：]\\s*`), '');
   if (/^\*\*[^*\n]+\*\*/.test(value) || /^\d+[.)]\s+/.test(value) || /^[-*]\s+/.test(value)) return value;
 
   const sentence = value.match(/^([\s\S]{1,120}?[。！？!?])([\s\S]*)$/);

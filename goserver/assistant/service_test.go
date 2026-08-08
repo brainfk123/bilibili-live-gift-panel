@@ -102,8 +102,8 @@ func TestChatUsesEvidenceAndStripsThinking(t *testing.T) {
 	if !strings.Contains(engine.prompt, "帮助条目足够回答") || strings.Contains(engine.prompt, NoEvidenceAnswer) {
 		t.Fatalf("prompt must tell the small model to answer the server-approved evidence directly: %q", engine.prompt)
 	}
-	if !strings.Contains(engine.prompt, "第一段仅用 **粗体**") {
-		t.Fatalf("prompt must request the compact Markdown answer format: %q", engine.prompt)
+	if !strings.Contains(engine.prompt, "第一句直接回答问题") || strings.Contains(engine.prompt, "加粗结论") {
+		t.Fatalf("prompt must request answer content without a repeatable formatting label: %q", engine.prompt)
 	}
 	last := events[len(events)-1]
 	if last.Type != "done" || last.StateSummary == nil || last.StateSummary.RoomConfigured != true {
@@ -111,7 +111,7 @@ func TestChatUsesEvidenceAndStripsThinking(t *testing.T) {
 	}
 }
 
-func TestPromptPlacesCurrentQuestionAfterConversationHistory(t *testing.T) {
+func TestPromptIgnoresConversationHistoryAndKeepsCurrentQuestionLast(t *testing.T) {
 	knowledge, err := NewKnowledgeBase(EmbeddedKnowledge())
 	if err != nil {
 		t.Fatal(err)
@@ -127,11 +127,12 @@ func TestPromptPlacesCurrentQuestionAfterConversationHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	oldQuestion := strings.Index(prompt, "怎么连接直播间？")
 	oldAnswer := strings.Index(prompt, "先填写房间号并连接。")
 	currentQuestion := strings.LastIndex(prompt, "怎么设置定时器？")
 	lastUserTurn := strings.LastIndex(prompt, "<|im_start|>user\n")
-	if oldAnswer < 0 || currentQuestion <= oldAnswer || lastUserTurn < 0 || currentQuestion <= lastUserTurn {
-		t.Fatalf("current question must be the final user turn after history: %q", prompt)
+	if oldQuestion >= 0 || oldAnswer >= 0 || currentQuestion < 0 || lastUserTurn < 0 || currentQuestion <= lastUserTurn {
+		t.Fatalf("prompt must ignore conversation history and keep only the current user turn: %q", prompt)
 	}
 	noThink := strings.LastIndex(prompt, "/no_think")
 	if strings.Count(prompt, "/no_think") != 1 || noThink <= lastUserTurn || noThink >= currentQuestion {

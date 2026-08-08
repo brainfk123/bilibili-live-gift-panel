@@ -50,21 +50,24 @@ describe('local assistant API', () => {
       '"sourceLabel":"训练中心"}]}\n{"type":"delta","text":"先填写房间号。"}\n',
       '{"type":"done","modelVersion":"q8"}\n',
     ];
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response(new ReadableStream({
       start(controller) {
         chunks.forEach((chunk) => controller.enqueue(encoder.encode(chunk)));
         controller.close();
       },
-    }), { headers: { 'Content-Type': 'application/x-ndjson' } })));
+    }), { headers: { 'Content-Type': 'application/x-ndjson' } }));
+    vi.stubGlobal('fetch', fetchMock);
     const events: unknown[] = [];
 
-    await streamAssistantChat('怎么连接？', [], (event) => events.push(event));
+    await streamAssistantChat('怎么连接？', (event) => events.push(event));
 
     expect(events).toEqual([
       { type: 'sources', sources: [{ id: 'lesson-room', title: '连接直播间', sourceLabel: '训练中心' }] },
       { type: 'delta', text: '先填写房间号。' },
       { type: 'done', modelVersion: 'q8' },
     ]);
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(request.body))).toEqual({ question: '怎么连接？' });
   });
 });
 

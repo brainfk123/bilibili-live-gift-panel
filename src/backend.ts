@@ -79,11 +79,6 @@ export interface AssistantSource {
   action?: AssistantSafeAction;
 }
 
-export interface AssistantHistoryMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
 export type AssistantChatEvent =
   | { type: 'sources'; sources: AssistantSource[] }
   | { type: 'delta'; text: string }
@@ -404,14 +399,13 @@ function isAssistantChatEvent(value: unknown): value is AssistantChatEvent {
 
 export async function streamAssistantChat(
   question: string,
-  history: AssistantHistoryMessage[],
   onEvent: (event: AssistantChatEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
   const response = await fetch('/api/assistant/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
-    body: JSON.stringify({ question, history }),
+    body: JSON.stringify({ question }),
     signal,
   });
   if (!response.ok) {
