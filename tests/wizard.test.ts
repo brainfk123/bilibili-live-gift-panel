@@ -1659,7 +1659,13 @@ describe('single-page configuration rendering', () => {
       }
       if (url === '/api/assistant/chat' && init?.method === 'POST') {
         return new Response([
-          JSON.stringify({ type: 'sources', sources: [] }),
+          JSON.stringify({
+            type: 'sources',
+            sources: [{
+              id: 'lesson-room', title: '连接直播间', sourceLabel: '训练中心 · 连接直播间',
+              action: { kind: 'config-page', target: 'overview', label: '带我去连接' },
+            }],
+          }),
           JSON.stringify({ type: 'delta', text: '\n结论：先配置直播间。\n\n1. 填写房间号\n2. 点击 `连接`\n' }),
           JSON.stringify({ type: 'done', modelVersion: assistantReady.modelVersion, appVersion: '0.3.0' }),
         ].join('\n'), { headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' } });
@@ -1697,6 +1703,12 @@ describe('single-page configuration rendering', () => {
     expect(userMessage.querySelector('strong')).toBeNull();
     expect(textOf(assistantMessage.querySelector('strong') as TestElement)).toBe('先配置直播间。');
     expect(textOf(assistantMessage)).not.toContain('结论：');
+    const references = assistantMessage.querySelector('.assistant-sources') as TestElement;
+    expect(references.tagName).toBe('details');
+    expect(references.getAttribute('open')).toBeNull();
+    expect(findByText(references, '查看参考帮助（1）')).toBeDefined();
+    expect(textOf(references)).toContain('连接直播间');
+    expect(findByText(references, '带我去连接')).toBeDefined();
 
     (root.querySelector('.program-settings-toggle') as TestElement | null)?.onclick?.();
     const modelCard = root.querySelector('.assistant-model-settings-card') as TestElement;

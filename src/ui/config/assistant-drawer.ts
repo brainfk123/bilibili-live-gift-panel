@@ -291,7 +291,7 @@ export function createAssistantDrawer(options: AssistantDrawerOptions): Assistan
   }
 
   function renderSources(sources: AssistantSource[]): HTMLElement {
-    const list = el('div', { class: 'assistant-sources' }, [el('strong', { text: '参考帮助' })]);
+    const rows = el('div', { class: 'assistant-source-list' });
     for (const source of sources) {
       const row = el('div', { class: 'assistant-source' }, [
         el('div', {}, [el('span', { text: source.sourceLabel }), el('strong', { text: source.title })]),
@@ -301,9 +301,12 @@ export function createAssistantDrawer(options: AssistantDrawerOptions): Assistan
         action.onclick = () => activateSafeAction(source.action as AssistantSafeAction);
         row.append(action);
       }
-      list.append(row);
+      rows.append(row);
     }
-    return list;
+    return el('details', { class: 'assistant-sources' }, [
+      el('summary', { text: `查看参考帮助（${sources.length}）` }),
+      rows,
+    ]);
   }
 
   function renderFeedbackPreview(message: ChatMessage, index: number, host: HTMLElement): void {
