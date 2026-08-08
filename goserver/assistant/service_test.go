@@ -96,7 +96,7 @@ func TestChatUsesEvidenceAndStripsThinking(t *testing.T) {
 	if strings.Contains(text, "泄露") || text != "请先填写房间号。" {
 		t.Fatalf("answer = %q", text)
 	}
-	if !strings.Contains(engine.prompt, "<|im_start|>system") || !strings.Contains(engine.prompt, "/no_think") || strings.Contains(engine.prompt, "真实房间号") {
+	if !strings.Contains(engine.prompt, "<|im_start|>system") || strings.Contains(engine.prompt, "/no_think") || strings.Contains(engine.prompt, "真实房间号") {
 		t.Fatalf("prompt = %q", engine.prompt)
 	}
 	if !strings.Contains(engine.prompt, "帮助条目足够回答") || strings.Contains(engine.prompt, NoEvidenceAnswer) {
@@ -134,9 +134,12 @@ func TestPromptIgnoresConversationHistoryAndKeepsCurrentQuestionLast(t *testing.
 	if oldQuestion >= 0 || oldAnswer >= 0 || currentQuestion < 0 || lastUserTurn < 0 || currentQuestion <= lastUserTurn {
 		t.Fatalf("prompt must ignore conversation history and keep only the current user turn: %q", prompt)
 	}
-	noThink := strings.LastIndex(prompt, "/no_think")
-	if strings.Count(prompt, "/no_think") != 1 || noThink <= lastUserTurn || noThink >= currentQuestion {
-		t.Fatalf("/no_think must be attached to the final current user turn: %q", prompt)
+	if strings.Contains(prompt, "/no_think") {
+		t.Fatalf("thinking mode must remain enabled: %q", prompt)
+	}
+	wantFinalTurn := "<|im_start|>user\n怎么设置定时器？<|im_end|>\n<|im_start|>assistant\n"
+	if !strings.HasSuffix(prompt, wantFinalTurn) || strings.Contains(prompt[lastUserTurn:], "不要复述") || strings.Contains(prompt[lastUserTurn:], "直接回答下面") {
+		t.Fatalf("the final user turn must contain only the current question: %q", prompt[lastUserTurn:])
 	}
 	if strings.Contains(prompt, "recentHistoryJSONL") || !strings.HasSuffix(prompt, "<|im_start|>assistant\n") {
 		t.Fatalf("prompt must use ordered ChatML turns and end at the assistant turn: %q", prompt)

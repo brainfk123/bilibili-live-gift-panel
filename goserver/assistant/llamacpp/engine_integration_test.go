@@ -34,8 +34,8 @@ func TestRealQwenSmoke(t *testing.T) {
 	var firstTokenAt time.Time
 	generationStarted := time.Now()
 	err := engine.Generate(ctx, assistant.GenerateRequest{
-		Prompt:    "<|im_start|>system\n你是测试助手。只回答：连接直播间。<|im_end|>\n<|im_start|>user\n/no_think 怎么开始？<|im_end|>\n<|im_start|>assistant\n",
-		MaxTokens: 32, Temperature: 0.7, TopP: 0.8, TopK: 20,
+		Prompt:    "<|im_start|>system\n你是测试助手。只回答：连接直播间。<|im_end|>\n<|im_start|>user\n怎么开始？<|im_end|>\n<|im_start|>assistant\n",
+		MaxTokens: 384, Temperature: 0.7, TopP: 0.8, TopK: 20,
 	}, func(token string) error {
 		if firstTokenAt.IsZero() {
 			firstTokenAt = time.Now()
@@ -51,18 +51,19 @@ func TestRealQwenSmoke(t *testing.T) {
 	if strings.TrimSpace(rawAnswer) == "" {
 		t.Fatal("Generate returned an empty answer")
 	}
-	visibleAnswer := rawAnswer
-	if thinkStart := strings.Index(strings.ToLower(rawAnswer), "<think>"); thinkStart >= 0 {
-		thinkEnd := strings.Index(strings.ToLower(rawAnswer[thinkStart:]), "</think>")
-		if thinkEnd < 0 {
-			t.Fatalf("unclosed thinking markup: %q", rawAnswer)
-		}
-		thinkEnd += thinkStart
-		if hidden := rawAnswer[thinkStart+len("<think>") : thinkEnd]; strings.TrimSpace(hidden) != "" {
-			t.Fatalf("non-empty thinking content generated in /no_think mode: %q", hidden)
-		}
-		visibleAnswer = rawAnswer[:thinkStart] + rawAnswer[thinkEnd+len("</think>"):]
+	thinkStart := strings.Index(strings.ToLower(rawAnswer), "<think>")
+	if thinkStart < 0 {
+		t.Fatalf("thinking mode did not emit a <think> block: %q", rawAnswer)
 	}
+	thinkEnd := strings.Index(strings.ToLower(rawAnswer[thinkStart:]), "</think>")
+	if thinkEnd < 0 {
+		t.Fatalf("unclosed thinking markup: %q", rawAnswer)
+	}
+	thinkEnd += thinkStart
+	if hidden := rawAnswer[thinkStart+len("<think>") : thinkEnd]; strings.TrimSpace(hidden) == "" {
+		t.Fatalf("thinking mode emitted an empty reasoning block: %q", rawAnswer)
+	}
+	visibleAnswer := rawAnswer[:thinkStart] + rawAnswer[thinkEnd+len("</think>"):]
 	if strings.TrimSpace(visibleAnswer) == "" {
 		t.Fatalf("Generate returned no visible answer: %q", rawAnswer)
 	}

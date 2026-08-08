@@ -439,7 +439,6 @@ func buildPrompt(request ChatRequest, results []SearchResult, summary StateSumma
 	prompt.WriteString(system)
 	prompt.WriteString("<|im_end|>\n")
 	prompt.WriteString("<|im_start|>user\n")
-	prompt.WriteString("/no_think\n直接回答下面的问题，不要复述回答规则。\n\n")
 	prompt.WriteString(sanitizeSpecialTokens(strings.TrimSpace(request.Question)))
 	prompt.WriteString("<|im_end|>\n<|im_start|>assistant\n")
 	return prompt.String(), nil
