@@ -3838,7 +3838,8 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .gift-choice-copy strong { font-size: var(--type-meta); }
 .config-root .gift-choice-copy small { min-width: 0; flex: 1; color: var(--text-dim); font-size: var(--type-meta); }
 .config-root .gift-choice-meta { display: flex; align-items: center; min-width: 0; gap: 6px; margin-top: 3px; }
-.config-root .gift-listing-status {
+.config-root .gift-listing-status,
+.config-root .gift-login-status {
   flex: 0 0 auto;
   border: 1px solid var(--border-strong);
   border-radius: 999px;
@@ -3851,6 +3852,7 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .gift-listing-status.is-special { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-text); }
 .config-root .gift-listing-status.is-observed { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-text); }
 .config-root .gift-listing-status.is-historical { background: var(--card); color: var(--text-dim); }
+.config-root .gift-login-status { border-color: color-mix(in srgb, var(--warning) 58%, var(--border)); background: color-mix(in srgb, var(--warning) 12%, transparent); color: var(--warning-text); }
 .config-root .gift-choice-check {
   display: inline-flex;
   align-items: center;
@@ -4478,6 +4480,8 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .template-gift-choice-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .config-root .template-gift-choice-copy strong { font-size: var(--type-meta); }
 .config-root .template-gift-choice-copy small { margin-top: 4px; color: var(--text-dim); font-size: var(--type-meta); }
+.config-root .template-gift-choice-meta { display: flex; min-width: 0; align-items: center; gap: 6px; margin-top: 4px; }
+.config-root .template-gift-choice-meta small { min-width: 0; flex: 1; margin-top: 0; }
 .config-root .template-gift-choice-action { display: grid; place-items: center; width: 27px; height: 27px; border: 1px solid var(--border-strong); border-radius: 50%; color: var(--text-dim); font-size: var(--type-meta); }
 .config-root .template-gift-choice.is-selected .template-gift-choice-action { border-color: var(--accent); background: var(--accent); color: var(--button-action-text); }
 .config-root .template-gift-grid-status { display: block; margin-top: 9px; color: var(--text-dim); text-align: center; }

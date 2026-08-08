@@ -18,6 +18,7 @@ async function main() {
       price: g.price,
       coinType: g.coin_type === 'gold' ? 'gold' : 'silver',
       imgBasic: g.img_basic ?? '',
+      ...((g.gift_type === 6 || g.gift_attrs?.includes?.(6)) ? { requiresLogin: true } : {}),
     }));
   } catch (err) {
     console.error('fetch gift catalog failed:', err.message);

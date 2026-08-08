@@ -14,6 +14,7 @@ import { matchesGiftSearch } from '../../gifts/catalog';
 import { giftPriceDescription } from '../../gifts/special-events';
 import type { GiftInfo } from '../../types';
 import { el } from '../common';
+import { createGiftLoginBadge } from './gift-picker';
 
 const GIFT_PAGE_SIZE = 40;
 
@@ -349,6 +350,7 @@ export function createGameplayTemplateWizard(options: GameplayTemplateWizardOpti
     if (!input) return el('span');
     const selected = (input.gifts[slotId] ?? []).some((candidate) => candidate.id === gift.id);
     const usedBy = Object.entries(input.gifts).find(([candidateSlotId, gifts]) => candidateSlotId !== slotId && gifts.some((candidate) => candidate.id === gift.id))?.[0];
+    const loginBadge = createGiftLoginBadge(gift);
     const image = el('img', { class: 'template-gift-image', alt: '' }) as HTMLImageElement;
     image.src = gift.imgBasic || transparentPixel();
     const button = el('button', {
@@ -374,7 +376,10 @@ export function createGameplayTemplateWizard(options: GameplayTemplateWizardOpti
       image,
       el('span', { class: 'template-gift-choice-copy' }, [
         el('strong', { text: gift.name, title: gift.name }),
-        el('small', { text: giftPriceDescription(gift) }),
+        el('span', { class: 'template-gift-choice-meta' }, [
+          el('small', { text: giftPriceDescription(gift) }),
+          ...(loginBadge ? [loginBadge] : []),
+        ]),
       ]),
       el('span', { class: 'template-gift-choice-action', text: selected ? '✓' : usedBy ? '移动' : '+' }),
     );

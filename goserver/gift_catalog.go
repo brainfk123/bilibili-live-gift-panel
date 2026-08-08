@@ -38,6 +38,7 @@ type roomGiftInfo struct {
 	CoinType            string  `json:"coinType"`
 	ImgBasic            string  `json:"imgBasic"`
 	Listed              bool    `json:"listed"`
+	RequiresLogin       bool    `json:"requiresLogin,omitempty"`
 	BlindBoxParent      bool    `json:"-"`
 	BlindBoxParentID    int     `json:"blindBoxParentId,omitempty"`
 	BlindBoxParentName  string  `json:"blindBoxParentName,omitempty"`
@@ -225,7 +226,8 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 		seen[giftID] = struct{}{}
 		_, blindBoxParent := blindBoxParents[gift.ID]
 		gifts = append(gifts, roomGiftInfo{
-			ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, ImgBasic: gift.ImgBasic, Listed: true, BlindBoxParent: blindBoxParent,
+			ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, ImgBasic: gift.ImgBasic,
+			Listed: true, RequiresLogin: blindBoxParent, BlindBoxParent: blindBoxParent,
 		})
 	}
 	for _, giftID := range metadataOrder {
@@ -235,7 +237,8 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 		gift := metadata[giftID]
 		_, blindBoxParent := blindBoxParents[gift.ID]
 		gifts = append(gifts, roomGiftInfo{
-			ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, ImgBasic: gift.ImgBasic, Listed: false, BlindBoxParent: blindBoxParent,
+			ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, ImgBasic: gift.ImgBasic,
+			Listed: false, RequiresLogin: blindBoxParent, BlindBoxParent: blindBoxParent,
 		})
 	}
 	return gifts, nil

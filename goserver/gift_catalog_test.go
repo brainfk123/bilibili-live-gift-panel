@@ -121,6 +121,12 @@ func TestMarkListedBlindBoxChildrenMarksRewardsAsListed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !gifts[0].RequiresLogin {
+		t.Fatalf("blind box parent should require login = %#v", gifts[0])
+	}
+	if gifts[1].RequiresLogin {
+		t.Fatalf("opened blind box reward should not require login = %#v", gifts[1])
+	}
 	lookups := []int{}
 	markListedBlindBoxChildren(gifts, func(giftID int) (*blindBoxInfo, bool, error) {
 		lookups = append(lookups, giftID)

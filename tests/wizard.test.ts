@@ -1180,7 +1180,7 @@ describe('single-page configuration rendering', () => {
 
   it('shows listed and observed gifts by default while keeping historical gifts search-only', async () => {
     const listedGift = {
-      id: 980001, name: '状态测试礼物 A', price: 100, coinType: 'gold' as const, imgBasic: '', listed: true,
+      id: 980001, name: '状态测试礼物 A', price: 100, coinType: 'gold' as const, imgBasic: '', listed: true, requiresLogin: true,
     };
     const historicalGift = {
       id: 980002, name: '状态测试礼物 B', price: 200, coinType: 'gold' as const, imgBasic: '', listed: false,
@@ -1239,6 +1239,8 @@ describe('single-page configuration rendering', () => {
     expect(defaultById.has(String(historicalGift.id))).toBe(false);
     expect(defaultById.has(String(manualGift.id))).toBe(false);
     expect(defaultById.get(String(listedGift.id))?.querySelector('.gift-listing-status')).toBeNull();
+    expect(textOf(defaultById.get(String(listedGift.id))?.querySelector('.gift-login-status')!)).toBe('需登录');
+    expect(defaultById.get(String(observedCatalogGift.id))?.querySelector('.gift-login-status')).toBeNull();
     expect(textOf(defaultById.get(String(observedCatalogGift.id))?.querySelector('.gift-listing-status')!))
       .toBe('直播中收到过');
 

@@ -59,7 +59,14 @@ export function buildGiftPickerCatalog(state: AppState, roomGiftCatalog: GiftInf
     const key = giftDisplayKey(candidate.gift);
     const existing = byDisplayKey.get(key);
     if (!existing || priority[candidate.availability] > priority[existing.availability]) {
-      byDisplayKey.set(key, candidate);
+      byDisplayKey.set(key, {
+        ...candidate,
+        gift: candidate.gift.requiresLogin || existing?.gift.requiresLogin
+          ? { ...candidate.gift, requiresLogin: true }
+          : candidate.gift,
+      });
+    } else if (candidate.gift.requiresLogin && !existing.gift.requiresLogin) {
+      byDisplayKey.set(key, { ...existing, gift: { ...existing.gift, requiresLogin: true } });
     }
   }
   const merged = Array.from(byDisplayKey.values());
@@ -67,6 +74,15 @@ export function buildGiftPickerCatalog(state: AppState, roomGiftCatalog: GiftInf
   const gifts = sortGiftsByUsage(merged.map(({ gift }) => gift), configuredGifts, state.recentGifts)
     .sort((left, right) => Number(isSpecialEventGift(right)) - Number(isSpecialEventGift(left)));
   return { gifts, availabilityById, hasLiveListingStatus };
+}
+
+export function createGiftLoginBadge(gift: Pick<GiftInfo, 'requiresLogin'>): HTMLElement | null {
+  if (!gift.requiresLogin) return null;
+  return el('span', {
+    class: 'gift-login-status',
+    text: '需登录',
+    title: '自动识别这类礼物需要登录 B 站账号',
+  });
 }
 
 export function filterGiftPickerGifts(catalog: GiftPickerCatalog, query: string): GiftInfo[] {
@@ -103,6 +119,7 @@ export function createGiftPicker(options: GiftPickerOptions): GiftPicker {
     const availability = catalog.availabilityById.get(gift.id) ?? 'historical';
     const showStatus = showAllStatuses || availability === 'observed' || availability === 'special';
     const selected = options.isSelected(gift);
+    const loginBadge = createGiftLoginBadge(gift);
     const statusLabel: Record<GiftAvailability, string> = {
       special: '直播事件',
       listed: '已上架',
@@ -126,6 +143,7 @@ export function createGiftPicker(options: GiftPickerOptions): GiftPicker {
             class: `gift-listing-status is-${availability}`,
             text: statusLabel[availability],
           })] : []),
+          ...(loginBadge ? [loginBadge] : []),
         ]),
       ]),
       el('span', { class: 'gift-choice-check', text: selected ? '✓' : '+' }),
