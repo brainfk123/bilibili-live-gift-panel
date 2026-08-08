@@ -756,17 +756,28 @@ body.config-mode::-webkit-scrollbar-corner,
   stroke: color-mix(in srgb, var(--accent) 48%, transparent);
   stroke-width: 1;
 }
-.config-root .tour-target-flow-dash {
-  stroke: color-mix(in srgb, white 86%, var(--accent));
-  stroke-width: 3;
+.config-root .tour-target-flow-segment {
   stroke-linecap: round;
   stroke-dasharray: 12 88;
   stroke-dashoffset: 0;
-  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 64%, transparent));
   animation: tour-outline-flow 1.8s linear infinite;
 }
+.config-root .tour-target-flow-tail {
+  stroke: color-mix(in srgb, var(--accent) 22%, transparent);
+  stroke-width: 5;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 36%, transparent));
+}
+.config-root .tour-target-flow-body {
+  stroke: color-mix(in srgb, var(--accent) 58%, transparent);
+  stroke-width: 3.5;
+}
+.config-root .tour-target-flow-dash {
+  stroke: color-mix(in srgb, white 86%, var(--accent));
+  stroke-width: 2.25;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, white 50%, var(--accent)));
+}
 @media (prefers-reduced-motion: reduce) {
-  .config-root .tour-target-flow-dash {
+  .config-root .tour-target-flow-segment {
     animation: none;
     opacity: 0;
   }

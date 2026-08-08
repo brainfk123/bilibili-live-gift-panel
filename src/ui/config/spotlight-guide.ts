@@ -139,26 +139,42 @@ function isGuideTargetAvailable(candidate: HTMLElement | null): candidate is HTM
 interface TourOutlineFlow {
   svg: SVGSVGElement;
   rects: SVGRectElement[];
-  dash: SVGRectElement;
+  segments: Array<{
+    rect: SVGRectElement;
+    lengthScale: number;
+  }>;
 }
 
 function createTourOutlineFlow(): TourOutlineFlow {
   const namespace = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(namespace, 'svg') as SVGSVGElement;
   const base = document.createElementNS(namespace, 'rect') as SVGRectElement;
+  const tail = document.createElementNS(namespace, 'rect') as SVGRectElement;
+  const body = document.createElementNS(namespace, 'rect') as SVGRectElement;
   const dash = document.createElementNS(namespace, 'rect') as SVGRectElement;
 
   svg.setAttribute('class', 'tour-target-flow');
   svg.setAttribute('aria-hidden', 'true');
   svg.setAttribute('focusable', 'false');
   base.setAttribute('class', 'tour-target-flow-base');
-  dash.setAttribute('class', 'tour-target-flow-dash');
-  for (const rect of [base, dash]) {
+  tail.setAttribute('class', 'tour-target-flow-segment tour-target-flow-tail');
+  body.setAttribute('class', 'tour-target-flow-segment tour-target-flow-body');
+  dash.setAttribute('class', 'tour-target-flow-segment tour-target-flow-dash');
+  const rects = [base, tail, body, dash];
+  for (const rect of rects) {
     rect.setAttribute('pathLength', '100');
   }
-  svg.append(base, dash);
+  svg.append(...rects);
 
-  return { svg, rects: [base, dash], dash };
+  return {
+    svg,
+    rects,
+    segments: [
+      { rect: tail, lengthScale: 1 },
+      { rect: body, lengthScale: 0.68 },
+      { rect: dash, lengthScale: 0.32 },
+    ],
+  };
 }
 
 function positionGuide(
@@ -232,7 +248,10 @@ function positionGuide(
   const perimeter = (straightWidth + straightHeight) * 2 + Math.PI * flowRadius * 2;
   const dashLength = Math.min(56, Math.max(24, perimeter * 0.16));
   const normalizedDashLength = perimeter > 0 ? (dashLength / perimeter) * 100 : 12;
-  outlineFlow.dash.style.strokeDasharray = `${normalizedDashLength} ${100 - normalizedDashLength}`;
+  for (const segment of outlineFlow.segments) {
+    const segmentLength = normalizedDashLength * segment.lengthScale;
+    segment.rect.style.strokeDasharray = `${segmentLength} ${100 - segmentLength}`;
+  }
 
   const width = Math.min(380, window.innerWidth - 32);
   bubble.style.width = `${width}px`;

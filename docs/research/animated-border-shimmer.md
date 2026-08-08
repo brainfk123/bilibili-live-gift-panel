@@ -17,9 +17,9 @@ The current tutorial highlight moves a straight, glowing capsule along a rounded
 Use an absolutely positioned SVG overlay containing two matching rounded rectangles:
 
 1. A faint static stroke for the complete outline.
-2. A bright stroke with `stroke-linecap: round`, one visible dash, and a large gap.
+2. Several synchronized dashed strokes with `stroke-linecap: round`: a long translucent tail, a shorter accent-colored body, and a short bright head. Their overlapping lengths create a directional gradient that still follows the curved path.
 3. Normalize the path with `pathLength="100"`, then animate the bright stroke's numeric `stroke-dashoffset` from `0` to `-100` with a linear timing function.
-4. Apply a small glow filter to the bright stroke, while keeping the stroke width close to the actual border thickness.
+4. Apply a small glow filter to the tail and head, while keeping the stroke widths close to the actual border thickness. A single solid stroke plus `drop-shadow` only softens its outside edge; it does not create a gradient along the direction of travel.
 5. Disable only the moving stroke under `prefers-reduced-motion`, leaving the static outline visible.
 
 This produces both properties needed here: constant travel along the perimeter and a highlight that genuinely curves around the same rounded rectangle. Shortening the current capsule or reducing its shadow can hide the defect, but cannot make a rigid line conform to an arc.
