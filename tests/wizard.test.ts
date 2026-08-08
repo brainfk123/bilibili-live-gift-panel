@@ -403,7 +403,12 @@ describe('configuration workspace shell', () => {
     expect(workspaces.find((workspace) => workspace.dataset.configPageWorkspace === 'overview')?.hidden).toBe(true);
     expect(workspaces.find((workspace) => workspace.dataset.configPageWorkspace === 'obs')?.hidden).toBe(false);
     expect(root.querySelector('.obs-panel-hub')?.parent?.dataset.configPageWorkspace).toBe('obs');
-    expect(root.querySelector('.display-scenes-section')?.parent?.dataset.configPageWorkspace).toBe('obs');
+    const obsWorkspace = workspaces.find((workspace) => workspace.dataset.configPageWorkspace === 'obs') as TestElement;
+    const combinationHeadings = [
+      ...obsWorkspace.querySelectorAll('h2'),
+      ...obsWorkspace.querySelectorAll('h3'),
+    ].filter((heading) => ['组合面板', 'OBS 组合面板'].includes(textOf(heading).trim()));
+    expect(combinationHeadings).toHaveLength(1);
   });
 });
 

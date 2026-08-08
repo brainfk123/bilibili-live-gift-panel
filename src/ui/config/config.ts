@@ -4150,7 +4150,9 @@ export function mountConfig(root: HTMLElement): void {
 
   function renderObsPanelHub(): void {
     const section = el('section', { class: 'obs-panel-hub' });
-    const catalog = buildObsOutputCatalog(state, { blindBoxLoginEnabled: biliAuth.state === 'logged_in' });
+    // Combination panels keep their richer editor directly below this hub.
+    const catalog = buildObsOutputCatalog(state, { blindBoxLoginEnabled: biliAuth.state === 'logged_in' })
+      .filter((group) => group.id !== 'scenes');
     section.append(el('div', { class: 'obs-panel-hub-heading' }, [
       sectionHeading('直播输出', 'OBS 面板中心', '集中管理所有独立链接；编辑仍回到对应玩法，避免出现两份配置。'),
       el('span', { class: 'obs-panel-count', text: `${obsOutputCount(catalog)} 个可用链接` }),
