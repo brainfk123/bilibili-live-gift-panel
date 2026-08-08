@@ -6,7 +6,10 @@ import (
 	"time"
 )
 
-const maxLogEntries = 200
+const (
+	maxLogEntries         = 200
+	maxGiftReceiptEntries = 200
+)
 
 type attributeState struct {
 	ID                         string                 `json:"id,omitempty"`
@@ -177,6 +180,9 @@ type giftInfo struct {
 	Price               float64 `json:"price"`
 	CoinType            string  `json:"coinType"`
 	ImgBasic            string  `json:"imgBasic"`
+	AnimationGIF        string  `json:"gif,omitempty"`
+	AnimationWebP       string  `json:"webp,omitempty"`
+	AnimationDurationMS int     `json:"animationDurationMs,omitempty"`
 	BlindBoxParentID    int     `json:"blindBoxParentId,omitempty"`
 	BlindBoxParentName  string  `json:"blindBoxParentName,omitempty"`
 	BlindBoxParentPrice float64 `json:"blindBoxParentPrice,omitempty"`
@@ -242,6 +248,37 @@ type logEntry struct {
 	Source        string  `json:"source,omitempty"`
 	TriggerName   string  `json:"triggerName,omitempty"`
 	EventID       string  `json:"eventId,omitempty"`
+}
+
+type giftReceiptEffect struct {
+	AttributeName string  `json:"attributeName"`
+	Delta         float64 `json:"delta"`
+	ValueAfter    float64 `json:"valueAfter"`
+	RuleID        string  `json:"ruleId"`
+	TriggerName   string  `json:"triggerName,omitempty"`
+}
+
+type giftReceiptAnimation struct {
+	GIF        string `json:"gif,omitempty"`
+	WebP       string `json:"webp,omitempty"`
+	DurationMS int    `json:"durationMs"`
+}
+
+type giftReceipt struct {
+	ID        string                `json:"id"`
+	Time      int64                 `json:"time"`
+	GiftID    int                   `json:"giftId"`
+	GiftName  string                `json:"giftName"`
+	Num       int                   `json:"num"`
+	Price     float64               `json:"price"`
+	TotalCoin float64               `json:"totalCoin"`
+	CoinType  string                `json:"coinType"`
+	Uname     string                `json:"uname"`
+	Avatar    string                `json:"avatar,omitempty"`
+	SenderUID int64                 `json:"senderUid,omitempty"`
+	ImgBasic  string                `json:"imgBasic,omitempty"`
+	Animation *giftReceiptAnimation `json:"animation,omitempty"`
+	Effects   []giftReceiptEffect   `json:"effects"`
 }
 
 type viewerContribution struct {
@@ -314,25 +351,29 @@ type appState struct {
 	RecentGifts     []recentGift                   `json:"recentGifts"`
 	Stats           map[string]dayStats            `json:"stats"`
 	Log             []logEntry                     `json:"log"`
+	GiftReceipts    []giftReceipt                  `json:"giftReceipts"`
 	Contributions   contributionLedgerState        `json:"contributions"`
 }
 
 type giftEvent struct {
-	GiftID         int
-	BlindGiftID    int
-	BlindGiftName  string
-	BlindGiftPrice float64
-	GiftName       string
-	Num            int
-	Price          float64
-	CoinType       string
-	TotalCoin      float64
-	Uname          string
-	Avatar         string
-	UID            int64
-	Timestamp      int64
-	ImgBasic       string
-	Rnd            string
+	GiftID              int
+	BlindGiftID         int
+	BlindGiftName       string
+	BlindGiftPrice      float64
+	GiftName            string
+	Num                 int
+	Price               float64
+	CoinType            string
+	TotalCoin           float64
+	Uname               string
+	Avatar              string
+	UID                 int64
+	Timestamp           int64
+	ImgBasic            string
+	AnimationGIF        string
+	AnimationWebP       string
+	AnimationDurationMS int
+	Rnd                 string
 }
 
 func defaultAppState() appState {
@@ -358,6 +399,7 @@ func defaultAppState() appState {
 		RecentGifts:    []recentGift{},
 		Stats:          map[string]dayStats{},
 		Log:            []logEntry{},
+		GiftReceipts:   []giftReceipt{},
 		Contributions:  contributionLedgerState{Viewers: []viewerContribution{}},
 		Settings: settingsState{
 			FontSize:                 48,
@@ -426,6 +468,17 @@ func normalizeAppState(state *appState) {
 	}
 	if state.Log == nil {
 		state.Log = []logEntry{}
+	}
+	if state.GiftReceipts == nil {
+		state.GiftReceipts = []giftReceipt{}
+	}
+	if len(state.GiftReceipts) > maxGiftReceiptEntries {
+		state.GiftReceipts = state.GiftReceipts[:maxGiftReceiptEntries]
+	}
+	for index := range state.GiftReceipts {
+		if state.GiftReceipts[index].Effects == nil {
+			state.GiftReceipts[index].Effects = []giftReceiptEffect{}
+		}
 	}
 	normalizeContributionLedger(&state.Contributions)
 	for index := range state.Rules {

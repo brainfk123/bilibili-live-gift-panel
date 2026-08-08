@@ -1,4 +1,4 @@
-import type { ActivitySession, ContributionLedger, GiftInfo } from './types';
+import type { ActivitySession, ContributionLedger, GiftInfo, GiftReceipt } from './types';
 import type { ActivityTransitionAction } from './activities';
 import { normalizeChangelogReleases, type ChangelogRelease } from './changelog';
 import type { GiftTargetProgressSnapshot } from './gift-targets';
@@ -184,6 +184,12 @@ interface GiftTargetProgressResponse {
   message?: string;
 }
 
+interface GiftReceiptResponse {
+  code: number;
+  giftReceipts?: GiftReceipt[];
+  message?: string;
+}
+
 interface AssistantStatusResponse {
   code: number;
   assistant?: AssistantStatus;
@@ -344,6 +350,19 @@ export async function clearContributionLedger(): Promise<ContributionLedger> {
     throw new Error(payload.message || `排行榜清空失败：HTTP ${response.status}`);
   }
   return payload.contributions;
+}
+
+export async function clearGiftReceipts(): Promise<GiftReceipt[]> {
+  const response = await fetch('/api/gift-receipts', { method: 'DELETE', cache: 'no-store' });
+  const payload = await response.json() as GiftReceiptResponse;
+  if (!response.ok || payload.code !== 0 || !Array.isArray(payload.giftReceipts)) {
+    throw new Error(payload.message || `送礼记录清空失败：HTTP ${response.status}`);
+  }
+  return payload.giftReceipts;
+}
+
+export function giftReceiptMediaUrl(receiptId: string, kind: 'animation' | 'avatar'): string {
+  return `/api/gift-receipts/media?id=${encodeURIComponent(receiptId)}&kind=${kind}`;
 }
 
 export async function resetGiftTargetProgress(panelId: string): Promise<GiftTargetProgressSnapshot> {

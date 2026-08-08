@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   checkForUpdates,
   clearContributionLedger,
+  clearGiftReceipts,
+  giftReceiptMediaUrl,
   getBlindBoxInfo,
   getBiliAuthStatus,
   getRoomAnchorInfo,
@@ -96,6 +98,20 @@ describe('contribution ledger API', () => {
 
     await expect(clearContributionLedger()).resolves.toEqual(contributions);
     expect(fetchMock).toHaveBeenCalledWith('/api/contributions', { method: 'DELETE', cache: 'no-store' });
+  });
+});
+
+describe('gift receipt API', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('clears the backend-owned receipt ledger and builds same-origin media URLs', async () => {
+    const giftReceipts: unknown[] = [];
+    const fetchMock = vi.fn(async () => Response.json({ code: 0, giftReceipts }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(clearGiftReceipts()).resolves.toEqual([]);
+    expect(fetchMock).toHaveBeenCalledWith('/api/gift-receipts', { method: 'DELETE', cache: 'no-store' });
+    expect(giftReceiptMediaUrl('receipt / 1', 'animation')).toBe('/api/gift-receipts/media?id=receipt%20%2F%201&kind=animation');
   });
 });
 

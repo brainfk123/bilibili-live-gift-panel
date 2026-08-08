@@ -37,6 +37,9 @@ type roomGiftInfo struct {
 	Price               float64 `json:"price"`
 	CoinType            string  `json:"coinType"`
 	ImgBasic            string  `json:"imgBasic"`
+	AnimationGIF        string  `json:"gif,omitempty"`
+	AnimationWebP       string  `json:"webp,omitempty"`
+	AnimationDurationMS int     `json:"animationDurationMs,omitempty"`
 	Listed              bool    `json:"listed"`
 	RequiresLogin       bool    `json:"requiresLogin,omitempty"`
 	BlindBoxParent      bool    `json:"-"`
@@ -151,6 +154,9 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 				Price     float64 `json:"price"`
 				CoinType  string  `json:"coin_type"`
 				ImgBasic  string  `json:"img_basic"`
+				GIF       string  `json:"gif"`
+				WebP      string  `json:"webp"`
+				StayTime  int     `json:"stay_time"`
 				GiftType  int     `json:"gift_type"`
 				GiftAttrs []int   `json:"gift_attrs"`
 			} `json:"list"`
@@ -196,6 +202,8 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 		}
 		metadata[gift.ID] = giftInfo{
 			ID: gift.ID, Name: strings.TrimSpace(gift.Name), Price: gift.Price, CoinType: coinType, ImgBasic: strings.TrimSpace(gift.ImgBasic),
+			AnimationGIF: strings.TrimSpace(gift.GIF), AnimationWebP: strings.TrimSpace(gift.WebP),
+			AnimationDurationMS: normalizeGiftAnimationDuration(gift.StayTime * 1000),
 		}
 		if gift.GiftType == 6 || containsGiftAttribute(gift.GiftAttrs, 6) {
 			blindBoxParents[gift.ID] = struct{}{}
@@ -227,6 +235,7 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 		_, blindBoxParent := blindBoxParents[gift.ID]
 		gifts = append(gifts, roomGiftInfo{
 			ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, ImgBasic: gift.ImgBasic,
+			AnimationGIF: gift.AnimationGIF, AnimationWebP: gift.AnimationWebP, AnimationDurationMS: gift.AnimationDurationMS,
 			Listed: true, RequiresLogin: blindBoxParent, BlindBoxParent: blindBoxParent,
 		})
 	}
@@ -238,6 +247,7 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 		_, blindBoxParent := blindBoxParents[gift.ID]
 		gifts = append(gifts, roomGiftInfo{
 			ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, ImgBasic: gift.ImgBasic,
+			AnimationGIF: gift.AnimationGIF, AnimationWebP: gift.AnimationWebP, AnimationDurationMS: gift.AnimationDurationMS,
 			Listed: false, RequiresLogin: blindBoxParent, BlindBoxParent: blindBoxParent,
 		})
 	}

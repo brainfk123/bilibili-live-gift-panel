@@ -1,4 +1,4 @@
-import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftKpiBarStyle, GiftKpiLayout, GiftKpiPanel, GiftRule, LogEntry, MAX_LOG, TimerRule, TrainingTopicId, TutorialLesson, ViewerContribution } from '../../types';
+import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftKpiBarStyle, GiftKpiLayout, GiftKpiPanel, GiftReceipt, GiftRule, MAX_GIFT_RECEIPTS, TimerRule, TrainingTopicId, TutorialLesson, ViewerContribution } from '../../types';
 import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { bindFloatingDetailCard, el, fieldControl, inputField, setFloatingDetailGuideExpanded, toast } from '../common';
@@ -9,6 +9,7 @@ import {
   BiliAuthStatus,
   checkForUpdates,
   clearContributionLedger,
+  clearGiftReceipts,
   getBlindBoxInfo,
   getBiliAuthStatus,
   getHostedChangelog,
@@ -25,6 +26,7 @@ import {
   startBiliQRCodeLogin,
   UpdateStatus,
 } from '../../backend';
+import { openGiftClipStudio } from './gift-clip-studio';
 import {
   applyGiftTargetProgressSnapshot,
   giftTargetPanelConfig,
@@ -2390,7 +2392,7 @@ export function mountConfig(root: HTMLElement): void {
   }
 
   function renderGiftHistory(replaceExisting = false): void {
-    const entries = state.log.filter((entry) => entry.source !== 'timer');
+    const entries = state.giftReceipts;
     const section = el('section', { class: 'gift-history-section' });
     const clearButton = el('button', {
       class: 'btn ghost gift-history-clear',
@@ -2398,27 +2400,41 @@ export function mountConfig(root: HTMLElement): void {
       text: '清空记录',
     }) as HTMLButtonElement;
     clearButton.disabled = entries.length === 0;
+    let clearArmed = false;
+    let clearTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
     clearButton.onclick = () => {
-      if (!confirm('清空全部送礼生效记录？属性值、礼物规则和定时器日志不会受影响。')) return;
-      const previousLog = state.log;
-      state.log = state.log.filter((entry) => entry.source === 'timer');
+      if (!clearArmed) {
+        clearArmed = true;
+        clearButton.textContent = '确定清空';
+        clearButton.classList.add('is-armed');
+        clearTimer = globalThis.setTimeout(() => {
+          clearArmed = false;
+          clearButton.textContent = '清空记录';
+          clearButton.classList.remove('is-armed');
+        }, 3000);
+        return;
+      }
+      if (clearTimer !== undefined) globalThis.clearTimeout(clearTimer);
       clearButton.disabled = true;
-      void saveAndWait().then(() => {
-        render();
-        toast('送礼生效记录已清空', root);
+      void clearGiftReceipts().then((receipts) => {
+        state.giftReceipts = receipts;
+        renderGiftHistory(true);
+        toast('所有送礼记录已清空', root);
       }).catch(() => {
-        state.log = previousLog;
+        clearArmed = false;
+        clearButton.textContent = '清空记录';
+        clearButton.classList.remove('is-armed');
         clearButton.disabled = false;
       });
     };
     const heading = el('div', { class: 'gift-history-heading' }, [
       sectionHeading(
         '运行核对',
-        '送礼生效记录',
-        `只显示真正执行过礼物规则的事件；未命中规则的礼物不会出现。最多保留最近 ${MAX_LOG} 条计算日志。`,
+        '所有送礼记录',
+        `记录直播间收到的全部礼物，包括未命中规则的事件。最多保留最近 ${MAX_GIFT_RECEIPTS} 条；有短动画素材时可手动制作回放。`,
       ),
       el('div', { class: 'gift-history-actions' }, [
-        el('div', { class: 'gift-history-count', text: `${entries.length} 条生效记录` }),
+        el('div', { class: 'gift-history-count', text: `${entries.length} 条送礼记录` }),
         clearButton,
       ]),
     ]);
@@ -2427,31 +2443,21 @@ export function mountConfig(root: HTMLElement): void {
     if (entries.length === 0) {
       section.append(el('div', {
         class: 'gift-history-empty',
-        text: '还没有送礼规则生效记录。收到命中规则的礼物后，会在这里显示完整的数值变化。',
+        text: '还没有送礼记录。连接直播间后，收到的礼物会在这里显示；是否命中规则都不会遗漏。',
       }));
       appendOrReplaceSection(section, '.gift-history-section', replaceExisting);
       return;
     }
 
     const distinctGifts = new Set(entries.map((entry) => entry.giftId));
-    const attributeTotals = new Map<string, { count: number; delta: number }>();
-    for (const entry of entries) {
-      const total = attributeTotals.get(entry.attributeName) ?? { count: 0, delta: 0 };
-      total.count += 1;
-      total.delta += entry.delta;
-      attributeTotals.set(entry.attributeName, total);
-    }
+    const giftCount = entries.reduce((total, entry) => total + Math.max(1, entry.num || 1), 0);
+    const effectCount = entries.reduce((total, entry) => total + entry.effects.length, 0);
     const summary = el('div', { class: 'gift-history-summary' }, [
+      el('span', { text: `${entries.length} 条记录` }),
       el('span', { text: `${distinctGifts.size} 种礼物` }),
+      el('span', { text: `${giftCount} 个礼物` }),
+      el('span', { text: `${effectCount} 次规则生效` }),
     ]);
-    for (const [attributeName, total] of attributeTotals) {
-      const attribute = state.attributes.find((item) => item.name === attributeName);
-      const fullSummary = `${attributeName}：${total.count} 次 · 净变化 ${formatHistoryDelta(total.delta, attribute)}`;
-      summary.append(el('span', {
-        text: `${attributeName}：${total.count} 次 · 净变化 ${formatHistorySummaryDelta(total.delta, attribute)}`,
-        title: fullSummary,
-      }));
-    }
     section.append(summary);
 
     const list = el('div', { class: 'gift-history-list' });
@@ -2481,12 +2487,8 @@ export function mountConfig(root: HTMLElement): void {
     appendOrReplaceSection(section, '.gift-history-section', replaceExisting);
   }
 
-  function renderGiftHistoryRow(entry: LogEntry): HTMLElement {
-    const attribute = state.attributes.find((item) => item.name === entry.attributeName);
-    const rule = state.rules.find((item) => item.id === entry.ruleId);
+  function renderGiftHistoryRow(entry: GiftReceipt): HTMLElement {
     const gift = findGift(state, entry.giftId);
-    const triggerName = entry.triggerName?.trim() || rule?.formulaName?.trim() || '历史规则';
-    const before = entry.valueAfter - entry.delta;
     const avatar = el('img', {
       class: 'gift-history-avatar',
       alt: entry.uname ? `${entry.uname}的头像` : '用户头像',
@@ -2494,7 +2496,7 @@ export function mountConfig(root: HTMLElement): void {
     }) as HTMLImageElement;
     avatar.src = entry.avatar || transparentPixel();
     const giftImage = el('img', { class: 'gift-history-gift-image', alt: gift?.name || entry.giftName }) as HTMLImageElement;
-    giftImage.src = gift?.imgBasic || transparentPixel();
+    giftImage.src = entry.imgBasic || gift?.imgBasic || transparentPixel();
     const time = new Date(entry.time < 1_000_000_000_000 ? entry.time * 1000 : entry.time);
     const timeText = time.toLocaleString('zh-CN', {
       month: '2-digit',
@@ -2504,10 +2506,25 @@ export function mountConfig(root: HTMLElement): void {
       second: '2-digit',
       hour12: false,
     });
-    const beforeText = formatHistoryValue(before, attribute);
-    const afterText = formatHistoryValue(entry.valueAfter, attribute);
-    const deltaText = formatHistoryDelta(entry.delta, attribute);
-    const transitionText = `${beforeText} → ${afterText}`;
+    const effects = entry.effects ?? [];
+    const effectSummary = effects.map((effect) => {
+      const attribute = state.attributes.find((item) => item.name === effect.attributeName);
+      return `${effect.attributeName} ${formatHistoryDelta(effect.delta, attribute)}`;
+    }).join(' · ');
+    const replayButton = el('button', {
+      class: 'btn ghost gift-history-replay',
+      type: 'button',
+      text: entry.animation ? '制作回放' : '无动画素材',
+    }) as HTMLButtonElement;
+    replayButton.disabled = !entry.animation;
+    replayButton.onclick = () => {
+      if (!entry.animation) return;
+      openGiftClipStudio({
+        host: root,
+        receipt: entry,
+        onError: (message) => toast(message, root),
+      });
+    };
     return el('article', { class: 'gift-history-row' }, [
       el('time', { class: 'gift-history-time', dateTime: time.toISOString(), text: timeText, title: time.toLocaleString('zh-CN') }),
       el('div', { class: 'gift-history-person' }, [
@@ -2525,12 +2542,15 @@ export function mountConfig(root: HTMLElement): void {
         ]),
       ]),
       el('div', { class: 'gift-history-effect' }, [
-        el('strong', { text: entry.attributeName }),
-        el('span', { text: triggerName, title: triggerName }),
+        el('strong', { text: effects.length > 0 ? `${effects.length} 条规则生效` : '未触发属性规则' }),
+        el('span', {
+          text: effects.length > 0 ? effectSummary : '礼物事件已记录',
+          title: effects.length > 0 ? effectSummary : '礼物事件已记录',
+        }),
       ]),
-      el('div', { class: 'gift-history-change' }, [
-        el('span', { text: transitionText, title: transitionText }),
-        el('strong', { class: entry.delta < 0 ? 'is-negative' : entry.delta > 0 ? 'is-positive' : 'is-zero', text: deltaText, title: deltaText }),
+      el('div', { class: 'gift-history-replay-cell' }, [
+        replayButton,
+        el('span', { text: entry.animation ? `${Math.round(entry.animation.durationMs / 100) / 10} 秒短动画` : '该礼物未提供 GIF/WebP' }),
       ]),
     ]);
   }
@@ -4656,7 +4676,7 @@ function contributionStateSignature(state: AppState): string {
 }
 
 function giftHistoryStateSignature(state: AppState): string {
-  return JSON.stringify(state.log.filter((entry) => entry.source !== 'timer'));
+  return JSON.stringify(state.giftReceipts);
 }
 
 function formatHistoryValue(value: number, attribute?: Attribute): string {
@@ -4667,17 +4687,6 @@ function formatHistoryValue(value: number, attribute?: Attribute): string {
 function formatHistoryDelta(delta: number, attribute?: Attribute): string {
   const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
   return `${sign}${formatHistoryValue(Math.abs(delta), attribute)}`;
-}
-
-function formatHistorySummaryDelta(delta: number, attribute?: Attribute): string {
-  if (Math.abs(delta) < 1_000_000) return formatHistoryDelta(delta, attribute);
-  const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
-  const unit = attribute?.format === 'suffix' && attribute.suffix
-    ? ` ${attribute.suffix}`
-    : attribute?.unit === 'seconds'
-      ? ' 秒'
-      : '';
-  return `${sign}${Math.abs(delta).toExponential(2)}${unit}`;
 }
 
 function attributeLiveValueElement(tag: 'small' | 'strong', attribute: Attribute): HTMLElement {

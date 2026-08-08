@@ -1,4 +1,4 @@
-import { AppState, AttributeValueMapping, MAX_LOG } from './types';
+import { AppState, AttributeValueMapping, MAX_GIFT_RECEIPTS, MAX_LOG } from './types';
 import { normalizeDisplayThemeId } from './display-themes';
 import { normalizeDisplayScenes } from './display-scenes';
 import { normalizeActivities } from './activities';
@@ -91,6 +91,7 @@ export const defaultState = (): AppState => ({
   recentGifts: [],
   stats: {},
   log: [],
+  giftReceipts: [],
   contributions: { viewers: [] },
 });
 
@@ -101,6 +102,7 @@ export function clearRoomScopedRecords(state: AppState): AppState {
     recentGifts: [],
     stats: {},
     log: [],
+    giftReceipts: [],
     contributions: { viewers: [], updatedAt: Date.now() },
   };
 }
@@ -278,6 +280,7 @@ export function mergeConfigBackup(current: AppState, input: unknown): AppState {
     recentGifts: current.recentGifts,
     stats: current.stats,
     log: current.log,
+    giftReceipts: current.giftReceipts,
     contributions: current.contributions,
   });
 }
@@ -356,6 +359,7 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     rules: parsed.rules ?? base.rules,
     timerRules: parsed.timerRules ?? base.timerRules,
     formulaPresets: parsed.formulaPresets ?? base.formulaPresets,
+    giftReceipts: (Array.isArray(parsed.giftReceipts) ? parsed.giftReceipts : []).slice(0, MAX_GIFT_RECEIPTS),
     contributions: normalizeContributionLedger(parsed.contributions),
   };
 }

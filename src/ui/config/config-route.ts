@@ -6,7 +6,7 @@ export const CONFIG_PAGES = [
   { id: 'activities', label: '活动会话', description: '开始、锁定与结算', icon: 'activities', selectors: ['.activity-workspace-section'] },
   { id: 'kpi', label: '礼物目标', description: '目标数量与进度', icon: 'kpi', selectors: ['.gift-kpi-config-section'] },
   { id: 'obs', label: 'OBS 面板', description: '组合画面与输出', icon: 'obs', selectors: ['.obs-panel-hub', '.display-scenes-section'] },
-  { id: 'data', label: '数据中心', description: '排行榜与生效记录', icon: 'data', selectors: ['.contribution-section', '.gift-history-section'] },
+  { id: 'data', label: '数据中心', description: '排行榜与送礼记录', icon: 'data', selectors: ['.contribution-section', '.gift-history-section'] },
 ] as const;
 
 export type ConfigPageId = (typeof CONFIG_PAGES)[number]['id'];

@@ -64,8 +64,12 @@ func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callba
 		return err
 	}
 	session = sessionForRoomInfo(info, session)
+	catalogByID := map[int]roomGiftInfo{}
 	if callbacks.onGiftCatalog != nil {
 		if gifts, catalogErr := fetchCurrentRoomGiftCatalog(roomID, session); catalogErr == nil {
+			for _, gift := range gifts {
+				catalogByID[gift.ID] = gift
+			}
 			callbacks.onGiftCatalog(gifts)
 		} else if callbacks.onGiftCatalogError != nil {
 			callbacks.onGiftCatalogError(catalogErr)
@@ -155,7 +159,7 @@ func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callba
 			}
 			for _, body := range bodies {
 				if gift, ok := parseBiliGift(body); ok {
-					callbacks.onGift(gift)
+					callbacks.onGift(enrichGiftAnimationFromRoomCatalog(gift, catalogByID))
 					continue
 				}
 				if paidEvent, ok := parseBiliPaidEvent(body); ok {
@@ -259,6 +263,8 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 		} `json:"blind_gift"`
 		GiftInfo struct {
 			ImgBasic string `json:"img_basic"`
+			GIF      string `json:"gif"`
+			WebP     string `json:"webp"`
 		} `json:"gift_info"`
 		SenderUinfo struct {
 			UID  biliUID `json:"uid"`
@@ -316,8 +322,30 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 		GiftID: data.GiftID, BlindGiftID: int(data.BlindGiftID), BlindGiftName: blindGiftName, BlindGiftPrice: blindGiftPrice,
 		GiftName: data.GiftName, Num: data.Num, Price: data.Price,
 		CoinType: data.CoinType, TotalCoin: data.TotalCoin, Uname: uname, Avatar: avatar, UID: uid,
-		Timestamp: data.Timestamp, ImgBasic: data.GiftInfo.ImgBasic, Rnd: rnd,
+		Timestamp: data.Timestamp, ImgBasic: data.GiftInfo.ImgBasic,
+		AnimationGIF: strings.TrimSpace(data.GiftInfo.GIF), AnimationWebP: strings.TrimSpace(data.GiftInfo.WebP),
+		Rnd: rnd,
 	}, true
+}
+
+func enrichGiftAnimationFromRoomCatalog(gift giftEvent, catalog map[int]roomGiftInfo) giftEvent {
+	metadata, exists := catalog[gift.GiftID]
+	if !exists {
+		return gift
+	}
+	if strings.TrimSpace(gift.ImgBasic) == "" {
+		gift.ImgBasic = metadata.ImgBasic
+	}
+	if strings.TrimSpace(gift.AnimationGIF) == "" {
+		gift.AnimationGIF = metadata.AnimationGIF
+	}
+	if strings.TrimSpace(gift.AnimationWebP) == "" {
+		gift.AnimationWebP = metadata.AnimationWebP
+	}
+	if gift.AnimationDurationMS <= 0 {
+		gift.AnimationDurationMS = metadata.AnimationDurationMS
+	}
+	return gift
 }
 
 func firstPositiveFloat(values ...float64) float64 {

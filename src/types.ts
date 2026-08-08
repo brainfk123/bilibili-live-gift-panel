@@ -204,6 +204,10 @@ export interface GiftInfo {
   price: number;
   coinType: 'gold' | 'silver';
   imgBasic: string;
+  /** Short SEND_GIFT animation assets exposed by Bilibili's room gift catalog. */
+  gif?: string;
+  webp?: string;
+  animationDurationMs?: number;
   /** Whether the gift is currently listed in the connected room. */
   listed?: boolean;
   /** Whether complete matching for this gift depends on a logged-in Bilibili session. */
@@ -277,6 +281,37 @@ export interface ViewerContribution {
   lastGiftAt: number;
 }
 
+export interface GiftReceiptEffect {
+  attributeName: string;
+  delta: number;
+  valueAfter: number;
+  ruleId: string;
+  triggerName?: string;
+}
+
+export interface GiftReceiptAnimation {
+  gif?: string;
+  webp?: string;
+  durationMs: number;
+}
+
+export interface GiftReceipt {
+  id: string;
+  time: number;
+  giftId: number;
+  giftName: string;
+  num: number;
+  price: number;
+  totalCoin: number;
+  coinType: string;
+  uname: string;
+  avatar?: string;
+  senderUid?: number;
+  imgBasic?: string;
+  animation?: GiftReceiptAnimation;
+  effects: GiftReceiptEffect[];
+}
+
 export interface BlindBoxContribution {
   giftId: number;
   giftName: string;
@@ -328,7 +363,9 @@ export interface AppState {
   recentGifts: RecentGift[];
   stats: Record<string, DayStats>;
   log: LogEntry[];
+  giftReceipts: GiftReceipt[];
   contributions: ContributionLedger;
 }
 
 export const MAX_LOG = 200;
+export const MAX_GIFT_RECEIPTS = 200;

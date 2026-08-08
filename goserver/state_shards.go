@@ -13,7 +13,7 @@ import (
 // Every persisted shard has its own version. Missing versions are treated as
 // legacy version 0, while newer versions are rejected so an older executable
 // cannot silently discard fields it does not understand.
-const stateShardSchemaVersion = 6
+const stateShardSchemaVersion = 7
 
 type unsupportedStateVersionError struct {
 	Shard   string
@@ -50,6 +50,7 @@ type historyStateShard struct {
 	Stats              map[string]dayStats     `json:"stats"`
 	Contributions      contributionLedgerState `json:"contributions"`
 	GiftTargetProgress giftTargetProgressState `json:"giftTargetProgress"`
+	GiftReceipts       []giftReceipt           `json:"giftReceipts"`
 }
 
 func configShardFromState(state appState) configStateShard {
@@ -82,6 +83,7 @@ func historyShardFromState(state appState) historyStateShard {
 		Stats:              state.Stats,
 		Contributions:      state.Contributions,
 		GiftTargetProgress: giftTargetProgressFromPanels(state.GiftKPIPanels),
+		GiftReceipts:       state.GiftReceipts,
 	}
 }
 
@@ -130,7 +132,7 @@ func (s *configStore) readStateLocked() (appState, error) {
 		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(configData, &fields); err == nil {
-			for _, key := range []string{"giftCatalog", "recentGifts", "stats", "log", "contributions"} {
+			for _, key := range []string{"giftCatalog", "recentGifts", "stats", "log", "contributions", "giftReceipts"} {
 				if _, exists := fields[key]; exists {
 					s.migrationRequired = true
 					break
@@ -163,11 +165,13 @@ func (s *configStore) readStateLocked() (appState, error) {
 	if err != nil {
 		return appState{}, err
 	}
+	historyVersion := 0
 	if historyExists {
 		version, err := readStateShardVersion(historyData, "历史数据")
 		if err != nil {
 			return appState{}, err
 		}
+		historyVersion = version
 		if version < stateShardSchemaVersion {
 			s.migrationRequired = true
 		}
@@ -177,6 +181,7 @@ func (s *configStore) readStateLocked() (appState, error) {
 		}
 		state.Stats = history.Stats
 		state.Contributions = history.Contributions
+		state.GiftReceipts = history.GiftReceipts
 		applyGiftTargetProgress(state.GiftKPIPanels, history.GiftTargetProgress)
 	}
 
@@ -186,6 +191,10 @@ func (s *configStore) readStateLocked() (appState, error) {
 	}
 	if eventLogExists {
 		state.Log = eventLog
+	}
+	if eventLogExists && historyVersion < 7 && len(state.GiftReceipts) == 0 {
+		state.GiftReceipts = migrateGiftReceiptsFromLog(eventLog)
+		s.migrationRequired = true
 	}
 
 	normalizeAppState(&state)

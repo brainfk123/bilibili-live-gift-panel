@@ -45,6 +45,33 @@ func TestBuildCurrentRoomGiftCatalogMarksPanelVersionsAsListed(t *testing.T) {
 	}
 }
 
+func TestBuildCurrentRoomGiftCatalogIncludesShortAnimationMetadata(t *testing.T) {
+	configPayload := map[string]any{
+		"code": float64(0),
+		"data": map[string]any{"list": []any{
+			map[string]any{
+				"id": float64(1), "name": "动画礼物", "price": float64(100), "coin_type": "gold",
+				"img_basic": "gift.png", "gif": "https://i0.hdslb.com/gift.gif",
+				"webp": "https://i0.hdslb.com/gift.webp", "stay_time": float64(4),
+			},
+		}},
+	}
+	panelPayload := map[string]any{
+		"code": float64(0),
+		"data": map[string]any{
+			"room_gift_list": map[string]any{"gold_list": []any{map[string]any{"gift_id": float64(1)}}, "silver_list": []any{}},
+			"tab_list":       []any{},
+		},
+	}
+	gifts, err := buildCurrentRoomGiftCatalog(configPayload, panelPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gifts) != 1 || gifts[0].AnimationGIF == "" || gifts[0].AnimationWebP == "" || gifts[0].AnimationDurationMS != 4000 {
+		t.Fatalf("animation metadata = %#v", gifts)
+	}
+}
+
 func TestBuildCurrentRoomGiftCatalogIncludesListedUpgradeGiftVariants(t *testing.T) {
 	configPayload := map[string]any{
 		"code": float64(0),

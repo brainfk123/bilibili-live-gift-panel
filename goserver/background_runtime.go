@@ -164,6 +164,7 @@ func (runtime *backgroundRuntime) mergeBlindBoxGiftCatalog(gifts []roomGiftInfo)
 			}
 			mapped := giftInfo{
 				ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, ImgBasic: gift.ImgBasic,
+				AnimationGIF: gift.AnimationGIF, AnimationWebP: gift.AnimationWebP, AnimationDurationMS: gift.AnimationDurationMS,
 				BlindBoxParentID: gift.BlindBoxParentID, BlindBoxParentName: gift.BlindBoxParentName, BlindBoxParentPrice: gift.BlindBoxParentPrice,
 			}
 			if index := findGiftIndex(state.GiftCatalog, gift.ID); index >= 0 {
@@ -517,6 +518,7 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 		resetActivityGiftTimeouts(state, changedAttributeNames, milestoneTime)
 		evaluateActivityMilestones(state, milestoneTime)
 	}
+	appendGiftReceipt(state, gift, changes)
 	recordGiftContribution(state, gift, giftContributionOutcome{
 		RuleTriggers: appliedRuleTriggers,
 		Changes:      changes,

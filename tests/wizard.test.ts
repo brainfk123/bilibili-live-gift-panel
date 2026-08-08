@@ -2353,7 +2353,7 @@ describe('single-page configuration rendering', () => {
     expect(root.querySelector('.activity-card')).toBeNull();
   });
 
-  it('lists only effective gift calculations with the gift ID and before/after values', () => {
+  it('lists all gift receipts and distinguishes effective from unmatched gifts', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state('88888888', 1),
       rules: [{
@@ -2373,49 +2373,68 @@ describe('single-page configuration rendering', () => {
           delta: -1, valueAfter: 59, ruleId: 't-1', source: 'timer', triggerName: '每分钟减少',
         },
       ],
+      giftReceipts: [
+        {
+          id: 'receipt-1', time: 1700000000, giftId: 32125, giftName: '电影票', num: 1,
+          price: 2000, totalCoin: 2000, coinType: 'gold', uname: '测试用户', senderUid: 123,
+          animation: { gif: 'https://i0.hdslb.com/gift.gif', durationMs: 3000 },
+          effects: [{ attributeName: '加班时间', delta: 60, valueAfter: 120, ruleId: 'r-movie', triggerName: '电影票加时' }],
+        },
+        {
+          id: 'receipt-2', time: 1699999999, giftId: 32128, giftName: '爱心抱枕', num: 2,
+          price: 100, totalCoin: 200, coinType: 'gold', uname: '未命中用户', effects: [],
+        },
+      ],
+    }));
+    const baseFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/api/gift-receipts') && init?.method === 'DELETE') {
+        return Response.json({ code: 0, giftReceipts: [] });
+      }
+      return baseFetch(input, init);
     }));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
     expect(root.querySelectorAll('.gift-history-row')).toHaveLength(2);
-    expect(textOf(root.querySelector('.gift-history-section') as TestElement)).toContain('2 条生效记录');
+    expect(textOf(root.querySelector('.gift-history-section') as TestElement)).toContain('2 条送礼记录');
     expect(textOf(root)).toContain('礼物 ID 32125');
-    expect(textOf(root)).toContain('电影票加时');
-    expect(textOf(root)).toContain('00:01:00 → 00:02:00');
-    expect(textOf(root)).toContain('+00:01:00');
-    expect(textOf(root)).toContain('历史规则');
+    expect(textOf(root)).toContain('加班时间 +00:01:00');
+    expect(textOf(root)).toContain('未触发属性规则');
+    expect(textOf(root)).toContain('制作回放');
+    expect(textOf(root)).toContain('无动画素材');
     expect(textOf(root)).not.toContain('每分钟减少');
 
-    const confirmMock = vi.fn(() => true);
-    vi.stubGlobal('confirm', confirmMock);
-    findByText(root, '清空记录')?.onclick?.();
+    const clearButton = findByText(root, '清空记录')!;
+    clearButton.onclick?.();
+    expect(clearButton.textContent).toBe('确定清空');
+    clearButton.onclick?.();
     return vi.waitFor(() => {
-      expect(loadState().log).toHaveLength(1);
-      expect(loadState().log[0].source).toBe('timer');
+      expect(loadState().log).toHaveLength(3);
       expect(root.querySelectorAll('.gift-history-row')).toHaveLength(0);
-      expect(textOf(root)).toContain('还没有送礼规则生效记录');
+      expect(textOf(root)).toContain('还没有送礼记录');
     });
   });
 
-  it('incrementally reveals all retained effective gift records while scrolling', () => {
-    const log = Array.from({ length: 85 }, (_, index) => ({
+  it('incrementally reveals all retained gift receipts while scrolling', () => {
+    const giftReceipts = Array.from({ length: 85 }, (_, index) => ({
+      id: `receipt-${index}`,
       time: 1700000000 - index,
       giftId: 32125,
       giftName: '电影票',
       num: 1,
       uname: `用户 ${index}`,
-      attributeName: '加班时间',
-      delta: 1,
-      valueAfter: 85 - index,
-      ruleId: 'r-movie',
-      source: 'gift',
+      price: 2000,
+      totalCoin: 2000,
+      coinType: 'gold',
+      effects: [{ attributeName: '加班时间', delta: 1, valueAfter: 85 - index, ruleId: 'r-movie' }],
     }));
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state('88888888', 1),
       rules: [{
         id: 'r-movie', giftId: 32125, attributeName: '加班时间', formulaName: '电影票加时', formula: '加班时间+1',
       }],
-      log,
+      giftReceipts,
     }));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);

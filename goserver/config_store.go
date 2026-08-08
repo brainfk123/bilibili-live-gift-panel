@@ -583,6 +583,7 @@ func clearRoomScopedRecords(state *appState) {
 	state.RecentGifts = []recentGift{}
 	state.Stats = map[string]dayStats{}
 	state.Log = []logEntry{}
+	state.GiftReceipts = []giftReceipt{}
 	state.Contributions = contributionLedgerState{
 		Viewers:   []viewerContribution{},
 		UpdatedAt: time.Now().UnixMilli(),
@@ -604,6 +605,7 @@ func (s *configStore) replaceClientState(state appState) (clientStateReplaceResu
 	if roomSwitchRequiresRecordReset(previous.RoomID, state.RoomID) {
 		clearRoomScopedRecords(&state)
 	} else {
+		state.GiftReceipts = previous.GiftReceipts
 		preserveGiftTargetProgress(previous.GiftKPIPanels, state.GiftKPIPanels)
 		if previous.Contributions.UpdatedAt > state.Contributions.UpdatedAt {
 			state.Contributions = previous.Contributions
