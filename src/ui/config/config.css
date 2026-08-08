@@ -724,17 +724,63 @@ body.config-mode::-webkit-scrollbar-corner,
   pointer-events: none;
   transition: none;
 }
+@property --tour-outline-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+@keyframes tour-outline-flow {
+  to { --tour-outline-angle: 1turn; }
+}
 .config-root .tour-target-outline {
   position: fixed;
   z-index: 132;
   min-width: 36px;
   min-height: 36px;
-  border: 2px solid var(--accent);
+  border: 0;
   border-radius: 11px;
   background: transparent;
   box-shadow: none;
+  isolation: isolate;
   pointer-events: none;
   transition: none;
+}
+.config-root .tour-target-outline::before,
+.config-root .tour-target-outline::after {
+  content: '';
+  position: absolute;
+  pointer-events: none;
+}
+.config-root .tour-target-outline::before {
+  inset: -4px;
+  border-radius: calc(11px + 4px);
+  padding: 3px;
+  background: conic-gradient(
+    from var(--tour-outline-angle),
+    transparent 0 54%,
+    color-mix(in srgb, var(--accent) 22%, transparent) 62%,
+    var(--accent) 70%,
+    color-mix(in srgb, white 86%, var(--accent)) 75%,
+    var(--accent) 80%,
+    transparent 91% 100%
+  );
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 64%, transparent));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: tour-outline-flow 1.8s linear infinite;
+}
+.config-root .tour-target-outline::after {
+  inset: -1px;
+  border: 1px solid color-mix(in srgb, var(--accent) 48%, transparent);
+  border-radius: calc(11px + 1px);
+  box-shadow: inset 0 0 7px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .config-root .tour-target-outline::before {
+    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, white 72%, var(--accent)));
+    animation: none;
+  }
 }
 .config-root .tour-bubble {
   position: fixed;
@@ -1613,7 +1659,11 @@ body.config-mode::-webkit-scrollbar-corner,
   line-height: 1.55;
 }
 .config-root .config-page > [hidden] { display: none !important; }
-.config-root .config-page { min-width: 0; }
+.config-root .config-page { position: relative; min-width: 0; }
+.config-root .config-page:has(.hover-detail-card:hover),
+.config-root .config-page:has(.hover-detail-card:not(.is-pointer-focus):focus-within),
+.config-root .config-page:has(.hover-detail-card.is-guide-expanded),
+.config-root .config-page:has(.hover-detail-card.is-detail-persisted) { z-index: 120; }
 .config-root .config-page-workspace { display: grid; min-width: 0; gap: 22px; }
 .config-root .overview-dashboard,
 .config-root .obs-panel-hub {
@@ -2014,7 +2064,10 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .activity-workspace-section:has(.hover-detail-card:not(.is-pointer-focus):focus-within),
 .config-root .activity-workspace-section:has(.hover-detail-card.is-detail-persisted),
 .config-root .display-scenes-section:has(.hover-detail-card:hover),
-.config-root .display-scenes-section:has(.hover-detail-card:not(.is-pointer-focus):focus-within) { z-index: 120; }
+.config-root .display-scenes-section:has(.hover-detail-card:not(.is-pointer-focus):focus-within),
+.config-root .gift-kpi-config-section:has(.hover-detail-card:hover),
+.config-root .gift-kpi-config-section:has(.hover-detail-card:not(.is-pointer-focus):focus-within),
+.config-root .gift-kpi-config-section:has(.hover-detail-card.is-detail-persisted) { z-index: 120; }
 .config-root .attributes-heading-row {
   display: flex;
   align-items: flex-end;

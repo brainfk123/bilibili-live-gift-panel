@@ -346,8 +346,8 @@ describe('wizard progress', () => {
     });
     expect(getTutorialLesson(tutorialState, true, { open: false })).toBe('timer');
     tutorialState.timerRules.push({
-      id: 'timer-1', attributeName: '加班时间', formulaName: '自动减少', intervalSeconds: 60,
-      condition: '加班时间>0', formula: 'MAX(加班时间-60,0)', enabled: true,
+      id: 'timer-1', attributeName: '加班时间', formulaName: '每秒自动减少', intervalSeconds: 1,
+      condition: '加班时间>0', formula: 'MAX(加班时间-1,0)', enabled: true,
     });
     expect(getTutorialLesson(tutorialState, true, { open: false })).toBe('enable');
     tutorialState.rules[0].enabled = true;
@@ -1290,7 +1290,10 @@ describe('single-page configuration rendering', () => {
     expect(configCss).toContain('.config-root .tour-prototype.is-modal-step .tour-target-outline { z-index: 172; }');
     expect(configCss).toContain('.config-root .tour-prototype.is-modal-step .tour-bubble { z-index: 173; }');
     expect(configCss).toMatch(/\.config-root \.tour-focus \{[\s\S]*?border: 0;[\s\S]*?box-shadow: 0 0 0 100vmax[\s\S]*?transition: none;/);
-    expect(configCss).toMatch(/\.config-root \.tour-target-outline \{[\s\S]*?border: 2px solid var\(--accent\);[\s\S]*?box-shadow: none;[\s\S]*?transition: none;/);
+    expect(configCss).toMatch(/\.config-root \.tour-target-outline \{[\s\S]*?border: 0;[\s\S]*?box-shadow: none;[\s\S]*?transition: none;/);
+    expect(configCss).toMatch(/\.config-root \.tour-target-outline::before \{[\s\S]*?conic-gradient\([\s\S]*?animation: tour-outline-flow 1\.8s linear infinite;/);
+    expect(configCss).toContain('@keyframes tour-outline-flow');
+    expect(configCss).toMatch(/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.config-root \.tour-target-outline::before \{[\s\S]*?animation: none;/);
     expect(configCss).toMatch(/\.config-root \.hover-detail-card\.is-guide-expanded,[\s\S]*?\.config-root \.hover-detail-card\.is-guide-expanded \.hover-detail-panel \{[\s\S]*?transition: none !important;/);
     expect(configCss).toContain('.config-root .template-wizard-overlay { z-index: 145;');
     expect(configCss).toMatch(/\.config-root \.overlay\.attribute-overlay \{[\s\S]*?z-index: 148;/);
@@ -1382,6 +1385,12 @@ describe('single-page configuration rendering', () => {
     expect(saved.attributes).toHaveLength(1);
     expect(saved.rules).toHaveLength(1);
     expect(saved.timerRules).toHaveLength(1);
+    expect(saved.timerRules[0]).toMatchObject({
+      formulaName: '每秒自动减少',
+      intervalSeconds: 1,
+      condition: '加班时间>0',
+      formula: 'MAX(加班时间-1,0)',
+    });
     expect(saved.formulaPresets).toHaveLength(1);
     expect(saved.rules[0].enabled).toBe(false);
 
@@ -2553,6 +2562,8 @@ describe('single-page configuration rendering', () => {
     expect(configCss).toContain('@media (hover: hover)');
     expect(configCss).toContain('.config-root .hover-detail-card:hover .hover-detail-panel');
     expect(configCss).toContain('.config-root .hover-detail-card:not(.is-pointer-focus):focus-within .hover-detail-panel');
+    expect(configCss).toMatch(/\.config-root \.config-page:has\(\.hover-detail-card:hover\),[\s\S]*?z-index: 120;/);
+    expect(configCss).toContain('.config-root .gift-kpi-config-section:has(.hover-detail-card:hover)');
     expect(configCss).toMatch(/\.config-root \.hover-detail-panel \{[\s\S]*?position: absolute;/);
     expect(configCss).toMatch(/\.config-root \.hover-detail-panel \{[\s\S]*?transform-origin: 50% top;/);
     expect(configCss).toMatch(/\.config-root \.hover-detail-card\.is-detail-above \.hover-detail-panel \{[\s\S]*?transform-origin: 50% bottom;/);

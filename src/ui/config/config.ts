@@ -3041,13 +3041,14 @@ export function mountConfig(root: HTMLElement): void {
     const addTimerButton = el('button', { class: 'btn ghost add-timer-button guide-add-timer', type: 'button', text: '+ 添加定时器' }) as HTMLButtonElement;
     addTimerButton.onclick = () => {
       const attributeName = nameInput.value.trim() || '属性';
+      const usesTutorialOvertimeTimer = editorGuideEnabled && editorTutorialProgress.basicsConfigured === true;
       timerRules.push({
         id: createTimerRuleId(),
         attributeName,
-        formulaName: '每分钟自动减少',
-        intervalSeconds: 60,
+        formulaName: usesTutorialOvertimeTimer ? '每秒自动减少' : '每分钟自动减少',
+        intervalSeconds: usesTutorialOvertimeTimer ? 1 : 60,
         condition: `${attributeName}>0`,
-        formula: `MAX(${attributeName}-60,0)`,
+        formula: `MAX(${attributeName}-${usesTutorialOvertimeTimer ? 1 : 60},0)`,
         enabled: true,
       });
       editorTutorialProgress.timerCount = timerRules.length;
