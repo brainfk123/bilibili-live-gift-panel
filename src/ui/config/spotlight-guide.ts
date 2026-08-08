@@ -136,11 +136,37 @@ function isGuideTargetAvailable(candidate: HTMLElement | null): candidate is HTM
   return true;
 }
 
+interface TourOutlineFlow {
+  svg: SVGSVGElement;
+  rects: SVGRectElement[];
+  dash: SVGRectElement;
+}
+
+function createTourOutlineFlow(): TourOutlineFlow {
+  const namespace = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(namespace, 'svg') as SVGSVGElement;
+  const base = document.createElementNS(namespace, 'rect') as SVGRectElement;
+  const dash = document.createElementNS(namespace, 'rect') as SVGRectElement;
+
+  svg.setAttribute('class', 'tour-target-flow');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  base.setAttribute('class', 'tour-target-flow-base');
+  dash.setAttribute('class', 'tour-target-flow-dash');
+  for (const rect of [base, dash]) {
+    rect.setAttribute('pathLength', '100');
+  }
+  svg.append(base, dash);
+
+  return { svg, rects: [base, dash], dash };
+}
+
 function positionGuide(
   target: HTMLElement | null,
   panel: HTMLElement | null,
   focus: HTMLElement,
   targetOutline: HTMLElement,
+  outlineFlow: TourOutlineFlow,
   bubble: HTMLElement,
 ): void {
   if (!target || typeof target.getBoundingClientRect !== 'function') {
@@ -182,10 +208,31 @@ function positionGuide(
   }
 
   const targetPad = 4;
+  const outlineWidth = Math.max(36, rect.width + targetPad * 2);
+  const outlineHeight = Math.max(36, rect.height + targetPad * 2);
   targetOutline.style.left = `${Math.max(8, rect.left - targetPad)}px`;
   targetOutline.style.top = `${Math.max(8, rect.top - targetPad)}px`;
-  targetOutline.style.width = `${Math.max(36, rect.width + targetPad * 2)}px`;
-  targetOutline.style.height = `${Math.max(36, rect.height + targetPad * 2)}px`;
+  targetOutline.style.width = `${outlineWidth}px`;
+  targetOutline.style.height = `${outlineHeight}px`;
+
+  const flowInset = 2;
+  const flowWidth = Math.max(1, outlineWidth - flowInset * 2);
+  const flowHeight = Math.max(1, outlineHeight - flowInset * 2);
+  const flowRadius = Math.min(10, flowWidth / 2, flowHeight / 2);
+  for (const flowRect of outlineFlow.rects) {
+    flowRect.setAttribute('x', String(flowInset));
+    flowRect.setAttribute('y', String(flowInset));
+    flowRect.setAttribute('width', String(flowWidth));
+    flowRect.setAttribute('height', String(flowHeight));
+    flowRect.setAttribute('rx', String(flowRadius));
+    flowRect.setAttribute('ry', String(flowRadius));
+  }
+  const straightWidth = Math.max(0, flowWidth - flowRadius * 2);
+  const straightHeight = Math.max(0, flowHeight - flowRadius * 2);
+  const perimeter = (straightWidth + straightHeight) * 2 + Math.PI * flowRadius * 2;
+  const dashLength = Math.min(56, Math.max(24, perimeter * 0.16));
+  const normalizedDashLength = perimeter > 0 ? (dashLength / perimeter) * 100 : 12;
+  outlineFlow.dash.style.strokeDasharray = `${normalizedDashLength} ${100 - normalizedDashLength}`;
 
   const width = Math.min(380, window.innerWidth - 32);
   bubble.style.width = `${width}px`;
@@ -242,6 +289,8 @@ export function renderSpotlightGuide(context: SpotlightGuideContext): SpotlightG
     .find(isGuideTargetAvailable) ?? target;
   const focus = el('div', { class: 'tour-focus', ariaHidden: 'true' } as any);
   const targetOutline = el('div', { class: 'tour-target-outline', ariaHidden: 'true' } as any);
+  const outlineFlow = createTourOutlineFlow();
+  targetOutline.append(outlineFlow.svg);
   const bubble = el('section', { class: 'tour-bubble', role: 'dialog', ariaLabel: '训练提示' } as any);
   const targetClasses = String(target?.getAttribute?.('class') ?? (target as any)?.className ?? '')
     .split(/\s+/);
@@ -272,7 +321,7 @@ export function renderSpotlightGuide(context: SpotlightGuideContext): SpotlightG
   let positionQueued = false;
   const position = (): void => {
     positionQueued = false;
-    positionGuide(target, panel, focus, targetOutline, bubble);
+    positionGuide(target, panel, focus, targetOutline, outlineFlow, bubble);
   };
   const schedulePosition = (): void => {
     if (positionQueued) return;

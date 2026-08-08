@@ -725,7 +725,7 @@ body.config-mode::-webkit-scrollbar-corner,
   transition: none;
 }
 @keyframes tour-outline-flow {
-  to { offset-distance: 100%; }
+  to { stroke-dashoffset: -100; }
 }
 .config-root .tour-target-outline {
   position: fixed;
@@ -740,43 +740,35 @@ body.config-mode::-webkit-scrollbar-corner,
   pointer-events: none;
   transition: none;
 }
-.config-root .tour-target-outline::before,
-.config-root .tour-target-outline::after {
-  content: '';
+.config-root .tour-target-flow {
   position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
   pointer-events: none;
 }
-.config-root .tour-target-outline::before {
-  top: 0;
-  left: 0;
-  width: clamp(26px, 18%, 72px);
-  height: 4px;
-  border-radius: 999px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    color-mix(in srgb, var(--accent) 28%, transparent) 28%,
-    var(--accent) 68%,
-    color-mix(in srgb, white 86%, var(--accent)) 84%,
-    transparent
-  );
+.config-root .tour-target-flow rect {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+}
+.config-root .tour-target-flow-base {
+  stroke: color-mix(in srgb, var(--accent) 48%, transparent);
+  stroke-width: 1;
+}
+.config-root .tour-target-flow-dash {
+  stroke: color-mix(in srgb, white 86%, var(--accent));
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: 12 88;
+  stroke-dashoffset: 0;
   filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 64%, transparent));
-  offset-path: border-box;
-  offset-distance: 0%;
-  offset-rotate: auto;
-  offset-anchor: center;
   animation: tour-outline-flow 1.8s linear infinite;
 }
-.config-root .tour-target-outline::after {
-  inset: -1px;
-  border: 1px solid color-mix(in srgb, var(--accent) 48%, transparent);
-  border-radius: calc(11px + 1px);
-  box-shadow: inset 0 0 7px color-mix(in srgb, var(--accent) 14%, transparent);
-}
 @media (prefers-reduced-motion: reduce) {
-  .config-root .tour-target-outline::before {
-    display: none;
+  .config-root .tour-target-flow-dash {
     animation: none;
+    opacity: 0;
   }
 }
 .config-root .tour-bubble {
