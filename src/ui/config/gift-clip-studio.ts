@@ -455,8 +455,27 @@ function createEffectCanvas(width: number, height: number): HTMLCanvasElement {
 }
 
 function fitGiftEffectFrame(width: number, height: number): [number, number] {
-  const scale = Math.min(400 / width, 340 / height);
+  const scale = Math.min(1, Math.max(CLIP_SIZE / width, CLIP_SIZE / height));
   return [Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale))];
+}
+
+export function giftClipCoverRect(
+  sourceWidth: number,
+  sourceHeight: number,
+  targetSize = CLIP_SIZE,
+): { x: number; y: number; width: number; height: number } {
+  const width = Math.max(1, sourceWidth);
+  const height = Math.max(1, sourceHeight);
+  const size = Math.max(1, targetSize);
+  const scale = Math.max(size / width, size / height);
+  const fittedWidth = width * scale;
+  const fittedHeight = height * scale;
+  return {
+    x: (size - fittedWidth) / 2,
+    y: (size - fittedHeight) / 2,
+    width: fittedWidth,
+    height: fittedHeight,
+  };
 }
 
 function renderGiftEffectFrame(effect: GiftEffectSource): GiftClipVisual | null {
@@ -653,6 +672,10 @@ function drawGiftClipPlaceholder(canvas: HTMLCanvasElement, receipt: GiftReceipt
   const context = canvas.getContext('2d');
   if (!context) return;
   drawGiftClipFrame(context, receipt, null, null);
+  context.fillStyle = 'rgba(255,255,255,.68)';
+  context.textAlign = 'center';
+  context.font = '600 24px system-ui, sans-serif';
+  context.fillText('正在准备礼物动画', CLIP_SIZE / 2, 190);
 }
 
 function drawGiftClipFrame(
@@ -675,26 +698,15 @@ function drawGiftClipFrame(
   context.fillRect(0, 0, CLIP_SIZE, 370);
 
   if (animation?.width && animation.height) {
-    const maxWidth = 400;
-    const maxHeight = 340;
-    const scale = Math.min(maxWidth / animation.width, maxHeight / animation.height);
-    const width = animation.width * scale;
-    const height = animation.height * scale;
+    const frame = giftClipCoverRect(animation.width, animation.height);
     context.save();
-    context.shadowColor = 'rgba(0, 0, 0, .32)';
-    context.shadowBlur = 20;
-    context.drawImage(animation.source, (CLIP_SIZE - width) / 2, 18 + (340 - height) / 2, width, height);
+    context.drawImage(animation.source, frame.x, frame.y, frame.width, frame.height);
     context.restore();
-  } else {
-    context.fillStyle = 'rgba(255,255,255,.68)';
-    context.textAlign = 'center';
-    context.font = '600 24px system-ui, sans-serif';
-    context.fillText('正在准备礼物动画', CLIP_SIZE / 2, 190);
   }
 
   const barGradient = context.createLinearGradient(18, 370, 462, 458);
-  barGradient.addColorStop(0, 'rgba(87, 39, 101, .94)');
-  barGradient.addColorStop(1, 'rgba(224, 68, 129, .94)');
+  barGradient.addColorStop(0, 'rgba(87, 39, 101, .76)');
+  barGradient.addColorStop(1, 'rgba(224, 68, 129, .76)');
   roundedRect(context, 18, 370, 444, 90, 22);
   context.fillStyle = barGradient;
   context.fill();

@@ -3535,8 +3535,9 @@ body.config-mode::-webkit-scrollbar-corner,
   font-size: 10px !important;
   font-weight: 800;
 }
-.config-root .gift-history-membership.is-admiral { border-color: #9f6cff; color: #c7adff !important; }
-.config-root .gift-history-membership.is-governor { border-color: #ff9d38; color: #ffc27e !important; }
+.config-root .gift-history-membership.is-captain { border-color: #4f8cff; background: color-mix(in srgb, #4f8cff 18%, var(--bg-soft)); color: #9cc2ff !important; }
+.config-root .gift-history-membership.is-admiral { border-color: #9f6cff; background: color-mix(in srgb, #9f6cff 18%, var(--bg-soft)); color: #c7adff !important; }
+.config-root .gift-history-membership.is-governor { border-color: #ff5d67; background: color-mix(in srgb, #ff5d67 18%, var(--bg-soft)); color: #ff9ba2 !important; }
 .config-root .gift-history-membership.is-fan { border-color: var(--border-strong); background: var(--bg-soft); color: var(--text-dim) !important; }
 .config-root .gift-history-replay-cell { display: grid; justify-items: end; min-width: 0; gap: 4px; }
 .config-root .gift-history-row-actions { display: flex; flex-wrap: nowrap; justify-content: flex-end; gap: 6px; }

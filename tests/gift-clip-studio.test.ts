@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
+  giftClipCoverRect,
   normalizeGiftClipDuration,
   normalizeGiftEffectLayout,
   giftEffectDurationMs,
@@ -11,6 +13,8 @@ import {
 } from '../src/ui/config/gift-clip-studio';
 
 describe('gift clip studio', () => {
+  const source = readFileSync(new URL('../src/ui/config/gift-clip-studio.ts', import.meta.url), 'utf8');
+
   it('clamps missing and abnormal animation durations', () => {
     expect(normalizeGiftClipDuration(undefined)).toBe(3000);
     expect(normalizeGiftClipDuration(200)).toBe(1000);
@@ -39,6 +43,25 @@ describe('gift clip studio', () => {
     expect(giftGifFrameIndex(delays, 220)).toBe(1);
     expect(giftGifFrameIndex(delays, 500)).toBe(2);
     expect(giftGifFrameIndex(delays, 660)).toBe(0);
+  });
+
+  it('uses cover scaling so landscape and portrait animations fill the square canvas', () => {
+    expect(giftClipCoverRect(320, 180)).toEqual({ x: -186.66666666666663, y: 0, width: 853.3333333333333, height: 480 });
+    expect(giftClipCoverRect(180, 320)).toEqual({ x: 0, y: -186.66666666666663, width: 480, height: 853.3333333333333 });
+    expect(giftClipCoverRect(480, 480)).toEqual({ x: 0, y: 0, width: 480, height: 480 });
+  });
+
+  it('keeps the preparing label in the setup placeholder and out of recorded frames', () => {
+    const placeholderStart = source.indexOf('function drawGiftClipPlaceholder');
+    const frameStart = source.indexOf('function drawGiftClipFrame');
+    const roundedRectStart = source.indexOf('function roundedRect');
+    expect(source.slice(placeholderStart, frameStart)).toContain("fillText('正在准备礼物动画'");
+    expect(source.slice(frameStart, roundedRectStart)).not.toContain('正在准备礼物动画');
+  });
+
+  it('keeps the sender information bar translucent over the animation', () => {
+    expect(source).toContain("barGradient.addColorStop(0, 'rgba(87, 39, 101, .76)')");
+    expect(source).toContain("barGradient.addColorStop(1, 'rgba(224, 68, 129, .76)')");
   });
 
   it('rejects packed-alpha coordinates outside the video', () => {
