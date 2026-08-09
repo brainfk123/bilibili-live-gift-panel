@@ -57,6 +57,7 @@ const state: AppState = {
   roomId: '31567150',
   settings: {
     ...defaultState().settings,
+    configExperience: 'advanced',
     showTutorial: false,
     tutorialReplayMode: false,
     tutorialCompletedLessons: ['room', 'attribute', 'template', 'basics', 'gift', 'rule', 'preset', 'timer', 'appearance', 'save', 'enable', 'output'],
@@ -103,7 +104,7 @@ const state: AppState = {
     {
       id: 'guard-effect', time: Date.now() - 500, giftId: 1_900_000_001, giftName: '大航海·舰长', num: 1,
       price: 198_000, totalCoin: 198_000, coinType: 'gold', uname: '新上舰观众', avatar: avatarURL,
-      senderUid: 22334455, membership: 'captain', imgBasic: animationURL,
+      senderUid: 22334455, membership: 'admiral', imgBasic: animationURL,
       animation: { durationMs: 5000, effectId: 9001, mp4: 'https://i0.hdslb.com/guard.mp4', mp4Json: 'https://i0.hdslb.com/guard.json' },
       effects: [],
     },

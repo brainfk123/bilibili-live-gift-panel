@@ -2678,7 +2678,11 @@ export function mountConfig(root: HTMLElement): void {
       referrerPolicy: 'no-referrer',
     }) as HTMLImageElement;
     avatar.src = entry.avatar || transparentPixel();
-    const giftImage = el('img', { class: 'gift-history-gift-image', alt: gift?.name || entry.giftName }) as HTMLImageElement;
+    const giftImage = el('img', {
+      class: 'gift-history-gift-image',
+      alt: gift?.name || entry.giftName,
+      referrerPolicy: 'no-referrer',
+    }) as HTMLImageElement;
     giftImage.src = entry.imgBasic || gift?.imgBasic || transparentPixel();
     const time = new Date(entry.time < 1_000_000_000_000 ? entry.time * 1000 : entry.time);
     const timeText = time.toLocaleString('zh-CN', {
