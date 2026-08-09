@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -324,25 +325,31 @@ type contributionLedgerState struct {
 	UpdatedAt int64                `json:"updatedAt,omitempty"`
 }
 
+type giftClipPlacementState struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
 type settingsState struct {
-	FontSize                  int      `json:"fontSize"`
-	AccentColor               string   `json:"accentColor"`
-	ShowStats                 bool     `json:"showStats"`
-	ShowConnection            bool     `json:"showConnection"`
-	Align                     string   `json:"align"`
-	Theme                     string   `json:"theme"`
-	GiftView                  string   `json:"giftView"`
-	PanelOpacity              int      `json:"panelOpacity"`
-	DefaultDisplayThemeID     string   `json:"defaultDisplayThemeId"`
-	ShowTutorial              *bool    `json:"showTutorial"`
-	TutorialVersion           int      `json:"tutorialVersion"`
-	TutorialCompletedLessons  []string `json:"tutorialCompletedLessons"`
-	TutorialReplayMode        *bool    `json:"tutorialReplayMode"`
-	TutorialTargetAttributeID string   `json:"tutorialTargetAttributeId,omitempty"`
-	TrainingCompletedTopics   []string `json:"trainingCompletedTopics"`
-	LastSeenChangelogVersion  string   `json:"lastSeenChangelogVersion"`
-	AutoUpdate                *bool    `json:"autoUpdate"`
-	ConfigExperience          string   `json:"configExperience"`
+	FontSize                  int                               `json:"fontSize"`
+	AccentColor               string                            `json:"accentColor"`
+	ShowStats                 bool                              `json:"showStats"`
+	ShowConnection            bool                              `json:"showConnection"`
+	Align                     string                            `json:"align"`
+	Theme                     string                            `json:"theme"`
+	GiftView                  string                            `json:"giftView"`
+	PanelOpacity              int                               `json:"panelOpacity"`
+	DefaultDisplayThemeID     string                            `json:"defaultDisplayThemeId"`
+	ShowTutorial              *bool                             `json:"showTutorial"`
+	TutorialVersion           int                               `json:"tutorialVersion"`
+	TutorialCompletedLessons  []string                          `json:"tutorialCompletedLessons"`
+	TutorialReplayMode        *bool                             `json:"tutorialReplayMode"`
+	TutorialTargetAttributeID string                            `json:"tutorialTargetAttributeId,omitempty"`
+	TrainingCompletedTopics   []string                          `json:"trainingCompletedTopics"`
+	LastSeenChangelogVersion  string                            `json:"lastSeenChangelogVersion"`
+	AutoUpdate                *bool                             `json:"autoUpdate"`
+	ConfigExperience          string                            `json:"configExperience"`
+	GiftClipPlacements        map[string]giftClipPlacementState `json:"giftClipPlacements"`
 }
 
 type simplePlayOvertimeGiftActionState struct {
@@ -451,6 +458,7 @@ func defaultAppState() appState {
 			TrainingCompletedTopics:  []string{},
 			AutoUpdate:               &autoUpdate,
 			ConfigExperience:         "simple",
+			GiftClipPlacements:       map[string]giftClipPlacementState{},
 		},
 	}
 }
@@ -549,6 +557,7 @@ func normalizeAppState(state *appState) {
 	if state.Settings.ConfigExperience != "simple" {
 		state.Settings.ConfigExperience = "advanced"
 	}
+	state.Settings.GiftClipPlacements = normalizeGiftClipPlacements(state.Settings.GiftClipPlacements)
 	if state.SimplePlay != nil {
 		state.SimplePlay.TemplateID = strings.TrimSpace(state.SimplePlay.TemplateID)
 		state.SimplePlay.AttributeID = strings.TrimSpace(state.SimplePlay.AttributeID)
@@ -705,6 +714,23 @@ func normalizeAppState(state *appState) {
 		autoUpdate := true
 		state.Settings.AutoUpdate = &autoUpdate
 	}
+}
+
+func normalizeGiftClipPlacements(input map[string]giftClipPlacementState) map[string]giftClipPlacementState {
+	placements := make(map[string]giftClipPlacementState, minInt(len(input), 200))
+	for key, placement := range input {
+		key = strings.TrimSpace(key)
+		if key == "" || len(key) > 160 || math.IsNaN(placement.X) || math.IsInf(placement.X, 0) || math.IsNaN(placement.Y) || math.IsInf(placement.Y, 0) {
+			continue
+		}
+		placement.X = math.Max(-160, math.Min(160, placement.X))
+		placement.Y = math.Max(-160, math.Min(160, placement.Y))
+		placements[key] = placement
+		if len(placements) == 200 {
+			break
+		}
+	}
+	return placements
 }
 
 func isDisplayThemeID(value string) bool {

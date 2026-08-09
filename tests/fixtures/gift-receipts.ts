@@ -145,6 +145,10 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
     return nativeFetch(animatedGiftGIFURL);
   }
   if (requestURL.pathname === '/api/config' && method === 'GET') return json(state);
+  if (requestURL.pathname === '/api/config' && method === 'PATCH') {
+    Object.assign(state, JSON.parse(String(init?.body ?? '{}')) as Partial<AppState>);
+    return json({ code: 0 });
+  }
   if (requestURL.pathname === '/api/config') return json({ code: 0 });
   if (requestURL.pathname === '/api/runtime') return json({ code: 0, runtime: { state: 'connected', roomId: state.roomId } });
   if (requestURL.pathname === '/api/auth/status') return json({ code: 0, auth: { state: 'anonymous' } });
