@@ -1649,6 +1649,7 @@ describe('single-page configuration rendering', () => {
     expect(changelogButton?.getAttribute('aria-label')).toBe('更新日志');
     changelogButton?.onclick?.();
 
+    await vi.waitFor(() => expect(root.querySelector('.changelog-dialog')).not.toBeNull());
     const dialog = root.querySelector('.changelog-dialog');
     expect(dialog).not.toBeNull();
     expect(textOf(dialog!)).toContain('这次更新了什么？');
@@ -1659,6 +1660,36 @@ describe('single-page configuration rendering', () => {
 
     await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.3.0'));
     expect(root.querySelector('.changelog-dialog')).toBeNull();
+  });
+
+  it('waits for hosted changelog history before opening the version list', async () => {
+    let resolveChangelog: ((response: Response) => void) | undefined;
+    const hostedChangelog = new Promise<Response>((resolve) => {
+      resolveChangelog = resolve;
+    });
+    const baseFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input) === '/api/changelog') return hostedChangelog;
+      return baseFetch(input, init);
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    root.querySelector('.changelog-toggle')?.onclick?.();
+    resolveChangelog?.(Response.json({
+      code: 0,
+      releases: [{
+        version: '0.2.4',
+        date: '2026-08-08',
+        title: '页面重新分区',
+        summary: '重新整理配置页面。',
+        highlights: [{ label: '界面', title: '更清晰的导航', description: '按用途划分配置入口。' }],
+        visuals: [],
+      }],
+    }));
+
+    await vi.waitFor(() => expect(root.querySelectorAll('.changelog-version')).toHaveLength(2));
+    expect(textOf(root.querySelector('.changelog-version-list') as TestElement)).toContain('v0.2.4');
   });
 
   it('shows the installed version changelog only once', async () => {

@@ -1,4 +1,5 @@
 import configCSS from '../../src/ui/config/config.css?inline';
+import { CHANGELOG_RELEASES } from '../../src/changelog';
 import { defaultState, hydrateStateFromServer } from '../../src/storage';
 import type { AppState } from '../../src/types';
 import { mountConfig } from '../../src/ui/config/config';
@@ -28,6 +29,19 @@ const animationSVG = `
 const dataURL = (svg: string): string => `data:image/svg+xml,${encodeURIComponent(svg)}`;
 const avatarURL = dataURL(avatarSVG);
 const animationURL = dataURL(animationSVG);
+const changelogHistory = [
+  ...CHANGELOG_RELEASES,
+  {
+    version: '0.2.4', date: '2026-08-08', title: '配置页面重新分区', summary: '按直播工作流程重新整理配置入口。',
+    highlights: [{ label: '界面', title: '更清晰的页面导航', description: '不同用途的功能进入各自页面。' }],
+    visuals: [],
+  },
+  {
+    version: '0.2.3', date: '2026-08-07', title: '礼物目标与榜单', summary: '新增礼物目标并完善盲盒盈亏榜。',
+    highlights: [{ label: '玩法', title: '设置礼物目标', description: '可为多种礼物分别设置目标数量。' }],
+    visuals: [],
+  },
+];
 
 const state: AppState = {
   ...defaultState(),
@@ -115,7 +129,7 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
   if (requestURL.pathname === '/api/room/anchor') return json({ code: 0, roomId: state.roomId, anchor: { uid: 1, uname: '测试主播', avatar: avatarURL } });
   if (requestURL.pathname === '/api/gifts') return json({ code: 0, gifts: state.giftCatalog });
   if (requestURL.pathname === '/api/update') return json({ code: 0, update: { state: 'development', currentVersion: 'dev', message: '开发版本', autoUpdate: false, restartRequired: false } });
-  if (requestURL.pathname === '/api/changelog') return json({ releases: [] });
+  if (requestURL.pathname === '/api/changelog') return json({ code: 0, releases: changelogHistory });
   if (requestURL.pathname === '/api/gift-receipts' && method === 'DELETE') {
     state.giftReceipts = [];
     return json({ code: 0, giftReceipts: [] });

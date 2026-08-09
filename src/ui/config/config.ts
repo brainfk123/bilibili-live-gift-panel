@@ -202,6 +202,9 @@ export function mountConfig(root: HTMLElement): void {
   let changelogAutoEvaluated = false;
   let changelogOpen = false;
   let changelogReleases: ChangelogRelease[] = CHANGELOG_RELEASES;
+  let hostedChangelogReady = false;
+  let hostedChangelogLoaded = false;
+  let hostedChangelogRefresh: Promise<void> | null = null;
   let loginModalOpen = false;
   let loginPollTimer: ReturnType<typeof globalThis.setInterval> | undefined;
   let localStateVersion = 0;
@@ -368,12 +371,21 @@ export function mountConfig(root: HTMLElement): void {
     return currentUpdateStatus;
   }
 
-  async function refreshHostedChangelog(): Promise<void> {
-    try {
-      changelogReleases = mergeChangelogReleases(await getHostedChangelog());
-    } catch {
-      // The bundled current-version note remains available when GitHub is slow or unavailable.
-    }
+  function refreshHostedChangelog(): Promise<void> {
+    if (hostedChangelogRefresh) return hostedChangelogRefresh;
+    hostedChangelogRefresh = (async () => {
+      try {
+        changelogReleases = mergeChangelogReleases(await getHostedChangelog());
+        hostedChangelogLoaded = true;
+      } catch {
+        // The bundled current-version note remains available when GitHub is slow or unavailable.
+      } finally {
+        hostedChangelogReady = true;
+        hostedChangelogRefresh = null;
+        maybeOpenChangelog();
+      }
+    })();
+    return hostedChangelogRefresh;
   }
 
   async function runManualUpdateCheck(): Promise<void> {
@@ -567,7 +579,7 @@ export function mountConfig(root: HTMLElement): void {
     openTrainingCenter();
   };
   changelogToggle.onclick = () => {
-    openChangelog(currentUpdateStatus.currentVersion);
+    void openHostedChangelog(currentUpdateStatus.currentVersion);
   };
   programSettingsToggle.onclick = () => {
     openProgramSettings();
@@ -759,8 +771,14 @@ export function mountConfig(root: HTMLElement): void {
     root.append(overlay);
   }
 
+  async function openHostedChangelog(version?: string): Promise<void> {
+    if (!hostedChangelogLoaded) await refreshHostedChangelog();
+    openChangelog(version);
+  }
+
   function maybeOpenChangelog(): void {
     if (changelogAutoEvaluated) return;
+    if (!hostedChangelogReady) return;
     const version = currentUpdateStatus.currentVersion;
     if (!version) return;
     if (version === 'dev' || !changelogReleaseForVersion(version, changelogReleases)) {
