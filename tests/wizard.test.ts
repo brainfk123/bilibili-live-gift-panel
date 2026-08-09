@@ -1936,6 +1936,24 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(loadState().formulaPresets).toHaveLength(0));
   });
 
+  it('accepts manually added gift prices in yuan and stores gold-seed units internally', async () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    const idInput = root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '礼物 ID') as TestElement;
+    const nameInput = root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '礼物名称') as TestElement;
+    const priceInput = root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '单价（元，可填 0）') as TestElement;
+    expect(priceInput).toBeDefined();
+    idInput.value = '456789';
+    nameInput.value = '手动礼物';
+    priceInput.value = '12.5';
+    findByText(root, '添加并选中')?.onclick?.();
+
+    await vi.waitFor(() => expect(loadState().recentGifts.find((gift) => gift.id === 456789)?.price).toBe(12_500));
+  });
+
   it('offers common beginner rule actions with a safe optional upper limit', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
     const root = new TestElement('div');
@@ -2384,6 +2402,10 @@ describe('single-page configuration rendering', () => {
           id: 'receipt-2', time: 1699999999, giftId: 32128, giftName: '爱心抱枕', num: 2,
           price: 100, totalCoin: 200, coinType: 'gold', uname: '未命中用户', effects: [],
         },
+        {
+          id: 'receipt-sc', time: 1699999998, giftId: 1900000004, giftName: 'Super Chat', num: 1,
+          price: 50000, totalCoin: 50000, coinType: 'gold', uname: '醒目留言用户', effects: [],
+        },
       ],
     }));
     const baseFetch = globalThis.fetch;
@@ -2396,9 +2418,10 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    expect(root.querySelectorAll('.gift-history-row')).toHaveLength(2);
-    expect(textOf(root.querySelector('.gift-history-section') as TestElement)).toContain('2 条送礼记录');
+    expect(root.querySelectorAll('.gift-history-row')).toHaveLength(3);
+    expect(textOf(root.querySelector('.gift-history-section') as TestElement)).toContain('3 条送礼记录');
     expect(textOf(root)).toContain('礼物 ID 32125');
+    expect(textOf(root)).toContain('金额 50 元 · 礼物 ID 1900000004');
     expect(textOf(root)).toContain('加班时间 +00:01:00');
     expect(textOf(root)).toContain('未触发属性规则');
     expect(textOf(root)).toContain('制作回放');
@@ -2493,7 +2516,10 @@ describe('single-page configuration rendering', () => {
 
     expect(findByText(root, '复制 OBS 链接')).toBeDefined();
     expect(root.querySelectorAll('.contribution-row')).toHaveLength(2);
-    expect(textOf(root.querySelector('.contribution-section') as TestElement)).toContain('20,000');
+    const contributionText = textOf(root.querySelector('.contribution-section') as TestElement);
+    expect(contributionText).toContain('付费礼物金额30 元');
+    expect(contributionText).toContain('5 个礼物20 元20 元礼物金额');
+    expect(contributionText).not.toContain('金瓜子');
     const tabs = root.querySelectorAll('.contribution-tab');
     expect(tabs).toHaveLength(3);
     tabs[1].onclick?.();
@@ -2501,8 +2527,8 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('3 次规则命中');
     tabs[2].onclick?.();
     const blindText = textOf(root.querySelector('.contribution-list-host') as TestElement);
-    expect(blindText).toContain('+6,000');
-    expect(blindText).toContain('-5,000');
+    expect(blindText).toContain('+6 元');
+    expect(blindText).toContain('-5 元');
     const scopeOptions = root.querySelectorAll('.blind-box-scope-option');
     expect(scopeOptions).toHaveLength(3);
     expect(scopeOptions.map((option) => textOf(option))).toEqual([
@@ -2517,10 +2543,10 @@ describe('single-page configuration rendering', () => {
     ]);
     scopeOptions[1].onclick?.();
     expect(root.querySelectorAll('.contribution-row')).toHaveLength(1);
-    expect(textOf(root.querySelector('.blind-box-scope-bar') as TestElement)).toContain('心动盲盒 · 1 位观众 · 2 个');
+    expect(textOf(root.querySelector('.blind-box-scope-bar') as TestElement)).toContain('心动盲盒 · 1 位观众 · 2 个 · 投入 18 元 · 开出 24 元 · 净盈亏 +6 元');
     expect(textOf(root.querySelector('.blind-box-scope-trigger') as TestElement)).toContain('心动盲盒');
-    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('+6,000');
-    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).not.toContain('-5,000');
+    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('+6 元');
+    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).not.toContain('-5 元');
   });
 
   it('reserves enough horizontal space for the complete blind-box scope name', () => {

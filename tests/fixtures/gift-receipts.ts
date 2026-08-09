@@ -42,7 +42,33 @@ const state: AppState = {
     { id: 32128, name: '心动盲盒', price: 960, coinType: 'gold', imgBasic: animationURL, gif: 'fixture.gif', animationDurationMs: 3000 },
     { id: 32126, name: '棉花糖', price: 540, coinType: 'gold', imgBasic: animationURL },
   ],
+  contributions: {
+    updatedAt: Date.now(),
+    viewers: [
+      {
+        key: 'uid:11578534', uid: 11578534, uname: '鲑鱼盖饭', avatar: avatarURL,
+        giftCount: 5, goldValue: 20_000, silverValue: 0, ruleTriggers: 3,
+        attributeDeltas: { 挑战次数: 2_880 }, blindBoxCount: 2,
+        blindBoxCost: 18_000, blindBoxValue: 24_000, blindBoxProfit: 6_000,
+        lastGiftAt: Date.now(),
+        blindBoxes: [{ giftId: 32128, giftName: '心动盲盒', count: 2, cost: 18_000, value: 24_000, profit: 6_000, lastGiftAt: Date.now() }],
+      },
+      {
+        key: 'uid:274988853', uid: 274988853, uname: 'MarsOvO_w', avatar: avatarURL,
+        giftCount: 2, goldValue: 10_000, silverValue: 0, ruleTriggers: 0,
+        attributeDeltas: {}, blindBoxCount: 1,
+        blindBoxCost: 9_000, blindBoxValue: 4_000, blindBoxProfit: -5_000,
+        lastGiftAt: Date.now() - 1_000,
+        blindBoxes: [{ giftId: 32128, giftName: '心动盲盒', count: 1, cost: 9_000, value: 4_000, profit: -5_000, lastGiftAt: Date.now() - 1_000 }],
+      },
+    ],
+  },
   giftReceipts: [
+    {
+      id: 'super-chat', time: Date.now() + 1000, giftId: 1_900_000_004, giftName: 'Super Chat', num: 1,
+      price: 50_000, totalCoin: 50_000, coinType: 'gold', uname: '送给暴脾气钢板', avatar: avatarURL,
+      senderUid: 2134957018, effects: [],
+    },
     {
       id: 'animated-effect', time: Date.now(), giftId: 32128, giftName: '心动盲盒', num: 1,
       price: 960, totalCoin: 960, coinType: 'gold', uname: '鲑鱼盖饭', avatar: avatarURL,

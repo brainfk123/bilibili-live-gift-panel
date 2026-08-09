@@ -5,6 +5,7 @@ import { bindFloatingDetailCard, el, fieldControl, inputField, setFloatingDetail
 import { builtinCatalog, findGift } from '../../gifts/catalog';
 import { giftPriceDescription, isSpecialEventGift } from '../../gifts/special-events';
 import { formatValue } from '../../format';
+import { formatSignedYuanFromGoldSeeds, formatYuanFromGoldSeeds, goldSeedsFromYuan } from '../../currency';
 import {
   BiliAuthStatus,
   checkForUpdates,
@@ -2117,9 +2118,9 @@ export function mountConfig(root: HTMLElement): void {
     }), { giftCount: 0, goldValue: 0, ruleTriggers: 0 });
     section.append(el('div', { class: 'contribution-summary' }, [
       contributionSummaryItem('收到礼物', `${formatLedgerNumber(totals.giftCount)} 个`),
-      contributionSummaryItem('金瓜子贡献', formatLedgerNumber(totals.goldValue)),
+      contributionSummaryItem('付费礼物金额', formatYuanFromGoldSeeds(totals.goldValue)),
       contributionSummaryItem('规则命中', `${formatLedgerNumber(totals.ruleTriggers)} 次`),
-      contributionSummaryItem('盲盒净盈亏', formatSignedLedgerNumber(blindBoxLeaderboard.summary.profit), contributionTone(blindBoxLeaderboard.summary.profit)),
+      contributionSummaryItem('盲盒净盈亏', formatSignedYuanFromGoldSeeds(blindBoxLeaderboard.summary.profit), contributionTone(blindBoxLeaderboard.summary.profit)),
     ]));
 
     const modeTabs = el('div', { class: 'contribution-tabs', role: 'tablist', ariaLabel: '排行榜类型' } as any);
@@ -2248,7 +2249,7 @@ export function mountConfig(root: HTMLElement): void {
         option.classList.toggle('is-selected', active);
         option.setAttribute('aria-selected', String(active));
       }
-      blindBoxScopeSummary.textContent = `${selectedScope?.giftName ?? '全部盲盒'} · ${formatLedgerNumber(scopedLeaderboard.summary.viewerCount)} 位观众 · ${formatLedgerNumber(scopedLeaderboard.summary.blindBoxCount)} 个 · 投入 ${formatLedgerNumber(scopedLeaderboard.summary.cost)} · 开出 ${formatLedgerNumber(scopedLeaderboard.summary.value)} · 净盈亏 ${formatSignedLedgerNumber(scopedLeaderboard.summary.profit)}`;
+      blindBoxScopeSummary.textContent = `${selectedScope?.giftName ?? '全部盲盒'} · ${formatLedgerNumber(scopedLeaderboard.summary.viewerCount)} 位观众 · ${formatLedgerNumber(scopedLeaderboard.summary.blindBoxCount)} 个 · 投入 ${formatYuanFromGoldSeeds(scopedLeaderboard.summary.cost)} · 开出 ${formatYuanFromGoldSeeds(scopedLeaderboard.summary.value)} · 净盈亏 ${formatSignedYuanFromGoldSeeds(scopedLeaderboard.summary.profit)}`;
       copyObsButton.textContent = leaderboardBlindBoxGiftId ? '复制此盲盒 OBS 链接' : '复制 OBS 链接';
       const ranked = rankContributors(viewers, leaderboardMode, leaderboardBlindBoxGiftId);
       if (ranked.length === 0) {
@@ -2298,7 +2299,7 @@ export function mountConfig(root: HTMLElement): void {
     if (mode === 'contribution') {
       details.append(
         el('span', { text: `${formatLedgerNumber(viewer.giftCount)} 个礼物` }),
-        el('span', { text: `${formatLedgerNumber(viewer.goldValue)} 金瓜子` }),
+        el('span', { text: formatYuanFromGoldSeeds(viewer.goldValue) }),
         ...(viewer.silverValue > 0 ? [el('span', { text: `${formatLedgerNumber(viewer.silverValue)} 银瓜子` })] : []),
       );
     } else if (mode === 'rules') {
@@ -2317,8 +2318,8 @@ export function mountConfig(root: HTMLElement): void {
     } else {
       details.append(
         el('span', { text: `${formatLedgerNumber(viewer.blindBoxCount)} 个盲盒` }),
-        el('span', { text: `投入 ${formatLedgerNumber(viewer.blindBoxCost)}` }),
-        el('span', { text: `开出 ${formatLedgerNumber(viewer.blindBoxValue)}` }),
+        el('span', { text: `投入 ${formatYuanFromGoldSeeds(viewer.blindBoxCost)}` }),
+        el('span', { text: `开出 ${formatYuanFromGoldSeeds(viewer.blindBoxValue)}` }),
         ...(viewer.unpricedBlindBoxCount
           ? [el('span', { class: 'is-warning', text: `${viewer.unpricedBlindBoxCount} 个缺少成本价` })]
           : []),
@@ -2371,20 +2372,15 @@ export function mountConfig(root: HTMLElement): void {
       return { value, label: '次命中', title: `${value} 次规则命中`, tone: 'positive' };
     }
     if (mode === 'blind-box') {
-      const value = formatSignedLedgerNumber(viewer.blindBoxProfit);
-      return { value, label: '净盈亏', title: `盲盒净盈亏 ${value} 金瓜子`, tone: contributionTone(viewer.blindBoxProfit) };
+      const value = formatSignedYuanFromGoldSeeds(viewer.blindBoxProfit);
+      return { value, label: '净盈亏', title: `盲盒净盈亏 ${value}`, tone: contributionTone(viewer.blindBoxProfit) };
     }
-    const value = formatLedgerNumber(viewer.goldValue);
-    return { value, label: '金瓜子', title: `${value} 金瓜子贡献`, tone: 'positive' };
+    const value = formatYuanFromGoldSeeds(viewer.goldValue);
+    return { value, label: '礼物金额', title: `付费礼物金额 ${value}`, tone: 'positive' };
   }
 
   function formatLedgerNumber(value: number): string {
     return Number(value || 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
-  }
-
-  function formatSignedLedgerNumber(value: number): string {
-    const normalized = Number(value || 0);
-    return `${normalized > 0 ? '+' : normalized < 0 ? '-' : ''}${formatLedgerNumber(Math.abs(normalized))}`;
   }
 
   function contributionTone(value: number): 'positive' | 'negative' | 'neutral' {
@@ -2507,6 +2503,12 @@ export function mountConfig(root: HTMLElement): void {
       hour12: false,
     });
     const effects = entry.effects ?? [];
+    const paidGoldSeeds = entry.totalCoin > 0
+      ? entry.totalCoin
+      : entry.price * Math.max(1, entry.num || 1);
+    const giftDetail = gift?.specialEvent === 'super-chat' && paidGoldSeeds > 0
+      ? `金额 ${formatYuanFromGoldSeeds(paidGoldSeeds)} · 礼物 ID ${entry.giftId}`
+      : `礼物 ID ${entry.giftId}`;
     const effectSummary = effects.map((effect) => {
       const attribute = state.attributes.find((item) => item.name === effect.attributeName);
       return `${effect.attributeName} ${formatHistoryDelta(effect.delta, attribute)}`;
@@ -2538,7 +2540,7 @@ export function mountConfig(root: HTMLElement): void {
         giftImage,
         el('div', { class: 'gift-history-copy' }, [
           el('strong', { text: `${entry.giftName || gift?.name || '礼物'} ×${Math.max(1, entry.num || 1)}` }),
-          el('span', { text: `礼物 ID ${entry.giftId}` }),
+          el('span', { text: giftDetail }),
         ]),
       ]),
       el('div', { class: 'gift-history-effect' }, [
@@ -3782,11 +3784,11 @@ export function mountConfig(root: HTMLElement): void {
     details.append(el('summary', { text: '找不到礼物？按 ID 手动添加' }));
     const idInput = inputField('礼物 ID', '');
     const nameInput = inputField('礼物名称', '');
-    const priceInput = inputField('单价 price（可填 0）', '0');
+    const priceInput = inputField('单价（元，可填 0）', '0');
     const addButton = el('button', { class: 'btn ghost', type: 'button', text: '添加并选中' }) as HTMLButtonElement;
     addButton.onclick = () => {
       const id = Number(idInput.value.trim());
-      const price = Number(priceInput.value.trim());
+      const priceYuan = Number(priceInput.value.trim());
       if (!Number.isInteger(id) || id <= 0) {
         toast('请输入有效的礼物 ID', root);
         return;
@@ -3794,7 +3796,7 @@ export function mountConfig(root: HTMLElement): void {
       const gift: GiftInfo = {
         id,
         name: nameInput.value.trim() || `礼物 ${id}`,
-        price: Number.isFinite(price) ? price : 0,
+        price: Number.isFinite(priceYuan) ? goldSeedsFromYuan(priceYuan) : 0,
         coinType: 'gold',
         imgBasic: '',
       };
@@ -4593,7 +4595,7 @@ export function mountConfig(root: HTMLElement): void {
         el('p', { text: '等号右侧的计算结果会成为属性的新值。要在原值上增加或减少，规则中必须写上当前属性名；只写数字会直接把属性设成该数字。' }),
         el('div', { class: 'formula-help-grid' }, [
           formulaHelpBlock('变量', [
-            ['price', '当前单个礼物的价格'],
+            ['price', '当前单个礼物价格（1 元对应 1000 price）'],
             [current, '触发前的当前属性值'],
             ['其他属性名', '可读取其他属性当前值'],
           ]),
@@ -4608,7 +4610,7 @@ export function mountConfig(root: HTMLElement): void {
         ]),
         el('div', { class: 'formula-help-examples' }, [
           el('code', { text: `${current}+60` }), el('span', { text: '在当前值上增加 60' }),
-          el('code', { text: `${current}+price/1000*60` }), el('span', { text: '每 1000 金瓜子增加 60' }),
+          el('code', { text: `${current}+price/1000*60` }), el('span', { text: '每 1 元增加 60' }),
           el('code', { text: `MIN(${current}+60,3600)` }), el('span', { text: '增加 60，但最大不超过 3600' }),
           el('code', { text: `IF(price>=1000,${current}+60,${current}+10)` }), el('span', { text: '按礼物价格选择增加量' }),
         ]),

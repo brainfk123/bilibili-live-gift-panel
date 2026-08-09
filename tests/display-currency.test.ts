@@ -3,7 +3,8 @@ import {
   formatCompactYuanFromGoldSeeds,
   formatSignedYuanFromGoldSeeds,
   formatYuanFromGoldSeeds,
-} from '../src/ui/display/currency';
+  goldSeedsFromYuan,
+} from '../src/currency';
 
 describe('OBS currency formatting', () => {
   it('converts gold seeds to yuan without losing sub-yuan values', () => {
@@ -21,5 +22,10 @@ describe('OBS currency formatting', () => {
   it('compacts only large yuan amounts', () => {
     expect(formatCompactYuanFromGoldSeeds(9_000)).toBe('9 元');
     expect(formatCompactYuanFromGoldSeeds(54_000_000)).toBe('5.4万元');
+  });
+
+  it('converts yuan input back to the internal gold-seed value', () => {
+    expect(goldSeedsFromYuan(0.1)).toBe(100);
+    expect(goldSeedsFromYuan(54)).toBe(54_000);
   });
 });

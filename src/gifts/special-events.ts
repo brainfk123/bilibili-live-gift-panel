@@ -1,4 +1,5 @@
 import type { GiftInfo } from '../types';
+import { formatYuanFromGoldSeeds } from '../currency';
 
 export const SPECIAL_EVENT_GIFT_IDS = {
   guardCaptain: 1_900_000_001,
@@ -53,5 +54,7 @@ export function isSpecialEventGift(gift: Pick<GiftInfo, 'specialEvent'>): boolea
 
 export function giftPriceDescription(gift: GiftInfo): string {
   if (gift.specialEvent) return '按实际支付金额';
-  return `${gift.price} ${gift.coinType === 'gold' ? '金瓜子' : '银瓜子'}`;
+  return gift.coinType === 'gold'
+    ? formatYuanFromGoldSeeds(gift.price)
+    : `${gift.price} 银瓜子`;
 }

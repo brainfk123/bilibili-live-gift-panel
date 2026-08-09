@@ -9,6 +9,10 @@ const compactYuanFormatter = new Intl.NumberFormat('zh-CN', {
   maximumFractionDigits: 1,
 });
 
+export function goldSeedsFromYuan(value: number): number {
+  return Math.round(Number(value || 0) * GOLD_SEEDS_PER_YUAN);
+}
+
 export function formatYuanFromGoldSeeds(value: number): string {
   return `${exactYuanFormatter.format(toYuan(value))} 元`;
 }

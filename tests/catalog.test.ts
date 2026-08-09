@@ -14,6 +14,8 @@ describe('catalog', () => {
     expect(findGift(defaultState(), SPECIAL_EVENT_GIFT_IDS.guardCaptain)?.name).toBe('大航海·舰长');
     expect(findGift(defaultState(), SPECIAL_EVENT_GIFT_IDS.superChat)?.name).toBe('Super Chat');
     expect(giftPriceDescription(specialEventCatalog[0])).toBe('按实际支付金额');
+    expect(giftPriceDescription({ id: 1, name: '付费礼物', price: 9_000, coinType: 'gold', imgBasic: '' })).toBe('9 元');
+    expect(giftPriceDescription({ id: 2, name: '免费礼物', price: 100, coinType: 'silver', imgBasic: '' })).toBe('100 银瓜子');
   });
 
   it('upserts new gift to recent', () => {

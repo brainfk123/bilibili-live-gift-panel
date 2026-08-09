@@ -9,7 +9,7 @@ import {
   formatCompactYuanFromGoldSeeds,
   formatSignedYuanFromGoldSeeds,
   formatYuanFromGoldSeeds,
-} from './currency';
+} from '../../currency';
 
 const MAX_RANKED_VIEWERS = 100;
 const ROW_DWELL_MS = 1_400;
