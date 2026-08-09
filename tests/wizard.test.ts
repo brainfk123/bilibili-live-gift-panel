@@ -1652,12 +1652,12 @@ describe('single-page configuration rendering', () => {
     const dialog = root.querySelector('.changelog-dialog');
     expect(dialog).not.toBeNull();
     expect(textOf(dialog!)).toContain('这次更新了什么？');
-    expect(textOf(dialog!)).toContain('按用途重新划分配置页面');
+    expect(textOf(dialog!)).toContain('制作礼物动画短视频');
     expect(root.querySelectorAll('.changelog-visual')).toHaveLength(0);
     expect(textOf(dialog!)).not.toContain('训练中心');
     (root.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
 
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.2.4'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.3.0'));
     expect(root.querySelector('.changelog-dialog')).toBeNull();
   });
 
@@ -1668,7 +1668,7 @@ describe('single-page configuration rendering', () => {
         return Response.json({
           code: 0,
           update: {
-            state: 'up-to-date', currentVersion: '0.2.4', latestVersion: '0.2.4',
+            state: 'up-to-date', currentVersion: '0.3.0', latestVersion: '0.3.0',
             message: '当前已经是最新版本。', autoUpdate: true, restartRequired: false,
           },
         });
@@ -1686,7 +1686,7 @@ describe('single-page configuration rendering', () => {
     mountConfig(firstRoot as unknown as HTMLElement);
     await vi.waitFor(() => expect(firstRoot.querySelector('.changelog-dialog')).not.toBeNull());
     (firstRoot.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.2.4'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.3.0'));
 
     const secondRoot = new TestElement('div');
     mountConfig(secondRoot as unknown as HTMLElement);
