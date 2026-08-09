@@ -3475,13 +3475,14 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 .config-root .gift-history-row {
   display: grid;
-  grid-template-columns: 104px minmax(140px, .9fr) minmax(160px, 1fr) minmax(190px, 1.2fr) minmax(132px, 160px);
+  grid-template-columns: 104px minmax(140px, .9fr) minmax(160px, 1fr) minmax(190px, 1.2fr) minmax(224px, 240px);
   align-items: center;
-  min-width: 900px;
+  min-width: 990px;
   gap: 12px;
+  border-top: 1px solid transparent;
   padding: 11px 13px;
 }
-.config-root .gift-history-row + .gift-history-row { border-top: 1px solid var(--border); }
+.config-root .gift-history-row + .gift-history-row { border-top-color: var(--border); }
 .config-root .gift-history-time {
   color: var(--text-dim);
   font-family: "Cascadia Code", Consolas, monospace;
@@ -3538,9 +3539,11 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .gift-history-membership.is-governor { border-color: #ff9d38; color: #ffc27e !important; }
 .config-root .gift-history-membership.is-fan { border-color: var(--border-strong); background: var(--bg-soft); color: var(--text-dim) !important; }
 .config-root .gift-history-replay-cell { display: grid; justify-items: end; min-width: 0; gap: 4px; }
-.config-root .gift-history-row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.config-root .gift-history-row-actions { display: flex; flex-wrap: nowrap; justify-content: flex-end; gap: 6px; }
 .config-root .gift-history-message { min-height: 34px; padding: 6px 11px; color: var(--accent-text); font-size: var(--type-meta); }
 .config-root .gift-history-replay { min-height: 34px; padding: 6px 11px; font-size: var(--type-meta); }
+.config-root .gift-history-message,
+.config-root .gift-history-replay { white-space: nowrap; }
 .config-root .gift-history-replay-cell span {
   max-width: 100%;
   overflow: hidden;
@@ -3615,6 +3618,7 @@ body.config-mode::-webkit-scrollbar-corner,
   padding: 24px;
 }
 .config-root .gift-clip-stage {
+  position: relative;
   display: grid;
   width: 100%;
   overflow: hidden;
@@ -3634,6 +3638,20 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 .config-root .gift-clip-canvas[hidden],
 .config-root .gift-clip-video[hidden] { display: none; }
+.config-root .gift-clip-source-media {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 160px;
+  height: 160px;
+  overflow: hidden;
+  opacity: .001;
+  pointer-events: none;
+  transform: scale(.01);
+  transform-origin: left top;
+}
+.config-root .gift-clip-source-media video,
+.config-root .gift-clip-source-animation { display: block; width: 160px; height: 160px; object-fit: contain; }
 .config-root .gift-clip-meta { display: grid; align-content: center; min-width: 0; gap: 13px; }
 .config-root .gift-clip-status { margin: 0; color: var(--text); font-size: var(--type-body); line-height: 1.55; }
 .config-root .gift-clip-status.is-error { color: var(--danger-text); }

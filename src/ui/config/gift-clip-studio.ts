@@ -1,6 +1,7 @@
 import type { GiftReceipt } from '../../types';
 import { giftReceiptMediaUrl } from '../../backend';
 import { el } from '../common';
+import { decompressFrames, parseGIF, type ParsedFrame } from 'gifuct-js';
 
 const CLIP_SIZE = 480;
 const CLIP_FPS = 30;
@@ -48,6 +49,11 @@ interface GiftClipVisual {
   height: number;
 }
 
+interface GiftAnimationSource {
+  durationMs?: number;
+  visualAt: (elapsedMs: number) => GiftClipVisual | null;
+}
+
 const RECORDER_FORMATS = [
   { mimeType: 'video/mp4;codecs=avc1.42E01E', extension: 'mp4' as const },
   { mimeType: 'video/mp4', extension: 'mp4' as const },
@@ -78,6 +84,18 @@ export function normalizeGiftEffectLayout(value: unknown): GiftEffectLayout {
 
 export function giftEffectDurationMs(layout: GiftEffectLayout): number {
   return normalizeGiftClipDuration(Math.round((layout.frames / layout.fps) * 1000));
+}
+
+export function giftGifFrameIndex(delays: readonly number[], elapsedMs: number): number {
+  if (delays.length === 0) return -1;
+  const normalizedDelays = delays.map((delay) => Math.max(10, Math.round(delay) || 100));
+  const cycleMs = normalizedDelays.reduce((total, delay) => total + delay, 0);
+  let position = Math.max(0, elapsedMs) % cycleMs;
+  for (let index = 0; index < normalizedDelays.length; index += 1) {
+    if (position < normalizedDelays[index]) return index;
+    position -= normalizedDelays[index];
+  }
+  return normalizedDelays.length - 1;
 }
 
 function positiveInteger(value: unknown): number {
@@ -176,6 +194,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
   const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭' }) as HTMLButtonElement;
   const canvas = el('canvas', { class: 'gift-clip-canvas', width: CLIP_SIZE, height: CLIP_SIZE }) as HTMLCanvasElement;
   const preview = el('video', { class: 'gift-clip-video', controls: true, loop: true, muted: true, playsInline: true }) as HTMLVideoElement;
+  const sourceMediaHost = el('div', { class: 'gift-clip-source-media', ariaHidden: 'true' });
   preview.hidden = true;
   const progress = el('progress', { class: 'gift-clip-progress', max: 100, value: 0 }) as HTMLProgressElement;
   const status = el('p', { class: 'gift-clip-status', text: '正在准备礼物动画…' });
@@ -195,8 +214,12 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
       activeEffect.video.load();
       activeEffect = null;
     }
-    for (const image of loadedImages) image.src = '';
+    for (const image of loadedImages) {
+      image.src = '';
+      image.remove();
+    }
     loadedImages.clear();
+    sourceMediaHost.replaceChildren();
     for (const sourceURL of sourceURLs) URL.revokeObjectURL(sourceURL);
     sourceURLs.clear();
     if (previewURL) URL.revokeObjectURL(previewURL);
@@ -232,7 +255,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
       closeButton,
     ]),
     el('div', { class: 'gift-clip-body' }, [
-      el('div', { class: 'gift-clip-stage' }, [canvas, preview]),
+      el('div', { class: 'gift-clip-stage' }, [canvas, preview, sourceMediaHost]),
       el('div', { class: 'gift-clip-meta' }, [
         status,
         progress,
@@ -257,22 +280,28 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
       if (!context || typeof canvas.captureStream !== 'function') throw new Error('当前浏览器不能录制画布。');
       const avatar = await loadOptionalImage(giftReceiptMediaUrl(receipt.id, 'avatar'), loadedImages);
       if (disposed) return;
-      let animation: HTMLImageElement | null = null;
+      let animation: GiftAnimationSource | null = null;
       let usingShortAnimationFallback = false;
       if (receipt.animation?.mp4 && receipt.animation.mp4Json) {
         try {
-          activeEffect = await loadGiftEffect(receipt.id, sourceURLs);
+          activeEffect = await loadGiftEffect(receipt.id, sourceURLs, sourceMediaHost);
         } catch (effectError) {
           if (!receipt.animation.gif && !receipt.animation.webp) throw effectError;
           usingShortAnimationFallback = true;
         }
       }
       if (!activeEffect) {
-        animation = await loadImage(`${giftReceiptMediaUrl(receipt.id, 'animation')}&v=${Date.now()}`, loadedImages);
+        animation = await loadGiftAnimation(
+          `${giftReceiptMediaUrl(receipt.id, 'animation')}&v=${Date.now()}`,
+          loadedImages,
+          sourceURLs,
+          sourceMediaHost,
+        );
       }
       if (disposed) return;
 
-      const duration = activeEffect?.durationMs ?? normalizeGiftClipDuration(receipt.animation?.durationMs);
+      const duration = activeEffect?.durationMs
+        ?? normalizeGiftClipDuration(receipt.animation?.durationMs || animation?.durationMs);
       activeStream = canvas.captureStream(CLIP_FPS);
       const selection = selectGiftClipRecorder(activeStream);
       generatedExtension = selection.extension;
@@ -284,13 +313,13 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
         selection.recorder.onerror = () => reject(new Error('视频录制失败，请重试。'));
         selection.recorder.onstop = () => resolve();
       });
-      const drawCurrentFrame = (): void => {
+      const drawCurrentFrame = (elapsedMs: number): void => {
         const visual = activeEffect
           ? renderGiftEffectFrame(activeEffect)
-          : imageGiftClipVisual(animation);
+          : animation?.visualAt(elapsedMs) ?? null;
         drawGiftClipFrame(context, receipt, visual, avatar);
       };
-      drawCurrentFrame();
+      drawCurrentFrame(0);
       selection.recorder.start(250);
       const sourceLabel = activeEffect ? '完整特效' : usingShortAnimationFallback ? '短动画回退' : '短动画';
       status.textContent = `正在生成 ${selection.extension.toUpperCase()} · ${sourceLabel} · ${Math.round(duration / 100) / 10} 秒`;
@@ -306,7 +335,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
             return;
           }
           const elapsed = now - startedAt;
-          drawCurrentFrame();
+          drawCurrentFrame(elapsed);
           progress.value = Math.min(100, (elapsed / duration) * 100);
           if (elapsed >= duration) {
             resolve();
@@ -365,7 +394,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
   return { close };
 }
 
-async function loadGiftEffect(receiptId: string, sourceURLs: Set<string>): Promise<GiftEffectSource> {
+async function loadGiftEffect(receiptId: string, sourceURLs: Set<string>, sourceMediaHost: HTMLElement): Promise<GiftEffectSource> {
   const cacheBuster = `&v=${Date.now()}`;
   const [layoutResponse, videoResponse] = await Promise.all([
     fetch(`${giftReceiptMediaUrl(receiptId, 'effect-layout')}${cacheBuster}`, { cache: 'no-store' }),
@@ -381,6 +410,7 @@ async function loadGiftEffect(receiptId: string, sourceURLs: Set<string>): Promi
   video.muted = true;
   video.playsInline = true;
   video.preload = 'auto';
+  sourceMediaHost.append(video);
   video.src = sourceURL;
   await waitForVideo(video);
   if (video.videoWidth !== layout.videoWidth || video.videoHeight !== layout.videoHeight) {
@@ -458,6 +488,128 @@ function imageGiftClipVisual(animation: HTMLImageElement | null): GiftClipVisual
   return { source: animation, width: animation.naturalWidth, height: animation.naturalHeight };
 }
 
+async function loadGiftAnimation(
+  src: string,
+  imageRegistry: Set<HTMLImageElement>,
+  sourceURLs: Set<string>,
+  sourceMediaHost: HTMLElement,
+): Promise<GiftAnimationSource> {
+  const response = await fetch(src, { cache: 'no-store' });
+  if (!response.ok) throw new Error('礼物动画素材读取失败，请稍后重试。');
+  const blob = await response.blob();
+  if (!blob.size) throw new Error('礼物动画素材没有有效内容。');
+  const data = await blob.arrayBuffer();
+  if (isGIFData(data)) return createGIFAnimationSource(data);
+
+  const sourceURL = URL.createObjectURL(blob);
+  sourceURLs.add(sourceURL);
+  const image = await loadAnimatedImage(sourceURL, imageRegistry, sourceMediaHost);
+  return { visualAt: () => imageGiftClipVisual(image) };
+}
+
+function isGIFData(data: ArrayBuffer): boolean {
+  if (data.byteLength < 6) return false;
+  const signature = String.fromCharCode(...new Uint8Array(data, 0, 6));
+  return signature === 'GIF87a' || signature === 'GIF89a';
+}
+
+function createGIFAnimationSource(data: ArrayBuffer): GiftAnimationSource {
+  const parsed = parseGIF(data);
+  const width = parsed.lsd.width;
+  const height = parsed.lsd.height;
+  const frameDimensions = parsed.frames.flatMap((frame) => (
+    'image' in frame ? [frame.image.descriptor] : []
+  ));
+  if (
+    width <= 0 || height <= 0 || width > 2048 || height > 2048
+    || width * height > 4_194_304 || frameDimensions.length === 0 || frameDimensions.length > 1200
+  ) {
+    throw new Error('礼物 GIF 动画尺寸或帧数超出允许范围。');
+  }
+  let totalFramePixels = 0;
+  for (const dimensions of frameDimensions) {
+    validateGIFFrameDimensions(dimensions, width, height);
+    totalFramePixels += dimensions.width * dimensions.height;
+    if (totalFramePixels > 33_554_432) throw new Error('礼物 GIF 动画解码后体积过大。');
+  }
+  const frames = decompressFrames(parsed, true);
+  for (const frame of frames) validateGIFFramePatch(frame);
+
+  const canvas = createEffectCanvas(width, height);
+  const context = canvas.getContext('2d');
+  const patchCanvas = createEffectCanvas(1, 1);
+  const patchContext = patchCanvas.getContext('2d');
+  if (!context || !patchContext) throw new Error('礼物 GIF 动画画布初始化失败。');
+  const delays = frames.map((frame) => Math.max(10, Math.round(frame.delay) || 100));
+  const cycleMs = delays.reduce((total, delay) => total + delay, 0);
+  let currentFrame = -1;
+  let currentCycle = -1;
+  let restoreSnapshot: ImageData | null = null;
+
+  const reset = (): void => {
+    context.clearRect(0, 0, width, height);
+    currentFrame = -1;
+    restoreSnapshot = null;
+  };
+  const drawFrame = (frameIndex: number): void => {
+    if (currentFrame >= 0) {
+      const previous = frames[currentFrame];
+      if (previous.disposalType === 2) {
+        context.clearRect(previous.dims.left, previous.dims.top, previous.dims.width, previous.dims.height);
+      } else if (previous.disposalType === 3 && restoreSnapshot) {
+        context.putImageData(restoreSnapshot, 0, 0);
+      }
+      restoreSnapshot = null;
+    }
+
+    const frame = frames[frameIndex];
+    if (frame.disposalType === 3) restoreSnapshot = context.getImageData(0, 0, width, height);
+    patchCanvas.width = frame.dims.width;
+    patchCanvas.height = frame.dims.height;
+    const patchPixels = new Uint8ClampedArray(frame.patch.length);
+    patchPixels.set(frame.patch);
+    const patch = new ImageData(patchPixels, frame.dims.width, frame.dims.height);
+    patchContext.putImageData(patch, 0, 0);
+    context.drawImage(patchCanvas, frame.dims.left, frame.dims.top);
+    currentFrame = frameIndex;
+  };
+
+  return {
+    durationMs: cycleMs,
+    visualAt: (elapsedMs) => {
+      const normalizedElapsed = Math.max(0, elapsedMs);
+      const cycle = Math.floor(normalizedElapsed / cycleMs);
+      const targetFrame = giftGifFrameIndex(delays, normalizedElapsed);
+      if (cycle !== currentCycle || targetFrame < currentFrame) {
+        reset();
+        currentCycle = cycle;
+      }
+      for (let index = currentFrame + 1; index <= targetFrame; index += 1) drawFrame(index);
+      return { source: canvas, width, height };
+    },
+  };
+}
+
+function validateGIFFrameDimensions(
+  dimensions: { left: number; top: number; width: number; height: number },
+  width: number,
+  height: number,
+): void {
+  const { left, top, width: frameWidth, height: frameHeight } = dimensions;
+  if (
+    left < 0 || top < 0 || frameWidth <= 0 || frameHeight <= 0
+    || left + frameWidth > width || top + frameHeight > height
+  ) {
+    throw new Error('礼物 GIF 动画帧无效。');
+  }
+}
+
+function validateGIFFramePatch(frame: ParsedFrame): void {
+  if (frame.patch.length !== frame.dims.width * frame.dims.height * 4) {
+    throw new Error('礼物 GIF 动画帧无效。');
+  }
+}
+
 function loadImage(src: string, registry: Set<HTMLImageElement>): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const image = new Image();
@@ -465,6 +617,26 @@ function loadImage(src: string, registry: Set<HTMLImageElement>): Promise<HTMLIm
     image.decoding = 'async';
     image.onload = () => resolve(image);
     image.onerror = () => reject(new Error('礼物动画素材读取失败，请稍后重试。'));
+    image.src = src;
+  });
+}
+
+function loadAnimatedImage(
+  src: string,
+  registry: Set<HTMLImageElement>,
+  sourceMediaHost: HTMLElement,
+): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    registry.add(image);
+    image.className = 'gift-clip-source-animation';
+    image.decoding = 'auto';
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('礼物动画素材读取失败，请稍后重试。'));
+    // Animated GIF/WebP can remain frozen on their first (often transparent) frame
+    // when the image is detached. Keep it in a tiny, nearly invisible render layer
+    // so Chromium advances its animation clock while each frame is copied to Canvas.
+    sourceMediaHost.append(image);
     image.src = src;
   });
 }
