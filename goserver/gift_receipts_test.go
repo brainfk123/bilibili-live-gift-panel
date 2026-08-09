@@ -28,6 +28,7 @@ func TestApplyGiftEventRecordsUnmatchedGiftWithAnimation(t *testing.T) {
 		Uname: "观众", UID: 42, Avatar: "https://i0.hdslb.com/avatar.png", ImgBasic: "gift.png",
 		AnimationGIF: "https://i0.hdslb.com/gift.gif", AnimationWebP: "https://i0.hdslb.com/gift.webp",
 		AnimationDurationMS: 2500, Timestamp: 1700000000, Rnd: "receipt-1",
+		EffectID: 1846, EffectMP4: "https://i0.hdslb.com/full.mp4", EffectMP4JSON: "https://i0.hdslb.com/full.json",
 	})
 
 	if len(state.Log) != 0 {
@@ -40,7 +41,7 @@ func TestApplyGiftEventRecordsUnmatchedGiftWithAnimation(t *testing.T) {
 	if receipt.Num != 2 || receipt.TotalCoin != 200 || len(receipt.Effects) != 0 {
 		t.Fatalf("unmatched receipt = %#v", receipt)
 	}
-	if receipt.Animation == nil || receipt.Animation.GIF == "" || receipt.Animation.WebP == "" || receipt.Animation.DurationMS != 2500 {
+	if receipt.Animation == nil || receipt.Animation.GIF == "" || receipt.Animation.WebP == "" || receipt.Animation.DurationMS != 2500 || receipt.Animation.EffectID != 1846 || receipt.Animation.MP4 == "" || receipt.Animation.MP4JSON == "" {
 		t.Fatalf("animation metadata = %#v", receipt.Animation)
 	}
 }
@@ -158,6 +159,44 @@ func TestGiftReceiptMediaFallsBackFromGIFToWebP(t *testing.T) {
 	}
 }
 
+func TestGiftReceiptMediaServesVideoAndSanitizedEffectLayout(t *testing.T) {
+	store, receipt := giftReceiptMediaTestStore(t)
+	client := giftMediaClientFunc(func(request *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(request.URL.Path, ".mp4") {
+			return mediaResponse(request, http.StatusOK, "video/mp4", "packed-video"), nil
+		}
+		return mediaResponse(request, http.StatusOK, "application/json", `{"info":{"videoW":1088,"videoH":1280,"rgbFrame":[0,0,720,1280],"aFrame":[724,0,360,640],"fps":30,"f":390,"private":"discarded"}}`), nil
+	})
+	api := newGiftReceiptAPI(store, client)
+	videoResponse := httptest.NewRecorder()
+	api.handleMedia(videoResponse, httptest.NewRequest(http.MethodGet, "/api/gift-receipts/media?id="+receipt.ID+"&kind=effect-video", nil))
+	if videoResponse.Code != http.StatusOK || videoResponse.Header().Get("Content-Type") != "video/mp4" || videoResponse.Body.String() != "packed-video" {
+		t.Fatalf("video status=%d type=%q body=%q", videoResponse.Code, videoResponse.Header().Get("Content-Type"), videoResponse.Body.String())
+	}
+	layoutResponse := httptest.NewRecorder()
+	api.handleMedia(layoutResponse, httptest.NewRequest(http.MethodGet, "/api/gift-receipts/media?id="+receipt.ID+"&kind=effect-layout", nil))
+	if layoutResponse.Code != http.StatusOK || layoutResponse.Header().Get("Content-Type") != "application/json" || strings.Contains(layoutResponse.Body.String(), "private") {
+		t.Fatalf("layout status=%d type=%q body=%q", layoutResponse.Code, layoutResponse.Header().Get("Content-Type"), layoutResponse.Body.String())
+	}
+	var layout giftEffectLayout
+	if err := json.Unmarshal(layoutResponse.Body.Bytes(), &layout); err != nil || layout.Frames != 390 || layout.AlphaFrame[0] != 724 {
+		t.Fatalf("layout = %#v err=%v", layout, err)
+	}
+}
+
+func TestGiftReceiptMediaRejectsInvalidEffectLayout(t *testing.T) {
+	store, receipt := giftReceiptMediaTestStore(t)
+	client := giftMediaClientFunc(func(request *http.Request) (*http.Response, error) {
+		return mediaResponse(request, http.StatusOK, "application/json", `{"info":{"videoW":1088,"videoH":1280,"rgbFrame":[0,0,1200,1280],"aFrame":[724,0,360,640],"fps":30,"f":390}}`), nil
+	})
+	api := newGiftReceiptAPI(store, client)
+	response := httptest.NewRecorder()
+	api.handleMedia(response, httptest.NewRequest(http.MethodGet, "/api/gift-receipts/media?id="+receipt.ID+"&kind=effect-layout", nil))
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
 func TestGiftReceiptMediaRejectsUnsafeResponses(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -245,6 +284,7 @@ func giftReceiptMediaTestStore(t *testing.T) (*configStore, giftReceipt) {
 		Avatar: "https://i0.hdslb.com/avatar.png",
 		Animation: &giftReceiptAnimation{
 			GIF: "https://i0.hdslb.com/gift.gif", WebP: "https://i0.hdslb.com/gift.webp", DurationMS: 3000,
+			EffectID: 1846, MP4: "https://i0.hdslb.com/full.mp4", MP4JSON: "https://i0.hdslb.com/full.json",
 		},
 	}
 	state := defaultAppState()

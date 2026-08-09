@@ -265,6 +265,7 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 			ImgBasic string `json:"img_basic"`
 			GIF      string `json:"gif"`
 			WebP     string `json:"webp"`
+			EffectID int    `json:"effect_id"`
 		} `json:"gift_info"`
 		SenderUinfo struct {
 			UID  biliUID `json:"uid"`
@@ -324,7 +325,8 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 		CoinType: data.CoinType, TotalCoin: data.TotalCoin, Uname: uname, Avatar: avatar, UID: uid,
 		Timestamp: data.Timestamp, ImgBasic: data.GiftInfo.ImgBasic,
 		AnimationGIF: strings.TrimSpace(data.GiftInfo.GIF), AnimationWebP: strings.TrimSpace(data.GiftInfo.WebP),
-		Rnd: rnd,
+		EffectID: data.GiftInfo.EffectID,
+		Rnd:      rnd,
 	}, true
 }
 
@@ -344,6 +346,13 @@ func enrichGiftAnimationFromRoomCatalog(gift giftEvent, catalog map[int]roomGift
 	}
 	if gift.AnimationDurationMS <= 0 {
 		gift.AnimationDurationMS = metadata.AnimationDurationMS
+	}
+	if gift.EffectID == 0 {
+		gift.EffectID = metadata.EffectID
+	}
+	if metadata.EffectID == 0 || gift.EffectID == metadata.EffectID {
+		gift.EffectMP4 = metadata.EffectMP4
+		gift.EffectMP4JSON = metadata.EffectMP4JSON
 	}
 	return gift
 }

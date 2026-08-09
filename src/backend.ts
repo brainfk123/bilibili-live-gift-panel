@@ -361,7 +361,9 @@ export async function clearGiftReceipts(): Promise<GiftReceipt[]> {
   return payload.giftReceipts;
 }
 
-export function giftReceiptMediaUrl(receiptId: string, kind: 'animation' | 'avatar'): string {
+export type GiftReceiptMediaKind = 'animation' | 'avatar' | 'effect-video' | 'effect-layout';
+
+export function giftReceiptMediaUrl(receiptId: string, kind: GiftReceiptMediaKind): string {
   return `/api/gift-receipts/media?id=${encodeURIComponent(receiptId)}&kind=${kind}`;
 }
 

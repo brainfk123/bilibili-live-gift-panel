@@ -24,6 +24,30 @@ interface RecorderSelection {
   extension: 'mp4' | 'webm';
 }
 
+export interface GiftEffectLayout {
+  videoWidth: number;
+  videoHeight: number;
+  rgbFrame: [number, number, number, number];
+  alphaFrame: [number, number, number, number];
+  fps: number;
+  frames: number;
+}
+
+interface GiftEffectSource {
+  video: HTMLVideoElement;
+  layout: GiftEffectLayout;
+  frame: HTMLCanvasElement;
+  color: HTMLCanvasElement;
+  alpha: HTMLCanvasElement;
+  durationMs: number;
+}
+
+interface GiftClipVisual {
+  source: CanvasImageSource;
+  width: number;
+  height: number;
+}
+
 const RECORDER_FORMATS = [
   { mimeType: 'video/mp4;codecs=avc1.42E01E', extension: 'mp4' as const },
   { mimeType: 'video/mp4', extension: 'mp4' as const },
@@ -35,6 +59,42 @@ const RECORDER_FORMATS = [
 export function normalizeGiftClipDuration(durationMs: number | undefined): number {
   const normalized = Math.round(Number(durationMs) || DEFAULT_DURATION_MS);
   return Math.min(MAX_DURATION_MS, Math.max(MIN_DURATION_MS, normalized));
+}
+
+export function normalizeGiftEffectLayout(value: unknown): GiftEffectLayout {
+  if (!value || typeof value !== 'object') throw new Error('礼物特效坐标无效。');
+  const candidate = value as Partial<GiftEffectLayout>;
+  const videoWidth = positiveInteger(candidate.videoWidth);
+  const videoHeight = positiveInteger(candidate.videoHeight);
+  const fps = positiveInteger(candidate.fps);
+  const frames = positiveInteger(candidate.frames);
+  const rgbFrame = normalizeEffectFrame(candidate.rgbFrame, videoWidth, videoHeight);
+  const alphaFrame = normalizeEffectFrame(candidate.alphaFrame, videoWidth, videoHeight);
+  if (videoWidth > 8192 || videoHeight > 8192 || fps > 120 || frames > 3600) {
+    throw new Error('礼物特效坐标超出允许范围。');
+  }
+  return { videoWidth, videoHeight, rgbFrame, alphaFrame, fps, frames };
+}
+
+export function giftEffectDurationMs(layout: GiftEffectLayout): number {
+  return normalizeGiftClipDuration(Math.round((layout.frames / layout.fps) * 1000));
+}
+
+function positiveInteger(value: unknown): number {
+  const result = Number(value);
+  if (!Number.isInteger(result) || result <= 0) throw new Error('礼物特效坐标无效。');
+  return result;
+}
+
+function normalizeEffectFrame(value: unknown, videoWidth: number, videoHeight: number): [number, number, number, number] {
+  if (!Array.isArray(value) || value.length !== 4) throw new Error('礼物特效坐标无效。');
+  const frame = value.map(Number) as [number, number, number, number];
+  if (!frame.every(Number.isInteger)) throw new Error('礼物特效坐标无效。');
+  const [x, y, width, height] = frame;
+  if (x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > videoWidth || y + height > videoHeight) {
+    throw new Error('礼物特效坐标无效。');
+  }
+  return frame;
 }
 
 export function sanitizeGiftClipFilename(receipt: Pick<GiftReceipt, 'giftName' | 'uname' | 'time'>, extension: 'mp4' | 'webm'): string {
@@ -107,7 +167,9 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
   let activeStream: MediaStream | null = null;
   let generatedBlob: Blob | null = null;
   let generatedExtension: 'mp4' | 'webm' = 'webm';
+  let activeEffect: GiftEffectSource | null = null;
   const loadedImages = new Set<HTMLImageElement>();
+  const sourceURLs = new Set<string>();
 
   const overlay = el('div', { class: 'overlay gift-clip-overlay', role: 'dialog', ariaModal: 'true', ariaLabel: '制作礼物动画回放' });
   const dialog = el('section', { class: 'card gift-clip-dialog' });
@@ -127,8 +189,16 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
     animationFrame = 0;
     stopGiftClipStream(activeStream);
     activeStream = null;
+    if (activeEffect) {
+      activeEffect.video.pause();
+      activeEffect.video.removeAttribute('src');
+      activeEffect.video.load();
+      activeEffect = null;
+    }
     for (const image of loadedImages) image.src = '';
     loadedImages.clear();
+    for (const sourceURL of sourceURLs) URL.revokeObjectURL(sourceURL);
+    sourceURLs.clear();
     if (previewURL) URL.revokeObjectURL(previewURL);
     previewURL = '';
     generatedBlob = null;
@@ -187,10 +257,22 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
       if (!context || typeof canvas.captureStream !== 'function') throw new Error('当前浏览器不能录制画布。');
       const avatar = await loadOptionalImage(giftReceiptMediaUrl(receipt.id, 'avatar'), loadedImages);
       if (disposed) return;
-      const animation = await loadImage(`${giftReceiptMediaUrl(receipt.id, 'animation')}&v=${Date.now()}`, loadedImages);
+      let animation: HTMLImageElement | null = null;
+      let usingShortAnimationFallback = false;
+      if (receipt.animation?.mp4 && receipt.animation.mp4Json) {
+        try {
+          activeEffect = await loadGiftEffect(receipt.id, sourceURLs);
+        } catch (effectError) {
+          if (!receipt.animation.gif && !receipt.animation.webp) throw effectError;
+          usingShortAnimationFallback = true;
+        }
+      }
+      if (!activeEffect) {
+        animation = await loadImage(`${giftReceiptMediaUrl(receipt.id, 'animation')}&v=${Date.now()}`, loadedImages);
+      }
       if (disposed) return;
 
-      const duration = normalizeGiftClipDuration(receipt.animation?.durationMs);
+      const duration = activeEffect?.durationMs ?? normalizeGiftClipDuration(receipt.animation?.durationMs);
       activeStream = canvas.captureStream(CLIP_FPS);
       const selection = selectGiftClipRecorder(activeStream);
       generatedExtension = selection.extension;
@@ -202,9 +284,20 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
         selection.recorder.onerror = () => reject(new Error('视频录制失败，请重试。'));
         selection.recorder.onstop = () => resolve();
       });
-      drawGiftClipFrame(context, receipt, animation, avatar);
+      const drawCurrentFrame = (): void => {
+        const visual = activeEffect
+          ? renderGiftEffectFrame(activeEffect)
+          : imageGiftClipVisual(animation);
+        drawGiftClipFrame(context, receipt, visual, avatar);
+      };
+      drawCurrentFrame();
       selection.recorder.start(250);
-      status.textContent = `正在生成 ${selection.extension.toUpperCase()} · ${Math.round(duration / 100) / 10} 秒`;
+      const sourceLabel = activeEffect ? '完整特效' : usingShortAnimationFallback ? '短动画回退' : '短动画';
+      status.textContent = `正在生成 ${selection.extension.toUpperCase()} · ${sourceLabel} · ${Math.round(duration / 100) / 10} 秒`;
+      if (activeEffect) {
+        activeEffect.video.currentTime = 0;
+        await activeEffect.video.play();
+      }
       const startedAt = performance.now();
       await new Promise<void>((resolve) => {
         const draw = (now: number): void => {
@@ -213,7 +306,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
             return;
           }
           const elapsed = now - startedAt;
-          drawGiftClipFrame(context, receipt, animation, avatar);
+          drawCurrentFrame();
           progress.value = Math.min(100, (elapsed / duration) * 100);
           if (elapsed >= duration) {
             resolve();
@@ -223,6 +316,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
         };
         animationFrame = requestAnimationFrame(draw);
       });
+      activeEffect?.video.pause();
       if (selection.recorder.state !== 'inactive') selection.recorder.stop();
       await stopped;
       if (disposed) return;
@@ -238,7 +332,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
       const sizeLabel = generatedBlob.size < 1024 * 1024
         ? `${Math.max(1, Math.round(generatedBlob.size / 1024))} KB`
         : `${(generatedBlob.size / 1024 / 1024).toFixed(1)} MB`;
-      status.textContent = `${generatedExtension.toUpperCase()} 已生成 · ${sizeLabel}`;
+      status.textContent = `${generatedExtension.toUpperCase()} 已生成 · ${sizeLabel} · ${sourceLabel}`;
       saveButton.textContent = `保存 ${generatedExtension.toUpperCase()}`;
       saveButton.disabled = false;
       retryButton.disabled = false;
@@ -271,6 +365,99 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
   return { close };
 }
 
+async function loadGiftEffect(receiptId: string, sourceURLs: Set<string>): Promise<GiftEffectSource> {
+  const cacheBuster = `&v=${Date.now()}`;
+  const [layoutResponse, videoResponse] = await Promise.all([
+    fetch(`${giftReceiptMediaUrl(receiptId, 'effect-layout')}${cacheBuster}`, { cache: 'no-store' }),
+    fetch(`${giftReceiptMediaUrl(receiptId, 'effect-video')}${cacheBuster}`, { cache: 'no-store' }),
+  ]);
+  if (!layoutResponse.ok || !videoResponse.ok) throw new Error('完整礼物特效读取失败。');
+  const layout = normalizeGiftEffectLayout(await layoutResponse.json());
+  const videoBlob = await videoResponse.blob();
+  if (!videoBlob.size) throw new Error('完整礼物特效没有有效视频。');
+  const sourceURL = URL.createObjectURL(videoBlob);
+  sourceURLs.add(sourceURL);
+  const video = document.createElement('video');
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = 'auto';
+  video.src = sourceURL;
+  await waitForVideo(video);
+  if (video.videoWidth !== layout.videoWidth || video.videoHeight !== layout.videoHeight) {
+    throw new Error('礼物特效视频尺寸与坐标不一致。');
+  }
+  const [width, height] = fitGiftEffectFrame(layout.rgbFrame[2], layout.rgbFrame[3]);
+  return {
+    video,
+    layout,
+    frame: createEffectCanvas(width, height),
+    color: createEffectCanvas(width, height),
+    alpha: createEffectCanvas(width, height),
+    durationMs: giftEffectDurationMs(layout),
+  };
+}
+
+function waitForVideo(video: HTMLVideoElement): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      video.removeEventListener('loadedmetadata', onLoaded);
+      video.removeEventListener('error', onError);
+    };
+    const onLoaded = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onError = (): void => {
+      cleanup();
+      reject(new Error('完整礼物特效视频无法解码。'));
+    };
+    video.addEventListener('loadedmetadata', onLoaded);
+    video.addEventListener('error', onError);
+    video.load();
+  });
+}
+
+function createEffectCanvas(width: number, height: number): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  return canvas;
+}
+
+function fitGiftEffectFrame(width: number, height: number): [number, number] {
+  const scale = Math.min(400 / width, 340 / height);
+  return [Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale))];
+}
+
+function renderGiftEffectFrame(effect: GiftEffectSource): GiftClipVisual | null {
+  if (effect.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return null;
+  const colorContext = effect.color.getContext('2d', { willReadFrequently: true });
+  const alphaContext = effect.alpha.getContext('2d', { willReadFrequently: true });
+  const frameContext = effect.frame.getContext('2d');
+  if (!colorContext || !alphaContext || !frameContext) throw new Error('礼物特效画布初始化失败。');
+  const [rgbX, rgbY, rgbWidth, rgbHeight] = effect.layout.rgbFrame;
+  const [alphaX, alphaY, alphaWidth, alphaHeight] = effect.layout.alphaFrame;
+  const width = effect.frame.width;
+  const height = effect.frame.height;
+  colorContext.clearRect(0, 0, width, height);
+  alphaContext.clearRect(0, 0, width, height);
+  colorContext.drawImage(effect.video, rgbX, rgbY, rgbWidth, rgbHeight, 0, 0, width, height);
+  alphaContext.drawImage(effect.video, alphaX, alphaY, alphaWidth, alphaHeight, 0, 0, width, height);
+  const colorPixels = colorContext.getImageData(0, 0, width, height);
+  const alphaPixels = alphaContext.getImageData(0, 0, width, height);
+  for (let index = 0; index < colorPixels.data.length; index += 4) {
+    colorPixels.data[index + 3] = alphaPixels.data[index];
+  }
+  frameContext.clearRect(0, 0, width, height);
+  frameContext.putImageData(colorPixels, 0, 0);
+  return { source: effect.frame, width, height };
+}
+
+function imageGiftClipVisual(animation: HTMLImageElement | null): GiftClipVisual | null {
+  if (!animation?.naturalWidth || !animation.naturalHeight) return null;
+  return { source: animation, width: animation.naturalWidth, height: animation.naturalHeight };
+}
+
 function loadImage(src: string, registry: Set<HTMLImageElement>): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const image = new Image();
@@ -299,7 +486,7 @@ function drawGiftClipPlaceholder(canvas: HTMLCanvasElement, receipt: GiftReceipt
 function drawGiftClipFrame(
   context: CanvasRenderingContext2D,
   receipt: GiftReceipt,
-  animation: HTMLImageElement | null,
+  animation: GiftClipVisual | null,
   avatar: HTMLImageElement | null,
 ): void {
   const gradient = context.createLinearGradient(0, 0, CLIP_SIZE, CLIP_SIZE);
@@ -315,16 +502,16 @@ function drawGiftClipFrame(
   context.fillStyle = glow;
   context.fillRect(0, 0, CLIP_SIZE, 370);
 
-  if (animation?.naturalWidth && animation.naturalHeight) {
+  if (animation?.width && animation.height) {
     const maxWidth = 400;
     const maxHeight = 340;
-    const scale = Math.min(maxWidth / animation.naturalWidth, maxHeight / animation.naturalHeight);
-    const width = animation.naturalWidth * scale;
-    const height = animation.naturalHeight * scale;
+    const scale = Math.min(maxWidth / animation.width, maxHeight / animation.height);
+    const width = animation.width * scale;
+    const height = animation.height * scale;
     context.save();
     context.shadowColor = 'rgba(0, 0, 0, .32)';
     context.shadowBlur = 20;
-    context.drawImage(animation, (CLIP_SIZE - width) / 2, 18 + (340 - height) / 2, width, height);
+    context.drawImage(animation.source, (CLIP_SIZE - width) / 2, 18 + (340 - height) / 2, width, height);
     context.restore();
   } else {
     context.fillStyle = 'rgba(255,255,255,.68)';

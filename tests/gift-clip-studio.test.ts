@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   normalizeGiftClipDuration,
+  normalizeGiftEffectLayout,
+  giftEffectDurationMs,
   sanitizeGiftClipFilename,
   selectGiftClipRecorder,
   stopGiftClipStream,
@@ -13,6 +15,31 @@ describe('gift clip studio', () => {
     expect(normalizeGiftClipDuration(200)).toBe(1000);
     expect(normalizeGiftClipDuration(2200)).toBe(2200);
     expect(normalizeGiftClipDuration(60_000)).toBe(15_000);
+  });
+
+  it('accepts packed-alpha effect coordinates and derives the real effect duration', () => {
+    const layout = normalizeGiftEffectLayout({
+      videoWidth: 1088,
+      videoHeight: 1280,
+      rgbFrame: [0, 0, 720, 1280],
+      alphaFrame: [724, 0, 360, 640],
+      fps: 30,
+      frames: 390,
+    });
+    expect(layout.rgbFrame).toEqual([0, 0, 720, 1280]);
+    expect(layout.alphaFrame).toEqual([724, 0, 360, 640]);
+    expect(giftEffectDurationMs(layout)).toBe(13_000);
+  });
+
+  it('rejects packed-alpha coordinates outside the video', () => {
+    expect(() => normalizeGiftEffectLayout({
+      videoWidth: 1088,
+      videoHeight: 1280,
+      rgbFrame: [0, 0, 1200, 1280],
+      alphaFrame: [724, 0, 360, 640],
+      fps: 30,
+      frames: 390,
+    })).toThrow('礼物特效坐标无效');
   });
 
   it('sanitizes video filenames without including the sender UID', () => {

@@ -52,7 +52,7 @@ func TestBuildCurrentRoomGiftCatalogIncludesShortAnimationMetadata(t *testing.T)
 			map[string]any{
 				"id": float64(1), "name": "动画礼物", "price": float64(100), "coin_type": "gold",
 				"img_basic": "gift.png", "gif": "https://i0.hdslb.com/gift.gif",
-				"webp": "https://i0.hdslb.com/gift.webp", "stay_time": float64(4),
+				"webp": "https://i0.hdslb.com/gift.webp", "stay_time": float64(4), "effect_id": float64(1846),
 			},
 		}},
 	}
@@ -67,7 +67,7 @@ func TestBuildCurrentRoomGiftCatalogIncludesShortAnimationMetadata(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(gifts) != 1 || gifts[0].AnimationGIF == "" || gifts[0].AnimationWebP == "" || gifts[0].AnimationDurationMS != 4000 {
+	if len(gifts) != 1 || gifts[0].AnimationGIF == "" || gifts[0].AnimationWebP == "" || gifts[0].AnimationDurationMS != 4000 || gifts[0].EffectID != 1846 {
 		t.Fatalf("animation metadata = %#v", gifts)
 	}
 }

@@ -14,7 +14,7 @@ func TestParseBiliGift(t *testing.T) {
 			"uid": 123456789, "timestamp": 1700000000, "rnd": "gift-rnd", "face": "https://example.test/avatar.png",
 			"gift_info": map[string]any{
 				"img_basic": "https://example.test/666.png",
-				"gif":       "https://i0.hdslb.com/666.gif", "webp": "https://i0.hdslb.com/666.webp",
+				"gif":       "https://i0.hdslb.com/666.gif", "webp": "https://i0.hdslb.com/666.webp", "effect_id": 1846,
 			},
 		},
 	})
@@ -31,7 +31,7 @@ func TestParseBiliGift(t *testing.T) {
 	if gift.UID != 123456789 {
 		t.Fatalf("uid = %d", gift.UID)
 	}
-	if gift.AnimationGIF != "https://i0.hdslb.com/666.gif" || gift.AnimationWebP != "https://i0.hdslb.com/666.webp" {
+	if gift.AnimationGIF != "https://i0.hdslb.com/666.gif" || gift.AnimationWebP != "https://i0.hdslb.com/666.webp" || gift.EffectID != 1846 {
 		t.Fatalf("animation = %#v", gift)
 	}
 }
@@ -40,10 +40,11 @@ func TestEnrichGiftAnimationFromRoomCatalogFillsMissingMetadata(t *testing.T) {
 	gift := enrichGiftAnimationFromRoomCatalog(giftEvent{GiftID: 1, AnimationGIF: "event.gif"}, map[int]roomGiftInfo{
 		1: {
 			ID: 1, ImgBasic: "gift.png", AnimationGIF: "catalog.gif",
-			AnimationWebP: "catalog.webp", AnimationDurationMS: 4200,
+			AnimationWebP: "catalog.webp", AnimationDurationMS: 4200, EffectID: 1846,
+			EffectMP4: "effect.mp4", EffectMP4JSON: "effect.json",
 		},
 	})
-	if gift.ImgBasic != "gift.png" || gift.AnimationGIF != "event.gif" || gift.AnimationWebP != "catalog.webp" || gift.AnimationDurationMS != 4200 {
+	if gift.ImgBasic != "gift.png" || gift.AnimationGIF != "event.gif" || gift.AnimationWebP != "catalog.webp" || gift.AnimationDurationMS != 4200 || gift.EffectMP4 != "effect.mp4" || gift.EffectMP4JSON != "effect.json" {
 		t.Fatalf("enriched gift = %#v", gift)
 	}
 }

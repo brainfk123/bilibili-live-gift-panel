@@ -112,6 +112,7 @@ describe('gift receipt API', () => {
     await expect(clearGiftReceipts()).resolves.toEqual([]);
     expect(fetchMock).toHaveBeenCalledWith('/api/gift-receipts', { method: 'DELETE', cache: 'no-store' });
     expect(giftReceiptMediaUrl('receipt / 1', 'animation')).toBe('/api/gift-receipts/media?id=receipt%20%2F%201&kind=animation');
+    expect(giftReceiptMediaUrl('receipt / 1', 'effect-video')).toBe('/api/gift-receipts/media?id=receipt%20%2F%201&kind=effect-video');
   });
 });
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,8 @@ const (
 	minGiftAnimationDurationMS     = 1000
 	maxGiftAnimationDurationMS     = 15000
 	maxGiftAnimationBytes          = 16 << 20
+	maxGiftEffectVideoBytes        = 64 << 20
+	maxGiftEffectLayoutBytes       = 64 << 10
 	maxGiftAvatarBytes             = 5 << 20
 	giftMediaTimeout               = 10 * time.Second
 )
@@ -73,9 +76,12 @@ func appendGiftReceipt(state *appState, gift giftEvent, changes []logEntry) {
 	}
 	gifURL := strings.TrimSpace(gift.AnimationGIF)
 	webpURL := strings.TrimSpace(gift.AnimationWebP)
-	if gifURL != "" || webpURL != "" {
+	effectMP4 := strings.TrimSpace(gift.EffectMP4)
+	effectMP4JSON := strings.TrimSpace(gift.EffectMP4JSON)
+	if gifURL != "" || webpURL != "" || (effectMP4 != "" && effectMP4JSON != "") {
 		receipt.Animation = &giftReceiptAnimation{
 			GIF: gifURL, WebP: webpURL, DurationMS: normalizeGiftAnimationDuration(gift.AnimationDurationMS),
+			EffectID: gift.EffectID, MP4: effectMP4, MP4JSON: effectMP4JSON,
 		}
 	}
 	for _, change := range changes {
@@ -192,7 +198,7 @@ func (api *giftReceiptAPI) handleMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	receiptID := strings.TrimSpace(r.URL.Query().Get("id"))
 	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
-	if receiptID == "" || (kind != "animation" && kind != "avatar") {
+	if receiptID == "" || !isGiftReceiptMediaKind(kind) {
 		http.Error(w, "媒体参数无效", http.StatusBadRequest)
 		return
 	}
@@ -229,12 +235,34 @@ func (api *giftReceiptAPI) handleMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "媒体暂时无法读取，请稍后重试", http.StatusBadGateway)
 		return
 	}
+	if kind == "effect-layout" {
+		layout, parseErr := parseGiftEffectLayout(media)
+		if parseErr != nil {
+			http.Error(w, "礼物特效坐标暂时无法读取，请稍后重试", http.StatusBadGateway)
+			return
+		}
+		media, err = json.Marshal(layout)
+		if err != nil {
+			http.Error(w, "礼物特效坐标暂时无法读取，请稍后重试", http.StatusInternalServerError)
+			return
+		}
+		mediaType = "application/json"
+	}
 	w.Header().Set("Cache-Control", "private, max-age=60")
 	w.Header().Set("Content-Type", mediaType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(media)))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(media)
+}
+
+func isGiftReceiptMediaKind(kind string) bool {
+	switch kind {
+	case "animation", "avatar", "effect-video", "effect-layout":
+		return true
+	default:
+		return false
+	}
 }
 
 func giftReceiptMediaCandidates(receipt giftReceipt, kind string) ([]string, int64, map[string]struct{}) {
@@ -245,6 +273,16 @@ func giftReceiptMediaCandidates(receipt giftReceipt, kind string) ([]string, int
 	}
 	if receipt.Animation == nil {
 		return nil, maxGiftAnimationBytes, nil
+	}
+	if kind == "effect-video" {
+		return compactMediaURLs(receipt.Animation.MP4), maxGiftEffectVideoBytes, map[string]struct{}{
+			"video/mp4": {},
+		}
+	}
+	if kind == "effect-layout" {
+		return compactMediaURLs(receipt.Animation.MP4JSON), maxGiftEffectLayoutBytes, map[string]struct{}{
+			"application/json": {}, "text/json": {},
+		}
 	}
 	return compactMediaURLs(receipt.Animation.GIF, receipt.Animation.WebP), maxGiftAnimationBytes, map[string]struct{}{
 		"image/gif": {}, "image/webp": {},
@@ -283,7 +321,7 @@ func (api *giftReceiptAPI) fetchMedia(parent context.Context, rawURL string, max
 		return nil, "", err
 	}
 	request.Header.Set("User-Agent", userAgent)
-	request.Header.Set("Accept", "image/avif,image/webp,image/png,image/jpeg,image/gif")
+	request.Header.Set("Accept", giftReceiptMediaAccept(allowedTypes))
 	response, err := api.client.Do(request)
 	if err != nil {
 		return nil, "", err
@@ -316,6 +354,16 @@ func (api *giftReceiptAPI) fetchMedia(parent context.Context, rawURL string, max
 		return nil, "", errors.New("媒体文件过大")
 	}
 	return data, mediaType, nil
+}
+
+func giftReceiptMediaAccept(allowedTypes map[string]struct{}) string {
+	if _, ok := allowedTypes["video/mp4"]; ok {
+		return "video/mp4"
+	}
+	if _, ok := allowedTypes["application/json"]; ok {
+		return "application/json"
+	}
+	return "image/avif,image/webp,image/png,image/jpeg,image/gif"
 }
 
 func validateBilibiliMediaURL(candidate *url.URL) error {

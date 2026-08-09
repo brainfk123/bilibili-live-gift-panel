@@ -183,6 +183,9 @@ type giftInfo struct {
 	AnimationGIF        string  `json:"gif,omitempty"`
 	AnimationWebP       string  `json:"webp,omitempty"`
 	AnimationDurationMS int     `json:"animationDurationMs,omitempty"`
+	EffectID            int     `json:"effectId,omitempty"`
+	EffectMP4           string  `json:"effectMp4,omitempty"`
+	EffectMP4JSON       string  `json:"effectMp4Json,omitempty"`
 	BlindBoxParentID    int     `json:"blindBoxParentId,omitempty"`
 	BlindBoxParentName  string  `json:"blindBoxParentName,omitempty"`
 	BlindBoxParentPrice float64 `json:"blindBoxParentPrice,omitempty"`
@@ -262,6 +265,9 @@ type giftReceiptAnimation struct {
 	GIF        string `json:"gif,omitempty"`
 	WebP       string `json:"webp,omitempty"`
 	DurationMS int    `json:"durationMs"`
+	EffectID   int    `json:"effectId,omitempty"`
+	MP4        string `json:"mp4,omitempty"`
+	MP4JSON    string `json:"mp4Json,omitempty"`
 }
 
 type giftReceipt struct {
@@ -373,6 +379,9 @@ type giftEvent struct {
 	AnimationGIF        string
 	AnimationWebP       string
 	AnimationDurationMS int
+	EffectID            int
+	EffectMP4           string
+	EffectMP4JSON       string
 	Rnd                 string
 }
 

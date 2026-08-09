@@ -208,6 +208,10 @@ export interface GiftInfo {
   gif?: string;
   webp?: string;
   animationDurationMs?: number;
+  /** Packed-alpha full-screen gift effect metadata from Bilibili's effect catalog. */
+  effectId?: number;
+  effectMp4?: string;
+  effectMp4Json?: string;
   /** Whether the gift is currently listed in the connected room. */
   listed?: boolean;
   /** Whether complete matching for this gift depends on a logged-in Bilibili session. */
@@ -293,6 +297,9 @@ export interface GiftReceiptAnimation {
   gif?: string;
   webp?: string;
   durationMs: number;
+  effectId?: number;
+  mp4?: string;
+  mp4Json?: string;
 }
 
 export interface GiftReceipt {

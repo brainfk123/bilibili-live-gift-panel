@@ -13,6 +13,7 @@ const (
 	roomGiftInfoEndpoint   = "https://api.live.bilibili.com/room/v1/Room/get_info"
 	roomGiftConfigEndpoint = "https://api.live.bilibili.com/xlive/web-room/v1/giftPanel/giftConfig"
 	roomGiftDataEndpoint   = "https://api.live.bilibili.com/xlive/web-room/v1/giftPanel/giftData"
+	roomGiftEffectEndpoint = "https://api.live.bilibili.com/xlive/general-interface/v1/fullScSpecialEffect/GetEffectConfListV2"
 )
 
 type roomGiftContext struct {
@@ -40,6 +41,9 @@ type roomGiftInfo struct {
 	AnimationGIF        string  `json:"gif,omitempty"`
 	AnimationWebP       string  `json:"webp,omitempty"`
 	AnimationDurationMS int     `json:"animationDurationMs,omitempty"`
+	EffectID            int     `json:"effectId,omitempty"`
+	EffectMP4           string  `json:"effectMp4,omitempty"`
+	EffectMP4JSON       string  `json:"effectMp4Json,omitempty"`
 	Listed              bool    `json:"listed"`
 	RequiresLogin       bool    `json:"requiresLogin,omitempty"`
 	BlindBoxParent      bool    `json:"-"`
@@ -116,6 +120,20 @@ func fetchCurrentRoomGiftCatalog(roomID string, session biliSession) ([]roomGift
 	if err != nil {
 		return nil, err
 	}
+	effectParameters := url.Values{
+		"platform":       {"pc"},
+		"room_id":        {strconv.FormatInt(roomContext.RoomID, 10)},
+		"area_id":        {strconv.Itoa(roomContext.AreaID)},
+		"area_parent_id": {strconv.Itoa(roomContext.ParentAreaID)},
+		"source":         {"live"},
+		"build":          {"0"},
+		"base_version":   {"0"},
+	}
+	if effectPayload, effectErr := fetchJSON(roomGiftEffectEndpoint+"?"+effectParameters.Encode(), headers); effectErr == nil {
+		if effects, parseErr := parseRoomGiftEffects(effectPayload); parseErr == nil {
+			enrichRoomGiftEffects(gifts, effects)
+		}
+	}
 	markListedBlindBoxChildren(gifts, func(giftID int) (*blindBoxInfo, bool, error) {
 		return fetchBlindBoxInfo(giftID, session)
 	})
@@ -157,6 +175,7 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 				GIF       string  `json:"gif"`
 				WebP      string  `json:"webp"`
 				StayTime  int     `json:"stay_time"`
+				EffectID  int     `json:"effect_id"`
 				GiftType  int     `json:"gift_type"`
 				GiftAttrs []int   `json:"gift_attrs"`
 			} `json:"list"`
@@ -204,6 +223,7 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 			ID: gift.ID, Name: strings.TrimSpace(gift.Name), Price: gift.Price, CoinType: coinType, ImgBasic: strings.TrimSpace(gift.ImgBasic),
 			AnimationGIF: strings.TrimSpace(gift.GIF), AnimationWebP: strings.TrimSpace(gift.WebP),
 			AnimationDurationMS: normalizeGiftAnimationDuration(gift.StayTime * 1000),
+			EffectID:            gift.EffectID,
 		}
 		if gift.GiftType == 6 || containsGiftAttribute(gift.GiftAttrs, 6) {
 			blindBoxParents[gift.ID] = struct{}{}
@@ -236,6 +256,7 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 		gifts = append(gifts, roomGiftInfo{
 			ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, ImgBasic: gift.ImgBasic,
 			AnimationGIF: gift.AnimationGIF, AnimationWebP: gift.AnimationWebP, AnimationDurationMS: gift.AnimationDurationMS,
+			EffectID: gift.EffectID, EffectMP4: gift.EffectMP4, EffectMP4JSON: gift.EffectMP4JSON,
 			Listed: true, RequiresLogin: blindBoxParent, BlindBoxParent: blindBoxParent,
 		})
 	}
@@ -248,6 +269,7 @@ func buildCurrentRoomGiftCatalog(configPayload, panelPayload map[string]any) ([]
 		gifts = append(gifts, roomGiftInfo{
 			ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, ImgBasic: gift.ImgBasic,
 			AnimationGIF: gift.AnimationGIF, AnimationWebP: gift.AnimationWebP, AnimationDurationMS: gift.AnimationDurationMS,
+			EffectID: gift.EffectID, EffectMP4: gift.EffectMP4, EffectMP4JSON: gift.EffectMP4JSON,
 			Listed: false, RequiresLogin: blindBoxParent, BlindBoxParent: blindBoxParent,
 		})
 	}

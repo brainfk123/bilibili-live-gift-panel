@@ -2431,7 +2431,7 @@ export function mountConfig(root: HTMLElement): void {
       sectionHeading(
         '运行核对',
         '所有送礼记录',
-        `记录直播间收到的全部礼物，包括未命中规则的事件。最多保留最近 ${MAX_GIFT_RECEIPTS} 条；有短动画素材时可手动制作回放。`,
+        `记录直播间收到的全部礼物，包括未命中规则的事件。最多保留最近 ${MAX_GIFT_RECEIPTS} 条；有完整特效或短动画素材时可手动制作回放。`,
       ),
       el('div', { class: 'gift-history-actions' }, [
         el('div', { class: 'gift-history-count', text: `${entries.length} 条送礼记录` }),
