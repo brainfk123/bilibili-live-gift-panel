@@ -51,64 +51,20 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install pinned native toolchain
-        shell: pwsh
-        run: |
-          choco install mingw --version 13.2.0 --yes --no-progress --allow-downgrade
-          choco install cmake --version 3.31.8 --yes --no-progress --allow-downgrade
-          choco install ninja --version 1.12.1 --yes --no-progress --allow-downgrade
-          Import-Module "$env:ChocolateyInstall/helpers/chocolateyProfile.psm1"
-          Update-SessionEnvironment
-          @('gcc', 'g++', 'cmake', 'ninja', 'objdump') | ForEach-Object {
-            $tool = Get-Command $_ -ErrorAction Stop
-            Split-Path -Parent $tool.Source | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          }
-
       - name: Run tests
         run: npm test -- --reporter=dot
 
       - name: Type check
         run: npm run typecheck
 
-      - name: Verify generated assistant knowledge
-        run: npm run check:assistant-help
-
-      - name: Verify hosted assistant model manifest
-        shell: pwsh
-        env:
-          ASSISTANT_MANIFEST_PUBLIC_KEY_BASE64: ${{ vars.ASSISTANT_MANIFEST_PUBLIC_KEY_BASE64 }}
-          ASSISTANT_MANIFEST_URL: ${{ vars.ASSISTANT_MANIFEST_URL }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:ASSISTANT_MANIFEST_URL)) {
-            throw "The repository is missing ASSISTANT_MANIFEST_URL."
-          }
-          node scripts/verify-assistant-manifest.mjs $env:ASSISTANT_MANIFEST_URL
-
       - name: Build frontend
         run: npm run build:ui
 
-      - name: Build pinned llama.cpp CPU runtime
-        run: npm run build:llama
-
-      - name: Compile native assistant Adapter
-        working-directory: goserver
-        run: go test -tags llamacpp ./assistant/llamacpp
-        env:
-          CGO_ENABLED: '1'
-          CC: gcc
-          CXX: g++
-
       - name: Build release executable
-        run: npm run build:exe:native
+        run: npm run build:exe
         env:
           APP_VERSION: ${{ env.RELEASE_TAG }}
           APP_COMMIT: ${{ github.sha }}
-          ASSISTANT_MANIFEST_PUBLIC_KEY_BASE64: ${{ vars.ASSISTANT_MANIFEST_PUBLIC_KEY_BASE64 }}
-          ASSISTANT_MANIFEST_URL: ${{ vars.ASSISTANT_MANIFEST_URL }}
-          REQUIRE_ASSISTANT_TRUST: '1'
-
-      - name: Verify native runtime is statically linked
-        run: npm run verify:exe-static -- dist/gift-panel.exe
 
       - name: Run backend tests
         working-directory: goserver
@@ -133,9 +89,6 @@ jobs:
       - name: Prepare release assets
         shell: pwsh
         run: |
-          Copy-Item -LiteralPath THIRD_PARTY_NOTICES.md -Destination dist/THIRD_PARTY_NOTICES.md
-          Copy-Item -LiteralPath third_party/licenses/llama.cpp-MIT.txt -Destination dist/llama.cpp-MIT.txt
-          Copy-Item -LiteralPath third_party/licenses/Qwen3-Apache-2.0.txt -Destination dist/Qwen3-Apache-2.0.txt
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel-windows-x64.exe).Hash.ToLowerInvariant()
           $size = (Get-Item -LiteralPath dist/gift-panel-windows-x64.exe).Length
           "$hash  gift-panel-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/gift-panel-windows-x64.exe.sha256
@@ -210,10 +163,10 @@ jobs:
         run: |
           gh release view $env:RELEASE_TAG *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/gift-panel-changelog.json dist/THIRD_PARTY_NOTICES.md dist/llama.cpp-MIT.txt dist/Qwen3-Apache-2.0.txt --clobber
+            gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/gift-panel-changelog.json --clobber
             gh release edit $env:RELEASE_TAG --draft=false --latest
           } else {
             gh release create $env:RELEASE_TAG --draft --verify-tag --generate-notes --title $env:RELEASE_TAG
-            gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/gift-panel-changelog.json dist/THIRD_PARTY_NOTICES.md dist/llama.cpp-MIT.txt dist/Qwen3-Apache-2.0.txt
+            gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/gift-panel-changelog.json
             gh release edit $env:RELEASE_TAG --draft=false --latest
           }

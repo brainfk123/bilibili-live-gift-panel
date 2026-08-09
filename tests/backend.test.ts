@@ -14,64 +14,8 @@ import {
   resetGiftTargetProgress,
   startBiliQRCodeLogin,
   startPagePresence,
-  streamAssistantChat,
-  getAssistantStatus,
-  installAssistantModel,
-  checkAssistantModelUpdate,
-  updateAssistantModel,
-  deleteAssistantModel,
   transitionActivity,
 } from '../src/backend';
-
-describe('local assistant API', () => {
-  afterEach(() => vi.unstubAllGlobals());
-
-  it('uses explicit model lifecycle endpoints', async () => {
-    const assistant = { state: 'ready' as const, message: '模型已就绪', modelVersion: 'qwen3-0.6b-q8' };
-    const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => Response.json({ code: 0, assistant }));
-    vi.stubGlobal('fetch', fetchMock);
-
-    await expect(getAssistantStatus()).resolves.toEqual(assistant);
-    await expect(installAssistantModel()).resolves.toEqual(assistant);
-    await expect(checkAssistantModelUpdate()).resolves.toEqual(assistant);
-    await expect(updateAssistantModel()).resolves.toEqual(assistant);
-    await expect(deleteAssistantModel()).resolves.toEqual(assistant);
-    expect(fetchMock.mock.calls.map(([url, init]) => [url, (init as RequestInit | undefined)?.method ?? 'GET'])).toEqual([
-      ['/api/assistant/status', 'GET'],
-      ['/api/assistant/model/install', 'POST'],
-      ['/api/assistant/model/check-update', 'POST'],
-      ['/api/assistant/model/update', 'POST'],
-      ['/api/assistant/model', 'DELETE'],
-    ]);
-  });
-
-  it('parses NDJSON events even when a line spans stream chunks', async () => {
-    const encoder = new TextEncoder();
-    const chunks = [
-      '{"type":"sources","sources":[{"id":"lesson-room","title":"连接直播间",',
-      '"sourceLabel":"训练中心"}]}\n{"type":"delta","text":"先填写房间号。"}\n',
-      '{"type":"done","modelVersion":"q8"}\n',
-    ];
-    const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response(new ReadableStream({
-      start(controller) {
-        chunks.forEach((chunk) => controller.enqueue(encoder.encode(chunk)));
-        controller.close();
-      },
-    }), { headers: { 'Content-Type': 'application/x-ndjson' } }));
-    vi.stubGlobal('fetch', fetchMock);
-    const events: unknown[] = [];
-
-    await streamAssistantChat('怎么连接？', (event) => events.push(event));
-
-    expect(events).toEqual([
-      { type: 'sources', sources: [{ id: 'lesson-room', title: '连接直播间', sourceLabel: '训练中心' }] },
-      { type: 'delta', text: '先填写房间号。' },
-      { type: 'done', modelVersion: 'q8' },
-    ]);
-    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
-    expect(JSON.parse(String(request.body))).toEqual({ question: '怎么连接？' });
-  });
-});
 
 describe('gift target progress API', () => {
   afterEach(() => vi.unstubAllGlobals());

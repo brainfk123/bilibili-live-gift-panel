@@ -48,48 +48,6 @@ export interface RoomAnchorInfo {
   avatar?: string;
 }
 
-export type AssistantModelState =
-  | 'missing'
-  | 'downloading'
-  | 'installed'
-  | 'loading'
-  | 'ready'
-  | 'answering'
-  | 'error';
-
-export interface AssistantStatus {
-  state: AssistantModelState;
-  message: string;
-  modelVersion?: string;
-  latestVersion?: string;
-  progress?: number;
-  sizeBytes?: number;
-  installedBytes?: number;
-  updateAvailable?: boolean;
-}
-
-export type AssistantSafeAction =
-  | { kind: 'config-page'; target: string; label?: string }
-  | { kind: 'training-topic'; target: string; label?: string };
-
-export interface AssistantSource {
-  id: string;
-  title: string;
-  sourceLabel: string;
-  action?: AssistantSafeAction;
-}
-
-export type AssistantChatEvent =
-  | { type: 'sources'; sources: AssistantSource[] }
-  | { type: 'delta'; text: string }
-  | {
-    type: 'done';
-    modelVersion?: string;
-    appVersion?: string;
-    stateSummary?: Record<string, unknown>;
-  }
-  | { type: 'error'; message: string };
-
 export function startPagePresence(mode: PagePresenceMode): () => void {
   const EventSourceConstructor = globalThis.EventSource;
   if (typeof EventSourceConstructor !== 'function') return () => {};
@@ -187,12 +145,6 @@ interface GiftTargetProgressResponse {
 interface GiftReceiptResponse {
   code: number;
   giftReceipts?: GiftReceipt[];
-  message?: string;
-}
-
-interface AssistantStatusResponse {
-  code: number;
-  assistant?: AssistantStatus;
   message?: string;
 }
 
@@ -377,93 +329,4 @@ export async function resetGiftTargetProgress(panelId: string): Promise<GiftTarg
     throw new Error(payload.message || `礼物目标清零失败：HTTP ${response.status}`);
   }
   return payload.progress;
-}
-
-async function requestAssistantStatus(path: string, init?: RequestInit): Promise<AssistantStatus> {
-  const response = await fetch(path, { cache: 'no-store', ...init });
-  const payload = await response.json() as AssistantStatusResponse;
-  if (!response.ok || payload.code !== 0 || !payload.assistant) {
-    throw new Error(payload.message || `答疑助手请求失败：HTTP ${response.status}`);
-  }
-  return payload.assistant;
-}
-
-export function getAssistantStatus(): Promise<AssistantStatus> {
-  return requestAssistantStatus('/api/assistant/status');
-}
-
-export function installAssistantModel(): Promise<AssistantStatus> {
-  return requestAssistantStatus('/api/assistant/model/install', { method: 'POST' });
-}
-
-export function checkAssistantModelUpdate(): Promise<AssistantStatus> {
-  return requestAssistantStatus('/api/assistant/model/check-update', { method: 'POST' });
-}
-
-export function updateAssistantModel(): Promise<AssistantStatus> {
-  return requestAssistantStatus('/api/assistant/model/update', { method: 'POST' });
-}
-
-export function deleteAssistantModel(): Promise<AssistantStatus> {
-  return requestAssistantStatus('/api/assistant/model', { method: 'DELETE' });
-}
-
-function isAssistantChatEvent(value: unknown): value is AssistantChatEvent {
-  if (!value || typeof value !== 'object') return false;
-  const event = value as Partial<AssistantChatEvent>;
-  if (event.type === 'delta') return typeof event.text === 'string';
-  if (event.type === 'error') return typeof event.message === 'string';
-  if (event.type === 'done') return true;
-  if (event.type === 'sources') return Array.isArray(event.sources);
-  return false;
-}
-
-export async function streamAssistantChat(
-  question: string,
-  onEvent: (event: AssistantChatEvent) => void,
-  signal?: AbortSignal,
-): Promise<void> {
-  const response = await fetch('/api/assistant/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
-    body: JSON.stringify({ question }),
-    signal,
-  });
-  if (!response.ok) {
-    let message = `答疑请求失败：HTTP ${response.status}`;
-    try {
-      const payload = await response.json() as { message?: string };
-      if (payload.message) message = payload.message;
-    } catch {
-      // Keep the HTTP error when the server did not return JSON.
-    }
-    throw new Error(message);
-  }
-  if (!response.body) throw new Error('答疑助手没有返回可读取的内容');
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let pending = '';
-  const emitLine = (line: string): void => {
-    const normalized = line.trim();
-    if (!normalized) return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(normalized);
-    } catch {
-      throw new Error('答疑助手返回了无法识别的数据');
-    }
-    if (!isAssistantChatEvent(parsed)) throw new Error('答疑助手返回了未知事件');
-    onEvent(parsed);
-  };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    pending += decoder.decode(value, { stream: !done });
-    const lines = pending.split(/\r?\n/);
-    pending = lines.pop() ?? '';
-    for (const line of lines) emitLine(line);
-    if (done) break;
-  }
-  emitLine(pending);
 }
