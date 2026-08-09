@@ -156,6 +156,28 @@ func TestConfigStorePatchWritesOnlyAffectedShard(t *testing.T) {
 	}
 }
 
+func TestConfigStorePersistsGiftClipPlacements(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	patch := httptest.NewRecorder()
+	store.handle(patch, httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(`{
+		"settings":{"giftClipPlacements":{"effect:99":{"x":42.5,"y":-18},"media:clamped":{"x":999,"y":-999}}}
+	}`)))
+	if patch.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, body = %s", patch.Code, patch.Body.String())
+	}
+
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := state.Settings.GiftClipPlacements["effect:99"]; got.X != 42.5 || got.Y != -18 {
+		t.Fatalf("saved effect placement = %#v", got)
+	}
+	if got := state.Settings.GiftClipPlacements["media:clamped"]; got.X != 160 || got.Y != -160 {
+		t.Fatalf("clamped media placement = %#v", got)
+	}
+}
+
 func TestConfigStorePatchPreservesExplicitlyDisabledRules(t *testing.T) {
 	dir := t.TempDir()
 	store := &configStore{path: filepath.Join(dir, "config.json")}

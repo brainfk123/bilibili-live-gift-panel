@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import {
+  constrainGiftClipPlacement,
+  giftClipAnimationKey,
   giftClipCoverRect,
+  giftClipPlacedCoverRect,
   normalizeGiftClipDuration,
   normalizeGiftEffectLayout,
   giftEffectDurationMs,
@@ -49,6 +52,34 @@ describe('gift clip studio', () => {
     expect(giftClipCoverRect(320, 180)).toEqual({ x: -186.66666666666663, y: 0, width: 853.3333333333333, height: 480 });
     expect(giftClipCoverRect(180, 320)).toEqual({ x: 0, y: -186.66666666666663, width: 480, height: 853.3333333333333 });
     expect(giftClipCoverRect(480, 480)).toEqual({ x: 0, y: 0, width: 480, height: 480 });
+  });
+
+  it('keeps a stable placement key for the same animation and ignores signed URL queries', () => {
+    expect(giftClipAnimationKey({
+      giftId: 1,
+      animation: { gif: 'https://i0.hdslb.com/gift/heart.gif?token=one', durationMs: 3000 },
+    })).toBe(giftClipAnimationKey({
+      giftId: 2,
+      animation: { gif: 'https://i0.hdslb.com/gift/heart.gif?token=two', durationMs: 5000 },
+    }));
+    expect(giftClipAnimationKey({
+      giftId: 1,
+      animation: { durationMs: 3000, effectId: 99 },
+    })).toBe('effect:99');
+  });
+
+  it('allows useful drag travel even when the animation canvas itself is square', () => {
+    expect(constrainGiftClipPlacement(480, 480, { x: 999, y: -999 }))
+      .toEqual({ x: 120, y: -120 });
+    expect(constrainGiftClipPlacement(180, 320, { x: 100, y: 300 }))
+      .toEqual({ x: 100, y: 160 });
+  });
+
+  it('adds only enough overscan to keep a shifted animation covering the video', () => {
+    expect(giftClipPlacedCoverRect(480, 480, { x: 0, y: 80 }))
+      .toEqual({ x: -80, y: 0, width: 640, height: 640 });
+    expect(giftClipPlacedCoverRect(480, 480, { x: 0, y: 0 }))
+      .toEqual({ x: 0, y: 0, width: 480, height: 480 });
   });
 
   it('keeps the preparing label in the setup placeholder and out of recorded frames', () => {

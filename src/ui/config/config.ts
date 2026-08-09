@@ -27,7 +27,7 @@ import {
   startBiliQRCodeLogin,
   UpdateStatus,
 } from '../../backend';
-import { openGiftClipStudio } from './gift-clip-studio';
+import { giftClipAnimationKey, openGiftClipStudio } from './gift-clip-studio';
 import {
   applyGiftTargetProgressSnapshot,
   giftTargetPanelConfig,
@@ -2727,9 +2727,18 @@ export function mountConfig(root: HTMLElement): void {
     replayButton.disabled = !entry.animation;
     replayButton.onclick = () => {
       if (!entry.animation) return;
+      const placementKey = giftClipAnimationKey(entry);
       openGiftClipStudio({
         host: root,
         receipt: entry,
+        initialPlacement: state.settings.giftClipPlacements[placementKey],
+        onPlacementConfirmed: (placement) => {
+          const placements = { ...state.settings.giftClipPlacements };
+          delete placements[placementKey];
+          placements[placementKey] = placement;
+          state.settings.giftClipPlacements = Object.fromEntries(Object.entries(placements).slice(-200));
+          save();
+        },
         onError: (message) => toast(message, root),
       });
     };

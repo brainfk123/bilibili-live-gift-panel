@@ -337,6 +337,11 @@ export interface ContributionLedger {
   updatedAt?: number;
 }
 
+export interface GiftClipPlacement {
+  x: number;
+  y: number;
+}
+
 export interface Settings {
   fontSize: number;
   accentColor: string;
@@ -356,6 +361,7 @@ export interface Settings {
   lastSeenChangelogVersion: string;
   autoUpdate: boolean;
   configExperience: 'simple' | 'advanced';
+  giftClipPlacements: Record<string, GiftClipPlacement>;
 }
 
 export type SimplePlayTemplateId = 'overtime' | 'counter' | 'goal';

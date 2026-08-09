@@ -20,6 +20,7 @@ describe('storage', () => {
     expect(s.settings.lastSeenChangelogVersion).toBe('');
     expect(s.settings.tutorialReplayMode).toBe(false);
     expect(s.settings.configExperience).toBe('simple');
+    expect(s.settings.giftClipPlacements).toEqual({});
   });
 
   it('treats persisted settings without configExperience as advanced', async () => {
@@ -85,6 +86,23 @@ describe('storage', () => {
     expect(loaded.settings.tutorialReplayMode).toBe(true);
     expect(loaded.settings.trainingCompletedTopics).toEqual(['blind-box', 'obs-no-change']);
     expect(loaded.settings.lastSeenChangelogVersion).toBe('0.2.0');
+  });
+
+  it('normalizes saved gift animation placements and drops malformed presets', async () => {
+    const serverState = defaultState();
+    serverState.settings.giftClipPlacements = {
+      'effect:1': { x: 22.5, y: -36 },
+      'media:clamped': { x: 999, y: -999 },
+      'media:invalid': { x: Number.NaN, y: 1 },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(serverState)));
+
+    await hydrateStateFromServer();
+
+    expect(loadState().settings.giftClipPlacements).toEqual({
+      'effect:1': { x: 22.5, y: -36 },
+      'media:clamped': { x: 160, y: -160 },
+    });
   });
 
   it('saves only changed settings when history is larger than the keepalive limit', async () => {
