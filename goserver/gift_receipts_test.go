@@ -46,6 +46,48 @@ func TestApplyGiftEventRecordsUnmatchedGiftWithAnimation(t *testing.T) {
 	}
 }
 
+func TestGiftReceiptRejectsIconOnlyAnimation(t *testing.T) {
+	state := defaultAppState()
+	state.RoomID = "100"
+	applyGiftEvent(&state, giftEvent{
+		GiftID: 31164, GiftName: "粉丝团灯牌", Num: 1,
+		AnimationGIF: "https://i0.hdslb.com/icon.gif", AnimationWebP: "https://i0.hdslb.com/icon.webp",
+		AnimationDurationMS: 3000, Timestamp: 1700000000, Rnd: "icon-only",
+	})
+	if len(state.GiftReceipts) != 1 || state.GiftReceipts[0].Animation != nil {
+		t.Fatalf("icon-only gift must not expose replay animation: %#v", state.GiftReceipts)
+	}
+}
+
+func TestGiftReceiptPreservesMembershipAndSuperChatMessage(t *testing.T) {
+	state := defaultAppState()
+	state.RoomID = "100"
+	applyGiftEvent(&state, giftEvent{
+		GiftID: specialGiftSuperChat, GiftName: "Super Chat", Num: 1,
+		Membership: "captain", Message: "今天也要加油", Timestamp: 1700000000, Rnd: "sc-message",
+	})
+	if len(state.GiftReceipts) != 1 || state.GiftReceipts[0].Membership != "captain" || state.GiftReceipts[0].Message != "今天也要加油" {
+		t.Fatalf("receipt identity/message = %#v", state.GiftReceipts)
+	}
+}
+
+func TestAttachGiftAnimationToMatchingGuardReceipt(t *testing.T) {
+	state := defaultAppState()
+	state.RoomID = "100"
+	applyGiftEvent(&state, giftEvent{
+		GiftID: specialGiftGuardCaptain, GiftName: "大航海·舰长", Num: 1,
+		UID: 42, Timestamp: 1700000000, Rnd: "guard-order",
+	})
+	attached := attachGiftAnimationToReceipt(&state, giftEvent{
+		GiftID: specialGiftGuardCaptain, UID: 42, Timestamp: 1700000001,
+		Membership: "captain", EffectID: 9001,
+		EffectMP4: "https://i0.hdslb.com/guard.mp4", EffectMP4JSON: "https://i0.hdslb.com/guard.json",
+	})
+	if !attached || state.GiftReceipts[0].Animation == nil || state.GiftReceipts[0].Animation.EffectID != 9001 {
+		t.Fatalf("guard animation was not attached: %#v", state.GiftReceipts)
+	}
+}
+
 func TestGiftReceiptCollectsMultipleRuleResultsAndDeduplicates(t *testing.T) {
 	state := defaultAppState()
 	state.RoomID = "100"

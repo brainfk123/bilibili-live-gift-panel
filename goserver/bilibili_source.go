@@ -65,15 +65,17 @@ func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callba
 	}
 	session = sessionForRoomInfo(info, session)
 	catalogByID := map[int]roomGiftInfo{}
-	if callbacks.onGiftCatalog != nil {
-		if gifts, catalogErr := fetchCurrentRoomGiftCatalog(roomID, session); catalogErr == nil {
-			for _, gift := range gifts {
-				catalogByID[gift.ID] = gift
-			}
-			callbacks.onGiftCatalog(gifts)
-		} else if callbacks.onGiftCatalogError != nil {
-			callbacks.onGiftCatalogError(catalogErr)
+	effectsByID := map[int]giftEffectResource{}
+	if resources, catalogErr := fetchCurrentRoomGiftResources(roomID, session); catalogErr == nil {
+		for _, gift := range resources.Gifts {
+			catalogByID[gift.ID] = gift
 		}
+		effectsByID = resources.EffectsByID
+		if callbacks.onGiftCatalog != nil {
+			callbacks.onGiftCatalog(resources.Gifts)
+		}
+	} else if callbacks.onGiftCatalogError != nil {
+		callbacks.onGiftCatalogError(catalogErr)
 	}
 	host := danmuHost{Host: "broadcastlv.chat.bilibili.com", WSSPort: 443}
 	if len(info.HostList) > 0 {
@@ -163,7 +165,7 @@ func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callba
 					continue
 				}
 				if paidEvent, ok := parseBiliPaidEvent(body); ok {
-					callbacks.onGift(paidEvent)
+					callbacks.onGift(enrichGiftAnimationFromEffectCatalog(paidEvent, effectsByID))
 				}
 			}
 		}
@@ -240,22 +242,27 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 		return giftEvent{}, false
 	}
 	var data struct {
-		GiftID            int             `json:"giftId"`
-		BlindGiftID       biliUID         `json:"blind_gift_id"`
-		BlindGiftName     string          `json:"blind_gift_name"`
-		BlindGiftPrice    float64         `json:"blind_gift_price"`
-		OriginalGiftPrice float64         `json:"original_gift_price"`
-		GiftName          string          `json:"giftName"`
-		Num               int             `json:"num"`
-		Price             float64         `json:"price"`
-		CoinType          string          `json:"coin_type"`
-		TotalCoin         float64         `json:"total_coin"`
-		Uname             string          `json:"uname"`
-		Face              string          `json:"face"`
-		UID               biliUID         `json:"uid"`
-		Timestamp         int64           `json:"timestamp"`
-		Rnd               json.RawMessage `json:"rnd"`
-		BlindGift         struct {
+		GiftID            int     `json:"giftId"`
+		BlindGiftID       biliUID `json:"blind_gift_id"`
+		BlindGiftName     string  `json:"blind_gift_name"`
+		BlindGiftPrice    float64 `json:"blind_gift_price"`
+		OriginalGiftPrice float64 `json:"original_gift_price"`
+		GiftName          string  `json:"giftName"`
+		Num               int     `json:"num"`
+		Price             float64 `json:"price"`
+		CoinType          string  `json:"coin_type"`
+		TotalCoin         float64 `json:"total_coin"`
+		GuardLevel        int     `json:"guard_level"`
+		MedalInfo         struct {
+			MedalName  string `json:"medal_name"`
+			MedalLevel int    `json:"medal_level"`
+		} `json:"medal_info"`
+		Uname     string          `json:"uname"`
+		Face      string          `json:"face"`
+		UID       biliUID         `json:"uid"`
+		Timestamp int64           `json:"timestamp"`
+		Rnd       json.RawMessage `json:"rnd"`
+		BlindGift struct {
 			GiftID            biliUID `json:"blind_gift_id"`
 			GiftName          string  `json:"gift_name"`
 			GiftPrice         float64 `json:"gift_price"`
@@ -267,17 +274,7 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 			WebP     string `json:"webp"`
 			EffectID int    `json:"effect_id"`
 		} `json:"gift_info"`
-		SenderUinfo struct {
-			UID  biliUID `json:"uid"`
-			Base struct {
-				Name       string `json:"name"`
-				Face       string `json:"face"`
-				OriginInfo struct {
-					Name string `json:"name"`
-					Face string `json:"face"`
-				} `json:"origin_info"`
-			} `json:"base"`
-		} `json:"sender_uinfo"`
+		SenderUinfo biliSenderUinfo `json:"sender_uinfo"`
 	}
 	if json.Unmarshal(envelope.Data, &data) != nil {
 		return giftEvent{}, false
@@ -324,10 +321,37 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 		GiftName: data.GiftName, Num: data.Num, Price: data.Price,
 		CoinType: data.CoinType, TotalCoin: data.TotalCoin, Uname: uname, Avatar: avatar, UID: uid,
 		Timestamp: data.Timestamp, ImgBasic: data.GiftInfo.ImgBasic,
+		Membership:   biliMembership(firstPositiveInt(data.GuardLevel, data.SenderUinfo.Guard.Level), firstNonEmptyEventField(data.MedalInfo.MedalName, data.SenderUinfo.Medal.Name)),
 		AnimationGIF: strings.TrimSpace(data.GiftInfo.GIF), AnimationWebP: strings.TrimSpace(data.GiftInfo.WebP),
 		EffectID: data.GiftInfo.EffectID,
 		Rnd:      rnd,
 	}, true
+}
+
+func enrichGiftAnimationFromEffectCatalog(gift giftEvent, effects map[int]giftEffectResource) giftEvent {
+	if gift.EffectID <= 0 {
+		return gift
+	}
+	effect, exists := effects[gift.EffectID]
+	if !exists {
+		return gift
+	}
+	if strings.TrimSpace(gift.EffectMP4) == "" {
+		gift.EffectMP4 = effect.MP4
+	}
+	if strings.TrimSpace(gift.EffectMP4JSON) == "" {
+		gift.EffectMP4JSON = effect.MP4JSON
+	}
+	return gift
+}
+
+func firstPositiveInt(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func enrichGiftAnimationFromRoomCatalog(gift giftEvent, catalog map[int]roomGiftInfo) giftEvent {

@@ -60,30 +60,23 @@ func giftReceiptID(roomID string, gift giftEvent) string {
 
 func appendGiftReceipt(state *appState, gift giftEvent, changes []logEntry) {
 	receipt := giftReceipt{
-		ID:        giftReceiptID(state.RoomID, gift),
-		Time:      gift.Timestamp,
-		GiftID:    gift.GiftID,
-		GiftName:  strings.TrimSpace(gift.GiftName),
-		Num:       maxInt(1, gift.Num),
-		Price:     gift.Price,
-		TotalCoin: gift.TotalCoin,
-		CoinType:  gift.CoinType,
-		Uname:     strings.TrimSpace(gift.Uname),
-		Avatar:    strings.TrimSpace(gift.Avatar),
-		SenderUID: gift.UID,
-		ImgBasic:  strings.TrimSpace(gift.ImgBasic),
-		Effects:   make([]giftReceiptEffect, 0, len(changes)),
+		ID:         giftReceiptID(state.RoomID, gift),
+		Time:       gift.Timestamp,
+		GiftID:     gift.GiftID,
+		GiftName:   strings.TrimSpace(gift.GiftName),
+		Num:        maxInt(1, gift.Num),
+		Price:      gift.Price,
+		TotalCoin:  gift.TotalCoin,
+		CoinType:   gift.CoinType,
+		Uname:      strings.TrimSpace(gift.Uname),
+		Avatar:     strings.TrimSpace(gift.Avatar),
+		SenderUID:  gift.UID,
+		Membership: strings.TrimSpace(gift.Membership),
+		Message:    strings.TrimSpace(gift.Message),
+		ImgBasic:   strings.TrimSpace(gift.ImgBasic),
+		Effects:    make([]giftReceiptEffect, 0, len(changes)),
 	}
-	gifURL := strings.TrimSpace(gift.AnimationGIF)
-	webpURL := strings.TrimSpace(gift.AnimationWebP)
-	effectMP4 := strings.TrimSpace(gift.EffectMP4)
-	effectMP4JSON := strings.TrimSpace(gift.EffectMP4JSON)
-	if gifURL != "" || webpURL != "" || (effectMP4 != "" && effectMP4JSON != "") {
-		receipt.Animation = &giftReceiptAnimation{
-			GIF: gifURL, WebP: webpURL, DurationMS: normalizeGiftAnimationDuration(gift.AnimationDurationMS),
-			EffectID: gift.EffectID, MP4: effectMP4, MP4JSON: effectMP4JSON,
-		}
-	}
+	receipt.Animation = giftReceiptAnimationFromEvent(gift)
 	for _, change := range changes {
 		receipt.Effects = append(receipt.Effects, giftReceiptEffect{
 			AttributeName: change.AttributeName,
@@ -102,6 +95,52 @@ func appendGiftReceipt(state *appState, gift giftEvent, changes []logEntry) {
 	if len(state.GiftReceipts) > maxGiftReceiptEntries {
 		state.GiftReceipts = state.GiftReceipts[:maxGiftReceiptEntries]
 	}
+}
+
+func giftReceiptAnimationFromEvent(gift giftEvent) *giftReceiptAnimation {
+	gifURL := strings.TrimSpace(gift.AnimationGIF)
+	webpURL := strings.TrimSpace(gift.AnimationWebP)
+	effectMP4 := strings.TrimSpace(gift.EffectMP4)
+	effectMP4JSON := strings.TrimSpace(gift.EffectMP4JSON)
+	hasFullEffect := effectMP4 != "" && effectMP4JSON != ""
+	hasShortEffect := gift.EffectID > 0 && (gifURL != "" || webpURL != "")
+	if !hasFullEffect && !hasShortEffect {
+		return nil
+	}
+	return &giftReceiptAnimation{
+		GIF: gifURL, WebP: webpURL, DurationMS: normalizeGiftAnimationDuration(gift.AnimationDurationMS),
+		EffectID: gift.EffectID, MP4: effectMP4, MP4JSON: effectMP4JSON,
+	}
+}
+
+func attachGiftAnimationToReceipt(state *appState, gift giftEvent) bool {
+	animation := giftReceiptAnimationFromEvent(gift)
+	if animation == nil {
+		return false
+	}
+	for index := range state.GiftReceipts {
+		receipt := &state.GiftReceipts[index]
+		if receipt.GiftID != gift.GiftID || receipt.SenderUID != gift.UID || !nearbyGiftTimestamps(receipt.Time, gift.Timestamp) {
+			continue
+		}
+		receipt.Animation = animation
+		if receipt.Membership == "" {
+			receipt.Membership = strings.TrimSpace(gift.Membership)
+		}
+		return true
+	}
+	return false
+}
+
+func nearbyGiftTimestamps(left, right int64) bool {
+	if left <= 0 || right <= 0 {
+		return true
+	}
+	difference := left - right
+	if difference < 0 {
+		difference = -difference
+	}
+	return difference <= 120
 }
 
 func migrateGiftReceiptsFromLog(entries []logEntry) []giftReceipt {

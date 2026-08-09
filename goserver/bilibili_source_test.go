@@ -79,6 +79,33 @@ func TestParseBiliGiftUsesSenderUinfoWhenLegacyIdentityIsMasked(t *testing.T) {
 	}
 }
 
+func TestParseBiliGiftExtractsFanAndGuardMembership(t *testing.T) {
+	payload, _ := json.Marshal(map[string]any{
+		"cmd": "SEND_GIFT",
+		"data": map[string]any{
+			"giftId": 1, "giftName": "礼物", "num": 1, "uid": 1,
+			"guard_level": 2,
+			"medal_info":  map[string]any{"medal_name": "测试粉丝团", "medal_level": 12},
+		},
+	})
+	gift, ok := parseBiliGift(payload)
+	if !ok || gift.Membership != "admiral" {
+		t.Fatalf("membership = %#v, ok=%v", gift, ok)
+	}
+
+	fanPayload, _ := json.Marshal(map[string]any{
+		"cmd": "SEND_GIFT",
+		"data": map[string]any{
+			"giftId": 1, "giftName": "礼物", "num": 1, "uid": 1,
+			"medal_info": map[string]any{"medal_name": "测试粉丝团", "medal_level": 1},
+		},
+	})
+	fanGift, ok := parseBiliGift(fanPayload)
+	if !ok || fanGift.Membership != "fan" {
+		t.Fatalf("fan membership = %#v, ok=%v", fanGift, ok)
+	}
+}
+
 func TestParseBiliGiftExtractsBlindBoxParent(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{
 		"cmd": "SEND_GIFT",
@@ -128,6 +155,28 @@ func TestParseBiliPaidEventParsesGuardBuy(t *testing.T) {
 	if gift.Rnd != "guard:guard-order-1" || gift.Timestamp != 1700000100 || gift.ImgBasic == "" {
 		t.Fatalf("guard metadata = %#v", gift)
 	}
+	if gift.Membership != "captain" {
+		t.Fatalf("guard membership = %q", gift.Membership)
+	}
+}
+
+func TestParseBiliPaidEventParsesGuardToastAnimation(t *testing.T) {
+	payload, _ := json.Marshal(map[string]any{
+		"cmd": "USER_TOAST_MSG_V2",
+		"data": map[string]any{
+			"timestamp": 1700000101,
+			"sender_uinfo": map[string]any{
+				"uid":  123456789,
+				"base": map[string]any{"name": "大航海观众", "face": "https://example.test/guard.png"},
+			},
+			"guard_info":  map[string]any{"guard_level": 3},
+			"effect_info": map[string]any{"room_effect_id": 9001},
+		},
+	})
+	gift, ok := parseBiliPaidEvent(payload)
+	if !ok || !gift.AnimationOnly || gift.GiftID != specialGiftGuardCaptain || gift.EffectID != 9001 || gift.UID != 123456789 {
+		t.Fatalf("guard toast = %#v, ok=%v", gift, ok)
+	}
 }
 
 func TestParseBiliPaidEventMapsEveryGuardLevel(t *testing.T) {
@@ -176,6 +225,9 @@ func TestParseBiliPaidEventParsesSuperChatInGoldSeedUnits(t *testing.T) {
 	}
 	if gift.Rnd != "super-chat:987654321" || gift.Timestamp != 1700000200 || gift.ImgBasic == "" {
 		t.Fatalf("super chat metadata = %#v", gift)
+	}
+	if gift.Message != "测试醒目留言" {
+		t.Fatalf("super chat message = %q", gift.Message)
 	}
 }
 

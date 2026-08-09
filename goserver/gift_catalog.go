@@ -52,6 +52,11 @@ type roomGiftInfo struct {
 	BlindBoxParentPrice float64 `json:"blindBoxParentPrice,omitempty"`
 }
 
+type roomGiftResources struct {
+	Gifts       []roomGiftInfo
+	EffectsByID map[int]giftEffectResource
+}
+
 func (entry giftPanelEntry) normalizedID() int {
 	if entry.GiftID > 0 {
 		return entry.GiftID
@@ -88,17 +93,25 @@ func handleRoomGiftCatalog(login *loginManager) http.HandlerFunc {
 }
 
 func fetchCurrentRoomGiftCatalog(roomID string, session biliSession) ([]roomGiftInfo, error) {
+	resources, err := fetchCurrentRoomGiftResources(roomID, session)
+	if err != nil {
+		return nil, err
+	}
+	return resources.Gifts, nil
+}
+
+func fetchCurrentRoomGiftResources(roomID string, session biliSession) (roomGiftResources, error) {
 	headers := map[string]string{}
 	if strings.TrimSpace(session.CookieHeader) != "" {
 		headers["Cookie"] = session.CookieHeader
 	}
 	roomPayload, err := fetchJSON(roomGiftInfoEndpoint+"?room_id="+url.QueryEscape(roomID), headers)
 	if err != nil {
-		return nil, err
+		return roomGiftResources{}, err
 	}
 	roomContext, err := parseRoomGiftContext(roomPayload)
 	if err != nil {
-		return nil, err
+		return roomGiftResources{}, err
 	}
 
 	parameters := url.Values{
@@ -110,16 +123,17 @@ func fetchCurrentRoomGiftCatalog(roomID string, session biliSession) ([]roomGift
 	}
 	configPayload, err := fetchJSON(roomGiftConfigEndpoint+"?"+parameters.Encode(), headers)
 	if err != nil {
-		return nil, err
+		return roomGiftResources{}, err
 	}
 	panelPayload, err := fetchJSON(roomGiftDataEndpoint+"?"+parameters.Encode(), headers)
 	if err != nil {
-		return nil, err
+		return roomGiftResources{}, err
 	}
 	gifts, err := buildCurrentRoomGiftCatalog(configPayload, panelPayload)
 	if err != nil {
-		return nil, err
+		return roomGiftResources{}, err
 	}
+	effectsByID := map[int]giftEffectResource{}
 	effectParameters := url.Values{
 		"platform":       {"pc"},
 		"room_id":        {strconv.FormatInt(roomContext.RoomID, 10)},
@@ -130,14 +144,15 @@ func fetchCurrentRoomGiftCatalog(roomID string, session biliSession) ([]roomGift
 		"base_version":   {"0"},
 	}
 	if effectPayload, effectErr := fetchJSON(roomGiftEffectEndpoint+"?"+effectParameters.Encode(), headers); effectErr == nil {
-		if effects, parseErr := parseRoomGiftEffects(effectPayload); parseErr == nil {
-			enrichRoomGiftEffects(gifts, effects)
+		if effects, parseErr := parseRoomGiftEffectCatalog(effectPayload); parseErr == nil {
+			enrichRoomGiftEffects(gifts, effects.ByGiftID)
+			effectsByID = effects.ByID
 		}
 	}
 	markListedBlindBoxChildren(gifts, func(giftID int) (*blindBoxInfo, bool, error) {
 		return fetchBlindBoxInfo(giftID, session)
 	})
-	return gifts, nil
+	return roomGiftResources{Gifts: gifts, EffectsByID: effectsByID}, nil
 }
 
 func parseRoomGiftContext(payload map[string]any) (roomGiftContext, error) {

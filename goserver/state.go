@@ -271,20 +271,22 @@ type giftReceiptAnimation struct {
 }
 
 type giftReceipt struct {
-	ID        string                `json:"id"`
-	Time      int64                 `json:"time"`
-	GiftID    int                   `json:"giftId"`
-	GiftName  string                `json:"giftName"`
-	Num       int                   `json:"num"`
-	Price     float64               `json:"price"`
-	TotalCoin float64               `json:"totalCoin"`
-	CoinType  string                `json:"coinType"`
-	Uname     string                `json:"uname"`
-	Avatar    string                `json:"avatar,omitempty"`
-	SenderUID int64                 `json:"senderUid,omitempty"`
-	ImgBasic  string                `json:"imgBasic,omitempty"`
-	Animation *giftReceiptAnimation `json:"animation,omitempty"`
-	Effects   []giftReceiptEffect   `json:"effects"`
+	ID         string                `json:"id"`
+	Time       int64                 `json:"time"`
+	GiftID     int                   `json:"giftId"`
+	GiftName   string                `json:"giftName"`
+	Num        int                   `json:"num"`
+	Price      float64               `json:"price"`
+	TotalCoin  float64               `json:"totalCoin"`
+	CoinType   string                `json:"coinType"`
+	Uname      string                `json:"uname"`
+	Avatar     string                `json:"avatar,omitempty"`
+	SenderUID  int64                 `json:"senderUid,omitempty"`
+	Membership string                `json:"membership,omitempty"`
+	Message    string                `json:"message,omitempty"`
+	ImgBasic   string                `json:"imgBasic,omitempty"`
+	Animation  *giftReceiptAnimation `json:"animation,omitempty"`
+	Effects    []giftReceiptEffect   `json:"effects"`
 }
 
 type viewerContribution struct {
@@ -374,6 +376,8 @@ type giftEvent struct {
 	Uname               string
 	Avatar              string
 	UID                 int64
+	Membership          string
+	Message             string
 	Timestamp           int64
 	ImgBasic            string
 	AnimationGIF        string
@@ -382,6 +386,7 @@ type giftEvent struct {
 	EffectID            int
 	EffectMP4           string
 	EffectMP4JSON       string
+	AnimationOnly       bool
 	Rnd                 string
 }
 

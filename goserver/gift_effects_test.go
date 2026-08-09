@@ -27,6 +27,25 @@ func TestParseRoomGiftEffectsMapsOnlyPlayableGiftResources(t *testing.T) {
 	}
 }
 
+func TestParseRoomGiftEffectCatalogIndexesGuardResourcesByEffectID(t *testing.T) {
+	payload := map[string]any{
+		"code": float64(0),
+		"data": map[string]any{"full_sc_resource": map[string]any{"conf_list": []any{
+			map[string]any{
+				"id": float64(9001), "type": float64(2),
+				"web_mp4": "https://i0.hdslb.com/guard.mp4", "web_mp4_json": "https://i0.hdslb.com/guard.json",
+			},
+		}}},
+	}
+	catalog, err := parseRoomGiftEffectCatalog(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog.ByID[9001].MP4 == "" || len(catalog.ByGiftID) != 0 {
+		t.Fatalf("effect catalog = %#v", catalog)
+	}
+}
+
 func TestEnrichRoomGiftEffectsRequiresMatchingConfiguredEffect(t *testing.T) {
 	gifts := []roomGiftInfo{
 		{ID: 1, EffectID: 1846},

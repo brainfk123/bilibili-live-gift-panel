@@ -16,6 +16,11 @@ type giftEffectResource struct {
 	MP4JSON string
 }
 
+type giftEffectCatalog struct {
+	ByGiftID map[int]giftEffectResource
+	ByID     map[int]giftEffectResource
+}
+
 type giftEffectLayout struct {
 	VideoWidth  int    `json:"videoWidth"`
 	VideoHeight int    `json:"videoHeight"`
@@ -26,6 +31,14 @@ type giftEffectLayout struct {
 }
 
 func parseRoomGiftEffects(payload map[string]any) (map[int]giftEffectResource, error) {
+	catalog, err := parseRoomGiftEffectCatalog(payload)
+	if err != nil {
+		return nil, err
+	}
+	return catalog.ByGiftID, nil
+}
+
+func parseRoomGiftEffectCatalog(payload map[string]any) (giftEffectCatalog, error) {
 	var response struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
@@ -42,22 +55,29 @@ func parseRoomGiftEffects(payload map[string]any) (map[int]giftEffectResource, e
 		} `json:"data"`
 	}
 	if err := decodeBiliPayload(payload, &response); err != nil {
-		return nil, err
+		return giftEffectCatalog{}, err
 	}
 	if response.Code != 0 {
-		return nil, fmt.Errorf("礼物特效配置无效：%s", response.Message)
+		return giftEffectCatalog{}, fmt.Errorf("礼物特效配置无效：%s", response.Message)
 	}
-	result := make(map[int]giftEffectResource)
+	result := giftEffectCatalog{
+		ByGiftID: make(map[int]giftEffectResource),
+		ByID:     make(map[int]giftEffectResource),
+	}
 	for _, entry := range response.Data.FullSCResource.ConfList {
 		mp4 := strings.TrimSpace(entry.WebMP4)
 		layout := strings.TrimSpace(entry.WebMP4JSON)
-		if entry.ID <= 0 || entry.Type != 1 || mp4 == "" || layout == "" {
+		if entry.ID <= 0 || mp4 == "" || layout == "" {
 			continue
 		}
 		resource := giftEffectResource{ID: entry.ID, MP4: mp4, MP4JSON: layout}
+		result.ByID[entry.ID] = resource
+		if entry.Type != 1 {
+			continue
+		}
 		for _, giftID := range entry.BindGiftIDs {
 			if giftID > 0 {
-				result[giftID] = resource
+				result.ByGiftID[giftID] = resource
 			}
 		}
 	}

@@ -194,10 +194,13 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .changelog-header h2 { margin-top: 5px; font-size: var(--type-page); line-height: 1.08; }
 .config-root .changelog-header p { margin-top: 9px; color: var(--text-dim); font-size: var(--type-title); }
 .config-root .changelog-close { flex: 0 0 auto; }
-.config-root .changelog-layout { display: grid; grid-template-columns: 170px minmax(0, 1fr); min-height: 0; }
+.config-root .changelog-layout { display: grid; flex: 1 1 auto; grid-template-columns: 170px minmax(0, 1fr); min-height: 0; overflow: hidden; }
 .config-root .changelog-version-list {
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
   gap: 8px;
   padding: 20px 14px;
   border-right: 1px solid var(--border);
@@ -224,7 +227,7 @@ body.config-mode::-webkit-scrollbar-corner,
   background: var(--accent-soft);
   color: var(--accent-text);
 }
-.config-root .changelog-content { min-width: 0; overflow: auto; padding: 26px 28px 32px; }
+.config-root .changelog-content { min-width: 0; min-height: 0; overflow: auto; padding: 26px 28px 32px; scrollbar-gutter: stable; }
 .config-root .changelog-release-intro { display: grid; gap: 8px; }
 .config-root .changelog-release-intro > div { display: flex; align-items: center; gap: 10px; }
 .config-root .changelog-release-version {
@@ -315,8 +318,8 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .changelog-dialog { max-height: calc(100vh - 20px); border-radius: 18px; }
   .config-root .changelog-header { padding: 20px 18px 16px; }
   .config-root .changelog-header p { font-size: var(--type-body); }
-  .config-root .changelog-layout { grid-template-columns: 1fr; }
-  .config-root .changelog-version-list { overflow-x: auto; align-items: stretch; flex-direction: row; padding: 10px 14px; border-right: 0; border-bottom: 1px solid var(--border); }
+  .config-root .changelog-layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .config-root .changelog-version-list { overflow-x: auto; overflow-y: hidden; align-items: stretch; flex-direction: row; padding: 10px 14px; border-right: 0; border-bottom: 1px solid var(--border); }
   .config-root .changelog-version { flex: 0 0 126px; min-height: 52px; }
   .config-root .changelog-content { padding: 20px 16px 26px; }
   .config-root .changelog-highlights { grid-template-columns: 1fr; }
@@ -3321,7 +3324,24 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .gift-history-copy span,
 .config-root .gift-history-effect span { margin-top: 3px; color: var(--text-dim); font-size: var(--type-meta); }
 .config-root .gift-history-effect strong { color: var(--text); }
+.config-root .gift-history-identity-line { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.config-root .gift-history-identity-line > strong { min-width: 0; }
+.config-root .gift-history-membership {
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--border));
+  border-radius: 999px;
+  padding: 1px 6px;
+  background: var(--accent-soft);
+  color: var(--accent-text) !important;
+  font-size: 10px !important;
+  font-weight: 800;
+}
+.config-root .gift-history-membership.is-admiral { border-color: #9f6cff; color: #c7adff !important; }
+.config-root .gift-history-membership.is-governor { border-color: #ff9d38; color: #ffc27e !important; }
+.config-root .gift-history-membership.is-fan { border-color: var(--border-strong); background: var(--bg-soft); color: var(--text-dim) !important; }
 .config-root .gift-history-replay-cell { display: grid; justify-items: end; min-width: 0; gap: 4px; }
+.config-root .gift-history-row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.config-root .gift-history-message { min-height: 34px; padding: 6px 11px; color: var(--accent-text); font-size: var(--type-meta); }
 .config-root .gift-history-replay { min-height: 34px; padding: 6px 11px; font-size: var(--type-meta); }
 .config-root .gift-history-replay-cell span {
   max-width: 100%;
@@ -3364,6 +3384,12 @@ body.config-mode::-webkit-scrollbar-corner,
   color: var(--text-dim);
   text-align: center;
 }
+
+.config-root .super-chat-message-overlay { z-index: 245; padding: 20px; }
+.config-root .overlay .super-chat-message-dialog { width: min(560px, calc(100vw - 40px)); max-width: 560px; padding: 0; }
+.config-root .super-chat-message-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 22px 24px 18px; border-bottom: 1px solid var(--border); }
+.config-root .super-chat-message-header h2 { margin-top: 5px; font-size: var(--type-section); }
+.config-root .super-chat-message-content { margin: 0; padding: 24px; color: var(--text); font-size: var(--type-title); line-height: 1.75; overflow-wrap: anywhere; white-space: pre-wrap; }
 
 .config-root .gift-clip-overlay { z-index: 235; padding: 20px; }
 .config-root .overlay .gift-clip-dialog {

@@ -91,6 +91,49 @@ func TestBackgroundRuntimePersistsBlindBoxMappingsFromRoomCatalog(t *testing.T) 
 	}
 }
 
+func TestBackgroundRuntimeAttachesGuardAnimationInEitherEventOrder(t *testing.T) {
+	for _, animationFirst := range []bool{false, true} {
+		name := "purchase-first"
+		if animationFirst {
+			name = "animation-first"
+		}
+		t.Run(name, func(t *testing.T) {
+			store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+			state := defaultAppState()
+			state.RoomID = "31567150"
+			if err := store.replaceState(state); err != nil {
+				t.Fatal(err)
+			}
+			runtime := newBackgroundRuntime(store, nil)
+			purchase := giftEvent{
+				GiftID: specialGiftGuardCaptain, GiftName: "大航海·舰长", Num: 1,
+				UID: 42, Uname: "舰长观众", Avatar: "https://example.test/avatar.png",
+				Timestamp: 1700000000, Rnd: "guard-order",
+			}
+			animation := giftEvent{
+				GiftID: specialGiftGuardCaptain, UID: 42, Timestamp: 1700000001,
+				Membership: "captain", EffectID: 9001,
+				EffectMP4: "https://i0.hdslb.com/guard.mp4", EffectMP4JSON: "https://i0.hdslb.com/guard.json",
+				AnimationOnly: true,
+			}
+			if animationFirst {
+				runtime.handleGift(animation)
+				runtime.handleGift(purchase)
+			} else {
+				runtime.handleGift(purchase)
+				runtime.handleGift(animation)
+			}
+			updated, err := store.readState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(updated.GiftReceipts) != 1 || updated.GiftReceipts[0].Animation == nil || updated.GiftReceipts[0].Animation.EffectID != 9001 {
+				t.Fatalf("guard receipt = %#v", updated.GiftReceipts)
+			}
+		})
+	}
+}
+
 func TestSameGiftIdentityKeepsMatchingAfterIconRevision(t *testing.T) {
 	configured := giftInfo{ID: 970001, Name: "情书", Price: 5200, CoinType: "gold", ImgBasic: "old.png"}
 	event := giftEvent{GiftID: 970002, GiftName: "情书", Price: 5200, CoinType: "gold", ImgBasic: "current.png"}

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   CHANGELOG_RELEASES,
@@ -10,6 +11,13 @@ import {
 } from '../src/changelog';
 
 describe('versioned changelog', () => {
+  it('keeps both changelog columns scrollable inside the viewport', () => {
+    const css = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    expect(css).toMatch(/\.changelog-layout\s*\{[^}]*flex:\s*1\s+1\s+auto[^}]*overflow:\s*hidden/s);
+    expect(css).toMatch(/\.changelog-version-list\s*\{[^}]*overflow-y:\s*auto/s);
+    expect(css).toMatch(/\.changelog-content\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*auto/s);
+  });
+
   it('keeps the latest release first and resolves v-prefixed versions', () => {
     expect(latestChangelogRelease()).toBe(CHANGELOG_RELEASES[0]);
     expect(normalizeChangelogVersion(' v0.3.0 ')).toBe('0.3.0');

@@ -2497,6 +2497,21 @@ export function mountConfig(root: HTMLElement): void {
       const attribute = state.attributes.find((item) => item.name === effect.attributeName);
       return `${effect.attributeName} ${formatHistoryDelta(effect.delta, attribute)}`;
     }).join(' · ');
+    const membershipLabels: Record<NonNullable<GiftReceipt['membership']>, string> = {
+      fan: '粉丝团',
+      captain: '舰长',
+      admiral: '提督',
+      governor: '总督',
+    };
+    const identityLine = el('div', { class: 'gift-history-identity-line' }, [
+      el('strong', { text: entry.uname?.trim() || '匿名观众', title: entry.uname?.trim() || '匿名观众' }),
+    ]);
+    if (entry.membership) {
+      identityLine.append(el('span', {
+        class: `gift-history-membership is-${entry.membership}`,
+        text: membershipLabels[entry.membership],
+      }));
+    }
     const replayButton = el('button', {
       class: 'btn ghost gift-history-replay',
       type: 'button',
@@ -2511,12 +2526,23 @@ export function mountConfig(root: HTMLElement): void {
         onError: (message) => toast(message, root),
       });
     };
+    const rowActions = el('div', { class: 'gift-history-row-actions' });
+    if (entry.message?.trim()) {
+      const messageButton = el('button', {
+        class: 'btn ghost gift-history-message',
+        type: 'button',
+        text: '查看留言',
+      }) as HTMLButtonElement;
+      messageButton.onclick = () => openSuperChatMessage(entry);
+      rowActions.append(messageButton);
+    }
+    rowActions.append(replayButton);
     return el('article', { class: 'gift-history-row' }, [
       el('time', { class: 'gift-history-time', dateTime: time.toISOString(), text: timeText, title: time.toLocaleString('zh-CN') }),
       el('div', { class: 'gift-history-person' }, [
         avatar,
         el('div', { class: 'gift-history-copy' }, [
-          el('strong', { text: entry.uname?.trim() || '匿名观众', title: entry.uname?.trim() || '匿名观众' }),
+          identityLine,
           el('span', { text: entry.senderUid ? `UID ${entry.senderUid}` : 'UID 未提供' }),
         ]),
       ]),
@@ -2535,10 +2561,35 @@ export function mountConfig(root: HTMLElement): void {
         }),
       ]),
       el('div', { class: 'gift-history-replay-cell' }, [
-        replayButton,
-        el('span', { text: entry.animation ? `${Math.round(entry.animation.durationMs / 100) / 10} 秒短动画` : '该礼物未提供 GIF/WebP' }),
+        rowActions,
+        el('span', { text: entry.animation ? `${Math.round(entry.animation.durationMs / 100) / 10} 秒动画` : entry.message?.trim() ? '醒目留言内容已记录' : '该礼物没有可回放动画' }),
       ]),
     ]);
+  }
+
+  function openSuperChatMessage(entry: GiftReceipt): void {
+    root.querySelector('.super-chat-message-overlay')?.remove();
+    const overlay = el('div', { class: 'overlay super-chat-message-overlay' });
+    const closeButton = el('button', {
+      class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭醒目留言',
+    } as any) as HTMLButtonElement;
+    const close = (): void => overlay.remove();
+    closeButton.onclick = close;
+    overlay.onclick = (event) => { if (event.target === overlay) close(); };
+    overlay.append(el('section', {
+      class: 'card super-chat-message-dialog', role: 'dialog', ariaModal: 'true', ariaLabel: '醒目留言内容',
+    } as any, [
+      el('header', { class: 'super-chat-message-header' }, [
+        el('div', {}, [
+          el('span', { class: 'section-kicker', text: 'Super Chat' }),
+          el('h2', { text: entry.uname?.trim() || '匿名观众' }),
+        ]),
+        closeButton,
+      ]),
+      el('p', { class: 'super-chat-message-content', text: entry.message?.trim() || '这条醒目留言没有正文。' }),
+    ]));
+    root.append(overlay);
+    closeButton.focus();
   }
 
   function openAttributeEditor(index?: number, initialSection: AttributeWorkspaceSection = 'overview'): void {

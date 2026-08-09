@@ -2335,7 +2335,7 @@ describe('single-page configuration rendering', () => {
       giftReceipts: [
         {
           id: 'receipt-1', time: 1700000000, giftId: 32125, giftName: '电影票', num: 1,
-          price: 2000, totalCoin: 2000, coinType: 'gold', uname: '测试用户', senderUid: 123,
+          price: 2000, totalCoin: 2000, coinType: 'gold', uname: '测试用户', senderUid: 123, membership: 'captain',
           animation: { gif: 'https://i0.hdslb.com/gift.gif', durationMs: 3000 },
           effects: [{ attributeName: '加班时间', delta: 60, valueAfter: 120, ruleId: 'r-movie', triggerName: '电影票加时' }],
         },
@@ -2345,7 +2345,7 @@ describe('single-page configuration rendering', () => {
         },
         {
           id: 'receipt-sc', time: 1699999998, giftId: 1900000004, giftName: 'Super Chat', num: 1,
-          price: 50000, totalCoin: 50000, coinType: 'gold', uname: '醒目留言用户', effects: [],
+          price: 50000, totalCoin: 50000, coinType: 'gold', uname: '醒目留言用户', message: '测试醒目留言内容', effects: [],
         },
       ],
     }));
@@ -2367,6 +2367,10 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root)).toContain('未触发属性规则');
     expect(textOf(root)).toContain('制作回放');
     expect(textOf(root)).toContain('无动画素材');
+    expect(textOf(root)).toContain('舰长');
+    const messageButton = findByText(root, '查看留言')!;
+    messageButton.onclick?.();
+    expect(textOf(root.querySelector('.super-chat-message-dialog') as TestElement)).toContain('测试醒目留言内容');
     expect(textOf(root)).not.toContain('每分钟减少');
 
     const clearButton = findByText(root, '清空记录')!;

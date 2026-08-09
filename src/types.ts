@@ -314,6 +314,8 @@ export interface GiftReceipt {
   uname: string;
   avatar?: string;
   senderUid?: number;
+  membership?: 'fan' | 'captain' | 'admiral' | 'governor';
+  message?: string;
   imgBasic?: string;
   animation?: GiftReceiptAnimation;
   effects: GiftReceiptEffect[];

@@ -16,7 +16,14 @@ const (
 )
 
 type biliSenderUinfo struct {
-	UID  biliUID `json:"uid"`
+	UID   biliUID `json:"uid"`
+	Guard struct {
+		Level int `json:"level"`
+	} `json:"guard"`
+	Medal struct {
+		Name  string `json:"name"`
+		Level int    `json:"level"`
+	} `json:"medal"`
 	Base struct {
 		Name       string `json:"name"`
 		Face       string `json:"face"`
@@ -39,6 +46,8 @@ func parseBiliPaidEvent(body []byte) (giftEvent, bool) {
 	switch command {
 	case "GUARD_BUY":
 		return parseGuardBuy(envelope.Data)
+	case "USER_TOAST_MSG_V2":
+		return parseGuardToast(envelope.Data)
 	case "SUPER_CHAT_MESSAGE", "SUPER_CHAT_MESSAGE_JPN":
 		return parseSuperChat(envelope.Data)
 	default:
@@ -94,7 +103,54 @@ func parseGuardBuy(payload []byte) (giftEvent, bool) {
 	return giftEvent{
 		GiftID: giftID, GiftName: giftName, Num: data.Num, Price: data.Price,
 		CoinType: "gold", TotalCoin: totalCoin, Uname: uname, Avatar: avatar, UID: uid,
-		Timestamp: timestamp, ImgBasic: specialEventIcon(iconLabel, iconColor), Rnd: rnd,
+		Timestamp: timestamp, ImgBasic: specialEventIcon(iconLabel, iconColor),
+		Membership: biliMembership(data.GuardLevel, ""), Rnd: rnd,
+	}, true
+}
+
+func parseGuardToast(payload []byte) (giftEvent, bool) {
+	var data struct {
+		Timestamp int64           `json:"timestamp"`
+		StartTime int64           `json:"start_time"`
+		Sender    biliSenderUinfo `json:"sender_uinfo"`
+		GuardInfo struct {
+			GuardLevel int `json:"guard_level"`
+			Level      int `json:"level"`
+		} `json:"guard_info"`
+		EffectInfo struct {
+			RoomEffectID      int `json:"room_effect_id"`
+			RoomGroupEffectID int `json:"room_group_effect_id"`
+		} `json:"effect_info"`
+	}
+	if json.Unmarshal(payload, &data) != nil {
+		return giftEvent{}, false
+	}
+	guardLevel := data.GuardInfo.GuardLevel
+	if guardLevel == 0 {
+		guardLevel = data.GuardInfo.Level
+	}
+	giftID, giftName, iconLabel, iconColor, ok := guardGiftIdentity(guardLevel)
+	if !ok {
+		return giftEvent{}, false
+	}
+	effectID := data.EffectInfo.RoomEffectID
+	if effectID <= 0 {
+		effectID = data.EffectInfo.RoomGroupEffectID
+	}
+	if effectID <= 0 {
+		return giftEvent{}, false
+	}
+	timestamp := firstPositiveInt64(data.Timestamp, data.StartTime)
+	if timestamp <= 0 {
+		timestamp = time.Now().Unix()
+	}
+	return giftEvent{
+		GiftID: giftID, GiftName: giftName, Num: 1,
+		Uname:  bestBiliUsername(data.Sender.Base.Name, data.Sender.Base.OriginInfo.Name),
+		Avatar: firstNonEmptyEventField(data.Sender.Base.Face, data.Sender.Base.OriginInfo.Face),
+		UID:    int64(data.Sender.UID), Timestamp: timestamp,
+		ImgBasic: specialEventIcon(iconLabel, iconColor), Membership: biliMembership(guardLevel, ""),
+		EffectID: effectID, AnimationOnly: true,
 	}, true
 }
 
@@ -105,9 +161,14 @@ func parseSuperChat(payload []byte) (giftEvent, bool) {
 		PriceYuan float64         `json:"price"`
 		Timestamp int64           `json:"ts"`
 		StartTime int64           `json:"start_time"`
+		Message   string          `json:"message"`
 		UserInfo  struct {
-			Uname string `json:"uname"`
-			Face  string `json:"face"`
+			Uname      string `json:"uname"`
+			Face       string `json:"face"`
+			GuardLevel int    `json:"guard_level"`
+			MedalInfo  struct {
+				MedalName string `json:"medal_name"`
+			} `json:"medal_info"`
 		} `json:"user_info"`
 		Sender biliSenderUinfo `json:"sender_uinfo"`
 	}
@@ -133,8 +194,26 @@ func parseSuperChat(payload []byte) (giftEvent, bool) {
 	return giftEvent{
 		GiftID: specialGiftSuperChat, GiftName: "Super Chat", Num: 1, Price: price,
 		CoinType: "gold", TotalCoin: price, Uname: uname, Avatar: avatar, UID: uid,
-		Timestamp: timestamp, ImgBasic: specialEventIcon("SC", "#ff5f91"), Rnd: rnd,
+		Timestamp: timestamp, ImgBasic: specialEventIcon("SC", "#ff5f91"),
+		Membership: biliMembership(data.UserInfo.GuardLevel, firstNonEmptyEventField(data.UserInfo.MedalInfo.MedalName, data.Sender.Medal.Name)),
+		Message:    strings.TrimSpace(data.Message), Rnd: rnd,
 	}, true
+}
+
+func biliMembership(guardLevel int, medalName string) string {
+	switch guardLevel {
+	case 3:
+		return "captain"
+	case 2:
+		return "admiral"
+	case 1:
+		return "governor"
+	default:
+		if strings.TrimSpace(medalName) != "" {
+			return "fan"
+		}
+		return ""
+	}
 }
 
 func guardGiftIdentity(level int) (id int, name, label, color string, ok bool) {

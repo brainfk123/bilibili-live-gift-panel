@@ -29,19 +29,20 @@ type runtimeStatus struct {
 }
 
 type backgroundRuntime struct {
-	store           *configStore
-	sourceFactory   func() giftEventSource
-	reload          chan struct{}
-	mu              sync.RWMutex
-	status          runtimeStatus
-	seen            map[string]time.Time
-	timerMu         sync.Mutex
-	timerSchedules  map[string]timerSchedule
-	timerTicks      <-chan time.Time
-	notifications   *notificationCenter
-	giftQueue       chan giftEvent
-	profileResolver userProfileResolver
-	diagnostics     *diagnosticLogger
+	store                 *configStore
+	sourceFactory         func() giftEventSource
+	reload                chan struct{}
+	mu                    sync.RWMutex
+	status                runtimeStatus
+	seen                  map[string]time.Time
+	pendingGiftAnimations map[string]giftEvent
+	timerMu               sync.Mutex
+	timerSchedules        map[string]timerSchedule
+	timerTicks            <-chan time.Time
+	notifications         *notificationCenter
+	giftQueue             chan giftEvent
+	profileResolver       userProfileResolver
+	diagnostics           *diagnosticLogger
 }
 
 type timerSchedule struct {
@@ -58,15 +59,16 @@ func newBackgroundRuntime(store *configStore, sourceFactory func() giftEventSour
 		center = notifications[0]
 	}
 	return &backgroundRuntime{
-		store:           store,
-		sourceFactory:   sourceFactory,
-		reload:          make(chan struct{}, 1),
-		status:          runtimeStatus{State: "idle"},
-		seen:            map[string]time.Time{},
-		timerSchedules:  map[string]timerSchedule{},
-		notifications:   center,
-		giftQueue:       make(chan giftEvent, 256),
-		profileResolver: newBilibiliUserProfileResolver(nil, ""),
+		store:                 store,
+		sourceFactory:         sourceFactory,
+		reload:                make(chan struct{}, 1),
+		status:                runtimeStatus{State: "idle"},
+		seen:                  map[string]time.Time{},
+		pendingGiftAnimations: map[string]giftEvent{},
+		timerSchedules:        map[string]timerSchedule{},
+		notifications:         center,
+		giftQueue:             make(chan giftEvent, 256),
+		profileResolver:       newBilibiliUserProfileResolver(nil, ""),
 	}
 }
 
@@ -302,6 +304,11 @@ func (runtime *backgroundRuntime) Status() runtimeStatus {
 }
 
 func (runtime *backgroundRuntime) handleGift(gift giftEvent) {
+	if gift.AnimationOnly {
+		runtime.handleGiftAnimation(gift)
+		return
+	}
+	gift = runtime.takePendingGiftAnimation(gift)
 	if runtime.isDuplicate(gift.Rnd) {
 		runtime.diagnostics.Info("gift_ignored", "reason", "duplicate", "gift_id", gift.GiftID)
 		return
@@ -362,6 +369,64 @@ func (runtime *backgroundRuntime) handleGift(gift giftEvent) {
 	)
 }
 
+var errGiftAnimationReceiptNotFound = errors.New("gift animation receipt not found")
+
+func (runtime *backgroundRuntime) handleGiftAnimation(gift giftEvent) {
+	if giftReceiptAnimationFromEvent(gift) == nil {
+		return
+	}
+	_, err := runtime.store.updateState(func(state *appState) error {
+		if !attachGiftAnimationToReceipt(state, gift) {
+			return errGiftAnimationReceiptNotFound
+		}
+		return nil
+	})
+	if err == nil {
+		return
+	}
+	if !errors.Is(err, errGiftAnimationReceiptNotFound) {
+		runtime.diagnostics.Error("gift_animation_attach_failed", "gift_id", gift.GiftID, "effect_id", gift.EffectID, "error", err)
+		return
+	}
+	runtime.mu.Lock()
+	runtime.pendingGiftAnimations[giftAnimationMatchKey(gift)] = gift
+	for key, pending := range runtime.pendingGiftAnimations {
+		if !nearbyGiftTimestamps(pending.Timestamp, gift.Timestamp) {
+			delete(runtime.pendingGiftAnimations, key)
+		}
+	}
+	runtime.mu.Unlock()
+}
+
+func (runtime *backgroundRuntime) takePendingGiftAnimation(gift giftEvent) giftEvent {
+	key := giftAnimationMatchKey(gift)
+	runtime.mu.Lock()
+	pending, exists := runtime.pendingGiftAnimations[key]
+	if exists && nearbyGiftTimestamps(pending.Timestamp, gift.Timestamp) {
+		delete(runtime.pendingGiftAnimations, key)
+	} else {
+		exists = false
+	}
+	runtime.mu.Unlock()
+	if !exists {
+		return gift
+	}
+	if gift.Membership == "" {
+		gift.Membership = pending.Membership
+	}
+	gift.EffectID = pending.EffectID
+	gift.EffectMP4 = pending.EffectMP4
+	gift.EffectMP4JSON = pending.EffectMP4JSON
+	gift.AnimationGIF = pending.AnimationGIF
+	gift.AnimationWebP = pending.AnimationWebP
+	gift.AnimationDurationMS = pending.AnimationDurationMS
+	return gift
+}
+
+func giftAnimationMatchKey(gift giftEvent) string {
+	return fmt.Sprintf("%d:%d", gift.GiftID, gift.UID)
+}
+
 func (runtime *backgroundRuntime) isDuplicate(key string) bool {
 	if key == "" {
 		return false
@@ -384,6 +449,10 @@ func (runtime *backgroundRuntime) isDuplicate(key string) bool {
 func (runtime *backgroundRuntime) setStatus(state, roomID string, err error) {
 	runtime.mu.Lock()
 	previous := runtime.status
+	if previous.RoomID != roomID {
+		clear(runtime.seen)
+		clear(runtime.pendingGiftAnimations)
+	}
 	nextLastError := ""
 	runtime.status.State = state
 	runtime.status.RoomID = roomID

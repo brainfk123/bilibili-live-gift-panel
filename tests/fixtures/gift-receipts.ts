@@ -41,6 +41,14 @@ const changelogHistory = [
     highlights: [{ label: '玩法', title: '设置礼物目标', description: '可为多种礼物分别设置目标数量。' }],
     visuals: [],
   },
+  ...Array.from({ length: 11 }, (_, index) => ({
+    version: `0.1.${10 - index}`,
+    date: `2026-07-${String(31 - index).padStart(2, '0')}`,
+    title: `历史版本 ${10 - index}`,
+    summary: '用于验证联网加载大量历史版本时，版本列表和正文都能独立滚动。',
+    highlights: [{ label: '历史', title: '较早版本内容', description: '更新日志仍然保持在弹窗可视范围内。' }],
+    visuals: [],
+  })),
 ];
 
 const state: AppState = {
@@ -54,7 +62,7 @@ const state: AppState = {
   },
   giftCatalog: [
     { id: 32128, name: '心动盲盒', price: 960, coinType: 'gold', imgBasic: animationURL, gif: 'fixture.gif', animationDurationMs: 3000 },
-    { id: 32126, name: '棉花糖', price: 540, coinType: 'gold', imgBasic: animationURL },
+    { id: 31164, name: '粉丝团灯牌', price: 100, coinType: 'gold', imgBasic: animationURL, gif: 'icon-only.gif', animationDurationMs: 3000 },
   ],
   contributions: {
     updatedAt: Date.now(),
@@ -81,18 +89,26 @@ const state: AppState = {
     {
       id: 'super-chat', time: Date.now() + 1000, giftId: 1_900_000_004, giftName: 'Super Chat', num: 1,
       price: 50_000, totalCoin: 50_000, coinType: 'gold', uname: '送给暴脾气钢板', avatar: avatarURL,
-      senderUid: 2134957018, effects: [],
+      senderUid: 2134957018, membership: 'governor', message: '主播辛苦了，今天也要开心！', effects: [],
     },
     {
       id: 'animated-effect', time: Date.now(), giftId: 32128, giftName: '心动盲盒', num: 1,
       price: 960, totalCoin: 960, coinType: 'gold', uname: '鲑鱼盖饭', avatar: avatarURL,
       senderUid: 11578534, imgBasic: animationURL,
+      membership: 'captain',
       animation: { gif: 'https://i0.hdslb.com/fixture.gif', webp: 'https://i0.hdslb.com/fixture.webp', durationMs: 3000 },
       effects: [{ attributeName: '挑战次数', delta: 960, valueAfter: 12745, ruleId: 'rule-1', triggerName: '心动盲盒规则' }],
     },
     {
-      id: 'unmatched', time: Date.now() - 1000, giftId: 32126, giftName: '棉花糖', num: 2,
-      price: 540, totalCoin: 1080, coinType: 'gold', uname: 'MarsOvO_w', avatar: avatarURL,
+      id: 'guard-effect', time: Date.now() - 500, giftId: 1_900_000_001, giftName: '大航海·舰长', num: 1,
+      price: 198_000, totalCoin: 198_000, coinType: 'gold', uname: '新上舰观众', avatar: avatarURL,
+      senderUid: 22334455, membership: 'captain', imgBasic: animationURL,
+      animation: { durationMs: 5000, effectId: 9001, mp4: 'https://i0.hdslb.com/guard.mp4', mp4Json: 'https://i0.hdslb.com/guard.json' },
+      effects: [],
+    },
+    {
+      id: 'unmatched', time: Date.now() - 1000, giftId: 31164, giftName: '粉丝团灯牌', num: 2,
+      price: 100, totalCoin: 200, coinType: 'gold', uname: 'MarsOvO_w', avatar: avatarURL,
       senderUid: 274988853, imgBasic: animationURL, effects: [],
     },
     {
