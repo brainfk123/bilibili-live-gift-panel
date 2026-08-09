@@ -1,6 +1,6 @@
 import changelogData from '../gift-panel-changelog.json';
 
-export type ChangelogVisual = 'scene' | 'broadcast' | 'training';
+export type ChangelogVisual = 'scene' | 'broadcast';
 
 export interface ChangelogHighlight {
   label: string;
@@ -17,7 +17,7 @@ export interface ChangelogRelease {
   visuals: ChangelogVisual[];
 }
 
-const VISUALS = new Set<ChangelogVisual>(['scene', 'broadcast', 'training']);
+const VISUALS = new Set<ChangelogVisual>(['scene', 'broadcast']);
 
 export function normalizeChangelogReleases(value: unknown): ChangelogRelease[] {
   const record = value && typeof value === 'object' ? value as Record<string, unknown> : {};

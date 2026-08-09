@@ -120,26 +120,12 @@ function createVisual(type: ChangelogVisual): HTMLElement {
       el('div', { class: 'changelog-scene-broadcast', text: '观众礼物正在依次播报…' }),
     ]);
   }
-  if (type === 'broadcast') {
-    return el('figure', { class: 'changelog-visual is-broadcast' }, [
-      el('figcaption', { text: '连续送礼不丢消息' }),
-      el('div', { class: 'changelog-broadcast-track' }, [
-        broadcastPreview('小电视飞船', '+60 秒', 'is-first'),
-        broadcastPreview('粉丝团灯牌', '+6 秒', 'is-second'),
-        broadcastPreview('人气票', '+1 票', 'is-third'),
-      ]),
-    ]);
-  }
-  return el('figure', { class: 'changelog-visual is-training' }, [
-    el('figcaption', { text: '训练中心' }),
-    el('div', { class: 'changelog-training-progress' }, [
-      el('strong', { text: '12/12' }),
-      el('span', { text: '主线任务' }),
-    ]),
-    el('ol', {}, [
-      el('li', { class: 'is-done', text: '连接直播间' }),
-      el('li', { class: 'is-done', text: '从空白创建加班机' }),
-      el('li', { class: 'is-active', text: '预览并加入 OBS' }),
+  return el('figure', { class: 'changelog-visual is-broadcast' }, [
+    el('figcaption', { text: '连续送礼不丢消息' }),
+    el('div', { class: 'changelog-broadcast-track' }, [
+      broadcastPreview('小电视飞船', '+60 秒', 'is-first'),
+      broadcastPreview('粉丝团灯牌', '+6 秒', 'is-second'),
+      broadcastPreview('人气票', '+1 票', 'is-third'),
     ]),
   ]);
 }

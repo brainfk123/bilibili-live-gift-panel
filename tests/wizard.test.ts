@@ -1653,7 +1653,8 @@ describe('single-page configuration rendering', () => {
     expect(dialog).not.toBeNull();
     expect(textOf(dialog!)).toContain('这次更新了什么？');
     expect(textOf(dialog!)).toContain('按用途重新划分配置页面');
-    expect(root.querySelectorAll('.changelog-visual')).toHaveLength(1);
+    expect(root.querySelectorAll('.changelog-visual')).toHaveLength(0);
+    expect(textOf(dialog!)).not.toContain('训练中心');
     (root.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
 
     await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.2.4'));

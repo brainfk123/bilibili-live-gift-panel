@@ -33,7 +33,7 @@
           "description": "移除重复的连接状态和组合面板入口，并修复导航栏遮挡 3D 卡片的问题。"
         }
       ],
-      "visuals": ["training"]
+      "visuals": []
     }
   ]
 }

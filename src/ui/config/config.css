@@ -294,15 +294,6 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .changelog-broadcast-avatar { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 50%; background: var(--accent-soft); color: var(--accent-text); font-size: var(--type-meta); font-weight: 800; }
 .config-root .changelog-broadcast-item > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .config-root .changelog-broadcast-item strong { color: var(--accent); white-space: nowrap; }
-.config-root .changelog-training-progress { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 14px; }
-.config-root .changelog-training-progress strong { color: var(--accent); font-size: var(--type-page); }
-.config-root .changelog-training-progress span { color: var(--text-dim); font-size: var(--type-meta); }
-.config-root .changelog-visual.is-training ol { display: grid; gap: 7px; margin-top: 10px; list-style: none; }
-.config-root .changelog-visual.is-training li { position: relative; border-radius: 8px; padding: 7px 9px 7px 28px; background: var(--bg-soft); color: var(--text-dim); font-size: var(--type-meta); }
-.config-root .changelog-visual.is-training li::before { position: absolute; left: 9px; content: '○'; color: var(--text-dim); }
-.config-root .changelog-visual.is-training li.is-done::before { content: '✓'; color: var(--success); }
-.config-root .changelog-visual.is-training li.is-active { background: var(--accent-soft); color: var(--text); animation: changelogLessonPulse 1.8s ease-in-out infinite; }
-.config-root .changelog-visual.is-training li.is-active::before { content: '→'; color: var(--accent); }
 .config-root .changelog-highlights { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
 .config-root .changelog-highlight { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 13px; border: 1px solid var(--border); border-radius: 16px; padding: 16px; background: var(--bg-soft); }
 .config-root .changelog-highlight-index { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 11px; background: var(--accent-soft); color: var(--accent-text); font-size: var(--type-meta); font-weight: 900; }
@@ -315,7 +306,6 @@ body.config-mode::-webkit-scrollbar-corner,
   95% { opacity: 0; transform: translateY(14px) scale(.98); }
   100% { opacity: 1; transform: translateY(0) scale(1); }
 }
-@keyframes changelogLessonPulse { 50% { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 42%, transparent); } }
 @media (max-width: 900px) {
   .config-root .changelog-visual-grid { grid-template-columns: 1fr; }
   .config-root .changelog-visual { height: 178px; }
@@ -332,8 +322,7 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .changelog-highlights { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .config-root .changelog-broadcast-item,
-  .config-root .changelog-visual.is-training li.is-active { animation: none; }
+  .config-root .changelog-broadcast-item { animation: none; }
   .config-root .changelog-broadcast-item:not(.is-first) { display: none; }
 }
 .config-root .theme-toggle {

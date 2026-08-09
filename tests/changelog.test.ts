@@ -37,4 +37,15 @@ describe('versioned changelog', () => {
     expect(merged.map((release) => release.version)).toEqual(['0.2.4', '0.1.0']);
     expect(normalizeChangelogReleases({ releases: [{ version: 'broken' }] })).toEqual([]);
   });
+
+  it('ignores the removed training visual from bundled and hosted changelogs', () => {
+    expect(changelogReleaseForVersion('0.2.4')?.visuals).toEqual([]);
+    const [hosted] = normalizeChangelogReleases({
+      releases: [{
+        version: '0.2.5', date: '2026-08-09', title: '测试版本', summary: '测试在线日志。',
+        highlights: [], visuals: ['training', 'broadcast'],
+      }],
+    });
+    expect(hosted.visuals).toEqual(['broadcast']);
+  });
 });
