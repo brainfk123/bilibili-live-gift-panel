@@ -342,6 +342,24 @@ type settingsState struct {
 	TrainingCompletedTopics   []string `json:"trainingCompletedTopics"`
 	LastSeenChangelogVersion  string   `json:"lastSeenChangelogVersion"`
 	AutoUpdate                *bool    `json:"autoUpdate"`
+	ConfigExperience          string   `json:"configExperience"`
+}
+
+type simplePlayOvertimeGiftActionState struct {
+	GiftID    int    `json:"giftId"`
+	Operation string `json:"operation"`
+	Seconds   *int   `json:"seconds,omitempty"`
+}
+
+type simplePlayState struct {
+	Version             int                                 `json:"version"`
+	TemplateID          string                              `json:"templateId"`
+	TemplateVersion     int                                 `json:"templateVersion"`
+	AttributeID         string                              `json:"attributeId"`
+	Parameters          map[string]any                      `json:"parameters"`
+	Gifts               map[string][]int                    `json:"gifts"`
+	OvertimeGiftActions []simplePlayOvertimeGiftActionState `json:"overtimeGiftActions,omitempty"`
+	ManagedFingerprint  string                              `json:"managedFingerprint"`
 }
 
 type appState struct {
@@ -355,6 +373,7 @@ type appState struct {
 	TimerRules      []timerRule                    `json:"timerRules"`
 	FormulaPresets  []formulaPreset                `json:"formulaPresets"`
 	Settings        settingsState                  `json:"settings"`
+	SimplePlay      *simplePlayState               `json:"simplePlay,omitempty"`
 	GiftCatalog     []giftInfo                     `json:"giftCatalog"`
 	RecentGifts     []recentGift                   `json:"recentGifts"`
 	Stats           map[string]dayStats            `json:"stats"`
@@ -431,6 +450,7 @@ func defaultAppState() appState {
 			TutorialReplayMode:       &tutorialReplayMode,
 			TrainingCompletedTopics:  []string{},
 			AutoUpdate:               &autoUpdate,
+			ConfigExperience:         "simple",
 		},
 	}
 }
@@ -525,6 +545,32 @@ func normalizeAppState(state *appState) {
 	}
 	if !isDisplayThemeID(state.Settings.DefaultDisplayThemeID) {
 		state.Settings.DefaultDisplayThemeID = defaults.DefaultDisplayThemeID
+	}
+	if state.Settings.ConfigExperience != "simple" {
+		state.Settings.ConfigExperience = "advanced"
+	}
+	if state.SimplePlay != nil {
+		state.SimplePlay.TemplateID = strings.TrimSpace(state.SimplePlay.TemplateID)
+		state.SimplePlay.AttributeID = strings.TrimSpace(state.SimplePlay.AttributeID)
+		state.SimplePlay.ManagedFingerprint = strings.TrimSpace(state.SimplePlay.ManagedFingerprint)
+		if state.SimplePlay.Parameters == nil {
+			state.SimplePlay.Parameters = map[string]any{}
+		}
+		if state.SimplePlay.Gifts == nil {
+			state.SimplePlay.Gifts = map[string][]int{}
+		}
+		for key, giftIDs := range state.SimplePlay.Gifts {
+			if giftIDs == nil {
+				state.SimplePlay.Gifts[key] = []int{}
+			}
+		}
+		for index := range state.SimplePlay.OvertimeGiftActions {
+			action := &state.SimplePlay.OvertimeGiftActions[index]
+			action.Operation = strings.ToLower(strings.TrimSpace(action.Operation))
+			if action.Operation != "add" && action.Operation != "subtract" {
+				action.Seconds = nil
+			}
+		}
 	}
 	appearanceDefaults := displayAppearanceDefaults(state.Settings)
 	normalizeBlindBoxDisplayAppearanceState(&state.BlindBoxDisplay, appearanceDefaults)

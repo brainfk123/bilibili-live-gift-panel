@@ -15,6 +15,8 @@ func TestFormulaParity(t *testing.T) {
 		"MIN(加班时间+60,120)":                120,
 		"ROUND(1.567,2)":                  1.57,
 		"ABS(-7)":                         7,
+		"FLOOR(1.9)":                      1,
+		"FLOOR(-1.1)":                     -2,
 	}
 	for formula, expected := range tests {
 		actual, err := evaluateFormula(formula, env)
@@ -23,6 +25,14 @@ func TestFormulaParity(t *testing.T) {
 		}
 		if math.Abs(actual-expected) > 0.000001 {
 			t.Fatalf("%s = %v, want %v", formula, actual, expected)
+		}
+	}
+}
+
+func TestFormulaFloorRequiresExactlyOneArgument(t *testing.T) {
+	for _, formula := range []string{"FLOOR()", "FLOOR(1,2)"} {
+		if _, err := evaluateFormula(formula, map[string]float64{}); err == nil {
+			t.Fatalf("%s unexpectedly accepted", formula)
 		}
 	}
 }

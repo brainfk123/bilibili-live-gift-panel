@@ -19,6 +19,20 @@ describe('storage', () => {
     expect(s.settings.trainingCompletedTopics).toEqual([]);
     expect(s.settings.lastSeenChangelogVersion).toBe('');
     expect(s.settings.tutorialReplayMode).toBe(false);
+    expect(s.settings.configExperience).toBe('simple');
+  });
+
+  it('treats persisted settings without configExperience as advanced', async () => {
+    const legacy = defaultState();
+    const settings = { ...legacy.settings } as Partial<typeof legacy.settings>;
+    delete settings.configExperience;
+    legacy.settings = settings as typeof legacy.settings;
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(legacy)));
+
+    await hydrateStateFromServer();
+
+    expect(loadState().settings.configExperience).toBe('advanced');
+    expect(consumeConfigMigrationRequired()).toBe(true);
   });
 
   it('clears only room-scoped records when switching rooms', () => {
@@ -102,6 +116,35 @@ describe('storage', () => {
     expect(JSON.parse(String(request?.body))).toEqual({ settings: state.settings });
     expect(String(request?.body).length).toBeLessThan(64 * 1024);
     expect(request?.keepalive).toBe(true);
+  });
+
+  it('clears a persisted simplePlay shard with null', async () => {
+    const serverState = defaultState();
+    serverState.simplePlay = {
+      version: 1,
+      templateId: 'counter',
+      templateVersion: 1,
+      attributeId: 'attribute-counter',
+      parameters: { name: '积分' },
+      gifts: { count: [1] },
+      managedFingerprint: 'simple-play-v1-test',
+    };
+    serverState.attributes = [{
+      id: 'attribute-counter', name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '',
+    }];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, request?: RequestInit) => (
+      request?.method === 'PATCH'
+        ? new Response(null, { status: 200 })
+        : Response.json(serverState)
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    await hydrateStateFromServer();
+    const next = { ...loadState(), simplePlay: undefined };
+
+    await saveState(next);
+
+    const [, request] = fetchMock.mock.calls.at(-1) ?? [];
+    expect(JSON.parse(String(request?.body))).toEqual({ simplePlay: null });
   });
 
   it('omits keepalive when the changed shard itself exceeds the browser limit', async () => {
@@ -312,12 +355,22 @@ describe('storage', () => {
       items: [{ giftId: 2, giftName: '子礼物', imageUrl: '2.png', target: 10, received: 7, barStyle: 'progress' }],
       appearance: { ...state.blindBoxDisplay },
     }];
+    state.simplePlay = {
+      version: 1,
+      templateId: 'counter',
+      templateVersion: 1,
+      attributeId: 'attribute-counter',
+      parameters: { name: '积分', amount: 1 },
+      gifts: { count: [1, 2] },
+      managedFingerprint: 'simple-play-v1-test',
+    };
 
     const backup = createConfigBackup(state);
 
-    expect(backup.schemaVersion).toBe(4);
+    expect(backup.schemaVersion).toBe(5);
     expect(backup.giftCatalog.map((gift) => gift.id)).toEqual([1, 2]);
     expect(backup.giftKpiPanels[0].items[0]).not.toHaveProperty('received');
+    expect(backup.simplePlay).toEqual(state.simplePlay);
     expect(backup).not.toHaveProperty('recentGifts');
     expect(backup).not.toHaveProperty('stats');
     expect(backup).not.toHaveProperty('log');
@@ -333,7 +386,7 @@ describe('storage', () => {
     }];
 
     const merged = mergeConfigBackup(current, {
-      schemaVersion: 4,
+      schemaVersion: 5,
       giftKpiPanels: [{
         id: 'target-1', name: '新名称', layout: 'stack',
         items: [{ giftId: 1, giftName: '小花花', imageUrl: '', target: 30, barStyle: 'health' }],
@@ -369,6 +422,51 @@ describe('storage', () => {
     expect(merged.stats).toEqual(current.stats);
     expect(merged.recentGifts).toEqual(current.recentGifts);
     expect(merged.contributions).toEqual(current.contributions);
+  });
+
+  it('imports pre-simple-mode backups as advanced and clears stale simple play metadata', () => {
+    const current = defaultState();
+    current.attributes = [{ id: 'old-simple', name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' }];
+    current.simplePlay = {
+      version: 1,
+      templateId: 'overtime',
+      templateVersion: 2,
+      attributeId: 'old-simple',
+      parameters: { name: '加班时间', maxSeconds: 0 },
+      gifts: { overtime: [1] },
+      managedFingerprint: 'simple-play-v1-old',
+    };
+
+    const merged = mergeConfigBackup(current, {
+      schemaVersion: 4,
+      settings: { theme: 'dark' },
+      attributes: [{ id: 'legacy-score', name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' }],
+      rules: [],
+    });
+
+    expect(merged.settings.configExperience).toBe('advanced');
+    expect(merged.simplePlay).toBeUndefined();
+    expect(merged.attributes[0].id).toBe('legacy-score');
+  });
+
+  it('drops simple play metadata when its managed attribute no longer exists', () => {
+    const current = defaultState();
+    const merged = mergeConfigBackup(current, {
+      schemaVersion: 5,
+      settings: { ...current.settings, configExperience: 'simple' },
+      attributes: [],
+      simplePlay: {
+        version: 1,
+        templateId: 'counter',
+        templateVersion: 1,
+        attributeId: 'missing',
+        parameters: { name: '积分' },
+        gifts: { count: [1] },
+        managedFingerprint: 'simple-play-v1-missing',
+      },
+    });
+
+    expect(merged.simplePlay).toBeUndefined();
   });
 
   it('rejects backups created by a newer schema', () => {

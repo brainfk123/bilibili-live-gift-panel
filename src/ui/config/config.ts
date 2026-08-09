@@ -98,6 +98,23 @@ import {
 } from './config-route';
 import { createConfigShell } from './config-shell';
 import { buildGiftPickerCatalog, createGiftPicker, type GiftPicker } from './gift-picker';
+import {
+  getSimplePlayAttribute,
+  isSimplePlayConfigurationIntact,
+  isSimplePlayManagedRule,
+  isSimplePlayManagedTimer,
+  planSimplePlayTransition,
+  simplePlayDraftFromState,
+  type SimplePlayDraft,
+} from '../../simple-play';
+import {
+  createSimpleMode,
+  createSimpleModeSession,
+  formatSimpleCurrentValue,
+  type SimpleModeCounts,
+  type SimpleModeSession,
+  type SimplePlayView,
+} from './simple-mode';
 
 interface SelectedGiftRule {
   gift: GiftInfo;
@@ -212,6 +229,9 @@ export function mountConfig(root: HTMLElement): void {
   let leaderboardBlindBoxGiftId: number | undefined;
   let activePage = parseConfigPage(globalThis.location?.search);
   let activePageIsExplicit = new URLSearchParams(globalThis.location?.search ?? '').has('page');
+  let simpleModeSession: SimpleModeSession | undefined;
+
+  const isSimpleMode = (): boolean => state.settings.configExperience === 'simple';
 
   const shell = el('div', { class: 'wizard-shell config-shell' });
   const header = el('header', { class: 'app-header' });
@@ -229,19 +249,27 @@ export function mountConfig(root: HTMLElement): void {
   const programSettingsToggle = el('button', { class: 'theme-toggle program-settings-toggle', type: 'button' }, [createHeaderActionIcon('settings')]) as HTMLButtonElement;
   programSettingsToggle.setAttribute('aria-label', '程序与数据');
   programSettingsToggle.setAttribute('title', '程序与数据');
+  const fullConfigToggle = el('button', { class: 'btn ghost simple-header-advanced', type: 'button', text: '完整配置' }) as HTMLButtonElement;
+  fullConfigToggle.onclick = () => switchConfigExperience('advanced');
   const status = el('div', { class: 'app-status' });
   const headerActions = el('div', { class: 'app-header-actions' });
-  headerActions.append(guideToggle, changelogToggle, programSettingsToggle, themeToggle, status);
+  headerActions.append(fullConfigToggle, guideToggle, changelogToggle, programSettingsToggle, themeToggle, status);
   header.append(brand, headerActions);
 
-  const configShell = createConfigShell(activePage, (page) => navigateToPage(page));
+  const configShell = createConfigShell(activePage, (page) => navigateToPage(page), isSimpleMode());
   const content = configShell.content;
   shell.append(header, configShell.element);
   root.replaceChildren(shell);
 
   function applyActivePage(): void {
-    configShell.activate(activePage);
-    activePageDescription.textContent = configPageDefinition(activePage).description;
+    if (isSimpleMode()) {
+      configShell.setSimpleMode(true);
+      activePageDescription.textContent = '简单模式 · 一台玩法就能开播';
+    } else {
+      configShell.setSimpleMode(false);
+      configShell.activate(activePage);
+      activePageDescription.textContent = configPageDefinition(activePage).description;
+    }
   }
 
   function navigateToPage(
@@ -532,6 +560,12 @@ export function mountConfig(root: HTMLElement): void {
         card.setAttribute('aria-label', `属性“${attribute.name}”，当前值 ${formatValue(attribute.value, attribute)}。悬停或聚焦查看详细设置。`);
       }
     }
+    const simpleValue = root.querySelector<HTMLElement>('.simple-current-value');
+    const simpleAttribute = getSimplePlayAttribute(state);
+    if (simpleValue && simpleAttribute && state.simplePlay) {
+      simpleValue.textContent = formatSimpleCurrentValue(state.simplePlay.templateId, simpleAttribute.value);
+      simpleValue.setAttribute('aria-label', `${simpleAttribute.name}当前值 ${simpleValue.textContent}`);
+    }
   }
 
   function appendOrReplaceSection(section: HTMLElement, selector: string, replaceExisting: boolean): void {
@@ -798,6 +832,7 @@ export function mountConfig(root: HTMLElement): void {
     activeGuide?.dispose();
     activeGuide = null;
     updateTrainingToggle();
+    if (isSimpleMode()) return;
     const lesson = guideDismissed ? null : activeTutorialLesson();
     if (navigate && lesson && !editorOpen && !activePageIsExplicit) {
       navigateToPage(configPageForTutorialLesson(lesson), {
@@ -855,6 +890,16 @@ export function mountConfig(root: HTMLElement): void {
     activeGuide = null;
     configShell.clearWorkspaces();
     renderHeaderStatus();
+    const simple = isSimpleMode();
+    root.classList.toggle('is-simple-experience', simple);
+    fullConfigToggle.hidden = !simple;
+    guideToggle.hidden = simple;
+    configShell.setSimpleMode(simple);
+    if (simple) {
+      renderSimpleExperience();
+      applyActivePage();
+      return;
+    }
     renderOverviewDashboard();
     renderConnectionWorkspace();
     renderAttributesWorkspace();
@@ -866,6 +911,163 @@ export function mountConfig(root: HTMLElement): void {
     renderGiftHistory();
     applyActivePage();
     renderGuide();
+  }
+
+  function switchConfigExperience(experience: AppState['settings']['configExperience']): void {
+    if (state.settings.configExperience === experience) return;
+    state.settings.configExperience = experience;
+    simpleModeSession = undefined;
+    guideDismissed = experience === 'simple' || !state.settings.showTutorial;
+    save();
+    render();
+  }
+
+  function renderSimpleExperience(): void {
+    const attribute = getSimplePlayAttribute(state);
+    const draft = simplePlayDraftFromState(state);
+    const attributeName = attribute?.name ?? '';
+    const managedRules = state.simplePlay && attributeName
+      ? state.rules.filter((rule) => rule.attributeName === attributeName && isSimplePlayManagedRule(rule, state.simplePlay!))
+      : [];
+    const managedTimers = state.simplePlay && attributeName
+      ? state.timerRules.filter((rule) => rule.attributeName === attributeName && isSimplePlayManagedTimer(rule, state.simplePlay!))
+      : [];
+    const extra: SimpleModeCounts = {
+      attributes: Math.max(0, state.attributes.length - (attribute ? 1 : 0)),
+      rules: Math.max(0, state.rules.length - managedRules.length),
+      timers: Math.max(0, state.timerRules.length - managedTimers.length),
+      activities: state.activities.length,
+      scenes: state.displayScenes.length,
+    };
+    const play: SimplePlayView | undefined = state.simplePlay && attribute && draft ? {
+      draft,
+      attributeName: attribute.name,
+      currentValue: attribute.value,
+      enabled: managedRules.every((rule) => rule.enabled !== false)
+        && managedTimers.every((rule) => rule.enabled),
+      fingerprintChanged: !isSimplePlayConfigurationIntact(state),
+    } : undefined;
+    simpleModeSession ??= createSimpleModeSession(play, state.roomId);
+    const simple = createSimpleMode({
+      roomId: state.roomId,
+      connectionState,
+      loggedIn: biliAuth.state === 'logged_in',
+      gifts: buildGiftPickerCatalog(state, roomGiftCatalog).gifts,
+      ...(play ? { play } : {}),
+      session: simpleModeSession,
+      extra,
+      onConnect: connectSimpleRoom,
+      onLogin: openLoginModal,
+      onSave: saveSimplePlay,
+      onToggleEnabled: toggleSimplePlay,
+      onReset: resetSimplePlay,
+      onCopyObs: async () => {
+        const currentAttribute = getSimplePlayAttribute(state);
+        if (!currentAttribute) throw new Error('请先保存玩法');
+        await copyText(attributeDisplayUrl(location.origin, currentAttribute.name));
+        toast('OBS 链接已复制', root);
+      },
+      getObsUrl: () => {
+        const currentAttribute = getSimplePlayAttribute(state);
+        return currentAttribute ? attributeDisplayUrl(location.origin, currentAttribute.name) : undefined;
+      },
+      previewTransition: (nextDraft) => planSimplePlayTransition(state, nextDraft).impact,
+      onRefresh: render,
+      onSwitchAdvanced: () => switchConfigExperience('advanced'),
+      onDone: () => {
+        simpleModeSession = undefined;
+        render();
+      },
+    });
+    configShell.simpleContent.append(simple.element);
+    renderRoomAnchorHosts();
+  }
+
+  async function connectSimpleRoom(roomId: string): Promise<void> {
+    if (!confirmRoomSwitch(roomId)) throw new Error('已取消切换直播间');
+    const previousState = state;
+    const previousConnection = connectionState;
+    const switchingRooms = isRoomSwitch(roomId);
+    state = switchingRooms ? clearRoomScopedRecords({ ...state, roomId }) : { ...state, roomId };
+    if (switchingRooms) {
+      roomGiftCatalogRoomId = '';
+      roomGiftCatalog = [];
+      roomAnchorInfo = null;
+      roomAnchorInfoRoomId = '';
+    }
+    connectionState = 'connecting';
+    renderHeaderStatus();
+    try {
+      await saveAndWait();
+      void refreshBiliAuth();
+      void refreshRoomAnchorInfo(true);
+      await refreshRuntime(true);
+      if ((connectionState as RuntimeConnectionState) === 'error') {
+        throw new Error('直播间连接失败，请检查房间号或网络后重试');
+      }
+      void refreshRoomGiftCatalog(true);
+    } catch (error) {
+      state = previousState;
+      connectionState = previousConnection;
+      renderHeaderStatus();
+      throw error;
+    }
+  }
+
+  async function saveSimplePlay(draft: SimplePlayDraft): Promise<void> {
+    const previousState = state;
+    const workingState: AppState = {
+      ...state,
+      giftCatalog: state.giftCatalog.map((gift) => ({ ...gift })),
+    };
+    const selectedGiftIds = new Set(Object.values(draft.gifts).flat());
+    const availableGifts = buildGiftPickerCatalog(state, roomGiftCatalog).gifts;
+    for (const gift of availableGifts) {
+      if (selectedGiftIds.has(gift.id)) upsertGiftCatalog(workingState, gift);
+    }
+    const transition = planSimplePlayTransition(workingState, draft);
+    state = transition.nextState;
+    try {
+      await saveAndWait();
+    } catch (error) {
+      state = previousState;
+      throw error;
+    }
+  }
+
+  async function toggleSimplePlay(enabled: boolean): Promise<void> {
+    const attribute = getSimplePlayAttribute(state);
+    if (!attribute) throw new Error('简单玩法不存在');
+    const previousRules = state.rules;
+    const previousTimers = state.timerRules;
+    const simplePlay = state.simplePlay;
+    if (!simplePlay) throw new Error('简单玩法不存在');
+    state.rules = state.rules.map((rule) => (
+      rule.attributeName === attribute.name && isSimplePlayManagedRule(rule, simplePlay) ? { ...rule, enabled } : rule
+    ));
+    state.timerRules = state.timerRules.map((rule) => (
+      rule.attributeName === attribute.name && isSimplePlayManagedTimer(rule, simplePlay) ? { ...rule, enabled } : rule
+    ));
+    try {
+      await saveAndWait();
+    } catch (error) {
+      state.rules = previousRules;
+      state.timerRules = previousTimers;
+      throw error;
+    }
+  }
+
+  async function resetSimplePlay(): Promise<void> {
+    const attribute = getSimplePlayAttribute(state);
+    if (!attribute) throw new Error('简单玩法不存在');
+    const previous = attribute.value;
+    attribute.value = 0;
+    try {
+      await saveAndWait();
+    } catch (error) {
+      attribute.value = previous;
+      throw error;
+    }
   }
 
   function sectionHeading(kicker: string, title: string, description: string): HTMLElement {
@@ -1082,6 +1284,7 @@ export function mountConfig(root: HTMLElement): void {
               biliAuth = next;
               close();
               render();
+              void refreshRoomGiftCatalog(true);
               toast(`已登录为 ${next.uname || `UID ${next.uid}`}`, root);
               return;
             }
@@ -4464,6 +4667,35 @@ export function mountConfig(root: HTMLElement): void {
       closeButton,
     ]);
     const body = el('div', { class: 'program-settings-body' });
+    const experienceCard = el('section', { class: 'workspace-card advanced-card experience-settings-card' }, [
+      el('h3', { text: '配置模式' }),
+      el('p', { class: 'advanced-copy', text: '简单模式只管理一台常用玩法；完整配置提供全部属性、活动和 OBS 工具。切换不会删除任何配置。' }),
+    ]);
+    const experienceChoices = el('div', { class: 'experience-settings-choices', role: 'group', ariaLabel: '配置模式' } as any);
+    ([
+      ['simple', '简单模式', '一台玩法，四步开播'],
+      ['advanced', '完整配置', '查看和编辑全部功能'],
+    ] as const).forEach(([experience, title, description]) => {
+      const button = el('button', {
+        class: `experience-setting-option${state.settings.configExperience === experience ? ' is-selected' : ''}`,
+        type: 'button',
+        ariaPressed: String(state.settings.configExperience === experience),
+      } as any) as HTMLButtonElement;
+      button.append(
+        el('span', {}, [el('strong', { text: title }), el('small', { text: description })]),
+        el('span', { class: 'experience-setting-check', text: state.settings.configExperience === experience ? '✓' : '' }),
+      );
+      button.onclick = () => {
+        if (state.settings.configExperience === experience) return;
+        state.settings.configExperience = experience;
+        guideDismissed = experience === 'simple' || !state.settings.showTutorial;
+        save();
+        close();
+        render();
+      };
+      experienceChoices.append(button);
+    });
+    experienceCard.append(experienceChoices);
     const dataCard = el('section', { class: 'workspace-card advanced-card data-settings-card' });
     dataCard.append(
       el('h3', { text: '配置与数据' }),
@@ -4609,7 +4841,7 @@ export function mountConfig(root: HTMLElement): void {
     localUpdateSync();
 
     dataCard.append(updateCard);
-    body.append(dataCard);
+    body.append(experienceCard, dataCard);
     dialog.append(header, body);
     overlay.append(dialog);
     root.append(overlay);
@@ -4692,6 +4924,7 @@ function configStructureSignature(state: AppState): string {
     rules: state.rules,
     timerRules: state.timerRules,
     formulaPresets: state.formulaPresets,
+    simplePlay: state.simplePlay,
     settings: state.settings,
     giftCatalog: state.giftCatalog,
   });
@@ -4735,6 +4968,30 @@ function upsertGiftCatalog(state: AppState, gift: GiftInfo): void {
   const index = state.giftCatalog.findIndex((item) => item.id === gift.id);
   if (index >= 0) state.giftCatalog[index] = { ...gift };
   else state.giftCatalog.push({ ...gift });
+}
+
+async function copyText(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // Fall through to the selection-based copy path for older WebViews or
+      // clipboard permission failures.
+    }
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.readOnly = true;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.append(textarea);
+  textarea.select();
+  try {
+    if (!document.execCommand?.('copy')) throw new Error('浏览器未允许复制');
+  } finally {
+    textarea.remove();
+  }
 }
 
 function ensureRuleGiftCatalog(state: AppState): boolean {

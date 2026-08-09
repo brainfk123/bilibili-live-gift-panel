@@ -265,6 +265,143 @@ func TestConfigStoreMigratesMissingFieldsWithDefaults(t *testing.T) {
 	}
 }
 
+func TestConfigExperienceDefaultsAndLegacyMigration(t *testing.T) {
+	if experience := defaultAppState().Settings.ConfigExperience; experience != "simple" {
+		t.Fatalf("new config experience = %q, want simple", experience)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := fmt.Sprintf(`{"schemaVersion":%d,"settings":{"theme":"light"}}`, stateShardSchemaVersion)
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &configStore{path: path}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Settings.ConfigExperience != "advanced" {
+		t.Fatalf("legacy config experience = %q, want advanced", state.Settings.ConfigExperience)
+	}
+}
+
+func TestConfigExperienceNormalizesInvalidValueToAdvanced(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(`{
+		"settings":{"configExperience":"unexpected"}
+	}`)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", response.Code, response.Body.String())
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Settings.ConfigExperience != "advanced" {
+		t.Fatalf("normalized config experience = %q, want advanced", state.Settings.ConfigExperience)
+	}
+}
+
+func TestConfigStorePersistsAndPatchesSimplePlay(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	store := &configStore{path: path}
+	payload := `{
+		"settings":{"configExperience":"simple"},
+		"attributes":[
+			{"id":"attribute-overtime","name":"加班时间","value":0,"unit":"seconds","format":"hhmmss","decimals":0,"suffix":""},
+			{"id":"attribute-score","name":"积分","value":0,"unit":"none","format":"number","decimals":0,"suffix":""}
+		],
+		"simplePlay":{
+			"version":1,
+			"templateId":"overtime",
+			"templateVersion":2,
+			"attributeId":"attribute-overtime",
+			"parameters":{"initialSeconds":300,"allowNegative":false},
+			"gifts":{"add":[1,2],"reset":[3]},
+			"overtimeGiftActions":[
+				{"giftId":1,"operation":"add","seconds":60},
+				{"giftId":3,"operation":"double","seconds":999}
+			],
+			"managedFingerprint":"managed-v1"
+		}
+	}`
+	put := httptest.NewRecorder()
+	store.handle(put, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if put.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", put.Code, put.Body.String())
+	}
+
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SimplePlay == nil || state.SimplePlay.TemplateID != "overtime" || state.SimplePlay.AttributeID != "attribute-overtime" {
+		t.Fatalf("simplePlay was not persisted: %#v", state.SimplePlay)
+	}
+	if got := state.SimplePlay.Parameters["initialSeconds"]; got != float64(300) {
+		t.Fatalf("simplePlay parameter = %#v, want 300", got)
+	}
+	if len(state.SimplePlay.Gifts["add"]) != 2 || len(state.SimplePlay.OvertimeGiftActions) != 2 {
+		t.Fatalf("simplePlay gifts/actions were not preserved: %#v", state.SimplePlay)
+	}
+	if state.SimplePlay.OvertimeGiftActions[0].Seconds == nil || *state.SimplePlay.OvertimeGiftActions[0].Seconds != 60 {
+		t.Fatalf("add seconds were not preserved: %#v", state.SimplePlay.OvertimeGiftActions[0])
+	}
+	if state.SimplePlay.OvertimeGiftActions[1].Seconds != nil {
+		t.Fatalf("double seconds were not normalized away: %#v", state.SimplePlay.OvertimeGiftActions[1])
+	}
+	configData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(configData), `"simplePlay"`) {
+		t.Fatalf("simplePlay was not written to the main config shard: %s", configData)
+	}
+
+	patch := httptest.NewRecorder()
+	store.handle(patch, httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(`{
+		"simplePlay":{
+			"version":1,"templateId":"counter","templateVersion":1,"attributeId":"attribute-score",
+			"parameters":{"initialValue":0},"gifts":{"increment":[9]},"managedFingerprint":"managed-v2"
+		}
+	}`)))
+	if patch.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, body = %s", patch.Code, patch.Body.String())
+	}
+	state, err = store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SimplePlay == nil || state.SimplePlay.TemplateID != "counter" || state.SimplePlay.ManagedFingerprint != "managed-v2" {
+		t.Fatalf("simplePlay PATCH was not persisted: %#v", state.SimplePlay)
+	}
+	if state.Settings.ConfigExperience != "simple" {
+		t.Fatalf("simplePlay PATCH changed config experience to %q", state.Settings.ConfigExperience)
+	}
+}
+
+func TestConfigStoreRejectsSimplePlayWithMissingAttribute(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	payload := `{
+		"settings":{"configExperience":"simple"},
+		"simplePlay":{
+			"version":1,"templateId":"counter","templateVersion":1,"attributeId":"missing",
+			"parameters":{"name":"积分"},"gifts":{"count":[1]},"managedFingerprint":"managed-v1"
+		}
+	}`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("PUT status = %d, want %d, body = %s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "引用的属性不存在") {
+		t.Fatalf("unexpected error: %s", response.Body.String())
+	}
+}
+
 func TestConfigStoreRefusesNewerSchemaWithoutOverwriting(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

@@ -183,6 +183,8 @@ func applyClientStatePatch(state *appState, fields map[string]json.RawMessage) e
 			target = &state.FormulaPresets
 		case "settings":
 			target = &state.Settings
+		case "simplePlay":
+			target = &state.SimplePlay
 		case "giftCatalog":
 			target = &state.GiftCatalog
 		case "recentGifts":
@@ -210,6 +212,54 @@ func applyClientStatePatch(state *appState, fields map[string]json.RawMessage) e
 }
 
 func validateAppState(state appState) error {
+	if state.Settings.ConfigExperience != "simple" && state.Settings.ConfigExperience != "advanced" {
+		return fmt.Errorf("配置体验模式无效")
+	}
+	if state.SimplePlay != nil {
+		if state.SimplePlay.Version != 1 {
+			return fmt.Errorf("简单模式配置版本无效")
+		}
+		if state.SimplePlay.TemplateID != "overtime" && state.SimplePlay.TemplateID != "counter" && state.SimplePlay.TemplateID != "goal" {
+			return fmt.Errorf("简单模式模板无效：%s", state.SimplePlay.TemplateID)
+		}
+		if state.SimplePlay.TemplateVersion <= 0 {
+			return fmt.Errorf("简单模式模板版本必须大于 0")
+		}
+		if state.SimplePlay.TemplateID == "" || state.SimplePlay.AttributeID == "" || state.SimplePlay.ManagedFingerprint == "" {
+			return fmt.Errorf("简单模式配置的模板、属性和托管指纹不能为空")
+		}
+		attributeExists := false
+		for _, attribute := range state.Attributes {
+			if strings.TrimSpace(attribute.ID) == state.SimplePlay.AttributeID {
+				attributeExists = true
+				break
+			}
+		}
+		if !attributeExists {
+			return fmt.Errorf("简单模式配置引用的属性不存在：%s", state.SimplePlay.AttributeID)
+		}
+		for _, giftIDs := range state.SimplePlay.Gifts {
+			for _, giftID := range giftIDs {
+				if giftID <= 0 {
+					return fmt.Errorf("简单模式配置的礼物 ID 必须大于 0")
+				}
+			}
+		}
+		for _, action := range state.SimplePlay.OvertimeGiftActions {
+			if action.GiftID <= 0 {
+				return fmt.Errorf("简单模式加班礼物动作的礼物 ID 必须大于 0")
+			}
+			switch action.Operation {
+			case "add", "subtract":
+				if action.Seconds == nil || *action.Seconds <= 0 {
+					return fmt.Errorf("简单模式加减时动作的秒数必须大于 0")
+				}
+			case "double", "halve", "reset":
+			default:
+				return fmt.Errorf("简单模式加班礼物动作无效：%s", action.Operation)
+			}
+		}
+	}
 	attributeNames := make(map[string]struct{}, len(state.Attributes))
 	for _, attribute := range state.Attributes {
 		name := strings.TrimSpace(attribute.Name)

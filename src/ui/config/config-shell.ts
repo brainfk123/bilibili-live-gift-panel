@@ -4,8 +4,10 @@ import { CONFIG_PAGES, ConfigPageIcon, ConfigPageId } from './config-route';
 export interface ConfigShell {
   element: HTMLElement;
   content: HTMLElement;
+  simpleContent: HTMLElement;
   workspace: (page: ConfigPageId) => HTMLElement;
   activate: (page: ConfigPageId) => void;
+  setSimpleMode: (simple: boolean) => void;
   clearWorkspaces: () => void;
 }
 
@@ -46,11 +48,17 @@ function createNavigationIcon(kind: ConfigPageIcon): HTMLElement {
 export function createConfigShell(
   activePage: ConfigPageId,
   onNavigate: (page: ConfigPageId) => void,
+  simpleMode = false,
 ): ConfigShell {
   const navigation = el('nav', { class: 'config-navigation', ariaLabel: '配置页面' } as any);
   const buttons = new Map<ConfigPageId, HTMLButtonElement>();
   const workspaces = new Map<ConfigPageId, HTMLElement>();
   const content = el('main', { class: 'wizard-content config-page' });
+  const simpleContent = el('div', {
+    class: 'simple-mode-workspace',
+    role: 'region',
+    ariaLabel: '简单模式工作区',
+  } as any);
 
   for (const page of CONFIG_PAGES) {
     const button = el('button', { class: 'config-nav-button', type: 'button' }) as HTMLButtonElement;
@@ -75,6 +83,7 @@ export function createConfigShell(
     workspaces.set(page.id, workspace);
     content.append(workspace);
   }
+  content.append(simpleContent);
 
   const activate = (page: ConfigPageId): void => {
     content.dataset.activePage = page;
@@ -92,21 +101,41 @@ export function createConfigShell(
   };
   activate(activePage);
 
-  const element = el('div', { class: 'config-workspace-layout' }, [
-    el('aside', { class: 'config-sidebar' }, [
+  const sidebar = el('aside', { class: 'config-sidebar' }, [
       navigation,
       el('p', { class: 'config-sidebar-note', text: '配置会自动保存，关闭页面不会中断直播监听。' }),
-    ]),
+    ]);
+  const element = el('div', { class: 'config-workspace-layout' }, [
+    sidebar,
     content,
   ]);
+
+  const setSimpleMode = (simple: boolean): void => {
+    element.classList.toggle('is-simple-mode', simple);
+    sidebar.hidden = simple;
+    sidebar.setAttribute('aria-hidden', String(simple));
+    simpleContent.hidden = !simple;
+    simpleContent.setAttribute('aria-hidden', String(!simple));
+    for (const workspace of workspaces.values()) {
+      if (simple) {
+        workspace.hidden = true;
+        workspace.setAttribute('aria-hidden', 'true');
+      }
+    }
+    if (!simple) activate(activePage);
+  };
+  setSimpleMode(simpleMode);
 
   return {
     element,
     content,
+    simpleContent,
     workspace: (page) => workspaces.get(page) as HTMLElement,
     activate,
+    setSimpleMode,
     clearWorkspaces: () => {
       for (const workspace of workspaces.values()) workspace.replaceChildren();
+      simpleContent.replaceChildren();
     },
   };
 }

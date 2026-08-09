@@ -1583,6 +1583,204 @@ body.config-mode::-webkit-scrollbar-corner,
   align-items: start;
   gap: 24px;
 }
+.config-root .config-workspace-layout.is-simple-mode { display: block; max-width: 1120px; margin: 0 auto; }
+.config-root .config-workspace-layout.is-simple-mode .config-sidebar { display: none; }
+.config-root .config-workspace-layout.is-simple-mode .config-page { width: 100%; }
+.config-root .simple-mode-workspace[hidden] { display: none; }
+
+/* Four-step setup and persistent dashboard for simple configuration mode. */
+.config-root .simple-mode { display: grid; gap: 22px; width: 100%; }
+.config-root .simple-wizard-header,
+.config-root .simple-home-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 22px;
+}
+.config-root .simple-wizard-header h1,
+.config-root .simple-home-header h1 { margin-top: 5px; }
+.config-root .simple-wizard-header p,
+.config-root .simple-home-header p { margin-top: 7px; color: var(--text-dim); }
+.config-root .simple-header-advanced,
+.config-root .simple-switch-advanced { white-space: nowrap; }
+.config-root .simple-wizard-progress {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--card);
+  list-style: none;
+}
+.config-root .simple-wizard-progress li {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+  padding: 13px 16px;
+  border-bottom: 3px solid transparent;
+  color: var(--text-dim);
+}
+.config-root .simple-wizard-progress li > span {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 25px;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  font-size: var(--type-meta);
+  font-weight: 800;
+}
+.config-root .simple-wizard-progress li strong { overflow: hidden; font-size: var(--type-meta); text-overflow: ellipsis; white-space: nowrap; }
+.config-root .simple-wizard-progress li.is-active { border-color: var(--accent); color: var(--text); background: var(--accent-soft); }
+.config-root .simple-wizard-progress li.is-active > span { border-color: var(--accent); background: var(--accent); color: var(--button-action-text); }
+.config-root .simple-wizard-progress li.is-done { color: var(--success-text); }
+.config-root .simple-wizard-progress li.is-done > span { border-color: var(--success-border); background: var(--success-soft); }
+.config-root .simple-wizard-body { display: grid; gap: 20px; }
+.config-root .simple-room-grid,
+.config-root .simple-confirm-grid,
+.config-root .simple-home-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.config-root .simple-step-card,
+.config-root .simple-login-recommendation,
+.config-root .simple-confirm-card,
+.config-root .simple-obs-preview,
+.config-root .simple-live-card,
+.config-root .simple-detail-card,
+.config-root .simple-notice-card,
+.config-root .simple-gift-section {
+  min-width: 0;
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+.config-root .simple-step-card,
+.config-root .simple-login-recommendation { display: grid; align-content: start; gap: 12px; }
+.config-root .simple-step-card p,
+.config-root .simple-step-card small,
+.config-root .simple-login-recommendation p,
+.config-root .simple-login-recommendation small,
+.config-root .simple-confirm-card p,
+.config-root .simple-obs-preview p,
+.config-root .simple-detail-card p,
+.config-root .simple-notice-card p,
+.config-root .simple-gift-section > div:first-child p { color: var(--text-dim); }
+.config-root .simple-step-number,
+.config-root .simple-login-mark { width: max-content; border-radius: 999px; padding: 4px 9px; background: var(--accent-soft); color: var(--accent-text); font-size: var(--type-meta); font-weight: 800; }
+.config-root .simple-login-recommendation { border-color: color-mix(in srgb, var(--accent) 52%, var(--border)); background: linear-gradient(135deg, var(--accent-soft), var(--card) 70%); }
+.config-root .simple-room-input { width: 100%; margin-top: 4px; }
+.config-root .simple-room-login { justify-self: start; }
+.config-root .simple-step-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.config-root .simple-wizard-message { min-height: 20px; color: var(--text-dim); text-align: center; }
+.config-root .simple-wizard-message.is-error { color: var(--danger-text); }
+.config-root .simple-wizard-extra { padding: 10px 13px; border: 1px solid var(--border); border-radius: 11px; background: var(--bg-soft); color: var(--text-dim); font-size: var(--type-meta); }
+.config-root .simple-template-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 13px; }
+.config-root .simple-template-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 12px;
+  min-height: 180px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--card);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.config-root .simple-template-card:hover { border-color: var(--border-strong); transform: translateY(-2px); }
+.config-root .simple-template-card.is-selected { border-color: var(--accent); background: linear-gradient(145deg, var(--accent-soft), var(--card) 70%); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
+.config-root .simple-template-icon { display: grid; width: 42px; height: 42px; place-items: center; border-radius: 13px; background: var(--accent-soft); color: var(--accent-text); font-size: 22px; font-weight: 900; }
+.config-root .simple-template-card > strong { align-self: center; font-size: var(--type-title); }
+.config-root .simple-template-card > p { grid-column: 1 / -1; color: var(--text-dim); }
+.config-root .simple-template-select { grid-column: 1 / -1; align-self: end; color: var(--accent-text); font-size: var(--type-meta); font-weight: 800; }
+.config-root .simple-parameter-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.config-root .simple-parameter { margin: 0; padding: 17px; border: 1px solid var(--border); border-radius: 14px; background: var(--card); }
+.config-root .simple-input-with-unit { display: grid; grid-template-columns: minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--input-bg); }
+.config-root .simple-input-with-unit .field-input { border: 0; border-radius: 0; }
+.config-root .simple-input-with-unit > span { display: flex; align-items: center; padding: 0 12px; border-left: 1px solid var(--border); color: var(--text-dim); font-size: var(--type-meta); }
+.config-root .simple-duration-readable { display: block; min-height: 18px; margin-top: 7px; color: var(--accent-text); }
+.config-root .simple-gift-section { display: grid; gap: 13px; }
+.config-root .simple-gift-picker-grid { max-height: 320px; }
+.config-root .simple-overtime-actions { display: grid; gap: 9px; padding-top: 16px; border-top: 1px solid var(--border); }
+.config-root .simple-overtime-action-row { display: grid; grid-template-columns: minmax(170px, 1fr) minmax(120px, .55fr) minmax(220px, 1fr); align-items: start; gap: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-soft); }
+.config-root .simple-action-gift { display: flex; min-width: 0; min-height: 44px; align-items: center; gap: 7px; }
+.config-root .simple-gift-chip { display: flex; min-width: 0; align-items: center; gap: 8px; }
+.config-root .simple-gift-chip img { width: 34px; height: 34px; flex: 0 0 34px; border-radius: 9px; background: var(--image-bg); object-fit: contain; }
+.config-root .simple-gift-chip strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.config-root .simple-action-amount { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 7px; }
+.config-root .simple-action-amount .simple-duration-readable { grid-column: 1 / -1; margin-top: 0; }
+.config-root .simple-anonymous-warning { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; border: 1px solid var(--warning); border-radius: 12px; color: var(--warning-text); }
+.config-root .simple-confirm-card { display: grid; align-content: start; gap: 11px; }
+.config-root .simple-rule-summary { display: grid; gap: 7px; padding-left: 20px; color: var(--text-dim); }
+.config-root .simple-obs-preview { text-align: center; }
+.config-root .simple-real-preview { display: grid; gap: 12px; margin-bottom: 16px; padding: 26px; border: 1px solid color-mix(in srgb, var(--accent) 58%, transparent); border-radius: 17px; background: #15171f; color: #fff; }
+.config-root .simple-real-preview > span:first-child { font-weight: 700; }
+.config-root .simple-real-preview > strong { color: #fb7299; font-size: clamp(30px, 6vw, 52px); font-variant-numeric: tabular-nums; }
+.config-root .simple-real-preview-frame-shell { position: relative; width: 100%; aspect-ratio: 16 / 9; margin-bottom: 16px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--accent) 58%, transparent); border-radius: 17px; background: #15171f; }
+.config-root .simple-real-preview-frame { position: absolute; top: 0; left: 0; width: 200%; height: 200%; border: 0; background: #15171f; transform: scale(.5); transform-origin: top left; }
+.config-root .simple-preview-meter { display: block; height: 11px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.16); }
+.config-root .simple-preview-meter > span { display: block; width: 68%; height: 100%; background: #fb7299; }
+.config-root .simple-obs-url-field { display: grid; gap: 7px; margin-top: 16px; }
+.config-root .simple-obs-url { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.config-root .simple-saved-actions .simple-confirm-copy { min-width: 190px; }
+.config-root .simple-home-grid { grid-template-columns: minmax(0, 1.45fr) minmax(270px, .55fr); align-items: start; }
+.config-root .simple-home-main,
+.config-root .simple-home-aside { display: grid; gap: 14px; }
+.config-root .simple-live-card { display: grid; gap: 18px; overflow: hidden; background: linear-gradient(145deg, var(--accent-soft), var(--card) 60%); }
+.config-root .simple-live-heading { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; }
+.config-root .simple-live-heading > div span { color: var(--text-dim); font-size: var(--type-meta); }
+.config-root .simple-state-badge { border-radius: 999px; padding: 5px 10px; background: var(--warm-soft); color: var(--warning-text); font-size: var(--type-meta); font-weight: 800; }
+.config-root .simple-state-badge.is-running { background: var(--success-soft); color: var(--success-text); }
+.config-root .simple-value-panel { display: grid; place-items: center; min-height: 180px; border: 1px solid var(--border); border-radius: 16px; background: var(--bg-soft); }
+.config-root .simple-value-panel small { color: var(--text-dim); }
+.config-root .simple-current-value { font-size: clamp(40px, 8vw, 76px); font-variant-numeric: tabular-nums; letter-spacing: .025em; }
+.config-root .simple-primary-actions,
+.config-root .simple-secondary-actions { display: flex; flex-wrap: wrap; gap: 9px; }
+.config-root .simple-primary-actions .simple-copy-obs { margin-left: auto; }
+.config-root .simple-reset.is-confirming,
+.config-root .simple-replace.is-confirming,
+.config-root .simple-adjust.is-confirming { border-color: var(--danger); color: var(--danger-text); }
+.config-root .simple-detail-card h3,
+.config-root .simple-notice-card strong { display: block; margin-bottom: 8px; }
+.config-root .simple-notice-card .btn { margin-top: 13px; }
+.config-root .simple-notice-card.is-warning { border-color: var(--warning); }
+.config-root .simple-notice-card.is-login { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.config-root .experience-settings-card { margin-bottom: 16px; }
+.config-root .experience-settings-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.config-root .experience-setting-option { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 13px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-soft); color: var(--text); text-align: left; cursor: pointer; }
+.config-root .experience-setting-option strong,
+.config-root .experience-setting-option small { display: block; }
+.config-root .experience-setting-option small { margin-top: 3px; color: var(--text-dim); }
+.config-root .experience-setting-option.is-selected { border-color: var(--accent); background: var(--accent-soft); }
+.config-root .experience-setting-check { color: var(--accent-text); font-weight: 900; }
+
+@media (max-width: 800px) {
+  .config-root .simple-room-grid,
+  .config-root .simple-confirm-grid,
+  .config-root .simple-home-grid,
+  .config-root .simple-template-grid { grid-template-columns: 1fr; }
+  .config-root .simple-overtime-action-row { grid-template-columns: minmax(0, 1fr) minmax(110px, .55fr); }
+  .config-root .simple-overtime-action-row .simple-action-amount { grid-column: 1 / -1; }
+}
+
+@media (max-width: 600px) {
+  .config-root .simple-wizard-header,
+  .config-root .simple-home-header { align-items: stretch; flex-direction: column; }
+  .config-root .simple-wizard-progress li { justify-content: center; padding-right: 8px; padding-left: 8px; }
+  .config-root .simple-wizard-progress li strong { display: none; }
+  .config-root .simple-parameter-grid,
+  .config-root .experience-settings-choices { grid-template-columns: 1fr; }
+  .config-root .simple-step-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .config-root .simple-step-actions > :only-child { grid-column: 1 / -1; }
+  .config-root .simple-primary-actions .btn,
+  .config-root .simple-secondary-actions .btn { flex: 1; margin-left: 0; }
+  .config-root .simple-live-heading { grid-template-columns: auto minmax(0, 1fr); }
+  .config-root .simple-state-badge { grid-column: 1 / -1; width: max-content; }
+  .config-root .simple-anonymous-warning { align-items: stretch; flex-direction: column; }
+}
 .config-root .config-sidebar {
   position: sticky;
   top: 18px;
@@ -4576,6 +4774,11 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .template-gift-choice-action { display: grid; place-items: center; width: 27px; height: 27px; border: 1px solid var(--border-strong); border-radius: 50%; color: var(--text-dim); font-size: var(--type-meta); }
 .config-root .template-gift-choice.is-selected .template-gift-choice-action { border-color: var(--accent); background: var(--accent); color: var(--button-action-text); }
 .config-root .template-gift-grid-status { display: block; margin-top: 9px; color: var(--text-dim); text-align: center; }
+.config-root .template-overtime-actions { display: grid; gap: 9px; margin-top: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-soft); }
+.config-root .template-overtime-actions .template-step-heading { margin-bottom: 2px; padding-bottom: 13px; }
+.config-root .template-overtime-action-row { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(120px, .55fr) minmax(220px, 1fr); align-items: center; gap: 10px; padding: 9px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); }
+.config-root .template-overtime-amount { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 7px; }
+.config-root .template-duration-readable { grid-column: 1 / -1; color: var(--accent-text); }
 
 .config-root .template-confirm-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, .82fr); gap: 18px; }
 .config-root .template-confirm-copy,
@@ -4679,6 +4882,8 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .gameplay-template-grid,
   .config-root .template-confirm-grid { grid-template-columns: 1fr; }
   .config-root .template-gift-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .config-root .template-overtime-action-row { grid-template-columns: minmax(150px, 1fr) minmax(110px, .55fr); }
+  .config-root .template-overtime-amount { grid-column: 1 / -1; }
   .config-root .display-theme-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .config-root .enum-mapping-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .config-root .enum-mapping-row > .btn { justify-self: start; }

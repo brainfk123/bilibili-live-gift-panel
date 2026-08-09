@@ -60,6 +60,9 @@ function callFunction(name: string, args: AstNode[], env: Record<string, number>
     case 'ABS':
       if (args.length !== 1) throw err('ABS 需要 1 个参数', 0);
       return Math.abs(evaluate(args[0], env));
+    case 'FLOOR':
+      if (args.length !== 1) throw err('FLOOR 需要 1 个参数', 0);
+      return Math.floor(evaluate(args[0], env));
     case 'RAND':
       if (args.length !== 0) throw err('RAND 不需要参数', 0);
       return Math.random();

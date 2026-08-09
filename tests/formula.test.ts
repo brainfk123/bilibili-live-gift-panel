@@ -22,6 +22,7 @@ describe('formula functions', () => {
   it('MIN', () => expect(evalFormula('MIN(1,5,3)', env)).toBe(1));
   it('ROUND', () => expect(evalFormula('ROUND(1.567, 2)', env)).toBe(1.57));
   it('ABS', () => expect(evalFormula('ABS(-7)', env)).toBe(7));
+  it('FLOOR', () => expect(evalFormula('FLOOR(7/2)', env)).toBe(3));
   it('RAND in [0,1)', () => {
     for (let i = 0; i < 100; i++) {
       const v = evalFormula('RAND()', env);

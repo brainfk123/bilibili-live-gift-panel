@@ -18,6 +18,12 @@ import { defaultState, loadState, resetState, saveState } from '../src/storage';
 import { builtinCatalog } from '../src/gifts/catalog';
 import type { GiftEvent } from '../src/bilibili/messages';
 import type { Attribute } from '../src/types';
+import { planSimplePlayTransition } from '../src/simple-play';
+import {
+  formatSimpleCurrentValue,
+  parseBilibiliRoomId,
+  simpleDraftSummary,
+} from '../src/ui/config/simple-mode';
 
 vi.mock('../src/ui/brand', () => ({
   createBrandIcon: (size = 40, className = 'brand-icon') => {
@@ -262,6 +268,10 @@ beforeEach(async () => {
   storage.clear();
   await saveState(defaultState());
   vi.stubGlobal('location', { origin: 'http://localhost:12450', reload: () => {} });
+  vi.stubGlobal('navigator', { clipboard: { writeText: vi.fn(async () => undefined) } });
+  const advanced = defaultState();
+  advanced.settings.configExperience = 'advanced';
+  await saveState(advanced);
 });
 
 const state = (roomId = '', rules = 0) => ({
@@ -271,6 +281,12 @@ const state = (roomId = '', rules = 0) => ({
     id: `r-${i}`, giftId: 1, attributeName: '加班时间', formula: '60',
   })),
 } as any);
+
+function defaultAdvancedState() {
+  const result = defaultState();
+  result.settings.configExperience = 'advanced';
+  return result;
+}
 
 describe('wizard progress', () => {
   it('starts with no default attributes', () => {
@@ -386,7 +402,7 @@ describe('wizard progress', () => {
 
 describe('configuration workspace shell', () => {
   it('owns one isolated workspace per page and activates only the selected page', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     await saveState(configured);
     const root = new TestElement('div');
@@ -413,9 +429,200 @@ describe('configuration workspace shell', () => {
   });
 });
 
+describe('simple configuration mode', () => {
+  it('accepts room numbers and complete Bilibili live URLs', () => {
+    expect(parseBilibiliRoomId('31567150')).toBe('31567150');
+    expect(parseBilibiliRoomId('https://live.bilibili.com/31567150?session_id=test')).toBe('31567150');
+    expect(parseBilibiliRoomId('https://www.bilibili.com/31567150')).toBeNull();
+    expect(parseBilibiliRoomId('not a room')).toBeNull();
+  });
+
+  it('formats timer values and per-gift action summaries in Chinese', () => {
+    const gift = builtinCatalog[0];
+    expect(formatSimpleCurrentValue('overtime', 3661)).toBe('01:01:01');
+    expect(simpleDraftSummary({
+      templateId: 'overtime',
+      parameters: { name: '加班时间', maxSeconds: 7200 },
+      gifts: { overtime: [gift.id] },
+      overtimeGiftActions: [{ giftId: gift.id, operation: 'subtract', seconds: 90 }],
+    }, [gift])).toEqual([`${gift.name}：减少 1分30秒`]);
+  });
+
+  it('top-aligns overtime gift controls when the duration preview adds a second row', () => {
+    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const actionRow = configCss.match(/\.config-root \.simple-overtime-action-row\s*\{([^}]*)\}/)?.[1] ?? '';
+    const giftColumn = configCss.match(/\.config-root \.simple-action-gift\s*\{([^}]*)\}/)?.[1] ?? '';
+
+    expect(actionRow).toMatch(/align-items:\s*start;/);
+    expect(giftColumn).toMatch(/min-height:\s*44px;/);
+  });
+
+  it('renders the actual OBS preview in a scaled 16:9 viewport instead of clipping it', () => {
+    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const previewShell = configCss.match(/\.config-root \.simple-real-preview-frame-shell\s*\{([^}]*)\}/)?.[1] ?? '';
+    const previewFrame = configCss.match(/\.config-root \.simple-real-preview-frame\s*\{([^}]*)\}/)?.[1] ?? '';
+
+    expect(previewShell).toMatch(/aspect-ratio:\s*16\s*\/\s*9;/);
+    expect(previewShell).toMatch(/overflow:\s*hidden;/);
+    expect(previewFrame).toMatch(/width:\s*200%;/);
+    expect(previewFrame).toMatch(/height:\s*200%;/);
+    expect(previewFrame).toMatch(/transform:\s*scale\(\.5\);/);
+    expect(previewFrame).toMatch(/transform-origin:\s*top left;/);
+  });
+
+  it('shows the four-step simple setup for a new user without sidebar spotlight training', async () => {
+    const fresh = defaultState();
+    fresh.giftCatalog = [builtinCatalog[0]];
+    await saveState(fresh);
+    const root = new TestElement('div');
+
+    mountConfig(root as unknown as HTMLElement);
+
+    expect(root.querySelector('.simple-mode')).not.toBeNull();
+    expect(root.querySelector('.config-workspace-layout')?.className).toContain('is-simple-mode');
+    expect(root.querySelectorAll('.simple-wizard-progress').at(0)?.querySelectorAll('li')).toHaveLength(4);
+    expect(root.querySelector('.tour-bubble')).toBeNull();
+    expect(root.querySelector('.simple-header-advanced')).not.toBeNull();
+    expect(textOf(root)).toContain('扫码登录（强烈建议）');
+    expect(textOf(root)).toContain('可以跳过');
+  });
+
+  it('completes setup with a skipped login and one action per overtime gift', async () => {
+    const fresh = defaultState();
+    fresh.giftCatalog = [];
+    await saveState(fresh);
+    mockedRuntimeState = 'connected';
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    const room = root.querySelector('.simple-room-input') as TestElement & { oninput?: () => void };
+    room.value = 'https://live.bilibili.com/31567150?from=test';
+    room.oninput?.();
+    root.querySelector('.simple-room-next')?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelector('.simple-template-grid')).not.toBeNull());
+    expect(loadState().roomId).toBe('31567150');
+
+    findByText(root, '下一步')?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelector('.simple-gift-picker-grid')).not.toBeNull());
+    root.querySelector('.gift-choice')?.onclick?.();
+    expect(root.querySelector('.simple-overtime-action-row')).not.toBeNull();
+    const operation = root.querySelector('.simple-operation-select') as TestElement & { onchange?: () => void };
+    operation.value = 'subtract';
+    operation.onchange?.();
+    let seconds = root.querySelector('.simple-action-seconds') as TestElement & { oninput?: () => void };
+    expect(seconds.value).toBe('60');
+    seconds.value = '90.5';
+    seconds.oninput?.();
+    expect(textOf(root.querySelector('.simple-overtime-action-row') as TestElement)).toContain('请输入正整数秒');
+    findByText(root, '检查设置')?.onclick?.();
+    expect(root.querySelector('.simple-gift-picker-grid')).not.toBeNull();
+    seconds = root.querySelector('.simple-action-seconds') as TestElement & { oninput?: () => void };
+    seconds.value = '90';
+    seconds.oninput?.();
+    expect(textOf(root.querySelector('.simple-overtime-action-row') as TestElement)).toContain('1分30秒');
+
+    findByText(root, '检查设置')?.onclick?.();
+    expect(textOf(root.querySelector('.simple-confirm-card') as TestElement)).toContain('减少 1分30秒');
+    root.querySelector('.simple-save-play')?.onclick?.();
+    await vi.waitFor(() => expect(loadState().simplePlay?.overtimeGiftActions?.[0]).toMatchObject({ operation: 'subtract', seconds: 90 }));
+    await vi.waitFor(() => expect(root.querySelector('.simple-confirm-copy')).not.toBeNull());
+    await vi.waitFor(() => expect(textOf(root)).toContain('测试主播'));
+    expect(root.querySelector('.simple-real-preview-frame-shell')).not.toBeNull();
+    expect(root.querySelector('.simple-real-preview-frame')).not.toBeNull();
+    expect((root.querySelector('.simple-confirm-done') as TestElement & { disabled?: boolean }).disabled).toBe(true);
+    root.querySelector('.simple-confirm-copy')?.onclick?.();
+    await vi.waitFor(() => expect((navigator.clipboard.writeText as ReturnType<typeof vi.fn>)).toHaveBeenCalled());
+    await vi.waitFor(() => expect((root.querySelector('.simple-confirm-done') as TestElement & { disabled?: boolean }).disabled).toBe(false));
+    expect(loadState().giftCatalog).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: builtinCatalog[0].id, name: builtinCatalog[0].name }),
+    ]));
+    root.querySelector('.simple-confirm-done')?.onclick?.();
+    expect(root.querySelector('.simple-live-card')).not.toBeNull();
+  });
+
+  it('shows exact cleanup impact before a template replacement reached through adjust', async () => {
+    const gift = builtinCatalog[0];
+    const configured = planSimplePlayTransition(defaultState(), {
+      templateId: 'overtime',
+      parameters: { name: '加班时间', maxSeconds: 0 },
+      gifts: { overtime: [gift.id] },
+      overtimeGiftActions: [{ giftId: gift.id, operation: 'add', seconds: 60 }],
+    }).nextState;
+    configured.giftCatalog = [gift];
+    await saveState(configured);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    root.querySelector('.simple-adjust')?.onclick?.();
+    findByText(root, '上一步')?.onclick?.();
+    root.querySelectorAll('.simple-template-card')[1]?.onclick?.();
+    findByText(root, '下一步')?.onclick?.();
+    root.querySelector('.gift-choice')?.onclick?.();
+    findByText(root, '检查设置')?.onclick?.();
+
+    expect(textOf(root)).toContain('更换玩法会替换当前简单玩法');
+    expect(root.querySelector('.simple-replace-impact')).not.toBeNull();
+    expect(textOf(root.querySelector('.simple-replace-impact') as TestElement)).toContain('1 个旧属性');
+    expect(findByText(root, '确认替换并保存')).toBeDefined();
+  });
+
+  it('controls the saved play, warns about advanced edits, and switches modes', async () => {
+    const gift = builtinCatalog[0];
+    const base = defaultState();
+    base.roomId = '31567150';
+    base.giftCatalog = [gift];
+    const transition = planSimplePlayTransition(base, {
+      templateId: 'overtime',
+      parameters: { name: '加班时间', maxSeconds: 7200 },
+      gifts: { overtime: [gift.id] },
+      overtimeGiftActions: [{ giftId: gift.id, operation: 'add', seconds: 60 }],
+    });
+    const configured = transition.nextState;
+    const managed = configured.attributes.find((attribute) => attribute.id === configured.simplePlay?.attributeId)!;
+    managed.value = 3661;
+    configured.attributes.push({ id: 'advanced-score', name: '高级积分', value: 5, unit: 'none', format: 'number', decimals: 0, suffix: '' });
+    configured.rules[0].formula = `${managed.name}+120`;
+    await saveState(configured);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    expect(textOf(root.querySelector('.simple-current-value') as TestElement)).toBe('01:01:01');
+    expect(textOf(root)).toContain('另有 1 项高级配置继续运行');
+    expect(textOf(root)).toContain('已在完整配置中修改');
+    const toggle = root.querySelector('.simple-enabled-toggle')!;
+    toggle.onclick?.();
+    await vi.waitFor(() => expect(loadState().rules.every((rule) => rule.enabled === false)).toBe(true));
+    const reset = root.querySelector('.simple-reset')!;
+    reset.onclick?.();
+    root.querySelector('.simple-reset')?.onclick?.();
+    await vi.waitFor(() => expect(loadState().attributes.find((attribute) => attribute.id === configured.simplePlay?.attributeId)?.value).toBe(0));
+
+    root.querySelector('.simple-header-advanced')?.onclick?.();
+    await vi.waitFor(() => expect(loadState().settings.configExperience).toBe('advanced'));
+    expect(root.querySelector('.config-workspace-layout')?.className).not.toContain('is-simple-mode');
+    expect(root.querySelector('.connection-grid')).not.toBeNull();
+  });
+
+  it('switches back to simple mode from program settings without deleting advanced configuration', async () => {
+    const configured = defaultAdvancedState();
+    configured.attributes.push({ id: 'score', name: '积分', value: 5, unit: 'none', format: 'number', decimals: 0, suffix: '' });
+    await saveState(configured);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    root.querySelector('.program-settings-toggle')?.onclick?.();
+    const simpleOption = root.querySelectorAll('.experience-setting-option').find((option) => textOf(option).includes('简单模式'));
+    simpleOption?.onclick?.();
+    await vi.waitFor(() => expect(loadState().settings.configExperience).toBe('simple'));
+    expect(root.querySelector('.simple-mode')).not.toBeNull();
+    expect(textOf(root)).toContain('另有 1 项高级配置会继续运行');
+    expect(loadState().attributes.map((attribute) => attribute.name)).toContain('积分');
+  });
+});
+
 describe('gameplay template wizard integration', () => {
   it('opens the template library for a normal add-attribute action', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     await saveState(configured);
     const root = new TestElement('div');
@@ -429,7 +636,7 @@ describe('gameplay template wizard integration', () => {
   });
 
   it('opens the complete attribute workbench from the blank creation card', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     await saveState(configured);
     const root = new TestElement('div');
@@ -446,7 +653,7 @@ describe('gameplay template wizard integration', () => {
   });
 
   it('validates and saves a complete overtime template as one configuration', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     await saveState(configured);
     const root = new TestElement('div');
@@ -457,24 +664,34 @@ describe('gameplay template wizard integration', () => {
       .find((card) => textOf(card).includes('加班机'));
     overtime?.onclick?.();
     findByText(root, '下一步')?.onclick?.();
-    expect(textOf(root.querySelector('.template-wizard') as TestElement)).toContain('每 1 元增加');
+    expect(textOf(root.querySelector('.template-wizard') as TestElement)).toContain('最多累计');
     findByText(root, '下一步')?.onclick?.();
     expect(root.querySelector('.template-gift-choice')).not.toBeNull();
     root.querySelector('.template-gift-choice')?.onclick?.();
     expect(root.querySelector('.template-gift-choice')?.className).toContain('is-selected');
+    expect(root.querySelector('.template-overtime-action-row')).not.toBeNull();
+    expect((root.querySelector('.template-overtime-operation') as TestElement | null)?.value).toBe('add');
+    expect((root.querySelector('.template-overtime-seconds') as TestElement | null)?.value).toBe('60');
+    expect(textOf(root.querySelector('.template-overtime-action-row') as TestElement)).toContain('1分');
+    const actionSelect = root.querySelector('.template-overtime-operation') as TestElement & { onchange?: () => void };
+    actionSelect.value = 'double';
+    actionSelect.onchange?.();
+    expect(root.querySelector('.template-overtime-seconds')).toBeNull();
     findByText(root, '下一步')?.onclick?.();
     expect(textOf(root.querySelector('.template-wizard') as TestElement)).toContain('将创建“加班时间”');
+    expect(textOf(root.querySelector('.template-wizard') as TestElement)).toContain('时间翻倍');
     root.querySelector('.template-wizard-actions')?.querySelectorAll('button').at(-1)?.onclick?.();
 
     await vi.waitFor(() => expect(loadState().attributes).toHaveLength(1));
     expect(loadState().attributes[0].createdFromTemplateId).toBe('overtime');
+    expect(loadState().rules[0].formula).toBe('加班时间*2');
     expect(loadState().rules).toHaveLength(1);
     expect(loadState().timerRules).toHaveLength(1);
     expect(root.querySelector('.template-wizard-overlay')).toBeNull();
   });
 
   it('creates a team duel with two attributes, one scene, and one gated activity transactionally', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     await saveState(configured);
     const root = new TestElement('div');
@@ -948,7 +1165,7 @@ describe.skip('legacy configuration wizard rendering', () => {
   });
 
   it('confirms a room switch and clears only room-scoped records', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     configured.roomId = '100';
     configured.attributes = [{ name: '积分', value: 7, unit: 'none', format: 'number', decimals: 0, suffix: '' }];
@@ -986,7 +1203,7 @@ describe.skip('legacy configuration wizard rendering', () => {
   });
 
   it('shows the broadcaster identity resolved from the configured room', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     configured.roomId = '31567150';
     await saveState(configured);
@@ -1142,7 +1359,7 @@ describe('single-page configuration rendering', () => {
     try {
       await saveState({
         ...state('88888888'),
-        settings: { ...defaultState().settings, showTutorial: false },
+        settings: { ...defaultState().settings, showTutorial: false, configExperience: 'advanced' },
       });
       const fetchMock = vi.fn(async (input: string | URL | Request) => {
         const url = String(input);
@@ -1194,7 +1411,7 @@ describe('single-page configuration rendering', () => {
     };
     await saveState({
       ...state('88888888'),
-      settings: { ...defaultState().settings, showTutorial: false },
+      settings: { ...defaultState().settings, showTutorial: false, configExperience: 'advanced' },
       recentGifts: [
         {
           id: observedCatalogGift.id,
@@ -1240,7 +1457,7 @@ describe('single-page configuration rendering', () => {
     expect(defaultById.has(String(historicalGift.id))).toBe(false);
     expect(defaultById.has(String(manualGift.id))).toBe(false);
     expect(defaultById.get(String(listedGift.id))?.querySelector('.gift-listing-status')).toBeNull();
-    expect(textOf(defaultById.get(String(listedGift.id))?.querySelector('.gift-login-status')!)).toBe('需登录');
+    expect(textOf(defaultById.get(String(listedGift.id))?.querySelector('.gift-login-status')!)).toBe('建议登录');
     expect(defaultById.get(String(observedCatalogGift.id))?.querySelector('.gift-login-status')).toBeNull();
     expect(textOf(defaultById.get(String(observedCatalogGift.id))?.querySelector('.gift-listing-status')!))
       .toBe('直播中收到过');
@@ -1459,7 +1676,7 @@ describe('single-page configuration rendering', () => {
   });
 
   it('collapses guided attribute details after resetting the main tutorial', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.roomId = '31567150';
     configured.attributes.push({
       name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '', broadcastMessage: '',
@@ -1494,7 +1711,7 @@ describe('single-page configuration rendering', () => {
   });
 
   it('replays the enable lesson on the overtime training attribute instead of the first card', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.roomId = '31567150';
     configured.attributes.push(
       { name: '挑战次数', value: 10, unit: 'none', format: 'suffix', decimals: 0, suffix: '次' },
@@ -1538,7 +1755,7 @@ describe('single-page configuration rendering', () => {
   });
 
   it('restarts from attribute creation when a late tutorial lesson has no overtime card', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.roomId = '31567150';
     configured.attributes.push({
       name: '挑战次数', value: 10, unit: 'none', format: 'suffix', decimals: 0, suffix: '次',
@@ -1709,7 +1926,7 @@ describe('single-page configuration rendering', () => {
       return new Response(null, { status: 204 });
     });
     vi.stubGlobal('fetch', fetchMock);
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
 
@@ -2050,7 +2267,7 @@ describe('single-page configuration rendering', () => {
   it('persists timer enable toggles from a card click activation', async () => {
     const initialState = {
       ...state('88888888'),
-      settings: { ...defaultState().settings, showTutorial: false },
+      settings: { ...defaultState().settings, showTutorial: false, configExperience: 'advanced' },
       timerRules: [{
         id: 't-disabled', attributeName: '加班时间', formulaName: '定时规则', intervalSeconds: 60,
         formula: '加班时间-1', enabled: false,
@@ -2079,7 +2296,7 @@ describe('single-page configuration rendering', () => {
   it('persists external rule switches after a same-structure backend refresh', async () => {
     const initialState = {
       ...state('88888888'),
-      settings: { ...defaultState().settings, showTutorial: false },
+      settings: { ...defaultState().settings, showTutorial: false, configExperience: 'advanced' },
       rules: [{
         id: 'r-disabled', giftId: 1, attributeName: '加班时间', formulaName: '礼物规则',
         formula: '加班时间+1', enabled: false,
@@ -2143,7 +2360,7 @@ describe('single-page configuration rendering', () => {
   });
 
   it('preserves every floating card while a backend timer updates only runtime values and timer logs', async () => {
-    const initialState = defaultState();
+    const initialState = defaultAdvancedState();
     initialState.settings.showTutorial = false;
     initialState.attributes = [
       { name: '加班时间', value: 10, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' },
@@ -2202,7 +2419,7 @@ describe('single-page configuration rendering', () => {
   it('does not let a stale backend refresh overwrite a timer toggle before editing', async () => {
     const initialState = {
       ...state('88888888'),
-      settings: { ...defaultState().settings, showTutorial: false },
+      settings: { ...defaultState().settings, showTutorial: false, configExperience: 'advanced' },
       timerRules: [{
         id: 't-disabled', attributeName: '加班时间', formulaName: '定时规则', intervalSeconds: 60,
         formula: '加班时间-1', enabled: false,
@@ -2259,7 +2476,7 @@ describe('single-page configuration rendering', () => {
   });
 
   it('deletes an activity after a backend refresh replaces live values', async () => {
-    const initialState = defaultState();
+    const initialState = defaultAdvancedState();
     initialState.settings.showTutorial = false;
     initialState.attributes = [
       { name: '红队', value: 0, unit: 'none', format: 'suffix', decimals: 0, suffix: '分' },
@@ -2505,7 +2722,7 @@ describe('single-page configuration rendering', () => {
   });
 
   it('configures 1–10 visible viewer slots for the blind-box OBS leaderboard', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
     const root = new TestElement('div');
@@ -2718,7 +2935,7 @@ describe('single-page configuration rendering', () => {
     const configured = {
       ...defaultState(),
       ...state('88888888', 1),
-      settings: { ...defaultState().settings, showTutorial: false },
+      settings: { ...defaultState().settings, showTutorial: false, configExperience: 'advanced' },
     };
     await saveState(configured);
     const root = new TestElement('div');
@@ -2842,7 +3059,7 @@ describe('single-page configuration rendering', () => {
 
 describe('OBS combination scene configuration', () => {
   it('creates a two-attribute scene and exposes its dedicated OBS link', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     configured.attributes = [
       { name: '生命值', value: 100, unit: 'none', format: 'number', decimals: 0, suffix: '' },
@@ -2874,7 +3091,7 @@ describe('OBS combination scene configuration', () => {
   });
 
   it('deletes a combination scene and clears its activity link in the same save', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     configured.attributes = [
       { name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' },
@@ -2908,7 +3125,7 @@ describe('OBS combination scene configuration', () => {
 
 describe('activity session configuration', () => {
   it('creates a gated activity from existing attributes', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     configured.attributes = [
       { name: '红队', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' },
@@ -2936,7 +3153,7 @@ describe('activity session configuration', () => {
   });
 
   it('keeps the delete action available after an activity is settled', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     configured.attributes = [
       { name: '红队', value: 12, unit: 'none', format: 'number', decimals: 0, suffix: '票' },
@@ -2966,7 +3183,7 @@ describe('activity session configuration', () => {
   });
 
   it('deletes an activity only after the configuration save succeeds', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     configured.attributes = [{ name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' }];
     configured.activities = [{
@@ -2991,7 +3208,7 @@ describe('activity session configuration', () => {
   });
 
   it('rerenders only the activity section and restores its open detail without replaying transitions', async () => {
-    const configured = defaultState();
+    const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     configured.attributes = [
       { name: '红队', value: 0, unit: 'none', format: 'suffix', decimals: 0, suffix: '分' },

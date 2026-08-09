@@ -13,10 +13,20 @@ import {
 import { matchesGiftSearch } from '../../gifts/catalog';
 import { giftPriceDescription } from '../../gifts/special-events';
 import type { GiftInfo } from '../../types';
+import { formatDurationZh } from '../../duration';
 import { el } from '../common';
 import { createGiftLoginBadge } from './gift-picker';
 
 const GIFT_PAGE_SIZE = 40;
+type OvertimeGiftAction = NonNullable<GameplayTemplateInput['overtimeGiftActions']>[number];
+type OvertimeOperation = OvertimeGiftAction['operation'];
+const OVERTIME_OPERATIONS: Record<OvertimeOperation, { label: string; amount: boolean }> = {
+  add: { label: '增加', amount: true },
+  subtract: { label: '减少', amount: true },
+  double: { label: '翻倍', amount: false },
+  halve: { label: '减半', amount: false },
+  reset: { label: '归零', amount: false },
+};
 
 export interface GameplayTemplateWizardOptions {
   gifts: GiftInfo[];
@@ -332,6 +342,9 @@ export function createGameplayTemplateWizard(options: GameplayTemplateWizardOpti
       renderGrid();
     };
     renderGrid();
+    const overtimeActions = selectedTemplate.id === 'overtime' && (input.gifts[slot.id] ?? []).length > 0
+      ? renderOvertimeGiftActions(input.gifts[slot.id] ?? [])
+      : null;
     body.append(
       el('div', { class: 'template-step-heading template-gift-heading' }, [
         el('div', {}, [el('h3', { text: '把礼物分配给玩法角色' }), el('p', { text: '同一个礼物只承担一个角色，选择到新角色时会自动移动。' })]),
@@ -343,7 +356,51 @@ export function createGameplayTemplateWizard(options: GameplayTemplateWizardOpti
         grid,
         status,
       ]),
+      ...(overtimeActions ? [overtimeActions] : []),
     );
+  }
+
+  function renderOvertimeGiftActions(gifts: GiftInfo[]): HTMLElement {
+    if (!input) return el('div');
+    const list = el('section', { class: 'template-overtime-actions' }, [
+      el('div', { class: 'template-step-heading' }, [
+        el('div', {}, [el('h3', { text: '设置每个礼物的动作' }), el('p', { text: '增加和减少默认 60 秒，也可以让当前时间翻倍、减半或归零。' })]),
+      ]),
+    ]);
+    for (const gift of gifts) {
+      const action = input.overtimeGiftActions?.find((candidate) => candidate.giftId === gift.id)
+        ?? { giftId: gift.id, operation: 'add' as const, seconds: 60 };
+      const operation = el('select', { class: 'field-input template-overtime-operation', ariaLabel: `${gift.name}的动作` } as any) as HTMLSelectElement;
+      (Object.keys(OVERTIME_OPERATIONS) as OvertimeOperation[]).forEach((value) => operation.append(el('option', { value, text: OVERTIME_OPERATIONS[value].label })));
+      operation.value = action.operation;
+      operation.onchange = () => updateOvertimeGiftAction(gift.id, operation.value as OvertimeOperation, action.seconds);
+      const row = el('div', { class: 'template-overtime-action-row' }, [giftChip(gift), operation]);
+      if (OVERTIME_OPERATIONS[action.operation].amount) {
+        const amount = el('input', { class: 'field-input template-overtime-seconds', type: 'number', min: '1', step: '1', value: String(action.seconds ?? 60), ariaLabel: `${gift.name}时长（秒）` } as any) as HTMLInputElement;
+        const readable = el('small', { class: 'template-duration-readable', text: overtimeDurationPreview(action.seconds ?? 60) });
+        amount.oninput = () => {
+          const seconds = Number(amount.value);
+          updateOvertimeGiftAction(gift.id, action.operation, seconds, false);
+          readable.textContent = overtimeDurationPreview(seconds);
+        };
+        row.append(el('div', { class: 'template-overtime-amount' }, [amount, el('span', { text: '秒' }), readable]));
+      }
+      list.append(row);
+    }
+    return list;
+  }
+
+  function updateOvertimeGiftAction(giftId: number, operation: OvertimeOperation, seconds = 60, rerender = true): void {
+    if (!input) return;
+    input.overtimeGiftActions = [
+      ...(input.overtimeGiftActions ?? []).filter((candidate) => candidate.giftId !== giftId),
+      { giftId, operation, ...(OVERTIME_OPERATIONS[operation].amount ? { seconds: Number(seconds) } : {}) },
+    ];
+    if (rerender) render();
+  }
+
+  function overtimeDurationPreview(seconds: number): string {
+    return Number.isInteger(seconds) && seconds > 0 ? formatDurationZh(seconds) : '请输入正整数秒';
   }
 
   function renderGiftChoice(gift: GiftInfo, slotId: string, multiple: boolean): HTMLElement {
@@ -369,6 +426,14 @@ export function createGameplayTemplateWizard(options: GameplayTemplateWizardOpti
       input.gifts[slotId] = selected
         ? current.filter((candidate) => candidate.id !== gift.id)
         : multiple ? [...current, gift] : [gift];
+      if (selected && input.overtimeGiftActions) {
+        input.overtimeGiftActions = input.overtimeGiftActions.filter((action) => action.giftId !== gift.id);
+      } else if (!selected && selectedTemplate?.id === 'overtime') {
+        input.overtimeGiftActions = [
+          ...(input.overtimeGiftActions ?? []).filter((action) => action.giftId !== gift.id),
+          { giftId: gift.id, operation: 'add', seconds: 60 },
+        ];
+      }
       setMessage();
       render();
     };

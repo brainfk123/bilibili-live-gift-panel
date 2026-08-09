@@ -13,7 +13,7 @@ import (
 // Every persisted shard has its own version. Missing versions are treated as
 // legacy version 0, while newer versions are rejected so an older executable
 // cannot silently discard fields it does not understand.
-const stateShardSchemaVersion = 8
+const stateShardSchemaVersion = 9
 
 type unsupportedStateVersionError struct {
 	Shard   string
@@ -36,6 +36,7 @@ type configStateShard struct {
 	TimerRules      []timerRule                    `json:"timerRules"`
 	FormulaPresets  []formulaPreset                `json:"formulaPresets"`
 	Settings        settingsState                  `json:"settings"`
+	SimplePlay      *simplePlayState               `json:"simplePlay,omitempty"`
 }
 
 type cacheStateShard struct {
@@ -66,6 +67,7 @@ func configShardFromState(state appState) configStateShard {
 		TimerRules:      state.TimerRules,
 		FormulaPresets:  state.FormulaPresets,
 		Settings:        state.Settings,
+		SimplePlay:      state.SimplePlay,
 	}
 }
 
@@ -218,6 +220,9 @@ func prepareOptionalSettingsForDecode(data []byte, state *appState) {
 	}
 	if _, exists := settings["autoUpdate"]; !exists {
 		state.Settings.AutoUpdate = nil
+	}
+	if _, exists := settings["configExperience"]; !exists {
+		state.Settings.ConfigExperience = "advanced"
 	}
 }
 

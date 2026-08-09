@@ -5,8 +5,12 @@ import type {
   DisplayThemeId,
   GiftInfo,
   GiftRule,
+  OvertimeGiftAction,
+  OvertimeGiftOperation,
   TimerRule,
 } from './types';
+import { buildOvertimeGiftFormula } from './gift-rule-operations';
+import { formatDurationZh } from './duration';
 
 export type GameplayTemplateCategory = 'timer' | 'goal' | 'challenge' | 'survival' | 'versus';
 export type TemplateParameterKind = 'text' | 'number' | 'duration' | 'select' | 'toggle';
@@ -43,6 +47,8 @@ export interface GameplayTemplateInput {
   parameters: Record<string, TemplateParameterValue>;
   gifts: Record<string, GiftInfo[]>;
   displayThemeId?: DisplayThemeId;
+  /** Per-gift behavior used by overtime template v2; omitted entries default to add 60 seconds. */
+  overtimeGiftActions?: OvertimeGiftAction[];
 }
 
 export interface GameplayTemplateBuildResult {
@@ -171,36 +177,66 @@ const commonBroadcast: TemplateParameterDefinition = {
   description: '没有新礼物时在 OBS 面板底部滚动显示。',
 };
 
+const OVERTIME_OPERATIONS = new Set<OvertimeGiftOperation>(['add', 'subtract', 'double', 'halve', 'reset']);
+
+function overtimeActionForGift(input: GameplayTemplateInput, giftId: number): OvertimeGiftAction {
+  const candidate = input.overtimeGiftActions?.find((action) => action.giftId === giftId);
+  if (!candidate || !OVERTIME_OPERATIONS.has(candidate.operation)) {
+    return { giftId, operation: 'add', seconds: 60 };
+  }
+  if (candidate.operation !== 'add' && candidate.operation !== 'subtract') {
+    return { giftId, operation: candidate.operation };
+  }
+  const seconds = Number(candidate.seconds);
+  return { giftId, operation: candidate.operation, seconds: Number.isInteger(seconds) && seconds > 0 ? seconds : 60 };
+}
+
+function overtimeActionName(action: OvertimeGiftAction): string {
+  switch (action.operation) {
+    case 'add': return `增加 ${formatDurationZh(action.seconds ?? 60)}`;
+    case 'subtract': return `减少 ${formatDurationZh(action.seconds ?? 60)}`;
+    case 'double': return '时间翻倍';
+    case 'halve': return '时间减半';
+    case 'reset': return '时间清零';
+  }
+}
+
 const TEMPLATES: readonly GameplayTemplateDefinition[] = [
   {
-    id: 'overtime', version: 1, category: 'timer', title: '加班机', difficulty: '简单', preview: 'timer',
-    summary: '礼物增加加班时间，后台按固定速度自动减少。',
-    audiencePlay: '观众投喂礼物增加直播时长。',
+    id: 'overtime', version: 2, category: 'timer', title: '加班机', difficulty: '简单', preview: 'timer',
+    summary: '不同礼物可以加时、减时、翻倍、减半或清零，后台自动倒数。',
+    audiencePlay: '观众投喂不同礼物改变直播时长。',
     recommendedThemeId: 'glass',
     parameters: [
       { id: 'name', label: '属性名称', kind: 'text', defaultValue: '加班时间' },
-      { id: 'minutesPerYuan', label: '每 1 元增加', kind: 'duration', defaultValue: 60, min: 1, max: 3600, durationUnit: 'minutes' },
-      { id: 'maxHours', label: '最多累计（0 为不限）', kind: 'number', defaultValue: 0, min: 0, max: 240, step: 0.5, unit: '小时' },
+      { id: 'maxSeconds', label: '最多累计（0 为不限）', kind: 'duration', defaultValue: 0, min: 0, max: 864000, durationUnit: 'seconds' },
       commonBroadcast,
     ],
-    giftSlots: [{ id: 'overtime', label: '加时礼物', description: '这些礼物会按价格增加加班时间。', minimum: 1, multiple: true }],
+    giftSlots: [{ id: 'overtime', label: '互动礼物', description: '为每个礼物单独选择加时、减时、翻倍、减半或清零。', minimum: 1, multiple: true }],
     build: (input, ids) => {
       const name = valueText(input, 'name') || '加班时间';
-      const perYuan = Math.max(1, valueNumber(input, 'minutesPerYuan'));
-      const maximum = Math.max(0, valueNumber(input, 'maxHours') * 3600);
-      const raw = `${name}+price/1000*${formulaNumber(perYuan)}`;
-      const formula = maximum > 0 ? `MIN(${raw},${formulaNumber(maximum)})` : raw;
-      const rules = rulesForSlot(input, 'overtime', name, '按价格加时', formula, ids);
+      const maximum = Math.max(0, valueNumber(input, 'maxSeconds'));
+      const rules = (input.gifts.overtime ?? []).map((gift) => {
+        const action = overtimeActionForGift(input, gift.id);
+        return {
+          id: ids.next('rule'),
+          giftId: gift.id,
+          attributeName: name,
+          formulaName: `${gift.name}·${overtimeActionName(action)}`,
+          formula: buildOvertimeGiftFormula(action.operation, name, action.seconds ?? 60, maximum > 0 ? maximum : undefined),
+          enabled: true,
+        } satisfies GiftRule;
+      });
       return {
         attributes: [{
           ...attributeBase(name, 0, 'hhmmss', '', valueText(input, 'broadcastMessage')),
           display: { variant: 'timer', themeId: themed(input, 'glass'), title: name, min: 0, ...(maximum > 0 ? { max: maximum } : {}) },
-          createdFromTemplateId: 'overtime', createdFromTemplateVersion: 1,
+          createdFromTemplateId: 'overtime', createdFromTemplateVersion: 2,
         }],
         rules,
         timerRules: [timer(ids, name, '每秒自动减少', 1, `MAX(${name}-1,0)`, `${name}>0`)],
         usedGifts: uniqueGifts(input),
-        summary: [`${rules.length} 个礼物按价格增加时间`, '每秒自动减少 1 秒', maximum > 0 ? `最多累计 ${maximum / 3600} 小时` : '累计时间不封顶'],
+        summary: [`${rules.length} 个礼物分别改变时间`, '每秒自动减少 1 秒', maximum > 0 ? `最多累计 ${formatDurationZh(maximum)}` : '累计时间不封顶'],
       };
     },
   },
@@ -656,6 +692,7 @@ export function createDefaultTemplateInput(template: GameplayTemplateDefinition)
     parameters: Object.fromEntries(template.parameters.map((parameter) => [parameter.id, parameter.defaultValue])),
     gifts: Object.fromEntries(template.giftSlots.map((slot) => [slot.id, []])),
     displayThemeId: template.recommendedThemeId,
+    ...(template.id === 'overtime' ? { overtimeGiftActions: [] } : {}),
   };
 }
 
@@ -683,6 +720,20 @@ export function validateGameplayTemplateInput(
       const previousSlot = usedGiftIds.get(gift.id);
       if (previousSlot && previousSlot !== slot.id) errors.push(`${gift.name}不能同时分配给多个角色`);
       usedGiftIds.set(gift.id, slot.id);
+    }
+  }
+  if (template.id === 'overtime') {
+    const maximum = Number(input.parameters.maxSeconds);
+    if (Number.isFinite(maximum) && !Number.isInteger(maximum)) errors.push('最多累计必须是整数秒数');
+    const selectedGiftIds = new Set((input.gifts.overtime ?? []).map((gift) => gift.id));
+    const actionGiftIds = new Set<number>();
+    for (const action of input.overtimeGiftActions ?? []) {
+      if (!selectedGiftIds.has(action.giftId) || actionGiftIds.has(action.giftId)) continue;
+      actionGiftIds.add(action.giftId);
+      if ((action.operation === 'add' || action.operation === 'subtract')
+        && (!Number.isInteger(action.seconds) || Number(action.seconds) <= 0)) {
+        errors.push(`${action.giftId} 号礼物的秒数必须是正整数`);
+      }
     }
   }
   return Array.from(new Set(errors));

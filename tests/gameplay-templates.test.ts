@@ -66,17 +66,27 @@ describe('gameplay templates', () => {
   it('creates a complete overtime setup transaction', () => {
     const template = GAMEPLAY_TEMPLATES[0];
     const input = validInput(template);
-    input.parameters.minutesPerYuan = 120;
-    input.parameters.maxHours = 2;
+    input.parameters.maxSeconds = 7200;
+    input.gifts.overtime = [gift(101, '加时'), gift(102, '减半'), gift(103, '清零')];
+    input.overtimeGiftActions = [
+      { giftId: 101, operation: 'add', seconds: 120 },
+      { giftId: 102, operation: 'halve' },
+      { giftId: 103, operation: 'reset' },
+    ];
     const result = buildGameplayTemplate(template, input, ids());
 
+    expect(template.version).toBe(2);
     expect(result.attributes[0]).toEqual(expect.objectContaining({
       name: '加班时间',
       value: 0,
       format: 'hhmmss',
       display: expect.objectContaining({ variant: 'timer', max: 7200 }),
     }));
-    expect(result.rules[0].formula).toBe('MIN(加班时间+price/1000*120,7200)');
+    expect(result.rules.map((rule) => rule.formula)).toEqual([
+      'MIN(加班时间+120,7200)',
+      'MAX(FLOOR(加班时间/2),0)',
+      '0',
+    ]);
     expect(result.timerRules[0]).toEqual(expect.objectContaining({
       formulaName: '每秒自动减少',
       intervalSeconds: 1,
@@ -84,6 +94,13 @@ describe('gameplay templates', () => {
       formula: 'MAX(加班时间-1,0)',
     }));
     expect(result.summary).toContain('每秒自动减少 1 秒');
+  });
+
+  it('defaults each overtime gift to adding 60 seconds', () => {
+    const template = GAMEPLAY_TEMPLATES[0];
+    const input = validInput(template);
+    const result = buildGameplayTemplate(template, input, ids());
+    expect(result.rules[0].formula).toBe('加班时间+60');
   });
 
   it('requires each mandatory role and prevents ambiguous duplicate role assignments', () => {

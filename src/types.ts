@@ -355,6 +355,28 @@ export interface Settings {
   trainingCompletedTopics: TrainingTopicId[];
   lastSeenChangelogVersion: string;
   autoUpdate: boolean;
+  configExperience: 'simple' | 'advanced';
+}
+
+export type SimplePlayTemplateId = 'overtime' | 'counter' | 'goal';
+
+export type OvertimeGiftOperation = 'add' | 'subtract' | 'double' | 'halve' | 'reset';
+
+export interface OvertimeGiftAction {
+  giftId: number;
+  operation: OvertimeGiftOperation;
+  seconds?: number;
+}
+
+export interface SimplePlay {
+  version: 1;
+  templateId: SimplePlayTemplateId;
+  templateVersion: number;
+  attributeId: string;
+  parameters: Record<string, string | number | boolean>;
+  gifts: Record<string, number[]>;
+  overtimeGiftActions?: OvertimeGiftAction[];
+  managedFingerprint: string;
 }
 
 export interface AppState {
@@ -374,6 +396,7 @@ export interface AppState {
   log: LogEntry[];
   giftReceipts: GiftReceipt[];
   contributions: ContributionLedger;
+  simplePlay?: SimplePlay;
 }
 
 export const MAX_LOG = 200;

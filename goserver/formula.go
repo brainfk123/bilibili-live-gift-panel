@@ -145,6 +145,12 @@ func (n callNode) evaluate(env map[string]float64) (float64, error) {
 		}
 		value, err := eval(0)
 		return math.Abs(value), err
+	case "FLOOR":
+		if len(n.args) != 1 {
+			return 0, fmt.Errorf("FLOOR 需要 1 个参数")
+		}
+		value, err := eval(0)
+		return math.Floor(value), err
 	case "RAND":
 		if len(n.args) != 0 {
 			return 0, fmt.Errorf("RAND 不需要参数")

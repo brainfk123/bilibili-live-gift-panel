@@ -1,4 +1,11 @@
-import { AppState, AttributeValueMapping, MAX_GIFT_RECEIPTS, MAX_LOG } from './types';
+import {
+  AppState,
+  AttributeValueMapping,
+  MAX_GIFT_RECEIPTS,
+  MAX_LOG,
+  type OvertimeGiftAction,
+  type SimplePlay,
+} from './types';
 import { normalizeDisplayThemeId } from './display-themes';
 import { normalizeDisplayScenes } from './display-scenes';
 import { normalizeActivities } from './activities';
@@ -11,7 +18,7 @@ import {
 import { giftTargetPanelConfig, mergeGiftTargetPanelConfigs, type GiftTargetPanelConfig } from './gift-targets';
 
 const CONFIG_ENDPOINT = '/api/config';
-const CONFIG_BACKUP_SCHEMA_VERSION = 4;
+const CONFIG_BACKUP_SCHEMA_VERSION = 5;
 const STATE_FIELD_KEYS = [
   'roomId',
   'attributes',
@@ -23,6 +30,7 @@ const STATE_FIELD_KEYS = [
   'timerRules',
   'formulaPresets',
   'settings',
+  'simplePlay',
   'giftCatalog',
   'recentGifts',
   'stats',
@@ -41,6 +49,7 @@ type ConfigBackupFields = Pick<AppState,
   | 'timerRules'
   | 'formulaPresets'
   | 'settings'
+  | 'simplePlay'
   | 'giftCatalog'> & { giftKpiPanels: GiftTargetPanelConfig[] };
 
 export type ConfigBackup = ConfigBackupFields & { schemaVersion: number };
@@ -86,6 +95,7 @@ export const defaultState = (): AppState => ({
     trainingCompletedTopics: [],
     lastSeenChangelogVersion: '',
     autoUpdate: true,
+    configExperience: 'simple',
   },
   giftCatalog: [],
   recentGifts: [],
@@ -201,9 +211,9 @@ async function persistStateToServer(snapshots: StateFieldSnapshots): Promise<voi
 function snapshotStateFields(state: AppState): StateFieldSnapshots {
   const snapshots = {} as StateFieldSnapshots;
   for (const key of STATE_FIELD_KEYS) {
-    snapshots[key] = JSON.stringify(key === 'giftKpiPanels'
+    snapshots[key] = JSON.stringify((key === 'giftKpiPanels'
       ? state.giftKpiPanels.map(giftTargetPanelConfig)
-      : state[key]);
+      : state[key]) ?? null);
   }
   return snapshots;
 }
@@ -215,6 +225,10 @@ export function createConfigBackup(state: AppState): ConfigBackup {
     for (const giftId of rule.matchGiftIds ?? []) referencedGiftIds.add(giftId);
   }
   for (const panel of state.giftKpiPanels) for (const item of panel.items) referencedGiftIds.add(item.giftId);
+  for (const giftIds of Object.values(state.simplePlay?.gifts ?? {})) {
+    for (const giftId of giftIds) referencedGiftIds.add(giftId);
+  }
+  for (const action of state.simplePlay?.overtimeGiftActions ?? []) referencedGiftIds.add(action.giftId);
   const catalogById = new Map<number, AppState['giftCatalog'][number]>();
   for (const gift of [...state.giftCatalog, ...state.recentGifts]) {
     if (referencedGiftIds.has(gift.id)) catalogById.set(gift.id, gift);
@@ -231,6 +245,7 @@ export function createConfigBackup(state: AppState): ConfigBackup {
     timerRules: state.timerRules,
     formulaPresets: state.formulaPresets,
     settings: state.settings,
+    simplePlay: state.simplePlay,
     giftCatalog: Array.from(catalogById.values()),
   };
 }
@@ -246,10 +261,12 @@ export function mergeConfigBackup(current: AppState, input: unknown): AppState {
     if (input[key] !== undefined && !Array.isArray(input[key])) throw new Error(`配置字段 ${key} 格式不正确`);
   }
   if (input.settings !== undefined && !isObjectRecord(input.settings)) throw new Error('配置字段 settings 格式不正确');
+  if (input.simplePlay !== undefined && !isObjectRecord(input.simplePlay)) throw new Error('配置字段 simplePlay 格式不正确');
   if (input.blindBoxDisplay !== undefined && !isObjectRecord(input.blindBoxDisplay)) throw new Error('配置字段 blindBoxDisplay 格式不正确');
   if (input.roomId !== undefined && typeof input.roomId !== 'string') throw new Error('配置字段 roomId 格式不正确');
 
   const parsed = input as Partial<AppState>;
+  const isLegacyBackup = schemaVersion < CONFIG_BACKUP_SCHEMA_VERSION;
   const importedCatalog = Array.isArray(parsed.giftCatalog)
     ? parsed.giftCatalog.filter((gift) => (
       isObjectRecord(gift)
@@ -274,7 +291,18 @@ export function mergeConfigBackup(current: AppState, input: unknown): AppState {
     ...(parsed.rules !== undefined ? { rules: parsed.rules } : {}),
     ...(parsed.timerRules !== undefined ? { timerRules: parsed.timerRules } : {}),
     ...(parsed.formulaPresets !== undefined ? { formulaPresets: parsed.formulaPresets } : {}),
-    settings: { ...current.settings, ...(parsed.settings ?? {}) },
+    settings: {
+      ...current.settings,
+      ...(parsed.settings ?? {}),
+      ...(isLegacyBackup && parsed.settings?.configExperience === undefined
+        ? { configExperience: 'advanced' as const }
+        : {}),
+    },
+    ...(parsed.simplePlay !== undefined
+      ? { simplePlay: parsed.simplePlay }
+      : isLegacyBackup || parsed.settings?.configExperience === 'advanced'
+        ? { simplePlay: undefined }
+        : {}),
     giftCatalog: Array.from(catalogById.values()),
     // Runtime/history data intentionally stays local and is never imported.
     recentGifts: current.recentGifts,
@@ -300,6 +328,7 @@ function normalizeState(parsed: Partial<AppState>): AppState {
   if (!Array.isArray(parsed.settings?.trainingCompletedTopics)) markSettingsMigrationRequired();
   if (parsed.settings?.autoUpdate === undefined) markSettingsMigrationRequired();
   if (parsed.settings?.defaultDisplayThemeId === undefined) markSettingsMigrationRequired();
+  if (parsed.settings?.configExperience === undefined) markSettingsMigrationRequired();
   const showTutorial = parsed.settings?.showTutorial ?? !setupComplete;
   const tutorialCompletedLessons = Array.isArray(parsed.settings?.tutorialCompletedLessons)
     ? parsed.settings.tutorialCompletedLessons.filter((lesson): lesson is AppState['settings']['tutorialCompletedLessons'][number] => (
@@ -309,7 +338,7 @@ function normalizeState(parsed: Partial<AppState>): AppState {
   const tutorialReplayMode = parsed.settings?.tutorialReplayMode === undefined
     ? showTutorial && setupComplete && tutorialCompletedLessons.length === 0
     : parsed.settings.tutorialReplayMode === true;
-  const settings = {
+  const settings: AppState['settings'] = {
     ...base.settings,
     ...(parsed.settings ?? {}),
     showTutorial,
@@ -317,6 +346,7 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     tutorialCompletedLessons: Array.from(new Set(tutorialCompletedLessons)),
     tutorialReplayMode,
     trainingCompletedTopics: normalizeTrainingTopicIds(parsed.settings?.trainingCompletedTopics),
+    configExperience: parsed.settings?.configExperience === 'simple' ? 'simple' : 'advanced',
   };
   settings.panelOpacity = Math.min(100, Math.max(10, Number(settings.panelOpacity) || base.settings.panelOpacity));
   settings.defaultDisplayThemeId = normalizeDisplayThemeId(settings.defaultDisplayThemeId);
@@ -359,8 +389,65 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     rules: parsed.rules ?? base.rules,
     timerRules: parsed.timerRules ?? base.timerRules,
     formulaPresets: parsed.formulaPresets ?? base.formulaPresets,
+    simplePlay: normalizeSimplePlay(parsed.simplePlay, new Set(attributes.flatMap((attribute) => attribute.id ? [attribute.id] : []))),
     giftReceipts: (Array.isArray(parsed.giftReceipts) ? parsed.giftReceipts : []).slice(0, MAX_GIFT_RECEIPTS),
     contributions: normalizeContributionLedger(parsed.contributions),
+  };
+}
+
+function normalizeSimplePlay(input: AppState['simplePlay'] | undefined, attributeIds: ReadonlySet<string>): SimplePlay | undefined {
+  if (!isObjectRecord(input)
+    || input.version !== 1
+    || !['overtime', 'counter', 'goal'].includes(String(input.templateId))
+    || !Number.isInteger(input.templateVersion)
+    || Number(input.templateVersion) < 1
+    || typeof input.attributeId !== 'string'
+    || !input.attributeId.trim()
+    || !attributeIds.has(input.attributeId.trim())
+    || !isObjectRecord(input.parameters)
+    || !isObjectRecord(input.gifts)
+    || typeof input.managedFingerprint !== 'string'
+    || !input.managedFingerprint.trim()) return undefined;
+
+  const parameters: SimplePlay['parameters'] = {};
+  for (const [key, value] of Object.entries(input.parameters)) {
+    if (!key || !['string', 'number', 'boolean'].includes(typeof value)) continue;
+    if (typeof value === 'number' && !Number.isFinite(value)) continue;
+    parameters[key] = value as string | number | boolean;
+  }
+  const gifts: SimplePlay['gifts'] = {};
+  for (const [slotId, giftIds] of Object.entries(input.gifts)) {
+    if (!slotId || !Array.isArray(giftIds)) continue;
+    gifts[slotId] = Array.from(new Set(giftIds
+      .map(Number)
+      .filter((giftId) => Number.isInteger(giftId) && giftId > 0)));
+  }
+  const overtimeGiftActions: SimplePlay['overtimeGiftActions'] = Array.isArray(input.overtimeGiftActions)
+    ? input.overtimeGiftActions.flatMap((candidate): OvertimeGiftAction[] => {
+      if (!isObjectRecord(candidate)) return [];
+      const giftId = Number(candidate.giftId);
+      const operation = String(candidate.operation).trim().toLowerCase();
+      if (!Number.isInteger(giftId)
+        || giftId <= 0
+        || !['add', 'subtract', 'double', 'halve', 'reset'].includes(operation)) return [];
+      if (operation !== 'add' && operation !== 'subtract') {
+        return [{ giftId, operation: operation as OvertimeGiftAction['operation'] }];
+      }
+      const seconds = Number(candidate.seconds);
+      if (!Number.isInteger(seconds) || seconds <= 0) return [];
+      return [{ giftId, operation, seconds } as OvertimeGiftAction];
+    })
+    : undefined;
+
+  return {
+    version: 1,
+    templateId: input.templateId as SimplePlay['templateId'],
+    templateVersion: Number(input.templateVersion),
+    attributeId: input.attributeId.trim(),
+    parameters,
+    gifts,
+    ...(overtimeGiftActions === undefined ? {} : { overtimeGiftActions }),
+    managedFingerprint: input.managedFingerprint.trim(),
   };
 }
 

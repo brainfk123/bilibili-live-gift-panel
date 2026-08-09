@@ -12,6 +12,8 @@ describe('quick gift rule presets', () => {
   it.each([
     ['add', 60, '加班时间+60'],
     ['subtract', 60, 'MAX(加班时间-60,0)'],
+    ['double', 60, '加班时间*2'],
+    ['halve', 60, 'MAX(FLOOR(加班时间/2),0)'],
     ['price', 60, '加班时间+price/1000*60'],
     ['priceSubtract', 60, 'MAX(加班时间-price/1000*60,0)'],
     ['set', 120, '120'],
@@ -26,6 +28,8 @@ describe('quick gift rule presets', () => {
   it.each([
     ['加班时间+60', 'add', 60],
     ['MAX(加班时间-60,0)', 'subtract', 60],
+    ['加班时间*2', 'double', 2],
+    ['MAX(FLOOR(加班时间/2),0)', 'halve', 2],
     ['加班时间+price/1000*60', 'price', 60],
     ['MAX(加班时间-price/1000*60,0)', 'priceSubtract', 60],
     ['120', 'set', 120],
@@ -42,8 +46,11 @@ describe('quick gift rule presets', () => {
     expect(quickGiftOperationUnit('price', true)).toBe('秒');
     expect(quickGiftOperationUsesAmount('reset')).toBe(false);
     expect(quickGiftOperationUsesAmount('advanced')).toBe(false);
+    expect(quickGiftOperationUsesAmount('double')).toBe(false);
+    expect(quickGiftOperationUsesAmount('halve')).toBe(false);
     expect(quickGiftOperationSupportsMaximum('add')).toBe(true);
     expect(quickGiftOperationSupportsMaximum('subtract')).toBe(false);
+    expect(quickGiftOperationSupportsMaximum('double')).toBe(true);
   });
 
   it('wraps increasing rules with an optional upper limit', () => {
@@ -54,5 +61,10 @@ describe('quick gift rule presets', () => {
       amount: 60,
       maximum: 3600,
     });
+  });
+
+  it('caps doubling but not halving', () => {
+    expect(buildQuickGiftFormula('double', '加班时间', 0, 3600)).toBe('MIN(加班时间*2,3600)');
+    expect(buildQuickGiftFormula('halve', '加班时间', 0, 3600)).toBe('MAX(FLOOR(加班时间/2),0)');
   });
 });

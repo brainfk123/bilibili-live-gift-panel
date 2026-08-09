@@ -80,8 +80,8 @@ export function createGiftLoginBadge(gift: Pick<GiftInfo, 'requiresLogin'>): HTM
   if (!gift.requiresLogin) return null;
   return el('span', {
     class: 'gift-login-status',
-    text: '需登录',
-    title: '自动识别这类礼物需要登录 B 站账号',
+    text: '建议登录',
+    title: '登录 B 站账号后，这类礼物的识别会更准确',
   });
 }
 
