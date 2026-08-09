@@ -2368,6 +2368,9 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root)).toContain('制作回放');
     expect(textOf(root)).toContain('无动画素材');
     expect(textOf(root)).toContain('舰长');
+    const superChatRow = root.querySelectorAll('.gift-history-row')
+      .find((row) => textOf(row as TestElement).includes('Super Chat')) as TestElement;
+    expect(superChatRow.querySelector('.gift-history-row-actions')?.querySelectorAll('.btn')).toHaveLength(2);
     const messageButton = findByText(root, '查看留言')!;
     messageButton.onclick?.();
     expect(textOf(root.querySelector('.super-chat-message-dialog') as TestElement)).toContain('测试醒目留言内容');

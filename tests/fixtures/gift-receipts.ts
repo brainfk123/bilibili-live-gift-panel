@@ -29,6 +29,7 @@ const animationSVG = `
 const dataURL = (svg: string): string => `data:image/svg+xml,${encodeURIComponent(svg)}`;
 const avatarURL = dataURL(avatarSVG);
 const animationURL = dataURL(animationSVG);
+const animatedGiftGIFURL = 'data:image/gif;base64,R0lGODlhQABAAIEAAAAAAP9dl//c6wAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQJFgAAACwAAAAAQABAAAAI1AABCBxIsKDBgwgTKlzIsKHDhxAjSpxIsaLFixgzatzIsaPHjyBDihxJsqTJkyhTqlzJsqXLlyQFyJw5E6ZBmjhl2hwoM4DPnz912uwJtGgAoS6JGi2KlKXSpUEFvHwK9ajUpAKqAm26kipUriq9LgWbUqxRsijNMr3aUu1Wtk6zavWJ9qTbqFPlzq1r8i5duF31auVb0q/VvHP/Ik5MOKbgqo1HGo4scjLgsI+/Xsa8d3NgyJ7j5qy5k+fo0KVTq17NurXr17Bjy55Nu7bt27hzlw4IACH5BAkWAAAALBgAEgARAB0AgQAAAP9dl//c6wAAAAhjAAEIBCCgoEGDAxMeXFgwIUEBASJKlNhQYMGJGCM2vJgx48GOHg2CxPhxJEWRJjWiTFmS5UqTLWG+HBmT5kyQNXHe7JiT586QHF0GlTnUZlGdR30+dDkwqUqHDBc6tBhVQMKAACH5BAkWAAAALCgAEgARAB0AgQAAAP9dl//c6wAAAAhjAAEIBCCgoEGDAxMeXFgwIUEBASJKlNhQYMGJGCM2vJgx48GOHg2CxPhxJEWRJjWiTFmS5UqTLWG+HBmT5kyQNXHe7JiT586QHF0GlTnUZlGdR30+dDkwqUqHDBc6tBhVQMKAADs=';
 const changelogHistory = [
   ...CHANGELOG_RELEASES,
   {
@@ -135,9 +136,13 @@ class FixtureImage extends nativeImage {
 globalThis.Image = FixtureImage;
 
 const json = (payload: unknown): Response => Response.json(payload);
+const nativeFetch = globalThis.fetch.bind(globalThis);
 globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
   const requestURL = new URL(String(input), location.href);
   const method = init?.method ?? 'GET';
+  if (requestURL.pathname === '/api/gift-receipts/media' && requestURL.searchParams.get('kind') === 'animation') {
+    return nativeFetch(animatedGiftGIFURL);
+  }
   if (requestURL.pathname === '/api/config' && method === 'GET') return json(state);
   if (requestURL.pathname === '/api/config') return json({ code: 0 });
   if (requestURL.pathname === '/api/runtime') return json({ code: 0, runtime: { state: 'connected', roomId: state.roomId } });

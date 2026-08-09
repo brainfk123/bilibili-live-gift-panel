@@ -3,6 +3,7 @@ import {
   normalizeGiftClipDuration,
   normalizeGiftEffectLayout,
   giftEffectDurationMs,
+  giftGifFrameIndex,
   sanitizeGiftClipFilename,
   selectGiftClipRecorder,
   stopGiftClipStream,
@@ -29,6 +30,15 @@ describe('gift clip studio', () => {
     expect(layout.rgbFrame).toEqual([0, 0, 720, 1280]);
     expect(layout.alphaFrame).toEqual([724, 0, 360, 640]);
     expect(giftEffectDurationMs(layout)).toBe(13_000);
+  });
+
+  it('selects deterministic GIF frames and loops by frame delays', () => {
+    const delays = [220, 220, 220];
+    expect(giftGifFrameIndex(delays, 0)).toBe(0);
+    expect(giftGifFrameIndex(delays, 219)).toBe(0);
+    expect(giftGifFrameIndex(delays, 220)).toBe(1);
+    expect(giftGifFrameIndex(delays, 500)).toBe(2);
+    expect(giftGifFrameIndex(delays, 660)).toBe(0);
   });
 
   it('rejects packed-alpha coordinates outside the video', () => {

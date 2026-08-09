@@ -377,14 +377,6 @@ func (api *giftReceiptAPI) fetchMedia(parent context.Context, rawURL string, max
 	if response.ContentLength > maxBytes {
 		return nil, "", errors.New("媒体文件过大")
 	}
-	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if err != nil {
-		return nil, "", errors.New("媒体类型无效")
-	}
-	mediaType = strings.ToLower(mediaType)
-	if _, ok := allowedTypes[mediaType]; !ok {
-		return nil, "", errors.New("媒体类型不受支持")
-	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxBytes+1))
 	if err != nil {
 		return nil, "", err
@@ -392,7 +384,46 @@ func (api *giftReceiptAPI) fetchMedia(parent context.Context, rawURL string, max
 	if int64(len(data)) > maxBytes {
 		return nil, "", errors.New("媒体文件过大")
 	}
+	mediaType, err := normalizeGiftReceiptMediaType(response.Header.Get("Content-Type"), data, allowedTypes)
+	if err != nil {
+		return nil, "", err
+	}
 	return data, mediaType, nil
+}
+
+func normalizeGiftReceiptMediaType(contentType string, data []byte, allowedTypes map[string]struct{}) (string, error) {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err == nil {
+		mediaType = strings.ToLower(mediaType)
+		if _, ok := allowedTypes[mediaType]; ok {
+			if mediaType == "text/json" {
+				if !json.Valid(data) {
+					return "", errors.New("媒体内容不是有效 JSON")
+				}
+				return "application/json", nil
+			}
+			return mediaType, nil
+		}
+	}
+
+	// B 站部分礼物特效 CDN 会把 H.264 MP4 标成 audio/mp4，或把 JSON
+	// 标成不符合 RFC 的裸 json。仅在内容签名也匹配时兼容这两个已知别名。
+	rawType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	if rawType == "audio/mp4" {
+		if _, ok := allowedTypes["video/mp4"]; ok && isMP4Media(data) {
+			return "video/mp4", nil
+		}
+	}
+	if rawType == "json" {
+		if _, ok := allowedTypes["application/json"]; ok && json.Valid(data) {
+			return "application/json", nil
+		}
+	}
+	return "", errors.New("媒体类型不受支持")
+}
+
+func isMP4Media(data []byte) bool {
+	return len(data) >= 12 && string(data[4:8]) == "ftyp"
 }
 
 func giftReceiptMediaAccept(allowedTypes map[string]struct{}) string {

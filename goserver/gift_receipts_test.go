@@ -226,6 +226,56 @@ func TestGiftReceiptMediaServesVideoAndSanitizedEffectLayout(t *testing.T) {
 	}
 }
 
+func TestGiftReceiptMediaAcceptsVerifiedBilibiliMIMEAliases(t *testing.T) {
+	store, receipt := giftReceiptMediaTestStore(t)
+	mp4 := "\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2"
+	client := giftMediaClientFunc(func(request *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(request.URL.Path, ".mp4") {
+			return mediaResponse(request, http.StatusOK, "audio/mp4", mp4), nil
+		}
+		return mediaResponse(request, http.StatusOK, "json", `{"info":{"videoW":1088,"videoH":1280,"rgbFrame":[0,0,720,1280],"aFrame":[724,0,360,640],"fps":30,"f":75}}`), nil
+	})
+	api := newGiftReceiptAPI(store, client)
+
+	videoResponse := httptest.NewRecorder()
+	api.handleMedia(videoResponse, httptest.NewRequest(http.MethodGet, "/api/gift-receipts/media?id="+receipt.ID+"&kind=effect-video", nil))
+	if videoResponse.Code != http.StatusOK || videoResponse.Header().Get("Content-Type") != "video/mp4" || videoResponse.Body.String() != mp4 {
+		t.Fatalf("video status=%d type=%q body=%q", videoResponse.Code, videoResponse.Header().Get("Content-Type"), videoResponse.Body.String())
+	}
+
+	layoutResponse := httptest.NewRecorder()
+	api.handleMedia(layoutResponse, httptest.NewRequest(http.MethodGet, "/api/gift-receipts/media?id="+receipt.ID+"&kind=effect-layout", nil))
+	if layoutResponse.Code != http.StatusOK || layoutResponse.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("layout status=%d type=%q body=%q", layoutResponse.Code, layoutResponse.Header().Get("Content-Type"), layoutResponse.Body.String())
+	}
+}
+
+func TestGiftReceiptMediaRejectsForgedBilibiliMIMEAliases(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		kind        string
+	}{
+		{name: "audio mp4 without ftyp", contentType: "audio/mp4", body: "not-an-mp4", kind: "effect-video"},
+		{name: "json alias without json", contentType: "json", body: "not-json", kind: "effect-layout"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, receipt := giftReceiptMediaTestStore(t)
+			client := giftMediaClientFunc(func(request *http.Request) (*http.Response, error) {
+				return mediaResponse(request, http.StatusOK, test.contentType, test.body), nil
+			})
+			api := newGiftReceiptAPI(store, client)
+			response := httptest.NewRecorder()
+			api.handleMedia(response, httptest.NewRequest(http.MethodGet, "/api/gift-receipts/media?id="+receipt.ID+"&kind="+test.kind, nil))
+			if response.Code != http.StatusBadGateway {
+				t.Fatalf("status=%d type=%q body=%q", response.Code, response.Header().Get("Content-Type"), response.Body.String())
+			}
+		})
+	}
+}
+
 func TestGiftReceiptMediaRejectsInvalidEffectLayout(t *testing.T) {
 	store, receipt := giftReceiptMediaTestStore(t)
 	client := giftMediaClientFunc(func(request *http.Request) (*http.Response, error) {
