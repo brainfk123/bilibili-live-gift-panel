@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { defaultState } from '../src/storage';
 import type { GiftReceipt } from '../src/types';
@@ -278,6 +279,14 @@ describe('gift clip studio', () => {
       .toBe(giftClipAnimationKey({ giftId: 2, animation: { gif: 'https://i0.hdslb.com/a.gif?token=two', durationMs: 5000 } }));
   });
 
+  it('keeps loading copy in the studio and out of the recorded renderer', () => {
+    const studioSource = readFileSync(new URL('../src/ui/config/gift-clip-studio.ts', import.meta.url), 'utf8');
+    const rendererSource = readFileSync(new URL('../src/ui/config/gift-clip-renderer.ts', import.meta.url), 'utf8');
+
+    expect(studioSource).toContain('正在读取礼物动画');
+    expect(rendererSource).not.toContain('正在准备礼物动画');
+  });
+
   it('cancels a pending source load on idempotent close without surfacing an error', async () => {
     let loadSignal: AbortSignal | undefined;
     studioMocks.loadMediaSession.mockImplementation((
@@ -413,6 +422,67 @@ describe('gift clip studio', () => {
     expect(session.dispose).toHaveBeenCalledOnce();
     expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1);
     expect(removeGlobalListener).toHaveBeenCalledOnce();
+  });
+
+  it('waits for aborted recording cleanup before re-edit can reuse the session and canvas', async () => {
+    const session = mediaSessionFixture();
+    let firstSignal: AbortSignal | undefined;
+    let settleFirstRecording: ((recording: {
+      blob: Blob;
+      mimeType: string;
+      extension: 'webm';
+    }) => void) | undefined;
+    let reportFirstProgress: ((value: number) => void) | undefined;
+    studioMocks.loadMediaSession.mockResolvedValue(session);
+    studioMocks.recordCanvas
+      .mockImplementationOnce(({
+        signal,
+        onProgress,
+      }: {
+        signal: AbortSignal;
+        onProgress: (value: number) => void;
+      }) => {
+        firstSignal = signal;
+        reportFirstProgress = onProgress;
+        return new Promise((resolve) => {
+          settleFirstRecording = resolve;
+        });
+      })
+      .mockResolvedValueOnce({
+        blob: new Blob(['second clip']), mimeType: 'video/webm', extension: 'webm',
+      });
+    const host = new StudioTestElement('host');
+    const controller = openStudio({
+      host: host as unknown as HTMLElement,
+      receipt: receiptFixture(),
+    });
+    await vi.waitFor(() => expect(button(host, '确定剪裁并生成').hidden).toBe(false));
+    button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(studioMocks.recordCanvas).toHaveBeenCalledOnce());
+
+    button(host, '重新剪裁').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(firstSignal?.aborted).toBe(true));
+    await Promise.resolve();
+
+    expect(host.querySelector('.gift-clip-crop-layer')).toBeNull();
+    expect(session.restart).toHaveBeenCalledTimes(2);
+    const progress = host.querySelector('.gift-clip-progress');
+    expect(progress?.value).toBe(0);
+    reportFirstProgress?.(0.75);
+    expect(progress?.value).toBe(0);
+    button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+    expect(studioMocks.recordCanvas).toHaveBeenCalledOnce();
+
+    settleFirstRecording?.({
+      blob: new Blob(['aborted clip']), mimeType: 'video/webm', extension: 'webm',
+    });
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-crop-layer')).not.toBeNull());
+    expect(session.restart).toHaveBeenCalledTimes(3);
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+
+    button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(studioMocks.recordCanvas).toHaveBeenCalledTimes(2));
+    controller.close();
   });
 
   it('drops the legacy placement field after the crop cutover', () => {

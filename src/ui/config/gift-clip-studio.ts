@@ -66,6 +66,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
   let editor: GiftClipCropEditor | null = null;
   let loadAbort: AbortController | null = null;
   let recordingAbort: AbortController | null = null;
+  let recordingTask: Promise<void> | null = null;
   let previewURL = '';
   let generatedRecording: GiftClipRecording | null = null;
   let confirmedCrop = normalizeGiftClipCrop(options.initialCrop);
@@ -152,6 +153,11 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
   const abortRecording = (): void => {
     if (recordingAbort && !recordingAbort.signal.aborted) recordingAbort.abort();
   };
+  const abortRecordingTask = (): Promise<void> | null => {
+    const activeTask = recordingTask;
+    abortRecording();
+    return activeTask;
+  };
   const abortLoad = (): void => {
     if (loadAbort && !loadAbort.signal.aborted) {
       loadAbort.abort(new DOMException('Gift clip source load cancelled.', 'AbortError'));
@@ -223,7 +229,9 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
     token: number,
   ): Promise<void> => {
     try {
-      abortRecording();
+      const activeRecording = abortRecordingTask();
+      if (activeRecording) await activeRecording;
+      if (!isCurrent(token) || activeSession !== session) return;
       stopEditorPreview();
       destroyEditor();
       clearPreview();
@@ -260,7 +268,9 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
   const loadSource = async (): Promise<void> => {
     const token = ++transition;
     abortLoad();
-    abortRecording();
+    const activeRecording = abortRecordingTask();
+    if (activeRecording) await activeRecording;
+    if (!isCurrent(token)) return;
     stopEditorPreview();
     destroyEditor();
     clearPreview();
@@ -339,41 +349,47 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
     status.textContent = `正在生成视频 · ${activeSession.sourceLabel} · ${Math.round(activeSession.durationMs / 100) / 10} 秒`;
     const controller = new AbortController();
     recordingAbort = controller;
-    try {
-      await activeSession.restart();
-      if (!isCurrent(token)) return;
-      const recording = await recordGiftClipCanvas({
-        canvas: recordingCanvas,
-        durationMs: activeSession.durationMs,
-        signal: controller.signal,
-        drawFrame: (elapsedMs) => {
-          drawGiftClipOutputFrame(context, receipt, activeSession.visualAt(elapsedMs), activeSession.avatar, pixels);
-        },
-        onProgress: (value) => {
-          progress.value = Math.min(100, Math.max(0, value * 100));
-        },
-      });
-      if (!isCurrent(token)) return;
-      activeSession.pause();
-      generatedRecording = recording;
-      previewURL = URL.createObjectURL(recording.blob);
-      preview.src = previewURL;
-      preview.style.aspectRatio = `${pixels.width} / ${pixels.height}`;
-      setStageSize(pixels.width, pixels.height);
-      sourceCanvas.hidden = true;
-      preview.hidden = false;
-      progress.value = 100;
-      const sizeLabel = formatGiftClipBytes(recording.blob.size);
-      status.textContent = `${recording.extension.toUpperCase()} 已生成 · ${sizeLabel} · ${pixels.width} × ${pixels.height} · ${activeSession.sourceLabel}`;
-      saveButton.textContent = `保存 ${recording.extension.toUpperCase()}`;
-      saveButton.hidden = false;
-      saveButton.disabled = false;
-      void preview.play().catch(() => undefined);
-    } catch (error) {
-      if (isCurrent(token) && !controller.signal.aborted) reportFailure(error);
-    } finally {
+    const recordingRun = (async (): Promise<void> => {
+      try {
+        await activeSession.restart();
+        if (!isCurrent(token)) return;
+        const recording = await recordGiftClipCanvas({
+          canvas: recordingCanvas,
+          durationMs: activeSession.durationMs,
+          signal: controller.signal,
+          drawFrame: (elapsedMs) => {
+            drawGiftClipOutputFrame(context, receipt, activeSession.visualAt(elapsedMs), activeSession.avatar, pixels);
+          },
+          onProgress: (value) => {
+            if (isCurrent(token)) progress.value = Math.min(100, Math.max(0, value * 100));
+          },
+        });
+        if (!isCurrent(token)) return;
+        activeSession.pause();
+        generatedRecording = recording;
+        previewURL = URL.createObjectURL(recording.blob);
+        preview.src = previewURL;
+        preview.style.aspectRatio = `${pixels.width} / ${pixels.height}`;
+        setStageSize(pixels.width, pixels.height);
+        sourceCanvas.hidden = true;
+        preview.hidden = false;
+        progress.value = 100;
+        const sizeLabel = formatGiftClipBytes(recording.blob.size);
+        status.textContent = `${recording.extension.toUpperCase()} 已生成 · ${sizeLabel} · ${pixels.width} × ${pixels.height} · ${activeSession.sourceLabel}`;
+        saveButton.textContent = `保存 ${recording.extension.toUpperCase()}`;
+        saveButton.hidden = false;
+        saveButton.disabled = false;
+        void preview.play().catch(() => undefined);
+      } catch (error) {
+        if (isCurrent(token) && !controller.signal.aborted) reportFailure(error);
+      }
+    })();
+    const task = recordingRun.finally(() => {
+      if (recordingTask === task) recordingTask = null;
       if (recordingAbort === controller) recordingAbort = null;
-    }
+    });
+    recordingTask = task;
+    await task;
   };
 
   const close = (): void => {
@@ -381,7 +397,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
     closed = true;
     transition += 1;
     abortLoad();
-    abortRecording();
+    void abortRecordingTask();
     stopEditorPreview();
     destroyEditor();
     disposeSession();
