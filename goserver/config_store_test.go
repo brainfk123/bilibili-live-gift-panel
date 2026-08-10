@@ -325,9 +325,8 @@ func TestStateShardVersionTenUpgradesToEleven(t *testing.T) {
 	}
 }
 
-func TestNormalizeGiftClipCropsRejectsNonFiniteAndLimitsCount(t *testing.T) {
-	input := make(map[string]giftClipCropState, 205)
-	input["invalid"] = giftClipCropState{X: math.NaN(), Y: 0, Width: 1, Height: 1}
+func TestNormalizeGiftClipCropsLimitsCount(t *testing.T) {
+	input := make(map[string]giftClipCropState, 204)
 	for index := 0; index < 204; index++ {
 		input[fmt.Sprintf("effect:%d", index)] = giftClipCropState{X: 0, Y: 0, Width: 1, Height: 1}
 	}
@@ -335,8 +334,23 @@ func TestNormalizeGiftClipCropsRejectsNonFiniteAndLimitsCount(t *testing.T) {
 	if len(got) != 200 {
 		t.Fatalf("crop count = %d, want 200", len(got))
 	}
-	if crop, exists := got["invalid"]; exists && crop != fullGiftClipCrop() {
+}
+
+func TestNormalizeGiftClipCropsRepairsNonFinite(t *testing.T) {
+	got := normalizeGiftClipCrops(map[string]giftClipCropState{
+		"invalid": {X: math.NaN(), Y: 0, Width: 1, Height: 1},
+	})
+	if crop := got["invalid"]; crop != fullGiftClipCrop() {
 		t.Fatalf("non-finite crop = %#v", crop)
+	}
+}
+
+func TestNormalizeGiftClipCropsAcceptsUnicodeKeysAtCharacterLimit(t *testing.T) {
+	key := strings.Repeat("礼", 160)
+	want := fullGiftClipCrop()
+	got := normalizeGiftClipCrops(map[string]giftClipCropState{key: want})
+	if crop, exists := got[key]; !exists || crop != want {
+		t.Fatalf("unicode key crop = %#v, exists = %t", crop, exists)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -752,7 +753,7 @@ func normalizeGiftClipCrops(input map[string]giftClipCropState) map[string]giftC
 	crops := make(map[string]giftClipCropState, minInt(len(input), 200))
 	for key, crop := range input {
 		key = strings.TrimSpace(key)
-		if key == "" || len(key) > 160 {
+		if key == "" || utf8.RuneCountInString(key) > 160 {
 			continue
 		}
 		if math.IsNaN(crop.X) || math.IsInf(crop.X, 0) || math.IsNaN(crop.Y) || math.IsInf(crop.Y, 0) || math.IsNaN(crop.Width) || math.IsInf(crop.Width, 0) || math.IsNaN(crop.Height) || math.IsInf(crop.Height, 0) || crop.Width <= 0 || crop.Height <= 0 {
