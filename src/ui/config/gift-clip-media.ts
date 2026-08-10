@@ -5,6 +5,7 @@ import type { GiftReceipt } from '../../types';
 const DEFAULT_DURATION_MS = 3000;
 const MIN_DURATION_MS = 1000;
 const MAX_DURATION_MS = 15000;
+const MAX_EFFECT_COMPOSITE_DIMENSION = 4096;
 
 export interface GiftEffectLayout {
   videoWidth: number;
@@ -56,6 +57,7 @@ class GiftClipMediaResources {
   private readonly videos = new Set<HTMLVideoElement>();
   private readonly objectURLs = new Set<string>();
   private readonly canvases = new Set<HTMLCanvasElement>();
+  private readonly disposeCallbacks = new Set<() => void>();
   private disposed = false;
 
   ownImage(image: HTMLImageElement): HTMLImageElement {
@@ -78,9 +80,15 @@ class GiftClipMediaResources {
     return canvas;
   }
 
+  onDispose(callback: () => void): void {
+    this.disposeCallbacks.add(callback);
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    for (const callback of this.disposeCallbacks) callback();
+    this.disposeCallbacks.clear();
     for (const video of this.videos) {
       video.pause();
       video.removeAttribute('src');
@@ -120,7 +128,11 @@ export function normalizeGiftEffectLayout(value: unknown): GiftEffectLayout {
   const frames = positiveInteger(candidate.frames);
   const rgbFrame = normalizeEffectFrame(candidate.rgbFrame, videoWidth, videoHeight);
   const alphaFrame = normalizeEffectFrame(candidate.alphaFrame, videoWidth, videoHeight);
-  if (videoWidth > 8192 || videoHeight > 8192 || fps > 120 || frames > 3600) {
+  if (
+    videoWidth > 8192 || videoHeight > 8192 || fps > 120 || frames > 3600
+    || rgbFrame[2] > MAX_EFFECT_COMPOSITE_DIMENSION
+    || rgbFrame[3] > MAX_EFFECT_COMPOSITE_DIMENSION
+  ) {
     throw new Error('礼物特效坐标超出允许范围。');
   }
   return { videoWidth, videoHeight, rgbFrame, alphaFrame, fps, frames };
@@ -198,8 +210,8 @@ export async function loadGiftClipMediaSession(
       visualAt(elapsedMs) {
         return disposed ? null : source.visualAt(elapsedMs);
       },
-      async restart() {
-        if (!disposed) await source.restart();
+      restart() {
+        return disposed ? Promise.resolve() : source.restart();
       },
       pause() {
         if (!disposed) source.pause();
@@ -348,13 +360,7 @@ async function loadGiftAnimation(
 
   const sourceURL = resources.ownObjectURL(URL.createObjectURL(blob));
   const image = await loadAnimatedImage(sourceURL, resources, sourceMediaHost);
-  return {
-    width: image.naturalWidth,
-    height: image.naturalHeight,
-    visualAt: () => imageGiftClipVisual(image),
-    restart: () => restartAnimatedImage(image, sourceURL),
-    pause: () => undefined,
-  };
+  return createAnimatedImageSource(image, sourceURL, resources);
 }
 
 function isGIFData(data: ArrayBuffer): boolean {
@@ -500,13 +506,58 @@ function loadAnimatedImage(
   });
 }
 
-function restartAnimatedImage(image: HTMLImageElement, src: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    image.onload = () => resolve();
-    image.onerror = () => reject(new Error('礼物动画素材读取失败，请稍后重试。'));
+function createAnimatedImageSource(
+  image: HTMLImageElement,
+  src: string,
+  resources: GiftClipMediaResources,
+): GiftClipMediaSource {
+  let restartPromise: Promise<void> | null = null;
+  let rejectRestart: ((reason: Error) => void) | null = null;
+
+  resources.onDispose(() => {
+    if (!rejectRestart) return;
+    const reject = rejectRestart;
+    restartPromise = null;
+    rejectRestart = null;
+    image.onload = null;
+    image.onerror = null;
+    reject(new Error('礼物动画会话已释放。'));
+  });
+
+  const restart = (): Promise<void> => {
+    if (restartPromise) return restartPromise;
+    let resolvePending!: () => void;
+    let rejectPending!: (reason: Error) => void;
+    const pending = new Promise<void>((resolve, reject) => {
+      resolvePending = resolve;
+      rejectPending = reject;
+    });
+    restartPromise = pending;
+    rejectRestart = rejectPending;
+
+    const settle = (error?: Error): void => {
+      if (restartPromise !== pending) return;
+      restartPromise = null;
+      rejectRestart = null;
+      image.onload = null;
+      image.onerror = null;
+      if (error) rejectPending(error);
+      else resolvePending();
+    };
+    image.onload = () => settle();
+    image.onerror = () => settle(new Error('礼物动画素材读取失败，请稍后重试。'));
     image.removeAttribute('src');
     image.src = src;
-  });
+    return pending;
+  };
+
+  return {
+    width: image.naturalWidth,
+    height: image.naturalHeight,
+    visualAt: () => imageGiftClipVisual(image),
+    restart,
+    pause: () => undefined,
+  };
 }
 
 async function loadOptionalImage(
