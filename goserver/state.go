@@ -330,26 +330,35 @@ type giftClipPlacementState struct {
 	Y float64 `json:"y"`
 }
 
+type giftClipCropState struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
 type settingsState struct {
-	FontSize                  int                               `json:"fontSize"`
-	AccentColor               string                            `json:"accentColor"`
-	ShowStats                 bool                              `json:"showStats"`
-	ShowConnection            bool                              `json:"showConnection"`
-	Align                     string                            `json:"align"`
-	Theme                     string                            `json:"theme"`
-	GiftView                  string                            `json:"giftView"`
-	PanelOpacity              int                               `json:"panelOpacity"`
-	DefaultDisplayThemeID     string                            `json:"defaultDisplayThemeId"`
-	ShowTutorial              *bool                             `json:"showTutorial"`
-	TutorialVersion           int                               `json:"tutorialVersion"`
-	TutorialCompletedLessons  []string                          `json:"tutorialCompletedLessons"`
-	TutorialReplayMode        *bool                             `json:"tutorialReplayMode"`
-	TutorialTargetAttributeID string                            `json:"tutorialTargetAttributeId,omitempty"`
-	TrainingCompletedTopics   []string                          `json:"trainingCompletedTopics"`
-	LastSeenChangelogVersion  string                            `json:"lastSeenChangelogVersion"`
-	AutoUpdate                *bool                             `json:"autoUpdate"`
-	ConfigExperience          string                            `json:"configExperience"`
-	GiftClipPlacements        map[string]giftClipPlacementState `json:"giftClipPlacements"`
+	FontSize                  int                          `json:"fontSize"`
+	AccentColor               string                       `json:"accentColor"`
+	ShowStats                 bool                         `json:"showStats"`
+	ShowConnection            bool                         `json:"showConnection"`
+	Align                     string                       `json:"align"`
+	Theme                     string                       `json:"theme"`
+	GiftView                  string                       `json:"giftView"`
+	PanelOpacity              int                          `json:"panelOpacity"`
+	DefaultDisplayThemeID     string                       `json:"defaultDisplayThemeId"`
+	ShowTutorial              *bool                        `json:"showTutorial"`
+	TutorialVersion           int                          `json:"tutorialVersion"`
+	TutorialCompletedLessons  []string                     `json:"tutorialCompletedLessons"`
+	TutorialReplayMode        *bool                        `json:"tutorialReplayMode"`
+	TutorialTargetAttributeID string                       `json:"tutorialTargetAttributeId,omitempty"`
+	TrainingCompletedTopics   []string                     `json:"trainingCompletedTopics"`
+	LastSeenChangelogVersion  string                       `json:"lastSeenChangelogVersion"`
+	AutoUpdate                *bool                        `json:"autoUpdate"`
+	ConfigExperience          string                       `json:"configExperience"`
+	GiftClipCrops             map[string]giftClipCropState `json:"giftClipCrops"`
+	// GiftClipPlacements is retained for compatibility until Task 7 switches consumers to crops.
+	GiftClipPlacements map[string]giftClipPlacementState `json:"giftClipPlacements"`
 }
 
 type simplePlayOvertimeGiftActionState struct {
@@ -458,6 +467,7 @@ func defaultAppState() appState {
 			TrainingCompletedTopics:  []string{},
 			AutoUpdate:               &autoUpdate,
 			ConfigExperience:         "simple",
+			GiftClipCrops:            map[string]giftClipCropState{},
 			GiftClipPlacements:       map[string]giftClipPlacementState{},
 		},
 	}
@@ -557,6 +567,7 @@ func normalizeAppState(state *appState) {
 	if state.Settings.ConfigExperience != "simple" {
 		state.Settings.ConfigExperience = "advanced"
 	}
+	state.Settings.GiftClipCrops = normalizeGiftClipCrops(state.Settings.GiftClipCrops)
 	state.Settings.GiftClipPlacements = normalizeGiftClipPlacements(state.Settings.GiftClipPlacements)
 	if state.SimplePlay != nil {
 		state.SimplePlay.TemplateID = strings.TrimSpace(state.SimplePlay.TemplateID)
@@ -731,6 +742,33 @@ func normalizeGiftClipPlacements(input map[string]giftClipPlacementState) map[st
 		}
 	}
 	return placements
+}
+
+func fullGiftClipCrop() giftClipCropState {
+	return giftClipCropState{X: 0, Y: 0, Width: 1, Height: 1}
+}
+
+func normalizeGiftClipCrops(input map[string]giftClipCropState) map[string]giftClipCropState {
+	crops := make(map[string]giftClipCropState, minInt(len(input), 200))
+	for key, crop := range input {
+		key = strings.TrimSpace(key)
+		if key == "" || len(key) > 160 {
+			continue
+		}
+		if math.IsNaN(crop.X) || math.IsInf(crop.X, 0) || math.IsNaN(crop.Y) || math.IsInf(crop.Y, 0) || math.IsNaN(crop.Width) || math.IsInf(crop.Width, 0) || math.IsNaN(crop.Height) || math.IsInf(crop.Height, 0) || crop.Width <= 0 || crop.Height <= 0 {
+			crop = fullGiftClipCrop()
+		} else {
+			crop.Width = math.Min(1, crop.Width)
+			crop.Height = math.Min(1, crop.Height)
+			crop.X = math.Max(0, math.Min(1-crop.Width, crop.X))
+			crop.Y = math.Max(0, math.Min(1-crop.Height, crop.Y))
+		}
+		crops[key] = crop
+		if len(crops) == 200 {
+			break
+		}
+	}
+	return crops
 }
 
 func isDisplayThemeID(value string) bool {

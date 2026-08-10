@@ -13,7 +13,7 @@ import (
 // Every persisted shard has its own version. Missing versions are treated as
 // legacy version 0, while newer versions are rejected so an older executable
 // cannot silently discard fields it does not understand.
-const stateShardSchemaVersion = 10
+const stateShardSchemaVersion = 11
 
 type unsupportedStateVersionError struct {
 	Shard   string

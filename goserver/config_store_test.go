@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -156,11 +157,15 @@ func TestConfigStorePatchWritesOnlyAffectedShard(t *testing.T) {
 	}
 }
 
-func TestConfigStorePersistsGiftClipPlacements(t *testing.T) {
+func TestConfigStorePersistsGiftClipCrops(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	patch := httptest.NewRecorder()
 	store.handle(patch, httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(`{
-		"settings":{"giftClipPlacements":{"effect:99":{"x":42.5,"y":-18},"media:clamped":{"x":999,"y":-999}}}
+		"settings":{"giftClipCrops":{
+			"effect:99":{"x":0.1,"y":0.2,"width":0.6,"height":0.7},
+			"media:clamped":{"x":0.9,"y":-1,"width":0.5,"height":2},
+			"media:invalid":{"x":0,"y":0,"width":0,"height":1}
+		}}
 	}`)))
 	if patch.Code != http.StatusOK {
 		t.Fatalf("PATCH status = %d, body = %s", patch.Code, patch.Body.String())
@@ -170,11 +175,21 @@ func TestConfigStorePersistsGiftClipPlacements(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := state.Settings.GiftClipPlacements["effect:99"]; got.X != 42.5 || got.Y != -18 {
-		t.Fatalf("saved effect placement = %#v", got)
+	if got := state.Settings.GiftClipCrops["effect:99"]; got != (giftClipCropState{X: .1, Y: .2, Width: .6, Height: .7}) {
+		t.Fatalf("saved crop = %#v", got)
 	}
-	if got := state.Settings.GiftClipPlacements["media:clamped"]; got.X != 160 || got.Y != -160 {
-		t.Fatalf("clamped media placement = %#v", got)
+	if got := state.Settings.GiftClipCrops["media:clamped"]; got != (giftClipCropState{X: .5, Y: 0, Width: .5, Height: 1}) {
+		t.Fatalf("clamped crop = %#v", got)
+	}
+	if got := state.Settings.GiftClipCrops["media:invalid"]; got != (giftClipCropState{X: 0, Y: 0, Width: 1, Height: 1}) {
+		t.Fatalf("repaired crop = %#v", got)
+	}
+	clone, err := cloneAppState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := clone.Settings.GiftClipCrops["effect:99"]; got != state.Settings.GiftClipCrops["effect:99"] {
+		t.Fatalf("cloned crop = %#v, want %#v", got, state.Settings.GiftClipCrops["effect:99"])
 	}
 }
 
@@ -284,6 +299,44 @@ func TestConfigStoreMigratesMissingFieldsWithDefaults(t *testing.T) {
 	}
 	if metadata.SchemaVersion != stateShardSchemaVersion {
 		t.Fatalf("schemaVersion = %d, want %d", metadata.SchemaVersion, stateShardSchemaVersion)
+	}
+}
+
+func TestStateShardVersionTenUpgradesToEleven(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	if err := os.WriteFile(store.path, []byte(`{"schemaVersion":10,"settings":{"theme":"light"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.migrateLegacy(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata struct {
+		SchemaVersion int `json:"schemaVersion"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.SchemaVersion != 11 {
+		t.Fatalf("schemaVersion = %d, want 11", metadata.SchemaVersion)
+	}
+}
+
+func TestNormalizeGiftClipCropsRejectsNonFiniteAndLimitsCount(t *testing.T) {
+	input := make(map[string]giftClipCropState, 205)
+	input["invalid"] = giftClipCropState{X: math.NaN(), Y: 0, Width: 1, Height: 1}
+	for index := 0; index < 204; index++ {
+		input[fmt.Sprintf("effect:%d", index)] = giftClipCropState{X: 0, Y: 0, Width: 1, Height: 1}
+	}
+	got := normalizeGiftClipCrops(input)
+	if len(got) != 200 {
+		t.Fatalf("crop count = %d, want 200", len(got))
+	}
+	if crop, exists := got["invalid"]; exists && crop != fullGiftClipCrop() {
+		t.Fatalf("non-finite crop = %#v", crop)
 	}
 }
 
