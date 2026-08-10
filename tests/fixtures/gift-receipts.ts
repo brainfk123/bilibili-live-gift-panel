@@ -13,23 +13,17 @@ const avatarSVG = `
 </svg>`;
 
 const animationSVG = `
-<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320" viewBox="0 0 320 320">
-  <defs>
-    <linearGradient id="box" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#ff9bc1"/><stop offset="1" stop-color="#ef4f91"/></linearGradient>
-    <filter id="shadow"><feDropShadow dx="0" dy="12" stdDeviation="10" flood-opacity=".28"/></filter>
-  </defs>
-  <g filter="url(#shadow)">
-    <animateTransform attributeName="transform" type="translate" values="0 8;0 -8;0 8" dur="1.2s" repeatCount="indefinite"/>
-    <rect x="74" y="91" width="172" height="154" rx="28" fill="url(#box)" stroke="#ffd7e6" stroke-width="8"/>
-    <path d="M160 91v154M74 140h172" stroke="#fff2f7" stroke-width="14"/>
-    <path d="M160 91c-24-45-66-44-65-12 1 27 36 31 65 12zm0 0c24-45 66-44 65-12-1 27-36 31-65 12z" fill="#ffd45e"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <defs><linearGradient id="sky" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#172d68"/><stop offset="1" stop-color="#e44f91"/></linearGradient></defs>
+  <rect width="640" height="360" fill="url(#sky)"/>
+  <circle cx="460" cy="150" r="72" fill="#ffd8e8"><animate attributeName="cy" values="140;175;140" dur="1.2s" repeatCount="indefinite"/></circle>
 </svg>`;
+const tinyAnimationSVG = `<svg xmlns="http://www.w3.org/2000/svg" width="63" height="120"><rect width="63" height="120" fill="#fb7299"/></svg>`;
 
 const dataURL = (svg: string): string => `data:image/svg+xml,${encodeURIComponent(svg)}`;
 const avatarURL = dataURL(avatarSVG);
 const animationURL = dataURL(animationSVG);
-const animatedGiftGIFURL = 'data:image/gif;base64,R0lGODlhQABAAIEAAAAAAP9dl//c6wAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQJFgAAACwAAAAAQABAAAAI1AABCBxIsKDBgwgTKlzIsKHDhxAjSpxIsaLFixgzatzIsaPHjyBDihxJsqTJkyhTqlzJsqXLlyQFyJw5E6ZBmjhl2hwoM4DPnz912uwJtGgAoS6JGi2KlKXSpUEFvHwK9ajUpAKqAm26kipUriq9LgWbUqxRsijNMr3aUu1Wtk6zavWJ9qTbqFPlzq1r8i5duF31auVb0q/VvHP/Ik5MOKbgqo1HGo4scjLgsI+/Xsa8d3NgyJ7j5qy5k+fo0KVTq17NurXr17Bjy55Nu7bt27hzlw4IACH5BAkWAAAALBgAEgARAB0AgQAAAP9dl//c6wAAAAhjAAEIBCCgoEGDAxMeXFgwIUEBASJKlNhQYMGJGCM2vJgx48GOHg2CxPhxJEWRJjWiTFmS5UqTLWG+HBmT5kyQNXHe7JiT586QHF0GlTnUZlGdR30+dDkwqUqHDBc6tBhVQMKAACH5BAkWAAAALCgAEgARAB0AgQAAAP9dl//c6wAAAAhjAAEIBCCgoEGDAxMeXFgwIUEBASJKlNhQYMGJGCM2vJgx48GOHg2CxPhxJEWRJjWiTFmS5UqTLWG+HBmT5kyQNXHe7JiT586QHF0GlTnUZlGdR30+dDkwqUqHDBc6tBhVQMKAADs=';
+const tinyAnimationURL = dataURL(tinyAnimationSVG);
 const changelogHistory = [
   ...CHANGELOG_RELEASES,
   {
@@ -102,6 +96,12 @@ const state: AppState = {
       effects: [{ attributeName: '挑战次数', delta: 960, valueAfter: 12745, ruleId: 'rule-1', triggerName: '心动盲盒规则' }],
     },
     {
+      id: 'tiny-animation', time: Date.now() - 250, giftId: 63_120, giftName: '微型动画', num: 1,
+      price: 1, totalCoin: 1, coinType: 'gold', uname: '尺寸门禁测试', avatar: avatarURL,
+      senderUid: 63120, imgBasic: tinyAnimationURL,
+      animation: { gif: 'https://i0.hdslb.com/tiny-animation.gif', durationMs: 1200 }, effects: [],
+    },
+    {
       id: 'guard-effect', time: Date.now() - 500, giftId: 1_900_000_001, giftName: '大航海·舰长', num: 1,
       price: 198_000, totalCoin: 198_000, coinType: 'gold', uname: '新上舰观众', avatar: avatarURL,
       senderUid: 22334455, membership: 'admiral', imgBasic: animationURL,
@@ -122,10 +122,14 @@ const state: AppState = {
   ],
 };
 
+Object.assign(window, { __giftReceiptFixtureState: state });
+
 const nativeImage = globalThis.Image;
 class FixtureImage extends nativeImage {
   override set src(value: string) {
-    if (value.includes('/api/gift-receipts/media') && value.includes('kind=animation')) super.src = animationURL;
+    if (value.includes('/api/gift-receipts/media') && value.includes('kind=animation')) {
+      super.src = value.includes('id=tiny-animation') ? tinyAnimationURL : animationURL;
+    }
     else if (value.includes('/api/gift-receipts/media') && value.includes('kind=avatar')) super.src = avatarURL;
     else super.src = value;
   }
@@ -142,7 +146,8 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
   const requestURL = new URL(String(input), location.href);
   const method = init?.method ?? 'GET';
   if (requestURL.pathname === '/api/gift-receipts/media' && requestURL.searchParams.get('kind') === 'animation') {
-    return nativeFetch(animatedGiftGIFURL);
+    if (requestURL.searchParams.get('id') === 'tiny-animation') return nativeFetch(dataURL(tinyAnimationSVG));
+    return nativeFetch(dataURL(animationSVG));
   }
   if (requestURL.pathname === '/api/config' && method === 'GET') return json(state);
   if (requestURL.pathname === '/api/config' && method === 'PATCH') {
