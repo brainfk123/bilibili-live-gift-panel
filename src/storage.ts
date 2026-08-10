@@ -16,6 +16,7 @@ import {
   normalizeGiftTargetLayout,
 } from './output-config';
 import { giftTargetPanelConfig, mergeGiftTargetPanelConfigs, type GiftTargetPanelConfig } from './gift-targets';
+import { normalizeGiftClipCrop } from './ui/config/gift-clip-crop';
 
 const CONFIG_ENDPOINT = '/api/config';
 const CONFIG_BACKUP_SCHEMA_VERSION = 5;
@@ -96,6 +97,7 @@ export const defaultState = (): AppState => ({
     lastSeenChangelogVersion: '',
     autoUpdate: true,
     configExperience: 'simple',
+    giftClipCrops: {},
     giftClipPlacements: {},
   },
   giftCatalog: [],
@@ -348,6 +350,7 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     tutorialReplayMode,
     trainingCompletedTopics: normalizeTrainingTopicIds(parsed.settings?.trainingCompletedTopics),
     configExperience: parsed.settings?.configExperience === 'simple' ? 'simple' : 'advanced',
+    giftClipCrops: normalizeGiftClipCrops(parsed.settings?.giftClipCrops),
     giftClipPlacements: normalizeGiftClipPlacements(parsed.settings?.giftClipPlacements),
   };
   settings.panelOpacity = Math.min(100, Math.max(10, Number(settings.panelOpacity) || base.settings.panelOpacity));
@@ -395,6 +398,16 @@ function normalizeState(parsed: Partial<AppState>): AppState {
     giftReceipts: (Array.isArray(parsed.giftReceipts) ? parsed.giftReceipts : []).slice(0, MAX_GIFT_RECEIPTS),
     contributions: normalizeContributionLedger(parsed.contributions),
   };
+}
+
+function normalizeGiftClipCrops(value: unknown): AppState['settings']['giftClipCrops'] {
+  if (!isObjectRecord(value)) return {};
+  const crops: AppState['settings']['giftClipCrops'] = {};
+  for (const [key, raw] of Object.entries(value).slice(-200)) {
+    if (!key.trim() || key.length > 160) continue;
+    crops[key] = normalizeGiftClipCrop(raw);
+  }
+  return crops;
 }
 
 function normalizeGiftClipPlacements(value: unknown): AppState['settings']['giftClipPlacements'] {

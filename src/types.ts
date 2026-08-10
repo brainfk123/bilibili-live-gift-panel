@@ -342,6 +342,13 @@ export interface GiftClipPlacement {
   y: number;
 }
 
+export interface GiftClipCrop {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface Settings {
   fontSize: number;
   accentColor: string;
@@ -361,6 +368,7 @@ export interface Settings {
   lastSeenChangelogVersion: string;
   autoUpdate: boolean;
   configExperience: 'simple' | 'advanced';
+  giftClipCrops: Record<string, GiftClipCrop>;
   giftClipPlacements: Record<string, GiftClipPlacement>;
 }
 

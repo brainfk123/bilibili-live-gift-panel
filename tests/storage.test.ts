@@ -20,6 +20,7 @@ describe('storage', () => {
     expect(s.settings.lastSeenChangelogVersion).toBe('');
     expect(s.settings.tutorialReplayMode).toBe(false);
     expect(s.settings.configExperience).toBe('simple');
+    expect(s.settings.giftClipCrops).toEqual({});
     expect(s.settings.giftClipPlacements).toEqual({});
   });
 
@@ -103,6 +104,36 @@ describe('storage', () => {
       'effect:1': { x: 22.5, y: -36 },
       'media:clamped': { x: 160, y: -160 },
     });
+  });
+
+  it('normalizes saved gift animation crops', async () => {
+    const serverState = defaultState();
+    serverState.settings.giftClipCrops = {
+      'effect:1': { x: .1, y: .2, width: .6, height: .7 },
+      'media:clamped': { x: .9, y: -.2, width: .5, height: 2 },
+      'media:invalid': { x: Number.NaN, y: 0, width: 1, height: 1 },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(serverState)));
+
+    await hydrateStateFromServer();
+
+    expect(loadState().settings.giftClipCrops).toEqual({
+      'effect:1': { x: .1, y: .2, width: .6, height: .7 },
+      'media:clamped': { x: .5, y: 0, width: .5, height: 1 },
+      'media:invalid': { x: 0, y: 0, width: 1, height: 1 },
+    });
+  });
+
+  it('limits persisted gift animation crops to 200 entries', async () => {
+    const serverState = defaultState();
+    serverState.settings.giftClipCrops = Object.fromEntries(
+      Array.from({ length: 205 }, (_, index) => [`effect:${index}`, { x: 0, y: 0, width: 1, height: 1 }]),
+    );
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(serverState)));
+
+    await hydrateStateFromServer();
+
+    expect(Object.keys(loadState().settings.giftClipCrops)).toHaveLength(200);
   });
 
   it('saves only changed settings when history is larger than the keepalive limit', async () => {
