@@ -64,6 +64,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
   let previewFrame = 0;
   let session: GiftClipMediaSession | null = null;
   let editor: GiftClipCropEditor | null = null;
+  let loadAbort: AbortController | null = null;
   let recordingAbort: AbortController | null = null;
   let previewURL = '';
   let generatedRecording: GiftClipRecording | null = null;
@@ -151,6 +152,12 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
   const abortRecording = (): void => {
     if (recordingAbort && !recordingAbort.signal.aborted) recordingAbort.abort();
   };
+  const abortLoad = (): void => {
+    if (loadAbort && !loadAbort.signal.aborted) {
+      loadAbort.abort(new DOMException('Gift clip source load cancelled.', 'AbortError'));
+    }
+    loadAbort = null;
+  };
   const clearPreview = (): void => {
     preview.pause();
     if (previewURL) URL.revokeObjectURL(previewURL);
@@ -198,7 +205,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
     const startedAt = performance.now();
     const draw = (now: number): void => {
       previewFrame = 0;
-      if (!isCurrent(token) || activeSession !== session || !editor) return;
+      if (!isCurrent(token) || activeSession !== session) return;
       try {
         drawGiftClipSourcePreview(context, activeSession.visualAt(now - startedAt));
         previewFrame = requestAnimationFrame(draw);
@@ -234,6 +241,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
       sourceCanvas.height = activeSession.height;
       await activeSession.restart();
       if (!isCurrent(token) || activeSession !== session) return;
+      startPreviewLoop(activeSession, token);
       editor = createGiftClipCropEditor({
         stage,
         sourceWidth: activeSession.width,
@@ -244,7 +252,6 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
           status.textContent = `剪裁 ${pixels.width} × ${pixels.height} · 成片按原始像素输出`;
         },
       });
-      startPreviewLoop(activeSession, token);
     } catch (error) {
       if (isCurrent(token)) reportFailure(error);
     }
@@ -252,6 +259,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
 
   const loadSource = async (): Promise<void> => {
     const token = ++transition;
+    abortLoad();
     abortRecording();
     stopEditorPreview();
     destroyEditor();
@@ -266,8 +274,11 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
     progress.hidden = true;
     status.textContent = '正在读取礼物动画…';
     status.classList.remove('is-error');
+    const controller = new AbortController();
+    loadAbort = controller;
     try {
-      const loaded = await loadGiftClipMediaSession(receipt, sourceMediaHost);
+      const loaded = await loadGiftClipMediaSession(receipt, sourceMediaHost, controller.signal);
+      if (loadAbort === controller) loadAbort = null;
       if (!isCurrent(token)) {
         loaded.dispose();
         return;
@@ -284,7 +295,8 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
       }
       await presentEditor(loaded, confirmedCrop, token);
     } catch (error) {
-      if (isCurrent(token)) reportFailure(error);
+      if (loadAbort === controller) loadAbort = null;
+      if (isCurrent(token) && !controller.signal.aborted) reportFailure(error);
     }
   };
 
@@ -368,6 +380,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
     if (closed) return;
     closed = true;
     transition += 1;
+    abortLoad();
     abortRecording();
     stopEditorPreview();
     destroyEditor();

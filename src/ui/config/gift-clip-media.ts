@@ -161,6 +161,7 @@ export function giftGifFrameIndex(delays: readonly number[], elapsedMs: number):
 export async function loadGiftClipMediaSession(
   receipt: GiftReceipt,
   sourceMediaHost: HTMLElement,
+  signal?: AbortSignal,
 ): Promise<GiftClipMediaSession> {
   const resources: GiftClipMediaResources[] = [];
   const avatarResources = new GiftClipMediaResources();
@@ -168,9 +169,11 @@ export async function loadGiftClipMediaSession(
   const disposeResources = (): void => {
     for (const owner of resources) owner.dispose();
   };
+  signal?.addEventListener('abort', disposeResources, { once: true });
 
   try {
-    const avatar = await loadOptionalImage(giftReceiptMediaUrl(receipt.id, 'avatar'), avatarResources);
+    throwIfAborted(signal);
+    const avatar = await loadOptionalImage(giftReceiptMediaUrl(receipt.id, 'avatar'), avatarResources, signal);
     let source: GiftClipMediaSource | null = null;
     let sourceLabel: GiftClipMediaSession['sourceLabel'] = '短动画';
 
@@ -178,9 +181,10 @@ export async function loadGiftClipMediaSession(
       const effectResources = new GiftClipMediaResources();
       resources.push(effectResources);
       try {
-        source = await loadGiftEffect(receipt.id, effectResources, sourceMediaHost);
+        source = await loadGiftEffect(receipt.id, effectResources, sourceMediaHost, signal);
         sourceLabel = '完整特效';
       } catch (effectError) {
+        throwIfAborted(signal);
         effectResources.dispose();
         if (!receipt.animation.gif && !receipt.animation.webp) throw effectError;
         sourceLabel = '短动画回退';
@@ -194,8 +198,10 @@ export async function loadGiftClipMediaSession(
         `${giftReceiptMediaUrl(receipt.id, 'animation')}&v=${Date.now()}`,
         animationResources,
         sourceMediaHost,
+        signal,
       );
     }
+    throwIfAborted(signal);
 
     const durationMs = sourceLabel === '完整特效'
       ? normalizeGiftClipDuration(source.durationMs)
@@ -225,6 +231,8 @@ export async function loadGiftClipMediaSession(
   } catch (error) {
     disposeResources();
     throw error;
+  } finally {
+    signal?.removeEventListener('abort', disposeResources);
   }
 }
 
@@ -249,15 +257,20 @@ async function loadGiftEffect(
   receiptId: string,
   resources: GiftClipMediaResources,
   sourceMediaHost: HTMLElement,
+  signal?: AbortSignal,
 ): Promise<GiftEffectSource> {
   const cacheBuster = `&v=${Date.now()}`;
   const [layoutResponse, videoResponse] = await Promise.all([
-    fetch(`${giftReceiptMediaUrl(receiptId, 'effect-layout')}${cacheBuster}`, { cache: 'no-store' }),
-    fetch(`${giftReceiptMediaUrl(receiptId, 'effect-video')}${cacheBuster}`, { cache: 'no-store' }),
+    fetch(`${giftReceiptMediaUrl(receiptId, 'effect-layout')}${cacheBuster}`, { cache: 'no-store', signal }),
+    fetch(`${giftReceiptMediaUrl(receiptId, 'effect-video')}${cacheBuster}`, { cache: 'no-store', signal }),
   ]);
+  throwIfAborted(signal);
   if (!layoutResponse.ok || !videoResponse.ok) throw new Error('完整礼物特效读取失败。');
-  const layout = normalizeGiftEffectLayout(await layoutResponse.json());
+  const layoutPayload = await layoutResponse.json();
+  throwIfAborted(signal);
+  const layout = normalizeGiftEffectLayout(layoutPayload);
   const videoBlob = await videoResponse.blob();
+  throwIfAborted(signal);
   if (!videoBlob.size) throw new Error('完整礼物特效没有有效视频。');
   const sourceURL = resources.ownObjectURL(URL.createObjectURL(videoBlob));
   const video = resources.ownVideo(document.createElement('video'));
@@ -266,7 +279,7 @@ async function loadGiftEffect(
   video.preload = 'auto';
   sourceMediaHost.append(video);
   video.src = sourceURL;
-  await waitForVideo(video);
+  await waitForVideo(video, signal);
   if (video.videoWidth !== layout.videoWidth || video.videoHeight !== layout.videoHeight) {
     throw new Error('礼物特效视频尺寸与坐标不一致。');
   }
@@ -292,11 +305,12 @@ async function loadGiftEffect(
   return effect;
 }
 
-function waitForVideo(video: HTMLVideoElement): Promise<void> {
+function waitForVideo(video: HTMLVideoElement, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const cleanup = (): void => {
       video.removeEventListener('loadedmetadata', onLoaded);
       video.removeEventListener('error', onError);
+      signal?.removeEventListener('abort', onAbort);
     };
     const onLoaded = (): void => {
       cleanup();
@@ -306,8 +320,17 @@ function waitForVideo(video: HTMLVideoElement): Promise<void> {
       cleanup();
       reject(new Error('完整礼物特效视频无法解码。'));
     };
+    const onAbort = (): void => {
+      cleanup();
+      reject(abortReason(signal));
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
     video.addEventListener('loadedmetadata', onLoaded);
     video.addEventListener('error', onError);
+    signal?.addEventListener('abort', onAbort, { once: true });
     video.load();
   });
 }
@@ -350,16 +373,20 @@ async function loadGiftAnimation(
   src: string,
   resources: GiftClipMediaResources,
   sourceMediaHost: HTMLElement,
+  signal?: AbortSignal,
 ): Promise<GiftClipMediaSource> {
-  const response = await fetch(src, { cache: 'no-store' });
+  const response = await fetch(src, { cache: 'no-store', signal });
+  throwIfAborted(signal);
   if (!response.ok) throw new Error('礼物动画素材读取失败，请稍后重试。');
   const blob = await response.blob();
+  throwIfAborted(signal);
   if (!blob.size) throw new Error('礼物动画素材没有有效内容。');
   const data = await blob.arrayBuffer();
+  throwIfAborted(signal);
   if (isGIFData(data)) return createGIFAnimationSource(data, resources);
 
   const sourceURL = resources.ownObjectURL(URL.createObjectURL(blob));
-  const image = await loadAnimatedImage(sourceURL, resources, sourceMediaHost);
+  const image = await loadAnimatedImage(sourceURL, resources, sourceMediaHost, signal);
   return createAnimatedImageSource(image, sourceURL, resources);
 }
 
@@ -479,12 +506,38 @@ function imageGiftClipVisual(animation: HTMLImageElement | null): GiftClipVisual
   return { source: animation, width: animation.naturalWidth, height: animation.naturalHeight };
 }
 
-function loadImage(src: string, resources: GiftClipMediaResources): Promise<HTMLImageElement> {
+function loadImage(
+  src: string,
+  resources: GiftClipMediaResources,
+  signal?: AbortSignal,
+): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const image = resources.ownImage(new Image());
     image.decoding = 'async';
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error('礼物动画素材读取失败，请稍后重试。'));
+    const cleanup = (): void => {
+      image.onload = null;
+      image.onerror = null;
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const onLoad = (): void => {
+      cleanup();
+      resolve(image);
+    };
+    const onError = (): void => {
+      cleanup();
+      reject(new Error('礼物动画素材读取失败，请稍后重试。'));
+    };
+    const onAbort = (): void => {
+      cleanup();
+      reject(abortReason(signal));
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    image.onload = onLoad;
+    image.onerror = onError;
+    signal?.addEventListener('abort', onAbort, { once: true });
     image.src = src;
   });
 }
@@ -493,13 +546,36 @@ function loadAnimatedImage(
   src: string,
   resources: GiftClipMediaResources,
   sourceMediaHost: HTMLElement,
+  signal?: AbortSignal,
 ): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const image = resources.ownImage(new Image());
     image.className = 'gift-clip-source-animation';
     image.decoding = 'auto';
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error('礼物动画素材读取失败，请稍后重试。'));
+    const cleanup = (): void => {
+      image.onload = null;
+      image.onerror = null;
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const onLoad = (): void => {
+      cleanup();
+      resolve(image);
+    };
+    const onError = (): void => {
+      cleanup();
+      reject(new Error('礼物动画素材读取失败，请稍后重试。'));
+    };
+    const onAbort = (): void => {
+      cleanup();
+      reject(abortReason(signal));
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    image.onload = onLoad;
+    image.onerror = onError;
+    signal?.addEventListener('abort', onAbort, { once: true });
     // Chromium advances animated GIF/WebP only while the image remains rendered.
     sourceMediaHost.append(image);
     image.src = src;
@@ -563,10 +639,20 @@ function createAnimatedImageSource(
 async function loadOptionalImage(
   src: string,
   resources: GiftClipMediaResources,
+  signal?: AbortSignal,
 ): Promise<HTMLImageElement | null> {
   try {
-    return await loadImage(src, resources);
+    return await loadImage(src, resources, signal);
   } catch {
+    throwIfAborted(signal);
     return null;
   }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortReason(signal);
+}
+
+function abortReason(signal?: AbortSignal): unknown {
+  return signal?.reason ?? new DOMException('The operation was aborted.', 'AbortError');
 }

@@ -28,6 +28,7 @@ class FakeMediaHost {
 
 class FakeImage {
   static readonly instances: FakeImage[] = [];
+  static holdAnimationLoads = false;
 
   className = '';
   decoding = '';
@@ -48,7 +49,7 @@ class FakeImage {
     this.sourceAssignments += 1;
     if (value.includes('kind=avatar')) {
       queueMicrotask(() => this.onerror?.());
-    } else if (value.startsWith('blob:') && this.sourceAssignments === 1) {
+    } else if (value.startsWith('blob:') && this.sourceAssignments === 1 && !FakeImage.holdAnimationLoads) {
       queueMicrotask(() => this.onload?.());
     }
   }
@@ -88,7 +89,7 @@ function animatedImage(): FakeImage {
   return image;
 }
 
-async function settlement(promise: Promise<void>): Promise<'resolved' | 'rejected' | 'pending'> {
+async function settlement<T>(promise: Promise<T>): Promise<'resolved' | 'rejected' | 'pending'> {
   return Promise.race([
     promise.then(() => 'resolved' as const, () => 'rejected' as const),
     new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 0)),
@@ -108,6 +109,7 @@ describe('gift clip media', () => {
 
   beforeEach(() => {
     FakeImage.instances.length = 0;
+    FakeImage.holdAnimationLoads = false;
     revokedURLs = [];
     vi.stubGlobal('Image', FakeImage as unknown as typeof Image);
     vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:gift-animation');
@@ -169,6 +171,31 @@ describe('gift clip media', () => {
       avatar: session.avatar,
     }).toEqual({ width: 320, height: 180, durationMs: 2400, sourceLabel: '短动画', avatar: null });
     expect(session.visualAt(0)?.source).toBe(host.children[0]);
+  });
+
+  it('aborts a pending animated-image load and promptly releases its partial resources', async () => {
+    FakeImage.holdAnimationLoads = true;
+    const host = new FakeMediaHost();
+    const controller = new AbortController();
+    const loading = loadGiftClipMediaSession(
+      receipt(),
+      host as unknown as HTMLElement,
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(host.children).toHaveLength(1));
+    const image = animatedImage();
+    const fetchMock = vi.mocked(fetch);
+
+    controller.abort(new DOMException('studio closed', 'AbortError'));
+
+    await expect(settlement(loading)).resolves.toBe('rejected');
+    await expect(loading).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchMock.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ signal: controller.signal }));
+    expect(host.children).toEqual([]);
+    expect(revokedURLs).toEqual(['blob:gift-animation']);
+    expect(image.src).toBe('');
+    expect(image.onload).toBeNull();
+    expect(image.onerror).toBeNull();
   });
 
   it('coalesces concurrent animated-image restarts into one reload', async () => {
