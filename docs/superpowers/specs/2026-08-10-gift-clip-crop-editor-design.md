@@ -113,7 +113,16 @@ overlayScale = outputWidth / 480
 
 ## 模块边界
 
-`gift-clip-studio.ts` 继续作为深模块，负责动画标识、剪裁几何、DOM 交互、帧绘制、录制和资源释放。纯几何函数独立导出，供 Vitest 直接验证。
+配置页继续只依赖 `giftClipAnimationKey()` 与 `openGiftClipStudio()`，这是礼物动画工作室对外的稳定 seam。现有近千行的 `gift-clip-studio.ts` 不再同时承担几何、素材解码、绘制、录制和对话框编排，而是按变化原因拆为以下深模块：
+
+- `gift-clip-crop.ts`：定义归一化剪裁数据、像素区域、8 个控制点与全部边界/最小尺寸运算；它是无 DOM、无 Canvas、无网络 I/O 的纯计算模块。
+- `gift-clip-media.ts`：隐藏完整特效 RGB/Alpha 合成、GIF 解码、WebP/图片加载、完整特效失败后的短动画回退，以及相关媒体元素和 Blob URL 的释放；对调用方只暴露一个可逐帧读取并可释放的素材会话。
+- `gift-clip-renderer.ts`：负责把素材预览绘制到编辑 Canvas，以及按剪裁像素区域绘制成片和按输出宽度绘制信息条。
+- `gift-clip-recorder.ts`：隐藏 MediaRecorder 格式选择、Canvas 捕获、进度推进、中止、流释放、文件名与下载行为。
+- `gift-clip-crop-editor.ts`：负责 DOM 遮罩、剪裁框、8 个控制点、Pointer Events 和信息条占位预览；几何结果全部委托给 `gift-clip-crop.ts`。
+- `gift-clip-studio.ts`：缩减为加载状态、剪裁确认、录制、预览、重试与关闭之间的对话框编排，并保持现有对外入口稳定。
+
+各内部模块只暴露编排所需的小接口，不为单一实现额外定义 port 或 adapter。单元测试通过这些模块接口验证可观察行为，不依赖私有状态。
 
 配置页只负责按动画标识读取初始剪裁数据，并通过确认回调更新 `settings.giftClipCrops`。存储层和 Go 后端负责格式归一化、数量限制与分片版本，不参与编辑器交互。
 
