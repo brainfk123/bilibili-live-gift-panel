@@ -3625,6 +3625,8 @@ body.config-mode::-webkit-scrollbar-corner,
   display: grid;
   width: 100%;
   max-width: 480px;
+  max-width: min(480px, calc((100vh - 220px) / (var(--gift-clip-source-height) / var(--gift-clip-source-width))));
+  max-width: min(480px, calc((100dvh - 220px) / (var(--gift-clip-source-height) / var(--gift-clip-source-width))));
   max-height: calc(100vh - 220px);
   max-height: calc(100dvh - 220px);
   overflow: hidden;
@@ -3671,6 +3673,10 @@ body.config-mode::-webkit-scrollbar-corner,
   cursor: move;
   touch-action: none;
 }
+.config-root .gift-clip-crop-frame:focus-visible {
+  border-width: 2px;
+  outline-width: 3px;
+}
 .config-root .gift-clip-crop-frame::after {
   position: absolute;
   z-index: 2;
@@ -3715,6 +3721,10 @@ body.config-mode::-webkit-scrollbar-corner,
   background: var(--accent);
   box-shadow: 0 1px 7px rgba(0,0,0,.58);
   touch-action: none;
+}
+.config-root .gift-clip-crop-handle:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 72%, white);
+  outline-offset: 1px;
 }
 .config-root .gift-clip-crop-handle.is-n { top: 0; left: 50%; cursor: ns-resize; transform: translateX(-50%); }
 .config-root .gift-clip-crop-handle.is-ne { top: 0; right: 0; cursor: nesw-resize; }
@@ -3764,6 +3774,8 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .gift-clip-header { padding: 18px 16px 14px; }
   .config-root .gift-clip-body { align-content: start; min-height: 0; gap: 17px; overflow-y: auto; padding: 16px; }
   .config-root .gift-clip-stage {
+    max-width: min(480px, calc((100vh - 210px) / (var(--gift-clip-source-height) / var(--gift-clip-source-width))));
+    max-width: min(480px, calc((100dvh - 210px) / (var(--gift-clip-source-height) / var(--gift-clip-source-width))));
     max-height: calc(100vh - 210px);
     max-height: calc(100dvh - 210px);
     border-radius: 14px;

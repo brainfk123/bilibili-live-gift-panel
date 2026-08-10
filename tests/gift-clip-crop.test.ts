@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { GiftClipCrop } from '../src/types';
+import { createGiftClipCropEditor, type GiftClipCropEditor } from '../src/ui/config/gift-clip-crop-editor';
 import {
   defaultGiftClipCrop,
   giftClipCropFromPixels,
@@ -8,6 +10,7 @@ import {
   normalizeGiftClipCrop,
   updateGiftClipCrop,
   type GiftClipCropHandle,
+  type GiftClipPixelRect,
 } from '../src/ui/config/gift-clip-crop';
 
 describe('gift clip crop geometry', () => {
@@ -53,5 +56,338 @@ describe('gift clip crop geometry', () => {
   it('converts display pointer deltas to original source pixels', () => {
     expect(giftClipDisplayDeltaToSource(48, 24, { width: 480, height: 270 }, 640, 360))
       .toEqual({ x: 64, y: 32 });
+  });
+});
+
+class CropTestStyle {
+  [name: string]: string | ((name: string, value: string) => void);
+
+  setProperty(name: string, value: string): void {
+    this[name] = value;
+  }
+}
+
+class CropTestElement {
+  className = '';
+  dataset: Record<string, string> = {};
+  children: CropTestElement[] = [];
+  parent: CropTestElement | null = null;
+  style = new CropTestStyle();
+  attributes: Record<string, string> = {};
+  type = '';
+  tabIndex = -1;
+  inert = false;
+  clientWidth = 0;
+  clientHeight = 0;
+  rectWidth: number | null = null;
+  rectHeight: number | null = null;
+  releasedPointers: number[] = [];
+  onpointerdown: ((event: PointerEvent) => unknown) | null = null;
+  onpointermove: ((event: PointerEvent) => unknown) | null = null;
+  onpointerup: ((event: PointerEvent) => unknown) | null = null;
+  onpointercancel: ((event: PointerEvent) => unknown) | null = null;
+  onlostpointercapture: ((event: PointerEvent) => unknown) | null = null;
+  onkeydown: ((event: KeyboardEvent) => unknown) | null = null;
+  private readonly capturedPointers = new Set<number>();
+  readonly classList = {
+    add: (...names: string[]) => {
+      const classes = new Set(this.className.split(' ').filter(Boolean));
+      names.forEach((name) => classes.add(name));
+      this.className = [...classes].join(' ');
+    },
+  };
+
+  constructor(readonly tagName: string) {}
+
+  append(...children: CropTestElement[]): void {
+    for (const child of children) {
+      child.parent = this;
+      if (child.className === 'gift-clip-crop-layer') {
+        child.clientWidth = this.clientWidth;
+        child.clientHeight = this.clientHeight;
+      }
+      this.children.push(child);
+    }
+  }
+
+  remove(): void {
+    if (!this.parent) return;
+    const index = this.parent.children.indexOf(this);
+    if (index >= 0) this.parent.children.splice(index, 1);
+    this.parent = null;
+  }
+
+  setAttribute(name: string, value: string): void {
+    this.attributes[name] = value;
+  }
+
+  getAttribute(name: string): string | null {
+    return this.attributes[name] ?? null;
+  }
+
+  querySelector(selector: string): CropTestElement | null {
+    return this.querySelectorAll(selector)[0] ?? null;
+  }
+
+  querySelectorAll(selector: string): CropTestElement[] {
+    const className = selector.startsWith('.') ? selector.slice(1) : '';
+    const found: CropTestElement[] = [];
+    const visit = (element: CropTestElement): void => {
+      for (const child of element.children) {
+        const matchesClass = className && child.className.split(' ').includes(className);
+        if (matchesClass || (!className && child.tagName === selector)) found.push(child);
+        visit(child);
+      }
+    };
+    visit(this);
+    return found;
+  }
+
+  getBoundingClientRect(): DOMRect {
+    const percentageWidth = Number.parseFloat(String(this.style.width ?? ''));
+    const percentageHeight = Number.parseFloat(String(this.style.height ?? ''));
+    const width = this.rectWidth
+      ?? (Number.isFinite(percentageWidth) && this.parent ? this.parent.clientWidth * percentageWidth / 100 : this.clientWidth);
+    const height = this.rectHeight
+      ?? (Number.isFinite(percentageHeight) && this.parent ? this.parent.clientHeight * percentageHeight / 100 : this.clientHeight);
+    return { width, height } as DOMRect;
+  }
+
+  setPointerCapture(pointerId: number): void {
+    this.capturedPointers.add(pointerId);
+  }
+
+  hasPointerCapture(pointerId: number): boolean {
+    return this.capturedPointers.has(pointerId);
+  }
+
+  releasePointerCapture(pointerId: number): void {
+    if (!this.capturedPointers.delete(pointerId)) return;
+    this.releasedPointers.push(pointerId);
+  }
+
+  dispatchPointer(
+    type: 'pointerdown' | 'pointermove' | 'pointerup' | 'pointercancel' | 'lostpointercapture',
+    init: { pointerId: number; clientX?: number; clientY?: number; button?: number; target?: CropTestElement },
+  ): boolean {
+    let defaultPrevented = false;
+    const event = {
+      pointerId: init.pointerId,
+      clientX: init.clientX ?? 0,
+      clientY: init.clientY ?? 0,
+      button: init.button ?? 0,
+      target: init.target ?? this,
+      currentTarget: this,
+      preventDefault: () => { defaultPrevented = true; },
+    } as unknown as PointerEvent;
+    const handlers = {
+      pointerdown: this.onpointerdown,
+      pointermove: this.onpointermove,
+      pointerup: this.onpointerup,
+      pointercancel: this.onpointercancel,
+      lostpointercapture: this.onlostpointercapture,
+    };
+    handlers[type]?.(event);
+    return defaultPrevented;
+  }
+
+  dispatchKey(key: string, target: CropTestElement = this, shiftKey = false): boolean {
+    let defaultPrevented = false;
+    this.onkeydown?.({
+      key,
+      shiftKey,
+      target,
+      currentTarget: this,
+      preventDefault: () => { defaultPrevented = true; },
+    } as unknown as KeyboardEvent);
+    return defaultPrevented;
+  }
+}
+
+class CropTestResizeObserver {
+  static instances: CropTestResizeObserver[] = [];
+  disconnected = false;
+  observed: Element | null = null;
+
+  constructor(private readonly callback: ResizeObserverCallback) {
+    CropTestResizeObserver.instances.push(this);
+  }
+
+  observe(target: Element): void {
+    this.observed = target;
+  }
+
+  disconnect(): void {
+    this.disconnected = true;
+  }
+
+  trigger(): void {
+    if (!this.disconnected) this.callback([], this as unknown as ResizeObserver);
+  }
+}
+
+interface CropEditorHarness {
+  editor: GiftClipCropEditor;
+  stage: CropTestElement;
+  layer: CropTestElement;
+  frame: CropTestElement;
+  infoPreview: CropTestElement;
+  changes: Array<{ crop: GiftClipCrop; pixels: GiftClipPixelRect }>;
+}
+
+function createCropEditorHarness(initialCrop: GiftClipCrop = defaultGiftClipCrop()): CropEditorHarness {
+  const stage = new CropTestElement('div');
+  stage.clientWidth = 480;
+  stage.clientHeight = 270;
+  stage.rectWidth = 960;
+  stage.rectHeight = 540;
+  const infoPreview = new CropTestElement('div');
+  const changes: Array<{ crop: GiftClipCrop; pixels: GiftClipPixelRect }> = [];
+  const editor = createGiftClipCropEditor({
+    stage: stage as unknown as HTMLElement,
+    sourceWidth: 640,
+    sourceHeight: 360,
+    initialCrop,
+    infoPreview: infoPreview as unknown as HTMLElement,
+    onChange: (crop, pixels) => { changes.push({ crop, pixels }); },
+  });
+  const layer = editor.element as unknown as CropTestElement;
+  const frame = layer.querySelector('.gift-clip-crop-frame');
+  if (!frame) throw new Error('crop frame was not created');
+  return { editor, stage, layer, frame, infoPreview, changes };
+}
+
+describe('gift clip crop DOM editor', () => {
+  beforeEach(() => {
+    CropTestResizeObserver.instances = [];
+    vi.stubGlobal('document', {
+      createElement: (tagName: string) => new CropTestElement(tagName),
+    } as unknown as Document);
+    vi.stubGlobal('ResizeObserver', CropTestResizeObserver as unknown as typeof ResizeObserver);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('creates eight semantic handles and a noninteractive scaled preview', () => {
+    const { layer, frame, infoPreview } = createCropEditorHarness(
+      giftClipCropFromPixels({ x: 160, y: 90, width: 320, height: 180 }, 640, 360),
+    );
+    const handleElements = layer.querySelectorAll('.gift-clip-crop-handle');
+
+    expect(handleElements.map((handle) => handle.dataset.handle)).toEqual(['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw']);
+    expect(handleElements.every((handle) => handle.tagName === 'button' && handle.type === 'button')).toBe(true);
+    expect(handleElements.every((handle) => Boolean(handle.getAttribute('aria-label')))).toBe(true);
+    expect(infoPreview.parent?.className).toBe('gift-clip-crop-viewport');
+    expect(infoPreview.style.pointerEvents).toBe('none');
+    expect(infoPreview.inert).toBe(true);
+    expect(infoPreview.style.transform).toBe('scale(0.5)');
+    expect(frame.style.left).toBe('25%');
+  });
+
+  it('uses the crop layer client area for pointer movement and releases capture on pointer up', () => {
+    const initial = giftClipCropFromPixels({ x: 128, y: 72, width: 384, height: 216 }, 640, 360);
+    const { editor, frame, layer } = createCropEditorHarness(initial);
+    const westHandle = layer.querySelector('.is-w');
+    if (!westHandle) throw new Error('west handle was not created');
+
+    expect(frame.dispatchPointer('pointerdown', { pointerId: 7, clientX: 100, target: westHandle })).toBe(true);
+    expect(frame.hasPointerCapture(7)).toBe(true);
+    frame.dispatchPointer('pointermove', { pointerId: 7, clientX: 148 });
+
+    expect(giftClipCropToPixels(editor.getCrop(), 640, 360))
+      .toEqual({ x: 192, y: 72, width: 320, height: 216 });
+    frame.dispatchPointer('pointerup', { pointerId: 7 });
+    expect(frame.hasPointerCapture(7)).toBe(false);
+    expect(frame.releasedPointers).toEqual([7]);
+  });
+
+  it('stops an active drag when pointer capture is lost', () => {
+    const initial = giftClipCropFromPixels({ x: 64, y: 64, width: 320, height: 180 }, 640, 360);
+    const { editor, frame } = createCropEditorHarness(initial);
+    frame.dispatchPointer('pointerdown', { pointerId: 4, clientX: 20 });
+    frame.dispatchPointer('pointermove', { pointerId: 4, clientX: 30 });
+    const cropAfterFirstMove = editor.getCrop();
+
+    frame.dispatchPointer('lostpointercapture', { pointerId: 4 });
+    frame.dispatchPointer('pointermove', { pointerId: 4, clientX: 120 });
+
+    expect(editor.getCrop()).toEqual(cropAfterFirstMove);
+  });
+
+  it('releases capture and stops movement when a pointer is cancelled', () => {
+    const initial = giftClipCropFromPixels({ x: 64, y: 64, width: 320, height: 180 }, 640, 360);
+    const { editor, frame } = createCropEditorHarness(initial);
+    frame.dispatchPointer('pointerdown', { pointerId: 5, clientX: 20 });
+
+    frame.dispatchPointer('pointercancel', { pointerId: 5, clientX: 20 });
+    frame.dispatchPointer('pointermove', { pointerId: 5, clientX: 120 });
+
+    expect(frame.hasPointerCapture(5)).toBe(false);
+    expect(frame.releasedPointers).toEqual([5]);
+    expect(editor.getCrop()).toEqual(initial);
+  });
+
+  it('makes the move surface keyboard reachable with precise and accelerated arrow movement', () => {
+    const initial = giftClipCropFromPixels({ x: 64, y: 64, width: 320, height: 180 }, 640, 360);
+    const { editor, frame } = createCropEditorHarness(initial);
+
+    expect(frame.tabIndex).toBe(0);
+    expect(frame.getAttribute('aria-label')).toContain('方向键');
+    expect(frame.dispatchKey('ArrowRight')).toBe(true);
+    expect(frame.dispatchKey('ArrowDown', frame, true)).toBe(true);
+    expect(giftClipCropToPixels(editor.getCrop(), 640, 360))
+      .toEqual({ x: 65, y: 74, width: 320, height: 180 });
+  });
+
+  it('resizes a focused handle with arrow keys without changing unrelated edges', () => {
+    const initial = giftClipCropFromPixels({ x: 64, y: 64, width: 320, height: 180 }, 640, 360);
+    const { editor, frame, layer, changes } = createCropEditorHarness(initial);
+    const eastHandle = layer.querySelector('.is-e');
+    if (!eastHandle) throw new Error('east handle was not created');
+
+    expect(frame.dispatchKey('ArrowLeft', eastHandle, true)).toBe(true);
+    expect(frame.dispatchKey('ArrowUp', eastHandle)).toBe(false);
+    expect(giftClipCropToPixels(editor.getCrop(), 640, 360))
+      .toEqual({ x: 64, y: 64, width: 310, height: 180 });
+    expect(changes).toHaveLength(2);
+  });
+
+  it('notifies with the full source crop when reset', () => {
+    const initial = giftClipCropFromPixels({ x: 64, y: 64, width: 320, height: 180 }, 640, 360);
+    const { editor, changes } = createCropEditorHarness(initial);
+
+    editor.reset();
+
+    expect(editor.getCrop()).toEqual({ x: 0, y: 0, width: 1, height: 1 });
+    expect(changes.at(-1)).toEqual({
+      crop: { x: 0, y: 0, width: 1, height: 1 },
+      pixels: { x: 0, y: 0, width: 640, height: 360 },
+    });
+  });
+
+  it('releases an active drag and stops preview resizing when destroyed', () => {
+    const { editor, frame, layer, infoPreview } = createCropEditorHarness();
+    const resizeObserver = CropTestResizeObserver.instances[0];
+    frame.dispatchPointer('pointerdown', { pointerId: 9 });
+    layer.clientWidth = 360;
+    resizeObserver.trigger();
+    expect(infoPreview.style.transform).toBe('scale(0.75)');
+
+    editor.destroy();
+    layer.clientWidth = 240;
+    resizeObserver.trigger();
+
+    expect(frame.releasedPointers).toEqual([9]);
+    expect(frame.onpointerdown).toBeNull();
+    expect(frame.onpointermove).toBeNull();
+    expect(frame.onpointerup).toBeNull();
+    expect(frame.onpointercancel).toBeNull();
+    expect(frame.onlostpointercapture).toBeNull();
+    expect(frame.onkeydown).toBeNull();
+    expect(layer.parent).toBeNull();
+    expect(resizeObserver.disconnected).toBe(true);
+    expect(infoPreview.style.transform).toBe('scale(0.75)');
   });
 });

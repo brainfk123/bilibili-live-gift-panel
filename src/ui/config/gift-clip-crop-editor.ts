@@ -31,6 +31,7 @@ interface DragState {
   clientY: number;
   handle: GiftClipCropHandle;
   crop: GiftClipCrop;
+  displaySize: { width: number; height: number };
 }
 
 const handles = [
@@ -60,10 +61,14 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
   layer.className = 'gift-clip-crop-layer';
   const frame = document.createElement('div');
   frame.className = 'gift-clip-crop-frame';
+  frame.tabIndex = 0;
+  frame.setAttribute('aria-label', '移动剪裁区域，使用方向键调整');
   const viewport = document.createElement('div');
   viewport.className = 'gift-clip-crop-viewport';
   infoPreview.classList.add('gift-clip-crop-info-preview');
   infoPreview.style.pointerEvents = 'none';
+  infoPreview.inert = true;
+  infoPreview.setAttribute('aria-hidden', 'true');
   viewport.append(infoPreview);
 
   const handleElements = handles.map(([handle, label]) => {
@@ -100,6 +105,14 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
     : new ResizeObserver(scaleInfoPreview);
   resizeObserver?.observe(frame);
 
+  const displaySize = (): { width: number; height: number } => {
+    const bounds = layer.getBoundingClientRect();
+    return {
+      width: layer.clientWidth || bounds.width,
+      height: layer.clientHeight || bounds.height,
+    };
+  };
+
   frame.onpointerdown = (event) => {
     if (destroyed || dragState || event.button !== 0) return;
     const target = event.target as HTMLElement | null;
@@ -111,6 +124,7 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
       clientY: event.clientY,
       handle: handle ?? 'move',
       crop: { ...crop },
+      displaySize: displaySize(),
     };
     frame.setPointerCapture(event.pointerId);
   };
@@ -120,7 +134,7 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
     const delta = giftClipDisplayDeltaToSource(
       event.clientX - dragState.clientX,
       event.clientY - dragState.clientY,
-      stage.getBoundingClientRect(),
+      dragState.displaySize,
       sourceWidth,
       sourceHeight,
     );
@@ -141,6 +155,34 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
   };
   frame.onpointerup = finishDrag;
   frame.onpointercancel = finishDrag;
+  frame.onlostpointercapture = (event) => {
+    if (dragState?.pointerId === event.pointerId) dragState = null;
+  };
+  frame.onkeydown = (event) => {
+    const direction = {
+      ArrowLeft: { x: -1, y: 0 },
+      ArrowRight: { x: 1, y: 0 },
+      ArrowUp: { x: 0, y: -1 },
+      ArrowDown: { x: 0, y: 1 },
+    }[event.key];
+    if (!direction) return;
+    const target = event.target as HTMLElement | null;
+    const handle = (target?.dataset.handle as GiftClipCropHandle | undefined) ?? 'move';
+    const adjustsX = handle === 'move' || handle.includes('e') || handle.includes('w');
+    const adjustsY = handle === 'move' || handle.includes('n') || handle.includes('s');
+    if ((direction.x && !adjustsX) || (direction.y && !adjustsY)) return;
+    event.preventDefault();
+    const step = event.shiftKey ? 10 : 1;
+    crop = updateGiftClipCrop(
+      crop,
+      handle,
+      direction.x * step,
+      direction.y * step,
+      sourceWidth,
+      sourceHeight,
+    );
+    render();
+  };
 
   render();
 
@@ -163,6 +205,8 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
       frame.onpointermove = null;
       frame.onpointerup = null;
       frame.onpointercancel = null;
+      frame.onlostpointercapture = null;
+      frame.onkeydown = null;
       resizeObserver?.disconnect();
       layer.remove();
     },
