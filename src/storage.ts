@@ -404,7 +404,7 @@ function normalizeGiftClipCrops(value: unknown): AppState['settings']['giftClipC
   if (!isObjectRecord(value)) return {};
   const crops: AppState['settings']['giftClipCrops'] = {};
   for (const [key, raw] of Object.entries(value).slice(-200)) {
-    if (!key.trim() || key.length > 160) continue;
+    if (!key.trim() || key.length > 160 || ['__proto__', 'constructor', 'prototype'].includes(key)) continue;
     crops[key] = normalizeGiftClipCrop(raw);
   }
   return crops;

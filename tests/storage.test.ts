@@ -124,6 +124,21 @@ describe('storage', () => {
     });
   });
 
+  it('rejects prototype keys when hydrating gift animation crops', async () => {
+    const serverState = defaultState();
+    Object.defineProperty(serverState.settings.giftClipCrops, '__proto__', {
+      enumerable: true,
+      value: { x: .1, y: .2, width: .6, height: .7 },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(serverState)));
+
+    await hydrateStateFromServer();
+
+    const crops = loadState().settings.giftClipCrops;
+    expect(Object.hasOwn(crops, '__proto__')).toBe(false);
+    expect(Object.getPrototypeOf(crops)).toBe(Object.prototype);
+  });
+
   it('limits persisted gift animation crops to 200 entries', async () => {
     const serverState = defaultState();
     serverState.settings.giftClipCrops = Object.fromEntries(
