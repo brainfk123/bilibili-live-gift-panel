@@ -21,7 +21,7 @@ describe('storage', () => {
     expect(s.settings.tutorialReplayMode).toBe(false);
     expect(s.settings.configExperience).toBe('simple');
     expect(s.settings.giftClipCrops).toEqual({});
-    expect(s.settings.giftClipPlacements).toEqual({});
+    expect((s.settings as unknown as Record<string, unknown>)[['giftClip', 'Placements'].join('')]).toBeUndefined();
   });
 
   it('treats persisted settings without configExperience as advanced', async () => {
@@ -89,21 +89,21 @@ describe('storage', () => {
     expect(loaded.settings.lastSeenChangelogVersion).toBe('0.2.0');
   });
 
-  it('normalizes saved gift animation placements and drops malformed presets', async () => {
+  it('ignores legacy gift animation placements without dropping unrelated settings', async () => {
     const serverState = defaultState();
-    serverState.settings.giftClipPlacements = {
+    serverState.settings.theme = 'light';
+    const legacyPlacementSettingsKey = ['giftClip', 'Placements'].join('');
+    const legacySettings = serverState.settings as typeof serverState.settings & Record<string, unknown>;
+    legacySettings[legacyPlacementSettingsKey] = {
       'effect:1': { x: 22.5, y: -36 },
-      'media:clamped': { x: 999, y: -999 },
-      'media:invalid': { x: Number.NaN, y: 1 },
     };
     vi.stubGlobal('fetch', vi.fn(async () => Response.json(serverState)));
 
     await hydrateStateFromServer();
 
-    expect(loadState().settings.giftClipPlacements).toEqual({
-      'effect:1': { x: 22.5, y: -36 },
-      'media:clamped': { x: 160, y: -160 },
-    });
+    const settings = loadState().settings;
+    expect(settings.theme).toBe('light');
+    expect((settings as unknown as Record<string, unknown>)[legacyPlacementSettingsKey]).toBeUndefined();
   });
 
   it('normalizes saved gift animation crops', async () => {

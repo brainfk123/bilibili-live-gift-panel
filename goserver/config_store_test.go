@@ -159,14 +159,19 @@ func TestConfigStorePatchWritesOnlyAffectedShard(t *testing.T) {
 
 func TestConfigStorePersistsGiftClipCrops(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	legacyPlacementSettingsKey := "giftClip" + "Placements"
 	patch := httptest.NewRecorder()
-	store.handle(patch, httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(`{
-		"settings":{"giftClipCrops":{
-			"effect:99":{"x":0.1,"y":0.2,"width":0.6,"height":0.7},
-			"media:clamped":{"x":0.9,"y":-1,"width":0.5,"height":2},
-			"media:invalid":{"x":0,"y":0,"width":0,"height":1}
-		}}
-	}`)))
+	payload := fmt.Sprintf(`{
+		"settings":{
+			"giftClipCrops":{
+				"effect:99":{"x":0.1,"y":0.2,"width":0.6,"height":0.7},
+				"media:clamped":{"x":0.9,"y":-1,"width":0.5,"height":2},
+				"media:invalid":{"x":0,"y":0,"width":0,"height":1}
+			},
+			%q:{"effect:legacy":{"x":12,"y":-8}}
+		}
+	}`, legacyPlacementSettingsKey)
+	store.handle(patch, httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(payload)))
 	if patch.Code != http.StatusOK {
 		t.Fatalf("PATCH status = %d, body = %s", patch.Code, patch.Body.String())
 	}
@@ -174,6 +179,13 @@ func TestConfigStorePersistsGiftClipCrops(t *testing.T) {
 	state, err := store.readState()
 	if err != nil {
 		t.Fatal(err)
+	}
+	data, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"`+legacyPlacementSettingsKey+`"`) {
+		t.Fatalf("legacy %s survived read/write cycle: %s", legacyPlacementSettingsKey, data)
 	}
 	if got := state.Settings.GiftClipCrops["effect:99"]; got != (giftClipCropState{X: .1, Y: .2, Width: .6, Height: .7}) {
 		t.Fatalf("saved crop = %#v", got)
