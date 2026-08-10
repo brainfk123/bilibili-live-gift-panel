@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   defaultGiftClipCrop,
   giftClipCropFromPixels,
+  giftClipDisplayDeltaToSource,
   giftClipCropToPixels,
   isGiftClipSourceSizeSupported,
   normalizeGiftClipCrop,
@@ -47,5 +48,10 @@ describe('gift clip crop geometry', () => {
     expect(isGiftClipSourceSizeSupported(64, 64)).toBe(true);
     expect(isGiftClipSourceSizeSupported(63, 640)).toBe(false);
     expect(isGiftClipSourceSizeSupported(640, 63)).toBe(false);
+  });
+
+  it('converts display pointer deltas to original source pixels', () => {
+    expect(giftClipDisplayDeltaToSource(48, 24, { width: 480, height: 270 }, 640, 360))
+      .toEqual({ x: 64, y: 32 });
   });
 });

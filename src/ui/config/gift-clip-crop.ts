@@ -58,6 +58,19 @@ export function giftClipCropFromPixels(rect: GiftClipPixelRect, sourceWidth: num
   });
 }
 
+export function giftClipDisplayDeltaToSource(
+  deltaX: number,
+  deltaY: number,
+  displaySize: { readonly width: number; readonly height: number },
+  sourceWidth: number,
+  sourceHeight: number,
+): { x: number; y: number } {
+  return {
+    x: deltaX * sourceWidth / Math.max(1, displaySize.width),
+    y: deltaY * sourceHeight / Math.max(1, displaySize.height),
+  };
+}
+
 export function updateGiftClipCrop(
   crop: GiftClipCrop,
   handle: GiftClipCropHandle,
