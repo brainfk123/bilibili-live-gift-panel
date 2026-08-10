@@ -138,4 +138,44 @@ describe('gift clip recorder', () => {
     expect(stopRecorder).toHaveBeenCalledOnce();
     expect(stopTrack).toHaveBeenCalledOnce();
   });
+
+  it.each(['drawFrame', 'onProgress'] as const)(
+    'does not start recording when %s aborts during initial callbacks',
+    async (abortingCallback) => {
+      const controller = new AbortController();
+      const start = vi.fn(() => { throw new Error('recorder started after abort'); });
+      const stopTrack = vi.fn();
+      class FakeRecorder {
+        static isTypeSupported = vi.fn(() => true);
+        state: RecordingState = 'inactive';
+        mimeType = 'video/webm';
+        ondataavailable: ((event: BlobEvent) => void) | null = null;
+        onerror: (() => void) | null = null;
+        onstop: (() => void) | null = null;
+
+        start(): void { start(); }
+        stop(): void { this.state = 'inactive'; this.onstop?.(); }
+      }
+      vi.stubGlobal('MediaRecorder', FakeRecorder);
+      const canvas = {
+        captureStream: () => ({ getTracks: () => [{ stop: stopTrack }] }),
+      } as unknown as HTMLCanvasElement;
+
+      const recording = recordGiftClipCanvas({
+        canvas,
+        durationMs: 1000,
+        drawFrame: () => {
+          if (abortingCallback === 'drawFrame') controller.abort();
+        },
+        onProgress: () => {
+          if (abortingCallback === 'onProgress') controller.abort();
+        },
+        signal: controller.signal,
+      });
+
+      await expect(recording).rejects.toMatchObject({ name: 'AbortError' });
+      expect(start).not.toHaveBeenCalled();
+      expect(stopTrack).toHaveBeenCalledOnce();
+    },
+  );
 });

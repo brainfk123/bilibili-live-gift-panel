@@ -127,7 +127,9 @@ export async function recordGiftClipCanvas(options: {
     signal.addEventListener('abort', abort, { once: true });
     throwIfAborted(signal);
     drawFrame(0);
+    throwIfAborted(signal);
     onProgress(0);
+    throwIfAborted(signal);
     recorder.start(250);
 
     const durationMs = Math.max(0, Number(options.durationMs) || 0);
