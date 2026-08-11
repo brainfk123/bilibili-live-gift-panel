@@ -221,15 +221,23 @@ func shouldRetryGiftClipSoftware(err error, stderr string) bool {
 	return false
 }
 
+const (
+	giftClipHardwareContextPattern = `(\bh264_mf\b(\s+@\s+[0-9a-fx]+)?\]?|\bmedia foundation\b|\bmft\b|\bmf\b)`
+	giftClipHardwareTargetPattern  = `((hardware\s+)?encoder|encoding|(hardware|gpu)\s+device|mft(\s+encoder)?|transform|session|(input|output)\s+(type|pin))`
+	giftClipFailureActionPattern   = `(((failed|unable)(\s+to)?|could not)\s+(initialize|open|create|start|encode)\w*|error(\s+while)?\s+(initializing|opening|creating|starting|encoding))`
+	giftClipUnavailablePattern     = `(is\s+)?(unavailable|not available|unsupported)`
+)
+
 var giftClipHardwareFailurePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\bh264_mf\b(\s+@\s+[0-9a-fx]+)?\]?\s*((hardware\s+)?encoder\s+)?(failed(\s+to)?|could not|unable(\s+to)?)\s+(initialize|open|create|start|encode)\w*`),
-	regexp.MustCompile(`(?i)\bmedia foundation\b(\s+(mft|transform|encoder)){0,2}\s+(failed(\s+to)?|could not|unable(\s+to)?)\s+(initialize|open|create|start|encode)\w*`),
-	regexp.MustCompile(`(?i)\bmft(\s+encoder)?\s+(failed(\s+to)?|could not|unable(\s+to)?)\s+(initialize|open|create|start|encode)\w*`),
-	regexp.MustCompile(`(?i)(error( while)? (initializing|opening|creating|starting|encoding)|(failed|could not|unable)( to)? (initialize|open|create|start|encode)\w*)\s+(the\s+)?(h264_mf(\s+hardware\s+encoder)?|media foundation(\s+(mft|encoder)){0,2}|mft(\s+encoder)?|hardware encoder|hardware encoding)\b`),
-	regexp.MustCompile(`(?i)(\bh264_mf\b(\s+@\s+[0-9a-fx]+)?\]?|\bmedia foundation\b(\s+(mft|encoder)){0,2}|\bmft(\s+encoder)?)\s+(is\s+)?(unavailable|not available|unsupported)\b`),
-	regexp.MustCompile(`(?i)\bhardware (encoder|encoding)\b\s+(failed|failure|is unavailable|unavailable|not available|unsupported)\b`),
-	regexp.MustCompile(`(?i)\bh264_mf\b[^;|]{0,48}\berror while opening encoder for output stream\b`),
-	regexp.MustCompile(`(?i)\bmedia foundation\b(\s+(mft|encoder)){0,2}\s+failed\s+(after|with|because of)\s+[^;|]{0,48}(dxgi_error_device_(removed|hung|reset)|d3d11)`),
-	regexp.MustCompile(`(?i)\b(gpu|hardware) device\b\s+(is\s+)?(lost|removed|failed|unavailable|not available)\b[^;|]{0,48}\b(hardware encoder|hardware encoding|h264_mf|media foundation|mft)\b`),
-	regexp.MustCompile(`(?i)\b(hardware encoder|hardware encoding|h264_mf|media foundation|mft)\b[^;|]{0,48}\b(gpu|hardware) device\b\s+(is\s+)?(lost|removed|failed|unavailable|not available)\b`),
+	regexp.MustCompile(`(?i)` + giftClipHardwareContextPattern + `\s+` + giftClipHardwareTargetPattern + `\s+` + giftClipFailureActionPattern + `(\s+(the\s+)?` + giftClipHardwareTargetPattern + `)?\s*[.!]?$`),
+	regexp.MustCompile(`(?i)` + giftClipHardwareContextPattern + `\s+` + giftClipFailureActionPattern + `\s+(the\s+)?` + giftClipHardwareTargetPattern + `\s*[.!]?$`),
+	regexp.MustCompile(`(?i)` + giftClipFailureActionPattern + `\s+` + giftClipHardwareContextPattern + `\s+` + giftClipHardwareTargetPattern + `\s*[.!]?$`),
+	regexp.MustCompile(`(?i)` + giftClipFailureActionPattern + `\s+(the\s+)?` + giftClipHardwareTargetPattern + `\s+(in|for|with)\s+` + giftClipHardwareContextPattern + `\s*[.!]?$`),
+	regexp.MustCompile(`(?i)` + giftClipHardwareContextPattern + `\s+` + giftClipHardwareTargetPattern + `\s+` + giftClipUnavailablePattern + `\s*[.!]?$`),
+	regexp.MustCompile(`(?i)\bhardware (encoder|encoding)\b\s+(` + giftClipFailureActionPattern + `|failed|failure|` + giftClipUnavailablePattern + `)\s*[.!]?$`),
+	regexp.MustCompile(`(?i)` + giftClipFailureActionPattern + `\s+hardware (encoder|encoding)\s*[.!]?$`),
+	regexp.MustCompile(`(?i)\b(hardware|gpu) device\b\s+(lost|removed|failed|` + giftClipUnavailablePattern + `)\s+(for|while using)\s+hardware (encoder|encoding)\s*[.!]?$`),
+	regexp.MustCompile(`(?i)` + giftClipFailureActionPattern + `\s+(hardware|gpu) device\s+for\s+hardware (encoder|encoding)\s*[.!]?$`),
+	regexp.MustCompile(`(?i)\bh264_mf\b(\s+@\s+[0-9a-fx]+)?\]?\s+error while opening encoder for output stream\b`),
+	regexp.MustCompile(`(?i)\bmedia foundation\b\s+encoder\s+failed\s+(after|with|because of)\s+(dxgi_error_device_(removed|hung|reset)|d3d11 device (lost|removed|failed))\s*[.!]?$`),
 }
