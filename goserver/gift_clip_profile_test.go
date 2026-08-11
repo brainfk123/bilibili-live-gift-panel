@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -18,11 +19,35 @@ func TestNewGiftClipOutputProfileUsesEvenBoundsAndThirtyFPS(t *testing.T) {
 	}
 }
 
+func TestNewGiftClipOutputProfileCountsFractionalFramesAndAllowsDurationEndpoints(t *testing.T) {
+	tests := []struct {
+		name     string
+		duration time.Duration
+		frames   int
+	}{
+		{"minimum duration", time.Second, 30},
+		{"fractional frame", time.Second + time.Nanosecond, 31},
+		{"maximum duration", 15 * time.Second, 450},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			profile, err := newGiftClipOutputProfile(giftClipCrop{Width: 64, Height: 64}, 64, 64, test.duration)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if profile.Frames != test.frames || profile.Duration != test.duration {
+				t.Fatalf("profile = %#v", profile)
+			}
+		})
+	}
+}
+
 func TestGiftClipBitrateScalesWithPixelArea(t *testing.T) {
 	tests := []struct {
 		width, height int
 		average       int64
 	}{
+		{64, 64, 150_000}, {648, 360, 250_000},
 		{512, 360, 200_000}, {640, 360, 200_000}, {960, 540, 500_000},
 		{1280, 720, 900_000}, {1920, 1080, 2_000_000},
 		{2560, 1440, 3_550_000}, {3840, 2160, 8_000_000},
@@ -60,6 +85,7 @@ func TestNewGiftClipOutputProfileRejectsInvalidInput(t *testing.T) {
 		{"negative y", giftClipCrop{Y: -1, Width: 64, Height: 64}, 64, 64, time.Second},
 		{"past source width", giftClipCrop{X: 1, Width: 64, Height: 64}, 64, 64, time.Second},
 		{"past source height", giftClipCrop{Y: 1, Width: 64, Height: 64}, 64, 64, time.Second},
+		{"maximum x does not wrap", giftClipCrop{X: math.MaxInt, Width: 64, Height: 64}, math.MaxInt, 64, time.Second},
 		{"duration too short", giftClipCrop{Width: 64, Height: 64}, 64, 64, time.Second - time.Nanosecond},
 		{"duration too long", giftClipCrop{Width: 64, Height: 64}, 64, 64, 15*time.Second + time.Nanosecond},
 	}
