@@ -602,8 +602,9 @@ func (payload *giftClipPayload) Prepare(ctx context.Context) (string, error) {
 --enable-avfilter
 --enable-avformat
 --enable-swscale
+--enable-mediafoundation
 --enable-protocol=file,pipe
---enable-demuxer=gif,webp,mov,image2
+--enable-demuxer=gif,image_webp_pipe,mov,image2
 --enable-decoder=gif,webp,png,h264
 --enable-parser=h264
 --enable-encoder=h264_mf
@@ -618,7 +619,7 @@ func (payload *giftClipPayload) Prepare(ctx context.Context) (string, error) {
 --extra-ldflags=-static
 ```
 
-脚本在 configure 后检查 `config.h` 不含 `CONFIG_GPL 1` / `CONFIG_NONFREE 1`，并保存 `ffmpeg -buildconf` 到 `dist/ffmpeg-build-config.txt`。如果实测完整特效 fixture 不是 H.264，停止本任务并回到规格评审；不能自行加入 HEVC/VP9。
+脚本在 configure 后检查 `config.h` 不含 `CONFIG_GPL 1` / `CONFIG_NONFREE 1`，确认 `CONFIG_MEDIAFOUNDATION 1` 与 `CONFIG_H264_MF_ENCODER 1`，并在 Windows/MSYS2 下构建实际目标 `ffmpeg.exe`；随后保存 `ffmpeg -buildconf` 到 `dist/ffmpeg-build-config.txt`。如果实测完整特效 fixture 不是 H.264，停止本任务并回到规格评审；不能自行加入 HEVC/VP9。
 
 - [ ] **Step 5: 实现签名后打包脚本和大小门限**
 
@@ -650,7 +651,7 @@ ZIP `> 40_000_000` bytes 立即失败，`> 30_000_000` bytes 输出明确 warnin
 }
 ```
 
-`verify-ffmpeg.mjs` 对解压出的 CLI 运行 `-version`、`-buildconf`、`-protocols`、`-demuxers`、`-decoders`、`-encoders`、`-filters`、`-muxers`，断言：版本 8.1.2；无网络协议/GPL/nonfree；仅含本任务白名单；含 animated WebP demuxer与 `h264_mf`。然后用 GIF/WebP/packed-alpha fixtures 运行短解码/合成 smoke test。
+`verify-ffmpeg.mjs` 对解压出的 CLI 运行 `-version`、`-buildconf`、`-protocols`、`-demuxers`、`-decoders`、`-encoders`、`-filters`、`-muxers`，断言：版本 8.1.2；无网络协议/GPL/nonfree；显式产品组件仅含本任务白名单，并允许 FFmpeg 为这些组件自动选择的必要基础设施组件；含实际命名为 `image_webp_pipe` 的 animated WebP demuxer 与 `h264_mf`。然后用 GIF/WebP/packed-alpha fixtures 运行短解码/合成 smoke test。自动选择项必须来自构建输出并在验证脚本中逐项记录/允许，不能借此扩大 codec、协议、网络、音频、字幕、GPL 或 nonfree 范围。
 
 - [ ] **Step 7: 构建开发 payload 并运行 GREEN**
 
@@ -670,7 +671,7 @@ npm run build:exe
 git diff --check
 ```
 
-Expected: 全部 exit 0；ZIP `<= 40 MiB`，本地 `APP_VERSION=dev` EXE 可构建。
+Expected: 全部 exit 0；ZIP `<= 40,000,000` decimal bytes，本地 `APP_VERSION=dev` EXE 可构建。
 
 - [ ] **Step 8: 提交 Task 5**
 
