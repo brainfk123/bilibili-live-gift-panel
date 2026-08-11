@@ -74,6 +74,69 @@ func TestBuildGiftClipFFmpegArgsRejectsUntrustedOrIncompleteInputs(t *testing.T)
 	}
 }
 
+func TestBuildGiftClipFFmpegArgsRejectsNetworkPathsForEveryFile(t *testing.T) {
+	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
+	tests := []struct {
+		name string
+		set  func(*giftClipEncodeRequest)
+	}{
+		{name: "source UNC", set: func(request *giftClipEncodeRequest) { request.Source.Path = `\\server\share\source.gif` }},
+		{name: "background slash UNC", set: func(request *giftClipEncodeRequest) { request.BackgroundPath = `//server/share/background.png` }},
+		{name: "overlay UNC", set: func(request *giftClipEncodeRequest) { request.OverlayPath = `\\server\share\overlay.png` }},
+		{name: "output slash UNC", set: func(request *giftClipEncodeRequest) { request.OutputPath = `//server/share/output.mp4` }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := request
+			test.set(&candidate)
+			if _, err := buildGiftClipFFmpegArgs(candidate, giftClipEncoderHardware); err == nil {
+				t.Fatal("network path was accepted")
+			}
+		})
+	}
+}
+
+func TestBuildGiftClipFFmpegArgsAcceptsPOSIXAbsolutePaths(t *testing.T) {
+	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Path: "/task/source.gif", VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
+	request.BackgroundPath = "/task/background.png"
+	request.OverlayPath = "/task/overlay.png"
+	request.OutputPath = "/task/output.mp4"
+	if _, err := buildGiftClipFFmpegArgs(request, giftClipEncoderHardware); err != nil {
+		t.Fatalf("POSIX local paths were rejected: %v", err)
+	}
+}
+
+func TestBuildGiftClipFFmpegArgsRejectsWindowsDeviceNamespaces(t *testing.T) {
+	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
+	tests := []struct {
+		name string
+		set  func(*giftClipEncodeRequest)
+	}{
+		{name: "source NT namespace", set: func(request *giftClipEncodeRequest) { request.Source.Path = `\??\C:\task\source.gif` }},
+		{name: "background globalroot", set: func(request *giftClipEncodeRequest) {
+			request.BackgroundPath = `\GLOBALROOT\Device\HarddiskVolume1\background.png`
+		}},
+		{name: "overlay device namespace", set: func(request *giftClipEncodeRequest) { request.OverlayPath = `\\.\C:\task\overlay.png` }},
+		{name: "output extended namespace", set: func(request *giftClipEncodeRequest) { request.OutputPath = `\\?\C:\task\output.mp4` }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := request
+			test.set(&candidate)
+			if _, err := buildGiftClipFFmpegArgs(candidate, giftClipEncoderHardware); err == nil {
+				t.Fatal("Windows device path was accepted")
+			}
+		})
+	}
+}
+
+func TestBuildGiftClipFFmpegArgsRejectsUnknownEncoderMode(t *testing.T) {
+	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
+	if _, err := buildGiftClipFFmpegArgs(request, giftClipEncoderMode("other")); err == nil {
+		t.Fatal("unknown encoder mode was accepted")
+	}
+}
+
 func TestGiftClipProgressParserIsMonotonicAndClamped(t *testing.T) {
 	parser := newGiftClipProgressParser(2 * time.Second)
 	got := []float64{}
@@ -94,10 +157,17 @@ func TestShouldRetryGiftClipSoftwareClassifiesHardwareFailures(t *testing.T) {
 		stderr string
 		want   bool
 	}{
-		{name: "encoder initialization", err: errors.New("exit status 1"), stderr: "Error initializing output stream 0:0 -- Error while opening encoder", want: true},
+		{name: "h264 mf initialization", err: errors.New("exit status 1"), stderr: "Error initializing h264_mf hardware encoder", want: true},
+		{name: "media foundation device failure", err: errors.New("exit status 1"), stderr: "Media Foundation encoder failed after DXGI_ERROR_DEVICE_REMOVED", want: true},
+		{name: "generic exit", err: errors.New("exit status 1"), stderr: "conversion failed", want: false},
 		{name: "canceled", err: context.Canceled, stderr: "Error while opening encoder", want: false},
 		{name: "disk full", err: errors.New("exit status 1"), stderr: "No space left on device", want: false},
 		{name: "invalid input", err: errors.New("exit status 1"), stderr: "Invalid data found when processing input", want: false},
+		{name: "permission denied", err: errors.New("exit status 1"), stderr: "Permission denied", want: false},
+		{name: "missing output directory", err: errors.New("exit status 1"), stderr: "No such file or directory", want: false},
+		{name: "unreadable input", err: errors.New("exit status 1"), stderr: "Error opening input: Permission denied", want: false},
+		{name: "muxer failure", err: errors.New("exit status 1"), stderr: "Could not write header for output file", want: false},
+		{name: "write failure", err: errors.New("exit status 1"), stderr: "Error muxing a packet", want: false},
 		{name: "payload integrity", err: errGiftClipPayloadIntegrity, stderr: "Error while opening encoder", want: false},
 	}
 	for _, test := range tests {

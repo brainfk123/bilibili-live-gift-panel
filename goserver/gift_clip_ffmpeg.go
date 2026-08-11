@@ -30,6 +30,9 @@ type giftClipEncodeRequest struct {
 }
 
 func buildGiftClipFFmpegArgs(request giftClipEncodeRequest, mode giftClipEncoderMode) ([]string, error) {
+	if mode != giftClipEncoderHardware && mode != giftClipEncoderSoftware {
+		return nil, errors.New("gift clip encoder mode is invalid")
+	}
 	if err := validateGiftClipEncodeRequest(request); err != nil {
 		return nil, err
 	}
@@ -129,7 +132,11 @@ func validateGiftClipLocalPath(name, path string) error {
 }
 
 func isAbsoluteGiftClipPath(path string) bool {
-	if filepath.IsAbs(path) || strings.HasPrefix(path, `\\`) {
+	normalized := strings.ToLower(strings.ReplaceAll(path, `\`, "/"))
+	if strings.HasPrefix(normalized, "//") || strings.HasPrefix(normalized, "/?/") || strings.HasPrefix(normalized, "/??/") || strings.HasPrefix(normalized, "/globalroot/") || strings.HasPrefix(normalized, "/device/") {
+		return false
+	}
+	if strings.HasPrefix(normalized, "/") || filepath.IsAbs(path) {
 		return true
 	}
 	return len(path) >= 3 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':' && (path[2] == '\\' || path[2] == '/')
@@ -189,5 +196,23 @@ func shouldRetryGiftClipSoftware(err error, stderr string) bool {
 		return false
 	}
 	message := strings.ToLower(err.Error() + "\n" + stderr)
-	return !strings.Contains(message, "no space left on device") && !strings.Contains(message, "invalid data found")
+	for _, excluded := range []string{
+		"no space left on device", "disk full", "not enough space", "permission denied", "access is denied",
+		"invalid data found", "corrupt", "malformed", "error opening input", "error while opening input", "could not open input",
+		"no such file or directory", "path not found", "failed to open output", "error opening output",
+		"muxer", "muxing", "write header", "write error", "error writing", "failed to write",
+	} {
+		if strings.Contains(message, excluded) {
+			return false
+		}
+	}
+	for _, diagnostic := range []string{
+		"h264_mf", "media foundation", "hardware encoder", "hardware encoding",
+		"dxgi_error_device", "device removed", "device lost", "device creation failed",
+	} {
+		if strings.Contains(message, diagnostic) {
+			return true
+		}
+	}
+	return false
 }
