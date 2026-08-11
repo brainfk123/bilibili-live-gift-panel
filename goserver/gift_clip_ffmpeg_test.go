@@ -17,9 +17,13 @@ func TestBuildGiftClipFFmpegArgsCreatesDeterministicShortAnimationTimeline(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantInput := []string{"-stream_loop", "-1", "-ignore_loop", "1", "-f", "webp_pipe", "-i", `C:\task\source.webp`}
+	if len(args) < len(wantInput) || !reflect.DeepEqual(args[:len(wantInput)], wantInput) {
+		t.Fatalf("WebP input args = %#v, want prefix %#v", args, wantInput)
+	}
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
-		"-stream_loop -1", "-ignore_loop 1", "-f webp", "crop=960:540:101:53", "fps=30",
+		"-stream_loop -1", "-ignore_loop 1", "crop=960:540:101:53", "fps=30",
 		"-c:v h264_mf", "-hw_encoding 1", "-rate_control pc_vbr",
 		"-b:v 500000", "-maxrate 750000", "-bufsize 1000000",
 		"-pix_fmt nv12", "-fps_mode cfr", "-movflags +faststart", "-progress pipe:1",
@@ -31,6 +35,20 @@ func TestBuildGiftClipFFmpegArgsCreatesDeterministicShortAnimationTimeline(t *te
 	}
 	if strings.Contains(joined, "http://") || strings.Contains(joined, "https://") || strings.Contains(joined, " -map 0:a") || strings.Contains(joined, "\"'") {
 		t.Fatalf("unsafe or audio argument in %s", joined)
+	}
+}
+
+func TestBuildGiftClipFFmpegArgsKeepsGIFDemuxer(t *testing.T) {
+	request := giftClipEncodeFixture(giftClipSource{
+		Kind: giftClipSourceGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond,
+	})
+	args, err := buildGiftClipFFmpegArgs(request, giftClipEncoderHardware)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantInput := []string{"-stream_loop", "-1", "-ignore_loop", "1", "-f", "gif", "-i", `C:\task\source.gif`}
+	if len(args) < len(wantInput) || !reflect.DeepEqual(args[:len(wantInput)], wantInput) {
+		t.Fatalf("GIF input args = %#v, want prefix %#v", args, wantInput)
 	}
 }
 

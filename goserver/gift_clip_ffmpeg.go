@@ -43,7 +43,7 @@ func buildGiftClipFFmpegArgs(request giftClipEncodeRequest, mode giftClipEncoder
 	case giftClipSourceGIF:
 		args = append(args, "-ignore_loop", "1", "-f", "gif")
 	case giftClipSourceWebP:
-		args = append(args, "-ignore_loop", "1", "-f", "webp")
+		args = append(args, "-ignore_loop", "1", "-f", "webp_pipe")
 	}
 	args = append(args, "-i", request.Source.Path)
 	args = appendStaticGiftClipImageInput(args, request.BackgroundPath)
