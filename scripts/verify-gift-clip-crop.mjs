@@ -165,7 +165,6 @@ try {
   await page.goto(baseURL);
   await page.locator('.config-nav-button[data-config-page="data"]').click();
   await openValidAnimation(page);
-  await page.screenshot({ path: resolve(artifactDir, 'gift-clip-crop-desktop.png') });
 
   const handleCount = await page.locator('.gift-clip-crop-handle').count();
   assert.equal(handleCount, 8, `expected eight crop handles, received ${handleCount}`);
@@ -192,6 +191,7 @@ try {
       viewportRadius: style('.gift-clip-crop-viewport').borderRadius,
       frameRadius: style('.gift-clip-crop-frame').borderRadius,
       frameCursor: style('.gift-clip-crop-frame').cursor,
+      frameBoxShadow: style('.gift-clip-crop-frame').boxShadow,
       dialogRadius: style('.gift-clip-dialog').borderRadius,
       handleWidth: style('.gift-clip-crop-handle').width,
       handleHeight: style('.gift-clip-crop-handle').height,
@@ -236,8 +236,36 @@ try {
   await page.waitForFunction(() => document.querySelector('.gift-clip-crop-frame')?.classList.contains('is-moving'));
   assert.equal(await frame.evaluate((element) => getComputedStyle(element).cursor), 'grabbing');
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('.gift-clip-crop-guides')).opacity) > 0);
+  const activeFrameContract = await frame.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    return {
+      boxShadow: getComputedStyle(element).boxShadow,
+      width: bounds.width,
+      height: bounds.height,
+    };
+  });
+  assert.notEqual(
+    activeFrameContract.boxShadow,
+    visualContract.frameBoxShadow,
+    'adjustment must strengthen the frame accent without changing layout',
+  );
+  assert.ok(
+    Math.abs(activeFrameContract.width - frameBoundsForState.width) <= 0.5
+      && Math.abs(activeFrameContract.height - frameBoundsForState.height) <= 0.5,
+    'adjustment accent must not change frame geometry',
+  );
+  await page.screenshot({ path: resolve(artifactDir, 'gift-clip-crop-desktop.png') });
   await page.mouse.up();
   await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('.gift-clip-crop-guides')).opacity) === 0);
+
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const reducedMotionContract = await page.evaluate(() => ({
+    frame: getComputedStyle(document.querySelector('.gift-clip-crop-frame')).transitionDuration,
+    guides: getComputedStyle(document.querySelector('.gift-clip-crop-guides')).transitionDuration,
+    handle: getComputedStyle(document.querySelector('.gift-clip-crop-handle'), '::before').transitionDuration,
+  }));
+  assert.deepEqual(reducedMotionContract, { frame: '0s', guides: '0s', handle: '0s' });
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
 
   await frame.focus();
   await page.keyboard.down('ArrowLeft');

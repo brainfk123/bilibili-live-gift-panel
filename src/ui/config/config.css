@@ -3670,9 +3670,20 @@ body.config-mode::-webkit-scrollbar-corner,
   container-type: size;
   border: 0;
   outline: 0;
-  box-shadow: 0 0 0 1px rgba(255,255,255,.78), 0 0 0 9999px rgba(7,7,13,.66);
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,.78),
+    0 0 0 2px transparent,
+    0 0 0 9999px rgba(7,7,13,.66);
   cursor: grab;
   touch-action: none;
+  transition: box-shadow 120ms ease;
+}
+.config-root .gift-clip-crop-frame.is-adjusting {
+  --gift-clip-crop-control: color-mix(in srgb, var(--accent) 92%, white);
+  box-shadow:
+    0 0 0 1px var(--gift-clip-crop-control),
+    0 0 0 2px color-mix(in srgb, var(--accent) 38%, transparent),
+    0 0 0 9999px rgba(7,7,13,.66);
 }
 .config-root .gift-clip-crop-frame.is-moving { cursor: grabbing; }
 .config-root .gift-clip-crop-frame:focus-visible {
@@ -3844,6 +3855,7 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .config-root .gift-clip-crop-frame,
   .config-root .gift-clip-crop-guides,
   .config-root .gift-clip-crop-handle::before {
     transition: none;
