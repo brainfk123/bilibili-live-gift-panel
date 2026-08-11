@@ -1,6 +1,7 @@
 import type { GiftClipCrop } from '../../types';
 
 export const MIN_GIFT_CLIP_SOURCE_SIZE = 64;
+const MAX_GIFT_CLIP_CROP_SIZE = 4096;
 
 export type GiftClipCropHandle = 'move' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw';
 
@@ -12,6 +13,21 @@ export interface GiftClipPixelRect {
 }
 
 export const defaultGiftClipCrop = (): GiftClipCrop => ({ x: 0, y: 0, width: 1, height: 1 });
+
+function isFullGiftClipCrop(crop: GiftClipCrop): boolean {
+  return crop.x === 0 && crop.y === 0 && crop.width === 1 && crop.height === 1;
+}
+
+function centeredFullPixelRect(sourceWidth: number, sourceHeight: number): GiftClipPixelRect {
+  const width = Math.min(sourceWidth, MAX_GIFT_CLIP_CROP_SIZE);
+  const height = Math.min(sourceHeight, MAX_GIFT_CLIP_CROP_SIZE);
+  return {
+    x: Math.floor((sourceWidth - width) / 2),
+    y: Math.floor((sourceHeight - height) / 2),
+    width,
+    height,
+  };
+}
 
 export function isGiftClipSourceSizeSupported(width: number, height: number): boolean {
   return Number.isInteger(width) && Number.isInteger(height)
@@ -41,6 +57,9 @@ export function constrainGiftClipCrop(crop: GiftClipCrop, sourceWidth: number, s
 
 export function giftClipCropToPixels(crop: GiftClipCrop, sourceWidth: number, sourceHeight: number): GiftClipPixelRect {
   const normalized = normalizeGiftClipCrop(crop);
+  if (isFullGiftClipCrop(normalized)) {
+    return constrainPixelRect(centeredFullPixelRect(sourceWidth, sourceHeight), sourceWidth, sourceHeight);
+  }
   return constrainPixelRect({
     x: Math.round(normalized.x * sourceWidth),
     y: Math.round(normalized.y * sourceHeight),
@@ -87,6 +106,8 @@ export function updateGiftClipCrop(
   let bottom = rect.y + rect.height;
   const minimumWidth = Math.min(MIN_GIFT_CLIP_SOURCE_SIZE, sourceWidth);
   const minimumHeight = Math.min(MIN_GIFT_CLIP_SOURCE_SIZE, sourceHeight);
+  const maximumWidth = Math.min(MAX_GIFT_CLIP_CROP_SIZE, sourceWidth);
+  const maximumHeight = Math.min(MAX_GIFT_CLIP_CROP_SIZE, sourceHeight);
 
   if (handle === 'move') {
     const moveX = clamp(deltaX, -left, sourceWidth - right);
@@ -96,10 +117,18 @@ export function updateGiftClipCrop(
     top += moveY;
     bottom += moveY;
   } else {
-    if (handle === 'n' || handle === 'ne' || handle === 'nw') top = clamp(top + deltaY, 0, bottom - minimumHeight);
-    if (handle === 's' || handle === 'se' || handle === 'sw') bottom = clamp(bottom + deltaY, top + minimumHeight, sourceHeight);
-    if (handle === 'e' || handle === 'ne' || handle === 'se') right = clamp(right + deltaX, left + minimumWidth, sourceWidth);
-    if (handle === 'w' || handle === 'nw' || handle === 'sw') left = clamp(left + deltaX, 0, right - minimumWidth);
+    if (handle === 'n' || handle === 'ne' || handle === 'nw') {
+      top = clamp(top + deltaY, Math.max(0, bottom - maximumHeight), bottom - minimumHeight);
+    }
+    if (handle === 's' || handle === 'se' || handle === 'sw') {
+      bottom = clamp(bottom + deltaY, top + minimumHeight, Math.min(sourceHeight, top + maximumHeight));
+    }
+    if (handle === 'e' || handle === 'ne' || handle === 'se') {
+      right = clamp(right + deltaX, left + minimumWidth, Math.min(sourceWidth, left + maximumWidth));
+    }
+    if (handle === 'w' || handle === 'nw' || handle === 'sw') {
+      left = clamp(left + deltaX, Math.max(0, right - maximumWidth), right - minimumWidth);
+    }
   }
 
   return giftClipCropFromPixels({ x: left, y: top, width: right - left, height: bottom - top }, sourceWidth, sourceHeight);
@@ -123,7 +152,8 @@ function constrainPixelAxis(origin: number, size: number, bound: number): { orig
     roundedSize = Math.abs(roundedSize);
   }
   const minimum = Math.min(MIN_GIFT_CLIP_SOURCE_SIZE, bound);
-  const constrainedSize = clamp(roundedSize, minimum, bound);
+  const maximum = Math.min(MAX_GIFT_CLIP_CROP_SIZE, bound);
+  const constrainedSize = clamp(roundedSize, minimum, maximum);
   return {
     origin: clamp(roundedOrigin, 0, bound - constrainedSize),
     size: constrainedSize,

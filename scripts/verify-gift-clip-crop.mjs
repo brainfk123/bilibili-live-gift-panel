@@ -30,6 +30,89 @@ async function waitForCropStatus(page, dimensions) {
   return text ?? '';
 }
 
+async function resizeCropToMinimum(page) {
+  async function shrink(handle, key, presses) {
+    await page.locator(`.gift-clip-crop-handle.is-${handle}`).focus();
+    await page.keyboard.down('Shift');
+    try {
+      for (let index = 0; index < presses; index += 1) {
+        await page.keyboard.press(key);
+      }
+    } finally {
+      await page.keyboard.up('Shift');
+    }
+  }
+
+  await shrink('e', 'ArrowLeft', 64);
+  await shrink('s', 'ArrowUp', 36);
+  await waitForCropStatus(page, '64 × 64');
+}
+
+async function inspectMinimumCropTargetability(page, layout) {
+  const contract = await page.evaluate(() => {
+    const frame = document.querySelector('.gift-clip-crop-frame');
+    if (!(frame instanceof HTMLElement)) throw new Error('.gift-clip-crop-frame missing');
+    const frameBounds = frame.getBoundingClientRect();
+    const handles = [...frame.querySelectorAll('.gift-clip-crop-handle')].map((element) => {
+      if (!(element instanceof HTMLElement)) throw new Error('crop handle must be an HTMLElement');
+      const bounds = element.getBoundingClientRect();
+      const center = {
+        x: bounds.left + bounds.width / 2,
+        y: bounds.top + bounds.height / 2,
+      };
+      const hit = document.elementFromPoint(center.x, center.y);
+      return {
+        handle: element.dataset.handle,
+        hitHandle: hit instanceof HTMLElement ? hit.dataset.handle ?? null : null,
+        bounds: {
+          left: bounds.left,
+          top: bounds.top,
+          right: bounds.right,
+          bottom: bounds.bottom,
+          width: bounds.width,
+          height: bounds.height,
+        },
+      };
+    });
+    const overlaps = [];
+    for (let leftIndex = 0; leftIndex < handles.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < handles.length; rightIndex += 1) {
+        const left = handles[leftIndex];
+        const right = handles[rightIndex];
+        const overlapWidth = Math.min(left.bounds.right, right.bounds.right)
+          - Math.max(left.bounds.left, right.bounds.left);
+        const overlapHeight = Math.min(left.bounds.bottom, right.bounds.bottom)
+          - Math.max(left.bounds.top, right.bounds.top);
+        if (overlapWidth > 0.5 && overlapHeight > 0.5) {
+          overlaps.push(`${left.handle}/${right.handle}`);
+        }
+      }
+    }
+    const frameCenterHit = document.elementFromPoint(
+      frameBounds.left + frameBounds.width / 2,
+      frameBounds.top + frameBounds.height / 2,
+    );
+    return {
+      frame: { width: frameBounds.width, height: frameBounds.height },
+      handles,
+      overlaps,
+      frameCenterIsGrabSurface: frameCenterHit === frame,
+    };
+  });
+
+  return {
+    layout,
+    ...contract,
+    failures: [
+      ...contract.handles
+        .filter(({ handle, hitHandle }) => handle !== hitHandle)
+        .map(({ handle, hitHandle }) => `${layout} ${handle} center hits ${hitHandle ?? 'non-handle'}`),
+      ...contract.overlaps.map((pair) => `${layout} overlapping handles ${pair}`),
+      ...(contract.frameCenterIsGrabSurface ? [] : [`${layout} frame center is not a grab surface`]),
+    ],
+  };
+}
+
 async function openValidAnimation(page) {
   await page.getByRole('button', { name: '制作回放' }).first().click();
   await page.locator('.gift-clip-crop-frame').waitFor();
@@ -82,7 +165,6 @@ try {
   await page.goto(baseURL);
   await page.locator('.config-nav-button[data-config-page="data"]').click();
   await openValidAnimation(page);
-  await page.screenshot({ path: resolve(artifactDir, 'gift-clip-crop-desktop.png') });
 
   const handleCount = await page.locator('.gift-clip-crop-handle').count();
   assert.equal(handleCount, 8, `expected eight crop handles, received ${handleCount}`);
@@ -93,10 +175,114 @@ try {
   assert.ok(stageBounds, 'crop stage must have a bounding box');
   assert.ok(Math.abs(stageBounds.width - 480) <= 0.5, `expected a 480px crop stage, received ${stageBounds.width}px`);
 
+  const frame = page.locator('.gift-clip-crop-frame');
+  const visualContract = await page.evaluate(() => {
+    const requireElement = (selector) => {
+      const element = document.querySelector(selector);
+      assertElement(element, selector);
+      return element;
+    };
+    function assertElement(element, selector) {
+      if (!(element instanceof HTMLElement)) throw new Error(`${selector} missing`);
+    }
+    const style = (selector, pseudo) => getComputedStyle(requireElement(selector), pseudo);
+    return {
+      stageRadius: style('.gift-clip-stage').borderRadius,
+      viewportRadius: style('.gift-clip-crop-viewport').borderRadius,
+      frameRadius: style('.gift-clip-crop-frame').borderRadius,
+      frameCursor: style('.gift-clip-crop-frame').cursor,
+      frameBoxShadow: style('.gift-clip-crop-frame').boxShadow,
+      dialogRadius: style('.gift-clip-dialog').borderRadius,
+      handleWidth: style('.gift-clip-crop-handle').width,
+      handleHeight: style('.gift-clip-crop-handle').height,
+      handleRadius: style('.gift-clip-crop-handle').borderRadius,
+      cornerTop: style('.gift-clip-crop-handle.is-nw', '::before').borderTopWidth,
+      cornerLeft: style('.gift-clip-crop-handle.is-nw', '::before').borderLeftWidth,
+      edgeWidth: style('.gift-clip-crop-handle.is-n', '::before').width,
+      edgeHeight: style('.gift-clip-crop-handle.is-n', '::before').height,
+      guidesOpacity: style('.gift-clip-crop-guides').opacity,
+    };
+  });
+
+  assert.equal(visualContract.stageRadius, '0px');
+  assert.equal(visualContract.viewportRadius, '0px');
+  assert.equal(visualContract.frameRadius, '0px');
+  assert.equal(visualContract.frameCursor, 'grab');
+  assert.ok(Number.parseFloat(visualContract.dialogRadius) > 0, 'desktop dialog must retain rounding');
+  assert.equal(visualContract.handleWidth, '28px');
+  assert.equal(visualContract.handleHeight, '28px');
+  assert.equal(visualContract.handleRadius, '0px');
+  assert.equal(visualContract.cornerTop, '2px');
+  assert.equal(visualContract.cornerLeft, '2px');
+  assert.equal(visualContract.edgeWidth, '14px');
+  assert.equal(visualContract.edgeHeight, '3px');
+  assert.equal(Number(visualContract.guidesOpacity), 0);
+
+  const handleCursors = await page.locator('.gift-clip-crop-handle').evaluateAll((handles) => (
+    Object.fromEntries(handles.map((handle) => [handle.dataset.handle, getComputedStyle(handle).cursor]))
+  ));
+  assert.deepEqual(handleCursors, {
+    n: 'ns-resize', ne: 'nesw-resize', e: 'ew-resize', se: 'nwse-resize',
+    s: 'ns-resize', sw: 'nesw-resize', w: 'ew-resize', nw: 'nwse-resize',
+  });
+
+  const frameBoundsForState = await frame.boundingBox();
+  assert.ok(frameBoundsForState, 'frame must be measurable for state checks');
+  await page.mouse.move(
+    frameBoundsForState.x + frameBoundsForState.width / 2,
+    frameBoundsForState.y + frameBoundsForState.height / 2,
+  );
+  await page.mouse.down();
+  await page.waitForFunction(() => document.querySelector('.gift-clip-crop-frame')?.classList.contains('is-moving'));
+  assert.equal(await frame.evaluate((element) => getComputedStyle(element).cursor), 'grabbing');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('.gift-clip-crop-guides')).opacity) > 0);
+  const activeFrameContract = await frame.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    return {
+      boxShadow: getComputedStyle(element).boxShadow,
+      width: bounds.width,
+      height: bounds.height,
+    };
+  });
+  assert.notEqual(
+    activeFrameContract.boxShadow,
+    visualContract.frameBoxShadow,
+    'adjustment must strengthen the frame accent without changing layout',
+  );
+  assert.ok(
+    Math.abs(activeFrameContract.width - frameBoundsForState.width) <= 0.5
+      && Math.abs(activeFrameContract.height - frameBoundsForState.height) <= 0.5,
+    'adjustment accent must not change frame geometry',
+  );
+  await page.screenshot({ path: resolve(artifactDir, 'gift-clip-crop-desktop.png') });
+  await page.mouse.up();
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('.gift-clip-crop-guides')).opacity) === 0);
+
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const reducedMotionContract = await page.evaluate(() => ({
+    frame: getComputedStyle(document.querySelector('.gift-clip-crop-frame')).transitionDuration,
+    guides: getComputedStyle(document.querySelector('.gift-clip-crop-guides')).transitionDuration,
+    handle: getComputedStyle(document.querySelector('.gift-clip-crop-handle'), '::before').transitionDuration,
+  }));
+  assert.deepEqual(reducedMotionContract, { frame: '0s', guides: '0s', handle: '0s' });
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+
+  await frame.focus();
+  await page.keyboard.down('ArrowLeft');
+  await page.waitForFunction(() => document.querySelector('.gift-clip-crop-frame')?.classList.contains('is-adjusting'));
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('.gift-clip-crop-guides')).opacity) > 0);
+  await page.keyboard.up('ArrowLeft');
+  await page.waitForFunction(() => !document.querySelector('.gift-clip-crop-frame')?.classList.contains('is-adjusting'));
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('.gift-clip-crop-guides')).opacity) === 0);
+
+  await resizeCropToMinimum(page);
+  const desktopMinimumTargetability = await inspectMinimumCropTargetability(page, 'desktop');
+  await page.getByRole('button', { name: '恢复完整画面' }).click();
+  await waitForCropStatus(page, '640 × 360');
+
   await dragBy(page, page.locator('.gift-clip-crop-handle.is-w'), 96, 0);
   await waitForCropStatus(page, '512 × 360');
 
-  const frame = page.locator('.gift-clip-crop-frame');
   const beforeMove = await frame.boundingBox();
   assert.ok(beforeMove, 'crop frame must have a bounding box before movement');
   await dragBy(page, frame, stageBounds.width + 200, stageBounds.height + 200);
@@ -166,6 +352,21 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await openValidAnimation(page);
   await waitForCropStatus(page, '512 × 360');
+  const mobileVisualContract = await page.evaluate(() => {
+    const handle = document.querySelector('.gift-clip-crop-handle');
+    const stage = document.querySelector('.gift-clip-stage');
+    if (!(handle instanceof HTMLElement)) throw new Error('.gift-clip-crop-handle missing');
+    if (!(stage instanceof HTMLElement)) throw new Error('.gift-clip-stage missing');
+    const handleStyle = getComputedStyle(handle);
+    return {
+      handleWidth: handleStyle.width,
+      handleHeight: handleStyle.height,
+      stageRadius: getComputedStyle(stage).borderRadius,
+    };
+  });
+  assert.equal(mobileVisualContract.handleWidth, '32px');
+  assert.equal(mobileVisualContract.handleHeight, '32px');
+  assert.equal(mobileVisualContract.stageRadius, '0px');
   await page.screenshot({ path: resolve(artifactDir, 'gift-clip-crop-mobile.png') });
   const overflow = await page.evaluate(() => {
     const dialog = document.querySelector('.gift-clip-dialog');
@@ -177,6 +378,18 @@ try {
   });
   assert.ok(overflow.document <= 1, `document horizontal overflow is ${overflow.document}px`);
   assert.ok(overflow.dialog <= 1, `dialog horizontal overflow is ${overflow.dialog}px`);
+
+  await resizeCropToMinimum(page);
+  const mobileMinimumTargetability = await inspectMinimumCropTargetability(page, 'mobile');
+  const minimumTargetabilityFailures = [
+    ...desktopMinimumTargetability.failures,
+    ...mobileMinimumTargetability.failures,
+  ];
+  assert.deepEqual(
+    minimumTargetabilityFailures,
+    [],
+    `minimum crop targetability failures:\n${minimumTargetabilityFailures.join('\n')}`,
+  );
 
   await page.waitForTimeout(100);
   assert.equal(errors.length, 0, `Browser errors:\n${errors.join('\n')}`);

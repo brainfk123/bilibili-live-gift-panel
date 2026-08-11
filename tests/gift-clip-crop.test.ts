@@ -14,6 +14,94 @@ import {
 } from '../src/ui/config/gift-clip-crop';
 
 describe('gift clip crop geometry', () => {
+  type ResizeHandle = Exclude<GiftClipCropHandle, 'move'>;
+  interface ResizeBoundaryCase {
+    handle: ResizeHandle;
+    minimumAt64: readonly [number, number];
+    minimumAt63: readonly [number, number];
+    minimumExpected: GiftClipPixelRect;
+    maximumAt4096: readonly [number, number];
+    maximumAt4097: readonly [number, number];
+    maximumExpected: GiftClipPixelRect;
+    sourceEdgeDelta: readonly [number, number];
+    sourceEdgeExpected: GiftClipPixelRect;
+  }
+
+  const resizeBoundaryCases: ResizeBoundaryCase[] = [
+    {
+      handle: 'n',
+      minimumAt64: [0, 1], minimumAt63: [0, 2],
+      minimumExpected: { x: 1000, y: 1001, width: 65, height: 64 },
+      maximumAt4096: [0, -1], maximumAt4097: [0, -2],
+      maximumExpected: { x: 3000, y: 2999, width: 4095, height: 4096 },
+      sourceEdgeDelta: [0, -9999],
+      sourceEdgeExpected: { x: 2000, y: 0, width: 512, height: 2512 },
+    },
+    {
+      handle: 'ne',
+      minimumAt64: [-1, 1], minimumAt63: [-2, 2],
+      minimumExpected: { x: 1000, y: 1001, width: 64, height: 64 },
+      maximumAt4096: [1, -1], maximumAt4097: [2, -2],
+      maximumExpected: { x: 3000, y: 2999, width: 4096, height: 4096 },
+      sourceEdgeDelta: [9999, -9999],
+      sourceEdgeExpected: { x: 2000, y: 0, width: 3000, height: 2512 },
+    },
+    {
+      handle: 'e',
+      minimumAt64: [-1, 0], minimumAt63: [-2, 0],
+      minimumExpected: { x: 1000, y: 1000, width: 64, height: 65 },
+      maximumAt4096: [1, 0], maximumAt4097: [2, 0],
+      maximumExpected: { x: 3000, y: 3000, width: 4096, height: 4095 },
+      sourceEdgeDelta: [9999, 0],
+      sourceEdgeExpected: { x: 2000, y: 2000, width: 3000, height: 512 },
+    },
+    {
+      handle: 'se',
+      minimumAt64: [-1, -1], minimumAt63: [-2, -2],
+      minimumExpected: { x: 1000, y: 1000, width: 64, height: 64 },
+      maximumAt4096: [1, 1], maximumAt4097: [2, 2],
+      maximumExpected: { x: 3000, y: 3000, width: 4096, height: 4096 },
+      sourceEdgeDelta: [9999, 9999],
+      sourceEdgeExpected: { x: 2000, y: 2000, width: 3000, height: 3000 },
+    },
+    {
+      handle: 's',
+      minimumAt64: [0, -1], minimumAt63: [0, -2],
+      minimumExpected: { x: 1000, y: 1000, width: 65, height: 64 },
+      maximumAt4096: [0, 1], maximumAt4097: [0, 2],
+      maximumExpected: { x: 3000, y: 3000, width: 4095, height: 4096 },
+      sourceEdgeDelta: [0, 9999],
+      sourceEdgeExpected: { x: 2000, y: 2000, width: 512, height: 3000 },
+    },
+    {
+      handle: 'sw',
+      minimumAt64: [1, -1], minimumAt63: [2, -2],
+      minimumExpected: { x: 1001, y: 1000, width: 64, height: 64 },
+      maximumAt4096: [-1, 1], maximumAt4097: [-2, 2],
+      maximumExpected: { x: 2999, y: 3000, width: 4096, height: 4096 },
+      sourceEdgeDelta: [-9999, 9999],
+      sourceEdgeExpected: { x: 0, y: 2000, width: 2512, height: 3000 },
+    },
+    {
+      handle: 'w',
+      minimumAt64: [1, 0], minimumAt63: [2, 0],
+      minimumExpected: { x: 1001, y: 1000, width: 64, height: 65 },
+      maximumAt4096: [-1, 0], maximumAt4097: [-2, 0],
+      maximumExpected: { x: 2999, y: 3000, width: 4096, height: 4095 },
+      sourceEdgeDelta: [-9999, 0],
+      sourceEdgeExpected: { x: 0, y: 2000, width: 2512, height: 512 },
+    },
+    {
+      handle: 'nw',
+      minimumAt64: [1, 1], minimumAt63: [2, 2],
+      minimumExpected: { x: 1001, y: 1001, width: 64, height: 64 },
+      maximumAt4096: [-1, -1], maximumAt4097: [-2, -2],
+      maximumExpected: { x: 2999, y: 2999, width: 4096, height: 4096 },
+      sourceEdgeDelta: [-9999, -9999],
+      sourceEdgeExpected: { x: 0, y: 0, width: 2512, height: 2512 },
+    },
+  ];
+
   const initial = giftClipCropFromPixels({ x: 100, y: 75, width: 200, height: 150 }, 400, 300);
   const expected: Record<GiftClipCropHandle, { x: number; y: number; width: number; height: number }> = {
     move: { x: 140, y: 105, width: 200, height: 150 },
@@ -51,12 +139,60 @@ describe('gift clip crop geometry', () => {
       .toEqual({ x: 37, y: 37, width: 64, height: 64 });
   });
 
-  it('keeps move and resize operations in bounds with a 64px minimum', () => {
+  it('keeps move operations inside the source without changing crop dimensions', () => {
     const tiny = giftClipCropFromPixels({ x: 100, y: 100, width: 80, height: 80 }, 400, 300);
-    expect(giftClipCropToPixels(updateGiftClipCrop(tiny, 'se', -999, -999, 400, 300), 400, 300))
-      .toEqual({ x: 100, y: 100, width: 64, height: 64 });
     expect(giftClipCropToPixels(updateGiftClipCrop(tiny, 'move', 999, 999, 400, 300), 400, 300))
       .toEqual({ x: 320, y: 220, width: 80, height: 80 });
+  });
+
+  it.each(resizeBoundaryCases)('$handle clamps an attempted 63px selection at the 64px minimum', ({
+    handle, minimumAt64, minimumAt63, minimumExpected,
+  }) => {
+    const initial = giftClipCropFromPixels({ x: 1000, y: 1000, width: 65, height: 65 }, 4097, 4097);
+
+    expect(giftClipCropToPixels(
+      updateGiftClipCrop(initial, handle, ...minimumAt64, 4097, 4097),
+      4097,
+      4097,
+    )).toEqual(minimumExpected);
+    expect(giftClipCropToPixels(
+      updateGiftClipCrop(initial, handle, ...minimumAt63, 4097, 4097),
+      4097,
+      4097,
+    )).toEqual(minimumExpected);
+  });
+
+  it.each(resizeBoundaryCases)('$handle caps an attempted 4097px selection at the 4096px maximum', ({
+    handle, maximumAt4096, maximumAt4097, maximumExpected,
+  }) => {
+    const initial = giftClipCropFromPixels(
+      { x: 3000, y: 3000, width: 4095, height: 4095 },
+      10_000,
+      10_000,
+    );
+
+    expect(giftClipCropToPixels(
+      updateGiftClipCrop(initial, handle, ...maximumAt4096, 10_000, 10_000),
+      10_000,
+      10_000,
+    )).toEqual(maximumExpected);
+    expect(giftClipCropToPixels(
+      updateGiftClipCrop(initial, handle, ...maximumAt4097, 10_000, 10_000),
+      10_000,
+      10_000,
+    )).toEqual(maximumExpected);
+  });
+
+  it.each(resizeBoundaryCases)('$handle stops at the source edge while preserving the opposite edge', ({
+    handle, sourceEdgeDelta, sourceEdgeExpected,
+  }) => {
+    const initial = giftClipCropFromPixels({ x: 2000, y: 2000, width: 512, height: 512 }, 5000, 5000);
+
+    expect(giftClipCropToPixels(
+      updateGiftClipCrop(initial, handle, ...sourceEdgeDelta, 5000, 5000),
+      5000,
+      5000,
+    )).toEqual(sourceEdgeExpected);
   });
 
   it('rejects a source when either original dimension is under 64px', () => {
@@ -69,6 +205,14 @@ describe('gift clip crop geometry', () => {
     expect(giftClipDisplayDeltaToSource(48, 24, { width: 480, height: 270 }, 640, 360))
       .toEqual({ x: 64, y: 32 });
   });
+
+  it('centers the full default crop when either source dimension exceeds 4096px', () => {
+    expect(giftClipCropToPixels(defaultGiftClipCrop(), 8192, 6000))
+      .toEqual({ x: 2048, y: 952, width: 4096, height: 4096 });
+    expect(giftClipCropToPixels(defaultGiftClipCrop(), 4096, 4096))
+      .toEqual({ x: 0, y: 0, width: 4096, height: 4096 });
+  });
+
 });
 
 class CropTestStyle {
@@ -103,13 +247,13 @@ class CropTestElement {
   onpointercancel: ((event: PointerEvent) => unknown) | null = null;
   onlostpointercapture: ((event: PointerEvent) => unknown) | null = null;
   onkeydown: ((event: KeyboardEvent) => unknown) | null = null;
+  onkeyup: ((event: KeyboardEvent) => unknown) | null = null;
+  onfocusout: ((event: FocusEvent) => unknown) | null = null;
   private readonly capturedPointers = new Set<number>();
   readonly classList = {
-    add: (...names: string[]) => {
-      const classes = new Set(this.className.split(' ').filter(Boolean));
-      names.forEach((name) => classes.add(name));
-      this.className = [...classes].join(' ');
-    },
+    add: (...names: string[]) => this.updateClasses(names, true),
+    remove: (...names: string[]) => this.updateClasses(names, false),
+    contains: (name: string) => this.className.split(/\s+/).includes(name),
   };
 
   constructor(readonly tagName: string) {}
@@ -217,6 +361,23 @@ class CropTestElement {
     } as unknown as KeyboardEvent);
     return defaultPrevented;
   }
+
+  dispatchKeyUp(key: string, target: CropTestElement = this): void {
+    this.onkeyup?.({ key, target, currentTarget: this } as unknown as KeyboardEvent);
+  }
+
+  dispatchFocusOut(target: CropTestElement = this): void {
+    this.onfocusout?.({ target, currentTarget: this } as unknown as FocusEvent);
+  }
+
+  private updateClasses(names: string[], add: boolean): void {
+    const classes = new Set(this.className.split(/\s+/).filter(Boolean));
+    for (const name of names) {
+      if (add) classes.add(name);
+      else classes.delete(name);
+    }
+    this.className = [...classes].join(' ');
+  }
 }
 
 class CropTestResizeObserver {
@@ -265,7 +426,11 @@ function cropReceiptFixture(): GiftReceipt {
   };
 }
 
-function createCropEditorHarness(initialCrop: GiftClipCrop = defaultGiftClipCrop()): CropEditorHarness {
+function createCropEditorHarness(
+  initialCrop: GiftClipCrop = defaultGiftClipCrop(),
+  sourceWidth = 640,
+  sourceHeight = 360,
+): CropEditorHarness {
   const stage = new CropTestElement('div');
   stage.clientWidth = 480;
   stage.clientHeight = 270;
@@ -274,8 +439,8 @@ function createCropEditorHarness(initialCrop: GiftClipCrop = defaultGiftClipCrop
   const changes: Array<{ crop: GiftClipCrop; pixels: GiftClipPixelRect }> = [];
   const editor = createGiftClipCropEditor({
     stage: stage as unknown as HTMLElement,
-    sourceWidth: 640,
-    sourceHeight: 360,
+    sourceWidth,
+    sourceHeight,
     initialCrop,
     receipt: cropReceiptFixture(),
     avatar: null,
@@ -398,6 +563,42 @@ describe('gift clip crop DOM editor', () => {
     expect(changes).toHaveLength(2);
   });
 
+  it('exposes an inert rule-of-thirds guide only while pointer adjustment is active', () => {
+    const { frame, layer } = createCropEditorHarness();
+    const guides = layer.querySelector('.gift-clip-crop-guides');
+    const eastHandle = layer.querySelector('.is-e');
+    if (!guides || !eastHandle) throw new Error('crop guide or east handle missing');
+
+    expect(guides.getAttribute('aria-hidden')).toBe('true');
+    expect(frame.classList.contains('is-adjusting')).toBe(false);
+    frame.dispatchPointer('pointerdown', { pointerId: 11, target: frame });
+    expect(frame.classList.contains('is-adjusting')).toBe(true);
+    expect(frame.classList.contains('is-moving')).toBe(true);
+    frame.dispatchPointer('pointerup', { pointerId: 11 });
+    expect(frame.classList.contains('is-adjusting')).toBe(false);
+
+    frame.dispatchPointer('pointerdown', { pointerId: 12, target: eastHandle });
+    expect(frame.classList.contains('is-adjusting')).toBe(true);
+    expect(frame.classList.contains('is-moving')).toBe(false);
+    frame.dispatchPointer('pointercancel', { pointerId: 12 });
+    expect(frame.classList.contains('is-adjusting')).toBe(false);
+  });
+
+  it('shows keyboard adjustment state until keyup or focusout', () => {
+    const { frame, layer } = createCropEditorHarness();
+    const eastHandle = layer.querySelector('.is-e');
+    if (!eastHandle) throw new Error('east handle missing');
+
+    frame.dispatchKey('ArrowLeft', eastHandle);
+    expect(frame.classList.contains('is-adjusting')).toBe(true);
+    frame.dispatchKeyUp('ArrowLeft', eastHandle);
+    expect(frame.classList.contains('is-adjusting')).toBe(false);
+
+    frame.dispatchKey('ArrowRight');
+    frame.dispatchFocusOut();
+    expect(frame.classList.contains('is-adjusting')).toBe(false);
+  });
+
   it('notifies with the full source crop when reset', () => {
     const initial = giftClipCropFromPixels({ x: 64, y: 64, width: 320, height: 180 }, 640, 360);
     const { editor, changes } = createCropEditorHarness(initial);
@@ -409,6 +610,18 @@ describe('gift clip crop DOM editor', () => {
       crop: { x: 0, y: 0, width: 1, height: 1 },
       pixels: { x: 0, y: 0, width: 640, height: 360 },
     });
+  });
+
+  it('resets an oversized source to its centered 4096px selection', () => {
+    const initial = giftClipCropFromPixels({ x: 3000, y: 2000, width: 1000, height: 1000 }, 8192, 6000);
+    const { editor, changes } = createCropEditorHarness(initial, 8192, 6000);
+
+    editor.reset();
+
+    expect(giftClipCropToPixels(editor.getCrop(), 8192, 6000))
+      .toEqual({ x: 2048, y: 952, width: 4096, height: 4096 });
+    expect(changes.at(-1)?.pixels)
+      .toEqual({ x: 2048, y: 952, width: 4096, height: 4096 });
   });
 
   it('releases an active drag and stops preview resizing when destroyed', () => {
@@ -430,6 +643,10 @@ describe('gift clip crop DOM editor', () => {
     expect(frame.onpointercancel).toBeNull();
     expect(frame.onlostpointercapture).toBeNull();
     expect(frame.onkeydown).toBeNull();
+    expect(frame.onkeyup).toBeNull();
+    expect(frame.onfocusout).toBeNull();
+    expect(frame.classList.contains('is-adjusting')).toBe(false);
+    expect(frame.classList.contains('is-moving')).toBe(false);
     expect(layer.parent).toBeNull();
     expect(resizeObserver.disconnected).toBe(true);
     expect(infoPreview.style.transform).toBe('scale(0.75)');

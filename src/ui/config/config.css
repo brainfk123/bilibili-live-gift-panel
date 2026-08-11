@@ -3636,6 +3636,14 @@ body.config-mode::-webkit-scrollbar-corner,
   background: #12101d;
   box-shadow: 0 0 0 1px var(--border-strong), 0 16px 40px rgba(0,0,0,.25);
 }
+.config-root .gift-clip-stage,
+.config-root .gift-clip-canvas,
+.config-root .gift-clip-video,
+.config-root .gift-clip-crop-layer,
+.config-root .gift-clip-crop-frame,
+.config-root .gift-clip-crop-viewport {
+  border-radius: 0;
+}
 .config-root .gift-clip-canvas,
 .config-root .gift-clip-video {
   grid-area: 1 / 1;
@@ -3656,35 +3664,44 @@ body.config-mode::-webkit-scrollbar-corner,
   -webkit-user-select: none;
 }
 .config-root .gift-clip-crop-frame {
+  --gift-clip-crop-control: color-mix(in srgb, var(--accent) 82%, white);
   position: absolute;
   box-sizing: border-box;
-  border: 1px solid rgba(255,255,255,.96);
-  outline: 2px solid color-mix(in srgb, var(--accent) 84%, white);
-  outline-offset: -3px;
-  box-shadow: 0 0 0 9999px rgba(7, 7, 13, .66);
-  cursor: move;
+  container-type: size;
+  border: 0;
+  outline: 0;
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,.78),
+    0 0 0 2px transparent,
+    0 0 0 9999px rgba(7,7,13,.66);
+  cursor: grab;
   touch-action: none;
+  transition: box-shadow 120ms ease;
 }
+.config-root .gift-clip-crop-frame.is-adjusting {
+  --gift-clip-crop-control: color-mix(in srgb, var(--accent) 92%, white);
+  box-shadow:
+    0 0 0 1px var(--gift-clip-crop-control),
+    0 0 0 2px color-mix(in srgb, var(--accent) 38%, transparent),
+    0 0 0 9999px rgba(7,7,13,.66);
+}
+.config-root .gift-clip-crop-frame.is-moving { cursor: grabbing; }
 .config-root .gift-clip-crop-frame:focus-visible {
-  border-width: 2px;
-  outline-width: 3px;
+  outline: 2px solid color-mix(in srgb, var(--accent) 82%, white);
+  outline-offset: -3px;
 }
-.config-root .gift-clip-crop-frame::after {
+.config-root .gift-clip-crop-guides {
   position: absolute;
   z-index: 2;
-  inset: 2px;
+  inset: 0;
+  opacity: 0;
   background:
-    linear-gradient(90deg, white, white) left top / 16px 2px no-repeat,
-    linear-gradient(white, white) left top / 2px 16px no-repeat,
-    linear-gradient(90deg, white, white) right top / 16px 2px no-repeat,
-    linear-gradient(white, white) right top / 2px 16px no-repeat,
-    linear-gradient(90deg, white, white) right bottom / 16px 2px no-repeat,
-    linear-gradient(white, white) right bottom / 2px 16px no-repeat,
-    linear-gradient(90deg, white, white) left bottom / 16px 2px no-repeat,
-    linear-gradient(white, white) left bottom / 2px 16px no-repeat;
-  content: '';
+    linear-gradient(to right, transparent calc(33.333% - .5px), rgba(255,255,255,.62) calc(33.333% - .5px), rgba(255,255,255,.62) calc(33.333% + .5px), transparent calc(33.333% + .5px), transparent calc(66.666% - .5px), rgba(255,255,255,.62) calc(66.666% - .5px), rgba(255,255,255,.62) calc(66.666% + .5px), transparent calc(66.666% + .5px)),
+    linear-gradient(to bottom, transparent calc(33.333% - .5px), rgba(255,255,255,.62) calc(33.333% - .5px), rgba(255,255,255,.62) calc(33.333% + .5px), transparent calc(33.333% + .5px), transparent calc(66.666% - .5px), rgba(255,255,255,.62) calc(66.666% - .5px), rgba(255,255,255,.62) calc(66.666% + .5px), transparent calc(66.666% + .5px));
   pointer-events: none;
+  transition: opacity 140ms ease;
 }
+.config-root .gift-clip-crop-frame.is-adjusting .gift-clip-crop-guides { opacity: .72; }
 .config-root .gift-clip-crop-viewport {
   position: absolute;
   z-index: 1;
@@ -3704,19 +3721,78 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .gift-clip-crop-handle {
   position: absolute;
   z-index: 3;
-  width: 18px;
-  height: 18px;
+  width: min(28px, 33.333cqw, 33.333cqh);
+  height: min(28px, 33.333cqw, 33.333cqh);
   margin: 0;
-  border: 2px solid white;
-  border-radius: 50%;
+  border: 0;
+  border-radius: 0;
   padding: 0;
-  background: var(--accent);
-  box-shadow: 0 1px 7px rgba(0,0,0,.58);
+  background: transparent;
+  box-shadow: none;
+  color: var(--gift-clip-crop-control);
   touch-action: none;
 }
-.config-root .gift-clip-crop-handle:focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--accent) 72%, white);
-  outline-offset: 1px;
+.config-root .gift-clip-crop-handle::before {
+  position: absolute;
+  box-sizing: border-box;
+  content: '';
+  transition: color 120ms ease, filter 120ms ease, opacity 120ms ease;
+}
+.config-root .gift-clip-crop-handle:hover::before,
+.config-root .gift-clip-crop-handle:focus-visible::before {
+  color: white;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent) 72%, transparent));
+}
+.config-root .gift-clip-crop-handle.is-n::before,
+.config-root .gift-clip-crop-handle.is-s::before {
+  left: 50%;
+  width: min(14px, 75%);
+  height: min(3px, 25%);
+  background: currentColor;
+  transform: translateX(-50%);
+}
+.config-root .gift-clip-crop-handle.is-e::before,
+.config-root .gift-clip-crop-handle.is-w::before {
+  top: 50%;
+  width: min(3px, 25%);
+  height: min(14px, 75%);
+  background: currentColor;
+  transform: translateY(-50%);
+}
+.config-root .gift-clip-crop-handle.is-n::before { top: min(3px, 15%); }
+.config-root .gift-clip-crop-handle.is-s::before { bottom: min(3px, 15%); }
+.config-root .gift-clip-crop-handle.is-e::before { right: min(3px, 15%); }
+.config-root .gift-clip-crop-handle.is-w::before { left: min(3px, 15%); }
+.config-root .gift-clip-crop-handle.is-nw::before,
+.config-root .gift-clip-crop-handle.is-ne::before,
+.config-root .gift-clip-crop-handle.is-se::before,
+.config-root .gift-clip-crop-handle.is-sw::before {
+  width: min(20px, 75%);
+  height: min(20px, 75%);
+}
+.config-root .gift-clip-crop-handle.is-nw::before {
+  top: min(4px, 15%);
+  left: min(4px, 15%);
+  border-top: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+}
+.config-root .gift-clip-crop-handle.is-ne::before {
+  top: min(4px, 15%);
+  right: min(4px, 15%);
+  border-top: 2px solid currentColor;
+  border-right: 2px solid currentColor;
+}
+.config-root .gift-clip-crop-handle.is-se::before {
+  right: min(4px, 15%);
+  bottom: min(4px, 15%);
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+}
+.config-root .gift-clip-crop-handle.is-sw::before {
+  bottom: min(4px, 15%);
+  left: min(4px, 15%);
+  border-bottom: 2px solid currentColor;
+  border-left: 2px solid currentColor;
 }
 .config-root .gift-clip-crop-handle.is-n { top: 0; left: 50%; cursor: ns-resize; transform: translateX(-50%); }
 .config-root .gift-clip-crop-handle.is-ne { top: 0; right: 0; cursor: nesw-resize; }
@@ -3770,9 +3846,20 @@ body.config-mode::-webkit-scrollbar-corner,
     max-width: min(480px, calc((100dvh - 210px) / (var(--gift-clip-source-height) / var(--gift-clip-source-width))));
     max-height: calc(100vh - 210px);
     max-height: calc(100dvh - 210px);
-    border-radius: 14px;
+    border-radius: 0;
   }
-  .config-root .gift-clip-crop-handle { width: 24px; height: 24px; }
+  .config-root .gift-clip-crop-handle {
+    width: min(32px, 33.333cqw, 33.333cqh);
+    height: min(32px, 33.333cqw, 33.333cqh);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .config-root .gift-clip-crop-frame,
+  .config-root .gift-clip-crop-guides,
+  .config-root .gift-clip-crop-handle::before {
+    transition: none;
+  }
 }
 
 .config-root .program-settings-overlay { z-index: 146; align-items: center; padding: 24px; overflow: hidden; }
