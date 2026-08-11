@@ -132,11 +132,10 @@ func validateGiftClipLocalPath(name, path string) error {
 }
 
 func isAbsoluteGiftClipPath(path string) bool {
-	normalized := strings.ToLower(strings.ReplaceAll(path, `\`, "/"))
-	if strings.HasPrefix(normalized, "//") || strings.HasPrefix(normalized, "/?/") || strings.HasPrefix(normalized, "/??/") || strings.HasPrefix(normalized, "/globalroot/") || strings.HasPrefix(normalized, "/device/") {
+	if strings.HasPrefix(path, `\`) || strings.HasPrefix(path, "//") {
 		return false
 	}
-	if strings.HasPrefix(normalized, "/") || filepath.IsAbs(path) {
+	if strings.HasPrefix(path, "/") {
 		return true
 	}
 	return len(path) >= 3 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':' && (path[2] == '\\' || path[2] == '/')
@@ -198,19 +197,32 @@ func shouldRetryGiftClipSoftware(err error, stderr string) bool {
 	message := strings.ToLower(err.Error() + "\n" + stderr)
 	for _, excluded := range []string{
 		"no space left on device", "disk full", "not enough space", "permission denied", "access is denied",
-		"invalid data found", "corrupt", "malformed", "error opening input", "error while opening input", "could not open input",
-		"no such file or directory", "path not found", "failed to open output", "error opening output",
+		"invalid data found", "corrupt", "malformed", "input", "error opening input", "error while opening input", "could not open input",
+		"no such file or directory", "path not found", "failed to open output", "error opening output", "output is not writable", "output path", "output directory", "output file", "could not write output",
 		"muxer", "muxing", "write header", "write error", "error writing", "failed to write",
 	} {
 		if strings.Contains(message, excluded) {
 			return false
 		}
 	}
-	for _, diagnostic := range []string{
-		"h264_mf", "media foundation", "hardware encoder", "hardware encoding",
-		"dxgi_error_device", "device removed", "device lost", "device creation failed",
-	} {
-		if strings.Contains(message, diagnostic) {
+	if !giftClipHardwareFailureContext(message) || !giftClipHardwareFailureSignal(message) {
+		return false
+	}
+	return true
+}
+
+func giftClipHardwareFailureContext(message string) bool {
+	for _, context := range []string{"h264_mf", "media foundation", "mft encoder", "hardware encoder", "hardware encoding", "dxgi", "d3d11"} {
+		if strings.Contains(message, context) {
+			return true
+		}
+	}
+	return false
+}
+
+func giftClipHardwareFailureSignal(message string) bool {
+	for _, signal := range []string{"failed", "failure", "error", "unavailable", "not available", "cannot initialize", "could not initialize", "initialization", "unsupported", "device lost", "device removed"} {
+		if strings.Contains(message, signal) {
 			return true
 		}
 	}

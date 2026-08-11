@@ -130,6 +130,29 @@ func TestBuildGiftClipFFmpegArgsRejectsWindowsDeviceNamespaces(t *testing.T) {
 	}
 }
 
+func TestBuildGiftClipFFmpegArgsRejectsWindowsRootRelativeAndDriveRelativePaths(t *testing.T) {
+	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
+	tests := []struct {
+		name string
+		set  func(*giftClipEncodeRequest)
+	}{
+		{name: "source root relative", set: func(request *giftClipEncodeRequest) { request.Source.Path = `\Windows\source.gif` }},
+		{name: "background dos devices", set: func(request *giftClipEncodeRequest) { request.BackgroundPath = `\DosDevices\C:\background.png` }},
+		{name: "overlay global namespace", set: func(request *giftClipEncodeRequest) { request.OverlayPath = `\GLOBAL??\overlay.png` }},
+		{name: "output device namespace", set: func(request *giftClipEncodeRequest) { request.OutputPath = `\Device\HarddiskVolume1\output.mp4` }},
+		{name: "source drive relative", set: func(request *giftClipEncodeRequest) { request.Source.Path = `C:source.gif` }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := request
+			test.set(&candidate)
+			if _, err := buildGiftClipFFmpegArgs(candidate, giftClipEncoderHardware); err == nil {
+				t.Fatal("Windows non-absolute path was accepted")
+			}
+		})
+	}
+}
+
 func TestBuildGiftClipFFmpegArgsRejectsUnknownEncoderMode(t *testing.T) {
 	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
 	if _, err := buildGiftClipFFmpegArgs(request, giftClipEncoderMode("other")); err == nil {
@@ -158,8 +181,15 @@ func TestShouldRetryGiftClipSoftwareClassifiesHardwareFailures(t *testing.T) {
 		want   bool
 	}{
 		{name: "h264 mf initialization", err: errors.New("exit status 1"), stderr: "Error initializing h264_mf hardware encoder", want: true},
+		{name: "h264 mf MFT creation", err: errors.New("exit status 1"), stderr: "[h264_mf @ 000001] Failed to create MFT encoder", want: true},
 		{name: "media foundation device failure", err: errors.New("exit status 1"), stderr: "Media Foundation encoder failed after DXGI_ERROR_DEVICE_REMOVED", want: true},
 		{name: "generic exit", err: errors.New("exit status 1"), stderr: "conversion failed", want: false},
+		{name: "h264 mf selected", err: errors.New("exit status 1"), stderr: "h264_mf selected", want: false},
+		{name: "media foundation selected", err: errors.New("exit status 1"), stderr: "Media Foundation selected", want: false},
+		{name: "device lost without encoder context", err: errors.New("exit status 1"), stderr: "device lost", want: false},
+		{name: "output failure mentioning h264 mf", err: errors.New("exit status 1"), stderr: "h264_mf selected; output is not writable", want: false},
+		{name: "input failure mentioning media foundation", err: errors.New("exit status 1"), stderr: "Media Foundation selected; failed to decode input", want: false},
+		{name: "mux failure mentioning hardware encoder", err: errors.New("exit status 1"), stderr: "hardware encoder selected; Error muxing a packet", want: false},
 		{name: "canceled", err: context.Canceled, stderr: "Error while opening encoder", want: false},
 		{name: "disk full", err: errors.New("exit status 1"), stderr: "No space left on device", want: false},
 		{name: "invalid input", err: errors.New("exit status 1"), stderr: "Invalid data found when processing input", want: false},
