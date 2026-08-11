@@ -3667,6 +3667,7 @@ body.config-mode::-webkit-scrollbar-corner,
   --gift-clip-crop-control: color-mix(in srgb, var(--accent) 82%, white);
   position: absolute;
   box-sizing: border-box;
+  container-type: size;
   border: 0;
   outline: 0;
   box-shadow: 0 0 0 1px rgba(255,255,255,.78), 0 0 0 9999px rgba(7,7,13,.66);
@@ -3709,8 +3710,8 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .gift-clip-crop-handle {
   position: absolute;
   z-index: 3;
-  width: 28px;
-  height: 28px;
+  width: min(28px, 33.333cqw, 33.333cqh);
+  height: min(28px, 33.333cqw, 33.333cqh);
   margin: 0;
   border: 0;
   border-radius: 0;
@@ -3734,51 +3735,51 @@ body.config-mode::-webkit-scrollbar-corner,
 .config-root .gift-clip-crop-handle.is-n::before,
 .config-root .gift-clip-crop-handle.is-s::before {
   left: 50%;
-  width: 14px;
-  height: 3px;
+  width: min(14px, 75%);
+  height: min(3px, 25%);
   background: currentColor;
   transform: translateX(-50%);
 }
 .config-root .gift-clip-crop-handle.is-e::before,
 .config-root .gift-clip-crop-handle.is-w::before {
   top: 50%;
-  width: 3px;
-  height: 14px;
+  width: min(3px, 25%);
+  height: min(14px, 75%);
   background: currentColor;
   transform: translateY(-50%);
 }
-.config-root .gift-clip-crop-handle.is-n::before { top: 3px; }
-.config-root .gift-clip-crop-handle.is-s::before { bottom: 3px; }
-.config-root .gift-clip-crop-handle.is-e::before { right: 3px; }
-.config-root .gift-clip-crop-handle.is-w::before { left: 3px; }
+.config-root .gift-clip-crop-handle.is-n::before { top: min(3px, 15%); }
+.config-root .gift-clip-crop-handle.is-s::before { bottom: min(3px, 15%); }
+.config-root .gift-clip-crop-handle.is-e::before { right: min(3px, 15%); }
+.config-root .gift-clip-crop-handle.is-w::before { left: min(3px, 15%); }
 .config-root .gift-clip-crop-handle.is-nw::before,
 .config-root .gift-clip-crop-handle.is-ne::before,
 .config-root .gift-clip-crop-handle.is-se::before,
 .config-root .gift-clip-crop-handle.is-sw::before {
-  width: 20px;
-  height: 20px;
+  width: min(20px, 75%);
+  height: min(20px, 75%);
 }
 .config-root .gift-clip-crop-handle.is-nw::before {
-  top: 4px;
-  left: 4px;
+  top: min(4px, 15%);
+  left: min(4px, 15%);
   border-top: 2px solid currentColor;
   border-left: 2px solid currentColor;
 }
 .config-root .gift-clip-crop-handle.is-ne::before {
-  top: 4px;
-  right: 4px;
+  top: min(4px, 15%);
+  right: min(4px, 15%);
   border-top: 2px solid currentColor;
   border-right: 2px solid currentColor;
 }
 .config-root .gift-clip-crop-handle.is-se::before {
-  right: 4px;
-  bottom: 4px;
+  right: min(4px, 15%);
+  bottom: min(4px, 15%);
   border-right: 2px solid currentColor;
   border-bottom: 2px solid currentColor;
 }
 .config-root .gift-clip-crop-handle.is-sw::before {
-  bottom: 4px;
-  left: 4px;
+  bottom: min(4px, 15%);
+  left: min(4px, 15%);
   border-bottom: 2px solid currentColor;
   border-left: 2px solid currentColor;
 }
@@ -3836,7 +3837,10 @@ body.config-mode::-webkit-scrollbar-corner,
     max-height: calc(100dvh - 210px);
     border-radius: 0;
   }
-  .config-root .gift-clip-crop-handle { width: 32px; height: 32px; }
+  .config-root .gift-clip-crop-handle {
+    width: min(32px, 33.333cqw, 33.333cqh);
+    height: min(32px, 33.333cqw, 33.333cqh);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

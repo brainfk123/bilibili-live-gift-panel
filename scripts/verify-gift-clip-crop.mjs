@@ -30,6 +30,89 @@ async function waitForCropStatus(page, dimensions) {
   return text ?? '';
 }
 
+async function resizeCropToMinimum(page) {
+  async function shrink(handle, key, presses) {
+    await page.locator(`.gift-clip-crop-handle.is-${handle}`).focus();
+    await page.keyboard.down('Shift');
+    try {
+      for (let index = 0; index < presses; index += 1) {
+        await page.keyboard.press(key);
+      }
+    } finally {
+      await page.keyboard.up('Shift');
+    }
+  }
+
+  await shrink('e', 'ArrowLeft', 64);
+  await shrink('s', 'ArrowUp', 36);
+  await waitForCropStatus(page, '64 × 64');
+}
+
+async function inspectMinimumCropTargetability(page, layout) {
+  const contract = await page.evaluate(() => {
+    const frame = document.querySelector('.gift-clip-crop-frame');
+    if (!(frame instanceof HTMLElement)) throw new Error('.gift-clip-crop-frame missing');
+    const frameBounds = frame.getBoundingClientRect();
+    const handles = [...frame.querySelectorAll('.gift-clip-crop-handle')].map((element) => {
+      if (!(element instanceof HTMLElement)) throw new Error('crop handle must be an HTMLElement');
+      const bounds = element.getBoundingClientRect();
+      const center = {
+        x: bounds.left + bounds.width / 2,
+        y: bounds.top + bounds.height / 2,
+      };
+      const hit = document.elementFromPoint(center.x, center.y);
+      return {
+        handle: element.dataset.handle,
+        hitHandle: hit instanceof HTMLElement ? hit.dataset.handle ?? null : null,
+        bounds: {
+          left: bounds.left,
+          top: bounds.top,
+          right: bounds.right,
+          bottom: bounds.bottom,
+          width: bounds.width,
+          height: bounds.height,
+        },
+      };
+    });
+    const overlaps = [];
+    for (let leftIndex = 0; leftIndex < handles.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < handles.length; rightIndex += 1) {
+        const left = handles[leftIndex];
+        const right = handles[rightIndex];
+        const overlapWidth = Math.min(left.bounds.right, right.bounds.right)
+          - Math.max(left.bounds.left, right.bounds.left);
+        const overlapHeight = Math.min(left.bounds.bottom, right.bounds.bottom)
+          - Math.max(left.bounds.top, right.bounds.top);
+        if (overlapWidth > 0.5 && overlapHeight > 0.5) {
+          overlaps.push(`${left.handle}/${right.handle}`);
+        }
+      }
+    }
+    const frameCenterHit = document.elementFromPoint(
+      frameBounds.left + frameBounds.width / 2,
+      frameBounds.top + frameBounds.height / 2,
+    );
+    return {
+      frame: { width: frameBounds.width, height: frameBounds.height },
+      handles,
+      overlaps,
+      frameCenterIsGrabSurface: frameCenterHit === frame,
+    };
+  });
+
+  return {
+    layout,
+    ...contract,
+    failures: [
+      ...contract.handles
+        .filter(({ handle, hitHandle }) => handle !== hitHandle)
+        .map(({ handle, hitHandle }) => `${layout} ${handle} center hits ${hitHandle ?? 'non-handle'}`),
+      ...contract.overlaps.map((pair) => `${layout} overlapping handles ${pair}`),
+      ...(contract.frameCenterIsGrabSurface ? [] : [`${layout} frame center is not a grab surface`]),
+    ],
+  };
+}
+
 async function openValidAnimation(page) {
   await page.getByRole('button', { name: '制作回放' }).first().click();
   await page.locator('.gift-clip-crop-frame').waitFor();
@@ -159,8 +242,15 @@ try {
   await frame.focus();
   await page.keyboard.down('ArrowLeft');
   await page.waitForFunction(() => document.querySelector('.gift-clip-crop-frame')?.classList.contains('is-adjusting'));
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('.gift-clip-crop-guides')).opacity) > 0);
   await page.keyboard.up('ArrowLeft');
   await page.waitForFunction(() => !document.querySelector('.gift-clip-crop-frame')?.classList.contains('is-adjusting'));
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('.gift-clip-crop-guides')).opacity) === 0);
+
+  await resizeCropToMinimum(page);
+  const desktopMinimumTargetability = await inspectMinimumCropTargetability(page, 'desktop');
+  await page.getByRole('button', { name: '恢复完整画面' }).click();
+  await waitForCropStatus(page, '640 × 360');
 
   await dragBy(page, page.locator('.gift-clip-crop-handle.is-w'), 96, 0);
   await waitForCropStatus(page, '512 × 360');
@@ -260,6 +350,18 @@ try {
   });
   assert.ok(overflow.document <= 1, `document horizontal overflow is ${overflow.document}px`);
   assert.ok(overflow.dialog <= 1, `dialog horizontal overflow is ${overflow.dialog}px`);
+
+  await resizeCropToMinimum(page);
+  const mobileMinimumTargetability = await inspectMinimumCropTargetability(page, 'mobile');
+  const minimumTargetabilityFailures = [
+    ...desktopMinimumTargetability.failures,
+    ...mobileMinimumTargetability.failures,
+  ];
+  assert.deepEqual(
+    minimumTargetabilityFailures,
+    [],
+    `minimum crop targetability failures:\n${minimumTargetabilityFailures.join('\n')}`,
+  );
 
   await page.waitForTimeout(100);
   assert.equal(errors.length, 0, `Browser errors:\n${errors.join('\n')}`);
