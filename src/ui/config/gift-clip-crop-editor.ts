@@ -56,16 +56,22 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
   } = options;
   let crop = constrainGiftClipCrop(options.initialCrop, sourceWidth, sourceHeight);
   let dragState: DragState | null = null;
+  let keyboardAdjusting = false;
   let destroyed = false;
 
   const layer = document.createElement('div');
   layer.className = 'gift-clip-crop-layer';
-  const frame = document.createElement('div');
+  const frame = document.createElement('div') as HTMLDivElement & {
+    onfocusout: ((event: FocusEvent) => unknown) | null;
+  };
   frame.className = 'gift-clip-crop-frame';
   frame.tabIndex = 0;
   frame.setAttribute('aria-label', '移动剪裁区域，使用方向键调整');
   const viewport = document.createElement('div');
   viewport.className = 'gift-clip-crop-viewport';
+  const guides = document.createElement('div');
+  guides.className = 'gift-clip-crop-guides';
+  guides.setAttribute('aria-hidden', 'true');
   const infoPreview = createGiftClipInfoPreview(options.receipt, options.avatar);
   infoPreview.style.pointerEvents = 'none';
   infoPreview.inert = true;
@@ -80,7 +86,7 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
     button.setAttribute('aria-label', label);
     return button;
   });
-  frame.append(viewport, ...handleElements);
+  frame.append(viewport, guides, ...handleElements);
   layer.append(frame);
   stage.style.setProperty('--gift-clip-source-width', String(sourceWidth));
   stage.style.setProperty('--gift-clip-source-height', String(sourceHeight));
@@ -113,6 +119,21 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
       height: layer.clientHeight || bounds.height,
     };
   };
+  const syncAdjustmentState = (): void => {
+    const adjusting = dragState !== null || keyboardAdjusting;
+    if (adjusting) frame.classList.add('is-adjusting');
+    else frame.classList.remove('is-adjusting');
+    if (dragState?.handle === 'move') frame.classList.add('is-moving');
+    else frame.classList.remove('is-moving');
+  };
+  const clearAdjustmentState = (): void => {
+    if (dragState && frame.hasPointerCapture(dragState.pointerId)) {
+      frame.releasePointerCapture(dragState.pointerId);
+    }
+    dragState = null;
+    keyboardAdjusting = false;
+    syncAdjustmentState();
+  };
 
   frame.onpointerdown = (event) => {
     if (destroyed || dragState || event.button !== 0) return;
@@ -128,6 +149,7 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
       displaySize: displaySize(),
     };
     frame.setPointerCapture(event.pointerId);
+    syncAdjustmentState();
   };
   frame.onpointermove = (event) => {
     if (!dragState || dragState.pointerId !== event.pointerId) return;
@@ -153,11 +175,15 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
     if (!dragState || dragState.pointerId !== event.pointerId) return;
     if (frame.hasPointerCapture(event.pointerId)) frame.releasePointerCapture(event.pointerId);
     dragState = null;
+    syncAdjustmentState();
   };
   frame.onpointerup = finishDrag;
   frame.onpointercancel = finishDrag;
   frame.onlostpointercapture = (event) => {
-    if (dragState?.pointerId === event.pointerId) dragState = null;
+    if (dragState?.pointerId === event.pointerId) {
+      dragState = null;
+      syncAdjustmentState();
+    }
   };
   frame.onkeydown = (event) => {
     const direction = {
@@ -173,6 +199,8 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
     const adjustsY = handle === 'move' || handle.includes('n') || handle.includes('s');
     if ((direction.x && !adjustsX) || (direction.y && !adjustsY)) return;
     event.preventDefault();
+    keyboardAdjusting = true;
+    syncAdjustmentState();
     const step = event.shiftKey ? 10 : 1;
     crop = updateGiftClipCrop(
       crop,
@@ -184,6 +212,15 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
     );
     render();
   };
+  frame.onkeyup = (event) => {
+    if (!event.key.startsWith('Arrow')) return;
+    keyboardAdjusting = false;
+    syncAdjustmentState();
+  };
+  frame.onfocusout = () => {
+    keyboardAdjusting = false;
+    syncAdjustmentState();
+  };
 
   render();
 
@@ -192,22 +229,22 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
     getCrop: () => ({ ...crop }),
     reset: () => {
       if (destroyed) return;
+      clearAdjustmentState();
       crop = constrainGiftClipCrop(defaultGiftClipCrop(), sourceWidth, sourceHeight);
       render();
     },
     destroy: () => {
       if (destroyed) return;
       destroyed = true;
-      if (dragState && frame.hasPointerCapture(dragState.pointerId)) {
-        frame.releasePointerCapture(dragState.pointerId);
-      }
-      dragState = null;
+      clearAdjustmentState();
       frame.onpointerdown = null;
       frame.onpointermove = null;
       frame.onpointerup = null;
       frame.onpointercancel = null;
       frame.onlostpointercapture = null;
       frame.onkeydown = null;
+      frame.onkeyup = null;
+      frame.onfocusout = null;
       resizeObserver?.disconnect();
       layer.remove();
     },

@@ -123,13 +123,13 @@ class CropTestElement {
   onpointercancel: ((event: PointerEvent) => unknown) | null = null;
   onlostpointercapture: ((event: PointerEvent) => unknown) | null = null;
   onkeydown: ((event: KeyboardEvent) => unknown) | null = null;
+  onkeyup: ((event: KeyboardEvent) => unknown) | null = null;
+  onfocusout: ((event: FocusEvent) => unknown) | null = null;
   private readonly capturedPointers = new Set<number>();
   readonly classList = {
-    add: (...names: string[]) => {
-      const classes = new Set(this.className.split(' ').filter(Boolean));
-      names.forEach((name) => classes.add(name));
-      this.className = [...classes].join(' ');
-    },
+    add: (...names: string[]) => this.updateClasses(names, true),
+    remove: (...names: string[]) => this.updateClasses(names, false),
+    contains: (name: string) => this.className.split(/\s+/).includes(name),
   };
 
   constructor(readonly tagName: string) {}
@@ -236,6 +236,23 @@ class CropTestElement {
       preventDefault: () => { defaultPrevented = true; },
     } as unknown as KeyboardEvent);
     return defaultPrevented;
+  }
+
+  dispatchKeyUp(key: string, target: CropTestElement = this): void {
+    this.onkeyup?.({ key, target, currentTarget: this } as unknown as KeyboardEvent);
+  }
+
+  dispatchFocusOut(target: CropTestElement = this): void {
+    this.onfocusout?.({ target, currentTarget: this } as unknown as FocusEvent);
+  }
+
+  private updateClasses(names: string[], add: boolean): void {
+    const classes = new Set(this.className.split(/\s+/).filter(Boolean));
+    for (const name of names) {
+      if (add) classes.add(name);
+      else classes.delete(name);
+    }
+    this.className = [...classes].join(' ');
   }
 }
 
@@ -422,6 +439,42 @@ describe('gift clip crop DOM editor', () => {
     expect(changes).toHaveLength(2);
   });
 
+  it('exposes an inert rule-of-thirds guide only while pointer adjustment is active', () => {
+    const { frame, layer } = createCropEditorHarness();
+    const guides = layer.querySelector('.gift-clip-crop-guides');
+    const eastHandle = layer.querySelector('.is-e');
+    if (!guides || !eastHandle) throw new Error('crop guide or east handle missing');
+
+    expect(guides.getAttribute('aria-hidden')).toBe('true');
+    expect(frame.classList.contains('is-adjusting')).toBe(false);
+    frame.dispatchPointer('pointerdown', { pointerId: 11, target: frame });
+    expect(frame.classList.contains('is-adjusting')).toBe(true);
+    expect(frame.classList.contains('is-moving')).toBe(true);
+    frame.dispatchPointer('pointerup', { pointerId: 11 });
+    expect(frame.classList.contains('is-adjusting')).toBe(false);
+
+    frame.dispatchPointer('pointerdown', { pointerId: 12, target: eastHandle });
+    expect(frame.classList.contains('is-adjusting')).toBe(true);
+    expect(frame.classList.contains('is-moving')).toBe(false);
+    frame.dispatchPointer('pointercancel', { pointerId: 12 });
+    expect(frame.classList.contains('is-adjusting')).toBe(false);
+  });
+
+  it('shows keyboard adjustment state until keyup or focusout', () => {
+    const { frame, layer } = createCropEditorHarness();
+    const eastHandle = layer.querySelector('.is-e');
+    if (!eastHandle) throw new Error('east handle missing');
+
+    frame.dispatchKey('ArrowLeft', eastHandle);
+    expect(frame.classList.contains('is-adjusting')).toBe(true);
+    frame.dispatchKeyUp('ArrowLeft', eastHandle);
+    expect(frame.classList.contains('is-adjusting')).toBe(false);
+
+    frame.dispatchKey('ArrowRight');
+    frame.dispatchFocusOut();
+    expect(frame.classList.contains('is-adjusting')).toBe(false);
+  });
+
   it('notifies with the full source crop when reset', () => {
     const initial = giftClipCropFromPixels({ x: 64, y: 64, width: 320, height: 180 }, 640, 360);
     const { editor, changes } = createCropEditorHarness(initial);
@@ -466,6 +519,10 @@ describe('gift clip crop DOM editor', () => {
     expect(frame.onpointercancel).toBeNull();
     expect(frame.onlostpointercapture).toBeNull();
     expect(frame.onkeydown).toBeNull();
+    expect(frame.onkeyup).toBeNull();
+    expect(frame.onfocusout).toBeNull();
+    expect(frame.classList.contains('is-adjusting')).toBe(false);
+    expect(frame.classList.contains('is-moving')).toBe(false);
     expect(layer.parent).toBeNull();
     expect(resizeObserver.disconnected).toBe(true);
     expect(infoPreview.style.transform).toBe('scale(0.75)');
