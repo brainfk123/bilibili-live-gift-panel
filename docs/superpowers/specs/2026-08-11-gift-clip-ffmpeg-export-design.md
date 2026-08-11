@@ -188,8 +188,9 @@ FFmpeg 使用 `-progress pipe:1 -nostats` 输出机器可读进度。服务用 `
 
 具体开关必须由可复现构建脚本显式列出，并以 GIF、动画 WebP、完整特效三类 fixture 验证，
 不得仅凭组件名称推断功能存在。FFmpeg 8.1.2 使用实际 demuxer 名 `image_webp_pipe`，并在
-`--disable-autodetect` 下显式启用 `mediafoundation` 以满足 `h264_mf` 依赖；Windows/MSYS2
-构建目标为 `ffmpeg.exe`。组件验证允许 FFmpeg 为显式白名单自动选择的必要基础设施项，但
+`--disable-autodetect` 下显式启用 `mediafoundation` 与 `d3d11va` 以满足 `h264_mf` 的编译
+依赖；`d3d11va` 不授权额外 codec/hwaccel，Windows/MSYS2 构建目标为 `ffmpeg.exe`。组件验证
+允许 FFmpeg 为显式白名单自动选择的必要基础设施项，但
 必须逐项记录，且不得扩大 codec、协议、网络、音频、字幕、GPL 或 nonfree 范围。若实际素材
 证明无需某个视频 decoder，应从最终配置移除。
 

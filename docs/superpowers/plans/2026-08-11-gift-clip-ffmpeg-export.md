@@ -603,6 +603,7 @@ func (payload *giftClipPayload) Prepare(ctx context.Context) (string, error) {
 --enable-avformat
 --enable-swscale
 --enable-mediafoundation
+--enable-d3d11va
 --enable-protocol=file,pipe
 --enable-demuxer=gif,image_webp_pipe,mov,image2
 --enable-decoder=gif,webp,png,h264
@@ -619,7 +620,7 @@ func (payload *giftClipPayload) Prepare(ctx context.Context) (string, error) {
 --extra-ldflags=-static
 ```
 
-脚本在 configure 后检查 `config.h` 不含 `CONFIG_GPL 1` / `CONFIG_NONFREE 1`，确认 `CONFIG_MEDIAFOUNDATION 1` 与 `CONFIG_H264_MF_ENCODER 1`，并在 Windows/MSYS2 下构建实际目标 `ffmpeg.exe`；随后保存 `ffmpeg -buildconf` 到 `dist/ffmpeg-build-config.txt`。如果实测完整特效 fixture 不是 H.264，停止本任务并回到规格评审；不能自行加入 HEVC/VP9。
+脚本在 configure 后检查 `config.h` 不含 `CONFIG_GPL 1` / `CONFIG_NONFREE 1`，确认 `CONFIG_MEDIAFOUNDATION 1`、`CONFIG_D3D11VA 1` 与 `CONFIG_H264_MF_ENCODER 1`，并在 Windows/MSYS2 下构建实际目标 `ffmpeg.exe`；随后保存 `ffmpeg -buildconf` 到 `dist/ffmpeg-build-config.txt`。`d3d11va` 只作为 FFmpeg 8.1.2 `h264_mf` 编译所需基础设施，不授权增加额外 codec/hwaccel。若实测完整特效 fixture 不是 H.264，停止本任务并回到规格评审；不能自行加入 HEVC/VP9。
 
 - [ ] **Step 5: 实现签名后打包脚本和大小门限**
 
