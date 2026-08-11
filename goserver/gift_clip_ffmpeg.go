@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -197,7 +198,9 @@ func shouldRetryGiftClipSoftware(err error, stderr string) bool {
 	message := strings.ToLower(err.Error() + "\n" + stderr)
 	for _, excluded := range []string{
 		"no space left on device", "disk full", "not enough space", "permission denied", "access is denied",
-		"invalid data found", "corrupt", "malformed", "input", "error opening input", "error while opening input", "could not open input",
+		"invalid data found", "corrupt input", "input is corrupt", "malformed input", "invalid input",
+		"error opening input", "error while opening input", "could not open input", "failed to open input",
+		"decode error", "decoding error", "failed to decode", "could not decode", "demux", "could not find codec parameters", "unsupported input format",
 		"no such file or directory", "path not found", "failed to open output", "error opening output", "output is not writable", "output path", "output directory", "output file", "could not write output",
 		"muxer", "muxing", "write header", "write error", "error writing", "failed to write",
 	} {
@@ -205,26 +208,28 @@ func shouldRetryGiftClipSoftware(err error, stderr string) bool {
 			return false
 		}
 	}
-	if !giftClipHardwareFailureContext(message) || !giftClipHardwareFailureSignal(message) {
-		return false
-	}
-	return true
-}
-
-func giftClipHardwareFailureContext(message string) bool {
-	for _, context := range []string{"h264_mf", "media foundation", "mft encoder", "hardware encoder", "hardware encoding", "dxgi", "d3d11"} {
-		if strings.Contains(message, context) {
-			return true
+	for _, clause := range strings.FieldsFunc(message, func(character rune) bool {
+		return character == '\r' || character == '\n' || character == ';' || character == '|'
+	}) {
+		normalized := strings.Join(strings.Fields(clause), " ")
+		for _, pattern := range giftClipHardwareFailurePatterns {
+			if pattern.MatchString(normalized) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-func giftClipHardwareFailureSignal(message string) bool {
-	for _, signal := range []string{"failed", "failure", "error", "unavailable", "not available", "cannot initialize", "could not initialize", "initialization", "unsupported", "device lost", "device removed"} {
-		if strings.Contains(message, signal) {
-			return true
-		}
-	}
-	return false
+var giftClipHardwareFailurePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\bh264_mf\b(\s+@\s+[0-9a-fx]+)?\]?\s*((hardware\s+)?encoder\s+)?(failed(\s+to)?|could not|unable(\s+to)?)\s+(initialize|open|create|start|encode)\w*`),
+	regexp.MustCompile(`(?i)\bmedia foundation\b(\s+(mft|transform|encoder)){0,2}\s+(failed(\s+to)?|could not|unable(\s+to)?)\s+(initialize|open|create|start|encode)\w*`),
+	regexp.MustCompile(`(?i)\bmft(\s+encoder)?\s+(failed(\s+to)?|could not|unable(\s+to)?)\s+(initialize|open|create|start|encode)\w*`),
+	regexp.MustCompile(`(?i)(error( while)? (initializing|opening|creating|starting|encoding)|(failed|could not|unable)( to)? (initialize|open|create|start|encode)\w*)\s+(the\s+)?(h264_mf(\s+hardware\s+encoder)?|media foundation(\s+(mft|encoder)){0,2}|mft(\s+encoder)?|hardware encoder|hardware encoding)\b`),
+	regexp.MustCompile(`(?i)(\bh264_mf\b(\s+@\s+[0-9a-fx]+)?\]?|\bmedia foundation\b(\s+(mft|encoder)){0,2}|\bmft(\s+encoder)?)\s+(is\s+)?(unavailable|not available|unsupported)\b`),
+	regexp.MustCompile(`(?i)\bhardware (encoder|encoding)\b\s+(failed|failure|is unavailable|unavailable|not available|unsupported)\b`),
+	regexp.MustCompile(`(?i)\bh264_mf\b[^;|]{0,48}\berror while opening encoder for output stream\b`),
+	regexp.MustCompile(`(?i)\bmedia foundation\b(\s+(mft|encoder)){0,2}\s+failed\s+(after|with|because of)\s+[^;|]{0,48}(dxgi_error_device_(removed|hung|reset)|d3d11)`),
+	regexp.MustCompile(`(?i)\b(gpu|hardware) device\b\s+(is\s+)?(lost|removed|failed|unavailable|not available)\b[^;|]{0,48}\b(hardware encoder|hardware encoding|h264_mf|media foundation|mft)\b`),
+	regexp.MustCompile(`(?i)\b(hardware encoder|hardware encoding|h264_mf|media foundation|mft)\b[^;|]{0,48}\b(gpu|hardware) device\b\s+(is\s+)?(lost|removed|failed|unavailable|not available)\b`),
 }
