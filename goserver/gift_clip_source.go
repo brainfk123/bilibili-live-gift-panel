@@ -264,10 +264,19 @@ func giftClipUint24(data []byte) int {
 }
 
 func writeGiftClipSource(taskDir, name string, data []byte) (string, error) {
-	return writeGiftClipSourceWithBeforeInstall(taskDir, name, data, nil)
+	return writeGiftClipSourceWithHooks(taskDir, name, data, giftClipSourceWriteHooks{})
 }
 
 func writeGiftClipSourceWithBeforeInstall(taskDir, name string, data []byte, beforeInstall func()) (string, error) {
+	return writeGiftClipSourceWithHooks(taskDir, name, data, giftClipSourceWriteHooks{beforeInstall: beforeInstall})
+}
+
+type giftClipSourceWriteHooks struct {
+	beforeInstall func()
+	removePartial func(string) error
+}
+
+func writeGiftClipSourceWithHooks(taskDir, name string, data []byte, hooks giftClipSourceWriteHooks) (string, error) {
 	if strings.TrimSpace(taskDir) == "" {
 		return "", errors.New("素材目录无效")
 	}
@@ -285,14 +294,14 @@ func writeGiftClipSourceWithBeforeInstall(taskDir, name string, data []byte, bef
 	if err != nil {
 		return "", err
 	}
-	clean := true
-	installed := false
+	removePartial := hooks.removePartial
+	if removePartial == nil {
+		removePartial = os.Remove
+	}
+	committed := false
 	defer func() {
-		if clean {
-			_ = os.Remove(partial)
-			if installed {
-				_ = os.Remove(path)
-			}
+		if !committed {
+			_ = removePartial(partial)
 		}
 	}()
 	if _, err := file.Write(data); err != nil {
@@ -306,16 +315,13 @@ func writeGiftClipSourceWithBeforeInstall(taskDir, name string, data []byte, bef
 	if err := file.Close(); err != nil {
 		return "", err
 	}
-	if beforeInstall != nil {
-		beforeInstall()
+	if hooks.beforeInstall != nil {
+		hooks.beforeInstall()
 	}
 	if err := os.Link(partial, path); err != nil {
 		return "", err
 	}
-	installed = true
-	if err := os.Remove(partial); err != nil {
-		return "", err
-	}
-	clean = false
+	committed = true
+	_ = removePartial(partial)
 	return path, nil
 }

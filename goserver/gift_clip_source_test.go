@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"image"
 	"image/color"
 	"image/gif"
@@ -46,13 +47,17 @@ func TestGiftClipWebPInfoClampsShortFrameDelay(t *testing.T) {
 }
 
 func TestGiftClipWebPInfoRejectsIncompleteFramePayloads(t *testing.T) {
+	unpaddedNestedChunk := rawUnpaddedWebPChunk("VP8 ", []byte{0})
+	if len(unpaddedNestedChunk) != 9 {
+		t.Fatalf("raw odd-length nested chunk size = %d", len(unpaddedNestedChunk))
+	}
 	tests := []struct {
 		name string
 		data []byte
 	}{
 		{name: "missing encoded frame", data: animatedWebPFrame(320, 180, 40, nil)},
 		{name: "truncated container", data: animatedWebPHeader(320, 180, 40)[:len(animatedWebPHeader(320, 180, 40))-1]},
-		{name: "missing nested padding", data: animatedWebPFrame(320, 180, 40, []byte{'V', 'P', '8', ' ', 1, 0, 0, 0, 0})},
+		{name: "missing nested padding", data: animatedWebPFrame(320, 180, 40, unpaddedNestedChunk)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -209,6 +214,29 @@ func TestWriteGiftClipSourceDoesNotReplaceDestinationCreatedBeforeInstallation(t
 	}
 }
 
+func TestWriteGiftClipSourceKeepsCommittedFinalWhenStagingCleanupFails(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "animation.gif")
+	returnedPath, err := writeGiftClipSourceWithHooks(directory, "animation.gif", []byte("installed"), giftClipSourceWriteHooks{
+		removePartial: func(string) error {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("peer"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return errors.New("simulated staging cleanup failure")
+		},
+	})
+	if err != nil || returnedPath != path {
+		t.Fatalf("path=%q err=%v", returnedPath, err)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil || string(data) != "peer" {
+		t.Fatalf("final data=%q err=%v", data, readErr)
+	}
+}
+
 func twoFrameGIF(t *testing.T, width, height int, delays []int) []byte {
 	t.Helper()
 	palette := color.Palette{color.Black, color.White}
@@ -267,6 +295,13 @@ func webPChunkData(kind string, data []byte) []byte {
 	var output bytes.Buffer
 	writeWebPChunk(&output, kind, data)
 	return output.Bytes()
+}
+
+func rawUnpaddedWebPChunk(kind string, data []byte) []byte {
+	chunk := make([]byte, 8, 8+len(data))
+	copy(chunk, kind)
+	binary.LittleEndian.PutUint32(chunk[4:8], uint32(len(data)))
+	return append(chunk, data...)
 }
 
 func validWebPVP8FrameHeader() []byte {
