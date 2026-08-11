@@ -203,6 +203,9 @@ func giftClipWebPInfo(data []byte) (int, int, time.Duration, error) {
 			if length < 16 {
 				return 0, 0, 0, errors.New("WebP 动画帧无效")
 			}
+			if !validGiftClipWebPFramePayload(data[payloadStart+16 : int(payloadEnd)]) {
+				return 0, 0, 0, errors.New("WebP 动画帧内容无效")
+			}
 			delay := giftClipUint24(data[payloadStart+12:])
 			cycle += time.Duration(maxInt(10, delay)) * time.Millisecond
 			hasFrame = true
@@ -222,11 +225,49 @@ func giftClipWebPInfo(data []byte) (int, int, time.Duration, error) {
 	return width, height, cycle, nil
 }
 
+func validGiftClipWebPFramePayload(data []byte) bool {
+	hasImage := false
+	for offset := 0; offset < len(data); {
+		if len(data)-offset < 8 {
+			return false
+		}
+		kind := string(data[offset : offset+4])
+		length := int64(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
+		payloadEnd := int64(offset+8) + length
+		if payloadEnd > int64(len(data)) {
+			return false
+		}
+		switch kind {
+		case "ALPH":
+		case "VP8 ", "VP8L":
+			if length == 0 {
+				return false
+			}
+			hasImage = true
+		default:
+			return false
+		}
+		next := payloadEnd
+		if length%2 != 0 {
+			next++
+		}
+		if next > int64(len(data)) {
+			return false
+		}
+		offset = int(next)
+	}
+	return hasImage
+}
+
 func giftClipUint24(data []byte) int {
 	return int(data[0]) | int(data[1])<<8 | int(data[2])<<16
 }
 
 func writeGiftClipSource(taskDir, name string, data []byte) (string, error) {
+	return writeGiftClipSourceWithBeforeInstall(taskDir, name, data, nil)
+}
+
+func writeGiftClipSourceWithBeforeInstall(taskDir, name string, data []byte, beforeInstall func()) (string, error) {
 	if strings.TrimSpace(taskDir) == "" {
 		return "", errors.New("素材目录无效")
 	}
@@ -245,9 +286,13 @@ func writeGiftClipSource(taskDir, name string, data []byte) (string, error) {
 		return "", err
 	}
 	clean := true
+	installed := false
 	defer func() {
 		if clean {
 			_ = os.Remove(partial)
+			if installed {
+				_ = os.Remove(path)
+			}
 		}
 	}()
 	if _, err := file.Write(data); err != nil {
@@ -261,7 +306,14 @@ func writeGiftClipSource(taskDir, name string, data []byte) (string, error) {
 	if err := file.Close(); err != nil {
 		return "", err
 	}
-	if err := os.Rename(partial, path); err != nil {
+	if beforeInstall != nil {
+		beforeInstall()
+	}
+	if err := os.Link(partial, path); err != nil {
+		return "", err
+	}
+	installed = true
+	if err := os.Remove(partial); err != nil {
 		return "", err
 	}
 	clean = false

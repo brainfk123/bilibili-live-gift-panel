@@ -45,6 +45,24 @@ func TestGiftClipWebPInfoClampsShortFrameDelay(t *testing.T) {
 	}
 }
 
+func TestGiftClipWebPInfoRejectsIncompleteFramePayloads(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "missing encoded frame", data: animatedWebPFrame(320, 180, 40, nil)},
+		{name: "truncated container", data: animatedWebPHeader(320, 180, 40)[:len(animatedWebPHeader(320, 180, 40))-1]},
+		{name: "missing nested padding", data: animatedWebPFrame(320, 180, 40, []byte{'V', 'P', '8', ' ', 1, 0, 0, 0, 0})},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, _, _, err := giftClipWebPInfo(test.data); err == nil {
+				t.Fatal("expected malformed WebP to be rejected")
+			}
+		})
+	}
+}
+
 func TestGiftClipSourceResolvesTrustedFullEffect(t *testing.T) {
 	store, receipt := giftClipSourceStore(t, &giftReceiptAnimation{
 		GIF: "https://i0.hdslb.com/gift.gif", MP4: "https://i0.hdslb.com/effect.mp4", MP4JSON: "https://i0.hdslb.com/effect.json",
@@ -171,6 +189,26 @@ func TestWriteGiftClipSourcePreservesAnExistingDestination(t *testing.T) {
 	}
 }
 
+func TestWriteGiftClipSourceDoesNotReplaceDestinationCreatedBeforeInstallation(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "animation.gif")
+	if _, err := writeGiftClipSourceWithBeforeInstall(directory, "animation.gif", []byte("replacement"), func() {
+		if err := os.WriteFile(path, []byte("concurrent"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}); err == nil {
+		t.Fatal("expected destination created during installation to be rejected")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "concurrent" {
+		t.Fatalf("destination data=%q err=%v", data, err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "animation.gif" {
+		t.Fatalf("directory entries=%#v err=%v", entries, err)
+	}
+}
+
 func twoFrameGIF(t *testing.T, width, height int, delays []int) []byte {
 	t.Helper()
 	palette := color.Palette{color.Black, color.White}
@@ -188,6 +226,18 @@ func twoFrameGIF(t *testing.T, width, height int, delays []int) []byte {
 }
 
 func animatedWebPHeader(width, height int, delays ...int) []byte {
+	frames := make([][]byte, len(delays))
+	for index, delay := range delays {
+		frames[index] = animatedWebPFrameData(width, height, delay, webPChunkData("VP8 ", validWebPVP8FrameHeader()))
+	}
+	return animatedWebP(width, height, frames...)
+}
+
+func animatedWebPFrame(width, height, delay int, payload []byte) []byte {
+	return animatedWebP(width, height, animatedWebPFrameData(width, height, delay, payload))
+}
+
+func animatedWebP(width, height int, frames ...[]byte) []byte {
 	var payload bytes.Buffer
 	payload.WriteString("WEBP")
 	vp8x := make([]byte, 10)
@@ -195,11 +245,7 @@ func animatedWebPHeader(width, height int, delays ...int) []byte {
 	putUint24(vp8x[7:10], height-1)
 	writeWebPChunk(&payload, "VP8X", vp8x)
 	writeWebPChunk(&payload, "ANIM", make([]byte, 6))
-	for _, delay := range delays {
-		frame := make([]byte, 16)
-		putUint24(frame[6:9], width-1)
-		putUint24(frame[9:12], height-1)
-		putUint24(frame[12:15], delay)
+	for _, frame := range frames {
 		writeWebPChunk(&payload, "ANMF", frame)
 	}
 	result := make([]byte, 8+payload.Len())
@@ -207,6 +253,24 @@ func animatedWebPHeader(width, height int, delays ...int) []byte {
 	binary.LittleEndian.PutUint32(result[4:8], uint32(payload.Len()))
 	copy(result[8:], payload.Bytes())
 	return result
+}
+
+func animatedWebPFrameData(width, height, delay int, payload []byte) []byte {
+	frame := make([]byte, 16, 16+len(payload))
+	putUint24(frame[6:9], width-1)
+	putUint24(frame[9:12], height-1)
+	putUint24(frame[12:15], delay)
+	return append(frame, payload...)
+}
+
+func webPChunkData(kind string, data []byte) []byte {
+	var output bytes.Buffer
+	writeWebPChunk(&output, kind, data)
+	return output.Bytes()
+}
+
+func validWebPVP8FrameHeader() []byte {
+	return []byte{0, 0, 0, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xb4, 0x00}
 }
 
 func writeWebPChunk(output *bytes.Buffer, kind string, data []byte) {
