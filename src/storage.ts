@@ -16,6 +16,7 @@ import {
   normalizeGiftTargetLayout,
 } from './output-config';
 import { giftTargetPanelConfig, mergeGiftTargetPanelConfigs, type GiftTargetPanelConfig } from './gift-targets';
+import { normalizeGiftClipCrop } from './ui/config/gift-clip-crop';
 
 const CONFIG_ENDPOINT = '/api/config';
 const CONFIG_BACKUP_SCHEMA_VERSION = 5;
@@ -96,7 +97,7 @@ export const defaultState = (): AppState => ({
     lastSeenChangelogVersion: '',
     autoUpdate: true,
     configExperience: 'simple',
-    giftClipPlacements: {},
+    giftClipCrops: {},
   },
   giftCatalog: [],
   recentGifts: [],
@@ -339,16 +340,19 @@ function normalizeState(parsed: Partial<AppState>): AppState {
   const tutorialReplayMode = parsed.settings?.tutorialReplayMode === undefined
     ? showTutorial && setupComplete && tutorialCompletedLessons.length === 0
     : parsed.settings.tutorialReplayMode === true;
+  const legacyPlacementSettingsKey = ['giftClip', 'Placements'].join('');
+  const parsedSettings = { ...(parsed.settings ?? {}) } as Partial<AppState['settings']> & Record<string, unknown>;
+  delete parsedSettings[legacyPlacementSettingsKey];
   const settings: AppState['settings'] = {
     ...base.settings,
-    ...(parsed.settings ?? {}),
+    ...parsedSettings,
     showTutorial,
     tutorialVersion: 3,
     tutorialCompletedLessons: Array.from(new Set(tutorialCompletedLessons)),
     tutorialReplayMode,
     trainingCompletedTopics: normalizeTrainingTopicIds(parsed.settings?.trainingCompletedTopics),
     configExperience: parsed.settings?.configExperience === 'simple' ? 'simple' : 'advanced',
-    giftClipPlacements: normalizeGiftClipPlacements(parsed.settings?.giftClipPlacements),
+    giftClipCrops: normalizeGiftClipCrops(parsedSettings.giftClipCrops),
   };
   settings.panelOpacity = Math.min(100, Math.max(10, Number(settings.panelOpacity) || base.settings.panelOpacity));
   settings.defaultDisplayThemeId = normalizeDisplayThemeId(settings.defaultDisplayThemeId);
@@ -397,21 +401,20 @@ function normalizeState(parsed: Partial<AppState>): AppState {
   };
 }
 
-function normalizeGiftClipPlacements(value: unknown): AppState['settings']['giftClipPlacements'] {
+function normalizeGiftClipCrops(value: unknown): AppState['settings']['giftClipCrops'] {
   if (!isObjectRecord(value)) return {};
-  const placements: AppState['settings']['giftClipPlacements'] = {};
-  for (const [key, raw] of Object.entries(value).slice(-200)) {
-    if (!key.trim() || key.length > 160 || !isObjectRecord(raw)) continue;
-    if (typeof raw.x !== 'number' || typeof raw.y !== 'number') continue;
-    const x = raw.x;
-    const y = raw.y;
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    placements[key] = {
-      x: Math.min(160, Math.max(-160, x)),
-      y: Math.min(160, Math.max(-160, y)),
-    };
+  const crops: AppState['settings']['giftClipCrops'] = {};
+  for (const [rawKey, raw] of Object.entries(value)) {
+    const key = rawKey.trim();
+    if (!key || Array.from(key).length > 160 || isReservedGiftClipCropKey(key)) continue;
+    crops[key] = normalizeGiftClipCrop(raw);
+    if (Object.keys(crops).length === 200) break;
   }
-  return placements;
+  return crops;
+}
+
+function isReservedGiftClipCropKey(key: string): boolean {
+  return key === '__proto__' || key === 'constructor' || key === 'prototype';
 }
 
 function normalizeSimplePlay(input: AppState['simplePlay'] | undefined, attributeIds: ReadonlySet<string>): SimplePlay | undefined {

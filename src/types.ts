@@ -337,9 +337,11 @@ export interface ContributionLedger {
   updatedAt?: number;
 }
 
-export interface GiftClipPlacement {
+export interface GiftClipCrop {
   x: number;
   y: number;
+  width: number;
+  height: number;
 }
 
 export interface Settings {
@@ -361,7 +363,7 @@ export interface Settings {
   lastSeenChangelogVersion: string;
   autoUpdate: boolean;
   configExperience: 'simple' | 'advanced';
-  giftClipPlacements: Record<string, GiftClipPlacement>;
+  giftClipCrops: Record<string, GiftClipCrop>;
 }
 
 export type SimplePlayTemplateId = 'overtime' | 'counter' | 'goal';

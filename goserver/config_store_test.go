@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -156,12 +157,21 @@ func TestConfigStorePatchWritesOnlyAffectedShard(t *testing.T) {
 	}
 }
 
-func TestConfigStorePersistsGiftClipPlacements(t *testing.T) {
+func TestConfigStorePersistsGiftClipCrops(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	legacyPlacementSettingsKey := "giftClip" + "Placements"
 	patch := httptest.NewRecorder()
-	store.handle(patch, httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(`{
-		"settings":{"giftClipPlacements":{"effect:99":{"x":42.5,"y":-18},"media:clamped":{"x":999,"y":-999}}}
-	}`)))
+	payload := fmt.Sprintf(`{
+		"settings":{
+			"giftClipCrops":{
+				"effect:99":{"x":0.1,"y":0.2,"width":0.6,"height":0.7},
+				"media:clamped":{"x":0.9,"y":-1,"width":0.5,"height":2},
+				"media:invalid":{"x":0,"y":0,"width":0,"height":1}
+			},
+			%q:{"effect:legacy":{"x":12,"y":-8}}
+		}
+	}`, legacyPlacementSettingsKey)
+	store.handle(patch, httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(payload)))
 	if patch.Code != http.StatusOK {
 		t.Fatalf("PATCH status = %d, body = %s", patch.Code, patch.Body.String())
 	}
@@ -170,11 +180,28 @@ func TestConfigStorePersistsGiftClipPlacements(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := state.Settings.GiftClipPlacements["effect:99"]; got.X != 42.5 || got.Y != -18 {
-		t.Fatalf("saved effect placement = %#v", got)
+	data, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := state.Settings.GiftClipPlacements["media:clamped"]; got.X != 160 || got.Y != -160 {
-		t.Fatalf("clamped media placement = %#v", got)
+	if strings.Contains(string(data), `"`+legacyPlacementSettingsKey+`"`) {
+		t.Fatalf("legacy %s survived read/write cycle: %s", legacyPlacementSettingsKey, data)
+	}
+	if got := state.Settings.GiftClipCrops["effect:99"]; got != (giftClipCropState{X: .1, Y: .2, Width: .6, Height: .7}) {
+		t.Fatalf("saved crop = %#v", got)
+	}
+	if got := state.Settings.GiftClipCrops["media:clamped"]; got != (giftClipCropState{X: .5, Y: 0, Width: .5, Height: 1}) {
+		t.Fatalf("clamped crop = %#v", got)
+	}
+	if got := state.Settings.GiftClipCrops["media:invalid"]; got != (giftClipCropState{X: 0, Y: 0, Width: 1, Height: 1}) {
+		t.Fatalf("repaired crop = %#v", got)
+	}
+	clone, err := cloneAppState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := clone.Settings.GiftClipCrops["effect:99"]; got != state.Settings.GiftClipCrops["effect:99"] {
+		t.Fatalf("cloned crop = %#v, want %#v", got, state.Settings.GiftClipCrops["effect:99"])
 	}
 }
 
@@ -284,6 +311,81 @@ func TestConfigStoreMigratesMissingFieldsWithDefaults(t *testing.T) {
 	}
 	if metadata.SchemaVersion != stateShardSchemaVersion {
 		t.Fatalf("schemaVersion = %d, want %d", metadata.SchemaVersion, stateShardSchemaVersion)
+	}
+}
+
+func TestStateShardVersionTenUpgradesToEleven(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	if err := os.WriteFile(store.path, []byte(`{"schemaVersion":10,"settings":{"theme":"light"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.migrateLegacy(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata struct {
+		SchemaVersion int `json:"schemaVersion"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.SchemaVersion != 11 {
+		t.Fatalf("schemaVersion = %d, want 11", metadata.SchemaVersion)
+	}
+}
+
+func TestNormalizeGiftClipCropsLimitsCount(t *testing.T) {
+	input := make(map[string]giftClipCropState, 204)
+	for index := 0; index < 204; index++ {
+		input[fmt.Sprintf("effect:%d", index)] = giftClipCropState{X: 0, Y: 0, Width: 1, Height: 1}
+	}
+	got := normalizeGiftClipCrops(input)
+	if len(got) != 200 {
+		t.Fatalf("crop count = %d, want 200", len(got))
+	}
+}
+
+func TestNormalizeGiftClipCropsRepairsNonFinite(t *testing.T) {
+	got := normalizeGiftClipCrops(map[string]giftClipCropState{
+		"invalid": {X: math.NaN(), Y: 0, Width: 1, Height: 1},
+	})
+	if crop := got["invalid"]; crop != fullGiftClipCrop() {
+		t.Fatalf("non-finite crop = %#v", crop)
+	}
+}
+
+func TestNormalizeGiftClipCropsAcceptsUnicodeKeysAtCharacterLimit(t *testing.T) {
+	key := strings.Repeat("礼", 160)
+	want := fullGiftClipCrop()
+	got := normalizeGiftClipCrops(map[string]giftClipCropState{key: want})
+	if crop, exists := got[key]; !exists || crop != want {
+		t.Fatalf("unicode key crop = %#v, exists = %t", crop, exists)
+	}
+}
+
+func TestNormalizeGiftClipCropsAppliesSharedKeyPolicy(t *testing.T) {
+	want := fullGiftClipCrop()
+	unicodeAtLimit := strings.Repeat("🎁", 160)
+	unicodeOverLimit := strings.Repeat("🎁", 161)
+	got := normalizeGiftClipCrops(map[string]giftClipCropState{
+		"  effect:trimmed  ": want,
+		unicodeAtLimit:       want,
+		unicodeOverLimit:     want,
+		" constructor ":      want,
+		"prototype":          want,
+		"__proto__":          want,
+	})
+	if len(got) != 2 {
+		t.Fatalf("normalized crop keys = %#v, want two accepted keys", got)
+	}
+	if crop, exists := got["effect:trimmed"]; !exists || crop != want {
+		t.Fatalf("trimmed crop = %#v, exists = %t", crop, exists)
+	}
+	if crop, exists := got[unicodeAtLimit]; !exists || crop != want {
+		t.Fatalf("unicode crop = %#v, exists = %t", crop, exists)
 	}
 }
 

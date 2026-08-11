@@ -1,13 +1,29 @@
-import type { GiftClipPlacement, GiftReceipt } from '../../types';
-import { giftReceiptMediaUrl } from '../../backend';
+import type { GiftClipCrop, GiftReceipt } from '../../types';
 import { el } from '../common';
-import { decompressFrames, parseGIF, type ParsedFrame } from 'gifuct-js';
-
-const CLIP_SIZE = 480;
-const CLIP_FPS = 30;
-const DEFAULT_DURATION_MS = 3000;
-const MIN_DURATION_MS = 1000;
-const MAX_DURATION_MS = 15000;
+import {
+  giftClipCropToPixels,
+  isGiftClipSourceSizeSupported,
+  normalizeGiftClipCrop,
+} from './gift-clip-crop';
+import {
+  createGiftClipCropEditor,
+  type GiftClipCropEditor,
+} from './gift-clip-crop-editor';
+import {
+  loadGiftClipMediaSession,
+  type GiftClipMediaSession,
+} from './gift-clip-media';
+import {
+  drawGiftClipOutputFrame,
+  drawGiftClipSourcePreview,
+  prepareGiftClipOutputCanvas,
+} from './gift-clip-renderer';
+import {
+  recordGiftClipCanvas,
+  sanitizeGiftClipFilename,
+  triggerGiftClipDownload,
+  type GiftClipRecording,
+} from './gift-clip-recorder';
 
 export interface GiftClipStudioController {
   close: () => void;
@@ -16,76 +32,9 @@ export interface GiftClipStudioController {
 interface GiftClipStudioOptions {
   host: HTMLElement;
   receipt: GiftReceipt;
-  initialPlacement?: GiftClipPlacement;
-  onPlacementConfirmed?: (placement: GiftClipPlacement) => void;
+  initialCrop?: GiftClipCrop;
+  onCropConfirmed?: (crop: GiftClipCrop) => void;
   onError?: (message: string) => void;
-}
-
-interface RecorderSelection {
-  recorder: MediaRecorder;
-  mimeType: string;
-  extension: 'mp4' | 'webm';
-}
-
-export interface GiftEffectLayout {
-  videoWidth: number;
-  videoHeight: number;
-  rgbFrame: [number, number, number, number];
-  alphaFrame: [number, number, number, number];
-  fps: number;
-  frames: number;
-}
-
-interface GiftEffectSource {
-  video: HTMLVideoElement;
-  layout: GiftEffectLayout;
-  frame: HTMLCanvasElement;
-  color: HTMLCanvasElement;
-  alpha: HTMLCanvasElement;
-  durationMs: number;
-}
-
-interface GiftClipVisual {
-  source: CanvasImageSource;
-  width: number;
-  height: number;
-}
-
-interface GiftAnimationSource {
-  durationMs?: number;
-  visualAt: (elapsedMs: number) => GiftClipVisual | null;
-}
-
-const RECORDER_FORMATS = [
-  { mimeType: 'video/mp4;codecs=avc1.42E01E', extension: 'mp4' as const },
-  { mimeType: 'video/mp4', extension: 'mp4' as const },
-  { mimeType: 'video/webm;codecs=vp9', extension: 'webm' as const },
-  { mimeType: 'video/webm;codecs=vp8', extension: 'webm' as const },
-  { mimeType: 'video/webm', extension: 'webm' as const },
-];
-
-export function normalizeGiftClipDuration(durationMs: number | undefined): number {
-  const normalized = Math.round(Number(durationMs) || DEFAULT_DURATION_MS);
-  return Math.min(MAX_DURATION_MS, Math.max(MIN_DURATION_MS, normalized));
-}
-
-export function normalizeGiftEffectLayout(value: unknown): GiftEffectLayout {
-  if (!value || typeof value !== 'object') throw new Error('礼物特效坐标无效。');
-  const candidate = value as Partial<GiftEffectLayout>;
-  const videoWidth = positiveInteger(candidate.videoWidth);
-  const videoHeight = positiveInteger(candidate.videoHeight);
-  const fps = positiveInteger(candidate.fps);
-  const frames = positiveInteger(candidate.frames);
-  const rgbFrame = normalizeEffectFrame(candidate.rgbFrame, videoWidth, videoHeight);
-  const alphaFrame = normalizeEffectFrame(candidate.alphaFrame, videoWidth, videoHeight);
-  if (videoWidth > 8192 || videoHeight > 8192 || fps > 120 || frames > 3600) {
-    throw new Error('礼物特效坐标超出允许范围。');
-  }
-  return { videoWidth, videoHeight, rgbFrame, alphaFrame, fps, frames };
-}
-
-export function giftEffectDurationMs(layout: GiftEffectLayout): number {
-  return normalizeGiftClipDuration(Math.round((layout.frames / layout.fps) * 1000));
 }
 
 export function giftClipAnimationKey(receipt: Pick<GiftReceipt, 'giftId' | 'animation'>): string {
@@ -108,860 +57,411 @@ export function giftClipAnimationKey(receipt: Pick<GiftReceipt, 'giftId' | 'anim
   return `media:${(hash >>> 0).toString(16).padStart(8, '0')}`;
 }
 
-export function normalizeGiftClipPlacement(value: unknown): GiftClipPlacement {
-  if (!value || typeof value !== 'object') return { x: 0, y: 0 };
-  const candidate = value as Partial<GiftClipPlacement>;
-  const x = Number(candidate.x);
-  const y = Number(candidate.y);
-  return {
-    x: Number.isFinite(x) ? Math.min(CLIP_SIZE, Math.max(-CLIP_SIZE, x)) : 0,
-    y: Number.isFinite(y) ? Math.min(CLIP_SIZE, Math.max(-CLIP_SIZE, y)) : 0,
-  };
-}
-
-export function constrainGiftClipPlacement(
-  sourceWidth: number,
-  sourceHeight: number,
-  placement: GiftClipPlacement,
-  targetSize = CLIP_SIZE,
-): GiftClipPlacement {
-  const frame = giftClipCoverRect(sourceWidth, sourceHeight, targetSize);
-  const minimumTravel = targetSize / 4;
-  const maximumTravel = targetSize / 3;
-  const limitX = Math.min(maximumTravel, Math.max(minimumTravel, Math.abs(frame.x)));
-  const limitY = Math.min(maximumTravel, Math.max(minimumTravel, Math.abs(frame.y)));
-  const normalized = normalizeGiftClipPlacement(placement);
-  return {
-    x: Math.min(limitX, Math.max(-limitX, normalized.x)),
-    y: Math.min(limitY, Math.max(-limitY, normalized.y)),
-  };
-}
-
-export function giftClipPlacedCoverRect(
-  sourceWidth: number,
-  sourceHeight: number,
-  placement: GiftClipPlacement,
-  targetSize = CLIP_SIZE,
-): { x: number; y: number; width: number; height: number } {
-  const frame = giftClipCoverRect(sourceWidth, sourceHeight, targetSize);
-  const constrained = constrainGiftClipPlacement(sourceWidth, sourceHeight, placement, targetSize);
-  const fillScale = Math.max(
-    1,
-    (targetSize + Math.abs(constrained.x) * 2) / frame.width,
-    (targetSize + Math.abs(constrained.y) * 2) / frame.height,
-  );
-  const width = frame.width * fillScale;
-  const height = frame.height * fillScale;
-  return {
-    x: (targetSize - width) / 2 + constrained.x,
-    y: (targetSize - height) / 2 + constrained.y,
-    width,
-    height,
-  };
-}
-
-export function giftGifFrameIndex(delays: readonly number[], elapsedMs: number): number {
-  if (delays.length === 0) return -1;
-  const normalizedDelays = delays.map((delay) => Math.max(10, Math.round(delay) || 100));
-  const cycleMs = normalizedDelays.reduce((total, delay) => total + delay, 0);
-  let position = Math.max(0, elapsedMs) % cycleMs;
-  for (let index = 0; index < normalizedDelays.length; index += 1) {
-    if (position < normalizedDelays[index]) return index;
-    position -= normalizedDelays[index];
-  }
-  return normalizedDelays.length - 1;
-}
-
-function positiveInteger(value: unknown): number {
-  const result = Number(value);
-  if (!Number.isInteger(result) || result <= 0) throw new Error('礼物特效坐标无效。');
-  return result;
-}
-
-function normalizeEffectFrame(value: unknown, videoWidth: number, videoHeight: number): [number, number, number, number] {
-  if (!Array.isArray(value) || value.length !== 4) throw new Error('礼物特效坐标无效。');
-  const frame = value.map(Number) as [number, number, number, number];
-  if (!frame.every(Number.isInteger)) throw new Error('礼物特效坐标无效。');
-  const [x, y, width, height] = frame;
-  if (x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > videoWidth || y + height > videoHeight) {
-    throw new Error('礼物特效坐标无效。');
-  }
-  return frame;
-}
-
-export function sanitizeGiftClipFilename(receipt: Pick<GiftReceipt, 'giftName' | 'uname' | 'time'>, extension: 'mp4' | 'webm'): string {
-  const timestamp = new Date(receipt.time < 1_000_000_000_000 ? receipt.time * 1000 : receipt.time);
-  const date = Number.isNaN(timestamp.getTime())
-    ? 'unknown-time'
-    : [
-      timestamp.getFullYear(),
-      String(timestamp.getMonth() + 1).padStart(2, '0'),
-      String(timestamp.getDate()).padStart(2, '0'),
-      '-',
-      String(timestamp.getHours()).padStart(2, '0'),
-      String(timestamp.getMinutes()).padStart(2, '0'),
-      String(timestamp.getSeconds()).padStart(2, '0'),
-    ].join('');
-  const safe = `${receipt.giftName || '礼物'}-${receipt.uname || '观众'}`
-    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 72) || '礼物回放';
-  return `${safe}-${date}.${extension}`;
-}
-
-export function selectGiftClipRecorder(
-  stream: MediaStream,
-  Recorder: typeof MediaRecorder | undefined = globalThis.MediaRecorder,
-): RecorderSelection {
-  if (typeof Recorder !== 'function') {
-    throw new Error('当前浏览器不支持录制 Canvas，请更新程序后重试。');
-  }
-  for (const format of RECORDER_FORMATS) {
-    if (typeof Recorder.isTypeSupported === 'function' && !Recorder.isTypeSupported(format.mimeType)) continue;
-    try {
-      return {
-        recorder: new Recorder(stream, { mimeType: format.mimeType, videoBitsPerSecond: 4_000_000 }),
-        mimeType: format.mimeType,
-        extension: format.extension,
-      };
-    } catch {
-      // Some Chromium builds report MP4 support but still reject construction.
-    }
-  }
-  try {
-    const recorder = new Recorder(stream, { videoBitsPerSecond: 4_000_000 });
-    const mimeType = recorder.mimeType || 'video/webm';
-    return { recorder, mimeType, extension: mimeType.includes('mp4') ? 'mp4' : 'webm' };
-  } catch {
-    throw new Error('当前浏览器不支持录制 Canvas，请更新程序后重试。');
-  }
-}
-
-export function stopGiftClipStream(stream: Pick<MediaStream, 'getTracks'> | null): void {
-  stream?.getTracks().forEach((track) => track.stop());
-}
-
-export function triggerGiftClipDownload(url: string, filename: string, targetDocument: Document = document): void {
-  const link = targetDocument.createElement('a');
-  link.href = url;
-  link.download = filename;
-  targetDocument.body.append(link);
-  link.click();
-  link.remove();
-}
-
 export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStudioController {
   const { host, receipt } = options;
-  let disposed = false;
-  let animationFrame = 0;
+  let closed = false;
+  let transition = 0;
+  let previewFrame = 0;
+  let session: GiftClipMediaSession | null = null;
+  let editor: GiftClipCropEditor | null = null;
+  let loadAbort: AbortController | null = null;
+  let recordingAbort: AbortController | null = null;
+  let recordingTask: Promise<void> | null = null;
   let previewURL = '';
-  let activeStream: MediaStream | null = null;
-  let generatedBlob: Blob | null = null;
-  let generatedExtension: 'mp4' | 'webm' = 'webm';
-  let activeEffect: GiftEffectSource | null = null;
-  let positioning = false;
-  let placementResolver: ((confirmed: boolean) => void) | null = null;
-  let placementVisualSize: { width: number; height: number } | null = null;
-  let currentPlacement = normalizeGiftClipPlacement(options.initialPlacement);
-  let dragState: { pointerId: number; clientX: number; clientY: number; placement: GiftClipPlacement } | null = null;
-  const loadedImages = new Set<HTMLImageElement>();
-  const sourceURLs = new Set<string>();
+  let generatedRecording: GiftClipRecording | null = null;
+  let confirmedCrop = normalizeGiftClipCrop(options.initialCrop);
+  let secondaryAction: 're-edit' | 'retry' = 'retry';
 
-  const overlay = el('div', { class: 'overlay gift-clip-overlay', role: 'dialog', ariaModal: 'true', ariaLabel: '制作礼物动画回放' });
+  const overlay = el('div', {
+    class: 'overlay gift-clip-overlay',
+    role: 'dialog',
+    ariaModal: 'true',
+    ariaLabel: '制作礼物动画回放',
+  });
   const dialog = el('section', { class: 'card gift-clip-dialog' });
-  const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭' }) as HTMLButtonElement;
-  const canvas = el('canvas', { class: 'gift-clip-canvas', width: CLIP_SIZE, height: CLIP_SIZE }) as HTMLCanvasElement;
-  const preview = el('video', { class: 'gift-clip-video', controls: true, loop: true, muted: true, playsInline: true }) as HTMLVideoElement;
-  const sourceMediaHost = el('div', { class: 'gift-clip-source-media', ariaHidden: 'true' });
-  preview.hidden = true;
-  const progress = el('progress', { class: 'gift-clip-progress', max: 100, value: 0 }) as HTMLProgressElement;
-  const status = el('p', { class: 'gift-clip-status', text: '正在准备礼物动画…' });
-  const resetPositionButton = el('button', { class: 'btn ghost', type: 'button', text: '恢复居中' }) as HTMLButtonElement;
-  const confirmPositionButton = el('button', { class: 'btn primary', type: 'button', text: '确定位置并生成' }) as HTMLButtonElement;
-  const retryButton = el('button', { class: 'btn ghost', type: 'button', text: '重新调整' }) as HTMLButtonElement;
-  const saveButton = el('button', { class: 'btn primary', type: 'button', text: '保存视频' }) as HTMLButtonElement;
-  resetPositionButton.hidden = true;
-  confirmPositionButton.hidden = true;
-  retryButton.hidden = true;
-  saveButton.hidden = true;
-  retryButton.disabled = true;
-  saveButton.disabled = true;
+  const closeButton = el('button', {
+    class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭',
+  }) as HTMLButtonElement;
+  const stage = el('div', { class: 'gift-clip-stage' });
+  const sourceCanvas = el('canvas', {
+    class: 'gift-clip-canvas', width: 1, height: 1,
+  }) as HTMLCanvasElement;
+  const recordingCanvas = el('canvas', {
+    class: 'gift-clip-recording-canvas', hidden: true,
+  }) as HTMLCanvasElement;
+  const preview = el('video', {
+    class: 'gift-clip-video', controls: true, loop: true, muted: true, playsInline: true, hidden: true,
+  }) as HTMLVideoElement;
+  const sourceMediaHost = el('div', {
+    class: 'gift-clip-source-media', ariaHidden: 'true',
+  });
+  const progress = el('progress', {
+    class: 'gift-clip-progress', max: 100, value: 0, hidden: true,
+  }) as HTMLProgressElement;
+  const status = el('p', {
+    class: 'gift-clip-status', text: '正在读取礼物动画…',
+  });
+  const resetButton = el('button', {
+    class: 'btn ghost', type: 'button', text: '恢复完整画面', hidden: true,
+  }) as HTMLButtonElement;
+  const confirmButton = el('button', {
+    class: 'btn primary', type: 'button', text: '确定剪裁并生成', hidden: true,
+  }) as HTMLButtonElement;
+  const reeditButton = el('button', {
+    class: 'btn ghost', type: 'button', text: '重新剪裁', hidden: true,
+  }) as HTMLButtonElement;
+  const saveButton = el('button', {
+    class: 'btn primary', type: 'button', text: '保存视频', hidden: true, disabled: true,
+  }) as HTMLButtonElement;
 
-  const finishPositioning = (confirmed: boolean): void => {
-    if (!placementResolver) return;
-    if (animationFrame) cancelAnimationFrame(animationFrame);
-    animationFrame = 0;
-    positioning = false;
-    dragState = null;
-    canvas.classList.remove('is-positioning', 'is-dragging');
-    activeEffect?.video.pause();
-    resetPositionButton.hidden = true;
-    confirmPositionButton.hidden = true;
-    const resolve = placementResolver;
-    placementResolver = null;
-    resolve(confirmed);
-  };
-
-  const disposeMedia = (): void => {
-    finishPositioning(false);
-    if (animationFrame) cancelAnimationFrame(animationFrame);
-    animationFrame = 0;
-    stopGiftClipStream(activeStream);
-    activeStream = null;
-    if (activeEffect) {
-      activeEffect.video.pause();
-      activeEffect.video.removeAttribute('src');
-      activeEffect.video.load();
-      activeEffect = null;
-    }
-    for (const image of loadedImages) {
-      image.src = '';
-      image.remove();
-    }
-    loadedImages.clear();
-    sourceMediaHost.replaceChildren();
-    for (const sourceURL of sourceURLs) URL.revokeObjectURL(sourceURL);
-    sourceURLs.clear();
-    if (previewURL) URL.revokeObjectURL(previewURL);
-    previewURL = '';
-    generatedBlob = null;
-    preview.removeAttribute('src');
-    preview.load();
-  };
-
-  const close = (): void => {
-    if (disposed) return;
-    disposed = true;
-    disposeMedia();
-    globalThis.removeEventListener('keydown', onKeyDown);
-    overlay.remove();
-  };
-  const onKeyDown = (event: KeyboardEvent): void => {
-    if (event.key === 'Escape') close();
-  };
-  closeButton.onclick = close;
-  overlay.onclick = (event) => {
-    if (event.target === overlay) close();
-  };
-  globalThis.addEventListener('keydown', onKeyDown);
-
+  stage.append(sourceCanvas, recordingCanvas, preview, sourceMediaHost);
   dialog.append(
     el('header', { class: 'gift-clip-header' }, [
       el('div', {}, [
         el('span', { class: 'section-kicker', text: '礼物动画回放' }),
         el('h2', { text: `${receipt.giftName || '礼物'} × ${Math.max(1, receipt.num || 1)}` }),
-        el('p', { text: '480 × 480 · 成片不含 UID；拖动画面微调位置，同一动画会记住本次位置。' }),
+        el('p', { text: '按素材原始像素剪裁；同一动画会记住已确认区域，成片不含 UID。' }),
       ]),
       closeButton,
     ]),
     el('div', { class: 'gift-clip-body' }, [
-      el('div', { class: 'gift-clip-stage' }, [canvas, preview, sourceMediaHost]),
+      stage,
       el('div', { class: 'gift-clip-meta' }, [
         status,
         progress,
-        el('div', { class: 'gift-clip-actions' }, [resetPositionButton, confirmPositionButton, retryButton, saveButton]),
+        el('div', { class: 'gift-clip-actions' }, [resetButton, confirmButton, reeditButton, saveButton]),
       ]),
     ]),
   );
   overlay.append(dialog);
   host.append(overlay);
 
-  const updatePlacementStatus = (): void => {
-    status.textContent = `按住左侧动画拖动 · 当前偏移 X ${Math.round(currentPlacement.x)} / Y ${Math.round(currentPlacement.y)}`;
+  const isCurrent = (token: number): boolean => !closed && token === transition;
+  const setStageSize = (width: number, height: number): void => {
+    stage.style.setProperty('--gift-clip-source-width', String(width));
+    stage.style.setProperty('--gift-clip-source-height', String(height));
   };
-
-  canvas.onpointerdown = (event) => {
-    if (!positioning || !placementVisualSize) return;
-    event.preventDefault();
-    dragState = {
-      pointerId: event.pointerId,
-      clientX: event.clientX,
-      clientY: event.clientY,
-      placement: { ...currentPlacement },
-    };
-    canvas.classList.add('is-dragging');
-    canvas.setPointerCapture?.(event.pointerId);
+  const stopEditorPreview = (): void => {
+    if (previewFrame) cancelAnimationFrame(previewFrame);
+    previewFrame = 0;
+    session?.pause();
   };
-  canvas.onpointermove = (event) => {
-    if (!positioning || !placementVisualSize || !dragState || dragState.pointerId !== event.pointerId) return;
-    event.preventDefault();
-    const bounds = canvas.getBoundingClientRect();
-    const scaleX = CLIP_SIZE / Math.max(1, bounds.width);
-    const scaleY = CLIP_SIZE / Math.max(1, bounds.height);
-    currentPlacement = constrainGiftClipPlacement(
-      placementVisualSize.width,
-      placementVisualSize.height,
-      {
-        x: dragState.placement.x + (event.clientX - dragState.clientX) * scaleX,
-        y: dragState.placement.y + (event.clientY - dragState.clientY) * scaleY,
-      },
-    );
-    updatePlacementStatus();
+  const destroyEditor = (): void => {
+    editor?.destroy();
+    editor = null;
   };
-  const endDrag = (event: PointerEvent): void => {
-    if (!dragState || dragState.pointerId !== event.pointerId) return;
-    if (canvas.hasPointerCapture?.(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
-    dragState = null;
-    canvas.classList.remove('is-dragging');
+  const abortRecording = (): void => {
+    if (recordingAbort && !recordingAbort.signal.aborted) recordingAbort.abort();
   };
-  canvas.onpointerup = endDrag;
-  canvas.onpointercancel = endDrag;
-
-  resetPositionButton.onclick = () => {
-    if (!positioning) return;
-    currentPlacement = { x: 0, y: 0 };
-    updatePlacementStatus();
+  const abortRecordingTask = (): Promise<void> | null => {
+    const activeTask = recordingTask;
+    abortRecording();
+    return activeTask;
   };
-  confirmPositionButton.onclick = () => {
-    if (!positioning) return;
-    if (placementVisualSize) {
-      currentPlacement = constrainGiftClipPlacement(
-        placementVisualSize.width,
-        placementVisualSize.height,
-        currentPlacement,
-      );
+  const abortLoad = (): void => {
+    if (loadAbort && !loadAbort.signal.aborted) {
+      loadAbort.abort(new DOMException('Gift clip source load cancelled.', 'AbortError'));
     }
-    options.onPlacementConfirmed?.({ ...currentPlacement });
-    finishPositioning(true);
+    loadAbort = null;
+  };
+  const clearPreview = (): void => {
+    preview.pause();
+    if (previewURL) URL.revokeObjectURL(previewURL);
+    previewURL = '';
+    generatedRecording = null;
+    preview.removeAttribute('src');
+    preview.load();
+    preview.hidden = true;
+    preview.style.aspectRatio = '';
+  };
+  const disposeSession = (): void => {
+    session?.dispose();
+    session = null;
+  };
+  const releaseCanvasBackingStores = (): void => {
+    sourceCanvas.width = 0;
+    sourceCanvas.height = 0;
+    recordingCanvas.width = 0;
+    recordingCanvas.height = 0;
+  };
+  const hideActions = (): void => {
+    resetButton.hidden = true;
+    confirmButton.hidden = true;
+    reeditButton.hidden = true;
+    saveButton.hidden = true;
+    saveButton.disabled = true;
+  };
+  const reportFailure = (error: unknown): void => {
+    if (closed) return;
+    stopEditorPreview();
+    destroyEditor();
+    clearPreview();
+    disposeSession();
+    releaseCanvasBackingStores();
+    progress.value = 0;
+    progress.hidden = true;
+    resetButton.hidden = true;
+    confirmButton.hidden = true;
+    saveButton.hidden = true;
+    saveButton.disabled = true;
+    secondaryAction = 'retry';
+    reeditButton.textContent = '重试';
+    reeditButton.hidden = false;
+    reeditButton.disabled = false;
+    const message = error instanceof Error ? error.message : '礼物动画生成失败，请重试。';
+    status.textContent = message;
+    status.classList.add('is-error');
+    options.onError?.(message);
   };
 
-  const generate = async (): Promise<void> => {
-    disposeMedia();
-    if (disposed) return;
-    preview.hidden = true;
-    canvas.hidden = false;
-    canvas.classList.remove('is-positioning', 'is-dragging');
-    resetPositionButton.hidden = true;
-    confirmPositionButton.hidden = true;
-    retryButton.hidden = true;
-    saveButton.hidden = true;
-    retryButton.disabled = true;
-    saveButton.disabled = true;
+  const startPreviewLoop = (activeSession: GiftClipMediaSession, token: number): void => {
+    const context = sourceCanvas.getContext('2d');
+    if (!context) throw new Error('礼物动画预览画布初始化失败。');
+    const startedAt = performance.now();
+    const draw = (now: number): void => {
+      previewFrame = 0;
+      if (!isCurrent(token) || activeSession !== session) return;
+      try {
+        drawGiftClipSourcePreview(context, activeSession.visualAt(now - startedAt));
+        previewFrame = requestAnimationFrame(draw);
+      } catch (error) {
+        reportFailure(error);
+      }
+    };
+    drawGiftClipSourcePreview(context, activeSession.visualAt(0));
+    previewFrame = requestAnimationFrame(draw);
+  };
+
+  const presentEditor = async (
+    activeSession: GiftClipMediaSession,
+    crop: GiftClipCrop,
+    token: number,
+  ): Promise<void> => {
+    try {
+      const activeRecording = abortRecordingTask();
+      if (activeRecording) await activeRecording;
+      if (!isCurrent(token) || activeSession !== session) return;
+      stopEditorPreview();
+      destroyEditor();
+      clearPreview();
+      sourceCanvas.hidden = false;
+      progress.value = 0;
+      progress.hidden = true;
+      status.classList.remove('is-error');
+      resetButton.hidden = false;
+      confirmButton.hidden = false;
+      confirmButton.disabled = false;
+      reeditButton.hidden = true;
+      saveButton.hidden = true;
+      setStageSize(activeSession.width, activeSession.height);
+      sourceCanvas.width = activeSession.width;
+      sourceCanvas.height = activeSession.height;
+      await activeSession.restart();
+      if (!isCurrent(token) || activeSession !== session) return;
+      startPreviewLoop(activeSession, token);
+      editor = createGiftClipCropEditor({
+        stage,
+        sourceWidth: activeSession.width,
+        sourceHeight: activeSession.height,
+        initialCrop: crop,
+        receipt,
+        avatar: activeSession.avatar,
+        onChange: (_nextCrop, pixels) => {
+          status.textContent = `剪裁 ${pixels.width} × ${pixels.height} · 成片按原始像素输出`;
+        },
+      });
+    } catch (error) {
+      if (isCurrent(token)) reportFailure(error);
+    }
+  };
+
+  const loadSource = async (): Promise<void> => {
+    const token = ++transition;
+    abortLoad();
+    const activeRecording = abortRecordingTask();
+    if (activeRecording) await activeRecording;
+    if (!isCurrent(token)) return;
+    stopEditorPreview();
+    destroyEditor();
+    clearPreview();
+    disposeSession();
+    hideActions();
+    sourceCanvas.hidden = false;
+    sourceCanvas.width = 1;
+    sourceCanvas.height = 1;
+    setStageSize(1, 1);
     progress.value = 0;
     progress.hidden = true;
     status.textContent = '正在读取礼物动画…';
     status.classList.remove('is-error');
-    drawGiftClipPlaceholder(canvas, receipt);
+    const controller = new AbortController();
+    loadAbort = controller;
     try {
-      const context = canvas.getContext('2d');
-      if (!context || typeof canvas.captureStream !== 'function') throw new Error('当前浏览器不能录制画布。');
-      const avatar = await loadOptionalImage(giftReceiptMediaUrl(receipt.id, 'avatar'), loadedImages);
-      if (disposed) return;
-      let animation: GiftAnimationSource | null = null;
-      let usingShortAnimationFallback = false;
-      if (receipt.animation?.mp4 && receipt.animation.mp4Json) {
-        try {
-          activeEffect = await loadGiftEffect(receipt.id, sourceURLs, sourceMediaHost);
-        } catch (effectError) {
-          if (!receipt.animation.gif && !receipt.animation.webp) throw effectError;
-          usingShortAnimationFallback = true;
-        }
+      const loaded = await loadGiftClipMediaSession(receipt, sourceMediaHost, controller.signal);
+      if (loadAbort === controller) loadAbort = null;
+      if (!isCurrent(token)) {
+        loaded.dispose();
+        return;
       }
-      if (!activeEffect) {
-        animation = await loadGiftAnimation(
-          `${giftReceiptMediaUrl(receipt.id, 'animation')}&v=${Date.now()}`,
-          loadedImages,
-          sourceURLs,
-          sourceMediaHost,
-        );
+      session = loaded;
+      if (!isGiftClipSourceSizeSupported(loaded.width, loaded.height)) {
+        status.textContent = `动画尺寸过小，无法制作回放（${loaded.width} × ${loaded.height}）`;
+        status.classList.add('is-error');
+        disposeSession();
+        releaseCanvasBackingStores();
+        secondaryAction = 'retry';
+        reeditButton.textContent = '重试';
+        reeditButton.hidden = false;
+        reeditButton.disabled = false;
+        return;
       }
-      if (disposed) return;
-
-      const duration = activeEffect?.durationMs
-        ?? normalizeGiftClipDuration(receipt.animation?.durationMs || animation?.durationMs);
-      const drawCurrentFrame = (elapsedMs: number): void => {
-        const visual = activeEffect
-          ? renderGiftEffectFrame(activeEffect)
-          : animation?.visualAt(elapsedMs) ?? null;
-        if (visual?.width && visual.height) {
-          placementVisualSize = { width: visual.width, height: visual.height };
-          currentPlacement = constrainGiftClipPlacement(visual.width, visual.height, currentPlacement);
-        }
-        drawGiftClipFrame(context, receipt, visual, avatar, currentPlacement);
-      };
-
-      positioning = true;
-      canvas.classList.add('is-positioning');
-      resetPositionButton.hidden = false;
-      confirmPositionButton.hidden = false;
-      updatePlacementStatus();
-      if (activeEffect) {
-        activeEffect.video.currentTime = 0;
-        await activeEffect.video.play();
-      }
-      if (disposed) return;
-      const confirmed = await new Promise<boolean>((resolve) => {
-        placementResolver = resolve;
-        const startedAt = performance.now();
-        const draw = (now: number): void => {
-          if (disposed || !positioning) return;
-          drawCurrentFrame(now - startedAt);
-          animationFrame = requestAnimationFrame(draw);
-        };
-        drawCurrentFrame(0);
-        animationFrame = requestAnimationFrame(draw);
-      });
-      if (!confirmed || disposed) return;
-
-      progress.hidden = false;
-      activeStream = canvas.captureStream(CLIP_FPS);
-      const selection = selectGiftClipRecorder(activeStream);
-      generatedExtension = selection.extension;
-      const chunks: BlobPart[] = [];
-      selection.recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunks.push(event.data);
-      };
-      const stopped = new Promise<void>((resolve, reject) => {
-        selection.recorder.onerror = () => reject(new Error('视频录制失败，请重试。'));
-        selection.recorder.onstop = () => resolve();
-      });
-      drawCurrentFrame(0);
-      selection.recorder.start(250);
-      const sourceLabel = activeEffect ? '完整特效' : usingShortAnimationFallback ? '短动画回退' : '短动画';
-      status.textContent = `正在生成 ${selection.extension.toUpperCase()} · ${sourceLabel} · ${Math.round(duration / 100) / 10} 秒`;
-      if (activeEffect) {
-        activeEffect.video.currentTime = 0;
-        await activeEffect.video.play();
-      }
-      const startedAt = performance.now();
-      await new Promise<void>((resolve) => {
-        const draw = (now: number): void => {
-          if (disposed) {
-            resolve();
-            return;
-          }
-          const elapsed = now - startedAt;
-          drawCurrentFrame(elapsed);
-          progress.value = Math.min(100, (elapsed / duration) * 100);
-          if (elapsed >= duration) {
-            resolve();
-            return;
-          }
-          animationFrame = requestAnimationFrame(draw);
-        };
-        animationFrame = requestAnimationFrame(draw);
-      });
-      activeEffect?.video.pause();
-      if (selection.recorder.state !== 'inactive') selection.recorder.stop();
-      await stopped;
-      if (disposed) return;
-      stopGiftClipStream(activeStream);
-      activeStream = null;
-      generatedBlob = new Blob(chunks, { type: selection.recorder.mimeType || selection.mimeType });
-      if (generatedBlob.size === 0) throw new Error('视频没有生成有效内容，请重试。');
-      previewURL = URL.createObjectURL(generatedBlob);
-      preview.src = previewURL;
-      preview.hidden = false;
-      canvas.hidden = true;
-      progress.value = 100;
-      const sizeLabel = generatedBlob.size < 1024 * 1024
-        ? `${Math.max(1, Math.round(generatedBlob.size / 1024))} KB`
-        : `${(generatedBlob.size / 1024 / 1024).toFixed(1)} MB`;
-      status.textContent = `${generatedExtension.toUpperCase()} 已生成 · ${sizeLabel} · ${sourceLabel}`;
-      saveButton.textContent = `保存 ${generatedExtension.toUpperCase()}`;
-      retryButton.textContent = '重新调整';
-      retryButton.hidden = false;
-      saveButton.hidden = false;
-      saveButton.disabled = false;
-      retryButton.disabled = false;
-      void preview.play().catch(() => undefined);
+      await presentEditor(loaded, confirmedCrop, token);
     } catch (error) {
-      if (disposed) return;
-      stopGiftClipStream(activeStream);
-      activeStream = null;
-      progress.value = 0;
-      const message = error instanceof Error ? error.message : '礼物动画生成失败，请重试。';
-      status.textContent = message;
-      status.classList.add('is-error');
-      progress.hidden = true;
-      retryButton.textContent = '重试';
-      retryButton.hidden = false;
-      retryButton.disabled = false;
-      options.onError?.(message);
+      if (loadAbort === controller) loadAbort = null;
+      if (isCurrent(token) && !controller.signal.aborted) reportFailure(error);
     }
   };
 
-  retryButton.onclick = () => {
+  const confirmAndGenerate = async (): Promise<void> => {
+    const activeEditor = editor;
+    const activeSession = session;
+    if (!activeEditor || !activeSession || closed) return;
+    confirmButton.disabled = true;
+    const crop = normalizeGiftClipCrop(activeEditor.getCrop());
+    try {
+      options.onCropConfirmed?.({ ...crop });
+    } catch (error) {
+      confirmButton.disabled = false;
+      reportFailure(error);
+      return;
+    }
+    if (closed) return;
+    confirmedCrop = crop;
+    const token = ++transition;
+    stopEditorPreview();
+    destroyEditor();
+    const pixels = giftClipCropToPixels(crop, activeSession.width, activeSession.height);
+    prepareGiftClipOutputCanvas(recordingCanvas, pixels);
+    const context = recordingCanvas.getContext('2d');
+    if (!context) {
+      reportFailure(new Error('礼物动画录制画布初始化失败。'));
+      return;
+    }
+    resetButton.hidden = true;
+    confirmButton.hidden = true;
+    saveButton.hidden = true;
+    saveButton.disabled = true;
+    secondaryAction = 're-edit';
+    reeditButton.textContent = '重新剪裁';
+    reeditButton.hidden = false;
+    reeditButton.disabled = false;
+    progress.value = 0;
+    progress.hidden = false;
     status.classList.remove('is-error');
-    void generate();
-  };
-  saveButton.onclick = () => {
-    if (!generatedBlob || !previewURL) return;
-    triggerGiftClipDownload(previewURL, sanitizeGiftClipFilename(receipt, generatedExtension));
+    status.textContent = `正在生成视频 · ${activeSession.sourceLabel} · ${Math.round(activeSession.durationMs / 100) / 10} 秒`;
+    const controller = new AbortController();
+    recordingAbort = controller;
+    const recordingRun = (async (): Promise<void> => {
+      try {
+        await activeSession.restart();
+        if (!isCurrent(token)) return;
+        const recording = await recordGiftClipCanvas({
+          canvas: recordingCanvas,
+          durationMs: activeSession.durationMs,
+          signal: controller.signal,
+          drawFrame: (elapsedMs) => {
+            drawGiftClipOutputFrame(context, receipt, activeSession.visualAt(elapsedMs), activeSession.avatar, pixels);
+          },
+          onProgress: (value) => {
+            if (isCurrent(token)) progress.value = Math.min(100, Math.max(0, value * 100));
+          },
+        });
+        if (!isCurrent(token)) return;
+        activeSession.pause();
+        generatedRecording = recording;
+        previewURL = URL.createObjectURL(recording.blob);
+        preview.src = previewURL;
+        preview.style.aspectRatio = `${pixels.width} / ${pixels.height}`;
+        setStageSize(pixels.width, pixels.height);
+        sourceCanvas.hidden = true;
+        preview.hidden = false;
+        progress.value = 100;
+        const sizeLabel = formatGiftClipBytes(recording.blob.size);
+        status.textContent = `${recording.extension.toUpperCase()} 已生成 · ${sizeLabel} · ${pixels.width} × ${pixels.height} · ${activeSession.sourceLabel}`;
+        saveButton.textContent = `保存 ${recording.extension.toUpperCase()}`;
+        saveButton.hidden = false;
+        saveButton.disabled = false;
+        void preview.play().catch(() => undefined);
+      } catch (error) {
+        if (isCurrent(token) && !controller.signal.aborted) reportFailure(error);
+      }
+    })();
+    const task = recordingRun.finally(() => {
+      releaseCanvasBackingStores();
+      if (recordingTask === task) recordingTask = null;
+      if (recordingAbort === controller) recordingAbort = null;
+    });
+    recordingTask = task;
+    await task;
   };
 
-  drawGiftClipPlaceholder(canvas, receipt);
-  void generate();
+  const close = (): void => {
+    if (closed) return;
+    closed = true;
+    transition += 1;
+    abortLoad();
+    void abortRecordingTask();
+    stopEditorPreview();
+    destroyEditor();
+    disposeSession();
+    clearPreview();
+    releaseCanvasBackingStores();
+    globalThis.removeEventListener('keydown', onKeyDown);
+    overlay.removeEventListener('click', onOverlayClick);
+    closeButton.onclick = null;
+    resetButton.onclick = null;
+    confirmButton.onclick = null;
+    reeditButton.onclick = null;
+    saveButton.onclick = null;
+    overlay.remove();
+  };
+  const onKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === 'Escape') close();
+  };
+  const onOverlayClick = (event: MouseEvent): void => {
+    if (event.target === overlay) close();
+  };
+
+  closeButton.onclick = close;
+  resetButton.onclick = () => editor?.reset();
+  confirmButton.onclick = () => { void confirmAndGenerate(); };
+  reeditButton.onclick = () => {
+    if (secondaryAction === 'retry' || !session) {
+      void loadSource();
+      return;
+    }
+    const token = ++transition;
+    void presentEditor(session, confirmedCrop, token);
+  };
+  saveButton.onclick = () => {
+    if (!generatedRecording || !previewURL) return;
+    triggerGiftClipDownload(
+      previewURL,
+      sanitizeGiftClipFilename(receipt, generatedRecording.extension),
+    );
+  };
+  globalThis.addEventListener('keydown', onKeyDown);
+  overlay.addEventListener('click', onOverlayClick);
+
+  const initialContext = sourceCanvas.getContext('2d');
+  if (initialContext) drawGiftClipSourcePreview(initialContext, null);
+  void loadSource();
   closeButton.focus();
   return { close };
 }
 
-async function loadGiftEffect(receiptId: string, sourceURLs: Set<string>, sourceMediaHost: HTMLElement): Promise<GiftEffectSource> {
-  const cacheBuster = `&v=${Date.now()}`;
-  const [layoutResponse, videoResponse] = await Promise.all([
-    fetch(`${giftReceiptMediaUrl(receiptId, 'effect-layout')}${cacheBuster}`, { cache: 'no-store' }),
-    fetch(`${giftReceiptMediaUrl(receiptId, 'effect-video')}${cacheBuster}`, { cache: 'no-store' }),
-  ]);
-  if (!layoutResponse.ok || !videoResponse.ok) throw new Error('完整礼物特效读取失败。');
-  const layout = normalizeGiftEffectLayout(await layoutResponse.json());
-  const videoBlob = await videoResponse.blob();
-  if (!videoBlob.size) throw new Error('完整礼物特效没有有效视频。');
-  const sourceURL = URL.createObjectURL(videoBlob);
-  sourceURLs.add(sourceURL);
-  const video = document.createElement('video');
-  video.muted = true;
-  video.playsInline = true;
-  video.preload = 'auto';
-  sourceMediaHost.append(video);
-  video.src = sourceURL;
-  await waitForVideo(video);
-  if (video.videoWidth !== layout.videoWidth || video.videoHeight !== layout.videoHeight) {
-    throw new Error('礼物特效视频尺寸与坐标不一致。');
-  }
-  const [width, height] = fitGiftEffectFrame(layout.rgbFrame[2], layout.rgbFrame[3]);
-  return {
-    video,
-    layout,
-    frame: createEffectCanvas(width, height),
-    color: createEffectCanvas(width, height),
-    alpha: createEffectCanvas(width, height),
-    durationMs: giftEffectDurationMs(layout),
-  };
-}
-
-function waitForVideo(video: HTMLVideoElement): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const cleanup = (): void => {
-      video.removeEventListener('loadedmetadata', onLoaded);
-      video.removeEventListener('error', onError);
-    };
-    const onLoaded = (): void => {
-      cleanup();
-      resolve();
-    };
-    const onError = (): void => {
-      cleanup();
-      reject(new Error('完整礼物特效视频无法解码。'));
-    };
-    video.addEventListener('loadedmetadata', onLoaded);
-    video.addEventListener('error', onError);
-    video.load();
-  });
-}
-
-function createEffectCanvas(width: number, height: number): HTMLCanvasElement {
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  return canvas;
-}
-
-function fitGiftEffectFrame(width: number, height: number): [number, number] {
-  const scale = Math.min(1, Math.max(CLIP_SIZE / width, CLIP_SIZE / height));
-  return [Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale))];
-}
-
-export function giftClipCoverRect(
-  sourceWidth: number,
-  sourceHeight: number,
-  targetSize = CLIP_SIZE,
-): { x: number; y: number; width: number; height: number } {
-  const width = Math.max(1, sourceWidth);
-  const height = Math.max(1, sourceHeight);
-  const size = Math.max(1, targetSize);
-  const scale = Math.max(size / width, size / height);
-  const fittedWidth = width * scale;
-  const fittedHeight = height * scale;
-  return {
-    x: (size - fittedWidth) / 2,
-    y: (size - fittedHeight) / 2,
-    width: fittedWidth,
-    height: fittedHeight,
-  };
-}
-
-function renderGiftEffectFrame(effect: GiftEffectSource): GiftClipVisual | null {
-  if (effect.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return null;
-  const colorContext = effect.color.getContext('2d', { willReadFrequently: true });
-  const alphaContext = effect.alpha.getContext('2d', { willReadFrequently: true });
-  const frameContext = effect.frame.getContext('2d');
-  if (!colorContext || !alphaContext || !frameContext) throw new Error('礼物特效画布初始化失败。');
-  const [rgbX, rgbY, rgbWidth, rgbHeight] = effect.layout.rgbFrame;
-  const [alphaX, alphaY, alphaWidth, alphaHeight] = effect.layout.alphaFrame;
-  const width = effect.frame.width;
-  const height = effect.frame.height;
-  colorContext.clearRect(0, 0, width, height);
-  alphaContext.clearRect(0, 0, width, height);
-  colorContext.drawImage(effect.video, rgbX, rgbY, rgbWidth, rgbHeight, 0, 0, width, height);
-  alphaContext.drawImage(effect.video, alphaX, alphaY, alphaWidth, alphaHeight, 0, 0, width, height);
-  const colorPixels = colorContext.getImageData(0, 0, width, height);
-  const alphaPixels = alphaContext.getImageData(0, 0, width, height);
-  for (let index = 0; index < colorPixels.data.length; index += 4) {
-    colorPixels.data[index + 3] = alphaPixels.data[index];
-  }
-  frameContext.clearRect(0, 0, width, height);
-  frameContext.putImageData(colorPixels, 0, 0);
-  return { source: effect.frame, width, height };
-}
-
-function imageGiftClipVisual(animation: HTMLImageElement | null): GiftClipVisual | null {
-  if (!animation?.naturalWidth || !animation.naturalHeight) return null;
-  return { source: animation, width: animation.naturalWidth, height: animation.naturalHeight };
-}
-
-async function loadGiftAnimation(
-  src: string,
-  imageRegistry: Set<HTMLImageElement>,
-  sourceURLs: Set<string>,
-  sourceMediaHost: HTMLElement,
-): Promise<GiftAnimationSource> {
-  const response = await fetch(src, { cache: 'no-store' });
-  if (!response.ok) throw new Error('礼物动画素材读取失败，请稍后重试。');
-  const blob = await response.blob();
-  if (!blob.size) throw new Error('礼物动画素材没有有效内容。');
-  const data = await blob.arrayBuffer();
-  if (isGIFData(data)) return createGIFAnimationSource(data);
-
-  const sourceURL = URL.createObjectURL(blob);
-  sourceURLs.add(sourceURL);
-  const image = await loadAnimatedImage(sourceURL, imageRegistry, sourceMediaHost);
-  return { visualAt: () => imageGiftClipVisual(image) };
-}
-
-function isGIFData(data: ArrayBuffer): boolean {
-  if (data.byteLength < 6) return false;
-  const signature = String.fromCharCode(...new Uint8Array(data, 0, 6));
-  return signature === 'GIF87a' || signature === 'GIF89a';
-}
-
-function createGIFAnimationSource(data: ArrayBuffer): GiftAnimationSource {
-  const parsed = parseGIF(data);
-  const width = parsed.lsd.width;
-  const height = parsed.lsd.height;
-  const frameDimensions = parsed.frames.flatMap((frame) => (
-    'image' in frame ? [frame.image.descriptor] : []
-  ));
-  if (
-    width <= 0 || height <= 0 || width > 2048 || height > 2048
-    || width * height > 4_194_304 || frameDimensions.length === 0 || frameDimensions.length > 1200
-  ) {
-    throw new Error('礼物 GIF 动画尺寸或帧数超出允许范围。');
-  }
-  let totalFramePixels = 0;
-  for (const dimensions of frameDimensions) {
-    validateGIFFrameDimensions(dimensions, width, height);
-    totalFramePixels += dimensions.width * dimensions.height;
-    if (totalFramePixels > 33_554_432) throw new Error('礼物 GIF 动画解码后体积过大。');
-  }
-  const frames = decompressFrames(parsed, true);
-  for (const frame of frames) validateGIFFramePatch(frame);
-
-  const canvas = createEffectCanvas(width, height);
-  const context = canvas.getContext('2d');
-  const patchCanvas = createEffectCanvas(1, 1);
-  const patchContext = patchCanvas.getContext('2d');
-  if (!context || !patchContext) throw new Error('礼物 GIF 动画画布初始化失败。');
-  const delays = frames.map((frame) => Math.max(10, Math.round(frame.delay) || 100));
-  const cycleMs = delays.reduce((total, delay) => total + delay, 0);
-  let currentFrame = -1;
-  let currentCycle = -1;
-  let restoreSnapshot: ImageData | null = null;
-
-  const reset = (): void => {
-    context.clearRect(0, 0, width, height);
-    currentFrame = -1;
-    restoreSnapshot = null;
-  };
-  const drawFrame = (frameIndex: number): void => {
-    if (currentFrame >= 0) {
-      const previous = frames[currentFrame];
-      if (previous.disposalType === 2) {
-        context.clearRect(previous.dims.left, previous.dims.top, previous.dims.width, previous.dims.height);
-      } else if (previous.disposalType === 3 && restoreSnapshot) {
-        context.putImageData(restoreSnapshot, 0, 0);
-      }
-      restoreSnapshot = null;
-    }
-
-    const frame = frames[frameIndex];
-    if (frame.disposalType === 3) restoreSnapshot = context.getImageData(0, 0, width, height);
-    patchCanvas.width = frame.dims.width;
-    patchCanvas.height = frame.dims.height;
-    const patchPixels = new Uint8ClampedArray(frame.patch.length);
-    patchPixels.set(frame.patch);
-    const patch = new ImageData(patchPixels, frame.dims.width, frame.dims.height);
-    patchContext.putImageData(patch, 0, 0);
-    context.drawImage(patchCanvas, frame.dims.left, frame.dims.top);
-    currentFrame = frameIndex;
-  };
-
-  return {
-    durationMs: cycleMs,
-    visualAt: (elapsedMs) => {
-      const normalizedElapsed = Math.max(0, elapsedMs);
-      const cycle = Math.floor(normalizedElapsed / cycleMs);
-      const targetFrame = giftGifFrameIndex(delays, normalizedElapsed);
-      if (cycle !== currentCycle || targetFrame < currentFrame) {
-        reset();
-        currentCycle = cycle;
-      }
-      for (let index = currentFrame + 1; index <= targetFrame; index += 1) drawFrame(index);
-      return { source: canvas, width, height };
-    },
-  };
-}
-
-function validateGIFFrameDimensions(
-  dimensions: { left: number; top: number; width: number; height: number },
-  width: number,
-  height: number,
-): void {
-  const { left, top, width: frameWidth, height: frameHeight } = dimensions;
-  if (
-    left < 0 || top < 0 || frameWidth <= 0 || frameHeight <= 0
-    || left + frameWidth > width || top + frameHeight > height
-  ) {
-    throw new Error('礼物 GIF 动画帧无效。');
-  }
-}
-
-function validateGIFFramePatch(frame: ParsedFrame): void {
-  if (frame.patch.length !== frame.dims.width * frame.dims.height * 4) {
-    throw new Error('礼物 GIF 动画帧无效。');
-  }
-}
-
-function loadImage(src: string, registry: Set<HTMLImageElement>): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    registry.add(image);
-    image.decoding = 'async';
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error('礼物动画素材读取失败，请稍后重试。'));
-    image.src = src;
-  });
-}
-
-function loadAnimatedImage(
-  src: string,
-  registry: Set<HTMLImageElement>,
-  sourceMediaHost: HTMLElement,
-): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    registry.add(image);
-    image.className = 'gift-clip-source-animation';
-    image.decoding = 'auto';
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error('礼物动画素材读取失败，请稍后重试。'));
-    // Animated GIF/WebP can remain frozen on their first (often transparent) frame
-    // when the image is detached. Keep it in a tiny, nearly invisible render layer
-    // so Chromium advances its animation clock while each frame is copied to Canvas.
-    sourceMediaHost.append(image);
-    image.src = src;
-  });
-}
-
-async function loadOptionalImage(src: string, registry: Set<HTMLImageElement>): Promise<HTMLImageElement | null> {
-  try {
-    return await loadImage(src, registry);
-  } catch {
-    return null;
-  }
-}
-
-function drawGiftClipPlaceholder(canvas: HTMLCanvasElement, receipt: GiftReceipt): void {
-  const context = canvas.getContext('2d');
-  if (!context) return;
-  drawGiftClipFrame(context, receipt, null, null);
-  context.fillStyle = 'rgba(255,255,255,.68)';
-  context.textAlign = 'center';
-  context.font = '600 24px system-ui, sans-serif';
-  context.fillText('正在准备礼物动画', CLIP_SIZE / 2, 190);
-}
-
-function drawGiftClipFrame(
-  context: CanvasRenderingContext2D,
-  receipt: GiftReceipt,
-  animation: GiftClipVisual | null,
-  avatar: HTMLImageElement | null,
-  placement: GiftClipPlacement = { x: 0, y: 0 },
-): void {
-  const gradient = context.createLinearGradient(0, 0, CLIP_SIZE, CLIP_SIZE);
-  gradient.addColorStop(0, '#12101d');
-  gradient.addColorStop(0.48, '#24152d');
-  gradient.addColorStop(1, '#511d45');
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, CLIP_SIZE, CLIP_SIZE);
-
-  const glow = context.createRadialGradient(240, 185, 20, 240, 185, 250);
-  glow.addColorStop(0, 'rgba(255, 113, 164, .3)');
-  glow.addColorStop(1, 'rgba(255, 113, 164, 0)');
-  context.fillStyle = glow;
-  context.fillRect(0, 0, CLIP_SIZE, 370);
-
-  if (animation?.width && animation.height) {
-    const frame = giftClipPlacedCoverRect(animation.width, animation.height, placement);
-    context.save();
-    context.drawImage(animation.source, frame.x, frame.y, frame.width, frame.height);
-    context.restore();
-  }
-
-  const barGradient = context.createLinearGradient(18, 370, 462, 458);
-  barGradient.addColorStop(0, 'rgba(87, 39, 101, .76)');
-  barGradient.addColorStop(1, 'rgba(224, 68, 129, .76)');
-  roundedRect(context, 18, 370, 444, 90, 22);
-  context.fillStyle = barGradient;
-  context.fill();
-  context.strokeStyle = 'rgba(255,255,255,.24)';
-  context.lineWidth = 1.5;
-  context.stroke();
-
-  context.save();
-  context.beginPath();
-  context.arc(67, 415, 30, 0, Math.PI * 2);
-  context.clip();
-  if (avatar?.naturalWidth && avatar.naturalHeight) {
-    const side = Math.min(avatar.naturalWidth, avatar.naturalHeight);
-    context.drawImage(avatar, (avatar.naturalWidth - side) / 2, (avatar.naturalHeight - side) / 2, side, side, 37, 385, 60, 60);
-  } else {
-    context.fillStyle = '#2a2132';
-    context.fillRect(37, 385, 60, 60);
-    context.fillStyle = '#ff85b1';
-    context.textAlign = 'center';
-    context.textBaseline = 'middle';
-    context.font = '700 24px system-ui, sans-serif';
-    context.fillText((receipt.uname || '观').slice(0, 1), 67, 415);
-  }
-  context.restore();
-  context.strokeStyle = 'rgba(255,255,255,.78)';
-  context.lineWidth = 2;
-  context.beginPath();
-  context.arc(67, 415, 30, 0, Math.PI * 2);
-  context.stroke();
-
-  const name = truncateCanvasText(context, receipt.uname?.trim() || '匿名观众', 302, '700 20px system-ui, sans-serif');
-  const giftText = truncateCanvasText(context, `赠送 ${receipt.giftName || '礼物'} × ${Math.max(1, receipt.num || 1)}`, 302, '500 17px system-ui, sans-serif');
-  context.textAlign = 'left';
-  context.textBaseline = 'alphabetic';
-  context.fillStyle = '#ffffff';
-  context.font = '700 20px system-ui, sans-serif';
-  context.fillText(name, 114, 409);
-  context.fillStyle = 'rgba(255,255,255,.82)';
-  context.font = '500 17px system-ui, sans-serif';
-  context.fillText(giftText, 114, 436);
-}
-
-function roundedRect(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number): void {
-  context.beginPath();
-  context.roundRect(x, y, width, height, radius);
-}
-
-function truncateCanvasText(context: CanvasRenderingContext2D, text: string, maxWidth: number, font: string): string {
-  context.font = font;
-  if (context.measureText(text).width <= maxWidth) return text;
-  let value = text;
-  while (value.length > 1 && context.measureText(`${value}…`).width > maxWidth) value = value.slice(0, -1);
-  return `${value}…`;
+function formatGiftClipBytes(bytes: number): string {
+  return bytes < 1024 * 1024
+    ? `${Math.max(1, Math.round(bytes / 1024))} KB`
+    : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }

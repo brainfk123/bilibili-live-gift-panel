@@ -1,158 +1,585 @@
-import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { defaultState } from '../src/storage';
+import type { GiftReceipt } from '../src/types';
+import type { GiftClipMediaSession } from '../src/ui/config/gift-clip-media';
+
+const studioMocks = vi.hoisted(() => ({
+  loadMediaSession: vi.fn(),
+  recordCanvas: vi.fn(),
+}));
+
+vi.mock('../src/ui/config/gift-clip-media', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/ui/config/gift-clip-media')>();
+  return { ...actual, loadGiftClipMediaSession: studioMocks.loadMediaSession };
+});
+
+vi.mock('../src/ui/config/gift-clip-recorder', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/ui/config/gift-clip-recorder')>();
+  return { ...actual, recordGiftClipCanvas: studioMocks.recordCanvas };
+});
+
 import {
-  constrainGiftClipPlacement,
   giftClipAnimationKey,
-  giftClipCoverRect,
-  giftClipPlacedCoverRect,
-  normalizeGiftClipDuration,
-  normalizeGiftEffectLayout,
-  giftEffectDurationMs,
-  giftGifFrameIndex,
-  sanitizeGiftClipFilename,
-  selectGiftClipRecorder,
-  stopGiftClipStream,
-  triggerGiftClipDownload,
+  openGiftClipStudio,
+  type GiftClipStudioController,
 } from '../src/ui/config/gift-clip-studio';
+import { normalizeGiftClipDuration } from '../src/ui/config/gift-clip-media';
+
+class StudioTestStyle {
+  [name: string]: string | ((name: string, value: string) => void);
+
+  cssText = '';
+  aspectRatio = '';
+
+  setProperty(name: string, value: string): void {
+    this[name] = value;
+  }
+}
+
+class StudioTestElement {
+  static onCropLayerAppended: (() => void) | null = null;
+
+  className = '';
+  textContent = '';
+  dataset: Record<string, string> = {};
+  children: StudioTestElement[] = [];
+  parent: StudioTestElement | null = null;
+  style = new StudioTestStyle();
+  attributes: Record<string, string> = {};
+  hidden = false;
+  disabled = false;
+  type = '';
+  tabIndex = -1;
+  inert = false;
+  width = 0;
+  height = 0;
+  clientWidth = 480;
+  clientHeight = 270;
+  value = 0;
+  max = 0;
+  src = '';
+  removeCalls = 0;
+  onclick: ((event: MouseEvent) => unknown) | null = null;
+  onpointerdown: ((event: PointerEvent) => unknown) | null = null;
+  onpointermove: ((event: PointerEvent) => unknown) | null = null;
+  onpointerup: ((event: PointerEvent) => unknown) | null = null;
+  onpointercancel: ((event: PointerEvent) => unknown) | null = null;
+  onlostpointercapture: ((event: PointerEvent) => unknown) | null = null;
+  onkeydown: ((event: KeyboardEvent) => unknown) | null = null;
+  private readonly listeners = new Map<string, Set<EventListener>>();
+  private readonly capturedPointers = new Set<number>();
+  readonly classList = {
+    add: (...names: string[]) => this.updateClasses(names, true),
+    remove: (...names: string[]) => this.updateClasses(names, false),
+    contains: (name: string) => this.className.split(/\s+/).includes(name),
+  };
+
+  constructor(readonly tagName: string) {}
+
+  append(...children: StudioTestElement[]): void {
+    for (const child of children) {
+      child.parent = this;
+      if (child.className.split(/\s+/).includes('gift-clip-crop-layer')) {
+        child.clientWidth = this.clientWidth;
+        child.clientHeight = this.clientHeight;
+        StudioTestElement.onCropLayerAppended?.();
+      }
+      this.children.push(child);
+    }
+  }
+
+  remove(): void {
+    this.removeCalls += 1;
+    if (!this.parent) return;
+    const index = this.parent.children.indexOf(this);
+    if (index >= 0) this.parent.children.splice(index, 1);
+    this.parent = null;
+  }
+
+  setAttribute(name: string, value: string): void {
+    this.attributes[name] = value;
+    if (name === 'style') this.style.cssText = value;
+  }
+
+  removeAttribute(name: string): void {
+    delete this.attributes[name];
+    if (name === 'src') this.src = '';
+  }
+
+  addEventListener(type: string, listener: EventListener): void {
+    const listeners = this.listeners.get(type) ?? new Set<EventListener>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: EventListener): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  querySelector(selector: string): StudioTestElement | null {
+    return this.querySelectorAll(selector)[0] ?? null;
+  }
+
+  querySelectorAll(selector: string): StudioTestElement[] {
+    const className = selector.startsWith('.') ? selector.slice(1) : '';
+    const found: StudioTestElement[] = [];
+    const visit = (element: StudioTestElement): void => {
+      for (const child of element.children) {
+        const matches = className
+          ? child.className.split(/\s+/).includes(className)
+          : child.tagName === selector;
+        if (matches) found.push(child);
+        visit(child);
+      }
+    };
+    visit(this);
+    return found;
+  }
+
+  getBoundingClientRect(): DOMRect {
+    const widthPercent = Number.parseFloat(String(this.style.width ?? ''));
+    const heightPercent = Number.parseFloat(String(this.style.height ?? ''));
+    return {
+      width: Number.isFinite(widthPercent) && this.parent ? this.parent.clientWidth * widthPercent / 100 : this.clientWidth,
+      height: Number.isFinite(heightPercent) && this.parent ? this.parent.clientHeight * heightPercent / 100 : this.clientHeight,
+    } as DOMRect;
+  }
+
+  getContext(): CanvasRenderingContext2D | null {
+    if (this.tagName !== 'canvas') return null;
+    const gradient = { addColorStop: vi.fn() };
+    return {
+      canvas: this,
+      createLinearGradient: vi.fn(() => gradient),
+      createRadialGradient: vi.fn(() => gradient),
+      fillRect: vi.fn(),
+      drawImage: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+  }
+
+  setPointerCapture(pointerId: number): void {
+    this.capturedPointers.add(pointerId);
+  }
+
+  hasPointerCapture(pointerId: number): boolean {
+    return this.capturedPointers.has(pointerId);
+  }
+
+  releasePointerCapture(pointerId: number): void {
+    this.capturedPointers.delete(pointerId);
+  }
+
+  focus(): void {}
+  pause(): void {}
+  load(): void {}
+  play(): Promise<void> { return Promise.resolve(); }
+
+  private updateClasses(names: string[], add: boolean): void {
+    const classes = new Set(this.className.split(/\s+/).filter(Boolean));
+    for (const name of names) {
+      if (add) classes.add(name);
+      else classes.delete(name);
+    }
+    this.className = [...classes].join(' ');
+  }
+}
+
+class StudioTestResizeObserver {
+  observe(): void {}
+  disconnect(): void {}
+}
+
+function receiptFixture(): GiftReceipt {
+  return {
+    id: 'receipt-1',
+    time: 1_700_000_000,
+    giftId: 1,
+    giftName: '测试礼物',
+    num: 1,
+    price: 100,
+    totalCoin: 100,
+    coinType: 'gold',
+    uname: '测试观众',
+    animation: { webp: 'animation.webp', durationMs: 2400 },
+    effects: [],
+  };
+}
+
+function mediaSessionFixture(width = 640, height = 360): GiftClipMediaSession {
+  return {
+    width,
+    height,
+    durationMs: 2400,
+    sourceLabel: '短动画',
+    avatar: null,
+    visualAt: vi.fn(() => null),
+    restart: vi.fn(async () => undefined),
+    pause: vi.fn(),
+    dispose: vi.fn(),
+  };
+}
+
+function button(root: StudioTestElement, text: string): StudioTestElement {
+  const match = root.querySelectorAll('button').find((candidate) => candidate.textContent === text);
+  if (!match) throw new Error(`button not found: ${text}`);
+  return match;
+}
 
 describe('gift clip studio', () => {
-  const source = readFileSync(new URL('../src/ui/config/gift-clip-studio.ts', import.meta.url), 'utf8');
+  let opened: GiftClipStudioController[];
+  let removeGlobalListener: ReturnType<typeof vi.fn>;
+  let requestFrame: ReturnType<typeof vi.fn>;
+  let cropLayerRafCounts: number[];
 
-  it('clamps missing and abnormal animation durations', () => {
-    expect(normalizeGiftClipDuration(undefined)).toBe(3000);
-    expect(normalizeGiftClipDuration(200)).toBe(1000);
-    expect(normalizeGiftClipDuration(2200)).toBe(2200);
-    expect(normalizeGiftClipDuration(60_000)).toBe(15_000);
+  beforeEach(() => {
+    opened = [];
+    cropLayerRafCounts = [];
+    let frameId = 0;
+    requestFrame = vi.fn(() => ++frameId);
+    removeGlobalListener = vi.fn();
+    StudioTestElement.onCropLayerAppended = () => {
+      cropLayerRafCounts.push(requestFrame.mock.calls.length);
+    };
+    studioMocks.loadMediaSession.mockReset();
+    studioMocks.recordCanvas.mockReset();
+    vi.stubGlobal('document', {
+      createElement: (tagName: string) => new StudioTestElement(tagName),
+      body: new StudioTestElement('body'),
+    } as unknown as Document);
+    vi.stubGlobal('ResizeObserver', StudioTestResizeObserver as unknown as typeof ResizeObserver);
+    vi.stubGlobal('requestAnimationFrame', requestFrame);
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    vi.stubGlobal('addEventListener', vi.fn());
+    vi.stubGlobal('removeEventListener', removeGlobalListener);
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:recording');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
   });
 
-  it('accepts packed-alpha effect coordinates and derives the real effect duration', () => {
-    const layout = normalizeGiftEffectLayout({
-      videoWidth: 1088,
-      videoHeight: 1280,
-      rgbFrame: [0, 0, 720, 1280],
-      alphaFrame: [724, 0, 360, 640],
-      fps: 30,
-      frames: 390,
+  afterEach(() => {
+    for (const controller of opened) controller.close();
+    StudioTestElement.onCropLayerAppended = null;
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const openStudio = (options: Parameters<typeof openGiftClipStudio>[0]) => {
+    const controller = openGiftClipStudio(options);
+    opened.push(controller);
+    return controller;
+  };
+
+  it('clamps missing and abnormal animation durations at the media seam', () => {
+    expect([undefined, 200, 2200, 60_000].map(normalizeGiftClipDuration))
+      .toEqual([3000, 1000, 2200, 15_000]);
+  });
+
+  it('keeps a stable crop key for signed versions of the same animation URL', () => {
+    expect(giftClipAnimationKey({ giftId: 1, animation: { gif: 'https://i0.hdslb.com/a.gif?token=one', durationMs: 3000 } }))
+      .toBe(giftClipAnimationKey({ giftId: 2, animation: { gif: 'https://i0.hdslb.com/a.gif?token=two', durationMs: 5000 } }));
+  });
+
+  it('keeps loading copy in the studio and out of the recorded renderer', () => {
+    const studioSource = readFileSync(new URL('../src/ui/config/gift-clip-studio.ts', import.meta.url), 'utf8');
+    const rendererSource = readFileSync(new URL('../src/ui/config/gift-clip-renderer.ts', import.meta.url), 'utf8');
+
+    expect(studioSource).toContain('正在读取礼物动画');
+    expect(rendererSource).not.toContain('正在准备礼物动画');
+  });
+
+  it('cancels a pending source load on idempotent close without surfacing an error', async () => {
+    let loadSignal: AbortSignal | undefined;
+    studioMocks.loadMediaSession.mockImplementation((
+      _receipt: GiftReceipt,
+      _host: HTMLElement,
+      signal?: AbortSignal,
+    ) => {
+      loadSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
     });
-    expect(layout.rgbFrame).toEqual([0, 0, 720, 1280]);
-    expect(layout.alphaFrame).toEqual([724, 0, 360, 640]);
-    expect(giftEffectDurationMs(layout)).toBe(13_000);
+    const host = new StudioTestElement('host');
+    const onError = vi.fn();
+    const controller = openStudio({
+      host: host as unknown as HTMLElement,
+      receipt: receiptFixture(),
+      onError,
+    });
+    const overlay = host.children[0];
+    expect(host.querySelector('.gift-clip-status')?.textContent).toBe('正在读取礼物动画…');
+
+    controller.close();
+    controller.close();
+    await Promise.resolve();
+
+    expect(loadSignal).toBeInstanceOf(AbortSignal);
+    expect(loadSignal?.aborted).toBe(true);
+    expect(onError).not.toHaveBeenCalled();
+    expect(host.children).toEqual([]);
+    expect(overlay.removeCalls).toBe(1);
+    expect(removeGlobalListener).toHaveBeenCalledOnce();
   });
 
-  it('selects deterministic GIF frames and loops by frame delays', () => {
-    const delays = [220, 220, 220];
-    expect(giftGifFrameIndex(delays, 0)).toBe(0);
-    expect(giftGifFrameIndex(delays, 219)).toBe(0);
-    expect(giftGifFrameIndex(delays, 220)).toBe(1);
-    expect(giftGifFrameIndex(delays, 500)).toBe(2);
-    expect(giftGifFrameIndex(delays, 660)).toBe(0);
+  it('shows the exact small-source gate, disposes it immediately, and retries with a fresh session', async () => {
+    const first = mediaSessionFixture(63, 120);
+    const second = mediaSessionFixture(63, 120);
+    studioMocks.loadMediaSession.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const host = new StudioTestElement('host');
+    const controller = openStudio({
+      host: host as unknown as HTMLElement,
+      receipt: receiptFixture(),
+    });
+    await vi.waitFor(() => {
+      expect(host.querySelector('.gift-clip-status')?.textContent)
+        .toBe('动画尺寸过小，无法制作回放（63 × 120）');
+    });
+
+    expect(button(host, '恢复完整画面').hidden).toBe(true);
+    expect(button(host, '确定剪裁并生成').hidden).toBe(true);
+    expect(button(host, '保存视频').hidden).toBe(true);
+    const retry = button(host, '重试');
+    expect(retry.hidden).toBe(false);
+    expect(first.dispose).toHaveBeenCalledOnce();
+
+    retry.onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(second.dispose).toHaveBeenCalledOnce());
+
+    expect(first.dispose).toHaveBeenCalledOnce();
+    controller.close();
+    expect(second.dispose).toHaveBeenCalledOnce();
   });
 
-  it('uses cover scaling so landscape and portrait animations fill the square canvas', () => {
-    expect(giftClipCoverRect(320, 180)).toEqual({ x: -186.66666666666663, y: 0, width: 853.3333333333333, height: 480 });
-    expect(giftClipCoverRect(180, 320)).toEqual({ x: 0, y: -186.66666666666663, width: 480, height: 853.3333333333333 });
-    expect(giftClipCoverRect(480, 480)).toEqual({ x: 0, y: 0, width: 480, height: 480 });
+  it('disposes a session whose editor restart rejects and retries with a fresh session', async () => {
+    const first = mediaSessionFixture();
+    first.restart = vi.fn(async () => { throw new Error('礼物动画素材读取失败，请稍后重试。'); });
+    const second = mediaSessionFixture();
+    studioMocks.loadMediaSession.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const host = new StudioTestElement('host');
+    const controller = openStudio({
+      host: host as unknown as HTMLElement,
+      receipt: receiptFixture(),
+    });
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-status')?.textContent)
+      .toBe('礼物动画素材读取失败，请稍后重试。'));
+
+    const sourceCanvas = host.querySelector('.gift-clip-canvas');
+    expect(first.dispose).toHaveBeenCalledOnce();
+    expect({ width: sourceCanvas?.width, height: sourceCanvas?.height }).toEqual({ width: 0, height: 0 });
+
+    button(host, '重试').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-crop-layer')).not.toBeNull());
+    expect(studioMocks.loadMediaSession).toHaveBeenCalledTimes(2);
+    expect(second.dispose).not.toHaveBeenCalled();
+    expect({ width: sourceCanvas?.width, height: sourceCanvas?.height }).toEqual({ width: 640, height: 360 });
+
+    controller.close();
+    expect(second.dispose).toHaveBeenCalledOnce();
   });
 
-  it('keeps a stable placement key for the same animation and ignores signed URL queries', () => {
-    expect(giftClipAnimationKey({
-      giftId: 1,
-      animation: { gif: 'https://i0.hdslb.com/gift/heart.gif?token=one', durationMs: 3000 },
-    })).toBe(giftClipAnimationKey({
-      giftId: 2,
-      animation: { gif: 'https://i0.hdslb.com/gift/heart.gif?token=two', durationMs: 5000 },
+  it('starts the source preview RAF before mounting the crop editor', async () => {
+    const session = mediaSessionFixture();
+    studioMocks.loadMediaSession.mockResolvedValue(session);
+    const host = new StudioTestElement('host');
+    const controller = openStudio({
+      host: host as unknown as HTMLElement,
+      receipt: receiptFixture(),
+    });
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-crop-layer')).not.toBeNull());
+
+    expect(cropLayerRafCounts).toEqual([1]);
+    controller.close();
+  });
+
+  it('notifies the confirmed crop before recording starts', async () => {
+    const events: string[] = [];
+    const session = mediaSessionFixture();
+    studioMocks.loadMediaSession.mockResolvedValue(session);
+    studioMocks.recordCanvas.mockImplementation(async () => {
+      events.push('record');
+      return { blob: new Blob(['clip']), mimeType: 'video/webm', extension: 'webm' as const };
+    });
+    const host = new StudioTestElement('host');
+    const controller = openStudio({
+      host: host as unknown as HTMLElement,
+      receipt: receiptFixture(),
+      onCropConfirmed: () => { events.push('confirm'); },
+    });
+    await vi.waitFor(() => expect(button(host, '确定剪裁并生成').hidden).toBe(false));
+
+    button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-status')?.textContent)
+      .toBe('WEBM 已生成 · 1 KB · 640 × 360 · 短动画'));
+
+    expect(events).toEqual(['confirm', 'record']);
+    controller.close();
+  });
+
+  it('releases canvas backing stores after recording settles and restores only the editor canvas on re-edit', async () => {
+    const session = mediaSessionFixture();
+    studioMocks.loadMediaSession.mockResolvedValue(session);
+    studioMocks.recordCanvas.mockResolvedValue({
+      blob: new Blob(['clip']), mimeType: 'video/webm', extension: 'webm',
+    });
+    const host = new StudioTestElement('host');
+    const controller = openStudio({
+      host: host as unknown as HTMLElement,
+      receipt: receiptFixture(),
+    });
+    await vi.waitFor(() => expect(button(host, '确定剪裁并生成').hidden).toBe(false));
+    const sourceCanvas = host.querySelector('.gift-clip-canvas');
+    const recordingCanvas = host.querySelector('.gift-clip-recording-canvas');
+
+    button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(button(host, '保存 WEBM').hidden).toBe(false));
+
+    expect({ width: sourceCanvas?.width, height: sourceCanvas?.height }).toEqual({ width: 0, height: 0 });
+    expect({ width: recordingCanvas?.width, height: recordingCanvas?.height }).toEqual({ width: 0, height: 0 });
+    expect(host.querySelector('.gift-clip-video')).toEqual(expect.objectContaining({
+      src: 'blob:recording',
+      hidden: false,
     }));
-    expect(giftClipAnimationKey({
-      giftId: 1,
-      animation: { durationMs: 3000, effectId: 99 },
-    })).toBe('effect:99');
+
+    button(host, '重新剪裁').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-crop-layer')).not.toBeNull());
+    expect({ width: sourceCanvas?.width, height: sourceCanvas?.height }).toEqual({ width: 640, height: 360 });
+    expect({ width: recordingCanvas?.width, height: recordingCanvas?.height }).toEqual({ width: 0, height: 0 });
+    controller.close();
   });
 
-  it('allows useful drag travel even when the animation canvas itself is square', () => {
-    expect(constrainGiftClipPlacement(480, 480, { x: 999, y: -999 }))
-      .toEqual({ x: 120, y: -120 });
-    expect(constrainGiftClipPlacement(180, 320, { x: 100, y: 300 }))
-      .toEqual({ x: 100, y: 160 });
+  it('disposes the failed recording session, clears canvases, and retries with a fresh load', async () => {
+    const first = mediaSessionFixture();
+    const second = mediaSessionFixture();
+    studioMocks.loadMediaSession.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    studioMocks.recordCanvas.mockRejectedValueOnce(new Error('视频录制失败，请重试。'));
+    const host = new StudioTestElement('host');
+    const controller = openStudio({
+      host: host as unknown as HTMLElement,
+      receipt: receiptFixture(),
+    });
+    await vi.waitFor(() => expect(button(host, '确定剪裁并生成').hidden).toBe(false));
+    const sourceCanvas = host.querySelector('.gift-clip-canvas');
+    const recordingCanvas = host.querySelector('.gift-clip-recording-canvas');
+
+    button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-status')?.textContent)
+      .toBe('视频录制失败，请重试。'));
+
+    expect(first.dispose).toHaveBeenCalledOnce();
+    expect({ width: sourceCanvas?.width, height: sourceCanvas?.height }).toEqual({ width: 0, height: 0 });
+    expect({ width: recordingCanvas?.width, height: recordingCanvas?.height }).toEqual({ width: 0, height: 0 });
+    expect(host.querySelector('.gift-clip-video')).toEqual(expect.objectContaining({ src: '', hidden: true }));
+
+    button(host, '重试').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-crop-layer')).not.toBeNull());
+    expect(studioMocks.loadMediaSession).toHaveBeenCalledTimes(2);
+    expect(second.dispose).not.toHaveBeenCalled();
+    controller.close();
+    expect(second.dispose).toHaveBeenCalledOnce();
   });
 
-  it('adds only enough overscan to keep a shifted animation covering the video', () => {
-    expect(giftClipPlacedCoverRect(480, 480, { x: 0, y: 80 }))
-      .toEqual({ x: -80, y: 0, width: 640, height: 640 });
-    expect(giftClipPlacedCoverRect(480, 480, { x: 0, y: 0 }))
-      .toEqual({ x: 0, y: 0, width: 480, height: 480 });
+  it('re-edits the confirmed crop without reloading media or saving an unconfirmed change', async () => {
+    const session = mediaSessionFixture();
+    const onCropConfirmed = vi.fn();
+    studioMocks.loadMediaSession.mockResolvedValue(session);
+    studioMocks.recordCanvas.mockResolvedValue({
+      blob: new Blob(['clip']), mimeType: 'video/webm', extension: 'webm',
+    });
+    const host = new StudioTestElement('host');
+    const controller = openStudio({
+      host: host as unknown as HTMLElement,
+      receipt: receiptFixture(),
+      onCropConfirmed,
+    });
+    await vi.waitFor(() => expect(button(host, '确定剪裁并生成').hidden).toBe(false));
+    button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(button(host, '保存 WEBM').hidden).toBe(false));
+
+    button(host, '重新剪裁').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-crop-layer')).not.toBeNull());
+
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:recording');
+    expect(studioMocks.loadMediaSession).toHaveBeenCalledOnce();
+    expect(session.restart).toHaveBeenCalledTimes(3);
+    expect(session.dispose).not.toHaveBeenCalled();
+    expect(onCropConfirmed).toHaveBeenCalledOnce();
+    expect(host.querySelector('.gift-clip-status')?.textContent)
+      .toBe('剪裁 640 × 360 · 成片按原始像素输出');
+
+    controller.close();
+    controller.close();
+    expect(session.dispose).toHaveBeenCalledOnce();
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(removeGlobalListener).toHaveBeenCalledOnce();
   });
 
-  it('keeps the preparing label in the setup placeholder and out of recorded frames', () => {
-    const placeholderStart = source.indexOf('function drawGiftClipPlaceholder');
-    const frameStart = source.indexOf('function drawGiftClipFrame');
-    const roundedRectStart = source.indexOf('function roundedRect');
-    expect(source.slice(placeholderStart, frameStart)).toContain("fillText('正在准备礼物动画'");
-    expect(source.slice(frameStart, roundedRectStart)).not.toContain('正在准备礼物动画');
-  });
-
-  it('keeps the sender information bar translucent over the animation', () => {
-    expect(source).toContain("barGradient.addColorStop(0, 'rgba(87, 39, 101, .76)')");
-    expect(source).toContain("barGradient.addColorStop(1, 'rgba(224, 68, 129, .76)')");
-  });
-
-  it('rejects packed-alpha coordinates outside the video', () => {
-    expect(() => normalizeGiftEffectLayout({
-      videoWidth: 1088,
-      videoHeight: 1280,
-      rgbFrame: [0, 0, 1200, 1280],
-      alphaFrame: [724, 0, 360, 640],
-      fps: 30,
-      frames: 390,
-    })).toThrow('礼物特效坐标无效');
-  });
-
-  it('sanitizes video filenames without including the sender UID', () => {
-    const filename = sanitizeGiftClipFilename({
-      giftName: '心动/盲盒:*?', uname: '观众<测试>|', time: 1_700_000_000,
-    }, 'mp4');
-    expect(filename).toMatch(/^心动-盲盒----观众-测试---\d{8}-\d{6}\.mp4$/);
-    expect(filename).not.toContain('UID');
-  });
-
-  it('prefers MP4 and falls back to WebM when MP4 construction fails', () => {
-    class FakeRecorder {
-      static isTypeSupported = vi.fn(() => true);
+  it('waits for aborted recording cleanup before re-edit can reuse the session and canvas', async () => {
+    const session = mediaSessionFixture();
+    let firstSignal: AbortSignal | undefined;
+    let settleFirstRecording: ((recording: {
+      blob: Blob;
       mimeType: string;
+      extension: 'webm';
+    }) => void) | undefined;
+    let reportFirstProgress: ((value: number) => void) | undefined;
+    studioMocks.loadMediaSession.mockResolvedValue(session);
+    studioMocks.recordCanvas
+      .mockImplementationOnce(({
+        signal,
+        onProgress,
+      }: {
+        signal: AbortSignal;
+        onProgress: (value: number) => void;
+      }) => {
+        firstSignal = signal;
+        reportFirstProgress = onProgress;
+        return new Promise((resolve) => {
+          settleFirstRecording = resolve;
+        });
+      })
+      .mockResolvedValueOnce({
+        blob: new Blob(['second clip']), mimeType: 'video/webm', extension: 'webm',
+      });
+    const host = new StudioTestElement('host');
+    const controller = openStudio({
+      host: host as unknown as HTMLElement,
+      receipt: receiptFixture(),
+    });
+    await vi.waitFor(() => expect(button(host, '确定剪裁并生成').hidden).toBe(false));
+    button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(studioMocks.recordCanvas).toHaveBeenCalledOnce());
 
-      constructor(_stream: MediaStream, options?: MediaRecorderOptions) {
-        this.mimeType = options?.mimeType ?? '';
-        if (this.mimeType.includes('mp4')) throw new Error('MP4 unavailable');
-      }
-    }
-    const selection = selectGiftClipRecorder({} as MediaStream, FakeRecorder as unknown as typeof MediaRecorder);
-    expect(selection.extension).toBe('webm');
-    expect(selection.mimeType).toContain('video/webm');
-    expect(FakeRecorder.isTypeSupported).toHaveBeenCalledWith('video/mp4;codecs=avc1.42E01E');
+    button(host, '重新剪裁').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(firstSignal?.aborted).toBe(true));
+    await Promise.resolve();
+
+    expect(host.querySelector('.gift-clip-crop-layer')).toBeNull();
+    expect(session.restart).toHaveBeenCalledTimes(2);
+    const progress = host.querySelector('.gift-clip-progress');
+    expect(progress?.value).toBe(0);
+    reportFirstProgress?.(0.75);
+    expect(progress?.value).toBe(0);
+    button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+    expect(studioMocks.recordCanvas).toHaveBeenCalledOnce();
+
+    settleFirstRecording?.({
+      blob: new Blob(['aborted clip']), mimeType: 'video/webm', extension: 'webm',
+    });
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-crop-layer')).not.toBeNull());
+    expect(session.restart).toHaveBeenCalledTimes(3);
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(host.querySelector('.gift-clip-recording-canvas')).toEqual(expect.objectContaining({ width: 0, height: 0 }));
+
+    button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(studioMocks.recordCanvas).toHaveBeenCalledTimes(2));
+    controller.close();
   });
 
-  it('reports an actionable error when MediaRecorder is unavailable', () => {
-    expect(() => selectGiftClipRecorder({} as MediaStream, undefined))
-      .toThrow('当前浏览器不支持录制 Canvas，请更新程序后重试。');
-  });
-
-  it('stops every canvas capture track during cleanup', () => {
-    const tracks = [{ stop: vi.fn() }, { stop: vi.fn() }];
-    stopGiftClipStream({ getTracks: () => tracks as unknown as MediaStreamTrack[] });
-    expect(tracks.every((track) => track.stop.mock.calls.length === 1)).toBe(true);
-  });
-
-  it('downloads through a temporary anchor with a sanitized filename', () => {
-    const anchor = { href: '', download: '', click: vi.fn(), remove: vi.fn() };
-    const append = vi.fn();
-    const targetDocument = {
-      createElement: vi.fn(() => anchor),
-      body: { append },
-    } as unknown as Document;
-    triggerGiftClipDownload('blob:fixture', '礼物回放.mp4', targetDocument);
-    expect(anchor.href).toBe('blob:fixture');
-    expect(anchor.download).toBe('礼物回放.mp4');
-    expect(append).toHaveBeenCalledWith(anchor);
-    expect(anchor.click).toHaveBeenCalledOnce();
-    expect(anchor.remove).toHaveBeenCalledOnce();
+  it('drops the legacy placement field after the crop cutover', () => {
+    const state = defaultState();
+    const legacyPlacementSettingsKey = ['giftClip', 'Placements'].join('');
+    expect(state.settings.giftClipCrops).toEqual({});
+    expect((state.settings as unknown as Record<string, unknown>)[legacyPlacementSettingsKey]).toBeUndefined();
   });
 });

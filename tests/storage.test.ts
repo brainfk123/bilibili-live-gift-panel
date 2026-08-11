@@ -20,7 +20,8 @@ describe('storage', () => {
     expect(s.settings.lastSeenChangelogVersion).toBe('');
     expect(s.settings.tutorialReplayMode).toBe(false);
     expect(s.settings.configExperience).toBe('simple');
-    expect(s.settings.giftClipPlacements).toEqual({});
+    expect(s.settings.giftClipCrops).toEqual({});
+    expect((s.settings as unknown as Record<string, unknown>)[['giftClip', 'Placements'].join('')]).toBeUndefined();
   });
 
   it('treats persisted settings without configExperience as advanced', async () => {
@@ -88,21 +89,103 @@ describe('storage', () => {
     expect(loaded.settings.lastSeenChangelogVersion).toBe('0.2.0');
   });
 
-  it('normalizes saved gift animation placements and drops malformed presets', async () => {
+  it('ignores legacy gift animation placements without dropping unrelated settings', async () => {
     const serverState = defaultState();
-    serverState.settings.giftClipPlacements = {
+    serverState.settings.theme = 'light';
+    const legacyPlacementSettingsKey = ['giftClip', 'Placements'].join('');
+    const legacySettings = serverState.settings as typeof serverState.settings & Record<string, unknown>;
+    legacySettings[legacyPlacementSettingsKey] = {
       'effect:1': { x: 22.5, y: -36 },
-      'media:clamped': { x: 999, y: -999 },
-      'media:invalid': { x: Number.NaN, y: 1 },
     };
     vi.stubGlobal('fetch', vi.fn(async () => Response.json(serverState)));
 
     await hydrateStateFromServer();
 
-    expect(loadState().settings.giftClipPlacements).toEqual({
-      'effect:1': { x: 22.5, y: -36 },
-      'media:clamped': { x: 160, y: -160 },
+    const settings = loadState().settings;
+    expect(settings.theme).toBe('light');
+    expect((settings as unknown as Record<string, unknown>)[legacyPlacementSettingsKey]).toBeUndefined();
+  });
+
+  it('normalizes saved gift animation crops', async () => {
+    const serverState = defaultState();
+    serverState.settings.giftClipCrops = {
+      'effect:1': { x: .1, y: .2, width: .6, height: .7 },
+      'media:clamped': { x: .9, y: -.2, width: .5, height: 2 },
+      'media:invalid': { x: Number.NaN, y: 0, width: 1, height: 1 },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(serverState)));
+
+    await hydrateStateFromServer();
+
+    expect(loadState().settings.giftClipCrops).toEqual({
+      'effect:1': { x: .1, y: .2, width: .6, height: .7 },
+      'media:clamped': { x: .5, y: 0, width: .5, height: 1 },
+      'media:invalid': { x: 0, y: 0, width: 1, height: 1 },
     });
+  });
+
+  it('applies the shared trimmed Unicode and reserved crop-key policy', async () => {
+    const serverState = defaultState();
+    const unicodeAtLimit = '🎁'.repeat(160);
+    const unicodeOverLimit = '🎁'.repeat(161);
+    serverState.settings.giftClipCrops = {
+      '  effect:trimmed  ': { x: .1, y: .2, width: .6, height: .7 },
+      [unicodeAtLimit]: { x: 0, y: 0, width: 1, height: 1 },
+      [unicodeOverLimit]: { x: 0, y: 0, width: 1, height: 1 },
+      ' constructor ': { x: 0, y: 0, width: 1, height: 1 },
+      prototype: { x: 0, y: 0, width: 1, height: 1 },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(serverState)));
+
+    await hydrateStateFromServer();
+
+    expect(loadState().settings.giftClipCrops).toEqual({
+      'effect:trimmed': { x: .1, y: .2, width: .6, height: .7 },
+      [unicodeAtLimit]: { x: 0, y: 0, width: 1, height: 1 },
+    });
+  });
+
+  it('rejects prototype keys when hydrating gift animation crops', async () => {
+    const serverState = defaultState();
+    Object.defineProperty(serverState.settings.giftClipCrops, '__proto__', {
+      enumerable: true,
+      value: { x: .1, y: .2, width: .6, height: .7 },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(serverState)));
+
+    await hydrateStateFromServer();
+
+    const crops = loadState().settings.giftClipCrops;
+    expect(Object.hasOwn(crops, '__proto__')).toBe(false);
+    expect(Object.getPrototypeOf(crops)).toBe(Object.prototype);
+  });
+
+  it('limits persisted gift animation crops to 200 entries', async () => {
+    const serverState = defaultState();
+    serverState.settings.giftClipCrops = Object.fromEntries(
+      Array.from({ length: 205 }, (_, index) => [`effect:${index}`, { x: 0, y: 0, width: 1, height: 1 }]),
+    );
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(serverState)));
+
+    await hydrateStateFromServer();
+
+    expect(Object.keys(loadState().settings.giftClipCrops)).toHaveLength(200);
+  });
+
+  it('counts accepted crop keys rather than raw input entries toward the limit', async () => {
+    const serverState = defaultState();
+    const crop = { x: 0, y: 0, width: 1, height: 1 };
+    serverState.settings.giftClipCrops = Object.fromEntries([
+      ...Array.from({ length: 200 }, (_, index) => [`effect:${index}`, crop] as const),
+      [' ', crop],
+      ['constructor', crop],
+      ['prototype', crop],
+    ]);
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(serverState)));
+
+    await hydrateStateFromServer();
+
+    expect(Object.keys(loadState().settings.giftClipCrops)).toHaveLength(200);
   });
 
   it('saves only changed settings when history is larger than the keepalive limit', async () => {
