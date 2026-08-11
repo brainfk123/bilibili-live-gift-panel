@@ -93,10 +93,78 @@ try {
   assert.ok(stageBounds, 'crop stage must have a bounding box');
   assert.ok(Math.abs(stageBounds.width - 480) <= 0.5, `expected a 480px crop stage, received ${stageBounds.width}px`);
 
+  const frame = page.locator('.gift-clip-crop-frame');
+  const visualContract = await page.evaluate(() => {
+    const requireElement = (selector) => {
+      const element = document.querySelector(selector);
+      assertElement(element, selector);
+      return element;
+    };
+    function assertElement(element, selector) {
+      if (!(element instanceof HTMLElement)) throw new Error(`${selector} missing`);
+    }
+    const style = (selector, pseudo) => getComputedStyle(requireElement(selector), pseudo);
+    return {
+      stageRadius: style('.gift-clip-stage').borderRadius,
+      viewportRadius: style('.gift-clip-crop-viewport').borderRadius,
+      frameRadius: style('.gift-clip-crop-frame').borderRadius,
+      frameCursor: style('.gift-clip-crop-frame').cursor,
+      dialogRadius: style('.gift-clip-dialog').borderRadius,
+      handleWidth: style('.gift-clip-crop-handle').width,
+      handleHeight: style('.gift-clip-crop-handle').height,
+      handleRadius: style('.gift-clip-crop-handle').borderRadius,
+      cornerTop: style('.gift-clip-crop-handle.is-nw', '::before').borderTopWidth,
+      cornerLeft: style('.gift-clip-crop-handle.is-nw', '::before').borderLeftWidth,
+      edgeWidth: style('.gift-clip-crop-handle.is-n', '::before').width,
+      edgeHeight: style('.gift-clip-crop-handle.is-n', '::before').height,
+      guidesOpacity: style('.gift-clip-crop-guides').opacity,
+    };
+  });
+
+  assert.equal(visualContract.stageRadius, '0px');
+  assert.equal(visualContract.viewportRadius, '0px');
+  assert.equal(visualContract.frameRadius, '0px');
+  assert.equal(visualContract.frameCursor, 'grab');
+  assert.ok(Number.parseFloat(visualContract.dialogRadius) > 0, 'desktop dialog must retain rounding');
+  assert.equal(visualContract.handleWidth, '28px');
+  assert.equal(visualContract.handleHeight, '28px');
+  assert.equal(visualContract.handleRadius, '0px');
+  assert.equal(visualContract.cornerTop, '2px');
+  assert.equal(visualContract.cornerLeft, '2px');
+  assert.equal(visualContract.edgeWidth, '14px');
+  assert.equal(visualContract.edgeHeight, '3px');
+  assert.equal(Number(visualContract.guidesOpacity), 0);
+
+  const handleCursors = await page.locator('.gift-clip-crop-handle').evaluateAll((handles) => (
+    Object.fromEntries(handles.map((handle) => [handle.dataset.handle, getComputedStyle(handle).cursor]))
+  ));
+  assert.deepEqual(handleCursors, {
+    n: 'ns-resize', ne: 'nesw-resize', e: 'ew-resize', se: 'nwse-resize',
+    s: 'ns-resize', sw: 'nesw-resize', w: 'ew-resize', nw: 'nwse-resize',
+  });
+
+  const frameBoundsForState = await frame.boundingBox();
+  assert.ok(frameBoundsForState, 'frame must be measurable for state checks');
+  await page.mouse.move(
+    frameBoundsForState.x + frameBoundsForState.width / 2,
+    frameBoundsForState.y + frameBoundsForState.height / 2,
+  );
+  await page.mouse.down();
+  await page.waitForFunction(() => document.querySelector('.gift-clip-crop-frame')?.classList.contains('is-moving'));
+  assert.equal(await frame.evaluate((element) => getComputedStyle(element).cursor), 'grabbing');
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('.gift-clip-crop-guides')).opacity) > 0);
+  await page.mouse.up();
+  await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('.gift-clip-crop-guides')).opacity) === 0);
+
+  await frame.focus();
+  await page.keyboard.down('ArrowLeft');
+  await page.waitForFunction(() => document.querySelector('.gift-clip-crop-frame')?.classList.contains('is-adjusting'));
+  await page.keyboard.up('ArrowLeft');
+  await page.waitForFunction(() => !document.querySelector('.gift-clip-crop-frame')?.classList.contains('is-adjusting'));
+
   await dragBy(page, page.locator('.gift-clip-crop-handle.is-w'), 96, 0);
   await waitForCropStatus(page, '512 × 360');
 
-  const frame = page.locator('.gift-clip-crop-frame');
   const beforeMove = await frame.boundingBox();
   assert.ok(beforeMove, 'crop frame must have a bounding box before movement');
   await dragBy(page, frame, stageBounds.width + 200, stageBounds.height + 200);
@@ -166,6 +234,21 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await openValidAnimation(page);
   await waitForCropStatus(page, '512 × 360');
+  const mobileVisualContract = await page.evaluate(() => {
+    const handle = document.querySelector('.gift-clip-crop-handle');
+    const stage = document.querySelector('.gift-clip-stage');
+    if (!(handle instanceof HTMLElement)) throw new Error('.gift-clip-crop-handle missing');
+    if (!(stage instanceof HTMLElement)) throw new Error('.gift-clip-stage missing');
+    const handleStyle = getComputedStyle(handle);
+    return {
+      handleWidth: handleStyle.width,
+      handleHeight: handleStyle.height,
+      stageRadius: getComputedStyle(stage).borderRadius,
+    };
+  });
+  assert.equal(mobileVisualContract.handleWidth, '32px');
+  assert.equal(mobileVisualContract.handleHeight, '32px');
+  assert.equal(mobileVisualContract.stageRadius, '0px');
   await page.screenshot({ path: resolve(artifactDir, 'gift-clip-crop-mobile.png') });
   const overflow = await page.evaluate(() => {
     const dialog = document.querySelector('.gift-clip-dialog');
