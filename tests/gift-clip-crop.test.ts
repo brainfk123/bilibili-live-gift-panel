@@ -69,6 +69,26 @@ describe('gift clip crop geometry', () => {
     expect(giftClipDisplayDeltaToSource(48, 24, { width: 480, height: 270 }, 640, 360))
       .toEqual({ x: 64, y: 32 });
   });
+
+  it('centers the full default crop when either source dimension exceeds 4096px', () => {
+    expect(giftClipCropToPixels(defaultGiftClipCrop(), 8192, 6000))
+      .toEqual({ x: 2048, y: 952, width: 4096, height: 4096 });
+    expect(giftClipCropToPixels(defaultGiftClipCrop(), 4096, 4096))
+      .toEqual({ x: 0, y: 0, width: 4096, height: 4096 });
+  });
+
+  it('caps every resized axis at 4096px while keeping the opposite edge fixed', () => {
+    const initial = giftClipCropFromPixels(
+      { x: 1000, y: 1000, width: 4000, height: 4000 },
+      8000,
+      8000,
+    );
+
+    expect(giftClipCropToPixels(updateGiftClipCrop(initial, 'se', 1000, 1000, 8000, 8000), 8000, 8000))
+      .toEqual({ x: 1000, y: 1000, width: 4096, height: 4096 });
+    expect(giftClipCropToPixels(updateGiftClipCrop(initial, 'nw', -1000, -1000, 8000, 8000), 8000, 8000))
+      .toEqual({ x: 904, y: 904, width: 4096, height: 4096 });
+  });
 });
 
 class CropTestStyle {
@@ -265,7 +285,11 @@ function cropReceiptFixture(): GiftReceipt {
   };
 }
 
-function createCropEditorHarness(initialCrop: GiftClipCrop = defaultGiftClipCrop()): CropEditorHarness {
+function createCropEditorHarness(
+  initialCrop: GiftClipCrop = defaultGiftClipCrop(),
+  sourceWidth = 640,
+  sourceHeight = 360,
+): CropEditorHarness {
   const stage = new CropTestElement('div');
   stage.clientWidth = 480;
   stage.clientHeight = 270;
@@ -274,8 +298,8 @@ function createCropEditorHarness(initialCrop: GiftClipCrop = defaultGiftClipCrop
   const changes: Array<{ crop: GiftClipCrop; pixels: GiftClipPixelRect }> = [];
   const editor = createGiftClipCropEditor({
     stage: stage as unknown as HTMLElement,
-    sourceWidth: 640,
-    sourceHeight: 360,
+    sourceWidth,
+    sourceHeight,
     initialCrop,
     receipt: cropReceiptFixture(),
     avatar: null,
@@ -409,6 +433,18 @@ describe('gift clip crop DOM editor', () => {
       crop: { x: 0, y: 0, width: 1, height: 1 },
       pixels: { x: 0, y: 0, width: 640, height: 360 },
     });
+  });
+
+  it('resets an oversized source to its centered 4096px selection', () => {
+    const initial = giftClipCropFromPixels({ x: 3000, y: 2000, width: 1000, height: 1000 }, 8192, 6000);
+    const { editor, changes } = createCropEditorHarness(initial, 8192, 6000);
+
+    editor.reset();
+
+    expect(giftClipCropToPixels(editor.getCrop(), 8192, 6000))
+      .toEqual({ x: 2048, y: 952, width: 4096, height: 4096 });
+    expect(changes.at(-1)?.pixels)
+      .toEqual({ x: 2048, y: 952, width: 4096, height: 4096 });
   });
 
   it('releases an active drag and stops preview resizing when destroyed', () => {

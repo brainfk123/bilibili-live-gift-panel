@@ -192,7 +192,7 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
     getCrop: () => ({ ...crop }),
     reset: () => {
       if (destroyed) return;
-      crop = defaultGiftClipCrop();
+      crop = constrainGiftClipCrop(defaultGiftClipCrop(), sourceWidth, sourceHeight);
       render();
     },
     destroy: () => {
