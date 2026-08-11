@@ -10,20 +10,97 @@ import {
 } from '../src/ui/config/gift-clip-media';
 
 class FakeMediaHost {
-  readonly children: FakeImage[] = [];
+  readonly children: Array<FakeImage | FakeVideo> = [];
 
-  append(...nodes: FakeImage[]): void {
+  append(...nodes: Array<FakeImage | FakeVideo>): void {
     for (const node of nodes) {
       node.parentHost = this;
       this.children.push(node);
     }
   }
 
-  remove(node: FakeImage): void {
+  remove(node: FakeImage | FakeVideo): void {
     const index = this.children.indexOf(node);
     if (index >= 0) this.children.splice(index, 1);
     node.parentHost = null;
   }
+}
+
+class FakeVideo {
+  static readonly instances: FakeVideo[] = [];
+
+  muted = false;
+  playsInline = false;
+  preload = '';
+  loop = false;
+  videoWidth = 1088;
+  videoHeight = 1280;
+  currentTime = 0;
+  paused = true;
+  parentHost: FakeMediaHost | null = null;
+  playCalls = 0;
+  private source = '';
+  private readonly listeners = new Map<string, Set<EventListener>>();
+
+  constructor() {
+    FakeVideo.instances.push(this);
+  }
+
+  set src(value: string) {
+    this.source = value;
+  }
+
+  get src(): string {
+    return this.source;
+  }
+
+  addEventListener(type: string, listener: EventListener): void {
+    const listeners = this.listeners.get(type) ?? new Set<EventListener>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: EventListener): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  load(): void {
+    if (!this.source) return;
+    queueMicrotask(() => {
+      for (const listener of this.listeners.get('loadedmetadata') ?? []) listener({} as Event);
+    });
+  }
+
+  play(): Promise<void> {
+    this.playCalls += 1;
+    this.paused = false;
+    return Promise.resolve();
+  }
+
+  pause(): void {
+    this.paused = true;
+  }
+
+  removeAttribute(name: string): void {
+    if (name === 'src') this.source = '';
+  }
+
+  remove(): void {
+    this.parentHost?.remove(this);
+  }
+
+  finishPlaybackPass(): void {
+    this.currentTime = 13;
+    if (this.loop) this.currentTime = 0;
+    else this.paused = true;
+  }
+}
+
+class FakeCanvas {
+  width = 0;
+  height = 0;
+
+  remove(): void {}
 }
 
 class FakeImage {
@@ -109,9 +186,15 @@ describe('gift clip media', () => {
 
   beforeEach(() => {
     FakeImage.instances.length = 0;
+    FakeVideo.instances.length = 0;
     FakeImage.holdAnimationLoads = false;
     revokedURLs = [];
     vi.stubGlobal('Image', FakeImage as unknown as typeof Image);
+    vi.stubGlobal('document', {
+      createElement: (tagName: string) => (
+        tagName === 'video' ? new FakeVideo() : new FakeCanvas()
+      ),
+    } as unknown as Document);
     vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:gift-animation');
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation((url) => revokedURLs.push(url));
     vi.stubGlobal('fetch', vi.fn(async () => new Response(new Blob(['RIFF-not-a-gif']))));
@@ -251,5 +334,32 @@ describe('gift clip media', () => {
 
     expect(session.sourceLabel).toBe('短动画回退');
     expect(session.visualAt(0)?.source).toBe(host.children[0]);
+  });
+
+  it('keeps complete-effect playback looping across editor and recording restarts', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('kind=effect-layout')) return Response.json(layout);
+      if (url.includes('kind=effect-video')) return new Response(new Blob(['effect-video']));
+      return new Response(null, { status: 404 });
+    }));
+    const host = new FakeMediaHost();
+    const session = await loadGiftClipMediaSession(receipt({
+      mp4: 'effect.mp4',
+      mp4Json: 'effect.json',
+      durationMs: 13_000,
+    }), host as unknown as HTMLElement);
+    const video = FakeVideo.instances[0];
+
+    await session.restart();
+    video.finishPlaybackPass();
+    expect({ loop: video.loop, paused: video.paused, currentTime: video.currentTime })
+      .toEqual({ loop: true, paused: false, currentTime: 0 });
+
+    await session.restart();
+    expect(video.playCalls).toBe(2);
+    session.dispose();
+    expect(host.children).toEqual([]);
+    expect(video.src).toBe('');
   });
 });

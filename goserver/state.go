@@ -727,7 +727,7 @@ func normalizeGiftClipCrops(input map[string]giftClipCropState) map[string]giftC
 	crops := make(map[string]giftClipCropState, minInt(len(input), 200))
 	for key, crop := range input {
 		key = strings.TrimSpace(key)
-		if key == "" || utf8.RuneCountInString(key) > 160 {
+		if key == "" || utf8.RuneCountInString(key) > 160 || isReservedGiftClipCropKey(key) {
 			continue
 		}
 		if math.IsNaN(crop.X) || math.IsInf(crop.X, 0) || math.IsNaN(crop.Y) || math.IsInf(crop.Y, 0) || math.IsNaN(crop.Width) || math.IsInf(crop.Width, 0) || math.IsNaN(crop.Height) || math.IsInf(crop.Height, 0) || crop.Width <= 0 || crop.Height <= 0 {
@@ -744,6 +744,15 @@ func normalizeGiftClipCrops(input map[string]giftClipCropState) map[string]giftC
 		}
 	}
 	return crops
+}
+
+func isReservedGiftClipCropKey(key string) bool {
+	switch key {
+	case "__proto__", "constructor", "prototype":
+		return true
+	default:
+		return false
+	}
 }
 
 func isDisplayThemeID(value string) bool {

@@ -3644,14 +3644,6 @@ body.config-mode::-webkit-scrollbar-corner,
   height: 100%;
   object-fit: contain;
 }
-.config-root .gift-clip-canvas.is-positioning {
-  cursor: grab;
-  touch-action: none;
-  user-select: none;
-  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
-  outline-offset: -2px;
-}
-.config-root .gift-clip-canvas.is-positioning.is-dragging { cursor: grabbing; }
 .config-root .gift-clip-canvas[hidden],
 .config-root .gift-clip-video[hidden] { display: none; }
 .config-root .gift-clip-crop-layer {

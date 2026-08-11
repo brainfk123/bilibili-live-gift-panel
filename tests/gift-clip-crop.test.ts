@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { GiftClipCrop } from '../src/types';
+import type { GiftClipCrop, GiftReceipt } from '../src/types';
 import { createGiftClipCropEditor, type GiftClipCropEditor } from '../src/ui/config/gift-clip-crop-editor';
 import {
   defaultGiftClipCrop,
@@ -39,6 +39,18 @@ describe('gift clip crop geometry', () => {
       .toEqual({ x: 200, y: 150, width: 200, height: 150 });
   });
 
+  it('rounds normalized origins and dimensions independently', () => {
+    expect(giftClipCropToPixels({ x: .005, y: .005, width: .65, height: .65 }, 101, 101))
+      .toEqual({ x: 1, y: 1, width: 66, height: 66 });
+  });
+
+  it('shifts or expands the independently rounded rectangle at source edges', () => {
+    expect(giftClipCropToPixels({ x: .5, y: .5, width: .5, height: .5 }, 201, 201))
+      .toEqual({ x: 100, y: 100, width: 101, height: 101 });
+    expect(giftClipCropToPixels({ x: .99, y: .99, width: .01, height: .01 }, 101, 101))
+      .toEqual({ x: 37, y: 37, width: 64, height: 64 });
+  });
+
   it('keeps move and resize operations in bounds with a 64px minimum', () => {
     const tiny = giftClipCropFromPixels({ x: 100, y: 100, width: 80, height: 80 }, 400, 300);
     expect(giftClipCropToPixels(updateGiftClipCrop(tiny, 'se', -999, -999, 400, 300), 400, 300))
@@ -69,6 +81,7 @@ class CropTestStyle {
 
 class CropTestElement {
   className = '';
+  textContent = '';
   dataset: Record<string, string> = {};
   children: CropTestElement[] = [];
   parent: CropTestElement | null = null;
@@ -77,6 +90,8 @@ class CropTestElement {
   type = '';
   tabIndex = -1;
   inert = false;
+  alt = '';
+  draggable = true;
   clientWidth = 0;
   clientHeight = 0;
   rectWidth: number | null = null;
@@ -235,25 +250,42 @@ interface CropEditorHarness {
   changes: Array<{ crop: GiftClipCrop; pixels: GiftClipPixelRect }>;
 }
 
+function cropReceiptFixture(): GiftReceipt {
+  return {
+    id: 'receipt-1',
+    time: 1_700_000_000,
+    giftId: 1,
+    giftName: '测试礼物',
+    num: 2,
+    price: 100,
+    totalCoin: 200,
+    coinType: 'gold',
+    uname: '测试观众',
+    effects: [],
+  };
+}
+
 function createCropEditorHarness(initialCrop: GiftClipCrop = defaultGiftClipCrop()): CropEditorHarness {
   const stage = new CropTestElement('div');
   stage.clientWidth = 480;
   stage.clientHeight = 270;
   stage.rectWidth = 960;
   stage.rectHeight = 540;
-  const infoPreview = new CropTestElement('div');
   const changes: Array<{ crop: GiftClipCrop; pixels: GiftClipPixelRect }> = [];
   const editor = createGiftClipCropEditor({
     stage: stage as unknown as HTMLElement,
     sourceWidth: 640,
     sourceHeight: 360,
     initialCrop,
-    infoPreview: infoPreview as unknown as HTMLElement,
+    receipt: cropReceiptFixture(),
+    avatar: null,
     onChange: (crop, pixels) => { changes.push({ crop, pixels }); },
   });
   const layer = editor.element as unknown as CropTestElement;
   const frame = layer.querySelector('.gift-clip-crop-frame');
   if (!frame) throw new Error('crop frame was not created');
+  const infoPreview = layer.querySelector('.gift-clip-crop-info-preview');
+  if (!infoPreview) throw new Error('information preview was not created');
   return { editor, stage, layer, frame, infoPreview, changes };
 }
 
@@ -270,11 +302,15 @@ describe('gift clip crop DOM editor', () => {
     vi.unstubAllGlobals();
   });
 
-  it('creates eight semantic handles and a noninteractive scaled preview', () => {
+  it('owns the detailed information preview behind the editor interface', () => {
     const { layer, frame, infoPreview } = createCropEditorHarness(
       giftClipCropFromPixels({ x: 160, y: 90, width: 320, height: 180 }, 640, 360),
     );
     const handleElements = layer.querySelectorAll('.gift-clip-crop-handle');
+    const infoBar = infoPreview.querySelector('.gift-clip-info-bar');
+    const avatarFallback = infoPreview.querySelector('.gift-clip-info-avatar-fallback');
+    const name = infoPreview.querySelector('.gift-clip-info-name');
+    const gift = infoPreview.querySelector('.gift-clip-info-gift');
 
     expect(handleElements.map((handle) => handle.dataset.handle)).toEqual(['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw']);
     expect(handleElements.every((handle) => handle.tagName === 'button' && handle.type === 'button')).toBe(true);
@@ -283,6 +319,14 @@ describe('gift clip crop DOM editor', () => {
     expect(infoPreview.style.pointerEvents).toBe('none');
     expect(infoPreview.inert).toBe(true);
     expect(infoPreview.style.transform).toBe('scale(0.5)');
+    expect(infoPreview.style.width).toBe('480px');
+    expect(infoPreview.style.height).toBe('110px');
+    expect(infoBar?.style.width).toBe('444px');
+    expect(infoBar?.style.height).toBe('90px');
+    expect(infoBar?.style.borderRadius).toBe('22px');
+    expect(avatarFallback?.textContent).toBe('测');
+    expect(name?.textContent).toBe('测试观众');
+    expect(gift?.textContent).toBe('赠送 测试礼物 × 2');
     expect(frame.style.left).toBe('25%');
   });
 

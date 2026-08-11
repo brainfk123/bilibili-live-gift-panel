@@ -124,6 +124,27 @@ describe('storage', () => {
     });
   });
 
+  it('applies the shared trimmed Unicode and reserved crop-key policy', async () => {
+    const serverState = defaultState();
+    const unicodeAtLimit = '🎁'.repeat(160);
+    const unicodeOverLimit = '🎁'.repeat(161);
+    serverState.settings.giftClipCrops = {
+      '  effect:trimmed  ': { x: .1, y: .2, width: .6, height: .7 },
+      [unicodeAtLimit]: { x: 0, y: 0, width: 1, height: 1 },
+      [unicodeOverLimit]: { x: 0, y: 0, width: 1, height: 1 },
+      ' constructor ': { x: 0, y: 0, width: 1, height: 1 },
+      prototype: { x: 0, y: 0, width: 1, height: 1 },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(serverState)));
+
+    await hydrateStateFromServer();
+
+    expect(loadState().settings.giftClipCrops).toEqual({
+      'effect:trimmed': { x: .1, y: .2, width: .6, height: .7 },
+      [unicodeAtLimit]: { x: 0, y: 0, width: 1, height: 1 },
+    });
+  });
+
   it('rejects prototype keys when hydrating gift animation crops', async () => {
     const serverState = defaultState();
     Object.defineProperty(serverState.settings.giftClipCrops, '__proto__', {
@@ -144,6 +165,22 @@ describe('storage', () => {
     serverState.settings.giftClipCrops = Object.fromEntries(
       Array.from({ length: 205 }, (_, index) => [`effect:${index}`, { x: 0, y: 0, width: 1, height: 1 }]),
     );
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(serverState)));
+
+    await hydrateStateFromServer();
+
+    expect(Object.keys(loadState().settings.giftClipCrops)).toHaveLength(200);
+  });
+
+  it('counts accepted crop keys rather than raw input entries toward the limit', async () => {
+    const serverState = defaultState();
+    const crop = { x: 0, y: 0, width: 1, height: 1 };
+    serverState.settings.giftClipCrops = Object.fromEntries([
+      ...Array.from({ length: 200 }, (_, index) => [`effect:${index}`, crop] as const),
+      [' ', crop],
+      ['constructor', crop],
+      ['prototype', crop],
+    ]);
     vi.stubGlobal('fetch', vi.fn(async () => Response.json(serverState)));
 
     await hydrateStateFromServer();

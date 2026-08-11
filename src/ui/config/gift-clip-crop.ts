@@ -41,11 +41,12 @@ export function constrainGiftClipCrop(crop: GiftClipCrop, sourceWidth: number, s
 
 export function giftClipCropToPixels(crop: GiftClipCrop, sourceWidth: number, sourceHeight: number): GiftClipPixelRect {
   const normalized = normalizeGiftClipCrop(crop);
-  const left = Math.round(normalized.x * sourceWidth);
-  const top = Math.round(normalized.y * sourceHeight);
-  const right = Math.round((normalized.x + normalized.width) * sourceWidth);
-  const bottom = Math.round((normalized.y + normalized.height) * sourceHeight);
-  return constrainPixelRect({ x: left, y: top, width: right - left, height: bottom - top }, sourceWidth, sourceHeight);
+  return constrainPixelRect({
+    x: Math.round(normalized.x * sourceWidth),
+    y: Math.round(normalized.y * sourceHeight),
+    width: Math.round(normalized.width * sourceWidth),
+    height: Math.round(normalized.height * sourceHeight),
+  }, sourceWidth, sourceHeight);
 }
 
 export function giftClipCropFromPixels(rect: GiftClipPixelRect, sourceWidth: number, sourceHeight: number): GiftClipCrop {
@@ -109,23 +110,24 @@ function constrainPixelRect(rect: GiftClipPixelRect, sourceWidth: number, source
   const height = Math.max(0, Math.round(sourceHeight));
   if (!width || !height) return { x: 0, y: 0, width, height };
 
-  const minimumWidth = Math.min(MIN_GIFT_CLIP_SOURCE_SIZE, width);
-  const minimumHeight = Math.min(MIN_GIFT_CLIP_SOURCE_SIZE, height);
-  let left = clamp(Math.round(rect.x), 0, width);
-  let top = clamp(Math.round(rect.y), 0, height);
-  let right = clamp(Math.round(rect.x + rect.width), 0, width);
-  let bottom = clamp(Math.round(rect.y + rect.height), 0, height);
-  if (right < left) [left, right] = [right, left];
-  if (bottom < top) [top, bottom] = [bottom, top];
-  if (right - left < minimumWidth) {
-    right = Math.min(width, left + minimumWidth);
-    left = right - minimumWidth;
+  const horizontal = constrainPixelAxis(rect.x, rect.width, width);
+  const vertical = constrainPixelAxis(rect.y, rect.height, height);
+  return { x: horizontal.origin, y: vertical.origin, width: horizontal.size, height: vertical.size };
+}
+
+function constrainPixelAxis(origin: number, size: number, bound: number): { origin: number; size: number } {
+  let roundedOrigin = Math.round(Number.isFinite(origin) ? origin : 0);
+  let roundedSize = Math.round(Number.isFinite(size) ? size : 0);
+  if (roundedSize < 0) {
+    roundedOrigin += roundedSize;
+    roundedSize = Math.abs(roundedSize);
   }
-  if (bottom - top < minimumHeight) {
-    bottom = Math.min(height, top + minimumHeight);
-    top = bottom - minimumHeight;
-  }
-  return { x: left, y: top, width: right - left, height: bottom - top };
+  const minimum = Math.min(MIN_GIFT_CLIP_SOURCE_SIZE, bound);
+  const constrainedSize = clamp(roundedSize, minimum, bound);
+  return {
+    origin: clamp(roundedOrigin, 0, bound - constrainedSize),
+    size: constrainedSize,
+  };
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {

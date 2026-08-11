@@ -1,28 +1,16 @@
 import type { GiftReceipt } from '../../types';
 import type { GiftClipPixelRect } from './gift-clip-crop';
+import {
+  GIFT_CLIP_INFO_BAR_DESIGN,
+  giftClipInfoBarLayout,
+} from './gift-clip-info-bar';
 import type { GiftClipVisual } from './gift-clip-media';
+
+export { giftClipInfoBarLayout } from './gift-clip-info-bar';
 
 export function prepareGiftClipOutputCanvas(canvas: HTMLCanvasElement, crop: GiftClipPixelRect): void {
   canvas.width = crop.width;
   canvas.height = crop.height;
-}
-
-export function giftClipInfoBarLayout(outputWidth: number, outputHeight: number) {
-  const scale = outputWidth / 480;
-  return {
-    scale,
-    x: 18 * scale,
-    y: outputHeight - 110 * scale,
-    width: 444 * scale,
-    height: 90 * scale,
-    radius: 22 * scale,
-    avatarX: 67 * scale,
-    avatarY: outputHeight - 65 * scale,
-    avatarRadius: 30 * scale,
-    textX: 114 * scale,
-    nameY: outputHeight - 71 * scale,
-    giftY: outputHeight - 44 * scale,
-  };
 }
 
 export function drawGiftClipSourcePreview(
@@ -51,14 +39,15 @@ export function drawGiftClipOutputFrame(
   }
 
   const layout = giftClipInfoBarLayout(outputWidth, outputHeight);
+  const design = GIFT_CLIP_INFO_BAR_DESIGN;
   const barGradient = context.createLinearGradient(layout.x, layout.y, layout.x + layout.width, layout.y + layout.height);
-  barGradient.addColorStop(0, 'rgba(87, 39, 101, .76)');
-  barGradient.addColorStop(1, 'rgba(224, 68, 129, .76)');
+  barGradient.addColorStop(0, design.gradientStart);
+  barGradient.addColorStop(1, design.gradientEnd);
   roundedRect(context, layout.x, layout.y, layout.width, layout.height, layout.radius);
   context.fillStyle = barGradient;
   context.fill();
-  context.strokeStyle = 'rgba(255,255,255,.24)';
-  context.lineWidth = 1.5 * layout.scale;
+  context.strokeStyle = design.barBorderColor;
+  context.lineWidth = layout.borderWidth;
   context.stroke();
 
   context.save();
@@ -81,32 +70,31 @@ export function drawGiftClipOutputFrame(
     );
   } else {
     const avatarSide = layout.avatarRadius * 2;
-    context.fillStyle = '#2a2132';
+    context.fillStyle = design.fallbackBackground;
     context.fillRect(layout.avatarX - layout.avatarRadius, layout.avatarY - layout.avatarRadius, avatarSide, avatarSide);
-    context.fillStyle = '#ff85b1';
+    context.fillStyle = design.fallbackColor;
     context.textAlign = 'center';
     context.textBaseline = 'middle';
-    context.font = `700 ${24 * layout.scale}px system-ui, sans-serif`;
+    context.font = `700 ${layout.fallbackFontSize}px system-ui, sans-serif`;
     context.fillText((receipt.uname || '观').slice(0, 1), layout.avatarX, layout.avatarY);
   }
   context.restore();
-  context.strokeStyle = 'rgba(255,255,255,.78)';
-  context.lineWidth = 2 * layout.scale;
+  context.strokeStyle = design.avatarBorderColor;
+  context.lineWidth = layout.avatarBorderWidth;
   context.beginPath();
   context.arc(layout.avatarX, layout.avatarY, layout.avatarRadius, 0, Math.PI * 2);
   context.stroke();
 
-  const maxTextWidth = 302 * layout.scale;
-  const nameFont = `700 ${20 * layout.scale}px system-ui, sans-serif`;
-  const giftFont = `500 ${17 * layout.scale}px system-ui, sans-serif`;
-  const name = truncateCanvasText(context, receipt.uname?.trim() || '匿名观众', maxTextWidth, nameFont);
-  const giftText = truncateCanvasText(context, `赠送 ${receipt.giftName || '礼物'} × ${Math.max(1, receipt.num || 1)}`, maxTextWidth, giftFont);
+  const nameFont = `700 ${layout.nameFontSize}px system-ui, sans-serif`;
+  const giftFont = `500 ${layout.giftFontSize}px system-ui, sans-serif`;
+  const name = truncateCanvasText(context, receipt.uname?.trim() || '匿名观众', layout.maxTextWidth, nameFont);
+  const giftText = truncateCanvasText(context, `赠送 ${receipt.giftName || '礼物'} × ${Math.max(1, receipt.num || 1)}`, layout.maxTextWidth, giftFont);
   context.textAlign = 'left';
   context.textBaseline = 'alphabetic';
   context.fillStyle = '#ffffff';
   context.font = nameFont;
   context.fillText(name, layout.textX, layout.nameY);
-  context.fillStyle = 'rgba(255,255,255,.82)';
+  context.fillStyle = design.giftTextColor;
   context.font = giftFont;
   context.fillText(giftText, layout.textX, layout.giftY);
 }

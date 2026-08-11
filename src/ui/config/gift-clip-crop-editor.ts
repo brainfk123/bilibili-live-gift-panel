@@ -1,4 +1,4 @@
-import type { GiftClipCrop } from '../../types';
+import type { GiftClipCrop, GiftReceipt } from '../../types';
 import {
   constrainGiftClipCrop,
   defaultGiftClipCrop,
@@ -8,6 +8,7 @@ import {
   type GiftClipCropHandle,
   type GiftClipPixelRect,
 } from './gift-clip-crop';
+import { GIFT_CLIP_INFO_BAR_DESIGN } from './gift-clip-info-bar';
 
 export interface GiftClipCropEditor {
   readonly element: HTMLElement;
@@ -21,7 +22,8 @@ interface GiftClipCropEditorOptions {
   sourceWidth: number;
   sourceHeight: number;
   initialCrop: GiftClipCrop;
-  infoPreview: HTMLElement;
+  receipt: Pick<GiftReceipt, 'uname' | 'giftName' | 'num'>;
+  avatar: HTMLImageElement | null;
   onChange: (crop: GiftClipCrop, pixels: GiftClipPixelRect) => void;
 }
 
@@ -50,7 +52,6 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
     stage,
     sourceWidth,
     sourceHeight,
-    infoPreview,
     onChange,
   } = options;
   let crop = constrainGiftClipCrop(options.initialCrop, sourceWidth, sourceHeight);
@@ -65,7 +66,7 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
   frame.setAttribute('aria-label', '移动剪裁区域，使用方向键调整');
   const viewport = document.createElement('div');
   viewport.className = 'gift-clip-crop-viewport';
-  infoPreview.classList.add('gift-clip-crop-info-preview');
+  const infoPreview = createGiftClipInfoPreview(options.receipt, options.avatar);
   infoPreview.style.pointerEvents = 'none';
   infoPreview.inert = true;
   infoPreview.setAttribute('aria-hidden', 'true');
@@ -211,4 +212,92 @@ export function createGiftClipCropEditor(options: GiftClipCropEditorOptions): Gi
       layer.remove();
     },
   };
+}
+
+function createGiftClipInfoPreview(
+  receipt: Pick<GiftReceipt, 'uname' | 'giftName' | 'num'>,
+  avatar: HTMLImageElement | null,
+): HTMLElement {
+  const design = GIFT_CLIP_INFO_BAR_DESIGN;
+  const preview = document.createElement('div');
+  preview.className = 'gift-clip-crop-info-preview';
+  preview.style.boxSizing = 'border-box';
+  preview.style.width = `${design.baselineWidth}px`;
+  preview.style.height = `${design.containerHeight}px`;
+  preview.style.padding = `0 ${design.horizontalInset}px ${design.bottomInset}px`;
+
+  const bar = document.createElement('div');
+  bar.className = 'gift-clip-info-bar';
+  bar.style.display = 'flex';
+  bar.style.alignItems = 'center';
+  bar.style.gap = `${design.barGap}px`;
+  bar.style.boxSizing = 'border-box';
+  bar.style.width = `${design.barWidth}px`;
+  bar.style.height = `${design.barHeight}px`;
+  bar.style.border = `${design.barBorderWidth}px solid ${design.barBorderColor}`;
+  bar.style.borderRadius = `${design.barRadius}px`;
+  bar.style.padding = `${design.barPaddingY}px ${design.barPaddingX}px`;
+  bar.style.background = `linear-gradient(135deg,${design.gradientStart},${design.gradientEnd})`;
+  bar.style.color = '#fff';
+  bar.style.fontFamily = 'system-ui, sans-serif';
+
+  const avatarFrame = document.createElement('span');
+  avatarFrame.className = 'gift-clip-info-avatar';
+  avatarFrame.style.display = 'block';
+  avatarFrame.style.flex = `0 0 ${design.avatarDiameter}px`;
+  avatarFrame.style.width = `${design.avatarDiameter}px`;
+  avatarFrame.style.height = `${design.avatarDiameter}px`;
+  avatarFrame.style.overflow = 'hidden';
+  avatarFrame.style.border = `${design.avatarBorderWidth}px solid ${design.avatarBorderColor}`;
+  avatarFrame.style.borderRadius = '50%';
+  avatarFrame.style.boxSizing = 'border-box';
+  if (avatar) {
+    avatar.alt = '';
+    avatar.draggable = false;
+    avatar.style.display = 'block';
+    avatar.style.width = `${design.avatarDiameter}px`;
+    avatar.style.height = `${design.avatarDiameter}px`;
+    avatar.style.objectFit = 'cover';
+    avatarFrame.append(avatar);
+  } else {
+    const fallback = document.createElement('span');
+    fallback.className = 'gift-clip-info-avatar-fallback';
+    fallback.textContent = (receipt.uname?.trim() || '观').slice(0, 1);
+    fallback.style.display = 'grid';
+    fallback.style.width = `${design.avatarDiameter}px`;
+    fallback.style.height = `${design.avatarDiameter}px`;
+    fallback.style.placeItems = 'center';
+    fallback.style.background = design.fallbackBackground;
+    fallback.style.color = design.fallbackColor;
+    fallback.style.font = `700 ${design.fallbackFontSize}px system-ui, sans-serif`;
+    avatarFrame.append(fallback);
+  }
+
+  const text = document.createElement('span');
+  text.className = 'gift-clip-info-text';
+  text.style.display = 'grid';
+  text.style.minWidth = '0';
+  text.style.gap = '4px';
+  text.style.textAlign = 'left';
+  const name = document.createElement('strong');
+  name.className = 'gift-clip-info-name';
+  name.textContent = receipt.uname?.trim() || '匿名观众';
+  name.style.overflow = 'hidden';
+  name.style.fontSize = `${design.nameFontSize}px`;
+  name.style.lineHeight = '1.2';
+  name.style.textOverflow = 'ellipsis';
+  name.style.whiteSpace = 'nowrap';
+  const gift = document.createElement('span');
+  gift.className = 'gift-clip-info-gift';
+  gift.textContent = `赠送 ${receipt.giftName || '礼物'} × ${Math.max(1, receipt.num || 1)}`;
+  gift.style.overflow = 'hidden';
+  gift.style.color = design.giftTextColor;
+  gift.style.fontSize = `${design.giftFontSize}px`;
+  gift.style.lineHeight = '1.2';
+  gift.style.textOverflow = 'ellipsis';
+  gift.style.whiteSpace = 'nowrap';
+  text.append(name, gift);
+  bar.append(avatarFrame, text);
+  preview.append(bar);
+  return preview;
 }

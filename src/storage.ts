@@ -404,11 +404,17 @@ function normalizeState(parsed: Partial<AppState>): AppState {
 function normalizeGiftClipCrops(value: unknown): AppState['settings']['giftClipCrops'] {
   if (!isObjectRecord(value)) return {};
   const crops: AppState['settings']['giftClipCrops'] = {};
-  for (const [key, raw] of Object.entries(value).slice(-200)) {
-    if (!key.trim() || key.length > 160 || ['__proto__', 'constructor', 'prototype'].includes(key)) continue;
+  for (const [rawKey, raw] of Object.entries(value)) {
+    const key = rawKey.trim();
+    if (!key || Array.from(key).length > 160 || isReservedGiftClipCropKey(key)) continue;
     crops[key] = normalizeGiftClipCrop(raw);
+    if (Object.keys(crops).length === 200) break;
   }
   return crops;
+}
+
+function isReservedGiftClipCropKey(key: string): boolean {
+  return key === '__proto__' || key === 'constructor' || key === 'prototype';
 }
 
 function normalizeSimplePlay(input: AppState['simplePlay'] | undefined, attributeIds: ReadonlySet<string>): SimplePlay | undefined {

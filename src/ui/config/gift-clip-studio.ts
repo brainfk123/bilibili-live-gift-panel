@@ -178,6 +178,12 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
     session?.dispose();
     session = null;
   };
+  const releaseCanvasBackingStores = (): void => {
+    sourceCanvas.width = 0;
+    sourceCanvas.height = 0;
+    recordingCanvas.width = 0;
+    recordingCanvas.height = 0;
+  };
   const hideActions = (): void => {
     resetButton.hidden = true;
     confirmButton.hidden = true;
@@ -189,6 +195,9 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
     if (closed) return;
     stopEditorPreview();
     destroyEditor();
+    clearPreview();
+    disposeSession();
+    releaseCanvasBackingStores();
     progress.value = 0;
     progress.hidden = true;
     resetButton.hidden = true;
@@ -255,7 +264,8 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
         sourceWidth: activeSession.width,
         sourceHeight: activeSession.height,
         initialCrop: crop,
-        infoPreview: createGiftClipInfoPreview(receipt, activeSession.avatar),
+        receipt,
+        avatar: activeSession.avatar,
         onChange: (_nextCrop, pixels) => {
           status.textContent = `剪裁 ${pixels.width} × ${pixels.height} · 成片按原始像素输出`;
         },
@@ -297,6 +307,8 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
       if (!isGiftClipSourceSizeSupported(loaded.width, loaded.height)) {
         status.textContent = `动画尺寸过小，无法制作回放（${loaded.width} × ${loaded.height}）`;
         status.classList.add('is-error');
+        disposeSession();
+        releaseCanvasBackingStores();
         secondaryAction = 'retry';
         reeditButton.textContent = '重试';
         reeditButton.hidden = false;
@@ -385,6 +397,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
       }
     })();
     const task = recordingRun.finally(() => {
+      releaseCanvasBackingStores();
       if (recordingTask === task) recordingTask = null;
       if (recordingAbort === controller) recordingAbort = null;
     });
@@ -402,10 +415,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
     destroyEditor();
     disposeSession();
     clearPreview();
-    sourceCanvas.width = 0;
-    sourceCanvas.height = 0;
-    recordingCanvas.width = 0;
-    recordingCanvas.height = 0;
+    releaseCanvasBackingStores();
     globalThis.removeEventListener('keydown', onKeyDown);
     overlay.removeEventListener('click', onOverlayClick);
     closeButton.onclick = null;
@@ -448,45 +458,6 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
   void loadSource();
   closeButton.focus();
   return { close };
-}
-
-function createGiftClipInfoPreview(
-  receipt: GiftReceipt,
-  avatar: HTMLImageElement | null,
-): HTMLElement {
-  const avatarNode = avatar ?? el('span', {
-    text: (receipt.uname?.trim() || '观').slice(0, 1),
-    style: 'display:grid;width:60px;height:60px;place-items:center;background:#2a2132;color:#ff85b1;font:700 24px system-ui,sans-serif;',
-  });
-  if (avatar) {
-    avatar.alt = '';
-    avatar.draggable = false;
-    avatar.style.cssText = 'display:block;width:60px;height:60px;object-fit:cover;';
-  }
-  const avatarFrame = el('span', {
-    style: 'display:block;flex:0 0 60px;width:60px;height:60px;overflow:hidden;border:2px solid rgba(255,255,255,.78);border-radius:50%;box-sizing:border-box;',
-  }, [avatarNode]);
-  return el('div', {
-    style: 'box-sizing:border-box;width:480px;height:110px;padding:0 18px 20px;',
-  }, [
-    el('div', {
-      style: 'display:flex;align-items:center;gap:16px;box-sizing:border-box;width:444px;height:90px;border:1.5px solid rgba(255,255,255,.24);border-radius:22px;padding:13px 18px;background:linear-gradient(135deg,rgba(87,39,101,.76),rgba(224,68,129,.76));color:#fff;font-family:system-ui,sans-serif;',
-    }, [
-      avatarFrame,
-      el('span', {
-        style: 'display:grid;min-width:0;gap:4px;text-align:left;',
-      }, [
-        el('strong', {
-          text: receipt.uname?.trim() || '匿名观众',
-          style: 'overflow:hidden;font-size:20px;line-height:1.2;text-overflow:ellipsis;white-space:nowrap;',
-        }),
-        el('span', {
-          text: `赠送 ${receipt.giftName || '礼物'} × ${Math.max(1, receipt.num || 1)}`,
-          style: 'overflow:hidden;color:rgba(255,255,255,.82);font-size:17px;line-height:1.2;text-overflow:ellipsis;white-space:nowrap;',
-        }),
-      ]),
-    ]),
-  ]);
 }
 
 function formatGiftClipBytes(bytes: number): string {

@@ -276,6 +276,7 @@ async function loadGiftEffect(
   const video = resources.ownVideo(document.createElement('video'));
   video.muted = true;
   video.playsInline = true;
+  video.loop = true;
   video.preload = 'auto';
   sourceMediaHost.append(video);
   video.src = sourceURL;

@@ -321,7 +321,7 @@ describe('gift clip studio', () => {
     expect(removeGlobalListener).toHaveBeenCalledOnce();
   });
 
-  it('shows the exact small-source gate and retries by replacing the media session', async () => {
+  it('shows the exact small-source gate, disposes it immediately, and retries with a fresh session', async () => {
     const first = mediaSessionFixture(63, 120);
     const second = mediaSessionFixture(63, 120);
     studioMocks.loadMediaSession.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
@@ -340,12 +340,39 @@ describe('gift clip studio', () => {
     expect(button(host, '保存视频').hidden).toBe(true);
     const retry = button(host, '重试');
     expect(retry.hidden).toBe(false);
+    expect(first.dispose).toHaveBeenCalledOnce();
 
     retry.onclick?.({} as MouseEvent);
-    await vi.waitFor(() => expect(studioMocks.loadMediaSession).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(second.dispose).toHaveBeenCalledOnce());
 
     expect(first.dispose).toHaveBeenCalledOnce();
+    controller.close();
+    expect(second.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('disposes a session whose editor restart rejects and retries with a fresh session', async () => {
+    const first = mediaSessionFixture();
+    first.restart = vi.fn(async () => { throw new Error('礼物动画素材读取失败，请稍后重试。'); });
+    const second = mediaSessionFixture();
+    studioMocks.loadMediaSession.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const host = new StudioTestElement('host');
+    const controller = openStudio({
+      host: host as unknown as HTMLElement,
+      receipt: receiptFixture(),
+    });
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-status')?.textContent)
+      .toBe('礼物动画素材读取失败，请稍后重试。'));
+
+    const sourceCanvas = host.querySelector('.gift-clip-canvas');
+    expect(first.dispose).toHaveBeenCalledOnce();
+    expect({ width: sourceCanvas?.width, height: sourceCanvas?.height }).toEqual({ width: 0, height: 0 });
+
+    button(host, '重试').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-crop-layer')).not.toBeNull());
+    expect(studioMocks.loadMediaSession).toHaveBeenCalledTimes(2);
     expect(second.dispose).not.toHaveBeenCalled();
+    expect({ width: sourceCanvas?.width, height: sourceCanvas?.height }).toEqual({ width: 640, height: 360 });
+
     controller.close();
     expect(second.dispose).toHaveBeenCalledOnce();
   });
@@ -386,6 +413,69 @@ describe('gift clip studio', () => {
 
     expect(events).toEqual(['confirm', 'record']);
     controller.close();
+  });
+
+  it('releases canvas backing stores after recording settles and restores only the editor canvas on re-edit', async () => {
+    const session = mediaSessionFixture();
+    studioMocks.loadMediaSession.mockResolvedValue(session);
+    studioMocks.recordCanvas.mockResolvedValue({
+      blob: new Blob(['clip']), mimeType: 'video/webm', extension: 'webm',
+    });
+    const host = new StudioTestElement('host');
+    const controller = openStudio({
+      host: host as unknown as HTMLElement,
+      receipt: receiptFixture(),
+    });
+    await vi.waitFor(() => expect(button(host, '确定剪裁并生成').hidden).toBe(false));
+    const sourceCanvas = host.querySelector('.gift-clip-canvas');
+    const recordingCanvas = host.querySelector('.gift-clip-recording-canvas');
+
+    button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(button(host, '保存 WEBM').hidden).toBe(false));
+
+    expect({ width: sourceCanvas?.width, height: sourceCanvas?.height }).toEqual({ width: 0, height: 0 });
+    expect({ width: recordingCanvas?.width, height: recordingCanvas?.height }).toEqual({ width: 0, height: 0 });
+    expect(host.querySelector('.gift-clip-video')).toEqual(expect.objectContaining({
+      src: 'blob:recording',
+      hidden: false,
+    }));
+
+    button(host, '重新剪裁').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-crop-layer')).not.toBeNull());
+    expect({ width: sourceCanvas?.width, height: sourceCanvas?.height }).toEqual({ width: 640, height: 360 });
+    expect({ width: recordingCanvas?.width, height: recordingCanvas?.height }).toEqual({ width: 0, height: 0 });
+    controller.close();
+  });
+
+  it('disposes the failed recording session, clears canvases, and retries with a fresh load', async () => {
+    const first = mediaSessionFixture();
+    const second = mediaSessionFixture();
+    studioMocks.loadMediaSession.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    studioMocks.recordCanvas.mockRejectedValueOnce(new Error('视频录制失败，请重试。'));
+    const host = new StudioTestElement('host');
+    const controller = openStudio({
+      host: host as unknown as HTMLElement,
+      receipt: receiptFixture(),
+    });
+    await vi.waitFor(() => expect(button(host, '确定剪裁并生成').hidden).toBe(false));
+    const sourceCanvas = host.querySelector('.gift-clip-canvas');
+    const recordingCanvas = host.querySelector('.gift-clip-recording-canvas');
+
+    button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-status')?.textContent)
+      .toBe('视频录制失败，请重试。'));
+
+    expect(first.dispose).toHaveBeenCalledOnce();
+    expect({ width: sourceCanvas?.width, height: sourceCanvas?.height }).toEqual({ width: 0, height: 0 });
+    expect({ width: recordingCanvas?.width, height: recordingCanvas?.height }).toEqual({ width: 0, height: 0 });
+    expect(host.querySelector('.gift-clip-video')).toEqual(expect.objectContaining({ src: '', hidden: true }));
+
+    button(host, '重试').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-crop-layer')).not.toBeNull());
+    expect(studioMocks.loadMediaSession).toHaveBeenCalledTimes(2);
+    expect(second.dispose).not.toHaveBeenCalled();
+    controller.close();
+    expect(second.dispose).toHaveBeenCalledOnce();
   });
 
   it('re-edits the confirmed crop without reloading media or saving an unconfirmed change', async () => {
@@ -479,6 +569,7 @@ describe('gift clip studio', () => {
     await vi.waitFor(() => expect(host.querySelector('.gift-clip-crop-layer')).not.toBeNull());
     expect(session.restart).toHaveBeenCalledTimes(3);
     expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(host.querySelector('.gift-clip-recording-canvas')).toEqual(expect.objectContaining({ width: 0, height: 0 }));
 
     button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
     await vi.waitFor(() => expect(studioMocks.recordCanvas).toHaveBeenCalledTimes(2));

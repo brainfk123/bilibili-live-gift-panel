@@ -41,8 +41,34 @@ describe('gift clip renderer', () => {
   });
 
   it('scales the information bar from output width and ignores height', () => {
-    expect(giftClipInfoBarLayout(960, 240)).toEqual(expect.objectContaining({ scale: 2, height: 180 }));
-    expect(giftClipInfoBarLayout(960, 960)).toEqual(expect.objectContaining({ scale: 2, height: 180 }));
+    expect(giftClipInfoBarLayout(960, 240)).toEqual({
+      scale: 2,
+      x: 36,
+      y: 20,
+      width: 888,
+      height: 180,
+      radius: 44,
+      borderWidth: 3,
+      avatarX: 134,
+      avatarY: 110,
+      avatarRadius: 60,
+      avatarBorderWidth: 4,
+      fallbackFontSize: 48,
+      textX: 228,
+      nameY: 98,
+      giftY: 152,
+      maxTextWidth: 604,
+      nameFontSize: 40,
+      giftFontSize: 34,
+    });
+    expect(giftClipInfoBarLayout(960, 960)).toEqual(expect.objectContaining({
+      scale: 2,
+      y: 740,
+      height: 180,
+      avatarY: 830,
+      nameY: 818,
+      giftY: 872,
+    }));
   });
 
   it('draws the selected source pixels to matching output pixels', () => {

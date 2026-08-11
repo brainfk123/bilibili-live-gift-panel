@@ -366,6 +366,29 @@ func TestNormalizeGiftClipCropsAcceptsUnicodeKeysAtCharacterLimit(t *testing.T) 
 	}
 }
 
+func TestNormalizeGiftClipCropsAppliesSharedKeyPolicy(t *testing.T) {
+	want := fullGiftClipCrop()
+	unicodeAtLimit := strings.Repeat("🎁", 160)
+	unicodeOverLimit := strings.Repeat("🎁", 161)
+	got := normalizeGiftClipCrops(map[string]giftClipCropState{
+		"  effect:trimmed  ": want,
+		unicodeAtLimit:       want,
+		unicodeOverLimit:     want,
+		" constructor ":      want,
+		"prototype":          want,
+		"__proto__":          want,
+	})
+	if len(got) != 2 {
+		t.Fatalf("normalized crop keys = %#v, want two accepted keys", got)
+	}
+	if crop, exists := got["effect:trimmed"]; !exists || crop != want {
+		t.Fatalf("trimmed crop = %#v, exists = %t", crop, exists)
+	}
+	if crop, exists := got[unicodeAtLimit]; !exists || crop != want {
+		t.Fatalf("unicode crop = %#v, exists = %t", crop, exists)
+	}
+}
+
 func TestConfigExperienceDefaultsAndLegacyMigration(t *testing.T) {
 	if experience := defaultAppState().Settings.ConfigExperience; experience != "simple" {
 		t.Fatalf("new config experience = %q, want simple", experience)
