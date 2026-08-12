@@ -167,7 +167,10 @@ func (writer *giftClipVideoResponseWriter) Write(data []byte) (int, error) {
 
 func (writer *giftClipVideoResponseWriter) setSafeVideoHeaders() {
 	header := writer.Header()
-	header.Set("Content-Type", "video/mp4")
+	mediaType, _, _ := mime.ParseMediaType(header.Get("Content-Type"))
+	if !strings.EqualFold(mediaType, "multipart/byteranges") {
+		header.Set("Content-Type", "video/mp4")
+	}
 	header.Set("Cache-Control", "no-store")
 	header.Set("Content-Disposition", `attachment; filename="gift-clip.mp4"`)
 }

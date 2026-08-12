@@ -10,6 +10,7 @@ import (
 	"image/color"
 	"image/png"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -208,6 +209,31 @@ func TestGiftClipHTTPVideoAndDelete(t *testing.T) {
 	api.ServeHTTP(ranged, rangedRequest)
 	if ranged.Code != http.StatusPartialContent || ranged.Body.String() != "mp4-" || ranged.Header().Get("Content-Range") != "bytes 0-3/8" || ranged.Header().Get("Accept-Ranges") != "bytes" || ranged.Header().Get("Content-Type") != "video/mp4" || ranged.Header().Get("Cache-Control") != "no-store" || ranged.Header().Get("Content-Disposition") != `attachment; filename="gift-clip.mp4"` {
 		t.Fatalf("range status=%d headers=%v body=%q", ranged.Code, ranged.Header(), ranged.Body.String())
+	}
+	multiRangeRequest := httptest.NewRequest(http.MethodGet, "/api/gift-clips/"+giftClipHTTPTestID+"/video", nil)
+	multiRangeRequest.Header.Set("Range", "bytes=0-1,4-5")
+	multiRange := httptest.NewRecorder()
+	api.ServeHTTP(multiRange, multiRangeRequest)
+	mediaType, parameters, err := mime.ParseMediaType(multiRange.Header().Get("Content-Type"))
+	if err != nil || mediaType != "multipart/byteranges" || parameters["boundary"] == "" || multiRange.Code != http.StatusPartialContent || multiRange.Header().Get("Cache-Control") != "no-store" || multiRange.Header().Get("Content-Disposition") != `attachment; filename="gift-clip.mp4"` {
+		t.Fatalf("multi-range status=%d type=%q parameters=%v headers=%v err=%v", multiRange.Code, mediaType, parameters, multiRange.Header(), err)
+	}
+	multiReader := multipart.NewReader(bytes.NewReader(multiRange.Body.Bytes()), parameters["boundary"])
+	for index, want := range []struct {
+		contentRange string
+		body         string
+	}{{"bytes 0-1/8", "mp"}, {"bytes 4-5/8", "da"}} {
+		part, err := multiReader.NextPart()
+		if err != nil {
+			t.Fatalf("multi-range part %d: %v", index, err)
+		}
+		body, err := io.ReadAll(part)
+		if err != nil || part.Header.Get("Content-Range") != want.contentRange || string(body) != want.body {
+			t.Fatalf("multi-range part %d range=%q body=%q err=%v", index, part.Header.Get("Content-Range"), body, err)
+		}
+	}
+	if part, err := multiReader.NextPart(); !errors.Is(err, io.EOF) || part != nil {
+		t.Fatalf("multi-range trailing part=%v err=%v", part, err)
 	}
 	unsatisfiableRequest := httptest.NewRequest(http.MethodGet, "/api/gift-clips/"+giftClipHTTPTestID+"/video", nil)
 	unsatisfiableRequest.Header.Set("Range", "bytes=100-101")
