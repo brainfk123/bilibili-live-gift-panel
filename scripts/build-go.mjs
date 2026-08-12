@@ -1,9 +1,31 @@
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const appVersion = (process.env.APP_VERSION || 'dev').replace(/^v/, '');
+const appCommit = process.env.APP_COMMIT || 'local';
+for (const [label, value] of [['APP_VERSION', appVersion], ['APP_COMMIT', appCommit]]) {
+  if (!/^[0-9A-Za-z.+-]+$/.test(value)) throw new Error(`${label} contains unsupported characters`);
+}
+if (appVersion !== 'dev') {
+  const manifestPath = join(root, 'goserver', 'ffmpeg', 'manifest.json');
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  } catch (error) {
+    throw new Error(`Release build requires a readable embedded FFmpeg manifest: ${error.message}`);
+  }
+  if (manifest.authenticode !== true) {
+    throw new Error('Release build requires an Authenticode-signed embedded FFmpeg payload.');
+  }
+  execFileSync(process.execPath, [join(root, 'scripts', 'verify-ffmpeg.mjs')], {
+    cwd: root,
+    stdio: 'inherit',
+    env: process.env,
+  });
+}
 const resource = join(root, 'goserver', 'rsrc_windows_amd64.syso');
 if (!existsSync(resource)) {
   throw new Error(
@@ -16,11 +38,6 @@ mkdirSync(distDir, { recursive: true });
 copyFileSync(join(root, 'dist', 'index.html'), join(distDir, 'index.html'));
 
 const out = join(root, 'dist', 'gift-panel.exe');
-const appVersion = (process.env.APP_VERSION || 'dev').replace(/^v/, '');
-const appCommit = process.env.APP_COMMIT || 'local';
-for (const [label, value] of [['APP_VERSION', appVersion], ['APP_COMMIT', appCommit]]) {
-  if (!/^[0-9A-Za-z.+-]+$/.test(value)) throw new Error(`${label} contains unsupported characters`);
-}
 const ldflags = `-s -w -H windowsgui -X main.appVersion=${appVersion} -X main.appCommit=${appCommit}`;
 const candidates = [
   process.env.GO_BIN,

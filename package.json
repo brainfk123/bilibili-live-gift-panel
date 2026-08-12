@@ -8,6 +8,9 @@
     "build": "npm run build:ui && npm run build:exe",
     "build:ui": "vite build",
     "build:exe": "node scripts/build-go.mjs",
+    "build:ffmpeg": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-ffmpeg.ps1",
+    "package:ffmpeg": "node scripts/package-ffmpeg.mjs",
+    "verify:ffmpeg": "node scripts/verify-ffmpeg.mjs",
     "fetch:catalog": "node scripts/fetch-gift-catalog.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
