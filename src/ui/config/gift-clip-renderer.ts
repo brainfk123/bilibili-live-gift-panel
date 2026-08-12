@@ -38,7 +38,28 @@ export function drawGiftClipOutputFrame(
     context.drawImage(visual.source, crop.x, crop.y, crop.width, crop.height, 0, 0, crop.width, crop.height);
   }
 
-  const layout = giftClipInfoBarLayout(outputWidth, outputHeight);
+  drawGiftClipInfoContent(context, receipt, avatar, outputWidth, outputHeight);
+}
+
+export function drawGiftClipInfoOverlay(
+  context: CanvasRenderingContext2D,
+  receipt: GiftReceipt,
+  avatar: HTMLImageElement | null,
+  width: number,
+  height: number,
+): void {
+  context.clearRect(0, 0, width, height);
+  drawGiftClipInfoContent(context, receipt, avatar, width, height);
+}
+
+function drawGiftClipInfoContent(
+  context: CanvasRenderingContext2D,
+  receipt: GiftReceipt,
+  avatar: HTMLImageElement | null,
+  width: number,
+  height: number,
+): void {
+  const layout = giftClipInfoBarLayout(width, height);
   const design = GIFT_CLIP_INFO_BAR_DESIGN;
   const barGradient = context.createLinearGradient(layout.x, layout.y, layout.x + layout.width, layout.y + layout.height);
   barGradient.addColorStop(0, design.gradientStart);
@@ -99,7 +120,7 @@ export function drawGiftClipOutputFrame(
   context.fillText(giftText, layout.textX, layout.giftY);
 }
 
-function drawGiftClipBackground(context: CanvasRenderingContext2D, width: number, height: number): void {
+export function drawGiftClipBackground(context: CanvasRenderingContext2D, width: number, height: number): void {
   const gradient = context.createLinearGradient(0, 0, width, height);
   gradient.addColorStop(0, '#12101d');
   gradient.addColorStop(0.48, '#24152d');
