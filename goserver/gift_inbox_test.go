@@ -72,6 +72,93 @@ func TestGiftInboxPersistsFIFOAcknowledgementsWithoutRawConnectionData(t *testin
 	}
 }
 
+func TestGiftInboxSnapshotMaintainsOrderedOldestAcrossAckReleaseAndReopen(t *testing.T) {
+	root := t.TempDir()
+	pending := filepath.Join(root, "gift-inbox", "pending")
+	if err := os.MkdirAll(pending, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	firstID, secondID := strings.Repeat("a", 32), strings.Repeat("b", 32)
+	writeGiftInboxFixture(t, filepath.Join(pending, giftInboxFilename(1, firstID)), giftInboxRecord{SchemaVersion: 1, LocalSequence: 1, IngestionID: firstID, ReceivedAt: 100, Gift: giftEvent{GiftName: "first"}})
+	writeGiftInboxFixture(t, filepath.Join(pending, giftInboxFilename(2, secondID)), giftInboxRecord{SchemaVersion: 1, LocalSequence: 2, IngestionID: secondID, ReceivedAt: 200, Gift: giftEvent{GiftName: "second"}})
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health := inbox.SnapshotHealth(); health.PendingCount != 2 || health.OldestPendingAt != 100 || health.PendingBytes == 0 {
+		t.Fatalf("startup snapshot = %#v", health)
+	}
+	record, ok, err := inbox.Next()
+	if err != nil || !ok || record.IngestionID != firstID {
+		t.Fatalf("first claim = %#v, %t, %v", record, ok, err)
+	}
+	if err := inbox.Release(firstID); err != nil {
+		t.Fatal(err)
+	}
+	if health := inbox.SnapshotHealth(); health.PendingCount != 2 || health.OldestPendingAt != 100 {
+		t.Fatalf("released snapshot = %#v", health)
+	}
+	record, ok, err = inbox.Next()
+	if err != nil || !ok || record.IngestionID != firstID {
+		t.Fatalf("reclaimed first = %#v, %t, %v", record, ok, err)
+	}
+	if err := inbox.Acknowledge(firstID); err != nil {
+		t.Fatal(err)
+	}
+	if health := inbox.SnapshotHealth(); health.PendingCount != 1 || health.OldestPendingAt != 200 {
+		t.Fatalf("post-ack snapshot = %#v, want second record as oldest", health)
+	}
+	if _, err := inbox.Accept("room", "SEND_GIFT", giftEvent{GiftName: "later"}); err != nil {
+		t.Fatal(err)
+	}
+	if health := inbox.SnapshotHealth(); health.PendingCount != 2 || health.OldestPendingAt != 200 {
+		t.Fatalf("post-accept snapshot replaced true oldest: %#v", health)
+	}
+	if err := inbox.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health := reopened.SnapshotHealth(); health.PendingCount != 2 || health.OldestPendingAt != 200 {
+		t.Fatalf("reopen snapshot = %#v", health)
+	}
+}
+
+func TestGiftInboxSnapshotCapacityBoundaryClearsAfterDrain(t *testing.T) {
+	oldRecordLimit, oldByteLimit := giftInboxRecordLimit, giftInboxByteLimit
+	giftInboxRecordLimit, giftInboxByteLimit = 2, 1<<20
+	defer func() { giftInboxRecordLimit, giftInboxByteLimit = oldRecordLimit, oldByteLimit }()
+	inbox, err := openGiftInbox(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := inbox.Accept("room", "SEND_GIFT", giftEvent{GiftName: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inbox.Accept("room", "SEND_GIFT", giftEvent{GiftName: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	if health := inbox.SnapshotHealth(); health.PendingCount != 2 || !health.CapacityError {
+		t.Fatalf("full snapshot = %#v", health)
+	}
+	if _, err := inbox.Accept("room", "SEND_GIFT", giftEvent{GiftName: "blocked"}); !errors.Is(err, errGiftInboxCapacity) {
+		t.Fatalf("accept past full snapshot = %v", err)
+	}
+	claimed, ok, err := inbox.Next()
+	if err != nil || !ok || claimed.IngestionID != first.IngestionID {
+		t.Fatalf("claim = %#v, %t, %v", claimed, ok, err)
+	}
+	if err := inbox.Acknowledge(first.IngestionID); err != nil {
+		t.Fatal(err)
+	}
+	if health := inbox.SnapshotHealth(); health.PendingCount != 1 || health.CapacityError {
+		t.Fatalf("drained snapshot = %#v", health)
+	}
+}
+
 func TestGiftInboxLeavesCorruptHeadForNextAndRemovesOnlyOwnTemporaryFiles(t *testing.T) {
 	root := t.TempDir()
 	pending := filepath.Join(root, "gift-inbox", "pending")

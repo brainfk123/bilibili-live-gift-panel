@@ -128,6 +128,38 @@ func TestPendingStateTransactionRecoversGiftFormulaRandomResultWithoutReevaluati
 	}
 }
 
+func TestTransactionPendingSnapshotTracksPrepareAndNonIngestionRecovery(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	if err := store.replaceState(defaultAppState()); err != nil {
+		t.Fatal(err)
+	}
+	failed := false
+	store.writeAtomically = func(path string, data []byte) error {
+		if filepath.Base(path) == "config.json" && !failed {
+			failed = true
+			return errors.New("injected post-prepare failure")
+		}
+		return writeFileAtomically(path, data)
+	}
+	if _, _, err := store.updateStateForIngestion("pending-snapshot", func(state *appState) error {
+		state.RoomID = "31567150"
+		return nil
+	}); err == nil {
+		t.Fatal("expected post-prepare failure")
+	}
+	if !store.TransactionPending() {
+		t.Fatal("prepare did not publish pending transaction snapshot")
+	}
+	store.writeAtomically = nil
+	if _, err := store.readState(); err != nil {
+		t.Fatal(err)
+	}
+	if store.TransactionPending() {
+		t.Fatal("ordinary state read recovery did not clear transaction snapshot")
+	}
+}
+
 func TestPendingStateTransactionValidatesEveryPayloadBeforeWritingTargets(t *testing.T) {
 	for name, mutate := range map[string]func(*pendingStateTransaction){
 		"malformed events": func(tx *pendingStateTransaction) { tx.EventLog = []byte("not-json\n") },

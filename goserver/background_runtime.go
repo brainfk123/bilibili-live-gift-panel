@@ -307,6 +307,7 @@ func (runtime *backgroundRuntime) acceptGift(_ context.Context, roomID, command 
 	_, err := inbox.Accept(roomID, command, gift)
 	acceptWriteLatency := time.Since(acceptedAt)
 	if err != nil {
+		runtime.publishInbox(inbox, runtime.snapshotInboxHealth(inbox))
 		runtime.recordIngestionFailureFrom("accept", err)
 		return
 	}
@@ -417,6 +418,7 @@ func (runtime *backgroundRuntime) consumeAvailableInboxRecord(ctx context.Contex
 	if err != nil {
 		return false, &ingestionFailureError{source: "next", err: err}
 	}
+	runtime.clearIngestionFailure(ingestionGeneration, "next")
 	if !ok {
 		return false, nil
 	}
@@ -431,6 +433,7 @@ func (runtime *backgroundRuntime) consumeAvailableInboxRecord(ctx context.Contex
 }
 
 func (runtime *backgroundRuntime) consumeClaimedInboxRecord(ctx context.Context, inbox runtimeGiftInbox, record giftInboxRecord) (err error) {
+	ingestionGeneration := runtime.currentIngestionGeneration()
 	acknowledged := false
 	defer func() {
 		if acknowledged {
@@ -438,6 +441,8 @@ func (runtime *backgroundRuntime) consumeClaimedInboxRecord(ctx context.Context,
 		}
 		if releaseErr := inbox.Release(record.IngestionID); releaseErr != nil && !errors.Is(releaseErr, errGiftInboxClosed) {
 			err = errors.Join(err, &ingestionFailureError{source: "release", err: releaseErr})
+		} else if releaseErr == nil {
+			runtime.clearIngestionFailure(ingestionGeneration, "release")
 		}
 		runtime.publishInbox(inbox, runtime.snapshotInboxHealth(inbox))
 	}()
@@ -447,7 +452,10 @@ func (runtime *backgroundRuntime) consumeClaimedInboxRecord(ctx context.Context,
 	if err := inbox.Acknowledge(record.IngestionID); err != nil {
 		return &ingestionFailureError{source: "ack", err: err}
 	}
-	runtime.publishInbox(inbox, runtime.snapshotInboxHealth(inbox))
+	health := runtime.snapshotInboxHealth(inbox)
+	runtime.publishInbox(inbox, health)
+	runtime.clearIngestionFailure(ingestionGeneration, "ack")
+	runtime.clearCapacityFailureIfDrained(health)
 	acknowledged = true
 	return nil
 }
@@ -1000,12 +1008,21 @@ func (runtime *backgroundRuntime) setTransactionPending(pending bool) {
 }
 
 func (runtime *backgroundRuntime) refreshTransactionPending() {
-	pending := false
-	if runtime.store != nil {
-		_, err := os.Stat(runtime.store.stateTransactionPath())
-		pending = err == nil
-	}
+	pending := runtime.store != nil && runtime.store.TransactionPending()
 	runtime.setTransactionPending(pending)
+}
+
+func (runtime *backgroundRuntime) clearCapacityFailureIfDrained(health giftInboxHealth) {
+	if health.CapacityError {
+		return
+	}
+	runtime.mu.Lock()
+	if runtime.status.IngestionErrorKind == "inbox_capacity" {
+		runtime.status.IngestionError = ""
+		runtime.status.IngestionErrorKind = ""
+		runtime.ingestionErrorSource = ""
+	}
+	runtime.mu.Unlock()
 }
 
 func (runtime *backgroundRuntime) recordLastFrame(roomID string) {

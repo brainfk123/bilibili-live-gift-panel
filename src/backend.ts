@@ -15,6 +15,7 @@ export interface RuntimeConnectionGap {
 
 export interface RuntimeInboxHealth {
   pendingCount: number;
+  pendingBytes?: number;
   oldestPendingAt?: number;
   capacityError?: boolean;
 }

@@ -19,6 +19,9 @@ import (
 const maxGiftInboxRecords = 10000
 const maxGiftInboxBytes int64 = 64 << 20
 
+var giftInboxRecordLimit = maxGiftInboxRecords
+var giftInboxByteLimit = maxGiftInboxBytes
+
 var (
 	errGiftInboxCapacity = errors.New("gift inbox capacity reached")
 	errGiftInboxClosed   = errors.New("gift inbox handle is closed")
@@ -36,8 +39,16 @@ type giftInboxRecord struct {
 
 type giftInboxHealth struct {
 	PendingCount    int   `json:"pendingCount"`
+	PendingBytes    int64 `json:"pendingBytes,omitempty"`
 	OldestPendingAt int64 `json:"oldestPendingAt,omitempty"`
 	CapacityError   bool  `json:"capacityError,omitempty"`
+}
+
+type giftInboxRecordMetadata struct {
+	filename    string
+	ingestionID string
+	receivedAt  int64
+	size        int64
 }
 
 type giftInboxSequence struct {
@@ -59,6 +70,7 @@ type giftInboxShared struct {
 	nextSequence uint64
 	health       giftInboxHealth
 	pendingBytes int64
+	pending      []giftInboxRecordMetadata
 	claimedBy    uint64
 	claimedID    string
 	rootInfo     os.FileInfo
@@ -144,7 +156,7 @@ func (inbox *giftInbox) Accept(roomID, command string, gift giftEvent) (giftInbo
 			return giftInboxRecord{}, err
 		}
 	}
-	if health.PendingCount >= maxGiftInboxRecords || health.CapacityError {
+	if health.PendingCount >= giftInboxRecordLimit || health.CapacityError {
 		return giftInboxRecord{}, errGiftInboxCapacity
 	}
 	ingestionID, err := newGiftInboxIngestionID()
@@ -164,9 +176,7 @@ func (inbox *giftInbox) Accept(roomID, command string, gift giftEvent) (giftInbo
 	if err != nil {
 		return giftInboxRecord{}, fmt.Errorf("serialize gift inbox record: %w", err)
 	}
-	if healthBytes, err := inbox.pendingBytesLocked(); err != nil {
-		return giftInboxRecord{}, err
-	} else if healthBytes+int64(len(data)+1) > maxGiftInboxBytes {
+	if inbox.shared.pendingBytes+int64(len(data)+1) > giftInboxByteLimit {
 		inbox.shared.health.CapacityError = true
 		return giftInboxRecord{}, errGiftInboxCapacity
 	}
@@ -179,10 +189,15 @@ func (inbox *giftInbox) Accept(roomID, command string, gift giftEvent) (giftInbo
 	}
 	inbox.shared.health.PendingCount++
 	inbox.shared.pendingBytes += int64(len(data) + 1)
-	if inbox.shared.health.OldestPendingAt == 0 {
+	inbox.shared.pending = append(inbox.shared.pending, giftInboxRecordMetadata{
+		filename: inbox.recordFilename(record.LocalSequence, record.IngestionID), ingestionID: record.IngestionID,
+		receivedAt: record.ReceivedAt, size: int64(len(data) + 1),
+	})
+	if inbox.shared.health.OldestPendingAt == 0 || record.ReceivedAt < inbox.shared.health.OldestPendingAt {
 		inbox.shared.health.OldestPendingAt = record.ReceivedAt
 	}
-	inbox.shared.health.CapacityError = false
+	inbox.shared.health.PendingBytes = inbox.shared.pendingBytes
+	inbox.shared.health.CapacityError = inbox.shared.health.PendingCount >= giftInboxRecordLimit || inbox.shared.pendingBytes >= giftInboxByteLimit
 	return record, nil
 }
 
@@ -196,14 +211,10 @@ func (inbox *giftInbox) Next() (giftInboxRecord, bool, error) {
 		return giftInboxRecord{}, false, nil
 	}
 
-	files, err := inbox.pendingFilesLocked()
-	if err != nil {
-		return giftInboxRecord{}, false, err
-	}
-	if len(files) == 0 {
+	if len(inbox.shared.pending) == 0 {
 		return giftInboxRecord{}, false, nil
 	}
-	record, err := inbox.readRecordLocked(files[0])
+	record, err := inbox.readRecordLocked(inbox.shared.pending[0].filename)
 	if err != nil {
 		return giftInboxRecord{}, false, err
 	}
@@ -228,47 +239,40 @@ func (inbox *giftInbox) Acknowledge(ingestionID string) error {
 		return fmt.Errorf("gift inbox acknowledgement does not match current claim")
 	}
 
-	files, err := inbox.pendingFilesLocked()
-	if err != nil {
-		return err
-	}
-	if len(files) == 0 {
+	if len(inbox.shared.pending) == 0 {
 		return nil
 	}
-	selected := files[0]
-	if pendingIngestionID(selected) != ingestionID {
-		for _, file := range files[1:] {
-			if pendingIngestionID(file) == ingestionID {
+	selected := inbox.shared.pending[0]
+	if selected.ingestionID != ingestionID {
+		for _, pending := range inbox.shared.pending[1:] {
+			if pending.ingestionID == ingestionID {
 				return fmt.Errorf("gift inbox acknowledgement is out of order")
 			}
 		}
 		return nil
 	}
-	record, err := inbox.readRecordLocked(selected)
+	record, err := inbox.readRecordLocked(selected.filename)
 	if err != nil {
 		return err
 	}
 	if record.IngestionID != ingestionID {
 		return fmt.Errorf("gift inbox record ingestion ID does not match filename")
 	}
-	info, statErr := os.Stat(filepath.Join(inbox.pendingPath, selected))
-	if err := os.Remove(filepath.Join(inbox.pendingPath, selected)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := os.Remove(filepath.Join(inbox.pendingPath, selected.filename)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("acknowledge gift inbox record: %w", err)
 	}
 	inbox.shared.claimedBy = 0
 	inbox.shared.claimedID = ""
 	inbox.shared.health.PendingCount = maxInt(0, inbox.shared.health.PendingCount-1)
-	if statErr == nil {
-		inbox.shared.pendingBytes = maxInt64(0, inbox.shared.pendingBytes-info.Size())
-	}
+	inbox.shared.pendingBytes = maxInt64(0, inbox.shared.pendingBytes-selected.size)
+	inbox.shared.pending = inbox.shared.pending[1:]
 	if inbox.shared.health.PendingCount == 0 {
 		inbox.shared.health.OldestPendingAt = 0
 	} else {
-		// The removed head was the oldest. Avoid a new directory scan on the
-		// acknowledgement path; the next explicit reconciliation restores it.
-		inbox.shared.health.OldestPendingAt = 0
+		inbox.shared.health.OldestPendingAt = inbox.shared.pending[0].receivedAt
 	}
-	inbox.shared.health.CapacityError = inbox.shared.health.PendingCount >= maxGiftInboxRecords || inbox.shared.pendingBytes >= maxGiftInboxBytes
+	inbox.shared.health.PendingBytes = inbox.shared.pendingBytes
+	inbox.shared.health.CapacityError = inbox.shared.health.PendingCount >= giftInboxRecordLimit || inbox.shared.pendingBytes >= giftInboxByteLimit
 	return nil
 }
 
@@ -433,15 +437,27 @@ func (inbox *giftInbox) reconcileHealthLocked() (giftInboxHealth, error) {
 	}
 	inbox.shared.health = giftInboxHealth{
 		PendingCount:    len(files),
+		PendingBytes:    bytes,
 		OldestPendingAt: oldest,
-		CapacityError:   len(files) >= maxGiftInboxRecords || bytes >= maxGiftInboxBytes,
+		CapacityError:   len(files) >= giftInboxRecordLimit || bytes >= giftInboxByteLimit,
 	}
 	inbox.shared.pendingBytes = bytes
+	inbox.shared.pending = make([]giftInboxRecordMetadata, 0, len(files))
+	for _, file := range files {
+		info, statErr := os.Stat(filepath.Join(inbox.pendingPath, file))
+		if statErr != nil {
+			return giftInboxHealth{}, fmt.Errorf("stat gift inbox record: %w", statErr)
+		}
+		receivedAt := info.ModTime().Unix()
+		record, recordErr := inbox.readRecordLocked(file)
+		if recordErr == nil {
+			receivedAt = record.ReceivedAt
+		}
+		inbox.shared.pending = append(inbox.shared.pending, giftInboxRecordMetadata{
+			filename: file, ingestionID: pendingIngestionID(file), receivedAt: receivedAt, size: info.Size(),
+		})
+	}
 	return inbox.shared.health, nil
-}
-
-func (inbox *giftInbox) pendingBytesLocked() (int64, error) {
-	return inbox.shared.pendingBytes, nil
 }
 
 func (inbox *giftInbox) pendingFilesLocked() ([]string, error) {
@@ -486,7 +502,11 @@ func (inbox *giftInbox) readRecordLocked(filename string) (giftInboxRecord, erro
 }
 
 func (inbox *giftInbox) recordPath(sequence uint64, ingestionID string) string {
-	return filepath.Join(inbox.pendingPath, fmt.Sprintf("%020d-%s.json", sequence, ingestionID))
+	return filepath.Join(inbox.pendingPath, inbox.recordFilename(sequence, ingestionID))
+}
+
+func (*giftInbox) recordFilename(sequence uint64, ingestionID string) string {
+	return fmt.Sprintf("%020d-%s.json", sequence, ingestionID)
 }
 
 func newGiftInboxIngestionID() (string, error) {

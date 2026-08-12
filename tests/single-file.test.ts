@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, join, relative, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build as viteBuild } from 'vite';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -33,6 +33,14 @@ function snapshotFiles(files: string[]): FileSnapshot[] {
   });
 }
 
+function emittedImportTargets(file: string): string[] {
+  const source = readFileSync(file, 'utf8');
+  const specifiers = [...source.matchAll(/(?:from\s*|import\s*)["']([^"']+)["']/g)].map((match) => match[1]);
+  return specifiers
+    .filter((specifier) => specifier.startsWith('.'))
+    .map((specifier) => resolve(dirname(file), specifier));
+}
+
 describe('single-file production output', () => {
   let outDir: string;
   let html: string;
@@ -61,7 +69,7 @@ describe('single-file production output', () => {
   it('builds into a temp dir and produces only index.html, leaving the real dist untouched', () => {
     const built = listFilesRecursively(outDir).map((file) => relative(outDir, file).replaceAll('\\', '/'));
     expect(built).toContain('index.html');
-    expect(built.some((file) => file.startsWith('chunks/') && file.endsWith('.js'))).toBe(true);
+    expect(built.some((file) => file.includes('config-entry-') && file.endsWith('.js'))).toBe(true);
     expect(snapshotFiles(listFilesRecursively(distRoot))).toEqual(distBefore);
   });
 
@@ -79,5 +87,47 @@ describe('single-file production output', () => {
     expect(html).not.toContain('连接中断期间可能漏礼物');
     const chunks = listFilesRecursively(outDir).filter((file) => file.endsWith('.js'));
     expect(chunks.some((file) => readFileSync(file, 'utf8').includes('gift-ingestion-warning'))).toBe(true);
+  });
+
+  it('keeps every configuration chunk dependency executable in the emitted graph', async () => {
+    const configEntry = listFilesRecursively(outDir).find((file) => (
+      file.includes('config-entry-') && file.endsWith('.js')
+    ));
+    if (!configEntry) throw new Error('build produced no configuration entry chunk');
+    const seen = new Set<string>();
+    const visit = (file: string): void => {
+      if (seen.has(file)) return;
+      seen.add(file);
+      expect(existsSync(file), `missing emitted import ${relative(outDir, file)}`).toBe(true);
+      for (const target of emittedImportTargets(file)) visit(target);
+    };
+    visit(configEntry);
+
+    // The project deliberately runs Vitest in node and ships no jsdom. Supply
+    // the small browser surface needed for module evaluation so this exercises
+    // the emitted entry rather than only inspecting its source.
+    const previousDocument = globalThis.document;
+    const element = () => ({
+      style: {}, dataset: {}, children: [], append() {}, appendChild() {},
+      setAttribute() {}, getAttribute() { return null; }, classList: { add() {}, remove() {}, toggle() { return false; } },
+      content: { firstElementChild: null },
+    });
+    Object.defineProperty(globalThis, 'document', {
+      configurable: true,
+      value: { createElement: element, createElementNS: element, getElementById: () => null, querySelectorAll: () => [], head: element(), body: element() },
+    });
+    const previousMutationObserver = globalThis.MutationObserver;
+    Object.defineProperty(globalThis, 'MutationObserver', {
+      configurable: true,
+      value: class { observe() {} disconnect() {} },
+    });
+    try {
+      const config = await import(pathToFileURL(configEntry).href);
+      expect(config.configStyles).toContain('.config-root');
+      expect(config.mountConfigEntry).toBeTypeOf('function');
+    } finally {
+      Object.defineProperty(globalThis, 'document', { configurable: true, value: previousDocument });
+      Object.defineProperty(globalThis, 'MutationObserver', { configurable: true, value: previousMutationObserver });
+    }
   });
 });

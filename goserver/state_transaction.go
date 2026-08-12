@@ -56,6 +56,7 @@ func (s *configStore) persistPreparedStateLocked(state appState, ingestionID str
 	if err := s.writeAtomicFile(s.stateTransactionPath(), append(data, '\n')); err != nil {
 		return err
 	}
+	s.transactionPending = true
 	if err := s.applyPendingStateTransactionLocked(tx); err != nil {
 		return err
 	}
@@ -84,6 +85,7 @@ func (s *configStore) applyPendingStateTransactionLocked(tx pendingStateTransact
 	if err := os.Remove(s.stateTransactionPath()); err != nil {
 		return fmt.Errorf("删除已完成状态事务失败：%w", err)
 	}
+	s.transactionPending = false
 	return syncStateDirectory(filepath.Dir(s.stateTransactionPath()))
 }
 
@@ -156,11 +158,13 @@ func validatePendingStateShard(name string, data []byte, into any, schemaVersion
 func (s *configStore) recoverPendingStateTransactionLocked() error {
 	data, err := os.ReadFile(s.stateTransactionPath())
 	if errors.Is(err, os.ErrNotExist) {
+		s.transactionPending = false
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("读取状态事务失败：%w", err)
 	}
+	s.transactionPending = true
 	var tx pendingStateTransaction
 	if err := json.Unmarshal(data, &tx); err != nil {
 		return fmt.Errorf("读取状态事务失败：%w", err)

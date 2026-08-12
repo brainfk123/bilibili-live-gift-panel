@@ -20,13 +20,22 @@ import (
 const maxConfigBytes = 8 << 20
 
 type configStore struct {
-	path              string
-	mu                sync.RWMutex
-	onChange          func()
-	onTimerChange     func()
-	onUpdateChange    func()
-	migrationRequired bool
-	writeAtomically   func(string, []byte) error
+	path               string
+	mu                 sync.RWMutex
+	onChange           func()
+	onTimerChange      func()
+	onUpdateChange     func()
+	migrationRequired  bool
+	transactionPending bool
+	writeAtomically    func(string, []byte) error
+}
+
+// TransactionPending is an O(1) snapshot maintained by the transaction
+// machinery. Status endpoints must not probe the transaction file themselves.
+func (s *configStore) TransactionPending() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.transactionPending
 }
 
 func newDefaultConfigStore() (*configStore, error) {

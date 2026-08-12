@@ -312,6 +312,7 @@ describe('gift ingestion health warnings', () => {
     expect(warning).not.toBeNull();
     expect(textOf(warning)).not.toContain('补录');
     expect(textOf(warning)).not.toContain('手动录入');
+    expect((findByText(warning, '关闭') as any).ariaLabel).toBe('关闭已恢复的礼物接收中断提醒');
     const fetchCallsBeforeDismiss = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
     findByText(warning, '关闭')?.onclick?.();
     expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(fetchCallsBeforeDismiss);
@@ -399,6 +400,7 @@ describe('gift ingestion health warnings', () => {
     const transactionRoot = new TestElement('div');
     mountConfig(transactionRoot as unknown as HTMLElement);
     await vi.waitFor(() => expect(textOf(transactionRoot)).toContain('礼物处理事务正在恢复'));
+    expect(textOf(transactionRoot)).not.toContain('保持配置页面打开');
   });
 });
 

@@ -946,7 +946,7 @@ export function mountConfig(root: HTMLElement): void {
       ]));
     } else if (recoveredGap && dismissedGapIdentity() !== connectionGapIdentity(recoveredGap)) {
       const warning = el('article', { class: 'gift-ingestion-warning is-warning' });
-      const close = el('button', { class: 'gift-ingestion-warning-close', type: 'button', text: '关闭' }) as HTMLButtonElement;
+      const close = el('button', { class: 'gift-ingestion-warning-close', type: 'button', text: '关闭', ariaLabel: '关闭已恢复的礼物接收中断提醒' } as any) as HTMLButtonElement;
       close.onclick = () => {
         try {
           globalThis.localStorage?.setItem('bilibili-live-gift-panel-dismissed-gap-v1', connectionGapIdentity(recoveredGap));
@@ -975,7 +975,7 @@ export function mountConfig(root: HTMLElement): void {
             ? '礼物收件箱暂时无法打开，新的礼物还不能安全保存。'
             : failureKind === 'inbox_recovery'
               ? '礼物收件箱正在恢复处理，请保持后台运行并等待恢复完成。'
-          : '礼物处理事务正在恢复，请保持配置页面打开并等待恢复完成。';
+          : '礼物处理事务正在恢复，请保持程序运行并等待恢复完成。';
       warnings.append(el('article', { class: 'gift-ingestion-warning is-danger', role: 'alert', ariaLabel: '礼物接收需要注意' } as any, [
         el('div', { class: 'gift-ingestion-warning-copy' }, [
           el('strong', { text: '礼物接收需要注意' }),
