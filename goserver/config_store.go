@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ type configStore struct {
 	onTimerChange     func()
 	onUpdateChange    func()
 	migrationRequired bool
+	writeAtomically   func(string, []byte) error
 }
 
 func newDefaultConfigStore() (*configStore, error) {
@@ -652,6 +654,11 @@ func (s *configStore) replaceClientState(state appState) (clientStateReplaceResu
 	if previousErr != nil {
 		return clientStateReplaceResult{}, previousErr
 	}
+	state.AppliedIngressIDs = append([]string(nil), previous.AppliedIngressIDs...)
+	state.RecentSourceGiftKeys = make(map[string]int64, len(previous.RecentSourceGiftKeys))
+	for key, timestamp := range previous.RecentSourceGiftKeys {
+		state.RecentSourceGiftKeys[key] = timestamp
+	}
 	if roomSwitchRequiresRecordReset(previous.RoomID, state.RoomID) {
 		clearRoomScopedRecords(&state)
 	} else {
@@ -727,6 +734,49 @@ func (s *configStore) updateState(update func(*appState) error) (appState, error
 	return state, nil
 }
 
+func (s *configStore) updateStateForIngestion(
+	ingestionID string,
+	update func(*appState) error,
+) (appState, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.recoverPendingStateTransactionLocked(); err != nil {
+		return appState{}, false, err
+	}
+	previous, err := s.readStateLocked()
+	if err != nil {
+		return appState{}, false, err
+	}
+	for _, appliedID := range previous.AppliedIngressIDs {
+		if appliedID == ingestionID {
+			return previous, false, nil
+		}
+	}
+	state, err := cloneAppState(previous)
+	if err != nil {
+		return appState{}, false, err
+	}
+	if err := update(&state); err != nil {
+		return appState{}, false, err
+	}
+	state.AppliedIngressIDs = append(state.AppliedIngressIDs, ingestionID)
+	if len(state.AppliedIngressIDs) > maxAppliedIngressIDs {
+		state.AppliedIngressIDs = append([]string(nil), state.AppliedIngressIDs[len(state.AppliedIngressIDs)-maxAppliedIngressIDs:]...)
+	}
+	normalizeAppState(&state)
+	if err := s.persistPreparedStateLocked(state, ingestionID); err != nil {
+		return appState{}, false, err
+	}
+	return state, true, nil
+}
+
+func (s *configStore) writeAtomicFile(path string, data []byte) error {
+	if s.writeAtomically != nil {
+		return s.writeAtomically(path, data)
+	}
+	return writeFileAtomically(path, data)
+}
+
 func writeFileAtomically(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -746,11 +796,37 @@ func writeFileAtomically(path string, data []byte) error {
 		temporary.Close()
 		return fmt.Errorf("写入配置失败：%w", err)
 	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return fmt.Errorf("同步配置文件失败：%w", err)
+	}
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("关闭配置文件失败：%w", err)
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("替换配置文件失败：%w", err)
+	}
+	if err := syncStateDirectory(dir); err != nil {
+		return err
+	}
+	return nil
+}
+
+func syncStateDirectory(dir string) error {
+	directory, err := os.Open(dir)
+	if err != nil {
+		if runtime.GOOS == "windows" {
+			return nil
+		}
+		return fmt.Errorf("打开配置目录失败：%w", err)
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if syncErr != nil && runtime.GOOS != "windows" {
+		return fmt.Errorf("同步配置目录失败：%w", syncErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("关闭配置目录失败：%w", closeErr)
 	}
 	return nil
 }

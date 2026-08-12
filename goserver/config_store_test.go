@@ -107,7 +107,7 @@ func TestConfigStoreMigratesLegacyFileIntoShards(t *testing.T) {
 	}
 }
 
-func TestConfigStorePatchWritesOnlyAffectedShard(t *testing.T) {
+func TestConfigStorePatchCommitsAllTransactionShards(t *testing.T) {
 	dir := t.TempDir()
 	store := &configStore{path: filepath.Join(dir, "config.json")}
 	initial := `{
@@ -151,9 +151,12 @@ func TestConfigStorePatchWritesOnlyAffectedShard(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !info.ModTime().Equal(oldTime) {
-			t.Fatalf("unaffected shard %s was rewritten at %v", sidecar, info.ModTime())
+		if info.ModTime().Equal(oldTime) {
+			t.Fatalf("transaction shard %s was not rewritten", sidecar)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state-transaction.json")); !os.IsNotExist(err) {
+		t.Fatalf("completed transaction evidence was not removed: %v", err)
 	}
 }
 
@@ -580,6 +583,98 @@ func TestConfigStoreReconnectsOnlyWhenRoomChanges(t *testing.T) {
 	put(`{"roomId":"32025114","attributes":[],"rules":[]}`)
 	if changes != 2 {
 		t.Fatalf("room change callbacks = %d, want 2", changes)
+	}
+}
+
+func TestConfigStorePreservesInternalIngestionLedgersAcrossClientReplacement(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	initial := defaultAppState()
+	initial.AppliedIngressIDs = []string{"ingress-1"}
+	initial.RecentSourceGiftKeys = map[string]int64{"rnd-1": time.Now().UnixMilli()}
+	if err := store.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := defaultAppState()
+	replacement.RoomID = "200"
+	replaced, err := store.replaceClientState(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replaced.State.AppliedIngressIDs) != 1 || replaced.State.AppliedIngressIDs[0] != "ingress-1" {
+		t.Fatalf("applied ingress IDs = %#v", replaced.State.AppliedIngressIDs)
+	}
+	if _, exists := replaced.State.RecentSourceGiftKeys["rnd-1"]; !exists {
+		t.Fatalf("recent source keys = %#v", replaced.State.RecentSourceGiftKeys)
+	}
+
+	encoded, err := json.Marshal(replaced.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "appliedIngressIds") || strings.Contains(string(encoded), "recentSourceGiftKeys") {
+		t.Fatalf("internal ledgers leaked into client state: %s", encoded)
+	}
+	history, err := os.ReadFile(filepath.Join(dir, "history.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(history), "appliedIngressIds") || !strings.Contains(string(history), "recentSourceGiftKeys") {
+		t.Fatalf("internal ledgers missing from history shard: %s", history)
+	}
+}
+
+func TestUpdateStateForIngestionBoundsAppliedLedger(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	initial := defaultAppState()
+	initial.AppliedIngressIDs = make([]string, maxAppliedIngressIDs)
+	for index := range initial.AppliedIngressIDs {
+		initial.AppliedIngressIDs[index] = fmt.Sprintf("ingress-%04d", index)
+	}
+	if err := store.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+
+	state, applied, err := store.updateStateForIngestion("ingress-new", func(*appState) error { return nil })
+	if err != nil || !applied {
+		t.Fatalf("applied=%v err=%v", applied, err)
+	}
+	if len(state.AppliedIngressIDs) != maxAppliedIngressIDs {
+		t.Fatalf("applied ingress count = %d", len(state.AppliedIngressIDs))
+	}
+	if state.AppliedIngressIDs[0] != "ingress-0001" || state.AppliedIngressIDs[len(state.AppliedIngressIDs)-1] != "ingress-new" {
+		t.Fatalf("bounded applied ingress IDs = %#v", state.AppliedIngressIDs)
+	}
+}
+
+func TestConfigStorePrunesRecentSourceGiftKeysByAgeAndCount(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	initial := defaultAppState()
+	now := time.Now()
+	initial.RecentSourceGiftKeys = map[string]int64{"expired": now.Add(-2 * time.Minute).UnixMilli()}
+	for index := 0; index < 501; index++ {
+		initial.RecentSourceGiftKeys[fmt.Sprintf("recent-%03d", index)] = now.Add(-time.Duration(index) * time.Millisecond).UnixMilli()
+	}
+	if err := store.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.RecentSourceGiftKeys) != 500 {
+		t.Fatalf("recent source key count = %d, want 500", len(state.RecentSourceGiftKeys))
+	}
+	if _, exists := state.RecentSourceGiftKeys["expired"]; exists {
+		t.Fatal("expired source key was retained")
+	}
+	if _, exists := state.RecentSourceGiftKeys["recent-500"]; exists {
+		t.Fatal("oldest over-limit source key was retained")
+	}
+	if _, exists := state.RecentSourceGiftKeys["recent-000"]; !exists {
+		t.Fatal("newest source key was pruned")
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 )
 
 // Every persisted shard has its own version. Missing versions are treated as
@@ -47,11 +46,13 @@ type cacheStateShard struct {
 
 type historyStateShard struct {
 	// This version also governs the event schema used by events.log.
-	SchemaVersion      int                     `json:"schemaVersion"`
-	Stats              map[string]dayStats     `json:"stats"`
-	Contributions      contributionLedgerState `json:"contributions"`
-	GiftTargetProgress giftTargetProgressState `json:"giftTargetProgress"`
-	GiftReceipts       []giftReceipt           `json:"giftReceipts"`
+	SchemaVersion        int                     `json:"schemaVersion"`
+	Stats                map[string]dayStats     `json:"stats"`
+	Contributions        contributionLedgerState `json:"contributions"`
+	GiftTargetProgress   giftTargetProgressState `json:"giftTargetProgress"`
+	GiftReceipts         []giftReceipt           `json:"giftReceipts"`
+	AppliedIngressIDs    []string                `json:"appliedIngressIds,omitempty"`
+	RecentSourceGiftKeys map[string]int64        `json:"recentSourceGiftKeys,omitempty"`
 }
 
 func configShardFromState(state appState) configStateShard {
@@ -81,11 +82,13 @@ func cacheShardFromState(state appState) cacheStateShard {
 
 func historyShardFromState(state appState) historyStateShard {
 	return historyStateShard{
-		SchemaVersion:      stateShardSchemaVersion,
-		Stats:              state.Stats,
-		Contributions:      state.Contributions,
-		GiftTargetProgress: giftTargetProgressFromPanels(state.GiftKPIPanels),
-		GiftReceipts:       state.GiftReceipts,
+		SchemaVersion:        stateShardSchemaVersion,
+		Stats:                state.Stats,
+		Contributions:        state.Contributions,
+		GiftTargetProgress:   giftTargetProgressFromPanels(state.GiftKPIPanels),
+		GiftReceipts:         state.GiftReceipts,
+		AppliedIngressIDs:    state.AppliedIngressIDs,
+		RecentSourceGiftKeys: state.RecentSourceGiftKeys,
 	}
 }
 
@@ -101,11 +104,18 @@ func (s *configStore) eventLogPath() string {
 	return filepath.Join(filepath.Dir(s.path), "events.log")
 }
 
+func (s *configStore) stateTransactionPath() string {
+	return filepath.Join(filepath.Dir(s.path), "state-transaction.json")
+}
+
 func (s *configStore) statePaths() []string {
 	return []string{s.path, s.cachePath(), s.historyPath(), s.eventLogPath()}
 }
 
 func (s *configStore) hasStoredStateLocked() bool {
+	if _, err := os.Stat(s.stateTransactionPath()); err == nil {
+		return true
+	}
 	for _, path := range s.statePaths() {
 		if _, err := os.Stat(path); err == nil {
 			return true
@@ -115,6 +125,9 @@ func (s *configStore) hasStoredStateLocked() bool {
 }
 
 func (s *configStore) readStateLocked() (appState, error) {
+	if err := s.recoverPendingStateTransactionLocked(); err != nil {
+		return appState{}, err
+	}
 	state := defaultAppState()
 	configData, configExists, err := readOptionalStateFile(s.path)
 	if err != nil {
@@ -184,6 +197,8 @@ func (s *configStore) readStateLocked() (appState, error) {
 		state.Stats = history.Stats
 		state.Contributions = history.Contributions
 		state.GiftReceipts = history.GiftReceipts
+		state.AppliedIngressIDs = history.AppliedIngressIDs
+		state.RecentSourceGiftKeys = history.RecentSourceGiftKeys
 		applyGiftTargetProgress(state.GiftKPIPanels, history.GiftTargetProgress)
 	}
 
@@ -234,6 +249,11 @@ func cloneAppState(state appState) (appState, error) {
 	clone := defaultAppState()
 	if err := json.Unmarshal(data, &clone); err != nil {
 		return appState{}, fmt.Errorf("复制配置失败：%w", err)
+	}
+	clone.AppliedIngressIDs = append([]string(nil), state.AppliedIngressIDs...)
+	clone.RecentSourceGiftKeys = make(map[string]int64, len(state.RecentSourceGiftKeys))
+	for key, timestamp := range state.RecentSourceGiftKeys {
+		clone.RecentSourceGiftKeys[key] = timestamp
 	}
 	normalizeAppState(&clone)
 	return clone, nil
@@ -307,55 +327,29 @@ func readEventLog(path string) ([]logEntry, bool, error) {
 	return entries, true, nil
 }
 
-func (s *configStore) persistStateLocked(previous appState, state appState, force bool) error {
-	configPath := s.path
-	cachePath := s.cachePath()
-	historyPath := s.historyPath()
-	eventLogPath := s.eventLogPath()
-	configBefore, configAfter := configShardFromState(previous), configShardFromState(state)
-	cacheBefore, cacheAfter := cacheShardFromState(previous), cacheShardFromState(state)
-	historyBefore, historyAfter := historyShardFromState(previous), historyShardFromState(state)
-	writeAll := force || s.migrationRequired
-
-	configMissing := stateFileMissing(configPath)
-	cacheMissing := stateFileMissing(cachePath)
-	historyMissing := stateFileMissing(historyPath)
-	eventLogMissing := stateFileMissing(eventLogPath)
-	if writeAll || eventLogMissing || !reflect.DeepEqual(previous.Log, state.Log) {
-		if err := writeEventLog(eventLogPath, state.Log); err != nil {
-			return err
-		}
-	}
-	if writeAll || historyMissing || !reflect.DeepEqual(historyBefore, historyAfter) {
-		if err := writeStateShard(historyPath, historyAfter); err != nil {
-			return err
-		}
-	}
-	if writeAll || cacheMissing || !reflect.DeepEqual(cacheBefore, cacheAfter) {
-		if err := writeStateShard(cachePath, cacheAfter); err != nil {
-			return err
-		}
-	}
-	if writeAll || configMissing || !reflect.DeepEqual(configBefore, configAfter) {
-		if err := writeStateShard(configPath, configAfter); err != nil {
-			return err
-		}
-	}
-	s.migrationRequired = false
-	return nil
+func (s *configStore) persistStateLocked(_ appState, state appState, _ bool) error {
+	return s.persistPreparedStateLocked(state, "")
 }
 
 func writeEventLog(path string, entries []logEntry) error {
+	data, err := serializeEventLog(entries)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomically(path, data)
+}
+
+func serializeEventLog(entries []logEntry) ([]byte, error) {
 	data := make([]byte, 0, len(entries)*256)
 	for index := len(entries) - 1; index >= 0; index-- {
 		line, err := json.Marshal(entries[index])
 		if err != nil {
-			return fmt.Errorf("序列化送礼记录失败：%w", err)
+			return nil, fmt.Errorf("序列化送礼记录失败：%w", err)
 		}
 		data = append(data, line...)
 		data = append(data, '\n')
 	}
-	return writeFileAtomically(path, data)
+	return data, nil
 }
 
 func stateFileMissing(path string) bool {
@@ -364,11 +358,19 @@ func stateFileMissing(path string) bool {
 }
 
 func writeStateShard(path string, shard any) error {
+	data, err := serializeStateShard(shard)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomically(path, data)
+}
+
+func serializeStateShard(shard any) ([]byte, error) {
 	data, err := json.MarshalIndent(shard, "", "  ")
 	if err != nil {
-		return fmt.Errorf("序列化配置失败：%w", err)
+		return nil, fmt.Errorf("序列化配置失败：%w", err)
 	}
-	return writeFileAtomically(path, append(data, '\n'))
+	return append(data, '\n'), nil
 }
 
 func (s *configStore) migrateLegacy() error {
