@@ -232,6 +232,41 @@ func TestGiftClipJobStableFailureMessagesAndDiagnostics(t *testing.T) {
 	}
 }
 
+func TestGiftClipJobRefreshesQueuedEncoderModeBeforeEncode(t *testing.T) {
+	root := t.TempDir()
+	logger, err := newDiagnosticLogger(filepath.Join(root, "diagnostic.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoder := newSwitchingGiftClipJobEncoder()
+	manager := newGiftClipJobManager(filepath.Join(root, "tasks"), testGiftClipJobResolver{}, encoder, logger)
+	defer manager.Close()
+	first, err := manager.Create(context.Background(), "first", testGiftClipJobCrop(), testGiftClipJobPNG(t, false), testGiftClipJobPNG(t, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := <-encoder.started; got != first.ID {
+		t.Fatalf("first started = %q", got)
+	}
+	second, err := manager.Create(context.Background(), "second", testGiftClipJobCrop(), testGiftClipJobPNG(t, false), testGiftClipJobPNG(t, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(encoder.releaseFirst)
+	waitGiftClipJobState(t, manager, first.ID, giftClipJobReady)
+	waitGiftClipJobState(t, manager, second.ID, giftClipJobFailed)
+	logData, err := os.ReadFile(logger.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := giftClipJobDiagnosticLine(string(logData), second.ID)
+	for _, token := range []string{`phase="encode"`, `exit_class="encoder_error"`, `mode="software"`} {
+		if !strings.Contains(line, token) {
+			t.Fatalf("diagnostic line %q missing %q", line, token)
+		}
+	}
+}
+
 func TestGiftClipJobCreatePreservesLayerWriteDiskCause(t *testing.T) {
 	manager := newTestGiftClipJobManager(t, &immediateGiftClipJobEncoder{})
 	defer manager.Close()
@@ -553,6 +588,38 @@ func (encoder errorGiftClipJobEncoder) Encode(context.Context, giftClipEncodeReq
 	return encoder.err
 }
 
+type switchingGiftClipJobEncoder struct {
+	mu           sync.Mutex
+	mode         giftClipEncoderMode
+	calls        int
+	started      chan string
+	releaseFirst chan struct{}
+}
+
+func newSwitchingGiftClipJobEncoder() *switchingGiftClipJobEncoder {
+	return &switchingGiftClipJobEncoder{mode: giftClipEncoderHardware, started: make(chan string, 2), releaseFirst: make(chan struct{})}
+}
+func (encoder *switchingGiftClipJobEncoder) initialMode() giftClipEncoderMode {
+	encoder.mu.Lock()
+	defer encoder.mu.Unlock()
+	return encoder.mode
+}
+func (encoder *switchingGiftClipJobEncoder) Encode(_ context.Context, request giftClipEncodeRequest, _ func(giftClipEncodingUpdate)) error {
+	encoder.mu.Lock()
+	encoder.calls++
+	call := encoder.calls
+	encoder.mu.Unlock()
+	encoder.started <- filepath.Base(filepath.Dir(request.OutputPath))
+	if call == 1 {
+		<-encoder.releaseFirst
+		encoder.mu.Lock()
+		encoder.mode = giftClipEncoderSoftware
+		encoder.mu.Unlock()
+		return nil
+	}
+	return errors.New("encoder failed before progress")
+}
+
 type blockingGiftClipJobEncoder struct {
 	started   chan string
 	finish    chan error
@@ -673,6 +740,14 @@ func assertNoGiftClipJobValue[T any](t *testing.T, channel <-chan T, wait time.D
 		t.Fatalf("unexpected value: %#v", value)
 	case <-time.After(wait):
 	}
+}
+func giftClipJobDiagnosticLine(logText, id string) string {
+	for _, line := range strings.Split(logText, "\n") {
+		if strings.Contains(line, `task_id="`+id+`"`) {
+			return line
+		}
+	}
+	return ""
 }
 func waitGiftClipJobState(t *testing.T, manager *giftClipJobManager, id string, state giftClipJobState) giftClipJobSnapshot {
 	t.Helper()

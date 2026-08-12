@@ -89,7 +89,7 @@ type giftClipJobFailure struct {
 func (failure giftClipJobFailure) Error() string { return failure.message }
 func (failure giftClipJobFailure) Unwrap() error { return failure.cause }
 
-type giftClipEncoderModeSource interface {
+type giftClipEncoderModeProvider interface {
 	initialMode() giftClipEncoderMode
 }
 
@@ -202,7 +202,6 @@ func (manager *giftClipJobManager) Create(requestCtx context.Context, receiptID 
 		id: owned.id, receiptID: receiptID, crop: crop, state: giftClipJobQueued, message: "等待导出。",
 		dir: owned.path, outputPath: filepath.Join(owned.path, "clip.mp4"), cancel: jobCancel,
 		ctx: jobCtx, width: crop.Width, height: crop.Height, fps: giftClipFPS,
-		mode: initialGiftClipJobEncoderMode(manager.encoder),
 	}
 	manager.childCount++
 	manager.jobs[owned.id] = job
@@ -408,6 +407,7 @@ func (manager *giftClipJobManager) encode(id string) {
 			}
 			manager.mu.Unlock()
 			phase = giftClipJobPhaseEncode
+			manager.refreshEncoderMode(id)
 			if err = ctx.Err(); err == nil {
 				err = manager.encoder.Encode(ctx, giftClipEncodeRequest{
 					Source: source, Crop: crop, Profile: profile,
@@ -624,10 +624,19 @@ func isGiftClipDiskFull(err error) bool {
 }
 
 func initialGiftClipJobEncoderMode(encoder giftClipEncoder) giftClipEncoderMode {
-	if source, ok := encoder.(giftClipEncoderModeSource); ok {
-		return source.initialMode()
+	if provider, ok := encoder.(giftClipEncoderModeProvider); ok {
+		return provider.initialMode()
 	}
 	return giftClipDefaultEncoderMode
+}
+
+func (manager *giftClipJobManager) refreshEncoderMode(id string) {
+	mode := initialGiftClipJobEncoderMode(manager.encoder)
+	manager.mu.Lock()
+	if job, ok := manager.jobs[id]; ok && job.state != giftClipJobCancelled {
+		job.mode = mode
+	}
+	manager.mu.Unlock()
 }
 
 func (manager *giftClipJobManager) releaseJobLocked(job *giftClipJob) {
