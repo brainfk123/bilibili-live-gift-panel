@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,53 @@ import (
 	"testing"
 	"time"
 )
+
+func TestNewMainGiftClipJobsStopsOnPayloadFailure(t *testing.T) {
+	want := errors.New("payload unavailable")
+	called := false
+	jobs, err := newMainGiftClipJobs(nil, nil, nil,
+		func(string) (*giftClipPayload, error) { return nil, want },
+		func(string, giftClipSourceResolver, giftClipEncoder, *diagnosticLogger) *giftClipJobManager {
+			called = true
+			return nil
+		},
+	)
+	if !errors.Is(err, want) || jobs != nil || called {
+		t.Fatalf("jobs=%v err=%v managerCalled=%v", jobs, err, called)
+	}
+}
+
+func TestNewMainGiftClipJobsSharesGiftMediaWithoutStartingEncoder(t *testing.T) {
+	media := &giftReceiptAPI{}
+	payload := &giftClipPayload{}
+	called := false
+	jobs, err := newMainGiftClipJobs(&configStore{}, media, nil,
+		func(string) (*giftClipPayload, error) { return payload, nil },
+		func(_ string, resolver giftClipSourceResolver, encoder giftClipEncoder, _ *diagnosticLogger) *giftClipJobManager {
+			called = true
+			resolved, ok := resolver.(*receiptGiftClipSourceResolver)
+			if !ok || resolved.media != media {
+				t.Fatalf("resolver=%T media=%p want=%p", resolver, resolved.media, media)
+			}
+			ffmpeg, ok := encoder.(*giftClipFFmpegEncoder)
+			if !ok || ffmpeg.payload != payload {
+				t.Fatalf("encoder=%T payload=%p want=%p", encoder, ffmpeg.payload, payload)
+			}
+			return nil
+		},
+	)
+	if err != nil || jobs != nil || !called {
+		t.Fatalf("jobs=%v err=%v managerCalled=%v", jobs, err, called)
+	}
+}
+
+func TestMainGiftClipShutdownOrdersRuntimeJobsServer(t *testing.T) {
+	order := []string{}
+	runMainGiftClipShutdown(func() { order = append(order, "runtime") }, func() { order = append(order, "jobs") }, func() { order = append(order, "server") })
+	if got := strings.Join(order, ","); got != "runtime,jobs,server" {
+		t.Fatalf("shutdown order=%q", got)
+	}
+}
 
 func TestFormulaPreviewUsesSelectedGiftPrice(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}

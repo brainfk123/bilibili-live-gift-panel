@@ -109,6 +109,21 @@ func announceStartup(notifications *notificationCenter, installedVersion string)
 	return true
 }
 
+func newMainGiftClipJobs(store *configStore, media *giftReceiptAPI, diagnostics *diagnosticLogger, loadPayload func(string) (*giftClipPayload, error), newManager func(string, giftClipSourceResolver, giftClipEncoder, *diagnosticLogger) *giftClipJobManager) (*giftClipJobManager, error) {
+	payload, err := loadPayload(defaultGiftClipCacheRoot())
+	if err != nil {
+		return nil, err
+	}
+	encoder := newGiftClipFFmpegEncoder(payload, newGiftClipProcessRunner(), diagnostics, giftClipFFmpegEncoderOptions{})
+	return newManager(defaultGiftClipTaskRoot(), newGiftClipSourceResolver(store, media), encoder, diagnostics), nil
+}
+
+func runMainGiftClipShutdown(stopRuntime, closeGiftClips, closeServer func()) {
+	stopRuntime()
+	closeGiftClips()
+	closeServer()
+}
+
 func main() {
 	if handled, updateErr := runUpdateHelper(os.Args[1:]); handled {
 		if updateErr != nil {
@@ -164,6 +179,13 @@ func main() {
 		diagnostics.Info("service_start", "version", appVersion)
 		defer diagnostics.Info("service_stop", "version", appVersion)
 	}
+	giftMedia := newGiftReceiptAPI(store, nil)
+	giftClips, err := newMainGiftClipJobs(store, giftMedia, diagnostics, embeddedGiftClipPayload, newGiftClipJobManager)
+	if err != nil {
+		showStartupError(err.Error())
+		return
+	}
+	defer giftClips.Close()
 	loginStore, err := newDefaultLoginCredentialStore()
 	if err != nil {
 		showStartupError(err.Error())
@@ -174,6 +196,7 @@ func main() {
 	updater := newDefaultAutoUpdater(store)
 	installedVersion := updater.ConsumeInstalledVersion()
 	if installedVersion == "" && updater.HasPending() {
+		giftClips.Close()
 		if err := updater.InstallOnExit(true); err != nil {
 			showStartupError(err.Error())
 		}
@@ -227,9 +250,11 @@ func main() {
 	mux.HandleFunc("/api/activities/transition", handleActivityTransition(store))
 	mux.HandleFunc("/api/blind-box", handleBlindBoxInfo(login))
 	mux.HandleFunc("/api/gifts", handleRoomGiftCatalog(login))
-	giftReceiptAPI := newGiftReceiptAPI(store, nil)
-	mux.HandleFunc("/api/gift-receipts", giftReceiptAPI.handleReceipts)
-	mux.HandleFunc("/api/gift-receipts/media", giftReceiptAPI.handleMedia)
+	mux.HandleFunc("/api/gift-receipts", giftMedia.handleReceipts)
+	mux.HandleFunc("/api/gift-receipts/media", giftMedia.handleMedia)
+	giftClipAPI := newGiftClipHTTPHandler(giftClips)
+	mux.Handle("/api/gift-clips", giftClipAPI)
+	mux.Handle("/api/gift-clips/", giftClipAPI)
 	mux.HandleFunc("/api/update", updater.handleStatus)
 	mux.HandleFunc("/api/update/check", updater.handleCheck)
 	mux.HandleFunc("/api/changelog", newHostedChangelogHandler(nil, hostedChangelogURL))
@@ -282,10 +307,9 @@ func main() {
 		diagnostics.Error("tray_failed", "error", trayErr)
 		showStartupError(fmt.Sprintf("系统托盘启动失败：%v", trayErr))
 	}
-	stopRuntime()
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = server.Shutdown(shutdownContext)
+	runMainGiftClipShutdown(stopRuntime, giftClips.Close, func() { _ = server.Shutdown(shutdownContext) })
 	if err := updater.InstallOnExit(restartAfterUpdate); err != nil {
 		diagnostics.Error("update_install_failed", "error", err)
 		showStartupError(err.Error())
