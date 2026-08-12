@@ -344,6 +344,27 @@ func TestGiftClipEncoderDoesNotTryAThirdTimeWhenSoftwareFails(t *testing.T) {
 	}
 }
 
+func TestGiftClipEncoderStopsAfterRetryNotificationCancelsContext(t *testing.T) {
+	if giftClipDefaultEncoderMode != giftClipEncoderHardware {
+		t.Skip("hardware fallback is a Windows-only default")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runner := &fakeGiftClipRunner{results: []fakeRunResult{{stderr: "Error initializing h264_mf hardware encoder", err: errors.New("exit 1")}}}
+	encoder := newGiftClipFFmpegEncoder(testGiftClipPayload(t), runner, nil, giftClipFFmpegEncoderOptions{})
+	err := encoder.Encode(ctx, giftClipEncodeFixture(testGiftClipSource()), func(update giftClipEncodingUpdate) {
+		if update.Retrying {
+			cancel()
+		}
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Encode error = %v, want context cancellation", err)
+	}
+	if got := len(runner.hardwareFlags()); got != 1 {
+		t.Fatalf("runs = %d, want 1", got)
+	}
+}
+
 func TestGiftClipEncoderPublishesMonotonicStdoutProgress(t *testing.T) {
 	runner := &fakeGiftClipRunner{results: []fakeRunResult{{stdout: "out_time_us=500000\nout_time_us=400000\nout_time_us=2500000\nprogress=end\n"}}}
 	encoder := newGiftClipFFmpegEncoder(testGiftClipPayload(t), runner, nil, giftClipFFmpegEncoderOptions{})
@@ -372,6 +393,27 @@ func TestGiftClipEncoderTruncatesAndSanitizesDiagnosticStderr(t *testing.T) {
 	data := logger.exportBytes()
 	if bytes.Contains(data, []byte(`C:\private\source.gif`)) || len(data) > 2*1024 {
 		t.Fatalf("diagnostic leaked path or excessive stderr: %d bytes", len(data))
+	}
+}
+
+func TestSanitizeGiftClipDiagnosticStderrRedactsWindowsAbsolutePaths(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		path string
+	}{
+		{name: "drive path with spaces", path: `C:\\private folder\\source gif.gif`},
+		{name: "quoted drive path", path: `"C:\\private folder\\source gif.gif"`},
+		{name: "UNC path with spaces", path: `\\\\server name\\share name\\source gif.gif`},
+		{name: "extended path", path: `\\\\?\\C:\\private folder\\source gif.gif`},
+		{name: "device path", path: `\\\\.\\C:\\private folder\\source gif.gif`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := "ffmpeg failed at " + test.path + " while encoding"
+			got := sanitizeGiftClipDiagnosticStderr(input)
+			if strings.Contains(got, test.path) || !strings.Contains(got, "[PATH]") {
+				t.Fatalf("sanitizeGiftClipDiagnosticStderr(%q) = %q", input, got)
+			}
+		})
 	}
 }
 

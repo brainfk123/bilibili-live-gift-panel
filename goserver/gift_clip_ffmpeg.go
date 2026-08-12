@@ -96,6 +96,9 @@ func (encoder *giftClipFFmpegEncoder) Encode(ctx context.Context, request giftCl
 	if notify != nil {
 		notify(giftClipEncodingUpdate{Mode: giftClipEncoderSoftware, Retrying: true})
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	err, _ = encoder.runAttempt(ctx, path, request, giftClipEncoderSoftware, notify)
 	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
@@ -181,7 +184,7 @@ func (tail *giftClipStderrTail) String() string {
 	return string(tail.buffer)
 }
 
-var giftClipDiagnosticPathPattern = regexp.MustCompile(`(?i)(?:[a-z]:[\\/][^\t\r\n "'<>|]+|/(?:[^\t\r\n "'<>|]+/?)+)`)
+var giftClipDiagnosticPathPattern = regexp.MustCompile(`(?i)(?:\\\\[?.][\\/](?:[^\r\n"']|"[^"]*")*|\\\\[^\\/\r\n]+[\\/](?:[^\r\n"']|"[^"]*")*|[a-z]:[\\/](?:[^\r\n"']|"[^"]*")*|/(?:[^\t\r\n "'<>|]+/?)+)`)
 
 func sanitizeGiftClipDiagnosticStderr(stderr string) string {
 	return giftClipDiagnosticPathPattern.ReplaceAllString(stderr, "[PATH]")
