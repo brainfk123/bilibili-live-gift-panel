@@ -2894,6 +2894,7 @@ export function mountConfig(root: HTMLElement): void {
     valueInput.inputMode = 'decimal';
     const initialEditableValue = Number(valueInput.value);
     let simulationDraftValue = Number.isFinite(initialEditableValue) ? initialEditableValue : 0;
+    let simulationGeneration = 0;
     const formatSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
     formatSelect.innerHTML = '<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字 + 后缀</option>';
     formatSelect.value = original?.format ?? 'hhmmss';
@@ -3594,11 +3595,12 @@ export function mountConfig(root: HTMLElement): void {
           ? simulationDraftValue
           : Number.isFinite(inputValue) ? inputValue : 0;
         const requestVersion = ++previewVersion;
+        const requestSimulationGeneration = completeLesson ? ++simulationGeneration : 0;
         preview.append(el('span', { text: '由后台计算预览…' }));
         void previewFormula(formula, name, currentValue, 'gift', item.gift.price).then((result) => {
           if (requestVersion !== previewVersion) return;
           if (completeLesson) {
-            simulationDraftValue = result;
+            if (requestSimulationGeneration === simulationGeneration) simulationDraftValue = result;
             item.simulationPreview = { currentValue, result };
           }
           let awaitingConfirmation = false;

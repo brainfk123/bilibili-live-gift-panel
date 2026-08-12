@@ -2190,6 +2190,62 @@ describe('single-page configuration rendering', () => {
     expect(loadState().attributes[0].value).toBe(0);
   });
 
+  it('ignores an older gift-rule response when advancing the shared simulation draft', async () => {
+    const [firstGift, secondGift] = builtinCatalog;
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state('88888888'),
+      rules: [
+        {
+          id: 'r-preview-a', giftId: firstGift.id, attributeName: '加班时间',
+          formulaName: '模拟 A', formula: '加班时间+1', enabled: true,
+        },
+        {
+          id: 'r-preview-b', giftId: secondGift.id, attributeName: '加班时间',
+          formulaName: '模拟 B', formula: '加班时间+10', enabled: true,
+        },
+      ],
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelectorAll('.formula-preview')
+      .every((preview) => textOf(preview).includes('预览收到'))).toBe(true));
+
+    const fallbackFetch = globalThis.fetch;
+    let resolveFirst!: (response: Response) => void;
+    let resolveSecond!: (response: Response) => void;
+    const firstPreview = new Promise<Response>((resolve) => { resolveFirst = resolve; });
+    const secondPreview = new Promise<Response>((resolve) => { resolveSecond = resolve; });
+    const requestedValues: number[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { attributeValue: number };
+      requestedValues.push(body.attributeValue);
+      if (requestedValues.length === 1) return firstPreview;
+      if (requestedValues.length === 2) return secondPreview;
+      return Response.json({ code: 0, result: body.attributeValue + 10 });
+    }));
+
+    const rows = root.querySelectorAll('.selected-gift-rule');
+    const firstSimulate = findByText(rows[0], '模拟收到 1 个')!;
+    const secondSimulate = findByText(rows[1], '模拟收到 1 个')!;
+    firstSimulate.onclick?.();
+    secondSimulate.onclick?.();
+    expect(requestedValues).toEqual([0, 0]);
+
+    resolveSecond(Response.json({ code: 0, result: 10 }));
+    await vi.waitFor(() => expect(textOf(rows[1].querySelector('.formula-preview')!)).toContain('0 → 10'));
+    resolveFirst(Response.json({ code: 0, result: 1 }));
+    await vi.waitFor(() => expect(textOf(rows[0].querySelector('.formula-preview')!)).toContain('0 → 1'));
+
+    secondSimulate.onclick?.();
+    await vi.waitFor(() => expect(textOf(rows[1].querySelector('.formula-preview')!)).toContain('10 → 20'));
+    expect(requestedValues).toEqual([0, 0, 10]);
+  });
+
   it('configures a conditional backend timer without adding it to the OBS gift grid', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
     const root = new TestElement('div');
