@@ -3188,6 +3188,7 @@ export function mountConfig(root: HTMLElement): void {
       const editor = el('article', { class: 'timer-rule-editor' });
       const removeButton = el('button', { class: 'rule-remove', type: 'button', text: '移除' }) as HTMLButtonElement;
       removeButton.onclick = () => {
+        simulationGeneration += 1;
         const timerIndex = timerRules.findIndex((candidate) => candidate.id === rule.id);
         if (timerIndex >= 0) timerRules.splice(timerIndex, 1);
         editorTutorialProgress.timerCount = timerRules.length;
@@ -3264,10 +3265,7 @@ export function mountConfig(root: HTMLElement): void {
       const updatePreview = (completeLesson = false): void => {
         rule.formula = formulaInput.value;
         const name = nameInput.value.trim() || originalName || '属性';
-        const inputValue = Number(valueInput.value);
-        const currentValue = completeLesson
-          ? simulationDraftValue
-          : Number.isFinite(inputValue) ? inputValue : 0;
+        const currentValue = simulationDraftValue;
         const condition = originalName && originalName !== name
           ? replaceFormulaVariable((rule.condition ?? '').trim(), originalName, name)
           : (rule.condition ?? '').trim();
@@ -3534,6 +3532,7 @@ export function mountConfig(root: HTMLElement): void {
       row.dataset.giftId = String(item.gift.id);
       const removeButton = el('button', { class: 'rule-remove', type: 'button', text: '移除' }) as HTMLButtonElement;
       removeButton.onclick = () => {
+        simulationGeneration += 1;
         selected.delete(item.gift.id);
         editorTutorialProgress.giftCount = selected.size;
         editorTutorialProgress.giftPreviewed = false;
@@ -3602,13 +3601,10 @@ export function mountConfig(root: HTMLElement): void {
         preview.classList.remove('has-tutorial-confirmation');
         preview.replaceChildren();
         const name = nameInput.value.trim() || originalName || '属性';
-        const inputValue = Number(valueInput.value);
         const formula = originalName && originalName !== name
           ? replaceFormulaVariable(item.formula.trim(), originalName, name)
           : item.formula.trim();
-        const currentValue = completeLesson
-          ? simulationDraftValue
-          : Number.isFinite(inputValue) ? inputValue : 0;
+        const currentValue = simulationDraftValue;
         const requestVersion = ++previewVersion;
         const requestSimulationGeneration = completeLesson ? ++simulationGeneration : 0;
         preview.append(el('span', { text: '由后台计算预览…' }));
