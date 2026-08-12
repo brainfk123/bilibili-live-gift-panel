@@ -9,10 +9,11 @@ import (
 )
 
 type fakeBiliSocket struct {
-	reads     [][]byte
-	readErr   error
-	writes    [][]byte
-	deadlines []time.Time
+	reads       [][]byte
+	readErr     error
+	writes      [][]byte
+	deadlines   []time.Time
+	deadlineErr error
 }
 
 func (socket *fakeBiliSocket) ReadMessage() (int, []byte, error) {
@@ -29,7 +30,7 @@ func (socket *fakeBiliSocket) WriteMessage(_ int, payload []byte) error {
 }
 func (socket *fakeBiliSocket) SetReadDeadline(deadline time.Time) error {
 	socket.deadlines = append(socket.deadlines, deadline)
-	return nil
+	return socket.deadlineErr
 }
 func (*fakeBiliSocket) Close() error { return nil }
 
@@ -79,6 +80,14 @@ func TestBilibiliSourceReturnsHeartbeatFailureOnce(t *testing.T) {
 	err := source.runSocket(context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{})
 	if connectionFailureKind(err) != "heartbeat" {
 		t.Fatalf("failure kind = %q, want heartbeat (error %v)", connectionFailureKind(err), err)
+	}
+}
+
+func TestBilibiliSourceReturnsReadDeadlineFailure(t *testing.T) {
+	socket := &fakeBiliSocket{deadlineErr: errors.New("deadline failed")}
+	err := (&bilibiliGiftSource{}).runSocket(context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{})
+	if connectionFailureKind(err) != "deadline" {
+		t.Fatalf("failure kind = %q, want deadline (error %v)", connectionFailureKind(err), err)
 	}
 }
 

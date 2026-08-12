@@ -152,10 +152,14 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 			}
 			continue
 		}
-		runtime.setConnectionGaps(nil)
+		previousStatus := runtime.Status()
+		if previousStatus.RoomID != roomID {
+			runtime.setConnectionGaps(nil)
+		}
 		connectionContext, cancel := context.WithCancel(ctx)
 		finished := make(chan error, 1)
 		supervisor := newConnectionSupervisor(runtime.sourceFactory)
+		supervisor.gaps = append([]connectionGap(nil), runtime.Status().ConnectionGaps...)
 		supervisor.onGap = runtime.setConnectionGaps
 		supervisor.onFailure = func(err error) {
 			runtime.setStatus("reconnecting", roomID, err)

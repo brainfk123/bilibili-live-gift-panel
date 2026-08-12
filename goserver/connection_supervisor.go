@@ -23,10 +23,10 @@ type connectionFailure struct {
 }
 
 func (failure *connectionFailure) Error() string {
-	if failure == nil || failure.err == nil {
+	if failure == nil {
 		return "connection failure"
 	}
-	return failure.err.Error()
+	return "connection " + safeConnectionFailureKind(failure.kind) + " failure"
 }
 
 func (failure *connectionFailure) Unwrap() error { return failure.err }
@@ -38,9 +38,18 @@ func newConnectionFailure(kind string, err error) error {
 func connectionFailureKind(err error) string {
 	var failure *connectionFailure
 	if errors.As(err, &failure) && failure.kind != "" {
-		return failure.kind
+		return safeConnectionFailureKind(failure.kind)
 	}
 	return "connection"
+}
+
+func safeConnectionFailureKind(kind string) string {
+	switch kind {
+	case "auth", "connection", "deadline", "dial", "heartbeat", "read", "source", "write":
+		return kind
+	default:
+		return "connection"
+	}
 }
 
 func reconnectDelay(failureCount int, jitter func(time.Duration) time.Duration) time.Duration {
@@ -52,7 +61,14 @@ func reconnectDelay(failureCount int, jitter func(time.Duration) time.Duration) 
 	if delay == 0 || jitter == nil {
 		return delay
 	}
-	return jitter(delay)
+	delay = jitter(delay)
+	if delay < 0 {
+		return 0
+	}
+	if delay > 30*time.Second {
+		return 30 * time.Second
+	}
+	return delay
 }
 
 // connectionSupervisor is the sole owner that creates and starts gift sources.
@@ -60,6 +76,7 @@ func reconnectDelay(failureCount int, jitter func(time.Duration) time.Duration) 
 type connectionSupervisor struct {
 	sourceFactory func() giftEventSource
 	wait          func(context.Context, time.Duration) bool
+	jitter        func(time.Duration) time.Duration
 	now           func() time.Time
 	maxGaps       int
 	onGap         func([]connectionGap)
@@ -82,6 +99,7 @@ func newConnectionSupervisor(sourceFactory func() giftEventSource) *connectionSu
 				return true
 			}
 		},
+		jitter:  func(delay time.Duration) time.Duration { return delay },
 		now:     time.Now,
 		maxGaps: defaultConnectionGapLimit,
 		gaps:    []connectionGap{},
@@ -98,13 +116,11 @@ func (supervisor *connectionSupervisor) Run(ctx context.Context, roomID string, 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		connected := false
 		wrapped := callbacks
 		previousOnState := callbacks.onState
 		wrapped.onState = func(state string) {
 			if state == "connected" {
 				stateMu.Lock()
-				connected = true
 				failureCount = 0
 				stateMu.Unlock()
 				supervisor.closeConnectionGap(supervisor.now())
@@ -126,8 +142,7 @@ func (supervisor *connectionSupervisor) Run(ctx context.Context, roomID string, 
 			err = newConnectionFailure("connection", errors.New("gift source stopped unexpectedly"))
 		}
 		stateMu.Lock()
-		wasConnected := connected
-		delay := reconnectDelay(failureCount, nil)
+		delay := reconnectDelay(failureCount, supervisor.jitter)
 		stateMu.Unlock()
 		supervisor.recordConnectionGap(supervisor.now(), err)
 		if supervisor.onFailure != nil {
@@ -139,11 +154,9 @@ func (supervisor *connectionSupervisor) Run(ctx context.Context, roomID string, 
 			}
 			return nil
 		}
-		if !wasConnected {
-			stateMu.Lock()
-			failureCount++
-			stateMu.Unlock()
-		}
+		stateMu.Lock()
+		failureCount++
+		stateMu.Unlock()
 	}
 }
 
@@ -160,9 +173,7 @@ func (supervisor *connectionSupervisor) recordConnectionGap(now time.Time, err e
 	}
 	gap := &supervisor.gaps[len(supervisor.gaps)-1]
 	gap.Attempts++
-	if gap.ErrorKind == "connection" {
-		gap.ErrorKind = connectionFailureKind(err)
-	}
+	gap.ErrorKind = connectionFailureKind(err)
 	supervisor.trimGapsLocked()
 	gaps := append([]connectionGap(nil), supervisor.gaps...)
 	supervisor.mu.Unlock()

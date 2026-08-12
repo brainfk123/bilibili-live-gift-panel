@@ -84,14 +84,14 @@ func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callba
 			session = authenticated
 		}
 	}
-	info, err := getRoomInfoWithSession(roomID, session)
+	info, err := getRoomInfoWithSessionContext(ctx, roomID, session)
 	if err != nil {
-		return err
+		return newConnectionFailure("source", err)
 	}
 	session = sessionForRoomInfo(info, session)
 	catalogByID := map[int]roomGiftInfo{}
 	effectsByID := map[int]giftEffectResource{}
-	if resources, catalogErr := fetchCurrentRoomGiftResources(roomID, session); catalogErr == nil {
+	if resources, catalogErr := fetchCurrentRoomGiftResourcesContext(ctx, roomID, session); catalogErr == nil {
 		for _, gift := range resources.Gifts {
 			catalogByID[gift.ID] = gift
 		}
@@ -143,7 +143,9 @@ func (source *bilibiliGiftSource) runSocket(ctx context.Context, connection bili
 	if err := write(encodeBiliPacket(biliOpAuth, auth)); err != nil {
 		return newConnectionFailure("write", err)
 	}
-	_ = connection.SetReadDeadline(time.Now().Add(readTimeout))
+	if err := connection.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+		return newConnectionFailure("deadline", err)
+	}
 
 	done := make(chan struct{})
 	defer close(done)
@@ -184,7 +186,9 @@ func (source *bilibiliGiftSource) runSocket(ctx context.Context, connection bili
 				return newConnectionFailure("read", err)
 			}
 		}
-		_ = connection.SetReadDeadline(time.Now().Add(readTimeout))
+		if err := connection.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+			return newConnectionFailure("deadline", err)
+		}
 		for _, packet := range decodeBiliPackets(payload) {
 			if packet.operation == biliOpAuthReply {
 				var reply struct {

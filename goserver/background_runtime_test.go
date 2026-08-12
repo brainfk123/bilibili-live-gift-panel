@@ -684,14 +684,21 @@ func TestBackgroundRuntimeConsumerWaitsForPreparationBeforeSettlingAndAcknowledg
 		allowClaim:       make(chan struct{}),
 		released:         make(chan struct{}),
 	}
-	allowPreparation := make(chan struct{})
+	preparationWriteStarted := make(chan struct{})
+	allowPreparationWrite := make(chan struct{})
 	var allowPreparationOnce sync.Once
-	allowRoomPreparation := func() { allowPreparationOnce.Do(func() { close(allowPreparation) }) }
+	allowRoomPreparation := func() { allowPreparationOnce.Do(func() { close(allowPreparationWrite) }) }
 	sourceStarted := make(chan struct{})
+	sourceConstructed := make(chan struct{})
 	runtime := newBackgroundRuntime(store, func() giftEventSource {
-		<-allowPreparation
+		close(sourceConstructed)
 		return &signalingStableSource{started: sourceStarted}
 	})
+	runtime.animationWriteAtomically = func(path string, data []byte) error {
+		close(preparationWriteStarted)
+		<-allowPreparationWrite
+		return writeFileAtomically(path, data)
+	}
 	runtime.inbox = inbox
 	resolver := &blockingUserProfileResolver{started: make(chan struct{}), release: make(chan struct{})}
 	runtime.profileResolver = resolver
@@ -708,20 +715,39 @@ func TestBackgroundRuntimeConsumerWaitsForPreparationBeforeSettlingAndAcknowledg
 	case <-time.After(time.Second):
 		t.Fatal("consumer did not claim the pending target-room record")
 	}
+	select {
+	case <-preparationWriteStarted:
+	case <-time.After(time.Second):
+		t.Fatal("room preparation did not begin")
+	}
 	close(inbox.allowClaim)
 	select {
 	case <-inbox.released:
 	case <-resolver.started:
 		t.Fatal("consumer began target-room settlement before room preparation")
-	case <-time.After(time.Second):
-		t.Fatal("consumer neither deferred the claim nor began settlement")
+	case <-time.After(50 * time.Millisecond):
+		// The durable preparation writer may hold animationMu while the consumer
+		// waits to inspect the prepared-room marker. Either that wait or release
+		// is valid; settlement is not.
 	}
 	if realInbox.Health().PendingCount != 1 {
 		t.Fatalf("record acknowledged before preparation: pending=%d", realInbox.Health().PendingCount)
 	}
 	assertRuntimeAttributeValue(t, store, "积分", 0)
+	select {
+	case <-sourceConstructed:
+		t.Fatal("source factory ran before durable room preparation")
+	case <-sourceStarted:
+		t.Fatal("source Run started before durable room preparation")
+	default:
+	}
 
 	allowRoomPreparation()
+	select {
+	case <-sourceConstructed:
+	case <-time.After(time.Second):
+		t.Fatal("source factory did not run after preparation")
+	}
 	select {
 	case <-sourceStarted:
 	case <-time.After(time.Second):
@@ -1202,6 +1228,33 @@ type callbackDuringShutdownSource struct {
 
 type stableConnectedSource struct{}
 
+type reloadGapSource struct {
+	attempts atomic.Int32
+}
+
+type roomChangeJoiningSource struct {
+	started chan string
+	exited  chan string
+}
+
+func (source *roomChangeJoiningSource) Run(ctx context.Context, roomID string, callbacks runtimeCallbacks) error {
+	callbacks.onState("connected")
+	source.started <- roomID
+	<-ctx.Done()
+	source.exited <- roomID
+	return ctx.Err()
+}
+
+func (source *reloadGapSource) Run(ctx context.Context, _ string, callbacks runtimeCallbacks) error {
+	attempt := source.attempts.Add(1)
+	callbacks.onState("connected")
+	if attempt == 1 {
+		return newConnectionFailure("read", errors.New("first connection lost"))
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 type signalingStableSource struct {
 	started chan struct{}
 }
@@ -1229,6 +1282,122 @@ func (*stableConnectedSource) Run(ctx context.Context, _ string, callbacks runti
 	callbacks.onState("connected")
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+func TestBackgroundRuntimePreservesConnectionGapsAcrossSameRoomReload(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-a"
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	source := &reloadGapSource{}
+	runtime := newBackgroundRuntime(store, func() giftEventSource { return source })
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	defer func() {
+		cancel()
+		<-done
+	}()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		gaps := runtime.Status().ConnectionGaps
+		if len(gaps) == 1 && gaps[0].EndedAt != 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if gaps := runtime.Status().ConnectionGaps; len(gaps) != 1 || gaps[0].EndedAt == 0 {
+		t.Fatalf("initial completed gap = %#v", gaps)
+	}
+	runtime.NotifyConfigChanged()
+	for time.Now().Before(deadline) {
+		if source.attempts.Load() >= 3 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if source.attempts.Load() < 3 {
+		t.Fatal("same-room reload did not replace the old supervisor")
+	}
+	if gaps := runtime.Status().ConnectionGaps; len(gaps) != 1 || gaps[0].EndedAt == 0 {
+		t.Fatalf("same-room reload erased gap history: %#v", gaps)
+	}
+}
+
+func TestBackgroundRuntimePublishesSafeConnectionFailureOnly(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-a"
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, func() giftEventSource {
+		return giftEventSourceFunc(func(context.Context, string, runtimeCallbacks) error {
+			return newConnectionFailure("read", errors.New("https://user:secret@example.test/path?token=private response body"))
+		})
+	})
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	defer func() {
+		cancel()
+		<-done
+	}()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		status := runtime.Status()
+		if status.State == "reconnecting" && status.LastError != "" {
+			if strings.Contains(status.LastError, "secret") || strings.Contains(status.LastError, "https://") || strings.Contains(status.LastError, "private") {
+				t.Fatalf("unsafe API-shaped runtime status: %#v", status)
+			}
+			if status.LastError != "connection read failure" {
+				t.Fatalf("last error = %q, want safe read category", status.LastError)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("runtime did not publish a reconnecting status: %#v", runtime.Status())
+}
+
+func TestBackgroundRuntimeRoomChangeCancelsAndJoinsOldSupervisor(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-a"
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	source := &roomChangeJoiningSource{started: make(chan string, 2), exited: make(chan string, 2)}
+	runtime := newBackgroundRuntime(store, func() giftEventSource { return source })
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	defer func() {
+		cancel()
+		<-done
+	}()
+	if room := <-source.started; room != "room-a" {
+		t.Fatalf("initial room = %q, want room-a", room)
+	}
+	if _, err := store.updateState(func(state *appState) error {
+		state.RoomID = "room-b"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runtime.NotifyConfigChanged()
+	select {
+	case room := <-source.exited:
+		if room != "room-a" {
+			t.Fatalf("cancelled room = %q, want room-a", room)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("room change did not join old source")
+	}
+	select {
+	case room := <-source.started:
+		if room != "room-b" {
+			t.Fatalf("replacement room = %q, want room-b", room)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("room change did not start target source")
+	}
 }
 
 func (source *callbackDuringShutdownSource) Run(ctx context.Context, _ string, callbacks runtimeCallbacks) error {

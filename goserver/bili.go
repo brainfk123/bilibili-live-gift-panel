@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -25,8 +26,16 @@ var wbiKeyCache struct {
 	expireAt time.Time
 }
 
+const defaultBiliHTTPTimeout = 45 * time.Second
+
+var biliHTTPClient = &http.Client{Timeout: defaultBiliHTTPTimeout}
+
 func fetchJSON(rawURL string, headers map[string]string) (map[string]any, error) {
-	req, err := http.NewRequest("GET", rawURL, nil)
+	return fetchJSONContext(context.Background(), rawURL, headers)
+}
+
+func fetchJSONContext(ctx context.Context, rawURL string, headers map[string]string) (map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -35,7 +44,7 @@ func fetchJSON(rawURL string, headers map[string]string) (map[string]any, error)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := biliHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -67,11 +76,15 @@ func extractWbiKey(imgURL, subURL string) string {
 }
 
 func getWbiKey() (string, error) {
+	return getWbiKeyContext(context.Background())
+}
+
+func getWbiKeyContext(ctx context.Context) (string, error) {
 	now := time.Now()
 	if wbiKeyCache.key != "" && now.Before(wbiKeyCache.expireAt) {
 		return wbiKeyCache.key, nil
 	}
-	data, err := fetchJSON("https://api.bilibili.com/x/web-interface/nav", nil)
+	data, err := fetchJSONContext(ctx, "https://api.bilibili.com/x/web-interface/nav", nil)
 	if err != nil {
 		return "", err
 	}
@@ -134,7 +147,11 @@ func getRoomInfo(input string) (roomInfo, error) {
 }
 
 func getRoomInfoWithSession(input string, session biliSession) (roomInfo, error) {
-	infoData, err := fetchJSON("https://api.live.bilibili.com/room/v1/Room/get_info?room_id="+url.QueryEscape(input), nil)
+	return getRoomInfoWithSessionContext(context.Background(), input, session)
+}
+
+func getRoomInfoWithSessionContext(ctx context.Context, input string, session biliSession) (roomInfo, error) {
+	infoData, err := fetchJSONContext(ctx, "https://api.live.bilibili.com/room/v1/Room/get_info?room_id="+url.QueryEscape(input), nil)
 	if err != nil {
 		return roomInfo{}, err
 	}
@@ -150,14 +167,14 @@ func getRoomInfoWithSession(input string, session biliSession) (roomInfo, error)
 
 	buvid := strings.TrimSpace(session.Buvid)
 	if buvid == "" {
-		spiData, err := fetchJSON("https://api.bilibili.com/x/frontend/finger/spi", nil)
+		spiData, err := fetchJSONContext(ctx, "https://api.bilibili.com/x/frontend/finger/spi", nil)
 		if err != nil {
 			return roomInfo{}, err
 		}
 		buvid = spiData["data"].(map[string]any)["b_3"].(string)
 	}
 
-	wbiKey, err := getWbiKey()
+	wbiKey, err := getWbiKeyContext(ctx)
 	if err != nil {
 		return roomInfo{}, err
 	}
@@ -174,7 +191,7 @@ func getRoomInfoWithSession(input string, session biliSession) (roomInfo, error)
 		}
 		cookieHeader += "buvid3=" + buvid
 	}
-	dmData, err := fetchJSON(dmURL, map[string]string{"Cookie": cookieHeader})
+	dmData, err := fetchJSONContext(ctx, dmURL, map[string]string{"Cookie": cookieHeader})
 	if err != nil {
 		return roomInfo{}, err
 	}

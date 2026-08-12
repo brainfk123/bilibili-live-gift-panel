@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -101,11 +102,15 @@ func fetchCurrentRoomGiftCatalog(roomID string, session biliSession) ([]roomGift
 }
 
 func fetchCurrentRoomGiftResources(roomID string, session biliSession) (roomGiftResources, error) {
+	return fetchCurrentRoomGiftResourcesContext(context.Background(), roomID, session)
+}
+
+func fetchCurrentRoomGiftResourcesContext(ctx context.Context, roomID string, session biliSession) (roomGiftResources, error) {
 	headers := map[string]string{}
 	if strings.TrimSpace(session.CookieHeader) != "" {
 		headers["Cookie"] = session.CookieHeader
 	}
-	roomPayload, err := fetchJSON(roomGiftInfoEndpoint+"?room_id="+url.QueryEscape(roomID), headers)
+	roomPayload, err := fetchJSONContext(ctx, roomGiftInfoEndpoint+"?room_id="+url.QueryEscape(roomID), headers)
 	if err != nil {
 		return roomGiftResources{}, err
 	}
@@ -121,11 +126,11 @@ func fetchCurrentRoomGiftResources(roomID string, session biliSession) (roomGift
 		"area_parent_id": {strconv.Itoa(roomContext.ParentAreaID)},
 		"biz_code":       {"live"},
 	}
-	configPayload, err := fetchJSON(roomGiftConfigEndpoint+"?"+parameters.Encode(), headers)
+	configPayload, err := fetchJSONContext(ctx, roomGiftConfigEndpoint+"?"+parameters.Encode(), headers)
 	if err != nil {
 		return roomGiftResources{}, err
 	}
-	panelPayload, err := fetchJSON(roomGiftDataEndpoint+"?"+parameters.Encode(), headers)
+	panelPayload, err := fetchJSONContext(ctx, roomGiftDataEndpoint+"?"+parameters.Encode(), headers)
 	if err != nil {
 		return roomGiftResources{}, err
 	}
@@ -143,7 +148,7 @@ func fetchCurrentRoomGiftResources(roomID string, session biliSession) (roomGift
 		"build":          {"0"},
 		"base_version":   {"0"},
 	}
-	if effectPayload, effectErr := fetchJSON(roomGiftEffectEndpoint+"?"+effectParameters.Encode(), headers); effectErr == nil {
+	if effectPayload, effectErr := fetchJSONContext(ctx, roomGiftEffectEndpoint+"?"+effectParameters.Encode(), headers); effectErr == nil {
 		if effects, parseErr := parseRoomGiftEffectCatalog(effectPayload); parseErr == nil {
 			enrichRoomGiftEffects(gifts, effects.ByGiftID)
 			effectsByID = effects.ByID
