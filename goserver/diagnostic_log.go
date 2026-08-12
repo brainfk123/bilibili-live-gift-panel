@@ -61,7 +61,7 @@ func (logger *diagnosticLogger) write(level, event string, keyValues ...any) {
 		line.WriteByte(' ')
 		line.WriteString(field.key)
 		line.WriteByte('=')
-		line.WriteString(formatDiagnosticValue(field.value))
+		line.WriteString(formatDiagnosticFieldValue(field.key, field.value))
 	}
 	line.WriteByte('\n')
 
@@ -165,7 +165,7 @@ type diagnosticField struct {
 type diagnosticFieldSpec func(any) (any, bool)
 
 var diagnosticFieldOrder = []string{
-	"gift_id", "blind_parent_id", "count", "timestamp", "rnd_hash", "reason", "state", "error_kind", "source_duplicate",
+	"gift_id", "blind_parent_id", "count", "timestamp", "rnd_hash", "reason", "state", "room_id", "error_kind", "source_duplicate",
 	"accept_write_ms", "inbox_depth", "oldest_pending_age_ms", "attempts", "duration_ms", "blind_source", "blind_cost", "blind_value", "blind_priced",
 	"mapped_children", "port", "version",
 }
@@ -178,6 +178,7 @@ var diagnosticFieldSpecs = map[string]diagnosticFieldSpec{
 	"rnd_hash":              validateDiagnosticHash,
 	"reason":                validateDiagnosticReason,
 	"state":                 validateDiagnosticState,
+	"room_id":               validateDiagnosticRoomID,
 	"error_kind":            validateDiagnosticErrorKind,
 	"source_duplicate":      validateDiagnosticBoolean,
 	"accept_write_ms":       validateDiagnosticNonNegativeInteger,
@@ -322,6 +323,22 @@ func validateDiagnosticState(value any) (any, bool) {
 	return text, true
 }
 
+func validateDiagnosticRoomID(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok || len(text) == 0 || len(text) > 20 || text[0] == '0' {
+		return nil, false
+	}
+	for _, character := range text {
+		if character < '0' || character > '9' {
+			return nil, false
+		}
+	}
+	if _, err := strconv.ParseUint(text, 10, 64); err != nil {
+		return nil, false
+	}
+	return text, true
+}
+
 func validateDiagnosticErrorKind(value any) (any, bool) {
 	text, ok := value.(string)
 	if !ok || !diagnosticErrorKindValues[text] {
@@ -403,6 +420,13 @@ func formatDiagnosticValue(value any) string {
 	return strconv.Quote(text)
 }
 
+func formatDiagnosticFieldValue(_ string, value any) string {
+	if text, ok := value.(string); ok {
+		return strconv.Quote(text)
+	}
+	return formatDiagnosticValue(value)
+}
+
 func sanitizeLegacyDiagnosticLine(line string) string {
 	line = strings.TrimSpace(line)
 	if line == "" {
@@ -464,12 +488,15 @@ func formatSanitizedLegacyEntry(entry map[string]any) string {
 		line.WriteByte(' ')
 		line.WriteString(key)
 		line.WriteByte('=')
-		line.WriteString(formatDiagnosticValue(validated))
+		line.WriteString(formatDiagnosticFieldValue(key, validated))
 	}
 	return line.String()
 }
 
 func parseLegacyDiagnosticValue(key, value string) any {
+	if key == "room_id" {
+		return value
+	}
 	if key == "blind_cost" || key == "blind_value" {
 		return json.Number(value)
 	}

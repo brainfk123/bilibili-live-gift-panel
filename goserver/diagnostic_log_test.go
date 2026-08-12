@@ -108,6 +108,31 @@ func TestDiagnosticLoggerFixesLevelAndEventToSafeCategories(t *testing.T) {
 	}
 }
 
+func TestDiagnosticLoggerRetainsOnlyCanonicalPublicRoomIDs(t *testing.T) {
+	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Info("connection_state", "state", "connected", "room_id", "31567150")
+	for _, value := range []any{" 31567150", "+31567150", "-31567150", "031567150", "31567150gift", "https://private.example/31567150?token=private", "private-token", "123456789012345678901", 31567150} {
+		logger.Info("connection_state", "state", "connected", "room_id", value)
+	}
+
+	data, err := os.ReadFile(logger.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if count := strings.Count(text, `room_id="31567150"`); count != 1 {
+		t.Fatalf("validated room_id entries = %d, want 1: %s", count, text)
+	}
+	for _, secret := range []string{" 31567150", "+31567150", "-31567150", "031567150", "31567150gift", "private.example", "private-token", "123456789012345678901"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("diagnostics leaked rejected room identifier %q: %s", secret, text)
+		}
+	}
+}
+
 func TestDiagnosticLogRoundTripsAllSafeProductionFields(t *testing.T) {
 	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
 	if err != nil {
@@ -124,9 +149,10 @@ func TestDiagnosticLogRoundTripsAllSafeProductionFields(t *testing.T) {
 	logger.Info("http_ready", "port", 12450)
 	logger.Info("service_start", "version", "0.1.1")
 	logger.Info("service_stop", "version", "dev")
+	logger.Info("connection_state", "state", "connected", "room_id", "31567150")
 
 	export := string(logger.exportBytes())
-	for _, expected := range []string{"gift_id=35801", "blind_parent_id=35800", "count=2", "timestamp=1700000000", `rnd_hash="ba7816bf8f01"`, "source_duplicate=false", `blind_source="catalog"`, "blind_cost=6000", "blind_value=9000", "blind_priced=true", "accept_write_ms=5", "inbox_depth=3", "oldest_pending_age_ms=9", "attempts=2", "duration_ms=123", `error_kind="read"`, "mapped_children=4", "port=12450", `version="0.1.1"`, `version="dev"`} {
+	for _, expected := range []string{"gift_id=35801", "blind_parent_id=35800", "count=2", "timestamp=1700000000", `rnd_hash="ba7816bf8f01"`, "source_duplicate=false", `blind_source="catalog"`, "blind_cost=6000", "blind_value=9000", "blind_priced=true", "accept_write_ms=5", "inbox_depth=3", "oldest_pending_age_ms=9", "attempts=2", "duration_ms=123", `error_kind="read"`, "mapped_children=4", "port=12450", `version="0.1.1"`, `version="dev"`, `room_id="31567150"`} {
 		if !strings.Contains(export, expected) {
 			t.Fatalf("export missing validated field %q: %s", expected, export)
 		}
