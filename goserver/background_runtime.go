@@ -269,6 +269,7 @@ func (runtime *backgroundRuntime) acceptGift(_ context.Context, roomID, command 
 	ingestionGeneration := runtime.currentIngestionGeneration()
 	acceptedAt := time.Now()
 	_, err := runtime.inbox.Accept(roomID, command, gift)
+	acceptWriteLatency := time.Since(acceptedAt)
 	if err != nil {
 		runtime.recordIngestionFailureFrom("accept", err)
 		return
@@ -286,7 +287,7 @@ func (runtime *backgroundRuntime) acceptGift(_ context.Context, roomID, command 
 		"count", maxInt(1, gift.Num),
 		"timestamp", gift.Timestamp,
 		"rnd_hash", diagnosticHash(gift.Rnd),
-		"inbox_write_ms", time.Since(acceptedAt).Milliseconds(),
+		"accept_write_ms", acceptWriteLatency.Milliseconds(),
 		"inbox_depth", health.PendingCount,
 		"oldest_pending_age_ms", oldestPendingAge,
 	)

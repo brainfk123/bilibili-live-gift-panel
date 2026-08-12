@@ -145,6 +145,31 @@ func TestDiagnosticHashIsShortAndStable(t *testing.T) {
 	}
 }
 
+func TestParseBiliGiftDetailedCategorizesMalformedGiftData(t *testing.T) {
+	gift, reason, ok := parseBiliGiftDetailed([]byte(`{"cmd":"SEND_GIFT","data":{"giftId":"not-an-integer"}}`))
+	if ok || reason != "malformed_gift_data" || gift != (giftEvent{}) {
+		t.Fatalf("detailed malformed gift result = %#v, %q, %v", gift, reason, ok)
+	}
+}
+
+func TestBilibiliDiagnosticsRateLimitsIgnoredMessages(t *testing.T) {
+	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &bilibiliGiftSource{diagnostics: logger}
+	for range 128 {
+		source.recordIgnoredMessage()
+	}
+	data, err := os.ReadFile(logger.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(data), "bili_message_ignored"); count != 1 {
+		t.Fatalf("ignored diagnostics entries = %d, want 1: %s", count, data)
+	}
+}
+
 func TestParseBiliGift(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{
 		"cmd": "SEND_GIFT",
