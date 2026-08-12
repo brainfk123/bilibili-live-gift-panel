@@ -8,8 +8,44 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 )
+
+func TestEmbeddedPageHandlerServesNestedUIAssets(t *testing.T) {
+	pageFS := fstest.MapFS{
+		"index.html":                 &fstest.MapFile{Data: []byte("<!doctype html>")},
+		"chunks/config-entry-abc.js": &fstest.MapFile{Data: []byte("export const config = true;")},
+		"assets/app.css":             &fstest.MapFile{Data: []byte(".app { color: red; }")},
+	}
+	handler := newEmbeddedPageHandler(pageFS)
+
+	tests := []struct {
+		name string
+		path string
+		want int
+		body string
+	}{
+		{name: "index", path: "/", want: http.StatusOK, body: "<!doctype html>"},
+		{name: "nested chunk", path: "/chunks/config-entry-abc.js", want: http.StatusOK, body: "export const config = true;"},
+		{name: "nested asset", path: "/assets/app.css", want: http.StatusOK, body: ".app { color: red; }"},
+		{name: "missing asset", path: "/chunks/missing.js", want: http.StatusNotFound},
+		{name: "traversal", path: "/chunks/../index.html", want: http.StatusNotFound},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, test.path, nil)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.want {
+				t.Fatalf("status = %d, want %d", response.Code, test.want)
+			}
+			if test.body != "" && response.Body.String() != test.body {
+				t.Fatalf("body = %q, want %q", response.Body.String(), test.body)
+			}
+		})
+	}
+}
 
 func TestNewMainGiftClipJobsStopsOnPayloadFailure(t *testing.T) {
 	want := errors.New("payload unavailable")

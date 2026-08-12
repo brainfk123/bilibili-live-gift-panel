@@ -1,7 +1,8 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { mirrorUiAssets } from './ui-assets.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const appVersion = (process.env.APP_VERSION || 'dev').replace(/^v/, '');
@@ -34,8 +35,8 @@ if (!existsSync(resource)) {
 }
 
 const distDir = join(root, 'goserver', 'dist');
-mkdirSync(distDir, { recursive: true });
-copyFileSync(join(root, 'dist', 'index.html'), join(distDir, 'index.html'));
+const uiManifest = mirrorUiAssets(join(root, 'dist'), distDir);
+console.log(`embedded ${uiManifest.files.length} UI assets (manifest v${uiManifest.version})`);
 
 const out = join(root, 'dist', 'gift-panel.exe');
 const ldflags = `-s -w -H windowsgui -X main.appVersion=${appVersion} -X main.appCommit=${appCommit}`;

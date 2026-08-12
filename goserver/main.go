@@ -5,16 +5,31 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
 
-//go:embed dist/index.html
+//go:embed dist
 var embeddedFS embed.FS
+
+func newEmbeddedPageHandler(pageFS fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(pageFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, segment := range strings.Split(r.URL.Path, "/") {
+			if segment == ".." {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		fileServer.ServeHTTP(w, r)
+	})
+}
 
 func writeJSON(w http.ResponseWriter, code int, payload map[string]any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -175,7 +190,7 @@ func main() {
 	}
 	defer releaseInstance()
 
-	indexHTML, err := embeddedFS.ReadFile("dist/index.html")
+	pageFS, err := fs.Sub(embeddedFS, "dist")
 	if err != nil {
 		showStartupError(fmt.Sprintf("内嵌页面读取失败：%v", err))
 		return
@@ -246,14 +261,7 @@ func main() {
 	login.SetOnChange(background.NotifyConfigChanged)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" && r.URL.Path != "/index.html" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(indexHTML)
-	})
+	mux.Handle("/", newEmbeddedPageHandler(pageFS))
 
 	mux.HandleFunc("/api/room_info", handleRoomInfo)
 	mux.HandleFunc("/api/room/anchor", newRoomAnchorHandler(login.roomOwnerUID, background.profileResolver))
