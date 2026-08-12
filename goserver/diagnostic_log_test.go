@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,6 +32,36 @@ func TestDiagnosticLoggerWritesPlainTextAndRedactsSecrets(t *testing.T) {
 	}
 	if strings.Contains(text, "SESSDATA=secret") || strings.HasPrefix(strings.TrimSpace(text), "{") {
 		t.Fatalf("runtime log leaked a secret or used JSON: %s", text)
+	}
+}
+
+func TestDiagnosticLogRedactsHostileIngestionValues(t *testing.T) {
+	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Info("gift_received",
+		"rnd", "raw-rnd-secret",
+		"viewer_uid", 987654321,
+		"username", "private-viewer",
+		"avatar", "https://private.example/avatar.png",
+		"error", errors.New("token=private-token"),
+		"payload", `{"cookie":"SESSDATA=private-cookie"}`,
+		"rnd_hash", "ba7816bf8f01",
+	)
+
+	data, err := os.ReadFile(logger.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `rnd_hash="ba7816bf8f01"`) {
+		t.Fatalf("diagnostics did not retain the safe hash: %s", text)
+	}
+	for _, secret := range []string{"raw-rnd-secret", "987654321", "private-viewer", "private.example/avatar.png", "private-token", "private-cookie"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("diagnostics leaked %q: %s", secret, text)
+		}
 	}
 }
 

@@ -94,6 +94,14 @@ func newBackgroundRuntime(store *configStore, sourceFactory func() giftEventSour
 
 func (runtime *backgroundRuntime) setDiagnosticLogger(logger *diagnosticLogger) {
 	runtime.diagnostics = logger
+	previousFactory := runtime.sourceFactory
+	runtime.sourceFactory = func() giftEventSource {
+		source := previousFactory()
+		if bilibiliSource, ok := source.(*bilibiliGiftSource); ok {
+			bilibiliSource.diagnostics = logger
+		}
+		return source
+	}
 }
 
 func (runtime *backgroundRuntime) Run(ctx context.Context) {
@@ -173,7 +181,7 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 					runtime.mergeBlindBoxGiftCatalog(gifts)
 				},
 				onGiftCatalogError: func(err error) {
-					runtime.diagnostics.Error("blind_box_catalog_failed", "room_id", roomID, "error", err)
+					runtime.diagnostics.Error("blind_box_catalog_failed", "room_id", roomID, "reason", "catalog_fetch_failed", "error", err)
 				},
 				onState: func(status string) {
 					runtime.setStatus(status, roomID, nil)
@@ -259,17 +267,28 @@ func (runtime *backgroundRuntime) acceptGift(_ context.Context, roomID, command 
 		return
 	}
 	ingestionGeneration := runtime.currentIngestionGeneration()
-	record, err := runtime.inbox.Accept(roomID, command, gift)
+	acceptedAt := time.Now()
+	_, err := runtime.inbox.Accept(roomID, command, gift)
 	if err != nil {
 		runtime.recordIngestionFailureFrom("accept", err)
 		return
 	}
 	runtime.clearIngestionFailure(ingestionGeneration, "accept")
+	health := runtime.inbox.Health()
+	oldestPendingAge := int64(0)
+	if health.OldestPendingAt > 0 {
+		oldestPendingAge = maxInt64(0, acceptedAt.UnixMilli()-health.OldestPendingAt*1000)
+	}
 	runtime.diagnostics.Info(
 		"gift_accepted",
-		"ingestion_id", record.IngestionID,
 		"gift_id", gift.GiftID,
+		"blind_parent_id", gift.BlindGiftID,
 		"count", maxInt(1, gift.Num),
+		"timestamp", gift.Timestamp,
+		"rnd_hash", diagnosticHash(gift.Rnd),
+		"inbox_write_ms", time.Since(acceptedAt).Milliseconds(),
+		"inbox_depth", health.PendingCount,
+		"oldest_pending_age_ms", oldestPendingAge,
 	)
 	select {
 	case runtime.inboxWake <- struct{}{}:
@@ -302,7 +321,7 @@ func (runtime *backgroundRuntime) mergeBlindBoxGiftCatalog(gifts []roomGiftInfo)
 		return nil
 	})
 	if err != nil {
-		runtime.diagnostics.Error("blind_box_catalog_save_failed", "error", err)
+		runtime.diagnostics.Error("blind_box_catalog_save_failed", "reason", "state_save_failed", "error", err)
 		return
 	}
 	runtime.diagnostics.Info("blind_box_catalog_ready", "mapped_children", mappedChildren)
@@ -454,6 +473,13 @@ func (runtime *backgroundRuntime) processInboxRecordLocked(ctx context.Context, 
 	}
 
 	now := time.Now()
+	runtime.diagnostics.Info(
+		"gift_transaction_prepare",
+		"gift_id", gift.GiftID,
+		"count", maxInt(1, gift.Num),
+		"timestamp", gift.Timestamp,
+		"rnd_hash", diagnosticHash(gift.Rnd),
+	)
 	settlement := giftSettlement{}
 	_, applied, err := runtime.store.updateStateForIngestion(record.IngestionID, func(state *appState) error {
 		if requirePreparation && strings.TrimSpace(state.RoomID) != preparedRoomID {
@@ -464,6 +490,20 @@ func (runtime *backgroundRuntime) processInboxRecordLocked(ctx context.Context, 
 	})
 	if err != nil {
 		return err
+	}
+	if !applied {
+		runtime.diagnostics.Info(
+			"gift_transaction_recovery",
+			"gift_id", gift.GiftID,
+			"rnd_hash", diagnosticHash(gift.Rnd),
+		)
+	} else {
+		runtime.diagnostics.Info(
+			"gift_transaction_complete",
+			"gift_id", gift.GiftID,
+			"count", maxInt(1, gift.Num),
+			"rnd_hash", diagnosticHash(gift.Rnd),
+		)
 	}
 	if roomMatches && gift.AnimationOnly {
 		attached := settlement.animationAttached
@@ -490,7 +530,7 @@ func (runtime *backgroundRuntime) processInboxRecordLocked(ctx context.Context, 
 		return nil
 	}
 	if settlement.roomMismatch {
-		runtime.diagnostics.Info("gift_ignored", "reason", "room_mismatch", "ingestion_id", record.IngestionID, "room_id", record.RoomID)
+		runtime.diagnostics.Info("gift_ignored", "reason", "room_mismatch", "room_id", record.RoomID, "gift_id", gift.GiftID, "rnd_hash", diagnosticHash(gift.Rnd))
 		return nil
 	}
 	if settlement.animationOnly {
@@ -500,8 +540,11 @@ func (runtime *backgroundRuntime) processInboxRecordLocked(ctx context.Context, 
 		runtime.diagnostics.Info(
 			"gift_ignored",
 			"reason", "duplicate",
-			"ingestion_id", record.IngestionID,
 			"gift_id", gift.GiftID,
+			"count", maxInt(1, gift.Num),
+			"timestamp", gift.Timestamp,
+			"rnd_hash", diagnosticHash(gift.Rnd),
+			"source_duplicate", true,
 		)
 		return nil
 	}
@@ -510,11 +553,11 @@ func (runtime *backgroundRuntime) processInboxRecordLocked(ctx context.Context, 
 	runtime.mu.Unlock()
 	runtime.diagnostics.Info(
 		"gift_received",
-		"ingestion_id", record.IngestionID,
 		"gift_id", settlement.gift.GiftID,
-		"gift_name", settlement.gift.GiftName,
 		"count", maxInt(1, settlement.gift.Num),
-		"viewer_uid", settlement.gift.UID,
+		"timestamp", settlement.gift.Timestamp,
+		"rnd_hash", diagnosticHash(settlement.gift.Rnd),
+		"source_duplicate", false,
 		"blind_parent_id", settlement.gift.BlindGiftID,
 		"blind_source", settlement.blindSource,
 		"blind_cost", settlement.blindCost,
@@ -752,7 +795,16 @@ func (runtime *backgroundRuntime) recordIngestionFailureFrom(source string, err 
 	runtime.ingestionErrorSource = source
 	runtime.status.IngestionError = err.Error()
 	runtime.mu.Unlock()
-	runtime.diagnostics.Error("gift_ingestion_failed", "error", err)
+	runtime.diagnostics.Error("gift_ingestion_failed", "reason", safeIngestionFailureSource(source), "error", err)
+}
+
+func safeIngestionFailureSource(source string) string {
+	switch source {
+	case "accept", "consumer":
+		return source
+	default:
+		return "consumer"
+	}
 }
 
 func (runtime *backgroundRuntime) currentIngestionGeneration() uint64 {
@@ -874,6 +926,16 @@ func (runtime *backgroundRuntime) setConnectionGaps(gaps []connectionGap) {
 	runtime.mu.Lock()
 	runtime.status.ConnectionGaps = append([]connectionGap(nil), gaps...)
 	runtime.mu.Unlock()
+	if len(gaps) == 0 {
+		return
+	}
+	latest := gaps[len(gaps)-1]
+	runtime.diagnostics.Info(
+		"connection_gap",
+		"attempts", latest.Attempts,
+		"error_kind", latest.ErrorKind,
+		"duration_ms", latest.DurationMS,
+	)
 }
 
 func (runtime *backgroundRuntime) resetConnectionGapsForRoom(roomID string) {
@@ -911,7 +973,7 @@ func (runtime *backgroundRuntime) setStatus(state, roomID string, err error) {
 	runtime.mu.Unlock()
 	if previous.State != state || previous.RoomID != roomID || previous.LastError != nextLastError {
 		if err != nil {
-			runtime.diagnostics.Error("connection_state", "state", state, "room_id", roomID, "error", err)
+			runtime.diagnostics.Error("connection_state", "state", state, "room_id", roomID, "reason", connectionFailureKind(err), "error", err)
 		} else {
 			runtime.diagnostics.Info("connection_state", "state", state, "room_id", roomID)
 		}

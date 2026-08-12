@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -88,6 +91,57 @@ func TestBilibiliSourceReturnsReadDeadlineFailure(t *testing.T) {
 	err := (&bilibiliGiftSource{}).runSocket(context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{})
 	if connectionFailureKind(err) != "deadline" {
 		t.Fatalf("failure kind = %q, want deadline (error %v)", connectionFailureKind(err), err)
+	}
+}
+
+func TestBilibiliDiagnosticsRecordsSafeParseOutcomes(t *testing.T) {
+	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	malformedPacket := make([]byte, biliHeaderLength)
+	malformedPacket[3] = 32 // Declares a packet beyond the supplied frame.
+	malformedPacket[5] = biliHeaderLength
+	malformedPacket[11] = biliOpMessage
+	invalidZlib := encodeBiliPacket(biliOpMessage, []byte("not-zlib"))
+	invalidZlib[7] = 2
+	malformedJSON := encodeBiliPacket(biliOpMessage, []byte(`{"cmd":`))
+	ignoredCombo := encodeBiliPacket(biliOpMessage, []byte(`{"cmd":"COMBO_SEND","data":{"uid":123456,"uname":"private-viewer"}}`))
+	validGift := encodeBiliPacket(biliOpMessage, []byte(`{"cmd":"SEND_GIFT","data":{"giftId":35801,"num":2,"blind_gift_id":35800,"timestamp":1700000000,"rnd":"diagnostic-rnd-token","uid":987654,"uname":"private-viewer","face":"https://private.example/avatar.png"}}`))
+	socket := &fakeBiliSocket{reads: [][]byte{malformedPacket, invalidZlib, malformedJSON, ignoredCombo, validGift}, readErr: errors.New("stop")}
+	var gifts []giftEvent
+
+	err = (&bilibiliGiftSource{diagnostics: logger, heartbeatInterval: time.Hour}).runSocket(context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{
+		onGift: func(gift giftEvent) { gifts = append(gifts, gift) },
+	})
+	if err == nil {
+		t.Fatal("runSocket returned nil after the fixture read ended")
+	}
+	if len(gifts) != 1 || gifts[0].GiftID != 35801 || gifts[0].Num != 2 || gifts[0].BlindGiftID != 35800 {
+		t.Fatalf("accepted gifts = %#v", gifts)
+	}
+
+	data, readErr := os.ReadFile(logger.path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	text := string(data)
+	for _, expected := range []string{"packet_bounds", "decompression_failure", "malformed_envelope", "ignored_command"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("diagnostics missing %q: %s", expected, text)
+		}
+	}
+	for _, secret := range []string{"diagnostic-rnd-token", "private-viewer", "private.example/avatar.png", `{"cmd":`} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("diagnostics leaked %q: %s", secret, text)
+		}
+	}
+}
+
+func TestDiagnosticHashIsShortAndStable(t *testing.T) {
+	if got, want := diagnosticHash("abc"), "ba7816bf8f01"; got != want {
+		t.Fatalf("diagnosticHash(abc) = %q, want %q", got, want)
 	}
 }
 

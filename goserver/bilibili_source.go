@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,10 @@ type bilibiliGiftSource struct {
 	dial              biliDial
 	heartbeatInterval time.Duration
 	readTimeout       time.Duration
+	diagnostics       *diagnosticLogger
+	diagnosticMu      sync.Mutex
+	ignoredCount      int
+	lastIgnoredLogAt  time.Time
 }
 
 type biliSocket interface {
@@ -44,7 +49,10 @@ type biliDial func(context.Context, string, http.Header) (biliSocket, error)
 const (
 	defaultBiliHeartbeatInterval = 30 * time.Second
 	defaultBiliReadTimeout       = 45 * time.Second
+	ignoredDiagnosticInterval    = time.Minute
 )
+
+var errBiliPacketBounds = errors.New("bilibili packet bounds")
 
 func defaultBiliDial(ctx context.Context, url string, headers http.Header) (biliSocket, error) {
 	connection, _, err := websocket.DefaultDialer.DialContext(ctx, url, headers)
@@ -189,7 +197,11 @@ func (source *bilibiliGiftSource) runSocket(ctx context.Context, connection bili
 		if err := connection.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
 			return newConnectionFailure("deadline", err)
 		}
-		for _, packet := range decodeBiliPackets(payload) {
+		packets, decodeErr := decodeBiliPacketsDetailed(payload)
+		if decodeErr != nil {
+			source.recordDiagnostic("bili_parse_failed", "reason", biliPacketDecodeReason(decodeErr))
+		}
+		for _, packet := range packets {
 			if packet.operation == biliOpAuthReply {
 				var reply struct {
 					Code int `json:"code"`
@@ -209,15 +221,21 @@ func (source *bilibiliGiftSource) runSocket(ctx context.Context, connection bili
 			if packet.protocolVersion == 2 {
 				inflated, err := inflateBiliPacket(packet.body)
 				if err != nil {
+					source.recordDiagnostic("bili_parse_failed", "reason", "decompression_failure")
 					continue
 				}
 				bodies = bodies[:0]
-				for _, nested := range decodeBiliPackets(inflated) {
+				nestedPackets, nestedErr := decodeBiliPacketsDetailed(inflated)
+				if nestedErr != nil {
+					source.recordDiagnostic("bili_parse_failed", "reason", biliPacketDecodeReason(nestedErr))
+				}
+				for _, nested := range nestedPackets {
 					bodies = append(bodies, nested.body)
 				}
 			}
 			for _, body := range bodies {
-				if gift, ok := parseBiliGift(body); ok {
+				gift, reason, giftOK := parseBiliGiftDetailed(body)
+				if giftOK {
 					if callbacks.onGift != nil {
 						callbacks.onGift(enrichGiftAnimationFromRoomCatalog(gift, catalogByID))
 					}
@@ -227,6 +245,12 @@ func (source *bilibiliGiftSource) runSocket(ctx context.Context, connection bili
 					if callbacks.onGift != nil {
 						callbacks.onGift(enrichGiftAnimationFromEffectCatalog(paidEvent, effectsByID))
 					}
+					continue
+				}
+				if reason == "ignored_command" {
+					source.recordIgnoredMessage()
+				} else {
+					source.recordDiagnostic("bili_parse_failed", "reason", reason)
 				}
 			}
 		}
@@ -268,12 +292,20 @@ func encodeBiliPacket(operation uint32, body []byte) []byte {
 }
 
 func decodeBiliPackets(payload []byte) []biliPacket {
+	packets, _ := decodeBiliPacketsDetailed(payload)
+	return packets
+}
+
+func decodeBiliPacketsDetailed(payload []byte) ([]biliPacket, error) {
 	packets := []biliPacket{}
-	for offset := 0; offset+biliHeaderLength <= len(payload); {
+	for offset := 0; offset < len(payload); {
+		if offset+biliHeaderLength > len(payload) {
+			return packets, errBiliPacketBounds
+		}
 		totalLength := int(binary.BigEndian.Uint32(payload[offset : offset+4]))
 		headerLength := int(binary.BigEndian.Uint16(payload[offset+4 : offset+6]))
 		if totalLength < headerLength || headerLength < biliHeaderLength || offset+totalLength > len(payload) {
-			break
+			return packets, errBiliPacketBounds
 		}
 		packets = append(packets, biliPacket{
 			protocolVersion: binary.BigEndian.Uint16(payload[offset+6 : offset+8]),
@@ -282,7 +314,14 @@ func decodeBiliPackets(payload []byte) []biliPacket {
 		})
 		offset += totalLength
 	}
-	return packets
+	return packets, nil
+}
+
+func biliPacketDecodeReason(err error) string {
+	if errors.Is(err, errBiliPacketBounds) {
+		return "packet_bounds"
+	}
+	return "packet_bounds"
 }
 
 func inflateBiliPacket(body []byte) ([]byte, error) {
@@ -295,12 +334,20 @@ func inflateBiliPacket(body []byte) ([]byte, error) {
 }
 
 func parseBiliGift(body []byte) (giftEvent, bool) {
+	gift, _, ok := parseBiliGiftDetailed(body)
+	return gift, ok
+}
+
+func parseBiliGiftDetailed(body []byte) (giftEvent, string, bool) {
 	var envelope struct {
 		Command string          `json:"cmd"`
 		Data    json.RawMessage `json:"data"`
 	}
-	if json.Unmarshal(body, &envelope) != nil || envelope.Command != "SEND_GIFT" {
-		return giftEvent{}, false
+	if json.Unmarshal(body, &envelope) != nil {
+		return giftEvent{}, "malformed_envelope", false
+	}
+	if envelope.Command != "SEND_GIFT" {
+		return giftEvent{}, "ignored_command", false
 	}
 	var data struct {
 		GiftID            int     `json:"giftId"`
@@ -338,7 +385,7 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 		SenderUinfo biliSenderUinfo `json:"sender_uinfo"`
 	}
 	if json.Unmarshal(envelope.Data, &data) != nil {
-		return giftEvent{}, false
+		return giftEvent{}, "malformed_gift_data", false
 	}
 	if data.BlindGiftID <= 0 {
 		data.BlindGiftID = data.BlindGift.GiftID
@@ -386,7 +433,32 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 		AnimationGIF: strings.TrimSpace(data.GiftInfo.GIF), AnimationWebP: strings.TrimSpace(data.GiftInfo.WebP),
 		EffectID: data.GiftInfo.EffectID,
 		Rnd:      rnd,
-	}, true
+	}, "SEND_GIFT", true
+}
+
+func (source *bilibiliGiftSource) recordDiagnostic(event string, keyValues ...any) {
+	if source == nil || source.diagnostics == nil {
+		return
+	}
+	source.diagnostics.Info(event, keyValues...)
+}
+
+func (source *bilibiliGiftSource) recordIgnoredMessage() {
+	if source == nil || source.diagnostics == nil {
+		return
+	}
+	now := time.Now()
+	source.diagnosticMu.Lock()
+	source.ignoredCount++
+	count := source.ignoredCount
+	if !source.lastIgnoredLogAt.IsZero() && now.Sub(source.lastIgnoredLogAt) < ignoredDiagnosticInterval {
+		source.diagnosticMu.Unlock()
+		return
+	}
+	source.ignoredCount = 0
+	source.lastIgnoredLogAt = now
+	source.diagnosticMu.Unlock()
+	source.diagnostics.Info("bili_message_ignored", "reason", "ignored_command", "count", count)
 }
 
 func enrichGiftAnimationFromEffectCatalog(gift giftEvent, effects map[int]giftEffectResource) giftEvent {

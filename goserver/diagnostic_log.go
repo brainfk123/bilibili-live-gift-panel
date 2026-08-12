@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
@@ -13,6 +15,8 @@ import (
 )
 
 const maxDiagnosticLogBytes int64 = 2 << 20
+
+const diagnosticHashLength = 12
 
 type diagnosticLogger struct {
 	path string
@@ -55,7 +59,7 @@ func (logger *diagnosticLogger) write(level, event string, keyValues ...any) {
 			continue
 		}
 		value := keyValues[index+1]
-		if isSensitiveDiagnosticKey(key) {
+		if isSensitiveDiagnosticKey(key) || isUnsafeDiagnosticValue(value) {
 			value = "[REDACTED]"
 		}
 		line.WriteByte(' ')
@@ -74,6 +78,14 @@ func (logger *diagnosticLogger) write(level, event string, keyValues ...any) {
 	}
 	_, _ = file.WriteString(line.String())
 	_ = file.Close()
+}
+
+// diagnosticHash creates a stable local correlation token without retaining
+// the source value in diagnostics. It is deliberately short because it is for
+// one export, not a security boundary.
+func diagnosticHash(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])[:diagnosticHashLength]
 }
 
 func (logger *diagnosticLogger) rotateIfNeeded(incomingBytes int64) error {
@@ -146,8 +158,36 @@ func sanitizeDiagnosticToken(value string) string {
 
 func isSensitiveDiagnosticKey(key string) bool {
 	normalized := strings.ToLower(key)
+	if normalized == "rnd_hash" {
+		return false
+	}
+	for _, candidate := range []string{"rnd", "uid", "viewer_uid", "username", "uname", "avatar", "face", "url", "payload", "frame", "json", "error"} {
+		if normalized == candidate || strings.HasSuffix(normalized, "_"+candidate) {
+			return true
+		}
+	}
 	for _, candidate := range []string{"cookie", "token", "secret", "session", "authorization", "sessdata", "csrf"} {
 		if strings.Contains(normalized, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func isUnsafeDiagnosticValue(value any) bool {
+	if _, ok := value.(error); ok {
+		return true
+	}
+	text := strings.TrimSpace(fmt.Sprint(value))
+	lower := strings.ToLower(text)
+	if strings.HasPrefix(text, "{") || strings.HasPrefix(text, "[") {
+		return true
+	}
+	if strings.Contains(lower, "://") {
+		return true
+	}
+	for _, candidate := range []string{"cookie", "token", "secret", "sessdata", "authorization", "csrf"} {
+		if strings.Contains(lower, candidate) {
 			return true
 		}
 	}
