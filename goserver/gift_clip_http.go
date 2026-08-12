@@ -150,10 +150,26 @@ func (handler *giftClipHTTPHandler) handleVideo(w http.ResponseWriter, r *http.R
 		giftClipHTTPNotFound(w)
 		return
 	}
-	w.Header().Set("Content-Type", "video/mp4")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Disposition", `attachment; filename="gift-clip.mp4"`)
-	http.ServeContent(w, r, "gift-clip.mp4", info.ModTime(), file)
+	http.ServeContent(&giftClipVideoResponseWriter{ResponseWriter: w}, r, "gift-clip.mp4", info.ModTime(), file)
+}
+
+type giftClipVideoResponseWriter struct{ http.ResponseWriter }
+
+func (writer *giftClipVideoResponseWriter) WriteHeader(status int) {
+	writer.setSafeVideoHeaders()
+	writer.ResponseWriter.WriteHeader(status)
+}
+
+func (writer *giftClipVideoResponseWriter) Write(data []byte) (int, error) {
+	writer.setSafeVideoHeaders()
+	return writer.ResponseWriter.Write(data)
+}
+
+func (writer *giftClipVideoResponseWriter) setSafeVideoHeaders() {
+	header := writer.Header()
+	header.Set("Content-Type", "video/mp4")
+	header.Set("Cache-Control", "no-store")
+	header.Set("Content-Disposition", `attachment; filename="gift-clip.mp4"`)
 }
 
 func (handler *giftClipHTTPHandler) handleDelete(w http.ResponseWriter, id string) {
@@ -164,30 +180,47 @@ func (handler *giftClipHTTPHandler) handleDelete(w http.ResponseWriter, id strin
 }
 
 func parseGiftClipCreateRequest(w http.ResponseWriter, r *http.Request) (giftClipCreateMetadata, []byte, []byte, error) {
-	raw, err := readGiftClipHTTPRequestBody(w, r)
-	if err != nil {
-		return giftClipCreateMetadata{}, nil, nil, err
-	}
 	mediaType, parameters, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || !strings.EqualFold(mediaType, "multipart/form-data") || parameters["boundary"] == "" {
+	boundary := parameters["boundary"]
+	if err != nil || !strings.EqualFold(mediaType, "multipart/form-data") || !validGiftClipHTTPBoundary(boundary) {
 		return giftClipCreateMetadata{}, nil, nil, errors.New("invalid multipart content type")
 	}
-	reader := multipart.NewReader(bytes.NewReader(raw), parameters["boundary"])
+	if r.ContentLength > maxGiftClipRequestBytes {
+		return giftClipCreateMetadata{}, nil, nil, errGiftClipHTTPRequestTooLarge
+	}
+	limited := http.MaxBytesReader(w, r.Body, maxGiftClipRequestBytes)
+	reader := multipart.NewReader(limited, boundary)
 	parts := make(map[string][]byte, 3)
+	var parseErr error
 	for {
 		part, err := reader.NextPart()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			if isGiftClipHTTPTooLarge(err) {
-				return giftClipCreateMetadata{}, nil, nil, errGiftClipHTTPRequestTooLarge
+			parseErr = err
+			break
+		}
+		if parseErr != nil {
+			if _, err := io.Copy(io.Discard, part); err != nil {
+				parseErr = err
+				break
 			}
-			return giftClipCreateMetadata{}, nil, nil, err
+			continue
 		}
 		if err := readGiftClipHTTPPart(parts, part); err != nil {
-			return giftClipCreateMetadata{}, nil, nil, err
+			parseErr = err
 		}
+	}
+	_, drainErr := io.Copy(io.Discard, limited)
+	if isGiftClipHTTPTooLarge(drainErr) || isGiftClipHTTPTooLarge(parseErr) {
+		return giftClipCreateMetadata{}, nil, nil, errGiftClipHTTPRequestTooLarge
+	}
+	if parseErr == nil && drainErr != nil {
+		parseErr = drainErr
+	}
+	if parseErr != nil {
+		return giftClipCreateMetadata{}, nil, nil, parseErr
 	}
 	metadataData, metadataOK := parts["metadata"]
 	background, backgroundOK := parts["background"]
@@ -211,23 +244,9 @@ func parseGiftClipCreateRequest(w http.ResponseWriter, r *http.Request) (giftCli
 	return metadata, background, overlay, nil
 }
 
-func readGiftClipHTTPRequestBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
-	if r.ContentLength > maxGiftClipRequestBytes {
-		return nil, errGiftClipHTTPRequestTooLarge
-	}
-	limited := http.MaxBytesReader(w, r.Body, maxGiftClipRequestBytes+1)
-	body := make([]byte, maxGiftClipRequestBytes+1)
-	read, err := io.ReadFull(limited, body)
-	if read > int(maxGiftClipRequestBytes) || err == nil {
-		return nil, errGiftClipHTTPRequestTooLarge
-	}
-	if !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-		if isGiftClipHTTPTooLarge(err) {
-			return nil, errGiftClipHTTPRequestTooLarge
-		}
-		return nil, err
-	}
-	return body[:read], nil
+func validGiftClipHTTPBoundary(boundary string) bool {
+	writer := multipart.NewWriter(io.Discard)
+	return writer.SetBoundary(boundary) == nil
 }
 
 func readGiftClipHTTPPart(parts map[string][]byte, part *multipart.Part) error {
