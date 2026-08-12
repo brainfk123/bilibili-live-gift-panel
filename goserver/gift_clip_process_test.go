@@ -143,6 +143,49 @@ func TestGiftClipWindowsProcessRunnerClosesJobWhenTerminateFails(t *testing.T) {
 	}
 }
 
+func TestGiftClipWindowsProcessRunnerKillsSuspendedProcessWhenAssignmentFails(t *testing.T) {
+	api := giftClipDefaultWindowsAPI
+	assignErr := errors.New("assignment failed")
+	api.assignProcess = func(syscall.Handle, syscall.Handle) error { return assignErr }
+	started := make(chan *exec.Cmd, 1)
+	startSuspended := api.startSuspended
+	api.startSuspended = func(path string, args []string, stdout, stderr io.Writer) (*exec.Cmd, error) {
+		command, err := startSuspended(path, args, stdout, stderr)
+		if command != nil {
+			started <- command
+		}
+		return command, err
+	}
+	jobCloses, processCloses, resumes := 0, 0, 0
+	closeJob, closeProcess, resume := api.closeJob, api.closeProcess, api.resumePrimaryThread
+	api.closeJob = func(handle syscall.Handle) { jobCloses++; closeJob(handle) }
+	api.closeProcess = func(handle syscall.Handle) { processCloses++; closeProcess(handle) }
+	api.resumePrimaryThread = func(pid int) error { resumes++; return resume(pid) }
+	runner := giftClipWindowsProcessRunner{api: api}
+	errs := make(chan error, 1)
+	go func() {
+		errs <- runner.Run(context.Background(), os.Args[0], []string{"-test.run=^TestGiftClipWindowsProcessHelper$"}, io.Discard, io.Discard)
+	}()
+	command := <-started
+	recordedPID := command.Process.Pid
+	select {
+	case err := <-errs:
+		if !errors.Is(err, assignErr) {
+			t.Fatalf("Run error = %v, want assignment error", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		t.Fatalf("Run did not return after assignment failure for recorded PID %d", recordedPID)
+	}
+	if !waitForGiftClipProcessGone(recordedPID, 3*time.Second) {
+		t.Fatalf("recorded suspended PID %d survived assignment failure", recordedPID)
+	}
+	if jobCloses != 1 || processCloses != 1 || resumes != 0 {
+		t.Fatalf("job closes=%d process closes=%d resumes=%d, want 1, 1, 0", jobCloses, processCloses, resumes)
+	}
+}
+
 func TestGiftClipWindowsProcessHelper(t *testing.T) {
 	if *giftClipProcessHelperFile == "" {
 		return

@@ -398,19 +398,27 @@ func TestGiftClipEncoderTruncatesAndSanitizesDiagnosticStderr(t *testing.T) {
 
 func TestSanitizeGiftClipDiagnosticStderrRedactsWindowsAbsolutePaths(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		path string
+		name         string
+		path         string
+		secretTokens []string
 	}{
-		{name: "drive path with spaces", path: `C:\\private folder\\source gif.gif`},
-		{name: "quoted drive path", path: `"C:\\private folder\\source gif.gif"`},
-		{name: "UNC path with spaces", path: `\\\\server name\\share name\\source gif.gif`},
-		{name: "extended path", path: `\\\\?\\C:\\private folder\\source gif.gif`},
-		{name: "device path", path: `\\\\.\\C:\\private folder\\source gif.gif`},
+		{name: "drive path with spaces", path: `C:\private folder\source gif.gif`, secretTokens: []string{"private", "source gif.gif"}},
+		{name: "quoted drive path", path: `"C:\private folder\source gif.gif"`, secretTokens: []string{"private", "source gif.gif"}},
+		{name: "UNC path with spaces", path: `\\server name\private share\source gif.gif`, secretTokens: []string{"server name", "private share", "source gif.gif"}},
+		{name: "extended path", path: `\\?\C:\private folder\source gif.gif`, secretTokens: []string{"private", "source gif.gif"}},
+		{name: "device path", path: `\\.\C:\private folder\source gif.gif`, secretTokens: []string{"private", "source gif.gif"}},
+		{name: "POSIX path with spaces", path: `/private folder/source gif.gif`, secretTokens: []string{"private", "source gif.gif"}},
+		{name: "forward slash UNC path", path: `//server name/private share/source gif.gif`, secretTokens: []string{"server name", "private share", "source gif.gif"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			input := "ffmpeg failed at " + test.path + " while encoding"
+			input := "ffmpeg failed at " + test.path + ": Permission denied"
 			got := sanitizeGiftClipDiagnosticStderr(input)
-			if strings.Contains(got, test.path) || !strings.Contains(got, "[PATH]") {
+			for _, token := range test.secretTokens {
+				if strings.Contains(got, token) {
+					t.Fatalf("sanitizeGiftClipDiagnosticStderr(%q) retained secret token %q in %q", input, token, got)
+				}
+			}
+			if !strings.Contains(got, "[PATH]") || !strings.Contains(got, "Permission denied") {
 				t.Fatalf("sanitizeGiftClipDiagnosticStderr(%q) = %q", input, got)
 			}
 		})

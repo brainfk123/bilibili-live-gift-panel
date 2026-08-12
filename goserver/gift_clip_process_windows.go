@@ -132,8 +132,7 @@ func (runner giftClipWindowsProcessRunner) Run(ctx context.Context, path string,
 	}
 	defer api.closeProcess(process)
 	if err := api.assignProcess(job, process); err != nil {
-		api.closeJob(job)
-		job = 0
+		_ = command.Process.Kill()
 		_ = command.Wait()
 		return err
 	}

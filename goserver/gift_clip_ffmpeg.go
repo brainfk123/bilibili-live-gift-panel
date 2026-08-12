@@ -184,10 +184,50 @@ func (tail *giftClipStderrTail) String() string {
 	return string(tail.buffer)
 }
 
-var giftClipDiagnosticPathPattern = regexp.MustCompile(`(?i)(?:\\\\[?.][\\/](?:[^\r\n"']|"[^"]*")*|\\\\[^\\/\r\n]+[\\/](?:[^\r\n"']|"[^"]*")*|[a-z]:[\\/](?:[^\r\n"']|"[^"]*")*|/(?:[^\t\r\n "'<>|]+/?)+)`)
-
 func sanitizeGiftClipDiagnosticStderr(stderr string) string {
-	return giftClipDiagnosticPathPattern.ReplaceAllString(stderr, "[PATH]")
+	var output strings.Builder
+	for index := 0; index < len(stderr); {
+		pathStart, quoted := index, false
+		if stderr[index] == '"' && index+1 < len(stderr) && startsGiftClipAbsolutePath(stderr, index+1) {
+			pathStart, quoted = index+1, true
+		} else if !startsGiftClipAbsolutePath(stderr, index) {
+			output.WriteByte(stderr[index])
+			index++
+			continue
+		}
+		end := endGiftClipDiagnosticPath(stderr, pathStart, quoted)
+		output.WriteString("[PATH]")
+		index = end
+	}
+	return output.String()
+}
+
+func startsGiftClipAbsolutePath(text string, index int) bool {
+	if index >= len(text) {
+		return false
+	}
+	if index+2 < len(text) && ((text[index] >= 'A' && text[index] <= 'Z') || (text[index] >= 'a' && text[index] <= 'z')) && text[index+1] == ':' && (text[index+2] == '\\' || text[index+2] == '/') {
+		return true
+	}
+	if text[index] == '/' {
+		return true
+	}
+	return index+1 < len(text) && text[index] == '\\' && text[index+1] == '\\'
+}
+
+func endGiftClipDiagnosticPath(text string, start int, quoted bool) int {
+	if quoted {
+		if end := strings.IndexByte(text[start:], '"'); end >= 0 {
+			return start + end + 1
+		}
+	}
+	for index := start; index < len(text); index++ {
+		if text[index] == '\r' || text[index] == '\n' || text[index] == '"' ||
+			(text[index] == ':' && index+1 < len(text) && (text[index+1] == ' ' || text[index+1] == '\t')) {
+			return index
+		}
+	}
+	return len(text)
 }
 
 var _ io.Writer = (*giftClipStderrTail)(nil)
