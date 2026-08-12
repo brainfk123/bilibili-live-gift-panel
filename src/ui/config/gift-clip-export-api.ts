@@ -65,13 +65,14 @@ export async function waitForGiftClipJob(id: string, options: GiftClipJobWaitOpt
   assertGiftClipJobID(id);
   const intervalMs = options.intervalMs ?? 250;
   const sleep = options.sleep ?? defaultSleep;
-  const maxAttempts = options.maxAttempts ?? 120;
-  if (!Number.isSafeInteger(intervalMs) || intervalMs < 0 || !Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
+  const maxAttempts = options.maxAttempts;
+  if (!Number.isSafeInteger(intervalMs) || intervalMs < 0
+    || (maxAttempts !== undefined && (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1))) {
     throw new Error('Invalid gift clip polling options.');
   }
 
   let attemptProgress = 0;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+  for (let attempt = 0; ; attempt += 1) {
     throwIfAborted(options.signal);
     const received = await getGiftClipJob(id, options.signal);
     throwIfAborted(options.signal);
@@ -91,7 +92,7 @@ export async function waitForGiftClipJob(id: string, options: GiftClipJobWaitOpt
     options.onSnapshot?.(snapshot);
 
     if (snapshot.state === 'ready') return snapshot;
-    if (attempt + 1 === maxAttempts) break;
+    if (maxAttempts !== undefined && attempt + 1 >= maxAttempts) break;
     throwIfAborted(options.signal);
     await sleep(intervalMs, options.signal);
     throwIfAborted(options.signal);
@@ -105,7 +106,7 @@ async function requestGiftClipJob(url: string, init: RequestInit, expectedStatus
     throwIfAborted(signal);
     response = await fetch(url, init);
   } catch (error) {
-    if (signal?.aborted || isAbortError(error)) throw error;
+    rethrowAbort(error, signal);
     throw new Error(invalidResponseMessage);
   }
   throwIfAborted(signal);
@@ -114,11 +115,17 @@ async function requestGiftClipJob(url: string, init: RequestInit, expectedStatus
   }
   let payload: unknown;
   try {
+    throwIfAborted(signal);
     payload = await response.json();
-  } catch {
+    throwIfAborted(signal);
+  } catch (error) {
+    rethrowAbort(error, signal);
     throw new Error(invalidResponseMessage);
   }
-  return parseGiftClipJobSnapshot(payload);
+  throwIfAborted(signal);
+  const snapshot = parseGiftClipJobSnapshot(payload);
+  throwIfAborted(signal);
+  return snapshot;
 }
 
 function parseGiftClipJobSnapshot(value: unknown): GiftClipJobSnapshot {
@@ -168,23 +175,46 @@ function isJSONContentType(value: string | null): boolean {
 }
 
 function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'AbortError';
+  return (error instanceof Error || error instanceof DOMException) && error.name === 'AbortError';
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw signal.reason ?? new DOMException('The operation was aborted.', 'AbortError');
+  if (signal?.aborted) throw abortReason(signal);
+}
+
+function rethrowAbort(error: unknown, signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortReason(signal);
+  if (isAbortError(error)) throw error;
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error || signal.reason instanceof DOMException
+    ? signal.reason
+    : new DOMException('The operation was aborted.', 'AbortError');
 }
 
 function defaultSleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+      reject(abortReason(signal));
       return;
     }
-    const timer = setTimeout(resolve, milliseconds);
-    signal?.addEventListener('abort', () => {
+
+    let settled = false;
+    const cleanup = () => signal?.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      if (settled || !signal) return;
+      settled = true;
       clearTimeout(timer);
-      reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
-    }, { once: true });
+      cleanup();
+      reject(abortReason(signal));
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
