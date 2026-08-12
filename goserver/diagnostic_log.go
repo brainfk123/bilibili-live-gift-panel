@@ -6,9 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,19 +54,14 @@ func (logger *diagnosticLogger) write(level, event string, keyValues ...any) {
 	line := strings.Builder{}
 	line.WriteString(logger.now().Format(time.RFC3339Nano))
 	line.WriteByte(' ')
-	line.WriteString(strings.ToUpper(strings.TrimSpace(level)))
+	line.WriteString(sanitizeDiagnosticLevel(level))
 	line.WriteByte(' ')
 	line.WriteString(sanitizeDiagnosticEvent(event))
-	for index := 0; index+1 < len(keyValues); index += 2 {
-		key := sanitizeDiagnosticToken(fmt.Sprint(keyValues[index]))
-		if key == "" {
-			continue
-		}
-		value := sanitizeDiagnosticValue(key, keyValues[index+1])
+	for _, field := range validatedDiagnosticFields(keyValues) {
 		line.WriteByte(' ')
-		line.WriteString(key)
+		line.WriteString(field.key)
 		line.WriteByte('=')
-		line.WriteString(formatDiagnosticValue(value))
+		line.WriteString(formatDiagnosticValue(field.value))
 	}
 	line.WriteByte('\n')
 
@@ -159,81 +157,199 @@ func sanitizeDiagnosticToken(value string) string {
 	return strings.Trim(value, "_")
 }
 
-func isSensitiveDiagnosticKey(key string) bool {
-	normalized := normalizeDiagnosticKey(key)
-	if normalized == "rndhash" || normalized == "errorkind" {
-		return false
-	}
-	for _, candidate := range []string{"cookie", "token", "secret", "session", "authorization", "sessdata", "csrf", "password", "credential"} {
-		if strings.Contains(normalized, candidate) {
-			return true
-		}
-	}
-	for _, candidate := range []string{"rnd", "uid", "user", "viewer", "uname", "avatar", "face", "url", "payload", "frame", "json", "error", "message"} {
-		if strings.Contains(normalized, candidate) {
-			return true
-		}
-	}
-	return false
+type diagnosticField struct {
+	key   string
+	value any
 }
 
-func normalizeDiagnosticKey(key string) string {
-	return strings.Map(func(character rune) rune {
-		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' {
-			return character
-		}
-		return -1
-	}, strings.ToLower(key))
+type diagnosticFieldSpec func(any) (any, bool)
+
+var diagnosticFieldOrder = []string{
+	"gift_id", "blind_parent_id", "count", "timestamp", "rnd_hash", "reason", "state", "error_kind", "source_duplicate",
+	"accept_write_ms", "inbox_depth", "oldest_pending_age_ms", "attempts", "duration_ms", "blind_source", "blind_cost", "blind_value", "blind_priced",
+	"mapped_children", "port", "version",
 }
 
-func sanitizeDiagnosticValue(key string, value any) any {
-	if isSensitiveDiagnosticKey(key) {
-		return "[REDACTED]"
+var diagnosticFieldSpecs = map[string]diagnosticFieldSpec{
+	"gift_id":               validateDiagnosticNonNegativeInteger,
+	"blind_parent_id":       validateDiagnosticNonNegativeInteger,
+	"count":                 validateDiagnosticNonNegativeInteger,
+	"timestamp":             validateDiagnosticNonNegativeInteger,
+	"rnd_hash":              validateDiagnosticHash,
+	"reason":                validateDiagnosticReason,
+	"state":                 validateDiagnosticState,
+	"error_kind":            validateDiagnosticErrorKind,
+	"source_duplicate":      validateDiagnosticBoolean,
+	"accept_write_ms":       validateDiagnosticNonNegativeInteger,
+	"inbox_depth":           validateDiagnosticNonNegativeInteger,
+	"oldest_pending_age_ms": validateDiagnosticNonNegativeInteger,
+	"attempts":              validateDiagnosticNonNegativeInteger,
+	"duration_ms":           validateDiagnosticNonNegativeInteger,
+	"blind_source":          validateDiagnosticBlindSource,
+	"blind_cost":            validateDiagnosticAmount,
+	"blind_value":           validateDiagnosticAmount,
+	"blind_priced":          validateDiagnosticBoolean,
+	"mapped_children":       validateDiagnosticNonNegativeInteger,
+	"port":                  validateDiagnosticPort,
+	"version":               validateDiagnosticVersion,
+}
+
+var diagnosticVersionPattern = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$`)
+
+func validatedDiagnosticFields(keyValues []any) []diagnosticField {
+	fields := make([]diagnosticField, 0, len(keyValues)/2)
+	for index := 0; index+1 < len(keyValues); index += 2 {
+		key, ok := keyValues[index].(string)
+		if !ok {
+			continue
+		}
+		value, ok := validateDiagnosticField(key, keyValues[index+1])
+		if !ok {
+			continue
+		}
+		fields = append(fields, diagnosticField{key: key, value: value})
 	}
+	return fields
+}
+
+func validateDiagnosticField(key string, value any) (any, bool) {
+	spec, exists := diagnosticFieldSpecs[key]
+	if !exists {
+		return nil, false
+	}
+	return spec(value)
+}
+
+func validateDiagnosticNonNegativeInteger(value any) (any, bool) {
+	integer, ok := diagnosticInteger(value)
+	if !ok || integer < 0 || integer > 1_000_000_000_000_000 {
+		return nil, false
+	}
+	return integer, true
+}
+
+func validateDiagnosticPort(value any) (any, bool) {
+	integer, ok := diagnosticInteger(value)
+	if !ok || integer < 1 || integer > 65535 {
+		return nil, false
+	}
+	return integer, true
+}
+
+func diagnosticInteger(value any) (int64, bool) {
 	switch value := value.(type) {
-	case bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, json.Number:
-		return value
-	case string:
-		if normalizeDiagnosticKey(key) == "rndhash" && isDiagnosticHash(value) {
-			return value
+	case int:
+		return int64(value), true
+	case int8:
+		return int64(value), true
+	case int16:
+		return int64(value), true
+	case int32:
+		return int64(value), true
+	case int64:
+		return value, true
+	case uint:
+		if uint64(value) <= math.MaxInt64 {
+			return int64(value), true
 		}
-		if isSafeDiagnosticString(key, value) {
-			return value
+	case uint8:
+		return int64(value), true
+	case uint16:
+		return int64(value), true
+	case uint32:
+		return int64(value), true
+	case uint64:
+		if value <= math.MaxInt64 {
+			return int64(value), true
+		}
+	case json.Number:
+		integer, err := value.Int64()
+		if err == nil {
+			return integer, true
 		}
 	}
-	return "[REDACTED]"
+	return 0, false
 }
 
-func isSafeDiagnosticString(key, value string) bool {
-	if !isSafeDiagnosticToken(value) {
-		return false
-	}
-	switch normalizeDiagnosticKey(key) {
-	case "reason":
-		switch value {
-		case "accept", "auth", "catalog_fetch_failed", "connection", "consumer", "deadline", "decompression_failure", "dial", "duplicate", "empty_legacy_line", "heartbeat", "ignored_command", "malformed_envelope", "malformed_gift_data", "malformed_legacy_line", "packet_bounds", "read", "room_mismatch", "source", "state_save_failed", "write":
-			return true
-		}
-	case "state":
-		switch value {
-		case "idle", "connecting", "connected", "reconnecting", "error":
-			return true
-		}
-	case "errorkind":
-		switch value {
-		case "auth", "connection", "deadline", "dial", "heartbeat", "read", "source", "write":
-			return true
-		}
-	case "blindsource":
-		switch value {
-		case "catalog", "event", "none":
-			return true
-		}
-	case "version":
-		return strings.HasPrefix(value, "v") || value[0] >= '0' && value[0] <= '9'
-	}
-	return false
+func validateDiagnosticBoolean(value any) (any, bool) {
+	boolean, ok := value.(bool)
+	return boolean, ok
 }
+
+func validateDiagnosticAmount(value any) (any, bool) {
+	var number float64
+	switch value := value.(type) {
+	case float64:
+		number = value
+	case float32:
+		number = float64(value)
+	case json.Number:
+		parsed, err := value.Float64()
+		if err != nil {
+			return nil, false
+		}
+		number = parsed
+	default:
+		return nil, false
+	}
+	if math.IsNaN(number) || math.IsInf(number, 0) || number < 0 || number > 1_000_000_000_000_000 {
+		return nil, false
+	}
+	return number, true
+}
+
+func validateDiagnosticHash(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok || !isDiagnosticHash(text) {
+		return nil, false
+	}
+	return text, true
+}
+
+func validateDiagnosticReason(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok || !diagnosticReasonValues[text] {
+		return nil, false
+	}
+	return text, true
+}
+
+func validateDiagnosticState(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok || !diagnosticStateValues[text] {
+		return nil, false
+	}
+	return text, true
+}
+
+func validateDiagnosticErrorKind(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok || !diagnosticErrorKindValues[text] {
+		return nil, false
+	}
+	return text, true
+}
+
+func validateDiagnosticBlindSource(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok || !diagnosticBlindSourceValues[text] {
+		return nil, false
+	}
+	return text, true
+}
+
+func validateDiagnosticVersion(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok || (text != "dev" && !diagnosticVersionPattern.MatchString(text)) {
+		return nil, false
+	}
+	return text, true
+}
+
+var diagnosticReasonValues = map[string]bool{"accept": true, "auth": true, "catalog_fetch_failed": true, "connection": true, "consumer": true, "deadline": true, "decompression_failure": true, "dial": true, "duplicate": true, "empty_legacy_line": true, "heartbeat": true, "ignored_command": true, "malformed_envelope": true, "malformed_gift_data": true, "malformed_legacy_line": true, "packet_bounds": true, "read": true, "room_mismatch": true, "source": true, "state_save_failed": true, "write": true}
+var diagnosticStateValues = map[string]bool{"idle": true, "connecting": true, "connected": true, "reconnecting": true, "error": true}
+var diagnosticErrorKindValues = map[string]bool{"auth": true, "connection": true, "deadline": true, "dial": true, "heartbeat": true, "read": true, "source": true, "write": true}
+var diagnosticBlindSourceValues = map[string]bool{"catalog": true, "event": true, "none": true}
 
 func isSafeDiagnosticEvent(value string) bool {
 	switch value {
@@ -252,18 +368,11 @@ func sanitizeDiagnosticEvent(value string) string {
 	return "diagnostic_event_omitted"
 }
 
-func isSafeDiagnosticToken(value string) bool {
-	value = strings.TrimSpace(value)
-	if value == "" || len(value) > 96 {
-		return false
+func sanitizeDiagnosticLevel(value string) string {
+	if strings.ToUpper(strings.TrimSpace(value)) == "ERROR" {
+		return "ERROR"
 	}
-	for _, character := range value {
-		if character == '_' || character == '-' || character == '.' || character >= '0' && character <= '9' || character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' {
-			continue
-		}
-		return false
-	}
-	return true
+	return "INFO"
 }
 
 func isDiagnosticHash(value string) bool {
@@ -300,7 +409,9 @@ func sanitizeLegacyDiagnosticLine(line string) string {
 		return "legacy_diagnostic_omitted reason=\"empty_legacy_line\""
 	}
 	var entry map[string]any
-	if json.Unmarshal([]byte(line), &entry) == nil {
+	decoder := json.NewDecoder(strings.NewReader(line))
+	decoder.UseNumber()
+	if decoder.Decode(&entry) == nil && decoder.Decode(&struct{}{}) == io.EOF {
 		return formatSanitizedLegacyEntry(entry)
 	}
 	fields := strings.Fields(line)
@@ -320,7 +431,7 @@ func sanitizeLegacyDiagnosticLine(line string) string {
 		if decoded, err := strconv.Unquote(value); err == nil {
 			value = decoded
 		}
-		entry[key] = parseLegacyDiagnosticValue(value)
+		entry[key] = parseLegacyDiagnosticValue(key, value)
 	}
 	return formatSanitizedLegacyEntry(entry)
 }
@@ -341,21 +452,27 @@ func formatSanitizedLegacyEntry(entry map[string]any) string {
 	line.WriteString(strings.ToUpper(level))
 	line.WriteByte(' ')
 	line.WriteString(sanitizeDiagnosticToken(event))
-	for _, key := range []string{"gift_id", "blind_parent_id", "count", "timestamp", "rnd_hash", "reason", "state", "error_kind", "source_duplicate", "accept_write_ms", "inbox_depth", "oldest_pending_age_ms", "attempts", "duration_ms"} {
+	for _, key := range diagnosticFieldOrder {
 		value, exists := entry[key]
 		if !exists || (key == "timestamp" && entry["__log_timestamp"] == nil) {
 			continue
 		}
-		sanitized := sanitizeDiagnosticValue(key, value)
+		validated, ok := validateDiagnosticField(key, value)
+		if !ok {
+			continue
+		}
 		line.WriteByte(' ')
 		line.WriteString(key)
 		line.WriteByte('=')
-		line.WriteString(formatDiagnosticValue(sanitized))
+		line.WriteString(formatDiagnosticValue(validated))
 	}
 	return line.String()
 }
 
-func parseLegacyDiagnosticValue(value string) any {
+func parseLegacyDiagnosticValue(key, value string) any {
+	if key == "blind_cost" || key == "blind_value" {
+		return json.Number(value)
+	}
 	if value == "true" || value == "false" {
 		return value == "true"
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -30,13 +31,105 @@ func TestDiagnosticLoggerWritesPlainTextAndRedactsSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	for _, expected := range []string{"INFO gift_received", "gift_id=35801", `blind_source="catalog"`, `cookie="[REDACTED]"`, `message="[REDACTED]"`} {
+	for _, expected := range []string{"INFO gift_received", "gift_id=35801", `blind_source="catalog"`} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("runtime log missing %q: %s", expected, text)
 		}
 	}
-	if strings.Contains(text, "SESSDATA=secret") || strings.HasPrefix(strings.TrimSpace(text), "{") {
+	if strings.Contains(text, "SESSDATA=secret") || strings.Contains(text, "cookie") || strings.Contains(text, "message") || strings.HasPrefix(strings.TrimSpace(text), "{") {
 		t.Fatalf("runtime log leaked a secret or used JSON: %s", text)
+	}
+}
+
+func TestDiagnosticLoggerOmitsUnknownAndWrongTypedFields(t *testing.T) {
+	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Info("gift_received",
+		"gift_id", 35801,
+		"count", 2,
+		"rnd_hash", "ba7816bf8f01",
+		"reason", "duplicate",
+		"error_kind", "read",
+		"source_duplicate", true,
+		"private-token-key", 1,
+		"unknown_numeric", 7,
+		"unknown_bool", false,
+		"unknown_number", json.Number("17"),
+		"gift_id", "35801",
+		"count", 2.5,
+		"timestamp", true,
+		"source_duplicate", 1,
+		"rnd_hash", 42,
+		"reason", 1,
+		"error_kind", "private-error",
+		"state", "ba7816bf8f01",
+		"version", "vprivate-token",
+		"port", "12450",
+	)
+
+	data, err := os.ReadFile(logger.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, expected := range []string{"gift_id=35801", "count=2", `rnd_hash="ba7816bf8f01"`, `reason="duplicate"`, `error_kind="read"`, "source_duplicate=true"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("diagnostics missing valid field %q: %s", expected, text)
+		}
+	}
+	for _, forbidden := range []string{"private-token-key", "unknown_numeric", "unknown_bool", "unknown_number", "private-error", "vprivate-token", "port=", "[REDACTED]", `gift_id="35801"`, "count=2.5", "timestamp=true", "source_duplicate=1"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("diagnostics emitted forbidden field/value %q: %s", forbidden, text)
+		}
+	}
+}
+
+func TestDiagnosticLoggerFixesLevelAndEventToSafeCategories(t *testing.T) {
+	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.write("private-level-secret", "private-event-secret", "gift_id", 1)
+
+	data, err := os.ReadFile(logger.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, " INFO diagnostic_event_omitted gift_id=1") {
+		t.Fatalf("logger did not use fixed level/event categories: %s", text)
+	}
+	for _, secret := range []string{"private-level-secret", "private-event-secret"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("logger leaked untrusted level/event %q: %s", secret, text)
+		}
+	}
+}
+
+func TestDiagnosticLogRoundTripsAllSafeProductionFields(t *testing.T) {
+	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Info("gift_received",
+		"gift_id", 35801, "blind_parent_id", 35800, "count", 2, "timestamp", int64(1700000000),
+		"rnd_hash", "ba7816bf8f01", "source_duplicate", false, "blind_source", "catalog",
+		"blind_cost", 6000.0, "blind_value", 9000.0, "blind_priced", true,
+	)
+	logger.Info("gift_accepted", "accept_write_ms", int64(5), "inbox_depth", 3, "oldest_pending_age_ms", int64(9))
+	logger.Info("connection_gap", "attempts", 2, "duration_ms", int64(123), "error_kind", "read")
+	logger.Info("blind_box_catalog_ready", "mapped_children", 4)
+	logger.Info("http_ready", "port", 12450)
+	logger.Info("service_start", "version", "0.1.1")
+	logger.Info("service_stop", "version", "dev")
+
+	export := string(logger.exportBytes())
+	for _, expected := range []string{"gift_id=35801", "blind_parent_id=35800", "count=2", "timestamp=1700000000", `rnd_hash="ba7816bf8f01"`, "source_duplicate=false", `blind_source="catalog"`, "blind_cost=6000", "blind_value=9000", "blind_priced=true", "accept_write_ms=5", "inbox_depth=3", "oldest_pending_age_ms=9", "attempts=2", "duration_ms=123", `error_kind="read"`, "mapped_children=4", "port=12450", `version="0.1.1"`, `version="dev"`} {
+		if !strings.Contains(export, expected) {
+			t.Fatalf("export missing validated field %q: %s", expected, export)
+		}
 	}
 }
 
