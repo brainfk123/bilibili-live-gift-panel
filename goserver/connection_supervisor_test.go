@@ -34,6 +34,7 @@ func TestReconnectAttemptsImmediatelyThenUsesBoundedBackoff(t *testing.T) {
 	var delays []time.Duration
 	connected := make(chan struct{})
 	supervisor := newConnectionSupervisor(func() giftEventSource { return source })
+	supervisor.jitter = func(delay time.Duration) time.Duration { return delay }
 	supervisor.wait = func(ctx context.Context, delay time.Duration) bool {
 		delays = append(delays, delay)
 		return ctx.Err() == nil
@@ -129,6 +130,8 @@ func TestReconnectUsesFullBoundedScheduleAfterStableConnection(t *testing.T) {
 			callbacks.onState("connected")
 			return newConnectionFailure("read", errors.New("lost after connected"))
 		case 8:
+			return errors.New("retry failure")
+		case 9:
 			close(connected)
 			<-ctx.Done()
 			return ctx.Err()
@@ -159,13 +162,24 @@ func TestReconnectUsesFullBoundedScheduleAfterStableConnection(t *testing.T) {
 	<-done
 	mu.Lock()
 	defer mu.Unlock()
-	wantDelays := []time.Duration{0, 0, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second}
+	wantDelays := []time.Duration{0, 0, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second}
 	if !slices.Equal(delays, wantDelays) {
 		t.Fatalf("delays = %v, want %v", delays, wantDelays)
 	}
-	wantJitter := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second}
+	wantJitter := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second}
 	if !slices.Equal(jitterInputs, wantJitter) {
 		t.Fatalf("jitter inputs = %v, want %v", jitterInputs, wantJitter)
+	}
+}
+
+func TestSupervisorDefaultJitterUsesInjectedEntropyWithinBounds(t *testing.T) {
+	supervisor := newConnectionSupervisorWithEntropy(nil, func() uint64 { return 0 })
+	got := supervisor.jitter(10 * time.Second)
+	if got != 9*time.Second {
+		t.Fatalf("default jitter with zero entropy = %s, want 9s", got)
+	}
+	if got <= 0 || got > 30*time.Second {
+		t.Fatalf("default jitter = %s, outside safe range", got)
 	}
 }
 
@@ -231,6 +245,37 @@ func TestReconnectRetriesHeartbeatFailureExactlyOnce(t *testing.T) {
 	<-retryStarted
 	if got := attempts.Load(); got != 2 {
 		t.Fatalf("source attempts = %d, want one retry after heartbeat failure", got)
+	}
+	cancel()
+	<-done
+}
+
+func TestReconnectRestartsAfterRealSocketHeartbeatFailure(t *testing.T) {
+	var factories atomic.Int32
+	restarted := make(chan struct{})
+	supervisor := newConnectionSupervisor(func() giftEventSource {
+		if factories.Add(1) == 1 {
+			return giftEventSourceFunc(func(ctx context.Context, _ string, _ runtimeCallbacks) error {
+				return (&bilibiliGiftSource{heartbeatInterval: time.Millisecond, readTimeout: time.Hour}).runSocket(
+					ctx,
+					&heartbeatFailingBiliSocket{closed: make(chan struct{})},
+					roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{},
+				)
+			})
+		}
+		return giftEventSourceFunc(func(ctx context.Context, _ string, _ runtimeCallbacks) error {
+			close(restarted)
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	})
+	supervisor.jitter = func(time.Duration) time.Duration { return 0 }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- supervisor.Run(ctx, "room-a", runtimeCallbacks{}) }()
+	<-restarted
+	if got := factories.Load(); got != 2 {
+		t.Fatalf("source factory calls = %d, want one restart after heartbeat failure", got)
 	}
 	cancel()
 	<-done

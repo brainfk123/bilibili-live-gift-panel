@@ -154,9 +154,11 @@ func fetchCurrentRoomGiftResourcesContext(ctx context.Context, roomID string, se
 			effectsByID = effects.ByID
 		}
 	}
-	markListedBlindBoxChildren(gifts, func(giftID int) (*blindBoxInfo, bool, error) {
-		return fetchBlindBoxInfo(giftID, session)
-	})
+	if err := markListedBlindBoxChildrenContext(ctx, gifts, func(ctx context.Context, giftID int) (*blindBoxInfo, bool, error) {
+		return fetchBlindBoxInfoContext(ctx, giftID, session)
+	}); err != nil {
+		return roomGiftResources{}, err
+	}
 	return roomGiftResources{Gifts: gifts, EffectsByID: effectsByID}, nil
 }
 
@@ -321,15 +323,30 @@ func markListedBlindBoxChildren(gifts []roomGiftInfo, lookup func(int) (*blindBo
 	if lookup == nil {
 		return
 	}
+	_ = markListedBlindBoxChildrenContext(context.Background(), gifts, func(_ context.Context, giftID int) (*blindBoxInfo, bool, error) {
+		return lookup(giftID)
+	})
+}
+
+func markListedBlindBoxChildrenContext(ctx context.Context, gifts []roomGiftInfo, lookup func(context.Context, int) (*blindBoxInfo, bool, error)) error {
+	if lookup == nil {
+		return nil
+	}
 	byID := make(map[int]int, len(gifts))
 	for index := range gifts {
 		byID[gifts[index].ID] = index
 	}
 	for _, gift := range gifts {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if !gift.Listed || !gift.BlindBoxParent {
 			continue
 		}
-		info, _, err := lookup(gift.ID)
+		info, _, err := lookup(ctx, gift.ID)
+		if err != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil || info == nil {
 			continue
 		}
@@ -348,6 +365,7 @@ func markListedBlindBoxChildren(gifts []roomGiftInfo, lookup func(int) (*blindBo
 			}
 		}
 	}
+	return nil
 }
 
 func decodeBiliPayload(payload map[string]any, target any) error {

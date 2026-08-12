@@ -48,6 +48,7 @@ type backgroundRuntime struct {
 	reload                   chan struct{}
 	mu                       sync.RWMutex
 	status                   runtimeStatus
+	connectionGapRoomID      string
 	ingestionGeneration      uint64
 	ingestionErrorSource     string
 	animationMu              sync.Mutex
@@ -145,6 +146,7 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 		}
 
 		roomID := state.RoomID
+		runtime.resetConnectionGapsForRoom(roomID)
 		if err := runtime.prepareRoomConnection(roomID); err != nil {
 			runtime.setStatus("error", roomID, err)
 			if !runtime.wait(ctx, 2*time.Second) {
@@ -152,10 +154,7 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 			}
 			continue
 		}
-		previousStatus := runtime.Status()
-		if previousStatus.RoomID != roomID {
-			runtime.setConnectionGaps(nil)
-		}
+		runtime.setConnectionGapRoom(roomID)
 		connectionContext, cancel := context.WithCancel(ctx)
 		finished := make(chan error, 1)
 		supervisor := newConnectionSupervisor(runtime.sourceFactory)
@@ -875,6 +874,26 @@ func (runtime *backgroundRuntime) setConnectionGaps(gaps []connectionGap) {
 	runtime.mu.Lock()
 	runtime.status.ConnectionGaps = append([]connectionGap(nil), gaps...)
 	runtime.mu.Unlock()
+}
+
+func (runtime *backgroundRuntime) resetConnectionGapsForRoom(roomID string) {
+	runtime.mu.Lock()
+	if runtime.connectionGapRoomID != "" && runtime.connectionGapRoomID != roomID {
+		runtime.status.ConnectionGaps = nil
+	}
+	runtime.mu.Unlock()
+}
+
+func (runtime *backgroundRuntime) setConnectionGapRoom(roomID string) {
+	runtime.mu.Lock()
+	runtime.connectionGapRoomID = roomID
+	runtime.mu.Unlock()
+}
+
+func (runtime *backgroundRuntime) connectionGapRoom() string {
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	return runtime.connectionGapRoomID
 }
 
 func (runtime *backgroundRuntime) setStatus(state, roomID string, err error) {

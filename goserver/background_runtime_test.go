@@ -1400,6 +1400,42 @@ func TestBackgroundRuntimeRoomChangeCancelsAndJoinsOldSupervisor(t *testing.T) {
 	}
 }
 
+func TestBackgroundRuntimeClearsOwnedGapsWhenPreparationFailsThenRetriesNewRoom(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-b"
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.setConnectionGapRoom("room-a")
+	runtime.setConnectionGaps([]connectionGap{{StartedAt: 1, ErrorKind: "read"}})
+	runtime.setStatus("error", "room-b", errors.New("first preparation failed"))
+	failed := false
+	runtime.animationWriteAtomically = func(path string, data []byte) error {
+		if !failed {
+			failed = true
+			return errors.New("injected preparation failure")
+		}
+		return writeFileAtomically(path, data)
+	}
+	runtime.resetConnectionGapsForRoom("room-b")
+	if err := runtime.prepareRoomConnection("room-b"); err == nil {
+		t.Fatal("first room preparation unexpectedly succeeded")
+	}
+	if gaps := runtime.Status().ConnectionGaps; len(gaps) != 0 {
+		t.Fatalf("old-room gaps survived failed target preparation: %#v", gaps)
+	}
+	runtime.resetConnectionGapsForRoom("room-b")
+	if err := runtime.prepareRoomConnection("room-b"); err != nil {
+		t.Fatal(err)
+	}
+	runtime.setConnectionGapRoom("room-b")
+	if owner := runtime.connectionGapRoom(); owner != "room-b" {
+		t.Fatalf("gap owner after successful retry = %q, want room-b", owner)
+	}
+}
+
 func (source *callbackDuringShutdownSource) Run(ctx context.Context, _ string, callbacks runtimeCallbacks) error {
 	close(source.started)
 	<-ctx.Done()

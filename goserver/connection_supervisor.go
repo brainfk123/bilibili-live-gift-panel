@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"errors"
 	"sync"
 	"time"
@@ -71,6 +73,29 @@ func reconnectDelay(failureCount int, jitter func(time.Duration) time.Duration) 
 	return delay
 }
 
+func newReconnectJitter(entropy func() uint64) func(time.Duration) time.Duration {
+	if entropy == nil {
+		entropy = defaultReconnectEntropy
+	}
+	return func(base time.Duration) time.Duration {
+		if base <= 0 {
+			return 0
+		}
+		// Spread each delay in the bounded [-10%, +10%] range.  The entropy is
+		// local to the supervisor, avoiding shared pseudo-random state.
+		percent := int64(entropy()%21) - 10
+		return base + (base*time.Duration(percent))/100
+	}
+}
+
+func defaultReconnectEntropy() uint64 {
+	var bytes [8]byte
+	if _, err := cryptorand.Read(bytes[:]); err == nil {
+		return binary.LittleEndian.Uint64(bytes[:])
+	}
+	return uint64(time.Now().UnixNano())
+}
+
 // connectionSupervisor is the sole owner that creates and starts gift sources.
 // The caller cancels its context to replace a room connection.
 type connectionSupervisor struct {
@@ -87,6 +112,10 @@ type connectionSupervisor struct {
 }
 
 func newConnectionSupervisor(sourceFactory func() giftEventSource) *connectionSupervisor {
+	return newConnectionSupervisorWithEntropy(sourceFactory, nil)
+}
+
+func newConnectionSupervisorWithEntropy(sourceFactory func() giftEventSource, entropy func() uint64) *connectionSupervisor {
 	return &connectionSupervisor{
 		sourceFactory: sourceFactory,
 		wait: func(ctx context.Context, delay time.Duration) bool {
@@ -99,7 +128,7 @@ func newConnectionSupervisor(sourceFactory func() giftEventSource) *connectionSu
 				return true
 			}
 		},
-		jitter:  func(delay time.Duration) time.Duration { return delay },
+		jitter:  newReconnectJitter(entropy),
 		now:     time.Now,
 		maxGaps: defaultConnectionGapLimit,
 		gaps:    []connectionGap{},
