@@ -247,16 +247,13 @@ body.display-mode { overflow: hidden; background: transparent; }
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
+  color: var(--theme-accent, var(--accent));
   font-size: 56px;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
   line-height: 1.05;
   text-overflow: ellipsis;
   white-space: nowrap;
-  background: linear-gradient(135deg, var(--accent), var(--accent2, #ffd166));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
   transition: transform 0.15s ease;
 }
 .attr-value.is-enum-mapped { display: flex; align-items: center; justify-content: flex-end; gap: .22em; background: none; color: var(--enum-value-color, var(--theme-accent, var(--accent))); -webkit-background-clip: border-box; background-clip: border-box; }
@@ -436,11 +433,6 @@ body.display-mode { overflow: hidden; background: transparent; }
 .display-gift-rule,
 .broadcast-ticker { background: var(--theme-card-soft); border-color: var(--theme-outline); }
 .attr-name { color: var(--theme-muted); }
-.attr-value {
-  background: linear-gradient(135deg, var(--theme-accent), color-mix(in srgb, var(--theme-accent) 52%, white));
-  -webkit-background-clip: text;
-  background-clip: text;
-}
 .display-gift-name { color: color-mix(in srgb, var(--theme-accent) 74%, var(--theme-text)); }
 .display-formula-name,
 .broadcast-content { color: var(--theme-text); }
