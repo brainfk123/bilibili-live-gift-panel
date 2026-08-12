@@ -3334,9 +3334,13 @@ describe('OBS attribute display', () => {
     const root = new TestElement('div');
     mountDisplay(root as unknown as HTMLElement, { kind: 'attribute', attributeName: '比赛结果' });
 
+    const valueElement = root.querySelector('.attr-value');
     expect(textOf(root)).toContain('红队胜');
-    expect(root.querySelector('.attr-value')?.className).toContain('is-enum-mapped');
+    expect(valueElement?.className).toContain('is-enum-mapped');
+    expect(valueElement?.style['--enum-value-color']).toBe('#ff3366');
     expect((root.querySelector('.attr-enum-image') as any)?.src).toBe('https://example.com/red.png');
+    const displayCss = readFileSync(new URL('../src/ui/display/display.css', import.meta.url), 'utf8');
+    expect(displayCss).toMatch(/\.attr-value\.is-enum-mapped\s*\{[^}]*color:\s*var\(--enum-value-color,/);
     vi.useRealTimers();
   });
 
@@ -3371,6 +3375,7 @@ describe('OBS attribute display', () => {
 
     expect(textOf(root)).toContain('积分');
     expect(textOf(root)).toContain('7');
+    expect(root.querySelector('.attr-value')?.textContent).toBe('7');
     expect(textOf(root)).toContain('增加一分');
     expect(textOf(root)).toContain('欢迎参与积分挑战');
     expect(root.querySelectorAll('.display-gift-rule')).toHaveLength(1);
