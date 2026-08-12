@@ -2190,7 +2190,7 @@ describe('single-page configuration rendering', () => {
     expect(loadState().attributes[0].value).toBe(0);
   });
 
-  it('ignores an older gift-rule response when advancing the shared simulation draft', async () => {
+  it('ignores a stale simulation response when advancing the shared draft', async () => {
     const [firstGift, secondGift] = builtinCatalog;
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state('88888888'),
@@ -2239,11 +2239,130 @@ describe('single-page configuration rendering', () => {
     resolveSecond(Response.json({ code: 0, result: 10 }));
     await vi.waitFor(() => expect(textOf(rows[1].querySelector('.formula-preview')!)).toContain('0 → 10'));
     resolveFirst(Response.json({ code: 0, result: 1 }));
-    await vi.waitFor(() => expect(textOf(rows[0].querySelector('.formula-preview')!)).toContain('0 → 1'));
+    await vi.waitFor(() => expect(textOf(rows[0].querySelector('.formula-preview')!)).not.toContain('0 → 1'));
 
     secondSimulate.onclick?.();
     await vi.waitFor(() => expect(textOf(rows[1].querySelector('.formula-preview')!)).toContain('10 → 20'));
     expect(requestedValues).toEqual([0, 0, 10]);
+  });
+
+  it('does not save a simulated timer result as the real attribute value', async () => {
+    const configured = state('88888888', 1);
+    configured.attributes[0].value = 10;
+    configured.timerRules = [{
+      id: 't-preview', attributeName: '加班时间', formulaName: '模拟减一',
+      intervalSeconds: 60, formula: '加班时间-1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const fallbackFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { attributeValue: number };
+      return Response.json({ code: 0, result: body.attributeValue - 1 });
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    const currentValue = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '当前值') as TestElement;
+    const timerEditor = root.querySelector('.timer-rule-editor')!;
+    findByText(timerEditor, '模拟执行一次')?.onclick?.();
+
+    await vi.waitFor(() => expect(textOf(timerEditor.querySelector('.formula-preview')!)).toContain('10 → 9'));
+    expect(currentValue.value).toBe('10');
+    findByText(root, '保存修改')?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
+    expect(loadState().attributes[0].value).toBe(10);
+  });
+
+  it('resets the shared simulation draft when the manual current value resets', async () => {
+    const configured = state('88888888', 1);
+    configured.attributes[0].value = 10;
+    configured.rules = [{
+      id: 'r-preview', giftId: 1, attributeName: '加班时间',
+      formulaName: '模拟加一', formula: '加班时间+1', enabled: true,
+    }];
+    configured.timerRules = [{
+      id: 't-preview', attributeName: '加班时间', formulaName: '模拟减一',
+      intervalSeconds: 60, formula: '加班时间-1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const fallbackFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { formula: string; attributeValue: number };
+      return Response.json({ code: 0, result: body.attributeValue + (body.formula.includes('-1') ? -1 : 1) });
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const currentValue = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '当前值') as TestElement & { oninput?: () => void };
+    const giftPreview = root.querySelector('.selected-gift-rule')!.querySelector('.formula-preview')!;
+    const giftSimulate = findByText(root, '模拟收到 1 个')!;
+    giftSimulate.onclick?.();
+    await vi.waitFor(() => expect(textOf(giftPreview)).toContain('10 → 11'));
+
+    currentValue.value = '20';
+    currentValue.oninput?.();
+    expect(textOf(root)).not.toContain('10 → 11');
+
+    const resetGiftRow = root.querySelector('.selected-gift-rule')!;
+    const resetGiftPreview = resetGiftRow.querySelector('.formula-preview')!;
+    findByText(resetGiftRow, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(resetGiftPreview)).toContain('20 → 21'));
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('定时器'))?.onclick?.();
+    const timerEditor = root.querySelector('.timer-rule-editor')!;
+    const timerPreview = timerEditor.querySelector('.formula-preview')!;
+    findByText(timerEditor, '模拟执行一次')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(timerPreview)).toContain('21 → 20'));
+    expect(currentValue.value).toBe('20');
+
+    findByText(root, '保存修改')?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
+    expect(loadState().attributes[0].value).toBe(20);
+  });
+
+  it('does not advance the shared draft for a skipped timer simulation', async () => {
+    const configured = state('88888888', 1);
+    configured.attributes[0].value = 10;
+    configured.rules = [{
+      id: 'r-preview', giftId: 1, attributeName: '加班时间',
+      formulaName: '模拟加一', formula: '加班时间+1', enabled: true,
+    }];
+    configured.timerRules = [{
+      id: 't-skipped', attributeName: '加班时间', formulaName: '不应执行',
+      intervalSeconds: 60, condition: '加班时间<0', formula: '加班时间-1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const fallbackFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { formula: string; attributeValue: number };
+      if (body.formula.includes('<0')) return Response.json({ code: 0, result: 0 });
+      return Response.json({ code: 0, result: body.attributeValue + (body.formula.includes('-1') ? -1 : 1) });
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('定时器'))?.onclick?.();
+    const timerEditor = root.querySelector('.timer-rule-editor')!;
+    const timerPreview = timerEditor.querySelector('.formula-preview')!;
+    findByText(timerEditor, '模拟执行一次')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(timerPreview)).toContain('当前条件不满足，本次未执行'));
+
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const giftPreview = root.querySelector('.selected-gift-rule')!.querySelector('.formula-preview')!;
+    findByText(root, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(giftPreview)).toContain('10 → 11'));
   });
 
   it('configures a conditional backend timer without adding it to the OBS gift grid', async () => {

@@ -2895,6 +2895,13 @@ export function mountConfig(root: HTMLElement): void {
     const initialEditableValue = Number(valueInput.value);
     let simulationDraftValue = Number.isFinite(initialEditableValue) ? initialEditableValue : 0;
     let simulationGeneration = 0;
+    const resetSimulationDraftFromInput = (): void => {
+      const nextValue = Number(valueInput.value);
+      simulationDraftValue = Number.isFinite(nextValue) ? nextValue : 0;
+      simulationGeneration += 1;
+      for (const item of selected.values()) item.simulationPreview = undefined;
+      renderSelectedRules();
+    };
     const formatSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
     formatSelect.innerHTML = '<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字 + 后缀</option>';
     formatSelect.value = original?.format ?? 'hhmmss';
@@ -2948,7 +2955,10 @@ export function mountConfig(root: HTMLElement): void {
       overviewPreviewName.textContent = previewAttribute.name;
       overviewPreviewValue.textContent = formatValue(previewAttribute.value, previewAttribute);
     };
-    valueInput.oninput = updateOverviewPreview;
+    valueInput.oninput = () => {
+      resetSimulationDraftFromInput();
+      updateOverviewPreview();
+    };
     suffixInput.oninput = updateOverviewPreview;
     const templateButton = el('button', {
       class: 'btn guide-overtime-template',
@@ -2958,6 +2968,7 @@ export function mountConfig(root: HTMLElement): void {
     templateButton.onclick = () => {
       nameInput.value = '加班时间';
       valueInput.value = '0';
+      resetSimulationDraftFromInput();
       formatSelect.value = 'hhmmss';
       suffixInput.value = '';
       if (!broadcastMessageInput.value.trim()) broadcastMessageInput.value = '感谢大家的支持，欢迎投喂礼物';
@@ -3252,8 +3263,10 @@ export function mountConfig(root: HTMLElement): void {
       const updatePreview = (completeLesson = false): void => {
         rule.formula = formulaInput.value;
         const name = nameInput.value.trim() || originalName || '属性';
-        const value = Number(valueInput.value);
-        const currentValue = Number.isFinite(value) ? value : 0;
+        const inputValue = Number(valueInput.value);
+        const currentValue = completeLesson
+          ? simulationDraftValue
+          : Number.isFinite(inputValue) ? inputValue : 0;
         const condition = originalName && originalName !== name
           ? replaceFormulaVariable((rule.condition ?? '').trim(), originalName, name)
           : (rule.condition ?? '').trim();
@@ -3261,6 +3274,7 @@ export function mountConfig(root: HTMLElement): void {
           ? replaceFormulaVariable(rule.formula.trim(), originalName, name)
           : rule.formula.trim();
         const requestVersion = ++previewVersion;
+        const requestSimulationGeneration = completeLesson ? ++simulationGeneration : 0;
         preview.classList.remove('has-tutorial-confirmation');
         preview.replaceChildren(el('span', { text: '由后台计算预览…' }));
         void (async () => {
@@ -3271,6 +3285,7 @@ export function mountConfig(root: HTMLElement): void {
           return { skipped: false as const, result: await previewFormula(formula, name, currentValue, 'timer') };
         })().then(({ skipped, result }) => {
           if (requestVersion !== previewVersion) return;
+          if (completeLesson && requestSimulationGeneration !== simulationGeneration) return;
           if (skipped) {
             preview.replaceChildren(el('span', {
               text: completeLesson ? '当前条件不满足，本次未执行' : '当前条件不满足，本次会跳过',
@@ -3286,8 +3301,7 @@ export function mountConfig(root: HTMLElement): void {
             return;
           }
           if (completeLesson) {
-            valueInput.value = String(result);
-            updateOverviewPreview();
+            simulationDraftValue = result;
           }
           preview.replaceChildren(
             el('span', { text: `${completeLesson ? '已模拟执行' : '预览'}：${currentValue} → ` }),
@@ -3599,8 +3613,9 @@ export function mountConfig(root: HTMLElement): void {
         preview.append(el('span', { text: '由后台计算预览…' }));
         void previewFormula(formula, name, currentValue, 'gift', item.gift.price).then((result) => {
           if (requestVersion !== previewVersion) return;
+          if (completeLesson && requestSimulationGeneration !== simulationGeneration) return;
           if (completeLesson) {
-            if (requestSimulationGeneration === simulationGeneration) simulationDraftValue = result;
+            simulationDraftValue = result;
             item.simulationPreview = { currentValue, result };
           }
           let awaitingConfirmation = false;
