@@ -159,6 +159,30 @@ func TestGiftInboxSnapshotCapacityBoundaryClearsAfterDrain(t *testing.T) {
 	}
 }
 
+func TestGiftInboxHealthRevisionSaturatesInsteadOfWrapping(t *testing.T) {
+	inbox, err := openGiftInbox(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inbox.Close()
+	inbox.shared.mu.Lock()
+	inbox.shared.revision = ^uint64(0) - 1
+	inbox.shared.health.Revision = inbox.shared.revision
+	inbox.shared.mu.Unlock()
+	if _, err := inbox.Accept("room", "SEND_GIFT", giftEvent{GiftName: "max revision"}); err != nil {
+		t.Fatal(err)
+	}
+	if health := inbox.SnapshotHealth(); health.Revision != ^uint64(0) {
+		t.Fatalf("post-Accept revision = %d, want max uint64", health.Revision)
+	}
+	if _, ok, err := inbox.Next(); err != nil || !ok {
+		t.Fatalf("Next() = %t, %v", ok, err)
+	}
+	if health := inbox.SnapshotHealth(); health.Revision != ^uint64(0) {
+		t.Fatalf("post-Next revision wrapped to %d", health.Revision)
+	}
+}
+
 func TestGiftInboxLeavesCorruptHeadForNextAndRemovesOnlyOwnTemporaryFiles(t *testing.T) {
 	root := t.TempDir()
 	pending := filepath.Join(root, "gift-inbox", "pending")

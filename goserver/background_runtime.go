@@ -53,6 +53,13 @@ type runtimeGiftInboxSnapshot interface {
 	SnapshotHealth() giftInboxHealth
 }
 
+type runtimeInboxEpoch uint64
+
+type runtimeInboxInstallation struct {
+	inbox runtimeGiftInbox
+	epoch runtimeInboxEpoch
+}
+
 type ingestionFailureError struct {
 	source string
 	err    error
@@ -85,6 +92,7 @@ type backgroundRuntime struct {
 	timerTicks               <-chan time.Time
 	notifications            *notificationCenter
 	inbox                    runtimeGiftInbox
+	inboxEpoch               runtimeInboxEpoch
 	inboxRevision            uint64
 	inboxWake                chan struct{}
 	inboxRetryDelay          time.Duration
@@ -133,9 +141,8 @@ func (runtime *backgroundRuntime) setDiagnosticLogger(logger *diagnosticLogger) 
 }
 
 func (runtime *backgroundRuntime) Run(ctx context.Context) {
-	runtime.refreshTransactionPending()
-	inbox := runtime.currentInbox()
-	if inbox == nil {
+	installation := runtime.currentInbox()
+	if installation.inbox == nil {
 		if runtime.store == nil {
 			runtime.recordIngestionFailureFrom("open", fmt.Errorf("gift inbox requires a config store"))
 			return
@@ -145,13 +152,15 @@ func (runtime *backgroundRuntime) Run(ctx context.Context) {
 			runtime.recordIngestionFailureFrom("open", err)
 			return
 		}
-		inbox = opened
-		runtime.publishInbox(inbox, inbox.Health())
+		installation = runtime.installInbox(opened, opened.Health())
+	} else if installation.epoch == 0 {
+		installation = runtime.installInbox(installation.inbox, runtime.snapshotInboxHealth(installation.inbox))
 	} else {
 		// A recovered inbox may be supplied before Run. Publish its startup
 		// snapshot before HTTP readers can observe the runtime.
-		runtime.publishInbox(inbox, runtime.snapshotInboxHealth(inbox))
+		runtime.publishInbox(installation, runtime.snapshotInboxHealth(installation.inbox))
 	}
+	inbox := installation.inbox
 	defer inbox.Close()
 
 	var workers sync.WaitGroup
@@ -298,23 +307,24 @@ func giftCommandCategory(gift giftEvent) string {
 }
 
 func (runtime *backgroundRuntime) acceptGift(_ context.Context, roomID, command string, gift giftEvent) {
-	inbox := runtime.currentInbox()
-	if inbox == nil {
+	installation := runtime.currentInbox()
+	if installation.inbox == nil {
 		runtime.recordIngestionFailure(fmt.Errorf("gift inbox is not available"))
 		return
 	}
+	inbox := installation.inbox
 	ingestionGeneration := runtime.currentIngestionGeneration()
 	acceptedAt := time.Now()
 	_, err := inbox.Accept(roomID, command, gift)
 	acceptWriteLatency := time.Since(acceptedAt)
 	if err != nil {
-		runtime.publishInbox(inbox, runtime.snapshotInboxHealth(inbox))
+		runtime.publishInbox(installation, runtime.snapshotInboxHealth(inbox))
 		runtime.recordIngestionFailureFrom("accept", err)
 		return
 	}
 	runtime.clearIngestionFailure(ingestionGeneration, "accept")
 	health := runtime.snapshotInboxHealth(inbox)
-	runtime.publishInbox(inbox, health)
+	runtime.publishInbox(installation, health)
 	oldestPendingAge := int64(0)
 	if health.OldestPendingAt > 0 {
 		oldestPendingAge = maxInt64(0, acceptedAt.UnixMilli()-health.OldestPendingAt*1000)
@@ -411,10 +421,11 @@ func (runtime *backgroundRuntime) runGiftLoop(ctx context.Context) {
 
 func (runtime *backgroundRuntime) consumeAvailableInboxRecord(ctx context.Context) (bool, error) {
 	ingestionGeneration := runtime.currentIngestionGeneration()
-	inbox := runtime.currentInbox()
-	if inbox == nil {
+	installation := runtime.currentInbox()
+	if installation.inbox == nil {
 		return false, fmt.Errorf("gift inbox is not available")
 	}
+	inbox := installation.inbox
 	record, ok, err := inbox.Next()
 	if err != nil {
 		return false, &ingestionFailureError{source: "next", err: err}
@@ -423,7 +434,7 @@ func (runtime *backgroundRuntime) consumeAvailableInboxRecord(ctx context.Contex
 	if !ok {
 		return false, nil
 	}
-	if err := runtime.consumeClaimedInboxRecord(ctx, inbox, record); err != nil {
+	if err := runtime.consumeClaimedInboxRecord(ctx, installation, record); err != nil {
 		if err == errRoomPreparationPending {
 			return false, nil
 		}
@@ -433,8 +444,9 @@ func (runtime *backgroundRuntime) consumeAvailableInboxRecord(ctx context.Contex
 	return true, nil
 }
 
-func (runtime *backgroundRuntime) consumeClaimedInboxRecord(ctx context.Context, inbox runtimeGiftInbox, record giftInboxRecord) (err error) {
+func (runtime *backgroundRuntime) consumeClaimedInboxRecord(ctx context.Context, installation runtimeInboxInstallation, record giftInboxRecord) (err error) {
 	ingestionGeneration := runtime.currentIngestionGeneration()
+	inbox := installation.inbox
 	acknowledged := false
 	defer func() {
 		if acknowledged {
@@ -445,7 +457,7 @@ func (runtime *backgroundRuntime) consumeClaimedInboxRecord(ctx context.Context,
 		} else if releaseErr == nil {
 			runtime.clearIngestionFailure(ingestionGeneration, "release")
 		}
-		runtime.publishInbox(inbox, runtime.snapshotInboxHealth(inbox))
+		runtime.publishInbox(installation, runtime.snapshotInboxHealth(inbox))
 	}()
 	if err := runtime.processPreparedInboxRecord(ctx, record); err != nil {
 		return err
@@ -454,9 +466,9 @@ func (runtime *backgroundRuntime) consumeClaimedInboxRecord(ctx context.Context,
 		return &ingestionFailureError{source: "ack", err: err}
 	}
 	health := runtime.snapshotInboxHealth(inbox)
-	runtime.publishInbox(inbox, health)
+	runtime.publishInbox(installation, health)
 	runtime.clearIngestionFailure(ingestionGeneration, "ack")
-	runtime.clearCapacityFailureIfDrained(health, ingestionGeneration)
+	runtime.clearCapacityFailureIfDrained(installation, health, ingestionGeneration)
 	acknowledged = true
 	return nil
 }
@@ -534,11 +546,6 @@ func (runtime *backgroundRuntime) processInboxRecordLocked(ctx context.Context, 
 		"rnd_hash", diagnosticHash(gift.Rnd),
 	)
 	settlement := giftSettlement{}
-	// A transaction may exist only while the store is applying an accepted
-	// record. Publish that lifecycle state here, not from Status(), so API
-	// polling remains a lock-only snapshot.
-	runtime.setTransactionPending(true)
-	defer runtime.refreshTransactionPending()
 	_, applied, err := runtime.store.updateStateForIngestion(record.IngestionID, func(state *appState) error {
 		if requirePreparation && strings.TrimSpace(state.RoomID) != preparedRoomID {
 			return errRoomPreparationPending
@@ -992,9 +999,20 @@ func (runtime *backgroundRuntime) NotifyTimerConfigChanged() {
 
 func (runtime *backgroundRuntime) Status() runtimeStatus {
 	runtime.mu.RLock()
-	status := runtime.status
-	status.ConnectionGaps = append([]connectionGap(nil), runtime.status.ConnectionGaps...)
-	status.Gaps = append([]connectionGap(nil), runtime.status.ConnectionGaps...)
+	connectionGaps := append([]connectionGap(nil), runtime.status.ConnectionGaps...)
+	status := runtimeStatus{
+		State:              runtime.status.State,
+		RoomID:             runtime.status.RoomID,
+		LastError:          runtime.status.LastError,
+		IngestionError:     runtime.status.IngestionError,
+		IngestionErrorKind: runtime.status.IngestionErrorKind,
+		LastGiftAt:         runtime.status.LastGiftAt,
+		LastFrameAt:        runtime.status.LastFrameAt,
+		ConnectionGaps:     connectionGaps,
+		Gaps:               append([]connectionGap(nil), connectionGaps...),
+		ReconnectAttempts:  runtime.status.ReconnectAttempts,
+		Inbox:              runtime.status.Inbox,
+	}
 	if len(status.Gaps) > 0 {
 		status.ReconnectAttempts = status.Gaps[len(status.Gaps)-1].Attempts
 	}
@@ -1006,23 +1024,12 @@ func (runtime *backgroundRuntime) Status() runtimeStatus {
 	return status
 }
 
-func (runtime *backgroundRuntime) setTransactionPending(pending bool) {
-	runtime.mu.Lock()
-	runtime.status.TransactionPending = pending
-	runtime.mu.Unlock()
-}
-
-func (runtime *backgroundRuntime) refreshTransactionPending() {
-	pending := runtime.store != nil && runtime.store.TransactionPending()
-	runtime.setTransactionPending(pending)
-}
-
-func (runtime *backgroundRuntime) clearCapacityFailureIfDrained(health giftInboxHealth, generation uint64) {
+func (runtime *backgroundRuntime) clearCapacityFailureIfDrained(installation runtimeInboxInstallation, health giftInboxHealth, generation uint64) {
 	if health.CapacityError {
 		return
 	}
 	runtime.mu.Lock()
-	if runtime.status.IngestionErrorKind == "inbox_capacity" && runtime.ingestionErrorSource == "accept" && runtime.ingestionGeneration == generation && runtime.inboxRevision == health.Revision {
+	if runtime.status.IngestionErrorKind == "inbox_capacity" && runtime.ingestionErrorSource == "accept" && runtime.ingestionGeneration == generation && runtime.inboxEpoch == installation.epoch && runtime.inboxRevision == health.Revision {
 		runtime.status.IngestionError = ""
 		runtime.status.IngestionErrorKind = ""
 		runtime.ingestionErrorSource = ""
@@ -1038,10 +1045,10 @@ func (runtime *backgroundRuntime) recordLastFrame(roomID string) {
 	runtime.mu.Unlock()
 }
 
-func (runtime *backgroundRuntime) currentInbox() runtimeGiftInbox {
+func (runtime *backgroundRuntime) currentInbox() runtimeInboxInstallation {
 	runtime.mu.RLock()
 	defer runtime.mu.RUnlock()
-	return runtime.inbox
+	return runtimeInboxInstallation{inbox: runtime.inbox, epoch: runtime.inboxEpoch}
 }
 
 func (runtime *backgroundRuntime) snapshotInboxHealth(inbox runtimeGiftInbox) giftInboxHealth {
@@ -1051,16 +1058,30 @@ func (runtime *backgroundRuntime) snapshotInboxHealth(inbox runtimeGiftInbox) gi
 	return inbox.Health()
 }
 
-func (runtime *backgroundRuntime) publishInbox(inbox runtimeGiftInbox, health giftInboxHealth) {
+func (runtime *backgroundRuntime) installInbox(inbox runtimeGiftInbox, health giftInboxHealth) runtimeInboxInstallation {
 	runtime.mu.Lock()
-	if runtime.inbox == inbox && health.Revision < runtime.inboxRevision {
-		runtime.mu.Unlock()
-		return
+	defer runtime.mu.Unlock()
+	if inbox == nil {
+		panic("cannot install a nil gift inbox")
 	}
+	if runtime.inboxEpoch == ^runtimeInboxEpoch(0) {
+		panic("gift inbox installation epoch exhausted")
+	}
+	runtime.inboxEpoch++
 	runtime.inbox = inbox
 	runtime.inboxRevision = health.Revision
 	runtime.status.Inbox = &health
-	runtime.mu.Unlock()
+	return runtimeInboxInstallation{inbox: inbox, epoch: runtime.inboxEpoch}
+}
+
+func (runtime *backgroundRuntime) publishInbox(installation runtimeInboxInstallation, health giftInboxHealth) {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if installation.epoch == 0 || installation.epoch != runtime.inboxEpoch || health.Revision < runtime.inboxRevision {
+		return
+	}
+	runtime.inboxRevision = health.Revision
+	runtime.status.Inbox = &health
 }
 
 func (runtime *backgroundRuntime) setConnectionGaps(gaps []connectionGap) {

@@ -469,7 +469,9 @@ func (inbox *giftInbox) reconcileHealthLocked() (giftInboxHealth, error) {
 }
 
 func (inbox *giftInbox) touchHealthLocked() {
-	inbox.shared.revision++
+	if inbox.shared.revision != ^uint64(0) {
+		inbox.shared.revision++
+	}
 	inbox.shared.health.Revision = inbox.shared.revision
 }
 

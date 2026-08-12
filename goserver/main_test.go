@@ -149,12 +149,11 @@ func TestRuntimeStatusIncludesIngestionHealth(t *testing.T) {
 	background := newBackgroundRuntime(store, nil)
 	background.status = runtimeStatus{
 		State: "connected", RoomID: "31567150", LastFrameAt: 3000, LastError: "https://connection-secret.example.test/read failure",
-		ConnectionGaps:     []connectionGap{{StartedAt: 1000, EndedAt: 4000, DurationMS: 3000, Attempts: 2, ErrorKind: "read_timeout"}},
-		TransactionPending: true,
+		ConnectionGaps: []connectionGap{{StartedAt: 1000, EndedAt: 4000, DurationMS: 3000, Attempts: 2, ErrorKind: "read_timeout"}},
 	}
 	store.transactionPending = true
 	background.recordIngestionFailureFrom("accept", errors.New("https://secret.example.test/inbox write failed"))
-	background.publishInbox(&runtimeStatusTestInbox{health: giftInboxHealth{PendingCount: 3, OldestPendingAt: 2000}}, giftInboxHealth{PendingCount: 3, OldestPendingAt: 2000})
+	background.installInbox(&runtimeStatusTestInbox{health: giftInboxHealth{PendingCount: 3, OldestPendingAt: 2000}}, giftInboxHealth{PendingCount: 3, OldestPendingAt: 2000})
 
 	handler := handleRuntimeStatus(background)
 	response := httptest.NewRecorder()
@@ -229,6 +228,13 @@ func TestRuntimeStatusReadsStoreTransactionSnapshotAfterRecovery(t *testing.T) {
 		if runtime.Status().TransactionPending {
 			t.Fatal("runtime did not reflect successful store recovery")
 		}
+	}
+}
+
+func TestRuntimeStatusWithNilStoreDoesNotUseCachedTransactionState(t *testing.T) {
+	runtime := newBackgroundRuntime(nil, nil)
+	if runtime.Status().TransactionPending {
+		t.Fatal("nil-store runtime reported a pending transaction")
 	}
 }
 

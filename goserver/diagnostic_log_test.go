@@ -242,7 +242,7 @@ func TestDiagnosticLogExportsNormalizedRuntimeIngestionLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := newBackgroundRuntime(store, nil)
-	runtime.inbox = inbox
+	runtime.installInbox(inbox, inbox.SnapshotHealth())
 	runtime.setDiagnosticLogger(logger)
 	gift := giftEvent{
 		GiftID: 35801, BlindGiftID: 35800, Num: 2, Timestamp: 1700000000, Rnd: "runtime-private-rnd",

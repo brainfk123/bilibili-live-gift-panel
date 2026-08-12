@@ -35,7 +35,7 @@ func TestBackgroundRuntimeReplaysDurableInboxOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstRuntime := newBackgroundRuntime(store, nil)
-	firstRuntime.inbox = firstInbox
+	firstRuntime.installInbox(firstInbox, firstInbox.SnapshotHealth())
 	firstRuntime.acceptGift(context.Background(), "room", "SEND_GIFT", giftEvent{
 		GiftID: 1, GiftName: "礼物", Num: 1, Timestamp: time.Now().Unix(), Rnd: "restart-rnd",
 	})
@@ -54,7 +54,7 @@ func TestBackgroundRuntimeReplaysDurableInboxOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	secondRuntime := newBackgroundRuntime(store, nil)
-	secondRuntime.inbox = secondInbox
+	secondRuntime.installInbox(secondInbox, secondInbox.SnapshotHealth())
 	cancelSecond, secondDone := startBackgroundRuntimeForTest(secondRuntime)
 	waitForInboxPendingCount(t, secondInbox, 0)
 	if status := secondRuntime.Status(); status.Inbox == nil || status.Inbox.PendingCount != 0 {
@@ -69,7 +69,7 @@ func TestBackgroundRuntimeReplaysDurableInboxOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	thirdRuntime := newBackgroundRuntime(store, nil)
-	thirdRuntime.inbox = thirdInbox
+	thirdRuntime.installInbox(thirdInbox, thirdInbox.SnapshotHealth())
 	cancelThird, thirdDone := startBackgroundRuntimeForTest(thirdRuntime)
 	waitForInboxPendingCount(t, thirdInbox, 0)
 	cancelThird()
@@ -81,7 +81,7 @@ func TestBackgroundRuntimeReplaysDurableInboxOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	duplicateRuntime := newBackgroundRuntime(store, nil)
-	duplicateRuntime.inbox = duplicateInbox
+	duplicateRuntime.installInbox(duplicateInbox, duplicateInbox.SnapshotHealth())
 	duplicateRuntime.inboxRetryDelay = time.Hour
 	for range 2 {
 		duplicateRuntime.acceptGift(context.Background(), "room", "SEND_GIFT", giftEvent{
@@ -112,7 +112,7 @@ func TestBackgroundRuntimeReplaysDurableInboxOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	recoveredRuntime := newBackgroundRuntime(recoveredStore, nil)
-	recoveredRuntime.inbox = recoveredInbox
+	recoveredRuntime.installInbox(recoveredInbox, recoveredInbox.SnapshotHealth())
 	cancelRecovered, recoveredDone := startBackgroundRuntimeForTest(recoveredRuntime)
 	waitForInboxPendingCount(t, recoveredInbox, 0)
 	cancelRecovered()
@@ -165,7 +165,7 @@ func TestBackgroundRuntimeIngressDoesNotWaitForProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := newBackgroundRuntime(store, nil)
-	runtime.inbox = inbox
+	runtime.installInbox(inbox, inbox.SnapshotHealth())
 	resolver := &blockingUserProfileResolver{started: make(chan struct{}), release: make(chan struct{})}
 	runtime.profileResolver = resolver
 	runtime.profileTimeout = time.Hour
@@ -247,10 +247,61 @@ func (inbox *runtimeStatusProbeInbox) Health() giftInboxHealth {
 	return giftInboxHealth{PendingCount: 1}
 }
 
+type nonComparableRuntimeInbox struct{ values []int }
+
+func (nonComparableRuntimeInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
+	return giftInboxRecord{}, nil
+}
+func (nonComparableRuntimeInbox) Next() (giftInboxRecord, bool, error) {
+	return giftInboxRecord{}, false, nil
+}
+func (nonComparableRuntimeInbox) Acknowledge(string) error { return nil }
+func (nonComparableRuntimeInbox) Release(string) error     { return nil }
+func (nonComparableRuntimeInbox) Close() error             { return nil }
+func (inbox nonComparableRuntimeInbox) Health() giftInboxHealth {
+	return giftInboxHealth{PendingCount: len(inbox.values)}
+}
+
+type snapshotBarrierGiftInbox struct {
+	*giftInbox
+	mu               sync.Mutex
+	blockNext        bool
+	snapshotCaptured chan giftInboxHealth
+	releaseSnapshot  chan struct{}
+}
+
+func (inbox *snapshotBarrierGiftInbox) blockNextSnapshot() (<-chan giftInboxHealth, chan struct{}) {
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
+	if inbox.blockNext {
+		panic("snapshot barrier is already armed")
+	}
+	inbox.blockNext = true
+	inbox.snapshotCaptured = make(chan giftInboxHealth, 1)
+	inbox.releaseSnapshot = make(chan struct{})
+	return inbox.snapshotCaptured, inbox.releaseSnapshot
+}
+
+func (inbox *snapshotBarrierGiftInbox) SnapshotHealth() giftInboxHealth {
+	health := inbox.giftInbox.SnapshotHealth()
+	inbox.mu.Lock()
+	if !inbox.blockNext {
+		inbox.mu.Unlock()
+		return health
+	}
+	inbox.blockNext = false
+	captured := inbox.snapshotCaptured
+	release := inbox.releaseSnapshot
+	inbox.mu.Unlock()
+	captured <- health
+	<-release
+	return health
+}
+
 func TestRuntimeStatusUsesPublishedInboxSnapshotWithoutHealthReconciliation(t *testing.T) {
 	runtime := newBackgroundRuntime(nil, nil)
 	inbox := &runtimeStatusProbeInbox{}
-	runtime.publishInbox(inbox, giftInboxHealth{PendingCount: 3, OldestPendingAt: 2000})
+	runtime.installInbox(inbox, giftInboxHealth{PendingCount: 3, OldestPendingAt: 2000})
 	for range 100 {
 		if got := runtime.Status().Inbox; got == nil || got.PendingCount != 3 {
 			t.Fatalf("status inbox = %#v, want published snapshot", got)
@@ -261,14 +312,134 @@ func TestRuntimeStatusUsesPublishedInboxSnapshotWithoutHealthReconciliation(t *t
 	}
 }
 
-func TestRuntimeInboxPublicationRejectsStaleSnapshotRevision(t *testing.T) {
+func TestRuntimeInboxPublicationDoesNotRequireComparableImplementation(t *testing.T) {
 	runtime := newBackgroundRuntime(nil, nil)
-	inbox := &runtimeStatusProbeInbox{}
-	runtime.publishInbox(inbox, giftInboxHealth{Revision: 1, PendingCount: 0})
-	runtime.publishInbox(inbox, giftInboxHealth{Revision: 2, PendingCount: 1})
-	runtime.publishInbox(inbox, giftInboxHealth{Revision: 1, PendingCount: 0})
-	if status := runtime.Status(); status.Inbox == nil || status.Inbox.PendingCount != 1 {
-		t.Fatalf("stale publication overwrote newer accept snapshot: %#v", status.Inbox)
+	inbox := nonComparableRuntimeInbox{values: []int{1}}
+	installation := runtime.installInbox(inbox, inbox.Health())
+	runtime.publishInbox(installation, giftInboxHealth{Revision: 1, PendingCount: 2})
+	if status := runtime.Status(); status.Inbox == nil || status.Inbox.PendingCount != 2 {
+		t.Fatalf("published inbox = %#v, want non-comparable implementation snapshot", status.Inbox)
+	}
+}
+
+func TestBackgroundRuntimeDelayedAckCannotOverwriteNewerRefillOrClearCapacityFailure(t *testing.T) {
+	oldRecordLimit, oldByteLimit := giftInboxRecordLimit, giftInboxByteLimit
+	giftInboxRecordLimit, giftInboxByteLimit = 1, 1<<20
+	defer func() { giftInboxRecordLimit, giftInboxByteLimit = oldRecordLimit, oldByteLimit }()
+
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	if err := store.replaceState(defaultAppState()); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	inbox := &snapshotBarrierGiftInbox{giftInbox: opened}
+	runtime := newBackgroundRuntime(store, nil)
+	installation := runtime.installInbox(inbox, inbox.SnapshotHealth())
+	runtime.acceptGift(context.Background(), "room", "SEND_GIFT", giftEvent{GiftID: 1, GiftName: "first", Num: 1, Rnd: "first"})
+	record, ok, err := inbox.Next()
+	if err != nil || !ok {
+		t.Fatalf("Next() = %#v, %t, %v", record, ok, err)
+	}
+
+	captured, release := inbox.blockNextSnapshot()
+	ackDone := make(chan error, 1)
+	go func() {
+		ackDone <- runtime.consumeClaimedInboxRecord(context.Background(), installation, record)
+	}()
+	ackHealth := <-captured
+	if ackHealth.Revision != 5 || ackHealth.PendingCount != 0 || ackHealth.CapacityError {
+		t.Fatalf("captured Ack snapshot = %#v, want drained revision 5", ackHealth)
+	}
+
+	runtime.acceptGift(context.Background(), "room", "SEND_GIFT", giftEvent{GiftID: 2, GiftName: "refill", Num: 1, Rnd: "refill"})
+	runtime.acceptGift(context.Background(), "room", "SEND_GIFT", giftEvent{GiftID: 3, GiftName: "rejected", Num: 1, Rnd: "rejected"})
+	close(release)
+	if err := <-ackDone; err != nil {
+		t.Fatal(err)
+	}
+	status := runtime.Status()
+	if status.Inbox == nil || status.Inbox.Revision != 7 || status.Inbox.PendingCount != 1 || !status.Inbox.CapacityError {
+		t.Fatalf("published inbox after delayed Ack = %#v, want full revision 7 refill", status.Inbox)
+	}
+	if status.IngestionErrorKind != "inbox_capacity" {
+		t.Fatalf("ingestion error kind = %q, want newer capacity rejection retained", status.IngestionErrorKind)
+	}
+}
+
+func TestBackgroundRuntimeRetiredInboxCannotPublishAfterReplacement(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	if err := store.replaceState(defaultAppState()); err != nil {
+		t.Fatal(err)
+	}
+	oldRoot := filepath.Join(root, "old")
+	pending := filepath.Join(oldRoot, "gift-inbox", "pending")
+	if err := os.MkdirAll(pending, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldRecord := giftInboxRecord{
+		SchemaVersion: 1, LocalSequence: 1, IngestionID: strings.Repeat("1", 32),
+		RoomID: "room", Command: "SEND_GIFT", ReceivedAt: 1_800_000_000,
+		Gift: giftEvent{GiftID: 1, GiftName: "old", Num: 1, Rnd: "old"},
+	}
+	writeGiftInboxFixture(t, filepath.Join(pending, giftInboxFilename(1, oldRecord.IngestionID)), oldRecord)
+	openedOld, err := openGiftInbox(oldRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer openedOld.Close()
+	oldInbox := &snapshotBarrierGiftInbox{giftInbox: openedOld}
+	var record giftInboxRecord
+	var ok bool
+	for range 4 {
+		record, ok, err = oldInbox.Next()
+		if err != nil || !ok {
+			t.Fatalf("old Next() = %#v, %t, %v", record, ok, err)
+		}
+		if err := oldInbox.Release(record.IngestionID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if health := oldInbox.SnapshotHealth(); health.Revision != 9 {
+		t.Fatalf("old installed health = %#v, want revision 9", health)
+	}
+
+	runtime := newBackgroundRuntime(store, nil)
+	oldInstallation := runtime.installInbox(oldInbox, oldInbox.SnapshotHealth())
+	captured, release := oldInbox.blockNextSnapshot()
+	ackDone := make(chan error, 1)
+	go func() {
+		ackDone <- runtime.consumeClaimedInboxRecord(context.Background(), oldInstallation, record)
+	}()
+	health := <-captured
+	if health.Revision != 10 || health.PendingCount != 0 {
+		t.Fatalf("delayed old Ack snapshot = %#v, want empty revision 10", health)
+	}
+
+	newInbox, err := openGiftInbox(filepath.Join(root, "new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer newInbox.Close()
+	if health := newInbox.SnapshotHealth(); health.Revision != 1 {
+		t.Fatalf("new installed health = %#v, want revision 1", health)
+	}
+	runtime.installInbox(newInbox, newInbox.SnapshotHealth())
+	if status := runtime.Status(); status.Inbox == nil || status.Inbox.Revision != 1 || status.Inbox.PendingCount != 0 {
+		t.Fatalf("new installed runtime snapshot = %#v, want empty revision 1", status.Inbox)
+	}
+	runtime.acceptGift(context.Background(), "room", "SEND_GIFT", giftEvent{GiftID: 2, GiftName: "new", Num: 1, Rnd: "new"})
+	close(release)
+	if err := <-ackDone; err != nil {
+		t.Fatal(err)
+	}
+	if status := runtime.Status(); status.Inbox == nil || status.Inbox.Revision != 3 || status.Inbox.PendingCount != 1 {
+		t.Fatalf("retired revision 10 publication replaced new inbox: %#v", status.Inbox)
 	}
 }
 
@@ -328,7 +499,7 @@ func TestBackgroundRuntimeReportsInboxCapacityWithoutVolatileApply(t *testing.T)
 		t.Fatal(err)
 	}
 	runtime := newBackgroundRuntime(store, nil)
-	runtime.inbox = &capacityFailureInbox{}
+	runtime.installInbox(&capacityFailureInbox{}, giftInboxHealth{CapacityError: true})
 
 	runtime.acceptGift(context.Background(), "room", "SEND_GIFT", giftEvent{GiftID: 1, GiftName: "礼物", Num: 1})
 
@@ -362,7 +533,7 @@ func TestBackgroundRuntimeTransactionRecoveryFailurePreservesInboxOrder(t *testi
 		t.Fatal(err)
 	}
 	runtime := newBackgroundRuntime(store, nil)
-	runtime.inbox = inbox
+	runtime.installInbox(inbox, runtime.snapshotInboxHealth(inbox))
 	runtime.inboxRetryDelay = time.Hour
 	cancel, done := startBackgroundRuntimeForTest(runtime)
 	waitForIngestionError(t, runtime, "读取状态事务失败")
@@ -391,7 +562,7 @@ func TestBackgroundRuntimePersistsAnimationFirstMergeAcrossCrashAndRestart(t *te
 		t.Fatal(err)
 	}
 	runtime := newBackgroundRuntime(store, nil)
-	runtime.inbox = inbox
+	runtime.installInbox(inbox, runtime.snapshotInboxHealth(inbox))
 	runtime.inboxRetryDelay = time.Hour
 	if err := runtime.savePendingGiftAnimationFile(pendingGiftAnimationFile{
 		SchemaVersion: pendingGiftAnimationsSchemaVersion, PreparedRoomID: "room-a", Records: []pendingGiftAnimation{},
@@ -422,7 +593,7 @@ func TestBackgroundRuntimePersistsAnimationFirstMergeAcrossCrashAndRestart(t *te
 		t.Fatal(err)
 	}
 	recovered := newBackgroundRuntime(recoveredStore, nil)
-	recovered.inbox = recoveredInbox
+	recovered.installInbox(recoveredInbox, recoveredInbox.SnapshotHealth())
 	cancelRecovered, recoveredDone := startBackgroundRuntimeForTest(recovered)
 	waitForInboxPendingCount(t, recoveredInbox, 0)
 	cancelRecovered()
@@ -433,7 +604,7 @@ func TestBackgroundRuntimePersistsAnimationFirstMergeAcrossCrashAndRestart(t *te
 		t.Fatal(err)
 	}
 	purchaseRuntime := newBackgroundRuntime(recoveredStore, nil)
-	purchaseRuntime.inbox = purchaseInbox
+	purchaseRuntime.installInbox(purchaseInbox, purchaseInbox.SnapshotHealth())
 	purchaseRuntime.acceptGift(context.Background(), "room-a", "GUARD_BUY", giftEvent{
 		GiftID: specialGiftGuardCaptain, GiftName: "大航海·舰长", Num: 1,
 		UID: 42, Uname: "舰长观众", Timestamp: 1_700_000_002, Rnd: "purchase-after-animation",
@@ -488,7 +659,7 @@ func TestBackgroundRuntimeRecoversPurchaseAfterPendingAnimationWasPrepared(t *te
 		t.Fatal(err)
 	}
 	runtime := newBackgroundRuntime(store, nil)
-	runtime.inbox = inbox
+	runtime.installInbox(inbox, runtime.snapshotInboxHealth(inbox))
 	runtime.inboxRetryDelay = time.Hour
 	runtime.acceptGift(context.Background(), "room-a", "GUARD_BUY", giftEvent{
 		GiftID: specialGiftGuardCaptain, GiftName: "大航海·舰长", Num: 1, UID: 42,
@@ -513,7 +684,7 @@ func TestBackgroundRuntimeRecoversPurchaseAfterPendingAnimationWasPrepared(t *te
 		t.Fatal(err)
 	}
 	recovered := newBackgroundRuntime(recoveredStore, nil)
-	recovered.inbox = recoveredInbox
+	recovered.installInbox(recoveredInbox, recoveredInbox.SnapshotHealth())
 	cancelRecovered, recoveredDone := startBackgroundRuntimeForTest(recovered)
 	waitForInboxPendingCount(t, recoveredInbox, 0)
 	cancelRecovered()
@@ -550,7 +721,7 @@ func TestBackgroundRuntimeDoesNotApplyBacklogFromAnotherRoom(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := newBackgroundRuntime(store, nil)
-	runtime.inbox = inbox
+	runtime.installInbox(inbox, runtime.snapshotInboxHealth(inbox))
 	cancel, done := startBackgroundRuntimeForTest(runtime)
 	waitForInboxPendingCount(t, inbox, 0)
 	cancel()
@@ -790,7 +961,7 @@ func TestBackgroundRuntimeConsumerWaitsForPreparationBeforeSettlingAndAcknowledg
 		<-allowPreparationWrite
 		return writeFileAtomically(path, data)
 	}
-	runtime.inbox = inbox
+	runtime.installInbox(inbox, runtime.snapshotInboxHealth(inbox))
 	resolver := &blockingUserProfileResolver{started: make(chan struct{}), release: make(chan struct{})}
 	runtime.profileResolver = resolver
 	runtime.profileTimeout = time.Hour
@@ -1035,7 +1206,7 @@ func TestBackgroundRuntimeCompletesPrivateAnimationWriteAfterCommittedIngestion(
 		t.Fatal(err)
 	}
 	runtime := newBackgroundRuntime(store, nil)
-	runtime.inbox = inbox
+	runtime.installInbox(inbox, runtime.snapshotInboxHealth(inbox))
 	runtime.inboxRetryDelay = time.Hour
 	if err := runtime.savePendingGiftAnimationFile(pendingGiftAnimationFile{
 		SchemaVersion: pendingGiftAnimationsSchemaVersion, PreparedRoomID: "room-a", Records: []pendingGiftAnimation{},
@@ -1067,7 +1238,7 @@ func TestBackgroundRuntimeCompletesPrivateAnimationWriteAfterCommittedIngestion(
 		t.Fatal(err)
 	}
 	recovered := newBackgroundRuntime(&configStore{path: filepath.Join(root, "config.json")}, nil)
-	recovered.inbox = recoveredInbox
+	recovered.installInbox(recoveredInbox, recoveredInbox.SnapshotHealth())
 	cancelRecovered, recoveredDone := startBackgroundRuntimeForTest(recovered)
 	waitForInboxPendingCount(t, recoveredInbox, 0)
 	cancelRecovered()
@@ -1114,7 +1285,7 @@ func TestBackgroundRuntimeCompletesPrivateAnimationDeleteAfterCommittedPurchase(
 		t.Fatal(err)
 	}
 	runtime := newBackgroundRuntime(store, nil)
-	runtime.inbox = inbox
+	runtime.installInbox(inbox, runtime.snapshotInboxHealth(inbox))
 	runtime.inboxRetryDelay = time.Hour
 	failed := false
 	runtime.animationWriteAtomically = func(path string, data []byte) error {
@@ -1141,7 +1312,7 @@ func TestBackgroundRuntimeCompletesPrivateAnimationDeleteAfterCommittedPurchase(
 		t.Fatal(err)
 	}
 	recovered := newBackgroundRuntime(&configStore{path: filepath.Join(root, "config.json")}, nil)
-	recovered.inbox = recoveredInbox
+	recovered.installInbox(recoveredInbox, recoveredInbox.SnapshotHealth())
 	cancelRecovered, recoveredDone := startBackgroundRuntimeForTest(recovered)
 	waitForInboxPendingCount(t, recoveredInbox, 0)
 	cancelRecovered()
@@ -1174,7 +1345,7 @@ func TestBackgroundRuntimeReportsIngestionFailureWithoutDisconnectAndClearsAfter
 		t.Fatal(err)
 	}
 	runtime := newBackgroundRuntime(store, func() giftEventSource { return &stableConnectedSource{} }, center)
-	runtime.inbox = inbox
+	runtime.installInbox(inbox, runtime.snapshotInboxHealth(inbox))
 	runtime.inboxRetryDelay = 10 * time.Millisecond
 	cancel, done := startBackgroundRuntimeForTest(runtime)
 	defer func() {
@@ -1253,7 +1424,7 @@ func TestBackgroundRuntimeSuccessfulClaimDoesNotClearNewerIngressFailure(t *test
 		acceptError: errors.New("newer accept failure"),
 	}
 	runtime := newBackgroundRuntime(store, nil)
-	runtime.inbox = inbox
+	runtime.installInbox(inbox, runtime.snapshotInboxHealth(inbox))
 	runtime.recordIngestionFailure(errors.New("older processing failure"))
 	cancel, done := startBackgroundRuntimeForTest(runtime)
 	defer func() {
@@ -1545,7 +1716,7 @@ func TestBackgroundRuntimeJoinsSourceBeforeClosingInbox(t *testing.T) {
 	inbox := &shutdownOrderingInbox{}
 	source := &callbackDuringShutdownSource{started: make(chan struct{}), done: make(chan struct{})}
 	runtime := newBackgroundRuntime(store, func() giftEventSource { return source })
-	runtime.inbox = inbox
+	runtime.installInbox(inbox, runtime.snapshotInboxHealth(inbox))
 	cancel, done := startBackgroundRuntimeForTest(runtime)
 	<-source.started
 	cancel()
