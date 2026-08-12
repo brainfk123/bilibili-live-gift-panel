@@ -160,6 +160,20 @@ func TestTransactionPendingSnapshotTracksPrepareAndNonIngestionRecovery(t *testi
 	}
 }
 
+func TestTransactionPendingRemainsTrueWhenExistingEvidenceCannotBeRead(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	if err := os.WriteFile(store.stateTransactionPath(), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.readTransaction = func(string) ([]byte, error) { return nil, errors.New("injected access failure") }
+	if _, err := store.readState(); err == nil {
+		t.Fatal("expected injected transaction read failure")
+	}
+	if !store.TransactionPending() {
+		t.Fatal("unreadable transaction evidence was incorrectly reported as cleared")
+	}
+}
+
 func TestPendingStateTransactionValidatesEveryPayloadBeforeWritingTargets(t *testing.T) {
 	for name, mutate := range map[string]func(*pendingStateTransaction){
 		"malformed events": func(tx *pendingStateTransaction) { tx.EventLog = []byte("not-json\n") },

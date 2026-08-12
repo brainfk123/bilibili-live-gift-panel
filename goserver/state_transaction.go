@@ -156,12 +156,17 @@ func validatePendingStateShard(name string, data []byte, into any, schemaVersion
 }
 
 func (s *configStore) recoverPendingStateTransactionLocked() error {
-	data, err := os.ReadFile(s.stateTransactionPath())
+	read := os.ReadFile
+	if s.readTransaction != nil {
+		read = s.readTransaction
+	}
+	data, err := read(s.stateTransactionPath())
 	if errors.Is(err, os.ErrNotExist) {
 		s.transactionPending = false
 		return nil
 	}
 	if err != nil {
+		s.transactionPending = true
 		return fmt.Errorf("读取状态事务失败：%w", err)
 	}
 	s.transactionPending = true

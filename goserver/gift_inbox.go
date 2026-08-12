@@ -38,10 +38,11 @@ type giftInboxRecord struct {
 }
 
 type giftInboxHealth struct {
-	PendingCount    int   `json:"pendingCount"`
-	PendingBytes    int64 `json:"pendingBytes,omitempty"`
-	OldestPendingAt int64 `json:"oldestPendingAt,omitempty"`
-	CapacityError   bool  `json:"capacityError,omitempty"`
+	Revision        uint64 `json:"-"`
+	PendingCount    int    `json:"pendingCount"`
+	PendingBytes    int64  `json:"pendingBytes,omitempty"`
+	OldestPendingAt int64  `json:"oldestPendingAt,omitempty"`
+	CapacityError   bool   `json:"capacityError,omitempty"`
 }
 
 type giftInboxRecordMetadata struct {
@@ -70,6 +71,7 @@ type giftInboxShared struct {
 	nextSequence uint64
 	health       giftInboxHealth
 	pendingBytes int64
+	revision     uint64
 	pending      []giftInboxRecordMetadata
 	claimedBy    uint64
 	claimedID    string
@@ -178,6 +180,7 @@ func (inbox *giftInbox) Accept(roomID, command string, gift giftEvent) (giftInbo
 	}
 	if inbox.shared.pendingBytes+int64(len(data)+1) > giftInboxByteLimit {
 		inbox.shared.health.CapacityError = true
+		inbox.touchHealthLocked()
 		return giftInboxRecord{}, errGiftInboxCapacity
 	}
 	if err := inbox.persistNextSequenceLocked(inbox.shared.nextSequence + 1); err != nil {
@@ -198,6 +201,7 @@ func (inbox *giftInbox) Accept(roomID, command string, gift giftEvent) (giftInbo
 	}
 	inbox.shared.health.PendingBytes = inbox.shared.pendingBytes
 	inbox.shared.health.CapacityError = inbox.shared.health.PendingCount >= giftInboxRecordLimit || inbox.shared.pendingBytes >= giftInboxByteLimit
+	inbox.touchHealthLocked()
 	return record, nil
 }
 
@@ -220,6 +224,7 @@ func (inbox *giftInbox) Next() (giftInboxRecord, bool, error) {
 	}
 	inbox.shared.claimedBy = inbox.handleID
 	inbox.shared.claimedID = record.IngestionID
+	inbox.touchHealthLocked()
 	return record, true, nil
 }
 
@@ -273,6 +278,7 @@ func (inbox *giftInbox) Acknowledge(ingestionID string) error {
 	}
 	inbox.shared.health.PendingBytes = inbox.shared.pendingBytes
 	inbox.shared.health.CapacityError = inbox.shared.health.PendingCount >= giftInboxRecordLimit || inbox.shared.pendingBytes >= giftInboxByteLimit
+	inbox.touchHealthLocked()
 	return nil
 }
 
@@ -292,6 +298,7 @@ func (inbox *giftInbox) Release(ingestionID string) error {
 	}
 	inbox.shared.claimedBy = 0
 	inbox.shared.claimedID = ""
+	inbox.touchHealthLocked()
 	return nil
 }
 
@@ -457,7 +464,13 @@ func (inbox *giftInbox) reconcileHealthLocked() (giftInboxHealth, error) {
 			filename: file, ingestionID: pendingIngestionID(file), receivedAt: receivedAt, size: info.Size(),
 		})
 	}
+	inbox.touchHealthLocked()
 	return inbox.shared.health, nil
+}
+
+func (inbox *giftInbox) touchHealthLocked() {
+	inbox.shared.revision++
+	inbox.shared.health.Revision = inbox.shared.revision
 }
 
 func (inbox *giftInbox) pendingFilesLocked() ([]string, error) {

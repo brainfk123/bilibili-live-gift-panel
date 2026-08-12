@@ -152,6 +152,7 @@ func TestRuntimeStatusIncludesIngestionHealth(t *testing.T) {
 		ConnectionGaps:     []connectionGap{{StartedAt: 1000, EndedAt: 4000, DurationMS: 3000, Attempts: 2, ErrorKind: "read_timeout"}},
 		TransactionPending: true,
 	}
+	store.transactionPending = true
 	background.recordIngestionFailureFrom("accept", errors.New("https://secret.example.test/inbox write failed"))
 	background.publishInbox(&runtimeStatusTestInbox{health: giftInboxHealth{PendingCount: 3, OldestPendingAt: 2000}}, giftInboxHealth{PendingCount: 3, OldestPendingAt: 2000})
 
@@ -208,19 +209,25 @@ func TestRuntimeIngestionErrorKindsAreStable(t *testing.T) {
 	}
 }
 
-func TestRuntimeStatusUsesCachedTransactionSnapshot(t *testing.T) {
+func TestRuntimeStatusReadsStoreTransactionSnapshotAfterRecovery(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	if err := os.WriteFile(store.stateTransactionPath(), []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	runtime := newBackgroundRuntime(store, nil)
-	runtime.status.TransactionPending = true
+	store.transactionPending = true
 	if err := os.Remove(store.stateTransactionPath()); err != nil {
 		t.Fatal(err)
 	}
+	if !runtime.Status().TransactionPending {
+		t.Fatal("runtime did not read the store-owned pending transaction snapshot")
+	}
+	if _, err := store.readState(); err != nil {
+		t.Fatal(err)
+	}
 	for range 100 {
-		if !runtime.Status().TransactionPending {
-			t.Fatal("status re-probed the transaction path instead of returning its cached snapshot")
+		if runtime.Status().TransactionPending {
+			t.Fatal("runtime did not reflect successful store recovery")
 		}
 	}
 }

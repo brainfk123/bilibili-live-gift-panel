@@ -85,6 +85,7 @@ type backgroundRuntime struct {
 	timerTicks               <-chan time.Time
 	notifications            *notificationCenter
 	inbox                    runtimeGiftInbox
+	inboxRevision            uint64
 	inboxWake                chan struct{}
 	inboxRetryDelay          time.Duration
 	profileTimeout           time.Duration
@@ -455,7 +456,7 @@ func (runtime *backgroundRuntime) consumeClaimedInboxRecord(ctx context.Context,
 	health := runtime.snapshotInboxHealth(inbox)
 	runtime.publishInbox(inbox, health)
 	runtime.clearIngestionFailure(ingestionGeneration, "ack")
-	runtime.clearCapacityFailureIfDrained(health)
+	runtime.clearCapacityFailureIfDrained(health, ingestionGeneration)
 	acknowledged = true
 	return nil
 }
@@ -997,7 +998,11 @@ func (runtime *backgroundRuntime) Status() runtimeStatus {
 	if len(status.Gaps) > 0 {
 		status.ReconnectAttempts = status.Gaps[len(status.Gaps)-1].Attempts
 	}
+	store := runtime.store
 	runtime.mu.RUnlock()
+	if store != nil {
+		status.TransactionPending = store.TransactionPending()
+	}
 	return status
 }
 
@@ -1012,12 +1017,12 @@ func (runtime *backgroundRuntime) refreshTransactionPending() {
 	runtime.setTransactionPending(pending)
 }
 
-func (runtime *backgroundRuntime) clearCapacityFailureIfDrained(health giftInboxHealth) {
+func (runtime *backgroundRuntime) clearCapacityFailureIfDrained(health giftInboxHealth, generation uint64) {
 	if health.CapacityError {
 		return
 	}
 	runtime.mu.Lock()
-	if runtime.status.IngestionErrorKind == "inbox_capacity" {
+	if runtime.status.IngestionErrorKind == "inbox_capacity" && runtime.ingestionErrorSource == "accept" && runtime.ingestionGeneration == generation && runtime.inboxRevision == health.Revision {
 		runtime.status.IngestionError = ""
 		runtime.status.IngestionErrorKind = ""
 		runtime.ingestionErrorSource = ""
@@ -1048,7 +1053,12 @@ func (runtime *backgroundRuntime) snapshotInboxHealth(inbox runtimeGiftInbox) gi
 
 func (runtime *backgroundRuntime) publishInbox(inbox runtimeGiftInbox, health giftInboxHealth) {
 	runtime.mu.Lock()
+	if runtime.inbox == inbox && health.Revision < runtime.inboxRevision {
+		runtime.mu.Unlock()
+		return
+	}
 	runtime.inbox = inbox
+	runtime.inboxRevision = health.Revision
 	runtime.status.Inbox = &health
 	runtime.mu.Unlock()
 }

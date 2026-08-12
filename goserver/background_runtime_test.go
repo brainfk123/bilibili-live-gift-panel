@@ -261,6 +261,17 @@ func TestRuntimeStatusUsesPublishedInboxSnapshotWithoutHealthReconciliation(t *t
 	}
 }
 
+func TestRuntimeInboxPublicationRejectsStaleSnapshotRevision(t *testing.T) {
+	runtime := newBackgroundRuntime(nil, nil)
+	inbox := &runtimeStatusProbeInbox{}
+	runtime.publishInbox(inbox, giftInboxHealth{Revision: 1, PendingCount: 0})
+	runtime.publishInbox(inbox, giftInboxHealth{Revision: 2, PendingCount: 1})
+	runtime.publishInbox(inbox, giftInboxHealth{Revision: 1, PendingCount: 0})
+	if status := runtime.Status(); status.Inbox == nil || status.Inbox.PendingCount != 1 {
+		t.Fatalf("stale publication overwrote newer accept snapshot: %#v", status.Inbox)
+	}
+}
+
 func TestBackgroundRuntimePublishesOpenedInboxBeforeConcurrentStatus(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	if err := store.replaceState(defaultAppState()); err != nil {

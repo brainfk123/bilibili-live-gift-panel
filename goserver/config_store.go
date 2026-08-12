@@ -28,6 +28,7 @@ type configStore struct {
 	migrationRequired  bool
 	transactionPending bool
 	writeAtomically    func(string, []byte) error
+	readTransaction    func(string) ([]byte, error)
 }
 
 // TransactionPending is an O(1) snapshot maintained by the transaction
