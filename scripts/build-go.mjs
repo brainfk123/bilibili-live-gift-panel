@@ -20,12 +20,12 @@ if (appVersion !== 'dev') {
   if (manifest.authenticode !== true) {
     throw new Error('Release build requires an Authenticode-signed embedded FFmpeg payload.');
   }
-  execFileSync(process.execPath, [join(root, 'scripts', 'verify-ffmpeg.mjs')], {
-    cwd: root,
-    stdio: 'inherit',
-    env: process.env,
-  });
 }
+execFileSync(process.execPath, [join(root, 'scripts', 'verify-ffmpeg.mjs'), ...(appVersion === 'dev' ? ['--payload-only'] : [])], {
+  cwd: root,
+  stdio: 'inherit',
+  env: process.env,
+});
 const resource = join(root, 'goserver', 'rsrc_windows_amd64.syso');
 if (!existsSync(resource)) {
   throw new Error(

@@ -2,9 +2,11 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"embed"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -21,10 +23,13 @@ import (
 var giftClipFFmpegFS embed.FS
 
 type giftClipFFmpegManifest struct {
-	Version      string `json:"version"`
-	SHA256       string `json:"sha256"`
-	Size         int64  `json:"size"`
-	Authenticode bool   `json:"authenticode"`
+	Version             string `json:"version"`
+	SHA256              string `json:"sha256"`
+	ArchiveSHA256       string `json:"archive_sha256"`
+	ComponentGate       string `json:"component_gate"`
+	ComponentGateSHA256 string `json:"component_gate_sha256"`
+	Size                int64  `json:"size"`
+	Authenticode        bool   `json:"authenticode"`
 }
 
 type giftClipPayload struct {
@@ -53,11 +58,8 @@ func embeddedGiftClipPayload(cacheRoot string) (*giftClipPayload, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: embedded manifest unavailable", errGiftClipPayloadIntegrity)
 	}
-	var manifest giftClipFFmpegManifest
-	if err := json.Unmarshal(manifestData, &manifest); err != nil {
-		return nil, fmt.Errorf("%w: embedded manifest invalid", errGiftClipPayloadIntegrity)
-	}
-	if err := validateGiftClipFFmpegManifest(manifest); err != nil {
+	manifest, err := parseGiftClipFFmpegManifest(manifestData)
+	if err != nil {
 		return nil, err
 	}
 	if cacheRoot == "" {
@@ -67,6 +69,55 @@ func embeddedGiftClipPayload(cacheRoot string) (*giftClipPayload, error) {
 		return nil, fmt.Errorf("%w: cache root unavailable", errGiftClipPayloadIntegrity)
 	}
 	return &giftClipPayload{Archive: archive, Manifest: manifest, CacheRoot: cacheRoot}, nil
+}
+
+func parseGiftClipFFmpegManifest(data []byte) (giftClipFFmpegManifest, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return giftClipFFmpegManifest{}, fmt.Errorf("%w: manifest must be one object", errGiftClipPayloadIntegrity)
+	}
+	var manifest giftClipFFmpegManifest
+	seen := make(map[string]bool, 7)
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		key, ok := keyToken.(string)
+		if err != nil || !ok || seen[key] {
+			return giftClipFFmpegManifest{}, fmt.Errorf("%w: manifest field is invalid or duplicated", errGiftClipPayloadIntegrity)
+		}
+		seen[key] = true
+		switch key {
+		case "version":
+			err = decoder.Decode(&manifest.Version)
+		case "sha256":
+			err = decoder.Decode(&manifest.SHA256)
+		case "archive_sha256":
+			err = decoder.Decode(&manifest.ArchiveSHA256)
+		case "component_gate_sha256":
+			err = decoder.Decode(&manifest.ComponentGateSHA256)
+		case "component_gate":
+			err = decoder.Decode(&manifest.ComponentGate)
+		case "size":
+			err = decoder.Decode(&manifest.Size)
+		case "authenticode":
+			err = decoder.Decode(&manifest.Authenticode)
+		default:
+			return giftClipFFmpegManifest{}, fmt.Errorf("%w: unknown manifest field", errGiftClipPayloadIntegrity)
+		}
+		if err != nil {
+			return giftClipFFmpegManifest{}, fmt.Errorf("%w: manifest field value is invalid", errGiftClipPayloadIntegrity)
+		}
+	}
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') || len(seen) != 7 {
+		return giftClipFFmpegManifest{}, fmt.Errorf("%w: manifest object is incomplete", errGiftClipPayloadIntegrity)
+	}
+	if token, err = decoder.Token(); err != io.EOF {
+		return giftClipFFmpegManifest{}, fmt.Errorf("%w: trailing manifest JSON", errGiftClipPayloadIntegrity)
+	}
+	if err := validateGiftClipFFmpegManifest(manifest); err != nil {
+		return giftClipFFmpegManifest{}, err
+	}
+	return manifest, nil
 }
 
 func (payload *giftClipPayload) Prepare(ctx context.Context) (string, error) {
@@ -94,12 +145,18 @@ func (payload *giftClipPayload) Prepare(ctx context.Context) (string, error) {
 }
 
 func validateGiftClipFFmpegManifest(manifest giftClipFFmpegManifest) error {
-	if !giftClipManifestVersionPattern.MatchString(manifest.Version) || manifest.Size <= 0 || len(manifest.SHA256) != sha256.Size*2 {
+	if !giftClipManifestVersionPattern.MatchString(manifest.Version) || manifest.Size <= 0 || len(manifest.ComponentGate) == 0 || len(manifest.ComponentGate) > 16_384 {
 		return fmt.Errorf("%w: invalid manifest", errGiftClipPayloadIntegrity)
 	}
-	decoded, err := hex.DecodeString(manifest.SHA256)
-	if err != nil || hex.EncodeToString(decoded) != manifest.SHA256 {
-		return fmt.Errorf("%w: invalid manifest hash", errGiftClipPayloadIntegrity)
+	componentGateHash := sha256.Sum256([]byte(manifest.ComponentGate))
+	if hex.EncodeToString(componentGateHash[:]) != manifest.ComponentGateSHA256 {
+		return fmt.Errorf("%w: component gate hash mismatch", errGiftClipPayloadIntegrity)
+	}
+	for _, value := range []string{manifest.SHA256, manifest.ArchiveSHA256, manifest.ComponentGateSHA256} {
+		decoded, err := hex.DecodeString(value)
+		if err != nil || len(decoded) != sha256.Size || hex.EncodeToString(decoded) != value {
+			return fmt.Errorf("%w: invalid manifest hash", errGiftClipPayloadIntegrity)
+		}
 	}
 	return nil
 }
@@ -122,7 +179,14 @@ func giftClipFileMatches(path string, manifest giftClipFFmpegManifest) bool {
 }
 
 func (payload *giftClipPayload) extractAtomically(ctx context.Context, targetDir, target string) (string, error) {
-	reader, err := zip.NewReader(newByteReader(payload.Archive), int64(len(payload.Archive)))
+	archiveHash := sha256.Sum256(payload.Archive)
+	if hex.EncodeToString(archiveHash[:]) != payload.Manifest.ArchiveSHA256 {
+		return "", fmt.Errorf("%w: archive hash mismatch", errGiftClipPayloadIntegrity)
+	}
+	if err := validateGiftClipZipShape(payload.Archive, payload.Manifest); err != nil {
+		return "", err
+	}
+	reader, err := zip.NewReader(bytes.NewReader(payload.Archive), int64(len(payload.Archive)))
 	if err != nil || len(reader.File) != 1 {
 		return "", fmt.Errorf("%w: invalid archive", errGiftClipPayloadIntegrity)
 	}
@@ -195,6 +259,68 @@ func (payload *giftClipPayload) extractAtomically(ctx context.Context, targetDir
 	return target, nil
 }
 
+func validateGiftClipZipShape(archive []byte, manifest giftClipFFmpegManifest) error {
+	fail := func(reason string) error { return fmt.Errorf("%w: %s", errGiftClipPayloadIntegrity, reason) }
+	if len(archive) < 22 || len(archive) > 40_000_000 {
+		return fail("archive size is invalid")
+	}
+	eocd := len(archive) - 22
+	if binary.LittleEndian.Uint32(archive[eocd:eocd+4]) != 0x06054b50 ||
+		binary.LittleEndian.Uint16(archive[eocd+4:eocd+6]) != 0 ||
+		binary.LittleEndian.Uint16(archive[eocd+6:eocd+8]) != 0 ||
+		binary.LittleEndian.Uint16(archive[eocd+8:eocd+10]) != 1 ||
+		binary.LittleEndian.Uint16(archive[eocd+10:eocd+12]) != 1 ||
+		binary.LittleEndian.Uint16(archive[eocd+20:eocd+22]) != 0 {
+		return fail("end record is invalid")
+	}
+	centralSize := uint64(binary.LittleEndian.Uint32(archive[eocd+12 : eocd+16]))
+	centralOffset := uint64(binary.LittleEndian.Uint32(archive[eocd+16 : eocd+20]))
+	if centralOffset > uint64(eocd) || centralSize > uint64(eocd)-centralOffset || centralOffset+centralSize != uint64(eocd) || centralSize < 46 {
+		return fail("central directory bounds are invalid")
+	}
+	central := archive[int(centralOffset):eocd]
+	if binary.LittleEndian.Uint32(central[0:4]) != 0x02014b50 || central[5] != 3 ||
+		binary.LittleEndian.Uint16(central[8:10]) != 0x0800 ||
+		binary.LittleEndian.Uint16(central[10:12]) != 8 ||
+		binary.LittleEndian.Uint16(central[30:32]) != 0 ||
+		binary.LittleEndian.Uint16(central[32:34]) != 0 ||
+		binary.LittleEndian.Uint16(central[34:36]) != 0 ||
+		binary.LittleEndian.Uint32(central[42:46]) != 0 {
+		return fail("central entry metadata is invalid")
+	}
+	nameLength := uint64(binary.LittleEndian.Uint16(central[28:30]))
+	if 46+nameLength != centralSize || nameLength != uint64(len("ffmpeg.exe")) || string(central[46:46+nameLength]) != "ffmpeg.exe" {
+		return fail("central entry name or boundaries are invalid")
+	}
+	mode := binary.LittleEndian.Uint32(central[38:42]) >> 16
+	if mode&0o170000 != 0o100000 {
+		return fail("central entry is not a regular file")
+	}
+	compressedSize := uint64(binary.LittleEndian.Uint32(central[20:24]))
+	uncompressedSize := uint64(binary.LittleEndian.Uint32(central[24:28]))
+	if compressedSize > 40_000_000 || uncompressedSize > 40_000_000 || uncompressedSize != uint64(manifest.Size) {
+		return fail("entry size is invalid")
+	}
+	if centralOffset < 30 || binary.LittleEndian.Uint32(archive[0:4]) != 0x04034b50 ||
+		binary.LittleEndian.Uint16(archive[6:8]) != 0x0800 ||
+		binary.LittleEndian.Uint16(archive[8:10]) != 8 ||
+		binary.LittleEndian.Uint16(archive[28:30]) != 0 {
+		return fail("local entry metadata is invalid")
+	}
+	localNameLength := uint64(binary.LittleEndian.Uint16(archive[26:28]))
+	dataOffset := uint64(30) + localNameLength
+	if localNameLength != nameLength || dataOffset > centralOffset || dataOffset+compressedSize != centralOffset ||
+		string(archive[30:dataOffset]) != "ffmpeg.exe" ||
+		binary.LittleEndian.Uint16(archive[6:8]) != binary.LittleEndian.Uint16(central[8:10]) ||
+		binary.LittleEndian.Uint16(archive[8:10]) != binary.LittleEndian.Uint16(central[10:12]) ||
+		binary.LittleEndian.Uint32(archive[14:18]) != binary.LittleEndian.Uint32(central[16:20]) ||
+		binary.LittleEndian.Uint32(archive[18:22]) != binary.LittleEndian.Uint32(central[20:24]) ||
+		binary.LittleEndian.Uint32(archive[22:26]) != binary.LittleEndian.Uint32(central[24:28]) {
+		return fail("local and central entries differ")
+	}
+	return nil
+}
+
 func replaceGiftClipFileAtomically(source, target string) error {
 	sourcePointer, err := syscall.UTF16PtrFromString(source)
 	if err != nil {
@@ -225,25 +351,6 @@ func (reader contextReader) Read(buffer []byte) (int, error) {
 		return 0, err
 	}
 	return reader.reader.Read(buffer)
-}
-
-type byteReaderAt struct {
-	data []byte
-}
-
-func newByteReader(data []byte) *byteReaderAt {
-	return &byteReaderAt{data: data}
-}
-
-func (reader *byteReaderAt) ReadAt(buffer []byte, offset int64) (int, error) {
-	if offset < 0 || offset >= int64(len(reader.data)) {
-		return 0, io.EOF
-	}
-	read := copy(buffer, reader.data[offset:])
-	if read < len(buffer) {
-		return read, io.EOF
-	}
-	return read, nil
 }
 
 func defaultGiftClipCacheRoot() string {

@@ -52,6 +52,29 @@ function Get-Sha256 {
     }
 }
 
+function Get-PEAuthenticodeContentSha256 {
+    param([string]$Path)
+    $Bytes = [IO.File]::ReadAllBytes($Path)
+    if ($Bytes.Length -lt 256 -or [BitConverter]::ToUInt16($Bytes, 0) -ne 0x5a4d) { throw 'Built FFmpeg is not a valid PE image.' }
+    $PE = [BitConverter]::ToUInt32($Bytes, 0x3c)
+    if ($PE + 24 -gt $Bytes.Length -or [BitConverter]::ToUInt32($Bytes, $PE) -ne 0x00004550) { throw 'Built FFmpeg PE header is invalid.' }
+    $Optional = $PE + 24
+    $Magic = [BitConverter]::ToUInt16($Bytes, $Optional)
+    $DataDirectory = $Optional + $(if ($Magic -eq 0x20b) { 112 } elseif ($Magic -eq 0x10b) { 96 } else { throw 'Built FFmpeg PE optional header is invalid.' })
+    $Checksum = $Optional + 64
+    $SecurityDirectory = $DataDirectory + 32
+    $CertificateOffset = [BitConverter]::ToUInt32($Bytes, $SecurityDirectory)
+    $CertificateSize = [BitConverter]::ToUInt32($Bytes, $SecurityDirectory + 4)
+    if (($CertificateOffset -eq 0) -ne ($CertificateSize -eq 0) -or $CertificateOffset -gt $Bytes.Length -or $CertificateSize -gt $Bytes.Length - $CertificateOffset -or ($CertificateSize -gt 0 -and $CertificateOffset + $CertificateSize -ne $Bytes.Length)) { throw 'Built FFmpeg PE certificate table is invalid.' }
+    $End = if ($CertificateSize -gt 0) { $CertificateOffset } else { $Bytes.Length }
+    $Normalized = New-Object byte[] $End
+    [Array]::Copy($Bytes, $Normalized, $End)
+    [Array]::Clear($Normalized, $Checksum, 4)
+    [Array]::Clear($Normalized, $SecurityDirectory, 8)
+    $Algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($Algorithm.ComputeHash($Normalized))).Replace('-', '').ToLowerInvariant() } finally { $Algorithm.Dispose() }
+}
+
 New-Item -ItemType Directory -Force -Path $DownloadRoot, $OutputRoot, $GpgHome | Out-Null
 function Invoke-PinnedDownload {
     param([string[]]$Uris, [string]$Destination)
@@ -157,10 +180,40 @@ $env:FFMPEG_OUTPUT_DIR = $OutputRoot
 $env:FFMPEG_FLAGS_FILE = $FlagsPath
 $env:FFMPEG_BUILD_JOBS = [string]$Jobs
 $env:FFMPEG_SOURCE_DATE_EPOCH = $SourceDateEpoch
+$env:FFMPEG_SOURCE_SHA256 = $ArchiveSha256
+$env:FFMPEG_VERSION = $Version
 $BuildCommand = @'
 set -euo pipefail
 export PATH="/ucrt64/bin:/usr/bin:$PATH"
 export SOURCE_DATE_EPOCH="$FFMPEG_SOURCE_DATE_EPOCH"
+expected_toolchain=$(cat <<'EOF'
+diffutils=3.12-1
+make=4.4.1-3
+mingw-w64-ucrt-x86_64-binutils=2.47-3
+mingw-w64-ucrt-x86_64-crt=14.0.0.r262.g5ea8e9fac-1
+mingw-w64-ucrt-x86_64-gcc=16.2.0-3
+mingw-w64-ucrt-x86_64-gcc-libs=16.2.0-3
+mingw-w64-ucrt-x86_64-headers=14.0.0.r262.g5ea8e9fac-1
+mingw-w64-ucrt-x86_64-libwinpthread=14.0.0.r262.g5ea8e9fac-1
+mingw-w64-ucrt-x86_64-winpthreads=14.0.0.r262.g5ea8e9fac-1
+mingw-w64-ucrt-x86_64-zlib=1.3.2-2
+nasm=2.16.03-1
+pkgconf=3.0.5-1
+EOF
+)
+expected_toolchain=$(printf '%s\n' "$expected_toolchain" | sort)
+toolchain_packages=$(printf '%s\n' "$expected_toolchain" | cut -d= -f1)
+actual_toolchain=$(pacman -Q $toolchain_packages | sed 's/ /=/' | sort)
+if ! diff -u <(printf '%s\n' "$expected_toolchain") <(printf '%s\n' "$actual_toolchain"); then
+  echo 'MSYS2 build package versions differ from the pinned toolchain.' >&2
+  exit 1
+fi
+gcc_version=$(gcc --version | head -n1)
+ld_version=$(ld --version | head -n1)
+make_version=$(make --version | head -n1)
+test "$gcc_version" = 'gcc.exe (Rev3, Built by MSYS2 project) 16.2.0'
+test "$ld_version" = 'GNU ld (GNU Binutils) 2.47.20260726'
+test "$make_version" = 'GNU Make 4.4.1'
 source_dir="$(cygpath -u "$FFMPEG_SOURCE_DIR")"
 output_dir="$(cygpath -u "$FFMPEG_OUTPUT_DIR")"
 flags_file="$(cygpath -u "$FFMPEG_FLAGS_FILE")"
@@ -250,9 +303,28 @@ if ! diff -u <(printf '%s\n' "$expected_components") <(printf '%s\n' "$actual_co
   echo 'Enabled FFmpeg component macros differ from the approved exact set.' >&2
   exit 1
 fi
-make -j"$FFMPEG_BUILD_JOBS" ffmpeg.exe
 mkdir -p "$output_dir"
+configure_sha=$(printf '%s\n' "${configure_flags[@]}" | sha256sum | cut -d' ' -f1)
+component_gate="$output_dir/../ffmpeg-component-gate.txt"
+rm -f "$component_gate" "$component_gate.partial"
+make -j"$FFMPEG_BUILD_JOBS" ffmpeg.exe
 cp -f ffmpeg.exe "$output_dir/ffmpeg.exe"
+binary_sha=$(sha256sum "$output_dir/ffmpeg.exe" | cut -d' ' -f1)
+binary_size=$(wc -c < "$output_dir/ffmpeg.exe" | tr -d '[:space:]')
+{
+  printf 'ffmpeg_version=%s\n' "$FFMPEG_VERSION"
+  printf 'source_sha256=%s\n' "$FFMPEG_SOURCE_SHA256"
+  printf 'source_date_epoch=%s\n' "$FFMPEG_SOURCE_DATE_EPOCH"
+  printf 'configure_sha256=%s\n' "$configure_sha"
+  printf 'binary_sha256=%s\n' "$binary_sha"
+  printf 'binary_size=%s\n' "$binary_size"
+  printf '[toolchain]\n%s\n' "$actual_toolchain"
+  printf 'gcc_version=%s\n' "$gcc_version"
+  printf 'ld_version=%s\n' "$ld_version"
+  printf 'make_version=%s\n' "$make_version"
+  printf '[components]\n%s\n' "$actual_components"
+  printf '[infrastructure]\nD3D11VA\nMEDIAFOUNDATION\n'
+} > "$component_gate.partial"
 "$output_dir/ffmpeg.exe" -buildconf > "$output_dir/../ffmpeg-build-config.txt"
 '@
 $BuildScriptPath = Join-Path $DownloadRoot 'build-ffmpeg.sh'
@@ -262,12 +334,21 @@ try {
     & $Bash $BuildScriptArgument
     if ($LASTEXITCODE -ne 0) { throw "FFmpeg build failed with exit code $LASTEXITCODE." }
 } finally {
-    Remove-Item Env:FFMPEG_SOURCE_DIR, Env:FFMPEG_OUTPUT_DIR, Env:FFMPEG_FLAGS_FILE, Env:FFMPEG_BUILD_JOBS, Env:FFMPEG_SOURCE_DATE_EPOCH -ErrorAction SilentlyContinue
+    Remove-Item Env:FFMPEG_SOURCE_DIR, Env:FFMPEG_OUTPUT_DIR, Env:FFMPEG_FLAGS_FILE, Env:FFMPEG_BUILD_JOBS, Env:FFMPEG_SOURCE_DATE_EPOCH, Env:FFMPEG_SOURCE_SHA256, Env:FFMPEG_VERSION -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $BuildScriptPath -Force -ErrorAction SilentlyContinue
 }
 
 $BuiltBinary = Join-Path $OutputRoot 'ffmpeg.exe'
 if (-not (Test-Path -LiteralPath $BuiltBinary)) { throw 'FFmpeg build did not produce dist/ffmpeg/ffmpeg.exe.' }
+$ComponentGate = Join-Path $DistRoot 'ffmpeg-component-gate.txt'
+$ComponentGatePartial = "$ComponentGate.partial"
+if (-not (Test-Path -LiteralPath $ComponentGatePartial)) { throw 'FFmpeg build did not produce a component gate record.' }
+$PEContentHash = Get-PEAuthenticodeContentSha256 -Path $BuiltBinary
+$GateText = [IO.File]::ReadAllText($ComponentGatePartial)
+$GateText = $GateText -replace '(?m)^(binary_size=[0-9]+\r?\n)', "`$1pe_authenticode_content_sha256=$PEContentHash`n"
+[IO.File]::WriteAllText("$ComponentGate.final", $GateText, (New-Object Text.UTF8Encoding($false)))
+Move-Item -LiteralPath "$ComponentGate.final" -Destination $ComponentGate -Force
+Remove-Item -LiteralPath $ComponentGatePartial -Force
 Write-Host "Built FFmpeg $Version at $BuiltBinary"
 Write-Host "Source SHA-256: $ArchiveSha256"
 Write-Host "Signing fingerprint: $SigningFingerprint"

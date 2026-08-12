@@ -3,12 +3,14 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"compress/flate"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/png"
@@ -189,6 +191,88 @@ func TestGiftClipPayloadPrepareRejectsUnsafeZipShapes(t *testing.T) {
 				t.Fatalf("error = %v, want integrity error", err)
 			}
 		})
+	}
+}
+
+func TestGiftClipPayloadStrictZipShapeRejectsAmbiguity(t *testing.T) {
+	body := []byte("MZstrict-zip")
+	valid := testStrictZipArchive(t, "ffmpeg.exe", body)
+	manifest := giftClipFFmpegManifest{Version: "9.0", SHA256: fmt.Sprintf("%x", sha256.Sum256(body)), Size: int64(len(body))}
+	if err := validateGiftClipZipShape(valid, manifest); err != nil {
+		t.Fatalf("strict ZIP rejected: %v", err)
+	}
+	central := len(valid) - 22 - (46 + len("ffmpeg.exe"))
+	eocd := len(valid) - 22
+	tests := []struct {
+		name   string
+		mutate func([]byte) []byte
+	}{
+		{name: "stored method", mutate: func(data []byte) []byte {
+			binary.LittleEndian.PutUint16(data[8:10], 0)
+			binary.LittleEndian.PutUint16(data[central+10:central+12], 0)
+			return data
+		}},
+		{name: "archive comment", mutate: func(data []byte) []byte {
+			binary.LittleEndian.PutUint16(data[eocd+20:eocd+22], 1)
+			return append(data, 'x')
+		}},
+		{name: "entry comment", mutate: func(data []byte) []byte { binary.LittleEndian.PutUint16(data[central+32:central+34], 1); return data }},
+		{name: "local extra", mutate: func(data []byte) []byte { binary.LittleEndian.PutUint16(data[28:30], 1); return data }},
+		{name: "central extra", mutate: func(data []byte) []byte { binary.LittleEndian.PutUint16(data[central+30:central+32], 1); return data }},
+		{name: "encrypted flag", mutate: func(data []byte) []byte {
+			binary.LittleEndian.PutUint16(data[6:8], 0x801)
+			binary.LittleEndian.PutUint16(data[central+8:central+10], 0x801)
+			return data
+		}},
+		{name: "data descriptor flag", mutate: func(data []byte) []byte {
+			binary.LittleEndian.PutUint16(data[6:8], 0x808)
+			binary.LittleEndian.PutUint16(data[central+8:central+10], 0x808)
+			return data
+		}},
+		{name: "archive disk", mutate: func(data []byte) []byte { binary.LittleEndian.PutUint16(data[eocd+4:eocd+6], 1); return data }},
+		{name: "central disk", mutate: func(data []byte) []byte { binary.LittleEndian.PutUint16(data[central+34:central+36], 1); return data }},
+		{name: "two entries", mutate: func(data []byte) []byte {
+			binary.LittleEndian.PutUint16(data[eocd+8:eocd+10], 2)
+			binary.LittleEndian.PutUint16(data[eocd+10:eocd+12], 2)
+			return data
+		}},
+		{name: "local name mismatch", mutate: func(data []byte) []byte { data[30] = 'x'; return data }},
+		{name: "local method mismatch", mutate: func(data []byte) []byte { binary.LittleEndian.PutUint16(data[8:10], 0); return data }},
+		{name: "local crc mismatch", mutate: func(data []byte) []byte { data[14] ^= 1; return data }},
+		{name: "local size mismatch", mutate: func(data []byte) []byte { data[18] ^= 1; return data }},
+		{name: "non-regular attrs", mutate: func(data []byte) []byte {
+			binary.LittleEndian.PutUint32(data[central+38:central+42], 0o120777<<16)
+			return data
+		}},
+		{name: "prefix junk", mutate: func(data []byte) []byte { return append([]byte("junk"), data...) }},
+		{name: "trailing junk", mutate: func(data []byte) []byte { return append(data, "junk"...) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mutated := test.mutate(bytes.Clone(valid))
+			if err := validateGiftClipZipShape(mutated, manifest); !errors.Is(err, errGiftClipPayloadIntegrity) {
+				t.Fatalf("error = %v, want integrity error", err)
+			}
+		})
+	}
+}
+
+func TestGiftClipPayloadManifestJSONIsStrict(t *testing.T) {
+	gate := "gate\n"
+	gateHash := sha256.Sum256([]byte(gate))
+	valid := `{"version":"9.0","sha256":"` + strings.Repeat("0", 64) + `","archive_sha256":"` + strings.Repeat("1", 64) + `","component_gate":"gate\n","component_gate_sha256":"` + fmt.Sprintf("%x", gateHash) + `","size":4,"authenticode":false}`
+	if _, err := parseGiftClipFFmpegManifest([]byte(valid)); err != nil {
+		t.Fatalf("strict manifest rejected: %v", err)
+	}
+	for _, invalid := range []string{
+		valid + `{}`,
+		strings.Replace(valid, `"size":4`, `"size":4,"extra":1`, 1),
+		strings.Replace(valid, `"size":4`, `"size":4,"size":4`, 1),
+		`[]`,
+	} {
+		if _, err := parseGiftClipFFmpegManifest([]byte(invalid)); !errors.Is(err, errGiftClipPayloadIntegrity) {
+			t.Fatalf("manifest %q error = %v, want integrity error", invalid, err)
+		}
 	}
 }
 
@@ -414,10 +498,14 @@ type testZipEntry struct {
 func newTestGiftClipPayload(t *testing.T, root string, binary []byte) *giftClipPayload {
 	t.Helper()
 	hash := sha256.Sum256(binary)
+	archive := testStrictZipArchive(t, "ffmpeg.exe", binary)
+	archiveHash := sha256.Sum256(archive)
+	componentGate := "fixture component gate\n"
+	componentGateHash := sha256.Sum256([]byte(componentGate))
 	return &giftClipPayload{
-		Archive: testZipArchive(t, []testZipEntry{{name: "ffmpeg.exe", body: binary, mode: 0o755}}),
+		Archive: archive,
 		Manifest: giftClipFFmpegManifest{
-			Version: "8.1.2", SHA256: fmt.Sprintf("%x", hash), Size: int64(len(binary)),
+			Version: "8.1.2", SHA256: fmt.Sprintf("%x", hash), ArchiveSHA256: fmt.Sprintf("%x", archiveHash), ComponentGate: componentGate, ComponentGateSHA256: fmt.Sprintf("%x", componentGateHash), Size: int64(len(binary)),
 		},
 		CacheRoot: root,
 	}
@@ -444,4 +532,49 @@ func testZipArchive(t *testing.T, entries []testZipEntry) []byte {
 		t.Fatal(err)
 	}
 	return buffer.Bytes()
+}
+
+func testStrictZipArchive(t *testing.T, name string, body []byte) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	writer, err := flate.NewWriter(&compressed, flate.BestCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	nameBytes := []byte(name)
+	local := make([]byte, 30+len(nameBytes))
+	binary.LittleEndian.PutUint32(local[0:4], 0x04034b50)
+	binary.LittleEndian.PutUint16(local[4:6], 20)
+	binary.LittleEndian.PutUint16(local[6:8], 0x0800)
+	binary.LittleEndian.PutUint16(local[8:10], 8)
+	binary.LittleEndian.PutUint32(local[14:18], crc32.ChecksumIEEE(body))
+	binary.LittleEndian.PutUint32(local[18:22], uint32(compressed.Len()))
+	binary.LittleEndian.PutUint32(local[22:26], uint32(len(body)))
+	binary.LittleEndian.PutUint16(local[26:28], uint16(len(nameBytes)))
+	copy(local[30:], nameBytes)
+	central := make([]byte, 46+len(nameBytes))
+	binary.LittleEndian.PutUint32(central[0:4], 0x02014b50)
+	binary.LittleEndian.PutUint16(central[4:6], 0x0314)
+	binary.LittleEndian.PutUint16(central[6:8], 20)
+	binary.LittleEndian.PutUint16(central[8:10], 0x0800)
+	binary.LittleEndian.PutUint16(central[10:12], 8)
+	binary.LittleEndian.PutUint32(central[16:20], crc32.ChecksumIEEE(body))
+	binary.LittleEndian.PutUint32(central[20:24], uint32(compressed.Len()))
+	binary.LittleEndian.PutUint32(central[24:28], uint32(len(body)))
+	binary.LittleEndian.PutUint16(central[28:30], uint16(len(nameBytes)))
+	binary.LittleEndian.PutUint32(central[38:42], 0o100755<<16)
+	copy(central[46:], nameBytes)
+	end := make([]byte, 22)
+	binary.LittleEndian.PutUint32(end[0:4], 0x06054b50)
+	binary.LittleEndian.PutUint16(end[8:10], 1)
+	binary.LittleEndian.PutUint16(end[10:12], 1)
+	binary.LittleEndian.PutUint32(end[12:16], uint32(len(central)))
+	binary.LittleEndian.PutUint32(end[16:20], uint32(len(local)+compressed.Len()))
+	return bytes.Join([][]byte{local, compressed.Bytes(), central, end}, nil)
 }
