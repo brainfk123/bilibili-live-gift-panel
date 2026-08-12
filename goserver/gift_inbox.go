@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,7 +19,10 @@ import (
 const maxGiftInboxRecords = 10000
 const maxGiftInboxBytes int64 = 64 << 20
 
-var errGiftInboxCapacity = errors.New("gift inbox capacity reached")
+var (
+	errGiftInboxCapacity = errors.New("gift inbox capacity reached")
+	errGiftInboxClosed   = errors.New("gift inbox handle is closed")
+)
 
 type giftInboxRecord struct {
 	SchemaVersion int       `json:"schemaVersion"`
@@ -47,6 +49,7 @@ type giftInbox struct {
 	handleID     uint64
 	pendingPath  string
 	sequencePath string
+	closed       bool
 }
 
 type giftInboxShared struct {
@@ -58,6 +61,8 @@ type giftInboxShared struct {
 	pendingBytes int64
 	claimedBy    uint64
 	claimedID    string
+	rootInfo     os.FileInfo
+	openHandles  int
 }
 
 var giftInboxRegistry = struct {
@@ -67,35 +72,44 @@ var giftInboxRegistry = struct {
 }{roots: make(map[string]*giftInboxShared)}
 
 func openGiftInbox(root string) (*giftInbox, error) {
-	inboxRoot := filepath.Join(root, "gift-inbox")
+	inboxRoot, err := filepath.Abs(filepath.Join(root, "gift-inbox"))
+	if err != nil {
+		return nil, fmt.Errorf("resolve gift inbox root path: %w", err)
+	}
+	inboxRoot = filepath.Clean(inboxRoot)
 	pendingPath := filepath.Join(inboxRoot, "pending")
 	if err := os.MkdirAll(pendingPath, 0o700); err != nil {
 		return nil, fmt.Errorf("create gift inbox directory: %w", err)
 	}
-	canonicalRoot, err := filepath.EvalSymlinks(inboxRoot)
+	rootInfo, err := os.Stat(inboxRoot)
 	if err != nil {
-		return nil, fmt.Errorf("resolve gift inbox root: %w", err)
-	}
-	canonicalRoot, err = filepath.Abs(canonicalRoot)
-	if err != nil {
-		return nil, fmt.Errorf("canonicalize gift inbox root: %w", err)
-	}
-	canonicalRoot = filepath.Clean(canonicalRoot)
-	if runtime.GOOS == "windows" {
-		canonicalRoot = strings.ToLower(canonicalRoot)
+		return nil, fmt.Errorf("stat gift inbox root: %w", err)
 	}
 
 	giftInboxRegistry.Lock()
 	defer giftInboxRegistry.Unlock()
 	giftInboxRegistry.nextHandleID++
 	handleID := giftInboxRegistry.nextHandleID
-	if shared := giftInboxRegistry.roots[canonicalRoot]; shared != nil {
+	if shared := giftInboxRegistry.roots[inboxRoot]; shared != nil {
+		if !os.SameFile(rootInfo, shared.rootInfo) {
+			return nil, fmt.Errorf("gift inbox root identity changed while handles remain open")
+		}
+		shared.openHandles++
 		return &giftInbox{shared: shared, handleID: handleID, pendingPath: shared.pendingPath, sequencePath: shared.sequencePath}, nil
+	}
+	for _, shared := range giftInboxRegistry.roots {
+		if os.SameFile(rootInfo, shared.rootInfo) {
+			giftInboxRegistry.roots[inboxRoot] = shared
+			shared.openHandles++
+			return &giftInbox{shared: shared, handleID: handleID, pendingPath: shared.pendingPath, sequencePath: shared.sequencePath}, nil
+		}
 	}
 	shared := &giftInboxShared{
 		pendingPath:  pendingPath,
 		sequencePath: filepath.Join(inboxRoot, "sequence.json"),
 		nextSequence: 1,
+		rootInfo:     rootInfo,
+		openHandles:  1,
 	}
 	inbox := &giftInbox{shared: shared, handleID: handleID, pendingPath: shared.pendingPath, sequencePath: shared.sequencePath}
 	if err := inbox.removeOrphanTempsLocked(); err != nil {
@@ -107,13 +121,16 @@ func openGiftInbox(root string) (*giftInbox, error) {
 	if _, err := inbox.reconcileHealthLocked(); err != nil {
 		return nil, err
 	}
-	giftInboxRegistry.roots[canonicalRoot] = shared
+	giftInboxRegistry.roots[inboxRoot] = shared
 	return inbox, nil
 }
 
 func (inbox *giftInbox) Accept(roomID, command string, gift giftEvent) (giftInboxRecord, error) {
 	inbox.shared.mu.Lock()
 	defer inbox.shared.mu.Unlock()
+	if err := inbox.checkOpenLocked(); err != nil {
+		return giftInboxRecord{}, err
+	}
 
 	health, err := inbox.reconcileHealthLocked()
 	if err != nil {
@@ -163,7 +180,10 @@ func (inbox *giftInbox) Accept(roomID, command string, gift giftEvent) (giftInbo
 func (inbox *giftInbox) Next() (giftInboxRecord, bool, error) {
 	inbox.shared.mu.Lock()
 	defer inbox.shared.mu.Unlock()
-	if inbox.shared.claimedBy != 0 && inbox.shared.claimedBy != inbox.handleID {
+	if err := inbox.checkOpenLocked(); err != nil {
+		return giftInboxRecord{}, false, err
+	}
+	if inbox.shared.claimedBy != 0 {
 		return giftInboxRecord{}, false, nil
 	}
 
@@ -186,8 +206,17 @@ func (inbox *giftInbox) Next() (giftInboxRecord, bool, error) {
 func (inbox *giftInbox) Acknowledge(ingestionID string) error {
 	inbox.shared.mu.Lock()
 	defer inbox.shared.mu.Unlock()
+	if err := inbox.checkOpenLocked(); err != nil {
+		return err
+	}
+	if !isValidGiftInboxID(ingestionID) {
+		return fmt.Errorf("invalid gift inbox acknowledgement ID")
+	}
 	if inbox.shared.claimedBy != 0 && inbox.shared.claimedBy != inbox.handleID {
 		return fmt.Errorf("gift inbox record is claimed by another handle")
+	}
+	if inbox.shared.claimedBy == inbox.handleID && inbox.shared.claimedID != ingestionID {
+		return fmt.Errorf("gift inbox acknowledgement does not match current claim")
 	}
 
 	files, err := inbox.pendingFilesLocked()
@@ -220,6 +249,58 @@ func (inbox *giftInbox) Acknowledge(ingestionID string) error {
 	inbox.shared.claimedID = ""
 	_, err = inbox.reconcileHealthLocked()
 	return err
+}
+
+// Release relinquishes this handle's matching claim without deleting the
+// record. Callers must defer Release after Next whenever processing may fail.
+func (inbox *giftInbox) Release(ingestionID string) error {
+	inbox.shared.mu.Lock()
+	defer inbox.shared.mu.Unlock()
+	if err := inbox.checkOpenLocked(); err != nil {
+		return err
+	}
+	if !isValidGiftInboxID(ingestionID) {
+		return fmt.Errorf("invalid gift inbox release ID")
+	}
+	if inbox.shared.claimedBy != inbox.handleID || inbox.shared.claimedID != ingestionID {
+		return fmt.Errorf("gift inbox release does not match current claim")
+	}
+	inbox.shared.claimedBy = 0
+	inbox.shared.claimedID = ""
+	return nil
+}
+
+// Close releases any claim owned by this handle and ends its ownership. Runtime
+// owners should defer Close immediately after opening an inbox.
+func (inbox *giftInbox) Close() error {
+	giftInboxRegistry.Lock()
+	defer giftInboxRegistry.Unlock()
+	inbox.shared.mu.Lock()
+	defer inbox.shared.mu.Unlock()
+	if inbox.closed {
+		return nil
+	}
+	if inbox.shared.claimedBy == inbox.handleID {
+		inbox.shared.claimedBy = 0
+		inbox.shared.claimedID = ""
+	}
+	inbox.closed = true
+	inbox.shared.openHandles--
+	if inbox.shared.openHandles == 0 {
+		for path, shared := range giftInboxRegistry.roots {
+			if shared == inbox.shared {
+				delete(giftInboxRegistry.roots, path)
+			}
+		}
+	}
+	return nil
+}
+
+func (inbox *giftInbox) checkOpenLocked() error {
+	if inbox.closed {
+		return errGiftInboxClosed
+	}
+	return nil
 }
 
 func (inbox *giftInbox) Health() giftInboxHealth {

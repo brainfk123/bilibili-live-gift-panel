@@ -468,6 +468,245 @@ func TestGiftInboxClaimsHeadForOnlyOneHandleUntilAcknowledged(t *testing.T) {
 	}
 }
 
+func TestGiftInboxSameHandleConcurrentNextClaimsHeadOnce(t *testing.T) {
+	root := t.TempDir()
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inbox.Accept("room", "SEND_GIFT", giftEvent{GiftName: "once"}); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		ok  bool
+		err error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			<-start
+			_, ok, err := inbox.Next()
+			results <- result{ok: ok, err: err}
+		}()
+	}
+	close(start)
+	claims := 0
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if result.ok {
+			claims++
+		}
+	}
+	if claims != 1 {
+		t.Fatalf("same-handle concurrent claims = %d, want 1", claims)
+	}
+}
+
+func TestGiftInboxReleaseMakesClaimAvailableToAnotherHandle(t *testing.T) {
+	root := t.TempDir()
+	owner, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := owner.Accept("room", "SEND_GIFT", giftEvent{GiftName: "retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := owner.Next(); err != nil || !ok {
+		t.Fatalf("owner Next = (_, %t, %v)", ok, err)
+	}
+	if err := owner.Release(want.IngestionID); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := other.Next()
+	if err != nil || !ok {
+		t.Fatalf("other Next after Release = (%+v, %t, %v)", got, ok, err)
+	}
+	if got.IngestionID != want.IngestionID {
+		t.Fatalf("released record ID = %q, want %q", got.IngestionID, want.IngestionID)
+	}
+}
+
+func TestGiftInboxCloseReleasesClaimAndRejectsFurtherOperations(t *testing.T) {
+	root := t.TempDir()
+	owner, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := owner.Accept("room", "SEND_GIFT", giftEvent{GiftName: "abandoned"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := owner.Next(); err != nil || !ok {
+		t.Fatalf("owner Next = (_, %t, %v)", ok, err)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatalf("repeated Close = %v, want nil", err)
+	}
+	if _, err := owner.Accept("room", "SEND_GIFT", giftEvent{}); !errors.Is(err, errGiftInboxClosed) {
+		t.Fatalf("Accept after Close = %v, want closed error", err)
+	}
+	if _, _, err := owner.Next(); !errors.Is(err, errGiftInboxClosed) {
+		t.Fatalf("Next after Close = %v, want closed error", err)
+	}
+	if err := owner.Acknowledge(want.IngestionID); !errors.Is(err, errGiftInboxClosed) {
+		t.Fatalf("Acknowledge after Close = %v, want closed error", err)
+	}
+	if err := owner.Release(want.IngestionID); !errors.Is(err, errGiftInboxClosed) {
+		t.Fatalf("Release after Close = %v, want closed error", err)
+	}
+	got, ok, err := other.Next()
+	if err != nil || !ok || got.IngestionID != want.IngestionID {
+		t.Fatalf("other Next after owner Close = (%+v, %t, %v), want abandoned record", got, ok, err)
+	}
+}
+
+func TestGiftInboxInvalidReleaseDoesNotFreeClaim(t *testing.T) {
+	root := t.TempDir()
+	owner, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := owner.Accept("room", "SEND_GIFT", giftEvent{GiftName: "claimed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	later, err := owner.Accept("room", "SEND_GIFT", giftEvent{GiftName: "later"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := owner.Next(); err != nil || !ok {
+		t.Fatalf("owner Next = (_, %t, %v)", ok, err)
+	}
+	for name, release := range map[string]func() error{
+		"other owner":  func() error { return other.Release(claimed.IngestionID) },
+		"invalid ID":   func() error { return owner.Release("not-hex") },
+		"different ID": func() error { return owner.Release(later.IngestionID) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := release(); err == nil {
+				t.Fatal("invalid Release succeeded")
+			}
+			if _, ok, err := other.Next(); err != nil || ok {
+				t.Fatalf("other Next after invalid Release = (_, %t, %v), want unavailable", ok, err)
+			}
+		})
+	}
+}
+
+func TestGiftInboxDistinctFilesystemRootsDoNotShareState(t *testing.T) {
+	parent := t.TempDir()
+	upperRoot := filepath.Join(parent, "GiftRoot")
+	lowerRoot := filepath.Join(parent, "giftroot")
+	for _, root := range []string{upperRoot, lowerRoot} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	upperInfo, err := os.Stat(upperRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lowerInfo, err := os.Stat(lowerRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(upperInfo, lowerInfo) {
+		t.Skip("filesystem treats case variants as one directory")
+	}
+	upper, err := openGiftInbox(upperRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower, err := openGiftInbox(lowerRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upperRecord, err := upper.Accept("upper", "SEND_GIFT", giftEvent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lowerRecord, err := lower.Accept("lower", "SEND_GIFT", giftEvent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upperRecord.LocalSequence != 1 || lowerRecord.LocalSequence != 1 {
+		t.Fatalf("distinct-root sequences = %d, %d; want 1, 1", upperRecord.LocalSequence, lowerRecord.LocalSequence)
+	}
+}
+
+func TestGiftInboxFilesystemAliasSharesStateWhenSupported(t *testing.T) {
+	parent := t.TempDir()
+	target := filepath.Join(parent, "target")
+	alias := filepath.Join(parent, "alias")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("filesystem alias unavailable: %v", err)
+	}
+	first, err := openGiftInbox(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := openGiftInbox(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	one, err := first.Accept("room", "SEND_GIFT", giftEvent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := second.Accept("room", "SEND_GIFT", giftEvent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if one.LocalSequence != 1 || two.LocalSequence != 2 {
+		t.Fatalf("alias sequences = %d, %d; want 1, 2", one.LocalSequence, two.LocalSequence)
+	}
+}
+
+func TestGiftInboxRejectsRootIdentityReplacementWhileHandleIsLive(t *testing.T) {
+	root := t.TempDir()
+	owner, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldInboxRoot := filepath.Join(root, "gift-inbox")
+	movedInboxRoot := filepath.Join(root, "gift-inbox-moved")
+	if err := os.Rename(oldInboxRoot, movedInboxRoot); err != nil {
+		t.Skipf("filesystem cannot replace a live inbox root: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(oldInboxRoot, "pending"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openGiftInbox(root); err == nil {
+		t.Fatal("openGiftInbox accepted a replaced root while its prior handle remained live")
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGiftInboxReconcilesCapacityAfterDeletionAndReopen(t *testing.T) {
 	root := t.TempDir()
 	inbox, err := openGiftInbox(root)
