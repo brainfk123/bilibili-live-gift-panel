@@ -2901,6 +2901,7 @@ export function mountConfig(root: HTMLElement): void {
       simulationGeneration += 1;
       for (const item of selected.values()) item.simulationPreview = undefined;
       renderSelectedRules();
+      renderTimerRules();
     };
     const formatSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
     formatSelect.innerHTML = '<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字 + 后缀</option>';

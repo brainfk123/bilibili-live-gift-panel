@@ -2365,6 +2365,43 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(textOf(giftPreview)).toContain('10 → 11'));
   });
 
+  it('clears timer simulation previews after manual and template value resets', async () => {
+    const configured = state('88888888', 1);
+    configured.attributes[0].value = 10;
+    configured.timerRules = [{
+      id: 't-preview', attributeName: '加班时间', formulaName: '模拟减一',
+      intervalSeconds: 60, formula: '加班时间-1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const fallbackFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { attributeValue: number };
+      return Response.json({ code: 0, result: body.attributeValue - 1 });
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    const currentValue = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '当前值') as TestElement & { oninput?: () => void };
+    let timerEditor = root.querySelector('.timer-rule-editor')!;
+    findByText(timerEditor, '模拟执行一次')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(timerEditor.querySelector('.formula-preview')!)).toContain('10 → 9'));
+
+    currentValue.value = '20';
+    currentValue.oninput?.();
+    expect(textOf(root)).not.toContain('10 → 9');
+
+    timerEditor = root.querySelector('.timer-rule-editor')!;
+    findByText(timerEditor, '模拟执行一次')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(timerEditor.querySelector('.formula-preview')!)).toContain('20 → 19'));
+
+    findByText(root, '使用加班机模板')?.onclick?.();
+    expect(currentValue.value).toBe('0');
+    expect(textOf(root)).not.toContain('20 → 19');
+  });
+
   it('configures a conditional backend timer without adding it to the OBS gift grid', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
     const root = new TestElement('div');
