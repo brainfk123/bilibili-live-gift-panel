@@ -471,14 +471,24 @@ func TestBackgroundRuntimeRoomSwitchResetsRoomScopedIngestionMetadata(t *testing
 	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
 	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
 	state.RecentSourceGiftKeys["same-rnd"] = time.Now().UnixMilli()
-	state.GiftReceipts = []giftReceipt{{
-		ID: pendingAnimationReceiptPrefix + "room-a:1:42:1", GiftID: 1, SenderUID: 42,
-		Animation: &giftReceiptAnimation{EffectID: 99}, Effects: []giftReceiptEffect{},
-	}}
 	if err := store.replaceState(state); err != nil {
 		t.Fatal(err)
 	}
 	runtime := newBackgroundRuntime(store, nil)
+	if err := runtime.savePendingGiftAnimations([]pendingGiftAnimation{
+		{RoomID: "room-a", Gift: giftEvent{GiftID: 1, UID: 42, Timestamp: 1, EffectID: 99, AnimationOnly: true}},
+		{RoomID: "room-b", Gift: giftEvent{GiftID: 2, UID: 43, Timestamp: 2, EffectID: 100, AnimationOnly: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := runtime.loadPendingGiftAnimationFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata.PreparedRoomID = "room-a"
+	if err := runtime.savePendingGiftAnimationFile(metadata); err != nil {
+		t.Fatal(err)
+	}
 	runtime.setStatus("connected", "room-a", nil)
 	if err := runtime.prepareRoomConnection("room-b"); err != nil {
 		t.Fatal(err)
@@ -494,8 +504,258 @@ func TestBackgroundRuntimeRoomSwitchResetsRoomScopedIngestionMetadata(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Attributes[0].Value != 1 || len(updated.GiftReceipts) != 1 || strings.HasPrefix(updated.GiftReceipts[0].ID, pendingAnimationReceiptPrefix) {
+	if updated.Attributes[0].Value != 1 || len(updated.GiftReceipts) != 1 {
 		t.Fatalf("room switch state = attribute=%v receipts=%#v", updated.Attributes[0].Value, updated.GiftReceipts)
+	}
+	pending, err := runtime.loadPendingGiftAnimations()
+	if err != nil || len(pending) != 1 || pending[0].RoomID != "room-b" || pending[0].Gift.EffectID != 100 {
+		t.Fatalf("pending animations after room switch = %#v, err=%v", pending, err)
+	}
+}
+
+func TestBackgroundRuntimeRetriesFailedRoomPreparationBeforeStartingSource(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-b"
+	state.RecentSourceGiftKeys["old-room-rnd"] = time.Now().UnixMilli()
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.setStatus("connected", "room-a", nil)
+	if err := runtime.savePendingGiftAnimations([]pendingGiftAnimation{{RoomID: "room-a", Gift: giftEvent{GiftID: 1, UID: 42, AnimationOnly: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := runtime.loadPendingGiftAnimationFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata.PreparedRoomID = "room-a"
+	if err := runtime.savePendingGiftAnimationFile(metadata); err != nil {
+		t.Fatal(err)
+	}
+	failed := false
+	store.writeAtomically = func(path string, data []byte) error {
+		if filepath.Base(path) == "events.log" && !failed {
+			failed = true
+			return errors.New("injected room preparation failure")
+		}
+		return writeFileAtomically(path, data)
+	}
+	if err := runtime.prepareRoomConnection("room-b"); err == nil {
+		t.Fatal("first room preparation unexpectedly succeeded")
+	}
+	runtime.setStatus("error", "room-b", errors.New("injected room preparation failure"))
+	if err := runtime.prepareRoomConnection("room-b"); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.RecentSourceGiftKeys) != 0 {
+		t.Fatalf("old-room dedupe survived retry: %#v", updated.RecentSourceGiftKeys)
+	}
+	pending, err := runtime.loadPendingGiftAnimations()
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("old-room animations survived retry: %#v, err=%v", pending, err)
+	}
+}
+
+func TestBackgroundRuntimePendingAnimationIsPrivateAndSurvivesHistoryClear(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-a"
+	for index := 0; index < maxGiftReceiptEntries; index++ {
+		state.GiftReceipts = append(state.GiftReceipts, giftReceipt{ID: fmt.Sprintf("real-%03d", index), GiftID: index + 1, Effects: []giftReceiptEffect{}})
+	}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	if err := runtime.processInboxRecord(context.Background(), giftInboxRecord{
+		IngestionID: strings.Repeat("e", 32), RoomID: "room-a", Command: "GUARD_BUY",
+		Gift: giftEvent{GiftID: specialGiftGuardCaptain, UID: 42, Timestamp: 10, EffectID: 9001, EffectMP4: "https://i0.hdslb.com/a.mp4", EffectMP4JSON: "https://i0.hdslb.com/a.json", AnimationOnly: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.GiftReceipts) != maxGiftReceiptEntries || updated.GiftReceipts[0].ID != "real-000" || updated.GiftReceipts[maxGiftReceiptEntries-1].ID != fmt.Sprintf("real-%03d", maxGiftReceiptEntries-1) {
+		t.Fatalf("pending animation changed public receipt history: count=%d first=%q last=%q", len(updated.GiftReceipts), updated.GiftReceipts[0].ID, updated.GiftReceipts[len(updated.GiftReceipts)-1].ID)
+	}
+	if _, err := store.updateState(func(state *appState) error {
+		state.GiftReceipts = []giftReceipt{}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := runtime.loadPendingGiftAnimations()
+	if err != nil || len(pending) != 1 || pending[0].Gift.EffectID != 9001 {
+		t.Fatalf("pending animation after history clear = %#v, err=%v", pending, err)
+	}
+	restarted := newBackgroundRuntime(&configStore{path: filepath.Join(root, "config.json")}, nil)
+	if err := restarted.processInboxRecord(context.Background(), giftInboxRecord{
+		IngestionID: strings.Repeat("f", 32), RoomID: "room-a", Command: "GUARD_BUY",
+		Gift: giftEvent{GiftID: specialGiftGuardCaptain, GiftName: "大航海·舰长", Num: 1, UID: 42, Timestamp: 11, Rnd: "private-animation-purchase"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := restarted.store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged.GiftReceipts) != 1 || merged.GiftReceipts[0].Animation == nil || merged.GiftReceipts[0].Animation.EffectID != 9001 {
+		t.Fatalf("private pending animation did not merge once: %#v", merged.GiftReceipts)
+	}
+	pending, err = restarted.loadPendingGiftAnimations()
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("private pending animation not consumed: %#v, err=%v", pending, err)
+	}
+}
+
+func TestBackgroundRuntimeCompletesPrivateAnimationWriteAfterCommittedIngestion(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-a"
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := inbox.Accept("room-a", "GUARD_BUY", giftEvent{
+		GiftID: specialGiftGuardCaptain, UID: 42, Timestamp: 10, EffectID: 9001,
+		EffectMP4: "https://i0.hdslb.com/a.mp4", EffectMP4JSON: "https://i0.hdslb.com/a.json", AnimationOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.inbox = inbox
+	runtime.inboxRetryDelay = time.Hour
+	if err := runtime.savePendingGiftAnimationFile(pendingGiftAnimationFile{
+		SchemaVersion: pendingGiftAnimationsSchemaVersion, PreparedRoomID: "room-a", Records: []pendingGiftAnimation{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	failed := false
+	runtime.animationWriteAtomically = func(path string, data []byte) error {
+		if !failed {
+			failed = true
+			return errors.New("injected private animation write failure")
+		}
+		return writeFileAtomically(path, data)
+	}
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	waitForIngestionError(t, runtime, "injected private animation write failure")
+	cancel()
+	<-done
+	committed, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !testContainsString(committed.AppliedIngressIDs, record.IngestionID) || inbox.Health().PendingCount != 1 {
+		t.Fatalf("committed animation ingestion not retained for completion: applied=%#v pending=%d", committed.AppliedIngressIDs, inbox.Health().PendingCount)
+	}
+
+	recoveredInbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered := newBackgroundRuntime(&configStore{path: filepath.Join(root, "config.json")}, nil)
+	recovered.inbox = recoveredInbox
+	cancelRecovered, recoveredDone := startBackgroundRuntimeForTest(recovered)
+	waitForInboxPendingCount(t, recoveredInbox, 0)
+	cancelRecovered()
+	<-recoveredDone
+	pending, err := recovered.loadPendingGiftAnimations()
+	if err != nil || len(pending) != 1 || pending[0].Gift.EffectID != 9001 {
+		t.Fatalf("private animation completion = %#v, err=%v", pending, err)
+	}
+}
+
+func TestBackgroundRuntimeCompletesPrivateAnimationDeleteAfterCommittedPurchase(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-a"
+	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
+	state.Rules = []giftRule{{ID: "guard", GiftID: specialGiftGuardCaptain, AttributeName: "积分", Formula: "积分+1"}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	seed := newBackgroundRuntime(store, nil)
+	if err := seed.addPendingGiftAnimation("room-a", giftEvent{
+		GiftID: specialGiftGuardCaptain, UID: 42, Timestamp: 10, EffectID: 9001,
+		EffectMP4: "https://i0.hdslb.com/a.mp4", EffectMP4JSON: "https://i0.hdslb.com/a.json", AnimationOnly: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := seed.loadPendingGiftAnimationFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata.PreparedRoomID = "room-a"
+	if err := seed.savePendingGiftAnimationFile(metadata); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := inbox.Accept("room-a", "GUARD_BUY", giftEvent{
+		GiftID: specialGiftGuardCaptain, GiftName: "大航海·舰长", Num: 1, UID: 42, Timestamp: 11, Rnd: "delete-after-commit",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.inbox = inbox
+	runtime.inboxRetryDelay = time.Hour
+	failed := false
+	runtime.animationWriteAtomically = func(path string, data []byte) error {
+		if !failed {
+			failed = true
+			return errors.New("injected private animation delete failure")
+		}
+		return writeFileAtomically(path, data)
+	}
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	waitForIngestionError(t, runtime, "injected private animation delete failure")
+	cancel()
+	<-done
+	committed, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !testContainsString(committed.AppliedIngressIDs, record.IngestionID) || committed.Attributes[0].Value != 1 || len(committed.GiftReceipts) != 1 || inbox.Health().PendingCount != 1 {
+		t.Fatalf("committed purchase not retained for delete completion: state=%#v pending=%d", committed, inbox.Health().PendingCount)
+	}
+
+	recoveredInbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered := newBackgroundRuntime(&configStore{path: filepath.Join(root, "config.json")}, nil)
+	recovered.inbox = recoveredInbox
+	cancelRecovered, recoveredDone := startBackgroundRuntimeForTest(recovered)
+	waitForInboxPendingCount(t, recoveredInbox, 0)
+	cancelRecovered()
+	<-recoveredDone
+	finalState, err := recovered.store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, pendingErr := recovered.loadPendingGiftAnimations()
+	if finalState.Attributes[0].Value != 1 || len(finalState.GiftReceipts) != 1 || len(pending) != 0 || pendingErr != nil {
+		t.Fatalf("private delete completion state=%#v pending=%#v err=%v", finalState, pending, pendingErr)
 	}
 }
 
@@ -550,6 +810,81 @@ func TestBackgroundRuntimeReportsIngestionFailureWithoutDisconnectAndClearsAfter
 	if status := runtime.Status(); status.IngestionError != "" {
 		t.Fatalf("ingestion error not cleared after retry: %#v", status)
 	}
+}
+
+type interleavedHealthInbox struct {
+	mu          sync.Mutex
+	record      giftInboxRecord
+	claimed     bool
+	ackStarted  chan struct{}
+	allowAck    chan struct{}
+	acceptError error
+}
+
+func (inbox *interleavedHealthInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
+	return giftInboxRecord{}, inbox.acceptError
+}
+func (inbox *interleavedHealthInbox) Next() (giftInboxRecord, bool, error) {
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
+	if inbox.claimed {
+		return giftInboxRecord{}, false, nil
+	}
+	inbox.claimed = true
+	return inbox.record, true, nil
+}
+func (inbox *interleavedHealthInbox) Acknowledge(string) error {
+	close(inbox.ackStarted)
+	<-inbox.allowAck
+	return nil
+}
+func (*interleavedHealthInbox) Release(string) error    { return nil }
+func (*interleavedHealthInbox) Close() error            { return nil }
+func (*interleavedHealthInbox) Health() giftInboxHealth { return giftInboxHealth{} }
+
+func TestBackgroundRuntimeSuccessfulClaimDoesNotClearNewerIngressFailure(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	if err := store.replaceState(defaultAppState()); err != nil {
+		t.Fatal(err)
+	}
+	inbox := &interleavedHealthInbox{
+		record: giftInboxRecord{
+			IngestionID: strings.Repeat("1", 32), Command: "SEND_GIFT",
+			Gift: giftEvent{GiftID: 1, GiftName: "older success", Num: 1, Rnd: "older-success"},
+		},
+		ackStarted: make(chan struct{}), allowAck: make(chan struct{}),
+		acceptError: errors.New("newer accept failure"),
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.inbox = inbox
+	runtime.recordIngestionFailure(errors.New("older processing failure"))
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	defer func() {
+		cancel()
+		<-done
+	}()
+	select {
+	case <-inbox.ackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("older successful claim did not reach acknowledgement")
+	}
+	runtime.acceptGift(context.Background(), "room", "SEND_GIFT", giftEvent{GiftID: 2})
+	close(inbox.allowAck)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.Status().IngestionError == "" {
+			t.Fatal("older claim success cleared the newer accept failure")
+		}
+		if runtime.Status().IngestionError == "newer accept failure" {
+			time.Sleep(20 * time.Millisecond)
+			if runtime.Status().IngestionError != "newer accept failure" {
+				t.Fatal("newer accept failure was cleared after older claim completion")
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("runtime status = %#v, want newer accept failure", runtime.Status())
 }
 
 type shutdownOrderingInbox struct {

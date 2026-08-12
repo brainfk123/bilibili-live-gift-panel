@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,21 +42,25 @@ type runtimeGiftInbox interface {
 }
 
 type backgroundRuntime struct {
-	store           *configStore
-	sourceFactory   func() giftEventSource
-	reload          chan struct{}
-	mu              sync.RWMutex
-	status          runtimeStatus
-	timerMu         sync.Mutex
-	timerSchedules  map[string]timerSchedule
-	timerTicks      <-chan time.Time
-	notifications   *notificationCenter
-	inbox           runtimeGiftInbox
-	inboxWake       chan struct{}
-	inboxRetryDelay time.Duration
-	profileTimeout  time.Duration
-	profileResolver userProfileResolver
-	diagnostics     *diagnosticLogger
+	store                    *configStore
+	sourceFactory            func() giftEventSource
+	reload                   chan struct{}
+	mu                       sync.RWMutex
+	status                   runtimeStatus
+	ingestionGeneration      uint64
+	ingestionErrorSource     string
+	animationMu              sync.Mutex
+	animationWriteAtomically func(string, []byte) error
+	timerMu                  sync.Mutex
+	timerSchedules           map[string]timerSchedule
+	timerTicks               <-chan time.Time
+	notifications            *notificationCenter
+	inbox                    runtimeGiftInbox
+	inboxWake                chan struct{}
+	inboxRetryDelay          time.Duration
+	profileTimeout           time.Duration
+	profileResolver          userProfileResolver
+	diagnostics              *diagnosticLogger
 }
 
 type timerSchedule struct {
@@ -192,23 +197,38 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 }
 
 func (runtime *backgroundRuntime) prepareRoomConnection(roomID string) error {
-	previousRoomID := strings.TrimSpace(runtime.Status().RoomID)
 	roomID = strings.TrimSpace(roomID)
-	if previousRoomID == "" || previousRoomID == roomID {
+	metadata, err := runtime.loadPendingGiftAnimationFile()
+	if err != nil {
+		return err
+	}
+	preparedRoomID := strings.TrimSpace(metadata.PreparedRoomID)
+	if preparedRoomID == "" {
+		statusRoomID := strings.TrimSpace(runtime.Status().RoomID)
+		if statusRoomID != roomID {
+			preparedRoomID = statusRoomID
+		}
+	}
+	if preparedRoomID == roomID {
 		return nil
 	}
-	_, err := runtime.store.updateState(func(state *appState) error {
-		state.RecentSourceGiftKeys = map[string]int64{}
-		filtered := state.GiftReceipts[:0]
-		for _, receipt := range state.GiftReceipts {
-			if !strings.HasPrefix(receipt.ID, pendingAnimationReceiptPrefix) {
-				filtered = append(filtered, receipt)
-			}
+	if preparedRoomID != "" {
+		if _, err := runtime.store.updateState(func(state *appState) error {
+			state.RecentSourceGiftKeys = map[string]int64{}
+			return nil
+		}); err != nil {
+			return err
 		}
-		state.GiftReceipts = filtered
-		return nil
-	})
-	return err
+	}
+	filtered := metadata.Records[:0]
+	for _, record := range metadata.Records {
+		if strings.TrimSpace(record.RoomID) != preparedRoomID {
+			filtered = append(filtered, record)
+		}
+	}
+	metadata.PreparedRoomID = roomID
+	metadata.Records = filtered
+	return runtime.savePendingGiftAnimationFile(metadata)
 }
 
 func giftCommandCategory(gift giftEvent) string {
@@ -226,11 +246,13 @@ func (runtime *backgroundRuntime) acceptGift(_ context.Context, roomID, command 
 		runtime.recordIngestionFailure(fmt.Errorf("gift inbox is not available"))
 		return
 	}
+	ingestionGeneration := runtime.currentIngestionGeneration()
 	record, err := runtime.inbox.Accept(roomID, command, gift)
 	if err != nil {
-		runtime.recordIngestionFailure(err)
+		runtime.recordIngestionFailureFrom("accept", err)
 		return
 	}
+	runtime.clearIngestionFailure(ingestionGeneration, "accept")
 	runtime.diagnostics.Info(
 		"gift_accepted",
 		"ingestion_id", record.IngestionID,
@@ -317,6 +339,7 @@ func (runtime *backgroundRuntime) runGiftLoop(ctx context.Context) {
 }
 
 func (runtime *backgroundRuntime) consumeAvailableInboxRecord(ctx context.Context) (bool, error) {
+	ingestionGeneration := runtime.currentIngestionGeneration()
 	record, ok, err := runtime.inbox.Next()
 	if err != nil {
 		return false, err
@@ -327,7 +350,7 @@ func (runtime *backgroundRuntime) consumeAvailableInboxRecord(ctx context.Contex
 	if err := runtime.consumeClaimedInboxRecord(ctx, record); err != nil {
 		return false, err
 	}
-	runtime.clearIngestionFailure()
+	runtime.clearIngestionFailure(ingestionGeneration, "consumer")
 	return true, nil
 }
 
@@ -360,6 +383,18 @@ func (runtime *backgroundRuntime) processInboxRecord(ctx context.Context, record
 	recordRoomID := strings.TrimSpace(record.RoomID)
 	currentRoomID := strings.TrimSpace(current.RoomID)
 	roomMatches := recordRoomID == "" || currentRoomID == "" || recordRoomID == currentRoomID
+	pendingAnimations := []pendingGiftAnimation{}
+	matchedPendingIndex := -1
+	if roomMatches && !gift.AnimationOnly {
+		pendingAnimations, err = runtime.loadPendingGiftAnimations()
+		if err != nil {
+			return err
+		}
+		matchedPendingIndex = findPendingGiftAnimation(pendingAnimations, record.RoomID, gift)
+		if matchedPendingIndex >= 0 {
+			gift = mergePendingAnimationIntoGift(gift, pendingAnimations[matchedPendingIndex].Gift)
+		}
+	}
 	if roomMatches && !gift.AnimationOnly && needsUserProfile(gift) && runtime.profileResolver != nil {
 		profileTimeout := runtime.profileTimeout
 		if profileTimeout <= 0 {
@@ -386,6 +421,27 @@ func (runtime *backgroundRuntime) processInboxRecord(ctx context.Context, record
 	})
 	if err != nil {
 		return err
+	}
+	if roomMatches && gift.AnimationOnly {
+		attached := settlement.animationAttached
+		if !applied {
+			latest, readErr := runtime.store.readState()
+			if readErr != nil {
+				return readErr
+			}
+			attached = giftAnimationAttachedToReceipt(latest, gift)
+		}
+		if !attached {
+			if err := runtime.addPendingGiftAnimation(record.RoomID, gift); err != nil {
+				return err
+			}
+		}
+	}
+	if roomMatches && !gift.AnimationOnly && matchedPendingIndex >= 0 {
+		pendingAnimations = append(pendingAnimations[:matchedPendingIndex], pendingAnimations[matchedPendingIndex+1:]...)
+		if err := runtime.savePendingGiftAnimations(pendingAnimations); err != nil {
+			return err
+		}
 	}
 	if !applied {
 		return nil
@@ -425,17 +481,16 @@ func (runtime *backgroundRuntime) processInboxRecord(ctx context.Context, record
 	return nil
 }
 
-const pendingAnimationReceiptPrefix = "pending-animation:"
-
 type giftSettlement struct {
-	gift            giftEvent
-	roomMismatch    bool
-	animationOnly   bool
-	sourceDuplicate bool
-	blindSource     string
-	blindCost       float64
-	blindValue      float64
-	blindPriced     bool
+	gift              giftEvent
+	roomMismatch      bool
+	animationOnly     bool
+	sourceDuplicate   bool
+	blindSource       string
+	blindCost         float64
+	blindValue        float64
+	blindPriced       bool
+	animationAttached bool
 }
 
 func settleGiftInState(state *appState, roomID string, gift giftEvent, now time.Time, durableDedupe bool) giftSettlement {
@@ -450,7 +505,7 @@ func settleGiftInState(state *appState, roomID string, gift giftEvent, now time.
 		normalizeInternalIngestionLedgers(state, now)
 	}
 	if gift.AnimationOnly {
-		persistGiftAnimationInState(state, roomID, gift)
+		settlement.animationAttached = attachGiftAnimationToReceipt(state, gift)
 		return settlement
 	}
 	if durableDedupe {
@@ -464,7 +519,7 @@ func settleGiftInState(state *appState, roomID string, gift giftEvent, now time.
 		}
 	}
 	originalBlindGiftID := gift.BlindGiftID
-	settlement.gift = takePersistedGiftAnimation(state, roomID, gift)
+	settlement.gift = gift
 	settlement.gift = enrichBlindBoxGiftFromCatalog(*state, settlement.gift)
 	if settlement.gift.BlindGiftID > 0 {
 		settlement.blindSource = "catalog"
@@ -479,79 +534,192 @@ func settleGiftInState(state *appState, roomID string, gift giftEvent, now time.
 	return settlement
 }
 
-func persistGiftAnimationInState(state *appState, roomID string, gift giftEvent) {
-	if giftReceiptAnimationFromEvent(gift) == nil || attachGiftAnimationToReceipt(state, gift) {
-		return
-	}
-	pending := giftReceipt{
-		ID: pendingAnimationReceiptID(roomID, gift), Time: gift.Timestamp, GiftID: gift.GiftID,
-		SenderUID: gift.UID, Membership: gift.Membership, Animation: giftReceiptAnimationFromEvent(gift), Effects: []giftReceiptEffect{},
-	}
-	for index := range state.GiftReceipts {
-		if state.GiftReceipts[index].ID == pending.ID {
-			state.GiftReceipts[index] = pending
-			return
-		}
-	}
-	state.GiftReceipts = append([]giftReceipt{pending}, state.GiftReceipts...)
-	if len(state.GiftReceipts) > maxGiftReceiptEntries {
-		state.GiftReceipts = state.GiftReceipts[:maxGiftReceiptEntries]
-	}
-}
-
-func takePersistedGiftAnimation(state *appState, roomID string, gift giftEvent) giftEvent {
-	pendingPrefix := pendingAnimationReceiptPrefix
-	if strings.TrimSpace(roomID) != "" {
-		pendingPrefix += strings.TrimSpace(roomID) + ":"
-	}
-	for index := range state.GiftReceipts {
-		pending := state.GiftReceipts[index]
-		if !strings.HasPrefix(pending.ID, pendingPrefix) || pending.GiftID != gift.GiftID || pending.SenderUID != gift.UID || !nearbyGiftTimestamps(pending.Time, gift.Timestamp) {
-			continue
-		}
-		if pending.Animation != nil {
-			gift = mergeReceiptAnimationIntoGift(gift, pending)
-		}
-		state.GiftReceipts = append(state.GiftReceipts[:index], state.GiftReceipts[index+1:]...)
-		return gift
-	}
-	return gift
-}
-
-func pendingAnimationReceiptID(roomID string, gift giftEvent) string {
-	return pendingAnimationReceiptPrefix + strings.TrimSpace(roomID) + ":" + strconv.Itoa(gift.GiftID) + ":" + strconv.FormatInt(gift.UID, 10) + ":" + strconv.FormatInt(gift.Timestamp, 10)
-}
-
-func mergeReceiptAnimationIntoGift(gift giftEvent, pending giftReceipt) giftEvent {
+func mergePendingAnimationIntoGift(gift, pending giftEvent) giftEvent {
 	if gift.Membership == "" {
 		gift.Membership = pending.Membership
 	}
-	animation := pending.Animation
-	if animation == nil {
-		return gift
-	}
-	gift.EffectID = animation.EffectID
-	gift.EffectMP4 = animation.MP4
-	gift.EffectMP4JSON = animation.MP4JSON
-	gift.AnimationGIF = animation.GIF
-	gift.AnimationWebP = animation.WebP
-	gift.AnimationDurationMS = animation.DurationMS
+	gift.EffectID = pending.EffectID
+	gift.EffectMP4 = pending.EffectMP4
+	gift.EffectMP4JSON = pending.EffectMP4JSON
+	gift.AnimationGIF = pending.AnimationGIF
+	gift.AnimationWebP = pending.AnimationWebP
+	gift.AnimationDurationMS = pending.AnimationDurationMS
 	return gift
 }
 
+const pendingGiftAnimationsSchemaVersion = 1
+const maxPendingGiftAnimations = 500
+
+type pendingGiftAnimation struct {
+	RoomID string    `json:"roomId"`
+	Gift   giftEvent `json:"gift"`
+}
+
+type pendingGiftAnimationFile struct {
+	SchemaVersion  int                    `json:"schemaVersion"`
+	PreparedRoomID string                 `json:"preparedRoomId,omitempty"`
+	Records        []pendingGiftAnimation `json:"records"`
+}
+
+func (runtime *backgroundRuntime) pendingGiftAnimationsPath() string {
+	return filepath.Join(filepath.Dir(runtime.store.path), "pending-gift-animations.json")
+}
+
+func (runtime *backgroundRuntime) loadPendingGiftAnimations() ([]pendingGiftAnimation, error) {
+	file, err := runtime.loadPendingGiftAnimationFile()
+	return file.Records, err
+}
+
+func (runtime *backgroundRuntime) loadPendingGiftAnimationFile() (pendingGiftAnimationFile, error) {
+	runtime.animationMu.Lock()
+	defer runtime.animationMu.Unlock()
+	return runtime.loadPendingGiftAnimationFileLocked()
+}
+
+func (runtime *backgroundRuntime) loadPendingGiftAnimationsLocked() ([]pendingGiftAnimation, error) {
+	file, err := runtime.loadPendingGiftAnimationFileLocked()
+	return file.Records, err
+}
+
+func (runtime *backgroundRuntime) loadPendingGiftAnimationFileLocked() (pendingGiftAnimationFile, error) {
+	data, err := os.ReadFile(runtime.pendingGiftAnimationsPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return pendingGiftAnimationFile{SchemaVersion: pendingGiftAnimationsSchemaVersion, Records: []pendingGiftAnimation{}}, nil
+	}
+	if err != nil {
+		return pendingGiftAnimationFile{}, fmt.Errorf("read pending gift animations: %w", err)
+	}
+	var file pendingGiftAnimationFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return pendingGiftAnimationFile{}, fmt.Errorf("parse pending gift animations: %w", err)
+	}
+	if file.SchemaVersion != pendingGiftAnimationsSchemaVersion || file.Records == nil {
+		return pendingGiftAnimationFile{}, fmt.Errorf("unsupported pending gift animations schema")
+	}
+	return file, nil
+}
+
+func (runtime *backgroundRuntime) savePendingGiftAnimations(records []pendingGiftAnimation) error {
+	runtime.animationMu.Lock()
+	defer runtime.animationMu.Unlock()
+	file, err := runtime.loadPendingGiftAnimationFileLocked()
+	if err != nil {
+		return err
+	}
+	file.Records = records
+	return runtime.savePendingGiftAnimationFileLocked(file)
+}
+
+func (runtime *backgroundRuntime) savePendingGiftAnimationsLocked(records []pendingGiftAnimation) error {
+	file, err := runtime.loadPendingGiftAnimationFileLocked()
+	if err != nil {
+		return err
+	}
+	file.Records = records
+	return runtime.savePendingGiftAnimationFileLocked(file)
+}
+
+func (runtime *backgroundRuntime) savePendingGiftAnimationFile(file pendingGiftAnimationFile) error {
+	runtime.animationMu.Lock()
+	defer runtime.animationMu.Unlock()
+	return runtime.savePendingGiftAnimationFileLocked(file)
+}
+
+func (runtime *backgroundRuntime) savePendingGiftAnimationFileLocked(file pendingGiftAnimationFile) error {
+	records := file.Records
+	if len(records) > maxPendingGiftAnimations {
+		records = records[len(records)-maxPendingGiftAnimations:]
+	}
+	file.SchemaVersion = pendingGiftAnimationsSchemaVersion
+	file.Records = records
+	data, err := json.MarshalIndent(file, "", "  ")
+	if err != nil {
+		return fmt.Errorf("serialize pending gift animations: %w", err)
+	}
+	write := runtime.animationWriteAtomically
+	if write == nil {
+		write = writeFileAtomically
+	}
+	if err := write(runtime.pendingGiftAnimationsPath(), append(data, '\n')); err != nil {
+		return fmt.Errorf("persist pending gift animations: %w", err)
+	}
+	return nil
+}
+
+func (runtime *backgroundRuntime) addPendingGiftAnimation(roomID string, gift giftEvent) error {
+	if giftReceiptAnimationFromEvent(gift) == nil {
+		return nil
+	}
+	runtime.animationMu.Lock()
+	defer runtime.animationMu.Unlock()
+	records, err := runtime.loadPendingGiftAnimationsLocked()
+	if err != nil {
+		return err
+	}
+	for index := range records {
+		if samePendingGiftAnimation(records[index], roomID, gift) {
+			records[index] = pendingGiftAnimation{RoomID: strings.TrimSpace(roomID), Gift: gift}
+			return runtime.savePendingGiftAnimationsLocked(records)
+		}
+	}
+	records = append(records, pendingGiftAnimation{RoomID: strings.TrimSpace(roomID), Gift: gift})
+	return runtime.savePendingGiftAnimationsLocked(records)
+}
+
+func findPendingGiftAnimation(records []pendingGiftAnimation, roomID string, gift giftEvent) int {
+	for index := range records {
+		if samePendingGiftAnimation(records[index], roomID, gift) && nearbyGiftTimestamps(records[index].Gift.Timestamp, gift.Timestamp) {
+			return index
+		}
+	}
+	return -1
+}
+
+func samePendingGiftAnimation(record pendingGiftAnimation, roomID string, gift giftEvent) bool {
+	return strings.TrimSpace(record.RoomID) == strings.TrimSpace(roomID) && record.Gift.GiftID == gift.GiftID && record.Gift.UID == gift.UID
+}
+
+func giftAnimationAttachedToReceipt(state appState, gift giftEvent) bool {
+	want := giftReceiptAnimationFromEvent(gift)
+	if want == nil {
+		return true
+	}
+	for _, receipt := range state.GiftReceipts {
+		if receipt.GiftID == gift.GiftID && receipt.SenderUID == gift.UID && nearbyGiftTimestamps(receipt.Time, gift.Timestamp) && receipt.Animation != nil && receipt.Animation.EffectID == want.EffectID {
+			return true
+		}
+	}
+	return false
+}
+
 func (runtime *backgroundRuntime) recordIngestionFailure(err error) {
+	runtime.recordIngestionFailureFrom("consumer", err)
+}
+
+func (runtime *backgroundRuntime) recordIngestionFailureFrom(source string, err error) {
 	if err == nil {
 		return
 	}
 	runtime.mu.Lock()
+	runtime.ingestionGeneration++
+	runtime.ingestionErrorSource = source
 	runtime.status.IngestionError = err.Error()
 	runtime.mu.Unlock()
 	runtime.diagnostics.Error("gift_ingestion_failed", "error", err)
 }
 
-func (runtime *backgroundRuntime) clearIngestionFailure() {
+func (runtime *backgroundRuntime) currentIngestionGeneration() uint64 {
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	return runtime.ingestionGeneration
+}
+
+func (runtime *backgroundRuntime) clearIngestionFailure(generation uint64, source string) {
 	runtime.mu.Lock()
-	runtime.status.IngestionError = ""
+	if runtime.ingestionGeneration == generation && runtime.ingestionErrorSource == source {
+		runtime.status.IngestionError = ""
+		runtime.ingestionErrorSource = ""
+	}
 	runtime.mu.Unlock()
 }
 
