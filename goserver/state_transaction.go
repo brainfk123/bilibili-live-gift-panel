@@ -1,13 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -64,6 +65,9 @@ func (s *configStore) persistPreparedStateLocked(state appState, ingestionID str
 }
 
 func (s *configStore) applyPendingStateTransactionLocked(tx pendingStateTransaction) error {
+	if err := validatePendingStateTransaction(tx); err != nil {
+		return err
+	}
 	writes := []struct {
 		path string
 		data []byte
@@ -84,6 +88,44 @@ func (s *configStore) applyPendingStateTransactionLocked(tx pendingStateTransact
 	return syncStateDirectory(filepath.Dir(s.stateTransactionPath()))
 }
 
+func validatePendingStateTransaction(tx pendingStateTransaction) error {
+	if tx.EventLog == nil || tx.History == nil || tx.Cache == nil || tx.Config == nil {
+		return fmt.Errorf("状态事务缺少必需分片")
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(tx.EventLog))
+	scanner.Buffer(make([]byte, 16*1024), 256*1024)
+	for scanner.Scan() {
+		if len(scanner.Bytes()) == 0 {
+			continue
+		}
+		var entry logEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			return fmt.Errorf("状态事务送礼记录无效：%w", err)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("状态事务送礼记录无效：%w", err)
+	}
+	shards := []struct {
+		name string
+		data []byte
+		into any
+	}{
+		{name: "主配置", data: tx.Config, into: &configStateShard{}},
+		{name: "礼物缓存", data: tx.Cache, into: &cacheStateShard{}},
+		{name: "历史数据", data: tx.History, into: &historyStateShard{}},
+	}
+	for _, shard := range shards {
+		if _, err := readStateShardVersion(shard.data, shard.name); err != nil {
+			return fmt.Errorf("状态事务%s无效：%w", shard.name, err)
+		}
+		if err := json.Unmarshal(shard.data, shard.into); err != nil {
+			return fmt.Errorf("状态事务%s无效：%w", shard.name, err)
+		}
+	}
+	return nil
+}
+
 func (s *configStore) recoverPendingStateTransactionLocked() error {
 	data, err := os.ReadFile(s.stateTransactionPath())
 	if errors.Is(err, os.ErrNotExist) {
@@ -98,9 +140,6 @@ func (s *configStore) recoverPendingStateTransactionLocked() error {
 	}
 	if tx.SchemaVersion != stateTransactionSchemaVersion {
 		return fmt.Errorf("状态事务格式版本不受支持：%d", tx.SchemaVersion)
-	}
-	if tx.EventLog == nil || tx.History == nil || tx.Cache == nil || tx.Config == nil {
-		return fmt.Errorf("状态事务缺少必需分片")
 	}
 	return s.applyPendingStateTransactionLocked(tx)
 }
@@ -131,8 +170,7 @@ func normalizeInternalIngestionLedgers(state *appState, now time.Time) {
 	}
 	recent := make([]recentKey, 0, len(state.RecentSourceGiftKeys))
 	for key, timestamp := range state.RecentSourceGiftKeys {
-		key = strings.TrimSpace(key)
-		if key == "" || timestamp < cutoff {
+		if key == "" || timestamp <= cutoff {
 			continue
 		}
 		recent = append(recent, recentKey{key: key, timestamp: timestamp})

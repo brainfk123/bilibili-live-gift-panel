@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -740,12 +741,12 @@ func (s *configStore) updateStateForIngestion(
 ) (appState, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.recoverPendingStateTransactionLocked(); err != nil {
-		return appState{}, false, err
-	}
 	previous, err := s.readStateLocked()
 	if err != nil {
 		return appState{}, false, err
+	}
+	if strings.TrimSpace(ingestionID) == "" {
+		return appState{}, false, fmt.Errorf("ingestion ID 不能为空")
 	}
 	for _, appliedID := range previous.AppliedIngressIDs {
 		if appliedID == ingestionID {
@@ -812,21 +813,37 @@ func writeFileAtomically(path string, data []byte) error {
 	return nil
 }
 
+type stateDirectory interface {
+	Sync() error
+	Close() error
+}
+
 func syncStateDirectory(dir string) error {
-	directory, err := os.Open(dir)
+	return syncStateDirectoryWith(dir, func(path string) (stateDirectory, error) {
+		return os.Open(path)
+	}, runtime.GOOS == "windows")
+}
+
+func syncStateDirectoryWith(
+	dir string,
+	open func(string) (stateDirectory, error),
+	windows bool,
+) error {
+	directory, err := open(dir)
 	if err != nil {
-		if runtime.GOOS == "windows" {
-			return nil
-		}
 		return fmt.Errorf("打开配置目录失败：%w", err)
 	}
 	syncErr := directory.Sync()
 	closeErr := directory.Close()
-	if syncErr != nil && runtime.GOOS != "windows" {
+	if syncErr != nil && !(windows && isUnsupportedWindowsDirectorySyncError(syncErr)) {
 		return fmt.Errorf("同步配置目录失败：%w", syncErr)
 	}
 	if closeErr != nil {
 		return fmt.Errorf("关闭配置目录失败：%w", closeErr)
 	}
 	return nil
+}
+
+func isUnsupportedWindowsDirectorySyncError(err error) bool {
+	return errors.Is(err, syscall.Errno(1)) || errors.Is(err, syscall.Errno(5)) || errors.Is(err, syscall.Errno(6))
 }

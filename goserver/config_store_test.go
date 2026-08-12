@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -60,6 +62,43 @@ func TestConfigStoreLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("config still exists after DELETE: %v", err)
+	}
+}
+
+type fakeStateDirectory struct {
+	syncErr  error
+	closeErr error
+}
+
+func (d *fakeStateDirectory) Sync() error  { return d.syncErr }
+func (d *fakeStateDirectory) Close() error { return d.closeErr }
+
+func TestSyncStateDirectoryPropagatesOpenAndStorageErrors(t *testing.T) {
+	storageErr := errors.New("storage failure")
+	for name, open := range map[string]func(string) (stateDirectory, error){
+		"open": func(string) (stateDirectory, error) { return nil, storageErr },
+		"sync": func(string) (stateDirectory, error) { return &fakeStateDirectory{syncErr: storageErr}, nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := syncStateDirectoryWith("unused", open, true); !errors.Is(err, storageErr) {
+				t.Fatalf("error = %v, want storage failure", err)
+			}
+		})
+	}
+}
+
+func TestSyncStateDirectorySuppressesOnlyUnsupportedWindowsSync(t *testing.T) {
+	for _, unsupported := range []error{syscall.Errno(1), syscall.Errno(5), syscall.Errno(6)} {
+		open := func(string) (stateDirectory, error) {
+			return &fakeStateDirectory{syncErr: unsupported}, nil
+		}
+		if err := syncStateDirectoryWith("unused", open, true); err != nil {
+			t.Fatalf("unsupported Windows directory sync error = %v", err)
+		}
+	}
+	open := func(string) (stateDirectory, error) { return &fakeStateDirectory{syncErr: syscall.Errno(1)}, nil }
+	if err := syncStateDirectoryWith("unused", open, false); !errors.Is(err, syscall.Errno(1)) {
+		t.Fatalf("non-Windows error = %v", err)
 	}
 }
 
@@ -317,9 +356,9 @@ func TestConfigStoreMigratesMissingFieldsWithDefaults(t *testing.T) {
 	}
 }
 
-func TestStateShardVersionTenUpgradesToEleven(t *testing.T) {
+func TestStateShardVersionElevenUpgradesToTwelve(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
-	if err := os.WriteFile(store.path, []byte(`{"schemaVersion":10,"settings":{"theme":"light"}}`), 0o600); err != nil {
+	if err := os.WriteFile(store.path, []byte(`{"schemaVersion":11,"settings":{"theme":"light"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.migrateLegacy(); err != nil {
@@ -335,8 +374,8 @@ func TestStateShardVersionTenUpgradesToEleven(t *testing.T) {
 	if err := json.Unmarshal(data, &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata.SchemaVersion != 11 {
-		t.Fatalf("schemaVersion = %d, want 11", metadata.SchemaVersion)
+	if metadata.SchemaVersion != 12 {
+		t.Fatalf("schemaVersion = %d, want 12", metadata.SchemaVersion)
 	}
 }
 
