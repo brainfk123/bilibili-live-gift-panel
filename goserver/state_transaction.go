@@ -95,11 +95,15 @@ func validatePendingStateTransaction(tx pendingStateTransaction) error {
 	scanner := bufio.NewScanner(bytes.NewReader(tx.EventLog))
 	scanner.Buffer(make([]byte, 16*1024), 256*1024)
 	for scanner.Scan() {
-		if len(scanner.Bytes()) == 0 {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
 			continue
 		}
+		if err := requireJSONObject(line); err != nil {
+			return fmt.Errorf("状态事务送礼记录无效：%w", err)
+		}
 		var entry logEntry
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+		if err := json.Unmarshal(line, &entry); err != nil {
 			return fmt.Errorf("状态事务送礼记录无效：%w", err)
 		}
 	}
@@ -116,12 +120,23 @@ func validatePendingStateTransaction(tx pendingStateTransaction) error {
 		{name: "历史数据", data: tx.History, into: &historyStateShard{}},
 	}
 	for _, shard := range shards {
+		if err := requireJSONObject(shard.data); err != nil {
+			return fmt.Errorf("状态事务%s无效：%w", shard.name, err)
+		}
 		if _, err := readStateShardVersion(shard.data, shard.name); err != nil {
 			return fmt.Errorf("状态事务%s无效：%w", shard.name, err)
 		}
 		if err := json.Unmarshal(shard.data, shard.into); err != nil {
 			return fmt.Errorf("状态事务%s无效：%w", shard.name, err)
 		}
+	}
+	return nil
+}
+
+func requireJSONObject(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return fmt.Errorf("必须是非空 JSON 对象")
 	}
 	return nil
 }

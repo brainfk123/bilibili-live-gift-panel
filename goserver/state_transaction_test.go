@@ -168,6 +168,52 @@ func TestPendingStateTransactionValidatesEveryPayloadBeforeWritingTargets(t *tes
 	}
 }
 
+func TestPendingStateTransactionRejectsNonObjectEmbeddedPayloadsBeforeWritingTargets(t *testing.T) {
+	targets := map[string]func(*pendingStateTransaction, []byte){
+		"events":  func(tx *pendingStateTransaction, data []byte) { tx.EventLog = append(data, '\n') },
+		"config":  func(tx *pendingStateTransaction, data []byte) { tx.Config = data },
+		"cache":   func(tx *pendingStateTransaction, data []byte) { tx.Cache = data },
+		"history": func(tx *pendingStateTransaction, data []byte) { tx.History = data },
+	}
+	shapes := map[string][]byte{
+		"null":   []byte("null"),
+		"scalar": []byte("7"),
+		"array":  []byte("[]"),
+	}
+	for targetName, setPayload := range targets {
+		for shapeName, payload := range shapes {
+			t.Run(targetName+"/"+shapeName, func(t *testing.T) {
+				dir := t.TempDir()
+				store := &configStore{path: filepath.Join(dir, "config.json")}
+				initial := defaultAppState()
+				initial.Attributes = []attributeState{{Name: "积分", Value: 1}}
+				initial.GiftCatalog = []giftInfo{{ID: 1, Name: "旧礼物"}}
+				initial.Log = []logEntry{{EventID: "old-event", ValueAfter: 1}}
+				if err := store.replaceState(initial); err != nil {
+					t.Fatal(err)
+				}
+				before := snapshotStateFiles(t, store)
+
+				next := initial
+				next.Attributes = []attributeState{{Name: "积分", Value: 9}}
+				next.GiftCatalog = []giftInfo{{ID: 9, Name: "新礼物"}}
+				next.Log = []logEntry{{EventID: "new-event", ValueAfter: 9}}
+				tx := preparedTransactionForTest(t, next)
+				setPayload(&tx, payload)
+				writePendingTransactionForTest(t, store, tx)
+
+				if _, err := store.readState(); err == nil {
+					t.Fatalf("accepted %s %s payload", targetName, shapeName)
+				}
+				assertStateFilesEqual(t, store, before)
+				if _, err := os.Stat(store.stateTransactionPath()); err != nil {
+					t.Fatalf("prepare evidence missing: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestUpdateStateForIngestionRejectsBlankIDBeforeCallback(t *testing.T) {
 	for _, ingestionID := range []string{"", " \t\r\n"} {
 		store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
