@@ -206,37 +206,71 @@ func startsGiftClipAbsolutePath(text string, index int) bool {
 	if index >= len(text) {
 		return false
 	}
-	if index+2 < len(text) && giftClipWindowsPathBoundary(text, index) && ((text[index] >= 'A' && text[index] <= 'Z') || (text[index] >= 'a' && text[index] <= 'z')) && text[index+1] == ':' && (text[index+2] == '\\' || text[index+2] == '/') {
+	if index+2 < len(text) && giftClipPathBoundary(text, index) && ((text[index] >= 'A' && text[index] <= 'Z') || (text[index] >= 'a' && text[index] <= 'z')) && text[index+1] == ':' && (text[index+2] == '\\' || text[index+2] == '/') {
 		return true
 	}
 	if text[index] == '/' {
-		return giftClipSlashPathBoundary(text, index)
+		return giftClipPathBoundary(text, index) && !giftClipPathStartsInURIScheme(text, index) && !giftClipPathStartsDotRelative(text, index)
 	}
-	return index+1 < len(text) && text[index] == '\\' && text[index+1] == '\\'
+	return index+1 < len(text) && text[index] == '\\' && text[index+1] == '\\' && giftClipPathBoundary(text, index)
 }
 
-func giftClipWindowsPathBoundary(text string, index int) bool {
+func giftClipPathBoundary(text string, index int) bool {
 	if index == 0 {
 		return true
 	}
-	switch text[index-1] {
-	case ' ', '\t', '\r', '\n', '"', '\'', '=', '(', '[':
-		return true
-	default:
-		return false
-	}
+	return !giftClipASCIIWordContinuation(text[index-1])
 }
 
-func giftClipSlashPathBoundary(text string, index int) bool {
-	if index == 0 {
-		return true
+func giftClipASCIIWordContinuation(character byte) bool {
+	return character >= 'a' && character <= 'z' ||
+		character >= 'A' && character <= 'Z' ||
+		character >= '0' && character <= '9' || character == '_'
+}
+
+func giftClipPathStartsInURIScheme(text string, index int) bool {
+	colon := -1
+	if index > 0 && text[index-1] == ':' {
+		colon = index - 1
+	} else if index > 1 && text[index-1] == '/' && text[index-2] == ':' {
+		colon = index - 2
 	}
-	switch text[index-1] {
-	case ' ', '\t', '\r', '\n', '"', '\'', '=', '(', '[':
-		return true
-	default:
+	if colon < 1 {
 		return false
 	}
+	schemeStart := colon - 1
+	for schemeStart > 0 && giftClipURISchemeTokenContinuation(text[schemeStart-1]) {
+		schemeStart--
+	}
+	if !((text[schemeStart] >= 'a' && text[schemeStart] <= 'z') || (text[schemeStart] >= 'A' && text[schemeStart] <= 'Z')) {
+		return false
+	}
+	for schemeIndex := schemeStart + 1; schemeIndex < colon; schemeIndex++ {
+		if !giftClipURISchemeContinuation(text[schemeIndex]) {
+			return false
+		}
+	}
+	return true
+}
+
+func giftClipURISchemeContinuation(character byte) bool {
+	return character >= 'a' && character <= 'z' ||
+		character >= 'A' && character <= 'Z' ||
+		character >= '0' && character <= '9' ||
+		character == '+' || character == '-' || character == '.'
+}
+
+func giftClipURISchemeTokenContinuation(character byte) bool {
+	return giftClipURISchemeContinuation(character) || character == '_'
+}
+
+func giftClipPathStartsDotRelative(text string, index int) bool {
+	dotStart := index
+	for dotStart > 0 && text[dotStart-1] == '.' {
+		dotStart--
+	}
+	dots := index - dotStart
+	return (dots == 1 || dots == 2) && giftClipPathBoundary(text, dotStart)
 }
 
 func endGiftClipDiagnosticPath(text string, start int, quoted bool) int {

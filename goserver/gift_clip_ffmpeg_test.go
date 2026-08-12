@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"slices"
@@ -430,12 +431,50 @@ func TestSanitizeGiftClipDiagnosticStderrPreservesRelativePathsAndURLs(t *testin
 		"scale=iw/2: invalid width",
 		"time_base=1/90000: invalid time base",
 		"libavfilter/vf_scale.c:123: scale failed",
+		"./relative/source.gif: relative path",
+		"../relative/source.gif: parent-relative path",
 		"https://example.invalid/secret: connection refused",
 		"tcp://127.0.0.1:9000: connection refused",
 	} {
 		if got := sanitizeGiftClipDiagnosticStderr(input); got != input {
 			t.Fatalf("sanitizeGiftClipDiagnosticStderr(%q) = %q, want original", input, got)
 		}
+	}
+}
+
+func TestSanitizeGiftClipDiagnosticStderrRedactsAbsolutePathsAfterPunctuation(t *testing.T) {
+	punctuation := []string{"]", ",", ";", "{", "<", "("}
+	paths := []struct {
+		name   string
+		path   string
+		secret string
+	}{
+		{name: "drive", path: `C:\drive-secret\source.gif`, secret: "drive-secret"},
+		{name: "backslash UNC", path: `\\unc-secret\share\source.gif`, secret: "unc-secret"},
+		{name: "slash UNC", path: `//slash-unc-secret/share/source.gif`, secret: "slash-unc-secret"},
+		{name: "POSIX", path: `/posix-secret/source.gif`, secret: "posix-secret"},
+	}
+	for _, mark := range punctuation {
+		for _, path := range paths {
+			t.Run(fmt.Sprintf("%s after %q", path.name, mark), func(t *testing.T) {
+				input := "ffmpeg failed" + mark + path.path + ": boundary sentinel"
+				got := sanitizeGiftClipDiagnosticStderr(input)
+				if strings.Contains(got, path.secret) {
+					t.Fatalf("sanitizeGiftClipDiagnosticStderr(%q) retained secret token %q in %q", input, path.secret, got)
+				}
+				if !strings.Contains(got, "[PATH]") || !strings.Contains(got, "boundary sentinel") {
+					t.Fatalf("sanitizeGiftClipDiagnosticStderr(%q) = %q", input, got)
+				}
+			})
+		}
+	}
+}
+
+func TestSanitizeGiftClipDiagnosticStderrDoesNotTreatLabelAsURIScheme(t *testing.T) {
+	input := "input_path:/private-label-secret/source.gif: label sentinel"
+	got := sanitizeGiftClipDiagnosticStderr(input)
+	if strings.Contains(got, "private-label-secret") || !strings.Contains(got, "[PATH]") || !strings.Contains(got, "label sentinel") {
+		t.Fatalf("sanitizeGiftClipDiagnosticStderr(%q) = %q", input, got)
 	}
 }
 

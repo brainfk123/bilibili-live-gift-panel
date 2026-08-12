@@ -7,9 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -19,6 +23,8 @@ const (
 	jobObjectExtendedLimitInformationClass = 9
 	jobObjectLimitKillOnJobClose           = 0x00002000
 	createSuspended                        = 0x00000004
+	pipeAccessInbound                      = 0x00000001
+	fileFlagFirstPipeInstance              = 0x00080000
 	processTerminate                       = 0x0001
 	processSetQuota                        = 0x0100
 	processQueryLimitedInformation         = 0x1000
@@ -39,7 +45,10 @@ var (
 	giftClipThread32Next             = giftClipKernel32.NewProc("Thread32Next")
 	giftClipOpenThread               = giftClipKernel32.NewProc("OpenThread")
 	giftClipResumeThread             = giftClipKernel32.NewProc("ResumeThread")
+	giftClipCreateNamedPipeW         = giftClipKernel32.NewProc("CreateNamedPipeW")
 )
+
+var giftClipPipeSequence atomic.Uint64
 
 type jobObjectBasicLimitInformation struct {
 	PerProcessUserTimeLimit int64
@@ -73,7 +82,7 @@ type jobObjectExtendedLimitInformation struct {
 
 type giftClipWindowsAPI struct {
 	createJobObject     func() (syscall.Handle, error)
-	startSuspended      func(string, []string, io.Writer, io.Writer) (*exec.Cmd, error)
+	startSuspended      func(string, []string, io.Writer, io.Writer) (*giftClipStartedProcess, error)
 	openProcess         func(int) (syscall.Handle, error)
 	assignProcess       func(syscall.Handle, syscall.Handle) error
 	resumePrimaryThread func(int) error
@@ -103,6 +112,36 @@ type giftClipWindowsProcessRunner struct {
 	api giftClipWindowsAPI
 }
 
+// giftClipStartedProcess owns the output pipes and their copier goroutines.
+// exec.Cmd sees *os.File writers, so os/exec does not create hidden pipes that
+// only Cmd.Wait can close. That lets the assignment-failure path stop copying
+// before releasing a process that could not be killed or waited for.
+type giftClipStartedProcess struct {
+	command *exec.Cmd
+	stdout  *giftClipProcessPipe
+	stderr  *giftClipProcessPipe
+}
+
+type giftClipProcessPipe struct {
+	reader      *os.File
+	writer      *os.File
+	destination io.Writer
+	done        chan struct{}
+
+	readerCloseOnce sync.Once
+	readerCloseErr  error
+	writerCloseOnce sync.Once
+	writerCloseErr  error
+	stopOnce        sync.Once
+	stopErr         error
+	copyErr         error
+}
+
+type giftClipSerializedWriter struct {
+	destination io.Writer
+	mu          sync.Mutex
+}
+
 func newGiftClipProcessRunner() giftClipProcessRunner {
 	return giftClipWindowsProcessRunner{api: giftClipDefaultWindowsAPI}
 }
@@ -126,26 +165,27 @@ func (runner giftClipWindowsProcessRunner) Run(ctx context.Context, path string,
 		}
 	}()
 
-	command, err := api.startSuspended(absPath, args, stdout, stderr)
+	started, err := api.startSuspended(absPath, args, stdout, stderr)
 	if err != nil {
 		return err
 	}
+	command := started.command
 	process, err := api.openProcess(command.Process.Pid)
 	if err != nil {
-		return cleanupGiftClipUnassignedProcess(api, command, err)
+		return cleanupGiftClipUnassignedProcess(api, started, err)
 	}
 	defer api.closeProcess(process)
 	if err := api.assignProcess(job, process); err != nil {
-		return cleanupGiftClipUnassignedProcess(api, command, err)
+		return cleanupGiftClipUnassignedProcess(api, started, err)
 	}
 	if err := api.resumePrimaryThread(command.Process.Pid); err != nil {
 		api.closeJob(job)
 		job = 0
-		return joinGiftClipProcessError(err, "wait after resume failure", api.waitProcess(command))
+		return joinGiftClipProcessError(err, "wait after resume failure", waitGiftClipStartedProcess(api, started))
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- api.waitProcess(command) }()
+	go func() { done <- waitGiftClipStartedProcess(api, started) }()
 	select {
 	case err := <-done:
 		return err
@@ -163,15 +203,27 @@ func (runner giftClipWindowsProcessRunner) Run(ctx context.Context, path string,
 	}
 }
 
-func cleanupGiftClipUnassignedProcess(api giftClipWindowsAPI, command *exec.Cmd, cause error) error {
-	if err := api.killProcess(command); err != nil {
+func cleanupGiftClipUnassignedProcess(api giftClipWindowsAPI, started *giftClipStartedProcess, cause error) error {
+	if err := api.killProcess(started.command); err != nil {
 		result := errors.Join(cause, fmt.Errorf("kill unassigned gift clip process: %w", err))
-		if releaseErr := api.releaseProcess(command); releaseErr != nil {
+		if copierErr := started.stopCopiers(); copierErr != nil {
+			result = errors.Join(result, fmt.Errorf("stop unassigned gift clip process output: %w", copierErr))
+		}
+		if releaseErr := api.releaseProcess(started.command); releaseErr != nil {
 			return errors.Join(result, fmt.Errorf("release unassigned gift clip process: %w", releaseErr))
 		}
 		return result
 	}
-	return joinGiftClipProcessError(cause, "wait after killing unassigned gift clip process", api.waitProcess(command))
+	return joinGiftClipProcessError(cause, "wait after killing unassigned gift clip process", waitGiftClipStartedProcess(api, started))
+}
+
+func waitGiftClipStartedProcess(api giftClipWindowsAPI, started *giftClipStartedProcess) error {
+	waitErr := api.waitProcess(started.command)
+	copierErr := started.waitCopiers()
+	if waitErr != nil {
+		return waitErr
+	}
+	return copierErr
 }
 
 func joinGiftClipProcessError(cause error, operation string, err error) error {
@@ -198,15 +250,180 @@ func releaseGiftClipProcess(command *exec.Cmd) error {
 	return command.Process.Release()
 }
 
-func startGiftClipProcessSuspended(path string, args []string, stdout, stderr io.Writer) (*exec.Cmd, error) {
-	command := exec.Command(path, args...)
-	command.Stdout = stdout
-	command.Stderr = stderr
-	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createSuspended}
-	if err := command.Start(); err != nil {
+func startGiftClipProcessSuspended(path string, args []string, stdout, stderr io.Writer) (*giftClipStartedProcess, error) {
+	stdout, stderr = serializeGiftClipSharedOutput(stdout, stderr)
+	stdoutPipe, err := newGiftClipProcessPipe(stdout)
+	if err != nil {
 		return nil, err
 	}
-	return command, nil
+	stderrPipe, err := newGiftClipProcessPipe(stderr)
+	if err != nil {
+		return nil, errors.Join(err, stdoutPipe.closeBeforeStart())
+	}
+	command := exec.Command(path, args...)
+	command.Stdout = stdoutPipe.writer
+	command.Stderr = stderrPipe.writer
+	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createSuspended}
+	if err := command.Start(); err != nil {
+		return nil, errors.Join(err, stdoutPipe.closeBeforeStart(), stderrPipe.closeBeforeStart())
+	}
+	stdoutPipe.closeWriter()
+	stderrPipe.closeWriter()
+	stdoutPipe.startCopier()
+	stderrPipe.startCopier()
+	return &giftClipStartedProcess{command: command, stdout: stdoutPipe, stderr: stderrPipe}, nil
+}
+
+func newGiftClipProcessPipe(destination io.Writer) (*giftClipProcessPipe, error) {
+	reader, writer, err := newGiftClipOverlappedPipe()
+	if err != nil {
+		return nil, err
+	}
+	if destination == nil {
+		destination = io.Discard
+	}
+	return &giftClipProcessPipe{
+		reader:      reader,
+		writer:      writer,
+		destination: destination,
+		done:        make(chan struct{}),
+	}, nil
+}
+
+func newGiftClipOverlappedPipe() (*os.File, *os.File, error) {
+	name, err := syscall.UTF16PtrFromString(fmt.Sprintf(
+		`\\.\pipe\bilibili-gift-clip-%d-%d`,
+		os.Getpid(),
+		giftClipPipeSequence.Add(1),
+	))
+	if err != nil {
+		return nil, nil, err
+	}
+	readerHandle, _, callErr := giftClipCreateNamedPipeW.Call(
+		uintptr(unsafe.Pointer(name)),
+		pipeAccessInbound|syscall.FILE_FLAG_OVERLAPPED|fileFlagFirstPipeInstance,
+		0,
+		1,
+		64*1024,
+		64*1024,
+		0,
+		0,
+	)
+	if readerHandle == uintptr(syscall.InvalidHandle) {
+		return nil, nil, callErr
+	}
+	closeReaderHandle := true
+	defer func() {
+		if closeReaderHandle {
+			closeGiftClipHandle(syscall.Handle(readerHandle))
+		}
+	}()
+	inherit := syscall.SecurityAttributes{
+		Length:        uint32(unsafe.Sizeof(syscall.SecurityAttributes{})),
+		InheritHandle: 1,
+	}
+	writerHandle, err := syscall.CreateFile(
+		name,
+		syscall.GENERIC_WRITE,
+		0,
+		&inherit,
+		syscall.OPEN_EXISTING,
+		syscall.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	closeWriterHandle := true
+	defer func() {
+		if closeWriterHandle {
+			closeGiftClipHandle(writerHandle)
+		}
+	}()
+	reader := os.NewFile(readerHandle, "gift-clip-output-reader")
+	writer := os.NewFile(uintptr(writerHandle), "gift-clip-output-writer")
+	if reader == nil || writer == nil {
+		return nil, nil, errors.New("create gift clip output pipe files")
+	}
+	closeReaderHandle = false
+	closeWriterHandle = false
+	return reader, writer, nil
+}
+
+func serializeGiftClipSharedOutput(stdout, stderr io.Writer) (io.Writer, io.Writer) {
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	if !giftClipWritersEqual(stdout, stderr) {
+		return stdout, stderr
+	}
+	shared := &giftClipSerializedWriter{destination: stdout}
+	return shared, shared
+}
+
+func giftClipWritersEqual(left, right io.Writer) (equal bool) {
+	defer func() { _ = recover() }()
+	return left == right
+}
+
+func (writer *giftClipSerializedWriter) Write(data []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return writer.destination.Write(data)
+}
+
+func (pipe *giftClipProcessPipe) startCopier() {
+	go func() {
+		_, pipe.copyErr = io.Copy(pipe.destination, pipe.reader)
+		pipe.closeReader()
+		close(pipe.done)
+	}()
+}
+
+func (pipe *giftClipProcessPipe) closeReader() error {
+	pipe.readerCloseOnce.Do(func() { pipe.readerCloseErr = pipe.reader.Close() })
+	return pipe.readerCloseErr
+}
+
+func (pipe *giftClipProcessPipe) closeWriter() error {
+	pipe.writerCloseOnce.Do(func() { pipe.writerCloseErr = pipe.writer.Close() })
+	return pipe.writerCloseErr
+}
+
+func (pipe *giftClipProcessPipe) closeBeforeStart() error {
+	return errors.Join(pipe.closeWriter(), pipe.closeReader())
+}
+
+func (pipe *giftClipProcessPipe) stopCopier() error {
+	pipe.stopOnce.Do(func() { pipe.stopErr = pipe.reader.SetReadDeadline(time.Now()) })
+	return pipe.stopErr
+}
+
+func (pipe *giftClipProcessPipe) waitResult(ignoreForcedClose bool) error {
+	<-pipe.done
+	copyErr := pipe.copyErr
+	if ignoreForcedClose && (errors.Is(copyErr, os.ErrClosed) || errors.Is(copyErr, os.ErrDeadlineExceeded)) {
+		copyErr = nil
+	}
+	return errors.Join(pipe.writerCloseErr, pipe.readerCloseErr, copyErr)
+}
+
+func (started *giftClipStartedProcess) waitCopiers() error {
+	return errors.Join(started.stdout.waitResult(false), started.stderr.waitResult(false))
+}
+
+func (started *giftClipStartedProcess) stopCopiers() error {
+	stdoutStopErr := started.stdout.stopCopier()
+	stderrStopErr := started.stderr.stopCopier()
+	return errors.Join(
+		stdoutStopErr,
+		stderrStopErr,
+		started.stdout.waitResult(true),
+		started.stderr.waitResult(true),
+	)
 }
 
 func createGiftClipJobObject() (syscall.Handle, error) {

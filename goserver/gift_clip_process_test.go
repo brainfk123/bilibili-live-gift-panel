@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -12,12 +13,15 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
 
 var giftClipProcessHelperFile = flag.String("test.gift_clip_helper_file", "", "gift clip process helper pid file")
+var giftClipProcessOutputHelper = flag.Bool("test.gift_clip_output_helper", false, "emit gift clip process helper output")
+var giftClipProcessOutputBursts = flag.Int("test.gift_clip_output_bursts", 0, "number of concurrent helper output bursts")
 
 func TestGiftClipWindowsProcessRunnerTerminatesTree(t *testing.T) {
 	path := t.TempDir() + "\\pids.txt"
@@ -48,20 +52,20 @@ func TestGiftClipWindowsProcessRunnerTerminatesTree(t *testing.T) {
 
 func TestGiftClipWindowsProcessRunnerStartsHelperSuspended(t *testing.T) {
 	path := t.TempDir() + "\\pids.txt"
-	command, err := startGiftClipProcessSuspended(os.Args[0], []string{
+	started, err := startGiftClipProcessSuspended(os.Args[0], []string{
 		"-test.run=^TestGiftClipWindowsProcessHelper$",
 		"-test.gift_clip_helper_file=" + path,
 	}, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	recordedPID := command.Process.Pid
+	recordedPID := started.command.Process.Pid
 	defer func() {
-		if recordedPID != command.Process.Pid {
+		if recordedPID != started.command.Process.Pid {
 			t.Fatal("attempted to terminate an unrecorded process")
 		}
-		_ = command.Process.Kill()
-		_ = command.Wait()
+		_ = started.command.Process.Kill()
+		_ = waitGiftClipStartedProcess(giftClipDefaultWindowsAPI, started)
 	}()
 	time.Sleep(100 * time.Millisecond)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -101,6 +105,119 @@ func TestGiftClipWindowsProcessRunnerAssignsJobBeforeResuming(t *testing.T) {
 	if err := <-errs; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run error = %v, want context cancellation", err)
 	}
+}
+
+func TestGiftClipWindowsProcessRunnerCopiesOutputAndWaitsNormally(t *testing.T) {
+	api := giftClipDefaultWindowsAPI
+	startedProcesses := make(chan *giftClipStartedProcess, 1)
+	startSuspended := api.startSuspended
+	api.startSuspended = func(path string, args []string, stdout, stderr io.Writer) (*giftClipStartedProcess, error) {
+		started, err := startSuspended(path, args, stdout, stderr)
+		if started != nil {
+			startedProcesses <- started
+		}
+		return started, err
+	}
+	waits, releases, jobCloses, processCloses := 0, 0, 0, 0
+	wait, release, closeJob, closeProcess := api.waitProcess, api.releaseProcess, api.closeJob, api.closeProcess
+	api.waitProcess = func(command *exec.Cmd) error { waits++; return wait(command) }
+	api.releaseProcess = func(command *exec.Cmd) error { releases++; return release(command) }
+	api.closeJob = func(handle syscall.Handle) { jobCloses++; closeJob(handle) }
+	api.closeProcess = func(handle syscall.Handle) { processCloses++; closeProcess(handle) }
+	var stdout, stderr bytes.Buffer
+	runner := giftClipWindowsProcessRunner{api: api}
+	if err := runner.Run(context.Background(), os.Args[0], []string{
+		"-test.run=^TestGiftClipWindowsProcessOutputHelper$",
+		"-test.gift_clip_output_helper=true",
+	}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	started := <-startedProcesses
+	if !strings.Contains(stdout.String(), "stdout sentinel") || !strings.Contains(stderr.String(), "stderr sentinel") {
+		t.Fatalf("stdout=%q stderr=%q, want copied sentinels", stdout.String(), stderr.String())
+	}
+	if waits != 1 || releases != 0 || jobCloses != 1 || processCloses != 1 {
+		t.Fatalf("waits=%d releases=%d job closes=%d process closes=%d, want 1, 0, 1, 1", waits, releases, jobCloses, processCloses)
+	}
+	for name, pipe := range map[string]*giftClipProcessPipe{"stdout": started.stdout, "stderr": started.stderr} {
+		select {
+		case <-pipe.done:
+		default:
+			t.Fatalf("%s copier did not complete before normal Run returned", name)
+		}
+		assertGiftClipPipeFileClosed(t, name+" reader", pipe.reader)
+		assertGiftClipPipeFileClosed(t, name+" writer", pipe.writer)
+	}
+}
+
+func TestGiftClipWindowsProcessRunnerSerializesSharedOutputWriter(t *testing.T) {
+	const bursts = 4096
+	var output bytes.Buffer
+	if err := newGiftClipProcessRunner().Run(context.Background(), os.Args[0], []string{
+		"-test.run=^TestGiftClipWindowsProcessOutputHelper$",
+		"-test.gift_clip_output_helper=true",
+		"-test.gift_clip_output_bursts=" + strconv.Itoa(bursts),
+	}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	if got := bytes.Count(output.Bytes(), []byte("stdout sentinel\n")); got != bursts {
+		t.Fatalf("stdout sentinel count = %d, want %d", got, bursts)
+	}
+	if got := bytes.Count(output.Bytes(), []byte("stderr sentinel\n")); got != bursts {
+		t.Fatalf("stderr sentinel count = %d, want %d", got, bursts)
+	}
+}
+
+func TestGiftClipWindowsProcessRunnerDoesNotSerializeDifferentOutputWriters(t *testing.T) {
+	stdout := &giftClipBlockingWriter{started: make(chan struct{}), unblock: make(chan struct{})}
+	stderr := &giftClipSignalingWriter{wrote: make(chan struct{})}
+	errs := make(chan error, 1)
+	go func() {
+		errs <- newGiftClipProcessRunner().Run(context.Background(), os.Args[0], []string{
+			"-test.run=^TestGiftClipWindowsProcessOutputHelper$",
+			"-test.gift_clip_output_helper=true",
+		}, stdout, stderr)
+	}()
+	select {
+	case <-stdout.started:
+	case <-time.After(3 * time.Second):
+		close(stdout.unblock)
+		<-errs
+		t.Fatal("stdout writer was not reached")
+	}
+	select {
+	case <-stderr.wrote:
+		close(stdout.unblock)
+	case <-time.After(500 * time.Millisecond):
+		close(stdout.unblock)
+		<-errs
+		t.Fatal("different stderr writer was blocked behind stdout")
+	}
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+}
+
+type giftClipBlockingWriter struct {
+	started chan struct{}
+	unblock chan struct{}
+	once    sync.Once
+}
+
+func (writer *giftClipBlockingWriter) Write(data []byte) (int, error) {
+	writer.once.Do(func() { close(writer.started) })
+	<-writer.unblock
+	return len(data), nil
+}
+
+type giftClipSignalingWriter struct {
+	wrote chan struct{}
+	once  sync.Once
+}
+
+func (writer *giftClipSignalingWriter) Write(data []byte) (int, error) {
+	writer.once.Do(func() { close(writer.wrote) })
+	return len(data), nil
 }
 
 func TestGiftClipWindowsProcessRunnerClosesJobWhenTerminateFails(t *testing.T) {
@@ -149,12 +266,12 @@ func TestGiftClipWindowsProcessRunnerKillsSuspendedProcessWhenAssignmentFails(t 
 	api.assignProcess = func(syscall.Handle, syscall.Handle) error { return assignErr }
 	started := make(chan *exec.Cmd, 1)
 	startSuspended := api.startSuspended
-	api.startSuspended = func(path string, args []string, stdout, stderr io.Writer) (*exec.Cmd, error) {
-		command, err := startSuspended(path, args, stdout, stderr)
-		if command != nil {
-			started <- command
+	api.startSuspended = func(path string, args []string, stdout, stderr io.Writer) (*giftClipStartedProcess, error) {
+		process, err := startSuspended(path, args, stdout, stderr)
+		if process != nil {
+			started <- process.command
 		}
-		return command, err
+		return process, err
 	}
 	jobCloses, processCloses, resumes, kills, waits := 0, 0, 0, 0, 0
 	closeJob, closeProcess, resume := api.closeJob, api.closeProcess, api.resumePrimaryThread
@@ -189,49 +306,90 @@ func TestGiftClipWindowsProcessRunnerKillsSuspendedProcessWhenAssignmentFails(t 
 	}
 }
 
-func TestGiftClipWindowsProcessRunnerAssignmentKillFailureSkipsWait(t *testing.T) {
+func TestGiftClipWindowsProcessRunnerAssignmentKillFailureClosesCopiersAndReleases(t *testing.T) {
 	api := giftClipDefaultWindowsAPI
-	assignErr, killErr := errors.New("assignment failed"), errors.New("kill failed")
-	api.assignProcess = func(syscall.Handle, syscall.Handle) error { return assignErr }
-	started := make(chan *exec.Cmd, 1)
+	assignErr := errors.New("assignment failed")
+	killErr := errors.New("kill failed")
+	releaseErr := errors.New("release failed")
+	allowAssignmentFailure := make(chan struct{})
+	api.assignProcess = func(syscall.Handle, syscall.Handle) error {
+		<-allowAssignmentFailure
+		return assignErr
+	}
+	startedProcesses := make(chan *giftClipStartedProcess, 1)
 	startSuspended := api.startSuspended
-	api.startSuspended = func(path string, args []string, stdout, stderr io.Writer) (*exec.Cmd, error) {
-		command, err := startSuspended(path, args, stdout, stderr)
-		if command != nil {
-			started <- command
+	api.startSuspended = func(path string, args []string, stdout, stderr io.Writer) (*giftClipStartedProcess, error) {
+		started, err := startSuspended(path, args, stdout, stderr)
+		if started != nil {
+			startedProcesses <- started
 		}
-		return command, err
+		return started, err
 	}
 	kills, waits, releases := 0, 0, 0
-	kill, release := api.killProcess, api.releaseProcess
-	api.killProcess = func(command *exec.Cmd) error {
+	release := api.releaseProcess
+	api.killProcess = func(*exec.Cmd) error {
 		kills++
-		_ = kill(command) // keep the self-created test process from surviving the injected API failure.
 		return killErr
 	}
 	api.waitProcess = func(*exec.Cmd) error { waits++; return nil }
-	api.releaseProcess = func(command *exec.Cmd) error { releases++; return release(command) }
+	api.releaseProcess = func(command *exec.Cmd) error {
+		releases++
+		return errors.Join(release(command), releaseErr)
+	}
 	runner := giftClipWindowsProcessRunner{api: api}
 	errs := make(chan error, 1)
 	go func() {
 		errs <- runner.Run(context.Background(), os.Args[0], []string{"-test.run=^TestGiftClipWindowsProcessHelper$"}, io.Discard, io.Discard)
 	}()
-	command := <-started
-	recordedPID := command.Process.Pid
+	started := <-startedProcesses
+	recordedPID := started.command.Process.Pid
+	cleanupPID := recordedPID
+	defer func() {
+		if cleanupPID != 0 {
+			_ = terminateRecordedGiftClipProcess(cleanupPID)
+		}
+	}()
+	if giftClipWindowsProcessIsGone(recordedPID) {
+		t.Fatalf("recorded suspended PID %d exited before the injected failures", recordedPID)
+	}
+	for name, pipe := range map[string]*giftClipProcessPipe{"stdout": started.stdout, "stderr": started.stderr} {
+		select {
+		case <-pipe.done:
+			t.Fatalf("%s copier completed while recorded PID %d was suspended", name, recordedPID)
+		default:
+		}
+		if _, err := pipe.reader.Stat(); err != nil {
+			t.Fatalf("%s parent pipe was not open before cleanup: %v", name, err)
+		}
+	}
+	close(allowAssignmentFailure)
 	select {
 	case err := <-errs:
-		if !errors.Is(err, assignErr) || !errors.Is(err, killErr) {
-			t.Fatalf("Run error = %v, want assignment and kill failure", err)
+		if !errors.Is(err, assignErr) || !errors.Is(err, killErr) || !errors.Is(err, releaseErr) {
+			t.Fatalf("Run error = %v, want assignment, kill, and release failure", err)
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("Run did not return after injected kill failure")
 	}
-	if !waitForGiftClipProcessGone(recordedPID, 3*time.Second) {
-		t.Fatalf("recorded PID %d survived injected kill failure", recordedPID)
+	if giftClipWindowsProcessIsGone(recordedPID) {
+		t.Fatalf("recorded suspended PID %d was terminated before independent test cleanup", recordedPID)
+	}
+	for name, pipe := range map[string]*giftClipProcessPipe{"stdout": started.stdout, "stderr": started.stderr} {
+		select {
+		case <-pipe.done:
+		default:
+			t.Fatalf("%s copier did not complete before Run returned", name)
+		}
+		assertGiftClipPipeFileClosed(t, name+" reader", pipe.reader)
+		assertGiftClipPipeFileClosed(t, name+" writer", pipe.writer)
 	}
 	if kills != 1 || waits != 0 || releases != 1 {
 		t.Fatalf("kills=%d waits=%d releases=%d, want 1, 0, 1", kills, waits, releases)
 	}
+	if err := terminateRecordedGiftClipProcess(recordedPID); err != nil {
+		t.Fatalf("terminate recorded PID %d: %v", recordedPID, err)
+	}
+	cleanupPID = 0
 }
 
 func TestGiftClipWindowsProcessRunnerAssignmentWaitFailureIsReported(t *testing.T) {
@@ -240,12 +398,12 @@ func TestGiftClipWindowsProcessRunnerAssignmentWaitFailureIsReported(t *testing.
 	api.assignProcess = func(syscall.Handle, syscall.Handle) error { return assignErr }
 	started := make(chan *exec.Cmd, 1)
 	startSuspended := api.startSuspended
-	api.startSuspended = func(path string, args []string, stdout, stderr io.Writer) (*exec.Cmd, error) {
-		command, err := startSuspended(path, args, stdout, stderr)
-		if command != nil {
-			started <- command
+	api.startSuspended = func(path string, args []string, stdout, stderr io.Writer) (*giftClipStartedProcess, error) {
+		process, err := startSuspended(path, args, stdout, stderr)
+		if process != nil {
+			started <- process.command
 		}
-		return command, err
+		return process, err
 	}
 	kills, waits := 0, 0
 	kill, wait := api.killProcess, api.waitProcess
@@ -315,6 +473,32 @@ func TestGiftClipWindowsProcessChildHelper(t *testing.T) {
 	}
 }
 
+func TestGiftClipWindowsProcessOutputHelper(t *testing.T) {
+	if !*giftClipProcessOutputHelper {
+		return
+	}
+	if *giftClipProcessOutputBursts > 0 {
+		var writers sync.WaitGroup
+		writers.Add(2)
+		go func() {
+			defer writers.Done()
+			for index := 0; index < *giftClipProcessOutputBursts; index++ {
+				_, _ = fmt.Fprintln(os.Stdout, "stdout sentinel")
+			}
+		}()
+		go func() {
+			defer writers.Done()
+			for index := 0; index < *giftClipProcessOutputBursts; index++ {
+				_, _ = fmt.Fprintln(os.Stderr, "stderr sentinel")
+			}
+		}()
+		writers.Wait()
+		return
+	}
+	_, _ = fmt.Fprint(os.Stdout, "stdout sentinel")
+	_, _ = fmt.Fprint(os.Stderr, "stderr sentinel")
+}
+
 func waitForGiftClipHelperPIDs(t *testing.T, path string) []int {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -346,4 +530,28 @@ func waitForGiftClipProcessGone(pid int, timeout time.Duration) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return giftClipWindowsProcessIsGone(pid)
+}
+
+func assertGiftClipPipeFileClosed(t *testing.T, name string, file *os.File) {
+	t.Helper()
+	if got := file.Fd(); got != uintptr(syscall.InvalidHandle) {
+		t.Fatalf("%s handle = %#x, want syscall.InvalidHandle", name, got)
+	}
+}
+
+func terminateRecordedGiftClipProcess(pid int) error {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if process.Pid != pid {
+		_ = process.Release()
+		return fmt.Errorf("found PID %d, want recorded PID %d", process.Pid, pid)
+	}
+	if err := process.Kill(); err != nil {
+		_ = process.Release()
+		return err
+	}
+	_, err = process.Wait()
+	return err
 }
