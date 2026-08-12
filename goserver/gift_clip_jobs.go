@@ -463,7 +463,7 @@ func (manager *giftClipJobManager) finishEncoding(id string, phase giftClipJobPh
 			if phase == giftClipJobPhaseEncode {
 				mode = string(job.mode)
 			}
-			manager.logger.Error("gift_clip_job_failed", "task_id", id, "phase", failure.phase, "mode", mode, "exit_class", failure.exitClass)
+			manager.logger.Error("gift_clip_job_failed", "task_id", id, "phase", string(failure.phase), "mode", mode, "exit_class", failure.exitClass)
 		}
 	}
 	job.finishedAt = manager.now()

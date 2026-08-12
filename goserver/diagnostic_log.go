@@ -165,7 +165,7 @@ type diagnosticField struct {
 type diagnosticFieldSpec func(any) (any, bool)
 
 var diagnosticFieldOrder = []string{
-	"gift_id", "blind_parent_id", "count", "timestamp", "rnd_hash", "reason", "state", "room_id", "error_kind", "source_duplicate",
+	"gift_id", "blind_parent_id", "count", "timestamp", "rnd_hash", "reason", "state", "room_id", "error_kind", "source_duplicate", "task_id", "phase", "exit_class", "mode",
 	"accept_write_ms", "inbox_depth", "oldest_pending_age_ms", "attempts", "duration_ms", "blind_source", "blind_cost", "blind_value", "blind_priced",
 	"mapped_children", "port", "version",
 }
@@ -193,6 +193,10 @@ var diagnosticFieldSpecs = map[string]diagnosticFieldSpec{
 	"mapped_children":       validateDiagnosticNonNegativeInteger,
 	"port":                  validateDiagnosticPort,
 	"version":               validateDiagnosticVersion,
+	"task_id":               validateDiagnosticTaskID,
+	"phase":                 validateDiagnosticPhase,
+	"exit_class":            validateDiagnosticExitClass,
+	"mode":                  validateDiagnosticMode,
 }
 
 var diagnosticVersionPattern = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$`)
@@ -367,14 +371,55 @@ var diagnosticReasonValues = map[string]bool{"accept": true, "auth": true, "cata
 var diagnosticStateValues = map[string]bool{"idle": true, "connecting": true, "connected": true, "reconnecting": true, "error": true}
 var diagnosticErrorKindValues = map[string]bool{"auth": true, "connection": true, "deadline": true, "dial": true, "heartbeat": true, "read": true, "source": true, "write": true}
 var diagnosticBlindSourceValues = map[string]bool{"catalog": true, "event": true, "none": true}
+var diagnosticPhaseValues = map[string]bool{"resolve": true, "profile": true, "encode": true, "cleanup": true}
+var diagnosticExitClassValues = map[string]bool{"source_error": true, "invalid_profile": true, "disk_full": true, "payload_integrity": true, "encoder_error": true, "filesystem_error": true}
+var diagnosticModeValues = map[string]bool{"hardware": true, "software": true, "none": true}
 
 func isSafeDiagnosticEvent(value string) bool {
 	switch value {
-	case "bili_message_ignored", "bili_parse_failed", "blind_box_catalog_failed", "blind_box_catalog_ready", "blind_box_catalog_save_failed", "connection_gap", "connection_state", "diagnostic_event_omitted", "gift_accepted", "gift_ignored", "gift_ingestion_failed", "gift_received", "gift_transaction_complete", "gift_transaction_prepare", "gift_transaction_recovery", "http_listen_failed", "http_ready", "http_server_stopped", "service_start", "service_stop", "tray_failed", "update_install_failed":
+	case "bili_message_ignored", "bili_parse_failed", "blind_box_catalog_failed", "blind_box_catalog_ready", "blind_box_catalog_save_failed", "connection_gap", "connection_state", "diagnostic_event_omitted", "gift_accepted", "gift_ignored", "gift_ingestion_failed", "gift_received", "gift_transaction_complete", "gift_transaction_prepare", "gift_transaction_recovery", "gift_clip_job_failed", "gift_clip_job_cleanup_failed", "gift_clip_ffmpeg_failed", "http_listen_failed", "http_ready", "http_server_stopped", "service_start", "service_stop", "tray_failed", "update_install_failed":
 		return true
 	default:
 		return false
 	}
+}
+
+func validateDiagnosticTaskID(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok || len(text) != 24 {
+		return nil, false
+	}
+	for _, character := range text {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '-' || character == '_' {
+			continue
+		}
+		return nil, false
+	}
+	return text, true
+}
+
+func validateDiagnosticPhase(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok || !diagnosticPhaseValues[text] {
+		return nil, false
+	}
+	return text, true
+}
+
+func validateDiagnosticExitClass(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok || !diagnosticExitClassValues[text] {
+		return nil, false
+	}
+	return text, true
+}
+
+func validateDiagnosticMode(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok || !diagnosticModeValues[text] {
+		return nil, false
+	}
+	return text, true
 }
 
 func sanitizeDiagnosticEvent(value string) string {
