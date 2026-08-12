@@ -742,9 +742,12 @@ ZIP `> 40_000_000` bytes 立即失败，`> 30_000_000` bytes 输出明确 warnin
 }
 ```
 
-`verify-ffmpeg.mjs` 对解压出的 CLI 运行组件查询，断言版本 9.0、无网络/GPL/nonfree，含
-`gif`/`webp_anim`/`image_webp_pipe` demuxer、`gif`/`webp_anim`/`webp` decoder、GIF/H.264
-parser 与 `h264_mf`，且不含 `loop` filter。自动选择的 `vp8` decoder、`ac3` parser 等必要
+`verify-ffmpeg.mjs` 对解压出的 CLI 运行其实际支持的组件查询，断言版本 9.0、无网络/GPL/nonfree，含
+`gif`/`webp_anim`/`image_webp_pipe` demuxer、`gif`/`webp_anim`/`webp` decoder 与 `h264_mf`，
+且不含 `loop` filter。FFmpeg 9.0 CLI 不提供 `-parsers` 查询；构建脚本必须从生成的
+`config_components.h` 精确断言仅 `ac3`/`gif`/`h264` parser 启用，生成与源码/configure
+绑定的确定性组件门禁记录，verifier/build/release 必须拒绝记录缺失、陈旧或不匹配，并由真实
+GIF/H.264 smoke 证明运行功能。自动选择的 `vp8` decoder、`ac3` parser 等必要
 基础设施必须逐项记录/允许，不能扩大 codec、协议、网络、音频、字幕、GPL 或 nonfree 范围。
 smoke fixture 必须使用真实有效的：单帧 GIF、多帧无 loop GIF、多帧有限 loop GIF、静态 WebP、
 动画 WebP、packed-alpha H.264；前五类逐一以生产等价 argv 生成精确 30 FPS/目标时长 MP4。
