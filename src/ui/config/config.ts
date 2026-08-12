@@ -2895,10 +2895,24 @@ export function mountConfig(root: HTMLElement): void {
     const initialEditableValue = Number(valueInput.value);
     let simulationDraftValue = Number.isFinite(initialEditableValue) ? initialEditableValue : 0;
     let simulationGeneration = 0;
+    let activeSimulationPreview: HTMLElement | null = null;
+    const invalidateSimulationRequests = (): void => {
+      simulationGeneration += 1;
+      activeSimulationPreview?.replaceChildren();
+      activeSimulationPreview = null;
+    };
+    const beginSimulationRequest = (preview: HTMLElement): number => {
+      invalidateSimulationRequests();
+      activeSimulationPreview = preview;
+      return simulationGeneration;
+    };
+    const settleSimulationRequest = (preview: HTMLElement): void => {
+      if (activeSimulationPreview === preview) activeSimulationPreview = null;
+    };
     const resetSimulationDraftFromInput = (): void => {
       const nextValue = Number(valueInput.value);
       simulationDraftValue = Number.isFinite(nextValue) ? nextValue : 0;
-      simulationGeneration += 1;
+      invalidateSimulationRequests();
       for (const item of selected.values()) item.simulationPreview = undefined;
       renderSelectedRules();
       renderTimerRules();
@@ -3188,7 +3202,7 @@ export function mountConfig(root: HTMLElement): void {
       const editor = el('article', { class: 'timer-rule-editor' });
       const removeButton = el('button', { class: 'rule-remove', type: 'button', text: '移除' }) as HTMLButtonElement;
       removeButton.onclick = () => {
-        simulationGeneration += 1;
+        invalidateSimulationRequests();
         const timerIndex = timerRules.findIndex((candidate) => candidate.id === rule.id);
         if (timerIndex >= 0) timerRules.splice(timerIndex, 1);
         editorTutorialProgress.timerCount = timerRules.length;
@@ -3273,7 +3287,7 @@ export function mountConfig(root: HTMLElement): void {
           ? replaceFormulaVariable(rule.formula.trim(), originalName, name)
           : rule.formula.trim();
         const requestVersion = ++previewVersion;
-        const requestSimulationGeneration = completeLesson ? ++simulationGeneration : 0;
+        const requestSimulationGeneration = completeLesson ? beginSimulationRequest(preview) : 0;
         preview.classList.remove('has-tutorial-confirmation');
         preview.replaceChildren(el('span', { text: '由后台计算预览…' }));
         void (async () => {
@@ -3286,6 +3300,7 @@ export function mountConfig(root: HTMLElement): void {
           if (requestVersion !== previewVersion) return;
           if (completeLesson && requestSimulationGeneration !== simulationGeneration) return;
           if (skipped) {
+            if (completeLesson) settleSimulationRequest(preview);
             preview.replaceChildren(el('span', {
               text: completeLesson ? '当前条件不满足，本次未执行' : '当前条件不满足，本次会跳过',
             }));
@@ -3301,6 +3316,7 @@ export function mountConfig(root: HTMLElement): void {
           }
           if (completeLesson) {
             simulationDraftValue = result;
+            settleSimulationRequest(preview);
           }
           preview.replaceChildren(
             el('span', { text: `${completeLesson ? '已模拟执行' : '预览'}：${currentValue} → ` }),
@@ -3316,6 +3332,8 @@ export function mountConfig(root: HTMLElement): void {
           }
         }).catch((error) => {
           if (requestVersion !== previewVersion) return;
+          if (completeLesson && requestSimulationGeneration !== simulationGeneration) return;
+          if (completeLesson) settleSimulationRequest(preview);
           preview.replaceChildren(el('span', {
             class: 'error',
             text: error instanceof Error ? error.message : String(error),
@@ -3376,6 +3394,7 @@ export function mountConfig(root: HTMLElement): void {
       });
       editorTutorialProgress.timerCount = timerRules.length;
       editorTutorialProgress.timerPreviewed = false;
+      invalidateSimulationRequests();
       renderTimerRules();
       timerList.querySelector('.timer-rule-editor:last-child')?.scrollIntoView({ block: 'nearest' });
       refreshEditorTutorial(false);
@@ -3406,7 +3425,7 @@ export function mountConfig(root: HTMLElement): void {
     let confirmGiftSelectionButton: HTMLButtonElement | null = null;
     let giftPickerController: GiftPicker;
     const removeSelectedGiftRule = (giftId: number): void => {
-      simulationGeneration += 1;
+      invalidateSimulationRequests();
       selected.delete(giftId);
     };
 
@@ -3427,6 +3446,7 @@ export function mountConfig(root: HTMLElement): void {
         || giftSelectionSnapshot.size !== selected.size
         || Array.from(selected).some(([giftId, item]) => giftSelectionSnapshot?.get(giftId) !== item);
       if (!commit && giftSelectionSnapshot) {
+        invalidateSimulationRequests();
         selected.clear();
         for (const [giftId, item] of giftSelectionSnapshot) selected.set(giftId, item);
         giftPickerController.refreshSelection();
@@ -3464,6 +3484,7 @@ export function mountConfig(root: HTMLElement): void {
         void hydrateBlindBoxRule(item);
       },
       onSelectionChange: () => {
+        invalidateSimulationRequests();
         renderSelectedRules();
         renderGuide();
       },
@@ -3609,7 +3630,7 @@ export function mountConfig(root: HTMLElement): void {
           : item.formula.trim();
         const currentValue = simulationDraftValue;
         const requestVersion = ++previewVersion;
-        const requestSimulationGeneration = completeLesson ? ++simulationGeneration : 0;
+        const requestSimulationGeneration = completeLesson ? beginSimulationRequest(preview) : 0;
         preview.append(el('span', { text: '由后台计算预览…' }));
         void previewFormula(formula, name, currentValue, 'gift', item.gift.price).then((result) => {
           if (requestVersion !== previewVersion) return;
@@ -3617,6 +3638,7 @@ export function mountConfig(root: HTMLElement): void {
           if (completeLesson) {
             simulationDraftValue = result;
             item.simulationPreview = { currentValue, result };
+            settleSimulationRequest(preview);
           }
           let awaitingConfirmation = false;
           if (completeLesson) awaitingConfirmation = renderSimulationPreview();
@@ -3630,6 +3652,8 @@ export function mountConfig(root: HTMLElement): void {
           }
         }).catch((error) => {
           if (requestVersion !== previewVersion) return;
+          if (completeLesson && requestSimulationGeneration !== simulationGeneration) return;
+          if (completeLesson) settleSimulationRequest(preview);
           preview.replaceChildren(
             el('span', { class: 'error', text: error instanceof Error ? error.message : String(error) }),
           );
@@ -3779,9 +3803,10 @@ export function mountConfig(root: HTMLElement): void {
     const manualGift = renderManualGiftAdder(() => {
       pickerCatalog = buildGiftPickerCatalog(state, roomGiftCatalog);
       giftPickerController.setCatalog(pickerCatalog);
+      invalidateSimulationRequests();
       renderSelectedRules();
       renderGuide();
-    }, selected, defaultFormula, (item) => { void hydrateBlindBoxRule(item); });
+    }, selected, defaultFormula, (item) => { void hydrateBlindBoxRule(item); }, invalidateSimulationRequests);
 
     const cancelGiftSelectionButton = el('button', {
       class: 'btn ghost',
@@ -4036,6 +4061,7 @@ export function mountConfig(root: HTMLElement): void {
     refreshOpenGiftCatalog = () => {
       pickerCatalog = buildGiftPickerCatalog(state, roomGiftCatalog);
       giftPickerController.setCatalog(pickerCatalog);
+      invalidateSimulationRequests();
       renderSelectedRules();
     };
     renderSelectedRules();
@@ -4050,6 +4076,7 @@ export function mountConfig(root: HTMLElement): void {
     selected: Map<number, SelectedGiftRule>,
     defaultFormula: () => string,
     hydrateBlindBoxRule?: (item: SelectedGiftRule) => void,
+    onReplacingSelectedGift?: () => void,
   ): HTMLElement {
     const details = el('details', { class: 'manual-gift-adder' });
     details.append(el('summary', { text: '找不到礼物？按 ID 手动添加' }));
@@ -4083,6 +4110,7 @@ export function mountConfig(root: HTMLElement): void {
         quickOperation: 'price',
         quickAmount: 60,
       };
+      if (selected.has(id)) onReplacingSelectedGift?.();
       selected.set(id, item);
       hydrateBlindBoxRule?.(item);
       save();
