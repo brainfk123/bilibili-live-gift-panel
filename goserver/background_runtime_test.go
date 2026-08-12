@@ -57,6 +57,9 @@ func TestBackgroundRuntimeReplaysDurableInboxOnce(t *testing.T) {
 	secondRuntime.inbox = secondInbox
 	cancelSecond, secondDone := startBackgroundRuntimeForTest(secondRuntime)
 	waitForInboxPendingCount(t, secondInbox, 0)
+	if status := secondRuntime.Status(); status.Inbox == nil || status.Inbox.PendingCount != 0 {
+		t.Fatalf("published inbox status after acknowledgement = %#v, want zero pending", status.Inbox)
+	}
 	cancelSecond()
 	<-secondDone
 	assertRuntimeAttributeValue(t, store, "积分", 1)
@@ -227,6 +230,83 @@ func (*capacityFailureInbox) Acknowledge(string) error { return nil }
 func (*capacityFailureInbox) Release(string) error     { return nil }
 func (*capacityFailureInbox) Close() error             { return nil }
 func (*capacityFailureInbox) Health() giftInboxHealth  { return giftInboxHealth{CapacityError: true} }
+
+type runtimeStatusProbeInbox struct{ healthCalls int }
+
+func (*runtimeStatusProbeInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
+	return giftInboxRecord{}, nil
+}
+func (*runtimeStatusProbeInbox) Next() (giftInboxRecord, bool, error) {
+	return giftInboxRecord{}, false, nil
+}
+func (*runtimeStatusProbeInbox) Acknowledge(string) error { return nil }
+func (*runtimeStatusProbeInbox) Release(string) error     { return nil }
+func (*runtimeStatusProbeInbox) Close() error             { return nil }
+func (inbox *runtimeStatusProbeInbox) Health() giftInboxHealth {
+	inbox.healthCalls++
+	return giftInboxHealth{PendingCount: 1}
+}
+
+func TestRuntimeStatusUsesPublishedInboxSnapshotWithoutHealthReconciliation(t *testing.T) {
+	runtime := newBackgroundRuntime(nil, nil)
+	inbox := &runtimeStatusProbeInbox{}
+	runtime.publishInbox(inbox, giftInboxHealth{PendingCount: 3, OldestPendingAt: 2000})
+	for range 100 {
+		if got := runtime.Status().Inbox; got == nil || got.PendingCount != 3 {
+			t.Fatalf("status inbox = %#v, want published snapshot", got)
+		}
+	}
+	if inbox.healthCalls != 0 {
+		t.Fatalf("Status called Health %d times, want 0", inbox.healthCalls)
+	}
+}
+
+func TestBackgroundRuntimePublishesOpenedInboxBeforeConcurrentStatus(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	if err := store.replaceState(defaultAppState()); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runtime.Run(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if status := runtime.Status(); status.Inbox != nil {
+			for range 100 {
+				_ = runtime.Status()
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("Run did not publish the opened inbox to concurrent status readers")
+}
+
+func TestRuntimeLastFrameIsRoomScoped(t *testing.T) {
+	runtime := newBackgroundRuntime(nil, nil)
+	runtime.setStatus("connected", "room-a", nil)
+	runtime.recordLastFrame("room-a")
+	if runtime.Status().LastFrameAt == 0 {
+		t.Fatal("room-a frame was not recorded")
+	}
+	runtime.setStatus("connecting", "room-b", nil)
+	if runtime.Status().LastFrameAt != 0 {
+		t.Fatal("room change retained prior room frame timestamp")
+	}
+	runtime.recordLastFrame("room-a")
+	if runtime.Status().LastFrameAt != 0 {
+		t.Fatal("old room callback updated current room frame timestamp")
+	}
+}
 
 func TestBackgroundRuntimeReportsInboxCapacityWithoutVolatileApply(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}

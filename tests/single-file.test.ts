@@ -60,7 +60,8 @@ describe('single-file production output', () => {
 
   it('builds into a temp dir and produces only index.html, leaving the real dist untouched', () => {
     const built = listFilesRecursively(outDir).map((file) => relative(outDir, file).replaceAll('\\', '/'));
-    expect(built).toEqual(['index.html']);
+    expect(built).toContain('index.html');
+    expect(built.some((file) => file.startsWith('chunks/') && file.endsWith('.js'))).toBe(true);
     expect(snapshotFiles(listFilesRecursively(distRoot))).toEqual(distBefore);
   });
 
@@ -73,12 +74,10 @@ describe('single-file production output', () => {
     expect(staticStyles.some((style) => /data-theme\s*=\s*"?light"?/.test(style))).toBe(false);
   });
 
-  it('still ships configuration CSS through the runtime text-injection path', () => {
-    // Config CSS is loaded as a text module (?inline) in config mode only. The
-    // minified `[data-theme=light]` selector is unique to config.css, so its
-    // presence anywhere in the bundle proves the CSS text still travels as a
-    // runtime-injected string rather than being dropped.
-    expect(html).toMatch(/data-theme\s*=\s*"?light"?/);
-    expect(html).toContain('.config-root');
+  it('keeps configuration-only ingestion warnings out of the OBS entry artifact', () => {
+    expect(html).not.toContain('gift-ingestion-warning');
+    expect(html).not.toContain('连接中断期间可能漏礼物');
+    const chunks = listFilesRecursively(outDir).filter((file) => file.endsWith('.js'));
+    expect(chunks.some((file) => readFileSync(file, 'utf8').includes('gift-ingestion-warning'))).toBe(true);
   });
 });

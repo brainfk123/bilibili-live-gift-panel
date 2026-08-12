@@ -934,8 +934,17 @@ export function mountConfig(root: HTMLElement): void {
   function renderGiftIngestionWarnings(host = configShell.workspace('overview')): void {
     const warnings = el('section', { class: 'gift-ingestion-warnings', ariaLive: 'polite' });
     const gaps = runtimeStatus.gaps ?? [];
+    const openGap = [...gaps].reverse().find((gap) => !gap.endedAt);
     const recoveredGap = [...gaps].reverse().find((gap) => gap.endedAt && gap.endedAt > gap.startedAt);
-    if (recoveredGap && dismissedGapIdentity() !== connectionGapIdentity(recoveredGap)) {
+    if (openGap || runtimeStatus.state === 'reconnecting') {
+      const attempts = openGap?.attempts ?? runtimeStatus.reconnectAttempts ?? 0;
+      warnings.append(el('article', { class: 'gift-ingestion-warning is-warning', role: 'status', ariaLabel: '礼物接收正在重连' } as any, [
+        el('div', { class: 'gift-ingestion-warning-copy' }, [
+          el('strong', { text: '直播连接正在重连' }),
+          el('p', { text: `礼物接收暂时不可用，正在尝试恢复${attempts > 0 ? `（已重试 ${attempts} 次）` : ''}。` }),
+        ]),
+      ]));
+    } else if (recoveredGap && dismissedGapIdentity() !== connectionGapIdentity(recoveredGap)) {
       const warning = el('article', { class: 'gift-ingestion-warning is-warning' });
       const close = el('button', { class: 'gift-ingestion-warning-close', type: 'button', text: '关闭' }) as HTMLButtonElement;
       close.onclick = () => {
@@ -962,8 +971,12 @@ export function mountConfig(root: HTMLElement): void {
         ? '礼物收件箱暂时无法写入，新的礼物可能无法安全保存。'
         : failureKind === 'inbox_capacity' || runtimeStatus.inbox?.capacityError
           ? '礼物收件箱已满，新的礼物暂时无法安全保存。'
+          : failureKind === 'inbox_open'
+            ? '礼物收件箱暂时无法打开，新的礼物还不能安全保存。'
+            : failureKind === 'inbox_recovery'
+              ? '礼物收件箱正在恢复处理，请保持后台运行并等待恢复完成。'
           : '礼物处理事务正在恢复，请保持配置页面打开并等待恢复完成。';
-      warnings.append(el('article', { class: 'gift-ingestion-warning is-danger' }, [
+      warnings.append(el('article', { class: 'gift-ingestion-warning is-danger', role: 'alert', ariaLabel: '礼物接收需要注意' } as any, [
         el('div', { class: 'gift-ingestion-warning-copy' }, [
           el('strong', { text: '礼物接收需要注意' }),
           el('p', { text: message }),

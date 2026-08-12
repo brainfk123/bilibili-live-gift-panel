@@ -312,13 +312,36 @@ describe('gift ingestion health warnings', () => {
     expect(warning).not.toBeNull();
     expect(textOf(warning)).not.toContain('补录');
     expect(textOf(warning)).not.toContain('手动录入');
+    const fetchCallsBeforeDismiss = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
     findByText(warning, '关闭')?.onclick?.();
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(fetchCallsBeforeDismiss);
     expect(firstRoot.querySelector('.gift-ingestion-warning')).toBeNull();
 
     const remountedRoot = new TestElement('div');
     mountConfig(remountedRoot as unknown as HTMLElement);
     await Promise.resolve();
     expect(remountedRoot.querySelector('.gift-ingestion-warning')).toBeNull();
+
+    mockedRuntimeHealth = {
+      gaps: [{ startedAt: 5_000, endedAt: 8_000, durationMs: 3_000, attempts: 1, errorKind: 'read_timeout' }],
+    };
+    const newerGapRoot = new TestElement('div');
+    mountConfig(newerGapRoot as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(newerGapRoot)).toContain('连接中断期间可能漏礼物'));
+  });
+
+  it('keeps the recovered warning safe when local dismissal storage is unavailable', async () => {
+    mockedRuntimeState = 'connected';
+    mockedRuntimeHealth = {
+      gaps: [{ startedAt: 1_000, endedAt: 4_000, durationMs: 3_000, attempts: 2, errorKind: 'read_timeout' }],
+    };
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => { throw new Error('storage disabled'); } });
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(root)).toContain('连接中断期间可能漏礼物'));
+
+    expect(() => findByText(root, '关闭')?.onclick?.()).not.toThrow();
+    expect(root.querySelector('.gift-ingestion-warning')).not.toBeNull();
   });
 
   it('shows a red configuration warning when the inbox cannot persist', async () => {
@@ -329,6 +352,9 @@ describe('gift ingestion health warnings', () => {
 
     await vi.waitFor(() => expect(root.querySelectorAll('.gift-ingestion-warning').some((warning) => warning.className.includes('is-danger'))).toBe(true));
     expect(textOf(root)).toContain('礼物收件箱暂时无法写入');
+    const danger = root.querySelectorAll('.gift-ingestion-warning').find((warning) => warning.className.includes('is-danger')) as TestElement;
+    expect((danger as any).role).toBe('alert');
+    expect((danger as any).ariaLabel).toBe('礼物接收需要注意');
   });
 
   it('shows pending count and oldest wait while the inbox is backlogged', async () => {
@@ -352,6 +378,27 @@ describe('gift ingestion health warnings', () => {
     mountConfig(root as unknown as HTMLElement);
 
     await vi.waitFor(() => expect(root.querySelector('.simple-mode-workspace')?.querySelector('.gift-ingestion-warning')).not.toBeNull());
+  });
+
+  it('shows an open reconnect warning instead of recovered-gap copy', async () => {
+    mockedRuntimeState = 'reconnecting';
+    mockedRuntimeHealth = { reconnectAttempts: 2, gaps: [{ startedAt: 1_000, attempts: 2, errorKind: 'read' }] };
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(root)).toContain('直播连接正在重连'));
+    expect(textOf(root)).not.toContain('连接中断期间可能漏礼物');
+  });
+
+  it('labels capacity and transaction ingestion failures as danger warnings', async () => {
+    mockedRuntimeHealth = { ingestionErrorKind: 'inbox_capacity' };
+    const capacityRoot = new TestElement('div');
+    mountConfig(capacityRoot as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(capacityRoot)).toContain('礼物收件箱已满'));
+
+    mockedRuntimeHealth = { ingestionErrorKind: 'transaction', transactionPending: true };
+    const transactionRoot = new TestElement('div');
+    mountConfig(transactionRoot as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(transactionRoot)).toContain('礼物处理事务正在恢复'));
   });
 });
 

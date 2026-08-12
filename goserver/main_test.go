@@ -124,6 +124,7 @@ func TestMainGiftClipCloserRunsOnlyOnce(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("close count=%d", count)
 	}
+}
 
 type runtimeStatusTestInbox struct {
 	health giftInboxHealth
@@ -147,11 +148,12 @@ func TestRuntimeStatusIncludesIngestionHealth(t *testing.T) {
 	}
 	background := newBackgroundRuntime(store, nil)
 	background.status = runtimeStatus{
-		State: "connected", RoomID: "31567150", LastError: "https://connection-secret.example.test/read failure",
-		ConnectionGaps: []connectionGap{{StartedAt: 1000, EndedAt: 4000, DurationMS: 3000, Attempts: 2, ErrorKind: "read_timeout"}},
+		State: "connected", RoomID: "31567150", LastFrameAt: 3000, LastError: "https://connection-secret.example.test/read failure",
+		ConnectionGaps:     []connectionGap{{StartedAt: 1000, EndedAt: 4000, DurationMS: 3000, Attempts: 2, ErrorKind: "read_timeout"}},
+		TransactionPending: true,
 	}
 	background.recordIngestionFailureFrom("accept", errors.New("https://secret.example.test/inbox write failed"))
-	background.inbox = &runtimeStatusTestInbox{health: giftInboxHealth{PendingCount: 3, OldestPendingAt: 2000}}
+	background.publishInbox(&runtimeStatusTestInbox{health: giftInboxHealth{PendingCount: 3, OldestPendingAt: 2000}}, giftInboxHealth{PendingCount: 3, OldestPendingAt: 2000})
 
 	handler := handleRuntimeStatus(background)
 	response := httptest.NewRecorder()
@@ -169,6 +171,7 @@ func TestRuntimeStatusIncludesIngestionHealth(t *testing.T) {
 	}
 	for field, want := range map[string]string{
 		"state":              `"connected"`,
+		"lastFrameAt":        `3000`,
 		"reconnectAttempts":  `2`,
 		"gaps":               `[{"startedAt":1000,"endedAt":4000,"durationMs":3000,"attempts":2,"errorKind":"read_timeout"}]`,
 		"inbox":              `{"pendingCount":3,"oldestPendingAt":2000}`,
@@ -181,6 +184,44 @@ func TestRuntimeStatusIncludesIngestionHealth(t *testing.T) {
 	}
 	if strings.Contains(body, "secret.example.test") || strings.Contains(body, "connection-secret.example.test") || strings.Contains(body, "IngestionError") {
 		t.Fatalf("runtime response exposed unsafe ingestion details: %s", body)
+	}
+}
+
+func TestRuntimeIngestionErrorKindsAreStable(t *testing.T) {
+	for _, test := range []struct {
+		source string
+		err    error
+		want   string
+	}{
+		{source: "accept", err: errGiftInboxCapacity, want: "inbox_capacity"},
+		{source: "accept", err: errors.New("write failed"), want: "inbox_persist"},
+		{source: "next", err: errors.New("read failed"), want: "inbox_recovery"},
+		{source: "consumer", err: errors.New("transaction failed"), want: "transaction"},
+	} {
+		t.Run(test.want, func(t *testing.T) {
+			runtime := newBackgroundRuntime(nil, nil)
+			runtime.recordIngestionFailureFrom(test.source, test.err)
+			if got := runtime.Status().IngestionErrorKind; got != test.want {
+				t.Fatalf("error kind = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRuntimeStatusUsesCachedTransactionSnapshot(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	if err := os.WriteFile(store.stateTransactionPath(), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.status.TransactionPending = true
+	if err := os.Remove(store.stateTransactionPath()); err != nil {
+		t.Fatal(err)
+	}
+	for range 100 {
+		if !runtime.Status().TransactionPending {
+			t.Fatal("status re-probed the transaction path instead of returning its cached snapshot")
+		}
 	}
 }
 

@@ -77,6 +77,19 @@ func TestBilibiliSourceRefreshesReadDeadlineForValidFrames(t *testing.T) {
 	}
 }
 
+func TestBilibiliSourceReportsHealthyNonGiftFrames(t *testing.T) {
+	authReply := encodeBiliPacket(biliOpAuthReply, []byte(`{"code":0}`))
+	ignored := encodeBiliPacket(biliOpMessage, []byte(`{"cmd":"DANMU_MSG","data":{"text":"hello"}}`))
+	socket := &fakeBiliSocket{reads: [][]byte{authReply, ignored}, readErr: errors.New("read stopped")}
+	frames := 0
+	err := (&bilibiliGiftSource{heartbeatInterval: time.Hour}).runSocket(context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{
+		onFrame: func() { frames++ },
+	})
+	if err == nil || frames != 2 {
+		t.Fatalf("runSocket error = %v, healthy frame callbacks = %d, want read error and 2", err, frames)
+	}
+}
+
 func TestBilibiliSourceReturnsHeartbeatFailureOnce(t *testing.T) {
 	socket := &heartbeatFailingBiliSocket{closed: make(chan struct{})}
 	source := &bilibiliGiftSource{heartbeatInterval: time.Millisecond, readTimeout: time.Hour}

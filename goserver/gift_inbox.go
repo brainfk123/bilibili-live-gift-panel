@@ -132,9 +132,17 @@ func (inbox *giftInbox) Accept(roomID, command string, gift giftEvent) (giftInbo
 		return giftInboxRecord{}, err
 	}
 
-	health, err := inbox.reconcileHealthLocked()
-	if err != nil {
-		return giftInboxRecord{}, err
+	health := inbox.shared.health
+	// A newly opened empty inbox can have a committed record written by an
+	// interrupted/other process between startup and the first Accept. Reconcile
+	// just this empty-cache boundary; normal ingress uses the maintained O(1)
+	// counters and never scans a deep inbox.
+	if health.PendingCount == 0 && inbox.shared.pendingBytes == 0 {
+		var err error
+		health, err = inbox.reconcileHealthLocked()
+		if err != nil {
+			return giftInboxRecord{}, err
+		}
 	}
 	if health.PendingCount >= maxGiftInboxRecords || health.CapacityError {
 		return giftInboxRecord{}, errGiftInboxCapacity
@@ -170,6 +178,7 @@ func (inbox *giftInbox) Accept(roomID, command string, gift giftEvent) (giftInbo
 		return giftInboxRecord{}, fmt.Errorf("persist gift inbox record: %w", err)
 	}
 	inbox.shared.health.PendingCount++
+	inbox.shared.pendingBytes += int64(len(data) + 1)
 	if inbox.shared.health.OldestPendingAt == 0 {
 		inbox.shared.health.OldestPendingAt = record.ReceivedAt
 	}
@@ -242,13 +251,25 @@ func (inbox *giftInbox) Acknowledge(ingestionID string) error {
 	if record.IngestionID != ingestionID {
 		return fmt.Errorf("gift inbox record ingestion ID does not match filename")
 	}
+	info, statErr := os.Stat(filepath.Join(inbox.pendingPath, selected))
 	if err := os.Remove(filepath.Join(inbox.pendingPath, selected)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("acknowledge gift inbox record: %w", err)
 	}
 	inbox.shared.claimedBy = 0
 	inbox.shared.claimedID = ""
-	_, err = inbox.reconcileHealthLocked()
-	return err
+	inbox.shared.health.PendingCount = maxInt(0, inbox.shared.health.PendingCount-1)
+	if statErr == nil {
+		inbox.shared.pendingBytes = maxInt64(0, inbox.shared.pendingBytes-info.Size())
+	}
+	if inbox.shared.health.PendingCount == 0 {
+		inbox.shared.health.OldestPendingAt = 0
+	} else {
+		// The removed head was the oldest. Avoid a new directory scan on the
+		// acknowledgement path; the next explicit reconciliation restores it.
+		inbox.shared.health.OldestPendingAt = 0
+	}
+	inbox.shared.health.CapacityError = inbox.shared.health.PendingCount >= maxGiftInboxRecords || inbox.shared.pendingBytes >= maxGiftInboxBytes
+	return nil
 }
 
 // Release relinquishes this handle's matching claim without deleting the
@@ -311,6 +332,15 @@ func (inbox *giftInbox) Health() giftInboxHealth {
 		return giftInboxHealth{CapacityError: true}
 	}
 	return health
+}
+
+// SnapshotHealth returns the last reconciled in-memory health value without
+// scanning the inbox directory or parsing records. Runtime status polling uses
+// this constant-time snapshot; Health remains the explicit reconciliation API.
+func (inbox *giftInbox) SnapshotHealth() giftInboxHealth {
+	inbox.shared.mu.Lock()
+	defer inbox.shared.mu.Unlock()
+	return inbox.shared.health
 }
 
 func (inbox *giftInbox) removeOrphanTempsLocked() error {

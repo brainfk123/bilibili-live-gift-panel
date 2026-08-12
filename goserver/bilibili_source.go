@@ -194,12 +194,18 @@ func (source *bilibiliGiftSource) runSocket(ctx context.Context, connection bili
 				return newConnectionFailure("read", err)
 			}
 		}
-		if err := connection.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
-			return newConnectionFailure("deadline", err)
-		}
 		packets, decodeErr := decodeBiliPacketsDetailed(payload)
 		if decodeErr != nil {
 			source.recordDiagnostic("bili_parse_failed", "reason", biliPacketDecodeReason(decodeErr))
+		}
+		if len(packets) == 0 {
+			continue
+		}
+		if err := connection.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+			return newConnectionFailure("deadline", err)
+		}
+		if callbacks.onFrame != nil {
+			callbacks.onFrame()
 		}
 		for _, packet := range packets {
 			if packet.operation == biliOpAuthReply {

@@ -6,9 +6,8 @@ export interface AppBootstrapOptions {
   document: Document;
   search: string;
   installFavicon: () => void;
-  loadConfigStyles: () => Promise<string>;
+  loadConfig: () => Promise<{ configStyles: string; mountConfigEntry: (root: HTMLElement) => void }>;
   mountDisplay: (root: HTMLElement, target?: ObsOutputTarget) => void;
-  mountConfig: (root: HTMLElement) => void;
 }
 
 export function injectConfigStyles(document: Document, cssText: string): HTMLStyleElement {
@@ -34,9 +33,9 @@ export async function startApp(options: AppBootstrapOptions): Promise<void> {
   if (mode === 'config') {
     options.document.body.classList.add('config-mode');
     root.classList.add('config-root');
-    const cssText = await options.loadConfigStyles();
-    injectConfigStyles(options.document, cssText);
-    options.mountConfig(root);
+    const config = await options.loadConfig();
+    injectConfigStyles(options.document, config.configStyles);
+    config.mountConfigEntry(root);
     return;
   }
 
