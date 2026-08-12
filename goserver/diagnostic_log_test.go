@@ -229,7 +229,9 @@ func TestDiagnosticLogExportSanitizesLegacyUnsafeLines(t *testing.T) {
 func TestDiagnosticLogExportsNormalizedRuntimeIngestionLifecycle(t *testing.T) {
 	root := t.TempDir()
 	store := &configStore{path: filepath.Join(root, "config.json")}
-	if err := store.replaceState(defaultAppState()); err != nil {
+	state := defaultAppState()
+	state.RoomID = "room"
+	if err := store.replaceState(state); err != nil {
 		t.Fatal(err)
 	}
 	inbox, err := openGiftInbox(root)

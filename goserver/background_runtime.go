@@ -85,6 +85,8 @@ type backgroundRuntime struct {
 	connectionGapRoomID      string
 	ingestionGeneration      uint64
 	ingestionErrorSource     string
+	resetGate                sync.RWMutex
+	resetGeneration          uint64
 	animationMu              sync.Mutex
 	animationWriteAtomically func(string, []byte) error
 	timerMu                  sync.Mutex
@@ -162,6 +164,9 @@ func (runtime *backgroundRuntime) Run(ctx context.Context) {
 	}
 	inbox := installation.inbox
 	defer inbox.Close()
+	if kind := runtime.store.MutationBlockKind(); kind != "" {
+		runtime.diagnostics.Error("gift_ingestion_failed", "reason", "consumer", "error_kind", kind)
+	}
 
 	var workers sync.WaitGroup
 	workers.Add(2)
@@ -179,6 +184,14 @@ func (runtime *backgroundRuntime) Run(ctx context.Context) {
 
 func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 	for {
+		producerGeneration := runtime.currentResetGeneration()
+		if runtime.store.MutationBlockKind() != "" {
+			runtime.setStatus("error", "", &stateMutationsBlockedError{})
+			if !runtime.wait(ctx, 2*time.Second) {
+				return
+			}
+			continue
+		}
 		state, err := runtime.store.readState()
 		if err != nil {
 			runtime.setStatus("error", "", err)
@@ -199,7 +212,10 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 
 		roomID := state.RoomID
 		runtime.resetConnectionGapsForRoom(roomID)
-		if err := runtime.prepareRoomConnection(roomID); err != nil {
+		if err := runtime.prepareRoomConnectionForGeneration(producerGeneration, roomID); err != nil {
+			if errors.Is(err, errResetGenerationChanged) {
+				continue
+			}
 			runtime.setStatus("error", roomID, err)
 			if !runtime.wait(ctx, 2*time.Second) {
 				return
@@ -211,25 +227,33 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 		finished := make(chan error, 1)
 		supervisor := newConnectionSupervisor(runtime.sourceFactory)
 		supervisor.gaps = append([]connectionGap(nil), runtime.Status().ConnectionGaps...)
-		supervisor.onGap = runtime.setConnectionGaps
-		supervisor.onFailure = func(err error) {
-			runtime.setStatus("reconnecting", roomID, err)
+		supervisor.onGap = func(gaps []connectionGap) {
+			runtime.withProducerGeneration(producerGeneration, func() { runtime.setConnectionGaps(gaps) })
 		}
-		runtime.setStatus("connecting", roomID, nil)
+		supervisor.onFailure = func(err error) {
+			runtime.withProducerGeneration(producerGeneration, func() {
+				runtime.setStatus("reconnecting", roomID, err)
+			})
+		}
+		runtime.withProducerGeneration(producerGeneration, func() { runtime.setStatus("connecting", roomID, nil) })
 		go func() {
 			finished <- supervisor.Run(connectionContext, roomID, runtimeCallbacks{
 				onGift: func(gift giftEvent) {
-					runtime.acceptGift(connectionContext, roomID, giftCommandCategory(gift), gift)
+					runtime.acceptGiftForGeneration(connectionContext, producerGeneration, roomID, giftCommandCategory(gift), gift)
 				},
-				onFrame: func() { runtime.recordLastFrame(roomID) },
+				onFrame: func() {
+					runtime.withProducerGeneration(producerGeneration, func() { runtime.recordLastFrame(roomID) })
+				},
 				onGiftCatalog: func(gifts []roomGiftInfo) {
-					runtime.mergeBlindBoxGiftCatalog(gifts)
+					runtime.withProducerGeneration(producerGeneration, func() { runtime.mergeBlindBoxGiftCatalog(gifts) })
 				},
 				onGiftCatalogError: func(err error) {
-					runtime.diagnostics.Error("blind_box_catalog_failed", "room_id", roomID, "reason", "catalog_fetch_failed", "error", err)
+					runtime.withProducerGeneration(producerGeneration, func() {
+						runtime.diagnostics.Error("blind_box_catalog_failed", "room_id", roomID, "reason", "catalog_fetch_failed", "error", err)
+					})
 				},
 				onState: func(status string) {
-					runtime.setStatus(status, roomID, nil)
+					runtime.withProducerGeneration(producerGeneration, func() { runtime.setStatus(status, roomID, nil) })
 				},
 			})
 		}()
@@ -249,7 +273,7 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 				return
 			}
 			if err != nil && !errors.Is(err, context.Canceled) {
-				runtime.setStatus("error", roomID, err)
+				runtime.withProducerGeneration(producerGeneration, func() { runtime.setStatus("error", roomID, err) })
 			}
 			if !runtime.wait(ctx, time.Second) {
 				return
@@ -258,7 +282,18 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 	}
 }
 
+var errResetGenerationChanged = errors.New("runtime reset generation changed")
+
 func (runtime *backgroundRuntime) prepareRoomConnection(roomID string) error {
+	return runtime.prepareRoomConnectionForGeneration(runtime.currentResetGeneration(), roomID)
+}
+
+func (runtime *backgroundRuntime) prepareRoomConnectionForGeneration(generation uint64, roomID string) error {
+	runtime.resetGate.RLock()
+	defer runtime.resetGate.RUnlock()
+	if generation != runtime.currentResetGeneration() {
+		return errResetGenerationChanged
+	}
 	roomID = strings.TrimSpace(roomID)
 	runtime.animationMu.Lock()
 	defer runtime.animationMu.Unlock()
@@ -306,7 +341,19 @@ func giftCommandCategory(gift giftEvent) string {
 	return "SEND_GIFT"
 }
 
-func (runtime *backgroundRuntime) acceptGift(_ context.Context, roomID, command string, gift giftEvent) {
+func (runtime *backgroundRuntime) acceptGift(ctx context.Context, roomID, command string, gift giftEvent) {
+	runtime.acceptGiftForGeneration(ctx, runtime.currentResetGeneration(), roomID, command, gift)
+}
+
+func (runtime *backgroundRuntime) acceptGiftForGeneration(ctx context.Context, generation uint64, roomID, command string, gift giftEvent) {
+	runtime.resetGate.RLock()
+	defer runtime.resetGate.RUnlock()
+	if ctx.Err() != nil || generation != runtime.currentResetGeneration() {
+		return
+	}
+	if runtime.store != nil && runtime.store.MutationBlockKind() != "" {
+		return
+	}
 	installation := runtime.currentInbox()
 	if installation.inbox == nil {
 		runtime.recordIngestionFailure(fmt.Errorf("gift inbox is not available"))
@@ -317,12 +364,17 @@ func (runtime *backgroundRuntime) acceptGift(_ context.Context, roomID, command 
 	acceptedAt := time.Now()
 	_, err := inbox.Accept(roomID, command, gift)
 	acceptWriteLatency := time.Since(acceptedAt)
-	if err != nil {
+	committedWithWarning := giftInboxRecordCommitted(err)
+	if err != nil && !committedWithWarning {
 		runtime.publishInbox(installation, runtime.snapshotInboxHealth(inbox))
 		runtime.recordIngestionFailureFrom("accept", err)
 		return
 	}
-	runtime.clearIngestionFailure(ingestionGeneration, "accept")
+	if committedWithWarning {
+		runtime.recordIngestionFailureFrom("accept", err)
+	} else {
+		runtime.clearIngestionFailure(ingestionGeneration, "accept")
+	}
 	health := runtime.snapshotInboxHealth(inbox)
 	runtime.publishInbox(installation, health)
 	oldestPendingAge := int64(0)
@@ -397,6 +449,15 @@ func (runtime *backgroundRuntime) runGiftLoop(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if runtime.store != nil && runtime.store.MutationBlockKind() != "" {
+			select {
+			case <-ctx.Done():
+				return
+			case <-runtime.inboxWake:
+			case <-retry.C:
+			}
+			continue
+		}
 		processed, err := runtime.consumeAvailableInboxRecord(ctx)
 		if err != nil {
 			runtime.recordIngestionFailureFrom(ingestionFailureSource(err), err)
@@ -420,6 +481,8 @@ func (runtime *backgroundRuntime) runGiftLoop(ctx context.Context) {
 }
 
 func (runtime *backgroundRuntime) consumeAvailableInboxRecord(ctx context.Context) (bool, error) {
+	runtime.resetGate.RLock()
+	defer runtime.resetGate.RUnlock()
 	ingestionGeneration := runtime.currentIngestionGeneration()
 	installation := runtime.currentInbox()
 	if installation.inbox == nil {
@@ -506,7 +569,7 @@ func (runtime *backgroundRuntime) processInboxRecordLocked(ctx context.Context, 
 			return errRoomPreparationPending
 		}
 	}
-	roomMatches := recordRoomID == "" || currentRoomID == "" || recordRoomID == currentRoomID
+	roomMatches := recordRoomID != "" && currentRoomID != "" && recordRoomID == currentRoomID
 	pendingAnimations := []pendingGiftAnimation{}
 	matchedPendingIndex := -1
 	if roomMatches && !gift.AnimationOnly {
@@ -648,7 +711,7 @@ func settleGiftInState(state *appState, roomID string, gift giftEvent, now time.
 	settlement := giftSettlement{gift: gift, animationOnly: gift.AnimationOnly, blindSource: "none"}
 	recordRoomID := strings.TrimSpace(roomID)
 	currentRoomID := strings.TrimSpace(state.RoomID)
-	if recordRoomID != "" && currentRoomID != "" && recordRoomID != currentRoomID {
+	if recordRoomID == "" || currentRoomID == "" || recordRoomID != currentRoomID {
 		settlement.roomMismatch = true
 		return settlement
 	}
@@ -861,10 +924,13 @@ func (runtime *backgroundRuntime) recordIngestionFailureFrom(source string, err 
 	runtime.status.IngestionError = err.Error()
 	runtime.status.IngestionErrorKind = safeIngestionFailureKind(source, err)
 	runtime.mu.Unlock()
-	runtime.diagnostics.Error("gift_ingestion_failed", "reason", safeIngestionFailureSource(source), "error", err)
+	runtime.diagnostics.Error("gift_ingestion_failed", "reason", safeIngestionFailureSource(source), "error_kind", safeIngestionFailureKind(source, err))
 }
 
 func safeIngestionFailureKind(source string, err error) string {
+	if giftInboxRecordCommitted(err) {
+		return "inbox_durability"
+	}
 	if errors.Is(err, errGiftInboxCapacity) {
 		return "inbox_capacity"
 	}
@@ -929,6 +995,11 @@ func (runtime *backgroundRuntime) runTimerLoop(ctx context.Context) {
 }
 
 func (runtime *backgroundRuntime) handleTimerTick(now time.Time) {
+	runtime.resetGate.RLock()
+	defer runtime.resetGate.RUnlock()
+	if runtime.store == nil || runtime.store.MutationBlockKind() != "" {
+		return
+	}
 	state, err := runtime.store.readState()
 	if err != nil {
 		status := runtime.Status()
@@ -991,6 +1062,126 @@ func (runtime *backgroundRuntime) NotifyConfigChanged() {
 	}
 }
 
+type runtimeGiftInboxResetter interface {
+	Reset() error
+}
+
+func (runtime *backgroundRuntime) currentResetGeneration() uint64 {
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	return runtime.resetGeneration
+}
+
+func (runtime *backgroundRuntime) withProducerGeneration(generation uint64, callback func()) {
+	runtime.resetGate.RLock()
+	defer runtime.resetGate.RUnlock()
+	if generation != runtime.currentResetGeneration() {
+		return
+	}
+	callback()
+}
+
+func (runtime *backgroundRuntime) resetFailure(err error) error {
+	if runtime.store != nil {
+		runtime.store.recordResetFailure(err)
+	}
+	runtime.diagnostics.Error("gift_ingestion_failed", "reason", "consumer", "error_kind", "reset_failure", "error", err)
+	return err
+}
+
+// Reset is the runtime-wide barrier behind the configuration API's 恢复默认
+// action. Producers and the claim/settle/ack consumer hold a read lock, so the
+// write lock waits for in-flight work and prevents new work until every owned
+// durable artifact has been cleared or the store has been failed closed.
+func (runtime *backgroundRuntime) Reset() error {
+	runtime.resetGate.Lock()
+	defer runtime.resetGate.Unlock()
+	if runtime.store == nil {
+		return runtime.resetFailure(fmt.Errorf("runtime reset requires a config store"))
+	}
+	runtime.mu.Lock()
+	if runtime.resetGeneration == ^uint64(0) {
+		runtime.mu.Unlock()
+		return runtime.resetFailure(fmt.Errorf("runtime reset generation exhausted"))
+	}
+	runtime.resetGeneration++
+	installation := runtimeInboxInstallation{inbox: runtime.inbox, epoch: runtime.inboxEpoch}
+	runtime.mu.Unlock()
+
+	resetInbox := installation.inbox
+	closeResetInbox := false
+	if resetInbox == nil {
+		opened, err := openGiftInbox(filepath.Dir(runtime.store.path))
+		if err != nil {
+			return runtime.resetFailure(err)
+		}
+		resetInbox = opened
+		closeResetInbox = true
+	}
+	if closeResetInbox {
+		defer resetInbox.Close()
+	}
+	resetter, ok := resetInbox.(runtimeGiftInboxResetter)
+	if !ok {
+		return runtime.resetFailure(fmt.Errorf("installed gift inbox does not support reset"))
+	}
+	if err := resetter.Reset(); err != nil {
+		return runtime.resetFailure(err)
+	}
+	if err := runtime.resetPendingGiftAnimations(); err != nil {
+		return runtime.resetFailure(err)
+	}
+	if err := runtime.store.resetStateArtifacts(); err != nil {
+		return runtime.resetFailure(err)
+	}
+
+	runtime.mu.Lock()
+	runtime.status.State = "idle"
+	runtime.status.RoomID = ""
+	runtime.status.LastError = ""
+	runtime.status.IngestionError = ""
+	runtime.status.IngestionErrorKind = ""
+	runtime.status.LastGiftAt = 0
+	runtime.status.LastFrameAt = 0
+	runtime.status.ConnectionGaps = nil
+	runtime.status.Gaps = nil
+	runtime.status.ReconnectAttempts = 0
+	runtime.connectionGapRoomID = ""
+	runtime.ingestionErrorSource = ""
+	runtime.ingestionGeneration++
+	runtime.mu.Unlock()
+	runtime.timerMu.Lock()
+	clear(runtime.timerSchedules)
+	runtime.timerMu.Unlock()
+	if installation.inbox != nil {
+		runtime.publishInbox(installation, runtime.snapshotInboxHealth(installation.inbox))
+	}
+	select {
+	case runtime.reload <- struct{}{}:
+	default:
+	}
+	select {
+	case runtime.inboxWake <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (runtime *backgroundRuntime) resetPendingGiftAnimations() error {
+	runtime.animationMu.Lock()
+	defer runtime.animationMu.Unlock()
+	path := runtime.pendingGiftAnimationsPath()
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove pending gift animations during reset: %w", err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); err == nil {
+		if err := syncStateDirectory(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("sync pending gift animation reset: %w", err)
+		}
+	}
+	return nil
+}
+
 func (runtime *backgroundRuntime) NotifyTimerConfigChanged() {
 	runtime.timerMu.Lock()
 	clear(runtime.timerSchedules)
@@ -1020,6 +1211,9 @@ func (runtime *backgroundRuntime) Status() runtimeStatus {
 	runtime.mu.RUnlock()
 	if store != nil {
 		status.TransactionPending = store.TransactionPending()
+		if kind := store.MutationBlockKind(); kind != "" {
+			status.IngestionErrorKind = kind
+		}
 	}
 	return status
 }

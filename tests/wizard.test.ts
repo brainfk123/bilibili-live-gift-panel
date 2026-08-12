@@ -401,6 +401,25 @@ describe('gift ingestion health warnings', () => {
     mountConfig(transactionRoot as unknown as HTMLElement);
     await vi.waitFor(() => expect(textOf(transactionRoot)).toContain('礼物处理事务正在恢复'));
     expect(textOf(transactionRoot)).not.toContain('保持配置页面打开');
+
+    mockedRuntimeHealth = { ingestionErrorKind: 'inbox_durability' };
+    const durabilityRoot = new TestElement('div');
+    mountConfig(durabilityRoot as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(durabilityRoot)).toContain('程序会继续按顺序处理，请勿重复提交'));
+  });
+
+  it('renders stable recovery/reset danger copy with a diagnostic export', async () => {
+    mockedRuntimeHealth = { ingestionErrorKind: 'transaction_recovery', transactionPending: true };
+    const recoveryRoot = new TestElement('div');
+    mountConfig(recoveryRoot as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(recoveryRoot)).toContain('状态事务证据无法自动恢复'));
+    const exportLink = recoveryRoot.querySelector('.gift-ingestion-warning')?.querySelector('.diagnostic-log-export') as (TestElement & { href?: string }) | null;
+    expect(exportLink?.href).toBe('/api/diagnostics/log');
+
+    mockedRuntimeHealth = { ingestionErrorKind: 'reset_failure' };
+    const resetRoot = new TestElement('div');
+    mountConfig(resetRoot as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(resetRoot)).toContain('恢复默认未能完整清理'));
   });
 });
 
@@ -2304,6 +2323,33 @@ describe('single-page configuration rendering', () => {
 
     await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
     expect(loadState().attributes[0].value).toBe(0);
+  });
+
+  it('keeps the configuration page open and reports a safe reset failure', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/config' && init?.method === 'DELETE') {
+        return new Response('RAW-RESET-SECRET', { status: 500 });
+      }
+      if (url.includes('/api/runtime')) return Response.json({ code: 0, runtime: { state: 'idle', roomId: '' } });
+      if (url.includes('/api/auth/status')) return Response.json({ code: 0, auth: { state: 'anonymous' } });
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const alertMock = vi.fn();
+    const reloadMock = vi.fn();
+    vi.stubGlobal('alert', alertMock);
+    vi.stubGlobal('location', { origin: 'http://localhost:12450', reload: reloadMock });
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    (root.querySelector('.program-settings-toggle') as TestElement | null)?.onclick?.();
+
+    findByText(root, '恢复默认')?.onclick?.();
+
+    await vi.waitFor(() => expect(alertMock).toHaveBeenCalledWith('恢复默认失败，请重试或先导出运行日志。'));
+    expect(reloadMock).not.toHaveBeenCalled();
+    expect(String(alertMock.mock.calls.flat())).not.toContain('RAW-RESET-SECRET');
   });
 
   it('ignores a stale simulation response when advancing the shared draft', async () => {

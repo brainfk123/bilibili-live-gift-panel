@@ -168,35 +168,39 @@ var diagnosticFieldOrder = []string{
 	"gift_id", "blind_parent_id", "count", "timestamp", "rnd_hash", "reason", "state", "room_id", "error_kind", "source_duplicate", "task_id", "phase", "exit_class", "mode",
 	"accept_write_ms", "inbox_depth", "oldest_pending_age_ms", "attempts", "duration_ms", "blind_source", "blind_cost", "blind_value", "blind_priced",
 	"mapped_children", "port", "version",
+	"protocol_version", "decoded_packet_count", "ignored_command_category",
 }
 
 var diagnosticFieldSpecs = map[string]diagnosticFieldSpec{
-	"gift_id":               validateDiagnosticNonNegativeInteger,
-	"blind_parent_id":       validateDiagnosticNonNegativeInteger,
-	"count":                 validateDiagnosticNonNegativeInteger,
-	"timestamp":             validateDiagnosticNonNegativeInteger,
-	"rnd_hash":              validateDiagnosticHash,
-	"reason":                validateDiagnosticReason,
-	"state":                 validateDiagnosticState,
-	"room_id":               validateDiagnosticRoomID,
-	"error_kind":            validateDiagnosticErrorKind,
-	"source_duplicate":      validateDiagnosticBoolean,
-	"accept_write_ms":       validateDiagnosticNonNegativeInteger,
-	"inbox_depth":           validateDiagnosticNonNegativeInteger,
-	"oldest_pending_age_ms": validateDiagnosticNonNegativeInteger,
-	"attempts":              validateDiagnosticNonNegativeInteger,
-	"duration_ms":           validateDiagnosticNonNegativeInteger,
-	"blind_source":          validateDiagnosticBlindSource,
-	"blind_cost":            validateDiagnosticAmount,
-	"blind_value":           validateDiagnosticAmount,
-	"blind_priced":          validateDiagnosticBoolean,
-	"mapped_children":       validateDiagnosticNonNegativeInteger,
-	"port":                  validateDiagnosticPort,
-	"version":               validateDiagnosticVersion,
-	"task_id":               validateDiagnosticTaskID,
-	"phase":                 validateDiagnosticPhase,
-	"exit_class":            validateDiagnosticExitClass,
-	"mode":                  validateDiagnosticMode,
+	"gift_id":                  validateDiagnosticNonNegativeInteger,
+	"blind_parent_id":          validateDiagnosticNonNegativeInteger,
+	"count":                    validateDiagnosticNonNegativeInteger,
+	"timestamp":                validateDiagnosticNonNegativeInteger,
+	"rnd_hash":                 validateDiagnosticHash,
+	"reason":                   validateDiagnosticReason,
+	"state":                    validateDiagnosticState,
+	"room_id":                  validateDiagnosticRoomID,
+	"error_kind":               validateDiagnosticErrorKind,
+	"source_duplicate":         validateDiagnosticBoolean,
+	"accept_write_ms":          validateDiagnosticNonNegativeInteger,
+	"inbox_depth":              validateDiagnosticNonNegativeInteger,
+	"oldest_pending_age_ms":    validateDiagnosticNonNegativeInteger,
+	"attempts":                 validateDiagnosticNonNegativeInteger,
+	"duration_ms":              validateDiagnosticNonNegativeInteger,
+	"blind_source":             validateDiagnosticBlindSource,
+	"blind_cost":               validateDiagnosticAmount,
+	"blind_value":              validateDiagnosticAmount,
+	"blind_priced":             validateDiagnosticBoolean,
+	"mapped_children":          validateDiagnosticNonNegativeInteger,
+	"port":                     validateDiagnosticPort,
+	"version":                  validateDiagnosticVersion,
+	"task_id":                  validateDiagnosticTaskID,
+	"phase":                    validateDiagnosticPhase,
+	"exit_class":               validateDiagnosticExitClass,
+	"mode":                     validateDiagnosticMode,
+	"protocol_version":         validateDiagnosticProtocolVersion,
+	"decoded_packet_count":     validateDiagnosticNonNegativeInteger,
+	"ignored_command_category": validateDiagnosticIgnoredCommandCategory,
 }
 
 var diagnosticVersionPattern = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$`)
@@ -239,6 +243,27 @@ func validateDiagnosticPort(value any) (any, bool) {
 		return nil, false
 	}
 	return integer, true
+}
+
+func validateDiagnosticProtocolVersion(value any) (any, bool) {
+	integer, ok := diagnosticInteger(value)
+	if !ok || integer < 0 || integer > 65535 {
+		return nil, false
+	}
+	return integer, true
+}
+
+func validateDiagnosticIgnoredCommandCategory(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok {
+		return nil, false
+	}
+	switch text {
+	case "combo_send", "batch_combo_send", "other":
+		return text, true
+	default:
+		return nil, false
+	}
 }
 
 func diagnosticInteger(value any) (int64, bool) {
@@ -369,13 +394,16 @@ func validateDiagnosticVersion(value any) (any, bool) {
 
 var diagnosticReasonValues = map[string]bool{"accept": true, "auth": true, "catalog_fetch_failed": true, "connection": true, "consumer": true, "deadline": true, "decompression_failure": true, "dial": true, "duplicate": true, "empty_legacy_line": true, "heartbeat": true, "ignored_command": true, "malformed_envelope": true, "malformed_gift_data": true, "malformed_legacy_line": true, "packet_bounds": true, "read": true, "room_mismatch": true, "source": true, "state_save_failed": true, "write": true}
 var diagnosticStateValues = map[string]bool{"idle": true, "connecting": true, "connected": true, "reconnecting": true, "error": true}
-var diagnosticErrorKindValues = map[string]bool{"auth": true, "connection": true, "deadline": true, "dial": true, "heartbeat": true, "read": true, "source": true, "write": true}
+var diagnosticErrorKindValues = map[string]bool{"auth": true, "connection": true, "deadline": true, "dial": true, "heartbeat": true, "inbox_capacity": true, "inbox_durability": true, "inbox_open": true, "inbox_persist": true, "inbox_recovery": true, "read": true, "reset_failure": true, "source": true, "transaction": true, "transaction_recovery": true, "write": true}
 var diagnosticBlindSourceValues = map[string]bool{"catalog": true, "event": true, "none": true}
 var diagnosticPhaseValues = map[string]bool{"resolve": true, "profile": true, "encode": true, "cleanup": true}
 var diagnosticExitClassValues = map[string]bool{"source_error": true, "invalid_profile": true, "disk_full": true, "payload_integrity": true, "encoder_error": true, "filesystem_error": true}
 var diagnosticModeValues = map[string]bool{"hardware": true, "software": true, "none": true}
 
 func isSafeDiagnosticEvent(value string) bool {
+	if value == "bili_frame_decoded" {
+		return true
+	}
 	switch value {
 	case "bili_message_ignored", "bili_parse_failed", "blind_box_catalog_failed", "blind_box_catalog_ready", "blind_box_catalog_save_failed", "connection_gap", "connection_state", "diagnostic_event_omitted", "gift_accepted", "gift_ignored", "gift_ingestion_failed", "gift_received", "gift_transaction_complete", "gift_transaction_prepare", "gift_transaction_recovery", "gift_clip_job_failed", "gift_clip_job_cleanup_failed", "gift_clip_ffmpeg_failed", "http_listen_failed", "http_ready", "http_server_stopped", "service_start", "service_stop", "tray_failed", "update_install_failed":
 		return true

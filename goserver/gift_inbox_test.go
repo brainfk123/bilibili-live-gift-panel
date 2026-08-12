@@ -921,6 +921,83 @@ func TestGiftInboxPersistsOnlyNormalizedGiftFields(t *testing.T) {
 	}
 }
 
+func TestGiftInboxPublishesRecordImmediatelyAfterPostRenameSyncFailure(t *testing.T) {
+	root := t.TempDir()
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected post-rename directory sync failure")
+	failNextCommittedGiftInboxRecordWrite(inbox, injected)
+
+	record, err := inbox.Accept("room-a", "SEND_GIFT", giftEvent{GiftID: 1, GiftName: "committed"})
+	if !errors.Is(err, injected) || !giftInboxRecordCommitted(err) {
+		t.Fatalf("Accept error = %v, committed = %t; want committed durability warning", err, giftInboxRecordCommitted(err))
+	}
+	if record.IngestionID == "" {
+		t.Fatal("Accept lost the identity of the committed record")
+	}
+	if health := inbox.SnapshotHealth(); health.PendingCount != 1 {
+		t.Fatalf("in-memory pending count = %d, want 1 without reconciliation", health.PendingCount)
+	}
+
+	next, ok, err := inbox.Next()
+	if err != nil || !ok {
+		t.Fatalf("Next = (%+v, %t, %v), want committed record immediately", next, ok, err)
+	}
+	if next.IngestionID != record.IngestionID {
+		t.Fatalf("Next ingestion ID = %q, want %q", next.IngestionID, record.IngestionID)
+	}
+}
+
+func TestGiftInboxPostRenameSyncFailurePreservesExistingBacklogOrder(t *testing.T) {
+	inbox, err := openGiftInbox(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := inbox.Accept("room-a", "SEND_GIFT", giftEvent{GiftID: 1, GiftName: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected post-rename directory sync failure")
+	failNextCommittedGiftInboxRecordWrite(inbox, injected)
+	second, err := inbox.Accept("room-a", "SEND_GIFT", giftEvent{GiftID: 2, GiftName: "second"})
+	if !errors.Is(err, injected) || !giftInboxRecordCommitted(err) {
+		t.Fatalf("second Accept error = %v, committed = %t", err, giftInboxRecordCommitted(err))
+	}
+	if first.LocalSequence >= second.LocalSequence {
+		t.Fatalf("sequences = %d then %d, want increasing", first.LocalSequence, second.LocalSequence)
+	}
+	if health := inbox.SnapshotHealth(); health.PendingCount != 2 {
+		t.Fatalf("in-memory pending count = %d, want 2", health.PendingCount)
+	}
+
+	for _, want := range []giftInboxRecord{first, second} {
+		got, ok, nextErr := inbox.Next()
+		if nextErr != nil || !ok {
+			t.Fatalf("Next = (%+v, %t, %v)", got, ok, nextErr)
+		}
+		if got.IngestionID != want.IngestionID {
+			t.Fatalf("Next ingestion ID = %q, want FIFO %q", got.IngestionID, want.IngestionID)
+		}
+		if ackErr := inbox.Acknowledge(got.IngestionID); ackErr != nil {
+			t.Fatal(ackErr)
+		}
+	}
+}
+
+func failNextCommittedGiftInboxRecordWrite(inbox *giftInbox, injected error) {
+	failed := false
+	inbox.shared.writeAtomically = func(path string, data []byte) atomicWriteOutcome {
+		outcome := writeFileAtomicallyOutcome(path, data)
+		if !failed && outcome.Err == nil && filepath.Clean(filepath.Dir(path)) == filepath.Clean(inbox.pendingPath) {
+			failed = true
+			return atomicWriteOutcome{Committed: true, Err: injected}
+		}
+		return outcome
+	}
+}
+
 func giftInboxFilename(sequence uint64, ingestionID string) string {
 	return strings.ReplaceAll(filepath.Base((&giftInbox{pendingPath: "pending"}).recordPath(sequence, ingestionID)), "\\", "")
 }

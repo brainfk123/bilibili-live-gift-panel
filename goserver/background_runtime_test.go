@@ -24,6 +24,7 @@ func TestBackgroundRuntimeReplaysDurableInboxOnce(t *testing.T) {
 	root := t.TempDir()
 	store := &configStore{path: filepath.Join(root, "config.json")}
 	state := defaultAppState()
+	state.RoomID = "room"
 	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
 	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
 	if err := store.replaceState(state); err != nil {
@@ -155,6 +156,7 @@ func TestBackgroundRuntimeIngressDoesNotWaitForProfile(t *testing.T) {
 	root := t.TempDir()
 	store := &configStore{path: filepath.Join(root, "config.json")}
 	state := defaultAppState()
+	state.RoomID = "room"
 	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
 	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
 	if err := store.replaceState(state); err != nil {
@@ -213,6 +215,206 @@ func TestBackgroundRuntimeIngressDoesNotWaitForProfile(t *testing.T) {
 	}
 	if len(updated.Log) == 0 || updated.Log[0].EventID != "slow-300:积分" {
 		t.Fatalf("newest ordered log entry = %#v", updated.Log)
+	}
+}
+
+type resetBarrierInbox struct {
+	mu            sync.Mutex
+	acceptStarted chan struct{}
+	allowAccept   chan struct{}
+	resetCalled   chan struct{}
+	acceptOnce    sync.Once
+	resetOnce     sync.Once
+	pending       int
+	resetErr      error
+}
+
+func (inbox *resetBarrierInbox) Accept(roomID, command string, gift giftEvent) (giftInboxRecord, error) {
+	inbox.acceptOnce.Do(func() { close(inbox.acceptStarted) })
+	if inbox.allowAccept != nil {
+		<-inbox.allowAccept
+	}
+	inbox.mu.Lock()
+	inbox.pending++
+	inbox.mu.Unlock()
+	return giftInboxRecord{SchemaVersion: 1, LocalSequence: 1, IngestionID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", RoomID: roomID, Command: command, Gift: gift}, nil
+}
+
+func (*resetBarrierInbox) Next() (giftInboxRecord, bool, error) { return giftInboxRecord{}, false, nil }
+func (*resetBarrierInbox) Acknowledge(string) error             { return nil }
+func (*resetBarrierInbox) Release(string) error                 { return nil }
+func (*resetBarrierInbox) Close() error                         { return nil }
+func (inbox *resetBarrierInbox) Health() giftInboxHealth {
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
+	return giftInboxHealth{PendingCount: inbox.pending}
+}
+func (inbox *resetBarrierInbox) Reset() error {
+	inbox.resetOnce.Do(func() { close(inbox.resetCalled) })
+	if inbox.resetErr != nil {
+		return inbox.resetErr
+	}
+	inbox.mu.Lock()
+	inbox.pending = 0
+	inbox.mu.Unlock()
+	return nil
+}
+
+func TestBackgroundRuntimeResetWaitsForConcurrentAcceptAndClearsAcceptedRecord(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-a"
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	inbox := &resetBarrierInbox{acceptStarted: make(chan struct{}), allowAccept: make(chan struct{}), resetCalled: make(chan struct{})}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.installInbox(inbox, inbox.Health())
+	accepted := make(chan struct{})
+	go func() {
+		runtime.acceptGift(context.Background(), "room-a", "SEND_GIFT", giftEvent{GiftID: 1})
+		close(accepted)
+	}()
+	<-inbox.acceptStarted
+	resetDone := make(chan error, 1)
+	go func() { resetDone <- runtime.Reset() }()
+	select {
+	case <-inbox.resetCalled:
+		t.Fatal("reset entered durable cleanup before concurrent Accept left the reset gate")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(inbox.allowAccept)
+	<-accepted
+	if err := <-resetDone; err != nil {
+		t.Fatal(err)
+	}
+	if health := inbox.Health(); health.PendingCount != 0 {
+		t.Fatalf("accepted record survived reset: %#v", health)
+	}
+}
+
+func TestBackgroundRuntimeResetWaitsForConsumerThenClearsAllOwnedArtifacts(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-a"
+	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
+	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inbox.Accept("room-a", "SEND_GIFT", giftEvent{GiftID: 1, UID: 42, Uname: "字***", Rnd: "old-room-rnd"}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.installInbox(inbox, inbox.SnapshotHealth())
+	if err := runtime.savePendingGiftAnimationFile(pendingGiftAnimationFile{SchemaVersion: pendingGiftAnimationsSchemaVersion, PreparedRoomID: "room-a", Records: []pendingGiftAnimation{}}); err != nil {
+		t.Fatal(err)
+	}
+	resolver := &blockingUserProfileResolver{started: make(chan struct{}), release: make(chan struct{})}
+	runtime.profileResolver = resolver
+	runtime.profileTimeout = time.Hour
+	consumed := make(chan error, 1)
+	go func() {
+		_, consumeErr := runtime.consumeAvailableInboxRecord(context.Background())
+		consumed <- consumeErr
+	}()
+	<-resolver.started
+	resetDone := make(chan error, 1)
+	go func() { resetDone <- runtime.Reset() }()
+	select {
+	case err := <-resetDone:
+		t.Fatalf("reset completed while consumer held the reset gate: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	resolver.unblock()
+	if err := <-consumed; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-resetDone; err != nil {
+		t.Fatal(err)
+	}
+	if health := inbox.Health(); health.PendingCount != 0 {
+		t.Fatalf("inbox survived reset: %#v", health)
+	}
+	for _, path := range append(store.statePaths(), store.stateTransactionPath(), runtime.pendingGiftAnimationsPath()) {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("owned artifact %s survived reset: %v", filepath.Base(path), err)
+		}
+	}
+}
+
+func TestBackgroundRuntimeResetRejectsStaleProducerAndProcessesOnlyNewRoom(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	oldState := defaultAppState()
+	oldState.RoomID = "room-a"
+	if err := store.replaceState(oldState); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.installInbox(inbox, inbox.SnapshotHealth())
+	oldGeneration := runtime.currentResetGeneration()
+	if err := runtime.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.prepareRoomConnectionForGeneration(oldGeneration, "room-a"); !errors.Is(err, errResetGenerationChanged) {
+		t.Fatalf("stale connection plan preparation error = %v, want reset generation change", err)
+	}
+	if _, err := os.Stat(runtime.pendingGiftAnimationsPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale connection plan recreated pending animation state: %v", err)
+	}
+	newState := defaultAppState()
+	newState.RoomID = "room-b"
+	newState.Attributes = []attributeState{{Name: "积分", Value: 0}}
+	newState.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
+	if err := store.replaceState(newState); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.prepareRoomConnection("room-b"); err != nil {
+		t.Fatal(err)
+	}
+	runtime.acceptGiftForGeneration(context.Background(), oldGeneration, "room-a", "SEND_GIFT", giftEvent{GiftID: 1, Rnd: "stale-old-room"})
+	if health := inbox.Health(); health.PendingCount != 0 {
+		t.Fatalf("stale producer recreated inbox state after reset: %#v", health)
+	}
+	runtime.acceptGift(context.Background(), "room-b", "SEND_GIFT", giftEvent{GiftID: 1, Rnd: "new-room"})
+	if _, err := runtime.consumeAvailableInboxRecord(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertRuntimeAttributeValue(t, store, "积分", 1)
+}
+
+func TestBackgroundRuntimeDoesNotMatchQueuedRecordWhenCurrentRoomIsEmpty(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	state := defaultAppState()
+	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
+	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	record := giftInboxRecord{SchemaVersion: 1, LocalSequence: 1, IngestionID: "empty-room-ingestion", RoomID: "room-a", Gift: giftEvent{GiftID: 1, Rnd: "old-room"}}
+	if err := runtime.processInboxRecord(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Attributes[0].Value != 0 || len(updated.GiftReceipts) != 0 {
+		t.Fatalf("queued old-room record matched empty room: %#v", updated)
+	}
+	if len(updated.AppliedIngressIDs) != 1 || updated.AppliedIngressIDs[0] != record.IngestionID {
+		t.Fatalf("empty-room no-op was not durably settled: %#v", updated.AppliedIngressIDs)
 	}
 }
 
@@ -513,6 +715,7 @@ func TestBackgroundRuntimeTransactionRecoveryFailurePreservesInboxOrder(t *testi
 	root := t.TempDir()
 	store := &configStore{path: filepath.Join(root, "config.json")}
 	state := defaultAppState()
+	state.RoomID = "room"
 	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
 	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
 	if err := store.replaceState(state); err != nil {
@@ -536,7 +739,13 @@ func TestBackgroundRuntimeTransactionRecoveryFailurePreservesInboxOrder(t *testi
 	runtime.installInbox(inbox, runtime.snapshotInboxHealth(inbox))
 	runtime.inboxRetryDelay = time.Hour
 	cancel, done := startBackgroundRuntimeForTest(runtime)
-	waitForIngestionError(t, runtime, "读取状态事务失败")
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && runtime.Status().IngestionErrorKind != "transaction_recovery" {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if status := runtime.Status(); status.IngestionErrorKind != "transaction_recovery" || !status.TransactionPending {
+		t.Fatalf("degraded recovery status = %#v", status)
+	}
 	cancel()
 	<-done
 
@@ -623,6 +832,57 @@ func TestBackgroundRuntimePersistsAnimationFirstMergeAcrossCrashAndRestart(t *te
 	}
 	if len(updated.AppliedIngressIDs) != 2 {
 		t.Fatalf("applied ingestion IDs = %d, want 2", len(updated.AppliedIngressIDs))
+	}
+}
+
+func TestBackgroundRuntimeProcessesCommittedInboxRecordAfterDurabilityWarningWithoutRetry(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-a"
+	state.Attributes = []attributeState{{Name: "points", Value: 0}}
+	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "points", Formula: "points+1"}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected post-rename directory sync failure")
+	failNextCommittedGiftInboxRecordWrite(inbox, injected)
+	runtime := newBackgroundRuntime(store, func() giftEventSource { return &stableConnectedSource{} })
+	runtime.installInbox(inbox, inbox.SnapshotHealth())
+	if err := runtime.savePendingGiftAnimationFile(pendingGiftAnimationFile{
+		SchemaVersion: pendingGiftAnimationsSchemaVersion, PreparedRoomID: "room-a", Records: []pendingGiftAnimation{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime.acceptGift(context.Background(), "room-a", "SEND_GIFT", giftEvent{
+		GiftID: 1, GiftName: "committed", Num: 1, Timestamp: 1_700_000_001, Rnd: "committed-warning",
+	})
+	if status := runtime.Status(); status.IngestionErrorKind != "inbox_durability" {
+		t.Fatalf("ingestion error kind = %q, want inbox_durability", status.IngestionErrorKind)
+	}
+	if health := inbox.SnapshotHealth(); health.PendingCount != 1 {
+		t.Fatalf("pending immediately after warning = %d, want 1", health.PendingCount)
+	}
+
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	waitForInboxPendingCount(t, inbox, 0)
+	cancel()
+	<-done
+	updated, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	attribute := updated.findAttribute("points")
+	if attribute == nil || attribute.Value != 1 {
+		t.Fatalf("settled attribute = %#v, want exactly one application", attribute)
+	}
+	if len(updated.AppliedIngressIDs) != 1 {
+		t.Fatalf("applied ingestion IDs = %d, want exactly 1", len(updated.AppliedIngressIDs))
 	}
 }
 
@@ -2157,6 +2417,7 @@ func (resolver *fakeUserProfileResolver) Resolve(_ context.Context, _ int64) (us
 func TestBackgroundRuntimeEnrichesMaskedSenderFromAnonymousProfile(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	state := defaultAppState()
+	state.RoomID = "room"
 	state.Attributes = []attributeState{{Name: "早播", Value: 0, Unit: "none", Format: "number"}}
 	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "早播", Formula: "早播+1"}}
 	if err := store.replaceState(state); err != nil {
@@ -2169,7 +2430,7 @@ func TestBackgroundRuntimeEnrichesMaskedSenderFromAnonymousProfile(t *testing.T)
 	runtime.profileResolver = profiles
 
 	if err := runtime.processInboxRecord(context.Background(), giftInboxRecord{
-		IngestionID: strings.Repeat("c", 32), Command: "SEND_GIFT",
+		IngestionID: strings.Repeat("c", 32), RoomID: "room", Command: "SEND_GIFT",
 		Gift: giftEvent{
 			GiftID: 1, GiftName: "人气票", Num: 1, Price: 100, CoinType: "gold",
 			UID: 123456789, Uname: "字***", Timestamp: 1700000000, Rnd: "masked-gift-1",

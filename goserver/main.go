@@ -269,6 +269,7 @@ func main() {
 	store.setOnChange(background.NotifyConfigChanged)
 	store.setOnTimerChange(background.NotifyTimerConfigChanged)
 	store.setOnUpdateChange(updater.NotifySettingsChanged)
+	store.setResetCoordinator(background.Reset)
 	login.SetOnChange(background.NotifyConfigChanged)
 
 	mux := http.NewServeMux()

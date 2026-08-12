@@ -33,8 +33,14 @@ type bilibiliGiftSource struct {
 	readTimeout       time.Duration
 	diagnostics       *diagnosticLogger
 	diagnosticMu      sync.Mutex
-	ignoredCount      int
-	lastIgnoredLogAt  time.Time
+	diagnosticNow     func() time.Time
+	ignoredAggregates map[string]biliDiagnosticAggregate
+	decodedAggregates map[uint16]biliDiagnosticAggregate
+}
+
+type biliDiagnosticAggregate struct {
+	count      int
+	lastLogged time.Time
 }
 
 type biliSocket interface {
@@ -197,6 +203,8 @@ func (source *bilibiliGiftSource) runSocket(ctx context.Context, connection bili
 		packets, decodeErr := decodeBiliPacketsDetailed(payload)
 		if decodeErr != nil {
 			source.recordDiagnostic("bili_parse_failed", "reason", biliPacketDecodeReason(decodeErr))
+		} else if len(packets) > 0 {
+			source.recordDecodedPackets(packets)
 		}
 		if len(packets) == 0 {
 			continue
@@ -254,7 +262,7 @@ func (source *bilibiliGiftSource) runSocket(ctx context.Context, connection bili
 					continue
 				}
 				if reason == "ignored_command" {
-					source.recordIgnoredMessage()
+					source.recordIgnoredMessage(ignoredBiliCommandCategory(body))
 				} else {
 					source.recordDiagnostic("bili_parse_failed", "reason", reason)
 				}
@@ -449,22 +457,92 @@ func (source *bilibiliGiftSource) recordDiagnostic(event string, keyValues ...an
 	source.diagnostics.Info(event, keyValues...)
 }
 
-func (source *bilibiliGiftSource) recordIgnoredMessage() {
+func (source *bilibiliGiftSource) diagnosticTime() time.Time {
+	if source != nil && source.diagnosticNow != nil {
+		return source.diagnosticNow()
+	}
+	return time.Now()
+}
+
+func ignoredBiliCommandCategory(body []byte) string {
+	var envelope struct {
+		Command string `json:"cmd"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return "other"
+	}
+	switch envelope.Command {
+	case "COMBO_SEND":
+		return "combo_send"
+	case "BATCH_COMBO_SEND":
+		return "batch_combo_send"
+	default:
+		return "other"
+	}
+}
+
+func normalizeIgnoredBiliCommandCategory(category string) string {
+	switch category {
+	case "combo_send", "batch_combo_send":
+		return category
+	default:
+		return "other"
+	}
+}
+
+func (source *bilibiliGiftSource) recordIgnoredMessage(category string) {
 	if source == nil || source.diagnostics == nil {
 		return
 	}
-	now := time.Now()
+	category = normalizeIgnoredBiliCommandCategory(category)
+	now := source.diagnosticTime()
 	source.diagnosticMu.Lock()
-	source.ignoredCount++
-	count := source.ignoredCount
-	if !source.lastIgnoredLogAt.IsZero() && now.Sub(source.lastIgnoredLogAt) < ignoredDiagnosticInterval {
+	if source.ignoredAggregates == nil {
+		source.ignoredAggregates = make(map[string]biliDiagnosticAggregate)
+	}
+	aggregate := source.ignoredAggregates[category]
+	aggregate.count++
+	if !aggregate.lastLogged.IsZero() && now.Sub(aggregate.lastLogged) < ignoredDiagnosticInterval {
+		source.ignoredAggregates[category] = aggregate
 		source.diagnosticMu.Unlock()
 		return
 	}
-	source.ignoredCount = 0
-	source.lastIgnoredLogAt = now
+	count := aggregate.count
+	aggregate.count = 0
+	aggregate.lastLogged = now
+	source.ignoredAggregates[category] = aggregate
 	source.diagnosticMu.Unlock()
-	source.diagnostics.Info("bili_message_ignored", "reason", "ignored_command", "count", count)
+	source.diagnostics.Info("bili_message_ignored", "reason", "ignored_command", "ignored_command_category", category, "count", count)
+}
+
+func (source *bilibiliGiftSource) recordDecodedPackets(packets []biliPacket) {
+	if source == nil || source.diagnostics == nil || len(packets) == 0 {
+		return
+	}
+	counts := make(map[uint16]int)
+	for _, packet := range packets {
+		counts[packet.protocolVersion]++
+	}
+	now := source.diagnosticTime()
+	for protocolVersion, packetCount := range counts {
+		source.diagnosticMu.Lock()
+		if source.decodedAggregates == nil {
+			source.decodedAggregates = make(map[uint16]biliDiagnosticAggregate)
+		}
+		aggregate := source.decodedAggregates[protocolVersion]
+		aggregate.count += packetCount
+		if !aggregate.lastLogged.IsZero() && now.Sub(aggregate.lastLogged) < ignoredDiagnosticInterval {
+			source.decodedAggregates[protocolVersion] = aggregate
+			source.diagnosticMu.Unlock()
+			continue
+		}
+		decodedPacketCount := aggregate.count
+		aggregate.count = 0
+		aggregate.lastLogged = now
+		source.decodedAggregates[protocolVersion] = aggregate
+		source.diagnosticMu.Unlock()
+		source.diagnostics.Info("bili_frame_decoded", "protocol_version", protocolVersion, "decoded_packet_count", decodedPacketCount)
+	}
 }
 
 func enrichGiftAnimationFromEffectCatalog(gift giftEvent, effects map[int]giftEffectResource) giftEvent {

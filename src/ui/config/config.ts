@@ -969,17 +969,25 @@ export function mountConfig(root: HTMLElement): void {
     if (failureKind || runtimeStatus.transactionPending || runtimeStatus.inbox?.capacityError) {
       const message = failureKind === 'inbox_persist'
         ? '礼物收件箱暂时无法写入，新的礼物可能无法安全保存。'
-        : failureKind === 'inbox_capacity' || runtimeStatus.inbox?.capacityError
-          ? '礼物收件箱已满，新的礼物暂时无法安全保存。'
-          : failureKind === 'inbox_open'
-            ? '礼物收件箱暂时无法打开，新的礼物还不能安全保存。'
-            : failureKind === 'inbox_recovery'
-              ? '礼物收件箱正在恢复处理，请保持后台运行并等待恢复完成。'
-          : '礼物处理事务正在恢复，请保持程序运行并等待恢复完成。';
+        : failureKind === 'inbox_durability'
+          ? '礼物已写入本地收件箱，但目录持久化未确认；程序会继续按顺序处理，请勿重复提交。'
+          : failureKind === 'inbox_capacity' || runtimeStatus.inbox?.capacityError
+            ? '礼物收件箱已满，新的礼物暂时无法安全保存。'
+            : failureKind === 'inbox_open'
+              ? '礼物收件箱暂时无法打开，新的礼物还不能安全保存。'
+              : failureKind === 'inbox_recovery'
+                ? '礼物收件箱正在恢复处理，请保持后台运行并等待恢复完成。'
+                : failureKind === 'transaction_recovery'
+                  ? '状态事务证据无法自动恢复，已暂停礼物接收和状态修改。请先导出运行日志，再重试恢复默认。'
+                  : failureKind === 'reset_failure'
+                    ? '恢复默认未能完整清理本地状态，礼物接收和状态修改保持暂停。请导出运行日志后重试。'
+                    : '礼物处理事务正在恢复，请保持程序运行并等待恢复完成。';
+      const recoveryBlocked = failureKind === 'transaction_recovery' || failureKind === 'reset_failure';
       warnings.append(el('article', { class: 'gift-ingestion-warning is-danger', role: 'alert', ariaLabel: '礼物接收需要注意' } as any, [
         el('div', { class: 'gift-ingestion-warning-copy' }, [
           el('strong', { text: '礼物接收需要注意' }),
           el('p', { text: message }),
+          ...(recoveryBlocked ? [el('a', { class: 'diagnostic-log-export', href: '/api/diagnostics/log', download: 'gift-panel-runtime.log', text: '导出运行日志' })] : []),
         ]),
       ]));
     }
@@ -4921,10 +4929,16 @@ export function mountConfig(root: HTMLElement): void {
       title: '导出连接、礼物解析和盲盒识别日志',
     }) as HTMLAnchorElement;
     const resetButton = el('button', { class: 'btn text-danger', type: 'button', text: '恢复默认' }) as HTMLButtonElement;
-    resetButton.onclick = () => {
+    resetButton.onclick = async () => {
       if (!confirm('确定恢复默认设置？当前配置将被清除。')) return;
-      resetState();
-      location.reload();
+      resetButton.disabled = true;
+      try {
+        await resetState();
+        location.reload();
+      } catch {
+        resetButton.disabled = false;
+        alert('恢复默认失败，请重试或先导出运行日志。');
+      }
     };
     dataCard.append(
       el('div', { class: 'data-actions' }, [exportButton, importButton, diagnosticLogLink, importInput, resetButton]),

@@ -170,16 +170,69 @@ func TestBilibiliDiagnosticsRateLimitsIgnoredMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := &bilibiliGiftSource{diagnostics: logger}
-	for range 128 {
-		source.recordIgnoredMessage()
-	}
+	now := time.Unix(1_700_000_000, 0)
+	source := &bilibiliGiftSource{diagnostics: logger, diagnosticNow: func() time.Time { return now }}
+	source.recordIgnoredMessage("combo_send")
+	source.recordIgnoredMessage("combo_send")
+	source.recordIgnoredMessage("batch_combo_send")
+	source.recordIgnoredMessage("batch_combo_send")
 	data, err := os.ReadFile(logger.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count := strings.Count(string(data), "bili_message_ignored"); count != 1 {
-		t.Fatalf("ignored diagnostics entries = %d, want 1: %s", count, data)
+	if count := strings.Count(string(data), "bili_message_ignored"); count != 2 {
+		t.Fatalf("ignored diagnostics entries = %d, want one per stable category: %s", count, data)
+	}
+	if !strings.Contains(string(data), `ignored_command_category="combo_send"`) || !strings.Contains(string(data), `ignored_command_category="batch_combo_send"`) {
+		t.Fatalf("ignored diagnostics did not retain independent categories: %s", data)
+	}
+	now = now.Add(ignoredDiagnosticInterval)
+	source.recordIgnoredMessage("combo_send")
+	data, err = os.ReadFile(logger.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(data), `ignored_command_category="combo_send"`); count != 2 || !strings.Contains(string(data), `ignored_command_category="combo_send" count=2`) {
+		t.Fatalf("combo aggregate was not emitted independently: %s", data)
+	}
+}
+
+func TestBilibiliDiagnosticsRecordsTypedFrameAndIgnoredCommandDimensions(t *testing.T) {
+	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodies := [][]byte{
+		[]byte(`{"cmd":"COMBO_SEND","data":{"uid":123456,"rnd":"PRIVATE-COMBO-RND"}}`),
+		[]byte(`{"cmd":"BATCH_COMBO_SEND","data":{"uid":234567}}`),
+		[]byte(`{"cmd":"PRIVATE_SECRET_COMMAND","data":{"uid":345678}}`),
+		[]byte(`{"cmd":"SEND_GIFT","data":{"giftId":35801,"num":1,"uid":456789,"rnd":"PRIVATE-GIFT-RND"}}`),
+	}
+	frame := []byte{}
+	for _, body := range bodies {
+		packet := encodeBiliPacket(biliOpMessage, body)
+		packet[7] = 1
+		frame = append(frame, packet...)
+	}
+	socket := &fakeBiliSocket{reads: [][]byte{frame}, readErr: errors.New("stop")}
+	source := &bilibiliGiftSource{diagnostics: logger, heartbeatInterval: time.Hour}
+	if err := source.runSocket(context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{}); err == nil {
+		t.Fatal("runSocket returned nil after fixture exhaustion")
+	}
+
+	export := string(logger.exportBytes())
+	for _, expected := range []string{
+		"bili_frame_decoded", "protocol_version=1", "decoded_packet_count=4",
+		`ignored_command_category="combo_send"`, `ignored_command_category="batch_combo_send"`, `ignored_command_category="other"`,
+	} {
+		if !strings.Contains(export, expected) {
+			t.Fatalf("diagnostic export missing %q: %s", expected, export)
+		}
+	}
+	for _, secret := range []string{"PRIVATE_SECRET_COMMAND", "PRIVATE-COMBO-RND", "PRIVATE-GIFT-RND", "123456", "234567", "345678", "456789", `"cmd"`} {
+		if strings.Contains(export, secret) {
+			t.Fatalf("diagnostic export leaked %q: %s", secret, export)
+		}
 	}
 }
 

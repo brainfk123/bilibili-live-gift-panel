@@ -125,9 +125,19 @@ func (s *configStore) hasStoredStateLocked() bool {
 }
 
 func (s *configStore) readStateLocked() (appState, error) {
-	if err := s.recoverPendingStateTransactionLocked(); err != nil {
-		return appState{}, err
+	if s.mutationBlockKind == "" {
+		if err := s.recoverPendingStateTransactionLocked(); err != nil {
+			s.blockMutationsLocked("transaction_recovery", err)
+		}
 	}
+	return s.readCommittedStateLocked()
+}
+
+// readCommittedStateLocked deliberately ignores pending transaction evidence.
+// It is used only for diagnostics/configuration reads while mutations are
+// blocked, so the application can expose recovery and reset controls without
+// overwriting the evidence that caused the degraded state.
+func (s *configStore) readCommittedStateLocked() (appState, error) {
 	state := defaultAppState()
 	configData, configExists, err := readOptionalStateFile(s.path)
 	if err != nil {

@@ -102,6 +102,22 @@ func TestSyncStateDirectorySuppressesOnlyUnsupportedWindowsSync(t *testing.T) {
 	}
 }
 
+func TestAtomicWriteOutcomeMarksPostRenameDirectorySyncFailureCommitted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	injected := errors.New("injected post-rename directory sync failure")
+	outcome := writeFileAtomicallyOutcomeWith(path, []byte("committed\n"), func(string) error { return injected })
+	if !outcome.Committed || !errors.Is(outcome.Err, injected) {
+		t.Fatalf("outcome = %+v, want committed injected warning", outcome)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "committed\n" {
+		t.Fatalf("final path data = %q", data)
+	}
+}
+
 func TestConfigStoreMigratesLegacyFileIntoShards(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

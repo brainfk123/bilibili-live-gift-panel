@@ -133,14 +133,24 @@ export function saveState(state: AppState): Promise<void> {
   return persistQueue;
 }
 
-export function resetState(): void {
+export function resetState(): Promise<void> {
   cachedState = defaultState();
   configMigrationRequired = false;
   persistedFieldSnapshots = {};
   forcePersistFields.clear();
-  if (typeof fetch === 'function') {
-    void fetch(CONFIG_ENDPOINT, { method: 'DELETE', keepalive: true }).catch(() => undefined);
-  }
+  persistQueue = persistQueue
+    .catch(() => undefined)
+    .then(async () => {
+      if (typeof fetch !== 'function') return;
+      let response: Response;
+      try {
+        response = await fetch(CONFIG_ENDPOINT, { method: 'DELETE', keepalive: true });
+      } catch {
+        throw new Error('恢复默认失败，请重试或先导出运行日志。');
+      }
+      if (!response.ok) throw new Error('恢复默认失败，请重试或先导出运行日志。');
+    });
+  return persistQueue;
 }
 
 export function consumeConfigMigrationRequired(): boolean {

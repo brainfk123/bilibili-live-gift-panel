@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -235,6 +236,173 @@ func TestRuntimeStatusWithNilStoreDoesNotUseCachedTransactionState(t *testing.T)
 	runtime := newBackgroundRuntime(nil, nil)
 	if runtime.Status().TransactionPending {
 		t.Fatal("nil-store runtime reported a pending transaction")
+	}
+}
+
+func TestApplicationLifecycleStartsDiagnosticsWithUnrecoverableTransactionEvidence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	seed := &configStore{path: path}
+	state := defaultAppState()
+	state.RoomID = "31567150"
+	if err := seed.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	evidence := []byte(`{"schemaVersion":999,"raw":"RAW-PREPARE-SECRET"}` + "\n")
+	if err := os.WriteFile(seed.stateTransactionPath(), evidence, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := newConfigStoreAtPath(path)
+	if err != nil {
+		t.Fatalf("application store construction failed: %v", err)
+	}
+	logger, err := newDiagnosticLogger(filepath.Join(dir, "runtime.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceStarted := make(chan struct{}, 1)
+	background := newBackgroundRuntime(store, func() giftEventSource {
+		sourceStarted <- struct{}{}
+		return &stableConnectedSource{}
+	})
+	background.setDiagnosticLogger(logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		background.Run(ctx)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	configResponse := httptest.NewRecorder()
+	store.handle(configResponse, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if configResponse.Code != http.StatusOK || !strings.Contains(configResponse.Body.String(), `"roomId":"31567150"`) {
+		t.Fatalf("diagnostic config GET status = %d, body = %s", configResponse.Code, configResponse.Body.String())
+	}
+	runtimeResponse := httptest.NewRecorder()
+	handleRuntimeStatus(background).ServeHTTP(runtimeResponse, httptest.NewRequest(http.MethodGet, "/api/runtime", nil))
+	if runtimeResponse.Code != http.StatusOK || !strings.Contains(runtimeResponse.Body.String(), `"ingestionErrorKind":"transaction_recovery"`) || !strings.Contains(runtimeResponse.Body.String(), `"transactionPending":true`) {
+		t.Fatalf("runtime health status = %d, body = %s", runtimeResponse.Code, runtimeResponse.Body.String())
+	}
+	for _, secret := range []string{"RAW-PREPARE-SECRET", "schemaVersion", "invalid character", "not supported"} {
+		if strings.Contains(runtimeResponse.Body.String(), secret) || strings.Contains(configResponse.Body.String(), secret) {
+			t.Fatalf("application API exposed recovery detail %q", secret)
+		}
+	}
+
+	putResponse := httptest.NewRecorder()
+	store.handle(putResponse, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(`{"roomId":"1"}`)))
+	if putResponse.Code != http.StatusConflict || strings.Contains(putResponse.Body.String(), "RAW-PREPARE-SECRET") {
+		t.Fatalf("blocked mutation status = %d, body = %s", putResponse.Code, putResponse.Body.String())
+	}
+	if after, readErr := os.ReadFile(seed.stateTransactionPath()); readErr != nil || string(after) != string(evidence) {
+		t.Fatalf("transaction evidence changed: data=%q err=%v", after, readErr)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		export := string(logger.exportBytes())
+		if strings.Contains(export, `error_kind="transaction_recovery"`) {
+			if strings.Contains(export, "RAW-PREPARE-SECRET") || strings.Contains(export, "schemaVersion") {
+				t.Fatalf("diagnostic export exposed transaction evidence: %s", export)
+			}
+			break
+		}
+		select {
+		case <-sourceStarted:
+			t.Fatal("gift source started while transaction evidence was unrecoverable")
+		case <-deadline:
+			t.Fatalf("diagnostic export did not report stable recovery kind: %s", export)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestConfigResetClearsCorruptTransactionAndRuntimeArtifactsThroughProductionHandler(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	seed := &configStore{path: path}
+	state := defaultAppState()
+	state.RoomID = "room-a"
+	if err := seed.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(seed.stateTransactionPath(), []byte(`{"schemaVersion":999,"raw":"RESETTABLE-EVIDENCE"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := newConfigStoreAtPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := openGiftInbox(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inbox.Accept("room-a", "SEND_GIFT", giftEvent{GiftID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	background := newBackgroundRuntime(store, nil)
+	background.installInbox(inbox, inbox.SnapshotHealth())
+	if err := background.savePendingGiftAnimationFile(pendingGiftAnimationFile{SchemaVersion: pendingGiftAnimationsSchemaVersion, PreparedRoomID: "room-a", Records: []pendingGiftAnimation{{RoomID: "room-a", Gift: giftEvent{GiftID: 1}}}}); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := filepath.Join(dir, "user-owned.txt")
+	if err := os.WriteFile(unrelated, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.setResetCoordinator(background.Reset)
+
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("reset status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if store.MutationBlockKind() != "" || store.TransactionPending() {
+		t.Fatalf("reset did not clear store health: kind=%q pending=%v", store.MutationBlockKind(), store.TransactionPending())
+	}
+	if health := inbox.Health(); health.PendingCount != 0 {
+		t.Fatalf("reset inbox health = %#v", health)
+	}
+	for _, artifact := range append(store.statePaths(), store.stateTransactionPath(), background.pendingGiftAnimationsPath()) {
+		if _, err := os.Stat(artifact); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("artifact %s survived reset: %v", filepath.Base(artifact), err)
+		}
+	}
+	if data, err := os.ReadFile(unrelated); err != nil || string(data) != "keep" {
+		t.Fatalf("reset changed unrelated user file: data=%q err=%v", data, err)
+	}
+}
+
+func TestConfigResetFailureIsSafeAndLeavesMutationsBlocked(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	if err := store.replaceState(defaultAppState()); err != nil {
+		t.Fatal(err)
+	}
+	inbox := &resetBarrierInbox{
+		acceptStarted: make(chan struct{}), resetCalled: make(chan struct{}),
+		resetErr: errors.New("RAW-RESET-SECRET https://private.example/reset"),
+	}
+	background := newBackgroundRuntime(store, nil)
+	background.installInbox(inbox, inbox.Health())
+	store.setResetCoordinator(background.Reset)
+
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+	if response.Code != http.StatusInternalServerError || strings.Contains(response.Body.String(), "RAW-RESET-SECRET") || strings.Contains(response.Body.String(), "private.example") {
+		t.Fatalf("unsafe reset failure response status = %d, body = %s", response.Code, response.Body.String())
+	}
+	status := background.Status()
+	if status.IngestionErrorKind != "reset_failure" {
+		t.Fatalf("reset failure kind = %q, want reset_failure", status.IngestionErrorKind)
+	}
+	put := httptest.NewRecorder()
+	store.handle(put, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(`{"roomId":"2"}`)))
+	if put.Code != http.StatusConflict || strings.Contains(put.Body.String(), "RAW-RESET-SECRET") {
+		t.Fatalf("post-failure mutation status = %d, body = %s", put.Code, put.Body.String())
 	}
 }
 

@@ -25,10 +25,19 @@ type configStore struct {
 	onChange           func()
 	onTimerChange      func()
 	onUpdateChange     func()
+	resetCoordinator   func() error
 	migrationRequired  bool
 	transactionPending bool
+	mutationBlockKind  string
+	mutationBlockErr   error
 	writeAtomically    func(string, []byte) error
 	readTransaction    func(string) ([]byte, error)
+}
+
+type stateMutationsBlockedError struct{}
+
+func (*stateMutationsBlockedError) Error() string {
+	return "本地状态事务需要先恢复或通过恢复默认清除"
 }
 
 // TransactionPending is an O(1) snapshot maintained by the transaction
@@ -39,12 +48,41 @@ func (s *configStore) TransactionPending() bool {
 	return s.transactionPending
 }
 
+func (s *configStore) MutationBlockKind() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.mutationBlockKind
+}
+
+func (s *configStore) blockMutationsLocked(kind string, err error) {
+	s.mutationBlockKind = kind
+	s.mutationBlockErr = err
+}
+
+func (s *configStore) ensureMutationsAllowedLocked() error {
+	if s.mutationBlockKind != "" {
+		return &stateMutationsBlockedError{}
+	}
+	return nil
+}
+
 func newDefaultConfigStore() (*configStore, error) {
 	root, err := os.UserConfigDir()
 	if err != nil {
 		return nil, fmt.Errorf("无法确定配置目录：%w", err)
 	}
-	store := &configStore{path: filepath.Join(root, "BilibiliLiveGiftPanel", "config.json")}
+	return newConfigStoreAtPath(filepath.Join(root, "BilibiliLiveGiftPanel", "config.json"))
+}
+
+func newConfigStoreAtPath(path string) (*configStore, error) {
+	store := &configStore{path: path}
+	store.mu.Lock()
+	if err := store.recoverPendingStateTransactionLocked(); err != nil {
+		store.blockMutationsLocked("transaction_recovery", err)
+		store.mu.Unlock()
+		return store, nil
+	}
+	store.mu.Unlock()
 	if err := store.migrateLegacy(); err != nil {
 		return nil, err
 	}
@@ -151,6 +189,11 @@ func (s *configStore) handlePatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeConfigStoreError(w http.ResponseWriter, err error) {
+	var blocked *stateMutationsBlockedError
+	if errors.As(err, &blocked) {
+		writeJSON(w, http.StatusConflict, map[string]any{"code": -1, "message": blocked.Error()})
+		return
+	}
 	var versionError *unsupportedStateVersionError
 	if errors.As(err, &versionError) {
 		writeJSON(w, http.StatusConflict, map[string]any{"code": -1, "message": versionError.Error()})
@@ -546,17 +589,17 @@ func validateAppState(state appState) error {
 
 func (s *configStore) handleDelete(w http.ResponseWriter) {
 	previous, _ := s.readState()
-	s.mu.Lock()
-	var removeErr error
-	for _, path := range s.statePaths() {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) && removeErr == nil {
-			removeErr = err
-		}
+	s.mu.RLock()
+	coordinator := s.resetCoordinator
+	s.mu.RUnlock()
+	var resetErr error
+	if coordinator != nil {
+		resetErr = coordinator()
+	} else {
+		resetErr = s.resetStateArtifacts()
 	}
-	s.migrationRequired = false
-	s.mu.Unlock()
-	if removeErr != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": removeErr.Error()})
+	if resetErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": "恢复默认失败，本地状态已暂停修改，请重试或导出运行日志"})
 		return
 	}
 	if strings.TrimSpace(previous.RoomID) != "" {
@@ -566,6 +609,58 @@ func (s *configStore) handleDelete(w http.ResponseWriter) {
 		s.notifyUpdateChanged()
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *configStore) setResetCoordinator(coordinator func() error) {
+	s.mu.Lock()
+	s.resetCoordinator = coordinator
+	s.mu.Unlock()
+}
+
+func (s *configStore) recordResetFailure(err error) {
+	s.mu.Lock()
+	s.blockMutationsLocked("reset_failure", err)
+	s.mu.Unlock()
+}
+
+func (s *configStore) resetStateArtifacts() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var firstErr error
+	paths := append(s.statePaths(), s.stateTransactionPath())
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	dir := filepath.Dir(s.path)
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, entry := range entries {
+			if entry.Type().IsRegular() && isGiftInboxTempName(entry.Name()) {
+				if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+					firstErr = err
+				}
+			}
+		}
+	} else if !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+		firstErr = err
+	}
+	if firstErr == nil {
+		if _, err := os.Stat(dir); err == nil {
+			firstErr = syncStateDirectory(dir)
+		}
+	}
+	if firstErr != nil {
+		s.blockMutationsLocked("reset_failure", firstErr)
+		_, evidenceErr := os.Stat(s.stateTransactionPath())
+		s.transactionPending = evidenceErr == nil || !errors.Is(evidenceErr, os.ErrNotExist)
+		return firstErr
+	}
+	s.migrationRequired = false
+	s.transactionPending = false
+	s.mutationBlockKind = ""
+	s.mutationBlockErr = nil
+	return nil
 }
 
 func (s *configStore) setOnChange(callback func()) {
@@ -623,8 +718,14 @@ func (s *configStore) replaceState(state appState) error {
 	normalizeAppState(&state)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.ensureMutationsAllowedLocked(); err != nil {
+		return err
+	}
 	previous, err := s.readStateLocked()
 	if err != nil {
+		return err
+	}
+	if err := s.ensureMutationsAllowedLocked(); err != nil {
 		return err
 	}
 	return s.persistStateLocked(previous, state, false)
@@ -661,9 +762,15 @@ func clearRoomScopedRecords(state *appState) {
 func (s *configStore) replaceClientState(state appState) (clientStateReplaceResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.ensureMutationsAllowedLocked(); err != nil {
+		return clientStateReplaceResult{}, err
+	}
 	previous, previousErr := s.readStateLocked()
 	if previousErr != nil {
 		return clientStateReplaceResult{}, previousErr
+	}
+	if err := s.ensureMutationsAllowedLocked(); err != nil {
+		return clientStateReplaceResult{}, err
 	}
 	state.AppliedIngressIDs = append([]string(nil), previous.AppliedIngressIDs...)
 	state.RecentSourceGiftKeys = make(map[string]int64, len(previous.RecentSourceGiftKeys))
@@ -689,9 +796,15 @@ func (s *configStore) replaceClientState(state appState) (clientStateReplaceResu
 func (s *configStore) patchClientState(fields map[string]json.RawMessage) (clientStateReplaceResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.ensureMutationsAllowedLocked(); err != nil {
+		return clientStateReplaceResult{}, err
+	}
 	previous, previousErr := s.readStateLocked()
 	if previousErr != nil {
 		return clientStateReplaceResult{}, previousErr
+	}
+	if err := s.ensureMutationsAllowedLocked(); err != nil {
+		return clientStateReplaceResult{}, err
 	}
 	// PATCH decoding mutates existing slice elements in place. A shallow copy
 	// would therefore also mutate previous, making persistStateLocked believe
@@ -727,8 +840,14 @@ func (s *configStore) patchClientState(fields map[string]json.RawMessage) (clien
 func (s *configStore) updateState(update func(*appState) error) (appState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.ensureMutationsAllowedLocked(); err != nil {
+		return appState{}, err
+	}
 	previous, err := s.readStateLocked()
 	if err != nil {
+		return appState{}, err
+	}
+	if err := s.ensureMutationsAllowedLocked(); err != nil {
 		return appState{}, err
 	}
 	state, err := cloneAppState(previous)
@@ -751,8 +870,14 @@ func (s *configStore) updateStateForIngestion(
 ) (appState, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.ensureMutationsAllowedLocked(); err != nil {
+		return appState{}, false, err
+	}
 	previous, err := s.readStateLocked()
 	if err != nil {
+		return appState{}, false, err
+	}
+	if err := s.ensureMutationsAllowedLocked(); err != nil {
 		return appState{}, false, err
 	}
 	if strings.TrimSpace(ingestionID) == "" {
@@ -788,39 +913,55 @@ func (s *configStore) writeAtomicFile(path string, data []byte) error {
 	return writeFileAtomically(path, data)
 }
 
+// atomicWriteOutcome distinguishes a write that never reached its final name
+// from one whose rename committed but whose containing directory could not be
+// durably synced. Existing state callers still treat either error as failure.
+type atomicWriteOutcome struct {
+	Committed bool
+	Err       error
+}
+
 func writeFileAtomically(path string, data []byte) error {
+	return writeFileAtomicallyOutcome(path, data).Err
+}
+
+func writeFileAtomicallyOutcome(path string, data []byte) atomicWriteOutcome {
+	return writeFileAtomicallyOutcomeWith(path, data, syncStateDirectory)
+}
+
+func writeFileAtomicallyOutcomeWith(path string, data []byte, syncDirectory func(string) error) atomicWriteOutcome {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("创建配置目录失败：%w", err)
+		return atomicWriteOutcome{Err: fmt.Errorf("创建配置目录失败：%w", err)}
 	}
 	temporary, err := os.CreateTemp(dir, "config-*.tmp")
 	if err != nil {
-		return fmt.Errorf("创建临时配置失败：%w", err)
+		return atomicWriteOutcome{Err: fmt.Errorf("创建临时配置失败：%w", err)}
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
 	if err := temporary.Chmod(0o600); err != nil {
 		temporary.Close()
-		return err
+		return atomicWriteOutcome{Err: err}
 	}
 	if _, err := temporary.Write(data); err != nil {
 		temporary.Close()
-		return fmt.Errorf("写入配置失败：%w", err)
+		return atomicWriteOutcome{Err: fmt.Errorf("写入配置失败：%w", err)}
 	}
 	if err := temporary.Sync(); err != nil {
 		temporary.Close()
-		return fmt.Errorf("同步配置文件失败：%w", err)
+		return atomicWriteOutcome{Err: fmt.Errorf("同步配置文件失败：%w", err)}
 	}
 	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("关闭配置文件失败：%w", err)
+		return atomicWriteOutcome{Err: fmt.Errorf("关闭配置文件失败：%w", err)}
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
-		return fmt.Errorf("替换配置文件失败：%w", err)
+		return atomicWriteOutcome{Err: fmt.Errorf("替换配置文件失败：%w", err)}
 	}
-	if err := syncStateDirectory(dir); err != nil {
-		return err
+	if err := syncDirectory(dir); err != nil {
+		return atomicWriteOutcome{Committed: true, Err: err}
 	}
-	return nil
+	return atomicWriteOutcome{Committed: true}
 }
 
 type stateDirectory interface {

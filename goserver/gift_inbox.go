@@ -65,18 +65,34 @@ type giftInbox struct {
 }
 
 type giftInboxShared struct {
-	mu           sync.Mutex
-	pendingPath  string
-	sequencePath string
-	nextSequence uint64
-	health       giftInboxHealth
-	pendingBytes int64
-	revision     uint64
-	pending      []giftInboxRecordMetadata
-	claimedBy    uint64
-	claimedID    string
-	rootInfo     os.FileInfo
-	openHandles  int
+	mu              sync.Mutex
+	pendingPath     string
+	sequencePath    string
+	nextSequence    uint64
+	health          giftInboxHealth
+	pendingBytes    int64
+	revision        uint64
+	pending         []giftInboxRecordMetadata
+	claimedBy       uint64
+	claimedID       string
+	rootInfo        os.FileInfo
+	openHandles     int
+	writeAtomically func(string, []byte) atomicWriteOutcome
+}
+
+type giftInboxDurabilityWarning struct {
+	err error
+}
+
+func (warning *giftInboxDurabilityWarning) Error() string {
+	return fmt.Sprintf("gift inbox record committed with durability warning: %v", warning.err)
+}
+
+func (warning *giftInboxDurabilityWarning) Unwrap() error { return warning.err }
+
+func giftInboxRecordCommitted(err error) bool {
+	var warning *giftInboxDurabilityWarning
+	return errors.As(err, &warning)
 }
 
 var giftInboxRegistry = struct {
@@ -119,11 +135,12 @@ func openGiftInbox(root string) (*giftInbox, error) {
 		}
 	}
 	shared := &giftInboxShared{
-		pendingPath:  pendingPath,
-		sequencePath: filepath.Join(inboxRoot, "sequence.json"),
-		nextSequence: 1,
-		rootInfo:     rootInfo,
-		openHandles:  1,
+		pendingPath:     pendingPath,
+		sequencePath:    filepath.Join(inboxRoot, "sequence.json"),
+		nextSequence:    1,
+		rootInfo:        rootInfo,
+		openHandles:     1,
+		writeAtomically: writeFileAtomicallyOutcome,
 	}
 	inbox := &giftInbox{shared: shared, handleID: handleID, pendingPath: shared.pendingPath, sequencePath: shared.sequencePath}
 	if err := inbox.removeOrphanTempsLocked(); err != nil {
@@ -183,12 +200,14 @@ func (inbox *giftInbox) Accept(roomID, command string, gift giftEvent) (giftInbo
 		inbox.touchHealthLocked()
 		return giftInboxRecord{}, errGiftInboxCapacity
 	}
-	if err := inbox.persistNextSequenceLocked(inbox.shared.nextSequence + 1); err != nil {
+	sequenceWarning, err := inbox.persistNextSequenceLocked(inbox.shared.nextSequence + 1)
+	if err != nil {
 		return giftInboxRecord{}, err
 	}
 	inbox.shared.nextSequence++
-	if err := writeFileAtomically(inbox.recordPath(record.LocalSequence, record.IngestionID), append(data, '\n')); err != nil {
-		return giftInboxRecord{}, fmt.Errorf("persist gift inbox record: %w", err)
+	writeOutcome := inbox.shared.writeAtomically(inbox.recordPath(record.LocalSequence, record.IngestionID), append(data, '\n'))
+	if writeOutcome.Err != nil && !writeOutcome.Committed {
+		return giftInboxRecord{}, fmt.Errorf("persist gift inbox record: %w", writeOutcome.Err)
 	}
 	inbox.shared.health.PendingCount++
 	inbox.shared.pendingBytes += int64(len(data) + 1)
@@ -202,6 +221,9 @@ func (inbox *giftInbox) Accept(roomID, command string, gift giftEvent) (giftInbo
 	inbox.shared.health.PendingBytes = inbox.shared.pendingBytes
 	inbox.shared.health.CapacityError = inbox.shared.health.PendingCount >= giftInboxRecordLimit || inbox.shared.pendingBytes >= giftInboxByteLimit
 	inbox.touchHealthLocked()
+	if writeOutcome.Err != nil || sequenceWarning != nil {
+		return record, &giftInboxDurabilityWarning{err: errors.Join(sequenceWarning, writeOutcome.Err)}
+	}
 	return record, nil
 }
 
@@ -328,6 +350,53 @@ func (inbox *giftInbox) Close() error {
 	return nil
 }
 
+// Reset clears only the durable inbox artifacts owned by this inbox root. The
+// runtime reset barrier guarantees there is no in-flight producer or consumer
+// claim while this method holds the shared inbox lock.
+func (inbox *giftInbox) Reset() error {
+	inbox.shared.mu.Lock()
+	defer inbox.shared.mu.Unlock()
+	if err := inbox.checkOpenLocked(); err != nil {
+		return err
+	}
+	if inbox.shared.claimedBy != 0 {
+		return fmt.Errorf("cannot reset gift inbox while a record is claimed")
+	}
+	entries, err := os.ReadDir(inbox.pendingPath)
+	if err != nil {
+		return fmt.Errorf("read gift inbox directory for reset: %w", err)
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || (!isGiftInboxRecordName(entry.Name()) && !isGiftInboxTempName(entry.Name())) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(inbox.pendingPath, entry.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			_, _ = inbox.reconcileHealthLocked()
+			return fmt.Errorf("remove gift inbox record during reset: %w", err)
+		}
+	}
+	if err := os.Remove(inbox.sequencePath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		_, _ = inbox.reconcileHealthLocked()
+		return fmt.Errorf("remove gift inbox sequence during reset: %w", err)
+	}
+	if err := syncStateDirectory(inbox.pendingPath); err != nil {
+		_, _ = inbox.reconcileHealthLocked()
+		return fmt.Errorf("sync reset gift inbox records: %w", err)
+	}
+	if err := syncStateDirectory(filepath.Dir(inbox.sequencePath)); err != nil {
+		_, _ = inbox.reconcileHealthLocked()
+		return fmt.Errorf("sync reset gift inbox root: %w", err)
+	}
+	inbox.shared.nextSequence = 1
+	inbox.shared.pendingBytes = 0
+	inbox.shared.pending = nil
+	inbox.shared.claimedBy = 0
+	inbox.shared.claimedID = ""
+	inbox.shared.health = giftInboxHealth{}
+	inbox.touchHealthLocked()
+	return nil
+}
+
 func (inbox *giftInbox) checkOpenLocked() error {
 	if inbox.closed {
 		return errGiftInboxClosed
@@ -404,18 +473,22 @@ func (inbox *giftInbox) loadSequenceLocked() error {
 	return nil
 }
 
-func (inbox *giftInbox) persistNextSequenceLocked(next uint64) error {
+func (inbox *giftInbox) persistNextSequenceLocked(next uint64) (warning error, err error) {
 	if next == 0 {
-		return errors.New("gift inbox sequence overflow")
+		return nil, errors.New("gift inbox sequence overflow")
 	}
 	data, err := json.Marshal(giftInboxSequence{NextSequence: next})
 	if err != nil {
-		return fmt.Errorf("serialize gift inbox sequence: %w", err)
+		return nil, fmt.Errorf("serialize gift inbox sequence: %w", err)
 	}
-	if err := writeFileAtomically(inbox.sequencePath, append(data, '\n')); err != nil {
-		return fmt.Errorf("persist gift inbox sequence: %w", err)
+	outcome := inbox.shared.writeAtomically(inbox.sequencePath, append(data, '\n'))
+	if outcome.Err != nil && !outcome.Committed {
+		return nil, fmt.Errorf("persist gift inbox sequence: %w", outcome.Err)
 	}
-	return nil
+	if outcome.Err != nil {
+		return fmt.Errorf("persist gift inbox sequence durability: %w", outcome.Err), nil
+	}
+	return nil, nil
 }
 
 func (inbox *giftInbox) reconcileHealthLocked() (giftInboxHealth, error) {

@@ -166,11 +166,14 @@ func TestTransactionPendingRemainsTrueWhenExistingEvidenceCannotBeRead(t *testin
 		t.Fatal(err)
 	}
 	store.readTransaction = func(string) ([]byte, error) { return nil, errors.New("injected access failure") }
-	if _, err := store.readState(); err == nil {
-		t.Fatal("expected injected transaction read failure")
+	if _, err := store.readState(); err != nil {
+		t.Fatalf("diagnostic read failed: %v", err)
 	}
 	if !store.TransactionPending() {
 		t.Fatal("unreadable transaction evidence was incorrectly reported as cleared")
+	}
+	if store.MutationBlockKind() != "transaction_recovery" {
+		t.Fatalf("mutation block kind = %q, want transaction_recovery", store.MutationBlockKind())
 	}
 }
 
@@ -203,8 +206,11 @@ func TestPendingStateTransactionValidatesEveryPayloadBeforeWritingTargets(t *tes
 			mutate(&tx)
 			writePendingTransactionForTest(t, store, tx)
 
-			if _, err := store.readState(); err == nil {
-				t.Fatal("expected embedded payload validation error")
+			if _, err := store.readState(); err != nil {
+				t.Fatalf("diagnostic read failed: %v", err)
+			}
+			if store.MutationBlockKind() != "transaction_recovery" {
+				t.Fatalf("mutation block kind = %q, want transaction_recovery", store.MutationBlockKind())
 			}
 			assertStateFilesEqual(t, store, before)
 			if _, err := os.Stat(store.stateTransactionPath()); err != nil {
@@ -248,8 +254,11 @@ func TestPendingStateTransactionRejectsNonObjectEmbeddedPayloadsBeforeWritingTar
 				setPayload(&tx, payload)
 				writePendingTransactionForTest(t, store, tx)
 
-				if _, err := store.readState(); err == nil {
-					t.Fatalf("accepted %s %s payload", targetName, shapeName)
+				if _, err := store.readState(); err != nil {
+					t.Fatalf("diagnostic read failed for %s %s payload: %v", targetName, shapeName, err)
+				}
+				if store.MutationBlockKind() != "transaction_recovery" {
+					t.Fatalf("mutation block kind = %q, want transaction_recovery", store.MutationBlockKind())
 				}
 				assertStateFilesEqual(t, store, before)
 				if _, err := os.Stat(store.stateTransactionPath()); err != nil {
@@ -311,8 +320,11 @@ func TestPendingStateTransactionRejectsNonCanonicalEmbeddedPayloadsBeforeWriting
 			test.mutate(&tx)
 			writePendingTransactionForTest(t, store, tx)
 
-			if _, err := store.readState(); err == nil {
-				t.Fatal("accepted noncanonical embedded payload")
+			if _, err := store.readState(); err != nil {
+				t.Fatalf("diagnostic read failed: %v", err)
+			}
+			if store.MutationBlockKind() != "transaction_recovery" {
+				t.Fatalf("mutation block kind = %q, want transaction_recovery", store.MutationBlockKind())
 			}
 			assertStateFilesEqual(t, store, before)
 			if _, err := os.Stat(store.stateTransactionPath()); err != nil {
@@ -495,8 +507,11 @@ func TestPendingStateTransactionKeepsUnreadableEvidence(t *testing.T) {
 				t.Fatal(err)
 			}
 			store := &configStore{path: filepath.Join(dir, "config.json")}
-			if _, err := store.readState(); err == nil {
-				t.Fatal("expected transaction recovery error")
+			if _, err := store.readState(); err != nil {
+				t.Fatalf("diagnostic read failed: %v", err)
+			}
+			if store.MutationBlockKind() != "transaction_recovery" {
+				t.Fatalf("mutation block kind = %q, want transaction_recovery", store.MutationBlockKind())
 			}
 			if data, err := os.ReadFile(path); err != nil || string(data) != contents {
 				t.Fatalf("transaction evidence changed: data=%q err=%v", data, err)

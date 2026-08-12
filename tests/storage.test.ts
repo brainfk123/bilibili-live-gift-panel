@@ -580,6 +580,13 @@ describe('storage', () => {
     expect(loadState().roomId).toBe('');
   });
 
+  it('resetState reports a safe error when the coordinated backend reset fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('RAW-RESET-SECRET', { status: 500 })));
+
+    await expect(resetState()).rejects.toThrow('恢复默认失败');
+    await expect(resetState()).rejects.not.toThrow('RAW-RESET-SECRET');
+  });
+
   it('pruneLog keeps the first MAX_LOG entries, preserving input order', () => {
     const entry = (time: number): LogEntry => ({
       time,
