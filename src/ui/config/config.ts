@@ -22,6 +22,7 @@ import {
   pollBiliQRCodeLogin,
   previewFormula,
   RuntimeConnectionState,
+  RuntimeStatus,
   RoomAnchorInfo,
   resetGiftTargetProgress,
   startBiliQRCodeLogin,
@@ -193,6 +194,7 @@ export function mountConfig(root: HTMLElement): void {
   if (metadataChanged || consumeConfigMigrationRequired()) void saveState(state);
 
   let connectionState: RuntimeConnectionState = 'idle';
+  let runtimeStatus: RuntimeStatus = { state: 'idle', roomId: '' };
   let biliAuth: BiliAuthStatus = { state: 'anonymous' };
   let guideDismissed = !state.settings.showTutorial;
   let activeGuide: SpotlightGuideElement | null = null;
@@ -334,6 +336,13 @@ export function mountConfig(root: HTMLElement): void {
       try {
         const runtime = await getRuntimeStatus();
         const previous = connectionState;
+        const previousHealth = JSON.stringify({
+          gaps: runtimeStatus.gaps,
+          inbox: runtimeStatus.inbox,
+          transactionPending: runtimeStatus.transactionPending,
+          ingestionErrorKind: runtimeStatus.ingestionErrorKind,
+        });
+        runtimeStatus = runtime;
         connectionState = runtime.state;
         renderHeaderStatus();
         const inlineStatus = root.querySelector('.connection-inline-status');
@@ -342,6 +351,13 @@ export function mountConfig(root: HTMLElement): void {
           void refreshRoomGiftCatalog(true);
           if (!editorOpen) render();
         }
+        const nextHealth = JSON.stringify({
+          gaps: runtime.gaps,
+          inbox: runtime.inbox,
+          transactionPending: runtime.transactionPending,
+          ingestionErrorKind: runtime.ingestionErrorKind,
+        });
+        if (previousHealth !== nextHealth && !editorOpen) render();
       } catch {
         connectionState = 'error';
         renderHeaderStatus();
@@ -896,11 +912,13 @@ export function mountConfig(root: HTMLElement): void {
     guideToggle.hidden = simple;
     configShell.setSimpleMode(simple);
     if (simple) {
+      renderGiftIngestionWarnings(configShell.simpleContent);
       renderSimpleExperience();
       applyActivePage();
       return;
     }
     renderOverviewDashboard();
+    renderGiftIngestionWarnings();
     renderConnectionWorkspace();
     renderAttributesWorkspace();
     renderActivities();
@@ -911,6 +929,82 @@ export function mountConfig(root: HTMLElement): void {
     renderGiftHistory();
     applyActivePage();
     renderGuide();
+  }
+
+  function renderGiftIngestionWarnings(host = configShell.workspace('overview')): void {
+    const warnings = el('section', { class: 'gift-ingestion-warnings', ariaLive: 'polite' });
+    const gaps = runtimeStatus.gaps ?? [];
+    const recoveredGap = [...gaps].reverse().find((gap) => gap.endedAt && gap.endedAt > gap.startedAt);
+    if (recoveredGap && dismissedGapIdentity() !== connectionGapIdentity(recoveredGap)) {
+      const warning = el('article', { class: 'gift-ingestion-warning is-warning' });
+      const close = el('button', { class: 'gift-ingestion-warning-close', type: 'button', text: '关闭' }) as HTMLButtonElement;
+      close.onclick = () => {
+        try {
+          globalThis.localStorage?.setItem('bilibili-live-gift-panel-dismissed-gap-v1', connectionGapIdentity(recoveredGap));
+        } catch {
+          // Local dismissal is optional when browser storage is unavailable.
+        }
+        render();
+      };
+      warning.append(
+        el('div', { class: 'gift-ingestion-warning-copy' }, [
+          el('strong', { text: '直播连接已恢复' }),
+          el('p', { text: `连接中断期间可能漏礼物。本次中断约 ${formatGapDuration(recoveredGap.durationMs)}，已重连 ${recoveredGap.attempts} 次。` }),
+        ]),
+        close,
+      );
+      warnings.append(warning);
+    }
+
+    const failureKind = runtimeStatus.ingestionErrorKind;
+    if (failureKind || runtimeStatus.transactionPending || runtimeStatus.inbox?.capacityError) {
+      const message = failureKind === 'inbox_persist'
+        ? '礼物收件箱暂时无法写入，新的礼物可能无法安全保存。'
+        : failureKind === 'inbox_capacity' || runtimeStatus.inbox?.capacityError
+          ? '礼物收件箱已满，新的礼物暂时无法安全保存。'
+          : '礼物处理事务正在恢复，请保持配置页面打开并等待恢复完成。';
+      warnings.append(el('article', { class: 'gift-ingestion-warning is-danger' }, [
+        el('div', { class: 'gift-ingestion-warning-copy' }, [
+          el('strong', { text: '礼物接收需要注意' }),
+          el('p', { text: message }),
+        ]),
+      ]));
+    }
+
+    const inbox = runtimeStatus.inbox;
+    if (inbox && inbox.pendingCount > 0) {
+      const oldestWait = inbox.oldestPendingAt ? `，最早已等待 ${formatPendingWait(inbox.oldestPendingAt)}` : '';
+      warnings.append(el('article', { class: 'gift-ingestion-warning is-warning' }, [
+        el('div', { class: 'gift-ingestion-warning-copy' }, [
+          el('strong', { text: '礼物正在等待处理' }),
+          el('p', { text: `${inbox.pendingCount} 条礼物等待处理${oldestWait}。` }),
+        ]),
+      ]));
+    }
+    if (warnings.children.length > 0) host.append(warnings);
+  }
+
+  function dismissedGapIdentity(): string | null {
+    try {
+      return globalThis.localStorage?.getItem('bilibili-live-gift-panel-dismissed-gap-v1') ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function connectionGapIdentity(gap: { startedAt: number; endedAt?: number; attempts: number }): string {
+    return `${gap.startedAt}:${gap.endedAt ?? 0}:${gap.attempts}`;
+  }
+
+  function formatGapDuration(durationMs?: number): string {
+    const seconds = Math.max(1, Math.round((durationMs ?? 0) / 1000));
+    return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分钟`;
+  }
+
+  function formatPendingWait(timestamp: number): string {
+    const milliseconds = timestamp < 100_000_000_000 ? timestamp * 1000 : timestamp;
+    const seconds = Math.max(0, Math.floor((Date.now() - milliseconds) / 1000));
+    return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分钟`;
   }
 
   function switchConfigExperience(experience: AppState['settings']['configExperience']): void {

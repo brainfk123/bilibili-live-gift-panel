@@ -25,12 +25,18 @@ type runtimeCallbacks struct {
 }
 
 type runtimeStatus struct {
-	State          string          `json:"state"`
-	RoomID         string          `json:"roomId"`
-	LastError      string          `json:"lastError,omitempty"`
-	IngestionError string          `json:"ingestionError,omitempty"`
-	LastGiftAt     int64           `json:"lastGiftAt,omitempty"`
-	ConnectionGaps []connectionGap `json:"connectionGaps,omitempty"`
+	State              string           `json:"state"`
+	RoomID             string           `json:"roomId"`
+	LastError          string           `json:"-"`
+	IngestionError     string           `json:"-"`
+	IngestionErrorKind string           `json:"ingestionErrorKind,omitempty"`
+	LastGiftAt         int64            `json:"lastGiftAt,omitempty"`
+	LastFrameAt        int64            `json:"lastFrameAt,omitempty"`
+	ConnectionGaps     []connectionGap  `json:"-"`
+	Gaps               []connectionGap  `json:"gaps,omitempty"`
+	ReconnectAttempts  int              `json:"reconnectAttempts"`
+	Inbox              *giftInboxHealth `json:"inbox,omitempty"`
+	TransactionPending bool             `json:"transactionPending"`
 }
 
 type runtimeGiftInbox interface {
@@ -175,6 +181,7 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 		go func() {
 			finished <- supervisor.Run(connectionContext, roomID, runtimeCallbacks{
 				onGift: func(gift giftEvent) {
+					runtime.recordLastFrame()
 					runtime.acceptGift(connectionContext, roomID, giftCommandCategory(gift), gift)
 				},
 				onGiftCatalog: func(gifts []roomGiftInfo) {
@@ -795,8 +802,19 @@ func (runtime *backgroundRuntime) recordIngestionFailureFrom(source string, err 
 	runtime.ingestionGeneration++
 	runtime.ingestionErrorSource = source
 	runtime.status.IngestionError = err.Error()
+	runtime.status.IngestionErrorKind = safeIngestionFailureKind(source, err)
 	runtime.mu.Unlock()
 	runtime.diagnostics.Error("gift_ingestion_failed", "reason", safeIngestionFailureSource(source), "error", err)
+}
+
+func safeIngestionFailureKind(source string, err error) string {
+	if errors.Is(err, errGiftInboxCapacity) {
+		return "inbox_capacity"
+	}
+	if source == "accept" {
+		return "inbox_persist"
+	}
+	return "transaction"
 }
 
 func safeIngestionFailureSource(source string) string {
@@ -818,6 +836,7 @@ func (runtime *backgroundRuntime) clearIngestionFailure(generation uint64, sourc
 	runtime.mu.Lock()
 	if runtime.ingestionGeneration == generation && runtime.ingestionErrorSource == source {
 		runtime.status.IngestionError = ""
+		runtime.status.IngestionErrorKind = ""
 		runtime.ingestionErrorSource = ""
 	}
 	runtime.mu.Unlock()
@@ -917,10 +936,30 @@ func (runtime *backgroundRuntime) NotifyTimerConfigChanged() {
 
 func (runtime *backgroundRuntime) Status() runtimeStatus {
 	runtime.mu.RLock()
-	defer runtime.mu.RUnlock()
 	status := runtime.status
 	status.ConnectionGaps = append([]connectionGap(nil), runtime.status.ConnectionGaps...)
+	status.Gaps = append([]connectionGap(nil), runtime.status.ConnectionGaps...)
+	if len(status.Gaps) > 0 {
+		status.ReconnectAttempts = status.Gaps[len(status.Gaps)-1].Attempts
+	}
+	inbox := runtime.inbox
+	store := runtime.store
+	runtime.mu.RUnlock()
+	if inbox != nil {
+		health := inbox.Health()
+		status.Inbox = &health
+	}
+	if store != nil {
+		_, err := os.Stat(store.stateTransactionPath())
+		status.TransactionPending = err == nil
+	}
 	return status
+}
+
+func (runtime *backgroundRuntime) recordLastFrame() {
+	runtime.mu.Lock()
+	runtime.status.LastFrameAt = time.Now().UnixMilli()
+	runtime.mu.Unlock()
 }
 
 func (runtime *backgroundRuntime) setConnectionGaps(gaps []connectionGap) {

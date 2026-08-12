@@ -41,6 +41,8 @@ const mockedClients = vi.hoisted(() => [] as Array<{
 }>);
 
 let mockedRuntimeState: 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error' = 'idle';
+let mockedRuntimeHealth: Record<string, unknown> = {};
+const configurationStorage = new Map<string, string>();
 const nativeSetInterval = globalThis.setInterval.bind(globalThis);
 const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
 const nativeClearInterval = globalThis.clearInterval.bind(globalThis);
@@ -216,6 +218,13 @@ const storage = {
 beforeEach(async () => {
   mockedClients.length = 0;
   mockedRuntimeState = 'idle';
+  mockedRuntimeHealth = {};
+  configurationStorage.clear();
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => configurationStorage.get(key) ?? null,
+    setItem: (key: string, value: string) => configurationStorage.set(key, value),
+    removeItem: (key: string) => configurationStorage.delete(key),
+  });
   vi.stubGlobal('setInterval', vi.fn((handler: TimerHandler, timeout?: number, ...args: unknown[]) => (
     (timeout ?? 0) >= 1000 ? 0 : nativeSetInterval(handler, timeout, ...args)
   )));
@@ -231,7 +240,7 @@ beforeEach(async () => {
     if (url.includes('/api/runtime')) {
       return new Response(JSON.stringify({
         code: 0,
-        runtime: { state: mockedRuntimeState, roomId: mockedRuntimeState === 'idle' ? '' : '31567150' },
+        runtime: { state: mockedRuntimeState, roomId: mockedRuntimeState === 'idle' ? '' : '31567150', ...mockedRuntimeHealth },
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
     if (url.includes('/api/auth/status')) {
@@ -287,6 +296,64 @@ function defaultAdvancedState() {
   result.settings.configExperience = 'advanced';
   return result;
 }
+
+describe('gift ingestion health warnings', () => {
+  it('shows a recovered connection gap only in configuration and allows dismissal', async () => {
+    mockedRuntimeState = 'connected';
+    mockedRuntimeHealth = {
+      gaps: [{ startedAt: 1_000, endedAt: 4_000, durationMs: 3_000, attempts: 2, errorKind: 'read_timeout' }],
+    };
+    const firstRoot = new TestElement('div');
+
+    mountConfig(firstRoot as unknown as HTMLElement);
+
+    await vi.waitFor(() => expect(textOf(firstRoot)).toContain('连接中断期间可能漏礼物'));
+    const warning = firstRoot.querySelector('.gift-ingestion-warning') as TestElement;
+    expect(warning).not.toBeNull();
+    expect(textOf(warning)).not.toContain('补录');
+    expect(textOf(warning)).not.toContain('手动录入');
+    findByText(warning, '关闭')?.onclick?.();
+    expect(firstRoot.querySelector('.gift-ingestion-warning')).toBeNull();
+
+    const remountedRoot = new TestElement('div');
+    mountConfig(remountedRoot as unknown as HTMLElement);
+    await Promise.resolve();
+    expect(remountedRoot.querySelector('.gift-ingestion-warning')).toBeNull();
+  });
+
+  it('shows a red configuration warning when the inbox cannot persist', async () => {
+    mockedRuntimeHealth = { ingestionErrorKind: 'inbox_persist' };
+    const root = new TestElement('div');
+
+    mountConfig(root as unknown as HTMLElement);
+
+    await vi.waitFor(() => expect(root.querySelectorAll('.gift-ingestion-warning').some((warning) => warning.className.includes('is-danger'))).toBe(true));
+    expect(textOf(root)).toContain('礼物收件箱暂时无法写入');
+  });
+
+  it('shows pending count and oldest wait while the inbox is backlogged', async () => {
+    mockedRuntimeHealth = { inbox: { pendingCount: 3, oldestPendingAt: Date.now() - 65_000 } };
+    const root = new TestElement('div');
+
+    mountConfig(root as unknown as HTMLElement);
+
+    await vi.waitFor(() => expect(root.querySelector('.gift-ingestion-warning')).not.toBeNull());
+    expect(textOf(root)).toContain('3 条礼物等待处理');
+    expect(textOf(root)).toContain('最早已等待');
+  });
+
+  it('keeps ingestion health warnings inside simple configuration', async () => {
+    mockedRuntimeHealth = { inbox: { pendingCount: 1 } };
+    const configured = defaultState();
+    configured.settings.configExperience = 'simple';
+    await saveState(configured);
+    const root = new TestElement('div');
+
+    mountConfig(root as unknown as HTMLElement);
+
+    await vi.waitFor(() => expect(root.querySelector('.simple-mode-workspace')?.querySelector('.gift-ingestion-warning')).not.toBeNull());
+  });
+});
 
 describe('wizard progress', () => {
   it('starts with no default attributes', () => {

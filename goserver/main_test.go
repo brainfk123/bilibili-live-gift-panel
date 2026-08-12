@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -121,6 +123,64 @@ func TestMainGiftClipCloserRunsOnlyOnce(t *testing.T) {
 	closeJobs()
 	if count != 1 {
 		t.Fatalf("close count=%d", count)
+	}
+
+type runtimeStatusTestInbox struct {
+	health giftInboxHealth
+}
+
+func (inbox *runtimeStatusTestInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
+	return giftInboxRecord{}, nil
+}
+func (inbox *runtimeStatusTestInbox) Next() (giftInboxRecord, bool, error) {
+	return giftInboxRecord{}, false, nil
+}
+func (inbox *runtimeStatusTestInbox) Acknowledge(string) error { return nil }
+func (inbox *runtimeStatusTestInbox) Release(string) error     { return nil }
+func (inbox *runtimeStatusTestInbox) Close() error             { return nil }
+func (inbox *runtimeStatusTestInbox) Health() giftInboxHealth  { return inbox.health }
+
+func TestRuntimeStatusIncludesIngestionHealth(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	if err := os.WriteFile(store.stateTransactionPath(), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	background := newBackgroundRuntime(store, nil)
+	background.status = runtimeStatus{
+		State: "connected", RoomID: "31567150", LastError: "https://connection-secret.example.test/read failure",
+		ConnectionGaps: []connectionGap{{StartedAt: 1000, EndedAt: 4000, DurationMS: 3000, Attempts: 2, ErrorKind: "read_timeout"}},
+	}
+	background.recordIngestionFailureFrom("accept", errors.New("https://secret.example.test/inbox write failed"))
+	background.inbox = &runtimeStatusTestInbox{health: giftInboxHealth{PendingCount: 3, OldestPendingAt: 2000}}
+
+	handler := handleRuntimeStatus(background)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/runtime", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+
+	var payload struct {
+		Runtime map[string]json.RawMessage `json:"runtime"`
+	}
+	if err := json.NewDecoder(strings.NewReader(body)).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	for field, want := range map[string]string{
+		"state":              `"connected"`,
+		"reconnectAttempts":  `2`,
+		"gaps":               `[{"startedAt":1000,"endedAt":4000,"durationMs":3000,"attempts":2,"errorKind":"read_timeout"}]`,
+		"inbox":              `{"pendingCount":3,"oldestPendingAt":2000}`,
+		"transactionPending": `true`,
+		"ingestionErrorKind": `"inbox_persist"`,
+	} {
+		if got := string(payload.Runtime[field]); got != want {
+			t.Errorf("runtime.%s = %s, want %s (body = %s)", field, got, want, body)
+		}
+	}
+	if strings.Contains(body, "secret.example.test") || strings.Contains(body, "connection-secret.example.test") || strings.Contains(body, "IngestionError") {
+		t.Fatalf("runtime response exposed unsafe ingestion details: %s", body)
 	}
 }
 

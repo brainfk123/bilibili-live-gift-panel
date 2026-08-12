@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   blindBoxDisplayUrl,
@@ -11,6 +12,21 @@ import {
 import { defaultState } from '../src/storage';
 
 describe('OBS output catalog', () => {
+  it('keeps ingestion warning UI out of every OBS output module', () => {
+    const displayModules = [
+      'src/ui/display/display.ts',
+      'src/ui/display/display-host.ts',
+      'src/ui/display/blind-box-display.ts',
+      'src/ui/display/gift-kpi-display.ts',
+    ];
+
+    for (const modulePath of displayModules) {
+      const source = readFileSync(modulePath, 'utf8');
+      expect(source).not.toContain('gift-ingestion-warning');
+      expect(source).not.toContain('连接中断期间可能漏礼物');
+    }
+  });
+
   it('owns parsing and encoded URL generation for every output kind', () => {
     expect(obsOutputUrl('http://localhost:12450')).toBe('http://localhost:12450/?mode=display');
     expect(obsOutputUrl('http://localhost:12450', { kind: 'attribute', attributeName: '加班 时间' }))

@@ -116,6 +116,17 @@ func handleFormulaPreview(store *configStore) http.HandlerFunc {
 	}
 }
 
+func handleRuntimeStatus(background *backgroundRuntime) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"code": -1, "message": "不支持的请求方法"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"code": 0, "runtime": background.Status()})
+	}
+}
+
 func announceStartup(notifications *notificationCenter, installedVersion string) bool {
 	if installedVersion != "" {
 		notifications.Publish(notificationUpdateSucceeded, installedVersion)
@@ -289,14 +300,7 @@ func main() {
 	})
 	mux.HandleFunc("/api/auth/", login.handle)
 	mux.Handle("/api/pages/presence/", presence)
-	mux.HandleFunc("/api/runtime", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"code": -1, "message": "不支持的请求方法"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"code": 0, "runtime": background.Status()})
-	})
+	mux.HandleFunc("/api/runtime", handleRuntimeStatus(background))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"name": panelHealthMarker, "version": appVersion})
 	})
