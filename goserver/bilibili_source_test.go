@@ -1,9 +1,86 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 )
+
+type fakeBiliSocket struct {
+	reads     [][]byte
+	readErr   error
+	writes    [][]byte
+	deadlines []time.Time
+}
+
+func (socket *fakeBiliSocket) ReadMessage() (int, []byte, error) {
+	if len(socket.reads) > 0 {
+		payload := socket.reads[0]
+		socket.reads = socket.reads[1:]
+		return 2, payload, nil
+	}
+	return 0, nil, socket.readErr
+}
+func (socket *fakeBiliSocket) WriteMessage(_ int, payload []byte) error {
+	socket.writes = append(socket.writes, append([]byte(nil), payload...))
+	return nil
+}
+func (socket *fakeBiliSocket) SetReadDeadline(deadline time.Time) error {
+	socket.deadlines = append(socket.deadlines, deadline)
+	return nil
+}
+func (*fakeBiliSocket) Close() error { return nil }
+
+type heartbeatFailingBiliSocket struct {
+	closed chan struct{}
+}
+
+func (socket *heartbeatFailingBiliSocket) ReadMessage() (int, []byte, error) {
+	<-socket.closed
+	return 0, nil, errors.New("socket closed")
+}
+func (*heartbeatFailingBiliSocket) WriteMessage(_ int, payload []byte) error {
+	if len(decodeBiliPackets(payload)) == 1 && decodeBiliPackets(payload)[0].operation == biliOpHeartbeat {
+		return errors.New("heartbeat write failed")
+	}
+	return nil
+}
+func (*heartbeatFailingBiliSocket) SetReadDeadline(time.Time) error { return nil }
+func (socket *heartbeatFailingBiliSocket) Close() error {
+	select {
+	case <-socket.closed:
+	default:
+		close(socket.closed)
+	}
+	return nil
+}
+
+func TestBilibiliSourceRefreshesReadDeadlineForValidFrames(t *testing.T) {
+	authReply := encodeBiliPacket(biliOpAuthReply, []byte(`{"code":0}`))
+	socket := &fakeBiliSocket{reads: [][]byte{authReply}, readErr: errors.New("read stopped")}
+	source := &bilibiliGiftSource{heartbeatInterval: time.Hour, readTimeout: 5 * time.Millisecond}
+	err := source.runSocket(context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{onState: func(string) {}})
+	if err == nil {
+		t.Fatal("runSocket returned nil after read failure")
+	}
+	if len(socket.deadlines) < 2 {
+		t.Fatalf("deadline refreshes = %d, want initial and valid-frame refresh", len(socket.deadlines))
+	}
+	if socket.deadlines[1].Sub(socket.deadlines[0]) > 50*time.Millisecond {
+		t.Fatalf("deadline was not refreshed from the valid frame: %v", socket.deadlines)
+	}
+}
+
+func TestBilibiliSourceReturnsHeartbeatFailureOnce(t *testing.T) {
+	socket := &heartbeatFailingBiliSocket{closed: make(chan struct{})}
+	source := &bilibiliGiftSource{heartbeatInterval: time.Millisecond, readTimeout: time.Hour}
+	err := source.runSocket(context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{})
+	if connectionFailureKind(err) != "heartbeat" {
+		t.Fatalf("failure kind = %q, want heartbeat (error %v)", connectionFailureKind(err), err)
+	}
+}
 
 func TestParseBiliGift(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{

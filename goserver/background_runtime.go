@@ -25,11 +25,12 @@ type runtimeCallbacks struct {
 }
 
 type runtimeStatus struct {
-	State          string `json:"state"`
-	RoomID         string `json:"roomId"`
-	LastError      string `json:"lastError,omitempty"`
-	IngestionError string `json:"ingestionError,omitempty"`
-	LastGiftAt     int64  `json:"lastGiftAt,omitempty"`
+	State          string          `json:"state"`
+	RoomID         string          `json:"roomId"`
+	LastError      string          `json:"lastError,omitempty"`
+	IngestionError string          `json:"ingestionError,omitempty"`
+	LastGiftAt     int64           `json:"lastGiftAt,omitempty"`
+	ConnectionGaps []connectionGap `json:"connectionGaps,omitempty"`
 }
 
 type runtimeGiftInbox interface {
@@ -144,9 +145,6 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 		}
 
 		roomID := state.RoomID
-		connectionContext, cancel := context.WithCancel(ctx)
-		finished := make(chan error, 1)
-		source := runtime.sourceFactory()
 		if err := runtime.prepareRoomConnection(roomID); err != nil {
 			runtime.setStatus("error", roomID, err)
 			if !runtime.wait(ctx, 2*time.Second) {
@@ -154,9 +152,17 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 			}
 			continue
 		}
+		runtime.setConnectionGaps(nil)
+		connectionContext, cancel := context.WithCancel(ctx)
+		finished := make(chan error, 1)
+		supervisor := newConnectionSupervisor(runtime.sourceFactory)
+		supervisor.onGap = runtime.setConnectionGaps
+		supervisor.onFailure = func(err error) {
+			runtime.setStatus("reconnecting", roomID, err)
+		}
 		runtime.setStatus("connecting", roomID, nil)
 		go func() {
-			finished <- source.Run(connectionContext, roomID, runtimeCallbacks{
+			finished <- supervisor.Run(connectionContext, roomID, runtimeCallbacks{
 				onGift: func(gift giftEvent) {
 					runtime.acceptGift(connectionContext, roomID, giftCommandCategory(gift), gift)
 				},
@@ -187,9 +193,9 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 				return
 			}
 			if err != nil && !errors.Is(err, context.Canceled) {
-				runtime.setStatus("reconnecting", roomID, err)
+				runtime.setStatus("error", roomID, err)
 			}
-			if !runtime.wait(ctx, 2*time.Second) {
+			if !runtime.wait(ctx, time.Second) {
 				return
 			}
 		}
@@ -856,7 +862,15 @@ func (runtime *backgroundRuntime) NotifyTimerConfigChanged() {
 func (runtime *backgroundRuntime) Status() runtimeStatus {
 	runtime.mu.RLock()
 	defer runtime.mu.RUnlock()
-	return runtime.status
+	status := runtime.status
+	status.ConnectionGaps = append([]connectionGap(nil), runtime.status.ConnectionGaps...)
+	return status
+}
+
+func (runtime *backgroundRuntime) setConnectionGaps(gaps []connectionGap) {
+	runtime.mu.Lock()
+	runtime.status.ConnectionGaps = append([]connectionGap(nil), gaps...)
+	runtime.mu.Unlock()
 }
 
 func (runtime *backgroundRuntime) setStatus(state, roomID string, err error) {

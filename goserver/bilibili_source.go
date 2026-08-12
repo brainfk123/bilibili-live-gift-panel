@@ -26,7 +26,32 @@ const (
 )
 
 type bilibiliGiftSource struct {
-	sessionProvider func(context.Context) (biliSession, bool)
+	sessionProvider   func(context.Context) (biliSession, bool)
+	dial              biliDial
+	heartbeatInterval time.Duration
+	readTimeout       time.Duration
+}
+
+type biliSocket interface {
+	ReadMessage() (int, []byte, error)
+	WriteMessage(int, []byte) error
+	SetReadDeadline(time.Time) error
+	Close() error
+}
+
+type biliDial func(context.Context, string, http.Header) (biliSocket, error)
+
+const (
+	defaultBiliHeartbeatInterval = 30 * time.Second
+	defaultBiliReadTimeout       = 45 * time.Second
+)
+
+func defaultBiliDial(ctx context.Context, url string, headers http.Header) (biliSocket, error) {
+	connection, _, err := websocket.DefaultDialer.DialContext(ctx, url, headers)
+	if err != nil {
+		return nil, err
+	}
+	return connection, nil
 }
 
 type biliPacket struct {
@@ -86,11 +111,27 @@ func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callba
 	if session.CookieHeader != "" {
 		headers.Set("Cookie", session.CookieHeader)
 	}
-	connection, _, err := websocket.DefaultDialer.DialContext(ctx, url, headers)
+	dial := source.dial
+	if dial == nil {
+		dial = defaultBiliDial
+	}
+	connection, err := dial(ctx, url, headers)
 	if err != nil {
-		return err
+		return newConnectionFailure("dial", err)
 	}
 	defer connection.Close()
+	return source.runSocket(ctx, connection, info, session, catalogByID, effectsByID, callbacks)
+}
+
+func (source *bilibiliGiftSource) runSocket(ctx context.Context, connection biliSocket, info roomInfo, session biliSession, catalogByID map[int]roomGiftInfo, effectsByID map[int]giftEffectResource, callbacks runtimeCallbacks) error {
+	heartbeatInterval := source.heartbeatInterval
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = defaultBiliHeartbeatInterval
+	}
+	readTimeout := source.readTimeout
+	if readTimeout <= 0 {
+		readTimeout = defaultBiliReadTimeout
+	}
 
 	auth := buildBiliAuthPayload(info, session)
 	var writeMu sync.Mutex
@@ -100,14 +141,15 @@ func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callba
 		return connection.WriteMessage(websocket.BinaryMessage, payload)
 	}
 	if err := write(encodeBiliPacket(biliOpAuth, auth)); err != nil {
-		return err
+		return newConnectionFailure("write", err)
 	}
-	_ = connection.SetReadDeadline(time.Now().Add(90 * time.Second))
+	_ = connection.SetReadDeadline(time.Now().Add(readTimeout))
 
 	done := make(chan struct{})
 	defer close(done)
+	heartbeatFailure := make(chan error, 1)
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(heartbeatInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -117,7 +159,11 @@ func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callba
 			case <-done:
 				return
 			case <-ticker.C:
-				if write(encodeBiliPacket(biliOpHeartbeat, nil)) != nil {
+				if err := write(encodeBiliPacket(biliOpHeartbeat, nil)); err != nil {
+					select {
+					case heartbeatFailure <- err:
+					default:
+					}
 					_ = connection.Close()
 					return
 				}
@@ -131,18 +177,25 @@ func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callba
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return err
+			select {
+			case heartbeatErr := <-heartbeatFailure:
+				return newConnectionFailure("heartbeat", heartbeatErr)
+			default:
+				return newConnectionFailure("read", err)
+			}
 		}
-		_ = connection.SetReadDeadline(time.Now().Add(90 * time.Second))
+		_ = connection.SetReadDeadline(time.Now().Add(readTimeout))
 		for _, packet := range decodeBiliPackets(payload) {
 			if packet.operation == biliOpAuthReply {
 				var reply struct {
 					Code int `json:"code"`
 				}
 				if err := json.Unmarshal(packet.body, &reply); err != nil || reply.Code != 0 {
-					return fmt.Errorf("弹幕服务器认证失败")
+					return newConnectionFailure("auth", fmt.Errorf("弹幕服务器认证失败"))
 				}
-				callbacks.onState("connected")
+				if callbacks.onState != nil {
+					callbacks.onState("connected")
+				}
 				continue
 			}
 			if packet.operation != biliOpMessage {
@@ -161,11 +214,15 @@ func (source *bilibiliGiftSource) Run(ctx context.Context, roomID string, callba
 			}
 			for _, body := range bodies {
 				if gift, ok := parseBiliGift(body); ok {
-					callbacks.onGift(enrichGiftAnimationFromRoomCatalog(gift, catalogByID))
+					if callbacks.onGift != nil {
+						callbacks.onGift(enrichGiftAnimationFromRoomCatalog(gift, catalogByID))
+					}
 					continue
 				}
 				if paidEvent, ok := parseBiliPaidEvent(body); ok {
-					callbacks.onGift(enrichGiftAnimationFromEffectCatalog(paidEvent, effectsByID))
+					if callbacks.onGift != nil {
+						callbacks.onGift(enrichGiftAnimationFromEffectCatalog(paidEvent, effectsByID))
+					}
 				}
 			}
 		}
