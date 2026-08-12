@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,10 +24,11 @@ type runtimeCallbacks struct {
 }
 
 type runtimeStatus struct {
-	State      string `json:"state"`
-	RoomID     string `json:"roomId"`
-	LastError  string `json:"lastError,omitempty"`
-	LastGiftAt int64  `json:"lastGiftAt,omitempty"`
+	State          string `json:"state"`
+	RoomID         string `json:"roomId"`
+	LastError      string `json:"lastError,omitempty"`
+	IngestionError string `json:"ingestionError,omitempty"`
+	LastGiftAt     int64  `json:"lastGiftAt,omitempty"`
 }
 
 type runtimeGiftInbox interface {
@@ -39,22 +41,21 @@ type runtimeGiftInbox interface {
 }
 
 type backgroundRuntime struct {
-	store                 *configStore
-	sourceFactory         func() giftEventSource
-	reload                chan struct{}
-	mu                    sync.RWMutex
-	status                runtimeStatus
-	seen                  map[string]time.Time
-	pendingGiftAnimations map[string]giftEvent
-	timerMu               sync.Mutex
-	timerSchedules        map[string]timerSchedule
-	timerTicks            <-chan time.Time
-	notifications         *notificationCenter
-	inbox                 runtimeGiftInbox
-	inboxWake             chan struct{}
-	inboxRetryDelay       time.Duration
-	profileResolver       userProfileResolver
-	diagnostics           *diagnosticLogger
+	store           *configStore
+	sourceFactory   func() giftEventSource
+	reload          chan struct{}
+	mu              sync.RWMutex
+	status          runtimeStatus
+	timerMu         sync.Mutex
+	timerSchedules  map[string]timerSchedule
+	timerTicks      <-chan time.Time
+	notifications   *notificationCenter
+	inbox           runtimeGiftInbox
+	inboxWake       chan struct{}
+	inboxRetryDelay time.Duration
+	profileTimeout  time.Duration
+	profileResolver userProfileResolver
+	diagnostics     *diagnosticLogger
 }
 
 type timerSchedule struct {
@@ -71,17 +72,16 @@ func newBackgroundRuntime(store *configStore, sourceFactory func() giftEventSour
 		center = notifications[0]
 	}
 	return &backgroundRuntime{
-		store:                 store,
-		sourceFactory:         sourceFactory,
-		reload:                make(chan struct{}, 1),
-		status:                runtimeStatus{State: "idle"},
-		seen:                  map[string]time.Time{},
-		pendingGiftAnimations: map[string]giftEvent{},
-		timerSchedules:        map[string]timerSchedule{},
-		notifications:         center,
-		inboxWake:             make(chan struct{}, 1),
-		inboxRetryDelay:       250 * time.Millisecond,
-		profileResolver:       newBilibiliUserProfileResolver(nil, ""),
+		store:           store,
+		sourceFactory:   sourceFactory,
+		reload:          make(chan struct{}, 1),
+		status:          runtimeStatus{State: "idle"},
+		timerSchedules:  map[string]timerSchedule{},
+		notifications:   center,
+		inboxWake:       make(chan struct{}, 1),
+		inboxRetryDelay: 250 * time.Millisecond,
+		profileTimeout:  2 * time.Second,
+		profileResolver: newBilibiliUserProfileResolver(nil, ""),
 	}
 }
 
@@ -142,6 +142,13 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 		connectionContext, cancel := context.WithCancel(ctx)
 		finished := make(chan error, 1)
 		source := runtime.sourceFactory()
+		if err := runtime.prepareRoomConnection(roomID); err != nil {
+			runtime.setStatus("error", roomID, err)
+			if !runtime.wait(ctx, 2*time.Second) {
+				return
+			}
+			continue
+		}
 		runtime.setStatus("connecting", roomID, nil)
 		go func() {
 			finished <- source.Run(connectionContext, roomID, runtimeCallbacks{
@@ -163,6 +170,7 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			cancel()
+			<-finished
 			return
 		case <-runtime.reload:
 			cancel()
@@ -181,6 +189,26 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (runtime *backgroundRuntime) prepareRoomConnection(roomID string) error {
+	previousRoomID := strings.TrimSpace(runtime.Status().RoomID)
+	roomID = strings.TrimSpace(roomID)
+	if previousRoomID == "" || previousRoomID == roomID {
+		return nil
+	}
+	_, err := runtime.store.updateState(func(state *appState) error {
+		state.RecentSourceGiftKeys = map[string]int64{}
+		filtered := state.GiftReceipts[:0]
+		for _, receipt := range state.GiftReceipts {
+			if !strings.HasPrefix(receipt.ID, pendingAnimationReceiptPrefix) {
+				filtered = append(filtered, receipt)
+			}
+		}
+		state.GiftReceipts = filtered
+		return nil
+	})
+	return err
 }
 
 func giftCommandCategory(gift giftEvent) string {
@@ -299,6 +327,7 @@ func (runtime *backgroundRuntime) consumeAvailableInboxRecord(ctx context.Contex
 	if err := runtime.consumeClaimedInboxRecord(ctx, record); err != nil {
 		return false, err
 	}
+	runtime.clearIngestionFailure()
 	return true, nil
 }
 
@@ -324,17 +353,22 @@ func (runtime *backgroundRuntime) consumeClaimedInboxRecord(ctx context.Context,
 
 func (runtime *backgroundRuntime) processInboxRecord(ctx context.Context, record giftInboxRecord) error {
 	gift := record.Gift
-	if gift.AnimationOnly {
-		runtime.handleGiftAnimation(gift)
-		_, _, err := runtime.store.updateStateForIngestion(record.IngestionID, func(*appState) error { return nil })
+	current, err := runtime.store.readState()
+	if err != nil {
 		return err
 	}
-	gift = runtime.takePendingGiftAnimation(gift)
-	if needsUserProfile(gift) && runtime.profileResolver != nil {
-		profileContext, cancel := context.WithTimeout(ctx, 2*time.Second)
-		profile, err := runtime.profileResolver.Resolve(profileContext, gift.UID)
+	recordRoomID := strings.TrimSpace(record.RoomID)
+	currentRoomID := strings.TrimSpace(current.RoomID)
+	roomMatches := recordRoomID == "" || currentRoomID == "" || recordRoomID == currentRoomID
+	if roomMatches && !gift.AnimationOnly && needsUserProfile(gift) && runtime.profileResolver != nil {
+		profileTimeout := runtime.profileTimeout
+		if profileTimeout <= 0 {
+			profileTimeout = 2 * time.Second
+		}
+		profileContext, cancel := context.WithTimeout(ctx, profileTimeout)
+		profile, resolveErr := runtime.profileResolver.Resolve(profileContext, gift.UID)
 		cancel()
-		if err == nil {
+		if resolveErr == nil {
 			if isMaskedUsername(gift.Uname) && profile.Name != "" {
 				gift.Uname = profile.Name
 			}
@@ -344,35 +378,10 @@ func (runtime *backgroundRuntime) processInboxRecord(ctx context.Context, record
 		}
 	}
 
-	blindSource := "none"
-	if gift.BlindGiftID > 0 {
-		blindSource = "event"
-	}
-	blindCost := float64(0)
-	blindValue := float64(0)
-	blindPriced := false
-	sourceDuplicate := false
 	now := time.Now()
+	settlement := giftSettlement{}
 	_, applied, err := runtime.store.updateStateForIngestion(record.IngestionID, func(state *appState) error {
-		normalizeInternalIngestionLedgers(state, now)
-		if gift.Rnd != "" {
-			last, exists := state.RecentSourceGiftKeys[gift.Rnd]
-			sourceDuplicate = exists && last > now.Add(-time.Minute).UnixMilli()
-			state.RecentSourceGiftKeys[gift.Rnd] = now.UnixMilli()
-		}
-		if sourceDuplicate {
-			return nil
-		}
-		gift = enrichBlindBoxGiftFromCatalog(*state, gift)
-		if blindSource == "none" && gift.BlindGiftID > 0 {
-			blindSource = "catalog"
-		}
-		if gift.BlindGiftID > 0 {
-			count := maxInt(1, gift.Num)
-			blindCost, blindPriced = blindBoxCost(*state, gift, count)
-			blindValue = blindBoxOutputValue(*state, gift, count)
-		}
-		applyGiftEvent(state, gift)
+		settlement = settleGiftInState(state, record.RoomID, gift, now, true)
 		return nil
 	})
 	if err != nil {
@@ -381,7 +390,14 @@ func (runtime *backgroundRuntime) processInboxRecord(ctx context.Context, record
 	if !applied {
 		return nil
 	}
-	if sourceDuplicate {
+	if settlement.roomMismatch {
+		runtime.diagnostics.Info("gift_ignored", "reason", "room_mismatch", "ingestion_id", record.IngestionID, "room_id", record.RoomID)
+		return nil
+	}
+	if settlement.animationOnly {
+		return nil
+	}
+	if settlement.sourceDuplicate {
 		runtime.diagnostics.Info(
 			"gift_ignored",
 			"reason", "duplicate",
@@ -396,26 +412,147 @@ func (runtime *backgroundRuntime) processInboxRecord(ctx context.Context, record
 	runtime.diagnostics.Info(
 		"gift_received",
 		"ingestion_id", record.IngestionID,
-		"gift_id", gift.GiftID,
-		"gift_name", gift.GiftName,
-		"count", maxInt(1, gift.Num),
-		"viewer_uid", gift.UID,
-		"blind_parent_id", gift.BlindGiftID,
-		"blind_source", blindSource,
-		"blind_cost", blindCost,
-		"blind_value", blindValue,
-		"blind_priced", blindPriced,
+		"gift_id", settlement.gift.GiftID,
+		"gift_name", settlement.gift.GiftName,
+		"count", maxInt(1, settlement.gift.Num),
+		"viewer_uid", settlement.gift.UID,
+		"blind_parent_id", settlement.gift.BlindGiftID,
+		"blind_source", settlement.blindSource,
+		"blind_cost", settlement.blindCost,
+		"blind_value", settlement.blindValue,
+		"blind_priced", settlement.blindPriced,
 	)
 	return nil
+}
+
+const pendingAnimationReceiptPrefix = "pending-animation:"
+
+type giftSettlement struct {
+	gift            giftEvent
+	roomMismatch    bool
+	animationOnly   bool
+	sourceDuplicate bool
+	blindSource     string
+	blindCost       float64
+	blindValue      float64
+	blindPriced     bool
+}
+
+func settleGiftInState(state *appState, roomID string, gift giftEvent, now time.Time, durableDedupe bool) giftSettlement {
+	settlement := giftSettlement{gift: gift, animationOnly: gift.AnimationOnly, blindSource: "none"}
+	recordRoomID := strings.TrimSpace(roomID)
+	currentRoomID := strings.TrimSpace(state.RoomID)
+	if recordRoomID != "" && currentRoomID != "" && recordRoomID != currentRoomID {
+		settlement.roomMismatch = true
+		return settlement
+	}
+	if durableDedupe {
+		normalizeInternalIngestionLedgers(state, now)
+	}
+	if gift.AnimationOnly {
+		persistGiftAnimationInState(state, roomID, gift)
+		return settlement
+	}
+	if durableDedupe {
+		if gift.Rnd != "" {
+			last, exists := state.RecentSourceGiftKeys[gift.Rnd]
+			settlement.sourceDuplicate = exists && last > now.Add(-time.Minute).UnixMilli()
+			state.RecentSourceGiftKeys[gift.Rnd] = now.UnixMilli()
+		}
+		if settlement.sourceDuplicate {
+			return settlement
+		}
+	}
+	originalBlindGiftID := gift.BlindGiftID
+	settlement.gift = takePersistedGiftAnimation(state, roomID, gift)
+	settlement.gift = enrichBlindBoxGiftFromCatalog(*state, settlement.gift)
+	if settlement.gift.BlindGiftID > 0 {
+		settlement.blindSource = "catalog"
+		if originalBlindGiftID > 0 {
+			settlement.blindSource = "event"
+		}
+		count := maxInt(1, settlement.gift.Num)
+		settlement.blindCost, settlement.blindPriced = blindBoxCost(*state, settlement.gift, count)
+		settlement.blindValue = blindBoxOutputValue(*state, settlement.gift, count)
+	}
+	applyGiftEvent(state, settlement.gift)
+	return settlement
+}
+
+func persistGiftAnimationInState(state *appState, roomID string, gift giftEvent) {
+	if giftReceiptAnimationFromEvent(gift) == nil || attachGiftAnimationToReceipt(state, gift) {
+		return
+	}
+	pending := giftReceipt{
+		ID: pendingAnimationReceiptID(roomID, gift), Time: gift.Timestamp, GiftID: gift.GiftID,
+		SenderUID: gift.UID, Membership: gift.Membership, Animation: giftReceiptAnimationFromEvent(gift), Effects: []giftReceiptEffect{},
+	}
+	for index := range state.GiftReceipts {
+		if state.GiftReceipts[index].ID == pending.ID {
+			state.GiftReceipts[index] = pending
+			return
+		}
+	}
+	state.GiftReceipts = append([]giftReceipt{pending}, state.GiftReceipts...)
+	if len(state.GiftReceipts) > maxGiftReceiptEntries {
+		state.GiftReceipts = state.GiftReceipts[:maxGiftReceiptEntries]
+	}
+}
+
+func takePersistedGiftAnimation(state *appState, roomID string, gift giftEvent) giftEvent {
+	pendingPrefix := pendingAnimationReceiptPrefix
+	if strings.TrimSpace(roomID) != "" {
+		pendingPrefix += strings.TrimSpace(roomID) + ":"
+	}
+	for index := range state.GiftReceipts {
+		pending := state.GiftReceipts[index]
+		if !strings.HasPrefix(pending.ID, pendingPrefix) || pending.GiftID != gift.GiftID || pending.SenderUID != gift.UID || !nearbyGiftTimestamps(pending.Time, gift.Timestamp) {
+			continue
+		}
+		if pending.Animation != nil {
+			gift = mergeReceiptAnimationIntoGift(gift, pending)
+		}
+		state.GiftReceipts = append(state.GiftReceipts[:index], state.GiftReceipts[index+1:]...)
+		return gift
+	}
+	return gift
+}
+
+func pendingAnimationReceiptID(roomID string, gift giftEvent) string {
+	return pendingAnimationReceiptPrefix + strings.TrimSpace(roomID) + ":" + strconv.Itoa(gift.GiftID) + ":" + strconv.FormatInt(gift.UID, 10) + ":" + strconv.FormatInt(gift.Timestamp, 10)
+}
+
+func mergeReceiptAnimationIntoGift(gift giftEvent, pending giftReceipt) giftEvent {
+	if gift.Membership == "" {
+		gift.Membership = pending.Membership
+	}
+	animation := pending.Animation
+	if animation == nil {
+		return gift
+	}
+	gift.EffectID = animation.EffectID
+	gift.EffectMP4 = animation.MP4
+	gift.EffectMP4JSON = animation.MP4JSON
+	gift.AnimationGIF = animation.GIF
+	gift.AnimationWebP = animation.WebP
+	gift.AnimationDurationMS = animation.DurationMS
+	return gift
 }
 
 func (runtime *backgroundRuntime) recordIngestionFailure(err error) {
 	if err == nil {
 		return
 	}
-	status := runtime.Status()
-	runtime.setStatus("error", status.RoomID, err)
+	runtime.mu.Lock()
+	runtime.status.IngestionError = err.Error()
+	runtime.mu.Unlock()
 	runtime.diagnostics.Error("gift_ingestion_failed", "error", err)
+}
+
+func (runtime *backgroundRuntime) clearIngestionFailure() {
+	runtime.mu.Lock()
+	runtime.status.IngestionError = ""
+	runtime.mu.Unlock()
 }
 
 func (runtime *backgroundRuntime) runTimerLoop(ctx context.Context) {
@@ -516,156 +653,9 @@ func (runtime *backgroundRuntime) Status() runtimeStatus {
 	return runtime.status
 }
 
-func (runtime *backgroundRuntime) handleGift(gift giftEvent) {
-	if gift.AnimationOnly {
-		runtime.handleGiftAnimation(gift)
-		return
-	}
-	gift = runtime.takePendingGiftAnimation(gift)
-	if runtime.isDuplicate(gift.Rnd) {
-		runtime.diagnostics.Info("gift_ignored", "reason", "duplicate", "gift_id", gift.GiftID)
-		return
-	}
-	if needsUserProfile(gift) && runtime.profileResolver != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		profile, err := runtime.profileResolver.Resolve(ctx, gift.UID)
-		cancel()
-		if err == nil {
-			if isMaskedUsername(gift.Uname) && profile.Name != "" {
-				gift.Uname = profile.Name
-			}
-			if strings.TrimSpace(gift.Avatar) == "" && profile.Avatar != "" {
-				gift.Avatar = profile.Avatar
-			}
-		}
-	}
-	blindSource := "none"
-	if gift.BlindGiftID > 0 {
-		blindSource = "event"
-	}
-	blindCost := float64(0)
-	blindValue := float64(0)
-	blindPriced := false
-	_, err := runtime.store.updateState(func(state *appState) error {
-		gift = enrichBlindBoxGiftFromCatalog(*state, gift)
-		if blindSource == "none" && gift.BlindGiftID > 0 {
-			blindSource = "catalog"
-		}
-		if gift.BlindGiftID > 0 {
-			count := maxInt(1, gift.Num)
-			blindCost, blindPriced = blindBoxCost(*state, gift, count)
-			blindValue = blindBoxOutputValue(*state, gift, count)
-		}
-		applyGiftEvent(state, gift)
-		return nil
-	})
-	if err != nil {
-		runtime.diagnostics.Error("gift_apply_failed", "gift_id", gift.GiftID, "error", err)
-		status := runtime.Status()
-		runtime.setStatus("error", status.RoomID, err)
-		return
-	}
-	runtime.mu.Lock()
-	runtime.status.LastGiftAt = time.Now().UnixMilli()
-	runtime.mu.Unlock()
-	runtime.diagnostics.Info(
-		"gift_received",
-		"gift_id", gift.GiftID,
-		"gift_name", gift.GiftName,
-		"count", maxInt(1, gift.Num),
-		"viewer_uid", gift.UID,
-		"blind_parent_id", gift.BlindGiftID,
-		"blind_source", blindSource,
-		"blind_cost", blindCost,
-		"blind_value", blindValue,
-		"blind_priced", blindPriced,
-	)
-}
-
-var errGiftAnimationReceiptNotFound = errors.New("gift animation receipt not found")
-
-func (runtime *backgroundRuntime) handleGiftAnimation(gift giftEvent) {
-	if giftReceiptAnimationFromEvent(gift) == nil {
-		return
-	}
-	_, err := runtime.store.updateState(func(state *appState) error {
-		if !attachGiftAnimationToReceipt(state, gift) {
-			return errGiftAnimationReceiptNotFound
-		}
-		return nil
-	})
-	if err == nil {
-		return
-	}
-	if !errors.Is(err, errGiftAnimationReceiptNotFound) {
-		runtime.diagnostics.Error("gift_animation_attach_failed", "gift_id", gift.GiftID, "effect_id", gift.EffectID, "error", err)
-		return
-	}
-	runtime.mu.Lock()
-	runtime.pendingGiftAnimations[giftAnimationMatchKey(gift)] = gift
-	for key, pending := range runtime.pendingGiftAnimations {
-		if !nearbyGiftTimestamps(pending.Timestamp, gift.Timestamp) {
-			delete(runtime.pendingGiftAnimations, key)
-		}
-	}
-	runtime.mu.Unlock()
-}
-
-func (runtime *backgroundRuntime) takePendingGiftAnimation(gift giftEvent) giftEvent {
-	key := giftAnimationMatchKey(gift)
-	runtime.mu.Lock()
-	pending, exists := runtime.pendingGiftAnimations[key]
-	if exists && nearbyGiftTimestamps(pending.Timestamp, gift.Timestamp) {
-		delete(runtime.pendingGiftAnimations, key)
-	} else {
-		exists = false
-	}
-	runtime.mu.Unlock()
-	if !exists {
-		return gift
-	}
-	if gift.Membership == "" {
-		gift.Membership = pending.Membership
-	}
-	gift.EffectID = pending.EffectID
-	gift.EffectMP4 = pending.EffectMP4
-	gift.EffectMP4JSON = pending.EffectMP4JSON
-	gift.AnimationGIF = pending.AnimationGIF
-	gift.AnimationWebP = pending.AnimationWebP
-	gift.AnimationDurationMS = pending.AnimationDurationMS
-	return gift
-}
-
-func giftAnimationMatchKey(gift giftEvent) string {
-	return fmt.Sprintf("%d:%d", gift.GiftID, gift.UID)
-}
-
-func (runtime *backgroundRuntime) isDuplicate(key string) bool {
-	if key == "" {
-		return false
-	}
-	now := time.Now()
-	runtime.mu.Lock()
-	defer runtime.mu.Unlock()
-	last, exists := runtime.seen[key]
-	runtime.seen[key] = now
-	if len(runtime.seen) > 500 {
-		for candidate, timestamp := range runtime.seen {
-			if now.Sub(timestamp) > time.Minute {
-				delete(runtime.seen, candidate)
-			}
-		}
-	}
-	return exists && now.Sub(last) < time.Minute
-}
-
 func (runtime *backgroundRuntime) setStatus(state, roomID string, err error) {
 	runtime.mu.Lock()
 	previous := runtime.status
-	if previous.RoomID != roomID {
-		clear(runtime.seen)
-		clear(runtime.pendingGiftAnimations)
-	}
 	nextLastError := ""
 	runtime.status.State = state
 	runtime.status.RoomID = roomID

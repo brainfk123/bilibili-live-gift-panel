@@ -201,12 +201,6 @@ func main() {
 		showStartupError(err.Error())
 		return
 	}
-	inbox, err := openGiftInbox(filepath.Dir(store.path))
-	if err != nil {
-		showStartupError(fmt.Sprintf("礼物收件箱初始化失败：%v", err))
-		return
-	}
-	defer inbox.Close()
 	diagnostics, diagnosticErr := newDiagnosticLogger(filepath.Join(filepath.Dir(store.path), "runtime.log"))
 	if diagnosticErr == nil {
 		diagnostics.Info("service_start", "version", appVersion)
@@ -260,7 +254,6 @@ func main() {
 	background := newBackgroundRuntime(store, func() giftEventSource {
 		return &bilibiliGiftSource{sessionProvider: login.Session}
 	}, notifications)
-	background.inbox = inbox
 	background.setDiagnosticLogger(diagnostics)
 	store.setOnChange(background.NotifyConfigChanged)
 	store.setOnTimerChange(background.NotifyTimerConfigChanged)
@@ -324,7 +317,11 @@ func main() {
 		}
 	}()
 	openConfigOnStartup := announceStartup(notifications, installedVersion)
-	go background.Run(runtimeContext)
+	runtimeDone := make(chan struct{})
+	go func() {
+		defer close(runtimeDone)
+		background.Run(runtimeContext)
+	}()
 	go updater.Run(runtimeContext)
 
 	configURL := fmt.Sprintf("http://localhost:%d/?mode=config", port)
@@ -338,7 +335,10 @@ func main() {
 	}
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	runMainGiftClipShutdown(stopRuntime, closeGiftClips, func() { _ = server.Shutdown(shutdownContext) }, func() {
+	runMainGiftClipShutdown(func() {
+		stopRuntime()
+		<-runtimeDone
+	}, closeGiftClips, func() { _ = server.Shutdown(shutdownContext) }, func() {
 		if err := updater.InstallOnExit(restartAfterUpdate); err != nil {
 			diagnostics.Error("update_install_failed", "error", err)
 			showStartupError(err.Error())

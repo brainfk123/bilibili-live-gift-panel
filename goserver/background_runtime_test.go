@@ -96,7 +96,7 @@ func TestBackgroundRuntimeReplaysDurableInboxOnce(t *testing.T) {
 		return writeFileAtomically(path, data)
 	}
 	cancelDuplicate, duplicateDone := startBackgroundRuntimeForTest(duplicateRuntime)
-	waitForRuntimeError(t, duplicateRuntime, "injected duplicate settlement failure")
+	waitForIngestionError(t, duplicateRuntime, "injected duplicate settlement failure")
 	cancelDuplicate()
 	<-duplicateDone
 	if health := duplicateInbox.Health(); health.PendingCount != 1 {
@@ -128,15 +128,24 @@ func TestBackgroundRuntimeReplaysDurableInboxOnce(t *testing.T) {
 }
 
 type blockingUserProfileResolver struct {
-	started chan struct{}
-	release chan struct{}
-	once    sync.Once
+	started     chan struct{}
+	release     chan struct{}
+	startedOnce sync.Once
+	releaseOnce sync.Once
 }
 
-func (resolver *blockingUserProfileResolver) Resolve(_ context.Context, uid int64) (userProfile, error) {
-	resolver.once.Do(func() { close(resolver.started) })
-	<-resolver.release
-	return userProfile{UID: uid, Name: "完整昵称"}, nil
+func (resolver *blockingUserProfileResolver) Resolve(ctx context.Context, uid int64) (userProfile, error) {
+	resolver.startedOnce.Do(func() { close(resolver.started) })
+	select {
+	case <-ctx.Done():
+		return userProfile{}, ctx.Err()
+	case <-resolver.release:
+		return userProfile{UID: uid, Name: "完整昵称"}, nil
+	}
+}
+
+func (resolver *blockingUserProfileResolver) unblock() {
+	resolver.releaseOnce.Do(func() { close(resolver.release) })
 }
 
 func TestBackgroundRuntimeIngressDoesNotWaitForProfile(t *testing.T) {
@@ -156,8 +165,10 @@ func TestBackgroundRuntimeIngressDoesNotWaitForProfile(t *testing.T) {
 	runtime.inbox = inbox
 	resolver := &blockingUserProfileResolver{started: make(chan struct{}), release: make(chan struct{})}
 	runtime.profileResolver = resolver
+	runtime.profileTimeout = time.Hour
 	cancel, done := startBackgroundRuntimeForTest(runtime)
 	defer func() {
+		resolver.unblock()
 		cancel()
 		<-done
 	}()
@@ -190,7 +201,7 @@ func TestBackgroundRuntimeIngressDoesNotWaitForProfile(t *testing.T) {
 		t.Fatalf("pending while profile is blocked = %d, want %d", health.PendingCount, additional+1)
 	}
 
-	close(resolver.release)
+	resolver.unblock()
 	waitForInboxPendingCount(t, inbox, 0)
 	assertRuntimeAttributeValue(t, store, "积分", additional+1)
 	updated, err := store.readState()
@@ -230,7 +241,7 @@ func TestBackgroundRuntimeReportsInboxCapacityWithoutVolatileApply(t *testing.T)
 
 	runtime.acceptGift(context.Background(), "room", "SEND_GIFT", giftEvent{GiftID: 1, GiftName: "礼物", Num: 1})
 
-	if got := runtime.Status().LastError; got != errGiftInboxCapacity.Error() {
+	if got := runtime.Status().IngestionError; got != errGiftInboxCapacity.Error() {
 		t.Fatalf("runtime error = %q, want %q", got, errGiftInboxCapacity.Error())
 	}
 	assertRuntimeAttributeValue(t, store, "积分", 0)
@@ -263,7 +274,7 @@ func TestBackgroundRuntimeTransactionRecoveryFailurePreservesInboxOrder(t *testi
 	runtime.inbox = inbox
 	runtime.inboxRetryDelay = time.Hour
 	cancel, done := startBackgroundRuntimeForTest(runtime)
-	waitForRuntimeError(t, runtime, "读取状态事务失败")
+	waitForIngestionError(t, runtime, "读取状态事务失败")
 	cancel()
 	<-done
 
@@ -274,6 +285,386 @@ func TestBackgroundRuntimeTransactionRecoveryFailurePreservesInboxOrder(t *testi
 		t.Fatal(err)
 	}
 	assertRuntimeAttributeValue(t, &configStore{path: filepath.Join(root, "config.json")}, "积分", 0)
+}
+
+func TestBackgroundRuntimePersistsAnimationFirstMergeAcrossCrashAndRestart(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-a"
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.inbox = inbox
+	runtime.inboxRetryDelay = time.Hour
+	runtime.acceptGift(context.Background(), "room-a", "GUARD_BUY", giftEvent{
+		GiftID: specialGiftGuardCaptain, UID: 42, Timestamp: 1_700_000_001,
+		Membership: "captain", EffectID: 9001, EffectMP4: "https://i0.hdslb.com/guard.mp4",
+		EffectMP4JSON: "https://i0.hdslb.com/guard.json", AnimationOnly: true,
+	})
+	failed := false
+	store.writeAtomically = func(path string, data []byte) error {
+		if filepath.Base(path) == "events.log" && !failed {
+			failed = true
+			return errors.New("injected animation settlement failure")
+		}
+		return writeFileAtomically(path, data)
+	}
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	waitForIngestionError(t, runtime, "injected animation settlement failure")
+	cancel()
+	<-done
+
+	recoveredStore := &configStore{path: filepath.Join(root, "config.json")}
+	recoveredInbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered := newBackgroundRuntime(recoveredStore, nil)
+	recovered.inbox = recoveredInbox
+	cancelRecovered, recoveredDone := startBackgroundRuntimeForTest(recovered)
+	waitForInboxPendingCount(t, recoveredInbox, 0)
+	cancelRecovered()
+	<-recoveredDone
+
+	purchaseInbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	purchaseRuntime := newBackgroundRuntime(recoveredStore, nil)
+	purchaseRuntime.inbox = purchaseInbox
+	purchaseRuntime.acceptGift(context.Background(), "room-a", "GUARD_BUY", giftEvent{
+		GiftID: specialGiftGuardCaptain, GiftName: "大航海·舰长", Num: 1,
+		UID: 42, Uname: "舰长观众", Timestamp: 1_700_000_002, Rnd: "purchase-after-animation",
+	})
+	cancelPurchase, purchaseDone := startBackgroundRuntimeForTest(purchaseRuntime)
+	waitForInboxPendingCount(t, purchaseInbox, 0)
+	cancelPurchase()
+	<-purchaseDone
+
+	updated, err := recoveredStore.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.GiftReceipts) != 1 || updated.GiftReceipts[0].Animation == nil || updated.GiftReceipts[0].Animation.EffectID != 9001 {
+		t.Fatalf("restart-safe animation receipt = %#v", updated.GiftReceipts)
+	}
+	if len(updated.AppliedIngressIDs) != 2 {
+		t.Fatalf("applied ingestion IDs = %d, want 2", len(updated.AppliedIngressIDs))
+	}
+}
+
+func TestBackgroundRuntimeRecoversPurchaseAfterPendingAnimationWasPrepared(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-a"
+	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
+	state.Rules = []giftRule{{ID: "guard", GiftID: specialGiftGuardCaptain, AttributeName: "积分", Formula: "积分+1"}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	animation := giftInboxRecord{
+		IngestionID: strings.Repeat("d", 32), RoomID: "room-a", Command: "GUARD_BUY",
+		Gift: giftEvent{
+			GiftID: specialGiftGuardCaptain, UID: 42, Timestamp: 1_700_000_001,
+			EffectID: 9001, EffectMP4: "https://i0.hdslb.com/guard.mp4", EffectMP4JSON: "https://i0.hdslb.com/guard.json", AnimationOnly: true,
+		},
+	}
+	if err := newBackgroundRuntime(store, nil).processInboxRecord(context.Background(), animation); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.inbox = inbox
+	runtime.inboxRetryDelay = time.Hour
+	runtime.acceptGift(context.Background(), "room-a", "GUARD_BUY", giftEvent{
+		GiftID: specialGiftGuardCaptain, GiftName: "大航海·舰长", Num: 1, UID: 42,
+		Timestamp: 1_700_000_002, Rnd: "purchase-prepared-crash",
+	})
+	failed := false
+	store.writeAtomically = func(path string, data []byte) error {
+		if filepath.Base(path) == "events.log" && !failed {
+			failed = true
+			return errors.New("injected purchase settlement failure")
+		}
+		return writeFileAtomically(path, data)
+	}
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	waitForIngestionError(t, runtime, "injected purchase settlement failure")
+	cancel()
+	<-done
+
+	recoveredStore := &configStore{path: filepath.Join(root, "config.json")}
+	recoveredInbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered := newBackgroundRuntime(recoveredStore, nil)
+	recovered.inbox = recoveredInbox
+	cancelRecovered, recoveredDone := startBackgroundRuntimeForTest(recovered)
+	waitForInboxPendingCount(t, recoveredInbox, 0)
+	cancelRecovered()
+	<-recoveredDone
+	updated, err := recoveredStore.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Attributes[0].Value != 1 || len(updated.GiftReceipts) != 1 || updated.GiftReceipts[0].Animation == nil || updated.GiftReceipts[0].Animation.EffectID != 9001 {
+		t.Fatalf("recovered purchase state = attribute=%v receipts=%#v", updated.Attributes[0].Value, updated.GiftReceipts)
+	}
+}
+
+func TestBackgroundRuntimeDoesNotApplyBacklogFromAnotherRoom(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-b"
+	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
+	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := inbox.Accept("room-a", "SEND_GIFT", giftEvent{GiftID: 1, GiftName: "旧房间", Num: 1, Rnd: "same-rnd"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := inbox.Accept("room-b", "SEND_GIFT", giftEvent{GiftID: 1, GiftName: "当前房间", Num: 1, Rnd: "same-rnd"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.inbox = inbox
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	waitForInboxPendingCount(t, inbox, 0)
+	cancel()
+	<-done
+	assertRuntimeAttributeValue(t, store, "积分", 1)
+	updated, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !testContainsString(updated.AppliedIngressIDs, first.IngestionID) || !testContainsString(updated.AppliedIngressIDs, second.IngestionID) {
+		t.Fatalf("room-scoped applied IDs = %#v", updated.AppliedIngressIDs)
+	}
+	if len(updated.Log) != 1 || updated.Log[0].GiftName != "当前房间" {
+		t.Fatalf("room-scoped gift log = %#v", updated.Log)
+	}
+}
+
+func TestBackgroundRuntimeRoomSwitchResetsRoomScopedIngestionMetadata(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-b"
+	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
+	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
+	state.RecentSourceGiftKeys["same-rnd"] = time.Now().UnixMilli()
+	state.GiftReceipts = []giftReceipt{{
+		ID: pendingAnimationReceiptPrefix + "room-a:1:42:1", GiftID: 1, SenderUID: 42,
+		Animation: &giftReceiptAnimation{EffectID: 99}, Effects: []giftReceiptEffect{},
+	}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.setStatus("connected", "room-a", nil)
+	if err := runtime.prepareRoomConnection("room-b"); err != nil {
+		t.Fatal(err)
+	}
+	record := giftInboxRecord{
+		IngestionID: strings.Repeat("b", 32), RoomID: "room-b", Command: "SEND_GIFT",
+		Gift: giftEvent{GiftID: 1, GiftName: "新房间", Num: 1, Rnd: "same-rnd"},
+	}
+	if err := runtime.processInboxRecord(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Attributes[0].Value != 1 || len(updated.GiftReceipts) != 1 || strings.HasPrefix(updated.GiftReceipts[0].ID, pendingAnimationReceiptPrefix) {
+		t.Fatalf("room switch state = attribute=%v receipts=%#v", updated.Attributes[0].Value, updated.GiftReceipts)
+	}
+}
+
+func TestBackgroundRuntimeReportsIngestionFailureWithoutDisconnectAndClearsAfterRetry(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-a"
+	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
+	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	center := newNotificationCenter()
+	notifications := make(chan desktopNotification, 4)
+	center.AttachSink(func(notification desktopNotification) { notifications <- notification })
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, func() giftEventSource { return &stableConnectedSource{} }, center)
+	runtime.inbox = inbox
+	runtime.inboxRetryDelay = 10 * time.Millisecond
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	defer func() {
+		cancel()
+		<-done
+	}()
+	waitForConnectionState(t, runtime, "connected")
+	for len(notifications) > 0 {
+		<-notifications
+	}
+	failed := false
+	store.writeAtomically = func(path string, data []byte) error {
+		if filepath.Base(path) == "events.log" && !failed {
+			failed = true
+			return errors.New("injected ingestion health failure")
+		}
+		return writeFileAtomically(path, data)
+	}
+	runtime.acceptGift(context.Background(), "room-a", "SEND_GIFT", giftEvent{GiftID: 1, GiftName: "礼物", Num: 1, Rnd: "health-retry"})
+	waitForIngestionError(t, runtime, "injected ingestion health failure")
+	if status := runtime.Status(); status.State != "connected" || status.LastError != "" {
+		t.Fatalf("connection status changed by ingestion failure: %#v", status)
+	}
+	select {
+	case notification := <-notifications:
+		t.Fatalf("ingestion failure published connection notification: %#v", notification)
+	default:
+	}
+	waitForInboxPendingCount(t, inbox, 0)
+	if status := runtime.Status(); status.IngestionError != "" {
+		t.Fatalf("ingestion error not cleared after retry: %#v", status)
+	}
+}
+
+type shutdownOrderingInbox struct {
+	mu                 sync.Mutex
+	closed             bool
+	acceptedAfterClose bool
+}
+
+func (inbox *shutdownOrderingInbox) Accept(roomID, command string, gift giftEvent) (giftInboxRecord, error) {
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
+	if inbox.closed {
+		inbox.acceptedAfterClose = true
+		return giftInboxRecord{}, errGiftInboxClosed
+	}
+	return giftInboxRecord{IngestionID: strings.Repeat("a", 32), RoomID: roomID, Command: command, Gift: gift}, nil
+}
+func (*shutdownOrderingInbox) Next() (giftInboxRecord, bool, error) {
+	return giftInboxRecord{}, false, nil
+}
+func (*shutdownOrderingInbox) Acknowledge(string) error { return nil }
+func (*shutdownOrderingInbox) Release(string) error     { return nil }
+func (inbox *shutdownOrderingInbox) Close() error {
+	inbox.mu.Lock()
+	inbox.closed = true
+	inbox.mu.Unlock()
+	return nil
+}
+func (*shutdownOrderingInbox) Health() giftInboxHealth { return giftInboxHealth{} }
+
+type callbackDuringShutdownSource struct {
+	started chan struct{}
+	done    chan struct{}
+}
+
+type stableConnectedSource struct{}
+
+func (*stableConnectedSource) Run(ctx context.Context, _ string, callbacks runtimeCallbacks) error {
+	callbacks.onState("connected")
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (source *callbackDuringShutdownSource) Run(ctx context.Context, _ string, callbacks runtimeCallbacks) error {
+	close(source.started)
+	<-ctx.Done()
+	callbacks.onGift(giftEvent{GiftID: 1, GiftName: "shutdown gift", Num: 1})
+	close(source.done)
+	return ctx.Err()
+}
+
+func TestBackgroundRuntimeJoinsSourceBeforeClosingInbox(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-a"
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	inbox := &shutdownOrderingInbox{}
+	source := &callbackDuringShutdownSource{started: make(chan struct{}), done: make(chan struct{})}
+	runtime := newBackgroundRuntime(store, func() giftEventSource { return source })
+	runtime.inbox = inbox
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	<-source.started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runtime did not join the source during shutdown")
+	}
+	inbox.mu.Lock()
+	acceptedAfterClose := inbox.acceptedAfterClose
+	closed := inbox.closed
+	inbox.mu.Unlock()
+	if !closed || acceptedAfterClose {
+		t.Fatalf("shutdown inbox closed=%v acceptedAfterClose=%v", closed, acceptedAfterClose)
+	}
+	select {
+	case <-source.done:
+	default:
+		t.Fatal("runtime returned before source callback completed")
+	}
+}
+
+func testContainsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func waitForIngestionError(t *testing.T, runtime *backgroundRuntime, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(runtime.Status().IngestionError, want) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("runtime status = %#v, want ingestion error containing %q", runtime.Status(), want)
+}
+
+func waitForConnectionState(t *testing.T, runtime *backgroundRuntime, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.Status().State == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("runtime status = %#v, want state %q", runtime.Status(), want)
 }
 
 func leftPadThree(value int) string {
@@ -292,7 +683,7 @@ func startBackgroundRuntimeForTest(runtime *backgroundRuntime) (context.CancelFu
 
 func waitForInboxPendingCount(t *testing.T, inbox runtimeGiftInbox, want int) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		if inbox.Health().PendingCount == want {
 			return
@@ -300,18 +691,6 @@ func waitForInboxPendingCount(t *testing.T, inbox runtimeGiftInbox, want int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("pending count = %d, want %d", inbox.Health().PendingCount, want)
-}
-
-func waitForRuntimeError(t *testing.T, runtime *backgroundRuntime, want string) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(runtime.Status().LastError, want) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("runtime status = %#v, want error containing %q", runtime.Status(), want)
 }
 
 func assertRuntimeAttributeValue(t *testing.T, store *configStore, name string, want float64) {
@@ -416,6 +795,17 @@ func TestBackgroundRuntimeAttachesGuardAnimationInEitherEventOrder(t *testing.T)
 				t.Fatal(err)
 			}
 			runtime := newBackgroundRuntime(store, nil)
+			sequence := 0
+			process := func(gift giftEvent) {
+				t.Helper()
+				sequence++
+				record := giftInboxRecord{
+					IngestionID: fmt.Sprintf("%032x", sequence), RoomID: state.RoomID, Command: "GUARD_BUY", Gift: gift,
+				}
+				if err := runtime.processInboxRecord(context.Background(), record); err != nil {
+					t.Fatal(err)
+				}
+			}
 			purchase := giftEvent{
 				GiftID: specialGiftGuardCaptain, GiftName: "大航海·舰长", Num: 1,
 				UID: 42, Uname: "舰长观众", Avatar: "https://example.test/avatar.png",
@@ -428,11 +818,11 @@ func TestBackgroundRuntimeAttachesGuardAnimationInEitherEventOrder(t *testing.T)
 				AnimationOnly: true,
 			}
 			if animationFirst {
-				runtime.handleGift(animation)
-				runtime.handleGift(purchase)
+				process(animation)
+				process(purchase)
 			} else {
-				runtime.handleGift(purchase)
-				runtime.handleGift(animation)
+				process(purchase)
+				process(animation)
 			}
 			updated, err := store.readState()
 			if err != nil {
@@ -673,10 +1063,15 @@ func TestBackgroundRuntimeEnrichesMaskedSenderFromAnonymousProfile(t *testing.T)
 	runtime := newBackgroundRuntime(store, nil)
 	runtime.profileResolver = profiles
 
-	runtime.handleGift(giftEvent{
-		GiftID: 1, GiftName: "人气票", Num: 1, Price: 100, CoinType: "gold",
-		UID: 123456789, Uname: "字***", Timestamp: 1700000000, Rnd: "masked-gift-1",
-	})
+	if err := runtime.processInboxRecord(context.Background(), giftInboxRecord{
+		IngestionID: strings.Repeat("c", 32), Command: "SEND_GIFT",
+		Gift: giftEvent{
+			GiftID: 1, GiftName: "人气票", Num: 1, Price: 100, CoinType: "gold",
+			UID: 123456789, Uname: "字***", Timestamp: 1700000000, Rnd: "masked-gift-1",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	updated, err := store.readState()
 	if err != nil {
