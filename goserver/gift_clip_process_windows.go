@@ -80,6 +80,9 @@ type giftClipWindowsAPI struct {
 	terminateJob        func(syscall.Handle) error
 	closeJob            func(syscall.Handle)
 	closeProcess        func(syscall.Handle)
+	killProcess         func(*exec.Cmd) error
+	waitProcess         func(*exec.Cmd) error
+	releaseProcess      func(*exec.Cmd) error
 }
 
 var giftClipDefaultWindowsAPI = giftClipWindowsAPI{
@@ -91,6 +94,9 @@ var giftClipDefaultWindowsAPI = giftClipWindowsAPI{
 	terminateJob:        terminateGiftClipJob,
 	closeJob:            closeGiftClipHandle,
 	closeProcess:        closeGiftClipHandle,
+	killProcess:         killGiftClipProcess,
+	waitProcess:         waitGiftClipProcess,
+	releaseProcess:      releaseGiftClipProcess,
 }
 
 type giftClipWindowsProcessRunner struct {
@@ -126,25 +132,20 @@ func (runner giftClipWindowsProcessRunner) Run(ctx context.Context, path string,
 	}
 	process, err := api.openProcess(command.Process.Pid)
 	if err != nil {
-		_ = command.Process.Kill()
-		_ = command.Wait()
-		return err
+		return cleanupGiftClipUnassignedProcess(api, command, err)
 	}
 	defer api.closeProcess(process)
 	if err := api.assignProcess(job, process); err != nil {
-		_ = command.Process.Kill()
-		_ = command.Wait()
-		return err
+		return cleanupGiftClipUnassignedProcess(api, command, err)
 	}
 	if err := api.resumePrimaryThread(command.Process.Pid); err != nil {
 		api.closeJob(job)
 		job = 0
-		_ = command.Wait()
-		return err
+		return joinGiftClipProcessError(err, "wait after resume failure", api.waitProcess(command))
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- command.Wait() }()
+	go func() { done <- api.waitProcess(command) }()
 	select {
 	case err := <-done:
 		return err
@@ -160,6 +161,41 @@ func (runner giftClipWindowsProcessRunner) Run(ctx context.Context, path string,
 		}
 		return ctx.Err()
 	}
+}
+
+func cleanupGiftClipUnassignedProcess(api giftClipWindowsAPI, command *exec.Cmd, cause error) error {
+	if err := api.killProcess(command); err != nil {
+		result := errors.Join(cause, fmt.Errorf("kill unassigned gift clip process: %w", err))
+		if releaseErr := api.releaseProcess(command); releaseErr != nil {
+			return errors.Join(result, fmt.Errorf("release unassigned gift clip process: %w", releaseErr))
+		}
+		return result
+	}
+	return joinGiftClipProcessError(cause, "wait after killing unassigned gift clip process", api.waitProcess(command))
+}
+
+func joinGiftClipProcessError(cause error, operation string, err error) error {
+	if err == nil || isGiftClipExpectedKilledProcessError(err) {
+		return cause
+	}
+	return errors.Join(cause, fmt.Errorf("%s: %w", operation, err))
+}
+
+func isGiftClipExpectedKilledProcessError(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr)
+}
+
+func killGiftClipProcess(command *exec.Cmd) error {
+	return command.Process.Kill()
+}
+
+func waitGiftClipProcess(command *exec.Cmd) error {
+	return command.Wait()
+}
+
+func releaseGiftClipProcess(command *exec.Cmd) error {
+	return command.Process.Release()
 }
 
 func startGiftClipProcessSuspended(path string, args []string, stdout, stderr io.Writer) (*exec.Cmd, error) {

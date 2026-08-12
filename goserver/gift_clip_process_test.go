@@ -156,11 +156,14 @@ func TestGiftClipWindowsProcessRunnerKillsSuspendedProcessWhenAssignmentFails(t 
 		}
 		return command, err
 	}
-	jobCloses, processCloses, resumes := 0, 0, 0
+	jobCloses, processCloses, resumes, kills, waits := 0, 0, 0, 0, 0
 	closeJob, closeProcess, resume := api.closeJob, api.closeProcess, api.resumePrimaryThread
+	kill, wait := api.killProcess, api.waitProcess
 	api.closeJob = func(handle syscall.Handle) { jobCloses++; closeJob(handle) }
 	api.closeProcess = func(handle syscall.Handle) { processCloses++; closeProcess(handle) }
 	api.resumePrimaryThread = func(pid int) error { resumes++; return resume(pid) }
+	api.killProcess = func(command *exec.Cmd) error { kills++; return kill(command) }
+	api.waitProcess = func(command *exec.Cmd) error { waits++; return wait(command) }
 	runner := giftClipWindowsProcessRunner{api: api}
 	errs := make(chan error, 1)
 	go func() {
@@ -181,8 +184,97 @@ func TestGiftClipWindowsProcessRunnerKillsSuspendedProcessWhenAssignmentFails(t 
 	if !waitForGiftClipProcessGone(recordedPID, 3*time.Second) {
 		t.Fatalf("recorded suspended PID %d survived assignment failure", recordedPID)
 	}
-	if jobCloses != 1 || processCloses != 1 || resumes != 0 {
-		t.Fatalf("job closes=%d process closes=%d resumes=%d, want 1, 1, 0", jobCloses, processCloses, resumes)
+	if jobCloses != 1 || processCloses != 1 || resumes != 0 || kills != 1 || waits != 1 {
+		t.Fatalf("job closes=%d process closes=%d resumes=%d kills=%d waits=%d, want 1, 1, 0, 1, 1", jobCloses, processCloses, resumes, kills, waits)
+	}
+}
+
+func TestGiftClipWindowsProcessRunnerAssignmentKillFailureSkipsWait(t *testing.T) {
+	api := giftClipDefaultWindowsAPI
+	assignErr, killErr := errors.New("assignment failed"), errors.New("kill failed")
+	api.assignProcess = func(syscall.Handle, syscall.Handle) error { return assignErr }
+	started := make(chan *exec.Cmd, 1)
+	startSuspended := api.startSuspended
+	api.startSuspended = func(path string, args []string, stdout, stderr io.Writer) (*exec.Cmd, error) {
+		command, err := startSuspended(path, args, stdout, stderr)
+		if command != nil {
+			started <- command
+		}
+		return command, err
+	}
+	kills, waits, releases := 0, 0, 0
+	kill, release := api.killProcess, api.releaseProcess
+	api.killProcess = func(command *exec.Cmd) error {
+		kills++
+		_ = kill(command) // keep the self-created test process from surviving the injected API failure.
+		return killErr
+	}
+	api.waitProcess = func(*exec.Cmd) error { waits++; return nil }
+	api.releaseProcess = func(command *exec.Cmd) error { releases++; return release(command) }
+	runner := giftClipWindowsProcessRunner{api: api}
+	errs := make(chan error, 1)
+	go func() {
+		errs <- runner.Run(context.Background(), os.Args[0], []string{"-test.run=^TestGiftClipWindowsProcessHelper$"}, io.Discard, io.Discard)
+	}()
+	command := <-started
+	recordedPID := command.Process.Pid
+	select {
+	case err := <-errs:
+		if !errors.Is(err, assignErr) || !errors.Is(err, killErr) {
+			t.Fatalf("Run error = %v, want assignment and kill failure", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Run did not return after injected kill failure")
+	}
+	if !waitForGiftClipProcessGone(recordedPID, 3*time.Second) {
+		t.Fatalf("recorded PID %d survived injected kill failure", recordedPID)
+	}
+	if kills != 1 || waits != 0 || releases != 1 {
+		t.Fatalf("kills=%d waits=%d releases=%d, want 1, 0, 1", kills, waits, releases)
+	}
+}
+
+func TestGiftClipWindowsProcessRunnerAssignmentWaitFailureIsReported(t *testing.T) {
+	api := giftClipDefaultWindowsAPI
+	assignErr, waitErr := errors.New("assignment failed"), errors.New("wait failed")
+	api.assignProcess = func(syscall.Handle, syscall.Handle) error { return assignErr }
+	started := make(chan *exec.Cmd, 1)
+	startSuspended := api.startSuspended
+	api.startSuspended = func(path string, args []string, stdout, stderr io.Writer) (*exec.Cmd, error) {
+		command, err := startSuspended(path, args, stdout, stderr)
+		if command != nil {
+			started <- command
+		}
+		return command, err
+	}
+	kills, waits := 0, 0
+	kill, wait := api.killProcess, api.waitProcess
+	api.killProcess = func(command *exec.Cmd) error { kills++; return kill(command) }
+	api.waitProcess = func(command *exec.Cmd) error {
+		waits++
+		_ = wait(command)
+		return waitErr
+	}
+	runner := giftClipWindowsProcessRunner{api: api}
+	errs := make(chan error, 1)
+	go func() {
+		errs <- runner.Run(context.Background(), os.Args[0], []string{"-test.run=^TestGiftClipWindowsProcessHelper$"}, io.Discard, io.Discard)
+	}()
+	command := <-started
+	recordedPID := command.Process.Pid
+	select {
+	case err := <-errs:
+		if !errors.Is(err, assignErr) || !errors.Is(err, waitErr) {
+			t.Fatalf("Run error = %v, want assignment and wait failure", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Run did not return after injected wait failure")
+	}
+	if !waitForGiftClipProcessGone(recordedPID, 3*time.Second) {
+		t.Fatalf("recorded PID %d survived injected wait failure", recordedPID)
+	}
+	if kills != 1 || waits != 1 {
+		t.Fatalf("kills=%d waits=%d, want 1, 1", kills, waits)
 	}
 }
 

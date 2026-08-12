@@ -425,6 +425,20 @@ func TestSanitizeGiftClipDiagnosticStderrRedactsWindowsAbsolutePaths(t *testing.
 	}
 }
 
+func TestSanitizeGiftClipDiagnosticStderrPreservesRelativePathsAndURLs(t *testing.T) {
+	for _, input := range []string{
+		"scale=iw/2: invalid width",
+		"time_base=1/90000: invalid time base",
+		"libavfilter/vf_scale.c:123: scale failed",
+		"https://example.invalid/secret: connection refused",
+		"tcp://127.0.0.1:9000: connection refused",
+	} {
+		if got := sanitizeGiftClipDiagnosticStderr(input); got != input {
+			t.Fatalf("sanitizeGiftClipDiagnosticStderr(%q) = %q, want original", input, got)
+		}
+	}
+}
+
 func testGiftClipPayload(t *testing.T) *giftClipPayload {
 	t.Helper()
 	return newTestGiftClipPayload(t, t.TempDir(), []byte("MZ test ffmpeg"))

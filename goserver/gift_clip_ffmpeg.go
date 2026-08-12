@@ -206,13 +206,37 @@ func startsGiftClipAbsolutePath(text string, index int) bool {
 	if index >= len(text) {
 		return false
 	}
-	if index+2 < len(text) && ((text[index] >= 'A' && text[index] <= 'Z') || (text[index] >= 'a' && text[index] <= 'z')) && text[index+1] == ':' && (text[index+2] == '\\' || text[index+2] == '/') {
+	if index+2 < len(text) && giftClipWindowsPathBoundary(text, index) && ((text[index] >= 'A' && text[index] <= 'Z') || (text[index] >= 'a' && text[index] <= 'z')) && text[index+1] == ':' && (text[index+2] == '\\' || text[index+2] == '/') {
 		return true
 	}
 	if text[index] == '/' {
-		return true
+		return giftClipSlashPathBoundary(text, index)
 	}
 	return index+1 < len(text) && text[index] == '\\' && text[index+1] == '\\'
+}
+
+func giftClipWindowsPathBoundary(text string, index int) bool {
+	if index == 0 {
+		return true
+	}
+	switch text[index-1] {
+	case ' ', '\t', '\r', '\n', '"', '\'', '=', '(', '[':
+		return true
+	default:
+		return false
+	}
+}
+
+func giftClipSlashPathBoundary(text string, index int) bool {
+	if index == 0 {
+		return true
+	}
+	switch text[index-1] {
+	case ' ', '\t', '\r', '\n', '"', '\'', '=', '(', '[':
+		return true
+	default:
+		return false
+	}
 }
 
 func endGiftClipDiagnosticPath(text string, start int, quoted bool) int {
