@@ -100,8 +100,15 @@
 
 输入按素材自身时间信息自适应：
 
-- **GIF**：使用每帧 delay 和 disposal 语义，循环到目标时长。
-- **动画 WebP**：使用容器内每帧 duration/timestamp 和循环语义，循环到目标时长。
+- **单帧 GIF**：严格解析确认只有一个 image descriptor 后，以 `gif` decoder + `image2`
+  静态输入按 30 FPS 循环；不能用这一分支打开多帧 GIF。
+- **多帧 GIF**：在任务目录的可信副本中严格插入或改写唯一 `NETSCAPE2.0` loop count 为 0，
+  保留原始帧数据、delay、disposal、画布和调色板，再由 GIF demuxer 使用 `-ignore_loop 0`
+  按原始时间戳无限循环。禁止 `-stream_loop`。
+- **静态 WebP**：严格确认没有 `ANIM`/`ANMF` 后，使用 `webp_pipe` 静态循环。
+- **动画 WebP**：严格要求 VP8X animation flag、唯一合法 `ANIM` 和至少一个 `ANMF`，只在
+  任务副本中把 `ANIM.loop_count` 改为 0，再由 FFmpeg 9.0 `webp_anim` demuxer/decoder 和
+  `-ignore_loop 0` 按容器 duration/timestamp 无限循环。原始下载文件不修改。
 - **完整特效**：使用已验证布局中的 `fps`、`frames`、RGB 区域与 alpha 区域；持续时间为
   `frames / fps` 并沿用 1–15 秒规范化规则。FFmpeg 分别裁出 RGB 和 alpha 平面，缩放到
   相同尺寸后合成透明动态画面。
@@ -109,6 +116,12 @@
 FFmpeg 的时间轴/`fps` 过滤把输入重采样为 30 FPS：低帧率输入按时间戳重复必要帧，
 高帧率输入按时间戳丢弃必要帧。禁止运动插帧。相同输入、剪裁和图层必须得到相同帧选择，
 与机器编码耗时无关。
+
+禁止使用会缓存整个动画周期的 `loop` video filter。16 MiB 素材大小门限和 4096×4096
+画布上限保持不变；播放链路的内存复杂度必须与动画帧数/周期长度无关，只允许保存有界源
+文件数据、解码器当前画布/帧和固定数量的合成缓冲区。GIF/WebP 规范化必须严格校验容器边界、
+扩展块/分块唯一性和终止符，歧义或畸形输入直接失败；通过同目录 partial + 原子无替换安装
+生成任务副本，取消或失败时只清理本任务拥有的文件。
 
 ## 合成与输出
 
@@ -175,20 +188,24 @@ FFmpeg 使用 `-progress pipe:1 -nostats` 输出机器可读进度。服务用 `
 
 ## FFmpeg 精简、嵌入与许可
 
-发布物使用固定 FFmpeg 版本/commit 从源码构建独立 `ffmpeg.exe`。配置以
+发布物使用官方签名的 FFmpeg 9.0 release tarball 从源码构建独立 `ffmpeg.exe`。配置以
 `--disable-everything` 为基础，只开启：
 
 - `ffmpeg` 程序本身；不构建 `ffplay`、`ffprobe`。
 - 本地文件和必要 pipe 协议；关闭全部网络协议。
-- MP4/MOV、GIF、动画 WebP、image2/image2pipe 等本功能实际需要的 demuxer。
-- H.264/HEVC/VP9（仅按实际完整特效素材需要）、GIF、WebP、PNG 等必要 decoder。
+- MP4/MOV、GIF、`webp_anim`、`image_webp_pipe`、image2 等本功能实际需要的 demuxer。
+- H.264、GIF、`webp_anim`、静态 WebP、PNG 等必要 decoder；完整特效已确认是 H.264，
+  不启用 HEVC/VP9。
+- GIF/H.264 parser；GIF parser 是多帧 GIF 正确解码的必要组件。
 - `h264_mf` encoder 和 MP4 muxer。
-- crop、scale、format、split、alpha 合成、overlay、fps、setpts、loop 等实际 filter graph 需要的 filter。
+- crop、scale、format、split、alpha 合成、overlay、fps、setpts 等实际 filter graph 需要的 filter；
+  不启用或使用缓存整个周期的 `loop` filter。
 - Windows Media Foundation 及构建所需依赖；不启用 GPL 或 nonfree 组件，不含音频、字幕和网络功能。
 
 具体开关必须由可复现构建脚本显式列出，并以 GIF、动画 WebP、完整特效三类 fixture 验证，
-不得仅凭组件名称推断功能存在。FFmpeg 8.1.2 使用实际 demuxer 名 `image_webp_pipe`，并在
-`--disable-autodetect` 下显式启用 `mediafoundation` 与 `d3d11va` 以满足 `h264_mf` 的编译
+不得仅凭组件名称推断功能存在。FFmpeg 9.0 同时启用动画 `webp_anim` 与静态
+`image_webp_pipe` 路径，并在 `--disable-autodetect` 下显式启用 `mediafoundation` 与
+`d3d11va` 以满足 `h264_mf` 的编译
 依赖；`d3d11va` 不授权额外 codec/hwaccel，Windows/MSYS2 构建目标为 `ffmpeg.exe`。组件验证
 允许 FFmpeg 为显式白名单自动选择的必要基础设施项，但
 必须逐项记录，且不得扩大 codec、协议、网络、音频、字幕、GPL 或 nonfree 范围。若实际素材

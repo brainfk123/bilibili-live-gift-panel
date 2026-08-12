@@ -4,9 +4,9 @@
 
 **Goal:** 用内嵌的精简 FFmpeg CLI 取代实时 Canvas/MediaRecorder 导出，使礼物动画按输入时间戳稳定生成恒定 30 FPS、H.264 MP4，并在 Windows 上优先硬件编码、自动回退软件模式。
 
-**Architecture:** 前端继续通过稳定的 `openGiftClipStudio(...)` seam 协调剪裁 UI，但把 DOM view、静态图层生成和任务 API 分到独立模块；Go 后端新增可信素材解析、FFmpeg 适配、单并发任务队列和 HTTP 任务接口。FFmpeg 8.1.2 的已签名最小 CLI 以 ZIP/DEFLATE 嵌入 Go EXE，首次使用校验 SHA-256 后原子解压到版本化本地缓存。
+**Architecture:** 前端继续通过稳定的 `openGiftClipStudio(...)` seam 协调剪裁 UI，但把 DOM view、静态图层生成和任务 API 分到独立模块；Go 后端新增可信素材解析、四类有界内存短动画播放模式、FFmpeg 适配、单并发任务队列和 HTTP 任务接口。官方签名 FFmpeg 9.0 的最小 CLI 以 ZIP/DEFLATE 嵌入 Go EXE，首次使用校验 SHA-256 后原子解压到版本化本地缓存。
 
-**Tech Stack:** TypeScript 5.5、Vitest 2.1、Canvas 2D、Playwright/Chromium、Go 1.26、FFmpeg 8.1.2、Windows Media Foundation `h264_mf`、PowerShell、Vite 5.4。
+**Tech Stack:** TypeScript 5.5、Vitest 2.1、Canvas 2D、Playwright/Chromium、Go 1.26、FFmpeg 9.0、Windows Media Foundation `h264_mf`、PowerShell、Vite 5.4。
 
 ## Global Constraints
 
@@ -16,10 +16,11 @@
 - 输出宽高各为 64–4096 的偶数；剪裁 `x`/`y` 仍保留 1 px 精度，最大面积为 16,777,216 像素。
 - 平均目标码率为 `2,000,000 × pixels / 2,073,600`，四舍五入到 50,000 bit/s，夹在 150,000–16,000,000 bit/s；peak 为 1.5 倍，VBV buffer 为 2 倍。
 - Windows 先运行 `h264_mf -hw_encoding 1`，编码器失败只回退一次 `h264_mf -hw_encoding 0`；取消、坏输入、完整性或磁盘错误不得回退。
-- FFmpeg 固定为 8.1.2，源码归档 `https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz`，SHA-256 `464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c`，发布签名 key fingerprint `FCF986EA15E6E293A5644F10B4322F04D67658D8`。
+- FFmpeg 固定为官方 9.0 release，源码归档 `https://ffmpeg.org/releases/ffmpeg-9.0.tar.xz`，SHA-256 `7f607a00dd0d28a729d5a4811205812eef01cf6ef6155025febb6f36a9062d52`，detached release signature key fingerprint `FCF986EA15E6E293A5644F10B4322F04D67658D8`。签名 tag `n9.0` 指向 commit `d32b387f2b0a484599d4587d651891f0c63c4238`，tag signer fingerprint `DD1EC9E8DE085C629B3E1846B18E8928B3948D64` 作为额外来源证据记录，但构建输入只使用已验签 tarball。
 - FFmpeg 构建保持 LGPL：不得启用 `--enable-gpl` 或 `--enable-nonfree`；关闭网络、音频、字幕、ffplay 和 ffprobe。
 - 内层 `ffmpeg.exe` 先 Authenticode 签名再计算 hash/ZIP；外层 `gift-panel.exe` 最后签名。禁止 UPX。
 - FFmpeg ZIP 目标 `<= 30,000,000 bytes`；`> 40,000,000 bytes` 时构建必须失败。
+- 禁止以 `-stream_loop` 循环动画，也禁止使用缓存完整周期的 `loop` filter；短动画播放内存必须与周期帧数无关。单帧 GIF、多帧 GIF、静态 WebP、动画 WebP 必须由受信任解析层明确分类，歧义输入拒绝。
 - 配置页外部 seam `openGiftClipStudio(options): GiftClipStudioController`、`giftClipAnimationKey()`、剪裁确认回调和持久化时机保持稳定。
 - `gift-clip-studio.ts` 必须缩为协调器；不得容纳 HTTP 实现、PNG 编码、FFmpeg 状态解析或重复的 DOM 构造细节。
 - 前端不能提交媒体 URL/本地路径；Go 只按 receipt ID 重新解析已允许的 Bilibili HTTPS 素材。
@@ -289,7 +290,10 @@ git commit -m "feat: define gift clip output profile"
 - Consumes: `giftReceiptAPI.fetchMedia()`、`parseGiftEffectLayout()`、`normalizeGiftAnimationDuration()`。
 - Produces:
   - `type giftClipSourceKind string` with `giftClipSourceGIF`, `giftClipSourceWebP`, `giftClipSourceEffect`
-  - `type giftClipSource struct { Kind giftClipSourceKind; Path string; VisualWidth, VisualHeight int; Duration time.Duration; Layout *giftEffectLayout }`
+  - `type giftClipPlaybackMode string` with `giftClipPlaybackSingleGIF`, `giftClipPlaybackAnimatedGIF`, `giftClipPlaybackStaticWebP`, `giftClipPlaybackAnimatedWebP`, `giftClipPlaybackEffect`
+  - `type giftClipSource struct { Kind giftClipSourceKind; Playback giftClipPlaybackMode; Path string; VisualWidth, VisualHeight int; Duration time.Duration; Layout *giftEffectLayout }`
+  - `type giftClipShortAnimation struct { Kind giftClipSourceKind; Playback giftClipPlaybackMode; Width, Height int; Cycle time.Duration; Extension string; Data []byte }`
+  - `func inspectGiftClipShortAnimation(string, []byte) (giftClipShortAnimation, error)`，返回经过严格验证、必要时只规范化 loop metadata 的任务副本 bytes。
   - `type giftClipSourceResolver interface { Resolve(context.Context, string, string) (giftClipSource, error) }`
   - `func newGiftClipSourceResolver(store *configStore, media *giftReceiptAPI) giftClipSourceResolver`
 
@@ -316,6 +320,46 @@ func TestGiftClipWebPInfoUsesANMFDelays(t *testing.T) {
 ```
 
 fixture helper 要写入合法 RIFF/VP8X/ANIM/ANMF chunk 长度与 padding；WebP delay 小于 10 ms 时按 10 ms 计算。
+
+- [ ] **Step 1a（架构修正）: 写出四类播放模式与 loop 规范化 RED 测试**
+
+在 Task 5 真实 FFmpeg 9.0 spike 后追加表驱动测试：GIF parser 必须精确计算 image descriptor
+数量并拒绝多个/畸形 `NETSCAPE2.0` 扩展；单帧返回 `giftClipPlaybackSingleGIF`，多帧将任务
+副本中的唯一 loop count 规范化为 0 后返回 `giftClipPlaybackAnimatedGIF`。WebP 必须区分没有
+`ANIM`/`ANMF` 的静态 `giftClipPlaybackStaticWebP` 与具有 VP8X animation flag、唯一长度 6
+的 `ANIM`、至少一个合法 `ANMF` 的 `giftClipPlaybackAnimatedWebP`；动画副本只改 `ANIM`
+loop-count 两个 little-endian 字节为 0。断言原始输入 bytes 不变，规范化后帧 payload、delay、
+disposal/canvas 不变；partial/取消/冲突路径不留文件。
+
+```go
+func TestGiftClipShortAnimationPlaybackModesAreExplicit(t *testing.T) {
+	tests := []struct { name string; mediaType string; data []byte; want giftClipPlaybackMode }{
+		{"single gif", "image/gif", singleFrameGIF(t), giftClipPlaybackSingleGIF},
+		{"animated gif", "image/gif", twoFrameGIF(t, 16, 16, []int{2, 3}), giftClipPlaybackAnimatedGIF},
+		{"static webp", "image/webp", staticWebPFixture(t), giftClipPlaybackStaticWebP},
+		{"animated webp", "image/webp", animatedWebPFixture(t), giftClipPlaybackAnimatedWebP},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := inspectGiftClipShortAnimation(test.mediaType, test.data)
+			if err != nil { t.Fatal(err) }
+			if got.Playback != test.want { t.Fatalf("playback = %q, want %q", got.Playback, test.want) }
+		})
+	}
+}
+```
+
+GIF 使用标准库 `gif.DecodeAll` 验证像素/画布/delay/disposal，再以独立 raw block parser 严格
+遍历 header、LSD/global color table、extension sub-block、image descriptor/local color table、image
+data sub-block 与唯一 trailer。单帧不改 bytes；多帧没有 loop extension 时只在 trailer 前插入
+标准 19-byte `NETSCAPE2.0` application extension，已有唯一合法扩展时只把 loop uint16 LE 改为 0；
+多个、截断或非标准 loop extension 拒绝。禁止用 DecodeAll→EncodeAll 重写图像数据。
+
+WebP raw parser 必须支持两条互斥路径：静态文件拒绝任何 `ANIM`/`ANMF`，并从 VP8X canvas、
+VP8 frame header 或 VP8L packed header 得到尺寸且要求恰有一个合法 image payload；动画文件要求
+VP8X animation flag、唯一 `ANIM` length 6、至少一个合法 `ANMF`，统计 delay 并只改写唯一
+ANIM payload offset 4–5 的 loop count。RIFF declared length、所有 chunk length/padding 和嵌套
+ALPH/VP8/VP8L 均必须完整消费，静态/动画标志冲突或多余 image payload 拒绝。
 
 - [ ] **Step 2: 写出 receipt 安全解析和完整特效回退 RED 测试**
 
@@ -377,7 +421,11 @@ func (resolver *receiptGiftClipSourceResolver) Resolve(ctx context.Context, rece
 }
 ```
 
-`resolveEffect()` 同时下载并验证 MP4/layout，duration 为规范化 `frames/fps`；短动画 duration 优先 receipt `DurationMS`，值为 0 时使用解码 cycle，再缺失时使用 3 秒。文件先写 `*.partial`，`Sync`、关闭后 `Rename`；任一错误清除本次创建的文件。
+`resolveEffect()` 同时下载并验证 MP4/layout，duration 为规范化 `frames/fps`，Playback 为
+`giftClipPlaybackEffect`；短动画 duration 优先 receipt `DurationMS`，值为 0 时使用解码 cycle，
+再缺失时使用 3 秒。GIF/WebP 解析与 loop 规范化必须发生在写入任务副本前；最大输入仍为
+16 MiB。文件先写同目录随机 `*.partial-*`、`Sync`、关闭后原子无替换安装；任一错误只清除
+本次创建的文件。禁止修改 receipt 原始 bytes 或引入整周期帧缓存。
 
 - [ ] **Step 6: 运行 GREEN、安全回归和 race test**
 
@@ -395,6 +443,15 @@ git diff --check
 ```powershell
 git add -- goserver/gift_clip_source.go goserver/gift_clip_source_test.go goserver/gift_receipts.go
 git commit -m "feat: resolve trusted gift clip sources"
+```
+
+- [ ] **Step 8（架构修正提交）: 提交有界内存播放分类**
+
+Task 3 已有提交不改写历史；在 RED→GREEN、安全回归与独立审查通过后追加独立提交：
+
+```powershell
+git add -- goserver/gift_clip_source.go goserver/gift_clip_source_test.go
+git commit -m "feat: normalize bounded gift clip playback"
 ```
 
 ---
@@ -417,13 +474,13 @@ git commit -m "feat: resolve trusted gift clip sources"
 - [ ] **Step 1: 写出短动画和 packed-alpha 参数 RED 测试**
 
 ```go
-func TestBuildGiftClipFFmpegArgsCreatesDeterministicShortAnimationTimeline(t *testing.T) {
-	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceWebP, Path: `C:\task\source.webp`, Duration: 2200*time.Millisecond})
+func TestBuildGiftClipFFmpegArgsCreatesDeterministicAnimatedWebPTimeline(t *testing.T) {
+	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceWebP, Playback: giftClipPlaybackAnimatedWebP, Path: `C:\task\source.webp`, Duration: 2200*time.Millisecond})
 	args, err := buildGiftClipFFmpegArgs(request, giftClipEncoderHardware)
 	if err != nil { t.Fatal(err) }
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
-		"-stream_loop -1", "-f webp", "crop=960:540:101:53", "fps=30",
+		"-f webp_anim -ignore_loop 0", "crop=960:540:101:53", "fps=30",
 		"-c:v h264_mf", "-hw_encoding 1", "-rate_control pc_vbr",
 		"-b:v 500000", "-maxrate 750000", "-bufsize 1000000",
 		"-pix_fmt nv12", "-fps_mode cfr", "-movflags +faststart", "-progress pipe:1",
@@ -432,6 +489,20 @@ func TestBuildGiftClipFFmpegArgsCreatesDeterministicShortAnimationTimeline(t *te
 	}
 }
 ```
+
+追加精确 argv prefix 表：
+
+```go
+tests := []struct { mode giftClipPlaybackMode; want []string }{
+	{giftClipPlaybackSingleGIF, []string{"-c:v", "gif", "-f", "image2", "-loop", "1", "-framerate", "30", "-i"}},
+	{giftClipPlaybackAnimatedGIF, []string{"-f", "gif", "-ignore_loop", "0", "-i"}},
+	{giftClipPlaybackStaticWebP, []string{"-stream_loop", "-1", "-f", "webp_pipe", "-i"}},
+	{giftClipPlaybackAnimatedWebP, []string{"-f", "webp_anim", "-ignore_loop", "0", "-i"}},
+}
+```
+
+所有动画模式都必须断言参数和 filter graph 中不存在 `-stream_loop`（静态 WebP 例外）与
+`loop=` video filter；Playback/Kind 不匹配必须报错。
 
 完整特效测试断言 filter graph 包含两个 layout crop、`scale`、`format=gray`、`alphamerge`，再执行用户 crop；参数中不能出现 `http://`、`https://`、shell quote wrapper 或音频 map。
 
@@ -483,7 +554,10 @@ effect := fmt.Sprintf(
 )
 ```
 
-动态素材在 input 前固定使用 `-stream_loop -1`；GIF/WebP 同时使用 `-ignore_loop 1`，由外层 stream loop 统一循环。静态 PNG inputs 固定使用例如
+输入参数只由 Task 3 的明确 Playback 决定：单帧 GIF 使用显式 `-c:v gif -f image2 -loop 1
+-framerate 30`；多帧 GIF 使用 `-f gif -ignore_loop 0`；静态 WebP 使用 `-stream_loop -1
+-f webp_pipe`；动画 WebP 使用 `-f webp_anim -ignore_loop 0`。只有静态 WebP 允许
+`-stream_loop`，所有动画禁止它，也禁止 `loop` video filter。静态 PNG inputs 固定使用例如
 `-f image2 -loop 1 -framerate 30 -i C:\task\background.png` 的绝对路径参数；输出时长用不带 locale 的秒数字符串，并加例如
 `-an -map [out] -t 2.2 -y C:\task\output.mp4`。
 
@@ -506,6 +580,16 @@ git diff --check
 ```powershell
 git add -- goserver/gift_clip_ffmpeg.go goserver/gift_clip_ffmpeg_test.go
 git commit -m "feat: build deterministic gift clip ffmpeg commands"
+```
+
+- [ ] **Step 8（架构修正提交）: 提交四类输入 argv**
+
+Task 4 已有提交不改写历史；Task 3 新 Playback 接口落地后，先证明旧 argv 测试 RED，再实现并
+运行真实 FFmpeg 9.0 smoke/full Go 回归，最后追加独立提交：
+
+```powershell
+git add -- goserver/gift_clip_ffmpeg.go goserver/gift_clip_ffmpeg_test.go
+git commit -m "feat: select bounded ffmpeg playback modes"
 ```
 
 ---
@@ -586,7 +670,7 @@ func (payload *giftClipPayload) Prepare(ctx context.Context) (string, error) {
 
 `extractAtomically()` 只接受 ZIP 中 basename 恰为 `ffmpeg.exe` 的一个普通文件，拒绝目录、绝对路径、`..`、symlink 和额外 entry；写入同目录随机 `.partial-*`，校验 size/hash 后 `Rename`。当前 manifest 之外的缓存目录不删除。
 
-- [ ] **Step 4: 固定 FFmpeg 8.1.2 来源和最小 configure flags**
+- [ ] **Step 4: 固定官方 FFmpeg 9.0 来源和最小 configure flags**
 
 `scripts/build-ffmpeg.ps1` 必须下载 tarball、`.asc` 和 `ffmpeg-devel.asc`，验证 tarball SHA-256 和 GPG fingerprint，再从 MSYS2 UCRT64 shell 调用 configure/make。`third_party/ffmpeg/configure.flags` 内容固定为：
 
@@ -605,9 +689,9 @@ func (payload *giftClipPayload) Prepare(ctx context.Context) (string, error) {
 --enable-mediafoundation
 --enable-d3d11va
 --enable-protocol=file,pipe
---enable-demuxer=gif,image_webp_pipe,mov,image2
---enable-decoder=gif,webp,png,h264
---enable-parser=h264
+--enable-demuxer=gif,webp_anim,image_webp_pipe,mov,image2
+--enable-decoder=gif,webp_anim,webp,png,h264
+--enable-parser=gif,h264
 --enable-encoder=h264_mf
 --enable-muxer=mp4
 --enable-filter=crop,scale,format,split,alphamerge,overlay,fps,setpts
@@ -620,7 +704,13 @@ func (payload *giftClipPayload) Prepare(ctx context.Context) (string, error) {
 --extra-ldflags=-static
 ```
 
-脚本在 configure 后检查 `config.h` 不含 `CONFIG_GPL 1` / `CONFIG_NONFREE 1`，确认 `CONFIG_MEDIAFOUNDATION 1`、`CONFIG_D3D11VA 1` 与 `CONFIG_H264_MF_ENCODER 1`，并在 Windows/MSYS2 下构建实际目标 `ffmpeg.exe`；随后保存 `ffmpeg -buildconf` 到 `dist/ffmpeg-build-config.txt`。`d3d11va` 只作为 FFmpeg 8.1.2 `h264_mf` 编译所需基础设施，不授权增加额外 codec/hwaccel。若实测完整特效 fixture 不是 H.264，停止本任务并回到规格评审；不能自行加入 HEVC/VP9。
+脚本必须下载并验证官方 `ffmpeg-9.0.tar.xz`、detached `.asc` 和 release key；固定 SHA-256
+为全局约束中的值。发布材料额外记录签名 `n9.0` tag/commit/fingerprint，但构建不从可变 git
+branch 或 unsigned commit 取源。configure 后检查 `config.h` 不含 `CONFIG_GPL 1` /
+`CONFIG_NONFREE 1`，确认 `CONFIG_MEDIAFOUNDATION 1`、`CONFIG_D3D11VA 1`、
+`CONFIG_H264_MF_ENCODER 1`、`CONFIG_GIF_PARSER 1`、`CONFIG_WEBP_ANIM_DEMUXER 1` 与
+`CONFIG_WEBP_ANIM_DECODER 1`，并确认 `CONFIG_LOOP_FILTER` 未启用；Windows/MSYS2 构建目标为
+`ffmpeg.exe`。若完整特效不是 H.264，停止规格评审，不能自行加入 HEVC/VP9。
 
 - [ ] **Step 5: 实现签名后打包脚本和大小门限**
 
@@ -629,7 +719,7 @@ func (payload *giftClipPayload) Prepare(ctx context.Context) (string, error) {
 ```js
 const binary = await readFile(input);
 const manifest = {
-  version: '8.1.2',
+  version: '9.0',
   sha256: createHash('sha256').update(binary).digest('hex'),
   size: binary.length,
   authenticode: process.env.FFMPEG_AUTHENTICODE === 'true',
@@ -652,7 +742,13 @@ ZIP `> 40_000_000` bytes 立即失败，`> 30_000_000` bytes 输出明确 warnin
 }
 ```
 
-`verify-ffmpeg.mjs` 对解压出的 CLI 运行 `-version`、`-buildconf`、`-protocols`、`-demuxers`、`-decoders`、`-encoders`、`-filters`、`-muxers`，断言：版本 8.1.2；无网络协议/GPL/nonfree；显式产品组件仅含本任务白名单，并允许 FFmpeg 为这些组件自动选择的必要基础设施组件；含实际命名为 `image_webp_pipe` 的 animated WebP demuxer 与 `h264_mf`。然后用 GIF/WebP/packed-alpha fixtures 运行短解码/合成 smoke test。自动选择项必须来自构建输出并在验证脚本中逐项记录/允许，不能借此扩大 codec、协议、网络、音频、字幕、GPL 或 nonfree 范围。
+`verify-ffmpeg.mjs` 对解压出的 CLI 运行组件查询，断言版本 9.0、无网络/GPL/nonfree，含
+`gif`/`webp_anim`/`image_webp_pipe` demuxer、`gif`/`webp_anim`/`webp` decoder、GIF/H.264
+parser 与 `h264_mf`，且不含 `loop` filter。自动选择的 `vp8` decoder、`ac3` parser 等必要
+基础设施必须逐项记录/允许，不能扩大 codec、协议、网络、音频、字幕、GPL 或 nonfree 范围。
+smoke fixture 必须使用真实有效的：单帧 GIF、多帧无 loop GIF、多帧有限 loop GIF、静态 WebP、
+动画 WebP、packed-alpha H.264；前五类逐一以生产等价 argv 生成精确 30 FPS/目标时长 MP4。
+另加静态检查：动画路径无 `-stream_loop`，构建/命令均无周期 `loop` filter。
 
 - [ ] **Step 7: 构建开发 payload 并运行 GREEN**
 
@@ -1491,7 +1587,7 @@ Remove-Item Env:FFPROBE_BIN
 6. `npm run build:exe`。
 7. 对外层 EXE 签名并验证。
 
-随后运行真实 E2E。Release assets 除应用 EXE/hash/update/changelog 外，还上传：`ffmpeg-8.1.2.tar.xz`、`ffmpeg-8.1.2.tar.xz.asc`、`ffmpeg-build-config.txt`、`third_party/ffmpeg/NOTICE.md`、`third_party/ffmpeg/COPYING.LGPLv2.1`。本任务只修改 workflow，不打 tag、不 push、不实际发布。
+随后运行真实 E2E。Release assets 除应用 EXE/hash/update/changelog 外，还上传：`ffmpeg-9.0.tar.xz`、`ffmpeg-9.0.tar.xz.asc`、`ffmpeg-build-config.txt`、`third_party/ffmpeg/NOTICE.md`、`third_party/ffmpeg/COPYING.LGPLv2.1`。本任务只修改 workflow，不打 tag、不 push、不实际发布。
 
 - [ ] **Step 6: 更新脚本与用户文档**
 
