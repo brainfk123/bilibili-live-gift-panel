@@ -9,57 +9,88 @@ import (
 	"time"
 )
 
-func TestBuildGiftClipFFmpegArgsCreatesDeterministicShortAnimationTimeline(t *testing.T) {
-	request := giftClipEncodeFixture(giftClipSource{
-		Kind: giftClipSourceWebP, Path: `C:\task\source.webp`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond,
-	})
-	args, err := buildGiftClipFFmpegArgs(request, giftClipEncoderHardware)
-	if err != nil {
-		t.Fatal(err)
+func TestBuildGiftClipFFmpegArgsSelectsBoundedPlaybackInput(t *testing.T) {
+	tests := []struct {
+		name       string
+		source     giftClipSource
+		wantPrefix []string
+		forbid     []string
+	}{
+		{
+			name: "single GIF", source: giftClipSource{Kind: giftClipSourceGIF, Playback: giftClipPlaybackSingleGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond},
+			wantPrefix: []string{"-c:v", "gif", "-f", "image2", "-loop", "1", "-framerate", "30", "-i", `C:\task\source.gif`},
+			forbid:     []string{"-stream_loop", "-ignore_loop"},
+		},
+		{
+			name: "animated GIF", source: giftClipSource{Kind: giftClipSourceGIF, Playback: giftClipPlaybackAnimatedGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond},
+			wantPrefix: []string{"-f", "gif", "-ignore_loop", "0", "-i", `C:\task\source.gif`},
+			forbid:     []string{"-stream_loop"},
+		},
+		{
+			name: "static WebP", source: giftClipSource{Kind: giftClipSourceWebP, Playback: giftClipPlaybackStaticWebP, Path: `C:\task\source.webp`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond},
+			wantPrefix: []string{"-stream_loop", "-1", "-f", "webp_pipe", "-i", `C:\task\source.webp`},
+			forbid:     []string{"-ignore_loop"},
+		},
+		{
+			name: "animated WebP", source: giftClipSource{Kind: giftClipSourceWebP, Playback: giftClipPlaybackAnimatedWebP, Path: `C:\task\source.webp`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond},
+			wantPrefix: []string{"-f", "webp_anim", "-ignore_loop", "0", "-i", `C:\task\source.webp`},
+			forbid:     []string{"-stream_loop"},
+		},
+		{
+			name: "packed alpha effect", source: giftClipSource{Kind: giftClipSourceEffect, Playback: giftClipPlaybackEffect, Path: `C:\task\effect.mp4`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond,
+				Layout: &giftEffectLayout{VideoWidth: 3840, VideoHeight: 1080, RGBFrame: [4]int{0, 0, 1920, 1080}, AlphaFrame: [4]int{1920, 0, 1920, 1080}, FPS: 24, Frames: 53}},
+			wantPrefix: []string{"-i", `C:\task\effect.mp4`},
+			forbid:     []string{"-stream_loop", "-ignore_loop"},
+		},
 	}
-	wantInput := []string{"-stream_loop", "-1", "-f", "webp_pipe", "-i", `C:\task\source.webp`}
-	if len(args) < len(wantInput) || !reflect.DeepEqual(args[:len(wantInput)], wantInput) {
-		t.Fatalf("WebP input args = %#v, want prefix %#v", args, wantInput)
-	}
-	for _, arg := range args {
-		if arg == "-ignore_loop" {
-			t.Fatalf("WebP input args unexpectedly contain GIF-only -ignore_loop: %#v", args)
-		}
-	}
-	joined := strings.Join(args, " ")
-	for _, want := range []string{
-		"-stream_loop -1", "crop=960:540:101:53", "fps=30",
-		"-c:v h264_mf", "-hw_encoding 1", "-rate_control pc_vbr",
-		"-b:v 500000", "-maxrate 750000", "-bufsize 1000000",
-		"-pix_fmt nv12", "-fps_mode cfr", "-movflags +faststart", "-progress pipe:1",
-		"-an", "-map [out]", "-t 2.2",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("missing %q in %s", want, joined)
-		}
-	}
-	if strings.Contains(joined, "http://") || strings.Contains(joined, "https://") || strings.Contains(joined, " -map 0:a") || strings.Contains(joined, "\"'") {
-		t.Fatalf("unsafe or audio argument in %s", joined)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args, err := buildGiftClipFFmpegArgs(giftClipEncodeFixture(test.source), giftClipEncoderHardware)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(args) < len(test.wantPrefix) || !reflect.DeepEqual(args[:len(test.wantPrefix)], test.wantPrefix) {
+				t.Fatalf("input args = %#v, want prefix %#v", args, test.wantPrefix)
+			}
+			for _, token := range test.forbid {
+				if giftClipArgsContain(args, token) {
+					t.Fatalf("input args unexpectedly contain %q: %#v", token, args)
+				}
+			}
+			if giftClipArgsContainLoopFilter(args) {
+				t.Fatalf("filter graph unexpectedly uses the loop filter: %#v", args)
+			}
+		})
 	}
 }
 
-func TestBuildGiftClipFFmpegArgsKeepsGIFDemuxer(t *testing.T) {
-	request := giftClipEncodeFixture(giftClipSource{
-		Kind: giftClipSourceGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond,
-	})
-	args, err := buildGiftClipFFmpegArgs(request, giftClipEncoderHardware)
-	if err != nil {
-		t.Fatal(err)
+func TestBuildGiftClipFFmpegArgsRejectsInvalidSourcePlaybackMatrix(t *testing.T) {
+	tests := []struct {
+		name   string
+		source giftClipSource
+	}{
+		{name: "GIF has no playback", source: giftClipSource{Kind: giftClipSourceGIF}},
+		{name: "GIF uses WebP playback", source: giftClipSource{Kind: giftClipSourceGIF, Playback: giftClipPlaybackAnimatedWebP}},
+		{name: "WebP uses GIF playback", source: giftClipSource{Kind: giftClipSourceWebP, Playback: giftClipPlaybackSingleGIF}},
+		{name: "effect uses GIF playback", source: giftClipSource{Kind: giftClipSourceEffect, Playback: giftClipPlaybackAnimatedGIF}},
+		{name: "unknown playback", source: giftClipSource{Kind: giftClipSourceGIF, Playback: giftClipPlaybackMode("other")}},
+		{name: "unknown kind", source: giftClipSource{Kind: giftClipSourceKind("other"), Playback: giftClipPlaybackSingleGIF}},
 	}
-	wantInput := []string{"-stream_loop", "-1", "-f", "gif", "-ignore_loop", "1", "-i", `C:\task\source.gif`}
-	if len(args) < len(wantInput) || !reflect.DeepEqual(args[:len(wantInput)], wantInput) {
-		t.Fatalf("GIF input args = %#v, want prefix %#v", args, wantInput)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := test.source
+			source.Path = `C:\task\source.gif`
+			source.VisualWidth, source.VisualHeight, source.Duration = 1920, 1080, 2200*time.Millisecond
+			if _, err := buildGiftClipFFmpegArgs(giftClipEncodeFixture(source), giftClipEncoderHardware); err == nil {
+				t.Fatal("invalid source playback matrix was accepted")
+			}
+		})
 	}
 }
 
 func TestBuildGiftClipFFmpegArgsReconstructsPackedAlphaBeforeUserCrop(t *testing.T) {
 	request := giftClipEncodeFixture(giftClipSource{
-		Kind: giftClipSourceEffect, Path: `C:\task\effect.mp4`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond,
+		Kind: giftClipSourceEffect, Playback: giftClipPlaybackEffect, Path: `C:\task\effect.mp4`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond,
 		Layout: &giftEffectLayout{
 			VideoWidth: 3840, VideoHeight: 1080,
 			RGBFrame: [4]int{0, 0, 1920, 1080}, AlphaFrame: [4]int{1920, 0, 1920, 1080}, FPS: 24, Frames: 53,
@@ -86,11 +117,11 @@ func TestBuildGiftClipFFmpegArgsReconstructsPackedAlphaBeforeUserCrop(t *testing
 }
 
 func TestBuildGiftClipFFmpegArgsRejectsUntrustedOrIncompleteInputs(t *testing.T) {
-	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Path: "https://example.test/source.gif", VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
+	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Playback: giftClipPlaybackSingleGIF, Path: "https://example.test/source.gif", VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
 	if _, err := buildGiftClipFFmpegArgs(request, giftClipEncoderHardware); err == nil {
 		t.Fatal("remote source was accepted")
 	}
-	request = giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
+	request = giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Playback: giftClipPlaybackSingleGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
 	request.BackgroundPath = ""
 	if _, err := buildGiftClipFFmpegArgs(request, giftClipEncoderHardware); err == nil {
 		t.Fatal("missing background was accepted")
@@ -98,7 +129,7 @@ func TestBuildGiftClipFFmpegArgsRejectsUntrustedOrIncompleteInputs(t *testing.T)
 }
 
 func TestBuildGiftClipFFmpegArgsRejectsNetworkPathsForEveryFile(t *testing.T) {
-	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
+	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Playback: giftClipPlaybackSingleGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
 	tests := []struct {
 		name string
 		set  func(*giftClipEncodeRequest)
@@ -120,7 +151,7 @@ func TestBuildGiftClipFFmpegArgsRejectsNetworkPathsForEveryFile(t *testing.T) {
 }
 
 func TestBuildGiftClipFFmpegArgsAcceptsPOSIXAbsolutePaths(t *testing.T) {
-	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Path: "/task/source.gif", VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
+	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Playback: giftClipPlaybackSingleGIF, Path: "/task/source.gif", VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
 	request.BackgroundPath = "/task/background.png"
 	request.OverlayPath = "/task/overlay.png"
 	request.OutputPath = "/task/output.mp4"
@@ -130,7 +161,7 @@ func TestBuildGiftClipFFmpegArgsAcceptsPOSIXAbsolutePaths(t *testing.T) {
 }
 
 func TestBuildGiftClipFFmpegArgsRejectsWindowsDeviceNamespaces(t *testing.T) {
-	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
+	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Playback: giftClipPlaybackSingleGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
 	tests := []struct {
 		name string
 		set  func(*giftClipEncodeRequest)
@@ -154,7 +185,7 @@ func TestBuildGiftClipFFmpegArgsRejectsWindowsDeviceNamespaces(t *testing.T) {
 }
 
 func TestBuildGiftClipFFmpegArgsRejectsWindowsRootRelativeAndDriveRelativePaths(t *testing.T) {
-	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
+	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Playback: giftClipPlaybackSingleGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
 	tests := []struct {
 		name string
 		set  func(*giftClipEncodeRequest)
@@ -177,7 +208,7 @@ func TestBuildGiftClipFFmpegArgsRejectsWindowsRootRelativeAndDriveRelativePaths(
 }
 
 func TestBuildGiftClipFFmpegArgsRejectsUnknownEncoderMode(t *testing.T) {
-	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
+	request := giftClipEncodeFixture(giftClipSource{Kind: giftClipSourceGIF, Playback: giftClipPlaybackSingleGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond})
 	if _, err := buildGiftClipFFmpegArgs(request, giftClipEncoderMode("other")); err == nil {
 		t.Fatal("unknown encoder mode was accepted")
 	}
@@ -257,6 +288,29 @@ func TestShouldRetryGiftClipSoftwareClassifiesHardwareFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func giftClipArgsContain(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
+func giftClipArgsContainLoopFilter(args []string) bool {
+	for index, arg := range args {
+		if arg != "-filter_complex" || index+1 == len(args) {
+			continue
+		}
+		for _, filter := range strings.FieldsFunc(args[index+1], func(r rune) bool { return r == ',' || r == ';' }) {
+			if strings.HasPrefix(filter, "loop=") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func giftClipEncodeFixture(source giftClipSource) giftClipEncodeRequest {

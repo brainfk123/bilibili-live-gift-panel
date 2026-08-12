@@ -38,14 +38,7 @@ func buildGiftClipFFmpegArgs(request giftClipEncodeRequest, mode giftClipEncoder
 		return nil, err
 	}
 
-	args := []string{"-stream_loop", "-1"}
-	switch request.Source.Kind {
-	case giftClipSourceGIF:
-		args = append(args, "-f", "gif", "-ignore_loop", "1")
-	case giftClipSourceWebP:
-		args = append(args, "-f", "webp_pipe")
-	}
-	args = append(args, "-i", request.Source.Path)
+	args := appendGiftClipSourceInput(nil, request.Source)
 	args = appendStaticGiftClipImageInput(args, request.BackgroundPath)
 	args = appendStaticGiftClipImageInput(args, request.OverlayPath)
 
@@ -78,12 +71,29 @@ func buildGiftClipFFmpegArgs(request giftClipEncodeRequest, mode giftClipEncoder
 	return args, nil
 }
 
+func appendGiftClipSourceInput(args []string, source giftClipSource) []string {
+	switch source.Playback {
+	case giftClipPlaybackSingleGIF:
+		return append(args, "-c:v", "gif", "-f", "image2", "-loop", "1", "-framerate", strconv.Itoa(giftClipFPS), "-i", source.Path)
+	case giftClipPlaybackAnimatedGIF:
+		return append(args, "-f", "gif", "-ignore_loop", "0", "-i", source.Path)
+	case giftClipPlaybackStaticWebP:
+		return append(args, "-stream_loop", "-1", "-f", "webp_pipe", "-i", source.Path)
+	case giftClipPlaybackAnimatedWebP:
+		return append(args, "-f", "webp_anim", "-ignore_loop", "0", "-i", source.Path)
+	case giftClipPlaybackEffect:
+		return append(args, "-i", source.Path)
+	default:
+		return args
+	}
+}
+
 func appendStaticGiftClipImageInput(args []string, path string) []string {
 	return append(args, "-f", "image2", "-loop", "1", "-framerate", strconv.Itoa(giftClipFPS), "-i", path)
 }
 
 func validateGiftClipEncodeRequest(request giftClipEncodeRequest) error {
-	if request.Source.Kind != giftClipSourceGIF && request.Source.Kind != giftClipSourceWebP && request.Source.Kind != giftClipSourceEffect {
+	if !validGiftClipSourcePlayback(request.Source.Kind, request.Source.Playback) {
 		return errors.New("gift clip source kind is invalid")
 	}
 	if err := validateGiftClipLocalPath("source", request.Source.Path); err != nil {
@@ -122,6 +132,19 @@ func validateGiftClipEncodeRequest(request giftClipEncodeRequest) error {
 		}
 	}
 	return nil
+}
+
+func validGiftClipSourcePlayback(kind giftClipSourceKind, playback giftClipPlaybackMode) bool {
+	switch kind {
+	case giftClipSourceGIF:
+		return playback == giftClipPlaybackSingleGIF || playback == giftClipPlaybackAnimatedGIF
+	case giftClipSourceWebP:
+		return playback == giftClipPlaybackStaticWebP || playback == giftClipPlaybackAnimatedWebP
+	case giftClipSourceEffect:
+		return playback == giftClipPlaybackEffect
+	default:
+		return false
+	}
 }
 
 func validateGiftClipLocalPath(name, path string) error {
