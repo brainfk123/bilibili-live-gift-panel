@@ -5,7 +5,6 @@ export interface GiftClipStudioView {
   readonly overlay: HTMLElement;
   readonly stage: HTMLElement;
   readonly sourceCanvas: HTMLCanvasElement;
-  readonly recordingCanvas: HTMLCanvasElement;
   readonly preview: HTMLVideoElement;
   readonly sourceMediaHost: HTMLElement;
   readonly closeButton: HTMLButtonElement;
@@ -39,9 +38,6 @@ export function createGiftClipStudioView(host: HTMLElement, receipt: GiftReceipt
   const sourceCanvas = el('canvas', {
     class: 'gift-clip-canvas', width: 1, height: 1,
   }) as HTMLCanvasElement;
-  const recordingCanvas = el('canvas', {
-    class: 'gift-clip-recording-canvas', hidden: true,
-  }) as HTMLCanvasElement;
   const preview = el('video', {
     class: 'gift-clip-video', controls: true, loop: true, muted: true, playsInline: true, hidden: true,
   }) as HTMLVideoElement;
@@ -67,7 +63,7 @@ export function createGiftClipStudioView(host: HTMLElement, receipt: GiftReceipt
     class: 'btn primary', type: 'button', text: '保存视频', hidden: true, disabled: true,
   }) as HTMLButtonElement;
 
-  stage.append(sourceCanvas, recordingCanvas, preview, sourceMediaHost);
+  stage.append(sourceCanvas, preview, sourceMediaHost);
   dialog.append(
     el('header', { class: 'gift-clip-header' }, [
       el('div', {}, [
@@ -102,7 +98,6 @@ export function createGiftClipStudioView(host: HTMLElement, receipt: GiftReceipt
     overlay,
     stage,
     sourceCanvas,
-    recordingCanvas,
     preview,
     sourceMediaHost,
     closeButton,

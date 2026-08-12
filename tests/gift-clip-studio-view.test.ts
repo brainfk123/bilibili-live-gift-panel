@@ -133,12 +133,12 @@ describe('gift clip studio view', () => {
     expect(view.stage.className).toBe('gift-clip-stage');
     expect(view.stage.children).toEqual([
       view.sourceCanvas,
-      view.recordingCanvas,
       view.preview,
       view.sourceMediaHost,
     ]);
     expect(view.sourceCanvas.className).toBe('gift-clip-canvas');
-    expect(view.recordingCanvas.className).toBe('gift-clip-recording-canvas');
+    expect(view.stage.querySelector('.gift-clip-recording-canvas')).toBeNull();
+    expect('recordingCanvas' in view).toBe(false);
     expect(view.preview.className).toBe('gift-clip-video');
     expect(view.sourceMediaHost.className).toBe('gift-clip-source-media');
     expect(view.sourceMediaHost.ariaHidden).toBe('true');
@@ -197,7 +197,7 @@ describe('gift clip studio view', () => {
       progressHidden: false,
       secondaryLabel: '重新剪裁',
     });
-    view.showReady('WEBM 已生成', '保存 WEBM', 'blob:recording', '640 / 360');
+    view.showReady('MP4 已生成', '保存 MP4', '/api/gift-clips/job-1/video', '640 / 360');
     expect({
       status: status.textContent,
       save: view.saveButton.textContent,
@@ -207,11 +207,11 @@ describe('gift clip studio view', () => {
       previewAspectRatio: view.preview.style.aspectRatio,
       previewHidden: view.preview.hidden,
     }).toEqual({
-      status: 'WEBM 已生成',
-      save: '保存 WEBM',
+      status: 'MP4 已生成',
+      save: '保存 MP4',
       saveHidden: false,
       saveDisabled: false,
-      previewSource: 'blob:recording',
+      previewSource: '/api/gift-clips/job-1/video',
       previewAspectRatio: '640 / 360',
       previewHidden: false,
     });
@@ -221,9 +221,9 @@ describe('gift clip studio view', () => {
       previewAspectRatio: view.preview.style.aspectRatio,
       previewHidden: view.preview.hidden,
     }).toEqual({ previewSource: '', previewAspectRatio: '', previewHidden: true });
-    view.showFailure('视频录制失败，请重试。', '重试');
+    view.showFailure('视频导出失败，请重试。', '重试');
     expect({ status: status.textContent, error: status.className.includes('is-error'), retry: view.reeditButton.textContent, retryHidden: view.reeditButton.hidden })
-      .toEqual({ status: '视频录制失败，请重试。', error: true, retry: '重试', retryHidden: false });
+      .toEqual({ status: '视频导出失败，请重试。', error: true, retry: '重试', retryHidden: false });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(addListener).not.toHaveBeenCalled();
   });
