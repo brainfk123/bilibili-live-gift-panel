@@ -2152,7 +2152,7 @@ describe('single-page configuration rendering', () => {
     expect(formula.value).toBe('MIN(加班时间+60,3600)');
   });
 
-  it('advances the editable value when a gift rule is simulated without saving live state', async () => {
+  it('advances a gift simulation draft without saving it as the real attribute value', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state('88888888', 1),
       rules: [{
@@ -2176,10 +2176,17 @@ describe('single-page configuration rendering', () => {
 
     simulate?.onclick?.();
 
-    await vi.waitFor(() => expect(currentValue.value).toBe('1'));
-    expect(textOf(root.querySelector('.formula-preview')!)).toContain('已模拟 1 个');
-    await new Promise((resolve) => nativeSetTimeout(resolve, 60));
-    expect(textOf(root.querySelector('.formula-preview')!)).toContain('已模拟 1 个');
+    await vi.waitFor(() => expect(textOf(root.querySelector('.formula-preview')!)).toContain('0 → 1'));
+    expect(currentValue.value).toBe('0');
+
+    simulate?.onclick?.();
+
+    await vi.waitFor(() => expect(textOf(root.querySelector('.formula-preview')!)).toContain('1 → 2'));
+    expect(currentValue.value).toBe('0');
+
+    findByText(root, '保存修改')?.onclick?.();
+
+    await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
     expect(loadState().attributes[0].value).toBe(0);
   });
 

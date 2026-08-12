@@ -2892,6 +2892,8 @@ export function mountConfig(root: HTMLElement): void {
     };
     const valueInput = inputField('当前值', String(original?.value ?? 0));
     valueInput.inputMode = 'decimal';
+    const initialEditableValue = Number(valueInput.value);
+    let simulationDraftValue = Number.isFinite(initialEditableValue) ? initialEditableValue : 0;
     const formatSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
     formatSelect.innerHTML = '<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字 + 后缀</option>';
     formatSelect.value = original?.format ?? 'hhmmss';
@@ -3584,19 +3586,20 @@ export function mountConfig(root: HTMLElement): void {
         preview.classList.remove('has-tutorial-confirmation');
         preview.replaceChildren();
         const name = nameInput.value.trim() || originalName || '属性';
-        const value = Number(valueInput.value);
+        const inputValue = Number(valueInput.value);
         const formula = originalName && originalName !== name
           ? replaceFormulaVariable(item.formula.trim(), originalName, name)
           : item.formula.trim();
-        const currentValue = Number.isFinite(value) ? value : 0;
+        const currentValue = completeLesson
+          ? simulationDraftValue
+          : Number.isFinite(inputValue) ? inputValue : 0;
         const requestVersion = ++previewVersion;
         preview.append(el('span', { text: '由后台计算预览…' }));
         void previewFormula(formula, name, currentValue, 'gift', item.gift.price).then((result) => {
           if (requestVersion !== previewVersion) return;
           if (completeLesson) {
-            valueInput.value = String(result);
+            simulationDraftValue = result;
             item.simulationPreview = { currentValue, result };
-            updateOverviewPreview();
           }
           let awaitingConfirmation = false;
           if (completeLesson) awaitingConfirmation = renderSimulationPreview();
