@@ -1582,7 +1582,11 @@ Remove-Item Env:FFPROBE_BIN
 
 在 `release.yml` 的 UI build 后增加：
 
-1. `msys2/setup-msys2@v2` 安装 `mingw-w64-ucrt-x86_64-toolchain make nasm pkgconf`。
+1. `msys2/setup-msys2@v2` 只建立 MSYS2 环境；随后读取 Task 5 提交的
+   `third_party/ffmpeg/toolchain-lock.json`，从其中固定的仓库快照/包 URL 下载精确版本包，
+   校验每个包的 SHA-256 与签名后用 `pacman -U` 安装。禁止以浮动包名安装 latest。
+   `npm run build:ffmpeg` 会再次核对已安装 package/gcc/ld/make 版本与 lock；任何缺失或偏差
+   直接失败。workflow 上传该 lock 与 component gate 作为 FFmpeg 发布材料。
 2. `npm run build:ffmpeg` 并 `npm run verify:ffmpeg`。
 3. `node scripts/sign-evsign.mjs dist/ffmpeg/ffmpeg.exe`。
 4. `Get-AuthenticodeSignature` 验证内层为 Valid。
@@ -1590,7 +1594,7 @@ Remove-Item Env:FFPROBE_BIN
 6. `npm run build:exe`。
 7. 对外层 EXE 签名并验证。
 
-随后运行真实 E2E。Release assets 除应用 EXE/hash/update/changelog 外，还上传：`ffmpeg-9.0.tar.xz`、`ffmpeg-9.0.tar.xz.asc`、`ffmpeg-build-config.txt`、`third_party/ffmpeg/NOTICE.md`、`third_party/ffmpeg/COPYING.LGPLv2.1`。本任务只修改 workflow，不打 tag、不 push、不实际发布。
+随后运行真实 E2E。Release assets 除应用 EXE/hash/update/changelog 外，还上传：`ffmpeg-9.0.tar.xz`、`ffmpeg-9.0.tar.xz.asc`、`ffmpeg-build-config.txt`、`ffmpeg-component-gate.json`、`third_party/ffmpeg/toolchain-lock.json`、`third_party/ffmpeg/NOTICE.md`、`third_party/ffmpeg/COPYING.LGPLv2.1`。本任务只修改 workflow，不打 tag、不 push、不实际发布。
 
 - [ ] **Step 6: 更新脚本与用户文档**
 
