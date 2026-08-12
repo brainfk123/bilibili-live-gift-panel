@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
-  cpSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -9,16 +9,28 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 export const UI_ASSET_MANIFEST = 'ui-assets.json';
+const NON_UI_DIST_ROOTS = new Set([
+  'ffmpeg',
+  'ffmpeg-source',
+  'msys2-toolchain',
+  'gift-panel.exe',
+  'gift-panel-windows-x64.exe',
+  'gift-panel-windows-x64.exe.sha256',
+  'gift-panel-update.json',
+  'gift-panel-changelog.json',
+  'ffmpeg-build-config.txt',
+  'ffmpeg-component-gate.txt',
+]);
 
 function listAssetPaths(root, current = '') {
   const directory = join(root, current);
   const paths = [];
   for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     const relativePath = current ? join(current, entry.name) : entry.name;
-    const fullPath = join(root, relativePath);
+    if (!current && NON_UI_DIST_ROOTS.has(entry.name)) continue;
     if (entry.name === UI_ASSET_MANIFEST && current === '') continue;
     if (entry.isSymbolicLink()) throw new Error(`UI asset symlinks are not supported: ${relativePath}`);
     if (entry.isDirectory()) paths.push(...listAssetPaths(root, relativePath));
@@ -97,7 +109,11 @@ export function mirrorUiAssets(sourceDir, targetDir) {
   if (source === target) throw new Error('UI source and embedded target directories must differ.');
   rmSync(target, { recursive: true, force: true });
   mkdirSync(target, { recursive: true });
-  cpSync(source, target, { recursive: true, force: true, errorOnExist: false });
+  for (const relativePath of listAssetPaths(source)) {
+    const destination = join(target, relativePath);
+    mkdirSync(dirname(destination), { recursive: true });
+    copyFileSync(join(source, relativePath), destination);
+  }
   const manifest = createUiAssetManifest(source);
   writeFileSync(join(target, UI_ASSET_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   return verifyUiAssetManifest(target, manifest);
