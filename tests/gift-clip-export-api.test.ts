@@ -19,6 +19,19 @@ function snapshot(overrides: Record<string, unknown> = {}) {
   };
 }
 
+async function captureRejection(promise: Promise<unknown>): Promise<unknown> {
+  let rejected = false;
+  let reason: unknown;
+  try {
+    await promise;
+  } catch (error) {
+    rejected = true;
+    reason = error;
+  }
+  expect(rejected).toBe(true);
+  return reason;
+}
+
 describe('gift clip export API', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -161,6 +174,56 @@ describe('gift clip export API', () => {
     controller.abort(abortError);
 
     await expect(request).rejects.toBe(abortError);
+  });
+
+  it('preserves an object reason when already aborted without issuing a request', async () => {
+    const controller = new AbortController();
+    const reason = { source: 'user', action: 'close' };
+    controller.abort(reason);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(await captureRejection(getGiftClipJob(jobID, controller.signal))).toBe(reason);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('preserves a string reason while the default sleep is pending and cleans up', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, 'addEventListener');
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+    const fetchMock = vi.fn(async () => Response.json(snapshot()));
+    vi.stubGlobal('fetch', fetchMock);
+    const waiting = waitForGiftClipJob(jobID, { intervalMs: 10, signal: controller.signal });
+    for (let turn = 0; turn < 10 && add.mock.calls.length === 0; turn += 1) await Promise.resolve();
+    expect(add).toHaveBeenCalledTimes(1);
+
+    controller.abort('user-stopped');
+
+    expect(await captureRejection(waiting)).toBe('user-stopped');
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('preserves null when aborted while the response body is pending', async () => {
+    const controller = new AbortController();
+    let bodyReadStarted!: () => void;
+    const started = new Promise<void>((resolve) => { bodyReadStarted = resolve; });
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: () => new Promise((_resolve, reject) => {
+        bodyReadStarted();
+        controller.signal.addEventListener('abort', () => reject(new DOMException('reader stopped', 'AbortError')), { once: true });
+      }),
+    } as Response)));
+
+    const request = getGiftClipJob(jobID, controller.signal);
+    await started;
+    controller.abort(null);
+
+    expect(await captureRejection(request)).toBeNull();
   });
 
   it('polls beyond 120 snapshots by default and only times out at an explicit attempt limit', async () => {

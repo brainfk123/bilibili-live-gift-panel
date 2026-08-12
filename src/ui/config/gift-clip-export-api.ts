@@ -187,8 +187,8 @@ function rethrowAbort(error: unknown, signal?: AbortSignal): void {
   if (isAbortError(error)) throw error;
 }
 
-function abortReason(signal: AbortSignal): Error {
-  return signal.reason instanceof Error || signal.reason instanceof DOMException
+function abortReason(signal: AbortSignal): unknown {
+  return 'reason' in signal
     ? signal.reason
     : new DOMException('The operation was aborted.', 'AbortError');
 }
