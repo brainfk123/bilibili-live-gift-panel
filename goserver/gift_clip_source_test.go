@@ -92,6 +92,10 @@ func TestGiftClipSingleGIFPreservesEveryByte(t *testing.T) {
 func TestGiftClipAnimatedGIFInsertsOnlyTheStandardInfiniteLoopExtension(t *testing.T) {
 	original := gifFixture(t, 4, 3, []int{2, 3}, -1)
 	input := bytes.Clone(original)
+	firstImage := bytes.IndexByte(original, 0x2c)
+	if firstImage < 0 {
+		t.Fatal("fixture is missing its first image descriptor")
+	}
 	got, err := inspectGiftClipShortAnimation("image/gif", input)
 	if err != nil {
 		t.Fatal(err)
@@ -100,9 +104,13 @@ func TestGiftClipAnimatedGIFInsertsOnlyTheStandardInfiniteLoopExtension(t *testi
 	if len(got.Data) != len(original)+len(wantExtension) {
 		t.Fatalf("normalized length = %d, want %d", len(got.Data), len(original)+len(wantExtension))
 	}
-	trailer := len(original) - 1
-	if !bytes.Equal(got.Data[:trailer], original[:trailer]) || !bytes.Equal(got.Data[trailer:trailer+len(wantExtension)], wantExtension) || got.Data[len(got.Data)-1] != 0x3b {
-		t.Fatal("animated GIF changed bytes outside the inserted loop extension")
+	loopStart := bytes.Index(got.Data, wantExtension)
+	normalizedFirstImage := bytes.IndexByte(got.Data, 0x2c)
+	if loopStart != firstImage || loopStart >= normalizedFirstImage {
+		t.Fatalf("loop extension offset = %d, original/normalized first image offsets = %d/%d", loopStart, firstImage, normalizedFirstImage)
+	}
+	if !bytes.Equal(got.Data[:loopStart], original[:loopStart]) || !bytes.Equal(got.Data[loopStart:loopStart+len(wantExtension)], wantExtension) || !bytes.Equal(got.Data[loopStart+len(wantExtension):], original[loopStart:]) {
+		t.Fatal("animated GIF changed bytes outside the inserted pre-frame loop extension")
 	}
 	if !bytes.Equal(input, original) {
 		t.Fatal("input GIF was mutated")
@@ -110,6 +118,28 @@ func TestGiftClipAnimatedGIFInsertsOnlyTheStandardInfiniteLoopExtension(t *testi
 	decoded, err := gif.DecodeAll(bytes.NewReader(got.Data))
 	if err != nil || len(decoded.Image) != 2 || decoded.Delay[0] != 2 || decoded.Delay[1] != 3 {
 		t.Fatalf("normalized GIF decode = %#v, err=%v", decoded, err)
+	}
+}
+
+func TestGiftClipAnimatedGIFRejectsExistingLoopExtensionAfterFirstImage(t *testing.T) {
+	original := gifFixture(t, 4, 3, []int{2, 3}, 7)
+	extension := gifLoopExtension(7)
+	extensionStart := bytes.Index(original, extension)
+	firstImage := bytes.IndexByte(original, 0x2c)
+	if extensionStart < 0 || firstImage < 0 || extensionStart >= firstImage {
+		t.Fatalf("fixture offsets extension=%d image=%d", extensionStart, firstImage)
+	}
+	withoutExtension := make([]byte, 0, len(original)-len(extension))
+	withoutExtension = append(withoutExtension, original[:extensionStart]...)
+	withoutExtension = append(withoutExtension, original[extensionStart+len(extension):]...)
+	trailer := len(withoutExtension) - 1
+	late := make([]byte, 0, len(original))
+	late = append(late, withoutExtension[:trailer]...)
+	late = append(late, extension...)
+	late = append(late, withoutExtension[trailer:]...)
+
+	if _, err := inspectGiftClipShortAnimation("image/gif", late); err == nil {
+		t.Fatal("expected late loop extension to be rejected")
 	}
 }
 

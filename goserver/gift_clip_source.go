@@ -204,7 +204,7 @@ const (
 )
 
 func inspectGiftClipGIF(data []byte) (giftClipShortAnimation, error) {
-	frameCount, trailerOffset, loopCountOffset, err := parseGiftClipGIFBlocks(data)
+	frameCount, firstImageOffset, loopCountOffset, err := parseGiftClipGIFBlocks(data)
 	if err != nil {
 		return giftClipShortAnimation{}, err
 	}
@@ -231,9 +231,9 @@ func inspectGiftClipGIF(data []byte) (giftClipShortAnimation, error) {
 		} else {
 			loopExtension := giftClipGIFInfiniteLoopExtension()
 			normalized = make([]byte, 0, len(data)+len(loopExtension))
-			normalized = append(normalized, data[:trailerOffset]...)
+			normalized = append(normalized, data[:firstImageOffset]...)
 			normalized = append(normalized, loopExtension...)
-			normalized = append(normalized, data[trailerOffset:]...)
+			normalized = append(normalized, data[firstImageOffset:]...)
 		}
 	}
 	return giftClipShortAnimation{
@@ -259,6 +259,7 @@ func parseGiftClipGIFBlocks(data []byte) (int, int, int, error) {
 		offset += colorTableBytes
 	}
 	frameCount := 0
+	firstImageOffset := -1
 	loopCountOffset := -1
 	decodedBytes := int64(0)
 	var err error
@@ -271,8 +272,11 @@ func parseGiftClipGIFBlocks(data []byte) (int, int, int, error) {
 			if offset != len(data) || frameCount == 0 {
 				return 0, 0, 0, errors.New("GIF trailer 不唯一或位置无效")
 			}
-			return frameCount, markerOffset, loopCountOffset, nil
+			return frameCount, firstImageOffset, loopCountOffset, nil
 		case 0x2c:
+			if firstImageOffset < 0 {
+				firstImageOffset = markerOffset
+			}
 			if len(data)-offset < 9 {
 				return 0, 0, 0, errors.New("GIF 图像描述块不完整")
 			}
@@ -337,7 +341,7 @@ func parseGiftClipGIFBlocks(data []byte) (int, int, int, error) {
 				applicationID := data[offset+1 : offset+12]
 				offset += 12
 				if bytes.Equal(applicationID, giftClipGIFLoopApplicationID) {
-					if loopCountOffset >= 0 || len(data)-offset < 5 || data[offset] != 3 || data[offset+1] != 1 || data[offset+4] != 0 {
+					if frameCount != 0 || loopCountOffset >= 0 || len(data)-offset < 5 || data[offset] != 3 || data[offset+1] != 1 || data[offset+4] != 0 {
 						return 0, 0, 0, errors.New("GIF loop 扩展重复或无效")
 					}
 					loopCountOffset = offset + 2
