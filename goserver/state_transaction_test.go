@@ -214,6 +214,118 @@ func TestPendingStateTransactionRejectsNonObjectEmbeddedPayloadsBeforeWritingTar
 	}
 }
 
+func TestPendingStateTransactionRejectsNonCanonicalEmbeddedPayloadsBeforeWritingTargets(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*pendingStateTransaction)
+	}{
+		{name: "config/empty-object", mutate: func(tx *pendingStateTransaction) { tx.Config = []byte("{}") }},
+		{name: "config/unknown-only", mutate: func(tx *pendingStateTransaction) { tx.Config = []byte(`{"unknown":true}`) }},
+		{name: "config/schema-only", mutate: func(tx *pendingStateTransaction) { tx.Config = []byte(`{"schemaVersion":12}`) }},
+		{name: "config/unknown-field", mutate: func(tx *pendingStateTransaction) { tx.Config = addUnknownJSONFieldForTest(t, tx.Config) }},
+		{name: "config/noncanonical-format", mutate: func(tx *pendingStateTransaction) { tx.Config = compactJSONForTest(t, tx.Config) }},
+		{name: "config/older-schema", mutate: func(tx *pendingStateTransaction) {
+			tx.Config = bytes.Replace(tx.Config, []byte(`"schemaVersion": 12`), []byte(`"schemaVersion": 11`), 1)
+		}},
+		{name: "cache/empty-object", mutate: func(tx *pendingStateTransaction) { tx.Cache = []byte("{}") }},
+		{name: "cache/unknown-only", mutate: func(tx *pendingStateTransaction) { tx.Cache = []byte(`{"unknown":true}`) }},
+		{name: "cache/schema-only", mutate: func(tx *pendingStateTransaction) { tx.Cache = []byte(`{"schemaVersion":12}`) }},
+		{name: "cache/unknown-field", mutate: func(tx *pendingStateTransaction) { tx.Cache = addUnknownJSONFieldForTest(t, tx.Cache) }},
+		{name: "history/empty-object", mutate: func(tx *pendingStateTransaction) { tx.History = []byte("{}") }},
+		{name: "history/unknown-only", mutate: func(tx *pendingStateTransaction) { tx.History = []byte(`{"unknown":true}`) }},
+		{name: "history/schema-only", mutate: func(tx *pendingStateTransaction) { tx.History = []byte(`{"schemaVersion":12}`) }},
+		{name: "history/unknown-field", mutate: func(tx *pendingStateTransaction) { tx.History = addUnknownJSONFieldForTest(t, tx.History) }},
+		{name: "events/empty-object", mutate: func(tx *pendingStateTransaction) { tx.EventLog = []byte("{}\n") }},
+		{name: "events/unknown-only", mutate: func(tx *pendingStateTransaction) { tx.EventLog = []byte("{\"unknown\":true}\n") }},
+		{name: "events/whitespace-only", mutate: func(tx *pendingStateTransaction) { tx.EventLog = []byte(" \t\r\n") }},
+		{name: "events/blank-line", mutate: func(tx *pendingStateTransaction) { tx.EventLog = append(tx.EventLog, '\n') }},
+		{name: "events/unknown-field", mutate: func(tx *pendingStateTransaction) { tx.EventLog = addUnknownJSONFieldForTest(t, tx.EventLog) }},
+		{name: "events/missing-final-newline", mutate: func(tx *pendingStateTransaction) { tx.EventLog = bytes.TrimSuffix(tx.EventLog, []byte("\n")) }},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := &configStore{path: filepath.Join(dir, "config.json")}
+			initial := defaultAppState()
+			initial.Attributes = []attributeState{{Name: "积分", Value: 1}}
+			initial.GiftCatalog = []giftInfo{{ID: 1, Name: "旧礼物"}}
+			initial.Log = []logEntry{{EventID: "old-event", ValueAfter: 1}}
+			if err := store.replaceState(initial); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotStateFiles(t, store)
+
+			next := initial
+			next.Attributes = []attributeState{{Name: "积分", Value: 9}}
+			next.GiftCatalog = []giftInfo{{ID: 9, Name: "新礼物"}}
+			next.Log = []logEntry{{EventID: "new-event", ValueAfter: 9}}
+			valid := preparedTransactionForTest(t, next)
+			tx := valid
+			test.mutate(&tx)
+			writePendingTransactionForTest(t, store, tx)
+
+			if _, err := store.readState(); err == nil {
+				t.Fatal("accepted noncanonical embedded payload")
+			}
+			assertStateFilesEqual(t, store, before)
+			if _, err := os.Stat(store.stateTransactionPath()); err != nil {
+				t.Fatalf("prepare evidence missing: %v", err)
+			}
+		})
+	}
+}
+
+func TestPendingStateTransactionRecoversProductionGeneratedPrepare(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	initial := defaultAppState()
+	if err := store.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+
+	next := defaultAppState()
+	next.Attributes = []attributeState{{Name: "积分", Value: 23}}
+	next.GiftCatalog = []giftInfo{{ID: 23, Name: "恢复礼物"}}
+	next.Log = []logEntry{
+		{EventID: "newer-event", GiftName: "新记录", ValueAfter: 23},
+		{EventID: "older-event", GiftName: "旧记录", ValueAfter: 11},
+	}
+	tx := preparedTransactionForTest(t, next)
+	writePendingTransactionForTest(t, store, tx)
+
+	recovered, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recovered.Attributes) != 1 || recovered.Attributes[0].Value != 23 {
+		t.Fatalf("recovered attributes = %#v", recovered.Attributes)
+	}
+	if len(recovered.GiftCatalog) != 1 || recovered.GiftCatalog[0].ID != 23 {
+		t.Fatalf("recovered cache = %#v", recovered.GiftCatalog)
+	}
+	if len(recovered.Log) != 2 || recovered.Log[0].EventID != "newer-event" || recovered.Log[1].EventID != "older-event" {
+		t.Fatalf("recovered event log = %#v", recovered.Log)
+	}
+	for path, want := range map[string][]byte{
+		store.eventLogPath(): tx.EventLog,
+		store.historyPath():  tx.History,
+		store.cachePath():    tx.Cache,
+		store.path:           tx.Config,
+	} {
+		got, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("recovered target %s does not match prepared bytes", filepath.Base(path))
+		}
+	}
+	if _, err := os.Stat(store.stateTransactionPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("completed prepare remains: %v", err)
+	}
+}
+
 func TestUpdateStateForIngestionRejectsBlankIDBeforeCallback(t *testing.T) {
 	for _, ingestionID := range []string{"", " \t\r\n"} {
 		store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
@@ -265,6 +377,27 @@ func preparedTransactionForTest(t *testing.T, state appState) pendingStateTransa
 		t.Fatal(err)
 	}
 	return pendingStateTransaction{SchemaVersion: stateTransactionSchemaVersion, EventLog: eventLog, History: history, Cache: cache, Config: config}
+}
+
+func compactJSONForTest(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, data); err != nil {
+		t.Fatal(err)
+	}
+	return compact.Bytes()
+}
+
+func addUnknownJSONFieldForTest(t *testing.T, data []byte) []byte {
+	t.Helper()
+	closingBrace := bytes.LastIndexByte(data, '}')
+	if closingBrace < 0 {
+		t.Fatalf("test payload has no closing object brace: %q", data)
+	}
+	result := append([]byte(nil), data[:closingBrace]...)
+	result = append(result, []byte(`,"unknown":true`)...)
+	result = append(result, data[closingBrace:]...)
+	return result
 }
 
 func writePendingTransactionForTest(t *testing.T, store *configStore, tx pendingStateTransaction) {

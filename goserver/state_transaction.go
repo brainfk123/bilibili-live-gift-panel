@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -92,51 +91,64 @@ func validatePendingStateTransaction(tx pendingStateTransaction) error {
 	if tx.EventLog == nil || tx.History == nil || tx.Cache == nil || tx.Config == nil {
 		return fmt.Errorf("状态事务缺少必需分片")
 	}
-	scanner := bufio.NewScanner(bytes.NewReader(tx.EventLog))
-	scanner.Buffer(make([]byte, 16*1024), 256*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
+	if len(tx.EventLog) > 0 && tx.EventLog[len(tx.EventLog)-1] != '\n' {
+		return fmt.Errorf("状态事务送礼记录无效：记录缺少换行符")
+	}
+	for start := 0; start < len(tx.EventLog); {
+		relativeEnd := bytes.IndexByte(tx.EventLog[start:], '\n')
+		if relativeEnd < 0 {
+			return fmt.Errorf("状态事务送礼记录无效：记录缺少换行符")
 		}
-		if err := requireJSONObject(line); err != nil {
-			return fmt.Errorf("状态事务送礼记录无效：%w", err)
+		end := start + relativeEnd
+		line := tx.EventLog[start:end]
+		if len(line) == 0 {
+			return fmt.Errorf("状态事务送礼记录无效：记录行不能为空")
+		}
+		if len(line) > 256*1024 {
+			return fmt.Errorf("状态事务送礼记录无效：记录行过长")
 		}
 		var entry logEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
 			return fmt.Errorf("状态事务送礼记录无效：%w", err)
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("状态事务送礼记录无效：%w", err)
-	}
-	shards := []struct {
-		name string
-		data []byte
-		into any
-	}{
-		{name: "主配置", data: tx.Config, into: &configStateShard{}},
-		{name: "礼物缓存", data: tx.Cache, into: &cacheStateShard{}},
-		{name: "历史数据", data: tx.History, into: &historyStateShard{}},
-	}
-	for _, shard := range shards {
-		if err := requireJSONObject(shard.data); err != nil {
-			return fmt.Errorf("状态事务%s无效：%w", shard.name, err)
+		canonical, err := serializeEventLog([]logEntry{entry})
+		if err != nil {
+			return fmt.Errorf("状态事务送礼记录无效：%w", err)
 		}
-		if _, err := readStateShardVersion(shard.data, shard.name); err != nil {
-			return fmt.Errorf("状态事务%s无效：%w", shard.name, err)
+		if !bytes.Equal(canonical, tx.EventLog[start:end+1]) {
+			return fmt.Errorf("状态事务送礼记录无效：记录行不是标准序列化格式")
 		}
-		if err := json.Unmarshal(shard.data, shard.into); err != nil {
-			return fmt.Errorf("状态事务%s无效：%w", shard.name, err)
-		}
+		start = end + 1
+	}
+
+	var config configStateShard
+	if err := validatePendingStateShard("主配置", tx.Config, &config, &config.SchemaVersion); err != nil {
+		return err
+	}
+	var cache cacheStateShard
+	if err := validatePendingStateShard("礼物缓存", tx.Cache, &cache, &cache.SchemaVersion); err != nil {
+		return err
+	}
+	var history historyStateShard
+	if err := validatePendingStateShard("历史数据", tx.History, &history, &history.SchemaVersion); err != nil {
+		return err
 	}
 	return nil
 }
 
-func requireJSONObject(data []byte) error {
-	data = bytes.TrimSpace(data)
-	if len(data) == 0 || data[0] != '{' {
-		return fmt.Errorf("必须是非空 JSON 对象")
+func validatePendingStateShard(name string, data []byte, into any, schemaVersion *int) error {
+	if err := json.Unmarshal(data, into); err != nil {
+		return fmt.Errorf("状态事务%s无效：%w", name, err)
+	}
+	if version := *schemaVersion; version != stateShardSchemaVersion {
+		return fmt.Errorf("状态事务%s无效：格式版本为 %d，需要 %d", name, version, stateShardSchemaVersion)
+	}
+	canonical, err := serializeStateShard(into)
+	if err != nil {
+		return fmt.Errorf("状态事务%s无效：%w", name, err)
+	}
+	if !bytes.Equal(canonical, data) {
+		return fmt.Errorf("状态事务%s无效：分片不是标准序列化格式", name)
 	}
 	return nil
 }
