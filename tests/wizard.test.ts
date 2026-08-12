@@ -3264,6 +3264,37 @@ describe('activity session configuration', () => {
 });
 
 describe('OBS attribute display', () => {
+  it.each(['glass', 'neon'] as const)('uses the configured accent color for the %s OBS theme', (themeId) => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state(),
+      attributes: [{
+        name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '',
+        display: {
+          variant: 'timer',
+          themeId,
+          appearance: {
+            themeId,
+            fontSize: 54,
+            accentColor: '#123456',
+            showConnection: false,
+            align: 'center',
+            panelOpacity: 55,
+          },
+        },
+      }],
+      rules: [],
+    }));
+    vi.useFakeTimers();
+    const root = new TestElement('div');
+
+    mountDisplay(root as unknown as HTMLElement, { kind: 'attribute', attributeName: '加班时间' });
+
+    expect(root.querySelector('.panel')?.style['--theme-accent']).toBe('#123456');
+    expect(root.querySelector('.attr')?.style['--theme-accent']).toBe('#123456');
+    expect(root.querySelector('.attr-value')?.textContent).toBe('00:00:00');
+    vi.useRealTimers();
+  });
+
   it('formats positive, negative, and zero deltas with the correct sign', () => {
     const attr = { name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' } as const;
     expect(formatDelta(60, attr)).toBe('+00:01:00');

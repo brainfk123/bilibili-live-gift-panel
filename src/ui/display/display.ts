@@ -228,7 +228,7 @@ export function mountDisplay(root: HTMLElement, target?: ObsOutputTarget): void 
     const scene = resolved.scene;
     const panelTheme = getDisplayTheme(appearance.themeId);
     panel.dataset.theme = panelTheme.id;
-    panel.style.setProperty('--theme-accent', panelTheme.id === 'glass' ? appearance.accentColor : panelTheme.accent);
+    panel.style.setProperty('--theme-accent', appearance.accentColor);
     panel.style.setProperty('--theme-surface', panelTheme.surface);
     stack.classList.toggle('center', appearance.align === 'center');
     stack.classList.toggle('right', appearance.align === 'right');
@@ -240,7 +240,7 @@ export function mountDisplay(root: HTMLElement, target?: ObsOutputTarget): void 
       const variant = resolveAttributeDisplayVariant(attr);
       block.dataset.theme = theme.id;
       block.dataset.variant = variant;
-      block.style.setProperty('--theme-accent', theme.id === 'glass' ? blockAppearance.accentColor : theme.accent);
+      block.style.setProperty('--theme-accent', blockAppearance.accentColor);
       block.style.setProperty('--theme-surface', theme.surface);
       const meter = block.querySelector<HTMLElement>('.attr-meter');
       if (meter) {
