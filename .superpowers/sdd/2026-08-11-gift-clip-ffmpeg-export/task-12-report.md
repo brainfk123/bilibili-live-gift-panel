@@ -57,3 +57,19 @@ controller passes it to wait, records it for cancellation and saving, and uses
 it—not an ID returned by a wait snapshot—for the preview/video URL.  Regression
 tests use valid opaque 24-character IDs and cover a mismatched wait snapshot,
 non-settling DELETE during polling failure, and create failure retry/UI error.
+
+## Fix round 2: deterministic review evidence
+
+This round added characterization coverage only; the round-1 production code
+was already GREEN, so no artificial RED or controller edit was made.  The new
+deterministic cases prove that close tears down synchronously and blocks stale
+snapshot writes while DELETE never settles; re-edit restores the existing media
+session without awaiting DELETE; closing after failure does not DELETE twice;
+and a rejected DELETE is owned without an `unhandledRejection`.
+
+One combined race test holds the old create request across re-edit and a second
+confirmation, completes the new export, then resolves the stale create.  It
+proves the stale ID is deleted exactly once, the new ID remains canonical for
+preview and download, and final close deletes only that new ID exactly once.
+The download mock now preserves the real filename sanitizer and replaces only
+the anchor trigger, so the controller-to-receipt filename path is exercised.

@@ -32,10 +32,10 @@ vi.mock('../src/ui/config/gift-clip-export-layers', () => ({
   createGiftClipExportLayers: studioMocks.createLayers,
 }));
 
-vi.mock('../src/ui/config/gift-clip-download', () => ({
-  sanitizeGiftClipFilename: () => '测试礼物-测试观众-20231114-221320.mp4',
-  triggerGiftClipDownload: studioMocks.triggerDownload,
-}));
+vi.mock('../src/ui/config/gift-clip-download', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/ui/config/gift-clip-download')>();
+  return { ...actual, triggerGiftClipDownload: studioMocks.triggerDownload };
+});
 
 import {
   giftClipAnimationKey,
@@ -43,6 +43,7 @@ import {
   type GiftClipStudioController,
 } from '../src/ui/config/gift-clip-studio';
 import { normalizeGiftClipDuration } from '../src/ui/config/gift-clip-media';
+import { sanitizeGiftClipFilename } from '../src/ui/config/gift-clip-download';
 
 class StudioTestStyle {
   [name: string]: string | ((name: string, value: string) => void);
@@ -497,6 +498,65 @@ describe('gift clip studio', () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
+  it('tears down synchronously on close while DELETE never settles and ignores later snapshots', async () => {
+    const session = mediaSessionFixture();
+    let signal: AbortSignal | undefined;
+    let reportSnapshot: ((snapshot: ReturnType<typeof jobSnapshot>) => void) | undefined;
+    studioMocks.loadMediaSession.mockResolvedValue(session);
+    studioMocks.createJob.mockResolvedValue(jobSnapshot());
+    studioMocks.waitForJob.mockImplementation((_id: string, options: {
+      signal: AbortSignal;
+      onSnapshot: (snapshot: ReturnType<typeof jobSnapshot>) => void;
+    }) => {
+      signal = options.signal;
+      reportSnapshot = options.onSnapshot;
+      return new Promise(() => undefined);
+    });
+    studioMocks.cancelJob.mockReturnValue(new Promise<void>(() => undefined));
+    const host = new StudioTestElement('host');
+    const controller = openStudio({ host: host as unknown as HTMLElement, receipt: receiptFixture() });
+    await vi.waitFor(() => expect(button(host, '确定剪裁并生成').hidden).toBe(false));
+    button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(studioMocks.waitForJob).toHaveBeenCalledOnce());
+    const overlay = host.children[0];
+    const status = host.querySelector('.gift-clip-status')!;
+    const textAtClose = status.textContent;
+
+    controller.close();
+
+    expect(signal?.aborted).toBe(true);
+    expect(host.children).toEqual([]);
+    expect(overlay.removeCalls).toBe(1);
+    expect(studioMocks.cancelJob).toHaveBeenCalledTimes(1);
+    expect(studioMocks.cancelJob).toHaveBeenCalledWith(firstJobID);
+    reportSnapshot?.(jobSnapshot({ state: 'ready', progress: 1 }));
+    await Promise.resolve();
+    expect(status.textContent).toBe(textAtClose);
+    expect(host.children).toEqual([]);
+  });
+
+  it('restores the editor immediately on re-edit while DELETE never settles', async () => {
+    const session = mediaSessionFixture();
+    studioMocks.loadMediaSession.mockResolvedValue(session);
+    studioMocks.createJob.mockResolvedValue(jobSnapshot());
+    studioMocks.waitForJob.mockResolvedValue(jobSnapshot({ state: 'ready', progress: 1 }));
+    studioMocks.cancelJob.mockReturnValue(new Promise<void>(() => undefined));
+    const host = new StudioTestElement('host');
+    const controller = openStudio({ host: host as unknown as HTMLElement, receipt: receiptFixture() });
+    await vi.waitFor(() => expect(button(host, '确定剪裁并生成').hidden).toBe(false));
+    button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(button(host, '保存 MP4').hidden).toBe(false));
+
+    button(host, '重新剪裁').onclick?.({} as MouseEvent);
+
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-crop-layer')).not.toBeNull());
+    expect(studioMocks.cancelJob).toHaveBeenCalledTimes(1);
+    expect(studioMocks.cancelJob).toHaveBeenCalledWith(firstJobID);
+    expect(studioMocks.loadMediaSession).toHaveBeenCalledOnce();
+    expect(session.dispose).not.toHaveBeenCalled();
+    controller.close();
+  });
+
   it('shows a polling failure immediately even while its best-effort DELETE never settles', async () => {
     const session = mediaSessionFixture();
     const deleteNeverSettles = new Promise<void>(() => undefined);
@@ -516,6 +576,53 @@ describe('gift clip studio', () => {
     expect(studioMocks.cancelJob).toHaveBeenCalledTimes(1);
     expect(studioMocks.cancelJob).toHaveBeenCalledWith(firstJobID);
     controller.close();
+  });
+
+  it('does not DELETE a failed job again when the failed studio closes', async () => {
+    const session = mediaSessionFixture();
+    studioMocks.loadMediaSession.mockResolvedValue(session);
+    studioMocks.createJob.mockResolvedValue(jobSnapshot());
+    studioMocks.waitForJob.mockRejectedValue(new Error('视频导出失败，请重试。'));
+    const host = new StudioTestElement('host');
+    const controller = openStudio({ host: host as unknown as HTMLElement, receipt: receiptFixture() });
+    await vi.waitFor(() => expect(button(host, '确定剪裁并生成').hidden).toBe(false));
+    button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+    await vi.waitFor(() => expect(host.querySelector('.gift-clip-status')?.textContent).toBe('视频导出失败，请重试。'));
+    expect(studioMocks.cancelJob).toHaveBeenCalledTimes(1);
+    expect(studioMocks.cancelJob).toHaveBeenCalledWith(firstJobID);
+
+    controller.close();
+    await Promise.resolve();
+
+    expect(studioMocks.cancelJob).toHaveBeenCalledTimes(1);
+  });
+
+  it('owns and swallows a rejected best-effort DELETE', async () => {
+    const session = mediaSessionFixture();
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      studioMocks.loadMediaSession.mockResolvedValue(session);
+      studioMocks.createJob.mockResolvedValue(jobSnapshot());
+      studioMocks.waitForJob.mockResolvedValue(jobSnapshot({ state: 'ready', progress: 1 }));
+      studioMocks.cancelJob.mockRejectedValue(new Error('DELETE failed'));
+      const host = new StudioTestElement('host');
+      const controller = openStudio({ host: host as unknown as HTMLElement, receipt: receiptFixture() });
+      await vi.waitFor(() => expect(button(host, '确定剪裁并生成').hidden).toBe(false));
+      button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
+      await vi.waitFor(() => expect(button(host, '保存 MP4').hidden).toBe(false));
+
+      controller.close();
+      await Promise.resolve();
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(studioMocks.cancelJob).toHaveBeenCalledTimes(1);
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(host.children).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
   });
 
   it('shows a create failure and retry without waiting for unrelated cleanup', async () => {
@@ -550,8 +657,9 @@ describe('gift clip studio', () => {
     button(host, '保存 MP4').onclick?.({} as MouseEvent);
     expect(studioMocks.triggerDownload).toHaveBeenCalledWith(
       `/api/gift-clips/${firstJobID}/video`,
-      '测试礼物-测试观众-20231114-221320.mp4',
+      sanitizeGiftClipFilename(receiptFixture()),
     );
+    expect(studioMocks.triggerDownload.mock.calls[0][1]).toMatch(/^测试礼物-测试观众-.+\.mp4$/);
     controller.close();
     await vi.waitFor(() => expect(studioMocks.cancelJob).toHaveBeenCalledWith(firstJobID));
     expect(studioMocks.cancelJob).toHaveBeenCalledTimes(1);
@@ -640,28 +748,38 @@ describe('gift clip studio', () => {
     controller.close();
   });
 
-  it('does not let an old job completion overwrite a newer transition', async () => {
+  it('deletes a late-created stale job once without disturbing the newer ready export', async () => {
     const session = mediaSessionFixture();
-    let finishFirst: ((value: unknown) => void) | undefined;
+    let finishOldCreate: ((value: ReturnType<typeof jobSnapshot>) => void) | undefined;
     studioMocks.loadMediaSession.mockResolvedValue(session);
-    studioMocks.createJob.mockResolvedValueOnce(jobSnapshot()).mockResolvedValueOnce(jobSnapshot({ id: secondJobID }));
-    studioMocks.waitForJob
-      .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
-      .mockResolvedValueOnce(jobSnapshot({ id: secondJobID, state: 'ready', progress: 1 }));
+    studioMocks.createJob
+      .mockImplementationOnce(() => new Promise((resolve) => { finishOldCreate = resolve; }))
+      .mockResolvedValueOnce(jobSnapshot({ id: secondJobID }));
+    studioMocks.waitForJob.mockResolvedValue(jobSnapshot({ id: secondJobID, state: 'ready', progress: 1 }));
     const host = new StudioTestElement('host');
     const controller = openStudio({ host: host as unknown as HTMLElement, receipt: receiptFixture() });
     await vi.waitFor(() => expect(button(host, '确定剪裁并生成').hidden).toBe(false));
     button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
-    await vi.waitFor(() => expect(studioMocks.waitForJob).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(studioMocks.createJob).toHaveBeenCalledOnce());
     button(host, '重新剪裁').onclick?.({} as MouseEvent);
     await vi.waitFor(() => expect(host.querySelector('.gift-clip-crop-layer')).not.toBeNull());
     button(host, '确定剪裁并生成').onclick?.({} as MouseEvent);
     await vi.waitFor(() => expect(button(host, '保存 MP4').hidden).toBe(false));
 
-    finishFirst?.(jobSnapshot({ state: 'ready', progress: 1 }));
-    await Promise.resolve();
+    finishOldCreate?.(jobSnapshot({ id: firstJobID }));
+    await vi.waitFor(() => expect(studioMocks.cancelJob).toHaveBeenCalledWith(firstJobID));
     expect(host.querySelector('.gift-clip-video')?.src).toBe(`/api/gift-clips/${secondJobID}/video`);
+    button(host, '保存 MP4').onclick?.({} as MouseEvent);
+    expect(studioMocks.triggerDownload).toHaveBeenCalledWith(
+      `/api/gift-clips/${secondJobID}/video`,
+      sanitizeGiftClipFilename(receiptFixture()),
+    );
+    expect(studioMocks.cancelJob.mock.calls.filter(([id]) => id === firstJobID)).toHaveLength(1);
+
     controller.close();
+    await vi.waitFor(() => expect(studioMocks.cancelJob).toHaveBeenCalledWith(secondJobID));
+    expect(studioMocks.cancelJob.mock.calls.filter(([id]) => id === firstJobID)).toHaveLength(1);
+    expect(studioMocks.cancelJob.mock.calls.filter(([id]) => id === secondJobID)).toHaveLength(1);
   });
 
   it('contains no recorder surface while retaining editor RAFs', () => {
