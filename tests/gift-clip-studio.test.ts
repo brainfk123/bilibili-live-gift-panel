@@ -287,6 +287,16 @@ describe('gift clip studio', () => {
     expect(studioSource).toContain("from './gift-clip-studio-controller'");
   });
 
+  it('keeps DOM rendering writes behind the studio view boundary', () => {
+    const controllerSource = readFileSync(
+      new URL('../src/ui/config/gift-clip-studio-controller.ts', import.meta.url),
+      'utf8',
+    );
+
+    expect(controllerSource).not.toMatch(/\.(?:hidden|disabled|textContent|src|style\.aspectRatio)\s*=/);
+    expect(controllerSource).not.toContain("removeAttribute('src')");
+  });
+
   it('cancels a pending source load on idempotent close without surfacing an error', async () => {
     let loadSignal: AbortSignal | undefined;
     studioMocks.loadMediaSession.mockImplementation((

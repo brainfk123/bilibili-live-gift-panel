@@ -14,10 +14,12 @@ export interface GiftClipStudioView {
   readonly reeditButton: HTMLButtonElement;
   readonly saveButton: HTMLButtonElement;
   setStageSize(width: number, height: number): void;
+  setConfirmDisabled(disabled: boolean): void;
+  clearPreview(): void;
   showLoading(): void;
   showEditing(message: string): void;
-  showEncoding(message: string, progress: number): void;
-  showReady(message: string, saveLabel: string): void;
+  showEncoding(message: string, progress: number, secondaryLabel: string): void;
+  showReady(message: string, saveLabel: string, previewSource: string, aspectRatio: string): void;
   showFailure(message: string, retryLabel: string): void;
   destroy(): void;
 }
@@ -112,6 +114,14 @@ export function createGiftClipStudioView(host: HTMLElement, receipt: GiftReceipt
       stage.style.setProperty('--gift-clip-source-width', String(width));
       stage.style.setProperty('--gift-clip-source-height', String(height));
     },
+    setConfirmDisabled: (disabled) => {
+      confirmButton.disabled = disabled;
+    },
+    clearPreview: () => {
+      preview.removeAttribute('src');
+      preview.hidden = true;
+      preview.style.aspectRatio = '';
+    },
     showLoading: () => {
       hideActions();
       sourceCanvas.hidden = false;
@@ -133,19 +143,22 @@ export function createGiftClipStudioView(host: HTMLElement, receipt: GiftReceipt
       saveButton.hidden = true;
       saveButton.disabled = true;
     },
-    showEncoding: (message, value) => {
+    showEncoding: (message, value, secondaryLabel) => {
       resetButton.hidden = true;
       confirmButton.hidden = true;
       saveButton.hidden = true;
       saveButton.disabled = true;
       reeditButton.hidden = false;
       reeditButton.disabled = false;
+      reeditButton.textContent = secondaryLabel;
       progress.value = Math.min(100, Math.max(0, value));
       progress.hidden = false;
       status.textContent = message;
       clearError();
     },
-    showReady: (message, saveLabel) => {
+    showReady: (message, saveLabel, previewSource, aspectRatio) => {
+      preview.src = previewSource;
+      preview.style.aspectRatio = aspectRatio;
       sourceCanvas.hidden = true;
       preview.hidden = false;
       progress.value = 100;

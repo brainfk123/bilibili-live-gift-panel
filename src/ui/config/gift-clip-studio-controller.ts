@@ -95,10 +95,8 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
     if (previewURL) URL.revokeObjectURL(previewURL);
     previewURL = '';
     generatedRecording = null;
-    preview.removeAttribute('src');
+    view.clearPreview();
     preview.load();
-    preview.hidden = true;
-    preview.style.aspectRatio = '';
   };
   const disposeSession = (): void => {
     session?.dispose();
@@ -219,12 +217,12 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
     const activeEditor = editor;
     const activeSession = session;
     if (!activeEditor || !activeSession || closed) return;
-    confirmButton.disabled = true;
+    view.setConfirmDisabled(true);
     const crop = normalizeGiftClipCrop(activeEditor.getCrop());
     try {
       options.onCropConfirmed?.({ ...crop });
     } catch (error) {
-      confirmButton.disabled = false;
+      view.setConfirmDisabled(false);
       reportFailure(error);
       return;
     }
@@ -241,9 +239,8 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
       return;
     }
     secondaryAction = 're-edit';
-    reeditButton.textContent = '重新剪裁';
     const encodingMessage = `正在生成视频 · ${activeSession.sourceLabel} · ${Math.round(activeSession.durationMs / 100) / 10} 秒`;
-    view.showEncoding(encodingMessage, 0);
+    view.showEncoding(encodingMessage, 0, '重新剪裁');
     const controller = new AbortController();
     recordingAbort = controller;
     const recordingRun = (async (): Promise<void> => {
@@ -258,20 +255,20 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
             drawGiftClipOutputFrame(context, receipt, activeSession.visualAt(elapsedMs), activeSession.avatar, pixels);
           },
           onProgress: (value) => {
-            if (isCurrent(token)) view.showEncoding(encodingMessage, value * 100);
+            if (isCurrent(token)) view.showEncoding(encodingMessage, value * 100, '重新剪裁');
           },
         });
         if (!isCurrent(token)) return;
         activeSession.pause();
         generatedRecording = recording;
         previewURL = URL.createObjectURL(recording.blob);
-        preview.src = previewURL;
-        preview.style.aspectRatio = `${pixels.width} / ${pixels.height}`;
         view.setStageSize(pixels.width, pixels.height);
         const sizeLabel = formatGiftClipBytes(recording.blob.size);
         view.showReady(
           `${recording.extension.toUpperCase()} 已生成 · ${sizeLabel} · ${pixels.width} × ${pixels.height} · ${activeSession.sourceLabel}`,
           `保存 ${recording.extension.toUpperCase()}`,
+          previewURL,
+          `${pixels.width} / ${pixels.height}`,
         );
         void preview.play().catch(() => undefined);
       } catch (error) {
