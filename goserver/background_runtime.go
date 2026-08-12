@@ -49,6 +49,7 @@ type backgroundRuntime struct {
 	status                   runtimeStatus
 	ingestionGeneration      uint64
 	ingestionErrorSource     string
+	completedPreparedRoomID  string
 	animationMu              sync.Mutex
 	animationWriteAtomically func(string, []byte) error
 	timerMu                  sync.Mutex
@@ -198,16 +199,17 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 
 func (runtime *backgroundRuntime) prepareRoomConnection(roomID string) error {
 	roomID = strings.TrimSpace(roomID)
-	metadata, err := runtime.loadPendingGiftAnimationFile()
+	runtime.animationMu.Lock()
+	defer runtime.animationMu.Unlock()
+	metadata, err := runtime.loadPendingGiftAnimationFileLocked()
 	if err != nil {
 		return err
 	}
 	preparedRoomID := strings.TrimSpace(metadata.PreparedRoomID)
 	if preparedRoomID == "" {
-		statusRoomID := strings.TrimSpace(runtime.Status().RoomID)
-		if statusRoomID != roomID {
-			preparedRoomID = statusRoomID
-		}
+		runtime.mu.RLock()
+		preparedRoomID = runtime.completedPreparedRoomID
+		runtime.mu.RUnlock()
 	}
 	if preparedRoomID == roomID {
 		return nil
@@ -228,7 +230,13 @@ func (runtime *backgroundRuntime) prepareRoomConnection(roomID string) error {
 	}
 	metadata.PreparedRoomID = roomID
 	metadata.Records = filtered
-	return runtime.savePendingGiftAnimationFile(metadata)
+	if err := runtime.savePendingGiftAnimationFileLocked(metadata); err != nil {
+		return err
+	}
+	runtime.mu.Lock()
+	runtime.completedPreparedRoomID = roomID
+	runtime.mu.Unlock()
+	return nil
 }
 
 func giftCommandCategory(gift giftEvent) string {
@@ -376,6 +384,8 @@ func (runtime *backgroundRuntime) consumeClaimedInboxRecord(ctx context.Context,
 
 func (runtime *backgroundRuntime) processInboxRecord(ctx context.Context, record giftInboxRecord) error {
 	gift := record.Gift
+	runtime.animationMu.Lock()
+	defer runtime.animationMu.Unlock()
 	current, err := runtime.store.readState()
 	if err != nil {
 		return err
@@ -386,7 +396,7 @@ func (runtime *backgroundRuntime) processInboxRecord(ctx context.Context, record
 	pendingAnimations := []pendingGiftAnimation{}
 	matchedPendingIndex := -1
 	if roomMatches && !gift.AnimationOnly {
-		pendingAnimations, err = runtime.loadPendingGiftAnimations()
+		pendingAnimations, err = runtime.loadPendingGiftAnimationsLocked()
 		if err != nil {
 			return err
 		}
@@ -432,14 +442,14 @@ func (runtime *backgroundRuntime) processInboxRecord(ctx context.Context, record
 			attached = giftAnimationAttachedToReceipt(latest, gift)
 		}
 		if !attached {
-			if err := runtime.addPendingGiftAnimation(record.RoomID, gift); err != nil {
+			if err := runtime.addPendingGiftAnimationLocked(record.RoomID, gift); err != nil {
 				return err
 			}
 		}
 	}
 	if roomMatches && !gift.AnimationOnly && matchedPendingIndex >= 0 {
 		pendingAnimations = append(pendingAnimations[:matchedPendingIndex], pendingAnimations[matchedPendingIndex+1:]...)
-		if err := runtime.savePendingGiftAnimations(pendingAnimations); err != nil {
+		if err := runtime.savePendingGiftAnimationsLocked(pendingAnimations); err != nil {
 			return err
 		}
 	}
@@ -652,6 +662,10 @@ func (runtime *backgroundRuntime) addPendingGiftAnimation(roomID string, gift gi
 	}
 	runtime.animationMu.Lock()
 	defer runtime.animationMu.Unlock()
+	return runtime.addPendingGiftAnimationLocked(roomID, gift)
+}
+
+func (runtime *backgroundRuntime) addPendingGiftAnimationLocked(roomID string, gift giftEvent) error {
 	records, err := runtime.loadPendingGiftAnimationsLocked()
 	if err != nil {
 		return err
@@ -827,6 +841,9 @@ func (runtime *backgroundRuntime) setStatus(state, roomID string, err error) {
 	nextLastError := ""
 	runtime.status.State = state
 	runtime.status.RoomID = roomID
+	if state == "connected" && runtime.completedPreparedRoomID == "" {
+		runtime.completedPreparedRoomID = strings.TrimSpace(roomID)
+	}
 	if err == nil {
 		runtime.status.LastError = ""
 	} else {

@@ -527,14 +527,6 @@ func TestBackgroundRuntimeRetriesFailedRoomPreparationBeforeStartingSource(t *te
 	if err := runtime.savePendingGiftAnimations([]pendingGiftAnimation{{RoomID: "room-a", Gift: giftEvent{GiftID: 1, UID: 42, AnimationOnly: true}}}); err != nil {
 		t.Fatal(err)
 	}
-	metadata, err := runtime.loadPendingGiftAnimationFile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	metadata.PreparedRoomID = "room-a"
-	if err := runtime.savePendingGiftAnimationFile(metadata); err != nil {
-		t.Fatal(err)
-	}
 	failed := false
 	store.writeAtomically = func(path string, data []byte) error {
 		if filepath.Base(path) == "events.log" && !failed {
@@ -560,6 +552,92 @@ func TestBackgroundRuntimeRetriesFailedRoomPreparationBeforeStartingSource(t *te
 	pending, err := runtime.loadPendingGiftAnimations()
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("old-room animations survived retry: %#v, err=%v", pending, err)
+	}
+}
+
+func TestBackgroundRuntimeRoomPreparationSerializesConcurrentAnimationAdd(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-b"
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.setStatus("connected", "room-a", nil)
+	writeStarted := make(chan struct{})
+	allowWrite := make(chan struct{})
+	var once sync.Once
+	runtime.animationWriteAtomically = func(path string, data []byte) error {
+		once.Do(func() { close(writeStarted); <-allowWrite })
+		return writeFileAtomically(path, data)
+	}
+	prepared := make(chan error, 1)
+	go func() { prepared <- runtime.prepareRoomConnection("room-b") }()
+	<-writeStarted
+	added := make(chan error, 1)
+	go func() {
+		added <- runtime.addPendingGiftAnimation("room-b", giftEvent{GiftID: 1, UID: 42, EffectID: 7, AnimationGIF: "https://i0.hdslb.com/a.gif", AnimationOnly: true})
+	}()
+	select {
+	case err := <-added:
+		t.Fatalf("concurrent add bypassed preparation lock: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(allowWrite)
+	if err := <-prepared; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-added; err != nil {
+		t.Fatal(err)
+	}
+	pending, err := runtime.loadPendingGiftAnimations()
+	if err != nil || len(pending) != 1 || pending[0].RoomID != "room-b" {
+		t.Fatalf("pending after serialized add = %#v err=%v", pending, err)
+	}
+}
+
+func TestBackgroundRuntimeRoomPreparationSerializesConcurrentAnimationDelete(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-b"
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.setStatus("connected", "room-a", nil)
+	if err := runtime.savePendingGiftAnimations([]pendingGiftAnimation{{RoomID: "room-b", Gift: giftEvent{GiftID: 1, UID: 42, Timestamp: 10, EffectID: 7, AnimationGIF: "https://i0.hdslb.com/a.gif", AnimationOnly: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	writeStarted := make(chan struct{})
+	allowWrite := make(chan struct{})
+	var once sync.Once
+	runtime.animationWriteAtomically = func(path string, data []byte) error {
+		once.Do(func() { close(writeStarted); <-allowWrite })
+		return writeFileAtomically(path, data)
+	}
+	prepared := make(chan error, 1)
+	go func() { prepared <- runtime.prepareRoomConnection("room-b") }()
+	<-writeStarted
+	deleted := make(chan error, 1)
+	go func() {
+		deleted <- runtime.processInboxRecord(context.Background(), giftInboxRecord{IngestionID: strings.Repeat("9", 32), RoomID: "room-b", Gift: giftEvent{GiftID: 1, UID: 42, Timestamp: 11, Rnd: "serialized-delete"}})
+	}()
+	select {
+	case err := <-deleted:
+		t.Fatalf("concurrent delete bypassed preparation lock: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(allowWrite)
+	if err := <-prepared; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-deleted; err != nil {
+		t.Fatal(err)
+	}
+	pending, err := runtime.loadPendingGiftAnimations()
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending resurrected after serialized delete = %#v err=%v", pending, err)
 	}
 }
 
