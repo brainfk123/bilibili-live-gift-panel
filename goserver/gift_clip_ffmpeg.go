@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,6 +32,162 @@ type giftClipEncodeRequest struct {
 	Profile                                 giftClipOutputProfile
 	BackgroundPath, OverlayPath, OutputPath string
 }
+
+type giftClipEncodingUpdate struct {
+	Progress float64
+	Mode     giftClipEncoderMode
+	Retrying bool
+}
+
+type giftClipEncoder interface {
+	Encode(context.Context, giftClipEncodeRequest, func(giftClipEncodingUpdate)) error
+}
+
+type giftClipProcessRunner interface {
+	Run(context.Context, string, []string, io.Writer, io.Writer) error
+}
+
+type giftClipFFmpegEncoderOptions struct {
+	ForceSoftware bool
+}
+
+type giftClipFFmpegEncoder struct {
+	payload       *giftClipPayload
+	runner        giftClipProcessRunner
+	diagnostics   *diagnosticLogger
+	forceSoftware bool
+
+	mu          sync.Mutex
+	useSoftware bool
+}
+
+func newGiftClipFFmpegEncoder(payload *giftClipPayload, runner giftClipProcessRunner, diagnostics *diagnosticLogger, options giftClipFFmpegEncoderOptions) giftClipEncoder {
+	if runner == nil {
+		runner = newGiftClipProcessRunner()
+	}
+	return &giftClipFFmpegEncoder{
+		payload:       payload,
+		runner:        runner,
+		diagnostics:   diagnostics,
+		forceSoftware: options.ForceSoftware,
+	}
+}
+
+func (encoder *giftClipFFmpegEncoder) Encode(ctx context.Context, request giftClipEncodeRequest, notify func(giftClipEncodingUpdate)) error {
+	if encoder == nil || encoder.payload == nil || encoder.runner == nil {
+		return errors.New("gift clip ffmpeg encoder is unavailable")
+	}
+	path, err := encoder.payload.Prepare(ctx)
+	if err != nil {
+		return err
+	}
+	mode := encoder.initialMode()
+	err, stderr := encoder.runAttempt(ctx, path, request, mode, notify)
+	if err == nil {
+		return nil
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return contextErr
+	}
+	if mode != giftClipEncoderHardware || !shouldRetryGiftClipSoftware(err, stderr) {
+		return err
+	}
+	encoder.rememberSoftwareMode()
+	if notify != nil {
+		notify(giftClipEncodingUpdate{Mode: giftClipEncoderSoftware, Retrying: true})
+	}
+	err, _ = encoder.runAttempt(ctx, path, request, giftClipEncoderSoftware, notify)
+	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
+	}
+	return err
+}
+
+func (encoder *giftClipFFmpegEncoder) initialMode() giftClipEncoderMode {
+	if encoder.forceSoftware {
+		return giftClipEncoderSoftware
+	}
+	encoder.mu.Lock()
+	defer encoder.mu.Unlock()
+	if encoder.useSoftware {
+		return giftClipEncoderSoftware
+	}
+	return giftClipDefaultEncoderMode
+}
+
+func (encoder *giftClipFFmpegEncoder) rememberSoftwareMode() {
+	encoder.mu.Lock()
+	encoder.useSoftware = true
+	encoder.mu.Unlock()
+}
+
+func (encoder *giftClipFFmpegEncoder) runAttempt(ctx context.Context, path string, request giftClipEncodeRequest, mode giftClipEncoderMode, notify func(giftClipEncodingUpdate)) (error, string) {
+	args, err := buildGiftClipFFmpegArgs(request, mode)
+	if err != nil {
+		return err, ""
+	}
+	stdoutReader, stdoutWriter := io.Pipe()
+	progressDone := make(chan error, 1)
+	go func() {
+		parser := newGiftClipProgressParser(request.Profile.Duration)
+		scanner := bufio.NewScanner(stdoutReader)
+		scanner.Buffer(make([]byte, 1024), 256*1024)
+		for scanner.Scan() {
+			if progress, ok := parser.Consume(scanner.Text()); ok && notify != nil {
+				notify(giftClipEncodingUpdate{Progress: progress, Mode: mode})
+			}
+		}
+		progressDone <- scanner.Err()
+		_ = stdoutReader.Close()
+	}()
+	stderr := &giftClipStderrTail{}
+	runErr := encoder.runner.Run(ctx, path, args, stdoutWriter, stderr)
+	_ = stdoutWriter.Close()
+	scanErr := <-progressDone
+	if runErr == nil && scanErr != nil {
+		runErr = scanErr
+	}
+	stderrText := stderr.String()
+	if runErr != nil && encoder.diagnostics != nil {
+		encoder.diagnostics.Error("gift_clip_ffmpeg_failed", "mode", mode, "stderr_tail", sanitizeGiftClipDiagnosticStderr(stderrText))
+	}
+	return runErr, stderrText
+}
+
+const giftClipStderrTailLimit = 32 * 1024
+
+type giftClipStderrTail struct {
+	buffer []byte
+}
+
+func (tail *giftClipStderrTail) Write(data []byte) (int, error) {
+	written := len(data)
+	if len(data) >= giftClipStderrTailLimit {
+		tail.buffer = append(tail.buffer[:0], data[len(data)-giftClipStderrTailLimit:]...)
+		return written, nil
+	}
+	overflow := len(tail.buffer) + len(data) - giftClipStderrTailLimit
+	if overflow > 0 {
+		copy(tail.buffer, tail.buffer[overflow:])
+		tail.buffer = tail.buffer[:len(tail.buffer)-overflow]
+	}
+	tail.buffer = append(tail.buffer, data...)
+	return written, nil
+}
+
+func (tail *giftClipStderrTail) String() string {
+	return string(tail.buffer)
+}
+
+var giftClipDiagnosticPathPattern = regexp.MustCompile(`(?i)(?:[a-z]:[\\/][^\t\r\n "'<>|]+|/(?:[^\t\r\n "'<>|]+/?)+)`)
+
+func sanitizeGiftClipDiagnosticStderr(stderr string) string {
+	return giftClipDiagnosticPathPattern.ReplaceAllString(stderr, "[PATH]")
+}
+
+var _ io.Writer = (*giftClipStderrTail)(nil)
 
 func buildGiftClipFFmpegArgs(request giftClipEncodeRequest, mode giftClipEncoderMode) ([]string, error) {
 	if mode != giftClipEncoderHardware && mode != giftClipEncoderSoftware {

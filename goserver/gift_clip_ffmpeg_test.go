@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -225,6 +229,159 @@ func TestGiftClipProgressParserIsMonotonicAndClamped(t *testing.T) {
 	if !reflect.DeepEqual(got, []float64{0.25, 0.25, 1, 1}) {
 		t.Fatalf("progress = %#v", got)
 	}
+}
+
+func TestGiftClipFFmpegEncoderOptionsCanForceSoftware(t *testing.T) {
+	runner := &fakeGiftClipRunner{}
+	encoder := newGiftClipFFmpegEncoder(testGiftClipPayload(t), runner, nil, giftClipFFmpegEncoderOptions{ForceSoftware: true})
+	if err := encoder.Encode(context.Background(), giftClipEncodeFixture(testGiftClipSource()), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.hardwareFlags(); !reflect.DeepEqual(got, []string{"0"}) {
+		t.Fatalf("flags = %#v", got)
+	}
+}
+
+type fakeRunResult struct {
+	stdout string
+	stderr string
+	err    error
+}
+
+type fakeGiftClipRunner struct {
+	mu      sync.Mutex
+	results []fakeRunResult
+	args    [][]string
+}
+
+func (runner *fakeGiftClipRunner) Run(_ context.Context, _ string, args []string, stdout, stderr io.Writer) error {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	runner.args = append(runner.args, append([]string(nil), args...))
+	result := fakeRunResult{}
+	if index := len(runner.args) - 1; index < len(runner.results) {
+		result = runner.results[index]
+	}
+	_, _ = io.WriteString(stdout, result.stdout)
+	_, _ = io.WriteString(stderr, result.stderr)
+	return result.err
+}
+
+func (runner *fakeGiftClipRunner) hardwareFlags() []string {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	flags := make([]string, 0, len(runner.args))
+	for _, args := range runner.args {
+		for index := range args {
+			if args[index] == "-hw_encoding" && index+1 < len(args) {
+				flags = append(flags, args[index+1])
+				break
+			}
+		}
+	}
+	return flags
+}
+
+func TestGiftClipEncoderRetriesSoftwareOnceAndCachesTheDecision(t *testing.T) {
+	if giftClipDefaultEncoderMode != giftClipEncoderHardware {
+		t.Skip("hardware fallback is a Windows-only default")
+	}
+	runner := &fakeGiftClipRunner{results: []fakeRunResult{{stderr: "Error initializing h264_mf hardware encoder", err: errors.New("exit 1")}, {}, {}}}
+	encoder := newGiftClipFFmpegEncoder(testGiftClipPayload(t), runner, nil, giftClipFFmpegEncoderOptions{})
+	updates := []giftClipEncodingUpdate{}
+	if err := encoder.Encode(context.Background(), giftClipEncodeFixture(testGiftClipSource()), func(update giftClipEncodingUpdate) { updates = append(updates, update) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := encoder.Encode(context.Background(), giftClipEncodeFixture(testGiftClipSource()), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.hardwareFlags(); !reflect.DeepEqual(got, []string{"1", "0", "0"}) {
+		t.Fatalf("flags = %#v", got)
+	}
+	if !slices.ContainsFunc(updates, func(update giftClipEncodingUpdate) bool {
+		return update.Retrying && update.Mode == giftClipEncoderSoftware
+	}) {
+		t.Fatalf("updates = %#v", updates)
+	}
+}
+
+func TestGiftClipEncoderDoesNotRetryCanceledOrInputFailures(t *testing.T) {
+	for _, test := range []struct {
+		name, stderr string
+		err          error
+	}{
+		{name: "canceled", err: context.Canceled},
+		{name: "no space", stderr: "No space left on device", err: errors.New("exit 1")},
+		{name: "bad input", stderr: "Invalid data found when processing input", err: errors.New("exit 1")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeGiftClipRunner{results: []fakeRunResult{{stderr: test.stderr, err: test.err}}}
+			encoder := newGiftClipFFmpegEncoder(testGiftClipPayload(t), runner, nil, giftClipFFmpegEncoderOptions{})
+			if err := encoder.Encode(context.Background(), giftClipEncodeFixture(testGiftClipSource()), nil); !errors.Is(err, test.err) {
+				t.Fatalf("Encode error = %v, want %v", err, test.err)
+			}
+			if got := len(runner.hardwareFlags()); got != 1 {
+				t.Fatalf("runs = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestGiftClipEncoderDoesNotTryAThirdTimeWhenSoftwareFails(t *testing.T) {
+	if giftClipDefaultEncoderMode != giftClipEncoderHardware {
+		t.Skip("hardware fallback is a Windows-only default")
+	}
+	runner := &fakeGiftClipRunner{results: []fakeRunResult{
+		{stderr: "Error initializing h264_mf hardware encoder", err: errors.New("hardware exit 1")},
+		{stderr: "software encoder failed", err: errors.New("software exit 1")},
+	}}
+	encoder := newGiftClipFFmpegEncoder(testGiftClipPayload(t), runner, nil, giftClipFFmpegEncoderOptions{})
+	if err := encoder.Encode(context.Background(), giftClipEncodeFixture(testGiftClipSource()), nil); err == nil {
+		t.Fatal("Encode succeeded")
+	}
+	if got := runner.hardwareFlags(); !reflect.DeepEqual(got, []string{"1", "0"}) {
+		t.Fatalf("flags = %#v", got)
+	}
+}
+
+func TestGiftClipEncoderPublishesMonotonicStdoutProgress(t *testing.T) {
+	runner := &fakeGiftClipRunner{results: []fakeRunResult{{stdout: "out_time_us=500000\nout_time_us=400000\nout_time_us=2500000\nprogress=end\n"}}}
+	encoder := newGiftClipFFmpegEncoder(testGiftClipPayload(t), runner, nil, giftClipFFmpegEncoderOptions{})
+	updates := []giftClipEncodingUpdate{}
+	if err := encoder.Encode(context.Background(), giftClipEncodeFixture(testGiftClipSource()), func(update giftClipEncodingUpdate) { updates = append(updates, update) }); err != nil {
+		t.Fatal(err)
+	}
+	progress := make([]float64, 0, len(updates))
+	for _, update := range updates {
+		progress = append(progress, update.Progress)
+	}
+	if !reflect.DeepEqual(progress, []float64{5.0 / 22, 5.0 / 22, 1, 1}) {
+		t.Fatalf("progress = %#v", progress)
+	}
+}
+
+func TestGiftClipEncoderTruncatesAndSanitizesDiagnosticStderr(t *testing.T) {
+	logger, err := newDiagnosticLogger(t.TempDir() + "/runtime.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr := append(bytes.Repeat([]byte("x"), 40*1024), []byte(" C:\\private\\source.gif")...)
+	runner := &fakeGiftClipRunner{results: []fakeRunResult{{stderr: string(stderr), err: errors.New("exit 1")}}}
+	encoder := newGiftClipFFmpegEncoder(testGiftClipPayload(t), runner, logger, giftClipFFmpegEncoderOptions{})
+	_ = encoder.Encode(context.Background(), giftClipEncodeFixture(testGiftClipSource()), nil)
+	data := logger.exportBytes()
+	if bytes.Contains(data, []byte(`C:\private\source.gif`)) || len(data) > 2*1024 {
+		t.Fatalf("diagnostic leaked path or excessive stderr: %d bytes", len(data))
+	}
+}
+
+func testGiftClipPayload(t *testing.T) *giftClipPayload {
+	t.Helper()
+	return newTestGiftClipPayload(t, t.TempDir(), []byte("MZ test ffmpeg"))
+}
+
+func testGiftClipSource() giftClipSource {
+	return giftClipSource{Kind: giftClipSourceGIF, Playback: giftClipPlaybackSingleGIF, Path: `C:\task\source.gif`, VisualWidth: 1920, VisualHeight: 1080, Duration: 2200 * time.Millisecond}
 }
 
 func TestShouldRetryGiftClipSoftwareClassifiesHardwareFailures(t *testing.T) {
