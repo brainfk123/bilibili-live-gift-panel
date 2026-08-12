@@ -2497,6 +2497,54 @@ describe('single-page configuration rendering', () => {
     expect(requestedValues.at(-1)).toBe(0);
   });
 
+  it('does not advance the shared draft when a pending gift simulation is deselected in the picker', async () => {
+    const [firstGift, secondGift] = builtinCatalog;
+    const configured = state('88888888');
+    configured.rules = [
+      { id: 'r-a', giftId: firstGift.id, attributeName: '加班时间', formulaName: 'A', formula: '加班时间+1', enabled: true },
+      { id: 'r-b', giftId: secondGift.id, attributeName: '加班时间', formulaName: 'B', formula: '加班时间+10', enabled: true },
+    ];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(2));
+
+    const fallbackFetch = globalThis.fetch;
+    let resolvePending!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => { resolvePending = resolve; });
+    let previewCalls = 0;
+    const requestedValues: number[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { attributeValue: number };
+      requestedValues.push(body.attributeValue);
+      previewCalls += 1;
+      if (previewCalls === 1) return pending;
+      return Response.json({ code: 0, result: body.attributeValue + 10 });
+    }));
+
+    const firstRow = root.querySelectorAll('.selected-gift-rule')[0];
+    findByText(firstRow, '模拟收到 1 个')?.onclick?.();
+    findByText(root, '+ 添加礼物')?.onclick?.();
+    const drawer = root.querySelector('.gift-picker-drawer')!;
+    const firstChoice = drawer.querySelectorAll('.gift-choice')
+      .find((choice) => choice.dataset.giftId === String(firstGift.id))!;
+    firstChoice.onclick?.();
+    findByText(drawer, '确认选择（1）')?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(1));
+
+    resolvePending(Response.json({ code: 0, result: 1 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const remainingRow = root.querySelector('.selected-gift-rule')!;
+    findByText(remainingRow, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(remainingRow.querySelector('.formula-preview')!)).toContain('0 → 10'));
+    expect(requestedValues.at(-1)).toBe(0);
+  });
+
   it('does not advance the shared draft when a pending timer simulation is removed', async () => {
     const configured = state('88888888');
     configured.timerRules = [

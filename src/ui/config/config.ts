@@ -3405,6 +3405,10 @@ export function mountConfig(root: HTMLElement): void {
     let modalFooter: HTMLElement | null = null;
     let confirmGiftSelectionButton: HTMLButtonElement | null = null;
     let giftPickerController: GiftPicker;
+    const removeSelectedGiftRule = (giftId: number): void => {
+      simulationGeneration += 1;
+      selected.delete(giftId);
+    };
 
     const openGiftDrawer = (): void => {
       if (!giftDrawer.hidden) return;
@@ -3445,7 +3449,7 @@ export function mountConfig(root: HTMLElement): void {
       isSelected: (gift) => selected.has(gift.id),
       onToggle: (gift, selectedNow) => {
         if (!selectedNow) {
-          selected.delete(gift.id);
+          removeSelectedGiftRule(gift.id);
           return;
         }
         const item: SelectedGiftRule = {
@@ -3532,8 +3536,7 @@ export function mountConfig(root: HTMLElement): void {
       row.dataset.giftId = String(item.gift.id);
       const removeButton = el('button', { class: 'rule-remove', type: 'button', text: '移除' }) as HTMLButtonElement;
       removeButton.onclick = () => {
-        simulationGeneration += 1;
-        selected.delete(item.gift.id);
+        removeSelectedGiftRule(item.gift.id);
         editorTutorialProgress.giftCount = selected.size;
         editorTutorialProgress.giftPreviewed = false;
         giftPickerController.refreshSelection();
