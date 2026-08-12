@@ -302,6 +302,11 @@ func TestBackgroundRuntimePersistsAnimationFirstMergeAcrossCrashAndRestart(t *te
 	runtime := newBackgroundRuntime(store, nil)
 	runtime.inbox = inbox
 	runtime.inboxRetryDelay = time.Hour
+	if err := runtime.savePendingGiftAnimationFile(pendingGiftAnimationFile{
+		SchemaVersion: pendingGiftAnimationsSchemaVersion, PreparedRoomID: "room-a", Records: []pendingGiftAnimation{},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	runtime.acceptGift(context.Background(), "room-a", "GUARD_BUY", giftEvent{
 		GiftID: specialGiftGuardCaptain, UID: 42, Timestamp: 1_700_000_001,
 		Membership: "captain", EffectID: 9001, EffectMP4: "https://i0.hdslb.com/guard.mp4",
@@ -377,6 +382,14 @@ func TestBackgroundRuntimeRecoversPurchaseAfterPendingAnimationWasPrepared(t *te
 		},
 	}
 	if err := newBackgroundRuntime(store, nil).processInboxRecord(context.Background(), animation); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := newBackgroundRuntime(store, nil).loadPendingGiftAnimationFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata.PreparedRoomID = "room-a"
+	if err := newBackgroundRuntime(store, nil).savePendingGiftAnimationFile(metadata); err != nil {
 		t.Fatal(err)
 	}
 	inbox, err := openGiftInbox(root)
@@ -552,6 +565,195 @@ func TestBackgroundRuntimeRetriesFailedRoomPreparationBeforeStartingSource(t *te
 	pending, err := runtime.loadPendingGiftAnimations()
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("old-room animations survived retry: %#v, err=%v", pending, err)
+	}
+}
+
+func TestBackgroundRuntimeMigratesEmptyPreparedRoomBeforeStartingTargetSource(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-b"
+	state.RecentSourceGiftKeys["old-room-rnd"] = time.Now().UnixMilli()
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	seed := newBackgroundRuntime(store, nil)
+	if err := seed.savePendingGiftAnimationFile(pendingGiftAnimationFile{
+		SchemaVersion:  pendingGiftAnimationsSchemaVersion,
+		PreparedRoomID: "",
+		Records: []pendingGiftAnimation{{
+			RoomID: "room-a",
+			Gift:   giftEvent{GiftID: 1, UID: 42, EffectID: 99, AnimationOnly: true},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	inspected := make(chan error, 1)
+	source := &inspectionGiftSource{inspect: func() error {
+		startedState, err := store.readState()
+		if err != nil {
+			return err
+		}
+		if len(startedState.RecentSourceGiftKeys) != 0 {
+			return fmt.Errorf("source started with old-room dedupe: %#v", startedState.RecentSourceGiftKeys)
+		}
+		metadata, err := newBackgroundRuntime(store, nil).loadPendingGiftAnimationFile()
+		if err != nil {
+			return err
+		}
+		if metadata.PreparedRoomID != "room-b" || len(metadata.Records) != 0 {
+			return fmt.Errorf("source started with unmigrated metadata: %#v", metadata)
+		}
+		return nil
+	}, inspected: inspected}
+	runtime := newBackgroundRuntime(store, func() giftEventSource { return source })
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	defer func() {
+		cancel()
+		<-done
+	}()
+	select {
+	case err := <-inspected:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("target source did not start after empty-marker migration")
+	}
+}
+
+type preparationBarrierInbox struct {
+	runtimeGiftInbox
+	claimed      chan struct{}
+	allowClaim   chan struct{}
+	released     chan struct{}
+	claimedOnce  sync.Once
+	releasedOnce sync.Once
+}
+
+func (inbox *preparationBarrierInbox) Next() (giftInboxRecord, bool, error) {
+	record, ok, err := inbox.runtimeGiftInbox.Next()
+	if ok && err == nil {
+		inbox.claimedOnce.Do(func() { close(inbox.claimed) })
+		<-inbox.allowClaim
+	}
+	return record, ok, err
+}
+
+func (inbox *preparationBarrierInbox) Release(ingestionID string) error {
+	err := inbox.runtimeGiftInbox.Release(ingestionID)
+	if err == nil {
+		inbox.releasedOnce.Do(func() { close(inbox.released) })
+	}
+	return err
+}
+
+func TestBackgroundRuntimeConsumerWaitsForPreparationBeforeSettlingAndAcknowledging(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room-b"
+	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
+	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
+	state.RecentSourceGiftKeys["old-room-rnd"] = time.Now().UnixMilli()
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	seed := newBackgroundRuntime(store, nil)
+	if err := seed.savePendingGiftAnimationFile(pendingGiftAnimationFile{
+		SchemaVersion:  pendingGiftAnimationsSchemaVersion,
+		PreparedRoomID: "",
+		Records:        []pendingGiftAnimation{{RoomID: "room-a", Gift: giftEvent{GiftID: 2, UID: 7, AnimationOnly: true}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	realInbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := realInbox.Accept("room-b", "SEND_GIFT", giftEvent{
+		GiftID: 1, GiftName: "first", Num: 1, UID: 42, Uname: "字***", Rnd: "target-rnd",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := &preparationBarrierInbox{
+		runtimeGiftInbox: realInbox,
+		claimed:          make(chan struct{}),
+		allowClaim:       make(chan struct{}),
+		released:         make(chan struct{}),
+	}
+	allowPreparation := make(chan struct{})
+	var allowPreparationOnce sync.Once
+	allowRoomPreparation := func() { allowPreparationOnce.Do(func() { close(allowPreparation) }) }
+	sourceStarted := make(chan struct{})
+	runtime := newBackgroundRuntime(store, func() giftEventSource {
+		<-allowPreparation
+		return &signalingStableSource{started: sourceStarted}
+	})
+	runtime.inbox = inbox
+	resolver := &blockingUserProfileResolver{started: make(chan struct{}), release: make(chan struct{})}
+	runtime.profileResolver = resolver
+	runtime.profileTimeout = time.Hour
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	defer func() {
+		resolver.unblock()
+		allowRoomPreparation()
+		cancel()
+		<-done
+	}()
+	select {
+	case <-inbox.claimed:
+	case <-time.After(time.Second):
+		t.Fatal("consumer did not claim the pending target-room record")
+	}
+	close(inbox.allowClaim)
+	select {
+	case <-inbox.released:
+	case <-resolver.started:
+		t.Fatal("consumer began target-room settlement before room preparation")
+	case <-time.After(time.Second):
+		t.Fatal("consumer neither deferred the claim nor began settlement")
+	}
+	if realInbox.Health().PendingCount != 1 {
+		t.Fatalf("record acknowledged before preparation: pending=%d", realInbox.Health().PendingCount)
+	}
+	assertRuntimeAttributeValue(t, store, "积分", 0)
+
+	allowRoomPreparation()
+	select {
+	case <-sourceStarted:
+	case <-time.After(time.Second):
+		t.Fatal("source did not start after preparation")
+	}
+	select {
+	case <-resolver.started:
+	case <-time.After(time.Second):
+		t.Fatal("consumer did not resume after preparation")
+	}
+	resolver.unblock()
+	waitForInboxPendingCount(t, realInbox, 0)
+	assertRuntimeAttributeValue(t, store, "积分", 1)
+
+	second, err := realInbox.Accept("room-b", "SEND_GIFT", giftEvent{
+		GiftID: 1, GiftName: "second", Num: 1, UID: 42, Rnd: "target-rnd",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case runtime.inboxWake <- struct{}{}:
+	default:
+	}
+	waitForInboxPendingCount(t, realInbox, 0)
+	assertRuntimeAttributeValue(t, store, "积分", 1)
+	updated, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !testContainsString(updated.AppliedIngressIDs, first.IngestionID) || !testContainsString(updated.AppliedIngressIDs, second.IngestionID) {
+		t.Fatalf("prepared duplicate ingestion IDs = %#v", updated.AppliedIngressIDs)
 	}
 }
 
@@ -999,6 +1201,29 @@ type callbackDuringShutdownSource struct {
 }
 
 type stableConnectedSource struct{}
+
+type signalingStableSource struct {
+	started chan struct{}
+}
+
+func (source *signalingStableSource) Run(ctx context.Context, _ string, callbacks runtimeCallbacks) error {
+	close(source.started)
+	callbacks.onState("connected")
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+type inspectionGiftSource struct {
+	inspect   func() error
+	inspected chan error
+}
+
+func (source *inspectionGiftSource) Run(ctx context.Context, _ string, callbacks runtimeCallbacks) error {
+	source.inspected <- source.inspect()
+	callbacks.onState("connected")
+	<-ctx.Done()
+	return ctx.Err()
+}
 
 func (*stableConnectedSource) Run(ctx context.Context, _ string, callbacks runtimeCallbacks) error {
 	callbacks.onState("connected")
