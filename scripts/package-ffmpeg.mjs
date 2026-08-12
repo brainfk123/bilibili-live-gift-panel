@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { execFileSync, spawn } from 'node:child_process';
-import { mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { execFile, execFileSync } from 'node:child_process';
+import { link, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,8 +12,15 @@ const maximumSize = 40_000_000;
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const outputDirectory = join(root, 'goserver', 'ffmpeg');
 const componentGatePath = join(root, 'dist', 'ffmpeg-component-gate.txt');
+const ownerLivenessCache = new Map();
 
-if (process.argv.includes('--self-test')) {
+if (process.argv.includes('--publish-worker')) {
+  const directory = resolve(readArgument('--directory'));
+  const archive = await readFile(resolve(readArgument('--archive')));
+  const manifest = await readFile(resolve(readArgument('--manifest')));
+  const options = JSON.parse(Buffer.from(readArgument('--options'), 'base64url').toString('utf8'));
+  await publishPairInWorker(directory, archive, manifest, options);
+} else if (process.argv.includes('--self-test')) {
   await runSelfTests();
 } else {
   await main();
@@ -173,13 +180,34 @@ function crc32(contents) {
 }
 
 async function publishPairTransactionally(directory, archive, manifest, options = {}) {
+  const inputs = await mkdtemp(join(tmpdir(), 'gift-panel-ffmpeg-publish-'));
+  const archivePath = join(inputs, 'archive.new');
+  const manifestPath = join(inputs, 'manifest.new');
+  try {
+    await Promise.all([writeDurably(archivePath, archive), writeDurably(manifestPath, manifest)]);
+    await new Promise((resolveWorker, rejectWorker) => {
+      const child = execFile(process.execPath, [fileURLToPath(import.meta.url), '--publish-worker', '--directory', resolve(directory), '--archive', archivePath, '--manifest', manifestPath, '--options', Buffer.from(JSON.stringify(options)).toString('base64url')], { windowsHide: true }, (error, stdout, stderr) => {
+        if (error) rejectWorker(new Error(`FFmpeg pair publication worker failed: ${error.message}; ${stderr}`));
+        else resolveWorker(stdout);
+      });
+      child.stdin?.end();
+    });
+  } finally {
+    await rm(inputs, { recursive: true, force: true });
+  }
+}
+
+async function publishPairInWorker(directory, archive, manifest, options = {}) {
   const nonce = `${process.pid}-${randomBytes(8).toString('hex')}`;
   const lockPath = join(directory, '.ffmpeg-package.lock');
   const journalPath = join(directory, '.ffmpeg-package.transaction.json');
   const targets = [join(directory, 'ffmpeg.zip'), join(directory, 'manifest.json')];
   const newPaths = targets.map((path) => `${path}.partial-${nonce}`);
   const backupPaths = targets.map((path) => `${path}.backup-${nonce}`);
-  const checkpoint = (name) => {
+  let publicationMutex;
+  const checkpoint = async (name) => {
+    publicationMutex?.assertHeld();
+    if (options.killMutexAt === name) process.exit(86);
     if (options.crashAt === name) {
       const error = new Error(`injected package publication crash: ${name}`);
       error.simulatedCrash = true;
@@ -188,10 +216,14 @@ async function publishPairTransactionally(directory, archive, manifest, options 
     if (options.rollbackFailAt === name) throw new Error(`injected package rollback failure: ${name}`);
     if (options.failAt === name) throw new Error(`injected package publication failure: ${name}`);
   };
-  const publicationMutex = await acquirePublicationMutex(directory);
+  publicationMutex = await acquirePublicationMutex(directory);
   let lock;
   try {
-  lock = await acquirePackageLock(lockPath, directory);
+  publicationMutex.assertHeld();
+  await cleanupStaleLockCandidates(directory);
+  await recoverPackageTransaction(directory);
+  publicationMutex.assertHeld();
+  lock = await acquirePackageLock(lockPath);
   const existed = [false, false];
   const backedUp = [false, false];
   const published = [false, false];
@@ -199,41 +231,50 @@ async function publishPairTransactionally(directory, archive, manifest, options 
   let rollbackComplete = false;
   try {
     for (let index = 0; index < targets.length; index += 1) {
-      checkpoint(`state-read-${index}`);
+      await checkpoint(`state-read-${index}`);
       existed[index] = await stat(targets[index]).then(() => true, (error) => error.code === 'ENOENT' ? false : Promise.reject(error));
     }
-    const journal = { nonce, existed, archive_sha256: createHash('sha256').update(archive).digest('hex'), manifest_sha256: createHash('sha256').update(manifest).digest('hex') };
-    await writeDurably(journalPath, Buffer.from(`${JSON.stringify(journal)}\n`));
+    const journal = { schema: 1, phase: 'prepared', nonce, existed, archive_sha256: createHash('sha256').update(archive).digest('hex'), manifest_sha256: createHash('sha256').update(manifest).digest('hex') };
+    publicationMutex.assertHeld();
+    await writeJournalAtomically(journalPath, journal);
+    publicationMutex.assertHeld();
     await writeDurably(newPaths[0], archive);
     await writeDurably(newPaths[1], manifest);
-    checkpoint('new-files-durable');
+    await checkpoint('new-files-durable');
     for (let index = 0; index < targets.length; index += 1) {
       if (existed[index]) {
         await rename(targets[index], backupPaths[index]);
         backedUp[index] = true;
       }
-      checkpoint(`backup-${index}`);
+      await checkpoint(`backup-${index}`);
     }
     for (let index = 0; index < targets.length; index += 1) {
       await rename(newPaths[index], targets[index]);
       published[index] = true;
-      checkpoint(`publish-${index}`);
+      await checkpoint(`publish-${index}`);
     }
-    await writeDurably(`${journalPath}.committed`, Buffer.from(`${JSON.stringify({ ...journal, committed: true })}\n`));
-    await rm(journalPath, { force: true });
-    await rename(`${journalPath}.committed`, journalPath);
+    await checkpoint('before-commit-journal');
+    await writeJournalAtomically(journalPath, { ...journal, phase: 'committed' });
+    await checkpoint('after-commit-journal');
     committed = true;
   } catch (error) {
     if (!error.simulatedCrash) {
       try {
-        for (let index = targets.length - 1; index >= 0; index -= 1) {
-          if (published[index]) await rm(targets[index], { force: true });
-          if (backedUp[index]) {
-            checkpoint(`restore-${index}`);
-            await rename(backupPaths[index], targets[index]);
+        if (!publicationMutex.isHeld()) {
+          await publicationMutex.release();
+          publicationMutex = await acquirePublicationMutex(directory);
+          await recoverPackageTransaction(directory);
+          rollbackComplete = true;
+        } else {
+          for (let index = targets.length - 1; index >= 0; index -= 1) {
+            if (published[index]) await rm(targets[index], { force: true });
+            if (backedUp[index]) {
+              await checkpoint(`restore-${index}`);
+              await rename(backupPaths[index], targets[index]);
+            }
           }
+          rollbackComplete = true;
         }
-        rollbackComplete = true;
       } catch (rollbackError) {
         error.cause = rollbackError;
       }
@@ -243,9 +284,9 @@ async function publishPairTransactionally(directory, archive, manifest, options 
     if (committed || rollbackComplete) {
       await Promise.all([...newPaths, ...backupPaths].map((path) => rm(path, { force: true })));
       await rm(journalPath, { force: true });
-      await rm(`${journalPath}.committed`, { force: true });
+      await cleanupJournalTemps(dirname(journalPath));
     }
-    await lock.close();
+    if (lock) await lock.close();
     if (committed || rollbackComplete) await rm(lockPath, { force: true });
     else await writeFile(lockPath, JSON.stringify({ pid: 0 }), { flag: 'w' });
   }
@@ -264,7 +305,29 @@ async function writeDurably(path, contents) {
   }
 }
 
-async function acquirePackageLock(path, directory) {
+async function writeJournalAtomically(path, state) {
+  const temporary = `${path}.partial-${process.pid}-${randomBytes(8).toString('hex')}`;
+  try {
+    await writeDurably(temporary, Buffer.from(`${JSON.stringify(state)}\n`));
+    if (process.platform === 'win32') {
+      const script = "Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public static class AtomicMove{[DllImport(\"kernel32.dll\",SetLastError=true,CharSet=CharSet.Unicode)]public static extern bool MoveFileEx(string a,string b,int f);}';if(-not[AtomicMove]::MoveFileEx($env:FFMPEG_JOURNAL_TEMP,$env:FFMPEG_JOURNAL_PATH,9)){throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())}";
+      execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, env: { ...process.env, FFMPEG_JOURNAL_TEMP: temporary, FFMPEG_JOURNAL_PATH: path }, stdio: 'pipe' });
+    } else await rename(temporary, path);
+    const canonical = await open(path, 'r+');
+    try { await canonical.sync(); } finally { await canonical.close(); }
+    await syncDirectoryBestEffort(dirname(path));
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
+async function syncDirectoryBestEffort(directory) {
+  if (process.platform === 'win32') return;
+  const handle = await open(directory, 'r');
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
+async function acquirePackageLock(path) {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     try {
       const lock = await open(path, 'wx', 0o600);
@@ -275,7 +338,6 @@ async function acquirePackageLock(path, directory) {
       if (error.code !== 'EEXIST') throw error;
       // The directory-keyed OS mutex proves no cooperating publisher is live;
       // any pre-existing file lock is therefore an abandoned transaction.
-      await recoverPackageTransaction(directory);
       await rm(path, { force: true });
     }
   }
@@ -284,41 +346,126 @@ async function acquirePackageLock(path, directory) {
 
 async function acquirePublicationMutex(directory) {
   const osLockPath = join(resolve(directory), '.ffmpeg-package.oslock');
-  const quotedPath = osLockPath.replaceAll("'", "''");
-  const script = `$lockPath='${quotedPath}';$deadline=[DateTime]::UtcNow.AddSeconds(30);$f=$null;try{while($null-eq $f){try{$f=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}catch{if([DateTime]::UtcNow-ge$deadline){exit 2};Start-Sleep -Milliseconds 10}};[Console]::Out.WriteLine('READY');[Console]::Out.Flush();[Console]::In.ReadToEnd()|Out-Null}finally{if($null-ne$f){$f.Dispose()}}`;
-  const helper = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-  let stderr = '';
-  helper.stderr.setEncoding('utf8');
-  helper.stderr.on('data', (chunk) => { stderr += chunk; });
-  await new Promise((resolveReady, reject) => {
-    let stdout = '';
-    const fail = (error) => reject(new Error(`Could not acquire FFmpeg package mutex: ${error.message || error}; ${stderr}`));
-    helper.once('error', fail);
-    helper.once('exit', (code) => { if (!stdout.includes('READY')) fail(new Error(`helper exited ${code}`)); });
-    helper.stdout.setEncoding('utf8');
-    helper.stdout.on('data', (chunk) => {
-      stdout += chunk;
-      if (stdout.includes('READY')) resolveReady();
-    });
-  });
-  return { release: () => new Promise((resolveRelease) => {
-    helper.once('exit', async () => { await rm(osLockPath, { force: true }).catch(() => {}); resolveRelease(); });
-    helper.stdin.end();
-  }) };
+  const takeoverPath = `${osLockPath}.takeover`;
+  const token = `${process.pid}-${randomBytes(16).toString('hex')}`;
+  const started = processStartIdentity(process.pid);
+  const candidatePath = `${osLockPath}.candidate-${token}`;
+  await writeDurably(candidatePath, Buffer.from(`${JSON.stringify({ pid: process.pid, started, token })}\n`));
+  try {
+    for (let attempt = 0; attempt < 3000; attempt += 1) {
+      try {
+        await link(candidatePath, osLockPath);
+        let held = true;
+        return {
+          isHeld: () => held,
+          assertHeld: () => { if (!held) throw new Error('FFmpeg package publication lock is not held.'); },
+          release: async () => {
+            if (!held) return;
+            held = false;
+            const owner = await readLockOwner(osLockPath);
+            if (owner?.token === token) await rm(osLockPath, { force: true, maxRetries: 20, retryDelay: 10 });
+          },
+        };
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+      }
+      const observed = await readLockOwner(osLockPath);
+      if (!observed) continue;
+      if (isLockOwnerAlive(observed)) {
+        await delay(10);
+        continue;
+      }
+      try {
+        await link(candidatePath, takeoverPath);
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        const claimant = await readLockOwner(takeoverPath);
+        if (!claimant) continue;
+        if (isLockOwnerAlive(claimant)) {
+          await delay(10);
+          continue;
+        }
+        const unchangedClaimant = await readLockOwner(takeoverPath);
+        if (unchangedClaimant?.token === claimant.token && unchangedClaimant.started === claimant.started && !isLockOwnerAlive(unchangedClaimant)) await rm(takeoverPath, { force: true, maxRetries: 20, retryDelay: 10 });
+        continue;
+      }
+      try {
+        const current = await readLockOwner(osLockPath);
+        if (current?.token === observed.token && current.started === observed.started && !isLockOwnerAlive(current)) await rm(osLockPath, { force: true, maxRetries: 20, retryDelay: 10 });
+      } finally {
+        const claimant = await readLockOwner(takeoverPath);
+        if (claimant?.token === token) await rm(takeoverPath, { force: true, maxRetries: 20, retryDelay: 10 });
+      }
+    }
+    throw new Error(`Timed out waiting for FFmpeg package publication lock: ${osLockPath}`);
+  } finally {
+    await rm(candidatePath, { force: true, maxRetries: 20, retryDelay: 10 });
+  }
+}
+
+async function readLockOwner(path) {
+  try {
+    const value = JSON.parse(await readFile(path, 'utf8'));
+    if (value && Object.getPrototypeOf(value) === Object.prototype && Object.keys(value).sort().join(',') === 'pid,started,token' && Number.isSafeInteger(value.pid) && value.pid > 0 && /^[0-9]{1,20}$/.test(value.started) && /^[0-9]+-[0-9a-f]{32}$/.test(value.token)) return value;
+    throw new Error(`FFmpeg package publication lock has an invalid owner record: ${path}`);
+  } catch (error) {
+    if (error.code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+function processStartIdentity(pid) {
+  const script = 'try{$p=Get-CimInstance Win32_Process -Filter ("ProcessId="+$env:FFMPEG_LOCK_PID) -ErrorAction Stop;if($null-eq$p){exit 3};[Console]::Write($p.CreationDate.ToUniversalTime().Ticks)}catch{Write-Error $_;exit 4}';
+  try {
+    const value = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, env: { ...process.env, FFMPEG_LOCK_PID: String(pid) }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    if (!/^[0-9]{1,20}$/.test(value)) throw new Error('Invalid process start identity.');
+    return value;
+  } catch (error) {
+    if (error.status === 3) return undefined;
+    throw new Error(`Could not verify FFmpeg package lock owner process ${pid}: ${error.message}`);
+  }
+}
+
+function isLockOwnerAlive(owner) {
+  try { process.kill(owner.pid, 0); } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    if (error.code !== 'EPERM') throw error;
+  }
+  const key = `${owner.pid}:${owner.started}`;
+  const cached = ownerLivenessCache.get(key);
+  if (cached && Date.now() - cached.checkedAt < 250) return cached.alive;
+  const alive = processStartIdentity(owner.pid) === owner.started;
+  ownerLivenessCache.set(key, { alive, checkedAt: Date.now() });
+  return alive;
+}
+
+function delay(milliseconds) { return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds)); }
+
+async function cleanupStaleLockCandidates(directory, options = {}) {
+  for (const name of await readdir(directory)) {
+    const token = name.match(/^\.ffmpeg-package\.oslock\.candidate-([0-9]+-[0-9a-f]{32})$/)?.[1];
+    if (!token) continue;
+    const path = join(directory, name);
+    await options.beforeCandidateRead?.(path);
+    const owner = await readLockOwner(path);
+    if (!owner) continue;
+    if (owner?.token !== token) throw new Error(`FFmpeg package lock candidate identity is invalid: ${path}`);
+    if (!isLockOwnerAlive(owner)) await rm(path, { force: true, maxRetries: 20, retryDelay: 10 });
+  }
 }
 
 async function recoverPackageTransaction(directory) {
   const journalPath = join(directory, '.ffmpeg-package.transaction.json');
   let state;
   try { state = JSON.parse(await readFile(journalPath, 'utf8')); } catch (error) {
-    if (error.code === 'ENOENT') return;
-    throw error;
+    if (error.code === 'ENOENT') return recoverWithoutUsableJournal(directory, false);
+    return recoverWithoutUsableJournal(directory, true);
   }
-  if (!/^[0-9]+-[0-9a-f]{16}$/.test(state.nonce) || !Array.isArray(state.existed) || state.existed.length !== 2 || !/^[0-9a-f]{64}$/.test(state.archive_sha256) || !/^[0-9a-f]{64}$/.test(state.manifest_sha256)) throw new Error('Invalid FFmpeg package recovery journal.');
+  if (state.schema !== 1 || !['prepared', 'committed'].includes(state.phase) || !/^[0-9]+-[0-9a-f]{16}$/.test(state.nonce) || !Array.isArray(state.existed) || state.existed.length !== 2 || !state.existed.every((value) => typeof value === 'boolean') || !/^[0-9a-f]{64}$/.test(state.archive_sha256) || !/^[0-9a-f]{64}$/.test(state.manifest_sha256)) return recoverWithoutUsableJournal(directory, true);
   const targets = ['ffmpeg.zip', 'manifest.json'].map((name) => join(directory, name));
   const partials = targets.map((path) => `${path}.partial-${state.nonce}`);
   const backups = targets.map((path) => `${path}.backup-${state.nonce}`);
-  const committedPairValid = state.committed && await pairMatchesJournal(targets, state);
+  const committedPairValid = state.phase === 'committed' && await pairMatchesJournal(targets, state);
   if (!committedPairValid) {
     for (let index = targets.length - 1; index >= 0; index -= 1) {
       const backupExists = await stat(backups[index]).then(() => true, () => false);
@@ -330,7 +477,62 @@ async function recoverPackageTransaction(directory) {
   }
   await Promise.all([...partials, ...backups].map((path) => rm(path, { force: true })));
   await rm(journalPath, { force: true });
-  await rm(`${journalPath}.committed`, { force: true });
+  await cleanupJournalTemps(directory);
+}
+
+async function recoverWithoutUsableJournal(directory, canonicalExists) {
+  const targets = ['ffmpeg.zip', 'manifest.json'].map((name) => join(directory, name));
+  const entries = await readdir(directory);
+  const hasTransactionEvidence = canonicalExists || entries.some((name) => /^(?:ffmpeg\.zip|manifest\.json)\.(?:partial|backup)-[0-9]+-[0-9a-f]{16}$|^\.ffmpeg-package\.transaction\.json\.partial-[0-9]+-[0-9a-f]{16}$/.test(name));
+  if (!hasTransactionEvidence) return;
+  const nonces = new Set(entries.map((name) => name.match(/^(?:ffmpeg\.zip|manifest\.json)\.backup-([0-9]+-[0-9a-f]{16})$/)?.[1]).filter(Boolean));
+  const candidates = [];
+  const currentIdentity = await pairIdentity(targets);
+  if (currentIdentity) candidates.push({ nonce: undefined, paths: targets, identity: currentIdentity });
+  for (const nonce of nonces) {
+    const paths = targets.map((target) => join(directory, `${target.endsWith('ffmpeg.zip') ? 'ffmpeg.zip' : 'manifest.json'}.backup-${nonce}`));
+    const candidate = [];
+    for (let index = 0; index < 2; index += 1) candidate.push(await stat(paths[index]).then(() => paths[index], () => targets[index]));
+    const identity = await pairIdentity(candidate);
+    if (identity) candidates.push({ nonce, paths: candidate, identity });
+  }
+  const identities = new Map(candidates.map((candidate) => [candidate.identity, candidate]));
+  if (identities.size !== 1) throw new Error('Invalid or ambiguous FFmpeg package recovery journal; recovery evidence was preserved.');
+  const selected = currentIdentity ? candidates.find((candidate) => candidate.paths === targets) : [...identities.values()][0];
+  for (let index = 0; index < 2; index += 1) {
+    if (selected.paths[index] !== targets[index]) {
+      await rm(targets[index], { force: true });
+      await rename(selected.paths[index], targets[index]);
+    }
+  }
+  if (canonicalExists) await rm(join(directory, '.ffmpeg-package.transaction.json'), { force: true });
+  await cleanupOwnedTransactionEvidence(directory);
+}
+
+async function pairHasArchiveIdentity(paths) {
+  return Boolean(await pairIdentity(paths));
+}
+
+async function pairIdentity(paths) {
+  try {
+    const [archive, manifestBytes] = await Promise.all(paths.map((path) => readFile(path)));
+    const manifest = JSON.parse(manifestBytes.toString('utf8'));
+    const exactKeys = 'archive_sha256,authenticode,component_gate,component_gate_sha256,sha256,size,version';
+    if (Object.getPrototypeOf(manifest) !== Object.prototype || Object.keys(manifest).sort().join(',') !== exactKeys || manifest.version !== version || typeof manifest.component_gate !== 'string' || !/^[0-9a-f]{64}$/.test(manifest.sha256) || !/^[0-9a-f]{64}$/.test(manifest.archive_sha256) || !/^[0-9a-f]{64}$/.test(manifest.component_gate_sha256) || !Number.isSafeInteger(manifest.size) || manifest.size <= 0 || typeof manifest.authenticode !== 'boolean') return undefined;
+    if (createHash('sha256').update(archive).digest('hex') !== manifest.archive_sha256 || createHash('sha256').update(manifest.component_gate).digest('hex') !== manifest.component_gate_sha256) return undefined;
+    return `${manifest.archive_sha256}:${createHash('sha256').update(manifestBytes).digest('hex')}`;
+  } catch { return undefined; }
+}
+
+async function cleanupJournalTemps(directory) {
+  const entries = await readdir(directory);
+  await Promise.all(entries.filter((name) => /^\.ffmpeg-package\.transaction\.json\.partial-[0-9]+-[0-9a-f]{16}$/.test(name)).map((name) => rm(join(directory, name), { force: true })));
+}
+
+async function cleanupOwnedTransactionEvidence(directory) {
+  const entries = await readdir(directory);
+  const owned = /^(?:ffmpeg\.zip|manifest\.json)\.(?:partial|backup)-[0-9]+-[0-9a-f]{16}$|^\.ffmpeg-package\.transaction\.json(?:\.partial-[0-9]+-[0-9a-f]{16})?$/;
+  await Promise.all(entries.filter((name) => owned.test(name)).map((name) => rm(join(directory, name), { force: true })));
 }
 
 async function pairMatchesJournal(targets, state) {
@@ -354,6 +556,71 @@ async function runSelfTests() {
     if (!refreshed.includes(`binary_sha256=${createHash('sha256').update(signedPE).digest('hex')}\nbinary_size=${signedPE.length}\n`)) throw new Error('signed build record was not refreshed');
     const differentPE = Buffer.from(signedPE); differentPE[400] ^= 1;
     assertThrows(() => bindBuildRecordToBinary(unsignedRecord, differentPE, true), 'different signed image', 'does not derive');
+    const retained = testBoundPair('retained');
+    await writeFile(join(directory, 'ffmpeg.zip'), retained.archive);
+    await writeFile(join(directory, 'manifest.json'), retained.manifest);
+    await writeFile(join(directory, '.ffmpeg-package.lock'), '{"pid":0}');
+    await writeFile(join(directory, '.ffmpeg-package.transaction.json'), '{"torn":');
+    await writeFile(join(directory, '.ffmpeg-package.transaction.json.partial-123-0123456789abcdef'), '{"phase":"prepared"');
+    const replacement = testBoundPair('replacement');
+    await publishPairTransactionally(directory, replacement.archive, replacement.manifest);
+    assertBuffer(await readFile(join(directory, 'ffmpeg.zip')), replacement.archive, 'torn journal one-run recovery archive');
+    assertBuffer(await readFile(join(directory, 'manifest.json')), replacement.manifest, 'torn journal one-run recovery manifest');
+    if ((await readdir(directory)).some((name) => name.startsWith('.ffmpeg-package.transaction.json'))) throw new Error('torn journal recovery left journal evidence after proving a valid pair');
+    const markerlessRetained = testBoundPair('markerless-retained');
+    await writeFile(join(directory, 'ffmpeg.zip'), markerlessRetained.archive);
+    await writeFile(join(directory, 'manifest.json'), markerlessRetained.manifest);
+    await writeFile(join(directory, '.ffmpeg-package.transaction.json'), '{"torn":');
+    await writeFile(join(directory, '.ffmpeg-package.transaction.json.partial-234-0123456789abcdef'), '{"phase":"prepared"');
+    const markerlessReplacement = testBoundPair('markerless-replacement');
+    await publishPairTransactionally(directory, markerlessReplacement.archive, markerlessReplacement.manifest);
+    assertBuffer(await readFile(join(directory, 'ffmpeg.zip')), markerlessReplacement.archive, 'markerless evidence recovery archive');
+    if ((await readdir(directory)).some((name) => name.startsWith('.ffmpeg-package.transaction.json'))) throw new Error('markerless recovery left journal evidence');
+    const recoverable = testBoundPair('recoverable-backup');
+    await writeFile(join(directory, 'ffmpeg.zip'), Buffer.from('mixed-current'));
+    await writeFile(join(directory, 'manifest.json'), Buffer.from('{invalid'));
+    await writeFile(join(directory, 'ffmpeg.zip.backup-456-0123456789abcdef'), recoverable.archive);
+    await writeFile(join(directory, 'manifest.json.backup-456-0123456789abcdef'), recoverable.manifest);
+    await writeFile(join(directory, '.ffmpeg-package.lock'), '{"pid":0}');
+    await writeFile(join(directory, '.ffmpeg-package.transaction.json'), '{"torn":');
+    const afterBackupRecovery = testBoundPair('after-backup-recovery');
+    await publishPairTransactionally(directory, afterBackupRecovery.archive, afterBackupRecovery.manifest);
+    assertBuffer(await readFile(join(directory, 'ffmpeg.zip')), afterBackupRecovery.archive, 'unique backup recovery converged in one run');
+    const validCurrent = testBoundPair('valid-current');
+    const validAlternative = testBoundPair('valid-alternative');
+    await writeFile(join(directory, 'ffmpeg.zip'), validCurrent.archive);
+    await writeFile(join(directory, 'manifest.json'), validCurrent.manifest);
+    await writeFile(join(directory, 'ffmpeg.zip.backup-567-0123456789abcdef'), validAlternative.archive);
+    await writeFile(join(directory, 'manifest.json.backup-567-0123456789abcdef'), validAlternative.manifest);
+    await writeFile(join(directory, '.ffmpeg-package.lock'), '{"pid":0}');
+    await writeFile(join(directory, '.ffmpeg-package.transaction.json'), '{"torn":');
+    await publishPairTransactionally(directory, replacement.archive, replacement.manifest).then(
+      () => { throw new Error('valid current plus alternative backup recovery unexpectedly succeeded'); },
+      (error) => { if (!String(error.message).includes('ambiguous')) throw error; },
+    );
+    assertBuffer(await readFile(join(directory, 'ffmpeg.zip')), validCurrent.archive, 'ambiguous current preserved');
+    assertBuffer(await readFile(join(directory, 'ffmpeg.zip.backup-567-0123456789abcdef')), validAlternative.archive, 'ambiguous backup preserved');
+    await rm(join(directory, 'ffmpeg.zip.backup-567-0123456789abcdef'));
+    await rm(join(directory, 'manifest.json.backup-567-0123456789abcdef'));
+    await rm(join(directory, '.ffmpeg-package.lock'), { force: true });
+    await rm(join(directory, '.ffmpeg-package.transaction.json'), { force: true });
+    const ambiguousOne = testBoundPair('ambiguous-one');
+    const ambiguousTwo = testBoundPair('ambiguous-two');
+    await writeFile(join(directory, 'ffmpeg.zip'), Buffer.from('mixed-current'));
+    await writeFile(join(directory, 'manifest.json'), Buffer.from('{invalid'));
+    for (const [nonce, pair] of [['789-0123456789abcdef', ambiguousOne], ['790-fedcba9876543210', ambiguousTwo]]) {
+      await writeFile(join(directory, `ffmpeg.zip.backup-${nonce}`), pair.archive);
+      await writeFile(join(directory, `manifest.json.backup-${nonce}`), pair.manifest);
+    }
+    await writeFile(join(directory, '.ffmpeg-package.lock'), '{"pid":0}');
+    await writeFile(join(directory, '.ffmpeg-package.transaction.json'), '{"torn":');
+    await publishPairTransactionally(directory, replacement.archive, replacement.manifest).then(
+      () => { throw new Error('ambiguous corrupt journal recovery unexpectedly succeeded'); },
+      (error) => { if (!String(error.message).includes('ambiguous')) throw error; },
+    );
+    for (const name of await readdir(directory)) if (/^(?:ffmpeg\.zip|manifest\.json)\.backup-(?:789-0123456789abcdef|790-fedcba9876543210)$/.test(name)) await rm(join(directory, name));
+    await rm(join(directory, '.ffmpeg-package.lock'), { force: true });
+    await rm(join(directory, '.ffmpeg-package.transaction.json'), { force: true });
     const oldArchive = Buffer.from('old-archive');
     const oldManifest = Buffer.from('old-manifest');
     for (const failAt of ['state-read-0', 'new-files-durable', 'backup-0', 'backup-1', 'publish-0', 'publish-1']) {
@@ -376,6 +643,16 @@ async function runSelfTests() {
       assertBuffer(await readFile(join(directory, 'ffmpeg.zip')), Buffer.from('recovered-archive'), `${crashAt} recovery archive`);
       assertBuffer(await readFile(join(directory, 'manifest.json')), Buffer.from('recovered-manifest'), `${crashAt} recovery manifest`);
     }
+    for (const crashAt of ['before-commit-journal', 'after-commit-journal']) {
+      await writeFile(join(directory, 'ffmpeg.zip'), oldArchive);
+      await writeFile(join(directory, 'manifest.json'), oldManifest);
+      await publishPairTransactionally(directory, Buffer.from('finalize-archive'), Buffer.from('finalize-manifest'), { crashAt }).then(
+        () => { throw new Error(`finalization crash ${crashAt} was not injected`); }, () => {},
+      );
+      await publishPairTransactionally(directory, Buffer.from('next-archive'), Buffer.from('next-manifest'));
+      assertBuffer(await readFile(join(directory, 'ffmpeg.zip')), Buffer.from('next-archive'), `${crashAt} one-run archive`);
+      assertBuffer(await readFile(join(directory, 'manifest.json')), Buffer.from('next-manifest'), `${crashAt} one-run manifest`);
+    }
     await publishPairTransactionally(directory, Buffer.from('crash-archive'), Buffer.from('crash-manifest'), { crashAt: 'publish-0' }).catch(() => {});
     await Promise.all(Array.from({ length: 12 }, (_, index) => publishPairTransactionally(
       directory, Buffer.from(`takeover-archive-${index}`), Buffer.from(`takeover-manifest-${index}`),
@@ -383,6 +660,41 @@ async function runSelfTests() {
     const takeoverArchive = (await readFile(join(directory, 'ffmpeg.zip'))).toString();
     const takeoverManifest = (await readFile(join(directory, 'manifest.json'))).toString();
     if (takeoverArchive.slice('takeover-archive-'.length) !== takeoverManifest.slice('takeover-manifest-'.length)) throw new Error(`concurrent stale takeover mixed generations: ${takeoverArchive}/${takeoverManifest}`);
+    for (const killMutexAt of ['state-read-0', 'new-files-durable', 'backup-0', 'backup-1', 'publish-0', 'publish-1', 'before-commit-journal', 'after-commit-journal']) {
+      const beforeLoss = testBoundPair(`before-loss-${killMutexAt}`);
+      await writeFile(join(directory, 'ffmpeg.zip'), beforeLoss.archive);
+      await writeFile(join(directory, 'manifest.json'), beforeLoss.manifest);
+      const interrupted = testBoundPair(`interrupted-${killMutexAt}`);
+      await publishPairTransactionally(directory, interrupted.archive, interrupted.manifest, { killMutexAt }).then(
+        () => { throw new Error(`mutex loss ${killMutexAt} unexpectedly succeeded`); }, () => {},
+      );
+      const afterLoss = testBoundPair(`after-loss-${killMutexAt}`);
+      await publishPairTransactionally(directory, afterLoss.archive, afterLoss.manifest);
+      assertBuffer(await readFile(join(directory, 'ffmpeg.zip')), afterLoss.archive, `${killMutexAt} successor archive`);
+      assertBuffer(await readFile(join(directory, 'manifest.json')), afterLoss.manifest, `${killMutexAt} successor manifest`);
+    }
+    const orphanToken = `2147483647-${'b'.repeat(32)}`;
+    const orphanCandidate = join(directory, `.ffmpeg-package.oslock.candidate-${orphanToken}`);
+    await writeFile(orphanCandidate, `${JSON.stringify({ pid: 2147483647, started: '1', token: orphanToken })}\n`);
+    await cleanupStaleLockCandidates(directory, { beforeCandidateRead: async (path) => { if (path === orphanCandidate) await rm(path); } });
+    if (await stat(orphanCandidate).then(() => true, () => false)) throw new Error('disappeared candidate race fixture still exists');
+    await writeFile(orphanCandidate, `${JSON.stringify({ pid: 2147483647, started: '1', token: orphanToken })}\n`);
+    const afterOrphan = testBoundPair('after-orphan-candidate');
+    await publishPairTransactionally(directory, afterOrphan.archive, afterOrphan.manifest);
+    if (await stat(orphanCandidate).then(() => true, () => false)) throw new Error('stale publication lock candidate was not cleaned');
+    await writeFile(join(directory, '.ffmpeg-package.oslock'), `${JSON.stringify({ pid: process.pid, started: '1', token: `999-${'a'.repeat(32)}` })}\n`);
+    const afterPIDReuse = testBoundPair('after-pid-reuse');
+    await publishPairTransactionally(directory, afterPIDReuse.archive, afterPIDReuse.manifest);
+    assertBuffer(await readFile(join(directory, 'ffmpeg.zip')), afterPIDReuse.archive, 'PID reuse stale-lock recovery');
+    await mkdir(join(directory, '.ffmpeg-package.oslock'));
+    await publishPairTransactionally(directory, replacement.archive, replacement.manifest).then(
+      () => { throw new Error('unreadable publication lock unexpectedly succeeded'); },
+      () => {},
+    );
+    if (!(await stat(join(directory, '.ffmpeg-package.oslock'))).isDirectory()) throw new Error('unreadable publication lock was deleted');
+    await rm(join(directory, '.ffmpeg-package.oslock'), { recursive: true });
+    await writeFile(join(directory, 'ffmpeg.zip'), Buffer.from('invalid-current-archive'));
+    await writeFile(join(directory, 'manifest.json'), Buffer.from('{invalid-current'));
     await writeFile(join(directory, '.ffmpeg-package.lock'), '{"pid":0}');
     await writeFile(join(directory, '.ffmpeg-package.transaction.json'), '{invalid');
     await publishPairTransactionally(directory, Buffer.from('invalid-journal-archive'), Buffer.from('invalid-journal-manifest')).then(
@@ -431,4 +743,18 @@ function testPE() {
 }
 function testSignedPE(unsigned) {
   const signed = Buffer.concat([unsigned, Buffer.alloc(16, 0xa5)]); const securityDirectory = 0x98 + 112 + 32; signed.writeUInt32LE(unsigned.length, securityDirectory); signed.writeUInt32LE(16, securityDirectory + 4); signed.writeUInt32LE(0x12345678, 0x98 + 64); return signed;
+}
+function testBoundPair(generation) {
+  const archive = Buffer.from(`bound-archive-${generation}`);
+  const componentGate = `test-gate-${generation}\n`;
+  const manifest = Buffer.from(`${JSON.stringify({
+    version,
+    sha256: createHash('sha256').update(`binary-${generation}`).digest('hex'),
+    archive_sha256: createHash('sha256').update(archive).digest('hex'),
+    component_gate: componentGate,
+    component_gate_sha256: createHash('sha256').update(componentGate).digest('hex'),
+    size: 1,
+    authenticode: false,
+  })}\n`);
+  return { archive, manifest };
 }

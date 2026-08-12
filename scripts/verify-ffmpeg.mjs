@@ -190,19 +190,52 @@ function readSingleFileZip(buffer, expectedName, expectedSize) {
 async function componentGateRecord(binarySha256, binarySize, binary) {
   const flags = await configureFlags();
   const configureHash = createHash('sha256').update(`${flags.join('\n')}\n`).digest('hex');
+  const { lock, bytes: toolchainLockBytes } = await readToolchainLock();
   return Buffer.from([
     'ffmpeg_version=9.0', `source_sha256=${sourceSha256}`, `source_date_epoch=${sourceDateEpoch}`,
     `configure_sha256=${configureHash}`, `binary_sha256=${binarySha256}`, `binary_size=${binarySize}`,
     `pe_authenticode_content_sha256=${authenticodeContentHash(binary)}`,
+    `toolchain_lock_sha256=${createHash('sha256').update(toolchainLockBytes).digest('hex')}`,
     '[toolchain]',
-    'diffutils=3.12-1', 'make=4.4.1-3', 'mingw-w64-ucrt-x86_64-binutils=2.47-3',
-    'mingw-w64-ucrt-x86_64-crt=14.0.0.r262.g5ea8e9fac-1', 'mingw-w64-ucrt-x86_64-gcc-libs=16.2.0-3',
-    'mingw-w64-ucrt-x86_64-gcc=16.2.0-3', 'mingw-w64-ucrt-x86_64-headers=14.0.0.r262.g5ea8e9fac-1',
-    'mingw-w64-ucrt-x86_64-libwinpthread=14.0.0.r262.g5ea8e9fac-1', 'mingw-w64-ucrt-x86_64-winpthreads=14.0.0.r262.g5ea8e9fac-1',
-    'mingw-w64-ucrt-x86_64-zlib=1.3.2-2', 'nasm=2.16.03-1', 'pkgconf=3.0.5-1',
-    'gcc_version=gcc.exe (Rev3, Built by MSYS2 project) 16.2.0', 'ld_version=GNU ld (GNU Binutils) 2.47.20260726', 'make_version=GNU Make 4.4.1',
+    ...lock.packages.map(({ name, version }) => `${name}=${version}`).sort(),
+    `gcc_version=${lock.executables.gcc}`, `ld_version=${lock.executables.ld}`, `make_version=${lock.executables.make}`,
     '[components]', ...exactComponents, '[infrastructure]', 'D3D11VA', 'MEDIAFOUNDATION', '',
   ].join('\n'));
+}
+
+async function readToolchainLock() {
+  const bytes = await readFile(join(root, 'third_party', 'ffmpeg', 'toolchain-lock.json'));
+  let lock;
+  try { lock = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('FFmpeg toolchain lock is not valid JSON.'); }
+  validateToolchainLock(lock);
+  return { lock, bytes: canonicalToolchainLock(lock) };
+}
+
+function canonicalToolchainLock(lock) {
+  validateToolchainLock(lock);
+  const lines = [`schema=${lock.schema}`, `source=${lock.source}`];
+  for (const item of lock.packages) lines.push(`package\t${item.name}\t${item.version}\t${item.url}\t${item.sha256}\t${item.signature_url}\t${item.signature_sha256}`);
+  lines.push(`gcc=${lock.executables.gcc}`, `ld=${lock.executables.ld}`, `make=${lock.executables.make}`);
+  return Buffer.from(`${lines.join('\n')}\n`);
+}
+
+function validateToolchainLock(lock) {
+  assert(lock && Object.getPrototypeOf(lock) === Object.prototype, 'Toolchain lock must be one object.');
+  assert(Object.keys(lock).sort().join(',') === 'executables,packages,schema,source', 'Toolchain lock schema is unexpected.');
+  assert(lock.schema === 1 && lock.source === 'https://repo.msys2.org', 'Toolchain lock source/schema is invalid.');
+  assert(Array.isArray(lock.packages) && lock.packages.length > 0, 'Toolchain lock packages are missing.');
+  const seen = new Set();
+  for (const item of lock.packages) {
+    assert(item && Object.getPrototypeOf(item) === Object.prototype && Object.keys(item).sort().join(',') === 'name,sha256,signature_sha256,signature_url,url,version', 'Toolchain lock package schema is invalid.');
+    assert(/^[a-z0-9][a-z0-9+._-]*$/.test(item.name) && /^[0-9A-Za-z][0-9A-Za-z.+_~-]*$/.test(item.version) && !seen.has(item.name), 'Toolchain lock package identity is invalid or duplicated.');
+    seen.add(item.name);
+    assert(/^https:\/\/repo\.msys2\.org\/(?:msys\/x86_64|mingw\/ucrt64)\/[A-Za-z0-9+._~-]+\.pkg\.tar\.zst$/.test(item.url) && item.signature_url === `${item.url}.sig`, 'Toolchain lock package URL is invalid.');
+    assert(/^[0-9a-f]{64}$/.test(item.sha256) && /^[0-9a-f]{64}$/.test(item.signature_sha256), 'Toolchain lock package hash is invalid.');
+  }
+  const requiredPackages = ['bash','coreutils','diffutils','gawk','gcc-libs','gmp','grep','libiconv','libintl','libpcre','libreadline','make','mingw-w64-ucrt-x86_64-binutils','mingw-w64-ucrt-x86_64-crt','mingw-w64-ucrt-x86_64-gcc','mingw-w64-ucrt-x86_64-gcc-libs','mingw-w64-ucrt-x86_64-gettext-runtime','mingw-w64-ucrt-x86_64-gmp','mingw-w64-ucrt-x86_64-headers','mingw-w64-ucrt-x86_64-isl','mingw-w64-ucrt-x86_64-libiconv','mingw-w64-ucrt-x86_64-libwinpthread','mingw-w64-ucrt-x86_64-mpc','mingw-w64-ucrt-x86_64-mpfr','mingw-w64-ucrt-x86_64-tzdata','mingw-w64-ucrt-x86_64-windows-default-manifest','mingw-w64-ucrt-x86_64-winpthreads','mingw-w64-ucrt-x86_64-zlib','mingw-w64-ucrt-x86_64-zstd','mpfr','msys2-runtime','nasm','ncurses','pkgconf','sed'];
+  assert([...seen].sort().join(',') === requiredPackages.sort().join(','), 'Toolchain package closure differs from the approved exact set.');
+  assert(lock.executables && Object.getPrototypeOf(lock.executables) === Object.prototype && Object.keys(lock.executables).sort().join(',') === 'gcc,ld,make', 'Toolchain lock executable schema is invalid.');
+  for (const value of Object.values(lock.executables)) assert(typeof value === 'string' && value.length > 0 && !/[\r\n]/.test(value), 'Toolchain lock executable version is invalid.');
 }
 
 function validateComponentGate(expected, actual, manifest) {
@@ -258,6 +291,14 @@ function authenticodeContentHash(binary) {
 function assert(condition, message) { if (!condition) throw new Error(message); }
 
 async function runSelfTests() {
+  const lockFixture = JSON.parse(await readFile(join(root, 'third_party', 'ffmpeg', 'toolchain-lock.json'), 'utf8'));
+  validateToolchainLock(lockFixture);
+  const crlfFixture = JSON.parse(JSON.stringify(lockFixture, null, 2).replaceAll('\n', '\r\n'));
+  assert(canonicalToolchainLock(lockFixture).equals(canonicalToolchainLock(crlfFixture)), 'Toolchain canonical hash depends on line endings.');
+  assertThrows(() => validateToolchainLock({ ...lockFixture, extra: true }), 'toolchain lock unknown field');
+  assertThrows(() => validateToolchainLock({ ...lockFixture, packages: [...lockFixture.packages, lockFixture.packages[0]] }), 'toolchain lock duplicate package');
+  assertThrows(() => validateToolchainLock({ ...lockFixture, packages: [{ ...lockFixture.packages[0], sha256: 'bad' }, ...lockFixture.packages.slice(1)] }), 'toolchain lock package hash');
+  assertThrows(() => validateToolchainLock({ ...lockFixture, packages: lockFixture.packages.slice(1) }), 'toolchain lock missing closure package');
   const body = Buffer.from('MZ-zip-test');
   const valid = testZip(body);
   assert(readSingleFileZip(valid, 'ffmpeg.exe', body.length).equals(body), 'valid strict ZIP self-test failed.');

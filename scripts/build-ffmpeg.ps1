@@ -1,7 +1,11 @@
 [CmdletBinding()]
 param(
     [string]$Msys2Root = 'C:\msys64',
-    [int]$Jobs = [Environment]::ProcessorCount
+    [string]$ToolchainRoot = '',
+    [int]$Jobs = [Environment]::ProcessorCount,
+    [switch]$InstallPinnedToolchain,
+    [switch]$VerifyToolchainOnly,
+    [switch]$SelfTest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,19 +27,20 @@ $DownloadRoot = Join-Path $DistRoot 'ffmpeg-source'
 $SourceRoot = Join-Path $DownloadRoot "ffmpeg-$Version"
 $OutputRoot = Join-Path $DistRoot 'ffmpeg'
 $FlagsPath = Join-Path $RepositoryRoot 'third_party\ffmpeg\configure.flags'
+$ToolchainLockPath = Join-Path $RepositoryRoot 'third_party\ffmpeg\toolchain-lock.json'
+$ToolchainCache = Join-Path $DistRoot 'msys2-toolchain'
+$ToolchainRoot = if ($ToolchainRoot) { [IO.Path]::GetFullPath($ToolchainRoot) } else { Join-Path $DistRoot 'msys2-toolchain-root' }
 $ArchivePath = Join-Path $DownloadRoot $ArchiveName
 $SignaturePath = "$ArchivePath.asc"
 $PublicKeyPath = Join-Path $DownloadRoot 'ffmpeg-devel.asc'
 $GpgHome = Join-Path $DownloadRoot 'gnupg'
-$Bash = Join-Path $Msys2Root 'usr\bin\bash.exe'
+$HostBash = Join-Path $Msys2Root 'usr\bin\bash.exe'
+$Bash = $HostBash
 $GpgCommand = Get-Command gpg.exe -ErrorAction SilentlyContinue
 $Gpg = if ($null -ne $GpgCommand) { $GpgCommand.Source } else { Join-Path $Msys2Root 'usr\bin\gpg.exe' }
 
-if (-not (Test-Path -LiteralPath $Bash)) {
+if (-not (Test-Path -LiteralPath $HostBash)) {
     throw "MSYS2 was not found at $Msys2Root. Install MSYS2 with the UCRT64 toolchain or pass -Msys2Root."
-}
-if (-not (Test-Path -LiteralPath (Join-Path $Msys2Root 'ucrt64\bin\gcc.exe'))) {
-    throw 'The MSYS2 UCRT64 GCC toolchain is missing. Install mingw-w64-ucrt-x86_64-toolchain, make, diffutils, and pkgconf.'
 }
 if (-not (Test-Path -LiteralPath $Gpg)) { throw 'GPG is required to verify the FFmpeg release signature.' }
 if ($Jobs -lt 1) { throw '-Jobs must be at least 1.' }
@@ -50,6 +55,22 @@ function Get-Sha256 {
         $Algorithm.Dispose()
         $Stream.Dispose()
     }
+}
+
+function Get-ToolchainLockCanonicalSha256 {
+    param([object]$Lock)
+    $Lines = [Collections.Generic.List[string]]::new()
+    $Lines.Add("schema=$($Lock.schema)")
+    $Lines.Add("source=$($Lock.source)")
+    foreach ($Package in @($Lock.packages)) {
+        $Lines.Add("package`t$($Package.name)`t$($Package.version)`t$($Package.url)`t$($Package.sha256)`t$($Package.signature_url)`t$($Package.signature_sha256)")
+    }
+    $Lines.Add("gcc=$($Lock.executables.gcc)")
+    $Lines.Add("ld=$($Lock.executables.ld)")
+    $Lines.Add("make=$($Lock.executables.make)")
+    $Bytes = [Text.Encoding]::UTF8.GetBytes(($Lines -join "`n") + "`n")
+    $Algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($Algorithm.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant() } finally { $Algorithm.Dispose() }
 }
 
 function Get-PEAuthenticodeContentSha256 {
@@ -75,7 +96,7 @@ function Get-PEAuthenticodeContentSha256 {
     try { return ([BitConverter]::ToString($Algorithm.ComputeHash($Normalized))).Replace('-', '').ToLowerInvariant() } finally { $Algorithm.Dispose() }
 }
 
-New-Item -ItemType Directory -Force -Path $DownloadRoot, $OutputRoot, $GpgHome | Out-Null
+New-Item -ItemType Directory -Force -Path $DownloadRoot, $OutputRoot, $GpgHome, $ToolchainCache | Out-Null
 function Invoke-PinnedDownload {
     param([string[]]$Uris, [string]$Destination)
     $Partial = "$Destination.download"
@@ -104,6 +125,116 @@ function Invoke-PinnedDownload {
     Move-Item -LiteralPath $Partial -Destination $Destination -Force
 }
 
+function ConvertTo-MsysPath {
+    param([string]$Path, [string]$BashPath = $Bash)
+    $env:GIFT_PANEL_PATH_TO_CONVERT = $Path
+    try {
+        $Converted = & $BashPath --noprofile --norc -c 'export PATH=/usr/bin; cygpath -u "$GIFT_PANEL_PATH_TO_CONVERT"'
+        if ($LASTEXITCODE -ne 0 -or -not $Converted) { throw "Could not convert path for MSYS2: $Path" }
+        return $Converted.Trim()
+    } finally {
+        Remove-Item Env:GIFT_PANEL_PATH_TO_CONVERT -ErrorAction SilentlyContinue
+    }
+}
+
+function Assert-ExactProperties {
+    param([object]$Value, [string[]]$Names, [string]$Label)
+    $Actual = @($Value.PSObject.Properties.Name | Sort-Object)
+    $Expected = @($Names | Sort-Object)
+    if (($Actual -join ',') -ne ($Expected -join ',')) { throw "$Label has an unexpected schema." }
+}
+
+if (-not (Test-Path -LiteralPath $ToolchainLockPath)) { throw 'The committed FFmpeg toolchain lock is missing.' }
+try { $ToolchainLock = Get-Content -LiteralPath $ToolchainLockPath -Raw | ConvertFrom-Json -ErrorAction Stop } catch { throw 'The FFmpeg toolchain lock is not valid JSON.' }
+Assert-ExactProperties $ToolchainLock @('schema', 'source', 'packages', 'executables') 'Toolchain lock'
+if ($ToolchainLock.schema -ne 1 -or $ToolchainLock.source -ne 'https://repo.msys2.org' -or @($ToolchainLock.packages).Count -eq 0) { throw 'The FFmpeg toolchain lock source/schema is invalid.' }
+Assert-ExactProperties $ToolchainLock.executables @('gcc', 'ld', 'make') 'Toolchain executable lock'
+$SeenPackages = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($Package in @($ToolchainLock.packages)) {
+    Assert-ExactProperties $Package @('name', 'version', 'url', 'sha256', 'signature_url', 'signature_sha256') 'Toolchain package lock'
+    if ($Package.name -notmatch '^[a-z0-9][a-z0-9+._-]*$' -or $Package.version -notmatch '^[0-9A-Za-z][0-9A-Za-z.+_~-]*$' -or -not $SeenPackages.Add([string]$Package.name)) { throw 'Toolchain package identity is invalid or duplicated.' }
+    if ($Package.url -notmatch '^https://repo\.msys2\.org/(?:msys/x86_64|mingw/ucrt64)/[A-Za-z0-9+._~-]+\.pkg\.tar\.zst$' -or $Package.signature_url -ne "$($Package.url).sig") { throw 'Toolchain package URL is invalid.' }
+    if ($Package.sha256 -notmatch '^[0-9a-f]{64}$' -or $Package.signature_sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Toolchain package hash is invalid.' }
+}
+$RequiredToolchainPackages = @('bash','coreutils','diffutils','gawk','gcc-libs','gmp','grep','libiconv','libintl','libpcre','libreadline','make','mingw-w64-ucrt-x86_64-binutils','mingw-w64-ucrt-x86_64-crt','mingw-w64-ucrt-x86_64-gcc','mingw-w64-ucrt-x86_64-gcc-libs','mingw-w64-ucrt-x86_64-gettext-runtime','mingw-w64-ucrt-x86_64-gmp','mingw-w64-ucrt-x86_64-headers','mingw-w64-ucrt-x86_64-isl','mingw-w64-ucrt-x86_64-libiconv','mingw-w64-ucrt-x86_64-libwinpthread','mingw-w64-ucrt-x86_64-mpc','mingw-w64-ucrt-x86_64-mpfr','mingw-w64-ucrt-x86_64-tzdata','mingw-w64-ucrt-x86_64-windows-default-manifest','mingw-w64-ucrt-x86_64-winpthreads','mingw-w64-ucrt-x86_64-zlib','mingw-w64-ucrt-x86_64-zstd','mpfr','msys2-runtime','nasm','ncurses','pkgconf','sed')
+if ((@($SeenPackages | Sort-Object) -join ',') -ne (@($RequiredToolchainPackages | Sort-Object) -join ',')) { throw 'Toolchain package closure differs from the approved exact set.' }
+$ExpectedToolchainPath = Join-Path $ToolchainCache 'expected-packages.txt'
+$ExpectedToolchain = @($ToolchainLock.packages | ForEach-Object { "$($_.name)=$($_.version)" } | Sort-Object)
+[IO.File]::WriteAllText($ExpectedToolchainPath, ($ExpectedToolchain -join "`n") + "`n", (New-Object Text.UTF8Encoding($false)))
+function Assert-ExactToolchainPackageSet {
+    param([string[]]$Expected, [string[]]$Actual)
+    if ((($Expected | Sort-Object) -join "`n") -ne (($Actual | Sort-Object) -join "`n")) { throw 'Installed isolated MSYS2 package database differs from the committed lock.' }
+}
+if ($SelfTest) {
+    $Extra = @($ExpectedToolchain) + 'unexpected-package=1.0-1'
+    $Rejected = $false
+    try { Assert-ExactToolchainPackageSet $ExpectedToolchain $Extra } catch { $Rejected = $true }
+    if (-not $Rejected) { throw 'Extra-package adversary was not detected.' }
+    $CanonicalLF = Get-ToolchainLockCanonicalSha256 $ToolchainLock
+    $CanonicalCRLF = Get-ToolchainLockCanonicalSha256 ((Get-Content -LiteralPath $ToolchainLockPath -Raw).Replace("`n", "`r`n") | ConvertFrom-Json)
+    if ($CanonicalLF -ne $CanonicalCRLF) { throw 'Toolchain lock canonical hash depends on line endings.' }
+    Write-Host 'FFmpeg build toolchain self-tests passed'
+    exit 0
+}
+
+if ($InstallPinnedToolchain) {
+    $PinnedPackagePaths = @()
+    foreach ($Package in @($ToolchainLock.packages)) {
+        $PackageName = [IO.Path]::GetFileName(([Uri]$Package.url).AbsolutePath)
+        $PackagePath = Join-Path $ToolchainCache $PackageName
+        $SignatureFile = "$PackagePath.sig"
+        if (-not (Test-Path -LiteralPath $PackagePath) -or (Get-Sha256 $PackagePath) -ne $Package.sha256) { Invoke-PinnedDownload -Uris @([string]$Package.url) -Destination $PackagePath }
+        if (-not (Test-Path -LiteralPath $SignatureFile) -or (Get-Sha256 $SignatureFile) -ne $Package.signature_sha256) { Invoke-PinnedDownload -Uris @([string]$Package.signature_url) -Destination $SignatureFile }
+        if ((Get-Sha256 $PackagePath) -ne $Package.sha256 -or (Get-Sha256 $SignatureFile) -ne $Package.signature_sha256) { throw "Pinned MSYS2 package hash mismatch: $PackageName" }
+        $env:FFMPEG_PINNED_PACKAGE = ConvertTo-MsysPath $PackagePath
+        $env:FFMPEG_PINNED_SIGNATURE = ConvertTo-MsysPath $SignatureFile
+        try {
+            $SignatureStatus = @(& $Bash -lc 'gpg --batch --homedir /etc/pacman.d/gnupg --status-fd 1 --verify "$FFMPEG_PINNED_SIGNATURE" "$FFMPEG_PINNED_PACKAGE" 2>/dev/null')
+            if ($LASTEXITCODE -ne 0 -or -not ($SignatureStatus -match '^\[GNUPG:\] VALIDSIG ') -or -not ($SignatureStatus -match '^\[GNUPG:\] TRUST_(?:FULLY|ULTIMATE) ')) { throw "Pinned MSYS2 package signature failed: $PackageName" }
+        } finally { Remove-Item Env:FFMPEG_PINNED_PACKAGE, Env:FFMPEG_PINNED_SIGNATURE -ErrorAction SilentlyContinue }
+        $PinnedPackagePaths += ConvertTo-MsysPath $PackagePath
+    }
+    $ResolvedToolchainRoot = [IO.Path]::GetFullPath($ToolchainRoot)
+    $ResolvedDistRoot = [IO.Path]::GetFullPath($DistRoot) + [IO.Path]::DirectorySeparatorChar
+    if (-not $ResolvedToolchainRoot.StartsWith($ResolvedDistRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'The isolated toolchain root must stay beneath dist.' }
+    if (Test-Path -LiteralPath $ResolvedToolchainRoot) { Remove-Item -LiteralPath $ResolvedToolchainRoot -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $ResolvedToolchainRoot | Out-Null
+    $env:FFMPEG_PINNED_PACKAGES = $PinnedPackagePaths -join "`n"
+    $env:FFMPEG_PINNED_ROOT = ConvertTo-MsysPath $ResolvedToolchainRoot
+    $InstallScript = Join-Path $ToolchainCache 'install-toolchain.sh'
+    [IO.File]::WriteAllText($InstallScript, "set -euo pipefail`nexport PATH=/usr/bin`nmapfile -t packages <<< `"`$FFMPEG_PINNED_PACKAGES`"`nmkdir -p `"`$FFMPEG_PINNED_ROOT/tmp`" `"`$FFMPEG_PINNED_ROOT/var/lib/pacman/local`" `"`$FFMPEG_PINNED_ROOT/var/cache/pacman/pkg`" `"`$FFMPEG_PINNED_ROOT/var/log`"`npacman --root `"`$FFMPEG_PINNED_ROOT`" --dbpath `"`$FFMPEG_PINNED_ROOT/var/lib/pacman`" --cachedir `"`$FFMPEG_PINNED_ROOT/var/cache/pacman/pkg`" --logfile `"`$FFMPEG_PINNED_ROOT/var/log/pacman.log`" -U --noconfirm --nodeps --noscriptlet `"`${packages[@]}`"`n", (New-Object Text.UTF8Encoding($false)))
+    try { & $HostBash (ConvertTo-MsysPath $InstallScript); if ($LASTEXITCODE -ne 0) { throw 'Pinned isolated MSYS2 toolchain installation failed.' } } finally { Remove-Item Env:FFMPEG_PINNED_PACKAGES, Env:FFMPEG_PINNED_ROOT -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $InstallScript -Force -ErrorAction SilentlyContinue }
+}
+
+$Bash = Join-Path $ToolchainRoot 'usr\bin\bash.exe'
+if (-not (Test-Path -LiteralPath $Bash)) { throw "The isolated pinned toolchain is missing at $ToolchainRoot. Run with -InstallPinnedToolchain." }
+
+$env:FFMPEG_TOOLCHAIN_EXPECTED_FILE = ConvertTo-MsysPath $ExpectedToolchainPath $HostBash
+$env:FFMPEG_PINNED_ROOT = ConvertTo-MsysPath $ToolchainRoot $HostBash
+$env:FFMPEG_EXPECTED_GCC_VERSION = [string]$ToolchainLock.executables.gcc
+$env:FFMPEG_EXPECTED_LD_VERSION = [string]$ToolchainLock.executables.ld
+$env:FFMPEG_EXPECTED_MAKE_VERSION = [string]$ToolchainLock.executables.make
+$ToolchainVerifyScript = Join-Path $ToolchainCache 'verify-toolchain.sh'
+$ToolchainExecutableVerifyCommand = @'
+set -euo pipefail
+export PATH="/ucrt64/bin:/usr/bin"
+test "$(gcc --version | head -n1)" = "$FFMPEG_EXPECTED_GCC_VERSION"
+test "$(ld --version | head -n1)" = "$FFMPEG_EXPECTED_LD_VERSION"
+test "$(make --version | head -n1)" = "$FFMPEG_EXPECTED_MAKE_VERSION"
+'@
+[IO.File]::WriteAllText($ToolchainVerifyScript, $ToolchainExecutableVerifyCommand, (New-Object Text.UTF8Encoding($false)))
+try {
+    $ActualToolchain = @(& $HostBash --noprofile --norc -c 'export PATH=/usr/bin; pacman --root "$FFMPEG_PINNED_ROOT" --dbpath "$FFMPEG_PINNED_ROOT/var/lib/pacman" -Q 2>/dev/null' | ForEach-Object { $_ -replace ' ', '=' })
+    if ($LASTEXITCODE -ne 0) { throw 'Could not query the isolated MSYS2 package database.' }
+    Assert-ExactToolchainPackageSet $ExpectedToolchain $ActualToolchain
+    & $Bash --noprofile --norc (ConvertTo-MsysPath $ToolchainVerifyScript)
+    if ($LASTEXITCODE -ne 0) { throw 'Installed isolated MSYS2 executables differ from the committed lock.' }
+} finally {
+    Remove-Item Env:FFMPEG_TOOLCHAIN_EXPECTED_FILE, Env:FFMPEG_PINNED_ROOT, Env:FFMPEG_EXPECTED_GCC_VERSION, Env:FFMPEG_EXPECTED_LD_VERSION, Env:FFMPEG_EXPECTED_MAKE_VERSION -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ToolchainVerifyScript -Force -ErrorAction SilentlyContinue
+}
+if ($VerifyToolchainOnly) { Write-Host "Verified pinned MSYS2 toolchain from $ToolchainLockPath"; exit 0 }
+
 if (-not (Test-Path -LiteralPath $ArchivePath) -or (Get-Sha256 -Path $ArchivePath) -ne $ArchiveSha256) {
     Invoke-PinnedDownload -Uris @(
         "$ReleaseBase/$ArchiveName",
@@ -124,22 +255,10 @@ if ($ActualHash -ne $ArchiveSha256) {
     throw "FFmpeg source SHA-256 mismatch: got $ActualHash, expected $ArchiveSha256."
 }
 
-function ConvertTo-MsysPath {
-    param([string]$Path)
-    $env:GIFT_PANEL_PATH_TO_CONVERT = $Path
-    try {
-        $Converted = & $Bash -lc 'cygpath -u "$GIFT_PANEL_PATH_TO_CONVERT"'
-        if ($LASTEXITCODE -ne 0 -or -not $Converted) { throw "Could not convert path for MSYS2: $Path" }
-        return $Converted.Trim()
-    } finally {
-        Remove-Item Env:GIFT_PANEL_PATH_TO_CONVERT -ErrorAction SilentlyContinue
-    }
-}
-
-$GpgHomeArgument = ConvertTo-MsysPath -Path $GpgHome
-$PublicKeyArgument = ConvertTo-MsysPath -Path $PublicKeyPath
-$SignatureArgument = ConvertTo-MsysPath -Path $SignaturePath
-$ArchiveArgument = ConvertTo-MsysPath -Path $ArchivePath
+$GpgHomeArgument = ConvertTo-MsysPath -Path $GpgHome -BashPath $HostBash
+$PublicKeyArgument = ConvertTo-MsysPath -Path $PublicKeyPath -BashPath $HostBash
+$SignatureArgument = ConvertTo-MsysPath -Path $SignaturePath -BashPath $HostBash
+$ArchiveArgument = ConvertTo-MsysPath -Path $ArchivePath -BashPath $HostBash
 & $Gpg --batch --homedir $GpgHomeArgument --import $PublicKeyArgument | Out-Host
 if ($LASTEXITCODE -ne 0) { throw 'Failed to import the official FFmpeg signing key.' }
 $Fingerprints = & $Gpg --batch --homedir $GpgHomeArgument --with-colons --fingerprint
@@ -182,38 +301,23 @@ $env:FFMPEG_BUILD_JOBS = [string]$Jobs
 $env:FFMPEG_SOURCE_DATE_EPOCH = $SourceDateEpoch
 $env:FFMPEG_SOURCE_SHA256 = $ArchiveSha256
 $env:FFMPEG_VERSION = $Version
+$env:FFMPEG_TOOLCHAIN_EXPECTED_FILE = $ExpectedToolchainPath
+$env:FFMPEG_TOOLCHAIN_LOCK_SHA256 = Get-ToolchainLockCanonicalSha256 $ToolchainLock
+$env:FFMPEG_EXPECTED_GCC_VERSION = [string]$ToolchainLock.executables.gcc
+$env:FFMPEG_EXPECTED_LD_VERSION = [string]$ToolchainLock.executables.ld
+$env:FFMPEG_EXPECTED_MAKE_VERSION = [string]$ToolchainLock.executables.make
 $BuildCommand = @'
 set -euo pipefail
-export PATH="/ucrt64/bin:/usr/bin:$PATH"
+export PATH="/ucrt64/bin:/usr/bin"
 export SOURCE_DATE_EPOCH="$FFMPEG_SOURCE_DATE_EPOCH"
-expected_toolchain=$(cat <<'EOF'
-diffutils=3.12-1
-make=4.4.1-3
-mingw-w64-ucrt-x86_64-binutils=2.47-3
-mingw-w64-ucrt-x86_64-crt=14.0.0.r262.g5ea8e9fac-1
-mingw-w64-ucrt-x86_64-gcc=16.2.0-3
-mingw-w64-ucrt-x86_64-gcc-libs=16.2.0-3
-mingw-w64-ucrt-x86_64-headers=14.0.0.r262.g5ea8e9fac-1
-mingw-w64-ucrt-x86_64-libwinpthread=14.0.0.r262.g5ea8e9fac-1
-mingw-w64-ucrt-x86_64-winpthreads=14.0.0.r262.g5ea8e9fac-1
-mingw-w64-ucrt-x86_64-zlib=1.3.2-2
-nasm=2.16.03-1
-pkgconf=3.0.5-1
-EOF
-)
-expected_toolchain=$(printf '%s\n' "$expected_toolchain" | sort)
-toolchain_packages=$(printf '%s\n' "$expected_toolchain" | cut -d= -f1)
-actual_toolchain=$(pacman -Q $toolchain_packages | sed 's/ /=/' | sort)
-if ! diff -u <(printf '%s\n' "$expected_toolchain") <(printf '%s\n' "$actual_toolchain"); then
-  echo 'MSYS2 build package versions differ from the pinned toolchain.' >&2
-  exit 1
-fi
+expected_toolchain=$(LC_ALL=C sort "$(cygpath -u "$FFMPEG_TOOLCHAIN_EXPECTED_FILE")")
+actual_toolchain="$expected_toolchain"
 gcc_version=$(gcc --version | head -n1)
 ld_version=$(ld --version | head -n1)
 make_version=$(make --version | head -n1)
-test "$gcc_version" = 'gcc.exe (Rev3, Built by MSYS2 project) 16.2.0'
-test "$ld_version" = 'GNU ld (GNU Binutils) 2.47.20260726'
-test "$make_version" = 'GNU Make 4.4.1'
+test "$gcc_version" = "$FFMPEG_EXPECTED_GCC_VERSION"
+test "$ld_version" = "$FFMPEG_EXPECTED_LD_VERSION"
+test "$make_version" = "$FFMPEG_EXPECTED_MAKE_VERSION"
 source_dir="$(cygpath -u "$FFMPEG_SOURCE_DIR")"
 output_dir="$(cygpath -u "$FFMPEG_OUTPUT_DIR")"
 flags_file="$(cygpath -u "$FFMPEG_FLAGS_FILE")"
@@ -318,6 +422,7 @@ binary_size=$(wc -c < "$output_dir/ffmpeg.exe" | tr -d '[:space:]')
   printf 'configure_sha256=%s\n' "$configure_sha"
   printf 'binary_sha256=%s\n' "$binary_sha"
   printf 'binary_size=%s\n' "$binary_size"
+  printf 'toolchain_lock_sha256=%s\n' "$FFMPEG_TOOLCHAIN_LOCK_SHA256"
   printf '[toolchain]\n%s\n' "$actual_toolchain"
   printf 'gcc_version=%s\n' "$gcc_version"
   printf 'ld_version=%s\n' "$ld_version"
@@ -334,7 +439,7 @@ try {
     & $Bash $BuildScriptArgument
     if ($LASTEXITCODE -ne 0) { throw "FFmpeg build failed with exit code $LASTEXITCODE." }
 } finally {
-    Remove-Item Env:FFMPEG_SOURCE_DIR, Env:FFMPEG_OUTPUT_DIR, Env:FFMPEG_FLAGS_FILE, Env:FFMPEG_BUILD_JOBS, Env:FFMPEG_SOURCE_DATE_EPOCH, Env:FFMPEG_SOURCE_SHA256, Env:FFMPEG_VERSION -ErrorAction SilentlyContinue
+    Remove-Item Env:FFMPEG_SOURCE_DIR, Env:FFMPEG_OUTPUT_DIR, Env:FFMPEG_FLAGS_FILE, Env:FFMPEG_BUILD_JOBS, Env:FFMPEG_SOURCE_DATE_EPOCH, Env:FFMPEG_SOURCE_SHA256, Env:FFMPEG_VERSION, Env:FFMPEG_TOOLCHAIN_EXPECTED_FILE, Env:FFMPEG_TOOLCHAIN_LOCK_SHA256, Env:FFMPEG_EXPECTED_GCC_VERSION, Env:FFMPEG_EXPECTED_LD_VERSION, Env:FFMPEG_EXPECTED_MAKE_VERSION -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $BuildScriptPath -Force -ErrorAction SilentlyContinue
 }
 
