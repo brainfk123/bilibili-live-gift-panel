@@ -201,6 +201,12 @@ func main() {
 		showStartupError(err.Error())
 		return
 	}
+	inbox, err := openGiftInbox(filepath.Dir(store.path))
+	if err != nil {
+		showStartupError(fmt.Sprintf("礼物收件箱初始化失败：%v", err))
+		return
+	}
+	defer inbox.Close()
 	diagnostics, diagnosticErr := newDiagnosticLogger(filepath.Join(filepath.Dir(store.path), "runtime.log"))
 	if diagnosticErr == nil {
 		diagnostics.Info("service_start", "version", appVersion)
@@ -254,6 +260,7 @@ func main() {
 	background := newBackgroundRuntime(store, func() giftEventSource {
 		return &bilibiliGiftSource{sessionProvider: login.Session}
 	}, notifications)
+	background.inbox = inbox
 	background.setDiagnosticLogger(diagnostics)
 	store.setOnChange(background.NotifyConfigChanged)
 	store.setOnTimerChange(background.NotifyTimerConfigChanged)

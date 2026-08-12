@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,6 +18,312 @@ import (
 type fakeGiftSource struct {
 	started chan string
 	events  chan giftEvent
+}
+
+func TestBackgroundRuntimeReplaysDurableInboxOnce(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
+	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	firstInbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRuntime := newBackgroundRuntime(store, nil)
+	firstRuntime.inbox = firstInbox
+	firstRuntime.acceptGift(context.Background(), "room", "SEND_GIFT", giftEvent{
+		GiftID: 1, GiftName: "礼物", Num: 1, Timestamp: time.Now().Unix(), Rnd: "restart-rnd",
+	})
+	if health := firstInbox.Health(); health.PendingCount != 1 {
+		t.Fatalf("pending before restart = %d, want 1", health.PendingCount)
+	}
+	canceledContext, cancelFirst := context.WithCancel(context.Background())
+	cancelFirst()
+	firstRuntime.Run(canceledContext)
+	if health := firstInbox.Health(); health.PendingCount != 1 {
+		t.Fatalf("pending after cancellation before consumption = %d, want 1", health.PendingCount)
+	}
+
+	secondInbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRuntime := newBackgroundRuntime(store, nil)
+	secondRuntime.inbox = secondInbox
+	cancelSecond, secondDone := startBackgroundRuntimeForTest(secondRuntime)
+	waitForInboxPendingCount(t, secondInbox, 0)
+	cancelSecond()
+	<-secondDone
+	assertRuntimeAttributeValue(t, store, "积分", 1)
+
+	thirdInbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thirdRuntime := newBackgroundRuntime(store, nil)
+	thirdRuntime.inbox = thirdInbox
+	cancelThird, thirdDone := startBackgroundRuntimeForTest(thirdRuntime)
+	waitForInboxPendingCount(t, thirdInbox, 0)
+	cancelThird()
+	<-thirdDone
+	assertRuntimeAttributeValue(t, store, "积分", 1)
+
+	duplicateInbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateRuntime := newBackgroundRuntime(store, nil)
+	duplicateRuntime.inbox = duplicateInbox
+	duplicateRuntime.inboxRetryDelay = time.Hour
+	for range 2 {
+		duplicateRuntime.acceptGift(context.Background(), "room", "SEND_GIFT", giftEvent{
+			GiftID: 1, GiftName: "礼物", Num: 1, Timestamp: time.Now().Unix(), Rnd: "durable-duplicate-rnd",
+		})
+	}
+	writes := 0
+	store.writeAtomically = func(path string, data []byte) error {
+		if filepath.Base(path) == "events.log" {
+			writes++
+			if writes == 2 {
+				return errors.New("injected duplicate settlement failure")
+			}
+		}
+		return writeFileAtomically(path, data)
+	}
+	cancelDuplicate, duplicateDone := startBackgroundRuntimeForTest(duplicateRuntime)
+	waitForRuntimeError(t, duplicateRuntime, "injected duplicate settlement failure")
+	cancelDuplicate()
+	<-duplicateDone
+	if health := duplicateInbox.Health(); health.PendingCount != 1 {
+		t.Fatalf("pending after prepared duplicate failure = %d, want 1", health.PendingCount)
+	}
+
+	recoveredStore := &configStore{path: filepath.Join(root, "config.json")}
+	recoveredInbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredRuntime := newBackgroundRuntime(recoveredStore, nil)
+	recoveredRuntime.inbox = recoveredInbox
+	cancelRecovered, recoveredDone := startBackgroundRuntimeForTest(recoveredRuntime)
+	waitForInboxPendingCount(t, recoveredInbox, 0)
+	cancelRecovered()
+	<-recoveredDone
+	assertRuntimeAttributeValue(t, recoveredStore, "积分", 2)
+	recoveredState, err := recoveredStore.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recoveredState.AppliedIngressIDs) != 3 {
+		t.Fatalf("applied ingestion IDs = %d, want 3", len(recoveredState.AppliedIngressIDs))
+	}
+	if _, exists := recoveredState.RecentSourceGiftKeys["durable-duplicate-rnd"]; !exists {
+		t.Fatalf("recent source keys = %#v", recoveredState.RecentSourceGiftKeys)
+	}
+}
+
+type blockingUserProfileResolver struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (resolver *blockingUserProfileResolver) Resolve(_ context.Context, uid int64) (userProfile, error) {
+	resolver.once.Do(func() { close(resolver.started) })
+	<-resolver.release
+	return userProfile{UID: uid, Name: "完整昵称"}, nil
+}
+
+func TestBackgroundRuntimeIngressDoesNotWaitForProfile(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
+	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.inbox = inbox
+	resolver := &blockingUserProfileResolver{started: make(chan struct{}), release: make(chan struct{})}
+	runtime.profileResolver = resolver
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	runtime.acceptGift(context.Background(), "room", "SEND_GIFT", giftEvent{
+		GiftID: 1, GiftName: "礼物", Num: 1, UID: 42, Uname: "字***", Timestamp: time.Now().Unix(), Rnd: "slow-000",
+	})
+	select {
+	case <-resolver.started:
+	case <-time.After(time.Second):
+		t.Fatal("profile resolver did not block the inbox consumer")
+	}
+
+	const additional = 300
+	accepted := make(chan struct{})
+	go func() {
+		defer close(accepted)
+		for index := 1; index <= additional; index++ {
+			runtime.acceptGift(context.Background(), "room", "SEND_GIFT", giftEvent{
+				GiftID: 1, GiftName: "礼物", Num: 1, Timestamp: time.Now().Unix(), Rnd: "slow-" + leftPadThree(index),
+			})
+		}
+	}()
+	select {
+	case <-accepted:
+	case <-time.After(30 * time.Second):
+		t.Fatal("durable gift acceptance waited for the blocked profile resolver")
+	}
+	if health := inbox.Health(); health.PendingCount != additional+1 {
+		t.Fatalf("pending while profile is blocked = %d, want %d", health.PendingCount, additional+1)
+	}
+
+	close(resolver.release)
+	waitForInboxPendingCount(t, inbox, 0)
+	assertRuntimeAttributeValue(t, store, "积分", additional+1)
+	updated, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Log) == 0 || updated.Log[0].EventID != "slow-300:积分" {
+		t.Fatalf("newest ordered log entry = %#v", updated.Log)
+	}
+}
+
+type capacityFailureInbox struct{}
+
+func (*capacityFailureInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
+	return giftInboxRecord{}, errGiftInboxCapacity
+}
+
+func (*capacityFailureInbox) Next() (giftInboxRecord, bool, error) {
+	return giftInboxRecord{}, false, nil
+}
+
+func (*capacityFailureInbox) Acknowledge(string) error { return nil }
+func (*capacityFailureInbox) Release(string) error     { return nil }
+func (*capacityFailureInbox) Close() error             { return nil }
+func (*capacityFailureInbox) Health() giftInboxHealth  { return giftInboxHealth{CapacityError: true} }
+
+func TestBackgroundRuntimeReportsInboxCapacityWithoutVolatileApply(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	state := defaultAppState()
+	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
+	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.inbox = &capacityFailureInbox{}
+
+	runtime.acceptGift(context.Background(), "room", "SEND_GIFT", giftEvent{GiftID: 1, GiftName: "礼物", Num: 1})
+
+	if got := runtime.Status().LastError; got != errGiftInboxCapacity.Error() {
+		t.Fatalf("runtime error = %q, want %q", got, errGiftInboxCapacity.Error())
+	}
+	assertRuntimeAttributeValue(t, store, "积分", 0)
+}
+
+func TestBackgroundRuntimeTransactionRecoveryFailurePreservesInboxOrder(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
+	state.Rules = []giftRule{{ID: "r1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range 2 {
+		if _, err := inbox.Accept("room", "SEND_GIFT", giftEvent{
+			GiftID: 1, GiftName: "礼物", Num: 1, Timestamp: time.Now().Unix(), Rnd: "blocked-" + leftPadThree(index),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(store.stateTransactionPath(), []byte("not-json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.inbox = inbox
+	runtime.inboxRetryDelay = time.Hour
+	cancel, done := startBackgroundRuntimeForTest(runtime)
+	waitForRuntimeError(t, runtime, "读取状态事务失败")
+	cancel()
+	<-done
+
+	if health := inbox.Health(); health.PendingCount != 2 {
+		t.Fatalf("pending after transaction recovery failure = %d, want 2", health.PendingCount)
+	}
+	if err := os.Remove(store.stateTransactionPath()); err != nil {
+		t.Fatal(err)
+	}
+	assertRuntimeAttributeValue(t, &configStore{path: filepath.Join(root, "config.json")}, "积分", 0)
+}
+
+func leftPadThree(value int) string {
+	return fmt.Sprintf("%03d", value)
+}
+
+func startBackgroundRuntimeForTest(runtime *backgroundRuntime) (context.CancelFunc, <-chan struct{}) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runtime.Run(ctx)
+	}()
+	return cancel, done
+}
+
+func waitForInboxPendingCount(t *testing.T, inbox runtimeGiftInbox, want int) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if inbox.Health().PendingCount == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("pending count = %d, want %d", inbox.Health().PendingCount, want)
+}
+
+func waitForRuntimeError(t *testing.T, runtime *backgroundRuntime, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(runtime.Status().LastError, want) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("runtime status = %#v, want error containing %q", runtime.Status(), want)
+}
+
+func assertRuntimeAttributeValue(t *testing.T, store *configStore, name string, want float64) {
+	t.Helper()
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	attribute := state.findAttribute(name)
+	if attribute == nil || attribute.Value != want {
+		t.Fatalf("attribute %q = %#v, want %v", name, attribute, want)
+	}
 }
 
 func (f *fakeGiftSource) Run(ctx context.Context, roomID string, callbacks runtimeCallbacks) error {

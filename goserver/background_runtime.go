@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,15 @@ type runtimeStatus struct {
 	LastGiftAt int64  `json:"lastGiftAt,omitempty"`
 }
 
+type runtimeGiftInbox interface {
+	Accept(roomID, command string, gift giftEvent) (giftInboxRecord, error)
+	Next() (giftInboxRecord, bool, error)
+	Acknowledge(ingestionID string) error
+	Release(ingestionID string) error
+	Close() error
+	Health() giftInboxHealth
+}
+
 type backgroundRuntime struct {
 	store                 *configStore
 	sourceFactory         func() giftEventSource
@@ -40,7 +50,9 @@ type backgroundRuntime struct {
 	timerSchedules        map[string]timerSchedule
 	timerTicks            <-chan time.Time
 	notifications         *notificationCenter
-	giftQueue             chan giftEvent
+	inbox                 runtimeGiftInbox
+	inboxWake             chan struct{}
+	inboxRetryDelay       time.Duration
 	profileResolver       userProfileResolver
 	diagnostics           *diagnosticLogger
 }
@@ -67,7 +79,8 @@ func newBackgroundRuntime(store *configStore, sourceFactory func() giftEventSour
 		pendingGiftAnimations: map[string]giftEvent{},
 		timerSchedules:        map[string]timerSchedule{},
 		notifications:         center,
-		giftQueue:             make(chan giftEvent, 256),
+		inboxWake:             make(chan struct{}, 1),
+		inboxRetryDelay:       250 * time.Millisecond,
 		profileResolver:       newBilibiliUserProfileResolver(nil, ""),
 	}
 }
@@ -77,9 +90,32 @@ func (runtime *backgroundRuntime) setDiagnosticLogger(logger *diagnosticLogger) 
 }
 
 func (runtime *backgroundRuntime) Run(ctx context.Context) {
-	go runtime.runGiftLoop(ctx)
-	go runtime.runTimerLoop(ctx)
+	if runtime.inbox == nil {
+		if runtime.store == nil {
+			runtime.recordIngestionFailure(fmt.Errorf("gift inbox requires a config store"))
+			return
+		}
+		inbox, err := openGiftInbox(filepath.Dir(runtime.store.path))
+		if err != nil {
+			runtime.recordIngestionFailure(err)
+			return
+		}
+		runtime.inbox = inbox
+	}
+	defer runtime.inbox.Close()
+
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		runtime.runGiftLoop(ctx)
+	}()
+	go func() {
+		defer workers.Done()
+		runtime.runTimerLoop(ctx)
+	}()
 	runtime.runConnectionLoop(ctx)
+	workers.Wait()
 }
 
 func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
@@ -110,7 +146,7 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 		go func() {
 			finished <- source.Run(connectionContext, roomID, runtimeCallbacks{
 				onGift: func(gift giftEvent) {
-					runtime.enqueueGift(connectionContext, gift)
+					runtime.acceptGift(connectionContext, roomID, giftCommandCategory(gift), gift)
 				},
 				onGiftCatalog: func(gifts []roomGiftInfo) {
 					runtime.mergeBlindBoxGiftCatalog(gifts)
@@ -147,10 +183,35 @@ func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
 	}
 }
 
-func (runtime *backgroundRuntime) enqueueGift(ctx context.Context, gift giftEvent) {
+func giftCommandCategory(gift giftEvent) string {
+	if gift.GiftID == specialGiftSuperChat {
+		return "SUPER_CHAT_MESSAGE"
+	}
+	if gift.GiftID == specialGiftGuardCaptain || gift.GiftID == specialGiftGuardAdmiral || gift.GiftID == specialGiftGuardGovernor {
+		return "GUARD_BUY"
+	}
+	return "SEND_GIFT"
+}
+
+func (runtime *backgroundRuntime) acceptGift(_ context.Context, roomID, command string, gift giftEvent) {
+	if runtime.inbox == nil {
+		runtime.recordIngestionFailure(fmt.Errorf("gift inbox is not available"))
+		return
+	}
+	record, err := runtime.inbox.Accept(roomID, command, gift)
+	if err != nil {
+		runtime.recordIngestionFailure(err)
+		return
+	}
+	runtime.diagnostics.Info(
+		"gift_accepted",
+		"ingestion_id", record.IngestionID,
+		"gift_id", gift.GiftID,
+		"count", maxInt(1, gift.Num),
+	)
 	select {
-	case runtime.giftQueue <- gift:
-	case <-ctx.Done():
+	case runtime.inboxWake <- struct{}{}:
+	default:
 	}
 }
 
@@ -195,14 +256,166 @@ func findGiftIndex(gifts []giftInfo, giftID int) int {
 }
 
 func (runtime *backgroundRuntime) runGiftLoop(ctx context.Context) {
+	retryDelay := runtime.inboxRetryDelay
+	if retryDelay <= 0 {
+		retryDelay = 250 * time.Millisecond
+	}
+	retry := time.NewTicker(retryDelay)
+	defer retry.Stop()
 	for {
+		if ctx.Err() != nil {
+			return
+		}
+		processed, err := runtime.consumeAvailableInboxRecord(ctx)
+		if err != nil {
+			runtime.recordIngestionFailure(err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-retry.C:
+			}
+			continue
+		}
+		if processed {
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case gift := <-runtime.giftQueue:
-			runtime.handleGift(gift)
+		case <-runtime.inboxWake:
+		case <-retry.C:
 		}
 	}
+}
+
+func (runtime *backgroundRuntime) consumeAvailableInboxRecord(ctx context.Context) (bool, error) {
+	record, ok, err := runtime.inbox.Next()
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	if err := runtime.consumeClaimedInboxRecord(ctx, record); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (runtime *backgroundRuntime) consumeClaimedInboxRecord(ctx context.Context, record giftInboxRecord) (err error) {
+	acknowledged := false
+	defer func() {
+		if acknowledged {
+			return
+		}
+		if releaseErr := runtime.inbox.Release(record.IngestionID); releaseErr != nil && !errors.Is(releaseErr, errGiftInboxClosed) {
+			err = errors.Join(err, releaseErr)
+		}
+	}()
+	if err := runtime.processInboxRecord(ctx, record); err != nil {
+		return err
+	}
+	if err := runtime.inbox.Acknowledge(record.IngestionID); err != nil {
+		return err
+	}
+	acknowledged = true
+	return nil
+}
+
+func (runtime *backgroundRuntime) processInboxRecord(ctx context.Context, record giftInboxRecord) error {
+	gift := record.Gift
+	if gift.AnimationOnly {
+		runtime.handleGiftAnimation(gift)
+		_, _, err := runtime.store.updateStateForIngestion(record.IngestionID, func(*appState) error { return nil })
+		return err
+	}
+	gift = runtime.takePendingGiftAnimation(gift)
+	if needsUserProfile(gift) && runtime.profileResolver != nil {
+		profileContext, cancel := context.WithTimeout(ctx, 2*time.Second)
+		profile, err := runtime.profileResolver.Resolve(profileContext, gift.UID)
+		cancel()
+		if err == nil {
+			if isMaskedUsername(gift.Uname) && profile.Name != "" {
+				gift.Uname = profile.Name
+			}
+			if strings.TrimSpace(gift.Avatar) == "" && profile.Avatar != "" {
+				gift.Avatar = profile.Avatar
+			}
+		}
+	}
+
+	blindSource := "none"
+	if gift.BlindGiftID > 0 {
+		blindSource = "event"
+	}
+	blindCost := float64(0)
+	blindValue := float64(0)
+	blindPriced := false
+	sourceDuplicate := false
+	now := time.Now()
+	_, applied, err := runtime.store.updateStateForIngestion(record.IngestionID, func(state *appState) error {
+		normalizeInternalIngestionLedgers(state, now)
+		if gift.Rnd != "" {
+			last, exists := state.RecentSourceGiftKeys[gift.Rnd]
+			sourceDuplicate = exists && last > now.Add(-time.Minute).UnixMilli()
+			state.RecentSourceGiftKeys[gift.Rnd] = now.UnixMilli()
+		}
+		if sourceDuplicate {
+			return nil
+		}
+		gift = enrichBlindBoxGiftFromCatalog(*state, gift)
+		if blindSource == "none" && gift.BlindGiftID > 0 {
+			blindSource = "catalog"
+		}
+		if gift.BlindGiftID > 0 {
+			count := maxInt(1, gift.Num)
+			blindCost, blindPriced = blindBoxCost(*state, gift, count)
+			blindValue = blindBoxOutputValue(*state, gift, count)
+		}
+		applyGiftEvent(state, gift)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return nil
+	}
+	if sourceDuplicate {
+		runtime.diagnostics.Info(
+			"gift_ignored",
+			"reason", "duplicate",
+			"ingestion_id", record.IngestionID,
+			"gift_id", gift.GiftID,
+		)
+		return nil
+	}
+	runtime.mu.Lock()
+	runtime.status.LastGiftAt = time.Now().UnixMilli()
+	runtime.mu.Unlock()
+	runtime.diagnostics.Info(
+		"gift_received",
+		"ingestion_id", record.IngestionID,
+		"gift_id", gift.GiftID,
+		"gift_name", gift.GiftName,
+		"count", maxInt(1, gift.Num),
+		"viewer_uid", gift.UID,
+		"blind_parent_id", gift.BlindGiftID,
+		"blind_source", blindSource,
+		"blind_cost", blindCost,
+		"blind_value", blindValue,
+		"blind_priced", blindPriced,
+	)
+	return nil
+}
+
+func (runtime *backgroundRuntime) recordIngestionFailure(err error) {
+	if err == nil {
+		return
+	}
+	status := runtime.Status()
+	runtime.setStatus("error", status.RoomID, err)
+	runtime.diagnostics.Error("gift_ingestion_failed", "error", err)
 }
 
 func (runtime *backgroundRuntime) runTimerLoop(ctx context.Context) {
