@@ -17,13 +17,18 @@ func TestBuildGiftClipFFmpegArgsCreatesDeterministicShortAnimationTimeline(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantInput := []string{"-stream_loop", "-1", "-ignore_loop", "1", "-f", "webp_pipe", "-i", `C:\task\source.webp`}
+	wantInput := []string{"-stream_loop", "-1", "-f", "webp_pipe", "-i", `C:\task\source.webp`}
 	if len(args) < len(wantInput) || !reflect.DeepEqual(args[:len(wantInput)], wantInput) {
 		t.Fatalf("WebP input args = %#v, want prefix %#v", args, wantInput)
 	}
+	for _, arg := range args {
+		if arg == "-ignore_loop" {
+			t.Fatalf("WebP input args unexpectedly contain GIF-only -ignore_loop: %#v", args)
+		}
+	}
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
-		"-stream_loop -1", "-ignore_loop 1", "crop=960:540:101:53", "fps=30",
+		"-stream_loop -1", "crop=960:540:101:53", "fps=30",
 		"-c:v h264_mf", "-hw_encoding 1", "-rate_control pc_vbr",
 		"-b:v 500000", "-maxrate 750000", "-bufsize 1000000",
 		"-pix_fmt nv12", "-fps_mode cfr", "-movflags +faststart", "-progress pipe:1",
@@ -46,7 +51,7 @@ func TestBuildGiftClipFFmpegArgsKeepsGIFDemuxer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantInput := []string{"-stream_loop", "-1", "-ignore_loop", "1", "-f", "gif", "-i", `C:\task\source.gif`}
+	wantInput := []string{"-stream_loop", "-1", "-f", "gif", "-ignore_loop", "1", "-i", `C:\task\source.gif`}
 	if len(args) < len(wantInput) || !reflect.DeepEqual(args[:len(wantInput)], wantInput) {
 		t.Fatalf("GIF input args = %#v, want prefix %#v", args, wantInput)
 	}
