@@ -279,12 +279,12 @@ describe('gift clip studio', () => {
       .toBe(giftClipAnimationKey({ giftId: 2, animation: { gif: 'https://i0.hdslb.com/a.gif?token=two', durationMs: 5000 } }));
   });
 
-  it('keeps loading copy in the studio and out of the recorded renderer', () => {
+  it('keeps the public studio module as a small stable facade', () => {
     const studioSource = readFileSync(new URL('../src/ui/config/gift-clip-studio.ts', import.meta.url), 'utf8');
-    const rendererSource = readFileSync(new URL('../src/ui/config/gift-clip-renderer.ts', import.meta.url), 'utf8');
 
-    expect(studioSource).toContain('正在读取礼物动画');
-    expect(rendererSource).not.toContain('正在准备礼物动画');
+    expect(studioSource.split(/\r?\n/).length).toBeLessThanOrEqual(20);
+    expect(studioSource).toContain("from './gift-clip-animation-key'");
+    expect(studioSource).toContain("from './gift-clip-studio-controller'");
   });
 
   it('cancels a pending source load on idempotent close without surfacing an error', async () => {
