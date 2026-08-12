@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -106,8 +108,11 @@ func TestGiftClipHTTPRejectsUnsafeCreateRequests(t *testing.T) {
 		{name: "bad version", request: newGiftClipMultipartRequest(t, strings.Replace(validMetadata, `"version":1`, `"version":2`, 1), background, overlay), want: http.StatusBadRequest},
 		{name: "odd dimensions", request: newGiftClipMultipartRequest(t, strings.Replace(validMetadata, `"width":960`, `"width":961`, 1), validGiftClipHTTPPNG(t, 961, 540, false), validGiftClipHTTPPNG(t, 961, 540, true)), want: http.StatusBadRequest},
 		{name: "bad png", request: newGiftClipMultipartRequest(t, validMetadata, []byte("not a png"), overlay), want: http.StatusBadRequest},
+		{name: "trailing metadata value", request: newGiftClipMultipartRequest(t, validMetadata+` {}`, background, overlay), want: http.StatusBadRequest},
 		{name: "too large", request: newGiftClipMultipartRequest(t, validMetadata, background, append(overlay, bytes.Repeat([]byte("x"), 32<<20)...)), want: http.StatusRequestEntityTooLarge},
 		{name: "too large unknown part", request: newGiftClipMultipartWithPartList(t, []giftClipHTTPPart{{"extra", bytes.Repeat([]byte("x"), 32<<20)}}), want: http.StatusRequestEntityTooLarge},
+		{name: "known length oversized epilogue", request: newGiftClipMultipartWithEpilogue(t, validMetadata, background, overlay, int(maxGiftClipRequestBytes), true), want: http.StatusRequestEntityTooLarge},
+		{name: "unknown length oversized epilogue", request: newGiftClipMultipartWithEpilogue(t, validMetadata, background, overlay, int(maxGiftClipRequestBytes), false), want: http.StatusRequestEntityTooLarge},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			response := httptest.NewRecorder()
@@ -119,6 +124,23 @@ func TestGiftClipHTTPRejectsUnsafeCreateRequests(t *testing.T) {
 				t.Fatalf("leaked internal error: %s", response.Body.String())
 			}
 		})
+	}
+	exactLimit := newGiftClipMultipartWithEpilogue(t, validMetadata, background, overlay, 0, true)
+	exactPadding := int(maxGiftClipRequestBytes - exactLimit.ContentLength)
+	exactLimit = newGiftClipMultipartWithEpilogue(t, validMetadata, background, overlay, exactPadding, true)
+	exactResponse := httptest.NewRecorder()
+	api.ServeHTTP(exactResponse, exactLimit)
+	if exactResponse.Code == http.StatusRequestEntityTooLarge {
+		t.Fatalf("exactly %d byte request was rejected as oversized", maxGiftClipRequestBytes)
+	}
+}
+
+func TestGiftClipHTTPCreateErrorDoesNotLeakDetails(t *testing.T) {
+	store := &giftClipHTTPStore{createErr: errors.New(`C:\private\secret.mp4: secret-value`), jobs: map[string]giftClipJobSnapshot{}}
+	response := httptest.NewRecorder()
+	newGiftClipHTTPHandler(store).ServeHTTP(response, newGiftClipMultipartRequest(t, `{"receiptId":"receipt-1","crop":{"x":100,"y":50,"width":960,"height":540},"version":1}`, validGiftClipHTTPPNG(t, 960, 540, false), validGiftClipHTTPPNG(t, 960, 540, true)))
+	if response.Code != http.StatusInternalServerError || response.Header().Get("Content-Type") != "application/json; charset=utf-8" || strings.Contains(response.Body.String(), "secret") || strings.Contains(response.Body.String(), "private") {
+		t.Fatalf("create error status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
 	}
 }
 
@@ -150,6 +172,27 @@ func TestGiftClipHTTPVideoAndDelete(t *testing.T) {
 	if video.Code != http.StatusOK || video.Header().Get("Content-Type") != "video/mp4" || video.Header().Get("Cache-Control") != "no-store" || video.Header().Get("Content-Disposition") != `attachment; filename="gift-clip.mp4"` || video.Body.String() != "mp4-data" {
 		t.Fatalf("video status=%d headers=%v body=%q", video.Code, video.Header(), video.Body.String())
 	}
+	rangedRequest := httptest.NewRequest(http.MethodGet, "/api/gift-clips/"+giftClipHTTPTestID+"/video", nil)
+	rangedRequest.Header.Set("Range", "bytes=0-3")
+	ranged := httptest.NewRecorder()
+	api.ServeHTTP(ranged, rangedRequest)
+	if ranged.Code != http.StatusPartialContent || ranged.Body.String() != "mp4-" || ranged.Header().Get("Content-Range") != "bytes 0-3/8" || ranged.Header().Get("Accept-Ranges") != "bytes" || ranged.Header().Get("Content-Type") != "video/mp4" || ranged.Header().Get("Cache-Control") != "no-store" || ranged.Header().Get("Content-Disposition") != `attachment; filename="gift-clip.mp4"` {
+		t.Fatalf("range status=%d headers=%v body=%q", ranged.Code, ranged.Header(), ranged.Body.String())
+	}
+	unsatisfiableRequest := httptest.NewRequest(http.MethodGet, "/api/gift-clips/"+giftClipHTTPTestID+"/video", nil)
+	unsatisfiableRequest.Header.Set("Range", "bytes=100-101")
+	unsatisfiable := httptest.NewRecorder()
+	api.ServeHTTP(unsatisfiable, unsatisfiableRequest)
+	if unsatisfiable.Code != http.StatusRequestedRangeNotSatisfiable || unsatisfiable.Header().Get("Content-Range") != "bytes */8" {
+		t.Fatalf("unsatisfiable status=%d headers=%v", unsatisfiable.Code, unsatisfiable.Header())
+	}
+	nonregular := httptest.NewRecorder()
+	store.videos[giftClipHTTPTestID] = directory
+	api.ServeHTTP(nonregular, httptest.NewRequest(http.MethodGet, "/api/gift-clips/"+giftClipHTTPTestID+"/video", nil))
+	if nonregular.Code != http.StatusNotFound {
+		t.Fatalf("nonregular video status=%d body=%s", nonregular.Code, nonregular.Body.String())
+	}
+	store.videos[giftClipHTTPTestID] = videoPath
 
 	store.videos = map[string]string{}
 	unready := httptest.NewRecorder()
@@ -218,6 +261,25 @@ func newGiftClipMultipartWithPartList(t *testing.T, parts []giftClipHTTPPart) *h
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/gift-clips", body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
+	return request
+}
+
+func newGiftClipMultipartWithEpilogue(t *testing.T, metadata string, background, overlay []byte, epilogueBytes int, knownLength bool) *http.Request {
+	t.Helper()
+	request := newGiftClipMultipartRequest(t, metadata, background, overlay)
+	contentType := request.Header.Get("Content-Type")
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if epilogueBytes > 0 {
+		body = append(body, bytes.Repeat([]byte("x"), epilogueBytes)...)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/gift-clips", bytes.NewReader(body))
+	request.Header.Set("Content-Type", contentType)
+	if !knownLength {
+		request.ContentLength = -1
+	}
 	return request
 }
 

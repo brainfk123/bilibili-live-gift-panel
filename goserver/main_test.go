@@ -50,11 +50,41 @@ func TestNewMainGiftClipJobsSharesGiftMediaWithoutStartingEncoder(t *testing.T) 
 	}
 }
 
-func TestMainGiftClipShutdownOrdersRuntimeJobsServer(t *testing.T) {
+func TestMainGiftClipShutdownOrdersRuntimeJobsServerInstallOnce(t *testing.T) {
 	order := []string{}
-	runMainGiftClipShutdown(func() { order = append(order, "runtime") }, func() { order = append(order, "jobs") }, func() { order = append(order, "server") })
-	if got := strings.Join(order, ","); got != "runtime,jobs,server" {
-		t.Fatalf("shutdown order=%q", got)
+	closeCount := 0
+	closeJobs := newMainGiftClipCloser(func() {
+		closeCount++
+		order = append(order, "jobs")
+	})
+	runMainGiftClipShutdown(func() { order = append(order, "runtime") }, closeJobs, func() { order = append(order, "server") }, func() { order = append(order, "install") })
+	closeJobs() // mirrors the deferred close after normal shutdown.
+	if got := strings.Join(order, ","); got != "runtime,jobs,server,install" || closeCount != 1 {
+		t.Fatalf("shutdown order=%q closeCount=%d", got, closeCount)
+	}
+}
+
+func TestMainPendingGiftClipUpdateClosesOnceBeforeInstall(t *testing.T) {
+	order := []string{}
+	closeCount := 0
+	closeJobs := newMainGiftClipCloser(func() {
+		closeCount++
+		order = append(order, "jobs")
+	})
+	runMainPendingGiftClipUpdate(closeJobs, func() { order = append(order, "install") })
+	closeJobs() // mirrors the deferred close on the pending-update return path.
+	if got := strings.Join(order, ","); got != "jobs,install" || closeCount != 1 {
+		t.Fatalf("pending update order=%q closeCount=%d", got, closeCount)
+	}
+}
+
+func TestMainGiftClipCloserRunsOnlyOnce(t *testing.T) {
+	count := 0
+	closeJobs := newMainGiftClipCloser(func() { count++ })
+	closeJobs()
+	closeJobs()
+	if count != 1 {
+		t.Fatalf("close count=%d", count)
 	}
 }
 

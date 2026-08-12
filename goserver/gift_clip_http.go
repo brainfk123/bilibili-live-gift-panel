@@ -7,10 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -63,7 +63,7 @@ func (handler *giftClipHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Req
 			giftClipHTTPError(w, http.StatusMethodNotAllowed, "不支持的请求方法")
 			return
 		}
-		handler.handleVideo(w, id)
+		handler.handleVideo(w, r, id)
 		return
 	}
 	if !validGiftClipHTTPID(remainder) {
@@ -129,7 +129,7 @@ func (handler *giftClipHTTPHandler) handleStatus(w http.ResponseWriter, id strin
 	writeJSON(w, http.StatusOK, giftClipHTTPSnapshot(snapshot))
 }
 
-func (handler *giftClipHTTPHandler) handleVideo(w http.ResponseWriter, id string) {
+func (handler *giftClipHTTPHandler) handleVideo(w http.ResponseWriter, r *http.Request, id string) {
 	if handler.jobs == nil {
 		giftClipHTTPNotFound(w)
 		return
@@ -153,9 +153,7 @@ func (handler *giftClipHTTPHandler) handleVideo(w http.ResponseWriter, id string
 	w.Header().Set("Content-Type", "video/mp4")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Disposition", `attachment; filename="gift-clip.mp4"`)
-	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, file)
+	http.ServeContent(w, r, "gift-clip.mp4", info.ModTime(), file)
 }
 
 func (handler *giftClipHTTPHandler) handleDelete(w http.ResponseWriter, id string) {
@@ -166,11 +164,15 @@ func (handler *giftClipHTTPHandler) handleDelete(w http.ResponseWriter, id strin
 }
 
 func parseGiftClipCreateRequest(w http.ResponseWriter, r *http.Request) (giftClipCreateMetadata, []byte, []byte, error) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxGiftClipRequestBytes)
-	reader, err := r.MultipartReader()
+	raw, err := readGiftClipHTTPRequestBody(w, r)
 	if err != nil {
 		return giftClipCreateMetadata{}, nil, nil, err
 	}
+	mediaType, parameters, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || !strings.EqualFold(mediaType, "multipart/form-data") || parameters["boundary"] == "" {
+		return giftClipCreateMetadata{}, nil, nil, errors.New("invalid multipart content type")
+	}
+	reader := multipart.NewReader(bytes.NewReader(raw), parameters["boundary"])
 	parts := make(map[string][]byte, 3)
 	for {
 		part, err := reader.NextPart()
@@ -207,6 +209,25 @@ func parseGiftClipCreateRequest(w http.ResponseWriter, r *http.Request) (giftCli
 		return giftClipCreateMetadata{}, nil, nil, err
 	}
 	return metadata, background, overlay, nil
+}
+
+func readGiftClipHTTPRequestBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	if r.ContentLength > maxGiftClipRequestBytes {
+		return nil, errGiftClipHTTPRequestTooLarge
+	}
+	limited := http.MaxBytesReader(w, r.Body, maxGiftClipRequestBytes+1)
+	body := make([]byte, maxGiftClipRequestBytes+1)
+	read, err := io.ReadFull(limited, body)
+	if read > int(maxGiftClipRequestBytes) || err == nil {
+		return nil, errGiftClipHTTPRequestTooLarge
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		if isGiftClipHTTPTooLarge(err) {
+			return nil, errGiftClipHTTPRequestTooLarge
+		}
+		return nil, err
+	}
+	return body[:read], nil
 }
 
 func readGiftClipHTTPPart(parts map[string][]byte, part *multipart.Part) error {

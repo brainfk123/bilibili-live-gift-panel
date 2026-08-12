@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -118,10 +119,21 @@ func newMainGiftClipJobs(store *configStore, media *giftReceiptAPI, diagnostics 
 	return newManager(defaultGiftClipTaskRoot(), newGiftClipSourceResolver(store, media), encoder, diagnostics), nil
 }
 
-func runMainGiftClipShutdown(stopRuntime, closeGiftClips, closeServer func()) {
+func newMainGiftClipCloser(closeGiftClips func()) func() {
+	var once sync.Once
+	return func() { once.Do(closeGiftClips) }
+}
+
+func runMainGiftClipShutdown(stopRuntime, closeGiftClips, closeServer, installUpdate func()) {
 	stopRuntime()
 	closeGiftClips()
 	closeServer()
+	installUpdate()
+}
+
+func runMainPendingGiftClipUpdate(closeGiftClips, installUpdate func()) {
+	closeGiftClips()
+	installUpdate()
 }
 
 func main() {
@@ -185,7 +197,8 @@ func main() {
 		showStartupError(err.Error())
 		return
 	}
-	defer giftClips.Close()
+	closeGiftClips := newMainGiftClipCloser(giftClips.Close)
+	defer closeGiftClips()
 	loginStore, err := newDefaultLoginCredentialStore()
 	if err != nil {
 		showStartupError(err.Error())
@@ -196,10 +209,11 @@ func main() {
 	updater := newDefaultAutoUpdater(store)
 	installedVersion := updater.ConsumeInstalledVersion()
 	if installedVersion == "" && updater.HasPending() {
-		giftClips.Close()
-		if err := updater.InstallOnExit(true); err != nil {
-			showStartupError(err.Error())
-		}
+		runMainPendingGiftClipUpdate(closeGiftClips, func() {
+			if err := updater.InstallOnExit(true); err != nil {
+				showStartupError(err.Error())
+			}
+		})
 		return
 	}
 	presence := newPagePresence(notifications)
@@ -309,9 +323,10 @@ func main() {
 	}
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	runMainGiftClipShutdown(stopRuntime, giftClips.Close, func() { _ = server.Shutdown(shutdownContext) })
-	if err := updater.InstallOnExit(restartAfterUpdate); err != nil {
-		diagnostics.Error("update_install_failed", "error", err)
-		showStartupError(err.Error())
-	}
+	runMainGiftClipShutdown(stopRuntime, closeGiftClips, func() { _ = server.Shutdown(shutdownContext) }, func() {
+		if err := updater.InstallOnExit(restartAfterUpdate); err != nil {
+			diagnostics.Error("update_install_failed", "error", err)
+			showStartupError(err.Error())
+		}
+	})
 }
