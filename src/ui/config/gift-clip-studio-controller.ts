@@ -69,12 +69,15 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
     if (loadAbort && !loadAbort.signal.aborted) loadAbort.abort();
     loadAbort = null;
   };
-  const cancelExport = async (): Promise<void> => {
+  const deleteGiftClipJob = (id: string): void => {
+    void cancelGiftClipJob(id).catch(() => undefined);
+  };
+  const cancelExport = (): void => {
     exportAbort?.abort();
     exportAbort = null;
     const id = exportJobId;
     exportJobId = '';
-    if (id) await cancelGiftClipJob(id).catch(() => undefined);
+    if (id) deleteGiftClipJob(id);
   };
   const clearPreview = (): void => {
     preview.pause();
@@ -156,7 +159,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
   const loadSource = async (): Promise<void> => {
     const token = ++transition;
     abortLoad();
-    void cancelExport();
+    cancelExport();
     stopEditorPreview();
     destroyEditor();
     clearPreview();
@@ -214,7 +217,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
     if (closed) return;
     confirmedCrop = crop;
     const token = ++transition;
-    void cancelExport();
+    cancelExport();
     stopEditorPreview();
     destroyEditor();
     const pixels = giftClipCropToPixels(crop, activeSession.width, activeSession.height);
@@ -239,7 +242,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
           ...layers,
         }, controller.signal);
         if (!isCurrent(token) || controller.signal.aborted) {
-          await cancelGiftClipJob(created.id).catch(() => undefined);
+          deleteGiftClipJob(created.id);
           return;
         }
         exportJobId = created.id;
@@ -255,13 +258,13 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
         view.showReady(
           `MP4 已生成 · ${ready.output.width} × ${ready.output.height} · ${activeSession.sourceLabel}`,
           '保存 MP4',
-          giftClipJobVideoURL(ready.id),
+          giftClipJobVideoURL(created.id),
           `${ready.output.width} / ${ready.output.height}`,
         );
         void preview.play().catch(() => undefined);
       } catch (error) {
         if (!isCurrent(token) || controller.signal.aborted) return;
-        await cancelExport();
+        cancelExport();
         if (isCurrent(token)) reportFailure(error);
       } finally {
         if (exportAbort === controller) exportAbort = null;
@@ -277,7 +280,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
     closed = true;
     transition += 1;
     abortLoad();
-    void cancelExport();
+    cancelExport();
     stopEditorPreview();
     destroyEditor();
     disposeSession();
@@ -308,7 +311,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
       return;
     }
     const token = ++transition;
-    void cancelExport();
+    cancelExport();
     void presentEditor(session, confirmedCrop, token);
   };
   saveButton.onclick = () => {

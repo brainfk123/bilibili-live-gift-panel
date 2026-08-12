@@ -42,3 +42,18 @@ legacy-canvas assertions plus regressions that the canvas/API no longer exists.
   (missing `保存 MP4`, recorder failure message, and no export polling).
 - GREEN: Studio now creates static PNG layers, creates and polls jobs, previews
   the same-origin MP4 URL, and passes lifecycle/stale/cancellation regressions.
+
+## Fix round 1: non-blocking cancellation and canonical IDs
+
+`cancelExport` now synchronously clears ownership and aborts before launching a
+best-effort DELETE whose rejection is owned and swallowed by the helper.  UI
+transitions never await that DELETE: poll/create failures display failure and
+retry immediately, re-edit resumes the editor immediately, and close cannot be
+followed by a DELETE completion writing UI.  Since ownership is cleared before
+the request, an old DELETE cannot affect a newer job.
+
+The ID returned by `createGiftClipJob` is now the export's canonical ID.  The
+controller passes it to wait, records it for cancellation and saving, and uses
+it—not an ID returned by a wait snapshot—for the preview/video URL.  Regression
+tests use valid opaque 24-character IDs and cover a mismatched wait snapshot,
+non-settling DELETE during polling failure, and create failure retry/UI error.
