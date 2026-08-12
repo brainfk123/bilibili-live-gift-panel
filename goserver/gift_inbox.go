@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,22 +43,61 @@ type giftInboxSequence struct {
 }
 
 type giftInbox struct {
+	shared       *giftInboxShared
+	handleID     uint64
+	pendingPath  string
+	sequencePath string
+}
+
+type giftInboxShared struct {
 	mu           sync.Mutex
 	pendingPath  string
 	sequencePath string
 	nextSequence uint64
 	health       giftInboxHealth
+	pendingBytes int64
+	claimedBy    uint64
+	claimedID    string
 }
 
+var giftInboxRegistry = struct {
+	sync.Mutex
+	roots        map[string]*giftInboxShared
+	nextHandleID uint64
+}{roots: make(map[string]*giftInboxShared)}
+
 func openGiftInbox(root string) (*giftInbox, error) {
-	inbox := &giftInbox{
-		pendingPath:  filepath.Join(root, "gift-inbox", "pending"),
-		sequencePath: filepath.Join(root, "gift-inbox", "sequence.json"),
-		nextSequence: 1,
-	}
-	if err := os.MkdirAll(inbox.pendingPath, 0o700); err != nil {
+	inboxRoot := filepath.Join(root, "gift-inbox")
+	pendingPath := filepath.Join(inboxRoot, "pending")
+	if err := os.MkdirAll(pendingPath, 0o700); err != nil {
 		return nil, fmt.Errorf("create gift inbox directory: %w", err)
 	}
+	canonicalRoot, err := filepath.EvalSymlinks(inboxRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve gift inbox root: %w", err)
+	}
+	canonicalRoot, err = filepath.Abs(canonicalRoot)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize gift inbox root: %w", err)
+	}
+	canonicalRoot = filepath.Clean(canonicalRoot)
+	if runtime.GOOS == "windows" {
+		canonicalRoot = strings.ToLower(canonicalRoot)
+	}
+
+	giftInboxRegistry.Lock()
+	defer giftInboxRegistry.Unlock()
+	giftInboxRegistry.nextHandleID++
+	handleID := giftInboxRegistry.nextHandleID
+	if shared := giftInboxRegistry.roots[canonicalRoot]; shared != nil {
+		return &giftInbox{shared: shared, handleID: handleID, pendingPath: shared.pendingPath, sequencePath: shared.sequencePath}, nil
+	}
+	shared := &giftInboxShared{
+		pendingPath:  pendingPath,
+		sequencePath: filepath.Join(inboxRoot, "sequence.json"),
+		nextSequence: 1,
+	}
+	inbox := &giftInbox{shared: shared, handleID: handleID, pendingPath: shared.pendingPath, sequencePath: shared.sequencePath}
 	if err := inbox.removeOrphanTempsLocked(); err != nil {
 		return nil, err
 	}
@@ -67,12 +107,13 @@ func openGiftInbox(root string) (*giftInbox, error) {
 	if _, err := inbox.reconcileHealthLocked(); err != nil {
 		return nil, err
 	}
+	giftInboxRegistry.roots[canonicalRoot] = shared
 	return inbox, nil
 }
 
 func (inbox *giftInbox) Accept(roomID, command string, gift giftEvent) (giftInboxRecord, error) {
-	inbox.mu.Lock()
-	defer inbox.mu.Unlock()
+	inbox.shared.mu.Lock()
+	defer inbox.shared.mu.Unlock()
 
 	health, err := inbox.reconcileHealthLocked()
 	if err != nil {
@@ -87,7 +128,7 @@ func (inbox *giftInbox) Accept(roomID, command string, gift giftEvent) (giftInbo
 	}
 	record := giftInboxRecord{
 		SchemaVersion: 1,
-		LocalSequence: inbox.nextSequence,
+		LocalSequence: inbox.shared.nextSequence,
 		IngestionID:   ingestionID,
 		RoomID:        roomID,
 		Command:       command,
@@ -100,28 +141,31 @@ func (inbox *giftInbox) Accept(roomID, command string, gift giftEvent) (giftInbo
 	}
 	if healthBytes, err := inbox.pendingBytesLocked(); err != nil {
 		return giftInboxRecord{}, err
-	} else if healthBytes+int64(len(data)) > maxGiftInboxBytes {
-		inbox.health.CapacityError = true
+	} else if healthBytes+int64(len(data)+1) > maxGiftInboxBytes {
+		inbox.shared.health.CapacityError = true
 		return giftInboxRecord{}, errGiftInboxCapacity
 	}
-	if err := inbox.persistNextSequenceLocked(inbox.nextSequence + 1); err != nil {
+	if err := inbox.persistNextSequenceLocked(inbox.shared.nextSequence + 1); err != nil {
 		return giftInboxRecord{}, err
 	}
-	inbox.nextSequence++
+	inbox.shared.nextSequence++
 	if err := writeFileAtomically(inbox.recordPath(record.LocalSequence, record.IngestionID), append(data, '\n')); err != nil {
 		return giftInboxRecord{}, fmt.Errorf("persist gift inbox record: %w", err)
 	}
-	inbox.health.PendingCount++
-	if inbox.health.OldestPendingAt == 0 {
-		inbox.health.OldestPendingAt = record.ReceivedAt
+	inbox.shared.health.PendingCount++
+	if inbox.shared.health.OldestPendingAt == 0 {
+		inbox.shared.health.OldestPendingAt = record.ReceivedAt
 	}
-	inbox.health.CapacityError = false
+	inbox.shared.health.CapacityError = false
 	return record, nil
 }
 
 func (inbox *giftInbox) Next() (giftInboxRecord, bool, error) {
-	inbox.mu.Lock()
-	defer inbox.mu.Unlock()
+	inbox.shared.mu.Lock()
+	defer inbox.shared.mu.Unlock()
+	if inbox.shared.claimedBy != 0 && inbox.shared.claimedBy != inbox.handleID {
+		return giftInboxRecord{}, false, nil
+	}
 
 	files, err := inbox.pendingFilesLocked()
 	if err != nil {
@@ -134,12 +178,17 @@ func (inbox *giftInbox) Next() (giftInboxRecord, bool, error) {
 	if err != nil {
 		return giftInboxRecord{}, false, err
 	}
+	inbox.shared.claimedBy = inbox.handleID
+	inbox.shared.claimedID = record.IngestionID
 	return record, true, nil
 }
 
 func (inbox *giftInbox) Acknowledge(ingestionID string) error {
-	inbox.mu.Lock()
-	defer inbox.mu.Unlock()
+	inbox.shared.mu.Lock()
+	defer inbox.shared.mu.Unlock()
+	if inbox.shared.claimedBy != 0 && inbox.shared.claimedBy != inbox.handleID {
+		return fmt.Errorf("gift inbox record is claimed by another handle")
+	}
 
 	files, err := inbox.pendingFilesLocked()
 	if err != nil {
@@ -167,13 +216,15 @@ func (inbox *giftInbox) Acknowledge(ingestionID string) error {
 	if err := os.Remove(filepath.Join(inbox.pendingPath, selected)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("acknowledge gift inbox record: %w", err)
 	}
+	inbox.shared.claimedBy = 0
+	inbox.shared.claimedID = ""
 	_, err = inbox.reconcileHealthLocked()
 	return err
 }
 
 func (inbox *giftInbox) Health() giftInboxHealth {
-	inbox.mu.Lock()
-	defer inbox.mu.Unlock()
+	inbox.shared.mu.Lock()
+	defer inbox.shared.mu.Unlock()
 	health, err := inbox.reconcileHealthLocked()
 	if err != nil {
 		return giftInboxHealth{CapacityError: true}
@@ -183,11 +234,15 @@ func (inbox *giftInbox) Health() giftInboxHealth {
 
 func (inbox *giftInbox) removeOrphanTempsLocked() error {
 	for _, directory := range []string{filepath.Dir(inbox.sequencePath), inbox.pendingPath} {
-		paths, err := filepath.Glob(filepath.Join(directory, "config-*.tmp"))
+		entries, err := os.ReadDir(directory)
 		if err != nil {
-			return fmt.Errorf("find gift inbox temporary files: %w", err)
+			return fmt.Errorf("read gift inbox directory for temporary files: %w", err)
 		}
-		for _, path := range paths {
+		for _, entry := range entries {
+			if !entry.Type().IsRegular() || !isGiftInboxTempName(entry.Name()) {
+				continue
+			}
+			path := filepath.Join(directory, entry.Name())
 			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("remove gift inbox temporary file: %w", err)
 			}
@@ -209,7 +264,7 @@ func (inbox *giftInbox) loadSequenceLocked() error {
 			}
 			return fmt.Errorf("parse gift inbox sequence: %w", err)
 		}
-		inbox.nextSequence = sequence.NextSequence
+		inbox.shared.nextSequence = sequence.NextSequence
 	}
 	files, err := inbox.pendingFilesLocked()
 	if err != nil {
@@ -217,11 +272,11 @@ func (inbox *giftInbox) loadSequenceLocked() error {
 	}
 	for _, file := range files {
 		sequence, _ := strconv.ParseUint(file[:20], 10, 64)
-		if sequence >= inbox.nextSequence {
+		if sequence >= inbox.shared.nextSequence {
 			if sequence == ^uint64(0) {
 				return errors.New("gift inbox sequence overflow")
 			}
-			inbox.nextSequence = sequence + 1
+			inbox.shared.nextSequence = sequence + 1
 		}
 	}
 	return nil
@@ -265,28 +320,17 @@ func (inbox *giftInbox) reconcileHealthLocked() (giftInboxHealth, error) {
 			oldest = record.ReceivedAt
 		}
 	}
-	inbox.health = giftInboxHealth{
+	inbox.shared.health = giftInboxHealth{
 		PendingCount:    len(files),
 		OldestPendingAt: oldest,
 		CapacityError:   len(files) >= maxGiftInboxRecords || bytes >= maxGiftInboxBytes,
 	}
-	return inbox.health, nil
+	inbox.shared.pendingBytes = bytes
+	return inbox.shared.health, nil
 }
 
 func (inbox *giftInbox) pendingBytesLocked() (int64, error) {
-	files, err := inbox.pendingFilesLocked()
-	if err != nil {
-		return 0, err
-	}
-	var bytes int64
-	for _, file := range files {
-		info, err := os.Stat(filepath.Join(inbox.pendingPath, file))
-		if err != nil {
-			return 0, fmt.Errorf("stat gift inbox record: %w", err)
-		}
-		bytes += info.Size()
-	}
-	return bytes, nil
+	return inbox.shared.pendingBytes, nil
 }
 
 func (inbox *giftInbox) pendingFilesLocked() ([]string, error) {
@@ -314,6 +358,19 @@ func (inbox *giftInbox) readRecordLocked(filename string) (giftInboxRecord, erro
 	if err := json.Unmarshal(data, &record); err != nil {
 		return giftInboxRecord{}, fmt.Errorf("parse gift inbox record %s: %w", filename, err)
 	}
+	filenameSequence, filenameID, ok := parseGiftInboxRecordName(filename)
+	if !ok {
+		return giftInboxRecord{}, fmt.Errorf("invalid gift inbox record filename %s", filename)
+	}
+	if record.SchemaVersion != 1 {
+		return giftInboxRecord{}, fmt.Errorf("unsupported gift inbox schema version %d in %s", record.SchemaVersion, filename)
+	}
+	if record.LocalSequence == 0 || record.LocalSequence != filenameSequence {
+		return giftInboxRecord{}, fmt.Errorf("gift inbox record sequence does not match filename %s", filename)
+	}
+	if !isValidGiftInboxID(record.IngestionID) || record.IngestionID != filenameID {
+		return giftInboxRecord{}, fmt.Errorf("gift inbox record ingestion ID does not match filename %s", filename)
+	}
 	return record, nil
 }
 
@@ -330,18 +387,35 @@ func newGiftInboxIngestionID() (string, error) {
 }
 
 func isGiftInboxRecordName(name string) bool {
+	_, _, ok := parseGiftInboxRecordName(name)
+	return ok
+}
+
+func parseGiftInboxRecordName(name string) (uint64, string, bool) {
 	if len(name) < 27 || !strings.HasSuffix(name, ".json") || name[20] != '-' {
-		return false
+		return 0, "", false
 	}
-	if _, err := strconv.ParseUint(name[:20], 10, 64); err != nil {
-		return false
+	sequence, err := strconv.ParseUint(name[:20], 10, 64)
+	if err != nil || sequence == 0 {
+		return 0, "", false
 	}
 	id := strings.TrimSuffix(name[21:], ".json")
-	if len(id) == 0 {
+	if !isValidGiftInboxID(id) {
+		return 0, "", false
+	}
+	return sequence, id, true
+}
+
+func isValidGiftInboxID(id string) bool {
+	if strings.TrimSpace(id) == "" {
 		return false
 	}
 	_, err := hex.DecodeString(id)
 	return err == nil
+}
+
+func isGiftInboxTempName(name string) bool {
+	return strings.HasPrefix(name, "config-") && strings.HasSuffix(name, ".tmp") && len(name) > len("config-.tmp")
 }
 
 func pendingIngestionID(filename string) string {

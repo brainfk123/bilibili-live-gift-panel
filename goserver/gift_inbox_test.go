@@ -1,9 +1,14 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -115,5 +120,468 @@ func TestGiftInboxLeavesCorruptHeadForNextAndRemovesOnlyOwnTemporaryFiles(t *tes
 	}
 	if accepted.LocalSequence != 3 {
 		t.Fatalf("sequence after existing records = %d, want 3", accepted.LocalSequence)
+	}
+}
+
+func TestGiftInboxCoordinatesConcurrentAcceptAcrossHandles(t *testing.T) {
+	root := t.TempDir()
+	first, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := openGiftInbox(filepath.Join(root, "."))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const accepts = 40
+	records := make(chan giftInboxRecord, accepts)
+	errorsSeen := make(chan error, accepts)
+	var group sync.WaitGroup
+	for index := 0; index < accepts; index++ {
+		group.Add(1)
+		go func(index int) {
+			defer group.Done()
+			inbox := first
+			if index%2 != 0 {
+				inbox = second
+			}
+			record, err := inbox.Accept("room", "SEND_GIFT", giftEvent{GiftID: index + 1})
+			if err != nil {
+				errorsSeen <- err
+				return
+			}
+			records <- record
+		}(index)
+	}
+	group.Wait()
+	close(records)
+	close(errorsSeen)
+	for err := range errorsSeen {
+		t.Fatalf("concurrent Accept = %v", err)
+	}
+	sequences := make([]int, 0, accepts)
+	for record := range records {
+		sequences = append(sequences, int(record.LocalSequence))
+	}
+	sort.Ints(sequences)
+	for index, sequence := range sequences {
+		if sequence != index+1 {
+			t.Fatalf("sorted sequence[%d] = %d, want %d; all=%v", index, sequence, index+1, sequences)
+		}
+	}
+}
+
+func TestGiftInboxSharedHandlesCannotExceedRecordCapacity(t *testing.T) {
+	root := t.TempDir()
+	pending := filepath.Join(root, "gift-inbox", "pending")
+	if err := os.MkdirAll(pending, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for sequence := 1; sequence < maxGiftInboxRecords; sequence++ {
+		name := filepath.Join(pending, giftInboxFilename(uint64(sequence), strings.Repeat("a", 32)))
+		if err := os.WriteFile(name, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, inbox := range []*giftInbox{first, second} {
+		go func(inbox *giftInbox) {
+			<-start
+			_, err := inbox.Accept("room", "SEND_GIFT", giftEvent{GiftName: "boundary"})
+			results <- err
+		}(inbox)
+	}
+	close(start)
+	successes := 0
+	capacityErrors := 0
+	for range 2 {
+		err := <-results
+		if err == nil {
+			successes++
+		} else if errors.Is(err, errGiftInboxCapacity) {
+			capacityErrors++
+		} else {
+			t.Fatalf("Accept error = %v", err)
+		}
+	}
+	if successes != 1 || capacityErrors != 1 {
+		t.Fatalf("results = %d success, %d capacity errors; want 1, 1", successes, capacityErrors)
+	}
+	if health := first.Health(); health.PendingCount != maxGiftInboxRecords || !health.CapacityError {
+		t.Fatalf("health = %+v, want full capacity", health)
+	}
+}
+
+func TestGiftInboxEnforcesExactPersistedByteBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		extraByte   int64
+		wantAllowed bool
+	}{
+		{name: "exact boundary allowed", extraByte: 0, wantAllowed: true},
+		{name: "one byte over rejected", extraByte: 1, wantAllowed: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			inbox, err := openGiftInbox(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gift := giftEvent{GiftName: "boundary"}
+			fixture := giftInboxRecord{SchemaVersion: 1, LocalSequence: 2, IngestionID: strings.Repeat("a", 32), RoomID: "room", Command: "SEND_GIFT", ReceivedAt: 1_800_000_000, Gift: gift}
+			encoded, err := json.Marshal(fixture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			acceptedBytes := int64(len(encoded) + 1)
+			fillerSize := maxGiftInboxBytes - acceptedBytes + test.extraByte
+			filler := filepath.Join(inbox.pendingPath, giftInboxFilename(1, strings.Repeat("b", 32)))
+			file, err := os.Create(filler)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Truncate(fillerSize); err != nil {
+				file.Close()
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+			_, err = inbox.Accept("room", "SEND_GIFT", gift)
+			if test.wantAllowed && err != nil {
+				t.Fatalf("Accept at exact byte boundary = %v", err)
+			}
+			if !test.wantAllowed && !errors.Is(err, errGiftInboxCapacity) {
+				t.Fatalf("Accept one byte over boundary = %v, want capacity error", err)
+			}
+			var total int64
+			entries, err := os.ReadDir(inbox.pendingPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				info, err := entry.Info()
+				if err != nil {
+					t.Fatal(err)
+				}
+				total += info.Size()
+			}
+			if total > maxGiftInboxBytes {
+				t.Fatalf("persisted bytes = %d, exceeds %d", total, maxGiftInboxBytes)
+			}
+		})
+	}
+}
+
+func TestGiftInboxSharedHandlesCannotJointlyExceedByteCapacity(t *testing.T) {
+	root := t.TempDir()
+	first, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gift := giftEvent{GiftName: "shared byte boundary"}
+	fixture := giftInboxRecord{SchemaVersion: 1, LocalSequence: 2, IngestionID: strings.Repeat("a", 32), RoomID: "room", Command: "SEND_GIFT", ReceivedAt: 1_800_000_000, Gift: gift}
+	encoded, err := json.Marshal(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filler := filepath.Join(first.pendingPath, giftInboxFilename(1, strings.Repeat("b", 32)))
+	file, err := os.Create(filler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxGiftInboxBytes - int64(len(encoded)+1)); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, inbox := range []*giftInbox{first, second} {
+		go func(inbox *giftInbox) {
+			<-start
+			_, err := inbox.Accept("room", "SEND_GIFT", gift)
+			results <- err
+		}(inbox)
+	}
+	close(start)
+	successes := 0
+	capacityErrors := 0
+	for range 2 {
+		err := <-results
+		if err == nil {
+			successes++
+		} else if errors.Is(err, errGiftInboxCapacity) {
+			capacityErrors++
+		} else {
+			t.Fatalf("Accept error = %v", err)
+		}
+	}
+	if successes != 1 || capacityErrors != 1 {
+		t.Fatalf("results = %d success, %d capacity errors; want 1, 1", successes, capacityErrors)
+	}
+}
+
+func TestGiftInboxTempCleanupDoesNotGlobSiblingRoots(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "[gift]")
+	ownPending := filepath.Join(root, "gift-inbox", "pending")
+	siblingPending := filepath.Join(parent, "g", "gift-inbox", "pending")
+	for _, directory := range []string{ownPending, siblingPending} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ownTemp := filepath.Join(ownPending, "config-own.tmp")
+	siblingSentinel := filepath.Join(siblingPending, "config-sibling.tmp")
+	if err := os.WriteFile(ownTemp, []byte("remove"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(siblingSentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openGiftInbox(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(ownTemp); !os.IsNotExist(err) {
+		t.Fatalf("own temp still exists: %v", err)
+	}
+	if data, err := os.ReadFile(siblingSentinel); err != nil || string(data) != "keep" {
+		t.Fatalf("sibling sentinel changed: data=%q err=%v", data, err)
+	}
+}
+
+func TestGiftInboxRejectsCommittedRecordsWithInvalidContract(t *testing.T) {
+	validID := strings.Repeat("a", 32)
+	otherID := strings.Repeat("b", 32)
+	tests := []struct {
+		name string
+		data string
+	}{
+		{name: "empty object", data: `{}`},
+		{name: "unknown schema", data: `{"schemaVersion":2,"localSequence":1,"ingestionId":"` + validID + `"}`},
+		{name: "zero sequence", data: `{"schemaVersion":1,"localSequence":0,"ingestionId":"` + validID + `"}`},
+		{name: "invalid record ID", data: `{"schemaVersion":1,"localSequence":1,"ingestionId":"not-hex"}`},
+		{name: "mismatched sequence", data: `{"schemaVersion":1,"localSequence":2,"ingestionId":"` + validID + `"}`},
+		{name: "mismatched ID", data: `{"schemaVersion":1,"localSequence":1,"ingestionId":"` + otherID + `"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			pending := filepath.Join(root, "gift-inbox", "pending")
+			if err := os.MkdirAll(pending, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			head := filepath.Join(pending, giftInboxFilename(1, validID))
+			if err := os.WriteFile(head, []byte(test.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			laterID := strings.Repeat("c", 32)
+			later := giftInboxRecord{SchemaVersion: 1, LocalSequence: 2, IngestionID: laterID}
+			writeGiftInboxFixture(t, filepath.Join(pending, giftInboxFilename(2, laterID)), later)
+			inbox, err := openGiftInbox(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok, err := inbox.Next(); err == nil || ok {
+				t.Fatalf("Next = (_, %t, %v), want invalid head error", ok, err)
+			}
+			if err := inbox.Acknowledge(validID); err == nil {
+				t.Fatal("Acknowledge tampered head succeeded")
+			}
+			if _, err := os.Stat(head); err != nil {
+				t.Fatalf("invalid committed record removed: %v", err)
+			}
+		})
+	}
+}
+
+func TestGiftInboxClaimsHeadForOnlyOneHandleUntilAcknowledged(t *testing.T) {
+	root := t.TempDir()
+	first, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := first.Accept("room", "SEND_GIFT", giftEvent{GiftName: "once"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		inbox  *giftInbox
+		record giftInboxRecord
+		ok     bool
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for _, inbox := range []*giftInbox{first, second} {
+		go func(inbox *giftInbox) {
+			<-start
+			next, ok, err := inbox.Next()
+			results <- result{inbox: inbox, record: next, ok: ok, err: err}
+		}(inbox)
+	}
+	close(start)
+	var owner *giftInbox
+	claimed := 0
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if result.ok {
+			claimed++
+			owner = result.inbox
+			if result.record.IngestionID != record.IngestionID {
+				t.Fatalf("claimed ID = %q, want %q", result.record.IngestionID, record.IngestionID)
+			}
+		}
+	}
+	if claimed != 1 {
+		t.Fatalf("concurrent Next claims = %d, want 1", claimed)
+	}
+	if err := owner.Acknowledge(record.IngestionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := second.Next(); err != nil || ok {
+		t.Fatalf("Next after acknowledgement = (_, %t, %v), want empty", ok, err)
+	}
+}
+
+func TestGiftInboxReconcilesCapacityAfterDeletionAndReopen(t *testing.T) {
+	root := t.TempDir()
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := inbox.Accept("room", "SEND_GIFT", giftEvent{GiftName: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := inbox.Acknowledge(first.IngestionID); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health := reopened.Health(); health.PendingCount != 0 || health.CapacityError {
+		t.Fatalf("health after deletion and reopen = %+v", health)
+	}
+	if _, err := reopened.Accept("room", "SEND_GIFT", giftEvent{GiftName: "replacement"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGiftInboxUsesGlobalFIFOAcrossRooms(t *testing.T) {
+	root := t.TempDir()
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRooms := []string{"room-a", "room-b", "room-a"}
+	for _, room := range wantRooms {
+		if _, err := inbox.Accept(room, "SEND_GIFT", giftEvent{GiftName: room}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, wantRoom := range wantRooms {
+		record, ok, err := inbox.Next()
+		if err != nil || !ok {
+			t.Fatalf("Next = (%+v, %t, %v)", record, ok, err)
+		}
+		if record.RoomID != wantRoom {
+			t.Fatalf("Next room = %q, want %q", record.RoomID, wantRoom)
+		}
+		if err := inbox.Acknowledge(record.IngestionID); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestGiftInboxPersistsOnlyNormalizedGiftFields(t *testing.T) {
+	type transportEnvelope struct {
+		Gift          giftEvent
+		SESSDATA      string
+		Authorization string
+		Cookie        string
+		RawFrame      string
+	}
+	input := transportEnvelope{
+		Gift:          giftEvent{GiftName: "normalized"},
+		SESSDATA:      "secret-session-marker",
+		Authorization: "secret-auth-marker",
+		Cookie:        "secret-cookie-marker",
+		RawFrame:      "secret-raw-frame-marker",
+	}
+	root := t.TempDir()
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := inbox.Accept("room", "SEND_GIFT", input.Gift); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(inbox.pendingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		data, err := os.ReadFile(filepath.Join(inbox.pendingPath, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		lower := strings.ToLower(string(data))
+		for _, marker := range []string{input.SESSDATA, input.Authorization, input.Cookie, input.RawFrame} {
+			if strings.Contains(lower, strings.ToLower(marker)) {
+				t.Fatalf("persisted normalized record %s contains transport marker %q", entry.Name(), marker)
+			}
+		}
+	}
+	wantGiftFields := []string{"AnimationDurationMS", "AnimationGIF", "AnimationOnly", "AnimationWebP", "Avatar", "BlindGiftID", "BlindGiftName", "BlindGiftPrice", "CoinType", "EffectID", "EffectMP4", "EffectMP4JSON", "GiftID", "GiftName", "ImgBasic", "Membership", "Message", "Num", "Price", "Rnd", "Timestamp", "TotalCoin", "UID", "Uname"}
+	actualGiftFields := make([]string, 0, reflect.TypeOf(giftEvent{}).NumField())
+	for index := 0; index < reflect.TypeOf(giftEvent{}).NumField(); index++ {
+		actualGiftFields = append(actualGiftFields, reflect.TypeOf(giftEvent{}).Field(index).Name)
+	}
+	sort.Strings(actualGiftFields)
+	if !reflect.DeepEqual(actualGiftFields, wantGiftFields) {
+		t.Fatalf("giftEvent persistence allowlist changed:\n got %v\nwant %v", actualGiftFields, wantGiftFields)
+	}
+}
+
+func giftInboxFilename(sequence uint64, ingestionID string) string {
+	return strings.ReplaceAll(filepath.Base((&giftInbox{pendingPath: "pending"}).recordPath(sequence, ingestionID)), "\\", "")
+}
+
+func writeGiftInboxFixture(t *testing.T, path string, record giftInboxRecord) {
+	t.Helper()
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
