@@ -576,8 +576,8 @@ func validateGiftClipE2EVideoContract(codec, pixelFormat string, width, height i
 
 func assertGiftClipE2EBitrateArgs(t *testing.T, args []string, profile giftClipOutputProfile) {
 	t.Helper()
-	if profile.Width == 320 && profile.Height == 180 && profile.AverageBitrate != 150_000 {
-		t.Fatalf("production minimum bitrate changed to %d, want 150000", profile.AverageBitrate)
+	if profile.Width == 320 && profile.Height == 180 && profile.AverageBitrate != 450_000 {
+		t.Fatalf("production minimum bitrate changed to %d, want 450000", profile.AverageBitrate)
 	}
 	want := map[string]string{
 		"-b:v":     strconv.FormatInt(profile.AverageBitrate, 10),

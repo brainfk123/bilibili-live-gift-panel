@@ -579,7 +579,7 @@ func giftClipEncodeFixture(source giftClipSource) giftClipEncodeRequest {
 		Crop:   giftClipCrop{X: 101, Y: 53, Width: 960, Height: 540},
 		Profile: giftClipOutputProfile{
 			Width: 960, Height: 540, FPS: 30, Frames: 66, Duration: 2200 * time.Millisecond,
-			AverageBitrate: 500_000, PeakBitrate: 750_000, VBVBuffer: 1_000_000,
+			AverageBitrate: 1_500_000, PeakBitrate: 2_250_000, VBVBuffer: 3_000_000,
 		},
 		BackgroundPath: `C:\task\background.png`,
 		OverlayPath:    `C:\task\overlay.png`,
