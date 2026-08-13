@@ -50,6 +50,29 @@ func TestEmbeddedPageHandlerServesNestedUIAssets(t *testing.T) {
 	}
 }
 
+func TestEmbeddedUIAssetManifestMatchesEmbeddedFS(t *testing.T) {
+	manifestBytes, err := embeddedFS.ReadFile("dist/ui-assets.json")
+	if err != nil {
+		t.Fatalf("read embedded UI asset manifest: %v", err)
+	}
+	var manifest struct {
+		Files []struct {
+			Path string `json:"path"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("decode embedded UI asset manifest: %v", err)
+	}
+	if len(manifest.Files) == 0 {
+		t.Fatal("embedded UI asset manifest is empty")
+	}
+	for _, asset := range manifest.Files {
+		if _, err := embeddedFS.ReadFile("dist/" + asset.Path); err != nil {
+			t.Errorf("manifest asset %q is not embedded: %v", asset.Path, err)
+		}
+	}
+}
+
 func TestNewMainGiftClipJobsStopsOnPayloadFailure(t *testing.T) {
 	want := errors.New("payload unavailable")
 	called := false
