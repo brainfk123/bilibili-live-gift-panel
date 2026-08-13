@@ -405,7 +405,7 @@ func isSafeDiagnosticEvent(value string) bool {
 		return true
 	}
 	switch value {
-	case "bili_message_ignored", "bili_parse_failed", "blind_box_catalog_failed", "blind_box_catalog_ready", "blind_box_catalog_save_failed", "connection_gap", "connection_state", "diagnostic_event_omitted", "gift_accepted", "gift_ignored", "gift_ingestion_failed", "gift_received", "gift_transaction_complete", "gift_transaction_prepare", "gift_transaction_recovery", "gift_clip_job_failed", "gift_clip_job_cleanup_failed", "gift_clip_ffmpeg_failed", "http_listen_failed", "http_ready", "http_server_stopped", "service_start", "service_stop", "tray_failed", "update_install_failed":
+	case "bili_message_ignored", "bili_parse_failed", "blind_box_catalog_failed", "blind_box_catalog_ready", "blind_box_catalog_save_failed", "blind_box_leaderboard_read_failed", "connection_gap", "connection_state", "diagnostic_event_omitted", "gift_accepted", "gift_ignored", "gift_ingestion_failed", "gift_received", "gift_transaction_complete", "gift_transaction_prepare", "gift_transaction_recovery", "gift_clip_job_failed", "gift_clip_job_cleanup_failed", "gift_clip_ffmpeg_failed", "http_listen_failed", "http_ready", "http_server_stopped", "service_start", "service_stop", "tray_failed", "update_install_failed":
 		return true
 	default:
 		return false

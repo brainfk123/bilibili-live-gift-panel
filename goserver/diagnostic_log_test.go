@@ -41,6 +41,22 @@ func TestDiagnosticLoggerWritesPlainTextAndRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestDiagnosticLoggerPreservesBlindBoxLeaderboardReadFailureEvent(t *testing.T) {
+	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Error("blind_box_leaderboard_read_failed", "error", errors.New("invalid configuration"))
+
+	data, err := os.ReadFile(logger.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := string(data); !strings.Contains(text, "blind_box_leaderboard_read_failed") {
+		t.Fatalf("leaderboard failure event was not retained: %s", text)
+	}
+}
+
 func TestDiagnosticLoggerOmitsUnknownAndWrongTypedFields(t *testing.T) {
 	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
 	if err != nil {
