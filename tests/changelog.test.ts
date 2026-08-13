@@ -18,29 +18,23 @@ describe('versioned changelog', () => {
     expect(css).toMatch(/\.changelog-content\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*auto/s);
   });
 
-  it('bundles only the v0.4.2 release with its configuration page fix', () => {
+  it('bundles only the v0.4.3 release with its gift video export improvements', () => {
     expect(CHANGELOG_RELEASES).toHaveLength(1);
     expect(latestChangelogRelease()).toBe(CHANGELOG_RELEASES[0]);
-    expect(normalizeChangelogVersion(' v0.4.2 ')).toBe('0.4.2');
-    expect(changelogReleaseForVersion('v0.4.2')).toEqual({
-      version: '0.4.2',
+    expect(normalizeChangelogVersion(' v0.4.3 ')).toBe('0.4.3');
+    expect(changelogReleaseForVersion('v0.4.3')).toEqual({
+      version: '0.4.3',
       date: '2026-08-13',
-      title: '配置页面恢复正常显示',
-      summary: '修复 v0.4.1 中启动后配置页面空白的问题。',
-      highlights: [
-        {
-          label: '配置页面',
-          title: '页面内容正常加载',
-          description: '补全 EXE 内缺失的启动模块，配置页面现在可以正常打开和使用。',
-        },
-      ],
+      title: '礼物视频导出体验优化',
+      summary: '生成礼物视频时不再弹出命令行窗口，并提高输出码率以改善画质。',
+      highlights: [],
       visuals: [],
     });
   });
 
   it('opens once for a known installed version and ignores development builds', () => {
-    expect(shouldShowChangelog('0.4.2', '')).toBe(true);
-    expect(shouldShowChangelog('v0.4.2', '0.4.2')).toBe(false);
+    expect(shouldShowChangelog('0.4.3', '')).toBe(true);
+    expect(shouldShowChangelog('v0.4.3', '0.4.3')).toBe(false);
     expect(shouldShowChangelog('dev', '')).toBe(false);
     expect(shouldShowChangelog('9.9.9', '')).toBe(false);
   });
@@ -56,12 +50,12 @@ describe('versioned changelog', () => {
       ],
     });
     const merged = mergeChangelogReleases(hosted);
-    expect(merged.map((release) => release.version)).toEqual(['0.4.2', '0.1.0']);
+    expect(merged.map((release) => release.version)).toEqual(['0.4.3', '0.1.0']);
     expect(normalizeChangelogReleases({ releases: [{ version: 'broken' }] })).toEqual([]);
   });
 
   it('ignores the removed training visual from bundled and hosted changelogs', () => {
-    expect(changelogReleaseForVersion('0.4.2')?.visuals).toEqual([]);
+    expect(changelogReleaseForVersion('0.4.3')?.visuals).toEqual([]);
     const [hosted] = normalizeChangelogReleases({
       releases: [{
         version: '0.2.5', date: '2026-08-09', title: '测试版本', summary: '测试在线日志。',
