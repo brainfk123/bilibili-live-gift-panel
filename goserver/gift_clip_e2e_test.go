@@ -610,22 +610,30 @@ func validateGiftClipE2EBitrateArgs(args []string, profile giftClipOutputProfile
 }
 
 func validateGiftClipE2EOutputCodec(args []string) error {
-	outputCodecs := 0
+	codecs := make([]string, 0, 2)
 	for index, arg := range args {
 		if arg != "-c:v" {
 			continue
 		}
-		if index+1 == len(args) {
+		if index+1 == len(args) || strings.HasPrefix(args[index+1], "-") {
 			return fmt.Errorf("production FFmpeg arg %s is missing its value: %q", arg, args)
 		}
-		if args[index+1] == "h264_mf" {
-			outputCodecs++
-		}
+		codecs = append(codecs, args[index+1])
 	}
-	if outputCodecs != 1 {
-		return fmt.Errorf("production FFmpeg args contain %d -c:v h264_mf pairs, want 1: %q", outputCodecs, args)
+	if len(codecs) == 0 || codecs[len(codecs)-1] != "h264_mf" {
+		return fmt.Errorf("production FFmpeg effective -c:v = %q, want h264_mf: %q", lastGiftClipE2EArgValue(codecs), args)
 	}
-	return nil
+	if len(codecs) == 1 || len(codecs) == 2 && codecs[0] == "gif" {
+		return nil
+	}
+	return fmt.Errorf("production FFmpeg -c:v sequence = %q, want h264_mf or gif then h264_mf: %q", codecs, args)
+}
+
+func lastGiftClipE2EArgValue(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[len(values)-1]
 }
 
 func validateGiftClipE2EExactOption(args []string, option, want string) error {
@@ -666,6 +674,7 @@ func TestValidateGiftClipE2EBitrateArgsRequiresAmendedVBRContract(t *testing.T) 
 		{"wrong rate control", append([]string{"-c:v", "h264_mf", "-rate_control", "cbr"}, valid[4:]...), true},
 		{"wrong compression level", append([]string{"-c:v", "h264_mf", "-rate_control", "pc_vbr", "-compression_level", "50"}, valid[6:]...), true},
 		{"duplicate output codec", append(append([]string(nil), valid...), "-c:v", "h264_mf"), true},
+		{"later output codec override", append(append([]string(nil), valid...), "-c:v", "libx264"), true},
 		{"duplicate compression level", append(append([]string(nil), valid...), "-compression_level", "75"), true},
 		{"dangling compression level", append(append([]string(nil), valid...), "-compression_level"), true},
 		{"dangling codec", append(append([]string(nil), valid...), "-c:v"), true},
