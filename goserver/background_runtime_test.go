@@ -472,6 +472,43 @@ type snapshotBarrierGiftInbox struct {
 	releaseSnapshot  chan struct{}
 }
 
+type startupResetBarrierInbox struct {
+	mu             sync.Mutex
+	health         giftInboxHealth
+	healthCaptured chan giftInboxHealth
+	releaseHealth  chan struct{}
+	resetCalled    chan struct{}
+	healthOnce     sync.Once
+	resetOnce      sync.Once
+}
+
+func (*startupResetBarrierInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
+	return giftInboxRecord{}, nil
+}
+func (*startupResetBarrierInbox) Next() (giftInboxRecord, bool, error) {
+	return giftInboxRecord{}, false, nil
+}
+func (*startupResetBarrierInbox) Acknowledge(string) error { return nil }
+func (*startupResetBarrierInbox) Release(string) error     { return nil }
+func (*startupResetBarrierInbox) Close() error             { return nil }
+func (inbox *startupResetBarrierInbox) Health() giftInboxHealth {
+	inbox.mu.Lock()
+	health := inbox.health
+	inbox.mu.Unlock()
+	inbox.healthOnce.Do(func() {
+		inbox.healthCaptured <- health
+		<-inbox.releaseHealth
+	})
+	return health
+}
+func (inbox *startupResetBarrierInbox) Reset() error {
+	inbox.resetOnce.Do(func() { close(inbox.resetCalled) })
+	inbox.mu.Lock()
+	inbox.health = giftInboxHealth{Revision: inbox.health.Revision + 1}
+	inbox.mu.Unlock()
+	return nil
+}
+
 func (inbox *snapshotBarrierGiftInbox) blockNextSnapshot() (<-chan giftInboxHealth, chan struct{}) {
 	inbox.mu.Lock()
 	defer inbox.mu.Unlock()
@@ -673,6 +710,70 @@ func TestBackgroundRuntimePublishesOpenedInboxBeforeConcurrentStatus(t *testing.
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("Run did not publish the opened inbox to concurrent status readers")
+}
+
+func TestBackgroundRuntimeStartupInboxInstallSerializesWithReset(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	if err := store.replaceState(defaultAppState()); err != nil {
+		t.Fatal(err)
+	}
+	inbox := &startupResetBarrierInbox{
+		health: giftInboxHealth{
+			Revision: 7, PendingCount: 3, PendingBytes: 42,
+			OldestPendingAt: 1_700_000_000, CapacityError: true,
+		},
+		healthCaptured: make(chan giftInboxHealth, 1),
+		releaseHealth:  make(chan struct{}),
+		resetCalled:    make(chan struct{}),
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	// Exercise Run's supported epoch-zero preinstallation path, before startup
+	// snapshots and publishes the supplied inbox.
+	runtime.mu.Lock()
+	runtime.inbox = inbox
+	runtime.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		runtime.Run(ctx)
+		close(runDone)
+	}()
+	defer func() {
+		select {
+		case <-inbox.releaseHealth:
+		default:
+			close(inbox.releaseHealth)
+		}
+		cancel()
+		<-runDone
+	}()
+
+	captured := <-inbox.healthCaptured
+	if captured.Revision != 7 || captured.PendingCount != 3 || !captured.CapacityError {
+		t.Fatalf("captured startup health = %#v", captured)
+	}
+	resetAttempted := make(chan struct{})
+	resetDone := make(chan error, 1)
+	go func() {
+		close(resetAttempted)
+		resetDone <- runtime.Reset()
+	}()
+	<-resetAttempted
+	select {
+	case <-inbox.resetCalled:
+		t.Fatal("Reset entered cleanup before startup installed and published its captured health")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(inbox.releaseHealth)
+	if err := <-resetDone; err != nil {
+		t.Fatal(err)
+	}
+	status := runtime.Status()
+	if status.Inbox == nil || status.Inbox.Revision != 8 || status.Inbox.PendingCount != 0 || status.Inbox.PendingBytes != 0 || status.Inbox.OldestPendingAt != 0 || status.Inbox.CapacityError {
+		t.Fatalf("published inbox after startup/reset = %#v, want reset revision 8", status.Inbox)
+	}
 }
 
 func TestRuntimeLastFrameIsRoomScoped(t *testing.T) {

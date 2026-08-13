@@ -117,7 +117,11 @@ func (resolver *receiptGiftClipSourceResolver) resolveEffect(ctx context.Context
 		return giftClipSource{}, err
 	}
 	duration := time.Duration(layout.Frames) * time.Second / time.Duration(layout.FPS)
-	duration = time.Duration(normalizeGiftAnimationDuration(int(duration/time.Millisecond))) * time.Millisecond
+	if duration < time.Second {
+		duration = time.Second
+	} else if duration > 15*time.Second {
+		duration = 15 * time.Second
+	}
 	return giftClipSource{
 		Kind: giftClipSourceEffect, Playback: giftClipPlaybackEffect, Path: path,
 		VisualWidth: layout.RGBFrame[2], VisualHeight: layout.RGBFrame[3],

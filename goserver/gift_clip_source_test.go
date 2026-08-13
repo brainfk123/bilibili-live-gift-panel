@@ -345,6 +345,56 @@ func TestGiftClipSourceResolvesTrustedFullEffect(t *testing.T) {
 	}
 }
 
+func TestGiftClipEffectPreservesFractionalDurationThroughOutputBoundaryAndArgv(t *testing.T) {
+	store, receipt := giftClipSourceStore(t, &giftReceiptAnimation{
+		MP4: "https://i0.hdslb.com/effect.mp4", MP4JSON: "https://i0.hdslb.com/effect.json",
+	})
+	media := newGiftReceiptAPI(store, giftClipMediaClient(map[string]giftClipMediaResponse{
+		"/effect.mp4":  {contentType: "video/mp4", body: validGiftClipMP4()},
+		"/effect.json": {contentType: "application/json", body: []byte(`{"info":{"videoW":1088,"videoH":1280,"rgbFrame":[0,0,720,1280],"aFrame":[724,0,360,640],"fps":59,"f":61}}`)},
+	}))
+	taskDir := t.TempDir()
+	source, err := newGiftClipSourceResolver(store, media).Resolve(context.Background(), receipt.ID, taskDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDuration := 61 * time.Second / 59
+	if source.Duration != wantDuration {
+		t.Fatalf("resolved effect duration = %s, want exact frames/fps duration %s", source.Duration, wantDuration)
+	}
+	crop := giftClipCrop{Width: 640, Height: 360}
+	profile, err := newGiftClipOutputProfile(crop, source.VisualWidth, source.VisualHeight, source.Duration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Frames != 32 {
+		t.Fatalf("30fps output boundary = %d frames, want 32", profile.Frames)
+	}
+	lastFrameTime := time.Duration(profile.Frames-1) * time.Second / time.Duration(profile.FPS)
+	excludedFrameTime := time.Duration(profile.Frames) * time.Second / time.Duration(profile.FPS)
+	if lastFrameTime >= source.Duration || excludedFrameTime < source.Duration {
+		t.Fatalf("frame boundary = included %s excluded %s duration %s", lastFrameTime, excludedFrameTime, source.Duration)
+	}
+	args, err := buildGiftClipFFmpegArgs(giftClipEncodeRequest{
+		Source: source, Crop: crop, Profile: profile,
+		BackgroundPath: filepath.Join(taskDir, "background.png"),
+		OverlayPath:    filepath.Join(taskDir, "overlay.png"),
+		OutputPath:     filepath.Join(taskDir, "output.mp4"),
+	}, giftClipEncoderSoftware)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, arg := range args {
+		if arg == "-t" && index+1 < len(args) {
+			if args[index+1] != "1.033898305" {
+				t.Fatalf("FFmpeg -t = %q, want nanosecond-precision duration", args[index+1])
+			}
+			return
+		}
+	}
+	t.Fatal("FFmpeg argv has no -t duration")
+}
+
 func TestGiftClipSourceFallsBackToGIFWhenEffectVideoIsInvalid(t *testing.T) {
 	gifData := twoFrameGIF(t, 160, 90, []int{4, 7})
 	store, receipt := giftClipSourceStore(t, &giftReceiptAnimation{

@@ -15,8 +15,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sync"
-	"syscall"
-	"unsafe"
 )
 
 //go:embed ffmpeg/ffmpeg.zip ffmpeg/manifest.json
@@ -42,12 +40,6 @@ type giftClipPayload struct {
 
 var giftClipManifestVersionPattern = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]*$`)
 var giftClipCacheLocks sync.Map
-var giftClipMoveFileExW = syscall.NewLazyDLL("kernel32.dll").NewProc("MoveFileExW")
-
-const (
-	giftClipMoveFileReplaceExisting = 0x1
-	giftClipMoveFileWriteThrough    = 0x8
-)
 
 func embeddedGiftClipPayload(cacheRoot string) (*giftClipPayload, error) {
 	archive, err := giftClipFFmpegFS.ReadFile("ffmpeg/ffmpeg.zip")
@@ -317,26 +309,6 @@ func validateGiftClipZipShape(archive []byte, manifest giftClipFFmpegManifest) e
 		binary.LittleEndian.Uint32(archive[18:22]) != binary.LittleEndian.Uint32(central[20:24]) ||
 		binary.LittleEndian.Uint32(archive[22:26]) != binary.LittleEndian.Uint32(central[24:28]) {
 		return fail("local and central entries differ")
-	}
-	return nil
-}
-
-func replaceGiftClipFileAtomically(source, target string) error {
-	sourcePointer, err := syscall.UTF16PtrFromString(source)
-	if err != nil {
-		return err
-	}
-	targetPointer, err := syscall.UTF16PtrFromString(target)
-	if err != nil {
-		return err
-	}
-	result, _, callErr := giftClipMoveFileExW.Call(
-		uintptr(unsafe.Pointer(sourcePointer)),
-		uintptr(unsafe.Pointer(targetPointer)),
-		giftClipMoveFileReplaceExisting|giftClipMoveFileWriteThrough,
-	)
-	if result == 0 {
-		return callErr
 	}
 	return nil
 }

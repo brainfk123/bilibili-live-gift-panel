@@ -11,6 +11,7 @@
     "build:ffmpeg": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-ffmpeg.ps1",
     "package:ffmpeg": "node scripts/package-ffmpeg.mjs",
     "verify:ffmpeg": "node scripts/verify-ffmpeg.mjs",
+    "verify:go-linux-compile": "node scripts/verify-go-linux-compile.mjs",
     "verify:gift-clip-export": "node scripts/verify-gift-clip-export.mjs",
     "fetch:catalog": "node scripts/fetch-gift-catalog.mjs",
     "test": "vitest run",
@@ -22,7 +23,8 @@
     "typescript": "^5.5.0",
     "vite": "^5.4.0",
     "vite-plugin-singlefile": "^2.0.3",
-    "vitest": "^2.1.0"
+    "vitest": "^2.1.0",
+    "yaml": "^2.8.1"
   },
   "dependencies": {
     "gifuct-js": "2.1.2"

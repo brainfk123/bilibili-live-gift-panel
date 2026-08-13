@@ -143,24 +143,31 @@ func (runtime *backgroundRuntime) setDiagnosticLogger(logger *diagnosticLogger) 
 }
 
 func (runtime *backgroundRuntime) Run(ctx context.Context) {
-	installation := runtime.currentInbox()
-	if installation.inbox == nil {
-		if runtime.store == nil {
-			runtime.recordIngestionFailureFrom("open", fmt.Errorf("gift inbox requires a config store"))
-			return
+	installation, err := func() (runtimeInboxInstallation, error) {
+		runtime.resetGate.RLock()
+		defer runtime.resetGate.RUnlock()
+		installation := runtime.currentInbox()
+		if installation.inbox == nil {
+			if runtime.store == nil {
+				return runtimeInboxInstallation{}, fmt.Errorf("gift inbox requires a config store")
+			}
+			opened, openErr := openGiftInbox(filepath.Dir(runtime.store.path))
+			if openErr != nil {
+				return runtimeInboxInstallation{}, openErr
+			}
+			return runtime.installInbox(opened, opened.Health()), nil
 		}
-		opened, err := openGiftInbox(filepath.Dir(runtime.store.path))
-		if err != nil {
-			runtime.recordIngestionFailureFrom("open", err)
-			return
+		if installation.epoch == 0 {
+			return runtime.installInbox(installation.inbox, runtime.snapshotInboxHealth(installation.inbox)), nil
 		}
-		installation = runtime.installInbox(opened, opened.Health())
-	} else if installation.epoch == 0 {
-		installation = runtime.installInbox(installation.inbox, runtime.snapshotInboxHealth(installation.inbox))
-	} else {
 		// A recovered inbox may be supplied before Run. Publish its startup
 		// snapshot before HTTP readers can observe the runtime.
 		runtime.publishInbox(installation, runtime.snapshotInboxHealth(installation.inbox))
+		return installation, nil
+	}()
+	if err != nil {
+		runtime.recordIngestionFailureFrom("open", err)
+		return
 	}
 	inbox := installation.inbox
 	defer inbox.Close()
