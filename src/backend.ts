@@ -215,7 +215,11 @@ export async function getBlindBoxLeaderboard(options: {
   let payload: unknown;
   try {
     payload = await response.json();
-  } catch {
+  } catch (error) {
+    if (options.signal?.aborted) {
+      if ('reason' in options.signal) throw options.signal.reason;
+      throw error;
+    }
     throw invalidBlindBoxLeaderboardResponse();
   }
   if (!response.ok || !isBlindBoxLeaderboardEnvelope(payload)) throw invalidBlindBoxLeaderboardResponse();

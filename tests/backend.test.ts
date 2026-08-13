@@ -58,6 +58,16 @@ const leaderboardSnapshot = {
   scopes: [{ giftId: 35800, giftName: '小熊虫盲盒', count: 2, lastGiftAt: 1_700_000_000_000 }],
 };
 
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void; reject(reason: unknown): void } {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('blind box leaderboard API', () => {
   afterEach(() => vi.unstubAllGlobals());
 
@@ -70,6 +80,38 @@ describe('blind box leaderboard API', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/blind-box/leaderboard?giftId=35800&limit=100', {
       cache: 'no-store', signal,
     });
+  });
+
+  it('preserves an abort reason identity while a response JSON body is pending', async () => {
+    const body = deferred<unknown>();
+    const bodyStarted = deferred<void>();
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: () => {
+        bodyStarted.resolve();
+        return body.promise;
+      },
+    } as unknown as Response));
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+    const reason = { source: 'leaderboard replacement' };
+    const request = getBlindBoxLeaderboard({ signal: controller.signal });
+
+    await bodyStarted.promise;
+    controller.abort(reason);
+    body.reject(new DOMException('body cancelled', 'AbortError'));
+
+    await expect(request).rejects.toBe(reason);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a non-abort JSON body rejection as the stable invalid-response error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => { throw new Error('invalid json'); },
+    } as unknown as Response)));
+
+    await expect(getBlindBoxLeaderboard()).rejects.toThrow('盲盒排行榜响应无效');
   });
 
   it.each([
