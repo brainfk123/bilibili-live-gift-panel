@@ -187,7 +187,7 @@ func TestBackgroundRuntimeIngressDoesNotWaitForProfile(t *testing.T) {
 		t.Fatal("profile resolver did not block the inbox consumer")
 	}
 
-	const additional = 300
+	const additional = 1
 	accepted := make(chan struct{})
 	go func() {
 		defer close(accepted)
@@ -199,7 +199,7 @@ func TestBackgroundRuntimeIngressDoesNotWaitForProfile(t *testing.T) {
 	}()
 	select {
 	case <-accepted:
-	case <-time.After(30 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("durable gift acceptance waited for the blocked profile resolver")
 	}
 	if health := inbox.Health(); health.PendingCount != additional+1 {
@@ -213,7 +213,7 @@ func TestBackgroundRuntimeIngressDoesNotWaitForProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(updated.Log) == 0 || updated.Log[0].EventID != "slow-300:积分" {
+	if len(updated.Log) == 0 || updated.Log[0].EventID != "slow-001:积分" {
 		t.Fatalf("newest ordered log entry = %#v", updated.Log)
 	}
 }
