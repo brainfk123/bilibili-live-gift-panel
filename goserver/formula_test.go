@@ -51,3 +51,32 @@ func TestFormulaRandomRange(t *testing.T) {
 		}
 	}
 }
+
+func TestFormulaLegacyEvaluatorCoverage(t *testing.T) {
+	env := map[string]float64{"price": 1000, "加班时间": 100}
+	successes := map[string]float64{
+		"IF(price>1000,10,1)":         1,
+		"MAX(1,5,3)":                  5,
+		"MAX(IF(price>500,100,0),50)": 100,
+	}
+	for formula, want := range successes {
+		got, err := evaluateFormula(formula, env)
+		if err != nil || math.Abs(got-want) > 0.000001 {
+			t.Fatalf("%s = %v, %v; want %v", formula, got, err, want)
+		}
+	}
+	for _, formula := range []string{"1/0", "foo+1", "count+1", "(1+2", "1+2 abc", "1 +"} {
+		if _, err := evaluateFormula(formula, env); err == nil {
+			t.Fatalf("%s unexpectedly accepted", formula)
+		}
+	}
+}
+
+func TestFormulaRandIsHalfOpenUnitInterval(t *testing.T) {
+	for range 200 {
+		got, err := evaluateFormula("RAND()", map[string]float64{})
+		if err != nil || got < 0 || got >= 1 {
+			t.Fatalf("RAND() = %v, %v", got, err)
+		}
+	}
+}
