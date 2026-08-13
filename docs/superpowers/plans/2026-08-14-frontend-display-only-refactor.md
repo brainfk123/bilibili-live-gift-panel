@@ -184,49 +184,37 @@ Stage production files only if Step 2 required a verified parity fix.
 - Modify: `src/formula/index.ts`
 - Modify: `tests/formula.test.ts`
 - Modify: `tests/gameplay-templates.test.ts`
-- Create: `tests/frontend-display-only-boundary.test.ts`
 
 **Interfaces:**
 - Consumes: Task 1 Go safety net; `collectVars(string): string[]`; `FormulaError`.
 - Produces: no frontend runtime rule evaluation; template tests verify parseability and allowed variable references without evaluating formulas.
 
-- [ ] **Step 1: Write a failing architecture test before deletion**
+- [ ] **Step 1: Write a failing public-interface test before deletion**
 
-Create `tests/frontend-display-only-boundary.test.ts`:
+At the top of `tests/formula.test.ts`, import the real module namespace and add:
 
 ```ts
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import * as formulaModule from '../src/formula';
 
-const root = process.cwd();
-
-describe('frontend display-only boundary', () => {
-  it('does not expose the removed formula evaluator', () => {
-    const formulaIndex = readFileSync(join(root, 'src/formula/index.ts'), 'utf8');
-    expect(formulaIndex).not.toContain('evalFormula');
-    expect(formulaIndex).not.toContain("./evaluator");
-  });
-
-  it('does not retain runtime rule-engine sources', () => {
-    const packageSources = [
-      readFileSync(join(root, 'src/main.ts'), 'utf8'),
-      readFileSync(join(root, 'src/ui/config/config.ts'), 'utf8'),
-    ].join('\n');
-    expect(packageSources).not.toMatch(/applyGiftToState|recordGiftTotals|resetTodayStats/);
+describe('formula public interface', () => {
+  it('exposes draft reference collection without a runtime evaluator', () => {
+    expect(Object.keys(formulaModule).sort()).toEqual(['FormulaError', 'collectVars']);
   });
 });
 ```
 
-- [ ] **Step 2: Run the architecture test to verify RED**
+This exercises the runtime module interface rather than grepping source text. File deletion remains a typecheck/build/`rg` gate, not a shipped change-detector test.
+
+- [ ] **Step 2: Run the public-interface test to verify RED**
 
 Run:
 
 ```powershell
-npx vitest run tests/frontend-display-only-boundary.test.ts --reporter=dot
+npx vitest run tests/formula.test.ts --reporter=dot
 ```
 
-Expected: FAIL because `src/formula/index.ts` still contains `evalFormula` and imports `./evaluator`.
+Expected: FAIL because the actual module namespace still exports `evalFormula`.
 
 - [ ] **Step 3: Remove evaluator exports and preserve `collectVars`**
 
@@ -295,19 +283,19 @@ This still parses every generated expression while leaving execution semantics s
 Run:
 
 ```powershell
-npx vitest run tests/frontend-display-only-boundary.test.ts tests/formula.test.ts tests/gameplay-templates.test.ts --reporter=dot
+npx vitest run tests/formula.test.ts tests/gameplay-templates.test.ts --reporter=dot
 npm run typecheck
 npm test -- --reporter=dot
 rg -n "evalFormula|applyGiftToState|recordGiftTotals|resetTodayStats" src tests
 git diff --check
 ```
 
-Expected: Vitest/typecheck/full tests exit 0. `rg` may find only the forbidden-symbol strings inside `tests/frontend-display-only-boundary.test.ts`; no import, definition, or runtime call may remain.
+Expected: Vitest/typecheck/full tests exit 0 and `rg` returns no matches.
 
 - [ ] **Step 6: Commit Task 2**
 
 ```powershell
-git add -A -- src/engine src/formula tests/engine.test.ts tests/formula.test.ts tests/gameplay-templates.test.ts tests/frontend-display-only-boundary.test.ts
+git add -A -- src/engine src/formula tests/engine.test.ts tests/formula.test.ts tests/gameplay-templates.test.ts
 git diff --cached --check
 git commit -m "refactor: remove frontend rule evaluator"
 ```
@@ -714,26 +702,12 @@ git commit -m "feat: add blind box leaderboard client"
 - Modify: `tests/display-layout.test.ts`
 - Modify: `tests/blind-box-display-scroll.test.ts`
 - Modify: `tests/wizard.test.ts`
-- Modify: `tests/frontend-display-only-boundary.test.ts`
 
 **Interfaces:**
 - Consumes: Task 5 `BlindBoxLeaderboardResource` and authoritative snapshot.
 - Produces: both UI surfaces render only backend-derived blind-box data; no TypeScript blind-box aggregation remains.
 
-- [ ] **Step 1: Extend architecture tests to make the old imports RED**
-
-In `tests/frontend-display-only-boundary.test.ts`, recursively read `src/ui/display/blind-box-display.ts` and `src/ui/config/config.ts`, then assert:
-
-```ts
-expect(source).not.toContain("from '../../blind-box-leaderboard'");
-expect(source).not.toContain('buildBlindBoxLeaderboard');
-expect(source).not.toContain('listBlindBoxLeaderboardScopes');
-expect(source).toContain('createBlindBoxLeaderboardResource');
-```
-
-Update `tests/display-layout.test.ts` to require the backend resource and prohibit local aggregation instead of expecting the old function string.
-
-- [ ] **Step 2: Add OBS async-state tests**
+- [ ] **Step 1: Add OBS async-state RED tests**
 
 Extend `tests/blind-box-display-scroll.test.ts` with a sibling describe using fake timers and a fake resource adapter. Cover:
 
@@ -762,15 +736,15 @@ export function mountBlindBoxDisplay(
 
 The test passes a fake factory through this third argument; production callers remain unchanged.
 
-Run the two architecture/display files and confirm at least the old-import assertion fails before production edits.
+Run the contradictory local-ledger/backend-snapshot test before production edits. Expected: FAIL because the current display has no injected resource and derives rows from `state.contributions`.
 
-- [ ] **Step 3: Migrate `blind-box-display.ts`**
+- [ ] **Step 2: Migrate `blind-box-display.ts`**
 
 Replace imports of the deleted module with Task 5 resource/types. Create one resource per mount. The initial render uses a non-authoritative empty visual state with the requested scope name fallback and no calculated totals; every 750ms cycle performs both existing config/runtime refresh and a leaderboard resource refresh with `{giftId: blindBoxGiftId, limit: 100}`.
 
 Apply only `status:'applied'`. For `status:'failed'`, keep `resource.current()` and set the connection indicator to error. Do not derive from `state.contributions`. Include snapshot `updatedAt`, summary, scopes, and viewer identity in `displaySignature` so new authoritative data triggers render. On `beforeunload`, cancel the resource and stop existing timers.
 
-- [ ] **Step 4: Add config-page race and failure tests**
+- [ ] **Step 3: Add config-page race and failure RED tests**
 
 Update the contribution section tests in `tests/wizard.test.ts` to use fetch responses for:
 
@@ -783,7 +757,9 @@ Update the contribution section tests in `tests/wizard.test.ts` to use fetch res
 
 Keep existing assertions for scope icons, summary text, CSS structure, contribution mode, and rule-hit mode.
 
-- [ ] **Step 5: Migrate `config.ts`**
+Run the contradictory local-ledger/backend-snapshot test before changing `config.ts`. Expected: FAIL because the current page renders the local ledger instead of the backend snapshot.
+
+- [ ] **Step 4: Migrate `config.ts`**
 
 Create one leaderboard resource in config-page lifetime state and cancel it during page teardown. `renderContributionLeaderboard` keeps contribution/rule tab behavior unchanged, but reads blind-box summary/scopes/viewers only from the resource snapshot.
 
@@ -791,16 +767,18 @@ When opening the section, request the unscoped complete snapshot. When selecting
 
 Move no config-import, gift-clip, save, or general state-refresh code in this step.
 
-- [ ] **Step 6: Delete the old aggregation module and migrate tests**
+- [ ] **Step 5: Delete the old aggregation module and migrate tests**
 
 Delete `src/blind-box-leaderboard.ts` and `tests/blind-box-leaderboard.test.ts`. Their semantic assertions now live in Task 3 Go tests; do not preserve a private copy under another name.
 
-- [ ] **Step 7: Run focused frontend RED/GREEN gates**
+Remove the old blind-box source-string expectations from `tests/display-layout.test.ts`; do not replace them with new source-string assertions. Runtime adapter/resource/UI behavior tests and the `rg` gate provide the verification.
+
+- [ ] **Step 6: Run focused frontend RED/GREEN gates**
 
 Run:
 
 ```powershell
-npx vitest run tests/frontend-display-only-boundary.test.ts tests/display-layout.test.ts tests/blind-box-display-scroll.test.ts tests/wizard.test.ts --reporter=dot
+npx vitest run tests/display-layout.test.ts tests/blind-box-display-scroll.test.ts tests/wizard.test.ts --reporter=dot
 npm run typecheck
 npm test -- --reporter=dot
 npm run build:ui
@@ -808,12 +786,12 @@ rg -n "buildBlindBoxLeaderboard|listBlindBoxLeaderboardScopes|evalFormula|applyG
 git diff --check
 ```
 
-Expected: all test/build commands exit 0. `rg` may find forbidden names only as string literals in the architecture test; no runtime definition/import/call may remain.
+Expected: all test/build commands exit 0 and `rg` returns no matches.
 
-- [ ] **Step 8: Commit Task 6**
+- [ ] **Step 7: Commit Task 6**
 
 ```powershell
-git add -A -- src/ui/display/blind-box-display.ts src/ui/config/config.ts src/blind-box-leaderboard.ts tests/blind-box-leaderboard.test.ts tests/display-layout.test.ts tests/blind-box-display-scroll.test.ts tests/wizard.test.ts tests/frontend-display-only-boundary.test.ts
+git add -A -- src/ui/display/blind-box-display.ts src/ui/config/config.ts src/blind-box-leaderboard.ts tests/blind-box-leaderboard.test.ts tests/display-layout.test.ts tests/blind-box-display-scroll.test.ts tests/wizard.test.ts
 git diff --cached --check
 git commit -m "refactor: render backend blind box leaderboard"
 ```
@@ -917,7 +895,7 @@ rg -n "fetch\(" src/ui/display/blind-box-display.ts src/ui/config/config.ts
 
 Expected:
 
-- forbidden symbols appear only inside architecture-test string assertions;
+- forbidden-symbol searches return no matches;
 - the new URL appears only in `src/backend.ts` and tests;
 - neither UI file calls `fetch` directly.
 
