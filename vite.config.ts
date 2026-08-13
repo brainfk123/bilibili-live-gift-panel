@@ -29,8 +29,16 @@ export default defineConfig({
     },
   },
   server: {
+    watch: {
+      ignored: ['**/artifacts/gift-clip-export/**'],
+    },
     proxy: {
-      '/api': 'http://localhost:12450',
+      '/api': {
+        target: process.env.VITE_API_PROXY_TARGET || 'http://localhost:12450',
+        // Keep the browser-visible Host so Go's same-origin check sees the
+        // same logical origin that the packaged application uses.
+        changeOrigin: false,
+      },
     },
   },
   test: {

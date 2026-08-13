@@ -465,7 +465,7 @@ describe('gift clip studio', () => {
       width: 640, height: 360, receipt, avatar: null, document: expect.anything(),
     }));
     expect(studioMocks.createJob).toHaveBeenCalledWith(expect.objectContaining({
-      receiptId: 'receipt-1', crop: { x: 0, y: 0, width: 1, height: 1 },
+      receiptId: 'receipt-1', crop: { x: 0, y: 0, width: 640, height: 360 },
       background: expect.any(Blob), overlay: expect.any(Blob),
     }), expect.any(AbortSignal));
     expect(host.querySelector('.gift-clip-video')).toEqual(expect.objectContaining({

@@ -107,16 +107,16 @@ func TestBuildGiftClipFFmpegArgsReconstructsPackedAlphaBeforeUserCrop(t *testing
 	}
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
-		"split=2", "crop=1920:1080:0:0,scale=1920:1080[rg]",
+		"[0:v]setpts=PTS-STARTPTS,fps=30,split=2", "crop=1920:1080:0:0,scale=1920:1080[rg]",
 		"crop=1920:1080:1920:0,scale=1920:1080,format=gray[a]",
-		"[rg][a]alphamerge,crop=960:540:101:53,setpts=PTS-STARTPTS,fps=30[anim]",
+		"[rg][a]alphamerge,crop=960:540:101:53[anim]",
 		"-hw_encoding 0",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in %s", want, joined)
 		}
 	}
-	if strings.Contains(joined, "http://") || strings.Contains(joined, "https://") || strings.Contains(joined, " -map 0:a") {
+	if strings.Contains(joined, "http://") || strings.Contains(joined, "https://") || strings.Contains(joined, " -map 0:a") || strings.Contains(joined, "shortest=1") {
 		t.Fatalf("unsafe or audio argument in %s", joined)
 	}
 }

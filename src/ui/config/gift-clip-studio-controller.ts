@@ -238,7 +238,7 @@ export function openGiftClipStudio(options: GiftClipStudioOptions): GiftClipStud
         if (!isCurrent(token) || controller.signal.aborted) return;
         const created = await createGiftClipJob({
           receiptId: receipt.id,
-          crop,
+          crop: pixels,
           ...layers,
         }, controller.signal);
         if (!isCurrent(token) || controller.signal.aborted) {

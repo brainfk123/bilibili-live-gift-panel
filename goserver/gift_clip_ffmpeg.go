@@ -429,14 +429,15 @@ func giftClipFilterGraph(request giftClipEncodeRequest) (string, error) {
 	if request.Source.Kind == giftClipSourceEffect {
 		layout := request.Source.Layout
 		return fmt.Sprintf(
-			"[0:v]split=2[rgb0][alpha0];[rgb0]crop=%d:%d:%d:%d,scale=%d:%d[rg];[alpha0]crop=%d:%d:%d:%d,scale=%d:%d,format=gray[a];[rg][a]alphamerge,crop=%d:%d:%d:%d,setpts=PTS-STARTPTS,fps=%d[anim];[1:v]format=rgba[bg];[bg][anim]overlay=0:0:format=auto:shortest=1[mid];[2:v]format=rgba[ol];[mid][ol]overlay=0:0:format=auto:shortest=1,fps=%d,format=nv12[out]",
+			"[0:v]setpts=PTS-STARTPTS,fps=%d,split=2[rgb0][alpha0];[rgb0]crop=%d:%d:%d:%d,scale=%d:%d[rg];[alpha0]crop=%d:%d:%d:%d,scale=%d:%d,format=gray[a];[rg][a]alphamerge,crop=%d:%d:%d:%d[anim];[1:v]format=rgba[bg];[bg][anim]overlay=0:0:format=auto[mid];[2:v]format=rgba[ol];[mid][ol]overlay=0:0:format=auto,fps=%d,format=nv12[out]",
+			giftClipFPS,
 			layout.RGBFrame[2], layout.RGBFrame[3], layout.RGBFrame[0], layout.RGBFrame[1], request.Source.VisualWidth, request.Source.VisualHeight,
 			layout.AlphaFrame[2], layout.AlphaFrame[3], layout.AlphaFrame[0], layout.AlphaFrame[1], request.Source.VisualWidth, request.Source.VisualHeight,
-			request.Crop.Width, request.Crop.Height, request.Crop.X, request.Crop.Y, giftClipFPS, giftClipFPS,
+			request.Crop.Width, request.Crop.Height, request.Crop.X, request.Crop.Y, giftClipFPS,
 		), nil
 	}
 	return fmt.Sprintf(
-		"[0:v]setpts=PTS-STARTPTS,crop=%d:%d:%d:%d,format=rgba,fps=%d[anim];[1:v]format=rgba[bg];[bg][anim]overlay=0:0:format=auto:shortest=1[mid];[2:v]format=rgba[ol];[mid][ol]overlay=0:0:format=auto:shortest=1,fps=%d,format=nv12[out]",
+		"[0:v]setpts=PTS-STARTPTS,crop=%d:%d:%d:%d,format=rgba,fps=%d[anim];[1:v]format=rgba[bg];[bg][anim]overlay=0:0:format=auto[mid];[2:v]format=rgba[ol];[mid][ol]overlay=0:0:format=auto,fps=%d,format=nv12[out]",
 		request.Crop.Width, request.Crop.Height, request.Crop.X, request.Crop.Y, giftClipFPS, giftClipFPS,
 	), nil
 }
