@@ -230,6 +230,8 @@ export function mountConfig(root: HTMLElement): void {
   let localStateVersion = 0;
   let leaderboardMode: LeaderboardMode = 'contribution';
   let leaderboardBlindBoxGiftId: number | undefined;
+  let requestedLeaderboardBlindBoxGiftId: number | undefined;
+  let requestedBlindBoxScopeName = '全部盲盒';
   let blindBoxLeaderboardSnapshot: BlindBoxLeaderboardSnapshot | undefined;
   let blindBoxLeaderboardLoading = false;
   let blindBoxLeaderboardError = false;
@@ -2396,6 +2398,8 @@ export function mountConfig(root: HTMLElement): void {
         state.contributions = contributions;
         blindBoxLeaderboardResource.clear();
         blindBoxLeaderboardSnapshot = undefined;
+        leaderboardBlindBoxGiftId = undefined;
+        requestedBlindBoxScopeName = '全部盲盒';
         void refreshBlindBoxLeaderboard();
         renderContributionLeaderboard(true);
         toast('观众排行榜已清空', root);
@@ -2509,10 +2513,9 @@ export function mountConfig(root: HTMLElement): void {
       ]) as HTMLButtonElement;
       option.dataset.giftId = scope ? String(scope.giftId) : '';
       option.onclick = () => {
-        leaderboardBlindBoxGiftId = scope?.giftId;
         blindBoxScopePicker.open = false;
-        void refreshBlindBoxLeaderboard({ giftId: leaderboardBlindBoxGiftId });
-        renderRows();
+        requestedBlindBoxScopeName = scope?.giftName ?? '全部盲盒';
+        void refreshBlindBoxLeaderboard(scope?.giftId);
       };
       blindBoxScopeOptions.push(option);
       return option;
@@ -2606,25 +2609,28 @@ export function mountConfig(root: HTMLElement): void {
       section.append(el('p', {
         class: 'blind-box-leaderboard-status',
         role: 'status',
-        text: '正在刷新盲盒排行榜…',
+        text: `正在刷新${requestedBlindBoxScopeName}盲盒排行榜…`,
       } as any));
     }
     renderRows();
     appendOrReplaceSection(section, '.contribution-section', replaceExisting);
   }
 
-  async function refreshBlindBoxLeaderboard(options: { giftId?: number } = {}): Promise<void> {
+  async function refreshBlindBoxLeaderboard(giftId?: number): Promise<void> {
+    requestedLeaderboardBlindBoxGiftId = giftId;
     blindBoxLeaderboardLoading = true;
     blindBoxLeaderboardError = false;
     renderContributionLeaderboard(true);
-    const result = await blindBoxLeaderboardResource.refresh({ ...options, limit: 100 });
+    const result = await blindBoxLeaderboardResource.refresh({ giftId, limit: 100 });
     if (result.status === 'stale') return;
+    if (requestedLeaderboardBlindBoxGiftId !== giftId) return;
     blindBoxLeaderboardLoading = false;
     if (result.status === 'failed') {
       blindBoxLeaderboardSnapshot = blindBoxLeaderboardResource.current();
       blindBoxLeaderboardError = true;
     } else {
       blindBoxLeaderboardSnapshot = result.snapshot;
+      leaderboardBlindBoxGiftId = giftId;
     }
     renderContributionLeaderboard(true);
   }

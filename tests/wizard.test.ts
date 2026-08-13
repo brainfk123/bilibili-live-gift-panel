@@ -3504,7 +3504,7 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).not.toContain('迟到 scope A 观众');
   });
 
-  it('retains the latest backend blind-box rows and reports a refresh failure', async () => {
+  it('keeps the applied global scope visible when a requested scope fails', async () => {
     const configured = defaultAdvancedState();
     configured.settings.showTutorial = false;
     await saveState(configured);
@@ -3512,30 +3512,54 @@ describe('single-page configuration rendering', () => {
     let leaderboardRequest = 0;
     const snapshot = {
       updatedAt: 1,
-      summary: { viewerCount: 1, blindBoxCount: 1, cost: 9000, value: 15000, profit: 6000, unpricedCount: 0 },
+      summary: { viewerCount: 1, blindBoxCount: 3, cost: 27000, value: 45000, profit: 18000, unpricedCount: 0 },
       viewers: [{
-        key: 'uid:server', uid: 1, uname: '最后成功的服务端观众', avatar: '', giftCount: 1, goldValue: 9000, silverValue: 0,
-        ruleTriggers: 0, attributeDeltas: {}, blindBoxCount: 1, blindBoxCost: 9000, blindBoxValue: 15000,
-        blindBoxProfit: 6000, lastGiftAt: 1,
+        key: 'uid:global', uid: 1, uname: '全局成功观众', avatar: '', giftCount: 3, goldValue: 27000, silverValue: 0,
+        ruleTriggers: 0, attributeDeltas: {}, blindBoxCount: 3, blindBoxCost: 27000, blindBoxValue: 45000,
+        blindBoxProfit: 18000, lastGiftAt: 1,
       }],
-      scopes: [{ giftId: 1, giftName: '失败重试盲盒', count: 1, lastGiftAt: 1 }],
+      scopes: [
+        { giftId: 1, giftName: 'scope A', count: 1, lastGiftAt: 1 },
+        { giftId: 2, giftName: 'scope B', count: 2, lastGiftAt: 2 },
+      ],
+    };
+    const scopeASnapshot = {
+      ...snapshot,
+      updatedAt: 2,
+      summary: { viewerCount: 1, blindBoxCount: 1, cost: 9000, value: 12000, profit: 3000, unpricedCount: 0 },
+      viewers: [{
+        ...snapshot.viewers[0], uname: 'scope A 成功观众', blindBoxCount: 1, blindBoxCost: 9000,
+        blindBoxValue: 12000, blindBoxProfit: 3000,
+      }],
     };
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       if (!String(input).includes('/api/blind-box/leaderboard')) return fallbackFetch(input, init);
       leaderboardRequest += 1;
       if (leaderboardRequest === 1) return Response.json({ code: 0, leaderboard: snapshot });
+      if (leaderboardRequest === 3) return Response.json({ code: 0, leaderboard: scopeASnapshot });
       throw new Error('network unavailable');
     }));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    await vi.waitFor(() => expect(root.querySelectorAll('.blind-box-scope-option')).toHaveLength(2));
+    await vi.waitFor(() => expect(root.querySelectorAll('.blind-box-scope-option')).toHaveLength(3));
     root.querySelectorAll('.contribution-tab')[2].onclick?.();
-    expect(textOf(root)).toContain('最后成功的服务端观众');
+    expect(textOf(root)).toContain('全局成功观众');
     root.querySelectorAll('.blind-box-scope-option')[1].onclick?.();
     await vi.waitFor(() => expect(textOf(root)).toContain('盲盒排行榜暂时无法刷新'));
 
-    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('最后成功的服务端观众');
+    expect(textOf(root.querySelector('.blind-box-scope-trigger') as TestElement)).toContain('全部盲盒');
+    expect(textOf(root.querySelector('.blind-box-scope-bar') as TestElement)).toContain('全部盲盒 · 1 位观众 · 3 个 · 投入 27 元 · 开出 45 元 · 净盈亏 +18 元');
+    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('全局成功观众');
+    const copyButton = root.querySelector('.contribution-obs-copy') as TestElement;
+    copyButton.onclick?.();
+    await Promise.resolve();
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith('http://localhost:12450/?mode=display&view=blind-box');
     expect((root.querySelector('.blind-box-leaderboard-status') as any)?.role).toBe('status');
+
+    root.querySelectorAll('.blind-box-scope-option')[1].onclick?.();
+    await vi.waitFor(() => expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('scope A 成功观众'));
+    expect(textOf(root.querySelector('.blind-box-scope-trigger') as TestElement)).toContain('scope A');
+    expect(textOf(root.querySelector('.blind-box-scope-bar') as TestElement)).toContain('scope A · 1 位观众 · 1 个 · 投入 9 元 · 开出 12 元 · 净盈亏 +3 元');
   });
 
   it('reserves enough horizontal space for the complete blind-box scope name', () => {
