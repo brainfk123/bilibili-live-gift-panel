@@ -134,6 +134,7 @@ type giftRule struct {
 	GiftID        int      `json:"giftId"`
 	AttributeName string   `json:"attributeName"`
 	FormulaName   string   `json:"formulaName,omitempty"`
+	Condition     string   `json:"condition,omitempty"`
 	Formula       string   `json:"formula"`
 	Enabled       *bool    `json:"enabled,omitempty"`
 	MatchGiftIDs  []int    `json:"matchGiftIds,omitempty"`

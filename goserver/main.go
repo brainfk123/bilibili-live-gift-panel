@@ -88,31 +88,51 @@ func handleFormulaPreview(store *configStore) http.HandlerFunc {
 			AttributeValue float64 `json:"attributeValue"`
 			Context        string  `json:"context"`
 			GiftPrice      float64 `json:"giftPrice"`
+			Condition      string  `json:"condition"`
+			UserIdentity   *int    `json:"userIdentity"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&request); err != nil {
+			if strings.Contains(err.Error(), "userIdentity") {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": "用户身份必须是 0 到 4 的整数"})
+				return
+			}
 			writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": "请求格式不正确"})
 			return
+		}
+		identityLevel := giftIdentityOrdinary
+		if request.UserIdentity != nil {
+			identityLevel = *request.UserIdentity
+			if identityLevel < giftIdentityOrdinary || identityLevel > giftIdentityGovernor {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": "用户身份必须是 0 到 4 的整数"})
+				return
+			}
 		}
 		state, err := store.readState()
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": err.Error()})
 			return
 		}
-		var result float64
 		if request.Context == "timer" {
-			result, err = timerFormulaPreview(state, request.Formula, request.AttributeName, request.AttributeValue)
+			result, err := timerFormulaPreview(state, request.Formula, request.AttributeName, request.AttributeValue)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"code": 0, "result": result})
+			return
 		} else {
 			price := request.GiftPrice
 			if price <= 0 {
 				price = 1000
 			}
-			result, err = formulaPreviewWithPrice(state, request.Formula, request.AttributeName, request.AttributeValue, price)
-		}
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})
+			preview, err := previewGiftRule(state, request.Condition, request.Formula, request.AttributeName, request.AttributeValue, price, identityLevel)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"code": 0, "triggered": preview.Triggered, "result": preview.Result})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"code": 0, "result": result})
 	}
 }
 

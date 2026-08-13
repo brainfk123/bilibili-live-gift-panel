@@ -447,6 +447,88 @@ func TestFormulaPreviewUsesSelectedGiftPrice(t *testing.T) {
 	}
 }
 
+func TestFormulaPreviewUsesGiftRuleIdentity(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{
+		"formula":"积分+10","condition":"用户身份>=舰长","attributeName":"积分","attributeValue":0,
+		"context":"gift","userIdentity":2
+	}`))
+	response := httptest.NewRecorder()
+
+	handleFormulaPreview(store)(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"triggered":true`) || !strings.Contains(response.Body.String(), `"result":10`) {
+		t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestFormulaPreviewReturnsUnchangedValueForFalseGiftCondition(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{
+		"formula":"积分+10","condition":"用户身份>=舰长","attributeName":"积分","attributeValue":4,
+		"context":"gift","userIdentity":1
+	}`))
+	response := httptest.NewRecorder()
+
+	handleFormulaPreview(store)(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"triggered":false`) || !strings.Contains(response.Body.String(), `"result":4`) {
+		t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestFormulaPreviewRejectsInvalidUserIdentity(t *testing.T) {
+	for _, identity := range []string{"-1", "5", "1.5", `"captain"`} {
+		t.Run(identity, func(t *testing.T) {
+			store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+			request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{
+				"formula":"积分+1","attributeName":"积分","attributeValue":0,"userIdentity":`+identity+`
+			}`))
+			response := httptest.NewRecorder()
+			handleFormulaPreview(store)(response, request)
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "用户身份必须是 0 到 4 的整数") {
+				t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestFormulaPreviewRejectsInvalidGiftCondition(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{
+		"formula":"积分+10","condition":"用户身份>=不存在身份","attributeName":"积分","attributeValue":0,"userIdentity":2
+	}`))
+	response := httptest.NewRecorder()
+	handleFormulaPreview(store)(response, request)
+	if response.Code != http.StatusBadRequest || strings.Contains(response.Body.String(), `"triggered":false`) || !strings.Contains(response.Body.String(), "不存在身份") {
+		t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestFormulaPreviewKeepsOmittedGiftConditionCompatible(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{
+		"formula":"积分+price/1000","attributeName":"积分","attributeValue":4,"giftPrice":2000
+	}`))
+	response := httptest.NewRecorder()
+	handleFormulaPreview(store)(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"triggered":true`) || !strings.Contains(response.Body.String(), `"result":6`) {
+		t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestFormulaPreviewKeepsUserIdentityOutOfTimerContext(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{
+		"formula":"用户身份+1","attributeName":"积分","attributeValue":0,"context":"timer","userIdentity":4
+	}`))
+	response := httptest.NewRecorder()
+	handleFormulaPreview(store)(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "用户身份") {
+		t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
 func TestListenWithFallbackSkipsOccupiedPort(t *testing.T) {
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

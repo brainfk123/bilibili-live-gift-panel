@@ -1406,9 +1406,12 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 			if rule.DailyLimit != nil && triggerCount >= *rule.DailyLimit {
 				continue
 			}
-			environment := map[string]float64{"price": gift.Price}
-			for _, candidate := range state.Attributes {
-				environment[candidate.Name] = candidate.Value
+			environment := buildGiftFormulaEnvironment(*state, attribute.Name, attribute.Value, gift.Price, gift.Membership)
+			if strings.TrimSpace(rule.Condition) != "" {
+				condition, err := evaluateFormula(rule.Condition, environment)
+				if err != nil || condition == 0 || math.IsInf(condition, 0) || math.IsNaN(condition) {
+					continue
+				}
 			}
 			nextValue, err := evaluateFormula(rule.Formula, environment)
 			if err != nil || math.IsInf(nextValue, 0) || math.IsNaN(nextValue) {
@@ -1569,11 +1572,7 @@ func formulaPreview(state appState, formula, attributeName string, attributeValu
 }
 
 func formulaPreviewWithPrice(state appState, formula, attributeName string, attributeValue, giftPrice float64) (float64, error) {
-	environment := map[string]float64{"price": giftPrice}
-	for _, attribute := range state.Attributes {
-		environment[attribute.Name] = attribute.Value
-	}
-	environment[attributeName] = attributeValue
+	environment := buildGiftFormulaEnvironment(state, attributeName, attributeValue, giftPrice, "")
 	result, err := evaluateFormula(formula, environment)
 	if err != nil {
 		return 0, err
@@ -1582,6 +1581,35 @@ func formulaPreviewWithPrice(state appState, formula, attributeName string, attr
 		return 0, fmt.Errorf("规则结果不是有效数字")
 	}
 	return result, nil
+}
+
+type giftRulePreviewResult struct {
+	Triggered bool    `json:"triggered"`
+	Result    float64 `json:"result"`
+}
+
+func previewGiftRule(state appState, condition, formula, attributeName string, attributeValue, giftPrice float64, identityLevel int) (giftRulePreviewResult, error) {
+	environment := buildGiftFormulaEnvironmentWithIdentity(state, attributeName, attributeValue, giftPrice, float64(identityLevel))
+	if strings.TrimSpace(condition) != "" {
+		conditionResult, err := evaluateFormula(condition, environment)
+		if err != nil {
+			return giftRulePreviewResult{}, err
+		}
+		if math.IsInf(conditionResult, 0) || math.IsNaN(conditionResult) {
+			return giftRulePreviewResult{}, fmt.Errorf("规则结果不是有效数字")
+		}
+		if conditionResult == 0 {
+			return giftRulePreviewResult{Triggered: false, Result: attributeValue}, nil
+		}
+	}
+	result, err := evaluateFormula(formula, environment)
+	if err != nil {
+		return giftRulePreviewResult{}, err
+	}
+	if math.IsInf(result, 0) || math.IsNaN(result) {
+		return giftRulePreviewResult{}, fmt.Errorf("规则结果不是有效数字")
+	}
+	return giftRulePreviewResult{Triggered: true, Result: result}, nil
 }
 
 func timerFormulaPreview(state appState, formula, attributeName string, attributeValue float64) (float64, error) {

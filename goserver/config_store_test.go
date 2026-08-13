@@ -877,6 +877,85 @@ func TestConfigStoreRejectsGiftOnlyPriceVariableInTimer(t *testing.T) {
 	}
 }
 
+func TestConfigStoreRejectsReservedFormulaNameAttributes(t *testing.T) {
+	for _, name := range []string{"用户身份", "普通用户", "粉丝团", "舰长", "提督", "总督"} {
+		t.Run(name, func(t *testing.T) {
+			store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+			payload := fmt.Sprintf(`{"attributes":[{"name":%q,"value":0}]}`, name)
+			response := httptest.NewRecorder()
+			store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "系统公式名称不能作为属性名") {
+				t.Fatalf("status = %d; body = %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestConfigStoreAllowsNearMatchToReservedFormulaName(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(`{"attributes":[{"name":"用户身份等级","value":0}]}`)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConfigStoreRejectsReservedFormulaNamePresetSource(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{"formulaPresets":[{"id":"legacy","name":"历史预设","context":"gift","formula":"积分+1","sourceAttributeName":"用户身份"}]}`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "系统公式名称不能作为预设来源属性") {
+		t.Fatalf("status = %d; body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConfigStorePersistsGiftRuleCondition(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{
+		"attributes":[{"name":"积分","value":0}],
+		"rules":[{"id":"r1","giftId":1,"attributeName":"积分","formulaName":"舰长规则","condition":"用户身份>=舰长","formula":"积分+1"}]
+	}`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", response.Code, response.Body.String())
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Rules) != 1 || state.Rules[0].Condition != "用户身份>=舰长" {
+		t.Fatalf("rules = %#v, want persisted condition", state.Rules)
+	}
+}
+
+func TestConfigStoreRejectsInvalidGiftRuleCondition(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{
+		"attributes":[{"name":"积分","value":0}],
+		"rules":[{"id":"r1","giftId":1,"attributeName":"积分","formulaName":"坏条件","condition":"用户身份>=不存在身份","formula":"积分+1"}]
+	}`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "运行条件无效") {
+		t.Fatalf("status = %d; body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConfigStoreRejectsGiftIdentityInTimer(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{
+		"attributes":[{"name":"积分","value":0}],
+		"timerRules":[{"id":"timer","attributeName":"积分","formulaName":"错误定时器","intervalSeconds":60,"condition":"用户身份>=舰长","formula":"积分+1","enabled":true}]
+	}`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "用户身份") {
+		t.Fatalf("status = %d; body = %s", response.Code, response.Body.String())
+	}
+}
+
 func TestConfigStorePersistsFormulaPresets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	store := &configStore{path: path}
