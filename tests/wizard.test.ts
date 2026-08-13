@@ -2392,15 +2392,20 @@ describe('single-page configuration rendering', () => {
   });
 
   it('preserves an unrelated gift rule without condition while renaming an attribute', async () => {
-    const [relatedGift, unrelatedGift] = builtinCatalog;
+    const [relatedGift, unrelatedGift, crossAttributeGift] = builtinCatalog;
     const configured = state('88888888');
     configured.attributes.push({ name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' });
     const unrelated = {
       id: 'r-unrelated', giftId: unrelatedGift.id, attributeName: '积分', formulaName: '积分规则', formula: '积分+1', enabled: true,
     };
+    const crossAttribute = {
+      id: 'r-cross-attribute', giftId: crossAttributeGift.id, attributeName: '积分', formulaName: '跨属性规则',
+      formula: '积分+加班时间', condition: '用户身份>=舰长*(加班时间>0)', enabled: true,
+    };
     configured.rules = [
       { id: 'r-related', giftId: relatedGift.id, attributeName: '加班时间', formulaName: '改名规则', formula: '加班时间+1', enabled: true },
       unrelated,
+      crossAttribute,
     ];
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
     const root = new TestElement('div');
@@ -2415,6 +2420,9 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).attributes[0].name).toBe('倒计时'));
     const saved = JSON.parse(storage.get('bilibili-live-gift-panel-v1')!);
     expect(saved.rules.find((rule: { id: string }) => rule.id === unrelated.id)).toEqual(unrelated);
+    expect(saved.rules.find((rule: { id: string }) => rule.id === crossAttribute.id)).toMatchObject({
+      attributeName: '积分', formula: '积分+倒计时', condition: '用户身份>=舰长*(倒计时>0)',
+    });
   });
 
   it('formula help explains gift-only identities, equality, and random choice', () => {

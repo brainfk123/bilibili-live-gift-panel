@@ -4600,15 +4600,17 @@ export function mountConfig(root: HTMLElement): void {
     }
 
     const renamedRules = state.rules.map((rule) => {
-      const needsRename = Boolean(originalName && originalName !== name && rule.attributeName === originalName);
-      if (!needsRename) return rule;
+      if (!originalName || originalName === name) return rule;
+      const attributeName = rule.attributeName === originalName ? name : rule.attributeName;
+      const formula = replaceFormulaVariable(rule.formula, originalName, name);
+      const hasCondition = Object.prototype.hasOwnProperty.call(rule, 'condition');
+      const condition = hasCondition ? replaceFormulaVariable(rule.condition ?? '', originalName, name) : undefined;
+      if (attributeName === rule.attributeName && formula === rule.formula && (!hasCondition || condition === rule.condition)) return rule;
       return {
         ...rule,
-        attributeName: name,
-        ...(Object.prototype.hasOwnProperty.call(rule, 'condition')
-          ? { condition: replaceFormulaVariable(rule.condition ?? '', originalName, name) }
-          : {}),
-        formula: replaceFormulaVariable(rule.formula, originalName, name),
+        attributeName,
+        ...(hasCondition ? { condition } : {}),
+        formula,
       };
     });
     const unrelatedRules = renamedRules.filter((rule) => rule.attributeName !== name);
