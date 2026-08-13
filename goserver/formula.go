@@ -104,6 +104,14 @@ func (n callNode) evaluate(env map[string]float64) (float64, error) {
 			return eval(1)
 		}
 		return eval(2)
+	case "RANDOMCHOICE":
+		if len(n.args) == 0 {
+			return 0, fmt.Errorf("RANDOMCHOICE 至少需要 1 个参数")
+		}
+		if len(n.args) == 1 {
+			return eval(0)
+		}
+		return eval(formulaRandomIntn(len(n.args)))
 	case "MAX", "MIN":
 		if len(n.args) == 0 {
 			return 0, fmt.Errorf("%s 至少需要 1 个参数", name)

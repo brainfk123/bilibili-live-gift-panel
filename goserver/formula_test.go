@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -49,6 +50,63 @@ func TestFormulaRandomRange(t *testing.T) {
 		if err != nil || value < 10 || value > 60 || value != math.Trunc(value) {
 			t.Fatalf("random value = %v, err = %v", value, err)
 		}
+	}
+}
+
+func TestFormulaRandomChoiceSelectsOneLazyArgument(t *testing.T) {
+	tests := []struct {
+		name    string
+		formula string
+		index   int
+	}{
+		{name: "first", formula: "RANDOMCHOICE(舰长+3,1/0,missing)", index: 0},
+		{name: "middle", formula: "RANDOMCHOICE(1/0,舰长+3,missing)", index: 1},
+		{name: "last", formula: "RANDOMCHOICE(1/0,missing,舰长+3)", index: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			original := formulaRandomIntn
+			t.Cleanup(func() { formulaRandomIntn = original })
+			calls := 0
+			formulaRandomIntn = func(limit int) int {
+				calls++
+				if limit != 3 {
+					t.Fatalf("limit = %d, want 3", limit)
+				}
+				return test.index
+			}
+			got, err := evaluateFormula(test.formula, map[string]float64{"舰长": 2})
+			if err != nil || got != 5 || calls != 1 {
+				t.Fatalf("got=%v err=%v calls=%d", got, err, calls)
+			}
+		})
+	}
+}
+
+func TestFormulaRandomChoiceSingleArgumentDoesNotDraw(t *testing.T) {
+	original := formulaRandomIntn
+	t.Cleanup(func() { formulaRandomIntn = original })
+	formulaRandomIntn = func(int) int { t.Fatal("single argument drew randomness"); return 0 }
+	got, err := evaluateFormula("RANDOMCHOICE(7)", nil)
+	if err != nil || got != 7 {
+		t.Fatalf("got=%v err=%v", got, err)
+	}
+}
+
+func TestFormulaRandomChoiceRejectsZeroArguments(t *testing.T) {
+	_, err := evaluateFormula("RANDOMCHOICE()", nil)
+	if err == nil || !strings.Contains(err.Error(), "RANDOMCHOICE 至少需要 1 个参数") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestFormulaRandomChoiceReturnsSelectedArgumentError(t *testing.T) {
+	original := formulaRandomIntn
+	t.Cleanup(func() { formulaRandomIntn = original })
+	formulaRandomIntn = func(int) int { return 1 }
+	_, err := evaluateFormula("RANDOMCHOICE(10,1/0)", nil)
+	if err == nil || !strings.Contains(err.Error(), "除数为零") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

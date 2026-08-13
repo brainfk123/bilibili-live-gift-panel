@@ -70,7 +70,7 @@ func TestPendingStateTransactionRecoversGiftFormulaRandomResultWithoutReevaluati
 	store := &configStore{path: filepath.Join(dir, "config.json")}
 	initial := defaultAppState()
 	initial.Attributes = []attributeState{{Name: "积分", Value: 0}}
-	initial.Rules = []giftRule{{ID: "random-rule", GiftID: 1, AttributeName: "积分", Formula: "RANDBETWEEN(10, 60)"}}
+	initial.Rules = []giftRule{{ID: "random-rule", GiftID: 1, AttributeName: "积分", Formula: "RANDOMCHOICE(10,37,60)"}}
 	if err := store.replaceState(initial); err != nil {
 		t.Fatal(err)
 	}
@@ -80,10 +80,10 @@ func TestPendingStateTransactionRecoversGiftFormulaRandomResultWithoutReevaluati
 	evaluations := 0
 	formulaRandomIntn = func(limit int) int {
 		evaluations++
-		if limit != 51 {
-			t.Fatalf("random limit = %d, want 51", limit)
+		if limit != 3 {
+			t.Fatalf("random limit = %d, want 3", limit)
 		}
-		return 27
+		return 1
 	}
 	failed := false
 	store.writeAtomically = func(path string, data []byte) error {
