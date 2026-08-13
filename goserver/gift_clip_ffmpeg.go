@@ -318,6 +318,7 @@ func buildGiftClipFFmpegArgs(request giftClipEncodeRequest, mode giftClipEncoder
 		"-c:v", "h264_mf",
 		"-hw_encoding", hardwareEncoding,
 		"-rate_control", "pc_vbr",
+		"-compression_level", "75",
 		"-b:v", strconv.FormatInt(request.Profile.AverageBitrate, 10),
 		"-maxrate", strconv.FormatInt(request.Profile.PeakBitrate, 10),
 		"-bufsize", strconv.FormatInt(request.Profile.VBVBuffer, 10),

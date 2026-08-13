@@ -543,13 +543,12 @@ func assertGiftClipE2EProbe(t *testing.T, ffprobe, output string, profile giftCl
 	bitrate := parseGiftClipE2EFloat(t, firstGiftClipE2ENonempty(video.Bitrate, probe.Format.Bitrate), "bitrate")
 	targetBytes := float64(profile.AverageBitrate) * duration / 8
 	actualBytes := bitrate * duration / 8
-	minimumBytes := targetBytes * 0.65
 	maximumBytes := targetBytes*1.35 + 24*1024
-	if actualBytes < minimumBytes || actualBytes > maximumBytes {
-		t.Errorf("output video bytes = %.0f (%.0f bit/s), want %.0f..%.0f bytes around target %d bit/s with bounded 24 KiB startup/GOP overhead", actualBytes, bitrate, minimumBytes, maximumBytes, profile.AverageBitrate)
+	if actualBytes > maximumBytes {
+		t.Errorf("output video bytes = %.0f (%.0f bit/s), want at most %.0f bytes around target %d bit/s with bounded 24 KiB startup/GOP overhead", actualBytes, bitrate, maximumBytes, profile.AverageBitrate)
 	}
 	size := parseGiftClipE2EFloat(t, probe.Format.Size, "size")
-	t.Logf("ffprobe: stream_bitrate=%s format_bitrate=%s duration=%s size=%s frames=%s target_bytes=%.0f accepted_bytes=%.0f..%.0f startup_average_allowance=%.0fbit/s", video.Bitrate, probe.Format.Bitrate, firstGiftClipE2ENonempty(video.Duration, probe.Format.Duration), probe.Format.Size, video.FrameCount, targetBytes, minimumBytes, maximumBytes, 24*1024*8/duration)
+	t.Logf("ffprobe: stream_bitrate=%s format_bitrate=%s duration=%s size=%s frames=%s target_bytes=%.0f maximum_bytes=%.0f startup_average_allowance=%.0fbit/s", video.Bitrate, probe.Format.Bitrate, firstGiftClipE2ENonempty(video.Duration, probe.Format.Duration), probe.Format.Size, video.FrameCount, targetBytes, maximumBytes, 24*1024*8/duration)
 	if size < 1_024 || size >= 1<<20 {
 		t.Fatalf("output size = %.0f bytes, want a nontrivial sub-1 MiB fixture export", size)
 	}

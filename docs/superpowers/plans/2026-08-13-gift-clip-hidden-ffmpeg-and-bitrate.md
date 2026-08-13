@@ -4,7 +4,7 @@
 
 **Goal:** Prevent the Windows FFmpeg child process from creating a console window and raise the complete gift-video bitrate curve to exactly three times its v0.4.2 values.
 
-**Architecture:** Keep the existing suspended-process/Job Object runner and add `CREATE_NO_WINDOW` at the single command-construction seam. Keep the existing pixel-area profile and average/peak/VBV relationships, but express its average bitrate constants and rounding quantum at the exact three-times scale so every previously supported resolution receives exactly three times its former target.
+**Architecture:** Keep the existing suspended-process/Job Object runner and add `CREATE_NO_WINDOW` at the single command-construction seam. Keep the existing pixel-area profile and average/peak/VBV relationships, but express its average bitrate constants and rounding quantum at the exact three-times scale so every previously supported resolution receives exactly three times its former target. Keep `h264_mf pc_vbr`, add generic FFmpeg `-compression_level 75` (FFmpeg 9.0 maps it to Media Foundation `AVEncCommonQualityVsSpeed`), and test requested target parameters rather than treating short low-entropy VBR output bytes as a minimum guarantee.
 
 **Tech Stack:** Go 1.26, Windows `syscall.SysProcAttr`, FFmpeg 9.0 CLI, Vitest/TypeScript release tests, Playwright release E2E, GitHub Actions Authenticode release workflow.
 
@@ -13,6 +13,7 @@
 - FFmpeg starts with `CREATE_SUSPENDED | CREATE_NO_WINDOW`; Job Object assignment must still occur before the primary thread resumes.
 - 1920×1080 average bitrate is exactly 6,000,000 bit/s; minimum is 450,000 and maximum is 48,000,000.
 - Peak bitrate remains average × 3/2 and VBV buffer remains average × 2.
+- FFmpeg remains `h264_mf` with `pc_vbr` and includes exactly `-compression_level 75`; do not use `-quality`, which Microsoft documents as ineffective in bitrate-constrained operation and whose probe outputs were bit-identical.
 - Input frame rate remains adaptive and output remains H.264 yuv420p at 30 FPS with no audio.
 - Existing hardware-first/software-fallback behavior, cancellation, diagnostics, embedded FFmpeg provenance, EV signing, and licensing remain unchanged.
 - Preserve all unrelated tracked and untracked files; do not push or publish until all local verification gates pass.
@@ -152,7 +153,7 @@ rounded := ((numerator + 75_000*baselinePixels) / (150_000 * baselinePixels)) * 
 return minInt64(maxGiftClipBitrate, maxInt64(minGiftClipBitrate, rounded))
 ```
 
-Do not change the average/peak/VBV multipliers in `newGiftClipOutputProfile` or FFmpeg argv construction.
+Do not change the average/peak/VBV multipliers in `newGiftClipOutputProfile`.
 
 - [ ] **Step 3: Run focused GREEN and argv coverage**
 
@@ -175,12 +176,12 @@ Set-Location goserver
 go test ./... -run '^TestGiftClipE2E' -count=1 -timeout=180s
 ```
 
-Expected: GIF, animated WebP, and packed-alpha exports remain H.264/yuv420p, 30 FPS, exact frame count/duration, no audio, and fall within the existing short-GOP byte-budget tolerance around the new profile target.
+Expected: GIF, animated WebP, and packed-alpha exports remain H.264/yuv420p, 30 FPS, exact frame count/duration, no audio, and stay below the existing VBR byte-budget upper bound while retaining the nontrivial-size, perceptual-quality, and determinism gates. Do not require a target-derived output-byte lower bound: `pc_vbr` is peak-constrained VBR and does not pad short low-entropy clips to `-b:v`.
 
 - [ ] **Step 5: Commit Task 2 independently**
 
 ```powershell
-git add -- goserver/gift_clip_profile.go goserver/gift_clip_profile_test.go goserver/gift_clip_e2e_test.go
+git add -- goserver/gift_clip_profile.go goserver/gift_clip_profile_test.go goserver/gift_clip_e2e_test.go goserver/gift_clip_ffmpeg.go goserver/gift_clip_ffmpeg_test.go
 git diff --cached --check
 git commit -m "feat: triple gift clip export bitrate"
 ```

@@ -69,6 +69,32 @@ func TestBuildGiftClipFFmpegArgsSelectsBoundedPlaybackInput(t *testing.T) {
 	}
 }
 
+func TestBuildGiftClipFFmpegArgsUsesVBRCompressionLevel(t *testing.T) {
+	for _, mode := range []giftClipEncoderMode{giftClipEncoderHardware, giftClipEncoderSoftware} {
+		t.Run(string(mode), func(t *testing.T) {
+			args, err := buildGiftClipFFmpegArgs(giftClipEncodeFixture(testGiftClipSource()), mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compressionLevels := 0
+			for index := 0; index+1 < len(args); index++ {
+				if args[index] == "-compression_level" {
+					compressionLevels++
+					if args[index+1] != "75" {
+						t.Fatalf("-compression_level = %q, want 75: %q", args[index+1], args)
+					}
+				}
+			}
+			if compressionLevels != 1 {
+				t.Fatalf("-compression_level occurrences = %d, want 1: %q", compressionLevels, args)
+			}
+			if giftClipArgsContain(args, "-quality") {
+				t.Fatalf("VBR args unexpectedly contain -quality: %q", args)
+			}
+		})
+	}
+}
+
 func TestBuildGiftClipFFmpegArgsRejectsInvalidSourcePlaybackMatrix(t *testing.T) {
 	tests := []struct {
 		name   string
