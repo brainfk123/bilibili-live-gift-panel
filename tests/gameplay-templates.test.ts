@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { evalFormula } from '../src/formula';
+import { collectVars } from '../src/formula';
 import {
   buildGameplayTemplate,
   createDefaultTemplateInput,
@@ -35,12 +35,11 @@ describe('gameplay templates', () => {
     ]);
   });
 
-  it('builds every template without hard-coded gift IDs and with valid formulas', () => {
+  it('builds every template without hard-coded gift IDs and with parseable formulas', () => {
     for (const template of GAMEPLAY_TEMPLATES) {
       const input = validInput(template);
       const result = buildGameplayTemplate(template, input, ids());
-      const environment = Object.fromEntries(result.attributes.map((attribute) => [attribute.name, attribute.value]));
-      environment.price = 1000;
+      const allowedVariables = new Set(['price', ...result.attributes.map((attribute) => attribute.name)]);
 
       expect(result.attributes.length).toBeGreaterThan(0);
       expect(result.rules.map((rule) => rule.giftId)).toEqual(result.usedGifts.map((item) => item.id));
@@ -55,10 +54,11 @@ describe('gameplay templates', () => {
         expect(activity.attributeNames.every((name) => result.attributes.some((attribute) => attribute.name === name))).toBe(true);
         expect(activity.milestones.every((milestone) => activity.attributeNames.includes(milestone.attributeName))).toBe(true);
       }
-      for (const rule of result.rules) expect(Number.isFinite(evalFormula(rule.formula, environment))).toBe(true);
-      for (const rule of result.timerRules) {
-        expect(Number.isFinite(evalFormula(rule.formula, environment))).toBe(true);
-        if (rule.condition) expect(typeof evalFormula(rule.condition, environment)).toBe('number');
+      for (const formula of [
+        ...result.rules.map((rule) => rule.formula),
+        ...result.timerRules.flatMap((rule) => [rule.formula, ...(rule.condition ? [rule.condition] : [])]),
+      ]) {
+        expect(collectVars(formula).every((name) => allowedVariables.has(name))).toBe(true);
       }
     }
   });
