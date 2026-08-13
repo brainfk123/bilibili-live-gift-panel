@@ -4,6 +4,7 @@ param(
     [string]$ToolchainRoot = '',
     [int]$Jobs = [Environment]::ProcessorCount,
     [switch]$InstallPinnedToolchain,
+    [switch]$BuildGiftClipTestTools,
     [switch]$VerifyToolchainOnly,
     [switch]$SelfTest
 )
@@ -26,6 +27,7 @@ $DistRoot = Join-Path $RepositoryRoot 'dist'
 $DownloadRoot = Join-Path $DistRoot 'ffmpeg-source'
 $SourceRoot = Join-Path $DownloadRoot "ffmpeg-$Version"
 $OutputRoot = Join-Path $DistRoot 'ffmpeg'
+$GiftClipTestToolsRoot = Join-Path $DistRoot 'gift-clip-test-tools'
 $FlagsPath = Join-Path $RepositoryRoot 'third_party\ffmpeg\configure.flags'
 $ToolchainLockPath = Join-Path $RepositoryRoot 'third_party\ffmpeg\toolchain-lock.json'
 $ToolchainCache = Join-Path $DistRoot 'msys2-toolchain'
@@ -458,3 +460,107 @@ Write-Host "Built FFmpeg $Version at $BuiltBinary"
 Write-Host "Source SHA-256: $ArchiveSha256"
 Write-Host "Signing fingerprint: $SigningFingerprint"
 Write-Host "Supplemental signed tag: $SignedTag ($SignedTagCommit, signer $SignedTagFingerprint)"
+
+if ($BuildGiftClipTestTools) {
+    $GiftClipTestToolConfigureFlags = @(
+        '--disable-autodetect',
+        '--disable-debug',
+        '--disable-doc',
+        '--disable-network',
+        '--disable-everything',
+        '--enable-ffmpeg',
+        '--enable-ffprobe',
+        '--enable-avcodec',
+        '--enable-avfilter',
+        '--enable-avformat',
+        '--enable-swscale',
+        '--enable-protocol=file,pipe',
+        '--enable-demuxer=mov',
+        '--enable-decoder=h264',
+        '--enable-parser=h264',
+        '--enable-encoder=rawvideo',
+        '--enable-muxer=framemd5,rawvideo',
+        '--enable-filter=scale,format,lut',
+        '--enable-static',
+        '--disable-shared',
+        '--target-os=mingw32',
+        '--arch=x86_64',
+        '--extra-cflags=-Os',
+        '--extra-ldflags=-static'
+    )
+    $GiftClipTestToolConfigureText = ($GiftClipTestToolConfigureFlags -join "`n") + "`n"
+    $GiftClipTestToolConfigurePath = Join-Path $DownloadRoot 'gift-clip-test-tools.configure.flags'
+    [IO.File]::WriteAllText($GiftClipTestToolConfigurePath, $GiftClipTestToolConfigureText, (New-Object Text.UTF8Encoding($false)))
+    $GiftClipTestToolConfigureSha256 = Get-Sha256 $GiftClipTestToolConfigurePath
+    if ($GiftClipTestToolConfigureSha256 -ne '2bbd2048081e7ca1d87b88509f1c0d1362dc2ec54c49dd7821e3a81e298d0886') {
+        throw 'Gift clip test-tool configure flags differ from the approved exact set.'
+    }
+    $ResolvedGiftClipTestToolsRoot = [IO.Path]::GetFullPath($GiftClipTestToolsRoot)
+    $ResolvedDistRoot = [IO.Path]::GetFullPath($DistRoot).TrimEnd('\') + '\'
+    if (-not $ResolvedGiftClipTestToolsRoot.StartsWith($ResolvedDistRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Gift clip test tools must stay beneath dist.'
+    }
+    if (Test-Path -LiteralPath $ResolvedGiftClipTestToolsRoot) { Remove-Item -LiteralPath $ResolvedGiftClipTestToolsRoot -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $ResolvedGiftClipTestToolsRoot | Out-Null
+
+    $env:GIFT_CLIP_TEST_SOURCE_DIR = $SourceRoot
+    $env:GIFT_CLIP_TEST_OUTPUT_DIR = $ResolvedGiftClipTestToolsRoot
+    $env:GIFT_CLIP_TEST_FLAGS_FILE = $GiftClipTestToolConfigurePath
+    $env:GIFT_CLIP_TEST_BUILD_JOBS = [string]$Jobs
+    $env:SOURCE_DATE_EPOCH = $SourceDateEpoch
+    $GiftClipTestToolBuildScript = Join-Path $DownloadRoot 'build-gift-clip-test-tools.sh'
+    $GiftClipTestToolBuildCommand = @'
+set -euo pipefail
+export PATH="/ucrt64/bin:/usr/bin"
+source_dir="$(cygpath -u "$GIFT_CLIP_TEST_SOURCE_DIR")"
+output_dir="$(cygpath -u "$GIFT_CLIP_TEST_OUTPUT_DIR")"
+flags_file="$(cygpath -u "$GIFT_CLIP_TEST_FLAGS_FILE")"
+mapfile -t configure_flags < "$flags_file"
+cd "$source_dir"
+make distclean
+./configure "${configure_flags[@]}"
+make -j"$GIFT_CLIP_TEST_BUILD_JOBS" ffmpeg.exe ffprobe.exe
+cp -f ffmpeg.exe ffprobe.exe "$output_dir/"
+'@
+    [IO.File]::WriteAllText($GiftClipTestToolBuildScript, $GiftClipTestToolBuildCommand, (New-Object Text.UTF8Encoding($false)))
+    try {
+        & $Bash --noprofile --norc (ConvertTo-MsysPath $GiftClipTestToolBuildScript)
+        if ($LASTEXITCODE -ne 0) { throw "Gift clip test-tool build failed with exit code $LASTEXITCODE." }
+    } finally {
+        Remove-Item Env:GIFT_CLIP_TEST_SOURCE_DIR, Env:GIFT_CLIP_TEST_OUTPUT_DIR, Env:GIFT_CLIP_TEST_FLAGS_FILE, Env:GIFT_CLIP_TEST_BUILD_JOBS, Env:SOURCE_DATE_EPOCH -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $GiftClipTestToolBuildScript, $GiftClipTestToolConfigurePath -Force -ErrorAction SilentlyContinue
+    }
+
+    $GiftClipTestToolBinaries = [ordered]@{}
+    foreach ($ToolName in @('ffmpeg', 'ffprobe')) {
+        $ToolPath = Join-Path $ResolvedGiftClipTestToolsRoot "$ToolName.exe"
+        if (-not (Test-Path -LiteralPath $ToolPath)) { throw "Gift clip test-tool build did not produce $ToolName.exe." }
+        $VersionLine = @(& $ToolPath -version)[0]
+        if ($LASTEXITCODE -ne 0 -or -not $VersionLine.StartsWith("$ToolName version $Version ", [StringComparison]::Ordinal)) {
+            throw "Gift clip test-tool $ToolName version differs from $Version."
+        }
+        $GiftClipTestToolBinaries[$ToolName] = [ordered]@{
+            file = "$ToolName.exe"
+            size = (Get-Item -LiteralPath $ToolPath).Length
+            sha256 = Get-Sha256 $ToolPath
+        }
+    }
+    $GiftClipTestToolManifest = [ordered]@{
+        schema = 1
+        ffmpegVersion = $Version
+        sourceSha256 = $ArchiveSha256
+        sourceSigningFingerprint = $SigningFingerprint
+        sourceSignedTag = $SignedTag
+        sourceSignedTagCommit = $SignedTagCommit
+        sourceSignedTagFingerprint = $SignedTagFingerprint
+        toolchainLockSha256 = Get-ToolchainLockCanonicalSha256 $ToolchainLock
+        configureSha256 = $GiftClipTestToolConfigureSha256
+        binaries = $GiftClipTestToolBinaries
+    }
+    [IO.File]::WriteAllText(
+        (Join-Path $ResolvedGiftClipTestToolsRoot 'manifest.json'),
+        ($GiftClipTestToolManifest | ConvertTo-Json -Depth 5) + "`n",
+        (New-Object Text.UTF8Encoding($false))
+    )
+    Write-Host "Built verified gift clip test tools at $ResolvedGiftClipTestToolsRoot"
+}

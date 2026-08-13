@@ -73,7 +73,7 @@ jobs:
         run: |
           $msys2Root = '${{ steps.msys2.outputs.msys2-location }}'
           $env:PATH = "$env:SystemRoot\System32;$msys2Root\usr\bin;$env:PATH"
-          npm run build:ffmpeg -- -Msys2Root $msys2Root -InstallPinnedToolchain
+          npm run build:ffmpeg -- -Msys2Root $msys2Root -InstallPinnedToolchain -BuildGiftClipTestTools
           if ($LASTEXITCODE -ne 0) {
             throw "Pinned FFmpeg build failed with exit code $LASTEXITCODE"
           }
@@ -148,8 +148,12 @@ jobs:
         env:
           GIFT_CLIP_FFMPEG_E2E: '1'
         run: |
-          $env:FFPROBE_BIN = (Get-Command ffprobe.exe -ErrorAction Stop).Source
-          $env:FFMPEG_FULL_BIN = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
+          $tools = node scripts/gift-clip-test-tools.mjs | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) {
+            throw "Gift clip test-tool verification failed with exit code $LASTEXITCODE"
+          }
+          $env:FFMPEG_FULL_BIN = [IO.Path]::GetFullPath([string]$tools.ffmpeg)
+          $env:FFPROBE_BIN = [IO.Path]::GetFullPath([string]$tools.ffprobe)
           npm run verify:gift-clip-export
           if ($LASTEXITCODE -ne 0) {
             throw "Gift clip browser E2E failed with exit code $LASTEXITCODE"

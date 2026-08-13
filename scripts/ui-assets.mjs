@@ -15,7 +15,9 @@ export const UI_ASSET_MANIFEST = 'ui-assets.json';
 const NON_UI_DIST_ROOTS = new Set([
   'ffmpeg',
   'ffmpeg-source',
+  'gift-clip-test-tools',
   'msys2-toolchain',
+  'msys2-toolchain-root',
   'gift-panel.exe',
   'gift-panel-windows-x64.exe',
   'gift-panel-windows-x64.exe.sha256',

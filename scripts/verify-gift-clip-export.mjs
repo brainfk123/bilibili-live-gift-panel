@@ -10,6 +10,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { mirrorUiAssets, verifyUiAssetManifest } from './ui-assets.mjs';
+import { assertGiftClipExportProbe } from './gift-clip-export-contract.mjs';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
@@ -76,7 +77,7 @@ try {
     const baselineProbe = await probeExport(baseline.output);
     const stalledProbe = await probeExport(stalled.output);
     assert.deepEqual(stalledProbe, baselineProbe, `${kind}: stall and baseline ffprobe contracts differ`);
-    assertExportProbe(kind, baselineProbe);
+    assertGiftClipExportProbe(kind, baselineProbe);
     variants.push({
       kind,
       outputs: [baseline.output, stalled.output],
@@ -282,6 +283,7 @@ async function probeExport(path) {
   assert.equal(video.length, 1, `video streams=${video.length}`);
   return {
     codec: video[0].codec_name,
+    pixelFormat: video[0].pix_fmt,
     fps: video[0].avg_frame_rate,
     frames: Number(video[0].nb_frames),
     duration: Number(video[0].duration ?? payload.format.duration),
@@ -291,27 +293,6 @@ async function probeExport(path) {
     bitrate: Number(video[0].bit_rate ?? payload.format.bit_rate),
     size: Number(payload.format.size),
   };
-}
-
-function assertExportProbe(kind, probe) {
-  assert.equal(probe.codec, 'h264', `${kind} codec`);
-  assert.equal(probe.fps, '30/1', `${kind} fps`);
-  assert.equal(probe.frames, 60, `${kind} frames`);
-  assert.equal(probe.width, 320, `${kind} width`);
-  assert.equal(probe.height, 180, `${kind} height`);
-  assert.equal(probe.audioStreams, 0, `${kind} audio streams`);
-  assert.ok(Math.abs(probe.duration - 2) <= 0.05, `${kind} duration=${probe.duration}`);
-  assert.ok(Number.isFinite(probe.bitrate) && probe.bitrate > 0, `${kind} bitrate=${probe.bitrate}`);
-  assert.ok(Number.isFinite(probe.size) && probe.size >= 1024 && probe.size < 1024 * 1024, `${kind} size=${probe.size}`);
-  const targetBitrate = 150_000;
-  const targetBytes = targetBitrate * probe.duration / 8;
-  const actualBytes = probe.bitrate * probe.duration / 8;
-  const minimumBytes = targetBytes * 0.65;
-  const maximumBytes = targetBytes * 1.35 + 24 * 1024;
-  assert.ok(
-    actualBytes >= minimumBytes && actualBytes <= maximumBytes,
-    `${kind} video bytes=${actualBytes} from ${probe.bitrate}bit/s, want ${minimumBytes}..${maximumBytes} around unchanged ${targetBitrate}bit/s plus bounded 24KiB startup/GOP overhead`,
-  );
 }
 
 function startProcess(name, command, args, options) {

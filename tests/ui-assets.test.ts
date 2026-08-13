@@ -11,10 +11,14 @@ describe('embedded UI asset mirroring', () => {
     const target = join(root, 'target');
     mkdirSync(join(source, 'chunks'), { recursive: true });
     mkdirSync(join(source, 'ffmpeg'), { recursive: true });
+    mkdirSync(join(source, 'gift-clip-test-tools'), { recursive: true });
+    mkdirSync(join(source, 'msys2-toolchain-root', 'ucrt64', 'bin'), { recursive: true });
     mkdirSync(join(target, 'chunks'), { recursive: true });
     writeFileSync(join(source, 'index.html'), '<script type="module" src="./chunks/config-entry-abc.js"></script>');
     writeFileSync(join(source, 'chunks', 'config-entry-abc.js'), 'export const config = true;');
     writeFileSync(join(source, 'ffmpeg', 'ffmpeg.exe'), 'must not be embedded');
+    writeFileSync(join(source, 'gift-clip-test-tools', 'ffprobe.exe'), 'test tool must not be embedded');
+    writeFileSync(join(source, 'msys2-toolchain-root', 'ucrt64', 'bin', 'c++.exe'), 'build tool must not be embedded');
     writeFileSync(join(source, 'gift-panel.exe'), 'stale executable');
     writeFileSync(join(target, 'stale.js'), 'must be removed');
 
@@ -36,6 +40,8 @@ describe('embedded UI asset mirroring', () => {
       expect(readFileSync(join(target, 'chunks', 'config-entry-abc.js'), 'utf8')).toBe('export const config = true;');
       expect(readFileSync(join(target, 'ui-assets.json'), 'utf8')).toContain('config-entry-abc.js');
       expect(existsSync(join(target, 'ffmpeg'))).toBe(false);
+      expect(existsSync(join(target, 'gift-clip-test-tools'))).toBe(false);
+      expect(existsSync(join(target, 'msys2-toolchain-root'))).toBe(false);
       expect(existsSync(join(target, 'gift-panel.exe'))).toBe(false);
       expect(existsSync(join(target, 'stale.js'))).toBe(false);
     } finally {

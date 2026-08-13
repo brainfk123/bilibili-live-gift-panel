@@ -153,8 +153,12 @@ func TestGiftClipE2E(t *testing.T) {
 			preserveGiftClipE2EOutput(t, output, test.name+".mp4")
 			assertGiftClipE2EProbe(t, ffprobe, output, profile)
 			frames := giftClipE2EFrameMD5(t, fullFFmpeg, output)
+			quantizedFrames := giftClipE2EQuantizedFrameMD5(t, fullFFmpeg, output)
 			fingerprints := giftClipE2EFrameFingerprints(t, fullFFmpeg, output)
 			assertGiftClipTimestampSampling(t, frames, fingerprints, test.fps, profile.FPS, profile.Frames)
+			if err := validateGiftClipFrameMD5TimestampPattern(quantizedFrames, test.fps, profile.FPS); err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 }
@@ -475,6 +479,7 @@ type giftClipE2EProbe struct {
 	Streams []struct {
 		CodecType   string `json:"codec_type"`
 		CodecName   string `json:"codec_name"`
+		PixelFormat string `json:"pix_fmt"`
 		Width       int    `json:"width"`
 		Height      int    `json:"height"`
 		AverageRate string `json:"avg_frame_rate"`
@@ -505,6 +510,7 @@ func assertGiftClipE2EProbe(t *testing.T, ffprobe, output string, profile giftCl
 	var video *struct {
 		CodecType   string `json:"codec_type"`
 		CodecName   string `json:"codec_name"`
+		PixelFormat string `json:"pix_fmt"`
 		Width       int    `json:"width"`
 		Height      int    `json:"height"`
 		AverageRate string `json:"avg_frame_rate"`
@@ -524,11 +530,11 @@ func assertGiftClipE2EProbe(t *testing.T, ffprobe, output string, profile giftCl
 			video = stream
 		}
 	}
-	if video == nil || video.CodecName != "h264" || video.Width != profile.Width || video.Height != profile.Height || video.AverageRate != "30/1" {
+	if video == nil {
 		t.Fatalf("unexpected ffprobe video contract for %s: %#v", output, video)
 	}
-	if video.FrameCount != strconv.Itoa(profile.Frames) {
-		t.Errorf("ffprobe frame count = %q, want %d", video.FrameCount, profile.Frames)
+	if err := validateGiftClipE2EVideoContract(video.CodecName, video.PixelFormat, video.Width, video.Height, video.AverageRate, video.FrameCount, profile); err != nil {
+		t.Fatalf("unexpected ffprobe video contract for %s: %v", output, err)
 	}
 	duration := parseGiftClipE2EFloat(t, firstGiftClipE2ENonempty(video.Duration, probe.Format.Duration), "duration")
 	if difference := duration - profile.Duration.Seconds(); difference < -0.05 || difference > 0.05 {
@@ -547,6 +553,25 @@ func assertGiftClipE2EProbe(t *testing.T, ffprobe, output string, profile giftCl
 	if size < 1_024 || size >= 1<<20 {
 		t.Fatalf("output size = %.0f bytes, want a nontrivial sub-1 MiB fixture export", size)
 	}
+}
+
+func validateGiftClipE2EVideoContract(codec, pixelFormat string, width, height int, averageRate, frameCount string, profile giftClipOutputProfile) error {
+	if codec != "h264" {
+		return fmt.Errorf("codec = %q, want h264", codec)
+	}
+	if pixelFormat != "yuv420p" {
+		return fmt.Errorf("pixel format = %q, want yuv420p", pixelFormat)
+	}
+	if width != profile.Width || height != profile.Height {
+		return fmt.Errorf("dimensions = %dx%d, want %dx%d", width, height, profile.Width, profile.Height)
+	}
+	if averageRate != "30/1" {
+		return fmt.Errorf("average frame rate = %q, want 30/1", averageRate)
+	}
+	if frameCount != strconv.Itoa(profile.Frames) {
+		return fmt.Errorf("frame count = %q, want %d", frameCount, profile.Frames)
+	}
+	return nil
 }
 
 func assertGiftClipE2EBitrateArgs(t *testing.T, args []string, profile giftClipOutputProfile) {
@@ -579,11 +604,59 @@ type giftClipE2EMD5Frame struct {
 	Hash     string
 }
 
+func TestGiftClipFrameMD5TimestampPatternRejectsWrongBoundaryOrMissingRepeats(t *testing.T) {
+	valid := []giftClipE2EMD5Frame{
+		{PTS: 0, Duration: 1, Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{PTS: 1, Duration: 1, Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{PTS: 2, Duration: 1, Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{PTS: 3, Duration: 1, Hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		{PTS: 4, Duration: 1, Hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		{PTS: 5, Duration: 1, Hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+	}
+	if err := validateGiftClipFrameMD5TimestampPattern(valid, 10, 30); err != nil {
+		t.Fatalf("valid timestamp hash pattern: %v", err)
+	}
+	wrongBoundary := append([]giftClipE2EMD5Frame(nil), valid...)
+	wrongBoundary[3].Hash = wrongBoundary[2].Hash
+	if err := validateGiftClipFrameMD5TimestampPattern(wrongBoundary, 10, 30); err == nil {
+		t.Fatal("static hash across a source timestamp boundary was accepted")
+	}
+	missingRepeats := append([]giftClipE2EMD5Frame(nil), valid...)
+	for index := range missingRepeats {
+		missingRepeats[index].Hash = fmt.Sprintf("%032x", index+1)
+	}
+	if err := validateGiftClipFrameMD5TimestampPattern(missingRepeats, 10, 30); err == nil {
+		t.Fatal("sequence with no observed repeated hashes was accepted")
+	}
+}
+
+func TestGiftClipE2EVideoContractRejectsNonYUV420P(t *testing.T) {
+	profile := giftClipOutputProfile{Width: 320, Height: 180, FPS: 30, Frames: 60}
+	if err := validateGiftClipE2EVideoContract("h264", "yuv444p", 320, 180, "30/1", "60", profile); err == nil {
+		t.Fatal("non-yuv420p output was accepted")
+	}
+}
+
 func giftClipE2EFrameMD5(t *testing.T, ffmpeg, output string) []giftClipE2EMD5Frame {
+	t.Helper()
+	return giftClipE2EFrameMD5WithFilter(t, ffmpeg, output, "")
+}
+
+func giftClipE2EQuantizedFrameMD5(t *testing.T, ffmpeg, output string) []giftClipE2EMD5Frame {
+	t.Helper()
+	return giftClipE2EFrameMD5WithFilter(t, ffmpeg, output, "scale=32:18:flags=area,format=gray,lut=y='floor(val/16)*16'")
+}
+
+func giftClipE2EFrameMD5WithFilter(t *testing.T, ffmpeg, output, filter string) []giftClipE2EMD5Frame {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, ffmpeg, "-v", "error", "-i", output, "-f", "framemd5", "-")
+	args := []string{"-v", "error", "-i", output}
+	if filter != "" {
+		args = append(args, "-vf", filter)
+	}
+	args = append(args, "-f", "framemd5", "-")
+	command := exec.CommandContext(ctx, ffmpeg, args...)
 	data, err := command.Output()
 	if err != nil {
 		t.Fatalf("framemd5 %s: %v", output, err)
@@ -621,6 +694,30 @@ func giftClipE2EFrameMD5(t *testing.T, ffmpeg, output string) []giftClipE2EMD5Fr
 		t.Fatalf("framemd5 timebase = %q, want 1/30", timebase)
 	}
 	return frames
+}
+
+func validateGiftClipFrameMD5TimestampPattern(frames []giftClipE2EMD5Frame, sourceFPS, outputFPS int) error {
+	if len(frames) < 2 || sourceFPS <= 0 || outputFPS <= 0 {
+		return errors.New("framemd5 timestamp pattern inputs are invalid")
+	}
+	expectedRepeatedTicks := 0
+	observedRepeatedHashes := 0
+	for index := 1; index < len(frames); index++ {
+		isRepeatedTimestamp := giftClipSourceIndexAtOutputTimestamp(index, sourceFPS, outputFPS) == giftClipSourceIndexAtOutputTimestamp(index-1, sourceFPS, outputFPS)
+		hashRepeated := frames[index].Hash == frames[index-1].Hash
+		if isRepeatedTimestamp {
+			expectedRepeatedTicks++
+			if hashRepeated {
+				observedRepeatedHashes++
+			}
+		} else if hashRepeated {
+			return fmt.Errorf("quantized framemd5 repeated across source timestamp boundary at output frame %d", index)
+		}
+	}
+	if expectedRepeatedTicks == 0 || observedRepeatedHashes*2 < expectedRepeatedTicks {
+		return fmt.Errorf("quantized framemd5 observed %d/%d expected repeated timestamp ticks, want at least half", observedRepeatedHashes, expectedRepeatedTicks)
+	}
+	return nil
 }
 
 func giftClipE2EFrameFingerprints(t *testing.T, ffmpeg, output string) [][]byte {
