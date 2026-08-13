@@ -9,6 +9,11 @@ import (
 func float64Pointer(value float64) *float64 { return &value }
 func intPointer(value int) *int             { return &value }
 
+const (
+	expectedLogEntryLimit = 200
+	generatedLogEntries   = expectedLogEntryLimit + 5
+)
+
 func semanticState(rule giftRule, initial float64) appState {
 	state := defaultAppState()
 	state.Attributes = []attributeState{{Name: "积分", Value: initial}}
@@ -85,16 +90,16 @@ func TestApplyGiftEventSkipsInvalidFormulaAndContinues(t *testing.T) {
 
 func TestApplyGiftEventKeepsNewestTwoHundredGiftLogs(t *testing.T) {
 	state := semanticState(giftRule{ID: "gift-log", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}, 0)
-	for timestamp := int64(1); timestamp <= maxLogEntries+5; timestamp++ {
+	for timestamp := int64(1); timestamp <= generatedLogEntries; timestamp++ {
 		applyGiftEvent(&state, giftEvent{GiftID: 1, Num: 1, Rnd: fmt.Sprintf("gift-%d", timestamp), Timestamp: timestamp})
 	}
-	if got := len(state.Log); got != maxLogEntries {
-		t.Fatalf("log length = %d, want %d", got, maxLogEntries)
+	if got := len(state.Log); got != expectedLogEntryLimit {
+		t.Fatalf("log length = %d, want %d", got, expectedLogEntryLimit)
 	}
-	if got := state.Log[0].Time; got != int64(maxLogEntries+5) {
-		t.Fatalf("newest log time = %d, want %d", got, maxLogEntries+5)
+	if got := state.Log[0].Time; got != int64(generatedLogEntries) {
+		t.Fatalf("newest log time = %d, want %d", got, generatedLogEntries)
 	}
-	if got := state.Log[maxLogEntries-1].Time; got != 6 {
+	if got := state.Log[expectedLogEntryLimit-1].Time; got != 6 {
 		t.Fatalf("oldest retained log time = %d, want 6", got)
 	}
 }
@@ -102,22 +107,22 @@ func TestApplyGiftEventKeepsNewestTwoHundredGiftLogs(t *testing.T) {
 func TestApplyTimerRulesKeepsNewestTwoHundredTimerLogs(t *testing.T) {
 	state := defaultAppState()
 	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
-	for timestamp := 1; timestamp <= maxLogEntries+5; timestamp++ {
+	for timestamp := 1; timestamp <= generatedLogEntries; timestamp++ {
 		state.TimerRules = append(state.TimerRules, timerRule{
 			ID: fmt.Sprintf("timer-%d", timestamp), AttributeName: "积分", Formula: "积分+1", Enabled: true,
 		})
 	}
-	for timestamp := 1; timestamp <= maxLogEntries+5; timestamp++ {
+	for timestamp := 1; timestamp <= generatedLogEntries; timestamp++ {
 		ruleID := fmt.Sprintf("timer-%d", timestamp)
 		applyTimerRules(&state, []string{ruleID}, time.Unix(int64(timestamp), 0))
 	}
-	if got := len(state.Log); got != maxLogEntries {
-		t.Fatalf("log length = %d, want %d", got, maxLogEntries)
+	if got := len(state.Log); got != expectedLogEntryLimit {
+		t.Fatalf("log length = %d, want %d", got, expectedLogEntryLimit)
 	}
-	if got := state.Log[0].Time; got != int64(maxLogEntries+5) {
-		t.Fatalf("newest log time = %d, want %d", got, maxLogEntries+5)
+	if got := state.Log[0].Time; got != int64(generatedLogEntries) {
+		t.Fatalf("newest log time = %d, want %d", got, generatedLogEntries)
 	}
-	if got := state.Log[maxLogEntries-1].Time; got != 6 {
+	if got := state.Log[expectedLogEntryLimit-1].Time; got != 6 {
 		t.Fatalf("oldest retained log time = %d, want 6", got)
 	}
 }
