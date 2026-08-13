@@ -3359,7 +3359,7 @@ describe('single-page configuration rendering', () => {
     expect(list.querySelector('.gift-history-loader')?.textContent).toContain('80 / 85');
   });
 
-  it('renders backend-owned contribution, rule-hit, and blind-box rankings', () => {
+  it('renders backend-owned contribution, rule-hit, and blind-box rankings', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state('88888888', 1),
       giftCatalog: [
@@ -3370,7 +3370,7 @@ describe('single-page configuration rendering', () => {
         updatedAt: 200,
         viewers: [
           {
-            key: 'uid:1', uid: 1, uname: '盈利观众', giftCount: 5, goldValue: 20000, silverValue: 0,
+            key: 'uid:1', uid: 1, uname: '本地错误盈利', giftCount: 5, goldValue: 20000, silverValue: 0,
             ruleTriggers: 3, attributeDeltas: { 加班时间: 180 }, blindBoxCount: 2,
             blindBoxCost: 18000, blindBoxValue: 24000, blindBoxProfit: 6000, lastGiftAt: 200,
             blindBoxes: [{
@@ -3379,7 +3379,7 @@ describe('single-page configuration rendering', () => {
             }],
           },
           {
-            key: 'name:反***', uname: '反***', giftCount: 2, goldValue: 10000, silverValue: 0,
+            key: 'name:反***', uname: '本地错误亏损', giftCount: 2, goldValue: 10000, silverValue: 0,
             ruleTriggers: 0, attributeDeltas: {}, blindBoxCount: 1,
             blindBoxCost: 9000, blindBoxValue: 4000, blindBoxProfit: -5000, lastGiftAt: 100,
             blindBoxes: [{
@@ -3390,8 +3390,34 @@ describe('single-page configuration rendering', () => {
         ],
       },
     }));
+    const fallbackFetch = globalThis.fetch;
+    const backendViewers = loadState().contributions.viewers.map((viewer, index) => index === 0
+      ? { ...viewer, uname: '服务端盈利观众', blindBoxValue: 25_000, blindBoxProfit: 7_000 }
+      : { ...viewer, uname: '服务端亏损观众', blindBoxValue: 6_000, blindBoxProfit: -3_000 });
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/api/blind-box/leaderboard')) {
+        const scoped = String(input).includes('giftId=990001');
+        return Response.json({
+          code: 0,
+          leaderboard: {
+            updatedAt: 200,
+            summary: scoped
+              ? { viewerCount: 1, blindBoxCount: 2, cost: 18000, value: 25000, profit: 7000, unpricedCount: 0 }
+              : { viewerCount: 2, blindBoxCount: 3, cost: 27000, value: 31000, profit: 4000, unpricedCount: 0 },
+            viewers: scoped ? backendViewers.slice(0, 1) : backendViewers,
+            scopes: [
+              { giftId: 990001, giftName: '心动盲盒', count: 2, lastGiftAt: 200 },
+              { giftId: 990002, giftName: '小熊虫盲盒', count: 1, lastGiftAt: 100 },
+            ],
+          },
+        });
+      }
+      return fallbackFetch(input, init);
+    }));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
+
+    await vi.waitFor(() => expect(root.querySelectorAll('.blind-box-scope-option')).toHaveLength(3));
 
     expect(findByText(root, '复制 OBS 链接')).toBeDefined();
     expect(root.querySelectorAll('.contribution-row')).toHaveLength(2);
@@ -3406,8 +3432,10 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('3 次规则命中');
     tabs[2].onclick?.();
     const blindText = textOf(root.querySelector('.contribution-list-host') as TestElement);
-    expect(blindText).toContain('+6 元');
-    expect(blindText).toContain('-5 元');
+    expect(blindText).toContain('服务端盈利观众');
+    expect(blindText).toContain('+7 元');
+    expect(blindText).toContain('-3 元');
+    expect(blindText).not.toContain('本地错误盈利');
     const scopeOptions = root.querySelectorAll('.blind-box-scope-option');
     expect(scopeOptions).toHaveLength(3);
     expect(scopeOptions.map((option) => textOf(option))).toEqual([
@@ -3421,11 +3449,93 @@ describe('single-page configuration rendering', () => {
       'https://example.com/bear-box.png',
     ]);
     scopeOptions[1].onclick?.();
-    expect(root.querySelectorAll('.contribution-row')).toHaveLength(1);
-    expect(textOf(root.querySelector('.blind-box-scope-bar') as TestElement)).toContain('心动盲盒 · 1 位观众 · 2 个 · 投入 18 元 · 开出 24 元 · 净盈亏 +6 元');
+    await vi.waitFor(() => expect(root.querySelectorAll('.contribution-row')).toHaveLength(1));
+    expect(textOf(root.querySelector('.blind-box-scope-bar') as TestElement)).toContain('心动盲盒 · 1 位观众 · 2 个 · 投入 18 元 · 开出 25 元 · 净盈亏 +7 元');
     expect(textOf(root.querySelector('.blind-box-scope-trigger') as TestElement)).toContain('心动盲盒');
-    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('+6 元');
-    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).not.toContain('-5 元');
+    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('+7 元');
+    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).not.toContain('-3 元');
+  });
+
+  it('keeps the current blind-box scope when an older scope response arrives late', async () => {
+    const configured = defaultAdvancedState();
+    configured.settings.showTutorial = false;
+    await saveState(configured);
+    let resolveOldScope!: (response: Response) => void;
+    const oldScope = new Promise<Response>((resolve) => { resolveOldScope = resolve; });
+    const fallbackFetch = globalThis.fetch;
+    let leaderboardRequest = 0;
+    const viewer = (uname: string, profit: number) => ({
+      key: `uid:${uname}`, uid: 1, uname, avatar: '', giftCount: 1, goldValue: 9000, silverValue: 0,
+      ruleTriggers: 0, attributeDeltas: {}, blindBoxCount: 1, blindBoxCost: 9000, blindBoxValue: 9000 + profit,
+      blindBoxProfit: profit, lastGiftAt: 1,
+    });
+    const responseFor = (current: ReturnType<typeof viewer>, giftId?: number) => Response.json({
+      code: 0,
+      leaderboard: {
+        updatedAt: giftId === 1 ? 20 : 30,
+        summary: { viewerCount: 1, blindBoxCount: 1, cost: 9000, value: current.blindBoxValue, profit: current.blindBoxProfit, unpricedCount: 0 },
+        viewers: [current],
+        scopes: [
+          { giftId: 1, giftName: 'scope A', count: 1, lastGiftAt: 1 },
+          { giftId: 2, giftName: 'scope B', count: 1, lastGiftAt: 2 },
+        ],
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/blind-box/leaderboard')) return fallbackFetch(input, init);
+      leaderboardRequest += 1;
+      if (leaderboardRequest === 1) return responseFor(viewer('初始服务端观众', 0));
+      if (leaderboardRequest === 2) return oldScope;
+      return responseFor(viewer('scope B 服务端观众', 3000), 2);
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    await vi.waitFor(() => expect(root.querySelectorAll('.blind-box-scope-option')).toHaveLength(3));
+    root.querySelectorAll('.contribution-tab')[2].onclick?.();
+    const scopes = root.querySelectorAll('.blind-box-scope-option');
+    scopes[1].onclick?.();
+    scopes[2].onclick?.();
+    await vi.waitFor(() => expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('scope B 服务端观众'));
+    resolveOldScope(responseFor(viewer('迟到 scope A 观众', -4000), 1));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('scope B 服务端观众');
+    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).not.toContain('迟到 scope A 观众');
+  });
+
+  it('retains the latest backend blind-box rows and reports a refresh failure', async () => {
+    const configured = defaultAdvancedState();
+    configured.settings.showTutorial = false;
+    await saveState(configured);
+    const fallbackFetch = globalThis.fetch;
+    let leaderboardRequest = 0;
+    const snapshot = {
+      updatedAt: 1,
+      summary: { viewerCount: 1, blindBoxCount: 1, cost: 9000, value: 15000, profit: 6000, unpricedCount: 0 },
+      viewers: [{
+        key: 'uid:server', uid: 1, uname: '最后成功的服务端观众', avatar: '', giftCount: 1, goldValue: 9000, silverValue: 0,
+        ruleTriggers: 0, attributeDeltas: {}, blindBoxCount: 1, blindBoxCost: 9000, blindBoxValue: 15000,
+        blindBoxProfit: 6000, lastGiftAt: 1,
+      }],
+      scopes: [{ giftId: 1, giftName: '失败重试盲盒', count: 1, lastGiftAt: 1 }],
+    };
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/blind-box/leaderboard')) return fallbackFetch(input, init);
+      leaderboardRequest += 1;
+      if (leaderboardRequest === 1) return Response.json({ code: 0, leaderboard: snapshot });
+      throw new Error('network unavailable');
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    await vi.waitFor(() => expect(root.querySelectorAll('.blind-box-scope-option')).toHaveLength(2));
+    root.querySelectorAll('.contribution-tab')[2].onclick?.();
+    expect(textOf(root)).toContain('最后成功的服务端观众');
+    root.querySelectorAll('.blind-box-scope-option')[1].onclick?.();
+    await vi.waitFor(() => expect(textOf(root)).toContain('盲盒排行榜暂时无法刷新'));
+
+    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('最后成功的服务端观众');
+    expect((root.querySelector('.blind-box-leaderboard-status') as any)?.role).toBe('status');
   });
 
   it('reserves enough horizontal space for the complete blind-box scope name', () => {
