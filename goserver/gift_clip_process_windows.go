@@ -25,6 +25,7 @@ const (
 	jobObjectExtendedLimitInformationClass = 9
 	jobObjectLimitKillOnJobClose           = 0x00002000
 	createSuspended                        = 0x00000004
+	createNoWindow                         = 0x08000000
 	pipeAccessInbound                      = 0x00000001
 	fileFlagFirstPipeInstance              = 0x00080000
 	pipeRejectRemoteClients                = 0x00000008
@@ -40,6 +41,8 @@ const (
 	threadSuspendResume             = 0x0002
 	th32csSnapThread                = 0x00000004
 )
+
+const giftClipProcessCreationFlags = createSuspended | createNoWindow
 
 var (
 	giftClipKernel32                 = syscall.NewLazyDLL("kernel32.dll")
@@ -337,6 +340,10 @@ func releaseGiftClipProcess(command *exec.Cmd) error {
 	return command.Process.Release()
 }
 
+func configureGiftClipWindowsCommand(command *exec.Cmd) {
+	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: giftClipProcessCreationFlags}
+}
+
 func startGiftClipProcessSuspended(path string, args []string, stdout, stderr io.Writer) (*giftClipStartedProcess, error) {
 	stdout, stderr = serializeGiftClipSharedOutput(stdout, stderr)
 	stdoutPipe, err := newGiftClipProcessPipe(stdout)
@@ -350,7 +357,7 @@ func startGiftClipProcessSuspended(path string, args []string, stdout, stderr io
 	command := exec.Command(path, args...)
 	command.Stdout = stdoutPipe.writer
 	command.Stderr = stderrPipe.writer
-	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createSuspended}
+	configureGiftClipWindowsCommand(command)
 	if err := command.Start(); err != nil {
 		return nil, errors.Join(err, stdoutPipe.closeBeforeStart(), stderrPipe.closeBeforeStart())
 	}
