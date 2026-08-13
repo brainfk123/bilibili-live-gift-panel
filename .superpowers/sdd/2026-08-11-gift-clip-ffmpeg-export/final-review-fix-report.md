@@ -165,6 +165,52 @@ Final browser probe summary:
 | WebP | 60 / yuv420p | 207,700 bit/s | 53,001 B | 0 / 0 |
 | effect | 60 / yuv420p | 184,608 bit/s | 47,228 B | 0 / 0 |
 
+## Post-review merge-gate stabilization — ingestion error retry observation
+
+### Failure and root cause
+
+The merge controller's fresh `goserver: go test ./... -count=1 -timeout=300s` failed after 55.2 seconds in `TestBackgroundRuntimeReportsIngestionFailureWithoutDisconnectAndClearsAfterRetry`: connection status remained correctly `connected` for `room-a`, but the test's five-second polling helper never observed the injected ingestion error.
+
+Focused reproduction against `cc71c24f6bee6b3bd2e6d211544fcf3eaf13a5ea`:
+
+```powershell
+go test ./... -run '^TestBackgroundRuntimeReportsIngestionFailureWithoutDisconnectAndClearsAfterRetry$' -count=100 -timeout=180s
+```
+
+Observed RED: exit 1; 7 of 100 runs failed after approximately 5.08 seconds with empty `IngestionError` / `IngestionErrorKind` and otherwise healthy connected status. The complete focused run took 49.016 seconds.
+
+The failure was a pre-existing test synchronization defect. The consumer recorded the first transaction failure as generation 1 / source `consumer`, then waited on a periodic 10ms retry ticker. Because the ticker starts with the worker rather than at the failure, the retry can begin anywhere from immediately to 10ms later. The successful retry acknowledges the still-pending record and clears the matching generation/source error. The test also sampled every 10ms, without a happens-before edge, so the complete set/clear interval could occur between two samples.
+
+`git blame` attributes the test to `96588d73`; the retry, record, and clear paths also predate `cc71c24`. The latter changed only the startup inbox snapshot/install/publish read-side reset gate before workers start. It did not change this test or the retry/error state machine; at most it perturbed a scheduler/ticker phase and exposed the existing flake.
+
+A temporary acknowledgement-barrier diagnostic was run ten times and then removed. Every run observed:
+
+```text
+before successful ack: failed=true generation=1 source="consumer" error="injected ingestion health failure" kind="transaction" pending=1
+after successful retry: failed=true generation=1 source="" error="" pending=0
+```
+
+This ruled out a missing production error publication.
+
+### Minimal test-only correction
+
+The real inbox and real state transaction remain in use. The existing `writeAtomically` failure seam now fails the first `events.log` write, then signals `retryStarted` and blocks the second successful `events.log` write on `allowRetry`. Waiting for `retryStarted` establishes that the consumer recorded the failure and entered its retry. While the retry is blocked, the test deterministically requires connected state, empty connection error, exact ingestion error `injected ingestion health failure`, kind `transaction`, no disconnect notification, and one still-pending record. It then releases the retry and waits for the stable terminal condition: pending zero and both ingestion error fields empty.
+
+The transient assertion copies `runtime.status` under `runtime.mu.RLock` because the second write barrier intentionally runs while the config store write lock is held. An initial diagnostic implementation called `runtime.Status()` at that point and correctly exposed a test-induced lock cycle: `Status → TransactionPending` waited for the store read lock while the consumer waited on `allowRetry` under the store write lock. No production lock or behavior was changed; full `Status()` is used again after releasing the barrier.
+
+No sleep, `Gosched`, or periodic polling observes the transient error. Channels provide the ordering; polling is used only for the stable post-retry terminal condition.
+
+### GREEN
+
+| Gate | Result |
+| --- | --- |
+| focused single diagnostic run | exit 0; test 0.09s |
+| focused `-count=100 -timeout=180s` | exit 0; `ok ... 13.320s` |
+| focused race `-count=20 -timeout=180s` | exit 0; `ok ... 4.628s` |
+| controller's failed full command, `go test ./... -count=1 -timeout=300s` | exit 0; `ok ... 49.443s` |
+
+Only `goserver/background_runtime_test.go` and this report are changed by the stabilization commit. No production, npm, package, build, `dist`, or artifact path was changed or invoked.
+
 ## Scope
 
 Authorized production/config paths:

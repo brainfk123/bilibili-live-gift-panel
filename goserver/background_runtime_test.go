@@ -1717,28 +1717,63 @@ func TestBackgroundRuntimeReportsIngestionFailureWithoutDisconnectAndClearsAfter
 	for len(notifications) > 0 {
 		<-notifications
 	}
-	failed := false
+	eventsLogWrites := 0
+	retryStarted := make(chan struct{})
+	allowRetry := make(chan struct{})
+	defer func() {
+		select {
+		case <-allowRetry:
+		default:
+			close(allowRetry)
+		}
+	}()
 	store.writeAtomically = func(path string, data []byte) error {
-		if filepath.Base(path) == "events.log" && !failed {
-			failed = true
-			return errors.New("injected ingestion health failure")
+		if filepath.Base(path) == "events.log" {
+			eventsLogWrites++
+			switch eventsLogWrites {
+			case 1:
+				return errors.New("injected ingestion health failure")
+			case 2:
+				close(retryStarted)
+				<-allowRetry
+			}
 		}
 		return writeFileAtomically(path, data)
 	}
 	runtime.acceptGift(context.Background(), "room-a", "SEND_GIFT", giftEvent{GiftID: 1, GiftName: "礼物", Num: 1, Rnd: "health-retry"})
-	waitForIngestionError(t, runtime, "injected ingestion health failure")
-	if status := runtime.Status(); status.State != "connected" || status.LastError != "" {
+	select {
+	case <-retryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("ingestion retry did not reach the second events.log write")
+	}
+	runtime.mu.RLock()
+	status := runtime.status
+	runtime.mu.RUnlock()
+	if status.State != "connected" || status.LastError != "" {
 		t.Fatalf("connection status changed by ingestion failure: %#v", status)
+	}
+	if status.IngestionError != "injected ingestion health failure" || status.IngestionErrorKind != "transaction" {
+		t.Fatalf("ingestion failure status before retry completion = %#v", status)
 	}
 	select {
 	case notification := <-notifications:
 		t.Fatalf("ingestion failure published connection notification: %#v", notification)
 	default:
 	}
-	waitForInboxPendingCount(t, inbox, 0)
-	if status := runtime.Status(); status.IngestionError != "" {
-		t.Fatalf("ingestion error not cleared after retry: %#v", status)
+	if health := inbox.Health(); health.PendingCount != 1 {
+		t.Fatalf("pending count before retry completion = %d, want 1", health.PendingCount)
 	}
+	close(allowRetry)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status = runtime.Status()
+		if inbox.Health().PendingCount == 0 && status.IngestionError == "" && status.IngestionErrorKind == "" {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("runtime status after retry = %#v, inbox health = %#v", status, inbox.Health())
 }
 
 type interleavedHealthInbox struct {
