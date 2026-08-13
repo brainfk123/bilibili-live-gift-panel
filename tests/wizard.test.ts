@@ -2311,6 +2311,44 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules[0].simulationIdentity).toBeUndefined());
   });
 
+  it('keeps the latest skipped gift simulation after the editor rerenders', async () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-skipped-rerender', giftId: gift.id, attributeName: '加班时间', formulaName: '身份条件',
+      condition: '用户身份>=舰长', formula: '加班时间+1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const fallbackFetch = globalThis.fetch;
+    const responses = [
+      { triggered: true, result: 1 },
+      { triggered: false, result: 10 },
+      { triggered: false, result: 10 },
+      { triggered: true, result: 11 },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      return Response.json({ code: 0, ...(responses.shift() ?? { triggered: true, result: 11 }) });
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const row = root.querySelector('.selected-gift-rule')!;
+    const identity = row.querySelector('.gift-rule-simulation-identity') as TestElement & { onchange?: () => void };
+    identity.value = '3';
+    identity.onchange?.();
+    findByText(row, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(row.querySelector('.formula-preview')!)).toContain('本次不会触发'));
+
+    findByText(root, '+ 添加礼物')?.onclick?.();
+    const drawer = root.querySelector('.gift-picker-drawer')!;
+    findByText(drawer, '取消')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(root.querySelector('.selected-gift-rule')!.querySelector('.formula-preview')!)).toContain('本次不会触发'));
+  });
+
   it('identity condition preview ignores stale response after its identity changes', async () => {
     const gift = builtinCatalog[0];
     const configured = state('88888888');
@@ -2348,6 +2386,35 @@ describe('single-page configuration rendering', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(textOf(row.querySelector('.formula-preview')!)).toContain('0 → 11');
     expect(requests.some((body) => body.userIdentity === 3 && body.condition === '用户身份>=舰长')).toBe(true);
+    findByText(row, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(row.querySelector('.formula-preview')!)).toContain('11 → 11'));
+    expect(requests.at(-1)?.attributeValue).toBe(11);
+  });
+
+  it('preserves an unrelated gift rule without condition while renaming an attribute', async () => {
+    const [relatedGift, unrelatedGift] = builtinCatalog;
+    const configured = state('88888888');
+    configured.attributes.push({ name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' });
+    const unrelated = {
+      id: 'r-unrelated', giftId: unrelatedGift.id, attributeName: '积分', formulaName: '积分规则', formula: '积分+1', enabled: true,
+    };
+    configured.rules = [
+      { id: 'r-related', giftId: relatedGift.id, attributeName: '加班时间', formulaName: '改名规则', formula: '加班时间+1', enabled: true },
+      unrelated,
+    ];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    const nameInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
+    nameInput.value = '倒计时';
+    nameInput.oninput?.();
+    findByText(root, '保存修改')?.onclick?.();
+    await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).attributes[0].name).toBe('倒计时'));
+    const saved = JSON.parse(storage.get('bilibili-live-gift-panel-v1')!);
+    expect(saved.rules.find((rule: { id: string }) => rule.id === unrelated.id)).toEqual(unrelated);
   });
 
   it('formula help explains gift-only identities, equality, and random choice', () => {

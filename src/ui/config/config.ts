@@ -3835,9 +3835,9 @@ export function mountConfig(root: HTMLElement): void {
         }).then(({ triggered, result }) => {
           if (requestVersion !== previewVersion) return;
           if (completeLesson && requestSimulationGeneration !== simulationGeneration) return;
-          if (completeLesson && triggered) {
-            simulationDraftValue = result;
+          if (completeLesson) {
             item.simulationPreview = { currentValue, result, triggered };
+            if (triggered) simulationDraftValue = result;
           }
           if (completeLesson) settleSimulationRequest(preview);
           let awaitingConfirmation = false;
@@ -4599,12 +4599,18 @@ export function mountConfig(root: HTMLElement): void {
       });
     }
 
-    const renamedRules = state.rules.map((rule) => ({
-      ...rule,
-      attributeName: originalName && rule.attributeName === originalName ? name : rule.attributeName,
-      condition: originalName && originalName !== name ? replaceFormulaVariable(rule.condition ?? '', originalName, name) : rule.condition,
-      formula: originalName && originalName !== name ? replaceFormulaVariable(rule.formula, originalName, name) : rule.formula,
-    }));
+    const renamedRules = state.rules.map((rule) => {
+      const needsRename = Boolean(originalName && originalName !== name && rule.attributeName === originalName);
+      if (!needsRename) return rule;
+      return {
+        ...rule,
+        attributeName: name,
+        ...(Object.prototype.hasOwnProperty.call(rule, 'condition')
+          ? { condition: replaceFormulaVariable(rule.condition ?? '', originalName, name) }
+          : {}),
+        formula: replaceFormulaVariable(rule.formula, originalName, name),
+      };
+    });
     const unrelatedRules = renamedRules.filter((rule) => rule.attributeName !== name);
     const replacementRules: GiftRule[] = normalizedRules.map((item) => ({
       id: item.previous?.id ?? createRuleId(),
