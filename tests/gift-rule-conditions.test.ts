@@ -15,6 +15,8 @@ describe('gift rule conditions', () => {
   });
 
   it('detects only trimmed standard condition forms', () => {
+    expect(detectQuickGiftCondition('')).toEqual({ mode: 'any', identity: 2 });
+    expect(detectQuickGiftCondition(' \t\n ')).toEqual({ mode: 'any', identity: 2 });
     expect(detectQuickGiftCondition(' 用户身份=粉丝团 ')).toEqual({ mode: 'equal', identity: 1 });
     expect(detectQuickGiftCondition('\t用户身份>=舰长\n')).toEqual({ mode: 'atLeast', identity: 2 });
   });

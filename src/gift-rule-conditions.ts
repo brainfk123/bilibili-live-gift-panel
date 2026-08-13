@@ -32,6 +32,7 @@ export function buildQuickGiftCondition(
 
 export function detectQuickGiftCondition(condition: string): QuickGiftConditionDraft {
   const normalized = condition.trim();
+  if (!normalized) return { mode: 'any', identity: 2 };
   const equal = normalized.match(EQUAL);
   if (equal) return { mode: 'equal', identity: identityForName(equal[1]) };
   const atLeast = normalized.match(AT_LEAST);
