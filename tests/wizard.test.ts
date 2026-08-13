@@ -258,7 +258,7 @@ beforeEach(async () => {
     }
     if (url.includes('/api/formula/preview')) {
       const body = JSON.parse(String(init?.body ?? '{}')) as { attributeValue?: number };
-      return new Response(JSON.stringify({ code: 0, result: (body.attributeValue ?? 0) + 1 }), {
+      return new Response(JSON.stringify({ code: 0, triggered: true, result: (body.attributeValue ?? 0) + 1 }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -2189,6 +2189,224 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root)).toContain('加一次挑战');
   });
 
+  it('gift identity condition saves, reopens, and updates through beginner controls', async () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-identity', giftId: gift.id, attributeName: '加班时间', formulaName: '舰长加时',
+      condition: '用户身份>=舰长', formula: '加班时间+1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const fallbackFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { attributeValue: number };
+      return Response.json({ code: 0, triggered: true, result: body.attributeValue + 1 });
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const mode = root.querySelector('.quick-rule-condition-mode') as TestElement & { onchange?: () => void };
+    const identity = root.querySelector('.quick-rule-condition-identity') as TestElement & { onchange?: () => void };
+    const condition = root.querySelector('.gift-rule-condition-input') as TestElement & { oninput?: () => void };
+    expect(mode.value).toBe('atLeast');
+    expect(identity.value).toBe('2');
+    expect(textOf(identity)).toContain('舰长');
+    expect(condition.value).toBe('用户身份>=舰长');
+
+    mode.value = 'equal';
+    mode.onchange?.();
+    identity.value = '1';
+    identity.onchange?.();
+    findByText(root, '保存修改')?.onclick?.();
+    await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules[0].condition).toBe('用户身份=粉丝团'));
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    expect((root.querySelector('.quick-rule-condition-mode') as TestElement).value).toBe('equal');
+    expect((root.querySelector('.quick-rule-condition-identity') as TestElement).value).toBe('1');
+  });
+
+  it('advanced gift condition stays exact until beginner mode explicitly replaces it', async () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-advanced-condition', giftId: gift.id, attributeName: '加班时间', formulaName: '高级条件',
+      condition: '用户身份>=舰长+积分', formula: '加班时间+1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const fallbackFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { attributeValue: number };
+      return Response.json({ code: 0, triggered: true, result: body.attributeValue + 1 });
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const mode = root.querySelector('.quick-rule-condition-mode') as TestElement & { onchange?: () => void };
+    const condition = root.querySelector('.gift-rule-condition-input') as TestElement;
+    expect(mode.value).toBe('advanced');
+    expect(condition.value).toBe('用户身份>=舰长+积分');
+    findByText(root, '保存修改')?.onclick?.();
+    await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules[0].condition).toBe('用户身份>=舰长+积分'));
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const reopenedMode = root.querySelector('.quick-rule-condition-mode') as TestElement & { onchange?: () => void };
+    reopenedMode.value = 'any';
+    reopenedMode.onchange?.();
+    findByText(root, '保存修改')?.onclick?.();
+    await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules[0].condition).toBe(''));
+  });
+
+  it('simulated gift identity sends the condition and keeps a skipped preview out of the draft', async () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.attributes[0].value = 10;
+    configured.rules = [{
+      id: 'r-simulated-identity', giftId: gift.id, attributeName: '加班时间', formulaName: '舰长加时',
+      condition: '用户身份>=舰长', formula: '加班时间+1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const fallbackFetch = globalThis.fetch;
+    const requests: Array<Record<string, unknown>> = [];
+    const responses = [
+      { triggered: true, result: 1 },
+      { triggered: false, result: 10 },
+      { triggered: false, result: 10 },
+      { triggered: true, result: 11 },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requests.push(body);
+      return Response.json({ code: 0, ...(responses.shift() ?? { triggered: true, result: 11 }) });
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const row = root.querySelector('.selected-gift-rule')!;
+    const identity = row.querySelector('.gift-rule-simulation-identity') as TestElement & { onchange?: () => void };
+    identity.value = '3';
+    identity.onchange?.();
+    findByText(row, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(row.querySelector('.formula-preview')!)).toContain('本次不会触发'));
+    expect(requests.at(-1)).toMatchObject({ condition: '用户身份>=舰长', userIdentity: 3 });
+
+    findByText(row, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(row.querySelector('.formula-preview')!)).toContain('10 → 11'));
+    findByText(root, '保存修改')?.onclick?.();
+    await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules[0].simulationIdentity).toBeUndefined());
+  });
+
+  it('identity condition preview ignores stale response after its identity changes', async () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-stale-identity', giftId: gift.id, attributeName: '加班时间', formulaName: '身份切换',
+      condition: '用户身份>=舰长', formula: '加班时间+1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const fallbackFetch = globalThis.fetch;
+    const pending: Array<(response: Response) => void> = [];
+    const requests: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requests.push(body);
+      if (body.userIdentity === 2) return new Promise<Response>((resolve) => { pending.push(resolve); });
+      return Response.json({ code: 0, triggered: true, result: 11 });
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const row = root.querySelector('.selected-gift-rule')!;
+    const identity = row.querySelector('.gift-rule-simulation-identity') as TestElement & { onchange?: () => void };
+    identity.value = '2';
+    identity.onchange?.();
+    findByText(row, '模拟收到 1 个')?.onclick?.();
+    identity.value = '3';
+    identity.onchange?.();
+    findByText(row, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(row.querySelector('.formula-preview')!)).toContain('0 → 11'));
+    pending.forEach((resolve) => resolve(Response.json({ code: 0, triggered: true, result: 99 })));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(textOf(row.querySelector('.formula-preview')!)).toContain('0 → 11');
+    expect(requests.some((body) => body.userIdentity === 3 && body.condition === '用户身份>=舰长')).toBe(true);
+  });
+
+  it('formula help explains gift-only identities, equality, and random choice', () => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const help = root.querySelector('.formula-help')!;
+    expect(textOf(help)).toContain('用户身份');
+    expect(textOf(help)).toContain('普通用户');
+    expect(textOf(help)).toContain('总督');
+    expect(textOf(help)).toContain('仅礼物规则可用');
+    expect(textOf(help)).toContain('RANDOMCHOICE(A,B,...)');
+    expect(textOf(help)).toContain('随机返回一个参数');
+    expect(textOf(help)).toContain('用户身份>=舰长');
+    expect(textOf(help)).toContain('RANDOMCHOICE(10,20,50)');
+    expect(textOf(help)).toContain('相等请使用 =');
+  });
+
+  it('rejects reserved gift formula names and retains identity constants while renaming', async () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-rename-identity', giftId: gift.id, attributeName: '加班时间', formulaName: '身份规则',
+      condition: '用户身份>=舰长', formula: '加班时间+舰长', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const fallbackFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { attributeValue: number };
+      return Response.json({ code: 0, triggered: true, result: body.attributeValue + 1 });
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    const nameInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
+    for (const reserved of ['用户身份', '普通用户', '粉丝团', '舰长', '提督', '总督']) {
+      nameInput.value = reserved;
+      nameInput.oninput?.();
+      findByText(root, '保存修改')?.onclick?.();
+      expect(textOf(root)).toContain(`系统公式名称不能作为属性名：${reserved}`);
+    }
+    nameInput.value = '用户身份等级';
+    nameInput.oninput?.();
+    findByText(root, '保存修改')?.onclick?.();
+    await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).attributes[0].name).toBe('用户身份等级'));
+    const saved = JSON.parse(storage.get('bilibili-live-gift-panel-v1')!);
+    expect(saved.rules[0]).toMatchObject({
+      formula: '用户身份等级+舰长',
+      condition: '用户身份>=舰长',
+    });
+  });
+
   it('saves, applies, and deletes a reusable gift formula preset', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
     const root = new TestElement('div');
@@ -2389,7 +2607,7 @@ describe('single-page configuration rendering', () => {
       requestedValues.push(body.attributeValue);
       if (requestedValues.length === 1) return firstPreview;
       if (requestedValues.length === 2) return secondPreview;
-      return Response.json({ code: 0, result: body.attributeValue + 10 });
+      return Response.json({ code: 0, triggered: true, result: body.attributeValue + 10 });
     }));
 
     const rows = root.querySelectorAll('.selected-gift-rule');
@@ -2399,9 +2617,9 @@ describe('single-page configuration rendering', () => {
     secondSimulate.onclick?.();
     expect(requestedValues).toEqual([0, 0]);
 
-    resolveSecond(Response.json({ code: 0, result: 10 }));
+    resolveSecond(Response.json({ code: 0, triggered: true, result: 10 }));
     await vi.waitFor(() => expect(textOf(rows[1].querySelector('.formula-preview')!)).toContain('0 → 10'));
-    resolveFirst(Response.json({ code: 0, result: 1 }));
+    resolveFirst(Response.json({ code: 0, triggered: true, result: 1 }));
     await vi.waitFor(() => expect(textOf(rows[0].querySelector('.formula-preview')!)).not.toContain('0 → 1'));
 
     secondSimulate.onclick?.();
@@ -2421,7 +2639,7 @@ describe('single-page configuration rendering', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
       const body = JSON.parse(String(init?.body)) as { attributeValue: number };
-      return Response.json({ code: 0, result: body.attributeValue - 1 });
+      return Response.json({ code: 0, triggered: true, result: body.attributeValue - 1 });
     }));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
@@ -2455,7 +2673,7 @@ describe('single-page configuration rendering', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
       const body = JSON.parse(String(init?.body)) as { formula: string; attributeValue: number };
-      return Response.json({ code: 0, result: body.attributeValue + (body.formula.includes('-1') ? -1 : 1) });
+      return Response.json({ code: 0, triggered: true, result: body.attributeValue + (body.formula.includes('-1') ? -1 : 1) });
     }));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
@@ -2507,8 +2725,8 @@ describe('single-page configuration rendering', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
       const body = JSON.parse(String(init?.body)) as { formula: string; attributeValue: number };
-      if (body.formula.includes('<0')) return Response.json({ code: 0, result: 0 });
-      return Response.json({ code: 0, result: body.attributeValue + (body.formula.includes('-1') ? -1 : 1) });
+      if (body.formula.includes('<0')) return Response.json({ code: 0, triggered: true, result: 0 });
+      return Response.json({ code: 0, triggered: true, result: body.attributeValue + (body.formula.includes('-1') ? -1 : 1) });
     }));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
@@ -2540,7 +2758,7 @@ describe('single-page configuration rendering', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
       const body = JSON.parse(String(init?.body)) as { attributeValue: number };
-      return Response.json({ code: 0, result: body.attributeValue - 1 });
+      return Response.json({ code: 0, triggered: true, result: body.attributeValue - 1 });
     }));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
@@ -2582,7 +2800,7 @@ describe('single-page configuration rendering', () => {
       if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
       const body = JSON.parse(String(init?.body)) as { formula: string; attributeValue: number };
       const delta = Number(body.formula.match(/([+-]\d+)$/)?.[1] ?? 0);
-      return Response.json({ code: 0, result: body.attributeValue + delta });
+      return Response.json({ code: 0, triggered: true, result: body.attributeValue + delta });
     }));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
@@ -2645,13 +2863,13 @@ describe('single-page configuration rendering', () => {
       requestedValues.push(body.attributeValue);
       previewCalls += 1;
       if (previewCalls === 1) return pending;
-      return Response.json({ code: 0, result: body.attributeValue + 10 });
+      return Response.json({ code: 0, triggered: true, result: body.attributeValue + 10 });
     }));
 
     const firstRow = root.querySelectorAll('.selected-gift-rule')[0];
     findByText(firstRow, '模拟收到 1 个')?.onclick?.();
     findByText(firstRow, '移除')?.onclick?.();
-    resolvePending(Response.json({ code: 0, result: 1 }));
+    resolvePending(Response.json({ code: 0, triggered: true, result: 1 }));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const remainingRow = root.querySelector('.selected-gift-rule')!;
@@ -2686,7 +2904,7 @@ describe('single-page configuration rendering', () => {
       requestedValues.push(body.attributeValue);
       previewCalls += 1;
       if (previewCalls === 1) return pending;
-      return Response.json({ code: 0, result: body.attributeValue + 10 });
+      return Response.json({ code: 0, triggered: true, result: body.attributeValue + 10 });
     }));
 
     const firstRow = root.querySelectorAll('.selected-gift-rule')[0];
@@ -2699,7 +2917,7 @@ describe('single-page configuration rendering', () => {
     findByText(drawer, '确认选择（1）')?.onclick?.();
     await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(1));
 
-    resolvePending(Response.json({ code: 0, result: 1 }));
+    resolvePending(Response.json({ code: 0, triggered: true, result: 1 }));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const remainingRow = root.querySelector('.selected-gift-rule')!;
@@ -2734,7 +2952,7 @@ describe('single-page configuration rendering', () => {
       requestedValues.push(body.attributeValue);
       previewCalls += 1;
       if (previewCalls === 1) return pending;
-      return Response.json({ code: 0, result: body.attributeValue + 10 });
+      return Response.json({ code: 0, triggered: true, result: body.attributeValue + 10 });
     }));
 
     const oldRow = root.querySelector('.selected-gift-rule')!;
@@ -2751,7 +2969,7 @@ describe('single-page configuration rendering', () => {
     findByText(root, '添加并选中')?.onclick?.();
     await vi.waitFor(() => expect(textOf(root.querySelector('.selected-gift-rule')!)).toContain('同 ID 替换礼物'));
 
-    resolvePending(Response.json({ code: 0, result: 1 }));
+    resolvePending(Response.json({ code: 0, triggered: true, result: 1 }));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const replacementRow = root.querySelector('.selected-gift-rule')!;
@@ -2788,7 +3006,7 @@ describe('single-page configuration rendering', () => {
         deferNext = false;
         return new Promise<Response>((resolve) => { pendingResolvers.push(resolve); });
       }
-      return Response.json({ code: 0, result: body.attributeValue + 10 });
+      return Response.json({ code: 0, triggered: true, result: body.attributeValue + 10 });
     }));
 
     root.querySelectorAll('.attribute-workbench-tab')
@@ -2800,7 +3018,7 @@ describe('single-page configuration rendering', () => {
     drawer.querySelectorAll('.gift-choice')
       .find((choice) => choice.dataset.giftId === String(secondGift.id))?.onclick?.();
     findByText(drawer, '确认选择（2）')?.onclick?.();
-    pendingResolvers.shift()?.(Response.json({ code: 0, result: 1 }));
+    pendingResolvers.shift()?.(Response.json({ code: 0, triggered: true, result: 1 }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     const addedGiftRow = root.querySelectorAll('.selected-gift-rule')
       .find((row) => row.dataset.giftId === String(secondGift.id))!;
@@ -2812,7 +3030,7 @@ describe('single-page configuration rendering', () => {
     deferNext = true;
     findByText(root.querySelector('.timer-rule-editor')!, '模拟执行一次')?.onclick?.();
     findByText(root, '+ 添加定时器')?.onclick?.();
-    pendingResolvers.shift()?.(Response.json({ code: 0, result: -1 }));
+    pendingResolvers.shift()?.(Response.json({ code: 0, triggered: true, result: -1 }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     const addedTimer = root.querySelectorAll('.timer-rule-editor').at(-1)!;
     findByText(addedTimer, '模拟执行一次')?.onclick?.();
@@ -2843,7 +3061,7 @@ describe('single-page configuration rendering', () => {
       if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
       previewCalls += 1;
       if (previewCalls === 1) return firstPending;
-      return Response.json({ code: 0, result: 10 });
+      return Response.json({ code: 0, triggered: true, result: 10 });
     }));
 
     const rows = root.querySelectorAll('.selected-gift-rule');
@@ -2853,7 +3071,7 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(textOf(rows[1].querySelector('.formula-preview')!)).toContain('0 → 10'));
     expect(textOf(rows[0].querySelector('.formula-preview')!)).not.toContain('由后台计算预览');
 
-    resolveFirst(Response.json({ code: 0, result: 1 }));
+    resolveFirst(Response.json({ code: 0, triggered: true, result: 1 }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     findByText(rows[1], '模拟收到 1 个')?.onclick?.();
     await vi.waitFor(() => expect(textOf(rows[1].querySelector('.formula-preview')!)).toContain('10 → 10'));
@@ -2882,13 +3100,13 @@ describe('single-page configuration rendering', () => {
       requestedValues.push(body.attributeValue);
       previewCalls += 1;
       if (previewCalls === 1) return pending;
-      return Response.json({ code: 0, result: body.attributeValue + 10 });
+      return Response.json({ code: 0, triggered: true, result: body.attributeValue + 10 });
     }));
 
     const firstTimer = root.querySelectorAll('.timer-rule-editor')[0];
     findByText(firstTimer, '模拟执行一次')?.onclick?.();
     findByText(firstTimer, '移除')?.onclick?.();
-    resolvePending(Response.json({ code: 0, result: -1 }));
+    resolvePending(Response.json({ code: 0, triggered: true, result: -1 }));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const remainingTimer = root.querySelector('.timer-rule-editor')!;

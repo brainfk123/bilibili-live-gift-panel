@@ -21,6 +21,7 @@ import {
   logoutBiliAuth,
   pollBiliQRCodeLogin,
   previewFormula,
+  previewGiftRule,
   RuntimeConnectionState,
   RuntimeStatus,
   RoomAnchorInfo,
@@ -28,6 +29,14 @@ import {
   startBiliQRCodeLogin,
   UpdateStatus,
 } from '../../backend';
+import {
+  buildQuickGiftCondition,
+  detectQuickGiftCondition,
+  GIFT_USER_IDENTITIES,
+  isGiftFormulaSystemName,
+  type GiftUserIdentity,
+  type QuickGiftConditionMode,
+} from '../../gift-rule-conditions';
 import { giftClipAnimationKey, openGiftClipStudio } from './gift-clip-studio';
 import {
   applyGiftTargetProgressSnapshot,
@@ -122,16 +131,20 @@ interface SelectedGiftRule {
   gift: GiftInfo;
   formulaName: string;
   formula: string;
+  condition: string;
   enabled: boolean;
   quickOperation?: QuickGiftOperation;
   quickAmount?: number;
   quickMaximum?: number;
   quickMaximumEnabled?: boolean;
+  quickConditionMode?: QuickGiftConditionMode;
+  quickConditionIdentity?: 1 | 2 | 3 | 4;
+  simulationIdentity?: GiftUserIdentity;
   previous?: GiftRule;
   matchGiftIds?: number[];
   blindBoxName?: string;
   blindBoxStatus?: 'matched' | 'login-required' | 'not-blind-box' | 'error';
-  simulationPreview?: { currentValue: number; result: number };
+  simulationPreview?: { currentValue: number; result: number; triggered: boolean };
 }
 
 type LeaderboardMode = 'contribution' | 'rules' | 'blind-box';
@@ -2998,7 +3011,9 @@ export function mountConfig(root: HTMLElement): void {
             gift,
             formulaName: rule.formulaName?.trim() || `${gift.name}规则`,
             formula: rule.formula,
+            condition: rule.condition ?? '',
             enabled: rule.enabled !== false,
+            simulationIdentity: 0,
             previous: rule,
             ...(rule.matchGiftIds ? { matchGiftIds: [...rule.matchGiftIds] } : {}),
             ...(rule.matchGiftIds && rule.matchGiftIds.length > 1 ? { blindBoxStatus: 'matched' as const } : {}),
@@ -3637,7 +3652,9 @@ export function mountConfig(root: HTMLElement): void {
           gift,
           formulaName: `${gift.name}规则`,
           formula: defaultFormula(),
+          condition: '',
           enabled: !editorGuideEnabled,
+          simulationIdentity: 0,
           quickOperation: 'price',
           quickAmount: 60,
         };
@@ -3749,6 +3766,14 @@ export function mountConfig(root: HTMLElement): void {
       formulaNameInput.oninput = () => {
         item.formulaName = formulaNameInput.value;
       };
+      if (!item.quickConditionMode) {
+        const detected = detectQuickGiftCondition(item.condition);
+        item.quickConditionMode = detected.mode;
+        item.quickConditionIdentity = detected.identity;
+      }
+      const conditionInput = inputField('运行条件（可留空）', item.condition);
+      conditionInput.classList.add('gift-rule-condition-input');
+      conditionInput.placeholder = '例如 用户身份>=舰长';
       const formulaInput = inputField('触发后属性值', item.formula);
       formulaInput.classList.add('formula');
       formulaInput.placeholder = `${nameInput.value.trim() || '属性'}+60`;
@@ -3771,6 +3796,10 @@ export function mountConfig(root: HTMLElement): void {
       const renderSimulationPreview = (): boolean => {
         if (!item.simulationPreview) return false;
         preview.classList.remove('has-tutorial-confirmation');
+        if (!item.simulationPreview.triggered) {
+          preview.replaceChildren(el('span', { text: `已模拟 1 个 ${item.gift.name}：本次不会触发` }));
+          return false;
+        }
         preview.replaceChildren(
           el('span', { text: `已模拟 1 个 ${item.gift.name}：${item.simulationPreview.currentValue} → ` }),
           el('strong', { text: String(item.simulationPreview.result) }),
@@ -3789,20 +3818,31 @@ export function mountConfig(root: HTMLElement): void {
         const formula = originalName && originalName !== name
           ? replaceFormulaVariable(item.formula.trim(), originalName, name)
           : item.formula.trim();
+        const condition = originalName && originalName !== name
+          ? replaceFormulaVariable(item.condition.trim(), originalName, name)
+          : item.condition.trim();
         const currentValue = simulationDraftValue;
         const requestVersion = ++previewVersion;
         const requestSimulationGeneration = completeLesson ? beginSimulationRequest(preview) : 0;
         preview.append(el('span', { text: '由后台计算预览…' }));
-        void previewFormula(formula, name, currentValue, 'gift', item.gift.price).then((result) => {
+        void previewGiftRule({
+          condition,
+          formula,
+          attributeName: name,
+          attributeValue: currentValue,
+          giftPrice: item.gift.price,
+          userIdentity: item.simulationIdentity ?? 0,
+        }).then(({ triggered, result }) => {
           if (requestVersion !== previewVersion) return;
           if (completeLesson && requestSimulationGeneration !== simulationGeneration) return;
-          if (completeLesson) {
+          if (completeLesson && triggered) {
             simulationDraftValue = result;
-            item.simulationPreview = { currentValue, result };
-            settleSimulationRequest(preview);
+            item.simulationPreview = { currentValue, result, triggered };
           }
+          if (completeLesson) settleSimulationRequest(preview);
           let awaitingConfirmation = false;
-          if (completeLesson) awaitingConfirmation = renderSimulationPreview();
+          if (completeLesson && triggered) awaitingConfirmation = renderSimulationPreview();
+          else if (!triggered) preview.replaceChildren(el('span', { text: '本次不会触发' }));
           else preview.replaceChildren(
               el('span', { text: `预览收到 1 个 ${item.gift.name}：${currentValue} → ` }),
               el('strong', { text: String(result) }),
@@ -3906,6 +3946,59 @@ export function mountConfig(root: HTMLElement): void {
         syncQuickCopy();
         updatePreview();
       };
+      const conditionModeSelect = el('select', { class: 'field-input quick-rule-condition-mode' }) as HTMLSelectElement;
+      for (const [value, text] of [
+        ['any', '不限'],
+        ['equal', '身份等于'],
+        ['atLeast', '身份至少'],
+        ['advanced', '高级条件'],
+      ] as Array<[QuickGiftConditionMode, string]>) {
+        conditionModeSelect.append(el('option', { value, text }));
+      }
+      const conditionIdentitySelect = el('select', { class: 'field-input quick-rule-condition-identity' }) as HTMLSelectElement;
+      for (const identity of GIFT_USER_IDENTITIES.filter((candidate) => candidate.value !== 0)) {
+        conditionIdentitySelect.append(el('option', { value: String(identity.value), text: identity.name }));
+      }
+      const simulationIdentitySelect = el('select', { class: 'field-input gift-rule-simulation-identity' }) as HTMLSelectElement;
+      for (const identity of GIFT_USER_IDENTITIES) {
+        simulationIdentitySelect.append(el('option', { value: String(identity.value), text: identity.name }));
+      }
+      simulationIdentitySelect.dataset.fieldLabel = '模拟送礼者身份';
+      conditionModeSelect.value = item.quickConditionMode ?? 'any';
+      conditionIdentitySelect.value = String(item.quickConditionIdentity ?? 2);
+      simulationIdentitySelect.value = String(item.simulationIdentity ?? 0);
+      const syncQuickConditionControls = (): void => {
+        const mode = conditionModeSelect.value as QuickGiftConditionMode;
+        const showIdentity = mode !== 'any' && mode !== 'advanced';
+        conditionIdentitySelect.hidden = !showIdentity;
+        conditionIdentitySelect.disabled = !showIdentity;
+      };
+      const syncQuickCondition = (): void => {
+        const mode = conditionModeSelect.value as QuickGiftConditionMode;
+        const identity = Number(conditionIdentitySelect.value) as 1 | 2 | 3 | 4;
+        item.quickConditionMode = mode;
+        item.quickConditionIdentity = identity;
+        const condition = buildQuickGiftCondition(mode, identity);
+        if (condition !== null) {
+          item.condition = condition;
+          conditionInput.value = condition;
+        }
+        syncQuickConditionControls();
+        updatePreview();
+      };
+      conditionModeSelect.onchange = syncQuickCondition;
+      conditionIdentitySelect.onchange = syncQuickCondition;
+      simulationIdentitySelect.onchange = () => {
+        item.simulationIdentity = Number(simulationIdentitySelect.value) as GiftUserIdentity;
+        updatePreview();
+      };
+      conditionInput.oninput = () => {
+        item.condition = conditionInput.value;
+        item.quickConditionMode = 'advanced';
+        conditionModeSelect.value = 'advanced';
+        syncQuickConditionControls();
+        updatePreview();
+      };
       const examples = el('div', { class: 'formula-examples' });
       const presetControls = renderFormulaPresetControls('gift', formulaInput, formulaNameInput, () => updatePreview());
       formulaHeading.append(presetControls.saveButton);
@@ -3946,16 +4039,24 @@ export function mountConfig(root: HTMLElement): void {
           quickUnit,
         ]),
         maximumLimit,
+        el('div', { class: 'quick-rule-sentence quick-rule-condition' }, [
+          el('span', { text: '送礼者身份' }),
+          conditionModeSelect,
+          conditionIdentitySelect,
+        ]),
+        fieldControl(simulationIdentitySelect),
         el('div', { class: 'quick-rule-actions' }, [presetControls.presetList, simulateButton]),
       ]);
       const advanced = el('details', { class: 'rule-advanced-settings' });
       advanced.append(
         el('summary', { text: '高级规则：直接编辑计算表达式' }),
+        fieldControl(conditionInput),
         formulaControl,
         examples,
       );
       row.append(quickBuilder, advanced, preview);
       syncQuickCopy();
+      syncQuickConditionControls();
       if (item.simulationPreview) renderSimulationPreview();
       else updatePreview();
       return row;
@@ -4267,7 +4368,9 @@ export function mountConfig(root: HTMLElement): void {
         gift,
         formulaName: `${gift.name}规则`,
         formula: defaultFormula(),
+        condition: '',
         enabled: !editorGuideEnabled,
+        simulationIdentity: 0,
         quickOperation: 'price',
         quickAmount: 60,
       };
@@ -4325,6 +4428,11 @@ export function mountConfig(root: HTMLElement): void {
       nameInput.focus();
       return;
     }
+    if (isGiftFormulaSystemName(name)) {
+      toast(`系统公式名称不能作为属性名：${name}`, root);
+      nameInput.focus();
+      return;
+    }
     if (state.attributes.some((attribute, attributeIndex) => attribute.name === name && attributeIndex !== index)) {
       toast('属性名称不能重复', root);
       nameInput.focus();
@@ -4348,11 +4456,14 @@ export function mountConfig(root: HTMLElement): void {
       const formula = originalName && originalName !== name
         ? replaceFormulaVariable(item.formula.trim(), originalName, name)
         : item.formula.trim();
+      const condition = originalName && originalName !== name
+        ? replaceFormulaVariable(item.condition.trim(), originalName, name)
+        : item.condition.trim();
       if (!formula) {
         toast(`请填写“${item.gift.name}”的规则`, root);
         return;
       }
-      normalizedRules.push({ ...item, formulaName, formula });
+      normalizedRules.push({ ...item, formulaName, condition, formula });
     }
 
     for (const timer of timerRules) {
@@ -4410,6 +4521,13 @@ export function mountConfig(root: HTMLElement): void {
     saveButton.textContent = '后台校验中…';
     try {
       for (const item of normalizedRules) {
+        await previewGiftRule({
+          condition: item.condition,
+          formula: item.formula,
+          attributeName: name,
+          attributeValue: value,
+          giftPrice: item.gift.price,
+        });
         await previewFormula(item.formula, name, value);
       }
       for (const timer of normalizedTimers) {
@@ -4484,6 +4602,7 @@ export function mountConfig(root: HTMLElement): void {
     const renamedRules = state.rules.map((rule) => ({
       ...rule,
       attributeName: originalName && rule.attributeName === originalName ? name : rule.attributeName,
+      condition: originalName && originalName !== name ? replaceFormulaVariable(rule.condition ?? '', originalName, name) : rule.condition,
       formula: originalName && originalName !== name ? replaceFormulaVariable(rule.formula, originalName, name) : rule.formula,
     }));
     const unrelatedRules = renamedRules.filter((rule) => rule.attributeName !== name);
@@ -4492,6 +4611,7 @@ export function mountConfig(root: HTMLElement): void {
       giftId: item.gift.id,
       attributeName: name,
       formulaName: item.formulaName,
+      condition: item.condition.trim(),
       formula: item.formula,
       enabled: item.enabled,
       ...(item.matchGiftIds && item.matchGiftIds.length > 1
@@ -5087,14 +5207,18 @@ export function mountConfig(root: HTMLElement): void {
             ['price', '当前单个礼物价格（1 元对应 1000 price）'],
             [current, '触发前的当前属性值'],
             ['其他属性名', '可读取其他属性当前值'],
+            ['用户身份', '送礼者身份等级（仅礼物规则可用）'],
+            ['普通用户 / 粉丝团 / 舰长 / 提督 / 总督', '用户身份可比较的命名常量（仅礼物规则可用）'],
           ]),
           formulaHelpBlock('运算与函数', [
             ['+  -  *  /  ( )', '基础四则运算与括号'],
+            ['=', '相等请使用 ='],
             ['IF(条件,A,B)', '按条件选择结果'],
             ['MIN / MAX', '限制最小值或最大值'],
             ['ROUND / ABS', '四舍五入或取绝对值'],
             ['RAND()', '生成 0 到 1 之间的随机数'],
             ['RANDBETWEEN(A,B)', '生成 A 到 B 的随机整数'],
+            ['RANDOMCHOICE(A,B,...)', '随机返回一个参数'],
           ]),
         ]),
         el('div', { class: 'formula-help-examples' }, [
@@ -5102,6 +5226,8 @@ export function mountConfig(root: HTMLElement): void {
           el('code', { text: `${current}+price/1000*60` }), el('span', { text: '每 1 元增加 60' }),
           el('code', { text: `MIN(${current}+60,3600)` }), el('span', { text: '增加 60，但最大不超过 3600' }),
           el('code', { text: `IF(price>=1000,${current}+60,${current}+10)` }), el('span', { text: '按礼物价格选择增加量' }),
+          el('code', { text: '用户身份>=舰长' }), el('span', { text: '仅舰长及以上送礼者触发（仅礼物规则可用）' }),
+          el('code', { text: 'RANDOMCHOICE(10,20,50)' }), el('span', { text: '随机选一个数作为结果' }),
         ]),
         el('p', { class: 'formula-help-note', text: '连送会拆成单个礼物逐次执行：例如一次连送 3 个，就依次计算 3 次。' }),
       ]),
