@@ -22,6 +22,8 @@ import {
   pollBiliQRCodeLogin,
   previewFormula,
   previewGiftRule,
+  validateFormula,
+  validateGiftRule,
   RuntimeConnectionState,
   RuntimeStatus,
   RoomAnchorInfo,
@@ -4521,18 +4523,17 @@ export function mountConfig(root: HTMLElement): void {
     saveButton.textContent = '后台校验中…';
     try {
       for (const item of normalizedRules) {
-        await previewGiftRule({
+        await validateGiftRule({
           condition: item.condition,
           formula: item.formula,
           attributeName: name,
           attributeValue: value,
           giftPrice: item.gift.price,
         });
-        await previewFormula(item.formula, name, value);
       }
       for (const timer of normalizedTimers) {
-        if (timer.condition) await previewFormula(timer.condition, name, value, 'timer');
-        await previewFormula(timer.formula, name, value, 'timer');
+        if (timer.condition) await validateFormula(timer.condition, name, value, 'timer');
+        await validateFormula(timer.formula, name, value, 'timer');
       }
     } catch (error) {
       toast(error instanceof Error ? `规则有误：${error.message}` : '规则有误', root);

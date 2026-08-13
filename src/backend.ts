@@ -434,6 +434,45 @@ export async function previewGiftRule(options: {
   return { triggered: payload.triggered, result: payload.result };
 }
 
+async function requestFormulaValidation(body: Record<string, unknown>): Promise<void> {
+  const response = await fetch('/api/formula/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, validateOnly: true }),
+  });
+  const payload = await response.json() as FormulaPreviewResponse;
+  if (!response.ok || payload.code !== 0) {
+    throw new Error(payload.message || `规则校验失败：HTTP ${response.status}`);
+  }
+}
+
+export function validateFormula(
+  formula: string,
+  attributeName: string,
+  attributeValue: number,
+  context: 'gift' | 'timer' = 'gift',
+  giftPrice?: number,
+): Promise<void> {
+  return requestFormulaValidation({ formula, attributeName, attributeValue, context, giftPrice });
+}
+
+export function validateGiftRule(options: {
+  condition?: string;
+  formula: string;
+  attributeName: string;
+  attributeValue: number;
+  giftPrice?: number;
+}): Promise<void> {
+  return requestFormulaValidation({
+    condition: options.condition ?? '',
+    formula: options.formula,
+    attributeName: options.attributeName,
+    attributeValue: options.attributeValue,
+    context: 'gift',
+    giftPrice: options.giftPrice,
+  });
+}
+
 export async function getBlindBoxInfo(giftId: number): Promise<BlindBoxLookup> {
   const response = await fetch(`/api/blind-box?giftId=${encodeURIComponent(String(giftId))}`, { cache: 'no-store' });
   const payload = await response.json() as BlindBoxResponse;

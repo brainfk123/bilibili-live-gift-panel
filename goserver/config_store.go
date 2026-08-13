@@ -530,11 +530,11 @@ func validateAppState(state appState) error {
 			return fmt.Errorf("规则 %q 不能为空", rule.FormulaName)
 		}
 		if strings.TrimSpace(rule.Condition) != "" {
-			if _, err := formulaPreview(state, rule.Condition, attribute.Name, attribute.Value); err != nil {
+			if err := validateGiftFormula(state, rule.Condition, attribute.Name, attribute.Value, 1000); err != nil {
 				return fmt.Errorf("规则 %q 的运行条件无效：%w", rule.FormulaName, err)
 			}
 		}
-		if _, err := formulaPreview(state, rule.Formula, attribute.Name, attribute.Value); err != nil {
+		if err := validateGiftFormula(state, rule.Formula, attribute.Name, attribute.Value, 1000); err != nil {
 			return fmt.Errorf("规则 %q 无效：%w", rule.FormulaName, err)
 		}
 	}
@@ -550,11 +550,11 @@ func validateAppState(state appState) error {
 			return fmt.Errorf("定时器 %q 的规则不能为空", rule.FormulaName)
 		}
 		if strings.TrimSpace(rule.Condition) != "" {
-			if _, err := timerFormulaPreview(state, rule.Condition, attribute.Name, attribute.Value); err != nil {
+			if err := validateTimerFormula(state, rule.Condition, attribute.Name, attribute.Value); err != nil {
 				return fmt.Errorf("定时器 %q 的运行条件无效：%w", rule.FormulaName, err)
 			}
 		}
-		if _, err := timerFormulaPreview(state, rule.Formula, attribute.Name, attribute.Value); err != nil {
+		if err := validateTimerFormula(state, rule.Formula, attribute.Name, attribute.Value); err != nil {
 			return fmt.Errorf("定时器 %q 的规则无效：%w", rule.FormulaName, err)
 		}
 	}

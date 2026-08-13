@@ -13,6 +13,8 @@ import {
   logoutBiliAuth,
   pollBiliQRCodeLogin,
   previewGiftRule,
+  validateFormula,
+  validateGiftRule,
   resetGiftTargetProgress,
   startBiliQRCodeLogin,
   startPagePresence,
@@ -130,6 +132,43 @@ describe('gift rule preview API', () => {
 
     await expect(previewGiftRule({ formula: '积分+1', attributeName: '积分', attributeValue: 0 }))
       .rejects.toThrow('条件表达式无效');
+  });
+});
+
+describe('formula validation API', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('requests structural gift-rule validation without a runtime result', async () => {
+    const fetchMock = vi.fn(async () => Response.json({ code: 0 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(validateGiftRule({
+      condition: 'RANDOMCHOICE(1,1/0)',
+      formula: 'RANDOMCHOICE(积分+1,1/0)',
+      attributeName: '积分',
+      attributeValue: 0,
+      giftPrice: 5200,
+    })).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith('/api/formula/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        condition: 'RANDOMCHOICE(1,1/0)', formula: 'RANDOMCHOICE(积分+1,1/0)',
+        attributeName: '积分', attributeValue: 0, context: 'gift', giftPrice: 5200, validateOnly: true,
+      }),
+    });
+  });
+
+  it('requests structural timer validation and preserves backend errors', async () => {
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => (
+      Response.json({ code: -1, message: '变量 "price" 未定义' }, { status: 400 })
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(validateFormula('price+1', '积分', 0, 'timer')).rejects.toThrow('price');
+    expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toEqual({
+      formula: 'price+1', attributeName: '积分', attributeValue: 0, context: 'timer', validateOnly: true,
+    });
   });
 });
 

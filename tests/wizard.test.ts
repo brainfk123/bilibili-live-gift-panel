@@ -2231,6 +2231,54 @@ describe('single-page configuration rendering', () => {
     expect((root.querySelector('.quick-rule-condition-identity') as TestElement).value).toBe('1');
   });
 
+  it('uses deterministic validation when saving lazy random-choice rules', async () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-lazy-random', giftId: gift.id, attributeName: '加班时间', formulaName: '惰性随机规则',
+      condition: 'RANDOMCHOICE(1,1/0)', formula: 'RANDOMCHOICE(10,1/0)', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+
+    const fallbackFetch = globalThis.fetch;
+    const formulaRequests: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      formulaRequests.push(body);
+      if (body.validateOnly === true) return Response.json({ code: 0 });
+      return Response.json({ code: -1, message: '除数为零' }, { status: 400 });
+    }));
+
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const requestCountBeforeSave = formulaRequests.length;
+
+    findByText(root, '保存修改')?.onclick?.();
+
+    await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
+    const saveRequests = formulaRequests.slice(requestCountBeforeSave);
+    expect(saveRequests.length).toBeGreaterThan(0);
+    expect(saveRequests.every((request) => request.validateOnly === true)).toBe(true);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const secondRequestCountBeforeSave = formulaRequests.length;
+    findByText(root, '保存修改')?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
+    const secondSaveRequests = formulaRequests.slice(secondRequestCountBeforeSave);
+    expect(secondSaveRequests.length).toBeGreaterThan(0);
+    expect(secondSaveRequests.every((request) => request.validateOnly === true)).toBe(true);
+    expect(loadState().rules[0]).toMatchObject({
+      condition: 'RANDOMCHOICE(1,1/0)',
+      formula: 'RANDOMCHOICE(10,1/0)',
+    });
+  });
+
   it('advanced gift condition stays exact until beginner mode explicitly replaces it', async () => {
     const gift = builtinCatalog[0];
     const configured = state('88888888');

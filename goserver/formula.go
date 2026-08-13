@@ -189,19 +189,97 @@ func (n callNode) evaluate(env map[string]float64) (float64, error) {
 }
 
 func evaluateFormula(input string, env map[string]float64) (float64, error) {
-	tokens, err := tokenizeFormula(input)
+	node, err := parseFormula(input)
 	if err != nil {
 		return 0, err
+	}
+	return node.evaluate(env)
+}
+
+func validateFormula(input string, env map[string]float64) error {
+	node, err := parseFormula(input)
+	if err != nil {
+		return err
+	}
+	return validateFormulaNode(node, env)
+}
+
+func parseFormula(input string) (formulaNode, error) {
+	tokens, err := tokenizeFormula(input)
+	if err != nil {
+		return nil, err
 	}
 	parser := formulaParser{tokens: tokens}
 	node, err := parser.parseExpression()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if parser.peek().kind != "eof" {
-		return 0, fmt.Errorf("多余的内容 %q", parser.peek().value)
+		return nil, fmt.Errorf("多余的内容 %q", parser.peek().value)
 	}
-	return node.evaluate(env)
+	return node, nil
+}
+
+func validateFormulaNode(node formulaNode, env map[string]float64) error {
+	switch typed := node.(type) {
+	case numberNode:
+		return nil
+	case variableNode:
+		if _, ok := env[string(typed)]; !ok {
+			return fmt.Errorf("变量 %q 未定义", string(typed))
+		}
+		return nil
+	case unaryNode:
+		return validateFormulaNode(typed.operand, env)
+	case binaryNode:
+		if err := validateFormulaNode(typed.left, env); err != nil {
+			return err
+		}
+		return validateFormulaNode(typed.right, env)
+	case callNode:
+		name := strings.ToUpper(typed.name)
+		argumentCount := len(typed.args)
+		switch name {
+		case "IF":
+			if argumentCount != 3 {
+				return fmt.Errorf("IF 需要 3 个参数")
+			}
+		case "RANDOMCHOICE":
+			if argumentCount == 0 {
+				return fmt.Errorf("RANDOMCHOICE 至少需要 1 个参数")
+			}
+		case "MAX", "MIN":
+			if argumentCount == 0 {
+				return fmt.Errorf("%s 至少需要 1 个参数", name)
+			}
+		case "ROUND":
+			if argumentCount < 1 || argumentCount > 2 {
+				return fmt.Errorf("ROUND 需要 1-2 个参数")
+			}
+		case "ABS", "FLOOR":
+			if argumentCount != 1 {
+				return fmt.Errorf("%s 需要 1 个参数", name)
+			}
+		case "RAND":
+			if argumentCount != 0 {
+				return fmt.Errorf("RAND 不需要参数")
+			}
+		case "RANDBETWEEN":
+			if argumentCount != 2 {
+				return fmt.Errorf("RANDBETWEEN 需要 2 个参数")
+			}
+		default:
+			return fmt.Errorf("未知函数 %q", typed.name)
+		}
+		for _, argument := range typed.args {
+			if err := validateFormulaNode(argument, env); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("表达式不合法")
+	}
 }
 
 func tokenizeFormula(input string) ([]formulaToken, error) {

@@ -175,3 +175,40 @@ Together, the build output, complete manifest/hash closure, all-file enumeration
 - Feature range `a320590..5a0711d` contains only the Task1–4 Go/frontend files and tests; pre-report `git status --short` was empty. This Task-5 correction modifies only this force-added report.
 - Controller/operator audit: no push, tag, release, publish, branch switch, `progress.md` edit, plan-workspace edit, or ignored `dist` artifact staging was performed by this Task-5 agent. No implementation file or design document was modified in Task 5.
 - Concern (non-load-bearing): the brief’s literal “no `用户身份==` exists” expectation conflicts with the deliberate negative test that proves this syntax is rejected. It is confined to that test and does not represent accepted product syntax.
+
+## Final review fix: deterministic formula validation (2026-08-14)
+
+### Finding and root cause
+
+- Fixed base: `e196d51b9aac5fa00b009e029fd8f58ff75f9991`.
+- `validateAppState` called `formulaPreview` / `timerFormulaPreview`, and the UI save preflight called runtime preview adapters. Both paths evaluated formulas while deciding whether they were structurally valid.
+- Consequently, `RANDOMCHOICE(10,1/0)` could be accepted or rejected depending on the drawn branch, even though runtime `RANDOMCHOICE` correctly evaluates only the selected branch.
+
+### RED evidence
+
+- Go: `go test ./... -run TestConfigStoreValidationDoesNotEvaluateRandomChoiceBranches -count=1` failed deterministically when the injected choice selected branch 1: HTTP 400 with `规则 "惰性随机规则" 的运行条件无效：除数为零`.
+- UI: `npm test -- --run tests/wizard.test.ts -t "uses deterministic validation when saving lazy random-choice rules"` failed with the editor still open and toast `规则有误：除数为零`.
+
+### Implementation and behavioral evidence
+
+- Parsing is shared by evaluation and validation. Structural validation recursively checks every AST branch for syntax, identifiers, known function names, and arity without evaluating arithmetic, drawing randomness, or checking runtime numeric outcomes.
+- Function contracts covered: `IF(3)`, `RANDOMCHOICE(>=1)`, `MAX/MIN(>=1)`, `ROUND(1-2)`, `ABS/FLOOR(1)`, `RAND(0)`, and `RANDBETWEEN(2)`; unknown functions fail.
+- Gift validation uses attributes plus `price` and identity system names. Timer validation uses attributes only, preserving the gift-only context boundary.
+- Config saving uses structural validation. `/api/formula/preview` accepts backward-compatible `validateOnly:true`; UI save preflight uses it, while interactive preview and live execution retain runtime evaluation.
+- `TestFormulaNestedLazyRandomCompositionUsesOnlySelectedExpressions` deterministically composes `IF`, `RANDOMCHOICE`, `RANDBETWEEN`, an attribute expression, and invalid unselected branches. It proves exactly two expected draws and a result of 13.
+
+### GREEN and final gates
+
+| Gate | Fresh observed result |
+|---|---|
+| Focused Go structural/config/API/nested suite | exit 0; PASS. |
+| Affected Go stress (`-count=20`) | exit 0; PASS in 3.376s. |
+| Focused race (`-count=5`) | exit 0; PASS in 1.623s. |
+| `go test ./... -count=1 -timeout=300s` | exit 0; PASS in 22.367s. |
+| `go test -race ./... -count=1 -timeout=300s` | exit 0; PASS in 38.850s. |
+| `npm run typecheck` | exit 0; 0 TypeScript errors. |
+| Focused backend/wizard validation suite | 3 passed, 189 skipped; exit 0. |
+| `npm test -- --reporter=dot` | 43 files, 500 passed, 31 skipped, 0 failed; exit 0. |
+| `git diff --check` | exit 0; no whitespace errors. |
+
+No push, tag, release, package, version, or FFmpeg action was performed for this fix.

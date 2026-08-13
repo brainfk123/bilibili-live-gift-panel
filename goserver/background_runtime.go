@@ -1583,6 +1583,20 @@ func formulaPreviewWithPrice(state appState, formula, attributeName string, attr
 	return result, nil
 }
 
+func validateGiftFormula(state appState, formula, attributeName string, attributeValue, giftPrice float64) error {
+	environment := buildGiftFormulaEnvironment(state, attributeName, attributeValue, giftPrice, "")
+	return validateFormula(formula, environment)
+}
+
+func validateTimerFormula(state appState, formula, attributeName string, attributeValue float64) error {
+	environment := map[string]float64{}
+	for _, attribute := range state.Attributes {
+		environment[attribute.Name] = attribute.Value
+	}
+	environment[attributeName] = attributeValue
+	return validateFormula(formula, environment)
+}
+
 type giftRulePreviewResult struct {
 	Triggered bool    `json:"triggered"`
 	Result    float64 `json:"result"`

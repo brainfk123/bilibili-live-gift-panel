@@ -90,6 +90,7 @@ func handleFormulaPreview(store *configStore) http.HandlerFunc {
 			GiftPrice      float64 `json:"giftPrice"`
 			Condition      string  `json:"condition"`
 			UserIdentity   *int    `json:"userIdentity"`
+			ValidateOnly   bool    `json:"validateOnly"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&request); err != nil {
 			if strings.Contains(err.Error(), "userIdentity") {
@@ -113,6 +114,14 @@ func handleFormulaPreview(store *configStore) http.HandlerFunc {
 			return
 		}
 		if request.Context == "timer" {
+			if request.ValidateOnly {
+				if err := validateTimerFormula(state, request.Formula, request.AttributeName, request.AttributeValue); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"code": 0})
+				return
+			}
 			result, err := timerFormulaPreview(state, request.Formula, request.AttributeName, request.AttributeValue)
 			if err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})
@@ -124,6 +133,20 @@ func handleFormulaPreview(store *configStore) http.HandlerFunc {
 			price := request.GiftPrice
 			if price <= 0 {
 				price = 1000
+			}
+			if request.ValidateOnly {
+				if strings.TrimSpace(request.Condition) != "" {
+					if err := validateGiftFormula(state, request.Condition, request.AttributeName, request.AttributeValue, price); err != nil {
+						writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})
+						return
+					}
+				}
+				if err := validateGiftFormula(state, request.Formula, request.AttributeName, request.AttributeValue, price); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"code": 0})
+				return
 			}
 			preview, err := previewGiftRule(state, request.Condition, request.Formula, request.AttributeName, request.AttributeValue, price, identityLevel)
 			if err != nil {

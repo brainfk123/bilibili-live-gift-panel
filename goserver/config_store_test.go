@@ -930,6 +930,34 @@ func TestConfigStorePersistsGiftRuleCondition(t *testing.T) {
 	}
 }
 
+func TestConfigStoreValidationDoesNotEvaluateRandomChoiceBranches(t *testing.T) {
+	originalRandomIntn := formulaRandomIntn
+	t.Cleanup(func() { formulaRandomIntn = originalRandomIntn })
+
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{
+		"attributes":[{"name":"积分","value":0}],
+		"rules":[{
+			"id":"r1","giftId":1,"attributeName":"积分","formulaName":"惰性随机规则",
+			"condition":"RANDOMCHOICE(1,1/0)","formula":"RANDOMCHOICE(10,1/0)"
+		}]
+	}`
+
+	for _, selectedIndex := range []int{0, 1} {
+		formulaRandomIntn = func(limit int) int {
+			if limit != 2 {
+				t.Fatalf("random limit = %d, want 2", limit)
+			}
+			return selectedIndex
+		}
+		response := httptest.NewRecorder()
+		store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+		if response.Code != http.StatusOK {
+			t.Fatalf("selected branch %d: status = %d, want 200; body = %s", selectedIndex, response.Code, response.Body.String())
+		}
+	}
+}
+
 func TestConfigStoreRejectsInvalidGiftRuleCondition(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	payload := `{

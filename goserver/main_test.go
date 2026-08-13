@@ -529,6 +529,47 @@ func TestFormulaPreviewKeepsUserIdentityOutOfTimerContext(t *testing.T) {
 	}
 }
 
+func TestFormulaPreviewValidateOnlyChecksGiftRuleWithoutEvaluation(t *testing.T) {
+	originalRandomIntn := formulaRandomIntn
+	t.Cleanup(func() { formulaRandomIntn = originalRandomIntn })
+	formulaRandomIntn = func(int) int {
+		t.Fatal("validation-only request drew randomness")
+		return 0
+	}
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{
+		"formula":"RANDOMCHOICE(积分+10,1/0)","condition":"RANDOMCHOICE(1,1/0)",
+		"attributeName":"积分","attributeValue":0,"context":"gift","validateOnly":true
+	}`))
+	response := httptest.NewRecorder()
+	handleFormulaPreview(store)(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":0`) {
+		t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestFormulaPreviewValidateOnlyEnforcesContextAndArity(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		message string
+	}{
+		{name: "gift unknown variable", payload: `{"formula":"missing+1","attributeName":"积分","validateOnly":true}`, message: "missing"},
+		{name: "gift wrong arity", payload: `{"formula":"IF(1,2)","attributeName":"积分","validateOnly":true}`, message: "IF 需要 3 个参数"},
+		{name: "timer gift variable", payload: `{"formula":"price+1","attributeName":"积分","context":"timer","validateOnly":true}`, message: "price"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+			response := httptest.NewRecorder()
+			handleFormulaPreview(store)(response, httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(test.payload)))
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), test.message) {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestListenWithFallbackSkipsOccupiedPort(t *testing.T) {
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
