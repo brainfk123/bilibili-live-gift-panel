@@ -75,7 +75,8 @@ import {
   type ObsOutputCatalogGroup,
   type ObsOutputCatalogItem,
 } from '../../obs-outputs';
-import { buildBlindBoxLeaderboard, listBlindBoxLeaderboardScopes } from '../../blind-box-leaderboard';
+import { createBlindBoxLeaderboardResource } from '../../blind-box-leaderboard-resource';
+import type { BlindBoxLeaderboardSnapshot } from '../../backend';
 import { createActivityWorkspace } from './activity-workspace';
 import { createTrainingCenter } from './training-center';
 import type { TrainingTopicDefinition } from '../../training';
@@ -229,6 +230,12 @@ export function mountConfig(root: HTMLElement): void {
   let localStateVersion = 0;
   let leaderboardMode: LeaderboardMode = 'contribution';
   let leaderboardBlindBoxGiftId: number | undefined;
+  let requestedLeaderboardBlindBoxGiftId: number | undefined;
+  let requestedBlindBoxScopeName = '全部盲盒';
+  let blindBoxLeaderboardSnapshot: BlindBoxLeaderboardSnapshot | undefined;
+  let blindBoxLeaderboardLoading = false;
+  let blindBoxLeaderboardError = false;
+  const blindBoxLeaderboardResource = createBlindBoxLeaderboardResource();
   let activePage = parseConfigPage(globalThis.location?.search);
   let activePageIsExplicit = new URLSearchParams(globalThis.location?.search ?? '').has('page');
   let simpleModeSession: SimpleModeSession | undefined;
@@ -2352,8 +2359,8 @@ export function mountConfig(root: HTMLElement): void {
 
   function renderContributionLeaderboard(replaceExisting = false): void {
     const viewers = state.contributions.viewers;
-    const blindBoxLeaderboard = buildBlindBoxLeaderboard(state.contributions);
-    const blindBoxScopes = listBlindBoxLeaderboardScopes(state.contributions);
+    const blindBoxLeaderboard = blindBoxLeaderboardSnapshot ?? emptyBlindBoxLeaderboardSnapshot();
+    const blindBoxScopes = blindBoxLeaderboard.scopes;
     if (leaderboardBlindBoxGiftId && !blindBoxScopes.some((scope) => scope.giftId === leaderboardBlindBoxGiftId)) {
       leaderboardBlindBoxGiftId = undefined;
     }
@@ -2389,7 +2396,12 @@ export function mountConfig(root: HTMLElement): void {
       clearButton.disabled = true;
       void clearContributionLedger().then((contributions) => {
         state.contributions = contributions;
-        render();
+        blindBoxLeaderboardResource.clear();
+        blindBoxLeaderboardSnapshot = undefined;
+        leaderboardBlindBoxGiftId = undefined;
+        requestedBlindBoxScopeName = '全部盲盒';
+        void refreshBlindBoxLeaderboard();
+        renderContributionLeaderboard(true);
         toast('观众排行榜已清空', root);
       }).catch((error) => {
         clearButton.disabled = false;
@@ -2501,9 +2513,9 @@ export function mountConfig(root: HTMLElement): void {
       ]) as HTMLButtonElement;
       option.dataset.giftId = scope ? String(scope.giftId) : '';
       option.onclick = () => {
-        leaderboardBlindBoxGiftId = scope?.giftId;
         blindBoxScopePicker.open = false;
-        renderRows();
+        requestedBlindBoxScopeName = scope?.giftName ?? '全部盲盒';
+        void refreshBlindBoxLeaderboard(scope?.giftId);
       };
       blindBoxScopeOptions.push(option);
       return option;
@@ -2539,7 +2551,7 @@ export function mountConfig(root: HTMLElement): void {
         button.setAttribute('aria-selected', String(active));
       }
       const selectedScope = blindBoxScopes.find((scope) => scope.giftId === leaderboardBlindBoxGiftId);
-      const scopedLeaderboard = buildBlindBoxLeaderboard(state.contributions, Number.POSITIVE_INFINITY, leaderboardBlindBoxGiftId);
+      const scopedLeaderboard = blindBoxLeaderboard;
       blindBoxScopeBar.classList.toggle('is-hidden', leaderboardMode !== 'blind-box');
       blindBoxScopeTriggerIcon.replaceChildren(createBlindBoxScopeVisual(selectedScope, 'trigger'));
       blindBoxScopeTriggerName.textContent = selectedScope?.giftName ?? '全部盲盒';
@@ -2553,7 +2565,9 @@ export function mountConfig(root: HTMLElement): void {
       }
       blindBoxScopeSummary.textContent = `${selectedScope?.giftName ?? '全部盲盒'} · ${formatLedgerNumber(scopedLeaderboard.summary.viewerCount)} 位观众 · ${formatLedgerNumber(scopedLeaderboard.summary.blindBoxCount)} 个 · 投入 ${formatYuanFromGoldSeeds(scopedLeaderboard.summary.cost)} · 开出 ${formatYuanFromGoldSeeds(scopedLeaderboard.summary.value)} · 净盈亏 ${formatSignedYuanFromGoldSeeds(scopedLeaderboard.summary.profit)}`;
       copyObsButton.textContent = leaderboardBlindBoxGiftId ? '复制此盲盒 OBS 链接' : '复制 OBS 链接';
-      const ranked = rankContributors(viewers, leaderboardMode, leaderboardBlindBoxGiftId);
+      const ranked = leaderboardMode === 'blind-box'
+        ? blindBoxLeaderboard.viewers
+        : rankContributors(viewers, leaderboardMode);
       if (ranked.length === 0) {
         listHost.replaceChildren(el('div', {
           class: 'contribution-empty',
@@ -2584,8 +2598,41 @@ export function mountConfig(root: HTMLElement): void {
       modeTabs.append(button);
     }
     section.append(modeTabs, blindBoxScopeBar, listHost);
+    section.classList.toggle('is-blind-box-loading', blindBoxLeaderboardLoading);
+    if (blindBoxLeaderboardError) {
+      section.append(el('p', {
+        class: 'blind-box-leaderboard-status is-error',
+        role: 'status',
+        text: '盲盒排行榜暂时无法刷新，正在保留上次成功的数据。请稍后重试。',
+      } as any));
+    } else if (blindBoxLeaderboardLoading) {
+      section.append(el('p', {
+        class: 'blind-box-leaderboard-status',
+        role: 'status',
+        text: `正在刷新${requestedBlindBoxScopeName}盲盒排行榜…`,
+      } as any));
+    }
     renderRows();
     appendOrReplaceSection(section, '.contribution-section', replaceExisting);
+  }
+
+  async function refreshBlindBoxLeaderboard(giftId?: number): Promise<void> {
+    requestedLeaderboardBlindBoxGiftId = giftId;
+    blindBoxLeaderboardLoading = true;
+    blindBoxLeaderboardError = false;
+    renderContributionLeaderboard(true);
+    const result = await blindBoxLeaderboardResource.refresh({ giftId, limit: 100 });
+    if (result.status === 'stale') return;
+    if (requestedLeaderboardBlindBoxGiftId !== giftId) return;
+    blindBoxLeaderboardLoading = false;
+    if (result.status === 'failed') {
+      blindBoxLeaderboardSnapshot = blindBoxLeaderboardResource.current();
+      blindBoxLeaderboardError = true;
+    } else {
+      blindBoxLeaderboardSnapshot = result.snapshot;
+      leaderboardBlindBoxGiftId = giftId;
+    }
+    renderContributionLeaderboard(true);
   }
 
   function renderContributionRow(viewer: ViewerContribution, rank: number, mode: LeaderboardMode): HTMLElement {
@@ -2655,8 +2702,7 @@ export function mountConfig(root: HTMLElement): void {
     ]);
   }
 
-  function rankContributors(viewers: ViewerContribution[], mode: LeaderboardMode, blindBoxGiftId?: number): ViewerContribution[] {
-    if (mode === 'blind-box') return buildBlindBoxLeaderboard({ viewers }, Number.POSITIVE_INFINITY, blindBoxGiftId).viewers;
+  function rankContributors(viewers: ViewerContribution[], mode: Exclude<LeaderboardMode, 'blind-box'>): ViewerContribution[] {
     const ranked = viewers.filter((viewer) => (
       mode === 'rules' ? viewer.ruleTriggers > 0 : viewer.giftCount > 0
     ));
@@ -5076,6 +5122,7 @@ export function mountConfig(root: HTMLElement): void {
 
   applyConfigTheme(state.settings.theme);
   render();
+  void refreshBlindBoxLeaderboard();
   void refreshRuntime();
   void refreshBiliAuth();
   void refreshRoomAnchorInfo();
@@ -5093,6 +5140,7 @@ export function mountConfig(root: HTMLElement): void {
     globalThis.clearInterval(authPollTimer);
     globalThis.clearInterval(updatePollTimer);
     if (loginPollTimer !== undefined) globalThis.clearInterval(loginPollTimer);
+    blindBoxLeaderboardResource.cancel();
   };
   if (typeof globalThis.addEventListener === 'function') globalThis.addEventListener('beforeunload', disposePolling, { once: true });
 }
@@ -5118,6 +5166,15 @@ function activityStateSignature(state: AppState): string {
 
 function contributionStateSignature(state: AppState): string {
   return JSON.stringify(state.contributions);
+}
+
+function emptyBlindBoxLeaderboardSnapshot(): BlindBoxLeaderboardSnapshot {
+  return {
+    updatedAt: 0,
+    summary: { viewerCount: 0, blindBoxCount: 0, cost: 0, value: 0, profit: 0, unpricedCount: 0 },
+    viewers: [],
+    scopes: [],
+  };
 }
 
 function giftHistoryStateSignature(state: AppState): string {

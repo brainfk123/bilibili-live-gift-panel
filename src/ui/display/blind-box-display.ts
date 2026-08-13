@@ -1,5 +1,6 @@
 import { getRuntimeStatus, type RuntimeConnectionState } from '../../backend';
-import { buildBlindBoxLeaderboard, listBlindBoxLeaderboardScopes } from '../../blind-box-leaderboard';
+import type { BlindBoxLeaderboardSnapshot } from '../../backend';
+import { createBlindBoxLeaderboardResource } from '../../blind-box-leaderboard-resource';
 import { getDisplayTheme } from '../../display-themes';
 import { loadState, refreshStateFromServer } from '../../storage';
 import type { AppState, ViewerContribution } from '../../types';
@@ -15,6 +16,10 @@ const MAX_RANKED_VIEWERS = 100;
 const ROW_DWELL_MS = 1_400;
 const EDGE_PAUSE_MS = 3_200;
 const ROW_TRANSITION_MS = 700;
+
+export interface BlindBoxDisplayDependencies {
+  createLeaderboardResource: typeof createBlindBoxLeaderboardResource;
+}
 
 export interface BlindBoxScrollPosition {
   index: number;
@@ -39,23 +44,32 @@ export function advanceBlindBoxScroll(
   return { index: nextIndex, direction: nextDirection };
 }
 
-export function mountBlindBoxDisplay(root: HTMLElement, blindBoxGiftId?: number): void {
+export function mountBlindBoxDisplay(
+  root: HTMLElement,
+  blindBoxGiftId?: number,
+  dependencies: BlindBoxDisplayDependencies = {
+    createLeaderboardResource: createBlindBoxLeaderboardResource,
+  },
+): void {
   let state = loadState();
   let connectionState: RuntimeConnectionState = 'idle';
+  let leaderboardConnectionError = false;
+  let leaderboardSnapshot: BlindBoxLeaderboardSnapshot | undefined;
   let refreshActive = false;
   let renderedSignature = '';
   let leaderboardScrollTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
   let leaderboardScrollIndex = 0;
   let leaderboardScrollDirection: 1 | -1 = 1;
   let leaderboardRenderVersion = 0;
+  const leaderboardResource = dependencies.createLeaderboardResource();
   const stack = el('div', { class: 'display-stack blind-box-stack' });
   root.replaceChildren(stack);
 
   function render(): void {
     stopLeaderboardScroll();
     const renderVersion = ++leaderboardRenderVersion;
-    const leaderboard = buildBlindBoxLeaderboard(state.contributions, MAX_RANKED_VIEWERS, blindBoxGiftId);
-    const selectedScope = listBlindBoxLeaderboardScopes(state.contributions)
+    const leaderboard = leaderboardSnapshot ?? emptyLeaderboardSnapshot();
+    const selectedScope = leaderboard.scopes
       .find((scope) => scope.giftId === blindBoxGiftId);
     const scopeName = blindBoxGiftId ? selectedScope?.giftName ?? `盲盒 ${blindBoxGiftId}` : '全部盲盒';
     const appearance = state.blindBoxDisplay;
@@ -168,7 +182,7 @@ export function mountBlindBoxDisplay(root: HTMLElement, blindBoxGiftId?: number)
   function updateConnection(panel = stack.querySelector<HTMLElement>('.blind-box-panel')): void {
     const indicator = panel?.querySelector<HTMLElement>('.conn');
     if (!indicator) return;
-    indicator.className = connectionClass(connectionState);
+    indicator.className = connectionClass(leaderboardConnectionError ? 'error' : connectionState);
     indicator.style.display = state.blindBoxDisplay.showConnection ? '' : 'none';
   }
 
@@ -177,13 +191,31 @@ export function mountBlindBoxDisplay(root: HTMLElement, blindBoxGiftId?: number)
     refreshActive = true;
     try {
       state = await refreshStateFromServer();
-      const signature = displaySignature(state);
+      const signature = displaySignature(state, leaderboardSnapshot, leaderboardConnectionError);
       if (signature !== renderedSignature) {
         renderedSignature = signature;
         render();
       }
     } finally {
       refreshActive = false;
+    }
+  }
+
+  async function refreshLeaderboard(): Promise<void> {
+    const result = await leaderboardResource.refresh({ giftId: blindBoxGiftId, limit: MAX_RANKED_VIEWERS });
+    if (result.status === 'stale') return;
+    if (result.status === 'failed') {
+      leaderboardConnectionError = true;
+    } else {
+      leaderboardSnapshot = result.snapshot;
+      leaderboardConnectionError = false;
+    }
+    const signature = displaySignature(state, leaderboardSnapshot, leaderboardConnectionError);
+    if (signature !== renderedSignature) {
+      renderedSignature = signature;
+      render();
+    } else {
+      updateConnection();
     }
   }
 
@@ -196,17 +228,20 @@ export function mountBlindBoxDisplay(root: HTMLElement, blindBoxGiftId?: number)
     updateConnection();
   }
 
-  renderedSignature = displaySignature(state);
+  renderedSignature = displaySignature(state, leaderboardSnapshot, leaderboardConnectionError);
   render();
+  void refreshLeaderboard();
   void refreshRuntime();
   const pollTimer = globalThis.setInterval(() => {
     void refreshState();
     void refreshRuntime();
+    void refreshLeaderboard();
   }, 750);
   if (typeof globalThis.addEventListener === 'function') {
     globalThis.addEventListener('beforeunload', () => {
       globalThis.clearInterval(pollTimer);
       stopLeaderboardScroll();
+      leaderboardResource.cancel();
     }, { once: true });
   }
 }
@@ -268,8 +303,40 @@ function applyAppearance(stack: HTMLElement, panel: HTMLElement, state: AppState
   panel.style.setProperty('--leaderboard-font-scale', String(Math.max(.8, Math.min(1.35, appearance.fontSize / 48))));
 }
 
-function displaySignature(state: AppState): string {
-  return JSON.stringify({ contributions: state.contributions, appearance: state.blindBoxDisplay });
+function emptyLeaderboardSnapshot(): BlindBoxLeaderboardSnapshot {
+  return {
+    updatedAt: 0,
+    summary: { viewerCount: 0, blindBoxCount: 0, cost: 0, value: 0, profit: 0, unpricedCount: 0 },
+    viewers: [],
+    scopes: [],
+  };
+}
+
+function displaySignature(
+  state: AppState,
+  snapshot: BlindBoxLeaderboardSnapshot | undefined,
+  leaderboardConnectionError: boolean,
+): string {
+  return JSON.stringify({
+    appearance: state.blindBoxDisplay,
+    leaderboardConnectionError,
+    snapshot: snapshot && {
+      updatedAt: snapshot.updatedAt,
+      summary: snapshot.summary,
+      scopes: snapshot.scopes,
+      viewers: snapshot.viewers.map((viewer) => ({
+        key: viewer.key,
+        uid: viewer.uid,
+        uname: viewer.uname,
+        avatar: viewer.avatar,
+        blindBoxCount: viewer.blindBoxCount,
+        blindBoxCost: viewer.blindBoxCost,
+        blindBoxValue: viewer.blindBoxValue,
+        blindBoxProfit: viewer.blindBoxProfit,
+        unpricedBlindBoxCount: viewer.unpricedBlindBoxCount,
+      })),
+    },
+  });
 }
 
 function connectionClass(state: RuntimeConnectionState): string {
