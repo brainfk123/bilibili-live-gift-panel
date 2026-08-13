@@ -60,6 +60,9 @@ jobs:
       - name: Build frontend
         run: npm run build:ui
 
+      - name: Prepare backend UI assets
+        run: npm run prepare:go-assets
+
       - name: Set up MSYS2 host environment
         id: msys2
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2

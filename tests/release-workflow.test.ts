@@ -53,7 +53,9 @@ describe('release workflow supply-chain contract', () => {
     )) as { packages?: unknown[] };
     expect(lock.packages).toHaveLength(35);
 
+    const buildFrontend = stepIndex(steps, 'Build frontend');
     const setup = stepIndex(steps, 'Set up MSYS2 host environment');
+    const prepareAssets = stepIndex(steps, 'Prepare backend UI assets');
     const build = stepIndex(steps, 'Build and verify pinned FFmpeg');
     const signInner = stepIndex(steps, 'Sign and verify inner FFmpeg');
     const packageInner = stepIndex(steps, 'Package and verify signed FFmpeg payload');
@@ -61,6 +63,9 @@ describe('release workflow supply-chain contract', () => {
     const signOuter = stepIndex(steps, 'Prepare and sign release executable');
     const e2e = stepIndex(steps, 'Verify deterministic gift clip exports from signed package chain');
 
+    expect(buildFrontend).toBeLessThan(prepareAssets);
+    expect(prepareAssets).toBeLessThan(build);
+    expect(steps[prepareAssets]?.run).toBe('npm run prepare:go-assets');
     expect([setup, build, signInner, packageInner, buildOuter, signOuter, e2e])
       .toEqual([...new Set([setup, build, signInner, packageInner, buildOuter, signOuter, e2e])].sort((a, b) => a - b));
     expect(steps[setup]?.id).toBe('msys2');
