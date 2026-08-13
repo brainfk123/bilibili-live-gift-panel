@@ -164,6 +164,16 @@ async function verifyConfigAndClear(harnessURL, configEntryURL) {
 
     await page.locator('.blind-box-scope-picker summary').click();
     await page.locator('.blind-box-scope-option[data-gift-id="35800"]').waitFor({ state: 'visible', timeout: 30_000 });
+    await page.locator('.blind-box-scope-option[data-gift-id="35801"]').waitFor({ state: 'attached', timeout: 30_000 });
+    const fixtureScopes = await Promise.all([35800, 35801].map(async (giftId) => {
+      const option = page.locator(`.blind-box-scope-option[data-gift-id="${giftId}"]`);
+      return {
+        giftId,
+        name: (await option.locator('.blind-box-scope-option-name').textContent())?.trim() ?? '',
+        count: (await option.locator('.blind-box-scope-option-count').textContent())?.trim() ?? '',
+      };
+    }));
+    assertFixtureScopeOptions(fixtureScopes);
     await page.locator('.blind-box-scope-option[data-gift-id="35800"]').click();
     await page.waitForFunction(() => document.querySelector('.blind-box-scope-summary')?.textContent?.includes('宝藏盲盒'));
     await expectTextParts(page.locator('.blind-box-scope-summary'), ['宝藏盲盒', '2 位观众', '3 个', '投入 3 元', '开出 3.8 元', '净盈亏 +0.8 元'], 'config scoped summary');
@@ -230,6 +240,13 @@ async function expectTextParts(locator, texts, label) {
   await locator.waitFor({ state: 'visible', timeout: 30_000 });
   const actual = await locator.textContent();
   for (const text of texts) assert.ok(actual?.includes(text), `${label}: expected ${JSON.stringify(text)} in ${JSON.stringify(actual)}`);
+}
+
+function assertFixtureScopeOptions(scopes) {
+  assert.deepEqual(scopes, [
+    { giftId: 35800, name: '宝藏盲盒', count: '3 个' },
+    { giftId: 35801, name: '星光盲盒', count: '1 个' },
+  ], 'config scope picker exposes both fixture scopes with their server-provided counts');
 }
 
 async function readOverflow(page) {
@@ -364,5 +381,9 @@ async function runVerifierSelfTests() {
     assert.equal(calls.some((call) => call.includes('902')), false, 'cleanup never touches unrecorded PID');
     assert.equal(calls.at(-1), 'rm:private-runtime', 'cleanup removes the private runtime directory after close/stop failures');
   }
+  assertFixtureScopeOptions([
+    { giftId: 35800, name: '宝藏盲盒', count: '3 个' },
+    { giftId: 35801, name: '星光盲盒', count: '1 个' },
+  ]);
   console.log('frontend display verifier self-test: PASS');
 }
