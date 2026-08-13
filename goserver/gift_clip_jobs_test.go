@@ -315,6 +315,7 @@ func TestGiftClipJobSweepTTLAndCloseOwnDirectories(t *testing.T) {
 		t.Fatal("Cancel returned false")
 	}
 	waitGiftClipJobState(t, manager, cancelled.ID, giftClipJobCancelled)
+	waitGiftClipJobFinished(t, manager, cancelled.ID)
 	other := filepath.Join(root, "not-created-by-manager")
 	if err := os.Mkdir(other, 0o700); err != nil {
 		t.Fatal(err)
