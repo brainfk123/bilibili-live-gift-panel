@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { build as viteBuild } from 'vite';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -122,7 +122,9 @@ describe('single-file production output', () => {
       value: class { observe() {} disconnect() {} },
     });
     try {
-      const config = await import(pathToFileURL(configEntry).href);
+      // Vitest expects a filesystem id here. pathToFileURL encodes `~` in
+      // Windows 8.3 temp paths as `%7E`, which Vite does not decode.
+      const config = await import(configEntry.replaceAll('\\', '/'));
       expect(config.configStyles).toContain('.config-root');
       expect(config.mountConfigEntry).toBeTypeOf('function');
     } finally {
