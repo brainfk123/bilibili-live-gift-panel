@@ -107,7 +107,7 @@ function Invoke-PinnedDownload {
     foreach ($Uri in $Uris) {
         Remove-Item -LiteralPath $Partial -Force -ErrorAction SilentlyContinue
         if ($null -ne $CurlCommand) {
-            & $CurlCommand.Source --fail --location --http1.1 --connect-timeout 15 --max-time 120 --speed-limit 1024 --speed-time 30 --retry 1 --retry-delay 2 --retry-all-errors --output $Partial $Uri
+            & $CurlCommand.Source --fail --location --http1.1 --connect-timeout 60 --max-time 180 --speed-limit 1024 --speed-time 30 --retry 2 --retry-delay 2 --retry-all-errors --output $Partial $Uri
             $Downloaded = $LASTEXITCODE -eq 0
         } else {
             try {
