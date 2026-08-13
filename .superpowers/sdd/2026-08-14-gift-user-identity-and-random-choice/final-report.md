@@ -10,111 +10,111 @@
 
 ## Prior RED → GREEN evidence
 
-Each cycle uses exact report wording where captured. `retrospective fixed-base reproduction` means the original report lacked test stdout, so the exact command was replayed in an isolated temporary detached worktree at the parent commit with only the corresponding final test restored; it never modified this branch. Original GREEN durations that were not preserved are explicitly marked, not invented.
+Each RED entry quotes only the original task report. Some reports captured a failure signature but not raw test stdout; those entries say so rather than claiming a later reconstruction. Every GREEN entry marked “fresh” was rerun on the current implementation with the exact command shown.
 
 ### Task 1 — identity context
 
 - **RED command (verbatim):** `cd goserver; go test ./... -run 'TestGiftIdentityLevel|TestBuildGiftFormulaEnvironment|TestReservedFormulaNames' -count=1`
 - **RED output (verbatim excerpt):** `Exit 1 as expected: build failed because giftIdentityLevel, both environment builders, giftIdentityCaptain, and isReservedFormulaName did not exist.`
 - **GREEN command (verbatim):** `cd goserver; go test ./... -run 'TestGiftIdentityLevel|TestBuildGiftFormulaEnvironment|TestReservedFormulaNames' -count=1`
-- **GREEN output (verbatim excerpt):** `Exit 0: ok bilibili-live-gift-panel.` Duration: not captured in original task report.
-- **Source:** `task-1-report.md`, “TDD evidence / RED: identity context” and “GREEN: identity context”.
+- **GREEN output (verbatim excerpt):** Original: `Exit 0: ok bilibili-live-gift-panel.` Original duration: not captured. Fresh: `ok bilibili-live-gift-panel 1.475s` (exit 0).
+- **Source:** `task-1-report.md`, “TDD evidence / RED: identity context” and “GREEN: identity context”; fresh GREEN run in this Task-5 correction.
 
 ### Task 1 — lazy `RANDOMCHOICE`
 
 - **RED command (verbatim):** `cd goserver; go test ./... -run 'TestFormulaRandomChoice' -count=1`
 - **RED output (verbatim excerpt):** `Exit 1 as expected: all new cases failed with 未知函数 "RANDOMCHOICE".`
 - **GREEN command (verbatim):** `cd goserver; go test ./... -run 'TestFormulaRandomChoice' -count=1`
-- **GREEN output (verbatim excerpt):** `Exit 0: ok bilibili-live-gift-panel.` Duration: not captured in original task report. High-count focus was `ok` in 2.144s; race focus was `ok` in 3.050s.
-- **Source:** `task-1-report.md`, “TDD evidence / RED: RANDOMCHOICE”, “GREEN: RANDOMCHOICE”, and “Final verification”.
+- **GREEN output (verbatim excerpt):** Original: `Exit 0: ok bilibili-live-gift-panel.` Original duration: not captured; high-count focus was `ok` in 2.144s and race focus `ok` in 3.050s. Fresh: `ok bilibili-live-gift-panel 1.330s` (exit 0).
+- **Source:** `task-1-report.md`, “TDD evidence / RED: RANDOMCHOICE”, “GREEN: RANDOMCHOICE”, and “Final verification”; fresh GREEN run in this Task-5 correction.
 
 ### Task 2 — runtime conditions and joint random choice
 
 - **RED command (verbatim):** `cd goserver; go test ./... -run 'TestApplyGiftEvent.*Identity|TestApplyGiftEventReevaluatesCondition|TestApplyGiftEventSkipsInvalidCondition|TestApplyGiftEventCombinesIdentityConditionAndRandomChoice' -count=1`
-- **RED output (verbatim excerpt):** `unknown field Condition in struct literal of type giftRule` (retrospective fixed-base reproduction: `background_runtime_semantics_test.go:40:3`, plus eight same-symbol failures; exit 1).
-- **GREEN command (verbatim):** `cd goserver; go test ./... -run 'TestApplyGiftEvent' -count=10`
-- **GREEN output (verbatim excerpt):** `GREEN runtime: the same focused tests and TestApplyGiftEvent -count=10 passed.` Duration/count detail: not captured in original task report.
-- **Source:** `task-2-report.md`, “RED runtime” / “GREEN runtime”; RED stdout reproduced at detached parent `0f0dfce`.
+- **RED output (verbatim excerpt):** `failed with unknown field Condition in struct literal of type giftRule` (original report captured no raw test stdout).
+- **GREEN command (verbatim):** `cd goserver; go test ./... -run 'TestApplyGiftEvent.*Identity|TestApplyGiftEventReevaluatesCondition|TestApplyGiftEventSkipsInvalidCondition|TestApplyGiftEventCombinesIdentityConditionAndRandomChoice' -count=1`
+- **GREEN output (verbatim excerpt):** Fresh: `ok bilibili-live-gift-panel 1.452s` (exit 0).
+- **Source:** `task-2-report.md`, “RED runtime” / “GREEN runtime”; fresh GREEN run in this Task-5 correction.
 
 ### Task 2 — config validation
 
 - **RED command (verbatim):** `cd goserver; go test ./... -run 'TestConfigStore.*ReservedFormulaName|TestConfigStore.*GiftRuleCondition|TestConfigStoreRejectsGiftIdentityInTimer' -count=1`
-- **RED output (verbatim excerpt):** Original RED output was not captured. Retrospective fixed-base reproduction at `0f0dfce` with final `config_store_test.go`: `FAIL bilibili-live-gift-panel [build failed]`; `config_store_test.go:928:45: state.Rules[0].Condition undefined (type giftRule has no field or method Condition)`; exit 1.
+- **RED output (verbatim excerpt):** `reserved names/preset source/invalid condition tests failed because all three were accepted.` Original RED output was not captured.
 - **GREEN command (verbatim):** `cd goserver; go test ./... -run 'TestConfigStore.*ReservedFormulaName|TestConfigStore.*GiftRuleCondition|TestConfigStoreRejectsGiftIdentityInTimer' -count=1`
-- **GREEN output (verbatim excerpt):** `GREEN config: TestConfigStore.*ReservedFormulaName|TestConfigStore.*GiftRuleCondition|TestConfigStoreRejectsGiftIdentityInTimer passed.` Duration: not captured in original task report.
-- **Source:** `task-2-report.md`, “RED config” / “GREEN config”; command spelling from `task-2-brief.md`, Step 6/7.
+- **GREEN output (verbatim excerpt):** Fresh: `ok bilibili-live-gift-panel 1.381s` (exit 0).
+- **Source:** `task-2-report.md`, “RED config” / “GREEN config”; command spelling from `task-2-brief.md`, Step 6/7; fresh GREEN run in this Task-5 correction.
 
 ### Task 2 — gift preview contract
 
 - **RED command (verbatim):** `cd goserver; go test ./... -run 'TestFormulaPreview.*Identity|TestFormulaPreview.*Condition|TestFormulaPreviewUsesSelectedGiftPrice' -count=1`
-- **RED output (verbatim excerpt):** Original RED output was not captured. Retrospective fixed-base reproduction at `0f0dfce`: `--- FAIL: TestFormulaPreviewUsesGiftRuleIdentity`; `preview status = 200, body = {"code":0,"result":10}`; false condition returned `{..."result":14}`; invalid identities and invalid condition also returned HTTP 200; exit 1.
+- **RED output (verbatim excerpt):** `new identity/condition tests failed because the endpoint returned the old {code,result} response and ignored input.` Original RED output was not captured.
 - **GREEN command (verbatim):** `cd goserver; go test ./... -run 'TestFormulaPreview.*Identity|TestFormulaPreview.*Condition|TestFormulaPreviewUsesSelectedGiftPrice' -count=1`
-- **GREEN output (verbatim excerpt):** `GREEN preview: TestFormulaPreview.*Identity|TestFormulaPreview.*Condition|TestFormulaPreviewUsesSelectedGiftPrice passed.` Duration: not captured in original task report.
-- **Source:** `task-2-report.md`, “RED preview” / “GREEN preview”; command spelling from `task-2-brief.md`, Step 9/10.
+- **GREEN output (verbatim excerpt):** Fresh: `ok bilibili-live-gift-panel 1.433s` (exit 0).
+- **Source:** `task-2-report.md`, “RED preview” / “GREEN preview”; command spelling from `task-2-brief.md`, Step 9/10; fresh GREEN run in this Task-5 correction.
 
 ### Task 3 — helper, adapter, and simple-play focus
 
 - **RED command (verbatim):** `npm test -- --run tests/gift-rule-conditions.test.ts`
-- **RED output (verbatim excerpt):** Retrospective fixed-base reproduction at `ef6df17`: `FAIL tests/gift-rule-conditions.test.ts`; `Failed to load url ../src/gift-rule-conditions ... Does the file exist?`; `0 test`; exit 1.
+- **RED output (verbatim excerpt):** `missing module.` Original report did not capture the resolver/test stdout.
 - **GREEN command (verbatim):** `npm test -- --run tests/gift-rule-conditions.test.ts tests/backend.test.ts tests/formula-presets.test.ts tests/simple-play.test.ts`
-- **GREEN output (verbatim excerpt):** `GREEN: focused helpers, backend adapter, formula presets, and simple-play tests all pass (55 tests).` Duration: not captured in original task report.
-- **Source:** `task-3-report.md`, initial “RED” / “GREEN”; focused command from `task-3-brief.md`, Step 9.
+- **GREEN output (verbatim excerpt):** Fresh: `Test Files 4 passed (4)`; `Tests 55 passed (55)`; `Duration 882ms`; exit 0.
+- **Source:** `task-3-report.md`, initial “RED” / “GREEN”; focused command from `task-3-brief.md`, Step 9; fresh GREEN run in this Task-5 correction.
 
 ### Task 3 — preview adapter
 
 - **RED command (verbatim):** `npm test -- --run tests/backend.test.ts`
-- **RED output (verbatim excerpt):** Retrospective fixed-base reproduction at `ef6df17`: `7 failed | 27 passed (34)`; test `posts the gift condition and identity context and returns the trigger result`; `TypeError: previewGiftRule is not a function`; exit 1.
+- **RED output (verbatim excerpt):** `previewGiftRule is not a function.` Original report did not capture the test count/stdout.
 - **GREEN command (verbatim):** `npm test -- --run tests/gift-rule-conditions.test.ts tests/backend.test.ts tests/formula-presets.test.ts tests/simple-play.test.ts`
-- **GREEN output (verbatim excerpt):** `55 tests` passed; duration: not captured in original task report.
-- **Source:** `task-3-report.md`, initial “RED” / “GREEN”; command from `task-3-brief.md`, Step 6/9.
+- **GREEN output (verbatim excerpt):** Fresh shared Task-3 focus: `Test Files 4 passed (4)`; `Tests 55 passed (55)`; `Duration 882ms`; exit 0.
+- **Source:** `task-3-report.md`, initial “RED” / “GREEN”; command from `task-3-brief.md`, Step 6/9; fresh GREEN run in this Task-5 correction.
 
 ### Task 3 — empty-condition review fix
 
 - **RED command (verbatim):** `npm test -- --run tests/gift-rule-conditions.test.ts`
 - **RED output (verbatim excerpt):** `failed: empty condition returned advanced instead of any.` Original detailed assertion output was not captured.
 - **GREEN command (verbatim):** `npm test -- --run tests/gift-rule-conditions.test.ts`
-- **GREEN output (verbatim excerpt):** `the same focused command passed (8 tests)`. Duration: not captured in original task report.
-- **Source:** `task-3-report.md`, “Review Fix Round 1”.
+- **GREEN output (verbatim excerpt):** Fresh: `Test Files 1 passed (1)`; `Tests 8 passed (8)`; `Duration 208ms`; exit 0.
+- **Source:** `task-3-report.md`, “Review Fix Round 1”; fresh GREEN run in this Task-5 correction.
 
 ### Task 4 — save/reopen and advanced preservation
 
 - **RED command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'gift identity condition|advanced gift condition'`
-- **RED output (verbatim excerpt):** Retrospective fixed-base reproduction at `ba41cd6`: `2 failed | 151 skipped (153)`; `gift identity condition saves, reopens, and updates through beginner controls` and `advanced gift condition stays exact until beginner mode explicitly replaces it`; both `Cannot read properties of null (reading 'value')`; exit 1.
+- **RED output (verbatim excerpt):** `2 failed (condition controls absent).` Original report did not capture test stdout.
 - **GREEN command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'gift identity condition|advanced gift condition'`
-- **GREEN output (verbatim excerpt):** `same command → 2 passed.` Duration: not captured in original task report.
-- **Source:** `task-4-report.md`, “TDD C1”; RED stdout reproduced at parent `ba41cd6`.
+- **GREEN output (verbatim excerpt):** Fresh: `Test Files 1 passed (1)`; `Tests 2 passed | 153 skipped (155)`; `Duration 948ms`; exit 0.
+- **Source:** `task-4-report.md`, “TDD C1”; fresh GREEN run in this Task-5 correction.
 
 ### Task 4 — simulation identity and stale preview
 
 - **RED command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'simulated gift identity|identity condition preview'`
-- **RED output (verbatim excerpt):** Retrospective fixed-base reproduction at `ba41cd6`: `2 failed | 151 skipped (153)`; both named simulation/stale tests: `Cannot set properties of null (setting 'value')`; exit 1.
+- **RED output (verbatim excerpt):** `2 failed (old preview advanced draft/no identity payload).` Original report did not capture test stdout.
 - **GREEN command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'simulated gift identity|identity condition preview'`
-- **GREEN output (verbatim excerpt):** `same command → 2 passed.` Duration: not captured in original task report.
-- **Source:** `task-4-report.md`, “TDD C2”; RED stdout reproduced at parent `ba41cd6`.
+- **GREEN output (verbatim excerpt):** Fresh: `Test Files 1 passed (1)`; `Tests 2 passed | 153 skipped (155)`; `Duration 1.02s`; exit 0.
+- **Source:** `task-4-report.md`, “TDD C2”; fresh GREEN run in this Task-5 correction.
 
 ### Task 4 — formula help and reserved names
 
 - **RED command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'formula help explains|rejects reserved gift formula names'`
-- **RED output (verbatim excerpt):** Retrospective fixed-base reproduction at `ba41cd6`: `2 failed | 151 skipped (153)`; `expected ... to contain '用户身份'`; and `expected ... to contain '系统公式名称不能作为属性名：用户身份'`; exit 1.
+- **RED output (verbatim excerpt):** `help test failed (identity help absent).` Original report did not capture the reserved-name test stdout.
 - **GREEN command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'formula help explains|rejects reserved gift formula names'`
-- **GREEN output (verbatim excerpt):** `same command → 2 passed.` Duration: not captured in original task report.
-- **Source:** `task-4-report.md`, “TDD C3”; RED stdout reproduced at parent `ba41cd6`.
+- **GREEN output (verbatim excerpt):** Fresh: `Test Files 1 passed (1)`; `Tests 2 passed | 153 skipped (155)`; `Duration 811ms`; exit 0.
+- **Source:** `task-4-report.md`, “TDD C3”; fresh GREEN run in this Task-5 correction.
 
 ### Task 4 review fix 1 — false snapshot, optional shape, stale guard
 
 - **RED command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'skipped gift simulation|identity condition preview|unrelated gift rule'`
-- **RED output (verbatim excerpt):** Retrospective fixed-base reproduction at `b29466e`: `2 failed | 1 passed | 152 skipped (155)`; `expected '预览收到 1 个 大航海·舰长：0 → 11' to contain '本次不会触发'`; unrelated rule received `"condition": ""`; stale test passed.
+- **RED output (verbatim excerpt):** `2 failed (false snapshot was lost on rerender; unrelated rule gained condition:'').` Original report records that stale-draft hardening already passed; raw test stdout was not captured.
 - **GREEN command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'skipped gift simulation|identity condition preview|unrelated gift rule'`
-- **GREEN output (verbatim excerpt):** `same command → 3 passed (false snapshot retained without draft advancement; unrelated optional condition remains absent; post-stale request uses attributeValue:11).` Duration: not captured in original task report.
-- **Source:** `task-4-report.md`, “Review fix round 1”; RED stdout reproduced at parent `b29466e`.
+- **GREEN output (verbatim excerpt):** Fresh: `Test Files 1 passed (1)`; `Tests 3 passed | 152 skipped (155)`; `Duration 1.00s`; exit 0.
+- **Source:** `task-4-report.md`, “Review fix round 1”; fresh GREEN run in this Task-5 correction.
 
 ### Task 4 review fix 2 — cross-attribute formula and condition rename
 
 - **RED command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'unrelated gift rule'`
-- **RED output (verbatim excerpt):** Retrospective fixed-base reproduction at `e7ee09a`: `1 failed | 154 skipped (155)`; expected `formula: '积分+倒计时', condition: '用户身份>=舰长*(倒计时>0)'`, received `formula: '积分+加班时间', condition: '用户身份>=舰长*(加班时间>0)'`; exit 1.
+- **RED output (verbatim excerpt):** `1 failed because the 积分 rule retained 积分+加班时间 and its existing condition retained 加班时间 after renaming.` Original report did not capture assertion stdout.
 - **GREEN command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'unrelated gift rule'`
-- **GREEN output (verbatim excerpt):** `same command → 1 passed; all gift rule formulas are rewritten for cross-attribute references, existing own condition fields are likewise rewritten, and missing condition fields remain absent.` Duration: not captured in original task report.
-- **Source:** `task-4-report.md`, “Fix round 2”; RED stdout reproduced at parent `e7ee09a`.
+- **GREEN output (verbatim excerpt):** Fresh: `Test Files 1 passed (1)`; `Tests 1 passed | 154 skipped (155)`; `Duration 800ms`; exit 0.
+- **Source:** `task-4-report.md`, “Fix round 2”; fresh GREEN run in this Task-5 correction.
 
 ### Task 5
 
