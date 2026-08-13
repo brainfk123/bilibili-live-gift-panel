@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "npm run build:ui && npm run build:exe",
     "build:ui": "vite build",
+    "prepare:go-assets": "node scripts/prepare-go-assets.mjs",
     "build:exe": "node scripts/build-go.mjs",
     "build:ffmpeg": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-ffmpeg.ps1",
     "package:ffmpeg": "node scripts/package-ffmpeg.mjs",
