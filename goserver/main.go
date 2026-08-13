@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-//go:embed dist
+//go:embed all:dist
 var embeddedFS embed.FS
 
 func newEmbeddedPageHandler(pageFS fs.FS) http.Handler {
