@@ -33,6 +33,13 @@ function writeToolFixture(root: string) {
 }
 
 describe('gift clip test-tool provenance', () => {
+  it('gives pinned release endpoints enough time and retries transient connection failures', () => {
+    const script = readFileSync(new URL('../scripts/build-ffmpeg.ps1', import.meta.url), 'utf8');
+    expect(script).toMatch(/--connect-timeout\s+60\b/);
+    expect(script).toMatch(/--max-time\s+180\b/);
+    expect(script).toMatch(/--retry\s+2\b/);
+  });
+
   it('returns absolute verified FFmpeg 9.0 tool paths', () => {
     const root = mkdtempSync(join(tmpdir(), 'gift-clip-test-tools-'));
     try {
