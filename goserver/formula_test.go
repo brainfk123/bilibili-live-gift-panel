@@ -121,9 +121,51 @@ func TestFormulaValidationChecksStructureWithoutEvaluation(t *testing.T) {
 	for _, formula := range []string{
 		"RANDOMCHOICE(积分+10,1/0)",
 		"IF(price>=1000,积分+1,1/0)",
-		"RANDBETWEEN(10,1)",
 	} {
 		if err := validateFormula(formula, environment); err != nil {
+			t.Fatalf("%s: %v", formula, err)
+		}
+	}
+}
+
+func TestFormulaValidationRejectsGuaranteedRuntimeErrors(t *testing.T) {
+	overflow := "1" + strings.Repeat("0", 307) + "*100"
+	tests := map[string]string{
+		"1/0":                       "除数为零",
+		"积分/0":                      "除数为零",
+		overflow:                    "规则结果不是有效数字",
+		"RANDBETWEEN(10,1)":         "最小值不能大于最大值",
+		"RANDOMCHOICE(1/0)":         "除数为零",
+		"IF(1,1/0,10)":              "除数为零",
+		"IF(积分/0,10,20)":            "除数为零",
+		"MAX(积分,1/0)":               "除数为零",
+		"IF(0,10,RANDBETWEEN(2,1))": "最小值不能大于最大值",
+	}
+	for formula, message := range tests {
+		err := validateFormula(formula, map[string]float64{"积分": 0})
+		if err == nil || !strings.Contains(err.Error(), message) {
+			t.Fatalf("%s: error = %v, want containing %q", formula, err, message)
+		}
+	}
+}
+
+func TestFormulaValidationAllowsRuntimeDependentOrUnselectedErrors(t *testing.T) {
+	original := formulaRandomIntn
+	t.Cleanup(func() { formulaRandomIntn = original })
+	formulaRandomIntn = func(int) int {
+		t.Fatal("semantic validation drew randomness")
+		return 0
+	}
+	for _, formula := range []string{
+		"RANDOMCHOICE(10,1/0)",
+		"RANDOMCHOICE(1/0,10)",
+		"IF(1,10,1/0)",
+		"IF(积分>0,1/0,10)",
+		"IF(RAND(),1/0,10)",
+		"1/积分",
+		"RANDBETWEEN(积分,-1)",
+	} {
+		if err := validateFormula(formula, map[string]float64{"积分": 0}); err != nil {
 			t.Fatalf("%s: %v", formula, err)
 		}
 	}

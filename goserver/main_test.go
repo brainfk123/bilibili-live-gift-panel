@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -565,6 +566,26 @@ func TestFormulaPreviewValidateOnlyEnforcesContextAndArity(t *testing.T) {
 			handleFormulaPreview(store)(response, httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(test.payload)))
 			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), test.message) {
 				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestFormulaPreviewValidateOnlyRejectsGuaranteedRuntimeErrors(t *testing.T) {
+	overflow := "1" + strings.Repeat("0", 307) + "*100"
+	tests := map[string]string{
+		"1/0":               "除数为零",
+		overflow:            "规则结果不是有效数字",
+		"RANDBETWEEN(10,1)": "最小值不能大于最大值",
+	}
+	for formula, message := range tests {
+		t.Run(message, func(t *testing.T) {
+			store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+			payload := fmt.Sprintf(`{"formula":%q,"attributeName":"积分","validateOnly":true}`, formula)
+			response := httptest.NewRecorder()
+			handleFormulaPreview(store)(response, httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(payload)))
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), message) {
+				t.Fatalf("formula %s: status = %d, body = %s", formula, response.Code, response.Body.String())
 			}
 		})
 	}

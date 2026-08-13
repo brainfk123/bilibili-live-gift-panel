@@ -201,7 +201,17 @@ func validateFormula(input string, env map[string]float64) error {
 	if err != nil {
 		return err
 	}
-	return validateFormulaNode(node, env)
+	if err := validateFormulaNode(node, env); err != nil {
+		return err
+	}
+	result, err := validateGuaranteedFormulaSemantics(node)
+	if err != nil {
+		return err
+	}
+	if result.known && (math.IsInf(result.value, 0) || math.IsNaN(result.value)) {
+		return fmt.Errorf("规则结果不是有效数字")
+	}
+	return nil
 }
 
 func parseFormula(input string) (formulaNode, error) {
@@ -279,6 +289,139 @@ func validateFormulaNode(node formulaNode, env map[string]float64) error {
 		return nil
 	default:
 		return fmt.Errorf("表达式不合法")
+	}
+}
+
+type formulaSemanticResult struct {
+	value float64
+	known bool
+}
+
+func validateGuaranteedFormulaSemantics(node formulaNode) (formulaSemanticResult, error) {
+	known := func(value float64) formulaSemanticResult { return formulaSemanticResult{value: value, known: true} }
+	unknown := formulaSemanticResult{}
+	switch typed := node.(type) {
+	case numberNode:
+		return known(float64(typed)), nil
+	case variableNode:
+		return unknown, nil
+	case unaryNode:
+		operand, err := validateGuaranteedFormulaSemantics(typed.operand)
+		if err != nil || !operand.known {
+			return operand, err
+		}
+		return known(-operand.value), nil
+	case binaryNode:
+		left, err := validateGuaranteedFormulaSemantics(typed.left)
+		if err != nil {
+			return unknown, err
+		}
+		right, err := validateGuaranteedFormulaSemantics(typed.right)
+		if err != nil {
+			return unknown, err
+		}
+		if typed.op == "/" && right.known && right.value == 0 {
+			return unknown, fmt.Errorf("除数为零")
+		}
+		if !left.known || !right.known {
+			return unknown, nil
+		}
+		switch typed.op {
+		case "+":
+			return known(left.value + right.value), nil
+		case "-":
+			return known(left.value - right.value), nil
+		case "*":
+			return known(left.value * right.value), nil
+		case "/":
+			return known(left.value / right.value), nil
+		case ">":
+			return known(boolNumber(left.value > right.value)), nil
+		case ">=":
+			return known(boolNumber(left.value >= right.value)), nil
+		case "<":
+			return known(boolNumber(left.value < right.value)), nil
+		case "<=":
+			return known(boolNumber(left.value <= right.value)), nil
+		case "=":
+			return known(boolNumber(left.value == right.value)), nil
+		default:
+			return unknown, fmt.Errorf("未知运算符 %s", typed.op)
+		}
+	case callNode:
+		name := strings.ToUpper(typed.name)
+		switch name {
+		case "IF":
+			condition, err := validateGuaranteedFormulaSemantics(typed.args[0])
+			if err != nil || !condition.known {
+				return unknown, err
+			}
+			if condition.value != 0 {
+				return validateGuaranteedFormulaSemantics(typed.args[1])
+			}
+			return validateGuaranteedFormulaSemantics(typed.args[2])
+		case "RANDOMCHOICE":
+			if len(typed.args) == 1 {
+				return validateGuaranteedFormulaSemantics(typed.args[0])
+			}
+			return unknown, nil
+		case "RAND":
+			return unknown, nil
+		}
+
+		arguments := make([]formulaSemanticResult, len(typed.args))
+		allKnown := true
+		for index, argument := range typed.args {
+			result, err := validateGuaranteedFormulaSemantics(argument)
+			if err != nil {
+				return unknown, err
+			}
+			arguments[index] = result
+			allKnown = allKnown && result.known
+		}
+		if name == "RANDBETWEEN" {
+			if !allKnown {
+				return unknown, nil
+			}
+			low, high := int(math.Ceil(arguments[0].value)), int(math.Floor(arguments[1].value))
+			if high < low {
+				return unknown, fmt.Errorf("RANDBETWEEN 最小值不能大于最大值")
+			}
+			if low == high {
+				return known(float64(low)), nil
+			}
+			return unknown, nil
+		}
+		if !allKnown {
+			return unknown, nil
+		}
+		switch name {
+		case "MAX", "MIN":
+			value := arguments[0].value
+			for _, argument := range arguments[1:] {
+				if name == "MAX" {
+					value = math.Max(value, argument.value)
+				} else {
+					value = math.Min(value, argument.value)
+				}
+			}
+			return known(value), nil
+		case "ROUND":
+			digits := 0.0
+			if len(arguments) == 2 {
+				digits = arguments[1].value
+			}
+			power := math.Pow(10, digits)
+			return known(math.Round(arguments[0].value*power) / power), nil
+		case "ABS":
+			return known(math.Abs(arguments[0].value)), nil
+		case "FLOOR":
+			return known(math.Floor(arguments[0].value)), nil
+		default:
+			return unknown, nil
+		}
+	default:
+		return unknown, fmt.Errorf("表达式不合法")
 	}
 }
 

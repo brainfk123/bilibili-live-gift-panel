@@ -958,6 +958,29 @@ func TestConfigStoreValidationDoesNotEvaluateRandomChoiceBranches(t *testing.T) 
 	}
 }
 
+func TestConfigStoreRejectsGuaranteedFormulaRuntimeErrors(t *testing.T) {
+	overflow := "1" + strings.Repeat("0", 307) + "*100"
+	tests := map[string]string{
+		"1/0":               "除数为零",
+		overflow:            "规则结果不是有效数字",
+		"RANDBETWEEN(10,1)": "最小值不能大于最大值",
+	}
+	for formula, message := range tests {
+		t.Run(message, func(t *testing.T) {
+			store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+			payload := fmt.Sprintf(`{
+				"attributes":[{"name":"积分","value":0}],
+				"rules":[{"id":"r1","giftId":1,"attributeName":"积分","formulaName":"错误规则","formula":%q}]
+			}`, formula)
+			response := httptest.NewRecorder()
+			store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), message) {
+				t.Fatalf("formula %s: status = %d, body = %s", formula, response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestConfigStoreRejectsInvalidGiftRuleCondition(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	payload := `{

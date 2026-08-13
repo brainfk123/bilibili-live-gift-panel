@@ -212,3 +212,36 @@ Together, the build output, complete manifest/hash closure, all-file enumeration
 | `git diff --check` | exit 0; no whitespace errors. |
 
 No push, tag, release, package, version, or FFmpeg action was performed for this fix.
+
+## Final review fix round 2: guaranteed formula semantics (2026-08-14)
+
+### Finding and RED evidence
+
+- Fixed base: `2677a4761966ab2f01c56161dbee162b1a692406`.
+- The first deterministic validator correctly avoided random/lazy evaluation, but its structural-only pass also accepted formulas that are guaranteed to fail whenever executed.
+- `go test ./... -run 'TestFormulaValidationRejectsGuaranteedRuntimeErrors|TestConfigStoreRejectsGuaranteedFormulaRuntimeErrors|TestFormulaPreviewValidateOnlyRejectsGuaranteedRuntimeErrors' -count=1` failed because `1/0`, a constant overflow expression, and `RANDBETWEEN(10,1)` all returned nil/HTTP 200.
+
+### Implementation and coverage
+
+- Structural validation still walks the complete AST first for syntax, names, function support, arity, and gift/timer context.
+- A separate semantic pass propagates only deterministic literal results. Variables and genuine random results remain unknown and their current preview values are not treated as constants.
+- Binary operands and ordinary function arguments are semantically checked because runtime always evaluates them. Guaranteed division by zero and a final known NaN/Inf are rejected.
+- `IF` always checks its condition. A constant condition follows only its guaranteed chosen branch; a runtime-dependent condition semantically checks neither lazy branch.
+- One-argument `RANDOMCHOICE` checks its guaranteed argument. Multi-argument `RANDOMCHOICE` checks no alternative semantically and never draws randomness; structural validation still checks every alternative.
+- Constant `RANDBETWEEN` bounds enforce the runtime range rule without drawing. Runtime-dependent bounds remain saveable.
+- Tests cover constant/variable divisors, constant overflow, constant/runtime ranges, guaranteed ordinary-function arguments, constant/unknown `IF`, one/multiple random choices in both alternative orders, and zero validation draws.
+
+### Fresh gates
+
+| Gate | Fresh observed result |
+|---|---|
+| Focused semantic/config/validate-only GREEN | exit 0; PASS. |
+| Focused stress (`-count=20`) | exit 0; PASS in 2.531s. |
+| Focused race (`-count=5`) | exit 0; PASS in 1.593s. |
+| `go test ./... -count=1 -timeout=300s` | exit 0; PASS in 24.630s. |
+| `go test -race ./... -count=1 -timeout=300s` | exit 0; PASS in 39.336s. |
+| `npm run typecheck` | exit 0; 0 TypeScript errors. |
+| `npm test -- --reporter=dot` | 43 files, 500 passed, 31 skipped, 0 failed; exit 0. |
+| `git diff --check` | exit 0; no whitespace errors. |
+
+No push, tag, release, package, version, or FFmpeg action was performed for round 2.
