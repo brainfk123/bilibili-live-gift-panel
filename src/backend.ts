@@ -5,11 +5,32 @@ import type { GiftTargetProgressSnapshot } from './gift-targets';
 
 export type RuntimeConnectionState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error';
 
+export interface RuntimeConnectionGap {
+  startedAt: number;
+  endedAt?: number;
+  durationMs?: number;
+  attempts: number;
+  errorKind?: string;
+}
+
+export interface RuntimeInboxHealth {
+  pendingCount: number;
+  pendingBytes?: number;
+  oldestPendingAt?: number;
+  capacityError?: boolean;
+}
+
 export interface RuntimeStatus {
   state: RuntimeConnectionState;
   roomId: string;
   lastError?: string;
   lastGiftAt?: number;
+  lastFrameAt?: number;
+  gaps?: RuntimeConnectionGap[];
+  reconnectAttempts?: number;
+  inbox?: RuntimeInboxHealth;
+  transactionPending?: boolean;
+  ingestionErrorKind?: string;
 }
 
 export type UpdateState = 'idle' | 'disabled' | 'development' | 'unsupported' | 'checking' | 'downloading' | 'ready' | 'up-to-date' | 'error';

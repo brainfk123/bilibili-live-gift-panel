@@ -33,6 +33,21 @@ describe('OBS broadcast panel layout', () => {
     expect(css).toContain('pointer-events: none;');
   });
 
+  it('keeps ordinary attribute values visible without gradient text clipping', () => {
+    const ordinaryValueRules = Array.from(
+      css.matchAll(/^[ \t]*\.attr-value[ \t]*\{([^}]*)\}/gm),
+      (match) => match[1],
+    );
+
+    expect(ordinaryValueRules.length).toBeGreaterThan(0);
+    expect(ordinaryValueRules[0]).toContain('color: var(--theme-accent, var(--accent));');
+    for (const rule of ordinaryValueRules) {
+      expect(rule).not.toContain('color: transparent;');
+      expect(rule).not.toContain('background-clip: text;');
+      expect(rule).not.toContain('-webkit-background-clip: text;');
+    }
+  });
+
   it('highlights gift names and separates them from formula names', () => {
     expect(css).toMatch(/\.display-gift-name\s*\{[\s\S]*?color: color-mix/);
     expect(css).toMatch(/\.display-formula-name\s*\{[\s\S]*?border-top: 1px solid color-mix/);

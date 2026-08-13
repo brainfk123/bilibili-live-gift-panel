@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -101,11 +102,15 @@ func fetchCurrentRoomGiftCatalog(roomID string, session biliSession) ([]roomGift
 }
 
 func fetchCurrentRoomGiftResources(roomID string, session biliSession) (roomGiftResources, error) {
+	return fetchCurrentRoomGiftResourcesContext(context.Background(), roomID, session)
+}
+
+func fetchCurrentRoomGiftResourcesContext(ctx context.Context, roomID string, session biliSession) (roomGiftResources, error) {
 	headers := map[string]string{}
 	if strings.TrimSpace(session.CookieHeader) != "" {
 		headers["Cookie"] = session.CookieHeader
 	}
-	roomPayload, err := fetchJSON(roomGiftInfoEndpoint+"?room_id="+url.QueryEscape(roomID), headers)
+	roomPayload, err := fetchJSONContext(ctx, roomGiftInfoEndpoint+"?room_id="+url.QueryEscape(roomID), headers)
 	if err != nil {
 		return roomGiftResources{}, err
 	}
@@ -121,11 +126,11 @@ func fetchCurrentRoomGiftResources(roomID string, session biliSession) (roomGift
 		"area_parent_id": {strconv.Itoa(roomContext.ParentAreaID)},
 		"biz_code":       {"live"},
 	}
-	configPayload, err := fetchJSON(roomGiftConfigEndpoint+"?"+parameters.Encode(), headers)
+	configPayload, err := fetchJSONContext(ctx, roomGiftConfigEndpoint+"?"+parameters.Encode(), headers)
 	if err != nil {
 		return roomGiftResources{}, err
 	}
-	panelPayload, err := fetchJSON(roomGiftDataEndpoint+"?"+parameters.Encode(), headers)
+	panelPayload, err := fetchJSONContext(ctx, roomGiftDataEndpoint+"?"+parameters.Encode(), headers)
 	if err != nil {
 		return roomGiftResources{}, err
 	}
@@ -143,15 +148,17 @@ func fetchCurrentRoomGiftResources(roomID string, session biliSession) (roomGift
 		"build":          {"0"},
 		"base_version":   {"0"},
 	}
-	if effectPayload, effectErr := fetchJSON(roomGiftEffectEndpoint+"?"+effectParameters.Encode(), headers); effectErr == nil {
+	if effectPayload, effectErr := fetchJSONContext(ctx, roomGiftEffectEndpoint+"?"+effectParameters.Encode(), headers); effectErr == nil {
 		if effects, parseErr := parseRoomGiftEffectCatalog(effectPayload); parseErr == nil {
 			enrichRoomGiftEffects(gifts, effects.ByGiftID)
 			effectsByID = effects.ByID
 		}
 	}
-	markListedBlindBoxChildren(gifts, func(giftID int) (*blindBoxInfo, bool, error) {
-		return fetchBlindBoxInfo(giftID, session)
-	})
+	if err := markListedBlindBoxChildrenContext(ctx, gifts, func(ctx context.Context, giftID int) (*blindBoxInfo, bool, error) {
+		return fetchBlindBoxInfoContext(ctx, giftID, session)
+	}); err != nil {
+		return roomGiftResources{}, err
+	}
 	return roomGiftResources{Gifts: gifts, EffectsByID: effectsByID}, nil
 }
 
@@ -316,15 +323,30 @@ func markListedBlindBoxChildren(gifts []roomGiftInfo, lookup func(int) (*blindBo
 	if lookup == nil {
 		return
 	}
+	_ = markListedBlindBoxChildrenContext(context.Background(), gifts, func(_ context.Context, giftID int) (*blindBoxInfo, bool, error) {
+		return lookup(giftID)
+	})
+}
+
+func markListedBlindBoxChildrenContext(ctx context.Context, gifts []roomGiftInfo, lookup func(context.Context, int) (*blindBoxInfo, bool, error)) error {
+	if lookup == nil {
+		return nil
+	}
 	byID := make(map[int]int, len(gifts))
 	for index := range gifts {
 		byID[gifts[index].ID] = index
 	}
 	for _, gift := range gifts {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if !gift.Listed || !gift.BlindBoxParent {
 			continue
 		}
-		info, _, err := lookup(gift.ID)
+		info, _, err := lookup(ctx, gift.ID)
+		if err != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil || info == nil {
 			continue
 		}
@@ -343,6 +365,7 @@ func markListedBlindBoxChildren(gifts []roomGiftInfo, lookup func(int) (*blindBo
 			}
 		}
 	}
+	return nil
 }
 
 func decodeBiliPayload(payload map[string]any, target any) error {

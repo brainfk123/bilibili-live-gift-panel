@@ -131,6 +131,15 @@ export function updateGiftClipCrop(
     }
   }
 
+  if ((right - left) % 2 !== 0) {
+    if (handle === 'w' || handle === 'nw' || handle === 'sw') left += 1;
+    else right -= 1;
+  }
+  if ((bottom - top) % 2 !== 0) {
+    if (handle === 'n' || handle === 'ne' || handle === 'nw') top += 1;
+    else bottom -= 1;
+  }
+
   return giftClipCropFromPixels({ x: left, y: top, width: right - left, height: bottom - top }, sourceWidth, sourceHeight);
 }
 
@@ -153,11 +162,16 @@ function constrainPixelAxis(origin: number, size: number, bound: number): { orig
   }
   const minimum = Math.min(MIN_GIFT_CLIP_SOURCE_SIZE, bound);
   const maximum = Math.min(MAX_GIFT_CLIP_CROP_SIZE, bound);
-  const constrainedSize = clamp(roundedSize, minimum, maximum);
+  const constrainedSize = evenPixelSize(roundedSize, minimum, maximum);
   return {
     origin: clamp(roundedOrigin, 0, bound - constrainedSize),
     size: constrainedSize,
   };
+}
+
+function evenPixelSize(value: number, minimum: number, maximum: number): number {
+  const constrained = clamp(value, minimum, maximum);
+  return constrained % 2 === 0 ? constrained : constrained - 1;
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {

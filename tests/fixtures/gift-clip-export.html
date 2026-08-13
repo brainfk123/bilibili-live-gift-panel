@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>礼物回放真实导出测试</title>
+</head>
+<body class="config-mode">
+  <main id="gift-clip-export-host" class="config-root"></main>
+  <script type="module">
+    import configCSS from '/src/ui/config/config.css?inline';
+    import { openGiftClipStudio } from '/src/ui/config/gift-clip-studio.ts';
+
+    const style = document.createElement('style');
+    style.textContent = configCSS;
+    document.head.append(style);
+
+    const host = document.querySelector('#gift-clip-export-host');
+    if (!(host instanceof HTMLElement)) throw new Error('gift clip export host is missing');
+    const kind = new URLSearchParams(location.search).get('kind') || 'effect';
+    const fixtures = {
+      gif: {
+        id: 'gift-clip-e2e-gif',
+        giftName: '确定性 GIF 礼物回放',
+        animation: { gif: 'fixture-animation.gif', durationMs: 2_000 },
+      },
+      webp: {
+        id: 'gift-clip-e2e-webp',
+        giftName: '确定性 WebP 礼物回放',
+        animation: { webp: 'fixture-animation.webp', durationMs: 2_000 },
+      },
+      effect: {
+        id: 'gift-clip-e2e-effect',
+        giftName: '确定性完整特效回放',
+        animation: {
+          gif: 'fixture-animation.gif', durationMs: 2_000, effectId: 13,
+          mp4: 'fixture-packed-alpha.mp4', mp4Json: 'fixture-packed-alpha.json',
+        },
+      },
+    };
+    const fixture = fixtures[kind];
+    if (!fixture) throw new Error(`unsupported gift clip fixture kind: ${kind}`);
+    const receipt = {
+      id: fixture.id,
+      time: 1_786_579_913,
+      giftId: 32_125,
+      giftName: fixture.giftName,
+      num: 1,
+      price: 100,
+      totalCoin: 100,
+      coinType: 'gold',
+      uname: 'Fixture Viewer',
+      avatar: 'fixture-avatar.png',
+      animation: fixture.animation,
+      effects: [],
+    };
+    const cleanupCallbacks = [];
+    const controller = openGiftClipStudio({ host, receipt });
+    cleanupCallbacks.push(() => controller.close());
+    const cleanup = () => {
+      while (cleanupCallbacks.length) cleanupCallbacks.pop()?.();
+    };
+    globalThis.__giftClipExportFixture = { cleanup, receiptId: receipt.id, kind };
+    globalThis.addEventListener('pagehide', cleanup, { once: true });
+  </script>
+</body>
+</html>

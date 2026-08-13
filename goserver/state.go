@@ -373,23 +373,25 @@ type simplePlayState struct {
 }
 
 type appState struct {
-	RoomID          string                         `json:"roomId"`
-	Attributes      []attributeState               `json:"attributes"`
-	DisplayScenes   []displaySceneState            `json:"displayScenes"`
-	BlindBoxDisplay blindBoxDisplayAppearanceState `json:"blindBoxDisplay"`
-	GiftKPIPanels   []giftKPIPanelState            `json:"giftKpiPanels"`
-	Activities      []activitySessionState         `json:"activities"`
-	Rules           []giftRule                     `json:"rules"`
-	TimerRules      []timerRule                    `json:"timerRules"`
-	FormulaPresets  []formulaPreset                `json:"formulaPresets"`
-	Settings        settingsState                  `json:"settings"`
-	SimplePlay      *simplePlayState               `json:"simplePlay,omitempty"`
-	GiftCatalog     []giftInfo                     `json:"giftCatalog"`
-	RecentGifts     []recentGift                   `json:"recentGifts"`
-	Stats           map[string]dayStats            `json:"stats"`
-	Log             []logEntry                     `json:"log"`
-	GiftReceipts    []giftReceipt                  `json:"giftReceipts"`
-	Contributions   contributionLedgerState        `json:"contributions"`
+	RoomID               string                         `json:"roomId"`
+	Attributes           []attributeState               `json:"attributes"`
+	DisplayScenes        []displaySceneState            `json:"displayScenes"`
+	BlindBoxDisplay      blindBoxDisplayAppearanceState `json:"blindBoxDisplay"`
+	GiftKPIPanels        []giftKPIPanelState            `json:"giftKpiPanels"`
+	Activities           []activitySessionState         `json:"activities"`
+	Rules                []giftRule                     `json:"rules"`
+	TimerRules           []timerRule                    `json:"timerRules"`
+	FormulaPresets       []formulaPreset                `json:"formulaPresets"`
+	Settings             settingsState                  `json:"settings"`
+	SimplePlay           *simplePlayState               `json:"simplePlay,omitempty"`
+	GiftCatalog          []giftInfo                     `json:"giftCatalog"`
+	RecentGifts          []recentGift                   `json:"recentGifts"`
+	Stats                map[string]dayStats            `json:"stats"`
+	Log                  []logEntry                     `json:"log"`
+	GiftReceipts         []giftReceipt                  `json:"giftReceipts"`
+	Contributions        contributionLedgerState        `json:"contributions"`
+	AppliedIngressIDs    []string                       `json:"-"`
+	RecentSourceGiftKeys map[string]int64               `json:"-"`
 }
 
 type giftEvent struct {
@@ -433,17 +435,19 @@ func defaultAppState() appState {
 			},
 			ViewerSlots: blindBoxViewerSlotsDefault,
 		},
-		Activities:     []activitySessionState{},
-		GiftKPIPanels:  []giftKPIPanelState{},
-		Rules:          []giftRule{},
-		TimerRules:     []timerRule{},
-		FormulaPresets: []formulaPreset{},
-		GiftCatalog:    []giftInfo{},
-		RecentGifts:    []recentGift{},
-		Stats:          map[string]dayStats{},
-		Log:            []logEntry{},
-		GiftReceipts:   []giftReceipt{},
-		Contributions:  contributionLedgerState{Viewers: []viewerContribution{}},
+		Activities:           []activitySessionState{},
+		GiftKPIPanels:        []giftKPIPanelState{},
+		Rules:                []giftRule{},
+		TimerRules:           []timerRule{},
+		FormulaPresets:       []formulaPreset{},
+		GiftCatalog:          []giftInfo{},
+		RecentGifts:          []recentGift{},
+		Stats:                map[string]dayStats{},
+		Log:                  []logEntry{},
+		GiftReceipts:         []giftReceipt{},
+		Contributions:        contributionLedgerState{Viewers: []viewerContribution{}},
+		AppliedIngressIDs:    []string{},
+		RecentSourceGiftKeys: map[string]int64{},
 		Settings: settingsState{
 			FontSize:                 48,
 			AccentColor:              "#fb7299",
@@ -467,6 +471,7 @@ func defaultAppState() appState {
 }
 
 func normalizeAppState(state *appState) {
+	normalizeInternalIngestionLedgers(state, time.Now())
 	if state.Attributes == nil {
 		state.Attributes = []attributeState{}
 	}

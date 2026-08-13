@@ -107,8 +107,12 @@ func giftReceiptAnimationFromEvent(gift giftEvent) *giftReceiptAnimation {
 	if !hasFullEffect && !hasShortEffect {
 		return nil
 	}
+	durationMS := gift.AnimationDurationMS
+	if durationMS > 0 {
+		durationMS = normalizeGiftAnimationDuration(durationMS)
+	}
 	return &giftReceiptAnimation{
-		GIF: gifURL, WebP: webpURL, DurationMS: normalizeGiftAnimationDuration(gift.AnimationDurationMS),
+		GIF: gifURL, WebP: webpURL, DurationMS: durationMS,
 		EffectID: gift.EffectID, MP4: effectMP4, MP4JSON: effectMP4JSON,
 	}
 }

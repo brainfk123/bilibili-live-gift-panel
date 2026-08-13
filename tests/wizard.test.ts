@@ -41,6 +41,8 @@ const mockedClients = vi.hoisted(() => [] as Array<{
 }>);
 
 let mockedRuntimeState: 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error' = 'idle';
+let mockedRuntimeHealth: Record<string, unknown> = {};
+const configurationStorage = new Map<string, string>();
 const nativeSetInterval = globalThis.setInterval.bind(globalThis);
 const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
 const nativeClearInterval = globalThis.clearInterval.bind(globalThis);
@@ -216,6 +218,13 @@ const storage = {
 beforeEach(async () => {
   mockedClients.length = 0;
   mockedRuntimeState = 'idle';
+  mockedRuntimeHealth = {};
+  configurationStorage.clear();
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => configurationStorage.get(key) ?? null,
+    setItem: (key: string, value: string) => configurationStorage.set(key, value),
+    removeItem: (key: string) => configurationStorage.delete(key),
+  });
   vi.stubGlobal('setInterval', vi.fn((handler: TimerHandler, timeout?: number, ...args: unknown[]) => (
     (timeout ?? 0) >= 1000 ? 0 : nativeSetInterval(handler, timeout, ...args)
   )));
@@ -231,7 +240,7 @@ beforeEach(async () => {
     if (url.includes('/api/runtime')) {
       return new Response(JSON.stringify({
         code: 0,
-        runtime: { state: mockedRuntimeState, roomId: mockedRuntimeState === 'idle' ? '' : '31567150' },
+        runtime: { state: mockedRuntimeState, roomId: mockedRuntimeState === 'idle' ? '' : '31567150', ...mockedRuntimeHealth },
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
     if (url.includes('/api/auth/status')) {
@@ -287,6 +296,132 @@ function defaultAdvancedState() {
   result.settings.configExperience = 'advanced';
   return result;
 }
+
+describe('gift ingestion health warnings', () => {
+  it('shows a recovered connection gap only in configuration and allows dismissal', async () => {
+    mockedRuntimeState = 'connected';
+    mockedRuntimeHealth = {
+      gaps: [{ startedAt: 1_000, endedAt: 4_000, durationMs: 3_000, attempts: 2, errorKind: 'read_timeout' }],
+    };
+    const firstRoot = new TestElement('div');
+
+    mountConfig(firstRoot as unknown as HTMLElement);
+
+    await vi.waitFor(() => expect(textOf(firstRoot)).toContain('连接中断期间可能漏礼物'));
+    const warning = firstRoot.querySelector('.gift-ingestion-warning') as TestElement;
+    expect(warning).not.toBeNull();
+    expect(textOf(warning)).not.toContain('补录');
+    expect(textOf(warning)).not.toContain('手动录入');
+    expect((findByText(warning, '关闭') as any).ariaLabel).toBe('关闭已恢复的礼物接收中断提醒');
+    const fetchCallsBeforeDismiss = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+    findByText(warning, '关闭')?.onclick?.();
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(fetchCallsBeforeDismiss);
+    expect(firstRoot.querySelector('.gift-ingestion-warning')).toBeNull();
+
+    const remountedRoot = new TestElement('div');
+    mountConfig(remountedRoot as unknown as HTMLElement);
+    await Promise.resolve();
+    expect(remountedRoot.querySelector('.gift-ingestion-warning')).toBeNull();
+
+    mockedRuntimeHealth = {
+      gaps: [{ startedAt: 5_000, endedAt: 8_000, durationMs: 3_000, attempts: 1, errorKind: 'read_timeout' }],
+    };
+    const newerGapRoot = new TestElement('div');
+    mountConfig(newerGapRoot as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(newerGapRoot)).toContain('连接中断期间可能漏礼物'));
+  });
+
+  it('keeps the recovered warning safe when local dismissal storage is unavailable', async () => {
+    mockedRuntimeState = 'connected';
+    mockedRuntimeHealth = {
+      gaps: [{ startedAt: 1_000, endedAt: 4_000, durationMs: 3_000, attempts: 2, errorKind: 'read_timeout' }],
+    };
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => { throw new Error('storage disabled'); } });
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(root)).toContain('连接中断期间可能漏礼物'));
+
+    expect(() => findByText(root, '关闭')?.onclick?.()).not.toThrow();
+    expect(root.querySelector('.gift-ingestion-warning')).not.toBeNull();
+  });
+
+  it('shows a red configuration warning when the inbox cannot persist', async () => {
+    mockedRuntimeHealth = { ingestionErrorKind: 'inbox_persist' };
+    const root = new TestElement('div');
+
+    mountConfig(root as unknown as HTMLElement);
+
+    await vi.waitFor(() => expect(root.querySelectorAll('.gift-ingestion-warning').some((warning) => warning.className.includes('is-danger'))).toBe(true));
+    expect(textOf(root)).toContain('礼物收件箱暂时无法写入');
+    const danger = root.querySelectorAll('.gift-ingestion-warning').find((warning) => warning.className.includes('is-danger')) as TestElement;
+    expect((danger as any).role).toBe('alert');
+    expect((danger as any).ariaLabel).toBe('礼物接收需要注意');
+  });
+
+  it('shows pending count and oldest wait while the inbox is backlogged', async () => {
+    mockedRuntimeHealth = { inbox: { pendingCount: 3, oldestPendingAt: Date.now() - 65_000 } };
+    const root = new TestElement('div');
+
+    mountConfig(root as unknown as HTMLElement);
+
+    await vi.waitFor(() => expect(root.querySelector('.gift-ingestion-warning')).not.toBeNull());
+    expect(textOf(root)).toContain('3 条礼物等待处理');
+    expect(textOf(root)).toContain('最早已等待');
+  });
+
+  it('keeps ingestion health warnings inside simple configuration', async () => {
+    mockedRuntimeHealth = { inbox: { pendingCount: 1 } };
+    const configured = defaultState();
+    configured.settings.configExperience = 'simple';
+    await saveState(configured);
+    const root = new TestElement('div');
+
+    mountConfig(root as unknown as HTMLElement);
+
+    await vi.waitFor(() => expect(root.querySelector('.simple-mode-workspace')?.querySelector('.gift-ingestion-warning')).not.toBeNull());
+  });
+
+  it('shows an open reconnect warning instead of recovered-gap copy', async () => {
+    mockedRuntimeState = 'reconnecting';
+    mockedRuntimeHealth = { reconnectAttempts: 2, gaps: [{ startedAt: 1_000, attempts: 2, errorKind: 'read' }] };
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(root)).toContain('直播连接正在重连'));
+    expect(textOf(root)).not.toContain('连接中断期间可能漏礼物');
+  });
+
+  it('labels capacity and transaction ingestion failures as danger warnings', async () => {
+    mockedRuntimeHealth = { ingestionErrorKind: 'inbox_capacity' };
+    const capacityRoot = new TestElement('div');
+    mountConfig(capacityRoot as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(capacityRoot)).toContain('礼物收件箱已满'));
+
+    mockedRuntimeHealth = { ingestionErrorKind: 'transaction', transactionPending: true };
+    const transactionRoot = new TestElement('div');
+    mountConfig(transactionRoot as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(transactionRoot)).toContain('礼物处理事务正在恢复'));
+    expect(textOf(transactionRoot)).not.toContain('保持配置页面打开');
+
+    mockedRuntimeHealth = { ingestionErrorKind: 'inbox_durability' };
+    const durabilityRoot = new TestElement('div');
+    mountConfig(durabilityRoot as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(durabilityRoot)).toContain('程序会继续按顺序处理，请勿重复提交'));
+  });
+
+  it('renders stable recovery/reset danger copy with a diagnostic export', async () => {
+    mockedRuntimeHealth = { ingestionErrorKind: 'transaction_recovery', transactionPending: true };
+    const recoveryRoot = new TestElement('div');
+    mountConfig(recoveryRoot as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(recoveryRoot)).toContain('状态事务证据无法自动恢复'));
+    const exportLink = recoveryRoot.querySelector('.gift-ingestion-warning')?.querySelector('.diagnostic-log-export') as (TestElement & { href?: string }) | null;
+    expect(exportLink?.href).toBe('/api/diagnostics/log');
+
+    mockedRuntimeHealth = { ingestionErrorKind: 'reset_failure' };
+    const resetRoot = new TestElement('div');
+    mountConfig(resetRoot as unknown as HTMLElement);
+    await vi.waitFor(() => expect(textOf(resetRoot)).toContain('恢复默认未能完整清理'));
+  });
+});
 
 describe('wizard progress', () => {
   it('starts with no default attributes', () => {
@@ -1870,12 +2005,12 @@ describe('single-page configuration rendering', () => {
     const dialog = root.querySelector('.changelog-dialog');
     expect(dialog).not.toBeNull();
     expect(textOf(dialog!)).toContain('这次更新了什么？');
-    expect(textOf(dialog!)).toContain('八方向调整动画画面');
+    expect(textOf(dialog!)).toContain('成片不再跟着页面卡顿');
     expect(root.querySelectorAll('.changelog-visual')).toHaveLength(0);
     expect(textOf(dialog!)).not.toContain('训练中心');
     (root.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
 
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.0'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.1'));
     expect(root.querySelector('.changelog-dialog')).toBeNull();
   });
 
@@ -1916,7 +2051,7 @@ describe('single-page configuration rendering', () => {
         return Response.json({
           code: 0,
           update: {
-            state: 'up-to-date', currentVersion: '0.4.0', latestVersion: '0.4.0',
+            state: 'up-to-date', currentVersion: '0.4.1', latestVersion: '0.4.1',
             message: '当前已经是最新版本。', autoUpdate: true, restartRequired: false,
           },
         });
@@ -1934,7 +2069,7 @@ describe('single-page configuration rendering', () => {
     mountConfig(firstRoot as unknown as HTMLElement);
     await vi.waitFor(() => expect(firstRoot.querySelector('.changelog-dialog')).not.toBeNull());
     (firstRoot.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.0'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.1'));
 
     const secondRoot = new TestElement('div');
     mountConfig(secondRoot as unknown as HTMLElement);
@@ -2152,7 +2287,7 @@ describe('single-page configuration rendering', () => {
     expect(formula.value).toBe('MIN(加班时间+60,3600)');
   });
 
-  it('advances the editable value when a gift rule is simulated without saving live state', async () => {
+  it('advances a gift simulation draft without saving it as the real attribute value', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state('88888888', 1),
       rules: [{
@@ -2176,11 +2311,589 @@ describe('single-page configuration rendering', () => {
 
     simulate?.onclick?.();
 
-    await vi.waitFor(() => expect(currentValue.value).toBe('1'));
-    expect(textOf(root.querySelector('.formula-preview')!)).toContain('已模拟 1 个');
-    await new Promise((resolve) => nativeSetTimeout(resolve, 60));
-    expect(textOf(root.querySelector('.formula-preview')!)).toContain('已模拟 1 个');
+    await vi.waitFor(() => expect(textOf(root.querySelector('.formula-preview')!)).toContain('0 → 1'));
+    expect(currentValue.value).toBe('0');
+
+    simulate?.onclick?.();
+
+    await vi.waitFor(() => expect(textOf(root.querySelector('.formula-preview')!)).toContain('1 → 2'));
+    expect(currentValue.value).toBe('0');
+
+    findByText(root, '保存修改')?.onclick?.();
+
+    await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
     expect(loadState().attributes[0].value).toBe(0);
+  });
+
+  it('keeps the configuration page open and reports a safe reset failure', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/config' && init?.method === 'DELETE') {
+        return new Response('RAW-RESET-SECRET', { status: 500 });
+      }
+      if (url.includes('/api/runtime')) return Response.json({ code: 0, runtime: { state: 'idle', roomId: '' } });
+      if (url.includes('/api/auth/status')) return Response.json({ code: 0, auth: { state: 'anonymous' } });
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const alertMock = vi.fn();
+    const reloadMock = vi.fn();
+    vi.stubGlobal('alert', alertMock);
+    vi.stubGlobal('location', { origin: 'http://localhost:12450', reload: reloadMock });
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    (root.querySelector('.program-settings-toggle') as TestElement | null)?.onclick?.();
+
+    findByText(root, '恢复默认')?.onclick?.();
+
+    await vi.waitFor(() => expect(alertMock).toHaveBeenCalledWith('恢复默认失败，请重试或先导出运行日志。'));
+    expect(reloadMock).not.toHaveBeenCalled();
+    expect(String(alertMock.mock.calls.flat())).not.toContain('RAW-RESET-SECRET');
+  });
+
+  it('ignores a stale simulation response when advancing the shared draft', async () => {
+    const [firstGift, secondGift] = builtinCatalog;
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state('88888888'),
+      rules: [
+        {
+          id: 'r-preview-a', giftId: firstGift.id, attributeName: '加班时间',
+          formulaName: '模拟 A', formula: '加班时间+1', enabled: true,
+        },
+        {
+          id: 'r-preview-b', giftId: secondGift.id, attributeName: '加班时间',
+          formulaName: '模拟 B', formula: '加班时间+10', enabled: true,
+        },
+      ],
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelectorAll('.formula-preview')
+      .every((preview) => textOf(preview).includes('预览收到'))).toBe(true));
+
+    const fallbackFetch = globalThis.fetch;
+    let resolveFirst!: (response: Response) => void;
+    let resolveSecond!: (response: Response) => void;
+    const firstPreview = new Promise<Response>((resolve) => { resolveFirst = resolve; });
+    const secondPreview = new Promise<Response>((resolve) => { resolveSecond = resolve; });
+    const requestedValues: number[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { attributeValue: number };
+      requestedValues.push(body.attributeValue);
+      if (requestedValues.length === 1) return firstPreview;
+      if (requestedValues.length === 2) return secondPreview;
+      return Response.json({ code: 0, result: body.attributeValue + 10 });
+    }));
+
+    const rows = root.querySelectorAll('.selected-gift-rule');
+    const firstSimulate = findByText(rows[0], '模拟收到 1 个')!;
+    const secondSimulate = findByText(rows[1], '模拟收到 1 个')!;
+    firstSimulate.onclick?.();
+    secondSimulate.onclick?.();
+    expect(requestedValues).toEqual([0, 0]);
+
+    resolveSecond(Response.json({ code: 0, result: 10 }));
+    await vi.waitFor(() => expect(textOf(rows[1].querySelector('.formula-preview')!)).toContain('0 → 10'));
+    resolveFirst(Response.json({ code: 0, result: 1 }));
+    await vi.waitFor(() => expect(textOf(rows[0].querySelector('.formula-preview')!)).not.toContain('0 → 1'));
+
+    secondSimulate.onclick?.();
+    await vi.waitFor(() => expect(textOf(rows[1].querySelector('.formula-preview')!)).toContain('10 → 20'));
+    expect(requestedValues).toEqual([0, 0, 10]);
+  });
+
+  it('does not save a simulated timer result as the real attribute value', async () => {
+    const configured = state('88888888', 1);
+    configured.attributes[0].value = 10;
+    configured.timerRules = [{
+      id: 't-preview', attributeName: '加班时间', formulaName: '模拟减一',
+      intervalSeconds: 60, formula: '加班时间-1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const fallbackFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { attributeValue: number };
+      return Response.json({ code: 0, result: body.attributeValue - 1 });
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    const currentValue = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '当前值') as TestElement;
+    const timerEditor = root.querySelector('.timer-rule-editor')!;
+    findByText(timerEditor, '模拟执行一次')?.onclick?.();
+
+    await vi.waitFor(() => expect(textOf(timerEditor.querySelector('.formula-preview')!)).toContain('10 → 9'));
+    expect(currentValue.value).toBe('10');
+    findByText(root, '保存修改')?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
+    expect(loadState().attributes[0].value).toBe(10);
+  });
+
+  it('resets the shared simulation draft when the manual current value resets', async () => {
+    const configured = state('88888888', 1);
+    configured.attributes[0].value = 10;
+    configured.rules = [{
+      id: 'r-preview', giftId: 1, attributeName: '加班时间',
+      formulaName: '模拟加一', formula: '加班时间+1', enabled: true,
+    }];
+    configured.timerRules = [{
+      id: 't-preview', attributeName: '加班时间', formulaName: '模拟减一',
+      intervalSeconds: 60, formula: '加班时间-1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const fallbackFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { formula: string; attributeValue: number };
+      return Response.json({ code: 0, result: body.attributeValue + (body.formula.includes('-1') ? -1 : 1) });
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const currentValue = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '当前值') as TestElement & { oninput?: () => void };
+    const giftPreview = root.querySelector('.selected-gift-rule')!.querySelector('.formula-preview')!;
+    const giftSimulate = findByText(root, '模拟收到 1 个')!;
+    giftSimulate.onclick?.();
+    await vi.waitFor(() => expect(textOf(giftPreview)).toContain('10 → 11'));
+
+    currentValue.value = '20';
+    currentValue.oninput?.();
+    expect(textOf(root)).not.toContain('10 → 11');
+
+    const resetGiftRow = root.querySelector('.selected-gift-rule')!;
+    const resetGiftPreview = resetGiftRow.querySelector('.formula-preview')!;
+    findByText(resetGiftRow, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(resetGiftPreview)).toContain('20 → 21'));
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('定时器'))?.onclick?.();
+    const timerEditor = root.querySelector('.timer-rule-editor')!;
+    const timerPreview = timerEditor.querySelector('.formula-preview')!;
+    findByText(timerEditor, '模拟执行一次')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(timerPreview)).toContain('21 → 20'));
+    expect(currentValue.value).toBe('20');
+
+    findByText(root, '保存修改')?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
+    expect(loadState().attributes[0].value).toBe(20);
+  });
+
+  it('does not advance the shared draft for a skipped timer simulation', async () => {
+    const configured = state('88888888', 1);
+    configured.attributes[0].value = 10;
+    configured.rules = [{
+      id: 'r-preview', giftId: 1, attributeName: '加班时间',
+      formulaName: '模拟加一', formula: '加班时间+1', enabled: true,
+    }];
+    configured.timerRules = [{
+      id: 't-skipped', attributeName: '加班时间', formulaName: '不应执行',
+      intervalSeconds: 60, condition: '加班时间<0', formula: '加班时间-1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const fallbackFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { formula: string; attributeValue: number };
+      if (body.formula.includes('<0')) return Response.json({ code: 0, result: 0 });
+      return Response.json({ code: 0, result: body.attributeValue + (body.formula.includes('-1') ? -1 : 1) });
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('定时器'))?.onclick?.();
+    const timerEditor = root.querySelector('.timer-rule-editor')!;
+    const timerPreview = timerEditor.querySelector('.formula-preview')!;
+    findByText(timerEditor, '模拟执行一次')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(timerPreview)).toContain('当前条件不满足，本次未执行'));
+
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const giftPreview = root.querySelector('.selected-gift-rule')!.querySelector('.formula-preview')!;
+    findByText(root, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(giftPreview)).toContain('10 → 11'));
+  });
+
+  it('clears timer simulation previews after manual and template value resets', async () => {
+    const configured = state('88888888', 1);
+    configured.attributes[0].value = 10;
+    configured.timerRules = [{
+      id: 't-preview', attributeName: '加班时间', formulaName: '模拟减一',
+      intervalSeconds: 60, formula: '加班时间-1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const fallbackFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { attributeValue: number };
+      return Response.json({ code: 0, result: body.attributeValue - 1 });
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    const currentValue = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '当前值') as TestElement & { oninput?: () => void };
+    let timerEditor = root.querySelector('.timer-rule-editor')!;
+    findByText(timerEditor, '模拟执行一次')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(timerEditor.querySelector('.formula-preview')!)).toContain('10 → 9'));
+
+    currentValue.value = '20';
+    currentValue.oninput?.();
+    expect(textOf(root)).not.toContain('10 → 9');
+
+    timerEditor = root.querySelector('.timer-rule-editor')!;
+    findByText(timerEditor, '模拟执行一次')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(timerEditor.querySelector('.formula-preview')!)).toContain('20 → 19'));
+
+    findByText(root, '使用加班机模板')?.onclick?.();
+    expect(currentValue.value).toBe('0');
+    expect(textOf(root)).not.toContain('20 → 19');
+  });
+
+  it('uses the current simulation draft for ordinary gift and timer previews without advancing it', async () => {
+    const configured = state('88888888', 1);
+    configured.attributes[0].value = 10;
+    configured.rules = [{
+      id: 'r-preview', giftId: 1, attributeName: '加班时间',
+      formulaName: '模拟加一', formula: '加班时间+1', enabled: true,
+    }];
+    configured.timerRules = [{
+      id: 't-preview', attributeName: '加班时间', formulaName: '模拟减一',
+      intervalSeconds: 60, formula: '加班时间-1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const fallbackFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { formula: string; attributeValue: number };
+      const delta = Number(body.formula.match(/([+-]\d+)$/)?.[1] ?? 0);
+      return Response.json({ code: 0, result: body.attributeValue + delta });
+    }));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const giftRow = root.querySelector('.selected-gift-rule')!;
+    const giftPreview = giftRow.querySelector('.formula-preview')!;
+    const giftFormula = giftRow.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '触发后属性值') as TestElement & { oninput?: () => void };
+    findByText(giftRow, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(giftPreview)).toContain('10 → 11'));
+
+    giftFormula.value = '加班时间+5';
+    giftFormula.oninput?.();
+    await vi.waitFor(() => expect(textOf(giftPreview)).toContain('11 → 16'));
+    findByText(giftRow, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(giftPreview)).toContain('11 → 16'));
+
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('定时器'))?.onclick?.();
+    const timerEditor = root.querySelector('.timer-rule-editor')!;
+    const timerPreview = timerEditor.querySelector('.formula-preview')!;
+    const timerFormula = timerEditor.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '定时触发后属性值') as TestElement & { oninput?: () => void };
+    findByText(timerEditor, '模拟执行一次')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(timerPreview)).toContain('16 → 15'));
+
+    timerFormula.value = '加班时间-2';
+    timerFormula.oninput?.();
+    await vi.waitFor(() => expect(textOf(timerPreview)).toContain('15 → 13'));
+    findByText(timerEditor, '模拟执行一次')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(timerPreview)).toContain('15 → 13'));
+  });
+
+  it('does not advance the shared draft when a pending gift simulation is removed', async () => {
+    const [firstGift, secondGift] = builtinCatalog;
+    const configured = state('88888888');
+    configured.rules = [
+      { id: 'r-a', giftId: firstGift.id, attributeName: '加班时间', formulaName: 'A', formula: '加班时间+1', enabled: true },
+      { id: 'r-b', giftId: secondGift.id, attributeName: '加班时间', formulaName: 'B', formula: '加班时间+10', enabled: true },
+    ];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(2));
+
+    const fallbackFetch = globalThis.fetch;
+    let resolvePending!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => { resolvePending = resolve; });
+    let previewCalls = 0;
+    const requestedValues: number[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { attributeValue: number };
+      requestedValues.push(body.attributeValue);
+      previewCalls += 1;
+      if (previewCalls === 1) return pending;
+      return Response.json({ code: 0, result: body.attributeValue + 10 });
+    }));
+
+    const firstRow = root.querySelectorAll('.selected-gift-rule')[0];
+    findByText(firstRow, '模拟收到 1 个')?.onclick?.();
+    findByText(firstRow, '移除')?.onclick?.();
+    resolvePending(Response.json({ code: 0, result: 1 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const remainingRow = root.querySelector('.selected-gift-rule')!;
+    findByText(remainingRow, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(remainingRow.querySelector('.formula-preview')!)).toContain('0 → 10'));
+    expect(requestedValues.at(-1)).toBe(0);
+  });
+
+  it('does not advance the shared draft when a pending gift simulation is deselected in the picker', async () => {
+    const [firstGift, secondGift] = builtinCatalog;
+    const configured = state('88888888');
+    configured.rules = [
+      { id: 'r-a', giftId: firstGift.id, attributeName: '加班时间', formulaName: 'A', formula: '加班时间+1', enabled: true },
+      { id: 'r-b', giftId: secondGift.id, attributeName: '加班时间', formulaName: 'B', formula: '加班时间+10', enabled: true },
+    ];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(2));
+
+    const fallbackFetch = globalThis.fetch;
+    let resolvePending!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => { resolvePending = resolve; });
+    let previewCalls = 0;
+    const requestedValues: number[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { attributeValue: number };
+      requestedValues.push(body.attributeValue);
+      previewCalls += 1;
+      if (previewCalls === 1) return pending;
+      return Response.json({ code: 0, result: body.attributeValue + 10 });
+    }));
+
+    const firstRow = root.querySelectorAll('.selected-gift-rule')[0];
+    findByText(firstRow, '模拟收到 1 个')?.onclick?.();
+    findByText(root, '+ 添加礼物')?.onclick?.();
+    const drawer = root.querySelector('.gift-picker-drawer')!;
+    const firstChoice = drawer.querySelectorAll('.gift-choice')
+      .find((choice) => choice.dataset.giftId === String(firstGift.id))!;
+    firstChoice.onclick?.();
+    findByText(drawer, '确认选择（1）')?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(1));
+
+    resolvePending(Response.json({ code: 0, result: 1 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const remainingRow = root.querySelector('.selected-gift-rule')!;
+    findByText(remainingRow, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(remainingRow.querySelector('.formula-preview')!)).toContain('0 → 10'));
+    expect(requestedValues.at(-1)).toBe(0);
+  });
+
+  it('does not advance the shared draft when manual add replaces a pending gift simulation', async () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-a', giftId: gift.id, attributeName: '加班时间',
+      formulaName: 'A', formula: '加班时间+1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(1));
+
+    const fallbackFetch = globalThis.fetch;
+    let resolvePending!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => { resolvePending = resolve; });
+    let previewCalls = 0;
+    const requestedValues: number[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { attributeValue: number };
+      requestedValues.push(body.attributeValue);
+      previewCalls += 1;
+      if (previewCalls === 1) return pending;
+      return Response.json({ code: 0, result: body.attributeValue + 10 });
+    }));
+
+    const oldRow = root.querySelector('.selected-gift-rule')!;
+    findByText(oldRow, '模拟收到 1 个')?.onclick?.();
+    const idInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '礼物 ID') as TestElement;
+    const nameInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '礼物名称') as TestElement;
+    const priceInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '单价（元，可填 0）') as TestElement;
+    idInput.value = String(gift.id);
+    nameInput.value = '同 ID 替换礼物';
+    priceInput.value = '1';
+    findByText(root, '添加并选中')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(root.querySelector('.selected-gift-rule')!)).toContain('同 ID 替换礼物'));
+
+    resolvePending(Response.json({ code: 0, result: 1 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const replacementRow = root.querySelector('.selected-gift-rule')!;
+    findByText(replacementRow, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(replacementRow.querySelector('.formula-preview')!)).toContain('0 → 10'));
+    expect(requestedValues.at(-1)).toBe(0);
+  });
+
+  it('invalidates pending simulations when gift selection or timer addition rebuilds editors', async () => {
+    const [firstGift, secondGift] = builtinCatalog;
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-a', giftId: firstGift.id, attributeName: '加班时间',
+      formulaName: 'A', formula: '加班时间+1', enabled: true,
+    }];
+    configured.timerRules = [{
+      id: 't-a', attributeName: '加班时间', formulaName: 'A',
+      intervalSeconds: 60, formula: '加班时间-1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '编辑')?.onclick?.();
+
+    const fallbackFetch = globalThis.fetch;
+    const pendingResolvers: Array<(response: Response) => void> = [];
+    const requestedValues: number[] = [];
+    let deferNext = false;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { attributeValue: number };
+      requestedValues.push(body.attributeValue);
+      if (deferNext) {
+        deferNext = false;
+        return new Promise<Response>((resolve) => { pendingResolvers.push(resolve); });
+      }
+      return Response.json({ code: 0, result: body.attributeValue + 10 });
+    }));
+
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    deferNext = true;
+    findByText(root.querySelector('.selected-gift-rule')!, '模拟收到 1 个')?.onclick?.();
+    findByText(root, '+ 添加礼物')?.onclick?.();
+    const drawer = root.querySelector('.gift-picker-drawer')!;
+    drawer.querySelectorAll('.gift-choice')
+      .find((choice) => choice.dataset.giftId === String(secondGift.id))?.onclick?.();
+    findByText(drawer, '确认选择（2）')?.onclick?.();
+    pendingResolvers.shift()?.(Response.json({ code: 0, result: 1 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const addedGiftRow = root.querySelectorAll('.selected-gift-rule')
+      .find((row) => row.dataset.giftId === String(secondGift.id))!;
+    findByText(addedGiftRow, '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(addedGiftRow.querySelector('.formula-preview')!)).toContain('0 → 10'));
+
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('定时器'))?.onclick?.();
+    deferNext = true;
+    findByText(root.querySelector('.timer-rule-editor')!, '模拟执行一次')?.onclick?.();
+    findByText(root, '+ 添加定时器')?.onclick?.();
+    pendingResolvers.shift()?.(Response.json({ code: 0, result: -1 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const addedTimer = root.querySelectorAll('.timer-rule-editor').at(-1)!;
+    findByText(addedTimer, '模拟执行一次')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(addedTimer.querySelector('.formula-preview')!)).toContain('10 → 20'));
+    expect(requestedValues.at(-1)).toBe(10);
+  });
+
+  it('settles a visible loading preview when another rule supersedes its simulation', async () => {
+    const [firstGift, secondGift] = builtinCatalog;
+    const configured = state('88888888');
+    configured.rules = [
+      { id: 'r-a', giftId: firstGift.id, attributeName: '加班时间', formulaName: 'A', formula: '加班时间+1', enabled: true },
+      { id: 'r-b', giftId: secondGift.id, attributeName: '加班时间', formulaName: 'B', formula: '加班时间+10', enabled: true },
+    ];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(2));
+
+    const fallbackFetch = globalThis.fetch;
+    let resolveFirst!: (response: Response) => void;
+    const firstPending = new Promise<Response>((resolve) => { resolveFirst = resolve; });
+    let previewCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      previewCalls += 1;
+      if (previewCalls === 1) return firstPending;
+      return Response.json({ code: 0, result: 10 });
+    }));
+
+    const rows = root.querySelectorAll('.selected-gift-rule');
+    findByText(rows[0], '模拟收到 1 个')?.onclick?.();
+    expect(textOf(rows[0].querySelector('.formula-preview')!)).toContain('由后台计算预览');
+    findByText(rows[1], '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(rows[1].querySelector('.formula-preview')!)).toContain('0 → 10'));
+    expect(textOf(rows[0].querySelector('.formula-preview')!)).not.toContain('由后台计算预览');
+
+    resolveFirst(Response.json({ code: 0, result: 1 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    findByText(rows[1], '模拟收到 1 个')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(rows[1].querySelector('.formula-preview')!)).toContain('10 → 10'));
+  });
+
+  it('does not advance the shared draft when a pending timer simulation is removed', async () => {
+    const configured = state('88888888');
+    configured.timerRules = [
+      { id: 't-a', attributeName: '加班时间', formulaName: 'A', intervalSeconds: 60, formula: '加班时间-1', enabled: true },
+      { id: 't-b', attributeName: '加班时间', formulaName: 'B', intervalSeconds: 60, formula: '加班时间+10', enabled: true },
+    ];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    findByText(root, '编辑')?.onclick?.();
+    await vi.waitFor(() => expect(root.querySelectorAll('.timer-rule-editor')).toHaveLength(2));
+
+    const fallbackFetch = globalThis.fetch;
+    let resolvePending!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => { resolvePending = resolve; });
+    let previewCalls = 0;
+    const requestedValues: number[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).includes('/api/formula/preview')) return fallbackFetch(input, init);
+      const body = JSON.parse(String(init?.body)) as { attributeValue: number };
+      requestedValues.push(body.attributeValue);
+      previewCalls += 1;
+      if (previewCalls === 1) return pending;
+      return Response.json({ code: 0, result: body.attributeValue + 10 });
+    }));
+
+    const firstTimer = root.querySelectorAll('.timer-rule-editor')[0];
+    findByText(firstTimer, '模拟执行一次')?.onclick?.();
+    findByText(firstTimer, '移除')?.onclick?.();
+    resolvePending(Response.json({ code: 0, result: -1 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const remainingTimer = root.querySelector('.timer-rule-editor')!;
+    findByText(remainingTimer, '模拟执行一次')?.onclick?.();
+    await vi.waitFor(() => expect(textOf(remainingTimer.querySelector('.formula-preview')!)).toContain('0 → 10'));
+    expect(requestedValues.at(-1)).toBe(0);
   });
 
   it('configures a conditional backend timer without adding it to the OBS gift grid', async () => {
@@ -3264,6 +3977,37 @@ describe('activity session configuration', () => {
 });
 
 describe('OBS attribute display', () => {
+  it.each(['glass', 'neon'] as const)('uses the configured accent color for the %s OBS theme', (themeId) => {
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
+      ...state(),
+      attributes: [{
+        name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '',
+        display: {
+          variant: 'timer',
+          themeId,
+          appearance: {
+            themeId,
+            fontSize: 54,
+            accentColor: '#123456',
+            showConnection: false,
+            align: 'center',
+            panelOpacity: 55,
+          },
+        },
+      }],
+      rules: [],
+    }));
+    vi.useFakeTimers();
+    const root = new TestElement('div');
+
+    mountDisplay(root as unknown as HTMLElement, { kind: 'attribute', attributeName: '加班时间' });
+
+    expect(root.querySelector('.panel')?.style['--theme-accent']).toBe('#123456');
+    expect(root.querySelector('.attr')?.style['--theme-accent']).toBe('#123456');
+    expect(root.querySelector('.attr-value')?.textContent).toBe('00:00:00');
+    vi.useRealTimers();
+  });
+
   it('formats positive, negative, and zero deltas with the correct sign', () => {
     const attr = { name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' } as const;
     expect(formatDelta(60, attr)).toBe('+00:01:00');
@@ -3303,9 +4047,13 @@ describe('OBS attribute display', () => {
     const root = new TestElement('div');
     mountDisplay(root as unknown as HTMLElement, { kind: 'attribute', attributeName: '比赛结果' });
 
+    const valueElement = root.querySelector('.attr-value');
     expect(textOf(root)).toContain('红队胜');
-    expect(root.querySelector('.attr-value')?.className).toContain('is-enum-mapped');
+    expect(valueElement?.className).toContain('is-enum-mapped');
+    expect(valueElement?.style['--enum-value-color']).toBe('#ff3366');
     expect((root.querySelector('.attr-enum-image') as any)?.src).toBe('https://example.com/red.png');
+    const displayCss = readFileSync(new URL('../src/ui/display/display.css', import.meta.url), 'utf8');
+    expect(displayCss).toMatch(/\.attr-value\.is-enum-mapped\s*\{[^}]*color:\s*var\(--enum-value-color,/);
     vi.useRealTimers();
   });
 
@@ -3340,6 +4088,7 @@ describe('OBS attribute display', () => {
 
     expect(textOf(root)).toContain('积分');
     expect(textOf(root)).toContain('7');
+    expect(root.querySelector('.attr-value')?.textContent).toBe('7');
     expect(textOf(root)).toContain('增加一分');
     expect(textOf(root)).toContain('欢迎参与积分挑战');
     expect(root.querySelectorAll('.display-gift-rule')).toHaveLength(1);

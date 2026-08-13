@@ -5,15 +5,31 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 )
 
-//go:embed dist/index.html
+//go:embed dist
 var embeddedFS embed.FS
+
+func newEmbeddedPageHandler(pageFS fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(pageFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, segment := range strings.Split(r.URL.Path, "/") {
+			if segment == ".." {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		fileServer.ServeHTTP(w, r)
+	})
+}
 
 func writeJSON(w http.ResponseWriter, code int, payload map[string]any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -100,6 +116,17 @@ func handleFormulaPreview(store *configStore) http.HandlerFunc {
 	}
 }
 
+func handleRuntimeStatus(background *backgroundRuntime) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"code": -1, "message": "不支持的请求方法"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"code": 0, "runtime": background.Status()})
+	}
+}
+
 func announceStartup(notifications *notificationCenter, installedVersion string) bool {
 	if installedVersion != "" {
 		notifications.Publish(notificationUpdateSucceeded, installedVersion)
@@ -107,6 +134,32 @@ func announceStartup(notifications *notificationCenter, installedVersion string)
 	}
 	notifications.Publish(notificationServiceStarted, "")
 	return true
+}
+
+func newMainGiftClipJobs(store *configStore, media *giftReceiptAPI, diagnostics *diagnosticLogger, loadPayload func(string) (*giftClipPayload, error), newManager func(string, giftClipSourceResolver, giftClipEncoder, *diagnosticLogger) *giftClipJobManager) (*giftClipJobManager, error) {
+	payload, err := loadPayload(defaultGiftClipCacheRoot())
+	if err != nil {
+		return nil, err
+	}
+	encoder := newGiftClipFFmpegEncoder(payload, newGiftClipProcessRunner(), diagnostics, giftClipFFmpegEncoderOptions{})
+	return newManager(defaultGiftClipTaskRoot(), newGiftClipSourceResolver(store, media), encoder, diagnostics), nil
+}
+
+func newMainGiftClipCloser(closeGiftClips func()) func() {
+	var once sync.Once
+	return func() { once.Do(closeGiftClips) }
+}
+
+func runMainGiftClipShutdown(stopRuntime, closeGiftClips, closeServer, installUpdate func()) {
+	stopRuntime()
+	closeGiftClips()
+	closeServer()
+	installUpdate()
+}
+
+func runMainPendingGiftClipUpdate(closeGiftClips, installUpdate func()) {
+	closeGiftClips()
+	installUpdate()
 }
 
 func main() {
@@ -148,7 +201,7 @@ func main() {
 	}
 	defer releaseInstance()
 
-	indexHTML, err := embeddedFS.ReadFile("dist/index.html")
+	pageFS, err := fs.Sub(embeddedFS, "dist")
 	if err != nil {
 		showStartupError(fmt.Sprintf("内嵌页面读取失败：%v", err))
 		return
@@ -164,6 +217,14 @@ func main() {
 		diagnostics.Info("service_start", "version", appVersion)
 		defer diagnostics.Info("service_stop", "version", appVersion)
 	}
+	giftMedia := newGiftReceiptAPI(store, nil)
+	giftClips, err := newMainGiftClipJobs(store, giftMedia, diagnostics, embeddedGiftClipPayload, newGiftClipJobManager)
+	if err != nil {
+		showStartupError(err.Error())
+		return
+	}
+	closeGiftClips := newMainGiftClipCloser(giftClips.Close)
+	defer closeGiftClips()
 	loginStore, err := newDefaultLoginCredentialStore()
 	if err != nil {
 		showStartupError(err.Error())
@@ -174,9 +235,11 @@ func main() {
 	updater := newDefaultAutoUpdater(store)
 	installedVersion := updater.ConsumeInstalledVersion()
 	if installedVersion == "" && updater.HasPending() {
-		if err := updater.InstallOnExit(true); err != nil {
-			showStartupError(err.Error())
-		}
+		runMainPendingGiftClipUpdate(closeGiftClips, func() {
+			if err := updater.InstallOnExit(true); err != nil {
+				showStartupError(err.Error())
+			}
+		})
 		return
 	}
 	presence := newPagePresence(notifications)
@@ -206,17 +269,11 @@ func main() {
 	store.setOnChange(background.NotifyConfigChanged)
 	store.setOnTimerChange(background.NotifyTimerConfigChanged)
 	store.setOnUpdateChange(updater.NotifySettingsChanged)
+	store.setResetCoordinator(background.Reset)
 	login.SetOnChange(background.NotifyConfigChanged)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" && r.URL.Path != "/index.html" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(indexHTML)
-	})
+	mux.Handle("/", newEmbeddedPageHandler(pageFS))
 
 	mux.HandleFunc("/api/room_info", handleRoomInfo)
 	mux.HandleFunc("/api/room/anchor", newRoomAnchorHandler(login.roomOwnerUID, background.profileResolver))
@@ -227,9 +284,11 @@ func main() {
 	mux.HandleFunc("/api/activities/transition", handleActivityTransition(store))
 	mux.HandleFunc("/api/blind-box", handleBlindBoxInfo(login))
 	mux.HandleFunc("/api/gifts", handleRoomGiftCatalog(login))
-	giftReceiptAPI := newGiftReceiptAPI(store, nil)
-	mux.HandleFunc("/api/gift-receipts", giftReceiptAPI.handleReceipts)
-	mux.HandleFunc("/api/gift-receipts/media", giftReceiptAPI.handleMedia)
+	mux.HandleFunc("/api/gift-receipts", giftMedia.handleReceipts)
+	mux.HandleFunc("/api/gift-receipts/media", giftMedia.handleMedia)
+	giftClipAPI := newGiftClipHTTPHandler(giftClips)
+	mux.Handle("/api/gift-clips", giftClipAPI)
+	mux.Handle("/api/gift-clips/", giftClipAPI)
 	mux.HandleFunc("/api/update", updater.handleStatus)
 	mux.HandleFunc("/api/update/check", updater.handleCheck)
 	mux.HandleFunc("/api/changelog", newHostedChangelogHandler(nil, hostedChangelogURL))
@@ -242,14 +301,7 @@ func main() {
 	})
 	mux.HandleFunc("/api/auth/", login.handle)
 	mux.Handle("/api/pages/presence/", presence)
-	mux.HandleFunc("/api/runtime", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"code": -1, "message": "不支持的请求方法"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"code": 0, "runtime": background.Status()})
-	})
+	mux.HandleFunc("/api/runtime", handleRuntimeStatus(background))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"name": panelHealthMarker, "version": appVersion})
 	})
@@ -270,7 +322,11 @@ func main() {
 		}
 	}()
 	openConfigOnStartup := announceStartup(notifications, installedVersion)
-	go background.Run(runtimeContext)
+	runtimeDone := make(chan struct{})
+	go func() {
+		defer close(runtimeDone)
+		background.Run(runtimeContext)
+	}()
 	go updater.Run(runtimeContext)
 
 	configURL := fmt.Sprintf("http://localhost:%d/?mode=config", port)
@@ -282,12 +338,15 @@ func main() {
 		diagnostics.Error("tray_failed", "error", trayErr)
 		showStartupError(fmt.Sprintf("系统托盘启动失败：%v", trayErr))
 	}
-	stopRuntime()
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = server.Shutdown(shutdownContext)
-	if err := updater.InstallOnExit(restartAfterUpdate); err != nil {
-		diagnostics.Error("update_install_failed", "error", err)
-		showStartupError(err.Error())
-	}
+	runMainGiftClipShutdown(func() {
+		stopRuntime()
+		<-runtimeDone
+	}, closeGiftClips, func() { _ = server.Shutdown(shutdownContext) }, func() {
+		if err := updater.InstallOnExit(restartAfterUpdate); err != nil {
+			diagnostics.Error("update_install_failed", "error", err)
+			showStartupError(err.Error())
+		}
+	})
 }

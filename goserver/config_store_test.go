@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -63,6 +65,59 @@ func TestConfigStoreLifecycle(t *testing.T) {
 	}
 }
 
+type fakeStateDirectory struct {
+	syncErr  error
+	closeErr error
+}
+
+func (d *fakeStateDirectory) Sync() error  { return d.syncErr }
+func (d *fakeStateDirectory) Close() error { return d.closeErr }
+
+func TestSyncStateDirectoryPropagatesOpenAndStorageErrors(t *testing.T) {
+	storageErr := errors.New("storage failure")
+	for name, open := range map[string]func(string) (stateDirectory, error){
+		"open": func(string) (stateDirectory, error) { return nil, storageErr },
+		"sync": func(string) (stateDirectory, error) { return &fakeStateDirectory{syncErr: storageErr}, nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := syncStateDirectoryWith("unused", open, true); !errors.Is(err, storageErr) {
+				t.Fatalf("error = %v, want storage failure", err)
+			}
+		})
+	}
+}
+
+func TestSyncStateDirectorySuppressesOnlyUnsupportedWindowsSync(t *testing.T) {
+	for _, unsupported := range []error{syscall.Errno(1), syscall.Errno(5), syscall.Errno(6)} {
+		open := func(string) (stateDirectory, error) {
+			return &fakeStateDirectory{syncErr: unsupported}, nil
+		}
+		if err := syncStateDirectoryWith("unused", open, true); err != nil {
+			t.Fatalf("unsupported Windows directory sync error = %v", err)
+		}
+	}
+	open := func(string) (stateDirectory, error) { return &fakeStateDirectory{syncErr: syscall.Errno(1)}, nil }
+	if err := syncStateDirectoryWith("unused", open, false); !errors.Is(err, syscall.Errno(1)) {
+		t.Fatalf("non-Windows error = %v", err)
+	}
+}
+
+func TestAtomicWriteOutcomeMarksPostRenameDirectorySyncFailureCommitted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	injected := errors.New("injected post-rename directory sync failure")
+	outcome := writeFileAtomicallyOutcomeWith(path, []byte("committed\n"), func(string) error { return injected })
+	if !outcome.Committed || !errors.Is(outcome.Err, injected) {
+		t.Fatalf("outcome = %+v, want committed injected warning", outcome)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "committed\n" {
+		t.Fatalf("final path data = %q", data)
+	}
+}
+
 func TestConfigStoreMigratesLegacyFileIntoShards(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -107,7 +162,7 @@ func TestConfigStoreMigratesLegacyFileIntoShards(t *testing.T) {
 	}
 }
 
-func TestConfigStorePatchWritesOnlyAffectedShard(t *testing.T) {
+func TestConfigStorePatchCommitsAllTransactionShards(t *testing.T) {
 	dir := t.TempDir()
 	store := &configStore{path: filepath.Join(dir, "config.json")}
 	initial := `{
@@ -151,9 +206,12 @@ func TestConfigStorePatchWritesOnlyAffectedShard(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !info.ModTime().Equal(oldTime) {
-			t.Fatalf("unaffected shard %s was rewritten at %v", sidecar, info.ModTime())
+		if info.ModTime().Equal(oldTime) {
+			t.Fatalf("transaction shard %s was not rewritten", sidecar)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state-transaction.json")); !os.IsNotExist(err) {
+		t.Fatalf("completed transaction evidence was not removed: %v", err)
 	}
 }
 
@@ -314,9 +372,9 @@ func TestConfigStoreMigratesMissingFieldsWithDefaults(t *testing.T) {
 	}
 }
 
-func TestStateShardVersionTenUpgradesToEleven(t *testing.T) {
+func TestStateShardVersionElevenUpgradesToTwelve(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
-	if err := os.WriteFile(store.path, []byte(`{"schemaVersion":10,"settings":{"theme":"light"}}`), 0o600); err != nil {
+	if err := os.WriteFile(store.path, []byte(`{"schemaVersion":11,"settings":{"theme":"light"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.migrateLegacy(); err != nil {
@@ -332,8 +390,8 @@ func TestStateShardVersionTenUpgradesToEleven(t *testing.T) {
 	if err := json.Unmarshal(data, &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata.SchemaVersion != 11 {
-		t.Fatalf("schemaVersion = %d, want 11", metadata.SchemaVersion)
+	if metadata.SchemaVersion != 12 {
+		t.Fatalf("schemaVersion = %d, want 12", metadata.SchemaVersion)
 	}
 }
 
@@ -580,6 +638,98 @@ func TestConfigStoreReconnectsOnlyWhenRoomChanges(t *testing.T) {
 	put(`{"roomId":"32025114","attributes":[],"rules":[]}`)
 	if changes != 2 {
 		t.Fatalf("room change callbacks = %d, want 2", changes)
+	}
+}
+
+func TestConfigStorePreservesInternalIngestionLedgersAcrossClientReplacement(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	initial := defaultAppState()
+	initial.AppliedIngressIDs = []string{"ingress-1"}
+	initial.RecentSourceGiftKeys = map[string]int64{"rnd-1": time.Now().UnixMilli()}
+	if err := store.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := defaultAppState()
+	replacement.RoomID = "200"
+	replaced, err := store.replaceClientState(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replaced.State.AppliedIngressIDs) != 1 || replaced.State.AppliedIngressIDs[0] != "ingress-1" {
+		t.Fatalf("applied ingress IDs = %#v", replaced.State.AppliedIngressIDs)
+	}
+	if _, exists := replaced.State.RecentSourceGiftKeys["rnd-1"]; !exists {
+		t.Fatalf("recent source keys = %#v", replaced.State.RecentSourceGiftKeys)
+	}
+
+	encoded, err := json.Marshal(replaced.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "appliedIngressIds") || strings.Contains(string(encoded), "recentSourceGiftKeys") {
+		t.Fatalf("internal ledgers leaked into client state: %s", encoded)
+	}
+	history, err := os.ReadFile(filepath.Join(dir, "history.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(history), "appliedIngressIds") || !strings.Contains(string(history), "recentSourceGiftKeys") {
+		t.Fatalf("internal ledgers missing from history shard: %s", history)
+	}
+}
+
+func TestUpdateStateForIngestionBoundsAppliedLedger(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	initial := defaultAppState()
+	initial.AppliedIngressIDs = make([]string, maxAppliedIngressIDs)
+	for index := range initial.AppliedIngressIDs {
+		initial.AppliedIngressIDs[index] = fmt.Sprintf("ingress-%04d", index)
+	}
+	if err := store.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+
+	state, applied, err := store.updateStateForIngestion("ingress-new", func(*appState) error { return nil })
+	if err != nil || !applied {
+		t.Fatalf("applied=%v err=%v", applied, err)
+	}
+	if len(state.AppliedIngressIDs) != maxAppliedIngressIDs {
+		t.Fatalf("applied ingress count = %d", len(state.AppliedIngressIDs))
+	}
+	if state.AppliedIngressIDs[0] != "ingress-0001" || state.AppliedIngressIDs[len(state.AppliedIngressIDs)-1] != "ingress-new" {
+		t.Fatalf("bounded applied ingress IDs = %#v", state.AppliedIngressIDs)
+	}
+}
+
+func TestConfigStorePrunesRecentSourceGiftKeysByAgeAndCount(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	initial := defaultAppState()
+	now := time.Now()
+	initial.RecentSourceGiftKeys = map[string]int64{"expired": now.Add(-2 * time.Minute).UnixMilli()}
+	for index := 0; index < 501; index++ {
+		initial.RecentSourceGiftKeys[fmt.Sprintf("recent-%03d", index)] = now.Add(-time.Duration(index) * time.Millisecond).UnixMilli()
+	}
+	if err := store.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.RecentSourceGiftKeys) != 500 {
+		t.Fatalf("recent source key count = %d, want 500", len(state.RecentSourceGiftKeys))
+	}
+	if _, exists := state.RecentSourceGiftKeys["expired"]; exists {
+		t.Fatal("expired source key was retained")
+	}
+	if _, exists := state.RecentSourceGiftKeys["recent-500"]; exists {
+		t.Fatal("oldest over-limit source key was retained")
+	}
+	if _, exists := state.RecentSourceGiftKeys["recent-000"]; !exists {
+		t.Fatal("newest source key was pruned")
 	}
 }
 

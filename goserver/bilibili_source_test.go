@@ -1,9 +1,240 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
+
+type fakeBiliSocket struct {
+	reads       [][]byte
+	readErr     error
+	writes      [][]byte
+	deadlines   []time.Time
+	deadlineErr error
+}
+
+func (socket *fakeBiliSocket) ReadMessage() (int, []byte, error) {
+	if len(socket.reads) > 0 {
+		payload := socket.reads[0]
+		socket.reads = socket.reads[1:]
+		return 2, payload, nil
+	}
+	return 0, nil, socket.readErr
+}
+func (socket *fakeBiliSocket) WriteMessage(_ int, payload []byte) error {
+	socket.writes = append(socket.writes, append([]byte(nil), payload...))
+	return nil
+}
+func (socket *fakeBiliSocket) SetReadDeadline(deadline time.Time) error {
+	socket.deadlines = append(socket.deadlines, deadline)
+	return socket.deadlineErr
+}
+func (*fakeBiliSocket) Close() error { return nil }
+
+type heartbeatFailingBiliSocket struct {
+	closed chan struct{}
+}
+
+func (socket *heartbeatFailingBiliSocket) ReadMessage() (int, []byte, error) {
+	<-socket.closed
+	return 0, nil, errors.New("socket closed")
+}
+func (*heartbeatFailingBiliSocket) WriteMessage(_ int, payload []byte) error {
+	if len(decodeBiliPackets(payload)) == 1 && decodeBiliPackets(payload)[0].operation == biliOpHeartbeat {
+		return errors.New("heartbeat write failed")
+	}
+	return nil
+}
+func (*heartbeatFailingBiliSocket) SetReadDeadline(time.Time) error { return nil }
+func (socket *heartbeatFailingBiliSocket) Close() error {
+	select {
+	case <-socket.closed:
+	default:
+		close(socket.closed)
+	}
+	return nil
+}
+
+func TestBilibiliSourceRefreshesReadDeadlineForValidFrames(t *testing.T) {
+	authReply := encodeBiliPacket(biliOpAuthReply, []byte(`{"code":0}`))
+	socket := &fakeBiliSocket{reads: [][]byte{authReply}, readErr: errors.New("read stopped")}
+	source := &bilibiliGiftSource{heartbeatInterval: time.Hour, readTimeout: 5 * time.Millisecond}
+	err := source.runSocket(context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{onState: func(string) {}})
+	if err == nil {
+		t.Fatal("runSocket returned nil after read failure")
+	}
+	if len(socket.deadlines) < 2 {
+		t.Fatalf("deadline refreshes = %d, want initial and valid-frame refresh", len(socket.deadlines))
+	}
+	if socket.deadlines[1].Sub(socket.deadlines[0]) > 50*time.Millisecond {
+		t.Fatalf("deadline was not refreshed from the valid frame: %v", socket.deadlines)
+	}
+}
+
+func TestBilibiliSourceReportsHealthyNonGiftFrames(t *testing.T) {
+	authReply := encodeBiliPacket(biliOpAuthReply, []byte(`{"code":0}`))
+	ignored := encodeBiliPacket(biliOpMessage, []byte(`{"cmd":"DANMU_MSG","data":{"text":"hello"}}`))
+	socket := &fakeBiliSocket{reads: [][]byte{authReply, ignored}, readErr: errors.New("read stopped")}
+	frames := 0
+	err := (&bilibiliGiftSource{heartbeatInterval: time.Hour}).runSocket(context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{
+		onFrame: func() { frames++ },
+	})
+	if err == nil || frames != 2 {
+		t.Fatalf("runSocket error = %v, healthy frame callbacks = %d, want read error and 2", err, frames)
+	}
+}
+
+func TestBilibiliSourceReturnsHeartbeatFailureOnce(t *testing.T) {
+	socket := &heartbeatFailingBiliSocket{closed: make(chan struct{})}
+	source := &bilibiliGiftSource{heartbeatInterval: time.Millisecond, readTimeout: time.Hour}
+	err := source.runSocket(context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{})
+	if connectionFailureKind(err) != "heartbeat" {
+		t.Fatalf("failure kind = %q, want heartbeat (error %v)", connectionFailureKind(err), err)
+	}
+}
+
+func TestBilibiliSourceReturnsReadDeadlineFailure(t *testing.T) {
+	socket := &fakeBiliSocket{deadlineErr: errors.New("deadline failed")}
+	err := (&bilibiliGiftSource{}).runSocket(context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{})
+	if connectionFailureKind(err) != "deadline" {
+		t.Fatalf("failure kind = %q, want deadline (error %v)", connectionFailureKind(err), err)
+	}
+}
+
+func TestBilibiliDiagnosticsRecordsSafeParseOutcomes(t *testing.T) {
+	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	malformedPacket := make([]byte, biliHeaderLength)
+	malformedPacket[3] = 32 // Declares a packet beyond the supplied frame.
+	malformedPacket[5] = biliHeaderLength
+	malformedPacket[11] = biliOpMessage
+	invalidZlib := encodeBiliPacket(biliOpMessage, []byte("not-zlib"))
+	invalidZlib[7] = 2
+	malformedJSON := encodeBiliPacket(biliOpMessage, []byte(`{"cmd":`))
+	ignoredCombo := encodeBiliPacket(biliOpMessage, []byte(`{"cmd":"COMBO_SEND","data":{"uid":123456,"uname":"private-viewer"}}`))
+	validGift := encodeBiliPacket(biliOpMessage, []byte(`{"cmd":"SEND_GIFT","data":{"giftId":35801,"num":2,"blind_gift_id":35800,"timestamp":1700000000,"rnd":"diagnostic-rnd-token","uid":987654,"uname":"private-viewer","face":"https://private.example/avatar.png"}}`))
+	socket := &fakeBiliSocket{reads: [][]byte{malformedPacket, invalidZlib, malformedJSON, ignoredCombo, validGift}, readErr: errors.New("stop")}
+	var gifts []giftEvent
+
+	err = (&bilibiliGiftSource{diagnostics: logger, heartbeatInterval: time.Hour}).runSocket(context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{
+		onGift: func(gift giftEvent) { gifts = append(gifts, gift) },
+	})
+	if err == nil {
+		t.Fatal("runSocket returned nil after the fixture read ended")
+	}
+	if len(gifts) != 1 || gifts[0].GiftID != 35801 || gifts[0].Num != 2 || gifts[0].BlindGiftID != 35800 {
+		t.Fatalf("accepted gifts = %#v", gifts)
+	}
+
+	data, readErr := os.ReadFile(logger.path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	text := string(data)
+	for _, expected := range []string{"packet_bounds", "decompression_failure", "malformed_envelope", "ignored_command"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("diagnostics missing %q: %s", expected, text)
+		}
+	}
+	for _, secret := range []string{"diagnostic-rnd-token", "private-viewer", "private.example/avatar.png", `{"cmd":`} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("diagnostics leaked %q: %s", secret, text)
+		}
+	}
+}
+
+func TestDiagnosticHashIsShortAndStable(t *testing.T) {
+	if got, want := diagnosticHash("abc"), "ba7816bf8f01"; got != want {
+		t.Fatalf("diagnosticHash(abc) = %q, want %q", got, want)
+	}
+}
+
+func TestParseBiliGiftDetailedCategorizesMalformedGiftData(t *testing.T) {
+	gift, reason, ok := parseBiliGiftDetailed([]byte(`{"cmd":"SEND_GIFT","data":{"giftId":"not-an-integer"}}`))
+	if ok || reason != "malformed_gift_data" || gift != (giftEvent{}) {
+		t.Fatalf("detailed malformed gift result = %#v, %q, %v", gift, reason, ok)
+	}
+}
+
+func TestBilibiliDiagnosticsRateLimitsIgnoredMessages(t *testing.T) {
+	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	source := &bilibiliGiftSource{diagnostics: logger, diagnosticNow: func() time.Time { return now }}
+	source.recordIgnoredMessage("combo_send")
+	source.recordIgnoredMessage("combo_send")
+	source.recordIgnoredMessage("batch_combo_send")
+	source.recordIgnoredMessage("batch_combo_send")
+	data, err := os.ReadFile(logger.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(data), "bili_message_ignored"); count != 2 {
+		t.Fatalf("ignored diagnostics entries = %d, want one per stable category: %s", count, data)
+	}
+	if !strings.Contains(string(data), `ignored_command_category="combo_send"`) || !strings.Contains(string(data), `ignored_command_category="batch_combo_send"`) {
+		t.Fatalf("ignored diagnostics did not retain independent categories: %s", data)
+	}
+	now = now.Add(ignoredDiagnosticInterval)
+	source.recordIgnoredMessage("combo_send")
+	data, err = os.ReadFile(logger.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(data), `ignored_command_category="combo_send"`); count != 2 || !strings.Contains(string(data), `ignored_command_category="combo_send" count=2`) {
+		t.Fatalf("combo aggregate was not emitted independently: %s", data)
+	}
+}
+
+func TestBilibiliDiagnosticsRecordsTypedFrameAndIgnoredCommandDimensions(t *testing.T) {
+	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodies := [][]byte{
+		[]byte(`{"cmd":"COMBO_SEND","data":{"uid":123456,"rnd":"PRIVATE-COMBO-RND"}}`),
+		[]byte(`{"cmd":"BATCH_COMBO_SEND","data":{"uid":234567}}`),
+		[]byte(`{"cmd":"PRIVATE_SECRET_COMMAND","data":{"uid":345678}}`),
+		[]byte(`{"cmd":"SEND_GIFT","data":{"giftId":35801,"num":1,"uid":456789,"rnd":"PRIVATE-GIFT-RND"}}`),
+	}
+	frame := []byte{}
+	for _, body := range bodies {
+		packet := encodeBiliPacket(biliOpMessage, body)
+		packet[7] = 1
+		frame = append(frame, packet...)
+	}
+	socket := &fakeBiliSocket{reads: [][]byte{frame}, readErr: errors.New("stop")}
+	source := &bilibiliGiftSource{diagnostics: logger, heartbeatInterval: time.Hour}
+	if err := source.runSocket(context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{}); err == nil {
+		t.Fatal("runSocket returned nil after fixture exhaustion")
+	}
+
+	export := string(logger.exportBytes())
+	for _, expected := range []string{
+		"bili_frame_decoded", "protocol_version=1", "decoded_packet_count=4",
+		`ignored_command_category="combo_send"`, `ignored_command_category="batch_combo_send"`, `ignored_command_category="other"`,
+	} {
+		if !strings.Contains(export, expected) {
+			t.Fatalf("diagnostic export missing %q: %s", expected, export)
+		}
+	}
+	for _, secret := range []string{"PRIVATE_SECRET_COMMAND", "PRIVATE-COMBO-RND", "PRIVATE-GIFT-RND", "123456", "234567", "345678", "456789", `"cmd"`} {
+		if strings.Contains(export, secret) {
+			t.Fatalf("diagnostic export leaked %q: %s", secret, export)
+		}
+	}
+}
 
 func TestParseBiliGift(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{

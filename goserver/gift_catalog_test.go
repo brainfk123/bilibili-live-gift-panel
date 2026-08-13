@@ -174,6 +174,14 @@ func TestMarkListedBlindBoxChildrenMarksRewardsAsListed(t *testing.T) {
 	}
 }
 
+func TestMarkListedBlindBoxChildrenAllowsNilLookup(t *testing.T) {
+	gifts := []roomGiftInfo{{ID: 1, Listed: true, BlindBoxParent: true}}
+	markListedBlindBoxChildren(gifts, nil)
+	if !gifts[0].BlindBoxParent || !gifts[0].Listed {
+		t.Fatalf("nil lookup changed gifts: %#v", gifts)
+	}
+}
+
 func TestParseRoomGiftContext(t *testing.T) {
 	context, err := parseRoomGiftContext(map[string]any{
 		"code": float64(0),

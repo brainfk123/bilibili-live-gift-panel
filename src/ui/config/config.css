@@ -2096,6 +2096,24 @@ body.config-mode::-webkit-scrollbar-corner,
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
+.config-root .gift-ingestion-warnings { display: grid; gap: 10px; margin-bottom: 16px; }
+.config-root .gift-ingestion-warning {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 14px;
+  border: 1px solid color-mix(in srgb, var(--warning) 58%, var(--border)); border-radius: 14px;
+  padding: 13px 15px; background: color-mix(in srgb, var(--warning) 11%, var(--card));
+}
+.config-root .gift-ingestion-warning.is-danger {
+  border-color: color-mix(in srgb, var(--danger) 58%, var(--border));
+  background: color-mix(in srgb, var(--danger) 10%, var(--card));
+}
+.config-root .gift-ingestion-warning-copy { min-width: 0; }
+.config-root .gift-ingestion-warning-copy strong { color: var(--text); font-size: var(--type-body); }
+.config-root .gift-ingestion-warning-copy p { margin-top: 5px; color: var(--text-dim); font-size: var(--type-meta); line-height: 1.55; }
+.config-root .gift-ingestion-warning-close {
+  flex: 0 0 auto; border: 0; padding: 2px 0; background: transparent; color: var(--accent-text);
+  font: inherit; font-size: var(--type-meta); cursor: pointer;
+}
+.config-root .gift-ingestion-warning-close:hover { color: var(--text); }
 .config-root .workspace-card {
   min-width: 0;
   border: 1px solid var(--border);

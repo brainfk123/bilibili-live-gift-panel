@@ -1,10 +1,39 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { GiftReceipt } from '../src/types';
 import {
+  drawGiftClipBackground,
+  drawGiftClipInfoOverlay,
   drawGiftClipOutputFrame,
   giftClipInfoBarLayout,
   prepareGiftClipOutputCanvas,
 } from '../src/ui/config/gift-clip-renderer';
+
+function recordingContext(width: number, height: number): { context: CanvasRenderingContext2D; calls: Array<{ name: string }> } {
+  const calls: Array<{ name: string }> = [];
+  const record = (name: string) => vi.fn(() => {
+    calls.push({ name });
+  });
+  const gradient = { addColorStop: vi.fn() };
+  return {
+    calls,
+    context: {
+      canvas: { width, height },
+      createLinearGradient: vi.fn(() => {
+        calls.push({ name: 'createLinearGradient' });
+        return gradient;
+      }),
+      createRadialGradient: vi.fn(() => {
+        calls.push({ name: 'createRadialGradient' });
+        return gradient;
+      }),
+      fillRect: record('fillRect'), clearRect: record('clearRect'), drawImage: record('drawImage'),
+      save: record('save'), restore: record('restore'), beginPath: record('beginPath'),
+      roundRect: record('roundRect'), arc: record('arc'), clip: record('clip'), fill: record('fill'),
+      stroke: record('stroke'), fillText: record('fillText'),
+      measureText: vi.fn((text: string) => ({ width: text.length * 8 })),
+    } as unknown as CanvasRenderingContext2D,
+  };
+}
 
 function createGiftClipContextStub(options: { width: number; height: number; drawImage: ReturnType<typeof vi.fn> }): CanvasRenderingContext2D {
   const gradient = { addColorStop: vi.fn() };
@@ -77,5 +106,18 @@ describe('gift clip renderer', () => {
     const visual = { source: {} as CanvasImageSource, width: 640, height: 360 };
     drawGiftClipOutputFrame(context, receiptFixture(), visual, null, { x: 80, y: 40, width: 320, height: 180 });
     expect(drawImage).toHaveBeenCalledWith(visual.source, 80, 40, 320, 180, 0, 0, 320, 180);
+  });
+
+  it('draws background and information overlay as independent layers', () => {
+    const background = recordingContext(960, 540);
+    drawGiftClipBackground(background.context, 960, 540);
+    expect(background.calls.some((call) => call.name === 'fillRect')).toBe(true);
+    expect(background.calls.some((call) => call.name === 'fillText')).toBe(false);
+
+    const overlay = recordingContext(960, 540);
+    drawGiftClipInfoOverlay(overlay.context, receiptFixture(), null, 960, 540);
+    expect(overlay.calls.some((call) => call.name === 'clearRect')).toBe(true);
+    expect(overlay.calls.some((call) => call.name === 'fillText')).toBe(true);
+    expect(overlay.calls.filter((call) => call.name === 'createLinearGradient')).toHaveLength(1);
   });
 });

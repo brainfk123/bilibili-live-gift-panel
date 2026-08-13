@@ -22,6 +22,7 @@ import {
   pollBiliQRCodeLogin,
   previewFormula,
   RuntimeConnectionState,
+  RuntimeStatus,
   RoomAnchorInfo,
   resetGiftTargetProgress,
   startBiliQRCodeLogin,
@@ -193,6 +194,7 @@ export function mountConfig(root: HTMLElement): void {
   if (metadataChanged || consumeConfigMigrationRequired()) void saveState(state);
 
   let connectionState: RuntimeConnectionState = 'idle';
+  let runtimeStatus: RuntimeStatus = { state: 'idle', roomId: '' };
   let biliAuth: BiliAuthStatus = { state: 'anonymous' };
   let guideDismissed = !state.settings.showTutorial;
   let activeGuide: SpotlightGuideElement | null = null;
@@ -334,6 +336,13 @@ export function mountConfig(root: HTMLElement): void {
       try {
         const runtime = await getRuntimeStatus();
         const previous = connectionState;
+        const previousHealth = JSON.stringify({
+          gaps: runtimeStatus.gaps,
+          inbox: runtimeStatus.inbox,
+          transactionPending: runtimeStatus.transactionPending,
+          ingestionErrorKind: runtimeStatus.ingestionErrorKind,
+        });
+        runtimeStatus = runtime;
         connectionState = runtime.state;
         renderHeaderStatus();
         const inlineStatus = root.querySelector('.connection-inline-status');
@@ -342,6 +351,13 @@ export function mountConfig(root: HTMLElement): void {
           void refreshRoomGiftCatalog(true);
           if (!editorOpen) render();
         }
+        const nextHealth = JSON.stringify({
+          gaps: runtime.gaps,
+          inbox: runtime.inbox,
+          transactionPending: runtime.transactionPending,
+          ingestionErrorKind: runtime.ingestionErrorKind,
+        });
+        if (previousHealth !== nextHealth && !editorOpen) render();
       } catch {
         connectionState = 'error';
         renderHeaderStatus();
@@ -896,11 +912,13 @@ export function mountConfig(root: HTMLElement): void {
     guideToggle.hidden = simple;
     configShell.setSimpleMode(simple);
     if (simple) {
+      renderGiftIngestionWarnings(configShell.simpleContent);
       renderSimpleExperience();
       applyActivePage();
       return;
     }
     renderOverviewDashboard();
+    renderGiftIngestionWarnings();
     renderConnectionWorkspace();
     renderAttributesWorkspace();
     renderActivities();
@@ -911,6 +929,103 @@ export function mountConfig(root: HTMLElement): void {
     renderGiftHistory();
     applyActivePage();
     renderGuide();
+  }
+
+  function renderGiftIngestionWarnings(host = configShell.workspace('overview')): void {
+    const warnings = el('section', { class: 'gift-ingestion-warnings', ariaLive: 'polite' });
+    const gaps = runtimeStatus.gaps ?? [];
+    const openGap = [...gaps].reverse().find((gap) => !gap.endedAt);
+    const recoveredGap = [...gaps].reverse().find((gap) => gap.endedAt && gap.endedAt > gap.startedAt);
+    if (openGap || runtimeStatus.state === 'reconnecting') {
+      const attempts = openGap?.attempts ?? runtimeStatus.reconnectAttempts ?? 0;
+      warnings.append(el('article', { class: 'gift-ingestion-warning is-warning', role: 'status', ariaLabel: '礼物接收正在重连' } as any, [
+        el('div', { class: 'gift-ingestion-warning-copy' }, [
+          el('strong', { text: '直播连接正在重连' }),
+          el('p', { text: `礼物接收暂时不可用，正在尝试恢复${attempts > 0 ? `（已重试 ${attempts} 次）` : ''}。` }),
+        ]),
+      ]));
+    } else if (recoveredGap && dismissedGapIdentity() !== connectionGapIdentity(recoveredGap)) {
+      const warning = el('article', { class: 'gift-ingestion-warning is-warning' });
+      const close = el('button', { class: 'gift-ingestion-warning-close', type: 'button', text: '关闭', ariaLabel: '关闭已恢复的礼物接收中断提醒' } as any) as HTMLButtonElement;
+      close.onclick = () => {
+        try {
+          globalThis.localStorage?.setItem('bilibili-live-gift-panel-dismissed-gap-v1', connectionGapIdentity(recoveredGap));
+        } catch {
+          // Local dismissal is optional when browser storage is unavailable.
+        }
+        render();
+      };
+      warning.append(
+        el('div', { class: 'gift-ingestion-warning-copy' }, [
+          el('strong', { text: '直播连接已恢复' }),
+          el('p', { text: `连接中断期间可能漏礼物。本次中断约 ${formatGapDuration(recoveredGap.durationMs)}，已重连 ${recoveredGap.attempts} 次。` }),
+        ]),
+        close,
+      );
+      warnings.append(warning);
+    }
+
+    const failureKind = runtimeStatus.ingestionErrorKind;
+    if (failureKind || runtimeStatus.transactionPending || runtimeStatus.inbox?.capacityError) {
+      const message = failureKind === 'inbox_persist'
+        ? '礼物收件箱暂时无法写入，新的礼物可能无法安全保存。'
+        : failureKind === 'inbox_durability'
+          ? '礼物已写入本地收件箱，但目录持久化未确认；程序会继续按顺序处理，请勿重复提交。'
+          : failureKind === 'inbox_capacity' || runtimeStatus.inbox?.capacityError
+            ? '礼物收件箱已满，新的礼物暂时无法安全保存。'
+            : failureKind === 'inbox_open'
+              ? '礼物收件箱暂时无法打开，新的礼物还不能安全保存。'
+              : failureKind === 'inbox_recovery'
+                ? '礼物收件箱正在恢复处理，请保持后台运行并等待恢复完成。'
+                : failureKind === 'transaction_recovery'
+                  ? '状态事务证据无法自动恢复，已暂停礼物接收和状态修改。请先导出运行日志，再重试恢复默认。'
+                  : failureKind === 'reset_failure'
+                    ? '恢复默认未能完整清理本地状态，礼物接收和状态修改保持暂停。请导出运行日志后重试。'
+                    : '礼物处理事务正在恢复，请保持程序运行并等待恢复完成。';
+      const recoveryBlocked = failureKind === 'transaction_recovery' || failureKind === 'reset_failure';
+      warnings.append(el('article', { class: 'gift-ingestion-warning is-danger', role: 'alert', ariaLabel: '礼物接收需要注意' } as any, [
+        el('div', { class: 'gift-ingestion-warning-copy' }, [
+          el('strong', { text: '礼物接收需要注意' }),
+          el('p', { text: message }),
+          ...(recoveryBlocked ? [el('a', { class: 'diagnostic-log-export', href: '/api/diagnostics/log', download: 'gift-panel-runtime.log', text: '导出运行日志' })] : []),
+        ]),
+      ]));
+    }
+
+    const inbox = runtimeStatus.inbox;
+    if (inbox && inbox.pendingCount > 0) {
+      const oldestWait = inbox.oldestPendingAt ? `，最早已等待 ${formatPendingWait(inbox.oldestPendingAt)}` : '';
+      warnings.append(el('article', { class: 'gift-ingestion-warning is-warning' }, [
+        el('div', { class: 'gift-ingestion-warning-copy' }, [
+          el('strong', { text: '礼物正在等待处理' }),
+          el('p', { text: `${inbox.pendingCount} 条礼物等待处理${oldestWait}。` }),
+        ]),
+      ]));
+    }
+    if (warnings.children.length > 0) host.append(warnings);
+  }
+
+  function dismissedGapIdentity(): string | null {
+    try {
+      return globalThis.localStorage?.getItem('bilibili-live-gift-panel-dismissed-gap-v1') ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function connectionGapIdentity(gap: { startedAt: number; endedAt?: number; attempts: number }): string {
+    return `${gap.startedAt}:${gap.endedAt ?? 0}:${gap.attempts}`;
+  }
+
+  function formatGapDuration(durationMs?: number): string {
+    const seconds = Math.max(1, Math.round((durationMs ?? 0) / 1000));
+    return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分钟`;
+  }
+
+  function formatPendingWait(timestamp: number): string {
+    const milliseconds = timestamp < 100_000_000_000 ? timestamp * 1000 : timestamp;
+    const seconds = Math.max(0, Math.floor((Date.now() - milliseconds) / 1000));
+    return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分钟`;
   }
 
   function switchConfigExperience(experience: AppState['settings']['configExperience']): void {
@@ -2892,6 +3007,31 @@ export function mountConfig(root: HTMLElement): void {
     };
     const valueInput = inputField('当前值', String(original?.value ?? 0));
     valueInput.inputMode = 'decimal';
+    const initialEditableValue = Number(valueInput.value);
+    let simulationDraftValue = Number.isFinite(initialEditableValue) ? initialEditableValue : 0;
+    let simulationGeneration = 0;
+    let activeSimulationPreview: HTMLElement | null = null;
+    const invalidateSimulationRequests = (): void => {
+      simulationGeneration += 1;
+      activeSimulationPreview?.replaceChildren();
+      activeSimulationPreview = null;
+    };
+    const beginSimulationRequest = (preview: HTMLElement): number => {
+      invalidateSimulationRequests();
+      activeSimulationPreview = preview;
+      return simulationGeneration;
+    };
+    const settleSimulationRequest = (preview: HTMLElement): void => {
+      if (activeSimulationPreview === preview) activeSimulationPreview = null;
+    };
+    const resetSimulationDraftFromInput = (): void => {
+      const nextValue = Number(valueInput.value);
+      simulationDraftValue = Number.isFinite(nextValue) ? nextValue : 0;
+      invalidateSimulationRequests();
+      for (const item of selected.values()) item.simulationPreview = undefined;
+      renderSelectedRules();
+      renderTimerRules();
+    };
     const formatSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
     formatSelect.innerHTML = '<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字 + 后缀</option>';
     formatSelect.value = original?.format ?? 'hhmmss';
@@ -2945,7 +3085,10 @@ export function mountConfig(root: HTMLElement): void {
       overviewPreviewName.textContent = previewAttribute.name;
       overviewPreviewValue.textContent = formatValue(previewAttribute.value, previewAttribute);
     };
-    valueInput.oninput = updateOverviewPreview;
+    valueInput.oninput = () => {
+      resetSimulationDraftFromInput();
+      updateOverviewPreview();
+    };
     suffixInput.oninput = updateOverviewPreview;
     const templateButton = el('button', {
       class: 'btn guide-overtime-template',
@@ -2955,6 +3098,7 @@ export function mountConfig(root: HTMLElement): void {
     templateButton.onclick = () => {
       nameInput.value = '加班时间';
       valueInput.value = '0';
+      resetSimulationDraftFromInput();
       formatSelect.value = 'hhmmss';
       suffixInput.value = '';
       if (!broadcastMessageInput.value.trim()) broadcastMessageInput.value = '感谢大家的支持，欢迎投喂礼物';
@@ -3173,6 +3317,7 @@ export function mountConfig(root: HTMLElement): void {
       const editor = el('article', { class: 'timer-rule-editor' });
       const removeButton = el('button', { class: 'rule-remove', type: 'button', text: '移除' }) as HTMLButtonElement;
       removeButton.onclick = () => {
+        invalidateSimulationRequests();
         const timerIndex = timerRules.findIndex((candidate) => candidate.id === rule.id);
         if (timerIndex >= 0) timerRules.splice(timerIndex, 1);
         editorTutorialProgress.timerCount = timerRules.length;
@@ -3249,8 +3394,7 @@ export function mountConfig(root: HTMLElement): void {
       const updatePreview = (completeLesson = false): void => {
         rule.formula = formulaInput.value;
         const name = nameInput.value.trim() || originalName || '属性';
-        const value = Number(valueInput.value);
-        const currentValue = Number.isFinite(value) ? value : 0;
+        const currentValue = simulationDraftValue;
         const condition = originalName && originalName !== name
           ? replaceFormulaVariable((rule.condition ?? '').trim(), originalName, name)
           : (rule.condition ?? '').trim();
@@ -3258,6 +3402,7 @@ export function mountConfig(root: HTMLElement): void {
           ? replaceFormulaVariable(rule.formula.trim(), originalName, name)
           : rule.formula.trim();
         const requestVersion = ++previewVersion;
+        const requestSimulationGeneration = completeLesson ? beginSimulationRequest(preview) : 0;
         preview.classList.remove('has-tutorial-confirmation');
         preview.replaceChildren(el('span', { text: '由后台计算预览…' }));
         void (async () => {
@@ -3268,7 +3413,9 @@ export function mountConfig(root: HTMLElement): void {
           return { skipped: false as const, result: await previewFormula(formula, name, currentValue, 'timer') };
         })().then(({ skipped, result }) => {
           if (requestVersion !== previewVersion) return;
+          if (completeLesson && requestSimulationGeneration !== simulationGeneration) return;
           if (skipped) {
+            if (completeLesson) settleSimulationRequest(preview);
             preview.replaceChildren(el('span', {
               text: completeLesson ? '当前条件不满足，本次未执行' : '当前条件不满足，本次会跳过',
             }));
@@ -3283,8 +3430,8 @@ export function mountConfig(root: HTMLElement): void {
             return;
           }
           if (completeLesson) {
-            valueInput.value = String(result);
-            updateOverviewPreview();
+            simulationDraftValue = result;
+            settleSimulationRequest(preview);
           }
           preview.replaceChildren(
             el('span', { text: `${completeLesson ? '已模拟执行' : '预览'}：${currentValue} → ` }),
@@ -3300,6 +3447,8 @@ export function mountConfig(root: HTMLElement): void {
           }
         }).catch((error) => {
           if (requestVersion !== previewVersion) return;
+          if (completeLesson && requestSimulationGeneration !== simulationGeneration) return;
+          if (completeLesson) settleSimulationRequest(preview);
           preview.replaceChildren(el('span', {
             class: 'error',
             text: error instanceof Error ? error.message : String(error),
@@ -3360,6 +3509,7 @@ export function mountConfig(root: HTMLElement): void {
       });
       editorTutorialProgress.timerCount = timerRules.length;
       editorTutorialProgress.timerPreviewed = false;
+      invalidateSimulationRequests();
       renderTimerRules();
       timerList.querySelector('.timer-rule-editor:last-child')?.scrollIntoView({ block: 'nearest' });
       refreshEditorTutorial(false);
@@ -3389,6 +3539,10 @@ export function mountConfig(root: HTMLElement): void {
     let modalFooter: HTMLElement | null = null;
     let confirmGiftSelectionButton: HTMLButtonElement | null = null;
     let giftPickerController: GiftPicker;
+    const removeSelectedGiftRule = (giftId: number): void => {
+      invalidateSimulationRequests();
+      selected.delete(giftId);
+    };
 
     const openGiftDrawer = (): void => {
       if (!giftDrawer.hidden) return;
@@ -3407,6 +3561,7 @@ export function mountConfig(root: HTMLElement): void {
         || giftSelectionSnapshot.size !== selected.size
         || Array.from(selected).some(([giftId, item]) => giftSelectionSnapshot?.get(giftId) !== item);
       if (!commit && giftSelectionSnapshot) {
+        invalidateSimulationRequests();
         selected.clear();
         for (const [giftId, item] of giftSelectionSnapshot) selected.set(giftId, item);
         giftPickerController.refreshSelection();
@@ -3429,7 +3584,7 @@ export function mountConfig(root: HTMLElement): void {
       isSelected: (gift) => selected.has(gift.id),
       onToggle: (gift, selectedNow) => {
         if (!selectedNow) {
-          selected.delete(gift.id);
+          removeSelectedGiftRule(gift.id);
           return;
         }
         const item: SelectedGiftRule = {
@@ -3444,6 +3599,7 @@ export function mountConfig(root: HTMLElement): void {
         void hydrateBlindBoxRule(item);
       },
       onSelectionChange: () => {
+        invalidateSimulationRequests();
         renderSelectedRules();
         renderGuide();
       },
@@ -3516,7 +3672,7 @@ export function mountConfig(root: HTMLElement): void {
       row.dataset.giftId = String(item.gift.id);
       const removeButton = el('button', { class: 'rule-remove', type: 'button', text: '移除' }) as HTMLButtonElement;
       removeButton.onclick = () => {
-        selected.delete(item.gift.id);
+        removeSelectedGiftRule(item.gift.id);
         editorTutorialProgress.giftCount = selected.size;
         editorTutorialProgress.giftPreviewed = false;
         giftPickerController.refreshSelection();
@@ -3584,19 +3740,20 @@ export function mountConfig(root: HTMLElement): void {
         preview.classList.remove('has-tutorial-confirmation');
         preview.replaceChildren();
         const name = nameInput.value.trim() || originalName || '属性';
-        const value = Number(valueInput.value);
         const formula = originalName && originalName !== name
           ? replaceFormulaVariable(item.formula.trim(), originalName, name)
           : item.formula.trim();
-        const currentValue = Number.isFinite(value) ? value : 0;
+        const currentValue = simulationDraftValue;
         const requestVersion = ++previewVersion;
+        const requestSimulationGeneration = completeLesson ? beginSimulationRequest(preview) : 0;
         preview.append(el('span', { text: '由后台计算预览…' }));
         void previewFormula(formula, name, currentValue, 'gift', item.gift.price).then((result) => {
           if (requestVersion !== previewVersion) return;
+          if (completeLesson && requestSimulationGeneration !== simulationGeneration) return;
           if (completeLesson) {
-            valueInput.value = String(result);
+            simulationDraftValue = result;
             item.simulationPreview = { currentValue, result };
-            updateOverviewPreview();
+            settleSimulationRequest(preview);
           }
           let awaitingConfirmation = false;
           if (completeLesson) awaitingConfirmation = renderSimulationPreview();
@@ -3610,6 +3767,8 @@ export function mountConfig(root: HTMLElement): void {
           }
         }).catch((error) => {
           if (requestVersion !== previewVersion) return;
+          if (completeLesson && requestSimulationGeneration !== simulationGeneration) return;
+          if (completeLesson) settleSimulationRequest(preview);
           preview.replaceChildren(
             el('span', { class: 'error', text: error instanceof Error ? error.message : String(error) }),
           );
@@ -3759,9 +3918,10 @@ export function mountConfig(root: HTMLElement): void {
     const manualGift = renderManualGiftAdder(() => {
       pickerCatalog = buildGiftPickerCatalog(state, roomGiftCatalog);
       giftPickerController.setCatalog(pickerCatalog);
+      invalidateSimulationRequests();
       renderSelectedRules();
       renderGuide();
-    }, selected, defaultFormula, (item) => { void hydrateBlindBoxRule(item); });
+    }, selected, defaultFormula, (item) => { void hydrateBlindBoxRule(item); }, invalidateSimulationRequests);
 
     const cancelGiftSelectionButton = el('button', {
       class: 'btn ghost',
@@ -4016,6 +4176,7 @@ export function mountConfig(root: HTMLElement): void {
     refreshOpenGiftCatalog = () => {
       pickerCatalog = buildGiftPickerCatalog(state, roomGiftCatalog);
       giftPickerController.setCatalog(pickerCatalog);
+      invalidateSimulationRequests();
       renderSelectedRules();
     };
     renderSelectedRules();
@@ -4030,6 +4191,7 @@ export function mountConfig(root: HTMLElement): void {
     selected: Map<number, SelectedGiftRule>,
     defaultFormula: () => string,
     hydrateBlindBoxRule?: (item: SelectedGiftRule) => void,
+    onReplacingSelectedGift?: () => void,
   ): HTMLElement {
     const details = el('details', { class: 'manual-gift-adder' });
     details.append(el('summary', { text: '找不到礼物？按 ID 手动添加' }));
@@ -4063,6 +4225,7 @@ export function mountConfig(root: HTMLElement): void {
         quickOperation: 'price',
         quickAmount: 60,
       };
+      if (selected.has(id)) onReplacingSelectedGift?.();
       selected.set(id, item);
       hydrateBlindBoxRule?.(item);
       save();
@@ -4766,10 +4929,16 @@ export function mountConfig(root: HTMLElement): void {
       title: '导出连接、礼物解析和盲盒识别日志',
     }) as HTMLAnchorElement;
     const resetButton = el('button', { class: 'btn text-danger', type: 'button', text: '恢复默认' }) as HTMLButtonElement;
-    resetButton.onclick = () => {
+    resetButton.onclick = async () => {
       if (!confirm('确定恢复默认设置？当前配置将被清除。')) return;
-      resetState();
-      location.reload();
+      resetButton.disabled = true;
+      try {
+        await resetState();
+        location.reload();
+      } catch {
+        resetButton.disabled = false;
+        alert('恢复默认失败，请重试或先导出运行日志。');
+      }
     };
     dataCard.append(
       el('div', { class: 'data-actions' }, [exportButton, importButton, diagnosticLogLink, importInput, resetButton]),

@@ -22,6 +22,14 @@ go test ./...
 
 `npm run build` 会构建前端并编译本地服务，产物为 `dist/gift-panel.exe`。EXE 已内嵌前端页面和代理服务，主播电脑不需要安装 Node.js 或 Go。
 
+## 礼物动画回放
+
+送礼记录中的 GIF、动态 WebP 和完整礼物特效都可以剪裁并导出为固定 30 FPS 的 H.264 MP4。输入素材不必预先转换成 30 FPS：程序会根据 GIF、WebP 或特效视频自身的帧时间进行采样，保持两秒素材等时间轴上的动作顺序。
+
+Windows 导出会优先使用硬件编码；设备或驱动不兼容时会自动切换到软件兼容模式。首次导出时，程序会在当前用户的 LocalAppData 缓存中校验并准备 EXE 内嵌的最小 FFmpeg 编码组件，用户不需要安装 FFmpeg，也不需要配置 PATH。
+
+内嵌组件基于未经修改的 FFmpeg 9.0 最小构建，遵循 LGPL 2.1 或更高版本。发布材料同时提供[再分发说明](third_party/ffmpeg/NOTICE.md)、[LGPL 2.1 许可证](third_party/ffmpeg/COPYING.LGPLv2.1)、[对应的 FFmpeg 9.0 源码](https://ffmpeg.org/releases/ffmpeg-9.0.tar.xz)及其签名。
+
 ## 发布与自动更新
 
 正式版本使用 `vMAJOR.MINOR.PATCH` 标签发布，且标签必须与 `package.json` 中的版本一致。例如：

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -70,6 +71,10 @@ func handleBlindBoxInfo(login *loginManager) http.HandlerFunc {
 }
 
 func fetchBlindBoxInfo(giftID int, session biliSession) (*blindBoxInfo, bool, error) {
+	return fetchBlindBoxInfoContext(context.Background(), giftID, session)
+}
+
+func fetchBlindBoxInfoContext(ctx context.Context, giftID int, session biliSession) (*blindBoxInfo, bool, error) {
 	blindBoxCache.Lock()
 	entry, cached := blindBoxCache.entries[giftID]
 	blindBoxCache.Unlock()
@@ -82,7 +87,7 @@ func fetchBlindBoxInfo(giftID int, session biliSession) (*blindBoxInfo, bool, er
 	if strings.TrimSpace(session.CookieHeader) != "" {
 		headers["Cookie"] = session.CookieHeader
 	}
-	payload, err := fetchJSON(endpoint, headers)
+	payload, err := fetchJSONContext(ctx, endpoint, headers)
 	if err != nil {
 		return nil, false, err
 	}

@@ -9,6 +9,8 @@ import (
 	"unicode"
 )
 
+var formulaRandomIntn = rand.Intn
+
 type formulaToken struct {
 	kind  string
 	value string
@@ -172,7 +174,7 @@ func (n callNode) evaluate(env map[string]float64) (float64, error) {
 		if high < low {
 			return 0, fmt.Errorf("RANDBETWEEN 最小值不能大于最大值")
 		}
-		return float64(low + rand.Intn(high-low+1)), nil
+		return float64(low + formulaRandomIntn(high-low+1)), nil
 	default:
 		return 0, fmt.Errorf("未知函数 %q", n.name)
 	}

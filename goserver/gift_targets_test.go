@@ -59,7 +59,7 @@ func TestGiftTargetConfigPatchPreservesBackendProgress(t *testing.T) {
 	}
 }
 
-func TestGiftTargetProgressWritesOnlyHistoryShard(t *testing.T) {
+func TestGiftTargetProgressCommitsAllTransactionShards(t *testing.T) {
 	store := newGiftTargetTestStore(t)
 	oldTime := time.Unix(1_700_000_000, 0)
 	if err := os.Chtimes(store.path, oldTime, oldTime); err != nil {
@@ -75,8 +75,8 @@ func TestGiftTargetProgressWritesOnlyHistoryShard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !configInfo.ModTime().Equal(oldTime) {
-		t.Fatalf("runtime progress rewrote config shard at %v", configInfo.ModTime())
+	if configInfo.ModTime().Equal(oldTime) {
+		t.Fatal("runtime progress did not commit the config transaction shard")
 	}
 	configData, err := os.ReadFile(store.path)
 	if err != nil {

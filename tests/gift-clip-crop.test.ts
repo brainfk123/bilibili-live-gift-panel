@@ -31,27 +31,27 @@ describe('gift clip crop geometry', () => {
     {
       handle: 'n',
       minimumAt64: [0, 1], minimumAt63: [0, 2],
-      minimumExpected: { x: 1000, y: 1001, width: 65, height: 64 },
-      maximumAt4096: [0, -1], maximumAt4097: [0, -2],
-      maximumExpected: { x: 3000, y: 2999, width: 4095, height: 4096 },
+      minimumExpected: { x: 1000, y: 1000, width: 64, height: 64 },
+      maximumAt4096: [0, -2], maximumAt4097: [0, -3],
+      maximumExpected: { x: 3000, y: 2998, width: 4094, height: 4096 },
       sourceEdgeDelta: [0, -9999],
       sourceEdgeExpected: { x: 2000, y: 0, width: 512, height: 2512 },
     },
     {
       handle: 'ne',
       minimumAt64: [-1, 1], minimumAt63: [-2, 2],
-      minimumExpected: { x: 1000, y: 1001, width: 64, height: 64 },
-      maximumAt4096: [1, -1], maximumAt4097: [2, -2],
-      maximumExpected: { x: 3000, y: 2999, width: 4096, height: 4096 },
+      minimumExpected: { x: 1000, y: 1000, width: 64, height: 64 },
+      maximumAt4096: [2, -2], maximumAt4097: [3, -3],
+      maximumExpected: { x: 3000, y: 2998, width: 4096, height: 4096 },
       sourceEdgeDelta: [9999, -9999],
       sourceEdgeExpected: { x: 2000, y: 0, width: 3000, height: 2512 },
     },
     {
       handle: 'e',
       minimumAt64: [-1, 0], minimumAt63: [-2, 0],
-      minimumExpected: { x: 1000, y: 1000, width: 64, height: 65 },
-      maximumAt4096: [1, 0], maximumAt4097: [2, 0],
-      maximumExpected: { x: 3000, y: 3000, width: 4096, height: 4095 },
+      minimumExpected: { x: 1000, y: 1000, width: 64, height: 64 },
+      maximumAt4096: [2, 0], maximumAt4097: [3, 0],
+      maximumExpected: { x: 3000, y: 3000, width: 4096, height: 4094 },
       sourceEdgeDelta: [9999, 0],
       sourceEdgeExpected: { x: 2000, y: 2000, width: 3000, height: 512 },
     },
@@ -59,7 +59,7 @@ describe('gift clip crop geometry', () => {
       handle: 'se',
       minimumAt64: [-1, -1], minimumAt63: [-2, -2],
       minimumExpected: { x: 1000, y: 1000, width: 64, height: 64 },
-      maximumAt4096: [1, 1], maximumAt4097: [2, 2],
+      maximumAt4096: [2, 2], maximumAt4097: [3, 3],
       maximumExpected: { x: 3000, y: 3000, width: 4096, height: 4096 },
       sourceEdgeDelta: [9999, 9999],
       sourceEdgeExpected: { x: 2000, y: 2000, width: 3000, height: 3000 },
@@ -67,36 +67,36 @@ describe('gift clip crop geometry', () => {
     {
       handle: 's',
       minimumAt64: [0, -1], minimumAt63: [0, -2],
-      minimumExpected: { x: 1000, y: 1000, width: 65, height: 64 },
-      maximumAt4096: [0, 1], maximumAt4097: [0, 2],
-      maximumExpected: { x: 3000, y: 3000, width: 4095, height: 4096 },
+      minimumExpected: { x: 1000, y: 1000, width: 64, height: 64 },
+      maximumAt4096: [0, 2], maximumAt4097: [0, 3],
+      maximumExpected: { x: 3000, y: 3000, width: 4094, height: 4096 },
       sourceEdgeDelta: [0, 9999],
       sourceEdgeExpected: { x: 2000, y: 2000, width: 512, height: 3000 },
     },
     {
       handle: 'sw',
       minimumAt64: [1, -1], minimumAt63: [2, -2],
-      minimumExpected: { x: 1001, y: 1000, width: 64, height: 64 },
-      maximumAt4096: [-1, 1], maximumAt4097: [-2, 2],
-      maximumExpected: { x: 2999, y: 3000, width: 4096, height: 4096 },
+      minimumExpected: { x: 1000, y: 1000, width: 64, height: 64 },
+      maximumAt4096: [-2, 2], maximumAt4097: [-3, 3],
+      maximumExpected: { x: 2998, y: 3000, width: 4096, height: 4096 },
       sourceEdgeDelta: [-9999, 9999],
       sourceEdgeExpected: { x: 0, y: 2000, width: 2512, height: 3000 },
     },
     {
       handle: 'w',
       minimumAt64: [1, 0], minimumAt63: [2, 0],
-      minimumExpected: { x: 1001, y: 1000, width: 64, height: 65 },
-      maximumAt4096: [-1, 0], maximumAt4097: [-2, 0],
-      maximumExpected: { x: 2999, y: 3000, width: 4096, height: 4095 },
+      minimumExpected: { x: 1000, y: 1000, width: 64, height: 64 },
+      maximumAt4096: [-2, 0], maximumAt4097: [-3, 0],
+      maximumExpected: { x: 2998, y: 3000, width: 4096, height: 4094 },
       sourceEdgeDelta: [-9999, 0],
       sourceEdgeExpected: { x: 0, y: 2000, width: 2512, height: 512 },
     },
     {
       handle: 'nw',
       minimumAt64: [1, 1], minimumAt63: [2, 2],
-      minimumExpected: { x: 1001, y: 1001, width: 64, height: 64 },
-      maximumAt4096: [-1, -1], maximumAt4097: [-2, -2],
-      maximumExpected: { x: 2999, y: 2999, width: 4096, height: 4096 },
+      minimumExpected: { x: 1000, y: 1000, width: 64, height: 64 },
+      maximumAt4096: [-2, -2], maximumAt4097: [-3, -3],
+      maximumExpected: { x: 2998, y: 2998, width: 4096, height: 4096 },
       sourceEdgeDelta: [-9999, -9999],
       sourceEdgeExpected: { x: 0, y: 0, width: 2512, height: 2512 },
     },
@@ -120,6 +120,46 @@ describe('gift clip crop geometry', () => {
       .toEqual(expected[handle]);
   });
 
+  it('normalizes output dimensions to even pixels without quantizing position', () => {
+    const normalized = giftClipCropFromPixels(
+      { x: 101, y: 53, width: 641, height: 359 },
+      1200,
+      800,
+    );
+    expect(giftClipCropToPixels(normalized, 1200, 800))
+      .toEqual({ x: 101, y: 53, width: 640, height: 358 });
+
+    const moved = updateGiftClipCrop(normalized, 'move', 1, 1, 1200, 800);
+    expect(giftClipCropToPixels(moved, 1200, 800))
+      .toEqual({ x: 102, y: 54, width: 640, height: 358 });
+  });
+
+  it('keeps the opposite resize edge fixed while dropping an odd pixel', () => {
+    const initial = giftClipCropFromPixels(
+      { x: 100, y: 100, width: 640, height: 360 },
+      1200,
+      800,
+    );
+    expect(giftClipCropToPixels(updateGiftClipCrop(initial, 'w', -1, 0, 1200, 800), 1200, 800))
+      .toEqual({ x: 100, y: 100, width: 640, height: 360 });
+    expect(giftClipCropToPixels(updateGiftClipCrop(initial, 'e', 1, 0, 1200, 800), 1200, 800))
+      .toEqual({ x: 100, y: 100, width: 640, height: 360 });
+  });
+
+  it('keeps output dimensions even for every resize handle', () => {
+    const initial = giftClipCropFromPixels(
+      { x: 100, y: 100, width: 640, height: 360 },
+      1200,
+      800,
+    );
+
+    for (const handle of ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw'] as const) {
+      const pixels = giftClipCropToPixels(updateGiftClipCrop(initial, handle, 17, 19, 1200, 800), 1200, 800);
+      expect(pixels.width % 2).toBe(0);
+      expect(pixels.height % 2).toBe(0);
+    }
+  });
+
   it('defaults damaged values to the full source and clamps valid values inside it', () => {
     expect(defaultGiftClipCrop()).toEqual({ x: 0, y: 0, width: 1, height: 1 });
     expect(normalizeGiftClipCrop({ x: Number.NaN, y: 0, width: 1, height: 1 })).toEqual(defaultGiftClipCrop());
@@ -134,7 +174,7 @@ describe('gift clip crop geometry', () => {
 
   it('shifts or expands the independently rounded rectangle at source edges', () => {
     expect(giftClipCropToPixels({ x: .5, y: .5, width: .5, height: .5 }, 201, 201))
-      .toEqual({ x: 100, y: 100, width: 101, height: 101 });
+      .toEqual({ x: 101, y: 101, width: 100, height: 100 });
     expect(giftClipCropToPixels({ x: .99, y: .99, width: .01, height: .01 }, 101, 101))
       .toEqual({ x: 37, y: 37, width: 64, height: 64 });
   });
