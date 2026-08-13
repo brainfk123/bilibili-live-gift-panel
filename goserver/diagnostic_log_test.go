@@ -46,13 +46,13 @@ func TestDiagnosticLoggerPreservesBlindBoxLeaderboardReadFailureEvent(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	logger.Error("blind_box_leaderboard_read_failed", "error", errors.New("invalid configuration"))
+	logger.Error("blind_box_leaderboard_read_failed", "error_kind", "config_decode")
 
 	data, err := os.ReadFile(logger.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text := string(data); !strings.Contains(text, "blind_box_leaderboard_read_failed") {
+	if text := string(data); !strings.Contains(text, "blind_box_leaderboard_read_failed") || !strings.Contains(text, `error_kind="config_decode"`) {
 		t.Fatalf("leaderboard failure event was not retained: %s", text)
 	}
 }

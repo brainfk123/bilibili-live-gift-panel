@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -88,6 +90,43 @@ func TestBlindBoxLeaderboardHTTPAcceptsZeroLimitWithoutTruncatingSummary(t *test
 	}
 }
 
+func TestBlindBoxLeaderboardHTTPAcceptsMaximumLimitAndCombinedQuery(t *testing.T) {
+	store := blindBoxLeaderboardHTTPStore(t, contributionLedgerState{
+		Viewers: []viewerContribution{
+			{Key: "uid:1", UID: 1, Uname: "甲", BlindBoxCount: 2, BlindBoxCost: 100, BlindBoxValue: 240, BlindBoxes: []blindBoxContribution{{GiftID: 7, GiftName: "盲盒七", Count: 2, Cost: 100, Value: 240}}, LastGiftAt: 1700000000000},
+			{Key: "uid:2", UID: 2, Uname: "乙", BlindBoxCount: 1, BlindBoxCost: 100, BlindBoxValue: 40, BlindBoxes: []blindBoxContribution{{GiftID: 7, GiftName: "盲盒七", Count: 1, Cost: 100, Value: 40}}, LastGiftAt: 1700000001000},
+		},
+	})
+	for _, test := range []struct {
+		name          string
+		query         string
+		wantViewerIDs []int64
+	}{
+		{name: "maximum limit", query: "?limit=2000", wantViewerIDs: []int64{1, 2}},
+		{name: "gift and limit", query: "?giftId=7&limit=1", wantViewerIDs: []int64{1}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handleBlindBoxLeaderboard(store, nil)(response, httptest.NewRequest(http.MethodGet, "/api/blind-box/leaderboard"+test.query, nil))
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+			payload := decodeBlindBoxLeaderboardHTTPResponse(t, response)
+			if got, want := payload.Leaderboard.Summary, (blindBoxLeaderboardSummary{ViewerCount: 2, BlindBoxCount: 3, Cost: 200, Value: 280, Profit: 80}); got != want {
+				t.Fatalf("summary = %#v, want %#v", got, want)
+			}
+			if len(payload.Leaderboard.Viewers) != len(test.wantViewerIDs) {
+				t.Fatalf("viewers = %#v, want %d", payload.Leaderboard.Viewers, len(test.wantViewerIDs))
+			}
+			for index, want := range test.wantViewerIDs {
+				if got := payload.Leaderboard.Viewers[index].UID; got != want {
+					t.Fatalf("viewer[%d].uid = %d, want %d", index, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestBlindBoxLeaderboardHTTPRejectsInvalidQueries(t *testing.T) {
 	store := blindBoxLeaderboardHTTPStore(t, contributionLedgerState{})
 	for _, query := range []string{
@@ -166,8 +205,54 @@ func TestBlindBoxLeaderboardHTTPHidesStoreErrorsAndRecordsCause(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(log), "blind_box_leaderboard_read_failed") || !strings.Contains(string(log), `error_kind="read"`) {
-		t.Fatalf("diagnostic event missing: %s", log)
+	if text := string(log); !strings.Contains(text, "blind_box_leaderboard_read_failed") || !strings.Contains(text, `error_kind="config_decode"`) {
+		t.Fatalf("diagnostic event/category missing: %s", log)
+	} else if strings.Contains(text, configPath) || strings.Contains(text, "invalid character") || strings.Contains(text, "{invalid json") {
+		t.Fatalf("diagnostic log leaked read cause: %s", text)
+	}
+}
+
+func TestBlindBoxLeaderboardReadErrorKindUsesSafeCategories(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "config decode", err: &json.SyntaxError{}, want: "config_decode"},
+		{name: "unsupported version", err: &unsupportedStateVersionError{Shard: "主配置", Version: 999}, want: "unsupported_version"},
+		{name: "filesystem read", err: &fs.PathError{Op: "read", Path: "private", Err: fs.ErrPermission}, want: "filesystem_read"},
+		{name: "other read", err: errors.New("private cause"), want: "read"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := blindBoxLeaderboardReadErrorKind(test.err); got != test.want {
+				t.Fatalf("error kind = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestBlindBoxLeaderboardHTTPRegistersMuxRouteWithoutReplacingMetadataRoute(t *testing.T) {
+	store := blindBoxLeaderboardHTTPStore(t, contributionLedgerState{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/blind-box", handleBlindBoxInfo(nil))
+	registerBlindBoxLeaderboardRoute(mux, store, nil)
+
+	leaderboard := httptest.NewRecorder()
+	mux.ServeHTTP(leaderboard, httptest.NewRequest(http.MethodGet, "/api/blind-box/leaderboard", nil))
+	if leaderboard.Code != http.StatusOK {
+		t.Fatalf("leaderboard status = %d, body = %s", leaderboard.Code, leaderboard.Body.String())
+	}
+	if got := decodeBlindBoxLeaderboardHTTPResponse(t, leaderboard).Code; got != 0 {
+		t.Fatalf("leaderboard code = %d, want 0", got)
+	}
+
+	metadata := httptest.NewRecorder()
+	mux.ServeHTTP(metadata, httptest.NewRequest(http.MethodGet, "/api/blind-box", nil))
+	if metadata.Code != http.StatusBadRequest {
+		t.Fatalf("metadata status = %d, body = %s", metadata.Code, metadata.Body.String())
+	}
+	if got := decodeBlindBoxLeaderboardHTTPError(t, metadata); got != (blindBoxLeaderboardHTTPError{Code: -1, Message: "礼物 ID 无效"}) {
+		t.Fatalf("metadata error = %#v", got)
 	}
 }
 

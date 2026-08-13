@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
+	"io/fs"
 	"net/http"
 	"strconv"
 )
@@ -24,7 +27,7 @@ func handleBlindBoxLeaderboard(store *configStore, diagnostics *diagnosticLogger
 		state, err := store.readState()
 		if err != nil {
 			if diagnostics != nil {
-				diagnostics.Error("blind_box_leaderboard_read_failed", "error", err, "error_kind", "read")
+				diagnostics.Error("blind_box_leaderboard_read_failed", "error_kind", blindBoxLeaderboardReadErrorKind(err))
 			}
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"code": -1, "message": "排行榜读取失败，请重试。",
@@ -37,6 +40,30 @@ func handleBlindBoxLeaderboard(store *configStore, diagnostics *diagnosticLogger
 			"code": 0, "leaderboard": buildBlindBoxLeaderboard(state.Contributions, query),
 		})
 	}
+}
+
+func registerBlindBoxLeaderboardRoute(mux *http.ServeMux, store *configStore, diagnostics *diagnosticLogger) {
+	mux.HandleFunc("/api/blind-box/leaderboard", handleBlindBoxLeaderboard(store, diagnostics))
+}
+
+func blindBoxLeaderboardReadErrorKind(err error) string {
+	var unsupported *unsupportedStateVersionError
+	if errors.As(err, &unsupported) {
+		return "unsupported_version"
+	}
+	var syntax *json.SyntaxError
+	if errors.As(err, &syntax) {
+		return "config_decode"
+	}
+	var typeError *json.UnmarshalTypeError
+	if errors.As(err, &typeError) {
+		return "config_decode"
+	}
+	var pathError *fs.PathError
+	if errors.As(err, &pathError) {
+		return "filesystem_read"
+	}
+	return "read"
 }
 
 func parseBlindBoxLeaderboardQuery(r *http.Request) (blindBoxLeaderboardQuery, error) {
