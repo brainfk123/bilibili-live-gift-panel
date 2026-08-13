@@ -61,6 +61,20 @@ describe('formula presets', () => {
 
     expect(applyFormulaPreset(preset, '欢乐值')).toBe('欢乐值+加班时间上限+price');
     expect(replaceFormulaVariable('积分+总积分+积分_2', '积分', '能量')).toBe('能量+总积分+积分_2');
+    expect(replaceFormulaVariable('用户身份>=舰长', '积分', '能量')).toBe('用户身份>=舰长');
+    expect(replaceFormulaVariable('IF(用户身份>=舰长,积分+1,积分)', '积分', '能量'))
+      .toBe('IF(用户身份>=舰长,能量+1,能量)');
+  });
+
+  it('rejects system formula names as preset sources when saving or applying', () => {
+    expect(() => saveFormulaPreset([], {
+      name: '身份规则',
+      context: 'gift',
+      formula: '用户身份+1',
+      sourceAttributeName: '用户身份',
+    })).toThrow('系统公式名称不能作为预设来源属性');
+    expect(() => applyFormulaPreset({ ...giftPreset, sourceAttributeName: '舰长' }, '欢乐值'))
+      .toThrow('系统公式名称不能作为预设来源属性');
   });
 
   it('rejects empty preset fields', () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  calculateSimplePlayManagedFingerprint,
   getSimplePlayAttribute,
   isSimplePlayConfigurationIntact,
   planSimplePlayTransition,
@@ -150,6 +151,23 @@ describe('simple play transitions', () => {
     }));
     expect(plan.nextState.formulaPresets.some((preset) => preset.id === 'old-preset')).toBe(false);
     expect(isSimplePlayConfigurationIntact(plan.nextState)).toBe(true);
+  });
+
+  it('tracks and cleans gift rules that reference the managed attribute only through a condition', () => {
+    const created = planSimplePlayTransition(stateWithCatalog(), draft('overtime')).nextState;
+    const managed = getSimplePlayAttribute(created)!;
+    const fingerprint = calculateSimplePlayManagedFingerprint(created, managed.id!);
+    const dependentRule = {
+      id: 'condition-dependent-rule', giftId: 5, attributeName: '积分',
+      condition: `用户身份>=${managed.name}`, formula: '积分+1',
+    };
+    created.attributes.unshift({ id: 'advanced-score', name: '积分', value: 10, unit: 'none', format: 'number', decimals: 0, suffix: '' });
+    created.rules.push(dependentRule);
+
+    expect(calculateSimplePlayManagedFingerprint(created, managed.id!)).not.toBe(fingerprint);
+
+    const plan = planSimplePlayTransition(created, draft('counter'));
+    expect(plan.nextState.rules.some((rule) => rule.id === dependentRule.id)).toBe(false);
   });
 
   it('detects advanced edits to managed formulas without treating live value changes as drift', () => {

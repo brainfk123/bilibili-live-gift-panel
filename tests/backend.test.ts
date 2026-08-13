@@ -12,6 +12,7 @@ import {
   getUpdateStatus,
   logoutBiliAuth,
   pollBiliQRCodeLogin,
+  previewGiftRule,
   resetGiftTargetProgress,
   startBiliQRCodeLogin,
   startPagePresence,
@@ -67,6 +68,70 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void; reject(r
   });
   return { promise, resolve, reject };
 }
+
+describe('gift rule preview API', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('posts the gift condition and identity context and returns the trigger result', async () => {
+    const fetchMock = vi.fn(async () => Response.json({ code: 0, triggered: true, result: 1 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(previewGiftRule({
+      condition: '用户身份>=舰长',
+      formula: '积分+1',
+      attributeName: '积分',
+      attributeValue: 0,
+      giftPrice: 5200,
+      userIdentity: 2,
+    })).resolves.toEqual({ triggered: true, result: 1 });
+    expect(fetchMock).toHaveBeenCalledWith('/api/formula/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        condition: '用户身份>=舰长',
+        formula: '积分+1',
+        attributeName: '积分',
+        attributeValue: 0,
+        context: 'gift',
+        giftPrice: 5200,
+        userIdentity: 2,
+      }),
+    });
+  });
+
+  it('defaults omitted condition and identity to an ordinary user', async () => {
+    let request: RequestInit | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      request = init;
+      return Response.json({ code: 0, triggered: true, result: 3 });
+    }));
+
+    await previewGiftRule({ formula: '积分+1', attributeName: '积分', attributeValue: 2 });
+
+    expect(JSON.parse(request?.body as string)).toEqual({
+      condition: '', formula: '积分+1', attributeName: '积分', attributeValue: 2, context: 'gift', userIdentity: 0,
+    });
+  });
+
+  it.each([
+    { code: 0, result: 1 },
+    { code: 0, triggered: 'true', result: 1 },
+    { code: 0, triggered: true },
+    { code: 0, triggered: true, result: Number.POSITIVE_INFINITY },
+  ])('rejects malformed preview responses: %o', async (payload) => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(payload)));
+
+    await expect(previewGiftRule({ formula: '积分+1', attributeName: '积分', attributeValue: 0 }))
+      .rejects.toThrow('规则计算失败：HTTP 200');
+  });
+
+  it('preserves the backend error message', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ code: -1, message: '条件表达式无效' }, { status: 400 })));
+
+    await expect(previewGiftRule({ formula: '积分+1', attributeName: '积分', attributeValue: 0 }))
+      .rejects.toThrow('条件表达式无效');
+  });
+});
 
 describe('blind box leaderboard API', () => {
   afterEach(() => vi.unstubAllGlobals());

@@ -109,7 +109,7 @@ export function calculateSimplePlayManagedFingerprint(state: AppState, attribute
       } : {}),
     },
     rules: state.rules
-      .filter((rule) => referencesAttribute(attributeName, rule.attributeName, rule.formula))
+      .filter((rule) => referencesAttribute(attributeName, rule.attributeName, rule.formula, rule.condition))
       .map((rule) => ({ ...rule, enabled: undefined })),
     timerRules: state.timerRules
       .filter((rule) => referencesAttribute(attributeName, rule.attributeName, rule.formula, rule.condition))
@@ -427,7 +427,7 @@ function emptyManagedCleanup(state: AppState): ManagedCleanup {
 function cleanManagedReferences(state: AppState, attribute: Attribute): ManagedCleanup {
   const name = attribute.name;
   const attributes = state.attributes.filter((candidate) => candidate !== attribute);
-  const rules = state.rules.filter((rule) => !referencesAttribute(name, rule.attributeName, rule.formula));
+  const rules = state.rules.filter((rule) => !referencesAttribute(name, rule.attributeName, rule.formula, rule.condition));
   const timerRules = state.timerRules.filter((rule) => !referencesAttribute(name, rule.attributeName, rule.formula, rule.condition));
 
   let displayScenesUpdated = 0;

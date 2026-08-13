@@ -140,6 +140,7 @@ export interface GiftRule {
   giftId: number;
   attributeName: string;
   formulaName?: string;
+  condition?: string;
   formula: string;
   enabled?: boolean;
   /** The parent gift and exploded gifts matched by this rule. */

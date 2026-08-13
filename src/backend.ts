@@ -1,4 +1,5 @@
 import type { ActivitySession, ContributionLedger, GiftInfo, GiftReceipt, ViewerContribution } from './types';
+import type { GiftUserIdentity } from './gift-rule-conditions';
 import type { ActivityTransitionAction } from './activities';
 import { normalizeChangelogReleases, type ChangelogRelease } from './changelog';
 import type { GiftTargetProgressSnapshot } from './gift-targets';
@@ -99,6 +100,13 @@ interface RuntimeResponse {
 
 interface FormulaPreviewResponse {
   code: number;
+  result?: number;
+  message?: string;
+}
+
+interface GiftRulePreviewResponse {
+  code: number;
+  triggered?: boolean;
   result?: number;
   message?: string;
 }
@@ -391,6 +399,39 @@ export async function previewFormula(
     throw new Error(payload.message || `规则计算失败：HTTP ${response.status}`);
   }
   return payload.result;
+}
+
+export interface GiftRulePreview {
+  triggered: boolean;
+  result: number;
+}
+
+export async function previewGiftRule(options: {
+  condition?: string;
+  formula: string;
+  attributeName: string;
+  attributeValue: number;
+  giftPrice?: number;
+  userIdentity?: GiftUserIdentity;
+}): Promise<GiftRulePreview> {
+  const response = await fetch('/api/formula/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      condition: options.condition ?? '',
+      formula: options.formula,
+      attributeName: options.attributeName,
+      attributeValue: options.attributeValue,
+      context: 'gift',
+      giftPrice: options.giftPrice,
+      userIdentity: options.userIdentity ?? 0,
+    }),
+  });
+  const payload = await response.json() as GiftRulePreviewResponse;
+  if (!response.ok || payload.code !== 0 || typeof payload.triggered !== 'boolean' || !isFiniteNumber(payload.result)) {
+    throw new Error(payload.message || `规则计算失败：HTTP ${response.status}`);
+  }
+  return { triggered: payload.triggered, result: payload.result };
 }
 
 export async function getBlindBoxInfo(giftId: number): Promise<BlindBoxLookup> {
