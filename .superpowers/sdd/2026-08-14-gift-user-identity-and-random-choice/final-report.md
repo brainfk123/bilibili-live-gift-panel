@@ -10,21 +10,115 @@
 
 ## Prior RED → GREEN evidence
 
-Every item below is transcribed from Task 1–4 reports and their briefs. “Duration not recorded” means the original task report did not record one; it is not reconstructed here.
+Each cycle uses exact report wording where captured. `retrospective fixed-base reproduction` means the original report lacked test stdout, so the exact command was replayed in an isolated temporary detached worktree at the parent commit with only the corresponding final test restored; it never modified this branch. Original GREEN durations that were not preserved are explicitly marked, not invented.
 
-- **Task 1 identity:** RED `cd goserver; go test ./... -run 'TestGiftIdentityLevel|TestBuildGiftFormulaEnvironment|TestReservedFormulaNames' -count=1` exited 1: `giftIdentityLevel`, both environment builders, `giftIdentityCaptain`, and `isReservedFormulaName` did not exist. GREEN repeated that exact command, exit 0, `ok bilibili-live-gift-panel`; focused-command duration not recorded. Recorded focused verification: `go test ./... -run 'TestGiftIdentity|TestBuildGiftFormulaEnvironment|TestReservedFormulaNames|TestFormulaRandomChoice|TestPendingStateTransactionRecoversGiftFormulaRandomResultWithoutReevaluation' -count=20` passed in 2.144s.
-- **Task 1 `RANDOMCHOICE`:** RED `cd goserver; go test ./... -run 'TestFormulaRandomChoice' -count=1` exited 1, `未知函数 "RANDOMCHOICE"`. GREEN repeated that exact command, exit 0, `ok bilibili-live-gift-panel`; duration not recorded. Recorded race focus `go test -race ./... -run 'TestFormulaRandomChoice|TestPendingStateTransactionRecoversGiftFormulaRandomResultWithoutReevaluation' -count=5` passed in 3.050s.
-- **Task 2 runtime:** RED `cd goserver; go test ./... -run 'TestApplyGiftEvent.*Identity|TestApplyGiftEventReevaluatesCondition|TestApplyGiftEventSkipsInvalidCondition|TestApplyGiftEventCombinesIdentityConditionAndRandomChoice' -count=1` exited 1, `unknown field Condition in struct literal of type giftRule`. GREEN repeated that command and `go test ./... -run 'TestApplyGiftEvent' -count=10`; both passed; focused counts/durations were not recorded.
-- **Task 2 config:** RED `cd goserver; go test ./... -run 'TestConfigStore.*ReservedFormulaName|TestConfigStore.*GiftRuleCondition|TestConfigStoreRejectsGiftIdentityInTimer' -count=1` failed because reserved names, preset source, and invalid condition were accepted. GREEN repeated that exact command and passed; count/duration not recorded.
-- **Task 2 preview:** RED `cd goserver; go test ./... -run 'TestFormulaPreview.*Identity|TestFormulaPreview.*Condition|TestFormulaPreviewUsesSelectedGiftPrice' -count=1` failed because the endpoint returned old `{code,result}` and ignored input. GREEN repeated that exact command and passed; count/duration not recorded. Final recorded Task-2 focus `go test ./... -run 'TestApplyGiftEvent|TestConfigStore.*Formula|TestConfigStore.*Identity|TestFormulaPreview' -count=20`, race `go test -race ./... -run 'TestApplyGiftEvent.*Identity|TestFormulaPreview.*Identity' -count=5`, and full Go gate passed; their focused counts/durations were not recorded.
-- **Task 3 helper/adapter:** RED `npm test -- --run tests/gift-rule-conditions.test.ts` failed with missing module; RED `npm test -- --run tests/backend.test.ts` failed with `previewGiftRule is not a function`. The brief’s recorded focused GREEN gate is `npm test -- --run tests/gift-rule-conditions.test.ts tests/backend.test.ts tests/formula-presets.test.ts tests/simple-play.test.ts`; Task-3 report records 55 passing tests, exit 0, duration not recorded.
-- **Task 3 review fix:** RED `npm test -- --run tests/gift-rule-conditions.test.ts` failed because empty condition returned `advanced` instead of `any`. GREEN repeated it: 8 passed, exit 0, duration not recorded; the same recorded four-file Task-3 focus remained 55 passed (duration not recorded).
-- **Task 4 C1:** RED `npm test -- --run tests/wizard.test.ts -t 'gift identity condition|advanced gift condition'` had 2 failures because condition controls were absent. GREEN repeated it: 2 passed, exit 0, duration not recorded.
-- **Task 4 C2:** RED `npm test -- --run tests/wizard.test.ts -t 'simulated gift identity|identity condition preview'` had 2 failures: old preview advanced the draft and sent no identity. GREEN repeated it: 2 passed, exit 0, duration not recorded.
-- **Task 4 C3:** RED `npm test -- --run tests/wizard.test.ts -t 'formula help explains|rejects reserved gift formula names'` failed because identity help was absent. GREEN repeated it: 2 passed, exit 0, duration not recorded. Recorded initial focused gate `npm test -- --run tests/wizard.test.ts tests/gift-rule-conditions.test.ts tests/backend.test.ts` passed 195 with 31 skipped; duration not recorded.
-- **Task 4 review fix 1:** RED `npm test -- --run tests/wizard.test.ts -t 'skipped gift simulation|identity condition preview|unrelated gift rule'` had 2 failures (false snapshot lost; unrelated rule acquired `condition:''`). GREEN repeated it: 3 passed, exit 0, duration not recorded. The recorded three-file focus passed 166 with 31 skipped; duration not recorded.
-- **Task 4 review fix 2:** RED `npm test -- --run tests/wizard.test.ts -t 'unrelated gift rule'` had 1 failure: renamed attribute left `积分+加班时间` and `加班时间` condition references. GREEN repeated it: 1 passed, exit 0, duration not recorded. Recorded review focus `npm test -- --run tests/wizard.test.ts -t 'skipped gift simulation|identity condition preview|unrelated gift rule'` passed 3; duration not recorded.
-- **Task 5:** no RED occurred. The fresh compatibility/gate evidence did not identify an owned Task1–4 regression, so no implementation change was authorized.
+### Task 1 — identity context
+
+- **RED command (verbatim):** `cd goserver; go test ./... -run 'TestGiftIdentityLevel|TestBuildGiftFormulaEnvironment|TestReservedFormulaNames' -count=1`
+- **RED output (verbatim excerpt):** `Exit 1 as expected: build failed because giftIdentityLevel, both environment builders, giftIdentityCaptain, and isReservedFormulaName did not exist.`
+- **GREEN command (verbatim):** `cd goserver; go test ./... -run 'TestGiftIdentityLevel|TestBuildGiftFormulaEnvironment|TestReservedFormulaNames' -count=1`
+- **GREEN output (verbatim excerpt):** `Exit 0: ok bilibili-live-gift-panel.` Duration: not captured in original task report.
+- **Source:** `task-1-report.md`, “TDD evidence / RED: identity context” and “GREEN: identity context”.
+
+### Task 1 — lazy `RANDOMCHOICE`
+
+- **RED command (verbatim):** `cd goserver; go test ./... -run 'TestFormulaRandomChoice' -count=1`
+- **RED output (verbatim excerpt):** `Exit 1 as expected: all new cases failed with 未知函数 "RANDOMCHOICE".`
+- **GREEN command (verbatim):** `cd goserver; go test ./... -run 'TestFormulaRandomChoice' -count=1`
+- **GREEN output (verbatim excerpt):** `Exit 0: ok bilibili-live-gift-panel.` Duration: not captured in original task report. High-count focus was `ok` in 2.144s; race focus was `ok` in 3.050s.
+- **Source:** `task-1-report.md`, “TDD evidence / RED: RANDOMCHOICE”, “GREEN: RANDOMCHOICE”, and “Final verification”.
+
+### Task 2 — runtime conditions and joint random choice
+
+- **RED command (verbatim):** `cd goserver; go test ./... -run 'TestApplyGiftEvent.*Identity|TestApplyGiftEventReevaluatesCondition|TestApplyGiftEventSkipsInvalidCondition|TestApplyGiftEventCombinesIdentityConditionAndRandomChoice' -count=1`
+- **RED output (verbatim excerpt):** `unknown field Condition in struct literal of type giftRule` (retrospective fixed-base reproduction: `background_runtime_semantics_test.go:40:3`, plus eight same-symbol failures; exit 1).
+- **GREEN command (verbatim):** `cd goserver; go test ./... -run 'TestApplyGiftEvent' -count=10`
+- **GREEN output (verbatim excerpt):** `GREEN runtime: the same focused tests and TestApplyGiftEvent -count=10 passed.` Duration/count detail: not captured in original task report.
+- **Source:** `task-2-report.md`, “RED runtime” / “GREEN runtime”; RED stdout reproduced at detached parent `0f0dfce`.
+
+### Task 2 — config validation
+
+- **RED command (verbatim):** `cd goserver; go test ./... -run 'TestConfigStore.*ReservedFormulaName|TestConfigStore.*GiftRuleCondition|TestConfigStoreRejectsGiftIdentityInTimer' -count=1`
+- **RED output (verbatim excerpt):** Original RED output was not captured. Retrospective fixed-base reproduction at `0f0dfce` with final `config_store_test.go`: `FAIL bilibili-live-gift-panel [build failed]`; `config_store_test.go:928:45: state.Rules[0].Condition undefined (type giftRule has no field or method Condition)`; exit 1.
+- **GREEN command (verbatim):** `cd goserver; go test ./... -run 'TestConfigStore.*ReservedFormulaName|TestConfigStore.*GiftRuleCondition|TestConfigStoreRejectsGiftIdentityInTimer' -count=1`
+- **GREEN output (verbatim excerpt):** `GREEN config: TestConfigStore.*ReservedFormulaName|TestConfigStore.*GiftRuleCondition|TestConfigStoreRejectsGiftIdentityInTimer passed.` Duration: not captured in original task report.
+- **Source:** `task-2-report.md`, “RED config” / “GREEN config”; command spelling from `task-2-brief.md`, Step 6/7.
+
+### Task 2 — gift preview contract
+
+- **RED command (verbatim):** `cd goserver; go test ./... -run 'TestFormulaPreview.*Identity|TestFormulaPreview.*Condition|TestFormulaPreviewUsesSelectedGiftPrice' -count=1`
+- **RED output (verbatim excerpt):** Original RED output was not captured. Retrospective fixed-base reproduction at `0f0dfce`: `--- FAIL: TestFormulaPreviewUsesGiftRuleIdentity`; `preview status = 200, body = {"code":0,"result":10}`; false condition returned `{..."result":14}`; invalid identities and invalid condition also returned HTTP 200; exit 1.
+- **GREEN command (verbatim):** `cd goserver; go test ./... -run 'TestFormulaPreview.*Identity|TestFormulaPreview.*Condition|TestFormulaPreviewUsesSelectedGiftPrice' -count=1`
+- **GREEN output (verbatim excerpt):** `GREEN preview: TestFormulaPreview.*Identity|TestFormulaPreview.*Condition|TestFormulaPreviewUsesSelectedGiftPrice passed.` Duration: not captured in original task report.
+- **Source:** `task-2-report.md`, “RED preview” / “GREEN preview”; command spelling from `task-2-brief.md`, Step 9/10.
+
+### Task 3 — helper, adapter, and simple-play focus
+
+- **RED command (verbatim):** `npm test -- --run tests/gift-rule-conditions.test.ts`
+- **RED output (verbatim excerpt):** Retrospective fixed-base reproduction at `ef6df17`: `FAIL tests/gift-rule-conditions.test.ts`; `Failed to load url ../src/gift-rule-conditions ... Does the file exist?`; `0 test`; exit 1.
+- **GREEN command (verbatim):** `npm test -- --run tests/gift-rule-conditions.test.ts tests/backend.test.ts tests/formula-presets.test.ts tests/simple-play.test.ts`
+- **GREEN output (verbatim excerpt):** `GREEN: focused helpers, backend adapter, formula presets, and simple-play tests all pass (55 tests).` Duration: not captured in original task report.
+- **Source:** `task-3-report.md`, initial “RED” / “GREEN”; focused command from `task-3-brief.md`, Step 9.
+
+### Task 3 — preview adapter
+
+- **RED command (verbatim):** `npm test -- --run tests/backend.test.ts`
+- **RED output (verbatim excerpt):** Retrospective fixed-base reproduction at `ef6df17`: `7 failed | 27 passed (34)`; test `posts the gift condition and identity context and returns the trigger result`; `TypeError: previewGiftRule is not a function`; exit 1.
+- **GREEN command (verbatim):** `npm test -- --run tests/gift-rule-conditions.test.ts tests/backend.test.ts tests/formula-presets.test.ts tests/simple-play.test.ts`
+- **GREEN output (verbatim excerpt):** `55 tests` passed; duration: not captured in original task report.
+- **Source:** `task-3-report.md`, initial “RED” / “GREEN”; command from `task-3-brief.md`, Step 6/9.
+
+### Task 3 — empty-condition review fix
+
+- **RED command (verbatim):** `npm test -- --run tests/gift-rule-conditions.test.ts`
+- **RED output (verbatim excerpt):** `failed: empty condition returned advanced instead of any.` Original detailed assertion output was not captured.
+- **GREEN command (verbatim):** `npm test -- --run tests/gift-rule-conditions.test.ts`
+- **GREEN output (verbatim excerpt):** `the same focused command passed (8 tests)`. Duration: not captured in original task report.
+- **Source:** `task-3-report.md`, “Review Fix Round 1”.
+
+### Task 4 — save/reopen and advanced preservation
+
+- **RED command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'gift identity condition|advanced gift condition'`
+- **RED output (verbatim excerpt):** Retrospective fixed-base reproduction at `ba41cd6`: `2 failed | 151 skipped (153)`; `gift identity condition saves, reopens, and updates through beginner controls` and `advanced gift condition stays exact until beginner mode explicitly replaces it`; both `Cannot read properties of null (reading 'value')`; exit 1.
+- **GREEN command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'gift identity condition|advanced gift condition'`
+- **GREEN output (verbatim excerpt):** `same command → 2 passed.` Duration: not captured in original task report.
+- **Source:** `task-4-report.md`, “TDD C1”; RED stdout reproduced at parent `ba41cd6`.
+
+### Task 4 — simulation identity and stale preview
+
+- **RED command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'simulated gift identity|identity condition preview'`
+- **RED output (verbatim excerpt):** Retrospective fixed-base reproduction at `ba41cd6`: `2 failed | 151 skipped (153)`; both named simulation/stale tests: `Cannot set properties of null (setting 'value')`; exit 1.
+- **GREEN command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'simulated gift identity|identity condition preview'`
+- **GREEN output (verbatim excerpt):** `same command → 2 passed.` Duration: not captured in original task report.
+- **Source:** `task-4-report.md`, “TDD C2”; RED stdout reproduced at parent `ba41cd6`.
+
+### Task 4 — formula help and reserved names
+
+- **RED command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'formula help explains|rejects reserved gift formula names'`
+- **RED output (verbatim excerpt):** Retrospective fixed-base reproduction at `ba41cd6`: `2 failed | 151 skipped (153)`; `expected ... to contain '用户身份'`; and `expected ... to contain '系统公式名称不能作为属性名：用户身份'`; exit 1.
+- **GREEN command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'formula help explains|rejects reserved gift formula names'`
+- **GREEN output (verbatim excerpt):** `same command → 2 passed.` Duration: not captured in original task report.
+- **Source:** `task-4-report.md`, “TDD C3”; RED stdout reproduced at parent `ba41cd6`.
+
+### Task 4 review fix 1 — false snapshot, optional shape, stale guard
+
+- **RED command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'skipped gift simulation|identity condition preview|unrelated gift rule'`
+- **RED output (verbatim excerpt):** Retrospective fixed-base reproduction at `b29466e`: `2 failed | 1 passed | 152 skipped (155)`; `expected '预览收到 1 个 大航海·舰长：0 → 11' to contain '本次不会触发'`; unrelated rule received `"condition": ""`; stale test passed.
+- **GREEN command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'skipped gift simulation|identity condition preview|unrelated gift rule'`
+- **GREEN output (verbatim excerpt):** `same command → 3 passed (false snapshot retained without draft advancement; unrelated optional condition remains absent; post-stale request uses attributeValue:11).` Duration: not captured in original task report.
+- **Source:** `task-4-report.md`, “Review fix round 1”; RED stdout reproduced at parent `b29466e`.
+
+### Task 4 review fix 2 — cross-attribute formula and condition rename
+
+- **RED command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'unrelated gift rule'`
+- **RED output (verbatim excerpt):** Retrospective fixed-base reproduction at `e7ee09a`: `1 failed | 154 skipped (155)`; expected `formula: '积分+倒计时', condition: '用户身份>=舰长*(倒计时>0)'`, received `formula: '积分+加班时间', condition: '用户身份>=舰长*(加班时间>0)'`; exit 1.
+- **GREEN command (verbatim):** `npm test -- --run tests/wizard.test.ts -t 'unrelated gift rule'`
+- **GREEN output (verbatim excerpt):** `same command → 1 passed; all gift rule formulas are rewritten for cross-attribute references, existing own condition fields are likewise rewritten, and missing condition fields remain absent.` Duration: not captured in original task report.
+- **Source:** `task-4-report.md`, “Fix round 2”; RED stdout reproduced at parent `e7ee09a`.
+
+### Task 5
+
+- No RED occurred: fresh compatibility/gate evidence did not identify an owned Task1–4 regression, so no implementation change was authorized.
 
 ## Fresh serial gates on `5a0711d`
 
