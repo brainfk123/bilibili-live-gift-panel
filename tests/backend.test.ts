@@ -4,6 +4,7 @@ import {
   clearContributionLedger,
   clearGiftReceipts,
   giftReceiptMediaUrl,
+  getBlindBoxLeaderboard,
   getBlindBoxInfo,
   getBiliAuthStatus,
   getRoomAnchorInfo,
@@ -16,6 +17,82 @@ import {
   startPagePresence,
   transitionActivity,
 } from '../src/backend';
+
+const leaderboardSnapshot = {
+  updatedAt: 1_700_000_000_000,
+  summary: {
+    viewerCount: 1,
+    blindBoxCount: 2,
+    cost: 18_000,
+    value: 12_000,
+    profit: -6_000,
+    unpricedCount: 1,
+  },
+  viewers: [{
+    key: 'uid:1',
+    uid: 1,
+    uname: '亏损观众',
+    avatar: 'https://example.test/avatar.png',
+    giftCount: 2,
+    goldValue: 18_000,
+    silverValue: 0,
+    ruleTriggers: 0,
+    attributeDeltas: { 积分: 2 },
+    blindBoxCount: 2,
+    blindBoxCost: 18_000,
+    blindBoxValue: 12_000,
+    blindBoxProfit: -6_000,
+    unpricedBlindBoxCount: 1,
+    blindBoxes: [{
+      giftId: 35800,
+      giftName: '小熊虫盲盒',
+      count: 2,
+      cost: 18_000,
+      value: 12_000,
+      profit: -6_000,
+      unpricedCount: 1,
+      lastGiftAt: 1_700_000_000_000,
+    }],
+    lastGiftAt: 1_700_000_000_000,
+  }],
+  scopes: [{ giftId: 35800, giftName: '小熊虫盲盒', count: 2, lastGiftAt: 1_700_000_000_000 }],
+};
+
+describe('blind box leaderboard API', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('requests a scoped leaderboard in the server query order and preserves negative profit', async () => {
+    const fetchMock = vi.fn(async () => Response.json({ code: 0, leaderboard: leaderboardSnapshot }));
+    vi.stubGlobal('fetch', fetchMock);
+    const signal = new AbortController().signal;
+
+    await expect(getBlindBoxLeaderboard({ giftId: 35800, limit: 100, signal })).resolves.toEqual(leaderboardSnapshot);
+    expect(fetchMock).toHaveBeenCalledWith('/api/blind-box/leaderboard?giftId=35800&limit=100', {
+      cache: 'no-store', signal,
+    });
+  });
+
+  it.each([
+    ['unknown snapshot field', { ...leaderboardSnapshot, unexpected: true }],
+    ['non-array viewers', { ...leaderboardSnapshot, viewers: {} }],
+    ['non-array scopes', { ...leaderboardSnapshot, scopes: {} }],
+    ['negative summary count', { ...leaderboardSnapshot, summary: { ...leaderboardSnapshot.summary, blindBoxCount: -1 } }],
+    ['non-finite summary cost', { ...leaderboardSnapshot, summary: { ...leaderboardSnapshot.summary, cost: Number.POSITIVE_INFINITY } }],
+    ['negative scope timestamp', { ...leaderboardSnapshot, scopes: [{ ...leaderboardSnapshot.scopes[0], lastGiftAt: -1 }] }],
+    ['invalid scope gift id', { ...leaderboardSnapshot, scopes: [{ ...leaderboardSnapshot.scopes[0], giftId: 0 }] }],
+    ['odd viewer shape', { ...leaderboardSnapshot, viewers: [{ ...leaderboardSnapshot.viewers[0], blindBoxes: {} }] }],
+    ['negative viewer count', { ...leaderboardSnapshot, viewers: [{ ...leaderboardSnapshot.viewers[0], blindBoxCount: -1 }] }],
+    ['non-finite viewer profit', { ...leaderboardSnapshot, viewers: [{ ...leaderboardSnapshot.viewers[0], blindBoxProfit: Number.NaN }] }],
+    ['negative nested cost', { ...leaderboardSnapshot, viewers: [{ ...leaderboardSnapshot.viewers[0], blindBoxes: [{ ...leaderboardSnapshot.viewers[0].blindBoxes[0], cost: -1 }] }] }],
+    ['invalid nested gift id', { ...leaderboardSnapshot, viewers: [{ ...leaderboardSnapshot.viewers[0], blindBoxes: [{ ...leaderboardSnapshot.viewers[0].blindBoxes[0], giftId: 0 }] }] }],
+    ['non-finite updated at', { ...leaderboardSnapshot, updatedAt: Number.POSITIVE_INFINITY }],
+    ['negative updated at', { ...leaderboardSnapshot, updatedAt: -1 }],
+  ])('rejects a %s payload without partially normalizing it', async (_name, leaderboard) => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ code: 0, leaderboard })));
+
+    await expect(getBlindBoxLeaderboard()).rejects.toThrow('盲盒排行榜响应无效');
+  });
+});
 
 describe('gift target progress API', () => {
   afterEach(() => vi.unstubAllGlobals());
