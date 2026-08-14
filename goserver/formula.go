@@ -297,13 +297,15 @@ type formulaValueClass uint8
 const (
 	formulaZero formulaValueClass = 1 << iota
 	formulaFiniteNonZero
-	formulaInfinity
+	formulaPositiveInfinity
+	formulaNegativeInfinity
 	formulaNaN
 )
 
 const (
-	formulaFinite = formulaZero | formulaFiniteNonZero
-	formulaTop    = formulaFinite | formulaInfinity | formulaNaN
+	formulaFinite   = formulaZero | formulaFiniteNonZero
+	formulaInfinity = formulaPositiveInfinity | formulaNegativeInfinity
+	formulaTop      = formulaFinite | formulaInfinity | formulaNaN
 )
 
 func (classes formulaValueClass) hasFinite() bool { return classes&formulaFinite != 0 }
@@ -318,8 +320,10 @@ func exactFormulaSemanticResult(value float64) formulaSemanticResult {
 	classes := formulaFiniteNonZero
 	if value == 0 {
 		classes = formulaZero
-	} else if math.IsInf(value, 0) {
-		classes = formulaInfinity
+	} else if math.IsInf(value, 1) {
+		classes = formulaPositiveInfinity
+	} else if math.IsInf(value, -1) {
+		classes = formulaNegativeInfinity
 	} else if math.IsNaN(value) {
 		classes = formulaNaN
 	}
@@ -328,7 +332,7 @@ func exactFormulaSemanticResult(value float64) formulaSemanticResult {
 
 func formulaClassMembers(classes formulaValueClass) []formulaValueClass {
 	members := make([]formulaValueClass, 0, 4)
-	for _, class := range []formulaValueClass{formulaZero, formulaFiniteNonZero, formulaInfinity, formulaNaN} {
+	for _, class := range []formulaValueClass{formulaZero, formulaFiniteNonZero, formulaPositiveInfinity, formulaNegativeInfinity, formulaNaN} {
 		if classes&class != 0 {
 			members = append(members, class)
 		}
@@ -348,20 +352,45 @@ func abstractBinaryFormulaClasses(op string, left, right formulaValueClass) (for
 	}
 	switch op {
 	case "+", "-":
-		if left == formulaInfinity && right == formulaInfinity {
-			return formulaInfinity | formulaNaN, false
+		leftInfinite := left&formulaInfinity != 0
+		rightInfinite := right&formulaInfinity != 0
+		if leftInfinite && rightInfinite {
+			if op == "+" && left == right {
+				return left, false
+			}
+			if op == "-" && left != right {
+				return left, false
+			}
+			return formulaNaN, false
 		}
-		if left == formulaInfinity || right == formulaInfinity {
-			return formulaInfinity, false
+		if leftInfinite {
+			return left, false
+		}
+		if rightInfinite {
+			if op == "+" {
+				return right, false
+			}
+			if right == formulaPositiveInfinity {
+				return formulaNegativeInfinity, false
+			}
+			return formulaPositiveInfinity, false
 		}
 		if left == formulaZero && right == formulaZero {
 			return formulaZero, false
 		}
 		return formulaFinite | formulaInfinity, false
 	case "*":
-		if left == formulaInfinity || right == formulaInfinity {
+		leftInfinite := left&formulaInfinity != 0
+		rightInfinite := right&formulaInfinity != 0
+		if leftInfinite || rightInfinite {
 			if left == formulaZero || right == formulaZero {
 				return formulaNaN, false
+			}
+			if leftInfinite && rightInfinite {
+				if left == right {
+					return formulaPositiveInfinity, false
+				}
+				return formulaNegativeInfinity, false
 			}
 			return formulaInfinity, false
 		}
@@ -373,13 +402,13 @@ func abstractBinaryFormulaClasses(op string, left, right formulaValueClass) (for
 		if right == formulaZero {
 			return 0, true
 		}
-		if right == formulaInfinity {
-			if left == formulaInfinity {
+		if right&formulaInfinity != 0 {
+			if left&formulaInfinity != 0 {
 				return formulaNaN, false
 			}
 			return formulaZero, false
 		}
-		if left == formulaInfinity {
+		if left&formulaInfinity != 0 {
 			return formulaInfinity, false
 		}
 		if left == formulaZero {
@@ -407,7 +436,14 @@ func validateGuaranteedFormulaSemantics(node formulaNode) (formulaSemanticResult
 		if operand.exact {
 			return exactFormulaSemanticResult(-operand.value), nil
 		}
-		return formulaSemanticResult{classes: operand.classes}, nil
+		classes := operand.classes &^ formulaInfinity
+		if operand.classes&formulaPositiveInfinity != 0 {
+			classes |= formulaNegativeInfinity
+		}
+		if operand.classes&formulaNegativeInfinity != 0 {
+			classes |= formulaPositiveInfinity
+		}
+		return formulaSemanticResult{classes: classes}, nil
 	case binaryNode:
 		left, err := validateGuaranteedFormulaSemantics(typed.left)
 		if err != nil {
@@ -488,8 +524,70 @@ func validateGuaranteedFormulaSemantics(node formulaNode) (formulaSemanticResult
 		}
 		if !allExact {
 			switch name {
+			case "MAX", "MIN":
+				classes := arguments[0].classes
+				for _, argument := range arguments[1:] {
+					nextClasses := formulaValueClass(0)
+					for _, leftClass := range formulaClassMembers(classes) {
+						for _, rightClass := range formulaClassMembers(argument.classes) {
+							if leftClass == formulaNaN || rightClass == formulaNaN {
+								nextClasses |= formulaNaN
+								continue
+							}
+							if name == "MAX" {
+								switch {
+								case leftClass == formulaPositiveInfinity || rightClass == formulaPositiveInfinity:
+									nextClasses |= formulaPositiveInfinity
+								case leftClass == formulaNegativeInfinity:
+									nextClasses |= rightClass
+								case rightClass == formulaNegativeInfinity:
+									nextClasses |= leftClass
+								default:
+									nextClasses |= formulaFinite
+								}
+							} else {
+								switch {
+								case leftClass == formulaNegativeInfinity || rightClass == formulaNegativeInfinity:
+									nextClasses |= formulaNegativeInfinity
+								case leftClass == formulaPositiveInfinity:
+									nextClasses |= rightClass
+								case rightClass == formulaPositiveInfinity:
+									nextClasses |= leftClass
+								default:
+									nextClasses |= formulaFinite
+								}
+							}
+						}
+					}
+					classes = nextClasses
+				}
+				return formulaSemanticResult{classes: classes}, nil
+			case "ROUND":
+				value := arguments[0]
+				if value.classes == formulaNaN {
+					return formulaSemanticResult{classes: formulaNaN}, nil
+				}
+				if len(arguments) == 1 {
+					return formulaSemanticResult{classes: value.classes}, nil
+				}
+				digits := arguments[1]
+				if !digits.exact {
+					return top, nil
+				}
+				power := math.Pow(10, digits.value)
+				if power == 0 || math.IsInf(power, 0) || math.IsNaN(power) {
+					return formulaSemanticResult{classes: formulaNaN}, nil
+				}
+				if value.classes&^formulaInfinity == 0 {
+					return formulaSemanticResult{classes: value.classes}, nil
+				}
+				return formulaSemanticResult{classes: value.classes | formulaInfinity}, nil
 			case "ABS", "FLOOR":
-				return formulaSemanticResult{classes: arguments[0].classes}, nil
+				classes := arguments[0].classes
+				if name == "ABS" && classes&formulaNegativeInfinity != 0 {
+					classes = classes&^formulaNegativeInfinity | formulaPositiveInfinity
+				}
+				return formulaSemanticResult{classes: classes}, nil
 			default:
 				return top, nil
 			}

@@ -131,18 +131,23 @@ func TestFormulaValidationChecksStructureWithoutEvaluation(t *testing.T) {
 func TestFormulaValidationRejectsGuaranteedRuntimeErrors(t *testing.T) {
 	overflow := "1" + strings.Repeat("0", 307) + "*100"
 	tests := map[string]string{
-		"1/0":                       "除数为零",
-		"积分/0":                      "除数为零",
-		overflow:                    "规则结果不是有效数字",
-		"RANDBETWEEN(10,1)":         "最小值不能大于最大值",
-		"RANDOMCHOICE(1/0)":         "除数为零",
-		"IF(1,1/0,10)":              "除数为零",
-		"IF(积分/0,10,20)":            "除数为零",
-		"MAX(积分,1/0)":               "除数为零",
-		"IF(0,10,RANDBETWEEN(2,1))": "最小值不能大于最大值",
-		"积分*(" + overflow + ")":     "规则结果不是有效数字",
-		"积分/ROUND(1,309)":           "规则结果不是有效数字",
-		"(" + overflow + ")/积分":     "规则结果不是有效数字",
+		"1/0":                         "除数为零",
+		"积分/0":                        "除数为零",
+		overflow:                      "规则结果不是有效数字",
+		"RANDBETWEEN(10,1)":           "最小值不能大于最大值",
+		"RANDOMCHOICE(1/0)":           "除数为零",
+		"IF(1,1/0,10)":                "除数为零",
+		"IF(积分/0,10,20)":              "除数为零",
+		"MAX(积分,1/0)":                 "除数为零",
+		"IF(0,10,RANDBETWEEN(2,1))":   "最小值不能大于最大值",
+		"积分*(" + overflow + ")":       "规则结果不是有效数字",
+		"积分/ROUND(1,309)":             "规则结果不是有效数字",
+		"(" + overflow + ")/积分":       "规则结果不是有效数字",
+		"MAX(积分," + overflow + ")":    "规则结果不是有效数字",
+		"MIN(积分,-(" + overflow + "))": "规则结果不是有效数字",
+		"ROUND(积分,309)":               "规则结果不是有效数字",
+		"ABS(" + overflow + ")":       "规则结果不是有效数字",
+		"FLOOR(" + overflow + ")":     "规则结果不是有效数字",
 	}
 	for formula, message := range tests {
 		err := validateFormula(formula, map[string]float64{"积分": 0})
@@ -175,6 +180,14 @@ func TestFormulaValidationAllowsRuntimeDependentOrUnselectedErrors(t *testing.T)
 		"IF(积分," + overflow + ",1)",
 		"RANDOMCHOICE(" + overflow + ",1)",
 		"(" + overflow + ")>积分",
+		"MAX(积分,-(" + overflow + "))",
+		"MIN(积分," + overflow + ")",
+		"ROUND(积分,2)",
+		"ABS(积分)",
+		"FLOOR(积分)",
+		"MAX(积分,10)",
+		"MIN(积分,10)",
+		"RANDBETWEEN(RAND(),积分)",
 	} {
 		if err := validateFormula(formula, map[string]float64{"积分": 0}); err != nil {
 			t.Fatalf("%s: %v", formula, err)

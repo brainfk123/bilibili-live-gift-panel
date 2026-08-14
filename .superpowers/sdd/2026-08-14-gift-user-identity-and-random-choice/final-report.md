@@ -276,3 +276,34 @@ No push, tag, release, package, version, or FFmpeg action was performed for roun
 | `git diff --check` | exit 0; no whitespace errors. |
 
 No push, tag, release, package, version, or FFmpeg action was performed for round 3.
+
+## Final review fix round 4: supported-function abstract transfers (2026-08-14)
+
+### Finding and RED evidence
+
+- Fixed base: `6107973062907791b710c5615d1c6ea25dce64da`.
+- The round-3 lattice handled non-exact binary operators, but returned an overly broad top result for non-exact `MAX`, `MIN`, and `ROUND` calls.
+- Focused unit, config PUT, and validation-only HTTP RED tests showed `MAX(积分,+Inf)`, `MIN(积分,-Inf)`, and `ROUND(积分,309)` were incorrectly accepted.
+
+### Function-transfer audit
+
+- Infinity was refined into positive and negative classes so extrema dominance is expressible without false rejection.
+- `MAX`/`MIN` now fold every eager argument through explicit class pairs, including NaN propagation and signed-infinity dominance. Required dominant-infinity formulas reject; `MAX(积分,-Inf)`, `MIN(积分,+Inf)`, and finite extrema retain finite outcomes.
+- `ROUND` with exact digits classifies its `10^digits` scale. Zero, infinity, or NaN scale guarantees NaN for a finite unknown value and rejects; ordinary scales retain finite outcomes while conservatively including possible overflow. Unknown digits remain top.
+- `ABS` maps negative infinity to positive infinity and otherwise preserves zero/finite/NaN classes. `FLOOR` preserves classes. Exact calls still use the runtime math operations.
+- `IF`, one/multi-argument `RANDOMCHOICE`, `RAND`, and exact/non-exact `RANDBETWEEN` retain the prior guaranteed/lazy/random rules. All ordinary eager function arguments are recursively checked before transfer.
+
+### Fresh gates
+
+| Gate | Fresh observed result |
+|---|---|
+| Focused function-transfer/config/validate-only/no-draw GREEN | exit 0; PASS. |
+| Focused stress (`-count=20`) | exit 0; PASS in 2.404s. |
+| Focused race (`-count=5`) | exit 0; PASS in 1.627s. |
+| `go test ./... -count=1 -timeout=300s` | exit 0; PASS in 23.100s. |
+| `go test -race ./... -count=1 -timeout=300s` | exit 0; PASS in 39.654s. |
+| `npm run typecheck` | exit 0; 0 TypeScript errors. |
+| `npm test -- --reporter=dot` | 43 files, 500 passed, 31 skipped, 0 failed; exit 0. |
+| `git diff --check` | exit 0; no whitespace errors. |
+
+No push, tag, release, package, version, or FFmpeg action was performed for round 4.
