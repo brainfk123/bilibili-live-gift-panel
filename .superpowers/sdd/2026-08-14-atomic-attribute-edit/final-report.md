@@ -4,7 +4,7 @@ Date: 2026-08-15 (Asia/Shanghai)
 
 ## Verdict and fixed range
 
-**READY for handoff; not released.** The atomic attribute-edit implementation was verified from the fixed feature audit base `1bc9a75` through source HEAD `e385fe5e2a5d79f7d1501c0f25a80f79f0c03f5c` on the isolated linked worktree branch `codex/fix-gift-clip-stutter`. Task 6 found no packaging closure defect, so no packaging production or test code was changed. This report is the only Task 6 persistent change.
+**READY for handoff; not released.** The atomic attribute-edit implementation was verified from the fixed feature audit base `1bc9a75` through source HEAD `e385fe5e2a5d79f7d1501c0f25a80f79f0c03f5c` on the isolated linked worktree branch `codex/fix-gift-clip-stutter`. The original Task 6 report was committed as `e7aa680ed9a45f8ee5297286ff8dc65d7b689699`. Task 6 found no production packaging closure defect; review round 1 adds only a permanent Go audit test so the previously temporary 83-path proof is rerunnable.
 
 The report is a verification artifact, not permission to publish. No application instance was launched or stopped. No push, tag, release, signing, version, dependency, lockfile, changelog, workflow, README, remote, or FFmpeg payload/build change was made.
 
@@ -18,7 +18,7 @@ The report is a verification artifact, not permission to publish. No application
 | 3 — frontend adapter/storage | `1ec39e9`, `2ef895a`, `fc84376`, `300560f` | Strict bounded frontend transport and schemas, maintained current-token lease, authoritative queued publication, enriched authoritative GiftInfo boundary. |
 | 4 — real editor integration | `89d9605`, `6c1c440`, `5426448`, `c072940`, `f72f61a` | Existing/new editors use narrow atomic submit; prepared sessions, stale-publication suppression, exactly-once release, publication-safe tutorial recovery. |
 | 5 — deterministic runtime proof | `b6544e2`, `085aa51`, `6c67b46`, `e385fe5` (`f72f61a..e385fe5`) | Gift/timer peer races, real-store-mutex serialization, same-target later-save-wins, failure cleanup, HTTP stale/replaced/expired token proofs. |
-| 6 — package/release gate | this report commit | Fresh source/race/build/package/SHA/scope/no-release verification; no closure repair required. |
+| 6 — package/release gate | `e7aa680` plus review round-1 commits recorded below | Fresh source/race/build/package/SHA/scope/no-release verification; permanent package-closure test added; no production closure repair required. |
 
 `git log --oneline --decorate 1bc9a75..e385fe5` contained 20 commits, from `9339475 docs: plan atomic attribute editing` through `e385fe5 test: prove peer updates between attribute saves`, with the task commits above in chronological history.
 
@@ -52,7 +52,7 @@ The report is a verification artifact, not permission to publish. No application
 ### Task 6
 
 - RED/ruling: no production packaging regression was found. The brief's proposed `scripts/build-go.test.mjs` does not exist in this tree; the real packaging test is `tests/ui-assets.test.ts`, and the real Go tests are `TestEmbeddedPageHandlerServesNestedUIAssets` and `TestEmbeddedUIAssetManifestMatchesEmbeddedFS`.
-- GREEN: the actual focused Vitest passed 1/1; the exact Go embedded pair passed; an uncommitted exhaustive audit exercised all 83 public asset URLs through the production handler and matched response length/SHA. The temporary audit test was removed before reporting.
+- GREEN: the actual focused Vitest passed 1/1 and the exact Go embedded pair passed. The first report used an uncommitted exhaustive audit for the 83 public URLs; review round 1 below replaces that evidentiary gap with a permanent, dynamically counted Go test using the same production handler and embedded filesystem.
 
 ## Stable-ID merge and reference-rewrite contract
 
@@ -126,7 +126,7 @@ Focused package checks:
 
 - `npm test -- tests/ui-assets.test.ts --reporter=dot`: 1 file / 1 test passed; Vitest duration 323ms.
 - `go -C goserver test ./... -run 'TestEmbedded(PageHandlerServesNestedUIAssets|UIAssetManifestMatchesEmbeddedFS)' -count=1 -timeout=120s`: `ok ... 1.518s`.
-- Temporary exhaustive production-handler audit: 83/83 manifest assets served at their public URLs and response size/SHA matched; `ok ... 1.589s`. `index.html` is publicly served at `/` with 200; direct `/index.html` canonically redirects to `/` with 301 by `http.FileServer`. All other manifest paths are direct 200s. The temporary test file was deleted.
+- Initial temporary exhaustive production-handler audit: 83/83 manifest assets served at their public URLs and response size/SHA matched; `ok ... 1.589s`. `index.html` is publicly served at `/` with 200; direct `/index.html` canonically redirects to `/` with 301 by `http.FileServer`. All other manifest paths are direct 200s. Review round 1 permanently codifies and strengthens this proof below.
 
 ## Manifest closure and executable
 
@@ -159,7 +159,7 @@ SHA256: 8f39489916630a80662929660059b14db3340173448cfa8ad453377587727de2
 
 ## Scope and no-release audit
 
-Before creating this report, `git diff --check` exited 0 and `git status --short` was empty. The fixed feature diff `git diff --name-only 1bc9a75..e385fe5` contained 17 files:
+Before creating the original report, `git diff --check` exited 0 and `git status --short` was empty. The fixed source-feature diff `git diff --name-only 1bc9a75..e385fe5` contained 17 files:
 
 ```text
 docs/superpowers/plans/2026-08-14-atomic-attribute-edit.md
@@ -200,6 +200,55 @@ Parser placement in `attribute-edit-lease.ts` is also a maintainability concern,
 
 Finally, the atomic guarantee covers mutations that participate in `configStore` locking and its atomic multi-shard persistence seam. **Unsupported external processes or tools that directly rewrite shard files outside `configStore` are outside this mutation guarantee.** Such writers can bypass the in-process lock and require their own coordination/recovery protocol; this boundary does not weaken the verified API/runtime behavior.
 
+## Review fix round 1/5 — permanent package-closure evidence
+
+### Finding and test boundary
+
+The original temporary exhaustive test was not independently rerunnable from the committed tree. Existing `TestEmbeddedUIAssetManifestMatchesEmbeddedFS` checked only that each manifest path could be read from `embeddedFS`; it did not reject extra embedded files, validate manifest size/SHA, exercise the production HTTP handler, or compare response bytes. Round 1 adds `TestEmbeddedUIAssetManifestClosesAndServesProductionAssets` in `goserver/ui_assets_test.go`. It consumes the existing `//go:embed` filesystem, `ui-assets.json`, and `newEmbeddedPageHandler`; it creates no copy, build, manifest, or packaging logic.
+
+The test dynamically walks the embedded UI filesystem (excluding the manifest itself), rejects invalid/duplicate manifest paths, compares the exact sorted manifest and embedded file sets, verifies embedded size/SHA, then requests every record through its canonical public URL (`index.html` as `/`) and requires HTTP 200 plus byte-for-byte/size/SHA agreement. It deliberately does not hardcode 83, so additions and removals remain auditable.
+
+### TDD evidence
+
+RED after adding the focused test entry point before its verifier:
+
+```text
+go -C goserver test ./... -run '^TestEmbeddedUIAssetManifestClosesAndServesProductionAssets$' -count=1 -timeout=120s
+# bilibili-live-gift-panel [bilibili-live-gift-panel.test]
+.\ui_assets_test.go:6:2: undefined: verifyEmbeddedUIAssetClosure
+FAIL bilibili-live-gift-panel [build failed]
+```
+
+GREEN after adding only the test-side verifier:
+
+```text
+go -C goserver test ./... -run '^TestEmbeddedUIAssetManifestClosesAndServesProductionAssets$' -count=1 -timeout=120s -v
+=== RUN   TestEmbeddedUIAssetManifestClosesAndServesProductionAssets
+    ui_assets_test.go:17: verified manifest closure and production handler bytes for 83 embedded UI assets
+--- PASS: TestEmbeddedUIAssetManifestClosesAndServesProductionAssets (0.03s)
+PASS
+ok   bilibili-live-gift-panel 1.529s
+```
+
+Relevant embedded tests and full Go also passed:
+
+```text
+go -C goserver test ./... -run '^TestEmbedded' -count=1 -timeout=120s -v
+TestEmbeddedPageHandlerServesNestedUIAssets: PASS
+TestEmbeddedUIAssetManifestMatchesEmbeddedFS: PASS
+TestEmbeddedUIAssetManifestClosesAndServesProductionAssets: PASS (83 assets)
+ok   bilibili-live-gift-panel 1.607s
+
+go -C goserver test ./... -count=1 -timeout=300s
+ok   bilibili-live-gift-panel 19.065s
+```
+
+### Commit and final-scope recording protocol
+
+The original verification report is already committed at `e7aa680`. The closure test and this round's evidence are committed together in the next test/report commit. Because that commit cannot embed its own SHA, a following report-only commit records the exact test/report commit SHA and re-runs `1bc9a75..HEAD` scope at the committed tree. The report-only commit changes no path membership, so its final-HEAD path count can be stated exactly without pretending to know its self-referential SHA.
+
+The staged pre-commit audit (`git diff --name-only 1bc9a75`) contained exactly 19 unique paths: 2 documentation/report paths, 5 Go production paths, 4 Go test paths, 4 TypeScript production paths, and 4 TypeScript test paths. The only round-1 path addition is `goserver/ui_assets_test.go`; the report path already existed. `git diff --cached --check` exited 0, staged scope was exactly the test plus this report, and the forbidden package/lock/version/changelog/workflow/signing/FFmpeg/README matcher returned 0.
+
 ## Handoff
 
-All required fresh gates, focused package tests, exhaustive manifest/handler audit, EXE hash, fixed-base scope audit, and no-release checks completed successfully. No packaging closure repair was required. The only remaining action authorized by Task 6 is committing this forced-tracked report; publishing remains explicitly out of scope.
+The original report is committed as `e7aa680`; review round 1 permanently records the package-closure proof and its exact final scope in the commits described above. All required gates, focused package tests, manifest/handler audit, EXE hash, and no-release checks passed. No production packaging closure repair was required. Publishing remains explicitly unauthorized and out of scope.
