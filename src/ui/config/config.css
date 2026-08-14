@@ -4156,6 +4156,24 @@ body.config-mode::-webkit-scrollbar-corner,
   gap: 12px;
   padding: 20px 26px 8px;
 }
+.config-root .attribute-time-shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.config-root .attribute-time-shortcut {
+  min-width: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  padding: 5px 8px;
+  background: var(--panel-soft);
+  color: var(--text);
+  cursor: pointer;
+  font-size: var(--type-meta);
+  font-weight: 700;
+}
+.config-root .attribute-time-shortcut:hover { border-color: var(--accent); color: var(--accent-text); }
 .config-root .attribute-broadcast-message { grid-column: 1 / -1; }
 .config-root .modal-tip {
   margin: 0 26px 20px;

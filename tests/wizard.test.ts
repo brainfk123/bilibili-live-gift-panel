@@ -2764,23 +2764,86 @@ describe('single-page configuration rendering', () => {
     const currentValue = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '当前值') as TestElement;
     const simulate = findByText(root, '模拟收到 1 个');
-    expect(currentValue.value).toBe('0');
+    expect(currentValue.value).toBe('00:00:00');
     expect(simulate).toBeDefined();
 
     simulate?.onclick?.();
 
     await vi.waitFor(() => expect(textOf(root.querySelector('.formula-preview')!)).toContain('0 → 1'));
-    expect(currentValue.value).toBe('0');
+    expect(currentValue.value).toBe('00:00:00');
 
     simulate?.onclick?.();
 
     await vi.waitFor(() => expect(textOf(root.querySelector('.formula-preview')!)).toContain('1 → 2'));
-    expect(currentValue.value).toBe('0');
+    expect(currentValue.value).toBe('00:00:00');
 
     findByText(root, '保存修改')?.onclick?.();
 
     await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
     expect(loadState().attributes[0].value).toBe(0);
+  });
+
+  it('edits timer values as canonical text across format switches', () => {
+    const configured = state('88888888');
+    configured.attributes[0].value = 3661;
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    const editor = root.querySelector('.attribute-modal')!;
+    const valueInput = editor.querySelector('.attribute-current-value') as TestElement & { oninput?: () => void };
+    const formatSelect = editor.querySelectorAll('select')
+      .find((select) => select.innerHTML.includes('value="hhmmss"')) as TestElement & { onchange?: () => void };
+    expect(valueInput.value).toBe('01:01:01');
+    expect(editor.querySelectorAll('.attribute-time-shortcut')).toHaveLength(6);
+
+    formatSelect.value = 'number';
+    formatSelect.onchange?.();
+    expect(valueInput.value).toBe('3661');
+    formatSelect.value = 'hhmmss';
+    formatSelect.onchange?.();
+    expect(valueInput.value).toBe('01:01:01');
+  });
+
+  it('uses timer shortcuts and saves numeric seconds', async () => {
+    const configured = state('88888888');
+    configured.attributes[0].value = 3661;
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    const editor = root.querySelector('.attribute-modal')!;
+    const valueInput = editor.querySelector('.attribute-current-value') as TestElement;
+    findByText(editor, '+10分')?.onclick?.();
+    expect(valueInput.value).toBe('01:11:01');
+    findByText(editor, '-1时')?.onclick?.();
+    expect(valueInput.value).toBe('00:11:01');
+    findByText(root, '保存修改')?.onclick?.();
+
+    await vi.waitFor(() => expect(loadState().attributes[0].value).toBe(661));
+  });
+
+  it('rejects invalid timer values before saving', () => {
+    for (const value of ['1:60:00', '1:24:00:00']) {
+      const configured = state('88888888');
+      configured.attributes[0].value = 3661;
+      storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      findByText(root, '编辑')?.onclick?.();
+      const editor = root.querySelector('.attribute-modal')!;
+      const valueInput = editor.querySelector('.attribute-current-value') as TestElement & { oninput?: () => void };
+      valueInput.value = value;
+      valueInput.oninput?.();
+      const requestCount = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+      findByText(root, '保存修改')?.onclick?.();
+
+      expect(root.querySelector('.attribute-modal')).not.toBeNull();
+      expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(requestCount);
+      expect(textOf(root)).toContain(value === '1:60:00' ? '分钟必须在 0–59 之间' : '四段时间中的小时必须在 0–23 之间');
+    }
   });
 
   it('keeps the configuration page open and reports a safe reset failure', async () => {
@@ -2890,7 +2953,7 @@ describe('single-page configuration rendering', () => {
     findByText(timerEditor, '模拟执行一次')?.onclick?.();
 
     await vi.waitFor(() => expect(textOf(timerEditor.querySelector('.formula-preview')!)).toContain('10 → 9'));
-    expect(currentValue.value).toBe('10');
+    expect(currentValue.value).toBe('00:00:10');
     findByText(root, '保存修改')?.onclick?.();
     await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
     expect(loadState().attributes[0].value).toBe(10);
@@ -2927,7 +2990,7 @@ describe('single-page configuration rendering', () => {
     giftSimulate.onclick?.();
     await vi.waitFor(() => expect(textOf(giftPreview)).toContain('10 → 11'));
 
-    currentValue.value = '20';
+    currentValue.value = '00:00:20';
     currentValue.oninput?.();
     expect(textOf(root)).not.toContain('10 → 11');
 
@@ -2941,7 +3004,7 @@ describe('single-page configuration rendering', () => {
     const timerPreview = timerEditor.querySelector('.formula-preview')!;
     findByText(timerEditor, '模拟执行一次')?.onclick?.();
     await vi.waitFor(() => expect(textOf(timerPreview)).toContain('21 → 20'));
-    expect(currentValue.value).toBe('20');
+    expect(currentValue.value).toBe('00:00:20');
 
     findByText(root, '保存修改')?.onclick?.();
     await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
@@ -3009,7 +3072,7 @@ describe('single-page configuration rendering', () => {
     findByText(timerEditor, '模拟执行一次')?.onclick?.();
     await vi.waitFor(() => expect(textOf(timerEditor.querySelector('.formula-preview')!)).toContain('10 → 9'));
 
-    currentValue.value = '20';
+    currentValue.value = '00:00:20';
     currentValue.oninput?.();
     expect(textOf(root)).not.toContain('10 → 9');
 
@@ -3018,7 +3081,7 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(textOf(timerEditor.querySelector('.formula-preview')!)).toContain('20 → 19'));
 
     findByText(root, '使用加班机模板')?.onclick?.();
-    expect(currentValue.value).toBe('0');
+    expect(currentValue.value).toBe('00:00:00');
     expect(textOf(root)).not.toContain('20 → 19');
   });
 

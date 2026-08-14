@@ -7,6 +7,12 @@ import { giftPriceDescription, isSpecialEventGift } from '../../gifts/special-ev
 import { formatValue } from '../../format';
 import { formatSignedYuanFromGoldSeeds, formatYuanFromGoldSeeds, goldSeedsFromYuan } from '../../currency';
 import {
+  adjustAttributeTimeValue,
+  formatAttributeTimeValue,
+  parseAttributeTimeValue,
+  type AttributeTimeParseResult,
+} from './attribute-time-value';
+import {
   BiliAuthStatus,
   checkForUpdates,
   clearContributionLedger,
@@ -153,6 +159,15 @@ interface SelectedGiftRule {
 type LeaderboardMode = 'contribution' | 'rules' | 'blind-box';
 
 type HeaderActionIcon = 'training' | 'changelog' | 'settings' | 'sun' | 'moon';
+
+const TIME_SHORTCUTS = [
+  ['-1时', -3600],
+  ['-10分', -600],
+  ['-30秒', -30],
+  ['+30秒', 30],
+  ['+10分', 600],
+  ['+1时', 3600],
+] as const;
 
 function createHeaderActionIcon(kind: HeaderActionIcon): HTMLElement {
   const namespace = 'http://www.w3.org/2000/svg';
@@ -3069,10 +3084,26 @@ export function mountConfig(root: HTMLElement): void {
       }
       updateOverviewPreview();
     };
-    const valueInput = inputField('当前值', String(original?.value ?? 0));
-    valueInput.inputMode = 'decimal';
-    const initialEditableValue = Number(valueInput.value);
-    let simulationDraftValue = Number.isFinite(initialEditableValue) ? initialEditableValue : 0;
+    const formatSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
+    formatSelect.innerHTML = '<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字 + 后缀</option>';
+    formatSelect.value = original?.format ?? 'hhmmss';
+    const valueInput = inputField(
+      '当前值',
+      formatSelect.value === 'hhmmss'
+        ? formatAttributeTimeValue(original?.value ?? 0)
+        : String(original?.value ?? 0),
+    );
+    valueInput.classList.add('attribute-current-value');
+    valueInput.inputMode = formatSelect.value === 'hhmmss' ? 'numeric' : 'decimal';
+    const readEditableAttributeValue = (): AttributeTimeParseResult => {
+      if (formatSelect.value === 'hhmmss') return parseAttributeTimeValue(valueInput.value);
+      const value = Number(valueInput.value);
+      return Number.isFinite(value)
+        ? { ok: true, seconds: value }
+        : { ok: false, message: '当前值必须是数字' };
+    };
+    const initialEditableValue = readEditableAttributeValue();
+    let simulationDraftValue = initialEditableValue.ok ? initialEditableValue.seconds : 0;
     let simulationGeneration = 0;
     let activeSimulationPreview: HTMLElement | null = null;
     const invalidateSimulationRequests = (): void => {
@@ -3089,16 +3120,13 @@ export function mountConfig(root: HTMLElement): void {
       if (activeSimulationPreview === preview) activeSimulationPreview = null;
     };
     const resetSimulationDraftFromInput = (): void => {
-      const nextValue = Number(valueInput.value);
-      simulationDraftValue = Number.isFinite(nextValue) ? nextValue : 0;
+      const nextValue = readEditableAttributeValue();
+      if (nextValue.ok) simulationDraftValue = nextValue.seconds;
       invalidateSimulationRequests();
       for (const item of selected.values()) item.simulationPreview = undefined;
       renderSelectedRules();
       renderTimerRules();
     };
-    const formatSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
-    formatSelect.innerHTML = '<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字 + 后缀</option>';
-    formatSelect.value = original?.format ?? 'hhmmss';
     const displayConfig: AttributeDisplay = original?.display
       ? { ...original.display, appearance: normalizeDisplayAppearance(original.display.appearance, state.settings, original.display.themeId), valueMappings: original.display.valueMappings?.map((mapping) => ({ ...mapping })) }
       : {
@@ -3118,28 +3146,52 @@ export function mountConfig(root: HTMLElement): void {
     const updateSuffixVisibility = (): void => {
       suffixControl.hidden = formatSelect.value !== 'suffix';
     };
+    let lastAcceptedFormat = formatSelect.value as Attribute['format'];
+    let timeShortcutRow: HTMLElement;
+    const updateTimeShortcutVisibility = (): void => {
+      timeShortcutRow.hidden = formatSelect.value !== 'hhmmss';
+    };
     formatSelect.onchange = () => {
+      const nextFormat = formatSelect.value as Attribute['format'];
+      formatSelect.value = lastAcceptedFormat;
+      const parsed = readEditableAttributeValue();
+      formatSelect.value = nextFormat;
+      if (lastAcceptedFormat === 'hhmmss' && nextFormat !== 'hhmmss') {
+        if (!parsed.ok) {
+          formatSelect.value = 'hhmmss';
+          toast(parsed.message, root);
+          valueInput.focus();
+          return;
+        }
+        valueInput.value = String(parsed.seconds);
+      } else if (lastAcceptedFormat !== 'hhmmss' && nextFormat === 'hhmmss') {
+        if (!parsed.ok || !Number.isInteger(parsed.seconds) || parsed.seconds < 0) {
+          formatSelect.value = lastAcceptedFormat;
+          toast('计时器当前值必须是非负整数秒', root);
+          valueInput.focus();
+          return;
+        }
+        valueInput.value = formatAttributeTimeValue(parsed.seconds);
+      }
+      lastAcceptedFormat = nextFormat;
+      valueInput.inputMode = nextFormat === 'hhmmss' ? 'numeric' : 'decimal';
       if (displayConfig.variant === 'number' || displayConfig.variant === 'timer') {
-        displayConfig.variant = formatSelect.value === 'hhmmss' ? 'timer' : 'number';
+        displayConfig.variant = nextFormat === 'hhmmss' ? 'timer' : 'number';
       }
       updateSuffixVisibility();
+      updateTimeShortcutVisibility();
+      resetSimulationDraftFromInput();
       updateOverviewPreview();
     };
     updateSuffixVisibility();
-    const basics = el('div', { class: 'attribute-basics' }, [
-      fieldControl(nameInput),
-      fieldControl(valueInput),
-      el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '显示格式' }), formatSelect]),
-      suffixControl,
-    ]);
     const overviewPreviewName = el('span', { class: 'attribute-overview-preview-name' });
     const overviewPreviewValue = el('strong', { class: 'attribute-overview-preview-value' });
     const updateOverviewPreview = (): void => {
-      const value = Number(valueInput.value);
+      const parsed = readEditableAttributeValue();
       const format = formatSelect.value as Attribute['format'];
       const previewAttribute: Attribute = {
         name: nameInput.value.trim() || '属性名称',
-        value: Number.isFinite(value) ? value : 0,
+        value: parsed.ok ? parsed.seconds : 0,
         unit: format === 'hhmmss' ? 'seconds' : 'none',
         format,
         decimals: original?.decimals ?? 0,
@@ -3154,6 +3206,30 @@ export function mountConfig(root: HTMLElement): void {
       updateOverviewPreview();
     };
     suffixInput.oninput = updateOverviewPreview;
+    timeShortcutRow = el('div', { class: 'attribute-time-shortcuts' }, TIME_SHORTCUTS.map(([label, delta]) => {
+      const button = el('button', { class: 'attribute-time-shortcut', type: 'button', text: label }) as HTMLButtonElement;
+      button.onclick = () => {
+        const adjusted = adjustAttributeTimeValue(valueInput.value, delta);
+        if (!adjusted.ok) {
+          toast(adjusted.message, root);
+          valueInput.focus();
+          return;
+        }
+        valueInput.value = formatAttributeTimeValue(adjusted.seconds);
+        resetSimulationDraftFromInput();
+        updateOverviewPreview();
+      };
+      return button;
+    }));
+    updateTimeShortcutVisibility();
+    const valueControl = fieldControl(valueInput);
+    valueControl.append(timeShortcutRow);
+    const basics = el('div', { class: 'attribute-basics' }, [
+      fieldControl(nameInput),
+      valueControl,
+      el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '显示格式' }), formatSelect]),
+      suffixControl,
+    ]);
     const templateButton = el('button', {
       class: 'btn guide-overtime-template',
       type: 'button',
@@ -3161,12 +3237,15 @@ export function mountConfig(root: HTMLElement): void {
     }) as HTMLButtonElement;
     templateButton.onclick = () => {
       nameInput.value = '加班时间';
-      valueInput.value = '0';
-      resetSimulationDraftFromInput();
       formatSelect.value = 'hhmmss';
+      lastAcceptedFormat = 'hhmmss';
+      valueInput.value = formatAttributeTimeValue(0);
+      valueInput.inputMode = 'numeric';
+      resetSimulationDraftFromInput();
       suffixInput.value = '';
       if (!broadcastMessageInput.value.trim()) broadcastMessageInput.value = '感谢大家的支持，欢迎投喂礼物';
       updateSuffixVisibility();
+      updateTimeShortcutVisibility();
       for (const label of Array.from(modal.querySelectorAll('.formula-target-name'))) {
         label.textContent = '加班时间 =';
       }
@@ -3270,8 +3349,8 @@ export function mountConfig(root: HTMLElement): void {
           confirmButton.disabled = true;
           confirmButton.textContent = '校验中…';
           try {
-            const value = Number(valueInput.value);
-            await previewFormula(formula, attributeName, Number.isFinite(value) ? value : 0, context === 'timer' ? 'timer' : undefined);
+            const parsed = readEditableAttributeValue();
+            await previewFormula(formula, attributeName, parsed.ok ? parsed.seconds : 0, context === 'timer' ? 'timer' : undefined);
             const result = saveFormulaPreset(state.formulaPresets, {
               name: presetNameInput.value,
               context,
@@ -4240,7 +4319,8 @@ export function mountConfig(root: HTMLElement): void {
       if (enumEnabled.checked) {
         displayConfig.variant = 'enum';
         if (valueMappings.length === 0) {
-          valueMappings.push({ value: Number(valueInput.value) || 0, label: '当前状态', color: '#fb7299' });
+          const parsed = readEditableAttributeValue();
+          valueMappings.push({ value: parsed.ok ? parsed.seconds : 0, label: '当前状态', color: '#fb7299' });
         }
       } else if (displayConfig.variant === 'enum') {
         displayConfig.variant = formatSelect.value === 'hhmmss' ? 'timer' : 'number';
@@ -4302,7 +4382,7 @@ export function mountConfig(root: HTMLElement): void {
     cancelButton.onclick = close;
     const saveButton = el('button', { class: 'btn guide-attribute-save', type: 'button', text: original ? '保存修改' : '创建属性' }) as HTMLButtonElement;
     saveButton.onclick = () => {
-      void saveAttributeEditor(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, overlay, saveButton);
+      void saveAttributeEditor(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, overlay, saveButton, readEditableAttributeValue);
     };
     modalFooter = el('footer', { class: 'modal-actions attribute-workbench-actions' }, [
       el('span', { class: 'attribute-save-note', text: '保存前会由后台统一校验规则' }),
@@ -4433,8 +4513,9 @@ export function mountConfig(root: HTMLElement): void {
     timerRules: TimerRule[],
     overlay: HTMLElement,
     saveButton: HTMLButtonElement,
+    readEditableAttributeValue: () => AttributeTimeParseResult,
   ): Promise<void> {
-    return saveAttributeEditorAsync(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, overlay, saveButton);
+    return saveAttributeEditorAsync(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, overlay, saveButton, readEditableAttributeValue);
   }
 
   async function saveAttributeEditorAsync(
@@ -4450,9 +4531,9 @@ export function mountConfig(root: HTMLElement): void {
     timerRules: TimerRule[],
     overlay: HTMLElement,
     saveButton: HTMLButtonElement,
+    readEditableAttributeValue: () => AttributeTimeParseResult,
   ): Promise<void> {
     const name = nameInput.value.trim();
-    const value = Number(valueInput.value);
     if (!name) {
       toast('请填写属性名称', root);
       nameInput.focus();
@@ -4468,11 +4549,13 @@ export function mountConfig(root: HTMLElement): void {
       nameInput.focus();
       return;
     }
-    if (!Number.isFinite(value)) {
-      toast('当前值必须是数字', root);
+    const parsedValue = readEditableAttributeValue();
+    if (!parsedValue.ok) {
+      toast(parsedValue.message, root);
       valueInput.focus();
       return;
     }
+    const value = parsedValue.seconds;
 
     const originalName = original?.name ?? '';
     const normalizedRules: SelectedGiftRule[] = [];
