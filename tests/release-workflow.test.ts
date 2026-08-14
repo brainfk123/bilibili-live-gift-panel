@@ -3,10 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { isScalar, parseDocument } from 'yaml';
 
 interface ReleaseStep {
+  env?: Record<string, string>;
   id?: string;
   name?: string;
   run?: string;
   uses?: string;
+  'working-directory'?: string;
 }
 
 const auditedSetupMSYS2Commit = '66cd2cce69caa17b53920067426061ca1de3a884';
@@ -74,5 +76,56 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[build]?.run).toContain('npm run verify:ffmpeg');
     expect(steps[e2e]?.run).toContain('scripts/gift-clip-test-tools.mjs');
     expect(steps[e2e]?.run).toContain('npm run verify:gift-clip-export');
+  });
+
+  it('gates release publication on update tooling tests and the expected signer subject', () => {
+    const { steps } = releaseWorkflow();
+    const testUpdateApi = stepIndex(steps, 'Test domestic update tooling');
+    const signOuter = stepIndex(steps, 'Prepare and sign release executable');
+    const githubRelease = stepIndex(steps, 'Create or update GitHub release');
+
+    expect(steps[testUpdateApi]?.run).toBe('go -C updateapi test ./... -race -count=1');
+    expect(testUpdateApi).toBeLessThan(githubRelease);
+    expect(signOuter).toBeLessThan(githubRelease);
+    expect(steps[signOuter]?.env?.EVSIGN_EXPECTED_SUBJECT)
+      .toBe('${{ vars.EVSIGN_EXPECTED_SUBJECT }}');
+    expect(steps[signOuter]?.run).toContain(
+      '$signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid',
+    );
+    expect(steps[signOuter]?.run).toContain('$null -eq $signature.SignerCertificate');
+    expect(steps[signOuter]?.run).toContain(
+      '$signature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT',
+    );
+  });
+
+  it('builds domestic update identity into the signed executable before mirroring it last', () => {
+    const { steps } = releaseWorkflow();
+    const build = stepIndex(steps, 'Build release executable');
+    const sign = stepIndex(steps, 'Prepare and sign release executable');
+    const githubRelease = stepIndex(steps, 'Create or update GitHub release');
+    const mirror = stepIndex(steps, 'Mirror release to Tencent COS');
+    const mirrorStep = steps[mirror];
+
+    expect(steps[build]?.env).toMatchObject({
+      APP_UPDATE_API_URL: '${{ vars.UPDATE_API_BASE_URL }}',
+      APP_UPDATE_PUBLISHER: '${{ vars.EVSIGN_EXPECTED_SUBJECT }}',
+    });
+    expect(steps[sign]?.run).toContain(
+      'node scripts/sign-evsign.mjs dist/gift-panel-windows-x64.exe',
+    );
+    expect(githubRelease).toBeLessThan(mirror);
+    expect(mirror).toBe(steps.length - 1);
+    expect(mirrorStep?.['working-directory']).toBe('updateapi');
+    expect(mirrorStep?.run).toContain(
+      'go run ./cmd/publish --tag $env:RELEASE_TAG --asset ../dist/gift-panel-windows-x64.exe --checksum ../dist/gift-panel-windows-x64.exe.sha256 --changelog ../dist/gift-panel-changelog.json',
+    );
+    expect(mirrorStep?.run).toContain('throw "Tencent COS release mirror failed"');
+    expect(mirrorStep?.env).toEqual({
+      COS_BUCKET: '${{ vars.COS_BUCKET }}',
+      COS_REGION: '${{ vars.COS_REGION }}',
+      COS_SECRET_ID: '${{ secrets.COS_RELEASE_SECRET_ID }}',
+      COS_SECRET_KEY: '${{ secrets.COS_RELEASE_SECRET_KEY }}',
+    });
+    expect(mirrorStep?.run).not.toMatch(/COS_(?:SECRET_ID|SECRET_KEY)/);
   });
 });

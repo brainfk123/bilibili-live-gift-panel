@@ -40,6 +40,9 @@ jobs:
           go-version-file: goserver/go.mod
           cache-dependency-path: goserver/go.sum
 
+      - name: Test domestic update tooling
+        run: go -C updateapi test ./... -race -count=1
+
       - name: Verify tag matches package version
         shell: pwsh
         run: |
@@ -122,6 +125,8 @@ jobs:
         env:
           APP_VERSION: ${{ env.RELEASE_TAG }}
           APP_COMMIT: ${{ github.sha }}
+          APP_UPDATE_API_URL: ${{ vars.UPDATE_API_BASE_URL }}
+          APP_UPDATE_PUBLISHER: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
 
       - name: Run backend tests
         working-directory: goserver
@@ -133,6 +138,7 @@ jobs:
           EVSIGN_KEY: ${{ secrets.EVSIGN_KEY }}
           EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
           EVSIGN_CERT: ${{ vars.EVSIGN_CERT }}
+          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
         run: |
           Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.exe
           node scripts/sign-evsign.mjs dist/gift-panel-windows-x64.exe
@@ -140,6 +146,12 @@ jobs:
           $signature = Get-AuthenticodeSignature -LiteralPath dist/gift-panel-windows-x64.exe
           if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
             throw "Authenticode verification failed: $($signature.Status) - $($signature.StatusMessage)"
+          }
+          if ($null -eq $signature.SignerCertificate) {
+            throw "Authenticode signer certificate is missing"
+          }
+          if ($signature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT) {
+            throw "Authenticode signer subject does not match EVSIGN_EXPECTED_SUBJECT"
           }
           Write-Host 'Verified outer application Authenticode signature.'
 
@@ -246,3 +258,15 @@ jobs:
             gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/gift-panel-changelog.json dist/ffmpeg-source/ffmpeg-9.0.tar.xz dist/ffmpeg-source/ffmpeg-9.0.tar.xz.asc dist/ffmpeg-build-config.txt dist/ffmpeg-component-gate.txt third_party/ffmpeg/toolchain-lock.json third_party/ffmpeg/NOTICE.md third_party/ffmpeg/COPYING.LGPLv2.1
             gh release edit $env:RELEASE_TAG --draft=false --latest
           }
+
+      - name: Mirror release to Tencent COS
+        shell: pwsh
+        working-directory: updateapi
+        env:
+          COS_BUCKET: ${{ vars.COS_BUCKET }}
+          COS_REGION: ${{ vars.COS_REGION }}
+          COS_SECRET_ID: ${{ secrets.COS_RELEASE_SECRET_ID }}
+          COS_SECRET_KEY: ${{ secrets.COS_RELEASE_SECRET_KEY }}
+        run: |
+          go run ./cmd/publish --tag $env:RELEASE_TAG --asset ../dist/gift-panel-windows-x64.exe --checksum ../dist/gift-panel-windows-x64.exe.sha256 --changelog ../dist/gift-panel-changelog.json
+          if ($LASTEXITCODE -ne 0) { throw "Tencent COS release mirror failed" }
