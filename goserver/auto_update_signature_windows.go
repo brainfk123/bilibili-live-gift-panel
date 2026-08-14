@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,11 +14,13 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const authenticodePowerShellScript = `& { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $signature = Get-AuthenticodeSignature -LiteralPath $args[0]; $subject = ''; if ($null -ne $signature.SignerCertificate) { $subject = $signature.SignerCertificate.Subject }; [pscustomobject]@{status=$signature.Status.ToString();subject=$subject} | ConvertTo-Json -Compress }`
+const authenticodeVerificationTimeout = 30 * time.Second
 
-type authenticodeCommandRunner func(string, ...string) ([]byte, error)
+type authenticodeCommandRunner func(context.Context, string, ...string) ([]byte, error)
 
 type authenticodeQueryResult struct {
 	Status  string `json:"status"`
@@ -29,7 +32,9 @@ func verifyAuthenticodePublisher(path, expectedSubject string) error {
 	if err != nil {
 		return err
 	}
-	return verifyAuthenticodePublisherWithRunner(path, expectedSubject, powershell, runAuthenticodeCommand)
+	ctx, cancel := context.WithTimeout(context.Background(), authenticodeVerificationTimeout)
+	defer cancel()
+	return verifyAuthenticodePublisherWithRunner(ctx, path, expectedSubject, powershell, runAuthenticodeCommand)
 }
 
 func systemWindowsPowerShellPath() (string, error) {
@@ -48,11 +53,12 @@ func systemWindowsPowerShellPath() (string, error) {
 	return powershell, nil
 }
 
-func verifyAuthenticodePublisherWithRunner(path, expectedSubject, powershell string, runner authenticodeCommandRunner) error {
+func verifyAuthenticodePublisherWithRunner(ctx context.Context, path, expectedSubject, powershell string, runner authenticodeCommandRunner) error {
 	if expectedSubject == "" {
 		return errors.New("预期 Authenticode 发布者为空")
 	}
 	output, err := runner(
+		ctx,
 		powershell,
 		"-NoProfile",
 		"-NonInteractive",
@@ -87,18 +93,18 @@ func verifyAuthenticodePublisherWithRunner(path, expectedSubject, powershell str
 	return nil
 }
 
-func newAuthenticodeCommand(name string, args ...string) *exec.Cmd {
-	command := exec.Command(name, args...)
+func newAuthenticodeCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	command := exec.CommandContext(ctx, name, args...)
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	return command
 }
 
-func runAuthenticodeCommand(name string, args ...string) ([]byte, error) {
+func runAuthenticodeCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
 	if len(args) == 0 {
 		return nil, errors.New("PowerShell 命令缺少路径参数")
 	}
 	commandArgs := append([]string(nil), args...)
 	lastArgument := len(commandArgs) - 1
 	commandArgs[lastArgument] = "'" + strings.ReplaceAll(commandArgs[lastArgument], "'", "''") + "'"
-	return newAuthenticodeCommand(name, commandArgs...).CombinedOutput()
+	return newAuthenticodeCommand(ctx, name, commandArgs...).CombinedOutput()
 }

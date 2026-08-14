@@ -22,6 +22,7 @@ const (
 var (
 	procUpdateOpenProcess      = kernel32.NewProc("OpenProcess")
 	procUpdateWaitForSingleObj = kernel32.NewProc("WaitForSingleObject")
+	removeWindowsUpdateFile    = os.Remove
 )
 
 func isAutoUpdateSupported() bool {
@@ -37,8 +38,15 @@ func launchUpdateInstaller(metadataPath string, waitPID int, restart bool) error
 	if err := json.Unmarshal(data, &pending); err != nil {
 		return err
 	}
-	if err := verifyFileSHA256(pending.PendingPath, pending.SHA256); err != nil {
-		return err
+	if err := verifyPendingExecutable(pending, defaultVerifyUpdateExecutable); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "启动更新替换器前安全校验诊断：%v\n", err)
+		return errors.New("待安装更新安全校验失败")
+	}
+	for _, path := range []string{pending.TargetPath + ".old", pending.TargetPath + ".new"} {
+		if err := removeUpdateArtifactWith(removeWindowsUpdateFile, path); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "启动更新替换器前残留文件清理诊断：%v\n", err)
+			return errors.New("待安装更新清理失败")
+		}
 	}
 	args := []string{"--apply-update", "--state", metadataPath, strconv.Itoa(waitPID)}
 	if restart {
@@ -77,30 +85,40 @@ func replaceDownloadedExecutable(self string, pending pendingUpdate, waitPID int
 	if filepath.Ext(targetPath) != ".exe" {
 		return errors.New("更新目标不是 EXE 文件")
 	}
-	if err := verifyFileSHA256(self, pending.SHA256); err != nil {
-		return fmt.Errorf("待安装文件校验失败：%w", err)
+	if err := verifyPendingExecutable(pending, defaultVerifyUpdateExecutable); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "更新替换器源文件安全校验诊断：%v\n", err)
+		return errors.New("待安装文件安全校验失败")
 	}
 	waitForWindowsProcess(waitPID)
 
 	newPath := targetPath + ".new"
 	backupPath := targetPath + ".old"
-	_ = os.Remove(newPath)
-	_ = os.Remove(backupPath)
+	if err := removeUpdateArtifactWith(removeWindowsUpdateFile, newPath); err != nil {
+		return fmt.Errorf("清理残留新版本失败：%w", err)
+	}
+	if err := removeUpdateArtifactWith(removeWindowsUpdateFile, backupPath); err != nil {
+		return fmt.Errorf("清理旧备份失败：%w", err)
+	}
 	if err := copyUpdateFile(self, newPath); err != nil {
 		return fmt.Errorf("准备新版本失败：%w", err)
 	}
-	if err := verifyFileSHA256(newPath, pending.SHA256); err != nil {
-		_ = os.Remove(newPath)
-		return fmt.Errorf("新版本落盘校验失败：%w", err)
+	newPending := pending
+	newPending.PendingPath = newPath
+	if err := verifyPendingExecutable(newPending, defaultVerifyUpdateExecutable); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "新版本落盘安全校验诊断：%v\n", err)
+		verificationErr := errors.New("新版本落盘安全校验失败")
+		return errors.Join(verificationErr, removeUpdateArtifactWith(removeWindowsUpdateFile, newPath))
 	}
 	if err := renameUpdateFile(targetPath, backupPath); err != nil {
-		_ = os.Remove(newPath)
-		return fmt.Errorf("备份旧版本失败：%w", err)
+		return errors.Join(fmt.Errorf("备份旧版本失败：%w", err), removeUpdateArtifactWith(removeWindowsUpdateFile, newPath))
 	}
 	if err := renameUpdateFile(newPath, targetPath); err != nil {
-		_ = renameUpdateFile(backupPath, targetPath)
-		_ = os.Remove(newPath)
-		return fmt.Errorf("替换程序失败，已恢复旧版本：%w", err)
+		restoreErr := renameUpdateFile(backupPath, targetPath)
+		cleanupErr := removeUpdateArtifactWith(removeWindowsUpdateFile, newPath)
+		if restoreErr != nil {
+			return errors.Join(fmt.Errorf("替换程序失败且恢复旧版本失败：%w", err), restoreErr, cleanupErr)
+		}
+		return errors.Join(fmt.Errorf("替换程序失败，已恢复旧版本：%w", err), cleanupErr)
 	}
 	return nil
 }
@@ -138,14 +156,17 @@ func copyUpdateFile(sourcePath, targetPath string) error {
 		return err
 	}
 	if _, err := io.Copy(target, source); err != nil {
-		target.Close()
-		_ = os.Remove(targetPath)
-		return err
+		closeErr := target.Close()
+		cleanupErr := removeUpdateArtifactWith(removeWindowsUpdateFile, targetPath)
+		return errors.Join(err, closeErr, cleanupErr)
 	}
 	if err := target.Sync(); err != nil {
-		target.Close()
-		_ = os.Remove(targetPath)
-		return err
+		closeErr := target.Close()
+		cleanupErr := removeUpdateArtifactWith(removeWindowsUpdateFile, targetPath)
+		return errors.Join(err, closeErr, cleanupErr)
 	}
-	return target.Close()
+	if err := target.Close(); err != nil {
+		return errors.Join(err, removeUpdateArtifactWith(removeWindowsUpdateFile, targetPath))
+	}
+	return nil
 }

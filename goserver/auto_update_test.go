@@ -267,10 +267,11 @@ func TestFindReleaseAssetRejectsInvalidDigest(t *testing.T) {
 	}
 }
 
-func TestReleaseUsesChecksumAssetAndUnknownDownloadSize(t *testing.T) {
+func TestReleaseRejectsMissingExecutableSize(t *testing.T) {
 	binary := []byte("mirrored executable")
 	digestBytes := sha256.Sum256(binary)
 	digest := hex.EncodeToString(digestBytes[:])
+	assetRequests := 0
 
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -286,6 +287,7 @@ func TestReleaseUsesChecksumAssetAndUnknownDownloadSize(t *testing.T) {
 		case "/checksum":
 			_, _ = w.Write([]byte(digest + "  " + updateAssetName))
 		case "/asset":
+			assetRequests++
 			w.Header().Del("Content-Length")
 			_, _ = w.Write(binary)
 		default:
@@ -302,15 +304,14 @@ func TestReleaseUsesChecksumAssetAndUnknownDownloadSize(t *testing.T) {
 	})
 	updater.checkAndDownload(context.Background(), true)
 	status := updater.Status()
-	if status.State != "ready" || status.LatestVersion != "1.1.0" {
+	if status.State != "error" {
 		t.Fatalf("status = %#v", status)
 	}
-	downloaded, err := os.ReadFile(filepath.Join(root, "updates", "gift-panel-pending.exe"))
-	if err != nil {
-		t.Fatal(err)
+	if assetRequests != 0 {
+		t.Fatalf("asset requests = %d, want 0 for missing required size", assetRequests)
 	}
-	if string(downloaded) != string(binary) {
-		t.Fatalf("downloaded = %q", downloaded)
+	if _, err := os.Stat(filepath.Join(root, "updates", "gift-panel-pending.exe")); !os.IsNotExist(err) {
+		t.Fatalf("pending executable must not exist: %v", err)
 	}
 }
 
@@ -515,12 +516,19 @@ func TestUpdaterSignatureFailuresLeaveNoPendingExecutable(t *testing.T) {
 			{Name: "Domestic", URL: server.URL + "/domestic"},
 			{Name: "GitHub", URL: server.URL + "/github", GitHub: true},
 		},
-		VerifyExecutable: func(string) error { return errors.New("publisher mismatch") },
+		VerifyExecutable: func(string) error { return errors.New("CN=Unexpected Publisher, O=Diagnostic Detail") },
 	})
 
 	updater.checkAndDownload(context.Background(), true)
-	if status := updater.Status(); status.State != "error" || status.RestartRequired {
+	status := updater.Status()
+	if status.State != "error" || status.RestartRequired {
 		t.Fatalf("status = %#v", status)
+	}
+	if !strings.Contains(status.Message, "安全校验失败") {
+		t.Fatalf("status message = %q, want stable safety verification error", status.Message)
+	}
+	if strings.Contains(status.Message, "Unexpected Publisher") || strings.Contains(status.Message, "Diagnostic Detail") {
+		t.Fatalf("status message leaked signer diagnostics: %q", status.Message)
 	}
 	if updater.HasPending() {
 		t.Fatal("signature failure must not create a pending update")
@@ -530,6 +538,75 @@ func TestUpdaterSignatureFailuresLeaveNoPendingExecutable(t *testing.T) {
 	}
 	if matches, err := filepath.Glob(filepath.Join(updatesDir, "*.download")); err != nil || len(matches) != 0 {
 		t.Fatalf("temporary downloads after signature failure = %v, err = %v", matches, err)
+	}
+}
+
+func TestUpdaterCleanupFailureStopsFallbackAndReportsError(t *testing.T) {
+	binary := []byte("executable whose rejected download remains locked")
+	digestBytes := sha256.Sum256(binary)
+	digest := hex.EncodeToString(digestBytes[:])
+	githubAssetRequests := 0
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/domestic", "/github":
+			assetPath := "/domestic-asset"
+			if r.URL.Path == "/github" {
+				assetPath = "/github-asset"
+			}
+			_ = json.NewEncoder(w).Encode(githubRelease{
+				TagName: "v1.1.0",
+				Assets: []githubAsset{{
+					Name: updateAssetName, DownloadURL: server.URL + assetPath, Size: int64(len(binary)), Digest: "sha256:" + digest,
+				}},
+			})
+		case "/domestic-asset":
+			_, _ = w.Write(binary)
+		case "/github-asset":
+			githubAssetRequests++
+			_, _ = w.Write(binary)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	removeAttempts := 0
+	updater := newAutoUpdater(autoUpdaterOptions{
+		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
+		UpdatesDir: filepath.Join(root, "updates"), AssetName: updateAssetName,
+		ReleaseSources: []updateReleaseSource{
+			{Name: "Domestic", URL: server.URL + "/domestic"},
+			{Name: "GitHub", URL: server.URL + "/github", GitHub: true},
+		},
+		VerifyExecutable: func(string) error { return errors.New("CN=Unexpected Publisher") },
+		RemoveFile: func(path string) error {
+			if strings.HasSuffix(path, ".download") {
+				removeAttempts++
+				return errors.New("locked artifact")
+			}
+			return os.Remove(path)
+		},
+	})
+
+	updater.checkAndDownload(context.Background(), true)
+	status := updater.Status()
+	if status.State != "error" || !strings.Contains(status.Message, "清理") {
+		t.Fatalf("status = %#v", status)
+	}
+	if strings.Contains(status.Message, "locked artifact") || strings.Contains(status.Message, "Unexpected Publisher") {
+		t.Fatalf("user-visible status leaked diagnostic detail: %q", status.Message)
+	}
+	if removeAttempts != 3 {
+		t.Fatalf("remove attempts = %d, want 3", removeAttempts)
+	}
+	if githubAssetRequests != 0 {
+		t.Fatalf("GitHub asset requests = %d, want 0 after cleanup integrity failure", githubAssetRequests)
+	}
+	if updater.HasPending() {
+		t.Fatal("cleanup failure must never produce pending update")
 	}
 }
 
@@ -673,6 +750,40 @@ func TestDownloadRejectsDigestMismatch(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(root, "updates", "gift-panel-pending.exe")); !os.IsNotExist(statErr) {
 		t.Fatalf("pending file must not survive mismatch: %v", statErr)
+	}
+}
+
+func TestDownloadRejectsPendingWhenPostRenameVerificationFails(t *testing.T) {
+	binary := []byte("signed temporary executable")
+	digestBytes := sha256.Sum256(binary)
+	digest := hex.EncodeToString(digestBytes[:])
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(binary)
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	updatesDir := filepath.Join(root, "updates")
+	updater := newAutoUpdater(autoUpdaterOptions{
+		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
+		UpdatesDir: updatesDir, ReleaseURL: server.URL, AssetName: updateAssetName,
+		VerifyExecutable: func(path string) error {
+			if filepath.Base(path) == "gift-panel-pending.exe" {
+				return errors.New("pending publisher mismatch")
+			}
+			return nil
+		},
+	})
+	_, err := updater.downloadAsset(context.Background(), "1.1.0", githubAsset{
+		Name: updateAssetName, DownloadURL: server.URL, Size: int64(len(binary)), Digest: "sha256:" + digest,
+	})
+	if err == nil {
+		t.Fatal("post-rename signature failure must reject pending executable")
+	}
+	if _, statErr := os.Stat(filepath.Join(updatesDir, "gift-panel-pending.exe")); !os.IsNotExist(statErr) {
+		t.Fatalf("pending executable must be removed: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(updatesDir, "pending-update.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("pending metadata must not be written: %v", statErr)
 	}
 }
 

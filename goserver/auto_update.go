@@ -37,7 +37,11 @@ const (
 	updateSourceTimeout    = 20 * time.Second
 	updateChecksumMaxBytes = int64(4096)
 	updateInstalledMarker  = "installed-update.json"
+	updateCleanupAttempts  = 3
+	updateCleanupRetryWait = 10 * time.Millisecond
 )
+
+var errUpdateArtifactCleanup = errors.New("更新文件清理失败")
 
 type updateStatus struct {
 	State           string `json:"state"`
@@ -67,6 +71,7 @@ type githubAsset struct {
 
 type pendingUpdate struct {
 	Version     string `json:"version"`
+	Size        int64  `json:"size"`
 	SHA256      string `json:"sha256"`
 	PendingPath string `json:"pendingPath"`
 	TargetPath  string `json:"targetPath"`
@@ -100,6 +105,8 @@ type autoUpdaterOptions struct {
 	CheckPeriod      time.Duration
 	Now              func() time.Time
 	VerifyExecutable func(string) error
+	LaunchInstaller  func(string, int, bool) error
+	RemoveFile       func(string) error
 }
 
 type autoUpdater struct {
@@ -116,6 +123,8 @@ type autoUpdater struct {
 	automaticAllowed func() bool
 	onReady          func(string)
 	verifyExecutable func(string) error
+	launchInstaller  func(string, int, bool) error
+	removeFile       func(string) error
 
 	mu      sync.Mutex
 	status  updateStatus
@@ -249,6 +258,14 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 	if verifyExecutable == nil {
 		verifyExecutable = defaultVerifyUpdateExecutable
 	}
+	launchInstaller := options.LaunchInstaller
+	if launchInstaller == nil {
+		launchInstaller = launchUpdateInstaller
+	}
+	removeFile := options.RemoveFile
+	if removeFile == nil {
+		removeFile = os.Remove
+	}
 	releaseSources := append([]updateReleaseSource(nil), options.ReleaseSources...)
 	if len(releaseSources) == 0 && strings.TrimSpace(options.ReleaseURL) != "" {
 		releaseSources = []updateReleaseSource{{Name: "更新源", URL: options.ReleaseURL, GitHub: true}}
@@ -269,6 +286,8 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 		trigger:          make(chan bool, 1),
 		automaticAllowed: func() bool { return true },
 		verifyExecutable: verifyExecutable,
+		launchInstaller:  launchInstaller,
+		removeFile:       removeFile,
 	}
 	if updater.currentVersion == "" {
 		updater.currentVersion = "dev"
@@ -433,14 +452,48 @@ func (updater *autoUpdater) InstallOnExit(restart bool) error {
 	if pending == nil {
 		return nil
 	}
-	if err := verifyFileSHA256(pending.PendingPath, pending.SHA256); err != nil {
-		return fmt.Errorf("退出更新校验失败：%w", err)
+	// This revalidation narrows accidental replacement and ordinary tampering windows.
+	// A malicious process running as the same user can still race path-based checks;
+	// defending that boundary requires a handle-based installer protocol and is outside
+	// the updater's current threat model.
+	if err := verifyPendingExecutable(*pending, updater.verifyExecutable); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "待安装更新执行前安全校验失败：%v\n", err)
+		cleanupErr := updater.cleanupPendingUpdate(*pending)
+		updater.mu.Lock()
+		updater.pending = nil
+		updater.mu.Unlock()
+		if cleanupErr != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "待安装更新拒绝后清理失败：%v\n", cleanupErr)
+			updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
+			return errors.New("待安装更新清理失败，已拒绝执行")
+		}
+		updater.setStatus("error", pending.Version, "待安装更新安全校验失败，已拒绝执行。", 0, false)
+		return errors.New("待安装更新安全校验失败，已拒绝执行")
+	}
+	if err := updater.preparePendingInstall(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "启动更新替换器前残留文件清理失败：%v\n", err)
+		updater.mu.Lock()
+		updater.pending = nil
+		updater.mu.Unlock()
+		updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
+		return errors.New("待安装更新清理失败，已拒绝执行")
 	}
 	metadataPath := updater.metadataPath()
-	if err := launchUpdateInstaller(metadataPath, os.Getpid(), restart); err != nil {
+	if err := updater.launchInstaller(metadataPath, os.Getpid(), restart); err != nil {
 		return fmt.Errorf("启动更新替换器失败：%w", err)
 	}
 	return nil
+}
+
+func (updater *autoUpdater) preparePendingInstall() error {
+	if updater.executablePath == "" {
+		return errors.New("更新目标路径为空")
+	}
+	var cleanupErr error
+	for _, path := range []string{updater.executablePath + ".old", updater.executablePath + ".new"} {
+		cleanupErr = errors.Join(cleanupErr, updater.removeUpdateArtifact(path))
+	}
+	return cleanupErr
 }
 
 func (updater *autoUpdater) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -580,6 +633,12 @@ func (updater *autoUpdater) checkAndDownload(ctx context.Context, manual bool) {
 		updater.setStatus("downloading", candidate.Version, fmt.Sprintf("正在通过 %s 静默下载 v%s…", candidate.Source.Name, candidate.Version), 0, false)
 		pending, err = updater.downloadAsset(ctx, candidate.Version, asset)
 		if err != nil {
+			if errors.Is(err, errUpdateArtifactCleanup) {
+				_, _ = fmt.Fprintf(os.Stderr, "更新文件清理失败，已停止自动更新：%v\n", err)
+				updater.markChecked()
+				updater.setStatus("error", candidate.Version, "更新文件清理失败，已停止安装。", 0, false)
+				return
+			}
 			sourceErrors = append(sourceErrors, fmt.Sprintf("%s：下载更新失败：%v", candidate.Source.Name, err))
 			updater.setStatus("checking", candidate.Version, "当前更新源下载失败，正在尝试备用源…", 0, false)
 			continue
@@ -660,6 +719,9 @@ func (updater *autoUpdater) resolveReleaseAsset(ctx context.Context, release git
 	if err != nil {
 		return githubAsset{}, err
 	}
+	if asset.Size <= 0 {
+		return githubAsset{}, fmt.Errorf("Release 中的 %s 文件大小无效", assetName)
+	}
 	if strings.TrimSpace(asset.Digest) != "" {
 		return asset, nil
 	}
@@ -709,9 +771,12 @@ func (updater *autoUpdater) fetchChecksum(ctx context.Context, downloadURL strin
 	return digest, nil
 }
 
-func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, asset githubAsset) (*pendingUpdate, error) {
+func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, asset githubAsset) (_ *pendingUpdate, resultErr error) {
 	if err := os.MkdirAll(updater.updatesDir, 0o700); err != nil {
 		return nil, fmt.Errorf("创建更新目录失败：%w", err)
+	}
+	if asset.Size <= 0 {
+		return nil, errors.New("更新文件缺少有效大小")
 	}
 	expectedSHA, err := normalizeSHA256(asset.Digest)
 	if err != nil {
@@ -731,9 +796,6 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 		return nil, fmt.Errorf("下载地址返回 HTTP %d", response.StatusCode)
 	}
 	expectedSize := asset.Size
-	if expectedSize == 0 && response.ContentLength > 0 {
-		expectedSize = response.ContentLength
-	}
 	if expectedSize > updateMaxBytes {
 		return nil, fmt.Errorf("下载文件过大：%d 字节", expectedSize)
 	}
@@ -742,7 +804,16 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 		return nil, err
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	temporaryNeedsCleanup := true
+	defer func() {
+		if !temporaryNeedsCleanup {
+			return
+		}
+		if err := updater.removeUpdateArtifact(temporaryPath); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "更新临时文件清理失败：%v\n", err)
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
 	written, copyErr := io.Copy(temporary, io.LimitReader(response.Body, updateMaxBytes+1))
 	closeErr := temporary.Close()
 	if copyErr != nil {
@@ -754,31 +825,91 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 	if written > updateMaxBytes {
 		return nil, fmt.Errorf("下载文件超过 %d 字节限制", updateMaxBytes)
 	}
-	if expectedSize > 0 && written != expectedSize {
+	if written != expectedSize {
 		return nil, fmt.Errorf("下载大小不符：收到 %d 字节，预期 %d 字节", written, expectedSize)
 	}
 	if err := verifyFileSHA256(temporaryPath, expectedSHA); err != nil {
 		return nil, fmt.Errorf("SHA-256 校验不通过，已丢弃下载文件：%w", err)
 	}
 	if err := updater.verifyExecutable(temporaryPath); err != nil {
-		return nil, fmt.Errorf("Authenticode 验证失败：%w", err)
+		_, _ = fmt.Fprintf(os.Stderr, "下载更新 Authenticode 诊断：%v\n", err)
+		return nil, errors.New("更新文件安全校验失败")
 	}
 	pendingPath := filepath.Join(updater.updatesDir, "gift-panel-pending.exe")
-	_ = os.Remove(pendingPath)
+	if err := updater.removeUpdateArtifact(pendingPath); err != nil {
+		return nil, err
+	}
 	if err := os.Rename(temporaryPath, pendingPath); err != nil {
 		return nil, fmt.Errorf("保存待安装更新失败：%w", err)
 	}
+	temporaryNeedsCleanup = false
 	pending := &pendingUpdate{
 		Version:     version,
+		Size:        expectedSize,
 		SHA256:      expectedSHA,
 		PendingPath: pendingPath,
 		TargetPath:  updater.executablePath,
 	}
+	if err := verifyPendingExecutable(*pending, updater.verifyExecutable); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "rename 后待安装更新安全校验诊断：%v\n", err)
+		verificationErr := errors.New("更新文件安全校验失败")
+		if cleanupErr := updater.removeUpdateArtifact(pendingPath); cleanupErr != nil {
+			return nil, errors.Join(verificationErr, cleanupErr)
+		}
+		return nil, verificationErr
+	}
 	if err := updater.writePendingMetadata(*pending); err != nil {
-		_ = os.Remove(pendingPath)
+		if cleanupErr := updater.removeUpdateArtifact(pendingPath); cleanupErr != nil {
+			return nil, errors.Join(err, cleanupErr)
+		}
 		return nil, err
 	}
 	return pending, nil
+}
+
+func (updater *autoUpdater) removeUpdateArtifact(path string) error {
+	return removeUpdateArtifactWith(updater.removeFile, path)
+}
+
+func removeUpdateArtifactWith(removeFile func(string) error, path string) error {
+	if path == "" {
+		return nil
+	}
+	var lastErr error
+	for attempt := 0; attempt < updateCleanupAttempts; attempt++ {
+		err := removeFile(path)
+		if err == nil || os.IsNotExist(err) {
+			return nil
+		}
+		lastErr = err
+		if attempt+1 < updateCleanupAttempts {
+			time.Sleep(updateCleanupRetryWait)
+		}
+	}
+	return fmt.Errorf("%w：%v", errUpdateArtifactCleanup, lastErr)
+}
+
+func verifyPendingExecutable(pending pendingUpdate, verifyExecutable func(string) error) error {
+	if pending.Size <= 0 {
+		return errors.New("待安装更新缺少有效大小")
+	}
+	info, err := os.Stat(pending.PendingPath)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("待安装更新不是普通文件")
+	}
+	if info.Size() != pending.Size {
+		return fmt.Errorf("待安装更新大小不符：收到 %d 字节，预期 %d 字节", info.Size(), pending.Size)
+	}
+	if err := verifyFileSHA256(pending.PendingPath, pending.SHA256); err != nil {
+		return err
+	}
+	if verifyExecutable == nil {
+		return errors.New("待安装更新缺少签名验证器")
+	}
+	return verifyExecutable(pending.PendingPath)
 }
 
 func (updater *autoUpdater) metadataPath() string {
@@ -874,16 +1005,16 @@ func (updater *autoUpdater) restorePendingUpdate() {
 	}
 	var pending pendingUpdate
 	if json.Unmarshal(data, &pending) != nil || pending.PendingPath != filepath.Join(updater.updatesDir, "gift-panel-pending.exe") || pending.TargetPath != updater.executablePath {
-		updater.cleanupPendingUpdate(pending)
+		updater.cleanupRestoredPending(pending)
 		return
 	}
 	comparison, versionErr := compareStableVersions(pending.Version, updater.currentVersion)
 	if versionErr != nil || comparison <= 0 {
-		updater.cleanupPendingUpdate(pending)
+		updater.cleanupRestoredPending(pending)
 		return
 	}
-	if verifyFileSHA256(pending.PendingPath, pending.SHA256) != nil {
-		updater.cleanupPendingUpdate(pending)
+	if verifyPendingExecutable(pending, updater.verifyExecutable) != nil {
+		updater.cleanupRestoredPending(pending)
 		return
 	}
 	updater.pending = &pending
@@ -897,18 +1028,30 @@ func (updater *autoUpdater) restorePendingUpdate() {
 	}
 }
 
-func (updater *autoUpdater) cleanupPendingUpdate(pending pendingUpdate) {
+func (updater *autoUpdater) cleanupRestoredPending(pending pendingUpdate) {
+	if err := updater.cleanupPendingUpdate(pending); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "恢复待安装更新时清理失败：%v\n", err)
+		updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
+	}
+}
+
+func (updater *autoUpdater) cleanupPendingUpdate(pending pendingUpdate) error {
 	knownPendingPath := filepath.Join(updater.updatesDir, "gift-panel-pending.exe")
+	paths := make([]string, 0, 4)
 	if pending.PendingPath == "" || filepath.Clean(pending.PendingPath) == filepath.Clean(knownPendingPath) {
-		_ = os.Remove(knownPendingPath)
+		paths = append(paths, knownPendingPath)
 	} else if filepath.Dir(pending.PendingPath) == filepath.Clean(updater.updatesDir) {
-		_ = os.Remove(pending.PendingPath)
+		paths = append(paths, pending.PendingPath)
 	}
-	_ = os.Remove(updater.metadataPath())
+	paths = append(paths, updater.metadataPath())
 	if updater.executablePath != "" {
-		_ = os.Remove(updater.executablePath + ".old")
-		_ = os.Remove(updater.executablePath + ".new")
+		paths = append(paths, updater.executablePath+".old", updater.executablePath+".new")
 	}
+	var cleanupErr error
+	for _, path := range paths {
+		cleanupErr = errors.Join(cleanupErr, updater.removeUpdateArtifact(path))
+	}
+	return cleanupErr
 }
 
 func normalizeSHA256(value string) (string, error) {
