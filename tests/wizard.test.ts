@@ -4969,14 +4969,16 @@ describe('single-page configuration rendering', () => {
       const opening = configuredAggregate();
       await saveState(opening);
       const authoritative = JSON.parse(JSON.stringify(opening)) as typeof opening;
-      authoritative.attributes[1].value = 88;
       authoritative.attributes.push({
         id: 'attribute-generated', name: '服务端新属性', value: 7, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '',
       });
       let submittedBody: Record<string, unknown> | undefined;
+      let peerMutatedAfterCreateSubmit = false;
       const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const path = String(input);
         if (path === '/api/attribute-edits') {
+          authoritative.attributes[1].value = 88;
+          peerMutatedAfterCreateSubmit = true;
           submittedBody = JSON.parse(String(init?.body));
           return Response.json({
             code: 0, target: { id: 'attribute-generated', name: '服务端新属性', created: true }, state: authoritative,
@@ -5009,6 +5011,7 @@ describe('single-page configuration rendering', () => {
       expect(submittedBody?.giftCatalogUpserts).toEqual([]);
       expect(fetchImpl.mock.calls.some(([url]) => String(url) === '/api/attribute-edits/session')).toBe(false);
       expect(fetchImpl.mock.calls.some(([url]) => String(url) === '/api/attribute-edit-lease')).toBe(false);
+      expect(peerMutatedAfterCreateSubmit).toBe(true);
       expect(JSON.stringify(submittedBody)).not.toContain('attribute-peer');
       await vi.waitFor(() => expect(loadState().attributes.at(-1)?.id).toBe('attribute-generated'));
       expect(loadState().attributes[1].value).toBe(88);

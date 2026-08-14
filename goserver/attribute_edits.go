@@ -303,7 +303,13 @@ func (s *configStore) applyAttributeEdit(command attributeEditCommand, newID fun
 }
 
 func (s *configStore) applyAttributeEditAuthorized(command attributeEditCommand, newID func() (string, error), isLive func() bool) (attributeEditResult, error) {
+	if s.beforeAttributeEditStoreLock != nil {
+		s.beforeAttributeEditStoreLock()
+	}
 	s.mu.Lock()
+	if s.afterAttributeEditStoreLock != nil {
+		s.afterAttributeEditStoreLock()
+	}
 	defer s.mu.Unlock()
 	return s.applyAttributeEditLockedAuthorized(command, newID, isLive)
 }

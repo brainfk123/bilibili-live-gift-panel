@@ -32,6 +32,10 @@ type configStore struct {
 	mutationBlockErr   error
 	writeAtomically    func(string, []byte) error
 	readTransaction    func(string) ([]byte, error)
+	// Attribute-edit lock hooks are nil in production. Tests use them to
+	// deterministically observe the exact mutex boundary.
+	beforeAttributeEditStoreLock func()
+	afterAttributeEditStoreLock  func()
 }
 
 type stateMutationsBlockedError struct{}

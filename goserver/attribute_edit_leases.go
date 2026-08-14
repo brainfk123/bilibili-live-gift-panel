@@ -33,13 +33,14 @@ type attributeEditLease struct {
 }
 
 type attributeEditLeaseCoordinator struct {
-	mu         sync.Mutex
-	changed    *sync.Cond
-	ttl        time.Duration
-	now        func() time.Time
-	newToken   func() (string, error)
-	sessions   map[string]*attributeEditLease
-	afterBegin func()
+	mu                 sync.Mutex
+	changed            *sync.Cond
+	ttl                time.Duration
+	now                func() time.Time
+	newToken           func() (string, error)
+	sessions           map[string]*attributeEditLease
+	afterBegin         func()
+	afterReleaseMarked func()
 }
 
 func newAttributeEditLeaseCoordinator(ttl time.Duration, now func() time.Time, token func() (string, error)) *attributeEditLeaseCoordinator {
@@ -181,6 +182,9 @@ func (leases *attributeEditLeaseCoordinator) Release(attributeID, token string) 
 		return false
 	}
 	lease.releasing = true
+	if leases.afterReleaseMarked != nil {
+		leases.afterReleaseMarked()
+	}
 	for lease.claims > 0 {
 		leases.changed.Wait()
 	}

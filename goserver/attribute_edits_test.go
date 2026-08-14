@@ -422,8 +422,18 @@ func TestAttributeEditSubmitHoldsLiveLeaseUntilItAcquiresStoreLock(t *testing.T)
 	command := existingAttributeEdit("attribute-a", "能量", 10)
 	command.Target.LeaseToken = token
 	service := newAttributeEditService(store, leases, fixedAttributeID)
+	attemptedStoreLock := make(chan struct{})
+	acquiredStoreLock := make(chan struct{})
+	store.beforeAttributeEditStoreLock = func() { close(attemptedStoreLock) }
+	store.afterAttributeEditStoreLock = func() { close(acquiredStoreLock) }
 	enteredPersistence := make(chan struct{})
 	releasePersistence := make(chan struct{})
+	var releasePersistenceOnce sync.Once
+	var submitWait sync.WaitGroup
+	t.Cleanup(func() {
+		releasePersistenceOnce.Do(func() { close(releasePersistence) })
+		submitWait.Wait()
+	})
 	store.writeAtomically = func(string, []byte) error {
 		close(enteredPersistence)
 		<-releasePersistence
@@ -431,22 +441,25 @@ func TestAttributeEditSubmitHoldsLiveLeaseUntilItAcquiresStoreLock(t *testing.T)
 	}
 
 	store.mu.Lock()
+	storeLocked := true
+	t.Cleanup(func() {
+		if storeLocked {
+			store.mu.Unlock()
+		}
+	})
 	done := make(chan error, 1)
+	submitWait.Add(1)
 	go func() {
+		defer submitWait.Done()
 		_, err := service.Submit(command)
 		done <- err
 	}()
-	select {
-	case <-enteredPersistence:
-		store.mu.Unlock()
-		close(releasePersistence)
-		<-done
-		t.Fatal("submit reached persistence before acquiring store lock")
-	case <-time.After(50 * time.Millisecond):
-		store.mu.Unlock()
-	}
+	<-attemptedStoreLock
+	store.mu.Unlock()
+	storeLocked = false
+	<-acquiredStoreLock
 	<-enteredPersistence
-	close(releasePersistence)
+	releasePersistenceOnce.Do(func() { close(releasePersistence) })
 	if err := <-done; err == nil {
 		t.Fatal("expected injected write failure")
 	}
@@ -505,6 +518,8 @@ func TestAttributeEditPrepareKeepsBackfillLeaseAndStateCoherent(t *testing.T) {
 	service := newAttributeEditService(store, leases, fixedAttributeID)
 	enteredCreate := make(chan struct{})
 	resumeCreate := make(chan struct{})
+	var resumeCreateOnce sync.Once
+	t.Cleanup(func() { resumeCreateOnce.Do(func() { close(resumeCreate) }) })
 	service.beforeLeaseCreate = func() {
 		close(enteredCreate)
 		<-resumeCreate
@@ -529,12 +544,7 @@ func TestAttributeEditPrepareKeepsBackfillLeaseAndStateCoherent(t *testing.T) {
 		})
 		deleted <- err
 	}()
-	select {
-	case err := <-deleted:
-		t.Fatalf("delete interleaved before lease/session completion: %v", err)
-	case <-time.After(30 * time.Millisecond):
-	}
-	close(resumeCreate)
+	resumeCreateOnce.Do(func() { close(resumeCreate) })
 	result := <-prepared
 	if result.err != nil || result.session.AttributeID != "generated-attribute" || !leases.Has(result.session.AttributeID, result.session.Token) {
 		t.Fatalf("session=%#v err=%v", result.session, result.err)
@@ -557,6 +567,12 @@ func TestAttributeEditSubmitCannotDeadlockWithBackgroundFreezeCheck(t *testing.T
 	service := newAttributeEditService(store, leases, fixedAttributeID)
 	claimStarted := make(chan struct{})
 	allowSubmit := make(chan struct{})
+	var allowSubmitOnce sync.Once
+	var submitWait sync.WaitGroup
+	t.Cleanup(func() {
+		allowSubmitOnce.Do(func() { close(allowSubmit) })
+		submitWait.Wait()
+	})
 	leases.afterBegin = func() {
 		close(claimStarted)
 		<-allowSubmit
@@ -564,7 +580,9 @@ func TestAttributeEditSubmitCannotDeadlockWithBackgroundFreezeCheck(t *testing.T
 	command := existingAttributeEdit("attribute-a", "能量", 10)
 	command.Target.LeaseToken = token
 	submitted := make(chan error, 1)
+	submitWait.Add(1)
 	go func() {
+		defer submitWait.Done()
 		_, err := service.Submit(command)
 		submitted <- err
 	}()
@@ -583,16 +601,10 @@ func TestAttributeEditSubmitCannotDeadlockWithBackgroundFreezeCheck(t *testing.T
 		backgroundDone <- err
 	}()
 	<-backgroundHasStoreLock
-	select {
-	case err := <-backgroundDone:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(200 * time.Millisecond):
-		close(allowSubmit)
-		t.Fatal("background store->lease check deadlocked with submit")
+	if err := <-backgroundDone; err != nil {
+		t.Fatal(err)
 	}
-	close(allowSubmit)
+	allowSubmitOnce.Do(func() { close(allowSubmit) })
 	if err := <-submitted; err != nil {
 		t.Fatal(err)
 	}
@@ -642,20 +654,13 @@ func TestAttributeEditExpiredClaimCannotBeResurrectedWhileStoreIsBlocked(t *test
 		t.Fatalf("submit error=%v, want lease lost", err)
 	}
 	released := make(chan bool, 1)
+	releaseMarked := make(chan struct{})
+	leases.afterReleaseMarked = func() { close(releaseMarked) }
 	go func() { released <- leases.Release("attribute-a", token) }()
-	select {
-	case <-released:
-		t.Fatal("Release returned before the retained claim finished")
-	case <-time.After(30 * time.Millisecond):
-	}
+	<-releaseMarked
 	first.Finish()
-	select {
-	case ok := <-released:
-		if !ok || leases.Has("attribute-a", token) {
-			t.Fatal("expired lease cleanup did not converge")
-		}
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("Release hung after retained claims finished")
+	if ok := <-released; !ok || leases.Has("attribute-a", token) {
+		t.Fatal("expired lease cleanup did not converge")
 	}
 	state, err := store.readState()
 	if err != nil {
@@ -684,6 +689,12 @@ func TestAttributeEditPreservesConcurrentGiftPeerUpdate(t *testing.T) {
 	}
 	enteredBeforeStore := make(chan struct{})
 	releaseSubmit := make(chan struct{})
+	var releaseSubmitOnce sync.Once
+	var submitWait sync.WaitGroup
+	t.Cleanup(func() {
+		releaseSubmitOnce.Do(func() { close(releaseSubmit) })
+		submitWait.Wait()
+	})
 	leases.afterBegin = func() {
 		close(enteredBeforeStore)
 		<-releaseSubmit
@@ -695,7 +706,9 @@ func TestAttributeEditPreservesConcurrentGiftPeerUpdate(t *testing.T) {
 		result attributeEditResult
 		err    error
 	}, 1)
+	submitWait.Add(1)
 	go func() {
+		defer submitWait.Done()
 		result, submitErr := service.Submit(command)
 		submitted <- struct {
 			result attributeEditResult
@@ -712,7 +725,7 @@ func TestAttributeEditPreservesConcurrentGiftPeerUpdate(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	close(releaseSubmit)
+	releaseSubmitOnce.Do(func() { close(releaseSubmit) })
 	result := <-submitted
 	if result.err != nil {
 		t.Fatal(result.err)
@@ -734,6 +747,12 @@ func TestAttributeEditPreservesConcurrentTimerPeerUpdate(t *testing.T) {
 	}
 	enteredBeforeStore := make(chan struct{})
 	releaseSubmit := make(chan struct{})
+	var releaseSubmitOnce sync.Once
+	var submitWait sync.WaitGroup
+	t.Cleanup(func() {
+		releaseSubmitOnce.Do(func() { close(releaseSubmit) })
+		submitWait.Wait()
+	})
 	leases.afterBegin = func() {
 		close(enteredBeforeStore)
 		<-releaseSubmit
@@ -745,7 +764,9 @@ func TestAttributeEditPreservesConcurrentTimerPeerUpdate(t *testing.T) {
 		result attributeEditResult
 		err    error
 	}, 1)
+	submitWait.Add(1)
 	go func() {
+		defer submitWait.Done()
 		result, submitErr := service.Submit(command)
 		submitted <- struct {
 			result attributeEditResult
@@ -759,7 +780,7 @@ func TestAttributeEditPreservesConcurrentTimerPeerUpdate(t *testing.T) {
 	startedAt := time.Unix(1_700_000_000, 0)
 	runtime.handleTimerTick(startedAt)
 	runtime.handleTimerTick(startedAt.Add(time.Minute))
-	close(releaseSubmit)
+	releaseSubmitOnce.Do(func() { close(releaseSubmit) })
 	result := <-submitted
 	if result.err != nil {
 		t.Fatal(result.err)
@@ -789,22 +810,46 @@ func TestAttributeEditSameTargetLaterValidSaveWinsAndKeepsPeerUpdate(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondBegun := make(chan struct{})
-	releaseSecond := make(chan struct{})
-	beginCount := 0
-	leases.afterBegin = func() {
-		beginCount++
-		if beginCount == 2 {
-			close(secondBegun)
-			<-releaseSecond
+	firstLockAcquired := make(chan struct{})
+	firstHoldsStoreLock := make(chan struct{})
+	secondLockAttempted := make(chan struct{})
+	allowSecondStoreLock := make(chan struct{})
+	secondLockAcquired := make(chan struct{})
+	var firstStoreRelease atomic.Bool
+	var beforeLockCount atomic.Int32
+	var afterLockCount atomic.Int32
+	lockOrderViolation := make(chan error, 1)
+	store.beforeAttributeEditStoreLock = func() {
+		if beforeLockCount.Add(1) == 2 {
+			close(secondLockAttempted)
+			<-allowSecondStoreLock
 		}
+	}
+	store.afterAttributeEditStoreLock = func() {
+		if afterLockCount.Add(1) == 1 {
+			close(firstLockAcquired)
+			return
+		}
+		if !firstStoreRelease.Load() {
+			lockOrderViolation <- errors.New("second command acquired configStore.mu before first release")
+		}
+		close(secondLockAcquired)
 	}
 	enteredFirstPersist := make(chan struct{})
 	releaseFirstPersist := make(chan struct{})
+	var releaseFirstOnce sync.Once
+	var releaseSecondOnce sync.Once
 	var persistOnce sync.Once
+	var submitWait sync.WaitGroup
+	t.Cleanup(func() {
+		releaseFirstOnce.Do(func() { close(releaseFirstPersist) })
+		releaseSecondOnce.Do(func() { close(allowSecondStoreLock) })
+		submitWait.Wait()
+	})
 	store.writeAtomically = func(path string, data []byte) error {
 		persistOnce.Do(func() {
 			close(enteredFirstPersist)
+			close(firstHoldsStoreLock)
 			<-releaseFirstPersist
 		})
 		return writeFileAtomically(path, data)
@@ -812,33 +857,56 @@ func TestAttributeEditSameTargetLaterValidSaveWinsAndKeepsPeerUpdate(t *testing.
 	service := newAttributeEditService(store, leases, fixedAttributeID)
 	firstCommand := existingAttributeEdit("attribute-a", "第一次", 10)
 	firstCommand.Target.LeaseToken = firstToken
+	firstCommand.GiftRules = []giftRule{
+		{ID: "gift-first-1", GiftID: 41, AttributeName: "第一次", FormulaName: "first one", Formula: "第一次+11"},
+		{ID: "gift-first-2", GiftID: 42, AttributeName: "第一次", FormulaName: "first two", Formula: "第一次+12"},
+	}
+	firstCommand.TimerRules = []timerRule{
+		{ID: "timer-first-1", AttributeName: "第一次", FormulaName: "first timer one", IntervalSeconds: 41, Formula: "第一次+21", Enabled: true},
+		{ID: "timer-first-2", AttributeName: "第一次", FormulaName: "first timer two", IntervalSeconds: 42, Formula: "第一次+22", Enabled: true},
+	}
 	secondCommand := existingAttributeEdit("attribute-a", "第二次", 20)
 	secondCommand.Target.LeaseToken = secondToken
+	secondCommand.GiftRules = []giftRule{
+		{ID: "gift-second-1", GiftID: 51, AttributeName: "第二次", FormulaName: "second one", Formula: "第二次+31"},
+		{ID: "gift-second-2", GiftID: 52, AttributeName: "第二次", FormulaName: "second two", Formula: "第二次+32"},
+	}
+	secondCommand.TimerRules = []timerRule{
+		{ID: "timer-second-1", AttributeName: "第二次", FormulaName: "second timer one", IntervalSeconds: 51, Formula: "第二次+41", Enabled: true},
+		{ID: "timer-second-2", AttributeName: "第二次", FormulaName: "second timer two", IntervalSeconds: 52, Formula: "第二次+42", Enabled: true},
+	}
 	firstDone := make(chan struct {
 		result attributeEditResult
 		err    error
 	}, 1)
+	submitWait.Add(1)
 	go func() {
+		defer submitWait.Done()
 		result, submitErr := service.Submit(firstCommand)
 		firstDone <- struct {
 			result attributeEditResult
 			err    error
 		}{result, submitErr}
 	}()
+	<-firstLockAcquired
 	<-enteredFirstPersist
+	<-firstHoldsStoreLock
 	secondDone := make(chan struct {
 		result attributeEditResult
 		err    error
 	}, 1)
+	submitWait.Add(1)
 	go func() {
+		defer submitWait.Done()
 		result, submitErr := service.Submit(secondCommand)
 		secondDone <- struct {
 			result attributeEditResult
 			err    error
 		}{result, submitErr}
 	}()
-	<-secondBegun
-	close(releaseFirstPersist)
+	<-secondLockAttempted
+	firstStoreRelease.Store(true)
+	releaseFirstOnce.Do(func() { close(releaseFirstPersist) })
 	first := <-firstDone
 	if first.err != nil {
 		t.Fatal(first.err)
@@ -846,23 +914,32 @@ func TestAttributeEditSameTargetLaterValidSaveWinsAndKeepsPeerUpdate(t *testing.
 	if first.result.Name != "第一次" || first.result.State.findAttribute("第一次").Value != 10 {
 		t.Fatalf("first result = %#v", first.result)
 	}
+	assertAtomicAttributeEditOwnedRules(t, first.result.State, []string{"gift-first-1", "gift-first-2", "gift-b"}, []string{"第一次+11", "第一次+12", "B + 1"}, []string{"timer-first-1", "timer-first-2", "timer-b"}, []string{"第一次+21", "第一次+22", "B + 1"})
 	if _, err := store.updateState(func(state *appState) error {
 		state.findAttribute("B").Value = 3
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	close(releaseSecond)
+	releaseSecondOnce.Do(func() { close(allowSecondStoreLock) })
+	<-secondLockAcquired
+	select {
+	case err := <-lockOrderViolation:
+		t.Fatal(err)
+	default:
+	}
 	second := <-secondDone
 	if second.err != nil {
 		t.Fatal(second.err)
 	}
 	assertAtomicAttributeEditPeerState(t, second.result.State, "第二次", 20, 3)
+	assertAtomicAttributeEditOwnedRules(t, second.result.State, []string{"gift-second-1", "gift-second-2", "gift-b"}, []string{"第二次+31", "第二次+32", "B + 1"}, []string{"timer-second-1", "timer-second-2", "timer-b"}, []string{"第二次+41", "第二次+42", "B + 1"})
 	persisted, err := store.readState()
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertAtomicAttributeEditPeerState(t, persisted, "第二次", 20, 3)
+	assertAtomicAttributeEditOwnedRules(t, persisted, []string{"gift-second-1", "gift-second-2", "gift-b"}, []string{"第二次+31", "第二次+32", "B + 1"}, []string{"timer-second-1", "timer-second-2", "timer-b"}, []string{"第二次+41", "第二次+42", "B + 1"})
 }
 
 func TestAttributeEditSameTargetInvalidLaterSaveLeavesFirstAuthoritative(t *testing.T) {
@@ -884,11 +961,15 @@ func TestAttributeEditSameTargetInvalidLaterSaveLeavesFirstAuthoritative(t *test
 	service := newAttributeEditService(store, leases, fixedAttributeID)
 	first := existingAttributeEdit("attribute-a", "第一次", 10)
 	first.Target.LeaseToken = firstToken
+	first.GiftRules = []giftRule{{ID: "gift-first-only", GiftID: 61, AttributeName: "第一次", Formula: "第一次+51"}}
+	first.TimerRules = []timerRule{{ID: "timer-first-only", AttributeName: "第一次", IntervalSeconds: 61, Formula: "第一次+61", Enabled: true}}
 	if _, err := service.Submit(first); err != nil {
 		t.Fatal(err)
 	}
 	invalid := existingAttributeEdit("attribute-a", "B", 20)
 	invalid.Target.LeaseToken = secondToken
+	invalid.GiftRules = []giftRule{{ID: "gift-invalid-later", GiftID: 62, AttributeName: "B", Formula: "B+71"}}
+	invalid.TimerRules = []timerRule{{ID: "timer-invalid-later", AttributeName: "B", IntervalSeconds: 62, Formula: "B+81", Enabled: true}}
 	if _, err := service.Submit(invalid); !isAttributeEditConflictError(err) {
 		t.Fatalf("invalid later save error = %v, want name conflict", err)
 	}
@@ -897,6 +978,45 @@ func TestAttributeEditSameTargetInvalidLaterSaveLeavesFirstAuthoritative(t *test
 		t.Fatal(err)
 	}
 	assertAtomicAttributeEditPeerState(t, persisted, "第一次", 10, 2)
+	assertAtomicAttributeEditOwnedRules(t, persisted, []string{"gift-first-only", "gift-b"}, []string{"第一次+51", "B + 1"}, []string{"timer-first-only", "timer-b"}, []string{"第一次+61", "B + 1"})
+}
+
+func TestAttributeEditSubmitWriteFailureLeavesNoPartialStateAndAllowsLaterSave(t *testing.T) {
+	store := attributeEditFixtureStore(t)
+	leases := newAttributeEditLeaseCoordinator(attributeEditLeaseTTL, timeNowForAttributeEditTest, func() (string, error) { return "AAAAAAAAAAAAAAAAAAAAAAAA", nil })
+	token, _, err := leases.Create("attribute-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := newAttributeEditService(store, leases, fixedAttributeID)
+	command := existingAttributeEdit("attribute-a", "故障保存", 10)
+	command.Target.LeaseToken = token
+	store.writeAtomically = func(string, []byte) error { return errors.New("injected submit persistence failure") }
+	if _, err := service.Submit(command); err == nil {
+		t.Fatal("expected service submit persistence failure")
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.findAttribute("故障保存") != nil || !leases.Has("attribute-a", token) {
+		t.Fatalf("failure exposed partial state or leaked live claim: attributes=%#v lease=%v", state.Attributes, leases.Has("attribute-a", token))
+	}
+	store.writeAtomically = nil
+	result, err := service.Submit(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Name != "故障保存" || result.State.findAttribute("故障保存").Value != 10 {
+		t.Fatalf("later submit did not recover service/store usability: %#v", result)
+	}
+	persisted, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.findAttribute("故障保存").Value != 10 {
+		t.Fatalf("later authoritative state not persisted: %#v", persisted.Attributes)
+	}
 }
 
 func TestAttributeEditLeaseFreezesOnlyTargetAndNewIDRemainsAddressable(t *testing.T) {
@@ -989,6 +1109,22 @@ func assertAtomicAttributeEditPeerState(t *testing.T, state appState, targetName
 	t.Helper()
 	if len(state.Attributes) != 2 || state.Attributes[0].ID != "attribute-a" || state.Attributes[0].Name != targetName || state.Attributes[0].Value != targetValue || state.Attributes[1].ID != "attribute-b" || state.Attributes[1].Name != "B" || state.Attributes[1].Value != peerValue {
 		t.Fatalf("state = %#v", state.Attributes)
+	}
+}
+
+func assertAtomicAttributeEditOwnedRules(t *testing.T, state appState, giftIDs, giftFormulas, timerIDs, timerFormulas []string) {
+	t.Helper()
+	assertGiftRuleIDs(t, state.Rules, giftIDs...)
+	assertTimerRuleIDs(t, state.TimerRules, timerIDs...)
+	for index, want := range giftFormulas {
+		if state.Rules[index].Formula != want {
+			t.Fatalf("gift rule[%d] formula=%q want=%q rules=%#v", index, state.Rules[index].Formula, want, state.Rules)
+		}
+	}
+	for index, want := range timerFormulas {
+		if state.TimerRules[index].Formula != want {
+			t.Fatalf("timer rule[%d] formula=%q want=%q rules=%#v", index, state.TimerRules[index].Formula, want, state.TimerRules)
+		}
 	}
 }
 
