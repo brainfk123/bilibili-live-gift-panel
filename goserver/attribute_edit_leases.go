@@ -160,7 +160,7 @@ func (claim *attributeEditLeaseClaim) Finish() {
 		if claim.lease.claims > 0 {
 			claim.lease.claims--
 		}
-		if claim.lease.claims == 0 && (claim.lease.releasing || !claim.lease.expiresAt.After(leases.now())) {
+		if claim.lease.claims == 0 && (claim.lease.releasing || claim.lease.expired || !claim.lease.expiresAt.After(leases.now())) {
 			if leases.sessions[claim.token] == claim.lease {
 				delete(leases.sessions, claim.token)
 			}

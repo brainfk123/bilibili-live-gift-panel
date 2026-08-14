@@ -128,6 +128,37 @@ func TestAttributeEditLeaseClaimAvoidsReverseLockDeadlockAndDefersRelease(t *tes
 	}
 }
 
+func TestAttributeEditLeaseFinishDeletesExpiredClaimAfterClockRollsBack(t *testing.T) {
+	now := time.Unix(100, 0)
+	leases := newAttributeEditLeaseCoordinator(15*time.Second, func() time.Time { return now }, func() (string, error) {
+		return strings.Repeat("g", 24), nil
+	})
+	token, _, err := leases.Create("attribute-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok := leases.Begin("attribute-1", token)
+	if !ok {
+		t.Fatal("claim did not begin")
+	}
+	now = time.Unix(115, 0)
+	if claim.Live() {
+		t.Fatal("claim did not become permanently expired")
+	}
+	now = time.Unix(100, 0)
+	claim.Finish()
+
+	leases.mu.Lock()
+	_, retained := leases.sessions[token]
+	leases.mu.Unlock()
+	if retained {
+		t.Fatal("zero-claim expired record survived clock rollback")
+	}
+	if leases.Has("attribute-1", token) || leases.Release("attribute-1", token) {
+		t.Fatal("removed expired claim regained authorization or release ownership")
+	}
+}
+
 func TestAttributeEditLeaseHTTPRejectsUnsafeAndMalformedRequests(t *testing.T) {
 	store := attributeEditLeaseTestStore(t, "attribute-1")
 	handler := newAttributeEditLeaseHandler(store, newAttributeEditLeaseCoordinator(15*time.Second, time.Now, func() (string, error) {
