@@ -20,9 +20,11 @@ const (
 )
 
 var (
-	procUpdateOpenProcess      = kernel32.NewProc("OpenProcess")
-	procUpdateWaitForSingleObj = kernel32.NewProc("WaitForSingleObject")
-	removeWindowsUpdateFile    = os.Remove
+	procUpdateOpenProcess          = kernel32.NewProc("OpenProcess")
+	procUpdateWaitForSingleObj     = kernel32.NewProc("WaitForSingleObject")
+	removeWindowsUpdateFile        = os.Remove
+	startUpdateInstallerExecutable = startDetachedExecutable
+	renameWindowsUpdateFile        = renameUpdateFile
 )
 
 func isAutoUpdateSupported() bool {
@@ -48,11 +50,15 @@ func launchUpdateInstaller(metadataPath string, waitPID int, restart bool) error
 			return errors.New("待安装更新清理失败")
 		}
 	}
+	if err := verifyPendingExecutable(pending, defaultVerifyUpdateExecutable); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "启动更新替换器最终安全校验诊断：%v\n", err)
+		return errors.New("待安装更新安全校验失败")
+	}
 	args := []string{"--apply-update", "--state", metadataPath, strconv.Itoa(waitPID)}
 	if restart {
 		args = append(args, "--restart")
 	}
-	return startDetachedExecutable(pending.PendingPath, args...)
+	return startUpdateInstallerExecutable(pending.PendingPath, args...)
 }
 
 func applyDownloadedUpdate(pending pendingUpdate, waitPID int) error {
@@ -109,16 +115,31 @@ func replaceDownloadedExecutable(self string, pending pendingUpdate, waitPID int
 		verificationErr := errors.New("新版本落盘安全校验失败")
 		return errors.Join(verificationErr, removeUpdateArtifactWith(removeWindowsUpdateFile, newPath))
 	}
-	if err := renameUpdateFile(targetPath, backupPath); err != nil {
+	if err := renameWindowsUpdateFile(targetPath, backupPath); err != nil {
 		return errors.Join(fmt.Errorf("备份旧版本失败：%w", err), removeUpdateArtifactWith(removeWindowsUpdateFile, newPath))
 	}
-	if err := renameUpdateFile(newPath, targetPath); err != nil {
-		restoreErr := renameUpdateFile(backupPath, targetPath)
+	if err := renameWindowsUpdateFile(newPath, targetPath); err != nil {
+		restoreErr := renameWindowsUpdateFile(backupPath, targetPath)
 		cleanupErr := removeUpdateArtifactWith(removeWindowsUpdateFile, newPath)
 		if restoreErr != nil {
 			return errors.Join(fmt.Errorf("替换程序失败且恢复旧版本失败：%w", err), restoreErr, cleanupErr)
 		}
 		return errors.Join(fmt.Errorf("替换程序失败，已恢复旧版本：%w", err), cleanupErr)
+	}
+	finalTarget := pending
+	finalTarget.PendingPath = targetPath
+	if err := verifyPendingExecutable(finalTarget, defaultVerifyUpdateExecutable); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "最终更新目标安全校验诊断：%v\n", err)
+		removeErr := removeUpdateArtifactWith(removeWindowsUpdateFile, targetPath)
+		var restoreErr error
+		if removeErr == nil {
+			restoreErr = renameWindowsUpdateFile(backupPath, targetPath)
+		}
+		if removeErr != nil || restoreErr != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "最终更新目标校验失败后的恢复诊断：%v\n", errors.Join(removeErr, restoreErr))
+			return errors.New("最终更新目标安全校验失败且恢复失败")
+		}
+		return errors.New("最终更新目标安全校验失败，已恢复旧版本")
 	}
 	return nil
 }

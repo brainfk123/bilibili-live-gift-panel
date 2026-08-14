@@ -13,18 +13,44 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
 const authenticodePowerShellScript = `& { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $signature = Get-AuthenticodeSignature -LiteralPath $args[0]; $subject = ''; if ($null -ne $signature.SignerCertificate) { $subject = $signature.SignerCertificate.Subject }; [pscustomobject]@{status=$signature.Status.ToString();subject=$subject} | ConvertTo-Json -Compress }`
 const authenticodeVerificationTimeout = 30 * time.Second
+const authenticodeOutputMaxBytes = 16 << 10
 
 type authenticodeCommandRunner func(context.Context, string, ...string) ([]byte, error)
 
 type authenticodeQueryResult struct {
 	Status  string `json:"status"`
 	Subject string `json:"subject"`
+}
+
+type boundedAuthenticodeOutput struct {
+	mu       sync.Mutex
+	buffer   bytes.Buffer
+	limit    int
+	overflow bool
+}
+
+func (output *boundedAuthenticodeOutput) Write(data []byte) (int, error) {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	remaining := output.limit - output.buffer.Len()
+	if remaining > 0 {
+		written := len(data)
+		if written > remaining {
+			written = remaining
+		}
+		_, _ = output.buffer.Write(data[:written])
+	}
+	if len(data) > remaining {
+		output.overflow = true
+	}
+	return len(data), nil
 }
 
 func verifyAuthenticodePublisher(path, expectedSubject string) error {
@@ -106,5 +132,23 @@ func runAuthenticodeCommand(ctx context.Context, name string, args ...string) ([
 	commandArgs := append([]string(nil), args...)
 	lastArgument := len(commandArgs) - 1
 	commandArgs[lastArgument] = "'" + strings.ReplaceAll(commandArgs[lastArgument], "'", "''") + "'"
-	return newAuthenticodeCommand(ctx, name, commandArgs...).CombinedOutput()
+	return runBoundedAuthenticodeCommand(newAuthenticodeCommand(ctx, name, commandArgs...), authenticodeOutputMaxBytes)
+}
+
+func runBoundedAuthenticodeCommand(command *exec.Cmd, limit int) ([]byte, error) {
+	if limit <= 0 {
+		return nil, errors.New("PowerShell 输出限制无效")
+	}
+	output := &boundedAuthenticodeOutput{limit: limit}
+	command.Stdout = output
+	command.Stderr = output
+	runErr := command.Run()
+	output.mu.Lock()
+	captured := append([]byte(nil), output.buffer.Bytes()...)
+	overflow := output.overflow
+	output.mu.Unlock()
+	if overflow {
+		return captured, errors.New("PowerShell 输出超过限制")
+	}
+	return captured, runErr
 }

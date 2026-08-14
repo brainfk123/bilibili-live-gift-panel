@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -175,5 +176,24 @@ func TestVerifyAuthenticodePublisherCommandTerminatesOnDeadline(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("hung PowerShell-equivalent process terminated after %v", elapsed)
+	}
+}
+
+func TestVerifyAuthenticodePublisherRejectsCombinedOutputOverflow(t *testing.T) {
+	if os.Getenv("GO_WANT_AUTHENTICODE_OUTPUT_HELPER") == "1" {
+		_, _ = os.Stdout.Write(bytes.Repeat([]byte{'o'}, 80))
+		_, _ = os.Stderr.Write(bytes.Repeat([]byte{'e'}, 80))
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	command := newAuthenticodeCommand(ctx, os.Args[0], "-test.run=^TestVerifyAuthenticodePublisherRejectsCombinedOutputOverflow$")
+	command.Env = append(os.Environ(), "GO_WANT_AUTHENTICODE_OUTPUT_HELPER=1")
+	output, err := runBoundedAuthenticodeCommand(command, 128)
+	if err == nil || !strings.Contains(err.Error(), "输出超过限制") {
+		t.Fatalf("error = %v, output bytes = %d", err, len(output))
+	}
+	if len(output) > 128 {
+		t.Fatalf("captured output bytes = %d, want at most 128", len(output))
 	}
 }

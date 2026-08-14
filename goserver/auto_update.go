@@ -41,7 +41,11 @@ const (
 	updateCleanupRetryWait = 10 * time.Millisecond
 )
 
-var errUpdateArtifactCleanup = errors.New("更新文件清理失败")
+var (
+	errUpdateArtifactCleanup     = errors.New("更新文件清理失败")
+	errPendingExecutableCleanup  = errors.New("待安装更新可执行文件清理失败")
+	startUpdatedTargetExecutable = startDetachedExecutable
+)
 
 type updateStatus struct {
 	State           string `json:"state"`
@@ -459,9 +463,11 @@ func (updater *autoUpdater) InstallOnExit(restart bool) error {
 	if err := verifyPendingExecutable(*pending, updater.verifyExecutable); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "待安装更新执行前安全校验失败：%v\n", err)
 		cleanupErr := updater.cleanupPendingUpdate(*pending)
-		updater.mu.Lock()
-		updater.pending = nil
-		updater.mu.Unlock()
+		if !errors.Is(cleanupErr, errPendingExecutableCleanup) {
+			updater.mu.Lock()
+			updater.pending = nil
+			updater.mu.Unlock()
+		}
 		if cleanupErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "待安装更新拒绝后清理失败：%v\n", cleanupErr)
 			updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
@@ -480,7 +486,8 @@ func (updater *autoUpdater) InstallOnExit(restart bool) error {
 	}
 	metadataPath := updater.metadataPath()
 	if err := updater.launchInstaller(metadataPath, os.Getpid(), restart); err != nil {
-		return fmt.Errorf("启动更新替换器失败：%w", err)
+		_, _ = fmt.Fprintf(os.Stderr, "启动更新替换器诊断：%v\n", err)
+		return errors.New("启动更新替换器失败")
 	}
 	return nil
 }
@@ -1013,8 +1020,14 @@ func (updater *autoUpdater) restorePendingUpdate() {
 		updater.cleanupRestoredPending(pending)
 		return
 	}
-	if verifyPendingExecutable(pending, updater.verifyExecutable) != nil {
-		updater.cleanupRestoredPending(pending)
+	if err := verifyPendingExecutable(pending, updater.verifyExecutable); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "恢复待安装更新安全校验诊断：%v\n", err)
+		if cleanupErr := updater.cleanupPendingUpdate(pending); cleanupErr != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "恢复待安装更新校验失败后的清理诊断：%v\n", cleanupErr)
+			updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
+		} else {
+			updater.setStatus("error", pending.Version, "待安装更新安全校验失败，已拒绝执行。", 0, false)
+		}
 		return
 	}
 	updater.pending = &pending
@@ -1037,13 +1050,18 @@ func (updater *autoUpdater) cleanupRestoredPending(pending pendingUpdate) {
 
 func (updater *autoUpdater) cleanupPendingUpdate(pending pendingUpdate) error {
 	knownPendingPath := filepath.Join(updater.updatesDir, "gift-panel-pending.exe")
-	paths := make([]string, 0, 4)
+	pendingPath := ""
 	if pending.PendingPath == "" || filepath.Clean(pending.PendingPath) == filepath.Clean(knownPendingPath) {
-		paths = append(paths, knownPendingPath)
+		pendingPath = knownPendingPath
 	} else if filepath.Dir(pending.PendingPath) == filepath.Clean(updater.updatesDir) {
-		paths = append(paths, pending.PendingPath)
+		pendingPath = pending.PendingPath
 	}
-	paths = append(paths, updater.metadataPath())
+	if pendingPath != "" {
+		if err := updater.removeUpdateArtifact(pendingPath); err != nil {
+			return errors.Join(errPendingExecutableCleanup, err)
+		}
+	}
+	paths := []string{updater.metadataPath()}
 	if updater.executablePath != "" {
 		paths = append(paths, updater.executablePath+".old", updater.executablePath+".new")
 	}
@@ -1159,25 +1177,46 @@ func runUpdateHelper(args []string) (bool, error) {
 	}
 	data, err := os.ReadFile(args[2])
 	if err != nil {
-		return true, err
+		_, _ = fmt.Fprintf(os.Stderr, "读取更新状态诊断：%v\n", err)
+		return true, errors.New("读取更新状态失败")
 	}
 	var pending pendingUpdate
 	if err := json.Unmarshal(data, &pending); err != nil {
-		return true, err
+		_, _ = fmt.Fprintf(os.Stderr, "解析更新状态诊断：%v\n", err)
+		return true, errors.New("解析更新状态失败")
 	}
 	if err := applyDownloadedUpdate(pending, waitPID); err != nil {
-		return true, err
+		_, _ = fmt.Fprintf(os.Stderr, "应用待安装更新诊断：%v\n", err)
+		return true, errors.New("应用待安装更新失败")
 	}
 	if err := writeInstalledUpdateMarker(args[2], pending.Version); err != nil {
-		return true, err
+		_, _ = fmt.Fprintf(os.Stderr, "记录已安装更新诊断：%v\n", err)
+		return true, errors.New("记录已安装更新失败")
 	}
-	_ = os.Remove(args[2])
+	if err := os.Remove(args[2]); err != nil && !errors.Is(err, os.ErrNotExist) {
+		_, _ = fmt.Fprintf(os.Stderr, "清理更新状态诊断：%v\n", err)
+	}
 	if restart {
-		if err := startDetachedExecutable(pending.TargetPath); err != nil {
-			return true, fmt.Errorf("重新启动更新后的程序失败：%w", err)
+		if err := startVerifiedUpdatedExecutable(pending); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "重新启动更新后的程序诊断：%v\n", err)
+			return true, errors.New("重新启动更新后的程序失败")
 		}
 	}
 	return true, nil
+}
+
+func startVerifiedUpdatedExecutable(pending pendingUpdate) error {
+	target := pending
+	target.PendingPath = pending.TargetPath
+	if err := verifyPendingExecutable(target, defaultVerifyUpdateExecutable); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "重新启动更新后程序前安全校验诊断：%v\n", err)
+		return errors.New("更新后程序安全校验失败")
+	}
+	if err := startUpdatedTargetExecutable(pending.TargetPath); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "启动更新后程序诊断：%v\n", err)
+		return errors.New("启动更新后程序失败")
+	}
+	return nil
 }
 
 func startDetachedExecutable(path string, args ...string) error {
