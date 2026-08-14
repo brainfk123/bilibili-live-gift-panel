@@ -2214,21 +2214,22 @@ describe('single-page configuration rendering', () => {
     const condition = root.querySelector('.gift-rule-condition-input') as TestElement & { oninput?: () => void };
     expect(mode.value).toBe('atLeast');
     expect(identity.value).toBe('2');
+    expect(textOf(identity)).toContain('普通用户');
     expect(textOf(identity)).toContain('舰长');
     expect(condition.value).toBe('用户身份>=舰长');
 
     mode.value = 'equal';
     mode.onchange?.();
-    identity.value = '1';
+    identity.value = '0';
     identity.onchange?.();
     findByText(root, '保存修改')?.onclick?.();
-    await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules[0].condition).toBe('用户身份=粉丝团'));
+    await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules[0].condition).toBe('用户身份=普通用户'));
 
     findByText(root, '编辑')?.onclick?.();
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     expect((root.querySelector('.quick-rule-condition-mode') as TestElement).value).toBe('equal');
-    expect((root.querySelector('.quick-rule-condition-identity') as TestElement).value).toBe('1');
+    expect((root.querySelector('.quick-rule-condition-identity') as TestElement).value).toBe('0');
   });
 
   it('uses deterministic validation when saving lazy random-choice rules', async () => {

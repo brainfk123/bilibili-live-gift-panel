@@ -9,7 +9,9 @@ import {
 describe('gift rule conditions', () => {
   it('builds the supported quick condition forms', () => {
     expect(buildQuickGiftCondition('any', 2)).toBe('');
+    expect(buildQuickGiftCondition('equal', 0)).toBe('用户身份=普通用户');
     expect(buildQuickGiftCondition('equal', 1)).toBe('用户身份=粉丝团');
+    expect(buildQuickGiftCondition('atLeast', 0)).toBe('用户身份>=普通用户');
     expect(buildQuickGiftCondition('atLeast', 2)).toBe('用户身份>=舰长');
     expect(buildQuickGiftCondition('advanced', 2)).toBeNull();
   });
@@ -17,12 +19,13 @@ describe('gift rule conditions', () => {
   it('detects only trimmed standard condition forms', () => {
     expect(detectQuickGiftCondition('')).toEqual({ mode: 'any', identity: 2 });
     expect(detectQuickGiftCondition(' \t\n ')).toEqual({ mode: 'any', identity: 2 });
+    expect(detectQuickGiftCondition(' 用户身份=普通用户 ')).toEqual({ mode: 'equal', identity: 0 });
     expect(detectQuickGiftCondition(' 用户身份=粉丝团 ')).toEqual({ mode: 'equal', identity: 1 });
+    expect(detectQuickGiftCondition('\t用户身份>=普通用户\n')).toEqual({ mode: 'atLeast', identity: 0 });
     expect(detectQuickGiftCondition('\t用户身份>=舰长\n')).toEqual({ mode: 'atLeast', identity: 2 });
   });
 
   it.each([
-    '用户身份>=普通用户',
     '舰长<=用户身份',
     '积分>=用户身份',
     '用户身份==舰长',

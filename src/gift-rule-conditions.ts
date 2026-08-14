@@ -11,16 +11,16 @@ export type QuickGiftConditionMode = 'any' | 'equal' | 'atLeast' | 'advanced';
 
 export interface QuickGiftConditionDraft {
   mode: QuickGiftConditionMode;
-  identity: Exclude<GiftUserIdentity, 0>;
+  identity: GiftUserIdentity;
 }
 
-const EQUAL = /^用户身份=(粉丝团|舰长|提督|总督)$/u;
-const AT_LEAST = /^用户身份>=(粉丝团|舰长|提督|总督)$/u;
+const EQUAL = /^用户身份=(普通用户|粉丝团|舰长|提督|总督)$/u;
+const AT_LEAST = /^用户身份>=(普通用户|粉丝团|舰长|提督|总督)$/u;
 const ADVANCED_DRAFT: QuickGiftConditionDraft = { mode: 'advanced', identity: 2 };
 
 export function buildQuickGiftCondition(
   mode: QuickGiftConditionMode,
-  identity: Exclude<GiftUserIdentity, 0>,
+  identity: GiftUserIdentity,
 ): string | null {
   const name = GIFT_USER_IDENTITIES.find((candidate) => candidate.value === identity)?.name;
   if (!name) return null;
@@ -44,7 +44,7 @@ export function isGiftFormulaSystemName(name: string): boolean {
   return name === '用户身份' || GIFT_USER_IDENTITIES.some((identity) => identity.name === name);
 }
 
-function identityForName(name: string): Exclude<GiftUserIdentity, 0> {
+function identityForName(name: string): GiftUserIdentity {
   const identity = GIFT_USER_IDENTITIES.find((candidate) => candidate.name === name)?.value;
-  return identity as Exclude<GiftUserIdentity, 0>;
+  return identity as GiftUserIdentity;
 }
