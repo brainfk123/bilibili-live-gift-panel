@@ -3032,12 +3032,25 @@ export function mountConfig(root: HTMLElement): void {
         // Invalidate an already-running soft poll before adopting the
         // prepared authoritative snapshot used by this editor.
         localStateVersion += 1;
-        const prepared = await prepareAttributeEditSession(
-          original.id?.trim() ? { attributeId: original.id } : { legacyName: original.name },
-          { onHealthChange: renderLeaseHealth },
-        );
+        const sessionTarget = original.id?.trim()
+          ? { attributeId: original.id }
+          : { legacyName: original.name };
+        const preparedResult: { session?: Awaited<ReturnType<typeof prepareAttributeEditSession>> } = {};
+        const authoritative = await commitAuthoritativeStateMutation(async () => {
+          const prepared = await prepareAttributeEditSession(
+            sessionTarget,
+            { onHealthChange: renderLeaseHealth },
+          );
+          preparedResult.session = prepared;
+          return prepared.state;
+        });
+        const prepared = preparedResult.session;
+        if (!prepared) throw new Error('无法打开属性编辑器');
         lease = prepared.lease;
-        const authoritative = await commitAuthoritativeStateMutation(() => Promise.resolve(prepared.state));
+        if (loadState() !== authoritative) {
+          await prepared.lease.release();
+          return;
+        }
         Object.assign(state, authoritative);
         refreshApplied = true;
         const refreshedMatches = state.attributes
@@ -4779,16 +4792,20 @@ export function mountConfig(root: HTMLElement): void {
       ...(gift.blindBoxParentName !== undefined ? { blindBoxParentName: gift.blindBoxParentName } : {}),
       ...(gift.blindBoxParentPrice !== undefined ? { blindBoxParentPrice: gift.blindBoxParentPrice } : {}),
     }));
+    const replayTutorial = state.settings.tutorialReplayMode;
+    const preserveTutorialTarget = editorGuideEnabled
+      || Boolean(original?.id && state.settings.tutorialTargetAttributeId === original.id);
+    const submittedResult: { target?: Awaited<ReturnType<typeof submitAttributeEdit>>['target'] } = {};
     try {
-      const target: AttributeEditInput['target'] = original
-        ? {
-          kind: 'existing',
-          attributeId: original.id ?? '',
-          leaseToken: lease?.token ?? '',
-        }
-        : { kind: 'new' };
       localStateVersion += 1;
       const committed = await commitAuthoritativeStateMutation(async () => {
+        const target: AttributeEditInput['target'] = original
+          ? {
+            kind: 'existing',
+            attributeId: original.id ?? '',
+            leaseToken: lease?.token ?? '',
+          }
+          : { kind: 'new' };
         const submitted = await submitAttributeEdit({
           target,
           attribute: nextAttribute,
@@ -4796,6 +4813,7 @@ export function mountConfig(root: HTMLElement): void {
           timerRules: normalizedTimers,
           giftCatalogUpserts,
         });
+        submittedResult.target = submitted.target;
         return submitted.state;
       });
       Object.assign(state, committed);
@@ -4805,6 +4823,25 @@ export function mountConfig(root: HTMLElement): void {
       saveButton.disabled = false;
       saveButton.textContent = original ? '保存修改' : '创建属性';
       return;
+    }
+    const submittedTarget = submittedResult.target;
+    if (replayTutorial && submittedTarget) {
+      if (preserveTutorialTarget) state.settings.tutorialTargetAttributeId = submittedTarget.id;
+      markTutorialLessonComplete(state.settings, 'attribute');
+      markTutorialLessonComplete(state.settings, 'template');
+      if (editorTutorialProgress.basicsConfigured) markTutorialLessonComplete(state.settings, 'basics');
+      if ((editorTutorialProgress.giftCount ?? 0) > 0) markTutorialLessonComplete(state.settings, 'gift');
+      if (editorTutorialProgress.giftPreviewed) markTutorialLessonComplete(state.settings, 'rule');
+      if (editorTutorialProgress.presetSaved) markTutorialLessonComplete(state.settings, 'preset');
+      if (editorTutorialProgress.timerPreviewed) markTutorialLessonComplete(state.settings, 'timer');
+      if (editorTutorialProgress.outputPreviewed) markTutorialLessonComplete(state.settings, 'appearance');
+      markTutorialLessonComplete(state.settings, 'save');
+      localStateVersion += 1;
+      try {
+        await saveState(state);
+      } catch (error) {
+        toast(error instanceof Error ? error.message : '教程进度保存失败', root);
+      }
     }
     setSaveInFlight(false);
     closeAttributeEditor();
