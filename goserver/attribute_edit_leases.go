@@ -27,23 +27,29 @@ type attributeFreezeChecker interface {
 type attributeEditLease struct {
 	attributeID string
 	expiresAt   time.Time
+	claims      int
+	releasing   bool
 }
 
 type attributeEditLeaseCoordinator struct {
-	mu       sync.Mutex
-	ttl      time.Duration
-	now      func() time.Time
-	newToken func() (string, error)
-	sessions map[string]attributeEditLease
+	mu         sync.Mutex
+	changed    *sync.Cond
+	ttl        time.Duration
+	now        func() time.Time
+	newToken   func() (string, error)
+	sessions   map[string]*attributeEditLease
+	afterBegin func()
 }
 
 func newAttributeEditLeaseCoordinator(ttl time.Duration, now func() time.Time, token func() (string, error)) *attributeEditLeaseCoordinator {
-	return &attributeEditLeaseCoordinator{
+	leases := &attributeEditLeaseCoordinator{
 		ttl:      ttl,
 		now:      now,
 		newToken: token,
-		sessions: map[string]attributeEditLease{},
+		sessions: map[string]*attributeEditLease{},
 	}
+	leases.changed = sync.NewCond(&leases.mu)
+	return leases
 }
 
 func newDefaultAttributeEditLeaseCoordinator() *attributeEditLeaseCoordinator {
@@ -70,7 +76,7 @@ func (leases *attributeEditLeaseCoordinator) Create(attributeID string) (string,
 		return "", time.Time{}, err
 	}
 	expiresAt := now.Add(leases.ttl)
-	leases.sessions[token] = attributeEditLease{attributeID: attributeID, expiresAt: expiresAt}
+	leases.sessions[token] = &attributeEditLease{attributeID: attributeID, expiresAt: expiresAt}
 	return token, expiresAt, nil
 }
 
@@ -83,11 +89,10 @@ func (leases *attributeEditLeaseCoordinator) Renew(attributeID, token string) (t
 	leases.removeExpiredLocked(now)
 
 	lease, ok := leases.sessions[token]
-	if !ok || lease.attributeID != attributeID {
+	if !ok || lease.attributeID != attributeID || lease.releasing {
 		return time.Time{}, false
 	}
 	lease.expiresAt = now.Add(leases.ttl)
-	leases.sessions[token] = lease
 	return lease.expiresAt, true
 }
 
@@ -99,24 +104,67 @@ func (leases *attributeEditLeaseCoordinator) Has(attributeID, token string) bool
 	defer leases.mu.Unlock()
 	leases.removeExpiredLocked(leases.now())
 	lease, ok := leases.sessions[token]
-	return ok && lease.attributeID == attributeID
+	return ok && !lease.releasing && lease.attributeID == attributeID
 }
 
-// withLive holds lease ownership through fn. Callers use this as the
-// authorization seam for a state mutation: Release cannot interleave between
-// the ownership check and the durable write performed by fn.
-func (leases *attributeEditLeaseCoordinator) withLive(attributeID, token string, fn func(isLive func() bool)) bool {
+type attributeEditLeaseClaim struct {
+	coordinator *attributeEditLeaseCoordinator
+	token       string
+	lease       *attributeEditLease
+	once        sync.Once
+}
+
+// Begin grants an in-flight claim without retaining leases.mu. Release waits
+// for the claim to finish, so a valid token cannot be revoked between the
+// authorization check and a store mutation.
+func (leases *attributeEditLeaseCoordinator) Begin(attributeID, token string) (*attributeEditLeaseClaim, bool) {
 	attributeID = strings.TrimSpace(attributeID)
 	token = strings.TrimSpace(token)
 	leases.mu.Lock()
-	defer leases.mu.Unlock()
 	leases.removeExpiredLocked(leases.now())
 	lease, ok := leases.sessions[token]
-	if !ok || lease.attributeID != attributeID {
+	if !ok || lease.releasing || lease.attributeID != attributeID {
+		leases.mu.Unlock()
+		return nil, false
+	}
+	lease.claims++
+	claim := &attributeEditLeaseClaim{coordinator: leases, token: token, lease: lease}
+	hook := leases.afterBegin
+	leases.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return claim, true
+}
+
+func (claim *attributeEditLeaseClaim) Live() bool {
+	if claim == nil || claim.coordinator == nil || claim.lease == nil {
 		return false
 	}
-	fn(func() bool { return lease.expiresAt.After(leases.now()) })
-	return true
+	leases := claim.coordinator
+	leases.mu.Lock()
+	defer leases.mu.Unlock()
+	return leases.sessions[claim.token] == claim.lease && claim.lease.claims > 0 && claim.lease.expiresAt.After(leases.now())
+}
+
+func (claim *attributeEditLeaseClaim) Finish() {
+	if claim == nil || claim.coordinator == nil || claim.lease == nil {
+		return
+	}
+	claim.once.Do(func() {
+		leases := claim.coordinator
+		leases.mu.Lock()
+		defer leases.mu.Unlock()
+		if claim.lease.claims > 0 {
+			claim.lease.claims--
+		}
+		if claim.lease.claims == 0 && (claim.lease.releasing || !claim.lease.expiresAt.After(leases.now())) {
+			if leases.sessions[claim.token] == claim.lease {
+				delete(leases.sessions, claim.token)
+			}
+		}
+		leases.changed.Broadcast()
+	})
 }
 
 func (leases *attributeEditLeaseCoordinator) Release(attributeID, token string) bool {
@@ -130,6 +178,10 @@ func (leases *attributeEditLeaseCoordinator) Release(attributeID, token string) 
 	if !ok || lease.attributeID != attributeID {
 		return false
 	}
+	lease.releasing = true
+	for lease.claims > 0 {
+		leases.changed.Wait()
+	}
 	delete(leases.sessions, token)
 	return true
 }
@@ -140,7 +192,7 @@ func (leases *attributeEditLeaseCoordinator) IsFrozen(attributeID string) bool {
 	defer leases.mu.Unlock()
 	leases.removeExpiredLocked(leases.now())
 	for _, lease := range leases.sessions {
-		if lease.attributeID == attributeID {
+		if lease.attributeID == attributeID && (lease.claims > 0 || lease.expiresAt.After(leases.now())) {
 			return true
 		}
 	}
@@ -149,7 +201,7 @@ func (leases *attributeEditLeaseCoordinator) IsFrozen(attributeID string) bool {
 
 func (leases *attributeEditLeaseCoordinator) removeExpiredLocked(now time.Time) {
 	for token, lease := range leases.sessions {
-		if !lease.expiresAt.After(now) {
+		if !lease.expiresAt.After(now) && lease.claims == 0 {
 			delete(leases.sessions, token)
 		}
 	}

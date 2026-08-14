@@ -495,6 +495,105 @@ func TestAttributeEditSubmitRejectsLeaseThatExpiresAtStoreWriteBoundary(t *testi
 	}
 }
 
+func TestAttributeEditPrepareKeepsBackfillLeaseAndStateCoherent(t *testing.T) {
+	store := attributeEditLegacyFixtureStore(t, "积分")
+	leases := newAttributeEditLeaseCoordinator(15*time.Second, timeNowForAttributeEditTest, func() (string, error) { return "AAAAAAAAAAAAAAAAAAAAAAAA", nil })
+	service := newAttributeEditService(store, leases, fixedAttributeID)
+	enteredCreate := make(chan struct{})
+	resumeCreate := make(chan struct{})
+	service.beforeLeaseCreate = func() {
+		close(enteredCreate)
+		<-resumeCreate
+	}
+	prepared := make(chan struct {
+		session attributeEditSession
+		err     error
+	}, 1)
+	go func() {
+		session, err := service.Prepare(attributeEditSessionRequest{LegacyName: "积分"})
+		prepared <- struct {
+			session attributeEditSession
+			err     error
+		}{session, err}
+	}()
+	<-enteredCreate
+	deleted := make(chan error, 1)
+	go func() {
+		_, err := store.updateState(func(state *appState) error {
+			state.Attributes = nil
+			return nil
+		})
+		deleted <- err
+	}()
+	select {
+	case err := <-deleted:
+		t.Fatalf("delete interleaved before lease/session completion: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(resumeCreate)
+	result := <-prepared
+	if result.err != nil || result.session.AttributeID != "generated-attribute" || !leases.Has(result.session.AttributeID, result.session.Token) {
+		t.Fatalf("session=%#v err=%v", result.session, result.err)
+	}
+	if result.session.State.Attributes[0].ID != "generated-attribute" {
+		t.Fatal("returned state did not contain the persisted ID")
+	}
+	if err := <-deleted; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAttributeEditSubmitCannotDeadlockWithBackgroundFreezeCheck(t *testing.T) {
+	store := attributeEditFixtureStore(t)
+	leases := newAttributeEditLeaseCoordinator(15*time.Second, timeNowForAttributeEditTest, func() (string, error) { return "AAAAAAAAAAAAAAAAAAAAAAAA", nil })
+	token, _, err := leases.Create("attribute-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := newAttributeEditService(store, leases, fixedAttributeID)
+	claimStarted := make(chan struct{})
+	allowSubmit := make(chan struct{})
+	leases.afterBegin = func() {
+		close(claimStarted)
+		<-allowSubmit
+	}
+	command := existingAttributeEdit("attribute-a", "能量", 10)
+	command.Target.LeaseToken = token
+	submitted := make(chan error, 1)
+	go func() {
+		_, err := service.Submit(command)
+		submitted <- err
+	}()
+	<-claimStarted
+
+	backgroundHasStoreLock := make(chan struct{})
+	backgroundDone := make(chan error, 1)
+	go func() {
+		_, err := store.updateState(func(state *appState) error {
+			close(backgroundHasStoreLock)
+			if !leases.IsFrozen("attribute-a") {
+				return errors.New("background lost the live freeze")
+			}
+			return nil
+		})
+		backgroundDone <- err
+	}()
+	<-backgroundHasStoreLock
+	select {
+	case err := <-backgroundDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		close(allowSubmit)
+		t.Fatal("background store->lease check deadlocked with submit")
+	}
+	close(allowSubmit)
+	if err := <-submitted; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func attributeEditFixtureStore(t *testing.T) *configStore {
 	t.Helper()
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}

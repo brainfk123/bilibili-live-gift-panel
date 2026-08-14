@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -69,9 +70,10 @@ type attributeEditSession struct {
 }
 
 type attributeEditService struct {
-	store  *configStore
-	leases *attributeEditLeaseCoordinator
-	newID  func() (string, error)
+	store             *configStore
+	leases            *attributeEditLeaseCoordinator
+	newID             func() (string, error)
+	beforeLeaseCreate func()
 }
 
 func newAttributeEditService(store *configStore, leases *attributeEditLeaseCoordinator, newID func() (string, error)) *attributeEditService {
@@ -90,9 +92,14 @@ func (service *attributeEditService) Prepare(request attributeEditSessionRequest
 	if service == nil || service.store == nil || service.leases == nil {
 		return attributeEditSession{}, fmt.Errorf("属性编辑服务未初始化")
 	}
-	state, attributeID, err := service.store.ensureAttributeID(request.AttributeID, request.LegacyName, service.newID)
+	service.store.mu.Lock()
+	defer service.store.mu.Unlock()
+	state, attributeID, err := service.store.ensureAttributeIDLocked(request.AttributeID, request.LegacyName, service.newID)
 	if err != nil {
 		return attributeEditSession{}, err
+	}
+	if service.beforeLeaseCreate != nil {
+		service.beforeLeaseCreate()
 	}
 	token, expiresAt, err := service.leases.Create(attributeID)
 	if err != nil {
@@ -110,11 +117,12 @@ func (service *attributeEditService) Submit(command attributeEditCommand) (attri
 		err    error
 	)
 	if strings.TrimSpace(command.Target.Kind) == "existing" {
-		if !service.leases.withLive(command.Target.AttributeID, command.Target.LeaseToken, func(isLive func() bool) {
-			result, err = service.store.applyAttributeEditAuthorized(command, service.newID, isLive)
-		}) {
+		claim, ok := service.leases.Begin(command.Target.AttributeID, command.Target.LeaseToken)
+		if !ok {
 			return attributeEditResult{}, &attributeEditLeaseLostError{}
 		}
+		defer claim.Finish()
+		result, err = service.store.applyAttributeEditAuthorized(command, service.newID, claim.Live)
 	} else {
 		result, err = service.store.applyAttributeEdit(command, service.newID)
 	}
@@ -138,7 +146,7 @@ func newAttributeEditHandler(service *attributeEditService) http.Handler {
 			attributeEditHTTPError(w, http.StatusMethodNotAllowed, "method_not_allowed", "不支持的请求方法")
 			return
 		}
-		if !isSameOriginGiftReceiptRequest(r) {
+		if !isSameOriginAttributeEditRequest(r) {
 			attributeEditHTTPError(w, http.StatusForbidden, "forbidden", "拒绝跨站请求")
 			return
 		}
@@ -184,6 +192,25 @@ func newAttributeEditHandler(service *attributeEditService) http.Handler {
 			"state":  result.State,
 		})
 	})
+}
+
+func isSameOriginAttributeEditRequest(r *http.Request) bool {
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" || parsed.User != nil {
+		return false
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return strings.EqualFold(parsed.Scheme, scheme) && strings.EqualFold(parsed.Host, r.Host)
 }
 
 func validAttributeEditSessionRequest(request attributeEditSessionRequest) bool {
@@ -421,13 +448,17 @@ func (s *configStore) applyAttributeEditLockedAuthorized(command attributeEditCo
 // ensureAttributeID resolves exactly one existing attribute and, for legacy
 // name-only records, durably assigns its ID before a lease is created.
 func (s *configStore) ensureAttributeID(attributeID, legacyName string, newID func() (string, error)) (appState, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ensureAttributeIDLocked(attributeID, legacyName, newID)
+}
+
+func (s *configStore) ensureAttributeIDLocked(attributeID, legacyName string, newID func() (string, error)) (appState, string, error) {
 	attributeID = strings.TrimSpace(attributeID)
 	legacyName = strings.TrimSpace(legacyName)
 	if (attributeID == "") == (legacyName == "") {
 		return appState{}, "", attributeEditInput(fmt.Errorf("必须且只能指定属性 ID 或旧属性名"))
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.ensureMutationsAllowedLocked(); err != nil {
 		return appState{}, "", err
 	}

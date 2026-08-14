@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -101,6 +102,32 @@ func TestAttributeEditLeaseHasRequiresExactLiveOwnership(t *testing.T) {
 	}
 }
 
+func TestAttributeEditLeaseClaimAvoidsReverseLockDeadlockAndDefersRelease(t *testing.T) {
+	leases := newAttributeEditLeaseCoordinator(15*time.Second, time.Now, func() (string, error) { return strings.Repeat("f", 24), nil })
+	token, _, err := leases.Create("attribute-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok := leases.Begin("attribute-1", token)
+	if !ok || !claim.Live() {
+		t.Fatal("could not establish live claim")
+	}
+	if _, ok := leases.Renew("attribute-1", token); !ok || !claim.Live() {
+		t.Fatal("Renew did not preserve the active claim")
+	}
+	released := make(chan bool, 1)
+	go func() { released <- leases.Release("attribute-1", token) }()
+	select {
+	case <-released:
+		t.Fatal("Release returned while the claim was active")
+	case <-time.After(30 * time.Millisecond):
+	}
+	claim.Finish()
+	if !<-released || leases.Has("attribute-1", token) {
+		t.Fatal("Release did not complete after claim finish")
+	}
+}
+
 func TestAttributeEditLeaseHTTPRejectsUnsafeAndMalformedRequests(t *testing.T) {
 	store := attributeEditLeaseTestStore(t, "attribute-1")
 	handler := newAttributeEditLeaseHandler(store, newAttributeEditLeaseCoordinator(15*time.Second, time.Now, func() (string, error) {
@@ -162,6 +189,8 @@ func TestAttributeEditHTTPStrictSessionAndSubmitAdapters(t *testing.T) {
 	}{
 		{name: "cross site fetch", path: "/api/attribute-edits/session", method: http.MethodPost, body: `{"attributeId":"attribute-a"}`, setup: func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "cross-site") }, want: http.StatusForbidden},
 		{name: "cross site origin", path: "/api/attribute-edits/session", method: http.MethodPost, body: `{"attributeId":"attribute-a"}`, setup: func(r *http.Request) { r.Header.Set("Origin", "https://attacker.invalid") }, want: http.StatusForbidden},
+		{name: "https origin on http session", path: "/api/attribute-edits/session", method: http.MethodPost, body: `{"attributeId":"attribute-a"}`, setup: func(r *http.Request) { r.Header.Set("Origin", "https://panel.local") }, want: http.StatusForbidden},
+		{name: "https origin on http submit", path: "/api/attribute-edits", method: http.MethodPost, body: `{"target":{"kind":"invalid"}}`, setup: func(r *http.Request) { r.Header.Set("Origin", "https://panel.local") }, want: http.StatusForbidden},
 		{name: "unknown path", path: "/api/attribute-edits/missing", method: http.MethodPost, body: `{}`, want: http.StatusNotFound},
 		{name: "wrong method", path: "/api/attribute-edits", method: http.MethodGet, body: `{}`, want: http.StatusMethodNotAllowed},
 		{name: "missing content type", path: "/api/attribute-edits/session", method: http.MethodPost, body: `{"attributeId":"attribute-a"}`, setup: func(r *http.Request) { r.Header.Del("Content-Type") }, want: http.StatusBadRequest},
@@ -287,6 +316,22 @@ func TestAttributeEditHTTPSessionAndSubmitLeaseSemantics(t *testing.T) {
 	}
 	if state.findAttribute("热度").Value != 20 {
 		t.Fatalf("last write did not win: %#v", state.Attributes)
+	}
+}
+
+func TestAttributeEditHTTPRejectsHTTPOriginOnHTTPSRequest(t *testing.T) {
+	store := attributeEditFixtureStore(t)
+	handler := newAttributeEditHandler(newAttributeEditService(store, newDefaultAttributeEditLeaseCoordinator(), fixedAttributeID))
+	for _, path := range []string{"/api/attribute-edits/session", "/api/attribute-edits"} {
+		request := httptest.NewRequest(http.MethodPost, "https://panel.local"+path, strings.NewReader(`{}`))
+		request.TLS = &tls.ConnectionState{}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Origin", "http://panel.local")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("path=%s status=%d body=%s", path, response.Code, response.Body.String())
+		}
 	}
 }
 
