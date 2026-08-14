@@ -14,7 +14,14 @@ import {
   TUTORIAL_LESSONS,
   type TutorialEditorProgress,
 } from '../src/ui/config/wizard';
-import { defaultState, loadState, resetState, saveState, saveStateTransaction } from '../src/storage';
+import {
+  commitAuthoritativeStateMutation,
+  defaultState,
+  loadState,
+  resetState,
+  saveState,
+  saveStateTransaction,
+} from '../src/storage';
 import { builtinCatalog } from '../src/gifts/catalog';
 import type { GiftEvent } from '../src/bilibili/messages';
 import type { Attribute } from '../src/types';
@@ -4913,6 +4920,118 @@ describe('single-page configuration rendering', () => {
       expect(textOf(root)).toContain('服务端新属性');
     });
 
+    it('persists the server-generated target and completed lessons across a normal first-run new save', async () => {
+      const opening = defaultAdvancedState();
+      opening.roomId = '88888888';
+      opening.settings.showTutorial = true;
+      opening.settings.tutorialReplayMode = false;
+      opening.settings.tutorialCompletedLessons = ['room'];
+      await saveState(opening);
+      const authoritative = JSON.parse(JSON.stringify(opening)) as typeof opening;
+      authoritative.attributes.push({
+        id: 'attribute-first-run-generated', name: '服务端首次属性', value: 5,
+        unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '',
+      });
+      const configPatches: Array<Record<string, unknown>> = [];
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits') return Response.json({
+          code: 0,
+          target: { id: 'attribute-first-run-generated', name: '服务端首次属性', created: true },
+          state: authoritative,
+        });
+        if (path === '/api/config' && init?.method === 'PATCH') {
+          configPatches.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return new Response(null, { status: 204 });
+        }
+        if (path === '/api/formula/preview') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      findByText(root, '+ 添加属性')?.onclick?.();
+      root.querySelector('.template-blank-card')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+      const name = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
+      const value = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '当前值') as TestElement;
+      name.value = '用户首次属性';
+      name.oninput?.();
+      value.value = '00:00:05';
+
+      findByText(root, '创建属性')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+
+      const saved = loadState();
+      expect(saved.settings.tutorialReplayMode).toBe(false);
+      expect(saved.settings.tutorialTargetAttributeId).toBe('attribute-first-run-generated');
+      expect(saved.settings.tutorialCompletedLessons).toEqual(expect.arrayContaining([
+        'room', 'attribute', 'template', 'save',
+      ]));
+      const settingsPatches = configPatches.filter((patch) => Object.prototype.hasOwnProperty.call(patch, 'settings'));
+      expect(settingsPatches).toEqual([expect.objectContaining({ settings: expect.any(Object) })]);
+      expect(Object.keys(settingsPatches[0])).toEqual(['settings']);
+      const reopenedRoot = new TestElement('div');
+      mountConfig(reopenedRoot as unknown as HTMLElement);
+      expect(textOf(reopenedRoot.querySelector('.guide-attribute-card') as TestElement)).toContain('服务端首次属性');
+    });
+
+    it('persists the submitted target and completed lessons across a normal first-run rename', async () => {
+      const opening = configuredAggregate();
+      opening.settings.showTutorial = true;
+      opening.settings.tutorialReplayMode = false;
+      opening.settings.tutorialCompletedLessons = ['room', 'attribute', 'template'];
+      opening.settings.tutorialTargetAttributeId = stableId;
+      await saveState(opening);
+      const authoritative = JSON.parse(JSON.stringify(opening)) as typeof opening;
+      authoritative.attributes[0] = { ...authoritative.attributes[0], name: '服务端首次重命名' };
+      authoritative.rules[0] = { ...authoritative.rules[0], attributeName: '服务端首次重命名' };
+      authoritative.timerRules[0] = { ...authoritative.timerRules[0], attributeName: '服务端首次重命名' };
+      delete authoritative.settings.tutorialTargetAttributeId;
+      authoritative.settings.tutorialCompletedLessons = ['room', 'attribute', 'template'];
+      const configPatches: Array<Record<string, unknown>> = [];
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits/session') return sessionResponse(opening);
+        if (path === '/api/attribute-edits') return Response.json({
+          code: 0, target: { id: stableId, name: '服务端首次重命名', created: false }, state: authoritative,
+        });
+        if (path === '/api/config' && init?.method === 'PATCH') {
+          configPatches.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return new Response(null, { status: 204 });
+        }
+        if (path === '/api/formula/preview') return Response.json({ code: 0 });
+        if (path === '/api/attribute-edit-lease') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExistingAttributeEditor(root);
+      const name = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
+      name.value = '用户首次重命名';
+      name.oninput?.();
+
+      findByText(root, '保存修改')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+
+      const saved = loadState();
+      expect(saved.settings.tutorialReplayMode).toBe(false);
+      expect(saved.settings.tutorialTargetAttributeId).toBe(stableId);
+      expect(saved.settings.tutorialCompletedLessons).toEqual(expect.arrayContaining([
+        'room', 'attribute', 'template', 'gift', 'save',
+      ]));
+      const settingsPatches = configPatches.filter((patch) => Object.prototype.hasOwnProperty.call(patch, 'settings'));
+      expect(settingsPatches).toEqual([expect.objectContaining({ settings: expect.any(Object) })]);
+      expect(Object.keys(settingsPatches[0])).toEqual(['settings']);
+      const reopenedRoot = new TestElement('div');
+      mountConfig(reopenedRoot as unknown as HTMLElement);
+      expect(textOf(reopenedRoot.querySelector('.guide-attribute-card') as TestElement)).toContain('服务端首次重命名');
+    });
+
     it('persists replay progress and the server-generated tutorial target for a canonically renamed new attribute', async () => {
       const opening = configuredAggregate();
       opening.settings.showTutorial = true;
@@ -5021,6 +5140,92 @@ describe('single-page configuration rendering', () => {
       mountConfig(reopenedRoot as unknown as HTMLElement);
       expect(textOf(reopenedRoot.querySelector('.guide-attribute-card') as TestElement)).toContain('服务端重命名');
     });
+
+    it.each(['save', 'reset', 'transaction', 'authoritative'] as const)(
+      'keeps a later %s intent authoritative when it overtakes an in-flight submit without an editor broad PATCH',
+      async (operation) => {
+        const opening = configuredAggregate();
+        opening.settings.showTutorial = true;
+        opening.settings.tutorialReplayMode = true;
+        opening.settings.tutorialCompletedLessons = ['room'];
+        opening.settings.tutorialTargetAttributeId = stableId;
+        await saveState(opening);
+        const submitted = JSON.parse(JSON.stringify(opening)) as typeof opening;
+        submitted.attributes[0] = { ...submitted.attributes[0], name: '被超越的提交' };
+        submitted.rules[0] = { ...submitted.rules[0], attributeName: '被超越的提交' };
+        submitted.timerRules[0] = { ...submitted.timerRules[0], attributeName: '被超越的提交' };
+        const later = JSON.parse(JSON.stringify(opening)) as typeof opening;
+        later.attributes[0] = { ...later.attributes[0], name: `后续${operation}`, value: 404 };
+        later.rules[0] = { ...later.rules[0], attributeName: `后续${operation}` };
+        later.timerRules[0] = { ...later.timerRules[0], attributeName: `后续${operation}` };
+        later.settings.tutorialReplayMode = false;
+        later.settings.tutorialCompletedLessons = ['room'];
+        later.settings.tutorialTargetAttributeId = 'attribute-later-intent';
+        let serverState = JSON.parse(JSON.stringify(opening)) as ReturnType<typeof defaultState>;
+        let resolveSubmit: ((response: Response) => void) | undefined;
+        const configPatches: Array<Record<string, unknown>> = [];
+        const releases: Array<Record<string, string>> = [];
+        const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+          const path = String(input);
+          if (path === '/api/attribute-edits/session') return sessionResponse(opening);
+          if (path === '/api/attribute-edits') {
+            return new Promise<Response>((resolve) => { resolveSubmit = resolve; });
+          }
+          if (path === '/api/config' && init?.method === 'PATCH') {
+            const patch = JSON.parse(String(init.body)) as Record<string, unknown>;
+            configPatches.push(patch);
+            serverState = { ...serverState, ...patch } as ReturnType<typeof defaultState>;
+            return new Response(null, { status: 204 });
+          }
+          if (path === '/api/config' && init?.method === 'DELETE') {
+            serverState = defaultState();
+            return new Response(null, { status: 204 });
+          }
+          if (path === '/api/attribute-edit-lease' && init?.method === 'DELETE') {
+            releases.push(JSON.parse(String(init.body)) as Record<string, string>);
+            return Response.json({ code: 0 });
+          }
+          if (path === '/api/attribute-edit-lease') return Response.json({ code: 0 });
+          if (path === '/api/formula/preview') return Response.json({ code: 0 });
+          return new Response(null, { status: 204 });
+        });
+        vi.stubGlobal('fetch', fetchImpl);
+        const root = new TestElement('div');
+        mountConfig(root as unknown as HTMLElement);
+        await openExistingAttributeEditor(root);
+
+        findByText(root, '保存修改')?.onclick?.();
+        await vi.waitFor(() => expect(resolveSubmit).toBeDefined());
+        const laterOperation = operation === 'reset'
+          ? resetState()
+          : operation === 'transaction'
+            ? saveStateTransaction(later).then(() => undefined)
+            : operation === 'authoritative'
+              ? commitAuthoritativeStateMutation(async () => {
+                serverState = JSON.parse(JSON.stringify(later)) as typeof serverState;
+                return later;
+              }).then(() => undefined)
+              : saveState(later);
+        serverState = JSON.parse(JSON.stringify(submitted)) as typeof serverState;
+        resolveSubmit?.(Response.json({
+          code: 0, target: { id: stableId, name: '被超越的提交', created: false }, state: submitted,
+        }));
+        await laterOperation;
+        await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+        await vi.waitFor(() => expect(releases).toHaveLength(1));
+
+        const expected = operation === 'reset' ? defaultState() : later;
+        expect(loadState().attributes).toEqual(expected.attributes);
+        expect(loadState().settings.tutorialTargetAttributeId).toBe(expected.settings.tutorialTargetAttributeId);
+        expect(serverState.attributes).toEqual(expected.attributes);
+        expect(serverState.settings.tutorialTargetAttributeId).toBe(expected.settings.tutorialTargetAttributeId);
+        const broadPatches = configPatches.filter((patch) => (
+          ['attributes', 'rules', 'timerRules'].some((key) => Object.prototype.hasOwnProperty.call(patch, key))
+        ));
+        expect(broadPatches).toHaveLength(operation === 'save' || operation === 'transaction' ? 1 : 0);
+        expect(releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
+      },
+    );
 
     it.each([
       ['server rejection', () => Promise.resolve(new Response(null, { status: 500 }))],

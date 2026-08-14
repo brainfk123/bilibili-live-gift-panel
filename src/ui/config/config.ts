@@ -4795,7 +4795,10 @@ export function mountConfig(root: HTMLElement): void {
     const replayTutorial = state.settings.tutorialReplayMode;
     const preserveTutorialTarget = editorGuideEnabled
       || Boolean(original?.id && state.settings.tutorialTargetAttributeId === original.id);
+    const tutorialGuidanceActive = state.settings.showTutorial
+      && (replayTutorial || editorGuideEnabled || preserveTutorialTarget);
     const submittedResult: { target?: Awaited<ReturnType<typeof submitAttributeEdit>>['target'] } = {};
+    let submitWasPublished = false;
     try {
       localStateVersion += 1;
       const committed = await commitAuthoritativeStateMutation(async () => {
@@ -4816,7 +4819,9 @@ export function mountConfig(root: HTMLElement): void {
         submittedResult.target = submitted.target;
         return submitted.state;
       });
-      Object.assign(state, committed);
+      const published = loadState();
+      submitWasPublished = published === committed;
+      Object.assign(state, published);
     } catch (error) {
       setSaveInFlight(false);
       toast(error instanceof Error ? error.message : '属性编辑请求失败', root);
@@ -4825,23 +4830,25 @@ export function mountConfig(root: HTMLElement): void {
       return;
     }
     const submittedTarget = submittedResult.target;
-    if (replayTutorial && submittedTarget) {
-      if (preserveTutorialTarget) state.settings.tutorialTargetAttributeId = submittedTarget.id;
-      markTutorialLessonComplete(state.settings, 'attribute');
-      markTutorialLessonComplete(state.settings, 'template');
-      if (editorTutorialProgress.basicsConfigured) markTutorialLessonComplete(state.settings, 'basics');
-      if ((editorTutorialProgress.giftCount ?? 0) > 0) markTutorialLessonComplete(state.settings, 'gift');
-      if (editorTutorialProgress.giftPreviewed) markTutorialLessonComplete(state.settings, 'rule');
-      if (editorTutorialProgress.presetSaved) markTutorialLessonComplete(state.settings, 'preset');
-      if (editorTutorialProgress.timerPreviewed) markTutorialLessonComplete(state.settings, 'timer');
-      if (editorTutorialProgress.outputPreviewed) markTutorialLessonComplete(state.settings, 'appearance');
-      markTutorialLessonComplete(state.settings, 'save');
+    if (submitWasPublished && tutorialGuidanceActive && submittedTarget) {
+      const tutorialState = JSON.parse(JSON.stringify(loadState())) as AppState;
+      if (preserveTutorialTarget) tutorialState.settings.tutorialTargetAttributeId = submittedTarget.id;
+      markTutorialLessonComplete(tutorialState.settings, 'attribute');
+      markTutorialLessonComplete(tutorialState.settings, 'template');
+      if (editorTutorialProgress.basicsConfigured) markTutorialLessonComplete(tutorialState.settings, 'basics');
+      if ((editorTutorialProgress.giftCount ?? 0) > 0) markTutorialLessonComplete(tutorialState.settings, 'gift');
+      if (editorTutorialProgress.giftPreviewed) markTutorialLessonComplete(tutorialState.settings, 'rule');
+      if (editorTutorialProgress.presetSaved) markTutorialLessonComplete(tutorialState.settings, 'preset');
+      if (editorTutorialProgress.timerPreviewed) markTutorialLessonComplete(tutorialState.settings, 'timer');
+      if (editorTutorialProgress.outputPreviewed) markTutorialLessonComplete(tutorialState.settings, 'appearance');
+      markTutorialLessonComplete(tutorialState.settings, 'save');
       localStateVersion += 1;
       try {
-        await saveState(state);
+        await saveState(tutorialState);
       } catch (error) {
         toast(error instanceof Error ? error.message : '教程进度保存失败', root);
       }
+      Object.assign(state, loadState());
     }
     setSaveInFlight(false);
     closeAttributeEditor();
