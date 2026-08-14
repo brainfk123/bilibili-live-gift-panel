@@ -174,21 +174,25 @@ func (leases *attributeEditLeaseCoordinator) Release(attributeID, token string) 
 	attributeID = strings.TrimSpace(attributeID)
 	token = strings.TrimSpace(token)
 	leases.mu.Lock()
-	defer leases.mu.Unlock()
 	leases.removeExpiredLocked(leases.now())
 
 	lease, ok := leases.sessions[token]
 	if !ok || lease.attributeID != attributeID {
+		leases.mu.Unlock()
 		return false
 	}
 	lease.releasing = true
-	if leases.afterReleaseMarked != nil {
-		leases.afterReleaseMarked()
+	hook := leases.afterReleaseMarked
+	leases.mu.Unlock()
+	if hook != nil {
+		hook()
 	}
+	leases.mu.Lock()
 	for lease.claims > 0 {
 		leases.changed.Wait()
 	}
 	delete(leases.sessions, token)
+	leases.mu.Unlock()
 	return true
 }
 
