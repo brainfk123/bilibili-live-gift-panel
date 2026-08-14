@@ -1,4 +1,8 @@
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { isScalar, parseDocument } from 'yaml';
 
@@ -36,6 +40,67 @@ function stepIndex(steps: ReleaseStep[], name: string): number {
   const index = steps.findIndex((step) => step.name === name);
   expect(index, `missing workflow step ${name}`).toBeGreaterThanOrEqual(0);
   return index;
+}
+
+function publishedManifestFixture(): Record<string, unknown> {
+  const asset = Buffer.from('signed-executable-fixture');
+  return {
+    tag_name: 'v1.2.3',
+    draft: false,
+    prerelease: false,
+    assets: [{
+      name: 'gift-panel-windows-x64.exe',
+      browser_download_url: 'https://github.com/example/repository/releases/download/v1.2.3/gift-panel-windows-x64.exe',
+      size: asset.length,
+      digest: `sha256:${createHash('sha256').update(asset).digest('hex')}`,
+    }],
+  };
+}
+
+function runPublishedReleaseValidation(
+  manifest: unknown,
+  manifestJSON = JSON.stringify(manifest),
+) {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), 'gift-panel-release-validation-'));
+  try {
+    const dist = join(temporaryRoot, 'dist');
+    mkdirSync(dist);
+    const asset = Buffer.from('signed-executable-fixture');
+    const digest = createHash('sha256').update(asset).digest('hex');
+    writeFileSync(join(dist, 'gift-panel-windows-x64.exe'), asset);
+    writeFileSync(join(dist, 'gift-panel-windows-x64.exe.sha256'), `${digest}  gift-panel-windows-x64.exe`);
+    writeFileSync(join(dist, 'gift-panel-update.json'), manifestJSON);
+    writeFileSync(join(dist, 'gift-panel-changelog.json'), '{"schemaVersion":1,"releases":[{}]}');
+
+    const { steps } = releaseWorkflow();
+    const validation = steps[stepIndex(steps, 'Validate published release assets')]?.run;
+    expect(validation).toBeTypeOf('string');
+    const script = String.raw`
+$ErrorActionPreference = 'Stop'
+function Get-AuthenticodeSignature {
+  param([string]$LiteralPath)
+  [pscustomobject]@{
+    Status = [System.Management.Automation.SignatureStatus]::Valid
+    SignerCertificate = [pscustomobject]@{ Subject = 'CN=Release Test' }
+  }
+}
+${validation}
+`;
+    return spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '-'], {
+      cwd: temporaryRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        EVSIGN_EXPECTED_SUBJECT: 'CN=Release Test',
+        GITHUB_REPOSITORY: 'example/repository',
+        RELEASE_TAG: 'v1.2.3',
+      },
+      input: script,
+      timeout: 30_000,
+    });
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 }
 
 describe('release workflow supply-chain contract', () => {
@@ -230,13 +295,92 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[validate]?.run).toContain('Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel-windows-x64.exe');
     expect(steps[validate]?.run).toContain('gift-panel-windows-x64.exe.sha256');
     expect(steps[validate]?.run).toContain('dist/gift-panel-update.json');
-    expect(steps[validate]?.run).toContain('$updateManifest.tag_name -cne $env:RELEASE_TAG');
-    expect(steps[validate]?.run).toContain("$manifestAsset.name -cne 'gift-panel-windows-x64.exe'");
-    expect(steps[validate]?.run).toContain('[int64]$manifestAsset.size -ne $actualSize');
-    expect(steps[validate]?.run).toContain('$manifestAsset.digest -cne $expectedDigest');
-    expect(steps[validate]?.run).toContain('$manifestAsset.browser_download_url -cne $expectedURL');
     expect(validate).toBeLessThan(mirror);
   });
+
+  it('accepts the exact typed fallback update manifest contract', () => {
+    const result = runPublishedReleaseValidation(publishedManifestFixture());
+
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  const malformedManifestCases: Array<{
+    name: string;
+    mutate: (manifest: Record<string, unknown>) => unknown;
+    serialize?: (manifest: unknown) => string;
+  }> = [
+    {
+      name: 'an array tag_name',
+      mutate: (manifest) => { manifest.tag_name = ['v1.2.3']; },
+    },
+    {
+      name: 'numeric draft false',
+      mutate: (manifest) => { manifest.draft = 0; },
+    },
+    {
+      name: 'numeric prerelease false',
+      mutate: (manifest) => { manifest.prerelease = 0; },
+    },
+    {
+      name: 'a non-array assets value',
+      mutate: (manifest) => { manifest.assets = (manifest.assets as unknown[])[0]; },
+    },
+    {
+      name: 'an array asset name',
+      mutate: (manifest) => { (manifest.assets as Record<string, unknown>[])[0]!.name = ['gift-panel-windows-x64.exe']; },
+    },
+    {
+      name: 'an array asset download URL',
+      mutate: (manifest) => {
+        (manifest.assets as Record<string, unknown>[])[0]!.browser_download_url =
+          ['https://github.com/example/repository/releases/download/v1.2.3/gift-panel-windows-x64.exe'];
+      },
+    },
+    {
+      name: 'an array asset digest',
+      mutate: (manifest) => {
+        const asset = (manifest.assets as Record<string, unknown>[])[0]!;
+        asset.digest = [asset.digest];
+      },
+    },
+    {
+      name: 'a string asset size',
+      mutate: (manifest) => {
+        const asset = (manifest.assets as Record<string, unknown>[])[0]!;
+        asset.size = String(asset.size);
+      },
+    },
+    {
+      name: 'a decimal-form asset size',
+      mutate: (manifest) => manifest,
+      serialize: (manifest) => {
+        const serialized = JSON.stringify(manifest);
+        const size = ((manifest as Record<string, unknown>).assets as Record<string, unknown>[])[0]!.size;
+        return serialized.replace(`"size":${size}`, `"size":${size}.0`);
+      },
+    },
+    {
+      name: 'an array root',
+      mutate: (manifest) => [manifest],
+    },
+    {
+      name: 'an unknown root property',
+      mutate: (manifest) => { manifest.extra = true; },
+    },
+  ];
+
+  it.each(malformedManifestCases)(
+    'rejects fallback manifests with $name before COS repair',
+    ({ mutate, serialize }) => {
+      const manifest = publishedManifestFixture();
+      const replacement = mutate(manifest);
+      const candidate = replacement ?? manifest;
+      const result = runPublishedReleaseValidation(candidate, serialize?.(candidate));
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('Published fallback update manifest');
+    },
+  );
 
   it('checks every gh command immediately so publication failures cannot be masked', () => {
     const { steps } = releaseWorkflow();

@@ -381,20 +381,83 @@ jobs:
           if (-not [String]::Equals($actualHash, $expectedHash, [StringComparison]::OrdinalIgnoreCase)) {
             throw "Published EXE does not match its checksum. Manual recovery required."
           }
-          try {
-            $updateManifest = Get-Content -LiteralPath dist/gift-panel-update.json -Raw | ConvertFrom-Json
-          } catch {
-            throw "Published fallback update manifest is malformed. Manual recovery required."
-          }
-          if ($updateManifest.tag_name -cne $env:RELEASE_TAG -or $updateManifest.draft -ne $false -or $updateManifest.prerelease -ne $false -or @($updateManifest.assets).Count -ne 1) {
-            throw "Published fallback update manifest metadata is inconsistent. Manual recovery required."
-          }
-          $manifestAsset = @($updateManifest.assets)[0]
           $actualSize = (Get-Item -LiteralPath dist/gift-panel-windows-x64.exe).Length
           $expectedDigest = "sha256:$($actualHash.ToLowerInvariant())"
           $expectedURL = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/gift-panel-windows-x64.exe"
-          if ($manifestAsset.name -cne 'gift-panel-windows-x64.exe' -or [int64]$manifestAsset.size -ne $actualSize -or $manifestAsset.digest -cne $expectedDigest -or $manifestAsset.browser_download_url -cne $expectedURL) {
-            throw "Published fallback update manifest asset is inconsistent. Manual recovery required."
+
+          function Test-ExactJsonObjectProperties {
+            param(
+              [System.Text.Json.JsonElement]$Element,
+              [string[]]$Names
+            )
+            if ($Element.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) {
+              return $false
+            }
+            $actualNames = @($Element.EnumerateObject() | ForEach-Object { $_.Name })
+            if ($actualNames.Count -ne $Names.Count) {
+              return $false
+            }
+            foreach ($name in $Names) {
+              if (@($actualNames | Where-Object { $_ -ceq $name }).Count -ne 1) {
+                return $false
+              }
+            }
+            return $true
+          }
+
+          $manifestDocument = $null
+          try {
+            $manifestJSON = Get-Content -LiteralPath dist/gift-panel-update.json -Raw
+            $manifestDocument = [System.Text.Json.JsonDocument]::Parse($manifestJSON)
+          } catch {
+            throw "Published fallback update manifest is malformed. Manual recovery required."
+          }
+          try {
+            $updateManifest = $manifestDocument.RootElement
+            if (-not (Test-ExactJsonObjectProperties $updateManifest @('tag_name', 'draft', 'prerelease', 'assets'))) {
+              throw "Published fallback update manifest metadata is inconsistent. Manual recovery required."
+            }
+
+            $tagName = $updateManifest.GetProperty('tag_name')
+            $draft = $updateManifest.GetProperty('draft')
+            $prerelease = $updateManifest.GetProperty('prerelease')
+            $assets = $updateManifest.GetProperty('assets')
+            if (
+              $tagName.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or
+              $tagName.GetString() -cne $env:RELEASE_TAG -or
+              $draft.ValueKind -ne [System.Text.Json.JsonValueKind]::False -or
+              $prerelease.ValueKind -ne [System.Text.Json.JsonValueKind]::False -or
+              $assets.ValueKind -ne [System.Text.Json.JsonValueKind]::Array -or
+              $assets.GetArrayLength() -ne 1
+            ) {
+              throw "Published fallback update manifest metadata is inconsistent. Manual recovery required."
+            }
+
+            $manifestAsset = $assets[0]
+            if (-not (Test-ExactJsonObjectProperties $manifestAsset @('name', 'browser_download_url', 'size', 'digest'))) {
+              throw "Published fallback update manifest asset is inconsistent. Manual recovery required."
+            }
+            $assetName = $manifestAsset.GetProperty('name')
+            $assetURL = $manifestAsset.GetProperty('browser_download_url')
+            $assetSize = $manifestAsset.GetProperty('size')
+            $assetDigest = $manifestAsset.GetProperty('digest')
+            [int64]$manifestSize = 0
+            if (
+              $assetName.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or
+              $assetName.GetString() -cne 'gift-panel-windows-x64.exe' -or
+              $assetURL.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or
+              $assetURL.GetString() -cne $expectedURL -or
+              $assetDigest.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or
+              $assetDigest.GetString() -cne $expectedDigest -or
+              $assetSize.ValueKind -ne [System.Text.Json.JsonValueKind]::Number -or
+              -not $assetSize.TryGetInt64([ref]$manifestSize) -or
+              $manifestSize -le 0 -or
+              $manifestSize -ne $actualSize
+            ) {
+              throw "Published fallback update manifest asset is inconsistent. Manual recovery required."
+            }
+          } finally {
+            $manifestDocument.Dispose()
           }
           try {
             $changelog = Get-Content -LiteralPath dist/gift-panel-changelog.json -Raw | ConvertFrom-Json
