@@ -181,6 +181,147 @@ func TestConfigStoreApplyAttributeEditDoesNotExposePartialStateAfterDurabilityFa
 	}
 }
 
+func TestConfigStoreApplyAttributeEditRejectsSubmittedPeerRuleIDCollisionsWithoutDeletingPeers(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*attributeEditCommand)
+	}{
+		{
+			name: "gift rule",
+			mutate: func(command *attributeEditCommand) {
+				command.GiftRules[0].ID = "gift-b"
+			},
+		},
+		{
+			name: "timer rule",
+			mutate: func(command *attributeEditCommand) {
+				command.TimerRules[0].ID = "timer-b"
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := attributeEditFixtureStore(t)
+			command := existingAttributeEdit("attribute-a", "能量", 10)
+			tc.mutate(&command)
+			_, err := store.applyAttributeEdit(command, fixedAttributeID)
+			if !isAttributeEditConflictError(err) {
+				t.Fatalf("error type = %T, want attributeEditConflictError", err)
+			}
+			state, err := store.readState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.findAttribute("积分") == nil || state.findAttribute("能量") != nil || state.Rules[1].ID != "gift-b" || state.TimerRules[1].ID != "timer-b" {
+				t.Fatalf("peer was changed after rejected command: rules=%#v timers=%#v", state.Rules, state.TimerRules)
+			}
+		})
+	}
+}
+
+func TestConfigStoreApplyAttributeEditRejectsAmbiguousLiveRuleIDs(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*appState)
+	}{
+		{
+			name: "duplicate gift ID",
+			mutate: func(state *appState) {
+				state.Rules[2].ID = "gift-b"
+			},
+		},
+		{
+			name: "empty gift ID",
+			mutate: func(state *appState) {
+				state.Rules[1].ID = ""
+			},
+		},
+		{
+			name: "duplicate timer ID",
+			mutate: func(state *appState) {
+				state.TimerRules[2].ID = "timer-b"
+			},
+		},
+		{
+			name: "empty timer ID",
+			mutate: func(state *appState) {
+				state.TimerRules[1].ID = ""
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := attributeEditFixtureStore(t)
+			state, err := store.readState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(&state)
+			if err := store.replaceState(state); err != nil {
+				t.Fatal(err)
+			}
+			_, err = store.applyAttributeEdit(existingAttributeEdit("attribute-a", "能量", 10), fixedAttributeID)
+			if !isAttributeEditConflictError(err) {
+				t.Fatalf("error type = %T, want attributeEditConflictError", err)
+			}
+		})
+	}
+}
+
+func TestConfigStoreApplyAttributeEditKeepsMultiplePeerRuleOrderAndReplacesTargetRules(t *testing.T) {
+	store := attributeEditFixtureStore(t)
+	if _, err := store.updateState(func(state *appState) error {
+		state.Rules = append(state.Rules, giftRule{ID: "gift-b-2", GiftID: 10, AttributeName: "B", FormulaName: "peer two", Formula: "B + 2"})
+		state.TimerRules = append(state.TimerRules, timerRule{ID: "timer-b-2", AttributeName: "B", FormulaName: "timer peer two", IntervalSeconds: 3, Formula: "B + 2", Enabled: true})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.applyAttributeEdit(existingAttributeEdit("attribute-a", "能量", 10), fixedAttributeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertGiftRuleIDs(t, first.State.Rules, "gift-a-2", "gift-a-3", "gift-b", "gift-b-2")
+	assertTimerRuleIDs(t, first.State.TimerRules, "timer-a-2", "timer-a-3", "timer-b", "timer-b-2")
+
+	secondCommand := existingAttributeEdit("attribute-a", "热度", 20)
+	secondCommand.GiftRules = []giftRule{{ID: "gift-final", GiftID: 4, AttributeName: "热度", FormulaName: "final target", Formula: "热度 + 7"}}
+	secondCommand.TimerRules = []timerRule{{ID: "timer-final", AttributeName: "热度", FormulaName: "final timer", IntervalSeconds: 7, Formula: "热度 + 7", Enabled: true}}
+	second, err := store.applyAttributeEdit(secondCommand, fixedAttributeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertGiftRuleIDs(t, second.State.Rules, "gift-final", "gift-b", "gift-b-2")
+	assertTimerRuleIDs(t, second.State.TimerRules, "timer-final", "timer-b", "timer-b-2")
+	if second.State.Rules[0].AttributeName != "热度" || second.State.Rules[0].Formula != "热度 + 7" || second.State.TimerRules[0].AttributeName != "热度" || second.State.TimerRules[0].Formula != "热度 + 7" {
+		t.Fatalf("target rules were not replaced by the second command: rules=%#v timers=%#v", second.State.Rules, second.State.TimerRules)
+	}
+}
+
+func assertGiftRuleIDs(t *testing.T, rules []giftRule, want ...string) {
+	t.Helper()
+	if len(rules) != len(want) {
+		t.Fatalf("gift rule count = %d, want %d: %#v", len(rules), len(want), rules)
+	}
+	for index, id := range want {
+		if rules[index].ID != id {
+			t.Fatalf("gift rule IDs = %#v, want %#v", rules, want)
+		}
+	}
+}
+
+func assertTimerRuleIDs(t *testing.T, rules []timerRule, want ...string) {
+	t.Helper()
+	if len(rules) != len(want) {
+		t.Fatalf("timer rule count = %d, want %d: %#v", len(rules), len(want), rules)
+	}
+	for index, id := range want {
+		if rules[index].ID != id {
+			t.Fatalf("timer rule IDs = %#v, want %#v", rules, want)
+		}
+	}
+}
+
 func isAttributeEditInputError(err error) bool {
 	var target *attributeEditInputError
 	return errors.As(err, &target)

@@ -134,17 +134,25 @@ func (s *configStore) applyAttributeEdit(command attributeEditCommand, newID fun
 		return attributeEditResult{}, err
 	}
 
+	if err := validateUniqueGiftRuleIDs(previous.Rules); err != nil {
+		return attributeEditResult{}, err
+	}
+	if err := validateUniqueTimerRuleIDs(previous.TimerRules); err != nil {
+		return attributeEditResult{}, err
+	}
 	ownedGiftRules := ownedGiftRuleIDs(previous.Rules, oldName)
 	ownedTimerRules := ownedTimerRuleIDs(previous.TimerRules, oldName)
+	peerGiftRuleIDs := nonTargetGiftRuleIDs(previous.Rules, oldName)
+	peerTimerRuleIDs := nonTargetTimerRuleIDs(previous.TimerRules, oldName)
 	if oldName != "" && oldName != command.Attribute.Name {
 		if err := rewriteAttributeReferences(&state, oldName, command.Attribute.Name); err != nil {
 			return attributeEditResult{}, attributeEditInput(err)
 		}
 	}
-	if err := validateSubmittedGiftRules(command.GiftRules, command.Attribute.Name); err != nil {
+	if err := validateSubmittedGiftRules(command.GiftRules, command.Attribute.Name, peerGiftRuleIDs); err != nil {
 		return attributeEditResult{}, err
 	}
-	if err := validateSubmittedTimerRules(command.TimerRules, command.Attribute.Name); err != nil {
+	if err := validateSubmittedTimerRules(command.TimerRules, command.Attribute.Name, peerTimerRuleIDs); err != nil {
 		return attributeEditResult{}, err
 	}
 	state.Rules = mergeGiftRuleGroup(state.Rules, ownedGiftRules, command.GiftRules)
@@ -289,7 +297,57 @@ func ownedTimerRuleIDs(rules []timerRule, name string) map[string]struct{} {
 	return owned
 }
 
-func validateSubmittedGiftRules(rules []giftRule, name string) error {
+func nonTargetGiftRuleIDs(rules []giftRule, targetName string) map[string]struct{} {
+	ids := make(map[string]struct{}, len(rules))
+	for _, rule := range rules {
+		if rule.AttributeName != targetName {
+			ids[rule.ID] = struct{}{}
+		}
+	}
+	return ids
+}
+
+func nonTargetTimerRuleIDs(rules []timerRule, targetName string) map[string]struct{} {
+	ids := make(map[string]struct{}, len(rules))
+	for _, rule := range rules {
+		if rule.AttributeName != targetName {
+			ids[rule.ID] = struct{}{}
+		}
+	}
+	return ids
+}
+
+func validateUniqueGiftRuleIDs(rules []giftRule) error {
+	seen := make(map[string]struct{}, len(rules))
+	for _, rule := range rules {
+		id := strings.TrimSpace(rule.ID)
+		if id == "" {
+			return attributeEditConflict(fmt.Errorf("现有礼物规则 ID 不能为空"))
+		}
+		if _, exists := seen[id]; exists {
+			return attributeEditConflict(fmt.Errorf("现有礼物规则 ID 不能重复：%s", id))
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
+func validateUniqueTimerRuleIDs(rules []timerRule) error {
+	seen := make(map[string]struct{}, len(rules))
+	for _, rule := range rules {
+		id := strings.TrimSpace(rule.ID)
+		if id == "" {
+			return attributeEditConflict(fmt.Errorf("现有定时器规则 ID 不能为空"))
+		}
+		if _, exists := seen[id]; exists {
+			return attributeEditConflict(fmt.Errorf("现有定时器规则 ID 不能重复：%s", id))
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
+func validateSubmittedGiftRules(rules []giftRule, name string, peerIDs map[string]struct{}) error {
 	seen := make(map[string]struct{}, len(rules))
 	for _, rule := range rules {
 		if rule.AttributeName != name {
@@ -301,12 +359,15 @@ func validateSubmittedGiftRules(rules []giftRule, name string) error {
 		if _, exists := seen[rule.ID]; exists {
 			return attributeEditInput(fmt.Errorf("提交的礼物规则 ID 不能重复：%s", rule.ID))
 		}
+		if _, exists := peerIDs[rule.ID]; exists {
+			return attributeEditConflict(fmt.Errorf("提交的礼物规则 ID 与同伴规则冲突：%s", rule.ID))
+		}
 		seen[rule.ID] = struct{}{}
 	}
 	return nil
 }
 
-func validateSubmittedTimerRules(rules []timerRule, name string) error {
+func validateSubmittedTimerRules(rules []timerRule, name string, peerIDs map[string]struct{}) error {
 	seen := make(map[string]struct{}, len(rules))
 	for _, rule := range rules {
 		if rule.AttributeName != name {
@@ -317,6 +378,9 @@ func validateSubmittedTimerRules(rules []timerRule, name string) error {
 		}
 		if _, exists := seen[rule.ID]; exists {
 			return attributeEditInput(fmt.Errorf("提交的定时器规则 ID 不能重复：%s", rule.ID))
+		}
+		if _, exists := peerIDs[rule.ID]; exists {
+			return attributeEditConflict(fmt.Errorf("提交的定时器规则 ID 与同伴规则冲突：%s", rule.ID))
 		}
 		seen[rule.ID] = struct{}{}
 	}
