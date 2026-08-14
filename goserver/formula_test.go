@@ -140,6 +140,9 @@ func TestFormulaValidationRejectsGuaranteedRuntimeErrors(t *testing.T) {
 		"IF(积分/0,10,20)":            "除数为零",
 		"MAX(积分,1/0)":               "除数为零",
 		"IF(0,10,RANDBETWEEN(2,1))": "最小值不能大于最大值",
+		"积分*(" + overflow + ")":     "规则结果不是有效数字",
+		"积分/ROUND(1,309)":           "规则结果不是有效数字",
+		"(" + overflow + ")/积分":     "规则结果不是有效数字",
 	}
 	for formula, message := range tests {
 		err := validateFormula(formula, map[string]float64{"积分": 0})
@@ -152,6 +155,7 @@ func TestFormulaValidationRejectsGuaranteedRuntimeErrors(t *testing.T) {
 func TestFormulaValidationAllowsRuntimeDependentOrUnselectedErrors(t *testing.T) {
 	original := formulaRandomIntn
 	t.Cleanup(func() { formulaRandomIntn = original })
+	overflow := "1" + strings.Repeat("0", 307) + "*100"
 	formulaRandomIntn = func(int) int {
 		t.Fatal("semantic validation drew randomness")
 		return 0
@@ -164,6 +168,13 @@ func TestFormulaValidationAllowsRuntimeDependentOrUnselectedErrors(t *testing.T)
 		"IF(RAND(),1/0,10)",
 		"1/积分",
 		"RANDBETWEEN(积分,-1)",
+		"积分/(" + overflow + ")",
+		"积分*积分",
+		"积分+积分",
+		"积分/积分",
+		"IF(积分," + overflow + ",1)",
+		"RANDOMCHOICE(" + overflow + ",1)",
+		"(" + overflow + ")>积分",
 	} {
 		if err := validateFormula(formula, map[string]float64{"积分": 0}); err != nil {
 			t.Fatalf("%s: %v", formula, err)

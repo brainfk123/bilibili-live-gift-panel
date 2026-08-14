@@ -245,3 +245,34 @@ No push, tag, release, package, version, or FFmpeg action was performed for this
 | `git diff --check` | exit 0; no whitespace errors. |
 
 No push, tag, release, package, version, or FFmpeg action was performed for round 2.
+
+## Final review fix round 3: abstract nonfinite propagation (2026-08-14)
+
+### Finding and RED evidence
+
+- Fixed base: `4d9acec6e2960f0d6d7ba05c43dd1febd42e5bfb`.
+- Round 2's `{known,value}` analysis lost guaranteed nonfinite information as soon as an exact nonfinite subtree was combined with a finite runtime variable.
+- The focused RED suite showed unit, config PUT, and validation-only HTTP acceptance of `积分*(constant overflow)`, `积分/ROUND(1,309)` (finite divided by NaN), and `(constant overflow)/积分`.
+
+### Abstract domain and contract
+
+- Runtime formula variables are modeled as finite unknowns. UI attribute saving rejects nonfinite values, JSON numeric decoding cannot persist IEEE NaN/Inf, live formula results are persisted only after explicit NaN/Inf rejection, and identity/product price values are finite numeric inputs by product contract.
+- The semantic lattice is a bitset of `{zero, finite-nonzero, infinity, NaN}` plus exact-value refinement. Binary transfer enumerates possible class pairs and separately excludes evaluator-error paths such as division by zero.
+- Validation rejects a final expression only when no valid finite result class remains. This proves `finite*Inf`, `finite/NaN`, and `Inf/finite` invalid for every finite variable value, including zero/error cases.
+- Conservative negative controls remain accepted when at least one finite outcome exists: `finite/Inf` (zero), finite-variable arithmetic/division, comparisons involving nonfinite values (numeric booleans), variable-dependent ranges, unknown `IF` branches, and multi-argument `RANDOMCHOICE` alternatives.
+- Exact constants retain round-2 division, overflow, `IF`, one-argument choice, and constant `RANDBETWEEN` behavior. Runtime evaluation and random selection remain unchanged.
+
+### Fresh gates
+
+| Gate | Fresh observed result |
+|---|---|
+| Focused lattice/config/validate-only/no-draw GREEN | exit 0; PASS. |
+| Focused stress (`-count=20`) | exit 0; PASS in 2.362s. |
+| Focused race (`-count=5`) | exit 0; PASS in 2.173s. |
+| `go test ./... -count=1 -timeout=300s` | exit 0; PASS in 23.208s. |
+| `go test -race ./... -count=1 -timeout=300s` | exit 0; PASS in 39.540s. |
+| `npm run typecheck` | exit 0; 0 TypeScript errors. |
+| `npm test -- --reporter=dot` | 43 files, 500 passed, 31 skipped, 0 failed; exit 0. |
+| `git diff --check` | exit 0; no whitespace errors. |
+
+No push, tag, release, package, version, or FFmpeg action was performed for round 3.

@@ -961,9 +961,11 @@ func TestConfigStoreValidationDoesNotEvaluateRandomChoiceBranches(t *testing.T) 
 func TestConfigStoreRejectsGuaranteedFormulaRuntimeErrors(t *testing.T) {
 	overflow := "1" + strings.Repeat("0", 307) + "*100"
 	tests := map[string]string{
-		"1/0":               "除数为零",
-		overflow:            "规则结果不是有效数字",
-		"RANDBETWEEN(10,1)": "最小值不能大于最大值",
+		"1/0":                   "除数为零",
+		overflow:                "规则结果不是有效数字",
+		"RANDBETWEEN(10,1)":     "最小值不能大于最大值",
+		"积分*(" + overflow + ")": "规则结果不是有效数字",
+		"积分/ROUND(1,309)":       "规则结果不是有效数字",
 	}
 	for formula, message := range tests {
 		t.Run(message, func(t *testing.T) {
