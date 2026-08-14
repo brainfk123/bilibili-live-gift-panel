@@ -16,6 +16,8 @@
     "verify:frontend-display-only": "node scripts/verify-frontend-display-only.mjs",
     "verify:gift-clip-export": "node scripts/verify-gift-clip-export.mjs",
     "fetch:catalog": "node scripts/fetch-gift-catalog.mjs",
+    "test:update-api": "go -C updateapi test ./... -count=1",
+    "build:update-api": "node scripts/build-update-api.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
