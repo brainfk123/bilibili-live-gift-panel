@@ -1,8 +1,17 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"mime"
+	"net/http"
 	"strings"
+	"time"
+	"unicode/utf8"
 )
 
 type attributeEditTarget struct {
@@ -43,9 +52,246 @@ type attributeEditNotFoundError struct{ err error }
 func (e *attributeEditNotFoundError) Error() string { return e.err.Error() }
 func (e *attributeEditNotFoundError) Unwrap() error { return e.err }
 
+type attributeEditLeaseLostError struct{}
+
+func (*attributeEditLeaseLostError) Error() string { return "编辑租约已失效" }
+
+type attributeEditSessionRequest struct {
+	AttributeID string `json:"attributeId,omitempty"`
+	LegacyName  string `json:"legacyName,omitempty"`
+}
+
+type attributeEditSession struct {
+	AttributeID string    `json:"attributeId"`
+	Token       string    `json:"token"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+	State       appState  `json:"state"`
+}
+
+type attributeEditService struct {
+	store  *configStore
+	leases *attributeEditLeaseCoordinator
+	newID  func() (string, error)
+}
+
+func newAttributeEditService(store *configStore, leases *attributeEditLeaseCoordinator, newID func() (string, error)) *attributeEditService {
+	return &attributeEditService{store: store, leases: leases, newID: newID}
+}
+
+func newAttributeEditID() (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, bytes); err != nil {
+		return "", err
+	}
+	return "attribute-" + base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+func (service *attributeEditService) Prepare(request attributeEditSessionRequest) (attributeEditSession, error) {
+	if service == nil || service.store == nil || service.leases == nil {
+		return attributeEditSession{}, fmt.Errorf("属性编辑服务未初始化")
+	}
+	state, attributeID, err := service.store.ensureAttributeID(request.AttributeID, request.LegacyName, service.newID)
+	if err != nil {
+		return attributeEditSession{}, err
+	}
+	token, expiresAt, err := service.leases.Create(attributeID)
+	if err != nil {
+		return attributeEditSession{}, err
+	}
+	return attributeEditSession{AttributeID: attributeID, Token: token, ExpiresAt: expiresAt, State: state}, nil
+}
+
+func (service *attributeEditService) Submit(command attributeEditCommand) (attributeEditResult, error) {
+	if service == nil || service.store == nil || service.leases == nil {
+		return attributeEditResult{}, fmt.Errorf("属性编辑服务未初始化")
+	}
+	var (
+		result attributeEditResult
+		err    error
+	)
+	if strings.TrimSpace(command.Target.Kind) == "existing" {
+		if !service.leases.withLive(command.Target.AttributeID, command.Target.LeaseToken, func(isLive func() bool) {
+			result, err = service.store.applyAttributeEditAuthorized(command, service.newID, isLive)
+		}) {
+			return attributeEditResult{}, &attributeEditLeaseLostError{}
+		}
+	} else {
+		result, err = service.store.applyAttributeEdit(command, service.newID)
+	}
+	if err != nil {
+		return attributeEditResult{}, err
+	}
+	// applyAttributeEditLocked releases the store mutex before this callback.
+	service.store.notifyStateChanges(result.Previous, result.PreviousErr, result.State)
+	return result, nil
+}
+
+func newAttributeEditHandler(service *attributeEditService) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		if r.URL.Path != "/api/attribute-edits/session" && r.URL.Path != "/api/attribute-edits" {
+			attributeEditHTTPError(w, http.StatusNotFound, "not_found", "请求地址不存在")
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			attributeEditHTTPError(w, http.StatusMethodNotAllowed, "method_not_allowed", "不支持的请求方法")
+			return
+		}
+		if !isSameOriginGiftReceiptRequest(r) {
+			attributeEditHTTPError(w, http.StatusForbidden, "forbidden", "拒绝跨站请求")
+			return
+		}
+		if r.URL.Path == "/api/attribute-edits/session" {
+			var request attributeEditSessionRequest
+			if status, message := decodeAttributeEditHTTPBody(w, r, &request); status != 0 {
+				attributeEditHTTPError(w, status, "invalid_request", message)
+				return
+			}
+			if !validAttributeEditSessionRequest(request) {
+				attributeEditHTTPError(w, http.StatusBadRequest, "invalid_request", "属性选择无效")
+				return
+			}
+			session, err := service.Prepare(request)
+			if err != nil {
+				attributeEditHTTPWriteServiceError(w, err)
+				return
+			}
+			attributeEditHTTPJSON(w, http.StatusOK, struct {
+				Code int `json:"code"`
+				attributeEditSession
+			}{Code: 0, attributeEditSession: session})
+			return
+		}
+
+		var command attributeEditCommand
+		if status, message := decodeAttributeEditHTTPBody(w, r, &command); status != 0 {
+			attributeEditHTTPError(w, status, "invalid_request", message)
+			return
+		}
+		if !validAttributeEditCommandTarget(command.Target) {
+			attributeEditHTTPError(w, http.StatusBadRequest, "invalid_request", "属性编辑目标无效")
+			return
+		}
+		result, err := service.Submit(command)
+		if err != nil {
+			attributeEditHTTPWriteServiceError(w, err)
+			return
+		}
+		attributeEditHTTPJSON(w, http.StatusOK, map[string]any{
+			"code":   0,
+			"target": map[string]any{"id": result.ID, "name": result.Name, "created": result.Created},
+			"state":  result.State,
+		})
+	})
+}
+
+func validAttributeEditSessionRequest(request attributeEditSessionRequest) bool {
+	attributeID := strings.TrimSpace(request.AttributeID)
+	legacyName := strings.TrimSpace(request.LegacyName)
+	if (attributeID == "") == (legacyName == "") {
+		return false
+	}
+	if attributeID != "" {
+		return validAttributeEditLeaseAttributeID(attributeID)
+	}
+	return utf8.ValidString(legacyName) && len(legacyName) <= 160
+}
+
+func validAttributeEditCommandTarget(target attributeEditTarget) bool {
+	switch strings.TrimSpace(target.Kind) {
+	case "existing":
+		if !validAttributeEditLeaseAttributeID(strings.TrimSpace(target.AttributeID)) {
+			return false
+		}
+		return target.LeaseToken == "" || validAttributeEditLeaseToken(target.LeaseToken)
+	case "new":
+		return strings.TrimSpace(target.AttributeID) == "" && strings.TrimSpace(target.LeaseToken) == ""
+	default:
+		return false
+	}
+}
+
+func decodeAttributeEditHTTPBody(w http.ResponseWriter, r *http.Request, target any) (int, string) {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		return http.StatusBadRequest, "请求必须使用 JSON 格式"
+	}
+	reader := http.MaxBytesReader(w, r.Body, maxConfigBytes)
+	defer reader.Close()
+	decoder := json.NewDecoder(reader)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return http.StatusRequestEntityTooLarge, "请求内容过大"
+		}
+		return http.StatusBadRequest, "请求格式不正确"
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return http.StatusRequestEntityTooLarge, "请求内容过大"
+		}
+		return http.StatusBadRequest, "请求格式不正确"
+	}
+	return 0, ""
+}
+
+func attributeEditHTTPWriteServiceError(w http.ResponseWriter, err error) {
+	var input *attributeEditInputError
+	var notFound *attributeEditNotFoundError
+	var conflict *attributeEditConflictError
+	var leaseLost *attributeEditLeaseLostError
+	var blocked *stateMutationsBlockedError
+	switch {
+	case errors.As(err, &input):
+		attributeEditHTTPError(w, http.StatusBadRequest, "invalid_request", "请求内容无效")
+	case errors.As(err, &notFound):
+		attributeEditHTTPError(w, http.StatusNotFound, "not_found", "属性不存在")
+	case errors.As(err, &leaseLost):
+		attributeEditHTTPError(w, http.StatusConflict, "lease_lost", "编辑租约已失效")
+	case errors.As(err, &conflict):
+		attributeEditHTTPError(w, http.StatusConflict, "name_conflict", "属性名称或引用发生冲突")
+	case errors.As(err, &blocked):
+		attributeEditHTTPError(w, http.StatusConflict, "mutations_blocked", "本地状态暂不可修改")
+	default:
+		attributeEditHTTPError(w, http.StatusInternalServerError, "internal_error", "服务器暂时无法处理请求")
+	}
+}
+
+func attributeEditHTTPError(w http.ResponseWriter, status int, code, message string) {
+	attributeEditHTTPJSON(w, status, map[string]any{"code": code, "message": message})
+}
+
+func attributeEditHTTPJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
 func (s *configStore) applyAttributeEdit(command attributeEditCommand, newID func() (string, error)) (attributeEditResult, error) {
+	return s.applyAttributeEditAuthorized(command, newID, nil)
+}
+
+func (s *configStore) applyAttributeEditAuthorized(command attributeEditCommand, newID func() (string, error), isLive func() bool) (attributeEditResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.applyAttributeEditLockedAuthorized(command, newID, isLive)
+}
+
+// applyAttributeEditLocked is called while s.mu is held. Keeping this method
+// separate lets attributeEditService hold lease ownership over the exact
+// check-to-persist interval without a lock-free TOCTOU window.
+func (s *configStore) applyAttributeEditLocked(command attributeEditCommand, newID func() (string, error)) (attributeEditResult, error) {
+	return s.applyAttributeEditLockedAuthorized(command, newID, nil)
+}
+
+func (s *configStore) applyAttributeEditLockedAuthorized(command attributeEditCommand, newID func() (string, error), isLive func() bool) (attributeEditResult, error) {
+	if isLive != nil && !isLive() {
+		return attributeEditResult{}, &attributeEditLeaseLostError{}
+	}
 	if err := s.ensureMutationsAllowedLocked(); err != nil {
 		return attributeEditResult{}, err
 	}
@@ -163,10 +409,84 @@ func (s *configStore) applyAttributeEdit(command attributeEditCommand, newID fun
 	if err := validateAppState(state); err != nil {
 		return attributeEditResult{}, attributeEditInput(err)
 	}
+	if isLive != nil && !isLive() {
+		return attributeEditResult{}, &attributeEditLeaseLostError{}
+	}
 	if err := s.persistStateLocked(previous, state, false); err != nil {
 		return attributeEditResult{}, err
 	}
 	return attributeEditResult{State: state, ID: id, Name: command.Attribute.Name, Created: created, Previous: previous}, nil
+}
+
+// ensureAttributeID resolves exactly one existing attribute and, for legacy
+// name-only records, durably assigns its ID before a lease is created.
+func (s *configStore) ensureAttributeID(attributeID, legacyName string, newID func() (string, error)) (appState, string, error) {
+	attributeID = strings.TrimSpace(attributeID)
+	legacyName = strings.TrimSpace(legacyName)
+	if (attributeID == "") == (legacyName == "") {
+		return appState{}, "", attributeEditInput(fmt.Errorf("必须且只能指定属性 ID 或旧属性名"))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureMutationsAllowedLocked(); err != nil {
+		return appState{}, "", err
+	}
+	previous, err := s.readStateLocked()
+	if err != nil {
+		return appState{}, "", err
+	}
+	if err := s.ensureMutationsAllowedLocked(); err != nil {
+		return appState{}, "", err
+	}
+	index := -1
+	for candidateIndex, attribute := range previous.Attributes {
+		matched := attribute.ID == attributeID
+		if legacyName != "" {
+			matched = strings.TrimSpace(attribute.Name) == legacyName
+		}
+		if !matched {
+			continue
+		}
+		if index >= 0 {
+			return appState{}, "", attributeEditNotFound(fmt.Errorf("属性选择不唯一"))
+		}
+		index = candidateIndex
+	}
+	if index < 0 {
+		return appState{}, "", attributeEditNotFound(fmt.Errorf("属性不存在"))
+	}
+	if existing := strings.TrimSpace(previous.Attributes[index].ID); existing != "" {
+		return previous, existing, nil
+	}
+	if newID == nil {
+		return appState{}, "", fmt.Errorf("生成属性 ID 的函数不能为空")
+	}
+	generatedID, err := newID()
+	if err != nil {
+		return appState{}, "", err
+	}
+	generatedID = strings.TrimSpace(generatedID)
+	if generatedID == "" {
+		return appState{}, "", fmt.Errorf("生成的属性 ID 不能为空")
+	}
+	if err := validateUniqueAttributeIDs(previous.Attributes); err != nil {
+		return appState{}, "", err
+	}
+	for _, attribute := range previous.Attributes {
+		if attribute.ID == generatedID {
+			return appState{}, "", attributeEditConflict(fmt.Errorf("属性 ID 不能重复：%s", generatedID))
+		}
+	}
+	state, err := cloneAppState(previous)
+	if err != nil {
+		return appState{}, "", err
+	}
+	state.Attributes[index].ID = generatedID
+	normalizeAppState(&state)
+	if err := s.persistStateLocked(previous, state, false); err != nil {
+		return appState{}, "", err
+	}
+	return state, generatedID, nil
 }
 
 func rewriteAttributeReferences(state *appState, oldName, newName string) error {

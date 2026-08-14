@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestRewriteFormulaIdentifierPreservesFormattingAndSubstrings(t *testing.T) {
@@ -332,7 +333,167 @@ func isAttributeEditConflictError(err error) bool {
 	return errors.As(err, &target)
 }
 
+func isAttributeEditNotFoundError(err error) bool {
+	var target *attributeEditNotFoundError
+	return errors.As(err, &target)
+}
+
 func fixedAttributeID() (string, error) { return "generated-attribute", nil }
+
+func TestAttributeEditSessionBackfillsLegacyIDBeforeLease(t *testing.T) {
+	store := attributeEditLegacyFixtureStore(t, "积分")
+	service := newAttributeEditService(store, newDefaultAttributeEditLeaseCoordinator(), fixedAttributeID)
+	got, err := service.Prepare(attributeEditSessionRequest{LegacyName: "积分"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AttributeID != "generated-attribute" || !service.leases.Has(got.AttributeID, got.Token) {
+		t.Fatalf("unexpected session: %#v", got)
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Attributes[0].ID != "generated-attribute" {
+		t.Fatal("ID was not persisted first")
+	}
+}
+
+func TestAttributeEditSessionRejectsAmbiguousOrMissingLegacyName(t *testing.T) {
+	for _, name := range []string{"missing", "积分"} {
+		t.Run(name, func(t *testing.T) {
+			store := attributeEditLegacyFixtureStore(t, "积分")
+			if name == "积分" {
+				if _, err := store.updateState(func(state *appState) error {
+					state.Attributes = append(state.Attributes, attributeState{Name: "积分"})
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := newAttributeEditService(store, newDefaultAttributeEditLeaseCoordinator(), fixedAttributeID).Prepare(attributeEditSessionRequest{LegacyName: name})
+			if !isAttributeEditNotFoundError(err) {
+				t.Fatalf("error=%T, want not found", err)
+			}
+		})
+	}
+}
+
+func TestAttributeEditSessionDoesNotCreateLeaseWhenIDPersistenceOrTokenGenerationFails(t *testing.T) {
+	store := attributeEditLegacyFixtureStore(t, "积分")
+	store.writeAtomically = func(string, []byte) error { return errors.New("injected persistence failure") }
+	service := newAttributeEditService(store, newDefaultAttributeEditLeaseCoordinator(), fixedAttributeID)
+	if _, err := service.Prepare(attributeEditSessionRequest{LegacyName: "积分"}); err == nil {
+		t.Fatal("expected persistence error")
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Attributes[0].ID != "" {
+		t.Fatal("failed persistence changed live state")
+	}
+
+	store = attributeEditLegacyFixtureStore(t, "积分")
+	leases := newAttributeEditLeaseCoordinator(attributeEditLeaseTTL, timeNowForAttributeEditTest, func() (string, error) { return "", errors.New("injected token failure") })
+	service = newAttributeEditService(store, leases, fixedAttributeID)
+	if _, err := service.Prepare(attributeEditSessionRequest{LegacyName: "积分"}); err == nil {
+		t.Fatal("expected token error")
+	}
+	state, err = store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Attributes[0].ID != "generated-attribute" || leases.IsFrozen("generated-attribute") {
+		t.Fatal("persisted ID must precede a failed lease creation")
+	}
+}
+
+func TestAttributeEditSubmitHoldsLiveLeaseUntilItAcquiresStoreLock(t *testing.T) {
+	store := attributeEditFixtureStore(t)
+	leases := newAttributeEditLeaseCoordinator(15*time.Second, timeNowForAttributeEditTest, func() (string, error) { return "AAAAAAAAAAAAAAAAAAAAAAAA", nil })
+	token, _, err := leases.Create("attribute-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := existingAttributeEdit("attribute-a", "能量", 10)
+	command.Target.LeaseToken = token
+	service := newAttributeEditService(store, leases, fixedAttributeID)
+	enteredPersistence := make(chan struct{})
+	releasePersistence := make(chan struct{})
+	store.writeAtomically = func(string, []byte) error {
+		close(enteredPersistence)
+		<-releasePersistence
+		return errors.New("injected write failure")
+	}
+
+	store.mu.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.Submit(command)
+		done <- err
+	}()
+	select {
+	case <-enteredPersistence:
+		store.mu.Unlock()
+		close(releasePersistence)
+		<-done
+		t.Fatal("submit reached persistence before acquiring store lock")
+	case <-time.After(50 * time.Millisecond):
+		store.mu.Unlock()
+	}
+	<-enteredPersistence
+	close(releasePersistence)
+	if err := <-done; err == nil {
+		t.Fatal("expected injected write failure")
+	}
+	if !leases.Has("attribute-a", token) {
+		t.Fatal("lease was not retained through the store-lock wait")
+	}
+}
+
+func TestAttributeEditSubmitRejectsLeaseThatExpiresAtStoreWriteBoundary(t *testing.T) {
+	now := time.Unix(100, 0)
+	nowCalls := 0
+	liveChecked := make(chan struct{})
+	leases := newAttributeEditLeaseCoordinator(15*time.Second, func() time.Time {
+		nowCalls++
+		if nowCalls == 2 { // Create consumes the first clock read.
+			close(liveChecked)
+		}
+		return now
+	}, func() (string, error) { return "AAAAAAAAAAAAAAAAAAAAAAAA", nil })
+	store := attributeEditFixtureStore(t)
+	token, _, err := leases.Create("attribute-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := existingAttributeEdit("attribute-a", "能量", 10)
+	command.Target.LeaseToken = token
+	service := newAttributeEditService(store, leases, fixedAttributeID)
+
+	store.mu.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.Submit(command)
+		done <- err
+	}()
+	<-liveChecked
+	now = now.Add(15 * time.Second)
+	store.mu.Unlock()
+	err = <-done
+	var leaseLost *attributeEditLeaseLostError
+	if !errors.As(err, &leaseLost) {
+		t.Fatalf("error=%v, want lease lost", err)
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.findAttribute("能量") != nil {
+		t.Fatal("expired lease persisted an edit")
+	}
+}
 
 func attributeEditFixtureStore(t *testing.T) *configStore {
 	t.Helper()
@@ -342,6 +503,19 @@ func attributeEditFixtureStore(t *testing.T) *configStore {
 	}
 	return store
 }
+
+func attributeEditLegacyFixtureStore(t *testing.T, name string) *configStore {
+	t.Helper()
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	state := defaultAppState()
+	state.Attributes = []attributeState{{Name: name, Value: 1, Color: "#112233"}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+func timeNowForAttributeEditTest() time.Time { return time.Unix(100, 0) }
 
 func existingAttributeEdit(id, name string, value float64) attributeEditCommand {
 	return attributeEditCommand{

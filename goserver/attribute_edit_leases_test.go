@@ -83,6 +83,24 @@ func TestAttributeEditLeaseRenewAndReleaseRequireMatchingAttributeAndToken(t *te
 	}
 }
 
+func TestAttributeEditLeaseHasRequiresExactLiveOwnership(t *testing.T) {
+	now := time.Unix(100, 0)
+	leases := newAttributeEditLeaseCoordinator(15*time.Second, func() time.Time { return now }, func() (string, error) {
+		return strings.Repeat("e", 24), nil
+	})
+	token, _, err := leases.Create("attribute-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !leases.Has("attribute-1", token) || leases.Has("attribute-2", token) || leases.Has("attribute-1", strings.Repeat("f", 24)) {
+		t.Fatal("Has did not require exact ownership")
+	}
+	now = now.Add(15 * time.Second)
+	if leases.Has("attribute-1", token) || leases.IsFrozen("attribute-1") {
+		t.Fatal("Has did not clean expired ownership")
+	}
+}
+
 func TestAttributeEditLeaseHTTPRejectsUnsafeAndMalformedRequests(t *testing.T) {
 	store := attributeEditLeaseTestStore(t, "attribute-1")
 	handler := newAttributeEditLeaseHandler(store, newAttributeEditLeaseCoordinator(15*time.Second, time.Now, func() (string, error) {
@@ -126,6 +144,161 @@ func TestAttributeEditLeaseHTTPRejectsUnsafeAndMalformedRequests(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAttributeEditHTTPStrictSessionAndSubmitAdapters(t *testing.T) {
+	store := attributeEditFixtureStore(t)
+	leases := newAttributeEditLeaseCoordinator(15*time.Second, time.Now, func() (string, error) { return strings.Repeat("A", 24), nil })
+	handler := newAttributeEditHandler(newAttributeEditService(store, leases, fixedAttributeID))
+	overseized := `{"legacyName":"` + strings.Repeat("a", maxConfigBytes) + `"}`
+
+	for _, test := range []struct {
+		name   string
+		path   string
+		method string
+		body   string
+		setup  func(*http.Request)
+		want   int
+	}{
+		{name: "cross site fetch", path: "/api/attribute-edits/session", method: http.MethodPost, body: `{"attributeId":"attribute-a"}`, setup: func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "cross-site") }, want: http.StatusForbidden},
+		{name: "cross site origin", path: "/api/attribute-edits/session", method: http.MethodPost, body: `{"attributeId":"attribute-a"}`, setup: func(r *http.Request) { r.Header.Set("Origin", "https://attacker.invalid") }, want: http.StatusForbidden},
+		{name: "unknown path", path: "/api/attribute-edits/missing", method: http.MethodPost, body: `{}`, want: http.StatusNotFound},
+		{name: "wrong method", path: "/api/attribute-edits", method: http.MethodGet, body: `{}`, want: http.StatusMethodNotAllowed},
+		{name: "missing content type", path: "/api/attribute-edits/session", method: http.MethodPost, body: `{"attributeId":"attribute-a"}`, setup: func(r *http.Request) { r.Header.Del("Content-Type") }, want: http.StatusBadRequest},
+		{name: "unknown field", path: "/api/attribute-edits/session", method: http.MethodPost, body: `{"attributeId":"attribute-a","extra":true}`, want: http.StatusBadRequest},
+		{name: "trailing JSON", path: "/api/attribute-edits/session", method: http.MethodPost, body: `{"attributeId":"attribute-a"} {}`, want: http.StatusBadRequest},
+		{name: "invalid target discriminant", path: "/api/attribute-edits", method: http.MethodPost, body: `{"target":{"kind":"invalid"}}`, want: http.StatusBadRequest},
+		{name: "invalid token", path: "/api/attribute-edits", method: http.MethodPost, body: `{"target":{"kind":"existing","attributeId":"attribute-a","leaseToken":"invalid"}}`, want: http.StatusBadRequest},
+		{name: "oversized body", path: "/api/attribute-edits/session", method: http.MethodPost, body: overseized, want: http.StatusRequestEntityTooLarge},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := attributeEditHTTPCall(handler, test.path, test.method, test.body, test.setup)
+			if response.Code != test.want {
+				t.Fatalf("status=%d want=%d body=%s", response.Code, test.want, response.Body.String())
+			}
+			if response.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("Cache-Control=%q", response.Header().Get("Cache-Control"))
+			}
+			if test.method == http.MethodGet && response.Header().Get("Allow") != http.MethodPost {
+				t.Fatalf("Allow=%q", response.Header().Get("Allow"))
+			}
+		})
+	}
+}
+
+func TestAttributeEditHTTPSessionAndSubmitLeaseSemantics(t *testing.T) {
+	now := time.Unix(100, 0)
+	tokens := []string{strings.Repeat("A", 24), strings.Repeat("B", 24)}
+	store := attributeEditFixtureStore(t)
+	leases := newAttributeEditLeaseCoordinator(15*time.Second, func() time.Time { return now }, func() (string, error) {
+		token := tokens[0]
+		tokens = tokens[1:]
+		return token, nil
+	})
+	handler := newAttributeEditHandler(newAttributeEditService(store, leases, fixedAttributeID))
+
+	first := attributeEditHTTPCall(handler, "/api/attribute-edits/session", http.MethodPost, `{"attributeId":"attribute-a"}`, nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("session status=%d body=%s", first.Code, first.Body.String())
+	}
+	var session struct {
+		Code        int      `json:"code"`
+		AttributeID string   `json:"attributeId"`
+		Token       string   `json:"token"`
+		State       appState `json:"state"`
+	}
+	if err := json.NewDecoder(first.Body).Decode(&session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Code != 0 || session.AttributeID != "attribute-a" || session.Token != strings.Repeat("A", 24) || session.State.Attributes[0].ID != "attribute-a" {
+		t.Fatalf("session=%#v", session)
+	}
+
+	second := attributeEditHTTPCall(handler, "/api/attribute-edits/session", http.MethodPost, `{"attributeId":"attribute-a"}`, nil)
+	var peer struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(second.Body).Decode(&peer); err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{"", strings.Repeat("C", 24)} {
+		command := existingAttributeEdit("attribute-a", "能量", 10)
+		command.Target.LeaseToken = token
+		body, err := json.Marshal(command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := attributeEditHTTPCall(handler, "/api/attribute-edits", http.MethodPost, string(body), nil)
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"lease_lost"`) {
+			t.Fatalf("token=%q status=%d body=%s", token, response.Code, response.Body.String())
+		}
+	}
+	now = now.Add(15 * time.Second)
+	command := existingAttributeEdit("attribute-a", "能量", 10)
+	command.Target.LeaseToken = peer.Token
+	body, err := json.Marshal(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired := attributeEditHTTPCall(handler, "/api/attribute-edits", http.MethodPost, string(body), nil)
+	if expired.Code != http.StatusConflict || !strings.Contains(expired.Body.String(), `"lease_lost"`) {
+		t.Fatalf("expired status=%d body=%s", expired.Code, expired.Body.String())
+	}
+
+	// Two live leases for one attribute intentionally permit last-write-wins.
+	store = attributeEditFixtureStore(t)
+	liveTokens := []string{strings.Repeat("D", 24), strings.Repeat("E", 24)}
+	leases = newAttributeEditLeaseCoordinator(15*time.Second, time.Now, func() (string, error) {
+		token := liveTokens[0]
+		liveTokens = liveTokens[1:]
+		return token, nil
+	})
+	handler = newAttributeEditHandler(newAttributeEditService(store, leases, fixedAttributeID))
+	first = attributeEditHTTPCall(handler, "/api/attribute-edits/session", http.MethodPost, `{"attributeId":"attribute-a"}`, nil)
+	second = attributeEditHTTPCall(handler, "/api/attribute-edits/session", http.MethodPost, `{"attributeId":"attribute-a"}`, nil)
+	var firstLive, secondLive struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(first.Body).Decode(&firstLive); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewDecoder(second.Body).Decode(&secondLive); err != nil {
+		t.Fatal(err)
+	}
+	for _, edit := range []struct {
+		token string
+		name  string
+		value float64
+	}{{firstLive.Token, "能量", 10}, {secondLive.Token, "热度", 20}} {
+		command := existingAttributeEdit("attribute-a", edit.name, edit.value)
+		command.Target.LeaseToken = edit.token
+		body, err := json.Marshal(command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := attributeEditHTTPCall(handler, "/api/attribute-edits", http.MethodPost, string(body), nil)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"created":false`) {
+			t.Fatalf("submit status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.findAttribute("热度").Value != 20 {
+		t.Fatalf("last write did not win: %#v", state.Attributes)
+	}
+}
+
+func attributeEditHTTPCall(handler http.Handler, path, method, body string, setup func(*http.Request)) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, "http://panel.local"+path, strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	if setup != nil {
+		setup(request)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
 }
 
 func TestAttributeEditLeaseHTTPRejectsAmbiguousAttributeID(t *testing.T) {
@@ -195,7 +368,7 @@ func TestAttributeEditLeaseHTTPLifecycleAndIdempotentRelease(t *testing.T) {
 	}
 }
 
-func TestRegisterAttributeEditLeaseRouteSharesCoordinatorWithRuntime(t *testing.T) {
+func TestRegisterAttributeEditRoutesSharesCoordinatorWithRuntime(t *testing.T) {
 	store := attributeEditLeaseTestStore(t, "attribute-1")
 	if _, err := store.updateState(func(state *appState) error {
 		state.RoomID = "room-1"
@@ -210,7 +383,8 @@ func TestRegisterAttributeEditLeaseRouteSharesCoordinatorWithRuntime(t *testing.
 		return strings.Repeat("A", 24), nil
 	})
 	mux := http.NewServeMux()
-	registerAttributeEditLeaseRoute(mux, store, background, leases)
+	service := newAttributeEditService(store, leases, fixedAttributeID)
+	registerAttributeEditRoutes(mux, store, background, leases, service)
 
 	created := attributeEditLeaseHTTPCall(mux, http.MethodPost, `{"attributeId":"attribute-1"}`)
 	if created.Code != http.StatusOK {

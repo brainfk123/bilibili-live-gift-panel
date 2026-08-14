@@ -91,6 +91,34 @@ func (leases *attributeEditLeaseCoordinator) Renew(attributeID, token string) (t
 	return lease.expiresAt, true
 }
 
+// Has reports whether token currently owns a live lease for attributeID.
+func (leases *attributeEditLeaseCoordinator) Has(attributeID, token string) bool {
+	attributeID = strings.TrimSpace(attributeID)
+	token = strings.TrimSpace(token)
+	leases.mu.Lock()
+	defer leases.mu.Unlock()
+	leases.removeExpiredLocked(leases.now())
+	lease, ok := leases.sessions[token]
+	return ok && lease.attributeID == attributeID
+}
+
+// withLive holds lease ownership through fn. Callers use this as the
+// authorization seam for a state mutation: Release cannot interleave between
+// the ownership check and the durable write performed by fn.
+func (leases *attributeEditLeaseCoordinator) withLive(attributeID, token string, fn func(isLive func() bool)) bool {
+	attributeID = strings.TrimSpace(attributeID)
+	token = strings.TrimSpace(token)
+	leases.mu.Lock()
+	defer leases.mu.Unlock()
+	leases.removeExpiredLocked(leases.now())
+	lease, ok := leases.sessions[token]
+	if !ok || lease.attributeID != attributeID {
+		return false
+	}
+	fn(func() bool { return lease.expiresAt.After(leases.now()) })
+	return true
+}
+
 func (leases *attributeEditLeaseCoordinator) Release(attributeID, token string) bool {
 	attributeID = strings.TrimSpace(attributeID)
 	token = strings.TrimSpace(token)
