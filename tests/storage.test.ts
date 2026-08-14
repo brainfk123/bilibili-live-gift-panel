@@ -46,6 +46,26 @@ describe('storage', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it('atomic attribute edit adopts a peer changed after the editor snapshot', async () => {
+    const opening = defaultState();
+    opening.attributes = [
+      { id: 'attribute-a', name: 'A', value: 2, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      { id: 'attribute-b', name: 'B', value: 2, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+    ];
+    await saveState(opening);
+    const editorSnapshot = loadState();
+    const backendState = JSON.parse(JSON.stringify(editorSnapshot)) as typeof opening;
+    backendState.attributes[0].value = 10;
+    backendState.attributes[1].value = 3;
+
+    await commitAuthoritativeStateMutation(async () => backendState);
+
+    expect(loadState().attributes).toEqual([
+      expect.objectContaining({ id: 'attribute-a', name: 'A', value: 10 }),
+      expect.objectContaining({ id: 'attribute-b', name: 'B', value: 3 }),
+    ]);
+  });
+
   it('lets a later ordinary save supersede an in-flight authoritative response', async () => {
     const initial = { ...defaultState(), roomId: 'initial' };
     await saveState(initial);

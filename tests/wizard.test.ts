@@ -4884,17 +4884,19 @@ describe('single-page configuration rendering', () => {
         specialEvent: 'guard-governor' as const, lastReceived: 1_800_000_000_000, count: 9,
       };
       authoritative.attributes[0] = { ...authoritative.attributes[0], name: '服务端规范名', value: 61 };
-      authoritative.attributes[1].value = 99;
       authoritative.rules[0] = { ...authoritative.rules[0], attributeName: '服务端规范名', formula: '服务端规范名+2' };
       authoritative.timerRules[0] = { ...authoritative.timerRules[0], attributeName: '服务端规范名', formula: '服务端规范名-1' };
       authoritative.displayScenes[0].attributeNames = ['服务端规范名', '同伴'];
       authoritative.giftCatalog = [submittedEnrichedGift];
       authoritative.recentGifts = [submittedEnrichedRecentGift];
       let submittedBody: Record<string, unknown> | undefined;
+      let peerMutatedAfterSession = false;
       const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const path = String(input);
         if (path === '/api/attribute-edits/session') return sessionResponse(opening);
         if (path === '/api/attribute-edits') {
+          authoritative.attributes[1].value = 99;
+          peerMutatedAfterSession = true;
           submittedBody = JSON.parse(String(init?.body));
           return Response.json({
             code: 0, target: { id: stableId, name: '服务端规范名', created: false }, state: authoritative,
@@ -4945,6 +4947,7 @@ describe('single-page configuration rendering', () => {
       expect(submittedBody?.giftCatalogUpserts).toEqual([
         expect.not.objectContaining({ specialEvent: expect.anything() }),
       ]);
+      expect(peerMutatedAfterSession).toBe(true);
       expect(JSON.stringify(submittedBody)).not.toContain('attribute-peer');
       expect(JSON.stringify(submittedBody)).not.toContain('rule-peer');
       expect(JSON.stringify(submittedBody)).not.toContain('timer-peer');
