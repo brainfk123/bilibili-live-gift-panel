@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -86,6 +87,100 @@ func TestHostedChangelogHandlerFallsBackAfterInvalidDomesticJSON(t *testing.T) {
 	assertHostedChangelogVersion(t, response, http.StatusOK, "0.2.0")
 	if domesticRequests.Load() != 1 || githubRequests.Load() != 1 {
 		t.Fatalf("requests: domestic=%d github=%d, want 1 and 1", domesticRequests.Load(), githubRequests.Load())
+	}
+}
+
+func TestHostedChangelogHandlerFallsBackAfterInvalidDomesticDocument(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "unsupported schema", body: `{"schemaVersion":2,"releases":[{"version":"0.2.0"}]}`},
+		{name: "empty releases", body: `{"schemaVersion":1,"releases":[]}`},
+		{name: "oversized body", body: strings.Repeat("x", int(hostedChangelogMaxBytes+1))},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var domesticRequests atomic.Int32
+			domestic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				domesticRequests.Add(1)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer domestic.Close()
+			var githubRequests atomic.Int32
+			github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				githubRequests.Add(1)
+				_, _ = w.Write([]byte(`{"schemaVersion":1,"releases":[{"version":"0.2.0"}]}`))
+			}))
+			defer github.Close()
+
+			response := httptest.NewRecorder()
+			newHostedChangelogHandler(domestic.Client(), []hostedChangelogSource{
+				{Name: "国内镜像", URL: domestic.URL},
+				{Name: "GitHub", URL: github.URL},
+			})(response, httptest.NewRequest(http.MethodGet, "/api/changelog", nil))
+
+			assertHostedChangelogVersion(t, response, http.StatusOK, "0.2.0")
+			if domesticRequests.Load() != 1 || githubRequests.Load() != 1 {
+				t.Fatalf("requests: domestic=%d github=%d, want 1 and 1", domesticRequests.Load(), githubRequests.Load())
+			}
+		})
+	}
+}
+
+func TestHostedChangelogHandlerFallsBackAfterDomesticTimeout(t *testing.T) {
+	var domesticRequests atomic.Int32
+	domestic := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		domesticRequests.Add(1)
+		<-r.Context().Done()
+	}))
+	defer domestic.Close()
+	var githubRequests atomic.Int32
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		githubRequests.Add(1)
+		_, _ = w.Write([]byte(`{"schemaVersion":1,"releases":[{"version":"0.2.0"}]}`))
+	}))
+	defer github.Close()
+
+	client := &http.Client{Timeout: 75 * time.Millisecond}
+	response := httptest.NewRecorder()
+	startedAt := time.Now()
+	newHostedChangelogHandler(client, []hostedChangelogSource{
+		{Name: "国内镜像", URL: domestic.URL},
+		{Name: "GitHub", URL: github.URL},
+	})(response, httptest.NewRequest(http.MethodGet, "/api/changelog", nil))
+	elapsed := time.Since(startedAt)
+
+	assertHostedChangelogVersion(t, response, http.StatusOK, "0.2.0")
+	if elapsed > time.Second {
+		t.Fatalf("request took %s, want fallback within 1s", elapsed)
+	}
+	if domesticRequests.Load() != 1 || githubRequests.Load() != 1 {
+		t.Fatalf("requests: domestic=%d github=%d, want 1 and 1", domesticRequests.Load(), githubRequests.Load())
+	}
+}
+
+func TestHostedChangelogHandlerPreservesReleaseOrder(t *testing.T) {
+	var githubRequests atomic.Int32
+	domestic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"schemaVersion":1,"releases":[{"version":"0.3.0"},{"version":"0.2.0"}]}`))
+	}))
+	defer domestic.Close()
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		githubRequests.Add(1)
+		t.Fatal("GitHub must not be requested after a valid domestic document")
+	}))
+	defer github.Close()
+
+	response := httptest.NewRecorder()
+	newHostedChangelogHandler(domestic.Client(), []hostedChangelogSource{
+		{Name: "国内镜像", URL: domestic.URL},
+		{Name: "GitHub", URL: github.URL},
+	})(response, httptest.NewRequest(http.MethodGet, "/api/changelog", nil))
+
+	assertHostedChangelogVersions(t, response, http.StatusOK, "0.3.0", "0.2.0")
+	if githubRequests.Load() != 0 {
+		t.Fatalf("GitHub requests = %d, want 0", githubRequests.Load())
 	}
 }
 
@@ -218,6 +313,11 @@ func TestHostedChangelogDefaultSourcesPreferDomesticMirror(t *testing.T) {
 
 func assertHostedChangelogVersion(t *testing.T, response *httptest.ResponseRecorder, wantStatus int, wantVersion string) {
 	t.Helper()
+	assertHostedChangelogVersions(t, response, wantStatus, wantVersion)
+}
+
+func assertHostedChangelogVersions(t *testing.T, response *httptest.ResponseRecorder, wantStatus int, wantVersions ...string) {
+	t.Helper()
 	if response.Code != wantStatus {
 		t.Fatalf("status = %d, want %d", response.Code, wantStatus)
 	}
@@ -230,7 +330,12 @@ func assertHostedChangelogVersion(t *testing.T, response *httptest.ResponseRecor
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Code != 0 || len(payload.Releases) != 1 || payload.Releases[0].Version != wantVersion {
-		t.Fatalf("payload = %+v, want release %q", payload, wantVersion)
+	if payload.Code != 0 || len(payload.Releases) != len(wantVersions) {
+		t.Fatalf("payload = %+v, want releases %q", payload, wantVersions)
+	}
+	for index, wantVersion := range wantVersions {
+		if payload.Releases[index].Version != wantVersion {
+			t.Fatalf("release %d = %q, want %q", index, payload.Releases[index].Version, wantVersion)
+		}
 	}
 }
