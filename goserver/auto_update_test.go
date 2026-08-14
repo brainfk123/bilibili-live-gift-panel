@@ -80,18 +80,56 @@ func TestDomesticUpdateURLAcceptsUppercaseHexAndNormalizesRootPath(t *testing.T)
 	}
 }
 
-func TestDomesticUpdateURLRejectsUnsafeBaseURLs(t *testing.T) {
-	tests := []string{
-		"http://updates.example.test",
-		"https://user:password@updates.example.test",
-		"https://updates.example.test?channel=stable",
-		"https://updates.example.test#stable",
-		"https://updates.example.test/releases",
+func TestDomesticUpdateURLAcceptsCanonicalExplicitPort(t *testing.T) {
+	previous := updateAPIBaseURLHex
+	updateAPIBaseURLHex = hex.EncodeToString([]byte("https://updates.example.test:65535"))
+	t.Cleanup(func() { updateAPIBaseURLHex = previous })
+
+	if got := domesticUpdateReleaseURL(); got != "https://updates.example.test:65535/api/v1/releases/latest" {
+		t.Fatalf("domestic update release URL = %q", got)
 	}
-	for _, value := range tests {
-		t.Run(value, func(t *testing.T) {
+}
+
+func TestDomesticUpdateURLRejectsInvalidUTF8Hex(t *testing.T) {
+	previous := updateAPIBaseURLHex
+	updateAPIBaseURLHex = "ff"
+	t.Cleanup(func() { updateAPIBaseURLHex = previous })
+
+	if got := domesticUpdateReleaseURL(); got != "" {
+		t.Fatalf("domestic update release URL = %q, want empty", got)
+	}
+}
+
+func TestDomesticUpdateURLRejectsUnsafeBaseURLs(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "non-HTTPS", value: "http://updates.example.test"},
+		{name: "credentials", value: "https://user:password@updates.example.test"},
+		{name: "empty userinfo", value: "https://@updates.example.test"},
+		{name: "query", value: "https://updates.example.test?channel=stable"},
+		{name: "empty query", value: "https://updates.example.test?"},
+		{name: "fragment", value: "https://updates.example.test#stable"},
+		{name: "path", value: "https://updates.example.test/releases"},
+		{name: "dot path", value: "https://updates.example.test/."},
+		{name: "dot segments", value: "https://updates.example.test/releases/../"},
+		{name: "escaped dot path", value: "https://updates.example.test/%2e"},
+		{name: "escaped slash path", value: "https://updates.example.test/%2F"},
+		{name: "hostless port", value: "https://:443"},
+		{name: "empty port", value: "https://updates.example.test:"},
+		{name: "non-numeric port", value: "https://updates.example.test:invalid"},
+		{name: "zero port", value: "https://updates.example.test:0"},
+		{name: "out of range port", value: "https://updates.example.test:65536"},
+		{name: "default port spelling", value: "https://updates.example.test:443"},
+		{name: "noncanonical port spelling", value: "https://updates.example.test:065535"},
+		{name: "uppercase host", value: "https://UPDATES.example.test"},
+		{name: "Unicode host", value: "https://例子.测试"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
 			previous := updateAPIBaseURLHex
-			updateAPIBaseURLHex = hex.EncodeToString([]byte(value))
+			updateAPIBaseURLHex = hex.EncodeToString([]byte(test.value))
 			t.Cleanup(func() { updateAPIBaseURLHex = previous })
 			if got := domesticUpdateReleaseURL(); got != "" {
 				t.Fatalf("domestic update release URL = %q, want empty", got)

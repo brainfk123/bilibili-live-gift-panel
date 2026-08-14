@@ -3,37 +3,15 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mirrorUiAssets } from './ui-assets.mjs';
+import { resolveUpdateAPIBaseURLHex } from './update-api-build-config.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const appVersion = (process.env.APP_VERSION || 'dev').replace(/^v/, '');
 const appCommit = process.env.APP_COMMIT || 'local';
-const updateAPIBaseURL = (process.env.APP_UPDATE_API_URL || '').trim();
 for (const [label, value] of [['APP_VERSION', appVersion], ['APP_COMMIT', appCommit]]) {
   if (!/^[0-9A-Za-z.+-]+$/.test(value)) throw new Error(`${label} contains unsupported characters`);
 }
-if (appVersion !== 'dev' && !updateAPIBaseURL) {
-  throw new Error('Release build requires APP_UPDATE_API_URL.');
-}
-if (updateAPIBaseURL) {
-  let parsedUpdateAPIBaseURL;
-  try {
-    parsedUpdateAPIBaseURL = new URL(updateAPIBaseURL);
-  } catch (error) {
-    throw new Error(`APP_UPDATE_API_URL must be an absolute URL: ${error.message}`);
-  }
-  if (
-    parsedUpdateAPIBaseURL.protocol !== 'https:'
-    || !parsedUpdateAPIBaseURL.hostname
-    || parsedUpdateAPIBaseURL.username
-    || parsedUpdateAPIBaseURL.password
-    || parsedUpdateAPIBaseURL.search
-    || parsedUpdateAPIBaseURL.hash
-    || parsedUpdateAPIBaseURL.pathname !== '/'
-  ) {
-    throw new Error('APP_UPDATE_API_URL must be an HTTPS origin without credentials, query, fragment, or path.');
-  }
-}
-const updateAPIBaseURLHex = Buffer.from(updateAPIBaseURL, 'utf8').toString('hex');
+const updateAPIBaseURLHex = resolveUpdateAPIBaseURLHex(appVersion, process.env.APP_UPDATE_API_URL);
 if (appVersion !== 'dev') {
   const manifestPath = join(root, 'goserver', 'ffmpeg', 'manifest.json');
   let manifest;

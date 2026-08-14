@@ -135,14 +135,43 @@ func domesticUpdateReleaseURL() string {
 	if err != nil || !utf8.Valid(decoded) {
 		return ""
 	}
-	baseURL, err := url.Parse(string(decoded))
-	if err != nil || baseURL.Scheme != "https" || baseURL.Host == "" || baseURL.User != nil || baseURL.RawQuery != "" || baseURL.Fragment != "" {
+	rawBaseURL := string(decoded)
+	baseURL, err := url.Parse(rawBaseURL)
+	if err != nil || baseURL.Scheme != "https" || baseURL.User != nil || baseURL.RawQuery != "" || baseURL.ForceQuery || baseURL.Fragment != "" {
 		return ""
 	}
 	if baseURL.Path != "" && baseURL.Path != "/" {
 		return ""
 	}
-	return strings.TrimSuffix(baseURL.String(), "/") + "/api/v1/releases/latest"
+	hostname := baseURL.Hostname()
+	if hostname == "" {
+		return ""
+	}
+	for _, character := range hostname {
+		if character > 127 {
+			return ""
+		}
+	}
+	canonicalHostname := strings.ToLower(hostname)
+	canonicalHost := canonicalHostname
+	if strings.Contains(canonicalHostname, ":") {
+		canonicalHost = "[" + canonicalHostname + "]"
+	}
+	if portText := baseURL.Port(); portText != "" {
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 || port == 443 {
+			return ""
+		}
+		canonicalHost = canonicalHostname + ":" + strconv.Itoa(port)
+		if strings.Contains(canonicalHostname, ":") {
+			canonicalHost = "[" + canonicalHostname + "]:" + strconv.Itoa(port)
+		}
+	}
+	canonicalOrigin := "https://" + canonicalHost
+	if rawBaseURL != canonicalOrigin && rawBaseURL != canonicalOrigin+"/" {
+		return ""
+	}
+	return canonicalOrigin + "/api/v1/releases/latest"
 }
 
 func newDefaultAutoUpdater(store *configStore) *autoUpdater {
