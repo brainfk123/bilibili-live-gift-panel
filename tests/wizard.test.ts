@@ -2716,6 +2716,35 @@ describe('single-page configuration rendering', () => {
     expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(fetchCount);
   });
 
+  it('keeps the zero floor and blocks saving a negative random range cap', async () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-negative-random-cap', giftId: gift.id, attributeName: '加班时间', formulaName: '随机变化',
+      condition: '', formula: 'MIN(MAX(加班时间+RANDBETWEEN(-60,60),0),100)', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const formulaInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '触发后属性值') as TestElement;
+    const maximum = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '最高不超过') as TestElement & { oninput?: () => void };
+    maximum.value = '-1';
+    maximum.oninput?.();
+
+    expect(textOf(root.querySelector('.quick-rule-error') as TestElement)).toContain('随机范围的上限不能小于 0');
+    expect(formulaInput.value).toBe('MIN(MAX(加班时间+RANDBETWEEN(-60,60),0),100)');
+    const fetchCount = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+    findByText(root, '保存修改')?.onclick?.();
+    await Promise.resolve();
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(fetchCount);
+  });
+
   it('advances a gift simulation draft without saving it as the real attribute value', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state('88888888', 1),

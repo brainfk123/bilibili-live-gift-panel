@@ -63,8 +63,15 @@ describe('quick gift rule presets', () => {
   it.each([
     [{ operation: 'randomRange', rangeMin: 2.5, rangeMax: 5 }, '随机范围必须使用整数'],
     [{ operation: 'randomRange', rangeMin: 10, rangeMax: -10 }, '随机范围的最小变化不能大于最大变化'],
+    [{ operation: 'randomRange', rangeMin: -60, rangeMax: 60, maximum: -1 }, '随机范围的上限不能小于 0'],
   ] as const)('rejects invalid random range %#', (draft, message) => {
     expect(validateQuickGiftRuleDraft(draft)).toBe(message);
+  });
+
+  it('does not build a random range formula whose cap violates the zero floor', () => {
+    expect(buildQuickGiftFormula({
+      operation: 'randomRange', rangeMin: -60, rangeMax: 60, maximum: -1,
+    }, '积分')).toBeNull();
   });
 
   it('provides beginner-facing copy and field behavior', () => {

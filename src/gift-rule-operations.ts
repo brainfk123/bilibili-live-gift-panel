@@ -88,6 +88,7 @@ export function validateQuickGiftRuleDraft(draft: QuickGiftRuleDraft): string | 
     return '随机范围必须使用整数';
   }
   if (draft.rangeMin > draft.rangeMax) return '随机范围的最小变化不能大于最大变化';
+  if (draft.maximum !== undefined && draft.maximum < 0) return '随机范围的上限不能小于 0';
   return null;
 }
 
