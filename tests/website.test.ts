@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const html = readFileSync(new URL('../website/index.html', import.meta.url), 'utf8');
+const nginx = readFileSync(new URL('../website/nginx.conf.example', import.meta.url), 'utf8');
 
 describe('public website contract', () => {
   it('matches the approved brand and ICP filing copy', () => {
@@ -26,5 +27,23 @@ describe('public website contract', () => {
   it('keeps the public source and release links', () => {
     expect(html).toContain('https://github.com/brainfk123/bilibili-live-gift-panel');
     expect(html).toContain('https://github.com/brainfk123/bilibili-live-gift-panel/releases/latest');
+  });
+});
+
+describe('public website nginx contract', () => {
+  it('serves all approved domains and the health endpoint', () => {
+    expect(nginx).toContain('server_name bilibililive.cn www.bilibililive.cn app.bilibililive.cn;');
+    expect(nginx).toContain('root /var/www/gift-panel;');
+    expect(nginx).toContain('location = /healthz');
+    expect(nginx).toContain('return 200 "ok\\n";');
+    expect(nginx).toContain('try_files $uri $uri/ =404;');
+  });
+
+  it('keeps the agreed security headers and no active application proxy', () => {
+    expect(nginx).toContain('X-Content-Type-Options "nosniff"');
+    expect(nginx).toContain('X-Frame-Options "DENY"');
+    expect(nginx).toContain('Referrer-Policy "no-referrer"');
+    expect(nginx).toContain('Permissions-Policy "camera=(), microphone=(), geolocation=()"');
+    expect(nginx).not.toMatch(/^\s*proxy_pass\s+/m);
   });
 });
