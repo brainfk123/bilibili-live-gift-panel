@@ -62,9 +62,15 @@ func main() {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
+	logger.Printf("startup listen=%s", configuration.listenAddress)
+	if status := serve(server, signals, logger); status != 0 {
+		os.Exit(status)
+	}
+}
+
+func serve(server *http.Server, signals <-chan os.Signal, logger *log.Logger) int {
 	serverErrors := make(chan error, 1)
 	go func() { serverErrors <- server.ListenAndServe() }()
-	logger.Printf("startup listen=%s", configuration.listenAddress)
 
 	select {
 	case signal := <-signals:
@@ -73,13 +79,16 @@ func main() {
 		defer cancel()
 		if err := server.Shutdown(shutdownContext); err != nil {
 			logger.Printf("shutdown cause=%v", err)
-			return
+			return 1
 		}
 		logger.Printf("shutdown complete")
+		return 0
 	case err := <-serverErrors:
 		if !errors.Is(err, http.ErrServerClosed) {
 			logger.Printf("shutdown cause=%v", err)
+			return 1
 		}
+		return 0
 	}
 }
 

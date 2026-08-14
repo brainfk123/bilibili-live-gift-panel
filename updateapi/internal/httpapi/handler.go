@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/release"
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/service"
@@ -31,7 +32,7 @@ type Logger interface {
 
 type handler struct {
 	service   ReleaseService
-	requestID func() string
+	requestID func() (string, error)
 	logger    Logger
 }
 
@@ -48,8 +49,18 @@ func (discardLogger) Error(string, string, error) {}
 // New creates the exact public update API routes.
 func New(service ReleaseService, requestID func() string, logger Logger) http.Handler {
 	if requestID == nil {
-		requestID = newRequestID
+		return newHandler(service, newRequestID, logger)
 	}
+	return newHandler(service, func() (string, error) {
+		generated := requestID()
+		if !validRequestID(generated) {
+			return "", errors.New("request ID generator returned an invalid value")
+		}
+		return generated, nil
+	}, logger)
+}
+
+func newHandler(service ReleaseService, requestID func() (string, error), logger Logger) http.Handler {
 	if logger == nil {
 		logger = discardLogger{}
 	}
@@ -59,7 +70,14 @@ func New(service ReleaseService, requestID func() string, logger Logger) http.Ha
 func (handler handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	requestID := request.Header.Get("X-Request-ID")
 	if len(request.Header.Values("X-Request-ID")) != 1 || !validRequestID(requestID) {
-		requestID = handler.requestID()
+		var err error
+		requestID, err = handler.requestID()
+		if err != nil {
+			writer.Header().Set("X-Content-Type-Options", "nosniff")
+			handler.logger.Error("", "request_id_unavailable", errors.New("request ID generation failed"))
+			handler.writeError(writer, request, "", http.StatusServiceUnavailable, "request_id_unavailable", "请求标识暂时不可用")
+			return
+		}
 	}
 	writer.Header().Set("X-Request-ID", requestID)
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
@@ -154,6 +172,7 @@ func (handler handler) writeError(writer http.ResponseWriter, request *http.Requ
 
 func (handler handler) writeBody(writer http.ResponseWriter, request *http.Request, status int, contentType string, body []byte) {
 	writer.Header().Set("Content-Type", contentType)
+	writer.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	writer.WriteHeader(status)
 	if request.Method != http.MethodHead {
 		_, _ = writer.Write(body)
@@ -172,10 +191,18 @@ func validRequestID(value string) bool {
 	return true
 }
 
-func newRequestID() string {
+func newRequestID() (string, error) {
+	return requestIDFromReader(rand.Read)
+}
+
+func requestIDFromReader(readRandom func([]byte) (int, error)) (string, error) {
 	bytes := make([]byte, 16)
-	if _, err := rand.Read(bytes); err != nil {
-		return "00000000000000000000000000000000"
+	read, err := readRandom(bytes)
+	if err != nil {
+		return "", err
 	}
-	return hex.EncodeToString(bytes)
+	if read != len(bytes) {
+		return "", errors.New("random source returned too few bytes")
+	}
+	return hex.EncodeToString(bytes), nil
 }

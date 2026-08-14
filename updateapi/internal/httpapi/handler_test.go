@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -114,6 +115,37 @@ func TestChangelogServesDocumentForGetAndHead(t *testing.T) {
 			}
 			if got := response.Body.String(); got != `{"schemaVersion":1,"releases":[{"version":"0.4.4"}]}` {
 				t.Fatalf("body = %s, want original changelog document", got)
+			}
+		})
+	}
+}
+
+func TestHeadResponsesDeclareTheSameContentLengthAsGet(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		path    string
+		service *fakeReleaseService
+	}{
+		{"latest", latestPath, &fakeReleaseService{latest: testRelease()}},
+		{"changelog", changelogPath, &fakeReleaseService{document: service.Document{Body: []byte(`{"schemaVersion":1,"releases":[{"version":"0.4.4"}]}`)}}},
+		{"service error", latestPath, &fakeReleaseService{latestErr: service.ErrReleaseUnavailable}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler := httpapi.New(test.service, func() string { return generatedID }, &captureLogger{})
+			get := httptest.NewRecorder()
+			handler.ServeHTTP(get, httptest.NewRequest(http.MethodGet, test.path, nil))
+			head := httptest.NewRecorder()
+			handler.ServeHTTP(head, httptest.NewRequest(http.MethodHead, test.path, nil))
+
+			want := strconv.Itoa(get.Body.Len())
+			if got := get.Header().Get("Content-Length"); got != want {
+				t.Fatalf("GET Content-Length = %q, want %q", got, want)
+			}
+			if got := head.Header().Get("Content-Length"); got != want {
+				t.Fatalf("HEAD Content-Length = %q, want matching GET length %q", got, want)
+			}
+			if got := head.Body.String(); got != "" {
+				t.Fatalf("HEAD body = %q, want empty", got)
 			}
 		})
 	}
