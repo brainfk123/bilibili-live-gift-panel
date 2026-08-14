@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 const html = readFileSync(new URL('../website/index.html', import.meta.url), 'utf8');
 const nginx = readFileSync(new URL('../website/nginx.conf.example', import.meta.url), 'utf8');
+const websiteReadme = readFileSync(new URL('../website/README.md', import.meta.url), 'utf8');
 
 describe('public website contract', () => {
   it('matches the approved brand and ICP filing copy', () => {
@@ -45,5 +46,9 @@ describe('public website nginx contract', () => {
     expect(nginx).toContain('Referrer-Policy "no-referrer"');
     expect(nginx).toContain('Permissions-Policy "camera=(), microphone=(), geolocation=()"');
     expect(nginx).not.toMatch(/^\s*proxy_pass\s+/m);
+  });
+
+  it('documents non-destructive site activation', () => {
+    expect(websiteReadme).not.toContain('sudo rm /etc/nginx/sites-enabled/default');
   });
 });

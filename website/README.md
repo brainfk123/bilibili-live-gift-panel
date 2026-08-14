@@ -34,7 +34,6 @@ sudo install -d -o "$USER" -g "$USER" /var/www/gift-panel
 
 ```bash
 sudo ln -s /etc/nginx/sites-available/gift-panel /etc/nginx/sites-enabled/gift-panel
-sudo rm /etc/nginx/sites-enabled/default
 sudo nginx -t
 sudo systemctl enable --now nginx
 sudo systemctl reload nginx
