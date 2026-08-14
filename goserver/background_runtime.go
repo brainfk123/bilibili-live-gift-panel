@@ -92,6 +92,7 @@ type backgroundRuntime struct {
 	timerMu                  sync.Mutex
 	timerSchedules           map[string]timerSchedule
 	timerTicks               <-chan time.Time
+	attributeFreezes         attributeFreezeChecker
 	notifications            *notificationCenter
 	inbox                    runtimeGiftInbox
 	inboxEpoch               runtimeInboxEpoch
@@ -140,6 +141,18 @@ func (runtime *backgroundRuntime) setDiagnosticLogger(logger *diagnosticLogger) 
 		}
 		return source
 	}
+}
+
+func (runtime *backgroundRuntime) setAttributeFreezeChecker(freezes attributeFreezeChecker) {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	runtime.attributeFreezes = freezes
+}
+
+func (runtime *backgroundRuntime) currentAttributeFreezeChecker() attributeFreezeChecker {
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	return runtime.attributeFreezes
 }
 
 func (runtime *backgroundRuntime) Run(ctx context.Context) {
@@ -620,7 +633,7 @@ func (runtime *backgroundRuntime) processInboxRecordLocked(ctx context.Context, 
 		if requirePreparation && strings.TrimSpace(state.RoomID) != preparedRoomID {
 			return errRoomPreparationPending
 		}
-		settlement = settleGiftInState(state, record.RoomID, gift, now, true)
+		settlement = settleGiftInStateWithFreeze(state, record.RoomID, gift, now, true, runtime.currentAttributeFreezeChecker())
 		return nil
 	})
 	if err != nil {
@@ -715,6 +728,10 @@ type giftSettlement struct {
 }
 
 func settleGiftInState(state *appState, roomID string, gift giftEvent, now time.Time, durableDedupe bool) giftSettlement {
+	return settleGiftInStateWithFreeze(state, roomID, gift, now, durableDedupe, nil)
+}
+
+func settleGiftInStateWithFreeze(state *appState, roomID string, gift giftEvent, now time.Time, durableDedupe bool, freezes attributeFreezeChecker) giftSettlement {
 	settlement := giftSettlement{gift: gift, animationOnly: gift.AnimationOnly, blindSource: "none"}
 	recordRoomID := strings.TrimSpace(roomID)
 	currentRoomID := strings.TrimSpace(state.RoomID)
@@ -751,7 +768,7 @@ func settleGiftInState(state *appState, roomID string, gift giftEvent, now time.
 		settlement.blindCost, settlement.blindPriced = blindBoxCost(*state, settlement.gift, count)
 		settlement.blindValue = blindBoxOutputValue(*state, settlement.gift, count)
 	}
-	applyGiftEvent(state, settlement.gift)
+	applyGiftEventWithFreeze(state, settlement.gift, freezes)
 	return settlement
 }
 
@@ -1019,7 +1036,7 @@ func (runtime *backgroundRuntime) handleTimerTick(now time.Time) {
 		return
 	}
 	_, err = runtime.store.updateState(func(current *appState) error {
-		appliedRules := applyTimerRules(current, dueRuleIDs, now)
+		appliedRules := applyTimerRulesWithFreeze(current, dueRuleIDs, now, runtime.currentAttributeFreezeChecker())
 		appliedTimeouts := applyActivityGiftTimeouts(current, dueActivityIDs, now)
 		if appliedRules == 0 && appliedTimeouts == 0 {
 			return errNoTimerChanges
@@ -1371,6 +1388,10 @@ func (runtime *backgroundRuntime) wait(ctx context.Context, delay time.Duration)
 }
 
 func applyGiftEvent(state *appState, gift giftEvent) {
+	applyGiftEventWithFreeze(state, gift, nil)
+}
+
+func applyGiftEventWithFreeze(state *appState, gift giftEvent, freezes attributeFreezeChecker) {
 	normalizeAppState(state)
 	gift = enrichBlindBoxGiftFromCatalog(*state, gift)
 	upsertRecentGiftState(state, gift)
@@ -1397,6 +1418,9 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 			}
 			attribute := state.findAttribute(rule.AttributeName)
 			if attribute == nil {
+				continue
+			}
+			if freezes != nil && attribute.ID != "" && freezes.IsFrozen(attribute.ID) {
 				continue
 			}
 			if rule.MinPrice != nil && gift.Price < *rule.MinPrice {
@@ -1476,6 +1500,10 @@ func applyGiftEvent(state *appState, gift giftEvent) {
 var errNoTimerChanges = errors.New("no timer changes")
 
 func applyTimerRules(state *appState, dueRuleIDs []string, now time.Time) int {
+	return applyTimerRulesWithFreeze(state, dueRuleIDs, now, nil)
+}
+
+func applyTimerRulesWithFreeze(state *appState, dueRuleIDs []string, now time.Time, freezes attributeFreezeChecker) int {
 	normalizeAppState(state)
 	due := make(map[string]struct{}, len(dueRuleIDs))
 	for _, ruleID := range dueRuleIDs {
@@ -1489,6 +1517,9 @@ func applyTimerRules(state *appState, dueRuleIDs []string, now time.Time) int {
 		}
 		attribute := state.findAttribute(rule.AttributeName)
 		if attribute == nil {
+			continue
+		}
+		if freezes != nil && attribute.ID != "" && freezes.IsFrozen(attribute.ID) {
 			continue
 		}
 		environment := make(map[string]float64, len(state.Attributes))

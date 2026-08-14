@@ -2674,6 +2674,62 @@ func TestBackgroundRuntimeProcessesTimerWithoutRoomOrDisplayPage(t *testing.T) {
 	t.Fatal("timer did not update the attribute while room and display were absent")
 }
 
+func TestBackgroundRuntimeFrozenTimerDoesNotCatchUp(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	state := defaultAppState()
+	state.Attributes = []attributeState{
+		{ID: "attribute-a", Name: "A", Value: 0},
+		{ID: "attribute-b", Name: "B", Value: 0},
+	}
+	state.TimerRules = []timerRule{
+		{ID: "timer-a", AttributeName: "A", IntervalSeconds: 60, Formula: "A+1", Enabled: true},
+		{ID: "timer-b", AttributeName: "B", IntervalSeconds: 60, Formula: "B+1", Enabled: true},
+	}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	freezes := fakeAttributeFreezeChecker{"attribute-a": true}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.setAttributeFreezeChecker(freezes)
+	startedAt := time.Unix(1700000000, 0)
+	runtime.handleTimerTick(startedAt)
+	runtime.handleTimerTick(startedAt.Add(60 * time.Second))
+
+	frozen, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := frozen.findAttribute("A").Value; got != 0 {
+		t.Fatalf("frozen A = %v", got)
+	}
+	if got := frozen.findAttribute("B").Value; got != 1 {
+		t.Fatalf("live B = %v", got)
+	}
+
+	delete(freezes, "attribute-a")
+	runtime.handleTimerTick(startedAt.Add(90 * time.Second))
+	beforeNextDue, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := beforeNextDue.findAttribute("A").Value; got != 0 {
+		t.Fatalf("thawed A caught up = %v", got)
+	}
+
+	runtime.handleTimerTick(startedAt.Add(120 * time.Second))
+	updated, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.findAttribute("A").Value; got != 1 {
+		t.Fatalf("next scheduled A = %v", got)
+	}
+	if got := updated.findAttribute("B").Value; got != 2 {
+		t.Fatalf("live B after second due tick = %v", got)
+	}
+}
+
 func TestTimerConditionSkipsOnlyTheCurrentOccurrence(t *testing.T) {
 	state := defaultAppState()
 	state.Attributes = []attributeState{{Name: "加班时间", Value: 0, Unit: "seconds", Format: "hhmmss"}}
