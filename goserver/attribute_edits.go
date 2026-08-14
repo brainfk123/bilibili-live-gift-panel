@@ -9,7 +9,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"net/url"
+	"reflect"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -146,7 +146,7 @@ func newAttributeEditHandler(service *attributeEditService) http.Handler {
 			attributeEditHTTPError(w, http.StatusMethodNotAllowed, "method_not_allowed", "不支持的请求方法")
 			return
 		}
-		if !isSameOriginAttributeEditRequest(r) {
+		if !isSameOriginGiftReceiptRequest(r) {
 			attributeEditHTTPError(w, http.StatusForbidden, "forbidden", "拒绝跨站请求")
 			return
 		}
@@ -192,25 +192,6 @@ func newAttributeEditHandler(service *attributeEditService) http.Handler {
 			"state":  result.State,
 		})
 	})
-}
-
-func isSameOriginAttributeEditRequest(r *http.Request) bool {
-	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
-		return false
-	}
-	origin := strings.TrimSpace(r.Header.Get("Origin"))
-	if origin == "" {
-		return true
-	}
-	parsed, err := url.Parse(origin)
-	if err != nil || parsed.Host == "" || parsed.User != nil {
-		return false
-	}
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	return strings.EqualFold(parsed.Scheme, scheme) && strings.EqualFold(parsed.Host, r.Host)
 }
 
 func validAttributeEditSessionRequest(request attributeEditSessionRequest) bool {
@@ -399,6 +380,9 @@ func (s *configStore) applyAttributeEditLockedAuthorized(command attributeEditCo
 		}
 		attribute := command.Attribute
 		attribute.ID = id
+		attribute.Color = ""
+		attribute.CreatedFromTemplateID = ""
+		attribute.CreatedFromTemplateVersion = 0
 		state.Attributes = append(state.Attributes, attribute)
 		index = len(state.Attributes) - 1
 		created = true
@@ -419,6 +403,14 @@ func (s *configStore) applyAttributeEditLockedAuthorized(command attributeEditCo
 	if err := validateUniqueTimerRuleIDs(previous.TimerRules); err != nil {
 		return attributeEditResult{}, err
 	}
+	submittedGiftRules := append([]giftRule(nil), command.GiftRules...)
+	for index := range submittedGiftRules {
+		submittedGiftRules[index].ID = strings.TrimSpace(submittedGiftRules[index].ID)
+	}
+	submittedTimerRules := append([]timerRule(nil), command.TimerRules...)
+	for index := range submittedTimerRules {
+		submittedTimerRules[index].ID = strings.TrimSpace(submittedTimerRules[index].ID)
+	}
 	ownedGiftRules := ownedGiftRuleIDs(previous.Rules, oldName)
 	ownedTimerRules := ownedTimerRuleIDs(previous.TimerRules, oldName)
 	peerGiftRuleIDs := nonTargetGiftRuleIDs(previous.Rules, oldName)
@@ -428,15 +420,21 @@ func (s *configStore) applyAttributeEditLockedAuthorized(command attributeEditCo
 			return attributeEditResult{}, attributeEditInput(err)
 		}
 	}
-	if err := validateSubmittedGiftRules(command.GiftRules, command.Attribute.Name, peerGiftRuleIDs); err != nil {
+	if err := validateSubmittedGiftRules(submittedGiftRules, command.Attribute.Name, peerGiftRuleIDs); err != nil {
 		return attributeEditResult{}, err
 	}
-	if err := validateSubmittedTimerRules(command.TimerRules, command.Attribute.Name, peerTimerRuleIDs); err != nil {
+	if err := validateSubmittedTimerRules(submittedTimerRules, command.Attribute.Name, peerTimerRuleIDs); err != nil {
 		return attributeEditResult{}, err
 	}
-	state.Rules = mergeGiftRuleGroup(state.Rules, ownedGiftRules, command.GiftRules)
-	state.TimerRules = mergeTimerRuleGroup(state.TimerRules, ownedTimerRules, command.TimerRules)
+	state.Rules = mergeGiftRuleGroup(state.Rules, ownedGiftRules, submittedGiftRules)
+	state.TimerRules = mergeTimerRuleGroup(state.TimerRules, ownedTimerRules, submittedTimerRules)
 	state.GiftCatalog = mergeGiftCatalog(state.GiftCatalog, command.GiftCatalogUpserts)
+	if err := validateUniqueGiftRuleIDs(state.Rules); err != nil {
+		return attributeEditResult{}, err
+	}
+	if err := validateUniqueTimerRuleIDs(state.TimerRules); err != nil {
+		return attributeEditResult{}, err
+	}
 
 	normalizeAppState(&state)
 	if err := validateAppState(state); err != nil {
@@ -445,10 +443,47 @@ func (s *configStore) applyAttributeEditLockedAuthorized(command attributeEditCo
 	if isLive != nil && !isLive() {
 		return attributeEditResult{}, &attributeEditLeaseLostError{}
 	}
-	if err := s.persistStateLocked(previous, state, false); err != nil {
+	state, err = s.persistAttributeEditStateLocked(state)
+	if err != nil {
 		return attributeEditResult{}, err
 	}
 	return attributeEditResult{State: state, ID: id, Name: command.Attribute.Name, Created: created, Previous: previous}, nil
+}
+
+func (s *configStore) persistAttributeEditStateLocked(state appState) (appState, error) {
+	outcome := s.persistPreparedStateWithOutcomeLocked(state, "")
+	if outcome.Err == nil {
+		return state, nil
+	}
+	if !outcome.Committed {
+		return appState{}, outcome.Err
+	}
+
+	recoveryErr := s.recoverPendingStateTransactionLocked()
+	if recoveryErr != nil {
+		// A published complete journal is the authoritative commit record. Leave the
+		// transaction retryable and serve its isolated candidate rather than
+		// exposing a partially replayed shard mix.
+		candidate := state
+		if cloned, cloneErr := cloneAppState(state); cloneErr == nil {
+			candidate = cloned
+		}
+		s.committedTransactionState = &candidate
+		return state, nil
+	}
+	s.committedTransactionState = nil
+	authoritative, readErr := s.readCommittedStateLocked()
+	if readErr != nil {
+		reconcileErr := fmt.Errorf("读取已提交属性编辑失败：%w", readErr)
+		s.blockMutationsLocked("transaction_recovery", reconcileErr)
+		return state, nil
+	}
+	if !reflect.DeepEqual(authoritative, state) {
+		reconcileErr := fmt.Errorf("已提交属性编辑与权威状态不一致")
+		s.blockMutationsLocked("transaction_recovery", reconcileErr)
+		return state, nil
+	}
+	return authoritative, nil
 }
 
 // ensureAttributeID resolves exactly one existing attribute and, for legacy
@@ -479,7 +514,7 @@ func (s *configStore) ensureAttributeIDLocked(attributeID, legacyName string, ne
 	for candidateIndex, attribute := range previous.Attributes {
 		matched := attribute.ID == attributeID
 		if legacyName != "" {
-			matched = strings.TrimSpace(attribute.Name) == legacyName
+			matched = strings.TrimSpace(attribute.ID) == "" && strings.TrimSpace(attribute.Name) == legacyName
 		}
 		if !matched {
 			continue
@@ -520,7 +555,8 @@ func (s *configStore) ensureAttributeIDLocked(attributeID, legacyName string, ne
 	}
 	state.Attributes[index].ID = generatedID
 	normalizeAppState(&state)
-	if err := s.persistStateLocked(previous, state, false); err != nil {
+	state, err = s.persistAttributeEditStateLocked(state)
+	if err != nil {
 		return appState{}, "", err
 	}
 	return state, generatedID, nil
@@ -635,7 +671,7 @@ func ownedGiftRuleIDs(rules []giftRule, name string) map[string]struct{} {
 	}
 	for _, rule := range rules {
 		if rule.AttributeName == name {
-			owned[rule.ID] = struct{}{}
+			owned[strings.TrimSpace(rule.ID)] = struct{}{}
 		}
 	}
 	return owned
@@ -648,7 +684,7 @@ func ownedTimerRuleIDs(rules []timerRule, name string) map[string]struct{} {
 	}
 	for _, rule := range rules {
 		if rule.AttributeName == name {
-			owned[rule.ID] = struct{}{}
+			owned[strings.TrimSpace(rule.ID)] = struct{}{}
 		}
 	}
 	return owned
@@ -658,7 +694,7 @@ func nonTargetGiftRuleIDs(rules []giftRule, targetName string) map[string]struct
 	ids := make(map[string]struct{}, len(rules))
 	for _, rule := range rules {
 		if rule.AttributeName != targetName {
-			ids[rule.ID] = struct{}{}
+			ids[strings.TrimSpace(rule.ID)] = struct{}{}
 		}
 	}
 	return ids
@@ -668,7 +704,7 @@ func nonTargetTimerRuleIDs(rules []timerRule, targetName string) map[string]stru
 	ids := make(map[string]struct{}, len(rules))
 	for _, rule := range rules {
 		if rule.AttributeName != targetName {
-			ids[rule.ID] = struct{}{}
+			ids[strings.TrimSpace(rule.ID)] = struct{}{}
 		}
 	}
 	return ids
@@ -707,19 +743,20 @@ func validateUniqueTimerRuleIDs(rules []timerRule) error {
 func validateSubmittedGiftRules(rules []giftRule, name string, peerIDs map[string]struct{}) error {
 	seen := make(map[string]struct{}, len(rules))
 	for _, rule := range rules {
+		id := strings.TrimSpace(rule.ID)
 		if rule.AttributeName != name {
 			return attributeEditInput(fmt.Errorf("提交的礼物规则必须引用目标属性 %q", name))
 		}
-		if strings.TrimSpace(rule.ID) == "" {
+		if id == "" {
 			return attributeEditInput(fmt.Errorf("提交的礼物规则 ID 不能为空"))
 		}
-		if _, exists := seen[rule.ID]; exists {
-			return attributeEditInput(fmt.Errorf("提交的礼物规则 ID 不能重复：%s", rule.ID))
+		if _, exists := seen[id]; exists {
+			return attributeEditInput(fmt.Errorf("提交的礼物规则 ID 不能重复：%s", id))
 		}
-		if _, exists := peerIDs[rule.ID]; exists {
-			return attributeEditConflict(fmt.Errorf("提交的礼物规则 ID 与同伴规则冲突：%s", rule.ID))
+		if _, exists := peerIDs[id]; exists {
+			return attributeEditConflict(fmt.Errorf("提交的礼物规则 ID 与同伴规则冲突：%s", id))
 		}
-		seen[rule.ID] = struct{}{}
+		seen[id] = struct{}{}
 	}
 	return nil
 }
@@ -727,19 +764,20 @@ func validateSubmittedGiftRules(rules []giftRule, name string, peerIDs map[strin
 func validateSubmittedTimerRules(rules []timerRule, name string, peerIDs map[string]struct{}) error {
 	seen := make(map[string]struct{}, len(rules))
 	for _, rule := range rules {
+		id := strings.TrimSpace(rule.ID)
 		if rule.AttributeName != name {
 			return attributeEditInput(fmt.Errorf("提交的定时器规则必须引用目标属性 %q", name))
 		}
-		if strings.TrimSpace(rule.ID) == "" {
+		if id == "" {
 			return attributeEditInput(fmt.Errorf("提交的定时器规则 ID 不能为空"))
 		}
-		if _, exists := seen[rule.ID]; exists {
-			return attributeEditInput(fmt.Errorf("提交的定时器规则 ID 不能重复：%s", rule.ID))
+		if _, exists := seen[id]; exists {
+			return attributeEditInput(fmt.Errorf("提交的定时器规则 ID 不能重复：%s", id))
 		}
-		if _, exists := peerIDs[rule.ID]; exists {
-			return attributeEditConflict(fmt.Errorf("提交的定时器规则 ID 与同伴规则冲突：%s", rule.ID))
+		if _, exists := peerIDs[id]; exists {
+			return attributeEditConflict(fmt.Errorf("提交的定时器规则 ID 与同伴规则冲突：%s", id))
 		}
-		seen[rule.ID] = struct{}{}
+		seen[id] = struct{}{}
 	}
 	return nil
 }
@@ -748,7 +786,7 @@ func mergeGiftRuleGroup(current []giftRule, owned map[string]struct{}, submitted
 	result := make([]giftRule, 0, len(current)-len(owned)+len(submitted))
 	inserted := false
 	for _, rule := range current {
-		if _, isOwned := owned[rule.ID]; isOwned {
+		if _, isOwned := owned[strings.TrimSpace(rule.ID)]; isOwned {
 			if !inserted {
 				result = append(result, submitted...)
 				inserted = true
@@ -767,7 +805,7 @@ func mergeTimerRuleGroup(current []timerRule, owned map[string]struct{}, submitt
 	result := make([]timerRule, 0, len(current)-len(owned)+len(submitted))
 	inserted := false
 	for _, rule := range current {
-		if _, isOwned := owned[rule.ID]; isOwned {
+		if _, isOwned := owned[strings.TrimSpace(rule.ID)]; isOwned {
 			if !inserted {
 				result = append(result, submitted...)
 				inserted = true

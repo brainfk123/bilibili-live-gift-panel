@@ -129,13 +129,14 @@ export function loadState(): AppState {
 export function saveState(state: AppState): Promise<void> {
   const operationEpoch = ++stateOperationEpoch;
   const nextState = publishCachedState(normalizeState(state));
-  const snapshots = snapshotStateFields(nextState);
+  const durableState = cloneState(nextState);
+  const snapshots = snapshotStateFields(durableState);
   const operation = persistQueue
     .catch(() => undefined)
     .then(async () => {
       try {
         await persistStateToServer(snapshots);
-        lastPersistedState = nextState;
+        recordLastPersistedState(durableState);
       } catch (error) {
         restoreLastPersistedState(operationEpoch);
         throw error;
@@ -147,7 +148,7 @@ export function saveState(state: AppState): Promise<void> {
 
 export function saveStateTransaction(state: AppState): Promise<AppState> {
   const operationEpoch = ++stateOperationEpoch;
-  const candidate = normalizeState(state);
+  const candidate = cloneState(normalizeState(state));
   const snapshots = snapshotStateFields(candidate);
   const startingRevision = cachedStateRevision;
   const transaction = persistQueue
@@ -161,7 +162,7 @@ export function saveStateTransaction(state: AppState): Promise<AppState> {
         throw new Error('配置在保存期间发生变化，请重试');
       }
       publishCachedState(candidate);
-      lastPersistedState = candidate;
+      recordLastPersistedState(candidate);
       return candidate;
     })
     .catch((error: unknown) => {
@@ -192,10 +193,10 @@ export function saveStateFieldTransaction<K extends StateFieldKey>(
         throw new Error('配置在保存期间发生变化，请重试');
       }
       const current = normalizeState(loadState());
-      const candidate = normalizeState({ ...current, [field]: update(current) });
+      const candidate = cloneState(normalizeState({ ...current, [field]: update(current) }));
       const snapshots = snapshotStateFields(candidate);
       await persistStateToServer(snapshots, [field]);
-      lastPersistedState = candidate;
+      recordLastPersistedState(candidate);
       if (stateOperationEpoch !== startingEpoch) {
         throw new Error('配置在保存期间发生变化，请重试');
       }
@@ -220,12 +221,12 @@ export function commitAuthoritativeStateMutation(
   const transaction = persistQueue
     .catch(() => undefined)
     .then(async () => {
-      const authoritative = normalizeState(await mutation());
+      const authoritative = cloneState(normalizeState(await mutation()));
       // The server committed this state even when a newer local operation owns
       // publication. Later queued persistence must diff against server reality.
       persistedFieldSnapshots = snapshotStateFields(authoritative);
       forcePersistFields.clear();
-      lastPersistedState = authoritative;
+      recordLastPersistedState(authoritative);
       if (stateOperationEpoch === operationEpoch) {
         publishCachedState(authoritative);
       }
@@ -245,6 +246,7 @@ export function commitAuthoritativeStateMutation(
 export function resetState(): Promise<void> {
   const operationEpoch = ++stateOperationEpoch;
   const reset = publishCachedState(defaultState());
+  const durableReset = cloneState(reset);
   configMigrationRequired = false;
   const operation = persistQueue
     .catch(() => undefined)
@@ -261,7 +263,7 @@ export function resetState(): Promise<void> {
         }
         persistedFieldSnapshots = {};
         forcePersistFields.clear();
-        lastPersistedState = reset;
+        recordLastPersistedState(durableReset);
       } catch (error) {
         restoreLastPersistedState(operationEpoch);
         throw error;
@@ -301,7 +303,7 @@ export async function refreshStateFromServer(
     if (acceptState() || !cachedState) {
       publishCachedState(nextState);
       persistedFieldSnapshots = hasPersistedState ? snapshotStateFields(nextState) : {};
-      lastPersistedState = nextState;
+      recordLastPersistedState(nextState);
     }
   } catch (error) {
     // A transient backend read failure must not erase the last visible state.
@@ -319,7 +321,7 @@ function publishCachedState(state: AppState): AppState {
 
 function restoreLastPersistedState(operationEpoch: number): void {
   if (stateOperationEpoch === operationEpoch && lastPersistedState) {
-    publishCachedState(lastPersistedState);
+    publishCachedState(cloneState(lastPersistedState));
   }
 }
 
@@ -366,6 +368,14 @@ function snapshotStateFields(state: AppState): StateFieldSnapshots {
       : state[key]) ?? null);
   }
   return snapshots;
+}
+
+function recordLastPersistedState(state: AppState): void {
+  lastPersistedState = cloneState(state);
+}
+
+function cloneState(state: AppState): AppState {
+  return JSON.parse(JSON.stringify(state)) as AppState;
 }
 
 export function createConfigBackup(state: AppState): ConfigBackup {

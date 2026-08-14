@@ -28,10 +28,18 @@ type configStore struct {
 	resetCoordinator   func() error
 	migrationRequired  bool
 	transactionPending bool
-	mutationBlockKind  string
-	mutationBlockErr   error
-	writeAtomically    func(string, []byte) error
-	readTransaction    func(string) ([]byte, error)
+	// committedTransactionState is the authoritative candidate reconstructed
+	// from a valid published journal that still needs replay/cleanup.
+	committedTransactionState *appState
+	mutationBlockKind         string
+	mutationBlockErr          error
+	writeAtomically           func(string, []byte) error
+	writeAtomicallyOutcome    func(string, []byte) atomicWriteOutcome
+	readTransaction           func(string) ([]byte, error)
+	// Transaction cleanup hooks are nil in production. Tests use them to
+	// deterministically fail the two stages after all shard writes complete.
+	removeStateTransaction        func(string) error
+	syncStateTransactionDirectory func(string) error
 	// Attribute-edit lock hooks are nil in production. Tests use them to
 	// deterministically observe the exact mutex boundary.
 	beforeAttributeEditStoreLock func()
@@ -67,6 +75,14 @@ func (s *configStore) ensureMutationsAllowedLocked() error {
 	if s.mutationBlockKind != "" {
 		return &stateMutationsBlockedError{}
 	}
+	if s.committedTransactionState != nil {
+		if err := s.recoverPendingStateTransactionLocked(); err != nil {
+			if s.committedTransactionState == nil {
+				s.blockMutationsLocked("transaction_recovery", err)
+			}
+			return &stateMutationsBlockedError{}
+		}
+	}
 	return nil
 }
 
@@ -79,14 +95,25 @@ func newDefaultConfigStore() (*configStore, error) {
 }
 
 func newConfigStoreAtPath(path string) (*configStore, error) {
-	store := &configStore{path: path}
+	return initializeConfigStore(&configStore{path: path})
+}
+
+// initializeConfigStore completes startup for a newly allocated store. Keeping
+// allocation separate from initialization lets deterministic recovery tests
+// install storage-failure hooks before exercising the real startup path.
+func initializeConfigStore(store *configStore) (*configStore, error) {
 	store.mu.Lock()
-	if err := store.recoverPendingStateTransactionLocked(); err != nil {
-		store.blockMutationsLocked("transaction_recovery", err)
-		store.mu.Unlock()
-		return store, nil
+	recoveryErr := store.recoverPendingStateTransactionLocked()
+	retryableCommittedRecovery := recoveryErr != nil && store.committedTransactionState != nil
+	if recoveryErr != nil && !retryableCommittedRecovery {
+		store.blockMutationsLocked("transaction_recovery", recoveryErr)
 	}
 	store.mu.Unlock()
+	if retryableCommittedRecovery {
+		// A valid published journal remains the authoritative state. Defer legacy
+		// migration until replay succeeds so startup cannot replace its evidence.
+		return store, nil
+	}
 	if err := store.migrateLegacy(); err != nil {
 		return nil, err
 	}
@@ -673,6 +700,7 @@ func (s *configStore) resetStateArtifacts() error {
 	}
 	s.migrationRequired = false
 	s.transactionPending = false
+	s.committedTransactionState = nil
 	s.mutationBlockKind = ""
 	s.mutationBlockErr = nil
 	return nil
@@ -922,10 +950,18 @@ func (s *configStore) updateStateForIngestion(
 }
 
 func (s *configStore) writeAtomicFile(path string, data []byte) error {
-	if s.writeAtomically != nil {
-		return s.writeAtomically(path, data)
+	return s.writeAtomicFileOutcome(path, data).Err
+}
+
+func (s *configStore) writeAtomicFileOutcome(path string, data []byte) atomicWriteOutcome {
+	if s.writeAtomicallyOutcome != nil {
+		return s.writeAtomicallyOutcome(path, data)
 	}
-	return writeFileAtomically(path, data)
+	if s.writeAtomically != nil {
+		err := s.writeAtomically(path, data)
+		return atomicWriteOutcome{Committed: err == nil, Err: err}
+	}
+	return writeFileAtomicallyOutcome(path, data)
 }
 
 // atomicWriteOutcome distinguishes a write that never reached its final name

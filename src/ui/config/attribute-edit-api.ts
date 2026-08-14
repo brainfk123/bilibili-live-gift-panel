@@ -1,5 +1,6 @@
 import type { AppState, Attribute, GiftInfo, GiftRule, TimerRule } from '../../types';
 import {
+  bestEffortReleasePreparedAttributeEditLease,
   isAttribute,
   isAttributeEditGiftCatalogUpsert,
   isGiftRule,
@@ -71,8 +72,15 @@ export async function prepareAttributeEditSession(
     SESSION_ENDPOINT,
     payload,
     options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    (latePayload) => bestEffortReleasePreparedAttributeEditLease(latePayload, options),
   );
-  const session = parsePreparedAttributeEditSession(response, payload.attributeId);
+  let session;
+  try {
+    session = parsePreparedAttributeEditSession(response, payload.attributeId);
+  } catch (error) {
+    await bestEffortReleasePreparedAttributeEditLease(response, options);
+    throw error;
+  }
   return {
     ...session,
     lease: maintainAttributeEditLease(session.attributeId, session.token, options),
@@ -98,36 +106,48 @@ async function postJSON(
   endpoint: string,
   payload: unknown,
   timeoutMs: number,
+  onLatePayload?: (payload: unknown) => void | Promise<void>,
 ): Promise<unknown> {
   const controller = new AbortController();
   const timeout = new OwnedRequestTimeout();
+  let expired = false;
   let timer: ReturnType<typeof setTimeout>;
   const timeoutPromise = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
+      expired = true;
       controller.abort(timeout);
       reject(timeout);
     }, timeoutMs);
   });
-  try {
+  const request = (async (): Promise<unknown> => {
     let response: Response;
     try {
-      const fetchPromise = Promise.resolve().then(() => fetchImpl(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        }));
-      response = await Promise.race([fetchPromise, timeoutPromise]);
-    } catch (error) {
+      response = await Promise.resolve().then(() => fetchImpl(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      }));
+    } catch {
       throw new Error('属性编辑请求失败');
     }
     if (!response.ok) throw new Error('属性编辑请求失败');
+    let responsePayload: unknown;
     try {
-      const bodyPromise = Promise.resolve().then(() => response.json() as Promise<unknown>);
-      return await Promise.race([bodyPromise, timeoutPromise]);
-    } catch (error) {
-      if (error === timeout) throw new Error('属性编辑请求失败');
+      responsePayload = await response.json() as unknown;
+    } catch {
       throw new Error('属性编辑响应无效');
+    }
+    if (expired && onLatePayload) await onLatePayload(responsePayload);
+    return responsePayload;
+  })();
+  void request.catch(() => undefined);
+  try {
+    try {
+      return await Promise.race([request, timeoutPromise]);
+    } catch (error) {
+      if (error !== timeout) throw error;
+      throw new Error('属性编辑请求失败');
     }
   } finally {
     clearTimeout(timer!);

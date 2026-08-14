@@ -63,6 +63,19 @@ describe('atomic attribute edit API', () => {
     await prepared.lease.release();
   });
 
+  it('accepts a legacy number unit in an authoritative session and canonicalizes it', async () => {
+    const state = defaultState() as unknown as Record<string, unknown> & { attributes: Array<Record<string, unknown>> };
+    state.attributes = [{
+      id: 'attribute-1', name: '积分', value: 1, unit: 'number', format: 'number', decimals: 0, suffix: '',
+    }];
+    const fetchImpl = vi.fn(async () => Response.json(sessionPayload({ state })));
+
+    const prepared = await prepareAttributeEditSession({ attributeId: 'attribute-1' }, { fetchImpl });
+
+    expect(prepared.state.attributes[0].unit).toBe('none');
+    await prepared.lease.release();
+  });
+
   it('submits only the atomic edit aggregate and returns the server-normalized state', async () => {
     const state = defaultState();
     state.attributes = [{ id: 'attribute-1', name: '新积分', value: 2, unit: 'none', format: 'number', decimals: 0, suffix: '' }];
@@ -85,6 +98,77 @@ describe('atomic attribute edit API', () => {
     expect(fetchImpl.mock.calls[0][1]).toMatchObject({ method: 'POST' });
     expect(requestBody(fetchImpl.mock.calls[0] as unknown as [RequestInfo | URL, RequestInit?])).toEqual(input);
     expect(submitted).toEqual({ target: { id: 'attribute-1', name: '新积分', created: false }, state });
+  });
+
+  it('accepts a legacy number unit in an authoritative submit response but keeps the command canonical', async () => {
+    const state = defaultState() as unknown as Record<string, unknown> & { attributes: Array<Record<string, unknown>> };
+    state.attributes = [{
+      id: 'attribute-1', name: '积分', value: 1, unit: 'number', format: 'number', decimals: 0, suffix: '',
+    }];
+    const fetchImpl = vi.fn(async () => Response.json({
+      code: 0,
+      target: { id: 'attribute-1', name: '积分', created: false },
+      state,
+    }));
+
+    const submitted = await submitAttributeEdit({
+      target: { kind: 'new' },
+      attribute: { name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      giftRules: [], timerRules: [], giftCatalogUpserts: [],
+    }, { fetchImpl });
+
+    expect(submitted.state.attributes[0].unit).toBe('none');
+    expect((requestBody(fetchImpl.mock.calls[0] as unknown as [RequestInfo | URL, RequestInit?]).attribute as { unit: string }).unit)
+      .toBe('none');
+  });
+
+  it('still rejects a legacy number unit in an outbound submitted command', async () => {
+    const fetchImpl = vi.fn();
+
+    await expect(submitAttributeEdit({
+      target: { kind: 'new' },
+      attribute: { name: '积分', value: 0, unit: 'number', format: 'number', decimals: 0, suffix: '' },
+      giftRules: [], timerRules: [], giftCatalogUpserts: [],
+    } as never, { fetchImpl })).rejects.toThrow('属性编辑请求无效');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('best-effort deletes a recoverable prepared token when authoritative state parsing fails', async () => {
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'DELETE') return Response.json({ code: 0 });
+      return Response.json(sessionPayload({ state: { ...defaultState(), attributes: [null] } }));
+    });
+
+    await expect(prepareAttributeEditSession({ attributeId: 'attribute-1' }, { fetchImpl }))
+      .rejects.toThrow('属性编辑响应无效');
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls[1][0]).toBe('/api/attribute-edit-lease');
+    expect(fetchImpl.mock.calls[1][1]).toMatchObject({ method: 'DELETE', keepalive: true });
+    expect(requestBody(fetchImpl.mock.calls[1] as unknown as [RequestInfo | URL, RequestInit?]))
+      .toEqual({ attributeId: 'attribute-1', token });
+  });
+
+  it('best-effort deletes a recoverable prepared token that arrives after the initial session timeout', async () => {
+    vi.useFakeTimers();
+    let resolveSession!: (response: Response) => void;
+    const sessionResponse = new Promise<Response>((resolve) => { resolveSession = resolve; });
+    const fetchImpl = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => (
+      init?.method === 'DELETE' ? Promise.resolve(Response.json({ code: 0 })) : sessionResponse
+    ));
+    const preparing = prepareAttributeEditSession({ attributeId: 'attribute-1' }, {
+      fetchImpl,
+      requestTimeoutMs: 100,
+    });
+    const rejected = expect(preparing).rejects.toThrow('属性编辑请求失败');
+    await vi.advanceTimersByTimeAsync(100);
+    await rejected;
+
+    resolveSession(Response.json(sessionPayload()));
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
+    expect(fetchImpl.mock.calls[1][1]).toMatchObject({ method: 'DELETE', keepalive: true });
+    expect(requestBody(fetchImpl.mock.calls[1] as unknown as [RequestInfo | URL, RequestInit?]))
+      .toEqual({ attributeId: 'attribute-1', token });
   });
 
   it.each([

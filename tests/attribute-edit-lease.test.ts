@@ -57,14 +57,16 @@ describe('attribute edit lease client', () => {
     expect(requestBody(fetchImpl.mock.calls[2] as unknown as [RequestInfo | URL, RequestInit?])).toEqual({ attributeId, token: replacementToken });
   });
 
-  it('does not replace the current token from a malformed recovery session', async () => {
+  it('does not replace the current token and releases a recoverable malformed recovery session', async () => {
     vi.useFakeTimers();
     const health = vi.fn();
+    const deletedLeases: Array<Record<string, unknown>> = [];
     const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === 'PUT') return responseError('编辑租约不存在');
       if (init?.method === 'POST') return Response.json({
-        code: 0, attributeId, token: 'B'.repeat(24), expiresAt: '2026-08-14T00:00:15Z',
+        code: 0, attributeId: 'attribute-2', token: 'B'.repeat(24), expiresAt: '2026-08-14T00:00:15Z',
       });
+      if (init?.method === 'DELETE') deletedLeases.push(requestBody([_input, init]));
       return success();
     });
     const session = maintainAttributeEditLease(attributeId, token, { fetchImpl, onHealthChange: health });
@@ -74,8 +76,10 @@ describe('attribute edit lease client', () => {
     expect(session.token).toBe(token);
     expect(health).toHaveBeenLastCalledWith('retrying');
     await session.release();
-    expect(requestBody(fetchImpl.mock.calls.at(-1) as unknown as [RequestInfo | URL, RequestInit?]))
-      .toEqual({ attributeId, token });
+    expect(deletedLeases).toEqual([
+      { attributeId: 'attribute-2', token: 'B'.repeat(24) },
+      { attributeId, token },
+    ]);
   });
 
   it('deletes a replacement token that arrives after release and waits for cleanup', async () => {

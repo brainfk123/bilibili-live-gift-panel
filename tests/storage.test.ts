@@ -379,6 +379,32 @@ describe('storage', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it('restores a durable top-level value after the mounted state is mutated in place and saving fails', async () => {
+    const persisted = { ...defaultState(), roomId: 'persisted-room' };
+    await saveState(persisted);
+    loadState().roomId = 'unsaved-room';
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 500 })));
+
+    await expect(saveState(loadState())).rejects.toThrow('配置保存失败');
+
+    expect(loadState().roomId).toBe('persisted-room');
+  });
+
+  it('keeps a nested durable rollback snapshot isolated across repeated in-place mutations', async () => {
+    const persisted = defaultState();
+    persisted.settings.giftClipCrops = { clip: { x: 0.1, y: 0.2, width: 0.3, height: 0.4 } };
+    await saveState(persisted);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 500 })));
+
+    loadState().settings.giftClipCrops.clip.x = 0.8;
+    await expect(saveState(loadState())).rejects.toThrow('配置保存失败');
+    expect(loadState().settings.giftClipCrops.clip.x).toBe(0.1);
+
+    loadState().settings.giftClipCrops.clip.x = 0.9;
+    await expect(saveState(loadState())).rejects.toThrow('配置保存失败');
+    expect(loadState().settings.giftClipCrops.clip.x).toBe(0.1);
+  });
+
   it('restores the first authoritative success when a later reset rejects', async () => {
     const initial = { ...defaultState(), roomId: 'initial' };
     await saveState(initial);

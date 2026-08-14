@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -108,7 +112,15 @@ func TestConfigStoreApplyAttributeEditCreatesWithGeneratedIDAndAppends(t *testin
 	store := attributeEditFixtureStore(t)
 	command := existingAttributeEdit("", "新属性", 3)
 	command.Target = attributeEditTarget{Kind: "new"}
-	command.Attribute = attributeState{Name: "新属性", Value: 3, Color: "#abcdef"}
+	command.Attribute = attributeState{
+		ID:                         "forged-attribute-id",
+		Name:                       "新属性",
+		Value:                      3,
+		Color:                      "#abcdef",
+		BroadcastMessage:           "保留客户端可编辑字段",
+		CreatedFromTemplateID:      "forged-template",
+		CreatedFromTemplateVersion: 99,
+	}
 	command.GiftRules = []giftRule{{ID: "gift-new", GiftID: 8, AttributeName: "新属性", Formula: "新属性 + 1"}}
 	command.TimerRules = nil
 	command.GiftCatalogUpserts = nil
@@ -118,6 +130,161 @@ func TestConfigStoreApplyAttributeEditCreatesWithGeneratedIDAndAppends(t *testin
 	}
 	if !result.Created || result.ID != "generated-attribute" || result.State.Attributes[2].ID != "generated-attribute" || result.State.Attributes[2].Name != "新属性" {
 		t.Fatalf("new result = %#v", result)
+	}
+	created := result.State.Attributes[2]
+	if created.Color != "" || created.CreatedFromTemplateID != "" || created.CreatedFromTemplateVersion != 0 {
+		t.Fatalf("server-managed fields were accepted from the client: %#v", created)
+	}
+	if created.BroadcastMessage != "保留客户端可编辑字段" {
+		t.Fatalf("editable fields were not preserved: %#v", created)
+	}
+	persisted, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.Attributes[2]; got != created {
+		t.Fatalf("persisted attribute = %#v, want %#v", got, created)
+	}
+}
+
+func TestConfigStoreApplyAttributeEditRejectsWhitespaceEquivalentSubmittedRuleIDs(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*attributeEditCommand)
+	}{
+		{
+			name: "gift",
+			mutate: func(command *attributeEditCommand) {
+				command.GiftRules[0].ID = "duplicate-rule"
+				command.GiftRules[1].ID = " duplicate-rule "
+			},
+		},
+		{
+			name: "timer",
+			mutate: func(command *attributeEditCommand) {
+				command.TimerRules[0].ID = "duplicate-rule"
+				command.TimerRules[1].ID = " duplicate-rule "
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := attributeEditFixtureStore(t)
+			command := existingAttributeEdit("attribute-a", "积分", 10)
+			tc.mutate(&command)
+			_, err := store.applyAttributeEdit(command, fixedAttributeID)
+			if !isAttributeEditInputError(err) {
+				t.Fatalf("error = %v, want attribute edit input error", err)
+			}
+		})
+	}
+}
+
+func TestConfigStoreApplyAttributeEditRejectsWhitespaceEquivalentPeerRuleIDs(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*attributeEditCommand)
+	}{
+		{
+			name: "gift",
+			mutate: func(command *attributeEditCommand) {
+				command.GiftRules[0].ID = " gift-b "
+			},
+		},
+		{
+			name: "timer",
+			mutate: func(command *attributeEditCommand) {
+				command.TimerRules[0].ID = " timer-b "
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := attributeEditFixtureStore(t)
+			command := existingAttributeEdit("attribute-a", "积分", 10)
+			tc.mutate(&command)
+			_, err := store.applyAttributeEdit(command, fixedAttributeID)
+			if !isAttributeEditConflictError(err) {
+				t.Fatalf("error = %v, want attribute edit conflict", err)
+			}
+		})
+	}
+}
+
+func TestConfigStoreApplyAttributeEditCanonicalizesSubmittedRuleIDsForFutureEdits(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*attributeEditCommand)
+		ids    func(appState) []string
+	}{
+		{
+			name: "gift",
+			mutate: func(command *attributeEditCommand) {
+				command.GiftRules[0].ID = " gift-a-2 "
+			},
+			ids: func(state appState) []string {
+				return []string{state.Rules[0].ID, state.Rules[1].ID}
+			},
+		},
+		{
+			name: "timer",
+			mutate: func(command *attributeEditCommand) {
+				command.TimerRules[0].ID = " timer-a-2 "
+			},
+			ids: func(state appState) []string {
+				return []string{state.TimerRules[0].ID, state.TimerRules[1].ID}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := attributeEditFixtureStore(t)
+			command := existingAttributeEdit("attribute-a", "积分", 10)
+			tc.mutate(&command)
+			result, err := store.applyAttributeEdit(command, fixedAttributeID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range tc.ids(result.State) {
+				if id != strings.TrimSpace(id) {
+					t.Fatalf("stored rule ID was not canonicalized: %q", id)
+				}
+			}
+			if _, err := store.applyAttributeEdit(existingAttributeEdit("attribute-a", "积分", 11), fixedAttributeID); err != nil {
+				t.Fatalf("future edit failed after canonicalized rule storage: %v", err)
+			}
+		})
+	}
+}
+
+func TestConfigStoreApplyAttributeEditPreservesNonTargetLegacyRuleIDStorage(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	state := attributeEditFixtureState()
+	state.Rules[1].ID = " gift-b "
+	state.TimerRules[1].ID = " timer-b "
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	for value := 10.0; value <= 11; value++ {
+		result, err := store.applyAttributeEdit(existingAttributeEdit("attribute-a", "积分", value), fixedAttributeID)
+		if err != nil {
+			t.Fatalf("edit value=%v failed with valid legacy peer IDs: %v", value, err)
+		}
+		var giftID, timerID string
+		for _, rule := range result.State.Rules {
+			if rule.AttributeName == "B" {
+				giftID = rule.ID
+			}
+		}
+		for _, rule := range result.State.TimerRules {
+			if rule.AttributeName == "B" {
+				timerID = rule.ID
+			}
+		}
+		if giftID != " gift-b " || timerID != " timer-b " {
+			t.Fatalf("non-target legacy IDs changed: gift=%q timer=%q", giftID, timerID)
+		}
 	}
 }
 
@@ -381,6 +548,44 @@ func TestAttributeEditSessionRejectsAmbiguousOrMissingLegacyName(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAttributeEditSessionLegacyNameDoesNotSelectIDBearingAttribute(t *testing.T) {
+	t.Run("service", func(t *testing.T) {
+		store := attributeEditFixtureStore(t)
+		leases := newDefaultAttributeEditLeaseCoordinator()
+		var generated atomic.Int32
+		service := newAttributeEditService(store, leases, func() (string, error) {
+			generated.Add(1)
+			return "unexpected-generated-id", nil
+		})
+
+		_, err := service.Prepare(attributeEditSessionRequest{LegacyName: "积分"})
+
+		if !isAttributeEditNotFoundError(err) {
+			t.Fatalf("error=%T, want attributeEditNotFoundError", err)
+		}
+		if generated.Load() != 0 || leases.IsFrozen("attribute-a") {
+			t.Fatalf("ID-bearing legacy selection generated=%d frozen=%v", generated.Load(), leases.IsFrozen("attribute-a"))
+		}
+	})
+
+	t.Run("HTTP", func(t *testing.T) {
+		store := attributeEditFixtureStore(t)
+		handler := newAttributeEditHandler(newAttributeEditService(store, newDefaultAttributeEditLeaseCoordinator(), fixedAttributeID))
+
+		response := attributeEditHTTPCall(
+			handler,
+			"/api/attribute-edits/session",
+			http.MethodPost,
+			`{"legacyName":"积分"}`,
+			nil,
+		)
+
+		if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"not_found"`) {
+			t.Fatalf("response=%d body=%s", response.Code, response.Body.String())
+		}
+	})
 }
 
 func TestAttributeEditSessionDoesNotCreateLeaseWhenIDPersistenceOrTokenGenerationFails(t *testing.T) {
@@ -1140,6 +1345,10 @@ func TestAttributeEditSubmitWriteFailureLeavesNoPartialStateAndAllowsLaterSave(t
 	if err != nil {
 		t.Fatal(err)
 	}
+	var roomNotifications atomic.Int32
+	var timerNotifications atomic.Int32
+	store.setOnChange(func() { roomNotifications.Add(1) })
+	store.setOnTimerChange(func() { timerNotifications.Add(1) })
 	store.writeAtomically = func(string, []byte) error { return errors.New("injected submit persistence failure") }
 	t.Cleanup(func() { store.writeAtomically = nil })
 	if _, err := service.Submit(command); err == nil {
@@ -1158,6 +1367,9 @@ func TestAttributeEditSubmitWriteFailureLeavesNoPartialStateAndAllowsLaterSave(t
 	if failedClaimCount != 0 {
 		t.Fatalf("failed submit retained lease claim count=%d", failedClaimCount)
 	}
+	if roomNotifications.Load() != 0 || timerNotifications.Load() != 0 {
+		t.Fatalf("pre-commit failure notified room=%d timer=%d", roomNotifications.Load(), timerNotifications.Load())
+	}
 	store.writeAtomically = nil
 	result, err := service.Submit(command)
 	if err != nil {
@@ -1166,12 +1378,359 @@ func TestAttributeEditSubmitWriteFailureLeavesNoPartialStateAndAllowsLaterSave(t
 	if result.Name != "故障保存" || result.State.findAttribute("故障保存").Value != 10 {
 		t.Fatalf("later submit did not recover service/store usability: %#v", result)
 	}
+	if roomNotifications.Load() != 0 || timerNotifications.Load() != 1 {
+		t.Fatalf("successful retry notified room=%d timer=%d, want room=0 timer=1", roomNotifications.Load(), timerNotifications.Load())
+	}
 	persisted, err := store.readState()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if persisted.findAttribute("故障保存").Value != 10 {
 		t.Fatalf("later authoritative state not persisted: %#v", persisted.Attributes)
+	}
+}
+
+func TestAttributeEditSubmitReconcilesCommittedPostJournalFailures(t *testing.T) {
+	type failureStage struct {
+		name   string
+		inject func(*configStore, *bool)
+	}
+	stages := []failureStage{
+		{
+			name: "journal publication directory sync",
+			inject: func(store *configStore, failed *bool) {
+				store.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+					outcome := writeFileAtomicallyOutcome(path, data)
+					if filepath.Base(path) == "state-transaction.json" && !*failed && outcome.Committed {
+						*failed = true
+						return atomicWriteOutcome{Committed: true, Err: errors.New("injected journal publication sync warning")}
+					}
+					return outcome
+				}
+			},
+		},
+	}
+	for _, failedShard := range []string{"events.log", "history.json", "cache.json", "config.json"} {
+		stages = append(stages, failureStage{
+			name: "shard/" + failedShard,
+			inject: func(store *configStore, failed *bool) {
+				store.writeAtomically = func(path string, data []byte) error {
+					if filepath.Base(path) == failedShard && !*failed {
+						*failed = true
+						return errors.New("injected post-journal shard failure")
+					}
+					return writeFileAtomically(path, data)
+				}
+			},
+		})
+	}
+	stages = append(stages,
+		failureStage{
+			name: "journal removal",
+			inject: func(store *configStore, failed *bool) {
+				store.removeStateTransaction = func(path string) error {
+					if !*failed {
+						*failed = true
+						return errors.New("injected journal removal failure")
+					}
+					return os.Remove(path)
+				}
+			},
+		},
+		failureStage{
+			name: "transaction directory sync",
+			inject: func(store *configStore, failed *bool) {
+				store.syncStateTransactionDirectory = func(dir string) error {
+					if !*failed {
+						*failed = true
+						return errors.New("injected transaction directory sync failure")
+					}
+					return syncStateDirectory(dir)
+				}
+			},
+		},
+	)
+
+	for _, stage := range stages {
+		t.Run(stage.name, func(t *testing.T) {
+			store := attributeEditFixtureStore(t)
+			leases := newAttributeEditLeaseCoordinator(attributeEditLeaseTTL, timeNowForAttributeEditTest, func() (string, error) {
+				return "AAAAAAAAAAAAAAAAAAAAAAAA", nil
+			})
+			token, _, err := leases.Create("attribute-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := existingAttributeEdit("attribute-a", "已提交", 10)
+			command.Target.LeaseToken = token
+			failed := false
+			stage.inject(store, &failed)
+			var roomNotifications atomic.Int32
+			var timerNotifications atomic.Int32
+			store.setOnChange(func() { roomNotifications.Add(1) })
+			store.setOnTimerChange(func() { timerNotifications.Add(1) })
+
+			result, err := newAttributeEditService(store, leases, fixedAttributeID).Submit(command)
+			if err != nil {
+				t.Fatalf("durably journaled submit returned an error: %v", err)
+			}
+			if !failed {
+				t.Fatal("post-journal shard failure was not injected")
+			}
+			if result.State.findAttribute("已提交") == nil || result.State.Rules[0].AttributeName != "已提交" || result.State.TimerRules[0].AttributeName != "已提交" {
+				t.Fatalf("authoritative result did not contain the committed aggregate: %#v", result.State)
+			}
+			if roomNotifications.Load() != 0 || timerNotifications.Load() != 1 {
+				t.Fatalf("notifications room=%d timer=%d, want room=0 timer=1", roomNotifications.Load(), timerNotifications.Load())
+			}
+
+			restarted := &configStore{path: store.path}
+			persisted, err := restarted.readState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(persisted, result.State) {
+				t.Fatalf("restart state differs from authoritative result: got=%#v want=%#v", persisted, result.State)
+			}
+		})
+	}
+}
+
+func TestAttributeEditHTTPReturnsSuccessWhileCommittedJournalReconciliationStillFails(t *testing.T) {
+	type failureStage struct {
+		name           string
+		transactionWAL bool
+		newTarget      bool
+		inject         func(*configStore, *atomic.Int32)
+	}
+	stages := []failureStage{
+		{
+			name:           "journal publication sync plus shard",
+			transactionWAL: true,
+			newTarget:      true,
+			inject: func(store *configStore, hits *atomic.Int32) {
+				store.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+					if filepath.Base(path) == "config.json" {
+						hits.Add(1)
+						return atomicWriteOutcome{Err: errors.New("persistent injected config shard failure")}
+					}
+					outcome := writeFileAtomicallyOutcome(path, data)
+					if filepath.Base(path) == "state-transaction.json" && outcome.Committed {
+						hits.Add(1)
+						return atomicWriteOutcome{Committed: true, Err: errors.New("injected journal publication sync warning")}
+					}
+					return outcome
+				}
+			},
+		},
+		{
+			name:           "shard",
+			transactionWAL: true,
+			inject: func(store *configStore, hits *atomic.Int32) {
+				store.writeAtomically = func(path string, data []byte) error {
+					if filepath.Base(path) == "config.json" {
+						hits.Add(1)
+						return errors.New("persistent injected config shard failure")
+					}
+					return writeFileAtomically(path, data)
+				}
+			},
+		},
+		{
+			name:           "journal removal",
+			transactionWAL: true,
+			inject: func(store *configStore, hits *atomic.Int32) {
+				store.removeStateTransaction = func(string) error {
+					hits.Add(1)
+					return errors.New("persistent injected journal removal failure")
+				}
+			},
+		},
+		{
+			name: "transaction directory sync",
+			inject: func(store *configStore, hits *atomic.Int32) {
+				store.syncStateTransactionDirectory = func(string) error {
+					hits.Add(1)
+					return errors.New("persistent injected transaction directory sync failure")
+				}
+			},
+		},
+	}
+
+	for _, stage := range stages {
+		t.Run(stage.name, func(t *testing.T) {
+			store := attributeEditFixtureStore(t)
+			leases := newAttributeEditLeaseCoordinator(attributeEditLeaseTTL, timeNowForAttributeEditTest, func() (string, error) {
+				return "AAAAAAAAAAAAAAAAAAAAAAAA", nil
+			})
+			handler := newAttributeEditHandler(newAttributeEditService(store, leases, fixedAttributeID))
+			command := existingAttributeEdit("attribute-a", "已提交", 10)
+			if stage.newTarget {
+				command.Target = attributeEditTarget{Kind: "new"}
+				command.GiftRules = []giftRule{{ID: "gift-new-committed", GiftID: 8, AttributeName: "已提交", Formula: "已提交 + 1"}}
+				command.TimerRules = []timerRule{{ID: "timer-new-committed", AttributeName: "已提交", IntervalSeconds: 1, Formula: "已提交 + 1", Enabled: true}}
+				command.GiftCatalogUpserts = nil
+			} else {
+				session := attributeEditHTTPSession(t, handler, "attribute-a")
+				command.Target.LeaseToken = session.Token
+			}
+			var hits atomic.Int32
+			stage.inject(store, &hits)
+			var roomNotifications atomic.Int32
+			var timerNotifications atomic.Int32
+			store.setOnChange(func() { roomNotifications.Add(1) })
+			store.setOnTimerChange(func() { timerNotifications.Add(1) })
+
+			response := attributeEditHTTPSubmit(t, handler, command)
+			if response.Code != http.StatusOK {
+				t.Fatalf("committed submit response=%d body=%s", response.Code, response.Body.String())
+			}
+			var submitted struct {
+				Code   int      `json:"code"`
+				State  appState `json:"state"`
+				Target struct {
+					ID      string `json:"id"`
+					Created bool   `json:"created"`
+				} `json:"target"`
+			}
+			if err := json.NewDecoder(response.Body).Decode(&submitted); err != nil {
+				t.Fatal(err)
+			}
+			if submitted.Code != 0 || submitted.State.findAttribute("已提交") == nil {
+				t.Fatalf("committed response did not contain the authoritative state: %#v", submitted)
+			}
+			if stage.newTarget && (!submitted.Target.Created || submitted.Target.ID != "generated-attribute") {
+				t.Fatalf("published-journal new target did not return committed creation: %#v", submitted.Target)
+			}
+			responseStateJSON, err := json.Marshal(submitted.State)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if hits.Load() < 1 {
+				t.Fatal("persistent post-journal failure was not injected")
+			}
+			if got := store.MutationBlockKind(); got != "" {
+				t.Fatalf("retryable committed transaction blocked future recovery: %q", got)
+			}
+			if got := store.TransactionPending(); got != stage.transactionWAL {
+				t.Fatalf("transaction pending=%v, want %v", got, stage.transactionWAL)
+			}
+			if roomNotifications.Load() != 0 || timerNotifications.Load() != 1 {
+				t.Fatalf("notifications room=%d timer=%d, want room=0 timer=1", roomNotifications.Load(), timerNotifications.Load())
+			}
+			whileFailing, err := store.readState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			whileFailingJSON, err := json.Marshal(whileFailing)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(whileFailingJSON) != string(responseStateJSON) {
+				t.Fatal("read during replay failure exposed state other than the committed journal candidate")
+			}
+			if got := store.MutationBlockKind(); got != "" {
+				t.Fatalf("transient committed replay failure permanently blocked recovery: %q", got)
+			}
+			if stage.transactionWAL {
+				mutationRan := false
+				_, mutationErr := store.updateState(func(*appState) error {
+					mutationRan = true
+					return nil
+				})
+				var blocked *stateMutationsBlockedError
+				if mutationRan || !errors.As(mutationErr, &blocked) {
+					t.Fatalf("pending committed journal mutation ran=%v error=%T, want retryable mutation block", mutationRan, mutationErr)
+				}
+
+				// Simulate a process restart while the same storage failure still
+				// prevents journal replay. The restarted store must reconstruct the
+				// authoritative candidate from the published journal instead of
+				// exposing the already-written subset of shards or permanently
+				// blocking recovery.
+				restartedCandidate := &configStore{path: store.path}
+				var restartHits atomic.Int32
+				stage.inject(restartedCandidate, &restartHits)
+				restartedWhileFailing, initializeErr := initializeConfigStore(restartedCandidate)
+				if initializeErr != nil {
+					t.Fatal(initializeErr)
+				}
+				if restartHits.Load() < 1 {
+					t.Fatal("restart did not retry the persistent journal failure")
+				}
+				restartedState, readErr := restartedWhileFailing.readState()
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				restartedJSON, marshalErr := json.Marshal(restartedState)
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
+				if string(restartedJSON) != string(responseStateJSON) {
+					t.Fatal("restart during replay failure exposed state other than the committed journal candidate")
+				}
+				if got := restartedWhileFailing.MutationBlockKind(); got != "" {
+					t.Fatalf("restart permanently blocked a valid journal replay: %q", got)
+				}
+
+				restartedWhileFailing.writeAtomically = nil
+				restartedWhileFailing.writeAtomicallyOutcome = nil
+				restartedWhileFailing.removeStateTransaction = nil
+				restartedWhileFailing.syncStateTransactionDirectory = nil
+				restartedRecovered, recoverErr := restartedWhileFailing.readState()
+				if recoverErr != nil {
+					t.Fatal(recoverErr)
+				}
+				restartedRecoveredJSON, marshalErr := json.Marshal(restartedRecovered)
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
+				if string(restartedRecoveredJSON) != string(responseStateJSON) {
+					t.Fatal("restarted store did not recover after the transient failure cleared")
+				}
+				if restartedWhileFailing.TransactionPending() {
+					t.Fatal("restarted store left a transaction pending after recovery")
+				}
+			}
+
+			store.writeAtomically = nil
+			store.writeAtomicallyOutcome = nil
+			store.removeStateTransaction = nil
+			store.syncStateTransactionDirectory = nil
+			recovered, err := store.readState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			recoveredJSON, err := json.Marshal(recovered)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(recoveredJSON) != string(responseStateJSON) {
+				t.Fatal("same-store read recovery differs from the authoritative HTTP response")
+			}
+			if store.TransactionPending() {
+				t.Fatal("same-store read recovery left a transaction pending")
+			}
+
+			restarted := &configStore{path: store.path}
+			persisted, err := restarted.readState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			persistedJSON, err := json.Marshal(persisted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(persistedJSON) != string(responseStateJSON) {
+				t.Fatal("restart state differs from the authoritative HTTP response")
+			}
+			if restarted.TransactionPending() {
+				t.Fatal("restart/read recovery left a transaction pending")
+			}
+			if roomNotifications.Load() != 0 || timerNotifications.Load() != 1 {
+				t.Fatalf("recovery emitted duplicate notifications room=%d timer=%d", roomNotifications.Load(), timerNotifications.Load())
+			}
+		})
 	}
 }
 

@@ -316,3 +316,76 @@ The correction commit containing this block is report-only and changes no produc
 ## Handoff
 
 The original report is committed as `e7aa680`, the permanent package-closure proof and its evidence as `a695473`, and the observed post-commit `5fa1518` audit is recorded above. The controller records this correction commit's actual SHA and post-commit HEAD audit externally after the commit exists. All required gates, focused package tests, manifest/handler audit, EXE hash, and no-release checks passed. No production packaging closure repair was required. Publishing remains explicitly unauthorized and out of scope.
+
+## Final review fix wave — 2026-08-15
+
+This section supersedes the earlier source-HEAD verdict for the one authorized final fix wave. The fixed input HEAD was `f0590429f8f0db321d743252d0841b845779935c`. The fix-wave commit cannot record its own SHA in this file; the controller records the actual full SHA and post-commit status externally after the commit exists. No push, tag, release, signing, version, package/dependency/lockfile, workflow, changelog, README, or FFmpeg source/payload/build change was made.
+
+### Final-review findings and RED → GREEN evidence
+
+1. **Published-journal commit boundary and committed-result reconciliation.** `statePersistenceOutcome` now separates pre-publication failure from logical commit; a generated transaction is validated before publication; journal publication uses the rename-aware atomic outcome; and shard application records whether every shard is committed independently of journal cleanup. Once the complete journal reaches its final name it is the authoritative logical commit record, including a reported containing-directory sync warning, so a later replay can never turn an ordinary reported failure into a committed edit. Attribute submit/backfill synchronously retries replay and reads the committed state when possible. If replay still fails, an isolated authoritative candidate is retained. On restart, any readable, schema-valid, canonically validated journal reconstructs that candidate before shard replay; unreadable or invalid evidence remains a permanent recovery block. Every read retries replay and serves a clone of the candidate instead of partial shards, mutations remain blocked until replay succeeds, and startup defers migration while valid evidence remains pending. Notifications occur once. Genuine failures before journal publication still fail and notify zero listeners.
+   - RED: the initial four shard stages of `TestAttributeEditSubmitReconcilesCommittedPostJournalFailures` each returned `durably journaled submit returned an error: injected post-journal shard failure`. Extending the stage table first failed to compile on missing `removeStateTransaction`, `syncStateTransactionDirectory`, and `writeAtomicallyOutcome` seams. The first persistent HTTP proof returned `500 {"code":"internal_error","message":"服务器暂时无法处理请求"}` for a committed shard failure and left `mutationBlockKind="transaction_recovery"` after persistent journal-removal failure. Independent completion review then added three stronger gaps: combined journal-publication sync warning plus persistent shard failure still returned HTTP 500 for a new target; a same-process read while replay remained broken either exposed a partial shard mix or permanently set `transaction_recovery`; and restart while the same replay failure remained active lost the memory-only candidate, exposed partial shards, and could not resume recovery. The restart regression's first run was deterministic RED at compile time (`undefined: initializeConfigStore`) before the startup seam and journal rehydration existed.
+   - GREEN: `TestAttributeEditSubmitReconcilesCommittedPostJournalFailures` covers journal publication sync warning, all four shards, journal removal, and final directory sync. `TestAttributeEditHTTPReturnsSuccessWhileCommittedJournalReconciliationStillFails` also covers the combined warning/failure on a new target, keeps every fault active through HTTP 200, same-process read/mutation attempts, and a real startup initialization of a new store, and verifies each read returns the same authoritative public state without a permanent block. It then clears the restarted-store fault and proves in-process replay recovery, clears the original fault, and proves same-store plus fresh-store restart equal the response with no duplicate notification. `TestAttributeEditSubmitWriteFailureLeavesNoPartialStateAndAllowsLaterSave` proves the pre-publication failure contract and zero notifications.
+
+2. **Frontend durable rollback snapshots.** Every stored fallback is cloned at capture time, operation snapshots are isolated before asynchronous persistence, and restore publishes a new clone rather than the private fallback object.
+   - RED: the two new storage regressions restored `"unsaved-room"` instead of `"persisted-room"` after a top-level in-place mutation and restored nested crop value `0.8` instead of durable `0.1` after a second failure.
+   - GREEN: `restores a durable top-level value after the mounted state is mutated in place and saving fails` and `keeps a nested durable rollback snapshot isolated across repeated in-place mutations` both pass; the full focused storage/API/lease run passed 125/125.
+
+3. **Legacy authoritative unit and recoverable lease cleanup.** Only authoritative session/submit parsing accepts legacy attribute `unit: "number"`, mapping it to canonical `"none"`; `isAttribute` and outbound submit validation remain strict. Cleanup identity parsing is deliberately narrower than adoption parsing. Initial parse failure, late initial response, and malformed/later reacquisition issue bounded keepalive DELETE requests whenever a valid `{attributeId, token}` can be recovered, including a mismatched response attribute ID.
+   - RED: real `prepareAttributeEditSession` and `submitAttributeEdit` calls threw `属性编辑响应无效` for legacy authoritative state; initial malformed/late session cleanup issued only the POST; malformed reacquisition deleted only the current `A` token. The strengthened mismatch proof showed the replacement `B` token incorrectly deleted under `attribute-1` instead of its authoritative `attribute-2`.
+   - GREEN: authoritative session and submit return `unit: "none"`; a runtime-cast outbound `"number"` command still rejects before fetch; initial and late tokens are cleaned up; malformed reacquisition keeps the current token, stays retrying, and deletes both the replacement pair and current pair exactly once.
+
+4. **Legacy-name selection is migration-only.** `legacyName` matches only attributes whose trimmed stable ID is empty.
+   - RED: the ID-bearing fixture was selected successfully by the service and the HTTP adapter returned 200.
+   - GREEN: `TestAttributeEditSessionLegacyNameDoesNotSelectIDBearingAttribute` returns typed not-found at the service boundary and HTTP 404, creates no lease, and never calls the ID generator.
+
+5. **Protected fields on new attributes.** The server always overwrites the client ID and initializes `Color`, `CreatedFromTemplateID`, and `CreatedFromTemplateVersion` to server-owned zero values while preserving editable fields.
+   - RED: the protected-field regression returned `Color:"#abcdef"`, template ID `"forged-template"`, and template version `99`.
+   - GREEN: `TestConfigStoreApplyAttributeEditCreatesWithGeneratedIDAndAppends` proves generated ID plus zero protected fields in both result and persisted state while retaining the editable broadcast message.
+
+6. **Canonical gift/timer rule-ID identity.** Submitted rule slices are copied and IDs trimmed; ownership, peer collision, duplicate detection, and merge maps use trimmed identity; the merged aggregate is revalidated. Untouched legacy peer storage remains byte-for-byte unchanged.
+   - RED: both gift and timer whitespace-duplicate cases returned nil error, both peer-collision cases returned nil error, and both canonical-storage cases persisted surrounding whitespace.
+   - GREEN: gift and timer duplicates are typed input errors, peer collisions are typed conflicts, submitted IDs persist trimmed and support later edits, and `TestConfigStoreApplyAttributeEditPreservesNonTargetLegacyRuleIDStorage` proves non-target raw legacy IDs remain unchanged across future valid edits.
+
+The tightly scoped same-origin minor was also fixed: session and submit now reuse the existing host-aware proxy-compatible policy already used by the lease endpoint. RED was 403 for same-host scheme mismatch in all three adapter assertions; GREEN accepts the request past origin validation while cross-host Origin and `Sec-Fetch-Site: cross-site` remain forbidden. The initial-session temporary-freeze cleanup minor is covered by finding 3. The five explicitly deferred minors were not pursued.
+
+### Final verification matrix
+
+| Gate | Exact command | Result |
+|---|---|---|
+| Focused frontend | `npm test -- tests/storage.test.ts tests/attribute-edit-api.test.ts tests/attribute-edit-lease.test.ts --reporter=dot` | exit 0; 3/3 files, 125/125 tests. |
+| TypeScript | `npm run typecheck` | exit 0; `tsc --noEmit`. |
+| Focused Go | `go -C goserver test ./... -run '^(TestAttributeEditSubmitReconcilesCommittedPostJournalFailures|TestAttributeEditHTTPReturnsSuccessWhileCommittedJournalReconciliationStillFails|TestPendingStateTransaction.*|TestTransactionPending.*|TestApplicationLifecycleStartsDiagnosticsWithUnrecoverableTransactionEvidence|TestConfigResetClearsCorruptTransactionAndRuntimeArtifactsThroughProductionHandler)$' -count=1 -timeout=180s` | exit 0; `ok ... 3.346s`. |
+| Focused Go race | `go -C goserver test -race ./... -run '^(TestAttributeEditSubmitReconcilesCommittedPostJournalFailures|TestAttributeEditHTTPReturnsSuccessWhileCommittedJournalReconciliationStillFails|TestPendingStateTransaction.*|TestTransactionPending.*)$' -count=1 -timeout=240s` | exit 0; `ok ... 3.406s`; no race report. |
+| Deterministic stress | `go -C goserver test ./... -run '^(TestAttributeEditSubmitReconcilesCommittedPostJournalFailures|TestAttributeEditHTTPReturnsSuccessWhileCommittedJournalReconciliationStillFails)$' -count=20 -timeout=300s` | exit 0; `ok ... 15.101s`. |
+| Full Go | `go -C goserver test ./... -count=1 -timeout=600s` | exit 0; final frozen-tree rerun `ok ... 18.385s`. |
+| Full Go race | `go -C goserver test -race ./... -count=1 -timeout=900s` | exit 0; final frozen-tree rerun `ok ... 30.838s`; no race report. |
+| Full Vitest | `npm test -- --reporter=dot` | exit 0; 46/46 files, 667 passed, 31 skipped, 698 total. Known single-file asset notices remained informational. |
+| UI build | `npm run build:ui` | exit 0; Vite 5.4.21 transformed 91 modules and built in 532ms. |
+| Local EXE build | `npm run build:exe` | exit 0; unchanged FFmpeg 9.0 payload verified; 83 UI assets embedded (manifest v1); local dev EXE built. |
+| Permanent embedded closure | `go -C goserver test ./... -run '^TestEmbedded(UIAssetManifestClosesAndServesProductionAssets|PageHandlerServesNestedUIAssets|UIAssetManifestMatchesEmbeddedFS)$' -count=1 -timeout=120s -v` | exit 0; final post-build rerun passed all three tests; manifest/handler bytes verified for 83 assets; `ok ... 1.581s`. |
+| Whitespace/scope | `git diff --check` plus `git status --short` | diff check exit 0; exactly the 13 intended source/test/report paths are tracked changes after this report update. |
+
+The freshly rebuilt ignored local artifact was `dist/gift-panel.exe`, 14,059,520 bytes, SHA-256 `fc4c5eec55a3aa3dda493b778d9a8d96824c0f7416fc4a6a4dcf418fde86014d`. It was not signed, published, staged, or released. The existing FFmpeg payload remained 6,209,536 bytes with ZIP SHA-256 `19247e960c50adcf107bc04e8a20435fd67d098e06b227d8772f0d1b8027e03c`; no FFmpeg file changed.
+
+### Final fix-wave scope and remaining boundary
+
+The intended tracked scope is exactly one report, four Go production files, two Go test files, three TypeScript production files, and three TypeScript test files:
+
+```text
+.superpowers/sdd/2026-08-14-atomic-attribute-edit/final-report.md
+goserver/attribute_edit_leases_test.go
+goserver/attribute_edits.go
+goserver/attribute_edits_test.go
+goserver/config_store.go
+goserver/state_shards.go
+goserver/state_transaction.go
+src/storage.ts
+src/ui/config/attribute-edit-api.ts
+src/ui/config/attribute-edit-lease.ts
+tests/attribute-edit-api.test.ts
+tests/attribute-edit-lease.test.ts
+tests/storage.test.ts
+```
+
+The explicit committed-outcome interpretation is intentionally used by atomic attribute submit and legacy-ID backfill, the request paths named by the final finding. Other generic `configStore` mutation callers retain their existing error-return contract and were not broadened in this feature-only wave. Unsupported external processes that directly rewrite shard files remain outside the `configStore` atomicity guarantee. Independent frontend review completed with no Critical, Important, or Minor findings. Independent Go review returned not-ready twice on the combined publication/read-recovery and restart-survival gaps; each was reproduced and fixed, and its final read-only re-review completed READY with no Critical, Important, or Minor findings. No additional product concern is known within the authorized final-review scope.

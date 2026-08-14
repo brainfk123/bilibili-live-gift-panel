@@ -220,8 +220,8 @@ func TestAttributeEditHTTPStrictSessionAndSubmitAdapters(t *testing.T) {
 	}{
 		{name: "cross site fetch", path: "/api/attribute-edits/session", method: http.MethodPost, body: `{"attributeId":"attribute-a"}`, setup: func(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "cross-site") }, want: http.StatusForbidden},
 		{name: "cross site origin", path: "/api/attribute-edits/session", method: http.MethodPost, body: `{"attributeId":"attribute-a"}`, setup: func(r *http.Request) { r.Header.Set("Origin", "https://attacker.invalid") }, want: http.StatusForbidden},
-		{name: "https origin on http session", path: "/api/attribute-edits/session", method: http.MethodPost, body: `{"attributeId":"attribute-a"}`, setup: func(r *http.Request) { r.Header.Set("Origin", "https://panel.local") }, want: http.StatusForbidden},
-		{name: "https origin on http submit", path: "/api/attribute-edits", method: http.MethodPost, body: `{"target":{"kind":"invalid"}}`, setup: func(r *http.Request) { r.Header.Set("Origin", "https://panel.local") }, want: http.StatusForbidden},
+		{name: "proxy https origin on http session", path: "/api/attribute-edits/session", method: http.MethodPost, body: `{"attributeId":"attribute-a"}`, setup: func(r *http.Request) { r.Header.Set("Origin", "https://panel.local") }, want: http.StatusOK},
+		{name: "proxy https origin on http submit", path: "/api/attribute-edits", method: http.MethodPost, body: `{"target":{"kind":"invalid"}}`, setup: func(r *http.Request) { r.Header.Set("Origin", "https://panel.local") }, want: http.StatusBadRequest},
 		{name: "unknown path", path: "/api/attribute-edits/missing", method: http.MethodPost, body: `{}`, want: http.StatusNotFound},
 		{name: "wrong method", path: "/api/attribute-edits", method: http.MethodGet, body: `{}`, want: http.StatusMethodNotAllowed},
 		{name: "missing content type", path: "/api/attribute-edits/session", method: http.MethodPost, body: `{"attributeId":"attribute-a"}`, setup: func(r *http.Request) { r.Header.Del("Content-Type") }, want: http.StatusBadRequest},
@@ -350,7 +350,7 @@ func TestAttributeEditHTTPSessionAndSubmitLeaseSemantics(t *testing.T) {
 	}
 }
 
-func TestAttributeEditHTTPRejectsHTTPOriginOnHTTPSRequest(t *testing.T) {
+func TestAttributeEditHTTPUsesProxyAwareHostOriginPolicy(t *testing.T) {
 	store := attributeEditFixtureStore(t)
 	handler := newAttributeEditHandler(newAttributeEditService(store, newDefaultAttributeEditLeaseCoordinator(), fixedAttributeID))
 	for _, path := range []string{"/api/attribute-edits/session", "/api/attribute-edits"} {
@@ -360,7 +360,7 @@ func TestAttributeEditHTTPRejectsHTTPOriginOnHTTPSRequest(t *testing.T) {
 		request.Header.Set("Origin", "http://panel.local")
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
-		if response.Code != http.StatusForbidden {
+		if response.Code != http.StatusBadRequest {
 			t.Fatalf("path=%s status=%d body=%s", path, response.Code, response.Body.String())
 		}
 	}

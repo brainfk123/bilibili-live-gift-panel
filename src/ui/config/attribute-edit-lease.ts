@@ -1,4 +1,4 @@
-import type { AppState } from '../../types';
+import type { AppState, Attribute } from '../../types';
 
 const ENDPOINT = '/api/attribute-edit-lease';
 const SESSION_ENDPOINT = '/api/attribute-edits/session';
@@ -59,6 +59,36 @@ export interface AttributeEditLeaseOptions {
 
 type LeasePayload = { code?: unknown; token?: unknown; attributeId?: unknown };
 
+export interface RecoverablePreparedAttributeEditLease {
+  attributeId: string;
+  token: string;
+}
+
+export function recoverPreparedAttributeEditLease(value: unknown): RecoverablePreparedAttributeEditLease | undefined {
+  if (!isRecord(value) || value.code !== 0 || typeof value.attributeId !== 'string' || !value.attributeId.trim()
+    || typeof value.token !== 'string' || !/^[A-Za-z0-9_-]{24}$/.test(value.token)) return undefined;
+  return { attributeId: value.attributeId, token: value.token };
+}
+
+export async function bestEffortReleasePreparedAttributeEditLease(
+  value: unknown,
+  options: Pick<AttributeEditLeaseOptions, 'fetchImpl' | 'requestTimeoutMs'> = {},
+): Promise<void> {
+  const recovered = recoverPreparedAttributeEditLease(value);
+  if (!recovered) return;
+  try {
+    await requestLeaseWithTimeout(
+      options.fetchImpl ?? fetch,
+      'DELETE',
+      { attributeId: recovered.attributeId, token: recovered.token },
+      options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      true,
+    );
+  } catch {
+    // Cleanup is bounded and best-effort; preserve the original parse error.
+  }
+}
+
 export async function acquireAttributeEditLease(
   attributeId: string,
   options: AttributeEditLeaseOptions = {},
@@ -102,7 +132,7 @@ function createLeaseSession(
   let activeRequest: RequestDeadline | undefined;
   let releasePromise: Promise<void> | undefined;
   let health: AttributeEditLeaseHealth = 'healthy';
-  const deletedTokens = new Set<string>();
+  const deletedLeases = new Set<string>();
 
   const reportHealth = (next: AttributeEditLeaseHealth, force = false): void => {
     if (!force && health === next) return;
@@ -121,13 +151,16 @@ function createLeaseSession(
     activeRequest.abort();
   };
 
-  const deleteTokenOnce = (tokenToDelete: string): Promise<void> => {
-    if (deletedTokens.has(tokenToDelete)) return Promise.resolve();
-    deletedTokens.add(tokenToDelete);
+  const deleteLeaseOnce = (attributeIdToDelete: string, tokenToDelete: string): Promise<void> => {
+    const key = `${attributeIdToDelete}\u0000${tokenToDelete}`;
+    if (deletedLeases.has(key)) return Promise.resolve();
+    deletedLeases.add(key);
     return requestLeaseWithTimeout(
-      fetchImpl, 'DELETE', { attributeId, token: tokenToDelete }, requestTimeoutMs, true,
+      fetchImpl, 'DELETE', { attributeId: attributeIdToDelete, token: tokenToDelete }, requestTimeoutMs, true,
     ).then(() => undefined, () => undefined);
   };
+
+  const deleteTokenOnce = (tokenToDelete: string): Promise<void> => deleteLeaseOnce(attributeId, tokenToDelete);
 
   const replacementTokenFromPayload = (payload: LeasePayload): string => (
     reacquireThroughSession
@@ -135,12 +168,20 @@ function createLeaseSession(
       : readLeaseToken(payload)
   );
 
-  const cleanupLatePayload = (payload: LeasePayload): void => {
+  const recoverReplacementLeaseFromPayload = (payload: LeasePayload): RecoverablePreparedAttributeEditLease | undefined => {
+    if (reacquireThroughSession) return recoverPreparedAttributeEditLease(payload);
     try {
-      const replacementToken = replacementTokenFromPayload(payload);
-      if (replacementToken !== currentToken) void deleteTokenOnce(replacementToken);
+      return { attributeId, token: readLeaseToken(payload) };
     } catch {
-      // Malformed late responses never replace or release the current token.
+      return undefined;
+    }
+  };
+
+  const cleanupLatePayload = (payload: LeasePayload): void => {
+    const replacementLease = recoverReplacementLeaseFromPayload(payload);
+    if (replacementLease
+      && (replacementLease.attributeId !== attributeId || replacementLease.token !== currentToken)) {
+      void deleteLeaseOnce(replacementLease.attributeId, replacementLease.token);
     }
   };
 
@@ -188,9 +229,13 @@ function createLeaseSession(
             { attributeId },
             reacquireThroughSession ? SESSION_ENDPOINT : ENDPOINT,
           );
-          const replacementToken = reacquireThroughSession
-            ? parsePreparedAttributeEditSession(reacquired.payload, attributeId).token
-            : readLeaseToken(reacquired.payload ?? {});
+          let replacementToken: string;
+          try {
+            replacementToken = replacementTokenFromPayload(reacquired.payload ?? {});
+          } catch (error) {
+            cleanupLatePayload(reacquired.payload ?? {});
+            throw error;
+          }
           if (released) {
             if (replacementToken !== currentToken) await deleteTokenOnce(replacementToken);
             return;
@@ -353,14 +398,20 @@ export function parsePreparedAttributeEditSession(
 }
 
 export function isAppState(value: unknown): value is AppState {
-  return isAppStateWire(value, false);
+  return isAppStateWire(value, false, false);
 }
 
 export function parseAppState(value: unknown): AppState {
-  if (!isAppStateWire(value, true)) throw new Error('属性编辑响应无效');
+  if (!isAppStateWire(value, true, true)) throw new Error('属性编辑响应无效');
+  const wire = value as Omit<AppState, 'attributes'> & {
+    attributes: Array<Omit<Attribute, 'unit'> & { unit: Attribute['unit'] | 'number' }>;
+  };
   return {
-    ...value,
-    giftKpiPanels: value.giftKpiPanels.map((panel) => ({
+    ...wire,
+    attributes: wire.attributes.map((attribute) => (
+      attribute.unit === 'number' ? { ...attribute, unit: 'none' as const } : attribute
+    )),
+    giftKpiPanels: wire.giftKpiPanels.map((panel) => ({
       ...panel,
       items: panel.items.map((item) => ({
         ...item,
@@ -371,15 +422,14 @@ export function parseAppState(value: unknown): AppState {
   } as AppState;
 }
 
-function isAppStateWire(value: unknown, allowOmittedKpiRuntimeFields: boolean): value is Record<string, unknown> & Pick<AppState,
-  Exclude<keyof AppState, 'giftKpiPanels'>> & { giftKpiPanels: Array<Record<string, unknown> & { items: Array<Record<string, unknown>> }> } {
+function isAppStateWire(value: unknown, allowOmittedKpiRuntimeFields: boolean, allowLegacyNumberUnit: boolean): boolean {
   if (!isRecord(value) || !hasExactKeys(value, [
     'roomId', 'attributes', 'displayScenes', 'blindBoxDisplay', 'giftKpiPanels',
     'activities', 'rules', 'timerRules', 'formulaPresets', 'settings', 'giftCatalog',
     'recentGifts', 'stats', 'log', 'giftReceipts', 'contributions', 'simplePlay',
   ], ['simplePlay'])) return false;
   return typeof value.roomId === 'string'
-    && isArrayOf(value.attributes, isAttribute)
+    && isArrayOf(value.attributes, (attribute) => isAttributeWire(attribute, allowLegacyNumberUnit))
     && isArrayOf(value.displayScenes, isDisplayScene)
     && isDisplayAppearance(value.blindBoxDisplay, true)
     && isArrayOf(value.giftKpiPanels, (panel) => isGiftKpiPanel(panel, allowOmittedKpiRuntimeFields))
@@ -398,6 +448,10 @@ function isAppStateWire(value: unknown, allowOmittedKpiRuntimeFields: boolean): 
 }
 
 export function isAttribute(value: unknown): boolean {
+  return isAttributeWire(value, false);
+}
+
+function isAttributeWire(value: unknown, allowLegacyNumberUnit: boolean): boolean {
   if (!isRecord(value) || !hasExactKeys(value, [
     'id', 'name', 'value', 'unit', 'format', 'decimals', 'suffix', 'color', 'broadcastMessage', 'display',
     'createdFromTemplateId', 'createdFromTemplateVersion',
@@ -405,7 +459,7 @@ export function isAttribute(value: unknown): boolean {
   return optionalString(value.id)
     && requiredString(value.name)
     && finiteNumber(value.value)
-    && oneOf(value.unit, ['seconds', 'none'])
+    && oneOf(value.unit, allowLegacyNumberUnit ? ['seconds', 'none', 'number'] : ['seconds', 'none'])
     && oneOf(value.format, ['hhmmss', 'number', 'suffix'])
     && finiteNumber(value.decimals)
     && typeof value.suffix === 'string'

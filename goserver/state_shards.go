@@ -127,6 +127,9 @@ func (s *configStore) hasStoredStateLocked() bool {
 func (s *configStore) readStateLocked() (appState, error) {
 	if s.mutationBlockKind == "" {
 		if err := s.recoverPendingStateTransactionLocked(); err != nil {
+			if s.committedTransactionState != nil {
+				return cloneAppState(*s.committedTransactionState)
+			}
 			s.blockMutationsLocked("transaction_recovery", err)
 		}
 	}
