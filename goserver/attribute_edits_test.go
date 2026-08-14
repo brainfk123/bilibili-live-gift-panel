@@ -795,7 +795,11 @@ func TestAttributeEditPreservesConcurrentTimerPeerUpdate(t *testing.T) {
 	assertAtomicAttributeEditPeerState(t, persisted, "能量", 10, 3)
 }
 
-func TestAttributeEditSameTargetLaterValidSaveWinsAndKeepsPeerUpdate(t *testing.T) {
+// This is intentionally separate from the peer-update test below: it proves
+// that command 1 is inside the production configStore mutex while its write is
+// paused. Removing s.mu.Lock from applyAttributeEditAuthorized makes TryLock
+// succeed and therefore fails this test.
+func TestAttributeEditSameTargetLaterValidSaveWinsAtRealStoreMutex(t *testing.T) {
 	store := attributeEditFixtureStore(t)
 	tokens := []string{"AAAAAAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBBBBBB"}
 	leases := newAttributeEditLeaseCoordinator(attributeEditLeaseTTL, timeNowForAttributeEditTest, func() (string, error) {
@@ -941,6 +945,14 @@ func TestAttributeEditSameTargetLaterValidSaveWinsAndKeepsPeerUpdate(t *testing.
 
 func TestAttributeEditSameTargetInvalidLaterSaveLeavesFirstAuthoritative(t *testing.T) {
 	store := attributeEditFixtureStore(t)
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.RoomID = "room-a"
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
 	tokens := []string{"AAAAAAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBBBBBB"}
 	leases := newAttributeEditLeaseCoordinator(attributeEditLeaseTTL, timeNowForAttributeEditTest, func() (string, error) {
 		token := tokens[0]
@@ -963,6 +975,14 @@ func TestAttributeEditSameTargetInvalidLaterSaveLeavesFirstAuthoritative(t *test
 	if _, err := service.Submit(first); err != nil {
 		t.Fatal(err)
 	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.setAttributeFreezeChecker(leases)
+	if err := runtime.processInboxRecord(context.Background(), giftInboxRecord{
+		IngestionID: "invalid-later-peer-gift", RoomID: "room-a",
+		Gift: giftEvent{GiftID: 9, GiftName: "peer", Num: 1, Price: 1, CoinType: "gold", UID: 1, Uname: "viewer", Timestamp: 100, Rnd: "invalid-later-peer-gift"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	invalid := existingAttributeEdit("attribute-a", "B", 20)
 	invalid.Target.LeaseToken = secondToken
 	invalid.GiftRules = []giftRule{{ID: "gift-invalid-later", GiftID: 62, AttributeName: "B", Formula: "B+71"}}
@@ -974,9 +994,103 @@ func TestAttributeEditSameTargetInvalidLaterSaveLeavesFirstAuthoritative(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertAtomicAttributeEditPeerState(t, persisted, "第一次", 10, 2)
+	assertAtomicAttributeEditPeerState(t, persisted, "第一次", 10, 3)
 	assertAtomicAttributeEditOwnedRules(t, persisted, []string{"gift-first-only", "gift-b"}, []string{"第一次+51", "B + 1"}, []string{"timer-first-only", "timer-b"}, []string{"第一次+61", "B + 1"})
 	assertAtomicAttributeEditCompleteRules(t, persisted, first.GiftRules, first.TimerRules)
+}
+
+func TestAttributeEditSameTargetLaterSavePreservesPeerUpdateBetweenCommands(t *testing.T) {
+	store := attributeEditFixtureStore(t)
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.RoomID = "room-a"
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	tokens := []string{"AAAAAAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBBBBBB"}
+	leases := newAttributeEditLeaseCoordinator(attributeEditLeaseTTL, timeNowForAttributeEditTest, func() (string, error) {
+		token := tokens[0]
+		tokens = tokens[1:]
+		return token, nil
+	})
+	firstToken, _, err := leases.Create("attribute-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondToken, _, err := leases.Create("attribute-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondClaimed := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	var releaseSecondOnce sync.Once
+	var beginCount atomic.Int32
+	leases.afterBegin = func() {
+		if beginCount.Add(1) == 2 {
+			close(secondClaimed)
+			<-releaseSecond
+		}
+	}
+	var submitWait sync.WaitGroup
+	t.Cleanup(func() {
+		releaseSecondOnce.Do(func() { close(releaseSecond) })
+		submitWait.Wait()
+	})
+	service := newAttributeEditService(store, leases, fixedAttributeID)
+	firstCommand := existingAttributeEdit("attribute-a", "第一保存", 10)
+	firstCommand.Target.LeaseToken = firstToken
+	firstCommand.GiftRules = []giftRule{{ID: "gift-first-between", GiftID: 71, AttributeName: "第一保存", FormulaName: "first between", Formula: "第一保存+71"}}
+	firstCommand.TimerRules = []timerRule{{ID: "timer-first-between", AttributeName: "第一保存", FormulaName: "first between timer", IntervalSeconds: 71, Formula: "第一保存+81", Enabled: true}}
+	if _, err := service.Submit(firstCommand); err != nil {
+		t.Fatal(err)
+	}
+	secondCommand := existingAttributeEdit("attribute-a", "第二保存", 20)
+	secondCommand.Target.LeaseToken = secondToken
+	secondCommand.GiftRules = []giftRule{
+		{ID: "gift-second-between-1", GiftID: 81, AttributeName: "第二保存", FormulaName: "second between one", Condition: "第二保存>=0", Formula: "第二保存+91"},
+		{ID: "gift-second-between-2", GiftID: 82, AttributeName: "第二保存", FormulaName: "second between two", Formula: "第二保存+92"},
+	}
+	secondCommand.TimerRules = []timerRule{
+		{ID: "timer-second-between-1", AttributeName: "第二保存", FormulaName: "second between timer one", IntervalSeconds: 81, Condition: "第二保存>=0", Formula: "第二保存+101", Enabled: true},
+		{ID: "timer-second-between-2", AttributeName: "第二保存", FormulaName: "second between timer two", IntervalSeconds: 82, Formula: "第二保存+102", Enabled: false},
+	}
+	secondDone := make(chan struct {
+		result attributeEditResult
+		err    error
+	}, 1)
+	submitWait.Add(1)
+	go func() {
+		defer submitWait.Done()
+		result, submitErr := service.Submit(secondCommand)
+		secondDone <- struct {
+			result attributeEditResult
+			err    error
+		}{result, submitErr}
+	}()
+	<-secondClaimed
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.setAttributeFreezeChecker(leases)
+	if err := runtime.processInboxRecord(context.Background(), giftInboxRecord{
+		IngestionID: "between-command-peer-gift", RoomID: "room-a",
+		Gift: giftEvent{GiftID: 9, GiftName: "peer", Num: 1, Price: 1, CoinType: "gold", UID: 1, Uname: "viewer", Timestamp: 100, Rnd: "between-command-peer-gift"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	releaseSecondOnce.Do(func() { close(releaseSecond) })
+	second := <-secondDone
+	if second.err != nil {
+		t.Fatal(second.err)
+	}
+	assertAtomicAttributeEditPeerState(t, second.result.State, "第二保存", 20, 3)
+	assertAtomicAttributeEditCompleteRules(t, second.result.State, secondCommand.GiftRules, secondCommand.TimerRules)
+	persisted, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertAtomicAttributeEditPeerState(t, persisted, "第二保存", 20, 3)
+	assertAtomicAttributeEditCompleteRules(t, persisted, secondCommand.GiftRules, secondCommand.TimerRules)
 }
 
 func TestAttributeEditLeaseReleaseHookCanReenterCoordinator(t *testing.T) {
