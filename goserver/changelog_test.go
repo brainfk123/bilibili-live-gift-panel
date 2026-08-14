@@ -91,13 +91,17 @@ func TestHostedChangelogHandlerFallsBackAfterInvalidDomesticJSON(t *testing.T) {
 }
 
 func TestHostedChangelogHandlerFallsBackAfterInvalidDomesticDocument(t *testing.T) {
+	oversizedBody := `{"schemaVersion":1,"releases":[{"version":"9.9.9","notes":"` + strings.Repeat("x", int(hostedChangelogMaxBytes)) + `"}]}`
+	if int64(len(oversizedBody)) <= hostedChangelogMaxBytes {
+		t.Fatalf("oversized fixture = %d bytes, want more than %d", len(oversizedBody), hostedChangelogMaxBytes)
+	}
 	tests := []struct {
 		name string
 		body string
 	}{
 		{name: "unsupported schema", body: `{"schemaVersion":2,"releases":[{"version":"0.2.0"}]}`},
 		{name: "empty releases", body: `{"schemaVersion":1,"releases":[]}`},
-		{name: "oversized body", body: strings.Repeat("x", int(hostedChangelogMaxBytes+1))},
+		{name: "oversized valid document", body: oversizedBody},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -277,20 +281,30 @@ func TestHostedChangelogHandlerCachesForThirtyMinutes(t *testing.T) {
 		_, _ = w.Write([]byte(`{"schemaVersion":1,"releases":[{"version":"0.1.0"}]}`))
 	}))
 	defer github.Close()
-	now := time.Date(2026, time.August, 15, 0, 0, 0, 0, time.UTC)
+	cachedAt := time.Date(2026, time.August, 15, 0, 0, 0, 0, time.UTC)
+	now := cachedAt
 	handler := newHostedChangelogHandlerWithNow(domestic.Client(), []hostedChangelogSource{
 		{Name: "国内镜像", URL: domestic.URL},
 		{Name: "GitHub", URL: github.URL},
 	}, func() time.Time { return now })
 
-	for range 2 {
+	request := func() {
 		request := httptest.NewRequest(http.MethodGet, "/api/changelog", nil)
 		response := httptest.NewRecorder()
 		handler(response, request)
 		assertHostedChangelogVersion(t, response, http.StatusOK, "0.2.0")
 	}
+	request()
+	now = cachedAt.Add(hostedChangelogCacheTTL - time.Nanosecond)
+	request()
 	if domesticRequests.Load() != 1 || githubRequests.Load() != 0 {
-		t.Fatalf("requests: domestic=%d github=%d, want 1 and 0", domesticRequests.Load(), githubRequests.Load())
+		t.Fatalf("requests before cache expiry: domestic=%d github=%d, want 1 and 0", domesticRequests.Load(), githubRequests.Load())
+	}
+
+	now = cachedAt.Add(hostedChangelogCacheTTL)
+	request()
+	if domesticRequests.Load() != 2 || githubRequests.Load() != 0 {
+		t.Fatalf("requests at cache expiry: domestic=%d github=%d, want 2 and 0", domesticRequests.Load(), githubRequests.Load())
 	}
 }
 
@@ -308,6 +322,31 @@ func TestHostedChangelogDefaultSourcesPreferDomesticMirror(t *testing.T) {
 	}
 	if sources[1] != (hostedChangelogSource{Name: "GitHub", URL: hostedChangelogURL}) {
 		t.Fatalf("GitHub source = %#v", sources[1])
+	}
+}
+
+func TestHostedChangelogDefaultSourcesUseGitHubOnlyWithoutValidDomesticConfiguration(t *testing.T) {
+	tests := []struct {
+		name    string
+		encoded string
+	}{
+		{name: "blank", encoded: ""},
+		{name: "invalid hex", encoded: "not-hex"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			previous := updateAPIBaseURLHex
+			updateAPIBaseURLHex = test.encoded
+			t.Cleanup(func() { updateAPIBaseURLHex = previous })
+
+			sources := defaultHostedChangelogSources()
+			if len(sources) != 1 {
+				t.Fatalf("sources = %#v, want GitHub only", sources)
+			}
+			if sources[0] != (hostedChangelogSource{Name: "GitHub", URL: hostedChangelogURL}) {
+				t.Fatalf("source = %#v, want non-empty GitHub fallback", sources[0])
+			}
+		})
 	}
 }
 
