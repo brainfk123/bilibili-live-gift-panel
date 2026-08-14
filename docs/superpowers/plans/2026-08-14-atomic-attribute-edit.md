@@ -63,7 +63,7 @@ Also assert malformed formulas return the parser error without partial output.
 Run from `goserver`:
 
 ```bash
-go test ./... -run '^TestRewriteFormulaIdentifier' -count=1
+go -C goserver test ./... -run '^TestRewriteFormulaIdentifier' -count=1
 ```
 
 Expected: compile failure because the rewrite function does not exist.
@@ -118,7 +118,7 @@ func TestConfigStoreApplyAttributeEditPreservesPeersAndLastWriteWins(t *testing.
 - [ ] **Step 5: Run aggregate tests and verify RED**
 
 ```bash
-go test ./... -run '^TestConfigStoreApplyAttributeEdit|^TestRewriteAttributeReferences' -count=1
+go -C goserver test ./... -run '^TestConfigStoreApplyAttributeEdit|^TestRewriteAttributeReferences' -count=1
 ```
 
 Expected: compile failures for the missing command/store methods.
@@ -161,9 +161,9 @@ Inject the existing `writeAtomically` failure seam and assert no partial state/r
 - [ ] **Step 8: Run Task 1 gates**
 
 ```bash
-go test ./... -run 'TestRewriteFormulaIdentifier|TestRewriteAttributeReferences|TestConfigStoreApplyAttributeEdit' -count=20
-go test -race ./... -run 'TestConfigStoreApplyAttributeEdit' -count=5
-go test ./... -count=1 -timeout=300s
+go -C goserver test ./... -run 'TestRewriteFormulaIdentifier|TestRewriteAttributeReferences|TestConfigStoreApplyAttributeEdit' -count=20
+go -C goserver test -race ./... -run 'TestConfigStoreApplyAttributeEdit' -count=5
+go -C goserver test ./... -count=1 -timeout=300s
 ```
 
 Expected: all pass.
@@ -214,7 +214,7 @@ func TestAttributeEditSessionBackfillsLegacyIDBeforeLease(t *testing.T) {
 - [ ] **Step 2: Run session tests and verify RED**
 
 ```bash
-go test ./... -run '^TestAttributeEditSession|^TestAttributeEditLeaseHas' -count=1
+go -C goserver test ./... -run '^TestAttributeEditSession|^TestAttributeEditLeaseHas' -count=1
 ```
 
 Expected: compile failure for missing service/ownership methods.
@@ -248,9 +248,9 @@ Replace `registerAttributeEditLeaseRoute` with a helper that registers the heart
 - [ ] **Step 7: Run Task 2 gates**
 
 ```bash
-go test ./... -run 'TestAttributeEditSession|TestAttributeEditHTTP|TestAttributeEditLease|TestRegisterAttributeEdit' -count=20
-go test -race ./... -run 'TestAttributeEditSession|TestAttributeEditHTTP|TestAttributeEditLease|TestRegisterAttributeEdit' -count=5
-go test ./... -count=1 -timeout=300s
+go -C goserver test ./... -run 'TestAttributeEditSession|TestAttributeEditHTTP|TestAttributeEditLease|TestRegisterAttributeEdit' -count=20
+go -C goserver test -race ./... -run 'TestAttributeEditSession|TestAttributeEditHTTP|TestAttributeEditLease|TestRegisterAttributeEdit' -count=5
+go -C goserver test ./... -count=1 -timeout=300s
 ```
 
 Expected: all pass.
@@ -444,7 +444,7 @@ git commit -m "refactor: save attributes atomically"
 Prepare a lease for A; start its command and block before `configStore.mu`; apply a gift event that changes unfrozen B from 2 to 3; release the command; then assert A contains the edit, B remains 3, peer ordering is current, and one persisted state contains both results.
 
 ```bash
-go test ./... -run '^TestAttributeEditPreservesConcurrentGiftPeerUpdate$' -count=20 -timeout=120s
+go -C goserver test ./... -run '^TestAttributeEditPreservesConcurrentGiftPeerUpdate$' -count=20 -timeout=120s
 ```
 
 Expected before atomic merge: the helper is absent or the old full-field save overwrites B. Expected after Tasks 1–4: pass 20/20.
@@ -454,7 +454,7 @@ Expected before atomic merge: the helper is absent or the old full-field save ov
 Repeat the same barrier with the timer runtime changing B. Assert no catch-up is applied to frozen A and the peer timer result survives.
 
 ```bash
-go test ./... -run '^TestAttributeEditPreservesConcurrentTimerPeerUpdate$' -count=20 -timeout=120s
+go -C goserver test ./... -run '^TestAttributeEditPreservesConcurrentTimerPeerUpdate$' -count=20 -timeout=120s
 ```
 
 - [ ] **Step 3: Add deterministic same-target last-write-wins tests**
@@ -466,8 +466,8 @@ Submit two ordered valid commands for the same target under the coordinator's re
 While A has a live session, gift/timer changes targeting A are ignored without catch-up, changes targeting B continue, expiration/release unfreezes A, stale/replaced tokens cannot submit, and a new attribute becomes addressable by its returned stable ID.
 
 ```bash
-go test ./... -run 'Test(AttributeEdit|AttributeLease|GiftRuleFrozen|TimerRuleFrozen)' -count=20 -timeout=180s
-go test -race ./... -run 'Test(AttributeEdit|AttributeLease|GiftRuleFrozen|TimerRuleFrozen)' -count=5 -timeout=180s
+go -C goserver test ./... -run 'Test(AttributeEdit|AttributeLease|GiftRuleFrozen|TimerRuleFrozen)' -count=20 -timeout=180s
+go -C goserver test -race ./... -run 'Test(AttributeEdit|AttributeLease|GiftRuleFrozen|TimerRuleFrozen)' -count=5 -timeout=180s
 ```
 
 - [ ] **Step 5: Prove the frontend sends no peer state**
@@ -481,8 +481,8 @@ npm test -- tests/wizard.test.ts tests/storage.test.ts --reporter=dot -t "atomic
 - [ ] **Step 6: Run complete Task 5 gates**
 
 ```bash
-go test ./... -count=1 -timeout=300s
-go test -race ./... -count=1 -timeout=300s
+go -C goserver test ./... -count=1 -timeout=300s
+go -C goserver test -race ./... -count=1 -timeout=300s
 npm run typecheck
 npm test -- --reporter=dot
 git diff --check
@@ -513,8 +513,8 @@ git commit -m "test: cover atomic attribute edit races"
 ```bash
 npm run typecheck
 npm test -- --reporter=dot
-go test ./... -count=1 -timeout=300s
-go test -race ./... -count=1 -timeout=300s
+go -C goserver test ./... -count=1 -timeout=300s
+go -C goserver test -race ./... -count=1 -timeout=300s
 ```
 
 Record exact test/pass/skip counts and durations.
@@ -534,7 +534,7 @@ Audit that the hashed module containing `/api/attribute-edits` occurs exactly on
 
 ```bash
 npm test -- scripts/build-go.test.mjs --reporter=dot
-go test ./... -run 'TestEmbedded(UI|Dist|Assets|Manifest)' -count=1 -timeout=120s
+go -C goserver test ./... -run 'TestEmbedded(UI|Dist|Assets|Manifest)' -count=1 -timeout=120s
 ```
 
 If actual test names differ, use `rg -n "ui-assets|embedded.*dist|manifest" scripts goserver -g "*test*"` to select the real tests and record that exact command. Do not weaken assertions or add another packaging path.
