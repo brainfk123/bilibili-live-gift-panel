@@ -18,7 +18,7 @@ The report is a verification artifact, not permission to publish. No application
 | 3 — frontend adapter/storage | `1ec39e9`, `2ef895a`, `fc84376`, `300560f` | Strict bounded frontend transport and schemas, maintained current-token lease, authoritative queued publication, enriched authoritative GiftInfo boundary. |
 | 4 — real editor integration | `89d9605`, `6c1c440`, `5426448`, `c072940`, `f72f61a` | Existing/new editors use narrow atomic submit; prepared sessions, stale-publication suppression, exactly-once release, publication-safe tutorial recovery. |
 | 5 — deterministic runtime proof | `b6544e2`, `085aa51`, `6c67b46`, `e385fe5` (`f72f61a..e385fe5`) | Gift/timer peer races, real-store-mutex serialization, same-target later-save-wins, failure cleanup, HTTP stale/replaced/expired token proofs. |
-| 6 — package/release gate | `e7aa680`, `a695473`, plus the report-only commit containing the final scope record | Fresh source/race/build/package/SHA/scope/no-release verification; permanent package-closure test added; no production closure repair required. |
+| 6 — package/release gate | `e7aa680`, `a695473`, `5fa1518`; later report-only correction SHA is recorded externally after commit | Fresh source/race/build/package/SHA/scope/no-release verification; permanent package-closure test added; no production closure repair required. |
 
 `git log --oneline --decorate 1bc9a75..e385fe5` contained 20 commits, from `9339475 docs: plan atomic attribute editing` through `e385fe5 test: prove peer updates between attribute saves`, with the task commits above in chronological history.
 
@@ -243,15 +243,25 @@ go -C goserver test ./... -count=1 -timeout=300s
 ok   bilibili-live-gift-panel 19.065s
 ```
 
-### Commit and final-scope recording protocol
+### Commit and audit recording protocol
 
-The original verification report is committed at `e7aa680ed9a45f8ee5297286ff8dc65d7b689699`. The closure test and this round's evidence are committed together at `a69547340233267d3ed65cdf2e8ce8d7deff1ef1` (`test: make packaged UI closure auditable`). This following report-only commit records that known SHA and the exact committed scope. Its own SHA is intentionally not embedded because a commit cannot contain its final self-referential hash.
+The original verification report is committed at `e7aa680ed9a45f8ee5297286ff8dc65d7b689699`. The closure test and its evidence are committed together at `a69547340233267d3ed65cdf2e8ce8d7deff1ef1` (`test: make packaged UI closure auditable`). The first scope-record correction is committed at `5fa15187267626502595ee85f11df834bd96902b` (`docs: finalize atomic edit scope audit`).
+
+This wording correction is necessarily report-only. It cannot embed its own final commit SHA, and this report does not claim otherwise. It changes only the already-counted `final-report.md` path, so it does not alter the audited product/test path membership. After committing the correction, the controller must run the scope/status/diff/tag commands against the actual new `HEAD`, then record the exact new SHA and command output in the external Task 6 handoff/ignored ledger. That post-commit evidence, rather than a self-referential promise in this report, establishes the correction commit's final repository state.
 
 The staged pre-commit audit (`git diff --name-only 1bc9a75`) contained exactly 19 unique paths: 2 documentation/report paths, 5 Go production paths, 4 Go test paths, 4 TypeScript production paths, and 4 TypeScript test paths. The only round-1 path addition is `goserver/ui_assets_test.go`; the report path already existed. `git diff --cached --check` exited 0, staged scope was exactly the test plus this report, and the forbidden package/lock/version/changelog/workflow/signing/FFmpeg/README matcher returned 0.
 
-### Final committed-HEAD fixed-base scope
+### Observed post-commit audit at `5fa1518` (not a later-final-HEAD claim)
 
-At committed test/report HEAD `a69547340233267d3ed65cdf2e8ce8d7deff1ef1`, `git diff --name-only 1bc9a75..HEAD` returned exactly the following 19 paths and the forbidden matcher returned 0:
+The following audit was actually run after `5fa15187267626502595ee85f11df834bd96902b` existed and while `git rev-parse HEAD` returned that exact SHA. It is evidence for `5fa1518`, not a claim that `5fa1518` remains HEAD after this later correction.
+
+Exact command:
+
+```text
+git diff --name-only 1bc9a75..5fa1518
+```
+
+Exact 19-path output:
 
 ```text
 .superpowers/sdd/2026-08-14-atomic-attribute-edit/final-report.md
@@ -275,8 +285,34 @@ tests/storage.test.ts
 tests/wizard.test.ts
 ```
 
-Categories are exactly: 2 documentation/report paths; 5 Go production paths; 4 Go test paths; 4 TypeScript production paths; 4 TypeScript test paths. The final report-only commit containing this paragraph modifies only the already-listed `final-report.md`, so the final committed HEAD has the same 19-path set, the same categories, and forbidden count 0. Post-commit verification re-runs this assertion rather than inferring a changed scope.
+Observed derived audit output:
+
+```text
+PATH_COUNT=19
+CATEGORIES=docs/report:2,go-production:5,go-tests:4,ts-production:4,ts-tests:4
+FORBIDDEN_COUNT=0
+```
+
+The remaining commands were also actually run after `5fa1518`:
+
+```text
+git status --short
+<no output>
+
+git tag --points-at 5fa1518
+<no output>
+TAG_COUNT=0
+
+git diff --check 5fa1518^..5fa1518
+<no output>
+DIFF_CHECK_EXIT=0
+
+git rev-parse HEAD
+5fa15187267626502595ee85f11df834bd96902b
+```
+
+The correction commit containing this block is report-only and changes no product/test path. It is not represented above as though its own SHA were already knowable; its actual post-commit `HEAD` audit belongs in the controller's final handoff and ignored Task 6 ledger.
 
 ## Handoff
 
-The original report is committed as `e7aa680`; the permanent package-closure proof and its evidence are committed as `a695473`; this report-only commit records their exact final 19-path scope. All required gates, focused package tests, manifest/handler audit, EXE hash, and no-release checks passed. No production packaging closure repair was required. Publishing remains explicitly unauthorized and out of scope.
+The original report is committed as `e7aa680`, the permanent package-closure proof and its evidence as `a695473`, and the observed post-commit `5fa1518` audit is recorded above. The controller records this correction commit's actual SHA and post-commit HEAD audit externally after the commit exists. All required gates, focused package tests, manifest/handler audit, EXE hash, and no-release checks passed. No production packaging closure repair was required. Publishing remains explicitly unauthorized and out of scope.
