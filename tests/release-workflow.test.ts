@@ -197,6 +197,23 @@ describe('release workflow supply-chain contract', () => {
     expect(mirrorStep?.run).not.toContain('../dist/');
   });
 
+  it('isolates every pinned publisher Go command from tag-controlled workspaces', () => {
+    const { steps } = releaseWorkflow();
+    const pinnedToolGoSteps = steps.filter((step) => (
+      typeof step.run === 'string' &&
+      /\bgo(?:\.exe)?\b/.test(step.run) &&
+      (step.run.includes('_update-publisher-tool') || step.run.includes('$publisherModuleRoot'))
+    ));
+
+    expect(pinnedToolGoSteps.map((step) => step.name)).toEqual([
+      'Test domestic update tooling',
+      'Mirror release to Tencent COS',
+    ]);
+    for (const step of pinnedToolGoSteps) {
+      expect(step.env?.GOWORK, `${step.name} must ignore a release-tag go.work`).toBe('off');
+    }
+  });
+
   it('uses the audited setup-msys2 v2 commit and rejects mutable refs', () => {
     const { document, steps } = releaseWorkflow();
     const setupSteps = steps.filter((step) => step.uses?.startsWith('msys2/setup-msys2@'));
@@ -290,6 +307,7 @@ describe('release workflow supply-chain contract', () => {
       'stable unchanged because the channel is already on an equal or newer version',
     );
     expect(mirrorStep?.env).toEqual({
+      GOWORK: 'off',
       COS_BUCKET: '${{ vars.COS_BUCKET }}',
       COS_REGION: '${{ vars.COS_REGION }}',
       COS_SECRET_ID: '${{ secrets.COS_RELEASE_SECRET_ID }}',
