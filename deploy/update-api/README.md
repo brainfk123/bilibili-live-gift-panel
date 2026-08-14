@@ -4,13 +4,21 @@ This deployment serves private COS release metadata through the API only. Keep t
 
 ## Required names
 
-GitHub Actions variables: `UPDATE_API_BASE_URL`, `COS_BUCKET`, `COS_REGION`, `EVSIGN_EXPECTED_SUBJECT`.
+GitHub Actions variables: `UPDATE_API_BASE_URL`, `COS_BUCKET`, `COS_REGION`, `EVSIGN_EXPECTED_SUBJECT`, `UPDATE_PUBLISHER_TOOL_SHA`.
 
 GitHub Actions secrets: `COS_RELEASE_SECRET_ID`, `COS_RELEASE_SECRET_KEY`.
+
+Store these release variables and secrets only in the protected GitHub Environment `release`, with its approval and branch rules enabled. `UPDATE_PUBLISHER_TOOL_SHA` is not secret, but it is a production trust decision: it must be an exact 40-hex commit SHA, never a tag, branch, shortened SHA, repository-level override, or workflow-dispatch input. The workflow validates the pin before checkout, checks the publisher tooling out separately from the requested release tag, verifies the resolved commit, and runs `updateapi/cmd/publish` only from that checkout. The requested tag checkout remains the source of release artifacts and metadata.
 
 Server environment variables: `UPDATE_API_LISTEN`, `COS_BUCKET`, `COS_REGION`, `COS_SECRET_ID`, `COS_SECRET_KEY`, `COS_CHANNEL_KEY`.
 
 Rendering variables: `PUBLIC_DOMAIN`, `ICP_NUMBER`, `TLS_CERT_PATH`, `TLS_KEY_PATH`.
+
+## Rotate the publisher tool pin
+
+To update the publisher without weakening repair safety, review the candidate commit and its complete diff, confirm that its `updateapi` race tests cover immutable release objects, stable-last promotion, rollback, and monotonic SemVer behavior, and obtain approval under the release change-control process. Copy the candidate's full 40-character commit SHA from the reviewed repository; do not copy a branch or tag name.
+
+After approval, update the environment variable `UPDATE_PUBLISHER_TOOL_SHA` in the protected GitHub Environment `release`. Keep the COS and signing credentials in that same Environment, and never expose the pin as a workflow-dispatch input. Rerun the Release workflow under Environment approval and verify that `Validate update publisher tool commit` succeeds and `Verify update publisher tool checkout` resolves the exact approved SHA before allowing the COS mirror step. If validation or checkout verification fails, restore the last reviewed pin; do not bypass either gate.
 
 ## Install
 

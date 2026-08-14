@@ -101,4 +101,16 @@ describe('update API deployment assets', () => {
     expect(environment).not.toContain('UPDATE_API_LISTEN=');
     expect(service).toContain('Environment=UPDATE_API_LISTEN=127.0.0.1:12450');
   });
+
+  it('documents protected-environment ownership and rotation of the publisher tool pin', () => {
+    const readme = deploymentAsset('README.md');
+
+    expect(readme).toContain('UPDATE_PUBLISHER_TOOL_SHA');
+    expect(readme).toContain('exact 40-hex commit SHA');
+    expect(readme).toContain('protected GitHub Environment `release`');
+    expect(readme).toContain('review the candidate commit');
+    expect(readme).toContain('update the environment variable');
+    expect(readme).toMatch(/rerun the Release workflow/i);
+    expect(readme).toContain('never expose the pin as a workflow-dispatch input');
+  });
 });

@@ -26,12 +26,20 @@ jobs:
     environment: release
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      UPDATE_PUBLISHER_TOOL_SHA: ${{ vars.UPDATE_PUBLISHER_TOOL_SHA }}
     steps:
       - name: Validate release tag
         shell: pwsh
         run: |
           if ($env:RELEASE_TAG -cnotmatch '^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$') {
             throw "Release tag must use canonical vMAJOR.MINOR.PATCH syntax"
+          }
+
+      - name: Validate update publisher tool commit
+        shell: pwsh
+        run: |
+          if ($env:UPDATE_PUBLISHER_TOOL_SHA -cnotmatch '\A[0-9A-Fa-f]{40}\z') {
+            throw "UPDATE_PUBLISHER_TOOL_SHA must be an exact 40-hex commit SHA"
           }
 
       - name: Check out release tag
@@ -47,6 +55,24 @@ jobs:
           $releaseCommit = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0) { throw "Could not resolve checked-out release commit" }
           "RELEASE_COMMIT=$releaseCommit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Check out update publisher tooling
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.UPDATE_PUBLISHER_TOOL_SHA }}
+          path: _update-publisher-tool
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify update publisher tool checkout
+        shell: pwsh
+        run: |
+          $publisherCheckout = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE '_update-publisher-tool'))
+          $publisherCommit = git -C "$publisherCheckout" rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw "Could not resolve update publisher tool commit" }
+          if (-not [String]::Equals($publisherCommit.Trim(), $env:UPDATE_PUBLISHER_TOOL_SHA, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Update publisher tool checkout does not match UPDATE_PUBLISHER_TOOL_SHA"
+          }
 
       - name: Inspect existing GitHub release
         shell: pwsh
@@ -99,11 +125,11 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: goserver/go.mod
-          cache-dependency-path: goserver/go.sum
+          go-version-file: _update-publisher-tool/updateapi/go.mod
+          cache-dependency-path: _update-publisher-tool/updateapi/go.sum
 
       - name: Test domestic update tooling
-        run: go -C updateapi test ./... -race -count=1
+        run: go -C _update-publisher-tool/updateapi test ./... -race -count=1
 
       - name: Verify tag matches package version
         shell: pwsh
@@ -470,14 +496,18 @@ jobs:
 
       - name: Mirror release to Tencent COS
         shell: pwsh
-        working-directory: updateapi
         env:
           COS_BUCKET: ${{ vars.COS_BUCKET }}
           COS_REGION: ${{ vars.COS_REGION }}
           COS_SECRET_ID: ${{ secrets.COS_RELEASE_SECRET_ID }}
           COS_SECRET_KEY: ${{ secrets.COS_RELEASE_SECRET_KEY }}
         run: |
-          $publishOutput = @(go run ./cmd/publish --tag $env:RELEASE_TAG --published-at $env:RELEASE_PUBLISHED_AT --asset ../dist/gift-panel-windows-x64.exe --checksum ../dist/gift-panel-windows-x64.exe.sha256 --changelog ../dist/gift-panel-changelog.json)
+          $releaseRoot = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
+          $publisherModuleRoot = [IO.Path]::GetFullPath((Join-Path $releaseRoot '_update-publisher-tool\updateapi'))
+          $assetPath = [IO.Path]::GetFullPath((Join-Path $releaseRoot 'dist\gift-panel-windows-x64.exe'))
+          $checksumPath = [IO.Path]::GetFullPath((Join-Path $releaseRoot 'dist\gift-panel-windows-x64.exe.sha256'))
+          $changelogPath = [IO.Path]::GetFullPath((Join-Path $releaseRoot 'dist\gift-panel-changelog.json'))
+          $publishOutput = @(& go -C "$publisherModuleRoot" run ./cmd/publish --tag $env:RELEASE_TAG --published-at $env:RELEASE_PUBLISHED_AT --asset "$assetPath" --checksum "$checksumPath" --changelog "$changelogPath")
           if ($LASTEXITCODE -ne 0) { throw "Tencent COS release mirror failed" }
           $publishOutput | ForEach-Object { Write-Host $_ }
           if ($publishOutput -contains 'stable unchanged') {

@@ -39,7 +39,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-发布标签时，GitHub Actions 会运行 TypeScript、后端及国内更新工具测试，构建并验证 `gift-panel-windows-x64.exe` 的 Authenticode 签名、发布 GitHub Release，最后把同一个已签名 EXE、SHA-256 文件和更新日志镜像到私有腾讯云 COS。只有 GitHub Release 成功后才会开始 COS 发布；publisher 会校验对象的 size/SHA-256，保持 `releases/` 对象不可变，并在所有版本对象验证成功后最后决定是否更新 `channels/stable/latest.json`。stable 按规范 SemVer 单调递增：目标版本更高才 promotion；相同或更旧标签的自动 repair 仍会补齐并校验 immutable 版本对象，但返回 `stable unchanged`，绝不会把 latest 降级。
+发布标签时，GitHub Actions 会运行 TypeScript、后端及国内更新工具测试，构建并验证 `gift-panel-windows-x64.exe` 的 Authenticode 签名、发布 GitHub Release，最后把同一个已签名 EXE、SHA-256 文件和更新日志镜像到私有腾讯云 COS。发布产物和元数据始终来自请求标签的精确 checkout；COS publisher 则从另一个 checkout 运行，该 checkout 必须匹配受保护发布环境提供并经审核的完整 40 位 commit SHA，因此修复旧标签时不会执行旧标签内过时的 publisher。只有 GitHub Release 成功后才会开始 COS 发布；publisher 会校验对象的 size/SHA-256，保持 `releases/` 对象不可变，并在所有版本对象验证成功后最后决定是否更新 `channels/stable/latest.json`。stable 按规范 SemVer 单调递增：目标版本更高才 promotion；相同或更旧标签的自动 repair 仍会补齐并校验 immutable 版本对象，但返回 `stable unchanged`，绝不会把 latest 降级。
 
 手动运行 Release 工作流时，会根据该标签的 GitHub Release 状态选择唯一分支：
 
@@ -47,7 +47,7 @@ git push origin v0.1.0
 - 已存在完整、非 draft、非 prerelease 的 GitHub Release：走 repair，仅下载已发布的 EXE、checksum、`gift-panel-update.json` 与 changelog；除复验签名发布者和 SHA-256 外，还会核对 fallback manifest 的标签、EXE 名称、size、digest 与该标签的 GitHub 下载 URL，沿用原始发布时间并镜像 COS；不会重新生成 manifest、重新构建、重签或上传 GitHub 资产。
 - GitHub Release 不完整，包括 draft/prerelease、缺少任一上述资产、fallback manifest 与下载资产不一致或其他资产校验失败：立即安全失败并要求人工恢复，不会访问 COS；也不会尝试重新构建或使用 `--clobber` 覆盖资产。
 
-Release job 绑定受保护的 GitHub Environment `release`；应为它配置必要的审批/分支规则，并把发布、EVSign 与 COS secrets 只放在该环境中。工作流需要 GitHub Actions variables `UPDATE_API_BASE_URL`、`COS_BUCKET`、`COS_REGION`、`EVSIGN_EXPECTED_SUBJECT`，以及 secrets `COS_RELEASE_SECRET_ID`、`COS_RELEASE_SECRET_KEY`。COS 凭证应仅有指定 bucket 下 `releases/*` 与 `channels/stable/latest.json` 所需的最小 Head/Get/Put 权限，不得授予删除权限；bucket 保持私有且不要启用版本控制。完整的 COS/API 初始化、验证、备份、回滚及凭证轮换步骤见[国内更新 API 部署说明](deploy/update-api/README.md)。
+Release job 绑定受保护的 GitHub Environment `release`；应为它配置必要的审批/分支规则，并把发布 variables、publisher 工具 pin、EVSign 与 COS secrets 只放在该环境中。工作流需要 GitHub Actions variables `UPDATE_API_BASE_URL`、`COS_BUCKET`、`COS_REGION`、`EVSIGN_EXPECTED_SUBJECT`、`UPDATE_PUBLISHER_TOOL_SHA`，以及 secrets `COS_RELEASE_SECRET_ID`、`COS_RELEASE_SECRET_KEY`。`UPDATE_PUBLISHER_TOOL_SHA` 必须是审核通过的完整 40 位十六进制 commit SHA，不能使用分支、标签、短 SHA、仓库级覆盖或手动工作流输入。COS 凭证应仅有指定 bucket 下 `releases/*` 与 `channels/stable/latest.json` 所需的最小 Head/Get/Put 权限，不得授予删除权限；bucket 保持私有且不要启用版本控制。完整的 COS/API 初始化、验证、备份、回滚、凭证轮换及 publisher pin 更新步骤见[国内更新 API 部署说明](deploy/update-api/README.md)。
 
 如果 COS 镜像在 stable promotion 之前失败，旧的 stable 清单保证不变。写入新 stable 后若 exact readback 失败，publisher 会尝试恢复并验证写入前的 stable；只有恢复验证成功时才能确认旧版本已经恢复。没有旧指针或恢复失败会报告 `stable promotion outcome is indeterminate`，此时操作员必须先检查 `channels/stable/latest.json`，按部署说明恢复已验证备份并验证 API，再重跑工作流。COS 的单对象覆盖不提供跨请求原子事务，因此不得把 post-PUT 错误描述为“stable 保证未变化”。无论哪种 COS 失败，已经创建的 GitHub Release 仍可用作客户端回退。
 

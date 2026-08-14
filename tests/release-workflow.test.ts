@@ -28,7 +28,13 @@ function releaseWorkflow() {
 
   const workflow = document.toJS() as {
     concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
-    jobs?: { release?: { environment?: string; steps?: ReleaseStep[] } };
+    jobs?: {
+      release?: {
+        env?: Record<string, string>;
+        environment?: string;
+        steps?: ReleaseStep[];
+      };
+    };
   };
   const release = workflow.jobs?.release;
   const steps = release?.steps;
@@ -121,7 +127,7 @@ describe('release workflow supply-chain contract', () => {
 
     expect(release?.environment).toBe('release');
     expect(validate).toBe(0);
-    expect(checkout).toBe(1);
+    expect(validate).toBeLessThan(checkout);
     expect(steps[validate]?.run).toContain(
       "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$",
     );
@@ -133,6 +139,62 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[resolveCommit]?.run).toContain('$releaseCommit = git rev-parse HEAD');
     expect(steps[resolveCommit]?.run).toContain('RELEASE_COMMIT=$releaseCommit');
     expect(source).not.toContain('github.sha');
+  });
+
+  it('runs the publisher only from a separately checked-out protected-environment commit', () => {
+    const { release, steps } = releaseWorkflow();
+    const validateTag = stepIndex(steps, 'Validate release tag');
+    const validateTool = stepIndex(steps, 'Validate update publisher tool commit');
+    const checkoutRelease = stepIndex(steps, 'Check out release tag');
+    const checkoutTool = stepIndex(steps, 'Check out update publisher tooling');
+    const verifyTool = stepIndex(steps, 'Verify update publisher tool checkout');
+    const testUpdateApi = stepIndex(steps, 'Test domestic update tooling');
+    const mirror = stepIndex(steps, 'Mirror release to Tencent COS');
+    const mirrorStep = steps[mirror];
+
+    expect(release?.environment).toBe('release');
+    expect(release?.env?.UPDATE_PUBLISHER_TOOL_SHA)
+      .toBe('${{ vars.UPDATE_PUBLISHER_TOOL_SHA }}');
+    expect(steps.slice(0, validateTool).map((step) => step.name))
+      .toEqual(['Validate release tag']);
+    expect(validateTag).toBeLessThan(validateTool);
+    expect(validateTool).toBeLessThan(checkoutRelease);
+    expect(steps[validateTool]?.run).toContain(
+      "$env:UPDATE_PUBLISHER_TOOL_SHA -cnotmatch '\\A[0-9A-Fa-f]{40}\\z'",
+    );
+
+    expect(checkoutRelease).toBeLessThan(checkoutTool);
+    expect(steps[checkoutTool]).toMatchObject({
+      uses: 'actions/checkout@v7',
+      with: {
+        ref: '${{ env.UPDATE_PUBLISHER_TOOL_SHA }}',
+        path: '_update-publisher-tool',
+        'persist-credentials': false,
+      },
+    });
+    expect(checkoutTool).toBeLessThan(verifyTool);
+    expect(steps[verifyTool]?.run).toContain(
+      "$publisherCheckout = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE '_update-publisher-tool'))",
+    );
+    expect(steps[verifyTool]?.run).toContain('git -C "$publisherCheckout" rev-parse HEAD');
+    expect(steps[verifyTool]?.run).toContain('[StringComparison]::OrdinalIgnoreCase');
+    expect(verifyTool).toBeLessThan(testUpdateApi);
+    expect(steps[testUpdateApi]?.run)
+      .toBe('go -C _update-publisher-tool/updateapi test ./... -race -count=1');
+
+    expect(mirrorStep?.['working-directory']).toBeUndefined();
+    expect(mirrorStep?.run).toContain(
+      "$publisherModuleRoot = [IO.Path]::GetFullPath((Join-Path $releaseRoot '_update-publisher-tool\\updateapi'))",
+    );
+    expect(mirrorStep?.run).toContain(
+      "$assetPath = [IO.Path]::GetFullPath((Join-Path $releaseRoot 'dist\\gift-panel-windows-x64.exe'))",
+    );
+    expect(mirrorStep?.run).toContain('& go -C "$publisherModuleRoot" run ./cmd/publish');
+    expect(mirrorStep?.run).toContain('--asset "$assetPath"');
+    expect(mirrorStep?.run).toContain('--checksum "$checksumPath"');
+    expect(mirrorStep?.run).toContain('--changelog "$changelogPath"');
+    expect(mirrorStep?.run).not.toContain('go run ./cmd/publish');
+    expect(mirrorStep?.run).not.toContain('../dist/');
   });
 
   it('uses the audited setup-msys2 v2 commit and rejects mutable refs', () => {
@@ -185,7 +247,8 @@ describe('release workflow supply-chain contract', () => {
     const signOuter = stepIndex(steps, 'Prepare and sign release executable');
     const githubRelease = stepIndex(steps, 'Create GitHub release');
 
-    expect(steps[testUpdateApi]?.run).toBe('go -C updateapi test ./... -race -count=1');
+    expect(steps[testUpdateApi]?.run)
+      .toBe('go -C _update-publisher-tool/updateapi test ./... -race -count=1');
     expect(testUpdateApi).toBeLessThan(githubRelease);
     expect(signOuter).toBeLessThan(githubRelease);
     expect(steps[signOuter]?.env?.EVSIGN_EXPECTED_SUBJECT)
@@ -217,9 +280,9 @@ describe('release workflow supply-chain contract', () => {
     );
     expect(githubRelease).toBeLessThan(mirror);
     expect(mirror).toBe(steps.length - 1);
-    expect(mirrorStep?.['working-directory']).toBe('updateapi');
+    expect(mirrorStep?.['working-directory']).toBeUndefined();
     expect(mirrorStep?.run).toContain(
-      'go run ./cmd/publish --tag $env:RELEASE_TAG --published-at $env:RELEASE_PUBLISHED_AT --asset ../dist/gift-panel-windows-x64.exe --checksum ../dist/gift-panel-windows-x64.exe.sha256 --changelog ../dist/gift-panel-changelog.json',
+      '& go -C "$publisherModuleRoot" run ./cmd/publish --tag $env:RELEASE_TAG --published-at $env:RELEASE_PUBLISHED_AT',
     );
     expect(mirrorStep?.run).toContain('throw "Tencent COS release mirror failed"');
     expect(mirrorStep?.run).toContain("$publishOutput -contains 'stable unchanged'");
