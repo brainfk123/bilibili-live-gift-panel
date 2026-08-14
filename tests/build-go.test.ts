@@ -11,6 +11,8 @@ describe('build-go update API configuration', () => {
   it('embeds the validated canonical origin as UTF-8 hex', () => {
     const expected = Buffer.from('https://updates.example.test:8443', 'utf8').toString('hex');
     expect(resolveUpdateAPIBaseURLHex('1.2.3', 'https://updates.example.test:8443/')).toBe(expected);
+    expect(resolveUpdateAPIBaseURLHex('dev', 'https://123.updates.example.test'))
+      .toBe(Buffer.from('https://123.updates.example.test', 'utf8').toString('hex'));
   });
 
   it.each([
@@ -34,6 +36,10 @@ describe('build-go update API configuration', () => {
     ['noncanonical port spelling', 'https://updates.example.test:065535'],
     ['uppercase host', 'https://UPDATES.example.test'],
     ['Unicode host', 'https://例子.测试'],
+    ['canonical IPv4 host', 'https://127.0.0.1'],
+    ['noncanonical IPv4 host', 'https://127.1'],
+    ['expanded IPv6 host', 'https://[0:0:0:0:0:0:0:1]'],
+    ['compressed IPv6 host', 'https://[::1]'],
   ])('rejects %s', (_label, value) => {
     expect(() => resolveUpdateAPIBaseURLHex('dev', value)).toThrow(/APP_UPDATE_API_URL/);
   });

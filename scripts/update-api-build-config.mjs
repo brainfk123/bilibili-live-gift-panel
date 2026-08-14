@@ -1,3 +1,5 @@
+import { isIP } from 'node:net';
+
 export function resolveUpdateAPIBaseURLHex(appVersion, configuredValue) {
   const updateAPIBaseURL = (configuredValue || '').trim();
   if (!updateAPIBaseURL) {
@@ -21,6 +23,7 @@ export function resolveUpdateAPIBaseURLHex(appVersion, configuredValue) {
     || parsed.pathname !== '/'
     || (parsed.port && (!/^[1-9][0-9]*$/.test(parsed.port) || Number(parsed.port) > 65535))
     || !/^[\x00-\x7F]+$/.test(parsed.hostname)
+    || isIP(parsed.hostname.replace(/^\[|\]$/g, '')) !== 0
     || (updateAPIBaseURL !== parsed.origin && updateAPIBaseURL !== `${parsed.origin}/`)
   ) {
     throw new Error('APP_UPDATE_API_URL must be a canonical ASCII HTTPS origin without credentials, query, fragment, or path.');

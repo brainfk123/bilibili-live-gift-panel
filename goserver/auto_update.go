@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -144,7 +145,7 @@ func domesticUpdateReleaseURL() string {
 		return ""
 	}
 	hostname := baseURL.Hostname()
-	if hostname == "" {
+	if hostname == "" || updateAPIHostnameIsIPLiteral(hostname) {
 		return ""
 	}
 	for _, character := range hostname {
@@ -172,6 +173,37 @@ func domesticUpdateReleaseURL() string {
 		return ""
 	}
 	return canonicalOrigin + "/api/v1/releases/latest"
+}
+
+func updateAPIHostnameIsIPLiteral(hostname string) bool {
+	if strings.Contains(hostname, ":") || net.ParseIP(hostname) != nil {
+		return true
+	}
+	lastLabel := strings.TrimSuffix(hostname, ".")
+	if separator := strings.LastIndexByte(lastLabel, '.'); separator >= 0 {
+		lastLabel = lastLabel[separator+1:]
+	}
+	if strings.HasPrefix(strings.ToLower(lastLabel), "0x") {
+		lastLabel = lastLabel[2:]
+		if lastLabel == "" {
+			return false
+		}
+		for _, character := range lastLabel {
+			if !strings.ContainsRune("0123456789abcdefABCDEF", character) {
+				return false
+			}
+		}
+		return true
+	}
+	if lastLabel == "" {
+		return false
+	}
+	for _, character := range lastLabel {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func newDefaultAutoUpdater(store *configStore) *autoUpdater {

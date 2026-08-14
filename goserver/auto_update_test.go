@@ -90,6 +90,16 @@ func TestDomesticUpdateURLAcceptsCanonicalExplicitPort(t *testing.T) {
 	}
 }
 
+func TestDomesticUpdateURLPreservesDNSHostWithNumericSubdomain(t *testing.T) {
+	previous := updateAPIBaseURLHex
+	updateAPIBaseURLHex = hex.EncodeToString([]byte("https://123.updates.example.test"))
+	t.Cleanup(func() { updateAPIBaseURLHex = previous })
+
+	if got := domesticUpdateReleaseURL(); got != "https://123.updates.example.test/api/v1/releases/latest" {
+		t.Fatalf("domestic update release URL = %q", got)
+	}
+}
+
 func TestDomesticUpdateURLRejectsInvalidUTF8Hex(t *testing.T) {
 	previous := updateAPIBaseURLHex
 	updateAPIBaseURLHex = "ff"
@@ -125,6 +135,10 @@ func TestDomesticUpdateURLRejectsUnsafeBaseURLs(t *testing.T) {
 		{name: "noncanonical port spelling", value: "https://updates.example.test:065535"},
 		{name: "uppercase host", value: "https://UPDATES.example.test"},
 		{name: "Unicode host", value: "https://例子.测试"},
+		{name: "canonical IPv4 host", value: "https://127.0.0.1"},
+		{name: "noncanonical IPv4 host", value: "https://127.1"},
+		{name: "expanded IPv6 host", value: "https://[0:0:0:0:0:0:0:1]"},
+		{name: "compressed IPv6 host", value: "https://[::1]"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
