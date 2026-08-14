@@ -18,7 +18,7 @@ The report is a verification artifact, not permission to publish. No application
 | 3 — frontend adapter/storage | `1ec39e9`, `2ef895a`, `fc84376`, `300560f` | Strict bounded frontend transport and schemas, maintained current-token lease, authoritative queued publication, enriched authoritative GiftInfo boundary. |
 | 4 — real editor integration | `89d9605`, `6c1c440`, `5426448`, `c072940`, `f72f61a` | Existing/new editors use narrow atomic submit; prepared sessions, stale-publication suppression, exactly-once release, publication-safe tutorial recovery. |
 | 5 — deterministic runtime proof | `b6544e2`, `085aa51`, `6c67b46`, `e385fe5` (`f72f61a..e385fe5`) | Gift/timer peer races, real-store-mutex serialization, same-target later-save-wins, failure cleanup, HTTP stale/replaced/expired token proofs. |
-| 6 — package/release gate | `e7aa680` plus review round-1 commits recorded below | Fresh source/race/build/package/SHA/scope/no-release verification; permanent package-closure test added; no production closure repair required. |
+| 6 — package/release gate | `e7aa680`, `a695473`, plus the report-only commit containing the final scope record | Fresh source/race/build/package/SHA/scope/no-release verification; permanent package-closure test added; no production closure repair required. |
 
 `git log --oneline --decorate 1bc9a75..e385fe5` contained 20 commits, from `9339475 docs: plan atomic attribute editing` through `e385fe5 test: prove peer updates between attribute saves`, with the task commits above in chronological history.
 
@@ -245,10 +245,38 @@ ok   bilibili-live-gift-panel 19.065s
 
 ### Commit and final-scope recording protocol
 
-The original verification report is already committed at `e7aa680`. The closure test and this round's evidence are committed together in the next test/report commit. Because that commit cannot embed its own SHA, a following report-only commit records the exact test/report commit SHA and re-runs `1bc9a75..HEAD` scope at the committed tree. The report-only commit changes no path membership, so its final-HEAD path count can be stated exactly without pretending to know its self-referential SHA.
+The original verification report is committed at `e7aa680ed9a45f8ee5297286ff8dc65d7b689699`. The closure test and this round's evidence are committed together at `a69547340233267d3ed65cdf2e8ce8d7deff1ef1` (`test: make packaged UI closure auditable`). This following report-only commit records that known SHA and the exact committed scope. Its own SHA is intentionally not embedded because a commit cannot contain its final self-referential hash.
 
 The staged pre-commit audit (`git diff --name-only 1bc9a75`) contained exactly 19 unique paths: 2 documentation/report paths, 5 Go production paths, 4 Go test paths, 4 TypeScript production paths, and 4 TypeScript test paths. The only round-1 path addition is `goserver/ui_assets_test.go`; the report path already existed. `git diff --cached --check` exited 0, staged scope was exactly the test plus this report, and the forbidden package/lock/version/changelog/workflow/signing/FFmpeg/README matcher returned 0.
 
+### Final committed-HEAD fixed-base scope
+
+At committed test/report HEAD `a69547340233267d3ed65cdf2e8ce8d7deff1ef1`, `git diff --name-only 1bc9a75..HEAD` returned exactly the following 19 paths and the forbidden matcher returned 0:
+
+```text
+.superpowers/sdd/2026-08-14-atomic-attribute-edit/final-report.md
+docs/superpowers/plans/2026-08-14-atomic-attribute-edit.md
+goserver/attribute_edit_leases.go
+goserver/attribute_edit_leases_test.go
+goserver/attribute_edits.go
+goserver/attribute_edits_http_test.go
+goserver/attribute_edits_test.go
+goserver/config_store.go
+goserver/formula.go
+goserver/main.go
+goserver/ui_assets_test.go
+src/storage.ts
+src/ui/config/attribute-edit-api.ts
+src/ui/config/attribute-edit-lease.ts
+src/ui/config/config.ts
+tests/attribute-edit-api.test.ts
+tests/attribute-edit-lease.test.ts
+tests/storage.test.ts
+tests/wizard.test.ts
+```
+
+Categories are exactly: 2 documentation/report paths; 5 Go production paths; 4 Go test paths; 4 TypeScript production paths; 4 TypeScript test paths. The final report-only commit containing this paragraph modifies only the already-listed `final-report.md`, so the final committed HEAD has the same 19-path set, the same categories, and forbidden count 0. Post-commit verification re-runs this assertion rather than inferring a changed scope.
+
 ## Handoff
 
-The original report is committed as `e7aa680`; review round 1 permanently records the package-closure proof and its exact final scope in the commits described above. All required gates, focused package tests, manifest/handler audit, EXE hash, and no-release checks passed. No production packaging closure repair was required. Publishing remains explicitly unauthorized and out of scope.
+The original report is committed as `e7aa680`; the permanent package-closure proof and its evidence are committed as `a695473`; this report-only commit records their exact final 19-path scope. All required gates, focused package tests, manifest/handler audit, EXE hash, and no-release checks passed. No production packaging closure repair was required. Publishing remains explicitly unauthorized and out of scope.
