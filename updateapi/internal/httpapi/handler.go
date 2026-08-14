@@ -129,8 +129,8 @@ func (handler handler) changelog(writer http.ResponseWriter, request *http.Reque
 }
 
 func (handler handler) health(writer http.ResponseWriter, request *http.Request, requestID string) {
-	if request.Method != http.MethodGet {
-		writer.Header().Set("Allow", http.MethodGet)
+	if request.Method != http.MethodGet && request.Method != http.MethodHead {
+		writer.Header().Set("Allow", "GET, HEAD")
 		handler.writeError(writer, request, requestID, http.StatusMethodNotAllowed, "method_not_allowed", "请求方法不受支持")
 		return
 	}

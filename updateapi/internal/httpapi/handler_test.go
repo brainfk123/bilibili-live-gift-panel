@@ -254,11 +254,36 @@ func TestRequestIDAcceptsOnlyLowercaseHex(t *testing.T) {
 	})
 }
 
-func TestHealthzReturnsOK(t *testing.T) {
+func TestHealthzServesGetAndHead(t *testing.T) {
+	handler := httpapi.New(&fakeReleaseService{}, func() string { return generatedID }, &captureLogger{})
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		t.Run(method, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(method, "/healthz", nil))
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", response.Code)
+			}
+			if got := response.Header().Get("Content-Length"); got != "2" {
+				t.Fatalf("Content-Length = %q, want 2", got)
+			}
+			if method == http.MethodGet && response.Body.String() != "ok" {
+				t.Fatalf("GET body = %q, want ok", response.Body.String())
+			}
+			if method == http.MethodHead && response.Body.String() != "" {
+				t.Fatalf("HEAD body = %q, want empty", response.Body.String())
+			}
+		})
+	}
+}
+
+func TestHealthzRejectsUnsupportedMethodsWithGetAndHeadAllow(t *testing.T) {
 	response := httptest.NewRecorder()
-	httpapi.New(&fakeReleaseService{}, func() string { return generatedID }, &captureLogger{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-	if response.Code != http.StatusOK || response.Body.String() != "ok" {
-		t.Fatalf("health response = %d %q, want 200 ok", response.Code, response.Body.String())
+	httpapi.New(&fakeReleaseService{}, func() string { return generatedID }, &captureLogger{}).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/healthz", nil))
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", response.Code)
+	}
+	if got := response.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Fatalf("Allow = %q, want GET, HEAD", got)
 	}
 }
 
