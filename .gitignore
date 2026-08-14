@@ -3,5 +3,6 @@ dist/
 goserver/dist/
 artifacts/
 .superpowers/
+.worktrees/
 .tmp/
 *.local
