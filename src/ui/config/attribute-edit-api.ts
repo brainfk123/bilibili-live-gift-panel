@@ -1,7 +1,11 @@
 import type { AppState, Attribute, GiftInfo, GiftRule, TimerRule } from '../../types';
 import {
-  isAppState,
+  isAttribute,
+  isGiftInfo,
+  isGiftRule,
+  isTimerRule,
   maintainAttributeEditLease,
+  parseAppState,
   parsePreparedAttributeEditSession,
   type AttributeEditLeaseOptions,
   type AttributeEditLeaseSession,
@@ -12,6 +16,8 @@ const SUBMIT_ENDPOINT = '/api/attribute-edits';
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{24}$/;
 const DEFAULT_REQUEST_TIMEOUT_MS = 4_000;
 
+class OwnedRequestTimeout {}
+
 export type AttributeEditSessionTarget =
   | { attributeId: string }
   | { legacyName: string };
@@ -20,12 +26,24 @@ export type AttributeEditTarget =
   | { kind: 'existing'; attributeId: string; leaseToken: string }
   | { kind: 'new' };
 
+export type AttributeEditGiftCatalogUpsert = Pick<GiftInfo, 'id' | 'name' | 'price' | 'coinType' | 'imgBasic'>
+  & Partial<Pick<GiftInfo,
+    | 'gif'
+    | 'webp'
+    | 'animationDurationMs'
+    | 'effectId'
+    | 'effectMp4'
+    | 'effectMp4Json'
+    | 'blindBoxParentId'
+    | 'blindBoxParentName'
+    | 'blindBoxParentPrice'>>;
+
 export interface AttributeEditInput {
   target: AttributeEditTarget;
   attribute: Attribute;
   giftRules: GiftRule[];
   timerRules: TimerRule[];
-  giftCatalogUpserts: GiftInfo[];
+  giftCatalogUpserts: AttributeEditGiftCatalogUpsert[];
 }
 
 export interface PreparedAttributeEditSession {
@@ -82,45 +100,50 @@ async function postJSON(
   timeoutMs: number,
 ): Promise<unknown> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = new OwnedRequestTimeout();
+  let timer: ReturnType<typeof setTimeout>;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort(timeout);
+      reject(timeout);
+    }, timeoutMs);
+  });
   try {
     let response: Response;
     try {
-      response = await fetchImpl(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-    } catch {
+      const fetchPromise = Promise.resolve().then(() => fetchImpl(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        }));
+      response = await Promise.race([fetchPromise, timeoutPromise]);
+    } catch (error) {
       throw new Error('属性编辑请求失败');
     }
-    if (controller.signal.aborted || !response.ok) throw new Error('属性编辑请求失败');
+    if (!response.ok) throw new Error('属性编辑请求失败');
     try {
-      const body = await response.json() as unknown;
-      if (controller.signal.aborted) throw new Error('属性编辑请求失败');
-      return body;
+      const bodyPromise = Promise.resolve().then(() => response.json() as Promise<unknown>);
+      return await Promise.race([bodyPromise, timeoutPromise]);
     } catch (error) {
-      if (error instanceof Error && error.message === '属性编辑请求失败') throw error;
-      if (controller.signal.aborted) throw new Error('属性编辑请求失败');
+      if (error === timeout) throw new Error('属性编辑请求失败');
       throw new Error('属性编辑响应无效');
     }
   } finally {
-    clearTimeout(timer);
+    clearTimeout(timer!);
   }
 }
 
 function readSubmittedEdit(payload: unknown): SubmittedAttributeEdit {
   if (!isRecord(payload) || !hasExactKeys(payload, ['code', 'target', 'state']) || payload.code !== 0
-    || !isRecord(payload.target) || !hasExactKeys(payload.target, ['id', 'name', 'created'])
-    || !isAppState(payload.state)) {
+    || !isRecord(payload.target) || !hasExactKeys(payload.target, ['id', 'name', 'created'])) {
     throw new Error('属性编辑响应无效');
   }
   const { id, name, created } = payload.target;
   if (typeof id !== 'string' || !id.trim() || typeof name !== 'string' || !name.trim() || typeof created !== 'boolean') {
     throw new Error('属性编辑响应无效');
   }
-  return { target: { id, name, created }, state: payload.state };
+  return { target: { id, name, created }, state: parseAppState(payload.state) };
 }
 
 function validateSessionTarget(target: AttributeEditSessionTarget): Record<string, string> {
@@ -144,8 +167,8 @@ function validateEditInput(input: AttributeEditInput): void {
   );
   if (!validTarget) throw new Error('属性编辑目标无效');
   if (!hasExactKeys(input, ['target', 'attribute', 'giftRules', 'timerRules', 'giftCatalogUpserts'])
-    || !isRecord(input.attribute) || !Array.isArray(input.giftRules)
-    || !Array.isArray(input.timerRules) || !Array.isArray(input.giftCatalogUpserts)) {
+    || !isAttribute(input.attribute) || !isArrayOf(input.giftRules, isGiftRule)
+    || !isArrayOf(input.timerRules, isTimerRule) || !isArrayOf(input.giftCatalogUpserts, isGiftInfo)) {
     throw new Error('属性编辑请求无效');
   }
 }
@@ -156,4 +179,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function hasExactKeys(value: Record<string, unknown>, keys: string[]): boolean {
   return Object.keys(value).length === keys.length && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function isArrayOf(value: unknown, predicate: (member: unknown) => boolean): boolean {
+  return Array.isArray(value) && value.every(predicate);
 }

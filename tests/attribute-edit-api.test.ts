@@ -183,14 +183,105 @@ describe('atomic attribute edit API', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['attribute extra key', {
+      attribute: { name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '', extra: true },
+    }],
+    ['gift rule extra key', {
+      giftRules: [{ id: 'gift-1', giftId: 1, attributeName: '积分', formula: '积分+1', extra: true }],
+    }],
+    ['timer rule malformed member', {
+      timerRules: [{ id: 'timer-1', attributeName: '积分', formulaName: '', intervalSeconds: '1', formula: '积分+1', enabled: true }],
+    }],
+    ['catalog extra key', {
+      giftCatalogUpserts: [{ id: 1, name: '礼物', price: 100, coinType: 'gold', imgBasic: '', extra: true }],
+    }],
+    ['catalog frontend-only key absent from the Go command wire', {
+      giftCatalogUpserts: [{ id: 1, name: '礼物', price: 100, coinType: 'gold', imgBasic: '', listed: true }],
+    }],
+    ['catalog null member', { giftCatalogUpserts: [null] }],
+  ])('rejects submitted %s before fetch', async (_name, overrides) => {
+    const fetchImpl = vi.fn();
+    const input = {
+      target: { kind: 'new' as const },
+      attribute: { name: '积分', value: 0, unit: 'none' as const, format: 'number' as const, decimals: 0, suffix: '' },
+      giftRules: [], timerRules: [], giftCatalogUpserts: [],
+      ...overrides,
+    };
+    await expect(submitAttributeEdit(input as never, { fetchImpl })).rejects.toThrow('属性编辑请求无效');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['attribute', { attributes: [{ name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '', extra: true }] }],
+    ['attribute display', { attributes: [{
+      name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '',
+      display: { variant: 'number', extra: true },
+    }] }],
+    ['gift rule', { rules: [{ id: 'gift-1', giftId: 1, attributeName: '积分', formula: '积分+1', extra: true }] }],
+    ['catalog member', { giftCatalog: [{
+      id: 1, name: '礼物', price: 100, coinType: 'gold', imgBasic: '', listed: true,
+    }] }],
+    ['KPI member', { giftKpiPanels: [{
+      id: 'panel-1', name: '目标', layout: 'stack', appearance: {
+        themeId: 'glass', fontSize: 48, accentColor: '#fff', showConnection: true, align: 'center', panelOpacity: 50,
+      },
+      items: [{ giftId: 1, giftName: '礼物', target: 10, barStyle: 'progress', extra: true }],
+    }] }],
+    ['settings crop', { settings: { ...defaultState().settings, giftClipCrops: { clip: { x: 0, y: 0, width: 1, height: 1, extra: true } } } }],
+  ])('rejects an AppState with an extra nested %s key', async (_name, stateOverrides) => {
+    const state = { ...defaultState(), ...stateOverrides };
+    await expect(submitAttributeEdit({
+      target: { kind: 'new' },
+      attribute: { name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      giftRules: [], timerRules: [], giftCatalogUpserts: [],
+    }, { fetchImpl: vi.fn(async () => Response.json({
+      code: 0, target: { id: 'attribute-1', name: '积分', created: true }, state,
+    })) })).rejects.toThrow('属性编辑响应无效');
+  });
+
+  it('accepts omitted KPI imageUrl and received fields and normalizes their defaults', async () => {
+    const state = {
+      ...defaultState(),
+      giftCatalog: [{ id: 1, name: '礼物', price: 100, coinType: 'gold', imgBasic: '' }],
+      giftKpiPanels: [{
+        id: 'panel-1', name: '目标', layout: 'stack', appearance: {
+          themeId: 'glass', fontSize: 48, accentColor: '#fff', showConnection: true, align: 'center', panelOpacity: 50,
+        },
+        items: [{ giftId: 1, giftName: '礼物', target: 10, barStyle: 'progress' }],
+      }],
+    };
+    const submitted = await submitAttributeEdit({
+      target: { kind: 'new' },
+      attribute: { name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      giftRules: [], timerRules: [], giftCatalogUpserts: [],
+    }, { fetchImpl: vi.fn(async () => Response.json({
+      code: 0, target: { id: 'attribute-1', name: '积分', created: true }, state,
+    })) });
+
+    expect(submitted.state.giftKpiPanels[0].items[0]).toMatchObject({ imageUrl: '', received: 0 });
+    expect(submitted.state.giftCatalog[0]).toEqual({ id: 1, name: '礼物', price: 100, coinType: 'gold', imgBasic: '' });
+  });
+
+  it('accepts a legal minimal Go gift catalog upsert member', async () => {
+    const fetchImpl = vi.fn(async () => Response.json({
+      code: 0, target: { id: 'attribute-1', name: '积分', created: true }, state: defaultState(),
+    }));
+    await submitAttributeEdit({
+      target: { kind: 'new' },
+      attribute: { name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      giftRules: [], timerRules: [],
+      giftCatalogUpserts: [{ id: 1, name: '礼物', price: 100, coinType: 'gold', imgBasic: '' }],
+    }, { fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it('times out a stalled submit fetch once and cleans its timer', async () => {
     vi.useFakeTimers();
     let signal: AbortSignal | undefined;
     const fetchImpl = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
       signal = init?.signal ?? undefined;
-      return new Promise<Response>((_resolve, reject) => {
-        signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
-      });
+      return new Promise<Response>(() => undefined);
     });
     const submit = submitAttributeEdit({
       target: { kind: 'new' },
@@ -215,9 +306,7 @@ describe('atomic attribute edit API', () => {
       return {
         ok: true,
         status: 200,
-        json: () => new Promise((_resolve, reject) => {
-          signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
-        }),
+        json: () => new Promise(() => undefined),
       } as Response;
     });
     const submit = submitAttributeEdit({
@@ -234,6 +323,63 @@ describe('atomic attribute edit API', () => {
     expect(signal?.aborted).toBe(true);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['resolve', 'reject'] as const)('settles a late fetch %s after timeout without retry or unhandled rejection', async (outcome) => {
+    vi.useFakeTimers();
+    let resolveFetch!: (response: Response) => void;
+    let rejectFetch!: (error: unknown) => void;
+    const rawFetch = new Promise<Response>((resolve, reject) => { resolveFetch = resolve; rejectFetch = reject; });
+    const fetchImpl = vi.fn(() => rawFetch);
+    const submit = submitAttributeEdit({
+      target: { kind: 'new' },
+      attribute: { name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      giftRules: [], timerRules: [], giftCatalogUpserts: [],
+    }, { fetchImpl, requestTimeoutMs: 100 });
+    const rejected = expect(submit).rejects.toThrow('属性编辑请求失败');
+    await vi.advanceTimersByTimeAsync(100);
+    await rejected;
+
+    if (outcome === 'resolve') resolveFetch(Response.json({}));
+    else rejectFetch(new Error('late fetch failure'));
+    await Promise.resolve();
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('settles a late JSON rejection after timeout without confusing it with the owned timeout', async () => {
+    vi.useFakeTimers();
+    let rejectBody!: (error: unknown) => void;
+    const body = new Promise<unknown>((_resolve, reject) => { rejectBody = reject; });
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 200, json: () => body } as Response));
+    const submit = submitAttributeEdit({
+      target: { kind: 'new' },
+      attribute: { name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      giftRules: [], timerRules: [], giftCatalogUpserts: [],
+    }, { fetchImpl, requestTimeoutMs: 100 });
+    const rejected = expect(submit).rejects.toThrow('属性编辑请求失败');
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(100);
+    await rejected;
+
+    rejectBody(new Error('属性编辑请求失败'));
+    await Promise.resolve();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('maps a same-message caller body rejection to the stable response error by identity', async () => {
+    const callerError = new Error('属性编辑请求失败');
+    const result = submitAttributeEdit({
+      target: { kind: 'new' },
+      attribute: { name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      giftRules: [], timerRules: [], giftCatalogUpserts: [],
+    }, { fetchImpl: vi.fn(async () => ({
+      ok: true, status: 200, json: async () => { throw callerError; },
+    } as unknown as Response)) });
+
+    await expect(result).rejects.toThrow('属性编辑响应无效');
+    await expect(result).rejects.not.toBe(callerError);
   });
 
   it('reports a stable network error without retrying submit', async () => {

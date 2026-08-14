@@ -58,6 +58,7 @@ export type ConfigBackup = ConfigBackupFields & { schemaVersion: number };
 let cachedState: AppState | null = null;
 let cachedStateRevision = 0;
 let stateOperationEpoch = 0;
+let lastPersistedState: AppState | null = null;
 let persistQueue = Promise.resolve();
 let configMigrationRequired = false;
 let persistedFieldSnapshots: Partial<StateFieldSnapshots> = {};
@@ -126,13 +127,22 @@ export function loadState(): AppState {
 }
 
 export function saveState(state: AppState): Promise<void> {
-  stateOperationEpoch += 1;
+  const operationEpoch = ++stateOperationEpoch;
   const nextState = publishCachedState(normalizeState(state));
   const snapshots = snapshotStateFields(nextState);
-  persistQueue = persistQueue
+  const operation = persistQueue
     .catch(() => undefined)
-    .then(() => persistStateToServer(snapshots));
-  return persistQueue;
+    .then(async () => {
+      try {
+        await persistStateToServer(snapshots);
+        lastPersistedState = nextState;
+      } catch (error) {
+        restoreLastPersistedState(operationEpoch);
+        throw error;
+      }
+    });
+  persistQueue = operation;
+  return operation;
 }
 
 export function saveStateTransaction(state: AppState): Promise<AppState> {
@@ -151,7 +161,12 @@ export function saveStateTransaction(state: AppState): Promise<AppState> {
         throw new Error('配置在保存期间发生变化，请重试');
       }
       publishCachedState(candidate);
+      lastPersistedState = candidate;
       return candidate;
+    })
+    .catch((error: unknown) => {
+      restoreLastPersistedState(operationEpoch);
+      throw error;
     });
   persistQueue = transaction.then(
     () => undefined,
@@ -176,10 +191,15 @@ export function commitAuthoritativeStateMutation(
       // publication. Later queued persistence must diff against server reality.
       persistedFieldSnapshots = snapshotStateFields(authoritative);
       forcePersistFields.clear();
+      lastPersistedState = authoritative;
       if (stateOperationEpoch === operationEpoch) {
         publishCachedState(authoritative);
       }
       return authoritative;
+    })
+    .catch((error: unknown) => {
+      restoreLastPersistedState(operationEpoch);
+      throw error;
     });
   persistQueue = transaction.then(
     () => undefined,
@@ -189,25 +209,32 @@ export function commitAuthoritativeStateMutation(
 }
 
 export function resetState(): Promise<void> {
-  stateOperationEpoch += 1;
-  publishCachedState(defaultState());
+  const operationEpoch = ++stateOperationEpoch;
+  const reset = publishCachedState(defaultState());
   configMigrationRequired = false;
-  persistQueue = persistQueue
+  const operation = persistQueue
     .catch(() => undefined)
     .then(async () => {
-      if (typeof fetch === 'function') {
-        let response: Response;
-        try {
-          response = await fetch(CONFIG_ENDPOINT, { method: 'DELETE', keepalive: true });
-        } catch {
-          throw new Error('恢复默认失败，请重试或先导出运行日志。');
+      try {
+        if (typeof fetch === 'function') {
+          let response: Response;
+          try {
+            response = await fetch(CONFIG_ENDPOINT, { method: 'DELETE', keepalive: true });
+          } catch {
+            throw new Error('恢复默认失败，请重试或先导出运行日志。');
+          }
+          if (!response.ok) throw new Error('恢复默认失败，请重试或先导出运行日志。');
         }
-        if (!response.ok) throw new Error('恢复默认失败，请重试或先导出运行日志。');
+        persistedFieldSnapshots = {};
+        forcePersistFields.clear();
+        lastPersistedState = reset;
+      } catch (error) {
+        restoreLastPersistedState(operationEpoch);
+        throw error;
       }
-      persistedFieldSnapshots = {};
-      forcePersistFields.clear();
     });
-  return persistQueue;
+  persistQueue = operation;
+  return operation;
 }
 
 export function consumeConfigMigrationRequired(): boolean {
@@ -240,6 +267,7 @@ export async function refreshStateFromServer(
     if (acceptState() || !cachedState) {
       publishCachedState(nextState);
       persistedFieldSnapshots = hasPersistedState ? snapshotStateFields(nextState) : {};
+      lastPersistedState = nextState;
     }
   } catch (error) {
     // A transient backend read failure must not erase the last visible state.
@@ -253,6 +281,12 @@ function publishCachedState(state: AppState): AppState {
   cachedState = state;
   cachedStateRevision += 1;
   return state;
+}
+
+function restoreLastPersistedState(operationEpoch: number): void {
+  if (stateOperationEpoch === operationEpoch && lastPersistedState) {
+    publishCachedState(lastPersistedState);
+  }
 }
 
 async function persistStateToServer(snapshots: StateFieldSnapshots): Promise<void> {

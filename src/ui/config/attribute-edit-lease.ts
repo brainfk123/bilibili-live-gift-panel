@@ -6,6 +6,41 @@ const DEFAULT_HEARTBEAT_MS = 5_000;
 const DEFAULT_RETRY_MS = 1_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 4_000;
 
+class OwnedLeaseRequestTimeout {}
+
+interface RequestDeadline {
+  controller: AbortController;
+  abort(): void;
+  close(): void;
+  race<T>(work: Promise<T>, onLate?: (value: T) => void | Promise<void>): Promise<T>;
+}
+
+function createRequestDeadline(timeoutMs: number): RequestDeadline {
+  const controller = new AbortController();
+  const timeout = new OwnedLeaseRequestTimeout();
+  let expired = false;
+  let rejectTimeout!: (error: OwnedLeaseRequestTimeout) => void;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => { rejectTimeout = reject; });
+  const expire = (): void => {
+    if (expired) return;
+    expired = true;
+    controller.abort(timeout);
+    rejectTimeout(timeout);
+  };
+  const timer = setTimeout(expire, timeoutMs);
+  return {
+    controller,
+    abort: () => controller.abort(),
+    close: () => clearTimeout(timer),
+    race: <T>(work: Promise<T>, onLate?: (value: T) => void | Promise<void>): Promise<T> => {
+      void work.then((value) => {
+        if (expired && onLate) return onLate(value);
+      }, () => undefined).catch(() => undefined);
+      return Promise.race([work, timeoutPromise]);
+    },
+  };
+}
+
 export type AttributeEditLeaseHealth = 'healthy' | 'retrying';
 
 export interface AttributeEditLeaseSession {
@@ -64,9 +99,10 @@ function createLeaseSession(
   let released = false;
   let renewalPromise: Promise<void> | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
-  let activeRequest: { controller: AbortController; timer: ReturnType<typeof setTimeout> } | undefined;
+  let activeRequest: RequestDeadline | undefined;
   let releasePromise: Promise<void> | undefined;
   let health: AttributeEditLeaseHealth = 'healthy';
+  const deletedTokens = new Set<string>();
 
   const reportHealth = (next: AttributeEditLeaseHealth, force = false): void => {
     if (!force && health === next) return;
@@ -82,10 +118,36 @@ function createLeaseSession(
 
   const abortActiveRequest = (): void => {
     if (!activeRequest) return;
-    const request = activeRequest;
-    activeRequest = undefined;
-    clearTimeout(request.timer);
-    request.controller.abort();
+    activeRequest.abort();
+  };
+
+  const deleteTokenOnce = (tokenToDelete: string): Promise<void> => {
+    if (deletedTokens.has(tokenToDelete)) return Promise.resolve();
+    deletedTokens.add(tokenToDelete);
+    return requestLeaseWithTimeout(
+      fetchImpl, 'DELETE', { attributeId, token: tokenToDelete }, requestTimeoutMs, true,
+    ).then(() => undefined, () => undefined);
+  };
+
+  const replacementTokenFromPayload = (payload: LeasePayload): string => (
+    reacquireThroughSession
+      ? parsePreparedAttributeEditSession(payload, attributeId).token
+      : readLeaseToken(payload)
+  );
+
+  const cleanupLatePayload = (payload: LeasePayload): void => {
+    try {
+      const replacementToken = replacementTokenFromPayload(payload);
+      if (replacementToken !== currentToken) void deleteTokenOnce(replacementToken);
+    } catch {
+      // Malformed late responses never replace or release the current token.
+    }
+  };
+
+  const cleanupLateResponse = (response: Response): void => {
+    if (!response.ok) return;
+    void readSuccessPayloadWithTimeout(response, requestTimeoutMs, cleanupLatePayload)
+      .then(cleanupLatePayload, () => undefined);
   };
 
   const requestRenewal = async (
@@ -93,19 +155,22 @@ function createLeaseSession(
     payload: Record<string, string>,
     endpoint = ENDPOINT,
   ): Promise<{ response: Response; payload?: LeasePayload }> => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
-    const ownedRequest = { controller, timer };
-    activeRequest = ownedRequest;
+    const deadline = createRequestDeadline(requestTimeoutMs);
+    activeRequest = deadline;
     try {
-      const response = await requestLease(fetchImpl, method, payload, false, controller.signal, endpoint);
+      const rawResponse = Promise.resolve().then(() => requestLease(
+        fetchImpl, method, payload, false, deadline.controller.signal, endpoint,
+      ));
+      const response = await deadline.race(rawResponse, method === 'POST' ? cleanupLateResponse : undefined);
       return {
         response,
-        ...(response.status === 404 ? {} : { payload: await readSuccessPayload(response) }),
+        ...(response.status === 404 ? {} : {
+          payload: await deadline.race(readSuccessPayload(response), method === 'POST' ? cleanupLatePayload : undefined),
+        }),
       };
     } finally {
-      clearTimeout(timer);
-      if (activeRequest === ownedRequest) activeRequest = undefined;
+      deadline.close();
+      if (activeRequest === deadline) activeRequest = undefined;
     }
   };
 
@@ -127,15 +192,7 @@ function createLeaseSession(
             ? parsePreparedAttributeEditSession(reacquired.payload, attributeId).token
             : readLeaseToken(reacquired.payload ?? {});
           if (released) {
-            if (replacementToken !== currentToken) {
-              await requestLeaseWithTimeout(
-                fetchImpl,
-                'DELETE',
-                { attributeId, token: replacementToken },
-                requestTimeoutMs,
-                true,
-              ).catch(() => undefined);
-            }
+            if (replacementToken !== currentToken) await deleteTokenOnce(replacementToken);
             return;
           }
           currentToken = replacementToken;
@@ -174,9 +231,7 @@ function createLeaseSession(
     clearRetry();
     abortActiveRequest();
     globalThis.removeEventListener?.('beforeunload', beforeUnload);
-    const deleteCurrent = requestLeaseWithTimeout(
-      fetchImpl, 'DELETE', { attributeId, token: currentToken }, requestTimeoutMs, true,
-    ).catch(() => undefined);
+    const deleteCurrent = deleteTokenOnce(currentToken);
     releasePromise = Promise.allSettled([deleteCurrent, pendingRenewal ?? Promise.resolve()]).then(() => undefined);
     return releasePromise;
   };
@@ -212,12 +267,12 @@ async function requestLeaseWithTimeout(
   timeoutMs: number,
   keepalive = false,
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const deadline = createRequestDeadline(timeoutMs);
   try {
-    return await requestLease(fetchImpl, method, payload, keepalive, controller.signal);
+    const response = requestLease(fetchImpl, method, payload, keepalive, deadline.controller.signal);
+    return await deadline.race(response);
   } finally {
-    clearTimeout(timer);
+    deadline.close();
   }
 }
 
@@ -227,13 +282,27 @@ async function requestLeasePayloadWithTimeout(
   payload: Record<string, string>,
   timeoutMs: number,
 ): Promise<LeasePayload> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const deadline = createRequestDeadline(timeoutMs);
   try {
-    const response = await requestLease(fetchImpl, method, payload, false, controller.signal);
-    return await readSuccessPayload(response);
+    const response = await deadline.race(Promise.resolve().then(() => requestLease(
+      fetchImpl, method, payload, false, deadline.controller.signal,
+    )));
+    return await deadline.race(readSuccessPayload(response));
   } finally {
-    clearTimeout(timer);
+    deadline.close();
+  }
+}
+
+async function readSuccessPayloadWithTimeout(
+  response: Response,
+  timeoutMs: number,
+  onLate?: (payload: LeasePayload) => void | Promise<void>,
+): Promise<LeasePayload> {
+  const deadline = createRequestDeadline(timeoutMs);
+  try {
+    return await deadline.race(readSuccessPayload(response), onLate);
+  } finally {
+    deadline.close();
   }
 }
 
@@ -279,12 +348,31 @@ export function parsePreparedAttributeEditSession(
     || typeof token !== 'string'
     || !/^[A-Za-z0-9_-]{24}$/.test(token)
     || !isRFC3339Timestamp(expiresAt)
-    || !isAppState(state)
   ) throw new Error('属性编辑响应无效');
-  return { attributeId, token, expiresAt, state };
+  return { attributeId, token, expiresAt, state: parseAppState(state) };
 }
 
 export function isAppState(value: unknown): value is AppState {
+  return isAppStateWire(value, false);
+}
+
+export function parseAppState(value: unknown): AppState {
+  if (!isAppStateWire(value, true)) throw new Error('属性编辑响应无效');
+  return {
+    ...value,
+    giftKpiPanels: value.giftKpiPanels.map((panel) => ({
+      ...panel,
+      items: panel.items.map((item) => ({
+        ...item,
+        imageUrl: item.imageUrl ?? '',
+        received: item.received ?? 0,
+      })),
+    })),
+  } as AppState;
+}
+
+function isAppStateWire(value: unknown, allowOmittedKpiRuntimeFields: boolean): value is Record<string, unknown> & Pick<AppState,
+  Exclude<keyof AppState, 'giftKpiPanels'>> & { giftKpiPanels: Array<Record<string, unknown> & { items: Array<Record<string, unknown>> }> } {
   if (!isRecord(value) || !hasExactKeys(value, [
     'roomId', 'attributes', 'displayScenes', 'blindBoxDisplay', 'giftKpiPanels',
     'activities', 'rules', 'timerRules', 'formulaPresets', 'settings', 'giftCatalog',
@@ -294,7 +382,7 @@ export function isAppState(value: unknown): value is AppState {
     && isArrayOf(value.attributes, isAttribute)
     && isArrayOf(value.displayScenes, isDisplayScene)
     && isDisplayAppearance(value.blindBoxDisplay, true)
-    && isArrayOf(value.giftKpiPanels, isGiftKpiPanel)
+    && isArrayOf(value.giftKpiPanels, (panel) => isGiftKpiPanel(panel, allowOmittedKpiRuntimeFields))
     && isArrayOf(value.activities, isActivity)
     && isArrayOf(value.rules, isGiftRule)
     && isArrayOf(value.timerRules, isTimerRule)
@@ -309,8 +397,11 @@ export function isAppState(value: unknown): value is AppState {
     && (value.simplePlay === undefined || isSimplePlay(value.simplePlay));
 }
 
-function isAttribute(value: unknown): boolean {
-  if (!isRecord(value)) return false;
+export function isAttribute(value: unknown): boolean {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    'id', 'name', 'value', 'unit', 'format', 'decimals', 'suffix', 'color', 'broadcastMessage', 'display',
+    'createdFromTemplateId', 'createdFromTemplateVersion',
+  ], ['id', 'color', 'broadcastMessage', 'display', 'createdFromTemplateId', 'createdFromTemplateVersion'])) return false;
   return optionalString(value.id)
     && requiredString(value.name)
     && finiteNumber(value.value)
@@ -326,7 +417,10 @@ function isAttribute(value: unknown): boolean {
 }
 
 function isAttributeDisplay(value: unknown): boolean {
-  if (!isRecord(value) || !oneOf(value.variant, ['number', 'timer', 'progress', 'health', 'resource', 'tug', 'enum'])) return false;
+  if (!isRecord(value) || !hasExactKeys(value, [
+    'variant', 'themeId', 'appearance', 'title', 'min', 'max', 'lowThreshold', 'leftLabel', 'rightLabel', 'valueMappings',
+  ], ['themeId', 'appearance', 'title', 'min', 'max', 'lowThreshold', 'leftLabel', 'rightLabel', 'valueMappings'])
+    || !oneOf(value.variant, ['number', 'timer', 'progress', 'health', 'resource', 'tug', 'enum'])) return false;
   return optionalOneOf(value.themeId, ['minimal', 'glass', 'rpg', 'pixel', 'neon', 'kawaii'])
     && (value.appearance === undefined || isDisplayAppearance(value.appearance))
     && optionalString(value.title)
@@ -336,12 +430,14 @@ function isAttributeDisplay(value: unknown): boolean {
 }
 
 function isValueMapping(value: unknown): boolean {
-  return isRecord(value) && finiteNumber(value.value) && requiredString(value.label)
+  return isRecord(value) && hasExactKeys(value, ['value', 'label', 'color', 'imageUrl'], ['color', 'imageUrl'])
+    && finiteNumber(value.value) && requiredString(value.label)
     && optionalString(value.color) && optionalString(value.imageUrl);
 }
 
 function isDisplayAppearance(value: unknown, viewerSlots = false): boolean {
-  return isRecord(value)
+  const keys = ['themeId', 'fontSize', 'accentColor', 'showConnection', 'align', 'panelOpacity', ...(viewerSlots ? ['viewerSlots'] : [])];
+  return isRecord(value) && hasExactKeys(value, keys)
     && oneOf(value.themeId, ['minimal', 'glass', 'rpg', 'pixel', 'neon', 'kawaii'])
     && finiteNumber(value.fontSize) && typeof value.accentColor === 'string'
     && typeof value.showConnection === 'boolean' && oneOf(value.align, ['left', 'center', 'right'])
@@ -349,27 +445,35 @@ function isDisplayAppearance(value: unknown, viewerSlots = false): boolean {
 }
 
 function isDisplayScene(value: unknown): boolean {
-  return isRecord(value) && requiredString(value.id) && requiredString(value.name)
+  return isRecord(value) && hasExactKeys(value, ['id', 'name', 'attributeNames', 'layout', 'themeId', 'appearance'], ['appearance'])
+    && requiredString(value.id) && requiredString(value.name)
     && isArrayOf(value.attributeNames, requiredString)
     && oneOf(value.layout, ['stack', 'grid', 'focus', 'versus', 'dashboard'])
     && oneOf(value.themeId, ['minimal', 'glass', 'rpg', 'pixel', 'neon', 'kawaii'])
     && (value.appearance === undefined || isDisplayAppearance(value.appearance));
 }
 
-function isGiftKpiPanel(value: unknown): boolean {
-  return isRecord(value) && requiredString(value.id) && requiredString(value.name)
+function isGiftKpiPanel(value: unknown, allowOmittedRuntimeFields: boolean): boolean {
+  return isRecord(value) && hasExactKeys(value, ['id', 'name', 'layout', 'items', 'appearance'])
+    && requiredString(value.id) && requiredString(value.name)
     && oneOf(value.layout, ['stack', 'grid', 'dashboard'])
-    && isArrayOf(value.items, isGiftKpiItem) && isDisplayAppearance(value.appearance);
+    && isArrayOf(value.items, (item) => isGiftKpiItem(item, allowOmittedRuntimeFields)) && isDisplayAppearance(value.appearance);
 }
 
-function isGiftKpiItem(value: unknown): boolean {
-  return isRecord(value) && finiteNumber(value.giftId) && requiredString(value.giftName)
-    && typeof value.imageUrl === 'string' && finiteNumber(value.target) && finiteNumber(value.received)
+function isGiftKpiItem(value: unknown, allowOmittedRuntimeFields: boolean): boolean {
+  return isRecord(value) && hasExactKeys(value, ['giftId', 'giftName', 'imageUrl', 'target', 'received', 'barStyle'],
+    allowOmittedRuntimeFields ? ['imageUrl', 'received'] : [])
+    && finiteNumber(value.giftId) && requiredString(value.giftName)
+    && (allowOmittedRuntimeFields ? optionalString(value.imageUrl) : typeof value.imageUrl === 'string')
+    && finiteNumber(value.target) && (allowOmittedRuntimeFields ? optionalNumber(value.received) : finiteNumber(value.received))
     && oneOf(value.barStyle, ['progress', 'resource', 'health']);
 }
 
 function isActivity(value: unknown): boolean {
-  if (!isRecord(value)) return false;
+  if (!isRecord(value) || !hasExactKeys(value, [
+    'id', 'name', 'attributeNames', 'sceneId', 'status', 'resultMode', 'gateRules', 'initialValues', 'milestones',
+    'giftTimeout', 'startedAt', 'lockedAt', 'settledAt', 'result',
+  ], ['sceneId', 'giftTimeout', 'startedAt', 'lockedAt', 'settledAt', 'result'])) return false;
   return requiredString(value.id) && requiredString(value.name)
     && isArrayOf(value.attributeNames, requiredString) && optionalString(value.sceneId)
     && oneOf(value.status, ['not_started', 'active', 'locked', 'settled'])
@@ -381,23 +485,30 @@ function isActivity(value: unknown): boolean {
 }
 
 function isActivityMilestone(value: unknown): boolean {
-  return isRecord(value) && requiredString(value.id) && requiredString(value.name)
+  return isRecord(value) && hasExactKeys(value, [
+    'id', 'name', 'attributeName', 'comparison', 'threshold', 'action', 'message', 'triggeredAt', 'triggerValue',
+  ], ['triggeredAt', 'triggerValue']) && requiredString(value.id) && requiredString(value.name)
     && requiredString(value.attributeName) && oneOf(value.comparison, ['gte', 'lte'])
     && finiteNumber(value.threshold) && oneOf(value.action, ['announce', 'lock', 'settle'])
     && typeof value.message === 'string' && optionalNumber(value.triggeredAt) && optionalNumber(value.triggerValue);
 }
 
 function isActivityTimeout(value: unknown): boolean {
-  return isRecord(value) && finiteNumber(value.seconds) && oneOf(value.action, ['lock', 'settle', 'reset'])
+  return isRecord(value) && hasExactKeys(value, ['seconds', 'action', 'lastGiftAt', 'deadlineAt'], ['lastGiftAt', 'deadlineAt'])
+    && finiteNumber(value.seconds) && oneOf(value.action, ['lock', 'settle', 'reset'])
     && optionalNumber(value.lastGiftAt) && optionalNumber(value.deadlineAt);
 }
 
 function isActivityResult(value: unknown): boolean {
-  return isRecord(value) && optionalString(value.winnerAttributeName) && isNumberMap(value.values);
+  return isRecord(value) && hasExactKeys(value, ['winnerAttributeName', 'values'], ['winnerAttributeName'])
+    && optionalString(value.winnerAttributeName) && isNumberMap(value.values);
 }
 
-function isGiftRule(value: unknown): boolean {
-  return isRecord(value) && requiredString(value.id) && finiteNumber(value.giftId)
+export function isGiftRule(value: unknown): boolean {
+  return isRecord(value) && hasExactKeys(value, [
+    'id', 'giftId', 'attributeName', 'formulaName', 'condition', 'formula', 'enabled', 'matchGiftIds', 'minPrice', 'cap', 'dailyLimit',
+  ], ['formulaName', 'condition', 'enabled', 'matchGiftIds', 'minPrice', 'cap', 'dailyLimit'])
+    && requiredString(value.id) && finiteNumber(value.giftId)
     && requiredString(value.attributeName) && typeof value.formula === 'string'
     && optionalString(value.formulaName) && optionalString(value.condition)
     && optionalBoolean(value.enabled)
@@ -405,20 +516,27 @@ function isGiftRule(value: unknown): boolean {
     && optionalNumber(value.minPrice) && optionalNumber(value.cap) && optionalNumber(value.dailyLimit);
 }
 
-function isTimerRule(value: unknown): boolean {
-  return isRecord(value) && requiredString(value.id) && requiredString(value.attributeName)
+export function isTimerRule(value: unknown): boolean {
+  return isRecord(value) && hasExactKeys(value, [
+    'id', 'attributeName', 'formulaName', 'intervalSeconds', 'condition', 'formula', 'enabled',
+  ], ['condition']) && requiredString(value.id) && requiredString(value.attributeName)
     && typeof value.formulaName === 'string' && finiteNumber(value.intervalSeconds)
     && optionalString(value.condition) && typeof value.formula === 'string' && typeof value.enabled === 'boolean';
 }
 
 function isFormulaPreset(value: unknown): boolean {
-  return isRecord(value) && requiredString(value.id) && requiredString(value.name)
+  return isRecord(value) && hasExactKeys(value, ['id', 'name', 'context', 'formula', 'sourceAttributeName'])
+    && requiredString(value.id) && requiredString(value.name)
     && oneOf(value.context, ['gift', 'timer']) && typeof value.formula === 'string'
     && requiredString(value.sourceAttributeName);
 }
 
 function isSettings(value: unknown): boolean {
-  return isRecord(value) && finiteNumber(value.fontSize) && typeof value.accentColor === 'string'
+  return isRecord(value) && hasExactKeys(value, [
+    'fontSize', 'accentColor', 'showStats', 'showConnection', 'align', 'theme', 'giftView', 'panelOpacity',
+    'defaultDisplayThemeId', 'showTutorial', 'tutorialVersion', 'tutorialCompletedLessons', 'tutorialReplayMode',
+    'tutorialTargetAttributeId', 'trainingCompletedTopics', 'lastSeenChangelogVersion', 'autoUpdate', 'configExperience', 'giftClipCrops',
+  ], ['tutorialTargetAttributeId']) && finiteNumber(value.fontSize) && typeof value.accentColor === 'string'
     && typeof value.showStats === 'boolean' && typeof value.showConnection === 'boolean'
     && oneOf(value.align, ['left', 'center', 'right']) && oneOf(value.theme, ['dark', 'light'])
     && oneOf(value.giftView, ['list', 'grid']) && finiteNumber(value.panelOpacity)
@@ -438,31 +556,45 @@ function isSettings(value: unknown): boolean {
 
 function isCropMap(value: unknown): boolean {
   return isRecord(value) && Object.values(value).every((crop) => isRecord(crop)
+    && hasExactKeys(crop, ['x', 'y', 'width', 'height'])
     && finiteNumber(crop.x) && finiteNumber(crop.y) && finiteNumber(crop.width) && finiteNumber(crop.height));
 }
 
-function isGiftInfo(value: unknown): boolean {
-  return isRecord(value) && finiteNumber(value.id) && requiredString(value.name) && finiteNumber(value.price)
+export function isGiftInfo(value: unknown): boolean {
+  return isRecord(value) && hasExactKeys(value, giftInfoKeys, giftInfoOptionalKeys) && isGiftInfoFields(value);
+}
+
+const giftInfoKeys = [
+  'id', 'name', 'price', 'coinType', 'imgBasic', 'gif', 'webp', 'animationDurationMs', 'effectId', 'effectMp4',
+  'effectMp4Json', 'blindBoxParentId', 'blindBoxParentName', 'blindBoxParentPrice',
+];
+const giftInfoOptionalKeys = giftInfoKeys.slice(5);
+
+function isGiftInfoFields(value: Record<string, unknown>): boolean {
+  return finiteNumber(value.id) && requiredString(value.name) && finiteNumber(value.price)
     && oneOf(value.coinType, ['gold', 'silver']) && typeof value.imgBasic === 'string'
     && optionalString(value.gif) && optionalString(value.webp) && optionalNumber(value.animationDurationMs)
     && optionalNumber(value.effectId) && optionalString(value.effectMp4) && optionalString(value.effectMp4Json)
-    && optionalBoolean(value.listed) && optionalBoolean(value.requiresLogin)
-    && (value.specialEvent === undefined || oneOf(value.specialEvent, ['guard-captain', 'guard-admiral', 'guard-governor', 'super-chat']))
     && optionalNumber(value.blindBoxParentId) && optionalString(value.blindBoxParentName)
     && optionalNumber(value.blindBoxParentPrice);
 }
 
 function isRecentGift(value: unknown): boolean {
-  return isGiftInfo(value) && isRecord(value) && finiteNumber(value.lastReceived) && finiteNumber(value.count);
+  return isRecord(value) && hasExactKeys(value, ['id', 'name', 'price', 'coinType', 'imgBasic', 'lastReceived', 'count'])
+    && isGiftInfoFields(value) && finiteNumber(value.lastReceived) && finiteNumber(value.count);
 }
 
 function isDayStatsMap(value: unknown): boolean {
-  return isRecord(value) && Object.values(value).every((day) => isRecord(day) && typeof day.date === 'string'
+  return isRecord(value) && Object.values(value).every((day) => isRecord(day)
+    && hasExactKeys(day, ['date', 'giftTotals', 'ruleTriggers']) && typeof day.date === 'string'
     && isNumberMap(day.giftTotals) && isNumberMap(day.ruleTriggers));
 }
 
 function isLogEntry(value: unknown): boolean {
-  return isRecord(value) && finiteNumber(value.time) && finiteNumber(value.giftId)
+  return isRecord(value) && hasExactKeys(value, [
+    'time', 'giftId', 'giftName', 'num', 'uname', 'avatar', 'senderUid', 'attributeName', 'delta', 'valueAfter',
+    'ruleId', 'source', 'triggerName', 'eventId',
+  ], ['avatar', 'senderUid', 'source', 'triggerName', 'eventId']) && finiteNumber(value.time) && finiteNumber(value.giftId)
     && typeof value.giftName === 'string' && finiteNumber(value.num) && typeof value.uname === 'string'
     && optionalString(value.avatar) && optionalNumber(value.senderUid) && typeof value.attributeName === 'string'
     && finiteNumber(value.delta) && finiteNumber(value.valueAfter) && typeof value.ruleId === 'string'
@@ -471,7 +603,11 @@ function isLogEntry(value: unknown): boolean {
 }
 
 function isGiftReceipt(value: unknown): boolean {
-  return isRecord(value) && requiredString(value.id) && finiteNumber(value.time) && finiteNumber(value.giftId)
+  return isRecord(value) && hasExactKeys(value, [
+    'id', 'time', 'giftId', 'giftName', 'num', 'price', 'totalCoin', 'coinType', 'uname', 'avatar', 'senderUid',
+    'membership', 'message', 'imgBasic', 'animation', 'effects',
+  ], ['avatar', 'senderUid', 'membership', 'message', 'imgBasic', 'animation'])
+    && requiredString(value.id) && finiteNumber(value.time) && finiteNumber(value.giftId)
     && typeof value.giftName === 'string' && finiteNumber(value.num) && finiteNumber(value.price)
     && finiteNumber(value.totalCoin) && typeof value.coinType === 'string' && typeof value.uname === 'string'
     && optionalString(value.avatar) && optionalNumber(value.senderUid)
@@ -482,22 +618,29 @@ function isGiftReceipt(value: unknown): boolean {
 }
 
 function isReceiptAnimation(value: unknown): boolean {
-  return isRecord(value) && optionalString(value.gif) && optionalString(value.webp)
+  return isRecord(value) && hasExactKeys(value, ['gif', 'webp', 'durationMs', 'effectId', 'mp4', 'mp4Json'],
+    ['gif', 'webp', 'effectId', 'mp4', 'mp4Json']) && optionalString(value.gif) && optionalString(value.webp)
     && finiteNumber(value.durationMs) && optionalNumber(value.effectId)
     && optionalString(value.mp4) && optionalString(value.mp4Json);
 }
 
 function isReceiptEffect(value: unknown): boolean {
-  return isRecord(value) && requiredString(value.attributeName) && finiteNumber(value.delta)
+  return isRecord(value) && hasExactKeys(value, ['attributeName', 'delta', 'valueAfter', 'ruleId', 'triggerName'], ['triggerName'])
+    && requiredString(value.attributeName) && finiteNumber(value.delta)
     && finiteNumber(value.valueAfter) && requiredString(value.ruleId) && optionalString(value.triggerName);
 }
 
 function isContributionLedger(value: unknown): boolean {
-  return isRecord(value) && isArrayOf(value.viewers, isViewerContribution) && optionalNumber(value.updatedAt);
+  return isRecord(value) && hasExactKeys(value, ['viewers', 'updatedAt'], ['updatedAt'])
+    && isArrayOf(value.viewers, isViewerContribution) && optionalNumber(value.updatedAt);
 }
 
 function isViewerContribution(value: unknown): boolean {
-  return isRecord(value) && requiredString(value.key) && optionalNumber(value.uid) && typeof value.uname === 'string'
+  return isRecord(value) && hasExactKeys(value, [
+    'key', 'uid', 'uname', 'avatar', 'giftCount', 'goldValue', 'silverValue', 'ruleTriggers', 'attributeDeltas',
+    'blindBoxCount', 'blindBoxCost', 'blindBoxValue', 'blindBoxProfit', 'unpricedBlindBoxCount', 'blindBoxes', 'lastGiftAt',
+  ], ['uid', 'avatar', 'unpricedBlindBoxCount', 'blindBoxes'])
+    && requiredString(value.key) && optionalNumber(value.uid) && typeof value.uname === 'string'
     && optionalString(value.avatar) && finiteNumber(value.giftCount) && finiteNumber(value.goldValue)
     && finiteNumber(value.silverValue) && finiteNumber(value.ruleTriggers) && isNumberMap(value.attributeDeltas)
     && finiteNumber(value.blindBoxCount) && finiteNumber(value.blindBoxCost) && finiteNumber(value.blindBoxValue)
@@ -507,13 +650,17 @@ function isViewerContribution(value: unknown): boolean {
 }
 
 function isBlindBoxContribution(value: unknown): boolean {
-  return isRecord(value) && finiteNumber(value.giftId) && typeof value.giftName === 'string'
+  return isRecord(value) && hasExactKeys(value, [
+    'giftId', 'giftName', 'count', 'cost', 'value', 'profit', 'unpricedCount', 'lastGiftAt',
+  ], ['unpricedCount']) && finiteNumber(value.giftId) && typeof value.giftName === 'string'
     && finiteNumber(value.count) && finiteNumber(value.cost) && finiteNumber(value.value)
     && finiteNumber(value.profit) && optionalNumber(value.unpricedCount) && finiteNumber(value.lastGiftAt);
 }
 
 function isSimplePlay(value: unknown): boolean {
-  return isRecord(value) && value.version === 1 && oneOf(value.templateId, ['overtime', 'counter', 'goal'])
+  return isRecord(value) && hasExactKeys(value, [
+    'version', 'templateId', 'templateVersion', 'attributeId', 'parameters', 'gifts', 'overtimeGiftActions', 'managedFingerprint',
+  ], ['overtimeGiftActions']) && value.version === 1 && oneOf(value.templateId, ['overtime', 'counter', 'goal'])
     && finiteNumber(value.templateVersion) && requiredString(value.attributeId)
     && isPrimitiveMap(value.parameters) && isNumberArrayMap(value.gifts)
     && (value.overtimeGiftActions === undefined || isArrayOf(value.overtimeGiftActions, isOvertimeGiftAction))
@@ -521,7 +668,7 @@ function isSimplePlay(value: unknown): boolean {
 }
 
 function isOvertimeGiftAction(value: unknown): boolean {
-  return isRecord(value) && finiteNumber(value.giftId)
+  return isRecord(value) && hasExactKeys(value, ['giftId', 'operation', 'seconds'], ['seconds']) && finiteNumber(value.giftId)
     && oneOf(value.operation, ['add', 'subtract', 'double', 'halve', 'reset']) && optionalNumber(value.seconds);
 }
 

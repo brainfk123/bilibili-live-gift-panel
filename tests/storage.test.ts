@@ -170,6 +170,87 @@ describe('storage', () => {
     expect(loadState().roomId).toBe('second-authoritative');
   });
 
+  it('publishes the first authoritative success when a later authoritative call rejects', async () => {
+    const initial = { ...defaultState(), roomId: 'initial' };
+    await saveState(initial);
+    const firstResponse = deferred<typeof initial>();
+    const firstState = { ...initial, roomId: 'first-authoritative' };
+    const first = commitAuthoritativeStateMutation(() => firstResponse.promise);
+    const second = commitAuthoritativeStateMutation(async () => { throw new Error('later rejected'); });
+
+    firstResponse.resolve(firstState);
+    await expect(first).resolves.toMatchObject({ roomId: 'first-authoritative' });
+    await expect(second).rejects.toThrow('later rejected');
+    expect(loadState().roomId).toBe('first-authoritative');
+
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchImpl);
+    await saveState(firstState);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('restores the first authoritative success when a later transaction rejects', async () => {
+    const initial = { ...defaultState(), roomId: 'initial' };
+    await saveState(initial);
+    const firstResponse = deferred<typeof initial>();
+    const firstState = { ...initial, roomId: 'first-authoritative' };
+    const first = commitAuthoritativeStateMutation(() => firstResponse.promise);
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 500 }));
+    vi.stubGlobal('fetch', fetchImpl);
+    const later = saveStateTransaction({ ...initial, roomId: 'later-transaction' });
+
+    firstResponse.resolve(firstState);
+    await expect(first).resolves.toMatchObject({ roomId: 'first-authoritative' });
+    await expect(later).rejects.toThrow('配置保存失败');
+    expect(loadState().roomId).toBe('first-authoritative');
+
+    fetchImpl.mockClear();
+    await saveState(firstState);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('restores the first authoritative success when a later ordinary save rejects', async () => {
+    const initial = { ...defaultState(), roomId: 'initial' };
+    await saveState(initial);
+    const firstResponse = deferred<typeof initial>();
+    const firstState = { ...initial, roomId: 'first-authoritative' };
+    const first = commitAuthoritativeStateMutation(() => firstResponse.promise);
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 500 }));
+    vi.stubGlobal('fetch', fetchImpl);
+    const later = saveState({ ...initial, roomId: 'later-save' });
+
+    firstResponse.resolve(firstState);
+    await expect(first).resolves.toMatchObject({ roomId: 'first-authoritative' });
+    await expect(later).rejects.toThrow('配置保存失败');
+    expect(loadState().roomId).toBe('first-authoritative');
+
+    fetchImpl.mockClear();
+    await saveState(firstState);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('restores the first authoritative success when a later reset rejects', async () => {
+    const initial = { ...defaultState(), roomId: 'initial' };
+    await saveState(initial);
+    const firstResponse = deferred<typeof initial>();
+    const firstState = { ...initial, roomId: 'first-authoritative' };
+    const first = commitAuthoritativeStateMutation(() => firstResponse.promise);
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, request?: RequestInit) => (
+      new Response(null, { status: request?.method === 'DELETE' ? 500 : 204 })
+    ));
+    vi.stubGlobal('fetch', fetchImpl);
+    const later = resetState();
+
+    firstResponse.resolve(firstState);
+    await expect(first).resolves.toMatchObject({ roomId: 'first-authoritative' });
+    await expect(later).rejects.toThrow('恢复默认失败');
+    expect(loadState().roomId).toBe('first-authoritative');
+
+    fetchImpl.mockClear();
+    await saveState(firstState);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('loads default state when empty', () => {
     const s = loadState();
     expect(s.attributes).toEqual([]);
