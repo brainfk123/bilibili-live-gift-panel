@@ -1,7 +1,7 @@
 import type { AppState, Attribute, GiftInfo, GiftRule, TimerRule } from '../../types';
 import {
   isAttribute,
-  isGiftInfo,
+  isAttributeEditGiftCatalogUpsert,
   isGiftRule,
   isTimerRule,
   maintainAttributeEditLease,
@@ -168,7 +168,8 @@ function validateEditInput(input: AttributeEditInput): void {
   if (!validTarget) throw new Error('属性编辑目标无效');
   if (!hasExactKeys(input, ['target', 'attribute', 'giftRules', 'timerRules', 'giftCatalogUpserts'])
     || !isAttribute(input.attribute) || !isArrayOf(input.giftRules, isGiftRule)
-    || !isArrayOf(input.timerRules, isTimerRule) || !isArrayOf(input.giftCatalogUpserts, isGiftInfo)) {
+    || !isArrayOf(input.timerRules, isTimerRule)
+    || !isArrayOf(input.giftCatalogUpserts, isAttributeEditGiftCatalogUpsert)) {
     throw new Error('属性编辑请求无效');
   }
 }

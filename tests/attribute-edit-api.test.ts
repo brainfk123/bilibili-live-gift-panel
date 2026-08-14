@@ -130,6 +130,59 @@ describe('atomic attribute edit API', () => {
     await prepared.lease.release();
   });
 
+  it('accepts and preserves legal optional GiftInfo fields in an authoritative session', async () => {
+    const catalogGift = {
+      id: 980001,
+      name: '状态测试礼物',
+      price: 100,
+      coinType: 'gold' as const,
+      imgBasic: '',
+      listed: true,
+      requiresLogin: false,
+      specialEvent: 'super-chat' as const,
+    };
+    const state = {
+      ...defaultState(),
+      giftCatalog: [catalogGift],
+      recentGifts: [{ ...catalogGift, lastReceived: 123, count: 2 }],
+    };
+    const fetchImpl = vi.fn(async () => Response.json(sessionPayload({ state })));
+
+    const prepared = await prepareAttributeEditSession({ attributeId: 'attribute-1' }, { fetchImpl });
+
+    expect(prepared.state.giftCatalog[0]).toEqual(catalogGift);
+    expect(prepared.state.recentGifts[0]).toEqual({ ...catalogGift, lastReceived: 123, count: 2 });
+    await prepared.lease.release();
+  });
+
+  it.each([
+    ['listed', 'yes'],
+    ['requiresLogin', 1],
+    ['specialEvent', 'guard-unknown'],
+  ])('rejects malformed optional GiftInfo field %s in an authoritative session', async (field, invalid) => {
+    const state = {
+      ...defaultState(),
+      giftCatalog: [{
+        id: 980001, name: '状态测试礼物', price: 100, coinType: 'gold', imgBasic: '', [field]: invalid,
+      }],
+    };
+    await expect(prepareAttributeEditSession({ attributeId: 'attribute-1' }, {
+      fetchImpl: vi.fn(async () => Response.json(sessionPayload({ state }))),
+    })).rejects.toThrow('属性编辑响应无效');
+  });
+
+  it('still rejects an unknown GiftInfo key in an authoritative session', async () => {
+    const state = {
+      ...defaultState(),
+      giftCatalog: [{
+        id: 980001, name: '状态测试礼物', price: 100, coinType: 'gold', imgBasic: '', listed: true, unknown: true,
+      }],
+    };
+    await expect(prepareAttributeEditSession({ attributeId: 'attribute-1' }, {
+      fetchImpl: vi.fn(async () => Response.json(sessionPayload({ state }))),
+    })).rejects.toThrow('属性编辑响应无效');
+  });
+
   it.each([
     [{ attributeId: 'attribute-1', extra: true }],
     [{ attributeId: 'attribute-1', legacyName: '积分' }],
@@ -220,7 +273,7 @@ describe('atomic attribute edit API', () => {
     }] }],
     ['gift rule', { rules: [{ id: 'gift-1', giftId: 1, attributeName: '积分', formula: '积分+1', extra: true }] }],
     ['catalog member', { giftCatalog: [{
-      id: 1, name: '礼物', price: 100, coinType: 'gold', imgBasic: '', listed: true,
+      id: 1, name: '礼物', price: 100, coinType: 'gold', imgBasic: '', unknown: true,
     }] }],
     ['KPI member', { giftKpiPanels: [{
       id: 'panel-1', name: '目标', layout: 'stack', appearance: {

@@ -564,23 +564,36 @@ export function isGiftInfo(value: unknown): boolean {
   return isRecord(value) && hasExactKeys(value, giftInfoKeys, giftInfoOptionalKeys) && isGiftInfoFields(value);
 }
 
+export function isAttributeEditGiftCatalogUpsert(value: unknown): boolean {
+  return isRecord(value)
+    && hasExactKeys(value, giftCatalogUpsertKeys, giftCatalogUpsertOptionalKeys)
+    && isGiftInfoFields(value);
+}
+
 const giftInfoKeys = [
   'id', 'name', 'price', 'coinType', 'imgBasic', 'gif', 'webp', 'animationDurationMs', 'effectId', 'effectMp4',
-  'effectMp4Json', 'blindBoxParentId', 'blindBoxParentName', 'blindBoxParentPrice',
+  'effectMp4Json', 'listed', 'requiresLogin', 'specialEvent',
+  'blindBoxParentId', 'blindBoxParentName', 'blindBoxParentPrice',
 ];
 const giftInfoOptionalKeys = giftInfoKeys.slice(5);
+const giftCatalogUpsertKeys = giftInfoKeys.filter((key) => !['listed', 'requiresLogin', 'specialEvent'].includes(key));
+const giftCatalogUpsertOptionalKeys = giftCatalogUpsertKeys.slice(5);
 
 function isGiftInfoFields(value: Record<string, unknown>): boolean {
   return finiteNumber(value.id) && requiredString(value.name) && finiteNumber(value.price)
     && oneOf(value.coinType, ['gold', 'silver']) && typeof value.imgBasic === 'string'
     && optionalString(value.gif) && optionalString(value.webp) && optionalNumber(value.animationDurationMs)
     && optionalNumber(value.effectId) && optionalString(value.effectMp4) && optionalString(value.effectMp4Json)
+    && optionalBoolean(value.listed) && optionalBoolean(value.requiresLogin)
+    && (value.specialEvent === undefined || oneOf(value.specialEvent, [
+      'guard-captain', 'guard-admiral', 'guard-governor', 'super-chat',
+    ]))
     && optionalNumber(value.blindBoxParentId) && optionalString(value.blindBoxParentName)
     && optionalNumber(value.blindBoxParentPrice);
 }
 
 function isRecentGift(value: unknown): boolean {
-  return isRecord(value) && hasExactKeys(value, ['id', 'name', 'price', 'coinType', 'imgBasic', 'lastReceived', 'count'])
+  return isRecord(value) && hasExactKeys(value, [...giftInfoKeys, 'lastReceived', 'count'], giftInfoOptionalKeys)
     && isGiftInfoFields(value) && finiteNumber(value.lastReceived) && finiteNumber(value.count);
 }
 
