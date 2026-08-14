@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -31,9 +32,12 @@ const (
 // Store is the COS subset required by a publisher transaction.
 type Store interface {
 	Head(context.Context, string) (cosstore.ObjectInfo, error)
+	PutImmutable(context.Context, string, io.Reader, int64, string, string) error
 	Put(context.Context, string, io.Reader, int64, string, string) error
 	Get(context.Context, string, int64) ([]byte, string, error)
 }
+
+var canonicalTag = regexp.MustCompile(`^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$`)
 
 // Input identifies the locally built release materials.
 type Input struct {
@@ -56,6 +60,9 @@ type object struct {
 func Run(ctx context.Context, store Store, input Input) error {
 	if store == nil {
 		return errors.New("COS store is required")
+	}
+	if !canonicalTag.MatchString(input.Tag) {
+		return fmt.Errorf("release tag %q must use canonical vMAJOR.MINOR.PATCH syntax", input.Tag)
 	}
 	asset, err := readAsset(input.AssetPath)
 	if err != nil {
@@ -176,8 +183,15 @@ func publishImmutable(ctx context.Context, store Store, candidate object) error 
 	if !errors.Is(err, cosstore.ErrNotFound) {
 		return fmt.Errorf("head %q: %w", candidate.key, err)
 	}
-	if err := store.Put(ctx, candidate.key, strings.NewReader(string(candidate.body)), int64(len(candidate.body)), candidate.contentType, candidate.digest); err != nil {
-		return fmt.Errorf("write %q: %w", candidate.key, err)
+	if err := store.PutImmutable(ctx, candidate.key, strings.NewReader(string(candidate.body)), int64(len(candidate.body)), candidate.contentType, candidate.digest); err != nil {
+		if !errors.Is(err, cosstore.ErrAlreadyExists) {
+			return fmt.Errorf("create immutable %q: %w", candidate.key, err)
+		}
+		info, headErr := store.Head(ctx, candidate.key)
+		if headErr != nil {
+			return fmt.Errorf("verify concurrent immutable %q: %w", candidate.key, headErr)
+		}
+		return verifyObject(candidate, info)
 	}
 	info, err = store.Head(ctx, candidate.key)
 	if err != nil {

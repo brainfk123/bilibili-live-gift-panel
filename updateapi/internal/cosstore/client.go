@@ -22,6 +22,9 @@ const (
 // ErrNotFound indicates that COS did not contain the requested object.
 var ErrNotFound = errors.New("COS object not found")
 
+// ErrAlreadyExists indicates that COS rejected an atomic no-overwrite upload.
+var ErrAlreadyExists = errors.New("COS object already exists")
+
 // ObjectInfo is the immutable-object metadata used to verify COS uploads.
 type ObjectInfo struct {
 	Size   int64
@@ -102,24 +105,42 @@ func (client *Client) Head(ctx context.Context, key string) (ObjectInfo, error) 
 	}, nil
 }
 
-// Put writes an object and records its content digest as COS metadata.
+// Put replaces the stable channel pointer.
 func (client *Client) Put(ctx context.Context, key string, body io.Reader, size int64, contentType, sha256 string) error {
-	if !isAllowedReadKey(key) {
-		return fmt.Errorf("object key %q is outside allowed paths", key)
+	if key != stableChannelKey {
+		return fmt.Errorf("replaceable write key must be %q", stableChannelKey)
 	}
+	return client.put(ctx, key, body, size, contentType, sha256, false)
+}
+
+// PutImmutable creates a versioned object without allowing an existing object
+// to be overwritten by a concurrent publisher.
+func (client *Client) PutImmutable(ctx context.Context, key string, body io.Reader, size int64, contentType, sha256 string) error {
+	if !isReleaseKey(key) {
+		return fmt.Errorf("immutable write key %q is outside releases/", key)
+	}
+	return client.put(ctx, key, body, size, contentType, sha256, true)
+}
+
+func (client *Client) put(ctx context.Context, key string, body io.Reader, size int64, contentType, sha256 string, forbidOverwrite bool) error {
 	if body == nil || size < 0 {
 		return errors.New("object body and non-negative size are required")
 	}
 	metadata := make(http.Header)
 	metadata.Set("x-cos-meta-sha256", sha256)
+	options := make(http.Header)
+	if forbidOverwrite {
+		options.Set("x-cos-forbid-overwrite", "true")
+	}
 	_, err := client.client.Object.Put(ctx, key, body, &cos.ObjectPutOptions{
 		ObjectPutHeaderOptions: &cos.ObjectPutHeaderOptions{
 			ContentLength: size,
 			ContentType:   contentType,
 			XCosMetaXXX:   &metadata,
+			XOptionHeader: &options,
 		},
 	})
-	return normalizeNotFound(err)
+	return normalizeCOSError(err)
 }
 
 func (client *Client) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error) {
@@ -154,11 +175,20 @@ func isReleaseKey(key string) bool {
 }
 
 func normalizeNotFound(err error) error {
+	return normalizeCOSError(err)
+}
+
+func normalizeCOSError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if response, ok := cos.IsCOSError(err); ok && response.Response != nil && response.Response.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("%w: %v", ErrNotFound, err)
+	if response, ok := cos.IsCOSError(err); ok {
+		if response.Code == "FileAlreadyExists" {
+			return fmt.Errorf("%w: %v", ErrAlreadyExists, err)
+		}
+		if response.Response != nil && response.Response.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("%w: %v", ErrNotFound, err)
+		}
 	}
 	return err
 }

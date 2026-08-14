@@ -26,16 +26,16 @@ func TestRunPublishesAndVerifiesVersionedObjectsBeforeStablePointer(t *testing.T
 
 	want := []string{
 		"HEAD releases/v1.2.3/gift-panel-windows-x64.exe",
-		"PUT releases/v1.2.3/gift-panel-windows-x64.exe",
+		"PUT-IMMUTABLE releases/v1.2.3/gift-panel-windows-x64.exe",
 		"HEAD releases/v1.2.3/gift-panel-windows-x64.exe",
 		"HEAD releases/v1.2.3/gift-panel-windows-x64.exe.sha256",
-		"PUT releases/v1.2.3/gift-panel-windows-x64.exe.sha256",
+		"PUT-IMMUTABLE releases/v1.2.3/gift-panel-windows-x64.exe.sha256",
 		"HEAD releases/v1.2.3/gift-panel-windows-x64.exe.sha256",
 		"HEAD releases/v1.2.3/gift-panel-changelog.json",
-		"PUT releases/v1.2.3/gift-panel-changelog.json",
+		"PUT-IMMUTABLE releases/v1.2.3/gift-panel-changelog.json",
 		"HEAD releases/v1.2.3/gift-panel-changelog.json",
 		"HEAD releases/v1.2.3/release.json",
-		"PUT releases/v1.2.3/release.json",
+		"PUT-IMMUTABLE releases/v1.2.3/release.json",
 		"HEAD releases/v1.2.3/release.json",
 		"PUT channels/stable/latest.json",
 		"GET channels/stable/latest.json",
@@ -45,6 +45,40 @@ func TestRunPublishesAndVerifiesVersionedObjectsBeforeStablePointer(t *testing.T
 	}
 	if _, ok := store.objects["channels/stable/latest.json"]; !ok {
 		t.Fatal("stable pointer was not written")
+	}
+}
+
+func TestRunRejectsConcurrentImmutableWriteConflictBeforeStablePointer(t *testing.T) {
+	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
+	store := newMemoryStore()
+	store.immutablePutError = cosstore.ErrAlreadyExists
+
+	err := Run(context.Background(), store, input)
+	if err == nil {
+		t.Fatal("Run() error = nil, want atomic immutable-write conflict")
+	}
+	if !containsOperation(store.operations, "PUT-IMMUTABLE releases/v1.2.3/gift-panel-windows-x64.exe") {
+		t.Fatalf("operations = %v, want atomic immutable write", store.operations)
+	}
+	if store.hasStablePut() {
+		t.Fatal("stable pointer was modified after immutable-write conflict")
+	}
+}
+
+func TestRunRejectsNonCanonicalOrUnsafeTagBeforeCOSAccess(t *testing.T) {
+	for _, tag := range []string{"1.2.3", "v01.2.3", "v1.2.3+build", "v1.2.3+extra/path", "v1.2.3/../../stable", "v1.2.3\\escape"} {
+		t.Run(tag, func(t *testing.T) {
+			input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
+			input.Tag = tag
+			store := newMemoryStore()
+
+			if err := Run(context.Background(), store, input); err == nil {
+				t.Fatal("Run() error = nil, want canonical safe tag rejection")
+			}
+			if len(store.operations) != 0 {
+				t.Fatalf("operations = %v, want no COS access for rejected tag", store.operations)
+			}
+		})
 	}
 }
 
@@ -112,7 +146,7 @@ func TestRunRejectsMalformedChangelogBeforeStablePointer(t *testing.T) {
 func TestRunLeavesStableUntouchedWhenVersionedUploadFails(t *testing.T) {
 	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
 	store := newMemoryStore()
-	store.putError = errors.New("network interrupted")
+	store.immutablePutError = errors.New("network interrupted")
 
 	err := Run(context.Background(), store, input)
 	if err == nil {
@@ -162,10 +196,11 @@ type storedObject struct {
 }
 
 type memoryStore struct {
-	objects        map[string]storedObject
-	operations     []string
-	putError       error
-	stableReadback []byte
+	objects           map[string]storedObject
+	operations        []string
+	putError          error
+	immutablePutError error
+	stableReadback    []byte
 }
 
 func newMemoryStore() *memoryStore {
@@ -197,6 +232,25 @@ func (store *memoryStore) Put(_ context.Context, key string, body io.Reader, siz
 	return nil
 }
 
+func (store *memoryStore) PutImmutable(_ context.Context, key string, body io.Reader, size int64, _ string, digest string) error {
+	store.operations = append(store.operations, "PUT-IMMUTABLE "+key)
+	if store.immutablePutError != nil {
+		return store.immutablePutError
+	}
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) != size {
+		return errors.New("incorrect object size")
+	}
+	if _, exists := store.objects[key]; exists {
+		return errors.New("object already exists")
+	}
+	store.objects[key] = storedObject{body: data, digest: digest}
+	return nil
+}
+
 func (store *memoryStore) Get(_ context.Context, key string, _ int64) ([]byte, string, error) {
 	store.operations = append(store.operations, "GET "+key)
 	if key == "channels/stable/latest.json" && store.stableReadback != nil {
@@ -212,6 +266,15 @@ func (store *memoryStore) Get(_ context.Context, key string, _ int64) ([]byte, s
 func (store *memoryStore) hasStablePut() bool {
 	for _, operation := range store.operations {
 		if operation == "PUT channels/stable/latest.json" {
+			return true
+		}
+	}
+	return false
+}
+
+func containsOperation(operations []string, want string) bool {
+	for _, operation := range operations {
+		if operation == want {
 			return true
 		}
 	}

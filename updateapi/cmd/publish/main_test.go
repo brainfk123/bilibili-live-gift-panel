@@ -1,0 +1,131 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/cosstore"
+	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/publish"
+)
+
+func TestRunRequiresAllPublishingFlagsBeforeCreatingStore(t *testing.T) {
+	called := false
+	err := run([]string{"--tag", "v1.2.3"}, func() (publish.Store, error) {
+		called = true
+		return nil, errors.New("must not create store")
+	}, time.Now, io.Discard)
+	if err == nil {
+		t.Fatal("run() error = nil, want required flag rejection")
+	}
+	if called {
+		t.Fatal("run() created COS store before checking required flags")
+	}
+}
+
+func TestRunRejectsInvalidTagWithoutPublishing(t *testing.T) {
+	asset, checksum, changelog := commandInputs(t)
+	store := newCommandStore()
+	var output bytes.Buffer
+	err := run([]string{"--tag", "v1.2.3+extra/path", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+		return store, nil
+	}, func() time.Time { return time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC) }, &output)
+	if err == nil {
+		t.Fatal("run() error = nil, want invalid tag rejection")
+	}
+	if len(store.objects) != 0 {
+		t.Fatalf("objects = %v, want no publishing", store.objects)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("output = %q, want no success output", output.String())
+	}
+}
+
+func TestRunPrintsOnlyVerifiedTagAndObjectKeys(t *testing.T) {
+	asset, checksum, changelog := commandInputs(t)
+	store := newCommandStore()
+	var output bytes.Buffer
+	err := run([]string{"--tag", "v1.2.3", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+		return store, nil
+	}, func() time.Time { return time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC) }, &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "v1.2.3\nreleases/v1.2.3/gift-panel-windows-x64.exe\nreleases/v1.2.3/gift-panel-windows-x64.exe.sha256\nreleases/v1.2.3/gift-panel-changelog.json\nreleases/v1.2.3/release.json\nchannels/stable/latest.json\n"
+	if output.String() != want {
+		t.Fatalf("output = %q, want only verified release identifiers", output.String())
+	}
+}
+
+func commandInputs(t *testing.T) (string, string, string) {
+	t.Helper()
+	directory := t.TempDir()
+	asset := filepath.Join(directory, "gift-panel-windows-x64.exe")
+	checksum := filepath.Join(directory, "gift-panel-windows-x64.exe.sha256")
+	changelog := filepath.Join(directory, "gift-panel-changelog.json")
+	body := []byte("windows executable")
+	if err := os.WriteFile(asset, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(body)
+	if err := os.WriteFile(checksum, []byte(hex.EncodeToString(digest[:])+"  gift-panel-windows-x64.exe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(changelog, []byte(`{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return asset, checksum, changelog
+}
+
+type commandObject struct {
+	body   []byte
+	digest string
+}
+
+type commandStore struct{ objects map[string]commandObject }
+
+func newCommandStore() *commandStore { return &commandStore{objects: make(map[string]commandObject)} }
+
+func (store *commandStore) Head(_ context.Context, key string) (cosstore.ObjectInfo, error) {
+	object, ok := store.objects[key]
+	if !ok {
+		return cosstore.ObjectInfo{}, cosstore.ErrNotFound
+	}
+	return cosstore.ObjectInfo{Size: int64(len(object.body)), SHA256: object.digest}, nil
+}
+
+func (store *commandStore) PutImmutable(_ context.Context, key string, body io.Reader, size int64, _ string, digest string) error {
+	if _, exists := store.objects[key]; exists {
+		return cosstore.ErrAlreadyExists
+	}
+	data, err := io.ReadAll(body)
+	if err != nil || int64(len(data)) != size {
+		return errors.New("immutable write failed")
+	}
+	store.objects[key] = commandObject{body: data, digest: digest}
+	return nil
+}
+
+func (store *commandStore) Put(_ context.Context, key string, body io.Reader, size int64, _ string, digest string) error {
+	data, err := io.ReadAll(body)
+	if err != nil || int64(len(data)) != size {
+		return errors.New("stable write failed")
+	}
+	store.objects[key] = commandObject{body: data, digest: digest}
+	return nil
+}
+
+func (store *commandStore) Get(_ context.Context, key string, _ int64) ([]byte, string, error) {
+	object, ok := store.objects[key]
+	if !ok {
+		return nil, "", cosstore.ErrNotFound
+	}
+	return append([]byte(nil), object.body...), "", nil
+}

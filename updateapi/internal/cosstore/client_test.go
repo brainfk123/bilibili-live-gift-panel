@@ -49,8 +49,8 @@ func TestPutWritesDigestMetadata(t *testing.T) {
 		if request.Method != http.MethodPut {
 			t.Fatalf("method = %s, want PUT", request.Method)
 		}
-		if request.URL.Path != "/releases/v0.4.4/release.json" {
-			t.Fatalf("path = %q, want release manifest key", request.URL.Path)
+		if request.URL.Path != "/channels/stable/latest.json" {
+			t.Fatalf("path = %q, want stable channel key", request.URL.Path)
 		}
 		if request.Header.Get("Content-Type") != "application/json" {
 			t.Fatalf("Content-Type = %q, want application/json", request.Header.Get("Content-Type"))
@@ -69,9 +69,41 @@ func TestPutWritesDigestMetadata(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := newStore(t, server, time.Second).Put(context.Background(), "releases/v0.4.4/release.json", strings.NewReader(`{"schemaVersion":1}`), int64(len(`{"schemaVersion":1}`)), "application/json", strings.Repeat("b", 64))
+	err := newStore(t, server, time.Second).Put(context.Background(), "channels/stable/latest.json", strings.NewReader(`{"schemaVersion":1}`), int64(len(`{"schemaVersion":1}`)), "application/json", strings.Repeat("b", 64))
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPutImmutableForbidsOverwrite(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut {
+			t.Fatalf("method = %s, want PUT", request.Method)
+		}
+		if request.Header.Get("X-Cos-Forbid-Overwrite") != "true" {
+			t.Fatalf("x-cos-forbid-overwrite = %q, want true", request.Header.Get("X-Cos-Forbid-Overwrite"))
+		}
+		writer.Header().Set("X-Cos-Hash-Crc64ecma", "15068690071664149826")
+	}))
+	defer server.Close()
+
+	err := newStore(t, server, time.Second).PutImmutable(context.Background(), "releases/v0.4.4/release.json", strings.NewReader(`{"schemaVersion":1}`), int64(len(`{"schemaVersion":1}`)), "application/json", strings.Repeat("b", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPutImmutableMapsCOSConflictToAlreadyExists(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/xml")
+		writer.WriteHeader(http.StatusConflict)
+		_, _ = writer.Write([]byte(`<Error><Code>FileAlreadyExists</Code><Message>exists</Message></Error>`))
+	}))
+	defer server.Close()
+
+	err := newStore(t, server, time.Second).PutImmutable(context.Background(), "releases/v0.4.4/release.json", strings.NewReader(`{"schemaVersion":1}`), int64(len(`{"schemaVersion":1}`)), "application/json", strings.Repeat("b", 64))
+	if !errors.Is(err, cosstore.ErrAlreadyExists) {
+		t.Fatalf("PutImmutable() error = %v, want typed conflict", err)
 	}
 }
 
