@@ -582,6 +582,7 @@ func TestFormulaPreviewValidateOnlyRejectsGuaranteedRuntimeErrors(t *testing.T) 
 		"MAX(积分," + overflow + ")":    "规则结果不是有效数字",
 		"MIN(积分,-(" + overflow + "))": "规则结果不是有效数字",
 		"ROUND(积分,309)":               "规则结果不是有效数字",
+		"ROUND(" + overflow + ",积分)":  "规则结果不是有效数字",
 	}
 	for formula, message := range tests {
 		t.Run(message, func(t *testing.T) {

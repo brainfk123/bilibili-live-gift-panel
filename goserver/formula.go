@@ -564,8 +564,8 @@ func validateGuaranteedFormulaSemantics(node formulaNode) (formulaSemanticResult
 				return formulaSemanticResult{classes: classes}, nil
 			case "ROUND":
 				value := arguments[0]
-				if value.classes == formulaNaN {
-					return formulaSemanticResult{classes: formulaNaN}, nil
+				if !value.classes.hasFinite() {
+					return formulaSemanticResult{classes: value.classes}, nil
 				}
 				if len(arguments) == 1 {
 					return formulaSemanticResult{classes: value.classes}, nil

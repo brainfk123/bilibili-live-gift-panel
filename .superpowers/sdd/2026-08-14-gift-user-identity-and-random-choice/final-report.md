@@ -307,3 +307,28 @@ No push, tag, release, package, version, or FFmpeg action was performed for roun
 | `git diff --check` | exit 0; no whitespace errors. |
 
 No push, tag, release, package, version, or FFmpeg action was performed for round 4.
+
+## Final review fix round 5: ROUND value-first transfer (2026-08-14)
+
+### Finding and fix
+
+- Fixed base: `df30aac8db9337a5f7550da3bd51a1a454608f69`.
+- `ROUND` returned top immediately when its digits argument was non-exact, losing the stronger fact that an already guaranteed-nonfinite value cannot become finite for any finite digits.
+- Unit, config PUT, and validation-only HTTP RED tests captured `ROUND(+Inf,积分)`; unit tests also covered negative infinity and NaN values.
+- The transfer now checks the value class first. If it has no finite member, the result remains guaranteed nonfinite before digits precision is considered. Values with a possible finite member still use conservative top for unknown digits.
+- Negative controls include `ROUND(积分,price)`, `ROUND(积分+10,price)`, and a multi-choice maybe-finite value with variable digits. Lazy/no-random behavior remains unchanged.
+
+### Fresh gates
+
+| Gate | Fresh observed result |
+|---|---|
+| Focused ROUND/config/validate-only/no-draw GREEN | exit 0; PASS. |
+| Focused stress (`-count=20`) | exit 0; PASS in 2.359s. |
+| Focused race (`-count=5`) | exit 0; PASS in 1.664s. |
+| `go test ./... -count=1 -timeout=300s` | exit 0; PASS in 23.032s. |
+| `go test -race ./... -count=1 -timeout=300s` | exit 0; PASS in 39.530s. |
+| `npm run typecheck` | exit 0; 0 TypeScript errors. |
+| `npm test -- --reporter=dot` | 43 files, 500 passed, 31 skipped, 0 failed; exit 0. |
+| `git diff --check` | exit 0; no whitespace errors. |
+
+No push, tag, release, package, version, or FFmpeg action was performed for round 5.
