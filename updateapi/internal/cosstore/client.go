@@ -19,6 +19,16 @@ const (
 	stableChannelKey = "channels/stable/latest.json"
 )
 
+// ErrNotFound indicates that COS did not contain the requested object.
+var ErrNotFound = errors.New("COS object not found")
+
+// ObjectInfo is the immutable-object metadata used to verify COS uploads.
+type ObjectInfo struct {
+	Size   int64
+	SHA256 string
+	ETag   string
+}
+
 type Client struct {
 	client    *cos.Client
 	secretID  string
@@ -62,7 +72,7 @@ func (client *Client) Get(ctx context.Context, key string, maxBytes int64) ([]by
 
 	response, err := client.client.Object.Get(ctx, key, nil)
 	if err != nil {
-		return nil, "", err
+		return nil, "", normalizeNotFound(err)
 	}
 	defer response.Body.Close()
 
@@ -74,6 +84,42 @@ func (client *Client) Get(ctx context.Context, key string, maxBytes int64) ([]by
 		return nil, "", fmt.Errorf("object %q exceeds %d byte limit", key, maxBytes)
 	}
 	return body, response.Header.Get("ETag"), nil
+}
+
+// Head reads object metadata without downloading the object body.
+func (client *Client) Head(ctx context.Context, key string) (ObjectInfo, error) {
+	if !isAllowedReadKey(key) {
+		return ObjectInfo{}, fmt.Errorf("object key %q is outside allowed paths", key)
+	}
+	response, err := client.client.Object.Head(ctx, key, nil)
+	if err != nil {
+		return ObjectInfo{}, normalizeNotFound(err)
+	}
+	return ObjectInfo{
+		Size:   response.ContentLength,
+		SHA256: response.Header.Get("X-Cos-Meta-Sha256"),
+		ETag:   response.Header.Get("ETag"),
+	}, nil
+}
+
+// Put writes an object and records its content digest as COS metadata.
+func (client *Client) Put(ctx context.Context, key string, body io.Reader, size int64, contentType, sha256 string) error {
+	if !isAllowedReadKey(key) {
+		return fmt.Errorf("object key %q is outside allowed paths", key)
+	}
+	if body == nil || size < 0 {
+		return errors.New("object body and non-negative size are required")
+	}
+	metadata := make(http.Header)
+	metadata.Set("x-cos-meta-sha256", sha256)
+	_, err := client.client.Object.Put(ctx, key, body, &cos.ObjectPutOptions{
+		ObjectPutHeaderOptions: &cos.ObjectPutHeaderOptions{
+			ContentLength: size,
+			ContentType:   contentType,
+			XCosMetaXXX:   &metadata,
+		},
+	})
+	return normalizeNotFound(err)
 }
 
 func (client *Client) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error) {
@@ -105,4 +151,14 @@ func isReleaseKey(key string) bool {
 		}
 	}
 	return true
+}
+
+func normalizeNotFound(err error) error {
+	if err == nil {
+		return nil
+	}
+	if response, ok := cos.IsCOSError(err); ok && response.Response != nil && response.Response.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w: %v", ErrNotFound, err)
+	}
+	return err
 }

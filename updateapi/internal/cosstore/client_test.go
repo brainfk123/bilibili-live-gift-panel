@@ -2,6 +2,8 @@ package cosstore_test
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,6 +14,66 @@ import (
 
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/cosstore"
 )
+
+func TestHeadReturnsMetadataAndTypedNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodHead {
+			t.Fatalf("method = %s, want HEAD", request.Method)
+		}
+		if request.URL.Path == "/releases/v0.4.4/missing.exe" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writer.Header().Set("Content-Length", "123")
+		writer.Header().Set("X-Cos-Meta-Sha256", strings.Repeat("a", 64))
+		writer.Header().Set("ETag", `"metadata-etag"`)
+	}))
+	defer server.Close()
+
+	store := newStore(t, server, time.Second)
+	info, err := store.Head(context.Background(), "releases/v0.4.4/gift-panel-windows-x64.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size != 123 || info.SHA256 != strings.Repeat("a", 64) || info.ETag != `"metadata-etag"` {
+		t.Fatalf("Head() = %+v, want COS metadata", info)
+	}
+	_, err = store.Head(context.Background(), "releases/v0.4.4/missing.exe")
+	if !errors.Is(err, cosstore.ErrNotFound) {
+		t.Fatalf("Head() error = %v, want typed not found", err)
+	}
+}
+
+func TestPutWritesDigestMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut {
+			t.Fatalf("method = %s, want PUT", request.Method)
+		}
+		if request.URL.Path != "/releases/v0.4.4/release.json" {
+			t.Fatalf("path = %q, want release manifest key", request.URL.Path)
+		}
+		if request.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("Content-Type = %q, want application/json", request.Header.Get("Content-Type"))
+		}
+		if request.Header.Get("X-Cos-Meta-Sha256") != strings.Repeat("b", 64) {
+			t.Fatalf("x-cos-meta-sha256 = %q, want release digest", request.Header.Get("X-Cos-Meta-Sha256"))
+		}
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(body) != `{"schemaVersion":1}` {
+			t.Fatalf("body = %q, want release JSON", body)
+		}
+		writer.Header().Set("X-Cos-Hash-Crc64ecma", "15068690071664149826")
+	}))
+	defer server.Close()
+
+	err := newStore(t, server, time.Second).Put(context.Background(), "releases/v0.4.4/release.json", strings.NewReader(`{"schemaVersion":1}`), int64(len(`{"schemaVersion":1}`)), "application/json", strings.Repeat("b", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestGetAuthorizesReadAndReturnsETag(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
