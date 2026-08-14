@@ -68,7 +68,10 @@ import {
   quickGiftOperationSupportsMaximum,
   quickGiftOperationUnit,
   quickGiftOperationUsesAmount,
+  quickGiftOperationUsesRange,
+  validateQuickGiftRuleDraft,
   type QuickGiftOperation,
+  type QuickGiftRuleDraft,
 } from './quick-gift-rules';
 import { createGameplayTemplateWizard } from './template-wizard';
 import type { GameplayTemplateBuildResult } from '../../gameplay-templates';
@@ -135,9 +138,7 @@ interface SelectedGiftRule {
   formula: string;
   condition: string;
   enabled: boolean;
-  quickOperation?: QuickGiftOperation;
-  quickAmount?: number;
-  quickMaximum?: number;
+  quickDraft?: QuickGiftRuleDraft;
   quickMaximumEnabled?: boolean;
   quickConditionMode?: QuickGiftConditionMode;
   quickConditionIdentity?: GiftUserIdentity;
@@ -3657,8 +3658,7 @@ export function mountConfig(root: HTMLElement): void {
           condition: '',
           enabled: !editorGuideEnabled,
           simulationIdentity: 0,
-          quickOperation: 'price',
-          quickAmount: 60,
+          quickDraft: { operation: 'price', amount: 60 },
         };
         selected.set(gift.id, item);
         void hydrateBlindBoxRule(item);
@@ -3863,12 +3863,9 @@ export function mountConfig(root: HTMLElement): void {
         });
       };
       const attributeName = nameInput.value.trim() || originalName || '属性';
-      if (!item.quickOperation) {
-        const detected = detectQuickGiftRule(item.formula, attributeName);
-        item.quickOperation = detected.operation;
-        item.quickAmount = detected.amount;
-        item.quickMaximum = detected.maximum;
-        item.quickMaximumEnabled = detected.maximum !== undefined;
+      if (!item.quickDraft) {
+        item.quickDraft = detectQuickGiftRule(item.formula, attributeName);
+        item.quickMaximumEnabled = item.quickDraft.maximum !== undefined;
       }
       const operationSelect = el('select', { class: 'field-input quick-rule-operation' }) as HTMLSelectElement;
       for (const group of QUICK_GIFT_OPERATION_GROUPS) {
@@ -3883,16 +3880,29 @@ export function mountConfig(root: HTMLElement): void {
         }
         operationSelect.append(optionGroup);
       }
-      operationSelect.value = item.quickOperation ?? 'advanced';
-      const amountInput = inputField('变化数值', String(item.quickAmount ?? 60));
+      operationSelect.value = item.quickDraft.operation;
+      const amountInput = inputField('变化数值', String('amount' in item.quickDraft ? item.quickDraft.amount : 60));
       amountInput.type = 'number';
       amountInput.step = 'any';
+      const rangeMinInput = inputField('随机最小变化', String(item.quickDraft.operation === 'randomRange' ? item.quickDraft.rangeMin : -60));
+      rangeMinInput.classList.add('quick-rule-range-min');
+      rangeMinInput.type = 'number';
+      rangeMinInput.step = '1';
+      const rangeMaxInput = inputField('随机最大变化', String(item.quickDraft.operation === 'randomRange' ? item.quickDraft.rangeMax : 60));
+      rangeMaxInput.classList.add('quick-rule-range-max');
+      rangeMaxInput.type = 'number';
+      rangeMaxInput.step = '1';
+      const rangeInput = el('div', { class: 'quick-rule-range' }, [
+        rangeMinInput,
+        el('span', { text: '到' }),
+        rangeMaxInput,
+      ]);
       const quickUnit = el('span', { class: 'quick-rule-unit' });
       const maximumToggle = el('input', { class: 'setting-switch-input', type: 'checkbox' }) as HTMLInputElement;
       maximumToggle.checked = item.quickMaximumEnabled === true;
       const maximumInput = inputField(
         '最高不超过',
-        String(item.quickMaximum ?? (formatSelect.value === 'hhmmss' ? 3600 : 100)),
+        String(item.quickDraft.maximum ?? (formatSelect.value === 'hhmmss' ? 3600 : 100)),
       );
       maximumInput.type = 'number';
       maximumInput.step = 'any';
@@ -3906,6 +3916,7 @@ export function mountConfig(root: HTMLElement): void {
         maximumInput,
         maximumUnit,
       ]);
+      const quickRuleError = el('div', { class: 'quick-rule-error error' });
       const syncQuickCopy = (): void => {
         const operation = operationSelect.value as QuickGiftOperation;
         const targetName = nameInput.value.trim() || originalName || '属性';
@@ -3914,7 +3925,9 @@ export function mountConfig(root: HTMLElement): void {
         }
         quickUnit.textContent = quickGiftOperationUnit(operation, formatSelect.value === 'hhmmss');
         amountInput.hidden = !quickGiftOperationUsesAmount(operation);
-        amountInput.min = operation === 'set' ? '' : operation.startsWith('random') ? '1' : '0';
+        quickUnit.hidden = !quickGiftOperationUsesAmount(operation);
+        amountInput.min = operation === 'set' ? '' : '0';
+        rangeInput.hidden = !quickGiftOperationUsesRange(operation);
         maximumLimit.hidden = !quickGiftOperationSupportsMaximum(operation);
         maximumInput.disabled = !maximumToggle.checked;
         maximumUnit.textContent = formatSelect.value === 'hhmmss' ? '秒' : '单位';
@@ -3922,29 +3935,42 @@ export function mountConfig(root: HTMLElement): void {
       const syncQuickRule = (): void => {
         const operation = operationSelect.value as QuickGiftOperation;
         const amount = Number(amountInput.value);
-        item.quickOperation = operation;
-        item.quickAmount = Number.isFinite(amount) ? amount : 0;
         const maximum = Number(maximumInput.value);
         item.quickMaximumEnabled = maximumToggle.checked && quickGiftOperationSupportsMaximum(operation);
-        item.quickMaximum = Number.isFinite(maximum) ? maximum : 0;
+        const optionalMaximum = item.quickMaximumEnabled && Number.isFinite(maximum) ? maximum : undefined;
+        const draft: QuickGiftRuleDraft = operation === 'randomRange'
+          ? {
+            operation,
+            rangeMin: Number(rangeMinInput.value),
+            rangeMax: Number(rangeMaxInput.value),
+            ...(optionalMaximum === undefined ? {} : { maximum: optionalMaximum }),
+          }
+          : {
+            operation,
+            amount: Number.isFinite(amount) ? amount : 0,
+            ...(optionalMaximum === undefined ? {} : { maximum: optionalMaximum }),
+          };
+        item.quickDraft = draft;
         const targetName = nameInput.value.trim() || originalName || '属性';
-        const formula = buildQuickGiftFormula(
-          operation,
-          targetName,
-          item.quickAmount,
-          item.quickMaximumEnabled ? item.quickMaximum : undefined,
-        );
-        if (formula !== null) formulaInput.value = formula;
+        const error = validateQuickGiftRuleDraft(draft);
+        quickRuleError.textContent = error ?? '';
+        if (error === null) {
+          const formula = buildQuickGiftFormula(draft, targetName);
+          if (formula !== null) formulaInput.value = formula;
+        }
         syncQuickCopy();
         updatePreview();
       };
       operationSelect.onchange = syncQuickRule;
       amountInput.oninput = syncQuickRule;
+      rangeMinInput.oninput = syncQuickRule;
+      rangeMaxInput.oninput = syncQuickRule;
       maximumToggle.onchange = syncQuickRule;
       maximumInput.oninput = syncQuickRule;
       formulaInput.oninput = () => {
-        item.quickOperation = 'advanced';
+        item.quickDraft = { operation: 'advanced', amount: 60 };
         operationSelect.value = 'advanced';
+        quickRuleError.textContent = '';
         syncQuickCopy();
         updatePreview();
       };
@@ -4013,8 +4039,9 @@ export function mountConfig(root: HTMLElement): void {
         const example = el('button', { class: 'formula-example', type: 'button', text: label }) as HTMLButtonElement;
         example.onclick = () => {
           formulaInput.value = makeFormula();
-          item.quickOperation = 'advanced';
+          item.quickDraft = { operation: 'advanced', amount: 60 };
           operationSelect.value = 'advanced';
+          quickRuleError.textContent = '';
           syncQuickCopy();
           updatePreview();
         };
@@ -4038,8 +4065,10 @@ export function mountConfig(root: HTMLElement): void {
           el('span', { text: `每收到 1 个“${item.gift.name}”后` }),
           operationSelect,
           amountInput,
+          rangeInput,
           quickUnit,
         ]),
+        quickRuleError,
         maximumLimit,
         el('div', { class: 'quick-rule-sentence quick-rule-condition' }, [
           el('span', { text: '送礼者身份' }),
@@ -4373,8 +4402,7 @@ export function mountConfig(root: HTMLElement): void {
         condition: '',
         enabled: !editorGuideEnabled,
         simulationIdentity: 0,
-        quickOperation: 'price',
-        quickAmount: 60,
+        quickDraft: { operation: 'price', amount: 60 },
       };
       if (selected.has(id)) onReplacingSelectedGift?.();
       selected.set(id, item);
@@ -4450,6 +4478,13 @@ export function mountConfig(root: HTMLElement): void {
     const normalizedRules: SelectedGiftRule[] = [];
     const normalizedTimers: TimerRule[] = [];
     for (const item of selected.values()) {
+      if (item.quickDraft && item.quickDraft.operation !== 'advanced') {
+        const quickDraftError = validateQuickGiftRuleDraft(item.quickDraft);
+        if (quickDraftError !== null) {
+          toast(quickDraftError, root);
+          return;
+        }
+      }
       const formulaName = item.formulaName.trim();
       if (!formulaName) {
         toast(`请填写“${item.gift.name}”的规则名称`, root);

@@ -1259,6 +1259,14 @@ body.config-mode::-webkit-scrollbar-corner,
   font-size: var(--type-meta);
 }
 .config-root .quick-rule-sentence .field-input { height: 40px; }
+.config-root .quick-rule-range {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.config-root .quick-rule-range .field-input { min-width: 0; }
 .config-root .quick-rule-condition { grid-template-columns: max-content minmax(160px, .7fr) minmax(120px, .45fr); }
 .config-root .quick-rule-builder > .field { min-width: 0; margin: 0; }
 .config-root .quick-rule-condition-mode,
@@ -1547,6 +1555,7 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .attribute-training-note { display: none; }
   .config-root .quick-rule-sentence { grid-template-columns: 1fr 1fr; }
   .config-root .quick-rule-sentence > span:first-child { grid-column: 1 / -1; }
+  .config-root .quick-rule-range { grid-column: 1 / -1; }
   .config-root .runtime-role-grid { grid-template-columns: 1fr; }
   .config-root .training-center-toolbar { grid-template-columns: 1fr; }
   .config-root .training-center-filters { justify-self: stretch; }
@@ -1575,6 +1584,8 @@ body.config-mode::-webkit-scrollbar-corner,
   .config-root .attribute-overview-preview { align-items: flex-start; flex-direction: column; }
   .config-root .quick-rule-sentence { grid-template-columns: 1fr; }
   .config-root .quick-rule-sentence > span:first-child { grid-column: auto; }
+  .config-root .quick-rule-range { grid-template-columns: 1fr; }
+  .config-root .quick-rule-range > span { text-align: center; }
   .config-root .quick-rule-heading,
   .config-root .quick-rule-actions { align-items: stretch; flex-direction: column; }
   .config-root .attribute-save-note { display: none; }

@@ -2606,7 +2606,7 @@ describe('single-page configuration rendering', () => {
     expect(textOf(operation)).toContain('让“加班时间”减少（最低为 0）');
     expect(textOf(operation)).toContain('把“加班时间”清零');
     expect(textOf(operation)).toContain('每 1 元让“加班时间”减少（最低为 0）');
-    expect(textOf(operation)).toContain('让“加班时间”随机减少 1 到（最低为 0）');
+    expect(textOf(operation)).toContain('让“加班时间”随机变化（最低为 0）');
 
     operation.value = 'subtract';
     operation.onchange?.();
@@ -2628,6 +2628,92 @@ describe('single-page configuration rendering', () => {
     maximum.value = '3600';
     maximum.oninput?.();
     expect(formula.value).toBe('MIN(加班时间+60,3600)');
+  });
+
+  it('edits an existing rule with a signed random range', () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-random-range', giftId: gift.id, attributeName: '加班时间', formulaName: '随机变化',
+      condition: '', formula: '加班时间+1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+
+    const operation = root.querySelector('.quick-rule-operation') as TestElement & { onchange?: () => void };
+    const optionValues = operation.querySelectorAll('option').map((option) => option.value);
+    expect(optionValues).toContain('randomRange');
+    expect(optionValues).not.toContain('randomSubtract');
+    operation.value = 'randomRange';
+    operation.onchange?.();
+
+    const minimum = root.querySelector('.quick-rule-range-min') as TestElement & { oninput?: () => void };
+    const maximum = root.querySelector('.quick-rule-range-max') as TestElement & { oninput?: () => void };
+    minimum.value = '-60';
+    minimum.oninput?.();
+    maximum.value = '60';
+    maximum.oninput?.();
+    expect((root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '触发后属性值') as TestElement).value)
+      .toBe('MAX(加班时间+RANDBETWEEN(-60,60),0)');
+  });
+
+  it.each([
+    ['加班时间+RANDBETWEEN(1,60)', '1', '60'],
+    ['MAX(加班时间-RANDBETWEEN(1,60),0)', '-60', '-1'],
+  ] as const)('loads legacy random formula %s into the signed range inputs', (formula, expectedMin, expectedMax) => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-legacy-random', giftId: gift.id, attributeName: '加班时间', formulaName: '旧随机规则',
+      condition: '', formula, enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+
+    expect((root.querySelector('.quick-rule-range-min') as TestElement).value).toBe(expectedMin);
+    expect((root.querySelector('.quick-rule-range-max') as TestElement).value).toBe(expectedMax);
+  });
+
+  it('keeps the last formula and blocks saving an invalid random range', async () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-invalid-random-range', giftId: gift.id, attributeName: '加班时间', formulaName: '随机变化',
+      condition: '', formula: 'MAX(加班时间+RANDBETWEEN(-60,60),0)', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    findByText(root, '编辑')?.onclick?.();
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const formulaInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '触发后属性值') as TestElement;
+    const minimum = root.querySelector('.quick-rule-range-min') as TestElement & { oninput?: () => void };
+    const maximum = root.querySelector('.quick-rule-range-max') as TestElement & { oninput?: () => void };
+    minimum.value = '10';
+    minimum.oninput?.();
+    const lastValidFormula = formulaInput.value;
+    maximum.value = '-10';
+    maximum.oninput?.();
+
+    expect(textOf(root.querySelector('.quick-rule-error') as TestElement)).toContain('随机范围的最小变化不能大于最大变化');
+    expect(formulaInput.value).toBe(lastValidFormula);
+    const fetchCount = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+    findByText(root, '保存修改')?.onclick?.();
+    await Promise.resolve();
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(fetchCount);
   });
 
   it('advances a gift simulation draft without saving it as the real attribute value', async () => {
