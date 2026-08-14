@@ -335,7 +335,7 @@ func main() {
 	mux.Handle("/api/gift-clips/", giftClipAPI)
 	mux.HandleFunc("/api/update", updater.handleStatus)
 	mux.HandleFunc("/api/update/check", updater.handleCheck)
-	mux.HandleFunc("/api/changelog", newHostedChangelogHandler(nil, hostedChangelogURL))
+	mux.HandleFunc("/api/changelog", newHostedChangelogHandler(nil, defaultHostedChangelogSources()))
 	mux.HandleFunc("/api/diagnostics/log", func(w http.ResponseWriter, r *http.Request) {
 		if diagnostics == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"code": -1, "message": "运行日志暂时不可用"})
