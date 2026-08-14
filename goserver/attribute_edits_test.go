@@ -594,6 +594,74 @@ func TestAttributeEditSubmitCannotDeadlockWithBackgroundFreezeCheck(t *testing.T
 	}
 }
 
+func TestAttributeEditExpiredClaimCannotBeResurrectedWhileStoreIsBlocked(t *testing.T) {
+	now := time.Unix(100, 0)
+	store := attributeEditFixtureStore(t)
+	leases := newAttributeEditLeaseCoordinator(15*time.Second, func() time.Time { return now }, func() (string, error) { return "AAAAAAAAAAAAAAAAAAAAAAAA", nil })
+	token, _, err := leases.Create("attribute-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, ok := leases.Begin("attribute-a", token)
+	if !ok || !first.Live() {
+		t.Fatal("first claim was not live")
+	}
+	service := newAttributeEditService(store, leases, fixedAttributeID)
+	secondStarted := make(chan struct{})
+	leases.afterBegin = func() { close(secondStarted) }
+	command := existingAttributeEdit("attribute-a", "能量", 10)
+	command.Target.LeaseToken = token
+	store.mu.Lock()
+	submitted := make(chan error, 1)
+	go func() {
+		_, err := service.Submit(command)
+		submitted <- err
+	}()
+	<-secondStarted
+	now = now.Add(15 * time.Second)
+	if first.Live() || leases.Has("attribute-a", token) {
+		store.mu.Unlock()
+		t.Fatal("expired claim remained live")
+	}
+	if _, ok := leases.Renew("attribute-a", token); ok {
+		store.mu.Unlock()
+		t.Fatal("Renew resurrected an expired claimed lease")
+	}
+	if _, ok := leases.Begin("attribute-a", token); ok {
+		store.mu.Unlock()
+		t.Fatal("Begin resurrected an expired claimed lease")
+	}
+	store.mu.Unlock()
+	err = <-submitted
+	var lost *attributeEditLeaseLostError
+	if !errors.As(err, &lost) {
+		t.Fatalf("submit error=%v, want lease lost", err)
+	}
+	released := make(chan bool, 1)
+	go func() { released <- leases.Release("attribute-a", token) }()
+	select {
+	case <-released:
+		t.Fatal("Release returned before the retained claim finished")
+	case <-time.After(30 * time.Millisecond):
+	}
+	first.Finish()
+	select {
+	case ok := <-released:
+		if !ok || leases.Has("attribute-a", token) {
+			t.Fatal("expired lease cleanup did not converge")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Release hung after retained claims finished")
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.findAttribute("能量") != nil {
+		t.Fatal("expired claim persisted an edit")
+	}
+}
+
 func attributeEditFixtureStore(t *testing.T) *configStore {
 	t.Helper()
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}

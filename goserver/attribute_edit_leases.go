@@ -29,6 +29,7 @@ type attributeEditLease struct {
 	expiresAt   time.Time
 	claims      int
 	releasing   bool
+	expired     bool
 }
 
 type attributeEditLeaseCoordinator struct {
@@ -89,7 +90,7 @@ func (leases *attributeEditLeaseCoordinator) Renew(attributeID, token string) (t
 	leases.removeExpiredLocked(now)
 
 	lease, ok := leases.sessions[token]
-	if !ok || lease.attributeID != attributeID || lease.releasing {
+	if !ok || lease.attributeID != attributeID || lease.releasing || lease.expired {
 		return time.Time{}, false
 	}
 	lease.expiresAt = now.Add(leases.ttl)
@@ -104,7 +105,7 @@ func (leases *attributeEditLeaseCoordinator) Has(attributeID, token string) bool
 	defer leases.mu.Unlock()
 	leases.removeExpiredLocked(leases.now())
 	lease, ok := leases.sessions[token]
-	return ok && !lease.releasing && lease.attributeID == attributeID
+	return ok && !lease.releasing && !lease.expired && lease.attributeID == attributeID
 }
 
 type attributeEditLeaseClaim struct {
@@ -123,7 +124,7 @@ func (leases *attributeEditLeaseCoordinator) Begin(attributeID, token string) (*
 	leases.mu.Lock()
 	leases.removeExpiredLocked(leases.now())
 	lease, ok := leases.sessions[token]
-	if !ok || lease.releasing || lease.attributeID != attributeID {
+	if !ok || lease.releasing || lease.expired || lease.attributeID != attributeID {
 		leases.mu.Unlock()
 		return nil, false
 	}
@@ -144,7 +145,8 @@ func (claim *attributeEditLeaseClaim) Live() bool {
 	leases := claim.coordinator
 	leases.mu.Lock()
 	defer leases.mu.Unlock()
-	return leases.sessions[claim.token] == claim.lease && claim.lease.claims > 0 && claim.lease.expiresAt.After(leases.now())
+	leases.removeExpiredLocked(leases.now())
+	return leases.sessions[claim.token] == claim.lease && !claim.lease.expired && claim.lease.claims > 0
 }
 
 func (claim *attributeEditLeaseClaim) Finish() {
@@ -192,7 +194,7 @@ func (leases *attributeEditLeaseCoordinator) IsFrozen(attributeID string) bool {
 	defer leases.mu.Unlock()
 	leases.removeExpiredLocked(leases.now())
 	for _, lease := range leases.sessions {
-		if lease.attributeID == attributeID && (lease.claims > 0 || lease.expiresAt.After(leases.now())) {
+		if lease.attributeID == attributeID && !lease.expired {
 			return true
 		}
 	}
@@ -202,7 +204,12 @@ func (leases *attributeEditLeaseCoordinator) IsFrozen(attributeID string) bool {
 func (leases *attributeEditLeaseCoordinator) removeExpiredLocked(now time.Time) {
 	for token, lease := range leases.sessions {
 		if !lease.expiresAt.After(now) && lease.claims == 0 {
+			lease.expired = true
 			delete(leases.sessions, token)
+			continue
+		}
+		if !lease.expiresAt.After(now) {
+			lease.expired = true
 		}
 	}
 }
