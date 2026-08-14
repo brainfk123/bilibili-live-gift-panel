@@ -37,6 +37,7 @@ func TestRunPublishesAndVerifiesVersionedObjectsBeforeStablePointer(t *testing.T
 		"HEAD releases/v1.2.3/release.json",
 		"PUT-IMMUTABLE releases/v1.2.3/release.json",
 		"HEAD releases/v1.2.3/release.json",
+		"GET channels/stable/latest.json",
 		"PUT channels/stable/latest.json",
 		"GET channels/stable/latest.json",
 	}
@@ -157,17 +158,85 @@ func TestRunLeavesStableUntouchedWhenVersionedUploadFails(t *testing.T) {
 	}
 }
 
-func TestRunRejectsStableReadbackMismatch(t *testing.T) {
+func TestRunRestoresValidatedPriorStableAfterReadbackMismatch(t *testing.T) {
 	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
 	store := newMemoryStore()
-	store.stableReadback = []byte(`{"schemaVersion":1,"tagName":"v9.9.9","publishedAt":"2026-08-14T12:00:00Z","asset":{"name":"gift-panel-windows-x64.exe","objectKey":"releases/v9.9.9/gift-panel-windows-x64.exe","size":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"changelogObjectKey":"releases/v9.9.9/gift-panel-changelog.json"}`)
+	prior := stableManifest("v1.1.0")
+	mismatch := stableManifest("v9.9.9")
+	store.stableGets = []stableGetResult{{body: prior}, {body: mismatch}, {body: prior}}
+	store.objects[stableKey] = storedObjectFor(prior)
 
 	err := Run(context.Background(), store, input)
 	if err == nil {
-		t.Fatal("Run() error = nil, want stable readback mismatch")
+		t.Fatal("Run() error = nil, want restored promotion failure")
 	}
-	if !store.hasStablePut() {
-		t.Fatal("stable pointer was not written before its readback check")
+	if strings.Contains(err.Error(), "promotion outcome is indeterminate") {
+		t.Fatalf("Run() error = %v, prior stable was restored and verified", err)
+	}
+	if got := store.objects[stableKey].body; string(got) != string(prior) {
+		t.Fatalf("stable body = %s, want restored prior %s", got, prior)
+	}
+	wantTail := "GET channels/stable/latest.json,PUT channels/stable/latest.json,GET channels/stable/latest.json,PUT channels/stable/latest.json,GET channels/stable/latest.json"
+	if got := strings.Join(store.operations[len(store.operations)-5:], ","); got != wantTail {
+		t.Fatalf("final operations = %s, want %s", got, wantTail)
+	}
+}
+
+func TestRunReturnsPromotionIndeterminateWhenRollbackFails(t *testing.T) {
+	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
+	store := newMemoryStore()
+	prior := stableManifest("v1.1.0")
+	store.stableGets = []stableGetResult{{body: prior}, {body: stableManifest("v9.9.9")}}
+	store.stablePutErrors = []error{nil, errors.New("restore denied")}
+	store.objects[stableKey] = storedObjectFor(prior)
+
+	err := Run(context.Background(), store, input)
+	if err == nil || !errors.Is(err, ErrPromotionIndeterminate) || !strings.Contains(err.Error(), "promotion outcome is indeterminate") {
+		t.Fatalf("Run() error = %v, want distinct promotion-indeterminate error", err)
+	}
+}
+
+func TestRunRestoresValidatedPriorStableAfterReadbackError(t *testing.T) {
+	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
+	store := newMemoryStore()
+	prior := stableManifest("v1.1.0")
+	store.stableGets = []stableGetResult{{body: prior}, {err: errors.New("read timeout")}, {body: prior}}
+	store.objects[stableKey] = storedObjectFor(prior)
+
+	err := Run(context.Background(), store, input)
+	if err == nil {
+		t.Fatal("Run() error = nil, want restored readback failure")
+	}
+	if errors.Is(err, ErrPromotionIndeterminate) {
+		t.Fatalf("Run() error = %v, prior stable was restored and verified", err)
+	}
+	if got := store.objects[stableKey].body; string(got) != string(prior) {
+		t.Fatalf("stable body = %s, want restored prior %s", got, prior)
+	}
+}
+
+func TestRunReturnsPromotionIndeterminateWithoutPriorStable(t *testing.T) {
+	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
+	store := newMemoryStore()
+	store.stableGets = []stableGetResult{{err: cosstore.ErrNotFound}, {body: stableManifest("v9.9.9")}}
+
+	err := Run(context.Background(), store, input)
+	if err == nil || !errors.Is(err, ErrPromotionIndeterminate) || !strings.Contains(err.Error(), "promotion outcome is indeterminate") {
+		t.Fatalf("Run() error = %v, want no-prior promotion-indeterminate error", err)
+	}
+}
+
+func TestRunRejectsInvalidPriorStableBeforePromotion(t *testing.T) {
+	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
+	store := newMemoryStore()
+	store.stableGets = []stableGetResult{{body: []byte(`{"schemaVersion":99}`)}}
+
+	err := Run(context.Background(), store, input)
+	if err == nil {
+		t.Fatal("Run() error = nil, want invalid prior stable rejection")
+	}
+	if store.hasStablePut() {
+		t.Fatal("stable pointer was modified after prior stable validation failed")
 	}
 }
 
@@ -195,12 +264,18 @@ type storedObject struct {
 	digest string
 }
 
+type stableGetResult struct {
+	body []byte
+	err  error
+}
+
 type memoryStore struct {
 	objects           map[string]storedObject
 	operations        []string
 	putError          error
 	immutablePutError error
-	stableReadback    []byte
+	stableGets        []stableGetResult
+	stablePutErrors   []error
 }
 
 func newMemoryStore() *memoryStore {
@@ -218,6 +293,13 @@ func (store *memoryStore) Head(_ context.Context, key string) (cosstore.ObjectIn
 
 func (store *memoryStore) Put(_ context.Context, key string, body io.Reader, size int64, _ string, digest string) error {
 	store.operations = append(store.operations, "PUT "+key)
+	if key == stableKey && len(store.stablePutErrors) > 0 {
+		err := store.stablePutErrors[0]
+		store.stablePutErrors = store.stablePutErrors[1:]
+		if err != nil {
+			return err
+		}
+	}
 	if store.putError != nil && key != "channels/stable/latest.json" {
 		return store.putError
 	}
@@ -253,14 +335,29 @@ func (store *memoryStore) PutImmutable(_ context.Context, key string, body io.Re
 
 func (store *memoryStore) Get(_ context.Context, key string, _ int64) ([]byte, string, error) {
 	store.operations = append(store.operations, "GET "+key)
-	if key == "channels/stable/latest.json" && store.stableReadback != nil {
-		return append([]byte(nil), store.stableReadback...), "", nil
+	if key == stableKey && len(store.stableGets) > 0 {
+		result := store.stableGets[0]
+		store.stableGets = store.stableGets[1:]
+		return append([]byte(nil), result.body...), "", result.err
 	}
 	object, ok := store.objects[key]
 	if !ok {
 		return nil, "", cosstore.ErrNotFound
 	}
 	return append([]byte(nil), object.body...), "", nil
+}
+
+func stableManifest(tag string) []byte {
+	return []byte(fmt.Sprintf(`{"schemaVersion":1,"tagName":%q,"publishedAt":"2026-08-14T12:00:00Z","asset":{"name":"gift-panel-windows-x64.exe","objectKey":%q,"size":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"changelogObjectKey":%q}`,
+		tag,
+		"releases/"+tag+"/gift-panel-windows-x64.exe",
+		"releases/"+tag+"/gift-panel-changelog.json",
+	))
+}
+
+func storedObjectFor(body []byte) storedObject {
+	digest := sha256.Sum256(body)
+	return storedObject{body: append([]byte(nil), body...), digest: hex.EncodeToString(digest[:])}
 }
 
 func (store *memoryStore) hasStablePut() bool {

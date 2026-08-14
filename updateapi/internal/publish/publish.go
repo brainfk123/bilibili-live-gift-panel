@@ -2,6 +2,7 @@
 package publish
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -38,6 +39,10 @@ type Store interface {
 }
 
 var canonicalTag = regexp.MustCompile(`^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$`)
+
+// ErrPromotionIndeterminate means the stable pointer may have advanced and
+// automatic restoration could not be verified. Operators must inspect COS.
+var ErrPromotionIndeterminate = errors.New("stable promotion outcome is indeterminate")
 
 // Input identifies the locally built release materials.
 type Input struct {
@@ -116,21 +121,66 @@ func Run(ctx context.Context, store Store, input Input) error {
 	}
 
 	stable := newObject(stableKey, manifestBody, "application/json")
+	prior, err := readPriorStable(ctx, store)
+	if err != nil {
+		return err
+	}
+	if prior != nil && bytes.Equal(prior.body, stable.body) {
+		return nil
+	}
 	if err := store.Put(ctx, stable.key, strings.NewReader(string(stable.body)), int64(len(stable.body)), stable.contentType, stable.digest); err != nil {
-		return fmt.Errorf("write stable pointer: %w", err)
+		return recoverPriorStable(ctx, store, prior, fmt.Errorf("write stable pointer: %w", err))
 	}
 	readback, _, err := store.Get(ctx, stableKey, maxStableBytes)
 	if err != nil {
-		return fmt.Errorf("read stable pointer: %w", err)
+		return recoverPriorStable(ctx, store, prior, fmt.Errorf("read stable pointer: %w", err))
 	}
-	verified, err := release.ParseChannelManifest(readback)
-	if err != nil {
-		return fmt.Errorf("parse stable pointer: %w", err)
-	}
-	if verified != manifest {
-		return errors.New("stable pointer readback does not match published release")
+	if err := verifyStableReadback(stable, readback); err != nil {
+		return recoverPriorStable(ctx, store, prior, err)
 	}
 	return nil
+}
+
+func readPriorStable(ctx context.Context, store Store) (*object, error) {
+	body, _, err := store.Get(ctx, stableKey, maxStableBytes)
+	if errors.Is(err, cosstore.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read prior stable pointer: %w", err)
+	}
+	if _, err := release.ParseChannelManifest(body); err != nil {
+		return nil, fmt.Errorf("validate prior stable pointer: %w", err)
+	}
+	prior := newObject(stableKey, body, "application/json")
+	return &prior, nil
+}
+
+func verifyStableReadback(want object, got []byte) error {
+	if !bytes.Equal(got, want.body) {
+		return errors.New("stable pointer exact readback does not match published release")
+	}
+	if _, err := release.ParseChannelManifest(got); err != nil {
+		return fmt.Errorf("validate stable pointer readback: %w", err)
+	}
+	return nil
+}
+
+func recoverPriorStable(ctx context.Context, store Store, prior *object, promotionErr error) error {
+	if prior == nil {
+		return fmt.Errorf("%w: %v; no prior stable pointer is available for restoration", ErrPromotionIndeterminate, promotionErr)
+	}
+	if err := store.Put(ctx, prior.key, strings.NewReader(string(prior.body)), int64(len(prior.body)), prior.contentType, prior.digest); err != nil {
+		return fmt.Errorf("%w: %v; restore prior stable pointer: %v", ErrPromotionIndeterminate, promotionErr, err)
+	}
+	readback, _, err := store.Get(ctx, stableKey, maxStableBytes)
+	if err != nil {
+		return fmt.Errorf("%w: %v; verify restored stable pointer: %v", ErrPromotionIndeterminate, promotionErr, err)
+	}
+	if err := verifyStableReadback(*prior, readback); err != nil {
+		return fmt.Errorf("%w: %v; verify restored stable pointer: %v", ErrPromotionIndeterminate, promotionErr, err)
+	}
+	return fmt.Errorf("stable promotion failed; prior stable pointer restored and verified: %w", promotionErr)
 }
 
 func readAsset(path string) (object, error) {

@@ -5,26 +5,30 @@ import { isScalar, parseDocument } from 'yaml';
 interface ReleaseStep {
   env?: Record<string, string>;
   id?: string;
+  if?: string;
   name?: string;
   run?: string;
   uses?: string;
+  with?: Record<string, unknown>;
   'working-directory'?: string;
 }
 
 const auditedSetupMSYS2Commit = '66cd2cce69caa17b53920067426061ca1de3a884';
 
 function releaseWorkflow() {
+  const source = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
   const document = parseDocument(
-    readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8'),
+    source,
   );
   expect(document.errors).toEqual([]);
 
   const workflow = document.toJS() as {
-    jobs?: { release?: { steps?: ReleaseStep[] } };
+    jobs?: { release?: { environment?: string; steps?: ReleaseStep[] } };
   };
-  const steps = workflow.jobs?.release?.steps;
+  const release = workflow.jobs?.release;
+  const steps = release?.steps;
   expect(Array.isArray(steps)).toBe(true);
-  return { document, steps: steps ?? [] };
+  return { document, release, source, steps: steps ?? [] };
 }
 
 function stepIndex(steps: ReleaseStep[], name: string): number {
@@ -34,6 +38,28 @@ function stepIndex(steps: ReleaseStep[], name: string): number {
 }
 
 describe('release workflow supply-chain contract', () => {
+  it('validates a canonical tag before an exact non-credentialed checkout', () => {
+    const { release, source, steps } = releaseWorkflow();
+    const validate = stepIndex(steps, 'Validate release tag');
+    const checkout = stepIndex(steps, 'Check out release tag');
+    const resolveCommit = stepIndex(steps, 'Resolve checked-out release commit');
+
+    expect(release?.environment).toBe('release');
+    expect(validate).toBe(0);
+    expect(checkout).toBe(1);
+    expect(steps[validate]?.run).toContain(
+      "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$",
+    );
+    expect(steps[checkout]?.with).toMatchObject({
+      ref: 'refs/tags/${{ env.RELEASE_TAG }}',
+      'persist-credentials': false,
+    });
+    expect(checkout).toBeLessThan(resolveCommit);
+    expect(steps[resolveCommit]?.run).toContain('$releaseCommit = git rev-parse HEAD');
+    expect(steps[resolveCommit]?.run).toContain('RELEASE_COMMIT=$releaseCommit');
+    expect(source).not.toContain('github.sha');
+  });
+
   it('uses the audited setup-msys2 v2 commit and rejects mutable refs', () => {
     const { document, steps } = releaseWorkflow();
     const setupSteps = steps.filter((step) => step.uses?.startsWith('msys2/setup-msys2@'));
@@ -82,7 +108,7 @@ describe('release workflow supply-chain contract', () => {
     const { steps } = releaseWorkflow();
     const testUpdateApi = stepIndex(steps, 'Test domestic update tooling');
     const signOuter = stepIndex(steps, 'Prepare and sign release executable');
-    const githubRelease = stepIndex(steps, 'Create or update GitHub release');
+    const githubRelease = stepIndex(steps, 'Create GitHub release');
 
     expect(steps[testUpdateApi]?.run).toBe('go -C updateapi test ./... -race -count=1');
     expect(testUpdateApi).toBeLessThan(githubRelease);
@@ -102,11 +128,12 @@ describe('release workflow supply-chain contract', () => {
     const { steps } = releaseWorkflow();
     const build = stepIndex(steps, 'Build release executable');
     const sign = stepIndex(steps, 'Prepare and sign release executable');
-    const githubRelease = stepIndex(steps, 'Create or update GitHub release');
+    const githubRelease = stepIndex(steps, 'Create GitHub release');
     const mirror = stepIndex(steps, 'Mirror release to Tencent COS');
     const mirrorStep = steps[mirror];
 
     expect(steps[build]?.env).toMatchObject({
+      APP_COMMIT: '${{ env.RELEASE_COMMIT }}',
       APP_UPDATE_API_URL: '${{ vars.UPDATE_API_BASE_URL }}',
       APP_UPDATE_PUBLISHER: '${{ vars.EVSIGN_EXPECTED_SUBJECT }}',
     });
@@ -117,7 +144,7 @@ describe('release workflow supply-chain contract', () => {
     expect(mirror).toBe(steps.length - 1);
     expect(mirrorStep?.['working-directory']).toBe('updateapi');
     expect(mirrorStep?.run).toContain(
-      'go run ./cmd/publish --tag $env:RELEASE_TAG --asset ../dist/gift-panel-windows-x64.exe --checksum ../dist/gift-panel-windows-x64.exe.sha256 --changelog ../dist/gift-panel-changelog.json',
+      'go run ./cmd/publish --tag $env:RELEASE_TAG --published-at $env:RELEASE_PUBLISHED_AT --asset ../dist/gift-panel-windows-x64.exe --checksum ../dist/gift-panel-windows-x64.exe.sha256 --changelog ../dist/gift-panel-changelog.json',
     );
     expect(mirrorStep?.run).toContain('throw "Tencent COS release mirror failed"');
     expect(mirrorStep?.env).toEqual({
@@ -127,5 +154,78 @@ describe('release workflow supply-chain contract', () => {
       COS_SECRET_KEY: '${{ secrets.COS_RELEASE_SECRET_KEY }}',
     });
     expect(mirrorStep?.run).not.toMatch(/COS_(?:SECRET_ID|SECRET_KEY)/);
+  });
+
+  it('reuses complete existing GitHub assets without rebuilding, resigning, or clobbering', () => {
+    const { steps } = releaseWorkflow();
+    const inspect = stepIndex(steps, 'Inspect existing GitHub release');
+    const download = stepIndex(steps, 'Download existing release assets');
+    const build = stepIndex(steps, 'Build release executable');
+    const sign = stepIndex(steps, 'Prepare and sign release executable');
+    const create = stepIndex(steps, 'Create GitHub release');
+    const validate = stepIndex(steps, 'Validate published release assets');
+    const mirror = stepIndex(steps, 'Mirror release to Tencent COS');
+
+    expect(inspect).toBeLessThan(download);
+    expect(steps[inspect]?.run).toContain('published_at');
+    expect(steps[download]?.if).toBe("env.RELEASE_EXISTS == 'true'");
+    expect(steps[download]?.run).toContain('--pattern gift-panel-windows-x64.exe');
+    expect(steps[download]?.run).toContain('--pattern gift-panel-windows-x64.exe.sha256');
+    expect(steps[download]?.run).toContain('--pattern gift-panel-changelog.json');
+    expect(steps[download]?.run).toContain('Manual recovery required');
+    for (const name of [
+      'Install dependencies',
+      'Run tests',
+      'Type check',
+      'Build frontend',
+      'Prepare backend UI assets',
+      'Set up MSYS2 host environment',
+      'Build and verify pinned FFmpeg',
+      'Sign and verify inner FFmpeg',
+      'Package and verify signed FFmpeg payload',
+      'Build release executable',
+      'Run backend tests',
+      'Prepare and sign release executable',
+      'Install pinned Playwright Chromium for release E2E',
+      'Verify deterministic gift clip exports from signed package chain',
+      'Prepare release assets',
+      'Attest executable provenance',
+    ]) {
+      expect(steps[stepIndex(steps, name)]?.if, `${name} must be skipped for repair`)
+        .toBe("env.RELEASE_EXISTS != 'true'");
+    }
+    expect(steps[build]?.if).toBe("env.RELEASE_EXISTS != 'true'");
+    expect(steps[sign]?.if).toBe("env.RELEASE_EXISTS != 'true'");
+    expect(steps[create]?.if).toBe("env.RELEASE_EXISTS != 'true'");
+    expect(steps[create]?.run).not.toContain('--clobber');
+    expect(steps[create]?.run).toContain(
+      'gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256',
+    );
+    expect(steps[create]?.run).toContain('dist/gift-panel-changelog.json');
+    expect(create).toBeLessThan(validate);
+    expect(steps[validate]?.run).toContain(
+      'Get-AuthenticodeSignature -LiteralPath dist/gift-panel-windows-x64.exe',
+    );
+    expect(steps[validate]?.run).toContain('$signature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT');
+    expect(steps[validate]?.run).toContain('Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel-windows-x64.exe');
+    expect(steps[validate]?.run).toContain('gift-panel-windows-x64.exe.sha256');
+    expect(validate).toBeLessThan(mirror);
+  });
+
+  it('checks every gh command immediately so publication failures cannot be masked', () => {
+    const { steps } = releaseWorkflow();
+    const ghRuns = steps
+      .map((step) => step.run)
+      .filter((run): run is string => typeof run === 'string' && /\bgh (?:api|release)\b/.test(run));
+    expect(ghRuns.length).toBeGreaterThan(0);
+
+    for (const run of ghRuns) {
+      const lines = run.split(/\r?\n/);
+      for (let index = 0; index < lines.length; index += 1) {
+        if (!/\bgh (?:api|release)\b/.test(lines[index] ?? '')) continue;
+        expect(lines[index + 1]?.trim(), `unchecked gh command: ${lines[index]?.trim()}`)
+          .toMatch(/^if \(\$LASTEXITCODE -ne 0\) \{ throw /);
+      }
+    }
   });
 });

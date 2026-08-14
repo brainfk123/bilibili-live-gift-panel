@@ -10,18 +10,18 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/cosstore"
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/publish"
 )
 
 func TestRunRequiresAllPublishingFlagsBeforeCreatingStore(t *testing.T) {
+	asset, checksum, changelog := commandInputs(t)
 	called := false
-	err := run([]string{"--tag", "v1.2.3"}, func() (publish.Store, error) {
+	err := run([]string{"--tag", "v1.2.3", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
 		called = true
 		return nil, errors.New("must not create store")
-	}, time.Now, io.Discard)
+	}, io.Discard)
 	if err == nil {
 		t.Fatal("run() error = nil, want required flag rejection")
 	}
@@ -30,13 +30,28 @@ func TestRunRequiresAllPublishingFlagsBeforeCreatingStore(t *testing.T) {
 	}
 }
 
+func TestRunRejectsInvalidPublishedTimestampBeforeCreatingStore(t *testing.T) {
+	asset, checksum, changelog := commandInputs(t)
+	called := false
+	err := run([]string{"--tag", "v1.2.3", "--published-at", "yesterday", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+		called = true
+		return nil, errors.New("must not create store")
+	}, io.Discard)
+	if err == nil {
+		t.Fatal("run() error = nil, want published timestamp rejection")
+	}
+	if called {
+		t.Fatal("run() created COS store before checking published timestamp")
+	}
+}
+
 func TestRunRejectsInvalidTagWithoutPublishing(t *testing.T) {
 	asset, checksum, changelog := commandInputs(t)
 	store := newCommandStore()
 	var output bytes.Buffer
-	err := run([]string{"--tag", "v1.2.3+extra/path", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+	err := run([]string{"--tag", "v1.2.3+extra/path", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
 		return store, nil
-	}, func() time.Time { return time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC) }, &output)
+	}, &output)
 	if err == nil {
 		t.Fatal("run() error = nil, want invalid tag rejection")
 	}
@@ -52,15 +67,19 @@ func TestRunPrintsOnlyVerifiedTagAndObjectKeys(t *testing.T) {
 	asset, checksum, changelog := commandInputs(t)
 	store := newCommandStore()
 	var output bytes.Buffer
-	err := run([]string{"--tag", "v1.2.3", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+	err := run([]string{"--tag", "v1.2.3", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
 		return store, nil
-	}, func() time.Time { return time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC) }, &output)
+	}, &output)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := "v1.2.3\nreleases/v1.2.3/gift-panel-windows-x64.exe\nreleases/v1.2.3/gift-panel-windows-x64.exe.sha256\nreleases/v1.2.3/gift-panel-changelog.json\nreleases/v1.2.3/release.json\nchannels/stable/latest.json\n"
 	if output.String() != want {
 		t.Fatalf("output = %q, want only verified release identifiers", output.String())
+	}
+	stable := string(store.objects["channels/stable/latest.json"].body)
+	if !bytes.Contains([]byte(stable), []byte(`"publishedAt":"2026-08-14T10:30:00Z"`)) {
+		t.Fatalf("stable manifest = %s, want preserved GitHub release timestamp", stable)
 	}
 }
 

@@ -39,11 +39,11 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-发布标签时，GitHub Actions 会运行 TypeScript、后端及国内更新工具测试，构建并验证 `gift-panel-windows-x64.exe` 的 Authenticode 签名、发布 GitHub Release，最后把同一个已签名 EXE、SHA-256 文件和更新日志镜像到私有腾讯云 COS。只有 GitHub Release 成功后才会开始 COS 发布；publisher 会校验对象的 size/SHA-256，保持 `releases/` 对象不可变，并在所有版本对象验证成功后最后更新 `channels/stable/latest.json`。
+发布标签时，GitHub Actions 会运行 TypeScript、后端及国内更新工具测试，构建并验证 `gift-panel-windows-x64.exe` 的 Authenticode 签名、发布 GitHub Release，最后把同一个已签名 EXE、SHA-256 文件和更新日志镜像到私有腾讯云 COS。只有 GitHub Release 成功后才会开始 COS 发布；publisher 会校验对象的 size/SHA-256，保持 `releases/` 对象不可变，并在所有版本对象验证成功后最后更新 `channels/stable/latest.json`。同一标签重跑时不会重新构建、重签或覆盖 GitHub 资产，而是下载已发布的 EXE、checksum 与 changelog，重新验证签名发布者和 SHA-256，并沿用 GitHub Release 原始发布时间后再镜像；资产缺失或不一致时必须先人工修复 GitHub Release。
 
-Release 工作流需要配置 GitHub Actions variables `UPDATE_API_BASE_URL`、`COS_BUCKET`、`COS_REGION`、`EVSIGN_EXPECTED_SUBJECT`，以及 secrets `COS_RELEASE_SECRET_ID`、`COS_RELEASE_SECRET_KEY`。COS 凭证应仅有指定 bucket 下 `releases/*` 与 `channels/stable/latest.json` 所需的最小 Head/Get/Put 权限，不得授予删除权限；bucket 保持私有且不要启用版本控制。完整的 COS/API 初始化、验证、备份、回滚及凭证轮换步骤见[国内更新 API 部署说明](deploy/update-api/README.md)。
+Release job 绑定受保护的 GitHub Environment `release`；应为它配置必要的审批/分支规则，并把发布、EVSign 与 COS secrets 只放在该环境中。工作流需要 GitHub Actions variables `UPDATE_API_BASE_URL`、`COS_BUCKET`、`COS_REGION`、`EVSIGN_EXPECTED_SUBJECT`，以及 secrets `COS_RELEASE_SECRET_ID`、`COS_RELEASE_SECRET_KEY`。COS 凭证应仅有指定 bucket 下 `releases/*` 与 `channels/stable/latest.json` 所需的最小 Head/Get/Put 权限，不得授予删除权限；bucket 保持私有且不要启用版本控制。完整的 COS/API 初始化、验证、备份、回滚及凭证轮换步骤见[国内更新 API 部署说明](deploy/update-api/README.md)。
 
-如果 COS 镜像失败，工作流会失败，但已经创建的 GitHub Release 仍可用，COS 的 stable 清单继续指向上一个已完整验证的版本；修复配置或权限后，可以对同一标签手动重跑 Release 工作流。
+如果 COS 镜像在 stable promotion 之前失败，旧的 stable 清单保证不变。写入新 stable 后若 exact readback 失败，publisher 会尝试恢复并验证写入前的 stable；只有恢复验证成功时才能确认旧版本已经恢复。没有旧指针或恢复失败会报告 `stable promotion outcome is indeterminate`，此时操作员必须先检查 `channels/stable/latest.json`，按部署说明恢复已验证备份并验证 API，再重跑工作流。COS 的单对象覆盖不提供跨请求原子事务，因此不得把 post-PUT 错误描述为“stable 保证未变化”。无论哪种 COS 失败，已经创建的 GitHub Release 仍可用作客户端回退。
 
 正式 EXE 会在配置页和 OBS 面板全部关闭的空闲状态下优先读取国内更新 API；国内元数据或同版本下载失败时自动回退到 GitHub Release 静态清单与下载地址，不占用 GitHub API 额度。之后每 6 小时最多自动检查一次。程序会静默下载、校验 SHA-256 与签名发布者、替换 EXE 并重新启动后台服务。更新后的首次启动只显示系统通知，不会自动打开配置页面。配置页面的“外观与数据 → 程序更新”中可以关闭自动更新或手动检查更新。
 
