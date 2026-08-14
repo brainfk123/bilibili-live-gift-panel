@@ -176,6 +176,40 @@ export function saveStateTransaction(state: AppState): Promise<AppState> {
 }
 
 /**
+ * Applies one field after previously queued state work has published, without
+ * superseding that work. A state operation invoked after this follow-up still
+ * wins and prevents the follow-up from publishing.
+ */
+export function saveStateFieldTransaction<K extends StateFieldKey>(
+  field: K,
+  update: (current: Readonly<AppState>) => AppState[K],
+): Promise<AppState> {
+  const startingEpoch = stateOperationEpoch;
+  const transaction = persistQueue
+    .catch(() => undefined)
+    .then(async () => {
+      if (stateOperationEpoch !== startingEpoch) {
+        throw new Error('配置在保存期间发生变化，请重试');
+      }
+      const current = normalizeState(loadState());
+      const candidate = normalizeState({ ...current, [field]: update(current) });
+      const snapshots = snapshotStateFields(candidate);
+      await persistStateToServer(snapshots, [field]);
+      lastPersistedState = candidate;
+      if (stateOperationEpoch !== startingEpoch) {
+        throw new Error('配置在保存期间发生变化，请重试');
+      }
+      publishCachedState(candidate);
+      return candidate;
+    });
+  persistQueue = transaction.then(
+    () => undefined,
+    () => undefined,
+  );
+  return transaction;
+}
+
+/**
  * Serializes a server-owned mutation with local persistence and adopts only
  * the normalized state returned by that command.
  */
@@ -289,9 +323,12 @@ function restoreLastPersistedState(operationEpoch: number): void {
   }
 }
 
-async function persistStateToServer(snapshots: StateFieldSnapshots): Promise<void> {
+async function persistStateToServer(
+  snapshots: StateFieldSnapshots,
+  fields: ReadonlyArray<StateFieldKey> = STATE_FIELD_KEYS,
+): Promise<void> {
   if (typeof fetch !== 'function') return;
-  const changedFields = STATE_FIELD_KEYS.filter((key) => (
+  const changedFields = fields.filter((key) => (
     forcePersistFields.has(key) || persistedFieldSnapshots[key] !== snapshots[key]
   ));
   if (changedFields.length === 0) return;

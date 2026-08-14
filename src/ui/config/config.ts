@@ -1,5 +1,5 @@
 import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftKpiBarStyle, GiftKpiLayout, GiftKpiPanel, GiftReceipt, GiftRule, MAX_GIFT_RECEIPTS, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
-import { clearRoomScopedRecords, commitAuthoritativeStateMutation, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState } from '../../storage';
+import { clearRoomScopedRecords, commitAuthoritativeStateMutation, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState, saveStateFieldTransaction } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { bindFloatingDetailCard, el, fieldControl, inputField, setFloatingDetailGuideExpanded, toast } from '../common';
 import { builtinCatalog, findGift } from '../../gifts/catalog';
@@ -4835,6 +4835,13 @@ export function mountConfig(root: HTMLElement): void {
     const submittedTarget = submittedResult.target;
     if (submitWasPublished && tutorialGuidanceActive && submittedTarget) {
       const tutorialState = JSON.parse(JSON.stringify(loadState())) as AppState;
+      const tutorialBaseline = {
+        showTutorial: tutorialState.settings.showTutorial,
+        tutorialVersion: tutorialState.settings.tutorialVersion,
+        tutorialCompletedLessons: [...tutorialState.settings.tutorialCompletedLessons],
+        tutorialReplayMode: tutorialState.settings.tutorialReplayMode,
+        tutorialTargetAttributeId: tutorialState.settings.tutorialTargetAttributeId,
+      };
       if (preserveTutorialTarget) tutorialState.settings.tutorialTargetAttributeId = submittedTarget.id;
       markTutorialLessonComplete(tutorialState.settings, 'attribute');
       markTutorialLessonComplete(tutorialState.settings, 'template');
@@ -4852,22 +4859,31 @@ export function mountConfig(root: HTMLElement): void {
         tutorialTargetAttributeId: tutorialState.settings.tutorialTargetAttributeId,
       };
       const persistTutorialSettings = async (): Promise<void> => {
-        const current = loadState();
-        if (!current.attributes.some((attribute) => attribute.id === submittedTarget.id)) {
-          throw new Error('当前配置已变化，教程进度未保存。请取消并重新打开配置。');
-        }
-        const candidate = JSON.parse(JSON.stringify(current)) as AppState;
-        candidate.settings.tutorialVersion = desiredTutorialSettings.tutorialVersion;
-        candidate.settings.tutorialCompletedLessons = [...desiredTutorialSettings.tutorialCompletedLessons];
-        candidate.settings.tutorialReplayMode = desiredTutorialSettings.tutorialReplayMode;
-        if (desiredTutorialSettings.tutorialTargetAttributeId) {
-          candidate.settings.tutorialTargetAttributeId = desiredTutorialSettings.tutorialTargetAttributeId;
-        } else {
-          delete candidate.settings.tutorialTargetAttributeId;
-        }
         localStateVersion += 1;
-        await saveState(candidate);
-        Object.assign(state, loadState());
+        const published = await saveStateFieldTransaction('settings', (current) => {
+          const baselineStillPublished = current.settings.showTutorial === tutorialBaseline.showTutorial
+            && current.settings.tutorialVersion === tutorialBaseline.tutorialVersion
+            && JSON.stringify(current.settings.tutorialCompletedLessons) === JSON.stringify(tutorialBaseline.tutorialCompletedLessons)
+            && current.settings.tutorialReplayMode === tutorialBaseline.tutorialReplayMode
+            && current.settings.tutorialTargetAttributeId === tutorialBaseline.tutorialTargetAttributeId;
+          if (!baselineStillPublished
+            || !current.attributes.some((attribute) => attribute.id === submittedTarget.id)) {
+            throw new Error('当前配置已变化，教程进度未保存。请取消并重新打开配置。');
+          }
+          const settings = {
+            ...current.settings,
+            tutorialVersion: desiredTutorialSettings.tutorialVersion,
+            tutorialCompletedLessons: [...desiredTutorialSettings.tutorialCompletedLessons],
+            tutorialReplayMode: desiredTutorialSettings.tutorialReplayMode,
+          };
+          if (desiredTutorialSettings.tutorialTargetAttributeId) {
+            settings.tutorialTargetAttributeId = desiredTutorialSettings.tutorialTargetAttributeId;
+          } else {
+            delete settings.tutorialTargetAttributeId;
+          }
+          return settings;
+        });
+        Object.assign(state, published);
       };
       const finishTutorialPersistence = (): void => {
         setSaveInFlight(false);

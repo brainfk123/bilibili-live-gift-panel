@@ -4770,7 +4770,7 @@ describe('single-page configuration rendering', () => {
       });
     }
 
-    async function openTutorialSettingsFailure() {
+    async function openTutorialSettingsFailure(options: { deferSubsequentSettingsPatches?: boolean } = {}) {
       const opening = configuredAggregate();
       opening.settings.showTutorial = true;
       opening.settings.tutorialReplayMode = true;
@@ -4785,15 +4785,20 @@ describe('single-page configuration rendering', () => {
       delete authoritative.settings.tutorialTargetAttributeId;
       const calls: {
         attributePosts: number;
+        configPatches: Array<Record<string, unknown>>;
         settingsPatches: Array<Record<string, unknown>>;
         releases: Array<Record<string, string>>;
         serverState: typeof authoritative;
         resolveRetryPatch?: (response: Response) => void;
+        deferNextBroadPatch: boolean;
+        resolveBroadPatch?: (response: Response) => void;
       } = {
         attributePosts: 0,
+        configPatches: [],
         settingsPatches: [],
         releases: [],
         serverState: JSON.parse(JSON.stringify(opening)) as typeof opening,
+        deferNextBroadPatch: false,
       };
       const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const path = String(input);
@@ -4807,14 +4812,30 @@ describe('single-page configuration rendering', () => {
         }
         if (path === '/api/config' && init?.method === 'PATCH') {
           const patch = JSON.parse(String(init.body)) as Record<string, unknown>;
+          calls.configPatches.push(patch);
           if (!Object.prototype.hasOwnProperty.call(patch, 'settings')) {
+            if (calls.deferNextBroadPatch) {
+              calls.deferNextBroadPatch = false;
+              return new Promise<Response>((resolve) => {
+                calls.resolveBroadPatch = (response) => {
+                  calls.resolveBroadPatch = undefined;
+                  if (response.ok) calls.serverState = { ...calls.serverState, ...patch } as typeof authoritative;
+                  resolve(response);
+                };
+              });
+            }
             calls.serverState = { ...calls.serverState, ...patch } as typeof authoritative;
             return new Response(null, { status: 204 });
           }
           calls.settingsPatches.push(patch);
           if (calls.settingsPatches.length === 1) return new Response(null, { status: 500 });
+          if (options.deferSubsequentSettingsPatches === false) {
+            calls.serverState = { ...calls.serverState, ...patch } as typeof authoritative;
+            return new Response(null, { status: 204 });
+          }
           return new Promise<Response>((resolve) => {
             calls.resolveRetryPatch = (response) => {
+              calls.resolveRetryPatch = undefined;
               if (response.ok) calls.serverState = { ...calls.serverState, ...patch } as typeof authoritative;
               resolve(response);
             };
@@ -5305,6 +5326,134 @@ describe('single-page configuration rendering', () => {
       expect(calls.serverState.settings.tutorialTargetAttributeId).toBeUndefined();
       findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.();
       await vi.waitFor(() => expect(calls.releases).toHaveLength(1));
+      expect(calls.releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
+    });
+
+    it('stably rejects repeated tutorial settings retries after a same-target tutorial reset', async () => {
+      const { root, calls } = await openTutorialSettingsFailure({ deferSubsequentSettingsPatches: false });
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性已保存，但教程进度保存失败'));
+      const restarted = JSON.parse(JSON.stringify(loadState())) as ReturnType<typeof configuredAggregate>;
+      resetTutorialProgress(restarted.settings);
+      restarted.settings.tutorialTargetAttributeId = stableId;
+      await saveState(restarted);
+      const patchesBeforeRetry = calls.configPatches.length;
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const retryButton = root.querySelector('.guide-attribute-save') as TestElement;
+        retryButton.onclick?.();
+        expect(textOf(retryButton)).toBe('正在重试教程进度…');
+        await vi.waitFor(() => expect(textOf(retryButton)).toBe('重试保存教程进度'));
+        expect(root.querySelector('.attribute-overlay')).not.toBeNull();
+        expect(textOf(root)).toContain('当前配置已变化，教程进度未保存');
+        expect(calls.configPatches).toHaveLength(patchesBeforeRetry);
+      }
+
+      expect(calls.attributePosts).toBe(1);
+      expect(loadState().settings.tutorialTargetAttributeId).toBe(stableId);
+      expect(loadState().settings.tutorialCompletedLessons).toEqual([]);
+      expect(calls.serverState.settings.tutorialTargetAttributeId).toBe(stableId);
+      expect(calls.serverState.settings.tutorialCompletedLessons).toEqual([]);
+      findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.();
+      await vi.waitFor(() => expect(calls.releases).toHaveLength(1));
+      expect(calls.releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
+    });
+
+    it('queues tutorial settings recovery behind a pending saveStateTransaction without invalidating or overwriting it', async () => {
+      const { root, calls } = await openTutorialSettingsFailure();
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性已保存，但教程进度保存失败'));
+      const later = JSON.parse(JSON.stringify(loadState())) as ReturnType<typeof configuredAggregate>;
+      later.roomId = 'later-transaction-room';
+      later.attributes[1] = { ...later.attributes[1], name: '事务同伴', value: 404 };
+      later.rules[1] = { ...later.rules[1], attributeName: '事务同伴', formula: '事务同伴+404' };
+      later.timerRules[1] = { ...later.timerRules[1], attributeName: '事务同伴', formula: '事务同伴+404' };
+      calls.deferNextBroadPatch = true;
+      const laterOperation = saveStateTransaction(later);
+      await vi.waitFor(() => expect(calls.resolveBroadPatch).toBeDefined());
+
+      findByText(root, '重试保存教程进度')?.onclick?.();
+      calls.resolveBroadPatch?.(new Response(null, { status: 204 }));
+      const [laterResult] = await Promise.allSettled([laterOperation]);
+      await vi.waitFor(() => expect(calls.resolveRetryPatch).toBeDefined());
+      calls.resolveRetryPatch?.(new Response(null, { status: 204 }));
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+      await vi.waitFor(() => expect(calls.releases).toHaveLength(1));
+
+      expect(laterResult.status).toBe('fulfilled');
+      expect(calls.attributePosts).toBe(1);
+      expect(loadState().roomId).toBe('later-transaction-room');
+      expect(loadState().attributes[1]).toEqual(expect.objectContaining({ name: '事务同伴', value: 404 }));
+      expect(calls.serverState.roomId).toBe('later-transaction-room');
+      expect(calls.serverState.attributes[1]).toEqual(expect.objectContaining({ name: '事务同伴', value: 404 }));
+      expect(Object.keys(calls.configPatches.at(-1) ?? {})).toEqual(['settings']);
+      expect(calls.releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
+    });
+
+    it('queues tutorial settings recovery behind a pending authoritative publication and preserves its peer fields', async () => {
+      const { root, calls } = await openTutorialSettingsFailure();
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性已保存，但教程进度保存失败'));
+      const later = JSON.parse(JSON.stringify(loadState())) as ReturnType<typeof configuredAggregate>;
+      later.roomId = 'later-authoritative-room';
+      later.settings.theme = 'light';
+      later.settings.fontSize = 63;
+      later.attributes[1] = { ...later.attributes[1], name: '权威同伴', value: 505 };
+      later.rules[1] = { ...later.rules[1], attributeName: '权威同伴', formula: '权威同伴+505' };
+      later.timerRules[1] = { ...later.timerRules[1], attributeName: '权威同伴', formula: '权威同伴+505' };
+      let authoritativeStarted = false;
+      let resolveAuthoritative: ((value: typeof later) => void) | undefined;
+      const authoritativeResponse = new Promise<typeof later>((resolve) => { resolveAuthoritative = resolve; });
+      const laterOperation = commitAuthoritativeStateMutation(async () => {
+        authoritativeStarted = true;
+        const next = await authoritativeResponse;
+        calls.serverState = JSON.parse(JSON.stringify(next)) as typeof calls.serverState;
+        return next;
+      });
+      await vi.waitFor(() => expect(authoritativeStarted).toBe(true));
+
+      findByText(root, '重试保存教程进度')?.onclick?.();
+      resolveAuthoritative?.(later);
+      await vi.waitFor(() => expect(calls.resolveRetryPatch).toBeDefined());
+      calls.resolveRetryPatch?.(new Response(null, { status: 204 }));
+      await Promise.all([laterOperation, vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull())]);
+      await vi.waitFor(() => expect(calls.releases).toHaveLength(1));
+
+      expect(calls.attributePosts).toBe(1);
+      expect(loadState().roomId).toBe('later-authoritative-room');
+      expect(loadState().settings).toEqual(expect.objectContaining({ theme: 'light', fontSize: 63 }));
+      expect(loadState().attributes[1]).toEqual(expect.objectContaining({ name: '权威同伴', value: 505 }));
+      expect(calls.serverState.roomId).toBe('later-authoritative-room');
+      expect(calls.serverState.settings).toEqual(expect.objectContaining({ theme: 'light', fontSize: 63 }));
+      expect(calls.serverState.attributes[1]).toEqual(expect.objectContaining({ name: '权威同伴', value: 505 }));
+      expect(Object.keys(calls.configPatches.at(-1) ?? {})).toEqual(['settings']);
+      expect(calls.releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
+    });
+
+    it('keeps recovery retryable across repeated settings rejections and releases once when dismissed', async () => {
+      const { root, calls } = await openTutorialSettingsFailure();
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性已保存，但教程进度保存失败'));
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const retryButton = root.querySelector('.guide-attribute-save') as TestElement;
+        retryButton.onclick?.();
+        expect(textOf(retryButton)).toBe('正在重试教程进度…');
+        await vi.waitFor(() => expect(calls.settingsPatches).toHaveLength(attempt + 2));
+        const rejectRetry = calls.resolveRetryPatch;
+        expect(rejectRetry).toBeDefined();
+        rejectRetry?.(new Response(null, { status: 500 }));
+        await vi.waitFor(() => expect(textOf(retryButton)).toBe('重试保存教程进度'));
+        expect(root.querySelector('.attribute-overlay')).not.toBeNull();
+        expect(calls.releases).toHaveLength(0);
+      }
+
+      findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+      await vi.waitFor(() => expect(calls.releases).toHaveLength(1));
+      expect(calls.attributePosts).toBe(1);
+      expect(calls.settingsPatches.every((patch) => Object.keys(patch).length === 1 && 'settings' in patch)).toBe(true);
+      expect(calls.configPatches.every((patch) => (
+        !('attributes' in patch) && !('rules' in patch) && !('timerRules' in patch)
+      ))).toBe(true);
+      expect(loadState().settings.tutorialTargetAttributeId).toBeUndefined();
+      expect(calls.serverState.settings.tutorialTargetAttributeId).toBeUndefined();
       expect(calls.releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
     });
 

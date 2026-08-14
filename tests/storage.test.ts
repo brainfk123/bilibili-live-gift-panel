@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { clearRoomScopedRecords, commitAuthoritativeStateMutation, consumeConfigMigrationRequired, createConfigBackup, defaultState, hydrateStateFromServer, loadState, mergeConfigBackup, saveState, saveStateTransaction, resetState, pruneLog, refreshStateFromServer } from '../src/storage';
+import { clearRoomScopedRecords, commitAuthoritativeStateMutation, consumeConfigMigrationRequired, createConfigBackup, defaultState, hydrateStateFromServer, loadState, mergeConfigBackup, saveState, saveStateFieldTransaction, saveStateTransaction, resetState, pruneLog, refreshStateFromServer } from '../src/storage';
 import { LogEntry, MAX_LOG } from '../src/types';
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
@@ -146,6 +146,136 @@ describe('storage', () => {
     await Promise.all([prior, mutation]);
 
     expect(loadState().roomId).toBe('authoritative');
+  });
+
+  it('runs a queued single-field transaction on the state published by a pending state transaction', async () => {
+    const initial = defaultState();
+    initial.roomId = 'initial';
+    initial.settings.tutorialCompletedLessons = ['room'];
+    await saveState(initial);
+    const patches: Array<Record<string, unknown>> = [];
+    let resolveStateTransaction: ((response: Response) => void) | undefined;
+    const fetchImpl = vi.fn((_input: RequestInfo | URL, request?: RequestInit): Promise<Response> => {
+      if (request?.method !== 'PATCH') return Promise.resolve(new Response(null, { status: 204 }));
+      patches.push(JSON.parse(String(request.body)) as Record<string, unknown>);
+      if (patches.length === 1) {
+        return new Promise<Response>((resolve) => { resolveStateTransaction = resolve; });
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const later = JSON.parse(JSON.stringify(initial)) as typeof initial;
+    later.roomId = 'later-transaction';
+    later.attributes = [{
+      id: 'attribute-later', name: '后续属性', value: 9, unit: 'none', format: 'number', decimals: 0, suffix: '',
+    }];
+    const stateTransaction = saveStateTransaction(later);
+    await vi.waitFor(() => expect(resolveStateTransaction).toBeTypeOf('function'));
+    let observedRoomId = '';
+
+    resolveStateTransaction?.(new Response(null, { status: 204 }));
+    expect(loadState().roomId).toBe('initial');
+    const fieldTransaction = saveStateFieldTransaction('settings', (current) => {
+      observedRoomId = current.roomId;
+      return { ...current.settings, tutorialCompletedLessons: ['room', 'save'] };
+    });
+    const [stateResult, fieldResult] = await Promise.allSettled([stateTransaction, fieldTransaction]);
+
+    expect(stateResult.status).toBe('fulfilled');
+    expect(fieldResult.status).toBe('fulfilled');
+    expect(observedRoomId).toBe('later-transaction');
+    expect(loadState().roomId).toBe('later-transaction');
+    expect(loadState().attributes[0]).toEqual(expect.objectContaining({ id: 'attribute-later', value: 9 }));
+    expect(loadState().settings.tutorialCompletedLessons).toEqual(['room', 'save']);
+    expect(patches).toHaveLength(2);
+    expect(Object.keys(patches[1])).toEqual(['settings']);
+  });
+
+  it('runs a queued single-field transaction on a pending authoritative publication without broad persistence', async () => {
+    const initial = defaultState();
+    initial.roomId = 'initial';
+    initial.settings.tutorialCompletedLessons = ['room'];
+    await saveState(initial);
+    const authoritativeResponse = deferred<typeof initial>();
+    let authoritativeStarted = false;
+    const authoritative = JSON.parse(JSON.stringify(initial)) as typeof initial;
+    authoritative.roomId = 'authoritative-later';
+    authoritative.attributes = [{
+      id: 'attribute-authoritative', name: '权威属性', value: 17, unit: 'none', format: 'number', decimals: 0, suffix: '',
+    }];
+    const patches: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, request?: RequestInit) => {
+      if (request?.method === 'PATCH') patches.push(JSON.parse(String(request.body)) as Record<string, unknown>);
+      return new Response(null, { status: 204 });
+    }));
+    const mutation = commitAuthoritativeStateMutation(() => {
+      authoritativeStarted = true;
+      return authoritativeResponse.promise;
+    });
+    await vi.waitFor(() => expect(authoritativeStarted).toBe(true));
+    let observedRoomId = '';
+
+    authoritativeResponse.resolve(authoritative);
+    expect(loadState().roomId).toBe('initial');
+    const fieldTransaction = saveStateFieldTransaction('settings', (current) => {
+      observedRoomId = current.roomId;
+      return { ...current.settings, tutorialCompletedLessons: ['room', 'save'] };
+    });
+    await Promise.all([mutation, fieldTransaction]);
+
+    expect(observedRoomId).toBe('authoritative-later');
+    expect(loadState().roomId).toBe('authoritative-later');
+    expect(loadState().attributes[0]).toEqual(expect.objectContaining({ id: 'attribute-authoritative', value: 17 }));
+    expect(loadState().settings.tutorialCompletedLessons).toEqual(['room', 'save']);
+    expect(patches).toHaveLength(1);
+    expect(Object.keys(patches[0])).toEqual(['settings']);
+  });
+
+  it('lets a later state transaction supersede a single-field transaction already in flight', async () => {
+    const initial = defaultState();
+    initial.roomId = 'initial';
+    initial.settings.tutorialCompletedLessons = ['room'];
+    await saveState(initial);
+    let serverState = JSON.parse(JSON.stringify(initial)) as typeof initial;
+    const patches: Array<Record<string, unknown>> = [];
+    let resolveFieldPatch: ((response: Response) => void) | undefined;
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, request?: RequestInit): Promise<Response> => {
+      if (request?.method !== 'PATCH') return Promise.resolve(new Response(null, { status: 204 }));
+      const patch = JSON.parse(String(request.body)) as Record<string, unknown>;
+      patches.push(patch);
+      if (patches.length === 1) {
+        return new Promise<Response>((resolve) => {
+          resolveFieldPatch = (response) => {
+            if (response.ok) serverState = { ...serverState, ...patch } as typeof initial;
+            resolve(response);
+          };
+        });
+      }
+      serverState = { ...serverState, ...patch } as typeof initial;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }));
+    const fieldTransaction = saveStateFieldTransaction('settings', (current) => ({
+      ...current.settings,
+      tutorialCompletedLessons: ['room', 'save'],
+    }));
+    await vi.waitFor(() => expect(resolveFieldPatch).toBeTypeOf('function'));
+    const later = JSON.parse(JSON.stringify(initial)) as typeof initial;
+    later.roomId = 'later-transaction';
+    const laterTransaction = saveStateTransaction(later);
+
+    resolveFieldPatch?.(new Response(null, { status: 204 }));
+    const [fieldResult, laterResult] = await Promise.allSettled([fieldTransaction, laterTransaction]);
+
+    expect(fieldResult).toEqual(expect.objectContaining({
+      status: 'rejected',
+      reason: expect.objectContaining({ message: '配置在保存期间发生变化，请重试' }),
+    }));
+    expect(laterResult.status).toBe('fulfilled');
+    expect(Object.keys(patches[0])).toEqual(['settings']);
+    expect(loadState().roomId).toBe('later-transaction');
+    expect(loadState().settings.tutorialCompletedLessons).toEqual(['room']);
+    expect(serverState.roomId).toBe('later-transaction');
+    expect(serverState.settings.tutorialCompletedLessons).toEqual(['room']);
   });
 
   it('continues the queue after a rejected authoritative mutation', async () => {
