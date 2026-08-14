@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,11 +17,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 var (
-	appVersion = "dev"
-	appCommit  = ""
+	appVersion          = "dev"
+	appCommit           = ""
+	updateAPIBaseURLHex = ""
 )
 
 const (
@@ -116,14 +119,38 @@ type autoUpdater struct {
 }
 
 func defaultUpdateReleaseSources() []updateReleaseSource {
-	return []updateReleaseSource{
-		{Name: "GitHub", URL: updateGitHubReleaseURL, GitHub: true},
+	sources := make([]updateReleaseSource, 0, 2)
+	if domesticURL := domesticUpdateReleaseURL(); domesticURL != "" {
+		sources = append(sources, updateReleaseSource{Name: "国内镜像", URL: domesticURL})
 	}
+	return append(sources, updateReleaseSource{Name: "GitHub", URL: updateGitHubReleaseURL, GitHub: true})
+}
+
+func domesticUpdateReleaseURL() string {
+	encoded := strings.TrimSpace(updateAPIBaseURLHex)
+	if encoded == "" {
+		return ""
+	}
+	decoded, err := hex.DecodeString(encoded)
+	if err != nil || !utf8.Valid(decoded) {
+		return ""
+	}
+	baseURL, err := url.Parse(string(decoded))
+	if err != nil || baseURL.Scheme != "https" || baseURL.Host == "" || baseURL.User != nil || baseURL.RawQuery != "" || baseURL.Fragment != "" {
+		return ""
+	}
+	if baseURL.Path != "" && baseURL.Path != "/" {
+		return ""
+	}
+	return strings.TrimSuffix(baseURL.String(), "/") + "/api/v1/releases/latest"
 }
 
 func newDefaultAutoUpdater(store *configStore) *autoUpdater {
 	root, rootErr := os.UserConfigDir()
 	executablePath, executableErr := os.Executable()
+	if strings.TrimSpace(updateAPIBaseURLHex) != "" && domesticUpdateReleaseURL() == "" {
+		_, _ = fmt.Fprintln(os.Stderr, "自动更新国内镜像配置无效，已使用 GitHub 回退。")
+	}
 	updater := newAutoUpdater(autoUpdaterOptions{
 		Store:          store,
 		Client:         &http.Client{Timeout: 10 * time.Minute},

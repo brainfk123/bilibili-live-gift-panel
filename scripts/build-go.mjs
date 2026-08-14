@@ -7,9 +7,33 @@ import { mirrorUiAssets } from './ui-assets.mjs';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const appVersion = (process.env.APP_VERSION || 'dev').replace(/^v/, '');
 const appCommit = process.env.APP_COMMIT || 'local';
+const updateAPIBaseURL = (process.env.APP_UPDATE_API_URL || '').trim();
 for (const [label, value] of [['APP_VERSION', appVersion], ['APP_COMMIT', appCommit]]) {
   if (!/^[0-9A-Za-z.+-]+$/.test(value)) throw new Error(`${label} contains unsupported characters`);
 }
+if (appVersion !== 'dev' && !updateAPIBaseURL) {
+  throw new Error('Release build requires APP_UPDATE_API_URL.');
+}
+if (updateAPIBaseURL) {
+  let parsedUpdateAPIBaseURL;
+  try {
+    parsedUpdateAPIBaseURL = new URL(updateAPIBaseURL);
+  } catch (error) {
+    throw new Error(`APP_UPDATE_API_URL must be an absolute URL: ${error.message}`);
+  }
+  if (
+    parsedUpdateAPIBaseURL.protocol !== 'https:'
+    || !parsedUpdateAPIBaseURL.hostname
+    || parsedUpdateAPIBaseURL.username
+    || parsedUpdateAPIBaseURL.password
+    || parsedUpdateAPIBaseURL.search
+    || parsedUpdateAPIBaseURL.hash
+    || parsedUpdateAPIBaseURL.pathname !== '/'
+  ) {
+    throw new Error('APP_UPDATE_API_URL must be an HTTPS origin without credentials, query, fragment, or path.');
+  }
+}
+const updateAPIBaseURLHex = Buffer.from(updateAPIBaseURL, 'utf8').toString('hex');
 if (appVersion !== 'dev') {
   const manifestPath = join(root, 'goserver', 'ffmpeg', 'manifest.json');
   let manifest;
@@ -39,7 +63,7 @@ const uiManifest = mirrorUiAssets(join(root, 'dist'), distDir);
 console.log(`embedded ${uiManifest.files.length} UI assets (manifest v${uiManifest.version})`);
 
 const out = join(root, 'dist', 'gift-panel.exe');
-const ldflags = `-s -w -H windowsgui -X main.appVersion=${appVersion} -X main.appCommit=${appCommit}`;
+const ldflags = `-s -w -H windowsgui -X main.appVersion=${appVersion} -X main.appCommit=${appCommit} -X main.updateAPIBaseURLHex=${updateAPIBaseURLHex}`;
 const candidates = [
   process.env.GO_BIN,
   'go',

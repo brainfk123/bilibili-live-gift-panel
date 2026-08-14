@@ -39,16 +39,64 @@ func TestCompareStableVersions(t *testing.T) {
 	}
 }
 
-func TestDefaultUpdateSourceUsesStaticGitHubManifest(t *testing.T) {
+func TestDefaultUpdateSourcesPreferDomesticMirror(t *testing.T) {
+	previous := updateAPIBaseURLHex
+	updateAPIBaseURLHex = hex.EncodeToString([]byte("https://updates.example.test"))
+	t.Cleanup(func() { updateAPIBaseURLHex = previous })
+
+	sources := defaultUpdateReleaseSources()
+	if len(sources) != 2 {
+		t.Fatalf("sources = %d, want 2", len(sources))
+	}
+	if sources[0].Name != "国内镜像" || sources[0].URL != "https://updates.example.test/api/v1/releases/latest" || sources[0].GitHub {
+		t.Fatalf("domestic source = %#v", sources[0])
+	}
+	if sources[1].Name != "GitHub" || sources[1].URL != updateGitHubReleaseURL || !sources[1].GitHub {
+		t.Fatalf("GitHub source = %#v", sources[1])
+	}
+}
+
+func TestDefaultUpdateSourcesUseGitHubOnlyWithoutDomesticConfiguration(t *testing.T) {
+	previous := updateAPIBaseURLHex
+	updateAPIBaseURLHex = ""
+	t.Cleanup(func() { updateAPIBaseURLHex = previous })
+
 	sources := defaultUpdateReleaseSources()
 	if len(sources) != 1 {
-		t.Fatalf("default update sources = %d, want 1", len(sources))
+		t.Fatalf("sources = %d, want 1", len(sources))
 	}
-	if sources[0].URL != updateGitHubReleaseURL {
-		t.Fatalf("default update URL = %q", sources[0].URL)
+	if sources[0].Name != "GitHub" || sources[0].URL != updateGitHubReleaseURL || !sources[0].GitHub {
+		t.Fatalf("GitHub source = %#v", sources[0])
 	}
-	if strings.Contains(sources[0].URL, "api.github.com") {
-		t.Fatalf("default update URL must not consume GitHub API quota: %q", sources[0].URL)
+}
+
+func TestDomesticUpdateURLAcceptsUppercaseHexAndNormalizesRootPath(t *testing.T) {
+	previous := updateAPIBaseURLHex
+	updateAPIBaseURLHex = strings.ToUpper(hex.EncodeToString([]byte("https://updates.example.test/")))
+	t.Cleanup(func() { updateAPIBaseURLHex = previous })
+
+	if got := domesticUpdateReleaseURL(); got != "https://updates.example.test/api/v1/releases/latest" {
+		t.Fatalf("domestic update release URL = %q", got)
+	}
+}
+
+func TestDomesticUpdateURLRejectsUnsafeBaseURLs(t *testing.T) {
+	tests := []string{
+		"http://updates.example.test",
+		"https://user:password@updates.example.test",
+		"https://updates.example.test?channel=stable",
+		"https://updates.example.test#stable",
+		"https://updates.example.test/releases",
+	}
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			previous := updateAPIBaseURLHex
+			updateAPIBaseURLHex = hex.EncodeToString([]byte(value))
+			t.Cleanup(func() { updateAPIBaseURLHex = previous })
+			if got := domesticUpdateReleaseURL(); got != "" {
+				t.Fatalf("domestic update release URL = %q, want empty", got)
+			}
+		})
 	}
 }
 
@@ -247,7 +295,7 @@ func TestUpdaterFallsBackToGitHubWhenPrimaryAssetIsIncomplete(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(githubRelease{
 				TagName: "v1.1.0",
 				Assets: []githubAsset{{
-					Name: updateAssetName, DownloadURL: server.URL + "/primary-asset",
+					Name: updateAssetName, DownloadURL: server.URL + "/primary-asset", Size: int64(len(binary)), Digest: "sha256:" + digest,
 				}},
 			})
 		case "/github":
@@ -258,6 +306,8 @@ func TestUpdaterFallsBackToGitHubWhenPrimaryAssetIsIncomplete(t *testing.T) {
 					Name: updateAssetName, DownloadURL: server.URL + "/github-asset", Size: int64(len(binary)), Digest: "sha256:" + digest,
 				}},
 			})
+		case "/primary-asset":
+			_, _ = w.Write(binary[:len(binary)-1])
 		case "/github-asset":
 			_, _ = w.Write(binary)
 		default:
