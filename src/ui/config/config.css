@@ -1111,6 +1111,17 @@ body.config-mode::-webkit-scrollbar-corner,
   grid-template-rows: auto auto minmax(0, 1fr) auto;
 }
 .config-root .attribute-workbench-header { padding: 20px 24px 17px; }
+.config-root .attribute-lease-warning {
+  margin: 10px 0 0;
+  border: 1px solid color-mix(in srgb, #f5a524 56%, var(--border));
+  border-radius: 9px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, #f5a524 12%, var(--surface));
+  color: var(--text);
+  font-size: var(--type-meta);
+  font-weight: 700;
+  line-height: 1.5;
+}
 .config-root .attribute-workbench-tabs {
   display: flex;
   gap: 4px;

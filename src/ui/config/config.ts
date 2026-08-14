@@ -66,6 +66,7 @@ import {
 } from './wizard';
 import { renderSpotlightGuide, type SpotlightGuideElement } from './spotlight-guide';
 import { createAttributeWorkspace, type AttributeWorkspace } from './attribute-workspace';
+import { acquireAttributeEditLease, type AttributeEditLeaseHealth, type AttributeEditLeaseSession } from './attribute-edit-lease';
 import {
   buildQuickGiftFormula,
   detectQuickGiftRule,
@@ -231,6 +232,7 @@ export function mountConfig(root: HTMLElement): void {
   let guideDismissed = !state.settings.showTutorial;
   let activeGuide: SpotlightGuideElement | null = null;
   let editorOpen = false;
+  let attributeEditorOpening = false;
   let editorGuideEnabled = false;
   let forcedTutorialLesson: TutorialLesson | null = null;
   let editorTutorialProgress: TutorialEditorProgress = { open: false };
@@ -1506,8 +1508,9 @@ export function mountConfig(root: HTMLElement): void {
       gifts: catalog.gifts,
       existingAttributeNames: state.attributes.map((attribute) => attribute.name),
       onBlank: () => {
+        editorOpen = false;
         if (forcedTutorialLesson === 'template') forcedTutorialLesson = null;
-        openAttributeEditor();
+        void openAttributeEditor();
       },
       onClose: (reason) => {
         if (reason === 'blank') return;
@@ -3000,11 +3003,39 @@ export function mountConfig(root: HTMLElement): void {
     closeButton.focus();
   }
 
-  function openAttributeEditor(index?: number, initialSection: AttributeWorkspaceSection = 'overview'): void {
+  async function openAttributeEditor(index?: number, initialSection: AttributeWorkspaceSection = 'overview'): Promise<void> {
+    if (editorOpen || attributeEditorOpening) return;
+    attributeEditorOpening = true;
     activeGuide?.dispose();
     activeGuide = null;
-    root.querySelector('.attribute-overlay')?.remove();
     const lessonBeforeOpen = activeTutorialLesson();
+    const original = index === undefined ? undefined : state.attributes[index];
+    let lease: AttributeEditLeaseSession | null = null;
+    let leaseWarning: HTMLElement | null = null;
+    const renderLeaseHealth = (health: AttributeEditLeaseHealth): void => {
+      if (!leaseWarning) return;
+      leaseWarning.hidden = health !== 'retrying';
+    };
+    try {
+      if (original) {
+        const previousId = original.id;
+        if (!original.id) {
+          original.id = createAttributeId();
+          try {
+            await saveAndWait();
+          } catch (error) {
+            original.id = previousId;
+            throw error;
+          }
+        }
+        lease = await acquireAttributeEditLease(original.id, { onHealthChange: renderLeaseHealth });
+      }
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '无法打开属性编辑器', root);
+      return;
+    } finally {
+      attributeEditorOpening = false;
+    }
     editorOpen = true;
     editorGuideEnabled = !guideDismissed && (
       (index === undefined && (lessonBeforeOpen === 'attribute' || lessonBeforeOpen === 'template'))
@@ -3013,7 +3044,6 @@ export function mountConfig(root: HTMLElement): void {
       )))
     );
 
-    const original = index === undefined ? undefined : state.attributes[index];
     const originalName = original?.name ?? '';
     const timerRules = original
       ? state.timerRules.filter((rule) => rule.attributeName === original.name).map((rule) => ({ ...rule }))
@@ -3052,7 +3082,7 @@ export function mountConfig(root: HTMLElement): void {
     const overlay = el('div', { class: 'overlay attribute-overlay' });
     let modal: HTMLElement;
     const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭' } as any) as HTMLButtonElement;
-    const close = (): void => {
+    const closeAttributeEditor = (): void => {
       overlay.remove();
       editorOpen = false;
       editorGuideEnabled = false;
@@ -3060,9 +3090,10 @@ export function mountConfig(root: HTMLElement): void {
       activeEditorWorkspace = null;
       forcedTutorialLesson = null;
       refreshOpenGiftCatalog = null;
+      void lease?.release();
       renderGuide();
     };
-    closeButton.onclick = close;
+    closeButton.onclick = closeAttributeEditor;
     const modalHeader = el('header', { class: 'modal-header attribute-workbench-header' }, [
       el('div', {}, [
         el('span', {
@@ -3071,6 +3102,10 @@ export function mountConfig(root: HTMLElement): void {
         }),
         el('h2', { text: original ? `配置“${original.name}”` : editorGuideEnabled ? '制作第一台加班机' : '创建互动属性' }),
         el('p', { text: '按工作区逐项配置；左侧训练任务会解释每项功能为什么存在。' }),
+        leaseWarning = el('p', {
+          class: 'attribute-lease-warning',
+          text: '属性规则冻结状态正在重连，请暂时不要关闭此页面。',
+        }),
       ]),
       closeButton,
     ]);
@@ -3230,6 +3265,7 @@ export function mountConfig(root: HTMLElement): void {
       el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '显示格式' }), formatSelect]),
       suffixControl,
     ]);
+    if (leaseWarning) leaseWarning.hidden = true;
     const templateButton = el('button', {
       class: 'btn guide-overtime-template',
       type: 'button',
@@ -4379,10 +4415,10 @@ export function mountConfig(root: HTMLElement): void {
     ]);
 
     const cancelButton = el('button', { class: 'btn ghost', type: 'button', text: '取消' }) as HTMLButtonElement;
-    cancelButton.onclick = close;
+    cancelButton.onclick = closeAttributeEditor;
     const saveButton = el('button', { class: 'btn guide-attribute-save', type: 'button', text: original ? '保存修改' : '创建属性' }) as HTMLButtonElement;
     saveButton.onclick = () => {
-      void saveAttributeEditor(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, overlay, saveButton, readEditableAttributeValue);
+      void saveAttributeEditor(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, closeAttributeEditor, saveButton, readEditableAttributeValue);
     };
     modalFooter = el('footer', { class: 'modal-actions attribute-workbench-actions' }, [
       el('span', { class: 'attribute-save-note', text: '保存前会由后台统一校验规则' }),
@@ -4428,7 +4464,7 @@ export function mountConfig(root: HTMLElement): void {
     overlay.onclick = (event) => {
       const shouldClose = overlayPointerStartedOutside && event.target === overlay;
       overlayPointerStartedOutside = false;
-      if (shouldClose) close();
+      if (shouldClose) closeAttributeEditor();
     };
     root.append(overlay);
     refreshOpenGiftCatalog = () => {
@@ -4511,11 +4547,11 @@ export function mountConfig(root: HTMLElement): void {
     displayConfig: AttributeDisplay,
     selected: Map<number, SelectedGiftRule>,
     timerRules: TimerRule[],
-    overlay: HTMLElement,
+    closeAttributeEditor: () => void,
     saveButton: HTMLButtonElement,
     readEditableAttributeValue: () => AttributeTimeParseResult,
   ): Promise<void> {
-    return saveAttributeEditorAsync(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, overlay, saveButton, readEditableAttributeValue);
+    return saveAttributeEditorAsync(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, closeAttributeEditor, saveButton, readEditableAttributeValue);
   }
 
   async function saveAttributeEditorAsync(
@@ -4529,7 +4565,7 @@ export function mountConfig(root: HTMLElement): void {
     displayConfig: AttributeDisplay,
     selected: Map<number, SelectedGiftRule>,
     timerRules: TimerRule[],
-    overlay: HTMLElement,
+    closeAttributeEditor: () => void,
     saveButton: HTMLButtonElement,
     readEditableAttributeValue: () => AttributeTimeParseResult,
   ): Promise<void> {
@@ -4780,13 +4816,7 @@ export function mountConfig(root: HTMLElement): void {
       saveButton.textContent = original ? '保存修改' : '创建属性';
       return;
     }
-    overlay.remove();
-    editorOpen = false;
-    editorGuideEnabled = false;
-    editorTutorialProgress = { open: false };
-    activeEditorWorkspace = null;
-    forcedTutorialLesson = null;
-    refreshOpenGiftCatalog = null;
+    closeAttributeEditor();
     render();
     toast(index === undefined ? '属性已创建' : '属性配置已保存', root);
   }

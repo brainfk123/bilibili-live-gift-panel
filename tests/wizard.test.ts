@@ -237,6 +237,10 @@ beforeEach(async () => {
   } as unknown as Document);
   vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
+    if (url === '/api/attribute-edit-lease') {
+      if (init?.method === 'POST') return Response.json({ code: 0, token: 'A'.repeat(24) });
+      return Response.json({ code: 0 });
+    }
     if (url.includes('/api/runtime')) {
       return new Response(JSON.stringify({
         code: 0,
@@ -4351,6 +4355,203 @@ describe('single-page configuration rendering', () => {
     overlay.onpointerdown?.({ target: overlay });
     overlay.onclick?.({ target: overlay });
     expect(root.querySelector('.attribute-overlay')).toBeNull();
+  });
+
+  describe('attribute edit lease', () => {
+    const stableId = 'attribute-stable-id';
+    const leaseToken = 'A'.repeat(24);
+
+    function configuredAttribute(id: string | null = stableId) {
+      const configured = defaultAdvancedState();
+      configured.roomId = '88888888';
+      configured.settings.showTutorial = false;
+      configured.attributes = [{
+          ...(id ? { id } : {}),
+          name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '',
+      }];
+      configured.rules = [{ id: 'r-lease', giftId: 1, attributeName: '加班时间', formula: '加班时间+1' }];
+      return configured;
+    }
+
+    function leaseFetch(overrides: Partial<Record<'POST' | 'PUT' | 'DELETE', () => Response | Promise<Response>>> = {}) {
+      return vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input) === '/api/attribute-edit-lease') {
+          const method = init?.method as 'POST' | 'PUT' | 'DELETE';
+          return overrides[method]?.() ?? Response.json(method === 'POST'
+            ? { code: 0, token: leaseToken }
+            : { code: 0 });
+        }
+        if (String(input) === '/api/formula/preview') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+    }
+
+    async function openExisting(root: TestElement): Promise<void> {
+      findByText(root, '编辑')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+    }
+
+    it('saves a generated ID before acquiring the existing attribute lease', async () => {
+      await saveState(configuredAttribute(null));
+      const fetchImpl = leaseFetch();
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      fetchImpl.mockClear();
+
+      await openExisting(root);
+
+      const configSave = fetchImpl.mock.calls.findIndex(([url, init]) => (
+        String(url) === '/api/config'
+        && init?.method === 'PATCH'
+        && Object.prototype.hasOwnProperty.call(JSON.parse(String(init.body)), 'attributes')
+      ));
+      const acquire = fetchImpl.mock.calls.findIndex(([url, init]) => String(url) === '/api/attribute-edit-lease' && init?.method === 'POST');
+      expect(configSave).toBeGreaterThanOrEqual(0);
+      const saved = JSON.parse(String(fetchImpl.mock.calls[configSave][1]?.body));
+      const lease = JSON.parse(String(fetchImpl.mock.calls[acquire][1]?.body));
+      expect(saved.attributes[0].id).toBe(lease.attributeId);
+    });
+
+    it('opens an existing editor only after its lease POST succeeds', async () => {
+      await saveState(configuredAttribute());
+      let resolveAcquire: ((response: Response) => void) | undefined;
+      const fetchImpl = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        if (String(input) === '/api/attribute-edit-lease' && init?.method === 'POST') {
+          return new Promise<Response>((resolve) => { resolveAcquire = resolve; });
+        }
+        return Promise.resolve(new Response(null, { status: 204 }));
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+
+      findByText(root, '编辑')?.onclick?.();
+      expect(root.querySelector('.attribute-overlay')).toBeNull();
+      resolveAcquire?.(Response.json({ code: 0, token: leaseToken }));
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+    });
+
+    it('opens a new attribute editor without lease traffic', async () => {
+      const fetchImpl = leaseFetch();
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+
+      findByText(root, '+ 添加属性')?.onclick?.();
+      root.querySelector('.template-blank-card')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+
+      expect(fetchImpl.mock.calls.filter(([url]) => String(url) === '/api/attribute-edit-lease')).toHaveLength(0);
+    });
+
+    it.each([
+      ['cancel', (root: TestElement) => findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.()],
+      ['close button', (root: TestElement) => findByText(root, '×')?.onclick?.()],
+      ['overlay close', (root: TestElement) => {
+        const overlay = root.querySelector('.attribute-overlay') as TestElement & { onpointerdown?: (event: { target: TestElement }) => void; onclick?: (event: { target: TestElement }) => void };
+        overlay.onpointerdown?.({ target: overlay });
+        overlay.onclick?.({ target: overlay });
+      }],
+      ['successful save', (root: TestElement) => findByText(root, '保存修改')?.onclick?.()],
+    ])('releases exactly once after %s', async (_reason, close) => {
+      await saveState(configuredAttribute());
+      const fetchImpl = leaseFetch();
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExisting(root);
+
+      close(root);
+      await vi.waitFor(() => expect(fetchImpl.mock.calls.filter(([url, init]) => (
+        String(url) === '/api/attribute-edit-lease' && init?.method === 'DELETE'
+      ))).toHaveLength(1));
+    });
+
+    it('keeps the editor and its lease alive when save persistence fails', async () => {
+      vi.useFakeTimers();
+      await saveState(configuredAttribute());
+      let failConfigSaves = false;
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input) === '/api/attribute-edit-lease') {
+          return Response.json(init?.method === 'POST' ? { code: 0, token: leaseToken } : { code: 0 });
+        }
+        if (String(input) === '/api/config' && init?.method === 'PATCH' && failConfigSaves) return new Response(null, { status: 500 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExisting(root);
+      failConfigSaves = true;
+
+      findByText(root, '保存修改')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(fetchImpl.mock.calls.some(([url, init]) => String(url) === '/api/attribute-edit-lease' && init?.method === 'PUT')).toBe(true);
+      expect(fetchImpl.mock.calls.some(([url, init]) => String(url) === '/api/attribute-edit-lease' && init?.method === 'DELETE')).toBe(false);
+    });
+
+    it('leaves the modal closed and shows an error when acquisition fails', async () => {
+      await saveState(configuredAttribute());
+      const fetchImpl = leaseFetch({ POST: () => Response.json({ code: -1 }, { status: 409 }) });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+
+      findByText(root, '编辑')?.onclick?.();
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性编辑租约请求失败'));
+      expect(root.querySelector('.attribute-overlay')).toBeNull();
+    });
+
+    it('shows a lease warning while retrying and hides it after recovery', async () => {
+      vi.useFakeTimers();
+      await saveState(configuredAttribute());
+      let renews = 0;
+      const fetchImpl = leaseFetch({ PUT: () => {
+        renews += 1;
+        return renews === 1 ? new Response(null, { status: 500 }) : Response.json({ code: 0 });
+      } });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExisting(root);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(textOf(root.querySelector('.attribute-lease-warning') as TestElement)).toBe('属性规则冻结状态正在重连，请暂时不要关闭此页面。');
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect((root.querySelector('.attribute-lease-warning') as TestElement & { hidden?: boolean }).hidden).toBe(true);
+    });
+
+    it('keeps renew and release bound to the original stable ID after renaming', async () => {
+      await saveState(configuredAttribute());
+      const fetchImpl = leaseFetch();
+      vi.stubGlobal('fetch', fetchImpl);
+      let heartbeat: (() => void) | undefined;
+      vi.stubGlobal('setInterval', (handler: () => void) => {
+        heartbeat = handler;
+        return 1;
+      });
+      vi.stubGlobal('clearInterval', () => {});
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExisting(root);
+      const name = root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
+      name.value = '倒计时';
+      name.oninput?.();
+
+      heartbeat?.();
+      await Promise.resolve();
+      await Promise.resolve();
+      findByText(root, '保存修改')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+      await vi.waitFor(() => expect(fetchImpl.mock.calls.filter(([url]) => String(url) === '/api/attribute-edit-lease')).toHaveLength(3));
+      const requests = fetchImpl.mock.calls.filter(([url]) => String(url) === '/api/attribute-edit-lease');
+      expect(requests.map((call) => JSON.parse(String(call[1]?.body)).attributeId)).toEqual([
+        stableId, stableId, stableId,
+      ]);
+    });
   });
 
   it('deletes an attribute only after clicking the delete button twice', async () => {
