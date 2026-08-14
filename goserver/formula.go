@@ -230,6 +230,32 @@ func parseFormula(input string) (formulaNode, error) {
 	return node, nil
 }
 
+func rewriteFormulaIdentifier(input, oldName, newName string) (string, error) {
+	if strings.TrimSpace(input) == "" {
+		return input, nil
+	}
+	if _, err := parseFormula(input); err != nil {
+		return "", err
+	}
+	tokens, err := tokenizeFormula(input)
+	if err != nil {
+		return "", err
+	}
+	runes := []rune(input)
+	var out strings.Builder
+	cursor := 0
+	for _, token := range tokens {
+		if token.kind != "ident" || token.value != oldName {
+			continue
+		}
+		out.WriteString(string(runes[cursor:token.pos]))
+		out.WriteString(newName)
+		cursor = token.pos + len([]rune(token.value))
+	}
+	out.WriteString(string(runes[cursor:]))
+	return out.String(), nil
+}
+
 func validateFormulaNode(node formulaNode, env map[string]float64) error {
 	switch typed := node.(type) {
 	case numberNode:
