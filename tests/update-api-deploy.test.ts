@@ -90,9 +90,12 @@ describe('update API deployment assets', () => {
     const service = deploymentAsset('gift-panel-update-api.service');
 
     expect(readme).toContain('bucket private');
-    expect(readme).toContain('Versioning must not be Enabled');
-    expect(readme).toContain('If versioning is Suspended, run controlled staging verification before production');
-    expect(readme).toContain('Safest is never-enabled versioning');
+    expect(readme).toContain('COS Versioning state must be `Disabled`');
+    expect(readme).toContain('previously enabled or suspended');
+    expect(readme).toContain('new never-versioned production bucket');
+    expect(readme).toContain('redesigned immutable mechanism');
+    expect(readme).not.toContain('Versioning must not be Enabled');
+    expect(readme).not.toContain('If versioning is Suspended, run controlled staging verification before production');
     expect(readme).toContain("curl --fail --silent --show-error http://127.0.0.1:12450/healthz | grep -Fx 'ok'");
     expect(readme).not.toContain('http://127.0.0.1/healthz');
     expect(environment).not.toContain('UPDATE_API_LISTEN=');

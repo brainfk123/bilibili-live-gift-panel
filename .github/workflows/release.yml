@@ -16,6 +16,10 @@ permissions:
   id-token: write
   attestations: write
 
+concurrency:
+  group: gift-panel-production-release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: windows-latest

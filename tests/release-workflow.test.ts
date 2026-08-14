@@ -23,12 +23,13 @@ function releaseWorkflow() {
   expect(document.errors).toEqual([]);
 
   const workflow = document.toJS() as {
+    concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
     jobs?: { release?: { environment?: string; steps?: ReleaseStep[] } };
   };
   const release = workflow.jobs?.release;
   const steps = release?.steps;
   expect(Array.isArray(steps)).toBe(true);
-  return { document, release, source, steps: steps ?? [] };
+  return { concurrency: workflow.concurrency, document, release, source, steps: steps ?? [] };
 }
 
 function stepIndex(steps: ReleaseStep[], name: string): number {
@@ -38,6 +39,15 @@ function stepIndex(steps: ReleaseStep[], name: string): number {
 }
 
 describe('release workflow supply-chain contract', () => {
+  it('serializes all production releases in one non-canceling global group', () => {
+    const { concurrency } = releaseWorkflow();
+
+    expect(concurrency).toEqual({
+      group: 'gift-panel-production-release',
+      'cancel-in-progress': false,
+    });
+  });
+
   it('validates a canonical tag before an exact non-credentialed checkout', () => {
     const { release, source, steps } = releaseWorkflow();
     const validate = stepIndex(steps, 'Validate release tag');

@@ -1,6 +1,6 @@
 # Gift Panel Update API deployment
 
-This deployment serves private COS release metadata through the API only. Keep the COS bucket private; do not enable public read or configure a CDN. Task 4 gate: COS Versioning must not be Enabled. Safest is never-enabled versioning. If versioning is Suspended, run controlled staging verification before production, including immutable release writes and stable-manifest promotion. The API issues short-lived signed download URLs, and neither Nginx access logs nor this runbook records their query strings.
+This deployment serves private COS release metadata through the API only. Keep the COS bucket private; do not enable public read or configure a CDN. Task 4 production gate: COS Versioning state must be `Disabled`; `Suspended` is not acceptable. A bucket that was previously enabled or suspended cannot satisfy this gate because Task 4's overwrite-forbidden immutable writes are ineffective there. Provision a new never-versioned production bucket, or adopt and verify a redesigned immutable mechanism before using that bucket for releases. The API issues short-lived signed download URLs, and neither Nginx access logs nor this runbook records their query strings.
 
 ## Required names
 
