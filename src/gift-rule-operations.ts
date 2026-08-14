@@ -83,6 +83,9 @@ function canonicalRandomRange(formula: string, attributeName: string): [number, 
 }
 
 export function validateQuickGiftRuleDraft(draft: QuickGiftRuleDraft): string | null {
+  if (draft.maximum !== undefined && !Number.isFinite(draft.maximum)) {
+    return draft.operation === 'randomRange' ? '随机范围的上限必须是有效数字' : '规则上限必须是有效数字';
+  }
   if (draft.operation !== 'randomRange') return null;
   if (!Number.isInteger(draft.rangeMin) || !Number.isInteger(draft.rangeMax)) {
     return '随机范围必须使用整数';

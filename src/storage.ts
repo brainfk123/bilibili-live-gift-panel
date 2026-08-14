@@ -56,6 +56,7 @@ type ConfigBackupFields = Pick<AppState,
 export type ConfigBackup = ConfigBackupFields & { schemaVersion: number };
 
 let cachedState: AppState | null = null;
+let cachedStateRevision = 0;
 let persistQueue = Promise.resolve();
 let configMigrationRequired = false;
 let persistedFieldSnapshots: Partial<StateFieldSnapshots> = {};
@@ -120,35 +121,59 @@ export function clearRoomScopedRecords(state: AppState): AppState {
 }
 
 export function loadState(): AppState {
-  if (!cachedState) cachedState = defaultState();
-  return cachedState;
+  return cachedState ?? publishCachedState(defaultState());
 }
 
 export function saveState(state: AppState): Promise<void> {
-  cachedState = normalizeState(state);
-  const snapshots = snapshotStateFields(cachedState);
+  const nextState = publishCachedState(normalizeState(state));
+  const snapshots = snapshotStateFields(nextState);
   persistQueue = persistQueue
     .catch(() => undefined)
     .then(() => persistStateToServer(snapshots));
   return persistQueue;
 }
 
+export function saveStateTransaction(state: AppState): Promise<AppState> {
+  const candidate = normalizeState(state);
+  const snapshots = snapshotStateFields(candidate);
+  const startingRevision = cachedStateRevision;
+  const transaction = persistQueue
+    .catch(() => undefined)
+    .then(async () => {
+      if (cachedStateRevision !== startingRevision) {
+        throw new Error('配置在保存期间发生变化，请重试');
+      }
+      await persistStateToServer(snapshots);
+      if (cachedStateRevision !== startingRevision) {
+        throw new Error('配置在保存期间发生变化，请重试');
+      }
+      publishCachedState(candidate);
+      return candidate;
+    });
+  persistQueue = transaction.then(
+    () => undefined,
+    () => undefined,
+  );
+  return transaction;
+}
+
 export function resetState(): Promise<void> {
-  cachedState = defaultState();
+  publishCachedState(defaultState());
   configMigrationRequired = false;
-  persistedFieldSnapshots = {};
-  forcePersistFields.clear();
   persistQueue = persistQueue
     .catch(() => undefined)
     .then(async () => {
-      if (typeof fetch !== 'function') return;
-      let response: Response;
-      try {
-        response = await fetch(CONFIG_ENDPOINT, { method: 'DELETE', keepalive: true });
-      } catch {
-        throw new Error('恢复默认失败，请重试或先导出运行日志。');
+      if (typeof fetch === 'function') {
+        let response: Response;
+        try {
+          response = await fetch(CONFIG_ENDPOINT, { method: 'DELETE', keepalive: true });
+        } catch {
+          throw new Error('恢复默认失败，请重试或先导出运行日志。');
+        }
+        if (!response.ok) throw new Error('恢复默认失败，请重试或先导出运行日志。');
       }
-      if (!response.ok) throw new Error('恢复默认失败，请重试或先导出运行日志。');
+      persistedFieldSnapshots = {};
+      forcePersistFields.clear();
     });
   return persistQueue;
 }
@@ -163,7 +188,10 @@ export async function hydrateStateFromServer(): Promise<void> {
   await refreshStateFromServer();
 }
 
-export async function refreshStateFromServer(acceptState: () => boolean = () => true): Promise<AppState> {
+export async function refreshStateFromServer(
+  acceptState: () => boolean = () => true,
+  options: { throwOnError?: boolean } = {},
+): Promise<AppState> {
   if (typeof fetch !== 'function') return loadState();
   await persistQueue.catch(() => undefined);
   try {
@@ -178,14 +206,21 @@ export async function refreshStateFromServer(acceptState: () => boolean = () => 
       nextState = normalizeState(await response.json() as Partial<AppState>);
     }
     if (acceptState() || !cachedState) {
-      cachedState = nextState;
+      publishCachedState(nextState);
       persistedFieldSnapshots = hasPersistedState ? snapshotStateFields(nextState) : {};
     }
-  } catch {
+  } catch (error) {
     // A transient backend read failure must not erase the last visible state.
-    cachedState ??= defaultState();
+    if (!cachedState) publishCachedState(defaultState());
+    if (options.throwOnError) throw error;
   }
-  return cachedState;
+  return cachedState ?? publishCachedState(defaultState());
+}
+
+function publishCachedState(state: AppState): AppState {
+  cachedState = state;
+  cachedStateRevision += 1;
+  return state;
 }
 
 async function persistStateToServer(snapshots: StateFieldSnapshots): Promise<void> {

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBackup, defaultState, hydrateStateFromServer, loadState, mergeConfigBackup, saveState, resetState, pruneLog, refreshStateFromServer } from '../src/storage';
+import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBackup, defaultState, hydrateStateFromServer, loadState, mergeConfigBackup, saveState, saveStateTransaction, resetState, pruneLog, refreshStateFromServer } from '../src/storage';
 import { LogEntry, MAX_LOG } from '../src/types';
 
 beforeEach(() => {
@@ -87,6 +87,98 @@ describe('storage', () => {
     expect(loaded.settings.tutorialReplayMode).toBe(true);
     expect(loaded.settings.trainingCompletedTopics).toEqual(['blind-box', 'obs-no-change']);
     expect(loaded.settings.lastSeenChangelogVersion).toBe('0.2.0');
+  });
+
+  it('does not republish a transaction superseded by a later ordinary save', async () => {
+    const initial = defaultState();
+    initial.roomId = 'initial';
+    await saveState(initial);
+    let resolveTransaction: ((response: Response) => void) | undefined;
+    let patches = 0;
+    const fetchImpl = vi.fn((_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      if (init?.method !== 'PATCH') return Promise.resolve(new Response(null, { status: 204 }));
+      patches += 1;
+      if (patches === 1) {
+        return new Promise<Response>((resolve) => { resolveTransaction = resolve; });
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const transactionState = { ...initial, roomId: 'transaction' };
+    const transaction = saveStateTransaction(transactionState);
+    await vi.waitFor(() => expect(resolveTransaction).toBeTypeOf('function'));
+    const laterState = { ...initial, roomId: 'later' };
+    const laterSave = saveState(laterState);
+
+    resolveTransaction?.(new Response(null, { status: 204 }));
+    const [transactionResult, laterResult] = await Promise.allSettled([transaction, laterSave]);
+
+    expect(laterResult.status).toBe('fulfilled');
+    expect(loadState().roomId).toBe('later');
+    expect(transactionResult).toEqual(expect.objectContaining({
+      status: 'rejected',
+      reason: expect.objectContaining({ message: '配置在保存期间发生变化，请重试' }),
+    }));
+  });
+
+  it('does not persist a queued transaction superseded by an earlier transaction', async () => {
+    const initial = defaultState();
+    initial.roomId = 'initial';
+    await saveState(initial);
+    let resolveFirstTransaction: ((response: Response) => void) | undefined;
+    let patches = 0;
+    const fetchImpl = vi.fn((_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      if (init?.method !== 'PATCH') return Promise.resolve(new Response(null, { status: 204 }));
+      patches += 1;
+      if (patches === 1) {
+        return new Promise<Response>((resolve) => { resolveFirstTransaction = resolve; });
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const firstState = { ...initial, roomId: 'first' };
+    const firstTransaction = saveStateTransaction(firstState);
+    await vi.waitFor(() => expect(resolveFirstTransaction).toBeTypeOf('function'));
+    const secondState = { ...initial, roomId: 'second' };
+    const secondTransaction = saveStateTransaction(secondState);
+
+    resolveFirstTransaction?.(new Response(null, { status: 204 }));
+    const [firstResult, secondResult] = await Promise.allSettled([firstTransaction, secondTransaction]);
+
+    expect(firstResult.status).toBe('fulfilled');
+    expect(secondResult).toEqual(expect.objectContaining({
+      status: 'rejected',
+      reason: expect.objectContaining({ message: '配置在保存期间发生变化，请重试' }),
+    }));
+    expect(patches).toBe(1);
+    expect(loadState().roomId).toBe('first');
+  });
+
+  it('clears persisted snapshots after queued writes drain during reset', async () => {
+    await resetState();
+    let resolveFirstSave: ((response: Response) => void) | undefined;
+    const methods: string[] = [];
+    const fetchImpl = vi.fn((_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? 'GET';
+      methods.push(method);
+      if (method === 'PATCH' && methods.filter((entry) => entry === 'PATCH').length === 1) {
+        return new Promise<Response>((resolve) => { resolveFirstSave = resolve; });
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const state = defaultState();
+    state.roomId = 'after-reset';
+    const firstSave = saveState(state);
+    await vi.waitFor(() => expect(resolveFirstSave).toBeTypeOf('function'));
+    const reset = resetState();
+
+    resolveFirstSave?.(new Response(null, { status: 204 }));
+    await firstSave;
+    await reset;
+    await saveState(state);
+
+    expect(methods).toEqual(['PATCH', 'DELETE', 'PATCH']);
   });
 
   it('ignores legacy gift animation placements without dropping unrelated settings', async () => {

@@ -1,6 +1,7 @@
 const ENDPOINT = '/api/attribute-edit-lease';
 const DEFAULT_HEARTBEAT_MS = 5_000;
 const DEFAULT_RETRY_MS = 1_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 4_000;
 
 export type AttributeEditLeaseHealth = 'healthy' | 'retrying';
 
@@ -14,6 +15,7 @@ export interface AttributeEditLeaseOptions {
   fetchImpl?: typeof fetch;
   heartbeatMs?: number;
   retryMs?: number;
+  requestTimeoutMs?: number;
   onHealthChange?: (health: AttributeEditLeaseHealth) => void;
 }
 
@@ -24,13 +26,15 @@ export async function acquireAttributeEditLease(
   options: AttributeEditLeaseOptions = {},
 ): Promise<AttributeEditLeaseSession> {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const response = await requestLease(fetchImpl, 'POST', { attributeId });
-  const payload = await readSuccessPayload(response);
-  if (typeof payload.token !== 'string' || !/^[A-Za-z0-9_-]{24}$/.test(payload.token)) {
-    throw new Error('属性编辑租约响应无效');
-  }
+  const payload = await requestLeasePayloadWithTimeout(
+    fetchImpl,
+    'POST',
+    { attributeId },
+    options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+  );
+  const token = readLeaseToken(payload);
 
-  return createLeaseSession(attributeId, payload.token, fetchImpl, options);
+  return createLeaseSession(attributeId, token, fetchImpl, options);
 }
 
 function createLeaseSession(
@@ -41,9 +45,12 @@ function createLeaseSession(
 ): AttributeEditLeaseSession {
   const heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
   const retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
+  const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  let currentToken = token;
   let released = false;
   let renewalActive = false;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let activeRequest: { controller: AbortController; timer: ReturnType<typeof setTimeout> } | undefined;
   let releasePromise: Promise<void> | undefined;
   let health: AttributeEditLeaseHealth = 'healthy';
 
@@ -59,12 +66,47 @@ function createLeaseSession(
     retryTimer = undefined;
   };
 
+  const abortActiveRequest = (): void => {
+    if (!activeRequest) return;
+    const request = activeRequest;
+    activeRequest = undefined;
+    clearTimeout(request.timer);
+    request.controller.abort();
+  };
+
+  const requestRenewal = async (
+    method: 'POST' | 'PUT',
+    payload: Record<string, string>,
+  ): Promise<{ response: Response; payload?: LeasePayload }> => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
+    const ownedRequest = { controller, timer };
+    activeRequest = ownedRequest;
+    try {
+      const response = await requestLease(fetchImpl, method, payload, false, controller.signal);
+      return {
+        response,
+        ...(response.status === 404 ? {} : { payload: await readSuccessPayload(response) }),
+      };
+    } finally {
+      clearTimeout(timer);
+      if (activeRequest === ownedRequest) activeRequest = undefined;
+    }
+  };
+
   const renew = async (): Promise<void> => {
     if (released || renewalActive) return;
     renewalActive = true;
     try {
-      const response = await requestLease(fetchImpl, 'PUT', { attributeId, token });
-      await readSuccessPayload(response);
+      const { response } = await requestRenewal('PUT', { attributeId, token: currentToken });
+      if (response.status === 404) {
+        if (released) return;
+        reportHealth('retrying');
+        const reacquired = await requestRenewal('POST', { attributeId });
+        const replacementToken = readLeaseToken(reacquired.payload ?? {});
+        if (released) return;
+        currentToken = replacementToken;
+      }
       if (released) return;
       clearRetry();
       reportHealth('healthy', true);
@@ -91,14 +133,25 @@ function createLeaseSession(
     released = true;
     clearInterval(heartbeatTimer);
     clearRetry();
+    abortActiveRequest();
     globalThis.removeEventListener?.('beforeunload', beforeUnload);
-    releasePromise = requestLease(fetchImpl, 'DELETE', { attributeId, token }, true)
+    releasePromise = requestLeaseWithTimeout(
+      fetchImpl,
+      'DELETE',
+      { attributeId, token: currentToken },
+      requestTimeoutMs,
+      true,
+    )
       .then(() => undefined)
       .catch(() => undefined);
     return releasePromise;
   };
 
-  return { attributeId, token, release };
+  return {
+    attributeId,
+    get token() { return currentToken; },
+    release,
+  };
 }
 
 async function requestLease(
@@ -106,13 +159,54 @@ async function requestLease(
   method: 'POST' | 'PUT' | 'DELETE',
   payload: Record<string, string>,
   keepalive = false,
+  signal?: AbortSignal,
 ): Promise<Response> {
   return fetchImpl(ENDPOINT, {
     method,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
     ...(keepalive ? { keepalive: true } : {}),
+    ...(signal ? { signal } : {}),
   });
+}
+
+async function requestLeaseWithTimeout(
+  fetchImpl: typeof fetch,
+  method: 'POST' | 'PUT' | 'DELETE',
+  payload: Record<string, string>,
+  timeoutMs: number,
+  keepalive = false,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await requestLease(fetchImpl, method, payload, keepalive, controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function requestLeasePayloadWithTimeout(
+  fetchImpl: typeof fetch,
+  method: 'POST' | 'PUT',
+  payload: Record<string, string>,
+  timeoutMs: number,
+): Promise<LeasePayload> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await requestLease(fetchImpl, method, payload, false, controller.signal);
+    return await readSuccessPayload(response);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function readLeaseToken(payload: LeasePayload): string {
+  if (typeof payload.token !== 'string' || !/^[A-Za-z0-9_-]{24}$/.test(payload.token)) {
+    throw new Error('属性编辑租约响应无效');
+  }
+  return payload.token;
 }
 
 async function readSuccessPayload(response: Response): Promise<LeasePayload> {

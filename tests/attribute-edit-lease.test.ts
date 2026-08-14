@@ -19,6 +19,7 @@ function requestBody(call: readonly unknown[]): Record<string, unknown> {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe('attribute edit lease client', () => {
@@ -57,7 +58,7 @@ describe('attribute edit lease client', () => {
     const health = vi.fn();
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(success({ token }))
-      .mockResolvedValueOnce(responseError())
+      .mockResolvedValueOnce(new Response(null, { status: 500 }))
       .mockResolvedValueOnce(success());
     const session = await acquireAttributeEditLease(attributeId, {
       fetchImpl,
@@ -73,23 +74,169 @@ describe('attribute edit lease client', () => {
     await session.release();
   });
 
+  it('times out a hung renewal and reacquires after the original lease actually expires', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const health = vi.fn();
+    let activeToken = '';
+    let expiresAt = 0;
+    let creates = 0;
+    let renews = 0;
+    let hungSignal: AbortSignal | undefined;
+    const fetchImpl = vi.fn((_: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const method = init?.method;
+      if (method === 'POST') {
+        creates += 1;
+        activeToken = String.fromCharCode(64 + creates).repeat(24);
+        expiresAt = Date.now() + 15_000;
+        return Promise.resolve(success({ token: activeToken }));
+      }
+      if (method === 'PUT') {
+        renews += 1;
+        if (renews === 1) {
+          hungSignal = init?.signal ?? undefined;
+          return new Promise<Response>((_resolve, reject) => {
+            hungSignal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+          });
+        }
+        const body = JSON.parse(String(init?.body)) as { token: string };
+        if (Date.now() >= expiresAt || body.token !== activeToken) return Promise.resolve(responseError('编辑租约不存在'));
+        expiresAt = Date.now() + 15_000;
+        return Promise.resolve(success());
+      }
+      return Promise.resolve(success());
+    });
+    const session = await acquireAttributeEditLease(attributeId, {
+      fetchImpl,
+      heartbeatMs: 5_000,
+      retryMs: 1_000,
+      requestTimeoutMs: 11_000,
+      onHealthChange: health,
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(hungSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect(hungSignal?.aborted).toBe(true);
+    expect(health).toHaveBeenLastCalledWith('retrying');
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(creates).toBe(2);
+    expect(session.token).toBe('B'.repeat(24));
+    expect(health).toHaveBeenLastCalledWith('healthy');
+    await session.release();
+  });
+
+  it('keeps the timeout active while reading a stalled renewal response body', async () => {
+    vi.useFakeTimers();
+    const health = vi.fn();
+    let renewalSignal: AbortSignal | undefined;
+    const fetchImpl = vi.fn((_: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (init?.method === 'POST') return Promise.resolve(success({ token }));
+      if (init?.method === 'PUT') {
+        renewalSignal = init.signal ?? undefined;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => new Promise((_resolve, reject) => {
+            renewalSignal?.addEventListener(
+              'abort',
+              () => reject(new DOMException('aborted', 'AbortError')),
+              { once: true },
+            );
+          }),
+        } as Response);
+      }
+      return Promise.resolve(success());
+    });
+    const session = await acquireAttributeEditLease(attributeId, {
+      fetchImpl,
+      requestTimeoutMs: 2_000,
+      onHealthChange: health,
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(renewalSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(renewalSignal?.aborted).toBe(true);
+    expect(health).toHaveBeenLastCalledWith('retrying');
+    await session.release();
+    const requestCountAfterRelease = fetchImpl.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchImpl).toHaveBeenCalledTimes(requestCountAfterRelease);
+  });
+
+  it('releases exactly the replacement token after a not-found renewal reacquires', async () => {
+    vi.useFakeTimers();
+    const replacementToken = 'B'.repeat(24);
+    let creates = 0;
+    const fetchImpl = vi.fn(async (_: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        creates += 1;
+        return success({ token: creates === 1 ? token : replacementToken });
+      }
+      if (init?.method === 'PUT') return responseError('编辑租约不存在');
+      return success();
+    });
+    const session = await acquireAttributeEditLease(attributeId, { fetchImpl });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(creates).toBe(2);
+    expect(session.token).toBe(replacementToken);
+    await session.release();
+    const releaseCall = fetchImpl.mock.calls.at(-1) as unknown as [RequestInfo | URL, RequestInit?];
+    expect(releaseCall[1]).toMatchObject({ method: 'DELETE', keepalive: true });
+    expect(requestBody(releaseCall)).toEqual({ attributeId, token: replacementToken });
+  });
+
+  it('reports retrying throughout not-found lease reacquisition', async () => {
+    vi.useFakeTimers();
+    const health = vi.fn();
+    const replacementToken = 'B'.repeat(24);
+    let creates = 0;
+    let resolveReacquire: ((response: Response) => void) | undefined;
+    const fetchImpl = vi.fn((_: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (init?.method === 'POST') {
+        creates += 1;
+        if (creates === 1) return Promise.resolve(success({ token }));
+        return new Promise<Response>((resolve) => { resolveReacquire = resolve; });
+      }
+      if (init?.method === 'PUT') return Promise.resolve(responseError('编辑租约不存在'));
+      return Promise.resolve(success());
+    });
+    const session = await acquireAttributeEditLease(attributeId, { fetchImpl, onHealthChange: health });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(resolveReacquire).toBeTypeOf('function');
+    expect(health).toHaveBeenLastCalledWith('retrying');
+    resolveReacquire?.(success({ token: replacementToken }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(session.token).toBe(replacementToken);
+    expect(health).toHaveBeenLastCalledWith('healthy');
+    await session.release();
+  });
+
   it('synchronously clears owned timers before one keepalive release request', async () => {
     vi.useFakeTimers();
     const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
-    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(success({ token }))
-      .mockResolvedValueOnce(responseError())
+      .mockResolvedValueOnce(new Response(null, { status: 500 }))
       .mockResolvedValueOnce(success());
     const session = await acquireAttributeEditLease(attributeId, { fetchImpl });
 
     await vi.advanceTimersByTimeAsync(5_000);
     const release = session.release();
     expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
-    expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
     expect(fetchImpl.mock.calls[2][1]).toMatchObject({ method: 'DELETE', keepalive: true });
     expect(requestBody(fetchImpl.mock.calls[2] as unknown as [RequestInfo | URL, RequestInit?])).toEqual({ attributeId, token });
     await release;
+    const requestCountAfterRelease = fetchImpl.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchImpl).toHaveBeenCalledTimes(requestCountAfterRelease);
   });
 
   it('makes repeated release calls idempotent', async () => {

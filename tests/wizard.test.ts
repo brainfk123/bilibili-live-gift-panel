@@ -249,6 +249,7 @@ beforeEach(async () => {
       if (init?.method === 'POST') return Response.json({ code: 0, token: 'A'.repeat(24) });
       return Response.json({ code: 0 });
     }
+    if (url === '/api/config' && !init?.method) return Response.json(loadState());
     if (url.includes('/api/runtime')) {
       return new Response(JSON.stringify({
         code: 0,
@@ -1513,6 +1514,7 @@ describe('single-page configuration rendering', () => {
         if (url === '/api/attribute-edit-lease') {
           return Response.json(init?.method === 'POST' ? { code: 0, token: 'A'.repeat(24) } : { code: 0 });
         }
+        if (url === '/api/config' && !init?.method) return Response.json(loadState());
         if (url === '/api/gifts?roomId=88888888') {
           return Response.json({ code: 0, gifts: [currentGift] });
         }
@@ -1580,6 +1582,7 @@ describe('single-page configuration rendering', () => {
       if (url === '/api/attribute-edit-lease') {
         return Response.json(init?.method === 'POST' ? { code: 0, token: 'A'.repeat(24) } : { code: 0 });
       }
+      if (url === '/api/config' && !init?.method) return Response.json(loadState());
       if (url === '/api/gifts?roomId=88888888') {
         return Response.json({ code: 0, gifts: [listedGift, historicalGift, observedCatalogGift] });
       }
@@ -2785,6 +2788,45 @@ describe('single-page configuration rendering', () => {
     expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(fetchCount);
   });
 
+  it.each([
+    ['minimum endpoint', 'minimum', '随机范围必须使用整数'],
+    ['maximum endpoint', 'maximum', '随机范围必须使用整数'],
+    ['enabled cap', 'cap', '随机范围的上限必须是有效数字'],
+  ] as const)('blocks saving when the random %s is cleared', async (_name, field, message) => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.attributes[0].id = 'attribute-random-blank';
+    configured.rules = [{
+      id: 'r-blank-random-range', giftId: gift.id, attributeName: '加班时间', formulaName: '随机变化',
+      condition: '', formula: 'MIN(MAX(加班时间+RANDBETWEEN(-60,60),0),100)', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    await openExistingAttributeEditor(root);
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const input = (field === 'minimum'
+      ? root.querySelector('.quick-rule-range-min')
+      : field === 'maximum'
+        ? root.querySelector('.quick-rule-range-max')
+        : root.querySelectorAll('input').find((candidate) => candidate.dataset.fieldLabel === '最高不超过')) as TestElement & { oninput?: () => void };
+    input.value = '   ';
+    input.oninput?.();
+
+    expect(textOf(root.querySelector('.quick-rule-error') as TestElement)).toContain(message);
+    const patchCount = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.filter(([url, init]) => (
+      String(url) === '/api/config' && init?.method === 'PATCH'
+    )).length;
+    findByText(root, '保存修改')?.onclick?.();
+    await Promise.resolve();
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.filter(([url, init]) => (
+      String(url) === '/api/config' && init?.method === 'PATCH'
+    ))).toHaveLength(patchCount);
+    expect(root.querySelector('.attribute-overlay')).not.toBeNull();
+  });
+
   it('advances a gift simulation draft without saving it as the real attribute value', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state('88888888', 1),
@@ -3712,6 +3754,7 @@ describe('single-page configuration rendering', () => {
         return Response.json(init?.method === 'POST' ? { code: 0, token: 'A'.repeat(24) } : { code: 0 });
       }
       if (url.endsWith('/api/config') && !init?.method) {
+        if (configGetStarted) return Response.json(loadState());
         configGetStarted = true;
         return configGet;
       }
@@ -4420,6 +4463,7 @@ describe('single-page configuration rendering', () => {
             ? { code: 0, token: leaseToken }
             : { code: 0 });
         }
+        if (String(input) === '/api/config' && !init?.method) return Response.json(loadState());
         if (String(input) === '/api/formula/preview') return Response.json({ code: 0 });
         return new Response(null, { status: 204 });
       });
@@ -4440,6 +4484,7 @@ describe('single-page configuration rendering', () => {
             ? { code: 0, token: leaseToken }
             : { code: 0 }));
         }
+        if (String(input) === '/api/config' && !init?.method) return Promise.resolve(Response.json(loadState()));
         return Promise.resolve(new Response(null, { status: 204 }));
       });
       vi.stubGlobal('fetch', fetchImpl);
@@ -4465,6 +4510,31 @@ describe('single-page configuration rendering', () => {
       expect(saved.attributes[0].id).toBe(lease.attributeId);
     });
 
+    it('keeps live and cached state ID-free when generated-ID persistence fails', async () => {
+      const configured = configuredAttribute(null);
+      configured.attributes[0].display = { variant: 'timer', themeId: 'glass' };
+      await saveState(configured);
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input) === '/api/config' && init?.method === 'PATCH') {
+          return new Response(null, { status: 500 });
+        }
+        if (String(input) === '/api/attribute-edit-lease') {
+          return Response.json(init?.method === 'POST' ? { code: 0, token: leaseToken } : { code: 0 });
+        }
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+
+      findByText(root, '编辑')?.onclick?.();
+      await vi.waitFor(() => expect(textOf(root)).toContain('配置保存失败'));
+
+      expect(loadState().attributes[0].id).toBeUndefined();
+      expect(fetchImpl.mock.calls.some(([url]) => String(url) === '/api/attribute-edit-lease')).toBe(false);
+      expect(root.querySelector('.attribute-overlay')).toBeNull();
+    });
+
     it('opens an existing editor only after its lease POST succeeds', async () => {
       await saveState(configuredAttribute());
       let resolveAcquire: ((response: Response) => void) | undefined;
@@ -4472,6 +4542,7 @@ describe('single-page configuration rendering', () => {
         if (String(input) === '/api/attribute-edit-lease' && init?.method === 'POST') {
           return new Promise<Response>((resolve) => { resolveAcquire = resolve; });
         }
+        if (String(input) === '/api/config' && !init?.method) return Promise.resolve(Response.json(loadState()));
         return Promise.resolve(new Response(null, { status: 204 }));
       });
       vi.stubGlobal('fetch', fetchImpl);
@@ -4482,6 +4553,203 @@ describe('single-page configuration rendering', () => {
       expect(root.querySelector('.attribute-overlay')).toBeNull();
       resolveAcquire?.(Response.json({ code: 0, token: leaseToken }));
       await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+    });
+
+    it('acquires the lease before refreshing and mounts the refreshed attribute by stable ID', async () => {
+      const configured = configuredAttribute();
+      await saveState(configured);
+      const refreshed = JSON.parse(JSON.stringify(configured)) as typeof configured;
+      refreshed.attributes[0].value = 3_661;
+      refreshed.attributes.unshift({
+        id: 'attribute-decoy', name: '干扰属性', value: 7, unit: 'none', format: 'number', decimals: 0, suffix: '',
+      });
+      const order: string[] = [];
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === '/api/attribute-edit-lease') {
+          if (init?.method === 'POST') order.push('POST lease');
+          return Response.json(init?.method === 'POST' ? { code: 0, token: leaseToken } : { code: 0 });
+        }
+        if (url === '/api/config' && !init?.method) {
+          order.push('GET config');
+          return Response.json(refreshed);
+        }
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+
+      findByText(root, '编辑')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+
+      expect(order).toEqual(['POST lease', 'GET config']);
+      const value = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '当前值');
+      const name = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '属性名称');
+      expect(name?.value).toBe('加班时间');
+      expect(value?.value).toBe('01:01:01');
+    });
+
+    it('rebases save by stable ID after peer changes, reorder, and a concurrent target rename', async () => {
+      const opening = configuredAttribute();
+      opening.attributes.push({
+        id: 'attribute-peer', name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '',
+      });
+      opening.timerRules = [{
+        id: 'timer-rebase', attributeName: '加班时间', formulaName: '每分钟减少', intervalSeconds: 60,
+        formula: '加班时间-1', enabled: true,
+      }];
+      opening.displayScenes = [{
+        id: 'scene-rebase', name: '直播状态', attributeNames: ['加班时间'], layout: 'stack', themeId: 'glass',
+      }];
+      opening.activities = [{
+        id: 'activity-rebase', name: '直播挑战', attributeNames: ['加班时间'], status: 'not_started',
+        resultMode: 'highest', gateRules: true, initialValues: { 加班时间: 0 },
+        milestones: [{
+          id: 'milestone-rebase', name: '目标', attributeName: '加班时间', comparison: 'gte', threshold: 60,
+          action: 'announce', message: '达到目标',
+        }],
+      }];
+      await saveState(opening);
+      const preSave = JSON.parse(JSON.stringify(opening)) as typeof opening;
+      preSave.attributes[1].value = 2;
+      preSave.attributes = [preSave.attributes[1], preSave.attributes[0]];
+      const backendName = '后台改名';
+      preSave.attributes[1].name = backendName;
+      preSave.rules = preSave.rules.map((rule) => ({
+        ...rule, attributeName: backendName, formula: `${backendName}+1`,
+      }));
+      preSave.timerRules = preSave.timerRules.map((rule) => ({
+        ...rule, attributeName: backendName, formula: `${backendName}-1`,
+      }));
+      preSave.displayScenes[0].attributeNames = [backendName];
+      preSave.activities[0] = {
+        ...preSave.activities[0],
+        attributeNames: [backendName],
+        initialValues: { [backendName]: 0 },
+        milestones: preSave.activities[0].milestones.map((milestone) => ({ ...milestone, attributeName: backendName })),
+      };
+      let configGets = 0;
+      let captureSave = false;
+      let configPatch: Record<string, unknown> | undefined;
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === '/api/attribute-edit-lease') {
+          return Response.json(init?.method === 'POST' ? { code: 0, token: leaseToken } : { code: 0 });
+        }
+        if (url === '/api/config' && !init?.method) {
+          configGets += 1;
+          return Response.json(configGets === 1 ? opening : preSave);
+        }
+        if (url === '/api/config' && init?.method === 'PATCH') {
+          const patch = JSON.parse(String(init.body ?? '{}')) as Record<string, unknown> & {
+            attributes?: Array<{ id?: string; value?: number }>;
+          };
+          if (captureSave && patch.attributes?.some((attribute) => attribute.id === stableId && attribute.value === 60)) configPatch = patch;
+          return Response.json({ code: 0 });
+        }
+        if (url === '/api/formula/preview') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExistingAttributeEditor(root);
+      const value = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '当前值') as TestElement;
+      value.value = '00:01:00';
+      captureSave = true;
+
+      findByText(root, '保存修改')?.onclick?.();
+      await vi.waitFor(() => expect(configPatch).toBeDefined());
+
+      expect(configGets).toBe(2);
+      const savedAttributes = configPatch?.attributes as Array<{ id?: string; value: number }>;
+      expect(savedAttributes.map((attribute) => attribute.id)).toEqual(['attribute-peer', stableId]);
+      expect(savedAttributes[0].value).toBe(2);
+      expect(savedAttributes[1].value).toBe(60);
+      expect(savedAttributes[1]).toEqual(expect.objectContaining({ name: '加班时间' }));
+      expect(configPatch?.rules).toEqual([
+        expect.objectContaining({ attributeName: '加班时间', formula: '加班时间+1' }),
+      ]);
+      expect(configPatch?.timerRules).toEqual([
+        expect.objectContaining({ attributeName: '加班时间', formula: '加班时间-1' }),
+      ]);
+      expect(configPatch?.displayScenes).toEqual([
+        expect.objectContaining({ attributeNames: ['加班时间'] }),
+      ]);
+      expect(configPatch?.activities).toEqual([
+        expect.objectContaining({
+          attributeNames: ['加班时间'],
+          initialValues: { 加班时间: 0 },
+          milestones: [expect.objectContaining({ attributeName: '加班时间' })],
+        }),
+      ]);
+    });
+
+    it.each([
+      ['the pre-save refresh fails', () => new Response(null, { status: 500 }), '配置读取失败'],
+      ['the stable target disappears before save', () => Response.json({ ...configuredAttribute(), attributes: [] }), '属性已不存在'],
+    ])('keeps the editor and lease when %s', async (_reason, preSaveResponse, message) => {
+      const configured = configuredAttribute();
+      await saveState(configured);
+      let configGets = 0;
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === '/api/attribute-edit-lease') {
+          return Response.json(init?.method === 'POST' ? { code: 0, token: leaseToken } : { code: 0 });
+        }
+        if (url === '/api/config' && !init?.method) {
+          configGets += 1;
+          return configGets === 1 ? Response.json(configured) : preSaveResponse();
+        }
+        if (url === '/api/formula/preview') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExistingAttributeEditor(root);
+      const patchCount = fetchImpl.mock.calls.filter(([url, init]) => (
+        String(url) === '/api/config' && init?.method === 'PATCH'
+      )).length;
+
+      findByText(root, '保存修改')?.onclick?.();
+
+      await vi.waitFor(() => expect(configGets).toBe(2));
+      await vi.waitFor(() => expect(textOf(root)).toContain(message));
+      expect(root.querySelector('.attribute-overlay')).not.toBeNull();
+      expect(fetchImpl.mock.calls.filter(([url, init]) => (
+        String(url) === '/api/config' && init?.method === 'PATCH'
+      ))).toHaveLength(patchCount);
+      expect(fetchImpl.mock.calls.some(([url, init]) => String(url) === '/api/attribute-edit-lease' && init?.method === 'DELETE')).toBe(false);
+    });
+
+    it.each([
+      ['the leased refresh fails', () => new Response(null, { status: 500 })],
+      ['the stable attribute is absent after refresh', () => Response.json({ ...configuredAttribute(), attributes: [] })],
+    ])('releases and aborts opening when %s', async (_reason, configResponse) => {
+      await saveState(configuredAttribute());
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === '/api/attribute-edit-lease') {
+          return Response.json(init?.method === 'POST' ? { code: 0, token: leaseToken } : { code: 0 });
+        }
+        if (url === '/api/config' && !init?.method) return configResponse();
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+
+      findByText(root, '编辑')?.onclick?.();
+
+      await vi.waitFor(() => expect(fetchImpl.mock.calls.some(([url, init]) => (
+        String(url) === '/api/attribute-edit-lease' && init?.method === 'DELETE'
+      ))).toBe(true));
+      expect(root.querySelector('.attribute-overlay')).toBeNull();
     });
 
     it('opens a new attribute editor without lease traffic', async () => {
@@ -4495,6 +4763,60 @@ describe('single-page configuration rendering', () => {
       await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
 
       expect(fetchImpl.mock.calls.filter(([url]) => String(url) === '/api/attribute-edit-lease')).toHaveLength(0);
+    });
+
+    it('rebases new-attribute creation on fresh peer values and order', async () => {
+      const opening = configuredAttribute();
+      opening.attributes.push({
+        id: 'attribute-peer', name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '',
+      });
+      await saveState(opening);
+      const preSave = JSON.parse(JSON.stringify(opening)) as typeof opening;
+      preSave.attributes[1].value = 2;
+      preSave.attributes = [preSave.attributes[1], preSave.attributes[0]];
+      let configGets = 0;
+      let captureSave = false;
+      let configPatch: Record<string, unknown> | undefined;
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === '/api/config' && !init?.method) {
+          configGets += 1;
+          return Response.json(preSave);
+        }
+        if (url === '/api/config' && init?.method === 'PATCH') {
+          const patch = JSON.parse(String(init.body ?? '{}')) as Record<string, unknown> & {
+            attributes?: Array<{ name?: string }>;
+          };
+          if (captureSave && patch.attributes?.some((attribute) => attribute.name === '新增属性')) configPatch = patch;
+          return Response.json({ code: 0 });
+        }
+        if (url === '/api/formula/preview') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+
+      findByText(root, '+ 添加属性')?.onclick?.();
+      root.querySelector('.template-blank-card')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+      const name = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement;
+      const value = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '当前值') as TestElement;
+      name.value = '新增属性';
+      value.value = '00:00:07';
+      captureSave = true;
+
+      findByText(root, '创建属性')?.onclick?.();
+      await vi.waitFor(() => expect(configPatch).toBeDefined());
+
+      expect(configGets).toBe(1);
+      const savedAttributes = configPatch?.attributes as Array<{ id?: string; name: string; value: number }>;
+      expect(savedAttributes.slice(0, 2).map((attribute) => attribute.id)).toEqual(['attribute-peer', stableId]);
+      expect(savedAttributes[0].value).toBe(2);
+      expect(savedAttributes.at(-1)).toEqual(expect.objectContaining({ name: '新增属性', value: 7 }));
+      expect(fetchImpl.mock.calls.some(([url]) => String(url) === '/api/attribute-edit-lease')).toBe(false);
     });
 
     it.each([
@@ -4539,6 +4861,7 @@ describe('single-page configuration rendering', () => {
             : { code: 0 }));
         }
         if (String(input) === '/api/formula/preview') return Promise.resolve(Response.json({ code: 0 }));
+        if (String(input) === '/api/config' && !init?.method) return Promise.resolve(Response.json(loadState()));
         if (String(input) === '/api/config' && init?.method === 'PATCH' && deferSave) {
           return new Promise<Response>((resolve) => { resolveSave = resolve; });
         }
@@ -4573,6 +4896,7 @@ describe('single-page configuration rendering', () => {
         if (String(input) === '/api/attribute-edit-lease') {
           return Response.json(init?.method === 'POST' ? { code: 0, token: leaseToken } : { code: 0 });
         }
+        if (String(input) === '/api/config' && !init?.method) return Response.json(loadState());
         if (String(input) === '/api/config' && init?.method === 'PATCH' && failConfigSaves) return new Response(null, { status: 500 });
         return new Response(null, { status: 204 });
       });
@@ -4598,6 +4922,47 @@ describe('single-page configuration rendering', () => {
       expect(fetchImpl.mock.calls.some(([url, init]) => String(url) === '/api/attribute-edit-lease' && init?.method === 'DELETE')).toBe(false);
     });
 
+    it('keeps failed attribute and rule drafts out of live/cache state after Cancel', async () => {
+      const configured = configuredAttribute();
+      await saveState(configured);
+      const serverState = JSON.parse(JSON.stringify(configured)) as typeof configured;
+      let failConfigSaves = false;
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === '/api/attribute-edit-lease') {
+          return Response.json(init?.method === 'POST' ? { code: 0, token: leaseToken } : { code: 0 });
+        }
+        if (url === '/api/config' && !init?.method) return Response.json(serverState);
+        if (url === '/api/config' && init?.method === 'PATCH' && failConfigSaves) {
+          return new Response(null, { status: 500 });
+        }
+        if (url === '/api/formula/preview') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExistingAttributeEditor(root);
+      failConfigSaves = true;
+      const name = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
+      const value = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '当前值') as TestElement;
+      name.value = '倒计时';
+      name.oninput?.();
+      value.value = '00:01:00';
+
+      findByText(root, '保存修改')?.onclick?.();
+      await vi.waitFor(() => expect(textOf(root)).toContain('配置保存失败'));
+
+      expect(loadState().attributes[0]).toEqual(expect.objectContaining({ name: '加班时间', value: 0 }));
+      expect(loadState().rules[0]).toEqual(expect.objectContaining({ attributeName: '加班时间', formula: '加班时间+1' }));
+      findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.();
+      expect(root.querySelector('.attribute-overlay')).toBeNull();
+      expect(loadState().attributes[0]).toEqual(expect.objectContaining({ name: '加班时间', value: 0 }));
+      expect(loadState().rules[0]).toEqual(expect.objectContaining({ attributeName: '加班时间', formula: '加班时间+1' }));
+    });
+
     it('leaves the modal closed and shows an error when acquisition fails', async () => {
       await saveState(configuredAttribute());
       const fetchImpl = leaseFetch({ POST: () => Response.json({ code: -1 }, { status: 409 }) });
@@ -4607,6 +4972,36 @@ describe('single-page configuration rendering', () => {
 
       findByText(root, '编辑')?.onclick?.();
       await vi.waitFor(() => expect(textOf(root)).toContain('属性编辑租约请求失败'));
+      expect(root.querySelector('.attribute-overlay')).toBeNull();
+    });
+
+    it('keeps the active spotlight guide when lease acquisition fails', async () => {
+      const configured = configuredAttribute();
+      configured.settings.showTutorial = true;
+      configured.settings.tutorialReplayMode = true;
+      configured.settings.tutorialCompletedLessons = [];
+      await saveState(configured);
+      let resolveAcquire: ((response: Response) => void) | undefined;
+      const baseFetch = globalThis.fetch;
+      const fetchImpl = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        if (String(input) === '/api/attribute-edit-lease' && init?.method === 'POST') {
+          return new Promise<Response>((resolve) => { resolveAcquire = resolve; });
+        }
+        return baseFetch(input, init);
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      const guide = root.querySelector('.tour-bubble');
+      expect(guide).not.toBeNull();
+
+      findByText(root, '编辑')?.onclick?.();
+      await vi.waitFor(() => expect(resolveAcquire).toBeTypeOf('function'));
+      expect(root.querySelector('.tour-bubble')).toBe(guide);
+      resolveAcquire?.(Response.json({ code: -1 }, { status: 409 }));
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性编辑租约请求失败'));
+
+      expect(root.querySelector('.tour-bubble')).toBe(guide);
       expect(root.querySelector('.attribute-overlay')).toBeNull();
     });
 
@@ -4638,6 +5033,48 @@ describe('single-page configuration rendering', () => {
       await vi.advanceTimersByTimeAsync(1_000);
       expect(warning.hidden).toBe(true);
       vi.useRealTimers();
+    });
+
+    it('mounts with the retry warning visible when renewal fails during the leased refresh', async () => {
+      const configured = configuredAttribute();
+      await saveState(configured);
+      let heartbeat: (() => void) | undefined;
+      let resolveRefresh: ((response: Response) => void) | undefined;
+      const fetchImpl = vi.fn((input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (url === '/api/attribute-edit-lease' && init?.method === 'POST') {
+          return Promise.resolve(Response.json({ code: 0, token: leaseToken }));
+        }
+        if (url === '/api/attribute-edit-lease' && init?.method === 'PUT') {
+          return Promise.resolve(new Response(null, { status: 500 }));
+        }
+        if (url === '/api/attribute-edit-lease') return Promise.resolve(Response.json({ code: 0 }));
+        if (url === '/api/config' && !init?.method) {
+          return new Promise<Response>((resolve) => { resolveRefresh = resolve; });
+        }
+        return Promise.resolve(new Response(null, { status: 204 }));
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      vi.stubGlobal('setInterval', (handler: () => void) => {
+        heartbeat = handler;
+        return 1;
+      });
+      vi.stubGlobal('clearInterval', () => {});
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+
+      findByText(root, '编辑')?.onclick?.();
+      await vi.waitFor(() => expect(resolveRefresh).toBeTypeOf('function'));
+      heartbeat?.();
+      await vi.waitFor(() => expect(fetchImpl.mock.calls.some(([url, init]) => (
+        String(url) === '/api/attribute-edit-lease' && init?.method === 'PUT'
+      ))).toBe(true));
+      resolveRefresh?.(Response.json(configured));
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+
+      const warning = root.querySelector('.attribute-lease-warning') as TestElement & { hidden?: boolean };
+      expect(warning.hidden).toBe(false);
+      findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.();
     });
 
     it('keeps renew and release bound to the original stable ID after renaming', async () => {
