@@ -140,7 +140,7 @@ interface SelectedGiftRule {
   quickMaximum?: number;
   quickMaximumEnabled?: boolean;
   quickConditionMode?: QuickGiftConditionMode;
-  quickConditionIdentity?: 1 | 2 | 3 | 4;
+  quickConditionIdentity?: GiftUserIdentity;
   simulationIdentity?: GiftUserIdentity;
   previous?: GiftRule;
   matchGiftIds?: number[];
@@ -3958,7 +3958,7 @@ export function mountConfig(root: HTMLElement): void {
         conditionModeSelect.append(el('option', { value, text }));
       }
       const conditionIdentitySelect = el('select', { class: 'field-input quick-rule-condition-identity' }) as HTMLSelectElement;
-      for (const identity of GIFT_USER_IDENTITIES.filter((candidate) => candidate.value !== 0)) {
+      for (const identity of GIFT_USER_IDENTITIES) {
         conditionIdentitySelect.append(el('option', { value: String(identity.value), text: identity.name }));
       }
       const simulationIdentitySelect = el('select', { class: 'field-input gift-rule-simulation-identity' }) as HTMLSelectElement;
@@ -3977,7 +3977,7 @@ export function mountConfig(root: HTMLElement): void {
       };
       const syncQuickCondition = (): void => {
         const mode = conditionModeSelect.value as QuickGiftConditionMode;
-        const identity = Number(conditionIdentitySelect.value) as 1 | 2 | 3 | 4;
+        const identity = Number(conditionIdentitySelect.value) as GiftUserIdentity;
         item.quickConditionMode = mode;
         item.quickConditionIdentity = identity;
         const condition = buildQuickGiftCondition(mode, identity);
