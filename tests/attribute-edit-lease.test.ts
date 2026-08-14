@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { acquireAttributeEditLease } from '../src/ui/config/attribute-edit-lease';
+import { acquireAttributeEditLease, maintainAttributeEditLease } from '../src/ui/config/attribute-edit-lease';
 
 const attributeId = 'attribute-1';
 const token = 'A'.repeat(24);
@@ -23,6 +23,28 @@ afterEach(() => {
 });
 
 describe('attribute edit lease client', () => {
+  it('maintains a prepared token and recovers a lost lease through the atomic session endpoint', async () => {
+    vi.useFakeTimers();
+    const replacementToken = 'B'.repeat(24);
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PUT') return responseError('编辑租约不存在');
+      if (init?.method === 'POST') return success({ attributeId, token: replacementToken });
+      return success();
+    });
+    const session = maintainAttributeEditLease(attributeId, token, { fetchImpl });
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(fetchImpl.mock.calls[0][0]).toBe('/api/attribute-edit-lease');
+    expect(requestBody(fetchImpl.mock.calls[0] as unknown as [RequestInfo | URL, RequestInit?])).toEqual({ attributeId, token });
+    expect(fetchImpl.mock.calls[1][0]).toBe('/api/attribute-edits/session');
+    expect(requestBody(fetchImpl.mock.calls[1] as unknown as [RequestInfo | URL, RequestInit?])).toEqual({ attributeId });
+    expect(session.token).toBe(replacementToken);
+    await session.release();
+    expect(requestBody(fetchImpl.mock.calls[2] as unknown as [RequestInfo | URL, RequestInit?])).toEqual({ attributeId, token: replacementToken });
+  });
+
   it('acquires with only the attribute ID and accepts a 24-character token', async () => {
     const fetchImpl = vi.fn(async () => success({ token }));
 

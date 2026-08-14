@@ -1,4 +1,5 @@
 const ENDPOINT = '/api/attribute-edit-lease';
+const SESSION_ENDPOINT = '/api/attribute-edits/session';
 const DEFAULT_HEARTBEAT_MS = 5_000;
 const DEFAULT_RETRY_MS = 1_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 4_000;
@@ -19,7 +20,7 @@ export interface AttributeEditLeaseOptions {
   onHealthChange?: (health: AttributeEditLeaseHealth) => void;
 }
 
-type LeasePayload = { code?: unknown; token?: unknown };
+type LeasePayload = { code?: unknown; token?: unknown; attributeId?: unknown };
 
 export async function acquireAttributeEditLease(
   attributeId: string,
@@ -37,11 +38,22 @@ export async function acquireAttributeEditLease(
   return createLeaseSession(attributeId, token, fetchImpl, options);
 }
 
+/** Starts heartbeats for a token returned by an atomic edit session. */
+export function maintainAttributeEditLease(
+  attributeId: string,
+  token: string,
+  options: AttributeEditLeaseOptions = {},
+): AttributeEditLeaseSession {
+  if (!attributeId.trim() || !/^[A-Za-z0-9_-]{24}$/.test(token)) throw new Error('属性编辑租约响应无效');
+  return createLeaseSession(attributeId, token, options.fetchImpl ?? fetch, options, true);
+}
+
 function createLeaseSession(
   attributeId: string,
   token: string,
   fetchImpl: typeof fetch,
   options: AttributeEditLeaseOptions,
+  reacquireThroughSession = false,
 ): AttributeEditLeaseSession {
   const heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
   const retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
@@ -77,13 +89,14 @@ function createLeaseSession(
   const requestRenewal = async (
     method: 'POST' | 'PUT',
     payload: Record<string, string>,
+    endpoint = ENDPOINT,
   ): Promise<{ response: Response; payload?: LeasePayload }> => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
     const ownedRequest = { controller, timer };
     activeRequest = ownedRequest;
     try {
-      const response = await requestLease(fetchImpl, method, payload, false, controller.signal);
+      const response = await requestLease(fetchImpl, method, payload, false, controller.signal, endpoint);
       return {
         response,
         ...(response.status === 404 ? {} : { payload: await readSuccessPayload(response) }),
@@ -102,7 +115,14 @@ function createLeaseSession(
       if (response.status === 404) {
         if (released) return;
         reportHealth('retrying');
-        const reacquired = await requestRenewal('POST', { attributeId });
+        const reacquired = await requestRenewal(
+          'POST',
+          { attributeId },
+          reacquireThroughSession ? SESSION_ENDPOINT : ENDPOINT,
+        );
+        if (reacquireThroughSession && reacquired.payload?.attributeId !== attributeId) {
+          throw new Error('属性编辑租约响应无效');
+        }
         const replacementToken = readLeaseToken(reacquired.payload ?? {});
         if (released) return;
         currentToken = replacementToken;
@@ -160,8 +180,9 @@ async function requestLease(
   payload: Record<string, string>,
   keepalive = false,
   signal?: AbortSignal,
+  endpoint = ENDPOINT,
 ): Promise<Response> {
-  return fetchImpl(ENDPOINT, {
+  return fetchImpl(endpoint, {
     method,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),

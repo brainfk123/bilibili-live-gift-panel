@@ -157,6 +157,28 @@ export function saveStateTransaction(state: AppState): Promise<AppState> {
   return transaction;
 }
 
+/**
+ * Serializes a server-owned mutation with local persistence and adopts only
+ * the normalized state returned by that command.
+ */
+export function commitAuthoritativeStateMutation(
+  mutation: () => Promise<AppState>,
+): Promise<AppState> {
+  const transaction = persistQueue
+    .catch(() => undefined)
+    .then(async () => {
+      const authoritative = normalizeState(await mutation());
+      persistedFieldSnapshots = snapshotStateFields(authoritative);
+      forcePersistFields.clear();
+      return publishCachedState(authoritative);
+    });
+  persistQueue = transaction.then(
+    () => undefined,
+    () => undefined,
+  );
+  return transaction;
+}
+
 export function resetState(): Promise<void> {
   publishCachedState(defaultState());
   configMigrationRequired = false;

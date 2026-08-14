@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBackup, defaultState, hydrateStateFromServer, loadState, mergeConfigBackup, saveState, saveStateTransaction, resetState, pruneLog, refreshStateFromServer } from '../src/storage';
+import { clearRoomScopedRecords, commitAuthoritativeStateMutation, consumeConfigMigrationRequired, createConfigBackup, defaultState, hydrateStateFromServer, loadState, mergeConfigBackup, saveState, saveStateTransaction, resetState, pruneLog, refreshStateFromServer } from '../src/storage';
 import { LogEntry, MAX_LOG } from '../src/types';
 
 beforeEach(() => {
@@ -8,6 +8,37 @@ beforeEach(() => {
 });
 
 describe('storage', () => {
+  it('serializes an authoritative mutation and publishes only its response', async () => {
+    const initial = defaultState();
+    initial.roomId = 'initial';
+    await saveState(initial);
+    let resolveSave: ((response: Response) => void) | undefined;
+    const fetchImpl = vi.fn((_input: RequestInfo | URL, request?: RequestInit): Promise<Response> => {
+      if (request?.method !== 'PATCH') return Promise.resolve(new Response(null, { status: 204 }));
+      return new Promise<Response>((resolve) => { resolveSave = resolve; });
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const ordinary = { ...initial, roomId: 'ordinary-save' };
+    const pendingSave = saveState(ordinary);
+    await vi.waitFor(() => expect(resolveSave).toBeTypeOf('function'));
+    const serverState = { ...initial, roomId: 'authoritative-server' };
+    let mutationStarted = false;
+
+    const mutation = commitAuthoritativeStateMutation(async () => {
+      mutationStarted = true;
+      return serverState;
+    });
+
+    expect(mutationStarted).toBe(false);
+    expect(loadState().roomId).toBe('ordinary-save');
+    resolveSave?.(new Response(null, { status: 204 }));
+    await pendingSave;
+    await expect(mutation).resolves.toMatchObject({ roomId: 'authoritative-server' });
+    expect(loadState().roomId).toBe('authoritative-server');
+    await saveState(serverState);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it('loads default state when empty', () => {
     const s = loadState();
     expect(s.attributes).toEqual([]);
