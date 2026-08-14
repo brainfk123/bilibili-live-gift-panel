@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+  <title>Gift Panel Update API</title>
+  <style>body{margin:0;min-height:100vh;display:grid;place-items:center;font:16px system-ui,sans-serif}main{text-align:center}footer{margin-top:1rem;text-align:center}</style>
+</head>
+<body>
+  <main>
+    <p>Gift Panel Update API</p>
+    <footer><a href="https://beian.miit.gov.cn/" rel="nofollow">${ICP_NUMBER}</a></footer>
+  </main>
+</body>
+</html>

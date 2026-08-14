@@ -1,0 +1,104 @@
+limit_req_zone $binary_remote_addr zone=gift_panel_update_api:10m rate=10r/m;
+
+log_format gift_panel_update_api_safe '$remote_addr - $remote_user [$time_local] '
+    '"$request_method $uri $server_protocol" $status $body_bytes_sent '
+    'request_id=$request_id';
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${PUBLIC_DOMAIN};
+    access_log /var/log/nginx/gift-panel-update-api.access.log gift_panel_update_api_safe;
+    error_log /var/log/nginx/gift-panel-update-api.error.log crit;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/acme;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${PUBLIC_DOMAIN};
+    ssl_certificate ${TLS_CERT_PATH};
+    ssl_certificate_key ${TLS_KEY_PATH};
+    access_log /var/log/nginx/gift-panel-update-api.access.log gift_panel_update_api_safe;
+    error_log /var/log/nginx/gift-panel-update-api.error.log crit;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy no-referrer always;
+    add_header X-Frame-Options DENY always;
+    add_header Permissions-Policy 'camera=(), geolocation=(), microphone=()' always;
+    add_header Content-Security-Policy "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" always;
+
+    root /opt/gift-panel-update-api/www;
+    index index.html;
+    error_page 429 = @rate_limited;
+
+    location = / {
+        try_files /index.html =404;
+    }
+
+    location = /api/v1/releases/latest {
+        limit_req zone=gift_panel_update_api burst=20 nodelay;
+        limit_req_status 429;
+        proxy_pass http://127.0.0.1:12450;
+        proxy_http_version 1.1;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_connect_timeout 2s;
+        proxy_send_timeout 5s;
+        proxy_read_timeout 10s;
+    }
+
+    location = /api/v1/changelog {
+        limit_req zone=gift_panel_update_api burst=20 nodelay;
+        limit_req_status 429;
+        proxy_pass http://127.0.0.1:12450;
+        proxy_http_version 1.1;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_connect_timeout 2s;
+        proxy_send_timeout 5s;
+        proxy_read_timeout 10s;
+    }
+
+    location = /healthz {
+        allow 127.0.0.1;
+        deny all;
+        proxy_pass http://127.0.0.1:12450;
+        proxy_http_version 1.1;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_connect_timeout 2s;
+        proxy_send_timeout 5s;
+        proxy_read_timeout 10s;
+    }
+
+    location @rate_limited {
+        internal;
+        default_type application/json;
+        add_header Content-Type application/json always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Referrer-Policy no-referrer always;
+        add_header X-Frame-Options DENY always;
+        add_header Permissions-Policy 'camera=(), geolocation=(), microphone=()' always;
+        add_header Content-Security-Policy "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" always;
+        return 429 '{"code":"rate_limited","message":"Too many requests"}';
+    }
+
+    location / {
+        default_type application/json;
+        return 404 '{"code":"not_found","message":"Not found"}';
+    }
+}
