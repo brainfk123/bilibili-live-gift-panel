@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { acquireAttributeEditLease, maintainAttributeEditLease } from '../src/ui/config/attribute-edit-lease';
+import { defaultState } from '../src/storage';
 
 const attributeId = 'attribute-1';
 const token = 'A'.repeat(24);
@@ -10,6 +11,17 @@ function success(payload: Record<string, unknown> = {}): Response {
 
 function responseError(message = '属性不存在'): Response {
   return Response.json({ code: -1, message }, { status: 404 });
+}
+
+function preparedSession(replacementToken: string, overrides: Record<string, unknown> = {}): Response {
+  return Response.json({
+    code: 0,
+    attributeId,
+    token: replacementToken,
+    expiresAt: '2026-08-14T00:00:15Z',
+    state: defaultState(),
+    ...overrides,
+  });
 }
 
 function requestBody(call: readonly unknown[]): Record<string, unknown> {
@@ -28,7 +40,7 @@ describe('attribute edit lease client', () => {
     const replacementToken = 'B'.repeat(24);
     const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === 'PUT') return responseError('编辑租约不存在');
-      if (init?.method === 'POST') return success({ attributeId, token: replacementToken });
+      if (init?.method === 'POST') return preparedSession(replacementToken);
       return success();
     });
     const session = maintainAttributeEditLease(attributeId, token, { fetchImpl });
@@ -43,6 +55,77 @@ describe('attribute edit lease client', () => {
     expect(session.token).toBe(replacementToken);
     await session.release();
     expect(requestBody(fetchImpl.mock.calls[2] as unknown as [RequestInfo | URL, RequestInit?])).toEqual({ attributeId, token: replacementToken });
+  });
+
+  it('does not replace the current token from a malformed recovery session', async () => {
+    vi.useFakeTimers();
+    const health = vi.fn();
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PUT') return responseError('编辑租约不存在');
+      if (init?.method === 'POST') return Response.json({
+        code: 0, attributeId, token: 'B'.repeat(24), expiresAt: '2026-08-14T00:00:15Z',
+      });
+      return success();
+    });
+    const session = maintainAttributeEditLease(attributeId, token, { fetchImpl, onHealthChange: health });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(session.token).toBe(token);
+    expect(health).toHaveBeenLastCalledWith('retrying');
+    await session.release();
+    expect(requestBody(fetchImpl.mock.calls.at(-1) as unknown as [RequestInfo | URL, RequestInit?]))
+      .toEqual({ attributeId, token });
+  });
+
+  it('deletes a replacement token that arrives after release and waits for cleanup', async () => {
+    vi.useFakeTimers();
+    const replacementToken = 'B'.repeat(24);
+    let resolveReacquire: ((response: Response) => void) | undefined;
+    const deletedTokens: string[] = [];
+    const fetchImpl = vi.fn((_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (init?.method === 'PUT') return Promise.resolve(responseError('编辑租约不存在'));
+      if (init?.method === 'POST') {
+        return new Promise<Response>((resolve) => { resolveReacquire = resolve; });
+      }
+      if (init?.method === 'DELETE') {
+        deletedTokens.push(String(requestBody([_input, init]).token));
+      }
+      return Promise.resolve(success());
+    });
+    const session = maintainAttributeEditLease(attributeId, token, { fetchImpl });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(resolveReacquire).toBeTypeOf('function');
+
+    let releaseSettled = false;
+    const release = session.release().then(() => { releaseSettled = true; });
+    await Promise.resolve();
+    expect(releaseSettled).toBe(false);
+    resolveReacquire?.(preparedSession(replacementToken));
+    await release;
+
+    expect(deletedTokens).toEqual([token, replacementToken]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('finishes release without a second delete when an aborted recovery rejects', async () => {
+    vi.useFakeTimers();
+    const deletedTokens: string[] = [];
+    const fetchImpl = vi.fn((_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (init?.method === 'PUT') return Promise.resolve(responseError('编辑租约不存在'));
+      if (init?.method === 'POST') return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      });
+      if (init?.method === 'DELETE') deletedTokens.push(String(requestBody([_input, init]).token));
+      return Promise.resolve(success());
+    });
+    const session = maintainAttributeEditLease(attributeId, token, { fetchImpl });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await session.release();
+
+    expect(deletedTokens).toEqual([token]);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('acquires with only the attribute ID and accepts a 24-character token', async () => {

@@ -2,6 +2,13 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { clearRoomScopedRecords, commitAuthoritativeStateMutation, consumeConfigMigrationRequired, createConfigBackup, defaultState, hydrateStateFromServer, loadState, mergeConfigBackup, saveState, saveStateTransaction, resetState, pruneLog, refreshStateFromServer } from '../src/storage';
 import { LogEntry, MAX_LOG } from '../src/types';
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 204 })));
   resetState();
@@ -37,6 +44,130 @@ describe('storage', () => {
     expect(loadState().roomId).toBe('authoritative-server');
     await saveState(serverState);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets a later ordinary save supersede an in-flight authoritative response', async () => {
+    const initial = { ...defaultState(), roomId: 'initial' };
+    await saveState(initial);
+    const response = deferred<typeof initial>();
+    let mutationStarted = false;
+    const mutation = commitAuthoritativeStateMutation(() => {
+      mutationStarted = true;
+      return response.promise;
+    });
+    await vi.waitFor(() => expect(mutationStarted).toBe(true));
+    const later = { ...initial, roomId: 'later-save' };
+
+    const save = saveState(later);
+    response.resolve({ ...initial, roomId: 'stale-authoritative' });
+    await Promise.all([mutation, save]);
+
+    expect(loadState().roomId).toBe('later-save');
+  });
+
+  it('persists a later save even when it matches the snapshot from before the authoritative mutation', async () => {
+    const initial = { ...defaultState(), roomId: 'initial' };
+    await saveState(initial);
+    let backendState = initial;
+    const response = deferred<void>();
+    let mutationStarted = false;
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, request?: RequestInit) => {
+      if (request?.method === 'PATCH') {
+        backendState = { ...backendState, ...JSON.parse(String(request.body)) };
+      }
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const mutation = commitAuthoritativeStateMutation(async () => {
+      mutationStarted = true;
+      await response.promise;
+      backendState = { ...initial, roomId: 'authoritative' };
+      return backendState;
+    });
+    await vi.waitFor(() => expect(mutationStarted).toBe(true));
+
+    const save = saveState(initial);
+    response.resolve();
+    await Promise.all([mutation, save]);
+
+    expect(loadState().roomId).toBe('initial');
+    expect(backendState.roomId).toBe('initial');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets a later reset supersede an in-flight authoritative response', async () => {
+    const initial = { ...defaultState(), roomId: 'initial' };
+    await saveState(initial);
+    const response = deferred<typeof initial>();
+    let mutationStarted = false;
+    const mutation = commitAuthoritativeStateMutation(() => {
+      mutationStarted = true;
+      return response.promise;
+    });
+    await vi.waitFor(() => expect(mutationStarted).toBe(true));
+
+    const reset = resetState();
+    response.resolve({ ...initial, roomId: 'stale-authoritative' });
+    await Promise.all([mutation, reset]);
+
+    expect(loadState().roomId).toBe('');
+  });
+
+  it('prevents an earlier transaction from republishing over a later authoritative call', async () => {
+    const initial = { ...defaultState(), roomId: 'initial' };
+    await saveState(initial);
+    const patch = deferred<Response>();
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, request?: RequestInit) => (
+      request?.method === 'PATCH' ? patch.promise : Promise.resolve(new Response(null, { status: 204 }))
+    )));
+    const prior = saveStateTransaction({ ...initial, roomId: 'prior-transaction' });
+    await Promise.resolve();
+    const mutation = commitAuthoritativeStateMutation(async () => ({ ...initial, roomId: 'authoritative' }));
+
+    patch.resolve(new Response(null, { status: 204 }));
+    const [priorResult, mutationResult] = await Promise.allSettled([prior, mutation]);
+
+    expect(priorResult.status).toBe('rejected');
+    expect(mutationResult.status).toBe('fulfilled');
+    expect(loadState().roomId).toBe('authoritative');
+  });
+
+  it('publishes an authoritative response after an earlier queued reset', async () => {
+    const initial = { ...defaultState(), roomId: 'initial' };
+    await saveState(initial);
+    const deletion = deferred<Response>();
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, request?: RequestInit) => (
+      request?.method === 'DELETE' ? deletion.promise : Promise.resolve(new Response(null, { status: 204 }))
+    )));
+    const prior = resetState();
+    const mutation = commitAuthoritativeStateMutation(async () => ({ ...initial, roomId: 'authoritative' }));
+
+    deletion.resolve(new Response(null, { status: 204 }));
+    await Promise.all([prior, mutation]);
+
+    expect(loadState().roomId).toBe('authoritative');
+  });
+
+  it('continues the queue after a rejected authoritative mutation', async () => {
+    const first = commitAuthoritativeStateMutation(async () => { throw new Error('server rejected'); });
+    const secondState = { ...defaultState(), roomId: 'second-authoritative' };
+    const second = commitAuthoritativeStateMutation(async () => secondState);
+
+    await expect(first).rejects.toThrow('server rejected');
+    await expect(second).resolves.toMatchObject({ roomId: 'second-authoritative' });
+    expect(loadState().roomId).toBe('second-authoritative');
+  });
+
+  it('publishes only the later of two queued authoritative mutations', async () => {
+    const firstResponse = deferred<ReturnType<typeof defaultState>>();
+    const first = commitAuthoritativeStateMutation(() => firstResponse.promise);
+    const secondState = { ...defaultState(), roomId: 'second-authoritative' };
+    const second = commitAuthoritativeStateMutation(async () => secondState);
+
+    firstResponse.resolve({ ...defaultState(), roomId: 'first-authoritative' });
+    await Promise.all([first, second]);
+
+    expect(loadState().roomId).toBe('second-authoritative');
   });
 
   it('loads default state when empty', () => {
@@ -152,7 +283,7 @@ describe('storage', () => {
     }));
   });
 
-  it('does not persist a queued transaction superseded by an earlier transaction', async () => {
+  it('lets the later transaction supersede an earlier in-flight transaction', async () => {
     const initial = defaultState();
     initial.roomId = 'initial';
     await saveState(initial);
@@ -176,13 +307,13 @@ describe('storage', () => {
     resolveFirstTransaction?.(new Response(null, { status: 204 }));
     const [firstResult, secondResult] = await Promise.allSettled([firstTransaction, secondTransaction]);
 
-    expect(firstResult.status).toBe('fulfilled');
-    expect(secondResult).toEqual(expect.objectContaining({
+    expect(firstResult).toEqual(expect.objectContaining({
       status: 'rejected',
       reason: expect.objectContaining({ message: '配置在保存期间发生变化，请重试' }),
     }));
-    expect(patches).toBe(1);
-    expect(loadState().roomId).toBe('first');
+    expect(secondResult.status).toBe('fulfilled');
+    expect(patches).toBe(2);
+    expect(loadState().roomId).toBe('second');
   });
 
   it('clears persisted snapshots after queued writes drain during reset', async () => {

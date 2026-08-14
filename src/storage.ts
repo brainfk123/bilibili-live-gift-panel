@@ -57,6 +57,7 @@ export type ConfigBackup = ConfigBackupFields & { schemaVersion: number };
 
 let cachedState: AppState | null = null;
 let cachedStateRevision = 0;
+let stateOperationEpoch = 0;
 let persistQueue = Promise.resolve();
 let configMigrationRequired = false;
 let persistedFieldSnapshots: Partial<StateFieldSnapshots> = {};
@@ -125,6 +126,7 @@ export function loadState(): AppState {
 }
 
 export function saveState(state: AppState): Promise<void> {
+  stateOperationEpoch += 1;
   const nextState = publishCachedState(normalizeState(state));
   const snapshots = snapshotStateFields(nextState);
   persistQueue = persistQueue
@@ -134,17 +136,18 @@ export function saveState(state: AppState): Promise<void> {
 }
 
 export function saveStateTransaction(state: AppState): Promise<AppState> {
+  const operationEpoch = ++stateOperationEpoch;
   const candidate = normalizeState(state);
   const snapshots = snapshotStateFields(candidate);
   const startingRevision = cachedStateRevision;
   const transaction = persistQueue
     .catch(() => undefined)
     .then(async () => {
-      if (cachedStateRevision !== startingRevision) {
+      if (stateOperationEpoch !== operationEpoch || cachedStateRevision !== startingRevision) {
         throw new Error('配置在保存期间发生变化，请重试');
       }
       await persistStateToServer(snapshots);
-      if (cachedStateRevision !== startingRevision) {
+      if (stateOperationEpoch !== operationEpoch || cachedStateRevision !== startingRevision) {
         throw new Error('配置在保存期间发生变化，请重试');
       }
       publishCachedState(candidate);
@@ -164,13 +167,19 @@ export function saveStateTransaction(state: AppState): Promise<AppState> {
 export function commitAuthoritativeStateMutation(
   mutation: () => Promise<AppState>,
 ): Promise<AppState> {
+  const operationEpoch = ++stateOperationEpoch;
   const transaction = persistQueue
     .catch(() => undefined)
     .then(async () => {
       const authoritative = normalizeState(await mutation());
+      // The server committed this state even when a newer local operation owns
+      // publication. Later queued persistence must diff against server reality.
       persistedFieldSnapshots = snapshotStateFields(authoritative);
       forcePersistFields.clear();
-      return publishCachedState(authoritative);
+      if (stateOperationEpoch === operationEpoch) {
+        publishCachedState(authoritative);
+      }
+      return authoritative;
     });
   persistQueue = transaction.then(
     () => undefined,
@@ -180,6 +189,7 @@ export function commitAuthoritativeStateMutation(
 }
 
 export function resetState(): Promise<void> {
+  stateOperationEpoch += 1;
   publishCachedState(defaultState());
   configMigrationRequired = false;
   persistQueue = persistQueue

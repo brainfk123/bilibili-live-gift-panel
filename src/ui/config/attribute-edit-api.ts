@@ -1,6 +1,8 @@
 import type { AppState, Attribute, GiftInfo, GiftRule, TimerRule } from '../../types';
 import {
+  isAppState,
   maintainAttributeEditLease,
+  parsePreparedAttributeEditSession,
   type AttributeEditLeaseOptions,
   type AttributeEditLeaseSession,
 } from './attribute-edit-lease';
@@ -8,6 +10,7 @@ import {
 const SESSION_ENDPOINT = '/api/attribute-edits/session';
 const SUBMIT_ENDPOINT = '/api/attribute-edits';
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{24}$/;
+const DEFAULT_REQUEST_TIMEOUT_MS = 4_000;
 
 export type AttributeEditSessionTarget =
   | { attributeId: string }
@@ -45,8 +48,13 @@ export async function prepareAttributeEditSession(
   options: AttributeEditApiOptions = {},
 ): Promise<PreparedAttributeEditSession> {
   const payload = validateSessionTarget(target);
-  const response = await post(options.fetchImpl ?? fetch, SESSION_ENDPOINT, payload);
-  const session = await readPreparedSession(response);
+  const response = await postJSON(
+    options.fetchImpl ?? fetch,
+    SESSION_ENDPOINT,
+    payload,
+    options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+  );
+  const session = parsePreparedAttributeEditSession(response, payload.attributeId);
   return {
     ...session,
     lease: maintainAttributeEditLease(session.attributeId, session.token, options),
@@ -55,48 +63,57 @@ export async function prepareAttributeEditSession(
 
 export async function submitAttributeEdit(
   input: AttributeEditInput,
-  options: Pick<AttributeEditApiOptions, 'fetchImpl'> = {},
+  options: Pick<AttributeEditApiOptions, 'fetchImpl' | 'requestTimeoutMs'> = {},
 ): Promise<SubmittedAttributeEdit> {
   validateEditInput(input);
-  const response = await post(options.fetchImpl ?? fetch, SUBMIT_ENDPOINT, input);
+  const response = await postJSON(
+    options.fetchImpl ?? fetch,
+    SUBMIT_ENDPOINT,
+    input,
+    options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+  );
   return readSubmittedEdit(response);
 }
 
-async function post(fetchImpl: typeof fetch, endpoint: string, payload: unknown): Promise<Response> {
+async function postJSON(
+  fetchImpl: typeof fetch,
+  endpoint: string,
+  payload: unknown,
+  timeoutMs: number,
+): Promise<unknown> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetchImpl(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-  } catch {
-    throw new Error('属性编辑请求失败');
+    let response: Response;
+    try {
+      response = await fetchImpl(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } catch {
+      throw new Error('属性编辑请求失败');
+    }
+    if (controller.signal.aborted || !response.ok) throw new Error('属性编辑请求失败');
+    try {
+      const body = await response.json() as unknown;
+      if (controller.signal.aborted) throw new Error('属性编辑请求失败');
+      return body;
+    } catch (error) {
+      if (error instanceof Error && error.message === '属性编辑请求失败') throw error;
+      if (controller.signal.aborted) throw new Error('属性编辑请求失败');
+      throw new Error('属性编辑响应无效');
+    }
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-async function readPreparedSession(response: Response): Promise<Omit<PreparedAttributeEditSession, 'lease'>> {
-  const payload = await readSuccessPayload(response);
-  if (
-    !isRecord(payload)
-    || typeof payload.attributeId !== 'string'
-    || !payload.attributeId.trim()
-    || typeof payload.token !== 'string'
-    || !TOKEN_PATTERN.test(payload.token)
-    || typeof payload.expiresAt !== 'string'
-    || !payload.expiresAt.trim()
-    || !isAppState(payload.state)
-  ) throw new Error('属性编辑响应无效');
-  return {
-    attributeId: payload.attributeId,
-    token: payload.token,
-    expiresAt: payload.expiresAt,
-    state: payload.state,
-  };
-}
-
-async function readSubmittedEdit(response: Response): Promise<SubmittedAttributeEdit> {
-  const payload = await readSuccessPayload(response);
-  if (!isRecord(payload) || !isRecord(payload.target) || !isAppState(payload.state)) {
+function readSubmittedEdit(payload: unknown): SubmittedAttributeEdit {
+  if (!isRecord(payload) || !hasExactKeys(payload, ['code', 'target', 'state']) || payload.code !== 0
+    || !isRecord(payload.target) || !hasExactKeys(payload.target, ['id', 'name', 'created'])
+    || !isAppState(payload.state)) {
     throw new Error('属性编辑响应无效');
   }
   const { id, name, created } = payload.target;
@@ -106,56 +123,37 @@ async function readSubmittedEdit(response: Response): Promise<SubmittedAttribute
   return { target: { id, name, created }, state: payload.state };
 }
 
-async function readSuccessPayload(response: Response): Promise<unknown> {
-  if (!response.ok) throw new Error('属性编辑请求失败');
-  try {
-    const payload = await response.json() as unknown;
-    if (!isRecord(payload) || payload.code !== 0) throw new Error('属性编辑响应无效');
-    return payload;
-  } catch (error) {
-    if (error instanceof Error && error.message === '属性编辑响应无效') throw error;
-    throw new Error('属性编辑响应无效');
-  }
-}
-
 function validateSessionTarget(target: AttributeEditSessionTarget): Record<string, string> {
   if (!isRecord(target)) throw new Error('属性编辑目标无效');
   const { attributeId, legacyName } = target as Record<string, unknown>;
-  if (typeof attributeId === 'string' && attributeId.trim() && legacyName === undefined) return { attributeId };
-  if (typeof legacyName === 'string' && legacyName.trim() && attributeId === undefined) return { legacyName };
+  if (typeof attributeId === 'string' && attributeId.trim() && hasExactKeys(target, ['attributeId'])) return { attributeId };
+  if (typeof legacyName === 'string' && legacyName.trim() && hasExactKeys(target, ['legacyName'])) return { legacyName };
   throw new Error('属性编辑目标无效');
 }
 
 function validateEditInput(input: AttributeEditInput): void {
   if (!isRecord(input) || !isRecord(input.target)) throw new Error('属性编辑目标无效');
   const { target } = input;
-  if (target.kind === 'new' && Object.keys(target).length === 1) return;
-  if (
+  const validTarget = target.kind === 'new' && hasExactKeys(target, ['kind']) || (
     target.kind === 'existing'
     && typeof target.attributeId === 'string'
     && target.attributeId.trim()
     && typeof target.leaseToken === 'string'
     && TOKEN_PATTERN.test(target.leaseToken)
-    && Object.keys(target).length === 3
-  ) return;
-  throw new Error('属性编辑目标无效');
-}
-
-function isAppState(value: unknown): value is AppState {
-  if (!isRecord(value) || typeof value.roomId !== 'string') return false;
-  const arrays = [
-    value.attributes, value.displayScenes, value.giftKpiPanels, value.activities,
-    value.rules, value.timerRules, value.formulaPresets, value.giftCatalog,
-    value.recentGifts, value.log, value.giftReceipts,
-  ];
-  return arrays.every(Array.isArray)
-    && isRecord(value.blindBoxDisplay)
-    && isRecord(value.settings)
-    && isRecord(value.stats)
-    && isRecord(value.contributions)
-    && (value.simplePlay === undefined || isRecord(value.simplePlay));
+    && hasExactKeys(target, ['kind', 'attributeId', 'leaseToken'])
+  );
+  if (!validTarget) throw new Error('属性编辑目标无效');
+  if (!hasExactKeys(input, ['target', 'attribute', 'giftRules', 'timerRules', 'giftCatalogUpserts'])
+    || !isRecord(input.attribute) || !Array.isArray(input.giftRules)
+    || !Array.isArray(input.timerRules) || !Array.isArray(input.giftCatalogUpserts)) {
+    throw new Error('属性编辑请求无效');
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: string[]): boolean {
+  return Object.keys(value).length === keys.length && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
 }
