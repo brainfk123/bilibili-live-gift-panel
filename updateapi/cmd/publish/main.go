@@ -53,7 +53,8 @@ func run(args []string, newStore func() (publish.Store, error), output io.Writer
 		return errors.New("COS configuration is invalid")
 	}
 	input.PublishedAt = parsedPublishedAt.UTC()
-	if err := publish.Run(context.Background(), store, input); err != nil {
+	outcome, err := publish.Publish(context.Background(), store, input)
+	if err != nil {
 		return fmt.Errorf("publish failed: %w", err)
 	}
 	prefix := "releases/" + input.Tag + "/"
@@ -61,5 +62,6 @@ func run(args []string, newStore func() (publish.Store, error), output io.Writer
 	for _, key := range []string{prefix + "gift-panel-windows-x64.exe", prefix + "gift-panel-windows-x64.exe.sha256", prefix + "gift-panel-changelog.json", prefix + "release.json", "channels/stable/latest.json"} {
 		fmt.Fprintln(output, key)
 	}
+	fmt.Fprintln(output, outcome)
 	return nil
 }

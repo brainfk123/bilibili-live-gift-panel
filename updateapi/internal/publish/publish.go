@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +45,14 @@ var canonicalTag = regexp.MustCompile(`^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(
 // automatic restoration could not be verified. Operators must inspect COS.
 var ErrPromotionIndeterminate = errors.New("stable promotion outcome is indeterminate")
 
+// Outcome reports whether this transaction advanced the stable pointer.
+type Outcome string
+
+const (
+	OutcomeStablePromoted  Outcome = "stable promoted"
+	OutcomeStableUnchanged Outcome = "stable unchanged"
+)
+
 // Input identifies the locally built release materials.
 type Input struct {
 	Tag           string
@@ -60,28 +69,35 @@ type object struct {
 	digest      string
 }
 
-// Run validates local release inputs, publishes immutable versioned objects,
-// verifies them by metadata, and updates the stable pointer only at the end.
+// Run preserves the original error-only publisher API.
 func Run(ctx context.Context, store Store, input Input) error {
+	_, err := Publish(ctx, store, input)
+	return err
+}
+
+// Publish validates local release inputs, publishes immutable versioned objects,
+// verifies them by metadata, and advances the stable pointer only at the end.
+// A valid stable tag greater than or equal to the candidate is never overwritten.
+func Publish(ctx context.Context, store Store, input Input) (Outcome, error) {
 	if store == nil {
-		return errors.New("COS store is required")
+		return "", errors.New("COS store is required")
 	}
 	if !canonicalTag.MatchString(input.Tag) {
-		return fmt.Errorf("release tag %q must use canonical vMAJOR.MINOR.PATCH syntax", input.Tag)
+		return "", fmt.Errorf("release tag %q must use canonical vMAJOR.MINOR.PATCH syntax", input.Tag)
 	}
 	asset, err := readAsset(input.AssetPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := validateChecksum(input.ChecksumPath, asset.digest); err != nil {
-		return err
+		return "", err
 	}
 	changelog, err := os.ReadFile(input.ChangelogPath)
 	if err != nil {
-		return fmt.Errorf("read changelog: %w", err)
+		return "", fmt.Errorf("read changelog: %w", err)
 	}
 	if _, err := release.ParseChangelog(changelog); err != nil {
-		return fmt.Errorf("validate changelog: %w", err)
+		return "", fmt.Errorf("validate changelog: %w", err)
 	}
 
 	prefix := "releases/" + input.Tag + "/"
@@ -98,15 +114,15 @@ func Run(ctx context.Context, store Store, input Input) error {
 		ChangelogObjectKey: prefix + changelogName,
 	}
 	if err := manifest.Validate(); err != nil {
-		return fmt.Errorf("validate release manifest: %w", err)
+		return "", fmt.Errorf("validate release manifest: %w", err)
 	}
 	manifestBody, err := json.Marshal(manifest)
 	if err != nil {
-		return fmt.Errorf("encode release manifest: %w", err)
+		return "", fmt.Errorf("encode release manifest: %w", err)
 	}
 	checksum, err := os.ReadFile(input.ChecksumPath)
 	if err != nil {
-		return fmt.Errorf("read checksum: %w", err)
+		return "", fmt.Errorf("read checksum: %w", err)
 	}
 	objects := []object{
 		withKey(asset, prefix+assetName),
@@ -116,32 +132,43 @@ func Run(ctx context.Context, store Store, input Input) error {
 	}
 	for _, candidate := range objects {
 		if err := publishImmutable(ctx, store, candidate); err != nil {
-			return err
+			return "", err
 		}
 	}
 
 	stable := newObject(stableKey, manifestBody, "application/json")
 	prior, err := readPriorStable(ctx, store)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if prior != nil && bytes.Equal(prior.body, stable.body) {
-		return nil
+	if prior != nil {
+		comparison, err := compareTags(input.Tag, prior.manifest.TagName)
+		if err != nil {
+			return "", fmt.Errorf("compare stable release tags: %w", err)
+		}
+		if comparison <= 0 {
+			return OutcomeStableUnchanged, nil
+		}
 	}
 	if err := store.Put(ctx, stable.key, strings.NewReader(string(stable.body)), int64(len(stable.body)), stable.contentType, stable.digest); err != nil {
-		return recoverPriorStable(ctx, store, prior, fmt.Errorf("write stable pointer: %w", err))
+		return "", recoverPriorStable(ctx, store, priorObject(prior), fmt.Errorf("write stable pointer: %w", err))
 	}
 	readback, _, err := store.Get(ctx, stableKey, maxStableBytes)
 	if err != nil {
-		return recoverPriorStable(ctx, store, prior, fmt.Errorf("read stable pointer: %w", err))
+		return "", recoverPriorStable(ctx, store, priorObject(prior), fmt.Errorf("read stable pointer: %w", err))
 	}
 	if err := verifyStableReadback(stable, readback); err != nil {
-		return recoverPriorStable(ctx, store, prior, err)
+		return "", recoverPriorStable(ctx, store, priorObject(prior), err)
 	}
-	return nil
+	return OutcomeStablePromoted, nil
 }
 
-func readPriorStable(ctx context.Context, store Store) (*object, error) {
+type priorStable struct {
+	object   object
+	manifest release.ChannelManifest
+}
+
+func readPriorStable(ctx context.Context, store Store) (*priorStable, error) {
 	body, _, err := store.Get(ctx, stableKey, maxStableBytes)
 	if errors.Is(err, cosstore.ErrNotFound) {
 		return nil, nil
@@ -149,11 +176,54 @@ func readPriorStable(ctx context.Context, store Store) (*object, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read prior stable pointer: %w", err)
 	}
-	if _, err := release.ParseChannelManifest(body); err != nil {
+	manifest, err := release.ParseChannelManifest(body)
+	if err != nil {
 		return nil, fmt.Errorf("validate prior stable pointer: %w", err)
 	}
 	prior := newObject(stableKey, body, "application/json")
-	return &prior, nil
+	return &priorStable{object: prior, manifest: manifest}, nil
+}
+
+func priorObject(prior *priorStable) *object {
+	if prior == nil {
+		return nil
+	}
+	return &prior.object
+}
+
+func compareTags(left, right string) (int, error) {
+	parse := func(tag string) ([3]int, error) {
+		var version [3]int
+		parts := strings.Split(strings.TrimPrefix(tag, "v"), ".")
+		if len(parts) != len(version) {
+			return version, fmt.Errorf("invalid canonical release tag %q", tag)
+		}
+		for index, part := range parts {
+			number, err := strconv.Atoi(part)
+			if err != nil || number < 0 {
+				return version, fmt.Errorf("invalid canonical release tag %q", tag)
+			}
+			version[index] = number
+		}
+		return version, nil
+	}
+	leftVersion, err := parse(left)
+	if err != nil {
+		return 0, err
+	}
+	rightVersion, err := parse(right)
+	if err != nil {
+		return 0, err
+	}
+	for index := range leftVersion {
+		if leftVersion[index] < rightVersion[index] {
+			return -1, nil
+		}
+		if leftVersion[index] > rightVersion[index] {
+			return 1, nil
+		}
+	}
+	return 0, nil
 }
 
 func verifyStableReadback(want object, got []byte) error {

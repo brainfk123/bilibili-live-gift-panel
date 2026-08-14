@@ -157,6 +157,10 @@ describe('release workflow supply-chain contract', () => {
       'go run ./cmd/publish --tag $env:RELEASE_TAG --published-at $env:RELEASE_PUBLISHED_AT --asset ../dist/gift-panel-windows-x64.exe --checksum ../dist/gift-panel-windows-x64.exe.sha256 --changelog ../dist/gift-panel-changelog.json',
     );
     expect(mirrorStep?.run).toContain('throw "Tencent COS release mirror failed"');
+    expect(mirrorStep?.run).toContain("$publishOutput -contains 'stable unchanged'");
+    expect(mirrorStep?.run).toContain(
+      'stable unchanged because the channel is already on an equal or newer version',
+    );
     expect(mirrorStep?.env).toEqual({
       COS_BUCKET: '${{ vars.COS_BUCKET }}',
       COS_REGION: '${{ vars.COS_REGION }}',
@@ -172,6 +176,7 @@ describe('release workflow supply-chain contract', () => {
     const download = stepIndex(steps, 'Download existing release assets');
     const build = stepIndex(steps, 'Build release executable');
     const sign = stepIndex(steps, 'Prepare and sign release executable');
+    const prepare = stepIndex(steps, 'Prepare release assets');
     const create = stepIndex(steps, 'Create GitHub release');
     const validate = stepIndex(steps, 'Validate published release assets');
     const mirror = stepIndex(steps, 'Mirror release to Tencent COS');
@@ -182,6 +187,7 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[download]?.run).toContain('--pattern gift-panel-windows-x64.exe');
     expect(steps[download]?.run).toContain('--pattern gift-panel-windows-x64.exe.sha256');
     expect(steps[download]?.run).toContain('--pattern gift-panel-changelog.json');
+    expect(steps[download]?.run).toContain('--pattern gift-panel-update.json');
     expect(steps[download]?.run).toContain('Manual recovery required');
     for (const name of [
       'Install dependencies',
@@ -211,7 +217,11 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[create]?.run).toContain(
       'gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256',
     );
+    expect(steps[create]?.run).toContain('dist/gift-panel-update.json');
     expect(steps[create]?.run).toContain('dist/gift-panel-changelog.json');
+    expect(steps[prepare]?.run).toContain(
+      'https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/gift-panel-windows-x64.exe',
+    );
     expect(create).toBeLessThan(validate);
     expect(steps[validate]?.run).toContain(
       'Get-AuthenticodeSignature -LiteralPath dist/gift-panel-windows-x64.exe',
@@ -219,6 +229,12 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[validate]?.run).toContain('$signature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT');
     expect(steps[validate]?.run).toContain('Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel-windows-x64.exe');
     expect(steps[validate]?.run).toContain('gift-panel-windows-x64.exe.sha256');
+    expect(steps[validate]?.run).toContain('dist/gift-panel-update.json');
+    expect(steps[validate]?.run).toContain('$updateManifest.tag_name -cne $env:RELEASE_TAG');
+    expect(steps[validate]?.run).toContain("$manifestAsset.name -cne 'gift-panel-windows-x64.exe'");
+    expect(steps[validate]?.run).toContain('[int64]$manifestAsset.size -ne $actualSize');
+    expect(steps[validate]?.run).toContain('$manifestAsset.digest -cne $expectedDigest');
+    expect(steps[validate]?.run).toContain('$manifestAsset.browser_download_url -cne $expectedURL');
     expect(validate).toBeLessThan(mirror);
   });
 

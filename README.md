@@ -39,13 +39,13 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-发布标签时，GitHub Actions 会运行 TypeScript、后端及国内更新工具测试，构建并验证 `gift-panel-windows-x64.exe` 的 Authenticode 签名、发布 GitHub Release，最后把同一个已签名 EXE、SHA-256 文件和更新日志镜像到私有腾讯云 COS。只有 GitHub Release 成功后才会开始 COS 发布；publisher 会校验对象的 size/SHA-256，保持 `releases/` 对象不可变，并在所有版本对象验证成功后最后更新 `channels/stable/latest.json`。
+发布标签时，GitHub Actions 会运行 TypeScript、后端及国内更新工具测试，构建并验证 `gift-panel-windows-x64.exe` 的 Authenticode 签名、发布 GitHub Release，最后把同一个已签名 EXE、SHA-256 文件和更新日志镜像到私有腾讯云 COS。只有 GitHub Release 成功后才会开始 COS 发布；publisher 会校验对象的 size/SHA-256，保持 `releases/` 对象不可变，并在所有版本对象验证成功后最后决定是否更新 `channels/stable/latest.json`。stable 按规范 SemVer 单调递增：目标版本更高才 promotion；相同或更旧标签的自动 repair 仍会补齐并校验 immutable 版本对象，但返回 `stable unchanged`，绝不会把 latest 降级。
 
 手动运行 Release 工作流时，会根据该标签的 GitHub Release 状态选择唯一分支：
 
 - GitHub Release 不存在：走正常首次发布，运行测试、构建、签名、上传 GitHub Release，再镜像 COS。
-- 已存在完整、非 draft、非 prerelease 的 GitHub Release：走 repair，仅下载已发布的 EXE、checksum 与 changelog，复验签名发布者和 SHA-256，沿用原始发布时间并镜像 COS；不会重新构建、重签或上传 GitHub 资产。
-- GitHub Release 不完整，包括 draft/prerelease、缺少资产或资产不一致：立即安全失败并要求人工恢复；不会尝试重新构建或使用 `--clobber` 覆盖资产。
+- 已存在完整、非 draft、非 prerelease 的 GitHub Release：走 repair，仅下载已发布的 EXE、checksum、`gift-panel-update.json` 与 changelog；除复验签名发布者和 SHA-256 外，还会核对 fallback manifest 的标签、EXE 名称、size、digest 与该标签的 GitHub 下载 URL，沿用原始发布时间并镜像 COS；不会重新生成 manifest、重新构建、重签或上传 GitHub 资产。
+- GitHub Release 不完整，包括 draft/prerelease、缺少任一上述资产、fallback manifest 与下载资产不一致或其他资产校验失败：立即安全失败并要求人工恢复，不会访问 COS；也不会尝试重新构建或使用 `--clobber` 覆盖资产。
 
 Release job 绑定受保护的 GitHub Environment `release`；应为它配置必要的审批/分支规则，并把发布、EVSign 与 COS secrets 只放在该环境中。工作流需要 GitHub Actions variables `UPDATE_API_BASE_URL`、`COS_BUCKET`、`COS_REGION`、`EVSIGN_EXPECTED_SUBJECT`，以及 secrets `COS_RELEASE_SECRET_ID`、`COS_RELEASE_SECRET_KEY`。COS 凭证应仅有指定 bucket 下 `releases/*` 与 `channels/stable/latest.json` 所需的最小 Head/Get/Put 权限，不得授予删除权限；bucket 保持私有且不要启用版本控制。完整的 COS/API 初始化、验证、备份、回滚及凭证轮换步骤见[国内更新 API 部署说明](deploy/update-api/README.md)。
 

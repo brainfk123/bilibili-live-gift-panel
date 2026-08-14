@@ -81,9 +81,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          gh release download $env:RELEASE_TAG --dir dist --pattern gift-panel-windows-x64.exe --pattern gift-panel-windows-x64.exe.sha256 --pattern gift-panel-changelog.json
+          gh release download $env:RELEASE_TAG --dir dist --pattern gift-panel-windows-x64.exe --pattern gift-panel-windows-x64.exe.sha256 --pattern gift-panel-update.json --pattern gift-panel-changelog.json
           if ($LASTEXITCODE -ne 0) { throw "Existing GitHub Release assets could not be downloaded. Manual recovery required." }
-          foreach ($path in @('dist/gift-panel-windows-x64.exe', 'dist/gift-panel-windows-x64.exe.sha256', 'dist/gift-panel-changelog.json')) {
+          foreach ($path in @('dist/gift-panel-windows-x64.exe', 'dist/gift-panel-windows-x64.exe.sha256', 'dist/gift-panel-update.json', 'dist/gift-panel-changelog.json')) {
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
               throw "Existing GitHub Release is missing required assets. Manual recovery required."
             }
@@ -264,7 +264,7 @@ jobs:
             assets = @(
               @{
                 name = "gift-panel-windows-x64.exe"
-                browser_download_url = "https://github.com/brainfk123/bilibili-live-gift-panel/releases/download/$env:RELEASE_TAG/gift-panel-windows-x64.exe"
+                browser_download_url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/gift-panel-windows-x64.exe"
                 size = $size
                 digest = "sha256:$hash"
               }
@@ -356,7 +356,7 @@ jobs:
         env:
           EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
         run: |
-          foreach ($path in @('dist/gift-panel-windows-x64.exe', 'dist/gift-panel-windows-x64.exe.sha256', 'dist/gift-panel-changelog.json')) {
+          foreach ($path in @('dist/gift-panel-windows-x64.exe', 'dist/gift-panel-windows-x64.exe.sha256', 'dist/gift-panel-update.json', 'dist/gift-panel-changelog.json')) {
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
               throw "Published GitHub Release is missing required assets. Manual recovery required."
             }
@@ -382,6 +382,21 @@ jobs:
             throw "Published EXE does not match its checksum. Manual recovery required."
           }
           try {
+            $updateManifest = Get-Content -LiteralPath dist/gift-panel-update.json -Raw | ConvertFrom-Json
+          } catch {
+            throw "Published fallback update manifest is malformed. Manual recovery required."
+          }
+          if ($updateManifest.tag_name -cne $env:RELEASE_TAG -or $updateManifest.draft -ne $false -or $updateManifest.prerelease -ne $false -or @($updateManifest.assets).Count -ne 1) {
+            throw "Published fallback update manifest metadata is inconsistent. Manual recovery required."
+          }
+          $manifestAsset = @($updateManifest.assets)[0]
+          $actualSize = (Get-Item -LiteralPath dist/gift-panel-windows-x64.exe).Length
+          $expectedDigest = "sha256:$($actualHash.ToLowerInvariant())"
+          $expectedURL = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/gift-panel-windows-x64.exe"
+          if ($manifestAsset.name -cne 'gift-panel-windows-x64.exe' -or [int64]$manifestAsset.size -ne $actualSize -or $manifestAsset.digest -cne $expectedDigest -or $manifestAsset.browser_download_url -cne $expectedURL) {
+            throw "Published fallback update manifest asset is inconsistent. Manual recovery required."
+          }
+          try {
             $changelog = Get-Content -LiteralPath dist/gift-panel-changelog.json -Raw | ConvertFrom-Json
           } catch {
             throw "Published changelog is malformed. Manual recovery required."
@@ -399,5 +414,9 @@ jobs:
           COS_SECRET_ID: ${{ secrets.COS_RELEASE_SECRET_ID }}
           COS_SECRET_KEY: ${{ secrets.COS_RELEASE_SECRET_KEY }}
         run: |
-          go run ./cmd/publish --tag $env:RELEASE_TAG --published-at $env:RELEASE_PUBLISHED_AT --asset ../dist/gift-panel-windows-x64.exe --checksum ../dist/gift-panel-windows-x64.exe.sha256 --changelog ../dist/gift-panel-changelog.json
+          $publishOutput = @(go run ./cmd/publish --tag $env:RELEASE_TAG --published-at $env:RELEASE_PUBLISHED_AT --asset ../dist/gift-panel-windows-x64.exe --checksum ../dist/gift-panel-windows-x64.exe.sha256 --changelog ../dist/gift-panel-changelog.json)
           if ($LASTEXITCODE -ne 0) { throw "Tencent COS release mirror failed" }
+          $publishOutput | ForEach-Object { Write-Host $_ }
+          if ($publishOutput -contains 'stable unchanged') {
+            Write-Host 'COS immutable release verified; stable unchanged because the channel is already on an equal or newer version.'
+          }

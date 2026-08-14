@@ -1,6 +1,7 @@
 package publish
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -20,8 +21,12 @@ func TestRunPublishesAndVerifiesVersionedObjectsBeforeStablePointer(t *testing.T
 	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
 	store := newMemoryStore()
 
-	if err := Run(context.Background(), store, input); err != nil {
+	outcome, err := Publish(context.Background(), store, input)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if outcome != OutcomeStablePromoted {
+		t.Fatalf("Publish() outcome = %q, want %q", outcome, OutcomeStablePromoted)
 	}
 
 	want := []string{
@@ -88,8 +93,12 @@ func TestRunDoesNotRewriteMatchingVersionedObjects(t *testing.T) {
 	store := newMemoryStore()
 	store.seedVersioned(t, input)
 
-	if err := Run(context.Background(), store, input); err != nil {
+	outcome, err := Publish(context.Background(), store, input)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if outcome != OutcomeStablePromoted {
+		t.Fatalf("Publish() outcome = %q, want %q", outcome, OutcomeStablePromoted)
 	}
 	for _, operation := range store.operations {
 		if strings.HasPrefix(operation, "PUT releases/") {
@@ -237,6 +246,78 @@ func TestRunRejectsInvalidPriorStableBeforePromotion(t *testing.T) {
 	}
 	if store.hasStablePut() {
 		t.Fatal("stable pointer was modified after prior stable validation failed")
+	}
+}
+
+func TestPublishDoesNotDowngradeNewerStableAfterMirroringImmutableObjects(t *testing.T) {
+	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
+	store := newMemoryStore()
+	prior := stableManifest("v1.3.0")
+	store.objects[stableKey] = storedObjectFor(prior)
+
+	outcome, err := Publish(context.Background(), store, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != OutcomeStableUnchanged {
+		t.Fatalf("Publish() outcome = %q, want %q", outcome, OutcomeStableUnchanged)
+	}
+	if store.hasStablePut() {
+		t.Fatal("older repair downgraded the stable pointer")
+	}
+	if got := store.objects[stableKey].body; !bytes.Equal(got, prior) {
+		t.Fatalf("stable body = %s, want unchanged newer stable %s", got, prior)
+	}
+	for _, key := range []string{
+		"releases/v1.2.3/gift-panel-windows-x64.exe",
+		"releases/v1.2.3/gift-panel-windows-x64.exe.sha256",
+		"releases/v1.2.3/gift-panel-changelog.json",
+		"releases/v1.2.3/release.json",
+	} {
+		if _, ok := store.objects[key]; !ok {
+			t.Fatalf("immutable object %q was not mirrored before the monotonic stable decision", key)
+		}
+	}
+}
+
+func TestPublishTreatsEqualStableTagAsIdempotentEvenWhenManifestBytesDiffer(t *testing.T) {
+	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
+	store := newMemoryStore()
+	prior := stableManifest("v1.2.3")
+	store.objects[stableKey] = storedObjectFor(prior)
+
+	outcome, err := Publish(context.Background(), store, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != OutcomeStableUnchanged {
+		t.Fatalf("Publish() outcome = %q, want %q", outcome, OutcomeStableUnchanged)
+	}
+	if store.hasStablePut() {
+		t.Fatal("equal-tag repair rewrote the stable pointer")
+	}
+	if got := store.objects[stableKey].body; !bytes.Equal(got, prior) {
+		t.Fatalf("stable body = %s, want unchanged equal-tag stable %s", got, prior)
+	}
+}
+
+func TestCompareTagsUsesNumericSemverOrdering(t *testing.T) {
+	for _, test := range []struct {
+		left  string
+		right string
+		want  int
+	}{
+		{left: "v1.10.0", right: "v1.9.99", want: 1},
+		{left: "v2.0.0", right: "v10.0.0", want: -1},
+		{left: "v3.4.5", right: "v3.4.5", want: 0},
+	} {
+		got, err := compareTags(test.left, test.right)
+		if err != nil {
+			t.Fatalf("compareTags(%q, %q): %v", test.left, test.right, err)
+		}
+		if got != test.want {
+			t.Fatalf("compareTags(%q, %q) = %d, want %d", test.left, test.right, got, test.want)
+		}
 	}
 }
 

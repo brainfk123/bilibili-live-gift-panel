@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/cosstore"
@@ -63,7 +64,7 @@ func TestRunRejectsInvalidTagWithoutPublishing(t *testing.T) {
 	}
 }
 
-func TestRunPrintsOnlyVerifiedTagAndObjectKeys(t *testing.T) {
+func TestRunPrintsOnlyVerifiedIdentifiersAndOutcome(t *testing.T) {
 	asset, checksum, changelog := commandInputs(t)
 	store := newCommandStore()
 	var output bytes.Buffer
@@ -73,13 +74,35 @@ func TestRunPrintsOnlyVerifiedTagAndObjectKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "v1.2.3\nreleases/v1.2.3/gift-panel-windows-x64.exe\nreleases/v1.2.3/gift-panel-windows-x64.exe.sha256\nreleases/v1.2.3/gift-panel-changelog.json\nreleases/v1.2.3/release.json\nchannels/stable/latest.json\n"
+	want := "v1.2.3\nreleases/v1.2.3/gift-panel-windows-x64.exe\nreleases/v1.2.3/gift-panel-windows-x64.exe.sha256\nreleases/v1.2.3/gift-panel-changelog.json\nreleases/v1.2.3/release.json\nchannels/stable/latest.json\nstable promoted\n"
 	if output.String() != want {
 		t.Fatalf("output = %q, want only verified release identifiers", output.String())
 	}
 	stable := string(store.objects["channels/stable/latest.json"].body)
 	if !bytes.Contains([]byte(stable), []byte(`"publishedAt":"2026-08-14T10:30:00Z"`)) {
 		t.Fatalf("stable manifest = %s, want preserved GitHub release timestamp", stable)
+	}
+}
+
+func TestRunReportsStableUnchangedWhenRepairingAnOlderRelease(t *testing.T) {
+	asset, checksum, changelog := commandInputs(t)
+	store := newCommandStore()
+	prior := []byte(`{"schemaVersion":1,"tagName":"v1.3.0","publishedAt":"2026-08-14T11:30:00Z","asset":{"name":"gift-panel-windows-x64.exe","objectKey":"releases/v1.3.0/gift-panel-windows-x64.exe","size":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"changelogObjectKey":"releases/v1.3.0/gift-panel-changelog.json"}`)
+	digest := sha256.Sum256(prior)
+	store.objects["channels/stable/latest.json"] = commandObject{body: prior, digest: hex.EncodeToString(digest[:])}
+	var output bytes.Buffer
+
+	err := run([]string{"--tag", "v1.2.3", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+		return store, nil
+	}, &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "stable unchanged\n") {
+		t.Fatalf("output = %q, want explicit stable unchanged outcome", output.String())
+	}
+	if got := store.objects["channels/stable/latest.json"].body; !bytes.Equal(got, prior) {
+		t.Fatalf("stable body = %s, want unchanged newer stable %s", got, prior)
 	}
 }
 
