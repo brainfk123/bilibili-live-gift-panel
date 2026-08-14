@@ -88,31 +88,74 @@ func handleFormulaPreview(store *configStore) http.HandlerFunc {
 			AttributeValue float64 `json:"attributeValue"`
 			Context        string  `json:"context"`
 			GiftPrice      float64 `json:"giftPrice"`
+			Condition      string  `json:"condition"`
+			UserIdentity   *int    `json:"userIdentity"`
+			ValidateOnly   bool    `json:"validateOnly"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&request); err != nil {
+			if strings.Contains(err.Error(), "userIdentity") {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": "用户身份必须是 0 到 4 的整数"})
+				return
+			}
 			writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": "请求格式不正确"})
 			return
+		}
+		identityLevel := giftIdentityOrdinary
+		if request.UserIdentity != nil {
+			identityLevel = *request.UserIdentity
+			if identityLevel < giftIdentityOrdinary || identityLevel > giftIdentityGovernor {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": "用户身份必须是 0 到 4 的整数"})
+				return
+			}
 		}
 		state, err := store.readState()
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": err.Error()})
 			return
 		}
-		var result float64
 		if request.Context == "timer" {
-			result, err = timerFormulaPreview(state, request.Formula, request.AttributeName, request.AttributeValue)
+			if request.ValidateOnly {
+				if err := validateTimerFormula(state, request.Formula, request.AttributeName, request.AttributeValue); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"code": 0})
+				return
+			}
+			result, err := timerFormulaPreview(state, request.Formula, request.AttributeName, request.AttributeValue)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"code": 0, "result": result})
+			return
 		} else {
 			price := request.GiftPrice
 			if price <= 0 {
 				price = 1000
 			}
-			result, err = formulaPreviewWithPrice(state, request.Formula, request.AttributeName, request.AttributeValue, price)
-		}
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})
+			if request.ValidateOnly {
+				if strings.TrimSpace(request.Condition) != "" {
+					if err := validateGiftFormula(state, request.Condition, request.AttributeName, request.AttributeValue, price); err != nil {
+						writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})
+						return
+					}
+				}
+				if err := validateGiftFormula(state, request.Formula, request.AttributeName, request.AttributeValue, price); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"code": 0})
+				return
+			}
+			preview, err := previewGiftRule(state, request.Condition, request.Formula, request.AttributeName, request.AttributeValue, price, identityLevel)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"code": -1, "message": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"code": 0, "triggered": preview.Triggered, "result": preview.Result})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"code": 0, "result": result})
 	}
 }
 
@@ -279,6 +322,7 @@ func main() {
 	mux.HandleFunc("/api/room/anchor", newRoomAnchorHandler(login.roomOwnerUID, background.profileResolver))
 	mux.HandleFunc("/api/config", store.handle)
 	mux.HandleFunc("/api/contributions", handleContributionLedger(store))
+	registerBlindBoxLeaderboardRoute(mux, store, diagnostics)
 	mux.HandleFunc("/api/gift-targets/progress", handleGiftTargetProgress(store))
 	mux.HandleFunc("/api/formula/preview", handleFormulaPreview(store))
 	mux.HandleFunc("/api/activities/transition", handleActivityTransition(store))

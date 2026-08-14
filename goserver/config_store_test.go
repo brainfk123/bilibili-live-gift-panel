@@ -877,6 +877,142 @@ func TestConfigStoreRejectsGiftOnlyPriceVariableInTimer(t *testing.T) {
 	}
 }
 
+func TestConfigStoreRejectsReservedFormulaNameAttributes(t *testing.T) {
+	for _, name := range []string{"用户身份", "普通用户", "粉丝团", "舰长", "提督", "总督"} {
+		t.Run(name, func(t *testing.T) {
+			store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+			payload := fmt.Sprintf(`{"attributes":[{"name":%q,"value":0}]}`, name)
+			response := httptest.NewRecorder()
+			store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "系统公式名称不能作为属性名") {
+				t.Fatalf("status = %d; body = %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestConfigStoreAllowsNearMatchToReservedFormulaName(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(`{"attributes":[{"name":"用户身份等级","value":0}]}`)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConfigStoreRejectsReservedFormulaNamePresetSource(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{"formulaPresets":[{"id":"legacy","name":"历史预设","context":"gift","formula":"积分+1","sourceAttributeName":"用户身份"}]}`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "系统公式名称不能作为预设来源属性") {
+		t.Fatalf("status = %d; body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConfigStorePersistsGiftRuleCondition(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{
+		"attributes":[{"name":"积分","value":0}],
+		"rules":[{"id":"r1","giftId":1,"attributeName":"积分","formulaName":"舰长规则","condition":"用户身份>=舰长","formula":"积分+1"}]
+	}`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", response.Code, response.Body.String())
+	}
+	state, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Rules) != 1 || state.Rules[0].Condition != "用户身份>=舰长" {
+		t.Fatalf("rules = %#v, want persisted condition", state.Rules)
+	}
+}
+
+func TestConfigStoreValidationDoesNotEvaluateRandomChoiceBranches(t *testing.T) {
+	originalRandomIntn := formulaRandomIntn
+	t.Cleanup(func() { formulaRandomIntn = originalRandomIntn })
+
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{
+		"attributes":[{"name":"积分","value":0}],
+		"rules":[{
+			"id":"r1","giftId":1,"attributeName":"积分","formulaName":"惰性随机规则",
+			"condition":"RANDOMCHOICE(1,1/0)","formula":"RANDOMCHOICE(10,1/0)"
+		}]
+	}`
+
+	for _, selectedIndex := range []int{0, 1} {
+		formulaRandomIntn = func(limit int) int {
+			if limit != 2 {
+				t.Fatalf("random limit = %d, want 2", limit)
+			}
+			return selectedIndex
+		}
+		response := httptest.NewRecorder()
+		store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+		if response.Code != http.StatusOK {
+			t.Fatalf("selected branch %d: status = %d, want 200; body = %s", selectedIndex, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestConfigStoreRejectsGuaranteedFormulaRuntimeErrors(t *testing.T) {
+	overflow := "1" + strings.Repeat("0", 307) + "*100"
+	tests := map[string]string{
+		"1/0":                         "除数为零",
+		overflow:                      "规则结果不是有效数字",
+		"RANDBETWEEN(10,1)":           "最小值不能大于最大值",
+		"积分*(" + overflow + ")":       "规则结果不是有效数字",
+		"积分/ROUND(1,309)":             "规则结果不是有效数字",
+		"MAX(积分," + overflow + ")":    "规则结果不是有效数字",
+		"MIN(积分,-(" + overflow + "))": "规则结果不是有效数字",
+		"ROUND(积分,309)":               "规则结果不是有效数字",
+		"ROUND(" + overflow + ",积分)":  "规则结果不是有效数字",
+	}
+	for formula, message := range tests {
+		t.Run(message, func(t *testing.T) {
+			store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+			payload := fmt.Sprintf(`{
+				"attributes":[{"name":"积分","value":0}],
+				"rules":[{"id":"r1","giftId":1,"attributeName":"积分","formulaName":"错误规则","formula":%q}]
+			}`, formula)
+			response := httptest.NewRecorder()
+			store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), message) {
+				t.Fatalf("formula %s: status = %d, body = %s", formula, response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestConfigStoreRejectsInvalidGiftRuleCondition(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{
+		"attributes":[{"name":"积分","value":0}],
+		"rules":[{"id":"r1","giftId":1,"attributeName":"积分","formulaName":"坏条件","condition":"用户身份>=不存在身份","formula":"积分+1"}]
+	}`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "运行条件无效") {
+		t.Fatalf("status = %d; body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConfigStoreRejectsGiftIdentityInTimer(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	payload := `{
+		"attributes":[{"name":"积分","value":0}],
+		"timerRules":[{"id":"timer","attributeName":"积分","formulaName":"错误定时器","intervalSeconds":60,"condition":"用户身份>=舰长","formula":"积分+1","enabled":true}]
+	}`
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader(payload)))
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "用户身份") {
+		t.Fatalf("status = %d; body = %s", response.Code, response.Body.String())
+	}
+}
+
 func TestConfigStorePersistsFormulaPresets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	store := &configStore{path: path}

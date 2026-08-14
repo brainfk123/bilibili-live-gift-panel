@@ -24,6 +24,18 @@ var giftClipProcessOutputHelper = flag.Bool("test.gift_clip_output_helper", fals
 var giftClipProcessOutputBursts = flag.Int("test.gift_clip_output_bursts", 0, "number of concurrent helper output bursts")
 var giftClipProcessExitCode = flag.Int("test.gift_clip_exit_code", 0, "exit code for the gift clip process helper")
 
+func TestConfigureGiftClipWindowsCommandStartsSuspendedWithoutConsole(t *testing.T) {
+	command := exec.Command(os.Args[0])
+	configureGiftClipWindowsCommand(command)
+	if command.SysProcAttr == nil {
+		t.Fatal("SysProcAttr is nil")
+	}
+	want := uint32(createSuspended | createNoWindow)
+	if command.SysProcAttr.CreationFlags != want {
+		t.Fatalf("CreationFlags = %#x, want %#x", command.SysProcAttr.CreationFlags, want)
+	}
+}
+
 func TestGiftClipWindowsProcessRunnerTerminatesTree(t *testing.T) {
 	path := t.TempDir() + "\\pids.txt"
 	ctx, cancel := context.WithCancel(context.Background())

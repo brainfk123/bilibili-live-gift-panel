@@ -1259,6 +1259,11 @@ body.config-mode::-webkit-scrollbar-corner,
   font-size: var(--type-meta);
 }
 .config-root .quick-rule-sentence .field-input { height: 40px; }
+.config-root .quick-rule-condition { grid-template-columns: max-content minmax(160px, .7fr) minmax(120px, .45fr); }
+.config-root .quick-rule-builder > .field { min-width: 0; margin: 0; }
+.config-root .quick-rule-condition-mode,
+.config-root .quick-rule-condition-identity,
+.config-root .gift-rule-simulation-identity { min-width: 0; }
 .config-root .quick-rule-limit {
   display: grid;
   grid-template-columns: max-content minmax(110px, 180px) max-content;
@@ -1295,6 +1300,7 @@ body.config-mode::-webkit-scrollbar-corner,
 }
 .config-root .rule-advanced-settings[open] { padding-bottom: 13px; }
 .config-root .rule-advanced-settings[open] > summary { color: var(--accent-text); }
+.config-root .rule-advanced-settings > .field,
 .config-root .rule-advanced-settings .formula-assignment-field,
 .config-root .rule-advanced-settings .formula-examples { margin: 12px 13px 10px; }
 .config-root .selected-gift-rule > .formula-preview { margin-top: 9px; text-align: right; }

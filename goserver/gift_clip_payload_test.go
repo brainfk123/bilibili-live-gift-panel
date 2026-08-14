@@ -388,7 +388,7 @@ func TestGiftClipPayloadFFmpegProductionArgvSmoke(t *testing.T) {
 				t.Fatal(err)
 			}
 			source := giftClipSource{Kind: animation.Kind, Playback: animation.Playback, Path: sourcePath, VisualWidth: animation.Width, VisualHeight: animation.Height, Duration: 1200 * time.Millisecond}
-			runGiftClipFFmpegSmoke(t, executable, giftClipSmokeRequest(source, background, overlay, filepath.Join(root, test.name+".mp4")))
+			runGiftClipFFmpegSmoke(t, executable, giftClipSmokeRequest(t, source, background, overlay, filepath.Join(root, test.name+".mp4")))
 		})
 	}
 
@@ -398,13 +398,18 @@ func TestGiftClipPayloadFFmpegProductionArgvSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	packedSource := giftClipSource{Kind: giftClipSourceEffect, Playback: giftClipPlaybackEffect, Path: packedPath, VisualWidth: 64, VisualHeight: 64, Duration: 1200 * time.Millisecond, Layout: &giftEffectLayout{VideoWidth: 128, VideoHeight: 64, RGBFrame: [4]int{0, 0, 64, 64}, AlphaFrame: [4]int{64, 0, 64, 64}, FPS: 30, Frames: 36}}
-	runGiftClipFFmpegSmoke(t, executable, giftClipSmokeRequest(packedSource, background, overlay, filepath.Join(root, "packed-smoke.mp4")))
+	runGiftClipFFmpegSmoke(t, executable, giftClipSmokeRequest(t, packedSource, background, overlay, filepath.Join(root, "packed-smoke.mp4")))
 }
 
-func giftClipSmokeRequest(source giftClipSource, background, overlay, output string) giftClipEncodeRequest {
+func giftClipSmokeRequest(t *testing.T, source giftClipSource, background, overlay, output string) giftClipEncodeRequest {
+	t.Helper()
+	crop := giftClipCrop{Width: 64, Height: 64}
+	profile, err := newGiftClipOutputProfile(crop, source.VisualWidth, source.VisualHeight, source.Duration)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return giftClipEncodeRequest{
-		Source: source, Crop: giftClipCrop{Width: 64, Height: 64},
-		Profile:        giftClipOutputProfile{Width: 64, Height: 64, FPS: 30, Frames: giftClipFrameCount(source.Duration), Duration: source.Duration, AverageBitrate: 150_000, PeakBitrate: 225_000, VBVBuffer: 300_000},
+		Source: source, Crop: crop, Profile: profile,
 		BackgroundPath: background, OverlayPath: overlay, OutputPath: output,
 	}
 }

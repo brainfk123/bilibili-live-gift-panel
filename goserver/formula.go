@@ -104,6 +104,14 @@ func (n callNode) evaluate(env map[string]float64) (float64, error) {
 			return eval(1)
 		}
 		return eval(2)
+	case "RANDOMCHOICE":
+		if len(n.args) == 0 {
+			return 0, fmt.Errorf("RANDOMCHOICE 至少需要 1 个参数")
+		}
+		if len(n.args) == 1 {
+			return eval(0)
+		}
+		return eval(formulaRandomIntn(len(n.args)))
 	case "MAX", "MIN":
 		if len(n.args) == 0 {
 			return 0, fmt.Errorf("%s 至少需要 1 个参数", name)
@@ -181,19 +189,437 @@ func (n callNode) evaluate(env map[string]float64) (float64, error) {
 }
 
 func evaluateFormula(input string, env map[string]float64) (float64, error) {
-	tokens, err := tokenizeFormula(input)
+	node, err := parseFormula(input)
 	if err != nil {
 		return 0, err
+	}
+	return node.evaluate(env)
+}
+
+func validateFormula(input string, env map[string]float64) error {
+	node, err := parseFormula(input)
+	if err != nil {
+		return err
+	}
+	if err := validateFormulaNode(node, env); err != nil {
+		return err
+	}
+	result, err := validateGuaranteedFormulaSemantics(node)
+	if err != nil {
+		return err
+	}
+	if !result.classes.hasFinite() {
+		return fmt.Errorf("规则结果不是有效数字")
+	}
+	return nil
+}
+
+func parseFormula(input string) (formulaNode, error) {
+	tokens, err := tokenizeFormula(input)
+	if err != nil {
+		return nil, err
 	}
 	parser := formulaParser{tokens: tokens}
 	node, err := parser.parseExpression()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if parser.peek().kind != "eof" {
-		return 0, fmt.Errorf("多余的内容 %q", parser.peek().value)
+		return nil, fmt.Errorf("多余的内容 %q", parser.peek().value)
 	}
-	return node.evaluate(env)
+	return node, nil
+}
+
+func validateFormulaNode(node formulaNode, env map[string]float64) error {
+	switch typed := node.(type) {
+	case numberNode:
+		return nil
+	case variableNode:
+		if _, ok := env[string(typed)]; !ok {
+			return fmt.Errorf("变量 %q 未定义", string(typed))
+		}
+		return nil
+	case unaryNode:
+		return validateFormulaNode(typed.operand, env)
+	case binaryNode:
+		if err := validateFormulaNode(typed.left, env); err != nil {
+			return err
+		}
+		return validateFormulaNode(typed.right, env)
+	case callNode:
+		name := strings.ToUpper(typed.name)
+		argumentCount := len(typed.args)
+		switch name {
+		case "IF":
+			if argumentCount != 3 {
+				return fmt.Errorf("IF 需要 3 个参数")
+			}
+		case "RANDOMCHOICE":
+			if argumentCount == 0 {
+				return fmt.Errorf("RANDOMCHOICE 至少需要 1 个参数")
+			}
+		case "MAX", "MIN":
+			if argumentCount == 0 {
+				return fmt.Errorf("%s 至少需要 1 个参数", name)
+			}
+		case "ROUND":
+			if argumentCount < 1 || argumentCount > 2 {
+				return fmt.Errorf("ROUND 需要 1-2 个参数")
+			}
+		case "ABS", "FLOOR":
+			if argumentCount != 1 {
+				return fmt.Errorf("%s 需要 1 个参数", name)
+			}
+		case "RAND":
+			if argumentCount != 0 {
+				return fmt.Errorf("RAND 不需要参数")
+			}
+		case "RANDBETWEEN":
+			if argumentCount != 2 {
+				return fmt.Errorf("RANDBETWEEN 需要 2 个参数")
+			}
+		default:
+			return fmt.Errorf("未知函数 %q", typed.name)
+		}
+		for _, argument := range typed.args {
+			if err := validateFormulaNode(argument, env); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("表达式不合法")
+	}
+}
+
+type formulaValueClass uint8
+
+const (
+	formulaZero formulaValueClass = 1 << iota
+	formulaFiniteNonZero
+	formulaPositiveInfinity
+	formulaNegativeInfinity
+	formulaNaN
+)
+
+const (
+	formulaFinite   = formulaZero | formulaFiniteNonZero
+	formulaInfinity = formulaPositiveInfinity | formulaNegativeInfinity
+	formulaTop      = formulaFinite | formulaInfinity | formulaNaN
+)
+
+func (classes formulaValueClass) hasFinite() bool { return classes&formulaFinite != 0 }
+
+type formulaSemanticResult struct {
+	classes formulaValueClass
+	exact   bool
+	value   float64
+}
+
+func exactFormulaSemanticResult(value float64) formulaSemanticResult {
+	classes := formulaFiniteNonZero
+	if value == 0 {
+		classes = formulaZero
+	} else if math.IsInf(value, 1) {
+		classes = formulaPositiveInfinity
+	} else if math.IsInf(value, -1) {
+		classes = formulaNegativeInfinity
+	} else if math.IsNaN(value) {
+		classes = formulaNaN
+	}
+	return formulaSemanticResult{classes: classes, exact: true, value: value}
+}
+
+func formulaClassMembers(classes formulaValueClass) []formulaValueClass {
+	members := make([]formulaValueClass, 0, 4)
+	for _, class := range []formulaValueClass{formulaZero, formulaFiniteNonZero, formulaPositiveInfinity, formulaNegativeInfinity, formulaNaN} {
+		if classes&class != 0 {
+			members = append(members, class)
+		}
+	}
+	return members
+}
+
+func abstractBinaryFormulaClasses(op string, left, right formulaValueClass) (formulaValueClass, bool) {
+	if left == formulaNaN || right == formulaNaN {
+		if op == ">" || op == ">=" || op == "<" || op == "<=" || op == "=" {
+			return formulaFinite, false
+		}
+		return formulaNaN, false
+	}
+	if op == ">" || op == ">=" || op == "<" || op == "<=" || op == "=" {
+		return formulaFinite, false
+	}
+	switch op {
+	case "+", "-":
+		leftInfinite := left&formulaInfinity != 0
+		rightInfinite := right&formulaInfinity != 0
+		if leftInfinite && rightInfinite {
+			if op == "+" && left == right {
+				return left, false
+			}
+			if op == "-" && left != right {
+				return left, false
+			}
+			return formulaNaN, false
+		}
+		if leftInfinite {
+			return left, false
+		}
+		if rightInfinite {
+			if op == "+" {
+				return right, false
+			}
+			if right == formulaPositiveInfinity {
+				return formulaNegativeInfinity, false
+			}
+			return formulaPositiveInfinity, false
+		}
+		if left == formulaZero && right == formulaZero {
+			return formulaZero, false
+		}
+		return formulaFinite | formulaInfinity, false
+	case "*":
+		leftInfinite := left&formulaInfinity != 0
+		rightInfinite := right&formulaInfinity != 0
+		if leftInfinite || rightInfinite {
+			if left == formulaZero || right == formulaZero {
+				return formulaNaN, false
+			}
+			if leftInfinite && rightInfinite {
+				if left == right {
+					return formulaPositiveInfinity, false
+				}
+				return formulaNegativeInfinity, false
+			}
+			return formulaInfinity, false
+		}
+		if left == formulaZero || right == formulaZero {
+			return formulaZero, false
+		}
+		return formulaFinite | formulaInfinity, false
+	case "/":
+		if right == formulaZero {
+			return 0, true
+		}
+		if right&formulaInfinity != 0 {
+			if left&formulaInfinity != 0 {
+				return formulaNaN, false
+			}
+			return formulaZero, false
+		}
+		if left&formulaInfinity != 0 {
+			return formulaInfinity, false
+		}
+		if left == formulaZero {
+			return formulaZero, false
+		}
+		return formulaFinite | formulaInfinity, false
+	default:
+		return formulaTop, false
+	}
+}
+
+func validateGuaranteedFormulaSemantics(node formulaNode) (formulaSemanticResult, error) {
+	unknownFinite := formulaSemanticResult{classes: formulaFinite}
+	top := formulaSemanticResult{classes: formulaTop}
+	switch typed := node.(type) {
+	case numberNode:
+		return exactFormulaSemanticResult(float64(typed)), nil
+	case variableNode:
+		return unknownFinite, nil
+	case unaryNode:
+		operand, err := validateGuaranteedFormulaSemantics(typed.operand)
+		if err != nil {
+			return operand, err
+		}
+		if operand.exact {
+			return exactFormulaSemanticResult(-operand.value), nil
+		}
+		classes := operand.classes &^ formulaInfinity
+		if operand.classes&formulaPositiveInfinity != 0 {
+			classes |= formulaNegativeInfinity
+		}
+		if operand.classes&formulaNegativeInfinity != 0 {
+			classes |= formulaPositiveInfinity
+		}
+		return formulaSemanticResult{classes: classes}, nil
+	case binaryNode:
+		left, err := validateGuaranteedFormulaSemantics(typed.left)
+		if err != nil {
+			return top, err
+		}
+		right, err := validateGuaranteedFormulaSemantics(typed.right)
+		if err != nil {
+			return top, err
+		}
+		if left.exact && right.exact {
+			if typed.op == "/" && right.value == 0 {
+				return top, fmt.Errorf("除数为零")
+			}
+			value, err := binaryNode{op: typed.op, left: numberNode(left.value), right: numberNode(right.value)}.evaluate(nil)
+			if err != nil {
+				return top, err
+			}
+			return exactFormulaSemanticResult(value), nil
+		}
+		classes := formulaValueClass(0)
+		hasValidOutcome := false
+		for _, leftClass := range formulaClassMembers(left.classes) {
+			for _, rightClass := range formulaClassMembers(right.classes) {
+				result, runtimeError := abstractBinaryFormulaClasses(typed.op, leftClass, rightClass)
+				if !runtimeError {
+					hasValidOutcome = true
+					classes |= result
+				}
+			}
+		}
+		if !hasValidOutcome {
+			return top, fmt.Errorf("除数为零")
+		}
+		return formulaSemanticResult{classes: classes}, nil
+	case callNode:
+		name := strings.ToUpper(typed.name)
+		switch name {
+		case "IF":
+			condition, err := validateGuaranteedFormulaSemantics(typed.args[0])
+			if err != nil || !condition.exact {
+				return top, err
+			}
+			if condition.value != 0 {
+				return validateGuaranteedFormulaSemantics(typed.args[1])
+			}
+			return validateGuaranteedFormulaSemantics(typed.args[2])
+		case "RANDOMCHOICE":
+			if len(typed.args) == 1 {
+				return validateGuaranteedFormulaSemantics(typed.args[0])
+			}
+			return top, nil
+		case "RAND":
+			return unknownFinite, nil
+		}
+
+		arguments := make([]formulaSemanticResult, len(typed.args))
+		allExact := true
+		for index, argument := range typed.args {
+			result, err := validateGuaranteedFormulaSemantics(argument)
+			if err != nil {
+				return top, err
+			}
+			arguments[index] = result
+			allExact = allExact && result.exact
+		}
+		if name == "RANDBETWEEN" {
+			if !allExact {
+				return unknownFinite, nil
+			}
+			low, high := int(math.Ceil(arguments[0].value)), int(math.Floor(arguments[1].value))
+			if high < low {
+				return top, fmt.Errorf("RANDBETWEEN 最小值不能大于最大值")
+			}
+			if low == high {
+				return exactFormulaSemanticResult(float64(low)), nil
+			}
+			return unknownFinite, nil
+		}
+		if !allExact {
+			switch name {
+			case "MAX", "MIN":
+				classes := arguments[0].classes
+				for _, argument := range arguments[1:] {
+					nextClasses := formulaValueClass(0)
+					for _, leftClass := range formulaClassMembers(classes) {
+						for _, rightClass := range formulaClassMembers(argument.classes) {
+							if leftClass == formulaNaN || rightClass == formulaNaN {
+								nextClasses |= formulaNaN
+								continue
+							}
+							if name == "MAX" {
+								switch {
+								case leftClass == formulaPositiveInfinity || rightClass == formulaPositiveInfinity:
+									nextClasses |= formulaPositiveInfinity
+								case leftClass == formulaNegativeInfinity:
+									nextClasses |= rightClass
+								case rightClass == formulaNegativeInfinity:
+									nextClasses |= leftClass
+								default:
+									nextClasses |= formulaFinite
+								}
+							} else {
+								switch {
+								case leftClass == formulaNegativeInfinity || rightClass == formulaNegativeInfinity:
+									nextClasses |= formulaNegativeInfinity
+								case leftClass == formulaPositiveInfinity:
+									nextClasses |= rightClass
+								case rightClass == formulaPositiveInfinity:
+									nextClasses |= leftClass
+								default:
+									nextClasses |= formulaFinite
+								}
+							}
+						}
+					}
+					classes = nextClasses
+				}
+				return formulaSemanticResult{classes: classes}, nil
+			case "ROUND":
+				value := arguments[0]
+				if !value.classes.hasFinite() {
+					return formulaSemanticResult{classes: value.classes}, nil
+				}
+				if len(arguments) == 1 {
+					return formulaSemanticResult{classes: value.classes}, nil
+				}
+				digits := arguments[1]
+				if !digits.exact {
+					return top, nil
+				}
+				power := math.Pow(10, digits.value)
+				if power == 0 || math.IsInf(power, 0) || math.IsNaN(power) {
+					return formulaSemanticResult{classes: formulaNaN}, nil
+				}
+				if value.classes&^formulaInfinity == 0 {
+					return formulaSemanticResult{classes: value.classes}, nil
+				}
+				return formulaSemanticResult{classes: value.classes | formulaInfinity}, nil
+			case "ABS", "FLOOR":
+				classes := arguments[0].classes
+				if name == "ABS" && classes&formulaNegativeInfinity != 0 {
+					classes = classes&^formulaNegativeInfinity | formulaPositiveInfinity
+				}
+				return formulaSemanticResult{classes: classes}, nil
+			default:
+				return top, nil
+			}
+		}
+		switch name {
+		case "MAX", "MIN":
+			value := arguments[0].value
+			for _, argument := range arguments[1:] {
+				if name == "MAX" {
+					value = math.Max(value, argument.value)
+				} else {
+					value = math.Min(value, argument.value)
+				}
+			}
+			return exactFormulaSemanticResult(value), nil
+		case "ROUND":
+			digits := 0.0
+			if len(arguments) == 2 {
+				digits = arguments[1].value
+			}
+			power := math.Pow(10, digits)
+			return exactFormulaSemanticResult(math.Round(arguments[0].value*power) / power), nil
+		case "ABS":
+			return exactFormulaSemanticResult(math.Abs(arguments[0].value)), nil
+		case "FLOOR":
+			return exactFormulaSemanticResult(math.Floor(arguments[0].value)), nil
+		default:
+			return top, nil
+		}
+	default:
+		return top, fmt.Errorf("表达式不合法")
+	}
 }
 
 func tokenizeFormula(input string) ([]formulaToken, error) {

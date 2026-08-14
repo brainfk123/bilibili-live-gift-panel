@@ -394,7 +394,7 @@ func validateDiagnosticVersion(value any) (any, bool) {
 
 var diagnosticReasonValues = map[string]bool{"accept": true, "auth": true, "catalog_fetch_failed": true, "connection": true, "consumer": true, "deadline": true, "decompression_failure": true, "dial": true, "duplicate": true, "empty_legacy_line": true, "heartbeat": true, "ignored_command": true, "malformed_envelope": true, "malformed_gift_data": true, "malformed_legacy_line": true, "packet_bounds": true, "read": true, "room_mismatch": true, "source": true, "state_save_failed": true, "write": true}
 var diagnosticStateValues = map[string]bool{"idle": true, "connecting": true, "connected": true, "reconnecting": true, "error": true}
-var diagnosticErrorKindValues = map[string]bool{"auth": true, "connection": true, "deadline": true, "dial": true, "heartbeat": true, "inbox_capacity": true, "inbox_durability": true, "inbox_open": true, "inbox_persist": true, "inbox_recovery": true, "read": true, "reset_failure": true, "source": true, "transaction": true, "transaction_recovery": true, "write": true}
+var diagnosticErrorKindValues = map[string]bool{"auth": true, "config_decode": true, "connection": true, "deadline": true, "dial": true, "filesystem_read": true, "heartbeat": true, "inbox_capacity": true, "inbox_durability": true, "inbox_open": true, "inbox_persist": true, "inbox_recovery": true, "read": true, "reset_failure": true, "source": true, "transaction": true, "transaction_recovery": true, "unsupported_version": true, "write": true}
 var diagnosticBlindSourceValues = map[string]bool{"catalog": true, "event": true, "none": true}
 var diagnosticPhaseValues = map[string]bool{"resolve": true, "profile": true, "encode": true, "cleanup": true}
 var diagnosticExitClassValues = map[string]bool{"source_error": true, "invalid_profile": true, "disk_full": true, "payload_integrity": true, "encoder_error": true, "filesystem_error": true}
@@ -405,7 +405,7 @@ func isSafeDiagnosticEvent(value string) bool {
 		return true
 	}
 	switch value {
-	case "bili_message_ignored", "bili_parse_failed", "blind_box_catalog_failed", "blind_box_catalog_ready", "blind_box_catalog_save_failed", "connection_gap", "connection_state", "diagnostic_event_omitted", "gift_accepted", "gift_ignored", "gift_ingestion_failed", "gift_received", "gift_transaction_complete", "gift_transaction_prepare", "gift_transaction_recovery", "gift_clip_job_failed", "gift_clip_job_cleanup_failed", "gift_clip_ffmpeg_failed", "http_listen_failed", "http_ready", "http_server_stopped", "service_start", "service_stop", "tray_failed", "update_install_failed":
+	case "bili_message_ignored", "bili_parse_failed", "blind_box_catalog_failed", "blind_box_catalog_ready", "blind_box_catalog_save_failed", "blind_box_leaderboard_read_failed", "connection_gap", "connection_state", "diagnostic_event_omitted", "gift_accepted", "gift_ignored", "gift_ingestion_failed", "gift_received", "gift_transaction_complete", "gift_transaction_prepare", "gift_transaction_recovery", "gift_clip_job_failed", "gift_clip_job_cleanup_failed", "gift_clip_ffmpeg_failed", "http_listen_failed", "http_ready", "http_server_stopped", "service_start", "service_stop", "tray_failed", "update_install_failed":
 		return true
 	default:
 		return false

@@ -1,4 +1,5 @@
 import type { FormulaPreset, FormulaPresetContext } from './types';
+import { isGiftFormulaSystemName } from './gift-rule-conditions';
 
 export interface FormulaPresetDraft {
   name: string;
@@ -36,6 +37,7 @@ export function saveFormulaPreset(
 export function applyFormulaPreset(preset: FormulaPreset, targetAttributeName: string): string {
   const target = targetAttributeName.trim();
   if (!target) throw new Error('目标属性名不能为空');
+  assertPresetSourceAttributeName(preset.sourceAttributeName);
   return replaceFormulaVariable(preset.formula, preset.sourceAttributeName, target);
 }
 
@@ -52,7 +54,14 @@ function normalizeDraft(draft: FormulaPresetDraft): FormulaPresetDraft {
   if (!name) throw new Error('预设名称不能为空');
   if (!formula) throw new Error('预设规则不能为空');
   if (!sourceAttributeName) throw new Error('预设来源属性不能为空');
+  assertPresetSourceAttributeName(sourceAttributeName);
   return { name, context: draft.context, formula, sourceAttributeName };
+}
+
+function assertPresetSourceAttributeName(sourceAttributeName: string): void {
+  if (isGiftFormulaSystemName(sourceAttributeName.trim())) {
+    throw new Error('系统公式名称不能作为预设来源属性');
+  }
 }
 
 function normalizeName(name: string): string {

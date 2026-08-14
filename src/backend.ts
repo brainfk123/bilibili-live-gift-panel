@@ -1,4 +1,5 @@
-import type { ActivitySession, ContributionLedger, GiftInfo, GiftReceipt } from './types';
+import type { ActivitySession, ContributionLedger, GiftInfo, GiftReceipt, ViewerContribution } from './types';
+import type { GiftUserIdentity } from './gift-rule-conditions';
 import type { ActivityTransitionAction } from './activities';
 import { normalizeChangelogReleases, type ChangelogRelease } from './changelog';
 import type { GiftTargetProgressSnapshot } from './gift-targets';
@@ -103,6 +104,13 @@ interface FormulaPreviewResponse {
   message?: string;
 }
 
+interface GiftRulePreviewResponse {
+  code: number;
+  triggered?: boolean;
+  result?: number;
+  message?: string;
+}
+
 interface BiliAuthResponse {
   code: number;
   auth?: BiliAuthStatus;
@@ -169,6 +177,29 @@ interface GiftReceiptResponse {
   message?: string;
 }
 
+export interface BlindBoxLeaderboardSummary {
+  viewerCount: number;
+  blindBoxCount: number;
+  cost: number;
+  value: number;
+  profit: number;
+  unpricedCount: number;
+}
+
+export interface BlindBoxLeaderboardScope {
+  giftId: number;
+  giftName: string;
+  count: number;
+  lastGiftAt: number;
+}
+
+export interface BlindBoxLeaderboardSnapshot {
+  updatedAt: number;
+  summary: BlindBoxLeaderboardSummary;
+  viewers: ViewerContribution[];
+  scopes: BlindBoxLeaderboardScope[];
+}
+
 export interface ActivityTransitionResult {
   activity: ActivitySession;
   attributeValues: Record<string, number>;
@@ -177,6 +208,140 @@ export interface ActivityTransitionResult {
 export interface BlindBoxLookup {
   info: import('./types').BlindBoxInfo | null;
   requiresLogin: boolean;
+}
+
+export async function getBlindBoxLeaderboard(options: {
+  giftId?: number;
+  limit?: number;
+  signal?: AbortSignal;
+} = {}): Promise<BlindBoxLeaderboardSnapshot> {
+  const query: string[] = [];
+  if (options.giftId !== undefined) query.push(`giftId=${encodeURIComponent(String(options.giftId))}`);
+  if (options.limit !== undefined) query.push(`limit=${encodeURIComponent(String(options.limit))}`);
+  const path = `/api/blind-box/leaderboard${query.length > 0 ? `?${query.join('&')}` : ''}`;
+  const response = await fetch(path, { cache: 'no-store', signal: options.signal });
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    if (options.signal?.aborted) {
+      if ('reason' in options.signal) throw options.signal.reason;
+      throw error;
+    }
+    throw invalidBlindBoxLeaderboardResponse();
+  }
+  if (!response.ok || !isBlindBoxLeaderboardEnvelope(payload)) throw invalidBlindBoxLeaderboardResponse();
+  return payload.leaderboard;
+}
+
+function isBlindBoxLeaderboardEnvelope(value: unknown): value is { code: 0; leaderboard: BlindBoxLeaderboardSnapshot } {
+  return hasExactKeys(value, ['code', 'leaderboard'])
+    && value.code === 0
+    && isBlindBoxLeaderboardSnapshot(value.leaderboard);
+}
+
+function isBlindBoxLeaderboardSnapshot(value: unknown): value is BlindBoxLeaderboardSnapshot {
+  return hasExactKeys(value, ['updatedAt', 'summary', 'viewers', 'scopes'])
+    && isNonNegativeInteger(value.updatedAt)
+    && isBlindBoxLeaderboardSummary(value.summary)
+    && Array.isArray(value.viewers)
+    && value.viewers.every(isViewerContribution)
+    && Array.isArray(value.scopes)
+    && value.scopes.every(isBlindBoxLeaderboardScope);
+}
+
+function isBlindBoxLeaderboardSummary(value: unknown): value is BlindBoxLeaderboardSummary {
+  return hasExactKeys(value, ['viewerCount', 'blindBoxCount', 'cost', 'value', 'profit', 'unpricedCount'])
+    && isNonNegativeInteger(value.viewerCount)
+    && isNonNegativeInteger(value.blindBoxCount)
+    && isNonNegativeNumber(value.cost)
+    && isNonNegativeNumber(value.value)
+    && isFiniteNumber(value.profit)
+    && isNonNegativeInteger(value.unpricedCount);
+}
+
+function isBlindBoxLeaderboardScope(value: unknown): value is BlindBoxLeaderboardScope {
+  return hasExactKeys(value, ['giftId', 'giftName', 'count', 'lastGiftAt'])
+    && isPositiveInteger(value.giftId)
+    && typeof value.giftName === 'string'
+    && isNonNegativeInteger(value.count)
+    && isNonNegativeInteger(value.lastGiftAt);
+}
+
+function isViewerContribution(value: unknown): value is ViewerContribution {
+  if (!hasExactKeys(value, [
+    'key', 'uname', 'giftCount', 'goldValue', 'silverValue', 'ruleTriggers',
+    'attributeDeltas', 'blindBoxCount', 'blindBoxCost', 'blindBoxValue', 'blindBoxProfit', 'lastGiftAt',
+  ], ['uid', 'avatar', 'unpricedBlindBoxCount', 'blindBoxes'])) return false;
+  return typeof value.key === 'string'
+    && (value.uid === undefined || isPositiveInteger(value.uid))
+    && typeof value.uname === 'string'
+    && (value.avatar === undefined || typeof value.avatar === 'string')
+    && isNonNegativeInteger(value.giftCount)
+    && isNonNegativeNumber(value.goldValue)
+    && isNonNegativeNumber(value.silverValue)
+    && isNonNegativeInteger(value.ruleTriggers)
+    && isAttributeDeltas(value.attributeDeltas)
+    && isNonNegativeInteger(value.blindBoxCount)
+    && isNonNegativeNumber(value.blindBoxCost)
+    && isNonNegativeNumber(value.blindBoxValue)
+    && isFiniteNumber(value.blindBoxProfit)
+    && (value.unpricedBlindBoxCount === undefined || isNonNegativeInteger(value.unpricedBlindBoxCount))
+    && (value.blindBoxes === undefined || (Array.isArray(value.blindBoxes) && value.blindBoxes.every(isBlindBoxContribution)))
+    && isNonNegativeInteger(value.lastGiftAt);
+}
+
+function isBlindBoxContribution(value: unknown): boolean {
+  return hasExactKeys(value, ['giftId', 'giftName', 'count', 'cost', 'value', 'profit', 'lastGiftAt'], ['unpricedCount'])
+    && isPositiveInteger(value.giftId)
+    && typeof value.giftName === 'string'
+    && isNonNegativeInteger(value.count)
+    && isNonNegativeNumber(value.cost)
+    && isNonNegativeNumber(value.value)
+    && isFiniteNumber(value.profit)
+    && (value.unpricedCount === undefined || isNonNegativeInteger(value.unpricedCount))
+    && isNonNegativeInteger(value.lastGiftAt);
+}
+
+function isAttributeDeltas(value: unknown): value is Record<string, number> {
+  return isPlainObject(value) && Object.values(value).every(isFiniteNumber);
+}
+
+function hasExactKeys(
+  value: unknown,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): value is Record<string, unknown> {
+  if (!isPlainObject(value)) return false;
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(value, key))
+    && Object.keys(value).every((key) => allowed.has(key));
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+  return isFiniteNumber(value) && value >= 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return isNonNegativeNumber(value) && Number.isInteger(value);
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return isNonNegativeInteger(value) && value > 0;
+}
+
+function invalidBlindBoxLeaderboardResponse(): Error {
+  return new Error('盲盒排行榜响应无效');
 }
 
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
@@ -234,6 +399,78 @@ export async function previewFormula(
     throw new Error(payload.message || `规则计算失败：HTTP ${response.status}`);
   }
   return payload.result;
+}
+
+export interface GiftRulePreview {
+  triggered: boolean;
+  result: number;
+}
+
+export async function previewGiftRule(options: {
+  condition?: string;
+  formula: string;
+  attributeName: string;
+  attributeValue: number;
+  giftPrice?: number;
+  userIdentity?: GiftUserIdentity;
+}): Promise<GiftRulePreview> {
+  const response = await fetch('/api/formula/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      condition: options.condition ?? '',
+      formula: options.formula,
+      attributeName: options.attributeName,
+      attributeValue: options.attributeValue,
+      context: 'gift',
+      giftPrice: options.giftPrice,
+      userIdentity: options.userIdentity ?? 0,
+    }),
+  });
+  const payload = await response.json() as GiftRulePreviewResponse;
+  if (!response.ok || payload.code !== 0 || typeof payload.triggered !== 'boolean' || !isFiniteNumber(payload.result)) {
+    throw new Error(payload.message || `规则计算失败：HTTP ${response.status}`);
+  }
+  return { triggered: payload.triggered, result: payload.result };
+}
+
+async function requestFormulaValidation(body: Record<string, unknown>): Promise<void> {
+  const response = await fetch('/api/formula/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, validateOnly: true }),
+  });
+  const payload = await response.json() as FormulaPreviewResponse;
+  if (!response.ok || payload.code !== 0) {
+    throw new Error(payload.message || `规则校验失败：HTTP ${response.status}`);
+  }
+}
+
+export function validateFormula(
+  formula: string,
+  attributeName: string,
+  attributeValue: number,
+  context: 'gift' | 'timer' = 'gift',
+  giftPrice?: number,
+): Promise<void> {
+  return requestFormulaValidation({ formula, attributeName, attributeValue, context, giftPrice });
+}
+
+export function validateGiftRule(options: {
+  condition?: string;
+  formula: string;
+  attributeName: string;
+  attributeValue: number;
+  giftPrice?: number;
+}): Promise<void> {
+  return requestFormulaValidation({
+    condition: options.condition ?? '',
+    formula: options.formula,
+    attributeName: options.attributeName,
+    attributeValue: options.attributeValue,
+    context: 'gift',
+    giftPrice: options.giftPrice,
+  });
 }
 
 export async function getBlindBoxInfo(giftId: number): Promise<BlindBoxLookup> {

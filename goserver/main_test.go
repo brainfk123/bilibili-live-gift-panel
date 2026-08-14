@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -444,6 +445,155 @@ func TestFormulaPreviewUsesSelectedGiftPrice(t *testing.T) {
 
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"result":312`) {
 		t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestFormulaPreviewUsesGiftRuleIdentity(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{
+		"formula":"积分+10","condition":"用户身份>=舰长","attributeName":"积分","attributeValue":0,
+		"context":"gift","userIdentity":2
+	}`))
+	response := httptest.NewRecorder()
+
+	handleFormulaPreview(store)(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"triggered":true`) || !strings.Contains(response.Body.String(), `"result":10`) {
+		t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestFormulaPreviewReturnsUnchangedValueForFalseGiftCondition(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{
+		"formula":"积分+10","condition":"用户身份>=舰长","attributeName":"积分","attributeValue":4,
+		"context":"gift","userIdentity":1
+	}`))
+	response := httptest.NewRecorder()
+
+	handleFormulaPreview(store)(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"triggered":false`) || !strings.Contains(response.Body.String(), `"result":4`) {
+		t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestFormulaPreviewRejectsInvalidUserIdentity(t *testing.T) {
+	for _, identity := range []string{"-1", "5", "1.5", `"captain"`} {
+		t.Run(identity, func(t *testing.T) {
+			store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+			request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{
+				"formula":"积分+1","attributeName":"积分","attributeValue":0,"userIdentity":`+identity+`
+			}`))
+			response := httptest.NewRecorder()
+			handleFormulaPreview(store)(response, request)
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "用户身份必须是 0 到 4 的整数") {
+				t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestFormulaPreviewRejectsInvalidGiftCondition(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{
+		"formula":"积分+10","condition":"用户身份>=不存在身份","attributeName":"积分","attributeValue":0,"userIdentity":2
+	}`))
+	response := httptest.NewRecorder()
+	handleFormulaPreview(store)(response, request)
+	if response.Code != http.StatusBadRequest || strings.Contains(response.Body.String(), `"triggered":false`) || !strings.Contains(response.Body.String(), "不存在身份") {
+		t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestFormulaPreviewKeepsOmittedGiftConditionCompatible(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{
+		"formula":"积分+price/1000","attributeName":"积分","attributeValue":4,"giftPrice":2000
+	}`))
+	response := httptest.NewRecorder()
+	handleFormulaPreview(store)(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"triggered":true`) || !strings.Contains(response.Body.String(), `"result":6`) {
+		t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestFormulaPreviewKeepsUserIdentityOutOfTimerContext(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{
+		"formula":"用户身份+1","attributeName":"积分","attributeValue":0,"context":"timer","userIdentity":4
+	}`))
+	response := httptest.NewRecorder()
+	handleFormulaPreview(store)(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "用户身份") {
+		t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestFormulaPreviewValidateOnlyChecksGiftRuleWithoutEvaluation(t *testing.T) {
+	originalRandomIntn := formulaRandomIntn
+	t.Cleanup(func() { formulaRandomIntn = originalRandomIntn })
+	formulaRandomIntn = func(int) int {
+		t.Fatal("validation-only request drew randomness")
+		return 0
+	}
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{
+		"formula":"RANDOMCHOICE(积分+10,1/0)","condition":"RANDOMCHOICE(1,1/0)",
+		"attributeName":"积分","attributeValue":0,"context":"gift","validateOnly":true
+	}`))
+	response := httptest.NewRecorder()
+	handleFormulaPreview(store)(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":0`) {
+		t.Fatalf("preview status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestFormulaPreviewValidateOnlyEnforcesContextAndArity(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		message string
+	}{
+		{name: "gift unknown variable", payload: `{"formula":"missing+1","attributeName":"积分","validateOnly":true}`, message: "missing"},
+		{name: "gift wrong arity", payload: `{"formula":"IF(1,2)","attributeName":"积分","validateOnly":true}`, message: "IF 需要 3 个参数"},
+		{name: "timer gift variable", payload: `{"formula":"price+1","attributeName":"积分","context":"timer","validateOnly":true}`, message: "price"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+			response := httptest.NewRecorder()
+			handleFormulaPreview(store)(response, httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(test.payload)))
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), test.message) {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestFormulaPreviewValidateOnlyRejectsGuaranteedRuntimeErrors(t *testing.T) {
+	overflow := "1" + strings.Repeat("0", 307) + "*100"
+	tests := map[string]string{
+		"1/0":                         "除数为零",
+		overflow:                      "规则结果不是有效数字",
+		"RANDBETWEEN(10,1)":           "最小值不能大于最大值",
+		"积分*(" + overflow + ")":       "规则结果不是有效数字",
+		"积分/ROUND(1,309)":             "规则结果不是有效数字",
+		"MAX(积分," + overflow + ")":    "规则结果不是有效数字",
+		"MIN(积分,-(" + overflow + "))": "规则结果不是有效数字",
+		"ROUND(积分,309)":               "规则结果不是有效数字",
+		"ROUND(" + overflow + ",积分)":  "规则结果不是有效数字",
+	}
+	for formula, message := range tests {
+		t.Run(message, func(t *testing.T) {
+			store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+			payload := fmt.Sprintf(`{"formula":%q,"attributeName":"积分","validateOnly":true}`, formula)
+			response := httptest.NewRecorder()
+			handleFormulaPreview(store)(response, httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(payload)))
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), message) {
+				t.Fatalf("formula %s: status = %d, body = %s", formula, response.Code, response.Body.String())
+			}
+		})
 	}
 }
 

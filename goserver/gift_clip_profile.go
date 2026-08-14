@@ -9,8 +9,8 @@ const (
 	giftClipFPS          = 30
 	minGiftClipDimension = 64
 	maxGiftClipDimension = 4096
-	minGiftClipBitrate   = int64(150_000)
-	maxGiftClipBitrate   = int64(16_000_000)
+	minGiftClipBitrate   = int64(450_000)
+	maxGiftClipBitrate   = int64(48_000_000)
 )
 
 type giftClipCrop struct {
@@ -59,8 +59,8 @@ func validateGiftClipCrop(crop giftClipCrop, sourceWidth, sourceHeight int) erro
 
 func giftClipAverageBitrate(width, height int) int64 {
 	baselinePixels := int64(1920 * 1080)
-	numerator := int64(2_000_000) * int64(width) * int64(height)
-	rounded := ((numerator + 25_000*baselinePixels) / (50_000 * baselinePixels)) * 50_000
+	numerator := int64(6_000_000) * int64(width) * int64(height)
+	rounded := ((numerator + 75_000*baselinePixels) / (150_000 * baselinePixels)) * 150_000
 	return minInt64(maxGiftClipBitrate, maxInt64(minGiftClipBitrate, rounded))
 }
 

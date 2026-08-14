@@ -322,6 +322,9 @@ func validateAppState(state appState) error {
 		if name == "" {
 			return fmt.Errorf("属性名不能为空")
 		}
+		if isReservedFormulaName(name) {
+			return fmt.Errorf("系统公式名称不能作为属性名：%s", name)
+		}
 		if _, exists := attributeNames[name]; exists {
 			return fmt.Errorf("属性名不能重复：%s", name)
 		}
@@ -526,7 +529,12 @@ func validateAppState(state appState) error {
 		if strings.TrimSpace(rule.Formula) == "" {
 			return fmt.Errorf("规则 %q 不能为空", rule.FormulaName)
 		}
-		if _, err := formulaPreview(state, rule.Formula, attribute.Name, attribute.Value); err != nil {
+		if strings.TrimSpace(rule.Condition) != "" {
+			if err := validateGiftFormula(state, rule.Condition, attribute.Name, attribute.Value, 1000); err != nil {
+				return fmt.Errorf("规则 %q 的运行条件无效：%w", rule.FormulaName, err)
+			}
+		}
+		if err := validateGiftFormula(state, rule.Formula, attribute.Name, attribute.Value, 1000); err != nil {
 			return fmt.Errorf("规则 %q 无效：%w", rule.FormulaName, err)
 		}
 	}
@@ -542,11 +550,11 @@ func validateAppState(state appState) error {
 			return fmt.Errorf("定时器 %q 的规则不能为空", rule.FormulaName)
 		}
 		if strings.TrimSpace(rule.Condition) != "" {
-			if _, err := timerFormulaPreview(state, rule.Condition, attribute.Name, attribute.Value); err != nil {
+			if err := validateTimerFormula(state, rule.Condition, attribute.Name, attribute.Value); err != nil {
 				return fmt.Errorf("定时器 %q 的运行条件无效：%w", rule.FormulaName, err)
 			}
 		}
-		if _, err := timerFormulaPreview(state, rule.Formula, attribute.Name, attribute.Value); err != nil {
+		if err := validateTimerFormula(state, rule.Formula, attribute.Name, attribute.Value); err != nil {
 			return fmt.Errorf("定时器 %q 的规则无效：%w", rule.FormulaName, err)
 		}
 	}
@@ -559,6 +567,9 @@ func validateAppState(state appState) error {
 		sourceAttributeName := strings.TrimSpace(preset.SourceAttributeName)
 		if id == "" || name == "" || formula == "" || sourceAttributeName == "" {
 			return fmt.Errorf("规则预设的 ID、名称、规则和来源属性不能为空")
+		}
+		if isReservedFormulaName(sourceAttributeName) {
+			return fmt.Errorf("系统公式名称不能作为预设来源属性：%s", sourceAttributeName)
 		}
 		if preset.Context != "gift" && preset.Context != "timer" {
 			return fmt.Errorf("规则预设 %q 的适用场景无效", name)

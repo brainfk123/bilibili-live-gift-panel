@@ -543,13 +543,12 @@ func assertGiftClipE2EProbe(t *testing.T, ffprobe, output string, profile giftCl
 	bitrate := parseGiftClipE2EFloat(t, firstGiftClipE2ENonempty(video.Bitrate, probe.Format.Bitrate), "bitrate")
 	targetBytes := float64(profile.AverageBitrate) * duration / 8
 	actualBytes := bitrate * duration / 8
-	minimumBytes := targetBytes * 0.65
 	maximumBytes := targetBytes*1.35 + 24*1024
-	if actualBytes < minimumBytes || actualBytes > maximumBytes {
-		t.Errorf("output video bytes = %.0f (%.0f bit/s), want %.0f..%.0f bytes around target %d bit/s with bounded 24 KiB startup/GOP overhead", actualBytes, bitrate, minimumBytes, maximumBytes, profile.AverageBitrate)
+	if actualBytes > maximumBytes {
+		t.Errorf("output video bytes = %.0f (%.0f bit/s), want at most %.0f bytes around target %d bit/s with bounded 24 KiB startup/GOP overhead", actualBytes, bitrate, maximumBytes, profile.AverageBitrate)
 	}
 	size := parseGiftClipE2EFloat(t, probe.Format.Size, "size")
-	t.Logf("ffprobe: stream_bitrate=%s format_bitrate=%s duration=%s size=%s frames=%s target_bytes=%.0f accepted_bytes=%.0f..%.0f startup_average_allowance=%.0fbit/s", video.Bitrate, probe.Format.Bitrate, firstGiftClipE2ENonempty(video.Duration, probe.Format.Duration), probe.Format.Size, video.FrameCount, targetBytes, minimumBytes, maximumBytes, 24*1024*8/duration)
+	t.Logf("ffprobe: stream_bitrate=%s format_bitrate=%s duration=%s size=%s frames=%s target_bytes=%.0f maximum_bytes=%.0f startup_average_allowance=%.0fbit/s", video.Bitrate, probe.Format.Bitrate, firstGiftClipE2ENonempty(video.Duration, probe.Format.Duration), probe.Format.Size, video.FrameCount, targetBytes, maximumBytes, 24*1024*8/duration)
 	if size < 1_024 || size >= 1<<20 {
 		t.Fatalf("output size = %.0f bytes, want a nontrivial sub-1 MiB fixture export", size)
 	}
@@ -576,25 +575,119 @@ func validateGiftClipE2EVideoContract(codec, pixelFormat string, width, height i
 
 func assertGiftClipE2EBitrateArgs(t *testing.T, args []string, profile giftClipOutputProfile) {
 	t.Helper()
-	if profile.Width == 320 && profile.Height == 180 && profile.AverageBitrate != 150_000 {
-		t.Fatalf("production minimum bitrate changed to %d, want 150000", profile.AverageBitrate)
+	if err := validateGiftClipE2EBitrateArgs(args, profile); err != nil {
+		t.Fatal(err)
 	}
-	want := map[string]string{
-		"-b:v":     strconv.FormatInt(profile.AverageBitrate, 10),
-		"-maxrate": strconv.FormatInt(profile.PeakBitrate, 10),
-		"-bufsize": strconv.FormatInt(profile.VBVBuffer, 10),
+}
+
+func validateGiftClipE2EBitrateArgs(args []string, profile giftClipOutputProfile) error {
+	if profile.Width == 320 && profile.Height == 180 && profile.AverageBitrate != 450_000 {
+		return fmt.Errorf("production minimum bitrate changed to %d, want 450000", profile.AverageBitrate)
 	}
-	for option, value := range want {
-		found := false
-		for index := 0; index+1 < len(args); index++ {
-			if args[index] == option && args[index+1] == value {
-				found = true
-				break
+	if err := validateGiftClipE2EOutputCodec(args); err != nil {
+		return err
+	}
+	for _, want := range []struct {
+		option string
+		value  string
+	}{
+		{"-rate_control", "pc_vbr"},
+		{"-compression_level", "75"},
+		{"-b:v", strconv.FormatInt(profile.AverageBitrate, 10)},
+		{"-maxrate", strconv.FormatInt(profile.PeakBitrate, 10)},
+		{"-bufsize", strconv.FormatInt(profile.VBVBuffer, 10)},
+	} {
+		if err := validateGiftClipE2EExactOption(args, want.option, want.value); err != nil {
+			return err
+		}
+	}
+	for _, arg := range args {
+		if arg == "-quality" {
+			return fmt.Errorf("production FFmpeg args unexpectedly contain -quality: %q", args)
+		}
+	}
+	return nil
+}
+
+func validateGiftClipE2EOutputCodec(args []string) error {
+	codecs := make([]string, 0, 2)
+	for index, arg := range args {
+		if arg != "-c:v" {
+			continue
+		}
+		if index+1 == len(args) || strings.HasPrefix(args[index+1], "-") {
+			return fmt.Errorf("production FFmpeg arg %s is missing its value: %q", arg, args)
+		}
+		codecs = append(codecs, args[index+1])
+	}
+	if len(codecs) == 0 || codecs[len(codecs)-1] != "h264_mf" {
+		return fmt.Errorf("production FFmpeg effective -c:v = %q, want h264_mf: %q", lastGiftClipE2EArgValue(codecs), args)
+	}
+	if len(codecs) == 1 || len(codecs) == 2 && codecs[0] == "gif" {
+		return nil
+	}
+	return fmt.Errorf("production FFmpeg -c:v sequence = %q, want h264_mf or gif then h264_mf: %q", codecs, args)
+}
+
+func lastGiftClipE2EArgValue(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[len(values)-1]
+}
+
+func validateGiftClipE2EExactOption(args []string, option, want string) error {
+	occurrences := 0
+	for index, arg := range args {
+		if arg != option {
+			continue
+		}
+		if index+1 == len(args) {
+			return fmt.Errorf("production FFmpeg arg %s is missing its value: %q", option, args)
+		}
+		if args[index+1] != want {
+			return fmt.Errorf("production FFmpeg arg %s = %q, want %q: %q", option, args[index+1], want, args)
+		}
+		occurrences++
+	}
+	if occurrences != 1 {
+		return fmt.Errorf("production FFmpeg args contain %d %s %s pairs, want 1: %q", occurrences, option, want, args)
+	}
+	return nil
+}
+
+func TestValidateGiftClipE2EBitrateArgsRequiresAmendedVBRContract(t *testing.T) {
+	profile := giftClipOutputProfile{Width: 320, Height: 180, AverageBitrate: 450_000, PeakBitrate: 675_000, VBVBuffer: 900_000}
+	valid := []string{
+		"-c:v", "h264_mf", "-rate_control", "pc_vbr", "-compression_level", "75",
+		"-b:v", "450000", "-maxrate", "675000", "-bufsize", "900000",
+	}
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"valid contract", valid, false},
+		{"GIF input codec is allowed", append([]string{"-c:v", "gif"}, valid...), false},
+		{"missing compression level", []string{"-c:v", "h264_mf", "-rate_control", "pc_vbr", "-b:v", "450000", "-maxrate", "675000", "-bufsize", "900000"}, true},
+		{"wrong codec", append([]string{"-c:v", "libx264"}, valid[2:]...), true},
+		{"wrong rate control", append([]string{"-c:v", "h264_mf", "-rate_control", "cbr"}, valid[4:]...), true},
+		{"wrong compression level", append([]string{"-c:v", "h264_mf", "-rate_control", "pc_vbr", "-compression_level", "50"}, valid[6:]...), true},
+		{"duplicate output codec", append(append([]string(nil), valid...), "-c:v", "h264_mf"), true},
+		{"later output codec override", append(append([]string(nil), valid...), "-c:v", "libx264"), true},
+		{"duplicate compression level", append(append([]string(nil), valid...), "-compression_level", "75"), true},
+		{"dangling compression level", append(append([]string(nil), valid...), "-compression_level"), true},
+		{"dangling codec", append(append([]string(nil), valid...), "-c:v"), true},
+		{"quality option", append(append([]string(nil), valid...), "-quality", "75"), true},
+		{"duplicate bitrate", append(append([]string(nil), valid...), "-b:v", "450000"), true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateGiftClipE2EBitrateArgs(test.args, profile)
+			if (err != nil) != test.want {
+				t.Fatalf("validateGiftClipE2EBitrateArgs() error = %v, want error %t", err, test.want)
 			}
-		}
-		if !found {
-			t.Fatalf("production FFmpeg args do not contain %s %s: %q", option, value, args)
-		}
+		})
 	}
 }
 

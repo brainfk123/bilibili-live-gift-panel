@@ -4,6 +4,7 @@ import {
   clearContributionLedger,
   clearGiftReceipts,
   giftReceiptMediaUrl,
+  getBlindBoxLeaderboard,
   getBlindBoxInfo,
   getBiliAuthStatus,
   getRoomAnchorInfo,
@@ -11,11 +12,233 @@ import {
   getUpdateStatus,
   logoutBiliAuth,
   pollBiliQRCodeLogin,
+  previewGiftRule,
+  validateFormula,
+  validateGiftRule,
   resetGiftTargetProgress,
   startBiliQRCodeLogin,
   startPagePresence,
   transitionActivity,
 } from '../src/backend';
+
+const leaderboardSnapshot = {
+  updatedAt: 1_700_000_000_000,
+  summary: {
+    viewerCount: 1,
+    blindBoxCount: 2,
+    cost: 18_000,
+    value: 12_000,
+    profit: -6_000,
+    unpricedCount: 1,
+  },
+  viewers: [{
+    key: 'uid:1',
+    uid: 1,
+    uname: '亏损观众',
+    avatar: 'https://example.test/avatar.png',
+    giftCount: 2,
+    goldValue: 18_000,
+    silverValue: 0,
+    ruleTriggers: 0,
+    attributeDeltas: { 积分: 2 },
+    blindBoxCount: 2,
+    blindBoxCost: 18_000,
+    blindBoxValue: 12_000,
+    blindBoxProfit: -6_000,
+    unpricedBlindBoxCount: 1,
+    blindBoxes: [{
+      giftId: 35800,
+      giftName: '小熊虫盲盒',
+      count: 2,
+      cost: 18_000,
+      value: 12_000,
+      profit: -6_000,
+      unpricedCount: 1,
+      lastGiftAt: 1_700_000_000_000,
+    }],
+    lastGiftAt: 1_700_000_000_000,
+  }],
+  scopes: [{ giftId: 35800, giftName: '小熊虫盲盒', count: 2, lastGiftAt: 1_700_000_000_000 }],
+};
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void; reject(reason: unknown): void } {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+describe('gift rule preview API', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('posts the gift condition and identity context and returns the trigger result', async () => {
+    const fetchMock = vi.fn(async () => Response.json({ code: 0, triggered: true, result: 1 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(previewGiftRule({
+      condition: '用户身份>=舰长',
+      formula: '积分+1',
+      attributeName: '积分',
+      attributeValue: 0,
+      giftPrice: 5200,
+      userIdentity: 2,
+    })).resolves.toEqual({ triggered: true, result: 1 });
+    expect(fetchMock).toHaveBeenCalledWith('/api/formula/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        condition: '用户身份>=舰长',
+        formula: '积分+1',
+        attributeName: '积分',
+        attributeValue: 0,
+        context: 'gift',
+        giftPrice: 5200,
+        userIdentity: 2,
+      }),
+    });
+  });
+
+  it('defaults omitted condition and identity to an ordinary user', async () => {
+    let request: RequestInit | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      request = init;
+      return Response.json({ code: 0, triggered: true, result: 3 });
+    }));
+
+    await previewGiftRule({ formula: '积分+1', attributeName: '积分', attributeValue: 2 });
+
+    expect(JSON.parse(request?.body as string)).toEqual({
+      condition: '', formula: '积分+1', attributeName: '积分', attributeValue: 2, context: 'gift', userIdentity: 0,
+    });
+  });
+
+  it.each([
+    { code: 0, result: 1 },
+    { code: 0, triggered: 'true', result: 1 },
+    { code: 0, triggered: true },
+    { code: 0, triggered: true, result: Number.POSITIVE_INFINITY },
+  ])('rejects malformed preview responses: %o', async (payload) => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(payload)));
+
+    await expect(previewGiftRule({ formula: '积分+1', attributeName: '积分', attributeValue: 0 }))
+      .rejects.toThrow('规则计算失败：HTTP 200');
+  });
+
+  it('preserves the backend error message', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ code: -1, message: '条件表达式无效' }, { status: 400 })));
+
+    await expect(previewGiftRule({ formula: '积分+1', attributeName: '积分', attributeValue: 0 }))
+      .rejects.toThrow('条件表达式无效');
+  });
+});
+
+describe('formula validation API', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('requests structural gift-rule validation without a runtime result', async () => {
+    const fetchMock = vi.fn(async () => Response.json({ code: 0 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(validateGiftRule({
+      condition: 'RANDOMCHOICE(1,1/0)',
+      formula: 'RANDOMCHOICE(积分+1,1/0)',
+      attributeName: '积分',
+      attributeValue: 0,
+      giftPrice: 5200,
+    })).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith('/api/formula/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        condition: 'RANDOMCHOICE(1,1/0)', formula: 'RANDOMCHOICE(积分+1,1/0)',
+        attributeName: '积分', attributeValue: 0, context: 'gift', giftPrice: 5200, validateOnly: true,
+      }),
+    });
+  });
+
+  it('requests structural timer validation and preserves backend errors', async () => {
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => (
+      Response.json({ code: -1, message: '变量 "price" 未定义' }, { status: 400 })
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(validateFormula('price+1', '积分', 0, 'timer')).rejects.toThrow('price');
+    expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toEqual({
+      formula: 'price+1', attributeName: '积分', attributeValue: 0, context: 'timer', validateOnly: true,
+    });
+  });
+});
+
+describe('blind box leaderboard API', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('requests a scoped leaderboard in the server query order and preserves negative profit', async () => {
+    const fetchMock = vi.fn(async () => Response.json({ code: 0, leaderboard: leaderboardSnapshot }));
+    vi.stubGlobal('fetch', fetchMock);
+    const signal = new AbortController().signal;
+
+    await expect(getBlindBoxLeaderboard({ giftId: 35800, limit: 100, signal })).resolves.toEqual(leaderboardSnapshot);
+    expect(fetchMock).toHaveBeenCalledWith('/api/blind-box/leaderboard?giftId=35800&limit=100', {
+      cache: 'no-store', signal,
+    });
+  });
+
+  it('preserves an abort reason identity while a response JSON body is pending', async () => {
+    const body = deferred<unknown>();
+    const bodyStarted = deferred<void>();
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: () => {
+        bodyStarted.resolve();
+        return body.promise;
+      },
+    } as unknown as Response));
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+    const reason = { source: 'leaderboard replacement' };
+    const request = getBlindBoxLeaderboard({ signal: controller.signal });
+
+    await bodyStarted.promise;
+    controller.abort(reason);
+    body.reject(new DOMException('body cancelled', 'AbortError'));
+
+    await expect(request).rejects.toBe(reason);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a non-abort JSON body rejection as the stable invalid-response error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => { throw new Error('invalid json'); },
+    } as unknown as Response)));
+
+    await expect(getBlindBoxLeaderboard()).rejects.toThrow('盲盒排行榜响应无效');
+  });
+
+  it.each([
+    ['unknown snapshot field', { ...leaderboardSnapshot, unexpected: true }],
+    ['non-array viewers', { ...leaderboardSnapshot, viewers: {} }],
+    ['non-array scopes', { ...leaderboardSnapshot, scopes: {} }],
+    ['negative summary count', { ...leaderboardSnapshot, summary: { ...leaderboardSnapshot.summary, blindBoxCount: -1 } }],
+    ['non-finite summary cost', { ...leaderboardSnapshot, summary: { ...leaderboardSnapshot.summary, cost: Number.POSITIVE_INFINITY } }],
+    ['negative scope timestamp', { ...leaderboardSnapshot, scopes: [{ ...leaderboardSnapshot.scopes[0], lastGiftAt: -1 }] }],
+    ['invalid scope gift id', { ...leaderboardSnapshot, scopes: [{ ...leaderboardSnapshot.scopes[0], giftId: 0 }] }],
+    ['odd viewer shape', { ...leaderboardSnapshot, viewers: [{ ...leaderboardSnapshot.viewers[0], blindBoxes: {} }] }],
+    ['negative viewer count', { ...leaderboardSnapshot, viewers: [{ ...leaderboardSnapshot.viewers[0], blindBoxCount: -1 }] }],
+    ['non-finite viewer profit', { ...leaderboardSnapshot, viewers: [{ ...leaderboardSnapshot.viewers[0], blindBoxProfit: Number.NaN }] }],
+    ['negative nested cost', { ...leaderboardSnapshot, viewers: [{ ...leaderboardSnapshot.viewers[0], blindBoxes: [{ ...leaderboardSnapshot.viewers[0].blindBoxes[0], cost: -1 }] }] }],
+    ['invalid nested gift id', { ...leaderboardSnapshot, viewers: [{ ...leaderboardSnapshot.viewers[0], blindBoxes: [{ ...leaderboardSnapshot.viewers[0].blindBoxes[0], giftId: 0 }] }] }],
+    ['non-finite updated at', { ...leaderboardSnapshot, updatedAt: Number.POSITIVE_INFINITY }],
+    ['negative updated at', { ...leaderboardSnapshot, updatedAt: -1 }],
+  ])('rejects a %s payload without partially normalizing it', async (_name, leaderboard) => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ code: 0, leaderboard })));
+
+    await expect(getBlindBoxLeaderboard()).rejects.toThrow('盲盒排行榜响应无效');
+  });
+});
 
 describe('gift target progress API', () => {
   afterEach(() => vi.unstubAllGlobals());

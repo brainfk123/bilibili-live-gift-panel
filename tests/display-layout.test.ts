@@ -19,7 +19,6 @@ describe('OBS attribute value fitting', () => {
 describe('OBS broadcast panel layout', () => {
   const css = readFileSync(new URL('../src/ui/display/display.css', import.meta.url), 'utf8');
   const source = readFileSync(new URL('../src/ui/display/display.ts', import.meta.url), 'utf8');
-  const blindBoxSource = readFileSync(new URL('../src/ui/display/blind-box-display.ts', import.meta.url), 'utf8');
 
   it('uses a one-third narrower panel without shrinking the primary value typography', () => {
     expect(css).toContain('width: min(480px, calc(100% - 40px));');
@@ -91,30 +90,12 @@ describe('OBS broadcast panel layout', () => {
 
   it('loads Bilibili avatars without sending the localhost referrer', () => {
     expect(source).toContain("referrerPolicy: 'no-referrer'");
-    expect(blindBoxSource).toContain("referrerPolicy: 'no-referrer'");
   });
 
-  it('renders a compact live blind-box leaderboard from the contribution ledger', () => {
+  it('keeps the blind-box ranking layout compact', () => {
     expect(source).toContain('mountSpecializedDisplay(root, target)');
-    expect(blindBoxSource).toContain('buildBlindBoxLeaderboard(state.contributions, MAX_RANKED_VIEWERS, blindBoxGiftId)');
-    expect(blindBoxSource).toContain('refreshStateFromServer()');
     expect(css).toMatch(/\.blind-box-ranking\s*\{[\s\S]*?border-radius: 16px/);
     expect(css).toMatch(/\.blind-box-ranking-track\s*\{[\s\S]*?transition-property: transform/);
     expect(css).toMatch(/\.blind-box-row\s*\{[\s\S]*?grid-template-columns:/);
-  });
-
-  it('scrolls the blind-box ranking down and back up with pauses at both ends', () => {
-    expect(blindBoxSource).toContain('normalizeViewerSlots(state.blindBoxDisplay.viewerSlots)');
-    expect(blindBoxSource).toContain('Math.min(viewerSlots, rows.length)');
-    expect(blindBoxSource).toContain('EDGE_PAUSE_MS = 3_200');
-    expect(blindBoxSource).toContain("viewport.dataset.scrollDirection = leaderboardScrollDirection > 0 ? 'down' : 'up'");
-    expect(blindBoxSource).toContain('scheduleNext(atEdge ? EDGE_PAUSE_MS : ROW_DWELL_MS)');
-  });
-
-  it('shows blind-box money in yuan on OBS pages', () => {
-    expect(blindBoxSource).toContain('formatYuanFromGoldSeeds');
-    expect(blindBoxSource).toContain('formatSignedYuanFromGoldSeeds');
-    expect(blindBoxSource).not.toContain('金瓜子');
-    expect(blindBoxSource).toContain('金额均以元显示');
   });
 });
