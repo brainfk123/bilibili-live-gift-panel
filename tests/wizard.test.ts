@@ -189,6 +189,14 @@ function findByText(root: TestElement, text: string): TestElement | undefined {
   return allElements(root).find((element) => element.textContent === text);
 }
 
+async function openExistingAttributeEditor(root: TestElement): Promise<void> {
+  if (root.querySelector('.attribute-overlay')) {
+    await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+  }
+  findByText(root, '编辑')?.onclick?.();
+  await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+}
+
 function cssVariable(block: string, name: string): string {
   return block.match(new RegExp(`${name}:\\s*([^;]+);`))?.[1].trim() ?? '';
 }
@@ -1500,8 +1508,11 @@ describe('single-page configuration rendering', () => {
         ...state('88888888'),
         settings: { ...defaultState().settings, showTutorial: false, configExperience: 'advanced' },
       });
-      const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const url = String(input);
+        if (url === '/api/attribute-edit-lease') {
+          return Response.json(init?.method === 'POST' ? { code: 0, token: 'A'.repeat(24) } : { code: 0 });
+        }
         if (url === '/api/gifts?roomId=88888888') {
           return Response.json({ code: 0, gifts: [currentGift] });
         }
@@ -1518,7 +1529,7 @@ describe('single-page configuration rendering', () => {
       mountConfig(root as unknown as HTMLElement);
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/gifts?roomId=88888888', { cache: 'no-store' }));
       await Promise.resolve();
-      findByText(root, '编辑')?.onclick?.();
+      await openExistingAttributeEditor(root);
       const searchInput = root.querySelectorAll('input')
         .find((input) => input.placeholder === '搜索礼物名称或 ID…') as TestElement & { oninput?: () => void };
       searchInput.value = '同名礼物';
@@ -1564,8 +1575,11 @@ describe('single-page configuration rendering', () => {
         { ...manualGift, lastReceived: 0, count: 0 },
       ],
     });
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
+      if (url === '/api/attribute-edit-lease') {
+        return Response.json(init?.method === 'POST' ? { code: 0, token: 'A'.repeat(24) } : { code: 0 });
+      }
       if (url === '/api/gifts?roomId=88888888') {
         return Response.json({ code: 0, gifts: [listedGift, historicalGift, observedCatalogGift] });
       }
@@ -1578,7 +1592,7 @@ describe('single-page configuration rendering', () => {
     mountConfig(root as unknown as HTMLElement);
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/gifts?roomId=88888888', { cache: 'no-store' }));
     await Promise.resolve();
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
 
     let choices: TestElement[] = [];
     await vi.waitFor(() => {
@@ -1766,7 +1780,7 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).settings.showTutorial).toBe(false));
     expect(root.querySelector('.attribute-card')?.className.split(' ')).not.toContain('is-guide-expanded');
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     expect(root.querySelector('.attribute-modal')).not.toBeNull();
     expect(root.querySelector('.tour-bubble')).toBeNull();
     expect(textOf(root)).not.toContain('补充礼物和规则');
@@ -1812,6 +1826,28 @@ describe('single-page configuration rendering', () => {
     (center.querySelector('.modal-close') as TestElement | null)?.onclick?.();
     expect(root.querySelector('.training-center')).toBeNull();
     expect(root.querySelector('.tour-bubble')).not.toBeNull();
+  });
+
+  it('opens editor controls only after a training topic acquires its attribute lease', async () => {
+    const configured = defaultAdvancedState();
+    configured.settings.showTutorial = false;
+    configured.attributes.push({
+      id: 'training-attribute', name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '',
+    });
+    await saveState(configured);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    (root.querySelector('.training-toggle') as TestElement | null)?.onclick?.();
+    const center = root.querySelector('.training-center') as TestElement;
+    findByText(center, '进阶玩法')?.onclick?.();
+    center.querySelectorAll('.training-center-course')
+      .find((course) => textOf(course).includes('按 ID 添加搜索不到的礼物'))
+      ?.onclick?.();
+    findByText(center, '打开礼物选择器')?.onclick?.();
+
+    await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+    expect((root.querySelector('.manual-gift-adder') as TestElement & { open?: boolean }).open).toBe(true);
   });
 
   it('collapses guided attribute details after resetting the main tutorial', async () => {
@@ -2133,7 +2169,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     expect(root.querySelector('.attribute-modal')).not.toBeNull();
     expect(textOf(root)).toContain('选择会影响这个属性的礼物');
     expect(root.querySelector('.formula-help')).not.toBeNull();
@@ -2210,7 +2246,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const mode = root.querySelector('.quick-rule-condition-mode') as TestElement & { onchange?: () => void };
@@ -2229,7 +2265,7 @@ describe('single-page configuration rendering', () => {
     findByText(root, '保存修改')?.onclick?.();
     await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules[0].condition).toBe('用户身份=普通用户'));
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     expect((root.querySelector('.quick-rule-condition-mode') as TestElement).value).toBe('equal');
@@ -2257,7 +2293,7 @@ describe('single-page configuration rendering', () => {
 
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const requestCountBeforeSave = formulaRequests.length;
@@ -2269,7 +2305,7 @@ describe('single-page configuration rendering', () => {
     expect(saveRequests.length).toBeGreaterThan(0);
     expect(saveRequests.every((request) => request.validateOnly === true)).toBe(true);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const secondRequestCountBeforeSave = formulaRequests.length;
@@ -2301,7 +2337,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const mode = root.querySelector('.quick-rule-condition-mode') as TestElement & { onchange?: () => void };
@@ -2311,7 +2347,7 @@ describe('single-page configuration rendering', () => {
     findByText(root, '保存修改')?.onclick?.();
     await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules[0].condition).toBe('用户身份>=舰长+积分'));
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const reopenedMode = root.querySelector('.quick-rule-condition-mode') as TestElement & { onchange?: () => void };
@@ -2347,7 +2383,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const row = root.querySelector('.selected-gift-rule')!;
@@ -2386,7 +2422,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const row = root.querySelector('.selected-gift-rule')!;
@@ -2423,7 +2459,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const row = root.querySelector('.selected-gift-rule')!;
@@ -2464,7 +2500,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const nameInput = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
     nameInput.value = '倒计时';
@@ -2478,12 +2514,12 @@ describe('single-page configuration rendering', () => {
     });
   });
 
-  it('formula help explains gift-only identities, equality, and random choice', () => {
+  it('formula help explains gift-only identities, equality, and random choice', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const help = root.querySelector('.formula-help')!;
@@ -2515,7 +2551,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const nameInput = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
     for (const reserved of ['用户身份', '普通用户', '粉丝团', '舰长', '提督', '总督']) {
@@ -2540,7 +2576,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelector('.gift-choice')?.onclick?.();
     const formulaInput = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '触发后属性值') as TestElement & { oninput?: () => void };
@@ -2581,7 +2617,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const idInput = root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '礼物 ID') as TestElement;
     const nameInput = root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '礼物名称') as TestElement;
     const priceInput = root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '单价（元，可填 0）') as TestElement;
@@ -2594,12 +2630,12 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(loadState().recentGifts.find((gift) => gift.id === 456789)?.price).toBe(12_500));
   });
 
-  it('offers common beginner rule actions with a safe optional upper limit', () => {
+  it('offers common beginner rule actions with a safe optional upper limit', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     findByText(root, '+ 添加礼物')?.onclick?.();
     root.querySelector('.gift-choice')?.onclick?.();
     root.querySelector('.guide-confirm-gifts')?.onclick?.();
@@ -2634,7 +2670,7 @@ describe('single-page configuration rendering', () => {
     expect(formula.value).toBe('MIN(加班时间+60,3600)');
   });
 
-  it('edits an existing rule with a signed random range', () => {
+  it('edits an existing rule with a signed random range', async () => {
     const gift = builtinCatalog[0];
     const configured = state('88888888');
     configured.rules = [{
@@ -2645,7 +2681,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
 
@@ -2669,7 +2705,7 @@ describe('single-page configuration rendering', () => {
   it.each([
     ['加班时间+RANDBETWEEN(1,60)', '1', '60'],
     ['MAX(加班时间-RANDBETWEEN(1,60),0)', '-60', '-1'],
-  ] as const)('loads legacy random formula %s into the signed range inputs', (formula, expectedMin, expectedMax) => {
+  ] as const)('loads legacy random formula %s into the signed range inputs', async (formula, expectedMin, expectedMax) => {
     const gift = builtinCatalog[0];
     const configured = state('88888888');
     configured.rules = [{
@@ -2680,7 +2716,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
 
@@ -2699,7 +2735,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const formulaInput = root.querySelectorAll('input')
@@ -2731,7 +2767,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const formulaInput = root.querySelectorAll('input')
@@ -2760,7 +2796,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const giftRulesTab = root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'));
     giftRulesTab?.onclick?.();
@@ -2787,14 +2823,14 @@ describe('single-page configuration rendering', () => {
     expect(loadState().attributes[0].value).toBe(0);
   });
 
-  it('edits timer values as canonical text across format switches', () => {
+  it('edits timer values as canonical text across format switches', async () => {
     const configured = state('88888888');
     configured.attributes[0].value = 3661;
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const editor = root.querySelector('.attribute-modal')!;
     const valueInput = editor.querySelector('.attribute-current-value') as TestElement & { oninput?: () => void };
     const formatSelect = editor.querySelectorAll('select')
@@ -2817,7 +2853,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const editor = root.querySelector('.attribute-modal')!;
     const valueInput = editor.querySelector('.attribute-current-value') as TestElement;
     findByText(editor, '+10分')?.onclick?.();
@@ -2829,14 +2865,14 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(loadState().attributes[0].value).toBe(661));
   });
 
-  it('rejects invalid timer values before saving', () => {
+  it('rejects invalid timer values before saving', async () => {
     for (const value of ['1:60:00', '1:24:00:00']) {
       const configured = state('88888888');
       configured.attributes[0].value = 3661;
       storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
       const root = new TestElement('div');
       mountConfig(root as unknown as HTMLElement);
-      findByText(root, '编辑')?.onclick?.();
+      await openExistingAttributeEditor(root);
       const editor = root.querySelector('.attribute-modal')!;
       const valueInput = editor.querySelector('.attribute-current-value') as TestElement & { oninput?: () => void };
       valueInput.value = value;
@@ -2895,7 +2931,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     await vi.waitFor(() => expect(root.querySelectorAll('.formula-preview')
@@ -2950,7 +2986,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const currentValue = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '当前值') as TestElement;
     const timerEditor = root.querySelector('.timer-rule-editor')!;
@@ -2984,7 +3020,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const currentValue = root.querySelectorAll('input')
@@ -3037,7 +3073,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('定时器'))?.onclick?.();
     const timerEditor = root.querySelector('.timer-rule-editor')!;
@@ -3069,7 +3105,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const currentValue = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '当前值') as TestElement & { oninput?: () => void };
     let timerEditor = root.querySelector('.timer-rule-editor')!;
@@ -3111,7 +3147,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const giftRow = root.querySelector('.selected-gift-rule')!;
@@ -3153,7 +3189,7 @@ describe('single-page configuration rendering', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(2));
@@ -3194,7 +3230,7 @@ describe('single-page configuration rendering', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(2));
@@ -3242,7 +3278,7 @@ describe('single-page configuration rendering', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(1));
@@ -3298,7 +3334,7 @@ describe('single-page configuration rendering', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
 
     const fallbackFetch = globalThis.fetch;
     const pendingResolvers: Array<(response: Response) => void> = [];
@@ -3354,7 +3390,7 @@ describe('single-page configuration rendering', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(2));
@@ -3392,7 +3428,7 @@ describe('single-page configuration rendering', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     await vi.waitFor(() => expect(root.querySelectorAll('.timer-rule-editor')).toHaveLength(2));
 
     const fallbackFetch = globalThis.fetch;
@@ -3426,7 +3462,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     expect(root.querySelector('.timer-binding-panel')).not.toBeNull();
     expect(textOf(root)).toContain('定时器只修改属性值，不会显示在 OBS 面板中');
     findByText(root, '+ 添加定时器')?.onclick?.();
@@ -3672,6 +3708,9 @@ describe('single-page configuration rendering', () => {
     });
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
+      if (url === '/api/attribute-edit-lease') {
+        return Response.json(init?.method === 'POST' ? { code: 0, token: 'A'.repeat(24) } : { code: 0 });
+      }
       if (url.endsWith('/api/config') && !init?.method) {
         configGetStarted = true;
         return configGet;
@@ -3707,7 +3746,7 @@ describe('single-page configuration rendering', () => {
 
     expect(summarySwitch.getAttribute('aria-checked')).toBe('true');
     expect(loadState().timerRules[0].enabled).toBe(true);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     expect(root.querySelector('.timer-editor-enabled-toggle')).toBeNull();
     vi.clearAllTimers();
     vi.useRealTimers();
@@ -4130,7 +4169,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     findByText(root, '保存修改')?.onclick?.();
 
     await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
@@ -4138,12 +4177,12 @@ describe('single-page configuration rendering', () => {
     expect(loadState().timerRules[0].enabled).toBe(false);
   });
 
-  it('collapses duplicate catalog aliases into one visible gift choice', () => {
+  it('collapses duplicate catalog aliases into one visible gift choice', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const duplicatedChoices = root.querySelectorAll('.gift-choice')
       .filter((choice) => textOf(choice).includes('666'));
 
@@ -4260,7 +4299,7 @@ describe('single-page configuration rendering', () => {
     expect(configCss).toContain('@media (prefers-reduced-motion: reduce)');
   });
 
-  it('incrementally appends gift picker items while scrolling and resets after search', () => {
+  it('incrementally appends gift picker items while scrolling and resets after search', async () => {
     const gifts = Array.from({ length: 135 }, (_, index) => ({
       id: 10000 + index,
       name: `自定义礼物 ${index}`,
@@ -4277,7 +4316,7 @@ describe('single-page configuration rendering', () => {
     }));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
 
     const picker = root.querySelector('.gift-picker-grid') as TestElement & {
       clientHeight?: number;
@@ -4337,11 +4376,11 @@ describe('single-page configuration rendering', () => {
     expect(choice.getAttribute('aria-pressed')).toBe('false');
   });
 
-  it('keeps the attribute editor open when text selection drags outside the panel', () => {
+  it('keeps the attribute editor open when text selection drags outside the panel', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888', 1)));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
 
     const overlay = root.querySelector('.attribute-overlay') as TestElement & {
       onpointerdown?: (event: { target: TestElement }) => void;
@@ -4386,20 +4425,33 @@ describe('single-page configuration rendering', () => {
       });
     }
 
-    async function openExisting(root: TestElement): Promise<void> {
-      findByText(root, '编辑')?.onclick?.();
-      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
-    }
-
     it('saves a generated ID before acquiring the existing attribute lease', async () => {
       await saveState(configuredAttribute(null));
-      const fetchImpl = leaseFetch();
+      let resolveAttributeSave: ((response: Response) => void) | undefined;
+      const fetchImpl = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        if (String(input) === '/api/config' && init?.method === 'PATCH') {
+          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+          if (Object.prototype.hasOwnProperty.call(body, 'attributes')) {
+            return new Promise<Response>((resolve) => { resolveAttributeSave = resolve; });
+          }
+        }
+        if (String(input) === '/api/attribute-edit-lease') {
+          return Promise.resolve(Response.json(init?.method === 'POST'
+            ? { code: 0, token: leaseToken }
+            : { code: 0 }));
+        }
+        return Promise.resolve(new Response(null, { status: 204 }));
+      });
       vi.stubGlobal('fetch', fetchImpl);
       const root = new TestElement('div');
       mountConfig(root as unknown as HTMLElement);
       fetchImpl.mockClear();
 
-      await openExisting(root);
+      findByText(root, '编辑')?.onclick?.();
+      await vi.waitFor(() => expect(resolveAttributeSave).toBeDefined());
+      expect(fetchImpl.mock.calls.some(([url]) => String(url) === '/api/attribute-edit-lease')).toBe(false);
+      resolveAttributeSave?.(new Response(null, { status: 204 }));
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
 
       const configSave = fetchImpl.mock.calls.findIndex(([url, init]) => (
         String(url) === '/api/config'
@@ -4460,7 +4512,7 @@ describe('single-page configuration rendering', () => {
       vi.stubGlobal('fetch', fetchImpl);
       const root = new TestElement('div');
       mountConfig(root as unknown as HTMLElement);
-      await openExisting(root);
+      await openExistingAttributeEditor(root);
 
       close(root);
       await vi.waitFor(() => expect(fetchImpl.mock.calls.filter(([url, init]) => (
@@ -4468,10 +4520,55 @@ describe('single-page configuration rendering', () => {
       ))).toHaveLength(1));
     });
 
+    it.each([
+      ['cancel', (root: TestElement) => findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.()],
+      ['close button', (root: TestElement) => findByText(root, '×')?.onclick?.()],
+      ['overlay close', (root: TestElement) => {
+        const overlay = root.querySelector('.attribute-overlay') as TestElement & { onpointerdown?: (event: { target: TestElement }) => void; onclick?: (event: { target: TestElement }) => void };
+        overlay.onpointerdown?.({ target: overlay });
+        overlay.onclick?.({ target: overlay });
+      }],
+    ])('does not release a saved attribute lease when %s is requested during persistence', async (_reason, dismiss) => {
+      await saveState(configuredAttribute());
+      let deferSave = false;
+      let resolveSave: ((response: Response) => void) | undefined;
+      const fetchImpl = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        if (String(input) === '/api/attribute-edit-lease') {
+          return Promise.resolve(Response.json(init?.method === 'POST'
+            ? { code: 0, token: leaseToken }
+            : { code: 0 }));
+        }
+        if (String(input) === '/api/formula/preview') return Promise.resolve(Response.json({ code: 0 }));
+        if (String(input) === '/api/config' && init?.method === 'PATCH' && deferSave) {
+          return new Promise<Response>((resolve) => { resolveSave = resolve; });
+        }
+        return Promise.resolve(new Response(null, { status: 204 }));
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExistingAttributeEditor(root);
+      deferSave = true;
+
+      findByText(root, '保存修改')?.onclick?.();
+      await vi.waitFor(() => expect(resolveSave).toBeDefined());
+      dismiss(root);
+      expect(root.querySelector('.attribute-overlay')).not.toBeNull();
+      expect(fetchImpl.mock.calls.some(([url, init]) => (
+        String(url) === '/api/attribute-edit-lease' && init?.method === 'DELETE'
+      ))).toBe(false);
+
+      resolveSave?.(new Response(null, { status: 204 }));
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+      expect(fetchImpl.mock.calls.filter(([url, init]) => (
+        String(url) === '/api/attribute-edit-lease' && init?.method === 'DELETE'
+      ))).toHaveLength(1);
+    });
+
     it('keeps the editor and its lease alive when save persistence fails', async () => {
-      vi.useFakeTimers();
       await saveState(configuredAttribute());
       let failConfigSaves = false;
+      let heartbeat: (() => void) | undefined;
       const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         if (String(input) === '/api/attribute-edit-lease') {
           return Response.json(init?.method === 'POST' ? { code: 0, token: leaseToken } : { code: 0 });
@@ -4480,14 +4577,22 @@ describe('single-page configuration rendering', () => {
         return new Response(null, { status: 204 });
       });
       vi.stubGlobal('fetch', fetchImpl);
+      vi.stubGlobal('setInterval', (handler: () => void) => {
+        heartbeat = handler;
+        return 1;
+      });
+      vi.stubGlobal('clearInterval', () => {});
       const root = new TestElement('div');
       mountConfig(root as unknown as HTMLElement);
-      await openExisting(root);
+      await openExistingAttributeEditor(root);
       failConfigSaves = true;
 
       findByText(root, '保存修改')?.onclick?.();
       await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
-      await vi.advanceTimersByTimeAsync(5_000);
+      heartbeat?.();
+      await vi.waitFor(() => expect(fetchImpl.mock.calls.some(([url, init]) => (
+        String(url) === '/api/attribute-edit-lease' && init?.method === 'PUT'
+      ))).toBe(true));
 
       expect(fetchImpl.mock.calls.some(([url, init]) => String(url) === '/api/attribute-edit-lease' && init?.method === 'PUT')).toBe(true);
       expect(fetchImpl.mock.calls.some(([url, init]) => String(url) === '/api/attribute-edit-lease' && init?.method === 'DELETE')).toBe(false);
@@ -4506,22 +4611,33 @@ describe('single-page configuration rendering', () => {
     });
 
     it('shows a lease warning while retrying and hides it after recovery', async () => {
-      vi.useFakeTimers();
       await saveState(configuredAttribute());
       let renews = 0;
+      let heartbeat: (() => void) | undefined;
       const fetchImpl = leaseFetch({ PUT: () => {
         renews += 1;
         return renews === 1 ? new Response(null, { status: 500 }) : Response.json({ code: 0 });
       } });
       vi.stubGlobal('fetch', fetchImpl);
+      vi.stubGlobal('setInterval', (handler: () => void) => {
+        heartbeat = handler;
+        return 1;
+      });
+      vi.stubGlobal('clearInterval', () => {});
       const root = new TestElement('div');
       mountConfig(root as unknown as HTMLElement);
-      await openExisting(root);
+      await openExistingAttributeEditor(root);
+      vi.useFakeTimers();
 
-      await vi.advanceTimersByTimeAsync(5_000);
-      expect(textOf(root.querySelector('.attribute-lease-warning') as TestElement)).toBe('属性规则冻结状态正在重连，请暂时不要关闭此页面。');
+      expect(renews).toBe(0);
+      heartbeat?.();
+      await vi.advanceTimersByTimeAsync(0);
+      const warning = root.querySelector('.attribute-lease-warning') as TestElement & { hidden?: boolean };
+      expect(textOf(warning)).toBe('属性规则冻结状态正在重连，请暂时不要关闭此页面。');
+      expect(warning.hidden).toBe(false);
       await vi.advanceTimersByTimeAsync(1_000);
-      expect((root.querySelector('.attribute-lease-warning') as TestElement & { hidden?: boolean }).hidden).toBe(true);
+      expect(warning.hidden).toBe(true);
+      vi.useRealTimers();
     });
 
     it('keeps renew and release bound to the original stable ID after renaming', async () => {
@@ -4536,7 +4652,7 @@ describe('single-page configuration rendering', () => {
       vi.stubGlobal('clearInterval', () => {});
       const root = new TestElement('div');
       mountConfig(root as unknown as HTMLElement);
-      await openExisting(root);
+      await openExistingAttributeEditor(root);
       const name = root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
       name.value = '倒计时';
       name.oninput?.();
@@ -4587,7 +4703,7 @@ describe('single-page configuration rendering', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888', 1)));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
 
     const fontSize = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '字体大小（px）') as TestElement & { oninput?: () => void };

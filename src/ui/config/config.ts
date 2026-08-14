@@ -783,22 +783,26 @@ export function mountConfig(root: HTMLElement): void {
     const openTopic = (topic: TrainingTopicDefinition): void => {
       overlay.remove();
       if (topic.destination.kind === 'editor') {
-        navigateToPage('attributes', { scroll: false, refreshGuide: false, automatic: true });
-        if (!editorOpen) openAttributeEditor(0);
-        activeEditorWorkspace?.setSection(topic.destination.section);
-        if (['multi-gift', 'blind-box', 'manual-gift'].includes(topic.id)) {
-          const addGift = root.querySelector<HTMLButtonElement>('.guide-add-gift');
-          if (typeof addGift?.click === 'function') addGift.click();
-          else (addGift as any)?.onclick?.();
-          if (topic.id === 'manual-gift') {
-            const manualAdder = root.querySelector<HTMLDetailsElement>('.manual-gift-adder');
-            if (manualAdder) manualAdder.open = true;
+        const destination = topic.destination;
+        void (async () => {
+          navigateToPage('attributes', { scroll: false, refreshGuide: false, automatic: true });
+          if (!editorOpen) await openAttributeEditor(0);
+          if (!activeEditorWorkspace) return;
+          activeEditorWorkspace.setSection(destination.section);
+          if (['multi-gift', 'blind-box', 'manual-gift'].includes(topic.id)) {
+            const addGift = root.querySelector<HTMLButtonElement>('.guide-add-gift');
+            if (typeof addGift?.click === 'function') addGift.click();
+            else (addGift as any)?.onclick?.();
+            if (topic.id === 'manual-gift') {
+              const manualAdder = root.querySelector<HTMLDetailsElement>('.manual-gift-adder');
+              if (manualAdder) manualAdder.open = true;
+            }
           }
-        }
-        if (['advanced-rule', 'cross-attribute'].includes(topic.id)) {
-          const advanced = root.querySelector<HTMLDetailsElement>('.rule-advanced-settings');
-          if (advanced) advanced.open = true;
-        }
+          if (['advanced-rule', 'cross-attribute'].includes(topic.id)) {
+            const advanced = root.querySelector<HTMLDetailsElement>('.rule-advanced-settings');
+            if (advanced) advanced.open = true;
+          }
+        })();
         return;
       }
       const destinationPage = configPageForSelector(topic.destination.selector);
@@ -3081,8 +3085,9 @@ export function mountConfig(root: HTMLElement): void {
 
     const overlay = el('div', { class: 'overlay attribute-overlay' });
     let modal: HTMLElement;
+    let saveInFlight = false;
     const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭' } as any) as HTMLButtonElement;
-    const closeAttributeEditor = (): void => {
+    const finishCloseAttributeEditor = (): void => {
       overlay.remove();
       editorOpen = false;
       editorGuideEnabled = false;
@@ -3092,6 +3097,10 @@ export function mountConfig(root: HTMLElement): void {
       refreshOpenGiftCatalog = null;
       void lease?.release();
       renderGuide();
+    };
+    const closeAttributeEditor = (): void => {
+      if (saveInFlight) return;
+      finishCloseAttributeEditor();
     };
     closeButton.onclick = closeAttributeEditor;
     const modalHeader = el('header', { class: 'modal-header attribute-workbench-header' }, [
@@ -4418,7 +4427,8 @@ export function mountConfig(root: HTMLElement): void {
     cancelButton.onclick = closeAttributeEditor;
     const saveButton = el('button', { class: 'btn guide-attribute-save', type: 'button', text: original ? '保存修改' : '创建属性' }) as HTMLButtonElement;
     saveButton.onclick = () => {
-      void saveAttributeEditor(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, closeAttributeEditor, saveButton, readEditableAttributeValue);
+      if (saveInFlight) return;
+      void saveAttributeEditor(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, finishCloseAttributeEditor, saveButton, readEditableAttributeValue, (value) => { saveInFlight = value; });
     };
     modalFooter = el('footer', { class: 'modal-actions attribute-workbench-actions' }, [
       el('span', { class: 'attribute-save-note', text: '保存前会由后台统一校验规则' }),
@@ -4550,8 +4560,9 @@ export function mountConfig(root: HTMLElement): void {
     closeAttributeEditor: () => void,
     saveButton: HTMLButtonElement,
     readEditableAttributeValue: () => AttributeTimeParseResult,
+    setSaveInFlight: (value: boolean) => void,
   ): Promise<void> {
-    return saveAttributeEditorAsync(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, closeAttributeEditor, saveButton, readEditableAttributeValue);
+    return saveAttributeEditorAsync(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, closeAttributeEditor, saveButton, readEditableAttributeValue, setSaveInFlight);
   }
 
   async function saveAttributeEditorAsync(
@@ -4568,6 +4579,7 @@ export function mountConfig(root: HTMLElement): void {
     closeAttributeEditor: () => void,
     saveButton: HTMLButtonElement,
     readEditableAttributeValue: () => AttributeTimeParseResult,
+    setSaveInFlight: (value: boolean) => void,
   ): Promise<void> {
     const name = nameInput.value.trim();
     if (!name) {
@@ -4673,6 +4685,7 @@ export function mountConfig(root: HTMLElement): void {
     }
     displayConfig.valueMappings = normalizedMappings;
 
+    setSaveInFlight(true);
     saveButton.disabled = true;
     saveButton.textContent = '后台校验中…';
     try {
@@ -4690,6 +4703,7 @@ export function mountConfig(root: HTMLElement): void {
         await validateFormula(timer.formula, name, value, 'timer');
       }
     } catch (error) {
+      setSaveInFlight(false);
       toast(error instanceof Error ? `规则有误：${error.message}` : '规则有误', root);
       saveButton.disabled = false;
       saveButton.textContent = original ? '保存修改' : '创建属性';
@@ -4812,10 +4826,12 @@ export function mountConfig(root: HTMLElement): void {
     try {
       await saveAndWait();
     } catch {
+      setSaveInFlight(false);
       saveButton.disabled = false;
       saveButton.textContent = original ? '保存修改' : '创建属性';
       return;
     }
+    setSaveInFlight(false);
     closeAttributeEditor();
     render();
     toast(index === undefined ? '属性已创建' : '属性配置已保存', root);
