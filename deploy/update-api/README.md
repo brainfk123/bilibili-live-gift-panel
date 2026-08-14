@@ -1,6 +1,6 @@
 # Gift Panel Update API deployment
 
-This deployment serves private COS release metadata through the API only. Keep the COS bucket private; do not enable public read or configure a CDN. The API issues short-lived signed download URLs, and neither Nginx access logs nor this runbook records their query strings.
+This deployment serves private COS release metadata through the API only. Keep the COS bucket private; do not enable public read or configure a CDN. Task 4 gate: COS Versioning must not be Enabled. Safest is never-enabled versioning. If versioning is Suspended, run controlled staging verification before production, including immutable release writes and stable-manifest promotion. The API issues short-lived signed download URLs, and neither Nginx access logs nor this runbook records their query strings.
 
 ## Required names
 
@@ -30,7 +30,7 @@ sudo install -o root -g gift-panel-update -m 0755 dist/gift-panel-update-api-lin
 sudo ln -sfn /opt/gift-panel-update-api/releases/RELEASE_ID /opt/gift-panel-update-api/current
 ```
 
-Create `/etc/gift-panel-update-api.env` from `gift-panel-update-api.env.example`, populate it through an approved secret channel, then install it root-owned and mode `0600`. Never commit that file. Keep `UPDATE_API_LISTEN=127.0.0.1:12450`; the Go server rejects non-loopback listeners.
+Create `/etc/gift-panel-update-api.env` from `gift-panel-update-api.env.example`, populate it through an approved secret channel, then install it root-owned and mode `0600`. Never commit that file. The systemd unit forces `UPDATE_API_LISTEN=127.0.0.1:12450`; do not add that variable to the environment file. The Go server rejects non-loopback listeners as a final boundary.
 
 ```sh
 sudo install -o root -g root -m 0600 /secure/gift-panel-update-api.env /etc/gift-panel-update-api.env
@@ -61,7 +61,7 @@ sudo logrotate -vf /etc/logrotate.d/gift-panel-update-api
 Run health checks locally from the server and only call public API routes over HTTPS:
 
 ```sh
-curl --fail --silent --show-error http://127.0.0.1/healthz
+curl --fail --silent --show-error http://127.0.0.1:12450/healthz | grep -Fx 'ok'
 curl --fail --silent --show-error https://PUBLIC_DOMAIN/api/v1/releases/latest
 curl --fail --silent --show-error https://PUBLIC_DOMAIN/api/v1/changelog
 ```
