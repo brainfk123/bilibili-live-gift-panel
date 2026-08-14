@@ -1,5 +1,5 @@
 import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftKpiBarStyle, GiftKpiLayout, GiftKpiPanel, GiftReceipt, GiftRule, MAX_GIFT_RECEIPTS, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
-import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState, saveStateTransaction } from '../../storage';
+import { clearRoomScopedRecords, commitAuthoritativeStateMutation, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { bindFloatingDetailCard, el, fieldControl, inputField, setFloatingDetailGuideExpanded, toast } from '../common';
 import { builtinCatalog, findGift } from '../../gifts/catalog';
@@ -66,7 +66,13 @@ import {
 } from './wizard';
 import { renderSpotlightGuide, type SpotlightGuideElement } from './spotlight-guide';
 import { createAttributeWorkspace, type AttributeWorkspace } from './attribute-workspace';
-import { acquireAttributeEditLease, type AttributeEditLeaseHealth, type AttributeEditLeaseSession } from './attribute-edit-lease';
+import {
+  prepareAttributeEditSession,
+  submitAttributeEdit,
+  type AttributeEditGiftCatalogUpsert,
+  type AttributeEditInput,
+} from './attribute-edit-api';
+import type { AttributeEditLeaseHealth, AttributeEditLeaseSession } from './attribute-edit-lease';
 import {
   buildQuickGiftFormula,
   detectQuickGiftRule,
@@ -654,20 +660,6 @@ export function mountConfig(root: HTMLElement): void {
     localStateVersion += 1;
     try {
       await saveState(state);
-    } catch (error) {
-      toast(error instanceof Error ? error.message : '配置保存失败', root);
-      throw error;
-    }
-  }
-
-  function detachedStateCandidate(): AppState {
-    return JSON.parse(JSON.stringify(state)) as AppState;
-  }
-
-  async function saveCandidateAndWait(candidate: AppState): Promise<AppState> {
-    localStateVersion += 1;
-    try {
-      return await saveStateTransaction(candidate);
     } catch (error) {
       toast(error instanceof Error ? error.message : '配置保存失败', root);
       throw error;
@@ -3037,33 +3029,20 @@ export function mountConfig(root: HTMLElement): void {
     };
     try {
       if (original) {
-        // Invalidate an already-running soft poll before establishing the
-        // lease-held authoritative snapshot used by this editor.
+        // Invalidate an already-running soft poll before adopting the
+        // prepared authoritative snapshot used by this editor.
         localStateVersion += 1;
-        let stableId = original.id;
-        if (!stableId) {
-          stableId = createAttributeId();
-          const candidate = detachedStateCandidate();
-          const candidateAttribute = candidate.attributes[index!];
-          if (!candidateAttribute) throw new Error('属性已不存在，请刷新后重试');
-          candidateAttribute.id = stableId;
-          const committed = await saveCandidateAndWait(candidate);
-          Object.assign(state, committed);
-        }
-        const localMatches = state.attributes
-          .map((attribute, attributeIndex) => ({ attribute, attributeIndex }))
-          .filter(({ attribute }) => attribute.id === stableId);
-        if (localMatches.length !== 1) throw new Error('属性已不存在，请刷新后重试');
-        index = localMatches[0].attributeIndex;
-        original = localMatches[0].attribute;
-
-        lease = await acquireAttributeEditLease(stableId, { onHealthChange: renderLeaseHealth });
-        const refreshed = await refreshStateFromServer(() => true, { throwOnError: true });
-        Object.assign(state, refreshed);
+        const prepared = await prepareAttributeEditSession(
+          original.id?.trim() ? { attributeId: original.id } : { legacyName: original.name },
+          { onHealthChange: renderLeaseHealth },
+        );
+        lease = prepared.lease;
+        const authoritative = await commitAuthoritativeStateMutation(() => Promise.resolve(prepared.state));
+        Object.assign(state, authoritative);
         refreshApplied = true;
         const refreshedMatches = state.attributes
           .map((attribute, attributeIndex) => ({ attribute, attributeIndex }))
-          .filter(({ attribute }) => attribute.id === stableId);
+          .filter(({ attribute }) => attribute.id === prepared.attributeId);
         if (refreshedMatches.length !== 1) throw new Error('属性已不存在，请刷新后重试');
         index = refreshedMatches[0].attributeIndex;
         original = refreshedMatches[0].attribute;
@@ -4466,7 +4445,7 @@ export function mountConfig(root: HTMLElement): void {
     const saveButton = el('button', { class: 'btn guide-attribute-save', type: 'button', text: original ? '保存修改' : '创建属性' }) as HTMLButtonElement;
     saveButton.onclick = () => {
       if (saveInFlight) return;
-      void saveAttributeEditor(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, finishCloseAttributeEditor, saveButton, readEditableAttributeValue, (value) => { saveInFlight = value; });
+      void saveAttributeEditor(index, original, lease, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, finishCloseAttributeEditor, saveButton, readEditableAttributeValue, (value) => { saveInFlight = value; });
     };
     modalFooter = el('footer', { class: 'modal-actions attribute-workbench-actions' }, [
       el('span', { class: 'attribute-save-note', text: '保存前会由后台统一校验规则' }),
@@ -4587,6 +4566,7 @@ export function mountConfig(root: HTMLElement): void {
   function saveAttributeEditor(
     index: number | undefined,
     original: Attribute | undefined,
+    lease: AttributeEditLeaseSession | null,
     nameInput: HTMLInputElement,
     valueInput: HTMLInputElement,
     formatSelect: HTMLSelectElement,
@@ -4600,12 +4580,13 @@ export function mountConfig(root: HTMLElement): void {
     readEditableAttributeValue: () => AttributeTimeParseResult,
     setSaveInFlight: (value: boolean) => void,
   ): Promise<void> {
-    return saveAttributeEditorAsync(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, closeAttributeEditor, saveButton, readEditableAttributeValue, setSaveInFlight);
+    return saveAttributeEditorAsync(index, original, lease, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, closeAttributeEditor, saveButton, readEditableAttributeValue, setSaveInFlight);
   }
 
   async function saveAttributeEditorAsync(
     index: number | undefined,
     original: Attribute | undefined,
+    lease: AttributeEditLeaseSession | null,
     nameInput: HTMLInputElement,
     valueInput: HTMLInputElement,
     formatSelect: HTMLSelectElement,
@@ -4748,45 +4729,9 @@ export function mountConfig(root: HTMLElement): void {
       return;
     }
 
-    let persistedOriginal = original;
-    let refreshedDuringSave = false;
-    try {
-      localStateVersion += 1;
-      const refreshed = await refreshStateFromServer(() => true, { throwOnError: true });
-      Object.assign(state, refreshed);
-      refreshedDuringSave = true;
-      if (original) {
-        const stableId = original.id?.trim();
-        const matches = stableId
-          ? state.attributes
-            .map((attribute, attributeIndex) => ({ attribute, attributeIndex }))
-            .filter(({ attribute }) => attribute.id === stableId)
-          : [];
-        if (matches.length !== 1) throw new Error('属性已不存在，请刷新后重试');
-        index = matches[0].attributeIndex;
-        persistedOriginal = matches[0].attribute;
-        original = persistedOriginal;
-      }
-    } catch (error) {
-      if (refreshedDuringSave) render();
-      setSaveInFlight(false);
-      toast(error instanceof Error ? error.message : '配置读取失败，请重试', root);
-      saveButton.disabled = false;
-      saveButton.textContent = original ? '保存修改' : '创建属性';
-      return;
-    }
-    if (state.attributes.some((attribute) => attribute.name === name && attribute.id !== persistedOriginal?.id)) {
-      setSaveInFlight(false);
-      toast('属性名称不能重复', root);
-      nameInput.focus();
-      saveButton.disabled = false;
-      saveButton.textContent = original ? '保存修改' : '创建属性';
-      return;
-    }
-
     const format = formatSelect.value as Attribute['format'];
     const nextAttribute: Attribute = {
-      id: persistedOriginal?.id ?? createAttributeId(),
+      ...(original?.id ? { id: original.id } : {}),
       name,
       value,
       unit: format === 'hhmmss' ? 'seconds' : 'none',
@@ -4799,66 +4744,10 @@ export function mountConfig(root: HTMLElement): void {
         themeId: displayConfig.appearance?.themeId ?? displayConfig.themeId ?? state.settings.defaultDisplayThemeId,
         title: !displayConfig.title || displayConfig.title === originalName ? name : displayConfig.title,
       },
-      ...(persistedOriginal?.color ? { color: persistedOriginal.color } : {}),
-      ...(persistedOriginal?.createdFromTemplateId ? { createdFromTemplateId: persistedOriginal.createdFromTemplateId } : {}),
-      ...(persistedOriginal?.createdFromTemplateVersion !== undefined ? { createdFromTemplateVersion: persistedOriginal.createdFromTemplateVersion } : {}),
+      ...(original?.color ? { color: original.color } : {}),
+      ...(original?.createdFromTemplateId ? { createdFromTemplateId: original.createdFromTemplateId } : {}),
+      ...(original?.createdFromTemplateVersion !== undefined ? { createdFromTemplateVersion: original.createdFromTemplateVersion } : {}),
     };
-    const candidate = detachedStateCandidate();
-    if (index === undefined) candidate.attributes.push(nextAttribute);
-    else candidate.attributes[index] = nextAttribute;
-    if (editorGuideEnabled && candidate.settings.tutorialReplayMode && nextAttribute.id) {
-      candidate.settings.tutorialTargetAttributeId = nextAttribute.id;
-    }
-    const persistedOriginalName = persistedOriginal?.name ?? '';
-    if (persistedOriginalName && persistedOriginalName !== name) {
-      candidate.displayScenes = candidate.displayScenes.map((scene) => ({
-        ...scene,
-        attributeNames: scene.attributeNames.map((attributeName) => attributeName === persistedOriginalName ? name : attributeName),
-      }));
-      candidate.activities = candidate.activities.map((activity) => {
-        if (!activity.attributeNames.includes(persistedOriginalName)) return activity;
-        const initialValues = { ...activity.initialValues, [name]: activity.initialValues[persistedOriginalName] ?? nextAttribute.value };
-        delete initialValues[persistedOriginalName];
-        const resultValues = { ...(activity.result?.values ?? {}) };
-        if (Object.prototype.hasOwnProperty.call(resultValues, persistedOriginalName)) {
-          resultValues[name] = resultValues[persistedOriginalName];
-          delete resultValues[persistedOriginalName];
-        }
-        return {
-          ...activity,
-          attributeNames: activity.attributeNames.map((attributeName) => attributeName === persistedOriginalName ? name : attributeName),
-          initialValues,
-          milestones: activity.milestones.map((milestone) => ({
-            ...milestone,
-            attributeName: milestone.attributeName === persistedOriginalName ? name : milestone.attributeName,
-          })),
-          ...(activity.result ? {
-            result: {
-              values: resultValues,
-              ...(activity.result.winnerAttributeName
-                ? { winnerAttributeName: activity.result.winnerAttributeName === persistedOriginalName ? name : activity.result.winnerAttributeName }
-                : {}),
-            },
-          } : {}),
-        };
-      });
-    }
-
-    const renamedRules = candidate.rules.map((rule) => {
-      if (!persistedOriginalName || persistedOriginalName === name) return rule;
-      const attributeName = rule.attributeName === persistedOriginalName ? name : rule.attributeName;
-      const formula = replaceFormulaVariable(rule.formula, persistedOriginalName, name);
-      const hasCondition = Object.prototype.hasOwnProperty.call(rule, 'condition');
-      const condition = hasCondition ? replaceFormulaVariable(rule.condition ?? '', persistedOriginalName, name) : undefined;
-      if (attributeName === rule.attributeName && formula === rule.formula && (!hasCondition || condition === rule.condition)) return rule;
-      return {
-        ...rule,
-        attributeName,
-        ...(hasCondition ? { condition } : {}),
-        formula,
-      };
-    });
-    const unrelatedRules = renamedRules.filter((rule) => rule.attributeName !== name);
     const replacementRules: GiftRule[] = normalizedRules.map((item) => ({
       id: item.previous?.id ?? createRuleId(),
       giftId: item.gift.id,
@@ -4874,36 +4763,45 @@ export function mountConfig(root: HTMLElement): void {
       ...(item.previous?.cap !== undefined ? { cap: item.previous.cap } : {}),
       ...(item.previous?.dailyLimit !== undefined ? { dailyLimit: item.previous.dailyLimit } : {}),
     }));
-    candidate.rules = [...unrelatedRules, ...replacementRules];
-    const renamedTimers = candidate.timerRules.map((rule) => ({
-      ...rule,
-      attributeName: persistedOriginalName && rule.attributeName === persistedOriginalName ? name : rule.attributeName,
-      condition: persistedOriginalName && persistedOriginalName !== name
-        ? replaceFormulaVariable(rule.condition ?? '', persistedOriginalName, name)
-        : rule.condition,
-      formula: persistedOriginalName && persistedOriginalName !== name
-        ? replaceFormulaVariable(rule.formula, persistedOriginalName, name)
-        : rule.formula,
+    const giftCatalogUpserts: AttributeEditGiftCatalogUpsert[] = normalizedRules.map(({ gift }) => ({
+      id: gift.id,
+      name: gift.name,
+      price: gift.price,
+      coinType: gift.coinType,
+      imgBasic: gift.imgBasic,
+      ...(gift.gif !== undefined ? { gif: gift.gif } : {}),
+      ...(gift.webp !== undefined ? { webp: gift.webp } : {}),
+      ...(gift.animationDurationMs !== undefined ? { animationDurationMs: gift.animationDurationMs } : {}),
+      ...(gift.effectId !== undefined ? { effectId: gift.effectId } : {}),
+      ...(gift.effectMp4 !== undefined ? { effectMp4: gift.effectMp4 } : {}),
+      ...(gift.effectMp4Json !== undefined ? { effectMp4Json: gift.effectMp4Json } : {}),
+      ...(gift.blindBoxParentId !== undefined ? { blindBoxParentId: gift.blindBoxParentId } : {}),
+      ...(gift.blindBoxParentName !== undefined ? { blindBoxParentName: gift.blindBoxParentName } : {}),
+      ...(gift.blindBoxParentPrice !== undefined ? { blindBoxParentPrice: gift.blindBoxParentPrice } : {}),
     }));
-    const unrelatedTimers = renamedTimers.filter((rule) => rule.attributeName !== name);
-    candidate.timerRules = [...unrelatedTimers, ...normalizedTimers];
-    for (const item of normalizedRules) upsertGiftCatalog(candidate, item.gift);
-    if (candidate.settings.tutorialReplayMode) {
-      markTutorialLessonComplete(candidate.settings, 'attribute');
-      markTutorialLessonComplete(candidate.settings, 'template');
-      if (editorTutorialProgress.basicsConfigured) markTutorialLessonComplete(candidate.settings, 'basics');
-      if ((editorTutorialProgress.giftCount ?? 0) > 0) markTutorialLessonComplete(candidate.settings, 'gift');
-      if (editorTutorialProgress.giftPreviewed) markTutorialLessonComplete(candidate.settings, 'rule');
-      if (editorTutorialProgress.presetSaved) markTutorialLessonComplete(candidate.settings, 'preset');
-      if (editorTutorialProgress.timerPreviewed) markTutorialLessonComplete(candidate.settings, 'timer');
-      if (editorTutorialProgress.outputPreviewed) markTutorialLessonComplete(candidate.settings, 'appearance');
-      markTutorialLessonComplete(candidate.settings, 'save');
-    }
     try {
-      const committed = await saveCandidateAndWait(candidate);
+      const target: AttributeEditInput['target'] = original
+        ? {
+          kind: 'existing',
+          attributeId: original.id ?? '',
+          leaseToken: lease?.token ?? '',
+        }
+        : { kind: 'new' };
+      localStateVersion += 1;
+      const committed = await commitAuthoritativeStateMutation(async () => {
+        const submitted = await submitAttributeEdit({
+          target,
+          attribute: nextAttribute,
+          giftRules: replacementRules,
+          timerRules: normalizedTimers,
+          giftCatalogUpserts,
+        });
+        return submitted.state;
+      });
       Object.assign(state, committed);
-    } catch {
+    } catch (error) {
       setSaveInFlight(false);
+      toast(error instanceof Error ? error.message : '属性编辑请求失败', root);
       saveButton.disabled = false;
       saveButton.textContent = original ? '保存修改' : '创建属性';
       return;
