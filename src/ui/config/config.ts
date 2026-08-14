@@ -4456,12 +4456,13 @@ export function mountConfig(root: HTMLElement): void {
     const cancelButton = el('button', { class: 'btn ghost', type: 'button', text: '取消' }) as HTMLButtonElement;
     cancelButton.onclick = closeAttributeEditor;
     const saveButton = el('button', { class: 'btn guide-attribute-save', type: 'button', text: original ? '保存修改' : '创建属性' }) as HTMLButtonElement;
+    const saveNote = el('span', { class: 'attribute-save-note', text: '保存前会由后台统一校验规则' });
     saveButton.onclick = () => {
       if (saveInFlight) return;
-      void saveAttributeEditor(index, original, lease, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, finishCloseAttributeEditor, saveButton, readEditableAttributeValue, (value) => { saveInFlight = value; });
+      void saveAttributeEditor(index, original, lease, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, finishCloseAttributeEditor, saveButton, saveNote, readEditableAttributeValue, (value) => { saveInFlight = value; });
     };
     modalFooter = el('footer', { class: 'modal-actions attribute-workbench-actions' }, [
-      el('span', { class: 'attribute-save-note', text: '保存前会由后台统一校验规则' }),
+      saveNote,
       cancelButton,
       saveButton,
     ]);
@@ -4590,10 +4591,11 @@ export function mountConfig(root: HTMLElement): void {
     timerRules: TimerRule[],
     closeAttributeEditor: () => void,
     saveButton: HTMLButtonElement,
+    saveNote: HTMLElement,
     readEditableAttributeValue: () => AttributeTimeParseResult,
     setSaveInFlight: (value: boolean) => void,
   ): Promise<void> {
-    return saveAttributeEditorAsync(index, original, lease, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, closeAttributeEditor, saveButton, readEditableAttributeValue, setSaveInFlight);
+    return saveAttributeEditorAsync(index, original, lease, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, closeAttributeEditor, saveButton, saveNote, readEditableAttributeValue, setSaveInFlight);
   }
 
   async function saveAttributeEditorAsync(
@@ -4610,6 +4612,7 @@ export function mountConfig(root: HTMLElement): void {
     timerRules: TimerRule[],
     closeAttributeEditor: () => void,
     saveButton: HTMLButtonElement,
+    saveNote: HTMLElement,
     readEditableAttributeValue: () => AttributeTimeParseResult,
     setSaveInFlight: (value: boolean) => void,
   ): Promise<void> {
@@ -4842,13 +4845,70 @@ export function mountConfig(root: HTMLElement): void {
       if (editorTutorialProgress.timerPreviewed) markTutorialLessonComplete(tutorialState.settings, 'timer');
       if (editorTutorialProgress.outputPreviewed) markTutorialLessonComplete(tutorialState.settings, 'appearance');
       markTutorialLessonComplete(tutorialState.settings, 'save');
-      localStateVersion += 1;
+      const desiredTutorialSettings = {
+        tutorialVersion: tutorialState.settings.tutorialVersion,
+        tutorialCompletedLessons: [...tutorialState.settings.tutorialCompletedLessons],
+        tutorialReplayMode: tutorialState.settings.tutorialReplayMode,
+        tutorialTargetAttributeId: tutorialState.settings.tutorialTargetAttributeId,
+      };
+      const persistTutorialSettings = async (): Promise<void> => {
+        const current = loadState();
+        if (!current.attributes.some((attribute) => attribute.id === submittedTarget.id)) {
+          throw new Error('当前配置已变化，教程进度未保存。请取消并重新打开配置。');
+        }
+        const candidate = JSON.parse(JSON.stringify(current)) as AppState;
+        candidate.settings.tutorialVersion = desiredTutorialSettings.tutorialVersion;
+        candidate.settings.tutorialCompletedLessons = [...desiredTutorialSettings.tutorialCompletedLessons];
+        candidate.settings.tutorialReplayMode = desiredTutorialSettings.tutorialReplayMode;
+        if (desiredTutorialSettings.tutorialTargetAttributeId) {
+          candidate.settings.tutorialTargetAttributeId = desiredTutorialSettings.tutorialTargetAttributeId;
+        } else {
+          delete candidate.settings.tutorialTargetAttributeId;
+        }
+        localStateVersion += 1;
+        await saveState(candidate);
+        Object.assign(state, loadState());
+      };
+      const finishTutorialPersistence = (): void => {
+        setSaveInFlight(false);
+        closeAttributeEditor();
+        render();
+        toast(index === undefined ? '属性已创建' : '属性配置已保存', root);
+      };
+      const enterTutorialPersistenceRecovery = (
+        message = '属性已保存，但教程进度保存失败。可以重试，或取消后稍后重新开始教程。',
+      ): void => {
+        Object.assign(state, loadState());
+        setSaveInFlight(false);
+        saveNote.textContent = message;
+        saveNote.classList.add('is-warning');
+        saveNote.setAttribute('role', 'alert');
+        saveNote.style.display = 'inline';
+        saveNote.style.color = 'var(--warning-text, #ffb86b)';
+        saveButton.disabled = false;
+        saveButton.textContent = '重试保存教程进度';
+        saveButton.onclick = () => {
+          if (saveButton.disabled) return;
+          setSaveInFlight(true);
+          saveButton.disabled = true;
+          saveButton.textContent = '正在重试教程进度…';
+          void persistTutorialSettings().then(
+            finishTutorialPersistence,
+            (error: unknown) => enterTutorialPersistenceRecovery(
+              error instanceof Error && error.message.startsWith('当前配置已变化')
+                ? error.message
+                : undefined,
+            ),
+          );
+        };
+        toast(message, root);
+      };
       try {
-        await saveState(tutorialState);
-      } catch (error) {
-        toast(error instanceof Error ? error.message : '教程进度保存失败', root);
+        await persistTutorialSettings();
+      } catch {
+        enterTutorialPersistenceRecovery();
+        return;
       }
-      Object.assign(state, loadState());
     }
     setSaveInFlight(false);
     closeAttributeEditor();

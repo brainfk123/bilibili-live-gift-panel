@@ -4770,6 +4770,77 @@ describe('single-page configuration rendering', () => {
       });
     }
 
+    async function openTutorialSettingsFailure() {
+      const opening = configuredAggregate();
+      opening.settings.showTutorial = true;
+      opening.settings.tutorialReplayMode = true;
+      opening.settings.tutorialCompletedLessons = ['room'];
+      opening.settings.tutorialTargetAttributeId = stableId;
+      await saveState(opening);
+      const authoritative = JSON.parse(JSON.stringify(opening)) as typeof opening;
+      authoritative.attributes[0] = { ...authoritative.attributes[0], name: '服务端已保存属性', value: 73 };
+      authoritative.rules[0] = { ...authoritative.rules[0], attributeName: '服务端已保存属性' };
+      authoritative.timerRules[0] = { ...authoritative.timerRules[0], attributeName: '服务端已保存属性' };
+      authoritative.settings.tutorialCompletedLessons = ['room'];
+      delete authoritative.settings.tutorialTargetAttributeId;
+      const calls: {
+        attributePosts: number;
+        settingsPatches: Array<Record<string, unknown>>;
+        releases: Array<Record<string, string>>;
+        serverState: typeof authoritative;
+        resolveRetryPatch?: (response: Response) => void;
+      } = {
+        attributePosts: 0,
+        settingsPatches: [],
+        releases: [],
+        serverState: JSON.parse(JSON.stringify(opening)) as typeof opening,
+      };
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits/session') return sessionResponse(opening);
+        if (path === '/api/attribute-edits') {
+          calls.attributePosts += 1;
+          calls.serverState = JSON.parse(JSON.stringify(authoritative)) as typeof authoritative;
+          return Response.json({
+            code: 0, target: { id: stableId, name: '服务端已保存属性', created: false }, state: authoritative,
+          });
+        }
+        if (path === '/api/config' && init?.method === 'PATCH') {
+          const patch = JSON.parse(String(init.body)) as Record<string, unknown>;
+          if (!Object.prototype.hasOwnProperty.call(patch, 'settings')) {
+            calls.serverState = { ...calls.serverState, ...patch } as typeof authoritative;
+            return new Response(null, { status: 204 });
+          }
+          calls.settingsPatches.push(patch);
+          if (calls.settingsPatches.length === 1) return new Response(null, { status: 500 });
+          return new Promise<Response>((resolve) => {
+            calls.resolveRetryPatch = (response) => {
+              if (response.ok) calls.serverState = { ...calls.serverState, ...patch } as typeof authoritative;
+              resolve(response);
+            };
+          });
+        }
+        if (path === '/api/config' && init?.method === 'DELETE') {
+          calls.serverState = defaultState() as typeof authoritative;
+          return new Response(null, { status: 204 });
+        }
+        if (path === '/api/attribute-edit-lease' && init?.method === 'DELETE') {
+          calls.releases.push(JSON.parse(String(init.body)) as Record<string, string>);
+          return Response.json({ code: 0 });
+        }
+        if (path === '/api/attribute-edit-lease') return Response.json({ code: 0 });
+        if (path === '/api/formula/preview') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExistingAttributeEditor(root);
+      findByText(root, '保存修改')?.onclick?.();
+      await vi.waitFor(() => expect(calls.settingsPatches).toHaveLength(1));
+      return { root, calls, authoritative };
+    }
+
     it('submits only the existing target aggregate and adopts the authoritative renamed state', async () => {
       const cached = configuredAggregate();
       cached.giftCatalog = [editedGift];
@@ -5139,6 +5210,102 @@ describe('single-page configuration rendering', () => {
       const reopenedRoot = new TestElement('div');
       mountConfig(reopenedRoot as unknown as HTMLElement);
       expect(textOf(reopenedRoot.querySelector('.guide-attribute-card') as TestElement)).toContain('服务端重命名');
+    });
+
+    it('retries only failed tutorial settings after a committed attribute and guards dismissal while retrying', async () => {
+      const { root, calls } = await openTutorialSettingsFailure();
+
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性已保存，但教程进度保存失败'));
+      expect(root.querySelector('.attribute-overlay')).not.toBeNull();
+      const warning = root.querySelector('.attribute-save-note') as TestElement;
+      expect(warning.attributes.role).toBe('alert');
+      expect(warning.style.display).toBe('inline');
+      expect(calls.attributePosts).toBe(1);
+      expect(calls.releases).toHaveLength(0);
+      expect(loadState().attributes[0]).toEqual(expect.objectContaining({
+        id: stableId, name: '服务端已保存属性', value: 73,
+      }));
+      expect(loadState().settings.tutorialTargetAttributeId).toBeUndefined();
+      expect(calls.serverState.settings.tutorialTargetAttributeId).toBeUndefined();
+
+      findByText(root, '重试保存教程进度')?.onclick?.();
+      await vi.waitFor(() => expect(calls.resolveRetryPatch).toBeDefined());
+      findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.();
+      findByText(root, '×')?.onclick?.();
+      const overlay = root.querySelector('.attribute-overlay') as TestElement & {
+        onpointerdown?: (event: { target: TestElement }) => void;
+        onclick?: (event: { target: TestElement }) => void;
+      };
+      overlay.onpointerdown?.({ target: overlay });
+      overlay.onclick?.({ target: overlay });
+      expect(root.querySelector('.attribute-overlay')).toBe(overlay);
+      expect(calls.releases).toHaveLength(0);
+
+      calls.resolveRetryPatch?.(new Response(null, { status: 204 }));
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+      await vi.waitFor(() => expect(calls.releases).toHaveLength(1));
+
+      expect(calls.attributePosts).toBe(1);
+      expect(calls.settingsPatches).toHaveLength(2);
+      expect(calls.settingsPatches.every((patch) => Object.keys(patch).length === 1 && 'settings' in patch)).toBe(true);
+      expect(loadState().settings.tutorialTargetAttributeId).toBe(stableId);
+      expect(calls.serverState.settings.tutorialTargetAttributeId).toBe(stableId);
+      expect(calls.releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
+      const reopenedRoot = new TestElement('div');
+      mountConfig(reopenedRoot as unknown as HTMLElement);
+      expect(textOf(reopenedRoot.querySelector('.guide-attribute-card') as TestElement))
+        .toContain('服务端已保存属性');
+    });
+
+    it.each([
+      ['cancel', (root: TestElement) => findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.()],
+      ['close button', (root: TestElement) => findByText(root, '×')?.onclick?.()],
+      ['overlay', (root: TestElement) => {
+        const overlay = root.querySelector('.attribute-overlay') as TestElement & {
+          onpointerdown?: (event: { target: TestElement }) => void;
+          onclick?: (event: { target: TestElement }) => void;
+        };
+        overlay.onpointerdown?.({ target: overlay });
+        overlay.onclick?.({ target: overlay });
+      }],
+    ])('dismisses with no false success or retry after tutorial settings failure via %s', async (_reason, dismiss) => {
+      const { root, calls } = await openTutorialSettingsFailure();
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性已保存，但教程进度保存失败'));
+
+      dismiss(root);
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+      await vi.waitFor(() => expect(calls.releases).toHaveLength(1));
+
+      expect(calls.attributePosts).toBe(1);
+      expect(calls.settingsPatches).toHaveLength(1);
+      expect(Object.keys(calls.settingsPatches[0])).toEqual(['settings']);
+      expect(loadState().attributes[0]).toEqual(expect.objectContaining({
+        id: stableId, name: '服务端已保存属性', value: 73,
+      }));
+      expect(loadState().settings.tutorialTargetAttributeId).toBeUndefined();
+      expect(calls.serverState.settings.tutorialTargetAttributeId).toBeUndefined();
+      expect(textOf(root)).not.toContain('属性配置已保存');
+      expect(calls.releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
+    });
+
+    it('does not resurrect tutorial progress when reset wins before a settings-only retry', async () => {
+      const { root, calls } = await openTutorialSettingsFailure();
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性已保存，但教程进度保存失败'));
+
+      await resetState();
+      findByText(root, '重试保存教程进度')?.onclick?.();
+      await vi.waitFor(() => expect(textOf(root)).toContain('当前配置已变化，教程进度未保存'));
+
+      expect(root.querySelector('.attribute-overlay')).not.toBeNull();
+      expect(calls.attributePosts).toBe(1);
+      expect(calls.settingsPatches).toHaveLength(1);
+      expect(loadState().attributes).toEqual([]);
+      expect(loadState().settings.tutorialTargetAttributeId).toBeUndefined();
+      expect(calls.serverState.attributes).toEqual([]);
+      expect(calls.serverState.settings.tutorialTargetAttributeId).toBeUndefined();
+      findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.();
+      await vi.waitFor(() => expect(calls.releases).toHaveLength(1));
+      expect(calls.releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
     });
 
     it.each(['save', 'reset', 'transaction', 'authoritative'] as const)(
