@@ -15,6 +15,7 @@ const (
 	changelogMaxBytes = int64(2 << 20)
 	cacheFreshness    = time.Minute
 	presignTTL        = 10 * time.Minute
+	stableChannelKey  = "channels/stable/latest.json"
 )
 
 var (
@@ -90,6 +91,10 @@ func (service *Service) Changelog(ctx context.Context) (Document, error) {
 }
 
 func (service *Service) manifest(ctx context.Context) (release.ChannelManifest, error) {
+	if service.channelKey != stableChannelKey {
+		return release.ChannelManifest{}, fmt.Errorf("%w: unsupported channel key %q", ErrReleaseInvalid, service.channelKey)
+	}
+
 	now := service.now()
 	if manifest, ok := service.freshManifest(now); ok {
 		return manifest, nil

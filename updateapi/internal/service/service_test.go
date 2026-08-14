@@ -192,6 +192,21 @@ func TestLatestClassifiesColdStartAndSignerFailures(t *testing.T) {
 	})
 }
 
+func TestLatestRejectsChannelKeysOtherThanStableLatest(t *testing.T) {
+	store := &fakeStore{
+		get: func(string, int64) ([]byte, string, error) {
+			t.Fatal("Get should not be called for an untrusted channel key")
+			return nil, "", nil
+		},
+		presign: func(string, time.Duration) (string, error) { return "", nil },
+	}
+
+	_, err := service.New(store, "channels/beta/latest.json", time.Now).Latest(context.Background())
+	if !errors.Is(err, service.ErrReleaseInvalid) {
+		t.Fatalf("Latest() error = %v, want ErrReleaseInvalid", err)
+	}
+}
+
 func TestChangelogReturnsBodyAndUpstreamETag(t *testing.T) {
 	manifest := validManifest(t)
 	changelog := []byte(`{"schemaVersion":1,"releases":[{"version":"0.4.4"}]}`)

@@ -54,6 +54,18 @@ func TestGetRejectsBodyLargerThanLimit(t *testing.T) {
 	}
 }
 
+func TestGetRejectsKeysOutsideChannelAndReleases(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Fatal("server received a request for a rejected key")
+	}))
+	defer server.Close()
+
+	_, _, err := newStore(t, server, time.Second).Get(context.Background(), "private/credentials.json", 64)
+	if err == nil {
+		t.Fatal("Get() error = nil, want rejection for arbitrary key")
+	}
+}
+
 func TestGetUsesSuppliedBoundedHTTPClient(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		time.Sleep(250 * time.Millisecond)
@@ -113,6 +125,16 @@ func TestPresignGetRejectsKeysOutsideReleases(t *testing.T) {
 	_, err := newStore(t, server, time.Second).PresignGet(context.Background(), "channels/stable/latest.json", 10*time.Minute)
 	if err == nil {
 		t.Fatal("PresignGet() error = nil, want non-release key rejection")
+	}
+}
+
+func TestPresignGetRejectsTTLThatIsNotTenMinutes(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	_, err := newStore(t, server, time.Second).PresignGet(context.Background(), "releases/v0.4.4/gift-panel-windows-x64.exe", 5*time.Minute)
+	if err == nil {
+		t.Fatal("PresignGet() error = nil, want non-10-minute TTL rejection")
 	}
 }
 

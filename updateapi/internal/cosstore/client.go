@@ -13,7 +13,11 @@ import (
 	cos "github.com/tencentyun/cos-go-sdk-v5"
 )
 
-const defaultTimeout = 10 * time.Second
+const (
+	defaultTimeout   = 10 * time.Second
+	presignTTL       = 10 * time.Minute
+	stableChannelKey = "channels/stable/latest.json"
+)
 
 type Client struct {
 	client    *cos.Client
@@ -52,6 +56,9 @@ func (client *Client) Get(ctx context.Context, key string, maxBytes int64) ([]by
 	if maxBytes < 0 {
 		return nil, "", errors.New("maximum object size must not be negative")
 	}
+	if !isAllowedReadKey(key) {
+		return nil, "", fmt.Errorf("object key %q is outside allowed read paths", key)
+	}
 
 	response, err := client.client.Object.Get(ctx, key, nil)
 	if err != nil {
@@ -73,12 +80,19 @@ func (client *Client) PresignGet(ctx context.Context, key string, ttl time.Durat
 	if !isReleaseKey(key) {
 		return "", fmt.Errorf("object key %q is outside releases/", key)
 	}
+	if ttl != presignTTL {
+		return "", fmt.Errorf("presigned URL TTL must be %s", presignTTL)
+	}
 
 	signedURL, err := client.client.Object.GetPresignedURL(ctx, http.MethodGet, key, client.secretID, client.secretKey, ttl, nil)
 	if err != nil {
 		return "", err
 	}
 	return signedURL.String(), nil
+}
+
+func isAllowedReadKey(key string) bool {
+	return key == stableChannelKey || isReleaseKey(key)
 }
 
 func isReleaseKey(key string) bool {
