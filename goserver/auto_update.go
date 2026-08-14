@@ -22,9 +22,10 @@ import (
 )
 
 var (
-	appVersion          = "dev"
-	appCommit           = ""
-	updateAPIBaseURLHex = ""
+	appVersion                 = "dev"
+	appCommit                  = ""
+	updateAPIBaseURLHex        = ""
+	updateExpectedPublisherHex = ""
 )
 
 const (
@@ -88,16 +89,17 @@ type updateReleaseCandidate struct {
 }
 
 type autoUpdaterOptions struct {
-	Store          *configStore
-	Client         *http.Client
-	CurrentVersion string
-	ExecutablePath string
-	UpdatesDir     string
-	ReleaseURL     string
-	ReleaseSources []updateReleaseSource
-	AssetName      string
-	CheckPeriod    time.Duration
-	Now            func() time.Time
+	Store            *configStore
+	Client           *http.Client
+	CurrentVersion   string
+	ExecutablePath   string
+	UpdatesDir       string
+	ReleaseURL       string
+	ReleaseSources   []updateReleaseSource
+	AssetName        string
+	CheckPeriod      time.Duration
+	Now              func() time.Time
+	VerifyExecutable func(string) error
 }
 
 type autoUpdater struct {
@@ -113,6 +115,7 @@ type autoUpdater struct {
 	trigger          chan bool
 	automaticAllowed func() bool
 	onReady          func(string)
+	verifyExecutable func(string) error
 
 	mu      sync.Mutex
 	status  updateStatus
@@ -242,6 +245,10 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 	if period <= 0 {
 		period = updateCheckPeriod
 	}
+	verifyExecutable := options.VerifyExecutable
+	if verifyExecutable == nil {
+		verifyExecutable = defaultVerifyUpdateExecutable
+	}
 	releaseSources := append([]updateReleaseSource(nil), options.ReleaseSources...)
 	if len(releaseSources) == 0 && strings.TrimSpace(options.ReleaseURL) != "" {
 		releaseSources = []updateReleaseSource{{Name: "更新源", URL: options.ReleaseURL, GitHub: true}}
@@ -261,6 +268,7 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 		now:              now,
 		trigger:          make(chan bool, 1),
 		automaticAllowed: func() bool { return true },
+		verifyExecutable: verifyExecutable,
 	}
 	if updater.currentVersion == "" {
 		updater.currentVersion = "dev"
@@ -283,6 +291,35 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 		updater.restorePendingUpdate()
 	}
 	return updater
+}
+
+func decodeExpectedUpdatePublisher(version, encoded string) (string, error) {
+	encoded = strings.TrimSpace(encoded)
+	if encoded == "" {
+		if version == "dev" {
+			return "", nil
+		}
+		return "", errors.New("发布构建缺少预期 Authenticode 发布者")
+	}
+	decoded, err := hex.DecodeString(encoded)
+	if err != nil {
+		return "", errors.New("预期 Authenticode 发布者编码无效")
+	}
+	if !utf8.Valid(decoded) || len(decoded) == 0 {
+		return "", errors.New("预期 Authenticode 发布者不是有效 UTF-8")
+	}
+	return string(decoded), nil
+}
+
+func defaultVerifyUpdateExecutable(path string) error {
+	expectedPublisher, err := decodeExpectedUpdatePublisher(appVersion, updateExpectedPublisherHex)
+	if err != nil {
+		return err
+	}
+	if expectedPublisher == "" {
+		return nil
+	}
+	return verifyAuthenticodePublisher(path, expectedPublisher)
 }
 
 func (updater *autoUpdater) Run(ctx context.Context) {
@@ -676,7 +713,10 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 	if err := os.MkdirAll(updater.updatesDir, 0o700); err != nil {
 		return nil, fmt.Errorf("创建更新目录失败：%w", err)
 	}
-	expectedSHA, _ := normalizeSHA256(asset.Digest)
+	expectedSHA, err := normalizeSHA256(asset.Digest)
+	if err != nil {
+		return nil, err
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.DownloadURL, nil)
 	if err != nil {
 		return nil, err
@@ -703,8 +743,7 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
-	hasher := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(temporary, hasher), io.LimitReader(response.Body, updateMaxBytes+1))
+	written, copyErr := io.Copy(temporary, io.LimitReader(response.Body, updateMaxBytes+1))
 	closeErr := temporary.Close()
 	if copyErr != nil {
 		return nil, copyErr
@@ -718,9 +757,11 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 	if expectedSize > 0 && written != expectedSize {
 		return nil, fmt.Errorf("下载大小不符：收到 %d 字节，预期 %d 字节", written, expectedSize)
 	}
-	actualSHA := hex.EncodeToString(hasher.Sum(nil))
-	if actualSHA != expectedSHA {
-		return nil, errors.New("SHA-256 校验不通过，已丢弃下载文件")
+	if err := verifyFileSHA256(temporaryPath, expectedSHA); err != nil {
+		return nil, fmt.Errorf("SHA-256 校验不通过，已丢弃下载文件：%w", err)
+	}
+	if err := updater.verifyExecutable(temporaryPath); err != nil {
+		return nil, fmt.Errorf("Authenticode 验证失败：%w", err)
 	}
 	pendingPath := filepath.Join(updater.updatesDir, "gift-panel-pending.exe")
 	_ = os.Remove(pendingPath)
@@ -729,7 +770,7 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 	}
 	pending := &pendingUpdate{
 		Version:     version,
-		SHA256:      actualSHA,
+		SHA256:      expectedSHA,
 		PendingPath: pendingPath,
 		TargetPath:  updater.executablePath,
 	}

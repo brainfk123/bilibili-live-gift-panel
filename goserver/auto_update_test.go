@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -68,6 +69,34 @@ func TestDefaultUpdateSourcesUseGitHubOnlyWithoutDomesticConfiguration(t *testin
 	if sources[0].Name != "GitHub" || sources[0].URL != updateGitHubReleaseURL || !sources[0].GitHub {
 		t.Fatalf("GitHub source = %#v", sources[0])
 	}
+}
+
+func TestExpectedUpdatePublisherConfiguration(t *testing.T) {
+	t.Run("development allows missing publisher", func(t *testing.T) {
+		publisher, err := decodeExpectedUpdatePublisher("dev", "")
+		if err != nil || publisher != "" {
+			t.Fatalf("publisher = %q, err = %v", publisher, err)
+		}
+	})
+	t.Run("release requires publisher", func(t *testing.T) {
+		if _, err := decodeExpectedUpdatePublisher("1.2.3", ""); err == nil {
+			t.Fatal("release build must reject a missing publisher")
+		}
+	})
+	t.Run("decodes exact UTF-8 subject", func(t *testing.T) {
+		const subject = "CN=预期发布者, O=Expected Publisher"
+		publisher, err := decodeExpectedUpdatePublisher("1.2.3", hex.EncodeToString([]byte(subject)))
+		if err != nil || publisher != subject {
+			t.Fatalf("publisher = %q, err = %v", publisher, err)
+		}
+	})
+	t.Run("rejects invalid hex and UTF-8", func(t *testing.T) {
+		for _, encoded := range []string{"not-hex", "ff"} {
+			if _, err := decodeExpectedUpdatePublisher("1.2.3", encoded); err == nil {
+				t.Fatalf("publisher encoding %q must be rejected", encoded)
+			}
+		}
+	})
 }
 
 func TestDomesticUpdateURLAcceptsUppercaseHexAndNormalizesRootPath(t *testing.T) {
@@ -386,6 +415,124 @@ func TestUpdaterFallsBackToGitHubWhenPrimaryAssetIsIncomplete(t *testing.T) {
 	}
 }
 
+func TestUpdaterSignatureFailureFallsBackToSameVersionGitHubCandidate(t *testing.T) {
+	domesticBinary := []byte("domestic executable with the wrong publisher")
+	domesticDigestBytes := sha256.Sum256(domesticBinary)
+	domesticDigest := hex.EncodeToString(domesticDigestBytes[:])
+	githubBinary := []byte("GitHub executable with the expected publisher")
+	githubDigestBytes := sha256.Sum256(githubBinary)
+	githubDigest := hex.EncodeToString(githubDigestBytes[:])
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/domestic":
+			_ = json.NewEncoder(w).Encode(githubRelease{
+				TagName: "v1.1.0",
+				Assets: []githubAsset{{
+					Name: updateAssetName, DownloadURL: server.URL + "/domestic-asset", Size: int64(len(domesticBinary)), Digest: "sha256:" + domesticDigest,
+				}},
+			})
+		case "/github":
+			_ = json.NewEncoder(w).Encode(githubRelease{
+				TagName: "v1.1.0",
+				Assets: []githubAsset{{
+					Name: updateAssetName, DownloadURL: server.URL + "/github-asset", Size: int64(len(githubBinary)), Digest: "sha256:" + githubDigest,
+				}},
+			})
+		case "/domestic-asset":
+			_, _ = w.Write(domesticBinary)
+		case "/github-asset":
+			_, _ = w.Write(githubBinary)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	updater := newAutoUpdater(autoUpdaterOptions{
+		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
+		UpdatesDir: filepath.Join(root, "updates"), AssetName: updateAssetName,
+		ReleaseSources: []updateReleaseSource{
+			{Name: "Domestic", URL: server.URL + "/domestic"},
+			{Name: "GitHub", URL: server.URL + "/github", GitHub: true},
+		},
+		VerifyExecutable: func(path string) error {
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if string(contents) == string(domesticBinary) {
+				return errors.New("publisher mismatch")
+			}
+			return nil
+		},
+	})
+
+	updater.checkAndDownload(context.Background(), true)
+	if status := updater.Status(); status.State != "ready" || status.LatestVersion != "1.1.0" {
+		t.Fatalf("status = %#v", status)
+	}
+	downloaded, err := os.ReadFile(filepath.Join(root, "updates", "gift-panel-pending.exe"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(downloaded) != string(githubBinary) {
+		t.Fatalf("downloaded = %q, want GitHub candidate", downloaded)
+	}
+}
+
+func TestUpdaterSignatureFailuresLeaveNoPendingExecutable(t *testing.T) {
+	binary := []byte("correct digest but invalid publisher")
+	digestBytes := sha256.Sum256(binary)
+	digest := hex.EncodeToString(digestBytes[:])
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/domestic", "/github":
+			_ = json.NewEncoder(w).Encode(githubRelease{
+				TagName: "v1.1.0",
+				Assets: []githubAsset{{
+					Name: updateAssetName, DownloadURL: server.URL + "/asset", Size: int64(len(binary)), Digest: "sha256:" + digest,
+				}},
+			})
+		case "/asset":
+			_, _ = w.Write(binary)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	updatesDir := filepath.Join(root, "updates")
+	updater := newAutoUpdater(autoUpdaterOptions{
+		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
+		UpdatesDir: updatesDir, AssetName: updateAssetName,
+		ReleaseSources: []updateReleaseSource{
+			{Name: "Domestic", URL: server.URL + "/domestic"},
+			{Name: "GitHub", URL: server.URL + "/github", GitHub: true},
+		},
+		VerifyExecutable: func(string) error { return errors.New("publisher mismatch") },
+	})
+
+	updater.checkAndDownload(context.Background(), true)
+	if status := updater.Status(); status.State != "error" || status.RestartRequired {
+		t.Fatalf("status = %#v", status)
+	}
+	if updater.HasPending() {
+		t.Fatal("signature failure must not create a pending update")
+	}
+	if _, err := os.Stat(filepath.Join(updatesDir, "gift-panel-pending.exe")); !os.IsNotExist(err) {
+		t.Fatalf("pending executable must not survive signature failure: %v", err)
+	}
+	if matches, err := filepath.Glob(filepath.Join(updatesDir, "*.download")); err != nil || len(matches) != 0 {
+		t.Fatalf("temporary downloads after signature failure = %v, err = %v", matches, err)
+	}
+}
+
 func TestUpdaterChecksGitHubWhenPrimarySourceIsBehind(t *testing.T) {
 	binary := []byte("newer GitHub executable")
 	digestBytes := sha256.Sum256(binary)
@@ -506,15 +653,23 @@ func TestDownloadRejectsDigestMismatch(t *testing.T) {
 	}))
 	defer server.Close()
 	root := t.TempDir()
+	verificationAttempted := false
 	updater := newAutoUpdater(autoUpdaterOptions{
 		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
 		UpdatesDir: filepath.Join(root, "updates"), ReleaseURL: server.URL, AssetName: updateAssetName,
+		VerifyExecutable: func(string) error {
+			verificationAttempted = true
+			return nil
+		},
 	})
 	_, err := updater.downloadAsset(context.Background(), "1.1.0", githubAsset{
 		Name: updateAssetName, DownloadURL: server.URL, Size: int64(len(binary)), Digest: "sha256:" + strings.Repeat("0", 64),
 	})
 	if err == nil {
 		t.Fatal("digest mismatch must fail")
+	}
+	if verificationAttempted {
+		t.Fatal("Authenticode verifier must not run before SHA-256 succeeds")
 	}
 	if _, statErr := os.Stat(filepath.Join(root, "updates", "gift-panel-pending.exe")); !os.IsNotExist(statErr) {
 		t.Fatalf("pending file must not survive mismatch: %v", statErr)

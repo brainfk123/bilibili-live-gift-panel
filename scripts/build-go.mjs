@@ -12,6 +12,11 @@ for (const [label, value] of [['APP_VERSION', appVersion], ['APP_COMMIT', appCom
   if (!/^[0-9A-Za-z.+-]+$/.test(value)) throw new Error(`${label} contains unsupported characters`);
 }
 const updateAPIBaseURLHex = resolveUpdateAPIBaseURLHex(appVersion, process.env.APP_UPDATE_API_URL);
+const updateExpectedPublisher = (process.env.APP_UPDATE_PUBLISHER || '').trim();
+if (appVersion !== 'dev' && !updateExpectedPublisher) {
+  throw new Error('Release build requires APP_UPDATE_PUBLISHER.');
+}
+const updateExpectedPublisherHex = Buffer.from(updateExpectedPublisher, 'utf8').toString('hex');
 if (appVersion !== 'dev') {
   const manifestPath = join(root, 'goserver', 'ffmpeg', 'manifest.json');
   let manifest;
@@ -41,7 +46,7 @@ const uiManifest = mirrorUiAssets(join(root, 'dist'), distDir);
 console.log(`embedded ${uiManifest.files.length} UI assets (manifest v${uiManifest.version})`);
 
 const out = join(root, 'dist', 'gift-panel.exe');
-const ldflags = `-s -w -H windowsgui -X main.appVersion=${appVersion} -X main.appCommit=${appCommit} -X main.updateAPIBaseURLHex=${updateAPIBaseURLHex}`;
+const ldflags = `-s -w -H windowsgui -X main.appVersion=${appVersion} -X main.appCommit=${appCommit} -X main.updateAPIBaseURLHex=${updateAPIBaseURLHex} -X main.updateExpectedPublisherHex=${updateExpectedPublisherHex}`;
 const candidates = [
   process.env.GO_BIN,
   'go',
