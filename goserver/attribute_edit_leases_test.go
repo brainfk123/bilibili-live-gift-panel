@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -191,6 +192,67 @@ func TestAttributeEditLeaseHTTPLifecycleAndIdempotentRelease(t *testing.T) {
 		if response.Header().Get("Cache-Control") != "no-store" {
 			t.Fatalf("Cache-Control=%q", response.Header().Get("Cache-Control"))
 		}
+	}
+}
+
+func TestRegisterAttributeEditLeaseRouteSharesCoordinatorWithRuntime(t *testing.T) {
+	store := attributeEditLeaseTestStore(t, "attribute-1")
+	if _, err := store.updateState(func(state *appState) error {
+		state.RoomID = "room-1"
+		state.Rules = []giftRule{{ID: "rule-1", GiftID: 1, AttributeName: "积分", Formula: "积分+1"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	background := newBackgroundRuntime(store, nil)
+	leases := newAttributeEditLeaseCoordinator(15*time.Second, time.Now, func() (string, error) {
+		return strings.Repeat("A", 24), nil
+	})
+	mux := http.NewServeMux()
+	registerAttributeEditLeaseRoute(mux, store, background, leases)
+
+	created := attributeEditLeaseHTTPCall(mux, http.MethodPost, `{"attributeId":"attribute-1"}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("POST status=%d body=%s", created.Code, created.Body.String())
+	}
+	var lease struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(created.Body).Decode(&lease); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := background.processInboxRecord(context.Background(), giftInboxRecord{
+		IngestionID: "frozen-gift", RoomID: "room-1",
+		Gift: giftEvent{GiftID: 1, GiftName: "test", Num: 1, Timestamp: 1700000000, Rnd: "frozen-gift"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	frozen, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := frozen.findAttribute("积分").Value; got != 0 {
+		t.Fatalf("frozen attribute value=%v want=0", got)
+	}
+
+	released := attributeEditLeaseHTTPCall(mux, http.MethodDelete, `{"attributeId":"attribute-1","token":"`+lease.Token+`"}`)
+	if released.Code != http.StatusOK {
+		t.Fatalf("DELETE status=%d body=%s", released.Code, released.Body.String())
+	}
+	if err := background.processInboxRecord(context.Background(), giftInboxRecord{
+		IngestionID: "thawed-gift", RoomID: "room-1",
+		Gift: giftEvent{GiftID: 1, GiftName: "test", Num: 1, Timestamp: 1700000001, Rnd: "thawed-gift"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	thawed, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := thawed.findAttribute("积分").Value; got != 1 {
+		t.Fatalf("thawed attribute value=%v want=1", got)
 	}
 }
 
