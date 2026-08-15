@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -214,6 +215,40 @@ func TestGiftClipHarnessServer(t *testing.T) {
 	}
 }
 
+func TestGiftClipHarnessServesBlindBoxLeaderboard(t *testing.T) {
+	uiDirectory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(uiDirectory, "ui-assets.json"), []byte(`{"version":1,"files":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIFT_CLIP_HARNESS_UI_DIR", uiDirectory)
+
+	resolver := &giftClipFixtureResolver{sources: map[string]giftClipSource{}, media: map[string]map[string]giftClipFixtureMedia{}}
+	server, listener, err := newGiftClipHarnessServer(t.TempDir(), resolver, errorGiftClipJobEncoder{err: errors.New("not used")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = server.Shutdown(context.Background())
+	})
+
+	response := httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/blind-box/leaderboard?limit=100", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("leaderboard status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var payload struct {
+		Code        int                         `json:"code"`
+		Leaderboard blindBoxLeaderboardSnapshot `json:"leaderboard"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode leaderboard response: %v", err)
+	}
+	if payload.Code != 0 || payload.Leaderboard.Viewers == nil || payload.Leaderboard.Scopes == nil {
+		t.Fatalf("unexpected leaderboard response: %+v", payload)
+	}
+}
+
 func newGiftClipFixtureResolver(t *testing.T, repositoryRoot string) *giftClipFixtureResolver {
 	t.Helper()
 	fixtureRoot := filepath.Join(repositoryRoot, "tests", "fixtures", "gift-clip-media")
@@ -311,6 +346,12 @@ func newGiftClipHarnessServer(root string, resolver giftClipSourceResolver, enco
 			manager.Close()
 			return nil, nil, errors.New("gift clip harness packaged UI manifest is missing")
 		}
+		leaderboardStore, err := newConfigStoreAtPath(filepath.Join(absoluteRoot, "config.json"))
+		if err != nil {
+			_ = listener.Close()
+			manager.Close()
+			return nil, nil, fmt.Errorf("create gift clip harness config store: %w", err)
+		}
 		mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet {
 				w.WriteHeader(http.StatusMethodNotAllowed)
@@ -324,6 +365,7 @@ func newGiftClipHarnessServer(root string, resolver giftClipSourceResolver, enco
 		mux.HandleFunc("/api/auth/status", func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"code": 0, "auth": map[string]any{"state": "anonymous"}})
 		})
+		mux.HandleFunc("/api/blind-box/leaderboard", handleBlindBoxLeaderboard(leaderboardStore, nil))
 		mux.HandleFunc("/api/changelog", func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"code": 0, "releases": []any{}})
 		})
