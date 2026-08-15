@@ -102,12 +102,12 @@ func TestSyncStateDirectorySuppressesOnlyUnsupportedWindowsSync(t *testing.T) {
 	}
 }
 
-func TestAtomicWriteOutcomeMarksPostRenameDirectorySyncFailureCommitted(t *testing.T) {
+func TestAtomicWriteOutcomeMarksPostRenameDirectorySyncFailureVisibleButNotDurable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	injected := errors.New("injected post-rename directory sync failure")
 	outcome := writeFileAtomicallyOutcomeWith(path, []byte("committed\n"), func(string) error { return injected })
-	if !outcome.Committed || !errors.Is(outcome.Err, injected) {
-		t.Fatalf("outcome = %+v, want committed injected warning", outcome)
+	if !outcome.Committed || outcome.Durable || !errors.Is(outcome.Err, injected) {
+		t.Fatalf("outcome = %+v, want rename-visible non-durable injected warning", outcome)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -116,6 +116,248 @@ func TestAtomicWriteOutcomeMarksPostRenameDirectorySyncFailureCommitted(t *testi
 	if string(data) != "committed\n" {
 		t.Fatalf("final path data = %q", data)
 	}
+}
+
+func TestRetireFileWithDirectorySyncRetriesAnUncertainTombstone(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "state.json")
+	tombstone := filepath.Join(dir, resetTombstoneName)
+	files := map[string]bool{source: true}
+	injected := errors.New("injected first directory sync failure")
+	moveHits := 0
+	syncHits := 0
+	removeHits := 0
+	exists := func(path string) (bool, error) { return files[path], nil }
+	move := func(oldPath, newPath string) error {
+		moveHits++
+		if !files[oldPath] {
+			return os.ErrNotExist
+		}
+		files[oldPath] = false
+		files[newPath] = true
+		return nil
+	}
+	syncDirectory := func(string) error {
+		syncHits++
+		if syncHits == 1 {
+			return injected
+		}
+		return nil
+	}
+	remove := func(path string) error {
+		removeHits++
+		files[path] = false
+		return nil
+	}
+
+	if err := retireFileWithDirectorySync(source, exists, move, syncDirectory, remove); !errors.Is(err, injected) {
+		t.Fatalf("first retirement error=%v, want injected sync failure", err)
+	}
+	if files[source] || !files[tombstone] || moveHits != 1 || syncHits != 1 || removeHits != 0 {
+		t.Fatalf("uncertain retirement source=%v tombstone=%v move=%d sync=%d remove=%d", files[source], files[tombstone], moveHits, syncHits, removeHits)
+	}
+	if err := retireFileWithDirectorySync(source, exists, move, syncDirectory, remove); err != nil {
+		t.Fatal(err)
+	}
+	if files[source] || files[tombstone] || moveHits != 1 || syncHits != 2 || removeHits != 1 {
+		t.Fatalf("retry source=%v tombstone=%v move=%d sync=%d remove=%d", files[source], files[tombstone], moveHits, syncHits, removeHits)
+	}
+}
+
+func TestConfigStoreHTTPRetainsRealNonDurableJournalWarningWithoutNotifications(t *testing.T) {
+	for _, test := range []struct {
+		method  string
+		payload string
+		roomID  string
+	}{
+		{method: http.MethodPatch, payload: `{"roomId":"patch-room"}`, roomID: "patch-room"},
+		{method: http.MethodPut, payload: `{"roomId":"put-room"}`, roomID: "put-room"},
+	} {
+		t.Run(test.method, func(t *testing.T) {
+			store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+			if err := store.replaceState(defaultAppState()); err != nil {
+				t.Fatal(err)
+			}
+			injected := errors.New("injected real non-durable journal directory sync warning")
+			var warningHits int
+			store.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+				if filepath.Base(path) == "state-transaction.json" {
+					warningHits++
+					outcome := writeFileAtomicallyOutcomeWith(path, data, func(string) error { return injected })
+					if !outcome.Committed || outcome.Durable || !errors.Is(outcome.Err, injected) {
+						t.Fatalf("real journal warning outcome=%+v", outcome)
+					}
+					return outcome
+				}
+				return writeFileAtomicallyOutcome(path, data)
+			}
+			var roomNotifications int
+			var timerNotifications int
+			var updateNotifications int
+			store.setOnChange(func() { roomNotifications++ })
+			store.setOnTimerChange(func() { timerNotifications++ })
+			store.setOnUpdateChange(func() { updateNotifications++ })
+
+			response := httptest.NewRecorder()
+			store.handle(response, httptest.NewRequest(test.method, "/api/config", strings.NewReader(test.payload)))
+			if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), injected.Error()) {
+				t.Fatalf("response=%d body=%s, want retained warning as 500", response.Code, response.Body.String())
+			}
+			if warningHits != 1 {
+				t.Fatalf("journal warning hits=%d, want 1", warningHits)
+			}
+			if roomNotifications != 0 || timerNotifications != 0 || updateNotifications != 0 {
+				t.Fatalf("notifications room=%d timer=%d update=%d, want zero", roomNotifications, timerNotifications, updateNotifications)
+			}
+			if _, err := os.Stat(store.stateTransactionPath()); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("completed transaction WAL remains: %v", err)
+			}
+			state, err := store.readState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.RoomID != test.roomID {
+				t.Fatalf("direct committed state room=%q, want %q", state.RoomID, test.roomID)
+			}
+			restarted := &configStore{path: store.path}
+			restartedState, err := restarted.readState()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if restartedState.RoomID != test.roomID {
+				t.Fatalf("restart committed state room=%q, want %q", restartedState.RoomID, test.roomID)
+			}
+		})
+	}
+}
+
+func TestConfigStoreGetCountsResetBlockedCandidateWithoutArtifacts(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	candidate := defaultAppState()
+	candidate.RoomID = "candidate-only"
+	store.mu.Lock()
+	store.committedTransactionState = &candidate
+	store.blockMutationsLocked("reset_failure", errors.New("injected final reset sync uncertainty"))
+	store.mu.Unlock()
+
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"roomId":"candidate-only"`) {
+		t.Fatalf("candidate-only GET status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestConfigStoreStartupDetectsResetIntentBeforeTransactionRecovery(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "config.json")
+	markerPath := filepath.Join(dir, "reset-intent.json")
+	if err := os.WriteFile(markerPath, []byte("{\"schemaVersion\":1}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	walData := []byte("not-a-transaction\n")
+	if err := os.WriteFile(filepath.Join(dir, "state-transaction.json"), walData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := initializeConfigStore(&configStore{path: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.MutationBlockKind(); got != "reset_pending" {
+		t.Fatalf("mutation block kind=%q, want reset_pending before WAL recovery", got)
+	}
+	if store.resetIntentDurable {
+		t.Fatal("startup-observed valid reset intent was treated as durable before republication")
+	}
+	if got := newBackgroundRuntime(store, nil).Status().IngestionErrorKind; got != "reset_pending" {
+		t.Fatalf("runtime reset-pending status kind=%q, want reset_pending", got)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "state-transaction.json")); err != nil || string(got) != string(walData) {
+		t.Fatalf("startup reset marker changed WAL: data=%q err=%v", got, err)
+	}
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("reset-pending GET status=%d body=%s, want fail closed", response.Code, response.Body.String())
+	}
+}
+
+func TestConfigStoreStartupCorruptResetIntentFailsClosedWithoutDeletingState(t *testing.T) {
+	dir := t.TempDir()
+	seed := &configStore{path: filepath.Join(dir, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "preserve-me"
+	if err := seed.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotStateFiles(t, seed)
+	markerPath := filepath.Join(dir, "reset-intent.json")
+	if err := os.WriteFile(markerPath, []byte("{\"schemaVersion\":999}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := initializeConfigStore(&configStore{path: seed.path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.MutationBlockKind(); got != "reset_failure" {
+		t.Fatalf("corrupt marker block kind=%q, want reset_failure", got)
+	}
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("corrupt-marker GET status=%d body=%s, want fail closed", response.Code, response.Body.String())
+	}
+	mutationRan := false
+	if _, err := store.updateState(func(*appState) error {
+		mutationRan = true
+		return nil
+	}); err == nil || mutationRan {
+		t.Fatalf("corrupt-marker mutation ran=%v err=%v", mutationRan, err)
+	}
+	assertStateFilesEqual(t, store, before)
+	if got, err := os.ReadFile(markerPath); err != nil || string(got) != "{\"schemaVersion\":999}\n" {
+		t.Fatalf("corrupt marker changed: data=%q err=%v", got, err)
+	}
+	retry := httptest.NewRecorder()
+	store.handle(retry, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+	if retry.Code != http.StatusNoContent {
+		t.Fatalf("explicit corrupt-marker reset retry status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("explicit reset retry left corrupt marker: %v", err)
+	}
+}
+
+func TestConfigStoreStartupUnreadableResetIntentFailsClosedWithoutExposingDetail(t *testing.T) {
+	dir := t.TempDir()
+	seed := &configStore{path: filepath.Join(dir, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "unreadable-marker-state"
+	if err := seed.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotStateFiles(t, seed)
+	if err := os.WriteFile(seed.resetIntentPath(), canonicalResetIntentData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("RAW-RESET-MARKER-SECRET https://private.example/reset-marker")
+	store, err := initializeConfigStore(&configStore{
+		path:            seed.path,
+		readResetIntent: func(string) ([]byte, error) { return nil, injected },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.MutationBlockKind(); got != "reset_failure" {
+		t.Fatalf("unreadable marker block kind=%q, want reset_failure", got)
+	}
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if response.Code != http.StatusInternalServerError || strings.Contains(response.Body.String(), "RAW-RESET-MARKER-SECRET") || strings.Contains(response.Body.String(), "private.example") {
+		t.Fatalf("unreadable-marker GET status=%d body=%s", response.Code, response.Body.String())
+	}
+	assertStateFilesEqual(t, store, before)
 }
 
 func TestConfigStoreMigratesLegacyFileIntoShards(t *testing.T) {

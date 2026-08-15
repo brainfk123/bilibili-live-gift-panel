@@ -6,9 +6,53 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
+
+func TestStatePersistenceCommitsAllShardsAfterRealNonDurableJournalWarning(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	if err := store.replaceState(defaultAppState()); err != nil {
+		t.Fatal(err)
+	}
+	desired := defaultAppState()
+	desired.RoomID = "all-shards-durable"
+	desired.Attributes = []attributeState{{ID: "attribute-a", Name: "积分", Value: 17}}
+	injected := errors.New("injected real non-durable journal directory sync warning")
+	journalWrites := 0
+	store.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+		if filepath.Base(path) == "state-transaction.json" {
+			journalWrites++
+			return writeFileAtomicallyOutcomeWith(path, data, func(string) error { return injected })
+		}
+		return writeFileAtomicallyOutcome(path, data)
+	}
+
+	store.mu.Lock()
+	outcome := store.persistPreparedStateWithOutcomeLocked(desired, "")
+	store.mu.Unlock()
+	if !outcome.Committed || !errors.Is(outcome.Err, injected) {
+		t.Fatalf("state persistence outcome=%+v, want committed with real journal warning", outcome)
+	}
+	if journalWrites != 1 {
+		t.Fatalf("journal writes=%d, want 1", journalWrites)
+	}
+	if _, err := os.Stat(store.stateTransactionPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("completed real-warning WAL remains: %v", err)
+	}
+	direct, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := (&configStore{path: store.path}).readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(direct, desired) || !reflect.DeepEqual(restarted, desired) {
+		t.Fatalf("whole committed state mismatch: direct=%#v restarted=%#v want=%#v", direct, restarted, desired)
+	}
+}
 
 func TestPendingStateTransactionRecoversEveryShardWithoutReapplyingIngress(t *testing.T) {
 	for _, failBase := range []string{"events.log", "history.json", "cache.json", "config.json"} {

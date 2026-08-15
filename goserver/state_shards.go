@@ -113,6 +113,12 @@ func (s *configStore) statePaths() []string {
 }
 
 func (s *configStore) hasStoredStateLocked() bool {
+	if s.resetIntentStatus != resetIntentNone {
+		return true
+	}
+	if s.committedTransactionState != nil {
+		return true
+	}
 	if _, err := os.Stat(s.stateTransactionPath()); err == nil {
 		return true
 	}
@@ -125,6 +131,12 @@ func (s *configStore) hasStoredStateLocked() bool {
 }
 
 func (s *configStore) readStateLocked() (appState, error) {
+	if s.resetIntentStatus != resetIntentNone {
+		return appState{}, &stateResetInProgressError{}
+	}
+	if s.committedTransactionState != nil && s.mutationBlockKind != "" {
+		return cloneAppState(*s.committedTransactionState)
+	}
 	if s.mutationBlockKind == "" {
 		if err := s.recoverPendingStateTransactionLocked(); err != nil {
 			if s.committedTransactionState != nil {

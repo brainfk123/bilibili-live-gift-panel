@@ -89,6 +89,7 @@ type backgroundRuntime struct {
 	resetGeneration          uint64
 	animationMu              sync.Mutex
 	animationWriteAtomically func(string, []byte) error
+	retireResetArtifact      func(string) error
 	timerMu                  sync.Mutex
 	timerSchedules           map[string]timerSchedule
 	timerTicks               <-chan time.Time
@@ -156,6 +157,11 @@ func (runtime *backgroundRuntime) currentAttributeFreezeChecker() attributeFreez
 }
 
 func (runtime *backgroundRuntime) Run(ctx context.Context) {
+	if runtime.store != nil && runtime.store.ValidResetIntentPending() {
+		if err := runtime.Reset(); err != nil {
+			return
+		}
+	}
 	installation, err := func() (runtimeInboxInstallation, error) {
 		runtime.resetGate.RLock()
 		defer runtime.resetGate.RUnlock()
@@ -1131,6 +1137,9 @@ func (runtime *backgroundRuntime) Reset() error {
 	runtime.resetGeneration++
 	installation := runtimeInboxInstallation{inbox: runtime.inbox, epoch: runtime.inboxEpoch}
 	runtime.mu.Unlock()
+	if err := runtime.store.beginResetIntent(); err != nil {
+		return runtime.resetFailure(err)
+	}
 
 	resetInbox := installation.inbox
 	closeResetInbox := false
@@ -1195,13 +1204,12 @@ func (runtime *backgroundRuntime) resetPendingGiftAnimations() error {
 	runtime.animationMu.Lock()
 	defer runtime.animationMu.Unlock()
 	path := runtime.pendingGiftAnimationsPath()
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove pending gift animations during reset: %w", err)
+	retire := runtime.retireResetArtifact
+	if retire == nil {
+		retire = retireFileDurably
 	}
-	if _, err := os.Stat(filepath.Dir(path)); err == nil {
-		if err := syncStateDirectory(filepath.Dir(path)); err != nil {
-			return fmt.Errorf("sync pending gift animation reset: %w", err)
-		}
+	if err := retire(path); err != nil {
+		return fmt.Errorf("remove pending gift animations during reset: %w", err)
 	}
 	return nil
 }

@@ -430,6 +430,571 @@ func TestConfigResetFailureIsSafeAndLeavesMutationsBlocked(t *testing.T) {
 	}
 }
 
+func TestConfigResetFailureAfterMarkerFailsClosedAndRetryClearsCandidate(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	initial := defaultAppState()
+	initial.RoomID = "old-room"
+	initial.Attributes = []attributeState{{ID: "attribute-a", Name: "积分", Value: 1}}
+	initial.GiftCatalog = []giftInfo{{ID: 1, Name: "旧礼物"}}
+	initial.Log = []logEntry{{EventID: "old-event", GiftName: "旧记录", ValueAfter: 1}}
+	if err := store.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+	next, err := cloneAppState(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.RoomID = "candidate-room"
+	next.Attributes[0].Value = 9
+	next.GiftCatalog = []giftInfo{{ID: 9, Name: "候选礼物"}}
+	next.Log = []logEntry{{EventID: "candidate-event", GiftName: "候选记录", ValueAfter: 9}}
+	injectedReplay := errors.New("persistent injected config replay failure")
+	store.writeAtomically = func(path string, data []byte) error {
+		if filepath.Base(path) == "config.json" {
+			return injectedReplay
+		}
+		return writeFileAtomically(path, data)
+	}
+	store.mu.Lock()
+	outcome := store.persistPreparedStateWithOutcomeLocked(next, "")
+	if !outcome.Committed || !errors.Is(outcome.Err, injectedReplay) {
+		store.mu.Unlock()
+		t.Fatalf("candidate persistence outcome = %+v", outcome)
+	}
+	if err := store.recoverPendingStateTransactionLocked(); !errors.Is(err, injectedReplay) {
+		store.mu.Unlock()
+		t.Fatalf("candidate replay error = %v", err)
+	}
+	if store.committedTransactionState == nil {
+		store.mu.Unlock()
+		t.Fatal("valid pending transaction did not install an authoritative candidate")
+	}
+	store.mu.Unlock()
+
+	inbox := &resetBarrierInbox{
+		acceptStarted: make(chan struct{}),
+		resetCalled:   make(chan struct{}),
+		resetErr:      errors.New("injected inbox reset failure"),
+	}
+	background := newBackgroundRuntime(store, nil)
+	background.installInbox(inbox, inbox.Health())
+	store.setResetCoordinator(background.Reset)
+
+	failedReset := httptest.NewRecorder()
+	store.handle(failedReset, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+	if failedReset.Code != http.StatusInternalServerError {
+		t.Fatalf("failed reset status=%d body=%s", failedReset.Code, failedReset.Body.String())
+	}
+	get := httptest.NewRecorder()
+	store.handle(get, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if get.Code != http.StatusInternalServerError {
+		t.Fatalf("post-marker candidate GET status=%d body=%s, want fail closed", get.Code, get.Body.String())
+	}
+
+	genericRan := false
+	if _, err := store.updateState(func(*appState) error {
+		genericRan = true
+		return nil
+	}); err == nil || genericRan {
+		t.Fatalf("reset-blocked generic mutation ran=%v err=%v", genericRan, err)
+	}
+	attributeIDRan := false
+	command := existingAttributeEdit("", "阻止的属性", 3)
+	command.Target = attributeEditTarget{Kind: "new"}
+	command.GiftRules = nil
+	command.TimerRules = nil
+	command.GiftCatalogUpserts = nil
+	if _, err := store.applyAttributeEdit(command, func() (string, error) {
+		attributeIDRan = true
+		return "blocked-attribute", nil
+	}); err == nil || attributeIDRan {
+		t.Fatalf("reset-blocked attribute mutation generated ID=%v err=%v", attributeIDRan, err)
+	}
+	store.mu.Lock()
+	candidatePresent := store.committedTransactionState != nil
+	store.mu.Unlock()
+	if !candidatePresent || !store.TransactionPending() {
+		t.Fatalf("failed reset lost candidate or pending status: candidate=%v pending=%v", candidatePresent, store.TransactionPending())
+	}
+	if _, err := os.Stat(store.stateTransactionPath()); err != nil {
+		t.Fatalf("failed reset lost WAL evidence: %v", err)
+	}
+	if _, err := os.Stat(store.resetIntentPath()); err != nil {
+		t.Fatalf("failed reset lost marker evidence: %v", err)
+	}
+
+	inbox.resetErr = nil
+	successfulReset := httptest.NewRecorder()
+	store.handle(successfulReset, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+	if successfulReset.Code != http.StatusNoContent {
+		t.Fatalf("reset retry status=%d body=%s", successfulReset.Code, successfulReset.Body.String())
+	}
+	store.mu.Lock()
+	candidatePresent = store.committedTransactionState != nil
+	store.mu.Unlock()
+	if candidatePresent || store.TransactionPending() || store.MutationBlockKind() != "" {
+		t.Fatalf("reset retry did not clear block: candidate=%v pending=%v kind=%q", candidatePresent, store.TransactionPending(), store.MutationBlockKind())
+	}
+	for _, path := range append(store.statePaths(), store.stateTransactionPath()) {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("reset retry left %s: %v", filepath.Base(path), err)
+		}
+	}
+
+	store.writeAtomically = nil
+	genericRan = false
+	if _, err := store.updateState(func(state *appState) error {
+		genericRan = true
+		state.RoomID = "after-reset"
+		return nil
+	}); err != nil || !genericRan {
+		t.Fatalf("ordinary generic mutation after reset ran=%v err=%v", genericRan, err)
+	}
+	attributeIDRan = false
+	if _, err := store.applyAttributeEdit(command, func() (string, error) {
+		attributeIDRan = true
+		return "after-reset-attribute", nil
+	}); err != nil || !attributeIDRan {
+		t.Fatalf("ordinary attribute mutation after reset generated ID=%v err=%v", attributeIDRan, err)
+	}
+}
+
+type markerCheckingResetInbox struct {
+	markerPath string
+	resetErr   error
+	resetCalls int
+}
+
+type durableMarkerCheckingResetInbox struct {
+	durable    *bool
+	resetCalls int
+}
+
+func (*durableMarkerCheckingResetInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
+	return giftInboxRecord{}, nil
+}
+func (*durableMarkerCheckingResetInbox) Next() (giftInboxRecord, bool, error) {
+	return giftInboxRecord{}, false, nil
+}
+func (*durableMarkerCheckingResetInbox) Acknowledge(string) error { return nil }
+func (*durableMarkerCheckingResetInbox) Release(string) error     { return nil }
+func (*durableMarkerCheckingResetInbox) Close() error             { return nil }
+func (*durableMarkerCheckingResetInbox) Health() giftInboxHealth  { return giftInboxHealth{} }
+func (inbox *durableMarkerCheckingResetInbox) Reset() error {
+	inbox.resetCalls++
+	if !*inbox.durable {
+		return errors.New("inbox reset ran before startup marker republication became durable")
+	}
+	return nil
+}
+
+func (*markerCheckingResetInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
+	return giftInboxRecord{}, nil
+}
+func (*markerCheckingResetInbox) Next() (giftInboxRecord, bool, error) {
+	return giftInboxRecord{}, false, nil
+}
+func (*markerCheckingResetInbox) Acknowledge(string) error { return nil }
+func (*markerCheckingResetInbox) Release(string) error     { return nil }
+func (*markerCheckingResetInbox) Close() error             { return nil }
+func (*markerCheckingResetInbox) Health() giftInboxHealth  { return giftInboxHealth{} }
+func (inbox *markerCheckingResetInbox) Reset() error {
+	inbox.resetCalls++
+	data, err := os.ReadFile(inbox.markerPath)
+	if err != nil {
+		return fmt.Errorf("reset intent was not published before inbox reset: %w", err)
+	}
+	if string(data) != "{\"schemaVersion\":1}\n" {
+		return fmt.Errorf("reset intent is not canonical: %q", data)
+	}
+	return inbox.resetErr
+}
+
+func TestBackgroundRuntimeResetPublishesIntentBeforeFailureAndFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "candidate-before-marker"
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected post-marker inbox failure")
+	inbox := &markerCheckingResetInbox{markerPath: filepath.Join(dir, "reset-intent.json"), resetErr: injected}
+	background := newBackgroundRuntime(store, nil)
+	background.installInbox(inbox, inbox.Health())
+	store.setResetCoordinator(background.Reset)
+
+	failed := httptest.NewRecorder()
+	store.handle(failed, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+	if failed.Code != http.StatusInternalServerError || inbox.resetCalls != 1 {
+		t.Fatalf("failed reset status=%d calls=%d body=%s", failed.Code, inbox.resetCalls, failed.Body.String())
+	}
+	if _, err := os.Stat(inbox.markerPath); err != nil {
+		t.Fatalf("post-marker failure lost reset intent: %v", err)
+	}
+	get := httptest.NewRecorder()
+	store.handle(get, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if get.Code != http.StatusInternalServerError {
+		t.Fatalf("post-marker GET status=%d body=%s, want fail closed", get.Code, get.Body.String())
+	}
+	callbackRan := false
+	if _, err := store.updateState(func(*appState) error {
+		callbackRan = true
+		return nil
+	}); err == nil || callbackRan {
+		t.Fatalf("post-marker mutation ran=%v err=%v", callbackRan, err)
+	}
+
+	inbox.resetErr = nil
+	retried := httptest.NewRecorder()
+	store.handle(retried, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+	if retried.Code != http.StatusNoContent || inbox.resetCalls != 2 {
+		t.Fatalf("reset retry status=%d calls=%d body=%s", retried.Code, inbox.resetCalls, retried.Body.String())
+	}
+	for _, path := range append(store.statePaths(), store.stateTransactionPath(), inbox.markerPath) {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("successful reset left %s: %v", filepath.Base(path), err)
+		}
+	}
+}
+
+func TestBackgroundRuntimeResetRepublishesNonDurableIntentBeforeRetirement(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "preserve-until-durable-marker"
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	markerPath := store.resetIntentPath()
+	injected := errors.New("injected reset-intent directory sync failure")
+	publicationAttempts := 0
+	markerSyncAttempts := 0
+	markerDurable := false
+	store.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+		if path != markerPath {
+			return writeFileAtomicallyOutcome(path, data)
+		}
+		publicationAttempts++
+		attempt := publicationAttempts
+		return writeFileAtomicallyOutcomeWith(path, data, func(directory string) error {
+			markerSyncAttempts++
+			if attempt <= 2 {
+				return injected
+			}
+			if err := syncStateDirectory(directory); err != nil {
+				return err
+			}
+			markerDurable = true
+			return nil
+		})
+	}
+	inbox := &markerCheckingResetInbox{markerPath: markerPath}
+	background := newBackgroundRuntime(store, nil)
+	background.installInbox(inbox, inbox.Health())
+	retired := make([]string, 0)
+	retire := func(path string) error {
+		retired = append(retired, path)
+		if !markerDurable {
+			return errors.New("artifact retirement started before durable reset intent")
+		}
+		return retireFileDurably(path)
+	}
+	background.retireResetArtifact = retire
+	store.retireResetArtifact = retire
+
+	if err := background.Reset(); !errors.Is(err, injected) {
+		t.Fatalf("first reset error=%v, want injected marker sync failure", err)
+	}
+	if publicationAttempts != 1 || markerSyncAttempts != 1 {
+		t.Fatalf("first reset marker publication attempts=%d sync attempts=%d, want 1/1", publicationAttempts, markerSyncAttempts)
+	}
+	if inbox.resetCalls != 0 || len(retired) != 0 {
+		t.Fatalf("first reset ran inbox/retirement before durable marker: inbox=%d retired=%v", inbox.resetCalls, retired)
+	}
+	if data, err := os.ReadFile(markerPath); err != nil || string(data) != string(canonicalResetIntentData) {
+		t.Fatalf("rename-visible marker data=%q err=%v", data, err)
+	}
+	get := httptest.NewRecorder()
+	store.handle(get, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if get.Code != http.StatusInternalServerError {
+		t.Fatalf("non-durable marker GET status=%d body=%s, want fail closed", get.Code, get.Body.String())
+	}
+
+	if err := background.Reset(); !errors.Is(err, injected) {
+		t.Fatalf("second reset error=%v, want durable marker republication before retirement", err)
+	}
+	if publicationAttempts != 2 || markerSyncAttempts != 2 {
+		t.Fatalf("second reset marker publication attempts=%d sync attempts=%d, want 2/2", publicationAttempts, markerSyncAttempts)
+	}
+	if inbox.resetCalls != 0 || len(retired) != 0 {
+		t.Fatalf("second reset ran inbox/retirement before durable marker: inbox=%d retired=%v", inbox.resetCalls, retired)
+	}
+
+	if err := background.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if publicationAttempts != 3 || markerSyncAttempts != 3 || !markerDurable {
+		t.Fatalf("durable retry marker publication attempts=%d sync attempts=%d durable=%v", publicationAttempts, markerSyncAttempts, markerDurable)
+	}
+	if inbox.resetCalls != 1 {
+		t.Fatalf("durable retry inbox reset calls=%d, want 1", inbox.resetCalls)
+	}
+	if len(retired) == 0 || retired[len(retired)-1] != markerPath {
+		t.Fatalf("durable retry retirement order=%v, want marker last", retired)
+	}
+	if store.resetIntentStatus != resetIntentNone || store.resetIntentDurable {
+		t.Fatalf("successful reset intent status=%q durable=%v, want cleared", store.resetIntentStatus, store.resetIntentDurable)
+	}
+	for _, path := range append(store.statePaths(), markerPath) {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("durable retry left %s: %v", filepath.Base(path), err)
+		}
+	}
+}
+
+func TestBackgroundRuntimeResetRepublishesStartupObservedIntentBeforeRetirement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	markerPath := filepath.Join(dir, "reset-intent.json")
+	injected := errors.New("injected pre-restart reset-intent directory sync failure")
+	seed := &configStore{path: path}
+	seed.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+		return writeFileAtomicallyOutcomeWith(path, data, func(string) error { return injected })
+	}
+	if err := seed.beginResetIntent(); !errors.Is(err, injected) {
+		t.Fatalf("pre-restart marker publication error=%v, want injected sync failure", err)
+	}
+	if data, err := os.ReadFile(markerPath); err != nil || string(data) != string(canonicalResetIntentData) {
+		t.Fatalf("pre-restart rename-visible marker data=%q err=%v", data, err)
+	}
+
+	restarted, err := initializeConfigStore(&configStore{path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.resetIntentStatus != resetIntentValid || restarted.resetIntentDurable {
+		t.Fatalf("startup marker status=%q durable=%v, want valid/non-durable until republished", restarted.resetIntentStatus, restarted.resetIntentDurable)
+	}
+	republicationAttempts := 0
+	markerSyncAttempts := 0
+	markerDurable := false
+	restarted.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+		if path != markerPath {
+			return writeFileAtomicallyOutcome(path, data)
+		}
+		republicationAttempts++
+		outcome := writeFileAtomicallyOutcomeWith(path, data, func(directory string) error {
+			markerSyncAttempts++
+			if err := syncStateDirectory(directory); err != nil {
+				return err
+			}
+			markerDurable = true
+			return nil
+		})
+		return outcome
+	}
+	inbox := &durableMarkerCheckingResetInbox{durable: &markerDurable}
+	background := newBackgroundRuntime(restarted, nil)
+	background.installInbox(inbox, inbox.Health())
+	prematureRetirement := false
+	retire := func(path string) error {
+		if !markerDurable {
+			prematureRetirement = true
+			return errors.New("artifact retirement ran before startup marker republication became durable")
+		}
+		return retireFileDurably(path)
+	}
+	background.retireResetArtifact = retire
+	restarted.retireResetArtifact = retire
+
+	if err := background.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if republicationAttempts != 1 || markerSyncAttempts != 1 || !markerDurable {
+		t.Fatalf("startup marker republication attempts=%d sync attempts=%d durable=%v", republicationAttempts, markerSyncAttempts, markerDurable)
+	}
+	if inbox.resetCalls != 1 || prematureRetirement {
+		t.Fatalf("startup reset inbox calls=%d premature retirement=%v", inbox.resetCalls, prematureRetirement)
+	}
+	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup reset left marker: %v", err)
+	}
+}
+
+func TestBackgroundRuntimeResetRetiresEveryAuthoritativeArtifactWithMarkerLast(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "retire-all"
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.stateTransactionPath(), []byte("reset-owned-wal\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := openGiftInbox(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := inbox.Accept("retire-all", "SEND_GIFT", giftEvent{GiftID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordPath := inbox.recordPath(record.LocalSequence, record.IngestionID)
+	background := newBackgroundRuntime(store, nil)
+	background.installInbox(inbox, inbox.SnapshotHealth())
+	if err := background.savePendingGiftAnimationFile(pendingGiftAnimationFile{SchemaVersion: pendingGiftAnimationsSchemaVersion, PreparedRoomID: "retire-all", Records: []pendingGiftAnimation{}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var retired []string
+	recordRetirement := func(path string) error {
+		retired = append(retired, filepath.Clean(path))
+		return retireFileDurably(path)
+	}
+	store.retireResetArtifact = recordRetirement
+	background.retireResetArtifact = recordRetirement
+	inbox.shared.retireResetArtifact = recordRetirement
+	if err := background.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	markerPath := store.resetIntentPath()
+	markerIndex := -1
+	for index, path := range retired {
+		if path == markerPath {
+			markerIndex = index
+		}
+	}
+	if markerIndex != len(retired)-1 {
+		t.Fatalf("reset marker retirement index=%d retirements=%#v, want last", markerIndex, retired)
+	}
+	for _, path := range append(append(store.statePaths(), store.stateTransactionPath(), markerPath), recordPath, inbox.sequencePath, background.pendingGiftAnimationsPath()) {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("authoritative reset artifact %s remains: %v", path, err)
+		}
+	}
+}
+
+func TestBackgroundRuntimeResetIntentSurvivesPartialRetirementAndRestart(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "ordinary-no-wal"
+	state.Attributes = []attributeState{{ID: "attribute-a", Name: "积分", Value: 7}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	stateBytes := make(map[string][]byte)
+	for _, path := range store.statePaths() {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stateBytes[path] = data
+	}
+	inbox, err := openGiftInbox(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := inbox.Accept("ordinary-no-wal", "SEND_GIFT", giftEvent{GiftID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordPath := inbox.recordPath(record.LocalSequence, record.IngestionID)
+	recordBytes, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequenceBytes, err := os.ReadFile(inbox.sequencePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	background := newBackgroundRuntime(store, nil)
+	background.installInbox(inbox, inbox.SnapshotHealth())
+	if err := background.savePendingGiftAnimationFile(pendingGiftAnimationFile{SchemaVersion: pendingGiftAnimationsSchemaVersion, PreparedRoomID: "ordinary-no-wal", Records: []pendingGiftAnimation{{RoomID: "ordinary-no-wal", Gift: giftEvent{GiftID: 1}}}}); err != nil {
+		t.Fatal(err)
+	}
+	animationPath := background.pendingGiftAnimationsPath()
+	animationBytes, err := os.ReadFile(animationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected partial state retirement failure")
+	failed := false
+	store.retireResetArtifact = func(path string) error {
+		if filepath.Base(path) == "cache.json" && !failed {
+			failed = true
+			return injected
+		}
+		return retireFileDurably(path)
+	}
+	if err := background.Reset(); !errors.Is(err, injected) {
+		t.Fatalf("partial reset error=%v, want injected", err)
+	}
+	if !failed {
+		t.Fatal("partial state retirement failure was not injected")
+	}
+	markerPath := store.resetIntentPath()
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("partial retirement lost reset marker: %v", err)
+	}
+	get := httptest.NewRecorder()
+	store.handle(get, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if get.Code != http.StatusInternalServerError {
+		t.Fatalf("partial-retirement GET status=%d body=%s", get.Code, get.Body.String())
+	}
+	mutationRan := false
+	if _, err := store.updateState(func(*appState) error {
+		mutationRan = true
+		return nil
+	}); err == nil || mutationRan {
+		t.Fatalf("partial-retirement mutation ran=%v err=%v", mutationRan, err)
+	}
+	if err := inbox.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a power loss choosing arbitrary pre-reset versions for every
+	// independently cached runtime artifact while the durable marker survives.
+	for path, data := range stateBytes {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(recordPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for path, data := range map[string][]byte{recordPath: recordBytes, inbox.sequencePath: sequenceBytes, animationPath: animationBytes} {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restarted, err := initializeConfigStore(&configStore{path: store.path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preRecovery := httptest.NewRecorder()
+	restarted.handle(preRecovery, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if preRecovery.Code != http.StatusInternalServerError {
+		t.Fatalf("restart exposed resurrected state status=%d body=%s", preRecovery.Code, preRecovery.Body.String())
+	}
+	restartedRuntime := newBackgroundRuntime(restarted, nil)
+	if err := restartedRuntime.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	completed := httptest.NewRecorder()
+	restarted.handle(completed, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if completed.Code != http.StatusNoContent {
+		t.Fatalf("completed restart reset GET status=%d body=%s", completed.Code, completed.Body.String())
+	}
+	for _, path := range append(append(restarted.statePaths(), restarted.stateTransactionPath(), markerPath), recordPath, inbox.sequencePath, animationPath) {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("restart reset left %s: %v", path, err)
+		}
+	}
+}
+
 func TestFormulaPreviewUsesSelectedGiftPrice(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	request := httptest.NewRequest(http.MethodPost, "/api/formula/preview", strings.NewReader(`{

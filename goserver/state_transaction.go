@@ -81,16 +81,19 @@ func (s *configStore) persistPreparedStateWithOutcomeLocked(state appState, inge
 		}
 		return statePersistenceOutcome{Err: journalWrite.Err}
 	}
+	if !journalWrite.Durable && journalWrite.Err == nil {
+		journalWrite.Err = fmt.Errorf("发布状态事务失败：事务未持久化")
+	}
 	s.transactionPending = true
 	applyOutcome := s.applyPendingStateTransactionWithOutcomeLocked(tx)
 	if applyOutcome.Err != nil {
 		return statePersistenceOutcome{
-			Committed: journalWrite.Committed || applyOutcome.ShardsCommitted,
+			Committed: journalWrite.Durable || applyOutcome.ShardsCommitted,
 			Err:       errors.Join(journalWrite.Err, applyOutcome.Err),
 		}
 	}
 	s.migrationRequired = false
-	return statePersistenceOutcome{Committed: true}
+	return statePersistenceOutcome{Committed: true, Err: journalWrite.Err}
 }
 
 func (s *configStore) applyPendingStateTransactionLocked(tx pendingStateTransaction) error {

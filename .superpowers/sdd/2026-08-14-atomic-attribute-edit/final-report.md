@@ -389,3 +389,90 @@ tests/storage.test.ts
 ```
 
 The explicit committed-outcome interpretation is intentionally used by atomic attribute submit and legacy-ID backfill, the request paths named by the final finding. Other generic `configStore` mutation callers retain their existing error-return contract and were not broadened in this feature-only wave. Unsupported external processes that directly rewrite shard files remain outside the `configStore` atomicity guarantee. Independent frontend review completed with no Critical, Important, or Minor findings. Independent Go review returned not-ready twice on the combined publication/read-recovery and restart-survival gaps; each was reproduced and fixed, and its final read-only re-review completed READY with no Critical, Important, or Minor findings. No additional product concern is known within the authorized final-review scope.
+
+## Additional final persistence fix wave — 2026-08-15
+
+This section supersedes the persistence-boundary and reset claims above where they conflict. The fixed input HEAD was `92b47bd652f22a24fd27108e8bc05a377dc14e29`. The eventual correction commit cannot contain its own SHA in this file; the controller records the actual full SHA after commit. No push, tag, release, signing, version, dependency, lockfile, workflow, FFmpeg source/payload/build, or frontend source change was authorized or made.
+
+### Verified platform semantics and resulting design
+
+The reviewer findings were checked against production behavior rather than accepted by assertion. On Go 1.26.5 for Windows, `os.File.Sync` reaches `FlushFileBuffers`, while the application opens directories through `os.Open`; Microsoft documents that `FlushFileBuffers` requires a `GENERIC_WRITE` handle. The existing Windows compatibility branch suppressed the expected access/invalid-handle errors, so directory `Sync` could not certify crash durability. Microsoft separately documents that `MoveFileExW(..., MOVEFILE_WRITE_THROUGH)` does not return until the move is on disk. Those contracts are recorded at [FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers) and [MoveFileExW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw).
+
+Atomic replacement is therefore platform-specific. Windows uses `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`; non-Windows uses rename followed by parent-directory sync. `atomicWriteOutcome` now separates final-name visibility (`Committed`) from crash durability (`Durable`). The Windows direct-API paths pass through an independently expressed `syscall.FullPath` conversion for long drive, UNC, relative, device, already-extended, and collapsible paths; a real replacement with source and destination paths longer than 280 characters is exercised on Windows.
+
+The state transaction matrix is now explicit:
+
+| WAL outcome | Shard outcome | Logical result |
+|---|---|---|
+| Not visible | Any | Not committed; return the publication error. |
+| Visible but not durable | An early shard fails | Not committed; return the joined WAL/shard failure, so attribute HTTP cannot return success. |
+| Visible but not durable | Every shard is durable | Committed, but retain the WAL warning. Generic `/api/config` returns its prior error and emits no notification; atomic attribute submit may reconcile the whole committed state to success. |
+| Durable | Replay/cleanup fails | Committed; retain/reconstruct the isolated candidate, retry replay, and never read mixed shards. |
+| Durable or all shards durable | Replay/cleanup completes | Committed whole state; cleanup warnings remain visible to generic callers. |
+
+Reset is a separate marker-first transaction. A canonical `reset-intent.json` is published durably before inbox, pending-animation, state-shard, or WAL retirement. A visible but non-durable marker blocks reads but is republished on retry; startup visibility is also treated as durability-unknown and must be republished before retirement. Startup inspects the marker before WAL recovery. A valid marker is completed before inbox workers start; an unreadable or corrupt marker fails closed without deleting evidence. State shards and WAL, inbox records and `config-*.tmp` files in both inbox directories, sequence state, and pending animations retire through same-directory tombstones. Windows retirement uses write-through moves; non-Windows retirement syncs the parent and retries an uncertain tombstone. The reset marker retires last. Unrelated files are preserved.
+
+Before marker publication, a valid pending WAL candidate remains authoritative even when another reset attempt records `reset_failure`. Once the reset marker is published, reads deliberately fail closed until marker-last completion. Mutations remain blocked throughout; a successful DELETE retry clears the marker, candidate, WAL, block, and runtime artifacts without exposing a partial shard mix.
+
+### Deterministic RED → GREEN provenance
+
+1. `TestAtomicWriteOutcomeMarksPostRenameDirectorySyncFailureVisibleButNotDurable` initially failed to compile because `atomicWriteOutcome.Durable` did not exist. After the split outcome model, a real temp write/file sync/close/ordinary rename plus injected parent-sync failure returns `Committed:true`, `Durable:false`, and the real warning.
+2. `TestAttributeEditHTTPRejectsRenameVisibleNonDurableJournalBeforeFirstShard` initially observed a logically committed outcome and HTTP 200 after that real WAL sync failure plus a persistent first-shard (`events.log`) failure. GREEN reports the outcome uncommitted, returns safe HTTP 500, leaves all four shard bytes unchanged, and proves both retained-WAL reads and simulated power-loss-without-WAL reads are whole states rather than a mix. No successful sync is fabricated before the warning.
+3. The original generic PATCH and PUT warning regression returned `200 {"code":0}`. `TestConfigStoreHTTPRetainsRealNonDurableJournalWarningWithoutNotifications` now uses the same real rename/failing-sync seam, returns HTTP 500 with zero callbacks, and proves direct and restarted reads see the completely applied state. `TestStatePersistenceCommitsAllShardsAfterRealNonDurableJournalWarning` passed on its first production run, honestly confirming that the all-shards-durable salvage branch was already correct; the missing coverage, not that branch, was the defect. The attribute committed-reconciliation stage was likewise changed from a fabricated durable warning to the real non-durable WAL outcome and still returns one successful whole result.
+4. The combined valid-candidate/reset failure regression initially exposed old config attributes joined to new cache/event sidecars. GREEN keeps a pre-marker candidate authoritative, then fails closed after marker publication; generic and attribute mutation callbacks never run while blocked, WAL/candidate/marker evidence survives, and a sequential DELETE retry clears the block and permits later mutations. Channel barriers and race runs cover reset-gate ordering without sleeps.
+5. Marker/startup REDs showed valid marker evidence losing to transaction recovery, corrupt/unreadable markers being ignored, workers reaching inbox processing first, and a second reset entering artifact retirement after only rename-visible marker publication. GREEN makes marker inspection precede WAL recovery, starts workers only after reset completion, and separately tracks marker validity and durability.
+6. `TestBackgroundRuntimeResetRepublishesStartupObservedIntentBeforeRetirement` was RED with startup status `valid/durable=true` after a pre-restart real rename plus failed sync. GREEN records it as valid/non-durable and requires a durable republication before the fake inbox or retirement hook can run.
+7. Full-runtime reset tests were initially missing durable retirement seams and restart intent. GREEN covers ordinary no-WAL reset, valid-WAL candidate reset, failure after partial retirement, arbitrary artifact resurrection under a surviving marker, marker-last ordering, and restart recovery across state, WAL, inbox, sequence, and animation files. `TestGiftInboxResetRetrySettlesRecordTombstoneBeforeSuccess` also proves retry settles an uncertain lone-record tombstone.
+8. `TestGiftInboxResetRetiresOwnedTempsFromRootAndPendingOnly` was RED because the inbox-root `config-*.tmp` survived. GREEN retires owned temps in root and pending while byte-checking unrelated files in both directories.
+9. Windows long-path coverage was first RED on a missing conversion helper. The real greater-than-280-character replacement then passed. Independent review rejected the first stdlib-shaped implementation on source-attribution grounds; it was replaced by the shorter `syscall.FullPath` design. A strengthened collapsible-long-path case then failed by returning the raw 338-character spelling and passed after the prefix trigger considered both original and resolved lengths.
+
+### Final verification matrix
+
+The two focused rows use this exact PowerShell variable (21 named regressions):
+
+```powershell
+$focusedPersistencePattern = '^(TestAtomicWriteOutcomeMarksPostRenameDirectorySyncFailureVisibleButNotDurable|TestRetireFileWithDirectorySyncRetriesAnUncertainTombstone|TestStatePersistenceCommitsAllShardsAfterRealNonDurableJournalWarning|TestConfigStoreHTTPRetainsRealNonDurableJournalWarningWithoutNotifications|TestAttributeEditHTTPRejectsRenameVisibleNonDurableJournalBeforeFirstShard|TestAttributeEditSubmitReconcilesCommittedPostJournalFailures|TestConfigStoreGetCountsResetBlockedCandidateWithoutArtifacts|TestConfigStoreStartupDetectsResetIntentBeforeTransactionRecovery|TestConfigStoreStartupCorruptResetIntentFailsClosedWithoutDeletingState|TestConfigStoreStartupUnreadableResetIntentFailsClosedWithoutExposingDetail|TestConfigResetFailureAfterMarkerFailsClosedAndRetryClearsCandidate|TestBackgroundRuntimeResetPublishesIntentBeforeFailureAndFailsClosed|TestBackgroundRuntimeResetRepublishesNonDurableIntentBeforeRetirement|TestBackgroundRuntimeResetRepublishesStartupObservedIntentBeforeRetirement|TestBackgroundRuntimeResetRetiresEveryAuthoritativeArtifactWithMarkerLast|TestBackgroundRuntimeResetIntentSurvivesPartialRetirementAndRestart|TestBackgroundRuntimeStartupCompletesValidResetIntentBeforeInboxNext|TestGiftInboxResetRetrySettlesRecordTombstoneBeforeSuccess|TestGiftInboxResetRetiresOwnedTempsFromRootAndPendingOnly|TestWindowsExtendedPathConversion|TestReplaceFileAtomicallySupportsWindowsLongPaths)$'
+```
+
+| Gate | Exact command | Result |
+|---|---|---|
+| New persistence/reset stress | `go -C goserver test ./... -run $focusedPersistencePattern -count=20 -timeout=600s` | exit 0; `ok ... 18.141s`. |
+| New persistence/reset race stress | `go -C goserver test -race ./... -run $focusedPersistencePattern -count=5 -timeout=600s` | exit 0; `ok ... 5.421s`; no race report. |
+| Existing compatibility/reset slice | `go -C goserver test ./... -run '^(TestAttributeEditHTTPReturnsSuccessWhileCommittedJournalReconciliationStillFails|TestPendingStateTransaction.*|TestTransactionPending.*|TestConfigReset.*|TestBackgroundRuntimeReset.*|TestBackgroundRuntimeStartupCompletesValidResetIntentBeforeInboxNext|TestGiftInbox.*|TestConfigStoreLifecycle|TestConfigStorePatchCommitsAllTransactionShards)$' -count=1 -timeout=300s` | exit 0; `ok ... 8.156s`. |
+| Full Go | `go -C goserver test ./... -count=1 -timeout=600s` | exit 0; `ok ... 21.855s`. |
+| Full Go race | `go -C goserver test -race ./... -count=1 -timeout=900s` | exit 0; `ok ... 31.406s`; no race report. |
+| Linux compile | `npm run verify:go-linux-compile` | exit 0; verified `GOOS=linux GOARCH=amd64` compile-only gate. |
+| UI build | `npm run build:ui` | exit 0; Vite 5.4.21 transformed 91 modules and built in 1.35s. No frontend source changed, so a separate frontend/typecheck rerun was not required. |
+| Windows EXE | `npm run build:exe` | exit 0; unchanged FFmpeg 9.0 payload verified; 83 UI assets embedded; local dev EXE rebuilt. |
+| Embedded closure | `go -C goserver test ./... -run '^TestEmbedded(UIAssetManifestClosesAndServesProductionAssets|PageHandlerServesNestedUIAssets|UIAssetManifestMatchesEmbeddedFS)$' -count=1 -timeout=120s -v` | exit 0; all three tests passed; handler/manifest bytes closed over 83 assets; `ok ... 1.630s`. |
+| Independent final review | Separate read-only review plus its own count-20, race count-5, lock/reset race, full Go, Linux compile, gofmt, and diff gates | READY; no Critical, Important, or Minor findings. |
+
+The freshly rebuilt ignored local artifact is `dist/gift-panel.exe`, 14,068,736 bytes, SHA-256 `d8b9e7fe94eb8ca10c093b639ce1c7a08568a37856e18cd28bac273323daaf99`. It was not signed, staged, published, or released. The existing FFmpeg binary remains 6,209,536 bytes and its ZIP SHA-256 remains `19247e960c50adcf107bc04e8a20435fd67d098e06b227d8772f0d1b8027e03c`; no FFmpeg file changed.
+
+### Final scope
+
+The intended tracked scope is this report plus 18 Go production/test files:
+
+```text
+.superpowers/sdd/2026-08-14-atomic-attribute-edit/final-report.md
+goserver/atomic_replace_other.go
+goserver/atomic_replace_windows.go
+goserver/atomic_replace_windows_test.go
+goserver/attribute_edits_test.go
+goserver/background_runtime.go
+goserver/background_runtime_test.go
+goserver/config_store.go
+goserver/config_store_test.go
+goserver/diagnostic_log.go
+goserver/durable_retire.go
+goserver/durable_retire_other.go
+goserver/durable_retire_windows.go
+goserver/gift_inbox.go
+goserver/gift_inbox_test.go
+goserver/main_test.go
+goserver/state_shards.go
+goserver/state_transaction.go
+goserver/state_transaction_test.go
+```
+
+The ignored RED/GREEN working ledger is `.superpowers/sdd/2026-08-14-atomic-attribute-edit/additional-final-fix-report.md`; it is provenance only and is not staged. The final whitespace/scope and post-commit status checks are recorded by the controller after this report is staged and committed. No remaining persistence concern is known within the authorized scope.

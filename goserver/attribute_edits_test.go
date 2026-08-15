@@ -1390,6 +1390,122 @@ func TestAttributeEditSubmitWriteFailureLeavesNoPartialStateAndAllowsLaterSave(t
 	}
 }
 
+func TestAttributeEditHTTPRejectsRenameVisibleNonDurableJournalBeforeFirstShard(t *testing.T) {
+	injectedSync := errors.New("injected journal directory sync failure")
+	injectedShard := errors.New("persistent injected events shard failure")
+	installFailures := func(store *configStore, syncHits, shardHits *atomic.Int32) {
+		store.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+			switch filepath.Base(path) {
+			case "state-transaction.json":
+				return writeFileAtomicallyOutcomeWith(path, data, func(string) error {
+					syncHits.Add(1)
+					return injectedSync
+				})
+			case "events.log":
+				shardHits.Add(1)
+				return atomicWriteOutcome{Err: injectedShard}
+			default:
+				return writeFileAtomicallyOutcome(path, data)
+			}
+		}
+	}
+
+	t.Run("state outcome", func(t *testing.T) {
+		store := attributeEditFixtureStore(t)
+		before := snapshotStateFiles(t, store)
+		next := attributeEditFixtureState()
+		next.RoomID = "non-durable-candidate"
+		var syncHits atomic.Int32
+		var shardHits atomic.Int32
+		installFailures(store, &syncHits, &shardHits)
+
+		store.mu.Lock()
+		outcome := store.persistPreparedStateWithOutcomeLocked(next, "")
+		store.mu.Unlock()
+		if outcome.Committed || !errors.Is(outcome.Err, injectedSync) || !errors.Is(outcome.Err, injectedShard) {
+			t.Fatalf("outcome = %+v, want uncommitted joined WAL and first-shard failures", outcome)
+		}
+		if syncHits.Load() != 1 || shardHits.Load() != 1 {
+			t.Fatalf("injection hits sync=%d shard=%d, want 1 each", syncHits.Load(), shardHits.Load())
+		}
+		assertStateFilesEqual(t, store, before)
+	})
+
+	store := attributeEditFixtureStore(t)
+	before := snapshotStateFiles(t, store)
+	leases := newAttributeEditLeaseCoordinator(attributeEditLeaseTTL, timeNowForAttributeEditTest, func() (string, error) {
+		return "AAAAAAAAAAAAAAAAAAAAAAAA", nil
+	})
+	handler := newAttributeEditHandler(newAttributeEditService(store, leases, fixedAttributeID))
+	command := existingAttributeEdit("attribute-a", "非持久候选", 10)
+	session := attributeEditHTTPSession(t, handler, "attribute-a")
+	command.Target.LeaseToken = session.Token
+	var syncHits atomic.Int32
+	var shardHits atomic.Int32
+	installFailures(store, &syncHits, &shardHits)
+	var roomNotifications atomic.Int32
+	var timerNotifications atomic.Int32
+	store.setOnChange(func() { roomNotifications.Add(1) })
+	store.setOnTimerChange(func() { timerNotifications.Add(1) })
+
+	response := attributeEditHTTPSubmit(t, handler, command)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("response=%d body=%s, want safe 500", response.Code, response.Body.String())
+	}
+	if syncHits.Load() != 1 || shardHits.Load() != 1 {
+		t.Fatalf("injection hits sync=%d shard=%d, want 1 each before reconciliation", syncHits.Load(), shardHits.Load())
+	}
+	if roomNotifications.Load() != 0 || timerNotifications.Load() != 0 {
+		t.Fatalf("notifications room=%d timer=%d, want zero", roomNotifications.Load(), timerNotifications.Load())
+	}
+	assertStateFilesEqual(t, store, before)
+
+	journalData, err := os.ReadFile(store.stateTransactionPath())
+	if err != nil {
+		t.Fatalf("rename-visible WAL missing: %v", err)
+	}
+	var journal pendingStateTransaction
+	if err := json.Unmarshal(journalData, &journal); err != nil {
+		t.Fatalf("rename-visible WAL invalid: %v", err)
+	}
+	retainedCandidate, err := stateFromPendingStateTransaction(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retainedCandidate.findAttribute("非持久候选") == nil || retainedCandidate.Rules[0].AttributeName != "非持久候选" || retainedCandidate.TimerRules[0].AttributeName != "非持久候选" || retainedCandidate.GiftCatalog[0].Name != "更新礼物" {
+		t.Fatalf("retained WAL candidate is not the whole edit: %#v", retainedCandidate)
+	}
+
+	restarted := &configStore{path: store.path}
+	var restartSyncHits atomic.Int32
+	var restartShardHits atomic.Int32
+	installFailures(restarted, &restartSyncHits, &restartShardHits)
+	restarted, err = initializeConfigStore(restarted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retained, err := restarted.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(retained, retainedCandidate) {
+		t.Fatal("restart with retained valid WAL exposed a mixed shard state")
+	}
+
+	if err := os.Remove(store.stateTransactionPath()); err != nil {
+		t.Fatal(err)
+	}
+	powerLoss := &configStore{path: store.path}
+	withoutWAL, err := powerLoss.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutWAL.findAttribute("积分") == nil || withoutWAL.findAttribute("非持久候选") != nil || withoutWAL.GiftCatalog[0].Name != "旧礼物" {
+		t.Fatalf("power loss without non-durable WAL exposed a mixed snapshot: %#v", withoutWAL)
+	}
+	assertStateFilesEqual(t, powerLoss, before)
+}
+
 func TestAttributeEditSubmitReconcilesCommittedPostJournalFailures(t *testing.T) {
 	type failureStage struct {
 		name   string
@@ -1397,15 +1513,15 @@ func TestAttributeEditSubmitReconcilesCommittedPostJournalFailures(t *testing.T)
 	}
 	stages := []failureStage{
 		{
-			name: "journal publication directory sync",
+			name: "real rename-visible non-durable journal publication",
 			inject: func(store *configStore, failed *bool) {
 				store.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
-					outcome := writeFileAtomicallyOutcome(path, data)
-					if filepath.Base(path) == "state-transaction.json" && !*failed && outcome.Committed {
+					if filepath.Base(path) == "state-transaction.json" && !*failed {
 						*failed = true
-						return atomicWriteOutcome{Committed: true, Err: errors.New("injected journal publication sync warning")}
+						injected := errors.New("injected real non-durable journal directory sync warning")
+						return writeFileAtomicallyOutcomeWith(path, data, func(string) error { return injected })
 					}
-					return outcome
+					return writeFileAtomicallyOutcome(path, data)
 				}
 			},
 		},
@@ -1504,25 +1620,6 @@ func TestAttributeEditHTTPReturnsSuccessWhileCommittedJournalReconciliationStill
 		inject         func(*configStore, *atomic.Int32)
 	}
 	stages := []failureStage{
-		{
-			name:           "journal publication sync plus shard",
-			transactionWAL: true,
-			newTarget:      true,
-			inject: func(store *configStore, hits *atomic.Int32) {
-				store.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
-					if filepath.Base(path) == "config.json" {
-						hits.Add(1)
-						return atomicWriteOutcome{Err: errors.New("persistent injected config shard failure")}
-					}
-					outcome := writeFileAtomicallyOutcome(path, data)
-					if filepath.Base(path) == "state-transaction.json" && outcome.Committed {
-						hits.Add(1)
-						return atomicWriteOutcome{Committed: true, Err: errors.New("injected journal publication sync warning")}
-					}
-					return outcome
-				}
-			},
-		},
 		{
 			name:           "shard",
 			transactionWAL: true,

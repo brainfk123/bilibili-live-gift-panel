@@ -482,6 +482,76 @@ type startupResetBarrierInbox struct {
 	resetOnce      sync.Once
 }
 
+type startupMarkerOrderingInbox struct {
+	resetCalled chan struct{}
+	nextCalled  chan bool
+	resetDone   atomic.Bool
+	resetOnce   sync.Once
+	nextOnce    sync.Once
+}
+
+func (*startupMarkerOrderingInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
+	return giftInboxRecord{}, nil
+}
+func (inbox *startupMarkerOrderingInbox) Next() (giftInboxRecord, bool, error) {
+	inbox.nextOnce.Do(func() { inbox.nextCalled <- inbox.resetDone.Load() })
+	return giftInboxRecord{}, false, nil
+}
+func (*startupMarkerOrderingInbox) Acknowledge(string) error { return nil }
+func (*startupMarkerOrderingInbox) Release(string) error     { return nil }
+func (*startupMarkerOrderingInbox) Close() error             { return nil }
+func (*startupMarkerOrderingInbox) Health() giftInboxHealth  { return giftInboxHealth{} }
+func (inbox *startupMarkerOrderingInbox) Reset() error {
+	inbox.resetDone.Store(true)
+	inbox.resetOnce.Do(func() { close(inbox.resetCalled) })
+	return nil
+}
+
+func TestBackgroundRuntimeStartupCompletesValidResetIntentBeforeInboxNext(t *testing.T) {
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "reset-intent.json")
+	if err := os.WriteFile(markerPath, canonicalResetIntentData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := initializeConfigStore(&configStore{path: filepath.Join(dir, "config.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := &startupMarkerOrderingInbox{resetCalled: make(chan struct{}), nextCalled: make(chan bool, 1)}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.inboxRetryDelay = time.Millisecond
+	runtime.installInbox(inbox, inbox.Health())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runtime.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-inbox.resetCalled:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("startup did not complete the valid reset intent")
+	}
+	select {
+	case afterReset := <-inbox.nextCalled:
+		if !afterReset {
+			t.Fatal("startup processed the inbox before reset completion")
+		}
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("gift worker did not start after reset completion")
+	}
+	cancel()
+	<-done
+	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup recovery left reset marker: %v", err)
+	}
+}
+
 func (*startupResetBarrierInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
 	return giftInboxRecord{}, nil
 }
