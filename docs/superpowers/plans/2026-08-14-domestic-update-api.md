@@ -316,7 +316,7 @@ COS_BUCKET           required
 COS_REGION           required
 COS_SECRET_ID        required
 COS_SECRET_KEY       required
-COS_CHANNEL_KEY      default channels/stable/latest.json
+channel object        fixed internally as channels/stable/latest.json
 ```
 
 Configure `ReadHeaderTimeout: 5s`, `ReadTimeout: 10s`, `WriteTimeout: 15s`, `IdleTimeout: 60s`, `MaxHeaderBytes: 16<<10`, and a 10-second graceful shutdown on `SIGINT/SIGTERM`. Log only startup, shutdown, request ID, stable error code, and wrapped server-side cause.
@@ -817,12 +817,12 @@ git commit -m "ci: mirror releases to Tencent COS"
 
 **Interfaces:**
 - Consumes: the approved ICP domain and real ICP number supplied by the user
-- Consumes: Tencent COS bucket in `ap-beijing`, CAM credentials, and GitHub variables/secrets
+- Consumes: the approved Tencent COS bucket and region, CAM credentials, and GitHub variables/secrets
 - Produces: HTTPS production API and verified domestic-first client behavior
 
 - [ ] **Step 1: Create and harden the COS bucket**
 
-Create or select a Beijing bucket, keep `private-read-write`, enable object versioning for stable rollback, and leave CDN/public-read disabled. Record bucket and region only in secret/config stores.
+Create or select a bucket that has never had versioning enabled, keep `private-read-write`, verify Versioning is exactly `Disabled`, and leave CDN/public-read disabled. This is required because immutable `releases/*` writes use COS forbid-overwrite semantics that are not effective on enabled or suspended versioned buckets. Before a stable-channel change, the operator copies the current private `channels/stable/latest.json` to a dated private backup key; rollback restores that reviewed backup without overwriting any `releases/*` object. The authoritative procedure is `deploy/update-api/README.md`. Record bucket and region only in secret/config stores.
 
 Create two CAM identities:
 
@@ -887,7 +887,7 @@ Using a normally signed release, verify GitHub Release precedes mirroring; COS h
 
 - [ ] **Step 8: Exercise rollback**
 
-Restore the previous COS version of stable and confirm newer clients do not downgrade. Switch the systemd symlink to the previous binary and validate health. Restore the previous Nginx config from backup, run `nginx -t`, reload, then reapply the new version and validate again.
+Restore the reviewed dated private backup to `channels/stable/latest.json` and confirm newer clients do not downgrade. Switch the systemd symlink to the previous binary and validate health. Restore the previous Nginx config from backup, run `nginx -t`, reload, then reapply the new version and validate again.
 
 - [ ] **Step 9: Run the full repository gate**
 
@@ -917,9 +917,9 @@ If acceptance required tracked fixes, commit each focused fix with its regressio
 - [ ] Domestic release and changelog endpoints match client contracts exactly.
 - [ ] The API cannot sign arbitrary keys and never proxies the EXE.
 - [ ] The root page shows the real ICP number and only the minimal service label.
-- [ ] COS remains private and versioned release objects cannot be overwritten.
+- [ ] COS remains private, Versioning is exactly `Disabled`, and immutable `releases/*` objects reject overwrite.
 - [ ] CI and Lighthouse use separate prefix-scoped credentials.
-- [ ] Stable metadata is written last and can be rolled back through COS versioning.
+- [ ] Stable metadata is written last and can be rolled back from a verified dated private backup.
 - [ ] The client verifies size, SHA-256, Authenticode trust, and publisher subject.
 - [ ] Domestic failures fall back to GitHub for updates and changelog.
 - [ ] Port 12450 and `/healthz` are not public.

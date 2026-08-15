@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,9 +23,27 @@ type hostedChangelogDocument struct {
 	Releases      []json.RawMessage `json:"releases"`
 }
 
-func newHostedChangelogHandler(client *http.Client, sourceURL string) http.HandlerFunc {
+type hostedChangelogSource struct {
+	Name string
+	URL  string
+}
+
+func defaultHostedChangelogSources() []hostedChangelogSource {
+	sources := make([]hostedChangelogSource, 0, 2)
+	if domesticReleaseURL := domesticUpdateReleaseURL(); domesticReleaseURL != "" {
+		domesticBaseURL := strings.TrimSuffix(domesticReleaseURL, "/api/v1/releases/latest")
+		sources = append(sources, hostedChangelogSource{Name: "国内镜像", URL: domesticBaseURL + "/api/v1/changelog"})
+	}
+	return append(sources, hostedChangelogSource{Name: "GitHub", URL: hostedChangelogURL})
+}
+
+func newHostedChangelogHandler(client *http.Client, sources []hostedChangelogSource) http.HandlerFunc {
+	return newHostedChangelogHandlerWithNow(client, sources, time.Now)
+}
+
+func newHostedChangelogHandlerWithNow(client *http.Client, sources []hostedChangelogSource, now func() time.Time) http.HandlerFunc {
 	if client == nil {
-		client = &http.Client{Timeout: 8 * time.Second}
+		client = newUpdateHTTPClient(8 * time.Second)
 	}
 	var mu sync.Mutex
 	var cached hostedChangelogDocument
@@ -38,23 +58,30 @@ func newHostedChangelogHandler(client *http.Client, sourceURL string) http.Handl
 
 		mu.Lock()
 		defer mu.Unlock()
-		if len(cached.Releases) > 0 && time.Since(cachedAt) < hostedChangelogCacheTTL {
+		if len(cached.Releases) > 0 && now().Sub(cachedAt) < hostedChangelogCacheTTL {
 			writeJSON(w, http.StatusOK, map[string]any{"code": 0, "releases": cached.Releases})
 			return
 		}
 
-		document, err := fetchHostedChangelog(r, client, sourceURL)
-		if err != nil {
-			if len(cached.Releases) > 0 {
-				writeJSON(w, http.StatusOK, map[string]any{"code": 0, "releases": cached.Releases})
+		var causes []error
+		for _, source := range sources {
+			document, err := fetchHostedChangelog(r, client, source.URL)
+			if err == nil {
+				cached = document
+				cachedAt = now()
+				writeJSON(w, http.StatusOK, map[string]any{"code": 0, "releases": document.Releases})
 				return
 			}
-			writeJSON(w, http.StatusBadGateway, map[string]any{"code": -1, "message": "在线更新日志暂时不可用"})
+			causes = append(causes, fmt.Errorf("%s: %w", source.Name, err))
+		}
+		if len(causes) > 0 {
+			log.Printf("hosted changelog sources failed: %v", errors.Join(causes...))
+		}
+		if len(cached.Releases) > 0 {
+			writeJSON(w, http.StatusOK, map[string]any{"code": 0, "releases": cached.Releases})
 			return
 		}
-		cached = document
-		cachedAt = time.Now()
-		writeJSON(w, http.StatusOK, map[string]any{"code": 0, "releases": document.Releases})
+		writeJSON(w, http.StatusBadGateway, map[string]any{"code": -1, "message": "在线更新日志暂时不可用"})
 	}
 }
 
@@ -64,13 +91,13 @@ func fetchHostedChangelog(r *http.Request, client *http.Client, sourceURL string
 	}
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, sourceURL, nil)
 	if err != nil {
-		return hostedChangelogDocument{}, err
+		return hostedChangelogDocument{}, errors.New("更新日志地址无效")
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "bilibili-live-gift-panel")
 	response, err := client.Do(request)
 	if err != nil {
-		return hostedChangelogDocument{}, err
+		return hostedChangelogDocument{}, safeUpdateNetworkError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {

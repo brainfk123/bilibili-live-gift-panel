@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,11 +18,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 var (
-	appVersion = "dev"
-	appCommit  = ""
+	appVersion                 = "dev"
+	appCommit                  = ""
+	updateAPIBaseURLHex        = ""
+	updateExpectedPublisherHex = ""
 )
 
 const (
@@ -32,6 +37,14 @@ const (
 	updateSourceTimeout    = 20 * time.Second
 	updateChecksumMaxBytes = int64(4096)
 	updateInstalledMarker  = "installed-update.json"
+	updateCleanupAttempts  = 3
+	updateCleanupRetryWait = 10 * time.Millisecond
+)
+
+var (
+	errUpdateArtifactCleanup     = errors.New("更新文件清理失败")
+	errPendingExecutableCleanup  = errors.New("待安装更新可执行文件清理失败")
+	startUpdatedTargetExecutable = startDetachedExecutable
 )
 
 type updateStatus struct {
@@ -62,6 +75,7 @@ type githubAsset struct {
 
 type pendingUpdate struct {
 	Version     string `json:"version"`
+	Size        int64  `json:"size"`
 	SHA256      string `json:"sha256"`
 	PendingPath string `json:"pendingPath"`
 	TargetPath  string `json:"targetPath"`
@@ -84,16 +98,19 @@ type updateReleaseCandidate struct {
 }
 
 type autoUpdaterOptions struct {
-	Store          *configStore
-	Client         *http.Client
-	CurrentVersion string
-	ExecutablePath string
-	UpdatesDir     string
-	ReleaseURL     string
-	ReleaseSources []updateReleaseSource
-	AssetName      string
-	CheckPeriod    time.Duration
-	Now            func() time.Time
+	Store            *configStore
+	Client           *http.Client
+	CurrentVersion   string
+	ExecutablePath   string
+	UpdatesDir       string
+	ReleaseURL       string
+	ReleaseSources   []updateReleaseSource
+	AssetName        string
+	CheckPeriod      time.Duration
+	Now              func() time.Time
+	VerifyExecutable func(string) error
+	LaunchInstaller  func(string, int, bool) error
+	RemoveFile       func(string) error
 }
 
 type autoUpdater struct {
@@ -109,6 +126,9 @@ type autoUpdater struct {
 	trigger          chan bool
 	automaticAllowed func() bool
 	onReady          func(string)
+	verifyExecutable func(string) error
+	launchInstaller  func(string, int, bool) error
+	removeFile       func(string) error
 
 	mu      sync.Mutex
 	status  updateStatus
@@ -116,17 +136,101 @@ type autoUpdater struct {
 }
 
 func defaultUpdateReleaseSources() []updateReleaseSource {
-	return []updateReleaseSource{
-		{Name: "GitHub", URL: updateGitHubReleaseURL, GitHub: true},
+	sources := make([]updateReleaseSource, 0, 2)
+	if domesticURL := domesticUpdateReleaseURL(); domesticURL != "" {
+		sources = append(sources, updateReleaseSource{Name: "国内镜像", URL: domesticURL})
 	}
+	return append(sources, updateReleaseSource{Name: "GitHub", URL: updateGitHubReleaseURL, GitHub: true})
+}
+
+func domesticUpdateReleaseURL() string {
+	encoded := strings.TrimSpace(updateAPIBaseURLHex)
+	if encoded == "" {
+		return ""
+	}
+	decoded, err := hex.DecodeString(encoded)
+	if err != nil || !utf8.Valid(decoded) {
+		return ""
+	}
+	rawBaseURL := string(decoded)
+	baseURL, err := url.Parse(rawBaseURL)
+	if err != nil || baseURL.Scheme != "https" || baseURL.User != nil || baseURL.RawQuery != "" || baseURL.ForceQuery || baseURL.Fragment != "" {
+		return ""
+	}
+	if baseURL.Path != "" && baseURL.Path != "/" {
+		return ""
+	}
+	hostname := baseURL.Hostname()
+	if hostname == "" || updateAPIHostnameIsIPLiteral(hostname) {
+		return ""
+	}
+	for _, character := range hostname {
+		if character > 127 {
+			return ""
+		}
+	}
+	canonicalHostname := strings.ToLower(hostname)
+	canonicalHost := canonicalHostname
+	if strings.Contains(canonicalHostname, ":") {
+		canonicalHost = "[" + canonicalHostname + "]"
+	}
+	if portText := baseURL.Port(); portText != "" {
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 || port == 443 {
+			return ""
+		}
+		canonicalHost = canonicalHostname + ":" + strconv.Itoa(port)
+		if strings.Contains(canonicalHostname, ":") {
+			canonicalHost = "[" + canonicalHostname + "]:" + strconv.Itoa(port)
+		}
+	}
+	canonicalOrigin := "https://" + canonicalHost
+	if rawBaseURL != canonicalOrigin && rawBaseURL != canonicalOrigin+"/" {
+		return ""
+	}
+	return canonicalOrigin + "/api/v1/releases/latest"
+}
+
+func updateAPIHostnameIsIPLiteral(hostname string) bool {
+	if strings.Contains(hostname, ":") || net.ParseIP(hostname) != nil {
+		return true
+	}
+	lastLabel := strings.TrimSuffix(hostname, ".")
+	if separator := strings.LastIndexByte(lastLabel, '.'); separator >= 0 {
+		lastLabel = lastLabel[separator+1:]
+	}
+	if strings.HasPrefix(strings.ToLower(lastLabel), "0x") {
+		lastLabel = lastLabel[2:]
+		if lastLabel == "" {
+			return false
+		}
+		for _, character := range lastLabel {
+			if !strings.ContainsRune("0123456789abcdefABCDEF", character) {
+				return false
+			}
+		}
+		return true
+	}
+	if lastLabel == "" {
+		return false
+	}
+	for _, character := range lastLabel {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func newDefaultAutoUpdater(store *configStore) *autoUpdater {
 	root, rootErr := os.UserConfigDir()
 	executablePath, executableErr := os.Executable()
+	if strings.TrimSpace(updateAPIBaseURLHex) != "" && domesticUpdateReleaseURL() == "" {
+		_, _ = fmt.Fprintln(os.Stderr, "自动更新国内镜像配置无效，已使用 GitHub 回退。")
+	}
 	updater := newAutoUpdater(autoUpdaterOptions{
 		Store:          store,
-		Client:         &http.Client{Timeout: 10 * time.Minute},
+		Client:         newUpdateHTTPClient(10 * time.Minute),
 		CurrentVersion: appVersion,
 		ExecutablePath: executablePath,
 		UpdatesDir:     filepath.Join(root, "BilibiliLiveGiftPanel", "updates"),
@@ -144,7 +248,7 @@ func newDefaultAutoUpdater(store *configStore) *autoUpdater {
 func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 	client := options.Client
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Minute}
+		client = newUpdateHTTPClient(10 * time.Minute)
 	}
 	now := options.Now
 	if now == nil {
@@ -153,6 +257,18 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 	period := options.CheckPeriod
 	if period <= 0 {
 		period = updateCheckPeriod
+	}
+	verifyExecutable := options.VerifyExecutable
+	if verifyExecutable == nil {
+		verifyExecutable = defaultVerifyUpdateExecutable
+	}
+	launchInstaller := options.LaunchInstaller
+	if launchInstaller == nil {
+		launchInstaller = launchUpdateInstaller
+	}
+	removeFile := options.RemoveFile
+	if removeFile == nil {
+		removeFile = os.Remove
 	}
 	releaseSources := append([]updateReleaseSource(nil), options.ReleaseSources...)
 	if len(releaseSources) == 0 && strings.TrimSpace(options.ReleaseURL) != "" {
@@ -173,6 +289,9 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 		now:              now,
 		trigger:          make(chan bool, 1),
 		automaticAllowed: func() bool { return true },
+		verifyExecutable: verifyExecutable,
+		launchInstaller:  launchInstaller,
+		removeFile:       removeFile,
 	}
 	if updater.currentVersion == "" {
 		updater.currentVersion = "dev"
@@ -195,6 +314,35 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 		updater.restorePendingUpdate()
 	}
 	return updater
+}
+
+func decodeExpectedUpdatePublisher(version, encoded string) (string, error) {
+	encoded = strings.TrimSpace(encoded)
+	if encoded == "" {
+		if version == "dev" {
+			return "", nil
+		}
+		return "", errors.New("发布构建缺少预期 Authenticode 发布者")
+	}
+	decoded, err := hex.DecodeString(encoded)
+	if err != nil {
+		return "", errors.New("预期 Authenticode 发布者编码无效")
+	}
+	if !utf8.Valid(decoded) || len(decoded) == 0 {
+		return "", errors.New("预期 Authenticode 发布者不是有效 UTF-8")
+	}
+	return string(decoded), nil
+}
+
+func defaultVerifyUpdateExecutable(path string) error {
+	expectedPublisher, err := decodeExpectedUpdatePublisher(appVersion, updateExpectedPublisherHex)
+	if err != nil {
+		return err
+	}
+	if expectedPublisher == "" {
+		return nil
+	}
+	return verifyAuthenticodePublisher(path, expectedPublisher)
 }
 
 func (updater *autoUpdater) Run(ctx context.Context) {
@@ -308,14 +456,51 @@ func (updater *autoUpdater) InstallOnExit(restart bool) error {
 	if pending == nil {
 		return nil
 	}
-	if err := verifyFileSHA256(pending.PendingPath, pending.SHA256); err != nil {
-		return fmt.Errorf("退出更新校验失败：%w", err)
+	// This revalidation narrows accidental replacement and ordinary tampering windows.
+	// A malicious process running as the same user can still race path-based checks;
+	// defending that boundary requires a handle-based installer protocol and is outside
+	// the updater's current threat model.
+	if err := verifyPendingExecutable(*pending, updater.verifyExecutable); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "待安装更新执行前安全校验失败：%v\n", err)
+		cleanupErr := updater.cleanupPendingUpdate(*pending)
+		if !errors.Is(cleanupErr, errPendingExecutableCleanup) {
+			updater.mu.Lock()
+			updater.pending = nil
+			updater.mu.Unlock()
+		}
+		if cleanupErr != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "待安装更新拒绝后清理失败：%v\n", cleanupErr)
+			updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
+			return errors.New("待安装更新清理失败，已拒绝执行")
+		}
+		updater.setStatus("error", pending.Version, "待安装更新安全校验失败，已拒绝执行。", 0, false)
+		return errors.New("待安装更新安全校验失败，已拒绝执行")
+	}
+	if err := updater.preparePendingInstall(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "启动更新替换器前残留文件清理失败：%v\n", err)
+		updater.mu.Lock()
+		updater.pending = nil
+		updater.mu.Unlock()
+		updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
+		return errors.New("待安装更新清理失败，已拒绝执行")
 	}
 	metadataPath := updater.metadataPath()
-	if err := launchUpdateInstaller(metadataPath, os.Getpid(), restart); err != nil {
-		return fmt.Errorf("启动更新替换器失败：%w", err)
+	if err := updater.launchInstaller(metadataPath, os.Getpid(), restart); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "启动更新替换器诊断：%v\n", err)
+		return errors.New("启动更新替换器失败")
 	}
 	return nil
+}
+
+func (updater *autoUpdater) preparePendingInstall() error {
+	if updater.executablePath == "" {
+		return errors.New("更新目标路径为空")
+	}
+	var cleanupErr error
+	for _, path := range []string{updater.executablePath + ".old", updater.executablePath + ".new"} {
+		cleanupErr = errors.Join(cleanupErr, updater.removeUpdateArtifact(path))
+	}
+	return cleanupErr
 }
 
 func (updater *autoUpdater) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -455,6 +640,12 @@ func (updater *autoUpdater) checkAndDownload(ctx context.Context, manual bool) {
 		updater.setStatus("downloading", candidate.Version, fmt.Sprintf("正在通过 %s 静默下载 v%s…", candidate.Source.Name, candidate.Version), 0, false)
 		pending, err = updater.downloadAsset(ctx, candidate.Version, asset)
 		if err != nil {
+			if errors.Is(err, errUpdateArtifactCleanup) {
+				_, _ = fmt.Fprintf(os.Stderr, "更新文件清理失败，已停止自动更新：%v\n", err)
+				updater.markChecked()
+				updater.setStatus("error", candidate.Version, "更新文件清理失败，已停止安装。", 0, false)
+				return
+			}
 			sourceErrors = append(sourceErrors, fmt.Sprintf("%s：下载更新失败：%v", candidate.Source.Name, err))
 			updater.setStatus("checking", candidate.Version, "当前更新源下载失败，正在尝试备用源…", 0, false)
 			continue
@@ -479,7 +670,7 @@ func (updater *autoUpdater) fetchReleaseFromSource(ctx context.Context, source u
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, source.URL, nil)
 	if err != nil {
-		return githubRelease{}, err
+		return githubRelease{}, errors.New("更新地址无效")
 	}
 	request.Header.Set("Accept", "application/json")
 	if source.GitHub {
@@ -489,7 +680,7 @@ func (updater *autoUpdater) fetchReleaseFromSource(ctx context.Context, source u
 	request.Header.Set("User-Agent", "bilibili-live-gift-panel/"+updater.currentVersion)
 	response, err := updater.client.Do(request)
 	if err != nil {
-		return githubRelease{}, err
+		return githubRelease{}, safeUpdateNetworkError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound {
@@ -535,6 +726,9 @@ func (updater *autoUpdater) resolveReleaseAsset(ctx context.Context, release git
 	if err != nil {
 		return githubAsset{}, err
 	}
+	if asset.Size <= 0 {
+		return githubAsset{}, fmt.Errorf("Release 中的 %s 文件大小无效", assetName)
+	}
 	if strings.TrimSpace(asset.Digest) != "" {
 		return asset, nil
 	}
@@ -555,12 +749,12 @@ func (updater *autoUpdater) fetchChecksum(ctx context.Context, downloadURL strin
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, downloadURL, nil)
 	if err != nil {
-		return "", err
+		return "", errors.New("校验地址无效")
 	}
 	request.Header.Set("User-Agent", "bilibili-live-gift-panel/"+updater.currentVersion)
 	response, err := updater.client.Do(request)
 	if err != nil {
-		return "", err
+		return "", safeUpdateNetworkError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -584,28 +778,31 @@ func (updater *autoUpdater) fetchChecksum(ctx context.Context, downloadURL strin
 	return digest, nil
 }
 
-func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, asset githubAsset) (*pendingUpdate, error) {
+func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, asset githubAsset) (_ *pendingUpdate, resultErr error) {
 	if err := os.MkdirAll(updater.updatesDir, 0o700); err != nil {
 		return nil, fmt.Errorf("创建更新目录失败：%w", err)
 	}
-	expectedSHA, _ := normalizeSHA256(asset.Digest)
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.DownloadURL, nil)
+	if asset.Size <= 0 {
+		return nil, errors.New("更新文件缺少有效大小")
+	}
+	expectedSHA, err := normalizeSHA256(asset.Digest)
 	if err != nil {
 		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.DownloadURL, nil)
+	if err != nil {
+		return nil, errors.New("下载地址无效")
 	}
 	request.Header.Set("User-Agent", "bilibili-live-gift-panel/"+updater.currentVersion)
 	response, err := updater.client.Do(request)
 	if err != nil {
-		return nil, err
+		return nil, safeUpdateNetworkError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("下载地址返回 HTTP %d", response.StatusCode)
 	}
 	expectedSize := asset.Size
-	if expectedSize == 0 && response.ContentLength > 0 {
-		expectedSize = response.ContentLength
-	}
 	if expectedSize > updateMaxBytes {
 		return nil, fmt.Errorf("下载文件过大：%d 字节", expectedSize)
 	}
@@ -614,9 +811,17 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 		return nil, err
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	hasher := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(temporary, hasher), io.LimitReader(response.Body, updateMaxBytes+1))
+	temporaryNeedsCleanup := true
+	defer func() {
+		if !temporaryNeedsCleanup {
+			return
+		}
+		if err := updater.removeUpdateArtifact(temporaryPath); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "更新临时文件清理失败：%v\n", err)
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+	written, copyErr := io.Copy(temporary, io.LimitReader(response.Body, updateMaxBytes+1))
 	closeErr := temporary.Close()
 	if copyErr != nil {
 		return nil, copyErr
@@ -627,29 +832,91 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 	if written > updateMaxBytes {
 		return nil, fmt.Errorf("下载文件超过 %d 字节限制", updateMaxBytes)
 	}
-	if expectedSize > 0 && written != expectedSize {
+	if written != expectedSize {
 		return nil, fmt.Errorf("下载大小不符：收到 %d 字节，预期 %d 字节", written, expectedSize)
 	}
-	actualSHA := hex.EncodeToString(hasher.Sum(nil))
-	if actualSHA != expectedSHA {
-		return nil, errors.New("SHA-256 校验不通过，已丢弃下载文件")
+	if err := verifyFileSHA256(temporaryPath, expectedSHA); err != nil {
+		return nil, fmt.Errorf("SHA-256 校验不通过，已丢弃下载文件：%w", err)
+	}
+	if err := updater.verifyExecutable(temporaryPath); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "下载更新 Authenticode 诊断：%v\n", err)
+		return nil, errors.New("更新文件安全校验失败")
 	}
 	pendingPath := filepath.Join(updater.updatesDir, "gift-panel-pending.exe")
-	_ = os.Remove(pendingPath)
+	if err := updater.removeUpdateArtifact(pendingPath); err != nil {
+		return nil, err
+	}
 	if err := os.Rename(temporaryPath, pendingPath); err != nil {
 		return nil, fmt.Errorf("保存待安装更新失败：%w", err)
 	}
+	temporaryNeedsCleanup = false
 	pending := &pendingUpdate{
 		Version:     version,
-		SHA256:      actualSHA,
+		Size:        expectedSize,
+		SHA256:      expectedSHA,
 		PendingPath: pendingPath,
 		TargetPath:  updater.executablePath,
 	}
+	if err := verifyPendingExecutable(*pending, updater.verifyExecutable); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "rename 后待安装更新安全校验诊断：%v\n", err)
+		verificationErr := errors.New("更新文件安全校验失败")
+		if cleanupErr := updater.removeUpdateArtifact(pendingPath); cleanupErr != nil {
+			return nil, errors.Join(verificationErr, cleanupErr)
+		}
+		return nil, verificationErr
+	}
 	if err := updater.writePendingMetadata(*pending); err != nil {
-		_ = os.Remove(pendingPath)
+		if cleanupErr := updater.removeUpdateArtifact(pendingPath); cleanupErr != nil {
+			return nil, errors.Join(err, cleanupErr)
+		}
 		return nil, err
 	}
 	return pending, nil
+}
+
+func (updater *autoUpdater) removeUpdateArtifact(path string) error {
+	return removeUpdateArtifactWith(updater.removeFile, path)
+}
+
+func removeUpdateArtifactWith(removeFile func(string) error, path string) error {
+	if path == "" {
+		return nil
+	}
+	var lastErr error
+	for attempt := 0; attempt < updateCleanupAttempts; attempt++ {
+		err := removeFile(path)
+		if err == nil || os.IsNotExist(err) {
+			return nil
+		}
+		lastErr = err
+		if attempt+1 < updateCleanupAttempts {
+			time.Sleep(updateCleanupRetryWait)
+		}
+	}
+	return fmt.Errorf("%w：%v", errUpdateArtifactCleanup, lastErr)
+}
+
+func verifyPendingExecutable(pending pendingUpdate, verifyExecutable func(string) error) error {
+	if pending.Size <= 0 {
+		return errors.New("待安装更新缺少有效大小")
+	}
+	info, err := os.Stat(pending.PendingPath)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("待安装更新不是普通文件")
+	}
+	if info.Size() != pending.Size {
+		return fmt.Errorf("待安装更新大小不符：收到 %d 字节，预期 %d 字节", info.Size(), pending.Size)
+	}
+	if err := verifyFileSHA256(pending.PendingPath, pending.SHA256); err != nil {
+		return err
+	}
+	if verifyExecutable == nil {
+		return errors.New("待安装更新缺少签名验证器")
+	}
+	return verifyExecutable(pending.PendingPath)
 }
 
 func (updater *autoUpdater) metadataPath() string {
@@ -745,16 +1012,22 @@ func (updater *autoUpdater) restorePendingUpdate() {
 	}
 	var pending pendingUpdate
 	if json.Unmarshal(data, &pending) != nil || pending.PendingPath != filepath.Join(updater.updatesDir, "gift-panel-pending.exe") || pending.TargetPath != updater.executablePath {
-		updater.cleanupPendingUpdate(pending)
+		updater.cleanupRestoredPending(pending)
 		return
 	}
 	comparison, versionErr := compareStableVersions(pending.Version, updater.currentVersion)
 	if versionErr != nil || comparison <= 0 {
-		updater.cleanupPendingUpdate(pending)
+		updater.cleanupRestoredPending(pending)
 		return
 	}
-	if verifyFileSHA256(pending.PendingPath, pending.SHA256) != nil {
-		updater.cleanupPendingUpdate(pending)
+	if err := verifyPendingExecutable(pending, updater.verifyExecutable); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "恢复待安装更新安全校验诊断：%v\n", err)
+		if cleanupErr := updater.cleanupPendingUpdate(pending); cleanupErr != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "恢复待安装更新校验失败后的清理诊断：%v\n", cleanupErr)
+			updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
+		} else {
+			updater.setStatus("error", pending.Version, "待安装更新安全校验失败，已拒绝执行。", 0, false)
+		}
 		return
 	}
 	updater.pending = &pending
@@ -768,18 +1041,35 @@ func (updater *autoUpdater) restorePendingUpdate() {
 	}
 }
 
-func (updater *autoUpdater) cleanupPendingUpdate(pending pendingUpdate) {
+func (updater *autoUpdater) cleanupRestoredPending(pending pendingUpdate) {
+	if err := updater.cleanupPendingUpdate(pending); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "恢复待安装更新时清理失败：%v\n", err)
+		updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
+	}
+}
+
+func (updater *autoUpdater) cleanupPendingUpdate(pending pendingUpdate) error {
 	knownPendingPath := filepath.Join(updater.updatesDir, "gift-panel-pending.exe")
+	pendingPath := ""
 	if pending.PendingPath == "" || filepath.Clean(pending.PendingPath) == filepath.Clean(knownPendingPath) {
-		_ = os.Remove(knownPendingPath)
+		pendingPath = knownPendingPath
 	} else if filepath.Dir(pending.PendingPath) == filepath.Clean(updater.updatesDir) {
-		_ = os.Remove(pending.PendingPath)
+		pendingPath = pending.PendingPath
 	}
-	_ = os.Remove(updater.metadataPath())
+	if pendingPath != "" {
+		if err := updater.removeUpdateArtifact(pendingPath); err != nil {
+			return errors.Join(errPendingExecutableCleanup, err)
+		}
+	}
+	paths := []string{updater.metadataPath()}
 	if updater.executablePath != "" {
-		_ = os.Remove(updater.executablePath + ".old")
-		_ = os.Remove(updater.executablePath + ".new")
+		paths = append(paths, updater.executablePath+".old", updater.executablePath+".new")
 	}
+	var cleanupErr error
+	for _, path := range paths {
+		cleanupErr = errors.Join(cleanupErr, updater.removeUpdateArtifact(path))
+	}
+	return cleanupErr
 }
 
 func normalizeSHA256(value string) (string, error) {
@@ -887,25 +1177,46 @@ func runUpdateHelper(args []string) (bool, error) {
 	}
 	data, err := os.ReadFile(args[2])
 	if err != nil {
-		return true, err
+		_, _ = fmt.Fprintf(os.Stderr, "读取更新状态诊断：%v\n", err)
+		return true, errors.New("读取更新状态失败")
 	}
 	var pending pendingUpdate
 	if err := json.Unmarshal(data, &pending); err != nil {
-		return true, err
+		_, _ = fmt.Fprintf(os.Stderr, "解析更新状态诊断：%v\n", err)
+		return true, errors.New("解析更新状态失败")
 	}
 	if err := applyDownloadedUpdate(pending, waitPID); err != nil {
-		return true, err
+		_, _ = fmt.Fprintf(os.Stderr, "应用待安装更新诊断：%v\n", err)
+		return true, errors.New("应用待安装更新失败")
 	}
 	if err := writeInstalledUpdateMarker(args[2], pending.Version); err != nil {
-		return true, err
+		_, _ = fmt.Fprintf(os.Stderr, "记录已安装更新诊断：%v\n", err)
+		return true, errors.New("记录已安装更新失败")
 	}
-	_ = os.Remove(args[2])
+	if err := os.Remove(args[2]); err != nil && !errors.Is(err, os.ErrNotExist) {
+		_, _ = fmt.Fprintf(os.Stderr, "清理更新状态诊断：%v\n", err)
+	}
 	if restart {
-		if err := startDetachedExecutable(pending.TargetPath); err != nil {
-			return true, fmt.Errorf("重新启动更新后的程序失败：%w", err)
+		if err := startVerifiedUpdatedExecutable(pending); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "重新启动更新后的程序诊断：%v\n", err)
+			return true, errors.New("重新启动更新后的程序失败")
 		}
 	}
 	return true, nil
+}
+
+func startVerifiedUpdatedExecutable(pending pendingUpdate) error {
+	target := pending
+	target.PendingPath = pending.TargetPath
+	if err := verifyPendingExecutable(target, defaultVerifyUpdateExecutable); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "重新启动更新后程序前安全校验诊断：%v\n", err)
+		return errors.New("更新后程序安全校验失败")
+	}
+	if err := startUpdatedTargetExecutable(pending.TargetPath); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "启动更新后程序诊断：%v\n", err)
+		return errors.New("启动更新后程序失败")
+	}
+	return nil
 }
 
 func startDetachedExecutable(path string, args ...string) error {

@@ -1,0 +1,30 @@
+[Unit]
+Description=Gift Panel domestic update API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gift-panel-update
+Group=gift-panel-update
+EnvironmentFile=/etc/gift-panel-update-api.env
+Environment=UPDATE_API_LISTEN=127.0.0.1:12450
+ExecStart=/opt/gift-panel-update-api/current/gift-panel-update-api
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LogNamespace=gift-panel-update-api
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
