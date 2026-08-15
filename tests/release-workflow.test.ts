@@ -391,6 +391,18 @@ describe('release workflow supply-chain contract', () => {
     expect(validate).toBeLessThan(mirror);
   });
 
+  it('writes release publication timestamps as invariant UTC RFC3339 for the COS publisher', () => {
+    const { steps } = releaseWorkflow();
+    for (const name of ['Inspect existing GitHub release', 'Create GitHub release']) {
+      const run = steps[stepIndex(steps, name)]?.run ?? '';
+      expect(run, name).toContain('.ToUniversalTime()');
+      expect(run, name).toContain("yyyy-MM-dd'T'HH:mm:ss'Z'");
+      expect(run, name).toContain('[Globalization.CultureInfo]::InvariantCulture');
+      expect(run, name).toContain('RELEASE_PUBLISHED_AT=$publishedAtRFC3339');
+      expect(run, name).not.toContain('RELEASE_PUBLISHED_AT=$($release.published_at)');
+    }
+  });
+
   it('accepts the exact typed fallback update manifest contract', () => {
     const result = runPublishedReleaseValidation(publishedManifestFixture());
 
