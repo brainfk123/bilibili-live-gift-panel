@@ -19,13 +19,19 @@ func main() {
 		return cosstore.New(os.Getenv("COS_BUCKET"), os.Getenv("COS_REGION"), os.Getenv("COS_SECRET_ID"), os.Getenv("COS_SECRET_KEY"), nil)
 	}, os.Stdout)
 	if err != nil {
-		if errors.Is(err, publish.ErrPromotionIndeterminate) {
-			log.Print("publish failed: stable promotion outcome is indeterminate; verify channels/stable/latest.json and restore the approved backup if required")
-		} else {
-			log.Print("publish failed")
-		}
+		log.Print(publishFailureMessage(err))
 		os.Exit(1)
 	}
+}
+
+func publishFailureMessage(err error) string {
+	if errors.Is(err, publish.ErrPromotionIndeterminate) {
+		return "publish failed: stable promotion outcome is indeterminate; verify channels/stable/latest.json and restore the approved backup if required"
+	}
+	if summary := cosstore.SafeErrorSummary(err); summary != "" {
+		return "publish failed: Tencent COS " + summary
+	}
+	return "publish failed"
 }
 
 func run(args []string, newStore func() (publish.Store, error), output io.Writer) error {

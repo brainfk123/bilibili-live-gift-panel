@@ -3,6 +3,7 @@ package cosstore_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +14,47 @@ import (
 	"time"
 
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/cosstore"
+	cos "github.com/tencentyun/cos-go-sdk-v5"
 )
+
+func TestSafeErrorSummaryReportsOnlyCOSCodeAndStatus(t *testing.T) {
+	request, err := http.NewRequest(http.MethodHead, "https://private.example.invalid/releases/v0.4.3/secret.exe?signature=secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerError := &cos.ErrorResponse{
+		Response:  &http.Response{StatusCode: http.StatusForbidden, Request: request, Header: make(http.Header)},
+		Code:      "AccessDenied",
+		Message:   "sensitive provider detail",
+		RequestID: "sensitive-request-id",
+	}
+
+	got := cosstore.SafeErrorSummary(fmt.Errorf("wrapped object path: %w", providerError))
+	if got != "AccessDenied (HTTP 403)" {
+		t.Fatalf("summary = %q", got)
+	}
+	for _, forbidden := range []string{"secret.exe", "signature", "sensitive", "request-id"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("summary leaked %q: %q", forbidden, got)
+		}
+	}
+}
+
+func TestSafeErrorSummaryRejectsNonCOSAndMalformedProviderErrors(t *testing.T) {
+	if got := cosstore.SafeErrorSummary(errors.New("local validation failed")); got != "" {
+		t.Fatalf("local summary = %q, want empty", got)
+	}
+	if got := cosstore.SafeErrorSummary(&cos.ErrorResponse{Code: "AccessDenied"}); got != "" {
+		t.Fatalf("malformed provider summary = %q, want empty", got)
+	}
+	providerError := &cos.ErrorResponse{
+		Response: &http.Response{StatusCode: http.StatusForbidden},
+		Code:     "AccessDenied\nforged-log-line",
+	}
+	if got := cosstore.SafeErrorSummary(providerError); got != "COS error (HTTP 403)" {
+		t.Fatalf("unsafe provider summary = %q", got)
+	}
+}
 
 func TestHeadReturnsMetadataAndTypedNotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

@@ -27,9 +27,30 @@ var ErrNotFound = errors.New("COS object not found")
 var ErrAlreadyExists = errors.New("COS object already exists")
 
 var (
-	cosBucketPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?-[1-9][0-9]{4,19}$`)
-	cosRegionPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}[a-z0-9]$`)
+	cosBucketPattern    = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?-[1-9][0-9]{4,19}$`)
+	cosRegionPattern    = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}[a-z0-9]$`)
+	cosErrorCodePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 )
+
+// SafeErrorSummary exposes only the provider error code and HTTP status. It
+// deliberately omits request URLs, object keys, provider messages, and request
+// identifiers so CI can diagnose authentication and authorization failures
+// without leaking release or credential-adjacent data.
+func SafeErrorSummary(err error) string {
+	response, ok := cos.IsCOSError(err)
+	if !ok || response.Response == nil {
+		return ""
+	}
+	status := response.Response.StatusCode
+	if status < http.StatusMultipleChoices || status > 599 {
+		return ""
+	}
+	code := response.Code
+	if !cosErrorCodePattern.MatchString(code) {
+		code = "COS error"
+	}
+	return fmt.Sprintf("%s (HTTP %d)", code, status)
+}
 
 // ObjectInfo is the immutable-object metadata used to verify COS uploads.
 type ObjectInfo struct {

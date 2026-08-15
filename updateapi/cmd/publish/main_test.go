@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +16,34 @@ import (
 
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/cosstore"
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/publish"
+	cos "github.com/tencentyun/cos-go-sdk-v5"
 )
+
+func TestPublishFailureMessageIncludesOnlySafeCOSClassification(t *testing.T) {
+	request, err := http.NewRequest(http.MethodHead, "https://private.example.invalid/releases/secret?token=secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerError := &cos.ErrorResponse{
+		Response:  &http.Response{StatusCode: http.StatusForbidden, Request: request, Header: make(http.Header)},
+		Code:      "AccessDenied",
+		Message:   "sensitive provider detail",
+		RequestID: "sensitive-request-id",
+	}
+	got := publishFailureMessage(fmt.Errorf("private object: %w", providerError))
+	if got != "publish failed: Tencent COS AccessDenied (HTTP 403)" {
+		t.Fatalf("message = %q", got)
+	}
+	if strings.Contains(got, "secret") || strings.Contains(got, "private object") {
+		t.Fatalf("message leaked private detail: %q", got)
+	}
+}
+
+func TestPublishFailureMessageKeepsLocalFailuresGeneric(t *testing.T) {
+	if got := publishFailureMessage(errors.New("private local path")); got != "publish failed" {
+		t.Fatalf("message = %q", got)
+	}
+}
 
 func TestRunRequiresAllPublishingFlagsBeforeCreatingStore(t *testing.T) {
 	asset, checksum, changelog := commandInputs(t)
