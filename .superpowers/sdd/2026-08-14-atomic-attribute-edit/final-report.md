@@ -476,3 +476,43 @@ goserver/state_transaction_test.go
 ```
 
 The ignored RED/GREEN working ledger is `.superpowers/sdd/2026-08-14-atomic-attribute-edit/additional-final-fix-report.md`; it is provenance only and is not staged. The final whitespace/scope and post-commit status checks are recorded by the controller after this report is staged and committed. No remaining persistence concern is known within the authorized scope.
+
+## Reopened WAL/reset boundary correction — 2026-08-15
+
+This section supersedes the preceding persistence/reset claims where they
+conflict. Base commit: `003daf189cd88a173353b36d48afe061205d1144`.
+
+The final reopened wave closes four boundaries:
+
+1. A rename-visible but non-durable WAL never starts shard replay. Restart
+   recovery validates and durably republishes the exact WAL bytes before the
+   candidate becomes authoritative; failed endorsement remains retryable and
+   fail-closed.
+2. `backgroundRuntime.Run` remains cancellation-responsive behind transient
+   startup reset recovery, and starts connection/gift/timer workers exactly
+   once after recovery or a successful DELETE retry.
+3. Reset retirement uses leaf `Lstat` plus platform reparse classification,
+   validates owned scan directories before enumeration, retires owned link
+   entries without following targets, and covers state/WAL, inbox records and
+   temporary files, sequence state, and pending animations.
+4. The backward-compatible reset marker optionally stores only
+   `roomConfigured` and `autoUpdateEnabled`. A successful retry consumes that
+   baseline for exactly-once callbacks; failed resets and legacy markers emit
+   no inferred callback.
+
+Deterministic RED/GREEN provenance is recorded in the ignored
+`.superpowers/sdd/2026-08-14-atomic-attribute-edit/reopened-persistence-fix-report.md`.
+Fresh final gates passed: reopened focused count 20 (`9.150s`), reopened race
+count 5 (`2.793s`), full Go (`32.393s`), full Go race (`47.539s`), Linux
+compile, UI build (91 modules), Windows EXE build (83 embedded assets), and
+the permanent embedded manifest/handler byte-closure test (`1.687s`). An
+independent read-only review returned READY with zero Critical, Important, or
+Minor findings. Actual Windows symlink integration tests explicitly skipped
+on this host because symlink privilege is unavailable; portable metadata and
+reparse seams passed.
+
+The rebuilt ignored local artifact is `dist/gift-panel.exe`, 14,086,144 bytes,
+SHA-256 `285B16852F7ADE56DB21854449947B00F527D539EA728FD6F1CF15B082A82CCD`.
+It is an unsigned local development build. It was not staged, published,
+tagged, signed, or released; no dependency, lockfile, version, workflow,
+frontend source, or FFmpeg source/payload change belongs to this wave.

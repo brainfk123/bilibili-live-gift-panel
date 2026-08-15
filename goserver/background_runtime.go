@@ -80,6 +80,7 @@ type backgroundRuntime struct {
 	store                    *configStore
 	sourceFactory            func() giftEventSource
 	reload                   chan struct{}
+	startupResetReady        chan struct{}
 	mu                       sync.RWMutex
 	status                   runtimeStatus
 	connectionGapRoomID      string
@@ -103,6 +104,7 @@ type backgroundRuntime struct {
 	profileTimeout           time.Duration
 	profileResolver          userProfileResolver
 	diagnostics              *diagnosticLogger
+	onWorkerStart            func(string)
 }
 
 type timerSchedule struct {
@@ -119,16 +121,17 @@ func newBackgroundRuntime(store *configStore, sourceFactory func() giftEventSour
 		center = notifications[0]
 	}
 	return &backgroundRuntime{
-		store:           store,
-		sourceFactory:   sourceFactory,
-		reload:          make(chan struct{}, 1),
-		status:          runtimeStatus{State: "idle"},
-		timerSchedules:  map[string]timerSchedule{},
-		notifications:   center,
-		inboxWake:       make(chan struct{}, 1),
-		inboxRetryDelay: 250 * time.Millisecond,
-		profileTimeout:  2 * time.Second,
-		profileResolver: newBilibiliUserProfileResolver(nil, ""),
+		store:             store,
+		sourceFactory:     sourceFactory,
+		reload:            make(chan struct{}, 1),
+		startupResetReady: make(chan struct{}, 1),
+		status:            runtimeStatus{State: "idle"},
+		timerSchedules:    map[string]timerSchedule{},
+		notifications:     center,
+		inboxWake:         make(chan struct{}, 1),
+		inboxRetryDelay:   250 * time.Millisecond,
+		profileTimeout:    2 * time.Second,
+		profileResolver:   newBilibiliUserProfileResolver(nil, ""),
 	}
 }
 
@@ -157,9 +160,14 @@ func (runtime *backgroundRuntime) currentAttributeFreezeChecker() attributeFreez
 }
 
 func (runtime *backgroundRuntime) Run(ctx context.Context) {
-	if runtime.store != nil && runtime.store.ValidResetIntentPending() {
-		if err := runtime.Reset(); err != nil {
+	for runtime.store != nil && runtime.store.ValidResetIntentPending() {
+		if _, err := runtime.reset(true); err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
 			return
+		case <-runtime.startupResetReady:
 		}
 	}
 	installation, err := func() (runtimeInboxInstallation, error) {
@@ -195,17 +203,31 @@ func (runtime *backgroundRuntime) Run(ctx context.Context) {
 	}
 
 	var workers sync.WaitGroup
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
 	workers.Add(2)
 	go func() {
 		defer workers.Done()
+		runtime.workerStarted("gift")
 		runtime.runGiftLoop(ctx)
 	}()
 	go func() {
 		defer workers.Done()
+		runtime.workerStarted("timer")
 		runtime.runTimerLoop(ctx)
 	}()
+	runtime.workerStarted("connection")
 	runtime.runConnectionLoop(ctx)
 	workers.Wait()
+}
+
+func (runtime *backgroundRuntime) workerStarted(name string) {
+	if runtime.onWorkerStart != nil {
+		runtime.onWorkerStart(name)
+	}
 }
 
 func (runtime *backgroundRuntime) runConnectionLoop(ctx context.Context) {
@@ -1124,21 +1146,35 @@ func (runtime *backgroundRuntime) resetFailure(err error) error {
 // write lock waits for in-flight work and prevents new work until every owned
 // durable artifact has been cleared or the store has been failed closed.
 func (runtime *backgroundRuntime) Reset() error {
+	_, err := runtime.ResetWithOutcome()
+	return err
+}
+
+func (runtime *backgroundRuntime) ResetWithOutcome() (resetOutcome, error) {
+	pendingOnly := runtime.store != nil && runtime.store.ValidResetIntentPending()
+	return runtime.reset(pendingOnly)
+}
+
+func (runtime *backgroundRuntime) reset(pendingOnly bool) (resetOutcome, error) {
 	runtime.resetGate.Lock()
 	defer runtime.resetGate.Unlock()
 	if runtime.store == nil {
-		return runtime.resetFailure(fmt.Errorf("runtime reset requires a config store"))
+		return resetOutcome{}, runtime.resetFailure(fmt.Errorf("runtime reset requires a config store"))
+	}
+	if pendingOnly && !runtime.store.ValidResetIntentPending() {
+		runtime.signalStartupResetReady()
+		return resetOutcome{}, nil
 	}
 	runtime.mu.Lock()
 	if runtime.resetGeneration == ^uint64(0) {
 		runtime.mu.Unlock()
-		return runtime.resetFailure(fmt.Errorf("runtime reset generation exhausted"))
+		return resetOutcome{}, runtime.resetFailure(fmt.Errorf("runtime reset generation exhausted"))
 	}
 	runtime.resetGeneration++
 	installation := runtimeInboxInstallation{inbox: runtime.inbox, epoch: runtime.inboxEpoch}
 	runtime.mu.Unlock()
 	if err := runtime.store.beginResetIntent(); err != nil {
-		return runtime.resetFailure(err)
+		return resetOutcome{}, runtime.resetFailure(err)
 	}
 
 	resetInbox := installation.inbox
@@ -1146,7 +1182,7 @@ func (runtime *backgroundRuntime) Reset() error {
 	if resetInbox == nil {
 		opened, err := openGiftInbox(filepath.Dir(runtime.store.path))
 		if err != nil {
-			return runtime.resetFailure(err)
+			return resetOutcome{}, runtime.resetFailure(err)
 		}
 		resetInbox = opened
 		closeResetInbox = true
@@ -1156,16 +1192,17 @@ func (runtime *backgroundRuntime) Reset() error {
 	}
 	resetter, ok := resetInbox.(runtimeGiftInboxResetter)
 	if !ok {
-		return runtime.resetFailure(fmt.Errorf("installed gift inbox does not support reset"))
+		return resetOutcome{}, runtime.resetFailure(fmt.Errorf("installed gift inbox does not support reset"))
 	}
 	if err := resetter.Reset(); err != nil {
-		return runtime.resetFailure(err)
+		return resetOutcome{}, runtime.resetFailure(err)
 	}
 	if err := runtime.resetPendingGiftAnimations(); err != nil {
-		return runtime.resetFailure(err)
+		return resetOutcome{}, runtime.resetFailure(err)
 	}
-	if err := runtime.store.resetStateArtifacts(); err != nil {
-		return runtime.resetFailure(err)
+	outcome, err := runtime.store.resetStateArtifactsWithOutcome()
+	if err != nil {
+		return resetOutcome{}, runtime.resetFailure(err)
 	}
 
 	runtime.mu.Lock()
@@ -1197,13 +1234,25 @@ func (runtime *backgroundRuntime) Reset() error {
 	case runtime.inboxWake <- struct{}{}:
 	default:
 	}
-	return nil
+	runtime.signalStartupResetReady()
+	return outcome, nil
+}
+
+func (runtime *backgroundRuntime) signalStartupResetReady() {
+	select {
+	case runtime.startupResetReady <- struct{}{}:
+	default:
+	}
 }
 
 func (runtime *backgroundRuntime) resetPendingGiftAnimations() error {
 	runtime.animationMu.Lock()
 	defer runtime.animationMu.Unlock()
 	path := runtime.pendingGiftAnimationsPath()
+	dir := filepath.Dir(path)
+	if err := validateResetScanDirectory(dir, dir); err != nil {
+		return fmt.Errorf("validate pending gift animation reset directory: %w", err)
+	}
 	retire := runtime.retireResetArtifact
 	if retire == nil {
 		retire = retireFileDurably

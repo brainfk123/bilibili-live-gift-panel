@@ -25,9 +25,8 @@ type pendingStateTransaction struct {
 }
 
 // statePersistenceOutcome records the logical commit boundary separately
-// from cleanup/application errors. Committed is true once either the complete
-// recovery journal is published at its final name or every state shard has
-// been durably replaced.
+// from cleanup/application errors. A newly published journal is authoritative
+// only after it crosses the platform durability boundary.
 type statePersistenceOutcome struct {
 	Committed bool
 	Err       error
@@ -36,6 +35,26 @@ type statePersistenceOutcome struct {
 type stateTransactionApplyOutcome struct {
 	ShardsCommitted bool
 	Err             error
+}
+
+// stateTransactionEndorsementError means a locally valid WAL has not yet been
+// durably re-published. Unlike corrupt or unreadable evidence, that candidate
+// may become authoritative on retry, so reads must not fall through to shards.
+type stateTransactionEndorsementError struct {
+	err error
+}
+
+func (e *stateTransactionEndorsementError) Error() string {
+	return fmt.Sprintf("重新发布状态事务失败：%v", e.err)
+}
+
+func (e *stateTransactionEndorsementError) Unwrap() error {
+	return e.err
+}
+
+func isStateTransactionEndorsementError(err error) bool {
+	var endorsementErr *stateTransactionEndorsementError
+	return errors.As(err, &endorsementErr)
 }
 
 func (s *configStore) persistPreparedStateLocked(state appState, ingestionID string) error {
@@ -85,6 +104,9 @@ func (s *configStore) persistPreparedStateWithOutcomeLocked(state appState, inge
 		journalWrite.Err = fmt.Errorf("发布状态事务失败：事务未持久化")
 	}
 	s.transactionPending = true
+	if !journalWrite.Durable {
+		return statePersistenceOutcome{Err: journalWrite.Err}
+	}
 	applyOutcome := s.applyPendingStateTransactionWithOutcomeLocked(tx)
 	if applyOutcome.Err != nil {
 		return statePersistenceOutcome{
@@ -269,6 +291,7 @@ func (s *configStore) recoverPendingStateTransactionLocked() error {
 	if errors.Is(err, os.ErrNotExist) {
 		s.transactionPending = false
 		s.committedTransactionState = nil
+		s.clearTransactionRecoveryBlockLocked()
 		return nil
 	}
 	if err != nil {
@@ -290,11 +313,21 @@ func (s *configStore) recoverPendingStateTransactionLocked() error {
 		s.committedTransactionState = nil
 		return err
 	}
+	endorsement := s.writeAtomicFileOutcome(s.stateTransactionPath(), data)
+	if !endorsement.Committed || !endorsement.Durable {
+		s.committedTransactionState = nil
+		endorsementErr := endorsement.Err
+		if endorsementErr == nil {
+			endorsementErr = fmt.Errorf("状态事务恢复证据未持久化")
+		}
+		return &stateTransactionEndorsementError{err: endorsementErr}
+	}
 	s.committedTransactionState = &candidate
 	if err := s.applyPendingStateTransactionLocked(tx); err != nil {
 		return err
 	}
 	s.committedTransactionState = nil
+	s.clearTransactionRecoveryBlockLocked()
 	return nil
 }
 

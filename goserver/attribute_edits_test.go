@@ -1422,11 +1422,11 @@ func TestAttributeEditHTTPRejectsRenameVisibleNonDurableJournalBeforeFirstShard(
 		store.mu.Lock()
 		outcome := store.persistPreparedStateWithOutcomeLocked(next, "")
 		store.mu.Unlock()
-		if outcome.Committed || !errors.Is(outcome.Err, injectedSync) || !errors.Is(outcome.Err, injectedShard) {
-			t.Fatalf("outcome = %+v, want uncommitted joined WAL and first-shard failures", outcome)
+		if outcome.Committed || !errors.Is(outcome.Err, injectedSync) || errors.Is(outcome.Err, injectedShard) {
+			t.Fatalf("outcome = %+v, want only the uncommitted WAL durability failure", outcome)
 		}
-		if syncHits.Load() != 1 || shardHits.Load() != 1 {
-			t.Fatalf("injection hits sync=%d shard=%d, want 1 each", syncHits.Load(), shardHits.Load())
+		if syncHits.Load() != 1 || shardHits.Load() != 0 {
+			t.Fatalf("injection hits sync=%d shard=%d, want 1/0", syncHits.Load(), shardHits.Load())
 		}
 		assertStateFilesEqual(t, store, before)
 	})
@@ -1452,8 +1452,8 @@ func TestAttributeEditHTTPRejectsRenameVisibleNonDurableJournalBeforeFirstShard(
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("response=%d body=%s, want safe 500", response.Code, response.Body.String())
 	}
-	if syncHits.Load() != 1 || shardHits.Load() != 1 {
-		t.Fatalf("injection hits sync=%d shard=%d, want 1 each before reconciliation", syncHits.Load(), shardHits.Load())
+	if syncHits.Load() != 1 || shardHits.Load() != 0 {
+		t.Fatalf("injection hits sync=%d shard=%d, want 1/0 before recovery", syncHits.Load(), shardHits.Load())
 	}
 	if roomNotifications.Load() != 0 || timerNotifications.Load() != 0 {
 		t.Fatalf("notifications room=%d timer=%d, want zero", roomNotifications.Load(), timerNotifications.Load())
@@ -1476,22 +1476,6 @@ func TestAttributeEditHTTPRejectsRenameVisibleNonDurableJournalBeforeFirstShard(
 		t.Fatalf("retained WAL candidate is not the whole edit: %#v", retainedCandidate)
 	}
 
-	restarted := &configStore{path: store.path}
-	var restartSyncHits atomic.Int32
-	var restartShardHits atomic.Int32
-	installFailures(restarted, &restartSyncHits, &restartShardHits)
-	restarted, err = initializeConfigStore(restarted)
-	if err != nil {
-		t.Fatal(err)
-	}
-	retained, err := restarted.readState()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(retained, retainedCandidate) {
-		t.Fatal("restart with retained valid WAL exposed a mixed shard state")
-	}
-
 	if err := os.Remove(store.stateTransactionPath()); err != nil {
 		t.Fatal(err)
 	}
@@ -1504,6 +1488,32 @@ func TestAttributeEditHTTPRejectsRenameVisibleNonDurableJournalBeforeFirstShard(
 		t.Fatalf("power loss without non-durable WAL exposed a mixed snapshot: %#v", withoutWAL)
 	}
 	assertStateFilesEqual(t, powerLoss, before)
+	if err := writeFileAtomically(store.stateTransactionPath(), journalData); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := &configStore{path: store.path}
+	var restartSyncHits atomic.Int32
+	var restartShardHits atomic.Int32
+	installFailures(restarted, &restartSyncHits, &restartShardHits)
+	restarted, err = initializeConfigStore(restarted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restarted.readState(); !errors.Is(err, injectedSync) {
+		t.Fatalf("failed restart endorsement error=%v, want sync failure", err)
+	}
+	if restartShardHits.Load() != 0 || restarted.committedTransactionState != nil {
+		t.Fatalf("failed restart endorsement shard hits=%d candidate=%v, want 0/nil", restartShardHits.Load(), restarted.committedTransactionState != nil)
+	}
+	restarted.writeAtomicallyOutcome = nil
+	retained, err := restarted.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(retained, retainedCandidate) {
+		t.Fatal("durably endorsed restart did not recover the whole candidate")
+	}
 }
 
 func TestAttributeEditSubmitReconcilesCommittedPostJournalFailures(t *testing.T) {
@@ -1511,21 +1521,7 @@ func TestAttributeEditSubmitReconcilesCommittedPostJournalFailures(t *testing.T)
 		name   string
 		inject func(*configStore, *bool)
 	}
-	stages := []failureStage{
-		{
-			name: "real rename-visible non-durable journal publication",
-			inject: func(store *configStore, failed *bool) {
-				store.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
-					if filepath.Base(path) == "state-transaction.json" && !*failed {
-						*failed = true
-						injected := errors.New("injected real non-durable journal directory sync warning")
-						return writeFileAtomicallyOutcomeWith(path, data, func(string) error { return injected })
-					}
-					return writeFileAtomicallyOutcome(path, data)
-				}
-			},
-		},
-	}
+	stages := []failureStage{}
 	for _, failedShard := range []string{"events.log", "history.json", "cache.json", "config.json"} {
 		stages = append(stages, failureStage{
 			name: "shard/" + failedShard,

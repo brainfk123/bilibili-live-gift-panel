@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -378,7 +379,7 @@ func TestConfigResetClearsCorruptTransactionAndRuntimeArtifactsThroughProduction
 	if err := os.WriteFile(unrelated, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store.setResetCoordinator(background.Reset)
+	store.setResetCoordinator(background.ResetWithOutcome)
 
 	response := httptest.NewRecorder()
 	store.handle(response, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
@@ -412,7 +413,7 @@ func TestConfigResetFailureIsSafeAndLeavesMutationsBlocked(t *testing.T) {
 	}
 	background := newBackgroundRuntime(store, nil)
 	background.installInbox(inbox, inbox.Health())
-	store.setResetCoordinator(background.Reset)
+	store.setResetCoordinator(background.ResetWithOutcome)
 
 	response := httptest.NewRecorder()
 	store.handle(response, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
@@ -478,7 +479,7 @@ func TestConfigResetFailureAfterMarkerFailsClosedAndRetryClearsCandidate(t *test
 	}
 	background := newBackgroundRuntime(store, nil)
 	background.installInbox(inbox, inbox.Health())
-	store.setResetCoordinator(background.Reset)
+	store.setResetCoordinator(background.ResetWithOutcome)
 
 	failedReset := httptest.NewRecorder()
 	store.handle(failedReset, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
@@ -604,8 +605,8 @@ func (inbox *markerCheckingResetInbox) Reset() error {
 	if err != nil {
 		return fmt.Errorf("reset intent was not published before inbox reset: %w", err)
 	}
-	if string(data) != "{\"schemaVersion\":1}\n" {
-		return fmt.Errorf("reset intent is not canonical: %q", data)
+	if _, err := decodeResetIntentRecord(data); err != nil {
+		return fmt.Errorf("reset intent is not canonical: %q: %w", data, err)
 	}
 	return inbox.resetErr
 }
@@ -622,7 +623,7 @@ func TestBackgroundRuntimeResetPublishesIntentBeforeFailureAndFailsClosed(t *tes
 	inbox := &markerCheckingResetInbox{markerPath: filepath.Join(dir, "reset-intent.json"), resetErr: injected}
 	background := newBackgroundRuntime(store, nil)
 	background.installInbox(inbox, inbox.Health())
-	store.setResetCoordinator(background.Reset)
+	store.setResetCoordinator(background.ResetWithOutcome)
 
 	failed := httptest.NewRecorder()
 	store.handle(failed, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
@@ -671,11 +672,13 @@ func TestBackgroundRuntimeResetRepublishesNonDurableIntentBeforeRetirement(t *te
 	publicationAttempts := 0
 	markerSyncAttempts := 0
 	markerDurable := false
+	publishedMarkers := make([][]byte, 0, 3)
 	store.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
 		if path != markerPath {
 			return writeFileAtomicallyOutcome(path, data)
 		}
 		publicationAttempts++
+		publishedMarkers = append(publishedMarkers, append([]byte(nil), data...))
 		attempt := publicationAttempts
 		return writeFileAtomicallyOutcomeWith(path, data, func(directory string) error {
 			markerSyncAttempts++
@@ -712,8 +715,12 @@ func TestBackgroundRuntimeResetRepublishesNonDurableIntentBeforeRetirement(t *te
 	if inbox.resetCalls != 0 || len(retired) != 0 {
 		t.Fatalf("first reset ran inbox/retirement before durable marker: inbox=%d retired=%v", inbox.resetCalls, retired)
 	}
-	if data, err := os.ReadFile(markerPath); err != nil || string(data) != string(canonicalResetIntentData) {
+	if data, err := os.ReadFile(markerPath); err != nil || !bytes.Equal(data, publishedMarkers[0]) {
 		t.Fatalf("rename-visible marker data=%q err=%v", data, err)
+	}
+	baseline, err := decodeResetIntentRecord(publishedMarkers[0])
+	if err != nil || baseline == nil || !baseline.RoomConfigured || !baseline.AutoUpdateEnabled {
+		t.Fatalf("rename-visible marker baseline=%+v err=%v", baseline, err)
 	}
 	get := httptest.NewRecorder()
 	store.handle(get, httptest.NewRequest(http.MethodGet, "/api/config", nil))
@@ -727,6 +734,9 @@ func TestBackgroundRuntimeResetRepublishesNonDurableIntentBeforeRetirement(t *te
 	if publicationAttempts != 2 || markerSyncAttempts != 2 {
 		t.Fatalf("second reset marker publication attempts=%d sync attempts=%d, want 2/2", publicationAttempts, markerSyncAttempts)
 	}
+	if !bytes.Equal(publishedMarkers[0], publishedMarkers[1]) {
+		t.Fatalf("non-durable marker retry changed exact bytes: first=%q second=%q", publishedMarkers[0], publishedMarkers[1])
+	}
 	if inbox.resetCalls != 0 || len(retired) != 0 {
 		t.Fatalf("second reset ran inbox/retirement before durable marker: inbox=%d retired=%v", inbox.resetCalls, retired)
 	}
@@ -736,6 +746,9 @@ func TestBackgroundRuntimeResetRepublishesNonDurableIntentBeforeRetirement(t *te
 	}
 	if publicationAttempts != 3 || markerSyncAttempts != 3 || !markerDurable {
 		t.Fatalf("durable retry marker publication attempts=%d sync attempts=%d durable=%v", publicationAttempts, markerSyncAttempts, markerDurable)
+	}
+	if !bytes.Equal(publishedMarkers[0], publishedMarkers[2]) {
+		t.Fatalf("durable marker retry changed exact bytes: first=%q third=%q", publishedMarkers[0], publishedMarkers[2])
 	}
 	if inbox.resetCalls != 1 {
 		t.Fatalf("durable retry inbox reset calls=%d, want 1", inbox.resetCalls)
@@ -765,8 +778,9 @@ func TestBackgroundRuntimeResetRepublishesStartupObservedIntentBeforeRetirement(
 	if err := seed.beginResetIntent(); !errors.Is(err, injected) {
 		t.Fatalf("pre-restart marker publication error=%v, want injected sync failure", err)
 	}
-	if data, err := os.ReadFile(markerPath); err != nil || string(data) != string(canonicalResetIntentData) {
-		t.Fatalf("pre-restart rename-visible marker data=%q err=%v", data, err)
+	preRestartMarker, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("read pre-restart rename-visible marker: %v", err)
 	}
 
 	restarted, err := initializeConfigStore(&configStore{path: path})
@@ -784,6 +798,9 @@ func TestBackgroundRuntimeResetRepublishesStartupObservedIntentBeforeRetirement(
 			return writeFileAtomicallyOutcome(path, data)
 		}
 		republicationAttempts++
+		if !bytes.Equal(data, preRestartMarker) {
+			t.Fatalf("startup marker republication changed exact bytes: before=%q after=%q", preRestartMarker, data)
+		}
 		outcome := writeFileAtomicallyOutcomeWith(path, data, func(directory string) error {
 			markerSyncAttempts++
 			if err := syncStateDirectory(directory); err != nil {

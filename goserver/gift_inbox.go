@@ -375,14 +375,19 @@ func (inbox *giftInbox) Reset() error {
 		{path: inbox.pendingPath, includeRecords: true},
 		{path: filepath.Dir(inbox.sequencePath)},
 	}
+	root := filepath.Dir(inbox.sequencePath)
+	for _, directory := range resetDirectories {
+		if err := validateResetScanDirectory(root, directory.path); err != nil {
+			return fmt.Errorf("validate gift inbox directory for reset: %w", err)
+		}
+	}
 	for _, directory := range resetDirectories {
 		entries, err := os.ReadDir(directory.path)
 		if err != nil {
 			return fmt.Errorf("read gift inbox directory for reset: %w", err)
 		}
 		for _, entry := range entries {
-			ownedRecord := directory.includeRecords && isGiftInboxRecordName(entry.Name())
-			if !entry.Type().IsRegular() || (!ownedRecord && !isGiftInboxTempName(entry.Name())) {
+			if !isOwnedGiftInboxResetEntry(entry.Name(), directory.includeRecords) {
 				continue
 			}
 			if err := retire(filepath.Join(directory.path, entry.Name())); err != nil {
@@ -654,6 +659,10 @@ func isValidGiftInboxID(id string) bool {
 
 func isGiftInboxTempName(name string) bool {
 	return strings.HasPrefix(name, "config-") && strings.HasSuffix(name, ".tmp") && len(name) > len("config-.tmp")
+}
+
+func isOwnedGiftInboxResetEntry(name string, includeRecords bool) bool {
+	return isGiftInboxTempName(name) || includeRecords && isGiftInboxRecordName(name)
 }
 
 func pendingIngestionID(filename string) string {

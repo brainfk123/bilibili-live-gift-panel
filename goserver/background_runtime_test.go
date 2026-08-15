@@ -490,6 +490,49 @@ type startupMarkerOrderingInbox struct {
 	nextOnce    sync.Once
 }
 
+type startupResetRecoveryInbox struct {
+	mu                  sync.Mutex
+	resetCalls          int
+	firstResetReturning chan struct{}
+	firstResetOnce      sync.Once
+	secondResetStarted  chan struct{}
+	releaseSecondReset  chan struct{}
+	secondResetOnce     sync.Once
+	injected            error
+}
+
+func (*startupResetRecoveryInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
+	return giftInboxRecord{}, nil
+}
+func (*startupResetRecoveryInbox) Next() (giftInboxRecord, bool, error) {
+	return giftInboxRecord{}, false, nil
+}
+func (*startupResetRecoveryInbox) Acknowledge(string) error { return nil }
+func (*startupResetRecoveryInbox) Release(string) error     { return nil }
+func (*startupResetRecoveryInbox) Close() error             { return nil }
+func (*startupResetRecoveryInbox) Health() giftInboxHealth  { return giftInboxHealth{} }
+func (inbox *startupResetRecoveryInbox) Reset() error {
+	inbox.mu.Lock()
+	inbox.resetCalls++
+	call := inbox.resetCalls
+	inbox.mu.Unlock()
+	if call == 1 {
+		inbox.firstResetOnce.Do(func() { close(inbox.firstResetReturning) })
+		return inbox.injected
+	}
+	if call == 2 {
+		inbox.secondResetOnce.Do(func() { close(inbox.secondResetStarted) })
+		<-inbox.releaseSecondReset
+	}
+	return nil
+}
+
+func (inbox *startupResetRecoveryInbox) ResetCalls() int {
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
+	return inbox.resetCalls
+}
+
 func (*startupMarkerOrderingInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
 	return giftInboxRecord{}, nil
 }
@@ -549,6 +592,309 @@ func TestBackgroundRuntimeStartupCompletesValidResetIntentBeforeInboxNext(t *tes
 	<-done
 	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("startup recovery left reset marker: %v", err)
+	}
+}
+
+func TestBackgroundRuntimeStartupResetFailureWaitsForSuccessfulRetryThenStartsWorkersOnce(t *testing.T) {
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "reset-intent.json")
+	if err := os.WriteFile(markerPath, canonicalResetIntentData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := initializeConfigStore(&configStore{path: filepath.Join(dir, "config.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := &startupResetRecoveryInbox{
+		firstResetReturning: make(chan struct{}),
+		secondResetStarted:  make(chan struct{}),
+		releaseSecondReset:  make(chan struct{}),
+		injected:            errors.New("injected transient startup reset failure"),
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.installInbox(inbox, inbox.Health())
+	store.setResetCoordinator(runtime.ResetWithOutcome)
+	workerStarts := make(chan string, 6)
+	runtime.onWorkerStart = func(name string) { workerStarts <- name }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runtime.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-inbox.firstResetReturning:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("startup reset did not reach the injected transient failure")
+	}
+	deleteResponse := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		store.handle(response, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+		deleteResponse <- response
+	}()
+	select {
+	case <-inbox.secondResetStarted:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("DELETE retry did not enter the second reset")
+	}
+	select {
+	case name := <-workerStarts:
+		t.Fatalf("worker %q started before reset recovery completed", name)
+	default:
+	}
+	select {
+	case <-done:
+		t.Fatal("runtime returned while reset recovery remained incomplete")
+	default:
+	}
+	close(inbox.releaseSecondReset)
+	select {
+	case response := <-deleteResponse:
+		if response.Code != http.StatusNoContent {
+			cancel()
+			<-done
+			t.Fatalf("DELETE retry status=%d body=%s, want 204", response.Code, response.Body.String())
+		}
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("DELETE retry did not complete")
+	}
+
+	started := map[string]int{}
+	for len(started) < 3 {
+		select {
+		case name := <-workerStarts:
+			started[name]++
+		case <-time.After(time.Second):
+			cancel()
+			<-done
+			t.Fatalf("workers did not start after reset recovery: %v", started)
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runtime did not stop after cancellation")
+	}
+	for {
+		select {
+		case name := <-workerStarts:
+			started[name]++
+		default:
+			goto drained
+		}
+	}
+
+drained:
+	for _, name := range []string{"connection", "gift", "timer"} {
+		if started[name] != 1 {
+			t.Fatalf("worker %q starts=%d, all starts=%v", name, started[name], started)
+		}
+	}
+	if len(started) != 3 {
+		t.Fatalf("unexpected worker starts: %v", started)
+	}
+	if calls := inbox.ResetCalls(); calls != 2 {
+		t.Fatalf("inbox reset calls=%d, want failed startup plus one successful retry", calls)
+	}
+}
+
+func TestBackgroundRuntimeStartupResetFailureWaitIsCancellationResponsive(t *testing.T) {
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "reset-intent.json")
+	if err := os.WriteFile(markerPath, canonicalResetIntentData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := initializeConfigStore(&configStore{path: filepath.Join(dir, "config.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := &startupResetRecoveryInbox{
+		firstResetReturning: make(chan struct{}),
+		secondResetStarted:  make(chan struct{}),
+		releaseSecondReset:  make(chan struct{}),
+		injected:            errors.New("injected transient startup reset failure"),
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.installInbox(inbox, inbox.Health())
+	workerStarts := make(chan string, 1)
+	runtime.onWorkerStart = func(name string) { workerStarts <- name }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runtime.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-inbox.firstResetReturning:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("startup reset did not reach the injected failure")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime did not stop while waiting for startup reset recovery")
+	}
+	select {
+	case name := <-workerStarts:
+		t.Fatalf("worker %q started before canceled startup recovery", name)
+	default:
+	}
+	if calls := inbox.ResetCalls(); calls != 1 {
+		t.Fatalf("startup reset calls=%d, want 1 before cancellation", calls)
+	}
+}
+
+func TestBackgroundRuntimeResetRetiresLinkedStateWALAndAnimationLeavesWithoutFollowingTargets(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	runtime := newBackgroundRuntime(store, nil)
+	inbox, err := openGiftInbox(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = inbox.Close() })
+	runtime.installInbox(inbox, inbox.Health())
+	store.setResetCoordinator(runtime.ResetWithOutcome)
+	outsideDir := t.TempDir()
+	existingTarget := filepath.Join(outsideDir, "existing-target.json")
+	if err := os.WriteFile(existingTarget, []byte("outside-must-survive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	existingLink := store.historyPath()
+	if err := os.Symlink(existingTarget, existingLink); err != nil {
+		t.Skipf("filesystem symlinks are unavailable on this host: %v", err)
+	}
+	danglingLinks := map[string]string{
+		store.path:                   filepath.Join(outsideDir, "missing-state-target.json"),
+		store.stateTransactionPath(): filepath.Join(outsideDir, "missing-wal-target.json"),
+		filepath.Join(inbox.pendingPath, inbox.recordFilename(1, strings.Repeat("c", 32))): filepath.Join(outsideDir, "missing-inbox-record-target.json"),
+		filepath.Join(inbox.pendingPath, "config-linked-reset.tmp"):                        filepath.Join(outsideDir, "missing-inbox-temp-target.json"),
+		runtime.pendingGiftAnimationsPath():                                                filepath.Join(outsideDir, "missing-animation-target.json"),
+	}
+	for path, target := range danglingLinks {
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("filesystem symlinks are unavailable on this host: %v", err)
+		}
+	}
+
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("DELETE reset status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, path := range append([]string{existingLink}, mapKeysForResetLinkTest(danglingLinks)...) {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("linked reset artifact %s survived: %v", filepath.Base(path), err)
+		}
+	}
+	data, err := os.ReadFile(existingTarget)
+	if err != nil || string(data) != "outside-must-survive" {
+		t.Fatalf("outside target changed: data=%q err=%v", data, err)
+	}
+	for ownedPath, target := range danglingLinks {
+		if err := os.WriteFile(target, []byte("created-after-reset"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(ownedPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("retired dangling link %s resurrected after target creation: %v", filepath.Base(ownedPath), err)
+		}
+		data, err := os.ReadFile(target)
+		if err != nil || string(data) != "created-after-reset" {
+			t.Fatalf("post-reset outside target %s changed: data=%q err=%v", filepath.Base(target), data, err)
+		}
+	}
+}
+
+func mapKeysForResetLinkTest(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func TestBackgroundRuntimeResetRejectsLinkedConfigRootBeforeMarkerOrInbox(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "owned-config-root")
+	outside := t.TempDir()
+	outsideSentinel := filepath.Join(outside, "outside.txt")
+	if err := os.WriteFile(outsideSentinel, []byte("outside-must-not-change"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, root); err != nil {
+		t.Skipf("directory symlink/reparse creation is unavailable on this host: %v", err)
+	}
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	runtime := newBackgroundRuntime(store, nil)
+	inbox := &startupMarkerOrderingInbox{resetCalled: make(chan struct{}), nextCalled: make(chan bool, 1)}
+	runtime.installInbox(inbox, inbox.Health())
+
+	if err := runtime.Reset(); err == nil {
+		t.Fatal("reset accepted a linked config root")
+	}
+	select {
+	case <-inbox.resetCalled:
+		t.Fatal("inbox reset ran before linked config root rejection")
+	default:
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "reset-intent.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reset marker was created through linked config root: %v", err)
+	}
+	data, err := os.ReadFile(outsideSentinel)
+	if err != nil || string(data) != "outside-must-not-change" {
+		t.Fatalf("outside sentinel changed: data=%q err=%v", data, err)
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "outside.txt" {
+		t.Fatalf("outside entry set changed: %v", entries)
+	}
+}
+
+func TestBackgroundRuntimeResetValidatesConfigRootBeforeMarkerOrInbox(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	injected := errors.New("injected unsafe config root")
+	validationHits := 0
+	store.validateResetRoot = func(path string) error {
+		validationHits++
+		if filepath.Clean(path) != filepath.Clean(filepath.Dir(store.path)) {
+			t.Fatalf("validated root=%q, want %q", path, filepath.Dir(store.path))
+		}
+		return injected
+	}
+	markerWrites := 0
+	store.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+		markerWrites++
+		return writeFileAtomicallyOutcome(path, data)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	inbox := &startupMarkerOrderingInbox{resetCalled: make(chan struct{}), nextCalled: make(chan bool, 1)}
+	runtime.installInbox(inbox, inbox.Health())
+
+	if err := runtime.Reset(); !errors.Is(err, injected) {
+		t.Fatalf("reset error=%v, want root validation failure", err)
+	}
+	if validationHits != 1 || markerWrites != 0 {
+		t.Fatalf("root validations=%d marker writes=%d, want 1/0", validationHits, markerWrites)
+	}
+	select {
+	case <-inbox.resetCalled:
+		t.Fatal("inbox reset ran before config-root validation")
+	default:
 	}
 }
 

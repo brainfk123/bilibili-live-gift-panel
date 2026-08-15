@@ -137,12 +137,16 @@ func (s *configStore) readStateLocked() (appState, error) {
 	if s.committedTransactionState != nil && s.mutationBlockKind != "" {
 		return cloneAppState(*s.committedTransactionState)
 	}
-	if s.mutationBlockKind == "" {
+	retryEndorsement := s.mutationBlockKind == "transaction_recovery" && isStateTransactionEndorsementError(s.mutationBlockErr)
+	if s.mutationBlockKind == "" || retryEndorsement {
 		if err := s.recoverPendingStateTransactionLocked(); err != nil {
 			if s.committedTransactionState != nil {
 				return cloneAppState(*s.committedTransactionState)
 			}
 			s.blockMutationsLocked("transaction_recovery", err)
+			if isStateTransactionEndorsementError(err) {
+				return appState{}, err
+			}
 		}
 	}
 	return s.readCommittedStateLocked()

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,36 +13,41 @@ import (
 	"time"
 )
 
-func TestStatePersistenceCommitsAllShardsAfterRealNonDurableJournalWarning(t *testing.T) {
+func TestStatePersistenceRetainsRealNonDurableJournalWithoutShardReplay(t *testing.T) {
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
 	if err := store.replaceState(defaultAppState()); err != nil {
 		t.Fatal(err)
 	}
+	before := snapshotStateFiles(t, store)
 	desired := defaultAppState()
 	desired.RoomID = "all-shards-durable"
 	desired.Attributes = []attributeState{{ID: "attribute-a", Name: "积分", Value: 17}}
 	injected := errors.New("injected real non-durable journal directory sync warning")
 	journalWrites := 0
+	shardWrites := 0
 	store.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
 		if filepath.Base(path) == "state-transaction.json" {
 			journalWrites++
 			return writeFileAtomicallyOutcomeWith(path, data, func(string) error { return injected })
 		}
+		shardWrites++
 		return writeFileAtomicallyOutcome(path, data)
 	}
 
 	store.mu.Lock()
 	outcome := store.persistPreparedStateWithOutcomeLocked(desired, "")
 	store.mu.Unlock()
-	if !outcome.Committed || !errors.Is(outcome.Err, injected) {
-		t.Fatalf("state persistence outcome=%+v, want committed with real journal warning", outcome)
+	if outcome.Committed || !errors.Is(outcome.Err, injected) {
+		t.Fatalf("state persistence outcome=%+v, want uncommitted with real journal warning", outcome)
 	}
-	if journalWrites != 1 {
-		t.Fatalf("journal writes=%d, want 1", journalWrites)
+	if journalWrites != 1 || shardWrites != 0 {
+		t.Fatalf("journal writes=%d shard writes=%d, want 1/0", journalWrites, shardWrites)
 	}
-	if _, err := os.Stat(store.stateTransactionPath()); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("completed real-warning WAL remains: %v", err)
+	assertStateFilesEqual(t, store, before)
+	if _, err := os.Stat(store.stateTransactionPath()); err != nil {
+		t.Fatalf("real-warning WAL was not retained: %v", err)
 	}
+	store.writeAtomicallyOutcome = nil
 	direct, err := store.readState()
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +58,329 @@ func TestStatePersistenceCommitsAllShardsAfterRealNonDurableJournalWarning(t *te
 	}
 	if !reflect.DeepEqual(direct, desired) || !reflect.DeepEqual(restarted, desired) {
 		t.Fatalf("whole committed state mismatch: direct=%#v restarted=%#v want=%#v", direct, restarted, desired)
+	}
+}
+
+func TestStatePersistenceDoesNotReplayShardsBeforeJournalIsDurable(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	initial := defaultAppState()
+	initial.RoomID = "old-room"
+	initial.Attributes = []attributeState{{ID: "attribute-a", Name: "积分", Value: 1}}
+	if err := store.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotStateFiles(t, store)
+
+	desired := initial
+	desired.RoomID = "new-room"
+	desired.Attributes = []attributeState{{ID: "attribute-a", Name: "积分", Value: 9}}
+	injected := errors.New("injected WAL directory sync failure")
+	shardWrites := make([]string, 0, len(store.statePaths()))
+	store.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+		if filepath.Clean(path) == filepath.Clean(store.stateTransactionPath()) {
+			return writeFileAtomicallyOutcomeWith(path, data, func(string) error { return injected })
+		}
+		shardWrites = append(shardWrites, filepath.Base(path))
+		return writeFileAtomicallyOutcome(path, data)
+	}
+
+	store.mu.Lock()
+	outcome := store.persistPreparedStateWithOutcomeLocked(desired, "")
+	store.mu.Unlock()
+	if outcome.Committed {
+		t.Fatalf("nondurable WAL outcome committed=%v, want false (err=%v)", outcome.Committed, outcome.Err)
+	}
+	if !errors.Is(outcome.Err, injected) {
+		t.Fatalf("nondurable WAL error=%v, want injected sync failure", outcome.Err)
+	}
+	if len(shardWrites) != 0 {
+		t.Fatalf("nondurable WAL triggered shard writes: %v", shardWrites)
+	}
+	assertStateFilesEqual(t, store, before)
+	if _, err := os.Stat(store.stateTransactionPath()); err != nil {
+		t.Fatalf("nondurable WAL evidence was not retained: %v", err)
+	}
+}
+
+func TestPendingStateTransactionFailsClosedUntilExactWALRepublicationIsDurable(t *testing.T) {
+	dir := t.TempDir()
+	seed := &configStore{path: filepath.Join(dir, "config.json")}
+	initial := defaultAppState()
+	initial.RoomID = "old-room"
+	initial.Attributes = []attributeState{{ID: "attribute-a", Name: "积分", Value: 1}}
+	if err := seed.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+	desired := initial
+	desired.RoomID = "new-room"
+	desired.Attributes = []attributeState{{ID: "attribute-a", Name: "积分", Value: 9}}
+	tx := preparedTransactionForTest(t, desired)
+	walBytes, err := json.MarshalIndent(tx, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	walBytes = append(walBytes, '\n')
+	publicationFailure := errors.New("injected pre-restart WAL directory sync failure")
+	publication := writeFileAtomicallyOutcomeWith(
+		seed.stateTransactionPath(),
+		walBytes,
+		func(string) error { return publicationFailure },
+	)
+	if !publication.Committed || publication.Durable || !errors.Is(publication.Err, publicationFailure) {
+		t.Fatalf("seed WAL outcome=%+v, want visible/non-durable real rename", publication)
+	}
+
+	restarted := &configStore{path: seed.path}
+	endorsementFailure := errors.New("injected recovery WAL endorsement failure")
+	endorsementAttempts := 0
+	shardWrites := 0
+	restarted.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+		if filepath.Clean(path) == filepath.Clean(restarted.stateTransactionPath()) {
+			endorsementAttempts++
+			if !bytes.Equal(data, walBytes) {
+				t.Fatalf("recovery republished different WAL bytes\ngot:  %q\nwant: %q", data, walBytes)
+			}
+			return writeFileAtomicallyOutcomeWith(path, data, func(string) error { return endorsementFailure })
+		}
+		shardWrites++
+		return writeFileAtomicallyOutcome(path, data)
+	}
+	if _, err := restarted.readState(); !errors.Is(err, endorsementFailure) {
+		t.Fatalf("recovery read error=%v, want endorsement failure", err)
+	}
+	if endorsementAttempts != 1 || shardWrites != 0 {
+		t.Fatalf("failed endorsement attempts=%d shard writes=%d, want 1/0", endorsementAttempts, shardWrites)
+	}
+	if restarted.committedTransactionState != nil {
+		t.Fatal("failed endorsement installed an authoritative candidate")
+	}
+	if restarted.MutationBlockKind() != "transaction_recovery" {
+		t.Fatalf("failed endorsement mutation block=%q, want transaction_recovery", restarted.MutationBlockKind())
+	}
+	mutationRan := false
+	if _, err := restarted.updateState(func(*appState) error {
+		mutationRan = true
+		return nil
+	}); err == nil {
+		t.Fatal("mutation unexpectedly succeeded while WAL endorsement still failed")
+	}
+	if mutationRan || shardWrites != 0 {
+		t.Fatalf("blocked mutation ran=%v shard writes=%d", mutationRan, shardWrites)
+	}
+
+	restarted.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+		if filepath.Clean(path) == filepath.Clean(restarted.stateTransactionPath()) {
+			endorsementAttempts++
+			if !bytes.Equal(data, walBytes) {
+				t.Fatalf("successful recovery republished different WAL bytes")
+			}
+		}
+		return writeFileAtomicallyOutcome(path, data)
+	}
+	recovered, err := restarted.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(recovered, desired) {
+		t.Fatalf("recovered state=%#v, want %#v", recovered, desired)
+	}
+	if restarted.MutationBlockKind() != "" {
+		t.Fatalf("successful endorsement left mutation block=%q", restarted.MutationBlockKind())
+	}
+}
+
+func TestConfigStoreStartupKeepsFailedWALEndorsementRetryableAndFailClosed(t *testing.T) {
+	dir := t.TempDir()
+	seed := &configStore{path: filepath.Join(dir, "config.json")}
+	initial := defaultAppState()
+	initial.RoomID = "old-room"
+	if err := seed.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+	desired := initial
+	desired.RoomID = "new-room"
+	tx := preparedTransactionForTest(t, desired)
+	walBytes, err := json.MarshalIndent(tx, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	walBytes = append(walBytes, '\n')
+	seedFailure := errors.New("injected pre-startup WAL directory sync failure")
+	seedOutcome := writeFileAtomicallyOutcomeWith(
+		seed.stateTransactionPath(),
+		walBytes,
+		func(string) error { return seedFailure },
+	)
+	if !seedOutcome.Committed || seedOutcome.Durable {
+		t.Fatalf("seed WAL outcome=%+v, want visible/non-durable", seedOutcome)
+	}
+
+	restarted := &configStore{path: seed.path}
+	endorsementFailure := errors.New("injected startup WAL endorsement failure")
+	shardWrites := 0
+	restarted.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+		if filepath.Clean(path) == filepath.Clean(restarted.stateTransactionPath()) {
+			return writeFileAtomicallyOutcomeWith(path, data, func(string) error { return endorsementFailure })
+		}
+		shardWrites++
+		return writeFileAtomicallyOutcome(path, data)
+	}
+	started, err := initializeConfigStore(restarted)
+	if err != nil {
+		t.Fatalf("startup returned an error instead of retaining a fail-closed store: %v", err)
+	}
+	response := httptest.NewRecorder()
+	started.handle(response, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("failed-endorsement GET status=%d body=%s, want 500", response.Code, response.Body.String())
+	}
+	if shardWrites != 0 || started.committedTransactionState != nil {
+		t.Fatalf("failed startup endorsement shard writes=%d candidate=%v, want 0/nil", shardWrites, started.committedTransactionState != nil)
+	}
+	mutationRan := false
+	if _, err := started.updateState(func(*appState) error {
+		mutationRan = true
+		return nil
+	}); err == nil || mutationRan {
+		t.Fatalf("failed startup endorsement mutation ran=%v err=%v", mutationRan, err)
+	}
+
+	started.writeAtomicallyOutcome = nil
+	recovered := httptest.NewRecorder()
+	started.handle(recovered, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if recovered.Code != http.StatusOK || !bytes.Contains(recovered.Body.Bytes(), []byte(`"roomId":"new-room"`)) {
+		t.Fatalf("retry GET status=%d body=%s, want recovered new state", recovered.Code, recovered.Body.String())
+	}
+	if started.MutationBlockKind() != "" {
+		t.Fatalf("successful retry left mutation block=%q", started.MutationBlockKind())
+	}
+}
+
+func TestTransactionRecoverySeparatesDiagnosticEvidenceFromUnendorsedValidWAL(t *testing.T) {
+	t.Run("unreadable evidence keeps diagnostic read", func(t *testing.T) {
+		store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+		initial := defaultAppState()
+		initial.RoomID = "diagnostic-room"
+		if err := store.replaceState(initial); err != nil {
+			t.Fatal(err)
+		}
+		injected := errors.New("injected unreadable WAL")
+		store.readTransaction = func(string) ([]byte, error) { return nil, injected }
+
+		state, err := store.readState()
+		if err != nil {
+			t.Fatalf("diagnostic read failed: %v", err)
+		}
+		if state.RoomID != initial.RoomID || store.MutationBlockKind() != "transaction_recovery" {
+			t.Fatalf("diagnostic state room=%q block=%q", state.RoomID, store.MutationBlockKind())
+		}
+	})
+
+	t.Run("valid WAL without durable endorsement fails closed", func(t *testing.T) {
+		store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+		initial := defaultAppState()
+		initial.RoomID = "old-room"
+		if err := store.replaceState(initial); err != nil {
+			t.Fatal(err)
+		}
+		desired := initial
+		desired.RoomID = "candidate-room"
+		writePendingTransactionForTest(t, store, preparedTransactionForTest(t, desired))
+		injected := errors.New("injected valid-WAL endorsement failure")
+		store.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+			if filepath.Clean(path) == filepath.Clean(store.stateTransactionPath()) {
+				return atomicWriteOutcome{Committed: true, Durable: false, Err: injected}
+			}
+			return writeFileAtomicallyOutcome(path, data)
+		}
+
+		if _, err := store.readState(); !errors.Is(err, injected) {
+			t.Fatalf("valid unendorsed WAL read error=%v, want injected failure", err)
+		}
+		if store.committedTransactionState != nil || store.MutationBlockKind() != "transaction_recovery" {
+			t.Fatalf("unendorsed candidate installed=%v block=%q", store.committedTransactionState != nil, store.MutationBlockKind())
+		}
+	})
+}
+
+func TestDurableWALKeepsFirstPostRenameShardSyncFailureWholeAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	initial := defaultAppState()
+	initial.RoomID = "old-room"
+	initial.Attributes = []attributeState{{ID: "attribute-a", Name: "积分", Value: 1}}
+	initial.Log = []logEntry{{EventID: "old-event", ValueAfter: 1}}
+	if err := store.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+	oldEventBytes, err := os.ReadFile(store.eventLogPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := initial
+	desired.RoomID = "new-room"
+	desired.Attributes = []attributeState{{ID: "attribute-a", Name: "积分", Value: 9}}
+	desired.Log = []logEntry{{EventID: "new-event", ValueAfter: 9}}
+	injected := errors.New("injected first-shard post-rename directory sync failure")
+	firstShardWrites := 0
+	installFailure := func(target *configStore) {
+		target.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+			if filepath.Clean(path) == filepath.Clean(target.eventLogPath()) {
+				firstShardWrites++
+				return writeFileAtomicallyOutcomeWith(path, data, func(string) error { return injected })
+			}
+			return writeFileAtomicallyOutcome(path, data)
+		}
+	}
+	installFailure(store)
+
+	store.mu.Lock()
+	outcome := store.persistPreparedStateWithOutcomeLocked(desired, "")
+	store.mu.Unlock()
+	if !outcome.Committed || !errors.Is(outcome.Err, injected) {
+		t.Fatalf("durable-WAL first-shard outcome=%+v, want committed with sync failure", outcome)
+	}
+	if firstShardWrites != 1 {
+		t.Fatalf("first shard writes=%d, want 1", firstShardWrites)
+	}
+	served, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(served, desired) {
+		t.Fatalf("same-process state=%#v, want complete WAL candidate %#v", served, desired)
+	}
+
+	// Model the allowed crash outcome where the rename-visible shard is lost.
+	// The durable WAL must still make the complete new candidate authoritative.
+	if err := os.WriteFile(store.eventLogPath(), oldEventBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restarted := &configStore{path: store.path}
+	installFailure(restarted)
+	restarted, err = initializeConfigStore(restarted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servedAfterRestart, err := restarted.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(servedAfterRestart, desired) {
+		t.Fatalf("restarted state=%#v, want complete WAL candidate %#v", servedAfterRestart, desired)
+	}
+
+	restarted.writeAtomicallyOutcome = nil
+	recovered, err := restarted.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(recovered, desired) {
+		t.Fatalf("settled state=%#v, want %#v", recovered, desired)
+	}
+	if _, err := os.Stat(restarted.stateTransactionPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("settled WAL remains: %v", err)
 	}
 }
 

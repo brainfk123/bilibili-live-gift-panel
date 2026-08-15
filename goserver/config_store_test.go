@@ -65,6 +65,141 @@ func TestConfigStoreLifecycle(t *testing.T) {
 	}
 }
 
+func TestConfigStoreDeleteAllowsMissingOwnedConfigDirectory(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "missing-parent", "not-created-yet", "config.json")
+	store := &configStore{path: path}
+
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("first-run DELETE status=%d body=%s, want 204", response.Code, response.Body.String())
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("first-run DELETE created config artifact: %v", err)
+	}
+}
+
+func TestConfigStoreResetRetryUsesMarkerNotificationBaselineExactlyOnce(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	store := &configStore{path: path}
+	initial := defaultAppState()
+	initial.RoomID = "room-must-not-enter-reset-marker"
+	disabled := false
+	initial.Settings.AutoUpdate = &disabled
+	if err := store.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+
+	var failedRoomNotifications int
+	var failedUpdateNotifications int
+	store.setOnChange(func() { failedRoomNotifications++ })
+	store.setOnUpdateChange(func() { failedUpdateNotifications++ })
+	injected := errors.New("injected reset after durable marker")
+	store.setResetCoordinator(func() (resetOutcome, error) {
+		if err := store.beginResetIntent(); err != nil {
+			return resetOutcome{}, err
+		}
+		store.recordResetFailure(injected)
+		return resetOutcome{}, injected
+	})
+
+	failed := httptest.NewRecorder()
+	store.handle(failed, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+	if failed.Code != http.StatusInternalServerError {
+		t.Fatalf("failed DELETE status=%d body=%s, want 500", failed.Code, failed.Body.String())
+	}
+	if failedRoomNotifications != 0 || failedUpdateNotifications != 0 {
+		t.Fatalf("failed DELETE notifications room=%d update=%d, want zero", failedRoomNotifications, failedUpdateNotifications)
+	}
+
+	markerBytes, err := os.ReadFile(store.resetIntentPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var marker map[string]any
+	if err := json.Unmarshal(markerBytes, &marker); err != nil {
+		t.Fatalf("reset marker is invalid JSON: %v", err)
+	}
+	if len(marker) != 2 {
+		t.Fatalf("reset marker keys=%v, want only schemaVersion and notificationBaseline", marker)
+	}
+	baseline, ok := marker["notificationBaseline"].(map[string]any)
+	if !ok {
+		t.Fatalf("reset marker baseline=%#v, want persisted minimal notification facts", marker["notificationBaseline"])
+	}
+	if len(baseline) != 2 || baseline["roomConfigured"] != true || baseline["autoUpdateEnabled"] != false {
+		t.Fatalf("reset marker baseline=%#v, want roomConfigured=true autoUpdateEnabled=false", baseline)
+	}
+	if strings.Contains(string(markerBytes), initial.RoomID) {
+		t.Fatalf("reset marker leaked full room state: %s", markerBytes)
+	}
+
+	restarted, err := newConfigStoreAtPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roomNotifications int
+	var updateNotifications int
+	restarted.setOnChange(func() { roomNotifications++ })
+	restarted.setOnUpdateChange(func() { updateNotifications++ })
+	restarted.setResetCoordinator(restarted.resetStateArtifactsWithOutcome)
+
+	succeeded := httptest.NewRecorder()
+	restarted.handle(succeeded, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+	if succeeded.Code != http.StatusNoContent {
+		t.Fatalf("retried DELETE status=%d body=%s, want 204", succeeded.Code, succeeded.Body.String())
+	}
+	if roomNotifications != 1 || updateNotifications != 1 {
+		t.Fatalf("successful retry notifications room=%d update=%d, want exactly one each", roomNotifications, updateNotifications)
+	}
+
+	noOp := httptest.NewRecorder()
+	restarted.handle(noOp, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+	if noOp.Code != http.StatusNoContent {
+		t.Fatalf("post-reset DELETE status=%d body=%s, want 204", noOp.Code, noOp.Body.String())
+	}
+	if roomNotifications != 1 || updateNotifications != 1 {
+		t.Fatalf("post-reset notifications room=%d update=%d, want no additional callbacks", roomNotifications, updateNotifications)
+	}
+}
+
+func TestConfigStoreLegacyResetMarkerRetryEmitsNoInferredNotifications(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	seed := &configStore{path: path}
+	state := defaultAppState()
+	state.RoomID = "legacy-marker-room"
+	disabled := false
+	state.Settings.AutoUpdate = &disabled
+	if err := seed.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(seed.resetIntentPath(), canonicalResetIntentData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := newConfigStoreAtPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roomNotifications int
+	var updateNotifications int
+	restarted.setOnChange(func() { roomNotifications++ })
+	restarted.setOnUpdateChange(func() { updateNotifications++ })
+
+	response := httptest.NewRecorder()
+	restarted.handle(response, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("legacy-marker DELETE status=%d body=%s, want 204", response.Code, response.Body.String())
+	}
+	if roomNotifications != 0 || updateNotifications != 0 {
+		t.Fatalf("legacy-marker notifications room=%d update=%d, want zero inferred callbacks", roomNotifications, updateNotifications)
+	}
+}
+
 type fakeStateDirectory struct {
 	syncErr  error
 	closeErr error
@@ -164,6 +299,102 @@ func TestRetireFileWithDirectorySyncRetriesAnUncertainTombstone(t *testing.T) {
 	}
 }
 
+func TestRetireFileDurablyUsesLeafLstatAndNeverFollowsOutsideTarget(t *testing.T) {
+	ownedDir := t.TempDir()
+	outsideDir := t.TempDir()
+	loopLink := filepath.Join(ownedDir, "cache.json")
+	if err := os.Symlink(loopLink, loopLink); err != nil {
+		t.Skipf("filesystem symlinks are unavailable on this host: %v", err)
+	}
+	if err := retireFileDurably(loopLink); err != nil {
+		t.Fatalf("retire self-referential owned link: %v", err)
+	}
+	if _, err := os.Lstat(loopLink); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("self-referential owned link survived retirement: %v", err)
+	}
+
+	danglingTarget := filepath.Join(outsideDir, "not-created-yet.json")
+	danglingLink := filepath.Join(ownedDir, "config.json")
+	if err := os.Symlink(danglingTarget, danglingLink); err != nil {
+		t.Skipf("filesystem symlinks are unavailable on this host: %v", err)
+	}
+	if err := retireFileDurably(danglingLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(danglingLink); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dangling owned link survived retirement: %v", err)
+	}
+	if err := os.WriteFile(danglingTarget, []byte("outside-after-reset"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(danglingLink); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retired dangling link resurrected after target creation: %v", err)
+	}
+
+	existingTarget := filepath.Join(outsideDir, "outside.json")
+	if err := os.WriteFile(existingTarget, []byte("outside-must-survive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	existingLink := filepath.Join(ownedDir, "state-transaction.json")
+	if err := os.Symlink(existingTarget, existingLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := retireFileDurably(existingLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(existingLink); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned link to existing target survived retirement: %v", err)
+	}
+	data, err := os.ReadFile(existingTarget)
+	if err != nil || string(data) != "outside-must-survive" {
+		t.Fatalf("outside target changed: data=%q err=%v", data, err)
+	}
+}
+
+func TestResetArtifactExistsUsesInjectedLeafMetadataLookup(t *testing.T) {
+	lookups := 0
+	exists, err := resetArtifactExistsWith("owned-link", func(path string) (os.FileInfo, error) {
+		lookups++
+		if path != "owned-link" {
+			t.Fatalf("leaf lookup path=%q", path)
+		}
+		return nil, nil
+	})
+	if err != nil || !exists || lookups != 1 {
+		t.Fatalf("leaf existence=%v err=%v lookups=%d, want true/nil/1", exists, err, lookups)
+	}
+	exists, err = resetArtifactExistsWith("missing-link", func(string) (os.FileInfo, error) {
+		return nil, os.ErrNotExist
+	})
+	if err != nil || exists {
+		t.Fatalf("missing leaf existence=%v err=%v, want false/nil", exists, err)
+	}
+}
+
+func TestValidateResetScanDirectoryRejectsEscapeAndLinkedComponent(t *testing.T) {
+	root := t.TempDir()
+	pending := filepath.Join(root, "pending")
+	if err := os.Mkdir(pending, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateResetScanDirectory(root, pending); err != nil {
+		t.Fatalf("ordinary contained directory rejected: %v", err)
+	}
+	if err := validateResetScanDirectory(root, filepath.Join(root, "..", "outside")); err == nil {
+		t.Fatal("lexically escaping reset scan directory was accepted")
+	}
+	if err := os.Remove(pending); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, pending); err != nil {
+		t.Skipf("directory symlink/reparse creation is unavailable on this host: %v", err)
+	}
+	if err := validateResetScanDirectory(root, pending); err == nil {
+		t.Fatal("linked/reparse reset scan directory was accepted")
+	}
+}
+
 func TestConfigStoreHTTPRetainsRealNonDurableJournalWarningWithoutNotifications(t *testing.T) {
 	for _, test := range []struct {
 		method  string
@@ -209,9 +440,19 @@ func TestConfigStoreHTTPRetainsRealNonDurableJournalWarningWithoutNotifications(
 			if roomNotifications != 0 || timerNotifications != 0 || updateNotifications != 0 {
 				t.Fatalf("notifications room=%d timer=%d update=%d, want zero", roomNotifications, timerNotifications, updateNotifications)
 			}
-			if _, err := os.Stat(store.stateTransactionPath()); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("completed transaction WAL remains: %v", err)
+			if _, err := os.Stat(store.stateTransactionPath()); err != nil {
+				t.Fatalf("nondurable transaction WAL was not retained: %v", err)
 			}
+			store.mu.Lock()
+			beforeRecovery, err := store.readCommittedStateLocked()
+			store.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if beforeRecovery.RoomID == test.roomID {
+				t.Fatalf("nondurable WAL changed shards before recovery: room=%q", beforeRecovery.RoomID)
+			}
+			store.writeAtomicallyOutcome = nil
 			state, err := store.readState()
 			if err != nil {
 				t.Fatal(err)
