@@ -323,11 +323,11 @@ func (s *configStore) recoverPendingStateTransactionLocked() error {
 		return &stateTransactionEndorsementError{err: endorsementErr}
 	}
 	s.committedTransactionState = &candidate
+	s.clearTransactionRecoveryBlockLocked()
 	if err := s.applyPendingStateTransactionLocked(tx); err != nil {
 		return err
 	}
 	s.committedTransactionState = nil
-	s.clearTransactionRecoveryBlockLocked()
 	return nil
 }
 

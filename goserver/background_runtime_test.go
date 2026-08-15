@@ -501,6 +501,28 @@ type startupResetRecoveryInbox struct {
 	injected            error
 }
 
+type startupResetNotificationInbox struct {
+	resetStarted chan struct{}
+	releaseReset chan struct{}
+	resetOnce    sync.Once
+}
+
+func (*startupResetNotificationInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
+	return giftInboxRecord{}, nil
+}
+func (*startupResetNotificationInbox) Next() (giftInboxRecord, bool, error) {
+	return giftInboxRecord{}, false, nil
+}
+func (*startupResetNotificationInbox) Acknowledge(string) error { return nil }
+func (*startupResetNotificationInbox) Release(string) error     { return nil }
+func (*startupResetNotificationInbox) Close() error             { return nil }
+func (*startupResetNotificationInbox) Health() giftInboxHealth  { return giftInboxHealth{} }
+func (inbox *startupResetNotificationInbox) Reset() error {
+	inbox.resetOnce.Do(func() { close(inbox.resetStarted) })
+	<-inbox.releaseReset
+	return nil
+}
+
 func (*startupResetRecoveryInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
 	return giftInboxRecord{}, nil
 }
@@ -592,6 +614,164 @@ func TestBackgroundRuntimeStartupCompletesValidResetIntentBeforeInboxNext(t *tes
 	<-done
 	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("startup recovery left reset marker: %v", err)
+	}
+}
+
+func TestBackgroundRuntimeStartupResetNotifiesPersistedBaselineExactlyOnce(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		baseline   *resetNotificationBaseline
+		wantRoom   int32
+		wantUpdate int32
+	}{
+		{
+			name:       "configured room and disabled updates",
+			baseline:   &resetNotificationBaseline{RoomConfigured: true, AutoUpdateEnabled: false},
+			wantRoom:   1,
+			wantUpdate: 1,
+		},
+		{
+			name:       "default baseline",
+			baseline:   &resetNotificationBaseline{RoomConfigured: false, AutoUpdateEnabled: true},
+			wantRoom:   0,
+			wantUpdate: 0,
+		},
+		{name: "legacy marker", baseline: nil, wantRoom: 0, wantUpdate: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			marker, err := encodeResetIntentRecord(test.baseline)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "reset-intent.json"), marker, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := initializeConfigStore(&configStore{path: path})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var roomNotifications atomic.Int32
+			var updateNotifications atomic.Int32
+			store.setOnChange(func() { roomNotifications.Add(1) })
+			store.setOnUpdateChange(func() { updateNotifications.Add(1) })
+			inbox := &startupMarkerOrderingInbox{resetCalled: make(chan struct{}), nextCalled: make(chan bool, 1)}
+			runtime := newBackgroundRuntime(store, nil)
+			runtime.installInbox(inbox, inbox.Health())
+			workerStarted := make(chan struct{}, 3)
+			runtime.onWorkerStart = func(string) { workerStarted <- struct{}{} }
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				runtime.Run(ctx)
+				close(done)
+			}()
+			select {
+			case <-workerStarted:
+			case <-time.After(time.Second):
+				cancel()
+				<-done
+				t.Fatal("workers did not start after startup reset")
+			}
+			cancel()
+			<-done
+			if got := roomNotifications.Load(); got != test.wantRoom {
+				t.Fatalf("room notifications=%d, want %d", got, test.wantRoom)
+			}
+			if got := updateNotifications.Load(); got != test.wantUpdate {
+				t.Fatalf("update notifications=%d, want %d", got, test.wantUpdate)
+			}
+		})
+	}
+}
+
+func TestBackgroundRuntimeStartupResetOwnsNotificationsBeforeQueuedDelete(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	marker, err := encodeResetIntentRecord(&resetNotificationBaseline{RoomConfigured: true, AutoUpdateEnabled: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "reset-intent.json"), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := initializeConfigStore(&configStore{path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roomNotifications atomic.Int32
+	var updateNotifications atomic.Int32
+	store.setOnChange(func() { roomNotifications.Add(1) })
+	store.setOnUpdateChange(func() { updateNotifications.Add(1) })
+	inbox := &startupResetNotificationInbox{
+		resetStarted: make(chan struct{}),
+		releaseReset: make(chan struct{}),
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.installInbox(inbox, inbox.Health())
+	deleteEntered := make(chan struct{})
+	store.setResetCoordinator(func() (resetOutcome, error) {
+		pendingOnly := store.ValidResetIntentPending()
+		close(deleteEntered)
+		return runtime.reset(pendingOnly)
+	})
+	workerStarted := make(chan struct{}, 3)
+	runtime.onWorkerStart = func(string) { workerStarted <- struct{}{} }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runtime.Run(ctx)
+		close(done)
+	}()
+	select {
+	case <-inbox.resetStarted:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("startup reset did not acquire the reset gate")
+	}
+	deleteResponse := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		store.handle(response, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+		deleteResponse <- response
+	}()
+	select {
+	case <-deleteEntered:
+	case <-time.After(time.Second):
+		cancel()
+		close(inbox.releaseReset)
+		<-done
+		t.Fatal("DELETE did not queue behind startup recovery")
+	}
+	close(inbox.releaseReset)
+	select {
+	case response := <-deleteResponse:
+		if response.Code != http.StatusNoContent {
+			cancel()
+			<-done
+			t.Fatalf("queued DELETE status=%d body=%s", response.Code, response.Body.String())
+		}
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("queued DELETE did not finish after startup reset")
+	}
+	select {
+	case <-workerStarted:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("workers did not start after startup reset")
+	}
+	cancel()
+	<-done
+	if got := roomNotifications.Load(); got != 1 {
+		t.Fatalf("room notifications=%d, want exactly one", got)
+	}
+	if got := updateNotifications.Load(); got != 1 {
+		t.Fatalf("update notifications=%d, want exactly one", got)
 	}
 }
 

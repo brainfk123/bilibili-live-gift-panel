@@ -836,6 +836,11 @@ func (s *configStore) handleDelete(w http.ResponseWriter) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": "恢复默认失败，本地状态已暂停修改，请重试或导出运行日志"})
 		return
 	}
+	s.notifyResetOutcome(outcome)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *configStore) notifyResetOutcome(outcome resetOutcome) {
 	baseline := outcome.NotificationBaseline
 	if baseline != nil && baseline.RoomConfigured {
 		s.notifyChanged()
@@ -843,7 +848,6 @@ func (s *configStore) handleDelete(w http.ResponseWriter) {
 	if baseline != nil && !baseline.AutoUpdateEnabled {
 		s.notifyUpdateChanged()
 	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *configStore) setResetCoordinator(coordinator func() (resetOutcome, error)) {

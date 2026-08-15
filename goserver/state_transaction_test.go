@@ -190,6 +190,85 @@ func TestPendingStateTransactionFailsClosedUntilExactWALRepublicationIsDurable(t
 	}
 }
 
+func TestPendingStateTransactionClearsEndorsementBlockBeforeReplayRetry(t *testing.T) {
+	dir := t.TempDir()
+	seed := &configStore{path: filepath.Join(dir, "config.json")}
+	initial := defaultAppState()
+	initial.RoomID = "old-room"
+	if err := seed.replaceState(initial); err != nil {
+		t.Fatal(err)
+	}
+	desired := initial
+	desired.RoomID = "authoritative-candidate"
+	tx := preparedTransactionForTest(t, desired)
+	walBytes, err := json.MarshalIndent(tx, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	walBytes = append(walBytes, '\n')
+	if err := os.WriteFile(seed.stateTransactionPath(), walBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := &configStore{path: seed.path}
+	endorsementFailure := errors.New("injected first endorsement failure")
+	restarted.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+		if filepath.Clean(path) == filepath.Clean(restarted.stateTransactionPath()) {
+			return atomicWriteOutcome{Committed: true, Durable: false, Err: endorsementFailure}
+		}
+		return writeFileAtomicallyOutcome(path, data)
+	}
+	if _, err := restarted.readState(); !errors.Is(err, endorsementFailure) {
+		t.Fatalf("initial endorsement error=%v, want injected failure", err)
+	}
+	if restarted.MutationBlockKind() != "transaction_recovery" {
+		t.Fatalf("initial recovery block=%q, want transaction_recovery", restarted.MutationBlockKind())
+	}
+
+	replayFailure := errors.New("injected first shard replay failure")
+	replayFailuresRemaining := 1
+	restarted.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+		if filepath.Clean(path) == filepath.Clean(restarted.stateTransactionPath()) {
+			return writeFileAtomicallyOutcome(path, data)
+		}
+		if replayFailuresRemaining > 0 {
+			replayFailuresRemaining--
+			return atomicWriteOutcome{Err: replayFailure}
+		}
+		return writeFileAtomicallyOutcome(path, data)
+	}
+	authoritative, err := restarted.readState()
+	if err != nil {
+		t.Fatalf("authoritative read after durable endorsement failed: %v", err)
+	}
+	if !reflect.DeepEqual(authoritative, desired) {
+		t.Fatalf("authoritative state=%#v, want %#v", authoritative, desired)
+	}
+	if restarted.committedTransactionState == nil {
+		t.Fatal("failed replay discarded the durably endorsed candidate")
+	}
+	if restarted.MutationBlockKind() != "" {
+		t.Fatalf("durably endorsed candidate retained obsolete block=%q", restarted.MutationBlockKind())
+	}
+	if _, err := os.Stat(restarted.stateTransactionPath()); err != nil {
+		t.Fatalf("failed replay lost retryable WAL: %v", err)
+	}
+
+	recovered, err := restarted.readState()
+	if err != nil {
+		t.Fatalf("subsequent replay retry failed: %v", err)
+	}
+	if !reflect.DeepEqual(recovered, desired) {
+		t.Fatalf("recovered state=%#v, want %#v", recovered, desired)
+	}
+	if restarted.committedTransactionState != nil || restarted.MutationBlockKind() != "" {
+		t.Fatalf("successful replay left candidate=%v block=%q", restarted.committedTransactionState != nil, restarted.MutationBlockKind())
+	}
+	if _, err := os.Stat(restarted.stateTransactionPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("successful replay left WAL: %v", err)
+	}
+}
+
 func TestConfigStoreStartupKeepsFailedWALEndorsementRetryableAndFailClosed(t *testing.T) {
 	dir := t.TempDir()
 	seed := &configStore{path: filepath.Join(dir, "config.json")}

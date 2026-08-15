@@ -516,3 +516,41 @@ SHA-256 `285B16852F7ADE56DB21854449947B00F527D539EA728FD6F1CF15B082A82CCD`.
 It is an unsigned local development build. It was not staged, published,
 tagged, signed, or released; no dependency, lockfile, version, workflow,
 frontend source, or FFmpeg source/payload change belongs to this wave.
+
+## Second final-audit correction — 2026-08-15
+
+The READY statement in the preceding reopened section was invalidated by a
+subsequent whole-range audit, which found two Important interleavings. This
+section supersedes those claims.
+
+First, a failed WAL endorsement left a typed recovery block behind after a
+later durable endorsement made the validated candidate authoritative but shard
+replay failed. The block is now retired at the authority transition, before
+replay. Reads expose the authoritative candidate and subsequent reads retry
+replay until the WAL and candidate clear. The deterministic regression was RED
+with `durably endorsed candidate retained obsolete block="transaction_recovery"`
+and is now GREEN through endorsement failure, endorsement success, replay
+failure, authoritative read, and successful replay retry.
+
+Second, startup reset recovery discarded the marker's notification outcome,
+allowing a DELETE queued behind recovery to consume an empty outcome. Startup
+recovery now owns and emits its successful outcome through the same notification
+helper as DELETE. Whichever path completes the marker transaction owns the
+single non-empty outcome; the losing path receives an empty outcome. Tests cover
+startup alone, a DELETE queued behind startup recovery, failed-startup DELETE
+retry, default baseline, and legacy marker. The RED was zero room/update
+notifications where one each was required; all cases are now GREEN without
+persisting full state.
+
+Fresh gates on the corrected frozen tree passed: focused count 20 (`6.207s`),
+focused race count 5 (`2.229s`), full Go (`29.667s`), full Go race (`47.608s`),
+Linux compile, UI build (91 modules), Windows EXE build (83 embedded assets),
+and permanent embedded closure (`1.541s`). The rebuilt ignored EXE is
+14,086,656 bytes with SHA-256
+`A6B09B94379A11D2FEF1BC42BD131FB6D0E6926190975F5EEC0EDAF18F7547D2`.
+Independent read-only re-review returned READY with zero Critical, Important,
+or Minor findings and additionally passed 100 focused repetitions. Its sandbox
+could not start MinGW for race; the controller's focused and full race gates
+above provide the race evidence.
+It remains an unsigned local development artifact and was not published,
+tagged, signed, or released.

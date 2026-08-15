@@ -161,7 +161,8 @@ func (runtime *backgroundRuntime) currentAttributeFreezeChecker() attributeFreez
 
 func (runtime *backgroundRuntime) Run(ctx context.Context) {
 	for runtime.store != nil && runtime.store.ValidResetIntentPending() {
-		if _, err := runtime.reset(true); err == nil {
+		if outcome, err := runtime.reset(true); err == nil {
+			runtime.store.notifyResetOutcome(outcome)
 			break
 		}
 		select {
