@@ -192,6 +192,61 @@ func TestLatestClassifiesColdStartAndSignerFailures(t *testing.T) {
 	})
 }
 
+func TestInvalidManifestErrorsExposeSanitizedReasonCodes(t *testing.T) {
+	tests := []struct {
+		name   string
+		reason string
+		mutate func(*release.ChannelManifest)
+	}{
+		{name: "tag", reason: "manifest_tag", mutate: func(manifest *release.ChannelManifest) {
+			manifest.TagName = "v0.04.4"
+			manifest.Asset.ObjectKey = "releases/v0.04.4/gift-panel-windows-x64.exe"
+			manifest.ChangelogObjectKey = "releases/v0.04.4/gift-panel-changelog.json"
+		}},
+		{name: "size", reason: "manifest_asset_size", mutate: func(manifest *release.ChannelManifest) {
+			manifest.Asset.Size = 0
+		}},
+		{name: "digest", reason: "manifest_asset_sha256", mutate: func(manifest *release.ChannelManifest) {
+			manifest.Asset.SHA256 = strings.Repeat("g", 64)
+		}},
+		{name: "path", reason: "manifest_asset_key", mutate: func(manifest *release.ChannelManifest) {
+			manifest.Asset.ObjectKey = "releases/v0.4.4/other.exe"
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var manifest release.ChannelManifest
+			if err := json.Unmarshal(validManifest(t), &manifest); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&manifest)
+			body, err := json.Marshal(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := &fakeStore{
+				get: func(string, int64) ([]byte, string, error) { return body, "etag", nil },
+				presign: func(string, time.Duration) (string, error) {
+					t.Fatal("PresignGet should not be called for invalid metadata")
+					return "", nil
+				},
+			}
+
+			_, err = service.New(store, channelKey, time.Now).Latest(context.Background())
+			if !errors.Is(err, service.ErrReleaseInvalid) {
+				t.Fatalf("Latest() error = %v, want ErrReleaseInvalid", err)
+			}
+			if got := service.InvalidReason(err); got != test.reason {
+				t.Fatalf("InvalidReason() = %q, want %q", got, test.reason)
+			}
+			if strings.Contains(service.InvalidReason(err), "releases/") {
+				t.Fatalf("reason %q contains object path", service.InvalidReason(err))
+			}
+		})
+	}
+}
+
 func TestLatestRejectsChannelKeysOtherThanStableLatest(t *testing.T) {
 	store := &fakeStore{
 		get: func(string, int64) ([]byte, string, error) {

@@ -44,6 +44,32 @@ func TestHeadReturnsMetadataAndTypedNotFound(t *testing.T) {
 	}
 }
 
+func TestNewRejectsUnsafeBucketAndRegion(t *testing.T) {
+	tests := []struct {
+		name   string
+		bucket string
+		region string
+	}{
+		{name: "bucket path", bucket: "private-release-1250000000/redirect", region: "ap-shanghai"},
+		{name: "bucket userinfo", bucket: "private-release-1250000000@evil.example", region: "ap-shanghai"},
+		{name: "bucket without app id", bucket: "private-release", region: "ap-shanghai"},
+		{name: "uppercase bucket", bucket: "Private-release-1250000000", region: "ap-shanghai"},
+		{name: "oversized bucket label", bucket: strings.Repeat("a", 62) + "-1250000000", region: "ap-shanghai"},
+		{name: "region path", bucket: "private-release-1250000000", region: "ap-shanghai/redirect"},
+		{name: "region userinfo", bucket: "private-release-1250000000", region: "ap-shanghai@evil.example"},
+		{name: "uppercase region", bucket: "private-release-1250000000", region: "AP-Shanghai"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, err := cosstore.New(test.bucket, test.region, "secret-id", "secret-key", nil)
+			if err == nil || client != nil {
+				t.Fatalf("New(%q, %q) = (%v, %v), want rejection", test.bucket, test.region, client, err)
+			}
+		})
+	}
+}
+
 func TestPutWritesDigestMetadata(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPut {

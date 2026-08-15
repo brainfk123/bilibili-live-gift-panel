@@ -48,6 +48,30 @@ func TestChannelManifestValidateRejectsUntrustedValues(t *testing.T) {
 			},
 		},
 		{
+			name: "tag without v prefix",
+			mutate: func(manifest *release.ChannelManifest) {
+				setManifestTag(manifest, "0.4.4")
+			},
+		},
+		{
+			name: "tag with surrounding whitespace",
+			mutate: func(manifest *release.ChannelManifest) {
+				setManifestTag(manifest, " v0.4.4 ")
+			},
+		},
+		{
+			name: "tag with leading zero",
+			mutate: func(manifest *release.ChannelManifest) {
+				setManifestTag(manifest, "v0.04.4")
+			},
+		},
+		{
+			name: "tag with build metadata",
+			mutate: func(manifest *release.ChannelManifest) {
+				setManifestTag(manifest, "v0.4.4+repair")
+			},
+		},
+		{
 			name: "unexpected asset name",
 			mutate: func(manifest *release.ChannelManifest) {
 				manifest.Asset.Name = "gift-panel-windows-arm64.exe"
@@ -101,6 +125,12 @@ func TestChannelManifestValidateRejectsUntrustedValues(t *testing.T) {
 			}
 		})
 	}
+}
+
+func setManifestTag(manifest *release.ChannelManifest, tag string) {
+	manifest.TagName = tag
+	manifest.Asset.ObjectKey = "releases/" + tag + "/gift-panel-windows-x64.exe"
+	manifest.ChangelogObjectKey = "releases/" + tag + "/gift-panel-changelog.json"
 }
 
 func TestChannelManifestParseRejectsInvalidJSONDocuments(t *testing.T) {

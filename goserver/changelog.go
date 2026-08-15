@@ -43,7 +43,7 @@ func newHostedChangelogHandler(client *http.Client, sources []hostedChangelogSou
 
 func newHostedChangelogHandlerWithNow(client *http.Client, sources []hostedChangelogSource, now func() time.Time) http.HandlerFunc {
 	if client == nil {
-		client = &http.Client{Timeout: 8 * time.Second}
+		client = newUpdateHTTPClient(8 * time.Second)
 	}
 	var mu sync.Mutex
 	var cached hostedChangelogDocument
@@ -91,13 +91,13 @@ func fetchHostedChangelog(r *http.Request, client *http.Client, sourceURL string
 	}
 	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, sourceURL, nil)
 	if err != nil {
-		return hostedChangelogDocument{}, err
+		return hostedChangelogDocument{}, errors.New("更新日志地址无效")
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", "bilibili-live-gift-panel")
 	response, err := client.Do(request)
 	if err != nil {
-		return hostedChangelogDocument{}, err
+		return hostedChangelogDocument{}, safeUpdateNetworkError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {

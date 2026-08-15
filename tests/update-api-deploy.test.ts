@@ -50,9 +50,10 @@ describe('update API deployment assets', () => {
 
     expect(nginx).toContain('rate=10r/m');
     expect(nginx).toContain('burst=20');
+    expect(nginx.match(/client_max_body_size 16k;/g)).toHaveLength(2);
     expect(nginx).toMatch(/location = \/api\/v1\/releases\/latest/);
     expect(nginx).toMatch(/location = \/api\/v1\/changelog/);
-    expect(nginx).toMatch(/location = \/healthz[\s\S]*allow 127\.0\.0\.1;[\s\S]*deny all;/);
+    expect(nginx).toMatch(/location = \/healthz[\s\S]*allow 127\.0\.0\.1;[\s\S]*allow ::1;[\s\S]*deny all;/);
     expect(nginx).toContain('error_page 429 = @rate_limited');
     expect(nginx).toContain('default_type application/json;');
     expect(nginx).not.toContain('add_header Content-Type');
@@ -70,18 +71,33 @@ describe('update API deployment assets', () => {
 
     expect(nginx.match(/\$request_method !~ \^\(GET\|HEAD\)\$/g)).toHaveLength(2);
     expect(nginx.match(/add_header Allow "GET, HEAD" always;/g)).toHaveLength(2);
-    expect(nginx.match(/return 405 '\{"code":"method_not_allowed","message":"Method not allowed"\}';/g)).toHaveLength(2);
+    expect(nginx.match(/add_header X-Request-ID \$request_id always;/g)).toHaveLength(4);
+    expect(nginx.match(/return 405 '\{"code":"method_not_allowed","message":"Method not allowed","request_id":"\$request_id"\}';/g)).toHaveLength(2);
+    expect(nginx).toContain(`return 429 '{"code":"rate_limited","message":"Too many requests","request_id":"$request_id"}';`);
+    expect(nginx).toContain(`return 404 '{"code":"not_found","message":"Not found","request_id":"$request_id"}';`);
+    expect(nginx).toContain('return 301 https://${PUBLIC_DOMAIN}$request_uri;');
+    expect(nginx).not.toContain('return 301 https://$host$request_uri;');
+
+    const notFoundLocation = nginx.slice(nginx.lastIndexOf('location / {'));
+    for (const header of ['X-Content-Type-Options', 'Referrer-Policy', 'X-Frame-Options', 'Permissions-Policy', 'Content-Security-Policy']) {
+      expect(notFoundLocation).toContain(`add_header ${header}`);
+    }
   });
 
   it('runs the API under a hardened service account and retains logs for one week', () => {
     const service = deploymentAsset('gift-panel-update-api.service');
     const logrotate = deploymentAsset('logrotate.conf');
+    const journal = deploymentAsset('journald.conf');
 
     expect(service).toContain('User=gift-panel-update');
     expect(service).toContain('NoNewPrivileges=true');
     expect(service).toContain('ProtectSystem=strict');
+    expect(service).toContain('LogNamespace=gift-panel-update-api');
     expect(logrotate).toContain('rotate 7');
     expect(logrotate).toContain('daily');
+    expect(journal).toContain('SystemMaxUse=64M');
+    expect(journal).toContain('RuntimeMaxUse=64M');
+    expect(journal).toContain('MaxRetentionSec=7day');
   });
 
   it('documents the private COS gate and direct loopback health check', () => {

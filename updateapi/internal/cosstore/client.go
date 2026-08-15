@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -25,6 +26,11 @@ var ErrNotFound = errors.New("COS object not found")
 // ErrAlreadyExists indicates that COS rejected an atomic no-overwrite upload.
 var ErrAlreadyExists = errors.New("COS object already exists")
 
+var (
+	cosBucketPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?-[1-9][0-9]{4,19}$`)
+	cosRegionPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}[a-z0-9]$`)
+)
+
 // ObjectInfo is the immutable-object metadata used to verify COS uploads.
 type ObjectInfo struct {
 	Size   int64
@@ -42,10 +48,17 @@ func New(bucket, region, secretID, secretKey string, httpClient *http.Client) (*
 	if bucket == "" || region == "" || secretID == "" || secretKey == "" {
 		return nil, errors.New("bucket, region, secret ID, and secret key are required")
 	}
+	if len(bucket) > 63 || !cosBucketPattern.MatchString(bucket) {
+		return nil, errors.New("COS bucket name is invalid")
+	}
+	if !cosRegionPattern.MatchString(region) {
+		return nil, errors.New("COS region is invalid")
+	}
 
-	bucketURL, err := url.Parse(fmt.Sprintf("https://%s.cos.%s.myqcloud.com", bucket, region))
-	if err != nil {
-		return nil, fmt.Errorf("parse COS bucket URL: %w", err)
+	expectedHost := fmt.Sprintf("%s.cos.%s.myqcloud.com", bucket, region)
+	bucketURL := &url.URL{Scheme: "https", Host: expectedHost}
+	if bucketURL.Scheme != "https" || bucketURL.Host != expectedHost || bucketURL.User != nil || bucketURL.Path != "" || bucketURL.RawQuery != "" || bucketURL.Fragment != "" {
+		return nil, errors.New("COS bucket URL is invalid")
 	}
 
 	if httpClient == nil {

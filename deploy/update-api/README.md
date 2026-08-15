@@ -10,7 +10,7 @@ GitHub Actions secrets: `COS_RELEASE_SECRET_ID`, `COS_RELEASE_SECRET_KEY`.
 
 Store these release variables and secrets only in the protected GitHub Environment `release`, with its approval and branch rules enabled. `UPDATE_PUBLISHER_TOOL_SHA` is not secret, but it is a production trust decision: it must be an exact 40-hex commit SHA, never a tag, branch, shortened SHA, repository-level override, or workflow-dispatch input. The workflow validates the pin before checkout, checks the publisher tooling out separately from the requested release tag, verifies the resolved commit, and runs `updateapi/cmd/publish` only from that checkout. The requested tag checkout remains the source of release artifacts and metadata.
 
-Server environment variables: `UPDATE_API_LISTEN`, `COS_BUCKET`, `COS_REGION`, `COS_SECRET_ID`, `COS_SECRET_KEY`, `COS_CHANNEL_KEY`.
+Server environment variables: `UPDATE_API_LISTEN`, `COS_BUCKET`, `COS_REGION`, `COS_SECRET_ID`, `COS_SECRET_KEY`. The channel object is fixed in the binary as `channels/stable/latest.json` and is not configurable.
 
 Rendering variables: `PUBLIC_DOMAIN`, `ICP_NUMBER`, `TLS_CERT_PATH`, `TLS_KEY_PATH`.
 
@@ -51,6 +51,8 @@ envsubst '${ICP_NUMBER}' < deploy/update-api/index.html.template | sudo tee /opt
 envsubst '${PUBLIC_DOMAIN} ${TLS_CERT_PATH} ${TLS_KEY_PATH}' < deploy/update-api/nginx.conf.template | sudo tee /etc/nginx/conf.d/gift-panel-update-api.conf >/dev/null
 sudo install -o root -g root -m 0644 deploy/update-api/gift-panel-update-api.service /etc/systemd/system/gift-panel-update-api.service
 sudo install -o root -g root -m 0644 deploy/update-api/logrotate.conf /etc/logrotate.d/gift-panel-update-api
+sudo install -d -o root -g root -m 0755 /etc/systemd/journald@gift-panel-update-api.conf.d
+sudo install -o root -g root -m 0644 deploy/update-api/journald.conf /etc/systemd/journald@gift-panel-update-api.conf.d/retention.conf
 sudo systemctl daemon-reload
 sudo systemd-analyze verify /etc/systemd/system/gift-panel-update-api.service
 sudo nginx -t
@@ -63,6 +65,8 @@ Nginx uses a dedicated log format that contains `$uri`, never `$args` or `$reque
 ```sh
 sudo logrotate -vf /etc/logrotate.d/gift-panel-update-api
 ```
+
+The service writes to its dedicated journal namespace. Inspect it with `journalctl --namespace=gift-panel-update-api -u gift-panel-update-api.service`; the namespace configuration caps persistent and volatile storage at 64 MiB and retains entries for at most seven days.
 
 ## Verify and operate
 

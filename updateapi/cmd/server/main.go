@@ -99,7 +99,7 @@ func loadConfig() (config, error) {
 		region:        os.Getenv("COS_REGION"),
 		secretID:      os.Getenv("COS_SECRET_ID"),
 		secretKey:     os.Getenv("COS_SECRET_KEY"),
-		channelKey:    valueOrDefault("COS_CHANNEL_KEY", defaultChannelKey),
+		channelKey:    defaultChannelKey,
 	}
 	if err := validateLoopbackAddress(configuration.listenAddress); err != nil {
 		return config{}, err

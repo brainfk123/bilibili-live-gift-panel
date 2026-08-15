@@ -110,6 +110,18 @@ ${validation}
 }
 
 describe('release workflow supply-chain contract', () => {
+  it('pins every external Action to an immutable commit SHA', () => {
+    const { steps } = releaseWorkflow();
+    const externalActions = steps
+      .map((step) => step.uses)
+      .filter((uses): uses is string => typeof uses === 'string');
+
+    expect(externalActions.length).toBeGreaterThan(0);
+    for (const uses of externalActions) {
+      expect(uses).toMatch(/^[^@\s]+@[0-9a-f]{40}$/);
+    }
+  });
+
   it('serializes all production releases in one non-canceling global group', () => {
     const { concurrency } = releaseWorkflow();
 
@@ -165,7 +177,7 @@ describe('release workflow supply-chain contract', () => {
 
     expect(checkoutRelease).toBeLessThan(checkoutTool);
     expect(steps[checkoutTool]).toMatchObject({
-      uses: 'actions/checkout@v7',
+      uses: 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
       with: {
         ref: '${{ env.UPDATE_PUBLISHER_TOOL_SHA }}',
         path: '_update-publisher-tool',

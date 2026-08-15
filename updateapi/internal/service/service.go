@@ -24,6 +24,34 @@ var (
 	ErrDownloadUnavailable = errors.New("download unavailable")
 )
 
+type invalidReleaseError struct {
+	reason string
+	cause  error
+}
+
+func (err invalidReleaseError) Error() string {
+	return fmt.Sprintf("%s: %v", ErrReleaseInvalid, err.cause)
+}
+func (err invalidReleaseError) Is(target error) bool  { return target == ErrReleaseInvalid }
+func (err invalidReleaseError) InvalidReason() string { return err.reason }
+
+func releaseInvalid(reason string, cause error) error {
+	return invalidReleaseError{reason: reason, cause: cause}
+}
+
+// InvalidReason returns a stable, non-sensitive code for invalid release metadata.
+func InvalidReason(err error) string {
+	var reasoned interface{ InvalidReason() string }
+	if !errors.As(err, &reasoned) {
+		return ""
+	}
+	reason := reasoned.InvalidReason()
+	if reason == "unsupported_channel_key" || reason == "manifest_size" || release.IsValidationCode(reason) {
+		return reason
+	}
+	return ""
+}
+
 type Store interface {
 	Get(ctx context.Context, key string, maxBytes int64) (body []byte, etag string, err error)
 	PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error)
@@ -82,17 +110,17 @@ func (service *Service) Changelog(ctx context.Context) (Document, error) {
 		return Document{}, fmt.Errorf("%w: %v", ErrReleaseUnavailable, err)
 	}
 	if len(body) > int(changelogMaxBytes) {
-		return Document{}, fmt.Errorf("%w: changelog exceeds 2 MiB", ErrReleaseInvalid)
+		return Document{}, releaseInvalid("changelog_size", errors.New("changelog exceeds 2 MiB"))
 	}
 	if _, err := release.ParseChangelog(body); err != nil {
-		return Document{}, fmt.Errorf("%w: %v", ErrReleaseInvalid, err)
+		return Document{}, releaseInvalid(string(release.ValidationCodeOf(err)), err)
 	}
 	return Document{Body: append([]byte(nil), body...), ETag: etag}, nil
 }
 
 func (service *Service) manifest(ctx context.Context) (release.ChannelManifest, error) {
 	if service.channelKey != stableChannelKey {
-		return release.ChannelManifest{}, fmt.Errorf("%w: unsupported channel key %q", ErrReleaseInvalid, service.channelKey)
+		return release.ChannelManifest{}, releaseInvalid("unsupported_channel_key", errors.New("unsupported channel key"))
 	}
 
 	now := service.now()
@@ -119,7 +147,7 @@ func (service *Service) manifest(ctx context.Context) (release.ChannelManifest, 
 		if manifest, ok := service.lastValidManifest(); ok {
 			return manifest, nil
 		}
-		return release.ChannelManifest{}, fmt.Errorf("%w: channel manifest exceeds 64 KiB", ErrReleaseInvalid)
+		return release.ChannelManifest{}, releaseInvalid("manifest_size", errors.New("channel manifest exceeds 64 KiB"))
 	}
 
 	manifest, err := release.ParseChannelManifest(body)
@@ -127,7 +155,7 @@ func (service *Service) manifest(ctx context.Context) (release.ChannelManifest, 
 		if cached, ok := service.lastValidManifest(); ok {
 			return cached, nil
 		}
-		return release.ChannelManifest{}, fmt.Errorf("%w: %v", ErrReleaseInvalid, err)
+		return release.ChannelManifest{}, releaseInvalid(string(release.ValidationCodeOf(err)), err)
 	}
 
 	service.cacheMu.Lock()

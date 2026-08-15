@@ -230,7 +230,7 @@ func newDefaultAutoUpdater(store *configStore) *autoUpdater {
 	}
 	updater := newAutoUpdater(autoUpdaterOptions{
 		Store:          store,
-		Client:         &http.Client{Timeout: 10 * time.Minute},
+		Client:         newUpdateHTTPClient(10 * time.Minute),
 		CurrentVersion: appVersion,
 		ExecutablePath: executablePath,
 		UpdatesDir:     filepath.Join(root, "BilibiliLiveGiftPanel", "updates"),
@@ -248,7 +248,7 @@ func newDefaultAutoUpdater(store *configStore) *autoUpdater {
 func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 	client := options.Client
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Minute}
+		client = newUpdateHTTPClient(10 * time.Minute)
 	}
 	now := options.Now
 	if now == nil {
@@ -670,7 +670,7 @@ func (updater *autoUpdater) fetchReleaseFromSource(ctx context.Context, source u
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, source.URL, nil)
 	if err != nil {
-		return githubRelease{}, err
+		return githubRelease{}, errors.New("更新地址无效")
 	}
 	request.Header.Set("Accept", "application/json")
 	if source.GitHub {
@@ -680,7 +680,7 @@ func (updater *autoUpdater) fetchReleaseFromSource(ctx context.Context, source u
 	request.Header.Set("User-Agent", "bilibili-live-gift-panel/"+updater.currentVersion)
 	response, err := updater.client.Do(request)
 	if err != nil {
-		return githubRelease{}, err
+		return githubRelease{}, safeUpdateNetworkError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound {
@@ -749,12 +749,12 @@ func (updater *autoUpdater) fetchChecksum(ctx context.Context, downloadURL strin
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, downloadURL, nil)
 	if err != nil {
-		return "", err
+		return "", errors.New("校验地址无效")
 	}
 	request.Header.Set("User-Agent", "bilibili-live-gift-panel/"+updater.currentVersion)
 	response, err := updater.client.Do(request)
 	if err != nil {
-		return "", err
+		return "", safeUpdateNetworkError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -791,12 +791,12 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.DownloadURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("下载地址无效")
 	}
 	request.Header.Set("User-Agent", "bilibili-live-gift-panel/"+updater.currentVersion)
 	response, err := updater.client.Do(request)
 	if err != nil {
-		return nil, err
+		return nil, safeUpdateNetworkError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {

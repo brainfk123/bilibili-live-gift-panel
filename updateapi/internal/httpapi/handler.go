@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -149,7 +150,11 @@ func getOrHead(writer http.ResponseWriter, request *http.Request, requestID stri
 func (handler handler) serviceError(writer http.ResponseWriter, request *http.Request, requestID string, err error) {
 	switch {
 	case errors.Is(err, service.ErrReleaseInvalid):
-		handler.writeLoggedError(writer, request, requestID, "release_invalid", service.ErrReleaseInvalid)
+		cause := service.ErrReleaseInvalid
+		if reason := service.InvalidReason(err); reason != "" {
+			cause = fmt.Errorf("reason=%s", reason)
+		}
+		handler.writeLoggedError(writer, request, requestID, "release_invalid", cause)
 	case errors.Is(err, service.ErrDownloadUnavailable):
 		handler.writeLoggedError(writer, request, requestID, "download_unavailable", service.ErrDownloadUnavailable)
 	default:

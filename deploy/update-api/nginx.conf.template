@@ -8,6 +8,7 @@ server {
     listen 80;
     listen [::]:80;
     server_name ${PUBLIC_DOMAIN};
+    client_max_body_size 16k;
     access_log /var/log/nginx/gift-panel-update-api.access.log gift_panel_update_api_safe;
     error_log /var/log/nginx/gift-panel-update-api.error.log crit;
 
@@ -16,7 +17,7 @@ server {
     }
 
     location / {
-        return 301 https://$host$request_uri;
+        return 301 https://${PUBLIC_DOMAIN}$request_uri;
     }
 }
 
@@ -24,6 +25,7 @@ server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
     server_name ${PUBLIC_DOMAIN};
+    client_max_body_size 16k;
     ssl_certificate ${TLS_CERT_PATH};
     ssl_certificate_key ${TLS_KEY_PATH};
     access_log /var/log/nginx/gift-panel-update-api.access.log gift_panel_update_api_safe;
@@ -52,7 +54,8 @@ server {
             add_header X-Frame-Options DENY always;
             add_header Permissions-Policy 'camera=(), geolocation=(), microphone=()' always;
             add_header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" always;
-            return 405 '{"code":"method_not_allowed","message":"Method not allowed"}';
+            add_header X-Request-ID $request_id always;
+            return 405 '{"code":"method_not_allowed","message":"Method not allowed","request_id":"$request_id"}';
         }
         limit_req zone=gift_panel_update_api burst=20 nodelay;
         limit_req_status 429;
@@ -76,7 +79,8 @@ server {
             add_header X-Frame-Options DENY always;
             add_header Permissions-Policy 'camera=(), geolocation=(), microphone=()' always;
             add_header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" always;
-            return 405 '{"code":"method_not_allowed","message":"Method not allowed"}';
+            add_header X-Request-ID $request_id always;
+            return 405 '{"code":"method_not_allowed","message":"Method not allowed","request_id":"$request_id"}';
         }
         limit_req zone=gift_panel_update_api burst=20 nodelay;
         limit_req_status 429;
@@ -93,6 +97,7 @@ server {
 
     location = /healthz {
         allow 127.0.0.1;
+        allow ::1;
         deny all;
         proxy_pass http://127.0.0.1:12450;
         proxy_http_version 1.1;
@@ -113,11 +118,18 @@ server {
         add_header X-Frame-Options DENY always;
         add_header Permissions-Policy 'camera=(), geolocation=(), microphone=()' always;
         add_header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" always;
-        return 429 '{"code":"rate_limited","message":"Too many requests"}';
+        add_header X-Request-ID $request_id always;
+        return 429 '{"code":"rate_limited","message":"Too many requests","request_id":"$request_id"}';
     }
 
     location / {
         default_type application/json;
-        return 404 '{"code":"not_found","message":"Not found"}';
+        add_header X-Content-Type-Options nosniff always;
+        add_header Referrer-Policy no-referrer always;
+        add_header X-Frame-Options DENY always;
+        add_header Permissions-Policy 'camera=(), geolocation=(), microphone=()' always;
+        add_header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" always;
+        add_header X-Request-ID $request_id always;
+        return 404 '{"code":"not_found","message":"Not found","request_id":"$request_id"}';
     }
 }

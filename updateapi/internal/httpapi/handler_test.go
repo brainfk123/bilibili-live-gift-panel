@@ -189,6 +189,32 @@ func TestServiceErrorsAreTypedPrivateAndLoggedWithoutSensitiveData(t *testing.T)
 	}
 }
 
+func TestInvalidManifestLogsOnlyItsSanitizedReasonCode(t *testing.T) {
+	logger := &captureLogger{}
+	handler := httpapi.New(&fakeReleaseService{latestErr: reasonedReleaseInvalid{cause: errors.New("releases/v0.4.4/private.json?signature=secret")}}, func() string { return generatedID }, logger)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, latestPath, nil))
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", response.Code)
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("logged entries = %#v, want one", logger.entries)
+	}
+	if got := logger.entries[0].cause.Error(); got != "reason=manifest_tag" {
+		t.Fatalf("logged cause = %q, want sanitized reason", got)
+	}
+}
+
+type reasonedReleaseInvalid struct{ cause error }
+
+func (reasoned reasonedReleaseInvalid) Error() string { return reasoned.cause.Error() }
+func (reasoned reasonedReleaseInvalid) Is(target error) bool {
+	return target == service.ErrReleaseInvalid
+}
+func (reasoned reasonedReleaseInvalid) InvalidReason() string { return "manifest_tag" }
+
 func TestUnknownAndUnsupportedRequestsUseStableJSONErrors(t *testing.T) {
 	handler := httpapi.New(&fakeReleaseService{}, func() string { return generatedID }, &captureLogger{})
 

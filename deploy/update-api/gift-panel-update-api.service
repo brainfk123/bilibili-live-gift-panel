@@ -23,6 +23,7 @@ CapabilityBoundingSet=
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LogNamespace=gift-panel-update-api
 UMask=0077
 
 [Install]
