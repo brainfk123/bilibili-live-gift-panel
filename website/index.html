@@ -3,96 +3,37 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta
-      name="description"
-      content="礼物互动工坊是面向 B 站直播场景的非营利开源互动工具，提供本地开源版，并筹备受邀网页版。"
-    />
+    <meta name="description" content="礼物互动工坊是我的个人项目记录页面，仅用于本人学习、记录和个人使用。" />
     <meta name="color-scheme" content="dark" />
-    <title>礼物互动工坊｜直播互动工具应用</title>
+    <title>礼物互动工坊｜个人项目记录</title>
     <style>
       :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; color: #f8fafc; background: #090b12; }
       * { box-sizing: border-box; }
-      body { min-width: 320px; min-height: 100vh; margin: 0; background: radial-gradient(circle at 15% 10%, rgba(251, 114, 153, .2), transparent 30rem), radial-gradient(circle at 85% 20%, rgba(255, 173, 102, .14), transparent 26rem), #090b12; }
-      a { color: inherit; }
-      .shell { width: min(1120px, calc(100% - 40px)); margin: 0 auto; }
-      header, footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; }
-      header { padding: 24px 0; }
-      .brand { display: inline-flex; align-items: center; gap: 12px; text-decoration: none; font-weight: 750; letter-spacing: -.02em; }
-      .mark { display: grid; width: 42px; height: 42px; place-items: center; border-radius: 13px; color: #1c0b11; background: linear-gradient(135deg, #fb7299, #ffad66); font-size: 22px; }
-      nav { display: flex; gap: 22px; color: #aeb6c7; font-size: 14px; }
-      nav a, footer a { text-decoration: none; }
-      nav a:hover, footer a:hover { color: #fff; }
-      main { padding: 76px 0 84px; }
-      .hero { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(300px, .85fr); gap: 64px; align-items: center; }
-      .eyebrow, .status { display: inline-flex; align-items: center; gap: 8px; padding: 7px 11px; border: 1px solid rgba(251, 114, 153, .35); border-radius: 999px; color: #ffb0c7; background: rgba(251, 114, 153, .08); font-size: 13px; }
-      .eyebrow::before { width: 7px; height: 7px; border-radius: 50%; background: #fb7299; box-shadow: 0 0 16px #fb7299; content: ""; }
-      h1 { max-width: 780px; margin: 24px 0 18px; font-size: clamp(42px, 7vw, 76px); line-height: 1.04; letter-spacing: -.055em; }
-      .gradient-text { color: transparent; background: linear-gradient(105deg, #fff 5%, #fb7299 52%, #ffad66 100%); background-clip: text; -webkit-background-clip: text; }
-      .lead, .legal { max-width: 650px; margin: 0; color: #aeb6c7; font-size: clamp(17px, 2vw, 20px); line-height: 1.75; }
-      .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 34px; }
-      .button { display: inline-flex; align-items: center; justify-content: center; min-height: 48px; padding: 0 20px; border: 1px solid rgba(255,255,255,.14); border-radius: 13px; background: rgba(255,255,255,.05); text-decoration: none; font-weight: 700; }
-      .button.primary { border-color: transparent; color: #1c0b11; background: linear-gradient(110deg, #fb7299, #ffad66); }
-      .preview { min-height: 370px; padding: 26px; overflow: hidden; border: 1px solid rgba(255,255,255,.12); border-radius: 28px; background: linear-gradient(150deg, rgba(26,30,43,.95), rgba(12,14,22,.94)); box-shadow: 0 32px 90px rgba(0,0,0,.35); }
-      .window-bar { display: flex; gap: 7px; margin-bottom: 28px; }
-      .window-bar span { width: 9px; height: 9px; border-radius: 50%; background: #394052; }
-      .window-bar span:first-child { background: #fb7299; }
-      .stat { padding: 18px; border: 1px solid rgba(255,255,255,.08); border-radius: 16px; background: rgba(255,255,255,.04); }
-      .stat + .stat { margin-top: 12px; }
-      .stat-label { margin-bottom: 8px; color: #8e98aa; font-size: 13px; }
-      .stat-value { display: flex; justify-content: space-between; gap: 20px; font-size: 28px; font-weight: 800; }
-      .stat-value small { color: #fb7299; font-size: 13px; }
-      .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 72px; }
-      .feature { padding: 24px; border: 1px solid rgba(255,255,255,.09); border-radius: 18px; background: rgba(255,255,255,.025); }
-      .feature strong { display: block; margin-bottom: 10px; font-size: 17px; }
-      .feature p { margin: 0; color: #929caf; font-size: 14px; line-height: 1.7; }
-      .legal { max-width: none; margin-top: 40px; padding: 24px; border: 1px solid rgba(255,255,255,.09); border-radius: 18px; background: rgba(255,255,255,.025); font-size: 14px; }
-      .legal p { margin: 0; } .legal p + p { margin-top: 10px; }
-      footer { padding: 25px 0 34px; border-top: 1px solid rgba(255,255,255,.08); color: #747f93; font-size: 13px; }
-      @media (max-width: 800px) { nav { display: none; } main { padding-top: 44px; } .hero { grid-template-columns: 1fr; gap: 42px; } .preview { min-height: 330px; } .features { grid-template-columns: 1fr; margin-top: 42px; } }
+      body { min-width: 320px; min-height: 100vh; margin: 0; background: radial-gradient(circle at 20% 15%, rgba(251, 114, 153, .18), transparent 30rem), radial-gradient(circle at 80% 20%, rgba(255, 173, 102, .12), transparent 28rem), #090b12; }
+      .page { width: min(760px, calc(100% - 40px)); min-height: 100vh; margin: 0 auto; display: flex; flex-direction: column; }
+      main { flex: 1; display: grid; place-items: center; padding: 72px 0; }
+      .card { width: 100%; padding: clamp(32px, 7vw, 64px); border: 1px solid rgba(255,255,255,.1); border-radius: 28px; background: linear-gradient(150deg, rgba(26,30,43,.94), rgba(12,14,22,.92)); box-shadow: 0 32px 90px rgba(0,0,0,.3); }
+      .eyebrow { display: inline-flex; padding: 7px 11px; border: 1px solid rgba(251,114,153,.35); border-radius: 999px; color: #ffb0c7; background: rgba(251,114,153,.08); font-size: 13px; }
+      h1 { margin: 24px 0 20px; font-size: clamp(42px, 9vw, 72px); line-height: 1.05; letter-spacing: -.05em; color: transparent; background: linear-gradient(105deg, #fff 5%, #fb7299 55%, #ffad66 100%); background-clip: text; -webkit-background-clip: text; }
+      p { margin: 0; color: #aeb6c7; font-size: clamp(16px, 2.6vw, 19px); line-height: 1.8; }
+      p + p { margin-top: 12px; }
+      footer { padding: 24px 0 32px; border-top: 1px solid rgba(255,255,255,.08); color: #747f93; font-size: 13px; text-align: center; }
+      footer a { color: inherit; text-decoration: none; }
+      footer a:hover { color: #fff; }
     </style>
   </head>
   <body>
-    <div class="shell">
-      <header>
-        <a class="brand" href="/" aria-label="返回首页"><span class="mark" aria-hidden="true">✦</span><span>礼物互动工坊</span></a>
-        <nav aria-label="主要导航">
-          <a href="#features">功能</a>
-          <a href="https://github.com/brainfk123/bilibili-live-gift-panel/releases/latest">更新日志</a>
-          <a href="https://github.com/brainfk123/bilibili-live-gift-panel">源代码</a>
-        </nav>
-      </header>
+    <div class="page">
       <main>
-        <section class="hero">
-          <div>
-            <span class="eyebrow">非营利 · 开源 · 本地运行</span>
-            <h1><span class="gradient-text">礼物互动工坊</span><br />直播互动工具应用</h1>
-            <p class="lead">面向 B 站直播场景的礼物互动工具。将观众礼物转换为可配置的互动规则，并在 OBS 直播画面中展示。</p>
-            <div class="actions">
-              <a class="button primary" href="https://github.com/brainfk123/bilibili-live-gift-panel/releases/latest">下载本地开源版</a>
-              <a class="button" href="https://github.com/brainfk123/bilibili-live-gift-panel">查看 GitHub 源码</a>
-              <span class="status" aria-label="网页版状态">受邀网页版 · 建设中</span>
-            </div>
-          </div>
-          <div class="preview" aria-label="属性面板示意">
-            <div class="window-bar"><span></span><span></span><span></span></div>
-            <div class="stat"><div class="stat-label">礼物规则</div><div class="stat-value"><span>02:18:36</span><small>触发 +5 分钟</small></div></div>
-            <div class="stat"><div class="stat-label">OBS 展示</div><div class="stat-value"><span>12,840</span><small>本场积分</small></div></div>
-            <div class="stat"><div class="stat-label">互动事件</div><div class="stat-value"><span>双倍奖励</span><small>规则已命中</small></div></div>
-          </div>
-        </section>
-        <section class="features" id="features" aria-label="主要功能">
-          <article class="feature"><strong>礼物互动规则</strong><p>按礼物、数量和活动设置互动规则，适配积分、挑战与自定义玩法。</p></article>
-          <article class="feature"><strong>OBS 数据展示</strong><p>将本地配置的礼物互动数据展示在 OBS 直播画面中。</p></article>
-          <article class="feature"><strong>开源可验证</strong><p>源代码和版本记录公开在 GitHub，便于独立查验。</p></article>
-        </section>
-        <section class="legal" aria-label="服务说明">
-          <p>本项目由个人维护，为非营利开源项目，与哔哩哔哩官方无隶属或授权关系。</p>
-          <p>本站不提供网络直播、音视频上传、论坛评论、新闻资讯或交易服务。</p>
+        <section class="card" aria-labelledby="page-title">
+          <span class="eyebrow">个人项目记录</span>
+          <h1 id="page-title">礼物互动工坊</h1>
+          <p>这是我的个人项目记录页面，用于记录本人开发和自用的直播互动工具。</p>
+          <p>本网站仅供本人学习、记录和个人使用。</p>
         </section>
       </main>
       <footer>
-        <span>© 2026 礼物互动工坊 · 非营利开源项目</span>
-        <span><a href="https://github.com/brainfk123/bilibili-live-gift-panel">GitHub</a> · <a href="https://beian.miit.gov.cn/" rel="nofollow">粤ICP备2026116328号</a></span>
+        <a href="https://beian.miit.gov.cn/" rel="nofollow">粤ICP备2026116328号</a>
       </footer>
     </div>
   </body>
