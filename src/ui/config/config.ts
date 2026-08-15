@@ -1,11 +1,17 @@
 import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftKpiBarStyle, GiftKpiLayout, GiftKpiPanel, GiftReceipt, GiftRule, MAX_GIFT_RECEIPTS, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
-import { clearRoomScopedRecords, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState } from '../../storage';
+import { clearRoomScopedRecords, commitAuthoritativeStateMutation, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState, saveStateFieldTransaction } from '../../storage';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { bindFloatingDetailCard, el, fieldControl, inputField, setFloatingDetailGuideExpanded, toast } from '../common';
 import { builtinCatalog, findGift } from '../../gifts/catalog';
 import { giftPriceDescription, isSpecialEventGift } from '../../gifts/special-events';
 import { formatValue } from '../../format';
 import { formatSignedYuanFromGoldSeeds, formatYuanFromGoldSeeds, goldSeedsFromYuan } from '../../currency';
+import {
+  adjustAttributeTimeValue,
+  formatAttributeTimeValue,
+  parseAttributeTimeValue,
+  type AttributeTimeParseResult,
+} from './attribute-time-value';
 import {
   BiliAuthStatus,
   checkForUpdates,
@@ -61,6 +67,13 @@ import {
 import { renderSpotlightGuide, type SpotlightGuideElement } from './spotlight-guide';
 import { createAttributeWorkspace, type AttributeWorkspace } from './attribute-workspace';
 import {
+  prepareAttributeEditSession,
+  submitAttributeEdit,
+  type AttributeEditGiftCatalogUpsert,
+  type AttributeEditInput,
+} from './attribute-edit-api';
+import type { AttributeEditLeaseHealth, AttributeEditLeaseSession } from './attribute-edit-lease';
+import {
   buildQuickGiftFormula,
   detectQuickGiftRule,
   QUICK_GIFT_OPERATION_GROUPS,
@@ -68,7 +81,10 @@ import {
   quickGiftOperationSupportsMaximum,
   quickGiftOperationUnit,
   quickGiftOperationUsesAmount,
+  quickGiftOperationUsesRange,
+  validateQuickGiftRuleDraft,
   type QuickGiftOperation,
+  type QuickGiftRuleDraft,
 } from './quick-gift-rules';
 import { createGameplayTemplateWizard } from './template-wizard';
 import type { GameplayTemplateBuildResult } from '../../gameplay-templates';
@@ -135,9 +151,7 @@ interface SelectedGiftRule {
   formula: string;
   condition: string;
   enabled: boolean;
-  quickOperation?: QuickGiftOperation;
-  quickAmount?: number;
-  quickMaximum?: number;
+  quickDraft?: QuickGiftRuleDraft;
   quickMaximumEnabled?: boolean;
   quickConditionMode?: QuickGiftConditionMode;
   quickConditionIdentity?: GiftUserIdentity;
@@ -152,6 +166,15 @@ interface SelectedGiftRule {
 type LeaderboardMode = 'contribution' | 'rules' | 'blind-box';
 
 type HeaderActionIcon = 'training' | 'changelog' | 'settings' | 'sun' | 'moon';
+
+const TIME_SHORTCUTS = [
+  ['-1时', -3600],
+  ['-10分', -600],
+  ['-30秒', -30],
+  ['+30秒', 30],
+  ['+10分', 600],
+  ['+1时', 3600],
+] as const;
 
 function createHeaderActionIcon(kind: HeaderActionIcon): HTMLElement {
   const namespace = 'http://www.w3.org/2000/svg';
@@ -215,6 +238,7 @@ export function mountConfig(root: HTMLElement): void {
   let guideDismissed = !state.settings.showTutorial;
   let activeGuide: SpotlightGuideElement | null = null;
   let editorOpen = false;
+  let attributeEditorOpening = false;
   let editorGuideEnabled = false;
   let forcedTutorialLesson: TutorialLesson | null = null;
   let editorTutorialProgress: TutorialEditorProgress = { open: false };
@@ -546,7 +570,7 @@ export function mountConfig(root: HTMLElement): void {
   }
 
   async function refreshBackendState(): Promise<void> {
-    if (stateRefreshActive || editorOpen) return;
+    if (stateRefreshActive || editorOpen || attributeEditorOpening) return;
     stateRefreshActive = true;
     try {
       const previousStructure = configStructureSignature(state);
@@ -765,22 +789,26 @@ export function mountConfig(root: HTMLElement): void {
     const openTopic = (topic: TrainingTopicDefinition): void => {
       overlay.remove();
       if (topic.destination.kind === 'editor') {
-        navigateToPage('attributes', { scroll: false, refreshGuide: false, automatic: true });
-        if (!editorOpen) openAttributeEditor(0);
-        activeEditorWorkspace?.setSection(topic.destination.section);
-        if (['multi-gift', 'blind-box', 'manual-gift'].includes(topic.id)) {
-          const addGift = root.querySelector<HTMLButtonElement>('.guide-add-gift');
-          if (typeof addGift?.click === 'function') addGift.click();
-          else (addGift as any)?.onclick?.();
-          if (topic.id === 'manual-gift') {
-            const manualAdder = root.querySelector<HTMLDetailsElement>('.manual-gift-adder');
-            if (manualAdder) manualAdder.open = true;
+        const destination = topic.destination;
+        void (async () => {
+          navigateToPage('attributes', { scroll: false, refreshGuide: false, automatic: true });
+          if (!editorOpen) await openAttributeEditor(0);
+          if (!activeEditorWorkspace) return;
+          activeEditorWorkspace.setSection(destination.section);
+          if (['multi-gift', 'blind-box', 'manual-gift'].includes(topic.id)) {
+            const addGift = root.querySelector<HTMLButtonElement>('.guide-add-gift');
+            if (typeof addGift?.click === 'function') addGift.click();
+            else (addGift as any)?.onclick?.();
+            if (topic.id === 'manual-gift') {
+              const manualAdder = root.querySelector<HTMLDetailsElement>('.manual-gift-adder');
+              if (manualAdder) manualAdder.open = true;
+            }
           }
-        }
-        if (['advanced-rule', 'cross-attribute'].includes(topic.id)) {
-          const advanced = root.querySelector<HTMLDetailsElement>('.rule-advanced-settings');
-          if (advanced) advanced.open = true;
-        }
+          if (['advanced-rule', 'cross-attribute'].includes(topic.id)) {
+            const advanced = root.querySelector<HTMLDetailsElement>('.rule-advanced-settings');
+            if (advanced) advanced.open = true;
+          }
+        })();
         return;
       }
       const destinationPage = configPageForSelector(topic.destination.selector);
@@ -1490,8 +1518,9 @@ export function mountConfig(root: HTMLElement): void {
       gifts: catalog.gifts,
       existingAttributeNames: state.attributes.map((attribute) => attribute.name),
       onBlank: () => {
+        editorOpen = false;
         if (forcedTutorialLesson === 'template') forcedTutorialLesson = null;
-        openAttributeEditor();
+        void openAttributeEditor();
       },
       onClose: (reason) => {
         if (reason === 'blank') return;
@@ -2984,11 +3013,63 @@ export function mountConfig(root: HTMLElement): void {
     closeButton.focus();
   }
 
-  function openAttributeEditor(index?: number, initialSection: AttributeWorkspaceSection = 'overview'): void {
+  async function openAttributeEditor(index?: number, initialSection: AttributeWorkspaceSection = 'overview'): Promise<void> {
+    if (editorOpen || attributeEditorOpening) return;
+    attributeEditorOpening = true;
+    const lessonBeforeOpen = activeTutorialLesson();
+    let original = index === undefined ? undefined : state.attributes[index];
+    let lease: AttributeEditLeaseSession | null = null;
+    let leaseWarning: HTMLElement | null = null;
+    const leaseState: { health: AttributeEditLeaseHealth } = { health: 'healthy' };
+    let refreshApplied = false;
+    const renderLeaseHealth = (health: AttributeEditLeaseHealth): void => {
+      leaseState.health = health;
+      if (!leaseWarning) return;
+      leaseWarning.hidden = health !== 'retrying';
+    };
+    try {
+      if (original) {
+        // Invalidate an already-running soft poll before adopting the
+        // prepared authoritative snapshot used by this editor.
+        localStateVersion += 1;
+        const sessionTarget = original.id?.trim()
+          ? { attributeId: original.id }
+          : { legacyName: original.name };
+        const preparedResult: { session?: Awaited<ReturnType<typeof prepareAttributeEditSession>> } = {};
+        const authoritative = await commitAuthoritativeStateMutation(async () => {
+          const prepared = await prepareAttributeEditSession(
+            sessionTarget,
+            { onHealthChange: renderLeaseHealth },
+          );
+          preparedResult.session = prepared;
+          return prepared.state;
+        });
+        const prepared = preparedResult.session;
+        if (!prepared) throw new Error('无法打开属性编辑器');
+        lease = prepared.lease;
+        if (loadState() !== authoritative) {
+          await prepared.lease.release();
+          return;
+        }
+        Object.assign(state, authoritative);
+        refreshApplied = true;
+        const refreshedMatches = state.attributes
+          .map((attribute, attributeIndex) => ({ attribute, attributeIndex }))
+          .filter(({ attribute }) => attribute.id === prepared.attributeId);
+        if (refreshedMatches.length !== 1) throw new Error('属性已不存在，请刷新后重试');
+        index = refreshedMatches[0].attributeIndex;
+        original = refreshedMatches[0].attribute;
+      }
+    } catch (error) {
+      void lease?.release();
+      if (refreshApplied) render();
+      toast(error instanceof Error ? error.message : '无法打开属性编辑器', root);
+      return;
+    } finally {
+      attributeEditorOpening = false;
+    }
     activeGuide?.dispose();
     activeGuide = null;
-    root.querySelector('.attribute-overlay')?.remove();
-    const lessonBeforeOpen = activeTutorialLesson();
     editorOpen = true;
     editorGuideEnabled = !guideDismissed && (
       (index === undefined && (lessonBeforeOpen === 'attribute' || lessonBeforeOpen === 'template'))
@@ -2997,7 +3078,6 @@ export function mountConfig(root: HTMLElement): void {
       )))
     );
 
-    const original = index === undefined ? undefined : state.attributes[index];
     const originalName = original?.name ?? '';
     const timerRules = original
       ? state.timerRules.filter((rule) => rule.attributeName === original.name).map((rule) => ({ ...rule }))
@@ -3035,8 +3115,9 @@ export function mountConfig(root: HTMLElement): void {
 
     const overlay = el('div', { class: 'overlay attribute-overlay' });
     let modal: HTMLElement;
+    let saveInFlight = false;
     const closeButton = el('button', { class: 'modal-close', type: 'button', text: '×', ariaLabel: '关闭' } as any) as HTMLButtonElement;
-    const close = (): void => {
+    const finishCloseAttributeEditor = (): void => {
       overlay.remove();
       editorOpen = false;
       editorGuideEnabled = false;
@@ -3044,9 +3125,14 @@ export function mountConfig(root: HTMLElement): void {
       activeEditorWorkspace = null;
       forcedTutorialLesson = null;
       refreshOpenGiftCatalog = null;
+      void lease?.release();
       renderGuide();
     };
-    closeButton.onclick = close;
+    const closeAttributeEditor = (): void => {
+      if (saveInFlight) return;
+      finishCloseAttributeEditor();
+    };
+    closeButton.onclick = closeAttributeEditor;
     const modalHeader = el('header', { class: 'modal-header attribute-workbench-header' }, [
       el('div', {}, [
         el('span', {
@@ -3055,6 +3141,10 @@ export function mountConfig(root: HTMLElement): void {
         }),
         el('h2', { text: original ? `配置“${original.name}”` : editorGuideEnabled ? '制作第一台加班机' : '创建互动属性' }),
         el('p', { text: '按工作区逐项配置；左侧训练任务会解释每项功能为什么存在。' }),
+        leaseWarning = el('p', {
+          class: 'attribute-lease-warning',
+          text: '属性规则冻结状态正在重连，请暂时不要关闭此页面。',
+        }),
       ]),
       closeButton,
     ]);
@@ -3068,10 +3158,26 @@ export function mountConfig(root: HTMLElement): void {
       }
       updateOverviewPreview();
     };
-    const valueInput = inputField('当前值', String(original?.value ?? 0));
-    valueInput.inputMode = 'decimal';
-    const initialEditableValue = Number(valueInput.value);
-    let simulationDraftValue = Number.isFinite(initialEditableValue) ? initialEditableValue : 0;
+    const formatSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
+    formatSelect.innerHTML = '<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字 + 后缀</option>';
+    formatSelect.value = original?.format ?? 'hhmmss';
+    const valueInput = inputField(
+      '当前值',
+      formatSelect.value === 'hhmmss'
+        ? formatAttributeTimeValue(original?.value ?? 0)
+        : String(original?.value ?? 0),
+    );
+    valueInput.classList.add('attribute-current-value');
+    valueInput.inputMode = formatSelect.value === 'hhmmss' ? 'numeric' : 'decimal';
+    const readEditableAttributeValue = (): AttributeTimeParseResult => {
+      if (formatSelect.value === 'hhmmss') return parseAttributeTimeValue(valueInput.value);
+      const value = Number(valueInput.value);
+      return Number.isFinite(value)
+        ? { ok: true, seconds: value }
+        : { ok: false, message: '当前值必须是数字' };
+    };
+    const initialEditableValue = readEditableAttributeValue();
+    let simulationDraftValue = initialEditableValue.ok ? initialEditableValue.seconds : 0;
     let simulationGeneration = 0;
     let activeSimulationPreview: HTMLElement | null = null;
     const invalidateSimulationRequests = (): void => {
@@ -3088,16 +3194,13 @@ export function mountConfig(root: HTMLElement): void {
       if (activeSimulationPreview === preview) activeSimulationPreview = null;
     };
     const resetSimulationDraftFromInput = (): void => {
-      const nextValue = Number(valueInput.value);
-      simulationDraftValue = Number.isFinite(nextValue) ? nextValue : 0;
+      const nextValue = readEditableAttributeValue();
+      if (nextValue.ok) simulationDraftValue = nextValue.seconds;
       invalidateSimulationRequests();
       for (const item of selected.values()) item.simulationPreview = undefined;
       renderSelectedRules();
       renderTimerRules();
     };
-    const formatSelect = el('select', { class: 'field-input' }) as HTMLSelectElement;
-    formatSelect.innerHTML = '<option value="hhmmss">HH:MM:SS 计时器</option><option value="number">纯数字</option><option value="suffix">数字 + 后缀</option>';
-    formatSelect.value = original?.format ?? 'hhmmss';
     const displayConfig: AttributeDisplay = original?.display
       ? { ...original.display, appearance: normalizeDisplayAppearance(original.display.appearance, state.settings, original.display.themeId), valueMappings: original.display.valueMappings?.map((mapping) => ({ ...mapping })) }
       : {
@@ -3117,28 +3220,52 @@ export function mountConfig(root: HTMLElement): void {
     const updateSuffixVisibility = (): void => {
       suffixControl.hidden = formatSelect.value !== 'suffix';
     };
+    let lastAcceptedFormat = formatSelect.value as Attribute['format'];
+    let timeShortcutRow: HTMLElement;
+    const updateTimeShortcutVisibility = (): void => {
+      timeShortcutRow.hidden = formatSelect.value !== 'hhmmss';
+    };
     formatSelect.onchange = () => {
+      const nextFormat = formatSelect.value as Attribute['format'];
+      formatSelect.value = lastAcceptedFormat;
+      const parsed = readEditableAttributeValue();
+      formatSelect.value = nextFormat;
+      if (lastAcceptedFormat === 'hhmmss' && nextFormat !== 'hhmmss') {
+        if (!parsed.ok) {
+          formatSelect.value = 'hhmmss';
+          toast(parsed.message, root);
+          valueInput.focus();
+          return;
+        }
+        valueInput.value = String(parsed.seconds);
+      } else if (lastAcceptedFormat !== 'hhmmss' && nextFormat === 'hhmmss') {
+        if (!parsed.ok || !Number.isInteger(parsed.seconds) || parsed.seconds < 0) {
+          formatSelect.value = lastAcceptedFormat;
+          toast('计时器当前值必须是非负整数秒', root);
+          valueInput.focus();
+          return;
+        }
+        valueInput.value = formatAttributeTimeValue(parsed.seconds);
+      }
+      lastAcceptedFormat = nextFormat;
+      valueInput.inputMode = nextFormat === 'hhmmss' ? 'numeric' : 'decimal';
       if (displayConfig.variant === 'number' || displayConfig.variant === 'timer') {
-        displayConfig.variant = formatSelect.value === 'hhmmss' ? 'timer' : 'number';
+        displayConfig.variant = nextFormat === 'hhmmss' ? 'timer' : 'number';
       }
       updateSuffixVisibility();
+      updateTimeShortcutVisibility();
+      resetSimulationDraftFromInput();
       updateOverviewPreview();
     };
     updateSuffixVisibility();
-    const basics = el('div', { class: 'attribute-basics' }, [
-      fieldControl(nameInput),
-      fieldControl(valueInput),
-      el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '显示格式' }), formatSelect]),
-      suffixControl,
-    ]);
     const overviewPreviewName = el('span', { class: 'attribute-overview-preview-name' });
     const overviewPreviewValue = el('strong', { class: 'attribute-overview-preview-value' });
     const updateOverviewPreview = (): void => {
-      const value = Number(valueInput.value);
+      const parsed = readEditableAttributeValue();
       const format = formatSelect.value as Attribute['format'];
       const previewAttribute: Attribute = {
         name: nameInput.value.trim() || '属性名称',
-        value: Number.isFinite(value) ? value : 0,
+        value: parsed.ok ? parsed.seconds : 0,
         unit: format === 'hhmmss' ? 'seconds' : 'none',
         format,
         decimals: original?.decimals ?? 0,
@@ -3153,6 +3280,31 @@ export function mountConfig(root: HTMLElement): void {
       updateOverviewPreview();
     };
     suffixInput.oninput = updateOverviewPreview;
+    timeShortcutRow = el('div', { class: 'attribute-time-shortcuts' }, TIME_SHORTCUTS.map(([label, delta]) => {
+      const button = el('button', { class: 'attribute-time-shortcut', type: 'button', text: label }) as HTMLButtonElement;
+      button.onclick = () => {
+        const adjusted = adjustAttributeTimeValue(valueInput.value, delta);
+        if (!adjusted.ok) {
+          toast(adjusted.message, root);
+          valueInput.focus();
+          return;
+        }
+        valueInput.value = formatAttributeTimeValue(adjusted.seconds);
+        resetSimulationDraftFromInput();
+        updateOverviewPreview();
+      };
+      return button;
+    }));
+    updateTimeShortcutVisibility();
+    const valueControl = fieldControl(valueInput);
+    valueControl.append(timeShortcutRow);
+    const basics = el('div', { class: 'attribute-basics' }, [
+      fieldControl(nameInput),
+      valueControl,
+      el('label', { class: 'field' }, [el('span', { class: 'field-label', text: '显示格式' }), formatSelect]),
+      suffixControl,
+    ]);
+    if (leaseWarning) leaseWarning.hidden = leaseState.health !== 'retrying';
     const templateButton = el('button', {
       class: 'btn guide-overtime-template',
       type: 'button',
@@ -3160,12 +3312,15 @@ export function mountConfig(root: HTMLElement): void {
     }) as HTMLButtonElement;
     templateButton.onclick = () => {
       nameInput.value = '加班时间';
-      valueInput.value = '0';
-      resetSimulationDraftFromInput();
       formatSelect.value = 'hhmmss';
+      lastAcceptedFormat = 'hhmmss';
+      valueInput.value = formatAttributeTimeValue(0);
+      valueInput.inputMode = 'numeric';
+      resetSimulationDraftFromInput();
       suffixInput.value = '';
       if (!broadcastMessageInput.value.trim()) broadcastMessageInput.value = '感谢大家的支持，欢迎投喂礼物';
       updateSuffixVisibility();
+      updateTimeShortcutVisibility();
       for (const label of Array.from(modal.querySelectorAll('.formula-target-name'))) {
         label.textContent = '加班时间 =';
       }
@@ -3269,8 +3424,8 @@ export function mountConfig(root: HTMLElement): void {
           confirmButton.disabled = true;
           confirmButton.textContent = '校验中…';
           try {
-            const value = Number(valueInput.value);
-            await previewFormula(formula, attributeName, Number.isFinite(value) ? value : 0, context === 'timer' ? 'timer' : undefined);
+            const parsed = readEditableAttributeValue();
+            await previewFormula(formula, attributeName, parsed.ok ? parsed.seconds : 0, context === 'timer' ? 'timer' : undefined);
             const result = saveFormulaPreset(state.formulaPresets, {
               name: presetNameInput.value,
               context,
@@ -3657,8 +3812,7 @@ export function mountConfig(root: HTMLElement): void {
           condition: '',
           enabled: !editorGuideEnabled,
           simulationIdentity: 0,
-          quickOperation: 'price',
-          quickAmount: 60,
+          quickDraft: { operation: 'price', amount: 60 },
         };
         selected.set(gift.id, item);
         void hydrateBlindBoxRule(item);
@@ -3863,12 +4017,9 @@ export function mountConfig(root: HTMLElement): void {
         });
       };
       const attributeName = nameInput.value.trim() || originalName || '属性';
-      if (!item.quickOperation) {
-        const detected = detectQuickGiftRule(item.formula, attributeName);
-        item.quickOperation = detected.operation;
-        item.quickAmount = detected.amount;
-        item.quickMaximum = detected.maximum;
-        item.quickMaximumEnabled = detected.maximum !== undefined;
+      if (!item.quickDraft) {
+        item.quickDraft = detectQuickGiftRule(item.formula, attributeName);
+        item.quickMaximumEnabled = item.quickDraft.maximum !== undefined;
       }
       const operationSelect = el('select', { class: 'field-input quick-rule-operation' }) as HTMLSelectElement;
       for (const group of QUICK_GIFT_OPERATION_GROUPS) {
@@ -3883,16 +4034,29 @@ export function mountConfig(root: HTMLElement): void {
         }
         operationSelect.append(optionGroup);
       }
-      operationSelect.value = item.quickOperation ?? 'advanced';
-      const amountInput = inputField('变化数值', String(item.quickAmount ?? 60));
+      operationSelect.value = item.quickDraft.operation;
+      const amountInput = inputField('变化数值', String('amount' in item.quickDraft ? item.quickDraft.amount : 60));
       amountInput.type = 'number';
       amountInput.step = 'any';
+      const rangeMinInput = inputField('随机最小变化', String(item.quickDraft.operation === 'randomRange' ? item.quickDraft.rangeMin : -60));
+      rangeMinInput.classList.add('quick-rule-range-min');
+      rangeMinInput.type = 'number';
+      rangeMinInput.step = '1';
+      const rangeMaxInput = inputField('随机最大变化', String(item.quickDraft.operation === 'randomRange' ? item.quickDraft.rangeMax : 60));
+      rangeMaxInput.classList.add('quick-rule-range-max');
+      rangeMaxInput.type = 'number';
+      rangeMaxInput.step = '1';
+      const rangeInput = el('div', { class: 'quick-rule-range' }, [
+        rangeMinInput,
+        el('span', { text: '到' }),
+        rangeMaxInput,
+      ]);
       const quickUnit = el('span', { class: 'quick-rule-unit' });
       const maximumToggle = el('input', { class: 'setting-switch-input', type: 'checkbox' }) as HTMLInputElement;
       maximumToggle.checked = item.quickMaximumEnabled === true;
       const maximumInput = inputField(
         '最高不超过',
-        String(item.quickMaximum ?? (formatSelect.value === 'hhmmss' ? 3600 : 100)),
+        String(item.quickDraft.maximum ?? (formatSelect.value === 'hhmmss' ? 3600 : 100)),
       );
       maximumInput.type = 'number';
       maximumInput.step = 'any';
@@ -3906,6 +4070,7 @@ export function mountConfig(root: HTMLElement): void {
         maximumInput,
         maximumUnit,
       ]);
+      const quickRuleError = el('div', { class: 'quick-rule-error error' });
       const syncQuickCopy = (): void => {
         const operation = operationSelect.value as QuickGiftOperation;
         const targetName = nameInput.value.trim() || originalName || '属性';
@@ -3914,7 +4079,9 @@ export function mountConfig(root: HTMLElement): void {
         }
         quickUnit.textContent = quickGiftOperationUnit(operation, formatSelect.value === 'hhmmss');
         amountInput.hidden = !quickGiftOperationUsesAmount(operation);
-        amountInput.min = operation === 'set' ? '' : operation.startsWith('random') ? '1' : '0';
+        quickUnit.hidden = !quickGiftOperationUsesAmount(operation);
+        amountInput.min = operation === 'set' ? '' : '0';
+        rangeInput.hidden = !quickGiftOperationUsesRange(operation);
         maximumLimit.hidden = !quickGiftOperationSupportsMaximum(operation);
         maximumInput.disabled = !maximumToggle.checked;
         maximumUnit.textContent = formatSelect.value === 'hhmmss' ? '秒' : '单位';
@@ -3922,29 +4089,42 @@ export function mountConfig(root: HTMLElement): void {
       const syncQuickRule = (): void => {
         const operation = operationSelect.value as QuickGiftOperation;
         const amount = Number(amountInput.value);
-        item.quickOperation = operation;
-        item.quickAmount = Number.isFinite(amount) ? amount : 0;
-        const maximum = Number(maximumInput.value);
+        const maximum = maximumInput.value.trim() === '' ? Number.NaN : Number(maximumInput.value);
         item.quickMaximumEnabled = maximumToggle.checked && quickGiftOperationSupportsMaximum(operation);
-        item.quickMaximum = Number.isFinite(maximum) ? maximum : 0;
+        const optionalMaximum = item.quickMaximumEnabled ? maximum : undefined;
+        const draft: QuickGiftRuleDraft = operation === 'randomRange'
+          ? {
+            operation,
+            rangeMin: rangeMinInput.value.trim() === '' ? Number.NaN : Number(rangeMinInput.value),
+            rangeMax: rangeMaxInput.value.trim() === '' ? Number.NaN : Number(rangeMaxInput.value),
+            ...(optionalMaximum === undefined ? {} : { maximum: optionalMaximum }),
+          }
+          : {
+            operation,
+            amount: Number.isFinite(amount) ? amount : 0,
+            ...(optionalMaximum === undefined ? {} : { maximum: optionalMaximum }),
+          };
+        item.quickDraft = draft;
         const targetName = nameInput.value.trim() || originalName || '属性';
-        const formula = buildQuickGiftFormula(
-          operation,
-          targetName,
-          item.quickAmount,
-          item.quickMaximumEnabled ? item.quickMaximum : undefined,
-        );
-        if (formula !== null) formulaInput.value = formula;
+        const error = validateQuickGiftRuleDraft(draft);
+        quickRuleError.textContent = error ?? '';
+        if (error === null) {
+          const formula = buildQuickGiftFormula(draft, targetName);
+          if (formula !== null) formulaInput.value = formula;
+        }
         syncQuickCopy();
         updatePreview();
       };
       operationSelect.onchange = syncQuickRule;
       amountInput.oninput = syncQuickRule;
+      rangeMinInput.oninput = syncQuickRule;
+      rangeMaxInput.oninput = syncQuickRule;
       maximumToggle.onchange = syncQuickRule;
       maximumInput.oninput = syncQuickRule;
       formulaInput.oninput = () => {
-        item.quickOperation = 'advanced';
+        item.quickDraft = { operation: 'advanced', amount: 60 };
         operationSelect.value = 'advanced';
+        quickRuleError.textContent = '';
         syncQuickCopy();
         updatePreview();
       };
@@ -4013,8 +4193,9 @@ export function mountConfig(root: HTMLElement): void {
         const example = el('button', { class: 'formula-example', type: 'button', text: label }) as HTMLButtonElement;
         example.onclick = () => {
           formulaInput.value = makeFormula();
-          item.quickOperation = 'advanced';
+          item.quickDraft = { operation: 'advanced', amount: 60 };
           operationSelect.value = 'advanced';
+          quickRuleError.textContent = '';
           syncQuickCopy();
           updatePreview();
         };
@@ -4038,8 +4219,10 @@ export function mountConfig(root: HTMLElement): void {
           el('span', { text: `每收到 1 个“${item.gift.name}”后` }),
           operationSelect,
           amountInput,
+          rangeInput,
           quickUnit,
         ]),
+        quickRuleError,
         maximumLimit,
         el('div', { class: 'quick-rule-sentence quick-rule-condition' }, [
           el('span', { text: '送礼者身份' }),
@@ -4211,7 +4394,8 @@ export function mountConfig(root: HTMLElement): void {
       if (enumEnabled.checked) {
         displayConfig.variant = 'enum';
         if (valueMappings.length === 0) {
-          valueMappings.push({ value: Number(valueInput.value) || 0, label: '当前状态', color: '#fb7299' });
+          const parsed = readEditableAttributeValue();
+          valueMappings.push({ value: parsed.ok ? parsed.seconds : 0, label: '当前状态', color: '#fb7299' });
         }
       } else if (displayConfig.variant === 'enum') {
         displayConfig.variant = formatSelect.value === 'hhmmss' ? 'timer' : 'number';
@@ -4270,13 +4454,15 @@ export function mountConfig(root: HTMLElement): void {
     ]);
 
     const cancelButton = el('button', { class: 'btn ghost', type: 'button', text: '取消' }) as HTMLButtonElement;
-    cancelButton.onclick = close;
+    cancelButton.onclick = closeAttributeEditor;
     const saveButton = el('button', { class: 'btn guide-attribute-save', type: 'button', text: original ? '保存修改' : '创建属性' }) as HTMLButtonElement;
+    const saveNote = el('span', { class: 'attribute-save-note', text: '保存前会由后台统一校验规则' });
     saveButton.onclick = () => {
-      void saveAttributeEditor(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, overlay, saveButton);
+      if (saveInFlight) return;
+      void saveAttributeEditor(index, original, lease, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, finishCloseAttributeEditor, saveButton, saveNote, readEditableAttributeValue, (value) => { saveInFlight = value; });
     };
     modalFooter = el('footer', { class: 'modal-actions attribute-workbench-actions' }, [
-      el('span', { class: 'attribute-save-note', text: '保存前会由后台统一校验规则' }),
+      saveNote,
       cancelButton,
       saveButton,
     ]);
@@ -4319,7 +4505,7 @@ export function mountConfig(root: HTMLElement): void {
     overlay.onclick = (event) => {
       const shouldClose = overlayPointerStartedOutside && event.target === overlay;
       overlayPointerStartedOutside = false;
-      if (shouldClose) close();
+      if (shouldClose) closeAttributeEditor();
     };
     root.append(overlay);
     refreshOpenGiftCatalog = () => {
@@ -4373,8 +4559,7 @@ export function mountConfig(root: HTMLElement): void {
         condition: '',
         enabled: !editorGuideEnabled,
         simulationIdentity: 0,
-        quickOperation: 'price',
-        quickAmount: 60,
+        quickDraft: { operation: 'price', amount: 60 },
       };
       if (selected.has(id)) onReplacingSelectedGift?.();
       selected.set(id, item);
@@ -4395,6 +4580,7 @@ export function mountConfig(root: HTMLElement): void {
   function saveAttributeEditor(
     index: number | undefined,
     original: Attribute | undefined,
+    lease: AttributeEditLeaseSession | null,
     nameInput: HTMLInputElement,
     valueInput: HTMLInputElement,
     formatSelect: HTMLSelectElement,
@@ -4403,15 +4589,19 @@ export function mountConfig(root: HTMLElement): void {
     displayConfig: AttributeDisplay,
     selected: Map<number, SelectedGiftRule>,
     timerRules: TimerRule[],
-    overlay: HTMLElement,
+    closeAttributeEditor: () => void,
     saveButton: HTMLButtonElement,
+    saveNote: HTMLElement,
+    readEditableAttributeValue: () => AttributeTimeParseResult,
+    setSaveInFlight: (value: boolean) => void,
   ): Promise<void> {
-    return saveAttributeEditorAsync(index, original, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, overlay, saveButton);
+    return saveAttributeEditorAsync(index, original, lease, nameInput, valueInput, formatSelect, suffixInput, broadcastMessageInput, displayConfig, selected, timerRules, closeAttributeEditor, saveButton, saveNote, readEditableAttributeValue, setSaveInFlight);
   }
 
   async function saveAttributeEditorAsync(
     index: number | undefined,
     original: Attribute | undefined,
+    lease: AttributeEditLeaseSession | null,
     nameInput: HTMLInputElement,
     valueInput: HTMLInputElement,
     formatSelect: HTMLSelectElement,
@@ -4420,11 +4610,13 @@ export function mountConfig(root: HTMLElement): void {
     displayConfig: AttributeDisplay,
     selected: Map<number, SelectedGiftRule>,
     timerRules: TimerRule[],
-    overlay: HTMLElement,
+    closeAttributeEditor: () => void,
     saveButton: HTMLButtonElement,
+    saveNote: HTMLElement,
+    readEditableAttributeValue: () => AttributeTimeParseResult,
+    setSaveInFlight: (value: boolean) => void,
   ): Promise<void> {
     const name = nameInput.value.trim();
-    const value = Number(valueInput.value);
     if (!name) {
       toast('请填写属性名称', root);
       nameInput.focus();
@@ -4440,16 +4632,25 @@ export function mountConfig(root: HTMLElement): void {
       nameInput.focus();
       return;
     }
-    if (!Number.isFinite(value)) {
-      toast('当前值必须是数字', root);
+    const parsedValue = readEditableAttributeValue();
+    if (!parsedValue.ok) {
+      toast(parsedValue.message, root);
       valueInput.focus();
       return;
     }
+    const value = parsedValue.seconds;
 
     const originalName = original?.name ?? '';
     const normalizedRules: SelectedGiftRule[] = [];
     const normalizedTimers: TimerRule[] = [];
     for (const item of selected.values()) {
+      if (item.quickDraft && item.quickDraft.operation !== 'advanced') {
+        const quickDraftError = validateQuickGiftRuleDraft(item.quickDraft);
+        if (quickDraftError !== null) {
+          toast(quickDraftError, root);
+          return;
+        }
+      }
       const formulaName = item.formulaName.trim();
       if (!formulaName) {
         toast(`请填写“${item.gift.name}”的规则名称`, root);
@@ -4519,6 +4720,7 @@ export function mountConfig(root: HTMLElement): void {
     }
     displayConfig.valueMappings = normalizedMappings;
 
+    setSaveInFlight(true);
     saveButton.disabled = true;
     saveButton.textContent = '后台校验中…';
     try {
@@ -4536,6 +4738,7 @@ export function mountConfig(root: HTMLElement): void {
         await validateFormula(timer.formula, name, value, 'timer');
       }
     } catch (error) {
+      setSaveInFlight(false);
       toast(error instanceof Error ? `规则有误：${error.message}` : '规则有误', root);
       saveButton.disabled = false;
       saveButton.textContent = original ? '保存修改' : '创建属性';
@@ -4544,7 +4747,7 @@ export function mountConfig(root: HTMLElement): void {
 
     const format = formatSelect.value as Attribute['format'];
     const nextAttribute: Attribute = {
-      id: original?.id ?? createAttributeId(),
+      ...(original?.id ? { id: original.id } : {}),
       name,
       value,
       unit: format === 'hhmmss' ? 'seconds' : 'none',
@@ -4561,60 +4764,6 @@ export function mountConfig(root: HTMLElement): void {
       ...(original?.createdFromTemplateId ? { createdFromTemplateId: original.createdFromTemplateId } : {}),
       ...(original?.createdFromTemplateVersion !== undefined ? { createdFromTemplateVersion: original.createdFromTemplateVersion } : {}),
     };
-    if (index === undefined) state.attributes.push(nextAttribute);
-    else state.attributes[index] = nextAttribute;
-    if (editorGuideEnabled && state.settings.tutorialReplayMode && nextAttribute.id) {
-      state.settings.tutorialTargetAttributeId = nextAttribute.id;
-    }
-    if (originalName && originalName !== name) {
-      state.displayScenes = state.displayScenes.map((scene) => ({
-        ...scene,
-        attributeNames: scene.attributeNames.map((attributeName) => attributeName === originalName ? name : attributeName),
-      }));
-      state.activities = state.activities.map((activity) => {
-        if (!activity.attributeNames.includes(originalName)) return activity;
-        const initialValues = { ...activity.initialValues, [name]: activity.initialValues[originalName] ?? nextAttribute.value };
-        delete initialValues[originalName];
-        const resultValues = { ...(activity.result?.values ?? {}) };
-        if (Object.prototype.hasOwnProperty.call(resultValues, originalName)) {
-          resultValues[name] = resultValues[originalName];
-          delete resultValues[originalName];
-        }
-        return {
-          ...activity,
-          attributeNames: activity.attributeNames.map((attributeName) => attributeName === originalName ? name : attributeName),
-          initialValues,
-          milestones: activity.milestones.map((milestone) => ({
-            ...milestone,
-            attributeName: milestone.attributeName === originalName ? name : milestone.attributeName,
-          })),
-          ...(activity.result ? {
-            result: {
-              values: resultValues,
-              ...(activity.result.winnerAttributeName
-                ? { winnerAttributeName: activity.result.winnerAttributeName === originalName ? name : activity.result.winnerAttributeName }
-                : {}),
-            },
-          } : {}),
-        };
-      });
-    }
-
-    const renamedRules = state.rules.map((rule) => {
-      if (!originalName || originalName === name) return rule;
-      const attributeName = rule.attributeName === originalName ? name : rule.attributeName;
-      const formula = replaceFormulaVariable(rule.formula, originalName, name);
-      const hasCondition = Object.prototype.hasOwnProperty.call(rule, 'condition');
-      const condition = hasCondition ? replaceFormulaVariable(rule.condition ?? '', originalName, name) : undefined;
-      if (attributeName === rule.attributeName && formula === rule.formula && (!hasCondition || condition === rule.condition)) return rule;
-      return {
-        ...rule,
-        attributeName,
-        ...(hasCondition ? { condition } : {}),
-        formula,
-      };
-    });
-    const unrelatedRules = renamedRules.filter((rule) => rule.attributeName !== name);
     const replacementRules: GiftRule[] = normalizedRules.map((item) => ({
       id: item.previous?.id ?? createRuleId(),
       giftId: item.gift.id,
@@ -4630,45 +4779,155 @@ export function mountConfig(root: HTMLElement): void {
       ...(item.previous?.cap !== undefined ? { cap: item.previous.cap } : {}),
       ...(item.previous?.dailyLimit !== undefined ? { dailyLimit: item.previous.dailyLimit } : {}),
     }));
-    state.rules = [...unrelatedRules, ...replacementRules];
-    const renamedTimers = state.timerRules.map((rule) => ({
-      ...rule,
-      attributeName: originalName && rule.attributeName === originalName ? name : rule.attributeName,
-      condition: originalName && originalName !== name
-        ? replaceFormulaVariable(rule.condition ?? '', originalName, name)
-        : rule.condition,
-      formula: originalName && originalName !== name
-        ? replaceFormulaVariable(rule.formula, originalName, name)
-        : rule.formula,
+    const giftCatalogUpserts: AttributeEditGiftCatalogUpsert[] = normalizedRules.map(({ gift }) => ({
+      id: gift.id,
+      name: gift.name,
+      price: gift.price,
+      coinType: gift.coinType,
+      imgBasic: gift.imgBasic,
+      ...(gift.gif !== undefined ? { gif: gift.gif } : {}),
+      ...(gift.webp !== undefined ? { webp: gift.webp } : {}),
+      ...(gift.animationDurationMs !== undefined ? { animationDurationMs: gift.animationDurationMs } : {}),
+      ...(gift.effectId !== undefined ? { effectId: gift.effectId } : {}),
+      ...(gift.effectMp4 !== undefined ? { effectMp4: gift.effectMp4 } : {}),
+      ...(gift.effectMp4Json !== undefined ? { effectMp4Json: gift.effectMp4Json } : {}),
+      ...(gift.blindBoxParentId !== undefined ? { blindBoxParentId: gift.blindBoxParentId } : {}),
+      ...(gift.blindBoxParentName !== undefined ? { blindBoxParentName: gift.blindBoxParentName } : {}),
+      ...(gift.blindBoxParentPrice !== undefined ? { blindBoxParentPrice: gift.blindBoxParentPrice } : {}),
     }));
-    const unrelatedTimers = renamedTimers.filter((rule) => rule.attributeName !== name);
-    state.timerRules = [...unrelatedTimers, ...normalizedTimers];
-    for (const item of normalizedRules) upsertGiftCatalog(state, item.gift);
-    if (state.settings.tutorialReplayMode) {
-      markTutorialLessonComplete(state.settings, 'attribute');
-      markTutorialLessonComplete(state.settings, 'template');
-      if (editorTutorialProgress.basicsConfigured) markTutorialLessonComplete(state.settings, 'basics');
-      if ((editorTutorialProgress.giftCount ?? 0) > 0) markTutorialLessonComplete(state.settings, 'gift');
-      if (editorTutorialProgress.giftPreviewed) markTutorialLessonComplete(state.settings, 'rule');
-      if (editorTutorialProgress.presetSaved) markTutorialLessonComplete(state.settings, 'preset');
-      if (editorTutorialProgress.timerPreviewed) markTutorialLessonComplete(state.settings, 'timer');
-      if (editorTutorialProgress.outputPreviewed) markTutorialLessonComplete(state.settings, 'appearance');
-      markTutorialLessonComplete(state.settings, 'save');
-    }
+    const replayTutorial = state.settings.tutorialReplayMode;
+    const preserveTutorialTarget = editorGuideEnabled
+      || Boolean(original?.id && state.settings.tutorialTargetAttributeId === original.id);
+    const tutorialGuidanceActive = state.settings.showTutorial
+      && (replayTutorial || editorGuideEnabled || preserveTutorialTarget);
+    const submittedResult: { target?: Awaited<ReturnType<typeof submitAttributeEdit>>['target'] } = {};
+    let submitWasPublished = false;
     try {
-      await saveAndWait();
-    } catch {
+      localStateVersion += 1;
+      const committed = await commitAuthoritativeStateMutation(async () => {
+        const target: AttributeEditInput['target'] = original
+          ? {
+            kind: 'existing',
+            attributeId: original.id ?? '',
+            leaseToken: lease?.token ?? '',
+          }
+          : { kind: 'new' };
+        const submitted = await submitAttributeEdit({
+          target,
+          attribute: nextAttribute,
+          giftRules: replacementRules,
+          timerRules: normalizedTimers,
+          giftCatalogUpserts,
+        });
+        submittedResult.target = submitted.target;
+        return submitted.state;
+      });
+      const published = loadState();
+      submitWasPublished = published === committed;
+      Object.assign(state, published);
+    } catch (error) {
+      setSaveInFlight(false);
+      toast(error instanceof Error ? error.message : '属性编辑请求失败', root);
       saveButton.disabled = false;
       saveButton.textContent = original ? '保存修改' : '创建属性';
       return;
     }
-    overlay.remove();
-    editorOpen = false;
-    editorGuideEnabled = false;
-    editorTutorialProgress = { open: false };
-    activeEditorWorkspace = null;
-    forcedTutorialLesson = null;
-    refreshOpenGiftCatalog = null;
+    const submittedTarget = submittedResult.target;
+    if (submitWasPublished && tutorialGuidanceActive && submittedTarget) {
+      const tutorialState = JSON.parse(JSON.stringify(loadState())) as AppState;
+      const tutorialBaseline = {
+        showTutorial: tutorialState.settings.showTutorial,
+        tutorialVersion: tutorialState.settings.tutorialVersion,
+        tutorialCompletedLessons: [...tutorialState.settings.tutorialCompletedLessons],
+        tutorialReplayMode: tutorialState.settings.tutorialReplayMode,
+        tutorialTargetAttributeId: tutorialState.settings.tutorialTargetAttributeId,
+      };
+      if (preserveTutorialTarget) tutorialState.settings.tutorialTargetAttributeId = submittedTarget.id;
+      markTutorialLessonComplete(tutorialState.settings, 'attribute');
+      markTutorialLessonComplete(tutorialState.settings, 'template');
+      if (editorTutorialProgress.basicsConfigured) markTutorialLessonComplete(tutorialState.settings, 'basics');
+      if ((editorTutorialProgress.giftCount ?? 0) > 0) markTutorialLessonComplete(tutorialState.settings, 'gift');
+      if (editorTutorialProgress.giftPreviewed) markTutorialLessonComplete(tutorialState.settings, 'rule');
+      if (editorTutorialProgress.presetSaved) markTutorialLessonComplete(tutorialState.settings, 'preset');
+      if (editorTutorialProgress.timerPreviewed) markTutorialLessonComplete(tutorialState.settings, 'timer');
+      if (editorTutorialProgress.outputPreviewed) markTutorialLessonComplete(tutorialState.settings, 'appearance');
+      markTutorialLessonComplete(tutorialState.settings, 'save');
+      const desiredTutorialSettings = {
+        tutorialVersion: tutorialState.settings.tutorialVersion,
+        tutorialCompletedLessons: [...tutorialState.settings.tutorialCompletedLessons],
+        tutorialReplayMode: tutorialState.settings.tutorialReplayMode,
+        tutorialTargetAttributeId: tutorialState.settings.tutorialTargetAttributeId,
+      };
+      const persistTutorialSettings = async (): Promise<void> => {
+        localStateVersion += 1;
+        const published = await saveStateFieldTransaction('settings', (current) => {
+          const baselineStillPublished = current.settings.showTutorial === tutorialBaseline.showTutorial
+            && current.settings.tutorialVersion === tutorialBaseline.tutorialVersion
+            && JSON.stringify(current.settings.tutorialCompletedLessons) === JSON.stringify(tutorialBaseline.tutorialCompletedLessons)
+            && current.settings.tutorialReplayMode === tutorialBaseline.tutorialReplayMode
+            && current.settings.tutorialTargetAttributeId === tutorialBaseline.tutorialTargetAttributeId;
+          if (!baselineStillPublished
+            || !current.attributes.some((attribute) => attribute.id === submittedTarget.id)) {
+            throw new Error('当前配置已变化，教程进度未保存。请取消并重新打开配置。');
+          }
+          const settings = {
+            ...current.settings,
+            tutorialVersion: desiredTutorialSettings.tutorialVersion,
+            tutorialCompletedLessons: [...desiredTutorialSettings.tutorialCompletedLessons],
+            tutorialReplayMode: desiredTutorialSettings.tutorialReplayMode,
+          };
+          if (desiredTutorialSettings.tutorialTargetAttributeId) {
+            settings.tutorialTargetAttributeId = desiredTutorialSettings.tutorialTargetAttributeId;
+          } else {
+            delete settings.tutorialTargetAttributeId;
+          }
+          return settings;
+        });
+        Object.assign(state, published);
+      };
+      const finishTutorialPersistence = (): void => {
+        setSaveInFlight(false);
+        closeAttributeEditor();
+        render();
+        toast(index === undefined ? '属性已创建' : '属性配置已保存', root);
+      };
+      const enterTutorialPersistenceRecovery = (
+        message = '属性已保存，但教程进度保存失败。可以重试，或取消后稍后重新开始教程。',
+      ): void => {
+        Object.assign(state, loadState());
+        setSaveInFlight(false);
+        saveNote.textContent = message;
+        saveNote.classList.add('is-warning');
+        saveNote.setAttribute('role', 'alert');
+        saveNote.style.display = 'inline';
+        saveNote.style.color = 'var(--warning-text, #ffb86b)';
+        saveButton.disabled = false;
+        saveButton.textContent = '重试保存教程进度';
+        saveButton.onclick = () => {
+          if (saveButton.disabled) return;
+          setSaveInFlight(true);
+          saveButton.disabled = true;
+          saveButton.textContent = '正在重试教程进度…';
+          void persistTutorialSettings().then(
+            finishTutorialPersistence,
+            (error: unknown) => enterTutorialPersistenceRecovery(
+              error instanceof Error && error.message.startsWith('当前配置已变化')
+                ? error.message
+                : undefined,
+            ),
+          );
+        };
+        toast(message, root);
+      };
+      try {
+        await persistTutorialSettings();
+      } catch {
+        enterTutorialPersistenceRecovery();
+        return;
+      }
+    }
+    setSaveInFlight(false);
+    closeAttributeEditor();
     render();
     toast(index === undefined ? '属性已创建' : '属性配置已保存', root);
   }

@@ -482,6 +482,602 @@ type startupResetBarrierInbox struct {
 	resetOnce      sync.Once
 }
 
+type startupMarkerOrderingInbox struct {
+	resetCalled chan struct{}
+	nextCalled  chan bool
+	resetDone   atomic.Bool
+	resetOnce   sync.Once
+	nextOnce    sync.Once
+}
+
+type startupResetRecoveryInbox struct {
+	mu                  sync.Mutex
+	resetCalls          int
+	firstResetReturning chan struct{}
+	firstResetOnce      sync.Once
+	secondResetStarted  chan struct{}
+	releaseSecondReset  chan struct{}
+	secondResetOnce     sync.Once
+	injected            error
+}
+
+type startupResetNotificationInbox struct {
+	resetStarted chan struct{}
+	releaseReset chan struct{}
+	resetOnce    sync.Once
+}
+
+func (*startupResetNotificationInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
+	return giftInboxRecord{}, nil
+}
+func (*startupResetNotificationInbox) Next() (giftInboxRecord, bool, error) {
+	return giftInboxRecord{}, false, nil
+}
+func (*startupResetNotificationInbox) Acknowledge(string) error { return nil }
+func (*startupResetNotificationInbox) Release(string) error     { return nil }
+func (*startupResetNotificationInbox) Close() error             { return nil }
+func (*startupResetNotificationInbox) Health() giftInboxHealth  { return giftInboxHealth{} }
+func (inbox *startupResetNotificationInbox) Reset() error {
+	inbox.resetOnce.Do(func() { close(inbox.resetStarted) })
+	<-inbox.releaseReset
+	return nil
+}
+
+func (*startupResetRecoveryInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
+	return giftInboxRecord{}, nil
+}
+func (*startupResetRecoveryInbox) Next() (giftInboxRecord, bool, error) {
+	return giftInboxRecord{}, false, nil
+}
+func (*startupResetRecoveryInbox) Acknowledge(string) error { return nil }
+func (*startupResetRecoveryInbox) Release(string) error     { return nil }
+func (*startupResetRecoveryInbox) Close() error             { return nil }
+func (*startupResetRecoveryInbox) Health() giftInboxHealth  { return giftInboxHealth{} }
+func (inbox *startupResetRecoveryInbox) Reset() error {
+	inbox.mu.Lock()
+	inbox.resetCalls++
+	call := inbox.resetCalls
+	inbox.mu.Unlock()
+	if call == 1 {
+		inbox.firstResetOnce.Do(func() { close(inbox.firstResetReturning) })
+		return inbox.injected
+	}
+	if call == 2 {
+		inbox.secondResetOnce.Do(func() { close(inbox.secondResetStarted) })
+		<-inbox.releaseSecondReset
+	}
+	return nil
+}
+
+func (inbox *startupResetRecoveryInbox) ResetCalls() int {
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
+	return inbox.resetCalls
+}
+
+func (*startupMarkerOrderingInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
+	return giftInboxRecord{}, nil
+}
+func (inbox *startupMarkerOrderingInbox) Next() (giftInboxRecord, bool, error) {
+	inbox.nextOnce.Do(func() { inbox.nextCalled <- inbox.resetDone.Load() })
+	return giftInboxRecord{}, false, nil
+}
+func (*startupMarkerOrderingInbox) Acknowledge(string) error { return nil }
+func (*startupMarkerOrderingInbox) Release(string) error     { return nil }
+func (*startupMarkerOrderingInbox) Close() error             { return nil }
+func (*startupMarkerOrderingInbox) Health() giftInboxHealth  { return giftInboxHealth{} }
+func (inbox *startupMarkerOrderingInbox) Reset() error {
+	inbox.resetDone.Store(true)
+	inbox.resetOnce.Do(func() { close(inbox.resetCalled) })
+	return nil
+}
+
+func TestBackgroundRuntimeStartupCompletesValidResetIntentBeforeInboxNext(t *testing.T) {
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "reset-intent.json")
+	if err := os.WriteFile(markerPath, canonicalResetIntentData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := initializeConfigStore(&configStore{path: filepath.Join(dir, "config.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := &startupMarkerOrderingInbox{resetCalled: make(chan struct{}), nextCalled: make(chan bool, 1)}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.inboxRetryDelay = time.Millisecond
+	runtime.installInbox(inbox, inbox.Health())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runtime.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-inbox.resetCalled:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("startup did not complete the valid reset intent")
+	}
+	select {
+	case afterReset := <-inbox.nextCalled:
+		if !afterReset {
+			t.Fatal("startup processed the inbox before reset completion")
+		}
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("gift worker did not start after reset completion")
+	}
+	cancel()
+	<-done
+	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup recovery left reset marker: %v", err)
+	}
+}
+
+func TestBackgroundRuntimeStartupResetNotifiesPersistedBaselineExactlyOnce(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		baseline   *resetNotificationBaseline
+		wantRoom   int32
+		wantUpdate int32
+	}{
+		{
+			name:       "configured room and disabled updates",
+			baseline:   &resetNotificationBaseline{RoomConfigured: true, AutoUpdateEnabled: false},
+			wantRoom:   1,
+			wantUpdate: 1,
+		},
+		{
+			name:       "default baseline",
+			baseline:   &resetNotificationBaseline{RoomConfigured: false, AutoUpdateEnabled: true},
+			wantRoom:   0,
+			wantUpdate: 0,
+		},
+		{name: "legacy marker", baseline: nil, wantRoom: 0, wantUpdate: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			marker, err := encodeResetIntentRecord(test.baseline)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "reset-intent.json"), marker, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := initializeConfigStore(&configStore{path: path})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var roomNotifications atomic.Int32
+			var updateNotifications atomic.Int32
+			store.setOnChange(func() { roomNotifications.Add(1) })
+			store.setOnUpdateChange(func() { updateNotifications.Add(1) })
+			inbox := &startupMarkerOrderingInbox{resetCalled: make(chan struct{}), nextCalled: make(chan bool, 1)}
+			runtime := newBackgroundRuntime(store, nil)
+			runtime.installInbox(inbox, inbox.Health())
+			workerStarted := make(chan struct{}, 3)
+			runtime.onWorkerStart = func(string) { workerStarted <- struct{}{} }
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				runtime.Run(ctx)
+				close(done)
+			}()
+			select {
+			case <-workerStarted:
+			case <-time.After(time.Second):
+				cancel()
+				<-done
+				t.Fatal("workers did not start after startup reset")
+			}
+			cancel()
+			<-done
+			if got := roomNotifications.Load(); got != test.wantRoom {
+				t.Fatalf("room notifications=%d, want %d", got, test.wantRoom)
+			}
+			if got := updateNotifications.Load(); got != test.wantUpdate {
+				t.Fatalf("update notifications=%d, want %d", got, test.wantUpdate)
+			}
+		})
+	}
+}
+
+func TestBackgroundRuntimeStartupResetOwnsNotificationsBeforeQueuedDelete(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	marker, err := encodeResetIntentRecord(&resetNotificationBaseline{RoomConfigured: true, AutoUpdateEnabled: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "reset-intent.json"), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := initializeConfigStore(&configStore{path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roomNotifications atomic.Int32
+	var updateNotifications atomic.Int32
+	store.setOnChange(func() { roomNotifications.Add(1) })
+	store.setOnUpdateChange(func() { updateNotifications.Add(1) })
+	inbox := &startupResetNotificationInbox{
+		resetStarted: make(chan struct{}),
+		releaseReset: make(chan struct{}),
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.installInbox(inbox, inbox.Health())
+	deleteEntered := make(chan struct{})
+	store.setResetCoordinator(func() (resetOutcome, error) {
+		pendingOnly := store.ValidResetIntentPending()
+		close(deleteEntered)
+		return runtime.reset(pendingOnly)
+	})
+	workerStarted := make(chan struct{}, 3)
+	runtime.onWorkerStart = func(string) { workerStarted <- struct{}{} }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runtime.Run(ctx)
+		close(done)
+	}()
+	select {
+	case <-inbox.resetStarted:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("startup reset did not acquire the reset gate")
+	}
+	deleteResponse := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		store.handle(response, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+		deleteResponse <- response
+	}()
+	select {
+	case <-deleteEntered:
+	case <-time.After(time.Second):
+		cancel()
+		close(inbox.releaseReset)
+		<-done
+		t.Fatal("DELETE did not queue behind startup recovery")
+	}
+	close(inbox.releaseReset)
+	select {
+	case response := <-deleteResponse:
+		if response.Code != http.StatusNoContent {
+			cancel()
+			<-done
+			t.Fatalf("queued DELETE status=%d body=%s", response.Code, response.Body.String())
+		}
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("queued DELETE did not finish after startup reset")
+	}
+	select {
+	case <-workerStarted:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("workers did not start after startup reset")
+	}
+	cancel()
+	<-done
+	if got := roomNotifications.Load(); got != 1 {
+		t.Fatalf("room notifications=%d, want exactly one", got)
+	}
+	if got := updateNotifications.Load(); got != 1 {
+		t.Fatalf("update notifications=%d, want exactly one", got)
+	}
+}
+
+func TestBackgroundRuntimeStartupResetFailureWaitsForSuccessfulRetryThenStartsWorkersOnce(t *testing.T) {
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "reset-intent.json")
+	if err := os.WriteFile(markerPath, canonicalResetIntentData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := initializeConfigStore(&configStore{path: filepath.Join(dir, "config.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := &startupResetRecoveryInbox{
+		firstResetReturning: make(chan struct{}),
+		secondResetStarted:  make(chan struct{}),
+		releaseSecondReset:  make(chan struct{}),
+		injected:            errors.New("injected transient startup reset failure"),
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.installInbox(inbox, inbox.Health())
+	store.setResetCoordinator(runtime.ResetWithOutcome)
+	workerStarts := make(chan string, 6)
+	runtime.onWorkerStart = func(name string) { workerStarts <- name }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runtime.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-inbox.firstResetReturning:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("startup reset did not reach the injected transient failure")
+	}
+	deleteResponse := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		store.handle(response, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+		deleteResponse <- response
+	}()
+	select {
+	case <-inbox.secondResetStarted:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("DELETE retry did not enter the second reset")
+	}
+	select {
+	case name := <-workerStarts:
+		t.Fatalf("worker %q started before reset recovery completed", name)
+	default:
+	}
+	select {
+	case <-done:
+		t.Fatal("runtime returned while reset recovery remained incomplete")
+	default:
+	}
+	close(inbox.releaseSecondReset)
+	select {
+	case response := <-deleteResponse:
+		if response.Code != http.StatusNoContent {
+			cancel()
+			<-done
+			t.Fatalf("DELETE retry status=%d body=%s, want 204", response.Code, response.Body.String())
+		}
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("DELETE retry did not complete")
+	}
+
+	started := map[string]int{}
+	for len(started) < 3 {
+		select {
+		case name := <-workerStarts:
+			started[name]++
+		case <-time.After(time.Second):
+			cancel()
+			<-done
+			t.Fatalf("workers did not start after reset recovery: %v", started)
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runtime did not stop after cancellation")
+	}
+	for {
+		select {
+		case name := <-workerStarts:
+			started[name]++
+		default:
+			goto drained
+		}
+	}
+
+drained:
+	for _, name := range []string{"connection", "gift", "timer"} {
+		if started[name] != 1 {
+			t.Fatalf("worker %q starts=%d, all starts=%v", name, started[name], started)
+		}
+	}
+	if len(started) != 3 {
+		t.Fatalf("unexpected worker starts: %v", started)
+	}
+	if calls := inbox.ResetCalls(); calls != 2 {
+		t.Fatalf("inbox reset calls=%d, want failed startup plus one successful retry", calls)
+	}
+}
+
+func TestBackgroundRuntimeStartupResetFailureWaitIsCancellationResponsive(t *testing.T) {
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "reset-intent.json")
+	if err := os.WriteFile(markerPath, canonicalResetIntentData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := initializeConfigStore(&configStore{path: filepath.Join(dir, "config.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := &startupResetRecoveryInbox{
+		firstResetReturning: make(chan struct{}),
+		secondResetStarted:  make(chan struct{}),
+		releaseSecondReset:  make(chan struct{}),
+		injected:            errors.New("injected transient startup reset failure"),
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.installInbox(inbox, inbox.Health())
+	workerStarts := make(chan string, 1)
+	runtime.onWorkerStart = func(name string) { workerStarts <- name }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runtime.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-inbox.firstResetReturning:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("startup reset did not reach the injected failure")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime did not stop while waiting for startup reset recovery")
+	}
+	select {
+	case name := <-workerStarts:
+		t.Fatalf("worker %q started before canceled startup recovery", name)
+	default:
+	}
+	if calls := inbox.ResetCalls(); calls != 1 {
+		t.Fatalf("startup reset calls=%d, want 1 before cancellation", calls)
+	}
+}
+
+func TestBackgroundRuntimeResetRetiresLinkedStateWALAndAnimationLeavesWithoutFollowingTargets(t *testing.T) {
+	dir := t.TempDir()
+	store := &configStore{path: filepath.Join(dir, "config.json")}
+	runtime := newBackgroundRuntime(store, nil)
+	inbox, err := openGiftInbox(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = inbox.Close() })
+	runtime.installInbox(inbox, inbox.Health())
+	store.setResetCoordinator(runtime.ResetWithOutcome)
+	outsideDir := t.TempDir()
+	existingTarget := filepath.Join(outsideDir, "existing-target.json")
+	if err := os.WriteFile(existingTarget, []byte("outside-must-survive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	existingLink := store.historyPath()
+	if err := os.Symlink(existingTarget, existingLink); err != nil {
+		t.Skipf("filesystem symlinks are unavailable on this host: %v", err)
+	}
+	danglingLinks := map[string]string{
+		store.path:                   filepath.Join(outsideDir, "missing-state-target.json"),
+		store.stateTransactionPath(): filepath.Join(outsideDir, "missing-wal-target.json"),
+		filepath.Join(inbox.pendingPath, inbox.recordFilename(1, strings.Repeat("c", 32))): filepath.Join(outsideDir, "missing-inbox-record-target.json"),
+		filepath.Join(inbox.pendingPath, "config-linked-reset.tmp"):                        filepath.Join(outsideDir, "missing-inbox-temp-target.json"),
+		runtime.pendingGiftAnimationsPath():                                                filepath.Join(outsideDir, "missing-animation-target.json"),
+	}
+	for path, target := range danglingLinks {
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("filesystem symlinks are unavailable on this host: %v", err)
+		}
+	}
+
+	response := httptest.NewRecorder()
+	store.handle(response, httptest.NewRequest(http.MethodDelete, "/api/config", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("DELETE reset status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, path := range append([]string{existingLink}, mapKeysForResetLinkTest(danglingLinks)...) {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("linked reset artifact %s survived: %v", filepath.Base(path), err)
+		}
+	}
+	data, err := os.ReadFile(existingTarget)
+	if err != nil || string(data) != "outside-must-survive" {
+		t.Fatalf("outside target changed: data=%q err=%v", data, err)
+	}
+	for ownedPath, target := range danglingLinks {
+		if err := os.WriteFile(target, []byte("created-after-reset"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(ownedPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("retired dangling link %s resurrected after target creation: %v", filepath.Base(ownedPath), err)
+		}
+		data, err := os.ReadFile(target)
+		if err != nil || string(data) != "created-after-reset" {
+			t.Fatalf("post-reset outside target %s changed: data=%q err=%v", filepath.Base(target), data, err)
+		}
+	}
+}
+
+func mapKeysForResetLinkTest(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func TestBackgroundRuntimeResetRejectsLinkedConfigRootBeforeMarkerOrInbox(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "owned-config-root")
+	outside := t.TempDir()
+	outsideSentinel := filepath.Join(outside, "outside.txt")
+	if err := os.WriteFile(outsideSentinel, []byte("outside-must-not-change"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, root); err != nil {
+		t.Skipf("directory symlink/reparse creation is unavailable on this host: %v", err)
+	}
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	runtime := newBackgroundRuntime(store, nil)
+	inbox := &startupMarkerOrderingInbox{resetCalled: make(chan struct{}), nextCalled: make(chan bool, 1)}
+	runtime.installInbox(inbox, inbox.Health())
+
+	if err := runtime.Reset(); err == nil {
+		t.Fatal("reset accepted a linked config root")
+	}
+	select {
+	case <-inbox.resetCalled:
+		t.Fatal("inbox reset ran before linked config root rejection")
+	default:
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "reset-intent.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reset marker was created through linked config root: %v", err)
+	}
+	data, err := os.ReadFile(outsideSentinel)
+	if err != nil || string(data) != "outside-must-not-change" {
+		t.Fatalf("outside sentinel changed: data=%q err=%v", data, err)
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "outside.txt" {
+		t.Fatalf("outside entry set changed: %v", entries)
+	}
+}
+
+func TestBackgroundRuntimeResetValidatesConfigRootBeforeMarkerOrInbox(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	injected := errors.New("injected unsafe config root")
+	validationHits := 0
+	store.validateResetRoot = func(path string) error {
+		validationHits++
+		if filepath.Clean(path) != filepath.Clean(filepath.Dir(store.path)) {
+			t.Fatalf("validated root=%q, want %q", path, filepath.Dir(store.path))
+		}
+		return injected
+	}
+	markerWrites := 0
+	store.writeAtomicallyOutcome = func(path string, data []byte) atomicWriteOutcome {
+		markerWrites++
+		return writeFileAtomicallyOutcome(path, data)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	inbox := &startupMarkerOrderingInbox{resetCalled: make(chan struct{}), nextCalled: make(chan bool, 1)}
+	runtime.installInbox(inbox, inbox.Health())
+
+	if err := runtime.Reset(); !errors.Is(err, injected) {
+		t.Fatalf("reset error=%v, want root validation failure", err)
+	}
+	if validationHits != 1 || markerWrites != 0 {
+		t.Fatalf("root validations=%d marker writes=%d, want 1/0", validationHits, markerWrites)
+	}
+	select {
+	case <-inbox.resetCalled:
+		t.Fatal("inbox reset ran before config-root validation")
+	default:
+	}
+}
+
 func (*startupResetBarrierInbox) Accept(string, string, giftEvent) (giftInboxRecord, error) {
 	return giftInboxRecord{}, nil
 }
@@ -2672,6 +3268,62 @@ func TestBackgroundRuntimeProcessesTimerWithoutRoomOrDisplayPage(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("timer did not update the attribute while room and display were absent")
+}
+
+func TestBackgroundRuntimeFrozenTimerDoesNotCatchUp(t *testing.T) {
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json")}
+	state := defaultAppState()
+	state.Attributes = []attributeState{
+		{ID: "attribute-a", Name: "A", Value: 0},
+		{ID: "attribute-b", Name: "B", Value: 0},
+	}
+	state.TimerRules = []timerRule{
+		{ID: "timer-a", AttributeName: "A", IntervalSeconds: 60, Formula: "A+1", Enabled: true},
+		{ID: "timer-b", AttributeName: "B", IntervalSeconds: 60, Formula: "B+1", Enabled: true},
+	}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	freezes := fakeAttributeFreezeChecker{"attribute-a": true}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.setAttributeFreezeChecker(freezes)
+	startedAt := time.Unix(1700000000, 0)
+	runtime.handleTimerTick(startedAt)
+	runtime.handleTimerTick(startedAt.Add(60 * time.Second))
+
+	frozen, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := frozen.findAttribute("A").Value; got != 0 {
+		t.Fatalf("frozen A = %v", got)
+	}
+	if got := frozen.findAttribute("B").Value; got != 1 {
+		t.Fatalf("live B = %v", got)
+	}
+
+	delete(freezes, "attribute-a")
+	runtime.handleTimerTick(startedAt.Add(90 * time.Second))
+	beforeNextDue, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := beforeNextDue.findAttribute("A").Value; got != 0 {
+		t.Fatalf("thawed A caught up = %v", got)
+	}
+
+	runtime.handleTimerTick(startedAt.Add(120 * time.Second))
+	updated, err := store.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.findAttribute("A").Value; got != 1 {
+		t.Fatalf("next scheduled A = %v", got)
+	}
+	if got := updated.findAttribute("B").Value; got != 2 {
+		t.Fatalf("live B after second due tick = %v", got)
+	}
 }
 
 func TestTimerConditionSkipsOnlyTheCurrentOccurrence(t *testing.T) {

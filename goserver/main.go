@@ -205,6 +205,14 @@ func runMainPendingGiftClipUpdate(closeGiftClips, installUpdate func()) {
 	installUpdate()
 }
 
+func registerAttributeEditRoutes(mux *http.ServeMux, store *configStore, background *backgroundRuntime, leases *attributeEditLeaseCoordinator, service *attributeEditService) {
+	background.setAttributeFreezeChecker(leases)
+	mux.Handle("/api/attribute-edit-lease", newAttributeEditLeaseHandler(store, leases))
+	handler := newAttributeEditHandler(service)
+	mux.Handle("/api/attribute-edits/session", handler)
+	mux.Handle("/api/attribute-edits", handler)
+}
+
 func main() {
 	if handled, updateErr := runUpdateHelper(os.Args[1:]); handled {
 		if updateErr != nil {
@@ -308,15 +316,18 @@ func main() {
 	background := newBackgroundRuntime(store, func() giftEventSource {
 		return &bilibiliGiftSource{sessionProvider: login.Session}
 	}, notifications)
+	attributeEditLeases := newDefaultAttributeEditLeaseCoordinator()
+	attributeEdits := newAttributeEditService(store, attributeEditLeases, newAttributeEditID)
 	background.setDiagnosticLogger(diagnostics)
 	store.setOnChange(background.NotifyConfigChanged)
 	store.setOnTimerChange(background.NotifyTimerConfigChanged)
 	store.setOnUpdateChange(updater.NotifySettingsChanged)
-	store.setResetCoordinator(background.Reset)
+	store.setResetCoordinator(background.ResetWithOutcome)
 	login.SetOnChange(background.NotifyConfigChanged)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", newEmbeddedPageHandler(pageFS))
+	registerAttributeEditRoutes(mux, store, background, attributeEditLeases, attributeEdits)
 
 	mux.HandleFunc("/api/room_info", handleRoomInfo)
 	mux.HandleFunc("/api/room/anchor", newRoomAnchorHandler(login.roomOwnerUID, background.profileResolver))

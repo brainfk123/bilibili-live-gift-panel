@@ -65,19 +65,21 @@ type giftInbox struct {
 }
 
 type giftInboxShared struct {
-	mu              sync.Mutex
-	pendingPath     string
-	sequencePath    string
-	nextSequence    uint64
-	health          giftInboxHealth
-	pendingBytes    int64
-	revision        uint64
-	pending         []giftInboxRecordMetadata
-	claimedBy       uint64
-	claimedID       string
-	rootInfo        os.FileInfo
-	openHandles     int
-	writeAtomically func(string, []byte) atomicWriteOutcome
+	mu                  sync.Mutex
+	pendingPath         string
+	sequencePath        string
+	nextSequence        uint64
+	health              giftInboxHealth
+	pendingBytes        int64
+	revision            uint64
+	pending             []giftInboxRecordMetadata
+	claimedBy           uint64
+	claimedID           string
+	rootInfo            os.FileInfo
+	openHandles         int
+	writeAtomically     func(string, []byte) atomicWriteOutcome
+	retireResetArtifact func(string) error
+	syncResetDirectory  func(string) error
 }
 
 type giftInboxDurabilityWarning struct {
@@ -362,30 +364,52 @@ func (inbox *giftInbox) Reset() error {
 	if inbox.shared.claimedBy != 0 {
 		return fmt.Errorf("cannot reset gift inbox while a record is claimed")
 	}
-	entries, err := os.ReadDir(inbox.pendingPath)
-	if err != nil {
-		return fmt.Errorf("read gift inbox directory for reset: %w", err)
+	retire := inbox.shared.retireResetArtifact
+	if retire == nil {
+		retire = retireFileDurably
 	}
-	for _, entry := range entries {
-		if !entry.Type().IsRegular() || (!isGiftInboxRecordName(entry.Name()) && !isGiftInboxTempName(entry.Name())) {
-			continue
-		}
-		if err := os.Remove(filepath.Join(inbox.pendingPath, entry.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			_, _ = inbox.reconcileHealthLocked()
-			return fmt.Errorf("remove gift inbox record during reset: %w", err)
+	resetDirectories := []struct {
+		path           string
+		includeRecords bool
+	}{
+		{path: inbox.pendingPath, includeRecords: true},
+		{path: filepath.Dir(inbox.sequencePath)},
+	}
+	root := filepath.Dir(inbox.sequencePath)
+	for _, directory := range resetDirectories {
+		if err := validateResetScanDirectory(root, directory.path); err != nil {
+			return fmt.Errorf("validate gift inbox directory for reset: %w", err)
 		}
 	}
-	if err := os.Remove(inbox.sequencePath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	for _, directory := range resetDirectories {
+		entries, err := os.ReadDir(directory.path)
+		if err != nil {
+			return fmt.Errorf("read gift inbox directory for reset: %w", err)
+		}
+		for _, entry := range entries {
+			if !isOwnedGiftInboxResetEntry(entry.Name(), directory.includeRecords) {
+				continue
+			}
+			if err := retire(filepath.Join(directory.path, entry.Name())); err != nil {
+				_, _ = inbox.reconcileHealthLocked()
+				return fmt.Errorf("remove gift inbox artifact during reset: %w", err)
+			}
+		}
+	}
+	if err := retire(inbox.sequencePath); err != nil {
 		_, _ = inbox.reconcileHealthLocked()
 		return fmt.Errorf("remove gift inbox sequence during reset: %w", err)
 	}
-	if err := syncStateDirectory(inbox.pendingPath); err != nil {
-		_, _ = inbox.reconcileHealthLocked()
-		return fmt.Errorf("sync reset gift inbox records: %w", err)
+	syncDirectory := inbox.shared.syncResetDirectory
+	if syncDirectory == nil {
+		syncDirectory = syncStateDirectory
 	}
-	if err := syncStateDirectory(filepath.Dir(inbox.sequencePath)); err != nil {
-		_, _ = inbox.reconcileHealthLocked()
-		return fmt.Errorf("sync reset gift inbox root: %w", err)
+	for _, directory := range resetDirectories {
+		if err := syncDirectory(directory.path); err != nil {
+			_, _ = inbox.reconcileHealthLocked()
+			return fmt.Errorf("sync gift inbox directory during reset: %w", err)
+		}
+		_ = os.Remove(filepath.Join(directory.path, resetTombstoneName))
 	}
 	inbox.shared.nextSequence = 1
 	inbox.shared.pendingBytes = 0
@@ -635,6 +659,10 @@ func isValidGiftInboxID(id string) bool {
 
 func isGiftInboxTempName(name string) bool {
 	return strings.HasPrefix(name, "config-") && strings.HasSuffix(name, ".tmp") && len(name) > len("config-.tmp")
+}
+
+func isOwnedGiftInboxResetEntry(name string, includeRecords bool) bool {
+	return isGiftInboxTempName(name) || includeRecords && isGiftInboxRecordName(name)
 }
 
 func pendingIngestionID(filename string) string {

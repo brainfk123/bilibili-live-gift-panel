@@ -24,22 +24,59 @@ type pendingStateTransaction struct {
 	Config        []byte `json:"config"`
 }
 
+// statePersistenceOutcome records the logical commit boundary separately
+// from cleanup/application errors. A newly published journal is authoritative
+// only after it crosses the platform durability boundary.
+type statePersistenceOutcome struct {
+	Committed bool
+	Err       error
+}
+
+type stateTransactionApplyOutcome struct {
+	ShardsCommitted bool
+	Err             error
+}
+
+// stateTransactionEndorsementError means a locally valid WAL has not yet been
+// durably re-published. Unlike corrupt or unreadable evidence, that candidate
+// may become authoritative on retry, so reads must not fall through to shards.
+type stateTransactionEndorsementError struct {
+	err error
+}
+
+func (e *stateTransactionEndorsementError) Error() string {
+	return fmt.Sprintf("重新发布状态事务失败：%v", e.err)
+}
+
+func (e *stateTransactionEndorsementError) Unwrap() error {
+	return e.err
+}
+
+func isStateTransactionEndorsementError(err error) bool {
+	var endorsementErr *stateTransactionEndorsementError
+	return errors.As(err, &endorsementErr)
+}
+
 func (s *configStore) persistPreparedStateLocked(state appState, ingestionID string) error {
+	return s.persistPreparedStateWithOutcomeLocked(state, ingestionID).Err
+}
+
+func (s *configStore) persistPreparedStateWithOutcomeLocked(state appState, ingestionID string) statePersistenceOutcome {
 	eventLog, err := serializeEventLog(state.Log)
 	if err != nil {
-		return err
+		return statePersistenceOutcome{Err: err}
 	}
 	history, err := serializeStateShard(historyShardFromState(state))
 	if err != nil {
-		return err
+		return statePersistenceOutcome{Err: err}
 	}
 	cache, err := serializeStateShard(cacheShardFromState(state))
 	if err != nil {
-		return err
+		return statePersistenceOutcome{Err: err}
 	}
 	config, err := serializeStateShard(configShardFromState(state))
 	if err != nil {
-		return err
+		return statePersistenceOutcome{Err: err}
 	}
 	tx := pendingStateTransaction{
 		SchemaVersion: stateTransactionSchemaVersion,
@@ -49,24 +86,45 @@ func (s *configStore) persistPreparedStateLocked(state appState, ingestionID str
 		Cache:         cache,
 		Config:        config,
 	}
+	if err := validatePendingStateTransaction(tx); err != nil {
+		return statePersistenceOutcome{Err: err}
+	}
 	data, err := json.MarshalIndent(tx, "", "  ")
 	if err != nil {
-		return fmt.Errorf("序列化状态事务失败：%w", err)
+		return statePersistenceOutcome{Err: fmt.Errorf("序列化状态事务失败：%w", err)}
 	}
-	if err := s.writeAtomicFile(s.stateTransactionPath(), append(data, '\n')); err != nil {
-		return err
+	journalWrite := s.writeAtomicFileOutcome(s.stateTransactionPath(), append(data, '\n'))
+	if !journalWrite.Committed {
+		if journalWrite.Err == nil {
+			journalWrite.Err = fmt.Errorf("发布状态事务失败：事务未提交")
+		}
+		return statePersistenceOutcome{Err: journalWrite.Err}
+	}
+	if !journalWrite.Durable && journalWrite.Err == nil {
+		journalWrite.Err = fmt.Errorf("发布状态事务失败：事务未持久化")
 	}
 	s.transactionPending = true
-	if err := s.applyPendingStateTransactionLocked(tx); err != nil {
-		return err
+	if !journalWrite.Durable {
+		return statePersistenceOutcome{Err: journalWrite.Err}
+	}
+	applyOutcome := s.applyPendingStateTransactionWithOutcomeLocked(tx)
+	if applyOutcome.Err != nil {
+		return statePersistenceOutcome{
+			Committed: journalWrite.Durable || applyOutcome.ShardsCommitted,
+			Err:       errors.Join(journalWrite.Err, applyOutcome.Err),
+		}
 	}
 	s.migrationRequired = false
-	return nil
+	return statePersistenceOutcome{Committed: true, Err: journalWrite.Err}
 }
 
 func (s *configStore) applyPendingStateTransactionLocked(tx pendingStateTransaction) error {
+	return s.applyPendingStateTransactionWithOutcomeLocked(tx).Err
+}
+
+func (s *configStore) applyPendingStateTransactionWithOutcomeLocked(tx pendingStateTransaction) stateTransactionApplyOutcome {
 	if err := validatePendingStateTransaction(tx); err != nil {
-		return err
+		return stateTransactionApplyOutcome{Err: err}
 	}
 	writes := []struct {
 		path string
@@ -79,14 +137,25 @@ func (s *configStore) applyPendingStateTransactionLocked(tx pendingStateTransact
 	}
 	for _, write := range writes {
 		if err := s.writeAtomicFile(write.path, write.data); err != nil {
-			return err
+			return stateTransactionApplyOutcome{Err: err}
 		}
 	}
-	if err := os.Remove(s.stateTransactionPath()); err != nil {
-		return fmt.Errorf("删除已完成状态事务失败：%w", err)
+	outcome := stateTransactionApplyOutcome{ShardsCommitted: true}
+	removeTransaction := os.Remove
+	if s.removeStateTransaction != nil {
+		removeTransaction = s.removeStateTransaction
+	}
+	if err := removeTransaction(s.stateTransactionPath()); err != nil {
+		outcome.Err = fmt.Errorf("删除已完成状态事务失败：%w", err)
+		return outcome
 	}
 	s.transactionPending = false
-	return syncStateDirectory(filepath.Dir(s.stateTransactionPath()))
+	syncDirectory := syncStateDirectory
+	if s.syncStateTransactionDirectory != nil {
+		syncDirectory = s.syncStateTransactionDirectory
+	}
+	outcome.Err = syncDirectory(filepath.Dir(s.stateTransactionPath()))
+	return outcome
 }
 
 func validatePendingStateTransaction(tx pendingStateTransaction) error {
@@ -138,6 +207,64 @@ func validatePendingStateTransaction(tx pendingStateTransaction) error {
 	return nil
 }
 
+// stateFromPendingStateTransaction reconstructs the exact authoritative state
+// represented by a validated journal. It mirrors readCommittedStateLocked, but
+// reads every shard from the single journal snapshot so a partially replayed
+// on-disk shard set can never leak through after a restart.
+func stateFromPendingStateTransaction(tx pendingStateTransaction) (appState, error) {
+	if err := validatePendingStateTransaction(tx); err != nil {
+		return appState{}, err
+	}
+
+	state := defaultAppState()
+	prepareOptionalSettingsForDecode(tx.Config, &state)
+	if err := json.Unmarshal(tx.Config, &state); err != nil {
+		return appState{}, fmt.Errorf("读取状态事务主配置失败：%w", err)
+	}
+
+	cache := cacheShardFromState(state)
+	if err := json.Unmarshal(tx.Cache, &cache); err != nil {
+		return appState{}, fmt.Errorf("读取状态事务礼物缓存失败：%w", err)
+	}
+	state.GiftCatalog = cache.GiftCatalog
+	state.RecentGifts = cache.RecentGifts
+
+	history := historyShardFromState(state)
+	if err := json.Unmarshal(tx.History, &history); err != nil {
+		return appState{}, fmt.Errorf("读取状态事务历史数据失败：%w", err)
+	}
+	state.Stats = history.Stats
+	state.Contributions = history.Contributions
+	state.GiftReceipts = history.GiftReceipts
+	state.AppliedIngressIDs = history.AppliedIngressIDs
+	state.RecentSourceGiftKeys = history.RecentSourceGiftKeys
+	applyGiftTargetProgress(state.GiftKPIPanels, history.GiftTargetProgress)
+
+	entries := make([]logEntry, 0, maxLogEntries)
+	for start := 0; start < len(tx.EventLog); {
+		relativeEnd := bytes.IndexByte(tx.EventLog[start:], '\n')
+		if relativeEnd < 0 {
+			return appState{}, fmt.Errorf("读取状态事务送礼记录失败：记录缺少换行符")
+		}
+		end := start + relativeEnd
+		var entry logEntry
+		if err := json.Unmarshal(tx.EventLog[start:end], &entry); err != nil {
+			return appState{}, fmt.Errorf("读取状态事务送礼记录失败：%w", err)
+		}
+		entries = append(entries, entry)
+		start = end + 1
+	}
+	for left, right := 0, len(entries)-1; left < right; left, right = left+1, right-1 {
+		entries[left], entries[right] = entries[right], entries[left]
+	}
+	if len(entries) > maxLogEntries {
+		entries = entries[:maxLogEntries]
+	}
+	state.Log = entries
+	normalizeAppState(&state)
+	return state, nil
+}
+
 func validatePendingStateShard(name string, data []byte, into any, schemaVersion *int) error {
 	if err := json.Unmarshal(data, into); err != nil {
 		return fmt.Errorf("状态事务%s无效：%w", name, err)
@@ -163,6 +290,8 @@ func (s *configStore) recoverPendingStateTransactionLocked() error {
 	data, err := read(s.stateTransactionPath())
 	if errors.Is(err, os.ErrNotExist) {
 		s.transactionPending = false
+		s.committedTransactionState = nil
+		s.clearTransactionRecoveryBlockLocked()
 		return nil
 	}
 	if err != nil {
@@ -172,12 +301,34 @@ func (s *configStore) recoverPendingStateTransactionLocked() error {
 	s.transactionPending = true
 	var tx pendingStateTransaction
 	if err := json.Unmarshal(data, &tx); err != nil {
+		s.committedTransactionState = nil
 		return fmt.Errorf("读取状态事务失败：%w", err)
 	}
 	if tx.SchemaVersion != stateTransactionSchemaVersion {
+		s.committedTransactionState = nil
 		return fmt.Errorf("状态事务格式版本不受支持：%d", tx.SchemaVersion)
 	}
-	return s.applyPendingStateTransactionLocked(tx)
+	candidate, err := stateFromPendingStateTransaction(tx)
+	if err != nil {
+		s.committedTransactionState = nil
+		return err
+	}
+	endorsement := s.writeAtomicFileOutcome(s.stateTransactionPath(), data)
+	if !endorsement.Committed || !endorsement.Durable {
+		s.committedTransactionState = nil
+		endorsementErr := endorsement.Err
+		if endorsementErr == nil {
+			endorsementErr = fmt.Errorf("状态事务恢复证据未持久化")
+		}
+		return &stateTransactionEndorsementError{err: endorsementErr}
+	}
+	s.committedTransactionState = &candidate
+	s.clearTransactionRecoveryBlockLocked()
+	if err := s.applyPendingStateTransactionLocked(tx); err != nil {
+		return err
+	}
+	s.committedTransactionState = nil
+	return nil
 }
 
 func normalizeInternalIngestionLedgers(state *appState, now time.Time) {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,25 +20,110 @@ import (
 
 const maxConfigBytes = 8 << 20
 
+const resetIntentSchemaVersion = 1
+
+const (
+	resetIntentNone    = ""
+	resetIntentValid   = "valid"
+	resetIntentInvalid = "invalid"
+)
+
+var canonicalResetIntentData = []byte(fmt.Sprintf("{\"schemaVersion\":%d}\n", resetIntentSchemaVersion))
+
+type resetNotificationBaseline struct {
+	RoomConfigured    bool `json:"roomConfigured"`
+	AutoUpdateEnabled bool `json:"autoUpdateEnabled"`
+}
+
+type resetIntentRecord struct {
+	SchemaVersion        int                        `json:"schemaVersion"`
+	NotificationBaseline *resetNotificationBaseline `json:"notificationBaseline,omitempty"`
+}
+
+type resetOutcome struct {
+	NotificationBaseline *resetNotificationBaseline
+}
+
+func cloneResetNotificationBaseline(baseline *resetNotificationBaseline) *resetNotificationBaseline {
+	if baseline == nil {
+		return nil
+	}
+	copy := *baseline
+	return &copy
+}
+
+func encodeResetIntentRecord(baseline *resetNotificationBaseline) ([]byte, error) {
+	data, err := json.Marshal(resetIntentRecord{
+		SchemaVersion:        resetIntentSchemaVersion,
+		NotificationBaseline: baseline,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+func decodeResetIntentRecord(data []byte) (*resetNotificationBaseline, error) {
+	var record resetIntentRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return nil, err
+	}
+	if record.SchemaVersion != resetIntentSchemaVersion {
+		return nil, fmt.Errorf("unsupported reset intent schema version %d", record.SchemaVersion)
+	}
+	canonical, err := encodeResetIntentRecord(record.NotificationBaseline)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(data, canonical) {
+		return nil, fmt.Errorf("reset intent is not canonical")
+	}
+	return cloneResetNotificationBaseline(record.NotificationBaseline), nil
+}
+
 type configStore struct {
 	path               string
 	mu                 sync.RWMutex
 	onChange           func()
 	onTimerChange      func()
 	onUpdateChange     func()
-	resetCoordinator   func() error
+	resetCoordinator   func() (resetOutcome, error)
 	migrationRequired  bool
 	transactionPending bool
-	mutationBlockKind  string
-	mutationBlockErr   error
-	writeAtomically    func(string, []byte) error
-	readTransaction    func(string) ([]byte, error)
+	// committedTransactionState is the authoritative candidate reconstructed
+	// from a valid published journal that still needs replay/cleanup.
+	committedTransactionState *appState
+	mutationBlockKind         string
+	mutationBlockErr          error
+	resetIntentStatus         string
+	resetIntentDurable        bool
+	resetNotificationBaseline *resetNotificationBaseline
+	writeAtomically           func(string, []byte) error
+	writeAtomicallyOutcome    func(string, []byte) atomicWriteOutcome
+	readTransaction           func(string) ([]byte, error)
+	readResetIntent           func(string) ([]byte, error)
+	retireResetArtifact       func(string) error
+	validateResetRoot         func(string) error
+	// Transaction cleanup hooks are nil in production. Tests use them to
+	// deterministically fail the two stages after all shard writes complete.
+	removeStateTransaction        func(string) error
+	syncStateTransactionDirectory func(string) error
+	// Attribute-edit lock hooks are nil in production. Tests use them to
+	// deterministically observe the exact mutex boundary.
+	beforeAttributeEditStoreLock func()
+	afterAttributeEditStoreLock  func()
 }
 
 type stateMutationsBlockedError struct{}
 
 func (*stateMutationsBlockedError) Error() string {
 	return "本地状态事务需要先恢复或通过恢复默认清除"
+}
+
+type stateResetInProgressError struct{}
+
+func (*stateResetInProgressError) Error() string {
+	return "恢复默认尚未安全完成，请重试"
 }
 
 // TransactionPending is an O(1) snapshot maintained by the transaction
@@ -59,9 +145,33 @@ func (s *configStore) blockMutationsLocked(kind string, err error) {
 	s.mutationBlockErr = err
 }
 
+func (s *configStore) clearTransactionRecoveryBlockLocked() {
+	if s.mutationBlockKind == "transaction_recovery" {
+		s.mutationBlockKind = ""
+		s.mutationBlockErr = nil
+	}
+}
+
 func (s *configStore) ensureMutationsAllowedLocked() error {
+	if s.mutationBlockKind == "transaction_recovery" {
+		if isStateTransactionEndorsementError(s.mutationBlockErr) {
+			if err := s.recoverPendingStateTransactionLocked(); err != nil {
+				return &stateMutationsBlockedError{}
+			}
+		} else {
+			return &stateMutationsBlockedError{}
+		}
+	}
 	if s.mutationBlockKind != "" {
 		return &stateMutationsBlockedError{}
+	}
+	if s.transactionPending || s.committedTransactionState != nil {
+		if err := s.recoverPendingStateTransactionLocked(); err != nil {
+			if s.committedTransactionState == nil {
+				s.blockMutationsLocked("transaction_recovery", err)
+			}
+			return &stateMutationsBlockedError{}
+		}
 	}
 	return nil
 }
@@ -75,18 +185,131 @@ func newDefaultConfigStore() (*configStore, error) {
 }
 
 func newConfigStoreAtPath(path string) (*configStore, error) {
-	store := &configStore{path: path}
+	return initializeConfigStore(&configStore{path: path})
+}
+
+// initializeConfigStore completes startup for a newly allocated store. Keeping
+// allocation separate from initialization lets deterministic recovery tests
+// install storage-failure hooks before exercising the real startup path.
+func initializeConfigStore(store *configStore) (*configStore, error) {
 	store.mu.Lock()
-	if err := store.recoverPendingStateTransactionLocked(); err != nil {
-		store.blockMutationsLocked("transaction_recovery", err)
+	if store.inspectResetIntentLocked() {
 		store.mu.Unlock()
 		return store, nil
 	}
+	recoveryErr := store.recoverPendingStateTransactionLocked()
+	if recoveryErr != nil && store.committedTransactionState == nil {
+		store.blockMutationsLocked("transaction_recovery", recoveryErr)
+	}
 	store.mu.Unlock()
+	if recoveryErr != nil {
+		// Preserve every recovery failure and defer migration so startup cannot
+		// overwrite its evidence. A locally valid WAL whose durable endorsement
+		// failed remains fail-closed; corrupt or unreadable evidence keeps the
+		// established diagnostic committed-shard read while mutations stay blocked.
+		return store, nil
+	}
 	if err := store.migrateLegacy(); err != nil {
 		return nil, err
 	}
 	return store, nil
+}
+
+func (s *configStore) resetIntentPath() string {
+	return filepath.Join(filepath.Dir(s.path), "reset-intent.json")
+}
+
+func (s *configStore) inspectResetIntentLocked() bool {
+	read := os.ReadFile
+	if s.readResetIntent != nil {
+		read = s.readResetIntent
+	}
+	data, err := read(s.resetIntentPath())
+	if errors.Is(err, os.ErrNotExist) {
+		s.resetIntentStatus = resetIntentNone
+		s.resetIntentDurable = false
+		s.resetNotificationBaseline = nil
+		return false
+	}
+	if err != nil {
+		s.resetIntentStatus = resetIntentInvalid
+		s.resetIntentDurable = false
+		s.resetNotificationBaseline = nil
+		s.blockMutationsLocked("reset_failure", fmt.Errorf("读取恢复默认标记失败：%w", err))
+		s.refreshTransactionPendingEvidenceLocked()
+		return true
+	}
+	baseline, err := decodeResetIntentRecord(data)
+	if err != nil {
+		s.resetIntentStatus = resetIntentInvalid
+		s.resetIntentDurable = false
+		s.resetNotificationBaseline = nil
+		s.blockMutationsLocked("reset_failure", fmt.Errorf("恢复默认标记无效"))
+		s.refreshTransactionPendingEvidenceLocked()
+		return true
+	}
+	s.resetIntentStatus = resetIntentValid
+	s.resetIntentDurable = false
+	s.resetNotificationBaseline = baseline
+	s.blockMutationsLocked("reset_pending", &stateResetInProgressError{})
+	s.refreshTransactionPendingEvidenceLocked()
+	return true
+}
+
+func (s *configStore) refreshTransactionPendingEvidenceLocked() {
+	_, err := os.Stat(s.stateTransactionPath())
+	s.transactionPending = s.committedTransactionState != nil || err == nil || !errors.Is(err, os.ErrNotExist)
+}
+
+func (s *configStore) beginResetIntent() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	root := filepath.Dir(s.path)
+	validateRoot := s.validateResetRoot
+	if validateRoot == nil {
+		validateRoot = validateResetRootDirectory
+	}
+	if err := validateRoot(root); err != nil {
+		return fmt.Errorf("验证恢复默认目录失败：%w", err)
+	}
+	if s.resetIntentStatus == resetIntentValid && s.resetIntentDurable {
+		return nil
+	}
+	if s.resetIntentStatus == resetIntentNone && s.resetNotificationBaseline == nil {
+		if state, err := s.readStateLocked(); err == nil {
+			s.resetNotificationBaseline = &resetNotificationBaseline{
+				RoomConfigured:    strings.TrimSpace(state.RoomID) != "",
+				AutoUpdateEnabled: autoUpdateEnabled(state),
+			}
+		}
+	}
+	markerData, err := encodeResetIntentRecord(s.resetNotificationBaseline)
+	if err != nil {
+		return fmt.Errorf("编码恢复默认标记失败：%w", err)
+	}
+	outcome := s.writeAtomicFileOutcome(s.resetIntentPath(), markerData)
+	if outcome.Committed {
+		s.resetIntentStatus = resetIntentValid
+		s.resetIntentDurable = outcome.Durable
+		s.blockMutationsLocked("reset_pending", &stateResetInProgressError{})
+	}
+	if !outcome.Durable {
+		err := outcome.Err
+		if err == nil {
+			err = fmt.Errorf("恢复默认标记未持久化")
+		}
+		if !outcome.Committed {
+			s.blockMutationsLocked("reset_failure", err)
+		}
+		return err
+	}
+	return outcome.Err
+}
+
+func (s *configStore) ValidResetIntentPending() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.resetIntentStatus == resetIntentValid
 }
 
 func (s *configStore) handle(w http.ResponseWriter, r *http.Request) {
@@ -599,30 +822,35 @@ func validateAppState(state appState) error {
 }
 
 func (s *configStore) handleDelete(w http.ResponseWriter) {
-	previous, _ := s.readState()
 	s.mu.RLock()
 	coordinator := s.resetCoordinator
 	s.mu.RUnlock()
+	var outcome resetOutcome
 	var resetErr error
 	if coordinator != nil {
-		resetErr = coordinator()
+		outcome, resetErr = coordinator()
 	} else {
-		resetErr = s.resetStateArtifacts()
+		outcome, resetErr = s.resetStateArtifactsWithOutcome()
 	}
 	if resetErr != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"code": -1, "message": "恢复默认失败，本地状态已暂停修改，请重试或导出运行日志"})
 		return
 	}
-	if strings.TrimSpace(previous.RoomID) != "" {
-		s.notifyChanged()
-	}
-	if !autoUpdateEnabled(previous) {
-		s.notifyUpdateChanged()
-	}
+	s.notifyResetOutcome(outcome)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *configStore) setResetCoordinator(coordinator func() error) {
+func (s *configStore) notifyResetOutcome(outcome resetOutcome) {
+	baseline := outcome.NotificationBaseline
+	if baseline != nil && baseline.RoomConfigured {
+		s.notifyChanged()
+	}
+	if baseline != nil && !baseline.AutoUpdateEnabled {
+		s.notifyUpdateChanged()
+	}
+}
+
+func (s *configStore) setResetCoordinator(coordinator func() (resetOutcome, error)) {
 	s.mu.Lock()
 	s.resetCoordinator = coordinator
 	s.mu.Unlock()
@@ -635,43 +863,71 @@ func (s *configStore) recordResetFailure(err error) {
 }
 
 func (s *configStore) resetStateArtifacts() error {
+	_, err := s.resetStateArtifactsWithOutcome()
+	return err
+}
+
+func (s *configStore) resetStateArtifactsWithOutcome() (resetOutcome, error) {
+	if err := s.beginResetIntent(); err != nil {
+		return resetOutcome{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	outcome := resetOutcome{NotificationBaseline: cloneResetNotificationBaseline(s.resetNotificationBaseline)}
 	var firstErr error
-	paths := append(s.statePaths(), s.stateTransactionPath())
-	for _, path := range paths {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
-			firstErr = err
-		}
+	retire := s.retireResetArtifact
+	if retire == nil {
+		retire = retireFileDurably
 	}
 	dir := filepath.Dir(s.path)
-	if entries, err := os.ReadDir(dir); err == nil {
-		for _, entry := range entries {
-			if entry.Type().IsRegular() && isGiftInboxTempName(entry.Name()) {
-				if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
-					firstErr = err
-				}
-			}
-		}
-	} else if !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+	if err := validateResetScanDirectory(dir, dir); err != nil {
 		firstErr = err
 	}
 	if firstErr == nil {
-		if _, err := os.Stat(dir); err == nil {
-			firstErr = syncStateDirectory(dir)
+		for _, path := range s.statePaths() {
+			if err := retire(path); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	if firstErr == nil {
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, entry := range entries {
+				if isGiftInboxTempName(entry.Name()) {
+					if err := retire(filepath.Join(dir, entry.Name())); err != nil && firstErr == nil {
+						firstErr = err
+					}
+				}
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			firstErr = err
+		}
+	}
+	if firstErr == nil {
+		if err := retire(s.stateTransactionPath()); err != nil {
+			firstErr = err
+		}
+	}
+	if firstErr == nil {
+		if err := retire(s.resetIntentPath()); err != nil {
+			firstErr = err
 		}
 	}
 	if firstErr != nil {
 		s.blockMutationsLocked("reset_failure", firstErr)
 		_, evidenceErr := os.Stat(s.stateTransactionPath())
-		s.transactionPending = evidenceErr == nil || !errors.Is(evidenceErr, os.ErrNotExist)
-		return firstErr
+		s.transactionPending = s.committedTransactionState != nil || evidenceErr == nil || !errors.Is(evidenceErr, os.ErrNotExist)
+		return resetOutcome{}, firstErr
 	}
 	s.migrationRequired = false
 	s.transactionPending = false
+	s.committedTransactionState = nil
+	s.resetIntentStatus = resetIntentNone
+	s.resetIntentDurable = false
+	s.resetNotificationBaseline = nil
 	s.mutationBlockKind = ""
 	s.mutationBlockErr = nil
-	return nil
+	return outcome, nil
 }
 
 func (s *configStore) setOnChange(callback func()) {
@@ -918,17 +1174,33 @@ func (s *configStore) updateStateForIngestion(
 }
 
 func (s *configStore) writeAtomicFile(path string, data []byte) error {
-	if s.writeAtomically != nil {
-		return s.writeAtomically(path, data)
-	}
-	return writeFileAtomically(path, data)
+	return s.writeAtomicFileOutcome(path, data).Err
 }
 
-// atomicWriteOutcome distinguishes a write that never reached its final name
-// from one whose rename committed but whose containing directory could not be
-// durably synced. Existing state callers still treat either error as failure.
+func (s *configStore) writeAtomicFileOutcome(path string, data []byte) atomicWriteOutcome {
+	if s.writeAtomicallyOutcome != nil {
+		return s.writeAtomicallyOutcome(path, data)
+	}
+	if s.writeAtomically != nil {
+		err := s.writeAtomically(path, data)
+		return atomicWriteOutcome{Committed: err == nil, Durable: err == nil, Err: err}
+	}
+	return writeFileAtomicallyOutcome(path, data)
+}
+
+// atomicWriteOutcome distinguishes a write that never reached its final name,
+// one that is rename-visible but not crash-durable, and one whose replacement
+// crossed the platform durability boundary. Gift inbox callers intentionally
+// use Committed as their record-visibility boundary.
 type atomicWriteOutcome struct {
 	Committed bool
+	Durable   bool
+	Err       error
+}
+
+type atomicReplaceOutcome struct {
+	Committed bool
+	Durable   bool
 	Err       error
 }
 
@@ -937,10 +1209,24 @@ func writeFileAtomically(path string, data []byte) error {
 }
 
 func writeFileAtomicallyOutcome(path string, data []byte) atomicWriteOutcome {
-	return writeFileAtomicallyOutcomeWith(path, data, syncStateDirectory)
+	return writeFileAtomicallyOutcomeReplacing(path, data, replaceFileAtomically, syncStateDirectory)
 }
 
 func writeFileAtomicallyOutcomeWith(path string, data []byte, syncDirectory func(string) error) atomicWriteOutcome {
+	return writeFileAtomicallyOutcomeReplacing(path, data, func(temporaryPath, finalPath string) atomicReplaceOutcome {
+		if err := os.Rename(temporaryPath, finalPath); err != nil {
+			return atomicReplaceOutcome{Err: err}
+		}
+		return atomicReplaceOutcome{Committed: true}
+	}, syncDirectory)
+}
+
+func writeFileAtomicallyOutcomeReplacing(
+	path string,
+	data []byte,
+	replace func(string, string) atomicReplaceOutcome,
+	syncDirectory func(string) error,
+) atomicWriteOutcome {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return atomicWriteOutcome{Err: fmt.Errorf("创建配置目录失败：%w", err)}
@@ -966,13 +1252,17 @@ func writeFileAtomicallyOutcomeWith(path string, data []byte, syncDirectory func
 	if err := temporary.Close(); err != nil {
 		return atomicWriteOutcome{Err: fmt.Errorf("关闭配置文件失败：%w", err)}
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return atomicWriteOutcome{Err: fmt.Errorf("替换配置文件失败：%w", err)}
+	replacement := replace(temporaryPath, path)
+	if replacement.Err != nil {
+		return atomicWriteOutcome{Committed: replacement.Committed, Durable: replacement.Durable, Err: fmt.Errorf("替换配置文件失败：%w", replacement.Err)}
+	}
+	if replacement.Durable {
+		return atomicWriteOutcome{Committed: true, Durable: true}
 	}
 	if err := syncDirectory(dir); err != nil {
 		return atomicWriteOutcome{Committed: true, Err: err}
 	}
-	return atomicWriteOutcome{Committed: true}
+	return atomicWriteOutcome{Committed: true, Durable: true}
 }
 
 type stateDirectory interface {

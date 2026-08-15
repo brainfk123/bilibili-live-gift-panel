@@ -523,6 +523,225 @@ func TestGiftInboxRejectsCommittedRecordsWithInvalidContract(t *testing.T) {
 	}
 }
 
+func TestGiftInboxResetRetrySettlesRecordTombstoneBeforeSuccess(t *testing.T) {
+	inbox, err := openGiftInbox(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = inbox.Close() })
+	record, err := inbox.Accept("room-a", "SEND_GIFT", giftEvent{GiftID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordPath := inbox.recordPath(record.LocalSequence, record.IngestionID)
+	injected := errors.New("injected pending-directory sync failure")
+	pendingSyncHits := 0
+	inbox.shared.syncResetDirectory = func(dir string) error {
+		if filepath.Clean(dir) == filepath.Clean(inbox.pendingPath) {
+			pendingSyncHits++
+			if pendingSyncHits == 1 {
+				return injected
+			}
+		}
+		return nil
+	}
+	inbox.shared.retireResetArtifact = func(path string) error {
+		return retireFileWithDirectorySync(path, resetArtifactExists, os.Rename, inbox.shared.syncResetDirectory, os.Remove)
+	}
+
+	if err := inbox.Reset(); !errors.Is(err, injected) {
+		t.Fatalf("first reset error=%v, want injected sync failure", err)
+	}
+	tombstone := filepath.Join(inbox.pendingPath, resetTombstoneName)
+	if _, err := os.Stat(recordPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("record was not renamed before sync failure: %v", err)
+	}
+	if _, err := os.Stat(tombstone); err != nil {
+		t.Fatalf("uncertain record tombstone missing: %v", err)
+	}
+	if err := inbox.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if pendingSyncHits != 2 {
+		t.Fatalf("pending directory sync hits=%d, want retry settlement", pendingSyncHits)
+	}
+	if _, err := os.Stat(tombstone); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("settled tombstone remains: %v", err)
+	}
+	if health := inbox.SnapshotHealth(); health.PendingCount != 0 {
+		t.Fatalf("reset inbox health=%#v", health)
+	}
+}
+
+func TestGiftInboxResetRetiresOwnedTempsFromRootAndPendingOnly(t *testing.T) {
+	inbox, err := openGiftInbox(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = inbox.Close() })
+	record, err := inbox.Accept("room-a", "SEND_GIFT", giftEvent{GiftID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordPath := inbox.recordPath(record.LocalSequence, record.IngestionID)
+	root := filepath.Dir(inbox.sequencePath)
+	rootTemp := filepath.Join(root, "config-root-reset.tmp")
+	pendingTemp := filepath.Join(inbox.pendingPath, "config-pending-reset.tmp")
+	rootUnrelated := filepath.Join(root, "keep-root.txt")
+	pendingUnrelated := filepath.Join(inbox.pendingPath, "keep-pending.txt")
+	for path, data := range map[string]string{
+		rootTemp:         "owned root temp",
+		pendingTemp:      "owned pending temp",
+		rootUnrelated:    "keep root",
+		pendingUnrelated: "keep pending",
+	} {
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := inbox.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{recordPath, inbox.sequencePath, rootTemp, pendingTemp} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("owned reset artifact %s remains: %v", filepath.Base(path), err)
+		}
+	}
+	for path, want := range map[string]string{rootUnrelated: "keep root", pendingUnrelated: "keep pending"} {
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != want {
+			t.Fatalf("unrelated file %s data=%q err=%v", filepath.Base(path), data, err)
+		}
+	}
+}
+
+func TestGiftInboxResetRetiresOwnedLinkEntriesWithoutFollowingTargets(t *testing.T) {
+	inbox, err := openGiftInbox(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = inbox.Close() })
+	root := filepath.Dir(inbox.sequencePath)
+	outsideDir := t.TempDir()
+	existingTarget := filepath.Join(outsideDir, "outside.json")
+	if err := os.WriteFile(existingTarget, []byte("outside-must-survive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	danglingTarget := filepath.Join(outsideDir, "not-created.json")
+	linkedArtifacts := []struct {
+		path   string
+		target string
+	}{
+		{path: filepath.Join(root, "config-linked-root.tmp"), target: existingTarget},
+		{path: filepath.Join(inbox.pendingPath, inbox.recordFilename(1, strings.Repeat("a", 32))), target: existingTarget},
+		{path: filepath.Join(inbox.pendingPath, "config-linked-pending.tmp"), target: danglingTarget},
+	}
+	for _, artifact := range linkedArtifacts {
+		if err := os.Symlink(artifact.target, artifact.path); err != nil {
+			t.Skipf("filesystem symlinks are unavailable on this host: %v", err)
+		}
+	}
+
+	if err := inbox.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	for _, artifact := range linkedArtifacts {
+		if _, err := os.Lstat(artifact.path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("owned link entry %s survived reset: %v", filepath.Base(artifact.path), err)
+		}
+	}
+	data, err := os.ReadFile(existingTarget)
+	if err != nil || string(data) != "outside-must-survive" {
+		t.Fatalf("outside target changed: data=%q err=%v", data, err)
+	}
+	if _, err := os.Lstat(danglingTarget); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reset created or changed dangling outside target: %v", err)
+	}
+}
+
+func TestGiftInboxResetOwnershipDependsOnReservedNameNotFileType(t *testing.T) {
+	record := (&giftInbox{}).recordFilename(1, strings.Repeat("a", 32))
+	for _, test := range []struct {
+		name           string
+		includeRecords bool
+		want           bool
+	}{
+		{name: record, includeRecords: true, want: true},
+		{name: record, includeRecords: false, want: false},
+		{name: "config-linked.tmp", includeRecords: true, want: true},
+		{name: "config-linked.tmp", includeRecords: false, want: true},
+		{name: "keep.txt", includeRecords: true, want: false},
+	} {
+		if got := isOwnedGiftInboxResetEntry(test.name, test.includeRecords); got != test.want {
+			t.Fatalf("owned reset entry name=%q includeRecords=%v => %v, want %v", test.name, test.includeRecords, got, test.want)
+		}
+	}
+}
+
+func TestGiftInboxResetRejectsLinkedDirectoriesWithoutTouchingOutside(t *testing.T) {
+	for _, linkedDirectory := range []string{"root", "pending"} {
+		t.Run(linkedDirectory, func(t *testing.T) {
+			base := t.TempDir()
+			inbox, err := openGiftInbox(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = inbox.Close() })
+			root := filepath.Dir(inbox.sequencePath)
+			outside := t.TempDir()
+			outsidePending := outside
+			if linkedDirectory == "root" {
+				outsidePending = filepath.Join(outside, "pending")
+				if err := os.MkdirAll(outsidePending, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			recordName := inbox.recordFilename(1, strings.Repeat("b", 32))
+			outsideRecord := filepath.Join(outsidePending, recordName)
+			outsideTemp := filepath.Join(outside, "config-outside.tmp")
+			for path, data := range map[string]string{
+				outsideRecord: "outside-record-must-survive",
+				outsideTemp:   "outside-temp-must-survive",
+			} {
+				if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			linkPath := inbox.pendingPath
+			if linkedDirectory == "root" {
+				linkPath = root
+				movedRoot := root + ".owned-before-link"
+				if err := os.Rename(root, movedRoot); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Remove(inbox.pendingPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, linkPath); err != nil {
+				t.Skipf("directory symlink/reparse creation is unavailable on this host: %v", err)
+			}
+
+			if err := inbox.Reset(); err == nil {
+				t.Fatal("reset followed a linked inbox directory instead of failing closed")
+			}
+			for path, want := range map[string]string{
+				outsideRecord: "outside-record-must-survive",
+				outsideTemp:   "outside-temp-must-survive",
+			} {
+				data, err := os.ReadFile(path)
+				if err != nil || string(data) != want {
+					t.Fatalf("outside artifact %s changed: data=%q err=%v", filepath.Base(path), data, err)
+				}
+			}
+			if _, err := os.Lstat(linkPath); err != nil {
+				t.Fatalf("linked directory entry changed after rejected reset: %v", err)
+			}
+		})
+	}
+}
+
 func TestGiftInboxClaimsHeadForOnlyOneHandleUntilAcknowledged(t *testing.T) {
 	root := t.TempDir()
 	first, err := openGiftInbox(root)

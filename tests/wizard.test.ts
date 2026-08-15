@@ -14,7 +14,14 @@ import {
   TUTORIAL_LESSONS,
   type TutorialEditorProgress,
 } from '../src/ui/config/wizard';
-import { defaultState, loadState, resetState, saveState } from '../src/storage';
+import {
+  commitAuthoritativeStateMutation,
+  defaultState,
+  loadState,
+  resetState,
+  saveState,
+  saveStateTransaction,
+} from '../src/storage';
 import { builtinCatalog } from '../src/gifts/catalog';
 import type { GiftEvent } from '../src/bilibili/messages';
 import type { Attribute } from '../src/types';
@@ -189,6 +196,14 @@ function findByText(root: TestElement, text: string): TestElement | undefined {
   return allElements(root).find((element) => element.textContent === text);
 }
 
+async function openExistingAttributeEditor(root: TestElement): Promise<void> {
+  if (root.querySelector('.attribute-overlay')) {
+    await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+  }
+  findByText(root, '编辑')?.onclick?.();
+  await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+}
+
 function cssVariable(block: string, name: string): string {
   return block.match(new RegExp(`${name}:\\s*([^;]+);`))?.[1].trim() ?? '';
 }
@@ -199,6 +214,92 @@ function relativeLuminance(hex: string): number {
     ? channel / 12.92
     : ((channel + 0.055) / 1.055) ** 2.4);
   return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+}
+
+function atomicEditFixtureResponse(body: {
+  target: { kind: 'existing'; attributeId: string; leaseToken: string } | { kind: 'new' };
+  attribute: Attribute;
+  giftRules: ReturnType<typeof defaultState>['rules'];
+  timerRules: ReturnType<typeof defaultState>['timerRules'];
+  giftCatalogUpserts: ReturnType<typeof defaultState>['giftCatalog'];
+}): { target: { id: string; name: string; created: boolean }; state: ReturnType<typeof defaultState> } {
+  const authoritative = JSON.parse(JSON.stringify(loadState())) as ReturnType<typeof defaultState>;
+  const targetAttributeId = body.target.kind === 'existing' ? body.target.attributeId : undefined;
+  const existingIndex = targetAttributeId
+    ? authoritative.attributes.findIndex((attribute) => attribute.id === targetAttributeId)
+    : -1;
+  const existing = existingIndex >= 0 ? authoritative.attributes[existingIndex] : undefined;
+  const oldName = existing?.name ?? '';
+  const id = existing?.id ?? `attribute-test-${authoritative.attributes.length + 1}`;
+  const created = body.target.kind === 'new';
+  const nextAttribute = {
+    ...body.attribute,
+    id,
+    ...(existing?.color ? { color: existing.color } : {}),
+    ...(existing?.createdFromTemplateId ? { createdFromTemplateId: existing.createdFromTemplateId } : {}),
+    ...(existing?.createdFromTemplateVersion !== undefined
+      ? { createdFromTemplateVersion: existing.createdFromTemplateVersion }
+      : {}),
+  };
+  if (existingIndex >= 0) authoritative.attributes[existingIndex] = nextAttribute;
+  else authoritative.attributes.push(nextAttribute);
+  const rewrite = (value: string | undefined): string | undefined => (
+    value === undefined || !oldName || oldName === body.attribute.name
+      ? value
+      : value.split(oldName).join(body.attribute.name)
+  );
+  authoritative.rules = authoritative.rules
+    .filter((rule) => rule.attributeName !== oldName)
+    .map((rule) => ({
+      ...rule,
+      formula: rewrite(rule.formula)!,
+      ...(rule.condition !== undefined ? { condition: rewrite(rule.condition) } : {}),
+    }))
+    .concat(body.giftRules);
+  authoritative.timerRules = authoritative.timerRules
+    .filter((rule) => rule.attributeName !== oldName)
+    .map((rule) => ({
+      ...rule,
+      formula: rewrite(rule.formula)!,
+      ...(rule.condition !== undefined ? { condition: rewrite(rule.condition) } : {}),
+    }))
+    .concat(body.timerRules);
+  if (oldName && oldName !== body.attribute.name) {
+    authoritative.displayScenes = authoritative.displayScenes.map((scene) => ({
+      ...scene,
+      attributeNames: scene.attributeNames.map((name) => name === oldName ? body.attribute.name : name),
+    }));
+    authoritative.activities = authoritative.activities.map((activity) => ({
+      ...activity,
+      attributeNames: activity.attributeNames.map((name) => name === oldName ? body.attribute.name : name),
+      initialValues: Object.fromEntries(Object.entries(activity.initialValues).map(([name, value]) => [
+        name === oldName ? body.attribute.name : name, value,
+      ])),
+      milestones: activity.milestones.map((milestone) => ({
+        ...milestone, attributeName: milestone.attributeName === oldName ? body.attribute.name : milestone.attributeName,
+      })),
+    }));
+  }
+  for (const gift of body.giftCatalogUpserts) {
+    const giftIndex = authoritative.giftCatalog.findIndex((candidate) => candidate.id === gift.id);
+    if (giftIndex >= 0) authoritative.giftCatalog[giftIndex] = gift;
+    else authoritative.giftCatalog.push(gift);
+  }
+  return { target: { id, name: body.attribute.name, created }, state: authoritative };
+}
+
+function preparedSessionFixture(init?: RequestInit, token = 'A'.repeat(24)): Response {
+  const target = JSON.parse(String(init?.body)) as { attributeId?: string; legacyName?: string };
+  const authoritative = JSON.parse(JSON.stringify(loadState())) as ReturnType<typeof defaultState>;
+  const index = authoritative.attributes.findIndex((attribute) => (
+    target.attributeId ? attribute.id === target.attributeId : attribute.name === target.legacyName
+  ));
+  if (index < 0) return new Response(null, { status: 404 });
+  const attributeId = authoritative.attributes[index].id ?? `attribute-test-${index + 1}`;
+  authoritative.attributes[index].id = attributeId;
+  return Response.json({
+    code: 0, attributeId, token, expiresAt: '2026-08-15T12:00:00Z', state: authoritative,
+  });
 }
 
 function contrastRatio(first: string, second: string): number {
@@ -237,6 +338,18 @@ beforeEach(async () => {
   } as unknown as Document);
   vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
+    if (url === '/api/attribute-edits/session') {
+      return preparedSessionFixture(init);
+    }
+    if (url === '/api/attribute-edits') {
+      const edit = JSON.parse(String(init?.body)) as Parameters<typeof atomicEditFixtureResponse>[0];
+      return Response.json({ code: 0, ...atomicEditFixtureResponse(edit) });
+    }
+    if (url === '/api/attribute-edit-lease') {
+      if (init?.method === 'POST') return Response.json({ code: 0, token: 'A'.repeat(24) });
+      return Response.json({ code: 0 });
+    }
+    if (url === '/api/config' && !init?.method) return Response.json(loadState());
     if (url.includes('/api/runtime')) {
       return new Response(JSON.stringify({
         code: 0,
@@ -1496,8 +1609,13 @@ describe('single-page configuration rendering', () => {
         ...state('88888888'),
         settings: { ...defaultState().settings, showTutorial: false, configExperience: 'advanced' },
       });
-      const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const url = String(input);
+        if (url === '/api/attribute-edits/session') return preparedSessionFixture(init);
+        if (url === '/api/attribute-edit-lease') {
+          return Response.json(init?.method === 'POST' ? { code: 0, token: 'A'.repeat(24) } : { code: 0 });
+        }
+        if (url === '/api/config' && !init?.method) return Response.json(loadState());
         if (url === '/api/gifts?roomId=88888888') {
           return Response.json({ code: 0, gifts: [currentGift] });
         }
@@ -1514,7 +1632,7 @@ describe('single-page configuration rendering', () => {
       mountConfig(root as unknown as HTMLElement);
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/gifts?roomId=88888888', { cache: 'no-store' }));
       await Promise.resolve();
-      findByText(root, '编辑')?.onclick?.();
+      await openExistingAttributeEditor(root);
       const searchInput = root.querySelectorAll('input')
         .find((input) => input.placeholder === '搜索礼物名称或 ID…') as TestElement & { oninput?: () => void };
       searchInput.value = '同名礼物';
@@ -1560,8 +1678,13 @@ describe('single-page configuration rendering', () => {
         { ...manualGift, lastReceived: 0, count: 0 },
       ],
     });
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
+      if (url === '/api/attribute-edits/session') return preparedSessionFixture(init);
+      if (url === '/api/attribute-edit-lease') {
+        return Response.json(init?.method === 'POST' ? { code: 0, token: 'A'.repeat(24) } : { code: 0 });
+      }
+      if (url === '/api/config' && !init?.method) return Response.json(loadState());
       if (url === '/api/gifts?roomId=88888888') {
         return Response.json({ code: 0, gifts: [listedGift, historicalGift, observedCatalogGift] });
       }
@@ -1574,7 +1697,7 @@ describe('single-page configuration rendering', () => {
     mountConfig(root as unknown as HTMLElement);
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/gifts?roomId=88888888', { cache: 'no-store' }));
     await Promise.resolve();
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
 
     let choices: TestElement[] = [];
     await vi.waitFor(() => {
@@ -1762,7 +1885,7 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).settings.showTutorial).toBe(false));
     expect(root.querySelector('.attribute-card')?.className.split(' ')).not.toContain('is-guide-expanded');
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     expect(root.querySelector('.attribute-modal')).not.toBeNull();
     expect(root.querySelector('.tour-bubble')).toBeNull();
     expect(textOf(root)).not.toContain('补充礼物和规则');
@@ -1808,6 +1931,28 @@ describe('single-page configuration rendering', () => {
     (center.querySelector('.modal-close') as TestElement | null)?.onclick?.();
     expect(root.querySelector('.training-center')).toBeNull();
     expect(root.querySelector('.tour-bubble')).not.toBeNull();
+  });
+
+  it('opens editor controls only after a training topic acquires its attribute lease', async () => {
+    const configured = defaultAdvancedState();
+    configured.settings.showTutorial = false;
+    configured.attributes.push({
+      id: 'training-attribute', name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '',
+    });
+    await saveState(configured);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    (root.querySelector('.training-toggle') as TestElement | null)?.onclick?.();
+    const center = root.querySelector('.training-center') as TestElement;
+    findByText(center, '进阶玩法')?.onclick?.();
+    center.querySelectorAll('.training-center-course')
+      .find((course) => textOf(course).includes('按 ID 添加搜索不到的礼物'))
+      ?.onclick?.();
+    findByText(center, '打开礼物选择器')?.onclick?.();
+
+    await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+    expect((root.querySelector('.manual-gift-adder') as TestElement & { open?: boolean }).open).toBe(true);
   });
 
   it('collapses guided attribute details after resetting the main tutorial', async () => {
@@ -2129,7 +2274,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     expect(root.querySelector('.attribute-modal')).not.toBeNull();
     expect(textOf(root)).toContain('选择会影响这个属性的礼物');
     expect(root.querySelector('.formula-help')).not.toBeNull();
@@ -2206,7 +2351,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const mode = root.querySelector('.quick-rule-condition-mode') as TestElement & { onchange?: () => void };
@@ -2225,7 +2370,7 @@ describe('single-page configuration rendering', () => {
     findByText(root, '保存修改')?.onclick?.();
     await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules[0].condition).toBe('用户身份=普通用户'));
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     expect((root.querySelector('.quick-rule-condition-mode') as TestElement).value).toBe('equal');
@@ -2253,7 +2398,7 @@ describe('single-page configuration rendering', () => {
 
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const requestCountBeforeSave = formulaRequests.length;
@@ -2265,7 +2410,7 @@ describe('single-page configuration rendering', () => {
     expect(saveRequests.length).toBeGreaterThan(0);
     expect(saveRequests.every((request) => request.validateOnly === true)).toBe(true);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const secondRequestCountBeforeSave = formulaRequests.length;
@@ -2297,7 +2442,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const mode = root.querySelector('.quick-rule-condition-mode') as TestElement & { onchange?: () => void };
@@ -2307,7 +2452,7 @@ describe('single-page configuration rendering', () => {
     findByText(root, '保存修改')?.onclick?.();
     await vi.waitFor(() => expect(JSON.parse(storage.get('bilibili-live-gift-panel-v1')!).rules[0].condition).toBe('用户身份>=舰长+积分'));
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const reopenedMode = root.querySelector('.quick-rule-condition-mode') as TestElement & { onchange?: () => void };
@@ -2343,7 +2488,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const row = root.querySelector('.selected-gift-rule')!;
@@ -2382,7 +2527,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const row = root.querySelector('.selected-gift-rule')!;
@@ -2419,7 +2564,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const row = root.querySelector('.selected-gift-rule')!;
@@ -2460,7 +2605,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const nameInput = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
     nameInput.value = '倒计时';
@@ -2474,12 +2619,12 @@ describe('single-page configuration rendering', () => {
     });
   });
 
-  it('formula help explains gift-only identities, equality, and random choice', () => {
+  it('formula help explains gift-only identities, equality, and random choice', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const help = root.querySelector('.formula-help')!;
@@ -2511,7 +2656,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const nameInput = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
     for (const reserved of ['用户身份', '普通用户', '粉丝团', '舰长', '提督', '总督']) {
@@ -2536,7 +2681,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelector('.gift-choice')?.onclick?.();
     const formulaInput = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '触发后属性值') as TestElement & { oninput?: () => void };
@@ -2577,7 +2722,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const idInput = root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '礼物 ID') as TestElement;
     const nameInput = root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '礼物名称') as TestElement;
     const priceInput = root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '单价（元，可填 0）') as TestElement;
@@ -2590,12 +2735,12 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(loadState().recentGifts.find((gift) => gift.id === 456789)?.price).toBe(12_500));
   });
 
-  it('offers common beginner rule actions with a safe optional upper limit', () => {
+  it('offers common beginner rule actions with a safe optional upper limit', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     findByText(root, '+ 添加礼物')?.onclick?.();
     root.querySelector('.gift-choice')?.onclick?.();
     root.querySelector('.guide-confirm-gifts')?.onclick?.();
@@ -2606,7 +2751,7 @@ describe('single-page configuration rendering', () => {
     expect(textOf(operation)).toContain('让“加班时间”减少（最低为 0）');
     expect(textOf(operation)).toContain('把“加班时间”清零');
     expect(textOf(operation)).toContain('每 1 元让“加班时间”减少（最低为 0）');
-    expect(textOf(operation)).toContain('让“加班时间”随机减少 1 到（最低为 0）');
+    expect(textOf(operation)).toContain('让“加班时间”随机变化（最低为 0）');
 
     operation.value = 'subtract';
     operation.onchange?.();
@@ -2630,6 +2775,160 @@ describe('single-page configuration rendering', () => {
     expect(formula.value).toBe('MIN(加班时间+60,3600)');
   });
 
+  it('edits an existing rule with a signed random range', async () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-random-range', giftId: gift.id, attributeName: '加班时间', formulaName: '随机变化',
+      condition: '', formula: '加班时间+1', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    await openExistingAttributeEditor(root);
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+
+    const operation = root.querySelector('.quick-rule-operation') as TestElement & { onchange?: () => void };
+    const optionValues = operation.querySelectorAll('option').map((option) => option.value);
+    expect(optionValues).toContain('randomRange');
+    expect(optionValues).not.toContain('randomSubtract');
+    operation.value = 'randomRange';
+    operation.onchange?.();
+
+    const minimum = root.querySelector('.quick-rule-range-min') as TestElement & { oninput?: () => void };
+    const maximum = root.querySelector('.quick-rule-range-max') as TestElement & { oninput?: () => void };
+    minimum.value = '-60';
+    minimum.oninput?.();
+    maximum.value = '60';
+    maximum.oninput?.();
+    expect((root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '触发后属性值') as TestElement).value)
+      .toBe('MAX(加班时间+RANDBETWEEN(-60,60),0)');
+  });
+
+  it.each([
+    ['加班时间+RANDBETWEEN(1,60)', '1', '60'],
+    ['MAX(加班时间-RANDBETWEEN(1,60),0)', '-60', '-1'],
+  ] as const)('loads legacy random formula %s into the signed range inputs', async (formula, expectedMin, expectedMax) => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-legacy-random', giftId: gift.id, attributeName: '加班时间', formulaName: '旧随机规则',
+      condition: '', formula, enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    await openExistingAttributeEditor(root);
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+
+    expect((root.querySelector('.quick-rule-range-min') as TestElement).value).toBe(expectedMin);
+    expect((root.querySelector('.quick-rule-range-max') as TestElement).value).toBe(expectedMax);
+  });
+
+  it('keeps the last formula and blocks saving an invalid random range', async () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-invalid-random-range', giftId: gift.id, attributeName: '加班时间', formulaName: '随机变化',
+      condition: '', formula: 'MAX(加班时间+RANDBETWEEN(-60,60),0)', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    await openExistingAttributeEditor(root);
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const formulaInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '触发后属性值') as TestElement;
+    const minimum = root.querySelector('.quick-rule-range-min') as TestElement & { oninput?: () => void };
+    const maximum = root.querySelector('.quick-rule-range-max') as TestElement & { oninput?: () => void };
+    minimum.value = '10';
+    minimum.oninput?.();
+    const lastValidFormula = formulaInput.value;
+    maximum.value = '-10';
+    maximum.oninput?.();
+
+    expect(textOf(root.querySelector('.quick-rule-error') as TestElement)).toContain('随机范围的最小变化不能大于最大变化');
+    expect(formulaInput.value).toBe(lastValidFormula);
+    const fetchCount = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+    findByText(root, '保存修改')?.onclick?.();
+    await Promise.resolve();
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(fetchCount);
+  });
+
+  it('keeps the zero floor and blocks saving a negative random range cap', async () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-negative-random-cap', giftId: gift.id, attributeName: '加班时间', formulaName: '随机变化',
+      condition: '', formula: 'MIN(MAX(加班时间+RANDBETWEEN(-60,60),0),100)', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    await openExistingAttributeEditor(root);
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const formulaInput = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '触发后属性值') as TestElement;
+    const maximum = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '最高不超过') as TestElement & { oninput?: () => void };
+    maximum.value = '-1';
+    maximum.oninput?.();
+
+    expect(textOf(root.querySelector('.quick-rule-error') as TestElement)).toContain('随机范围的上限不能小于 0');
+    expect(formulaInput.value).toBe('MIN(MAX(加班时间+RANDBETWEEN(-60,60),0),100)');
+    const fetchCount = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+    findByText(root, '保存修改')?.onclick?.();
+    await Promise.resolve();
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(fetchCount);
+  });
+
+  it.each([
+    ['minimum endpoint', 'minimum', '随机范围必须使用整数'],
+    ['maximum endpoint', 'maximum', '随机范围必须使用整数'],
+    ['enabled cap', 'cap', '随机范围的上限必须是有效数字'],
+  ] as const)('blocks saving when the random %s is cleared', async (_name, field, message) => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.attributes[0].id = 'attribute-random-blank';
+    configured.rules = [{
+      id: 'r-blank-random-range', giftId: gift.id, attributeName: '加班时间', formulaName: '随机变化',
+      condition: '', formula: 'MIN(MAX(加班时间+RANDBETWEEN(-60,60),0),100)', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    await openExistingAttributeEditor(root);
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const input = (field === 'minimum'
+      ? root.querySelector('.quick-rule-range-min')
+      : field === 'maximum'
+        ? root.querySelector('.quick-rule-range-max')
+        : root.querySelectorAll('input').find((candidate) => candidate.dataset.fieldLabel === '最高不超过')) as TestElement & { oninput?: () => void };
+    input.value = '   ';
+    input.oninput?.();
+
+    expect(textOf(root.querySelector('.quick-rule-error') as TestElement)).toContain(message);
+    const patchCount = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.filter(([url, init]) => (
+      String(url) === '/api/config' && init?.method === 'PATCH'
+    )).length;
+    findByText(root, '保存修改')?.onclick?.();
+    await Promise.resolve();
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.filter(([url, init]) => (
+      String(url) === '/api/config' && init?.method === 'PATCH'
+    ))).toHaveLength(patchCount);
+    expect(root.querySelector('.attribute-overlay')).not.toBeNull();
+  });
+
   it('advances a gift simulation draft without saving it as the real attribute value', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state('88888888', 1),
@@ -2641,7 +2940,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const giftRulesTab = root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'));
     giftRulesTab?.onclick?.();
@@ -2649,23 +2948,86 @@ describe('single-page configuration rendering', () => {
     const currentValue = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '当前值') as TestElement;
     const simulate = findByText(root, '模拟收到 1 个');
-    expect(currentValue.value).toBe('0');
+    expect(currentValue.value).toBe('00:00:00');
     expect(simulate).toBeDefined();
 
     simulate?.onclick?.();
 
     await vi.waitFor(() => expect(textOf(root.querySelector('.formula-preview')!)).toContain('0 → 1'));
-    expect(currentValue.value).toBe('0');
+    expect(currentValue.value).toBe('00:00:00');
 
     simulate?.onclick?.();
 
     await vi.waitFor(() => expect(textOf(root.querySelector('.formula-preview')!)).toContain('1 → 2'));
-    expect(currentValue.value).toBe('0');
+    expect(currentValue.value).toBe('00:00:00');
 
     findByText(root, '保存修改')?.onclick?.();
 
     await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
     expect(loadState().attributes[0].value).toBe(0);
+  });
+
+  it('edits timer values as canonical text across format switches', async () => {
+    const configured = state('88888888');
+    configured.attributes[0].value = 3661;
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    await openExistingAttributeEditor(root);
+    const editor = root.querySelector('.attribute-modal')!;
+    const valueInput = editor.querySelector('.attribute-current-value') as TestElement & { oninput?: () => void };
+    const formatSelect = editor.querySelectorAll('select')
+      .find((select) => select.innerHTML.includes('value="hhmmss"')) as TestElement & { onchange?: () => void };
+    expect(valueInput.value).toBe('01:01:01');
+    expect(editor.querySelectorAll('.attribute-time-shortcut')).toHaveLength(6);
+
+    formatSelect.value = 'number';
+    formatSelect.onchange?.();
+    expect(valueInput.value).toBe('3661');
+    formatSelect.value = 'hhmmss';
+    formatSelect.onchange?.();
+    expect(valueInput.value).toBe('01:01:01');
+  });
+
+  it('uses timer shortcuts and saves numeric seconds', async () => {
+    const configured = state('88888888');
+    configured.attributes[0].value = 3661;
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    await openExistingAttributeEditor(root);
+    const editor = root.querySelector('.attribute-modal')!;
+    const valueInput = editor.querySelector('.attribute-current-value') as TestElement;
+    findByText(editor, '+10分')?.onclick?.();
+    expect(valueInput.value).toBe('01:11:01');
+    findByText(editor, '-1时')?.onclick?.();
+    expect(valueInput.value).toBe('00:11:01');
+    findByText(root, '保存修改')?.onclick?.();
+
+    await vi.waitFor(() => expect(loadState().attributes[0].value).toBe(661));
+  });
+
+  it('rejects invalid timer values before saving', async () => {
+    for (const value of ['1:60:00', '1:24:00:00']) {
+      const configured = state('88888888');
+      configured.attributes[0].value = 3661;
+      storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExistingAttributeEditor(root);
+      const editor = root.querySelector('.attribute-modal')!;
+      const valueInput = editor.querySelector('.attribute-current-value') as TestElement & { oninput?: () => void };
+      valueInput.value = value;
+      valueInput.oninput?.();
+      const requestCount = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+      findByText(root, '保存修改')?.onclick?.();
+
+      expect(root.querySelector('.attribute-modal')).not.toBeNull();
+      expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(requestCount);
+      expect(textOf(root)).toContain(value === '1:60:00' ? '分钟必须在 0–59 之间' : '四段时间中的小时必须在 0–23 之间');
+    }
   });
 
   it('keeps the configuration page open and reports a safe reset failure', async () => {
@@ -2713,7 +3075,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     await vi.waitFor(() => expect(root.querySelectorAll('.formula-preview')
@@ -2768,14 +3130,14 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const currentValue = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '当前值') as TestElement;
     const timerEditor = root.querySelector('.timer-rule-editor')!;
     findByText(timerEditor, '模拟执行一次')?.onclick?.();
 
     await vi.waitFor(() => expect(textOf(timerEditor.querySelector('.formula-preview')!)).toContain('10 → 9'));
-    expect(currentValue.value).toBe('10');
+    expect(currentValue.value).toBe('00:00:10');
     findByText(root, '保存修改')?.onclick?.();
     await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
     expect(loadState().attributes[0].value).toBe(10);
@@ -2802,7 +3164,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const currentValue = root.querySelectorAll('input')
@@ -2812,7 +3174,7 @@ describe('single-page configuration rendering', () => {
     giftSimulate.onclick?.();
     await vi.waitFor(() => expect(textOf(giftPreview)).toContain('10 → 11'));
 
-    currentValue.value = '20';
+    currentValue.value = '00:00:20';
     currentValue.oninput?.();
     expect(textOf(root)).not.toContain('10 → 11');
 
@@ -2826,7 +3188,7 @@ describe('single-page configuration rendering', () => {
     const timerPreview = timerEditor.querySelector('.formula-preview')!;
     findByText(timerEditor, '模拟执行一次')?.onclick?.();
     await vi.waitFor(() => expect(textOf(timerPreview)).toContain('21 → 20'));
-    expect(currentValue.value).toBe('20');
+    expect(currentValue.value).toBe('00:00:20');
 
     findByText(root, '保存修改')?.onclick?.();
     await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
@@ -2855,7 +3217,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('定时器'))?.onclick?.();
     const timerEditor = root.querySelector('.timer-rule-editor')!;
@@ -2887,14 +3249,14 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const currentValue = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '当前值') as TestElement & { oninput?: () => void };
     let timerEditor = root.querySelector('.timer-rule-editor')!;
     findByText(timerEditor, '模拟执行一次')?.onclick?.();
     await vi.waitFor(() => expect(textOf(timerEditor.querySelector('.formula-preview')!)).toContain('10 → 9'));
 
-    currentValue.value = '20';
+    currentValue.value = '00:00:20';
     currentValue.oninput?.();
     expect(textOf(root)).not.toContain('10 → 9');
 
@@ -2903,7 +3265,7 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(textOf(timerEditor.querySelector('.formula-preview')!)).toContain('20 → 19'));
 
     findByText(root, '使用加班机模板')?.onclick?.();
-    expect(currentValue.value).toBe('0');
+    expect(currentValue.value).toBe('00:00:00');
     expect(textOf(root)).not.toContain('20 → 19');
   });
 
@@ -2929,7 +3291,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     const giftRow = root.querySelector('.selected-gift-rule')!;
@@ -2971,7 +3333,7 @@ describe('single-page configuration rendering', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(2));
@@ -3012,7 +3374,7 @@ describe('single-page configuration rendering', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(2));
@@ -3060,7 +3422,7 @@ describe('single-page configuration rendering', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(1));
@@ -3116,7 +3478,7 @@ describe('single-page configuration rendering', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
 
     const fallbackFetch = globalThis.fetch;
     const pendingResolvers: Array<(response: Response) => void> = [];
@@ -3172,7 +3534,7 @@ describe('single-page configuration rendering', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     root.querySelectorAll('.attribute-workbench-tab')
       .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
     await vi.waitFor(() => expect(root.querySelectorAll('.selected-gift-rule')).toHaveLength(2));
@@ -3210,7 +3572,7 @@ describe('single-page configuration rendering', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     await vi.waitFor(() => expect(root.querySelectorAll('.timer-rule-editor')).toHaveLength(2));
 
     const fallbackFetch = globalThis.fetch;
@@ -3244,7 +3606,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     expect(root.querySelector('.timer-binding-panel')).not.toBeNull();
     expect(textOf(root)).toContain('定时器只修改属性值，不会显示在 OBS 面板中');
     findByText(root, '+ 添加定时器')?.onclick?.();
@@ -3490,7 +3852,12 @@ describe('single-page configuration rendering', () => {
     });
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
+      if (url === '/api/attribute-edits/session') return preparedSessionFixture(init);
+      if (url === '/api/attribute-edit-lease') {
+        return Response.json(init?.method === 'POST' ? { code: 0, token: 'A'.repeat(24) } : { code: 0 });
+      }
       if (url.endsWith('/api/config') && !init?.method) {
+        if (configGetStarted) return Response.json(loadState());
         configGetStarted = true;
         return configGet;
       }
@@ -3525,7 +3892,7 @@ describe('single-page configuration rendering', () => {
 
     expect(summarySwitch.getAttribute('aria-checked')).toBe('true');
     expect(loadState().timerRules[0].enabled).toBe(true);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     expect(root.querySelector('.timer-editor-enabled-toggle')).toBeNull();
     vi.clearAllTimers();
     vi.useRealTimers();
@@ -3948,7 +4315,7 @@ describe('single-page configuration rendering', () => {
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     findByText(root, '保存修改')?.onclick?.();
 
     await vi.waitFor(() => expect(root.querySelector('.attribute-modal')).toBeNull());
@@ -3956,12 +4323,12 @@ describe('single-page configuration rendering', () => {
     expect(loadState().timerRules[0].enabled).toBe(false);
   });
 
-  it('collapses duplicate catalog aliases into one visible gift choice', () => {
+  it('collapses duplicate catalog aliases into one visible gift choice', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888')));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
 
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
     const duplicatedChoices = root.querySelectorAll('.gift-choice')
       .filter((choice) => textOf(choice).includes('666'));
 
@@ -4078,7 +4445,7 @@ describe('single-page configuration rendering', () => {
     expect(configCss).toContain('@media (prefers-reduced-motion: reduce)');
   });
 
-  it('incrementally appends gift picker items while scrolling and resets after search', () => {
+  it('incrementally appends gift picker items while scrolling and resets after search', async () => {
     const gifts = Array.from({ length: 135 }, (_, index) => ({
       id: 10000 + index,
       name: `自定义礼物 ${index}`,
@@ -4091,11 +4458,11 @@ describe('single-page configuration rendering', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify({
       ...state('88888888', 1),
       recentGifts: gifts,
-      giftCatalog: gifts,
+      giftCatalog: gifts.map(({ lastReceived: _lastReceived, count: _count, ...gift }) => gift),
     }));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
 
     const picker = root.querySelector('.gift-picker-grid') as TestElement & {
       clientHeight?: number;
@@ -4155,11 +4522,11 @@ describe('single-page configuration rendering', () => {
     expect(choice.getAttribute('aria-pressed')).toBe('false');
   });
 
-  it('keeps the attribute editor open when text selection drags outside the panel', () => {
+  it('keeps the attribute editor open when text selection drags outside the panel', async () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888', 1)));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
 
     const overlay = root.querySelector('.attribute-overlay') as TestElement & {
       onpointerdown?: (event: { target: TestElement }) => void;
@@ -4173,6 +4540,1277 @@ describe('single-page configuration rendering', () => {
     overlay.onpointerdown?.({ target: overlay });
     overlay.onclick?.({ target: overlay });
     expect(root.querySelector('.attribute-overlay')).toBeNull();
+  });
+
+  describe('atomic attribute edit session', () => {
+    const leaseToken = 'S'.repeat(24);
+
+    function configuredAttribute(id: string | null = 'attribute-countdown') {
+      const configured = defaultAdvancedState();
+      configured.roomId = '88888888';
+      configured.settings.showTutorial = false;
+      configured.attributes = [{
+        ...(id ? { id } : {}),
+        name: '缓存名称', value: 7, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '',
+      }];
+      configured.rules = [{ id: 'rule-countdown', giftId: 1, attributeName: '缓存名称', formula: '缓存名称+1' }];
+      return configured;
+    }
+
+    it('opens an existing draft from exactly one prepared session using its stable ID', async () => {
+      const cached = configuredAttribute();
+      await saveState(cached);
+      const authoritative = JSON.parse(JSON.stringify(cached)) as typeof cached;
+      authoritative.attributes.unshift({
+        id: 'attribute-peer', name: '干扰属性', value: 3, unit: 'none', format: 'number', decimals: 0, suffix: '',
+      });
+      authoritative.attributes[1].name = '服务端倒计时';
+      authoritative.attributes[1].value = 90;
+      authoritative.rules[0] = {
+        ...authoritative.rules[0], attributeName: '服务端倒计时', formula: '服务端倒计时+1',
+      };
+      const requests: Array<{ method: string; path: string; body: unknown }> = [];
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits/session') {
+          requests.push({ method: String(init?.method), path, body: JSON.parse(String(init?.body)) });
+          return Response.json({
+            code: 0, attributeId: 'attribute-countdown', token: leaseToken,
+            expiresAt: '2026-08-15T12:00:00Z', state: authoritative,
+          });
+        }
+        if (path === '/api/formula/preview') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      fetchImpl.mockClear();
+
+      findByText(root, '编辑')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+
+      expect(requests).toEqual([{
+        method: 'POST', path: '/api/attribute-edits/session', body: { attributeId: 'attribute-countdown' },
+      }]);
+      expect(fetchImpl.mock.calls.some(([url, init]) => String(url) === '/api/config' && !init?.method)).toBe(false);
+      expect(root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '属性名称')?.value)
+        .toBe('服务端倒计时');
+      expect(root.querySelectorAll('input').find((input) => input.dataset.fieldLabel === '当前值')?.value)
+        .toBe('00:01:30');
+    });
+
+    it('opens an ID-less legacy attribute by name and adopts the generated stable ID and authoritative rules', async () => {
+      const cached = configuredAttribute(null);
+      await saveState(cached);
+      const authoritative = JSON.parse(JSON.stringify(cached)) as typeof cached;
+      authoritative.attributes[0] = {
+        ...authoritative.attributes[0], id: 'attribute-generated', name: '权威名称', value: 12,
+      };
+      authoritative.rules[0] = {
+        ...authoritative.rules[0], attributeName: '权威名称', formula: '权威名称+5',
+      };
+      let sessionBody: unknown;
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits/session') {
+          sessionBody = JSON.parse(String(init?.body));
+          return Response.json({
+            code: 0, attributeId: 'attribute-generated', token: leaseToken,
+            expiresAt: '2026-08-15T12:00:00Z', state: authoritative,
+          });
+        }
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      fetchImpl.mockClear();
+
+      findByText(root, '编辑')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+
+      expect(sessionBody).toEqual({ legacyName: '缓存名称' });
+      expect(loadState().attributes[0]).toEqual(expect.objectContaining({ id: 'attribute-generated', name: '权威名称' }));
+      expect(root.querySelectorAll('input').some((input) => input.value === '权威名称+5')).toBe(true);
+      const legacyPatches = fetchImpl.mock.calls
+        .filter(([url, init]) => String(url) === '/api/config' && init?.method === 'PATCH')
+        .map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>);
+      expect(legacyPatches.every((patch) => (
+        !Object.prototype.hasOwnProperty.call(patch, 'attributes')
+        && !Object.prototype.hasOwnProperty.call(patch, 'rules')
+        && !Object.prototype.hasOwnProperty.call(patch, 'timerRules')
+      ))).toBe(true);
+    });
+
+    it('keeps the guide and leaves no editor maintenance behind when session preparation fails', async () => {
+      const configured = configuredAttribute();
+      configured.settings.showTutorial = true;
+      configured.settings.tutorialReplayMode = true;
+      configured.settings.tutorialCompletedLessons = [];
+      await saveState(configured);
+      const addListener = vi.fn();
+      const removeListener = vi.fn();
+      vi.stubGlobal('addEventListener', addListener);
+      vi.stubGlobal('removeEventListener', removeListener);
+      const baseFetch = globalThis.fetch;
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => (
+        String(input) === '/api/attribute-edits/session'
+          ? new Response(null, { status: 409 })
+          : baseFetch(input, init)
+      ));
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      const guide = root.querySelector('.tour-bubble');
+      const intervalsBeforeOpen = vi.mocked(globalThis.setInterval).mock.calls.length;
+      const listenersBeforeOpen = addListener.mock.calls.length;
+      const removalsBeforeOpen = removeListener.mock.calls.length;
+
+      findByText(root, '编辑')?.onclick?.();
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性编辑请求失败'));
+
+      expect(root.querySelector('.attribute-overlay')).toBeNull();
+      expect(root.querySelector('.tour-bubble')).toBe(guide);
+      expect(vi.mocked(globalThis.setInterval).mock.calls).toHaveLength(intervalsBeforeOpen);
+      expect(addListener.mock.calls).toHaveLength(listenersBeforeOpen);
+      expect(removeListener.mock.calls).toHaveLength(removalsBeforeOpen);
+    });
+
+    it.each(['save', 'reset', 'transaction'] as const)(
+      'dismisses a stale prepared open after a later %s operation without overwriting state or leaking its lease',
+      async (operation) => {
+        const cached = configuredAttribute();
+        await saveState(cached);
+        const stale = JSON.parse(JSON.stringify(cached)) as typeof cached;
+        stale.attributes[0].name = '过期服务端名称';
+        const later = JSON.parse(JSON.stringify(cached)) as typeof cached;
+        later.attributes[0].name = `后续${operation}`;
+        let resolveSession: ((response: Response) => void) | undefined;
+        const releases: Array<Record<string, string>> = [];
+        const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+          const path = String(input);
+          if (path === '/api/attribute-edits/session') {
+            return new Promise<Response>((resolve) => { resolveSession = resolve; });
+          }
+          if (path === '/api/attribute-edit-lease' && init?.method === 'DELETE') {
+            releases.push(JSON.parse(String(init.body)) as Record<string, string>);
+            return Response.json({ code: 0 });
+          }
+          if (path === '/api/attribute-edit-lease') return Response.json({ code: 0 });
+          return new Response(null, { status: 204 });
+        });
+        vi.stubGlobal('fetch', fetchImpl);
+        const root = new TestElement('div');
+        mountConfig(root as unknown as HTMLElement);
+
+        findByText(root, '编辑')?.onclick?.();
+        await vi.waitFor(() => expect(resolveSession).toBeDefined());
+        const laterOperation = operation === 'reset'
+          ? resetState()
+          : operation === 'transaction'
+            ? saveStateTransaction(later).then(() => undefined)
+            : saveState(later);
+        resolveSession?.(Response.json({
+          code: 0, attributeId: 'attribute-countdown', token: leaseToken,
+          expiresAt: '2026-08-15T12:00:00Z', state: stale,
+        }));
+        await laterOperation;
+        await vi.waitFor(() => expect(releases).toHaveLength(1));
+
+        expect(root.querySelector('.attribute-overlay')).toBeNull();
+        expect(loadState().attributes).toEqual(operation === 'reset' ? [] : later.attributes);
+        expect(releases).toEqual([{ attributeId: 'attribute-countdown', token: leaseToken }]);
+      },
+    );
+  });
+
+  describe('atomic attribute edit save', () => {
+    const stableId = 'attribute-countdown';
+    const leaseToken = 'T'.repeat(24);
+    const editedGift = {
+      id: 987_654, name: '测试礼物', price: 2_000, coinType: 'gold' as const, imgBasic: 'https://example.test/gift.png',
+    };
+    const enrichedEditedGift = {
+      ...editedGift, listed: true, requiresLogin: true, specialEvent: 'super-chat' as const,
+    };
+    const enrichedRecentGift = {
+      id: 987_655, name: '最近礼物', price: 3_000, coinType: 'gold' as const,
+      imgBasic: 'https://example.test/recent.png', listed: false, requiresLogin: false,
+      specialEvent: 'guard-captain' as const, lastReceived: 1_723_689_600_000, count: 2,
+    };
+
+    function configuredAggregate() {
+      const configured = defaultAdvancedState();
+      configured.roomId = '88888888';
+      configured.settings.showTutorial = false;
+      configured.attributes = [
+        { id: stableId, name: '倒计时', value: 30, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' },
+        { id: 'attribute-peer', name: '同伴', value: 8, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      ];
+      configured.giftCatalog = [enrichedEditedGift];
+      configured.recentGifts = [enrichedRecentGift];
+      configured.rules = [
+        { id: 'rule-target', giftId: editedGift.id, attributeName: '倒计时', formulaName: '目标礼物', formula: '倒计时+2', enabled: true },
+        { id: 'rule-peer', giftId: 1, attributeName: '同伴', formulaName: '同伴礼物', formula: '同伴+1', enabled: true },
+      ];
+      configured.timerRules = [
+        { id: 'timer-target', attributeName: '倒计时', formulaName: '目标定时器', intervalSeconds: 60, formula: '倒计时-1', enabled: true },
+        { id: 'timer-peer', attributeName: '同伴', formulaName: '同伴定时器', intervalSeconds: 30, formula: '同伴+1', enabled: true },
+      ];
+      configured.displayScenes = [{
+        id: 'scene-target', name: '场景', attributeNames: ['倒计时', '同伴'], layout: 'grid', themeId: 'glass',
+      }];
+      return configured;
+    }
+
+    function sessionResponse(state: ReturnType<typeof configuredAggregate>, token = leaseToken): Response {
+      return Response.json({
+        code: 0, attributeId: stableId, token, expiresAt: '2026-08-15T12:00:00Z', state,
+      });
+    }
+
+    async function openTutorialSettingsFailure(options: { deferSubsequentSettingsPatches?: boolean } = {}) {
+      const opening = configuredAggregate();
+      opening.settings.showTutorial = true;
+      opening.settings.tutorialReplayMode = true;
+      opening.settings.tutorialCompletedLessons = ['room'];
+      opening.settings.tutorialTargetAttributeId = stableId;
+      await saveState(opening);
+      const authoritative = JSON.parse(JSON.stringify(opening)) as typeof opening;
+      authoritative.attributes[0] = { ...authoritative.attributes[0], name: '服务端已保存属性', value: 73 };
+      authoritative.rules[0] = { ...authoritative.rules[0], attributeName: '服务端已保存属性' };
+      authoritative.timerRules[0] = { ...authoritative.timerRules[0], attributeName: '服务端已保存属性' };
+      authoritative.settings.tutorialCompletedLessons = ['room'];
+      delete authoritative.settings.tutorialTargetAttributeId;
+      const calls: {
+        attributePosts: number;
+        configPatches: Array<Record<string, unknown>>;
+        settingsPatches: Array<Record<string, unknown>>;
+        releases: Array<Record<string, string>>;
+        serverState: typeof authoritative;
+        resolveRetryPatch?: (response: Response) => void;
+        deferNextBroadPatch: boolean;
+        resolveBroadPatch?: (response: Response) => void;
+      } = {
+        attributePosts: 0,
+        configPatches: [],
+        settingsPatches: [],
+        releases: [],
+        serverState: JSON.parse(JSON.stringify(opening)) as typeof opening,
+        deferNextBroadPatch: false,
+      };
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits/session') return sessionResponse(opening);
+        if (path === '/api/attribute-edits') {
+          calls.attributePosts += 1;
+          calls.serverState = JSON.parse(JSON.stringify(authoritative)) as typeof authoritative;
+          return Response.json({
+            code: 0, target: { id: stableId, name: '服务端已保存属性', created: false }, state: authoritative,
+          });
+        }
+        if (path === '/api/config' && init?.method === 'PATCH') {
+          const patch = JSON.parse(String(init.body)) as Record<string, unknown>;
+          calls.configPatches.push(patch);
+          if (!Object.prototype.hasOwnProperty.call(patch, 'settings')) {
+            if (calls.deferNextBroadPatch) {
+              calls.deferNextBroadPatch = false;
+              return new Promise<Response>((resolve) => {
+                calls.resolveBroadPatch = (response) => {
+                  calls.resolveBroadPatch = undefined;
+                  if (response.ok) calls.serverState = { ...calls.serverState, ...patch } as typeof authoritative;
+                  resolve(response);
+                };
+              });
+            }
+            calls.serverState = { ...calls.serverState, ...patch } as typeof authoritative;
+            return new Response(null, { status: 204 });
+          }
+          calls.settingsPatches.push(patch);
+          if (calls.settingsPatches.length === 1) return new Response(null, { status: 500 });
+          if (options.deferSubsequentSettingsPatches === false) {
+            calls.serverState = { ...calls.serverState, ...patch } as typeof authoritative;
+            return new Response(null, { status: 204 });
+          }
+          return new Promise<Response>((resolve) => {
+            calls.resolveRetryPatch = (response) => {
+              calls.resolveRetryPatch = undefined;
+              if (response.ok) calls.serverState = { ...calls.serverState, ...patch } as typeof authoritative;
+              resolve(response);
+            };
+          });
+        }
+        if (path === '/api/config' && init?.method === 'DELETE') {
+          calls.serverState = defaultState() as typeof authoritative;
+          return new Response(null, { status: 204 });
+        }
+        if (path === '/api/attribute-edit-lease' && init?.method === 'DELETE') {
+          calls.releases.push(JSON.parse(String(init.body)) as Record<string, string>);
+          return Response.json({ code: 0 });
+        }
+        if (path === '/api/attribute-edit-lease') return Response.json({ code: 0 });
+        if (path === '/api/formula/preview') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExistingAttributeEditor(root);
+      findByText(root, '保存修改')?.onclick?.();
+      await vi.waitFor(() => expect(calls.settingsPatches).toHaveLength(1));
+      return { root, calls, authoritative };
+    }
+
+    it('submits only the existing target aggregate and adopts the authoritative renamed state', async () => {
+      const cached = configuredAggregate();
+      cached.giftCatalog = [editedGift];
+      cached.recentGifts = [{
+        id: enrichedRecentGift.id, name: '缓存最近礼物', price: 1_000, coinType: 'silver', imgBasic: '',
+        lastReceived: 1_700_000_000_000, count: 1,
+      }];
+      await saveState(cached);
+      expect(loadState().giftCatalog[0]).toEqual(editedGift);
+      expect(loadState().recentGifts[0]).toEqual(expect.not.objectContaining({
+        listed: expect.anything(), requiresLogin: expect.anything(), specialEvent: expect.anything(),
+      }));
+      const opening = configuredAggregate();
+      const authoritative = JSON.parse(JSON.stringify(opening)) as typeof opening;
+      const submittedEnrichedGift = {
+        ...enrichedEditedGift, listed: false, requiresLogin: false, specialEvent: 'guard-admiral' as const,
+      };
+      const submittedEnrichedRecentGift = {
+        ...enrichedRecentGift, name: '提交后最近礼物', listed: true, requiresLogin: true,
+        specialEvent: 'guard-governor' as const, lastReceived: 1_800_000_000_000, count: 9,
+      };
+      authoritative.attributes[0] = { ...authoritative.attributes[0], name: '服务端规范名', value: 61 };
+      authoritative.rules[0] = { ...authoritative.rules[0], attributeName: '服务端规范名', formula: '服务端规范名+2' };
+      authoritative.timerRules[0] = { ...authoritative.timerRules[0], attributeName: '服务端规范名', formula: '服务端规范名-1' };
+      authoritative.displayScenes[0].attributeNames = ['服务端规范名', '同伴'];
+      authoritative.giftCatalog = [submittedEnrichedGift];
+      authoritative.recentGifts = [submittedEnrichedRecentGift];
+      let submittedBody: Record<string, unknown> | undefined;
+      let peerMutatedAfterSession = false;
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits/session') return sessionResponse(opening);
+        if (path === '/api/attribute-edits') {
+          authoritative.attributes[1].value = 99;
+          peerMutatedAfterSession = true;
+          submittedBody = JSON.parse(String(init?.body));
+          return Response.json({
+            code: 0, target: { id: stableId, name: '服务端规范名', created: false }, state: authoritative,
+          });
+        }
+        if (path === '/api/formula/preview') return Response.json({ code: 0 });
+        if (path === '/api/attribute-edit-lease') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExistingAttributeEditor(root);
+      expect(root.querySelector('.attribute-overlay')).not.toBeNull();
+      expect(loadState().giftCatalog).toContainEqual(enrichedEditedGift);
+      expect(loadState().recentGifts).toContainEqual(enrichedRecentGift);
+      const name = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
+      const value = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '当前值') as TestElement;
+      name.value = '用户重命名';
+      name.oninput?.();
+      value.value = '00:01:00';
+
+      findByText(root, '保存修改')?.onclick?.();
+      await vi.waitFor(() => expect(submittedBody).toBeDefined());
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+
+      expect(Object.keys(submittedBody!).sort()).toEqual([
+        'attribute', 'giftCatalogUpserts', 'giftRules', 'target', 'timerRules',
+      ]);
+      expect(submittedBody?.target).toEqual({ kind: 'existing', attributeId: stableId, leaseToken });
+      expect(submittedBody?.attribute).toEqual(expect.objectContaining({ id: stableId, name: '用户重命名', value: 60 }));
+      expect(submittedBody?.giftRules).toEqual([
+        expect.objectContaining({ id: 'rule-target', giftId: editedGift.id, attributeName: '用户重命名', formula: '用户重命名+2' }),
+      ]);
+      expect(submittedBody?.timerRules).toEqual([
+        expect.objectContaining({ id: 'timer-target', attributeName: '用户重命名', formula: '用户重命名-1' }),
+      ]);
+      expect(submittedBody?.giftCatalogUpserts).toEqual([editedGift]);
+      expect(submittedBody?.giftCatalogUpserts).not.toEqual([enrichedEditedGift]);
+      expect(submittedBody?.giftCatalogUpserts).toEqual([
+        expect.not.objectContaining({ listed: expect.anything() }),
+      ]);
+      expect(submittedBody?.giftCatalogUpserts).toEqual([
+        expect.not.objectContaining({ requiresLogin: expect.anything() }),
+      ]);
+      expect(submittedBody?.giftCatalogUpserts).toEqual([
+        expect.not.objectContaining({ specialEvent: expect.anything() }),
+      ]);
+      expect(peerMutatedAfterSession).toBe(true);
+      expect(JSON.stringify(submittedBody)).not.toContain('attribute-peer');
+      expect(JSON.stringify(submittedBody)).not.toContain('rule-peer');
+      expect(JSON.stringify(submittedBody)).not.toContain('timer-peer');
+      expect(fetchImpl.mock.calls.some(([url, init]) => String(url) === '/api/config' && !init?.method)).toBe(false);
+      const forbiddenPatches = fetchImpl.mock.calls.filter(([url, init]) => {
+        if (String(url) !== '/api/config' || init?.method !== 'PATCH') return false;
+        const patch = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return ['attributes', 'rules', 'timerRules'].some((key) => Object.prototype.hasOwnProperty.call(patch, key));
+      });
+      expect(forbiddenPatches).toHaveLength(0);
+      expect(loadState().attributes).toEqual(authoritative.attributes);
+      expect(loadState().displayScenes[0].attributeNames).toEqual(['服务端规范名', '同伴']);
+      expect(loadState().giftCatalog).toEqual([submittedEnrichedGift]);
+      expect(loadState().recentGifts).toEqual([submittedEnrichedRecentGift]);
+      expect(textOf(root)).toContain('服务端规范名');
+    });
+
+    it('creates through an unleased atomic target and adopts the server-generated ID without peer payloads', async () => {
+      const opening = configuredAggregate();
+      await saveState(opening);
+      const authoritative = JSON.parse(JSON.stringify(opening)) as typeof opening;
+      authoritative.attributes.push({
+        id: 'attribute-generated', name: '服务端新属性', value: 7, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '',
+      });
+      let submittedBody: Record<string, unknown> | undefined;
+      let peerMutatedAfterCreateSubmit = false;
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits') {
+          authoritative.attributes[1].value = 88;
+          peerMutatedAfterCreateSubmit = true;
+          submittedBody = JSON.parse(String(init?.body));
+          return Response.json({
+            code: 0, target: { id: 'attribute-generated', name: '服务端新属性', created: true }, state: authoritative,
+          });
+        }
+        if (path === '/api/formula/preview') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      findByText(root, '+ 添加属性')?.onclick?.();
+      root.querySelector('.template-blank-card')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+      const name = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement;
+      const value = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '当前值') as TestElement;
+      name.value = '新属性草稿';
+      value.value = '00:00:07';
+
+      findByText(root, '创建属性')?.onclick?.();
+      await vi.waitFor(() => expect(submittedBody).toBeDefined());
+
+      expect(submittedBody?.target).toEqual({ kind: 'new' });
+      expect(submittedBody?.attribute).toEqual(expect.objectContaining({ name: '新属性草稿', value: 7 }));
+      expect((submittedBody?.attribute as { id?: string }).id).toBeUndefined();
+      expect(submittedBody?.giftRules).toEqual([]);
+      expect(submittedBody?.timerRules).toEqual([]);
+      expect(submittedBody?.giftCatalogUpserts).toEqual([]);
+      expect(fetchImpl.mock.calls.some(([url]) => String(url) === '/api/attribute-edits/session')).toBe(false);
+      expect(fetchImpl.mock.calls.some(([url]) => String(url) === '/api/attribute-edit-lease')).toBe(false);
+      expect(peerMutatedAfterCreateSubmit).toBe(true);
+      expect(JSON.stringify(submittedBody)).not.toContain('attribute-peer');
+      await vi.waitFor(() => expect(loadState().attributes.at(-1)?.id).toBe('attribute-generated'));
+      expect(loadState().attributes[1].value).toBe(88);
+      expect(textOf(root)).toContain('服务端新属性');
+    });
+
+    it('persists the server-generated target and completed lessons across a normal first-run new save', async () => {
+      const opening = defaultAdvancedState();
+      opening.roomId = '88888888';
+      opening.settings.showTutorial = true;
+      opening.settings.tutorialReplayMode = false;
+      opening.settings.tutorialCompletedLessons = ['room'];
+      await saveState(opening);
+      const authoritative = JSON.parse(JSON.stringify(opening)) as typeof opening;
+      authoritative.attributes.push({
+        id: 'attribute-first-run-generated', name: '服务端首次属性', value: 5,
+        unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '',
+      });
+      const configPatches: Array<Record<string, unknown>> = [];
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits') return Response.json({
+          code: 0,
+          target: { id: 'attribute-first-run-generated', name: '服务端首次属性', created: true },
+          state: authoritative,
+        });
+        if (path === '/api/config' && init?.method === 'PATCH') {
+          configPatches.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return new Response(null, { status: 204 });
+        }
+        if (path === '/api/formula/preview') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      findByText(root, '+ 添加属性')?.onclick?.();
+      root.querySelector('.template-blank-card')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+      const name = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
+      const value = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '当前值') as TestElement;
+      name.value = '用户首次属性';
+      name.oninput?.();
+      value.value = '00:00:05';
+
+      findByText(root, '创建属性')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+
+      const saved = loadState();
+      expect(saved.settings.tutorialReplayMode).toBe(false);
+      expect(saved.settings.tutorialTargetAttributeId).toBe('attribute-first-run-generated');
+      expect(saved.settings.tutorialCompletedLessons).toEqual(expect.arrayContaining([
+        'room', 'attribute', 'template', 'save',
+      ]));
+      const settingsPatches = configPatches.filter((patch) => Object.prototype.hasOwnProperty.call(patch, 'settings'));
+      expect(settingsPatches).toEqual([expect.objectContaining({ settings: expect.any(Object) })]);
+      expect(Object.keys(settingsPatches[0])).toEqual(['settings']);
+      const reopenedRoot = new TestElement('div');
+      mountConfig(reopenedRoot as unknown as HTMLElement);
+      expect(textOf(reopenedRoot.querySelector('.guide-attribute-card') as TestElement)).toContain('服务端首次属性');
+    });
+
+    it('persists the submitted target and completed lessons across a normal first-run rename', async () => {
+      const opening = configuredAggregate();
+      opening.settings.showTutorial = true;
+      opening.settings.tutorialReplayMode = false;
+      opening.settings.tutorialCompletedLessons = ['room', 'attribute', 'template'];
+      opening.settings.tutorialTargetAttributeId = stableId;
+      await saveState(opening);
+      const authoritative = JSON.parse(JSON.stringify(opening)) as typeof opening;
+      authoritative.attributes[0] = { ...authoritative.attributes[0], name: '服务端首次重命名' };
+      authoritative.rules[0] = { ...authoritative.rules[0], attributeName: '服务端首次重命名' };
+      authoritative.timerRules[0] = { ...authoritative.timerRules[0], attributeName: '服务端首次重命名' };
+      delete authoritative.settings.tutorialTargetAttributeId;
+      authoritative.settings.tutorialCompletedLessons = ['room', 'attribute', 'template'];
+      const configPatches: Array<Record<string, unknown>> = [];
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits/session') return sessionResponse(opening);
+        if (path === '/api/attribute-edits') return Response.json({
+          code: 0, target: { id: stableId, name: '服务端首次重命名', created: false }, state: authoritative,
+        });
+        if (path === '/api/config' && init?.method === 'PATCH') {
+          configPatches.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return new Response(null, { status: 204 });
+        }
+        if (path === '/api/formula/preview') return Response.json({ code: 0 });
+        if (path === '/api/attribute-edit-lease') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExistingAttributeEditor(root);
+      const name = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
+      name.value = '用户首次重命名';
+      name.oninput?.();
+
+      findByText(root, '保存修改')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+
+      const saved = loadState();
+      expect(saved.settings.tutorialReplayMode).toBe(false);
+      expect(saved.settings.tutorialTargetAttributeId).toBe(stableId);
+      expect(saved.settings.tutorialCompletedLessons).toEqual(expect.arrayContaining([
+        'room', 'attribute', 'template', 'gift', 'save',
+      ]));
+      const settingsPatches = configPatches.filter((patch) => Object.prototype.hasOwnProperty.call(patch, 'settings'));
+      expect(settingsPatches).toEqual([expect.objectContaining({ settings: expect.any(Object) })]);
+      expect(Object.keys(settingsPatches[0])).toEqual(['settings']);
+      const reopenedRoot = new TestElement('div');
+      mountConfig(reopenedRoot as unknown as HTMLElement);
+      expect(textOf(reopenedRoot.querySelector('.guide-attribute-card') as TestElement)).toContain('服务端首次重命名');
+    });
+
+    it('persists replay progress and the server-generated tutorial target for a canonically renamed new attribute', async () => {
+      const opening = configuredAggregate();
+      opening.settings.showTutorial = true;
+      opening.settings.tutorialReplayMode = true;
+      opening.settings.tutorialCompletedLessons = ['room'];
+      await saveState(opening);
+      const authoritative = JSON.parse(JSON.stringify(opening)) as typeof opening;
+      authoritative.attributes.push({
+        id: 'attribute-tutorial-generated', name: '服务端加班机', value: 7,
+        unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '',
+      });
+      const configPatches: Array<Record<string, unknown>> = [];
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits') return Response.json({
+          code: 0,
+          target: { id: 'attribute-tutorial-generated', name: '服务端加班机', created: true },
+          state: authoritative,
+        });
+        if (path === '/api/config' && init?.method === 'PATCH') {
+          configPatches.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return new Response(null, { status: 204 });
+        }
+        if (path === '/api/formula/preview') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      findByText(root, '+ 添加属性')?.onclick?.();
+      root.querySelector('.template-blank-card')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).not.toBeNull());
+      const name = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
+      const value = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '当前值') as TestElement;
+      name.value = '用户加班机';
+      name.oninput?.();
+      value.value = '00:00:07';
+
+      findByText(root, '创建属性')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+
+      const saved = loadState();
+      expect(saved.settings.tutorialTargetAttributeId).toBe('attribute-tutorial-generated');
+      expect(saved.settings.tutorialCompletedLessons).toEqual(expect.arrayContaining([
+        'room', 'attribute', 'template', 'save',
+      ]));
+      const settingsPatches = configPatches.filter((patch) => Object.prototype.hasOwnProperty.call(patch, 'settings'));
+      expect(settingsPatches).toEqual([expect.objectContaining({ settings: expect.any(Object) })]);
+      expect(Object.keys(settingsPatches[0])).toEqual(['settings']);
+      const reopenedRoot = new TestElement('div');
+      mountConfig(reopenedRoot as unknown as HTMLElement);
+      expect(textOf(reopenedRoot.querySelector('.guide-attribute-card') as TestElement)).toContain('服务端加班机');
+    });
+
+    it('restores the submitted stable tutorial target and replay completion after an existing rename', async () => {
+      const opening = configuredAggregate();
+      opening.settings.showTutorial = true;
+      opening.settings.tutorialReplayMode = true;
+      opening.settings.tutorialCompletedLessons = ['room'];
+      opening.settings.tutorialTargetAttributeId = stableId;
+      await saveState(opening);
+      const authoritative = JSON.parse(JSON.stringify(opening)) as typeof opening;
+      authoritative.attributes[0] = { ...authoritative.attributes[0], name: '服务端重命名' };
+      authoritative.rules[0] = { ...authoritative.rules[0], attributeName: '服务端重命名' };
+      authoritative.timerRules[0] = { ...authoritative.timerRules[0], attributeName: '服务端重命名' };
+      authoritative.settings.tutorialCompletedLessons = ['room'];
+      delete authoritative.settings.tutorialTargetAttributeId;
+      const configPatches: Array<Record<string, unknown>> = [];
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits/session') return sessionResponse(opening);
+        if (path === '/api/attribute-edits') return Response.json({
+          code: 0, target: { id: stableId, name: '服务端重命名', created: false }, state: authoritative,
+        });
+        if (path === '/api/config' && init?.method === 'PATCH') {
+          configPatches.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return new Response(null, { status: 204 });
+        }
+        if (path === '/api/formula/preview') return Response.json({ code: 0 });
+        if (path === '/api/attribute-edit-lease') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExistingAttributeEditor(root);
+      const name = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement & { oninput?: () => void };
+      name.value = '用户重命名';
+      name.oninput?.();
+
+      findByText(root, '保存修改')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+
+      const saved = loadState();
+      expect(saved.settings.tutorialTargetAttributeId).toBe(stableId);
+      expect(saved.settings.tutorialCompletedLessons).toEqual(expect.arrayContaining([
+        'room', 'attribute', 'template', 'save',
+      ]));
+      const settingsPatches = configPatches.filter((patch) => Object.prototype.hasOwnProperty.call(patch, 'settings'));
+      expect(settingsPatches).toEqual([expect.objectContaining({ settings: expect.any(Object) })]);
+      expect(Object.keys(settingsPatches[0])).toEqual(['settings']);
+      const reopenedRoot = new TestElement('div');
+      mountConfig(reopenedRoot as unknown as HTMLElement);
+      expect(textOf(reopenedRoot.querySelector('.guide-attribute-card') as TestElement)).toContain('服务端重命名');
+    });
+
+    it('retries only failed tutorial settings after a committed attribute and guards dismissal while retrying', async () => {
+      const { root, calls } = await openTutorialSettingsFailure();
+
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性已保存，但教程进度保存失败'));
+      expect(root.querySelector('.attribute-overlay')).not.toBeNull();
+      const warning = root.querySelector('.attribute-save-note') as TestElement;
+      expect(warning.attributes.role).toBe('alert');
+      expect(warning.style.display).toBe('inline');
+      expect(calls.attributePosts).toBe(1);
+      expect(calls.releases).toHaveLength(0);
+      expect(loadState().attributes[0]).toEqual(expect.objectContaining({
+        id: stableId, name: '服务端已保存属性', value: 73,
+      }));
+      expect(loadState().settings.tutorialTargetAttributeId).toBeUndefined();
+      expect(calls.serverState.settings.tutorialTargetAttributeId).toBeUndefined();
+
+      findByText(root, '重试保存教程进度')?.onclick?.();
+      await vi.waitFor(() => expect(calls.resolveRetryPatch).toBeDefined());
+      findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.();
+      findByText(root, '×')?.onclick?.();
+      const overlay = root.querySelector('.attribute-overlay') as TestElement & {
+        onpointerdown?: (event: { target: TestElement }) => void;
+        onclick?: (event: { target: TestElement }) => void;
+      };
+      overlay.onpointerdown?.({ target: overlay });
+      overlay.onclick?.({ target: overlay });
+      expect(root.querySelector('.attribute-overlay')).toBe(overlay);
+      expect(calls.releases).toHaveLength(0);
+
+      calls.resolveRetryPatch?.(new Response(null, { status: 204 }));
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+      await vi.waitFor(() => expect(calls.releases).toHaveLength(1));
+
+      expect(calls.attributePosts).toBe(1);
+      expect(calls.settingsPatches).toHaveLength(2);
+      expect(calls.settingsPatches.every((patch) => Object.keys(patch).length === 1 && 'settings' in patch)).toBe(true);
+      expect(loadState().settings.tutorialTargetAttributeId).toBe(stableId);
+      expect(calls.serverState.settings.tutorialTargetAttributeId).toBe(stableId);
+      expect(calls.releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
+      const reopenedRoot = new TestElement('div');
+      mountConfig(reopenedRoot as unknown as HTMLElement);
+      expect(textOf(reopenedRoot.querySelector('.guide-attribute-card') as TestElement))
+        .toContain('服务端已保存属性');
+    });
+
+    it.each([
+      ['cancel', (root: TestElement) => findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.()],
+      ['close button', (root: TestElement) => findByText(root, '×')?.onclick?.()],
+      ['overlay', (root: TestElement) => {
+        const overlay = root.querySelector('.attribute-overlay') as TestElement & {
+          onpointerdown?: (event: { target: TestElement }) => void;
+          onclick?: (event: { target: TestElement }) => void;
+        };
+        overlay.onpointerdown?.({ target: overlay });
+        overlay.onclick?.({ target: overlay });
+      }],
+    ])('dismisses with no false success or retry after tutorial settings failure via %s', async (_reason, dismiss) => {
+      const { root, calls } = await openTutorialSettingsFailure();
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性已保存，但教程进度保存失败'));
+
+      dismiss(root);
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+      await vi.waitFor(() => expect(calls.releases).toHaveLength(1));
+
+      expect(calls.attributePosts).toBe(1);
+      expect(calls.settingsPatches).toHaveLength(1);
+      expect(Object.keys(calls.settingsPatches[0])).toEqual(['settings']);
+      expect(loadState().attributes[0]).toEqual(expect.objectContaining({
+        id: stableId, name: '服务端已保存属性', value: 73,
+      }));
+      expect(loadState().settings.tutorialTargetAttributeId).toBeUndefined();
+      expect(calls.serverState.settings.tutorialTargetAttributeId).toBeUndefined();
+      expect(textOf(root)).not.toContain('属性配置已保存');
+      expect(calls.releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
+    });
+
+    it('does not resurrect tutorial progress when reset wins before a settings-only retry', async () => {
+      const { root, calls } = await openTutorialSettingsFailure();
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性已保存，但教程进度保存失败'));
+
+      await resetState();
+      findByText(root, '重试保存教程进度')?.onclick?.();
+      await vi.waitFor(() => expect(textOf(root)).toContain('当前配置已变化，教程进度未保存'));
+
+      expect(root.querySelector('.attribute-overlay')).not.toBeNull();
+      expect(calls.attributePosts).toBe(1);
+      expect(calls.settingsPatches).toHaveLength(1);
+      expect(loadState().attributes).toEqual([]);
+      expect(loadState().settings.tutorialTargetAttributeId).toBeUndefined();
+      expect(calls.serverState.attributes).toEqual([]);
+      expect(calls.serverState.settings.tutorialTargetAttributeId).toBeUndefined();
+      findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.();
+      await vi.waitFor(() => expect(calls.releases).toHaveLength(1));
+      expect(calls.releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
+    });
+
+    it('stably rejects repeated tutorial settings retries after a same-target tutorial reset', async () => {
+      const { root, calls } = await openTutorialSettingsFailure({ deferSubsequentSettingsPatches: false });
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性已保存，但教程进度保存失败'));
+      const restarted = JSON.parse(JSON.stringify(loadState())) as ReturnType<typeof configuredAggregate>;
+      resetTutorialProgress(restarted.settings);
+      restarted.settings.tutorialTargetAttributeId = stableId;
+      await saveState(restarted);
+      const patchesBeforeRetry = calls.configPatches.length;
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const retryButton = root.querySelector('.guide-attribute-save') as TestElement;
+        retryButton.onclick?.();
+        expect(textOf(retryButton)).toBe('正在重试教程进度…');
+        await vi.waitFor(() => expect(textOf(retryButton)).toBe('重试保存教程进度'));
+        expect(root.querySelector('.attribute-overlay')).not.toBeNull();
+        expect(textOf(root)).toContain('当前配置已变化，教程进度未保存');
+        expect(calls.configPatches).toHaveLength(patchesBeforeRetry);
+      }
+
+      expect(calls.attributePosts).toBe(1);
+      expect(loadState().settings.tutorialTargetAttributeId).toBe(stableId);
+      expect(loadState().settings.tutorialCompletedLessons).toEqual([]);
+      expect(calls.serverState.settings.tutorialTargetAttributeId).toBe(stableId);
+      expect(calls.serverState.settings.tutorialCompletedLessons).toEqual([]);
+      findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.();
+      await vi.waitFor(() => expect(calls.releases).toHaveLength(1));
+      expect(calls.releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
+    });
+
+    it('queues tutorial settings recovery behind a pending saveStateTransaction without invalidating or overwriting it', async () => {
+      const { root, calls } = await openTutorialSettingsFailure();
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性已保存，但教程进度保存失败'));
+      const later = JSON.parse(JSON.stringify(loadState())) as ReturnType<typeof configuredAggregate>;
+      later.roomId = 'later-transaction-room';
+      later.attributes[1] = { ...later.attributes[1], name: '事务同伴', value: 404 };
+      later.rules[1] = { ...later.rules[1], attributeName: '事务同伴', formula: '事务同伴+404' };
+      later.timerRules[1] = { ...later.timerRules[1], attributeName: '事务同伴', formula: '事务同伴+404' };
+      calls.deferNextBroadPatch = true;
+      const laterOperation = saveStateTransaction(later);
+      await vi.waitFor(() => expect(calls.resolveBroadPatch).toBeDefined());
+
+      findByText(root, '重试保存教程进度')?.onclick?.();
+      calls.resolveBroadPatch?.(new Response(null, { status: 204 }));
+      const [laterResult] = await Promise.allSettled([laterOperation]);
+      await vi.waitFor(() => expect(calls.resolveRetryPatch).toBeDefined());
+      calls.resolveRetryPatch?.(new Response(null, { status: 204 }));
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+      await vi.waitFor(() => expect(calls.releases).toHaveLength(1));
+
+      expect(laterResult.status).toBe('fulfilled');
+      expect(calls.attributePosts).toBe(1);
+      expect(loadState().roomId).toBe('later-transaction-room');
+      expect(loadState().attributes[1]).toEqual(expect.objectContaining({ name: '事务同伴', value: 404 }));
+      expect(calls.serverState.roomId).toBe('later-transaction-room');
+      expect(calls.serverState.attributes[1]).toEqual(expect.objectContaining({ name: '事务同伴', value: 404 }));
+      expect(Object.keys(calls.configPatches.at(-1) ?? {})).toEqual(['settings']);
+      expect(calls.releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
+    });
+
+    it('queues tutorial settings recovery behind a pending authoritative publication and preserves its peer fields', async () => {
+      const { root, calls } = await openTutorialSettingsFailure();
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性已保存，但教程进度保存失败'));
+      const later = JSON.parse(JSON.stringify(loadState())) as ReturnType<typeof configuredAggregate>;
+      later.roomId = 'later-authoritative-room';
+      later.settings.theme = 'light';
+      later.settings.fontSize = 63;
+      later.attributes[1] = { ...later.attributes[1], name: '权威同伴', value: 505 };
+      later.rules[1] = { ...later.rules[1], attributeName: '权威同伴', formula: '权威同伴+505' };
+      later.timerRules[1] = { ...later.timerRules[1], attributeName: '权威同伴', formula: '权威同伴+505' };
+      let authoritativeStarted = false;
+      let resolveAuthoritative: ((value: typeof later) => void) | undefined;
+      const authoritativeResponse = new Promise<typeof later>((resolve) => { resolveAuthoritative = resolve; });
+      const laterOperation = commitAuthoritativeStateMutation(async () => {
+        authoritativeStarted = true;
+        const next = await authoritativeResponse;
+        calls.serverState = JSON.parse(JSON.stringify(next)) as typeof calls.serverState;
+        return next;
+      });
+      await vi.waitFor(() => expect(authoritativeStarted).toBe(true));
+
+      findByText(root, '重试保存教程进度')?.onclick?.();
+      resolveAuthoritative?.(later);
+      await vi.waitFor(() => expect(calls.resolveRetryPatch).toBeDefined());
+      calls.resolveRetryPatch?.(new Response(null, { status: 204 }));
+      await Promise.all([laterOperation, vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull())]);
+      await vi.waitFor(() => expect(calls.releases).toHaveLength(1));
+
+      expect(calls.attributePosts).toBe(1);
+      expect(loadState().roomId).toBe('later-authoritative-room');
+      expect(loadState().settings).toEqual(expect.objectContaining({ theme: 'light', fontSize: 63 }));
+      expect(loadState().attributes[1]).toEqual(expect.objectContaining({ name: '权威同伴', value: 505 }));
+      expect(calls.serverState.roomId).toBe('later-authoritative-room');
+      expect(calls.serverState.settings).toEqual(expect.objectContaining({ theme: 'light', fontSize: 63 }));
+      expect(calls.serverState.attributes[1]).toEqual(expect.objectContaining({ name: '权威同伴', value: 505 }));
+      expect(Object.keys(calls.configPatches.at(-1) ?? {})).toEqual(['settings']);
+      expect(calls.releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
+    });
+
+    it('keeps recovery retryable across repeated settings rejections and releases once when dismissed', async () => {
+      const { root, calls } = await openTutorialSettingsFailure();
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性已保存，但教程进度保存失败'));
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const retryButton = root.querySelector('.guide-attribute-save') as TestElement;
+        retryButton.onclick?.();
+        expect(textOf(retryButton)).toBe('正在重试教程进度…');
+        await vi.waitFor(() => expect(calls.settingsPatches).toHaveLength(attempt + 2));
+        const rejectRetry = calls.resolveRetryPatch;
+        expect(rejectRetry).toBeDefined();
+        rejectRetry?.(new Response(null, { status: 500 }));
+        await vi.waitFor(() => expect(textOf(retryButton)).toBe('重试保存教程进度'));
+        expect(root.querySelector('.attribute-overlay')).not.toBeNull();
+        expect(calls.releases).toHaveLength(0);
+      }
+
+      findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+      await vi.waitFor(() => expect(calls.releases).toHaveLength(1));
+      expect(calls.attributePosts).toBe(1);
+      expect(calls.settingsPatches.every((patch) => Object.keys(patch).length === 1 && 'settings' in patch)).toBe(true);
+      expect(calls.configPatches.every((patch) => (
+        !('attributes' in patch) && !('rules' in patch) && !('timerRules' in patch)
+      ))).toBe(true);
+      expect(loadState().settings.tutorialTargetAttributeId).toBeUndefined();
+      expect(calls.serverState.settings.tutorialTargetAttributeId).toBeUndefined();
+      expect(calls.releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
+    });
+
+    it.each(['save', 'reset', 'transaction', 'authoritative'] as const)(
+      'keeps a later %s intent authoritative when it overtakes an in-flight submit without an editor broad PATCH',
+      async (operation) => {
+        const opening = configuredAggregate();
+        opening.settings.showTutorial = true;
+        opening.settings.tutorialReplayMode = true;
+        opening.settings.tutorialCompletedLessons = ['room'];
+        opening.settings.tutorialTargetAttributeId = stableId;
+        await saveState(opening);
+        const submitted = JSON.parse(JSON.stringify(opening)) as typeof opening;
+        submitted.attributes[0] = { ...submitted.attributes[0], name: '被超越的提交' };
+        submitted.rules[0] = { ...submitted.rules[0], attributeName: '被超越的提交' };
+        submitted.timerRules[0] = { ...submitted.timerRules[0], attributeName: '被超越的提交' };
+        const later = JSON.parse(JSON.stringify(opening)) as typeof opening;
+        later.attributes[0] = { ...later.attributes[0], name: `后续${operation}`, value: 404 };
+        later.rules[0] = { ...later.rules[0], attributeName: `后续${operation}` };
+        later.timerRules[0] = { ...later.timerRules[0], attributeName: `后续${operation}` };
+        later.settings.tutorialReplayMode = false;
+        later.settings.tutorialCompletedLessons = ['room'];
+        later.settings.tutorialTargetAttributeId = 'attribute-later-intent';
+        let serverState = JSON.parse(JSON.stringify(opening)) as ReturnType<typeof defaultState>;
+        let resolveSubmit: ((response: Response) => void) | undefined;
+        const configPatches: Array<Record<string, unknown>> = [];
+        const releases: Array<Record<string, string>> = [];
+        const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+          const path = String(input);
+          if (path === '/api/attribute-edits/session') return sessionResponse(opening);
+          if (path === '/api/attribute-edits') {
+            return new Promise<Response>((resolve) => { resolveSubmit = resolve; });
+          }
+          if (path === '/api/config' && init?.method === 'PATCH') {
+            const patch = JSON.parse(String(init.body)) as Record<string, unknown>;
+            configPatches.push(patch);
+            serverState = { ...serverState, ...patch } as ReturnType<typeof defaultState>;
+            return new Response(null, { status: 204 });
+          }
+          if (path === '/api/config' && init?.method === 'DELETE') {
+            serverState = defaultState();
+            return new Response(null, { status: 204 });
+          }
+          if (path === '/api/attribute-edit-lease' && init?.method === 'DELETE') {
+            releases.push(JSON.parse(String(init.body)) as Record<string, string>);
+            return Response.json({ code: 0 });
+          }
+          if (path === '/api/attribute-edit-lease') return Response.json({ code: 0 });
+          if (path === '/api/formula/preview') return Response.json({ code: 0 });
+          return new Response(null, { status: 204 });
+        });
+        vi.stubGlobal('fetch', fetchImpl);
+        const root = new TestElement('div');
+        mountConfig(root as unknown as HTMLElement);
+        await openExistingAttributeEditor(root);
+
+        findByText(root, '保存修改')?.onclick?.();
+        await vi.waitFor(() => expect(resolveSubmit).toBeDefined());
+        const laterOperation = operation === 'reset'
+          ? resetState()
+          : operation === 'transaction'
+            ? saveStateTransaction(later).then(() => undefined)
+            : operation === 'authoritative'
+              ? commitAuthoritativeStateMutation(async () => {
+                serverState = JSON.parse(JSON.stringify(later)) as typeof serverState;
+                return later;
+              }).then(() => undefined)
+              : saveState(later);
+        serverState = JSON.parse(JSON.stringify(submitted)) as typeof serverState;
+        resolveSubmit?.(Response.json({
+          code: 0, target: { id: stableId, name: '被超越的提交', created: false }, state: submitted,
+        }));
+        await laterOperation;
+        await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+        await vi.waitFor(() => expect(releases).toHaveLength(1));
+
+        const expected = operation === 'reset' ? defaultState() : later;
+        expect(loadState().attributes).toEqual(expected.attributes);
+        expect(loadState().settings.tutorialTargetAttributeId).toBe(expected.settings.tutorialTargetAttributeId);
+        expect(serverState.attributes).toEqual(expected.attributes);
+        expect(serverState.settings.tutorialTargetAttributeId).toBe(expected.settings.tutorialTargetAttributeId);
+        const broadPatches = configPatches.filter((patch) => (
+          ['attributes', 'rules', 'timerRules'].some((key) => Object.prototype.hasOwnProperty.call(patch, key))
+        ));
+        expect(broadPatches).toHaveLength(operation === 'save' || operation === 'transaction' ? 1 : 0);
+        expect(releases).toEqual([{ attributeId: stableId, token: leaseToken }]);
+      },
+    );
+
+    it.each([
+      ['server rejection', () => Promise.resolve(new Response(null, { status: 500 }))],
+      ['ambiguous network failure', () => Promise.reject(new Error('socket closed'))],
+    ])('keeps the existing dialog, draft, and lease after %s without automatic retry', async (_reason, failSubmit) => {
+      const opening = configuredAggregate();
+      await saveState(opening);
+      let submitCalls = 0;
+      const fetchImpl = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits/session') return sessionResponse(opening);
+        if (path === '/api/attribute-edits') {
+          submitCalls += 1;
+          return failSubmit();
+        }
+        if (path === '/api/formula/preview') return Response.json({ code: 0 });
+        if (path === '/api/attribute-edit-lease') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExistingAttributeEditor(root);
+      const name = root.querySelectorAll('input')
+        .find((input) => input.dataset.fieldLabel === '属性名称') as TestElement;
+      name.value = '保留的草稿';
+
+      findByText(root, '保存修改')?.onclick?.();
+      await vi.waitFor(() => expect(textOf(root)).toContain('属性编辑请求失败'));
+
+      expect(submitCalls).toBe(1);
+      await new Promise((resolve) => nativeSetTimeout(resolve, 20));
+      expect(submitCalls).toBe(1);
+      expect(root.querySelector('.attribute-overlay')).not.toBeNull();
+      expect(name.value).toBe('保留的草稿');
+      expect(fetchImpl.mock.calls.some(([url, init]) => (
+        String(url) === '/api/attribute-edit-lease' && init?.method === 'DELETE'
+      ))).toBe(false);
+    });
+
+    it.each([
+      ['Cancel', (root: TestElement) => findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.()],
+      ['close button', (root: TestElement) => findByText(root, '×')?.onclick?.()],
+      ['overlay', (root: TestElement) => {
+        const overlay = root.querySelector('.attribute-overlay') as TestElement & {
+          onpointerdown?: (event: { target: TestElement }) => void;
+          onclick?: (event: { target: TestElement }) => void;
+        };
+        overlay.onpointerdown?.({ target: overlay });
+        overlay.onclick?.({ target: overlay });
+      }],
+    ])('guards %s dismissal until the atomic submit settles', async (_reason, dismiss) => {
+      const opening = configuredAggregate();
+      await saveState(opening);
+      let resolveSubmit: ((response: Response) => void) | undefined;
+      const fetchImpl = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits/session') return sessionResponse(opening);
+        if (path === '/api/attribute-edits') {
+          return new Promise<Response>((resolve) => { resolveSubmit = resolve; });
+        }
+        if (path === '/api/formula/preview') return Response.json({ code: 0 });
+        if (path === '/api/attribute-edit-lease') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExistingAttributeEditor(root);
+
+      findByText(root, '保存修改')?.onclick?.();
+      await vi.waitFor(() => expect(resolveSubmit).toBeDefined());
+      dismiss(root);
+
+      expect(root.querySelector('.attribute-overlay')).not.toBeNull();
+      expect(fetchImpl.mock.calls.some(([url, init]) => (
+        String(url) === '/api/attribute-edit-lease' && init?.method === 'DELETE'
+      ))).toBe(false);
+      resolveSubmit?.(Response.json({
+        code: 0, target: { id: stableId, name: '倒计时', created: false }, state: opening,
+      }));
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+    });
+  });
+
+  describe('prepared attribute edit lease integration', () => {
+    const stableId = 'attribute-prepared-lease';
+    const initialToken = 'A'.repeat(24);
+    const recoveredToken = 'B'.repeat(24);
+
+    function configuredAttribute() {
+      const configured = defaultAdvancedState();
+      configured.roomId = '88888888';
+      configured.settings.showTutorial = false;
+      configured.attributes = [{
+        id: stableId, name: '加班时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '',
+      }];
+      return configured;
+    }
+
+    function prepared(state: ReturnType<typeof configuredAttribute>, token = initialToken): Response {
+      return Response.json({
+        code: 0, attributeId: stableId, token, expiresAt: '2026-08-15T12:00:00Z', state,
+      });
+    }
+
+    it('submits the lease current token after a 404 recovery through a prepared session', async () => {
+      const configured = configuredAttribute();
+      await saveState(configured);
+      let heartbeat: (() => void) | undefined;
+      let sessionPosts = 0;
+      let submittedToken = '';
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits/session') {
+          sessionPosts += 1;
+          return prepared(configured, sessionPosts === 1 ? initialToken : recoveredToken);
+        }
+        if (path === '/api/attribute-edit-lease' && init?.method === 'PUT') return new Response(null, { status: 404 });
+        if (path === '/api/attribute-edit-lease') return Response.json({ code: 0 });
+        if (path === '/api/attribute-edits') {
+          submittedToken = (JSON.parse(String(init?.body)) as { target: { leaseToken: string } }).target.leaseToken;
+          return Response.json({
+            code: 0, target: { id: stableId, name: '加班时间', created: false }, state: configured,
+          });
+        }
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      vi.stubGlobal('setInterval', (handler: () => void) => {
+        heartbeat = handler;
+        return 1;
+      });
+      vi.stubGlobal('clearInterval', () => {});
+
+      await openExistingAttributeEditor(root);
+      heartbeat?.();
+      await vi.waitFor(() => expect(sessionPosts).toBe(2));
+      findByText(root, '保存修改')?.onclick?.();
+      await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+
+      expect(submittedToken).toBe(recoveredToken);
+      const release = fetchImpl.mock.calls.find(([url, init]) => (
+        String(url) === '/api/attribute-edit-lease' && init?.method === 'DELETE'
+      ));
+      expect(JSON.parse(String(release?.[1]?.body))).toEqual({ attributeId: stableId, token: recoveredToken });
+    });
+
+    it('reads the recovered lease token only after a blocked authoritative queue reaches submit', async () => {
+      const configured = configuredAttribute();
+      await saveState(configured);
+      let heartbeat: (() => void) | undefined;
+      let sessionPosts = 0;
+      let resolveConfigPatch: ((response: Response) => void) | undefined;
+      let submittedToken = '';
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits/session') {
+          sessionPosts += 1;
+          return prepared(configured, sessionPosts === 1 ? initialToken : recoveredToken);
+        }
+        if (path === '/api/config' && init?.method === 'PATCH') {
+          return new Promise<Response>((resolve) => { resolveConfigPatch = resolve; });
+        }
+        if (path === '/api/attribute-edit-lease' && init?.method === 'PUT') return new Response(null, { status: 404 });
+        if (path === '/api/attribute-edit-lease') return Response.json({ code: 0 });
+        if (path === '/api/attribute-edits') {
+          submittedToken = (JSON.parse(String(init?.body)) as { target: { leaseToken: string } }).target.leaseToken;
+          return Response.json({
+            code: 0, target: { id: stableId, name: '加班时间', created: false }, state: configured,
+          });
+        }
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      vi.stubGlobal('setInterval', (handler: () => void) => {
+        heartbeat = handler;
+        return 1;
+      });
+      vi.stubGlobal('clearInterval', () => {});
+      await openExistingAttributeEditor(root);
+
+      const locallySaved = JSON.parse(JSON.stringify(configured)) as typeof configured;
+      locallySaved.roomId = '99999999';
+      const blockingSave = saveState(locallySaved);
+      await vi.waitFor(() => expect(resolveConfigPatch).toBeDefined());
+      findByText(root, '保存修改')?.onclick?.();
+      heartbeat?.();
+      await vi.waitFor(() => expect(sessionPosts).toBe(2));
+      expect(submittedToken).toBe('');
+
+      resolveConfigPatch?.(new Response(null, { status: 204 }));
+      await blockingSave;
+      await vi.waitFor(() => expect(submittedToken).not.toBe(''));
+
+      expect(submittedToken).toBe(recoveredToken);
+    });
+
+    it('shows the retry warning after a failed heartbeat and hides it after recovery', async () => {
+      const configured = configuredAttribute();
+      await saveState(configured);
+      let heartbeat: (() => void) | undefined;
+      let renewals = 0;
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits/session') return prepared(configured);
+        if (path === '/api/attribute-edit-lease' && init?.method === 'PUT') {
+          renewals += 1;
+          return renewals === 1 ? new Response(null, { status: 500 }) : Response.json({ code: 0 });
+        }
+        if (path === '/api/attribute-edit-lease') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      vi.stubGlobal('setInterval', (handler: () => void) => {
+        heartbeat = handler;
+        return 1;
+      });
+      vi.stubGlobal('clearInterval', () => {});
+      await openExistingAttributeEditor(root);
+      vi.useFakeTimers();
+
+      heartbeat?.();
+      await vi.advanceTimersByTimeAsync(0);
+      const warning = root.querySelector('.attribute-lease-warning') as TestElement & { hidden?: boolean };
+      expect(warning.hidden).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(warning.hidden).toBe(true);
+      findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.();
+      vi.useRealTimers();
+    });
+
+    it.each([
+      ['cancel', (root: TestElement) => findByText(root.querySelector('.attribute-workbench-actions') as TestElement, '取消')?.onclick?.()],
+      ['successful submit', (root: TestElement) => findByText(root, '保存修改')?.onclick?.()],
+    ])('releases the prepared lease exactly once after %s', async (_reason, finish) => {
+      const configured = configuredAttribute();
+      await saveState(configured);
+      const fetchImpl = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+        const path = String(input);
+        if (path === '/api/attribute-edits/session') return prepared(configured);
+        if (path === '/api/attribute-edits') return Response.json({
+          code: 0, target: { id: stableId, name: '加班时间', created: false }, state: configured,
+        });
+        if (path === '/api/attribute-edit-lease') return Response.json({ code: 0 });
+        return new Response(null, { status: 204 });
+      });
+      vi.stubGlobal('fetch', fetchImpl);
+      const root = new TestElement('div');
+      mountConfig(root as unknown as HTMLElement);
+      await openExistingAttributeEditor(root);
+
+      finish(root);
+      await vi.waitFor(() => expect(fetchImpl.mock.calls.filter(([url, init]) => (
+        String(url) === '/api/attribute-edit-lease' && init?.method === 'DELETE'
+      ))).toHaveLength(1));
+    });
   });
 
   it('deletes an attribute only after clicking the delete button twice', async () => {
@@ -4208,7 +5846,7 @@ describe('single-page configuration rendering', () => {
     storage.set('bilibili-live-gift-panel-v1', JSON.stringify(state('88888888', 1)));
     const root = new TestElement('div');
     mountConfig(root as unknown as HTMLElement);
-    findByText(root, '编辑')?.onclick?.();
+    await openExistingAttributeEditor(root);
 
     const fontSize = root.querySelectorAll('input')
       .find((input) => input.dataset.fieldLabel === '字体大小（px）') as TestElement & { oninput?: () => void };

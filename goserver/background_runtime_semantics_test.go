@@ -22,6 +22,54 @@ func semanticState(rule giftRule, initial float64) appState {
 	return state
 }
 
+type fakeAttributeFreezeChecker map[string]bool
+
+func (checker fakeAttributeFreezeChecker) IsFrozen(attributeID string) bool {
+	return checker[attributeID]
+}
+
+func TestApplyGiftEventSkipsOnlyFrozenAttribute(t *testing.T) {
+	state := defaultAppState()
+	state.Attributes = []attributeState{
+		{ID: "attribute-a", Name: "A", Value: 0},
+		{ID: "attribute-b", Name: "B", Value: 0},
+	}
+	state.Rules = []giftRule{
+		{ID: "gift-a", GiftID: 1, AttributeName: "A", Formula: "A+1"},
+		{ID: "gift-b", GiftID: 1, AttributeName: "B", Formula: "B+1"},
+	}
+
+	applyGiftEventWithFreeze(&state, giftEvent{
+		GiftID: 1, GiftName: "test gift", Num: 1, Price: 100, CoinType: "gold",
+		UID: 1, Uname: "viewer", Timestamp: 1700000000, Rnd: "frozen-gift",
+	}, fakeAttributeFreezeChecker{"attribute-a": true})
+
+	if got := state.findAttribute("A").Value; got != 0 {
+		t.Fatalf("frozen A = %v", got)
+	}
+	if got := state.findAttribute("B").Value; got != 1 {
+		t.Fatalf("live B = %v", got)
+	}
+	if len(state.GiftReceipts) != 1 {
+		t.Fatalf("receipts = %d", len(state.GiftReceipts))
+	}
+	if state.todayStats().GiftTotals[giftKey(1)] != 1 {
+		t.Fatal("gift total was dropped")
+	}
+	if len(state.Contributions.Viewers) != 1 {
+		t.Fatal("contribution was dropped")
+	}
+	if effects := state.GiftReceipts[0].Effects; len(effects) != 1 || effects[0].AttributeName != "B" {
+		t.Fatalf("receipt effects = %#v", effects)
+	}
+	if got := state.todayStats().RuleTriggers["gift-a"]; got != 0 {
+		t.Fatalf("frozen rule triggers = %d", got)
+	}
+	if got := state.todayStats().RuleTriggers["gift-b"]; got != 1 {
+		t.Fatalf("live rule triggers = %d", got)
+	}
+}
+
 func TestApplyGiftEventHonorsMinimumPrice(t *testing.T) {
 	state := semanticState(giftRule{
 		ID: "priced", GiftID: 1, AttributeName: "积分",

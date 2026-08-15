@@ -56,6 +56,9 @@ type ConfigBackupFields = Pick<AppState,
 export type ConfigBackup = ConfigBackupFields & { schemaVersion: number };
 
 let cachedState: AppState | null = null;
+let cachedStateRevision = 0;
+let stateOperationEpoch = 0;
+let lastPersistedState: AppState | null = null;
 let persistQueue = Promise.resolve();
 let configMigrationRequired = false;
 let persistedFieldSnapshots: Partial<StateFieldSnapshots> = {};
@@ -120,37 +123,154 @@ export function clearRoomScopedRecords(state: AppState): AppState {
 }
 
 export function loadState(): AppState {
-  if (!cachedState) cachedState = defaultState();
-  return cachedState;
+  return cachedState ?? publishCachedState(defaultState());
 }
 
 export function saveState(state: AppState): Promise<void> {
-  cachedState = normalizeState(state);
-  const snapshots = snapshotStateFields(cachedState);
-  persistQueue = persistQueue
+  const operationEpoch = ++stateOperationEpoch;
+  const nextState = publishCachedState(normalizeState(state));
+  const durableState = cloneState(nextState);
+  const snapshots = snapshotStateFields(durableState);
+  const operation = persistQueue
     .catch(() => undefined)
-    .then(() => persistStateToServer(snapshots));
-  return persistQueue;
+    .then(async () => {
+      try {
+        await persistStateToServer(snapshots);
+        recordLastPersistedState(durableState);
+      } catch (error) {
+        restoreLastPersistedState(operationEpoch);
+        throw error;
+      }
+    });
+  persistQueue = operation;
+  return operation;
+}
+
+export function saveStateTransaction(state: AppState): Promise<AppState> {
+  const operationEpoch = ++stateOperationEpoch;
+  const candidate = cloneState(normalizeState(state));
+  const snapshots = snapshotStateFields(candidate);
+  const startingRevision = cachedStateRevision;
+  const transaction = persistQueue
+    .catch(() => undefined)
+    .then(async () => {
+      if (stateOperationEpoch !== operationEpoch || cachedStateRevision !== startingRevision) {
+        throw new Error('配置在保存期间发生变化，请重试');
+      }
+      await persistStateToServer(snapshots);
+      if (stateOperationEpoch !== operationEpoch || cachedStateRevision !== startingRevision) {
+        throw new Error('配置在保存期间发生变化，请重试');
+      }
+      publishCachedState(candidate);
+      recordLastPersistedState(candidate);
+      return candidate;
+    })
+    .catch((error: unknown) => {
+      restoreLastPersistedState(operationEpoch);
+      throw error;
+    });
+  persistQueue = transaction.then(
+    () => undefined,
+    () => undefined,
+  );
+  return transaction;
+}
+
+/**
+ * Applies one field after previously queued state work has published, without
+ * superseding that work. A state operation invoked after this follow-up still
+ * wins and prevents the follow-up from publishing.
+ */
+export function saveStateFieldTransaction<K extends StateFieldKey>(
+  field: K,
+  update: (current: Readonly<AppState>) => AppState[K],
+): Promise<AppState> {
+  const startingEpoch = stateOperationEpoch;
+  const transaction = persistQueue
+    .catch(() => undefined)
+    .then(async () => {
+      if (stateOperationEpoch !== startingEpoch) {
+        throw new Error('配置在保存期间发生变化，请重试');
+      }
+      const current = normalizeState(loadState());
+      const candidate = cloneState(normalizeState({ ...current, [field]: update(current) }));
+      const snapshots = snapshotStateFields(candidate);
+      await persistStateToServer(snapshots, [field]);
+      recordLastPersistedState(candidate);
+      if (stateOperationEpoch !== startingEpoch) {
+        throw new Error('配置在保存期间发生变化，请重试');
+      }
+      publishCachedState(candidate);
+      return candidate;
+    });
+  persistQueue = transaction.then(
+    () => undefined,
+    () => undefined,
+  );
+  return transaction;
+}
+
+/**
+ * Serializes a server-owned mutation with local persistence and adopts only
+ * the normalized state returned by that command.
+ */
+export function commitAuthoritativeStateMutation(
+  mutation: () => Promise<AppState>,
+): Promise<AppState> {
+  const operationEpoch = ++stateOperationEpoch;
+  const transaction = persistQueue
+    .catch(() => undefined)
+    .then(async () => {
+      const authoritative = cloneState(normalizeState(await mutation()));
+      // The server committed this state even when a newer local operation owns
+      // publication. Later queued persistence must diff against server reality.
+      persistedFieldSnapshots = snapshotStateFields(authoritative);
+      forcePersistFields.clear();
+      recordLastPersistedState(authoritative);
+      if (stateOperationEpoch === operationEpoch) {
+        publishCachedState(authoritative);
+      }
+      return authoritative;
+    })
+    .catch((error: unknown) => {
+      restoreLastPersistedState(operationEpoch);
+      throw error;
+    });
+  persistQueue = transaction.then(
+    () => undefined,
+    () => undefined,
+  );
+  return transaction;
 }
 
 export function resetState(): Promise<void> {
-  cachedState = defaultState();
+  const operationEpoch = ++stateOperationEpoch;
+  const reset = publishCachedState(defaultState());
+  const durableReset = cloneState(reset);
   configMigrationRequired = false;
-  persistedFieldSnapshots = {};
-  forcePersistFields.clear();
-  persistQueue = persistQueue
+  const operation = persistQueue
     .catch(() => undefined)
     .then(async () => {
-      if (typeof fetch !== 'function') return;
-      let response: Response;
       try {
-        response = await fetch(CONFIG_ENDPOINT, { method: 'DELETE', keepalive: true });
-      } catch {
-        throw new Error('恢复默认失败，请重试或先导出运行日志。');
+        if (typeof fetch === 'function') {
+          let response: Response;
+          try {
+            response = await fetch(CONFIG_ENDPOINT, { method: 'DELETE', keepalive: true });
+          } catch {
+            throw new Error('恢复默认失败，请重试或先导出运行日志。');
+          }
+          if (!response.ok) throw new Error('恢复默认失败，请重试或先导出运行日志。');
+        }
+        persistedFieldSnapshots = {};
+        forcePersistFields.clear();
+        recordLastPersistedState(durableReset);
+      } catch (error) {
+        restoreLastPersistedState(operationEpoch);
+        throw error;
       }
-      if (!response.ok) throw new Error('恢复默认失败，请重试或先导出运行日志。');
     });
-  return persistQueue;
+  persistQueue = operation;
+  return operation;
 }
 
 export function consumeConfigMigrationRequired(): boolean {
@@ -163,7 +283,10 @@ export async function hydrateStateFromServer(): Promise<void> {
   await refreshStateFromServer();
 }
 
-export async function refreshStateFromServer(acceptState: () => boolean = () => true): Promise<AppState> {
+export async function refreshStateFromServer(
+  acceptState: () => boolean = () => true,
+  options: { throwOnError?: boolean } = {},
+): Promise<AppState> {
   if (typeof fetch !== 'function') return loadState();
   await persistQueue.catch(() => undefined);
   try {
@@ -178,19 +301,36 @@ export async function refreshStateFromServer(acceptState: () => boolean = () => 
       nextState = normalizeState(await response.json() as Partial<AppState>);
     }
     if (acceptState() || !cachedState) {
-      cachedState = nextState;
+      publishCachedState(nextState);
       persistedFieldSnapshots = hasPersistedState ? snapshotStateFields(nextState) : {};
+      recordLastPersistedState(nextState);
     }
-  } catch {
+  } catch (error) {
     // A transient backend read failure must not erase the last visible state.
-    cachedState ??= defaultState();
+    if (!cachedState) publishCachedState(defaultState());
+    if (options.throwOnError) throw error;
   }
-  return cachedState;
+  return cachedState ?? publishCachedState(defaultState());
 }
 
-async function persistStateToServer(snapshots: StateFieldSnapshots): Promise<void> {
+function publishCachedState(state: AppState): AppState {
+  cachedState = state;
+  cachedStateRevision += 1;
+  return state;
+}
+
+function restoreLastPersistedState(operationEpoch: number): void {
+  if (stateOperationEpoch === operationEpoch && lastPersistedState) {
+    publishCachedState(cloneState(lastPersistedState));
+  }
+}
+
+async function persistStateToServer(
+  snapshots: StateFieldSnapshots,
+  fields: ReadonlyArray<StateFieldKey> = STATE_FIELD_KEYS,
+): Promise<void> {
   if (typeof fetch !== 'function') return;
-  const changedFields = STATE_FIELD_KEYS.filter((key) => (
+  const changedFields = fields.filter((key) => (
     forcePersistFields.has(key) || persistedFieldSnapshots[key] !== snapshots[key]
   ));
   if (changedFields.length === 0) return;
@@ -228,6 +368,14 @@ function snapshotStateFields(state: AppState): StateFieldSnapshots {
       : state[key]) ?? null);
   }
   return snapshots;
+}
+
+function recordLastPersistedState(state: AppState): void {
+  lastPersistedState = cloneState(state);
+}
+
+function cloneState(state: AppState): AppState {
+  return JSON.parse(JSON.stringify(state)) as AppState;
 }
 
 export function createConfigBackup(state: AppState): ConfigBackup {
