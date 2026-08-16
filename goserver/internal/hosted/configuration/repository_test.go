@@ -1,8 +1,10 @@
 package configuration
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"regexp"
 	"testing"
@@ -22,9 +24,9 @@ func TestRepositoryActivateCreatesAndActivatesVersionAtomically(t *testing.T) {
 	migrationJobID := int64(33)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT a.active_config_version_id, COALESCE(v.number, 0) FROM streamer_accounts AS a LEFT JOIN account_config_versions AS v ON v.id = a.active_config_version_id WHERE a.id = ? FOR UPDATE")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT active.config_version_id, COALESCE(v.number, 0) FROM streamer_accounts AS a LEFT JOIN account_active_config AS active ON active.account_id = a.id LEFT JOIN account_config_versions AS v ON v.account_id = active.account_id AND v.id = active.config_version_id WHERE a.id = ? FOR UPDATE")).
 		WithArgs(int64(7)).
-		WillReturnRows(sqlmock.NewRows([]string{"active_config_version_id", "number"}).AddRow(nil, uint64(0)))
+		WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number"}).AddRow(nil, uint64(0)))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT revision FROM account_runtime_state WHERE account_id = ? FOR UPDATE")).
 		WithArgs(int64(7)).
 		WillReturnError(sql.ErrNoRows)
@@ -32,13 +34,13 @@ func TestRepositoryActivateCreatesAndActivatesVersionAtomically(t *testing.T) {
 		WithArgs(int64(7)).
 		WillReturnRows(sqlmock.NewRows([]string{"number"}).AddRow(uint64(1)))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO account_config_versions (account_id, number, definition_json, source, created_at) VALUES (?, ?, ?, ?, ?)")).
-		WithArgs(int64(7), uint64(1), sqlmock.AnyArg(), "migration", now).
+		WithArgs(int64(7), uint64(1), jsonWithoutImageURL{}, "migration", now).
 		WillReturnResult(sqlmock.NewResult(51, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO account_runtime_state (account_id, config_version_id, revision, runtime_json, updated_at) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE config_version_id = VALUES(config_version_id), revision = VALUES(revision), runtime_json = VALUES(runtime_json), updated_at = VALUES(updated_at)")).
 		WithArgs(int64(7), int64(51), uint64(1), sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE streamer_accounts SET active_config_version_id = ?, updated_at = ? WHERE id = ?")).
-		WithArgs(int64(51), now, int64(7)).
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO account_active_config (account_id, config_version_id, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE config_version_id = VALUES(config_version_id), updated_at = VALUES(updated_at)")).
+		WithArgs(int64(7), int64(51), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE migration_jobs SET status = 'applied', applied_at = ? WHERE id = ? AND account_id = ? AND status IN ('previewed', 'pending')")).
 		WithArgs(now, migrationJobID, int64(7)).
@@ -70,9 +72,9 @@ func TestRepositoryActivateRollsBackWhenExpectedVersionDoesNotMatch(t *testing.T
 	}
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT a.active_config_version_id, COALESCE(v.number, 0) FROM streamer_accounts AS a LEFT JOIN account_config_versions AS v ON v.id = a.active_config_version_id WHERE a.id = ? FOR UPDATE")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT active.config_version_id, COALESCE(v.number, 0) FROM streamer_accounts AS a LEFT JOIN account_active_config AS active ON active.account_id = a.id LEFT JOIN account_config_versions AS v ON v.account_id = active.account_id AND v.id = active.config_version_id WHERE a.id = ? FOR UPDATE")).
 		WithArgs(int64(7)).
-		WillReturnRows(sqlmock.NewRows([]string{"active_config_version_id", "number"}).AddRow(int64(51), uint64(2)))
+		WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number"}).AddRow(int64(51), uint64(2)))
 	mock.ExpectRollback()
 
 	_, _, err = repository.Activate(context.Background(), ActivationCommand{
@@ -94,9 +96,9 @@ func TestRepositoryActivateAcceptsExistingRuntimeUpsertResult(t *testing.T) {
 	now := time.Date(2026, 8, 16, 12, 2, 0, 0, time.UTC)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT a.active_config_version_id, COALESCE(v.number, 0) FROM streamer_accounts AS a LEFT JOIN account_config_versions AS v ON v.id = a.active_config_version_id WHERE a.id = ? FOR UPDATE")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT active.config_version_id, COALESCE(v.number, 0) FROM streamer_accounts AS a LEFT JOIN account_active_config AS active ON active.account_id = a.id LEFT JOIN account_config_versions AS v ON v.account_id = active.account_id AND v.id = active.config_version_id WHERE a.id = ? FOR UPDATE")).
 		WithArgs(int64(7)).
-		WillReturnRows(sqlmock.NewRows([]string{"active_config_version_id", "number"}).AddRow(int64(50), uint64(2)))
+		WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number"}).AddRow(int64(50), uint64(2)))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT revision FROM account_runtime_state WHERE account_id = ? FOR UPDATE")).
 		WithArgs(int64(7)).
 		WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(uint64(4)))
@@ -104,14 +106,14 @@ func TestRepositoryActivateAcceptsExistingRuntimeUpsertResult(t *testing.T) {
 		WithArgs(int64(7)).
 		WillReturnRows(sqlmock.NewRows([]string{"number"}).AddRow(uint64(3)))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO account_config_versions (account_id, number, definition_json, source, created_at) VALUES (?, ?, ?, ?, ?)")).
-		WithArgs(int64(7), uint64(3), sqlmock.AnyArg(), "manual", now).
+		WithArgs(int64(7), uint64(3), jsonWithoutImageURL{}, "manual", now).
 		WillReturnResult(sqlmock.NewResult(51, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO account_runtime_state (account_id, config_version_id, revision, runtime_json, updated_at) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE config_version_id = VALUES(config_version_id), revision = VALUES(revision), runtime_json = VALUES(runtime_json), updated_at = VALUES(updated_at)")).
 		WithArgs(int64(7), int64(51), uint64(5), sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 2))
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE streamer_accounts SET active_config_version_id = ?, updated_at = ? WHERE id = ?")).
-		WithArgs(int64(51), now, int64(7)).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO account_active_config (account_id, config_version_id, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE config_version_id = VALUES(config_version_id), updated_at = VALUES(updated_at)")).
+		WithArgs(int64(7), int64(51), now).
+		WillReturnResult(sqlmock.NewResult(0, 2))
 	mock.ExpectCommit()
 
 	version, state, err := repository.Activate(context.Background(), ActivationCommand{AccountID: 7, ExpectedVersion: 2, ExpectedRevision: 4, Definition: definition, Runtime: runtime, Source: "manual", At: now})
@@ -191,7 +193,7 @@ func TestRepositoryLoadActiveDecodesVersionAndRuntime(t *testing.T) {
 	createdAt := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
 	updatedAt := createdAt.Add(time.Minute)
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT v.id, v.account_id, v.number, v.definition_json, v.source, v.created_at, s.config_version_id, s.revision, s.runtime_json, s.updated_at FROM streamer_accounts AS a JOIN account_config_versions AS v ON v.id = a.active_config_version_id JOIN account_runtime_state AS s ON s.account_id = a.id WHERE a.id = ?")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT v.id, v.account_id, v.number, v.definition_json, v.source, v.created_at, s.config_version_id, s.revision, s.runtime_json, s.updated_at FROM streamer_accounts AS a JOIN account_active_config AS active ON active.account_id = a.id JOIN account_config_versions AS v ON v.account_id = active.account_id AND v.id = active.config_version_id JOIN account_runtime_state AS s ON s.account_id = a.id AND s.config_version_id = active.config_version_id WHERE a.id = ?")).
 		WithArgs(int64(7)).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "account_id", "number", "definition_json", "source", "created_at", "config_version_id", "revision", "runtime_json", "updated_at"}).AddRow(int64(51), int64(7), uint64(1), definitionJSON, "manual", createdAt, int64(51), uint64(4), runtimeJSON, updatedAt))
 
@@ -237,4 +239,11 @@ func assertSQLMock(t *testing.T, mock sqlmock.Sqlmock) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("SQL expectations: %v", err)
 	}
+}
+
+type jsonWithoutImageURL struct{}
+
+func (jsonWithoutImageURL) Match(value driver.Value) bool {
+	encoded, ok := value.([]byte)
+	return ok && !bytes.Contains(encoded, []byte(`"imageUrl"`))
 }

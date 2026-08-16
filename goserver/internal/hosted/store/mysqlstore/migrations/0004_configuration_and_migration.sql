@@ -1,7 +1,3 @@
-ALTER TABLE streamer_accounts
-    ADD COLUMN active_config_version_id BIGINT UNSIGNED NULL AFTER disabled_at,
-    ADD KEY idx_streamer_accounts_active_config_version (active_config_version_id);
-
 CREATE TABLE IF NOT EXISTS account_config_versions (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     account_id BIGINT UNSIGNED NOT NULL,
@@ -11,6 +7,7 @@ CREATE TABLE IF NOT EXISTS account_config_versions (
     created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     PRIMARY KEY (id),
     UNIQUE KEY uq_account_config_versions_account_number (account_id, number),
+    UNIQUE KEY uq_account_config_versions_account_id (account_id, id),
     KEY idx_account_config_versions_account_created (account_id, created_at),
     CONSTRAINT fk_account_config_versions_account
         FOREIGN KEY (account_id) REFERENCES streamer_accounts (id)
@@ -19,10 +16,19 @@ CREATE TABLE IF NOT EXISTS account_config_versions (
     CONSTRAINT chk_account_config_versions_source CHECK (source IN ('manual', 'migration', 'rollback'))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
-ALTER TABLE streamer_accounts
-    ADD CONSTRAINT fk_streamer_accounts_active_config_version
-        FOREIGN KEY (active_config_version_id) REFERENCES account_config_versions (id)
-        ON UPDATE RESTRICT ON DELETE RESTRICT;
+CREATE TABLE IF NOT EXISTS account_active_config (
+    account_id BIGINT UNSIGNED NOT NULL,
+    config_version_id BIGINT UNSIGNED NOT NULL,
+    updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (account_id),
+    KEY idx_account_active_config_account_version (account_id, config_version_id),
+    CONSTRAINT fk_account_active_config_account
+        FOREIGN KEY (account_id) REFERENCES streamer_accounts (id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT fk_account_active_config_version
+        FOREIGN KEY (account_id, config_version_id) REFERENCES account_config_versions (account_id, id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS account_runtime_state (
     account_id BIGINT UNSIGNED NOT NULL,
@@ -31,12 +37,12 @@ CREATE TABLE IF NOT EXISTS account_runtime_state (
     runtime_json JSON NOT NULL,
     updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     PRIMARY KEY (account_id),
-    KEY idx_account_runtime_state_version (config_version_id),
+    KEY idx_account_runtime_state_account_version (account_id, config_version_id),
     CONSTRAINT fk_account_runtime_state_account
         FOREIGN KEY (account_id) REFERENCES streamer_accounts (id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT fk_account_runtime_state_config_version
-        FOREIGN KEY (config_version_id) REFERENCES account_config_versions (id)
+        FOREIGN KEY (account_id, config_version_id) REFERENCES account_config_versions (account_id, id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT chk_account_runtime_state_revision CHECK (revision >= 1),
     CONSTRAINT chk_account_runtime_state_runtime_json CHECK (JSON_VALID(runtime_json))
@@ -58,6 +64,8 @@ CREATE TABLE IF NOT EXISTS migration_jobs (
     account_id BIGINT UNSIGNED NOT NULL,
     request_hash BINARY(32) NOT NULL,
     status VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'previewed',
+    base_config_version_number BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    base_state_revision BIGINT UNSIGNED NOT NULL DEFAULT 0,
     definition_json JSON NOT NULL,
     runtime_json JSON NOT NULL,
     room_suggestion VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NULL,
@@ -77,12 +85,13 @@ CREATE TABLE IF NOT EXISTS migration_jobs (
     KEY idx_migration_jobs_hash (account_id, request_hash),
     KEY idx_migration_jobs_status_expiry (status, expires_at),
     KEY idx_migration_jobs_account_created (account_id, created_at),
+    KEY idx_migration_jobs_account_rollback_version (account_id, rollback_config_version_id),
     KEY idx_migration_jobs_rollback_expiry (rollback_expires_at),
     CONSTRAINT fk_migration_jobs_account
         FOREIGN KEY (account_id) REFERENCES streamer_accounts (id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT fk_migration_jobs_rollback_config_version
-        FOREIGN KEY (rollback_config_version_id) REFERENCES account_config_versions (id)
+        FOREIGN KEY (account_id, rollback_config_version_id) REFERENCES account_config_versions (account_id, id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT chk_migration_jobs_definition_json CHECK (JSON_VALID(definition_json)),
     CONSTRAINT chk_migration_jobs_runtime_json CHECK (JSON_VALID(runtime_json)),
@@ -102,12 +111,12 @@ CREATE TABLE IF NOT EXISTS live_sessions (
     PRIMARY KEY (id),
     KEY idx_live_sessions_account_started (account_id, started_at),
     KEY idx_live_sessions_account_opened (account_id, ended_at),
-    KEY idx_live_sessions_config_version (config_version_id),
+    KEY idx_live_sessions_account_version (account_id, config_version_id),
     CONSTRAINT fk_live_sessions_account
         FOREIGN KEY (account_id) REFERENCES streamer_accounts (id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT fk_live_sessions_config_version
-        FOREIGN KEY (config_version_id) REFERENCES account_config_versions (id)
+        FOREIGN KEY (account_id, config_version_id) REFERENCES account_config_versions (account_id, id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT chk_live_sessions_room_id CHECK (CHAR_LENGTH(room_id) BETWEEN 1 AND 128),
     CONSTRAINT chk_live_sessions_end_after_start CHECK (ended_at IS NULL OR ended_at >= started_at)

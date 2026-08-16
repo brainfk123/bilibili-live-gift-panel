@@ -61,6 +61,43 @@ func TestSplitCopiesDefinitionAndRuntimeIndependently(t *testing.T) {
 	}
 }
 
+func TestDefinitionGiftAllowlistAndJoinDoNotMutateInputs(t *testing.T) {
+	snapshot := fixtureSnapshot()
+	definition, runtime, err := Split(snapshot)
+	if err != nil {
+		t.Fatalf("Split() error = %v", err)
+	}
+	if _, exists := reflect.TypeOf(GiftDefinition{}).FieldByName("ImageURL"); exists {
+		t.Fatal("GiftDefinition exposes an image URL")
+	}
+	beforeDefinition, err := json.Marshal(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRuntime, err := json.Marshal(runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Join(definition, runtime); err != nil {
+		t.Fatalf("Join() error = %v", err)
+	}
+	afterDefinition, _ := json.Marshal(definition)
+	afterRuntime, _ := json.Marshal(runtime)
+	if !bytes.Equal(afterDefinition, beforeDefinition) || !bytes.Equal(afterRuntime, beforeRuntime) {
+		t.Fatalf("Join() mutated input definition or runtime: definition=%s runtime=%s", afterDefinition, afterRuntime)
+	}
+}
+
+func TestSplitRejectsDuplicateGiftTargetWithinPanel(t *testing.T) {
+	snapshot := fixtureSnapshot()
+	snapshot.GiftTargetPanels[0].Items = append(snapshot.GiftTargetPanels[0].Items, gameplay.GiftTargetItem{GiftID: 1, Name: "Rose again", Target: 5, Received: 1, BarStyle: "default"})
+
+	if _, _, err := Split(snapshot); err == nil {
+		t.Fatal("Split() accepted duplicate gift target IDs within one panel")
+	}
+}
+
 func TestJoinRejectsMissingOrUnexpectedRuntimeEntries(t *testing.T) {
 	definition, runtime, err := Split(fixtureSnapshot())
 	if err != nil {

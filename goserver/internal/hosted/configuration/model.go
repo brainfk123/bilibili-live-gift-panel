@@ -42,7 +42,7 @@ type Definition struct {
 	TimerRules       []gameplay.TimerRule        `json:"timerRules"`
 	FormulaPresets   []gameplay.FormulaPreset    `json:"formulaPresets"`
 	SimplePlay       *gameplay.SimplePlay        `json:"simplePlay,omitempty"`
-	Gifts            []gameplay.GiftInfo         `json:"gifts"`
+	Gifts            []GiftDefinition            `json:"gifts"`
 }
 
 type AttributeDefinition struct {
@@ -69,6 +69,18 @@ type GiftTargetItemDefinition struct {
 	Name     string `json:"name,omitempty"`
 	Target   int    `json:"target"`
 	BarStyle string `json:"barStyle"`
+}
+
+// GiftDefinition is the allowlisted catalog metadata needed by gameplay.
+// Asset URLs are resolved by the hosted Bilibili gateway and never persisted.
+type GiftDefinition struct {
+	ID                  int     `json:"id"`
+	Name                string  `json:"name"`
+	Price               float64 `json:"price"`
+	CoinType            string  `json:"coinType"`
+	BlindBoxParentID    int     `json:"blindBoxParentId,omitempty"`
+	BlindBoxParentName  string  `json:"blindBoxParentName,omitempty"`
+	BlindBoxParentPrice float64 `json:"blindBoxParentPrice,omitempty"`
 }
 
 type ActivityDefinition struct {
@@ -150,7 +162,7 @@ func Split(snapshot gameplay.Snapshot) (Definition, RuntimeState, error) {
 		TimerRules:       normalized.TimerRules,
 		FormulaPresets:   normalized.FormulaPresets,
 		SimplePlay:       normalized.SimplePlay,
-		Gifts:            normalized.Gifts,
+		Gifts:            make([]GiftDefinition, len(normalized.Gifts)),
 	}
 	runtime := RuntimeState{
 		AttributeValues:    make(map[string]float64, len(normalized.Attributes)),
@@ -164,8 +176,13 @@ func Split(snapshot gameplay.Snapshot) (Definition, RuntimeState, error) {
 		runtime.AttributeValues[attribute.ID] = attribute.Value
 	}
 	for panelIndex, panel := range normalized.GiftTargetPanels {
+		seenGiftIDs := make(map[int]struct{}, len(panel.Items))
 		projected := GiftTargetPanelDefinition{ID: panel.ID, Name: panel.Name, Layout: panel.Layout, Items: make([]GiftTargetItemDefinition, len(panel.Items))}
 		for itemIndex, item := range panel.Items {
+			if _, duplicate := seenGiftIDs[item.GiftID]; duplicate {
+				return Definition{}, RuntimeState{}, fmt.Errorf("gift target %d is duplicated in panel %q", item.GiftID, panel.ID)
+			}
+			seenGiftIDs[item.GiftID] = struct{}{}
 			projected.Items[itemIndex] = GiftTargetItemDefinition{GiftID: item.GiftID, Name: item.Name, Target: item.Target, BarStyle: item.BarStyle}
 			runtime.GiftTargetReceived = append(runtime.GiftTargetReceived, GiftTargetRuntimeState{PanelID: panel.ID, GiftID: item.GiftID, Received: item.Received})
 		}
@@ -185,8 +202,8 @@ func Split(snapshot gameplay.Snapshot) (Definition, RuntimeState, error) {
 		definition.Activities[activityIndex] = projected
 		runtime.Activities[activityIndex] = state
 	}
-	for index := range definition.Gifts {
-		definition.Gifts[index].ImageURL = ""
+	for index, gift := range normalized.Gifts {
+		definition.Gifts[index] = GiftDefinition{ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, BlindBoxParentID: gift.BlindBoxParentID, BlindBoxParentName: gift.BlindBoxParentName, BlindBoxParentPrice: gift.BlindBoxParentPrice}
 	}
 	return definition, runtime, nil
 }
@@ -236,11 +253,16 @@ func Join(definition Definition, runtime RuntimeState) (gameplay.Snapshot, error
 	if err != nil {
 		return gameplay.Snapshot{}, err
 	}
-	snapshot := gameplay.Snapshot{Attributes: attributes, DisplayScenes: definition.DisplayScenes, GiftTargetPanels: panels, Activities: activities, Rules: definition.Rules, TimerRules: definition.TimerRules, FormulaPresets: definition.FormulaPresets, SimplePlay: definition.SimplePlay, Gifts: definition.Gifts, RuleLimits: runtime.RuleLimits}
-	for index := range snapshot.Gifts {
-		snapshot.Gifts[index].ImageURL = ""
-	}
+	snapshot := gameplay.Snapshot{Attributes: attributes, DisplayScenes: definition.DisplayScenes, GiftTargetPanels: panels, Activities: activities, Rules: definition.Rules, TimerRules: definition.TimerRules, FormulaPresets: definition.FormulaPresets, SimplePlay: definition.SimplePlay, Gifts: joinGifts(definition.Gifts), RuleLimits: runtime.RuleLimits}
 	return gameplay.Normalize(snapshot)
+}
+
+func joinGifts(definitions []GiftDefinition) []gameplay.GiftInfo {
+	gifts := make([]gameplay.GiftInfo, len(definitions))
+	for index, definition := range definitions {
+		gifts[index] = gameplay.GiftInfo{ID: definition.ID, Name: definition.Name, Price: definition.Price, CoinType: definition.CoinType, BlindBoxParentID: definition.BlindBoxParentID, BlindBoxParentName: definition.BlindBoxParentName, BlindBoxParentPrice: definition.BlindBoxParentPrice}
+	}
+	return gifts
 }
 
 func joinAttributes(definitions []AttributeDefinition, values map[string]float64) ([]gameplay.Attribute, error) {

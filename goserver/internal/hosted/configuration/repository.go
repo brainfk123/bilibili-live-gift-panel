@@ -55,7 +55,7 @@ func (repository *sqlRepository) LoadActive(ctx context.Context, accountID int64
 	if !repository.ready() || accountID <= 0 {
 		return Version{}, State{}, ErrInvalidInput
 	}
-	const query = "SELECT v.id, v.account_id, v.number, v.definition_json, v.source, v.created_at, s.config_version_id, s.revision, s.runtime_json, s.updated_at FROM streamer_accounts AS a JOIN account_config_versions AS v ON v.id = a.active_config_version_id JOIN account_runtime_state AS s ON s.account_id = a.id WHERE a.id = ?"
+	const query = "SELECT v.id, v.account_id, v.number, v.definition_json, v.source, v.created_at, s.config_version_id, s.revision, s.runtime_json, s.updated_at FROM streamer_accounts AS a JOIN account_active_config AS active ON active.account_id = a.id JOIN account_config_versions AS v ON v.account_id = active.account_id AND v.id = active.config_version_id JOIN account_runtime_state AS s ON s.account_id = a.id AND s.config_version_id = active.config_version_id WHERE a.id = ?"
 	var version Version
 	var state State
 	var definitionJSON, runtimeJSON []byte
@@ -157,7 +157,7 @@ func (repository *sqlRepository) Activate(ctx context.Context, command Activatio
 
 	var activeID sql.NullInt64
 	var activeNumber uint64
-	err = transaction.QueryRowContext(ctx, "SELECT a.active_config_version_id, COALESCE(v.number, 0) FROM streamer_accounts AS a LEFT JOIN account_config_versions AS v ON v.id = a.active_config_version_id WHERE a.id = ? FOR UPDATE", command.AccountID).Scan(&activeID, &activeNumber)
+	err = transaction.QueryRowContext(ctx, "SELECT active.config_version_id, COALESCE(v.number, 0) FROM streamer_accounts AS a LEFT JOIN account_active_config AS active ON active.account_id = a.id LEFT JOIN account_config_versions AS v ON v.account_id = active.account_id AND v.id = active.config_version_id WHERE a.id = ? FOR UPDATE", command.AccountID).Scan(&activeID, &activeNumber)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Version{}, State{}, ErrNotFound
 	}
@@ -204,8 +204,8 @@ func (repository *sqlRepository) Activate(ctx context.Context, command Activatio
 	if err != nil || !oneOrTwoRows(result) {
 		return Version{}, State{}, ErrUnavailable
 	}
-	result, err = transaction.ExecContext(ctx, "UPDATE streamer_accounts SET active_config_version_id = ?, updated_at = ? WHERE id = ?", versionID, command.At, command.AccountID)
-	if err != nil || !oneRow(result) {
+	result, err = transaction.ExecContext(ctx, "INSERT INTO account_active_config (account_id, config_version_id, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE config_version_id = VALUES(config_version_id), updated_at = VALUES(updated_at)", command.AccountID, versionID, command.At)
+	if err != nil || !oneOrTwoRows(result) {
 		return Version{}, State{}, ErrUnavailable
 	}
 	if command.MigrationJobID != nil {

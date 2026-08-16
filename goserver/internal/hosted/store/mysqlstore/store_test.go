@@ -102,25 +102,35 @@ func TestProductionMigrationsIncludeVersionedConfigurationStorage(t *testing.T) 
 		}
 		sql := strings.Join(strings.Fields(string(item.contents)), " ")
 		for _, required := range []string{
-			"ALTER TABLE streamer_accounts ADD COLUMN active_config_version_id BIGINT UNSIGNED NULL",
 			"CREATE TABLE IF NOT EXISTS account_config_versions",
+			"CREATE TABLE IF NOT EXISTS account_active_config",
 			"CREATE TABLE IF NOT EXISTS account_runtime_state",
 			"CREATE TABLE IF NOT EXISTS account_room_suggestions",
 			"CREATE TABLE IF NOT EXISTS migration_jobs",
 			"CREATE TABLE IF NOT EXISTS live_sessions",
 			"UNIQUE KEY uq_account_config_versions_account_number (account_id, number)",
+			"UNIQUE KEY uq_account_config_versions_account_id (account_id, id)",
 			"PRIMARY KEY (account_id)",
+			"base_config_version_number BIGINT UNSIGNED NOT NULL DEFAULT 0",
+			"base_state_revision BIGINT UNSIGNED NOT NULL DEFAULT 0",
 			"CHECK (JSON_VALID(definition_json))",
 			"CHECK (JSON_VALID(runtime_json))",
 			"KEY idx_migration_jobs_hash (account_id, request_hash)",
 			"KEY idx_migration_jobs_status_expiry (status, expires_at)",
+			"FOREIGN KEY (account_id, config_version_id) REFERENCES account_config_versions (account_id, id)",
+			"FOREIGN KEY (account_id, rollback_config_version_id) REFERENCES account_config_versions (account_id, id)",
 		} {
 			if !strings.Contains(sql, required) {
 				t.Fatalf("0004 migration missing %q", required)
 			}
 		}
-		if strings.Contains(sql, "target_room") || strings.Contains(sql, "INSERT INTO live_sessions") {
+		if strings.Contains(sql, "ALTER TABLE") || strings.Contains(sql, "target_room") || strings.Contains(sql, "INSERT INTO live_sessions") {
 			t.Fatalf("0004 migration violates pending room suggestion boundary: %s", sql)
+		}
+		for _, statement := range splitStatements(item.contents) {
+			if !strings.HasPrefix(strings.TrimSpace(statement), "CREATE TABLE IF NOT EXISTS") {
+				t.Fatalf("0004 migration has a partial-retry unsafe statement: %s", statement)
+			}
 		}
 		return
 	}
