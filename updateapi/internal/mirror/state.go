@@ -246,8 +246,11 @@ func (repository *fileStateRepository) readState(root *os.Root) (MirrorState, []
 		return MirrorState{}, nil, nil, false, invalidStateError("state file changed while opening")
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxStateBytes+1))
-	if err != nil || len(data) > maxStateBytes {
-		return MirrorState{}, nil, nil, false, invalidStateError("state file is too large")
+	if err != nil {
+		return MirrorState{}, nil, nil, false, invalidStateError("state file could not be read")
+	}
+	if len(data) > maxStateBytes {
+		return MirrorState{}, nil, pathInfo, true, invalidStateError("state file is too large")
 	}
 	state, err := decodeMirrorState(data)
 	if err != nil {

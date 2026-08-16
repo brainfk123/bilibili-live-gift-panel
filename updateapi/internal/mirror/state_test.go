@@ -3,6 +3,7 @@ package mirror
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -134,6 +135,55 @@ func TestFileStateRepositoryLeavesCorruptStateUntouchedWhenReplacementFails(t *t
 	}
 	if !bytes.Equal(got, corrupt) {
 		t.Fatalf("corrupt prior changed to %q, want %q", got, corrupt)
+	}
+}
+
+func TestFileStateRepositoryReplacesOversizedRegularStateWithoutUnboundedRead(t *testing.T) {
+	// Mutation caught: dropping identity when the bounded reader observes maxStateBytes+1 makes oversized corruption permanent.
+	for _, size := range []int64{maxStateBytes + 1, maxStateBytes * 4096} {
+		t.Run(fmt.Sprintf("size-%d", size), func(t *testing.T) {
+			directory := t.TempDir()
+			writeOversizedStateFile(t, directory, size)
+			repository := mustNewFileStateRepository(t, directory)
+			if _, err := repository.Load(); !errors.Is(err, ErrInvalidState) {
+				t.Fatalf("initial Load() error = %v, want ErrInvalidState", err)
+			}
+			want := validMirrorState()
+			if err := repository.Save(want); err != nil {
+				t.Fatalf("Save() error = %v, want oversized cache replaced", err)
+			}
+			got, err := repository.Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if got != want {
+				t.Fatalf("Load() = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestFileStateRepositoryReportsIndeterminateCommitWhenOversizedPriorReplacementCannotSync(t *testing.T) {
+	// Mutation caught: treating an oversized prior as restorable permits a false ordinary failure after replacement.
+	directory := t.TempDir()
+	writeOversizedStateFile(t, directory, maxStateBytes*4096)
+	repository, err := newFileStateRepositoryWithOptions(directory, fileStateOptions{
+		syncDirectory: func(*os.Root) error { return errors.New("directory sync failed") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := validMirrorState()
+	err = repository.Save(want)
+	if !errors.Is(err, ErrIndeterminateStateCommit) {
+		t.Fatalf("Save() error = %v, want ErrIndeterminateStateCommit", err)
+	}
+	got, loadErr := mustNewFileStateRepository(t, directory).Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	if got != want {
+		t.Fatalf("Load() = %#v, want complete replacement %#v", got, want)
 	}
 }
 
@@ -539,6 +589,21 @@ func validMirrorState() MirrorState {
 		SHA256:      strings.Repeat("a", 64),
 		PublishedAt: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC),
 		CompletedAt: time.Date(2026, 8, 16, 12, 5, 0, 0, time.UTC),
+	}
+}
+
+func writeOversizedStateFile(t *testing.T, directory string, size int64) {
+	t.Helper()
+	file, err := os.OpenFile(filepath.Join(directory, stateFileName), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(size); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

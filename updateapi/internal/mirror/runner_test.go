@@ -77,6 +77,39 @@ func TestRunnerRecoversCorruptFileStateThenUsesSavedETagWithoutRepublishing(t *t
 	}
 }
 
+func TestRunnerRecoversOversizedFileStateThenUsesSavedETagWithoutRepublishing(t *testing.T) {
+	// Mutation caught: an oversized but safely identified state file can otherwise keep every validated run stuck at state-save.
+	fixture := newRunnerFixture(t)
+	writeOversizedStateFile(t, fixture.directory, maxStateBytes*4096)
+	state := mustNewFileStateRepository(t, fixture.directory)
+	runner := fixture.runner()
+	runner.State = state
+
+	first, err := runner.Run(context.Background(), RunOptions{})
+	if err != nil {
+		t.Fatalf("first Run() error = %v", err)
+	}
+	if !first.StateInvalid || fixture.publisher.calls != 1 {
+		t.Fatalf("first Run() result=%+v publishes=%d, want recovered publication", first, fixture.publisher.calls)
+	}
+	saved, err := state.Load()
+	if err != nil {
+		t.Fatalf("Load() after recovery error = %v", err)
+	}
+
+	fixture.source.result = LatestResult{NotModified: true}
+	second, err := runner.Run(context.Background(), RunOptions{})
+	if err != nil {
+		t.Fatalf("second Run() error = %v", err)
+	}
+	if !second.NotModified || second.StateInvalid || fixture.source.etag != saved.ETag {
+		t.Fatalf("second Run() result=%+v discovery ETag=%q, want clean 304 for %q", second, fixture.source.etag, saved.ETag)
+	}
+	if fixture.publisher.calls != 1 || len(fixture.fetcher.specs) != 4 {
+		t.Fatalf("304 repeated work: publishes=%d downloads=%d", fixture.publisher.calls, len(fixture.fetcher.specs))
+	}
+}
+
 // Mutation caught: ignoring a valid prior state ETag defeats conditional discovery.
 func TestRunnerPassesOnlyValidStateETagToDiscovery(t *testing.T) {
 	fixture := newRunnerFixture(t)
