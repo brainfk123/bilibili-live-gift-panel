@@ -902,7 +902,11 @@ func (state *appState) findGift(id int) *giftInfo {
 }
 
 func (state *appState) todayStats() dayStats {
-	date := time.Now().Format("2006-01-02")
+	return state.todayStatsAt(time.Now())
+}
+
+func (state *appState) todayStatsAt(now time.Time) dayStats {
+	date := now.In(time.Local).Format("2006-01-02")
 	stats, ok := state.Stats[date]
 	if !ok {
 		stats = dayStats{Date: date, GiftTotals: map[string]int{}, RuleTriggers: map[string]int{}}

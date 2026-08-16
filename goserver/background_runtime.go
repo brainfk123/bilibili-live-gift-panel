@@ -1448,18 +1448,22 @@ func (runtime *backgroundRuntime) wait(ctx context.Context, delay time.Duration)
 }
 
 func applyGiftEvent(state *appState, gift giftEvent) {
-	applyGiftEventWithFreeze(state, gift, nil)
+	applyGiftEventWithFreezeAt(state, gift, nil, time.Now())
 }
 
 func applyGiftEventWithFreeze(state *appState, gift giftEvent, freezes attributeFreezeChecker) {
+	applyGiftEventWithFreezeAt(state, gift, freezes, time.Now())
+}
+
+func applyGiftEventWithFreezeAt(state *appState, gift giftEvent, freezes attributeFreezeChecker, processingNow time.Time) {
 	normalizeAppState(state)
 	gift = enrichBlindBoxGiftFromCatalog(*state, gift)
 	upsertRecentGiftState(state, gift)
-	stats := state.todayStats()
+	stats := state.todayStatsAt(processingNow)
 	stats.GiftTotals[giftKey(gift.GiftID)] += maxInt(1, gift.Num)
 	state.Stats[stats.Date] = stats
-	snapshot := gameplaySnapshotForGift(*state, gift, freezes)
-	transition, err := (gameplay.Engine{}).ApplyGiftWithRandom(snapshot, gameplayGift(gift), time.Now(), formulaRandomIntn)
+	snapshot := gameplaySnapshotForGiftAt(*state, gift, freezes, processingNow)
+	transition, err := (gameplay.Engine{}).ApplyGiftWithRandom(snapshot, gameplayGift(gift), processingNow, formulaRandomIntn)
 	repetitions := maxInt(1, gift.Num)
 	changes := []logEntry{}
 	appliedRuleTriggers := 0

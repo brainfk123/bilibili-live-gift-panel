@@ -237,6 +237,45 @@ func TestApplyGiftEventRepeatsQuantityWithoutExceedingDailyLimit(t *testing.T) {
 	}
 }
 
+func TestApplyGiftEventKeepsDailyBucketsOnProcessingDate(t *testing.T) {
+	processingNow := time.Date(2000, time.January, 2, 12, 34, 56, 0, time.Local)
+	processingDate := "2000-01-02"
+	otherDate := "1999-12-31"
+	state := semanticState(giftRule{
+		ID: "limited", GiftID: 1, AttributeName: "积分",
+		Formula: "积分+1", DailyLimit: intPointer(2),
+	}, 0)
+	state.Stats = map[string]dayStats{
+		processingDate: {
+			Date: processingDate, GiftTotals: map[string]int{"1": 4}, RuleTriggers: map[string]int{"limited": 1},
+		},
+		otherDate: {
+			Date: otherDate, GiftTotals: map[string]int{"9": 7}, RuleTriggers: map[string]int{"historic": 3},
+		},
+	}
+
+	applyGiftEventWithFreezeAt(&state, giftEvent{GiftID: 1, Num: 3, Rnd: "historical-processing-date"}, nil, processingNow)
+
+	if got := state.Attributes[0].Value; got != 1 {
+		t.Fatalf("value = %v, want 1 remaining daily-limit application", got)
+	}
+	if got := state.Stats[processingDate].GiftTotals["1"]; got != 7 {
+		t.Fatalf("processing-date gift total = %d, want 7", got)
+	}
+	if got := state.Stats[processingDate].RuleTriggers["limited"]; got != 2 {
+		t.Fatalf("processing-date rule triggers = %d, want 2", got)
+	}
+	if got := state.Stats[otherDate].GiftTotals["9"]; got != 7 {
+		t.Fatalf("other-date gift total = %d, want 7", got)
+	}
+	if got := state.Stats[otherDate].RuleTriggers["historic"]; got != 3 {
+		t.Fatalf("other-date rule triggers = %d, want 3", got)
+	}
+	if got := len(state.Stats); got != 2 {
+		t.Fatalf("daily bucket count = %d, want 2", got)
+	}
+}
+
 func TestApplyGiftEventCapsGrowthButAllowsDecrease(t *testing.T) {
 	state := semanticState(giftRule{
 		ID: "capped", GiftID: 1, AttributeName: "积分",

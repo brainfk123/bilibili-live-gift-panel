@@ -12,6 +12,10 @@ import (
 // receipts, logs, contribution data, and ingestion ledgers deliberately have
 // no representation here.
 func snapshotFromAppState(state appState) gameplay.Snapshot {
+	return snapshotFromAppStateAt(state, time.Now())
+}
+
+func snapshotFromAppStateAt(state appState, processingNow time.Time) gameplay.Snapshot {
 	attributeIDs := make(map[string]string, len(state.Attributes))
 	attributes := make([]gameplay.Attribute, len(state.Attributes))
 	for index, attribute := range state.Attributes {
@@ -51,7 +55,7 @@ func snapshotFromAppState(state appState) gameplay.Snapshot {
 		TimerRules:       make([]gameplay.TimerRule, len(state.TimerRules)),
 		FormulaPresets:   make([]gameplay.FormulaPreset, len(state.FormulaPresets)),
 		Gifts:            make([]gameplay.GiftInfo, len(state.GiftCatalog)),
-		RuleLimits:       gameplayRuleLimitState(state),
+		RuleLimits:       gameplayRuleLimitState(state, processingNow),
 	}
 	for index, scene := range state.DisplayScenes {
 		snapshot.DisplayScenes[index] = gameplay.DisplayScene{
@@ -174,7 +178,11 @@ func gameplayGift(gift giftEvent) gameplay.Gift {
 }
 
 func gameplaySnapshotForGift(state appState, gift giftEvent, freezes attributeFreezeChecker) gameplay.Snapshot {
-	snapshot := snapshotFromAppState(state)
+	return gameplaySnapshotForGiftAt(state, gift, freezes, time.Now())
+}
+
+func gameplaySnapshotForGiftAt(state appState, gift giftEvent, freezes attributeFreezeChecker, processingNow time.Time) gameplay.Snapshot {
+	snapshot := snapshotFromAppStateAt(state, processingNow)
 	snapshot.DisplayScenes = nil
 	snapshot.TimerRules = nil
 	snapshot.FormulaPresets = nil
@@ -306,7 +314,7 @@ func applyGameplayTransition(state *appState, transition gameplay.Transition) {
 	applyGameplayRuleLimits(state, transition.Next.RuleLimits)
 }
 
-func gameplayRuleLimitState(state appState) gameplay.RuleLimitState {
+func gameplayRuleLimitState(state appState, processingNow time.Time) gameplay.RuleLimitState {
 	if len(state.Stats) == 0 {
 		return gameplay.RuleLimitState{AppliedCounts: map[string]int{}}
 	}
@@ -316,7 +324,7 @@ func gameplayRuleLimitState(state appState) gameplay.RuleLimitState {
 	}
 	sort.Strings(dates)
 	date := dates[len(dates)-1]
-	currentDate := time.Now().Format("2006-01-02")
+	currentDate := processingNow.In(time.Local).Format("2006-01-02")
 	if _, exists := state.Stats[currentDate]; exists {
 		date = currentDate
 	}
