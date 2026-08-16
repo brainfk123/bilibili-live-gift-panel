@@ -269,6 +269,76 @@ describe('online migration exporter', () => {
     expect(migration.payload.definition.gifts.map((gift) => gift.id)).toEqual([1, 2]);
   });
 
+  it('completes omitted current template parameters from their live defaults', () => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
+      parameters: { name: '计数器', suffix: '次', amount: 2, cap: 9 },
+    };
+
+    const migration = createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12));
+
+    expect(migration.payload.definition.simplePlay?.parameters).toEqual({
+      name: '计数器', suffix: '次', amount: 2, cap: 9, broadcastMessage: '感谢大家的支持，欢迎投喂礼物',
+    });
+  });
+
+  it('does not replace explicit invalid current values with defaults', () => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
+      parameters: { name: '', suffix: '次', amount: -1, cap: 0 },
+    };
+
+    expect(createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12)).payload.definition.simplePlay).toBeUndefined();
+  });
+
+  it('completes omitted legacy overtime v1 parameters from historical defaults', () => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'overtime', templateVersion: 1, attributeId: 'time', gifts: { overtime: [1] }, managedFingerprint: 'safe',
+      parameters: {},
+    };
+
+    const migration = createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12));
+
+    expect(migration.payload.definition.simplePlay?.parameters).toEqual({
+      name: '加班时间', minutesPerYuan: 60, maxHours: 0, broadcastMessage: '感谢大家的支持，欢迎投喂礼物',
+    });
+  });
+
+  it('does not replace an explicit invalid legacy overtime v1 value with its default', () => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'overtime', templateVersion: 1, attributeId: 'time', gifts: { overtime: [1] }, managedFingerprint: 'safe',
+      parameters: { minutesPerYuan: 0 },
+    };
+
+    expect(createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12)).payload.definition.simplePlay).toBeUndefined();
+  });
+
+  it.each([
+    '正文 ipfs://cid/image.png',
+    '正文 s3://bucket/image.png',
+    '正文 content:asset',
+    '正文 custom+scheme.foo:asset',
+    '正文 C:\\assets\\image.png',
+    '正文 C:\\private\\secret',
+    '正文 /private/secret',
+    '正文 \\private\\secret',
+    '正文 .\\assets\\image.png',
+    '正文 .\\private\\secret',
+    'HP:https://assets.invalid/image.png',
+  ])('fails closed for a resource reference with an arbitrary scheme or path: %s', (unsafeValue) => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
+      parameters: { name: 'PK: 红队', suffix: '次', amount: 1, cap: 0, broadcastMessage: unsafeValue },
+    };
+
+    expect(createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12)).payload.definition.simplePlay).toBeUndefined();
+  });
+
   it.each([
     { parameters: { name: '', maxSeconds: 3600, broadcastMessage: '继续加油' }, label: 'an empty required text parameter' },
     { parameters: { name: '加班时间', maxSeconds: 1.5, broadcastMessage: '继续加油' }, label: 'a non-integer v2 maxSeconds value' },

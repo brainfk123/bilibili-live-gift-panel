@@ -165,10 +165,10 @@ interface OnlineSimplePlay {
 }
 
 const LEGACY_OVERTIME_V1_PARAMETERS = [
-  { id: 'name', kind: 'text' },
-  { id: 'minutesPerYuan', kind: 'number', min: 1, max: 3600 },
-  { id: 'maxHours', kind: 'number', min: 0, max: 240 },
-  { id: 'broadcastMessage', kind: 'text' },
+  { id: 'name', kind: 'text', defaultValue: '加班时间' },
+  { id: 'minutesPerYuan', kind: 'number', min: 1, max: 3600, defaultValue: 60 },
+  { id: 'maxHours', kind: 'number', min: 0, max: 240, defaultValue: 0 },
+  { id: 'broadcastMessage', kind: 'text', defaultValue: '感谢大家的支持，欢迎投喂礼物' },
 ] as const;
 
 const OVERTIME_OPERATIONS = new Set<NonNullable<SimplePlay['overtimeGiftActions']>[number]['operation']>([
@@ -441,7 +441,7 @@ function exportCurrentSimplePlay(simplePlay: SimplePlay, template: GameplayTempl
 
 function exportLegacyOvertimeV1(simplePlay: SimplePlay): OnlineSimplePlay | undefined {
   const parameters = Object.fromEntries(LEGACY_OVERTIME_V1_PARAMETERS.flatMap((definition) => {
-    const value = simplePlay.parameters[definition.id];
+    const value = parameterValueOrDefault(definition, simplePlay.parameters);
     return isValidLegacyOvertimeV1Parameter(definition, value) ? [[definition.id, value]] : [];
   }));
   const gifts = exportTemplateGifts([{ id: 'overtime', label: '', description: '', minimum: 1, multiple: true }], simplePlay.gifts);
@@ -462,9 +462,18 @@ function exportTemplateParameters(
   source: SimplePlay['parameters'],
 ): Record<string, TemplateParameterValue> {
   return Object.fromEntries(definitions.flatMap((definition) => {
-    const value = source[definition.id];
+    const value = parameterValueOrDefault(definition, source);
     return isValidSimplePlayParameter(definition, value) ? [[definition.id, value]] : [];
   }));
+}
+
+function parameterValueOrDefault(
+  definition: Pick<TemplateParameterDefinition, 'id' | 'defaultValue'>,
+  source: SimplePlay['parameters'],
+): unknown {
+  return Object.prototype.hasOwnProperty.call(source, definition.id)
+    ? source[definition.id]
+    : definition.defaultValue;
 }
 
 function exportTemplateGifts(
@@ -540,10 +549,14 @@ function isValidLegacyOvertimeV1Parameter(
 }
 
 function containsResourceReference(value: string): boolean {
-  return /(?:https?|data|file|blob|javascript):/i.test(value)
-    || /\/\//.test(value)
+  const schemes = value.matchAll(/[A-Za-z][A-Za-z0-9+.-]*:/g);
+  for (const match of schemes) {
+    const scheme = match[0].slice(0, -1);
+    if (scheme !== 'PK' && scheme !== 'HP') return true;
+  }
+  return /\/\//.test(value)
     || /\\\\/.test(value)
-    || /(?:^|[\s"'(<])(?:\/|\.\.?\/)/.test(value)
+    || /(?:^|[\s"'(<])(?:\/|\\|\.\.?[\\/])/.test(value)
     || /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp|mp3|wav|ogg|m4a|mp4|m4v|mov|webm)(?:[?#\s]|$)/i.test(value);
 }
 
