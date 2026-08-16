@@ -24,6 +24,8 @@ const (
 	invocationTimeout     = 15 * time.Minute
 )
 
+var buildCommit = "local"
+
 type commandRunner interface {
 	Run(context.Context, mirror.RunOptions) (mirror.RunResult, error)
 }
@@ -117,13 +119,22 @@ func run(parent context.Context, args []string, lookup environmentLookup, factor
 	}
 
 	dryRun := false
+	showBuildCommit := false
 	stateDirectory := defaultStateDirectory
 	flags := flag.NewFlagSet("gift-panel-release-mirror", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.BoolVar(&dryRun, "dry-run", false, "validate the latest release without COS publication")
+	flags.BoolVar(&showBuildCommit, "build-commit", false, "print the embedded source commit")
 	flags.StringVar(&stateDirectory, "state-dir", defaultStateDirectory, "absolute mirror state directory")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !isAbsoluteCleanStateDirectory(stateDirectory) {
 		return finishFailure(commandFailure(stageArguments, errors.New("command arguments are invalid")))
+	}
+	if showBuildCommit {
+		if dryRun || stateDirectory != defaultStateDirectory {
+			return finishFailure(commandFailure(stageArguments, errors.New("command arguments are invalid")))
+		}
+		fmt.Fprintln(output, buildCommit)
+		return nil
 	}
 	if err := ctx.Err(); err != nil {
 		return finishFailure(commandFailure(stageInvocation, err))

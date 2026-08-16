@@ -16,6 +16,29 @@ import (
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/publish"
 )
 
+// Mutation caught: removing the build identity flag makes a deployed binary impossible to tie to its reviewed source commit.
+func TestRunReportsEmbeddedBuildCommitWithoutConstructingMirror(t *testing.T) {
+	previous := buildCommit
+	buildCommit = "0123456789abcdef0123456789abcdef01234567"
+	t.Cleanup(func() { buildCommit = previous })
+
+	factoryCalls := 0
+	var output bytes.Buffer
+	err := run(context.Background(), []string{"--build-commit"}, emptyEnvironment, func(string, cosConfiguration) (commandRunner, error) {
+		factoryCalls++
+		return &fakeCommandRunner{}, nil
+	}, &output, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); got != buildCommit+"\n" {
+		t.Fatalf("build commit output = %q", got)
+	}
+	if factoryCalls != 0 {
+		t.Fatalf("factory calls = %d", factoryCalls)
+	}
+}
+
 // Mutation caught: exposing repository, endpoint, asset, or arbitrary positional controls expands the public CLI trust boundary.
 func TestRunRejectsEveryFlagExceptDryRunAndStateDir(t *testing.T) {
 	for _, args := range [][]string{

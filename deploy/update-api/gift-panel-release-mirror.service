@@ -1,0 +1,26 @@
+[Unit]
+Description=Gift Panel GitHub Release mirror
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=gift-panel-mirror
+Group=gift-panel-mirror
+EnvironmentFile=/etc/gift-panel-release-mirror.env
+ExecStart=/opt/gift-panel-release-mirror/current/gift-panel-release-mirror
+StateDirectory=gift-panel-release-mirror
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LogNamespace=gift-panel-release-mirror
+UMask=0077
