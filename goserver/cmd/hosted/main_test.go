@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -9,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"bilibili-live-gift-panel/internal/hosted/adminidentity"
 )
 
 func TestNewHTTPServerConfiguresHostedTimeouts(t *testing.T) {
@@ -228,6 +231,93 @@ func TestServeHTTPTreatsServerClosedAsNormalAndClosesListener(t *testing.T) {
 	if !listener.isClosed() {
 		t.Fatal("listener remained open after ServerClosed")
 	}
+}
+
+func TestRunModeAdminInitPrintsOneTimeSecretsAndNeverStartsHTTP(t *testing.T) {
+	initializer := &initializerStub{result: adminidentity.InitializeResult{
+		TOTPURI:          "otpauth://totp/GiftPanel:owner?secret=ONCE",
+		RecoveryPassword: "12345678901234567890",
+	}}
+	var output bytes.Buffer
+	serveCalls := 0
+
+	err := runMode(
+		context.Background(),
+		[]string{"admin", "init", "--uid", "32249588", "--email", "owner@example.com"},
+		initializer,
+		&output,
+		func() error { serveCalls++; return nil },
+	)
+	if err != nil {
+		t.Fatalf("runMode() error = %v", err)
+	}
+	if serveCalls != 0 {
+		t.Fatalf("HTTP serve called %d times during local admin init", serveCalls)
+	}
+	if initializer.uid != "32249588" || initializer.email != "owner@example.com" {
+		t.Fatalf("Initialize arguments uid=%q email=%q", initializer.uid, initializer.email)
+	}
+	for _, secret := range []string{initializer.result.TOTPURI, initializer.result.RecoveryPassword} {
+		if got := bytes.Count(output.Bytes(), []byte(secret)); got != 1 {
+			t.Fatalf("secret %q appeared %d times in output %q", secret, got, output.String())
+		}
+	}
+	for _, forbidden := range []string{"32249588", "owner@example.com", "MYSQL", "HOSTED_"} {
+		if bytes.Contains(output.Bytes(), []byte(forbidden)) {
+			t.Fatalf("CLI output exposed %q: %q", forbidden, output.String())
+		}
+	}
+}
+
+func TestRunModeRepeatedAdminInitFailsClosedWithoutPrintingOrListening(t *testing.T) {
+	initializer := &initializerStub{err: adminidentity.ErrAlreadyInitialized}
+	var output bytes.Buffer
+	serveCalls := 0
+	err := runMode(
+		context.Background(),
+		[]string{"admin", "init", "--uid", "32249588", "--email", "owner@example.com"},
+		initializer,
+		&output,
+		func() error { serveCalls++; return nil },
+	)
+	if !errors.Is(err, adminidentity.ErrAlreadyInitialized) {
+		t.Fatalf("runMode() error = %v", err)
+	}
+	if output.Len() != 0 || serveCalls != 0 {
+		t.Fatalf("failed init output=%q serveCalls=%d", output.String(), serveCalls)
+	}
+}
+
+func TestRunModeNormalServiceAndInvalidCommandLifecycle(t *testing.T) {
+	initializer := &initializerStub{}
+	serveCalls := 0
+	if err := runMode(context.Background(), nil, initializer, &bytes.Buffer{}, func() error { serveCalls++; return nil }); err != nil {
+		t.Fatalf("normal runMode() error = %v", err)
+	}
+	if serveCalls != 1 || initializer.calls != 0 {
+		t.Fatalf("normal mode serveCalls=%d initCalls=%d", serveCalls, initializer.calls)
+	}
+
+	serveCalls = 0
+	var output bytes.Buffer
+	err := runMode(context.Background(), []string{"admin", "init", "--uid", "32249588", "--email", "owner@example.com", "unexpected"}, initializer, &output, func() error { serveCalls++; return nil })
+	if !errors.Is(err, errInvalidCommand) || serveCalls != 0 || output.Len() != 0 {
+		t.Fatalf("invalid command error=%v serveCalls=%d output=%q", err, serveCalls, output.String())
+	}
+}
+
+type initializerStub struct {
+	result adminidentity.InitializeResult
+	err    error
+	uid    string
+	email  string
+	calls  int
+}
+
+func (initializer *initializerStub) Initialize(_ context.Context, uid, email string) (adminidentity.InitializeResult, error) {
+	initializer.calls++
+	initializer.uid, initializer.email = uid, email
+	return initializer.result, initializer.err
 }
 
 type lifecycleStub struct {

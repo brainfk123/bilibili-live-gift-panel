@@ -12,10 +12,17 @@ import (
 // Config contains the hosted process configuration. Callers must never log the
 // complete value because it contains the MySQL DSN and secret file locations.
 type Config struct {
-	ListenAddr        string
-	MySQLDSN          string
-	EncryptionKeyFile string
-	HMACKeyFile       string
+	ListenAddr         string
+	MySQLDSN           string
+	EncryptionKeyFile  string
+	HMACKeyFile        string
+	AdminAllowedOrigin string
+	AdminCSRFToken     string
+	SMTPAddress        string
+	SMTPHost           string
+	SMTPUsername       string
+	SMTPPassword       string
+	SMTPFrom           string
 }
 
 // Load reads and validates the hosted process environment.
@@ -42,10 +49,17 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		ListenAddr:        listenAddr,
-		MySQLDSN:          dsn,
-		EncryptionKeyFile: encryptionKeyFile,
-		HMACKeyFile:       hmacKeyFile,
+		ListenAddr:         listenAddr,
+		MySQLDSN:           dsn,
+		EncryptionKeyFile:  encryptionKeyFile,
+		HMACKeyFile:        hmacKeyFile,
+		AdminAllowedOrigin: strings.TrimSpace(os.Getenv("HOSTED_ADMIN_ALLOWED_ORIGIN")),
+		AdminCSRFToken:     os.Getenv("HOSTED_ADMIN_CSRF_TOKEN"),
+		SMTPAddress:        strings.TrimSpace(os.Getenv("HOSTED_SMTP_ADDRESS")),
+		SMTPHost:           strings.TrimSpace(os.Getenv("HOSTED_SMTP_HOST")),
+		SMTPUsername:       os.Getenv("HOSTED_SMTP_USERNAME"),
+		SMTPPassword:       os.Getenv("HOSTED_SMTP_PASSWORD"),
+		SMTPFrom:           strings.TrimSpace(os.Getenv("HOSTED_SMTP_FROM")),
 	}, nil
 }
 
