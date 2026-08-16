@@ -430,14 +430,13 @@ func (state *cloneState) enter(value reflect.Value, path string) (func(), error)
 }
 
 func validateSnapshotValues(snapshot Snapshot) error {
+	if snapshot.SimplePlay != nil {
+		if err := validateDynamicValue(reflect.ValueOf(snapshot.SimplePlay.Parameters), "simplePlay.parameters", 0, &dynamicValidationState{active: map[validationVisit]struct{}{}}); err != nil {
+			return err
+		}
+	}
 	state := validationState{active: map[validationVisit]struct{}{}}
-	if err := validateValue(reflect.ValueOf(snapshot), "snapshot", &state); err != nil {
-		return err
-	}
-	if snapshot.SimplePlay == nil {
-		return nil
-	}
-	return validateDynamicValue(reflect.ValueOf(snapshot.SimplePlay.Parameters), "simplePlay.parameters", 0, &dynamicValidationState{active: map[validationVisit]struct{}{}})
+	return validateValue(reflect.ValueOf(snapshot), "snapshot", &state)
 }
 
 type validationVisit struct {
@@ -478,6 +477,9 @@ func validateValue(value reflect.Value, path string, state *validationState) err
 		}
 	case reflect.Struct:
 		for index := 0; index < value.NumField(); index++ {
+			if value.Type() == reflect.TypeOf(SimplePlay{}) && value.Type().Field(index).Name == "Parameters" {
+				continue
+			}
 			if err := validateValue(value.Field(index), path, state); err != nil {
 				return err
 			}

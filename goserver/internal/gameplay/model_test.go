@@ -151,7 +151,7 @@ func TestNormalizeRejectsCyclicOrExcessiveSimplePlayParameters(t *testing.T) {
 
 	deep := map[string]any{}
 	current := deep
-	for range 65 {
+	for range 1024 {
 		next := map[string]any{}
 		current["next"] = next
 		current = next
@@ -164,6 +164,17 @@ func TestNormalizeRejectsCyclicOrExcessiveSimplePlayParameters(t *testing.T) {
 	cycle["self"] = cycle
 	if _, err := Normalize(Snapshot{SimplePlay: &SimplePlay{Parameters: cycle}}); err == nil || !strings.Contains(err.Error(), "cycle") {
 		t.Fatalf("Normalize(cyclic parameters) error = %v, want cycle error", err)
+	}
+}
+
+func TestNormalizeValidatesDynamicCycleBeforeStaticTraversal(t *testing.T) {
+	t.Parallel()
+
+	cycle := map[string]any{}
+	cycle["self"] = cycle
+	_, err := Normalize(Snapshot{SimplePlay: &SimplePlay{Parameters: cycle}})
+	if err == nil || err.Error() != "simplePlay.parameters contains a cycle" {
+		t.Fatalf("Normalize(cyclic parameters) error = %v, want bounded dynamic validation error", err)
 	}
 }
 
