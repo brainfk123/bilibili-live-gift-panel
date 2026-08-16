@@ -31,7 +31,7 @@
 - `goserver/internal/hosted/roomsource/*`: normalized room registry, one connection per room, immutable event fanout, reconnect and egress breaker.
 - `goserver/internal/hosted/runtime/*`: leases, account queues, room switch barrier, ephemeral viewers, persistence-before-publish.
 - `goserver/internal/hosted/obs/*`: long credential, fragment exchange, scoped short session, SSE snapshot stream.
-- `goserver/internal/hosted/store/mysqlstore/migrations/0004_runtime_and_obs.sql`: rooms, sessions, aggregate, dedupe, service credential, and OBS tables.
+- `goserver/internal/hosted/store/mysqlstore/migrations/0005_runtime_and_obs.sql`: rooms, session aggregates, dedupe, service credential, and OBS tables; it extends the `live_sessions` table introduced by configuration/migration `0004` rather than recreating it.
 - `src/hosted/runtime.ts`, `room.ts`, `obs-settings.ts`: account runtime controls/status without stop action.
 - `src/hosted/obs/main.ts`, `obs/view.ts`, `obs.css`, `obs.html`: read-only OBS entry.
 - `tests/hosted-runtime.test.ts`, `hosted-obs.test.ts`: UI/URL privacy contracts.
@@ -48,7 +48,7 @@
 - Create: `goserver/internal/hosted/biligateway/limits.go`
 - Create: `goserver/internal/hosted/biligateway/http.go`
 - Create: `goserver/internal/hosted/biligateway/http_test.go`
-- Create: `goserver/internal/hosted/store/mysqlstore/migrations/0004_runtime_and_obs.sql`
+- Create: `goserver/internal/hosted/store/mysqlstore/migrations/0005_runtime_and_obs.sql`
 - Modify: `src/hosted/admin.ts`
 - Create: `tests/hosted-bili-service-admin.test.ts`
 - Modify: `goserver/go.mod`

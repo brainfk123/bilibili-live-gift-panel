@@ -31,7 +31,7 @@
 - `goserver/internal/hosted/migration/envelope.go`: bounded format v1 decoding and normalization.
 - `goserver/internal/hosted/migration/service.go`: preview, apply, pending activation, cancel, rollback, idempotency.
 - `goserver/internal/hosted/migration/http.go`: multipart-free JSON upload and confirmation routes.
-- `goserver/internal/hosted/store/mysqlstore/migrations/0003_configuration_and_migration.sql`: config/state/jobs/session-status tables.
+- `goserver/internal/hosted/store/mysqlstore/migrations/0004_configuration_and_migration.sql`: config/state/jobs/session-status tables.
 - `src/migration.ts`: desktop-only safe migration exporter.
 - `src/ui/config/config.ts`: desktop “迁移到在线版” download action.
 - `tests/migration.test.ts`: exporter privacy and schema contract.
@@ -47,7 +47,8 @@
 - Create: `goserver/internal/hosted/configuration/model_test.go`
 - Create: `goserver/internal/hosted/configuration/repository.go`
 - Create: `goserver/internal/hosted/configuration/repository_test.go`
-- Create: `goserver/internal/hosted/store/mysqlstore/migrations/0003_configuration_and_migration.sql`
+- Create: `goserver/internal/hosted/store/mysqlstore/migrations/0004_configuration_and_migration.sql`
+- Modify: `goserver/internal/hosted/store/mysqlstore/store_test.go`
 
 **Interfaces:**
 - Produces: `configuration.Split(gameplay.Snapshot)` and `Join(Definition, RuntimeState)`.
@@ -78,8 +79,8 @@ Expected: FAIL because the package does not exist.
 Use:
 
 ```go
-type Version struct { ID, AccountID string; Number uint64; Definition Definition; Source string; CreatedAt time.Time }
-type State struct { AccountID, ConfigVersionID string; Revision uint64; Runtime RuntimeState; UpdatedAt time.Time }
+type Version struct { ID, AccountID int64; Number uint64; Definition Definition; Source string; CreatedAt time.Time }
+type State struct { AccountID, ConfigVersionID int64; Revision uint64; Runtime RuntimeState; UpdatedAt time.Time }
 var ErrRevisionConflict = errors.New("configuration revision conflict")
 ```
 
@@ -87,7 +88,7 @@ var ErrRevisionConflict = errors.New("configuration revision conflict")
 
 - [ ] **Step 3: Add database schema and repository semantics**
 
-Create `account_config_versions`, `account_runtime_state`, `migration_jobs`, and `live_sessions`. Use unique `(account_id, number)`, one state row per account, foreign keys, JSON validity checks where MySQL supports them, and indexed job hash/status/expiry. `CreateVersion` allocates number under account-row lock. `CompareAndSwapState` updates only when the submitted revision matches and increments it once.
+Create `account_config_versions`, `account_runtime_state`, `account_room_suggestions`, `migration_jobs`, and `live_sessions`. Use `BIGINT UNSIGNED` IDs consistently with `streamer_accounts`, unique `(account_id, number)`, one state/suggestion row per account, foreign keys, JSON validity checks where MySQL supports them, and indexed job hash/status/expiry. A room suggestion is untrusted input awaiting the later runtime `SetRoom` confirmation; saving or applying it never sets a target room or opens a session. `CreateVersion` allocates number under account-row lock. `CompareAndSwapState` updates only when the submitted revision matches and increments it once.
 
 - [ ] **Step 4: Test atomic activation**
 
@@ -107,6 +108,9 @@ Run focused/race tests and full Go tests; commit the listed files as `feat: vers
 - Create: `goserver/internal/hosted/configuration/http.go`
 - Create: `goserver/internal/hosted/configuration/http_test.go`
 - Modify: `goserver/internal/hosted/app/app.go`
+- Modify: `goserver/internal/hosted/app/app_test.go`
+- Modify: `goserver/cmd/hosted/main.go`
+- Modify: `goserver/cmd/hosted/main_test.go`
 
 **Interfaces:**
 - Produces: `Service.Load`, `SaveDefinition`, `SaveStateCommand`, and `SuggestRoom`.
@@ -125,7 +129,7 @@ type SaveStateCommand struct { ExpectedRevision uint64; Runtime RuntimeState }
 type RoomSuggestionCommand struct { RoomID string }
 ```
 
-The service receives `accountID` separately from trusted middleware context. Normalize through `gameplay.Normalize(Join(...))` before any write.
+The service receives `accountID int64` separately from trusted middleware context. Normalize through `gameplay.Normalize(Join(...))` before any write. `SuggestRoom` only creates/replaces the account's pending suggestion and never changes a target room or `live_sessions`.
 
 - [ ] **Step 3: Add HTTP routes**
 
@@ -137,6 +141,8 @@ PUT  /api/configuration/room-suggestion
 ```
 
 Limit bodies to 2 MiB, reject second JSON values, require CSRF/Origin for writes, return `409 revision_conflict` on stale edits, and return the new version/revision after success.
+
+Wire the repository/service/HTTP handler in the real `cmd/hosted` composition root using the borrowed shared MySQL pool and `identity.HTTPHandler.Authenticate`; pass a dedicated Configuration handler through `app.Dependencies`. Main-level tests must prove all four method-routes are reachable and do not fall through broader auth/admin prefixes.
 
 - [ ] **Step 4: Verify contract and full regression**
 
@@ -219,7 +225,7 @@ This commit contains no hosted server/UI files and is the only migration-plan co
 
 **Interfaces:**
 - Produces: `Decode(io.Reader, maxBytes int64) (Envelope, Report, error)`.
-- Produces: `Service.Preview(context.Context, accountID string, Envelope) (Preview, error)`.
+- Produces: `Service.Preview(context.Context, accountID int64, Envelope) (Preview, error)`.
 
 - [ ] **Step 1: Write failing parser limit tests**
 
@@ -251,13 +257,18 @@ Run migration tests with `-count=10`, race tests, full Go tests, and commit `fea
 - Create: `goserver/internal/hosted/migration/http.go`
 - Create: `goserver/internal/hosted/migration/http_test.go`
 - Modify: `goserver/internal/hosted/app/app.go`
+- Modify: `goserver/internal/hosted/app/app_test.go`
+- Modify: `goserver/cmd/hosted/main.go`
+- Modify: `goserver/cmd/hosted/main_test.go`
+- Modify: `goserver/internal/hosted/identity/service.go`
+- Modify: `goserver/internal/hosted/identity/service_test.go`
 
 **Interfaces:**
 - Produces: `Apply`, `ApplyPendingAfterSession`, `Cancel`, and `Rollback`.
 
 - [ ] **Step 1: Write failing lifecycle tests**
 
-Cover inactive immediate apply, active-session pending apply, cancellation, natural session end apply, duplicate confirmation idempotency, login proof older than 15 minutes, rollback within 7 days, rollback expiry, and preservation of historical session aggregates.
+Cover inactive immediate apply, active-session pending apply, cancellation, natural session end apply, duplicate confirmation idempotency, matching/mismatched/reused Bilibili account proof and proof older than 15 minutes, rollback within 7 days, rollback expiry, and preservation of historical session aggregates.
 
 - [ ] **Step 2: Implement atomic apply**
 
@@ -278,6 +289,8 @@ GET    /api/migrations/{id}
 ```
 
 Preview accepts `application/json` directly, not multipart. Apply/rollback require a B 站 identity proof completed within 15 minutes and CSRF/Origin validation.
+
+Add a narrow identity seam `ConsumeAccountProof(ctx, challengeID string, accountID int64, maxAge time.Duration) error`. It consumes exactly one existing-account challenge in the verified/login-ready stage, compares the repository-derived bound account ID, checks the stored Bilibili completion time against `maxAge`, and erases the challenge on every terminal path. It returns no UID or Cookie. Migration apply/rollback accepts a `challengeId` and calls this seam in the same request; pending/unavailable results remain retryable, while success/mismatch/expiry/reuse are terminal. Wire the migration repository/service/HTTP handler in real `cmd/hosted` composition using the same DB, identity service, Authenticate middleware, resolver, and limiter, and expose only the five exact migration method-routes through `app.Dependencies`.
 
 - [ ] **Step 5: Verify and commit**
 
