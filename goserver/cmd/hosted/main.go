@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,6 +18,14 @@ import (
 )
 
 const shutdownTimeout = 30 * time.Second
+
+type serverLifecycle interface {
+	Serve(net.Listener) error
+	Shutdown(context.Context) error
+	Close() error
+}
+
+type listenFunc func(network, address string) (net.Listener, error)
 
 func main() {
 	if err := run(); err != nil {
@@ -43,20 +52,49 @@ func run() error {
 		return fmt.Errorf("migrate hosted database: %w", err)
 	}
 
-	server := &http.Server{
-		Addr:              config.ListenAddr,
-		Handler:           app.New(app.Dependencies{DB: store}),
+	server := newHTTPServer(config.ListenAddr, app.New(app.Dependencies{DB: store}))
+	return serveHTTP(
+		processContext,
+		server,
+		config.ListenAddr,
+		net.Listen,
+		shutdownTimeout,
+		func() { slog.Info("hosted service listening", "address", config.ListenAddr) },
+	)
+}
+
+func newHTTPServer(address string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              address,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+}
+
+func serveHTTP(
+	ctx context.Context,
+	server serverLifecycle,
+	address string,
+	listen listenFunc,
+	gracePeriod time.Duration,
+	onListening func(),
+) error {
+	listener, err := listen("tcp", address)
+	if err != nil {
+		return fmt.Errorf("listen hosted HTTP: %w", err)
+	}
+	defer listener.Close()
+	if onListening != nil {
+		onListening()
+	}
 
 	serveErrors := make(chan error, 1)
 	go func() {
-		serveErrors <- server.ListenAndServe()
+		serveErrors <- server.Serve(listener)
 	}()
-	slog.Info("hosted service listening", "address", config.ListenAddr)
 
 	select {
 	case err := <-serveErrors:
@@ -64,10 +102,10 @@ func run() error {
 			return nil
 		}
 		return fmt.Errorf("serve hosted HTTP: %w", err)
-	case <-processContext.Done():
+	case <-ctx.Done():
 	}
 
-	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), gracePeriod)
 	defer cancelShutdown()
 	if err := server.Shutdown(shutdownContext); err != nil {
 		_ = server.Close()
