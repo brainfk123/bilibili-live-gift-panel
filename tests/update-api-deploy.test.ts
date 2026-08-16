@@ -72,6 +72,92 @@ function dryRunTail(block: string): string {
   return `set -euo pipefail\n${block.slice(start)}`;
 }
 
+function verifyDryRunScript(name: 'install' | 'rollback', block: string, successStarts: string[], enablesTimer: boolean): void {
+  const root = mkdtempSync(join(tmpdir(), `gift-panel-${name}-dry-run-`));
+  const runRoot = '$PWD/run';
+  const fakeSystemd = `
+sudo() { "$@"; }
+install() { last=\${!#}; mkdir -p "$last"; }
+tee() { cat > "$1"; }
+journalctl() { printf 'journal\\n' >> "$SYSTEMCTL_LOG"; }
+rm() {
+  last=\${!#}
+  removes=$(cat "$REMOVE_COUNT" 2>/dev/null || printf 0); removes=$((removes + 1)); printf '%s' "$removes" > "$REMOVE_COUNT"
+  if test "$last" = "$DROPIN" && test "\${FAIL_REMOVE_AT:-0}" = "$removes"; then return 1; fi
+  command rm "$@"
+}
+systemctl() {
+  printf '%s\\n' "$*" >> "$SYSTEMCTL_LOG"
+  case "$1" in
+    daemon-reload)
+      reloads=$(cat "$RELOAD_COUNT" 2>/dev/null || printf 0); reloads=$((reloads + 1)); printf '%s' "$reloads" > "$RELOAD_COUNT"
+      test "\${FAIL_RELOAD_AT:-0}" != "$reloads" ;;
+    show)
+      if test "$3" = Result; then
+        test "\${FAIL_RESULT_SHOW:-0}" != 1 || return 1
+        printf '%s\\n' "\${RESULT_VALUE:-success}"
+      else
+        test "\${FAIL_DROPIN_SHOW:-0}" != 1 || return 1
+        if test "\${ACTIVE_DROPINS:-0}" = 1 || test -e "$DROPIN"; then printf '%s\\n' "$DROPIN"; fi
+      fi ;;
+    start)
+      starts=$(cat "$START_COUNT" 2>/dev/null || printf 0); starts=$((starts + 1)); printf '%s' "$starts" > "$START_COUNT"
+      if test -e "$DROPIN"; then printf 'dry-run\\n' >> "$START_LOG"; else printf 'normal\\n' >> "$START_LOG"; fi
+      if test -n "\${SEND_SIGNAL:-}"; then kill -s "$SEND_SIGNAL" "$$"; fi
+      test "\${FAIL_START_AT:-0}" != "$starts" ;;
+    *) return 0 ;;
+  esac
+}
+`;
+  try {
+    const script = dryRunTail(block).replaceAll('/run/systemd/system', runRoot);
+    const scenarios: Array<{
+      name: string;
+      environment: NodeJS.ProcessEnv;
+      status: number;
+      starts: string[];
+      timer: boolean;
+      reloads?: number;
+    }> = [
+      { name: 'success', environment: {}, status: 0, starts: successStarts, timer: enablesTimer },
+      { name: 'initial-reload-error', environment: { FAIL_RELOAD_AT: '1' }, status: 1, starts: [], timer: false, reloads: 2 },
+      { name: 'dry-run-start-error', environment: { FAIL_START_AT: '1' }, status: 1, starts: ['dry-run'], timer: false },
+      { name: 'validation-error', environment: { RESULT_VALUE: 'failed' }, status: 1, starts: ['dry-run'], timer: false },
+      { name: 'result-show-error', environment: { FAIL_RESULT_SHOW: '1' }, status: 1, starts: ['dry-run'], timer: false },
+      { name: 'removal-error', environment: { FAIL_REMOVE_AT: '1' }, status: 1, starts: ['dry-run'], timer: false },
+      { name: 'cleanup-reload-error', environment: { FAIL_RELOAD_AT: '2' }, status: 1, starts: ['dry-run'], timer: false, reloads: 3 },
+      { name: 'active-dropin', environment: { ACTIVE_DROPINS: '1' }, status: 1, starts: ['dry-run'], timer: false },
+      { name: 'dropin-show-error', environment: { FAIL_DROPIN_SHOW: '1' }, status: 1, starts: ['dry-run'], timer: false },
+      { name: 'interrupt', environment: { SEND_SIGNAL: 'INT' }, status: 130, starts: ['dry-run'], timer: false },
+      { name: 'terminate', environment: { SEND_SIGNAL: 'TERM' }, status: 143, starts: ['dry-run'], timer: false },
+    ];
+    if (name === 'install') {
+      scenarios.push({ name: 'normal-start-error', environment: { FAIL_START_AT: '2' }, status: 1, starts: ['dry-run', 'normal'], timer: false });
+    }
+
+    for (const scenario of scenarios) {
+      writeFileSync(join(root, 'systemctl.log'), '');
+      writeFileSync(join(root, 'start.log'), '');
+      writeFileSync(join(root, 'start-count'), '0');
+      writeFileSync(join(root, 'reload-count'), '0');
+      writeFileSync(join(root, 'remove-count'), '0');
+      const result = runBash(`${fakeSystemd}\n${script}`, root, { SYSTEMCTL_LOG: 'systemctl.log', START_LOG: 'start.log', START_COUNT: 'start-count', RELOAD_COUNT: 'reload-count', REMOVE_COUNT: 'remove-count', ...scenario.environment });
+      expect(result.status, `${name}:${scenario.name}: ${result.stderr}`).toBe(scenario.status);
+      expect(existsSync(join(root, 'run', 'gift-panel-release-mirror.service.d', 'dry-run.conf'))).toBe(false);
+      const callLines = readFileSync(join(root, 'systemctl.log'), 'utf8').split(/\r?\n/).filter(Boolean);
+      const starts = readFileSync(join(root, 'start.log'), 'utf8').trim().split(/\r?\n/).filter(Boolean);
+      expect(starts, `${name}:${scenario.name}: exact start order`).toEqual(scenario.starts);
+      expect(callLines.filter((call) => call === 'start gift-panel-release-mirror.service'), `${name}:${scenario.name}: all starts logged`).toHaveLength(scenario.starts.length);
+      expect(callLines.filter((call) => call === 'enable --now gift-panel-release-mirror.timer'), `${name}:${scenario.name}: timer enablement`).toEqual(scenario.timer ? ['enable --now gift-panel-release-mirror.timer'] : []);
+      if (scenario.reloads !== undefined) {
+        expect(Number(readFileSync(join(root, 'reload-count'), 'utf8')), `${name}:${scenario.name}: reload attempts`).toBe(scenario.reloads);
+      }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function build(root: string, environment: NodeJS.ProcessEnv = {}): SpawnSyncReturns<string> {
   return spawnSync(process.execPath, [join(root, 'scripts', 'build-update-api.mjs')], {
     cwd: root,
@@ -419,7 +505,7 @@ describe('update API deployment assets', () => {
     }
   });
 
-  it('accepts a private primary group with a different numeric ID and rejects incompatible mirror accounts', () => {
+  it('accepts idempotent private-group accounts and fails each incompatible account gate independently', () => {
     const readme = deploymentAsset('README.md');
     const install = shellBlocksAfter(readme, '## Release mirror (separate service)').find((block) => block.includes('ACCOUNT_RECORD='))!;
     const account = install.slice(install.indexOf('if ! getent passwd gift-panel-mirror'), install.indexOf('sudo install -d'));
@@ -430,9 +516,9 @@ sudo() { "$@"; }
 getent() {
   case "$1:$2" in
     passwd:gift-panel-mirror)
-      if test "\${ACCOUNT_MODE}" = absent && test "\${ACCOUNT_CREATED:-0}" != 1; then return 2; fi
+      if { test "\${ACCOUNT_MODE}" = absent && test "\${ACCOUNT_CREATED:-0}" != 1; } || test "\${ACCOUNT_MODE}" = existing-group-without-user; then return 2; fi
       case "\${ACCOUNT_MODE}" in
-        wrong-primary-group) printf 'gift-panel-mirror:x:999:996::/nonexistent:/usr/sbin/nologin\\n' ;;
+        wrong-passwd-username) printf 'other-mirror:x:999:995::/nonexistent:/usr/sbin/nologin\\n' ;;
         wrong-shell) printf 'gift-panel-mirror:x:999:995::/nonexistent:/bin/bash\\n' ;;
         wrong-home) printf 'gift-panel-mirror:x:999:995::/home/mirror:/usr/sbin/nologin\\n' ;;
         *) printf 'gift-panel-mirror:x:999:995::/nonexistent:/usr/sbin/nologin\\n' ;;
@@ -442,14 +528,13 @@ getent() {
       printf 'gift-panel-mirror:x:995:\\n' ;;
     group:995)
       if test "\${ACCOUNT_MODE}" = missing-group; then return 2; fi
-      printf 'gift-panel-mirror:x:995:\\n' ;;
-    group:996) printf 'other-primary:x:996:\\n' ;;
+      if test "\${ACCOUNT_MODE}" = wrong-group-record-gid; then printf 'gift-panel-mirror:x:996:\\n'; else printf 'gift-panel-mirror:x:995:\\n'; fi ;;
     *) return 2 ;;
   esac
 }
 id() {
   test "$1" = -gn && test "$2" = gift-panel-mirror
-  if test "\${ACCOUNT_MODE}" = wrong-primary-group; then printf 'other-primary\\n'; else printf 'gift-panel-mirror\\n'; fi
+  if test "\${ACCOUNT_MODE}" = wrong-id-group; then printf 'other-primary\\n'; else printf 'gift-panel-mirror\\n'; fi
 }
 useradd() { ACCOUNT_CREATED=1; printf 'useradd\\n' >> "$ACCOUNT_LOG"; }
 `;
@@ -458,94 +543,45 @@ useradd() { ACCOUNT_CREATED=1; printf 'useradd\\n' >> "$ACCOUNT_LOG"; }
         writeFileSync(join(root, 'account.log'), '');
         const result = runBash(`set -euo pipefail\n${fakeAccounts}\n${account}`, root, { ACCOUNT_MODE: mode, ACCOUNT_LOG: log });
         expect(result.status, result.stderr).toBe(0);
-        const calls = readFileSync(join(root, 'account.log'), 'utf8');
-        expect(calls.includes('useradd')).toBe(mode === 'absent');
+        const calls = readFileSync(join(root, 'account.log'), 'utf8').split(/\r?\n/).filter(Boolean);
+        expect(calls, `${mode}: exact account mutations`).toEqual(mode === 'absent' ? ['useradd'] : []);
       }
-      for (const mode of ['wrong-primary-group', 'wrong-shell', 'wrong-home', 'missing-group']) {
+      for (const mode of [
+        'wrong-passwd-username',
+        'wrong-group-record-gid',
+        'wrong-id-group',
+        'existing-group-without-user',
+        'wrong-shell',
+        'wrong-home',
+        'missing-group',
+      ]) {
         writeFileSync(join(root, 'account.log'), '');
         const incompatible = runBash(`set -euo pipefail\n${fakeAccounts}\n${account}\nprintf must-not-reach\n`, root, { ACCOUNT_MODE: mode, ACCOUNT_LOG: log });
         expect(incompatible.status, mode).not.toBe(0);
         expect(incompatible.stdout, mode).not.toContain('must-not-reach');
-        expect(readFileSync(join(root, 'account.log'), 'utf8'), mode).not.toContain('useradd');
+        expect(readFileSync(join(root, 'account.log'), 'utf8'), `${mode}: no account mutation`).toBe('');
       }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it('executes dry-run cleanup across success, failures, and signals without publication', () => {
+  it('executes the install dry-run across exact start, cleanup, signal, and publication boundaries', () => {
     const readme = deploymentAsset('README.md');
     const blocks = shellBlocksAfter(readme, '## Release mirror (separate service)').filter((block) => block.includes('dry-run'));
-    const root = mkdtempSync(join(tmpdir(), 'gift-panel-dry-run-'));
-    const runRoot = '$PWD/run';
-    const fakeSystemd = `
-sudo() { "$@"; }
-install() { last=\${!#}; mkdir -p "$last"; }
-tee() { cat > "$1"; }
-journalctl() { printf 'journal\\n' >> "$SYSTEMCTL_LOG"; }
-rm() {
-  last=\${!#}
-  removes=$(cat "$REMOVE_COUNT" 2>/dev/null || printf 0); removes=$((removes + 1)); printf '%s' "$removes" > "$REMOVE_COUNT"
-  if test "$last" = "$DROPIN" && test "\${FAIL_REMOVE_AT:-0}" = "$removes"; then return 1; fi
-  command rm "$@"
-}
-systemctl() {
-  printf '%s\\n' "$*" >> "$SYSTEMCTL_LOG"
-  case "$1" in
-    daemon-reload)
-      reloads=$(cat "$RELOAD_COUNT" 2>/dev/null || printf 0); reloads=$((reloads + 1)); printf '%s' "$reloads" > "$RELOAD_COUNT"
-      test "\${FAIL_RELOAD_AT:-0}" != "$reloads" ;;
-    show)
-      if test "$3" = Result; then
-        test "\${FAIL_RESULT_SHOW:-0}" != 1 || return 1
-        printf '%s\\n' "\${RESULT_VALUE:-success}"
-      else
-        test "\${FAIL_DROPIN_SHOW:-0}" != 1 || return 1
-        if test "\${ACTIVE_DROPINS:-0}" = 1 || test -e "$DROPIN"; then printf '%s\\n' "$DROPIN"; fi
-      fi ;;
-    start)
-      if test -e "$DROPIN"; then printf 'dry-run\\n' >> "$START_LOG"; else printf 'normal\\n' >> "$START_LOG"; fi
-      if test -n "\${SEND_SIGNAL:-}"; then kill -s "$SEND_SIGNAL" "$$"; fi
-      test "\${FAIL_START:-0}" != 1 ;;
-    *) return 0 ;;
-  esac
-}
-`;
-    try {
-      for (const [index, block] of blocks.entries()) {
-        const script = dryRunTail(block).replaceAll('/run/systemd/system', runRoot);
-        const expectedPublication = index === 0;
-        for (const scenario of [
-          { name: 'success', environment: {}, status: 0 },
-          { name: 'start-error', environment: { FAIL_START: '1' }, status: 1 },
-          { name: 'validation-error', environment: { RESULT_VALUE: 'failed' }, status: 1 },
-          { name: 'result-show-error', environment: { FAIL_RESULT_SHOW: '1' }, status: 1 },
-          { name: 'removal-error', environment: { FAIL_REMOVE_AT: '1' }, status: 1 },
-          { name: 'reload-error', environment: { FAIL_RELOAD_AT: '2' }, status: 1 },
-          { name: 'active-dropin', environment: { ACTIVE_DROPINS: '1' }, status: 1 },
-          { name: 'dropin-show-error', environment: { FAIL_DROPIN_SHOW: '1' }, status: 1 },
-          { name: 'interrupt', environment: { SEND_SIGNAL: 'INT' }, status: 130 },
-          { name: 'terminate', environment: { SEND_SIGNAL: 'TERM' }, status: 143 },
-        ]) {
-          writeFileSync(join(root, 'systemctl.log'), '');
-          writeFileSync(join(root, 'start.log'), '');
-          writeFileSync(join(root, 'reload-count'), '0');
-          writeFileSync(join(root, 'remove-count'), '0');
-          const result = runBash(`${fakeSystemd}\n${script}`, root, { SYSTEMCTL_LOG: 'systemctl.log', START_LOG: 'start.log', RELOAD_COUNT: 'reload-count', REMOVE_COUNT: 'remove-count', ...scenario.environment });
-          expect(result.status, `${index}:${scenario.name}: ${result.stderr}`).toBe(scenario.status);
-          expect(existsSync(join(root, 'run', 'gift-panel-release-mirror.service.d', 'dry-run.conf'))).toBe(false);
-          const calls = readFileSync(join(root, 'systemctl.log'), 'utf8');
-          const starts = readFileSync(join(root, 'start.log'), 'utf8').trim().split(/\r?\n/).filter(Boolean);
-          const expectedStarts = expectedPublication && scenario.name === 'success' ? ['dry-run', 'normal'] : ['dry-run'];
-          expect(starts, `${index}:${scenario.name}: start order`).toEqual(expectedStarts);
-          expect(calls.split(/\r?\n/).filter((call) => call === 'start gift-panel-release-mirror.service'), `${index}:${scenario.name}: all starts logged`).toHaveLength(expectedStarts.length);
-          const enabled = calls.includes('enable --now gift-panel-release-mirror.timer');
-          expect(enabled).toBe(expectedPublication && scenario.name === 'success');
-        }
-      }
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    const installBlock = blocks.find((block) => block.includes('enable --now gift-panel-release-mirror.timer'));
+    expect(blocks).toHaveLength(2);
+    expect(installBlock, 'missing install dry-run script').toBeDefined();
+    verifyDryRunScript('install', installBlock!, ['dry-run', 'normal'], true);
+  });
+
+  it('executes the rollback dry-run across exact start, cleanup, and signal boundaries', () => {
+    const readme = deploymentAsset('README.md');
+    const blocks = shellBlocksAfter(readme, '## Release mirror (separate service)').filter((block) => block.includes('dry-run'));
+    const rollbackBlock = blocks.find((block) => block.includes('Only after this rollback dry-run succeeds'));
+    expect(blocks).toHaveLength(2);
+    expect(rollbackBlock, 'missing rollback dry-run script').toBeDefined();
+    verifyDryRunScript('rollback', rollbackBlock!, ['dry-run'], false);
   });
 
   it('documents the private COS gate and direct loopback health check', () => {
