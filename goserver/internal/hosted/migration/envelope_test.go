@@ -3,6 +3,7 @@ package migration
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -148,7 +149,7 @@ func TestDecodeFreshAllowlistsSimplePlayWithoutSavingCraftedValues(t *testing.T)
 	definition["gifts"] = []any{map[string]any{"id": 1, "name": "gift", "price": 1, "coinType": "gold"}}
 	definition["simplePlay"] = map[string]any{
 		"version": 1, "templateId": "overtime", "templateVersion": 2, "attributeId": "health", "managedFingerprint": "managed",
-		"parameters":          map[string]any{"name": "https://attacker.invalid", "maxSeconds": 60, "broadcastMessage": "thanks", "cookie": "secret", "token": "secret-token", "path": "C:\\secret"},
+		"parameters":          map[string]any{"name": "safe", "maxSeconds": 60, "broadcastMessage": "thanks", "cookie": "secret", "token": "secret-token", "path": "C:\\secret"},
 		"gifts":               map[string]any{"overtime": []any{1}, "unknownSlot": []any{1}},
 		"overtimeGiftActions": []any{map[string]any{"giftId": 1, "operation": "add", "seconds": 60}, map[string]any{"giftId": 1, "operation": "shell", "seconds": 60}},
 	}
@@ -162,13 +163,114 @@ func TestDecodeFreshAllowlistsSimplePlayWithoutSavingCraftedValues(t *testing.T)
 	if _, exists := envelope.Definition.SimplePlay.Parameters["cookie"]; exists {
 		t.Fatal("crafted parameter reached definition")
 	}
-	if strings.Contains(string(envelope.CanonicalJSON), "secret") || strings.Contains(string(envelope.CanonicalJSON), "attacker.invalid") || strings.Contains(string(envelope.CanonicalJSON), "C:\\secret") || strings.Contains(string(envelope.CanonicalJSON), "unknownSlot") || strings.Contains(string(envelope.CanonicalJSON), "shell") {
+	if strings.Contains(string(envelope.CanonicalJSON), "secret") || strings.Contains(string(envelope.CanonicalJSON), "C:\\secret") || strings.Contains(string(envelope.CanonicalJSON), "unknownSlot") || strings.Contains(string(envelope.CanonicalJSON), "shell") {
 		t.Fatal("crafted simple play value reached canonical JSON")
 	}
-	for _, pointer := range []string{"/payload/definition/simplePlay/parameters/name", "/payload/definition/simplePlay/parameters/cookie", "/payload/definition/simplePlay/parameters/token", "/payload/definition/simplePlay/parameters/path", "/payload/definition/simplePlay/gifts/unknownSlot", "/payload/definition/simplePlay/overtimeGiftActions/1/operation"} {
+	for _, pointer := range []string{"/payload/definition/simplePlay/parameters/cookie", "/payload/definition/simplePlay/parameters/token", "/payload/definition/simplePlay/parameters/path", "/payload/definition/simplePlay/gifts/unknownSlot", "/payload/definition/simplePlay/overtimeGiftActions/1/operation"} {
 		if !contains(report.Ignored, pointer) {
 			t.Fatalf("missing ignored pointer %q: %#v", pointer, report.Ignored)
 		}
+	}
+}
+
+func TestDecodeMirrorsAllDesktopSimplePlayVersions(t *testing.T) {
+	tests := []struct {
+		id         string
+		version    int
+		parameters map[string]any
+		slots      map[string][]any
+	}{
+		{"overtime", 1, map[string]any{"name": "n", "minutesPerYuan": 60, "maxHours": 0, "broadcastMessage": "b"}, map[string][]any{"overtime": {1}}},
+		{"overtime", 2, map[string]any{"name": "n", "maxSeconds": 60, "broadcastMessage": "b"}, map[string][]any{"overtime": {1}}},
+		{"countdown", 1, map[string]any{"name": "n", "initialSeconds": 1800, "growthMode": "fixed", "addSeconds": 60, "maxSeconds": 7200, "broadcastMessage": "b"}, map[string][]any{"extend": {1}}},
+		{"counter", 1, map[string]any{"name": "n", "suffix": "次", "amount": 1, "cap": 0, "broadcastMessage": "b"}, map[string][]any{"count": {1}}},
+		{"goal", 1, map[string]any{"name": "n", "target": 100, "perYuan": 1, "broadcastMessage": "b"}, map[string][]any{"progress": {1}}},
+		{"boss", 1, map[string]any{"name": "n", "bossName": "b", "maxHealth": 1000, "attack": 50, "heavy": 200, "heal": 100, "regenEnabled": false, "regenInterval": 10, "regenAmount": 10, "broadcastMessage": "b"}, map[string][]any{"attack": {1}, "heavy": {2}, "heal": {3}}},
+		{"resource", 1, map[string]any{"name": "n", "maximum": 100, "consumeInterval": 5, "consumeAmount": 1, "smallSupply": 10, "largeSupply": 30, "interference": 10, "broadcastMessage": "b"}, map[string][]any{"small": {1}, "large": {2}, "interference": {3}}},
+		{"tug", 1, map[string]any{"name": "n", "leftLabel": "l", "rightLabel": "r", "initial": 50, "leftAmount": 10, "rightAmount": 10, "broadcastMessage": "b"}, map[string][]any{"left": {1}, "right": {2}}},
+		{"team-duel", 1, map[string]any{"activityName": "a", "leftName": "l", "rightName": "r", "target": 100, "points": 1, "broadcastMessage": "b"}, map[string][]any{"left": {1}, "right": {2}}},
+		{"gift-vote", 1, map[string]any{"activityName": "a", "leftName": "l", "rightName": "r", "votes": 1, "broadcastMessage": "b"}, map[string][]any{"left": {1}, "right": {2}}},
+		{"combo", 1, map[string]any{"name": "n", "timeout": 15, "goal": 50, "broadcastMessage": "b"}, map[string][]any{"combo": {1}}},
+		{"milestone", 1, map[string]any{"name": "n", "target": 100, "amount": 1, "message": "m", "broadcastMessage": "b"}, map[string][]any{"progress": {1}}},
+		{"random-event", 1, map[string]any{"name": "n", "event1": "a", "event2": "b", "event3": "c", "event4": "d", "broadcastMessage": "b"}, map[string][]any{"draw": {1}}},
+	}
+	for _, test := range tests {
+		t.Run(test.id+"-v"+strconv.Itoa(test.version), func(t *testing.T) {
+			document := validEnvelopeWire()
+			definition := document["payload"].(map[string]any)["definition"].(map[string]any)
+			definition["gifts"] = []any{map[string]any{"id": 1, "name": "one", "price": 1, "coinType": "gold"}, map[string]any{"id": 2, "name": "two", "price": 1, "coinType": "gold"}, map[string]any{"id": 3, "name": "three", "price": 1, "coinType": "gold"}}
+			simple := map[string]any{"version": 1, "templateId": test.id, "templateVersion": test.version, "attributeId": "health", "parameters": test.parameters, "gifts": test.slots, "managedFingerprint": "managed"}
+			if test.id == "overtime" && test.version == 2 {
+				simple["overtimeGiftActions"] = []any{map[string]any{"giftId": 1, "operation": "add", "seconds": 60}}
+			}
+			definition["simplePlay"] = simple
+			envelope, _, err := Decode(jsonReader(t, document), 2<<20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Definition.SimplePlay == nil || envelope.Definition.SimplePlay.TemplateID != test.id || envelope.Definition.SimplePlay.TemplateVersion != test.version {
+				t.Fatalf("simple play not retained: %#v", envelope.Definition.SimplePlay)
+			}
+			if len(envelope.Definition.SimplePlay.Parameters) != len(test.parameters) || len(envelope.Definition.SimplePlay.Gifts) != len(test.slots) {
+				t.Fatalf("simple play projection mismatch: %#v", envelope.Definition.SimplePlay)
+			}
+		})
+	}
+}
+
+func TestDecodeSimplePlayDefaultsOnlyMissingAndFailsClosedForPresentInvalid(t *testing.T) {
+	base := func(parameters map[string]any) map[string]any {
+		document := validEnvelopeWire()
+		definition := document["payload"].(map[string]any)["definition"].(map[string]any)
+		definition["gifts"] = []any{map[string]any{"id": 1, "name": "gift", "price": 1, "coinType": "gold"}}
+		definition["simplePlay"] = map[string]any{"version": 1, "templateId": "counter", "templateVersion": 1, "attributeId": "health", "parameters": parameters, "gifts": map[string]any{"count": []any{1}}, "managedFingerprint": "managed"}
+		return document
+	}
+	envelope, _, err := Decode(jsonReader(t, base(map[string]any{})), 2<<20)
+	if err != nil || envelope.Definition.SimplePlay == nil || envelope.Definition.SimplePlay.Parameters["amount"] != float64(1) {
+		t.Fatalf("missing parameter did not receive desktop default: %#v, %v", envelope.Definition.SimplePlay, err)
+	}
+	for _, parameters := range []map[string]any{{"name": ""}, {"amount": "wrong"}, {"cap": nil}} {
+		envelope, report, err := Decode(jsonReader(t, base(parameters)), 2<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Definition.SimplePlay != nil {
+			t.Fatalf("present invalid parameter was defaulted: %#v", envelope.Definition.SimplePlay)
+		}
+		if len(report.Warnings) == 0 {
+			t.Fatal("removed invalid simple play has no warning")
+		}
+	}
+}
+
+func TestSimplePlayTextResourceParity(t *testing.T) {
+	for _, value := range []string{"10/20", "A/B", "PK: boss", "HP: 10"} {
+		if !safeSimpleText(value) {
+			t.Fatalf("safe desktop text rejected: %q", value)
+		}
+	}
+	for _, value := range []string{"ipfs:cid", "s3:bucket", "content:thing", "https://host/path", "C:\\avatar.png", "/root/path", " ./relative", "avatar.png"} {
+		if safeSimpleText(value) {
+			t.Fatalf("resource-like desktop text accepted: %q", value)
+		}
+	}
+}
+
+func TestDecodeSimplePlayRejectsCrossSlotGiftReuse(t *testing.T) {
+	document := validEnvelopeWire()
+	definition := document["payload"].(map[string]any)["definition"].(map[string]any)
+	definition["gifts"] = []any{map[string]any{"id": 1, "name": "gift", "price": 1, "coinType": "gold"}}
+	definition["simplePlay"] = map[string]any{"version": 1, "templateId": "tug", "templateVersion": 1, "attributeId": "health", "managedFingerprint": "managed", "parameters": map[string]any{"name": "n", "leftLabel": "l", "rightLabel": "r", "initial": 50, "leftAmount": 10, "rightAmount": 10, "broadcastMessage": "b"}, "gifts": map[string]any{"left": []any{1}, "right": []any{1}}}
+	envelope, report, err := Decode(jsonReader(t, document), 2<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Definition.SimplePlay != nil {
+		t.Fatal("cross-slot duplicate retained simple play")
+	}
+	if !contains(report.Ignored, "/payload/definition/simplePlay/gifts/right") {
+		t.Fatalf("duplicate slot was not reported: %#v", report.Ignored)
 	}
 }
 

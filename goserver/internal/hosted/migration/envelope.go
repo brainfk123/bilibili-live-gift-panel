@@ -10,9 +10,11 @@ import (
 	"errors"
 	"io"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"bilibili-live-gift-panel/internal/gameplay"
@@ -244,13 +246,18 @@ func normalizeWire(wire wireEnvelope, report *Report) (configuration.Definition,
 type simpleParameter struct {
 	fallback any
 	text     bool
+	toggle   bool
 	min, max float64
 	integer  bool
 	choices  map[string]struct{}
 }
+type simpleSlot struct {
+	minimum  int
+	multiple bool
+}
 type simpleTemplate struct {
 	parameters map[string]simpleParameter
-	slot       string
+	slots      map[string]simpleSlot
 	actions    bool
 }
 
@@ -274,12 +281,14 @@ func normalizeSimplePlay(wire wireSimplePlay, catalog []configuration.GiftDefini
 				value = candidate
 			} else {
 				reportIgnored(report, "/payload/definition/simplePlay/parameters/"+escapePointer(key))
+				reportIgnored(report, "/payload/definition/simplePlay")
+				return nil, nil
 			}
 		}
 		parameters[key] = value
 	}
 	for slot := range wire.Gifts {
-		if slot != template.slot {
+		if _, known := template.slots[slot]; !known {
 			reportIgnored(report, "/payload/definition/simplePlay/gifts/"+escapePointer(slot))
 		}
 	}
@@ -287,27 +296,39 @@ func normalizeSimplePlay(wire wireSimplePlay, catalog []configuration.GiftDefini
 	for _, gift := range catalog {
 		knownGifts[gift.ID] = struct{}{}
 	}
-	giftIDs := make([]int, 0)
 	seen := make(map[int]struct{})
-	for index, giftID := range wire.Gifts[template.slot] {
-		if giftID <= 0 {
-			reportIgnored(report, "/payload/definition/simplePlay/gifts/"+template.slot+"/"+strconv.Itoa(index))
-			continue
-		}
-		if _, exists := knownGifts[giftID]; !exists {
-			reportIgnored(report, "/payload/definition/simplePlay/gifts/"+template.slot+"/"+strconv.Itoa(index))
-			continue
-		}
-		if _, duplicate := seen[giftID]; duplicate {
-			reportIgnored(report, "/payload/definition/simplePlay/gifts/"+template.slot+"/"+strconv.Itoa(index))
-			continue
-		}
-		seen[giftID] = struct{}{}
-		giftIDs = append(giftIDs, giftID)
+	gifts := make(map[string][]int, len(template.slots))
+	slotNames := make([]string, 0, len(template.slots))
+	for slot := range template.slots {
+		slotNames = append(slotNames, slot)
 	}
-	if len(giftIDs) == 0 {
-		reportIgnored(report, "/payload/definition/simplePlay/gifts/"+template.slot)
-		return nil, nil
+	sort.Strings(slotNames)
+	for _, slot := range slotNames {
+		policy := template.slots[slot]
+		for index, giftID := range wire.Gifts[slot] {
+			if giftID <= 0 {
+				reportIgnored(report, "/payload/definition/simplePlay/gifts/"+slot+"/"+strconv.Itoa(index))
+				continue
+			}
+			if _, exists := knownGifts[giftID]; !exists {
+				reportIgnored(report, "/payload/definition/simplePlay/gifts/"+slot+"/"+strconv.Itoa(index))
+				continue
+			}
+			if _, duplicate := seen[giftID]; duplicate {
+				reportIgnored(report, "/payload/definition/simplePlay/gifts/"+slot+"/"+strconv.Itoa(index))
+				continue
+			}
+			if !policy.multiple && len(gifts[slot]) > 0 {
+				reportIgnored(report, "/payload/definition/simplePlay/gifts/"+slot+"/"+strconv.Itoa(index))
+				continue
+			}
+			seen[giftID] = struct{}{}
+			gifts[slot] = append(gifts[slot], giftID)
+		}
+		if len(gifts[slot]) < policy.minimum {
+			reportIgnored(report, "/payload/definition/simplePlay/gifts/"+slot)
+			return nil, nil
+		}
 	}
 	actions := make([]gameplay.OvertimeGiftAction, 0)
 	if template.actions {
@@ -321,7 +342,7 @@ func normalizeSimplePlay(wire wireSimplePlay, catalog []configuration.GiftDefini
 	} else if len(wire.OvertimeGiftActions) != 0 {
 		reportIgnored(report, "/payload/definition/simplePlay/overtimeGiftActions")
 	}
-	return &gameplay.SimplePlay{Version: 1, TemplateID: wire.TemplateID, TemplateVersion: wire.TemplateVersion, AttributeID: wire.AttributeID, Parameters: parameters, Gifts: map[string][]int{template.slot: giftIDs}, OvertimeGiftActions: actions, ManagedFingerprint: wire.ManagedFingerprint}, nil
+	return &gameplay.SimplePlay{Version: 1, TemplateID: wire.TemplateID, TemplateVersion: wire.TemplateVersion, AttributeID: wire.AttributeID, Parameters: parameters, Gifts: gifts, OvertimeGiftActions: actions, ManagedFingerprint: wire.ManagedFingerprint}, nil
 }
 
 func migrationSimpleTemplate(id string, version int) (simpleTemplate, bool) {
@@ -337,15 +358,103 @@ func migrationSimpleTemplate(id string, version int) (simpleTemplate, bool) {
 		return simpleParameter{fallback: value, choices: choices}
 	}
 	broadcast := text("感谢大家的支持，欢迎投喂礼物")
+	slots := func(items ...struct {
+		id      string
+		minimum int
+	}) map[string]simpleSlot {
+		result := make(map[string]simpleSlot, len(items))
+		for _, item := range items {
+			result[item.id] = simpleSlot{minimum: item.minimum, multiple: true}
+		}
+		return result
+	}
 	switch {
 	case id == "overtime" && version == 1:
-		return simpleTemplate{slot: "overtime", parameters: map[string]simpleParameter{"name": text("加班时间"), "minutesPerYuan": number(60, 1, 3600, false), "maxHours": number(0, 0, 240, false), "broadcastMessage": broadcast}}, true
+		return simpleTemplate{slots: slots(struct {
+			id      string
+			minimum int
+		}{"overtime", 1}), parameters: map[string]simpleParameter{"name": text("加班时间"), "minutesPerYuan": number(60, 1, 3600, false), "maxHours": number(0, 0, 240, false), "broadcastMessage": broadcast}}, true
 	case id == "overtime" && version == 2:
-		return simpleTemplate{slot: "overtime", actions: true, parameters: map[string]simpleParameter{"name": text("加班时间"), "maxSeconds": number(0, 0, 864000, true), "broadcastMessage": broadcast}}, true
+		return simpleTemplate{slots: slots(struct {
+			id      string
+			minimum int
+		}{"overtime", 1}), actions: true, parameters: map[string]simpleParameter{"name": text("加班时间"), "maxSeconds": number(0, 0, 864000, true), "broadcastMessage": broadcast}}, true
+	case id == "countdown" && version == 1:
+		return simpleTemplate{slots: slots(struct {
+			id      string
+			minimum int
+		}{"extend", 1}), parameters: map[string]simpleParameter{"name": text("剩余时间"), "initialSeconds": number(1800, 10, 86400, false), "growthMode": selectValue("fixed", "fixed", "price"), "addSeconds": number(60, 1, 3600, false), "maxSeconds": number(7200, 60, 86400, false), "broadcastMessage": broadcast}}, true
 	case id == "counter" && version == 1:
-		return simpleTemplate{slot: "count", parameters: map[string]simpleParameter{"name": text("挑战次数"), "suffix": selectValue("次", "次", "局", "个", "组", "分"), "amount": number(1, .01, 100000, false), "cap": number(0, 0, 1000000, false), "broadcastMessage": broadcast}}, true
+		return simpleTemplate{slots: slots(struct {
+			id      string
+			minimum int
+		}{"count", 1}), parameters: map[string]simpleParameter{"name": text("挑战次数"), "suffix": selectValue("次", "次", "局", "个", "组", "分"), "amount": number(1, .01, 100000, false), "cap": number(0, 0, 1000000, false), "broadcastMessage": broadcast}}, true
 	case id == "goal" && version == 1:
-		return simpleTemplate{slot: "progress", parameters: map[string]simpleParameter{"name": text("目标进度"), "target": number(100, 1, 100000000, false), "perYuan": number(1, .01, 100000, false), "broadcastMessage": broadcast}}, true
+		return simpleTemplate{slots: slots(struct {
+			id      string
+			minimum int
+		}{"progress", 1}), parameters: map[string]simpleParameter{"name": text("目标进度"), "target": number(100, 1, 100000000, false), "perYuan": number(1, .01, 100000, false), "broadcastMessage": broadcast}}, true
+	case id == "boss" && version == 1:
+		return simpleTemplate{slots: slots(struct {
+			id      string
+			minimum int
+		}{"attack", 1}, struct {
+			id      string
+			minimum int
+		}{"heavy", 0}, struct {
+			id      string
+			minimum int
+		}{"heal", 0}), parameters: map[string]simpleParameter{"name": text("Boss血量"), "bossName": text("最终 Boss"), "maxHealth": number(1000, 1, 100000000, false), "attack": number(50, 0, 100000000, false), "heavy": number(200, 0, 100000000, false), "heal": number(100, 0, 100000000, false), "regenEnabled": simpleParameter{fallback: false, toggle: true}, "regenInterval": number(10, 1, 3600, false), "regenAmount": number(10, 0, 100000000, false), "broadcastMessage": broadcast}}, true
+	case id == "resource" && version == 1:
+		return simpleTemplate{slots: slots(struct {
+			id      string
+			minimum int
+		}{"small", 1}, struct {
+			id      string
+			minimum int
+		}{"large", 0}, struct {
+			id      string
+			minimum int
+		}{"interference", 0}), parameters: map[string]simpleParameter{"name": text("氧气"), "maximum": number(100, 1, 100000000, false), "consumeInterval": number(5, 1, 3600, false), "consumeAmount": number(1, 0, 100000000, false), "smallSupply": number(10, 0, 100000000, false), "largeSupply": number(30, 0, 100000000, false), "interference": number(10, 0, 100000000, false), "broadcastMessage": broadcast}}, true
+	case id == "tug" && version == 1:
+		return simpleTemplate{slots: slots(struct {
+			id      string
+			minimum int
+		}{"left", 1}, struct {
+			id      string
+			minimum int
+		}{"right", 1}), parameters: map[string]simpleParameter{"name": text("局势"), "leftLabel": text("继续挑战"), "rightLabel": text("结束挑战"), "initial": number(50, 0, 100, false), "leftAmount": number(10, 0, 100, false), "rightAmount": number(10, 0, 100, false), "broadcastMessage": broadcast}}, true
+	case id == "team-duel" && version == 1:
+		return simpleTemplate{slots: slots(struct {
+			id      string
+			minimum int
+		}{"left", 1}, struct {
+			id      string
+			minimum int
+		}{"right", 1}), parameters: map[string]simpleParameter{"activityName": text("红蓝阵营对战"), "leftName": text("红队"), "rightName": text("蓝队"), "target": number(100, 1, 100000000, false), "points": number(1, .01, 1000000, false), "broadcastMessage": broadcast}}, true
+	case id == "gift-vote" && version == 1:
+		return simpleTemplate{slots: slots(struct {
+			id      string
+			minimum int
+		}{"left", 1}, struct {
+			id      string
+			minimum int
+		}{"right", 1}), parameters: map[string]simpleParameter{"activityName": text("下一项挑战投票"), "leftName": text("继续挑战"), "rightName": text("休息一下"), "votes": number(1, .01, 1000000, false), "broadcastMessage": broadcast}}, true
+	case id == "combo" && version == 1:
+		return simpleTemplate{slots: slots(struct {
+			id      string
+			minimum int
+		}{"combo", 1}), parameters: map[string]simpleParameter{"name": text("全房连击"), "timeout": number(15, 1, 3600, false), "goal": number(50, 0, 100000000, false), "broadcastMessage": broadcast}}, true
+	case id == "milestone" && version == 1:
+		return simpleTemplate{slots: slots(struct {
+			id      string
+			minimum int
+		}{"progress", 1}), parameters: map[string]simpleParameter{"name": text("应援目标"), "target": number(100, 1, 100000000, false), "amount": number(1, .01, 1000000, false), "message": text("全房目标达成！"), "broadcastMessage": broadcast}}, true
+	case id == "random-event" && version == 1:
+		return simpleTemplate{slots: slots(struct {
+			id      string
+			minimum int
+		}{"draw", 1}), parameters: map[string]simpleParameter{"name": text("随机事件"), "event1": text("主播喝水"), "event2": text("做 10 个深蹲"), "event3": text("唱一句歌"), "event4": text("安全通过"), "broadcastMessage": broadcast}}, true
 	}
 	return simpleTemplate{}, false
 }
@@ -359,12 +468,56 @@ func validSimpleParameter(value any, rule simpleParameter) bool {
 		_, found := rule.choices[text]
 		return ok && found
 	}
+	if rule.toggle {
+		_, ok := value.(bool)
+		return ok
+	}
 	number, ok := value.(float64)
 	return ok && !math.IsNaN(number) && !math.IsInf(number, 0) && number >= rule.min && number <= rule.max && (!rule.integer || math.Trunc(number) == number)
 }
+
+var simpleSchemePattern = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*:`)
+var simpleDrivePattern = regexp.MustCompile(`[A-Za-z]:[\\/]`)
+var simpleMediaPattern = regexp.MustCompile(`(?i)\.(apng|avif|bmp|gif|jpe?g|png|svg|webp|mp3|wav|ogg|m4a|mp4|m4v|mov|webm)\b`)
+
 func safeSimpleText(value string) bool {
-	lower := strings.ToLower(value)
-	return strings.TrimSpace(value) != "" && utf8.RuneCountInString(value) <= maximumStringRunes && !strings.Contains(value, "//") && !strings.Contains(value, "\\") && !strings.Contains(value, "/") && !strings.Contains(lower, "http:") && !strings.Contains(lower, "https:") && !strings.Contains(lower, "file:") && !strings.Contains(lower, "data:") && !strings.Contains(lower, "blob:") && !strings.Contains(lower, "javascript:") && !strings.Contains(lower, "vbscript:")
+	return strings.TrimSpace(value) != "" && utf8.RuneCountInString(value) <= maximumStringRunes && !containsSimpleResourceReference(value)
+}
+func containsSimpleResourceReference(value string) bool {
+	for _, index := range simpleSchemePattern.FindAllStringIndex(value, -1) {
+		scheme := value[index[0] : index[1]-1]
+		remainder := value[index[1]:]
+		lower := strings.ToLower(scheme)
+		switch lower {
+		case "http", "https", "data", "file", "blob", "javascript", "vbscript":
+			return true
+		}
+		if scheme != "PK" && scheme != "HP" && (len(remainder) == 0 || !unicode.IsSpace(firstRune(remainder))) {
+			return true
+		}
+	}
+	if strings.Contains(value, "//") || strings.Contains(value, "\\\\") || simpleDrivePattern.MatchString(value) || simpleMediaPattern.MatchString(value) {
+		return true
+	}
+	runes := []rune(value)
+	for index, character := range runes {
+		if character != '/' && character != '\\' {
+			continue
+		}
+		if index+1 >= len(runes) || unicode.IsSpace(runes[index+1]) {
+			continue
+		}
+		if index == 0 || unicode.IsSpace(runes[index-1]) || unicode.IsPunct(runes[index-1]) || unicode.IsSymbol(runes[index-1]) {
+			return true
+		}
+	}
+	return false
+}
+func firstRune(value string) rune {
+	for _, character := range value {
+		return character
+	}
+	return 0
 }
 func validOvertimeAction(action gameplay.OvertimeGiftAction) bool {
 	if action.Operation != "add" && action.Operation != "subtract" && action.Operation != "double" && action.Operation != "halve" && action.Operation != "reset" {
