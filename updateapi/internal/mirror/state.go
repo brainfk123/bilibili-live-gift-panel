@@ -36,15 +36,20 @@ type StateRepository interface {
 	Save(MirrorState) error
 }
 
-// ErrInvalidState identifies untrusted or corrupt on-disk mirror state.
-var ErrInvalidState = errors.New("invalid mirror state")
+var (
+	// ErrInvalidState identifies untrusted or corrupt on-disk mirror state.
+	ErrInvalidState = errors.New("invalid mirror state")
+	// ErrIndeterminateStateCommit identifies a save that replaced a state file but could not verify its durability or restore the prior state.
+	ErrIndeterminateStateCommit = errors.New("indeterminate mirror state commit")
+)
 
 type fileStateOptions struct {
 	write         func(*os.File, []byte) (int, error)
 	syncFile      func(*os.File) error
 	beforeReplace func() error
-	replace       func(*os.Root, string, string) error
+	replace       func(string, *os.Root, string, string) error
 	syncDirectory func(*os.Root) error
+	openFile      func(*os.Root, string, int, os.FileMode) (*os.File, error)
 }
 
 type fileStateRepository struct {
@@ -87,6 +92,9 @@ func newFileStateRepositoryWithOptions(stateDir string, options fileStateOptions
 	if options.syncDirectory == nil {
 		options.syncDirectory = syncStateDirectory
 	}
+	if options.openFile == nil {
+		options.openFile = openStateFile
+	}
 	gate := make(chan struct{}, 1)
 	gate <- struct{}{}
 	return &fileStateRepository{stateDir: stateDir, stateInfo: info, options: options, gate: gate}, nil
@@ -104,28 +112,7 @@ func (repository *fileStateRepository) Load() (MirrorState, error) {
 	if err := repository.validateStateRoot(root); err != nil {
 		return MirrorState{}, invalidStateError("state directory changed")
 	}
-	info, err := root.Lstat(stateFileName)
-	if errors.Is(err, os.ErrNotExist) {
-		return MirrorState{}, nil
-	}
-	if err != nil || !safeStateFile(info) {
-		return MirrorState{}, invalidStateError("state file is unsafe")
-	}
-	file, err := openStateFile(root, stateFileName, os.O_RDONLY, 0)
-	if err != nil {
-		return MirrorState{}, invalidStateError("state file cannot be opened")
-	}
-	defer file.Close()
-	openedInfo, err := file.Stat()
-	pathInfo, pathErr := root.Lstat(stateFileName)
-	if err != nil || pathErr != nil || !safeStateFile(openedInfo) || !safeStateFile(pathInfo) || !os.SameFile(openedInfo, pathInfo) {
-		return MirrorState{}, invalidStateError("state file changed while opening")
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxStateBytes+1))
-	if err != nil || len(data) > maxStateBytes {
-		return MirrorState{}, invalidStateError("state file is too large")
-	}
-	state, err := decodeMirrorState(data)
+	state, _, _, _, err := repository.readState(root)
 	if err != nil {
 		return MirrorState{}, err
 	}
@@ -152,7 +139,8 @@ func (repository *fileStateRepository) Save(state MirrorState) error {
 	if err := repository.validateStateRoot(root); err != nil {
 		return errors.New("mirror state directory changed")
 	}
-	if err := rejectUnsafeStatePath(root); err != nil {
+	_, priorData, priorInfo, priorExists, err := repository.readState(root)
+	if err != nil {
 		return err
 	}
 	temporary, temporaryName, err := createStateTemp(root)
@@ -172,13 +160,18 @@ func (repository *fileStateRepository) Save(state MirrorState) error {
 		_ = temporary.Close()
 		return errors.New("could not sync mirror state")
 	}
+	temporaryInfo, err := temporary.Stat()
+	if err != nil || !temporaryInfo.Mode().IsRegular() {
+		_ = temporary.Close()
+		return errors.New("could not verify mirror state")
+	}
 	if err := temporary.Close(); err != nil {
 		return errors.New("could not close mirror state")
 	}
 	if err := repository.validateStateRoot(root); err != nil {
 		return errors.New("mirror state directory changed")
 	}
-	if err := rejectUnsafeStatePath(root); err != nil {
+	if err := ensurePriorStateUnchanged(root, priorInfo, priorExists); err != nil {
 		return err
 	}
 	if repository.options.beforeReplace != nil {
@@ -186,11 +179,27 @@ func (repository *fileStateRepository) Save(state MirrorState) error {
 			return err
 		}
 	}
-	if err := repository.options.replace(root, temporaryName, stateFileName); err != nil {
+	if err := repository.validateStateRoot(root); err != nil {
+		return errors.New("mirror state directory changed")
+	}
+	if err := ensurePriorStateUnchanged(root, priorInfo, priorExists); err != nil {
+		return err
+	}
+	if err := repository.options.replace(repository.stateDir, root, temporaryName, stateFileName); err != nil {
 		return errors.New("could not atomically replace mirror state")
 	}
+	installedInfo, err := root.Lstat(stateFileName)
+	if err != nil || !safeStateFile(installedInfo) || !os.SameFile(temporaryInfo, installedInfo) || repository.validateStateRoot(root) != nil {
+		return indeterminateStateCommitError("state changed during replacement")
+	}
 	if err := repository.options.syncDirectory(root); err != nil {
-		return errors.New("could not sync mirror state directory")
+		if !priorExists {
+			return indeterminateStateCommitError("directory sync failed without prior state")
+		}
+		if restoreErr := repository.restorePriorState(root, priorData); restoreErr != nil {
+			return indeterminateStateCommitError("directory sync failed and prior state could not be restored")
+		}
+		return errors.New("could not sync mirror state directory; prior state restored")
 	}
 	return nil
 }
@@ -211,19 +220,102 @@ func (repository *fileStateRepository) validateStateRoot(root *os.Root) error {
 	return nil
 }
 
-func rejectUnsafeStatePath(root *os.Root) error {
+func safeStateFile(info os.FileInfo) bool {
+	return info != nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular() && stateFilePermissionsSafe(info)
+}
+
+func (repository *fileStateRepository) readState(root *os.Root) (MirrorState, []byte, os.FileInfo, bool, error) {
 	info, err := root.Lstat(stateFileName)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return MirrorState{}, nil, nil, false, nil
 	}
 	if err != nil || !safeStateFile(info) {
-		return errors.New("mirror state file is unsafe")
+		return MirrorState{}, nil, nil, false, invalidStateError("state file is unsafe")
+	}
+	// On Windows this open may follow an in-root reparse point. It remains
+	// read-only and is not used until the root-relative Lstat identity check.
+	file, err := repository.options.openFile(root, stateFileName, os.O_RDONLY, 0)
+	if err != nil {
+		return MirrorState{}, nil, nil, false, invalidStateError("state file cannot be opened")
+	}
+	defer file.Close()
+	openedInfo, statErr := file.Stat()
+	pathInfo, pathErr := root.Lstat(stateFileName)
+	if statErr != nil || pathErr != nil || !safeStateFile(openedInfo) || !safeStateFile(pathInfo) || !os.SameFile(openedInfo, pathInfo) {
+		return MirrorState{}, nil, nil, false, invalidStateError("state file changed while opening")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxStateBytes+1))
+	if err != nil || len(data) > maxStateBytes {
+		return MirrorState{}, nil, nil, false, invalidStateError("state file is too large")
+	}
+	state, err := decodeMirrorState(data)
+	if err != nil {
+		return MirrorState{}, nil, nil, false, err
+	}
+	return state, data, pathInfo, true, nil
+}
+
+func ensurePriorStateUnchanged(root *os.Root, priorInfo os.FileInfo, priorExists bool) error {
+	info, err := root.Lstat(stateFileName)
+	if !priorExists {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return errors.New("mirror state appeared before replacement")
+	}
+	if err != nil || !safeStateFile(info) || !os.SameFile(priorInfo, info) {
+		return errors.New("mirror state changed before replacement")
 	}
 	return nil
 }
 
-func safeStateFile(info os.FileInfo) bool {
-	return info != nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular() && stateFilePermissionsSafe(info)
+func (repository *fileStateRepository) restorePriorState(root *os.Root, priorData []byte) error {
+	if err := repository.validateStateRoot(root); err != nil {
+		return err
+	}
+	temporary, temporaryName, err := createStateTemp(root)
+	if err != nil {
+		return err
+	}
+	defer root.Remove(temporaryName)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := writeAll(temporary, priorData, repository.options.write); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := repository.options.syncFile(temporary); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	priorInfo, err := temporary.Stat()
+	if err != nil || !priorInfo.Mode().IsRegular() {
+		_ = temporary.Close()
+		return errors.New("could not verify restored mirror state")
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := repository.validateStateRoot(root); err != nil {
+		return err
+	}
+	if err := repository.options.replace(repository.stateDir, root, temporaryName, stateFileName); err != nil {
+		return err
+	}
+	installedInfo, err := root.Lstat(stateFileName)
+	if err != nil || !safeStateFile(installedInfo) || !os.SameFile(priorInfo, installedInfo) || repository.validateStateRoot(root) != nil {
+		return errors.New("restored mirror state changed during replacement")
+	}
+	if err := repository.options.syncDirectory(root); err != nil {
+		return err
+	}
+	_, restoredData, _, restored, err := repository.readState(root)
+	if err != nil || !restored || !bytes.Equal(restoredData, priorData) {
+		return errors.New("restored mirror state could not be verified")
+	}
+	return nil
 }
 
 func createStateTemp(root *os.Root) (*os.File, string, error) {
@@ -312,6 +404,9 @@ func rejectDuplicateStateFields(data []byte) error {
 		if err != nil || !ok {
 			return errors.New("state JSON key is invalid")
 		}
+		if _, allowed := canonicalStateJSONFields[key]; !allowed {
+			return errors.New("state JSON key is not canonical")
+		}
 		if _, duplicate := seen[key]; duplicate {
 			return errors.New("state JSON contains duplicate fields")
 		}
@@ -325,6 +420,14 @@ func rejectDuplicateStateFields(data []byte) error {
 		return errors.New("state JSON is incomplete")
 	}
 	return ensureJSONEOF(decoder)
+}
+
+var canonicalStateJSONFields = map[string]struct{}{
+	"etag":        {},
+	"tag":         {},
+	"sha256":      {},
+	"publishedAt": {},
+	"completedAt": {},
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {
@@ -371,4 +474,8 @@ func parseCanonicalStateTime(value string) (time.Time, error) {
 
 func invalidStateError(message string) error {
 	return fmt.Errorf("%w: %s", ErrInvalidState, message)
+}
+
+func indeterminateStateCommitError(message string) error {
+	return fmt.Errorf("%w: %s", ErrIndeterminateStateCommit, message)
 }

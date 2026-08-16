@@ -20,7 +20,7 @@ func syncStateDirectory(root *os.Root) error {
 	return directory.Sync()
 }
 
-func replaceStateFile(root *os.Root, oldName, newName string) error {
+func replaceStateFile(_ string, root *os.Root, oldName, newName string) error {
 	return root.Rename(oldName, newName)
 }
 
