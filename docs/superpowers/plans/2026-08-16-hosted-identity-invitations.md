@@ -188,13 +188,17 @@ Run `go -C goserver test ./internal/hosted/identity/... ./internal/hosted/app -c
 - Create: `goserver/internal/hosted/adminidentity/http.go`
 - Create: `goserver/internal/hosted/adminidentity/http_test.go`
 - Create: `goserver/internal/hosted/adminidentity/smtp.go`
+- Create: `goserver/internal/hosted/store/mysqlstore/migrations/0003_admin_handoffs.sql`
 - Modify: `goserver/internal/hosted/app/app.go`
 - Modify: `goserver/internal/hosted/platform/config.go`
+- Modify: `goserver/internal/hosted/store/mysqlstore/store_test.go`
 - Modify: `goserver/cmd/hosted/main.go`
 - Modify: `goserver/cmd/hosted/main_test.go`
+- Modify: `goserver/go.mod`
+- Modify: `goserver/go.sum`
 
 **Interfaces:**
-- Produces: `adminidentity.Service.Initialize`, `VerifyLogin`, `RequireRecentTOTP`, `SendRecovery`, and `CompleteRecovery`.
+- Produces: `adminidentity.Service.Initialize`, `VerifyLogin`, `RequireRecentTOTP`, `SendRecovery`, `PrepareRecovery`, and `ConfirmRecovery`.
 - Produces: `MailSender.Send(context.Context, Message) error` with SMTP and in-memory adapters.
 
 - [ ] **Step 1: Write failing TOTP lifecycle tests**
@@ -209,15 +213,27 @@ Initialization is available only to the local CLI:
 gift-panel-hosted admin init --uid <uid> --email <address>
 ```
 
-The command prints the `otpauth://` URI and initial recovery package password once; it does not expose an HTTP initialization route. Store the TOTP secret with `Keyring.Seal("admin_totp", ...)`. Record `totp_verified_at` on the admin session and require it to be within 5 minutes for high-risk operations.
+The command prints the `otpauth://` URI and initial recovery package password; it does not expose an HTTP initialization route. Store the TOTP secret with `Keyring.Seal("admin_totp", ...)`. Record `totp_verified_at` on the admin session and require it to be within 5 minutes for high-risk operations.
+
+Initialization is a recoverable two-phase handoff. The first invocation creates one database-backed pending handoff, sends its stable encrypted attachment, and prints secrets decrypted from that pending record. Repeating the exact local initialization while it remains pending returns the same handoff instead of mailing or creating a second invalid credential set. The first successful matching B 站 UID plus new TOTP login atomically activates the pending administrator and erases the retrievable handoff secret. An expired pending handoff is unusable and is removed by bounded periodic cleanup. A configured active administrator still makes initialization fail closed.
 
 - [ ] **Step 3: Implement the recovery archive**
 
 Generate ten 16-byte recovery codes. Store only SHA-256 hashes. Build a binary envelope containing version, random salt, scrypt parameters, nonce, and AES-256-GCM ciphertext. Derive the archive key with `scrypt.Key(password, salt, 32768, 8, 1, 32)`. Email only the encrypted attachment; return the random 20-character decryption password to the current local/admin page once.
 
+Provide a supported local command that decrypts this exact archive format, reads the password from a non-echoing terminal or an explicitly selected stdin/file input rather than a command-line argument, and prints the ten recovery codes only to local stdout. Test the real CLI boundary from generated attachment to recovered codes.
+
+Recovery rotation also uses a database-backed prepare/confirm handoff. `PrepareRecovery` requires a fresh matching B 站 proof and an unused recovery code, reserves that code, persists one encrypted pending credential set and stable mail attachment, then returns the new TOTP URI, archive password, and opaque handoff token. Retrying the same recovery code with a fresh proof returns the same unexpired handoff; it never creates or mails a different set. No old credential/session is revoked during prepare. `ConfirmRecovery` requires the opaque handoff token and a valid TOTP from the pending new secret, then in one transaction consumes the reserved old code, activates the new TOTP and recovery hashes, invalidates every old code, increments the administrator epoch, revokes every old admin session, and destroys the pending retrievable secret. Losing either the prepare or confirm HTTP response must therefore be safely retryable or leave already-delivered new credentials usable. Expiry releases the reservation and deletes pending secret material through bounded periodic cleanup.
+
+The handoff/outbox schema must enforce one pending initialization globally and one pending recovery per administrator/recovery code across instances. Mail is sent only from a committed pending record; retry may resend the same valid attachment but may not create invalid alternate attachments. Persist only AEAD ciphertext, hashes, minimal delivery metadata, expiry, and state—never plaintext TOTP, recovery codes, archive password, B 站 UID, or SMTP password.
+
 - [ ] **Step 4: Test recovery secrecy and SMTP composition**
 
-Assert the attachment contains no code plaintext, wrong password fails authentication, sent mail contains no password, successful recovery requires a fresh matching admin B 站 UID proof, consumes one code, rotates TOTP, invalidates every old recovery code, and revokes every admin session.
+Assert the attachment contains no code plaintext, wrong password fails authentication, sent mail contains no password, the supported local decrypt command recovers the ten codes, and prepare/confirm recovery is safe under duplicate requests, concurrent instances, SMTP failure, response loss, pending expiry, and activation retry. Successful confirmation requires a fresh matching admin B 站 UID proof at prepare, consumes one reserved code, rotates TOTP, invalidates every old recovery code, and revokes every admin session.
+
+Apply endpoint-specific global, per-IP, and per-session-or-administrator limits to TOTP verification and recovery archive generation; limiter keys must use internal IDs or one-way token hashes, never plaintext cookies. Missing or empty admin cookies return stable generic JSON and never panic.
+
+SMTP transport is explicit and fail closed: support implicit TLS and mandatory STARTTLS with system certificate verification and the correct server name; never silently downgrade, and authenticate only after TLS. Use `DialContext`, a bounded total timeout, connection deadlines, and context-cancelled connection close. Plain SMTP is permitted only behind an explicit localhost-only development opt-in.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -335,7 +351,7 @@ All hosted UI fetches go through `HostedAPI`, which sets `credentials:'same-orig
 
 - [ ] **Step 3: Implement views with secret lifecycle controls**
 
-Complete invitation/recovery strings exist only in closure-local state, are replaced with masked text when dialogs close, and are not written to `localStorage`, `sessionStorage`, URL, analytics, or console. QR challenges cancel when their view unmounts.
+Complete invitation/recovery strings exist only in closure-local state, are replaced with masked text when dialogs close, and are not written to `localStorage`, `sessionStorage`, URL, analytics, or console. QR challenges cancel when their view unmounts. The recovery UI keeps the prepare handoff only in closure-local state, requires the user to save the new TOTP and archive password before confirm is enabled, and can repeat prepare with the same recovery code plus a fresh B 站 proof to recover the same unexpired handoff after a lost response.
 
 - [ ] **Step 4: Run frontend and full verification**
 
