@@ -136,9 +136,10 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunRe
 	tag := candidate.Tag
 
 	paths := make(map[string]string, 4)
-	defer func() {
+	cleanupAttempted := false
+	cleanupCompleted := func() error {
 		if len(paths) == 0 {
-			return
+			return nil
 		}
 		cleaner, ok := runner.Fetcher.(CompletedArtifactCleaner)
 		var cleanupErrors []error
@@ -156,8 +157,17 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunRe
 			}
 		}
 		if len(cleanupErrors) != 0 {
-			cleanupErrors = append(cleanupErrors, runErr)
-			runErr = runnerFailure(StageCleanup, tag, errors.Join(cleanupErrors...))
+			return errors.Join(cleanupErrors...)
+		}
+		clear(paths)
+		return nil
+	}
+	defer func() {
+		if cleanupAttempted || len(paths) == 0 {
+			return
+		}
+		if cleanupErr := cleanupCompleted(); cleanupErr != nil {
+			runErr = runnerFailure(StageCleanup, tag, errors.Join(cleanupErr, runErr))
 		}
 	}()
 
@@ -167,7 +177,9 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunRe
 		if !ok || !allowed || asset.Name != name {
 			return RunResult{Tag: tag, StateInvalid: stateInvalid}, runnerFailure(StageValidation, tag, errors.New("required asset metadata is invalid"))
 		}
-		path, err := runner.Fetcher.Download(ctx, DownloadSpec{Name: name, URL: asset.DownloadURL, Size: asset.Size, MaxBytes: limit})
+		path, err := runner.Fetcher.Download(ctx, DownloadSpec{
+			Name: name, URL: asset.DownloadURL, Size: asset.Size, MaxBytes: limit, Resumable: name == AssetExecutable,
+		})
 		if err != nil {
 			return RunResult{Tag: tag, StateInvalid: stateInvalid}, runnerFailure(StageFetch, tag, err)
 		}
@@ -225,6 +237,10 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunRe
 	}
 	if outcome != publish.OutcomeStablePromoted && outcome != publish.OutcomeStableUnchanged {
 		return RunResult{Tag: tag, StateInvalid: stateInvalid}, runnerFailure(StagePublish, tag, errors.New("publisher outcome is invalid"))
+	}
+	cleanupAttempted = true
+	if err := cleanupCompleted(); err != nil {
+		return RunResult{Tag: tag, Outcome: outcome, StateInvalid: stateInvalid}, runnerFailure(StageCleanup, tag, err)
 	}
 
 	now := time.Now

@@ -140,7 +140,8 @@ func (repository *fileStateRepository) Save(state MirrorState) error {
 		return errors.New("mirror state directory changed")
 	}
 	_, priorData, priorInfo, priorExists, err := repository.readState(root)
-	if err != nil {
+	priorValid := err == nil && priorExists
+	if err != nil && (!errors.Is(err, ErrInvalidState) || !priorExists || priorInfo == nil) {
 		return err
 	}
 	temporary, temporaryName, err := createStateTemp(root)
@@ -193,8 +194,8 @@ func (repository *fileStateRepository) Save(state MirrorState) error {
 		return indeterminateStateCommitError("state changed during replacement")
 	}
 	if err := repository.options.syncDirectory(root); err != nil {
-		if !priorExists {
-			return indeterminateStateCommitError("directory sync failed without prior state")
+		if !priorValid {
+			return indeterminateStateCommitError("directory sync failed without valid prior state")
 		}
 		if restoreErr := repository.restorePriorState(root, priorData); restoreErr != nil {
 			return indeterminateStateCommitError("directory sync failed and prior state could not be restored")
@@ -250,7 +251,7 @@ func (repository *fileStateRepository) readState(root *os.Root) (MirrorState, []
 	}
 	state, err := decodeMirrorState(data)
 	if err != nil {
-		return MirrorState{}, nil, nil, false, err
+		return MirrorState{}, data, pathInfo, true, err
 	}
 	return state, data, pathInfo, true, nil
 }

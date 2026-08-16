@@ -39,6 +39,44 @@ func TestRunnerTreatsCorruptStateAsEmptyCacheAndStopsOnNotModified(t *testing.T)
 	}
 }
 
+func TestRunnerRecoversCorruptFileStateThenUsesSavedETagWithoutRepublishing(t *testing.T) {
+	// Mutation caught: treating corrupt state as a cache miss only during Load still leaves Save permanently blocked.
+	fixture := newRunnerFixture(t)
+	if err := os.WriteFile(filepath.Join(fixture.directory, stateFileName), []byte(`{"etag":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := mustNewFileStateRepository(t, fixture.directory)
+	runner := fixture.runner()
+	runner.State = state
+
+	first, err := runner.Run(context.Background(), RunOptions{})
+	if err != nil {
+		t.Fatalf("first Run() error = %v", err)
+	}
+	if !first.StateInvalid || fixture.publisher.calls != 1 {
+		t.Fatalf("first Run() result=%+v publishes=%d, want recovered publication", first, fixture.publisher.calls)
+	}
+	saved, err := state.Load()
+	if err != nil {
+		t.Fatalf("Load() after recovery error = %v", err)
+	}
+	if saved.ETag != fixture.source.result.ETag {
+		t.Fatalf("saved ETag = %q, want %q", saved.ETag, fixture.source.result.ETag)
+	}
+
+	fixture.source.result = LatestResult{NotModified: true}
+	second, err := runner.Run(context.Background(), RunOptions{})
+	if err != nil {
+		t.Fatalf("second Run() error = %v", err)
+	}
+	if !second.NotModified || second.StateInvalid || fixture.source.etag != saved.ETag {
+		t.Fatalf("second Run() result=%+v discovery ETag=%q, want clean 304 for %q", second, fixture.source.etag, saved.ETag)
+	}
+	if fixture.publisher.calls != 1 || len(fixture.fetcher.specs) != 4 {
+		t.Fatalf("304 repeated work: publishes=%d downloads=%d", fixture.publisher.calls, len(fixture.fetcher.specs))
+	}
+}
+
 // Mutation caught: ignoring a valid prior state ETag defeats conditional discovery.
 func TestRunnerPassesOnlyValidStateETagToDiscovery(t *testing.T) {
 	fixture := newRunnerFixture(t)
@@ -72,7 +110,7 @@ func TestRunnerDownloadsFourFixedAssetsBeforePublishingAndSavingState(t *testing
 	for index, wantName := range wantNames {
 		spec := fixture.fetcher.specs[index]
 		asset := fixture.release.Assets[wantName]
-		if spec.Name != wantName || spec.URL != asset.DownloadURL || spec.Size != asset.Size {
+		if spec.Name != wantName || spec.URL != asset.DownloadURL || spec.Size != asset.Size || spec.Resumable != (wantName == AssetExecutable) {
 			t.Fatalf("Download() spec[%d] = %+v, want metadata for %q", index, spec, wantName)
 		}
 	}
@@ -308,7 +346,7 @@ func TestRunnerCleansCompleteArtifactsAfterSuccessAndFailure(t *testing.T) {
 	}
 }
 
-// Mutation caught: ignoring companion cleanup failures reports success after publish/state save and hides the incomplete cleanup.
+// Mutation caught: committing state before cleanup hides a failed cleanup behind the new ETag.
 func TestRunnerReturnsSafeCleanupStageAfterPublishedStateCannotBeCleaned(t *testing.T) {
 	fixture := newRunnerFixture(t)
 	fixture.fetcher.cleanupErr = errors.New("C:/private/artifact https://secret.invalid/?token=credential")
@@ -317,7 +355,7 @@ func TestRunnerReturnsSafeCleanupStageAfterPublishedStateCannotBeCleaned(t *test
 	if err == nil || StageOf(err) != StageCleanup {
 		t.Fatalf("Run() result=%+v error=%v stage=%q, want cleanup failure", result, err, StageOf(err))
 	}
-	if fixture.publisher.calls != 1 || fixture.state.saveCalls != 1 {
+	if fixture.publisher.calls != 1 || fixture.state.saveCalls != 0 {
 		t.Fatalf("cleanup ordering: publishes=%d saves=%d", fixture.publisher.calls, fixture.state.saveCalls)
 	}
 	if len(fixture.fetcher.cleanupPaths) != 4 {
@@ -327,6 +365,59 @@ func TestRunnerReturnsSafeCleanupStageAfterPublishedStateCannotBeCleaned(t *test
 		if strings.Contains(err.Error(), leaked) {
 			t.Fatalf("cleanup error leaked %q: %v", leaked, err)
 		}
+	}
+}
+
+func TestRunnerRetriesPublishedReleaseAfterCleanupFailureAndCommitsOnlyAfterCleanup(t *testing.T) {
+	// Mutation caught: advancing ETag on the first run turns the next run into a 304 and strands completed artifacts.
+	fixture := newRunnerFixture(t)
+	fixture.fetcher.cleanupErr = errors.New("transient cleanup failure")
+	first, err := fixture.runner().Run(context.Background(), RunOptions{})
+	if err == nil || StageOf(err) != StageCleanup || first.Tag != fixture.release.Tag {
+		t.Fatalf("first Run() result=%+v error=%v, want cleanup retry", first, err)
+	}
+	if fixture.publisher.calls != 1 || fixture.state.saveCalls != 0 {
+		t.Fatalf("first ordering: publishes=%d saves=%d", fixture.publisher.calls, fixture.state.saveCalls)
+	}
+
+	fixture.fetcher.cleanupErr = nil
+	fixture.publisher.outcome = publish.OutcomeStableUnchanged
+	second, err := fixture.runner().Run(context.Background(), RunOptions{})
+	if err != nil {
+		t.Fatalf("second Run() error = %v", err)
+	}
+	if second.Outcome != publish.OutcomeStableUnchanged || fixture.publisher.calls != 2 || fixture.state.saveCalls != 1 {
+		t.Fatalf("second Run() result=%+v publishes=%d saves=%d", second, fixture.publisher.calls, fixture.state.saveCalls)
+	}
+	if fixture.source.etag != "" {
+		t.Fatalf("retry discovery ETag = %q, want unadvanced cache", fixture.source.etag)
+	}
+	for _, path := range fixture.fetcher.returnedPaths[len(fixture.fetcher.returnedPaths)-4:] {
+		if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("retried completed artifact %q remains, error=%v", filepath.Base(path), statErr)
+		}
+	}
+	fixture.source.result = LatestResult{NotModified: true}
+	third, err := fixture.runner().Run(context.Background(), RunOptions{})
+	if err != nil || !third.NotModified {
+		t.Fatalf("third Run() result=%+v error=%v, want cached 304", third, err)
+	}
+	if fixture.source.etag != fixture.state.saved.ETag || fixture.publisher.calls != 2 || fixture.state.saveCalls != 1 {
+		t.Fatalf("post-cleanup cache: ETag=%q publishes=%d saves=%d", fixture.source.etag, fixture.publisher.calls, fixture.state.saveCalls)
+	}
+}
+
+func TestRunnerCancellationDuringPostPublishCleanupDoesNotCommitState(t *testing.T) {
+	// Mutation caught: saving after cancellation during cleanup can cache a release whose local cleanup never completed.
+	fixture := newRunnerFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	fixture.publisher.onPublish = cancel
+	_, err := fixture.runner().Run(ctx, RunOptions{})
+	if err == nil || StageOf(err) != StageCleanup || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error=%v stage=%q, want canceled cleanup", err, StageOf(err))
+	}
+	if fixture.publisher.calls != 1 || fixture.state.saveCalls != 0 {
+		t.Fatalf("canceled ordering: publishes=%d saves=%d", fixture.publisher.calls, fixture.state.saveCalls)
 	}
 }
 
@@ -552,8 +643,11 @@ func (fetcher *fakeArtifactFetcher) Download(_ context.Context, spec DownloadSpe
 	return path, nil
 }
 
-func (fetcher *fakeArtifactFetcher) CleanupCompleted(_ context.Context, path string) error {
+func (fetcher *fakeArtifactFetcher) CleanupCompleted(ctx context.Context, path string) error {
 	fetcher.cleanupPaths = append(fetcher.cleanupPaths, path)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if fetcher.cleanupErr != nil {
 		return fetcher.cleanupErr
 	}
@@ -575,18 +669,25 @@ func (repository *fakeStateRepository) Load() (MirrorState, error) {
 func (repository *fakeStateRepository) Save(state MirrorState) error {
 	repository.saveCalls++
 	repository.saved = state
+	if repository.saveErr == nil {
+		repository.loaded = state
+	}
 	return repository.saveErr
 }
 
 type fakePublisher struct {
-	input   publish.Input
-	outcome publish.Outcome
-	err     error
-	calls   int
+	input     publish.Input
+	outcome   publish.Outcome
+	err       error
+	calls     int
+	onPublish func()
 }
 
 func (publisher *fakePublisher) Publish(_ context.Context, input publish.Input) (publish.Outcome, error) {
 	publisher.calls++
 	publisher.input = input
+	if publisher.onPublish != nil {
+		publisher.onPublish()
+	}
 	return publisher.outcome, publisher.err
 }

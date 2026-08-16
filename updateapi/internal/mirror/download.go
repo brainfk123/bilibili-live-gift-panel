@@ -23,10 +23,11 @@ const (
 )
 
 type DownloadSpec struct {
-	Name     string
-	URL      string
-	Size     int64
-	MaxBytes int64
+	Name      string
+	URL       string
+	Size      int64
+	MaxBytes  int64
+	Resumable bool
 }
 
 type ArtifactFetcher interface {
@@ -214,14 +215,26 @@ func (downloader *downloader) CleanupCompleted(ctx context.Context, path string)
 	return nil
 }
 
-func (downloader *downloader) downloadOnce(ctx context.Context, root *os.Root, spec DownloadSpec) error {
+func (downloader *downloader) downloadOnce(ctx context.Context, root *os.Root, spec DownloadSpec) (returnErr error) {
 	finalName := spec.Name
+	if !spec.Resumable {
+		defer func() {
+			if returnErr != nil {
+				downloader.removePartial(root, finalName)
+			}
+		}()
+	}
 	if err := rejectUnsafeExistingPath(root, finalName); err != nil {
 		return err
 	}
 	partial, err := downloader.loadPartial(root, spec, finalName)
 	if err != nil {
 		return err
+	}
+	if !spec.Resumable {
+		closePartial(&partial)
+		downloader.removePartial(root, finalName)
+		partial = partialDownload{}
 	}
 	defer func() {
 		if partial.file != nil {
@@ -278,10 +291,10 @@ func (downloader *downloader) downloadOnce(ctx context.Context, root *os.Root, s
 		return errors.New("artifact server returned an unexpected status")
 	}
 
-	resumable := partial.offset > 0
+	resumable := spec.Resumable && partial.offset > 0
 	if partial.offset == 0 {
 		etag := response.Header.Get("ETag")
-		if isStrongETag(etag) {
+		if spec.Resumable && isStrongETag(etag) {
 			metadata := resumeMetadata{URL: spec.URL, ETag: etag, Size: spec.Size}
 			if err := downloader.writeResumeMetadata(root, finalName, metadata); err != nil {
 				return err
@@ -410,6 +423,9 @@ func validateDownloadSpec(spec DownloadSpec) error {
 	}
 	if spec.Size <= 0 || spec.MaxBytes <= 0 || spec.Size > spec.MaxBytes || spec.MaxBytes > limit {
 		return errors.New("artifact size bounds are invalid")
+	}
+	if spec.Resumable && spec.Name != AssetExecutable {
+		return errors.New("only executable downloads may be resumable")
 	}
 	return nil
 }

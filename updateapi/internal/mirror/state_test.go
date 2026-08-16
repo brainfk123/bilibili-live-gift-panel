@@ -1,6 +1,7 @@
 package mirror
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -62,6 +63,77 @@ func TestFileStateRepositoryRejectsCorruptJSON(t *testing.T) {
 				t.Fatalf("Load() error = %v, want ErrInvalidState", err)
 			}
 		})
+	}
+}
+
+func TestFileStateRepositoryReplacesCorruptStateAfterSuccessfulRevalidation(t *testing.T) {
+	// Mutation caught: rereading corrupt prior state during Save makes corruption a permanent recovery blocker.
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, stateFileName), []byte(`{"etag":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repository := mustNewFileStateRepository(t, directory)
+	want := validMirrorState()
+	if err := repository.Save(want); err != nil {
+		t.Fatalf("Save() error = %v, want corrupt cache replaced", err)
+	}
+	got, err := repository.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("Load() = %#v, want %#v", got, want)
+	}
+}
+
+func TestFileStateRepositoryReportsIndeterminateCommitWhenCorruptPriorCannotBeDurablyReplaced(t *testing.T) {
+	// Mutation caught: restoring or treating corrupt bytes as a valid prior cache understates post-replace commit uncertainty.
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, stateFileName), []byte(`{"etag":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := newFileStateRepositoryWithOptions(directory, fileStateOptions{
+		syncDirectory: func(*os.Root) error { return errors.New("directory sync failed") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := validMirrorState()
+	err = repository.Save(want)
+	if !errors.Is(err, ErrIndeterminateStateCommit) {
+		t.Fatalf("Save() error = %v, want ErrIndeterminateStateCommit", err)
+	}
+	got, loadErr := mustNewFileStateRepository(t, directory).Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	if got != want {
+		t.Fatalf("Load() = %#v, want complete replacement %#v", got, want)
+	}
+}
+
+func TestFileStateRepositoryLeavesCorruptStateUntouchedWhenReplacementFails(t *testing.T) {
+	// Mutation caught: deleting corrupt state before the atomic replace turns a pre-commit fault into state loss.
+	directory := t.TempDir()
+	corrupt := []byte(`{"etag":`)
+	if err := os.WriteFile(filepath.Join(directory, stateFileName), corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := newFileStateRepositoryWithOptions(directory, fileStateOptions{
+		replace: func(string, *os.Root, string, string) error { return errors.New("replacement failed") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Save(validMirrorState()); err == nil || errors.Is(err, ErrIndeterminateStateCommit) {
+		t.Fatalf("Save() error = %v, want known pre-commit replacement failure", err)
+	}
+	got, err := os.ReadFile(filepath.Join(directory, stateFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, corrupt) {
+		t.Fatalf("corrupt prior changed to %q, want %q", got, corrupt)
 	}
 }
 

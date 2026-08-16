@@ -150,7 +150,7 @@ func TestDownloaderCleanupReturnsRemovalFailure(t *testing.T) {
 func TestResumeUsesRangeAndIfRangeBoundToExactMetadata(t *testing.T) {
 	content := "abcdef"
 	stateDir := t.TempDir()
-	finalPath := filepath.Join(stateDir, AssetManifest)
+	finalPath := filepath.Join(stateDir, AssetExecutable)
 
 	var serverURL string
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -172,7 +172,7 @@ func TestResumeUsesRangeAndIfRangeBoundToExactMetadata(t *testing.T) {
 
 	downloader := mustNewDownloader(t, server.Client(), stateDir)
 	path, err := downloader.Download(context.Background(), DownloadSpec{
-		Name: AssetManifest, URL: serverURL, Size: 6, MaxBytes: maxManifestBytes,
+		Name: AssetExecutable, URL: serverURL, Size: 6, MaxBytes: maxExecutableBytes, Resumable: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -204,11 +204,11 @@ func TestResumeDiscardsUntrustworthyMetadataBeforeRequest(t *testing.T) {
 			defer server.Close()
 
 			stateDir := t.TempDir()
-			finalPath := filepath.Join(stateDir, AssetManifest)
+			finalPath := filepath.Join(stateDir, AssetExecutable)
 			writePartialState(t, finalPath, "stale", test.metadata(server.URL+"/asset"))
 			downloader := mustNewDownloader(t, server.Client(), stateDir)
 			path, err := downloader.Download(context.Background(), DownloadSpec{
-				Name: AssetManifest, URL: server.URL + "/asset", Size: 6, MaxBytes: maxManifestBytes,
+				Name: AssetExecutable, URL: server.URL + "/asset", Size: 6, MaxBytes: maxExecutableBytes, Resumable: true,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -252,11 +252,11 @@ func TestResumeRestartsWhenServerIgnoresRangeOrReturnsMalformedRange(t *testing.
 			defer server.Close()
 
 			stateDir := t.TempDir()
-			finalPath := filepath.Join(stateDir, AssetManifest)
+			finalPath := filepath.Join(stateDir, AssetExecutable)
 			url := server.URL + "/asset"
 			writePartialState(t, finalPath, "abc", fmt.Sprintf(`{"url":%q,"etag":"\"strong\"","size":6}`, url))
 			downloader := mustNewDownloader(t, server.Client(), stateDir)
-			path, err := downloader.Download(context.Background(), DownloadSpec{Name: AssetManifest, URL: url, Size: 6, MaxBytes: maxManifestBytes})
+			path, err := downloader.Download(context.Background(), DownloadSpec{Name: AssetExecutable, URL: url, Size: 6, MaxBytes: maxExecutableBytes, Resumable: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -274,7 +274,7 @@ func TestResumeRestartsWhenServerIgnoresRangeOrReturnsMalformedRange(t *testing.
 
 func TestResumeRejectsPartSwappedAfterOffsetValidation(t *testing.T) {
 	stateDir := t.TempDir()
-	finalPath := filepath.Join(stateDir, AssetManifest)
+	finalPath := filepath.Join(stateDir, AssetExecutable)
 	partPath := finalPath + ".part"
 	var swapped atomic.Bool
 	var serverURL string
@@ -299,7 +299,7 @@ func TestResumeRejectsPartSwappedAfterOffsetValidation(t *testing.T) {
 	writePartialState(t, finalPath, "abc", fmt.Sprintf(`{"url":%q,"etag":"\"strong\"","size":6}`, serverURL))
 
 	_, err := mustNewDownloader(t, server.Client(), stateDir).Download(context.Background(), DownloadSpec{
-		Name: AssetManifest, URL: serverURL, Size: 6, MaxBytes: maxManifestBytes,
+		Name: AssetExecutable, URL: serverURL, Size: 6, MaxBytes: maxExecutableBytes, Resumable: true,
 	})
 	if swapped.Load() {
 		if err == nil {
@@ -342,8 +342,8 @@ func TestDownloaderRejectsUnsafeResponsesAndBoundsRetries(t *testing.T) {
 		}))
 		defer server.Close()
 		stateDir := t.TempDir()
-		finalPath := filepath.Join(stateDir, AssetManifest)
-		_, err := mustNewDownloader(t, server.Client(), stateDir).Download(context.Background(), DownloadSpec{Name: AssetManifest, URL: server.URL + "/asset?token=secret", Size: 6, MaxBytes: maxManifestBytes})
+		finalPath := filepath.Join(stateDir, AssetExecutable)
+		_, err := mustNewDownloader(t, server.Client(), stateDir).Download(context.Background(), DownloadSpec{Name: AssetExecutable, URL: server.URL + "/asset?token=secret", Size: 6, MaxBytes: maxExecutableBytes, Resumable: true})
 		if err == nil || requests != 3 {
 			t.Fatalf("error = %v, requests = %d; want three failed attempts", err, requests)
 		}
@@ -435,7 +435,7 @@ func TestDownloaderSyncsRetryablePartialBeforeRetainingResumeState(t *testing.T)
 		t.Fatal(err)
 	}
 	_, err = downloader.Download(context.Background(), DownloadSpec{
-		Name: AssetManifest, URL: server.URL, Size: 6, MaxBytes: maxManifestBytes,
+		Name: AssetExecutable, URL: server.URL, Size: 6, MaxBytes: maxExecutableBytes, Resumable: true,
 	})
 	if err == nil {
 		t.Fatal("Download() error = nil, want premature EOF")
@@ -443,11 +443,56 @@ func TestDownloaderSyncsRetryablePartialBeforeRetainingResumeState(t *testing.T)
 	if syncCalls != 1 {
 		t.Fatalf("partial sync calls = %d, want 1", syncCalls)
 	}
-	if _, err := os.Stat(filepath.Join(stateDir, AssetManifest) + ".part"); err != nil {
+	if _, err := os.Stat(filepath.Join(stateDir, AssetExecutable) + ".part"); err != nil {
 		t.Fatalf("durable partial missing: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(stateDir, AssetManifest) + ".part.meta"); err != nil {
+	if _, err := os.Stat(filepath.Join(stateDir, AssetExecutable) + ".part.meta"); err != nil {
 		t.Fatalf("durable resume metadata missing: %v", err)
+	}
+}
+
+func TestDownloaderRetainsRetryablePartialOnlyForExecutable(t *testing.T) {
+	// Mutation caught: deriving retention only from a strong server ETag leaves validation artifacts resumable too.
+	for _, name := range []string{AssetExecutable, AssetChecksum, AssetManifest, AssetChangelog} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("ETag", `"strong"`)
+				writer.Header().Set("Content-Length", "6")
+				_, _ = writer.Write([]byte("a"))
+			}))
+			defer server.Close()
+			stateDir := t.TempDir()
+			downloader, err := newDownloaderWithOptions(server.Client(), stateDir, downloaderOptions{
+				overallTimeout: time.Second,
+				maxAttempts:    1,
+				backoff:        func(context.Context, int) error { return nil },
+				syncFile:       func(file *os.File) error { return file.Sync() },
+				rename:         replaceDownloadFile,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			limit, _ := assetLimit(name)
+			_, err = downloader.Download(context.Background(), DownloadSpec{
+				Name: name, URL: server.URL, Size: 6, MaxBytes: limit, Resumable: name == AssetExecutable,
+			})
+			if err == nil {
+				t.Fatal("Download() error = nil, want premature EOF")
+			}
+			partPath := filepath.Join(stateDir, name) + ".part"
+			metadataPath := partPath + ".meta"
+			if name == AssetExecutable {
+				if _, statErr := os.Stat(partPath); statErr != nil {
+					t.Fatalf("EXE partial missing: %v", statErr)
+				}
+				if _, statErr := os.Stat(metadataPath); statErr != nil {
+					t.Fatalf("EXE resume metadata missing: %v", statErr)
+				}
+				return
+			}
+			assertPathMissing(t, partPath)
+			assertPathMissing(t, metadataPath)
+		})
 	}
 }
 
