@@ -1,4 +1,4 @@
-import { HostedAPIError, type HostedConfiguration, type HostedConfigurationDefinition, type HostedConfigurationRuntime } from './api';
+import { HostedAPIError, isHostedConfigurationDefinition, isHostedConfigurationRuntime, type HostedConfiguration, type HostedConfigurationDefinition, type HostedConfigurationRuntime } from './api';
 
 interface ConfigurationAPI {
   loadConfiguration(): Promise<HostedConfiguration>;
@@ -27,8 +27,8 @@ export function createConfigurationFlow(api: ConfigurationAPI, render: (state: C
   const genericFailure = (): void => { error = '保存失败，请重试'; publish(); };
   return Object.freeze({
     async load(): Promise<void> { if (disposed) throw new HostedAPIError('invalid_request', 400); busy = true; error = undefined; publish(); try { const loaded = await api.loadConfiguration(); if (disposed) return; authoritative = loaded; draftDefinition ??= copy(loaded.definition); draftRuntime ??= copy(loaded.runtime); } catch { if (!disposed) genericFailure(); throw new HostedAPIError('operation_failed', 0); } finally { if (!disposed) { busy = false; publish(); } } },
-    setDefinition(definition: HostedConfigurationDefinition): void { draftDefinition = copy(definition); conflict = false; error = undefined; publish(); },
-    setRuntime(runtime: HostedConfigurationRuntime): void { draftRuntime = copy(runtime); conflict = false; error = undefined; publish(); },
+    setDefinition(definition: HostedConfigurationDefinition): void { if (!isHostedConfigurationDefinition(definition)) throw new HostedAPIError('invalid_request', 400); draftDefinition = copy(definition); conflict = false; error = undefined; publish(); },
+    setRuntime(runtime: HostedConfigurationRuntime): void { if (!isHostedConfigurationRuntime(runtime)) throw new HostedAPIError('invalid_request', 400); draftRuntime = copy(runtime); conflict = false; error = undefined; publish(); },
     async saveDefinition(): Promise<void> {
       if (disposed || !authoritative || !draftDefinition || busy) throw new HostedAPIError('invalid_request', 400);
       busy = true; error = undefined; publish();
@@ -49,28 +49,30 @@ export function createConfigurationFlow(api: ConfigurationAPI, render: (state: C
 }
 
 export function mountConfigurationView(root: HTMLElement, api: ConfigurationAPI, callbacks: { onMigration(): void; onExit(): void }) {
-  const document = root.ownerDocument; let disposed = false;
-  let definitionInput: HTMLTextAreaElement | undefined; let runtimeInput: HTMLTextAreaElement | undefined;
+  const document = root.ownerDocument; let disposed = false; let loaded = false;
+  const panel = document.createElement('main'); panel.className = 'hosted-shell hosted-panel'; const title = document.createElement('h1'); title.textContent = '在线配置';
   const status = document.createElement('p'); status.setAttribute('role', 'alert'); status.setAttribute('aria-live', 'assertive');
+  const definitionLabel = document.createElement('label'); definitionLabel.textContent = '配置定义 JSON（仅保存在本页内存）'; const definitionInput = document.createElement('textarea'); definitionLabel.append(definitionInput);
+  const runtimeLabel = document.createElement('label'); runtimeLabel.textContent = '当前玩法状态 JSON（仅保存在本页内存）'; const runtimeInput = document.createElement('textarea'); runtimeLabel.append(runtimeInput);
+  const compare = document.createElement('pre'); compare.setAttribute('aria-label', '服务器权威配置对照');
   const parse = (input: HTMLTextAreaElement): HostedConfigurationDefinition => {
     const value: unknown = JSON.parse(input.value); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new HostedAPIError('invalid_request', 400); return value as HostedConfigurationDefinition;
   };
+  const saveDefinition = document.createElement('button'); saveDefinition.type = 'button'; saveDefinition.addEventListener('click', () => { try { flow.setDefinition(parse(definitionInput)); void flow.saveDefinition().catch(() => undefined); } catch { status.textContent = 'JSON 格式无效，未发送到服务器'; } });
+  const saveRuntime = document.createElement('button'); saveRuntime.type = 'button'; saveRuntime.addEventListener('click', () => { try { flow.setRuntime(parse(runtimeInput) as HostedConfigurationRuntime); void flow.saveRuntime().catch(() => undefined); } catch { status.textContent = 'JSON 格式无效，未发送到服务器'; } });
+  const roomLabel = document.createElement('label'); roomLabel.textContent = '建议直播间号（不会自动运行）'; const room = document.createElement('input'); room.inputMode = 'numeric'; roomLabel.append(room);
+  const roomButton = document.createElement('button'); roomButton.type = 'button'; roomButton.textContent = '保存房间建议'; roomButton.addEventListener('click', () => { void flow.suggestRoom(room.value).then(() => { room.value = ''; status.textContent = '已保存建议，尚未启动直播间。'; }).catch(() => { status.textContent = '房间建议保存失败'; }); });
+  const migration = document.createElement('button'); migration.type = 'button'; migration.textContent = '迁移本地配置'; migration.addEventListener('click', callbacks.onMigration);
+  const exit = document.createElement('button'); exit.type = 'button'; exit.textContent = '返回账号'; exit.addEventListener('click', callbacks.onExit);
+  panel.append(title, status, definitionLabel, saveDefinition, runtimeLabel, saveRuntime, compare, roomLabel, roomButton, migration, exit); root.replaceChildren(panel);
   const render = (state: ConfigurationViewState): void => {
     if (disposed) return;
-    const panel = document.createElement('main'); panel.className = 'hosted-shell hosted-panel'; const title = document.createElement('h1'); title.textContent = '在线配置';
     status.textContent = state.conflict ? '服务器配置已更新；已保留本页未保存草稿，请对照后重试。' : state.error ?? '';
-    const definitionLabel = document.createElement('label'); definitionLabel.textContent = '配置定义 JSON（仅保存在本页内存）'; definitionInput = document.createElement('textarea'); definitionInput.value = JSON.stringify(state.draftDefinition ?? {}, null, 2); definitionLabel.append(definitionInput);
-    const runtimeLabel = document.createElement('label'); runtimeLabel.textContent = '当前玩法状态 JSON（仅保存在本页内存）'; runtimeInput = document.createElement('textarea'); runtimeInput.value = JSON.stringify(state.draftRuntime ?? {}, null, 2); runtimeLabel.append(runtimeInput);
-    const saveDefinition = document.createElement('button'); saveDefinition.type = 'button'; saveDefinition.textContent = state.busy ? '正在保存…' : '保存配置定义'; saveDefinition.disabled = state.busy;
-    saveDefinition.addEventListener('click', () => { try { flow.setDefinition(parse(definitionInput!)); void flow.saveDefinition().catch(() => undefined); } catch { status.textContent = 'JSON 格式无效，未发送到服务器'; } });
-    const saveRuntime = document.createElement('button'); saveRuntime.type = 'button'; saveRuntime.textContent = state.busy ? '正在保存…' : '保存当前状态'; saveRuntime.disabled = state.busy;
-    saveRuntime.addEventListener('click', () => { try { flow.setRuntime(parse(runtimeInput!) as HostedConfigurationRuntime); void flow.saveRuntime().catch(() => undefined); } catch { status.textContent = 'JSON 格式无效，未发送到服务器'; } });
-    const roomLabel = document.createElement('label'); roomLabel.textContent = '建议直播间号（不会自动运行）'; const room = document.createElement('input'); room.inputMode = 'numeric'; roomLabel.append(room);
-    const roomButton = document.createElement('button'); roomButton.type = 'button'; roomButton.textContent = '保存房间建议'; roomButton.addEventListener('click', () => { void flow.suggestRoom(room.value).then(() => { room.value = ''; status.textContent = '已保存建议，尚未启动直播间。'; }).catch(() => { status.textContent = '房间建议保存失败'; }); });
-    const migration = document.createElement('button'); migration.type = 'button'; migration.textContent = '迁移本地配置'; migration.addEventListener('click', callbacks.onMigration);
-    const exit = document.createElement('button'); exit.type = 'button'; exit.textContent = '返回账号'; exit.addEventListener('click', callbacks.onExit);
-    panel.append(title, status, definitionLabel, saveDefinition, runtimeLabel, saveRuntime, roomLabel, roomButton, migration, exit); root.replaceChildren(panel); definitionInput.focus();
+    if (!loaded && state.draftDefinition && state.draftRuntime) { definitionInput.value = JSON.stringify(state.draftDefinition, null, 2); runtimeInput.value = JSON.stringify(state.draftRuntime, null, 2); loaded = true; definitionInput.focus(); }
+    compare.textContent = state.authoritative ? `服务器权威版本 ${state.authoritative.version} / 状态修订 ${state.authoritative.revision}\n${JSON.stringify(state.authoritative, null, 2)}` : '';
+    saveDefinition.textContent = state.busy ? '正在保存…' : '保存配置定义'; saveDefinition.disabled = state.busy;
+    saveRuntime.textContent = state.busy ? '正在保存…' : '保存当前状态'; saveRuntime.disabled = state.busy;
   };
   const flow = createConfigurationFlow(api, render); render({ conflict: false, busy: false }); const ready = flow.load().catch(() => undefined);
-  return Object.freeze({ ready, dispose(): void { disposed = true; definitionInput && (definitionInput.value = ''); runtimeInput && (runtimeInput.value = ''); flow.dispose(); root.replaceChildren(); } });
+  return Object.freeze({ ready, dispose(): void { disposed = true; definitionInput.value = ''; runtimeInput.value = ''; compare.textContent = ''; root.replaceChildren(); flow.dispose(); } });
 }

@@ -143,6 +143,33 @@ func TestDecodeCanonicalHashIgnoresFieldOrderAndUnknownFields(t *testing.T) {
 	}
 }
 
+func TestPreviewDTOUsesCamelCaseCountsAndSourceFields(t *testing.T) {
+
+	encoded, err := json.Marshal(struct {
+		Counts Counts `json:"counts"`
+		Source Source `json:"source"`
+	}{
+		Counts: Counts{Attributes: 1, Rules: 2, Activities: 3, GiftTargetPanels: 4, GiftTargetItems: 5},
+		Source: Source{AppVersion: "0.4.4", ConfigurationSchemaVersion: 5},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	counts := value["counts"].(map[string]any)
+	source := value["source"].(map[string]any)
+	for _, key := range []string{"attributes", "rules", "activities", "giftTargetPanels", "giftTargetItems"} {
+		if _, ok := counts[key]; !ok { t.Fatalf("missing camelCase count %q: %s", key, encoded) }
+	}
+	if source["appVersion"] != "0.4.4" || source["configurationSchemaVersion"] != float64(5) { t.Fatalf("wrong source DTO: %s", encoded) }
+	for _, forbidden := range []string{"Attributes", "GiftTargetPanels", "AppVersion", "ConfigurationSchemaVersion"} {
+		if strings.Contains(string(encoded), "\""+forbidden+"\"") { t.Fatalf("legacy Go field leaked: %s", encoded) }
+	}
+}
+
 func TestDecodeFreshAllowlistsSimplePlayWithoutSavingCraftedValues(t *testing.T) {
 	document := validEnvelopeWire()
 	definition := document["payload"].(map[string]any)["definition"].(map[string]any)

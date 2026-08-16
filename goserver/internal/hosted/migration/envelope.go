@@ -45,12 +45,16 @@ type Envelope struct {
 }
 
 type Source struct {
-	AppVersion                 string
-	ConfigurationSchemaVersion int
+	AppVersion                 string `json:"appVersion"`
+	ConfigurationSchemaVersion int    `json:"configurationSchemaVersion"`
 }
 
 type Counts struct {
-	Attributes, Rules, Activities, GiftTargetPanels, GiftTargetItems int
+	Attributes       int `json:"attributes"`
+	Rules            int `json:"rules"`
+	Activities       int `json:"activities"`
+	GiftTargetPanels int `json:"giftTargetPanels"`
+	GiftTargetItems  int `json:"giftTargetItems"`
 }
 
 // Report is safe to show to a client: it identifies filtered paths but never

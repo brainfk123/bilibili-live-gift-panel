@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { HostedAPI } from '../src/hosted/api';
+import { HostedAPI, HostedAPIError } from '../src/hosted/api';
 import { createMigrationFlow, migrationFileLimit } from '../src/hosted/migration';
 
 function json(body: unknown, status = 200): Response {
@@ -52,6 +52,15 @@ describe('hosted migration contract', () => {
     expect(JSON.stringify(rendered)).not.toContain('UPLOAD-MUST-NOT-PERSIST');
   });
 
+  it('uses the server job state rather than assuming a reused preview is previewed', async () => {
+    const rendered: unknown[] = [];
+    const api = { previewMigration: vi.fn(async () => ({ ...preview, reused: true })), getMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const, expiresAt: preview.expiresAt })) };
+    const flow = createMigrationFlow(api, (state) => rendered.push(structuredClone(state)));
+    await flow.preview({ name: 'package.json', size: 2, text: vi.fn(async () => '{}') });
+    expect(api.getMigration).toHaveBeenCalledWith(12);
+    expect(rendered.at(-1)).toEqual(expect.objectContaining({ job: expect.objectContaining({ id: 12, status: 'pending' }), canApply: false, canRefresh: true, canCancel: true }));
+  });
+
   it('requires an explicit unchecked room suggestion and polls the reusable proof without creating a site session', async () => {
     const api = {
       beginLogin: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })),
@@ -69,6 +78,42 @@ describe('hosted migration contract', () => {
     expect(api.createSession).not.toHaveBeenCalled();
   });
 
+  it('serializes proof operations and keeps a transient verification failure retryable', async () => {
+    let release!: (value: { status: 'verified'; expiresAt: string }) => void;
+    const polling = new Promise<{ status: 'verified'; expiresAt: string }>((resolve) => { release = resolve; });
+    const api = {
+      beginLogin: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })),
+      pollLogin: vi.fn(() => polling), cancelLogin: vi.fn(async () => undefined), applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const })),
+    };
+    const flow = createMigrationFlow(api, vi.fn()); flow.acceptPreview(preview); flow.confirmReplacement(true);
+    const first = flow.apply(); const second = flow.apply();
+    await vi.waitFor(() => { expect(api.beginLogin).toHaveBeenCalledTimes(1); expect(api.pollLogin).toHaveBeenCalledTimes(1); });
+    release({ status: 'verified', expiresAt: '2030-01-02T00:00:00Z' }); await first; await second;
+    expect(api.applyMigration).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses an unexpired proof after a temporary verification outage', async () => {
+    const api = {
+      beginLogin: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })),
+      pollLogin: vi.fn().mockRejectedValueOnce(new HostedAPIError('temporarily_unavailable', 503)).mockResolvedValueOnce({ status: 'verified', expiresAt: '2030-01-02T00:00:00Z' }),
+      cancelLogin: vi.fn(async () => undefined), applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const })),
+    };
+    const flow = createMigrationFlow(api, vi.fn()); flow.acceptPreview(preview); flow.confirmReplacement(true);
+    await expect(flow.apply()).rejects.toMatchObject({ code: 'temporarily_unavailable' });
+    await flow.apply();
+    expect(api.beginLogin).toHaveBeenCalledTimes(1); expect(api.pollLogin).toHaveBeenCalledTimes(2); expect(api.applyMigration).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not mutate state after disposal and exposes only valid lifecycle actions', async () => {
+    let release!: (value: { challengeId: string; qrImage: string; expiresAt: string }) => void;
+    const begin = new Promise<{ challengeId: string; qrImage: string; expiresAt: string }>((resolve) => { release = resolve; });
+    const states: Array<Record<string, unknown>> = [];
+    const api = { beginLogin: vi.fn(() => begin), pollLogin: vi.fn(), cancelLogin: vi.fn(async () => undefined), applyMigration: vi.fn() };
+    const flow = createMigrationFlow(api, (state) => states.push(structuredClone(state) as unknown as Record<string, unknown>)); flow.acceptPreview(preview); flow.confirmReplacement(true);
+    const applying = flow.apply(); await flow.dispose(); release({ challengeId: 'late-proof', qrImage: 'secret-qr', expiresAt: '2030-01-02T00:00:00Z' }); await expect(applying).rejects.toMatchObject({ code: 'operation_failed' });
+    expect(api.cancelLogin).toHaveBeenCalledWith('late-proof'); expect(JSON.stringify(states)).not.toContain('secret-qr');
+  });
+
   it('cleans up a terminal rejected proof while keeping a pending proof retryable', async () => {
     const api = {
       previewMigration: vi.fn(), beginLogin: vi.fn(async () => ({ challengeId: 'terminal-proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })),
@@ -84,13 +129,18 @@ describe('hosted migration contract', () => {
   it('shows pending, supports cancellation, and exposes the seven-day rollback countdown without raw errors', async () => {
     const states: unknown[] = [];
     const api = {
+      beginLogin: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })),
+      pollLogin: vi.fn(async () => ({ status: 'verified' as const, expiresAt: '2030-01-02T00:00:00Z' })),
+      cancelLogin: vi.fn(async () => undefined),
+      applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const, expiresAt: '2030-01-02T00:00:00Z' })),
       getMigration: vi.fn(async () => ({ id: 12, status: 'applied' as const, rollbackExpiresAt: '2030-01-08T00:00:00Z' })),
       cancelMigration: vi.fn(async () => ({ id: 12, status: 'cancelled' as const })),
     };
     const flow = createMigrationFlow(api, (state) => states.push(structuredClone(state)), { now: () => new Date('2030-01-01T00:00:00Z') });
-    await flow.refresh(12); await flow.cancel();
-    expect(states.at(-2)).toEqual(expect.objectContaining({ rollbackDaysRemaining: 7 }));
-    expect(states.at(-1)).toEqual(expect.objectContaining({ job: { id: 12, status: 'cancelled' } }));
+    flow.acceptPreview(preview); flow.confirmReplacement(true); await flow.apply();
+    await flow.refresh(12);
+    expect(states.at(-1)).toEqual(expect.objectContaining({ rollbackDaysRemaining: 7, canRollback: true, canCancel: false, canRefresh: false }));
+    await expect(flow.cancel()).rejects.toMatchObject({ code: 'invalid_request' });
     flow.reportFailure(new Error('RAW UPLOADED JSON: secret'));
     expect(JSON.stringify(states.at(-1))).not.toContain('RAW UPLOADED JSON');
   });
