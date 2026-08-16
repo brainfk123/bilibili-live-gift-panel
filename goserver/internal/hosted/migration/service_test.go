@@ -230,9 +230,9 @@ func TestSQLRepositoryAppliesInactivePreviewInOneTransaction(t *testing.T) {
 	defer database.Close()
 	now := time.Date(2026, 8, 17, 9, 30, 0, 0, time.UTC)
 	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(nil, 0, 0, nil))
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(jobPreviewed, now.Add(time.Hour), 0, nil, nil, nil, nil, []byte(`{"attributes":[]}`), []byte(`{"attributeValues":{}}`), "12345"))
 	expectPreviewNow(mock, now)
-	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(nil, 0, 0, nil))
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleBaseQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"base_config_version_number", "base_state_revision"}).AddRow(0, 0))
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleOpenSessionQuery)).WithArgs(int64(7)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleNextVersionQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"number"}).AddRow(1))
@@ -263,9 +263,9 @@ func TestSQLRepositoryStagesLiveSessionWithoutChangingConfiguration(t *testing.T
 	defer database.Close()
 	now := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
 	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(88, 3, 6, []byte(`{"attributeValues":{"health":1}}`)))
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(jobPreviewed, now.Add(time.Hour), 0, nil, nil, nil, nil, []byte(`{"attributes":[]}`), []byte(`{"attributeValues":{}}`), "12345"))
 	expectPreviewNow(mock, now)
-	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(88, 3, 6, []byte(`{"attributeValues":{"health":1}}`)))
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleBaseQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"base_config_version_number", "base_state_revision"}).AddRow(3, 6))
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleOpenSessionQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(12))
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE migration_jobs SET status = 'pending', keep_room_suggestion = ? WHERE id = ? AND account_id = ? AND status = 'previewed'")).WithArgs(true, int64(19), int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -291,9 +291,9 @@ func TestSQLRepositoryAppliesPendingJobAfterSessionWithPersistedRoomDecision(t *
 	defer database.Close()
 	now := time.Date(2026, 8, 17, 10, 15, 0, 0, time.UTC)
 	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(88, 3, 6, []byte(`{"attributeValues":{"health":1}}`)))
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(jobPending, now.Add(time.Hour), 1, nil, nil, nil, nil, []byte(`{"attributes":[]}`), []byte(`{"attributeValues":{}}`), "12345"))
 	expectPreviewNow(mock, now)
-	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(88, 3, 6, []byte(`{"attributeValues":{"health":1}}`)))
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleBaseQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"base_config_version_number", "base_state_revision"}).AddRow(3, 6))
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleOpenSessionQuery)).WithArgs(int64(7)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleNextVersionQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"number"}).AddRow(4))
@@ -323,9 +323,9 @@ func TestSQLRepositoryRollbackRestoresSavedStateOnlyWhenAppliedVersionIsCurrent(
 	defer database.Close()
 	now := time.Date(2026, 8, 17, 10, 30, 0, 0, time.UTC)
 	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(88, 4, 8, []byte(`{"attributeValues":{"health":5}}`)))
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(jobApplied, now.Add(time.Hour), 0, 77, []byte(`{"attributeValues":{"health":1}}`), now.Add(7*24*time.Hour), 88, []byte(`{"attributes":[]}`), []byte(`{"attributeValues":{"health":5}}`), nil))
 	expectPreviewNow(mock, now)
-	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(88, 4, 8, []byte(`{"attributeValues":{"health":5}}`)))
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleOpenSessionQuery)).WithArgs(int64(7)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT definition_json FROM account_config_versions WHERE account_id = ? AND id = ?")).WithArgs(int64(7), int64(77)).WillReturnRows(sqlmock.NewRows([]string{"definition_json"}).AddRow([]byte(`{"attributes":[]}`)))
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleNextVersionQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"number"}).AddRow(5))
@@ -340,6 +340,112 @@ func TestSQLRepositoryRollbackRestoresSavedStateOnlyWhenAppliedVersionIsCurrent(
 	}
 	if job.Status != jobRolledBack {
 		t.Fatalf("job = %#v", job)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryPendingCompletionRejectsPreviewedJobAfterAccountLock(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 17, 11, 0, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(nil, 0, 0, nil))
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(jobPreviewed, now.Add(time.Hour), 0, nil, nil, nil, nil, []byte(`{"attributes":[]}`), []byte(`{"attributeValues":{}}`), nil))
+	expectPreviewNow(mock, now)
+	mock.ExpectRollback()
+	_, err = NewRepository(database).(lifecycleRepository).ApplyPendingAfterSession(context.Background(), 7, 19)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("ApplyPendingAfterSession() error = %v, want conflict", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryExpiresPreviewWithCommittedGuardRelease(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 17, 11, 30, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(nil, 0, 0, nil))
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(jobPreviewed, now, 0, nil, nil, nil, nil, []byte(`{"attributes":[]}`), []byte(`{"attributeValues":{}}`), nil))
+	expectPreviewNow(mock, now)
+	mock.ExpectExec(regexp.QuoteMeta(previewExpireQuery)).WithArgs(int64(19), int64(7), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	_, err = NewRepository(database).(lifecycleRepository).Apply(context.Background(), applyCommand{AccountID: 7, JobID: 19})
+	if !errors.Is(err, ErrExpired) {
+		t.Fatalf("Apply() error = %v, want expired", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryCancelAllowsOnlyCancelledTerminalState(t *testing.T) {
+	now := time.Date(2026, 8, 17, 11, 45, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name, status string
+		want         error
+		commit       bool
+	}{
+		{name: "cancelled idempotent", status: jobCancelled, commit: true},
+		{name: "applied conflict", status: jobApplied, want: ErrConflict},
+		{name: "rolled back conflict", status: jobRolledBack, want: ErrConflict},
+		{name: "expired conflict", status: jobExpired, want: ErrConflict},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			mock.ExpectBegin()
+			mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(nil, 0, 0, nil))
+			mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(test.status, now.Add(time.Hour), 0, nil, nil, nil, nil, []byte(`{"attributes":[]}`), []byte(`{"attributeValues":{}}`), nil))
+			expectPreviewNow(mock, now)
+			if test.commit {
+				mock.ExpectCommit()
+			} else {
+				mock.ExpectRollback()
+			}
+			job, err := NewRepository(database).(lifecycleRepository).Cancel(context.Background(), 7, 19)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("Cancel() error=%v want=%v", err, test.want)
+			}
+			if test.commit && job.Status != jobCancelled {
+				t.Fatalf("job=%#v", job)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestSQLRepositoryCancelRequiresExactlyOneTransitionRow(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 17, 11, 50, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(nil, 0, 0, nil))
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(jobPreviewed, now.Add(time.Hour), 0, nil, nil, nil, nil, []byte(`{"attributes":[]}`), []byte(`{"attributeValues":{}}`), nil))
+	expectPreviewNow(mock, now)
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE migration_jobs SET status = 'cancelled', cancelled_at = ? WHERE id = ? AND account_id = ? AND status IN ('previewed', 'pending')")).WithArgs(now, int64(19), int64(7)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectRollback()
+	_, err = NewRepository(database).(lifecycleRepository).Cancel(context.Background(), 7, 19)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Cancel() error=%v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -364,6 +470,12 @@ func (repository *recordingLifecycleRepository) Apply(_ context.Context, command
 	return repository.applyResult, repository.applyErr
 }
 func (repository *recordingLifecycleRepository) ApplyPendingAfterSession(context.Context, int64, int64) (storedJob, error) {
+	return storedJob{}, ErrUnavailable
+}
+func (repository *recordingLifecycleRepository) PreauthorizeApply(context.Context, int64, int64) (storedJob, error) {
+	return storedJob{}, ErrUnavailable
+}
+func (repository *recordingLifecycleRepository) PreauthorizeRollback(context.Context, int64, int64) (storedJob, error) {
 	return storedJob{}, ErrUnavailable
 }
 func (repository *recordingLifecycleRepository) Cancel(context.Context, int64, int64) (storedJob, error) {

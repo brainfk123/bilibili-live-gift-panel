@@ -132,13 +132,13 @@ func TestHTTPRollbackPreservesRetryableProofAndSkipsDuplicateProof(t *testing.T)
 		t.Fatal(err)
 	}
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, migrationRequest(http.MethodPost, "/api/migrations/9/rollback", `{"challengeId":"proof","keepRoomSuggestion":false}`))
+	handler.ServeHTTP(response, migrationRequest(http.MethodPost, "/api/migrations/9/rollback", `{"challengeId":"proof"}`))
 	if response.Code != http.StatusAccepted || proof.calls != 1 || service.rollbacks != 0 {
 		t.Fatalf("pending status=%d proof=%d rollback=%d", response.Code, proof.calls, service.rollbacks)
 	}
 	service.job.Status = jobRolledBack
 	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, migrationRequest(http.MethodPost, "/api/migrations/9/rollback", `{"challengeId":"proof","keepRoomSuggestion":false}`))
+	handler.ServeHTTP(response, migrationRequest(http.MethodPost, "/api/migrations/9/rollback", `{"challengeId":"proof"}`))
 	if response.Code != http.StatusOK || proof.calls != 1 || service.rollbacks != 0 {
 		t.Fatalf("duplicate status=%d proof=%d rollback=%d", response.Code, proof.calls, service.rollbacks)
 	}
@@ -172,6 +172,95 @@ func TestHTTPMutationRejectsQueryOriginAndContentTypeBeforeProof(t *testing.T) {
 	}
 }
 
+func TestHTTPPreauthorizationRejectsBeforeProofConsumption(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status string
+		err    error
+		route  string
+	}{
+		{name: "expired apply", err: ErrExpired, route: "/api/migrations/9/apply"},
+		{name: "base drift", err: ErrConflict, route: "/api/migrations/9/apply"},
+		{name: "anchor drift", err: ErrConflict, route: "/api/migrations/9/rollback"},
+		{name: "open session", err: ErrConflict, route: "/api/migrations/9/rollback"},
+		{name: "non owner", err: ErrNotFound, route: "/api/migrations/9/apply"},
+		{name: "database unavailable", err: ErrUnavailable, route: "/api/migrations/9/apply"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &httpMigrationService{job: Job{ID: 9, Status: jobPreviewed}, preauthErr: test.err}
+			proof := &httpProof{}
+			handler, err := newMigrationHTTPTestHandler(service, proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := `{"challengeId":"proof","keepRoomSuggestion":false}`
+			if strings.HasSuffix(test.route, "/rollback") {
+				body = `{"challengeId":"proof"}`
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, migrationRequest(http.MethodPost, test.route, body))
+			if proof.calls != 0 || service.applies != 0 || service.rollbacks != 0 {
+				t.Fatalf("proof=%d apply=%d rollback=%d", proof.calls, service.applies, service.rollbacks)
+			}
+		})
+	}
+}
+
+func TestHTTPRollbackBodyAllowsOnlyChallengeID(t *testing.T) {
+	service := &httpMigrationService{job: Job{ID: 9, Status: jobApplied}}
+	proof := &httpProof{}
+	handler, err := newMigrationHTTPTestHandler(service, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, migrationRequest(http.MethodPost, "/api/migrations/9/rollback", `{"challengeId":"proof","keepRoomSuggestion":false}`))
+	if response.Code != http.StatusBadRequest || proof.calls != 0 || service.gets != 0 {
+		t.Fatalf("status=%d proof=%d get=%d", response.Code, proof.calls, service.gets)
+	}
+}
+
+func TestHTTPPreviewDecodesBeforeAuthentication(t *testing.T) {
+	service := &httpMigrationService{}
+	var authenticated int
+	authenticate := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			authenticated++
+			next.ServeHTTP(response, request)
+		})
+	}
+	handler, err := NewHTTPHandler(service, &httpProof{}, HTTPOptions{AllowedOrigin: "https://hosted.example", CSRFToken: "csrf", Limiter: allowAllLimiter{}, ClientIP: identity.DirectClientIP, Authenticate: authenticate, AccountID: func(context.Context) (int64, bool) { return 7, true }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, migrationRequest(http.MethodPost, "/api/migrations/preview", `{`))
+	if response.Code != http.StatusBadRequest || authenticated != 0 || service.previews != 0 {
+		t.Fatalf("status=%d auth=%d preview=%d", response.Code, authenticated, service.previews)
+	}
+}
+
+func TestHTTPPreviewRejectsOversizeAfterAllThreeLimitsBeforeAuthentication(t *testing.T) {
+	service := &httpMigrationService{}
+	limiter := &countingLimiter{}
+	var authenticated int
+	authenticate := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			authenticated++
+			next.ServeHTTP(response, request)
+		})
+	}
+	handler, err := NewHTTPHandler(service, &httpProof{}, HTTPOptions{AllowedOrigin: "https://hosted.example", CSRFToken: "csrf", Limiter: limiter, ClientIP: identity.DirectClientIP, Authenticate: authenticate, AccountID: func(context.Context) (int64, bool) { return 7, true }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, migrationRequest(http.MethodPost, "/api/migrations/preview", strings.Repeat("x", maxMigrationBody+1)))
+	if response.Code != http.StatusBadRequest || limiter.calls != 3 || authenticated != 0 || service.previews != 0 {
+		t.Fatalf("status=%d limits=%d auth=%d preview=%d", response.Code, limiter.calls, authenticated, service.previews)
+	}
+}
+
 func newMigrationHTTPTestHandler(service migrationHTTPService, proof accountProofConsumer) (*HTTPHandler, error) {
 	return NewHTTPHandler(service, proof, HTTPOptions{AllowedOrigin: "https://hosted.example", CSRFToken: "csrf", Limiter: allowAllLimiter{}, ClientIP: identity.DirectClientIP, Authenticate: testAuthenticate(), AccountID: func(context.Context) (int64, bool) { return 7, true }})
 }
@@ -190,6 +279,7 @@ type httpMigrationService struct {
 	cancels, rollbacks      int
 	lastAccountID           int64
 	keepRoom                bool
+	preauthErr              error
 }
 
 func (service *httpMigrationService) Preview(context.Context, int64, Envelope) (Preview, error) {
@@ -200,6 +290,16 @@ func (service *httpMigrationService) Get(_ context.Context, accountID, _ int64) 
 	service.gets++
 	service.lastAccountID = accountID
 	return service.job, nil
+}
+func (service *httpMigrationService) PreauthorizeApply(_ context.Context, accountID, _ int64) (Job, error) {
+	service.gets++
+	service.lastAccountID = accountID
+	return service.job, service.preauthErr
+}
+func (service *httpMigrationService) PreauthorizeRollback(_ context.Context, accountID, _ int64) (Job, error) {
+	service.gets++
+	service.lastAccountID = accountID
+	return service.job, service.preauthErr
 }
 func (service *httpMigrationService) Apply(_ context.Context, accountID, _ int64, keepRoom bool) (Job, error) {
 	service.applies++
@@ -232,6 +332,13 @@ func (proof *httpProof) ConsumeAccountProof(context.Context, string, int64, time
 type allowAllLimiter struct{}
 
 func (allowAllLimiter) Allow(context.Context, identity.LimitScope, string) bool { return true }
+
+type countingLimiter struct{ calls int }
+
+func (limiter *countingLimiter) Allow(context.Context, identity.LimitScope, string) bool {
+	limiter.calls++
+	return true
+}
 func testAuthenticate() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler { return next }
 }

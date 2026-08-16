@@ -97,6 +97,8 @@ type Repository interface {
 type lifecycleRepository interface {
 	Apply(context.Context, applyCommand) (storedJob, error)
 	ApplyPendingAfterSession(context.Context, int64, int64) (storedJob, error)
+	PreauthorizeApply(context.Context, int64, int64) (storedJob, error)
+	PreauthorizeRollback(context.Context, int64, int64) (storedJob, error)
 	Cancel(context.Context, int64, int64) (storedJob, error)
 	Rollback(context.Context, int64, int64) (storedJob, error)
 	Get(context.Context, int64, int64) (storedJob, error)
@@ -145,6 +147,30 @@ func (service *Service) Apply(ctx context.Context, accountID, jobID int64, keepR
 		return Job{}, ErrUnavailable
 	}
 	stored, err := repository.Apply(ctx, applyCommand{AccountID: accountID, JobID: jobID, KeepRoomSuggestion: keepRoomSuggestion})
+	return publicJob(stored, accountID, err)
+}
+
+func (service *Service) PreauthorizeApply(ctx context.Context, accountID, jobID int64) (Job, error) {
+	if service == nil || accountID <= 0 || jobID <= 0 {
+		return Job{}, ErrInvalidInput
+	}
+	repository, ok := service.repository.(lifecycleRepository)
+	if !ok {
+		return Job{}, ErrUnavailable
+	}
+	stored, err := repository.PreauthorizeApply(ctx, accountID, jobID)
+	return publicJob(stored, accountID, err)
+}
+
+func (service *Service) PreauthorizeRollback(ctx context.Context, accountID, jobID int64) (Job, error) {
+	if service == nil || accountID <= 0 || jobID <= 0 {
+		return Job{}, ErrInvalidInput
+	}
+	repository, ok := service.repository.(lifecycleRepository)
+	if !ok {
+		return Job{}, ErrUnavailable
+	}
+	stored, err := repository.PreauthorizeRollback(ctx, accountID, jobID)
 	return publicJob(stored, accountID, err)
 }
 
@@ -419,7 +445,127 @@ func (repository *sqlRepository) Get(ctx context.Context, accountID, jobID int64
 	return result, nil
 }
 
+func (repository *sqlRepository) PreauthorizeApply(ctx context.Context, accountID, jobID int64) (storedJob, error) {
+	if repository == nil || repository.db == nil || accountID <= 0 || jobID <= 0 {
+		return storedJob{}, ErrInvalidInput
+	}
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storedJob{}, ErrUnavailable
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	_, version, revision, _, err := loadLockedAccount(ctx, transaction, accountID)
+	if err != nil {
+		return storedJob{}, err
+	}
+	job, err := loadLockedJob(ctx, transaction, accountID, jobID)
+	if err != nil {
+		return storedJob{}, err
+	}
+	now, err := databaseUTCNow(ctx, transaction)
+	if err != nil {
+		return storedJob{}, err
+	}
+	if job.Status == jobApplied || job.Status == jobPending {
+		if err := transaction.Commit(); err != nil {
+			return storedJob{}, ErrUnavailable
+		}
+		committed = true
+		return job.storedJob, nil
+	}
+	if job.Status != jobPreviewed {
+		return storedJob{}, ErrConflict
+	}
+	if !job.ExpiresAt.After(now) {
+		return storedJob{}, ErrExpired
+	}
+	baseVersion, baseRevision, err := loadLifecycleBase(ctx, transaction, accountID, jobID)
+	if err != nil {
+		return storedJob{}, err
+	}
+	if version != baseVersion || revision != baseRevision {
+		return storedJob{}, ErrConflict
+	}
+	var sessionID int64
+	if err := transaction.QueryRowContext(ctx, lifecycleOpenSessionQuery, accountID).Scan(&sessionID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return storedJob{}, ErrUnavailable
+	}
+	if err := transaction.Commit(); err != nil {
+		return storedJob{}, ErrUnavailable
+	}
+	committed = true
+	return job.storedJob, nil
+}
+
+func (repository *sqlRepository) PreauthorizeRollback(ctx context.Context, accountID, jobID int64) (storedJob, error) {
+	if repository == nil || repository.db == nil || accountID <= 0 || jobID <= 0 {
+		return storedJob{}, ErrInvalidInput
+	}
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storedJob{}, ErrUnavailable
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	activeID, _, revision, _, err := loadLockedAccount(ctx, transaction, accountID)
+	if err != nil {
+		return storedJob{}, err
+	}
+	job, err := loadLockedJob(ctx, transaction, accountID, jobID)
+	if err != nil {
+		return storedJob{}, err
+	}
+	if job.Status == jobRolledBack {
+		if err := transaction.Commit(); err != nil {
+			return storedJob{}, ErrUnavailable
+		}
+		committed = true
+		return job.storedJob, nil
+	}
+	if job.Status != jobApplied {
+		return storedJob{}, ErrConflict
+	}
+	now, err := databaseUTCNow(ctx, transaction)
+	if err != nil {
+		return storedJob{}, err
+	}
+	if job.RollbackExpiresAt.IsZero() || !job.RollbackExpiresAt.After(now) {
+		return storedJob{}, ErrExpired
+	}
+	if !activeID.Valid || revision == 0 || !job.appliedConfigID.Valid || activeID.Int64 != job.appliedConfigID.Int64 {
+		return storedJob{}, ErrConflict
+	}
+	var sessionID int64
+	if err := transaction.QueryRowContext(ctx, lifecycleOpenSessionQuery, accountID).Scan(&sessionID); err == nil {
+		return storedJob{}, ErrConflict
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return storedJob{}, ErrUnavailable
+	}
+	if err := transaction.Commit(); err != nil {
+		return storedJob{}, ErrUnavailable
+	}
+	committed = true
+	return job.storedJob, nil
+}
+
 func (repository *sqlRepository) Apply(ctx context.Context, command applyCommand) (storedJob, error) {
+	return repository.apply(ctx, command, false)
+}
+
+func (repository *sqlRepository) ApplyPendingAfterSession(ctx context.Context, accountID, jobID int64) (storedJob, error) {
+	return repository.apply(ctx, applyCommand{AccountID: accountID, JobID: jobID}, true)
+}
+
+func (repository *sqlRepository) apply(ctx context.Context, command applyCommand, pendingOnly bool) (storedJob, error) {
 	if repository == nil || repository.db == nil || command.AccountID <= 0 || command.JobID <= 0 {
 		return storedJob{}, ErrInvalidInput
 	}
@@ -433,6 +579,10 @@ func (repository *sqlRepository) Apply(ctx context.Context, command applyCommand
 			_ = transaction.Rollback()
 		}
 	}()
+	activeID, currentVersion, currentRevision, currentRuntime, err := loadLockedAccount(ctx, transaction, command.AccountID)
+	if err != nil {
+		return storedJob{}, err
+	}
 	job, err := loadLockedJob(ctx, transaction, command.AccountID, command.JobID)
 	if err != nil {
 		return storedJob{}, err
@@ -448,18 +598,18 @@ func (repository *sqlRepository) Apply(ctx context.Context, command applyCommand
 		committed = true
 		return job.storedJob, nil
 	}
-	if job.Status != jobPreviewed && job.Status != jobPending {
+	if pendingOnly && job.Status != jobPending || !pendingOnly && job.Status != jobPreviewed {
 		return storedJob{}, ErrConflict
 	}
 	if !job.ExpiresAt.After(now) {
 		if err := setExpired(ctx, transaction, command.AccountID, command.JobID, now); err != nil {
 			return storedJob{}, err
 		}
+		if err := transaction.Commit(); err != nil {
+			return storedJob{}, ErrUnavailable
+		}
+		committed = true
 		return storedJob{}, ErrExpired
-	}
-	activeID, currentVersion, currentRevision, currentRuntime, err := loadLockedAccount(ctx, transaction, command.AccountID)
-	if err != nil {
-		return storedJob{}, err
 	}
 	baseVersion, baseRevision, err := loadLifecycleBase(ctx, transaction, command.AccountID, command.JobID)
 	if err != nil {
@@ -471,7 +621,7 @@ func (repository *sqlRepository) Apply(ctx context.Context, command applyCommand
 	var sessionID int64
 	err = transaction.QueryRowContext(ctx, lifecycleOpenSessionQuery, command.AccountID).Scan(&sessionID)
 	if err == nil {
-		if job.Status == jobPreviewed {
+		if !pendingOnly && job.Status == jobPreviewed {
 			result, updateErr := transaction.ExecContext(ctx, "UPDATE migration_jobs SET status = 'pending', keep_room_suggestion = ? WHERE id = ? AND account_id = ? AND status = 'previewed'", command.KeepRoomSuggestion, command.JobID, command.AccountID)
 			if updateErr != nil || !exactlyOne(result) {
 				return storedJob{}, ErrUnavailable
@@ -498,10 +648,6 @@ func (repository *sqlRepository) Apply(ctx context.Context, command applyCommand
 	return result, nil
 }
 
-func (repository *sqlRepository) ApplyPendingAfterSession(ctx context.Context, accountID, jobID int64) (storedJob, error) {
-	return repository.Apply(ctx, applyCommand{AccountID: accountID, JobID: jobID})
-}
-
 func (repository *sqlRepository) Cancel(ctx context.Context, accountID, jobID int64) (storedJob, error) {
 	if repository == nil || repository.db == nil || accountID <= 0 || jobID <= 0 {
 		return storedJob{}, ErrInvalidInput
@@ -516,6 +662,9 @@ func (repository *sqlRepository) Cancel(ctx context.Context, accountID, jobID in
 			_ = transaction.Rollback()
 		}
 	}()
+	if _, _, _, _, err := loadLockedAccount(ctx, transaction, accountID); err != nil {
+		return storedJob{}, err
+	}
 	job, err := loadLockedJob(ctx, transaction, accountID, jobID)
 	if err != nil {
 		return storedJob{}, err
@@ -528,13 +677,19 @@ func (repository *sqlRepository) Cancel(ctx context.Context, accountID, jobID in
 		if err := setExpired(ctx, transaction, accountID, jobID, now); err != nil {
 			return storedJob{}, err
 		}
-		job.Status = jobExpired
+		if err := transaction.Commit(); err != nil {
+			return storedJob{}, ErrUnavailable
+		}
+		committed = true
+		return storedJob{}, ErrExpired
 	} else if job.Status == jobPreviewed || job.Status == jobPending {
 		result, updateErr := transaction.ExecContext(ctx, "UPDATE migration_jobs SET status = 'cancelled', cancelled_at = ? WHERE id = ? AND account_id = ? AND status IN ('previewed', 'pending')", now, jobID, accountID)
 		if updateErr != nil || !exactlyOne(result) {
 			return storedJob{}, ErrUnavailable
 		}
 		job.Status = jobCancelled
+	} else if job.Status != jobCancelled {
+		return storedJob{}, ErrConflict
 	}
 	if err := transaction.Commit(); err != nil {
 		return storedJob{}, ErrUnavailable
@@ -557,6 +712,10 @@ func (repository *sqlRepository) Rollback(ctx context.Context, accountID, jobID 
 			_ = transaction.Rollback()
 		}
 	}()
+	activeID, _, currentRevision, _, err := loadLockedAccount(ctx, transaction, accountID)
+	if err != nil {
+		return storedJob{}, err
+	}
 	job, err := loadLockedJob(ctx, transaction, accountID, jobID)
 	if err != nil {
 		return storedJob{}, err
@@ -577,10 +736,6 @@ func (repository *sqlRepository) Rollback(ctx context.Context, accountID, jobID 
 	}
 	if job.RollbackExpiresAt.IsZero() || !job.RollbackExpiresAt.After(now) {
 		return storedJob{}, ErrExpired
-	}
-	activeID, _, currentRevision, _, err := loadLockedAccount(ctx, transaction, accountID)
-	if err != nil {
-		return storedJob{}, err
 	}
 	if !activeID.Valid || currentRevision == 0 || !job.appliedConfigID.Valid || activeID.Int64 != job.appliedConfigID.Int64 {
 		return storedJob{}, ErrConflict

@@ -23,6 +23,8 @@ const maxMigrationBody = 2 << 20
 type migrationHTTPService interface {
 	Preview(context.Context, int64, Envelope) (Preview, error)
 	Get(context.Context, int64, int64) (Job, error)
+	PreauthorizeApply(context.Context, int64, int64) (Job, error)
+	PreauthorizeRollback(context.Context, int64, int64) (Job, error)
 	Apply(context.Context, int64, int64, bool) (Job, error)
 	Cancel(context.Context, int64, int64) (Job, error)
 	Rollback(context.Context, int64, int64) (Job, error)
@@ -87,12 +89,12 @@ func (handler *HTTPHandler) preview(response http.ResponseWriter, request *http.
 		writeMigrationError(response, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
+	envelope, _, err := Decode(http.MaxBytesReader(response, request.Body, maxMigrationBody), maxMigrationBody)
+	if err != nil {
+		writeMigrationError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
 	handler.authenticated(response, request, func(accountID int64, request *http.Request) {
-		envelope, _, err := Decode(http.MaxBytesReader(response, request.Body, maxMigrationBody), maxMigrationBody)
-		if err != nil {
-			writeMigrationError(response, http.StatusBadRequest, "invalid_request")
-			return
-		}
 		preview, err := handler.service.Preview(request.Context(), accountID, envelope)
 		if err != nil {
 			handler.writeServiceError(response, err)
@@ -149,17 +151,13 @@ func (handler *HTTPHandler) apply(response http.ResponseWriter, request *http.Re
 		return
 	}
 	handler.authenticated(response, request, func(accountID int64, request *http.Request) {
-		job, err := handler.service.Get(request.Context(), accountID, jobID)
+		job, err := handler.service.PreauthorizeApply(request.Context(), accountID, jobID)
 		if err != nil {
 			handler.writeServiceError(response, err)
 			return
 		}
 		if job.Status == jobPending || job.Status == jobApplied {
 			writeMigrationJSON(response, http.StatusOK, job)
-			return
-		}
-		if job.Status != jobPreviewed {
-			writeMigrationError(response, http.StatusConflict, "operation_conflict")
 			return
 		}
 		if err := handler.proofConsumer.ConsumeAccountProof(request.Context(), body.ChallengeID, accountID, 15*time.Minute); err != nil {
@@ -205,8 +203,7 @@ func (handler *HTTPHandler) cancel(response http.ResponseWriter, request *http.R
 
 func (handler *HTTPHandler) rollback(response http.ResponseWriter, request *http.Request) {
 	var body struct {
-		ChallengeID        string `json:"challengeId"`
-		KeepRoomSuggestion *bool  `json:"keepRoomSuggestion"`
+		ChallengeID string `json:"challengeId"`
 	}
 	if !handler.acceptJSONMutation(request) {
 		handler.writeRejection(response, request)
@@ -216,7 +213,7 @@ func (handler *HTTPHandler) rollback(response http.ResponseWriter, request *http
 		writeMigrationError(response, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
-	if !decodeMigrationJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 || body.KeepRoomSuggestion == nil || *body.KeepRoomSuggestion {
+	if !decodeMigrationJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 {
 		writeMigrationError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -226,17 +223,13 @@ func (handler *HTTPHandler) rollback(response http.ResponseWriter, request *http
 		return
 	}
 	handler.authenticated(response, request, func(accountID int64, request *http.Request) {
-		job, err := handler.service.Get(request.Context(), accountID, jobID)
+		job, err := handler.service.PreauthorizeRollback(request.Context(), accountID, jobID)
 		if err != nil {
 			handler.writeServiceError(response, err)
 			return
 		}
 		if job.Status == jobRolledBack {
 			writeMigrationJSON(response, http.StatusOK, job)
-			return
-		}
-		if job.Status != jobApplied {
-			writeMigrationError(response, http.StatusConflict, "operation_conflict")
 			return
 		}
 		if err := handler.proofConsumer.ConsumeAccountProof(request.Context(), body.ChallengeID, accountID, 15*time.Minute); err != nil {
