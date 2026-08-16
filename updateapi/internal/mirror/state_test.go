@@ -193,7 +193,7 @@ func TestFileStateRepositoryRejectsInvalidFields(t *testing.T) {
 		name string
 		body string
 	}{
-		{name: "weak ETag", body: strings.Replace(validStateJSON(""), `"etag":"\"current\""`, `"etag":"W/\"current\""`, 1)},
+		{name: "lowercase weak ETag prefix", body: strings.Replace(validStateJSON(""), `"etag":"\"current\""`, `"etag":"w/\"current\""`, 1)},
 		{name: "noncanonical tag", body: strings.Replace(validStateJSON(""), `"tag":"v0.4.4"`, `"tag":"v00.4.4"`, 1)},
 		{name: "uppercase SHA", body: strings.Replace(validStateJSON(""), `"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`, `"sha256":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"`, 1)},
 		{name: "zero publication time", body: strings.Replace(validStateJSON(""), `"publishedAt":"2026-08-16T12:00:00Z"`, `"publishedAt":"0001-01-01T00:00:00Z"`, 1)},

@@ -636,6 +636,13 @@ func isStrongETag(value string) bool {
 	return true
 }
 
+func isConditionalETag(value string) bool {
+	if strings.HasPrefix(value, "W/") {
+		return isStrongETag(value[2:])
+	}
+	return isStrongETag(value)
+}
+
 func defaultDownloadBackoff(ctx context.Context, attempt int) error {
 	delay := time.Duration(attempt*attempt) * 100 * time.Millisecond
 	timer := time.NewTimer(delay)

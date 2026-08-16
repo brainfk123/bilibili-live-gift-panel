@@ -124,6 +124,40 @@ func TestRunnerPassesOnlyValidStateETagToDiscovery(t *testing.T) {
 	}
 }
 
+func TestRunnerPersistsWeakGitHubDiscoveryETagForConditionalRequests(t *testing.T) {
+	// Mutation caught: reusing the resumable-download strong ETag rule for
+	// GitHub release discovery rejects GitHub's real W/"..." response ETags.
+	fixture := newRunnerFixture(t)
+	fixture.source.result.ETag = `W/"github-release"`
+	state := mustNewFileStateRepository(t, fixture.directory)
+	runner := fixture.runner()
+	runner.State = state
+
+	first, err := runner.Run(context.Background(), RunOptions{})
+	if err != nil {
+		t.Fatalf("first Run() error = %v", err)
+	}
+	if first.Tag != "v1.2.3" || fixture.publisher.calls != 1 {
+		t.Fatalf("first Run() result=%+v publishes=%d, want one publication", first, fixture.publisher.calls)
+	}
+	saved, err := state.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if saved.ETag != `W/"github-release"` {
+		t.Fatalf("saved ETag = %q, want GitHub weak ETag", saved.ETag)
+	}
+
+	fixture.source.result = LatestResult{NotModified: true}
+	second, err := runner.Run(context.Background(), RunOptions{})
+	if err != nil {
+		t.Fatalf("second Run() error = %v", err)
+	}
+	if !second.NotModified || fixture.source.etag != `W/"github-release"` {
+		t.Fatalf("second Run() result=%+v discovery ETag=%q", second, fixture.source.etag)
+	}
+}
+
 // Mutation caught: reordering or omitting a required artifact can publish a partially validated release.
 func TestRunnerDownloadsFourFixedAssetsBeforePublishingAndSavingState(t *testing.T) {
 	fixture := newRunnerFixture(t)

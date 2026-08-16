@@ -446,7 +446,7 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 }
 
 func canonicalMirrorState(state MirrorState) (MirrorState, error) {
-	if !isStrongETag(state.ETag) {
+	if !isConditionalETag(state.ETag) {
 		return MirrorState{}, invalidStateError("state ETag is invalid")
 	}
 	if _, err := release.ParseStableTag(state.Tag); err != nil {

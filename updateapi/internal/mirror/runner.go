@@ -130,7 +130,7 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunRe
 	}
 
 	candidate := latest.Release
-	if _, err := release.ParseStableTag(candidate.Tag); err != nil || candidate.PublishedAt.IsZero() || !isStrongETag(latest.ETag) {
+	if _, err := release.ParseStableTag(candidate.Tag); err != nil || candidate.PublishedAt.IsZero() || !isConditionalETag(latest.ETag) {
 		return RunResult{StateInvalid: stateInvalid}, runnerFailure(StageValidation, candidate.Tag, errors.New("release identity is invalid"))
 	}
 	tag := candidate.Tag
