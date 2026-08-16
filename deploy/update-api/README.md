@@ -93,28 +93,40 @@ The mirror is separate from the update API: it uses a no-login account, its own 
 Set the reviewed inputs independently of the build output. Deployment builds archive the exact clean Git commit before compiling; `GIFT_PANEL_LOCAL_BUILD=1` writes only `dist/local/` and must never be installed.
 
 ```sh
+set -euo pipefail
 RELEASE_ID="${REVIEWED_COMMIT:?set the reviewed 40-hex commit}"
 REVIEWED_SHA256="${REVIEWED_SHA256:?set the independently reviewed mirror SHA-256}"
 test "$RELEASE_ID" = "$(git rev-parse HEAD)"
 npm run build:update-api
 test "$RELEASE_ID" = "$(dist/gift-panel-release-mirror-linux-amd64 --build-commit)"
 printf '%s  %s\n' "$REVIEWED_SHA256" 'dist/gift-panel-release-mirror-linux-amd64' | sha256sum -c -
+printf '%s\n%s\n' "$RELEASE_ID" "$REVIEWED_SHA256" > gift-panel-release-mirror.reviewed
+test "$(wc -l < gift-panel-release-mirror.reviewed)" -eq 2
 ```
 
-Transfer only that verified normal artifact by the approved secure channel. On Lighthouse, create the account, install to the versioned directory, and verify the copied bytes and `current` target again before proceeding:
+Transfer both the verified normal artifact and the two-line `gift-panel-release-mirror.reviewed` sidecar by the approved secure channel. On Lighthouse, redefine evidence from the transferred sidecar rather than relying on local-shell variables, then verify the installed directory, binary identity, checksum, and `current` target before any systemd start:
 
 ```sh
+set -euo pipefail
+test "$(wc -l < gift-panel-release-mirror.reviewed)" -eq 2
+RELEASE_ID=$(sed -n '1p' gift-panel-release-mirror.reviewed)
+REVIEWED_SHA256=$(sed -n '2p' gift-panel-release-mirror.reviewed)
+printf '%s\n' "$RELEASE_ID" | grep -Eq '^[0-9a-f]{40}$'
+printf '%s\n' "$REVIEWED_SHA256" | grep -Eq '^[0-9a-f]{64}$'
 sudo useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin gift-panel-mirror
 sudo install -d -o root -g root -m 0755 /opt/gift-panel-release-mirror/releases/"$RELEASE_ID"
 sudo install -o root -g root -m 0755 gift-panel-release-mirror-linux-amd64 /opt/gift-panel-release-mirror/releases/"$RELEASE_ID"/gift-panel-release-mirror
 printf '%s  %s\n' "$REVIEWED_SHA256" /opt/gift-panel-release-mirror/releases/"$RELEASE_ID"/gift-panel-release-mirror | sha256sum -c -
+test "$RELEASE_ID" = "$(/opt/gift-panel-release-mirror/releases/"$RELEASE_ID"/gift-panel-release-mirror --build-commit)"
 sudo ln -sfn /opt/gift-panel-release-mirror/releases/"$RELEASE_ID" /opt/gift-panel-release-mirror/current
 test "$(readlink -f /opt/gift-panel-release-mirror/current/gift-panel-release-mirror)" = "/opt/gift-panel-release-mirror/releases/$RELEASE_ID/gift-panel-release-mirror"
+test "$RELEASE_ID" = "$(/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --build-commit)"
 ```
 
 Install the separate root-owned `0600` environment and units. It contains only the mirror scoped CAM credentials and never reuses `/etc/gift-panel-update-api.env`:
 
 ```sh
+set -euo pipefail
 sudo install -o root -g root -m 0600 /secure/gift-panel-release-mirror.env /etc/gift-panel-release-mirror.env
 sudo install -o root -g root -m 0644 deploy/update-api/gift-panel-release-mirror.service /etc/systemd/system/gift-panel-release-mirror.service
 sudo install -o root -g root -m 0644 deploy/update-api/gift-panel-release-mirror.timer /etc/systemd/system/gift-panel-release-mirror.timer
@@ -127,28 +139,71 @@ sudo systemd-analyze verify /etc/systemd/system/gift-panel-release-mirror.servic
 Do not run the binary manually on a fresh host: systemd must create `StateDirectory` first. Before enabling the timer, use a temporary dry-run drop-in, inspect the completed invocation, remove the drop-in, then run one normal oneshot:
 
 ```sh
-sudo install -d -o root -g root -m 0755 /etc/systemd/system/gift-panel-release-mirror.service.d
-printf '[Service]\nExecStart=\nExecStart=/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --dry-run\n' | sudo tee /etc/systemd/system/gift-panel-release-mirror.service.d/dry-run.conf >/dev/null
+set -euo pipefail
+DROPIN=/run/systemd/system/gift-panel-release-mirror.service.d/dry-run.conf
+DROPIN_DIR=$(dirname "$DROPIN")
+test "$DROPIN_DIR" = /run/systemd/system/gift-panel-release-mirror.service.d
+cleanup() {
+  status=$?
+  if test -e "$DROPIN"; then sudo rm -- "$DROPIN"; fi
+  sudo systemctl daemon-reload
+  trap - EXIT INT TERM
+  exit "$status"
+}
+trap cleanup EXIT INT TERM
+sudo install -d -o root -g root -m 0755 "$DROPIN_DIR"
+printf '[Service]\nExecStart=\nExecStart=/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --dry-run\n' | sudo tee "$DROPIN" >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl start gift-panel-release-mirror.service
-sudo systemctl status gift-panel-release-mirror.service --no-pager
+test "$(sudo systemctl show -p Result --value gift-panel-release-mirror.service)" = success
 sudo journalctl --namespace=gift-panel-release-mirror -u gift-panel-release-mirror.service --no-pager
-sudo rm /etc/systemd/system/gift-panel-release-mirror.service.d/dry-run.conf
+sudo rm -- "$DROPIN"
 sudo systemctl daemon-reload
+test ! -e "$DROPIN"
+trap - EXIT INT TERM
 sudo systemctl start gift-panel-release-mirror.service
 sudo systemctl enable --now gift-panel-release-mirror.timer
 ```
 
-For rollback, quiesce both timer and oneshot before changing `current`. Optionally restore an approved private backup of `channels/stable/latest.json` only while quiesced, then verify that stable pointer and the mirror `state.json` agree with the approved tag/SHA before the rollback binary dry-run. Do not delete immutable release objects or release directories.
+For rollback, quiesce both timer and oneshot before changing `current`. If the stable pointer also needs to move backward, stop here and use a separately confirmed Tencent COS console or approved operator action to restore the reviewed private `channels/stable/latest.json` backup while quiesced. do not re-enable timer while an intentionally older stable release would immediately be re-promoted. Do not delete immutable release objects. After that separate action, verify the domestic API's public metadata against approved rollback evidence without fetching a signed download URL.
 
 ```sh
+set -euo pipefail
 sudo systemctl disable --now gift-panel-release-mirror.timer
 sudo systemctl stop gift-panel-release-mirror.service
 sudo systemctl is-active --quiet gift-panel-release-mirror.timer && exit 1
 sudo systemctl is-active --quiet gift-panel-release-mirror.service && exit 1
 sudo ln -sfn /opt/gift-panel-release-mirror/releases/PREVIOUS_RELEASE_ID /opt/gift-panel-release-mirror/current
-# If approved, use the COS operator tool to restore the verified private channels/stable/latest.json backup while still quiesced.
-sudo jq -e --arg tag "$APPROVED_TAG" --arg sha "$APPROVED_SHA256" '.tag == $tag and .sha256 == $sha' /var/lib/gift-panel-release-mirror/state.json
+PUBLIC_DOMAIN="${PUBLIC_DOMAIN:?set the domestic API domain}"
+APPROVED_TAG="${APPROVED_TAG:?set the approved rollback tag}"
+APPROVED_SHA256="${APPROVED_SHA256:?set the approved rollback SHA-256}"
+APPROVED_SIZE="${APPROVED_SIZE:?set the approved rollback asset size}"
+curl --fail --silent --show-error "https://$PUBLIC_DOMAIN/api/v1/releases/latest" > /tmp/gift-panel-release-mirror-rollback-latest.json
+jq -e --arg tag "$APPROVED_TAG" --arg sha "$APPROVED_SHA256" --argjson size "$APPROVED_SIZE" '.tagName == $tag and .asset.sha256 == $sha and .asset.size == $size' /tmp/gift-panel-release-mirror-rollback-latest.json
+if ! sudo jq -e --arg tag "$APPROVED_TAG" --arg sha "$APPROVED_SHA256" '.tag == $tag and .sha256 == $sha' /var/lib/gift-panel-release-mirror/state.json; then
+  test "${ROLLBACK_STATE_POLICY:?set state-matches-approved or stable-pointer-restored-while-mirror-state-remains-newer}" = stable-pointer-restored-while-mirror-state-remains-newer
+  printf 'rollback state intentionally differs: stable pointer restored while mirror state remains newer\n' | sudo systemd-cat -t gift-panel-release-mirror
+fi
+ROLLBACK_DROPIN=/run/systemd/system/gift-panel-release-mirror.service.d/dry-run.conf
+ROLLBACK_DROPIN_DIR=$(dirname "$ROLLBACK_DROPIN")
+test "$ROLLBACK_DROPIN_DIR" = /run/systemd/system/gift-panel-release-mirror.service.d
+rollback_cleanup() {
+  status=$?
+  if test -e "$ROLLBACK_DROPIN"; then sudo rm -- "$ROLLBACK_DROPIN"; fi
+  sudo systemctl daemon-reload
+  trap - EXIT INT TERM
+  exit "$status"
+}
+trap rollback_cleanup EXIT INT TERM
+sudo install -d -o root -g root -m 0755 "$ROLLBACK_DROPIN_DIR"
+printf '[Service]\nExecStart=\nExecStart=/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --dry-run\n' | sudo tee "$ROLLBACK_DROPIN" >/dev/null
+sudo systemctl daemon-reload
 sudo systemctl start gift-panel-release-mirror.service
-sudo systemctl enable --now gift-panel-release-mirror.timer
+test "$(sudo systemctl show -p Result --value gift-panel-release-mirror.service)" = success
+sudo journalctl --namespace=gift-panel-release-mirror -u gift-panel-release-mirror.service --no-pager
+sudo rm -- "$ROLLBACK_DROPIN"
+sudo systemctl daemon-reload
+test ! -e "$ROLLBACK_DROPIN"
+trap - EXIT INT TERM
+# Only after this rollback dry-run succeeds may an operator decide whether to restart/re-enable.
 ```

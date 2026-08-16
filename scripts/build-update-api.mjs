@@ -44,8 +44,9 @@ function buildDeployment(commit) {
     execFileSync('git', ['-C', root, 'archive', '--format=tar', `--output=${archive}`, commit]);
     execFileSync('tar', ['-xf', archive, '-C', snapshot]);
 
-    const mutationPath = process.env.GIFT_PANEL_BUILD_TEST_MUTATE_TRACKED_PATH;
-    if (mutationPath) appendFileSync(mutationPath, '\n// deterministic build mutation\n');
+    if (process.env.GIFT_PANEL_BUILD_TEST_MUTATE_TRACKED === '1') {
+      appendFileSync(join(root, 'scripts', 'build-update-api.mjs'), '\n// deterministic build mutation\n');
+    }
 
     const snapshotOutput = join(temporaryRoot, 'dist');
     build(snapshot, snapshotOutput, commit);

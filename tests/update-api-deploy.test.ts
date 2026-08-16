@@ -39,12 +39,17 @@ function sectionValues(unit: Unit, section: string, key: string): string[] {
   return unit.get(section)?.get(key) ?? [];
 }
 
+function shellBlocksAfter(readme: string, heading: string): string[] {
+  const section = readme.slice(readme.indexOf(heading));
+  return [...section.matchAll(/```sh\r?\n([\s\S]*?)```/g)].map((match) => match[1]);
+}
+
 function build(root: string, environment: NodeJS.ProcessEnv = {}): SpawnSyncReturns<string> {
   return spawnSync(process.execPath, [join(root, 'scripts', 'build-update-api.mjs')], {
     cwd: root,
     encoding: 'utf8',
     timeout: 120_000,
-    env: { ...process.env, ...environment },
+    env: { ...process.env, GOCACHE: join(tmpdir(), 'gift-panel-update-api-vitest-gocache'), ...environment },
   });
 }
 
@@ -141,8 +146,7 @@ describe('update API deployment assets', () => {
   it('fails deployment publication when HEAD changes after its snapshot is taken', () => {
     const temporaryRoot = reviewedBuildRoot('gift-panel-update-api-race-');
     try {
-      const mutation = join(temporaryRoot, 'updateapi', 'cmd', 'mirror', 'main.go');
-      const result = build(temporaryRoot, { GIFT_PANEL_BUILD_TEST_MUTATE_TRACKED_PATH: mutation });
+      const result = build(temporaryRoot, { GIFT_PANEL_BUILD_TEST_MUTATE_TRACKED: '1' });
       expect(result.status).not.toBe(0);
       expect(`${result.stdout}\n${result.stderr}`).toMatch(/changed during build|clean reviewed Git commit/i);
     } finally {
@@ -245,6 +249,9 @@ describe('update API deployment assets', () => {
     expect(sectionValue(service, 'Service', 'RestrictAddressFamilies')).toBe('AF_UNIX AF_INET AF_INET6');
     expect(sectionValue(service, 'Service', 'LogNamespace')).toBe('gift-panel-release-mirror');
     expect(sectionValues(service, 'Service', 'ExecStart')).toEqual(['/opt/gift-panel-release-mirror/current/gift-panel-release-mirror']);
+    for (const [key, value] of Object.entries({ User: 'gift-panel-mirror', Group: 'gift-panel-mirror', EnvironmentFile: '/etc/gift-panel-release-mirror.env', StateDirectory: 'gift-panel-release-mirror', StateDirectoryMode: '0700', NoNewPrivileges: 'true', PrivateTmp: 'true', ProtectSystem: 'strict', ProtectHome: 'true' })) {
+      expect(sectionValues(service, 'Service', key)).toEqual([value]);
+    }
     expect(sectionValue(service, 'Socket', 'ListenStream')).toBeUndefined();
     expect(sectionValue(service, 'Service', 'ListenStream')).toBeUndefined();
     expect(sectionValue(journal, 'Journal', 'MaxRetentionSec')).toBe('7day');
@@ -257,6 +264,9 @@ describe('update API deployment assets', () => {
     expect(sectionValue(timer, 'Timer', 'OnUnitInactiveSec')).toBe('5min');
     expect(sectionValue(timer, 'Timer', 'Persistent')).toBe('true');
     expect(sectionValue(timer, 'Timer', 'Unit')).toBe('gift-panel-release-mirror.service');
+    for (const [key, value] of Object.entries({ OnBootSec: '1min', OnUnitInactiveSec: '5min', Persistent: 'true', Unit: 'gift-panel-release-mirror.service' })) {
+      expect(sectionValues(timer, 'Timer', key)).toEqual([value]);
+    }
     expect(sectionValue(timer, 'Install', 'WantedBy')).toBe('timers.target');
   });
 
@@ -270,10 +280,20 @@ describe('update API deployment assets', () => {
     expect(readme).toContain('install -o root -g root -m 0600 /secure/gift-panel-release-mirror.env /etc/gift-panel-release-mirror.env');
     expect(readme).toContain('sha256sum -c');
     expect(readme).toContain('RELEASE_ID="${REVIEWED_COMMIT:?set the reviewed 40-hex commit}"');
+    expect(readme).toContain('set -euo pipefail');
+    expect(readme).toContain('gift-panel-release-mirror.reviewed');
+    expect(readme).toContain('RELEASE_ID=$(sed -n \'1p\' gift-panel-release-mirror.reviewed)');
     expect(readme).toContain('test "$RELEASE_ID" = "$(dist/gift-panel-release-mirror-linux-amd64 --build-commit)"');
     expect(readme).toContain('sha256sum -c -');
+    expect(readme).toContain('test "$RELEASE_ID" = "$(/opt/gift-panel-release-mirror/releases/"$RELEASE_ID"/gift-panel-release-mirror --build-commit)"');
     expect(readme).toContain('readlink -f /opt/gift-panel-release-mirror/current/gift-panel-release-mirror');
+    expect(readme).toContain('test "$RELEASE_ID" = "$(/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --build-commit)"');
+    expect(readme).toContain('systemd must create `StateDirectory` first');
     expect(readme).toContain('gift-panel-release-mirror.service.d/dry-run.conf');
+    expect(readme).toContain('/run/systemd/system/gift-panel-release-mirror.service.d/dry-run.conf');
+    expect(readme).toContain('trap cleanup EXIT INT TERM');
+    expect(readme).toContain('test ! -e "$DROPIN"');
+    expect(readme).toContain('Result --value gift-panel-release-mirror.service');
     expect(readme).toContain('ExecStart=/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --dry-run');
     expect(readme).toContain('systemctl start gift-panel-release-mirror.service');
     expect(readme.indexOf('systemctl enable --now gift-panel-release-mirror.timer')).toBeGreaterThan(readme.indexOf('gift-panel-release-mirror --dry-run'));
@@ -284,9 +304,18 @@ describe('update API deployment assets', () => {
     expect(readme).toContain('systemctl is-active --quiet gift-panel-release-mirror.service');
     expect(readme).toContain('channels/stable/latest.json');
     expect(readme).toContain('state.json');
+    expect(readme).toContain('https://$PUBLIC_DOMAIN/api/v1/releases/latest');
+    expect(readme).toContain('.tagName == $tag and .asset.sha256 == $sha and .asset.size == $size');
+    expect(readme).toContain('do not re-enable timer');
+    expect(readme).toContain('trap rollback_cleanup EXIT INT TERM');
+    expect(readme).toContain('test ! -e "$ROLLBACK_DROPIN"');
+    expect(readme).toContain('Only after this rollback dry-run succeeds');
     expect(readme).toContain('Do not delete immutable release objects');
     expect(readme.indexOf('systemctl disable --now gift-panel-release-mirror.timer')).toBeLessThan(readme.indexOf('ln -sfn /opt/gift-panel-release-mirror/releases/PREVIOUS_RELEASE_ID'));
     expect(readme.indexOf('systemctl stop gift-panel-release-mirror.service')).toBeLessThan(readme.indexOf('ln -sfn /opt/gift-panel-release-mirror/releases/PREVIOUS_RELEASE_ID'));
+    for (const block of shellBlocksAfter(readme, '## Release mirror (separate service)')) {
+      expect(block.trimStart().startsWith('set -euo pipefail')).toBe(true);
+    }
   });
 
   it('documents the private COS gate and direct loopback health check', () => {
