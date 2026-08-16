@@ -552,11 +552,12 @@ function containsResourceReference(value: string): boolean {
   const schemes = value.matchAll(/[A-Za-z][A-Za-z0-9+.-]*:/g);
   for (const match of schemes) {
     const scheme = match[0].slice(0, -1);
-    if (scheme !== 'PK' && scheme !== 'HP') return true;
+    const remainder = value.slice((match.index ?? 0) + match[0].length);
+    if (scheme !== 'PK' && scheme !== 'HP' && !/^\s/.test(remainder)) return true;
   }
   return /\/\//.test(value)
     || /\\\\/.test(value)
-    || /(?:^|[\s"'(<])(?:\/|\\|\.\.?[\\/])/.test(value)
+    || /(?:^|[\s:=[\]()"'<])(?:\/|\\|\.\.?[\\/])/.test(value)
     || /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp|mp3|wav|ogg|m4a|mp4|m4v|mov|webm)(?:[?#\s]|$)/i.test(value);
 }
 

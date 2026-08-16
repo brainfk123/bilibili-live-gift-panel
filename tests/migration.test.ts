@@ -339,6 +339,32 @@ describe('online migration exporter', () => {
     expect(createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12)).payload.definition.simplePlay).toBeUndefined();
   });
 
+  it.each(['Score: 10', 'Boss: 红队'])('preserves an ordinary ASCII label followed by whitespace: %s', (label) => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
+      parameters: { name: label, suffix: '次', amount: 1, cap: 0, broadcastMessage: '继续加油' },
+    };
+
+    expect(createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12)).payload.definition.simplePlay?.parameters.name).toBe(label);
+  });
+
+  it.each([
+    'PK:/private/secret',
+    'HP:../secret',
+    'PK:data:text/plain,blocked',
+    'HP:https://assets.invalid/image.png',
+    '说明=[/private/secret]',
+  ])('still rejects a resource reference following an allowed label or punctuation boundary: %s', (unsafeValue) => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
+      parameters: { name: 'PK: 红队', suffix: '次', amount: 1, cap: 0, broadcastMessage: unsafeValue },
+    };
+
+    expect(createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12)).payload.definition.simplePlay).toBeUndefined();
+  });
+
   it.each([
     { parameters: { name: '', maxSeconds: 3600, broadcastMessage: '继续加油' }, label: 'an empty required text parameter' },
     { parameters: { name: '加班时间', maxSeconds: 1.5, broadcastMessage: '继续加油' }, label: 'a non-integer v2 maxSeconds value' },
