@@ -176,13 +176,8 @@ func Split(snapshot gameplay.Snapshot) (Definition, RuntimeState, error) {
 		runtime.AttributeValues[attribute.ID] = attribute.Value
 	}
 	for panelIndex, panel := range normalized.GiftTargetPanels {
-		seenGiftIDs := make(map[int]struct{}, len(panel.Items))
 		projected := GiftTargetPanelDefinition{ID: panel.ID, Name: panel.Name, Layout: panel.Layout, Items: make([]GiftTargetItemDefinition, len(panel.Items))}
 		for itemIndex, item := range panel.Items {
-			if _, duplicate := seenGiftIDs[item.GiftID]; duplicate {
-				return Definition{}, RuntimeState{}, fmt.Errorf("gift target %d is duplicated in panel %q", item.GiftID, panel.ID)
-			}
-			seenGiftIDs[item.GiftID] = struct{}{}
 			projected.Items[itemIndex] = GiftTargetItemDefinition{GiftID: item.GiftID, Name: item.Name, Target: item.Target, BarStyle: item.BarStyle}
 			runtime.GiftTargetReceived = append(runtime.GiftTargetReceived, GiftTargetRuntimeState{PanelID: panel.ID, GiftID: item.GiftID, Received: item.Received})
 		}
@@ -204,6 +199,9 @@ func Split(snapshot gameplay.Snapshot) (Definition, RuntimeState, error) {
 	}
 	for index, gift := range normalized.Gifts {
 		definition.Gifts[index] = GiftDefinition{ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, BlindBoxParentID: gift.BlindBoxParentID, BlindBoxParentName: gift.BlindBoxParentName, BlindBoxParentPrice: gift.BlindBoxParentPrice}
+	}
+	if err := validateDefinition(definition); err != nil {
+		return Definition{}, RuntimeState{}, err
 	}
 	return definition, runtime, nil
 }
@@ -241,6 +239,9 @@ func DefaultRuntime(definition Definition) RuntimeState {
 // Join verifies that runtime has exactly the keys required by definition and
 // returns a detached room-independent snapshot.
 func Join(definition Definition, runtime RuntimeState) (gameplay.Snapshot, error) {
+	if err := validateDefinition(definition); err != nil {
+		return gameplay.Snapshot{}, err
+	}
 	attributes, err := joinAttributes(definition.Attributes, runtime.AttributeValues)
 	if err != nil {
 		return gameplay.Snapshot{}, err
@@ -255,6 +256,19 @@ func Join(definition Definition, runtime RuntimeState) (gameplay.Snapshot, error
 	}
 	snapshot := gameplay.Snapshot{Attributes: attributes, DisplayScenes: definition.DisplayScenes, GiftTargetPanels: panels, Activities: activities, Rules: definition.Rules, TimerRules: definition.TimerRules, FormulaPresets: definition.FormulaPresets, SimplePlay: definition.SimplePlay, Gifts: joinGifts(definition.Gifts), RuleLimits: runtime.RuleLimits}
 	return gameplay.Normalize(snapshot)
+}
+
+func validateDefinition(definition Definition) error {
+	for _, panel := range definition.GiftTargetPanels {
+		giftIDs := make(map[int]struct{}, len(panel.Items))
+		for _, item := range panel.Items {
+			if _, duplicate := giftIDs[item.GiftID]; duplicate {
+				return fmt.Errorf("gift target IDs must be unique within panel %q", panel.ID)
+			}
+			giftIDs[item.GiftID] = struct{}{}
+		}
+	}
+	return nil
 }
 
 func joinGifts(definitions []GiftDefinition) []gameplay.GiftInfo {

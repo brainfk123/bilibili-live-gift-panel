@@ -98,6 +98,23 @@ func TestSplitRejectsDuplicateGiftTargetWithinPanel(t *testing.T) {
 	}
 }
 
+func TestJoinRejectsHandBuiltDuplicateGiftTargetWithinPanel(t *testing.T) {
+	definition := Definition{
+		GiftTargetPanels: []GiftTargetPanelDefinition{{
+			ID: "goals",
+			Items: []GiftTargetItemDefinition{
+				{GiftID: 1, Name: "Rose", Target: 10},
+				{GiftID: 1, Name: "Rose duplicate", Target: 5},
+			},
+		}},
+	}
+	runtime := RuntimeState{AttributeValues: map[string]float64{}, GiftTargetReceived: []GiftTargetRuntimeState{{PanelID: "goals", GiftID: 1, Received: 2}}, Activities: []ActivityRuntimeState{}, RuleLimits: gameplay.RuleLimitState{AppliedCounts: map[string]int{}}}
+
+	if _, err := Join(definition, runtime); err == nil {
+		t.Fatal("Join() accepted duplicate gift target IDs within one panel")
+	}
+}
+
 func TestJoinRejectsMissingOrUnexpectedRuntimeEntries(t *testing.T) {
 	definition, runtime, err := Split(fixtureSnapshot())
 	if err != nil {
