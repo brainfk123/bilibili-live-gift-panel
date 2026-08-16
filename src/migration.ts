@@ -174,6 +174,9 @@ const LEGACY_OVERTIME_V1_PARAMETERS = [
 const OVERTIME_OPERATIONS = new Set<NonNullable<SimplePlay['overtimeGiftActions']>[number]['operation']>([
   'add', 'subtract', 'double', 'halve', 'reset',
 ]);
+const UNSAFE_RESOURCE_SCHEMES = new Set([
+  'http', 'https', 'data', 'file', 'blob', 'javascript', 'vbscript',
+]);
 
 export function onlineMigrationFilename(exportedAt: Date): string {
   return `gift-panel-migration-v1-${exportedAt.toISOString().slice(0, 10)}.json`;
@@ -553,12 +556,16 @@ function containsResourceReference(value: string): boolean {
   for (const match of schemes) {
     const scheme = match[0].slice(0, -1);
     const remainder = value.slice((match.index ?? 0) + match[0].length);
+    if (UNSAFE_RESOURCE_SCHEMES.has(scheme.toLowerCase())) return true;
     if (scheme !== 'PK' && scheme !== 'HP' && !/^\s/.test(remainder)) return true;
   }
   return /\/\//.test(value)
     || /\\\\/.test(value)
-    || /(?:^|[\s:=[\]()"'<])(?:\/|\\|\.\.?[\\/])/.test(value)
-    || /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp|mp3|wav|ogg|m4a|mp4|m4v|mov|webm)(?:[?#\s]|$)/i.test(value);
+    || /\\(?=\S)/.test(value)
+    || /\/(?=[A-Za-z0-9._~-])/.test(value)
+    || /\.\.?[\\/]/.test(value)
+    || /[A-Za-z]:[\\/]/.test(value)
+    || /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp|mp3|wav|ogg|m4a|mp4|m4v|mov|webm)\b/i.test(value);
 }
 
 function exportRuleLimits(state: AppState, exportedAt: Date): OnlineMigrationRuntime['ruleLimits'] {

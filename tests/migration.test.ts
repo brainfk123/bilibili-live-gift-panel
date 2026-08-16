@@ -320,6 +320,9 @@ describe('online migration exporter', () => {
   it.each([
     '正文 ipfs://cid/image.png',
     '正文 s3://bucket/image.png',
+    '正文 ipfs:CID',
+    '正文 s3:bucket',
+    '正文 pk:regular',
     '正文 content:asset',
     '正文 custom+scheme.foo:asset',
     '正文 C:\\assets\\image.png',
@@ -356,6 +359,38 @@ describe('online migration exporter', () => {
     'HP:https://assets.invalid/image.png',
     '说明=[/private/secret]',
   ])('still rejects a resource reference following an allowed label or punctuation boundary: %s', (unsafeValue) => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
+      parameters: { name: 'PK: 红队', suffix: '次', amount: 1, cap: 0, broadcastMessage: unsafeValue },
+    };
+
+    expect(createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12)).payload.definition.simplePlay).toBeUndefined();
+  });
+
+  it.each([
+    '正文 http: example.invalid',
+    '正文 https: example.invalid',
+    '正文 data: text/plain,blocked',
+    '正文 file: local-path',
+    '正文 blob: payload',
+    '正文 javascript: alert(1)',
+    '正文 vbscript: msgbox',
+  ])('rejects a known dangerous scheme even when its colon is followed by whitespace: %s', (unsafeValue) => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
+      parameters: { name: '计数器', suffix: '次', amount: 1, cap: 0, broadcastMessage: unsafeValue },
+    };
+
+    expect(createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12)).payload.definition.simplePlay).toBeUndefined();
+  });
+
+  it.each([
+    '说明={/private}',
+    '提示，../private',
+    '值{\\private}',
+  ])('rejects path syntax regardless of its preceding character: %s', (unsafeValue) => {
     const state = defaultState();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
