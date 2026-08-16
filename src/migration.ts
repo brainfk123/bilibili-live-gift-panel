@@ -561,9 +561,7 @@ function containsResourceReference(value: string): boolean {
   }
   return /\/\//.test(value)
     || /\\\\/.test(value)
-    || /\\(?=\S)/.test(value)
-    || /\/(?=[A-Za-z0-9._~-])/.test(value)
-    || /\.\.?[\\/]/.test(value)
+    || /(?:^|[\s\p{P}\p{S}])[/\\](?=\S)/u.test(value)
     || /[A-Za-z]:[\\/]/.test(value)
     || /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp|mp3|wav|ogg|m4a|mp4|m4v|mov|webm)\b/i.test(value);
 }

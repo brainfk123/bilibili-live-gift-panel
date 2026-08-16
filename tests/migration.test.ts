@@ -400,6 +400,32 @@ describe('online migration exporter', () => {
     expect(createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12)).payload.definition.simplePlay).toBeUndefined();
   });
 
+  it.each(['比分 10/20', 'A/B 对战'])('preserves an ordinary slash that is not a path start: %s', (label) => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
+      parameters: { name: label, suffix: '次', amount: 1, cap: 0, broadcastMessage: '继续加油' },
+    };
+
+    expect(createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12)).payload.definition.simplePlay?.parameters.name).toBe(label);
+  });
+
+  it.each([
+    '/私密/文件',
+    '说明，/图片/缓存',
+    '={/private}',
+    'PK:/private',
+    '说明，\\私密\\文件',
+  ])('rejects Unicode-aware path starts: %s', (unsafeValue) => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
+      parameters: { name: 'PK: 红队', suffix: '次', amount: 1, cap: 0, broadcastMessage: unsafeValue },
+    };
+
+    expect(createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12)).payload.definition.simplePlay).toBeUndefined();
+  });
+
   it.each([
     { parameters: { name: '', maxSeconds: 3600, broadcastMessage: '继续加油' }, label: 'an empty required text parameter' },
     { parameters: { name: '加班时间', maxSeconds: 1.5, broadcastMessage: '继续加油' }, label: 'a non-integer v2 maxSeconds value' },
