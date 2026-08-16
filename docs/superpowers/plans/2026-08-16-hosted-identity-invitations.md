@@ -14,6 +14,7 @@
 - A streamer account binds exactly one verified B 站 UID; login UID and target room are unrelated.
 - Temporary streamer B 站 credentials exist only in memory until UID verification and are then destroyed.
 - Site sessions, invitation codes, recovery codes, and OBS credentials are stored only as hashes.
+- Every future OBS credential/session is bound to the account `credential_epoch`; disabling or rebinding increments the epoch so credentials can be invalidated before the OBS tables exist.
 - B 站 UID plaintext is AEAD-encrypted; a separate HMAC key provides equality lookup.
 - The unique administrator logs in with the configured B 站 UID plus TOTP; high-risk actions require recent TOTP.
 - Invitation quota is deducted when a streamer generates a code; revoke/expire/use never refunds it.
@@ -75,7 +76,7 @@ Use AES-256-GCM with a fresh nonce, purpose as additional authenticated data, HM
 
 - [ ] **Step 3: Add schema constraints**
 
-Migration `0002` creates `streamer_accounts`, `bili_uid_bindings`, `site_sessions`, `admin_identity`, `admin_totp`, `admin_recovery_codes`, `invitation_quotas`, `invitation_quota_events`, `invitations`, and `audit_events`. Enforce unique UID HMAC, one active binding per account, unique token/code hash, non-negative quota, immutable audit IDs, and foreign keys. Do not store UID plaintext columns.
+Migration `0002` creates `streamer_accounts`, `bili_uid_bindings`, `site_sessions`, `admin_identity`, `admin_totp`, `admin_recovery_codes`, `invitation_quotas`, `invitation_quota_events`, `invitations`, and `audit_events`. `streamer_accounts` includes a positive `credential_epoch` starting at 1. Enforce unique UID HMAC, one active binding per account, unique token/code hash, non-negative quota, immutable audit IDs, and foreign keys. Do not store UID plaintext columns.
 
 - [ ] **Step 4: Implement and test repository transactions**
 
@@ -182,6 +183,8 @@ Run `go -C goserver test ./internal/hosted/identity/... ./internal/hosted/app -c
 - Create: `goserver/internal/hosted/adminidentity/smtp.go`
 - Modify: `goserver/internal/hosted/app/app.go`
 - Modify: `goserver/internal/hosted/platform/config.go`
+- Modify: `goserver/cmd/hosted/main.go`
+- Modify: `goserver/cmd/hosted/main_test.go`
 
 **Interfaces:**
 - Produces: `adminidentity.Service.Initialize`, `VerifyLogin`, `RequireRecentTOTP`, `SendRecovery`, and `CompleteRecovery`.
@@ -229,15 +232,15 @@ Run focused, race, and full Go tests; run `git diff --check`. Commit as `feat: s
 
 - [ ] **Step 1: Write failing authorization and transaction tests**
 
-Test that only an administrator session with TOTP verified within 5 minutes can disable, enable, or rebind; a streamer cannot call these routes; a disabled account cannot create a new site session; and failed audit/session-revocation writes roll back the status/binding change.
+Test that only an administrator session with TOTP verified within 5 minutes can disable, enable, or rebind; a streamer cannot call these routes; a disabled account cannot create a new site session; and failed audit/session-revocation writes roll back the status/binding/credential-epoch change.
 
 - [ ] **Step 2: Implement disable and enable**
 
-Disabling sets `disabled_at` and a required administrator reason, revokes all current site and OBS sessions in the same transaction, and writes an audit event. Enabling clears `disabled_at` but does not restore revoked sessions or invitations. Runtime plan Task 3 must reject/close leases for disabled accounts.
+Disabling sets `disabled_at` and a required administrator reason, increments `credential_epoch`, revokes all current site sessions in the same transaction, and writes an audit event. No OBS table exists in this phase; every later OBS credential/session must store the issuing epoch and fail validation after the increment. Enabling clears `disabled_at` but does not restore revoked sessions or invitations. Runtime plan Task 3 must reject/close leases for disabled accounts.
 
 - [ ] **Step 3: Implement verified UID rebind**
 
-Require a fresh B 站 verification whose UID differs from the current binding and is not bound elsewhere. In one transaction close the old binding, insert the encrypted new UID/HMAC binding, revoke all site/OBS sessions, and write old/new UID lookup hashes, timestamp, administrator ID, and reason to audit. Do not consume or create an invitation.
+Require a fresh B 站 verification whose UID differs from the current binding and is not bound elsewhere. In one transaction close the old binding, insert the encrypted new UID/HMAC binding, increment `credential_epoch`, revoke all site sessions, and write old/new UID lookup hashes, timestamp, administrator ID, and reason to audit. The epoch increment invalidates future OBS credentials without referencing a table that is not created until the runtime plan. Do not consume or create an invitation.
 
 - [ ] **Step 4: Add stable HTTP contracts**
 

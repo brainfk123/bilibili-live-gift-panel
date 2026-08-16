@@ -16,6 +16,7 @@
 - Use one administrator-controlled B 站 service account; never use streamer login credentials for room data.
 - OBS receives an update only after the corresponding MySQL transaction commits.
 - Viewer UID, nickname, avatar, and contribution rows live only in the current runtime memory and disappear on session end/restart.
+- Long and short OBS credentials carry the account `credential_epoch` created by the identity plan and are rejected whenever it differs from the current account epoch.
 - No manual start/stop route or UI control may exist.
 - Config or OBS presence starts/keeps the runtime; both absent for 10 minutes ends the session.
 - Database outage buffering is capped at 500 events per account and 60 seconds, whichever occurs first.
@@ -239,7 +240,7 @@ Run processor tests `-count=20`, race tests, full Go tests, and commit `feat: pe
 
 - [ ] **Step 1: Write failing token secrecy tests**
 
-Assert long token appears only in the one-time create/reset response, DB sees only SHA-256, the generated URL is `https://host/obs/{publicID}#token=...`, request targets/logs never contain it, reset revokes old long and short sessions, and an OBS session cannot access another public ID.
+Assert long token appears only in the one-time create/reset response, DB sees only SHA-256 plus the non-secret issuing `credential_epoch`, the generated URL is `https://host/obs/{publicID}#token=...`, request targets/logs never contain it, reset revokes old long and short sessions, an OBS session cannot access another public ID, and account disable/rebind epoch changes invalidate every earlier long and short credential.
 
 - [ ] **Step 2: Implement fragment exchange**
 
