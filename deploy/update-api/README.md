@@ -113,7 +113,21 @@ RELEASE_ID=$(sed -n '1p' gift-panel-release-mirror.reviewed)
 REVIEWED_SHA256=$(sed -n '2p' gift-panel-release-mirror.reviewed)
 printf '%s\n' "$RELEASE_ID" | grep -Eq '^[0-9a-f]{40}$'
 printf '%s\n' "$REVIEWED_SHA256" | grep -Eq '^[0-9a-f]{64}$'
-sudo useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin gift-panel-mirror
+if ! getent passwd gift-panel-mirror >/dev/null; then
+  if getent group gift-panel-mirror >/dev/null; then exit 1; fi
+  sudo useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin gift-panel-mirror
+fi
+ACCOUNT_RECORD=$(getent passwd gift-panel-mirror)
+ACCOUNT_UID=$(printf '%s\n' "$ACCOUNT_RECORD" | cut -d: -f3)
+ACCOUNT_GID=$(printf '%s\n' "$ACCOUNT_RECORD" | cut -d: -f4)
+test "$(printf '%s\n' "$ACCOUNT_RECORD" | cut -d: -f1)" = gift-panel-mirror
+test "$ACCOUNT_UID" = "$ACCOUNT_GID"
+test "$(printf '%s\n' "$ACCOUNT_RECORD" | cut -d: -f6)" = /nonexistent
+test "$(printf '%s\n' "$ACCOUNT_RECORD" | cut -d: -f7)" = /usr/sbin/nologin
+GROUP_RECORD=$(getent group "$ACCOUNT_GID")
+test "$(printf '%s\n' "$GROUP_RECORD" | cut -d: -f1)" = gift-panel-mirror
+test "$(printf '%s\n' "$GROUP_RECORD" | cut -d: -f3)" = "$ACCOUNT_GID"
+test "$(id -gn gift-panel-mirror)" = gift-panel-mirror
 sudo install -d -o root -g root -m 0755 /opt/gift-panel-release-mirror/releases/"$RELEASE_ID"
 sudo install -o root -g root -m 0755 gift-panel-release-mirror-linux-amd64 /opt/gift-panel-release-mirror/releases/"$RELEASE_ID"/gift-panel-release-mirror
 printf '%s  %s\n' "$REVIEWED_SHA256" /opt/gift-panel-release-mirror/releases/"$RELEASE_ID"/gift-panel-release-mirror | sha256sum -c -
@@ -136,36 +150,60 @@ sudo systemctl daemon-reload
 sudo systemd-analyze verify /etc/systemd/system/gift-panel-release-mirror.service /etc/systemd/system/gift-panel-release-mirror.timer
 ```
 
-Do not run the binary manually on a fresh host: systemd must create `StateDirectory` first. Before enabling the timer, use a temporary dry-run drop-in, inspect the completed invocation, remove the drop-in, then run one normal oneshot:
+Do not run the binary manually on a fresh host: systemd must create `StateDirectory` first. Before enabling the timer, use a temporary dry-run drop-in, inspect the completed invocation, remove the drop-in, then run one normal oneshot. The cleanup below is deliberately failure-safe: an interrupted or failed validation cannot reach normal publication, and it removes only the exact resolved drop-in path.
 
 ```sh
 set -euo pipefail
 DROPIN=/run/systemd/system/gift-panel-release-mirror.service.d/dry-run.conf
 DROPIN_DIR=$(dirname "$DROPIN")
 test "$DROPIN_DIR" = /run/systemd/system/gift-panel-release-mirror.service.d
-cleanup() {
-  status=$?
-  if test -e "$DROPIN"; then sudo rm -- "$DROPIN"; fi
-  sudo systemctl daemon-reload
-  trap - EXIT INT TERM
-  exit "$status"
+cleanup_dry_run() {
+  cleanup_failed=0
+  if test -e "$DROPIN"; then sudo rm -- "$DROPIN" || cleanup_failed=1; fi
+  sudo systemctl daemon-reload || cleanup_failed=1
+  test ! -e "$DROPIN" || cleanup_failed=1
+  active_dropins=$(sudo systemctl show -p DropInPaths --value gift-panel-release-mirror.service)
+  if test $? -ne 0; then
+    cleanup_failed=1
+  elif printf '%s\n' "$active_dropins" | grep -Fq -- "$DROPIN"; then
+    cleanup_failed=1
+  fi
+  return "$cleanup_failed"
 }
-trap cleanup EXIT INT TERM
+finish_dry_run() {
+  original_rc=$1
+  trap - EXIT INT TERM
+  set +e
+  cleanup_dry_run
+  cleanup_rc=$?
+  set -e
+  if test "$original_rc" -ne 0; then exit "$original_rc"; fi
+  if test "$cleanup_rc" -ne 0; then exit 1; fi
+  exit 0
+}
+on_exit() { finish_dry_run "$?"; }
+on_int() { finish_dry_run 130; }
+on_term() { finish_dry_run 143; }
+trap on_exit EXIT
+trap on_int INT
+trap on_term TERM
 sudo install -d -o root -g root -m 0755 "$DROPIN_DIR"
 printf '[Service]\nExecStart=\nExecStart=/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --dry-run\n' | sudo tee "$DROPIN" >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl start gift-panel-release-mirror.service
 test "$(sudo systemctl show -p Result --value gift-panel-release-mirror.service)" = success
 sudo journalctl --namespace=gift-panel-release-mirror -u gift-panel-release-mirror.service --no-pager
-sudo rm -- "$DROPIN"
-sudo systemctl daemon-reload
-test ! -e "$DROPIN"
+set +e
+cleanup_dry_run
+cleanup_rc=$?
+set -e
+test "$cleanup_rc" -eq 0
 trap - EXIT INT TERM
 sudo systemctl start gift-panel-release-mirror.service
 sudo systemctl enable --now gift-panel-release-mirror.timer
 ```
 
-For rollback, quiesce both timer and oneshot before changing `current`. If the stable pointer also needs to move backward, stop here and use a separately confirmed Tencent COS console or approved operator action to restore the reviewed private `channels/stable/latest.json` backup while quiesced. do not re-enable timer while an intentionally older stable release would immediately be re-promoted. Do not delete immutable release objects. After that separate action, verify the domestic API's public metadata against approved rollback evidence without fetching a signed download URL.
+For rollback, quiesce both timer and oneshot before changing `current`. If the stable pointer also needs to move backward, stop here and use a separately confirmed Tencent COS console or approved operator action to restore the reviewed private `channels/stable/latest.json` backup while quiesced. do not re-enable timer while an intentionally older stable release would immediately be re-promoted. Do not delete immutable release objects. After that separate action, verify the domestic API's public metadata against approved rollback evidence without writing, printing, or logging its signed download URL. Lighthouse needs the Node.js runtime already used by the build verifier for this safe streaming check.
 
 ```sh
 set -euo pipefail
@@ -178,32 +216,66 @@ PUBLIC_DOMAIN="${PUBLIC_DOMAIN:?set the domestic API domain}"
 APPROVED_TAG="${APPROVED_TAG:?set the approved rollback tag}"
 APPROVED_SHA256="${APPROVED_SHA256:?set the approved rollback SHA-256}"
 APPROVED_SIZE="${APPROVED_SIZE:?set the approved rollback asset size}"
-curl --fail --silent --show-error "https://$PUBLIC_DOMAIN/api/v1/releases/latest" > /tmp/gift-panel-release-mirror-rollback-latest.json
-jq -e --arg tag "$APPROVED_TAG" --arg sha "$APPROVED_SHA256" --argjson size "$APPROVED_SIZE" '.tagName == $tag and .asset.sha256 == $sha and .asset.size == $size' /tmp/gift-panel-release-mirror-rollback-latest.json
+curl --fail --silent --show-error "https://$PUBLIC_DOMAIN/api/v1/releases/latest" | node -e '
+const { readFileSync } = require("node:fs");
+const [tag, sha256, expectedSize] = process.argv.slice(1);
+try {
+  const latest = JSON.parse(readFileSync(0, "utf8"));
+  const expectedIntegerSize = Number(expectedSize);
+  const assets = latest.assets;
+  const asset = Array.isArray(assets) && assets.length === 1 ? assets[0] : null;
+  if (!/^(?:0|[1-9][0-9]*)$/.test(expectedSize) || !Number.isSafeInteger(expectedIntegerSize) || latest.tag_name !== tag || !asset || asset.name !== "gift-panel-windows-x64.exe" || asset.digest !== "sha256:" + sha256 || !Number.isSafeInteger(asset.size) || asset.size !== expectedIntegerSize) process.exit(1);
+  process.exit(0);
+} catch { process.exit(1); }
+' "$APPROVED_TAG" "$APPROVED_SHA256" "$APPROVED_SIZE"
 if ! sudo jq -e --arg tag "$APPROVED_TAG" --arg sha "$APPROVED_SHA256" '.tag == $tag and .sha256 == $sha' /var/lib/gift-panel-release-mirror/state.json; then
   test "${ROLLBACK_STATE_POLICY:?set state-matches-approved or stable-pointer-restored-while-mirror-state-remains-newer}" = stable-pointer-restored-while-mirror-state-remains-newer
   printf 'rollback state intentionally differs: stable pointer restored while mirror state remains newer\n' | sudo systemd-cat -t gift-panel-release-mirror
 fi
-ROLLBACK_DROPIN=/run/systemd/system/gift-panel-release-mirror.service.d/dry-run.conf
-ROLLBACK_DROPIN_DIR=$(dirname "$ROLLBACK_DROPIN")
-test "$ROLLBACK_DROPIN_DIR" = /run/systemd/system/gift-panel-release-mirror.service.d
-rollback_cleanup() {
-  status=$?
-  if test -e "$ROLLBACK_DROPIN"; then sudo rm -- "$ROLLBACK_DROPIN"; fi
-  sudo systemctl daemon-reload
-  trap - EXIT INT TERM
-  exit "$status"
+DROPIN=/run/systemd/system/gift-panel-release-mirror.service.d/dry-run.conf
+DROPIN_DIR=$(dirname "$DROPIN")
+test "$DROPIN_DIR" = /run/systemd/system/gift-panel-release-mirror.service.d
+cleanup_dry_run() {
+  cleanup_failed=0
+  if test -e "$DROPIN"; then sudo rm -- "$DROPIN" || cleanup_failed=1; fi
+  sudo systemctl daemon-reload || cleanup_failed=1
+  test ! -e "$DROPIN" || cleanup_failed=1
+  active_dropins=$(sudo systemctl show -p DropInPaths --value gift-panel-release-mirror.service)
+  if test $? -ne 0; then
+    cleanup_failed=1
+  elif printf '%s\n' "$active_dropins" | grep -Fq -- "$DROPIN"; then
+    cleanup_failed=1
+  fi
+  return "$cleanup_failed"
 }
-trap rollback_cleanup EXIT INT TERM
-sudo install -d -o root -g root -m 0755 "$ROLLBACK_DROPIN_DIR"
-printf '[Service]\nExecStart=\nExecStart=/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --dry-run\n' | sudo tee "$ROLLBACK_DROPIN" >/dev/null
+finish_dry_run() {
+  original_rc=$1
+  trap - EXIT INT TERM
+  set +e
+  cleanup_dry_run
+  cleanup_rc=$?
+  set -e
+  if test "$original_rc" -ne 0; then exit "$original_rc"; fi
+  if test "$cleanup_rc" -ne 0; then exit 1; fi
+  exit 0
+}
+on_exit() { finish_dry_run "$?"; }
+on_int() { finish_dry_run 130; }
+on_term() { finish_dry_run 143; }
+trap on_exit EXIT
+trap on_int INT
+trap on_term TERM
+sudo install -d -o root -g root -m 0755 "$DROPIN_DIR"
+printf '[Service]\nExecStart=\nExecStart=/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --dry-run\n' | sudo tee "$DROPIN" >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl start gift-panel-release-mirror.service
 test "$(sudo systemctl show -p Result --value gift-panel-release-mirror.service)" = success
 sudo journalctl --namespace=gift-panel-release-mirror -u gift-panel-release-mirror.service --no-pager
-sudo rm -- "$ROLLBACK_DROPIN"
-sudo systemctl daemon-reload
-test ! -e "$ROLLBACK_DROPIN"
+set +e
+cleanup_dry_run
+cleanup_rc=$?
+set -e
+test "$cleanup_rc" -eq 0
 trap - EXIT INT TERM
 # Only after this rollback dry-run succeeds may an operator decide whether to restart/re-enable.
 ```

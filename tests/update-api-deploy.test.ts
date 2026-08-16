@@ -18,7 +18,7 @@ function parseUnit(contents: string): Unit {
     if (!line || line.startsWith('#') || line.startsWith(';')) continue;
     const header = line.match(/^\[([^\]]+)\]$/);
     if (header) {
-      section = new Map();
+      section = sections.get(header[1]) ?? new Map();
       sections.set(header[1], section);
       continue;
     }
@@ -42,6 +42,34 @@ function sectionValues(unit: Unit, section: string, key: string): string[] {
 function shellBlocksAfter(readme: string, heading: string): string[] {
   const section = readme.slice(readme.indexOf(heading));
   return [...section.matchAll(/```sh\r?\n([\s\S]*?)```/g)].map((match) => match[1]);
+}
+
+function latestVerifier(readme: string): string {
+  const match = readme.match(/curl --fail --silent --show-error "https:\/\/\$PUBLIC_DOMAIN\/api\/v1\/releases\/latest" \| node -e '\r?\n([\s\S]*?)\r?\n' "\$APPROVED_TAG" "\$APPROVED_SHA256" "\$APPROVED_SIZE"/);
+  expect(match, 'missing safe streaming latest-release verifier').not.toBeNull();
+  return match![1];
+}
+
+function verifyLatest(readme: string, body: string, tag = 'v1.2.3', sha256 = 'a'.repeat(64), size = '42'): SpawnSyncReturns<string> {
+  return spawnSync(process.execPath, ['-e', latestVerifier(readme), tag, sha256, size], { input: body, encoding: 'utf8' });
+}
+
+function posixPath(path: string): string {
+  return path.replaceAll('\\', '/').replace(/^([A-Za-z]):/, (_match, drive: string) => `/${drive.toLowerCase()}`);
+}
+
+function runBash(script: string, cwd: string, environment: NodeJS.ProcessEnv = {}): SpawnSyncReturns<string> {
+  return spawnSync('C:\\Program Files\\Git\\bin\\bash.exe', ['-c', script], {
+    cwd,
+    encoding: 'utf8',
+    env: { ...process.env, ...environment },
+  });
+}
+
+function dryRunTail(block: string): string {
+  const start = block.indexOf('DROPIN=');
+  expect(start, 'missing dry-run drop-in definition').toBeGreaterThanOrEqual(0);
+  return `set -euo pipefail\n${block.slice(start)}`;
 }
 
 function build(root: string, environment: NodeJS.ProcessEnv = {}): SpawnSyncReturns<string> {
@@ -249,9 +277,11 @@ describe('update API deployment assets', () => {
     expect(sectionValue(service, 'Service', 'RestrictAddressFamilies')).toBe('AF_UNIX AF_INET AF_INET6');
     expect(sectionValue(service, 'Service', 'LogNamespace')).toBe('gift-panel-release-mirror');
     expect(sectionValues(service, 'Service', 'ExecStart')).toEqual(['/opt/gift-panel-release-mirror/current/gift-panel-release-mirror']);
-    for (const [key, value] of Object.entries({ User: 'gift-panel-mirror', Group: 'gift-panel-mirror', EnvironmentFile: '/etc/gift-panel-release-mirror.env', StateDirectory: 'gift-panel-release-mirror', StateDirectoryMode: '0700', NoNewPrivileges: 'true', PrivateTmp: 'true', ProtectSystem: 'strict', ProtectHome: 'true' })) {
+    for (const [key, value] of Object.entries({ Type: 'oneshot', User: 'gift-panel-mirror', Group: 'gift-panel-mirror', EnvironmentFile: '/etc/gift-panel-release-mirror.env', ExecStart: '/opt/gift-panel-release-mirror/current/gift-panel-release-mirror', StateDirectory: 'gift-panel-release-mirror', StateDirectoryMode: '0700', NoNewPrivileges: 'true', PrivateTmp: 'true', ProtectSystem: 'strict', ProtectHome: 'true', ProtectKernelTunables: 'true', ProtectControlGroups: 'true', RestrictSUIDSGID: 'true', CapabilityBoundingSet: '', LockPersonality: 'true', MemoryDenyWriteExecute: 'true', RestrictAddressFamilies: 'AF_UNIX AF_INET AF_INET6', LogNamespace: 'gift-panel-release-mirror', UMask: '0077' })) {
       expect(sectionValues(service, 'Service', key)).toEqual([value]);
     }
+    const repeated = parseUnit('[Service]\nUser=gift-panel-mirror\n[Service]\nUser=unexpected\n');
+    expect(sectionValues(repeated, 'Service', 'User')).toEqual(['gift-panel-mirror', 'unexpected']);
     expect(sectionValue(service, 'Socket', 'ListenStream')).toBeUndefined();
     expect(sectionValue(service, 'Service', 'ListenStream')).toBeUndefined();
     expect(sectionValue(journal, 'Journal', 'MaxRetentionSec')).toBe('7day');
@@ -276,7 +306,10 @@ describe('update API deployment assets', () => {
     const variables = environment.split(/\r?\n/).filter((line) => line && !line.startsWith('#')).map((line) => line.split('=', 2));
 
     expect(variables).toEqual([['COS_BUCKET', ''], ['COS_REGION', ''], ['COS_SECRET_ID', ''], ['COS_SECRET_KEY', '']]);
+    expect(readme).toContain('if ! getent passwd gift-panel-mirror >/dev/null; then');
     expect(readme).toContain('useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin gift-panel-mirror');
+    expect(readme).toContain('ACCOUNT_UID');
+    expect(readme).toContain('ACCOUNT_GID');
     expect(readme).toContain('install -o root -g root -m 0600 /secure/gift-panel-release-mirror.env /etc/gift-panel-release-mirror.env');
     expect(readme).toContain('sha256sum -c');
     expect(readme).toContain('RELEASE_ID="${REVIEWED_COMMIT:?set the reviewed 40-hex commit}"');
@@ -291,7 +324,10 @@ describe('update API deployment assets', () => {
     expect(readme).toContain('systemd must create `StateDirectory` first');
     expect(readme).toContain('gift-panel-release-mirror.service.d/dry-run.conf');
     expect(readme).toContain('/run/systemd/system/gift-panel-release-mirror.service.d/dry-run.conf');
-    expect(readme).toContain('trap cleanup EXIT INT TERM');
+    expect(readme).toContain('on_int()');
+    expect(readme).toContain('on_term()');
+    expect(readme).toContain('finish_dry_run 130');
+    expect(readme).toContain('finish_dry_run 143');
     expect(readme).toContain('test ! -e "$DROPIN"');
     expect(readme).toContain('Result --value gift-panel-release-mirror.service');
     expect(readme).toContain('ExecStart=/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --dry-run');
@@ -305,16 +341,169 @@ describe('update API deployment assets', () => {
     expect(readme).toContain('channels/stable/latest.json');
     expect(readme).toContain('state.json');
     expect(readme).toContain('https://$PUBLIC_DOMAIN/api/v1/releases/latest');
-    expect(readme).toContain('.tagName == $tag and .asset.sha256 == $sha and .asset.size == $size');
+    expect(readme).toContain('tag_name');
+    expect(readme).toContain('gift-panel-windows-x64.exe');
     expect(readme).toContain('do not re-enable timer');
-    expect(readme).toContain('trap rollback_cleanup EXIT INT TERM');
-    expect(readme).toContain('test ! -e "$ROLLBACK_DROPIN"');
+    expect(readme).toContain('trap on_term TERM');
+    expect(readme).toContain('test ! -e "$DROPIN"');
     expect(readme).toContain('Only after this rollback dry-run succeeds');
     expect(readme).toContain('Do not delete immutable release objects');
     expect(readme.indexOf('systemctl disable --now gift-panel-release-mirror.timer')).toBeLessThan(readme.indexOf('ln -sfn /opt/gift-panel-release-mirror/releases/PREVIOUS_RELEASE_ID'));
     expect(readme.indexOf('systemctl stop gift-panel-release-mirror.service')).toBeLessThan(readme.indexOf('ln -sfn /opt/gift-panel-release-mirror/releases/PREVIOUS_RELEASE_ID'));
     for (const block of shellBlocksAfter(readme, '## Release mirror (separate service)')) {
       expect(block.trimStart().startsWith('set -euo pipefail')).toBe(true);
+    }
+  });
+
+  it('streams only safe public latest-release fields through the executable rollback verifier', () => {
+    const readme = deploymentAsset('README.md');
+    const signedURL = 'https://download.example.invalid/opaque?never-log-this';
+    const good = JSON.stringify({ tag_name: 'v1.2.3', assets: [{ name: 'gift-panel-windows-x64.exe', browser_download_url: signedURL, size: 42, digest: `sha256:${'a'.repeat(64)}` }] });
+    const result = verifyLatest(readme, good);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+    expect(`${result.stdout}${result.stderr}`).not.toContain(signedURL);
+
+    const wrongSchema = verifyLatest(readme, JSON.stringify({ tagName: 'v1.2.3', asset: { sha256: 'a'.repeat(64), size: 42 }, browser_download_url: signedURL }));
+    expect(wrongSchema.status).not.toBe(0);
+    expect(`${wrongSchema.stdout}${wrongSchema.stderr}`).not.toContain(signedURL);
+
+    const duplicateAsset = verifyLatest(readme, JSON.stringify({ tag_name: 'v1.2.3', assets: [{ name: 'gift-panel-windows-x64.exe', browser_download_url: signedURL, size: 42, digest: `sha256:${'a'.repeat(64)}` }, { name: 'gift-panel-windows-x64.exe', browser_download_url: signedURL, size: 42, digest: `sha256:${'a'.repeat(64)}` }] }));
+    expect(duplicateAsset.status).not.toBe(0);
+    expect(`${duplicateAsset.stdout}${duplicateAsset.stderr}`).not.toContain(signedURL);
+
+    const nonIntegerEvidence = verifyLatest(readme, good, 'v1.2.3', 'a'.repeat(64), '42.0');
+    expect(nonIntegerEvidence.status).not.toBe(0);
+  });
+
+  it('documents distinct fail-closed signal cleanup for both mirror dry-runs', () => {
+    const readme = deploymentAsset('README.md');
+    const blocks = shellBlocksAfter(readme, '## Release mirror (separate service)').filter((block) => block.includes('dry-run'));
+
+    expect(blocks).toHaveLength(2);
+    for (const block of blocks) {
+      expect(block).toContain('trap - EXIT INT TERM');
+      expect(block).toContain('set +e');
+      expect(block).toContain('DropInPaths');
+      expect(block).toContain('finish_dry_run 130');
+      expect(block).toContain('finish_dry_run 143');
+    }
+  });
+
+  it('executes the transferred sidecar checks before deployment side effects', () => {
+    const readme = deploymentAsset('README.md');
+    const install = shellBlocksAfter(readme, '## Release mirror (separate service)').find((block) => block.includes('if ! getent passwd gift-panel-mirror'))!;
+    const sidecarChecks = install.slice(0, install.indexOf('if ! getent passwd gift-panel-mirror'));
+    const root = mkdtempSync(join(tmpdir(), 'gift-panel-sidecar-'));
+    try {
+      writeFileSync(join(root, 'gift-panel-release-mirror.reviewed'), `${'a'.repeat(40)}\n${'b'.repeat(64)}\n`);
+      const good = runBash(`${sidecarChecks}\nprintf sidecar-ok\n`, root);
+      expect(good.status, good.stderr).toBe(0);
+      expect(good.stdout).toContain('sidecar-ok');
+
+      writeFileSync(join(root, 'gift-panel-release-mirror.reviewed'), `${'a'.repeat(40)}\n`);
+      const short = runBash(`${sidecarChecks}\nprintf must-not-reach\n`, root);
+      expect(short.status).not.toBe(0);
+      expect(short.stdout).not.toContain('must-not-reach');
+
+      writeFileSync(join(root, 'gift-panel-release-mirror.reviewed'), `local\n${'b'.repeat(64)}\n`);
+      const local = runBash(`${sidecarChecks}\nprintf must-not-reach\n`, root);
+      expect(local.status).not.toBe(0);
+      expect(local.stdout).not.toContain('must-not-reach');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('executes idempotent and incompatible mirror-account paths', () => {
+    const readme = deploymentAsset('README.md');
+    const install = shellBlocksAfter(readme, '## Release mirror (separate service)').find((block) => block.includes('ACCOUNT_RECORD='))!;
+    const account = install.slice(install.indexOf('if ! getent passwd gift-panel-mirror'), install.indexOf('sudo install -d'));
+    const root = mkdtempSync(join(tmpdir(), 'gift-panel-account-'));
+    const log = posixPath(join(root, 'account.log'));
+    const fakeAccounts = `
+sudo() { "$@"; }
+getent() {
+  case "$1:$2" in
+    passwd:gift-panel-mirror)
+      if test "\${ACCOUNT_MODE}" = absent && test "\${ACCOUNT_CREATED:-0}" != 1; then return 2; fi
+      if test "\${ACCOUNT_MODE}" = incompatible; then printf 'gift-panel-mirror:x:999:999::/home/mirror:/usr/sbin/nologin\\n'; else printf 'gift-panel-mirror:x:999:999::/nonexistent:/usr/sbin/nologin\\n'; fi ;;
+    group:gift-panel-mirror) return 2 ;;
+    group:999) printf 'gift-panel-mirror:x:999:\\n' ;;
+    *) return 2 ;;
+  esac
+}
+id() { test "$1" = -gn && test "$2" = gift-panel-mirror && printf 'gift-panel-mirror\\n'; }
+useradd() { ACCOUNT_CREATED=1; printf 'useradd\\n' >> "$ACCOUNT_LOG"; }
+`;
+    try {
+      for (const mode of ['absent', 'compatible']) {
+        writeFileSync(join(root, 'account.log'), '');
+        const result = runBash(`set -euo pipefail\n${fakeAccounts}\n${account}`, root, { ACCOUNT_MODE: mode, ACCOUNT_LOG: log });
+        expect(result.status, result.stderr).toBe(0);
+        const calls = readFileSync(join(root, 'account.log'), 'utf8');
+        expect(calls.includes('useradd')).toBe(mode === 'absent');
+      }
+      writeFileSync(join(root, 'account.log'), '');
+      const incompatible = runBash(`set -euo pipefail\n${fakeAccounts}\n${account}\nprintf must-not-reach\n`, root, { ACCOUNT_MODE: 'incompatible', ACCOUNT_LOG: log });
+      expect(incompatible.status).not.toBe(0);
+      expect(incompatible.stdout).not.toContain('must-not-reach');
+      expect(readFileSync(join(root, 'account.log'), 'utf8')).not.toContain('useradd');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('executes dry-run cleanup across success, failures, and signals without publication', () => {
+    const readme = deploymentAsset('README.md');
+    const blocks = shellBlocksAfter(readme, '## Release mirror (separate service)').filter((block) => block.includes('dry-run'));
+    const root = mkdtempSync(join(tmpdir(), 'gift-panel-dry-run-'));
+    const runRoot = '$PWD/run';
+    const fakeSystemd = `
+sudo() { "$@"; }
+install() { last=\${!#}; mkdir -p "$last"; }
+tee() { cat > "$1"; }
+journalctl() { printf 'journal\\n' >> "$SYSTEMCTL_LOG"; }
+systemctl() {
+  printf '%s\\n' "$*" >> "$SYSTEMCTL_LOG"
+  case "$1" in
+    daemon-reload)
+      reloads=$(cat "$RELOAD_COUNT" 2>/dev/null || printf 0); reloads=$((reloads + 1)); printf '%s' "$reloads" > "$RELOAD_COUNT"
+      test "\${FAIL_RELOAD_AT:-0}" != "$reloads" ;;
+    show)
+      if test "$3" = Result; then printf 'success\\n'; else printf '%s\\n' "\${ACTIVE_DROPINS:-}"; fi ;;
+    start)
+      if test -n "\${SEND_SIGNAL:-}"; then kill -s "$SEND_SIGNAL" "$$"; fi
+      test "\${FAIL_START:-0}" != 1 ;;
+    *) return 0 ;;
+  esac
+}
+`;
+    try {
+      for (const [index, block] of blocks.entries()) {
+        const script = dryRunTail(block).replaceAll('/run/systemd/system', runRoot);
+        const expectedPublication = index === 0;
+        for (const scenario of [
+          { name: 'success', environment: {}, status: 0 },
+          { name: 'start-error', environment: { FAIL_START: '1' }, status: 1 },
+          { name: 'cleanup-error', environment: { FAIL_RELOAD_AT: '2' }, status: 1 },
+          { name: 'interrupt', environment: { SEND_SIGNAL: 'INT' }, status: 130 },
+          { name: 'terminate', environment: { SEND_SIGNAL: 'TERM' }, status: 143 },
+        ]) {
+          writeFileSync(join(root, 'systemctl.log'), '');
+          writeFileSync(join(root, 'reload-count'), '0');
+          const result = runBash(`${fakeSystemd}\n${script}`, root, { SYSTEMCTL_LOG: 'systemctl.log', RELOAD_COUNT: 'reload-count', ...scenario.environment });
+          expect(result.status, `${index}:${scenario.name}: ${result.stderr}`).toBe(scenario.status);
+          expect(existsSync(join(root, 'run', 'gift-panel-release-mirror.service.d', 'dry-run.conf'))).toBe(false);
+          const calls = readFileSync(join(root, 'systemctl.log'), 'utf8');
+          const enabled = calls.includes('enable --now gift-panel-release-mirror.timer');
+          expect(enabled).toBe(expectedPublication && scenario.name === 'success');
+        }
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 
