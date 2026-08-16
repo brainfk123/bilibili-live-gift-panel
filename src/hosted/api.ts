@@ -208,12 +208,13 @@ export class HostedAPI {
     const data = object((await this.request(`/api/admin/accounts/${accountId}/invitation-quota`, 'POST', 200, { remainingQuota, reason })).data);
     if (!data || !exactKeys(data, ['accountId', 'remainingQuota']) || data.accountId !== accountId || data.remainingQuota !== remainingQuota) throw new HostedAPIError('invalid_response', 200);
   }
-  async disableAccount(accountId: number, reason: string): Promise<ManagedAccount> { return this.accountMutation(accountId, 'disable', 'disabled', { reason }); }
-  async enableAccount(accountId: number, reason: string): Promise<ManagedAccount> { return this.accountMutation(accountId, 'enable', 'active', { reason }); }
-  async rebindAccount(accountId: number, challengeId: string, reason: string): Promise<ManagedAccount> { return this.accountMutation(accountId, 'rebind', 'active', { challengeId, reason }); }
-  private async accountMutation(accountId: number, action: string, expectedAccountStatus: ManagedAccount['status'], body: unknown): Promise<ManagedAccount> {
+  async disableAccount(accountId: number, reason: string): Promise<ManagedAccount> { return this.accountMutation(accountId, 'disable', ['disabled'], { reason }); }
+  async enableAccount(accountId: number, reason: string): Promise<ManagedAccount> { return this.accountMutation(accountId, 'enable', ['active'], { reason }); }
+  async rebindAccount(accountId: number, challengeId: string, reason: string): Promise<ManagedAccount> { return this.accountMutation(accountId, 'rebind', ['active', 'disabled'], { challengeId, reason }); }
+  private async accountMutation(accountId: number, action: string, expectedAccountStatuses: readonly ManagedAccount['status'][], body: unknown): Promise<ManagedAccount> {
     const data = object((await this.request(`/api/admin/accounts/${accountId}/${action}`, 'POST', 200, body)).data);
-    if (!data || !exactKeys(data, ['accountId', 'status']) || data.accountId !== accountId || data.status !== expectedAccountStatus) throw new HostedAPIError('invalid_response', 200);
-    return { accountId, status: expectedAccountStatus };
+    const status = expectedAccountStatuses.find((expected) => data?.status === expected);
+    if (!data || !exactKeys(data, ['accountId', 'status']) || data.accountId !== accountId || !status) throw new HostedAPIError('invalid_response', 200);
+    return { accountId, status };
   }
 }

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { HostedAPI, HostedAPIError } from '../src/hosted/api';
 import { createAuthFlow, mountAuthView } from '../src/hosted/auth';
 import { createAdminAccountFlow, createAdminFlow, createAdminOneTimeSecretFlow, mountAdminView } from '../src/hosted/admin';
+import { createHostedViewHost } from '../src/hosted/shell';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -87,6 +88,13 @@ describe('HostedAPI authentication contract', () => {
     await expect(api.disableAccount(7, 'security')).rejects.toMatchObject({ code: 'invalid_response' });
     responseBody = { accountId: 7, status: 'disabled' };
     await expect(api.enableAccount(7, 'appeal')).rejects.toMatchObject({ code: 'invalid_response' });
+  });
+
+  it('accepts a disabled account returned by a committed rebind', async () => {
+    const api = await HostedAPI.connect(async (input) => input === '/api/bootstrap'
+      ? json({ csrfToken: 'csrf' })
+      : json({ accountId: 7, status: 'disabled' }));
+    await expect(api.rebindAccount(7, 'fresh-proof', 'security hold')).resolves.toEqual({ accountId: 7, status: 'disabled' });
   });
 });
 
@@ -214,6 +222,44 @@ describe('Bilibili authentication lifecycle', () => {
     const disposing = flow.dispose(); finishSession(); await polling; await disposing;
     expect(logout).toHaveBeenCalledTimes(1);
     expect(signedIn).not.toHaveBeenCalled();
+  });
+
+  it('finishes old session compensation before a replacement view can mount', async () => {
+    const events: string[] = [];
+    let finishCreate!: () => void; let finishLogout!: () => void;
+    const createPending = new Promise<void>((resolve) => { finishCreate = resolve; });
+    const logoutPending = new Promise<void>((resolve) => { finishLogout = resolve; });
+    const logout = vi.fn(async () => { events.push('old-logout-start'); await logoutPending; events.push('old-logout-finish'); });
+    const cancel = vi.fn(async () => undefined);
+    const flow = createAuthFlow({
+      beginLogin: vi.fn(async () => ({ challengeId: 'old-challenge', qrImage: 'qr', expiresAt: '2030-01-01T00:00:00Z' })),
+      pollLogin: vi.fn(async () => ({ status: 'verified' as const, expiresAt: '2030-01-01T00:00:00Z' })),
+      createSession: vi.fn(async () => { events.push('old-create-start'); await createPending; events.push('old-create-finish'); }),
+      cancelLogin: cancel, logout,
+    }, { onStatus: vi.fn(), onSignedIn: vi.fn(), onRegistrationRequired: vi.fn() });
+    const host = createHostedViewHost();
+    await host.replace(() => ({ dispose: flow.dispose })); await flow.start();
+    const polling = flow.poll(); await vi.waitFor(() => expect(events).toContain('old-create-start'));
+    const duplicatePoll = flow.poll(); await Promise.resolve();
+    expect(events.filter((event) => event === 'old-create-start')).toHaveLength(1);
+    const replacing = host.replace(() => { events.push('new-mount'); return { dispose: vi.fn() }; });
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledWith('old-challenge'));
+    expect(events).not.toContain('new-mount');
+    finishCreate(); await vi.waitFor(() => expect(logout).toHaveBeenCalledTimes(1));
+    expect(events).not.toContain('new-mount');
+    finishLogout(); await Promise.all([polling, duplicatePoll, replacing]);
+    expect(events).toEqual(['old-create-start', 'old-create-finish', 'old-logout-start', 'old-logout-finish', 'new-mount']);
+  });
+
+  it('detaches normal session establishment before signed-in replaces the auth view', async () => {
+    const host = createHostedViewHost(); let replacement: Promise<void> | undefined; let flow!: ReturnType<typeof createAuthFlow>;
+    flow = createAuthFlow({
+      beginLogin: vi.fn(async () => ({ challengeId: 'normal-challenge', qrImage: 'qr', expiresAt: '2030-01-01T00:00:00Z' })),
+      pollLogin: vi.fn(async () => ({ status: 'verified' as const, expiresAt: '2030-01-01T00:00:00Z' })),
+      createSession: vi.fn(async () => undefined), cancelLogin: vi.fn(async () => undefined), logout: vi.fn(async () => undefined),
+    }, { onStatus: vi.fn(), onRegistrationRequired: vi.fn(), onSignedIn: () => { replacement = host.replace(() => ({ dispose: vi.fn() })); } });
+    await host.replace(() => ({ dispose: flow.dispose })); await flow.start(); await flow.poll();
+    await expect(replacement).resolves.toBeUndefined();
   });
 });
 

@@ -73,6 +73,7 @@ export function createAuthFlow(api: AuthAPI, callbacks: AuthCallbacks) {
   let activeChallenge: Challenge | undefined;
   let disposed = false;
   let polling = false;
+  let sessionCompletion: Promise<void> | undefined;
 
   return Object.freeze({
     async start(): Promise<void> {
@@ -87,7 +88,7 @@ export function createAuthFlow(api: AuthAPI, callbacks: AuthCallbacks) {
     },
     async poll(): Promise<void> {
       const current = activeChallenge;
-      if (!current || disposed || polling) return;
+      if (!current || disposed || polling || sessionCompletion) return;
       polling = true;
       let result: PollResult;
       try { result = await api.pollLogin(current.challengeId); } finally { polling = false; }
@@ -97,8 +98,19 @@ export function createAuthFlow(api: AuthAPI, callbacks: AuthCallbacks) {
         return;
       }
       if (result.status === 'verified') {
-        await api.createSession(current.challengeId);
-        if (disposed) { await api.logout(); return; }
+        let completeSession!: () => void;
+        const ownedCompletion = new Promise<void>((resolve) => { completeSession = resolve; });
+        sessionCompletion = ownedCompletion;
+        let established = false;
+        try {
+          await api.createSession(current.challengeId);
+          if (disposed) { await api.logout(); return; }
+          established = true;
+        } finally {
+          if (sessionCompletion === ownedCompletion) sessionCompletion = undefined;
+          completeSession();
+        }
+        if (!established) return;
         activeChallenge = undefined;
         callbacks.onStatus('verified');
         callbacks.onSignedIn();
@@ -116,8 +128,10 @@ export function createAuthFlow(api: AuthAPI, callbacks: AuthCallbacks) {
       if (disposed) return;
       disposed = true;
       const current = activeChallenge;
+      const pendingSession = sessionCompletion;
       activeChallenge = undefined;
       if (current) await api.cancelLogin(current.challengeId);
+      await pendingSession;
     },
   });
 }
