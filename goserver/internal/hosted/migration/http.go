@@ -129,7 +129,7 @@ func (handler *HTTPHandler) get(response http.ResponseWriter, request *http.Requ
 func (handler *HTTPHandler) apply(response http.ResponseWriter, request *http.Request) {
 	var body struct {
 		ChallengeID        string `json:"challengeId"`
-		KeepRoomSuggestion bool   `json:"keepRoomSuggestion"`
+		KeepRoomSuggestion *bool  `json:"keepRoomSuggestion"`
 	}
 	if !handler.acceptJSONMutation(request) {
 		handler.writeRejection(response, request)
@@ -139,7 +139,7 @@ func (handler *HTTPHandler) apply(response http.ResponseWriter, request *http.Re
 		writeMigrationError(response, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
-	if !decodeMigrationJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 {
+	if !decodeMigrationJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 || body.KeepRoomSuggestion == nil {
 		writeMigrationError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -166,7 +166,7 @@ func (handler *HTTPHandler) apply(response http.ResponseWriter, request *http.Re
 			handler.writeProofError(response, err)
 			return
 		}
-		job, err = handler.service.Apply(request.Context(), accountID, jobID, body.KeepRoomSuggestion)
+		job, err = handler.service.Apply(request.Context(), accountID, jobID, *body.KeepRoomSuggestion)
 		if err != nil {
 			handler.writeServiceError(response, err)
 			return
@@ -206,7 +206,7 @@ func (handler *HTTPHandler) cancel(response http.ResponseWriter, request *http.R
 func (handler *HTTPHandler) rollback(response http.ResponseWriter, request *http.Request) {
 	var body struct {
 		ChallengeID        string `json:"challengeId"`
-		KeepRoomSuggestion bool   `json:"keepRoomSuggestion"`
+		KeepRoomSuggestion *bool  `json:"keepRoomSuggestion"`
 	}
 	if !handler.acceptJSONMutation(request) {
 		handler.writeRejection(response, request)
@@ -216,7 +216,7 @@ func (handler *HTTPHandler) rollback(response http.ResponseWriter, request *http
 		writeMigrationError(response, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
-	if !decodeMigrationJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 || body.KeepRoomSuggestion {
+	if !decodeMigrationJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 || body.KeepRoomSuggestion == nil || *body.KeepRoomSuggestion {
 		writeMigrationError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
