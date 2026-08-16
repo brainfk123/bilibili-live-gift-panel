@@ -13,7 +13,7 @@ func TestPublicModelExcludesViewerAndCredentialFields(t *testing.T) {
 	t.Parallel()
 
 	forbidden := regexp.MustCompile(`(?i)uid|uname|nickname|avatar|cookie|token|receipt|contribution|log`)
-	for _, value := range []any{Snapshot{}, Gift{}, Effect{}, Transition{}} {
+	for _, value := range []any{Snapshot{}, Gift{}, Effect{}, TargetNotice{}, ActivityNotice{}, Transition{}} {
 		typ := reflect.TypeOf(value)
 		for i := 0; i < typ.NumField(); i++ {
 			field := typ.Field(i)
@@ -21,6 +21,35 @@ func TestPublicModelExcludesViewerAndCredentialFields(t *testing.T) {
 				t.Fatalf("%s exposes forbidden field %s", typ.Name(), field.Name)
 			}
 		}
+	}
+}
+
+func TestEffectJSONShapeExpressesAttributeTargetAndActivityChanges(t *testing.T) {
+	t.Parallel()
+
+	want := Effect{
+		RuleID:        "gift-health",
+		AttributeName: "Health",
+		Delta:         3,
+		ValueAfter:    45,
+		TriggerName:   "Rose",
+		Target:        &TargetNotice{PanelID: "goals", GiftID: 1, Received: 4, Target: 10},
+		Activity:      &ActivityNotice{ActivityID: "round", Action: "lock", Status: "locked", MilestoneID: "health-cap"},
+	}
+
+	encoded, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if strings.Contains(string(encoded), "attributeId") || !strings.Contains(string(encoded), `"attributeName":"Health"`) {
+		t.Fatalf("Effect JSON shape = %s, want attributeName without attributeId", encoded)
+	}
+	var got Effect
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Effect JSON round trip = %#v, want %#v", got, want)
 	}
 }
 
@@ -114,5 +143,92 @@ func TestNormalizeDeepCopiesMapsAndSlices(t *testing.T) {
 
 	if got.Attributes[0].Value != 42 || got.Activities[0].AttributeIDs[0] != "health" || got.Activities[0].InitialValues["health"] != 42 || got.GiftTargetPanels[0].Items[0].Received != 2 || got.SimplePlay.Parameters["nested"].(map[string]any)["value"] != "before" || got.SimplePlay.Gifts["heal"][0] != 1 {
 		t.Fatalf("Normalize() returned an aliased copy: %#v", got)
+	}
+}
+
+func TestNormalizeRejectsCyclicOrExcessiveSimplePlayParameters(t *testing.T) {
+	t.Parallel()
+
+	deep := map[string]any{}
+	current := deep
+	for range 65 {
+		next := map[string]any{}
+		current["next"] = next
+		current = next
+	}
+	if _, err := Normalize(Snapshot{SimplePlay: &SimplePlay{Parameters: deep}}); err == nil || !strings.Contains(err.Error(), "maximum nesting depth") {
+		t.Fatalf("Normalize(deep parameters) error = %v, want maximum nesting depth error", err)
+	}
+
+	cycle := map[string]any{}
+	cycle["self"] = cycle
+	if _, err := Normalize(Snapshot{SimplePlay: &SimplePlay{Parameters: cycle}}); err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("Normalize(cyclic parameters) error = %v, want cycle error", err)
+	}
+}
+
+func TestNormalizePreservesConcreteDynamicParameterTypes(t *testing.T) {
+	t.Parallel()
+
+	const exactInt64 int64 = 9_007_199_254_740_993
+	input := Snapshot{SimplePlay: &SimplePlay{Parameters: map[string]any{
+		"exact":  exactInt64,
+		"labels": map[string]string{"before": "value"},
+		"ids":    []int{1, 2},
+		"nested": []any{map[string][]int{"scores": {3, 4}}},
+	}}}
+
+	got, err := Normalize(input)
+	if err != nil {
+		t.Fatalf("Normalize() error = %v", err)
+	}
+	if value, ok := got.SimplePlay.Parameters["exact"].(int64); !ok || value != exactInt64 {
+		t.Fatalf("exact parameter = %#v (%T), want int64 %d", got.SimplePlay.Parameters["exact"], got.SimplePlay.Parameters["exact"], exactInt64)
+	}
+	if labels, ok := got.SimplePlay.Parameters["labels"].(map[string]string); !ok || labels["before"] != "value" {
+		t.Fatalf("labels parameter = %#v (%T), want map[string]string", got.SimplePlay.Parameters["labels"], got.SimplePlay.Parameters["labels"])
+	}
+	if ids, ok := got.SimplePlay.Parameters["ids"].([]int); !ok || !reflect.DeepEqual(ids, []int{1, 2}) {
+		t.Fatalf("ids parameter = %#v (%T), want []int{1, 2}", got.SimplePlay.Parameters["ids"], got.SimplePlay.Parameters["ids"])
+	}
+	if nested, ok := got.SimplePlay.Parameters["nested"].([]any); !ok || !reflect.DeepEqual(nested, []any{map[string][]int{"scores": {3, 4}}}) {
+		t.Fatalf("nested parameter = %#v (%T), want nested typed map and slice", got.SimplePlay.Parameters["nested"], got.SimplePlay.Parameters["nested"])
+	}
+
+	input.SimplePlay.Parameters["labels"].(map[string]string)["before"] = "changed"
+	input.SimplePlay.Parameters["ids"].([]int)[0] = 9
+	input.SimplePlay.Parameters["nested"].([]any)[0].(map[string][]int)["scores"][0] = 9
+	if got.SimplePlay.Parameters["labels"].(map[string]string)["before"] != "value" || got.SimplePlay.Parameters["ids"].([]int)[0] != 1 || got.SimplePlay.Parameters["nested"].([]any)[0].(map[string][]int)["scores"][0] != 3 {
+		t.Fatalf("Normalize() retained aliases in dynamic parameters: %#v", got.SimplePlay.Parameters)
+	}
+}
+
+func TestNormalizeRejectsUnsupportedDynamicParameterTypes(t *testing.T) {
+	t.Parallel()
+
+	_, err := Normalize(Snapshot{SimplePlay: &SimplePlay{Parameters: map[string]any{"bad": make(chan int)}}})
+	if err == nil || !strings.Contains(err.Error(), "unsupported dynamic type") {
+		t.Fatalf("Normalize() error = %v, want unsupported dynamic type error", err)
+	}
+}
+
+func TestNormalizeDetachesModelPointers(t *testing.T) {
+	t.Parallel()
+
+	minimum, enabled, seconds := 1.0, true, 30
+	input := Snapshot{
+		Attributes: []Attribute{{ID: "health", Display: &Display{Min: &minimum}}},
+		Rules:      []Rule{{ID: "gift-health", Enabled: &enabled, MinPrice: &minimum}},
+		Activities: []Activity{{ID: "round", GiftTimeout: &GiftTimeout{Seconds: seconds}}},
+		SimplePlay: &SimplePlay{OvertimeGiftActions: []OvertimeGiftAction{{GiftID: 1, Seconds: &seconds}}},
+	}
+
+	got, err := Normalize(input)
+	if err != nil {
+		t.Fatalf("Normalize() error = %v", err)
+	}
+	minimum, enabled, seconds = 99, false, 99
+	if *got.Attributes[0].Display.Min != 1 || !*got.Rules[0].Enabled || *got.Rules[0].MinPrice != 1 || got.Activities[0].GiftTimeout.Seconds != 30 || *got.SimplePlay.OvertimeGiftActions[0].Seconds != 30 {
+		t.Fatalf("Normalize() retained a model pointer alias: %#v", got)
 	}
 }

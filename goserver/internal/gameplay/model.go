@@ -4,7 +4,6 @@
 package gameplay
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
@@ -13,13 +12,15 @@ import (
 )
 
 const (
-	maxAttributes  = 200
-	maxRules       = 500
-	maxTimerRules  = 100
-	maxActivities  = 100
-	maxGiftPanels  = 100
-	maxPanelItems  = 200
-	maxStringRunes = 4096
+	maxAttributes   = 200
+	maxRules        = 500
+	maxTimerRules   = 100
+	maxActivities   = 100
+	maxGiftPanels   = 100
+	maxPanelItems   = 200
+	maxStringRunes  = 4096
+	maxDynamicDepth = 64
+	maxDynamicNodes = 10000
 )
 
 // Engine applies pure gameplay transitions. Its operations are implemented in
@@ -198,11 +199,29 @@ type Gift struct {
 
 // Effect is one observable gameplay state update made by a transition.
 type Effect struct {
-	AttributeID string  `json:"attributeId"`
-	Delta       float64 `json:"delta"`
-	ValueAfter  float64 `json:"valueAfter"`
-	RuleID      string  `json:"ruleId,omitempty"`
-	TriggerName string  `json:"triggerName,omitempty"`
+	RuleID        string          `json:"ruleId,omitempty"`
+	AttributeName string          `json:"attributeName,omitempty"`
+	Delta         float64         `json:"delta"`
+	ValueAfter    float64         `json:"valueAfter"`
+	TriggerName   string          `json:"triggerName,omitempty"`
+	Target        *TargetNotice   `json:"target,omitempty"`
+	Activity      *ActivityNotice `json:"activity,omitempty"`
+}
+
+// TargetNotice identifies one gift-target counter affected by a transition.
+type TargetNotice struct {
+	PanelID  string `json:"panelId"`
+	GiftID   int    `json:"giftId"`
+	Received int    `json:"received"`
+	Target   int    `json:"target"`
+}
+
+// ActivityNotice identifies an activity state change made by a transition.
+type ActivityNotice struct {
+	ActivityID  string `json:"activityId"`
+	Action      string `json:"action"`
+	Status      string `json:"status"`
+	MilestoneID string `json:"milestoneId,omitempty"`
 }
 
 type Transition struct {
@@ -281,22 +300,157 @@ func Normalize(snapshot Snapshot) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 
-	encoded, err := json.Marshal(snapshot)
+	return deepCopySnapshot(snapshot)
+}
+
+func deepCopySnapshot(snapshot Snapshot) (Snapshot, error) {
+	value, err := cloneValue(reflect.ValueOf(snapshot), "snapshot", &cloneState{active: map[validationVisit]struct{}{}})
 	if err != nil {
-		return Snapshot{}, fmt.Errorf("marshal snapshot: %w", err)
+		return Snapshot{}, err
 	}
-	var copy Snapshot
-	if err := json.Unmarshal(encoded, &copy); err != nil {
-		return Snapshot{}, fmt.Errorf("unmarshal snapshot copy: %w", err)
+	return value.Interface().(Snapshot), nil
+}
+
+type cloneState struct {
+	active map[validationVisit]struct{}
+}
+
+func cloneValue(value reflect.Value, path string, state *cloneState) (reflect.Value, error) {
+	if !value.IsValid() {
+		return value, nil
 	}
-	return copy, nil
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), nil
+		}
+		copy, err := cloneValue(value.Elem(), path, state)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		result := reflect.New(value.Type()).Elem()
+		result.Set(copy)
+		return result, nil
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), nil
+		}
+		leave, err := state.enter(value, path)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		defer leave()
+		copy, err := cloneValue(value.Elem(), path, state)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		result := reflect.New(value.Type().Elem())
+		result.Elem().Set(copy)
+		return result, nil
+	case reflect.Struct:
+		result := reflect.New(value.Type()).Elem()
+		for index := 0; index < value.NumField(); index++ {
+			if !result.Field(index).CanSet() || !value.Field(index).CanInterface() {
+				return reflect.Value{}, fmt.Errorf("%s contains unsupported dynamic type %s", path, value.Type())
+			}
+			copy, err := cloneValue(value.Field(index), path, state)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			result.Field(index).Set(copy)
+		}
+		return result, nil
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), nil
+		}
+		leave, err := state.enter(value, path)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		defer leave()
+		result := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			key, err := cloneValue(iter.Key(), path, state)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			item, err := cloneValue(iter.Value(), path, state)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			result.SetMapIndex(key, item)
+		}
+		return result, nil
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), nil
+		}
+		leave, err := state.enter(value, path)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		defer leave()
+		result := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for index := 0; index < value.Len(); index++ {
+			item, err := cloneValue(value.Index(index), path, state)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			result.Index(index).Set(item)
+		}
+		return result, nil
+	case reflect.Array:
+		result := reflect.New(value.Type()).Elem()
+		for index := 0; index < value.Len(); index++ {
+			item, err := cloneValue(value.Index(index), path, state)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			result.Index(index).Set(item)
+		}
+		return result, nil
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128, reflect.String:
+		return value, nil
+	default:
+		return reflect.Value{}, fmt.Errorf("%s contains unsupported dynamic type %s", path, value.Type())
+	}
+}
+
+func (state *cloneState) enter(value reflect.Value, path string) (func(), error) {
+	visit := validationVisit{typ: value.Type(), kind: value.Kind(), pointer: value.Pointer()}
+	if _, exists := state.active[visit]; exists {
+		return nil, fmt.Errorf("%s contains a cycle", path)
+	}
+	state.active[visit] = struct{}{}
+	return func() { delete(state.active, visit) }, nil
 }
 
 func validateSnapshotValues(snapshot Snapshot) error {
-	return validateValue(reflect.ValueOf(snapshot), "snapshot")
+	state := validationState{active: map[validationVisit]struct{}{}}
+	if err := validateValue(reflect.ValueOf(snapshot), "snapshot", &state); err != nil {
+		return err
+	}
+	if snapshot.SimplePlay == nil {
+		return nil
+	}
+	return validateDynamicValue(reflect.ValueOf(snapshot.SimplePlay.Parameters), "simplePlay.parameters", 0, &dynamicValidationState{active: map[validationVisit]struct{}{}})
 }
 
-func validateValue(value reflect.Value, path string) error {
+type validationVisit struct {
+	typ     reflect.Type
+	kind    reflect.Kind
+	pointer uintptr
+}
+
+type validationState struct {
+	active map[validationVisit]struct{}
+}
+
+func validateValue(value reflect.Value, path string, state *validationState) error {
 	if !value.IsValid() {
 		return nil
 	}
@@ -304,7 +458,14 @@ func validateValue(value reflect.Value, path string) error {
 		if value.IsNil() {
 			return nil
 		}
-		return validateValue(value.Elem(), path)
+		if value.Kind() == reflect.Pointer {
+			leave, err := state.enter(value, path)
+			if err != nil {
+				return err
+			}
+			defer leave()
+		}
+		return validateValue(value.Elem(), path, state)
 	}
 	switch value.Kind() {
 	case reflect.String:
@@ -317,28 +478,158 @@ func validateValue(value reflect.Value, path string) error {
 		}
 	case reflect.Struct:
 		for index := 0; index < value.NumField(); index++ {
-			if err := validateValue(value.Field(index), path); err != nil {
+			if err := validateValue(value.Field(index), path, state); err != nil {
 				return err
 			}
 		}
 	case reflect.Slice, reflect.Array:
+		var leave func()
+		if value.Kind() == reflect.Slice && !value.IsNil() {
+			var err error
+			leave, err = state.enter(value, path)
+			if err != nil {
+				return err
+			}
+			defer leave()
+		}
 		for index := 0; index < value.Len(); index++ {
-			if err := validateValue(value.Index(index), path); err != nil {
+			if err := validateValue(value.Index(index), path, state); err != nil {
 				return err
 			}
 		}
 	case reflect.Map:
+		if value.IsNil() {
+			return nil
+		}
+		leave, err := state.enter(value, path)
+		if err != nil {
+			return err
+		}
+		defer leave()
 		iter := value.MapRange()
 		for iter.Next() {
-			if err := validateValue(iter.Key(), path); err != nil {
+			if err := validateValue(iter.Key(), path, state); err != nil {
 				return err
 			}
-			if err := validateValue(iter.Value(), path); err != nil {
+			if err := validateValue(iter.Value(), path, state); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func (state *validationState) enter(value reflect.Value, path string) (func(), error) {
+	visit := validationVisit{typ: value.Type(), kind: value.Kind(), pointer: value.Pointer()}
+	if _, exists := state.active[visit]; exists {
+		return nil, fmt.Errorf("%s contains a cycle", path)
+	}
+	state.active[visit] = struct{}{}
+	return func() { delete(state.active, visit) }, nil
+}
+
+type dynamicValidationState struct {
+	active map[validationVisit]struct{}
+	nodes  int
+}
+
+func validateDynamicValue(value reflect.Value, path string, depth int, state *dynamicValidationState) error {
+	if depth > maxDynamicDepth {
+		return fmt.Errorf("%s exceeds maximum nesting depth", path)
+	}
+	state.nodes++
+	if state.nodes > maxDynamicNodes {
+		return fmt.Errorf("%s exceeds maximum node count", path)
+	}
+	if !value.IsValid() {
+		return nil
+	}
+	if value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return nil
+		}
+		return validateDynamicValue(value.Elem(), path, depth, state)
+	}
+	switch value.Kind() {
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return nil
+	case reflect.String:
+		if utf8.RuneCountInString(value.String()) > maxStringRunes {
+			return fmt.Errorf("%s exceeds %d runes", path, maxStringRunes)
+		}
+		return nil
+	case reflect.Float32, reflect.Float64:
+		if math.IsNaN(value.Float()) || math.IsInf(value.Float(), 0) {
+			return fmt.Errorf("%s must be finite", path)
+		}
+		return nil
+	case reflect.Pointer:
+		if value.IsNil() {
+			return nil
+		}
+		leave, err := state.enter(value, path)
+		if err != nil {
+			return err
+		}
+		defer leave()
+		return validateDynamicValue(value.Elem(), path, depth+1, state)
+	case reflect.Slice:
+		if value.IsNil() {
+			return nil
+		}
+		leave, err := state.enter(value, path)
+		if err != nil {
+			return err
+		}
+		defer leave()
+		for index := 0; index < value.Len(); index++ {
+			if err := validateDynamicValue(value.Index(index), path, depth+1, state); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Array:
+		for index := 0; index < value.Len(); index++ {
+			if err := validateDynamicValue(value.Index(index), path, depth+1, state); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Map:
+		if value.Type().Key().Kind() != reflect.String {
+			return fmt.Errorf("%s contains unsupported dynamic type %s", path, value.Type())
+		}
+		if value.IsNil() {
+			return nil
+		}
+		leave, err := state.enter(value, path)
+		if err != nil {
+			return err
+		}
+		defer leave()
+		iter := value.MapRange()
+		for iter.Next() {
+			if err := validateDynamicValue(iter.Key(), path, depth+1, state); err != nil {
+				return err
+			}
+			if err := validateDynamicValue(iter.Value(), path, depth+1, state); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("%s contains unsupported dynamic type %s", path, value.Type())
+	}
+}
+
+func (state *dynamicValidationState) enter(value reflect.Value, path string) (func(), error) {
+	visit := validationVisit{typ: value.Type(), kind: value.Kind(), pointer: value.Pointer()}
+	if _, exists := state.active[visit]; exists {
+		return nil, fmt.Errorf("%s contains a cycle", path)
+	}
+	state.active[visit] = struct{}{}
+	return func() { delete(state.active, visit) }, nil
 }
 
 func validateUniqueStringIDs(kind string, ids []string) error {
