@@ -88,21 +88,31 @@ For an Nginx rollback, restore the last known-good `/etc/nginx/conf.d/gift-panel
 
 ## Release mirror (separate service)
 
-The GitHub Release mirror is deliberately separate from the update API: it has a different no-login account, a write-only COS CAM identity, `/var/lib/gift-panel-release-mirror` state managed by systemd, and a dedicated journal namespace. It is a oneshot process and opens no public socket. Build it only from the exact reviewed commit that will be installed. `npm run build:update-api` rejects tracked-dirty or unavailable Git identity; `GIFT_PANEL_LOCAL_BUILD=1` is solely for a non-deployment local build.
+The mirror is separate from the update API: it uses a no-login account, its own systemd state directory and journal namespace, and opens no public socket. Its CAM identity is scoped read/write: only Head/Get/Put for `releases/*` and `channels/stable/latest.json`; no Delete, list, bucket configuration, or other prefixes.
 
-Create the dedicated service account and a versioned release location. Replace `RELEASE_ID` with the reviewed 40-hex commit and `REVIEWED_SHA256` with the independently reviewed checksum for this binary:
+Set the reviewed inputs independently of the build output. Deployment builds archive the exact clean Git commit before compiling; `GIFT_PANEL_LOCAL_BUILD=1` writes only `dist/local/` and must never be installed.
+
+```sh
+RELEASE_ID="${REVIEWED_COMMIT:?set the reviewed 40-hex commit}"
+REVIEWED_SHA256="${REVIEWED_SHA256:?set the independently reviewed mirror SHA-256}"
+test "$RELEASE_ID" = "$(git rev-parse HEAD)"
+npm run build:update-api
+test "$RELEASE_ID" = "$(dist/gift-panel-release-mirror-linux-amd64 --build-commit)"
+printf '%s  %s\n' "$REVIEWED_SHA256" 'dist/gift-panel-release-mirror-linux-amd64' | sha256sum -c -
+```
+
+Transfer only that verified normal artifact by the approved secure channel. On Lighthouse, create the account, install to the versioned directory, and verify the copied bytes and `current` target again before proceeding:
 
 ```sh
 sudo useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin gift-panel-mirror
-npm run build:update-api
-dist/gift-panel-release-mirror-linux-amd64 --build-commit
-printf '%s  %s\n' 'REVIEWED_SHA256' 'dist/gift-panel-release-mirror-linux-amd64' | sha256sum -c -
-sudo install -d -o root -g root -m 0755 /opt/gift-panel-release-mirror/releases/RELEASE_ID
-sudo install -o root -g root -m 0755 dist/gift-panel-release-mirror-linux-amd64 /opt/gift-panel-release-mirror/releases/RELEASE_ID/gift-panel-release-mirror
-sudo ln -sfn /opt/gift-panel-release-mirror/releases/RELEASE_ID /opt/gift-panel-release-mirror/current
+sudo install -d -o root -g root -m 0755 /opt/gift-panel-release-mirror/releases/"$RELEASE_ID"
+sudo install -o root -g root -m 0755 gift-panel-release-mirror-linux-amd64 /opt/gift-panel-release-mirror/releases/"$RELEASE_ID"/gift-panel-release-mirror
+printf '%s  %s\n' "$REVIEWED_SHA256" /opt/gift-panel-release-mirror/releases/"$RELEASE_ID"/gift-panel-release-mirror | sha256sum -c -
+sudo ln -sfn /opt/gift-panel-release-mirror/releases/"$RELEASE_ID" /opt/gift-panel-release-mirror/current
+test "$(readlink -f /opt/gift-panel-release-mirror/current/gift-panel-release-mirror)" = "/opt/gift-panel-release-mirror/releases/$RELEASE_ID/gift-panel-release-mirror"
 ```
 
-Create the environment through an approved secret channel. It must contain only the mirror COS write credentials and must not reuse `/etc/gift-panel-update-api.env`:
+Install the separate root-owned `0600` environment and units. It contains only the mirror scoped CAM credentials and never reuses `/etc/gift-panel-update-api.env`:
 
 ```sh
 sudo install -o root -g root -m 0600 /secure/gift-panel-release-mirror.env /etc/gift-panel-release-mirror.env
@@ -114,20 +124,31 @@ sudo systemctl daemon-reload
 sudo systemd-analyze verify /etc/systemd/system/gift-panel-release-mirror.service /etc/systemd/system/gift-panel-release-mirror.timer
 ```
 
-Do not enable the timer until these validations succeed. The dry run fetches and validates the candidate without COS publication; the following one-shot invocation is the first controlled publication:
+Do not run the binary manually on a fresh host: systemd must create `StateDirectory` first. Before enabling the timer, use a temporary dry-run drop-in, inspect the completed invocation, remove the drop-in, then run one normal oneshot:
 
 ```sh
-sudo -u gift-panel-mirror /opt/gift-panel-release-mirror/current/gift-panel-release-mirror --dry-run
+sudo install -d -o root -g root -m 0755 /etc/systemd/system/gift-panel-release-mirror.service.d
+printf '[Service]\nExecStart=\nExecStart=/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --dry-run\n' | sudo tee /etc/systemd/system/gift-panel-release-mirror.service.d/dry-run.conf >/dev/null
+sudo systemctl daemon-reload
 sudo systemctl start gift-panel-release-mirror.service
+sudo systemctl status gift-panel-release-mirror.service --no-pager
 sudo journalctl --namespace=gift-panel-release-mirror -u gift-panel-release-mirror.service --no-pager
+sudo rm /etc/systemd/system/gift-panel-release-mirror.service.d/dry-run.conf
+sudo systemctl daemon-reload
+sudo systemctl start gift-panel-release-mirror.service
 sudo systemctl enable --now gift-panel-release-mirror.timer
 ```
 
-To roll back the installed binary, stop the timer, repoint only the stable `current` pointer to a previously reviewed release directory, validate one controlled invocation, then enable the timer again. Do not delete immutable release objects in COS or release directories during rollback.
+For rollback, quiesce both timer and oneshot before changing `current`. Optionally restore an approved private backup of `channels/stable/latest.json` only while quiesced, then verify that stable pointer and the mirror `state.json` agree with the approved tag/SHA before the rollback binary dry-run. Do not delete immutable release objects or release directories.
 
 ```sh
 sudo systemctl disable --now gift-panel-release-mirror.timer
+sudo systemctl stop gift-panel-release-mirror.service
+sudo systemctl is-active --quiet gift-panel-release-mirror.timer && exit 1
+sudo systemctl is-active --quiet gift-panel-release-mirror.service && exit 1
 sudo ln -sfn /opt/gift-panel-release-mirror/releases/PREVIOUS_RELEASE_ID /opt/gift-panel-release-mirror/current
+# If approved, use the COS operator tool to restore the verified private channels/stable/latest.json backup while still quiesced.
+sudo jq -e --arg tag "$APPROVED_TAG" --arg sha "$APPROVED_SHA256" '.tag == $tag and .sha256 == $sha' /var/lib/gift-panel-release-mirror/state.json
 sudo systemctl start gift-panel-release-mirror.service
 sudo systemctl enable --now gift-panel-release-mirror.timer
 ```

@@ -39,6 +39,28 @@ func TestRunReportsEmbeddedBuildCommitWithoutConstructingMirror(t *testing.T) {
 	}
 }
 
+// Mutation caught: allowing a local or malformed build identity to publish lets a non-deployable artifact change COS state.
+func TestRunRejectsNonReviewedBuildIdentityOutsideDryRun(t *testing.T) {
+	previous := buildCommit
+	buildCommit = "local"
+	t.Cleanup(func() { buildCommit = previous })
+	configuration := mapEnvironment(map[string]string{
+		"COS_BUCKET": "bucket", "COS_REGION": "region", "COS_SECRET_ID": "id", "COS_SECRET_KEY": "key",
+	})
+	factoryCalls := 0
+	var output bytes.Buffer
+	err := run(context.Background(), []string{"--state-dir", t.TempDir()}, configuration, func(string, cosConfiguration) (commandRunner, error) {
+		factoryCalls++
+		return &fakeCommandRunner{}, nil
+	}, &output, time.Now)
+	if err == nil || commandStageOf(err) != stageConfiguration || factoryCalls != 0 {
+		t.Fatalf("run() error=%v stage=%q factory=%d", err, commandStageOf(err), factoryCalls)
+	}
+	if err := run(context.Background(), []string{"--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, fixedRunnerFactory(&fakeCommandRunner{result: mirror.RunResult{DryRun: true}}), &output, time.Now); err != nil {
+		t.Fatalf("dry-run error = %v", err)
+	}
+}
+
 // Mutation caught: exposing repository, endpoint, asset, or arbitrary positional controls expands the public CLI trust boundary.
 func TestRunRejectsEveryFlagExceptDryRunAndStateDir(t *testing.T) {
 	for _, args := range [][]string{
@@ -119,6 +141,9 @@ func TestRunDryRunNeedsNoCOSEnvironmentAndForwardsOption(t *testing.T) {
 
 // Mutation caught: allowing any missing COS field defers a permanent configuration error until after downloads.
 func TestRunNormalModeRequiresAllFourCOSVariables(t *testing.T) {
+	previous := buildCommit
+	buildCommit = "0123456789abcdef0123456789abcdef01234567"
+	t.Cleanup(func() { buildCommit = previous })
 	complete := map[string]string{
 		"COS_BUCKET":     "bucket-123456",
 		"COS_REGION":     "ap-shanghai",

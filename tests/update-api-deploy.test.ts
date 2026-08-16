@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
@@ -8,11 +8,11 @@ function deploymentAsset(name: string): string {
   return readFileSync(new URL(`../deploy/update-api/${name}`, import.meta.url), 'utf8');
 }
 
-type Unit = Map<string, Map<string, string>>;
+type Unit = Map<string, Map<string, string[]>>;
 
 function parseUnit(contents: string): Unit {
   const sections: Unit = new Map();
-  let section: Map<string, string> | undefined;
+  let section: Map<string, string[]> | undefined;
   for (const rawLine of contents.replaceAll('\r\n', '\n').split('\n')) {
     const line = rawLine.trim();
     if (!line || line.startsWith('#') || line.startsWith(';')) continue;
@@ -23,13 +23,20 @@ function parseUnit(contents: string): Unit {
       continue;
     }
     const separator = line.indexOf('=');
-    if (separator > 0 && section) section.set(line.slice(0, separator), line.slice(separator + 1));
+    if (separator > 0 && section) {
+      const key = line.slice(0, separator);
+      section.set(key, [...(section.get(key) ?? []), line.slice(separator + 1)]);
+    }
   }
   return sections;
 }
 
 function sectionValue(unit: Unit, section: string, key: string): string | undefined {
-  return unit.get(section)?.get(key);
+  return unit.get(section)?.get(key)?.at(-1);
+}
+
+function sectionValues(unit: Unit, section: string, key: string): string[] {
+  return unit.get(section)?.get(key) ?? [];
 }
 
 function build(root: string, environment: NodeJS.ProcessEnv = {}): SpawnSyncReturns<string> {
@@ -52,6 +59,19 @@ function copyUpdateAPI(destination: string): void {
   });
 }
 
+function reviewedBuildRoot(prefix: string): string {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  mkdirSync(join(root, 'scripts'));
+  cpSync(new URL('../scripts/build-update-api.mjs', import.meta.url), join(root, 'scripts', 'build-update-api.mjs'));
+  copyUpdateAPI(join(root, 'updateapi'));
+  execFileSync('git', ['init', '--quiet'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'Deployment test'], { cwd: root });
+  execFileSync('git', ['add', 'scripts', 'updateapi'], { cwd: root });
+  execFileSync('git', ['commit', '--quiet', '-m', 'reviewed build input'], { cwd: root });
+  return root;
+}
+
 function nginxAccessLogFormat(nginx: string): string {
   const format = nginx.match(/log_format gift_panel_update_api_safe ([\s\S]*?);/);
   expect(format, 'missing dedicated update API access log format').not.toBeNull();
@@ -60,17 +80,8 @@ function nginxAccessLogFormat(nginx: string): string {
 
 describe('update API deployment assets', () => {
   it('builds both Linux amd64 binaries from a reviewed clean commit', () => {
-    const temporaryRoot = mkdtempSync(join(tmpdir(), 'gift-panel-update-api-build-'));
+    const temporaryRoot = reviewedBuildRoot('gift-panel-update-api-build-');
     try {
-      mkdirSync(join(temporaryRoot, 'scripts'));
-      cpSync(new URL('../scripts/build-update-api.mjs', import.meta.url), join(temporaryRoot, 'scripts', 'build-update-api.mjs'));
-      copyUpdateAPI(join(temporaryRoot, 'updateapi'));
-
-      execFileSync('git', ['init', '--quiet'], { cwd: temporaryRoot });
-      execFileSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: temporaryRoot });
-      execFileSync('git', ['config', 'user.name', 'Deployment test'], { cwd: temporaryRoot });
-      execFileSync('git', ['add', 'scripts', 'updateapi'], { cwd: temporaryRoot });
-      execFileSync('git', ['commit', '--quiet', '-m', 'reviewed build input'], { cwd: temporaryRoot });
       const reviewedCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: temporaryRoot, encoding: 'utf8' }).trim();
       const result = build(temporaryRoot);
 
@@ -81,6 +92,9 @@ describe('update API deployment assets', () => {
         expect(goMetadata(binary)).toMatch(/\bmod\s+github.com\/brainfk123\/bilibili-live-gift-panel\/updateapi\b[\s\S]*\bGOARCH=amd64\b[\s\S]*\bGOOS=linux\b/);
       }
       const mirror = join(temporaryRoot, 'dist', 'gift-panel-release-mirror-linux-amd64');
+      expect(goMetadata(join(temporaryRoot, 'dist', 'gift-panel-update-api-linux-amd64'))).toContain('path\tgithub.com/brainfk123/bilibili-live-gift-panel/updateapi/cmd/server');
+      expect(goMetadata(mirror)).toContain('path\tgithub.com/brainfk123/bilibili-live-gift-panel/updateapi/cmd/mirror');
+      expect(goMetadata(mirror)).toContain('dep\tgithub.com/tencentyun/cos-go-sdk-v5\tv0.7.75');
       expect(readFileSync(mirror).includes(Buffer.from(reviewedCommit))).toBe(true);
     } finally {
       rmSync(temporaryRoot, { recursive: true, force: true });
@@ -100,6 +114,50 @@ describe('update API deployment assets', () => {
 
       const local = build(temporaryRoot, { GIFT_PANEL_LOCAL_BUILD: '1' });
       expect(local.status, local.stderr).toBe(0);
+      expect(existsSync(join(temporaryRoot, 'dist', 'gift-panel-release-mirror-linux-amd64'))).toBe(false);
+      expect(existsSync(join(temporaryRoot, 'dist', 'local', 'gift-panel-release-mirror-linux-amd64'))).toBe(true);
+    } finally {
+      rmSync(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects tracked source changes and excludes untracked Go files from a deployment artifact', () => {
+    const temporaryRoot = reviewedBuildRoot('gift-panel-update-api-snapshot-');
+    try {
+      appendFileSync(join(temporaryRoot, 'updateapi', 'cmd', 'mirror', 'untracked.go'), '\npackage main\nfunc init() { buildCommit = "UNTRACKED-MIRROR-CODE" }\n');
+      const snapshot = build(temporaryRoot);
+      expect(snapshot.status, snapshot.stderr).toBe(0);
+      expect(readFileSync(join(temporaryRoot, 'dist', 'gift-panel-release-mirror-linux-amd64')).includes(Buffer.from('UNTRACKED-MIRROR-CODE'))).toBe(false);
+
+      appendFileSync(join(temporaryRoot, 'updateapi', 'cmd', 'mirror', 'main.go'), '\n// tracked mutation\n');
+      const dirty = build(temporaryRoot);
+      expect(dirty.status).not.toBe(0);
+      expect(`${dirty.stdout}\n${dirty.stderr}`).toMatch(/clean reviewed Git commit/i);
+    } finally {
+      rmSync(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('fails deployment publication when HEAD changes after its snapshot is taken', () => {
+    const temporaryRoot = reviewedBuildRoot('gift-panel-update-api-race-');
+    try {
+      const mutation = join(temporaryRoot, 'updateapi', 'cmd', 'mirror', 'main.go');
+      const result = build(temporaryRoot, { GIFT_PANEL_BUILD_TEST_MUTATE_TRACKED_PATH: mutation });
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).toMatch(/changed during build|clean reviewed Git commit/i);
+    } finally {
+      rmSync(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('archives a reviewed checkout larger than Node default command buffering', () => {
+    const temporaryRoot = reviewedBuildRoot('gift-panel-update-api-large-archive-');
+    try {
+      writeFileSync(join(temporaryRoot, 'updateapi', 'build-fixture.bin'), Buffer.alloc(1024 * 1024 + 1, 7));
+      execFileSync('git', ['add', 'updateapi/build-fixture.bin'], { cwd: temporaryRoot });
+      execFileSync('git', ['commit', '--quiet', '-m', 'large reviewed input'], { cwd: temporaryRoot });
+      const result = build(temporaryRoot);
+      expect(result.status, result.stderr).toBe(0);
       expect(existsSync(join(temporaryRoot, 'dist', 'gift-panel-release-mirror-linux-amd64'))).toBe(true);
     } finally {
       rmSync(temporaryRoot, { recursive: true, force: true });
@@ -186,6 +244,7 @@ describe('update API deployment assets', () => {
     expect(sectionValue(service, 'Service', 'CapabilityBoundingSet')).toBe('');
     expect(sectionValue(service, 'Service', 'RestrictAddressFamilies')).toBe('AF_UNIX AF_INET AF_INET6');
     expect(sectionValue(service, 'Service', 'LogNamespace')).toBe('gift-panel-release-mirror');
+    expect(sectionValues(service, 'Service', 'ExecStart')).toEqual(['/opt/gift-panel-release-mirror/current/gift-panel-release-mirror']);
     expect(sectionValue(service, 'Socket', 'ListenStream')).toBeUndefined();
     expect(sectionValue(service, 'Service', 'ListenStream')).toBeUndefined();
     expect(sectionValue(journal, 'Journal', 'MaxRetentionSec')).toBe('7day');
@@ -204,17 +263,30 @@ describe('update API deployment assets', () => {
   it('keeps mirror credentials separate and documents validation before timer enablement', () => {
     const environment = deploymentAsset('gift-panel-release-mirror.env.example');
     const readme = deploymentAsset('README.md');
-    const variables = environment.split(/\r?\n/).filter((line) => line && !line.startsWith('#')).map((line) => line.split('=', 1)[0]);
+    const variables = environment.split(/\r?\n/).filter((line) => line && !line.startsWith('#')).map((line) => line.split('=', 2));
 
-    expect(variables).toEqual(['COS_BUCKET', 'COS_REGION', 'COS_SECRET_ID', 'COS_SECRET_KEY']);
+    expect(variables).toEqual([['COS_BUCKET', ''], ['COS_REGION', ''], ['COS_SECRET_ID', ''], ['COS_SECRET_KEY', '']]);
     expect(readme).toContain('useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin gift-panel-mirror');
     expect(readme).toContain('install -o root -g root -m 0600 /secure/gift-panel-release-mirror.env /etc/gift-panel-release-mirror.env');
     expect(readme).toContain('sha256sum -c');
-    expect(readme).toContain('gift-panel-release-mirror --dry-run');
+    expect(readme).toContain('RELEASE_ID="${REVIEWED_COMMIT:?set the reviewed 40-hex commit}"');
+    expect(readme).toContain('test "$RELEASE_ID" = "$(dist/gift-panel-release-mirror-linux-amd64 --build-commit)"');
+    expect(readme).toContain('sha256sum -c -');
+    expect(readme).toContain('readlink -f /opt/gift-panel-release-mirror/current/gift-panel-release-mirror');
+    expect(readme).toContain('gift-panel-release-mirror.service.d/dry-run.conf');
+    expect(readme).toContain('ExecStart=/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --dry-run');
     expect(readme).toContain('systemctl start gift-panel-release-mirror.service');
     expect(readme.indexOf('systemctl enable --now gift-panel-release-mirror.timer')).toBeGreaterThan(readme.indexOf('gift-panel-release-mirror --dry-run'));
-    expect(readme).toContain('ln -sfn /opt/gift-panel-release-mirror/releases/RELEASE_ID /opt/gift-panel-release-mirror/current');
+    expect(readme).toContain('ln -sfn /opt/gift-panel-release-mirror/releases/"$RELEASE_ID" /opt/gift-panel-release-mirror/current');
+    expect(readme).toContain('Head/Get/Put');
+    expect(readme).toContain('no Delete, list, bucket configuration, or other prefixes');
+    expect(readme).toContain('systemctl stop gift-panel-release-mirror.service');
+    expect(readme).toContain('systemctl is-active --quiet gift-panel-release-mirror.service');
+    expect(readme).toContain('channels/stable/latest.json');
+    expect(readme).toContain('state.json');
     expect(readme).toContain('Do not delete immutable release objects');
+    expect(readme.indexOf('systemctl disable --now gift-panel-release-mirror.timer')).toBeLessThan(readme.indexOf('ln -sfn /opt/gift-panel-release-mirror/releases/PREVIOUS_RELEASE_ID'));
+    expect(readme.indexOf('systemctl stop gift-panel-release-mirror.service')).toBeLessThan(readme.indexOf('ln -sfn /opt/gift-panel-release-mirror/releases/PREVIOUS_RELEASE_ID'));
   });
 
   it('documents the private COS gate and direct loopback health check', () => {

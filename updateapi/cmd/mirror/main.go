@@ -136,6 +136,9 @@ func run(parent context.Context, args []string, lookup environmentLookup, factor
 		fmt.Fprintln(output, buildCommit)
 		return nil
 	}
+	if !dryRun && !isReviewedBuildCommit(buildCommit) {
+		return finishFailure(commandFailure(stageConfiguration, errors.New("mirror build identity is not reviewed")))
+	}
 	if err := ctx.Err(); err != nil {
 		return finishFailure(commandFailure(stageInvocation, err))
 	}
@@ -193,6 +196,18 @@ func run(parent context.Context, args []string, lookup environmentLookup, factor
 	elapsed := now().Sub(startedAt)
 	writeSuccessSummary(output, result, elapsed)
 	return nil
+}
+
+func isReviewedBuildCommit(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func newProductionRunner(stateDirectory string, configuration cosConfiguration) (commandRunner, error) {
