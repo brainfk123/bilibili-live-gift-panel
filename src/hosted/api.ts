@@ -43,10 +43,52 @@ export interface RecoveryPreparation {
   handoffToken: string;
 }
 
+export type HostedConfigurationDefinition = Record<string, unknown>;
+export type HostedConfigurationRuntime = Record<string, unknown>;
+
+export interface HostedConfiguration {
+  definition: HostedConfigurationDefinition;
+  runtime: HostedConfigurationRuntime;
+  version: number;
+  revision: number;
+}
+
+export interface MigrationCounts {
+  attributes: number;
+  rules: number;
+  activities: number;
+  giftTargetPanels: number;
+  giftTargetItems: number;
+}
+
+export interface MigrationSource {
+  appVersion: string;
+  configurationSchemaVersion: number;
+}
+
+export interface MigrationPreview {
+  id: number;
+  expiresAt: string;
+  reused: boolean;
+  counts: MigrationCounts;
+  warnings?: string[];
+  ignored?: string[];
+  roomSuggestion?: string;
+  source: MigrationSource;
+}
+
+export interface MigrationJob {
+  id: number;
+  status: 'previewed' | 'pending' | 'applied' | 'cancelled' | 'rolled_back' | 'expired';
+  expiresAt?: string;
+  rollbackExpiresAt?: string;
+}
+
 const stableErrors = new Set([
   'authentication_failed', 'authentication_required', 'invalid_request', 'operation_failed',
   'quota_exhausted', 'rate_limited', 'recent_totp_required', 'request_rejected',
-  'temporarily_unavailable', 'verification_pending',
+  'temporarily_unavailable', 'verification_pending', 'revision_conflict', 'not_found',
+  'proof_rejected', 'expired', 'operation_conflict',
 ]);
 
 export class HostedAPIError extends Error {
@@ -77,6 +119,78 @@ function number(value: unknown): value is number {
 function exactKeys(value: Record<string, unknown>, required: string[], optional: string[] = []): boolean {
   const allowed = new Set([...required, ...optional]);
   return required.every((key) => Object.hasOwn(value, key)) && Object.keys(value).every((key) => allowed.has(key));
+}
+
+function safeObject(value: unknown): value is Record<string, unknown> {
+  return object(value) !== undefined;
+}
+
+function nonEmptyStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string' && item.length <= 4096);
+}
+
+function finite(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value); }
+function strings(value: unknown): value is string[] { return Array.isArray(value) && value.every((item) => typeof item === 'string'); }
+function integers(value: unknown): value is number[] { return Array.isArray(value) && value.every((item) => number(item)); }
+function arrayOf(value: unknown, valid: (item: unknown) => boolean): boolean { return Array.isArray(value) && value.every(valid); }
+function numberMap(value: unknown, integer = false): boolean { const item = object(value); return item !== undefined && Object.values(item).every((entry) => integer ? number(entry) : finite(entry)); }
+function optional(value: unknown, valid: (item: unknown) => boolean): boolean { return value === undefined || valid(value); }
+function display(value: unknown): boolean {
+  const item = object(value); return item !== undefined && exactKeys(item, ['variant'], ['themeId', 'title', 'min', 'max', 'lowThreshold', 'leftLabel', 'rightLabel', 'valueMappings']) && string(item.variant) && optional(item.themeId, string) && optional(item.title, string) && optional(item.min, finite) && optional(item.max, finite) && optional(item.lowThreshold, finite) && optional(item.leftLabel, string) && optional(item.rightLabel, string) && optional(item.valueMappings, (items) => arrayOf(items, (entry) => { const mapping = object(entry); return mapping !== undefined && exactKeys(mapping, ['value', 'label'], ['color']) && finite(mapping.value) && string(mapping.label) && optional(mapping.color, string); }));
+}
+function attributeDefinition(value: unknown): boolean {
+  const item = object(value); return item !== undefined && exactKeys(item, ['id', 'name', 'unit', 'format', 'decimals', 'suffix'], ['color', 'broadcastMessage', 'display']) && string(item.id) && string(item.name) && string(item.unit) && string(item.format) && Number.isSafeInteger(item.decimals) && string(item.suffix) && optional(item.color, string) && optional(item.broadcastMessage, string) && optional(item.display, display);
+}
+function definition(value: unknown): value is HostedConfigurationDefinition {
+  const item = object(value);
+  if (!item || !exactKeys(item, ['attributes', 'displayScenes', 'giftTargetPanels', 'activities', 'rules', 'timerRules', 'formulaPresets', 'gifts'], ['simplePlay']) || !arrayOf(item.attributes, attributeDefinition)) return false;
+  const scene = (entry: unknown): boolean => { const row = object(entry); return row !== undefined && exactKeys(row, ['id', 'name', 'attributeIds', 'layout', 'themeId']) && string(row.id) && string(row.name) && strings(row.attributeIds) && string(row.layout) && string(row.themeId); };
+  const panel = (entry: unknown): boolean => { const row = object(entry); return row !== undefined && exactKeys(row, ['id', 'name', 'layout', 'items']) && string(row.id) && string(row.name) && string(row.layout) && arrayOf(row.items, (child) => { const item = object(child); return item !== undefined && exactKeys(item, ['giftId', 'target', 'barStyle'], ['name']) && number(item.giftId) && number(item.target) && string(item.barStyle) && optional(item.name, string); }); };
+  const milestone = (entry: unknown): boolean => { const row = object(entry); return row !== undefined && exactKeys(row, ['id', 'name', 'attributeId', 'comparison', 'threshold', 'action', 'message']) && string(row.id) && string(row.name) && string(row.attributeId) && string(row.comparison) && finite(row.threshold) && string(row.action) && string(row.message); };
+  const activity = (entry: unknown): boolean => { const row = object(entry); return row !== undefined && exactKeys(row, ['id', 'name', 'attributeIds', 'resultMode', 'gateRules', 'initialValues', 'milestones'], ['sceneId', 'giftTimeout']) && string(row.id) && string(row.name) && strings(row.attributeIds) && string(row.resultMode) && typeof row.gateRules === 'boolean' && numberMap(row.initialValues) && arrayOf(row.milestones, milestone) && optional(row.sceneId, string) && optional(row.giftTimeout, (timeout) => { const item = object(timeout); return item !== undefined && exactKeys(item, ['seconds', 'action']) && number(item.seconds) && string(item.action); }); };
+  const rule = (entry: unknown): boolean => { const row = object(entry); return row !== undefined && exactKeys(row, ['id', 'giftId', 'attributeId', 'formula'], ['formulaName', 'condition', 'enabled', 'matchGiftIds', 'minPrice', 'cap', 'dailyLimit']) && string(row.id) && number(row.giftId) && string(row.attributeId) && string(row.formula) && optional(row.formulaName, string) && optional(row.condition, string) && optional(row.enabled, (enabled) => typeof enabled === 'boolean') && optional(row.matchGiftIds, integers) && optional(row.minPrice, finite) && optional(row.cap, finite) && optional(row.dailyLimit, number); };
+  const timerRule = (entry: unknown): boolean => { const row = object(entry); return row !== undefined && exactKeys(row, ['id', 'attributeId', 'formulaName', 'intervalSeconds', 'formula', 'enabled'], ['condition']) && string(row.id) && string(row.attributeId) && string(row.formulaName) && number(row.intervalSeconds) && string(row.formula) && typeof row.enabled === 'boolean' && optional(row.condition, string); };
+  const preset = (entry: unknown): boolean => { const row = object(entry); return row !== undefined && exactKeys(row, ['id', 'name', 'context', 'formula', 'attributeId']) && string(row.id) && string(row.name) && string(row.context) && string(row.formula) && string(row.attributeId); };
+  const gift = (entry: unknown): boolean => { const row = object(entry); return row !== undefined && exactKeys(row, ['id', 'name', 'price', 'coinType'], ['blindBoxParentId', 'blindBoxParentName', 'blindBoxParentPrice']) && number(row.id) && string(row.name) && finite(row.price) && string(row.coinType) && optional(row.blindBoxParentId, number) && optional(row.blindBoxParentName, string) && optional(row.blindBoxParentPrice, finite); };
+  const simplePlay = (entry: unknown): boolean => { const row = object(entry); return row !== undefined && exactKeys(row, ['version', 'templateId', 'templateVersion', 'attributeId', 'parameters', 'gifts', 'managedFingerprint'], ['overtimeGiftActions']) && Number.isSafeInteger(row.version) && string(row.templateId) && Number.isSafeInteger(row.templateVersion) && string(row.attributeId) && safeObject(row.parameters) && safeObject(row.gifts) && string(row.managedFingerprint) && Object.values(row.gifts).every(integers) && optional(row.overtimeGiftActions, (actions) => arrayOf(actions, (action) => { const item = object(action); return item !== undefined && exactKeys(item, ['giftId', 'operation'], ['seconds']) && number(item.giftId) && string(item.operation) && optional(item.seconds, number); })); };
+  return arrayOf(item.displayScenes, scene) && arrayOf(item.giftTargetPanels, panel) && arrayOf(item.activities, activity) && arrayOf(item.rules, rule) && arrayOf(item.timerRules, timerRule) && arrayOf(item.formulaPresets, preset) && arrayOf(item.gifts, gift) && optional(item.simplePlay, simplePlay);
+}
+function runtime(value: unknown): value is HostedConfigurationRuntime {
+  const item = object(value);
+  const activity = (entry: unknown): boolean => { const row = object(entry); return row !== undefined && exactKeys(row, ['id', 'status', 'milestones'], ['startedAtMillis', 'lockedAtMillis', 'settledAtMillis', 'result', 'giftTimeout']) && string(row.id) && string(row.status) && arrayOf(row.milestones, (milestone) => { const item = object(milestone); return item !== undefined && exactKeys(item, ['id'], ['triggeredAtMillis', 'triggerValue']) && string(item.id) && optional(item.triggeredAtMillis, (time) => typeof time === 'number' && Number.isSafeInteger(time)) && optional(item.triggerValue, finite); }) && optional(row.startedAtMillis, (time) => typeof time === 'number' && Number.isSafeInteger(time)) && optional(row.lockedAtMillis, (time) => typeof time === 'number' && Number.isSafeInteger(time)) && optional(row.settledAtMillis, (time) => typeof time === 'number' && Number.isSafeInteger(time)) && optional(row.result, (result) => { const item = object(result); return item !== undefined && exactKeys(item, ['values'], ['winnerAttributeId']) && numberMap(item.values) && optional(item.winnerAttributeId, string); }) && optional(row.giftTimeout, (timeout) => { const item = object(timeout); return item !== undefined && exactKeys(item, ['lastGiftAtMillis', 'deadlineAtMillis']) && typeof item.lastGiftAtMillis === 'number' && Number.isSafeInteger(item.lastGiftAtMillis) && typeof item.deadlineAtMillis === 'number' && Number.isSafeInteger(item.deadlineAtMillis); }); };
+  return item !== undefined && exactKeys(item, ['attributeValues', 'giftTargetReceived', 'activities', 'ruleLimits']) && numberMap(item.attributeValues) && arrayOf(item.giftTargetReceived, (entry) => { const row = object(entry); return row !== undefined && exactKeys(row, ['panelId', 'giftId', 'received']) && string(row.panelId) && number(row.giftId) && number(row.received); }) && arrayOf(item.activities, activity) && (() => { const limits = object(item.ruleLimits); return limits !== undefined && exactKeys(limits, ['localDate', 'appliedCounts']) && string(limits.localDate) && numberMap(limits.appliedCounts, true); })();
+}
+
+function configuration(value: unknown): HostedConfiguration | undefined {
+  const item = object(value);
+  if (!item || !exactKeys(item, ['definition', 'runtime', 'version', 'revision']) || !safeObject(item.definition) || !safeObject(item.runtime) || !number(item.version) || !number(item.revision)) return undefined;
+  if (!definition(item.definition) || !runtime(item.runtime)) return undefined;
+  return { definition: item.definition, runtime: item.runtime, version: item.version, revision: item.revision };
+}
+
+function migrationCounts(value: unknown): MigrationCounts | undefined {
+  const item = object(value);
+  return item && exactKeys(item, ['attributes', 'rules', 'activities', 'giftTargetPanels', 'giftTargetItems']) && number(item.attributes) && number(item.rules) && number(item.activities) && number(item.giftTargetPanels) && number(item.giftTargetItems)
+    ? item as unknown as MigrationCounts : undefined;
+}
+
+function migrationSource(value: unknown): MigrationSource | undefined {
+  const item = object(value);
+  return item && exactKeys(item, ['appVersion', 'configurationSchemaVersion']) && string(item.appVersion) && number(item.configurationSchemaVersion)
+    ? item as unknown as MigrationSource : undefined;
+}
+
+function migrationPreview(value: unknown): MigrationPreview | undefined {
+  const item = object(value);
+  const counts = migrationCounts(item?.counts); const source = migrationSource(item?.source);
+  if (!item || !exactKeys(item, ['id', 'expiresAt', 'reused', 'counts', 'source'], ['warnings', 'ignored', 'roomSuggestion']) || !number(item.id) || item.id === 0 || !instant(item.expiresAt) || typeof item.reused !== 'boolean' || !counts || !source || (item.warnings !== undefined && !nonEmptyStringArray(item.warnings)) || (item.ignored !== undefined && !nonEmptyStringArray(item.ignored)) || (item.roomSuggestion !== undefined && !string(item.roomSuggestion))) return undefined;
+  return { id: item.id, expiresAt: item.expiresAt, reused: item.reused, counts, source, ...(item.warnings ? { warnings: item.warnings } : {}), ...(item.ignored ? { ignored: item.ignored } : {}), ...(item.roomSuggestion ? { roomSuggestion: item.roomSuggestion } : {}) };
+}
+
+function migrationJob(value: unknown): MigrationJob | undefined {
+  const item = object(value);
+  if (!item || !exactKeys(item, ['id', 'status'], ['expiresAt', 'rollbackExpiresAt']) || !number(item.id) || item.id === 0 || !string(item.status) || !['previewed', 'pending', 'applied', 'cancelled', 'rolled_back', 'expired'].includes(item.status) || (item.expiresAt !== undefined && !instant(item.expiresAt)) || (item.rollbackExpiresAt !== undefined && !instant(item.rollbackExpiresAt))) return undefined;
+  return item as unknown as MigrationJob;
 }
 
 function challenge(value: unknown): Challenge | undefined {
@@ -142,6 +256,17 @@ export class HostedAPI {
     return { status: response.status, data };
   }
 
+  private async requestRawJSON(path: string, expectedStatus: number | readonly number[], body: string): Promise<{ status: number; data: unknown }> {
+    const response = await this.fetcher(path, {
+      method: 'POST', credentials: 'same-origin', headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': this.csrfToken }, body,
+    });
+    const data = await HostedAPI.readJSON(response);
+    const errorBody = object(data);
+    if (errorBody && exactKeys(errorBody, ['error']) && string(errorBody.error) && stableErrors.has(errorBody.error)) throw new HostedAPIError(errorBody.error, response.status);
+    if (!(Array.isArray(expectedStatus) ? expectedStatus : [expectedStatus]).includes(response.status)) throw new HostedAPIError('invalid_response', response.status);
+    return { status: response.status, data };
+  }
+
   private requireChallenge(value: unknown): Challenge {
     const result = challenge(value);
     if (!result) throw new HostedAPIError('invalid_response', 200);
@@ -188,6 +313,38 @@ export class HostedAPI {
     return { ...record, code: data.code, ...(remainingQuota === undefined ? {} : { remainingQuota }) };
   }
   async revokeInvitation(id: number): Promise<void> { await this.request(`/api/invitations/${id}`, 'DELETE', 204); }
+
+  async loadConfiguration(): Promise<HostedConfiguration> {
+    const result = configuration((await this.request('/api/configuration', 'GET', 200)).data);
+    if (!result) throw new HostedAPIError('invalid_response', 200);
+    return result;
+  }
+  async saveConfigurationDefinition(expectedVersion: number, definition: HostedConfigurationDefinition): Promise<{ version: number; revision: number }> {
+    const data = object((await this.request('/api/configuration/definition', 'PUT', 200, { expectedVersion, definition })).data);
+    if (!data || !exactKeys(data, ['version', 'revision']) || !number(data.version) || !number(data.revision)) throw new HostedAPIError('invalid_response', 200);
+    return { version: data.version, revision: data.revision };
+  }
+  async saveConfigurationRuntime(expectedRevision: number, runtime: HostedConfigurationRuntime): Promise<{ revision: number }> {
+    const data = object((await this.request('/api/configuration/state', 'PUT', 200, { expectedRevision, runtime })).data);
+    if (!data || !exactKeys(data, ['revision']) || !number(data.revision)) throw new HostedAPIError('invalid_response', 200);
+    return { revision: data.revision };
+  }
+  async suggestRoom(roomId: string): Promise<void> { await this.request('/api/configuration/room-suggestion', 'PUT', 204, { roomId }); }
+
+  async previewMigration(rawJSON: string): Promise<MigrationPreview> {
+    const result = migrationPreview((await this.requestRawJSON('/api/migrations/preview', 201, rawJSON)).data);
+    if (!result) throw new HostedAPIError('invalid_response', 201);
+    return result;
+  }
+  async getMigration(id: number): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}`, 'GET', 200)).data); }
+  async applyMigration(id: number, challengeId: string, keepRoomSuggestion: boolean): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}/apply`, 'POST', 200, { challengeId, keepRoomSuggestion })).data); }
+  async cancelMigration(id: number): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}`, 'DELETE', 200)).data); }
+  async rollbackMigration(id: number, challengeId: string): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}/rollback`, 'POST', 200, { challengeId })).data); }
+  private requireMigrationJob(value: unknown): MigrationJob {
+    const result = migrationJob(value);
+    if (!result) throw new HostedAPIError('invalid_response', 200);
+    return result;
+  }
 
   async beginAdminProof(): Promise<Challenge> { return this.requireChallenge((await this.request('/api/admin/auth/bili/challenges', 'POST', 201)).data); }
   async cancelAdminProof(id: string): Promise<void> { await this.request(`/api/admin/auth/bili/challenges/${encodeURIComponent(id)}`, 'DELETE', 204); }
