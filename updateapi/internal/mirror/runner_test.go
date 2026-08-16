@@ -158,6 +158,32 @@ func TestRunnerPersistsWeakGitHubDiscoveryETagForConditionalRequests(t *testing.
 	}
 }
 
+func TestRunnerTreatsChangedGitHubETagForSameReleaseIdentityAsNoOp(t *testing.T) {
+	// GitHub release ETags include volatile metadata such as asset download
+	// counts. Downloading a mirrored asset can therefore invalidate the ETag
+	// without changing the immutable release identity.
+	fixture := newRunnerFixture(t)
+	prior := validRunnerMirrorState(fixture)
+	fixture.state.loaded = prior
+	fixture.source.result.ETag = `W/"download-count-changed"`
+
+	result, err := fixture.runner().Run(context.Background(), RunOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.NotModified || result.Tag != fixture.release.Tag {
+		t.Fatalf("Run() result = %+v, want tagged no-op", result)
+	}
+	if len(fixture.fetcher.specs) != 0 || fixture.factoryCalls != 0 || fixture.publisher.calls != 0 {
+		t.Fatalf("same-release side effects: downloads=%d factory=%d publishes=%d", len(fixture.fetcher.specs), fixture.factoryCalls, fixture.publisher.calls)
+	}
+	want := prior
+	want.ETag = fixture.source.result.ETag
+	if fixture.state.saveCalls != 1 || fixture.state.saved != want {
+		t.Fatalf("refreshed state: calls=%d state=%+v, want %+v", fixture.state.saveCalls, fixture.state.saved, want)
+	}
+}
+
 // Mutation caught: reordering or omitting a required artifact can publish a partially validated release.
 func TestRunnerDownloadsFourFixedAssetsBeforePublishingAndSavingState(t *testing.T) {
 	fixture := newRunnerFixture(t)

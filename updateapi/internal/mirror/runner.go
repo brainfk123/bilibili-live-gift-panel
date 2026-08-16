@@ -134,6 +134,16 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunRe
 		return RunResult{StateInvalid: stateInvalid}, runnerFailure(StageValidation, candidate.Tag, errors.New("release identity is invalid"))
 	}
 	tag := candidate.Tag
+	if !stateInvalid && sameReleaseIdentity(prior, candidate) {
+		if !options.DryRun && latest.ETag != prior.ETag {
+			refreshed := prior
+			refreshed.ETag = latest.ETag
+			if err := runner.State.Save(refreshed); err != nil {
+				return RunResult{Tag: tag, StateInvalid: stateInvalid}, runnerFailure(StageStateSave, tag, err)
+			}
+		}
+		return RunResult{Tag: tag, NotModified: true, StateInvalid: stateInvalid}, nil
+	}
 
 	paths := make(map[string]string, 4)
 	cleanupAttempted := false
@@ -259,6 +269,13 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunRe
 		return RunResult{Tag: tag, Outcome: outcome, StateInvalid: stateInvalid}, runnerFailure(StageStateSave, tag, err)
 	}
 	return RunResult{Tag: tag, Outcome: outcome, StateInvalid: stateInvalid}, nil
+}
+
+func sameReleaseIdentity(prior MirrorState, candidate RemoteRelease) bool {
+	executable, ok := candidate.Assets[AssetExecutable]
+	return ok && prior.Tag == candidate.Tag &&
+		prior.PublishedAt.Equal(candidate.PublishedAt.UTC().Round(0)) &&
+		executable.Digest == "sha256:"+prior.SHA256
 }
 
 func readFetchedArtifact(path, name string, declaredSize int64) ([]byte, error) {
