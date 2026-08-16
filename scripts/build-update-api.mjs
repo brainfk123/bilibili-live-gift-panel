@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -43,10 +43,6 @@ function buildDeployment(commit) {
     mkdirSync(snapshot);
     execFileSync('git', ['-C', root, 'archive', '--format=tar', `--output=${archive}`, commit]);
     execFileSync('tar', ['-xf', archive, '-C', snapshot]);
-
-    if (process.env.GIFT_PANEL_BUILD_TEST_MUTATE_TRACKED === '1') {
-      appendFileSync(join(root, 'scripts', 'build-update-api.mjs'), '\n// deterministic build mutation\n');
-    }
 
     const snapshotOutput = join(temporaryRoot, 'dist');
     build(snapshot, snapshotOutput, commit);

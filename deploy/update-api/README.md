@@ -124,7 +124,7 @@ printf '%s\n%s\n' "$RELEASE_ID" "$REVIEWED_SHA256" > gift-panel-release-mirror.r
 test "$(wc -l < gift-panel-release-mirror.reviewed)" -eq 2
 ```
 
-Transfer both the verified normal artifact and the two-line `gift-panel-release-mirror.reviewed` sidecar by the approved secure channel. On Lighthouse, redefine evidence from the transferred sidecar rather than relying on local-shell variables, then verify the installed directory, binary identity, checksum, and `current` target before any systemd start:
+Transfer both the verified normal artifact and the two-line `gift-panel-release-mirror.reviewed` sidecar by the approved secure channel. The following install/upgrade transaction remains quiesced throughout. It stages on the same filesystem, never writes into an existing version directory, runs the dry-run from the exact verified version path before changing `current`, and uses rename-based atomic publication. Do not run the binary manually on a fresh host: systemd must create `StateDirectory` first.
 
 ```sh
 set -euo pipefail
@@ -133,6 +133,13 @@ RELEASE_ID=$(sed -n '1p' gift-panel-release-mirror.reviewed)
 REVIEWED_SHA256=$(sed -n '2p' gift-panel-release-mirror.reviewed)
 printf '%s\n' "$RELEASE_ID" | grep -Eq '^[0-9a-f]{40}$'
 printf '%s\n' "$REVIEWED_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+
+sudo systemctl disable --now gift-panel-release-mirror.timer 2>/dev/null || true
+sudo systemctl stop gift-panel-release-mirror.service 2>/dev/null || true
+sudo systemctl is-enabled --quiet gift-panel-release-mirror.timer && exit 1
+sudo systemctl is-active --quiet gift-panel-release-mirror.timer && exit 1
+sudo systemctl is-active --quiet gift-panel-release-mirror.service && exit 1
+
 if ! getent passwd gift-panel-mirror >/dev/null; then
   if getent group gift-panel-mirror >/dev/null; then exit 1; fi
   sudo useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin gift-panel-mirror
@@ -146,19 +153,42 @@ GROUP_RECORD=$(getent group "$ACCOUNT_GID")
 test "$(printf '%s\n' "$GROUP_RECORD" | cut -d: -f1)" = gift-panel-mirror
 test "$(printf '%s\n' "$GROUP_RECORD" | cut -d: -f3)" = "$ACCOUNT_GID"
 test "$(id -gn gift-panel-mirror)" = gift-panel-mirror
-sudo install -d -o root -g root -m 0755 /opt/gift-panel-release-mirror/releases/"$RELEASE_ID"
-sudo install -o root -g root -m 0755 gift-panel-release-mirror-linux-amd64 /opt/gift-panel-release-mirror/releases/"$RELEASE_ID"/gift-panel-release-mirror
-printf '%s  %s\n' "$REVIEWED_SHA256" /opt/gift-panel-release-mirror/releases/"$RELEASE_ID"/gift-panel-release-mirror | sha256sum -c -
-test "$RELEASE_ID" = "$(/opt/gift-panel-release-mirror/releases/"$RELEASE_ID"/gift-panel-release-mirror --build-commit)"
-sudo ln -sfn /opt/gift-panel-release-mirror/releases/"$RELEASE_ID" /opt/gift-panel-release-mirror/current
-test "$(readlink -f /opt/gift-panel-release-mirror/current/gift-panel-release-mirror)" = "/opt/gift-panel-release-mirror/releases/$RELEASE_ID/gift-panel-release-mirror"
-test "$RELEASE_ID" = "$(/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --build-commit)"
-```
 
-Install the separate root-owned `0600` environment and units. It contains only the mirror scoped CAM credentials and never reuses `/etc/gift-panel-update-api.env`:
+RELEASE_ROOT=/opt/gift-panel-release-mirror/releases
+FINAL_RELEASE="$RELEASE_ROOT/$RELEASE_ID"
+FINAL_BINARY="$FINAL_RELEASE/gift-panel-release-mirror"
+sudo install -d -o root -g root -m 0755 "$RELEASE_ROOT"
+STAGE_DIR=$(sudo mktemp -d "$RELEASE_ROOT/.stage-${RELEASE_ID}.XXXXXX")
+STAGED_BINARY="$STAGE_DIR/gift-panel-release-mirror"
+cleanup_stage() { if test -n "${STAGE_DIR:-}"; then sudo rm -rf -- "$STAGE_DIR"; fi; }
+trap cleanup_stage EXIT INT TERM
+sudo chmod 0755 "$STAGE_DIR"
+sudo install -o root -g root -m 0755 gift-panel-release-mirror-linux-amd64 "$STAGED_BINARY"
+sudo install -o root -g root -m 0644 gift-panel-release-mirror.reviewed "$STAGE_DIR/gift-panel-release-mirror.reviewed"
+test "$(wc -l < "$STAGE_DIR/gift-panel-release-mirror.reviewed")" -eq 2
+test "$RELEASE_ID" = "$(sed -n '1p' "$STAGE_DIR/gift-panel-release-mirror.reviewed")"
+test "$REVIEWED_SHA256" = "$(sed -n '2p' "$STAGE_DIR/gift-panel-release-mirror.reviewed")"
+printf '%s  %s\n' "$REVIEWED_SHA256" "$STAGED_BINARY" | sha256sum -c -
+test "$RELEASE_ID" = "$("$STAGED_BINARY" --build-commit)"
+STAGED_METADATA=$(go version -m "$STAGED_BINARY")
+printf '%s\n' "$STAGED_METADATA" | grep -Fq 'github.com/brainfk123/bilibili-live-gift-panel/updateapi/cmd/mirror'
+printf '%s\n' "$STAGED_METADATA" | grep -Fq 'GOOS=linux'
+printf '%s\n' "$STAGED_METADATA" | grep -Fq 'GOARCH=amd64'
+if sudo test -e "$FINAL_RELEASE"; then
+  test ! -L "$FINAL_RELEASE"
+  test "$(sudo find "$FINAL_RELEASE" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)" = "$(printf '%s\n' gift-panel-release-mirror gift-panel-release-mirror.reviewed | sort)"
+  sudo cmp -s -- "$STAGED_BINARY" "$FINAL_BINARY"
+  sudo cmp -s -- "$STAGE_DIR/gift-panel-release-mirror.reviewed" "$FINAL_RELEASE/gift-panel-release-mirror.reviewed"
+  sudo rm -rf -- "$STAGE_DIR"
+else
+  sudo mv -T -- "$STAGE_DIR" "$FINAL_RELEASE"
+fi
+STAGE_DIR=
+trap - EXIT INT TERM
+printf '%s  %s\n' "$REVIEWED_SHA256" "$FINAL_BINARY" | sha256sum -c -
+test "$RELEASE_ID" = "$("$FINAL_BINARY" --build-commit)"
+test "$(readlink -f -- "$FINAL_BINARY")" = "$FINAL_BINARY"
 
-```sh
-set -euo pipefail
 sudo install -o root -g root -m 0600 /secure/gift-panel-release-mirror.env /etc/gift-panel-release-mirror.env
 sudo install -o root -g root -m 0644 deploy/update-api/gift-panel-release-mirror.service /etc/systemd/system/gift-panel-release-mirror.service
 sudo install -o root -g root -m 0644 deploy/update-api/gift-panel-release-mirror.timer /etc/systemd/system/gift-panel-release-mirror.timer
@@ -166,16 +196,7 @@ sudo install -d -o root -g root -m 0755 /etc/systemd/journald@gift-panel-release
 sudo install -o root -g root -m 0644 deploy/update-api/journald.conf /etc/systemd/journald@gift-panel-release-mirror.conf.d/retention.conf
 sudo systemctl daemon-reload
 sudo systemd-analyze verify /etc/systemd/system/gift-panel-release-mirror.service /etc/systemd/system/gift-panel-release-mirror.timer
-```
 
-### Rotate Lighthouse mirror credentials
-
-After an independently approved policy-simulator check, create a replacement `lighthouse-cos-publisher` key without disabling the active key. Install the replacement values through the approved secret channel into `/etc/gift-panel-release-mirror.env`, retaining owner `root:root` and mode `0600`; never put them in a command, shell history, log, ticket, commit, or chat. Run the systemd dry-run below, then one normal oneshot, and verify the immutable COS objects, stable pointer, public latest-version API, and changelog. Only after those checks succeed may a separately confirmed action revoke the old key. Delete that old key only in a later, independently confirmed cleanup window.
-
-Do not run the binary manually on a fresh host: systemd must create `StateDirectory` first. Before enabling the timer, use a temporary dry-run drop-in, inspect the completed invocation, remove the drop-in, then run one normal oneshot. The cleanup below is deliberately failure-safe: an interrupted or failed validation cannot reach normal publication, and it removes only the exact resolved drop-in path.
-
-```sh
-set -euo pipefail
 DROPIN=/run/systemd/system/gift-panel-release-mirror.service.d/dry-run.conf
 DROPIN_DIR=$(dirname "$DROPIN")
 test "$DROPIN_DIR" = /run/systemd/system/gift-panel-release-mirror.service.d
@@ -185,10 +206,8 @@ cleanup_dry_run() {
   sudo systemctl daemon-reload || cleanup_failed=1
   test ! -e "$DROPIN" || cleanup_failed=1
   active_dropins=$(sudo systemctl show -p DropInPaths --value gift-panel-release-mirror.service)
-  if test $? -ne 0; then
-    cleanup_failed=1
-  elif printf '%s\n' "$active_dropins" | grep -Fq -- "$DROPIN"; then
-    cleanup_failed=1
+  if test $? -ne 0; then cleanup_failed=1
+  elif printf '%s\n' "$active_dropins" | grep -Fq -- "$DROPIN"; then cleanup_failed=1
   fi
   return "$cleanup_failed"
 }
@@ -210,7 +229,7 @@ trap on_exit EXIT
 trap on_int INT
 trap on_term TERM
 sudo install -d -o root -g root -m 0755 "$DROPIN_DIR"
-printf '[Service]\nExecStart=\nExecStart=/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --dry-run\n' | sudo tee "$DROPIN" >/dev/null
+printf '[Service]\nExecStart=\nExecStart=%s --dry-run\n' "$FINAL_BINARY" | sudo tee "$DROPIN" >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl start gift-panel-release-mirror.service
 test "$(sudo systemctl show -p Result --value gift-panel-release-mirror.service)" = success
@@ -221,9 +240,43 @@ cleanup_rc=$?
 set -e
 test "$cleanup_rc" -eq 0
 trap - EXIT INT TERM
-sudo systemctl start gift-panel-release-mirror.service
-sudo systemctl enable --now gift-panel-release-mirror.timer
+
+CURRENT_TMP=/opt/gift-panel-release-mirror/.current-"$RELEASE_ID"
+test ! -e "$CURRENT_TMP"
+test ! -L "$CURRENT_TMP"
+sudo ln -s -- "$FINAL_RELEASE" "$CURRENT_TMP"
+sudo mv -Tf -- "$CURRENT_TMP" /opt/gift-panel-release-mirror/current
+test "$(readlink -f /opt/gift-panel-release-mirror/current/gift-panel-release-mirror)" = "$FINAL_BINARY"
+test "$RELEASE_ID" = "$(/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --build-commit)"
+sudo systemctl is-active --quiet gift-panel-release-mirror.timer && exit 1
+sudo systemctl is-active --quiet gift-panel-release-mirror.service && exit 1
 ```
+
+Stop here and obtain independent operator confirmation before the real oneshot. The dry-run result and exact `current` target are review evidence; neither authorizes a COS write.
+
+After that confirmation only, run one real oneshot and stop again:
+
+```sh
+set -euo pipefail
+sudo systemctl is-active --quiet gift-panel-release-mirror.timer && exit 1
+sudo systemctl start gift-panel-release-mirror.service
+test "$(sudo systemctl show -p Result --value gift-panel-release-mirror.service)" = success
+sudo journalctl --namespace=gift-panel-release-mirror -u gift-panel-release-mirror.service --no-pager
+```
+
+Independently verify that `releases/v0.4.4/gift-panel-windows-x64.exe`, `releases/v0.4.4/gift-panel-windows-x64.exe.sha256`, `releases/v0.4.4/gift-panel-changelog.json`, and `releases/v0.4.4/release.json` all exist, match the reviewed GitHub size/SHA-256 or reviewed content as applicable, and remain immutable; verify `channels/stable/latest.json` points to the same complete release. Then verify the domestic latest and changelog routes; the signed download URL is redacted, and the existing update API service and `127.0.0.1:12450` listener must be unchanged. Capture only tag, asset name, size, digest, publication time, changelog ordering, and redacted URL evidence—never its query string.
+
+Stop here and obtain a separate operator confirmation before enabling the timer. Only after the COS, domestic API, changelog, redaction, and unchanged-listener evidence has been independently reviewed may scheduling change:
+
+```sh
+set -euo pipefail
+sudo systemctl enable --now gift-panel-release-mirror.timer
+systemctl list-timers gift-panel-release-mirror.timer --all --no-pager
+```
+
+### Rotate Lighthouse mirror credentials
+
+After an independently approved policy-simulator check, create a replacement `lighthouse-cos-publisher` key without disabling the active key. Install the replacement values through the approved secret channel into `/etc/gift-panel-release-mirror.env`, retaining owner `root:root` and mode `0600`; never put them in a command, shell history, log, ticket, commit, or chat. Repeat the same separately confirmed dry-run, real-oneshot, COS/API verification, and timer gates. Only after those checks succeed may a separately confirmed action revoke the old key. Delete that old key only in a later, independently confirmed cleanup window.
 
 ### Retire the obsolete GitHub publisher
 
@@ -231,15 +284,37 @@ Do not clean up the former GitHub publisher during installation. Production acce
 
 Only after that production acceptance, request separate explicit confirmation before each external cleanup stage. With approval, remove the obsolete GitHub Environment COS secrets and variables from the protected `release` Environment. In a separately approved key window, disable the old `github-cos-uploader` key, verify that `lighthouse-cos-publisher` still mirrors or no-ops successfully, and leave the old key disabled. Delete the old key only in a later independently confirmed cleanup window. Never combine Environment cleanup, key disablement, and key deletion into one approval.
 
-For rollback, quiesce both timer and oneshot before changing `current`. If the stable pointer also needs to move backward, stop here and use a separately confirmed Tencent COS console or approved operator action to restore the reviewed private `channels/stable/latest.json` backup while quiesced. do not re-enable timer while an intentionally older stable release would immediately be re-promoted. Do not delete immutable release objects. After that separate action, verify the domestic API's public metadata against approved rollback evidence without writing, printing, or logging its signed download URL. Lighthouse needs the Node.js runtime already used by the build verifier for this safe streaming check.
+For rollback, quiesce both timer and oneshot before inspecting or changing installed bits. The exact previous version must already contain its independently reviewed two-line sidecar. Preverify its safe path, complete directory contents, SHA-256, embedded 40-hex commit, and Linux amd64 Go command identity; the dry-run then points directly at that exact preverified version. If the stable pointer also needs to move backward, stop and use a separately confirmed Tencent COS console or approved operator action to restore the reviewed private `channels/stable/latest.json` backup while quiesced; do not re-enable timer while an intentionally older stable release would immediately be re-promoted. Do not delete immutable release objects.
 
 ```sh
 set -euo pipefail
 sudo systemctl disable --now gift-panel-release-mirror.timer
 sudo systemctl stop gift-panel-release-mirror.service
+sudo systemctl is-enabled --quiet gift-panel-release-mirror.timer && exit 1
 sudo systemctl is-active --quiet gift-panel-release-mirror.timer && exit 1
 sudo systemctl is-active --quiet gift-panel-release-mirror.service && exit 1
-sudo ln -sfn /opt/gift-panel-release-mirror/releases/PREVIOUS_RELEASE_ID /opt/gift-panel-release-mirror/current
+PREVIOUS_RELEASE_ID="${PREVIOUS_RELEASE_ID:?set the reviewed previous 40-hex commit}"
+printf '%s\n' "$PREVIOUS_RELEASE_ID" | grep -Eq '^[0-9a-f]{40}$'
+PREVIOUS_RELEASE=/opt/gift-panel-release-mirror/releases/"$PREVIOUS_RELEASE_ID"
+PREVIOUS_BINARY="$PREVIOUS_RELEASE/gift-panel-release-mirror"
+PREVIOUS_SIDECAR="$PREVIOUS_RELEASE/gift-panel-release-mirror.reviewed"
+test ! -L "$PREVIOUS_RELEASE"
+test ! -L "$PREVIOUS_BINARY"
+test ! -L "$PREVIOUS_SIDECAR"
+test "$(readlink -f -- "$PREVIOUS_RELEASE")" = "$PREVIOUS_RELEASE"
+test "$(readlink -f -- "$PREVIOUS_BINARY")" = "$PREVIOUS_BINARY"
+test "$(readlink -f -- "$PREVIOUS_SIDECAR")" = "$PREVIOUS_SIDECAR"
+test "$(sudo find "$PREVIOUS_RELEASE" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)" = "$(printf '%s\n' gift-panel-release-mirror gift-panel-release-mirror.reviewed | sort)"
+test "$(wc -l < "$PREVIOUS_SIDECAR")" -eq 2
+test "$PREVIOUS_RELEASE_ID" = "$(sed -n '1p' "$PREVIOUS_SIDECAR")"
+PREVIOUS_SHA256=$(sed -n '2p' "$PREVIOUS_SIDECAR")
+printf '%s\n' "$PREVIOUS_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+printf '%s  %s\n' "$PREVIOUS_SHA256" "$PREVIOUS_BINARY" | sha256sum -c -
+test "$PREVIOUS_RELEASE_ID" = "$("$PREVIOUS_BINARY" --build-commit)"
+PREVIOUS_METADATA=$(go version -m "$PREVIOUS_BINARY")
+printf '%s\n' "$PREVIOUS_METADATA" | grep -Fq 'github.com/brainfk123/bilibili-live-gift-panel/updateapi/cmd/mirror'
+printf '%s\n' "$PREVIOUS_METADATA" | grep -Fq 'GOOS=linux'
+printf '%s\n' "$PREVIOUS_METADATA" | grep -Fq 'GOARCH=amd64'
 PUBLIC_DOMAIN="${PUBLIC_DOMAIN:?set the domestic API domain}"
 APPROVED_TAG="${APPROVED_TAG:?set the approved rollback tag}"
 APPROVED_SHA256="${APPROVED_SHA256:?set the approved rollback SHA-256}"
@@ -294,7 +369,7 @@ trap on_exit EXIT
 trap on_int INT
 trap on_term TERM
 sudo install -d -o root -g root -m 0755 "$DROPIN_DIR"
-printf '[Service]\nExecStart=\nExecStart=/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --dry-run\n' | sudo tee "$DROPIN" >/dev/null
+printf '[Service]\nExecStart=\nExecStart=%s --dry-run\n' "$PREVIOUS_BINARY" | sudo tee "$DROPIN" >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl start gift-panel-release-mirror.service
 test "$(sudo systemctl show -p Result --value gift-panel-release-mirror.service)" = success
@@ -305,5 +380,16 @@ cleanup_rc=$?
 set -e
 test "$cleanup_rc" -eq 0
 trap - EXIT INT TERM
-# Only after this rollback dry-run succeeds may an operator decide whether to restart/re-enable.
+# Only after this rollback dry-run succeeds is the local pointer changed.
+CURRENT_TMP=/opt/gift-panel-release-mirror/.current-rollback-"$PREVIOUS_RELEASE_ID"
+test ! -e "$CURRENT_TMP"
+test ! -L "$CURRENT_TMP"
+sudo ln -s -- "$PREVIOUS_RELEASE" "$CURRENT_TMP"
+sudo mv -Tf -- "$CURRENT_TMP" /opt/gift-panel-release-mirror/current
+test "$(readlink -f /opt/gift-panel-release-mirror/current/gift-panel-release-mirror)" = "$PREVIOUS_BINARY"
+test "$PREVIOUS_RELEASE_ID" = "$(/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --build-commit)"
+sudo systemctl is-active --quiet gift-panel-release-mirror.timer && exit 1
+sudo systemctl is-active --quiet gift-panel-release-mirror.service && exit 1
 ```
+
+The rollback remains quiesced after the atomic switch. Verify the intended domestic latest/changelog state and unchanged API listener, then obtain independent confirmation for any later real mirror run or timer enablement; do not combine those actions.

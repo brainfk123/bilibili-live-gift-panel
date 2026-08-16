@@ -66,10 +66,18 @@ function runBash(script: string, cwd: string, environment: NodeJS.ProcessEnv = {
   });
 }
 
-function dryRunTail(block: string): string {
+function dryRunTail(name: 'install' | 'rollback', block: string): string {
   const start = block.indexOf('DROPIN=');
   expect(start, 'missing dry-run drop-in definition').toBeGreaterThanOrEqual(0);
-  return `set -euo pipefail\n${block.slice(start)}`;
+  const tail = block.slice(start);
+  const validation = tail.indexOf('test "$cleanup_rc" -eq 0');
+  const trapRemoval = tail.indexOf('\ntrap - EXIT INT TERM', validation);
+  expect(validation, 'missing explicit cleanup validation').toBeGreaterThanOrEqual(0);
+  expect(trapRemoval, 'missing final trap removal').toBeGreaterThanOrEqual(0);
+  const binary = name === 'install'
+    ? 'FINAL_BINARY=/opt/gift-panel-release-mirror/releases/test/gift-panel-release-mirror'
+    : 'PREVIOUS_BINARY=/opt/gift-panel-release-mirror/releases/previous/gift-panel-release-mirror';
+  return `set -euo pipefail\n${binary}\n${tail.slice(0, trapRemoval + '\ntrap - EXIT INT TERM'.length)}`;
 }
 
 function verifyDryRunScript(name: 'install' | 'rollback', block: string, successStarts: string[], enablesTimer: boolean): void {
@@ -110,7 +118,7 @@ systemctl() {
 }
 `;
   try {
-    const script = dryRunTail(block).replaceAll('/run/systemd/system', runRoot);
+    const script = dryRunTail(name, block).replaceAll('/run/systemd/system', runRoot);
     const scenarios: Array<{
       name: string;
       environment: NodeJS.ProcessEnv;
@@ -131,10 +139,6 @@ systemctl() {
       { name: 'interrupt', environment: { SEND_SIGNAL: 'INT' }, status: 130, starts: ['dry-run'], timer: false },
       { name: 'terminate', environment: { SEND_SIGNAL: 'TERM' }, status: 143, starts: ['dry-run'], timer: false },
     ];
-    if (name === 'install') {
-      scenarios.push({ name: 'normal-start-error', environment: { FAIL_START_AT: '2' }, status: 1, starts: ['dry-run', 'normal'], timer: false });
-    }
-
     for (const scenario of scenarios) {
       writeFileSync(join(root, 'systemctl.log'), '');
       writeFileSync(join(root, 'start.log'), '');
@@ -189,6 +193,17 @@ function reviewedBuildRoot(prefix: string): string {
   execFileSync('git', ['add', 'scripts', 'updateapi'], { cwd: root });
   execFileSync('git', ['commit', '--quiet', '-m', 'reviewed build input'], { cwd: root });
   return root;
+}
+
+function injectPostSnapshotTrackedMutation(root: string): void {
+  const scriptPath = join(root, 'scripts', 'build-update-api.mjs');
+  const source = readFileSync(scriptPath, 'utf8');
+  const archiveExtraction = "    execFileSync('tar', ['-xf', archive, '-C', snapshot]);";
+  expect(source.match(new RegExp(archiveExtraction.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))).toHaveLength(1);
+  const mutated = source
+    .replace("import { copyFileSync,", "import { appendFileSync, copyFileSync,")
+    .replace(archiveExtraction, `${archiveExtraction}\n    appendFileSync(join(root, 'scripts', 'build-update-api.mjs'), '\\n// test-side post-snapshot mutation\\n');`);
+  writeFileSync(scriptPath, mutated);
 }
 
 function nginxAccessLogFormat(nginx: string): string {
@@ -260,12 +275,23 @@ describe('update API deployment assets', () => {
   it('fails deployment publication when HEAD changes after its snapshot is taken', () => {
     const temporaryRoot = reviewedBuildRoot('gift-panel-update-api-race-');
     try {
-      const result = build(temporaryRoot, { GIFT_PANEL_BUILD_TEST_MUTATE_TRACKED: '1' });
+      injectPostSnapshotTrackedMutation(temporaryRoot);
+      execFileSync('git', ['add', 'scripts/build-update-api.mjs'], { cwd: temporaryRoot });
+      execFileSync('git', ['commit', '--quiet', '-m', 'test-side race fixture'], { cwd: temporaryRoot });
+      const result = build(temporaryRoot);
       expect(result.status).not.toBe(0);
       expect(`${result.stdout}\n${result.stderr}`).toMatch(/changed during build|clean reviewed Git commit/i);
     } finally {
       rmSync(temporaryRoot, { recursive: true, force: true });
     }
+  });
+
+  it('keeps deployment race injection out of the production build script', () => {
+    const source = readFileSync(new URL('../scripts/build-update-api.mjs', import.meta.url), 'utf8');
+
+    expect(source).not.toContain('GIFT_PANEL_BUILD_TEST_MUTATE_TRACKED');
+    expect(source).not.toContain('deterministic build mutation');
+    expect(source).not.toMatch(/appendFileSync\s*\(/);
   });
 
   it('archives a reviewed checkout larger than Node default command buffering', () => {
@@ -406,7 +432,7 @@ describe('update API deployment assets', () => {
     expect(readme).toContain('RELEASE_ID=$(sed -n \'1p\' gift-panel-release-mirror.reviewed)');
     expect(readme).toContain('test "$RELEASE_ID" = "$(dist/gift-panel-release-mirror-linux-amd64 --build-commit)"');
     expect(readme).toContain('sha256sum -c -');
-    expect(readme).toContain('test "$RELEASE_ID" = "$(/opt/gift-panel-release-mirror/releases/"$RELEASE_ID"/gift-panel-release-mirror --build-commit)"');
+    expect(readme).toContain('test "$RELEASE_ID" = "$("$FINAL_BINARY" --build-commit)"');
     expect(readme).toContain('readlink -f /opt/gift-panel-release-mirror/current/gift-panel-release-mirror');
     expect(readme).toContain('test "$RELEASE_ID" = "$(/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --build-commit)"');
     expect(readme).toContain('systemd must create `StateDirectory` first');
@@ -418,10 +444,11 @@ describe('update API deployment assets', () => {
     expect(readme).toContain('finish_dry_run 143');
     expect(readme).toContain('test ! -e "$DROPIN"');
     expect(readme).toContain('Result --value gift-panel-release-mirror.service');
-    expect(readme).toContain('ExecStart=/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --dry-run');
+    expect(readme).toContain('ExecStart=%s --dry-run');
     expect(readme).toContain('systemctl start gift-panel-release-mirror.service');
     expect(readme.indexOf('systemctl enable --now gift-panel-release-mirror.timer')).toBeGreaterThan(readme.indexOf('gift-panel-release-mirror --dry-run'));
-    expect(readme).toContain('ln -sfn /opt/gift-panel-release-mirror/releases/"$RELEASE_ID" /opt/gift-panel-release-mirror/current');
+    expect(readme).not.toContain('ln -sfn /opt/gift-panel-release-mirror');
+    expect(readme).toContain('sudo mv -Tf -- "$CURRENT_TMP" /opt/gift-panel-release-mirror/current');
     expect(readme).toContain('Head/Get/Put');
     expect(readme).toContain('no Delete, list, bucket configuration, or other prefixes');
     expect(readme).toContain('systemctl stop gift-panel-release-mirror.service');
@@ -436,8 +463,9 @@ describe('update API deployment assets', () => {
     expect(readme).toContain('test ! -e "$DROPIN"');
     expect(readme).toContain('Only after this rollback dry-run succeeds');
     expect(readme).toContain('Do not delete immutable release objects');
-    expect(readme.indexOf('systemctl disable --now gift-panel-release-mirror.timer')).toBeLessThan(readme.indexOf('ln -sfn /opt/gift-panel-release-mirror/releases/PREVIOUS_RELEASE_ID'));
-    expect(readme.indexOf('systemctl stop gift-panel-release-mirror.service')).toBeLessThan(readme.indexOf('ln -sfn /opt/gift-panel-release-mirror/releases/PREVIOUS_RELEASE_ID'));
+    expect(readme).toContain('PREVIOUS_SIDECAR="$PREVIOUS_RELEASE/gift-panel-release-mirror.reviewed"');
+    expect(readme).toContain('test "$PREVIOUS_RELEASE_ID" = "$("$PREVIOUS_BINARY" --build-commit)"');
+    expect(readme).toContain('printf \'%s  %s\\n\' "$PREVIOUS_SHA256" "$PREVIOUS_BINARY" | sha256sum -c -');
     for (const block of shellBlocksAfter(readme, '## Release mirror (separate service)')) {
       expect(block.trimStart().startsWith('set -euo pipefail')).toBe(true);
     }
@@ -480,10 +508,89 @@ describe('update API deployment assets', () => {
     }
   });
 
+  it('stages and verifies an install while quiesced before atomic publication and pointer switch', () => {
+    const readme = deploymentAsset('README.md');
+    const install = shellBlocksAfter(readme, '## Release mirror (separate service)').find((block) => block.includes('FINAL_BINARY'))!;
+    expect(install, 'missing staged install script').toBeDefined();
+
+    const quiesce = install.indexOf('sudo systemctl disable --now gift-panel-release-mirror.timer');
+    const stage = install.indexOf('STAGE_DIR=$(sudo mktemp -d');
+    const finalCheck = install.indexOf('if sudo test -e "$FINAL_RELEASE"; then');
+    const checksum = install.indexOf('sha256sum -c -');
+    const identity = install.indexOf('go version -m "$STAGED_BINARY"');
+    const publish = install.indexOf('sudo mv -T -- "$STAGE_DIR" "$FINAL_RELEASE"');
+    const dryRun = install.indexOf("ExecStart=%s --dry-run");
+    const pointer = install.indexOf('sudo mv -Tf -- "$CURRENT_TMP" /opt/gift-panel-release-mirror/current');
+
+    for (const [name, index] of Object.entries({ quiesce, stage, finalCheck, checksum, identity, publish, dryRun, pointer })) {
+      expect(index, `missing ${name} gate`).toBeGreaterThanOrEqual(0);
+    }
+    expect(quiesce).toBeLessThan(stage);
+    expect(install.indexOf('systemctl is-enabled --quiet gift-panel-release-mirror.timer')).toBeGreaterThan(quiesce);
+    expect(install.indexOf('systemctl is-enabled --quiet gift-panel-release-mirror.timer')).toBeLessThan(stage);
+    expect(stage).toBeLessThan(finalCheck);
+    expect(finalCheck).toBeLessThan(publish);
+    expect(checksum).toBeLessThan(publish);
+    expect(identity).toBeLessThan(publish);
+    expect(publish).toBeLessThan(dryRun);
+    expect(dryRun).toBeLessThan(pointer);
+    for (const evidence of [
+      'sudo chmod 0755 "$STAGE_DIR"',
+      'wc -l < "$STAGE_DIR/gift-panel-release-mirror.reviewed"',
+      'sed -n \'1p\' "$STAGE_DIR/gift-panel-release-mirror.reviewed"',
+    ]) {
+      const evidenceIndex = install.indexOf(evidence);
+      expect(evidenceIndex, `missing staged evidence: ${evidence}`).toBeGreaterThanOrEqual(0);
+      expect(evidenceIndex).toBeLessThan(publish);
+    }
+    expect(install).toContain('cmp -s -- "$STAGED_BINARY" "$FINAL_BINARY"');
+    expect(install).toContain('gift-panel-release-mirror.reviewed');
+  });
+
+  it('requires separate confirmations around the real mirror and timer production gates', () => {
+    const readme = deploymentAsset('README.md');
+    const install = shellBlocksAfter(readme, '## Release mirror (separate service)').find((block) => block.includes('FINAL_BINARY'))!;
+    expect(install).not.toContain('systemctl start gift-panel-release-mirror.service\nsudo systemctl enable');
+    expect(install).not.toContain('enable --now gift-panel-release-mirror.timer');
+    expect(readme).toContain('Stop here and obtain independent operator confirmation before the real oneshot');
+    expect(readme).toContain('releases/v0.4.4/');
+    for (const object of ['gift-panel-windows-x64.exe', 'gift-panel-windows-x64.exe.sha256', 'gift-panel-changelog.json', 'release.json']) {
+      expect(readme).toContain(`releases/v0.4.4/${object}`);
+    }
+    expect(readme).toContain('channels/stable/latest.json');
+    expect(readme).toContain('signed download URL is redacted');
+    expect(readme).toContain('127.0.0.1:12450');
+    expect(readme).toContain('Stop here and obtain a separate operator confirmation before enabling the timer');
+  });
+
+  it('preverifies rollback sidecar and binary before dry-run and atomic current switch', () => {
+    const readme = deploymentAsset('README.md');
+    const rollback = shellBlocksAfter(readme, '## Release mirror (separate service)').find((block) => block.includes('PREVIOUS_SIDECAR'))!;
+    expect(rollback, 'missing reviewed rollback script').toBeDefined();
+
+    const quiesce = rollback.indexOf('sudo systemctl disable --now gift-panel-release-mirror.timer');
+    const sidecar = rollback.indexOf('PREVIOUS_SIDECAR="$PREVIOUS_RELEASE/gift-panel-release-mirror.reviewed"');
+    const checksum = rollback.indexOf('sha256sum -c -');
+    const identity = rollback.indexOf('go version -m "$PREVIOUS_BINARY"');
+    const dryRun = rollback.indexOf('ExecStart=%s --dry-run');
+    const pointer = rollback.indexOf('sudo mv -Tf -- "$CURRENT_TMP" /opt/gift-panel-release-mirror/current');
+
+    for (const [name, index] of Object.entries({ quiesce, sidecar, checksum, identity, dryRun, pointer })) {
+      expect(index, `missing rollback ${name} gate`).toBeGreaterThanOrEqual(0);
+    }
+    expect(quiesce).toBeLessThan(sidecar);
+    expect(sidecar).toBeLessThan(checksum);
+    expect(checksum).toBeLessThan(dryRun);
+    expect(identity).toBeLessThan(dryRun);
+    expect(dryRun).toBeLessThan(pointer);
+    expect(rollback).toContain('test "$(readlink -f -- "$PREVIOUS_RELEASE")" = "$PREVIOUS_RELEASE"');
+    expect(rollback).not.toContain('enable --now gift-panel-release-mirror.timer');
+  });
+
   it('executes the transferred sidecar checks before deployment side effects', () => {
     const readme = deploymentAsset('README.md');
     const install = shellBlocksAfter(readme, '## Release mirror (separate service)').find((block) => block.includes('if ! getent passwd gift-panel-mirror'))!;
-    const sidecarChecks = install.slice(0, install.indexOf('if ! getent passwd gift-panel-mirror'));
+    const sidecarChecks = install.slice(0, install.indexOf('sudo systemctl disable --now gift-panel-release-mirror.timer'));
     const root = mkdtempSync(join(tmpdir(), 'gift-panel-sidecar-'));
     try {
       writeFileSync(join(root, 'gift-panel-release-mirror.reviewed'), `${'a'.repeat(40)}\n${'b'.repeat(64)}\n`);
@@ -508,7 +615,7 @@ describe('update API deployment assets', () => {
   it('accepts idempotent private-group accounts and fails each incompatible account gate independently', () => {
     const readme = deploymentAsset('README.md');
     const install = shellBlocksAfter(readme, '## Release mirror (separate service)').find((block) => block.includes('ACCOUNT_RECORD='))!;
-    const account = install.slice(install.indexOf('if ! getent passwd gift-panel-mirror'), install.indexOf('sudo install -d'));
+    const account = install.slice(install.indexOf('if ! getent passwd gift-panel-mirror'), install.indexOf('\n\nRELEASE_ROOT='));
     const root = mkdtempSync(join(tmpdir(), 'gift-panel-account-'));
     const log = posixPath(join(root, 'account.log'));
     const fakeAccounts = `
@@ -574,10 +681,10 @@ useradd() { ACCOUNT_CREATED=1; printf 'useradd\\n' >> "$ACCOUNT_LOG"; }
   it('executes the install dry-run across exact start, cleanup, signal, and publication boundaries', () => {
     const readme = deploymentAsset('README.md');
     const blocks = shellBlocksAfter(readme, '## Release mirror (separate service)').filter((block) => block.includes('dry-run'));
-    const installBlock = blocks.find((block) => block.includes('enable --now gift-panel-release-mirror.timer'));
+    const installBlock = blocks.find((block) => block.includes('FINAL_BINARY'));
     expect(blocks).toHaveLength(2);
     expect(installBlock, 'missing install dry-run script').toBeDefined();
-    verifyDryRunScript('install', installBlock!, ['dry-run', 'normal'], true);
+    verifyDryRunScript('install', installBlock!, ['dry-run'], false);
   });
 
   it('executes the rollback dry-run across exact start, cleanup, and signal boundaries', () => {
