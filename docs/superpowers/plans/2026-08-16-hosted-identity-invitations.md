@@ -291,7 +291,13 @@ Run focused tests with `-count=10`, race tests, full Go tests, and commit `feat:
 - Create: `goserver/internal/hosted/invitation/service_test.go`
 - Create: `goserver/internal/hosted/invitation/http.go`
 - Create: `goserver/internal/hosted/invitation/http_test.go`
+- Modify: `goserver/internal/hosted/identity/service.go`
+- Modify: `goserver/internal/hosted/identity/service_test.go`
+- Modify: `goserver/internal/hosted/store/mysqlstore/store.go`
+- Modify: `goserver/internal/hosted/store/mysqlstore/store_test.go`
 - Modify: `goserver/internal/hosted/app/app.go`
+- Modify: `goserver/cmd/hosted/main.go`
+- Modify: `goserver/cmd/hosted/main_test.go`
 
 **Interfaces:**
 - Produces: `Service.AdjustQuota`, `Generate`, `Revoke`, `List`, and `Redeem`.
@@ -318,9 +324,28 @@ Generate 32 random bytes, return unpadded base64url once, save SHA-256 only, and
 
 Revocation changes only `active -> revoked`. Expiration changes only `active -> expired`. Redemption first verifies B 站 UID, then locks the invitation by hash and atomically creates the account/binding, sets `used`, records invited account, and writes audit. Duplicate UID or second redemption rolls back every write.
 
+The registration intent uses an in-memory reserve/commit/abort lease. Reservation has one concurrent winner and returns a cloned encrypted UID plus absolute expiry without deleting the original intent. A successful SQL commit performs an infallible intent commit that destroys the reserved entry; every SQL or commit failure aborts the lease so the same still-unexpired intent can be retried. Expiry and service shutdown destroy abandoned reservations, and the existing consume API is retained as a reserve-plus-commit compatibility wrapper. No invitation-layer mutex may substitute for the database transaction.
+
+Successful redemption also creates the new account's initial zero quota and a hash-only site session in the same transaction. Only after the transaction commits does HTTP set the standard `__Host-gift_panel_session` cookie, so registration immediately logs the invited streamer in without a second B 站 scan. A lost HTTP response may require normal B 站 login, but cannot reuse the invitation or registration intent.
+
 - [ ] **Step 4: Add HTTP authorization tests**
 
 Routes expose current account quota/list/generate and admin quota adjustment. Streamers cannot adjust quota or inspect other creators. Full codes appear only in the successful generation response; all list responses contain masked hint only. High-risk admin adjustment requires recent TOTP.
+
+Stable method-routes are:
+
+```text
+POST   /api/auth/registration
+GET    /api/invitations
+POST   /api/invitations
+DELETE /api/invitations/{id}
+POST   /api/admin/invitations
+POST   /api/admin/accounts/{id}/invitation-quota
+```
+
+Administrator invitation generation, quota adjustment, and streamer invitation mutation are rate limited and require the applicable current session; both administrator mutations require recent TOTP. Quota adjustment sets an absolute non-negative remaining quota, writes the before/after delta event and immutable audit reason in the same transaction, and rejects overflow or malformed values. Registration, login, QR and invitation mutations use global, per-IP and hashed-session/challenge limits. No route accepts a caller-selected streamer account ID outside the administrator account path.
+
+Task 5 is the final backend task in this plan, so it also completes the real process composition. `mysqlstore.Store` exposes a documented borrowed `*sql.DB` composition seam that callers must not close. `cmd/hosted` constructs the identity repository/service/HTTP and invitation repository/service/HTTP from the shared pool, keyring, B 站 verifier, trusted client-IP resolver and limiter; closes identity before the shared verifier and store; and passes `Auth`, `Admin`, and `Invitation` handlers to `app`. Main-level tests prove the real method-routes are reachable with correct specificity, including `/api/admin/accounts/{id}/invitation-quota` taking precedence over the broader account-administration prefix.
 
 - [ ] **Step 5: Verify and commit**
 
