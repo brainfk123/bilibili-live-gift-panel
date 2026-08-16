@@ -35,6 +35,7 @@ func New(dependencies Dependencies) http.Handler {
 	})
 	if dependencies.Auth != nil {
 		mux.Handle("/api/auth/", dependencies.Auth)
+		mux.Handle("/api/admin/accounts/", dependencies.Auth)
 	}
 	if dependencies.Admin != nil {
 		mux.Handle("/api/admin/", dependencies.Admin)

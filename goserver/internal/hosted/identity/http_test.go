@@ -2,8 +2,10 @@ package identity
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -315,6 +317,205 @@ func TestHTTPAuthRoutesMountThroughHostedAppRouter(t *testing.T) {
 	}
 }
 
+func TestHTTPAdministratorAccountRoutesExposeOnlyInternalStatus(t *testing.T) {
+	service := &fakeHTTPService{}
+	handler := newTestHTTPHandler(t, service, allowLimiter{})
+	tests := []struct {
+		name       string
+		path       string
+		body       string
+		wantStatus string
+		challenge  string
+		reason     string
+	}{
+		{name: "disable", path: "/api/admin/accounts/71/disable", body: `{"reason":" policy violation "}`, wantStatus: AccountStatusDisabled, reason: "policy violation"},
+		{name: "enable", path: "/api/admin/accounts/71/enable", body: `{"reason":" appeal accepted "}`, wantStatus: AccountStatusActive, reason: "appeal accepted"},
+		{name: "rebind", path: "/api/admin/accounts/71/rebind", body: `{"challengeId":"fresh-proof","reason":" ownership exception "}`, wantStatus: AccountStatusActive, challenge: "fresh-proof", reason: "ownership exception"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service.adminResult = ManagedAccount{AccountID: 71, Status: test.wantStatus}
+			request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body))
+			request.RemoteAddr = "203.0.113.21:9000"
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Origin", testOrigin)
+			request.Header.Set("X-CSRF-Token", testCSRF)
+			request.AddCookie(&http.Cookie{Name: SiteSessionCookie, Value: "administrator-cookie"})
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("status=%d cache=%q body=%s", response.Code, response.Header().Get("Cache-Control"), response.Body.String())
+			}
+			if response.Body.String() != `{"accountId":71,"status":"`+test.wantStatus+`"}`+"\n" {
+				t.Fatalf("response = %q", response.Body.String())
+			}
+			assertBodyOmitsSecrets(t, response.Body.String(), "987654321", "administrator-cookie", "fresh-proof")
+			if service.adminSession != "administrator-cookie" || service.adminAccountID != 71 || service.adminChallenge != test.challenge {
+				t.Fatalf("service args session=%q account=%d challenge=%q", service.adminSession, service.adminAccountID, service.adminChallenge)
+			}
+			if service.adminReason != test.reason {
+				t.Fatalf("service reason = %q, want %q", service.adminReason, test.reason)
+			}
+		})
+	}
+}
+
+func TestHTTPAdministratorAccountRoutesApplyGlobalIPAndHashedSessionLimits(t *testing.T) {
+	routes := []struct {
+		operation string
+		path      string
+		body      string
+	}{
+		{operation: "admin_account_disable", path: "/api/admin/accounts/71/disable", body: `{"reason":"security"}`},
+		{operation: "admin_account_enable", path: "/api/admin/accounts/71/enable", body: `{"reason":"appeal"}`},
+		{operation: "admin_account_rebind", path: "/api/admin/accounts/71/rebind", body: `{"challengeId":"proof","reason":"ownership"}`},
+	}
+	for _, route := range routes {
+		for _, deniedScope := range []LimitScope{LimitGlobal, LimitPerIP, LimitPerChallenge} {
+			t.Run(route.operation+"/"+string(deniedScope), func(t *testing.T) {
+				service := &fakeHTTPService{adminResult: ManagedAccount{AccountID: 71, Status: AccountStatusActive}}
+				limiter := &recordingLimiter{denyScope: deniedScope}
+				handler := newTestHTTPHandler(t, service, limiter)
+				request := httptest.NewRequest(http.MethodPost, route.path, strings.NewReader(route.body))
+				request.RemoteAddr = "203.0.113.22:9000"
+				request.Header.Set("Content-Type", "application/json")
+				request.Header.Set("Origin", testOrigin)
+				request.Header.Set("X-CSRF-Token", testCSRF)
+				request.AddCookie(&http.Cookie{Name: SiteSessionCookie, Value: "administrator-cookie-secret"})
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+
+				if response.Code != http.StatusTooManyRequests || response.Body.String() != `{"error":"rate_limited"}`+"\n" {
+					t.Fatalf("status=%d body=%q calls=%#v", response.Code, response.Body.String(), limiter.calls)
+				}
+				if service.adminSession != "" {
+					t.Fatal("rate-limited request reached account service")
+				}
+				for _, call := range limiter.calls {
+					if strings.Contains(call.key, "administrator-cookie-secret") {
+						t.Fatalf("limiter key exposed cookie: %#v", limiter.calls)
+					}
+				}
+				digest := sha256.Sum256([]byte("administrator-cookie-secret"))
+				want := []limitCall{{scope: LimitGlobal, key: route.operation}}
+				if deniedScope != LimitGlobal {
+					want = append(want, limitCall{scope: LimitPerIP, key: route.operation + "\x00" + "203.0.113.22"})
+				}
+				if deniedScope == LimitPerChallenge {
+					want = append(want, limitCall{scope: LimitPerChallenge, key: route.operation + "\x00" + fmt.Sprintf("%x", digest[:])})
+				}
+				if !equalLimitCalls(limiter.calls, want) {
+					t.Fatalf("limiter calls=%#v want=%#v", limiter.calls, want)
+				}
+			})
+		}
+	}
+}
+
+func TestHTTPAdministratorAccountRoutesRejectUntrustedOrInjectedInputBeforeService(t *testing.T) {
+	tests := []struct {
+		name        string
+		path        string
+		body        string
+		origin      string
+		csrf        string
+		contentType string
+		withCookie  bool
+		wantStatus  int
+	}{
+		{name: "missing origin", path: "/api/admin/accounts/71/disable", body: `{"reason":"security"}`, csrf: testCSRF, contentType: "application/json", withCookie: true, wantStatus: http.StatusForbidden},
+		{name: "wrong csrf", path: "/api/admin/accounts/71/enable", body: `{"reason":"appeal"}`, origin: testOrigin, csrf: "wrong", contentType: "application/json", withCookie: true, wantStatus: http.StatusForbidden},
+		{name: "missing cookie", path: "/api/admin/accounts/71/disable", body: `{"reason":"security"}`, origin: testOrigin, csrf: testCSRF, contentType: "application/json", wantStatus: http.StatusUnauthorized},
+		{name: "query account injection", path: "/api/admin/accounts/71/disable?accountId=99", body: `{"reason":"security"}`, origin: testOrigin, csrf: testCSRF, contentType: "application/json", withCookie: true, wantStatus: http.StatusBadRequest},
+		{name: "body account injection", path: "/api/admin/accounts/71/disable", body: `{"accountId":99,"reason":"security"}`, origin: testOrigin, csrf: testCSRF, contentType: "application/json", withCookie: true, wantStatus: http.StatusBadRequest},
+		{name: "uid injection", path: "/api/admin/accounts/71/rebind", body: `{"uid":"987654321","challengeId":"proof","reason":"ownership"}`, origin: testOrigin, csrf: testCSRF, contentType: "application/json", withCookie: true, wantStatus: http.StatusBadRequest},
+		{name: "noncanonical path id", path: "/api/admin/accounts/071/disable", body: `{"reason":"security"}`, origin: testOrigin, csrf: testCSRF, contentType: "application/json", withCookie: true, wantStatus: http.StatusBadRequest},
+		{name: "empty reason", path: "/api/admin/accounts/71/disable", body: `{"reason":"   "}`, origin: testOrigin, csrf: testCSRF, contentType: "application/json", withCookie: true, wantStatus: http.StatusBadRequest},
+		{name: "control reason", path: "/api/admin/accounts/71/enable", body: "{\"reason\":\"line one\\nline two\"}", origin: testOrigin, csrf: testCSRF, contentType: "application/json", withCookie: true, wantStatus: http.StatusBadRequest},
+		{name: "fake json media type", path: "/api/admin/accounts/71/enable", body: `{"reason":"appeal"}`, origin: testOrigin, csrf: testCSRF, contentType: "application/jsonx", withCookie: true, wantStatus: http.StatusBadRequest},
+		{name: "oversized body", path: "/api/admin/accounts/71/disable", body: `{"reason":"` + strings.Repeat("a", 5000) + `"}`, origin: testOrigin, csrf: testCSRF, contentType: "application/json", withCookie: true, wantStatus: http.StatusBadRequest},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeHTTPService{adminResult: ManagedAccount{AccountID: 71, Status: AccountStatusActive}}
+			handler := newTestHTTPHandler(t, service, allowLimiter{})
+			request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body))
+			request.Header.Set("Origin", test.origin)
+			request.Header.Set("X-CSRF-Token", test.csrf)
+			request.Header.Set("Content-Type", test.contentType)
+			if test.withCookie {
+				request.AddCookie(&http.Cookie{Name: SiteSessionCookie, Value: "administrator-cookie"})
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != test.wantStatus {
+				t.Fatalf("status=%d want=%d body=%q", response.Code, test.wantStatus, response.Body.String())
+			}
+			if service.adminSession != "" {
+				t.Fatalf("rejected request reached service with session %q", service.adminSession)
+			}
+			assertBodyOmitsSecrets(t, response.Body.String(), "987654321", "administrator-cookie", `"accountId":99`)
+		})
+	}
+}
+
+func TestHTTPAdministratorAccountRoutesMountAheadOfGeneralAdminHandler(t *testing.T) {
+	service := &fakeHTTPService{adminResult: ManagedAccount{AccountID: 71, Status: AccountStatusDisabled}}
+	identityHandler := newTestHTTPHandler(t, service, allowLimiter{})
+	generalAdmin := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusTeapot)
+	})
+	application := hostedapp.New(hostedapp.Dependencies{DB: healthyAppDatabase{}, Auth: identityHandler, Admin: generalAdmin})
+
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/accounts/71/disable", strings.NewReader(`{"reason":"security"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", testOrigin)
+	request.Header.Set("X-CSRF-Token", testCSRF)
+	request.AddCookie(&http.Cookie{Name: SiteSessionCookie, Value: "administrator-cookie"})
+	response := httptest.NewRecorder()
+	application.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || service.adminAccountID != 71 {
+		t.Fatalf("account route status=%d body=%q target=%d", response.Code, response.Body.String(), service.adminAccountID)
+	}
+
+	response = httptest.NewRecorder()
+	application.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/admin/session", nil))
+	if response.Code != http.StatusTeapot {
+		t.Fatalf("general admin route status=%d, want %d", response.Code, http.StatusTeapot)
+	}
+}
+
+func TestHTTPAdministratorAccountResultCannotOverridePathIdentityOrExposeErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		result ManagedAccount
+		err    error
+		forbid string
+	}{
+		{name: "mismatched result", result: ManagedAccount{AccountID: 99, Status: AccountStatusActive}, forbid: `"accountId":99`},
+		{name: "private database text", err: errors.New("duplicate UID 987654321 database-private"), forbid: "987654321"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeHTTPService{adminResult: test.result, adminErr: test.err}
+			handler := newTestHTTPHandler(t, service, allowLimiter{})
+			request := httptest.NewRequest(http.MethodPost, "/api/admin/accounts/71/enable", strings.NewReader(`{"reason":"appeal"}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Origin", testOrigin)
+			request.Header.Set("X-CSRF-Token", testCSRF)
+			request.AddCookie(&http.Cookie{Name: SiteSessionCookie, Value: "administrator-cookie"})
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusConflict || response.Body.String() != `{"error":"operation_failed"}`+"\n" {
+				t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+			}
+			assertBodyOmitsSecrets(t, response.Body.String(), test.forbid, "database-private")
+		})
+	}
+}
+
 type healthyAppDatabase struct{}
 
 func (healthyAppDatabase) Health(context.Context) error { return nil }
@@ -334,6 +535,12 @@ type fakeHTTPService struct {
 	logoutErr      error
 	logoutToken    string
 	cancelCalls    []string
+	adminResult    ManagedAccount
+	adminErr       error
+	adminSession   string
+	adminAccountID int64
+	adminChallenge string
+	adminReason    string
 }
 
 func (service *fakeHTTPService) Begin(context.Context) (Challenge, error) {
@@ -364,6 +571,21 @@ func (service *fakeHTTPService) Cancel(challengeID string) {
 	service.cancelCalls = append(service.cancelCalls, challengeID)
 }
 
+func (service *fakeHTTPService) DisableAccount(_ context.Context, session string, accountID int64, reason string) (ManagedAccount, error) {
+	service.adminSession, service.adminAccountID, service.adminReason, service.adminChallenge = session, accountID, reason, ""
+	return service.adminResult, service.adminErr
+}
+
+func (service *fakeHTTPService) EnableAccount(_ context.Context, session string, accountID int64, reason string) (ManagedAccount, error) {
+	service.adminSession, service.adminAccountID, service.adminReason, service.adminChallenge = session, accountID, reason, ""
+	return service.adminResult, service.adminErr
+}
+
+func (service *fakeHTTPService) RebindVerifiedUID(_ context.Context, session string, accountID int64, challengeID, reason string) (ManagedAccount, error) {
+	service.adminSession, service.adminAccountID, service.adminReason, service.adminChallenge = session, accountID, reason, challengeID
+	return service.adminResult, service.adminErr
+}
+
 type allowLimiter struct{}
 
 func (allowLimiter) Allow(context.Context, LimitScope, string) bool { return true }
@@ -383,7 +605,7 @@ func (limiter *recordingLimiter) Allow(_ context.Context, scope LimitScope, key 
 	return scope != limiter.denyScope
 }
 
-func newTestHTTPHandler(t *testing.T, service sessionService, limiter ChallengeLimiter) *HTTPHandler {
+func newTestHTTPHandler(t *testing.T, service identityHTTPService, limiter ChallengeLimiter) *HTTPHandler {
 	t.Helper()
 	handler, err := NewHTTPHandler(service, HTTPOptions{
 		AllowedOrigin: testOrigin,

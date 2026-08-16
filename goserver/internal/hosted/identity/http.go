@@ -2,14 +2,18 @@ package identity
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -44,6 +48,17 @@ type sessionService interface {
 	RequireSession(context.Context, string) (Session, error)
 }
 
+type accountAdminService interface {
+	DisableAccount(context.Context, string, int64, string) (ManagedAccount, error)
+	EnableAccount(context.Context, string, int64, string) (ManagedAccount, error)
+	RebindVerifiedUID(context.Context, string, int64, string, string) (ManagedAccount, error)
+}
+
+type identityHTTPService interface {
+	sessionService
+	accountAdminService
+}
+
 // HTTPOptions contains public deployment policy; CSRFToken is a non-secret
 // bootstrap value but is still compared without data-dependent early exits.
 type HTTPOptions struct {
@@ -54,9 +69,9 @@ type HTTPOptions struct {
 	Now           func() time.Time
 }
 
-// HTTPHandler owns only hosted authentication routes and middleware.
+// HTTPHandler owns hosted identity, session, and account-management routes.
 type HTTPHandler struct {
-	service       sessionService
+	service       identityHTTPService
 	allowedOrigin string
 	csrfToken     string
 	limiter       ChallengeLimiter
@@ -65,8 +80,8 @@ type HTTPHandler struct {
 	mux           *http.ServeMux
 }
 
-// NewHTTPHandler builds the six stable authentication method-routes.
-func NewHTTPHandler(service sessionService, options HTTPOptions) (*HTTPHandler, error) {
+// NewHTTPHandler builds the stable hosted identity method-routes.
+func NewHTTPHandler(service identityHTTPService, options HTTPOptions) (*HTTPHandler, error) {
 	if service == nil || options.Limiter == nil || options.ClientIP == nil || options.CSRFToken == "" || len(options.CSRFToken) > 512 {
 		return nil, ErrInvalidInput
 	}
@@ -89,7 +104,145 @@ func NewHTTPHandler(service sessionService, options HTTPOptions) (*HTTPHandler, 
 	handler.mux.HandleFunc("POST /api/auth/session", handler.createSession)
 	handler.mux.HandleFunc("DELETE /api/auth/session", handler.deleteSession)
 	handler.mux.Handle("GET /api/auth/session", handler.Authenticate(http.HandlerFunc(handler.getSession)))
+	handler.mux.HandleFunc("POST /api/admin/accounts/{id}/disable", handler.disableAccount)
+	handler.mux.HandleFunc("POST /api/admin/accounts/{id}/enable", handler.enableAccount)
+	handler.mux.HandleFunc("POST /api/admin/accounts/{id}/rebind", handler.rebindAccount)
 	return handler, nil
+}
+
+func (handler *HTTPHandler) disableAccount(response http.ResponseWriter, request *http.Request) {
+	accountID, sessionToken, ok := handler.acceptAccountMutation(response, request, "admin_account_disable")
+	if !ok {
+		return
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if !decodeHTTPJSON(response, request, &body) {
+		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	normalizedReason, validReason := normalizeAdministratorReason(body.Reason)
+	if !validReason {
+		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	result, err := handler.service.DisableAccount(request.Context(), sessionToken, accountID, normalizedReason)
+	handler.writeAccountMutation(response, accountID, result, err, AccountStatusDisabled)
+}
+
+func (handler *HTTPHandler) enableAccount(response http.ResponseWriter, request *http.Request) {
+	accountID, sessionToken, ok := handler.acceptAccountMutation(response, request, "admin_account_enable")
+	if !ok {
+		return
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if !decodeHTTPJSON(response, request, &body) {
+		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	normalizedReason, validReason := normalizeAdministratorReason(body.Reason)
+	if !validReason {
+		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	result, err := handler.service.EnableAccount(request.Context(), sessionToken, accountID, normalizedReason)
+	handler.writeAccountMutation(response, accountID, result, err, AccountStatusActive)
+}
+
+func (handler *HTTPHandler) rebindAccount(response http.ResponseWriter, request *http.Request) {
+	accountID, sessionToken, ok := handler.acceptAccountMutation(response, request, "admin_account_rebind")
+	if !ok {
+		return
+	}
+	var body struct {
+		ChallengeID string `json:"challengeId"`
+		Reason      string `json:"reason"`
+	}
+	if !decodeHTTPJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 {
+		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	normalizedReason, validReason := normalizeAdministratorReason(body.Reason)
+	if !validReason {
+		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	result, err := handler.service.RebindVerifiedUID(request.Context(), sessionToken, accountID, body.ChallengeID, normalizedReason)
+	handler.writeAccountMutation(response, accountID, result, err, "")
+}
+
+func (handler *HTTPHandler) acceptAccountMutation(response http.ResponseWriter, request *http.Request, operation string) (int64, string, bool) {
+	if !handler.acceptMutation(request) {
+		writeHTTPError(response, http.StatusForbidden, "request_rejected")
+		return 0, "", false
+	}
+	if len(request.URL.Query()) != 0 || !isJSONContentType(request.Header.Get("Content-Type")) {
+		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
+		return 0, "", false
+	}
+	rawAccountID := request.PathValue("id")
+	accountID, err := strconv.ParseInt(rawAccountID, 10, 64)
+	if err != nil || accountID <= 0 || strconv.FormatInt(accountID, 10) != rawAccountID {
+		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
+		return 0, "", false
+	}
+	cookie, err := request.Cookie(SiteSessionCookie)
+	if err != nil || cookie == nil || cookie.Value == "" {
+		writeHTTPError(response, http.StatusUnauthorized, "authentication_failed")
+		return 0, "", false
+	}
+	if !handler.allowAccountMutation(request, operation, cookie.Value) {
+		writeHTTPError(response, http.StatusTooManyRequests, "rate_limited")
+		return 0, "", false
+	}
+	return accountID, cookie.Value, true
+}
+
+func isJSONContentType(value string) bool {
+	mediaType, _, err := mime.ParseMediaType(value)
+	return err == nil && strings.EqualFold(mediaType, "application/json")
+}
+
+func (handler *HTTPHandler) allowAccountMutation(request *http.Request, operation, sessionToken string) bool {
+	if !handler.limiter.Allow(request.Context(), LimitGlobal, operation) ||
+		!handler.limiter.Allow(request.Context(), LimitPerIP, operation+"\x00"+handler.clientIP(request)) {
+		return false
+	}
+	digest := sha256.Sum256([]byte(sessionToken))
+	return handler.limiter.Allow(request.Context(), LimitPerChallenge, operation+"\x00"+fmt.Sprintf("%x", digest[:]))
+}
+
+func (handler *HTTPHandler) writeAccountMutation(response http.ResponseWriter, accountID int64, result ManagedAccount, err error, requiredStatus string) {
+	if err == nil && result.AccountID == accountID && (requiredStatus == "" || result.Status == requiredStatus) && (result.Status == AccountStatusActive || result.Status == AccountStatusDisabled) {
+		writeHTTPJSON(response, http.StatusOK, result)
+		return
+	}
+	switch {
+	case errors.Is(err, ErrRecentTOTPRequired):
+		writeHTTPError(response, http.StatusForbidden, "recent_totp_required")
+	case errors.Is(err, ErrVerificationPending):
+		writeHTTPError(response, http.StatusAccepted, "verification_pending")
+	case errors.Is(err, ErrVerificationUnavailable), errors.Is(err, ErrRepositoryUnavailable):
+		writeHTTPError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
+	case errors.Is(err, ErrInvalidInput):
+		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
+	case errors.Is(err, ErrAuthenticationFailed):
+		writeHTTPError(response, http.StatusUnauthorized, "authentication_failed")
+	default:
+		writeHTTPError(response, http.StatusConflict, "operation_failed")
+	}
+}
+
+func decodeHTTPJSON(response http.ResponseWriter, request *http.Request, target any) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 4096))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return false
+	}
+	return errors.Is(decoder.Decode(&struct{}{}), io.EOF)
 }
 
 func (handler *HTTPHandler) cancelChallenge(response http.ResponseWriter, request *http.Request) {
