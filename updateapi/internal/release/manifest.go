@@ -118,7 +118,7 @@ func (manifest ChannelManifest) Validate() error {
 	if manifest.SchemaVersion != 1 {
 		return validationFailure(ValidationManifestSchema, fmt.Errorf("unsupported manifest schema version %d", manifest.SchemaVersion))
 	}
-	if _, err := parseStableVersion(manifest.TagName); err != nil {
+	if _, err := ParseStableTag(manifest.TagName); err != nil {
 		return validationFailure(ValidationManifestTag, fmt.Errorf("invalid release tag: %w", err))
 	}
 	if _, err := time.Parse(time.RFC3339, manifest.PublishedAt); err != nil {
@@ -189,27 +189,28 @@ func decodeJSON(data []byte, destination any) error {
 	return nil
 }
 
-func parseStableVersion(value string) ([3]int, error) {
+// ParseStableTag accepts only the canonical vMAJOR.MINOR.PATCH release-tag form.
+func ParseStableTag(value string) ([3]uint64, error) {
 	if len(value) < 2 || value[0] != 'v' {
-		return [3]int{}, fmt.Errorf("%q is not a stable version", value)
+		return [3]uint64{}, fmt.Errorf("%q is not a stable version", value)
 	}
 	parts := strings.Split(value[1:], ".")
 	if len(parts) != 3 {
-		return [3]int{}, fmt.Errorf("%q must use vMAJOR.MINOR.PATCH", value)
+		return [3]uint64{}, fmt.Errorf("%q must use vMAJOR.MINOR.PATCH", value)
 	}
-	var result [3]int
+	var result [3]uint64
 	for index, part := range parts {
 		if part == "" || (len(part) > 1 && part[0] == '0') {
-			return [3]int{}, fmt.Errorf("%q contains a noncanonical number", value)
+			return [3]uint64{}, fmt.Errorf("%q contains a noncanonical number", value)
 		}
 		for _, character := range part {
 			if character < '0' || character > '9' {
-				return [3]int{}, fmt.Errorf("%q contains an invalid number", value)
+				return [3]uint64{}, fmt.Errorf("%q contains an invalid number", value)
 			}
 		}
-		number, err := strconv.Atoi(part)
-		if err != nil || number < 0 {
-			return [3]int{}, fmt.Errorf("%q contains an invalid number", value)
+		number, err := strconv.ParseUint(part, 10, 64)
+		if err != nil {
+			return [3]uint64{}, fmt.Errorf("%q contains an invalid number", value)
 		}
 		result[index] = number
 	}
