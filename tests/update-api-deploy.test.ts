@@ -607,15 +607,35 @@ useradd() { ACCOUNT_CREATED=1; printf 'useradd\\n' >> "$ACCOUNT_LOG"; }
     expect(service).toContain('Environment=UPDATE_API_LISTEN=127.0.0.1:12450');
   });
 
-  it('documents protected-environment ownership and rotation of the publisher tool pin', () => {
+  it('documents Lighthouse-owned mirroring and retires obsolete GitHub COS setup only after acceptance', () => {
     const readme = deploymentAsset('README.md');
 
-    expect(readme).toContain('UPDATE_PUBLISHER_TOOL_SHA');
-    expect(readme).toContain('exact 40-hex commit SHA');
-    expect(readme).toContain('protected GitHub Environment `release`');
-    expect(readme).toContain('review the candidate commit');
-    expect(readme).toContain('update the environment variable');
-    expect(readme).toMatch(/rerun the Release workflow/i);
-    expect(readme).toContain('never expose the pin as a workflow-dispatch input');
+    for (const forbidden of [
+      /COS_RELEASE_SECRET_ID/i,
+      /COS_RELEASE_SECRET_KEY/i,
+      /UPDATE_PUBLISHER_TOOL_SHA/i,
+      /_update-publisher-tool/i,
+      /Check out update publisher tooling/i,
+      /Mirror release to Tencent COS/i,
+      /test-cos-connectivity/i,
+    ]) {
+      expect(readme).not.toMatch(forbidden);
+    }
+    expect(readme).toContain(
+      'GitHub Actions variables: `UPDATE_API_BASE_URL`, `EVSIGN_CERT`, `EVSIGN_EXPECTED_SUBJECT`.',
+    );
+    expect(readme).toContain('GitHub Actions secrets: `EVSIGN_KEY`, `EVSIGN_PASSWORD`.');
+    expect(readme).toContain('every five minutes');
+    expect(readme).toContain('lighthouse-cos-publisher');
+    expect(readme).toContain('name/cos:HeadObject');
+    expect(readme).toContain('name/cos:GetObject');
+    expect(readme).toContain('name/cos:PutObject');
+    expect(readme).toContain('/etc/gift-panel-release-mirror.env');
+    expect(readme).toContain('production acceptance');
+    expect(readme).toContain('separate explicit confirmation');
+    expect(readme).toContain('obsolete GitHub Environment COS secrets and variables');
+    expect(readme).toContain('github-cos-uploader');
+    expect(readme).toMatch(/create a replacement.*lighthouse-cos-publisher.*key/is);
+    expect(readme).toMatch(/verify.*revoke the old key/is);
   });
 });

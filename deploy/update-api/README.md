@@ -4,21 +4,19 @@ This deployment serves private COS release metadata through the API only. Keep t
 
 ## Required names
 
-GitHub Actions variables: `UPDATE_API_BASE_URL`, `COS_BUCKET`, `COS_REGION`, `EVSIGN_EXPECTED_SUBJECT`, `UPDATE_PUBLISHER_TOOL_SHA`.
+GitHub Actions variables: `UPDATE_API_BASE_URL`, `EVSIGN_CERT`, `EVSIGN_EXPECTED_SUBJECT`.
 
-GitHub Actions secrets: `COS_RELEASE_SECRET_ID`, `COS_RELEASE_SECRET_KEY`.
+GitHub Actions secrets: `EVSIGN_KEY`, `EVSIGN_PASSWORD`.
 
-Store these release variables and secrets only in the protected GitHub Environment `release`, with its approval and branch rules enabled. `UPDATE_PUBLISHER_TOOL_SHA` is not secret, but it is a production trust decision: it must be an exact 40-hex commit SHA, never a tag, branch, shortened SHA, repository-level override, or workflow-dispatch input. The workflow validates the pin before checkout, checks the publisher tooling out separately from the requested release tag, verifies the resolved commit, and runs `updateapi/cmd/publish` only from that checkout. The requested tag checkout remains the source of release artifacts and metadata.
+Store these signing variables and secrets only in the protected GitHub Environment `release`, with its approval and branch rules enabled. The Release workflow uses the requested tag checkout for the update-module race test, build, signature, GitHub Release creation or complete-Release repair, and final asset validation. A validated GitHub Release is the workflow's terminal success condition; the workflow does not hold COS credentials or invoke the COS publisher.
 
 Server environment variables: `UPDATE_API_LISTEN`, `COS_BUCKET`, `COS_REGION`, `COS_SECRET_ID`, `COS_SECRET_KEY`. The channel object is fixed in the binary as `channels/stable/latest.json` and is not configurable.
 
+Mirror environment variables: `COS_BUCKET`, `COS_REGION`, `COS_SECRET_ID`, `COS_SECRET_KEY`. They belong only in the root-owned `/etc/gift-panel-release-mirror.env` on Lighthouse and must not be copied into GitHub.
+
 Rendering variables: `PUBLIC_DOMAIN`, `ICP_NUMBER`, `TLS_CERT_PATH`, `TLS_KEY_PATH`.
 
-## Rotate the publisher tool pin
-
-To update the publisher without weakening repair safety, review the candidate commit and its complete diff, confirm that its `updateapi` race tests cover immutable release objects, stable-last promotion, rollback, and monotonic SemVer behavior, and obtain approval under the release change-control process. Copy the candidate's full 40-character commit SHA from the reviewed repository; do not copy a branch or tag name.
-
-After approval, update the environment variable `UPDATE_PUBLISHER_TOOL_SHA` in the protected GitHub Environment `release`. Keep the COS and signing credentials in that same Environment, and never expose the pin as a workflow-dispatch input. Rerun the Release workflow under Environment approval and verify that `Validate update publisher tool commit` succeeds and `Verify update publisher tool checkout` resolves the exact approved SHA before allowing the COS mirror step. If validation or checkout verification fails, restore the last reviewed pin; do not bypass either gate.
+The Lighthouse timer checks the public GitHub Release asynchronously every five minutes. GitHub publication never waits for the mirror. The oneshot validates all required public assets before constructing a COS client, preserves immutable release objects, and advances the stable pointer only after complete verification.
 
 ## Install
 
@@ -88,7 +86,29 @@ For an Nginx rollback, restore the last known-good `/etc/nginx/conf.d/gift-panel
 
 ## Release mirror (separate service)
 
-The mirror is separate from the update API: it uses a no-login account, its own systemd state directory and journal namespace, and opens no public socket. Its CAM identity is scoped read/write: only Head/Get/Put for `releases/*` and `channels/stable/latest.json`; no Delete, list, bucket configuration, or other prefixes.
+The mirror is separate from the update API: it uses a no-login account, its own systemd state directory and journal namespace, and opens no public socket. Give it the dedicated CAM identity `lighthouse-cos-publisher`; do not reuse the read-only update API identity or any GitHub publishing identity.
+
+Before attaching the policy, use the Tencent CAM policy simulator to prove that only `name/cos:HeadObject`, `name/cos:GetObject`, and `name/cos:PutObject` are allowed for the immutable release prefix and stable pointer. This is Head/Get/Put only: no Delete, list, bucket configuration, or other prefixes. Another bucket and every other resource must also be denied. The production policy is:
+
+```json
+{
+  "version": "2.0",
+  "statement": [{
+    "effect": "allow",
+    "action": [
+      "name/cos:HeadObject",
+      "name/cos:GetObject",
+      "name/cos:PutObject"
+    ],
+    "resource": [
+      "qcs::cos:ap-shanghai:uid/1256302443:bilibili-live-gift-panel-1256302443/releases/*",
+      "qcs::cos:ap-shanghai:uid/1256302443:bilibili-live-gift-panel-1256302443/channels/stable/latest.json"
+    ]
+  }]
+}
+```
+
+Creating the identity, attaching or changing this policy, and creating a key are separate production mutations that require action-time approval. Keep the bucket private and never grant DeleteObject.
 
 Set the reviewed inputs independently of the build output. Deployment builds archive the exact clean Git commit before compiling; `GIFT_PANEL_LOCAL_BUILD=1` writes only `dist/local/` and must never be installed.
 
@@ -148,6 +168,10 @@ sudo systemctl daemon-reload
 sudo systemd-analyze verify /etc/systemd/system/gift-panel-release-mirror.service /etc/systemd/system/gift-panel-release-mirror.timer
 ```
 
+### Rotate Lighthouse mirror credentials
+
+After an independently approved policy-simulator check, create a replacement `lighthouse-cos-publisher` key without disabling the active key. Install the replacement values through the approved secret channel into `/etc/gift-panel-release-mirror.env`, retaining owner `root:root` and mode `0600`; never put them in a command, shell history, log, ticket, commit, or chat. Run the systemd dry-run below, then one normal oneshot, and verify the immutable COS objects, stable pointer, public latest-version API, and changelog. Only after those checks succeed may a separately confirmed action revoke the old key. Delete that old key only in a later, independently confirmed cleanup window.
+
 Do not run the binary manually on a fresh host: systemd must create `StateDirectory` first. Before enabling the timer, use a temporary dry-run drop-in, inspect the completed invocation, remove the drop-in, then run one normal oneshot. The cleanup below is deliberately failure-safe: an interrupted or failed validation cannot reach normal publication, and it removes only the exact resolved drop-in path.
 
 ```sh
@@ -200,6 +224,12 @@ trap - EXIT INT TERM
 sudo systemctl start gift-panel-release-mirror.service
 sudo systemctl enable --now gift-panel-release-mirror.timer
 ```
+
+### Retire the obsolete GitHub publisher
+
+Do not clean up the former GitHub publisher during installation. Production acceptance first requires a successful systemd dry-run, one verified real mirror, matching public API metadata, an enabled five-minute timer, a later no-op, and a failed-then-recovered retry that leaves stable unchanged during failure.
+
+Only after that production acceptance, request separate explicit confirmation before each external cleanup stage. With approval, remove the obsolete GitHub Environment COS secrets and variables from the protected `release` Environment. In a separately approved key window, disable the old `github-cos-uploader` key, verify that `lighthouse-cos-publisher` still mirrors or no-ops successfully, and leave the old key disabled. Delete the old key only in a later independently confirmed cleanup window. Never combine Environment cleanup, key disablement, and key deletion into one approval.
 
 For rollback, quiesce both timer and oneshot before changing `current`. If the stable pointer also needs to move backward, stop here and use a separately confirmed Tencent COS console or approved operator action to restore the reviewed private `channels/stable/latest.json` backup while quiesced. do not re-enable timer while an intentionally older stable release would immediately be re-promoted. Do not delete immutable release objects. After that separate action, verify the domestic API's public metadata against approved rollback evidence without writing, printing, or logging its signed download URL. Lighthouse needs the Node.js runtime already used by the build verifier for this safe streaming check.
 

@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -173,6 +173,24 @@ describe('release workflow supply-chain contract', () => {
       expect(source, `release workflow must not reference ${name}`).not.toMatch(forbidden);
     }
     expect(source).not.toMatch(/\bgo(?:\.exe)?(?:\s+-C\s+\S+)?\s+run\s+\.\/cmd\/publish\b/);
+  });
+
+  it('keeps obsolete direct COS connectivity entry points deleted', () => {
+    expect(existsSync(new URL('../.github/workflows/cos-connectivity-test.yml', import.meta.url)))
+      .toBe(false);
+    expect(existsSync(new URL('../scripts/test-cos-connectivity.mjs', import.meta.url)))
+      .toBe(false);
+  });
+
+  it('validates release publication timestamps without producing unused publisher metadata', () => {
+    const { steps } = releaseWorkflow();
+
+    for (const name of ['Inspect existing GitHub release', 'Create GitHub release']) {
+      const run = steps[stepIndex(steps, name)]?.run ?? '';
+      expect(run, name).toContain('$publishedAt = [DateTimeOffset]$release.published_at');
+      expect(run, name).not.toContain('$publishedAtRFC3339');
+      expect(run, name).toContain('publication timestamp is invalid');
+    }
   });
 
   it('race-tests the update module from the release tag checkout itself', () => {

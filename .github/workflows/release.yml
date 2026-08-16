@@ -74,7 +74,6 @@ jobs:
 
           try {
             $publishedAt = [DateTimeOffset]$release.published_at
-            $publishedAtRFC3339 = $publishedAt.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
           } catch {
             throw "Existing GitHub Release publication timestamp is invalid. Manual recovery required before rerunning."
           }
@@ -360,7 +359,6 @@ jobs:
 
           try {
             $publishedAt = [DateTimeOffset]$release.published_at
-            $publishedAtRFC3339 = $publishedAt.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
           } catch {
             throw "Published GitHub Release publication timestamp is invalid; manual recovery required"
           }
