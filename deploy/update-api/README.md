@@ -124,7 +124,9 @@ printf '%s\n%s\n' "$RELEASE_ID" "$REVIEWED_SHA256" > gift-panel-release-mirror.r
 test "$(wc -l < gift-panel-release-mirror.reviewed)" -eq 2
 ```
 
-Transfer both the verified normal artifact and the two-line `gift-panel-release-mirror.reviewed` sidecar by the approved secure channel. The following install/upgrade transaction remains quiesced throughout. It stages on the same filesystem, never writes into an existing version directory, runs the dry-run from the exact verified version path before changing `current`, and uses rename-based atomic publication. Do not run the binary manually on a fresh host: systemd must create `StateDirectory` first.
+STOP: obtain separate action-time operator confirmation before production transfer or any install/quiesce action. Build approval is not transfer/install approval. After confirmation, proceed with the separately authorized transfer. Transfer both the verified normal artifact and the two-line `gift-panel-release-mirror.reviewed` sidecar by the approved secure channel.
+
+Run this read-only-evidence plus quiesce preflight. It fails on every systemctl query, D-Bus, permission, command, unknown-state, active-state, or enabled-timer error. A fresh host is accepted only when both units report `LoadState=not-found`, `ActiveState=inactive`, and the timer's raw `UnitFileState` is empty or `not-found`; that raw value is normalized to the explicit state `not-found`.
 
 ```sh
 set -euo pipefail
@@ -133,13 +135,76 @@ RELEASE_ID=$(sed -n '1p' gift-panel-release-mirror.reviewed)
 REVIEWED_SHA256=$(sed -n '2p' gift-panel-release-mirror.reviewed)
 printf '%s\n' "$RELEASE_ID" | grep -Eq '^[0-9a-f]{40}$'
 printf '%s\n' "$REVIEWED_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+mirror_systemctl_value() {
+  property=$1 unit=$2
+  value=$(sudo systemctl show --property="$property" --value "$unit") || return 1
+  case "$value" in ''|*[!a-z-]*) return 1 ;; esac
+  printf '%s\n' "$value"
+}
+mirror_timer_unit_file_state() {
+  timer_load=$1
+  raw=$(sudo systemctl show --property=UnitFileState --value gift-panel-release-mirror.timer) || return 1
+  case "$timer_load:$raw" in
+    loaded:disabled) printf '%s\n' disabled ;;
+    not-found:|not-found:not-found) printf '%s\n' not-found ;;
+    *) return 1 ;;
+  esac
+}
+mirror_verify_quiesced() {
+  timer_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.timer) || return 1
+  timer_active=$(mirror_systemctl_value ActiveState gift-panel-release-mirror.timer) || return 1
+  timer_unit_file=$(mirror_timer_unit_file_state "$timer_load") || return 1
+  service_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.service) || return 1
+  service_active=$(mirror_systemctl_value ActiveState gift-panel-release-mirror.service) || return 1
+  case "$timer_load:$timer_active:$timer_unit_file" in loaded:inactive:disabled|not-found:inactive:not-found) ;; *) return 1 ;; esac
+  case "$service_load:$service_active" in loaded:inactive|not-found:inactive) ;; *) return 1 ;; esac
+}
+mirror_quiesce() {
+  timer_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.timer) || return 1
+  service_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.service) || return 1
+  case "$timer_load" in loaded) sudo systemctl disable --now gift-panel-release-mirror.timer || return 1 ;; not-found) ;; *) return 1 ;; esac
+  case "$service_load" in loaded) sudo systemctl stop gift-panel-release-mirror.service || return 1 ;; not-found) ;; *) return 1 ;; esac
+  mirror_verify_quiesced
+}
+mirror_quiesce
+```
 
-sudo systemctl disable --now gift-panel-release-mirror.timer 2>/dev/null || true
-sudo systemctl stop gift-panel-release-mirror.service 2>/dev/null || true
-sudo systemctl is-enabled --quiet gift-panel-release-mirror.timer && exit 1
-sudo systemctl is-active --quiet gift-panel-release-mirror.timer && exit 1
-sudo systemctl is-active --quiet gift-panel-release-mirror.service && exit 1
+STOP: obtain separate action-time operator confirmation before service-user, version, and unit installation. The transfer/quiesce confirmation does not authorize account creation or writes under `/opt` or `/etc/systemd`.
 
+After that confirmation, re-read the transferred evidence, re-issue and verify quiescence, then stage on the same filesystem. Never write into an existing version directory; an existing exact version is accepted only when its complete contents are byte-identical.
+
+```sh
+set -euo pipefail
+test "$(wc -l < gift-panel-release-mirror.reviewed)" -eq 2
+RELEASE_ID=$(sed -n '1p' gift-panel-release-mirror.reviewed)
+REVIEWED_SHA256=$(sed -n '2p' gift-panel-release-mirror.reviewed)
+printf '%s\n' "$RELEASE_ID" | grep -Eq '^[0-9a-f]{40}$'
+printf '%s\n' "$REVIEWED_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+mirror_systemctl_value() {
+  property=$1 unit=$2; value=$(sudo systemctl show --property="$property" --value "$unit") || return 1
+  case "$value" in ''|*[!a-z-]*) return 1 ;; esac; printf '%s\n' "$value"
+}
+mirror_timer_unit_file_state() {
+  timer_load=$1; raw=$(sudo systemctl show --property=UnitFileState --value gift-panel-release-mirror.timer) || return 1
+  case "$timer_load:$raw" in loaded:disabled) printf '%s\n' disabled ;; not-found:|not-found:not-found) printf '%s\n' not-found ;; *) return 1 ;; esac
+}
+mirror_verify_quiesced() {
+  timer_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.timer) || return 1
+  timer_active=$(mirror_systemctl_value ActiveState gift-panel-release-mirror.timer) || return 1
+  timer_unit_file=$(mirror_timer_unit_file_state "$timer_load") || return 1
+  service_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.service) || return 1
+  service_active=$(mirror_systemctl_value ActiveState gift-panel-release-mirror.service) || return 1
+  case "$timer_load:$timer_active:$timer_unit_file" in loaded:inactive:disabled|not-found:inactive:not-found) ;; *) return 1 ;; esac
+  case "$service_load:$service_active" in loaded:inactive|not-found:inactive) ;; *) return 1 ;; esac
+}
+mirror_quiesce() {
+  timer_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.timer) || return 1
+  service_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.service) || return 1
+  case "$timer_load" in loaded) sudo systemctl disable --now gift-panel-release-mirror.timer || return 1 ;; not-found) ;; *) return 1 ;; esac
+  case "$service_load" in loaded) sudo systemctl stop gift-panel-release-mirror.service || return 1 ;; not-found) ;; *) return 1 ;; esac
+  mirror_verify_quiesced
+}
+mirror_quiesce
 if ! getent passwd gift-panel-mirror >/dev/null; then
   if getent group gift-panel-mirror >/dev/null; then exit 1; fi
   sudo useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin gift-panel-mirror
@@ -153,7 +218,6 @@ GROUP_RECORD=$(getent group "$ACCOUNT_GID")
 test "$(printf '%s\n' "$GROUP_RECORD" | cut -d: -f1)" = gift-panel-mirror
 test "$(printf '%s\n' "$GROUP_RECORD" | cut -d: -f3)" = "$ACCOUNT_GID"
 test "$(id -gn gift-panel-mirror)" = gift-panel-mirror
-
 RELEASE_ROOT=/opt/gift-panel-release-mirror/releases
 FINAL_RELEASE="$RELEASE_ROOT/$RELEASE_ID"
 FINAL_BINARY="$FINAL_RELEASE/gift-panel-release-mirror"
@@ -188,15 +252,64 @@ trap - EXIT INT TERM
 printf '%s  %s\n' "$REVIEWED_SHA256" "$FINAL_BINARY" | sha256sum -c -
 test "$RELEASE_ID" = "$("$FINAL_BINARY" --build-commit)"
 test "$(readlink -f -- "$FINAL_BINARY")" = "$FINAL_BINARY"
-
-sudo install -o root -g root -m 0600 /secure/gift-panel-release-mirror.env /etc/gift-panel-release-mirror.env
 sudo install -o root -g root -m 0644 deploy/update-api/gift-panel-release-mirror.service /etc/systemd/system/gift-panel-release-mirror.service
 sudo install -o root -g root -m 0644 deploy/update-api/gift-panel-release-mirror.timer /etc/systemd/system/gift-panel-release-mirror.timer
 sudo install -d -o root -g root -m 0755 /etc/systemd/journald@gift-panel-release-mirror.conf.d
 sudo install -o root -g root -m 0644 deploy/update-api/journald.conf /etc/systemd/journald@gift-panel-release-mirror.conf.d/retention.conf
 sudo systemctl daemon-reload
 sudo systemd-analyze verify /etc/systemd/system/gift-panel-release-mirror.service /etc/systemd/system/gift-panel-release-mirror.timer
+mirror_verify_quiesced
+```
 
+STOP: obtain separate action-time operator confirmation before installing the secret environment file. This is a distinct secret-bearing production mutation and is not authorized by transfer, account, binary, or unit approval.
+
+```sh
+set -euo pipefail
+mirror_systemctl_value() {
+  property=$1 unit=$2; value=$(sudo systemctl show --property="$property" --value "$unit") || return 1
+  case "$value" in ''|*[!a-z-]*) return 1 ;; esac; printf '%s\n' "$value"
+}
+mirror_verify_quiesced() {
+  timer_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.timer) || return 1
+  timer_active=$(mirror_systemctl_value ActiveState gift-panel-release-mirror.timer) || return 1
+  timer_unit_file=$(sudo systemctl show --property=UnitFileState --value gift-panel-release-mirror.timer) || return 1
+  service_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.service) || return 1
+  service_active=$(mirror_systemctl_value ActiveState gift-panel-release-mirror.service) || return 1
+  test "$timer_load:$timer_active:$timer_unit_file" = loaded:inactive:disabled
+  test "$service_load:$service_active" = loaded:inactive
+}
+mirror_verify_quiesced
+sudo install -o root -g root -m 0600 /secure/gift-panel-release-mirror.env /etc/gift-panel-release-mirror.env
+mirror_verify_quiesced
+```
+
+Do not run the binary manually on a fresh host: systemd must create `StateDirectory` first. The dry-run below revalidates the final binary and fail-closed state, records the prior `InvocationID`, starts only after the exact drop-in is active, and requires a new nonempty invocation identity. After cleanup it revalidates quiescence again before atomically changing `current`.
+
+```sh
+set -euo pipefail
+test "$(wc -l < gift-panel-release-mirror.reviewed)" -eq 2
+RELEASE_ID=$(sed -n '1p' gift-panel-release-mirror.reviewed)
+REVIEWED_SHA256=$(sed -n '2p' gift-panel-release-mirror.reviewed)
+printf '%s\n' "$RELEASE_ID" | grep -Eq '^[0-9a-f]{40}$'
+FINAL_RELEASE=/opt/gift-panel-release-mirror/releases/"$RELEASE_ID"
+FINAL_BINARY="$FINAL_RELEASE/gift-panel-release-mirror"
+printf '%s  %s\n' "$REVIEWED_SHA256" "$FINAL_BINARY" | sha256sum -c -
+test "$RELEASE_ID" = "$("$FINAL_BINARY" --build-commit)"
+mirror_systemctl_value() {
+  property=$1 unit=$2; value=$(sudo systemctl show --property="$property" --value "$unit") || return 1
+  case "$value" in ''|*[!a-z-]*) return 1 ;; esac; printf '%s\n' "$value"
+}
+mirror_verify_quiesced() {
+  timer_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.timer) || return 1
+  timer_active=$(mirror_systemctl_value ActiveState gift-panel-release-mirror.timer) || return 1
+  timer_unit_file=$(sudo systemctl show --property=UnitFileState --value gift-panel-release-mirror.timer) || return 1
+  service_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.service) || return 1
+  service_active=$(mirror_systemctl_value ActiveState gift-panel-release-mirror.service) || return 1
+  test "$timer_load:$timer_active:$timer_unit_file" = loaded:inactive:disabled
+  test "$service_load:$service_active" = loaded:inactive
+}
+mirror_verify_quiesced
+BEFORE_INVOCATION=$(sudo systemctl show --property=InvocationID --value gift-panel-release-mirror.service) || exit 1
 DROPIN=/run/systemd/system/gift-panel-release-mirror.service.d/dry-run.conf
 DROPIN_DIR=$(dirname "$DROPIN")
 test "$DROPIN_DIR" = /run/systemd/system/gift-panel-release-mirror.service.d
@@ -205,19 +318,14 @@ cleanup_dry_run() {
   if test -e "$DROPIN"; then sudo rm -- "$DROPIN" || cleanup_failed=1; fi
   sudo systemctl daemon-reload || cleanup_failed=1
   test ! -e "$DROPIN" || cleanup_failed=1
-  active_dropins=$(sudo systemctl show -p DropInPaths --value gift-panel-release-mirror.service)
+  active_dropins=$(sudo systemctl show --property=DropInPaths --value gift-panel-release-mirror.service)
   if test $? -ne 0; then cleanup_failed=1
   elif printf '%s\n' "$active_dropins" | grep -Fq -- "$DROPIN"; then cleanup_failed=1
   fi
   return "$cleanup_failed"
 }
 finish_dry_run() {
-  original_rc=$1
-  trap - EXIT INT TERM
-  set +e
-  cleanup_dry_run
-  cleanup_rc=$?
-  set -e
+  original_rc=$1; trap - EXIT INT TERM; set +e; cleanup_dry_run; cleanup_rc=$?; set -e
   if test "$original_rc" -ne 0; then exit "$original_rc"; fi
   if test "$cleanup_rc" -ne 0; then exit 1; fi
   exit 0
@@ -231,8 +339,12 @@ trap on_term TERM
 sudo install -d -o root -g root -m 0755 "$DROPIN_DIR"
 printf '[Service]\nExecStart=\nExecStart=%s --dry-run\n' "$FINAL_BINARY" | sudo tee "$DROPIN" >/dev/null
 sudo systemctl daemon-reload
+mirror_verify_quiesced
 sudo systemctl start gift-panel-release-mirror.service
-test "$(sudo systemctl show -p Result --value gift-panel-release-mirror.service)" = success
+DRY_RUN_INVOCATION=$(sudo systemctl show --property=InvocationID --value gift-panel-release-mirror.service) || exit 1
+test -n "$DRY_RUN_INVOCATION"
+test "$DRY_RUN_INVOCATION" != "$BEFORE_INVOCATION"
+test "$(sudo systemctl show --property=Result --value gift-panel-release-mirror.service)" = success
 sudo journalctl --namespace=gift-panel-release-mirror -u gift-panel-release-mirror.service --no-pager
 set +e
 cleanup_dry_run
@@ -240,7 +352,7 @@ cleanup_rc=$?
 set -e
 test "$cleanup_rc" -eq 0
 trap - EXIT INT TERM
-
+mirror_verify_quiesced
 CURRENT_TMP=/opt/gift-panel-release-mirror/.current-"$RELEASE_ID"
 test ! -e "$CURRENT_TMP"
 test ! -L "$CURRENT_TMP"
@@ -248,8 +360,7 @@ sudo ln -s -- "$FINAL_RELEASE" "$CURRENT_TMP"
 sudo mv -Tf -- "$CURRENT_TMP" /opt/gift-panel-release-mirror/current
 test "$(readlink -f /opt/gift-panel-release-mirror/current/gift-panel-release-mirror)" = "$FINAL_BINARY"
 test "$RELEASE_ID" = "$(/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --build-commit)"
-sudo systemctl is-active --quiet gift-panel-release-mirror.timer && exit 1
-sudo systemctl is-active --quiet gift-panel-release-mirror.service && exit 1
+mirror_verify_quiesced
 ```
 
 Stop here and obtain independent operator confirmation before the real oneshot. The dry-run result and exact `current` target are review evidence; neither authorizes a COS write.
@@ -258,10 +369,27 @@ After that confirmation only, run one real oneshot and stop again:
 
 ```sh
 set -euo pipefail
-sudo systemctl is-active --quiet gift-panel-release-mirror.timer && exit 1
+mirror_systemctl_value() {
+  property=$1 unit=$2; value=$(sudo systemctl show --property="$property" --value "$unit") || return 1
+  case "$value" in ''|*[!a-z-]*) return 1 ;; esac; printf '%s\n' "$value"
+}
+mirror_verify_quiesced() {
+  test "$(mirror_systemctl_value LoadState gift-panel-release-mirror.timer)" = loaded
+  test "$(mirror_systemctl_value ActiveState gift-panel-release-mirror.timer)" = inactive
+  test "$(sudo systemctl show --property=UnitFileState --value gift-panel-release-mirror.timer)" = disabled
+  test "$(mirror_systemctl_value LoadState gift-panel-release-mirror.service)" = loaded
+  test "$(mirror_systemctl_value ActiveState gift-panel-release-mirror.service)" = inactive
+}
+mirror_verify_quiesced
+BEFORE_INVOCATION=$(sudo systemctl show --property=InvocationID --value gift-panel-release-mirror.service) || exit 1
 sudo systemctl start gift-panel-release-mirror.service
-test "$(sudo systemctl show -p Result --value gift-panel-release-mirror.service)" = success
+REAL_INVOCATION=$(sudo systemctl show --property=InvocationID --value gift-panel-release-mirror.service) || exit 1
+test -n "$REAL_INVOCATION"
+test "$REAL_INVOCATION" != "$BEFORE_INVOCATION"
+test "$(sudo systemctl show --property=Result --value gift-panel-release-mirror.service)" = success
 sudo journalctl --namespace=gift-panel-release-mirror -u gift-panel-release-mirror.service --no-pager
+# real oneshot invocation is complete; timer remains disabled pending acceptance
+mirror_verify_quiesced
 ```
 
 Independently verify that `releases/v0.4.4/gift-panel-windows-x64.exe`, `releases/v0.4.4/gift-panel-windows-x64.exe.sha256`, `releases/v0.4.4/gift-panel-changelog.json`, and `releases/v0.4.4/release.json` all exist, match the reviewed GitHub size/SHA-256 or reviewed content as applicable, and remain immutable; verify `channels/stable/latest.json` points to the same complete release. Then verify the domestic latest and changelog routes; the signed download URL is redacted, and the existing update API service and `127.0.0.1:12450` listener must be unchanged. Capture only tag, asset name, size, digest, publication time, changelog ordering, and redacted URL evidence—never its query string.
@@ -288,11 +416,31 @@ For rollback, quiesce both timer and oneshot before inspecting or changing insta
 
 ```sh
 set -euo pipefail
-sudo systemctl disable --now gift-panel-release-mirror.timer
-sudo systemctl stop gift-panel-release-mirror.service
-sudo systemctl is-enabled --quiet gift-panel-release-mirror.timer && exit 1
-sudo systemctl is-active --quiet gift-panel-release-mirror.timer && exit 1
-sudo systemctl is-active --quiet gift-panel-release-mirror.service && exit 1
+mirror_systemctl_value() {
+  property=$1 unit=$2; value=$(sudo systemctl show --property="$property" --value "$unit") || return 1
+  case "$value" in ''|*[!a-z-]*) return 1 ;; esac; printf '%s\n' "$value"
+}
+mirror_timer_unit_file_state() {
+  timer_load=$1; raw=$(sudo systemctl show --property=UnitFileState --value gift-panel-release-mirror.timer) || return 1
+  case "$timer_load:$raw" in loaded:disabled) printf '%s\n' disabled ;; not-found:|not-found:not-found) printf '%s\n' not-found ;; *) return 1 ;; esac
+}
+mirror_verify_quiesced() {
+  timer_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.timer) || return 1
+  timer_active=$(mirror_systemctl_value ActiveState gift-panel-release-mirror.timer) || return 1
+  timer_unit_file=$(mirror_timer_unit_file_state "$timer_load") || return 1
+  service_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.service) || return 1
+  service_active=$(mirror_systemctl_value ActiveState gift-panel-release-mirror.service) || return 1
+  case "$timer_load:$timer_active:$timer_unit_file" in loaded:inactive:disabled|not-found:inactive:not-found) ;; *) return 1 ;; esac
+  case "$service_load:$service_active" in loaded:inactive|not-found:inactive) ;; *) return 1 ;; esac
+}
+mirror_quiesce() {
+  timer_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.timer) || return 1
+  service_load=$(mirror_systemctl_value LoadState gift-panel-release-mirror.service) || return 1
+  case "$timer_load" in loaded) sudo systemctl disable --now gift-panel-release-mirror.timer || return 1 ;; not-found) ;; *) return 1 ;; esac
+  case "$service_load" in loaded) sudo systemctl stop gift-panel-release-mirror.service || return 1 ;; not-found) ;; *) return 1 ;; esac
+  mirror_verify_quiesced
+}
+mirror_quiesce
 PREVIOUS_RELEASE_ID="${PREVIOUS_RELEASE_ID:?set the reviewed previous 40-hex commit}"
 printf '%s\n' "$PREVIOUS_RELEASE_ID" | grep -Eq '^[0-9a-f]{40}$'
 PREVIOUS_RELEASE=/opt/gift-panel-release-mirror/releases/"$PREVIOUS_RELEASE_ID"
@@ -335,6 +483,8 @@ if ! sudo jq -e --arg tag "$APPROVED_TAG" --arg sha "$APPROVED_SHA256" '.tag == 
   test "${ROLLBACK_STATE_POLICY:?set state-matches-approved or stable-pointer-restored-while-mirror-state-remains-newer}" = stable-pointer-restored-while-mirror-state-remains-newer
   printf 'rollback state intentionally differs: stable pointer restored while mirror state remains newer\n' | sudo systemd-cat -t gift-panel-release-mirror
 fi
+mirror_verify_quiesced
+BEFORE_INVOCATION=$(sudo systemctl show --property=InvocationID --value gift-panel-release-mirror.service) || exit 1
 DROPIN=/run/systemd/system/gift-panel-release-mirror.service.d/dry-run.conf
 DROPIN_DIR=$(dirname "$DROPIN")
 test "$DROPIN_DIR" = /run/systemd/system/gift-panel-release-mirror.service.d
@@ -343,7 +493,7 @@ cleanup_dry_run() {
   if test -e "$DROPIN"; then sudo rm -- "$DROPIN" || cleanup_failed=1; fi
   sudo systemctl daemon-reload || cleanup_failed=1
   test ! -e "$DROPIN" || cleanup_failed=1
-  active_dropins=$(sudo systemctl show -p DropInPaths --value gift-panel-release-mirror.service)
+  active_dropins=$(sudo systemctl show --property=DropInPaths --value gift-panel-release-mirror.service)
   if test $? -ne 0; then
     cleanup_failed=1
   elif printf '%s\n' "$active_dropins" | grep -Fq -- "$DROPIN"; then
@@ -371,8 +521,12 @@ trap on_term TERM
 sudo install -d -o root -g root -m 0755 "$DROPIN_DIR"
 printf '[Service]\nExecStart=\nExecStart=%s --dry-run\n' "$PREVIOUS_BINARY" | sudo tee "$DROPIN" >/dev/null
 sudo systemctl daemon-reload
+mirror_verify_quiesced
 sudo systemctl start gift-panel-release-mirror.service
-test "$(sudo systemctl show -p Result --value gift-panel-release-mirror.service)" = success
+ROLLBACK_DRY_RUN_INVOCATION=$(sudo systemctl show --property=InvocationID --value gift-panel-release-mirror.service) || exit 1
+test -n "$ROLLBACK_DRY_RUN_INVOCATION"
+test "$ROLLBACK_DRY_RUN_INVOCATION" != "$BEFORE_INVOCATION"
+test "$(sudo systemctl show --property=Result --value gift-panel-release-mirror.service)" = success
 sudo journalctl --namespace=gift-panel-release-mirror -u gift-panel-release-mirror.service --no-pager
 set +e
 cleanup_dry_run
@@ -381,6 +535,7 @@ set -e
 test "$cleanup_rc" -eq 0
 trap - EXIT INT TERM
 # Only after this rollback dry-run succeeds is the local pointer changed.
+mirror_verify_quiesced
 CURRENT_TMP=/opt/gift-panel-release-mirror/.current-rollback-"$PREVIOUS_RELEASE_ID"
 test ! -e "$CURRENT_TMP"
 test ! -L "$CURRENT_TMP"
@@ -388,8 +543,7 @@ sudo ln -s -- "$PREVIOUS_RELEASE" "$CURRENT_TMP"
 sudo mv -Tf -- "$CURRENT_TMP" /opt/gift-panel-release-mirror/current
 test "$(readlink -f /opt/gift-panel-release-mirror/current/gift-panel-release-mirror)" = "$PREVIOUS_BINARY"
 test "$PREVIOUS_RELEASE_ID" = "$(/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --build-commit)"
-sudo systemctl is-active --quiet gift-panel-release-mirror.timer && exit 1
-sudo systemctl is-active --quiet gift-panel-release-mirror.service && exit 1
+mirror_verify_quiesced
 ```
 
 The rollback remains quiesced after the atomic switch. Verify the intended domestic latest/changelog state and unchanged API listener, then obtain independent confirmation for any later real mirror run or timer enablement; do not combine those actions.

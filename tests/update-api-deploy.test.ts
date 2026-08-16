@@ -66,10 +66,77 @@ function runBash(script: string, cwd: string, environment: NodeJS.ProcessEnv = {
   });
 }
 
+function quiesceContract(readme: string): string {
+  const block = shellBlocksAfter(readme, '## Release mirror (separate service)')
+    .find((candidate) => candidate.includes('mirror_quiesce()') && !candidate.includes('ACCOUNT_RECORD='));
+  expect(block, 'missing standalone fail-closed quiesce preflight').toBeDefined();
+  const start = block!.indexOf('mirror_systemctl_value()');
+  const call = block!.lastIndexOf('\nmirror_quiesce');
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(call).toBeGreaterThan(start);
+  return `set -euo pipefail\n${block!.slice(start, call + '\nmirror_quiesce'.length)}\nprintf quiesce-ok\n`;
+}
+
+function verifyQuiesceContract(readme: string): void {
+  const root = mkdtempSync(join(tmpdir(), 'gift-panel-quiesce-'));
+  const log = posixPath(join(root, 'systemctl.log'));
+  const fakeSystemd = `
+sudo() { "$@"; }
+systemctl() {
+  printf '%s\\n' "$*" >> "$SYSTEMCTL_LOG"
+  case "$1" in
+    show)
+      property=\${2#--property=}; unit=$4
+      if test "\${FAIL_QUERY:-}" = "$property:$unit"; then return 1; fi
+      case "$property:$unit" in
+        LoadState:gift-panel-release-mirror.timer) printf '%s\\n' "\${TIMER_LOAD:-loaded}" ;;
+        ActiveState:gift-panel-release-mirror.timer) printf '%s\\n' "\${TIMER_ACTIVE:-inactive}" ;;
+        UnitFileState:gift-panel-release-mirror.timer) printf '%s' "\${TIMER_UNIT_FILE-disabled}" ;;
+        LoadState:gift-panel-release-mirror.service) printf '%s\\n' "\${SERVICE_LOAD:-loaded}" ;;
+        ActiveState:gift-panel-release-mirror.service) printf '%s\\n' "\${SERVICE_ACTIVE:-inactive}" ;;
+        *) return 1 ;;
+      esac ;;
+    disable) test "\${FAIL_DISABLE:-0}" != 1 ;;
+    stop) test "\${FAIL_STOP:-0}" != 1 ;;
+    *) return 1 ;;
+  esac
+}
+`;
+  const scenarios: Array<{ name: string; environment: NodeJS.ProcessEnv; status: number; reaches: boolean }> = [
+    { name: 'loaded-disabled-inactive', environment: {}, status: 0, reaches: true },
+    { name: 'fresh-host-not-found', environment: { TIMER_LOAD: 'not-found', TIMER_ACTIVE: 'inactive', TIMER_UNIT_FILE: '', SERVICE_LOAD: 'not-found', SERVICE_ACTIVE: 'inactive' }, status: 0, reaches: true },
+    { name: 'query-failure', environment: { FAIL_QUERY: 'LoadState:gift-panel-release-mirror.timer' }, status: 1, reaches: false },
+    { name: 'unknown-load', environment: { TIMER_LOAD: 'masked' }, status: 1, reaches: false },
+    { name: 'active-timer', environment: { TIMER_ACTIVE: 'active' }, status: 1, reaches: false },
+    { name: 'enabled-timer', environment: { TIMER_UNIT_FILE: 'enabled' }, status: 1, reaches: false },
+    { name: 'active-service', environment: { SERVICE_ACTIVE: 'activating' }, status: 1, reaches: false },
+    { name: 'disable-failure', environment: { FAIL_DISABLE: '1' }, status: 1, reaches: false },
+    { name: 'stop-failure', environment: { FAIL_STOP: '1' }, status: 1, reaches: false },
+  ];
+  try {
+    for (const scenario of scenarios) {
+      writeFileSync(join(root, 'systemctl.log'), '');
+      const result = runBash(`${fakeSystemd}\n${quiesceContract(readme)}`, root, { SYSTEMCTL_LOG: log, ...scenario.environment });
+      expect(result.status, `${scenario.name}: ${result.stderr}`).toBe(scenario.status);
+      expect(result.stdout.includes('quiesce-ok'), scenario.name).toBe(scenario.reaches);
+      const calls = readFileSync(join(root, 'systemctl.log'), 'utf8').split(/\r?\n/).filter(Boolean);
+      expect(calls.some((call) => call.startsWith('start ') || call.startsWith('install ')), `${scenario.name}: no start/install`).toBe(false);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function dryRunTail(name: 'install' | 'rollback', block: string): string {
-  const start = block.indexOf('DROPIN=');
-  expect(start, 'missing dry-run drop-in definition').toBeGreaterThanOrEqual(0);
-  const tail = block.slice(start);
+  const helperStart = block.indexOf('mirror_systemctl_value()');
+  const invocation = block.indexOf('BEFORE_INVOCATION=');
+  const segmentStart = block.lastIndexOf('\nmirror_verify_quiesced\n', invocation) + 1;
+  const quiesceCall = block.indexOf('\nmirror_quiesce\n', helperStart);
+  const definitionsEnd = quiesceCall >= 0 && quiesceCall < segmentStart ? quiesceCall + 1 : segmentStart;
+  expect(helperStart, 'missing state verifier definitions').toBeGreaterThanOrEqual(0);
+  expect(invocation, 'missing pre-start invocation identity').toBeGreaterThanOrEqual(0);
+  expect(segmentStart, 'missing pre-start quiescence call').toBeGreaterThan(0);
+  const tail = block.slice(segmentStart);
   const validation = tail.indexOf('test "$cleanup_rc" -eq 0');
   const trapRemoval = tail.indexOf('\ntrap - EXIT INT TERM', validation);
   expect(validation, 'missing explicit cleanup validation').toBeGreaterThanOrEqual(0);
@@ -77,7 +144,8 @@ function dryRunTail(name: 'install' | 'rollback', block: string): string {
   const binary = name === 'install'
     ? 'FINAL_BINARY=/opt/gift-panel-release-mirror/releases/test/gift-panel-release-mirror'
     : 'PREVIOUS_BINARY=/opt/gift-panel-release-mirror/releases/previous/gift-panel-release-mirror';
-  return `set -euo pipefail\n${binary}\n${tail.slice(0, trapRemoval + '\ntrap - EXIT INT TERM'.length)}`;
+  const definitions = block.slice(helperStart, definitionsEnd);
+  return `set -euo pipefail\n${binary}\n${definitions}\n${tail.slice(0, trapRemoval + '\ntrap - EXIT INT TERM'.length)}`;
 }
 
 function verifyDryRunScript(name: 'install' | 'rollback', block: string, successStarts: string[], enablesTimer: boolean): void {
@@ -101,13 +169,23 @@ systemctl() {
       reloads=$(cat "$RELOAD_COUNT" 2>/dev/null || printf 0); reloads=$((reloads + 1)); printf '%s' "$reloads" > "$RELOAD_COUNT"
       test "\${FAIL_RELOAD_AT:-0}" != "$reloads" ;;
     show)
-      if test "$3" = Result; then
+      case "$2" in
+      --property=LoadState)
+        test "\${FAIL_STATE_SHOW:-0}" != 1 || return 1
+        printf '%s\\n' "\${LOAD_STATE:-loaded}" ;;
+      --property=ActiveState) printf '%s\\n' "\${ACTIVE_STATE:-inactive}" ;;
+      --property=UnitFileState) printf '%s\\n' "\${UNIT_FILE_STATE:-disabled}" ;;
+      --property=InvocationID)
+        starts=$(cat "$START_COUNT" 2>/dev/null || printf 0)
+        if test "\${SAME_INVOCATION:-0}" = 1 || test "$starts" = 0; then printf 'before\\n'; else printf 'invocation-%s\\n' "$starts"; fi ;;
+      --property=Result)
         test "\${FAIL_RESULT_SHOW:-0}" != 1 || return 1
-        printf '%s\\n' "\${RESULT_VALUE:-success}"
-      else
+        printf '%s\\n' "\${RESULT_VALUE:-success}" ;;
+      --property=DropInPaths)
         test "\${FAIL_DROPIN_SHOW:-0}" != 1 || return 1
-        if test "\${ACTIVE_DROPINS:-0}" = 1 || test -e "$DROPIN"; then printf '%s\\n' "$DROPIN"; fi
-      fi ;;
+        if test "\${ACTIVE_DROPINS:-0}" = 1 || test -e "$DROPIN"; then printf '%s\\n' "$DROPIN"; fi ;;
+      *) return 1 ;;
+      esac ;;
     start)
       starts=$(cat "$START_COUNT" 2>/dev/null || printf 0); starts=$((starts + 1)); printf '%s' "$starts" > "$START_COUNT"
       if test -e "$DROPIN"; then printf 'dry-run\\n' >> "$START_LOG"; else printf 'normal\\n' >> "$START_LOG"; fi
@@ -136,6 +214,11 @@ systemctl() {
       { name: 'cleanup-reload-error', environment: { FAIL_RELOAD_AT: '2' }, status: 1, starts: ['dry-run'], timer: false, reloads: 3 },
       { name: 'active-dropin', environment: { ACTIVE_DROPINS: '1' }, status: 1, starts: ['dry-run'], timer: false },
       { name: 'dropin-show-error', environment: { FAIL_DROPIN_SHOW: '1' }, status: 1, starts: ['dry-run'], timer: false },
+      { name: 'state-query-error', environment: { FAIL_STATE_SHOW: '1' }, status: 1, starts: [], timer: false },
+      { name: 'unknown-state', environment: { LOAD_STATE: 'masked' }, status: 1, starts: [], timer: false },
+      { name: 'active-state', environment: { ACTIVE_STATE: 'active' }, status: 1, starts: [], timer: false },
+      { name: 'enabled-state', environment: { UNIT_FILE_STATE: 'enabled' }, status: 1, starts: [], timer: false },
+      { name: 'same-invocation', environment: { SAME_INVOCATION: '1' }, status: 1, starts: ['dry-run'], timer: false },
       { name: 'interrupt', environment: { SEND_SIGNAL: 'INT' }, status: 130, starts: ['dry-run'], timer: false },
       { name: 'terminate', environment: { SEND_SIGNAL: 'TERM' }, status: 143, starts: ['dry-run'], timer: false },
     ];
@@ -452,7 +535,7 @@ describe('update API deployment assets', () => {
     expect(readme).toContain('Head/Get/Put');
     expect(readme).toContain('no Delete, list, bucket configuration, or other prefixes');
     expect(readme).toContain('systemctl stop gift-panel-release-mirror.service');
-    expect(readme).toContain('systemctl is-active --quiet gift-panel-release-mirror.service');
+    expect(readme).toContain('systemctl show --property="$property" --value "$unit"');
     expect(readme).toContain('channels/stable/latest.json');
     expect(readme).toContain('state.json');
     expect(readme).toContain('https://$PUBLIC_DOMAIN/api/v1/releases/latest');
@@ -510,29 +593,31 @@ describe('update API deployment assets', () => {
 
   it('stages and verifies an install while quiesced before atomic publication and pointer switch', () => {
     const readme = deploymentAsset('README.md');
-    const install = shellBlocksAfter(readme, '## Release mirror (separate service)').find((block) => block.includes('FINAL_BINARY'))!;
+    const blocks = shellBlocksAfter(readme, '## Release mirror (separate service)');
+    const install = blocks.find((block) => block.includes('STAGE_DIR='))!;
+    const dryRunBlock = blocks.find((block) => block.includes('FINAL_BINARY') && block.includes('DROPIN='))!;
     expect(install, 'missing staged install script').toBeDefined();
+    expect(dryRunBlock, 'missing exact-version dry-run script').toBeDefined();
 
-    const quiesce = install.indexOf('sudo systemctl disable --now gift-panel-release-mirror.timer');
+    const quiesce = install.indexOf('mirror_quiesce');
     const stage = install.indexOf('STAGE_DIR=$(sudo mktemp -d');
     const finalCheck = install.indexOf('if sudo test -e "$FINAL_RELEASE"; then');
     const checksum = install.indexOf('sha256sum -c -');
     const identity = install.indexOf('go version -m "$STAGED_BINARY"');
     const publish = install.indexOf('sudo mv -T -- "$STAGE_DIR" "$FINAL_RELEASE"');
-    const dryRun = install.indexOf("ExecStart=%s --dry-run");
-    const pointer = install.indexOf('sudo mv -Tf -- "$CURRENT_TMP" /opt/gift-panel-release-mirror/current');
+    const dryRun = dryRunBlock.indexOf("ExecStart=%s --dry-run");
+    const pointer = dryRunBlock.indexOf('sudo mv -Tf -- "$CURRENT_TMP" /opt/gift-panel-release-mirror/current');
 
     for (const [name, index] of Object.entries({ quiesce, stage, finalCheck, checksum, identity, publish, dryRun, pointer })) {
       expect(index, `missing ${name} gate`).toBeGreaterThanOrEqual(0);
     }
     expect(quiesce).toBeLessThan(stage);
-    expect(install.indexOf('systemctl is-enabled --quiet gift-panel-release-mirror.timer')).toBeGreaterThan(quiesce);
-    expect(install.indexOf('systemctl is-enabled --quiet gift-panel-release-mirror.timer')).toBeLessThan(stage);
+    expect(install.lastIndexOf('\nmirror_verify_quiesced\n')).toBeGreaterThan(publish);
     expect(stage).toBeLessThan(finalCheck);
     expect(finalCheck).toBeLessThan(publish);
     expect(checksum).toBeLessThan(publish);
     expect(identity).toBeLessThan(publish);
-    expect(publish).toBeLessThan(dryRun);
+    expect(readme.indexOf('sudo mv -T -- "$STAGE_DIR" "$FINAL_RELEASE"')).toBeLessThan(readme.indexOf('ExecStart=%s --dry-run'));
     expect(dryRun).toBeLessThan(pointer);
     for (const evidence of [
       'sudo chmod 0755 "$STAGE_DIR"',
@@ -545,6 +630,33 @@ describe('update API deployment assets', () => {
     }
     expect(install).toContain('cmp -s -- "$STAGED_BINARY" "$FINAL_BINARY"');
     expect(install).toContain('gift-panel-release-mirror.reviewed');
+  });
+
+  it('executes fail-closed mirror quiescence for fresh, failed, unknown, active, and enabled states', () => {
+    verifyQuiesceContract(deploymentAsset('README.md'));
+  });
+
+  it('revalidates quiescence and invocation identity at every start and current-switch boundary', () => {
+    const readme = deploymentAsset('README.md');
+    const blocks = shellBlocksAfter(readme, '## Release mirror (separate service)');
+    const setup = blocks.find((block) => block.includes('ACCOUNT_RECORD=') && block.includes('STAGE_DIR='))!;
+    const installDryRun = blocks.find((block) => block.includes('FINAL_BINARY') && block.includes('DROPIN='))!;
+    const real = blocks.find((block) => block.includes('real oneshot invocation') || (block.includes('systemctl start gift-panel-release-mirror.service') && !block.includes('DROPIN=')))!;
+    const rollback = blocks.find((block) => block.includes('PREVIOUS_SIDECAR'))!;
+
+    expect(setup.indexOf('mirror_quiesce')).toBeLessThan(setup.indexOf('ACCOUNT_RECORD='));
+    for (const block of [installDryRun, real, rollback]) {
+      expect(block, 'missing independently executable state-gated block').toBeDefined();
+      expect(block).toContain('mirror_verify_quiesced');
+      expect(block).toContain('InvocationID');
+    }
+    expect(installDryRun.indexOf('mirror_verify_quiesced')).toBeLessThan(installDryRun.indexOf('DROPIN='));
+    const installPointer = installDryRun.indexOf('sudo mv -Tf -- "$CURRENT_TMP"');
+    expect(installDryRun.slice(0, installPointer).lastIndexOf('mirror_verify_quiesced')).toBeGreaterThan(installDryRun.indexOf('DROPIN='));
+    expect(real.indexOf('mirror_verify_quiesced')).toBeLessThan(real.indexOf('systemctl start gift-panel-release-mirror.service'));
+    expect(rollback.indexOf('mirror_quiesce')).toBeLessThan(rollback.indexOf('PREVIOUS_SIDECAR='));
+    const rollbackPointer = rollback.indexOf('sudo mv -Tf -- "$CURRENT_TMP"');
+    expect(rollback.slice(0, rollbackPointer).lastIndexOf('mirror_verify_quiesced')).toBeGreaterThan(rollback.indexOf('DROPIN='));
   });
 
   it('requires separate confirmations around the real mirror and timer production gates', () => {
@@ -561,6 +673,27 @@ describe('update API deployment assets', () => {
     expect(readme).toContain('signed download URL is redacted');
     expect(readme).toContain('127.0.0.1:12450');
     expect(readme).toContain('Stop here and obtain a separate operator confirmation before enabling the timer');
+  });
+
+  it('requires separate action-time confirmations before transfer, setup, and secret installation', () => {
+    const readme = deploymentAsset('README.md');
+    const transferGate = readme.indexOf('STOP: obtain separate action-time operator confirmation before production transfer');
+    const transfer = readme.indexOf('Transfer both the verified normal artifact');
+    const setupGate = readme.indexOf('STOP: obtain separate action-time operator confirmation before service-user, version, and unit installation');
+    const useradd = readme.indexOf('useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin gift-panel-mirror');
+    const unitInstall = readme.indexOf('deploy/update-api/gift-panel-release-mirror.service /etc/systemd/system/gift-panel-release-mirror.service');
+    const secretGate = readme.indexOf('STOP: obtain separate action-time operator confirmation before installing the secret environment file');
+    const secretInstall = readme.indexOf('install -o root -g root -m 0600 /secure/gift-panel-release-mirror.env /etc/gift-panel-release-mirror.env');
+
+    for (const [name, index] of Object.entries({ transferGate, transfer, setupGate, useradd, unitInstall, secretGate, secretInstall })) {
+      expect(index, `missing ${name}`).toBeGreaterThanOrEqual(0);
+    }
+    expect(transferGate).toBeLessThan(transfer);
+    expect(transfer).toBeLessThan(setupGate);
+    expect(setupGate).toBeLessThan(useradd);
+    expect(setupGate).toBeLessThan(unitInstall);
+    expect(unitInstall).toBeLessThan(secretGate);
+    expect(secretGate).toBeLessThan(secretInstall);
   });
 
   it('preverifies rollback sidecar and binary before dry-run and atomic current switch', () => {
@@ -590,7 +723,7 @@ describe('update API deployment assets', () => {
   it('executes the transferred sidecar checks before deployment side effects', () => {
     const readme = deploymentAsset('README.md');
     const install = shellBlocksAfter(readme, '## Release mirror (separate service)').find((block) => block.includes('if ! getent passwd gift-panel-mirror'))!;
-    const sidecarChecks = install.slice(0, install.indexOf('sudo systemctl disable --now gift-panel-release-mirror.timer'));
+    const sidecarChecks = install.slice(0, install.indexOf('mirror_systemctl_value()'));
     const root = mkdtempSync(join(tmpdir(), 'gift-panel-sidecar-'));
     try {
       writeFileSync(join(root, 'gift-panel-release-mirror.reviewed'), `${'a'.repeat(40)}\n${'b'.repeat(64)}\n`);
@@ -615,7 +748,7 @@ describe('update API deployment assets', () => {
   it('accepts idempotent private-group accounts and fails each incompatible account gate independently', () => {
     const readme = deploymentAsset('README.md');
     const install = shellBlocksAfter(readme, '## Release mirror (separate service)').find((block) => block.includes('ACCOUNT_RECORD='))!;
-    const account = install.slice(install.indexOf('if ! getent passwd gift-panel-mirror'), install.indexOf('\n\nRELEASE_ROOT='));
+    const account = install.slice(install.indexOf('if ! getent passwd gift-panel-mirror'), install.indexOf('\nRELEASE_ROOT='));
     const root = mkdtempSync(join(tmpdir(), 'gift-panel-account-'));
     const log = posixPath(join(root, 'account.log'));
     const fakeAccounts = `
