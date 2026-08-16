@@ -79,8 +79,8 @@ func (handler *HTTPHandler) beginVerification(response http.ResponseWriter, requ
 		writeAdminError(response, http.StatusForbidden, "request_rejected")
 		return
 	}
-	if len(request.URL.Query()) != 0 || !handler.allow(request, "admin_proof_begin", "") {
-		if len(request.URL.Query()) != 0 {
+	if request.URL.RawQuery != "" || !handler.allow(request, "admin_proof_begin", "") {
+		if request.URL.RawQuery != "" {
 			writeAdminError(response, http.StatusBadRequest, "invalid_request")
 		} else {
 			writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
@@ -101,7 +101,7 @@ func (handler *HTTPHandler) cancelVerification(response http.ResponseWriter, req
 		return
 	}
 	challengeID := request.PathValue("id")
-	if challengeID == "" || len(challengeID) > 256 || len(request.URL.Query()) != 0 {
+	if challengeID == "" || len(challengeID) > 256 || request.URL.RawQuery != "" {
 		writeAdminError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -278,7 +278,7 @@ func (handler *HTTPHandler) allow(request *http.Request, operation, challengeID 
 }
 
 func (handler *HTTPHandler) acceptJSONMutation(request *http.Request) bool {
-	return handler.acceptMutation(request) && len(request.URL.Query()) == 0 && strings.HasPrefix(strings.ToLower(request.Header.Get("Content-Type")), "application/json")
+	return handler.acceptMutation(request) && request.URL.RawQuery == "" && strings.HasPrefix(strings.ToLower(request.Header.Get("Content-Type")), "application/json")
 }
 
 func (handler *HTTPHandler) acceptMutation(request *http.Request) bool {

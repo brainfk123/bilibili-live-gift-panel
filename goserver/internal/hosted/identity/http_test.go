@@ -244,6 +244,50 @@ func TestHTTPSessionCreationRejectsAccountIDInjection(t *testing.T) {
 	}
 }
 
+func TestHTTPForbiddenMalformedQueryNeverReachesService(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		cookie string
+	}{
+		{name: "begin challenge", method: http.MethodPost, path: "/api/auth/bili/challenges?x;y"},
+		{name: "poll challenge", method: http.MethodGet, path: "/api/auth/bili/challenges/proof?x;y"},
+		{name: "cancel challenge", method: http.MethodDelete, path: "/api/auth/bili/challenges/proof?x;y"},
+		{name: "create session", method: http.MethodPost, path: "/api/auth/session?x;y", body: `{"challengeId":"proof"}`},
+		{name: "delete session", method: http.MethodDelete, path: "/api/auth/session?x;y", cookie: "site-session"},
+		{name: "disable account", method: http.MethodPost, path: "/api/admin/accounts/41/disable?x;y", body: `{"reason":"security"}`, cookie: "admin-session"},
+		{name: "enable account", method: http.MethodPost, path: "/api/admin/accounts/41/enable?x;y", body: `{"reason":"appeal"}`, cookie: "admin-session"},
+		{name: "rebind account", method: http.MethodPost, path: "/api/admin/accounts/41/rebind?x;y", body: `{"challengeId":"proof","reason":"support"}`, cookie: "admin-session"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeHTTPService{}
+			handler := newTestHTTPHandler(t, service, allowLimiter{})
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			request.Header.Set("Origin", testOrigin)
+			request.Header.Set("X-CSRF-Token", testCSRF)
+			request.Header.Set("Content-Type", "application/json")
+			if test.cookie != "" {
+				request.AddCookie(&http.Cookie{Name: SiteSessionCookie, Value: test.cookie})
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusBadRequest || response.Body.String() != "{\"error\":\"invalid_request\"}\n" {
+				t.Fatalf("response=%d %q", response.Code, response.Body.String())
+			}
+			if response.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("Cache-Control=%q", response.Header().Get("Cache-Control"))
+			}
+			if service.wasCalled() {
+				t.Fatalf("malformed query reached service: %#v", service)
+			}
+		})
+	}
+}
+
 func TestHTTPSessionCookieHasHostPrefixAndCompleteSecurityAttributes(t *testing.T) {
 	now := time.Date(2026, 8, 16, 11, 0, 0, 0, time.UTC)
 	service := &fakeHTTPService{loginResult: SiteSession{Token: "site-token-secret", AccountID: 88, ExpiresAt: now.Add(24 * time.Hour)}}
@@ -521,6 +565,7 @@ type healthyAppDatabase struct{}
 func (healthyAppDatabase) Health(context.Context) error { return nil }
 
 type fakeHTTPService struct {
+	beginCalls     int
 	challenge      Challenge
 	beginErr       error
 	pollResult     PollResult
@@ -544,6 +589,7 @@ type fakeHTTPService struct {
 }
 
 func (service *fakeHTTPService) Begin(context.Context) (Challenge, error) {
+	service.beginCalls++
 	return service.challenge, service.beginErr
 }
 
@@ -584,6 +630,12 @@ func (service *fakeHTTPService) EnableAccount(_ context.Context, session string,
 func (service *fakeHTTPService) RebindVerifiedUID(_ context.Context, session string, accountID int64, challengeID, reason string) (ManagedAccount, error) {
 	service.adminSession, service.adminAccountID, service.adminReason, service.adminChallenge = session, accountID, reason, challengeID
 	return service.adminResult, service.adminErr
+}
+
+func (service *fakeHTTPService) wasCalled() bool {
+	return service.beginCalls != 0 || service.pollCalls != 0 || service.loginChallenge != "" || service.requiredToken != "" ||
+		service.logoutToken != "" || len(service.cancelCalls) != 0 || service.adminSession != "" || service.adminAccountID != 0 ||
+		service.adminChallenge != "" || service.adminReason != ""
 }
 
 type allowLimiter struct{}

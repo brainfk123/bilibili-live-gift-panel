@@ -149,16 +149,11 @@ func (repository *sqlRepository) disableAccount(ctx context.Context, tokenHash [
 		return ManagedAccount{}, err
 	}
 
-	const accountQuery = "SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE"
-	var credentialEpoch int64
-	var disabledAt sql.NullTime
-	if err := transaction.QueryRowContext(ctx, accountQuery, accountID).Scan(&credentialEpoch, &disabledAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ManagedAccount{}, ErrAccountManagementFailed
-		}
-		return ManagedAccount{}, ErrRepositoryUnavailable
+	disabledAt, err := lockManagedAccount(ctx, transaction, accountID)
+	if err != nil {
+		return ManagedAccount{}, err
 	}
-	if credentialEpoch < 1 || disabledAt.Valid {
+	if disabledAt.Valid {
 		return ManagedAccount{}, ErrAccountManagementFailed
 	}
 	result, err := transaction.ExecContext(ctx,
@@ -203,16 +198,11 @@ func (repository *sqlRepository) enableAccount(ctx context.Context, tokenHash []
 		return ManagedAccount{}, err
 	}
 
-	const accountQuery = "SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE"
-	var credentialEpoch int64
-	var disabledAt sql.NullTime
-	if err := transaction.QueryRowContext(ctx, accountQuery, accountID).Scan(&credentialEpoch, &disabledAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ManagedAccount{}, ErrAccountManagementFailed
-		}
-		return ManagedAccount{}, ErrRepositoryUnavailable
+	disabledAt, err := lockManagedAccount(ctx, transaction, accountID)
+	if err != nil {
+		return ManagedAccount{}, err
 	}
-	if credentialEpoch < 1 || !disabledAt.Valid {
+	if !disabledAt.Valid {
 		return ManagedAccount{}, ErrAccountManagementFailed
 	}
 	result, err := transaction.ExecContext(ctx,
@@ -252,17 +242,9 @@ func (repository *sqlRepository) rebindAccount(ctx context.Context, tokenHash []
 		return ManagedAccount{}, err
 	}
 
-	const accountQuery = "SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE"
-	var credentialEpoch int64
-	var disabledAt sql.NullTime
-	if err := transaction.QueryRowContext(ctx, accountQuery, accountID).Scan(&credentialEpoch, &disabledAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ManagedAccount{}, ErrAccountManagementFailed
-		}
-		return ManagedAccount{}, ErrRepositoryUnavailable
-	}
-	if credentialEpoch < 1 {
-		return ManagedAccount{}, ErrRepositoryUnavailable
+	disabledAt, err := lockManagedAccount(ctx, transaction, accountID)
+	if err != nil {
+		return ManagedAccount{}, err
 	}
 	const bindingQuery = "SELECT uid_lookup FROM bili_uid_bindings WHERE account_id = ? AND unbound_at IS NULL FOR UPDATE"
 	var oldLookup []byte
@@ -358,19 +340,36 @@ func (repository *sqlRepository) authorizeAccountAdministrator(ctx context.Conte
 	return nil
 }
 
+func lockManagedAccount(ctx context.Context, transaction *sql.Tx, accountID int64) (sql.NullTime, error) {
+	const query = "SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE"
+	var credentialEpoch int64
+	var disabledAt sql.NullTime
+	err := transaction.QueryRowContext(ctx, query, accountID).Scan(&credentialEpoch, &disabledAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return sql.NullTime{}, ErrAccountManagementFailed
+	}
+	if err != nil || credentialEpoch < 1 {
+		return sql.NullTime{}, ErrRepositoryUnavailable
+	}
+	return disabledAt, nil
+}
+
 func requireRecentAdministrator(ctx context.Context, transaction *sql.Tx, tokenHash []byte, now time.Time) error {
-	const query = `
-SELECT s.id, s.credential_epoch, s.expires_at, s.revoked_at, s.totp_verified_at, a.credential_epoch
-FROM admin_identity AS a
-JOIN site_sessions AS s ON s.admin_identity_id = a.id
-WHERE a.id = 1 AND s.token_hash = ?
-LIMIT 1
-FOR UPDATE`
-	var sessionID, sessionEpoch, administratorEpoch int64
+	var administratorEpoch int64
+	err := transaction.QueryRowContext(ctx, "SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE").Scan(&administratorEpoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrAuthenticationFailed
+	}
+	if err != nil || administratorEpoch < 1 {
+		return ErrRepositoryUnavailable
+	}
+
+	const query = "SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE"
+	var sessionID, sessionEpoch int64
 	var expiresAt time.Time
 	var revokedAt, verifiedAt sql.NullTime
-	err := transaction.QueryRowContext(ctx, query, tokenHash).Scan(
-		&sessionID, &sessionEpoch, &expiresAt, &revokedAt, &verifiedAt, &administratorEpoch,
+	err = transaction.QueryRowContext(ctx, query, tokenHash).Scan(
+		&sessionID, &sessionEpoch, &expiresAt, &revokedAt, &verifiedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrAuthenticationFailed

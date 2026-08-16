@@ -213,6 +213,45 @@ func TestHTTPMutationsRejectOriginCSRFAndUnexpectedFields(t *testing.T) {
 	}
 }
 
+func TestHTTPForbiddenMalformedQueryNeverReachesService(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		body       string
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "begin proof", method: http.MethodPost, path: "/api/admin/auth/bili/challenges?x;y", wantStatus: http.StatusBadRequest, wantCode: "invalid_request"},
+		{name: "cancel proof", method: http.MethodDelete, path: "/api/admin/auth/bili/challenges/proof?x;y", wantStatus: http.StatusBadRequest, wantCode: "invalid_request"},
+		{name: "login", method: http.MethodPost, path: "/api/admin/session?x;y", body: `{"challengeId":"proof","totp":"123456"}`, wantStatus: http.StatusForbidden, wantCode: "request_rejected"},
+		{name: "recent totp", method: http.MethodPost, path: "/api/admin/totp?x;y", body: `{"totp":"123456"}`, wantStatus: http.StatusForbidden, wantCode: "request_rejected"},
+		{name: "recovery archive", method: http.MethodPost, path: "/api/admin/recovery/archive?x;y", body: `{}`, wantStatus: http.StatusForbidden, wantCode: "request_rejected"},
+		{name: "recovery prepare", method: http.MethodPost, path: "/api/admin/recovery/prepare?x;y", body: `{"challengeId":"proof","recoveryCode":"code"}`, wantStatus: http.StatusForbidden, wantCode: "request_rejected"},
+		{name: "recovery confirm", method: http.MethodPost, path: "/api/admin/recovery/confirm?x;y", body: `{"handoffToken":"handoff","totp":"123456"}`, wantStatus: http.StatusForbidden, wantCode: "request_rejected"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &adminHTTPService{}
+			handler := newTestHTTPHandler(t, service)
+			request := mutationRequest(test.method, test.path, test.body)
+			request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "admin-session"})
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != test.wantStatus || response.Body.String() != fmt.Sprintf("{\"error\":%q}\n", test.wantCode) {
+				t.Fatalf("response=%d %q", response.Code, response.Body.String())
+			}
+			if response.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("Cache-Control=%q", response.Header().Get("Cache-Control"))
+			}
+			if service.wasCalled() {
+				t.Fatalf("malformed query reached service: %#v", service)
+			}
+		})
+	}
+}
+
 func TestAppMountsAdministratorHandlerOnlyUnderAdminPrefix(t *testing.T) {
 	admin := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.WriteHeader(http.StatusTeapot)
@@ -232,6 +271,7 @@ func TestAppMountsAdministratorHandlerOnlyUnderAdminPrefix(t *testing.T) {
 }
 
 type adminHTTPService struct {
+	beginCalls       int
 	challenge        identity.Challenge
 	challengeErr     error
 	login            LoginResult
@@ -255,6 +295,7 @@ type adminHTTPService struct {
 }
 
 func (service *adminHTTPService) BeginVerification(context.Context) (identity.Challenge, error) {
+	service.beginCalls++
 	return service.challenge, service.challengeErr
 }
 
@@ -285,6 +326,12 @@ func (service *adminHTTPService) PrepareRecovery(_ context.Context, challengeID,
 func (service *adminHTTPService) ConfirmRecovery(_ context.Context, token, code string) error {
 	service.confirmToken, service.confirmCode = token, code
 	return service.confirmErr
+}
+
+func (service *adminHTTPService) wasCalled() bool {
+	return service.beginCalls != 0 || service.loginChallenge != "" || service.loginCode != "" || service.verifySession != "" ||
+		service.verifyCode != "" || service.recoverySession != "" || service.prepareChallenge != "" || service.prepareCode != "" ||
+		service.confirmToken != "" || service.confirmCode != "" || len(service.cancelled) != 0
 }
 
 type allowAdminLimits struct{}

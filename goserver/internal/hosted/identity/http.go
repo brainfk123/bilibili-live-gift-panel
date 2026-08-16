@@ -179,7 +179,7 @@ func (handler *HTTPHandler) acceptAccountMutation(response http.ResponseWriter, 
 		writeHTTPError(response, http.StatusForbidden, "request_rejected")
 		return 0, "", false
 	}
-	if len(request.URL.Query()) != 0 || !isJSONContentType(request.Header.Get("Content-Type")) {
+	if request.URL.RawQuery != "" || !isJSONContentType(request.Header.Get("Content-Type")) {
 		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
 		return 0, "", false
 	}
@@ -251,7 +251,7 @@ func (handler *HTTPHandler) cancelChallenge(response http.ResponseWriter, reques
 		return
 	}
 	challengeID := request.PathValue("id")
-	if challengeID == "" || len(challengeID) > 256 || len(request.URL.Query()) != 0 {
+	if challengeID == "" || len(challengeID) > 256 || request.URL.RawQuery != "" {
 		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -269,7 +269,7 @@ func (handler *HTTPHandler) beginChallenge(response http.ResponseWriter, request
 		writeHTTPError(response, http.StatusForbidden, "request_rejected")
 		return
 	}
-	if len(request.URL.Query()) != 0 {
+	if request.URL.RawQuery != "" {
 		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -296,7 +296,7 @@ func (handler *HTTPHandler) beginChallenge(response http.ResponseWriter, request
 
 func (handler *HTTPHandler) pollChallenge(response http.ResponseWriter, request *http.Request) {
 	challengeID := request.PathValue("id")
-	if challengeID == "" || len(challengeID) > 256 || len(request.URL.Query()) != 0 {
+	if challengeID == "" || len(challengeID) > 256 || request.URL.RawQuery != "" {
 		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -335,7 +335,7 @@ func (handler *HTTPHandler) createSession(response http.ResponseWriter, request 
 		writeHTTPError(response, http.StatusForbidden, "request_rejected")
 		return
 	}
-	if len(request.URL.Query()) != 0 || !strings.HasPrefix(strings.ToLower(request.Header.Get("Content-Type")), "application/json") {
+	if request.URL.RawQuery != "" || !strings.HasPrefix(strings.ToLower(request.Header.Get("Content-Type")), "application/json") {
 		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -366,7 +366,7 @@ func (handler *HTTPHandler) deleteSession(response http.ResponseWriter, request 
 		writeHTTPError(response, http.StatusForbidden, "request_rejected")
 		return
 	}
-	if len(request.URL.Query()) != 0 {
+	if request.URL.RawQuery != "" {
 		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}

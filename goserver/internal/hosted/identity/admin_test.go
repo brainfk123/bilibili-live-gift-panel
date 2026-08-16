@@ -187,7 +187,9 @@ func TestRebindRejectsNonAdministratorBeforeConsumingBilibiliProof(t *testing.T)
 	tokenHash, _ := keys.HashToken("admin_session", []byte("streamer-or-invalid-session"))
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("(?s)SELECT s.id, s.credential_epoch, s.expires_at, s.revoked_at, s.totp_verified_at, a.credential_epoch.*a.id = 1.*s.token_hash = .*FOR UPDATE").
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
 		WithArgs(tokenHash).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectRollback()
@@ -208,14 +210,14 @@ func TestAdministratorAuthorizationUsesPersistedRecentTOTPBoundaries(t *testing.
 	now := time.Date(2026, 8, 16, 14, 30, 0, 0, time.UTC)
 	revokedAt := now.Add(-time.Minute)
 	tests := []struct {
-		name          string
-		expiresAt     time.Time
-		revokedAt     any
-		verifiedAt    any
-		sessionEpoch  int64
-		adminEpoch    int64
-		databaseError error
-		wantError     error
+		name         string
+		expiresAt    time.Time
+		revokedAt    any
+		verifiedAt   any
+		sessionEpoch int64
+		adminEpoch   int64
+		sessionError error
+		wantError    error
 	}{
 		{name: "exactly five minutes is recent", expiresAt: now.Add(time.Hour), verifiedAt: now.Add(-5 * time.Minute), sessionEpoch: 4, adminEpoch: 4},
 		{name: "future skew boundary accepted", expiresAt: now.Add(time.Hour), verifiedAt: now.Add(30 * time.Second), sessionEpoch: 4, adminEpoch: 4},
@@ -225,8 +227,8 @@ func TestAdministratorAuthorizationUsesPersistedRecentTOTPBoundaries(t *testing.
 		{name: "revoked admin session", expiresAt: now.Add(time.Hour), revokedAt: revokedAt, verifiedAt: now, sessionEpoch: 4, adminEpoch: 4, wantError: ErrAuthenticationFailed},
 		{name: "expired admin session", expiresAt: now, verifiedAt: now, sessionEpoch: 4, adminEpoch: 4, wantError: ErrAuthenticationFailed},
 		{name: "stale admin epoch", expiresAt: now.Add(time.Hour), verifiedAt: now, sessionEpoch: 3, adminEpoch: 4, wantError: ErrAuthenticationFailed},
-		{name: "streamer or unknown session", databaseError: sql.ErrNoRows, wantError: ErrAuthenticationFailed},
-		{name: "database failure is generic", databaseError: errors.New("private administrator database detail"), wantError: ErrRepositoryUnavailable},
+		{name: "streamer or unknown session", adminEpoch: 4, sessionError: sql.ErrNoRows, wantError: ErrAuthenticationFailed},
+		{name: "second query database failure rolls back generically", adminEpoch: 4, sessionError: errors.New("private administrator database detail"), wantError: ErrRepositoryUnavailable},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -238,12 +240,14 @@ func TestAdministratorAuthorizationUsesPersistedRecentTOTPBoundaries(t *testing.
 			repository := NewRepository(database).(*sqlRepository)
 			tokenHash := bytes.Repeat([]byte{0x51}, sha256.Size)
 			mock.ExpectBegin()
-			expectation := mock.ExpectQuery("(?s)SELECT s.id, s.credential_epoch, s.expires_at, s.revoked_at, s.totp_verified_at, a.credential_epoch.*a.id = 1.*s.token_hash = .*FOR UPDATE").WithArgs(tokenHash)
-			if test.databaseError != nil {
-				expectation.WillReturnError(test.databaseError)
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+				WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(test.adminEpoch))
+			expectation := mock.ExpectQuery(regexp.QuoteMeta("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).WithArgs(tokenHash)
+			if test.sessionError != nil {
+				expectation.WillReturnError(test.sessionError)
 			} else {
-				expectation.WillReturnRows(sqlmock.NewRows([]string{"id", "session_credential_epoch", "expires_at", "revoked_at", "totp_verified_at", "admin_credential_epoch"}).
-					AddRow(int64(9), test.sessionEpoch, test.expiresAt, test.revokedAt, test.verifiedAt, test.adminEpoch))
+				expectation.WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at", "totp_verified_at"}).
+					AddRow(int64(9), test.sessionEpoch, test.expiresAt, test.revokedAt, test.verifiedAt))
 			}
 			if test.wantError == nil {
 				mock.ExpectCommit()
@@ -338,6 +342,48 @@ func TestEnableAccountRollsBackWhenAuditWriteFails(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAccountMutationsClassifyInvalidCredentialEpochAsRepositoryUnavailable(t *testing.T) {
+	now := time.Date(2026, 8, 16, 14, 46, 0, 0, time.UTC)
+	for _, operation := range []string{"disable", "enable", "rebind"} {
+		t.Run(operation, func(t *testing.T) {
+			database, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			repository := NewRepository(database).(*sqlRepository)
+			tokenHash := bytes.Repeat([]byte{0x54}, sha256.Size)
+			mock.ExpectBegin()
+			expectRecentAdministrator(mock, tokenHash, now, now.Add(-time.Minute))
+			disabledAt := any(nil)
+			if operation == "enable" {
+				disabledAt = now.Add(-time.Hour)
+			}
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
+				WithArgs(int64(54)).
+				WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(0), disabledAt))
+			mock.ExpectRollback()
+
+			switch operation {
+			case "disable":
+				_, err = repository.disableAccount(context.Background(), tokenHash, 54, "security", now)
+			case "enable":
+				_, err = repository.enableAccount(context.Background(), tokenHash, 54, "appeal", now)
+			case "rebind":
+				_, err = repository.rebindAccount(context.Background(), tokenHash, 54, EncryptedUID{
+					Ciphertext: []byte("encrypted-new-uid"), Lookup: bytes.Repeat([]byte{0x55}, sha256.Size),
+				}, "support", now)
+			}
+			if !errors.Is(err, ErrRepositoryUnavailable) {
+				t.Fatalf("%s invalid credential epoch error = %v", operation, err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -512,11 +558,12 @@ func TestRebindBilibiliProofForgettingMatchesTerminalState(t *testing.T) {
 }
 
 func expectRecentAdministrator(mock sqlmock.Sqlmock, tokenHash []byte, now, verifiedAt time.Time) {
-	mock.ExpectQuery("(?s)SELECT s.id, s.credential_epoch, s.expires_at, s.revoked_at, s.totp_verified_at, a.credential_epoch.*FROM admin_identity AS a.*JOIN site_sessions AS s.*a.id = 1.*s.token_hash = .*FOR UPDATE").
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
 		WithArgs(tokenHash).
-		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "session_credential_epoch", "expires_at", "revoked_at", "totp_verified_at", "admin_credential_epoch",
-		}).AddRow(int64(9), int64(4), now.Add(time.Hour), nil, verifiedAt, int64(4)))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at", "totp_verified_at"}).
+			AddRow(int64(9), int64(4), now.Add(time.Hour), nil, verifiedAt))
 }
 
 type auditJSONArgument struct {
