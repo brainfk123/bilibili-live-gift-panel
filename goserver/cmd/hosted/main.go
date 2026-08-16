@@ -49,6 +49,9 @@ func main() {
 }
 
 func run() error {
+	if args := os.Args[1:]; len(args) >= 3 && args[0] == "admin" && args[1] == "recovery" && args[2] == "decrypt" {
+		return runRecoveryDecrypt(args[3:], os.Stdin, os.Stdout)
+	}
 	processContext, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 
@@ -92,9 +95,9 @@ func run() error {
 	if err != nil {
 		return errors.New("configure administrator identity")
 	}
-	go adminService.RunHandoffCleanup(processContext, time.Minute)
-
-	return runModeWithInput(processContext, os.Args[1:], adminService, os.Stdin, os.Stdout, func() error {
+	return runModeWithCleanup(processContext, os.Args[1:], adminService, os.Stdin, os.Stdout, func(cleanupContext context.Context) {
+		adminService.RunHandoffCleanup(cleanupContext, time.Minute)
+	}, func() error {
 		resolver, err := identity.NewTrustedProxyClientIPResolver([]string{"127.0.0.1/32", "::1/128"})
 		if err != nil {
 			return errors.New("configure administrator client address policy")
@@ -234,6 +237,25 @@ func runModeWithInput(ctx context.Context, args []string, initializer adminIniti
 		return errors.New("write administrator initialization result")
 	}
 	return nil
+}
+
+func runModeWithCleanup(ctx context.Context, args []string, initializer adminInitializer, input io.Reader, output io.Writer, cleanup func(context.Context), serve func() error) error {
+	if ctx == nil || cleanup == nil || serve == nil {
+		return errInvalidCommand
+	}
+	return runModeWithInput(ctx, args, initializer, input, output, func() error {
+		cleanupContext, cancelCleanup := context.WithCancel(ctx)
+		cleanupDone := make(chan struct{})
+		go func() {
+			defer close(cleanupDone)
+			cleanup(cleanupContext)
+		}()
+		defer func() {
+			cancelCleanup()
+			<-cleanupDone
+		}()
+		return serve()
+	})
 }
 
 func runRecoveryDecrypt(args []string, input io.Reader, output io.Writer) error {

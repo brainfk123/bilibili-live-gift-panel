@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -316,6 +317,31 @@ func TestSQLRepositoryRecoveryHandoffRollsBackAllCredentialChanges(t *testing.T)
 	mock.ExpectRollback()
 	if err := repository.ConfirmRecoveryHandoff(context.Background(), tokenHash, now); !errors.Is(err, ErrUnavailable) || stringsContains(err.Error(), "database detail") {
 		t.Fatalf("ConfirmRecoveryHandoff() error=%v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryRejectsDifferentRequestForPendingAdministratorRecovery(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 16, 10, 8, 0, 0, time.UTC)
+	candidate := sqlHandoffRecord(now, HandoffRecovery)
+	uidLookup := bytes.Repeat([]byte{0x31}, sha256.Size)
+	codeHash := bytes.Repeat([]byte{0x32}, sha256.Size)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT uid_lookup FROM admin_identity").WillReturnRows(sqlmock.NewRows([]string{"uid_lookup"}).AddRow(uidLookup))
+	mock.ExpectQuery("SELECT id FROM admin_recovery_codes").WithArgs(codeHash).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(11))
+	columns := []string{"id", "handoff_kind", "handoff_state", "request_hash", "token_hash", "token_ciphertext", "uid_ciphertext", "uid_lookup", "email_ciphertext", "totp_secret_ciphertext", "totp_uri_ciphertext", "archive_password_ciphertext", "recovery_archive", "created_at", "expires_at", "mail_delivered_at", "reserved_recovery_code_id"}
+	mock.ExpectQuery("SELECT .*admin_identity_id = 1 FOR UPDATE").WillReturnRows(sqlmock.NewRows(columns).AddRow(7, HandoffRecovery, HandoffPending, bytes.Repeat([]byte{0x7f}, sha256.Size), candidate.TokenHash, candidate.TokenCiphertext, nil, nil, candidate.EmailCiphertext, candidate.TOTPSecretCiphertext, candidate.TOTPURICiphertext, candidate.PasswordCiphertext, candidate.Archive, now, now.Add(time.Minute), nil, 11))
+	mock.ExpectRollback()
+	if _, err := repository.PrepareRecoveryHandoff(context.Background(), uidLookup, codeHash, candidate); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("PrepareRecoveryHandoff() error=%v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -654,12 +680,19 @@ func (repository *memoryRepository) PrepareRecoveryHandoff(_ context.Context, ui
 		return PendingHandoff{}, ErrAuthenticationFailed
 	}
 	for id, reserved := range repository.handoffReserved {
-		if reserved == codeKey {
-			handoff := repository.handoffs[id]
-			if handoff.State == HandoffPending && handoff.ExpiresAt.After(record.CreatedAt) {
-				return handoff, nil
-			}
+		handoff := repository.handoffs[id]
+		if handoff.Kind != HandoffRecovery || handoff.State != HandoffPending {
+			continue
 		}
+		if !handoff.ExpiresAt.After(record.CreatedAt) {
+			delete(repository.handoffs, id)
+			delete(repository.handoffReserved, id)
+			continue
+		}
+		if reserved != codeKey || subtle.ConstantTimeCompare(handoff.RequestHash, record.RequestHash) != 1 {
+			return PendingHandoff{}, ErrAuthenticationFailed
+		}
+		return handoff, nil
 	}
 	repository.nextHandoffID++
 	handoff := pendingFromRecord(repository.nextHandoffID, record)

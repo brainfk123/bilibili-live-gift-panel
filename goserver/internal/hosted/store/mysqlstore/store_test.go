@@ -60,7 +60,7 @@ func TestProductionMigrationsIncludeRetryableAdministratorHandoffs(t *testing.T)
 			continue
 		}
 		sql := string(item.contents)
-		for _, required := range []string{"admin_credential_handoffs", "admin_handoff_recovery_codes", "pending_initialization_guard", "reserved_recovery_code_id", "token_hash", "expires_at"} {
+		for _, required := range []string{"admin_credential_handoffs", "admin_handoff_recovery_codes", "pending_initialization_guard", "pending_recovery_admin_guard", "reserved_recovery_code_id", "token_hash", "expires_at"} {
 			if !strings.Contains(sql, required) {
 				t.Fatalf("0003 migration missing %q", required)
 			}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +18,8 @@ import (
 
 	"bilibili-live-gift-panel/internal/hosted/adminidentity"
 )
+
+const recoveryArchiveFixture = "R1BSQQEQDCAAAIAAAAAACAAAAAEAAAEdsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy/OsZfWF1Ni/wJbLtaXhn3L2O7UBZh/umY584J8IxZQ+GUUnl/8Nh+dwlW3G4KjyUbDlP2vFi3PsyML32ProgId7mHDRyuhqypPGF36mEh81bubIw9oUqbRDCLXlH7+vOA4AGOfANiolmP1ODOAo65GMpTEd6XzXrCs1Lggs3Suw7aP3Rl6Uc3vxoiHvMtVTqU0qrLPlOfzrZrQNOA573Wn473x7Fw6asWQ56+8jRwCJEiZ9JudESX7gu2uLbcRUC5NZWg+49dRWCzZ3G5aYMZm80zWBlER9ZJUoEgz2pN8ZNf1m5q8uu0y4Oz+2oKpitpoUpNLvbAxa15gNiyuQGG5xQ11uUnhX3gTI7GYQthIpy9/koeG3cr45a8uCQQ=="
 
 func TestNewHTTPServerConfiguresHostedTimeouts(t *testing.T) {
 	handler := http.NewServeMux()
@@ -274,8 +277,7 @@ func TestRunModeAdminInitPrintsOneTimeSecretsAndNeverStartsHTTP(t *testing.T) {
 }
 
 func TestRunModeDecryptsGeneratedRecoveryArchiveFromStdinWithoutPasswordArgument(t *testing.T) {
-	const fixture = "R1BSQQEQDCAAAIAAAAAACAAAAAEAAAEdsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy/OsZfWF1Ni/wJbLtaXhn3L2O7UBZh/umY584J8IxZQ+GUUnl/8Nh+dwlW3G4KjyUbDlP2vFi3PsyML32ProgId7mHDRyuhqypPGF36mEh81bubIw9oUqbRDCLXlH7+vOA4AGOfANiolmP1ODOAo65GMpTEd6XzXrCs1Lggs3Suw7aP3Rl6Uc3vxoiHvMtVTqU0qrLPlOfzrZrQNOA573Wn473x7Fw6asWQ56+8jRwCJEiZ9JudESX7gu2uLbcRUC5NZWg+49dRWCzZ3G5aYMZm80zWBlER9ZJUoEgz2pN8ZNf1m5q8uu0y4Oz+2oKpitpoUpNLvbAxa15gNiyuQGG5xQ11uUnhX3gTI7GYQthIpy9/koeG3cr45a8uCQQ=="
-	archive, err := base64.StdEncoding.DecodeString(fixture)
+	archive, err := base64.StdEncoding.DecodeString(recoveryArchiveFixture)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,6 +305,46 @@ func TestRunModeDecryptsGeneratedRecoveryArchiveFromStdinWithoutPasswordArgument
 	}
 	if err := runModeWithInput(context.Background(), []string{"admin", "recovery", "decrypt", "--archive", archivePath, "--password", "oaKjpKWmp6ipqqusra6v"}, nil, strings.NewReader(""), &bytes.Buffer{}, nil); !errors.Is(err, errInvalidCommand) {
 		t.Fatalf("password argv error=%v, want invalid command", err)
+	}
+}
+
+func TestRunDecryptsRecoveryArchiveBeforeConfigurationOrNetworkInitialization(t *testing.T) {
+	archive, err := base64.StdEncoding.DecodeString(recoveryArchiveFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	archivePath := filepath.Join(directory, "admin-recovery.gpra")
+	passwordPath := filepath.Join(directory, "password.txt")
+	if err := os.WriteFile(archivePath, archive, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(passwordPath, []byte("oaKjpKWmp6ipqqusra6v\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"HOSTED_LISTEN_ADDR", "HOSTED_MYSQL_DSN", "HOSTED_ENCRYPTION_KEY_FILE", "HOSTED_HMAC_KEY_FILE", "HOSTED_SMTP_ADDRESS"} {
+		t.Setenv(name, "")
+	}
+	oldArgs, oldStdout := os.Args, os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Args = []string{"gift-panel-hosted", "admin", "recovery", "decrypt", "--archive", archivePath, "--password-file", passwordPath}
+	os.Stdout = writer
+	t.Cleanup(func() { os.Args = oldArgs; os.Stdout = oldStdout; _ = reader.Close(); _ = writer.Close() })
+	err = run()
+	_ = writer.Close()
+	os.Stdout = oldStdout
+	output, readErr := io.ReadAll(reader)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if err != nil {
+		t.Fatalf("offline run decrypt error=%v", err)
+	}
+	if lines := strings.Fields(string(output)); len(lines) != adminidentity.RecoveryCodeCount {
+		t.Fatalf("offline run output lines=%d output=%q", len(lines), output)
 	}
 }
 
@@ -340,6 +382,42 @@ func TestRunModeNormalServiceAndInvalidCommandLifecycle(t *testing.T) {
 	err := runMode(context.Background(), []string{"admin", "init", "--uid", "32249588", "--email", "owner@example.com", "unexpected"}, initializer, &output, func() error { serveCalls++; return nil })
 	if !errors.Is(err, errInvalidCommand) || serveCalls != 0 || output.Len() != 0 {
 		t.Fatalf("invalid command error=%v serveCalls=%d output=%q", err, serveCalls, output.String())
+	}
+}
+
+func TestRunModeWithCleanupDoesNotStartCleanupForAdministratorCLI(t *testing.T) {
+	initializer := &initializerStub{result: adminidentity.InitializeResult{TOTPURI: "otpauth://pending", RecoveryPassword: "12345678901234567890"}}
+	cleanupCalls, serveCalls := 0, 0
+	err := runModeWithCleanup(context.Background(), []string{"admin", "init", "--uid", "32249588", "--email", "owner@example.com"}, initializer, strings.NewReader(""), &bytes.Buffer{}, func(context.Context) { cleanupCalls++ }, func() error { serveCalls++; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanupCalls != 0 || serveCalls != 0 {
+		t.Fatalf("admin CLI cleanupCalls=%d serveCalls=%d", cleanupCalls, serveCalls)
+	}
+}
+
+func TestRunModeWithCleanupJoinsCleanupBeforeRepositoryClose(t *testing.T) {
+	started := make(chan struct{})
+	var mu sync.Mutex
+	order := make([]string, 0, 2)
+	cleanup := func(ctx context.Context) {
+		close(started)
+		<-ctx.Done()
+		mu.Lock()
+		order = append(order, "cleanup-exit")
+		mu.Unlock()
+	}
+	err := runModeWithCleanup(context.Background(), nil, &initializerStub{}, strings.NewReader(""), &bytes.Buffer{}, cleanup, func() error { <-started; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	order = append(order, "repository-close")
+	got := append([]string(nil), order...)
+	mu.Unlock()
+	if len(got) != 2 || got[0] != "cleanup-exit" || got[1] != "repository-close" {
+		t.Fatalf("shutdown order=%v", got)
 	}
 }
 

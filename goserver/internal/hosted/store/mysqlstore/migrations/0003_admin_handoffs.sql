@@ -29,11 +29,15 @@ CREATE TABLE IF NOT EXISTS admin_credential_handoffs (
     pending_reserved_recovery_code_id BIGINT UNSIGNED GENERATED ALWAYS AS (
         CASE WHEN handoff_kind = 'recovery' AND handoff_state = 'pending' THEN reserved_recovery_code_id ELSE NULL END
     ) STORED,
+    pending_recovery_admin_guard TINYINT UNSIGNED GENERATED ALWAYS AS (
+        CASE WHEN handoff_kind = 'recovery' AND handoff_state = 'pending' THEN admin_identity_id ELSE NULL END
+    ) STORED,
     PRIMARY KEY (id),
     UNIQUE KEY uq_admin_handoffs_token_hash (token_hash),
     UNIQUE KEY uq_admin_handoffs_pending_initialization (pending_initialization_guard),
     UNIQUE KEY uq_admin_handoffs_pending_request (pending_request_hash),
     UNIQUE KEY uq_admin_handoffs_pending_recovery_code (pending_reserved_recovery_code_id),
+    UNIQUE KEY uq_admin_handoffs_pending_recovery_admin (pending_recovery_admin_guard),
     KEY idx_admin_handoffs_expiry (handoff_state, expires_at, id),
     KEY idx_admin_handoffs_admin (admin_identity_id),
     CONSTRAINT fk_admin_handoffs_identity

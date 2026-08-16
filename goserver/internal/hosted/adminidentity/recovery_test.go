@@ -225,6 +225,97 @@ func TestPrepareConfirmRecoveryIsRetryableAndDefersCredentialMutation(t *testing
 	}
 }
 
+func TestConcurrentRecoveryPreparationAcrossInstancesAllowsOnePendingAdministratorHandoff(t *testing.T) {
+	now := time.Date(2026, 8, 16, 11, 17, 0, 0, time.UTC)
+	repository := initializedMemoryRepository(t, now)
+	codes := []string{"first-valid-recovery-code", "second-valid-recovery-code"}
+	for _, code := range codes {
+		hash := sha256.Sum256([]byte(code))
+		repository.activeCodes[hash] = struct{}{}
+	}
+	senders := []*MemorySender{{}, {}}
+	services := []*Service{
+		newTestService(t, repository, &memoryVerifier{verification: identity.Verification{UID: "32249588", CompletedAt: now}}, senders[0], now),
+		newTestService(t, repository, &memoryVerifier{verification: identity.Verification{UID: "32249588", CompletedAt: now}}, senders[1], now),
+	}
+	start := make(chan struct{})
+	results := make(chan error, len(services))
+	for index := range services {
+		go func(index int) {
+			<-start
+			_, err := services[index].PrepareRecovery(context.Background(), "proof", codes[index])
+			results <- err
+		}(index)
+	}
+	close(start)
+	successes, rejected := 0, 0
+	for range services {
+		switch err := <-results; {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrAuthenticationFailed):
+			rejected++
+		default:
+			t.Fatalf("PrepareRecovery() error=%v", err)
+		}
+	}
+	repository.mu.Lock()
+	pending := 0
+	for _, handoff := range repository.handoffs {
+		if handoff.Kind == HandoffRecovery && handoff.State == HandoffPending {
+			pending++
+		}
+	}
+	repository.mu.Unlock()
+	if successes != 1 || rejected != 1 || pending != 1 || len(senders[0].Messages())+len(senders[1].Messages()) != 1 {
+		t.Fatalf("successes=%d rejected=%d pending=%d messages=%d", successes, rejected, pending, len(senders[0].Messages())+len(senders[1].Messages()))
+	}
+}
+
+func TestExistingRecoveryHandoffRequiresMatchingRequestHash(t *testing.T) {
+	now := time.Date(2026, 8, 16, 11, 18, 0, 0, time.UTC)
+	repository := initializedMemoryRepository(t, now)
+	codeHash := sha256.Sum256([]byte("same-code"))
+	repository.activeCodes[codeHash] = struct{}{}
+	record := sqlHandoffRecord(now, HandoffRecovery)
+	first, err := repository.PrepareRecoveryHandoff(context.Background(), repository.identity.UIDLookup, codeHash[:], record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.RequestHash = bytes.Repeat([]byte{0x7f}, sha256.Size)
+	second, err := repository.PrepareRecoveryHandoff(context.Background(), repository.identity.UIDLookup, codeHash[:], record)
+	if !errors.Is(err, ErrAuthenticationFailed) || second.ID != 0 || first.ID == 0 {
+		t.Fatalf("mismatched retry handoff=%#v error=%v", second, err)
+	}
+}
+
+func TestExpiredRecoveryHandoffIsErasedBeforeDifferentCodeCanPrepare(t *testing.T) {
+	now := time.Date(2026, 8, 16, 11, 19, 0, 0, time.UTC)
+	repository := initializedMemoryRepository(t, now)
+	oldCodeHash := sha256.Sum256([]byte("expired-code"))
+	newCodeHash := sha256.Sum256([]byte("new-code"))
+	repository.activeCodes[oldCodeHash] = struct{}{}
+	repository.activeCodes[newCodeHash] = struct{}{}
+	expired := sqlHandoffRecord(now.Add(-time.Hour), HandoffRecovery)
+	expired.ExpiresAt = now.Add(-time.Minute)
+	oldHandoff, err := repository.PrepareRecoveryHandoff(context.Background(), repository.identity.UIDLookup, oldCodeHash[:], expired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := sqlHandoffRecord(now, HandoffRecovery)
+	fresh.RequestHash = bytes.Repeat([]byte{0x55}, sha256.Size)
+	newHandoff, err := repository.PrepareRecoveryHandoff(context.Background(), repository.identity.UIDLookup, newCodeHash[:], fresh)
+	if err != nil {
+		t.Fatalf("fresh PrepareRecoveryHandoff() error=%v", err)
+	}
+	repository.mu.Lock()
+	_, oldStillPresent := repository.handoffs[oldHandoff.ID]
+	repository.mu.Unlock()
+	if oldStillPresent || newHandoff.ID == oldHandoff.ID || len(newHandoff.Archive) == 0 {
+		t.Fatalf("oldPresent=%v oldID=%d new=%#v", oldStillPresent, oldHandoff.ID, newHandoff)
+	}
+}
+
 func TestCompleteRecoveryRejectsMismatchedOrStaleBilibiliProofWithoutConsumingCode(t *testing.T) {
 	now := time.Date(2026, 8, 16, 11, 20, 0, 0, time.UTC)
 	tests := []identity.Verification{

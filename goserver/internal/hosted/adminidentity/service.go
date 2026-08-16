@@ -524,6 +524,20 @@ func scanHandoff(row rowScanner) (PendingHandoff, error) {
 	return handoff, nil
 }
 
+func scanHandoffWithReservedCode(row rowScanner) (PendingHandoff, sql.NullInt64, error) {
+	var handoff PendingHandoff
+	var delivered sql.NullTime
+	var reserved sql.NullInt64
+	err := row.Scan(&handoff.ID, &handoff.Kind, &handoff.State, &handoff.RequestHash, &handoff.TokenHash, &handoff.TokenCiphertext,
+		&handoff.UIDCiphertext, &handoff.UIDLookup, &handoff.EmailCiphertext, &handoff.TOTPSecretCiphertext,
+		&handoff.TOTPURICiphertext, &handoff.PasswordCiphertext, &handoff.Archive, &handoff.CreatedAt, &handoff.ExpiresAt, &delivered, &reserved)
+	if err != nil {
+		return PendingHandoff{}, sql.NullInt64{}, err
+	}
+	handoff.MailDelivered = delivered.Valid
+	return handoff, reserved, nil
+}
+
 func (repository *SQLRepository) PrepareInitialization(ctx context.Context, candidate HandoffRecord) (PendingHandoff, error) {
 	if !repository.ready() || !validHandoffRecord(candidate, HandoffInitialization) {
 		return PendingHandoff{}, ErrInvalidInput
@@ -669,10 +683,13 @@ func (repository *SQLRepository) PrepareRecoveryHandoff(ctx context.Context, uid
 	if err := transaction.QueryRowContext(ctx, "SELECT id FROM admin_recovery_codes WHERE admin_identity_id = 1 AND code_hash = ? AND used_at IS NULL AND invalidated_at IS NULL FOR UPDATE", bytes.Clone(codeHash)).Scan(&codeID); err != nil {
 		return PendingHandoff{}, ErrAuthenticationFailed
 	}
-	query := "SELECT " + handoffColumns + " FROM admin_credential_handoffs WHERE handoff_kind = 'recovery' AND handoff_state = 'pending' AND reserved_recovery_code_id = ? FOR UPDATE"
-	existing, scanErr := scanHandoff(transaction.QueryRowContext(ctx, query, codeID))
+	query := "SELECT " + handoffColumns + ", reserved_recovery_code_id FROM admin_credential_handoffs WHERE handoff_kind = 'recovery' AND handoff_state = 'pending' AND admin_identity_id = 1 FOR UPDATE"
+	existing, reserved, scanErr := scanHandoffWithReservedCode(transaction.QueryRowContext(ctx, query))
 	if scanErr == nil {
 		if existing.ExpiresAt.After(candidate.CreatedAt) {
+			if !reserved.Valid || reserved.Int64 != codeID || subtle.ConstantTimeCompare(existing.RequestHash, candidate.RequestHash) != 1 {
+				return PendingHandoff{}, ErrAuthenticationFailed
+			}
 			if err := loadHandoffCodes(ctx, transaction, &existing); err != nil {
 				return PendingHandoff{}, err
 			}
@@ -729,10 +746,7 @@ func (repository *SQLRepository) ConfirmRecoveryHandoff(ctx context.Context, tok
 		}
 	}()
 	query := "SELECT " + handoffColumns + ", reserved_recovery_code_id FROM admin_credential_handoffs WHERE token_hash = ? FOR UPDATE"
-	var handoff PendingHandoff
-	var delivered sql.NullTime
-	var reserved sql.NullInt64
-	err = transaction.QueryRowContext(ctx, query, bytes.Clone(tokenHash)).Scan(&handoff.ID, &handoff.Kind, &handoff.State, &handoff.RequestHash, &handoff.TokenHash, &handoff.TokenCiphertext, &handoff.UIDCiphertext, &handoff.UIDLookup, &handoff.EmailCiphertext, &handoff.TOTPSecretCiphertext, &handoff.TOTPURICiphertext, &handoff.PasswordCiphertext, &handoff.Archive, &handoff.CreatedAt, &handoff.ExpiresAt, &delivered, &reserved)
+	handoff, reserved, err := scanHandoffWithReservedCode(transaction.QueryRowContext(ctx, query, bytes.Clone(tokenHash)))
 	if err != nil || handoff.Kind != HandoffRecovery {
 		return ErrAuthenticationFailed
 	}
