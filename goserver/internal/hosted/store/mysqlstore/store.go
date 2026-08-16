@@ -1,0 +1,205 @@
+package mysqlstore
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"embed"
+	"errors"
+	"fmt"
+	"io/fs"
+	"path"
+	"slices"
+	"strings"
+	"time"
+
+	_ "github.com/go-sql-driver/mysql"
+)
+
+const (
+	migrationLockName    = "gift_panel_schema"
+	migrationLockSeconds = 30
+
+	schemaMigrationsDDL = `CREATE TABLE IF NOT EXISTS schema_migrations (
+    version VARCHAR(255) NOT NULL PRIMARY KEY,
+    checksum CHAR(64) NOT NULL,
+    applied_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+) ENGINE=InnoDB`
+)
+
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
+
+type migration struct {
+	version  string
+	contents []byte
+	checksum string
+}
+
+// Store owns the hosted service's MySQL connection pool.
+type Store struct {
+	db *sql.DB
+}
+
+// Open creates and verifies a MySQL connection pool. Returned errors are
+// deliberately generic so a malformed DSN is never reflected to logs.
+func Open(ctx context.Context, dsn string) (*Store, error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, errors.New("open mysql: configuration is empty")
+	}
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, errors.New("open mysql: invalid configuration")
+	}
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, errors.New("open mysql: database unavailable")
+	}
+	return &Store{db: db}, nil
+}
+
+// Close closes the underlying connection pool.
+func (store *Store) Close() error {
+	if store == nil || store.db == nil {
+		return nil
+	}
+	return store.db.Close()
+}
+
+// Health reports whether MySQL is reachable without returning database error
+// details to the HTTP layer.
+func (store *Store) Health(ctx context.Context) error {
+	if store == nil || store.db == nil {
+		return errors.New("mysql store is not initialized")
+	}
+	return store.db.PingContext(ctx)
+}
+
+// Migrate applies embedded migrations while holding a connection-scoped MySQL
+// advisory lock. MySQL DDL implicitly commits, so migrations intentionally use
+// idempotent statements and record the checksum only after every statement has
+// succeeded; this function does not claim whole-file transactional atomicity.
+func (store *Store) Migrate(ctx context.Context) (resultErr error) {
+	if store == nil || store.db == nil {
+		return errors.New("migrate mysql: store is not initialized")
+	}
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		return fmt.Errorf("read migrations: %w", err)
+	}
+
+	connection, err := store.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration connection: %w", err)
+	}
+	defer connection.Close()
+
+	if err := acquireMigrationLock(ctx, connection); err != nil {
+		return err
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := releaseMigrationLock(releaseCtx, connection); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+
+	if _, err := connection.ExecContext(ctx, schemaMigrationsDDL); err != nil {
+		return fmt.Errorf("create schema migrations table: %w", err)
+	}
+
+	for _, item := range migrations {
+		var appliedChecksum string
+		err := connection.QueryRowContext(ctx,
+			"SELECT checksum FROM schema_migrations WHERE version = ?",
+			item.version,
+		).Scan(&appliedChecksum)
+		switch {
+		case err == nil:
+			if appliedChecksum != item.checksum {
+				return fmt.Errorf("migration %s checksum mismatch", item.version)
+			}
+			continue
+		case errors.Is(err, sql.ErrNoRows):
+		case err != nil:
+			return fmt.Errorf("read migration %s: %w", item.version, err)
+		}
+
+		for _, statement := range splitStatements(item.contents) {
+			if _, err := connection.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("apply migration %s: %w", item.version, err)
+			}
+		}
+		if _, err := connection.ExecContext(ctx,
+			"INSERT INTO schema_migrations (version, checksum) VALUES (?, ?)",
+			item.version,
+			item.checksum,
+		); err != nil {
+			return fmt.Errorf("record migration %s: %w", item.version, err)
+		}
+	}
+	return nil
+}
+
+func acquireMigrationLock(ctx context.Context, connection *sql.Conn) error {
+	var acquired sql.NullInt64
+	if err := connection.QueryRowContext(ctx,
+		"SELECT GET_LOCK(?, ?)",
+		migrationLockName,
+		migrationLockSeconds,
+	).Scan(&acquired); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	if !acquired.Valid || acquired.Int64 != 1 {
+		return errors.New("acquire migration lock: timed out")
+	}
+	return nil
+}
+
+func releaseMigrationLock(ctx context.Context, connection *sql.Conn) error {
+	var released sql.NullInt64
+	if err := connection.QueryRowContext(ctx,
+		"SELECT RELEASE_LOCK(?)",
+		migrationLockName,
+	).Scan(&released); err != nil {
+		return fmt.Errorf("release migration lock: %w", err)
+	}
+	if !released.Valid || released.Int64 != 1 {
+		return errors.New("release migration lock: lock was not held")
+	}
+	return nil
+}
+
+func readMigrations(fileSystem fs.FS) ([]migration, error) {
+	names, err := fs.Glob(fileSystem, "migrations/*.sql")
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(names)
+	result := make([]migration, 0, len(names))
+	for _, name := range names {
+		contents, err := fs.ReadFile(fileSystem, name)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", name, err)
+		}
+		version := strings.TrimSuffix(path.Base(name), path.Ext(name))
+		if version == "" {
+			return nil, fmt.Errorf("migration %s has an empty version", name)
+		}
+		checksum := fmt.Sprintf("%x", sha256.Sum256(contents))
+		result = append(result, migration{version: version, contents: contents, checksum: checksum})
+	}
+	return result, nil
+}
+
+func splitStatements(contents []byte) []string {
+	parts := strings.Split(string(contents), ";")
+	statements := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if statement := strings.TrimSpace(part); statement != "" {
+			statements = append(statements, statement)
+		}
+	}
+	return statements
+}

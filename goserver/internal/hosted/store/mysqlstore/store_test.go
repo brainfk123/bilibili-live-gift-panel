@@ -1,0 +1,179 @@
+package mysqlstore
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"testing"
+	"testing/fstest"
+
+	"github.com/DATA-DOG/go-sqlmock"
+)
+
+const (
+	lockName    = "gift_panel_schema"
+	lockSeconds = 30
+)
+
+func TestReadMigrationsSortsFilesByName(t *testing.T) {
+	files := fstest.MapFS{
+		"migrations/0002_second.sql": {Data: []byte("SELECT 2")},
+		"migrations/0001_first.sql":  {Data: []byte("SELECT 1")},
+		"migrations/notes.txt":       {Data: []byte("ignored")},
+	}
+
+	migrations, err := readMigrations(files)
+	if err != nil {
+		t.Fatalf("readMigrations() error = %v", err)
+	}
+	if len(migrations) != 2 || migrations[0].version != "0001_first" || migrations[1].version != "0002_second" {
+		t.Fatalf("migration order = %#v, want 0001_first then 0002_second", migrations)
+	}
+}
+
+func TestMigrateAppliesUnseenMigrationAndRecordsChecksum(t *testing.T) {
+	store, mock, closeDB := newMockStore(t)
+	defer closeDB()
+	migration := embeddedFoundationMigration(t)
+
+	expectLock(mock)
+	expectSchemaTable(mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT checksum FROM schema_migrations WHERE version = ?")).
+		WithArgs(migration.version).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec("(?s)CREATE TABLE IF NOT EXISTS schema_migrations").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("(?s)CREATE TABLE IF NOT EXISTS service_health_markers").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO schema_migrations (version, checksum) VALUES (?, ?)")).
+		WithArgs(migration.version, migration.checksum).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	expectUnlock(mock)
+
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestMigrateSkipsAlreadyAppliedMigrationWithMatchingChecksum(t *testing.T) {
+	store, mock, closeDB := newMockStore(t)
+	defer closeDB()
+	migration := embeddedFoundationMigration(t)
+
+	expectLock(mock)
+	expectSchemaTable(mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT checksum FROM schema_migrations WHERE version = ?")).
+		WithArgs(migration.version).
+		WillReturnRows(sqlmock.NewRows([]string{"checksum"}).AddRow(migration.checksum))
+	expectUnlock(mock)
+
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestMigrateRejectsChangedChecksumAndReleasesLock(t *testing.T) {
+	store, mock, closeDB := newMockStore(t)
+	defer closeDB()
+	migration := embeddedFoundationMigration(t)
+
+	expectLock(mock)
+	expectSchemaTable(mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT checksum FROM schema_migrations WHERE version = ?")).
+		WithArgs(migration.version).
+		WillReturnRows(sqlmock.NewRows([]string{"checksum"}).AddRow(strings.Repeat("0", 64)))
+	expectUnlock(mock)
+
+	err := store.Migrate(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "checksum") {
+		t.Fatalf("Migrate() error = %v, want checksum mismatch", err)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestMigrateReleasesLockWhenMigrationApplicationFails(t *testing.T) {
+	store, mock, closeDB := newMockStore(t)
+	defer closeDB()
+	migration := embeddedFoundationMigration(t)
+
+	expectLock(mock)
+	expectSchemaTable(mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT checksum FROM schema_migrations WHERE version = ?")).
+		WithArgs(migration.version).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec("(?s)CREATE TABLE IF NOT EXISTS schema_migrations").
+		WillReturnError(errors.New("apply failed"))
+	expectUnlock(mock)
+
+	err := store.Migrate(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "apply migration") {
+		t.Fatalf("Migrate() error = %v, want application failure", err)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestOpenDoesNotExposeDSNOnFailure(t *testing.T) {
+	dsn := "super-secret-dsn-without-required-shape"
+	_, err := Open(context.Background(), dsn)
+	if err == nil {
+		t.Fatal("Open() error = nil, want invalid DSN error")
+	}
+	if strings.Contains(err.Error(), dsn) {
+		t.Fatalf("Open() error exposed DSN: %v", err)
+	}
+}
+
+func newMockStore(t *testing.T) (*Store, sqlmock.Sqlmock, func()) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New() error = %v", err)
+	}
+	return &Store{db: db}, mock, func() { _ = db.Close() }
+}
+
+func embeddedFoundationMigration(t *testing.T) migration {
+	t.Helper()
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatalf("readMigrations() error = %v", err)
+	}
+	if len(migrations) != 1 {
+		t.Fatalf("embedded migration count = %d, want 1", len(migrations))
+	}
+	wantChecksum := fmt.Sprintf("%x", sha256.Sum256(migrations[0].contents))
+	if migrations[0].checksum != wantChecksum {
+		t.Fatalf("checksum = %q, want SHA-256 %q", migrations[0].checksum, wantChecksum)
+	}
+	return migrations[0]
+}
+
+func expectLock(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, lockSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"GET_LOCK"}).AddRow(1))
+}
+
+func expectUnlock(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"RELEASE_LOCK"}).AddRow(1))
+}
+
+func expectSchemaTable(mock sqlmock.Sqlmock) {
+	mock.ExpectExec("(?s)CREATE TABLE IF NOT EXISTS schema_migrations").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
+func assertExpectations(t *testing.T, mock sqlmock.Sqlmock) {
+	t.Helper()
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("SQL expectations: %v", err)
+	}
+}
