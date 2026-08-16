@@ -118,10 +118,8 @@ if ! getent passwd gift-panel-mirror >/dev/null; then
   sudo useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin gift-panel-mirror
 fi
 ACCOUNT_RECORD=$(getent passwd gift-panel-mirror)
-ACCOUNT_UID=$(printf '%s\n' "$ACCOUNT_RECORD" | cut -d: -f3)
 ACCOUNT_GID=$(printf '%s\n' "$ACCOUNT_RECORD" | cut -d: -f4)
 test "$(printf '%s\n' "$ACCOUNT_RECORD" | cut -d: -f1)" = gift-panel-mirror
-test "$ACCOUNT_UID" = "$ACCOUNT_GID"
 test "$(printf '%s\n' "$ACCOUNT_RECORD" | cut -d: -f6)" = /nonexistent
 test "$(printf '%s\n' "$ACCOUNT_RECORD" | cut -d: -f7)" = /usr/sbin/nologin
 GROUP_RECORD=$(getent group "$ACCOUNT_GID")

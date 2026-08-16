@@ -308,8 +308,10 @@ describe('update API deployment assets', () => {
     expect(variables).toEqual([['COS_BUCKET', ''], ['COS_REGION', ''], ['COS_SECRET_ID', ''], ['COS_SECRET_KEY', '']]);
     expect(readme).toContain('if ! getent passwd gift-panel-mirror >/dev/null; then');
     expect(readme).toContain('useradd --system --user-group --home-dir /nonexistent --shell /usr/sbin/nologin gift-panel-mirror');
-    expect(readme).toContain('ACCOUNT_UID');
+    expect(readme).not.toContain('ACCOUNT_UID');
     expect(readme).toContain('ACCOUNT_GID');
+    expect(readme).toContain('GROUP_RECORD=$(getent group "$ACCOUNT_GID")');
+    expect(readme).toContain('test "$(id -gn gift-panel-mirror)" = gift-panel-mirror');
     expect(readme).toContain('install -o root -g root -m 0600 /secure/gift-panel-release-mirror.env /etc/gift-panel-release-mirror.env');
     expect(readme).toContain('sha256sum -c');
     expect(readme).toContain('RELEASE_ID="${REVIEWED_COMMIT:?set the reviewed 40-hex commit}"');
@@ -417,7 +419,7 @@ describe('update API deployment assets', () => {
     }
   });
 
-  it('executes idempotent and incompatible mirror-account paths', () => {
+  it('accepts a private primary group with a different numeric ID and rejects incompatible mirror accounts', () => {
     const readme = deploymentAsset('README.md');
     const install = shellBlocksAfter(readme, '## Release mirror (separate service)').find((block) => block.includes('ACCOUNT_RECORD='))!;
     const account = install.slice(install.indexOf('if ! getent passwd gift-panel-mirror'), install.indexOf('sudo install -d'));
@@ -429,13 +431,26 @@ getent() {
   case "$1:$2" in
     passwd:gift-panel-mirror)
       if test "\${ACCOUNT_MODE}" = absent && test "\${ACCOUNT_CREATED:-0}" != 1; then return 2; fi
-      if test "\${ACCOUNT_MODE}" = incompatible; then printf 'gift-panel-mirror:x:999:999::/home/mirror:/usr/sbin/nologin\\n'; else printf 'gift-panel-mirror:x:999:999::/nonexistent:/usr/sbin/nologin\\n'; fi ;;
-    group:gift-panel-mirror) return 2 ;;
-    group:999) printf 'gift-panel-mirror:x:999:\\n' ;;
+      case "\${ACCOUNT_MODE}" in
+        wrong-primary-group) printf 'gift-panel-mirror:x:999:996::/nonexistent:/usr/sbin/nologin\\n' ;;
+        wrong-shell) printf 'gift-panel-mirror:x:999:995::/nonexistent:/bin/bash\\n' ;;
+        wrong-home) printf 'gift-panel-mirror:x:999:995::/home/mirror:/usr/sbin/nologin\\n' ;;
+        *) printf 'gift-panel-mirror:x:999:995::/nonexistent:/usr/sbin/nologin\\n' ;;
+      esac ;;
+    group:gift-panel-mirror)
+      if { test "\${ACCOUNT_MODE}" = absent && test "\${ACCOUNT_CREATED:-0}" != 1; } || test "\${ACCOUNT_MODE}" = missing-group; then return 2; fi
+      printf 'gift-panel-mirror:x:995:\\n' ;;
+    group:995)
+      if test "\${ACCOUNT_MODE}" = missing-group; then return 2; fi
+      printf 'gift-panel-mirror:x:995:\\n' ;;
+    group:996) printf 'other-primary:x:996:\\n' ;;
     *) return 2 ;;
   esac
 }
-id() { test "$1" = -gn && test "$2" = gift-panel-mirror && printf 'gift-panel-mirror\\n'; }
+id() {
+  test "$1" = -gn && test "$2" = gift-panel-mirror
+  if test "\${ACCOUNT_MODE}" = wrong-primary-group; then printf 'other-primary\\n'; else printf 'gift-panel-mirror\\n'; fi
+}
 useradd() { ACCOUNT_CREATED=1; printf 'useradd\\n' >> "$ACCOUNT_LOG"; }
 `;
     try {
@@ -446,11 +461,13 @@ useradd() { ACCOUNT_CREATED=1; printf 'useradd\\n' >> "$ACCOUNT_LOG"; }
         const calls = readFileSync(join(root, 'account.log'), 'utf8');
         expect(calls.includes('useradd')).toBe(mode === 'absent');
       }
-      writeFileSync(join(root, 'account.log'), '');
-      const incompatible = runBash(`set -euo pipefail\n${fakeAccounts}\n${account}\nprintf must-not-reach\n`, root, { ACCOUNT_MODE: 'incompatible', ACCOUNT_LOG: log });
-      expect(incompatible.status).not.toBe(0);
-      expect(incompatible.stdout).not.toContain('must-not-reach');
-      expect(readFileSync(join(root, 'account.log'), 'utf8')).not.toContain('useradd');
+      for (const mode of ['wrong-primary-group', 'wrong-shell', 'wrong-home', 'missing-group']) {
+        writeFileSync(join(root, 'account.log'), '');
+        const incompatible = runBash(`set -euo pipefail\n${fakeAccounts}\n${account}\nprintf must-not-reach\n`, root, { ACCOUNT_MODE: mode, ACCOUNT_LOG: log });
+        expect(incompatible.status, mode).not.toBe(0);
+        expect(incompatible.stdout, mode).not.toContain('must-not-reach');
+        expect(readFileSync(join(root, 'account.log'), 'utf8'), mode).not.toContain('useradd');
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -466,6 +483,12 @@ sudo() { "$@"; }
 install() { last=\${!#}; mkdir -p "$last"; }
 tee() { cat > "$1"; }
 journalctl() { printf 'journal\\n' >> "$SYSTEMCTL_LOG"; }
+rm() {
+  last=\${!#}
+  removes=$(cat "$REMOVE_COUNT" 2>/dev/null || printf 0); removes=$((removes + 1)); printf '%s' "$removes" > "$REMOVE_COUNT"
+  if test "$last" = "$DROPIN" && test "\${FAIL_REMOVE_AT:-0}" = "$removes"; then return 1; fi
+  command rm "$@"
+}
 systemctl() {
   printf '%s\\n' "$*" >> "$SYSTEMCTL_LOG"
   case "$1" in
@@ -473,8 +496,15 @@ systemctl() {
       reloads=$(cat "$RELOAD_COUNT" 2>/dev/null || printf 0); reloads=$((reloads + 1)); printf '%s' "$reloads" > "$RELOAD_COUNT"
       test "\${FAIL_RELOAD_AT:-0}" != "$reloads" ;;
     show)
-      if test "$3" = Result; then printf 'success\\n'; else printf '%s\\n' "\${ACTIVE_DROPINS:-}"; fi ;;
+      if test "$3" = Result; then
+        test "\${FAIL_RESULT_SHOW:-0}" != 1 || return 1
+        printf '%s\\n' "\${RESULT_VALUE:-success}"
+      else
+        test "\${FAIL_DROPIN_SHOW:-0}" != 1 || return 1
+        if test "\${ACTIVE_DROPINS:-0}" = 1 || test -e "$DROPIN"; then printf '%s\\n' "$DROPIN"; fi
+      fi ;;
     start)
+      if test -e "$DROPIN"; then printf 'dry-run\\n' >> "$START_LOG"; else printf 'normal\\n' >> "$START_LOG"; fi
       if test -n "\${SEND_SIGNAL:-}"; then kill -s "$SEND_SIGNAL" "$$"; fi
       test "\${FAIL_START:-0}" != 1 ;;
     *) return 0 ;;
@@ -488,16 +518,27 @@ systemctl() {
         for (const scenario of [
           { name: 'success', environment: {}, status: 0 },
           { name: 'start-error', environment: { FAIL_START: '1' }, status: 1 },
-          { name: 'cleanup-error', environment: { FAIL_RELOAD_AT: '2' }, status: 1 },
+          { name: 'validation-error', environment: { RESULT_VALUE: 'failed' }, status: 1 },
+          { name: 'result-show-error', environment: { FAIL_RESULT_SHOW: '1' }, status: 1 },
+          { name: 'removal-error', environment: { FAIL_REMOVE_AT: '1' }, status: 1 },
+          { name: 'reload-error', environment: { FAIL_RELOAD_AT: '2' }, status: 1 },
+          { name: 'active-dropin', environment: { ACTIVE_DROPINS: '1' }, status: 1 },
+          { name: 'dropin-show-error', environment: { FAIL_DROPIN_SHOW: '1' }, status: 1 },
           { name: 'interrupt', environment: { SEND_SIGNAL: 'INT' }, status: 130 },
           { name: 'terminate', environment: { SEND_SIGNAL: 'TERM' }, status: 143 },
         ]) {
           writeFileSync(join(root, 'systemctl.log'), '');
+          writeFileSync(join(root, 'start.log'), '');
           writeFileSync(join(root, 'reload-count'), '0');
-          const result = runBash(`${fakeSystemd}\n${script}`, root, { SYSTEMCTL_LOG: 'systemctl.log', RELOAD_COUNT: 'reload-count', ...scenario.environment });
+          writeFileSync(join(root, 'remove-count'), '0');
+          const result = runBash(`${fakeSystemd}\n${script}`, root, { SYSTEMCTL_LOG: 'systemctl.log', START_LOG: 'start.log', RELOAD_COUNT: 'reload-count', REMOVE_COUNT: 'remove-count', ...scenario.environment });
           expect(result.status, `${index}:${scenario.name}: ${result.stderr}`).toBe(scenario.status);
           expect(existsSync(join(root, 'run', 'gift-panel-release-mirror.service.d', 'dry-run.conf'))).toBe(false);
           const calls = readFileSync(join(root, 'systemctl.log'), 'utf8');
+          const starts = readFileSync(join(root, 'start.log'), 'utf8').trim().split(/\r?\n/).filter(Boolean);
+          const expectedStarts = expectedPublication && scenario.name === 'success' ? ['dry-run', 'normal'] : ['dry-run'];
+          expect(starts, `${index}:${scenario.name}: start order`).toEqual(expectedStarts);
+          expect(calls.split(/\r?\n/).filter((call) => call === 'start gift-panel-release-mirror.service'), `${index}:${scenario.name}: all starts logged`).toHaveLength(expectedStarts.length);
           const enabled = calls.includes('enable --now gift-panel-release-mirror.timer');
           expect(enabled).toBe(expectedPublication && scenario.name === 'success');
         }
