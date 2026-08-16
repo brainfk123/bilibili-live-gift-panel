@@ -91,7 +91,7 @@ describe('online migration exporter', () => {
   it('exports only validated template parameters from a simple play', () => {
     const state = defaultState();
     state.simplePlay = {
-      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: {}, managedFingerprint: 'safe',
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
       parameters: {
         name: '计数器', suffix: '次', amount: 2, cap: 9, broadcastMessage: '继续加油',
         maxSeconds: 60, cookie: 'synthetic-value', token: 'synthetic-value', imageUrl: 'https://assets.invalid/image.png', custom: true,
@@ -124,7 +124,7 @@ describe('online migration exporter', () => {
 
     const migration = createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12));
 
-    expect(migration.payload.definition.simplePlay?.parameters).toEqual({ amount: 1 });
+    expect(migration.payload.definition.simplePlay).toBeUndefined();
     expect(JSON.stringify(migration)).not.toContain(unsafeValue);
   });
 
@@ -166,5 +166,119 @@ describe('online migration exporter', () => {
     expect(() => downloadOnlineMigration(defaultState(), '0.4.4', new Date(2026, 7, 16, 12), adapter)).toThrow('synthetic download failure');
     expect(revokeObjectURL).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenLastCalledWith('blob:synthetic-migration');
+  });
+
+  it('keeps ordinary punctuation in validated text parameters', () => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
+      parameters: { name: 'PK: 红队', suffix: '次', amount: 1, cap: 0, broadcastMessage: 'HP:剩余' },
+    };
+
+    const migration = createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12));
+
+    expect(migration.payload.definition.simplePlay?.parameters).toMatchObject({ name: 'PK: 红队', broadcastMessage: 'HP:剩余' });
+  });
+
+  it('fails closed when a current template text parameter contains a resource reference', () => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
+      parameters: { name: '计数器', suffix: '次', amount: 1, cap: 0, broadcastMessage: '正文 https://assets.invalid/image.png' },
+    };
+
+    const migration = createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12));
+
+    expect(migration.payload.definition.simplePlay).toBeUndefined();
+    expect(JSON.stringify(migration)).not.toContain('https://assets.invalid');
+  });
+
+  it('preserves the explicit overtime v1 legacy shape without v2 actions', () => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'overtime', templateVersion: 1, attributeId: 'time', gifts: { overtime: [1] }, managedFingerprint: 'safe',
+      parameters: { name: '加班时间', minutesPerYuan: 60, maxHours: 24, broadcastMessage: '继续加油' },
+      overtimeGiftActions: [{ giftId: 1, operation: 'add', seconds: 60 }],
+    };
+
+    const migration = createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12));
+
+    expect(migration.payload.definition.simplePlay).toMatchObject({
+      templateId: 'overtime', templateVersion: 1,
+      parameters: { name: '加班时间', minutesPerYuan: 60, maxHours: 24, broadcastMessage: '继续加油' },
+      gifts: { overtime: [1] },
+    });
+    expect(migration.payload.definition.simplePlay).not.toHaveProperty('overtimeGiftActions');
+  });
+
+  it('omits unknown template versions rather than exporting a partial simple play', () => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 2, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
+      parameters: { name: '计数器', suffix: '次', amount: 1, cap: 0, broadcastMessage: '继续加油' },
+    };
+
+    expect(createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12)).payload.definition.simplePlay).toBeUndefined();
+  });
+
+  it('exports only current template gift slots and removes non-overtime actions from references', () => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', managedFingerprint: 'safe',
+      parameters: { name: '计数器', suffix: '次', amount: 1, cap: 0, broadcastMessage: '继续加油' },
+      gifts: { count: [1, 1, 0, -2, 2.5], unknown: [9] },
+      overtimeGiftActions: [{ giftId: 9, operation: 'add', seconds: 60 }],
+    };
+    state.giftCatalog = [
+      { id: 1, name: '有效礼物', price: 1, coinType: 'gold', imgBasic: '' },
+      { id: 9, name: '未知槽位礼物', price: 1, coinType: 'gold', imgBasic: '' },
+    ];
+
+    const migration = createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12));
+
+    expect(migration.payload.definition.simplePlay).toMatchObject({ gifts: { count: [1] } });
+    expect(migration.payload.definition.simplePlay).not.toHaveProperty('overtimeGiftActions');
+    expect(migration.payload.definition.gifts.map((gift) => gift.id)).toEqual([1]);
+  });
+
+  it('limits overtime v2 actions to unique configured gifts with valid operations', () => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'overtime', templateVersion: 2, attributeId: 'time', managedFingerprint: 'safe',
+      parameters: { name: '加班时间', maxSeconds: 3600, broadcastMessage: '继续加油' },
+      gifts: { overtime: [1, 1, 2, 0], unknown: [9] },
+      overtimeGiftActions: [
+        { giftId: 1, operation: 'add', seconds: 60 },
+        { giftId: 1, operation: 'double' },
+        { giftId: 2, operation: 'invalid' as 'add' },
+        { giftId: 9, operation: 'reset' },
+      ],
+    };
+    state.giftCatalog = [
+      { id: 1, name: '有效礼物 1', price: 1, coinType: 'gold', imgBasic: '' },
+      { id: 2, name: '有效礼物 2', price: 1, coinType: 'gold', imgBasic: '' },
+      { id: 9, name: '未知槽位礼物', price: 1, coinType: 'gold', imgBasic: '' },
+    ];
+
+    const migration = createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12));
+
+    expect(migration.payload.definition.simplePlay).toMatchObject({
+      gifts: { overtime: [1, 2] },
+      overtimeGiftActions: [{ giftId: 1, operation: 'add', seconds: 60 }],
+    });
+    expect(migration.payload.definition.gifts.map((gift) => gift.id)).toEqual([1, 2]);
+  });
+
+  it.each([
+    { parameters: { name: '', maxSeconds: 3600, broadcastMessage: '继续加油' }, label: 'an empty required text parameter' },
+    { parameters: { name: '加班时间', maxSeconds: 1.5, broadcastMessage: '继续加油' }, label: 'a non-integer v2 maxSeconds value' },
+  ])('fails closed for $label', ({ parameters }) => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'overtime', templateVersion: 2, attributeId: 'time', gifts: { overtime: [1] }, managedFingerprint: 'safe',
+      parameters,
+    };
+
+    expect(createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12)).payload.definition.simplePlay).toBeUndefined();
   });
 });

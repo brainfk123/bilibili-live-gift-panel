@@ -9,7 +9,14 @@ import type {
   Settings,
   SimplePlay,
 } from './types';
-import { getGameplayTemplate, type TemplateParameterDefinition, type TemplateParameterValue } from './gameplay-templates';
+import {
+  getGameplayTemplate,
+  validateGameplayTemplateInput,
+  type GameplayTemplateDefinition,
+  type TemplateGiftSlotDefinition,
+  type TemplateParameterDefinition,
+  type TemplateParameterValue,
+} from './gameplay-templates';
 
 const CONFIG_SCHEMA_VERSION = 5;
 
@@ -157,11 +164,16 @@ interface OnlineSimplePlay {
   managedFingerprint: string;
 }
 
-const SIMPLE_PLAY_PARAMETER_DEFINITIONS: Record<SimplePlay['templateId'], readonly TemplateParameterDefinition[]> = {
-  overtime: templateParameters('overtime'),
-  counter: templateParameters('counter'),
-  goal: templateParameters('goal'),
-};
+const LEGACY_OVERTIME_V1_PARAMETERS = [
+  { id: 'name', kind: 'text' },
+  { id: 'minutesPerYuan', kind: 'number', min: 1, max: 3600 },
+  { id: 'maxHours', kind: 'number', min: 0, max: 240 },
+  { id: 'broadcastMessage', kind: 'text' },
+] as const;
+
+const OVERTIME_OPERATIONS = new Set<NonNullable<SimplePlay['overtimeGiftActions']>[number]['operation']>([
+  'add', 'subtract', 'double', 'halve', 'reset',
+]);
 
 export function onlineMigrationFilename(exportedAt: Date): string {
   return `gift-panel-migration-v1-${exportedAt.toISOString().slice(0, 10)}.json`;
@@ -196,7 +208,8 @@ export function createOnlineMigration(state: AppState, appVersion: string, expor
     return exportAttribute(attribute, id);
   });
   const idForName = (name: string): string => attributeIDs.get(name) ?? name;
-  const referencedGiftIDs = collectReferencedGiftIDs(state);
+  const simplePlay = state.simplePlay ? exportSimplePlay(state.simplePlay) : undefined;
+  const referencedGiftIDs = collectReferencedGiftIDs(state, simplePlay);
 
   return {
     kind: 'gift-panel-online-migration',
@@ -248,7 +261,7 @@ export function createOnlineMigration(state: AppState, appVersion: string, expor
           formula: preset.formula,
           attributeId: idForName(preset.sourceAttributeName),
         })),
-        ...(state.simplePlay ? { simplePlay: exportSimplePlay(state.simplePlay) } : {}),
+        ...(simplePlay ? { simplePlay } : {}),
         gifts: state.giftCatalog
           .filter((gift) => referencedGiftIDs.has(gift.id))
           .map(exportGift)
@@ -390,33 +403,109 @@ function remapNumberRecord(record: Record<string, number>, idForName: (name: str
     .map(([name, value]) => [idForName(name), value]));
 }
 
-function exportSimplePlay(simplePlay: SimplePlay): OnlineSimplePlay {
+function exportSimplePlay(simplePlay: SimplePlay): OnlineSimplePlay | undefined {
+  const template = getGameplayTemplate(simplePlay.templateId);
+  if (template?.version === simplePlay.templateVersion) return exportCurrentSimplePlay(simplePlay, template);
+  if (simplePlay.templateId === 'overtime' && simplePlay.templateVersion === 1) return exportLegacyOvertimeV1(simplePlay);
+  return undefined;
+}
+
+function exportCurrentSimplePlay(simplePlay: SimplePlay, template: GameplayTemplateDefinition): OnlineSimplePlay | undefined {
+  const parameters = exportTemplateParameters(template.parameters, simplePlay.parameters);
+  const gifts = exportTemplateGifts(template.giftSlots, simplePlay.gifts);
+  if (Object.keys(parameters).length !== template.parameters.length) return undefined;
+  if (simplePlay.templateId === 'overtime' && !Number.isInteger(parameters.maxSeconds)) return undefined;
+  const overtimeGiftActions = template.id === 'overtime'
+    ? exportOvertimeGiftActions(simplePlay.overtimeGiftActions, gifts.overtime ?? [])
+    : undefined;
+  const input = {
+    parameters,
+    gifts: Object.fromEntries(template.giftSlots.map((slot) => [
+      slot.id,
+      (gifts[slot.id] ?? []).map(templateGift),
+    ])),
+    ...(template.id === 'overtime' ? { overtimeGiftActions: overtimeGiftActions ?? [] } : {}),
+  };
+  if (validateGameplayTemplateInput(template, input).length > 0) return undefined;
   return {
     version: simplePlay.version,
     templateId: simplePlay.templateId,
     templateVersion: simplePlay.templateVersion,
     attributeId: simplePlay.attributeId,
-    parameters: Object.fromEntries(SIMPLE_PLAY_PARAMETER_DEFINITIONS[simplePlay.templateId]
-      .flatMap((definition) => {
-        const value = simplePlay.parameters[definition.id];
-        return isValidSimplePlayParameter(definition, value) ? [[definition.id, value]] : [];
-      })),
-    gifts: Object.fromEntries(Object.entries(simplePlay.gifts)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, giftIDs]) => [key, [...giftIDs]])),
-    ...(simplePlay.overtimeGiftActions === undefined ? {} : {
-      overtimeGiftActions: simplePlay.overtimeGiftActions.map((action) => ({
-        giftId: action.giftId,
-        operation: action.operation,
-        ...(action.seconds === undefined ? {} : { seconds: action.seconds }),
-      })),
-    }),
+    parameters,
+    gifts,
+    ...(template.id === 'overtime' && simplePlay.overtimeGiftActions !== undefined ? { overtimeGiftActions: overtimeGiftActions ?? [] } : {}),
     managedFingerprint: simplePlay.managedFingerprint,
   };
 }
 
-function templateParameters(templateId: SimplePlay['templateId']): readonly TemplateParameterDefinition[] {
-  return getGameplayTemplate(templateId)?.parameters ?? [];
+function exportLegacyOvertimeV1(simplePlay: SimplePlay): OnlineSimplePlay | undefined {
+  const parameters = Object.fromEntries(LEGACY_OVERTIME_V1_PARAMETERS.flatMap((definition) => {
+    const value = simplePlay.parameters[definition.id];
+    return isValidLegacyOvertimeV1Parameter(definition, value) ? [[definition.id, value]] : [];
+  }));
+  const gifts = exportTemplateGifts([{ id: 'overtime', label: '', description: '', minimum: 1, multiple: true }], simplePlay.gifts);
+  if (Object.keys(parameters).length !== LEGACY_OVERTIME_V1_PARAMETERS.length || gifts.overtime?.length === 0) return undefined;
+  return {
+    version: simplePlay.version,
+    templateId: 'overtime',
+    templateVersion: 1,
+    attributeId: simplePlay.attributeId,
+    parameters,
+    gifts,
+    managedFingerprint: simplePlay.managedFingerprint,
+  };
+}
+
+function exportTemplateParameters(
+  definitions: readonly TemplateParameterDefinition[],
+  source: SimplePlay['parameters'],
+): Record<string, TemplateParameterValue> {
+  return Object.fromEntries(definitions.flatMap((definition) => {
+    const value = source[definition.id];
+    return isValidSimplePlayParameter(definition, value) ? [[definition.id, value]] : [];
+  }));
+}
+
+function exportTemplateGifts(
+  slots: readonly TemplateGiftSlotDefinition[],
+  source: SimplePlay['gifts'],
+): Record<string, number[]> {
+  const used = new Set<number>();
+  return Object.fromEntries(slots.map((slot) => {
+    const giftIDs: number[] = [];
+    for (const giftID of source[slot.id] ?? []) {
+      if (!Number.isInteger(giftID) || giftID <= 0 || used.has(giftID)) continue;
+      used.add(giftID);
+      giftIDs.push(giftID);
+      if (!slot.multiple) break;
+    }
+    return [slot.id, giftIDs];
+  }));
+}
+
+function templateGift(id: number): GiftInfo {
+  return { id, name: String(id), price: 0, coinType: 'gold', imgBasic: '' };
+}
+
+function exportOvertimeGiftActions(
+  source: SimplePlay['overtimeGiftActions'],
+  giftIDs: readonly number[],
+): NonNullable<SimplePlay['overtimeGiftActions']> | undefined {
+  if (source === undefined) return undefined;
+  const configuredGiftIDs = new Set(giftIDs);
+  const seen = new Set<number>();
+  return source.flatMap((action) => {
+    if (!configuredGiftIDs.has(action.giftId) || seen.has(action.giftId) || !OVERTIME_OPERATIONS.has(action.operation)) return [];
+    if ((action.operation === 'add' || action.operation === 'subtract')
+      && (!Number.isInteger(action.seconds) || Number(action.seconds) <= 0)) return [];
+    seen.add(action.giftId);
+    return [{
+      giftId: action.giftId,
+      operation: action.operation,
+      ...(action.operation === 'add' || action.operation === 'subtract' ? { seconds: Number(action.seconds) } : {}),
+    }];
+  });
 }
 
 function isValidSimplePlayParameter(
@@ -425,7 +514,7 @@ function isValidSimplePlayParameter(
 ): value is TemplateParameterValue {
   switch (definition.kind) {
     case 'text':
-      return typeof value === 'string' && value.length <= 4096 && isSafeTemplateText(value);
+      return typeof value === 'string' && value.trim().length > 0 && value.length <= 4096 && !containsResourceReference(value);
     case 'select':
       return typeof value === 'string' && definition.options?.some((option) => option.value === value) === true;
     case 'toggle':
@@ -439,8 +528,23 @@ function isValidSimplePlayParameter(
   }
 }
 
-function isSafeTemplateText(value: string): boolean {
-  return !/^(?:[a-z][a-z0-9+.-]*:|\/\/|\\\\)/i.test(value.trim());
+function isValidLegacyOvertimeV1Parameter(
+  definition: (typeof LEGACY_OVERTIME_V1_PARAMETERS)[number],
+  value: unknown,
+): value is TemplateParameterValue {
+  if (definition.kind === 'text') return typeof value === 'string' && value.trim().length > 0 && value.length <= 4096 && !containsResourceReference(value);
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && value >= definition.min
+    && value <= definition.max;
+}
+
+function containsResourceReference(value: string): boolean {
+  return /(?:https?|data|file|blob|javascript):/i.test(value)
+    || /\/\//.test(value)
+    || /\\\\/.test(value)
+    || /(?:^|[\s"'(<])(?:\/|\.\.?\/)/.test(value)
+    || /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp|mp3|wav|ogg|m4a|mp4|m4v|mov|webm)(?:[?#\s]|$)/i.test(value);
 }
 
 function exportRuleLimits(state: AppState, exportedAt: Date): OnlineMigrationRuntime['ruleLimits'] {
@@ -460,15 +564,15 @@ function localDateString(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
-function collectReferencedGiftIDs(state: AppState): Set<number> {
+function collectReferencedGiftIDs(state: AppState, simplePlay: OnlineSimplePlay | undefined): Set<number> {
   const ids = new Set<number>();
   for (const rule of state.rules) {
     ids.add(rule.giftId);
     for (const matchedID of rule.matchGiftIds ?? []) ids.add(matchedID);
   }
   for (const panel of state.giftKpiPanels) for (const item of panel.items) ids.add(item.giftId);
-  for (const giftIDs of Object.values(state.simplePlay?.gifts ?? {})) for (const giftID of giftIDs) ids.add(giftID);
-  for (const action of state.simplePlay?.overtimeGiftActions ?? []) ids.add(action.giftId);
+  for (const giftIDs of Object.values(simplePlay?.gifts ?? {})) for (const giftID of giftIDs) ids.add(giftID);
+  for (const action of simplePlay?.overtimeGiftActions ?? []) ids.add(action.giftId);
   return ids;
 }
 
