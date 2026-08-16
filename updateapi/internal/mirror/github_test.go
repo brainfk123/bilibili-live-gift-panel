@@ -115,6 +115,9 @@ func TestGitHubReleaseSourceLatestRejectsUntrustedRelease(t *testing.T) {
 		{name: "non hexadecimal digest", mutate: func(release map[string]any) {
 			release["assets"] = mutateAsset(validAssets(), AssetExecutable, "digest", "sha256:"+strings.Repeat("g", 64))
 		}},
+		{name: "uppercase hexadecimal digest", mutate: func(release map[string]any) {
+			release["assets"] = mutateAsset(validAssets(), AssetExecutable, "digest", "sha256:"+strings.Repeat("A", 64))
+		}},
 		{name: "non HTTPS asset URL", mutate: func(release map[string]any) {
 			release["assets"] = mutateAsset(validAssets(), AssetExecutable, "browser_download_url", "http://github.com/brainfk123/bilibili-live-gift-panel/releases/download/v0.4.4/gift-panel-windows-x64.exe")
 		}},
@@ -141,6 +144,47 @@ func TestGitHubReleaseSourceLatestRejectsUntrustedRelease(t *testing.T) {
 
 			if _, err := newGitHubReleaseSource(server.Client(), server.URL).Latest(context.Background(), ""); err == nil {
 				t.Fatal("Latest() error = nil, want rejection")
+			}
+		})
+	}
+}
+
+func TestGitHubReleaseSourceLatestRejectsDuplicateSecurityFields(t *testing.T) {
+	valid := marshalReleaseJSON(t, validReleaseJSON())
+	executableURL := `"browser_download_url":"https://github.com/brainfk123/bilibili-live-gift-panel/releases/download/v0.4.4/gift-panel-windows-x64.exe"`
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "duplicate draft",
+			body: strings.Replace(valid, `"draft":false`, `"draft":false,"draft":false`, 1),
+		},
+		{
+			name: "duplicate tag name",
+			body: strings.Replace(valid, `"tag_name":"v0.4.4"`, `"tag_name":"v0.4.4","tag_name":"v0.4.4"`, 1),
+		},
+		{
+			name: "duplicate assets",
+			body: strings.Replace(valid, `"assets":`, `"assets":[],"assets":`, 1),
+		},
+		{
+			name: "duplicate asset download URL",
+			body: strings.Replace(valid, executableURL, executableURL+","+executableURL, 1),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("ETag", `"current"`)
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			defer server.Close()
+
+			if _, err := newGitHubReleaseSource(server.Client(), server.URL).Latest(context.Background(), ""); err == nil {
+				t.Fatal("Latest() error = nil, want duplicate-field rejection")
 			}
 		})
 	}
@@ -225,4 +269,13 @@ func writeReleaseJSON(t *testing.T, writer http.ResponseWriter, value map[string
 	if err := json.NewEncoder(writer).Encode(value); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func marshalReleaseJSON(t *testing.T, value map[string]any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
 }

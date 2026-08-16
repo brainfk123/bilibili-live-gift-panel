@@ -2,6 +2,7 @@
 package mirror
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -134,20 +135,147 @@ type githubAssetPayload struct {
 }
 
 func decodeGitHubRelease(body io.Reader) (githubReleasePayload, error) {
-	limited := &io.LimitedReader{R: body, N: maxReleaseResponseSize + 1}
-	decoder := json.NewDecoder(limited)
-	var payload githubReleasePayload
-	if err := decoder.Decode(&payload); err != nil {
-		return githubReleasePayload{}, errors.New("could not parse GitHub release response")
+	data, err := io.ReadAll(io.LimitReader(body, maxReleaseResponseSize+1))
+	if err != nil {
+		return githubReleasePayload{}, errors.New("could not read GitHub release response")
 	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		return githubReleasePayload{}, errors.New("GitHub release response must contain one JSON value")
-	}
-	if limited.N <= 0 {
+	if len(data) > maxReleaseResponseSize {
 		return githubReleasePayload{}, errors.New("GitHub release response exceeds size limit")
 	}
+	if err := rejectDuplicateSecurityFields(data); err != nil {
+		return githubReleasePayload{}, err
+	}
+	var payload githubReleasePayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return githubReleasePayload{}, errors.New("could not parse GitHub release response")
+	}
 	return payload, nil
+}
+
+type jsonObjectKind uint8
+
+const (
+	jsonGenericObject jsonObjectKind = iota
+	jsonReleaseObject
+	jsonAssetObject
+)
+
+func rejectDuplicateSecurityFields(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	first, err := decoder.Token()
+	if err != nil || first != json.Delim('{') {
+		return errors.New("could not parse GitHub release response")
+	}
+	if err := scanJSONObject(decoder, jsonReleaseObject); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return errors.New("GitHub release response must contain one JSON value")
+	}
+	return nil
+}
+
+func scanJSONObject(decoder *json.Decoder, kind jsonObjectKind) error {
+	seen := make(map[string]struct{})
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return errors.New("could not parse GitHub release response")
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return errors.New("could not parse GitHub release response")
+		}
+		if isSecurityField(kind, key) {
+			if _, duplicated := seen[key]; duplicated {
+				return errors.New("GitHub release response contains duplicate security field")
+			}
+			seen[key] = struct{}{}
+		}
+
+		value, err := decoder.Token()
+		if err != nil {
+			return errors.New("could not parse GitHub release response")
+		}
+		if kind == jsonReleaseObject && key == "assets" {
+			if delimiter, ok := value.(json.Delim); ok && delimiter == '[' {
+				if err := scanAssetsArray(decoder); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		if err := scanJSONValue(decoder, value); err != nil {
+			return err
+		}
+	}
+	if end, err := decoder.Token(); err != nil || end != json.Delim('}') {
+		return errors.New("could not parse GitHub release response")
+	}
+	return nil
+}
+
+func scanAssetsArray(decoder *json.Decoder) error {
+	for decoder.More() {
+		value, err := decoder.Token()
+		if err != nil {
+			return errors.New("could not parse GitHub release response")
+		}
+		if delimiter, ok := value.(json.Delim); ok && delimiter == '{' {
+			if err := scanJSONObject(decoder, jsonAssetObject); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := scanJSONValue(decoder, value); err != nil {
+			return err
+		}
+	}
+	if end, err := decoder.Token(); err != nil || end != json.Delim(']') {
+		return errors.New("could not parse GitHub release response")
+	}
+	return nil
+}
+
+func scanJSONValue(decoder *json.Decoder, value json.Token) error {
+	delimiter, ok := value.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		return scanJSONObject(decoder, jsonGenericObject)
+	case '[':
+		for decoder.More() {
+			child, err := decoder.Token()
+			if err != nil {
+				return errors.New("could not parse GitHub release response")
+			}
+			if err := scanJSONValue(decoder, child); err != nil {
+				return err
+			}
+		}
+		if end, err := decoder.Token(); err != nil || end != json.Delim(']') {
+			return errors.New("could not parse GitHub release response")
+		}
+	}
+	return nil
+}
+
+func isSecurityField(kind jsonObjectKind, key string) bool {
+	switch kind {
+	case jsonReleaseObject:
+		switch key {
+		case "tag_name", "draft", "prerelease", "published_at", "assets":
+			return true
+		}
+	case jsonAssetObject:
+		switch key {
+		case "name", "browser_download_url", "size", "digest":
+			return true
+		}
+	}
+	return false
 }
 
 func validateGitHubRelease(payload githubReleasePayload) (RemoteRelease, error) {
@@ -229,6 +357,9 @@ func validateAssetDigest(digest string) error {
 	}
 	const prefix = "sha256:"
 	if !strings.HasPrefix(digest, prefix) || len(digest) != len(prefix)+64 {
+		return errors.New("GitHub release asset digest is invalid")
+	}
+	if digest != strings.ToLower(digest) {
 		return errors.New("GitHub release asset digest is invalid")
 	}
 	if _, err := hex.DecodeString(digest[len(prefix):]); err != nil {
