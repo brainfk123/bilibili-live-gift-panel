@@ -52,6 +52,7 @@ const (
 	StagePublisher     Stage = "publisher"
 	StagePublish       Stage = "publish"
 	StageStateSave     Stage = "state-save"
+	StageCleanup       Stage = "cleanup"
 )
 
 type runError struct {
@@ -103,9 +104,10 @@ type Runner struct {
 	Now          func() time.Time
 }
 
-// Run performs one transaction. Complete artifacts are always removed on return;
-// the downloader alone owns any resumable EXE partial state.
-func (runner *Runner) Run(ctx context.Context, options RunOptions) (RunResult, error) {
+// Run performs one transaction. It asks the fetcher to remove each exact
+// completed artifact on return and reports cleanup failures explicitly; the
+// downloader alone owns any resumable EXE partial state.
+func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunResult, runErr error) {
 	if runner == nil || runner.Source == nil || runner.Fetcher == nil || runner.State == nil {
 		return RunResult{}, runnerFailure(StageConfiguration, "", errors.New("runner dependencies are incomplete"))
 	}
@@ -135,8 +137,27 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (RunResult, e
 
 	paths := make(map[string]string, 4)
 	defer func() {
-		for _, path := range paths {
-			_ = os.Remove(path)
+		if len(paths) == 0 {
+			return
+		}
+		cleaner, ok := runner.Fetcher.(CompletedArtifactCleaner)
+		var cleanupErrors []error
+		if !ok {
+			cleanupErrors = append(cleanupErrors, errors.New("artifact fetcher does not support owned cleanup"))
+		} else {
+			for _, name := range []string{AssetExecutable, AssetChecksum, AssetManifest, AssetChangelog} {
+				path, exists := paths[name]
+				if !exists {
+					continue
+				}
+				if err := cleaner.CleanupCompleted(ctx, path); err != nil {
+					cleanupErrors = append(cleanupErrors, err)
+				}
+			}
+		}
+		if len(cleanupErrors) != 0 {
+			cleanupErrors = append(cleanupErrors, runErr)
+			runErr = runnerFailure(StageCleanup, tag, errors.Join(cleanupErrors...))
 		}
 	}()
 
@@ -180,6 +201,10 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (RunResult, e
 	if options.DryRun {
 		return RunResult{Tag: tag, DryRun: true, StateInvalid: stateInvalid}, nil
 	}
+	prepared, err := publish.NewPreparedRelease(bodies[AssetExecutable], bodies[AssetChecksum], bodies[AssetChangelog])
+	if err != nil {
+		return RunResult{Tag: tag, StateInvalid: stateInvalid}, runnerFailure(StageValidation, tag, err)
+	}
 	if runner.NewPublisher == nil {
 		return RunResult{Tag: tag, StateInvalid: stateInvalid}, runnerFailure(StagePublisher, tag, errors.New("publisher factory is required"))
 	}
@@ -191,11 +216,9 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (RunResult, e
 		return RunResult{Tag: tag, StateInvalid: stateInvalid}, runnerFailure(StagePublisher, tag, err)
 	}
 	outcome, err := publisher.Publish(ctx, publish.Input{
-		Tag:           tag,
-		AssetPath:     paths[AssetExecutable],
-		ChecksumPath:  paths[AssetChecksum],
-		ChangelogPath: paths[AssetChangelog],
-		PublishedAt:   candidate.PublishedAt.UTC(),
+		Tag:         tag,
+		PublishedAt: candidate.PublishedAt.UTC(),
+		Prepared:    prepared,
 	})
 	if err != nil {
 		return RunResult{Tag: tag, StateInvalid: stateInvalid}, runnerFailure(StagePublish, tag, err)

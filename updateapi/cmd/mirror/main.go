@@ -103,12 +103,17 @@ func run(parent context.Context, args []string, lookup environmentLookup, factor
 		now = time.Now
 	}
 	startedAt := now()
+	ctx, cancel := context.WithTimeout(parent, invocationTimeout)
+	defer cancel()
 	finishFailure := func(err error) error {
 		if _, ok := err.(*commandError); !ok && mirror.StageOf(err) == "" {
 			err = commandFailure(stageInvocation, err)
 		}
 		writeFailureSummary(output, err, now().Sub(startedAt))
 		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return finishFailure(commandFailure(stageInvocation, err))
 	}
 
 	dryRun := false
@@ -119,6 +124,9 @@ func run(parent context.Context, args []string, lookup environmentLookup, factor
 	flags.StringVar(&stateDirectory, "state-dir", defaultStateDirectory, "absolute mirror state directory")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !isAbsoluteCleanStateDirectory(stateDirectory) {
 		return finishFailure(commandFailure(stageArguments, errors.New("command arguments are invalid")))
+	}
+	if err := ctx.Err(); err != nil {
+		return finishFailure(commandFailure(stageInvocation, err))
 	}
 
 	configuration := cosConfiguration{}
@@ -137,16 +145,36 @@ func run(parent context.Context, args []string, lookup environmentLookup, factor
 			return finishFailure(commandFailure(stageConfiguration, errors.New("COS configuration is incomplete")))
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return finishFailure(commandFailure(stageInvocation, err))
+	}
 
-	runner, err := factory(stateDirectory, configuration)
+	type constructionResult struct {
+		runner commandRunner
+		err    error
+	}
+	constructed := make(chan constructionResult, 1)
+	go func() {
+		runner, err := factory(stateDirectory, configuration)
+		constructed <- constructionResult{runner: runner, err: err}
+	}()
+	var runner commandRunner
+	var err error
+	select {
+	case <-ctx.Done():
+		return finishFailure(commandFailure(stageInvocation, ctx.Err()))
+	case result := <-constructed:
+		runner, err = result.runner, result.err
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return finishFailure(commandFailure(stageInvocation, contextErr))
+	}
 	if err != nil || runner == nil {
 		if err == nil {
 			err = errors.New("runner factory returned nil")
 		}
 		return finishFailure(commandFailure(stageConfiguration, err))
 	}
-	ctx, cancel := context.WithTimeout(parent, invocationTimeout)
-	defer cancel()
 	result, err := runner.Run(ctx, mirror.RunOptions{DryRun: dryRun})
 	if err != nil {
 		return finishFailure(err)

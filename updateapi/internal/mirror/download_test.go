@@ -68,6 +68,85 @@ func TestDownloaderCompletesBoundedDownloadAndSyncsBeforeRename(t *testing.T) {
 	assertPathMissing(t, path+".part.meta")
 }
 
+// Mutation caught: accepting an arbitrary absolute path lets cleanup delete a file the downloader never returned.
+func TestDownloaderCleanupRejectsWrongOrOutsidePathWithoutDeletingIt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte("x"))
+	}))
+	defer server.Close()
+	downloader := mustNewConcreteDownloader(t, server.Client(), t.TempDir())
+	if _, err := downloader.Download(context.Background(), DownloadSpec{Name: AssetManifest, URL: server.URL, Size: 1, MaxBytes: maxManifestBytes}); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), AssetManifest)
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := downloader.CleanupCompleted(context.Background(), outside); err == nil {
+		t.Fatal("CleanupCompleted() accepted an outside path")
+	}
+	assertFileContent(t, outside, "outside")
+}
+
+// Mutation caught: deleting only by root-relative name removes a replacement file that is not the completed artifact returned by Download.
+func TestDownloaderCleanupRejectsReplacedCompletedArtifact(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte("original"))
+	}))
+	defer server.Close()
+	stateDir := t.TempDir()
+	downloader := mustNewConcreteDownloader(t, server.Client(), stateDir)
+	completed, err := downloader.Download(context.Background(), DownloadSpec{Name: AssetManifest, URL: server.URL, Size: int64(len("original")), MaxBytes: maxManifestBytes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retainedOriginal := completed + ".retained"
+	if err := os.Rename(completed, retainedOriginal); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(completed, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := downloader.CleanupCompleted(context.Background(), completed); err == nil {
+		t.Fatal("CleanupCompleted() deleted a replacement path")
+	}
+	assertFileContent(t, completed, "replacement")
+	assertFileContent(t, retainedOriginal, "original")
+}
+
+// Mutation caught: discarding a root-relative removal failure reports cleanup success while the completed artifact remains.
+func TestDownloaderCleanupReturnsRemovalFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte("x"))
+	}))
+	defer server.Close()
+	stateDir := t.TempDir()
+	downloader, err := newDownloaderWithOptions(server.Client(), stateDir, downloaderOptions{
+		overallTimeout: time.Second,
+		maxAttempts:    1,
+		backoff:        func(context.Context, int) error { return nil },
+		syncFile:       func(file *os.File) error { return file.Sync() },
+		rename:         replaceDownloadFile,
+		removeCompleted: func(*os.Root, string) error {
+			return errors.New("injected removal failure")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := downloader.Download(context.Background(), DownloadSpec{Name: AssetManifest, URL: server.URL, Size: 1, MaxBytes: maxManifestBytes})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := downloader.CleanupCompleted(context.Background(), completed); err == nil {
+		t.Fatal("CleanupCompleted() error = nil, want removal failure")
+	}
+	assertFileContent(t, completed, "x")
+}
+
 func TestResumeUsesRangeAndIfRangeBoundToExactMetadata(t *testing.T) {
 	content := "abcdef"
 	stateDir := t.TempDir()
@@ -680,6 +759,21 @@ func TestDownloaderRejectsWindowsJunctionStateDirectory(t *testing.T) {
 }
 
 func mustNewDownloader(t *testing.T, client *http.Client, stateDir string) ArtifactFetcher {
+	t.Helper()
+	downloader, err := newDownloaderWithOptions(client, stateDir, downloaderOptions{
+		overallTimeout: defaultDownloadTimeout,
+		maxAttempts:    defaultMaxAttempts,
+		backoff:        defaultDownloadBackoff,
+		syncFile:       func(file *os.File) error { return file.Sync() },
+		rename:         replaceDownloadFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return downloader
+}
+
+func mustNewConcreteDownloader(t *testing.T, client *http.Client, stateDir string) *downloader {
 	t.Helper()
 	downloader, err := newDownloaderWithOptions(client, stateDir, downloaderOptions{
 		overallTimeout: defaultDownloadTimeout,

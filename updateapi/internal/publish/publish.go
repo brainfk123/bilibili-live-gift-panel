@@ -56,6 +56,27 @@ type Input struct {
 	ChecksumPath  string
 	ChangelogPath string
 	PublishedAt   time.Time
+	Prepared      *PreparedRelease
+}
+
+// PreparedRelease is an immutable, in-memory snapshot of already validated
+// release bytes. Its fields are private and the constructor copies all input.
+type PreparedRelease struct {
+	asset     []byte
+	checksum  []byte
+	changelog []byte
+}
+
+// NewPreparedRelease takes an immutable snapshot for the publisher transaction.
+func NewPreparedRelease(asset, checksum, changelog []byte) (*PreparedRelease, error) {
+	if len(asset) == 0 || len(checksum) == 0 || len(changelog) == 0 {
+		return nil, errors.New("prepared release bytes are incomplete")
+	}
+	return &PreparedRelease{
+		asset:     append([]byte(nil), asset...),
+		checksum:  append([]byte(nil), checksum...),
+		changelog: append([]byte(nil), changelog...),
+	}, nil
 }
 
 // Publisher binds the existing immutable release transaction to one COS store.
@@ -103,18 +124,14 @@ func Publish(ctx context.Context, store Store, input Input) (Outcome, error) {
 	if _, err := release.ParseStableTag(input.Tag); err != nil {
 		return "", fmt.Errorf("release tag %q must use canonical vMAJOR.MINOR.PATCH syntax", input.Tag)
 	}
-	asset, err := readAsset(input.AssetPath)
+	materials, err := readInputMaterials(input)
 	if err != nil {
 		return "", err
 	}
-	if err := validateChecksum(input.ChecksumPath, asset.digest); err != nil {
+	if err := validateChecksumBytes(materials.checksum, materials.asset.digest); err != nil {
 		return "", err
 	}
-	changelog, err := os.ReadFile(input.ChangelogPath)
-	if err != nil {
-		return "", fmt.Errorf("read changelog: %w", err)
-	}
-	if _, err := release.ParseChangelog(changelog); err != nil {
+	if _, err := release.ParseChangelog(materials.changelog); err != nil {
 		return "", fmt.Errorf("validate changelog: %w", err)
 	}
 
@@ -126,8 +143,8 @@ func Publish(ctx context.Context, store Store, input Input) (Outcome, error) {
 		Asset: release.AssetManifest{
 			Name:      assetName,
 			ObjectKey: prefix + assetName,
-			Size:      int64(len(asset.body)),
-			SHA256:    asset.digest,
+			Size:      int64(len(materials.asset.body)),
+			SHA256:    materials.asset.digest,
 		},
 		ChangelogObjectKey: prefix + changelogName,
 	}
@@ -138,14 +155,10 @@ func Publish(ctx context.Context, store Store, input Input) (Outcome, error) {
 	if err != nil {
 		return "", fmt.Errorf("encode release manifest: %w", err)
 	}
-	checksum, err := os.ReadFile(input.ChecksumPath)
-	if err != nil {
-		return "", fmt.Errorf("read checksum: %w", err)
-	}
 	objects := []object{
-		withKey(asset, prefix+assetName),
-		newObject(prefix+checksumName, checksum, "text/plain; charset=utf-8"),
-		newObject(prefix+changelogName, changelog, "application/json"),
+		withKey(materials.asset, prefix+assetName),
+		newObject(prefix+checksumName, materials.checksum, "text/plain; charset=utf-8"),
+		newObject(prefix+changelogName, materials.changelog, "application/json"),
 		newObject(prefix+releaseName, manifestBody, "application/json"),
 	}
 	for _, candidate := range objects {
@@ -267,11 +280,47 @@ func readAsset(path string) (object, error) {
 	return newObject("", body, "application/vnd.microsoft.portable-executable"), nil
 }
 
-func validateChecksum(path, want string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read checksum: %w", err)
+type inputMaterials struct {
+	asset     object
+	checksum  []byte
+	changelog []byte
+}
+
+func readInputMaterials(input Input) (inputMaterials, error) {
+	hasAnyPath := input.AssetPath != "" || input.ChecksumPath != "" || input.ChangelogPath != ""
+	hasAllPaths := input.AssetPath != "" && input.ChecksumPath != "" && input.ChangelogPath != ""
+	if input.Prepared != nil {
+		if hasAnyPath {
+			return inputMaterials{}, errors.New("release input must not mix paths and a prepared snapshot")
+		}
+		if len(input.Prepared.asset) == 0 || len(input.Prepared.checksum) == 0 || len(input.Prepared.changelog) == 0 {
+			return inputMaterials{}, errors.New("prepared release snapshot is invalid")
+		}
+		return inputMaterials{
+			asset:     newObject("", input.Prepared.asset, "application/vnd.microsoft.portable-executable"),
+			checksum:  input.Prepared.checksum,
+			changelog: input.Prepared.changelog,
+		}, nil
 	}
+	if !hasAllPaths {
+		return inputMaterials{}, errors.New("release input paths are incomplete")
+	}
+	asset, err := readAsset(input.AssetPath)
+	if err != nil {
+		return inputMaterials{}, err
+	}
+	checksum, err := os.ReadFile(input.ChecksumPath)
+	if err != nil {
+		return inputMaterials{}, fmt.Errorf("read checksum: %w", err)
+	}
+	changelog, err := os.ReadFile(input.ChangelogPath)
+	if err != nil {
+		return inputMaterials{}, fmt.Errorf("read changelog: %w", err)
+	}
+	return inputMaterials{asset: asset, checksum: checksum, changelog: changelog}, nil
+}
+
+func validateChecksumBytes(data []byte, want string) error {
 	if len(data) > maxChecksumSize {
 		return errors.New("checksum file exceeds 16 KiB")
 	}

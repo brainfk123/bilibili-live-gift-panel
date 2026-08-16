@@ -192,6 +192,91 @@ func TestRunWithSignalsCancelsOnSIGTERM(t *testing.T) {
 	}
 }
 
+// Mutation caught: running the factory synchronously prevents SIGTERM from returning while state-directory construction is blocked.
+func TestRunWithSignalsCancelsBlockingFactoryOnSIGTERM(t *testing.T) {
+	signals := make(chan os.Signal, 1)
+	started := make(chan struct{})
+	releaseFactory := make(chan struct{})
+	runner := &fakeCommandRunner{}
+	result := make(chan error, 1)
+	go func() {
+		var output bytes.Buffer
+		result <- runWithSignals(context.Background(), signals, []string{"--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, func(string, cosConfiguration) (commandRunner, error) {
+			close(started)
+			<-releaseFactory
+			return runner, nil
+		}, &output, time.Now)
+	}()
+	<-started
+	signals <- syscall.SIGTERM
+	select {
+	case err := <-result:
+		close(releaseFactory)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("runWithSignals() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		close(releaseFactory)
+		<-result
+		t.Fatal("SIGTERM did not interrupt blocking runner construction")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if runner.calls != 0 {
+		t.Fatalf("late factory result executed Runner.Run() %d times", runner.calls)
+	}
+}
+
+// Mutation caught: a caller deadline cannot stop synchronous runner construction before Runner.Run receives a context.
+func TestRunCallerDeadlineCancelsBlockingFactory(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := make(chan struct{})
+	releaseFactory := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		var output bytes.Buffer
+		result <- run(ctx, []string{"--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, func(string, cosConfiguration) (commandRunner, error) {
+			close(started)
+			<-releaseFactory
+			return &fakeCommandRunner{}, nil
+		}, &output, time.Now)
+	}()
+	<-started
+	select {
+	case err := <-result:
+		close(releaseFactory)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("run() error = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		close(releaseFactory)
+		<-result
+		t.Fatal("caller deadline did not interrupt blocking runner construction")
+	}
+}
+
+// Mutation caught: creating the 15-minute timeout after factory completion gives construction unbounded extra time.
+func TestRunOverallDeadlineStartsBeforeFactoryConstruction(t *testing.T) {
+	runner := &fakeCommandRunner{inspectContext: func(ctx context.Context) error {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return errors.New("deadline is missing")
+		}
+		if remaining := time.Until(deadline); remaining >= invocationTimeout-50*time.Millisecond {
+			return fmt.Errorf("deadline started after construction: remaining %s", remaining)
+		}
+		return nil
+	}, result: mirror.RunResult{Tag: "v1.2.3", DryRun: true}}
+	var output bytes.Buffer
+	err := run(context.Background(), []string{"--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, func(string, cosConfiguration) (commandRunner, error) {
+		time.Sleep(100 * time.Millisecond)
+		return runner, nil
+	}, &output, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Mutation caught: formatting whole results or dependency values can expose paths, URLs, or credentials in success logs.
 func TestRunWritesOnlySafeSuccessSummaries(t *testing.T) {
 	for _, result := range []mirror.RunResult{
@@ -248,9 +333,11 @@ type fakeCommandRunner struct {
 	err            error
 	options        mirror.RunOptions
 	inspectContext func(context.Context) error
+	calls          int
 }
 
 func (runner *fakeCommandRunner) Run(ctx context.Context, options mirror.RunOptions) (mirror.RunResult, error) {
+	runner.calls++
 	runner.options = options
 	if runner.inspectContext != nil {
 		if err := runner.inspectContext(ctx); err != nil {

@@ -33,6 +33,12 @@ type ArtifactFetcher interface {
 	Download(context.Context, DownloadSpec) (string, error)
 }
 
+// CompletedArtifactCleaner removes only completed artifacts whose exact file
+// identity was previously returned by the same fetcher.
+type CompletedArtifactCleaner interface {
+	CleanupCompleted(context.Context, string) error
+}
+
 type resumeMetadata struct {
 	URL  string `json:"url"`
 	ETag string `json:"etag"`
@@ -40,13 +46,14 @@ type resumeMetadata struct {
 }
 
 type downloaderOptions struct {
-	overallTimeout time.Duration
-	maxAttempts    int
-	backoff        func(context.Context, int) error
-	syncFile       func(*os.File) error
-	openFile       func(*os.Root, string, int, os.FileMode) (*os.File, error)
-	beforeRename   func()
-	rename         func(*os.Root, string, string) error
+	overallTimeout  time.Duration
+	maxAttempts     int
+	backoff         func(context.Context, int) error
+	syncFile        func(*os.File) error
+	openFile        func(*os.Root, string, int, os.FileMode) (*os.File, error)
+	beforeRename    func()
+	rename          func(*os.Root, string, string) error
+	removeCompleted func(*os.Root, string) error
 }
 
 type downloader struct {
@@ -55,6 +62,12 @@ type downloader struct {
 	stateInfo os.FileInfo
 	options   downloaderOptions
 	gate      chan struct{}
+	completed map[string]completedArtifact
+}
+
+type completedArtifact struct {
+	name string
+	info os.FileInfo
 }
 
 type partialDownload struct {
@@ -73,11 +86,12 @@ func (err *attemptError) Unwrap() error { return err.err }
 
 func NewDownloader(stateDir string) (ArtifactFetcher, error) {
 	return newDownloaderWithOptions(NewRestrictedHTTPClient(), stateDir, downloaderOptions{
-		overallTimeout: defaultDownloadTimeout,
-		maxAttempts:    defaultMaxAttempts,
-		backoff:        defaultDownloadBackoff,
-		syncFile:       func(file *os.File) error { return file.Sync() },
-		rename:         replaceDownloadFile,
+		overallTimeout:  defaultDownloadTimeout,
+		maxAttempts:     defaultMaxAttempts,
+		backoff:         defaultDownloadBackoff,
+		syncFile:        func(file *os.File) error { return file.Sync() },
+		rename:          replaceDownloadFile,
+		removeCompleted: func(root *os.Root, name string) error { return root.Remove(name) },
 	})
 }
 
@@ -98,13 +112,16 @@ func newDownloaderWithOptions(client *http.Client, stateDir string, options down
 	if options.openFile == nil {
 		options.openFile = openDownloadFile
 	}
+	if options.removeCompleted == nil {
+		options.removeCompleted = func(root *os.Root, name string) error { return root.Remove(name) }
+	}
 	if options.overallTimeout <= 0 || options.maxAttempts <= 0 || options.maxAttempts > defaultMaxAttempts ||
 		options.backoff == nil || options.syncFile == nil || options.rename == nil {
 		return nil, errors.New("download options are invalid")
 	}
 	gate := make(chan struct{}, 1)
 	gate <- struct{}{}
-	return &downloader{client: client, stateDir: stateDir, stateInfo: info, options: options, gate: gate}, nil
+	return &downloader{client: client, stateDir: stateDir, stateInfo: info, options: options, gate: gate, completed: make(map[string]completedArtifact)}, nil
 }
 
 func (downloader *downloader) Download(ctx context.Context, spec DownloadSpec) (string, error) {
@@ -156,6 +173,45 @@ func (downloader *downloader) Download(ctx context.Context, spec DownloadSpec) (
 		}
 	}
 	return "", errors.New("artifact download failed")
+}
+
+// CleanupCompleted removes a returned completed artifact through the bound
+// state-directory root only if its current identity is still the returned file.
+func (downloader *downloader) CleanupCompleted(ctx context.Context, path string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-downloader.gate:
+	}
+	defer func() { downloader.gate <- struct{}{} }()
+
+	completed, ok := downloader.completed[path]
+	if !ok || path != filepath.Join(downloader.stateDir, completed.name) {
+		return errors.New("completed artifact is not owned by this downloader")
+	}
+	root, err := os.OpenRoot(downloader.stateDir)
+	if err != nil {
+		return errors.New("could not open download state directory for cleanup")
+	}
+	defer root.Close()
+	if err := downloader.validateStateRoot(root); err != nil {
+		return errors.New("download state directory changed before cleanup")
+	}
+	current, err := root.Lstat(completed.name)
+	if err != nil || current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() || !os.SameFile(completed.info, current) {
+		return errors.New("completed artifact changed before cleanup")
+	}
+	if err := downloader.options.removeCompleted(root, completed.name); err != nil {
+		return errors.New("could not remove completed artifact")
+	}
+	if err := downloader.validateStateRoot(root); err != nil {
+		return errors.New("download state directory changed during cleanup")
+	}
+	if err := syncDownloadDirectory(root); err != nil {
+		return errors.New("could not sync completed artifact cleanup")
+	}
+	delete(downloader.completed, path)
+	return nil
 }
 
 func (downloader *downloader) downloadOnce(ctx context.Context, root *os.Root, spec DownloadSpec) error {
@@ -340,6 +396,7 @@ func (downloader *downloader) downloadOnce(ctx context.Context, root *os.Root, s
 	if err := syncDownloadDirectory(root); err != nil {
 		return errors.New("could not sync completed artifact directory")
 	}
+	downloader.completed[filepath.Join(downloader.stateDir, finalName)] = completedArtifact{name: finalName, info: installedInfo}
 	return nil
 }
 

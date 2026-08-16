@@ -1,17 +1,20 @@
 package mirror
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/cosstore"
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/publish"
 )
 
@@ -78,7 +81,7 @@ func TestRunnerDownloadsFourFixedAssetsBeforePublishingAndSavingState(t *testing
 	}
 	input := fixture.publisher.input
 	if input.Tag != fixture.release.Tag || input.PublishedAt != fixture.release.PublishedAt ||
-		filepath.Base(input.AssetPath) != AssetExecutable || filepath.Base(input.ChecksumPath) != AssetChecksum || filepath.Base(input.ChangelogPath) != AssetChangelog {
+		input.Prepared == nil || input.AssetPath != "" || input.ChecksumPath != "" || input.ChangelogPath != "" {
 		t.Fatalf("Publish() input = %+v", input)
 	}
 	if fixture.state.saveCalls != 1 {
@@ -305,6 +308,58 @@ func TestRunnerCleansCompleteArtifactsAfterSuccessAndFailure(t *testing.T) {
 	}
 }
 
+// Mutation caught: ignoring companion cleanup failures reports success after publish/state save and hides the incomplete cleanup.
+func TestRunnerReturnsSafeCleanupStageAfterPublishedStateCannotBeCleaned(t *testing.T) {
+	fixture := newRunnerFixture(t)
+	fixture.fetcher.cleanupErr = errors.New("C:/private/artifact https://secret.invalid/?token=credential")
+
+	result, err := fixture.runner().Run(context.Background(), RunOptions{})
+	if err == nil || StageOf(err) != StageCleanup {
+		t.Fatalf("Run() result=%+v error=%v stage=%q, want cleanup failure", result, err, StageOf(err))
+	}
+	if fixture.publisher.calls != 1 || fixture.state.saveCalls != 1 {
+		t.Fatalf("cleanup ordering: publishes=%d saves=%d", fixture.publisher.calls, fixture.state.saveCalls)
+	}
+	if len(fixture.fetcher.cleanupPaths) != 4 {
+		t.Fatalf("CleanupCompleted() calls = %d, want 4", len(fixture.fetcher.cleanupPaths))
+	}
+	for _, leaked := range []string{"C:/private", "secret.invalid", "token=", "credential"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Fatalf("cleanup error leaked %q: %v", leaked, err)
+		}
+	}
+}
+
+// Mutation caught: reopening validated paths after the publisher factory runs allows a coherent replacement release to be published without strict validation.
+func TestRunnerPublishesTheExactValidatedSnapshotAfterFactorySwapsFiles(t *testing.T) {
+	fixture := newRunnerFixture(t)
+	originalExecutable := append([]byte(nil), fixture.bodies[AssetExecutable]...)
+	store := newRunnerSnapshotStore()
+	fixture.newPublisher = func() (Publisher, error) {
+		replacementExecutable := []byte("MZ replacement executable")
+		replacementDigest := sha256.Sum256(replacementExecutable)
+		replacements := map[string][]byte{
+			AssetExecutable: replacementExecutable,
+			AssetChecksum:   []byte(hex.EncodeToString(replacementDigest[:]) + "  " + AssetExecutable),
+			AssetChangelog:  []byte(`{"schemaVersion":1,"releases":[{"version":"1.2.3","summary":"replacement"}]}`),
+		}
+		for name, body := range replacements {
+			if err := os.WriteFile(filepath.Join(fixture.directory, name), body, 0o600); err != nil {
+				return nil, err
+			}
+		}
+		return publish.NewPublisher(store)
+	}
+
+	if _, err := fixture.runner().Run(context.Background(), RunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	published := store.objects["releases/v1.2.3/"+AssetExecutable]
+	if !bytes.Equal(published, originalExecutable) {
+		t.Fatalf("published EXE = %q, want exact validated bytes %q", published, originalExecutable)
+	}
+}
+
 func assertRunnerStageFailure(t *testing.T, fixture *runnerFixture, wantStage Stage) {
 	t.Helper()
 	_, err := fixture.runner().Run(context.Background(), RunOptions{})
@@ -328,6 +383,7 @@ type runnerFixture struct {
 	publisher    *fakePublisher
 	factoryCalls int
 	factoryErr   error
+	newPublisher PublisherFactory
 }
 
 func newRunnerFixture(t *testing.T) *runnerFixture {
@@ -390,6 +446,9 @@ func (fixture *runnerFixture) runner() *Runner {
 		State:   fixture.state,
 		NewPublisher: func() (Publisher, error) {
 			fixture.factoryCalls++
+			if fixture.newPublisher != nil {
+				return fixture.newPublisher()
+			}
 			if fixture.factoryErr != nil {
 				return nil, fixture.factoryErr
 			}
@@ -397,6 +456,54 @@ func (fixture *runnerFixture) runner() *Runner {
 		},
 		Now: func() time.Time { return fixture.now },
 	}
+}
+
+type runnerSnapshotStore struct {
+	objects map[string][]byte
+}
+
+func newRunnerSnapshotStore() *runnerSnapshotStore {
+	return &runnerSnapshotStore{objects: make(map[string][]byte)}
+}
+
+func (store *runnerSnapshotStore) Head(_ context.Context, key string) (cosstore.ObjectInfo, error) {
+	body, ok := store.objects[key]
+	if !ok {
+		return cosstore.ObjectInfo{}, cosstore.ErrNotFound
+	}
+	digest := sha256.Sum256(body)
+	return cosstore.ObjectInfo{Size: int64(len(body)), SHA256: hex.EncodeToString(digest[:])}, nil
+}
+
+func (store *runnerSnapshotStore) PutImmutable(_ context.Context, key string, body io.Reader, size int64, _ string, _ string) error {
+	if _, exists := store.objects[key]; exists {
+		return cosstore.ErrAlreadyExists
+	}
+	return store.put(key, body, size)
+}
+
+func (store *runnerSnapshotStore) Put(_ context.Context, key string, body io.Reader, size int64, _ string, _ string) error {
+	return store.put(key, body, size)
+}
+
+func (store *runnerSnapshotStore) put(key string, reader io.Reader, size int64) error {
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return err
+	}
+	if int64(len(body)) != size {
+		return errors.New("test store size mismatch")
+	}
+	store.objects[key] = append([]byte(nil), body...)
+	return nil
+}
+
+func (store *runnerSnapshotStore) Get(_ context.Context, key string, _ int64) ([]byte, string, error) {
+	body, ok := store.objects[key]
+	if !ok {
+		return nil, "", cosstore.ErrNotFound
+	}
+	return append([]byte(nil), body...), "", nil
 }
 
 func validRunnerMirrorState(fixture *runnerFixture) MirrorState {
@@ -428,6 +535,8 @@ type fakeArtifactFetcher struct {
 	returnedPaths []string
 	errName       string
 	err           error
+	cleanupPaths  []string
+	cleanupErr    error
 }
 
 func (fetcher *fakeArtifactFetcher) Download(_ context.Context, spec DownloadSpec) (string, error) {
@@ -441,6 +550,14 @@ func (fetcher *fakeArtifactFetcher) Download(_ context.Context, spec DownloadSpe
 	}
 	fetcher.returnedPaths = append(fetcher.returnedPaths, path)
 	return path, nil
+}
+
+func (fetcher *fakeArtifactFetcher) CleanupCompleted(_ context.Context, path string) error {
+	fetcher.cleanupPaths = append(fetcher.cleanupPaths, path)
+	if fetcher.cleanupErr != nil {
+		return fetcher.cleanupErr
+	}
+	return os.Remove(path)
 }
 
 type fakeStateRepository struct {
