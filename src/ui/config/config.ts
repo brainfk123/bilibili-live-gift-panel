@@ -1,5 +1,7 @@
 import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftKpiBarStyle, GiftKpiLayout, GiftKpiPanel, GiftReceipt, GiftRule, MAX_GIFT_RECEIPTS, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
 import { clearRoomScopedRecords, commitAuthoritativeStateMutation, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState, saveStateFieldTransaction } from '../../storage';
+import { createOnlineMigration, onlineMigrationFilename } from '../../migration';
+import packageInfo from '../../../package.json';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { bindFloatingDetailCard, el, fieldControl, inputField, setFloatingDetailGuideExpanded, toast } from '../common';
 import { builtinCatalog, findGift } from '../../gifts/catalog';
@@ -5319,6 +5321,16 @@ export function mountConfig(root: HTMLElement): void {
       link.click();
       URL.revokeObjectURL(url);
     };
+    const migrationButton = el('button', { class: 'btn ghost', type: 'button', text: '迁移到在线版' }) as HTMLButtonElement;
+    migrationButton.onclick = () => {
+      const exportedAt = new Date();
+      const migration = createOnlineMigration(state, packageInfo.version, exportedAt);
+      const blob = new Blob([JSON.stringify(migration, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = el('a', { href: url, download: onlineMigrationFilename(exportedAt) }) as HTMLAnchorElement;
+      link.click();
+      URL.revokeObjectURL(url);
+    };
     const importInput = el('input', { type: 'file', accept: '.json' }) as HTMLInputElement;
     importInput.hidden = true;
     importInput.onchange = () => {
@@ -5375,7 +5387,8 @@ export function mountConfig(root: HTMLElement): void {
       }
     };
     dataCard.append(
-      el('div', { class: 'data-actions' }, [exportButton, importButton, diagnosticLogLink, importInput, resetButton]),
+      el('div', { class: 'data-actions' }, [exportButton, migrationButton, importButton, diagnosticLogLink, importInput, resetButton]),
+      el('small', { class: 'advanced-copy migration-export-note', text: '迁移文件只会下载到本地；本地数据保持不变，文件不包含登录信息或观众历史。' }),
       el('small', { class: 'advanced-copy diagnostic-log-note', text: '运行日志包含连接状态、礼物 ID、发送者 UID 和盲盒识别结果，不包含 Cookie 或登录凭据。' }),
     );
 
