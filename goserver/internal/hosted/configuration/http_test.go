@@ -1,6 +1,7 @@
 package configuration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -40,6 +41,45 @@ func TestConfigurationHTTPRejectsMalformedWriteBeforeAuthentication(t *testing.T
 	}
 	if got := response.Header().Get("Cache-Control"); got != "no-store" {
 		t.Fatalf("Cache-Control=%q", got)
+	}
+}
+
+func TestConfigurationHTTPLimitsMalformedAndOversizeWritesBeforeAuthentication(t *testing.T) {
+	service := &httpService{}
+	limiter := &recordingLimiter{}
+	authCalls := 0
+	handler, err := NewHTTPHandler(service, HTTPOptions{
+		AllowedOrigin: "https://admin.example.test", CSRFToken: "csrf", Limiter: limiter, ClientIP: identity.DirectClientIP,
+		Authenticate: func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				authCalls++
+				next.ServeHTTP(response, request)
+			})
+		},
+		AccountID: func(context.Context) (int64, bool) { return 7, true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range [][]byte{
+		[]byte(`{"expectedRevision":1}{}`),
+		append([]byte(`{"expectedRevision":1,"runtime":"`), append(bytes.Repeat([]byte("x"), maxConfigurationBody), []byte(`"}`)...)...),
+	} {
+		request := httptest.NewRequest(http.MethodPut, "/api/configuration/state", bytes.NewReader(body))
+		request.Header.Set("Origin", "https://admin.example.test")
+		request.Header.Set("X-CSRF-Token", "csrf")
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("status=%d, want malformed request rejection", response.Code)
+		}
+	}
+	if authCalls != 0 || service.saveStateCalls != 0 || len(limiter.calls) != 6 {
+		t.Fatalf("auth=%d save=%d limits=%#v", authCalls, service.saveStateCalls, limiter.calls)
+	}
+	if limiter.calls[2].key != limiter.calls[5].key || strings.Contains(limiter.calls[2].key, "session-secret") {
+		t.Fatalf("anonymous cookie buckets = %q and %q", limiter.calls[2].key, limiter.calls[5].key)
 	}
 }
 
@@ -114,6 +154,69 @@ func TestConfigurationHTTPRequiresAuthenticatedAccountAndMapsConflict(t *testing
 	if response.Code != http.StatusConflict || strings.TrimSpace(response.Body.String()) != `{"error":"revision_conflict"}` {
 		t.Fatalf("conflict status=%d body=%q", response.Code, response.Body.String())
 	}
+}
+
+func TestConfigurationHTTPUsesAllowlistedCamelCaseResponseDTOs(t *testing.T) {
+	definition, runtime, err := Split(fixtureSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &httpService{
+		version: Version{ID: 31, AccountID: 7, Number: 4, Definition: definition, Source: "manual"},
+		state:   State{AccountID: 7, ConfigVersionID: 31, Revision: 9, Runtime: runtime},
+	}
+	handler, err := NewHTTPHandler(service, HTTPOptions{
+		AllowedOrigin: "https://admin.example.test", CSRFToken: "csrf", Limiter: allowAllLimiter{}, ClientIP: identity.DirectClientIP,
+		Authenticate: passthroughAuthentication,
+		AccountID:    func(context.Context) (int64, bool) { return 7, true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/configuration", nil))
+	assertConfigurationResponseShape(t, response, []string{"definition", "runtime", "version", "revision"})
+
+	request := httptest.NewRequest(http.MethodPut, "/api/configuration/state", strings.NewReader(string(mustJSON(t, SaveStateCommand{ExpectedRevision: 9, Runtime: runtime}))))
+	request.Header.Set("Origin", "https://admin.example.test")
+	request.Header.Set("X-CSRF-Token", "csrf")
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	assertConfigurationResponseShape(t, response, []string{"revision"})
+}
+
+func assertConfigurationResponseShape(t *testing.T, response *httptest.ResponseRecorder, want []string) {
+	t.Helper()
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != len(want) {
+		t.Fatalf("keys=%v want=%v body=%q", body, want, response.Body.String())
+	}
+	for _, key := range want {
+		if _, ok := body[key]; !ok {
+			t.Fatalf("missing %q in %q", key, response.Body.String())
+		}
+	}
+	for _, forbidden := range []string{"accountId", "configVersionId", "source", "createdAt", "updatedAt", "accountID", "config_version_id"} {
+		if strings.Contains(response.Body.String(), `"`+forbidden+`"`) {
+			t.Fatalf("response leaked %q: %q", forbidden, response.Body.String())
+		}
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 type httpService struct {

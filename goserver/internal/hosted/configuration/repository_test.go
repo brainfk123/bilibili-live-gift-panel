@@ -241,6 +241,20 @@ func TestRepositoryUpsertRoomSuggestionDoesNotTouchConfigurationOrSessions(t *te
 	assertSQLMock(t, mock)
 }
 
+func TestRepositoryUpsertRoomSuggestionAcceptsSameValueNoop(t *testing.T) {
+	repository, mock, closeDB := newMockRepository(t)
+	defer closeDB()
+	now := time.Date(2026, 8, 16, 12, 4, 0, 0, time.UTC)
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO account_room_suggestions (account_id, room_id, suggested_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE room_id = VALUES(room_id), suggested_at = VALUES(suggested_at)")).
+		WithArgs(int64(7), "12345", now).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := repository.UpsertRoomSuggestion(context.Background(), RoomSuggestion{AccountID: 7, RoomID: "12345", SuggestedAt: now}); err != nil {
+		t.Fatalf("UpsertRoomSuggestion() error = %v", err)
+	}
+	assertSQLMock(t, mock)
+}
+
 func newMockRepository(t *testing.T) (Repository, sqlmock.Sqlmock, func()) {
 	t.Helper()
 	database, mock, err := sqlmock.New()

@@ -25,6 +25,24 @@ type configurationHTTPService interface {
 	SuggestRoom(context.Context, int64, RoomSuggestionCommand) error
 }
 
+// configurationReadResponse is the explicit public configuration projection.
+// It deliberately excludes account IDs, storage IDs, source, and timestamps.
+type configurationReadResponse struct {
+	Definition Definition   `json:"definition"`
+	Runtime    RuntimeState `json:"runtime"`
+	Version    uint64       `json:"version"`
+	Revision   uint64       `json:"revision"`
+}
+
+type configurationDefinitionWriteResponse struct {
+	Version  uint64 `json:"version"`
+	Revision uint64 `json:"revision"`
+}
+
+type configurationStateWriteResponse struct {
+	Revision uint64 `json:"revision"`
+}
+
 // HTTPOptions supplies the shared hosted security policy. Authenticate must
 // inject an account ID that AccountID can read; callers never submit one.
 type HTTPOptions struct {
@@ -92,51 +110,44 @@ func (handler *HTTPHandler) load(response http.ResponseWriter, request *http.Req
 			handler.writeServiceError(response, err)
 			return
 		}
-		writeConfigurationJSON(response, http.StatusOK, struct {
-			Version Version `json:"version"`
-			State   State   `json:"state"`
-		}{Version: version, State: state})
+		writeConfigurationJSON(response, http.StatusOK, configurationReadResponse{Definition: version.Definition, Runtime: state.Runtime, Version: version.Number, Revision: state.Revision})
 	})).ServeHTTP(response, request)
 }
 
 func (handler *HTTPHandler) saveDefinition(response http.ResponseWriter, request *http.Request) {
 	var command SaveDefinitionCommand
-	handler.mutate(response, request, "configuration_definition", &command, func(accountID int64) (any, error) {
+	handler.mutate(response, request, "configuration_definition", &command, func(accountID int64) (any, int, error) {
 		version, state, err := handler.service.SaveDefinition(request.Context(), accountID, command)
-		return struct {
-			Version Version `json:"version"`
-			State   State   `json:"state"`
-		}{Version: version, State: state}, err
+		return configurationDefinitionWriteResponse{Version: version.Number, Revision: state.Revision}, http.StatusOK, err
 	})
 }
 
 func (handler *HTTPHandler) saveState(response http.ResponseWriter, request *http.Request) {
 	var command SaveStateCommand
-	handler.mutate(response, request, "configuration_state", &command, func(accountID int64) (any, error) {
-		return handler.service.SaveState(request.Context(), accountID, command)
+	handler.mutate(response, request, "configuration_state", &command, func(accountID int64) (any, int, error) {
+		state, err := handler.service.SaveState(request.Context(), accountID, command)
+		return configurationStateWriteResponse{Revision: state.Revision}, http.StatusOK, err
 	})
 }
 
 func (handler *HTTPHandler) suggestRoom(response http.ResponseWriter, request *http.Request) {
 	var command RoomSuggestionCommand
-	handler.mutate(response, request, "configuration_room_suggestion", &command, func(accountID int64) (any, error) {
-		return struct {
-			RoomID string `json:"roomId"`
-		}{RoomID: command.RoomID}, handler.service.SuggestRoom(request.Context(), accountID, command)
+	handler.mutate(response, request, "configuration_room_suggestion", &command, func(accountID int64) (any, int, error) {
+		return nil, http.StatusNoContent, handler.service.SuggestRoom(request.Context(), accountID, command)
 	})
 }
 
-func (handler *HTTPHandler) mutate(response http.ResponseWriter, request *http.Request, operation string, body any, execute func(int64) (any, error)) {
+func (handler *HTTPHandler) mutate(response http.ResponseWriter, request *http.Request, operation string, body any, execute func(int64) (any, int, error)) {
 	if !handler.acceptJSONMutation(request) {
 		handler.writeRejection(response, request)
 		return
 	}
-	if !decodeConfigurationJSON(response, request, body) {
-		writeConfigurationError(response, http.StatusBadRequest, "invalid_request")
-		return
-	}
 	if !handler.allow(request, operation) {
 		writeConfigurationError(response, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
+	if !decodeConfigurationJSON(response, request, body) {
+		writeConfigurationError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
 	handler.authenticate(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -145,12 +156,16 @@ func (handler *HTTPHandler) mutate(response http.ResponseWriter, request *http.R
 			writeConfigurationError(response, http.StatusUnauthorized, "authentication_required")
 			return
 		}
-		result, err := execute(accountID)
+		result, status, err := execute(accountID)
 		if err != nil {
 			handler.writeServiceError(response, err)
 			return
 		}
-		writeConfigurationJSON(response, http.StatusOK, result)
+		if status == http.StatusNoContent {
+			response.WriteHeader(http.StatusNoContent)
+			return
+		}
+		writeConfigurationJSON(response, status, result)
 	})).ServeHTTP(response, request)
 }
 

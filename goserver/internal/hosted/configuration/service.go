@@ -111,11 +111,16 @@ func (service *Service) SaveState(ctx context.Context, accountID int64, command 
 	if current.Revision != command.ExpectedRevision {
 		return State{}, ErrRevisionConflict
 	}
-	if _, err := Join(version.Definition, command.Runtime); err != nil {
+	snapshot, err := Join(version.Definition, command.Runtime)
+	if err != nil {
+		return State{}, ErrInvalidInput
+	}
+	_, runtime, err := Split(snapshot)
+	if err != nil {
 		return State{}, ErrInvalidInput
 	}
 	next, err := service.repository.CompareAndSwapState(ctx, UpdateStateCommand{
-		AccountID: accountID, ExpectedRevision: command.ExpectedRevision, Runtime: command.Runtime, UpdatedAt: service.now().UTC(),
+		AccountID: accountID, ExpectedRevision: command.ExpectedRevision, Runtime: runtime, UpdatedAt: service.now().UTC(),
 	})
 	if err != nil {
 		return State{}, err

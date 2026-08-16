@@ -2,7 +2,9 @@ package configuration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -56,6 +58,55 @@ func TestServiceSaveStateRejectsUnrelatedAccountInjection(t *testing.T) {
 	if repository.swapCalls != 1 || repository.swap.AccountID != 7 {
 		t.Fatalf("CAS command = %#v, calls = %d", repository.swap, repository.swapCalls)
 	}
+}
+
+func TestServiceSaveStateCanonicalizesRuntimeBeforeCASWithoutAliasingInput(t *testing.T) {
+	snapshot := fixtureSnapshot()
+	secondActivity := snapshot.Activities[0]
+	secondActivity.ID, secondActivity.Name = "round-2", "Round two"
+	secondActivity.Milestones[0].ID = "health-cap-2"
+	snapshot.Activities = append(snapshot.Activities, secondActivity)
+	snapshot.Gifts = append(snapshot.Gifts, snapshot.Gifts[0])
+	snapshot.Gifts[1].ID, snapshot.Gifts[1].Name = 2, "Tulip"
+	snapshot.GiftTargetPanels[0].Items = append(snapshot.GiftTargetPanels[0].Items, snapshot.GiftTargetPanels[0].Items[0])
+	snapshot.GiftTargetPanels[0].Items[1].GiftID, snapshot.GiftTargetPanels[0].Items[1].Name = 2, "Tulip"
+	definition, runtime, err := Split(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	untrusted := cloneRuntimeForTest(t, runtime)
+	untrusted.Activities[0], untrusted.Activities[1] = untrusted.Activities[1], untrusted.Activities[0]
+	untrusted.GiftTargetReceived[0], untrusted.GiftTargetReceived[1] = untrusted.GiftTargetReceived[1], untrusted.GiftTargetReceived[0]
+	repository := &serviceRepository{
+		version:    Version{ID: 31, AccountID: 7, Number: 4, Definition: definition},
+		state:      State{AccountID: 7, ConfigVersionID: 31, Revision: 9, Runtime: runtime},
+		swapResult: State{AccountID: 7, ConfigVersionID: 31, Revision: 10, Runtime: runtime},
+	}
+
+	if _, err := NewService(repository, time.Now).SaveState(context.Background(), 7, SaveStateCommand{ExpectedRevision: 9, Runtime: untrusted}); err != nil {
+		t.Fatalf("SaveState() error = %v", err)
+	}
+	if !reflect.DeepEqual(repository.swap.Runtime, runtime) {
+		t.Fatalf("CAS runtime = %#v, want canonical %#v", repository.swap.Runtime, runtime)
+	}
+	untrusted.AttributeValues["health"] = -99
+	untrusted.Activities[0].Status = "mutated"
+	if repository.swap.Runtime.AttributeValues["health"] == -99 || repository.swap.Runtime.Activities[0].Status == "mutated" {
+		t.Fatalf("CAS runtime aliases caller input: %#v", repository.swap.Runtime)
+	}
+}
+
+func cloneRuntimeForTest(t *testing.T, runtime RuntimeState) RuntimeState {
+	t.Helper()
+	encoded, err := json.Marshal(runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clone RuntimeState
+	if err := json.Unmarshal(encoded, &clone); err != nil {
+		t.Fatal(err)
+	}
+	return clone
 }
 
 func TestServiceSuggestRoomOnlyUpsertsSuggestion(t *testing.T) {

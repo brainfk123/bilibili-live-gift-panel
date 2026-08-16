@@ -235,7 +235,7 @@ func (repository *sqlRepository) UpsertRoomSuggestion(ctx context.Context, sugge
 		return ErrInvalidInput
 	}
 	result, err := repository.db.ExecContext(ctx, "INSERT INTO account_room_suggestions (account_id, room_id, suggested_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE room_id = VALUES(room_id), suggested_at = VALUES(suggested_at)", suggestion.AccountID, suggestion.RoomID, suggestion.SuggestedAt)
-	if err != nil || !oneOrTwoRows(result) {
+	if err != nil || !zeroOneOrTwoRows(result) {
 		return ErrUnavailable
 	}
 	return nil
@@ -281,6 +281,16 @@ func oneOrTwoRows(result sql.Result) bool {
 	}
 	rows, err := result.RowsAffected()
 	return err == nil && (rows == 1 || rows == 2)
+}
+
+// MySQL reports zero rows for an idempotent ON DUPLICATE KEY UPDATE where the
+// stored room suggestion already has the supplied values.
+func zeroOneOrTwoRows(result sql.Result) bool {
+	if result == nil {
+		return false
+	}
+	rows, err := result.RowsAffected()
+	return err == nil && (rows == 0 || rows == 1 || rows == 2)
 }
 
 func (repository *sqlRepository) ready() bool {
