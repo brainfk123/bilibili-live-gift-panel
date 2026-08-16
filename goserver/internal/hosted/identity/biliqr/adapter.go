@@ -53,6 +53,10 @@ type pendingChallenge struct {
 	cancel     context.CancelCauseFunc
 }
 
+// CredentialConsumer is an internal trusted boundary for the one operation
+// that needs a Bilibili session Cookie. The byte slice is invalid once ConsumeCredential returns.
+type CredentialConsumer = func([]byte) error
+
 // Adapter keeps QR keys and confirmation Cookies only in process memory.
 type Adapter struct {
 	client           *http.Client
@@ -261,6 +265,112 @@ func (adapter *Adapter) Poll(ctx context.Context, challengeID string) (identity.
 		adapter.Forget(challengeID)
 		return identity.Verification{}, identity.ErrVerificationFailed
 	}
+}
+
+// ConsumeCredential completes a service-account QR challenge without ever
+// exposing its Cookie through the normal identity.Verification result. A
+// failed consumer leaves the completed challenge available until its TTL so a
+// transactional persistence failure can be retried; a successful consumer
+// destroys every adapter reference before returning.
+func (adapter *Adapter) ConsumeCredential(ctx context.Context, challengeID string, consumer CredentialConsumer) error {
+	if consumer == nil {
+		return identity.ErrVerificationFailed
+	}
+	adapter.mu.Lock()
+	state, exists := adapter.challenges[challengeID]
+	if !exists || adapter.closed {
+		adapter.mu.Unlock()
+		return identity.ErrChallengeNotFound
+	}
+	if !adapter.now().Before(state.expiresAt) {
+		adapter.destroyLocked(challengeID, identity.ErrChallengeExpired)
+		adapter.mu.Unlock()
+		return identity.ErrChallengeExpired
+	}
+	if len(state.cookies) > 0 {
+		credential := []byte(cookieHeader(cloneCookies(state.cookies)))
+		adapter.mu.Unlock()
+		return adapter.consumeStoredCredential(challengeID, credential, consumer)
+	}
+	if state.polling {
+		adapter.mu.Unlock()
+		return identity.ErrVerificationPending
+	}
+	now := adapter.now()
+	if !state.nextPollAt.IsZero() && now.Before(state.nextPollAt) {
+		adapter.mu.Unlock()
+		return identity.ErrVerificationPending
+	}
+	state.polling = true
+	state.nextPollAt = now.Add(adapter.pollInterval)
+	qrKey := state.qrKey
+	pollContext, cancelPoll := context.WithCancelCause(ctx)
+	state.cancel = cancelPoll
+	adapter.mu.Unlock()
+	defer cancelPoll(nil)
+
+	endpoint, err := url.Parse(adapter.pollEndpoint)
+	if err != nil {
+		adapter.finishTransientPoll(challengeID, state)
+		return identity.ErrVerificationUnavailable
+	}
+	query := endpoint.Query()
+	query.Set("qrcode_key", qrKey)
+	endpoint.RawQuery = query.Encode()
+	var payload struct {
+		Code int `json:"code"`
+		Data struct {
+			URL  string `json:"url"`
+			Code int    `json:"code"`
+		} `json:"data"`
+	}
+	response, err := adapter.getJSON(pollContext, endpoint.String(), nil, &payload)
+	if err != nil {
+		if terminal := cancellationResult(pollContext); terminal != nil {
+			return terminal
+		}
+		adapter.finishTransientPoll(challengeID, state)
+		return err
+	}
+	if payload.Code != 0 {
+		adapter.Forget(challengeID)
+		return identity.ErrVerificationFailed
+	}
+	switch payload.Data.Code {
+	case 86101, 86090:
+		adapter.finishTransientPoll(challengeID, state)
+		return identity.ErrVerificationPending
+	case 86038:
+		adapter.Forget(challengeID)
+		return identity.ErrChallengeExpired
+	case 0:
+		cookies, ok := loginCookies(response, payload.Data.URL)
+		if !ok {
+			adapter.Forget(challengeID)
+			return identity.ErrVerificationFailed
+		}
+		defer destroyCookies(cookies)
+		if !adapter.storeCookies(challengeID, state, cookies) {
+			if terminal := cancellationResult(pollContext); terminal != nil {
+				return terminal
+			}
+			return identity.ErrChallengeNotFound
+		}
+		adapter.finishTransientPoll(challengeID, state)
+		return adapter.consumeStoredCredential(challengeID, []byte(cookieHeader(cookies)), consumer)
+	default:
+		adapter.Forget(challengeID)
+		return identity.ErrVerificationFailed
+	}
+}
+
+func (adapter *Adapter) consumeStoredCredential(challengeID string, credential []byte, consumer CredentialConsumer) error {
+	defer clear(credential)
+	if err := consumer(credential); err != nil {
+		return err
+	}
+	adapter.Forget(challengeID)
+	return nil
 }
 
 // Forget securely drops the adapter's only references to a QR key and Cookies.

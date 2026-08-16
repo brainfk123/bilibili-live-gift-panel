@@ -102,6 +102,55 @@ func TestAdapterPollsRealBilibiliShapeAndReturnsUIDOnly(t *testing.T) {
 	}
 }
 
+func TestAdapterConsumeCredentialRetainsOnlyUntilConsumerSucceeds(t *testing.T) {
+	var pollCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/generate":
+			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": "https://example.test/qr", "qrcode_key": "service-qr-key"}})
+		case "/poll":
+			pollCalls++
+			http.SetCookie(response, &http.Cookie{Name: "SESSDATA", Value: "service-cookie"})
+			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"code": 0, "url": "https://example.test/"}})
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+
+	adapter, err := New(Config{Client: server.Client(), GenerateEndpoint: server.URL + "/generate", PollEndpoint: server.URL + "/poll", NavEndpoint: server.URL + "/nav", EncodeQR: func(string) (string, error) { return "qr", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := adapter.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumerFailure := errors.New("transaction unavailable")
+	if err := adapter.ConsumeCredential(context.Background(), challenge.ID, func(cookie []byte) error {
+		if !strings.Contains(string(cookie), "SESSDATA=service-cookie") {
+			t.Fatalf("credential callback = %q", cookie)
+		}
+		return consumerFailure
+	}); !errors.Is(err, consumerFailure) {
+		t.Fatalf("first ConsumeCredential() error = %v, want consumer failure", err)
+	}
+	if err := adapter.ConsumeCredential(context.Background(), challenge.ID, func(cookie []byte) error {
+		if !strings.Contains(string(cookie), "SESSDATA=service-cookie") {
+			t.Fatalf("retry callback = %q", cookie)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("retry ConsumeCredential() error = %v", err)
+	}
+	if pollCalls != 1 {
+		t.Fatalf("poll calls = %d, want completed credential retry without a new upstream poll", pollCalls)
+	}
+	if _, err := adapter.Poll(context.Background(), challenge.ID); !errors.Is(err, identity.ErrChallengeNotFound) {
+		t.Fatalf("successful callback kept credential: %v", err)
+	}
+}
+
 func TestAdapterExpiresForgetsAndClosesAllChallenges(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/generate" {

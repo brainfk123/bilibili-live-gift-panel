@@ -50,7 +50,7 @@ func TestComposeHostedHTTPMakesAllInvitationRoutesReachableWithSpecificity(t *te
 	auth := statusHandler(http.StatusAccepted)
 	admin := statusHandler(http.StatusNonAuthoritativeInfo)
 	invitation := statusHandler(http.StatusTeapot)
-	handler := composeHostedHTTP(healthyHostedDatabase{}, auth, admin, invitation, nil, nil, "runtime-csrf")
+	handler := composeHostedHTTP(healthyHostedDatabase{}, auth, admin, invitation, nil, nil, nil, "runtime-csrf")
 
 	tests := []struct {
 		method string
@@ -82,7 +82,7 @@ func TestComposeHostedHTTPMakesAllConfigurationRoutesReachableWithSpecificity(t 
 	admin := statusHandler(http.StatusNonAuthoritativeInfo)
 	invitation := statusHandler(http.StatusTeapot)
 	configuration := statusHandler(http.StatusCreated)
-	handler := composeHostedHTTP(healthyHostedDatabase{}, auth, admin, invitation, configuration, nil, "runtime-csrf")
+	handler := composeHostedHTTP(healthyHostedDatabase{}, auth, admin, invitation, configuration, nil, nil, "runtime-csrf")
 
 	for _, route := range []struct{ method, path string }{
 		{http.MethodGet, "/api/configuration"},
@@ -100,13 +100,29 @@ func TestComposeHostedHTTPMakesAllConfigurationRoutesReachableWithSpecificity(t 
 
 func TestComposeHostedHTTPMakesMigrationRoutesReachableWithSpecificity(t *testing.T) {
 	migration := statusHandler(http.StatusCreated)
-	handler := composeHostedHTTP(healthyHostedDatabase{}, statusHandler(http.StatusAccepted), statusHandler(http.StatusNonAuthoritativeInfo), statusHandler(http.StatusTeapot), nil, migration, "runtime-csrf")
+	handler := composeHostedHTTP(healthyHostedDatabase{}, statusHandler(http.StatusAccepted), statusHandler(http.StatusNonAuthoritativeInfo), statusHandler(http.StatusTeapot), nil, migration, nil, "runtime-csrf")
 	for _, route := range []struct{ method, path string }{
 		{http.MethodPost, "/api/migrations/preview"},
 		{http.MethodPost, "/api/migrations/9/apply"},
 		{http.MethodDelete, "/api/migrations/9"},
 		{http.MethodPost, "/api/migrations/9/rollback"},
 		{http.MethodGet, "/api/migrations/9"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))
+		if response.Code != http.StatusCreated {
+			t.Fatalf("%s %s status=%d", route.method, route.path, response.Code)
+		}
+	}
+}
+
+func TestComposeHostedHTTPMakesBiliServiceRoutesReachableWithSpecificity(t *testing.T) {
+	biliService := statusHandler(http.StatusCreated)
+	handler := composeHostedHTTP(healthyHostedDatabase{}, statusHandler(http.StatusAccepted), statusHandler(http.StatusNonAuthoritativeInfo), statusHandler(http.StatusTeapot), nil, nil, biliService, "runtime-csrf")
+	for _, route := range []struct{ method, path string }{
+		{http.MethodGet, "/api/admin/bili-service/status"},
+		{http.MethodPost, "/api/admin/bili-service/challenge"},
+		{http.MethodPost, "/api/admin/bili-service/replace"},
 	} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))

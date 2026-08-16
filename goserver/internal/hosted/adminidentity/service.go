@@ -1497,6 +1497,23 @@ func (service *Service) RequireRecentTOTP(ctx context.Context, sessionToken stri
 	return nil
 }
 
+// RequireSession validates only an active administrator session. It exposes no
+// identity details and deliberately does not turn a read-only status request
+// into a recent-TOTP operation.
+func (service *Service) RequireSession(ctx context.Context, sessionToken string) error {
+	if service == nil || sessionToken == "" {
+		return ErrAuthenticationFailed
+	}
+	tokenHash, err := service.keys.HashToken("admin_session", []byte(sessionToken))
+	if err != nil {
+		return ErrAuthenticationFailed
+	}
+	if _, err := service.repository.FindSession(ctx, tokenHash, service.now()); err != nil {
+		return ErrAuthenticationFailed
+	}
+	return nil
+}
+
 func (service *Service) SendRecovery(ctx context.Context, sessionToken string) (RecoveryResult, error) {
 	if err := service.RequireRecentTOTP(ctx, sessionToken); err != nil {
 		return RecoveryResult{}, err

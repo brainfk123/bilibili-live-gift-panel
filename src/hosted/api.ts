@@ -7,6 +7,9 @@ export interface Challenge {
   qrImage: string;
   expiresAt: string;
 }
+export type BiliServiceStatus =
+  | { version: number; health: 'healthy'; lastVerifiedAt: string }
+  | { version: 0; health: 'missing' | 'unavailable' };
 
 export type PollResult =
   | { status: 'pending'; expiresAt: string }
@@ -91,6 +94,7 @@ const stableErrors = new Set([
   'quota_exhausted', 'rate_limited', 'recent_totp_required', 'request_rejected',
   'temporarily_unavailable', 'verification_pending', 'revision_conflict', 'not_found',
   'proof_rejected', 'expired', 'operation_conflict',
+  'credential_unavailable',
 ]);
 
 export class HostedAPIError extends Error {
@@ -402,6 +406,22 @@ export class HostedAPI {
   }
 
   async beginAdminProof(): Promise<Challenge> { return this.requireChallenge((await this.request('/api/admin/auth/bili/challenges', 'POST', 201)).data); }
+  async biliServiceStatus(): Promise<BiliServiceStatus> {
+    const data = object((await this.request('/api/admin/bili-service/status', 'GET', 200)).data);
+    if (!data || !number(data.version) || !string(data.health)) throw new HostedAPIError('invalid_response', 200);
+    if (data.health === 'healthy' && data.version > 0 && exactKeys(data, ['version', 'health', 'lastVerifiedAt']) && instant(data.lastVerifiedAt)) {
+      return { version: data.version, health: 'healthy', lastVerifiedAt: data.lastVerifiedAt };
+    }
+    if ((data.health === 'missing' || data.health === 'unavailable') && data.version === 0 && exactKeys(data, ['version', 'health'])) {
+      return { version: 0, health: data.health };
+    }
+    throw new HostedAPIError('invalid_response', 200);
+  }
+  async beginBiliServiceChallenge(): Promise<Challenge> { return this.requireChallenge((await this.request('/api/admin/bili-service/challenge', 'POST', 201)).data); }
+  async replaceBiliServiceCredential(challengeId: string): Promise<void> {
+    if (!string(challengeId) || challengeId.length > 256) throw new HostedAPIError('invalid_request', 400);
+    await this.request('/api/admin/bili-service/replace', 'POST', 204, { challengeId });
+  }
   async cancelAdminProof(id: string): Promise<void> { await this.request(`/api/admin/auth/bili/challenges/${encodeURIComponent(id)}`, 'DELETE', 204); }
   async adminLogin(challengeId: string, totp: string): Promise<void> { await this.request('/api/admin/session', 'POST', 204, { challengeId, totp }); }
   async verifyRecentTOTP(totp: string): Promise<void> { await this.request('/api/admin/totp', 'POST', 204, { totp }); }

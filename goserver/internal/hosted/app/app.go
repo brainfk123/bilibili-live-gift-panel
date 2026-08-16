@@ -18,6 +18,7 @@ type Dependencies struct {
 	Invitation    http.Handler
 	Configuration http.Handler
 	Migration     http.Handler
+	BiliService   http.Handler
 	CSRFToken     string
 }
 
@@ -73,6 +74,13 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("DELETE /api/migrations/{id}", dependencies.Migration)
 		mux.Handle("POST /api/migrations/{id}/rollback", dependencies.Migration)
 		mux.Handle("GET /api/migrations/{id}", dependencies.Migration)
+	}
+	if dependencies.BiliService != nil {
+		// These methods are intentionally more specific than /api/admin/ so
+		// they cannot be handled by the broader administrator router.
+		mux.Handle("POST /api/admin/bili-service/challenge", dependencies.BiliService)
+		mux.Handle("POST /api/admin/bili-service/replace", dependencies.BiliService)
+		mux.Handle("GET /api/admin/bili-service/status", dependencies.BiliService)
 	}
 	if dependencies.Auth != nil {
 		mux.Handle("/api/auth/", dependencies.Auth)

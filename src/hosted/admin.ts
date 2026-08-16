@@ -1,4 +1,4 @@
-import { HostedAPIError, type Challenge, type HostedAPI, type RecoveryPreparation } from './api';
+import { HostedAPIError, type BiliServiceStatus, type Challenge, type HostedAPI, type RecoveryPreparation } from './api';
 
 interface AdminLoginAPI {
   beginAdminProof(): Promise<Challenge>;
@@ -36,6 +36,62 @@ export function createAdminFlow(api: AdminLoginAPI) {
       }
     },
     async dispose(): Promise<void> { disposed = true; generation += 1; const current = proof; proof = undefined; if (current) await api.cancelAdminProof(current.challengeId); },
+  });
+}
+
+interface BiliServiceAPI {
+  beginBiliServiceChallenge(): Promise<Challenge>;
+  replaceBiliServiceCredential(challengeId: string): Promise<void>;
+  verifyRecentTOTP(totp: string): Promise<void>;
+}
+
+export function biliServiceStatusText(status: BiliServiceStatus): string {
+  if (status.health === 'healthy') return `版本 ${status.version}；最近验证 ${status.lastVerifiedAt}`;
+  return status.health === 'missing' ? '服务账号未配置' : '服务账号状态暂不可用';
+}
+
+export function createBiliServiceFlow(api: BiliServiceAPI) {
+  let challenge: Challenge | undefined;
+  let busy = false;
+  let disposed = false;
+  let generation = 0;
+  let beginOperation: Promise<Challenge> | undefined;
+  let replaceOperation: Promise<void> | undefined;
+  const unavailable = (): HostedAPIError => new HostedAPIError('operation_failed', 0);
+  return Object.freeze({
+    begin(): Promise<Challenge> {
+      if (disposed) return Promise.reject(unavailable());
+      if (beginOperation) return beginOperation;
+      if (busy) return Promise.reject(new HostedAPIError('operation_conflict', 409));
+      const current = ++generation; busy = true;
+      const operation = api.beginBiliServiceChallenge().then((created) => {
+        if (disposed || current !== generation) throw unavailable();
+        challenge = created; return created;
+      }).finally(() => { if (!disposed && current === generation) busy = false; if (beginOperation === operation) beginOperation = undefined; });
+      beginOperation = operation;
+      return operation;
+    },
+    replace(totp: string): Promise<void> {
+      if (disposed) return Promise.reject(unavailable());
+      if (replaceOperation) return replaceOperation;
+      if (busy) return Promise.reject(new HostedAPIError('operation_conflict', 409));
+      if (!challenge) return Promise.reject(new HostedAPIError('invalid_request', 400));
+      const id = challenge.challengeId; const current = ++generation; busy = true;
+      const operation = (async () => {
+        try { await api.replaceBiliServiceCredential(id); } catch (error) {
+          if (!(error instanceof HostedAPIError) || error.code !== 'recent_totp_required') throw error;
+          await api.verifyRecentTOTP(totp);
+          if (disposed || current !== generation) throw unavailable();
+          await api.replaceBiliServiceCredential(id);
+        }
+        if (disposed || current !== generation) throw unavailable();
+        challenge = undefined;
+      })().finally(() => { if (!disposed && current === generation) busy = false; if (replaceOperation === operation) replaceOperation = undefined; });
+      replaceOperation = operation;
+      return operation;
+    },
+    state(): { challenge?: Challenge; busy: boolean } { return { busy, ...(challenge ? { challenge: { ...challenge } } : {}) }; },
+    dispose(): void { disposed = true; generation += 1; busy = false; challenge = undefined; },
   });
 }
 
@@ -177,6 +233,7 @@ function labelledInput(document: Document, labelText: string, type = 'text'): [H
 export function mountAdminView(root: HTMLElement, api: HostedAPI) {
   const document = root.ownerDocument;
   const loginFlow = createAdminFlow(api);
+  const biliServiceFlow = createBiliServiceFlow(api);
   const accountFlow = createAdminAccountFlow(api);
   let disposed = false;
   let recoveryProof: Challenge | undefined;
@@ -222,6 +279,23 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
       })));
     }
     panel.append(rebindGroup);
+
+    const service = document.createElement('section'); const serviceTitle = document.createElement('h2'); serviceTitle.textContent = 'B 站服务账号'; service.append(serviceTitle);
+    const serviceStatus = document.createElement('p'); serviceStatus.textContent = '正在读取服务账号状态…'; service.append(serviceStatus);
+    void api.biliServiceStatus().then((value) => { if (!disposed) serviceStatus.textContent = biliServiceStatusText(value); }).catch(() => { if (!disposed) serviceStatus.textContent = '服务账号状态暂不可用'; });
+    const serviceState = biliServiceFlow.state(); const serviceBegin = button(document, serviceState.busy ? '正在创建服务账号二维码…' : '创建服务账号二维码', () => {
+      const operation = biliServiceFlow.begin(); renderDashboard();
+      void operation.then(() => { renderDashboard(); }).catch(() => { if (!disposed) { status.textContent = '无法创建服务账号验证'; renderDashboard(); } });
+    }); serviceBegin.disabled = serviceState.busy; service.append(serviceBegin);
+    const serviceChallenge = serviceState.challenge;
+    if (serviceChallenge) {
+      const qr = document.createElement('img'); qr.className = 'hosted-qr'; qr.alt = 'B 站服务账号二维码'; qr.src = serviceChallenge.qrImage;
+      const replace = button(document, serviceState.busy ? '正在替换服务账号…' : '确认替换服务账号', () => {
+        const totp = recent.value; recent.value = ''; const operation = biliServiceFlow.replace(totp); renderDashboard();
+        void operation.then(() => { if (!disposed) { status.textContent = '服务账号已替换'; renderDashboard(); } }).catch(() => { if (!disposed) { status.textContent = '服务账号替换失败，请检查 TOTP'; renderDashboard(); } });
+      }); replace.disabled = serviceState.busy; service.append(qr, replace);
+    }
+    panel.append(service);
 
     const invitation = document.createElement('section'); const invitationTitle = document.createElement('h2'); invitationTitle.textContent = '管理员邀请码'; invitation.append(invitationTitle);
     invitation.append(button(document, '生成不限额度邀请码', () => guarded(async () => {
@@ -318,7 +392,8 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
   renderLogin();
   return Object.freeze({ dispose: async () => {
     disposed = true; recoveryProofGeneration += 1; recoveryFlow?.close(); recoveryFlow = undefined;
-    adminSecretFlow.dispose();
+	adminSecretFlow.dispose();
+		biliServiceFlow.dispose();
     clearTransientSecret?.(); clearTransientSecret = undefined;
     for (const input of secretInputs) input.value = '';
     secretInputs.clear();

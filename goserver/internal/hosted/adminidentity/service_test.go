@@ -144,6 +144,22 @@ func TestVerifyRecentTOTPRejectsReplayAndExpiresAfterFiveMinutes(t *testing.T) {
 	}
 }
 
+func TestRequireSessionAcceptsActiveAdminWithoutRequiringRecentTOTP(t *testing.T) {
+	now := time.Date(2026, 8, 17, 11, 0, 0, 0, time.UTC)
+	repository := initializedMemoryRepository(t, now)
+	service := newTestService(t, repository, &memoryVerifier{verification: identity.Verification{UID: "32249588", CompletedAt: now}}, &MemorySender{}, now)
+	login, err := service.VerifyLogin(context.Background(), "login", "123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RequireSession(context.Background(), login.Token); err != nil {
+		t.Fatalf("RequireSession(active admin) = %v", err)
+	}
+	if err := service.RequireSession(context.Background(), "streamer-session"); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("RequireSession(non-admin token) = %v", err)
+	}
+}
+
 func TestConcurrentInitializeHasExactlyOneWinner(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 30, 0, 0, time.UTC)
 	repository := &synchronizedPrepareRepository{

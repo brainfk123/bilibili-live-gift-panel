@@ -364,6 +364,7 @@ describe('administrator flow', () => {
     const api = {
       beginAdminProof, cancelAdminProof: vi.fn(async () => undefined), adminLogin: vi.fn(async () => undefined), verifyRecentTOTP: vi.fn(async () => undefined),
       disableAccount: vi.fn(), enableAccount: vi.fn(), adjustQuota: vi.fn(), rebindAccount: vi.fn(),
+      biliServiceStatus: vi.fn(async () => ({ version: 0 as const, health: 'missing' as const })),
       generateInvitation: vi.fn(async () => ({ id: 8, codeHint: '****LAST', code: 'ONE-TIME-ADMIN-CODE', status: 'active' as const, createdAt: '2026-08-16T00:00:00Z', expiresAt: '2026-08-17T00:00:00Z' })),
       sendRecoveryArchive: vi.fn(), prepareRecovery: vi.fn(), confirmRecovery: vi.fn(),
     };

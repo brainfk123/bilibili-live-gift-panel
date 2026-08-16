@@ -130,3 +130,20 @@ func TestMigrationMethodRoutesWinOverBroaderAuthenticationPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestBiliServiceRoutesWinOverBroaderAdministratorPrefix(t *testing.T) {
+	biliService := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusTeapot) })
+	administrator := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusAccepted) })
+	handler := New(Dependencies{DB: fakeHealth{}, Admin: administrator, BiliService: biliService})
+	for _, route := range []struct{ method, path string }{
+		{http.MethodGet, "/api/admin/bili-service/status"},
+		{http.MethodPost, "/api/admin/bili-service/challenge"},
+		{http.MethodPost, "/api/admin/bili-service/replace"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))
+		if response.Code != http.StatusTeapot {
+			t.Fatalf("%s %s status=%d, want Bili service handler", route.method, route.path, response.Code)
+		}
+	}
+}
