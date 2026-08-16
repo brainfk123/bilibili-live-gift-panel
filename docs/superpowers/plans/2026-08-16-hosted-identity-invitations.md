@@ -364,21 +364,25 @@ Run invitation tests with `-count=10`, race tests, full Go tests, and `git diff 
 - Create: `tests/hosted-invitations.test.ts`
 - Modify: `src/hosted/main.ts`
 - Modify: `src/hosted/shell.ts`
+- Modify: `goserver/internal/hosted/app/app.go`
+- Modify: `goserver/internal/hosted/app/app_test.go`
+- Modify: `goserver/cmd/hosted/main.go`
+- Modify: `goserver/cmd/hosted/main_test.go`
 
 **Interfaces:**
 - Produces: typed `HostedAPI` methods and views that never retain B 站 Cookie or complete codes after the current render lifecycle.
 
 - [ ] **Step 1: Write failing browser contract tests**
 
-Test QR pending/success/expiry, invite-required registration, one-time code reveal with copy button, masked history including revoked rows, quota display, TOTP second step, recent verification prompt, recovery archive download/password separation, account disable/enable, and exception rebind requiring a fresh verification challenge and reason.
+Test QR pending/success/expiry, invite-required registration, one-time code reveal with copy button, masked history including revoked rows, quota display, TOTP second step, recent verification prompt, emailed recovery-archive/password separation, account disable/enable, and exception rebind requiring a fresh verification challenge and reason.
 
 - [ ] **Step 2: Implement one HTTP adapter**
 
-All hosted UI fetches go through `HostedAPI`, which sets `credentials:'same-origin'`, supplies CSRF header from a non-secret bootstrap value, rejects non-JSON responses, maps stable error codes, and never logs bodies.
+Add a same-origin `GET /api/bootstrap` composition route that returns only the runtime non-secret CSRF value as JSON, sets `Cache-Control: no-store`, rejects a raw query string, and is wired from the existing hosted runtime configuration. All hosted UI fetches go through `HostedAPI`, which loads that bootstrap before mutations, sets `credentials:'same-origin'`, supplies the CSRF header, rejects non-JSON responses, maps stable error codes, and never logs bodies. The bootstrap response must not expose the allowed origin, database configuration, key paths, SMTP configuration, or any credential.
 
 - [ ] **Step 3: Implement views with secret lifecycle controls**
 
-Complete invitation/recovery strings exist only in closure-local state, are replaced with masked text when dialogs close, and are not written to `localStorage`, `sessionStorage`, URL, analytics, or console. QR challenges cancel when their view unmounts. The recovery UI keeps the prepare handoff only in closure-local state, requires the user to save the new TOTP and archive password before confirm is enabled, and can repeat prepare with the same recovery code plus a fresh B 站 proof to recover the same unexpired handoff after a lost response.
+Complete invitation/recovery strings exist only in closure-local state, are replaced with masked text when dialogs close, and are not written to `localStorage`, `sessionStorage`, URL, analytics, or console. QR challenges cancel when their view unmounts. The encrypted recovery archive is delivered by email and is not downloaded from the site; the UI displays only the separately delivered decryption password. The recovery UI keeps the prepare handoff only in closure-local state, requires the user to acknowledge saving the new TOTP URI and archive password and receiving the emailed archive before confirm is enabled, and can repeat prepare with the same recovery code plus a fresh B 站 proof to recover the same unexpired handoff after a lost response.
 
 - [ ] **Step 4: Run frontend and full verification**
 
