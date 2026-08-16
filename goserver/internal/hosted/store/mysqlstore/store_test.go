@@ -50,6 +50,26 @@ func TestProductionMigrationsIncludeIdentitySchema(t *testing.T) {
 	t.Fatal("production migrations do not include 0002_identity_and_invitations")
 }
 
+func TestProductionMigrationsIncludeRetryableAdministratorHandoffs(t *testing.T) {
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range migrations {
+		if item.version != "0003_admin_handoffs" {
+			continue
+		}
+		sql := string(item.contents)
+		for _, required := range []string{"admin_credential_handoffs", "admin_handoff_recovery_codes", "pending_initialization_guard", "reserved_recovery_code_id", "token_hash", "expires_at"} {
+			if !strings.Contains(sql, required) {
+				t.Fatalf("0003 migration missing %q", required)
+			}
+		}
+		return
+	}
+	t.Fatal("production migrations do not include 0003_admin_handoffs")
+}
+
 func TestIdentityMigrationTerminalInvitationsCannotAlsoBeRevoked(t *testing.T) {
 	migrations, err := readMigrations(migrationFiles)
 	if err != nil {

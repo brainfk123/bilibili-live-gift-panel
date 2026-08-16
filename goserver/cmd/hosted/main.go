@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -76,7 +77,8 @@ func run() error {
 	defer adminRepository.Close()
 	sender, err := adminidentity.NewSMTPSender(adminidentity.SMTPConfig{
 		Address: config.SMTPAddress, Host: config.SMTPHost, Username: config.SMTPUsername,
-		Password: config.SMTPPassword, From: config.SMTPFrom,
+		Password: config.SMTPPassword, From: config.SMTPFrom, Mode: adminidentity.SMTPMode(config.SMTPMode),
+		AllowInsecureLocalhost: config.SMTPAllowInsecureLocalhost,
 	})
 	if err != nil {
 		return errors.New("configure administrator mail delivery")
@@ -90,8 +92,9 @@ func run() error {
 	if err != nil {
 		return errors.New("configure administrator identity")
 	}
+	go adminService.RunHandoffCleanup(processContext, time.Minute)
 
-	return runMode(processContext, os.Args[1:], adminService, os.Stdout, func() error {
+	return runModeWithInput(processContext, os.Args[1:], adminService, os.Stdin, os.Stdout, func() error {
 		resolver, err := identity.NewTrustedProxyClientIPResolver([]string{"127.0.0.1/32", "::1/128"})
 		if err != nil {
 			return errors.New("configure administrator client address policy")
@@ -197,11 +200,18 @@ func newHTTPServer(address string, handler http.Handler) *http.Server {
 }
 
 func runMode(ctx context.Context, args []string, initializer adminInitializer, output io.Writer, serve func() error) error {
+	return runModeWithInput(ctx, args, initializer, strings.NewReader(""), output, serve)
+}
+
+func runModeWithInput(ctx context.Context, args []string, initializer adminInitializer, input io.Reader, output io.Writer, serve func() error) error {
 	if len(args) == 0 {
 		if serve == nil {
 			return errInvalidCommand
 		}
 		return serve()
+	}
+	if len(args) >= 3 && args[0] == "admin" && args[1] == "recovery" && args[2] == "decrypt" {
+		return runRecoveryDecrypt(args[3:], input, output)
 	}
 	if len(args) < 2 || args[0] != "admin" || args[1] != "init" || initializer == nil || output == nil {
 		return errInvalidCommand
@@ -224,6 +234,63 @@ func runMode(ctx context.Context, args []string, initializer adminInitializer, o
 		return errors.New("write administrator initialization result")
 	}
 	return nil
+}
+
+func runRecoveryDecrypt(args []string, input io.Reader, output io.Writer) error {
+	if input == nil || output == nil {
+		return errInvalidCommand
+	}
+	flags := flag.NewFlagSet("admin recovery decrypt", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	archivePath := flags.String("archive", "", "encrypted recovery archive")
+	passwordStdin := flags.Bool("password-stdin", false, "read password from standard input")
+	passwordFile := flags.String("password-file", "", "read password from file")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *archivePath == "" || (*passwordStdin == (*passwordFile != "")) {
+		return errInvalidCommand
+	}
+	archive, err := readBoundedFile(*archivePath, 4<<20)
+	if err != nil || len(archive) == 0 {
+		return adminidentity.ErrArchiveAuthentication
+	}
+	var passwordBytes []byte
+	if *passwordStdin {
+		passwordBytes, err = io.ReadAll(io.LimitReader(input, 1025))
+	} else {
+		passwordBytes, err = readBoundedFile(*passwordFile, 1024)
+	}
+	if err != nil || len(passwordBytes) > 1024 {
+		clear(passwordBytes)
+		return adminidentity.ErrArchiveAuthentication
+	}
+	password := strings.TrimSuffix(strings.TrimSuffix(string(passwordBytes), "\n"), "\r")
+	clear(passwordBytes)
+	if len(password) != 20 {
+		return adminidentity.ErrArchiveAuthentication
+	}
+	codes, err := adminidentity.DecryptRecoveryArchive(archive, password)
+	if err != nil {
+		return err
+	}
+	for _, code := range codes {
+		if _, err := fmt.Fprintln(output, code); err != nil {
+			return errors.New("write recovery codes")
+		}
+	}
+	return nil
+}
+
+func readBoundedFile(path string, limit int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	contents, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil || int64(len(contents)) > limit {
+		clear(contents)
+		return nil, errors.New("file exceeds limit")
+	}
+	return contents, nil
 }
 
 func serveHTTP(

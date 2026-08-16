@@ -12,17 +12,19 @@ import (
 // Config contains the hosted process configuration. Callers must never log the
 // complete value because it contains the MySQL DSN and secret file locations.
 type Config struct {
-	ListenAddr         string
-	MySQLDSN           string
-	EncryptionKeyFile  string
-	HMACKeyFile        string
-	AdminAllowedOrigin string
-	AdminCSRFToken     string
-	SMTPAddress        string
-	SMTPHost           string
-	SMTPUsername       string
-	SMTPPassword       string
-	SMTPFrom           string
+	ListenAddr                 string
+	MySQLDSN                   string
+	EncryptionKeyFile          string
+	HMACKeyFile                string
+	AdminAllowedOrigin         string
+	AdminCSRFToken             string
+	SMTPAddress                string
+	SMTPHost                   string
+	SMTPUsername               string
+	SMTPPassword               string
+	SMTPFrom                   string
+	SMTPMode                   string
+	SMTPAllowInsecureLocalhost bool
 }
 
 // Load reads and validates the hosted process environment.
@@ -48,18 +50,27 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("HOSTED_LISTEN_ADDR must be a literal loopback address: %w", err)
 	}
 
+	allowInsecureLocalhost := false
+	if raw := strings.TrimSpace(os.Getenv("HOSTED_SMTP_ALLOW_INSECURE_LOCALHOST")); raw != "" {
+		allowInsecureLocalhost, err = strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, errors.New("HOSTED_SMTP_ALLOW_INSECURE_LOCALHOST must be a boolean")
+		}
+	}
 	return Config{
-		ListenAddr:         listenAddr,
-		MySQLDSN:           dsn,
-		EncryptionKeyFile:  encryptionKeyFile,
-		HMACKeyFile:        hmacKeyFile,
-		AdminAllowedOrigin: strings.TrimSpace(os.Getenv("HOSTED_ADMIN_ALLOWED_ORIGIN")),
-		AdminCSRFToken:     os.Getenv("HOSTED_ADMIN_CSRF_TOKEN"),
-		SMTPAddress:        strings.TrimSpace(os.Getenv("HOSTED_SMTP_ADDRESS")),
-		SMTPHost:           strings.TrimSpace(os.Getenv("HOSTED_SMTP_HOST")),
-		SMTPUsername:       os.Getenv("HOSTED_SMTP_USERNAME"),
-		SMTPPassword:       os.Getenv("HOSTED_SMTP_PASSWORD"),
-		SMTPFrom:           strings.TrimSpace(os.Getenv("HOSTED_SMTP_FROM")),
+		ListenAddr:                 listenAddr,
+		MySQLDSN:                   dsn,
+		EncryptionKeyFile:          encryptionKeyFile,
+		HMACKeyFile:                hmacKeyFile,
+		AdminAllowedOrigin:         strings.TrimSpace(os.Getenv("HOSTED_ADMIN_ALLOWED_ORIGIN")),
+		AdminCSRFToken:             os.Getenv("HOSTED_ADMIN_CSRF_TOKEN"),
+		SMTPAddress:                strings.TrimSpace(os.Getenv("HOSTED_SMTP_ADDRESS")),
+		SMTPHost:                   strings.TrimSpace(os.Getenv("HOSTED_SMTP_HOST")),
+		SMTPUsername:               os.Getenv("HOSTED_SMTP_USERNAME"),
+		SMTPPassword:               os.Getenv("HOSTED_SMTP_PASSWORD"),
+		SMTPFrom:                   strings.TrimSpace(os.Getenv("HOSTED_SMTP_FROM")),
+		SMTPMode:                   strings.TrimSpace(os.Getenv("HOSTED_SMTP_MODE")),
+		SMTPAllowInsecureLocalhost: allowInsecureLocalhost,
 	}, nil
 }
 

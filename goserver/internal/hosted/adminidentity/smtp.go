@@ -3,14 +3,17 @@ package adminidentity
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"mime/multipart"
 	"mime/quotedprintable"
+	"net"
 	"net/mail"
 	"net/smtp"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Attachment struct {
@@ -63,20 +66,46 @@ func (sender *MemorySender) Messages() []Message {
 }
 
 type SMTPConfig struct {
-	Address  string
-	Host     string
-	Username string
-	Password string
-	From     string
+	Address                string
+	Host                   string
+	Username               string
+	Password               string
+	From                   string
+	Mode                   SMTPMode
+	AllowInsecureLocalhost bool
+	Timeout                time.Duration
 }
+
+type SMTPMode string
+
+const (
+	SMTPModeImplicitTLS       SMTPMode = "implicit_tls"
+	SMTPModeSTARTTLS          SMTPMode = "starttls"
+	SMTPModeInsecureLocalhost SMTPMode = "insecure_localhost"
+	defaultSMTPTimeout                 = 15 * time.Second
+)
 
 type SMTPSender struct {
 	config SMTPConfig
 }
 
 func NewSMTPSender(config SMTPConfig) (*SMTPSender, error) {
-	if !validAddress(config.From) || strings.TrimSpace(config.Address) == "" || strings.TrimSpace(config.Host) == "" || strings.ContainsAny(config.Host, "\r\n") || (config.Username == "") != (config.Password == "") {
+	addressHost, _, splitErr := net.SplitHostPort(config.Address)
+	validMode := config.Mode == SMTPModeImplicitTLS || config.Mode == SMTPModeSTARTTLS || config.Mode == SMTPModeInsecureLocalhost
+	if !validAddress(config.From) || splitErr != nil || strings.TrimSpace(config.Host) == "" || strings.ContainsAny(config.Host, "\r\n") || (config.Username == "") != (config.Password == "") || !validMode {
 		return nil, ErrInvalidInput
+	}
+	if config.Timeout == 0 {
+		config.Timeout = defaultSMTPTimeout
+	}
+	if config.Timeout <= 0 || config.Timeout > time.Minute {
+		return nil, ErrInvalidInput
+	}
+	if config.Mode == SMTPModeInsecureLocalhost {
+		ip := net.ParseIP(addressHost)
+		if !config.AllowInsecureLocalhost || ((ip == nil || !ip.IsLoopback()) && !strings.EqualFold(addressHost, "localhost")) || config.Username != "" {
+			return nil, ErrInvalidInput
+		}
 	}
 	return &SMTPSender{config: config}, nil
 }
@@ -89,11 +118,74 @@ func (sender *SMTPSender) Send(ctx context.Context, message Message) error {
 	if err != nil {
 		return err
 	}
-	var auth smtp.Auth
-	if sender.config.Username != "" {
-		auth = smtp.PlainAuth("", sender.config.Username, sender.config.Password, sender.config.Host)
+	deadline := time.Now().Add(sender.config.Timeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
 	}
-	if err := smtp.SendMail(sender.config.Address, auth, sender.config.From, []string{message.To}, wire); err != nil {
+	dialer := net.Dialer{Timeout: time.Until(deadline)}
+	rawConnection, err := dialer.DialContext(ctx, "tcp", sender.config.Address)
+	if err != nil {
+		return ErrUnavailable
+	}
+	defer rawConnection.Close()
+	_ = rawConnection.SetDeadline(deadline)
+	closed := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = rawConnection.Close()
+		case <-closed:
+		}
+	}()
+	defer close(closed)
+
+	var connection net.Conn = rawConnection
+	tlsActive := false
+	if sender.config.Mode == SMTPModeImplicitTLS {
+		tlsConnection := tls.Client(connection, &tls.Config{ServerName: sender.config.Host, MinVersion: tls.VersionTLS12})
+		if err := tlsConnection.HandshakeContext(ctx); err != nil {
+			return ErrUnavailable
+		}
+		connection = tlsConnection
+		tlsActive = true
+	}
+	client, err := smtp.NewClient(connection, sender.config.Host)
+	if err != nil {
+		return ErrUnavailable
+	}
+	defer client.Close()
+	if sender.config.Mode == SMTPModeSTARTTLS {
+		if supported, _ := client.Extension("STARTTLS"); !supported {
+			return ErrUnavailable
+		}
+		if err := client.StartTLS(&tls.Config{ServerName: sender.config.Host, MinVersion: tls.VersionTLS12}); err != nil {
+			return ErrUnavailable
+		}
+		tlsActive = true
+	}
+	if sender.config.Username != "" {
+		if !tlsActive || client.Auth(smtp.PlainAuth("", sender.config.Username, sender.config.Password, sender.config.Host)) != nil {
+			return ErrUnavailable
+		}
+	}
+	if err := client.Mail(sender.config.From); err != nil {
+		return ErrUnavailable
+	}
+	if err := client.Rcpt(message.To); err != nil {
+		return ErrUnavailable
+	}
+	data, err := client.Data()
+	if err != nil {
+		return ErrUnavailable
+	}
+	if _, err := data.Write(wire); err != nil {
+		_ = data.Close()
+		return ErrUnavailable
+	}
+	if err := data.Close(); err != nil {
+		return ErrUnavailable
+	}
+	if err := client.Quit(); err != nil {
 		return ErrUnavailable
 	}
 	return nil

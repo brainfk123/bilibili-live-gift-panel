@@ -1,11 +1,14 @@
 package adminidentity
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +52,25 @@ func TestRecoveryArchiveUsesPinnedScryptAndAuthenticatedEncryption(t *testing.T)
 	tampered[len(tampered)-1] ^= 0x01
 	if _, _, err := openRecoveryArchive(tampered, material.Password); !errors.Is(err, ErrArchiveAuthentication) {
 		t.Fatalf("tampered archive error = %v, want ErrArchiveAuthentication", err)
+	}
+}
+
+func TestDecryptRecoveryArchiveReturnsExactlyTenCodes(t *testing.T) {
+	material, err := buildRecoveryPackage(&sequenceReader{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	codes, err := DecryptRecoveryArchive(material.Archive, material.Password)
+	if err != nil {
+		t.Fatalf("DecryptRecoveryArchive() error = %v", err)
+	}
+	if len(codes) != RecoveryCodeCount {
+		t.Fatalf("codes = %d, want %d", len(codes), RecoveryCodeCount)
+	}
+	for index := range codes {
+		if codes[index] != material.Codes[index] {
+			t.Fatalf("code %d differs", index)
+		}
 	}
 }
 
@@ -132,6 +154,77 @@ func TestCompleteRecoveryRequiresFreshMatchingProofAndAtomicallyRotatesEverythin
 	}
 }
 
+func TestPrepareConfirmRecoveryIsRetryableAndDefersCredentialMutation(t *testing.T) {
+	now := time.Date(2026, 8, 16, 11, 15, 0, 0, time.UTC)
+	repository := initializedMemoryRepository(t, now)
+	oldCode := "reserved-old-recovery-code"
+	oldHash := sha256.Sum256([]byte(oldCode))
+	repository.activeCodes[oldHash] = struct{}{}
+	verifier := &memoryVerifier{verification: identity.Verification{UID: "32249588", CompletedAt: now}}
+	sender := &MemorySender{Err: ErrUnavailable}
+	service := newTestService(t, repository, verifier, sender, now)
+	login, err := service.VerifyLogin(context.Background(), "login-proof", "123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.PrepareRecovery(context.Background(), "prepare-proof", oldCode); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("SMTP-failed prepare error=%v", err)
+	}
+	repository.mu.Lock()
+	if repository.identity.CredentialEpoch != 1 || len(repository.activeCodes) != 1 {
+		t.Fatal("prepare failure mutated active credentials")
+	}
+	var stableArchive []byte
+	for _, handoff := range repository.handoffs {
+		if handoff.Kind == HandoffRecovery && handoff.State == HandoffPending {
+			stableArchive = bytes.Clone(handoff.Archive)
+		}
+	}
+	repository.mu.Unlock()
+	if len(stableArchive) == 0 {
+		t.Fatal("SMTP failure did not leave committed retryable handoff")
+	}
+	sender.Err = nil
+	prepared, err := service.PrepareRecovery(context.Background(), "retry-proof", oldCode)
+	if err != nil {
+		t.Fatalf("retry PrepareRecovery() error=%v", err)
+	}
+	if prepared.HandoffToken == "" || prepared.TOTPURI == "" || len(prepared.RecoveryPassword) != 20 {
+		t.Fatalf("prepared=%#v", prepared)
+	}
+	if messages := sender.Messages(); len(messages) != 1 || !bytes.Equal(messages[0].Attachments[0].Data, stableArchive) {
+		t.Fatal("retry did not send the stable committed attachment")
+	}
+	if err := service.ConfirmRecovery(context.Background(), prepared.HandoffToken, "000000"); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("wrong pending TOTP error=%v", err)
+	}
+	if err := service.ConfirmRecovery(context.Background(), prepared.HandoffToken, "123456"); err != nil {
+		t.Fatalf("ConfirmRecovery() error=%v", err)
+	}
+	if err := service.ConfirmRecovery(context.Background(), prepared.HandoffToken, "123456"); err != nil {
+		t.Fatalf("idempotent ConfirmRecovery() error=%v", err)
+	}
+	repository.mu.Lock()
+	_, consumed := repository.usedCodes[oldHash]
+	activeCount, epoch := len(repository.activeCodes), repository.identity.CredentialEpoch
+	var secretRetained bool
+	for _, handoff := range repository.handoffs {
+		if bytes.Equal(handoff.TokenHash, func() []byte {
+			hash, _ := service.keys.HashToken("admin_handoff_token", []byte(prepared.HandoffToken))
+			return hash
+		}()) {
+			secretRetained = len(handoff.TOTPSecretCiphertext) != 0 || len(handoff.PasswordCiphertext) != 0 || len(handoff.Archive) != 0
+		}
+	}
+	repository.mu.Unlock()
+	if !consumed || activeCount != RecoveryCodeCount || epoch != 2 || secretRetained {
+		t.Fatalf("confirmed state consumed=%v active=%d epoch=%d secretRetained=%v", consumed, activeCount, epoch, secretRetained)
+	}
+	if err := service.RequireRecentTOTP(context.Background(), login.Token); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("old session survived confirmation: %v", err)
+	}
+}
+
 func TestCompleteRecoveryRejectsMismatchedOrStaleBilibiliProofWithoutConsumingCode(t *testing.T) {
 	now := time.Date(2026, 8, 16, 11, 20, 0, 0, time.UTC)
 	tests := []identity.Verification{
@@ -182,4 +275,126 @@ func TestSMTPMessageContainsOnlySafeHeadersAndEncryptedAttachment(t *testing.T) 
 	if _, err := composeSMTPMessage("noreply@example.com", message, "boundary-for-test"); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("header injection error = %v, want ErrInvalidInput", err)
 	}
+}
+
+func TestSMTPTransportModeIsExplicitAndPlaintextIsLocalhostOnly(t *testing.T) {
+	base := SMTPConfig{Address: "smtp.example.com:587", Host: "smtp.example.com", From: "owner@example.com"}
+	if _, err := NewSMTPSender(base); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("missing transport mode error = %v", err)
+	}
+	base.Mode = SMTPModeInsecureLocalhost
+	base.AllowInsecureLocalhost = true
+	if _, err := NewSMTPSender(base); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("remote plaintext error = %v", err)
+	}
+	base.Address, base.Host = "127.0.0.1:1025", "localhost"
+	if _, err := NewSMTPSender(base); err != nil {
+		t.Fatalf("explicit localhost development SMTP error = %v", err)
+	}
+	base.Mode, base.AllowInsecureLocalhost = SMTPModeSTARTTLS, false
+	if _, err := NewSMTPSender(base); err != nil {
+		t.Fatalf("STARTTLS config error = %v", err)
+	}
+	base.Mode = SMTPModeImplicitTLS
+	if _, err := NewSMTPSender(base); err != nil {
+		t.Fatalf("implicit TLS config error = %v", err)
+	}
+}
+
+func TestSMTPSTARTTLSRefusesDowngradeBeforeAuthentication(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	commands := make(chan string, 4)
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		_, _ = fmt.Fprint(connection, "220 localhost ESMTP\r\n")
+		line, _ := bufio.NewReader(connection).ReadString('\n')
+		commands <- line
+		_, _ = fmt.Fprint(connection, "250-localhost\r\n250 AUTH PLAIN\r\n")
+		line, _ = bufio.NewReader(connection).ReadString('\n')
+		commands <- line
+	}()
+	sender, err := NewSMTPSender(SMTPConfig{Address: listener.Addr().String(), Host: "localhost", From: "sender@example.com", Username: "user", Password: "password", Mode: SMTPModeSTARTTLS, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = sender.Send(context.Background(), Message{To: "owner@example.com", Subject: "Recovery", Text: "encrypted", Attachments: []Attachment{{Filename: "codes.gpra", ContentType: "application/octet-stream", Data: []byte("ciphertext")}}})
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("downgrade error=%v", err)
+	}
+	<-serverDone
+	close(commands)
+	for command := range commands {
+		if strings.HasPrefix(strings.ToUpper(command), "AUTH ") {
+			t.Fatalf("AUTH sent before TLS: %q", command)
+		}
+	}
+}
+
+func TestSMTPContextCancellationClosesBlockedConnection(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			accepted <- connection
+		}
+	}()
+	sender, err := NewSMTPSender(SMTPConfig{Address: listener.Addr().String(), Host: "localhost", From: "sender@example.com", Mode: SMTPModeInsecureLocalhost, AllowInsecureLocalhost: true, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err = sender.Send(ctx, Message{To: "owner@example.com", Subject: "Recovery", Text: "encrypted", Attachments: []Attachment{{Filename: "codes.gpra", ContentType: "application/octet-stream", Data: []byte("ciphertext")}}})
+	if !errors.Is(err, ErrUnavailable) || time.Since(started) > 500*time.Millisecond {
+		t.Fatalf("cancel error=%v elapsed=%s", err, time.Since(started))
+	}
+	select {
+	case connection := <-accepted:
+		_ = connection.Close()
+	case <-time.After(time.Second):
+		t.Fatal("SMTP server never accepted connection")
+	}
+}
+
+func TestSMTPImplicitTLSNeverFallsBackToPlaintext(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		_, _ = fmt.Fprint(connection, "220 plaintext-is-not-tls\r\n")
+	}()
+	sender, err := NewSMTPSender(SMTPConfig{Address: listener.Addr().String(), Host: "localhost", From: "sender@example.com", Mode: SMTPModeImplicitTLS, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = sender.Send(context.Background(), Message{To: "owner@example.com", Subject: "Recovery", Text: "encrypted", Attachments: []Attachment{{Filename: "codes.gpra", ContentType: "application/octet-stream", Data: []byte("ciphertext")}}})
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("implicit TLS downgrade error=%v", err)
+	}
+	<-serverDone
 }

@@ -173,6 +173,17 @@ func openRecoveryArchive(archive []byte, password string) (scryptParameters, []s
 	return parameters, payload.RecoveryCodes, nil
 }
 
+// DecryptRecoveryArchive opens the versioned administrator recovery archive.
+// Callers are responsible for obtaining the password without placing it in
+// process arguments or logs.
+func DecryptRecoveryArchive(archive []byte, password string) ([]string, error) {
+	_, codes, err := openRecoveryArchive(archive, password)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string(nil), codes...), nil
+}
+
 func recoveryCodeHashes(codes []string) ([][]byte, error) {
 	if len(codes) != RecoveryCodeCount {
 		return nil, ErrInvalidInput

@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -266,6 +270,39 @@ func TestRunModeAdminInitPrintsOneTimeSecretsAndNeverStartsHTTP(t *testing.T) {
 		if bytes.Contains(output.Bytes(), []byte(forbidden)) {
 			t.Fatalf("CLI output exposed %q: %q", forbidden, output.String())
 		}
+	}
+}
+
+func TestRunModeDecryptsGeneratedRecoveryArchiveFromStdinWithoutPasswordArgument(t *testing.T) {
+	const fixture = "R1BSQQEQDCAAAIAAAAAACAAAAAEAAAEdsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy/OsZfWF1Ni/wJbLtaXhn3L2O7UBZh/umY584J8IxZQ+GUUnl/8Nh+dwlW3G4KjyUbDlP2vFi3PsyML32ProgId7mHDRyuhqypPGF36mEh81bubIw9oUqbRDCLXlH7+vOA4AGOfANiolmP1ODOAo65GMpTEd6XzXrCs1Lggs3Suw7aP3Rl6Uc3vxoiHvMtVTqU0qrLPlOfzrZrQNOA573Wn473x7Fw6asWQ56+8jRwCJEiZ9JudESX7gu2uLbcRUC5NZWg+49dRWCzZ3G5aYMZm80zWBlER9ZJUoEgz2pN8ZNf1m5q8uu0y4Oz+2oKpitpoUpNLvbAxa15gNiyuQGG5xQ11uUnhX3gTI7GYQthIpy9/koeG3cr45a8uCQQ=="
+	archive, err := base64.StdEncoding.DecodeString(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(t.TempDir(), "admin-recovery.gpra")
+	if err := os.WriteFile(archivePath, archive, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err = runModeWithInput(context.Background(), []string{"admin", "recovery", "decrypt", "--archive", archivePath, "--password-stdin"}, nil, strings.NewReader("oaKjpKWmp6ipqqusra6v\n"), &output, nil)
+	if err != nil {
+		t.Fatalf("decrypt command error = %v", err)
+	}
+	lines := strings.Fields(output.String())
+	if len(lines) != adminidentity.RecoveryCodeCount {
+		t.Fatalf("code lines=%d output=%q", len(lines), output.String())
+	}
+	for index, line := range lines {
+		raw := make([]byte, adminidentity.RecoveryCodeBytes)
+		for offset := range raw {
+			raw[offset] = byte(index*adminidentity.RecoveryCodeBytes + offset + 1)
+		}
+		if want := base64.RawURLEncoding.EncodeToString(raw); line != want {
+			t.Fatalf("code %d=%q want=%q", index, line, want)
+		}
+	}
+	if err := runModeWithInput(context.Background(), []string{"admin", "recovery", "decrypt", "--archive", archivePath, "--password", "oaKjpKWmp6ipqqusra6v"}, nil, strings.NewReader(""), &bytes.Buffer{}, nil); !errors.Is(err, errInvalidCommand) {
+		t.Fatalf("password argv error=%v, want invalid command", err)
 	}
 }
 

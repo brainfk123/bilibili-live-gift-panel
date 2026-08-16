@@ -89,6 +89,72 @@ type RecoveryCompletion struct {
 	Now                     time.Time
 }
 
+const (
+	HandoffInitialization = "initialization"
+	HandoffRecovery       = "recovery"
+	HandoffPending        = "pending"
+	HandoffConfirmed      = "confirmed"
+	defaultHandoffTTL     = 30 * time.Minute
+	defaultCleanupLimit   = 100
+)
+
+type HandoffRecord struct {
+	Kind                 string
+	RequestHash          []byte
+	TokenHash            []byte
+	TokenCiphertext      []byte
+	UIDCiphertext        []byte
+	UIDLookup            []byte
+	EmailCiphertext      []byte
+	TOTPSecretCiphertext []byte
+	TOTPURICiphertext    []byte
+	PasswordCiphertext   []byte
+	Archive              []byte
+	RecoveryCodeHashes   [][]byte
+	CreatedAt            time.Time
+	ExpiresAt            time.Time
+}
+
+type PendingHandoff struct {
+	ID                   int64
+	Kind                 string
+	State                string
+	RequestHash          []byte
+	TokenHash            []byte
+	TokenCiphertext      []byte
+	UIDCiphertext        []byte
+	UIDLookup            []byte
+	EmailCiphertext      []byte
+	TOTPSecretCiphertext []byte
+	TOTPURICiphertext    []byte
+	PasswordCiphertext   []byte
+	Archive              []byte
+	RecoveryCodeHashes   [][]byte
+	CreatedAt            time.Time
+	ExpiresAt            time.Time
+	MailDelivered        bool
+}
+
+type ActivateInitializationAttempt struct {
+	HandoffID int64
+	UIDLookup []byte
+	TokenHash []byte
+	CreatedAt time.Time
+	ExpiresAt time.Time
+	TOTPStep  time.Time
+}
+
+type HandoffRepository interface {
+	PrepareInitialization(context.Context, HandoffRecord) (PendingHandoff, error)
+	PendingInitialization(context.Context, []byte, time.Time) (PendingHandoff, error)
+	ActivateInitialization(context.Context, ActivateInitializationAttempt) error
+	PrepareRecoveryHandoff(context.Context, []byte, []byte, HandoffRecord) (PendingHandoff, error)
+	HandoffByToken(context.Context, []byte) (PendingHandoff, error)
+	ConfirmRecoveryHandoff(context.Context, []byte, time.Time) error
+	MarkHandoffMailAttempt(context.Context, int64, time.Time, bool) error
+	CleanupExpiredHandoffs(context.Context, time.Time, int) error
+}
+
 type Repository interface {
 	Initialize(context.Context, InitializationRecord) error
 	Identity(context.Context) (IdentityRecord, error)
@@ -439,6 +505,385 @@ func (repository *SQLRepository) CompleteRecovery(ctx context.Context, attempt R
 	return bytes.Clone(emailCiphertext), nil
 }
 
+const handoffColumns = "id, handoff_kind, handoff_state, request_hash, token_hash, token_ciphertext, uid_ciphertext, uid_lookup, email_ciphertext, totp_secret_ciphertext, totp_uri_ciphertext, archive_password_ciphertext, recovery_archive, created_at, expires_at, mail_delivered_at"
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scanHandoff(row rowScanner) (PendingHandoff, error) {
+	var handoff PendingHandoff
+	var delivered sql.NullTime
+	err := row.Scan(&handoff.ID, &handoff.Kind, &handoff.State, &handoff.RequestHash, &handoff.TokenHash, &handoff.TokenCiphertext,
+		&handoff.UIDCiphertext, &handoff.UIDLookup, &handoff.EmailCiphertext, &handoff.TOTPSecretCiphertext,
+		&handoff.TOTPURICiphertext, &handoff.PasswordCiphertext, &handoff.Archive, &handoff.CreatedAt, &handoff.ExpiresAt, &delivered)
+	if err != nil {
+		return PendingHandoff{}, err
+	}
+	handoff.MailDelivered = delivered.Valid
+	return handoff, nil
+}
+
+func (repository *SQLRepository) PrepareInitialization(ctx context.Context, candidate HandoffRecord) (PendingHandoff, error) {
+	if !repository.ready() || !validHandoffRecord(candidate, HandoffInitialization) {
+		return PendingHandoff{}, ErrInvalidInput
+	}
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PendingHandoff{}, ErrUnavailable
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	var active int64
+	err = transaction.QueryRowContext(ctx, "SELECT id FROM admin_identity WHERE id = 1 FOR UPDATE").Scan(&active)
+	if err == nil {
+		return PendingHandoff{}, ErrAlreadyInitialized
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return PendingHandoff{}, ErrUnavailable
+	}
+	query := "SELECT " + handoffColumns + " FROM admin_credential_handoffs WHERE handoff_kind = 'initialization' AND handoff_state = 'pending' FOR UPDATE"
+	existing, scanErr := scanHandoff(transaction.QueryRowContext(ctx, query))
+	if scanErr == nil {
+		if existing.ExpiresAt.After(candidate.CreatedAt) {
+			if subtle.ConstantTimeCompare(existing.RequestHash, candidate.RequestHash) == 1 {
+				if err := loadHandoffCodes(ctx, transaction, &existing); err != nil {
+					return PendingHandoff{}, err
+				}
+				if err := transaction.Commit(); err != nil {
+					return PendingHandoff{}, ErrUnavailable
+				}
+				committed = true
+				return existing, nil
+			}
+			return PendingHandoff{}, ErrAlreadyInitialized
+		}
+		if err := expireHandoff(ctx, transaction, existing.ID, candidate.CreatedAt); err != nil {
+			return PendingHandoff{}, err
+		}
+	}
+	if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
+		return PendingHandoff{}, ErrUnavailable
+	}
+	handoff, err := insertHandoff(ctx, transaction, candidate, nil)
+	if err != nil {
+		if errors.Is(err, ErrAlreadyInitialized) {
+			_ = transaction.Rollback()
+			committed = true
+			return repository.PrepareInitialization(ctx, candidate)
+		}
+		return PendingHandoff{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return PendingHandoff{}, ErrUnavailable
+	}
+	committed = true
+	return handoff, nil
+}
+
+func (repository *SQLRepository) PendingInitialization(ctx context.Context, uidLookup []byte, now time.Time) (PendingHandoff, error) {
+	if !repository.ready() || len(uidLookup) != sha256.Size || now.IsZero() {
+		return PendingHandoff{}, ErrInvalidInput
+	}
+	query := "SELECT " + handoffColumns + " FROM admin_credential_handoffs WHERE handoff_kind = 'initialization' AND handoff_state = 'pending' AND uid_lookup = ? AND expires_at > ? LIMIT 1"
+	handoff, err := scanHandoff(repository.db.QueryRowContext(ctx, query, bytes.Clone(uidLookup), now))
+	if errors.Is(err, sql.ErrNoRows) {
+		return PendingHandoff{}, ErrAuthenticationFailed
+	}
+	if err != nil {
+		return PendingHandoff{}, ErrUnavailable
+	}
+	return handoff, nil
+}
+
+func (repository *SQLRepository) ActivateInitialization(ctx context.Context, attempt ActivateInitializationAttempt) error {
+	if !repository.ready() || attempt.HandoffID <= 0 || len(attempt.UIDLookup) != sha256.Size || len(attempt.TokenHash) != sha256.Size || attempt.CreatedAt.IsZero() || !attempt.ExpiresAt.After(attempt.CreatedAt) || attempt.TOTPStep.IsZero() {
+		return ErrInvalidInput
+	}
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ErrUnavailable
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	query := "SELECT " + handoffColumns + " FROM admin_credential_handoffs WHERE id = ? FOR UPDATE"
+	handoff, err := scanHandoff(transaction.QueryRowContext(ctx, query, attempt.HandoffID))
+	if err != nil || handoff.Kind != HandoffInitialization || handoff.State != HandoffPending || !handoff.ExpiresAt.After(attempt.CreatedAt) || subtle.ConstantTimeCompare(handoff.UIDLookup, attempt.UIDLookup) != 1 {
+		return ErrAuthenticationFailed
+	}
+	if err := loadHandoffCodes(ctx, transaction, &handoff); err != nil {
+		return err
+	}
+	if !validCodeHashes(handoff.RecoveryCodeHashes) {
+		return ErrUnavailable
+	}
+	if _, err := transaction.ExecContext(ctx, "INSERT INTO admin_identity (id, credential_epoch, uid_ciphertext, uid_lookup, email_ciphertext, created_at, updated_at) VALUES (1, 1, ?, ?, ?, ?, ?)", handoff.UIDCiphertext, handoff.UIDLookup, handoff.EmailCiphertext, attempt.CreatedAt, attempt.CreatedAt); err != nil {
+		return ErrAuthenticationFailed
+	}
+	if _, err := transaction.ExecContext(ctx, "INSERT INTO admin_totp (admin_identity_id, secret_ciphertext, rotated_at) VALUES (1, ?, ?)", handoff.TOTPSecretCiphertext, attempt.CreatedAt); err != nil {
+		return ErrUnavailable
+	}
+	if err := insertRecoveryCodes(ctx, transaction, handoff.RecoveryCodeHashes, attempt.CreatedAt); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, "INSERT INTO site_sessions (admin_identity_id, token_hash, credential_epoch, created_at, expires_at, totp_verified_at) VALUES (1, ?, 1, ?, ?, ?)", attempt.TokenHash, attempt.CreatedAt, attempt.ExpiresAt, attempt.TOTPStep); err != nil {
+		return ErrUnavailable
+	}
+	if err := destroyHandoff(ctx, transaction, handoff.ID, attempt.CreatedAt); err != nil {
+		return err
+	}
+	if err := transaction.Commit(); err != nil {
+		return ErrUnavailable
+	}
+	committed = true
+	return nil
+}
+
+func (repository *SQLRepository) PrepareRecoveryHandoff(ctx context.Context, uidLookup, codeHash []byte, candidate HandoffRecord) (PendingHandoff, error) {
+	if !repository.ready() || len(uidLookup) != sha256.Size || len(codeHash) != sha256.Size || !validHandoffRecord(candidate, HandoffRecovery) {
+		return PendingHandoff{}, ErrInvalidInput
+	}
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PendingHandoff{}, ErrUnavailable
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	var currentLookup []byte
+	if err := transaction.QueryRowContext(ctx, "SELECT uid_lookup FROM admin_identity WHERE id = 1 FOR UPDATE").Scan(&currentLookup); err != nil || subtle.ConstantTimeCompare(currentLookup, uidLookup) != 1 {
+		return PendingHandoff{}, ErrAuthenticationFailed
+	}
+	var codeID int64
+	if err := transaction.QueryRowContext(ctx, "SELECT id FROM admin_recovery_codes WHERE admin_identity_id = 1 AND code_hash = ? AND used_at IS NULL AND invalidated_at IS NULL FOR UPDATE", bytes.Clone(codeHash)).Scan(&codeID); err != nil {
+		return PendingHandoff{}, ErrAuthenticationFailed
+	}
+	query := "SELECT " + handoffColumns + " FROM admin_credential_handoffs WHERE handoff_kind = 'recovery' AND handoff_state = 'pending' AND reserved_recovery_code_id = ? FOR UPDATE"
+	existing, scanErr := scanHandoff(transaction.QueryRowContext(ctx, query, codeID))
+	if scanErr == nil {
+		if existing.ExpiresAt.After(candidate.CreatedAt) {
+			if err := loadHandoffCodes(ctx, transaction, &existing); err != nil {
+				return PendingHandoff{}, err
+			}
+			if err := transaction.Commit(); err != nil {
+				return PendingHandoff{}, ErrUnavailable
+			}
+			committed = true
+			return existing, nil
+		}
+		if err := expireHandoff(ctx, transaction, existing.ID, candidate.CreatedAt); err != nil {
+			return PendingHandoff{}, err
+		}
+	} else if !errors.Is(scanErr, sql.ErrNoRows) {
+		return PendingHandoff{}, ErrUnavailable
+	}
+	handoff, err := insertHandoff(ctx, transaction, candidate, &codeID)
+	if err != nil {
+		return PendingHandoff{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return PendingHandoff{}, ErrUnavailable
+	}
+	committed = true
+	return handoff, nil
+}
+
+func (repository *SQLRepository) HandoffByToken(ctx context.Context, tokenHash []byte) (PendingHandoff, error) {
+	if !repository.ready() || len(tokenHash) != sha256.Size {
+		return PendingHandoff{}, ErrInvalidInput
+	}
+	query := "SELECT " + handoffColumns + " FROM admin_credential_handoffs WHERE token_hash = ? LIMIT 1"
+	handoff, err := scanHandoff(repository.db.QueryRowContext(ctx, query, bytes.Clone(tokenHash)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return PendingHandoff{}, ErrAuthenticationFailed
+	}
+	if err != nil {
+		return PendingHandoff{}, ErrUnavailable
+	}
+	return handoff, nil
+}
+
+func (repository *SQLRepository) ConfirmRecoveryHandoff(ctx context.Context, tokenHash []byte, now time.Time) error {
+	if !repository.ready() || len(tokenHash) != sha256.Size || now.IsZero() {
+		return ErrInvalidInput
+	}
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ErrUnavailable
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	query := "SELECT " + handoffColumns + ", reserved_recovery_code_id FROM admin_credential_handoffs WHERE token_hash = ? FOR UPDATE"
+	var handoff PendingHandoff
+	var delivered sql.NullTime
+	var reserved sql.NullInt64
+	err = transaction.QueryRowContext(ctx, query, bytes.Clone(tokenHash)).Scan(&handoff.ID, &handoff.Kind, &handoff.State, &handoff.RequestHash, &handoff.TokenHash, &handoff.TokenCiphertext, &handoff.UIDCiphertext, &handoff.UIDLookup, &handoff.EmailCiphertext, &handoff.TOTPSecretCiphertext, &handoff.TOTPURICiphertext, &handoff.PasswordCiphertext, &handoff.Archive, &handoff.CreatedAt, &handoff.ExpiresAt, &delivered, &reserved)
+	if err != nil || handoff.Kind != HandoffRecovery {
+		return ErrAuthenticationFailed
+	}
+	if handoff.State == HandoffConfirmed {
+		if err := transaction.Commit(); err != nil {
+			return ErrUnavailable
+		}
+		committed = true
+		return nil
+	}
+	if handoff.State != HandoffPending || !handoff.ExpiresAt.After(now) || !reserved.Valid {
+		return ErrAuthenticationFailed
+	}
+	if err := loadHandoffCodes(ctx, transaction, &handoff); err != nil {
+		return err
+	}
+	if !validCodeHashes(handoff.RecoveryCodeHashes) {
+		return ErrUnavailable
+	}
+	var active int
+	if err := transaction.QueryRowContext(ctx, "SELECT 1 FROM admin_recovery_codes WHERE id = ? AND admin_identity_id = 1 AND used_at IS NULL AND invalidated_at IS NULL FOR UPDATE", reserved.Int64).Scan(&active); err != nil {
+		return ErrAuthenticationFailed
+	}
+	if result, err := transaction.ExecContext(ctx, "UPDATE admin_recovery_codes SET used_at = ? WHERE id = ? AND used_at IS NULL AND invalidated_at IS NULL", now, reserved.Int64); err != nil || !oneRow(result) {
+		return ErrAuthenticationFailed
+	}
+	if _, err := transaction.ExecContext(ctx, "UPDATE admin_recovery_codes SET invalidated_at = ? WHERE admin_identity_id = 1 AND used_at IS NULL AND invalidated_at IS NULL", now); err != nil {
+		return ErrUnavailable
+	}
+	if result, err := transaction.ExecContext(ctx, "UPDATE admin_totp SET secret_ciphertext = ?, rotated_at = ? WHERE admin_identity_id = 1", handoff.TOTPSecretCiphertext, now); err != nil || !oneRow(result) {
+		return ErrUnavailable
+	}
+	if result, err := transaction.ExecContext(ctx, "UPDATE admin_identity SET credential_epoch = credential_epoch + 1, updated_at = ? WHERE id = 1", now); err != nil || !oneRow(result) {
+		return ErrUnavailable
+	}
+	if _, err := transaction.ExecContext(ctx, "UPDATE site_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE admin_identity_id = 1", now); err != nil {
+		return ErrUnavailable
+	}
+	if err := insertRecoveryCodes(ctx, transaction, handoff.RecoveryCodeHashes, now); err != nil {
+		return err
+	}
+	if err := destroyHandoff(ctx, transaction, handoff.ID, now); err != nil {
+		return err
+	}
+	if err := transaction.Commit(); err != nil {
+		return ErrUnavailable
+	}
+	committed = true
+	return nil
+}
+
+func (repository *SQLRepository) MarkHandoffMailAttempt(ctx context.Context, id int64, now time.Time, delivered bool) error {
+	if !repository.ready() || id <= 0 || now.IsZero() {
+		return ErrInvalidInput
+	}
+	var result sql.Result
+	var err error
+	if delivered {
+		result, err = repository.db.ExecContext(ctx, "UPDATE admin_credential_handoffs SET mail_attempt_count = mail_attempt_count + 1, last_mail_attempt_at = ?, mail_delivered_at = COALESCE(mail_delivered_at, ?) WHERE id = ? AND handoff_state = 'pending'", now, now, id)
+	} else {
+		result, err = repository.db.ExecContext(ctx, "UPDATE admin_credential_handoffs SET mail_attempt_count = mail_attempt_count + 1, last_mail_attempt_at = ? WHERE id = ? AND handoff_state = 'pending'", now, id)
+	}
+	if err != nil || !oneRow(result) {
+		return ErrUnavailable
+	}
+	return nil
+}
+
+func (repository *SQLRepository) CleanupExpiredHandoffs(ctx context.Context, now time.Time, limit int) error {
+	if !repository.ready() || now.IsZero() || limit < 1 || limit > 1000 {
+		return ErrInvalidInput
+	}
+	_, err := repository.db.ExecContext(ctx, "DELETE FROM admin_credential_handoffs WHERE handoff_state = 'pending' AND expires_at <= ? ORDER BY id LIMIT ?", now, limit)
+	if err != nil {
+		return ErrUnavailable
+	}
+	return nil
+}
+
+func insertHandoff(ctx context.Context, transaction *sql.Tx, candidate HandoffRecord, reservedCodeID *int64) (PendingHandoff, error) {
+	result, err := transaction.ExecContext(ctx, "INSERT INTO admin_credential_handoffs (handoff_kind, handoff_state, request_hash, token_hash, token_ciphertext, admin_identity_id, reserved_recovery_code_id, uid_ciphertext, uid_lookup, email_ciphertext, totp_secret_ciphertext, totp_uri_ciphertext, archive_password_ciphertext, recovery_archive, created_at, expires_at) VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", candidate.Kind, candidate.RequestHash, candidate.TokenHash, candidate.TokenCiphertext, nullableAdminID(candidate.Kind), reservedCodeID, candidate.UIDCiphertext, candidate.UIDLookup, candidate.EmailCiphertext, candidate.TOTPSecretCiphertext, candidate.TOTPURICiphertext, candidate.PasswordCiphertext, candidate.Archive, candidate.CreatedAt, candidate.ExpiresAt)
+	if err != nil {
+		if repositoryDuplicate(err) {
+			return PendingHandoff{}, ErrAlreadyInitialized
+		}
+		return PendingHandoff{}, ErrUnavailable
+	}
+	id, err := result.LastInsertId()
+	if err != nil || id <= 0 {
+		return PendingHandoff{}, ErrUnavailable
+	}
+	for ordinal, hash := range candidate.RecoveryCodeHashes {
+		if _, err := transaction.ExecContext(ctx, "INSERT INTO admin_handoff_recovery_codes (handoff_id, code_ordinal, code_hash) VALUES (?, ?, ?)", id, ordinal, hash); err != nil {
+			return PendingHandoff{}, ErrUnavailable
+		}
+	}
+	return PendingHandoff{ID: id, Kind: candidate.Kind, State: HandoffPending, RequestHash: bytes.Clone(candidate.RequestHash), TokenHash: bytes.Clone(candidate.TokenHash), TokenCiphertext: bytes.Clone(candidate.TokenCiphertext), UIDCiphertext: bytes.Clone(candidate.UIDCiphertext), UIDLookup: bytes.Clone(candidate.UIDLookup), EmailCiphertext: bytes.Clone(candidate.EmailCiphertext), TOTPSecretCiphertext: bytes.Clone(candidate.TOTPSecretCiphertext), TOTPURICiphertext: bytes.Clone(candidate.TOTPURICiphertext), PasswordCiphertext: bytes.Clone(candidate.PasswordCiphertext), Archive: bytes.Clone(candidate.Archive), RecoveryCodeHashes: cloneByteSlices(candidate.RecoveryCodeHashes), CreatedAt: candidate.CreatedAt, ExpiresAt: candidate.ExpiresAt}, nil
+}
+
+func nullableAdminID(kind string) any {
+	if kind == HandoffRecovery {
+		return int64(1)
+	}
+	return nil
+}
+
+func loadHandoffCodes(ctx context.Context, transaction *sql.Tx, handoff *PendingHandoff) error {
+	rows, err := transaction.QueryContext(ctx, "SELECT code_hash FROM admin_handoff_recovery_codes WHERE handoff_id = ? ORDER BY code_ordinal", handoff.ID)
+	if err != nil {
+		return ErrUnavailable
+	}
+	defer rows.Close()
+	handoff.RecoveryCodeHashes = nil
+	for rows.Next() {
+		var hash []byte
+		if rows.Scan(&hash) != nil {
+			return ErrUnavailable
+		}
+		handoff.RecoveryCodeHashes = append(handoff.RecoveryCodeHashes, bytes.Clone(hash))
+	}
+	if rows.Err() != nil {
+		return ErrUnavailable
+	}
+	return nil
+}
+
+func destroyHandoff(ctx context.Context, transaction *sql.Tx, id int64, now time.Time) error {
+	if _, err := transaction.ExecContext(ctx, "DELETE FROM admin_handoff_recovery_codes WHERE handoff_id = ?", id); err != nil {
+		return ErrUnavailable
+	}
+	result, err := transaction.ExecContext(ctx, "UPDATE admin_credential_handoffs SET handoff_state = 'confirmed', confirmed_at = ?, token_ciphertext = NULL, uid_ciphertext = NULL, uid_lookup = NULL, totp_secret_ciphertext = NULL, totp_uri_ciphertext = NULL, archive_password_ciphertext = NULL, recovery_archive = NULL WHERE id = ? AND handoff_state = 'pending'", now, id)
+	if err != nil || !oneRow(result) {
+		return ErrUnavailable
+	}
+	return nil
+}
+
+func expireHandoff(ctx context.Context, transaction *sql.Tx, id int64, now time.Time) error {
+	if _, err := transaction.ExecContext(ctx, "DELETE FROM admin_handoff_recovery_codes WHERE handoff_id = ?", id); err != nil {
+		return ErrUnavailable
+	}
+	if _, err := transaction.ExecContext(ctx, "UPDATE admin_credential_handoffs SET handoff_state = 'expired', token_ciphertext = NULL, uid_ciphertext = NULL, uid_lookup = NULL, totp_secret_ciphertext = NULL, totp_uri_ciphertext = NULL, archive_password_ciphertext = NULL, recovery_archive = NULL WHERE id = ? AND handoff_state = 'pending'", id); err != nil {
+		return ErrUnavailable
+	}
+	return nil
+}
+
+func validHandoffRecord(record HandoffRecord, kind string) bool {
+	return record.Kind == kind && len(record.RequestHash) == sha256.Size && len(record.TokenHash) == sha256.Size && len(record.TokenCiphertext) > 0 && len(record.EmailCiphertext) > 0 && len(record.TOTPSecretCiphertext) > 0 && len(record.TOTPURICiphertext) > 0 && len(record.PasswordCiphertext) > 0 && len(record.Archive) > 0 && !record.CreatedAt.IsZero() && record.ExpiresAt.After(record.CreatedAt) && validCodeHashes(record.RecoveryCodeHashes) && (kind != HandoffInitialization || (len(record.UIDCiphertext) > 0 && len(record.UIDLookup) == sha256.Size))
+}
+
 func (repository *SQLRepository) ready() bool {
 	return repository != nil && repository.db != nil
 }
@@ -553,6 +998,7 @@ type ServiceOptions struct {
 	Issuer     string
 	ProofTTL   time.Duration
 	SessionTTL time.Duration
+	HandoffTTL time.Duration
 }
 
 type Service struct {
@@ -566,6 +1012,7 @@ type Service struct {
 	issuer     string
 	proofTTL   time.Duration
 	sessionTTL time.Duration
+	handoffTTL time.Duration
 }
 
 type InitializeResult struct {
@@ -585,6 +1032,12 @@ type RecoveryResult struct {
 type RecoveryCompletionResult struct {
 	TOTPURI          string `json:"totpUri"`
 	RecoveryPassword string `json:"recoveryPassword"`
+}
+
+type RecoveryPreparationResult struct {
+	TOTPURI          string `json:"totpUri"`
+	RecoveryPassword string `json:"recoveryPassword"`
+	HandoffToken     string `json:"handoffToken"`
 }
 
 func NewService(repository Repository, keys security.Keyring, verifier identity.BiliVerifier, sender MailSender, options ServiceOptions) (*Service, error) {
@@ -612,13 +1065,16 @@ func NewService(repository Repository, keys security.Keyring, verifier identity.
 	if options.SessionTTL == 0 {
 		options.SessionTTL = defaultSessionTTL
 	}
-	if options.ProofTTL <= 0 || options.ProofTTL > defaultProofTTL || options.SessionTTL <= 0 || options.SessionTTL > 7*24*time.Hour || len(options.Issuer) > 128 {
+	if options.HandoffTTL == 0 {
+		options.HandoffTTL = defaultHandoffTTL
+	}
+	if options.ProofTTL <= 0 || options.ProofTTL > defaultProofTTL || options.SessionTTL <= 0 || options.SessionTTL > 7*24*time.Hour || options.HandoffTTL <= 0 || options.HandoffTTL > 24*time.Hour || len(options.Issuer) > 128 {
 		return nil, ErrInvalidInput
 	}
 	return &Service{
 		repository: repository, keys: keys, verifier: verifier, sender: sender,
 		now: options.Now, random: options.Random, totp: options.TOTP, issuer: options.Issuer,
-		proofTTL: options.ProofTTL, sessionTTL: options.SessionTTL,
+		proofTTL: options.ProofTTL, sessionTTL: options.SessionTTL, handoffTTL: options.HandoffTTL,
 	}, nil
 }
 
@@ -646,6 +1102,9 @@ func (service *Service) Initialize(ctx context.Context, uid, email string) (Init
 	canonical, ok := canonicalAdminUID(uid)
 	if service == nil || !ok || !validEmail(email) {
 		return InitializeResult{}, ErrInvalidInput
+	}
+	if repository, ok := service.repository.(HandoffRepository); ok {
+		return service.initializeHandoff(ctx, repository, canonical, email)
 	}
 	secret, uri, err := service.totp.Generate(service.issuer, email)
 	if err != nil || secret == "" || uri == "" {
@@ -691,13 +1150,162 @@ func (service *Service) Initialize(ctx context.Context, uid, email string) (Init
 	return InitializeResult{TOTPURI: uri, RecoveryPassword: material.Password}, nil
 }
 
+func (service *Service) initializeHandoff(ctx context.Context, repository HandoffRepository, canonicalUID, email string) (InitializeResult, error) {
+	now := service.now()
+	_ = repository.CleanupExpiredHandoffs(ctx, now, defaultCleanupLimit)
+	secret, uri, err := service.totp.Generate(service.issuer, email)
+	if err != nil || secret == "" || uri == "" {
+		return InitializeResult{}, ErrUnavailable
+	}
+	material, err := buildRecoveryPackage(service.random)
+	if err != nil {
+		return InitializeResult{}, err
+	}
+	hashes, err := recoveryCodeHashes(material.Codes)
+	if err != nil {
+		return InitializeResult{}, ErrUnavailable
+	}
+	uidCiphertext, err := service.keys.Seal("admin_uid", []byte(canonicalUID))
+	if err != nil {
+		return InitializeResult{}, ErrUnavailable
+	}
+	uidLookup, err := service.keys.Lookup("bili_uid", []byte(canonicalUID))
+	if err != nil {
+		return InitializeResult{}, ErrUnavailable
+	}
+	emailCiphertext, err := service.keys.Seal("admin_email", []byte(email))
+	if err != nil {
+		return InitializeResult{}, ErrUnavailable
+	}
+	secretCiphertext, err := service.keys.Seal("admin_totp", []byte(secret))
+	if err != nil {
+		return InitializeResult{}, ErrUnavailable
+	}
+	uriCiphertext, err := service.keys.Seal("admin_handoff_totp_uri", []byte(uri))
+	if err != nil {
+		return InitializeResult{}, ErrUnavailable
+	}
+	passwordCiphertext, err := service.keys.Seal("admin_handoff_password", []byte(material.Password))
+	if err != nil {
+		return InitializeResult{}, ErrUnavailable
+	}
+	token, err := service.keys.NewToken()
+	if err != nil {
+		return InitializeResult{}, ErrUnavailable
+	}
+	tokenHash, err := service.keys.HashToken("admin_handoff_token", []byte(token))
+	if err != nil {
+		return InitializeResult{}, ErrUnavailable
+	}
+	tokenCiphertext, err := service.keys.Seal("admin_handoff_token", []byte(token))
+	if err != nil {
+		return InitializeResult{}, ErrUnavailable
+	}
+	requestHash, err := service.keys.HashToken("admin_handoff_request", []byte(canonicalUID+"\x00"+email))
+	if err != nil {
+		return InitializeResult{}, ErrUnavailable
+	}
+	handoff, err := repository.PrepareInitialization(ctx, HandoffRecord{Kind: HandoffInitialization, RequestHash: requestHash, TokenHash: tokenHash, TokenCiphertext: tokenCiphertext, UIDCiphertext: uidCiphertext, UIDLookup: uidLookup, EmailCiphertext: emailCiphertext, TOTPSecretCiphertext: secretCiphertext, TOTPURICiphertext: uriCiphertext, PasswordCiphertext: passwordCiphertext, Archive: bytes.Clone(material.Archive), RecoveryCodeHashes: hashes, CreatedAt: now, ExpiresAt: now.Add(service.handoffTTL)})
+	if err != nil {
+		if errors.Is(err, ErrAlreadyInitialized) {
+			return InitializeResult{}, ErrAlreadyInitialized
+		}
+		return InitializeResult{}, ErrUnavailable
+	}
+	return service.deliverPendingInitialization(ctx, repository, handoff)
+}
+
+func (service *Service) deliverPendingInitialization(ctx context.Context, repository HandoffRepository, handoff PendingHandoff) (InitializeResult, error) {
+	uri, err := service.keys.Open("admin_handoff_totp_uri", handoff.TOTPURICiphertext)
+	if err != nil {
+		return InitializeResult{}, ErrUnavailable
+	}
+	defer clear(uri)
+	password, err := service.keys.Open("admin_handoff_password", handoff.PasswordCiphertext)
+	if err != nil {
+		return InitializeResult{}, ErrUnavailable
+	}
+	defer clear(password)
+	email, err := service.keys.Open("admin_email", handoff.EmailCiphertext)
+	if err != nil || !validEmail(string(email)) {
+		clear(email)
+		return InitializeResult{}, ErrUnavailable
+	}
+	defer clear(email)
+	if !handoff.MailDelivered {
+		sendErr := service.sendArchive(ctx, string(email), handoff.Archive)
+		_ = repository.MarkHandoffMailAttempt(ctx, handoff.ID, service.now(), sendErr == nil)
+		if sendErr != nil {
+			return InitializeResult{}, ErrUnavailable
+		}
+	}
+	if len(password) != 20 || len(uri) == 0 {
+		return InitializeResult{}, ErrUnavailable
+	}
+	return InitializeResult{TOTPURI: string(uri), RecoveryPassword: string(password)}, nil
+}
+
 func (service *Service) VerifyLogin(ctx context.Context, challengeID, code string) (LoginResult, error) {
 	if service == nil || challengeID == "" || !validTOTPCode(code) {
 		return LoginResult{}, ErrAuthenticationFailed
 	}
-	record, step, err := service.verifyProofAndTOTP(ctx, challengeID, code)
+	verification, err := service.consumeProof(ctx, challengeID)
 	if err != nil {
 		return LoginResult{}, err
+	}
+	uid, ok := canonicalAdminUID(verification.UID)
+	if !ok {
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	lookup, err := service.keys.Lookup("bili_uid", []byte(uid))
+	if err != nil {
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	now := service.now()
+	record, identityErr := service.repository.Identity(ctx)
+	if identityErr != nil {
+		repository, supportsHandoffs := service.repository.(HandoffRepository)
+		if !supportsHandoffs {
+			return LoginResult{}, ErrAuthenticationFailed
+		}
+		handoff, err := repository.PendingInitialization(ctx, lookup, now)
+		if err != nil {
+			return LoginResult{}, ErrAuthenticationFailed
+		}
+		secret, err := service.keys.Open("admin_totp", handoff.TOTPSecretCiphertext)
+		if err != nil {
+			return LoginResult{}, ErrAuthenticationFailed
+		}
+		step, valid := service.totp.Validate(code, string(secret), now)
+		clear(secret)
+		if !valid || step.IsZero() {
+			return LoginResult{}, ErrAuthenticationFailed
+		}
+		token, err := service.keys.NewToken()
+		if err != nil {
+			return LoginResult{}, ErrUnavailable
+		}
+		tokenHash, err := service.keys.HashToken("admin_session", []byte(token))
+		if err != nil {
+			return LoginResult{}, ErrUnavailable
+		}
+		expiresAt := now.Add(service.sessionTTL)
+		if err := repository.ActivateInitialization(ctx, ActivateInitializationAttempt{HandoffID: handoff.ID, UIDLookup: lookup, TokenHash: tokenHash, CreatedAt: now, ExpiresAt: expiresAt, TOTPStep: step}); err != nil {
+			return LoginResult{}, ErrAuthenticationFailed
+		}
+		return LoginResult{Token: token, ExpiresAt: expiresAt}, nil
+	}
+	if subtle.ConstantTimeCompare(lookup, record.UIDLookup) != 1 || record.CredentialEpoch < 1 {
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	secret, err := service.keys.Open("admin_totp", record.TOTPSecretCiphertext)
+	if err != nil {
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	step, valid := service.totp.Validate(code, string(secret), now)
+	clear(secret)
+	if !valid || step.IsZero() {
+		return LoginResult{}, ErrAuthenticationFailed
 	}
 	token, err := service.keys.NewToken()
 	if err != nil {
@@ -707,7 +1315,6 @@ func (service *Service) VerifyLogin(ctx context.Context, challengeID, code strin
 	if err != nil {
 		return LoginResult{}, ErrUnavailable
 	}
-	now := service.now()
 	expiresAt := now.Add(service.sessionTTL)
 	if err := service.repository.CreateLoginSession(ctx, LoginSessionAttempt{
 		ExpectedCredentialEpoch: record.CredentialEpoch, TokenHash: tokenHash,
@@ -811,6 +1418,170 @@ func (service *Service) SendRecovery(ctx context.Context, sessionToken string) (
 		return RecoveryResult{}, ErrUnavailable
 	}
 	return RecoveryResult{RecoveryPassword: material.Password}, nil
+}
+
+func (service *Service) PrepareRecovery(ctx context.Context, challengeID, recoveryCode string) (RecoveryPreparationResult, error) {
+	if service == nil || challengeID == "" || recoveryCode == "" || len(recoveryCode) > 256 {
+		return RecoveryPreparationResult{}, ErrAuthenticationFailed
+	}
+	repository, ok := service.repository.(HandoffRepository)
+	if !ok {
+		return RecoveryPreparationResult{}, ErrUnavailable
+	}
+	verification, err := service.consumeProof(ctx, challengeID)
+	if err != nil {
+		return RecoveryPreparationResult{}, err
+	}
+	uid, ok := canonicalAdminUID(verification.UID)
+	if !ok {
+		return RecoveryPreparationResult{}, ErrAuthenticationFailed
+	}
+	uidLookup, err := service.keys.Lookup("bili_uid", []byte(uid))
+	if err != nil {
+		return RecoveryPreparationResult{}, ErrAuthenticationFailed
+	}
+	record, err := service.repository.Identity(ctx)
+	if err != nil || subtle.ConstantTimeCompare(uidLookup, record.UIDLookup) != 1 {
+		return RecoveryPreparationResult{}, ErrAuthenticationFailed
+	}
+	now := service.now()
+	_ = repository.CleanupExpiredHandoffs(ctx, now, defaultCleanupLimit)
+	secret, uri, err := service.totp.Generate(service.issuer, "administrator")
+	if err != nil || secret == "" || uri == "" {
+		return RecoveryPreparationResult{}, ErrUnavailable
+	}
+	material, err := buildRecoveryPackage(service.random)
+	if err != nil {
+		return RecoveryPreparationResult{}, err
+	}
+	hashes, err := recoveryCodeHashes(material.Codes)
+	if err != nil {
+		return RecoveryPreparationResult{}, ErrUnavailable
+	}
+	secretCiphertext, err := service.keys.Seal("admin_totp", []byte(secret))
+	if err != nil {
+		return RecoveryPreparationResult{}, ErrUnavailable
+	}
+	uriCiphertext, err := service.keys.Seal("admin_handoff_totp_uri", []byte(uri))
+	if err != nil {
+		return RecoveryPreparationResult{}, ErrUnavailable
+	}
+	passwordCiphertext, err := service.keys.Seal("admin_handoff_password", []byte(material.Password))
+	if err != nil {
+		return RecoveryPreparationResult{}, ErrUnavailable
+	}
+	token, err := service.keys.NewToken()
+	if err != nil {
+		return RecoveryPreparationResult{}, ErrUnavailable
+	}
+	tokenHash, err := service.keys.HashToken("admin_handoff_token", []byte(token))
+	if err != nil {
+		return RecoveryPreparationResult{}, ErrUnavailable
+	}
+	tokenCiphertext, err := service.keys.Seal("admin_handoff_token", []byte(token))
+	if err != nil {
+		return RecoveryPreparationResult{}, ErrUnavailable
+	}
+	requestHash, err := service.keys.HashToken("admin_handoff_request", []byte(recoveryCode))
+	if err != nil {
+		return RecoveryPreparationResult{}, ErrUnavailable
+	}
+	codeHash := sha256.Sum256([]byte(recoveryCode))
+	handoff, err := repository.PrepareRecoveryHandoff(ctx, uidLookup, codeHash[:], HandoffRecord{Kind: HandoffRecovery, RequestHash: requestHash, TokenHash: tokenHash, TokenCiphertext: tokenCiphertext, EmailCiphertext: record.EmailCiphertext, TOTPSecretCiphertext: secretCiphertext, TOTPURICiphertext: uriCiphertext, PasswordCiphertext: passwordCiphertext, Archive: bytes.Clone(material.Archive), RecoveryCodeHashes: hashes, CreatedAt: now, ExpiresAt: now.Add(service.handoffTTL)})
+	if err != nil {
+		return RecoveryPreparationResult{}, ErrAuthenticationFailed
+	}
+	return service.deliverPendingRecovery(ctx, repository, handoff)
+}
+
+func (service *Service) deliverPendingRecovery(ctx context.Context, repository HandoffRepository, handoff PendingHandoff) (RecoveryPreparationResult, error) {
+	uri, err := service.keys.Open("admin_handoff_totp_uri", handoff.TOTPURICiphertext)
+	if err != nil {
+		return RecoveryPreparationResult{}, ErrUnavailable
+	}
+	defer clear(uri)
+	password, err := service.keys.Open("admin_handoff_password", handoff.PasswordCiphertext)
+	if err != nil {
+		return RecoveryPreparationResult{}, ErrUnavailable
+	}
+	defer clear(password)
+	token, err := service.keys.Open("admin_handoff_token", handoff.TokenCiphertext)
+	if err != nil {
+		return RecoveryPreparationResult{}, ErrUnavailable
+	}
+	defer clear(token)
+	email, err := service.keys.Open("admin_email", handoff.EmailCiphertext)
+	if err != nil || !validEmail(string(email)) {
+		clear(email)
+		return RecoveryPreparationResult{}, ErrUnavailable
+	}
+	defer clear(email)
+	if !handoff.MailDelivered {
+		sendErr := service.sendArchive(ctx, string(email), handoff.Archive)
+		_ = repository.MarkHandoffMailAttempt(ctx, handoff.ID, service.now(), sendErr == nil)
+		if sendErr != nil {
+			return RecoveryPreparationResult{}, ErrUnavailable
+		}
+	}
+	if len(password) != 20 || len(uri) == 0 || len(token) == 0 {
+		return RecoveryPreparationResult{}, ErrUnavailable
+	}
+	return RecoveryPreparationResult{TOTPURI: string(uri), RecoveryPassword: string(password), HandoffToken: string(token)}, nil
+}
+
+func (service *Service) ConfirmRecovery(ctx context.Context, handoffToken, code string) error {
+	if service == nil || handoffToken == "" || !validTOTPCode(code) {
+		return ErrAuthenticationFailed
+	}
+	repository, ok := service.repository.(HandoffRepository)
+	if !ok {
+		return ErrUnavailable
+	}
+	tokenHash, err := service.keys.HashToken("admin_handoff_token", []byte(handoffToken))
+	if err != nil {
+		return ErrAuthenticationFailed
+	}
+	handoff, err := repository.HandoffByToken(ctx, tokenHash)
+	if err != nil || handoff.Kind != HandoffRecovery {
+		return ErrAuthenticationFailed
+	}
+	if handoff.State == HandoffConfirmed {
+		return nil
+	}
+	now := service.now()
+	if handoff.State != HandoffPending || !handoff.ExpiresAt.After(now) {
+		return ErrAuthenticationFailed
+	}
+	secret, err := service.keys.Open("admin_totp", handoff.TOTPSecretCiphertext)
+	if err != nil {
+		return ErrAuthenticationFailed
+	}
+	step, valid := service.totp.Validate(code, string(secret), now)
+	clear(secret)
+	if !valid || step.IsZero() {
+		return ErrAuthenticationFailed
+	}
+	if err := repository.ConfirmRecoveryHandoff(ctx, tokenHash, now); err != nil {
+		return ErrAuthenticationFailed
+	}
+	return nil
+}
+
+func (service *Service) RunHandoffCleanup(ctx context.Context, interval time.Duration) {
+	repository, ok := service.repository.(HandoffRepository)
+	if !ok || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = repository.CleanupExpiredHandoffs(ctx, service.now(), defaultCleanupLimit)
+		}
+	}
 }
 
 func (service *Service) CompleteRecovery(ctx context.Context, challengeID, recoveryCode string) (RecoveryCompletionResult, error) {

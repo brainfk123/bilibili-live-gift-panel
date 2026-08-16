@@ -2,6 +2,8 @@ package adminidentity
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +13,67 @@ import (
 	"bilibili-live-gift-panel/internal/hosted/app"
 	"bilibili-live-gift-panel/internal/hosted/identity"
 )
+
+func TestHTTPSensitiveEndpointsRejectMissingCookieWithoutPanic(t *testing.T) {
+	handler := newTestHTTPHandler(t, &adminHTTPService{})
+	for _, path := range []string{"/api/admin/totp", "/api/admin/recovery/archive"} {
+		request := mutationRequest(http.MethodPost, path, `{"totp":"123456"}`)
+		if path != "/api/admin/totp" {
+			request = mutationRequest(http.MethodPost, path, `{}`)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized || response.Body.String() != "{\"error\":\"authentication_failed\"}\n" {
+			t.Fatalf("POST %s = %d %q", path, response.Code, response.Body.String())
+		}
+		if response.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("POST %s Cache-Control = %q", path, response.Header().Get("Cache-Control"))
+		}
+	}
+}
+
+func TestHTTPSensitiveEndpointRateLimitUsesHashedSessionBeforeService(t *testing.T) {
+	for _, test := range []struct{ path, body, key string }{
+		{path: "/api/admin/totp", body: `{"totp":"123456"}`, key: "plain-cookie-must-not-be-a-key"},
+		{path: "/api/admin/recovery/archive", body: `{}`, key: "plain-cookie-must-not-be-a-key"},
+		{path: "/api/admin/recovery/prepare", body: `{"challengeId":"proof","recoveryCode":"code"}`, key: "admin:1"},
+	} {
+		limiter := &denySessionLimit{deniedKey: test.key}
+		service := &adminHTTPService{}
+		handler, err := NewHTTPHandler(service, HTTPOptions{AllowedOrigin: "https://panel.example.com", CSRFToken: "csrf-test-token", Limiter: limiter, ClientIP: identity.DirectClientIP})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := mutationRequest(http.MethodPost, test.path, test.body)
+		if test.path != "/api/admin/recovery/prepare" {
+			request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: test.key})
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusTooManyRequests {
+			t.Fatalf("POST %s status=%d body=%s", test.path, response.Code, response.Body.String())
+		}
+		if service.verifySession != "" || service.recoverySession != "" || service.prepareChallenge != "" {
+			t.Fatalf("POST %s reached service", test.path)
+		}
+		if limiter.sawPlaintext {
+			t.Fatalf("POST %s limiter received plaintext secret", test.path)
+		}
+	}
+}
+
+type denySessionLimit struct {
+	sawPlaintext bool
+	deniedKey    string
+}
+
+func (limiter *denySessionLimit) Allow(_ context.Context, scope identity.LimitScope, key string) bool {
+	if key == limiter.deniedKey && limiter.deniedKey != "admin:1" {
+		limiter.sawPlaintext = true
+	}
+	want := sha256.Sum256([]byte(limiter.deniedKey))
+	return scope != identity.LimitPerChallenge || (key != fmt.Sprintf("%x", want[:]) && key != limiter.deniedKey)
+}
 
 func TestHTTPHandlerExposesNoAdministratorInitializationRoute(t *testing.T) {
 	handler := newTestHTTPHandler(t, &adminHTTPService{})
@@ -102,19 +165,26 @@ func TestHTTPRecoveryReturnsPasswordOnceWithoutArchiveOrUID(t *testing.T) {
 	}
 }
 
-func TestHTTPCompleteRecoveryUsesFreshChallengeAndClearsOldCookie(t *testing.T) {
-	service := &adminHTTPService{completion: RecoveryCompletionResult{TOTPURI: "otpauth://new", RecoveryPassword: "abcdefghijklmnopqrst"}}
+func TestHTTPRecoveryPrepareThenConfirmClearsOldCookie(t *testing.T) {
+	service := &adminHTTPService{preparation: RecoveryPreparationResult{TOTPURI: "otpauth://new", RecoveryPassword: "abcdefghijklmnopqrst", HandoffToken: "opaque-handoff"}}
 	handler := newTestHTTPHandler(t, service)
-	request := mutationRequest(http.MethodPost, "/api/admin/recovery/complete", `{"challengeId":"fresh-proof","recoveryCode":"one-time-code"}`)
+	request := mutationRequest(http.MethodPost, "/api/admin/recovery/prepare", `{"challengeId":"fresh-proof","recoveryCode":"one-time-code"}`)
 	request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "old-session"})
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK || service.completeChallenge != "fresh-proof" || service.completeCode != "one-time-code" {
-		t.Fatalf("response=%d %q args=%q %q", response.Code, response.Body.String(), service.completeChallenge, service.completeCode)
+	if response.Code != http.StatusOK || service.prepareChallenge != "fresh-proof" || service.prepareCode != "one-time-code" {
+		t.Fatalf("response=%d %q args=%q %q", response.Code, response.Body.String(), service.prepareChallenge, service.prepareCode)
 	}
-	if got := response.Header().Get("Cache-Control"); got != "no-store" {
-		t.Fatalf("Cache-Control = %q", got)
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatal("prepare cleared an old session before confirmation")
+	}
+	request = mutationRequest(http.MethodPost, "/api/admin/recovery/confirm", `{"handoffToken":"opaque-handoff","totp":"123456"}`)
+	request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "old-session"})
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || service.confirmToken != "opaque-handoff" || service.confirmCode != "123456" {
+		t.Fatalf("confirm=%d %q args=%q %q", response.Code, response.Body.String(), service.confirmToken, service.confirmCode)
 	}
 	cookies := response.Result().Cookies()
 	if len(cookies) != 1 || cookies[0].Name != identity.SiteSessionCookie || cookies[0].Value != "" || cookies[0].MaxAge != -1 {
@@ -162,23 +232,26 @@ func TestAppMountsAdministratorHandlerOnlyUnderAdminPrefix(t *testing.T) {
 }
 
 type adminHTTPService struct {
-	challenge         identity.Challenge
-	challengeErr      error
-	login             LoginResult
-	loginErr          error
-	loginChallenge    string
-	loginCode         string
-	verifyErr         error
-	verifySession     string
-	verifyCode        string
-	recovery          RecoveryResult
-	recoveryErr       error
-	recoverySession   string
-	completion        RecoveryCompletionResult
-	completionErr     error
-	completeChallenge string
-	completeCode      string
-	cancelled         []string
+	challenge        identity.Challenge
+	challengeErr     error
+	login            LoginResult
+	loginErr         error
+	loginChallenge   string
+	loginCode        string
+	verifyErr        error
+	verifySession    string
+	verifyCode       string
+	recovery         RecoveryResult
+	recoveryErr      error
+	recoverySession  string
+	preparation      RecoveryPreparationResult
+	preparationErr   error
+	prepareChallenge string
+	prepareCode      string
+	confirmErr       error
+	confirmToken     string
+	confirmCode      string
+	cancelled        []string
 }
 
 func (service *adminHTTPService) BeginVerification(context.Context) (identity.Challenge, error) {
@@ -204,9 +277,14 @@ func (service *adminHTTPService) SendRecovery(_ context.Context, sessionToken st
 	return service.recovery, service.recoveryErr
 }
 
-func (service *adminHTTPService) CompleteRecovery(_ context.Context, challengeID, code string) (RecoveryCompletionResult, error) {
-	service.completeChallenge, service.completeCode = challengeID, code
-	return service.completion, service.completionErr
+func (service *adminHTTPService) PrepareRecovery(_ context.Context, challengeID, code string) (RecoveryPreparationResult, error) {
+	service.prepareChallenge, service.prepareCode = challengeID, code
+	return service.preparation, service.preparationErr
+}
+
+func (service *adminHTTPService) ConfirmRecovery(_ context.Context, token, code string) error {
+	service.confirmToken, service.confirmCode = token, code
+	return service.confirmErr
 }
 
 type allowAdminLimits struct{}

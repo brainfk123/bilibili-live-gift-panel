@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
+	"io"
 	"regexp"
 	"sync"
 	"testing"
@@ -21,7 +23,8 @@ func TestInitializeStoresOneAdministratorAndEmailsOnlyEncryptedCodes(t *testing.
 	now := time.Date(2026, 8, 16, 10, 0, 0, 0, time.UTC)
 	repository := newMemoryRepository()
 	sender := &MemorySender{}
-	service := newTestService(t, repository, &memoryVerifier{}, sender, now)
+	verifier := &memoryVerifier{verification: identity.Verification{UID: "32249588", CompletedAt: now}}
+	service := newTestService(t, repository, verifier, sender, now)
 
 	result, err := service.Initialize(context.Background(), "32249588", "owner@example.com")
 	if err != nil {
@@ -34,6 +37,19 @@ func TestInitializeStoresOneAdministratorAndEmailsOnlyEncryptedCodes(t *testing.
 		t.Fatalf("RecoveryPassword length = %d, want 20", len(result.RecoveryPassword))
 	}
 
+	if repository.initialized {
+		t.Fatal("initialization activated administrator before matching Bilibili proof and new TOTP")
+	}
+	second, err := service.Initialize(context.Background(), "32249588", "owner@example.com")
+	if err != nil || second != result {
+		t.Fatalf("retry Initialize() = %#v, %v; want same handoff", second, err)
+	}
+	if len(sender.Messages()) != 1 {
+		t.Fatalf("successful retry sent %d archives, want stable prior delivery", len(sender.Messages()))
+	}
+	if _, err := service.VerifyLogin(context.Background(), "activate-proof", "123456"); err != nil {
+		t.Fatalf("activate pending initialization error = %v", err)
+	}
 	repository.mu.Lock()
 	stored := repository.identity
 	codeHashes := cloneHashes(repository.activeCodes)
@@ -62,7 +78,7 @@ func TestInitializeStoresOneAdministratorAndEmailsOnlyEncryptedCodes(t *testing.
 	}
 
 	if _, err := service.Initialize(context.Background(), "32249588", "owner@example.com"); !errors.Is(err, ErrAlreadyInitialized) {
-		t.Fatalf("second Initialize() error = %v, want ErrAlreadyInitialized", err)
+		t.Fatalf("post-activation Initialize() error = %v, want ErrAlreadyInitialized", err)
 	}
 }
 
@@ -155,8 +171,30 @@ func TestConcurrentInitializeHasExactlyOneWinner(t *testing.T) {
 			t.Fatalf("Initialize() error = %v", err)
 		}
 	}
-	if winners != 1 || alreadyInitialized != 1 {
+	if winners != 2 || alreadyInitialized != 0 {
 		t.Fatalf("winners=%d alreadyInitialized=%d", winners, alreadyInitialized)
+	}
+	if got := len(service.sender.(*MemorySender).Messages()); got != 1 {
+		t.Fatalf("concurrent exact initialization sent %d attachments, want one", got)
+	}
+}
+
+func TestSequenceReaderDoesNotWrapAfter256Bytes(t *testing.T) {
+	reader := &sequenceReader{}
+	first := make([]byte, 32)
+	if _, err := io.ReadFull(reader, first); err != nil {
+		t.Fatal(err)
+	}
+	discard := make([]byte, 224)
+	if _, err := io.ReadFull(reader, discard); err != nil {
+		t.Fatal(err)
+	}
+	next := make([]byte, 32)
+	if _, err := io.ReadFull(reader, next); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(first, next) {
+		t.Fatal("sequenceReader wrapped after 256 bytes")
 	}
 }
 
@@ -220,6 +258,66 @@ func TestSQLRepositoryInitializeUsesOneTransactionAndMapsSingletonConflict(t *te
 		t.Fatalf("duplicate Initialize() error = %v", err)
 	}
 	if err := mock2.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryCommitsPendingInitializationBeforeDelivery(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 16, 10, 6, 0, 0, time.UTC)
+	record := sqlHandoffRecord(now, HandoffInitialization)
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT id FROM admin_identity WHERE id = 1 FOR UPDATE")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery("SELECT .* FROM admin_credential_handoffs.*FOR UPDATE").WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectExec("INSERT INTO admin_credential_handoffs").WillReturnResult(sqlmock.NewResult(9, 1))
+	for range record.RecoveryCodeHashes {
+		mock.ExpectExec("INSERT INTO admin_handoff_recovery_codes").WillReturnResult(sqlmock.NewResult(1, 1))
+	}
+	mock.ExpectCommit()
+	handoff, err := repository.PrepareInitialization(context.Background(), record)
+	if err != nil {
+		t.Fatalf("PrepareInitialization() error=%v", err)
+	}
+	if handoff.ID != 9 || handoff.State != HandoffPending || !bytes.Equal(handoff.Archive, record.Archive) {
+		t.Fatalf("handoff=%#v", handoff)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryRecoveryHandoffRollsBackAllCredentialChanges(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 16, 10, 7, 0, 0, time.UTC)
+	tokenHash := bytes.Repeat([]byte{2}, sha256.Size)
+	mock.ExpectBegin()
+	columns := []string{"id", "handoff_kind", "handoff_state", "request_hash", "token_hash", "token_ciphertext", "uid_ciphertext", "uid_lookup", "email_ciphertext", "totp_secret_ciphertext", "totp_uri_ciphertext", "archive_password_ciphertext", "recovery_archive", "created_at", "expires_at", "mail_delivered_at", "reserved_recovery_code_id"}
+	mock.ExpectQuery("SELECT .*reserved_recovery_code_id.*FOR UPDATE").WithArgs(tokenHash).WillReturnRows(sqlmock.NewRows(columns).AddRow(7, HandoffRecovery, HandoffPending, bytes.Repeat([]byte{1}, 32), tokenHash, []byte("token"), nil, nil, []byte("email"), []byte("secret"), []byte("uri"), []byte("password"), []byte("archive"), now.Add(-time.Minute), now.Add(time.Minute), nil, 11))
+	codeRows := sqlmock.NewRows([]string{"code_hash"})
+	for index := 0; index < RecoveryCodeCount; index++ {
+		codeRows.AddRow(bytes.Repeat([]byte{byte(index + 1)}, sha256.Size))
+	}
+	mock.ExpectQuery("SELECT code_hash FROM admin_handoff_recovery_codes").WithArgs(int64(7)).WillReturnRows(codeRows)
+	mock.ExpectQuery("SELECT 1 FROM admin_recovery_codes").WithArgs(int64(11)).WillReturnRows(sqlmock.NewRows([]string{"active"}).AddRow(1))
+	mock.ExpectExec("UPDATE admin_recovery_codes SET used_at").WithArgs(now, int64(11)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE admin_recovery_codes SET invalidated_at").WithArgs(now).WillReturnResult(sqlmock.NewResult(0, 4))
+	mock.ExpectExec("UPDATE admin_totp SET secret_ciphertext").WithArgs([]byte("secret"), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE admin_identity SET credential_epoch").WithArgs(now).WillReturnError(errors.New("database detail must stay private"))
+	mock.ExpectRollback()
+	if err := repository.ConfirmRecoveryHandoff(context.Background(), tokenHash, now); !errors.Is(err, ErrUnavailable) || stringsContains(err.Error(), "database detail") {
+		t.Fatalf("ConfirmRecoveryHandoff() error=%v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -348,6 +446,14 @@ func sqlInitializationRecord(now time.Time) InitializationRecord {
 	}
 }
 
+func sqlHandoffRecord(now time.Time, kind string) HandoffRecord {
+	hashes := make([][]byte, RecoveryCodeCount)
+	for index := range hashes {
+		hashes[index] = bytes.Repeat([]byte{byte(index + 1)}, sha256.Size)
+	}
+	return HandoffRecord{Kind: kind, RequestHash: bytes.Repeat([]byte{1}, sha256.Size), TokenHash: bytes.Repeat([]byte{2}, sha256.Size), TokenCiphertext: []byte("token-ciphertext"), UIDCiphertext: []byte("uid-ciphertext"), UIDLookup: bytes.Repeat([]byte{3}, sha256.Size), EmailCiphertext: []byte("email-ciphertext"), TOTPSecretCiphertext: []byte("totp-ciphertext"), TOTPURICiphertext: []byte("uri-ciphertext"), PasswordCiphertext: []byte("password-ciphertext"), Archive: []byte("encrypted-archive"), RecoveryCodeHashes: hashes, CreatedAt: now, ExpiresAt: now.Add(defaultHandoffTTL)}
+}
+
 func sqlPattern(fragment string) string { return ".*" + regexp.QuoteMeta(fragment) + ".*" }
 
 func stringsContains(value, fragment string) bool {
@@ -437,35 +543,207 @@ func initializedMemoryRepository(t *testing.T, now time.Time) *memoryRepository 
 }
 
 type sequenceReader struct {
-	mu   sync.Mutex
-	next byte
+	mu      sync.Mutex
+	counter uint64
+	buffer  []byte
 }
 
 func (reader *sequenceReader) Read(buffer []byte) (int, error) {
 	reader.mu.Lock()
 	defer reader.mu.Unlock()
-	for index := range buffer {
-		reader.next++
-		buffer[index] = reader.next
+	written := 0
+	for written < len(buffer) {
+		if len(reader.buffer) == 0 {
+			reader.counter++
+			seed := make([]byte, 8)
+			binary.BigEndian.PutUint64(seed, reader.counter)
+			digest := sha256.Sum256(seed)
+			reader.buffer = append(reader.buffer[:0], digest[:]...)
+		}
+		count := copy(buffer[written:], reader.buffer)
+		reader.buffer = reader.buffer[count:]
+		written += count
 	}
 	return len(buffer), nil
 }
 
 type memoryRepository struct {
-	mu          sync.Mutex
-	initialized bool
-	identity    IdentityRecord
-	rotatedAt   time.Time
-	lastStep    time.Time
-	sessions    map[[sha256.Size]byte]AdminSession
-	activeCodes map[[sha256.Size]byte]struct{}
-	usedCodes   map[[sha256.Size]byte]struct{}
+	mu              sync.Mutex
+	initialized     bool
+	identity        IdentityRecord
+	rotatedAt       time.Time
+	lastStep        time.Time
+	sessions        map[[sha256.Size]byte]AdminSession
+	activeCodes     map[[sha256.Size]byte]struct{}
+	usedCodes       map[[sha256.Size]byte]struct{}
+	handoffs        map[int64]PendingHandoff
+	handoffReserved map[int64][sha256.Size]byte
+	nextHandoffID   int64
 }
 
 func newMemoryRepository() *memoryRepository {
 	return &memoryRepository{
-		sessions: make(map[[sha256.Size]byte]AdminSession), activeCodes: make(map[[sha256.Size]byte]struct{}), usedCodes: make(map[[sha256.Size]byte]struct{}),
+		sessions: make(map[[sha256.Size]byte]AdminSession), activeCodes: make(map[[sha256.Size]byte]struct{}), usedCodes: make(map[[sha256.Size]byte]struct{}), handoffs: make(map[int64]PendingHandoff), handoffReserved: make(map[int64][sha256.Size]byte),
 	}
+}
+
+func pendingFromRecord(id int64, record HandoffRecord) PendingHandoff {
+	return PendingHandoff{ID: id, Kind: record.Kind, State: HandoffPending, RequestHash: bytes.Clone(record.RequestHash), TokenHash: bytes.Clone(record.TokenHash), TokenCiphertext: bytes.Clone(record.TokenCiphertext), UIDCiphertext: bytes.Clone(record.UIDCiphertext), UIDLookup: bytes.Clone(record.UIDLookup), EmailCiphertext: bytes.Clone(record.EmailCiphertext), TOTPSecretCiphertext: bytes.Clone(record.TOTPSecretCiphertext), TOTPURICiphertext: bytes.Clone(record.TOTPURICiphertext), PasswordCiphertext: bytes.Clone(record.PasswordCiphertext), Archive: bytes.Clone(record.Archive), RecoveryCodeHashes: cloneByteSlices(record.RecoveryCodeHashes), CreatedAt: record.CreatedAt, ExpiresAt: record.ExpiresAt}
+}
+
+func (repository *memoryRepository) PrepareInitialization(_ context.Context, record HandoffRecord) (PendingHandoff, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	if repository.initialized {
+		return PendingHandoff{}, ErrAlreadyInitialized
+	}
+	for _, handoff := range repository.handoffs {
+		if handoff.Kind == HandoffInitialization && handoff.State == HandoffPending {
+			if handoff.ExpiresAt.After(record.CreatedAt) && bytes.Equal(handoff.RequestHash, record.RequestHash) {
+				return handoff, nil
+			}
+			return PendingHandoff{}, ErrAlreadyInitialized
+		}
+	}
+	repository.nextHandoffID++
+	handoff := pendingFromRecord(repository.nextHandoffID, record)
+	repository.handoffs[handoff.ID] = handoff
+	return handoff, nil
+}
+
+func (repository *memoryRepository) PendingInitialization(_ context.Context, lookup []byte, now time.Time) (PendingHandoff, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	for _, handoff := range repository.handoffs {
+		if handoff.Kind == HandoffInitialization && handoff.State == HandoffPending && handoff.ExpiresAt.After(now) && bytes.Equal(handoff.UIDLookup, lookup) {
+			return handoff, nil
+		}
+	}
+	return PendingHandoff{}, ErrAuthenticationFailed
+}
+
+func (repository *memoryRepository) ActivateInitialization(_ context.Context, attempt ActivateInitializationAttempt) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	handoff, found := repository.handoffs[attempt.HandoffID]
+	if !found || repository.initialized || handoff.State != HandoffPending || !handoff.ExpiresAt.After(attempt.CreatedAt) || !bytes.Equal(handoff.UIDLookup, attempt.UIDLookup) {
+		return ErrAuthenticationFailed
+	}
+	repository.initialized = true
+	repository.identity = IdentityRecord{CredentialEpoch: 1, UIDCiphertext: bytes.Clone(handoff.UIDCiphertext), UIDLookup: bytes.Clone(handoff.UIDLookup), EmailCiphertext: bytes.Clone(handoff.EmailCiphertext), TOTPSecretCiphertext: bytes.Clone(handoff.TOTPSecretCiphertext)}
+	for _, hash := range handoff.RecoveryCodeHashes {
+		key, _ := hashKey(hash)
+		repository.activeCodes[key] = struct{}{}
+	}
+	key, _ := hashKey(attempt.TokenHash)
+	repository.sessions[key] = AdminSession{ID: 1, CredentialEpoch: 1, ExpiresAt: attempt.ExpiresAt, TOTPVerifiedAt: attempt.TOTPStep}
+	repository.lastStep = attempt.TOTPStep
+	handoff.State, handoff.TokenCiphertext, handoff.TOTPSecretCiphertext, handoff.TOTPURICiphertext, handoff.PasswordCiphertext, handoff.Archive, handoff.RecoveryCodeHashes = HandoffConfirmed, nil, nil, nil, nil, nil, nil
+	repository.handoffs[handoff.ID] = handoff
+	return nil
+}
+
+func (repository *memoryRepository) PrepareRecoveryHandoff(_ context.Context, uidLookup, codeHash []byte, record HandoffRecord) (PendingHandoff, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	codeKey, ok := hashKey(codeHash)
+	if !ok || !repository.initialized || !bytes.Equal(uidLookup, repository.identity.UIDLookup) {
+		return PendingHandoff{}, ErrAuthenticationFailed
+	}
+	if _, active := repository.activeCodes[codeKey]; !active {
+		return PendingHandoff{}, ErrAuthenticationFailed
+	}
+	for id, reserved := range repository.handoffReserved {
+		if reserved == codeKey {
+			handoff := repository.handoffs[id]
+			if handoff.State == HandoffPending && handoff.ExpiresAt.After(record.CreatedAt) {
+				return handoff, nil
+			}
+		}
+	}
+	repository.nextHandoffID++
+	handoff := pendingFromRecord(repository.nextHandoffID, record)
+	repository.handoffs[handoff.ID] = handoff
+	repository.handoffReserved[handoff.ID] = codeKey
+	return handoff, nil
+}
+
+func (repository *memoryRepository) HandoffByToken(_ context.Context, tokenHash []byte) (PendingHandoff, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	for _, handoff := range repository.handoffs {
+		if bytes.Equal(handoff.TokenHash, tokenHash) {
+			return handoff, nil
+		}
+	}
+	return PendingHandoff{}, ErrAuthenticationFailed
+}
+
+func (repository *memoryRepository) ConfirmRecoveryHandoff(_ context.Context, tokenHash []byte, now time.Time) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	for id, handoff := range repository.handoffs {
+		if !bytes.Equal(handoff.TokenHash, tokenHash) {
+			continue
+		}
+		if handoff.State == HandoffConfirmed {
+			return nil
+		}
+		reserved, ok := repository.handoffReserved[id]
+		if !ok || handoff.State != HandoffPending || !handoff.ExpiresAt.After(now) {
+			return ErrAuthenticationFailed
+		}
+		if _, active := repository.activeCodes[reserved]; !active {
+			return ErrAuthenticationFailed
+		}
+		delete(repository.activeCodes, reserved)
+		repository.usedCodes[reserved] = struct{}{}
+		clear(repository.activeCodes)
+		repository.identity.TOTPSecretCiphertext = bytes.Clone(handoff.TOTPSecretCiphertext)
+		repository.identity.CredentialEpoch++
+		for key, session := range repository.sessions {
+			session.Revoked = true
+			repository.sessions[key] = session
+		}
+		for _, hash := range handoff.RecoveryCodeHashes {
+			key, _ := hashKey(hash)
+			repository.activeCodes[key] = struct{}{}
+		}
+		handoff.State, handoff.TokenCiphertext, handoff.TOTPSecretCiphertext, handoff.TOTPURICiphertext, handoff.PasswordCiphertext, handoff.Archive, handoff.RecoveryCodeHashes = HandoffConfirmed, nil, nil, nil, nil, nil, nil
+		repository.handoffs[id] = handoff
+		return nil
+	}
+	return ErrAuthenticationFailed
+}
+
+func (repository *memoryRepository) MarkHandoffMailAttempt(_ context.Context, id int64, _ time.Time, delivered bool) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	handoff, ok := repository.handoffs[id]
+	if !ok {
+		return ErrUnavailable
+	}
+	if delivered {
+		handoff.MailDelivered = true
+	}
+	repository.handoffs[id] = handoff
+	return nil
+}
+
+func (repository *memoryRepository) CleanupExpiredHandoffs(_ context.Context, now time.Time, limit int) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	for id, handoff := range repository.handoffs {
+		if limit == 0 {
+			break
+		}
+		if handoff.State == HandoffPending && !handoff.ExpiresAt.After(now) {
+			delete(repository.handoffs, id)
+			delete(repository.handoffReserved, id)
+			limit--
+		}
+	}
+	return nil
 }
 
 func (repository *memoryRepository) Initialize(_ context.Context, record InitializationRecord) error {

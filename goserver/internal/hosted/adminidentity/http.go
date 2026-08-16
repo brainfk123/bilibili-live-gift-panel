@@ -2,9 +2,11 @@ package adminidentity
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -20,7 +22,8 @@ type adminHTTPServicePort interface {
 	VerifyLogin(context.Context, string, string) (LoginResult, error)
 	VerifyRecentTOTP(context.Context, string, string) error
 	SendRecovery(context.Context, string) (RecoveryResult, error)
-	CompleteRecovery(context.Context, string, string) (RecoveryCompletionResult, error)
+	PrepareRecovery(context.Context, string, string) (RecoveryPreparationResult, error)
+	ConfirmRecovery(context.Context, string, string) error
 }
 
 type HTTPOptions struct {
@@ -61,7 +64,8 @@ func NewHTTPHandler(service adminHTTPServicePort, options HTTPOptions) (*HTTPHan
 	handler.mux.HandleFunc("POST /api/admin/session", handler.verifyLogin)
 	handler.mux.HandleFunc("POST /api/admin/totp", handler.verifyRecentTOTP)
 	handler.mux.HandleFunc("POST /api/admin/recovery/archive", handler.sendRecovery)
-	handler.mux.HandleFunc("POST /api/admin/recovery/complete", handler.completeRecovery)
+	handler.mux.HandleFunc("POST /api/admin/recovery/prepare", handler.prepareRecovery)
+	handler.mux.HandleFunc("POST /api/admin/recovery/confirm", handler.confirmRecovery)
 	return handler, nil
 }
 
@@ -149,7 +153,15 @@ func (handler *HTTPHandler) verifyRecentTOTP(response http.ResponseWriter, reque
 		return
 	}
 	token, ok := adminSessionToken(request)
-	if !ok || handler.service.VerifyRecentTOTP(request.Context(), token, body.TOTP) != nil {
+	if !ok {
+		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
+		return
+	}
+	if !handler.allowSensitive(request, "admin_totp", token) {
+		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
+	if handler.service.VerifyRecentTOTP(request.Context(), token, body.TOTP) != nil {
 		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
 		return
 	}
@@ -168,7 +180,11 @@ func (handler *HTTPHandler) sendRecovery(response http.ResponseWriter, request *
 	}
 	token, ok := adminSessionToken(request)
 	if !ok {
-		writeAdminError(response, http.StatusUnauthorized, "authentication_required")
+		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
+		return
+	}
+	if !handler.allowSensitive(request, "admin_recovery_archive", token) {
+		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
 	result, err := handler.service.SendRecovery(request.Context(), token)
@@ -178,13 +194,22 @@ func (handler *HTTPHandler) sendRecovery(response http.ResponseWriter, request *
 	case errors.Is(err, ErrRecentTOTPRequired):
 		writeAdminError(response, http.StatusForbidden, "recent_totp_required")
 	case errors.Is(err, ErrAuthenticationFailed):
-		writeAdminError(response, http.StatusUnauthorized, "authentication_required")
+		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
 	default:
 		writeAdminError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
 	}
 }
 
-func (handler *HTTPHandler) completeRecovery(response http.ResponseWriter, request *http.Request) {
+func (handler *HTTPHandler) allowSensitive(request *http.Request, operation, sessionToken string) bool {
+	if !handler.limiter.Allow(request.Context(), identity.LimitGlobal, operation) ||
+		!handler.limiter.Allow(request.Context(), identity.LimitPerIP, operation+"\x00"+handler.clientIP(request)) {
+		return false
+	}
+	digest := sha256.Sum256([]byte(sessionToken))
+	return handler.limiter.Allow(request.Context(), identity.LimitPerChallenge, fmt.Sprintf("%x", digest[:]))
+}
+
+func (handler *HTTPHandler) prepareRecovery(response http.ResponseWriter, request *http.Request) {
 	if !handler.acceptJSONMutation(request) {
 		writeAdminError(response, http.StatusForbidden, "request_rejected")
 		return
@@ -197,14 +222,13 @@ func (handler *HTTPHandler) completeRecovery(response http.ResponseWriter, reque
 		writeAdminError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if !handler.allow(request, "admin_recovery", body.ChallengeID) {
+	if !handler.allowAdministrator(request, "admin_recovery_prepare") {
 		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
-	result, err := handler.service.CompleteRecovery(request.Context(), body.ChallengeID, body.RecoveryCode)
+	result, err := handler.service.PrepareRecovery(request.Context(), body.ChallengeID, body.RecoveryCode)
 	switch {
-	case err == nil && result.TOTPURI != "" && len(result.RecoveryPassword) == 20:
-		http.SetCookie(response, adminCookie("", time.Unix(1, 0)))
+	case err == nil && result.TOTPURI != "" && len(result.RecoveryPassword) == 20 && result.HandoffToken != "":
 		writeAdminJSON(response, http.StatusOK, result)
 	case errors.Is(err, identity.ErrVerificationPending):
 		writeAdminError(response, http.StatusAccepted, "verification_pending")
@@ -213,6 +237,37 @@ func (handler *HTTPHandler) completeRecovery(response http.ResponseWriter, reque
 	default:
 		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
 	}
+}
+
+func (handler *HTTPHandler) allowAdministrator(request *http.Request, operation string) bool {
+	return handler.limiter.Allow(request.Context(), identity.LimitGlobal, operation) &&
+		handler.limiter.Allow(request.Context(), identity.LimitPerIP, operation+"\x00"+handler.clientIP(request)) &&
+		handler.limiter.Allow(request.Context(), identity.LimitPerChallenge, "admin:1")
+}
+
+func (handler *HTTPHandler) confirmRecovery(response http.ResponseWriter, request *http.Request) {
+	if !handler.acceptJSONMutation(request) {
+		writeAdminError(response, http.StatusForbidden, "request_rejected")
+		return
+	}
+	var body struct {
+		HandoffToken string `json:"handoffToken"`
+		TOTP         string `json:"totp"`
+	}
+	if !decodeAdminJSON(response, request, &body) || body.HandoffToken == "" || len(body.HandoffToken) > 512 || !validTOTPCode(body.TOTP) {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if !handler.allowSensitive(request, "admin_recovery_confirm", body.HandoffToken) {
+		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
+	if err := handler.service.ConfirmRecovery(request.Context(), body.HandoffToken, body.TOTP); err != nil {
+		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
+		return
+	}
+	http.SetCookie(response, adminCookie("", time.Unix(1, 0)))
+	response.WriteHeader(http.StatusNoContent)
 }
 
 func (handler *HTTPHandler) allow(request *http.Request, operation, challengeID string) bool {
@@ -241,7 +296,10 @@ func decodeAdminJSON(response http.ResponseWriter, request *http.Request, target
 
 func adminSessionToken(request *http.Request) (string, bool) {
 	cookie, err := request.Cookie(identity.SiteSessionCookie)
-	return cookie.Value, err == nil && cookie.Value != ""
+	if err != nil || cookie == nil || cookie.Value == "" {
+		return "", false
+	}
+	return cookie.Value, true
 }
 
 func adminCookie(value string, expiresAt time.Time) *http.Cookie {
