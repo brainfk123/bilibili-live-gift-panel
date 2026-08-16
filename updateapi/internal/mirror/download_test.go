@@ -233,6 +233,33 @@ func TestStrongETagRequiresCompleteEntityTagGrammar(t *testing.T) {
 	}
 }
 
+func TestDownloaderRequestsGitHubReleaseAssetMedia(t *testing.T) {
+	// Mutation caught: using the asset API URL without its media Accept header
+	// downloads GitHub's JSON metadata instead of the release asset bytes.
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if got := request.Header.Get("Accept"); got != "application/octet-stream" {
+			t.Fatalf("Accept = %q", got)
+		}
+		if got := request.Header.Get("X-GitHub-Api-Version"); got != "2022-11-28" {
+			t.Fatalf("X-GitHub-Api-Version = %q", got)
+		}
+		if got := request.Header.Get("User-Agent"); got != "bilibili-live-gift-panel-release-mirror/1.0" {
+			t.Fatalf("User-Agent = %q", got)
+		}
+		_, _ = writer.Write([]byte("asset"))
+	}))
+	defer server.Close()
+
+	downloader := mustNewDownloader(t, server.Client(), t.TempDir())
+	path, err := downloader.Download(context.Background(), DownloadSpec{
+		Name: AssetManifest, URL: server.URL + "/release-asset", Size: 5, MaxBytes: maxManifestBytes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, path, "asset")
+}
+
 func TestResumeRestartsWhenServerIgnoresRangeOrReturnsMalformedRange(t *testing.T) {
 	for _, response := range []string{"ignored", "malformed"} {
 		t.Run(response, func(t *testing.T) {

@@ -65,6 +65,9 @@ func TestGitHubReleaseSourceLatestSendsFixedRequestAndMapsTrustedRelease(t *test
 	if result.Release.Assets[AssetExecutable].Digest != "sha256:"+strings.Repeat("a", 64) {
 		t.Fatalf("executable digest = %q", result.Release.Assets[AssetExecutable].Digest)
 	}
+	if got := result.Release.Assets[AssetExecutable].DownloadURL; got != "https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/1001" {
+		t.Fatalf("executable download URL = %q, want validated GitHub asset API URL", got)
+	}
 }
 
 func TestGitHubReleaseSourceLatest304ReturnsNoMetadata(t *testing.T) {
@@ -130,6 +133,20 @@ func TestGitHubReleaseSourceLatestRejectsUntrustedRelease(t *testing.T) {
 		{name: "wrong name asset URL", mutate: func(release map[string]any) {
 			release["assets"] = mutateAsset(validAssets(), AssetExecutable, "browser_download_url", "https://github.com/brainfk123/bilibili-live-gift-panel/releases/download/v0.4.4/other.exe")
 		}},
+		{name: "missing asset API URL", mutate: func(release map[string]any) {
+			assets := validAssets()
+			delete(assets[0], "url")
+			release["assets"] = assets
+		}},
+		{name: "wrong asset API repository", mutate: func(release map[string]any) {
+			release["assets"] = mutateAsset(validAssets(), AssetExecutable, "url", "https://api.github.com/repos/other/repository/releases/assets/1001")
+		}},
+		{name: "noncanonical asset API ID", mutate: func(release map[string]any) {
+			release["assets"] = mutateAsset(validAssets(), AssetExecutable, "url", "https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/01001")
+		}},
+		{name: "asset API URL query", mutate: func(release map[string]any) {
+			release["assets"] = mutateAsset(validAssets(), AssetExecutable, "url", "https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/1001?download=1")
+		}},
 	}
 
 	for _, test := range tests {
@@ -152,6 +169,7 @@ func TestGitHubReleaseSourceLatestRejectsUntrustedRelease(t *testing.T) {
 func TestGitHubReleaseSourceLatestRejectsDuplicateSecurityFields(t *testing.T) {
 	valid := marshalReleaseJSON(t, validReleaseJSON())
 	executableURL := `"browser_download_url":"https://github.com/brainfk123/bilibili-live-gift-panel/releases/download/v0.4.4/gift-panel-windows-x64.exe"`
+	executableAPIURL := `"url":"https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/1001"`
 
 	tests := []struct {
 		name string
@@ -172,6 +190,10 @@ func TestGitHubReleaseSourceLatestRejectsDuplicateSecurityFields(t *testing.T) {
 		{
 			name: "duplicate asset download URL",
 			body: strings.Replace(valid, executableURL, executableURL+","+executableURL, 1),
+		},
+		{
+			name: "duplicate asset API URL",
+			body: strings.Replace(valid, executableAPIURL, executableAPIURL+","+executableAPIURL, 1),
 		},
 	}
 
@@ -242,7 +264,14 @@ func validAssets() []map[string]any {
 }
 
 func assetJSON(name string, size int64, digest string) map[string]any {
+	assetID := map[string]string{
+		AssetExecutable: "1001",
+		AssetChecksum:   "1002",
+		AssetManifest:   "1003",
+		AssetChangelog:  "1004",
+	}[name]
 	return map[string]any{
+		"url":                  "https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/" + assetID,
 		"name":                 name,
 		"size":                 size,
 		"digest":               digest,

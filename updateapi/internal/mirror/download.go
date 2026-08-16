@@ -246,6 +246,9 @@ func (downloader *downloader) downloadOnce(ctx context.Context, root *os.Root, s
 	if err != nil {
 		return errors.New("could not create artifact request")
 	}
+	request.Header.Set("Accept", githubAssetMediaType)
+	request.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
+	request.Header.Set("User-Agent", githubUserAgent)
 	if partial.offset > 0 {
 		request.Header.Set("Range", fmt.Sprintf("bytes=%d-", partial.offset))
 		request.Header.Set("If-Range", partial.etag)

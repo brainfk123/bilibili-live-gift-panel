@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,7 @@ const (
 	githubRepository       = "brainfk123/bilibili-live-gift-panel"
 	githubAPIVersion       = "2022-11-28"
 	githubUserAgent        = "bilibili-live-gift-panel-release-mirror/1.0"
+	githubAssetMediaType   = "application/octet-stream"
 	maxReleaseResponseSize = 1 << 20
 )
 
@@ -128,6 +130,7 @@ type githubReleasePayload struct {
 }
 
 type githubAssetPayload struct {
+	APIURL      string `json:"url"`
 	Name        string `json:"name"`
 	DownloadURL string `json:"browser_download_url"`
 	Size        int64  `json:"size"`
@@ -271,7 +274,7 @@ func isSecurityField(kind jsonObjectKind, key string) bool {
 		}
 	case jsonAssetObject:
 		switch key {
-		case "name", "browser_download_url", "size", "digest":
+		case "url", "name", "browser_download_url", "size", "digest":
 			return true
 		}
 	}
@@ -308,12 +311,15 @@ func validateGitHubRelease(payload githubReleasePayload) (RemoteRelease, error) 
 		if err := validateAssetURL(asset.DownloadURL, payload.TagName, asset.Name); err != nil {
 			return RemoteRelease{}, err
 		}
+		if err := validateAssetAPIURL(asset.APIURL); err != nil {
+			return RemoteRelease{}, err
+		}
 		if err := validateAssetDigest(asset.Digest); err != nil {
 			return RemoteRelease{}, err
 		}
 		assets[asset.Name] = RemoteAsset{
 			Name:        asset.Name,
-			DownloadURL: asset.DownloadURL,
+			DownloadURL: asset.APIURL,
 			Size:        asset.Size,
 			Digest:      asset.Digest,
 		}
@@ -322,6 +328,24 @@ func validateGitHubRelease(payload githubReleasePayload) (RemoteRelease, error) 
 		return RemoteRelease{}, errors.New("GitHub release is missing required assets")
 	}
 	return RemoteRelease{Tag: payload.TagName, PublishedAt: publishedAt, Assets: assets}, nil
+}
+
+func validateAssetAPIURL(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "api.github.com" || parsed.User != nil ||
+		parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return errors.New("GitHub release asset API URL is invalid")
+	}
+	prefix := "/repos/" + githubRepository + "/releases/assets/"
+	if !strings.HasPrefix(parsed.Path, prefix) {
+		return errors.New("GitHub release asset API URL does not match the repository")
+	}
+	identifier := strings.TrimPrefix(parsed.Path, prefix)
+	numericID, err := strconv.ParseUint(identifier, 10, 64)
+	if err != nil || numericID == 0 || strconv.FormatUint(numericID, 10) != identifier {
+		return errors.New("GitHub release asset API URL has an invalid asset ID")
+	}
+	return nil
 }
 
 func assetLimit(name string) (int64, bool) {
