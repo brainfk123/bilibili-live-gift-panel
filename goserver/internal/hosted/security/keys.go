@@ -67,7 +67,7 @@ func (keys Keyring) Seal(purpose string, plaintext []byte) ([]byte, error) {
 	result := make([]byte, 1, 1+len(nonce)+len(plaintext)+aead.Overhead())
 	result[0] = keys.version
 	result = append(result, nonce...)
-	result = aead.Seal(result, nonce, plaintext, purposeDomain("aead", purpose))
+	result = aead.Seal(result, nonce, plaintext, aeadDomain(keys.version, purpose))
 	return result, nil
 }
 
@@ -89,7 +89,7 @@ func (keys Keyring) Open(purpose string, ciphertext []byte) ([]byte, error) {
 	}
 	nonce := ciphertext[1 : 1+aead.NonceSize()]
 	sealed := ciphertext[1+aead.NonceSize():]
-	plaintext, err := aead.Open(nil, nonce, sealed, purposeDomain("aead", purpose))
+	plaintext, err := aead.Open(nil, nonce, sealed, aeadDomain(ciphertext[0], purpose))
 	if err != nil {
 		return nil, ErrAuthentication
 	}
@@ -111,7 +111,7 @@ func (keys Keyring) Lookup(purpose string, value []byte) ([]byte, error) {
 // HashToken returns an unkeyed SHA-256 digest for a high-entropy token. The
 // purpose domain prevents token classes from silently sharing one hash space.
 func (keys Keyring) HashToken(purpose string, token []byte) ([]byte, error) {
-	if !validPurpose(purpose) {
+	if !keys.initialized || !validPurpose(purpose) {
 		return nil, ErrInvalidInput
 	}
 	digest := sha256.New()
@@ -123,6 +123,9 @@ func (keys Keyring) HashToken(purpose string, token []byte) ([]byte, error) {
 
 // NewToken returns 32 bytes from crypto/rand encoded as unpadded base64url.
 func (keys Keyring) NewToken() (string, error) {
+	if !keys.initialized {
+		return "", ErrInvalidInput
+	}
 	raw := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, raw); err != nil {
 		return "", ErrRandomUnavailable
@@ -159,4 +162,9 @@ func validPurpose(purpose string) bool {
 
 func purposeDomain(operation, purpose string) []byte {
 	return []byte("gift-panel/hosted/" + operation + "/v1\x00" + purpose)
+}
+
+func aeadDomain(version byte, purpose string) []byte {
+	domain := purposeDomain("aead", purpose)
+	return append(domain, 0, version)
 }

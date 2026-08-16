@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 )
 
 const (
@@ -47,7 +47,11 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	if strings.TrimSpace(dsn) == "" {
 		return nil, errors.New("open mysql: configuration is empty")
 	}
-	db, err := sql.Open("mysql", dsn)
+	normalizedDSN, err := normalizeMySQLDSN(dsn)
+	if err != nil {
+		return nil, errors.New("open mysql: invalid configuration")
+	}
+	db, err := sql.Open("mysql", normalizedDSN)
 	if err != nil {
 		return nil, errors.New("open mysql: invalid configuration")
 	}
@@ -56,6 +60,22 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		return nil, errors.New("open mysql: database unavailable")
 	}
 	return &Store{db: db}, nil
+}
+
+func normalizeMySQLDSN(dsn string) (string, error) {
+	config, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return "", err
+	}
+	config.ParseTime = true
+	config.Loc = time.UTC
+	if config.Params == nil {
+		config.Params = make(map[string]string)
+	}
+	// Loc controls how the driver scans date/time bytes. The session variable
+	// additionally fixes MySQL TIMESTAMP conversion at the connection boundary.
+	config.Params["time_zone"] = "'+00:00'"
+	return config.FormatDSN(), nil
 }
 
 // Close closes the underlying connection pool.

@@ -59,6 +59,12 @@ func TestZeroKeyringCannotUseUnvalidatedKeyMaterial(t *testing.T) {
 	if _, err := keys.Lookup("bili_uid", []byte("123456")); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("zero Keyring Lookup() error = %v, want ErrInvalidInput", err)
 	}
+	if _, err := keys.HashToken("site_session", []byte("high-entropy-token")); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("zero Keyring HashToken() error = %v, want ErrInvalidInput", err)
+	}
+	if _, err := keys.NewToken(); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("zero Keyring NewToken() error = %v, want ErrInvalidInput", err)
+	}
 }
 
 func TestKeyringSealRoundTripsWithFreshNonceAndPurposeBinding(t *testing.T) {
@@ -98,6 +104,28 @@ func TestKeyringSealRoundTripsWithFreshNonceAndPurposeBinding(t *testing.T) {
 	unknown[0] = 8
 	if _, err := keys.Open("bili_uid", unknown); !errors.Is(err, ErrUnknownKeyVersion) {
 		t.Fatalf("Open() unknown-version error = %v, want ErrUnknownKeyVersion", err)
+	}
+}
+
+func TestKeyringAuthenticatesVersionPrefixAcrossSameKeyVersions(t *testing.T) {
+	aeadKey := bytes.Repeat([]byte{1}, 32)
+	hmacKey := bytes.Repeat([]byte{2}, 32)
+	versionSeven, err := NewKeyring(7, aeadKey, hmacKey)
+	if err != nil {
+		t.Fatalf("NewKeyring(7) error = %v", err)
+	}
+	versionEight, err := NewKeyring(8, aeadKey, hmacKey)
+	if err != nil {
+		t.Fatalf("NewKeyring(8) error = %v", err)
+	}
+	sealed, err := versionSeven.Seal("bili_uid", []byte("123456"))
+	if err != nil {
+		t.Fatalf("Seal() error = %v", err)
+	}
+	sealed[0] = 8
+
+	if _, err := versionEight.Open("bili_uid", sealed); !errors.Is(err, ErrAuthentication) {
+		t.Fatalf("Open() version-prefix tamper error = %v, want ErrAuthentication", err)
 	}
 }
 

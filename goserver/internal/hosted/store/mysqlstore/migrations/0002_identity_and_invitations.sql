@@ -142,8 +142,8 @@ CREATE TABLE IF NOT EXISTS invitations (
     CONSTRAINT chk_invitations_terminal_state CHECK (
         (status = 'active' AND revoked_at IS NULL AND used_at IS NULL AND invited_account_id IS NULL)
         OR (status = 'revoked' AND revoked_at IS NOT NULL AND used_at IS NULL AND invited_account_id IS NULL)
-        OR (status = 'expired' AND used_at IS NULL AND invited_account_id IS NULL)
-        OR (status = 'used' AND used_at IS NOT NULL AND invited_account_id IS NOT NULL)
+        OR (status = 'expired' AND revoked_at IS NULL AND used_at IS NULL AND invited_account_id IS NULL)
+        OR (status = 'used' AND revoked_at IS NULL AND used_at IS NOT NULL AND invited_account_id IS NOT NULL)
     )
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 

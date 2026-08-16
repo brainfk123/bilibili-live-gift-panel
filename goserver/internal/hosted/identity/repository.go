@@ -119,11 +119,20 @@ func (repository *sqlRepository) CreateBoundAccount(ctx context.Context, encrypt
 		return Account{}, ErrRepositoryUnavailable
 	}
 
+	account := Account{ID: accountID}
+	err = transaction.QueryRowContext(ctx,
+		"SELECT credential_epoch, created_at, updated_at FROM streamer_accounts WHERE id = ?",
+		accountID,
+	).Scan(&account.CredentialEpoch, &account.CreatedAt, &account.UpdatedAt)
+	if err != nil || account.CredentialEpoch < 1 || account.CreatedAt.IsZero() || account.UpdatedAt.IsZero() {
+		return Account{}, ErrRepositoryUnavailable
+	}
+
 	if err := transaction.Commit(); err != nil {
 		return Account{}, ErrRepositoryUnavailable
 	}
 	committed = true
-	return Account{ID: accountID, CredentialEpoch: 1}, nil
+	return account, nil
 }
 
 func (repository *sqlRepository) CreateSession(ctx context.Context, session Session) error {

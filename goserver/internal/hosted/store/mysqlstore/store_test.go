@@ -2,14 +2,18 @@ package mysqlstore
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/go-sql-driver/mysql"
 )
 
 const (
@@ -44,6 +48,31 @@ func TestProductionMigrationsIncludeIdentitySchema(t *testing.T) {
 		}
 	}
 	t.Fatal("production migrations do not include 0002_identity_and_invitations")
+}
+
+func TestIdentityMigrationTerminalInvitationsCannotAlsoBeRevoked(t *testing.T) {
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatalf("readMigrations() error = %v", err)
+	}
+	var identitySQL string
+	for _, item := range migrations {
+		if item.version == "0002_identity_and_invitations" {
+			identitySQL = strings.Join(strings.Fields(string(item.contents)), " ")
+			break
+		}
+	}
+	if identitySQL == "" {
+		t.Fatal("production migrations do not include 0002_identity_and_invitations")
+	}
+	for _, requiredBranch := range []string{
+		"status = 'expired' AND revoked_at IS NULL AND used_at IS NULL AND invited_account_id IS NULL",
+		"status = 'used' AND revoked_at IS NULL AND used_at IS NOT NULL AND invited_account_id IS NOT NULL",
+	} {
+		if !strings.Contains(identitySQL, requiredBranch) {
+			t.Fatalf("terminal invitation CHECK missing invariant %q", requiredBranch)
+		}
+	}
 }
 
 func TestMigrateAppliesUnseenMigrationAndRecordsChecksum(t *testing.T) {
@@ -140,6 +169,45 @@ func TestOpenDoesNotExposeDSNOnFailure(t *testing.T) {
 	}
 }
 
+func TestNormalizeMySQLDSNForcesParsedUTCTimeContract(t *testing.T) {
+	input := "hosted-user:private-password@tcp(127.0.0.1:3306)/gift_panel?loc=Local&parseTime=false&time_zone=%27%2B08%3A00%27"
+	normalized, err := normalizeMySQLDSN(input)
+	if err != nil {
+		t.Fatalf("normalizeMySQLDSN() error = %v", err)
+	}
+	config, err := mysql.ParseDSN(normalized)
+	if err != nil {
+		t.Fatalf("mysql.ParseDSN(normalized) error = %v", err)
+	}
+	if !config.ParseTime {
+		t.Fatal("normalized DSN does not enable parseTime")
+	}
+	if config.Loc != time.UTC {
+		t.Fatalf("normalized DSN location = %v, want UTC", config.Loc)
+	}
+	if got := config.Params["time_zone"]; got != "'+00:00'" {
+		t.Fatalf("normalized DSN session time_zone = %q, want '+00:00'", got)
+	}
+	if config.User != "hosted-user" || config.Passwd != "private-password" || config.DBName != "gift_panel" {
+		t.Fatal("normalization did not preserve connection identity")
+	}
+
+	store, mock, closeDB := newMockStore(t)
+	defer closeDB()
+	want := time.Date(2026, 8, 16, 10, 11, 12, 123456000, time.UTC)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT created_at, disabled_at FROM scan_contract")).
+		WillReturnRows(sqlmock.NewRows([]string{"created_at", "disabled_at"}).AddRow(want, want))
+	var createdAt time.Time
+	var disabledAt sql.NullTime
+	if err := store.db.QueryRowContext(context.Background(), "SELECT created_at, disabled_at FROM scan_contract").Scan(&createdAt, &disabledAt); err != nil {
+		t.Fatalf("Scan(time.Time, sql.NullTime) error = %v", err)
+	}
+	if !createdAt.Equal(want) || createdAt.Location() != time.UTC || !disabledAt.Valid || !disabledAt.Time.Equal(want) || disabledAt.Time.Location() != time.UTC {
+		t.Fatalf("time Scan = (%v, %#v), want UTC values %v", createdAt, disabledAt, want)
+	}
+	assertExpectations(t, mock)
+}
+
 func newMockStore(t *testing.T) (*Store, sqlmock.Sqlmock, func()) {
 	t.Helper()
 	db, mock, err := sqlmock.New()
@@ -151,8 +219,7 @@ func newMockStore(t *testing.T) (*Store, sqlmock.Sqlmock, func()) {
 
 func foundationFixture(t *testing.T) (fstest.MapFS, migration) {
 	t.Helper()
-	files := fstest.MapFS{
-		"migrations/0001_foundation.sql": {Data: []byte(`CREATE TABLE IF NOT EXISTS schema_migrations (
+	originalContents := []byte(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version VARCHAR(255) NOT NULL PRIMARY KEY,
     checksum CHAR(64) NOT NULL,
     applied_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
@@ -162,7 +229,9 @@ CREATE TABLE IF NOT EXISTS service_health_markers (
     marker_name VARCHAR(64) NOT NULL PRIMARY KEY,
     updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)
 ) ENGINE=InnoDB;
-`)},
+`)
+	files := fstest.MapFS{
+		"migrations/0001_foundation.sql": {Data: originalContents},
 	}
 	migrations, err := readMigrations(files)
 	if err != nil {
@@ -170,6 +239,10 @@ CREATE TABLE IF NOT EXISTS service_health_markers (
 	}
 	if len(migrations) != 1 {
 		t.Fatalf("fixture migration count = %d, want 1", len(migrations))
+	}
+	wantChecksum := fmt.Sprintf("%x", sha256.Sum256(originalContents))
+	if migrations[0].checksum != wantChecksum {
+		t.Fatalf("fixture checksum = %q, want independent SHA-256 %q", migrations[0].checksum, wantChecksum)
 	}
 	return files, migrations[0]
 }
