@@ -18,7 +18,7 @@
 - B 站 UID plaintext is AEAD-encrypted; a separate HMAC key provides equality lookup.
 - The unique administrator logs in with the configured B 站 UID plus TOTP; high-risk actions require recent TOTP.
 - Invitation quota is deducted when a streamer generates a code; revoke/expire/use never refunds it.
-- Complete invitation and recovery codes are displayed exactly once.
+- Complete invitation codes are displayed exactly once. Complete recovery codes are never returned by the hosted HTTP service; they are recovered only from the encrypted attachment through the local decrypt command. Pending TOTP URI and archive password may be re-read from the database-backed handoff until confirmation, then their retrievable ciphertext is erased.
 - No handler may log Cookie, QR secret, UID plaintext, TOTP secret/code, site token, invitation code, or recovery code.
 
 ---
