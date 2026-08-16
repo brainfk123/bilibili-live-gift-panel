@@ -248,6 +248,8 @@ Run focused, race, and full Go tests; run `git diff --check`. Commit as `feat: s
 - Create: `goserver/internal/hosted/identity/admin_test.go`
 - Modify: `goserver/internal/hosted/identity/http.go`
 - Modify: `goserver/internal/hosted/identity/http_test.go`
+- Modify: `goserver/internal/hosted/adminidentity/http.go`
+- Modify: `goserver/internal/hosted/adminidentity/http_test.go`
 - Modify: `goserver/internal/hosted/app/app.go`
 
 **Interfaces:**
