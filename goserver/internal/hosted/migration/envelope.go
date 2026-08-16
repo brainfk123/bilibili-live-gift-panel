@@ -54,6 +54,7 @@ type Counts struct {
 // Report is safe to show to a client: it identifies filtered paths but never
 // retains their values or another copy of the upload.
 type Report struct {
+	Counts   Counts   `json:"counts"`
 	Ignored  []string `json:"ignored"`
 	Warnings []string `json:"warnings"`
 }
@@ -164,6 +165,13 @@ func Decode(reader io.Reader, maxBytes int64) (Envelope, Report, error) {
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return Envelope{}, Report{}, ErrInvalidEnvelope
 	}
+	if !requiredObject(top, "source") || !requiredObject(top, "payload") {
+		return Envelope{}, Report{}, ErrInvalidEnvelope
+	}
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(top["payload"], &payload) != nil || payload == nil || !requiredObject(payload, "definition") || !requiredObject(payload, "runtime") {
+		return Envelope{}, Report{}, ErrInvalidEnvelope
+	}
 
 	report := Report{}
 	scanNode(raw, "", envelopeSchema(), &report)
@@ -174,7 +182,7 @@ func Decode(reader io.Reader, maxBytes int64) (Envelope, Report, error) {
 	if err := validateWire(wire); err != nil {
 		return Envelope{}, Report{}, ErrInvalidEnvelope
 	}
-	definition, runtime, err := normalizeWire(wire)
+	definition, runtime, err := normalizeWire(wire, &report)
 	if err != nil {
 		return Envelope{}, Report{}, ErrInvalidEnvelope
 	}
@@ -189,11 +197,21 @@ func Decode(reader io.Reader, maxBytes int64) (Envelope, Report, error) {
 	if wire.Payload.RoomSuggestion != nil {
 		roomSuggestion = *wire.Payload.RoomSuggestion
 	}
+	report.Counts = countWire(wire.Payload.Definition)
 	report.finalize()
-	return Envelope{Definition: definition, Runtime: runtime, RoomSuggestion: roomSuggestion, Source: Source{AppVersion: wire.Source.AppVersion, ConfigurationSchemaVersion: wire.Source.ConfigurationSchemaVersion}, Counts: countWire(wire.Payload.Definition), Report: report, CanonicalJSON: canonical, Hash: sha256.Sum256(canonical)}, report, nil
+	return Envelope{Definition: definition, Runtime: runtime, RoomSuggestion: roomSuggestion, Source: Source{AppVersion: wire.Source.AppVersion, ConfigurationSchemaVersion: wire.Source.ConfigurationSchemaVersion}, Counts: report.Counts, Report: report, CanonicalJSON: canonical, Hash: sha256.Sum256(canonical)}, report, nil
 }
 
-func normalizeWire(wire wireEnvelope) (configuration.Definition, configuration.RuntimeState, error) {
+func requiredObject(object map[string]json.RawMessage, key string) bool {
+	raw, exists := object[key]
+	if !exists || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return false
+	}
+	var child map[string]json.RawMessage
+	return json.Unmarshal(raw, &child) == nil && child != nil
+}
+
+func normalizeWire(wire wireEnvelope, report *Report) (configuration.Definition, configuration.RuntimeState, error) {
 	definition := configuration.Definition{Attributes: make([]configuration.AttributeDefinition, len(wire.Payload.Definition.Attributes)), DisplayScenes: wire.Payload.Definition.DisplayScenes, GiftTargetPanels: make([]configuration.GiftTargetPanelDefinition, len(wire.Payload.Definition.GiftTargetPanels)), Activities: make([]configuration.ActivityDefinition, len(wire.Payload.Definition.Activities)), Rules: wire.Payload.Definition.Rules, TimerRules: wire.Payload.Definition.TimerRules, FormulaPresets: wire.Payload.Definition.FormulaPresets, Gifts: wire.Payload.Definition.Gifts}
 	for index, item := range wire.Payload.Definition.Attributes {
 		definition.Attributes[index] = configuration.AttributeDefinition{ID: item.ID, Name: item.Name, Unit: item.Unit, Format: item.Format, Decimals: item.Decimals, Suffix: item.Suffix, Color: item.Color, BroadcastMessage: item.BroadcastMessage, Display: item.Display}
@@ -209,11 +227,11 @@ func normalizeWire(wire wireEnvelope) (configuration.Definition, configuration.R
 		definition.Activities[index] = configuration.ActivityDefinition{ID: activity.ID, Name: activity.Name, AttributeIDs: activity.AttributeIDs, SceneID: activity.SceneID, ResultMode: activity.ResultMode, GateRules: activity.GateRules, InitialValues: activity.InitialValues, Milestones: activity.Milestones, GiftTimeout: activity.GiftTimeout}
 	}
 	if wire.Payload.Definition.SimplePlay != nil {
-		simple, err := normalizeSimplePlay(*wire.Payload.Definition.SimplePlay)
+		simple, err := normalizeSimplePlay(*wire.Payload.Definition.SimplePlay, definition.Gifts, report)
 		if err != nil {
 			return configuration.Definition{}, configuration.RuntimeState{}, err
 		}
-		definition.SimplePlay = &simple
+		definition.SimplePlay = simple
 	}
 	runtime := configuration.RuntimeState{AttributeValues: wire.Payload.Runtime.AttributeValues, GiftTargetReceived: wire.Payload.Runtime.GiftTargetReceived, Activities: wire.Payload.Runtime.Activities, RuleLimits: wire.Payload.Runtime.RuleLimits}
 	snapshot, err := configuration.Join(definition, runtime)
@@ -223,26 +241,154 @@ func normalizeWire(wire wireEnvelope) (configuration.Definition, configuration.R
 	return configuration.Split(snapshot)
 }
 
-func normalizeSimplePlay(wire wireSimplePlay) (gameplay.SimplePlay, error) {
-	parameters := make(map[string]any, len(wire.Parameters))
-	for key, raw := range wire.Parameters {
-		var value any
-		if json.Unmarshal(raw, &value) != nil {
-			return gameplay.SimplePlay{}, ErrInvalidEnvelope
-		}
-		switch typed := value.(type) {
-		case string, bool:
-			parameters[key] = typed
-		case float64:
-			if math.IsNaN(typed) || math.IsInf(typed, 0) {
-				return gameplay.SimplePlay{}, ErrInvalidEnvelope
-			}
-			parameters[key] = typed
-		default:
-			return gameplay.SimplePlay{}, ErrInvalidEnvelope
+type simpleParameter struct {
+	fallback any
+	text     bool
+	min, max float64
+	integer  bool
+	choices  map[string]struct{}
+}
+type simpleTemplate struct {
+	parameters map[string]simpleParameter
+	slot       string
+	actions    bool
+}
+
+func normalizeSimplePlay(wire wireSimplePlay, catalog []configuration.GiftDefinition, report *Report) (*gameplay.SimplePlay, error) {
+	template, ok := migrationSimpleTemplate(wire.TemplateID, wire.TemplateVersion)
+	if !ok || wire.Version != 1 || !safeSimpleText(wire.ManagedFingerprint) {
+		reportIgnored(report, "/payload/definition/simplePlay")
+		return nil, nil
+	}
+	parameters := make(map[string]any, len(template.parameters))
+	for key := range wire.Parameters {
+		if _, known := template.parameters[key]; !known {
+			reportIgnored(report, "/payload/definition/simplePlay/parameters/"+escapePointer(key))
 		}
 	}
-	return gameplay.SimplePlay{Version: wire.Version, TemplateID: wire.TemplateID, TemplateVersion: wire.TemplateVersion, AttributeID: wire.AttributeID, Parameters: parameters, Gifts: wire.Gifts, OvertimeGiftActions: wire.OvertimeGiftActions, ManagedFingerprint: wire.ManagedFingerprint}, nil
+	for key, rule := range template.parameters {
+		value := rule.fallback
+		if raw, present := wire.Parameters[key]; present {
+			var candidate any
+			if json.Unmarshal(raw, &candidate) == nil && validSimpleParameter(candidate, rule) {
+				value = candidate
+			} else {
+				reportIgnored(report, "/payload/definition/simplePlay/parameters/"+escapePointer(key))
+			}
+		}
+		parameters[key] = value
+	}
+	for slot := range wire.Gifts {
+		if slot != template.slot {
+			reportIgnored(report, "/payload/definition/simplePlay/gifts/"+escapePointer(slot))
+		}
+	}
+	knownGifts := make(map[int]struct{}, len(catalog))
+	for _, gift := range catalog {
+		knownGifts[gift.ID] = struct{}{}
+	}
+	giftIDs := make([]int, 0)
+	seen := make(map[int]struct{})
+	for index, giftID := range wire.Gifts[template.slot] {
+		if giftID <= 0 {
+			reportIgnored(report, "/payload/definition/simplePlay/gifts/"+template.slot+"/"+strconv.Itoa(index))
+			continue
+		}
+		if _, exists := knownGifts[giftID]; !exists {
+			reportIgnored(report, "/payload/definition/simplePlay/gifts/"+template.slot+"/"+strconv.Itoa(index))
+			continue
+		}
+		if _, duplicate := seen[giftID]; duplicate {
+			reportIgnored(report, "/payload/definition/simplePlay/gifts/"+template.slot+"/"+strconv.Itoa(index))
+			continue
+		}
+		seen[giftID] = struct{}{}
+		giftIDs = append(giftIDs, giftID)
+	}
+	if len(giftIDs) == 0 {
+		reportIgnored(report, "/payload/definition/simplePlay/gifts/"+template.slot)
+		return nil, nil
+	}
+	actions := make([]gameplay.OvertimeGiftAction, 0)
+	if template.actions {
+		for index, action := range wire.OvertimeGiftActions {
+			if _, selected := seen[action.GiftID]; !selected || !validOvertimeAction(action) || containsAction(actions, action.GiftID) {
+				reportIgnored(report, "/payload/definition/simplePlay/overtimeGiftActions/"+strconv.Itoa(index)+"/operation")
+				continue
+			}
+			actions = append(actions, action)
+		}
+	} else if len(wire.OvertimeGiftActions) != 0 {
+		reportIgnored(report, "/payload/definition/simplePlay/overtimeGiftActions")
+	}
+	return &gameplay.SimplePlay{Version: 1, TemplateID: wire.TemplateID, TemplateVersion: wire.TemplateVersion, AttributeID: wire.AttributeID, Parameters: parameters, Gifts: map[string][]int{template.slot: giftIDs}, OvertimeGiftActions: actions, ManagedFingerprint: wire.ManagedFingerprint}, nil
+}
+
+func migrationSimpleTemplate(id string, version int) (simpleTemplate, bool) {
+	text := func(value string) simpleParameter { return simpleParameter{fallback: value, text: true} }
+	number := func(value, min, max float64, integer bool) simpleParameter {
+		return simpleParameter{fallback: value, min: min, max: max, integer: integer}
+	}
+	selectValue := func(value string, values ...string) simpleParameter {
+		choices := make(map[string]struct{}, len(values))
+		for _, item := range values {
+			choices[item] = struct{}{}
+		}
+		return simpleParameter{fallback: value, choices: choices}
+	}
+	broadcast := text("感谢大家的支持，欢迎投喂礼物")
+	switch {
+	case id == "overtime" && version == 1:
+		return simpleTemplate{slot: "overtime", parameters: map[string]simpleParameter{"name": text("加班时间"), "minutesPerYuan": number(60, 1, 3600, false), "maxHours": number(0, 0, 240, false), "broadcastMessage": broadcast}}, true
+	case id == "overtime" && version == 2:
+		return simpleTemplate{slot: "overtime", actions: true, parameters: map[string]simpleParameter{"name": text("加班时间"), "maxSeconds": number(0, 0, 864000, true), "broadcastMessage": broadcast}}, true
+	case id == "counter" && version == 1:
+		return simpleTemplate{slot: "count", parameters: map[string]simpleParameter{"name": text("挑战次数"), "suffix": selectValue("次", "次", "局", "个", "组", "分"), "amount": number(1, .01, 100000, false), "cap": number(0, 0, 1000000, false), "broadcastMessage": broadcast}}, true
+	case id == "goal" && version == 1:
+		return simpleTemplate{slot: "progress", parameters: map[string]simpleParameter{"name": text("目标进度"), "target": number(100, 1, 100000000, false), "perYuan": number(1, .01, 100000, false), "broadcastMessage": broadcast}}, true
+	}
+	return simpleTemplate{}, false
+}
+func validSimpleParameter(value any, rule simpleParameter) bool {
+	if rule.text {
+		text, ok := value.(string)
+		return ok && safeSimpleText(text)
+	}
+	if len(rule.choices) > 0 {
+		text, ok := value.(string)
+		_, found := rule.choices[text]
+		return ok && found
+	}
+	number, ok := value.(float64)
+	return ok && !math.IsNaN(number) && !math.IsInf(number, 0) && number >= rule.min && number <= rule.max && (!rule.integer || math.Trunc(number) == number)
+}
+func safeSimpleText(value string) bool {
+	lower := strings.ToLower(value)
+	return strings.TrimSpace(value) != "" && utf8.RuneCountInString(value) <= maximumStringRunes && !strings.Contains(value, "//") && !strings.Contains(value, "\\") && !strings.Contains(value, "/") && !strings.Contains(lower, "http:") && !strings.Contains(lower, "https:") && !strings.Contains(lower, "file:") && !strings.Contains(lower, "data:") && !strings.Contains(lower, "blob:") && !strings.Contains(lower, "javascript:") && !strings.Contains(lower, "vbscript:")
+}
+func validOvertimeAction(action gameplay.OvertimeGiftAction) bool {
+	if action.Operation != "add" && action.Operation != "subtract" && action.Operation != "double" && action.Operation != "halve" && action.Operation != "reset" {
+		return false
+	}
+	if action.Operation != "add" && action.Operation != "subtract" {
+		return action.Seconds == nil
+	}
+	return action.Seconds != nil && *action.Seconds > 0
+}
+func containsAction(actions []gameplay.OvertimeGiftAction, giftID int) bool {
+	for _, action := range actions {
+		if action.GiftID == giftID {
+			return true
+		}
+	}
+	return false
+}
+func reportIgnored(report *Report, pointer string) {
+	if report == nil {
+		return
+	}
+	report.Ignored = append(report.Ignored, pointer)
+	report.Warnings = append(report.Warnings, "desktop-only field removed: "+pointer)
 }
 
 func validateWire(wire wireEnvelope) error {

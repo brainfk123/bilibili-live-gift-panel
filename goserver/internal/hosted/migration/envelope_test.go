@@ -82,6 +82,10 @@ func TestDecodeRejectsMissingOrMalformedKnownFields(t *testing.T) {
 		{"attribute values wrong type", func(document map[string]any) {
 			document["payload"].(map[string]any)["runtime"].(map[string]any)["attributeValues"] = []any{}
 		}},
+		{"missing payload", func(document map[string]any) { delete(document, "payload") }},
+		{"null payload", func(document map[string]any) { document["payload"] = nil }},
+		{"null definition", func(document map[string]any) { document["payload"].(map[string]any)["definition"] = nil }},
+		{"null runtime", func(document map[string]any) { document["payload"].(map[string]any)["runtime"] = nil }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -135,6 +139,36 @@ func TestDecodeCanonicalHashIgnoresFieldOrderAndUnknownFields(t *testing.T) {
 	}
 	if firstEnvelope.Hash != secondEnvelope.Hash {
 		t.Fatalf("hash changed after ignored input: %x != %x", firstEnvelope.Hash, secondEnvelope.Hash)
+	}
+}
+
+func TestDecodeFreshAllowlistsSimplePlayWithoutSavingCraftedValues(t *testing.T) {
+	document := validEnvelopeWire()
+	definition := document["payload"].(map[string]any)["definition"].(map[string]any)
+	definition["gifts"] = []any{map[string]any{"id": 1, "name": "gift", "price": 1, "coinType": "gold"}}
+	definition["simplePlay"] = map[string]any{
+		"version": 1, "templateId": "overtime", "templateVersion": 2, "attributeId": "health", "managedFingerprint": "managed",
+		"parameters":          map[string]any{"name": "https://attacker.invalid", "maxSeconds": 60, "broadcastMessage": "thanks", "cookie": "secret", "token": "secret-token", "path": "C:\\secret"},
+		"gifts":               map[string]any{"overtime": []any{1}, "unknownSlot": []any{1}},
+		"overtimeGiftActions": []any{map[string]any{"giftId": 1, "operation": "add", "seconds": 60}, map[string]any{"giftId": 1, "operation": "shell", "seconds": 60}},
+	}
+	envelope, report, err := Decode(jsonReader(t, document), 2<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Definition.SimplePlay == nil {
+		t.Fatal("valid allowlisted simple play was removed")
+	}
+	if _, exists := envelope.Definition.SimplePlay.Parameters["cookie"]; exists {
+		t.Fatal("crafted parameter reached definition")
+	}
+	if strings.Contains(string(envelope.CanonicalJSON), "secret") || strings.Contains(string(envelope.CanonicalJSON), "attacker.invalid") || strings.Contains(string(envelope.CanonicalJSON), "C:\\secret") || strings.Contains(string(envelope.CanonicalJSON), "unknownSlot") || strings.Contains(string(envelope.CanonicalJSON), "shell") {
+		t.Fatal("crafted simple play value reached canonical JSON")
+	}
+	for _, pointer := range []string{"/payload/definition/simplePlay/parameters/name", "/payload/definition/simplePlay/parameters/cookie", "/payload/definition/simplePlay/parameters/token", "/payload/definition/simplePlay/parameters/path", "/payload/definition/simplePlay/gifts/unknownSlot", "/payload/definition/simplePlay/overtimeGiftActions/1/operation"} {
+		if !contains(report.Ignored, pointer) {
+			t.Fatalf("missing ignored pointer %q: %#v", pointer, report.Ignored)
+		}
 	}
 }
 

@@ -116,6 +116,8 @@ func TestProductionMigrationsIncludeVersionedConfigurationStorage(t *testing.T) 
 			"CHECK (JSON_VALID(definition_json))",
 			"CHECK (JSON_VALID(runtime_json))",
 			"KEY idx_migration_jobs_hash (account_id, request_hash)",
+			"active_request_hash BINARY(32) GENERATED ALWAYS AS (CASE WHEN status IN ('previewed', 'pending') THEN request_hash ELSE NULL END) STORED",
+			"UNIQUE KEY uq_migration_jobs_account_active_hash (account_id, active_request_hash)",
 			"KEY idx_migration_jobs_status_expiry (status, expires_at)",
 			"FOREIGN KEY (account_id, config_version_id) REFERENCES account_config_versions (account_id, id)",
 			"FOREIGN KEY (account_id, rollback_config_version_id) REFERENCES account_config_versions (account_id, id)",
@@ -123,6 +125,9 @@ func TestProductionMigrationsIncludeVersionedConfigurationStorage(t *testing.T) 
 			if !strings.Contains(sql, required) {
 				t.Fatalf("0004 migration missing %q", required)
 			}
+		}
+		if strings.Contains(sql, "UNIQUE KEY uq_migration_jobs_account_hash (account_id, request_hash)") {
+			t.Fatal("0004 migration permanently deduplicates terminal migration generations")
 		}
 		if strings.Contains(sql, "ALTER TABLE") || strings.Contains(sql, "target_room") || strings.Contains(sql, "INSERT INTO live_sessions") {
 			t.Fatalf("0004 migration violates pending room suggestion boundary: %s", sql)
