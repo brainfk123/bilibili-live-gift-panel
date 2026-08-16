@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"bilibili-live-gift-panel/internal/gameplay"
 )
 
 // Gift target definitions are configuration, while received counts are
@@ -68,17 +70,11 @@ func preserveGiftTargetProgress(previous []giftKPIPanelState, next []giftKPIPane
 }
 
 func applyGiftTargetEvent(state *appState, gift giftEvent) {
-	count := maxInt(1, gift.Num)
-	for panelIndex := range state.GiftKPIPanels {
-		for itemIndex := range state.GiftKPIPanels[panelIndex].Items {
-			item := &state.GiftKPIPanels[panelIndex].Items[itemIndex]
-			matchesOpenedGift := item.GiftID == gift.GiftID
-			matchesBlindBox := gift.BlindGiftID > 0 && item.GiftID == gift.BlindGiftID
-			if matchesOpenedGift || matchesBlindBox {
-				item.Received += count
-			}
-		}
+	transition, err := gameplay.ApplyGiftTargets(gameplaySnapshotForTargets(*state), gameplayGift(gift))
+	if err != nil {
+		return
 	}
+	applyGameplayTransition(state, transition)
 }
 
 func resetGiftTargetPanelProgress(state *appState, panelID string) (giftTargetPanelProgress, error) {

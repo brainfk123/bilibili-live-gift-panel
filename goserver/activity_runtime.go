@@ -2,100 +2,35 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
+
+	"bilibili-live-gift-panel/internal/gameplay"
 )
 
 func transitionActivity(state *appState, activityID, action string, now time.Time) (*activitySessionState, error) {
-	activity := state.findActivity(strings.TrimSpace(activityID))
-	if activity == nil {
-		return nil, fmt.Errorf("找不到活动会话")
+	transition, err := (gameplay.Engine{}).TransitionActivity(gameplaySnapshotForActivities(*state), activityID, action, now)
+	if err != nil {
+		return nil, err
 	}
-	nowMillis := now.UnixMilli()
-	switch strings.TrimSpace(action) {
-	case "start":
-		if activity.Status != "not_started" {
-			return nil, fmt.Errorf("只有未开始的活动才能开始")
-		}
-		restoreActivityInitialValues(state, activity)
-		activity.Status = "active"
-		activity.StartedAt = nowMillis
-		activity.LockedAt = 0
-		activity.SettledAt = 0
-		activity.Result = nil
-		clearActivityMilestones(activity)
-		clearActivityGiftTimeout(activity)
-	case "lock":
-		if activity.Status != "active" {
-			return nil, fmt.Errorf("只有进行中的活动才能锁定")
-		}
-		activity.Status = "locked"
-		activity.LockedAt = nowMillis
-		clearActivityGiftTimeout(activity)
-	case "settle":
-		if activity.Status != "active" && activity.Status != "locked" {
-			return nil, fmt.Errorf("只有进行中或已锁定的活动才能结算")
-		}
-		if activity.LockedAt == 0 {
-			activity.LockedAt = nowMillis
-		}
-		activity.Status = "settled"
-		activity.SettledAt = nowMillis
-		activity.Result = settleActivity(state, activity)
-		clearActivityGiftTimeout(activity)
-	case "reset":
-		restoreActivityInitialValues(state, activity)
-		activity.Status = "not_started"
-		activity.StartedAt = 0
-		activity.LockedAt = 0
-		activity.SettledAt = 0
-		activity.Result = nil
-		clearActivityMilestones(activity)
-		clearActivityGiftTimeout(activity)
-	default:
-		return nil, fmt.Errorf("不支持的活动操作")
-	}
-	return activity, nil
-}
-
-func clearActivityMilestones(activity *activitySessionState) {
-	for index := range activity.Milestones {
-		activity.Milestones[index].TriggeredAt = 0
-		activity.Milestones[index].TriggerValue = nil
-	}
-}
-
-func clearActivityGiftTimeout(activity *activitySessionState) {
-	if activity.GiftTimeout == nil {
-		return
-	}
-	activity.GiftTimeout.LastGiftAt = 0
-	activity.GiftTimeout.DeadlineAt = 0
+	applyGameplayTransition(state, transition)
+	return state.findActivity(strings.TrimSpace(activityID)), nil
 }
 
 func resetActivityGiftTimeouts(state *appState, changedAttributeNames map[string]struct{}, now time.Time) int {
-	reset := 0
-	for activityIndex := range state.Activities {
-		activity := &state.Activities[activityIndex]
-		if activity.Status != "active" || activity.GiftTimeout == nil || activity.GiftTimeout.Seconds < 1 {
-			continue
+	snapshot := gameplaySnapshotForActivities(*state)
+	changedAttributeIDs := make([]string, 0, len(changedAttributeNames))
+	for _, attribute := range snapshot.Attributes {
+		if _, exists := changedAttributeNames[attribute.Name]; exists {
+			changedAttributeIDs = append(changedAttributeIDs, attribute.ID)
 		}
-		matched := false
-		for _, attributeName := range activity.AttributeNames {
-			if _, exists := changedAttributeNames[attributeName]; exists {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			continue
-		}
-		activity.GiftTimeout.LastGiftAt = now.UnixMilli()
-		activity.GiftTimeout.DeadlineAt = now.Add(time.Duration(activity.GiftTimeout.Seconds) * time.Second).UnixMilli()
-		reset++
 	}
+	transition, reset, err := gameplay.ResetActivityGiftTimeouts(snapshot, changedAttributeIDs, now)
+	if err != nil {
+		return 0
+	}
+	applyGameplayTransition(state, transition)
 	return reset
 }
 
@@ -133,54 +68,19 @@ func applyActivityGiftTimeouts(state *appState, activityIDs []string, now time.T
 }
 
 func evaluateActivityMilestones(state *appState, now time.Time) int {
-	triggered := 0
-	for activityIndex := range state.Activities {
-		activity := &state.Activities[activityIndex]
-		if activity.Status != "active" {
-			continue
-		}
-		for milestoneIndex := range activity.Milestones {
-			if activity.Status != "active" {
-				break
-			}
-			milestone := &activity.Milestones[milestoneIndex]
-			if milestone.TriggeredAt > 0 {
-				continue
-			}
-			attribute := state.findAttribute(milestone.AttributeName)
-			if attribute == nil {
-				continue
-			}
-			reached := milestone.Comparison == "lte" && attribute.Value <= milestone.Threshold ||
-				milestone.Comparison == "gte" && attribute.Value >= milestone.Threshold
-			if !reached {
-				continue
-			}
-			value := attribute.Value
-			milestone.TriggeredAt = now.UnixMilli()
-			milestone.TriggerValue = &value
-			triggered++
-			switch milestone.Action {
-			case "lock":
-				activity.Status = "locked"
-				activity.LockedAt = now.UnixMilli()
-				clearActivityGiftTimeout(activity)
-			case "settle":
-				activity.Status = "settled"
-				activity.LockedAt = now.UnixMilli()
-				activity.SettledAt = now.UnixMilli()
-				activity.Result = settleActivity(state, activity)
-				clearActivityGiftTimeout(activity)
-			}
-		}
+	transition, triggered, err := gameplay.EvaluateActivityMilestones(gameplaySnapshotForActivities(*state), now)
+	if err != nil {
+		return 0
 	}
+	applyGameplayTransition(state, transition)
 	return triggered
 }
 
 func activityAllowsRulesForAttribute(state appState, attributeName string) bool {
-	for _, activity := range state.Activities {
-		if activity.GateRules && containsString(activity.AttributeNames, attributeName) {
-			return activity.Status == "active"
+	snapshot := gameplaySnapshotForActivities(state)
+	for _, attribute := range snapshot.Attributes {
+		if attribute.Name == attributeName {
+			return gameplay.AllowsRulesForAttribute(snapshot, attribute.ID)
 		}
 	}
 	return true
@@ -193,57 +93,6 @@ func activityForScene(state appState, sceneID string) *activitySessionState {
 		}
 	}
 	return nil
-}
-
-func restoreActivityInitialValues(state *appState, activity *activitySessionState) {
-	for _, attributeName := range activity.AttributeNames {
-		attribute := state.findAttribute(attributeName)
-		if attribute == nil {
-			continue
-		}
-		if value, exists := activity.InitialValues[attributeName]; exists {
-			attribute.Value = value
-		}
-	}
-}
-
-func settleActivity(state *appState, activity *activitySessionState) *activityResultState {
-	result := &activityResultState{Values: map[string]float64{}}
-	for _, attributeName := range activity.AttributeNames {
-		if attribute := state.findAttribute(attributeName); attribute != nil {
-			result.Values[attributeName] = attribute.Value
-		}
-	}
-	if activity.ResultMode == "none" || len(result.Values) == 0 {
-		return result
-	}
-	var winner string
-	var winnerValue float64
-	tied := false
-	for _, attributeName := range activity.AttributeNames {
-		value, exists := result.Values[attributeName]
-		if !exists {
-			continue
-		}
-		if winner == "" {
-			winner = attributeName
-			winnerValue = value
-			tied = false
-			continue
-		}
-		better := activity.ResultMode == "highest" && value > winnerValue || activity.ResultMode == "lowest" && value < winnerValue
-		if better {
-			winner = attributeName
-			winnerValue = value
-			tied = false
-		} else if value == winnerValue {
-			tied = true
-		}
-	}
-	if !tied {
-		result.WinnerAttributeName = winner
-	}
-	return result
 }
 
 func handleActivityTransition(store *configStore) http.HandlerFunc {

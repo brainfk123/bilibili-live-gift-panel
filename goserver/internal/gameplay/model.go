@@ -39,6 +39,14 @@ type Snapshot struct {
 	FormulaPresets   []FormulaPreset   `json:"formulaPresets"`
 	SimplePlay       *SimplePlay       `json:"simplePlay,omitempty"`
 	Gifts            []GiftInfo        `json:"gifts"`
+	RuleLimits       RuleLimitState    `json:"ruleLimits"`
+}
+
+// RuleLimitState is the minimum enforcement state needed to apply per-day
+// rules. It intentionally carries no analytics or historical buckets.
+type RuleLimitState struct {
+	LocalDate     string         `json:"localDate"`
+	AppliedCounts map[string]int `json:"appliedCounts"`
 }
 
 type Attribute struct {
@@ -176,12 +184,6 @@ type GiftInfo struct {
 	Price               float64 `json:"price"`
 	CoinType            string  `json:"coinType"`
 	ImageURL            string  `json:"imageUrl,omitempty"`
-	AnimationGIF        string  `json:"gif,omitempty"`
-	AnimationWebP       string  `json:"webp,omitempty"`
-	AnimationDurationMS int     `json:"animationDurationMs,omitempty"`
-	EffectID            int     `json:"effectId,omitempty"`
-	EffectMP4           string  `json:"effectMp4,omitempty"`
-	EffectMP4JSON       string  `json:"effectMp4Json,omitempty"`
 	BlindBoxParentID    int     `json:"blindBoxParentId,omitempty"`
 	BlindBoxParentName  string  `json:"blindBoxParentName,omitempty"`
 	BlindBoxParentPrice float64 `json:"blindBoxParentPrice,omitempty"`
@@ -195,6 +197,9 @@ type Gift struct {
 	Price        float64 `json:"price"`
 	IdentityRank int     `json:"identityRank"`
 	EventID      string  `json:"eventId,omitempty"`
+	// OccurredAtMillis lets the desktop adapter preserve event-time activity
+	// deadlines while now remains the authoritative local-date clock.
+	OccurredAtMillis int64 `json:"occurredAtMillis,omitempty"`
 }
 
 // Effect is one observable gameplay state update made by a transition.
@@ -298,6 +303,14 @@ func Normalize(snapshot Snapshot) (Snapshot, error) {
 	}
 	if err := validateUniqueGiftIDs(snapshot.Gifts); err != nil {
 		return Snapshot{}, err
+	}
+	for ruleID, count := range snapshot.RuleLimits.AppliedCounts {
+		if strings.TrimSpace(ruleID) == "" {
+			return Snapshot{}, fmt.Errorf("rule limit ID is blank")
+		}
+		if count < 0 {
+			return Snapshot{}, fmt.Errorf("rule limit count for %q is negative", ruleID)
+		}
 	}
 
 	return deepCopySnapshot(snapshot)

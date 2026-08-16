@@ -13,13 +13,26 @@ func TestPublicModelExcludesViewerAndCredentialFields(t *testing.T) {
 	t.Parallel()
 
 	forbidden := regexp.MustCompile(`(?i)uid|uname|nickname|avatar|cookie|token|receipt|contribution|log`)
-	for _, value := range []any{Snapshot{}, Gift{}, Effect{}, TargetNotice{}, ActivityNotice{}, Transition{}} {
+	for _, value := range []any{Snapshot{}, RuleLimitState{}, Gift{}, Effect{}, TargetNotice{}, ActivityNotice{}, Transition{}} {
 		typ := reflect.TypeOf(value)
 		for i := 0; i < typ.NumField(); i++ {
 			field := typ.Field(i)
 			if forbidden.MatchString(field.Name + " " + field.Tag.Get("json")) {
 				t.Fatalf("%s exposes forbidden field %s", typ.Name(), field.Name)
 			}
+		}
+	}
+}
+
+func TestGiftInfoExcludesDesktopAnimationFields(t *testing.T) {
+	t.Parallel()
+
+	forbidden := regexp.MustCompile(`(?i)animation|effect`)
+	typ := reflect.TypeOf(GiftInfo{})
+	for index := 0; index < typ.NumField(); index++ {
+		field := typ.Field(index)
+		if forbidden.MatchString(field.Name + " " + field.Tag.Get("json")) {
+			t.Fatalf("GiftInfo exposes desktop animation field %s", field.Name)
 		}
 	}
 }
@@ -69,6 +82,7 @@ func TestSnapshotJSONRoundTrip(t *testing.T) {
 			ID: "goals", Name: "Goals", Items: []GiftTargetItem{{GiftID: 1, Target: 10, Received: 2}},
 		}},
 		Gifts:      []GiftInfo{{ID: 1, Name: "Rose", Price: 1}},
+		RuleLimits: RuleLimitState{LocalDate: "2026-08-16", AppliedCounts: map[string]int{"gift-health": 2}},
 		SimplePlay: &SimplePlay{TemplateID: "survival", Parameters: map[string]any{"difficulty": "normal"}, Gifts: map[string][]int{"heal": {1}}},
 	})
 	if err != nil {

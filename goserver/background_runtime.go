@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"bilibili-live-gift-panel/internal/gameplay"
 )
 
 type giftEventSource interface {
@@ -1455,64 +1457,19 @@ func applyGiftEventWithFreeze(state *appState, gift giftEvent, freezes attribute
 	upsertRecentGiftState(state, gift)
 	stats := state.todayStats()
 	stats.GiftTotals[giftKey(gift.GiftID)] += maxInt(1, gift.Num)
-	applyGiftTargetEvent(state, gift)
+	state.Stats[stats.Date] = stats
+	snapshot := gameplaySnapshotForGift(*state, gift, freezes)
+	transition, err := (gameplay.Engine{}).ApplyGiftWithRandom(snapshot, gameplayGift(gift), time.Now(), formulaRandomIntn)
 	repetitions := maxInt(1, gift.Num)
 	changes := []logEntry{}
-	changeIndexes := map[string]int{}
 	appliedRuleTriggers := 0
-	for occurrence := 0; occurrence < repetitions; occurrence++ {
-		for _, rule := range state.Rules {
-			if !rule.enabled() {
+	if err == nil {
+		applyGameplayTransition(state, transition)
+		appliedRuleTriggers = gameplayAppliedRuleDelta(snapshot.RuleLimits, transition.Next.RuleLimits, state.Rules)
+		for _, effect := range transition.Effects {
+			if effect.AttributeName == "" {
 				continue
 			}
-			if !activityAllowsRulesForAttribute(*state, rule.AttributeName) {
-				continue
-			}
-			configuredGift := state.findGift(rule.GiftID)
-			matchesAlias := configuredGift != nil && sameGiftIdentity(*configuredGift, gift)
-			matchesBlindBoxParent := gift.BlindGiftID > 0 && rule.GiftID == gift.BlindGiftID
-			if !rule.matchesGiftID(gift.GiftID) && !matchesAlias && !matchesBlindBoxParent {
-				continue
-			}
-			attribute := state.findAttribute(rule.AttributeName)
-			if attribute == nil {
-				continue
-			}
-			if freezes != nil && attribute.ID != "" && freezes.IsFrozen(attribute.ID) {
-				continue
-			}
-			if rule.MinPrice != nil && gift.Price < *rule.MinPrice {
-				continue
-			}
-			triggerCount := stats.RuleTriggers[rule.ID]
-			if rule.DailyLimit != nil && triggerCount >= *rule.DailyLimit {
-				continue
-			}
-			environment := buildGiftFormulaEnvironment(*state, attribute.Name, attribute.Value, gift.Price, gift.Membership)
-			if strings.TrimSpace(rule.Condition) != "" {
-				condition, err := evaluateFormula(rule.Condition, environment)
-				if err != nil || condition == 0 || math.IsInf(condition, 0) || math.IsNaN(condition) {
-					continue
-				}
-			}
-			nextValue, err := evaluateFormula(rule.Formula, environment)
-			if err != nil || math.IsInf(nextValue, 0) || math.IsNaN(nextValue) {
-				continue
-			}
-			if rule.Cap != nil {
-				nextValue = math.Min(nextValue, *rule.Cap)
-			}
-			before := attribute.Value
-			attribute.Value = nextValue
-			stats.RuleTriggers[rule.ID] = triggerCount + 1
-			appliedRuleTriggers++
-			delta := nextValue - before
-			if index, exists := changeIndexes[attribute.Name]; exists {
-				changes[index].Delta += delta
-				changes[index].ValueAfter = nextValue
-				continue
-			}
-			changeIndexes[attribute.Name] = len(changes)
 			changes = append(changes, logEntry{
 				Time:          gift.Timestamp,
 				GiftID:        gift.GiftID,
@@ -1521,13 +1478,13 @@ func applyGiftEventWithFreeze(state *appState, gift giftEvent, freezes attribute
 				Uname:         gift.Uname,
 				Avatar:        gift.Avatar,
 				SenderUID:     gift.UID,
-				AttributeName: attribute.Name,
-				Delta:         delta,
-				ValueAfter:    nextValue,
-				RuleID:        rule.ID,
+				AttributeName: effect.AttributeName,
+				Delta:         effect.Delta,
+				ValueAfter:    effect.ValueAfter,
+				RuleID:        effect.RuleID,
 				Source:        "gift",
-				TriggerName:   rule.FormulaName,
-				EventID:       fmt.Sprintf("%s:%s", gift.Rnd, attribute.Name),
+				TriggerName:   effect.TriggerName,
+				EventID:       fmt.Sprintf("%s:%s", gift.Rnd, effect.AttributeName),
 			})
 		}
 	}
@@ -1536,23 +1493,12 @@ func applyGiftEventWithFreeze(state *appState, gift giftEvent, freezes attribute
 		if len(state.Log) > maxLogEntries {
 			state.Log = state.Log[:maxLogEntries]
 		}
-		milestoneTime := time.Now()
-		if gift.Timestamp > 0 {
-			milestoneTime = time.Unix(gift.Timestamp, 0)
-		}
-		changedAttributeNames := make(map[string]struct{}, len(changes))
-		for _, change := range changes {
-			changedAttributeNames[change.AttributeName] = struct{}{}
-		}
-		resetActivityGiftTimeouts(state, changedAttributeNames, milestoneTime)
-		evaluateActivityMilestones(state, milestoneTime)
 	}
 	appendGiftReceipt(state, gift, changes)
 	recordGiftContribution(state, gift, giftContributionOutcome{
 		RuleTriggers: appliedRuleTriggers,
 		Changes:      changes,
 	})
-	state.Stats[stats.Date] = stats
 }
 
 var errNoTimerChanges = errors.New("no timer changes")
@@ -1563,59 +1509,61 @@ func applyTimerRules(state *appState, dueRuleIDs []string, now time.Time) int {
 
 func applyTimerRulesWithFreeze(state *appState, dueRuleIDs []string, now time.Time, freezes attributeFreezeChecker) int {
 	normalizeAppState(state)
-	due := make(map[string]struct{}, len(dueRuleIDs))
-	for _, ruleID := range dueRuleIDs {
-		due[ruleID] = struct{}{}
-	}
 	stats := state.todayStats()
-	applied := 0
-	for _, rule := range state.TimerRules {
-		if _, exists := due[rule.ID]; !exists || !rule.Enabled || !activityAllowsRulesForAttribute(*state, rule.AttributeName) {
+	state.Stats[stats.Date] = stats
+	snapshot := gameplaySnapshotForTimers(*state, dueRuleIDs, freezes)
+	activityDate := now.In(time.Local).Format("2006-01-02")
+	snapshot.RuleLimits.LocalDate = activityDate
+	transition, err := (gameplay.Engine{}).ApplyTimersWithRandom(snapshot, dueRuleIDs, now, formulaRandomIntn)
+	if err != nil {
+		return 0
+	}
+	applied := gameplayAppliedTimerRuleDelta(snapshot.RuleLimits, transition.Next.RuleLimits, state.TimerRules)
+	transition.Next.RuleLimits.LocalDate = stats.Date
+	applyGameplayTransition(state, transition)
+	for _, effect := range transition.Effects {
+		if effect.AttributeName == "" {
 			continue
 		}
-		attribute := state.findAttribute(rule.AttributeName)
-		if attribute == nil {
-			continue
-		}
-		if freezes != nil && attribute.ID != "" && freezes.IsFrozen(attribute.ID) {
-			continue
-		}
-		environment := make(map[string]float64, len(state.Attributes))
-		for _, candidate := range state.Attributes {
-			environment[candidate.Name] = candidate.Value
-		}
-		if strings.TrimSpace(rule.Condition) != "" {
-			conditionResult, err := evaluateFormula(rule.Condition, environment)
-			if err != nil || conditionResult == 0 || math.IsInf(conditionResult, 0) || math.IsNaN(conditionResult) {
-				continue
-			}
-		}
-		nextValue, err := evaluateFormula(rule.Formula, environment)
-		if err != nil || math.IsInf(nextValue, 0) || math.IsNaN(nextValue) {
-			continue
-		}
-		before := attribute.Value
-		attribute.Value = nextValue
-		stats.RuleTriggers[rule.ID]++
 		state.Log = append([]logEntry{{
-			Time:          now.Unix(),
-			AttributeName: attribute.Name,
-			Delta:         nextValue - before,
-			ValueAfter:    nextValue,
-			RuleID:        rule.ID,
-			Source:        "timer",
-			TriggerName:   rule.FormulaName,
+			Time: now.Unix(), AttributeName: effect.AttributeName, Delta: effect.Delta,
+			ValueAfter: effect.ValueAfter, RuleID: effect.RuleID, Source: "timer", TriggerName: effect.TriggerName,
 		}}, state.Log...)
 		if len(state.Log) > maxLogEntries {
 			state.Log = state.Log[:maxLogEntries]
 		}
-		applied++
-	}
-	state.Stats[stats.Date] = stats
-	if applied > 0 {
-		evaluateActivityMilestones(state, now)
 	}
 	return applied
+}
+
+func gameplayAppliedRuleDelta(before, after gameplay.RuleLimitState, rules []giftRule) int {
+	ruleIDs := make(map[string]struct{}, len(rules))
+	for _, rule := range rules {
+		ruleIDs[rule.ID] = struct{}{}
+	}
+	return gameplayAppliedCountDelta(before, after, ruleIDs)
+}
+
+func gameplayAppliedTimerRuleDelta(before, after gameplay.RuleLimitState, rules []timerRule) int {
+	ruleIDs := make(map[string]struct{}, len(rules))
+	for _, rule := range rules {
+		ruleIDs[rule.ID] = struct{}{}
+	}
+	return gameplayAppliedCountDelta(before, after, ruleIDs)
+}
+
+func gameplayAppliedCountDelta(before, after gameplay.RuleLimitState, ruleIDs map[string]struct{}) int {
+	count := 0
+	for ruleID := range ruleIDs {
+		baseline := 0
+		if before.LocalDate == after.LocalDate {
+			baseline = before.AppliedCounts[ruleID]
+		}
+		if delta := after.AppliedCounts[ruleID] - baseline; delta > 0 {
+			count += delta
+		}
+	}
+	return count
 }
 
 func upsertRecentGiftState(state *appState, gift giftEvent) {
