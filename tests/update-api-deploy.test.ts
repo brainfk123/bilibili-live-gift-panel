@@ -528,7 +528,11 @@ getent() {
       printf 'gift-panel-mirror:x:995:\\n' ;;
     group:995)
       if test "\${ACCOUNT_MODE}" = missing-group; then return 2; fi
-      if test "\${ACCOUNT_MODE}" = wrong-group-record-gid; then printf 'gift-panel-mirror:x:996:\\n'; else printf 'gift-panel-mirror:x:995:\\n'; fi ;;
+      case "\${ACCOUNT_MODE}" in
+        wrong-group-record-gid) printf 'gift-panel-mirror:x:996:\\n' ;;
+        wrong-group-record-name) printf 'other-primary:x:995:\\n' ;;
+        *) printf 'gift-panel-mirror:x:995:\\n' ;;
+      esac ;;
     *) return 2 ;;
   esac
 }
@@ -549,6 +553,7 @@ useradd() { ACCOUNT_CREATED=1; printf 'useradd\\n' >> "$ACCOUNT_LOG"; }
       for (const mode of [
         'wrong-passwd-username',
         'wrong-group-record-gid',
+        'wrong-group-record-name',
         'wrong-id-group',
         'existing-group-without-user',
         'wrong-shell',
