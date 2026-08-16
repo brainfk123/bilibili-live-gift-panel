@@ -65,7 +65,7 @@ type HTTPHandler struct {
 	mux           *http.ServeMux
 }
 
-// NewHTTPHandler builds the five stable authentication routes.
+// NewHTTPHandler builds the six stable authentication method-routes.
 func NewHTTPHandler(service sessionService, options HTTPOptions) (*HTTPHandler, error) {
 	if service == nil || options.Limiter == nil || options.ClientIP == nil || options.CSRFToken == "" || len(options.CSRFToken) > 512 {
 		return nil, ErrInvalidInput
