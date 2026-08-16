@@ -22,7 +22,7 @@
 
 ## File Map
 
-- `goserver/internal/gameplay/model.go`: exported privacy-safe gameplay snapshot, event, effect, and transition types.
+- `goserver/internal/gameplay/model.go`: exported privacy-safe gameplay snapshot, event, effect, transition, and rule-limit enforcement state types.
 - `goserver/internal/gameplay/engine.go`: the deep `Engine` interface implementation for gifts, timers, activity transitions, and target progress.
 - `goserver/internal/gameplay/*_test.go`: interface-level parity and privacy-contract tests.
 - `goserver/gameplay_adapter.go`: desktop `appState`/`giftEvent` adapter; viewer history stays outside the shared module.
@@ -180,6 +180,8 @@ git commit -m "feat: define shared gameplay model"
 ### Task 3: Move gameplay transitions behind `gameplay.Engine`
 
 **Files:**
+- Modify: `goserver/internal/gameplay/model.go`
+- Modify: `goserver/internal/gameplay/model_test.go`
 - Create: `goserver/internal/gameplay/engine.go`
 - Create: `goserver/internal/gameplay/engine_test.go`
 - Create: `goserver/gameplay_adapter.go`
@@ -192,6 +194,7 @@ git commit -m "feat: define shared gameplay model"
 **Interfaces:**
 - Consumes: `gameplay.Engine` and model types from Task 2.
 - Produces: `snapshotFromAppState(appState) gameplay.Snapshot` and `applyGameplayTransition(*appState, gameplay.Transition)`.
+- Plan repair discovered during execution: daily-limit parity requires a privacy-safe `RuleLimitState` in `Snapshot`, containing only the current local date and per-rule applied counts. It is gameplay enforcement state, not analytics: it must not contain gift totals, viewer identity, logs, receipts, contributions, or historical days.
 
 - [ ] **Step 1: Lock cross-adapter parity with failing tests**
 
@@ -212,7 +215,7 @@ func TestGameplayAdapterMatchesGiftTransition(t *testing.T) {
 }
 ```
 
-Cover minimum price, cap, daily limit, disabled rules, timer rules, activity gates/milestones/timeouts, blind-box parent target matching, reset/start/lock/settle, invalid formula isolation, and zero-count normalization.
+Cover minimum price, cap, daily limit (including date rollover through `RuleLimitState`), disabled rules, timer rules, activity gates/milestones/timeouts, blind-box parent target matching, reset/start/lock/settle, invalid formula isolation, and zero-count normalization.
 
 Run: `go -C goserver test ./... -run 'TestGameplayAdapter' -count=1`
 
@@ -224,7 +227,7 @@ Move parsing/evaluation and activity transition implementation into `internal/ga
 
 - [ ] **Step 3: Move gift-rule, timer, and target transitions**
 
-Implement `Engine.ApplyGift` and `ApplyTimers` as pure copy-in/copy-out operations. `Effect` contains only `RuleID`, `AttributeName`, `Delta`, `ValueAfter`, `TriggerName`, and target/activity notices. Desktop log, receipt, animation, profile lookup, and contribution updates remain in the root adapter after the transition returns.
+Implement `Engine.ApplyGift` and `ApplyTimers` as pure copy-in/copy-out operations. `Engine.ApplyGift` resets `RuleLimitState` when `now` enters a new local date, enforces `DailyLimit`, and increments only successfully applied rule counts. `Effect` contains only `RuleID`, `AttributeName`, `Delta`, `ValueAfter`, `TriggerName`, and target/activity notices. Desktop gift totals, multi-day stats, log, receipt, animation, profile lookup, and contribution updates remain in the root adapter after the transition returns.
 
 - [ ] **Step 4: Run parity, race, and full regression**
 
@@ -243,7 +246,7 @@ Expected: PASS with unchanged desktop behavior.
 - [ ] **Step 5: Commit the shared engine**
 
 ```powershell
-git add -- goserver/internal/gameplay goserver/gameplay_adapter.go goserver/background_runtime.go goserver/activity_runtime.go goserver/formula.go goserver/gift_targets.go goserver/state.go
+git add -- goserver/internal/gameplay goserver/gameplay_adapter.go goserver/background_runtime.go goserver/activity_runtime.go goserver/formula.go goserver/gift_targets.go goserver/state.go docs/superpowers/plans/2026-08-16-hosted-foundation.md
 git diff --cached --check
 git commit -m "refactor: extract shared gameplay engine"
 ```
