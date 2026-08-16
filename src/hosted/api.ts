@@ -146,30 +146,41 @@ function attributeDefinition(value: unknown): boolean {
 }
 const legacyOvertime = {
   parameters: [
-    { id: 'name', kind: 'text', min: undefined, max: undefined, options: undefined },
-    { id: 'minutesPerYuan', kind: 'number', min: 1, max: 3600, options: undefined },
-    { id: 'maxHours', kind: 'number', min: 0, max: 240, options: undefined },
-    { id: 'broadcastMessage', kind: 'text', min: undefined, max: undefined, options: undefined },
+    { id: 'name', kind: 'text', min: undefined, max: undefined, options: undefined, integer: false },
+    { id: 'minutesPerYuan', kind: 'number', min: 1, max: 3600, options: undefined, integer: false },
+    { id: 'maxHours', kind: 'number', min: 0, max: 240, options: undefined, integer: false },
+    { id: 'broadcastMessage', kind: 'text', min: undefined, max: undefined, options: undefined, integer: false },
   ] as const,
   giftSlots: [{ id: 'overtime', minimum: 1, multiple: true }] as const,
 };
-function simpleDescriptor(id: string, version: number): { parameters: readonly Pick<TemplateParameterDefinition, 'id' | 'kind' | 'min' | 'max' | 'options'>[]; giftSlots: readonly Pick<TemplateGiftSlotDefinition, 'id' | 'minimum' | 'multiple'>[] } | undefined {
+type SimpleParameterDefinition = Pick<TemplateParameterDefinition, 'id' | 'kind' | 'min' | 'max' | 'options'> & { integer: boolean };
+function simpleDescriptor(id: string, version: number): { parameters: readonly SimpleParameterDefinition[]; giftSlots: readonly Pick<TemplateGiftSlotDefinition, 'id' | 'minimum' | 'multiple'>[] } | undefined {
   if (id === 'overtime' && version === 1) return legacyOvertime;
-  return GAMEPLAY_TEMPLATES.find((template) => template.id === id && template.version === version);
+  const template = GAMEPLAY_TEMPLATES.find((candidate) => candidate.id === id && candidate.version === version);
+  return template && { ...template, parameters: template.parameters.map((parameter) => ({ ...parameter, integer: id === 'overtime' && version === 2 && parameter.id === 'maxSeconds' })) };
 }
-function validParameter(value: unknown, parameter: Pick<TemplateParameterDefinition, 'kind' | 'min' | 'max' | 'options'>): boolean {
-  if (parameter.kind === 'text') return typeof value === 'string' && value.trim().length > 0 && value.length <= 4096;
+const simpleSchemePattern = /[A-Za-z][A-Za-z0-9+.-]*:/g;
+const simpleDrivePattern = /[A-Za-z]:[\\/]/;
+const simpleMediaPattern = /\.(apng|avif|bmp|gif|jpe?g|png|svg|webp|mp3|wav|ogg|m4a|mp4|m4v|mov|webm)\b/i;
+function safeSimpleText(value: string): boolean {
+  if (!value.trim() || Array.from(value).length > 4096 || value.includes('//') || value.includes('\\\\') || simpleDrivePattern.test(value) || simpleMediaPattern.test(value)) return false;
+  for (const match of value.matchAll(simpleSchemePattern)) { const scheme = match[0].slice(0, -1); const remainder = value.slice((match.index ?? 0) + match[0].length); if (['http', 'https', 'data', 'file', 'blob', 'javascript', 'vbscript'].includes(scheme.toLowerCase()) || (scheme !== 'PK' && scheme !== 'HP' && (!remainder || !/^\s/u.test(remainder)))) return false; }
+  const runes = Array.from(value); for (let index = 0; index < runes.length; index += 1) { if (runes[index] !== '/' && runes[index] !== '\\') continue; if (index + 1 >= runes.length || /^\s$/u.test(runes[index + 1])) continue; if (index === 0 || /^\s$/u.test(runes[index - 1]) || /[\p{P}\p{S}]/u.test(runes[index - 1])) return false; }
+  return true;
+}
+function validParameter(value: unknown, parameter: SimpleParameterDefinition): boolean {
+  if (parameter.kind === 'text') return typeof value === 'string' && safeSimpleText(value);
   if (parameter.kind === 'toggle') return typeof value === 'boolean';
   if (parameter.kind === 'select') return typeof value === 'string' && parameter.options?.some((option) => option.value === value) === true;
-  return finite(value) && (parameter.min === undefined || value >= parameter.min) && (parameter.max === undefined || value <= parameter.max);
+  return finite(value) && (parameter.min === undefined || value >= parameter.min) && (parameter.max === undefined || value <= parameter.max) && (!parameter.integer || Number.isInteger(value));
 }
-function validSimplePlay(value: unknown): boolean {
+function validSimplePlay(value: unknown, catalog: ReadonlySet<number>): boolean {
   const item = object(value);
   if (!item || !exactKeys(item, ['version', 'templateId', 'templateVersion', 'attributeId', 'parameters', 'gifts', 'managedFingerprint'], ['overtimeGiftActions']) || !Number.isSafeInteger(item.version) || item.version !== 1 || !string(item.templateId) || !Number.isSafeInteger(item.templateVersion) || !string(item.attributeId) || !string(item.managedFingerprint)) return false;
   const template = simpleDescriptor(item.templateId, item.templateVersion as number); const parameters = object(item.parameters); const gifts = object(item.gifts);
   if (!template || !parameters || !gifts || !exactKeys(parameters, template.parameters.map((parameter) => parameter.id), []) || !exactKeys(gifts, template.giftSlots.map((slot) => slot.id), [])) return false;
   if (!template.parameters.every((parameter) => validParameter(parameters[parameter.id], parameter))) return false;
-  const assigned = new Set<number>(); for (const slot of template.giftSlots) { const slotGifts = gifts[slot.id]; if (!integers(slotGifts) || slotGifts.length < slot.minimum || (!slot.multiple && slotGifts.length > 1)) return false; for (const giftID of slotGifts) { if (assigned.has(giftID)) return false; assigned.add(giftID); } }
+  const assigned = new Set<number>(); for (const slot of template.giftSlots) { const slotGifts = gifts[slot.id]; if (!integers(slotGifts) || slotGifts.length < slot.minimum || (!slot.multiple && slotGifts.length > 1)) return false; for (const giftID of slotGifts) { if (giftID <= 0 || !catalog.has(giftID) || assigned.has(giftID)) return false; assigned.add(giftID); } }
   if (item.overtimeGiftActions === undefined) return true;
   if (item.templateId !== 'overtime' || item.templateVersion !== 2) return false;
   const actionIDs = new Set<number>();
@@ -190,8 +201,9 @@ function definition(value: unknown): value is HostedConfigurationDefinition {
   const timerRule = (entry: unknown): boolean => { const row = object(entry); return row !== undefined && exactKeys(row, ['id', 'attributeId', 'formulaName', 'intervalSeconds', 'formula', 'enabled'], ['condition']) && string(row.id) && text(row.attributeId) && text(row.formulaName) && number(row.intervalSeconds) && text(row.formula) && typeof row.enabled === 'boolean' && optional(row.condition, string); };
   const preset = (entry: unknown): boolean => { const row = object(entry); return row !== undefined && exactKeys(row, ['id', 'name', 'context', 'formula', 'attributeId']) && string(row.id) && text(row.name) && text(row.context) && text(row.formula) && text(row.attributeId); };
   const gift = (entry: unknown): boolean => { const row = object(entry); return row !== undefined && exactKeys(row, ['id', 'name', 'price', 'coinType'], ['blindBoxParentId', 'blindBoxParentName', 'blindBoxParentPrice']) && number(row.id) && text(row.name) && finite(row.price) && text(row.coinType) && optional(row.blindBoxParentId, number) && optional(row.blindBoxParentName, string) && optional(row.blindBoxParentPrice, finite); };
-  const simplePlay = (entry: unknown): boolean => validSimplePlay(entry);
-  return arrayOf(item.displayScenes, scene) && arrayOf(item.giftTargetPanels, panel) && arrayOf(item.activities, activity) && arrayOf(item.rules, rule) && arrayOf(item.timerRules, timerRule) && arrayOf(item.formulaPresets, preset) && arrayOf(item.gifts, gift) && optional(item.simplePlay, simplePlay);
+  if (!arrayOf(item.gifts, gift)) return false;
+  const catalog = new Set((item.gifts as unknown[]).map((entry) => (entry as { id: number }).id)); const simplePlay = (entry: unknown): boolean => validSimplePlay(entry, catalog);
+  return arrayOf(item.displayScenes, scene) && arrayOf(item.giftTargetPanels, panel) && arrayOf(item.activities, activity) && arrayOf(item.rules, rule) && arrayOf(item.timerRules, timerRule) && arrayOf(item.formulaPresets, preset) && optional(item.simplePlay, simplePlay);
 }
 function runtime(value: unknown): value is HostedConfigurationRuntime {
   const item = object(value);

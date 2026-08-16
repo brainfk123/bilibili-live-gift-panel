@@ -70,7 +70,7 @@ export function mountConfigurationView(root: HTMLElement, api: ConfigurationAPI,
   const render = (state: ConfigurationViewState): void => {
     if (disposed) return;
     status.textContent = state.conflict ? '服务器配置已更新；已保留本页未保存草稿，请对照后重试。' : state.error ?? '';
-    if (!loaded && state.draftDefinition && state.draftRuntime) { definitionInput.value = JSON.stringify(state.draftDefinition, null, 2); runtimeInput.value = JSON.stringify(state.draftRuntime, null, 2); loaded = true; definitionInput.focus(); }
+    if (!loaded && state.draftDefinition && state.draftRuntime) { if (definitionEditVersion === 0) definitionInput.value = JSON.stringify(state.draftDefinition, null, 2); if (runtimeEditVersion === 0) runtimeInput.value = JSON.stringify(state.draftRuntime, null, 2); loaded = true; if (definitionEditVersion === 0 && runtimeEditVersion === 0) definitionInput.focus(); }
     compare.textContent = state.authoritative ? `服务器权威版本 ${state.authoritative.version} / 状态修订 ${state.authoritative.revision}\n${JSON.stringify(state.authoritative, null, 2)}` : '';
     saveDefinition.textContent = state.busy ? '正在保存…' : '保存配置定义'; saveDefinition.disabled = state.busy;
     saveRuntime.textContent = state.busy ? '正在保存…' : '保存当前状态'; saveRuntime.disabled = state.busy;

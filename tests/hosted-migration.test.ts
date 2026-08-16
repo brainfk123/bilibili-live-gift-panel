@@ -79,10 +79,10 @@ describe('hosted migration contract', () => {
 
   it('keeps migration confirmation controls mounted and focused across incremental updates', async () => {
     class Element {
-      children: Element[] = []; textContent = ''; className = ''; type = ''; disabled = false; hidden = false; checked = false; value = ''; accept = ''; src = ''; alt = '';
+      children: Element[] = []; private content = ''; parent?: Element; className = ''; type = ''; disabled = false; hidden = false; checked = false; value = ''; accept = ''; src = ''; alt = '';
       listeners = new Map<string, () => void>(); attributes = new Map<string, string>(); files?: { item(index: number): unknown };
       constructor(readonly tagName: string, readonly ownerDocument: { createElement(tag: string): Element; createTextNode(text: string): Element; activeElement?: Element; defaultView?: unknown }) {}
-      get firstChild() { return this.children[0]; } append(...nodes: Element[]) { this.children.push(...nodes); } replaceChildren(...nodes: Element[]) { this.children = nodes; } removeChild(node: Element) { this.children = this.children.filter((child) => child !== node); }
+      get textContent() { return this.content; } set textContent(value: string) { this.content = value; this.replaceChildren(); } get firstChild() { return this.children[0]; } append(...nodes: Element[]) { for (const node of nodes) { node.parent?.removeChild(node); node.parent = this; this.children.push(node); } } replaceChildren(...nodes: Element[]) { for (const child of this.children) { child.parent = undefined; if (this.ownerDocument.activeElement === child) this.ownerDocument.activeElement = undefined; } this.children = []; this.append(...nodes); } removeChild(node: Element) { this.children = this.children.filter((child) => child !== node); node.parent = undefined; if (this.ownerDocument.activeElement === node) this.ownerDocument.activeElement = undefined; }
       setAttribute(name: string, value: string) { this.attributes.set(name, value); } removeAttribute(name: string) { this.attributes.delete(name); } addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); } focus() { this.ownerDocument.activeElement = this; }
     }
     const view = { addEventListener: vi.fn(), removeEventListener: vi.fn() };
@@ -94,7 +94,18 @@ describe('hosted migration contract', () => {
     await vi.waitFor(() => expect(panel.children[5].hidden).toBe(false));
     const confirmation = panel.children[5].children[0]; confirmation.focus(); confirmation.checked = true; confirmation.listeners.get('change')?.();
     expect((root as unknown as Element).children[0]).toBe(panel); expect(panel.children[5].children[0]).toBe(confirmation); expect(document.activeElement).toBe(confirmation); expect(panel.children[7].hidden).toBe(false);
+    await vi.waitFor(() => expect(panel.children[6].children[0]).toBeDefined()); const keepBox = panel.children[6].children[0]; keepBox.focus(); keepBox.checked = true; keepBox.listeners.get('change')?.(); expect(panel.children[6].children[0]).toBe(keepBox); expect(document.activeElement).toBe(keepBox);
     await mounted.dispose();
+  });
+
+  it('re-enables the DOM apply action after a pending proof while retaining single-flight confirmation', async () => {
+    let verify!: (value: { status: 'verified'; expiresAt: string }) => void; const verifying = new Promise<{ status: 'verified'; expiresAt: string }>((resolve) => { verify = resolve; });
+    class Element { children: Element[] = []; textContent = ''; className = ''; type = ''; disabled = false; hidden = false; checked = false; value = ''; accept = ''; src = ''; alt = ''; listeners = new Map<string, () => void>(); files?: { item(index: number): unknown }; constructor(readonly tagName: string, readonly ownerDocument: { createElement(tag: string): Element; createTextNode(text: string): Element; defaultView?: unknown }) {} get firstChild() { return this.children[0]; } append(...nodes: Element[]) { this.children.push(...nodes); } replaceChildren(...nodes: Element[]) { this.children = nodes; } removeChild(node: Element) { this.children = this.children.filter((child) => child !== node); } setAttribute() {} removeAttribute() {} addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); } }
+    const view = { addEventListener: vi.fn(), removeEventListener: vi.fn() }; const document: { createElement(tag: string): Element; createTextNode(text: string): Element; defaultView: unknown } = { createElement: (tag: string): Element => new Element(tag, document), createTextNode: (text: string): Element => { const node = new Element('#text', document); node.textContent = text; return node; }, defaultView: view }; const root = new Element('div', document) as unknown as HTMLElement;
+    const api = { previewMigration: vi.fn(async () => preview), beginLogin: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: preview.expiresAt })), pollLogin: vi.fn().mockResolvedValueOnce({ status: 'pending' as const, expiresAt: preview.expiresAt }).mockImplementationOnce(() => verifying), applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const, expiresAt: preview.expiresAt })) };
+    const mounted = mountMigrationView(root, api, { onConfiguration: vi.fn() }); const panel = (root as unknown as Element).children[0]; const file = panel.children[2]; const previewButton = panel.children[3]; const replace = panel.children[5].children[0]; const apply = panel.children[7];
+    file.files = { item: () => ({ name: 'package.json', size: 2, text: async () => '{}' }) }; file.listeners.get('change')?.(); previewButton.listeners.get('click')?.(); await vi.waitFor(() => expect(panel.children[5].hidden).toBe(false)); replace.checked = true; replace.listeners.get('change')?.(); apply.listeners.get('click')?.();
+    await vi.waitFor(() => expect(panel.children[8].hidden).toBe(false)); await vi.waitFor(() => expect(apply.disabled).toBe(false)); apply.listeners.get('click')?.(); apply.listeners.get('click')?.(); await vi.waitFor(() => expect(api.pollLogin).toHaveBeenCalledTimes(2)); verify({ status: 'verified', expiresAt: preview.expiresAt }); await vi.waitFor(() => expect(api.applyMigration).toHaveBeenCalledTimes(1)); await mounted.dispose();
   });
 
   it('requires an explicit unchecked room suggestion and polls the reusable proof without creating a site session', async () => {
@@ -104,11 +115,12 @@ describe('hosted migration contract', () => {
       cancelLogin: vi.fn(async () => undefined), applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const, expiresAt: '2030-01-02T00:00:00Z' })),
       createSession: vi.fn(),
     };
-    const flow = createMigrationFlow(api, vi.fn(), { now: () => new Date('2030-01-01T00:00:00Z') });
+    const states: Array<Record<string, unknown>> = []; const flow = createMigrationFlow(api, (state) => states.push(state as unknown as Record<string, unknown>), { now: () => new Date('2030-01-01T00:00:00Z') });
     flow.acceptPreview(preview);
     await expect(flow.apply()).rejects.toMatchObject({ code: 'invalid_request' });
     flow.confirmReplacement(true); flow.setKeepRoomSuggestion(false);
     await expect(flow.apply()).rejects.toMatchObject({ code: 'verification_pending' });
+    expect(states.at(-1)).toEqual(expect.objectContaining({ proof: expect.objectContaining({ qrImage: 'qr' }), operationInFlight: false }));
     await flow.apply();
     expect(api.applyMigration).toHaveBeenCalledWith(12, 'proof', false);
     expect(api.createSession).not.toHaveBeenCalled();
@@ -153,8 +165,9 @@ describe('hosted migration contract', () => {
       pollLogin: vi.fn().mockRejectedValueOnce(new HostedAPIError('temporarily_unavailable', 503)).mockResolvedValueOnce({ status: 'verified', expiresAt: '2030-01-02T00:00:00Z' }),
       cancelLogin: vi.fn(async () => undefined), applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const })),
     };
-    const flow = createMigrationFlow(api, vi.fn()); flow.acceptPreview(preview); flow.confirmReplacement(true);
+    const states: Array<Record<string, unknown>> = []; const flow = createMigrationFlow(api, (state) => states.push(state as unknown as Record<string, unknown>)); flow.acceptPreview(preview); flow.confirmReplacement(true);
     await expect(flow.apply()).rejects.toMatchObject({ code: 'temporarily_unavailable' });
+    expect(states.at(-1)).toEqual(expect.objectContaining({ proof: expect.objectContaining({ qrImage: 'qr' }), operationInFlight: false }));
     await flow.apply();
     expect(api.beginLogin).toHaveBeenCalledTimes(1); expect(api.pollLogin).toHaveBeenCalledTimes(2); expect(api.applyMigration).toHaveBeenCalledTimes(1);
   });

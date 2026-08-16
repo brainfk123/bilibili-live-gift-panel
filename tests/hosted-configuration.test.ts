@@ -133,6 +133,26 @@ describe('hosted configuration contract', () => {
     await expect((await connect(legacy)).loadConfiguration()).resolves.toEqual(legacy);
   });
 
+  it('rejects SimplePlay resource-like text, fractional integer fields, and gifts absent from its catalog', async () => {
+    const overtime = GAMEPLAY_TEMPLATES.find((template) => template.id === 'overtime' && template.version === 2); if (!overtime) throw new Error('overtime template missing');
+    const current = { ...configuration, definition: { ...configuration.definition, gifts: [{ id: 1, name: 'gift', price: 1, coinType: 'gold' }], simplePlay: { version: 1, templateId: 'overtime', templateVersion: 2, attributeId: 'seconds', parameters: Object.fromEntries(overtime.parameters.map((parameter) => [parameter.id, parameter.defaultValue])), gifts: { overtime: [1] }, overtimeGiftActions: [{ giftId: 1, operation: 'add', seconds: 60 }], managedFingerprint: 'current' } } };
+    const connect = async (body: unknown) => HostedAPI.connect(async (input) => input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : json(body));
+    await expect((await connect(current)).loadConfiguration()).resolves.toEqual(current);
+    for (const mutate of [
+      (simple: Record<string, unknown>) => { (simple.parameters as Record<string, unknown>).maxSeconds = 1.5; },
+      (simple: Record<string, unknown>) => { (simple.parameters as Record<string, unknown>).name = 'https://host/path'; },
+      (simple: Record<string, unknown>) => { (simple.gifts as Record<string, number[]>).overtime = [0]; },
+      (simple: Record<string, unknown>) => { (simple.gifts as Record<string, number[]>).overtime = [99]; },
+      (simple: Record<string, unknown>) => { (simple.overtimeGiftActions as Array<Record<string, unknown>>)[0].giftId = 99; },
+    ]) {
+      const malformed = structuredClone(current); mutate(malformed.definition.simplePlay as Record<string, unknown>);
+      await expect((await connect(malformed)).loadConfiguration()).rejects.toMatchObject({ code: 'invalid_response' });
+    }
+    const legacy = { ...configuration, definition: { ...configuration.definition, gifts: [{ id: 1, name: 'gift', price: 1, coinType: 'gold' }], simplePlay: { version: 1, templateId: 'overtime', templateVersion: 1, attributeId: 'seconds', parameters: { name: '10/20', minutesPerYuan: 60, maxHours: 0, broadcastMessage: 'PK: boss' }, gifts: { overtime: [1] }, managedFingerprint: 'legacy' } } };
+    await expect((await connect(legacy)).loadConfiguration()).resolves.toEqual(legacy);
+    const mediaPath = structuredClone(legacy); (mediaPath.definition.simplePlay!.parameters as Record<string, unknown>).name = 'avatar.png'; await expect((await connect(mediaPath)).loadConfiguration()).rejects.toMatchObject({ code: 'invalid_response' });
+  });
+
   it('preserves an in-memory unsaved draft and refreshes authority after a revision conflict', async () => {
     const render = vi.fn();
     const draft = { ...configuration.definition, attributes: [{ id: 'hp', name: '生命值', unit: '', format: '', decimals: 0, suffix: '' }] };
@@ -222,6 +242,17 @@ describe('hosted configuration contract', () => {
     const mounted = mountConfigurationView(root, api, { onMigration: vi.fn(), onExit: vi.fn() }); await mounted.ready; const panel = (root as unknown as Element).children[0]; const input = panel.children.find((child) => child.tagName === 'label')?.children[0]; const save = panel.children.find((child) => child.tagName === 'button' && child.textContent === '保存配置定义'); if (!input || !save) throw new Error('controls missing');
     input.value = JSON.stringify(configuration.definition); input.listeners.get('input')?.(); save.listeners.get('click')?.(); await vi.waitFor(() => expect(api.saveConfigurationDefinition).toHaveBeenCalledTimes(1)); input.listeners.get('input')?.(); release({ version: 5, revision: 10 }); await Promise.resolve(); await Promise.resolve();
     const event = { preventDefault: vi.fn(), returnValue: undefined as unknown }; (listeners.get('beforeunload') as unknown as (value: unknown) => void)?.(event); expect(event.preventDefault).toHaveBeenCalledTimes(1); mounted.dispose();
+  });
+
+  it('keeps a user draft typed before the initial authority response', async () => {
+    let release!: (value: typeof configuration) => void; const loaded = new Promise<typeof configuration>((resolve) => { release = resolve; });
+    class Element { children: Element[] = []; textContent = ''; type = ''; disabled = false; value = ''; inputMode = ''; listeners = new Map<string, () => void>(); constructor(readonly tagName: string, readonly ownerDocument: { createElement(tag: string): Element; defaultView?: unknown }) {} append(...nodes: Element[]) { this.children.push(...nodes); } replaceChildren(...nodes: Element[]) { this.children = nodes; } setAttribute() {} addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); } focus() {} }
+    const windowListeners = new Map<string, () => void>(); const view = { addEventListener: (name: string, listener: () => void) => windowListeners.set(name, listener), removeEventListener: vi.fn(), confirm: vi.fn() };
+    const document: { createElement(tag: string): Element; defaultView: unknown } = { createElement: (tag: string): Element => new Element(tag, document), defaultView: view }; const root = new Element('div', document) as unknown as HTMLElement;
+    const mounted = mountConfigurationView(root, { loadConfiguration: vi.fn(() => loaded), saveConfigurationDefinition: vi.fn(), saveConfigurationRuntime: vi.fn(), suggestRoom: vi.fn() }, { onMigration: vi.fn(), onExit: vi.fn() });
+    const panel = (root as unknown as Element).children[0]; const definition = panel.children.find((child) => child.tagName === 'label')?.children[0]; if (!definition) throw new Error('definition input missing');
+    const draft = JSON.stringify({ ...configuration.definition, attributes: [{ id: 'hp', name: 'local draft', unit: '', format: '', decimals: 0, suffix: '' }] }); definition.value = draft; definition.listeners.get('input')?.(); release(configuration); await mounted.ready;
+    expect(definition.value).toBe(draft); const event = { preventDefault: vi.fn(), returnValue: undefined as unknown }; (windowListeners.get('beforeunload') as unknown as (value: unknown) => void)?.(event); expect(event.preventDefault).toHaveBeenCalledTimes(1); mounted.dispose();
   });
 
   it('drops a configuration response that completes after disposal', async () => {
