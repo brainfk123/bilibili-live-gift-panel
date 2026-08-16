@@ -44,6 +44,7 @@ type downloaderOptions struct {
 	maxAttempts    int
 	backoff        func(context.Context, int) error
 	syncFile       func(*os.File) error
+	openFile       func(*os.Root, string, int, os.FileMode) (*os.File, error)
 	beforeRename   func()
 	rename         func(*os.Root, string, string) error
 }
@@ -93,6 +94,9 @@ func newDownloaderWithOptions(client *http.Client, stateDir string, options down
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return nil, errors.New("download state directory must be a real directory")
+	}
+	if options.openFile == nil {
+		options.openFile = openDownloadFile
 	}
 	if options.overallTimeout <= 0 || options.maxAttempts <= 0 || options.maxAttempts > defaultMaxAttempts ||
 		options.backoff == nil || options.syncFile == nil || options.rename == nil {
@@ -250,7 +254,7 @@ func (downloader *downloader) downloadOnce(ctx context.Context, root *os.Root, s
 			return errors.New("could not seek partial artifact")
 		}
 	} else {
-		file, err = openRegularNoFollow(root, partName, flags, 0o600)
+		file, err = openRegularNoFollow(root, partName, flags, 0o600, downloader.options.openFile)
 		if err != nil {
 			return errors.New("could not safely open partial artifact")
 		}
@@ -378,12 +382,12 @@ func (downloader *downloader) loadPartial(root *os.Root, spec DownloadSpec, fina
 		!metadataInfo.Mode().IsRegular() || metadataInfo.Mode()&os.ModeSymlink != 0 {
 		return partialDownload{}, errors.New("partial artifact state is not regular")
 	}
-	metadata, err := readResumeMetadata(root, metadataName)
+	metadata, err := readResumeMetadata(root, metadataName, downloader.options.openFile)
 	if err != nil || metadata.URL != spec.URL || metadata.Size != spec.Size || !isStrongETag(metadata.ETag) || partInfo.Size() <= 0 || partInfo.Size() >= spec.Size {
 		downloader.removePartial(root, finalName)
 		return partialDownload{}, nil
 	}
-	file, err := openRegularNoFollow(root, partName, os.O_RDWR, 0)
+	file, err := openRegularNoFollow(root, partName, os.O_RDWR, 0, downloader.options.openFile)
 	if err != nil {
 		return partialDownload{}, errors.New("could not safely open resumable artifact")
 	}
@@ -402,8 +406,8 @@ func closePartial(partial *partialDownload) {
 	}
 }
 
-func readResumeMetadata(root *os.Root, name string) (resumeMetadata, error) {
-	file, err := openRegularNoFollow(root, name, os.O_RDONLY, 0)
+func readResumeMetadata(root *os.Root, name string, opener func(*os.Root, string, int, os.FileMode) (*os.File, error)) (resumeMetadata, error) {
+	file, err := openRegularNoFollow(root, name, os.O_RDONLY, 0, opener)
 	if err != nil {
 		return resumeMetadata{}, err
 	}
@@ -478,8 +482,12 @@ func rejectUnsafeExistingPath(root *os.Root, name string) error {
 	return nil
 }
 
-func openRegularNoFollow(root *os.Root, name string, flag int, perm os.FileMode) (*os.File, error) {
-	file, err := openDownloadFile(root, name, flag, perm)
+func openRegularNoFollow(root *os.Root, name string, flag int, perm os.FileMode, opener func(*os.Root, string, int, os.FileMode) (*os.File, error)) (*os.File, error) {
+	nondestructiveFlag := flag &^ (os.O_TRUNC | os.O_APPEND | os.O_CREATE | os.O_EXCL)
+	file, err := opener(root, name, nondestructiveFlag, perm)
+	if errors.Is(err, os.ErrNotExist) && flag&os.O_CREATE != 0 {
+		file, err = opener(root, name, nondestructiveFlag|os.O_CREATE|os.O_EXCL, perm)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -492,6 +500,22 @@ func openRegularNoFollow(root *os.Root, name string, flag int, perm os.FileMode)
 	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() || !os.SameFile(openedInfo, pathInfo) {
 		_ = file.Close()
 		return nil, errors.New("artifact path changed while opening")
+	}
+	if flag&os.O_TRUNC != 0 {
+		if err := file.Truncate(0); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+	}
+	if flag&os.O_APPEND != 0 {
+		if _, err := file.Seek(0, io.SeekEnd); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
 	}
 	return file, nil
 }

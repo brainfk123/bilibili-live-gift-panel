@@ -573,6 +573,87 @@ func TestDownloaderRejectsSymlinkPartialState(t *testing.T) {
 	assertFileContent(t, outside, "do not append")
 }
 
+func TestDownloaderVerifiesCandidateBeforeDestructiveOpenMutation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write([]byte("x"))
+	}))
+	defer server.Close()
+
+	stateDir := t.TempDir()
+	const sentinelName = "sentinel"
+	sentinelPath := filepath.Join(stateDir, sentinelName)
+	const sentinelContent = "do not truncate or append"
+	if err := os.WriteFile(sentinelPath, []byte(sentinelContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var openedFlags []int
+	downloader, err := newDownloaderWithOptions(server.Client(), stateDir, downloaderOptions{
+		overallTimeout: time.Second,
+		maxAttempts:    1,
+		backoff:        func(context.Context, int) error { return nil },
+		syncFile:       func(file *os.File) error { return file.Sync() },
+		openFile: func(root *os.Root, name string, flag int, perm os.FileMode) (*os.File, error) {
+			if name == AssetManifest+".part" {
+				openedFlags = append(openedFlags, flag)
+				return root.OpenFile(sentinelName, flag, perm)
+			}
+			return openDownloadFile(root, name, flag, perm)
+		},
+		rename: replaceDownloadFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = downloader.Download(context.Background(), DownloadSpec{
+		Name: AssetManifest, URL: server.URL, Size: 1, MaxBytes: maxManifestBytes,
+	})
+	if err == nil {
+		t.Fatal("Download() accepted an opener that returned a different file")
+	}
+	if len(openedFlags) == 0 {
+		t.Fatal("test opener was not called for the fresh partial")
+	}
+	for _, flag := range openedFlags {
+		if flag&(os.O_TRUNC|os.O_APPEND) != 0 {
+			t.Fatalf("candidate opened with destructive flags %#x", flag)
+		}
+		if flag&os.O_CREATE != 0 && flag&os.O_EXCL == 0 {
+			t.Fatalf("candidate creation can follow an existing symlink: flags %#x", flag)
+		}
+	}
+	assertFileContent(t, sentinelPath, sentinelContent)
+}
+
+func TestDownloaderRejectsInRootSymlinkPartWithoutMutatingTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ordinary Windows symlink creation requires unavailable privilege")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write([]byte("x"))
+	}))
+	defer server.Close()
+
+	stateDir := t.TempDir()
+	const sentinelName = "sentinel"
+	sentinelPath := filepath.Join(stateDir, sentinelName)
+	const sentinelContent = "do not truncate"
+	if err := os.WriteFile(sentinelPath, []byte(sentinelContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	partPath := filepath.Join(stateDir, AssetManifest) + ".part"
+	if err := os.Symlink(sentinelName, partPath); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := mustNewDownloader(t, server.Client(), stateDir).Download(context.Background(), DownloadSpec{
+		Name: AssetManifest, URL: server.URL, Size: 1, MaxBytes: maxManifestBytes,
+	})
+	if err == nil {
+		t.Fatal("Download() accepted an in-root symlink partial")
+	}
+	assertFileContent(t, sentinelPath, sentinelContent)
+}
+
 func TestDownloaderRejectsWindowsJunctionStateDirectory(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows junction evidence")
