@@ -50,7 +50,7 @@ func TestComposeHostedHTTPMakesAllInvitationRoutesReachableWithSpecificity(t *te
 	auth := statusHandler(http.StatusAccepted)
 	admin := statusHandler(http.StatusNonAuthoritativeInfo)
 	invitation := statusHandler(http.StatusTeapot)
-	handler := composeHostedHTTP(healthyHostedDatabase{}, auth, admin, invitation)
+	handler := composeHostedHTTP(healthyHostedDatabase{}, auth, admin, invitation, "runtime-csrf")
 
 	tests := []struct {
 		method string
@@ -66,6 +66,7 @@ func TestComposeHostedHTTPMakesAllInvitationRoutesReachableWithSpecificity(t *te
 		{http.MethodPost, "/api/auth/session", http.StatusAccepted},
 		{http.MethodPost, "/api/admin/accounts/41/disable", http.StatusAccepted},
 		{http.MethodPost, "/api/admin/totp", http.StatusNonAuthoritativeInfo},
+		{http.MethodGet, "/api/bootstrap", http.StatusOK},
 	}
 	for _, test := range tests {
 		response := httptest.NewRecorder()

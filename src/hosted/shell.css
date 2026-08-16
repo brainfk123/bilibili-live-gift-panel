@@ -63,6 +63,79 @@ select {
   background: #ffd0e8;
 }
 
+.hosted-secondary,
+.hosted-panel button {
+  min-height: 2.75rem;
+  padding: 0.65rem 1rem;
+  color: #f7f3ff;
+  background: #3b285e;
+  border: 1px solid #8067a7;
+  border-radius: 0.75rem;
+  cursor: pointer;
+}
+
+.hosted-panel label,
+.hosted-panel section {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.hosted-panel input {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.55rem 0.7rem;
+  color: #fff;
+  background: #211337;
+  border: 1px solid #8067a7;
+  border-radius: 0.5rem;
+}
+
+.hosted-panel code {
+  max-width: 100%;
+  padding: 0.75rem;
+  overflow-wrap: anywhere;
+  color: #fff;
+  background: #211337;
+  border-radius: 0.5rem;
+}
+
+.hosted-panel dialog {
+  width: min(90vw, 32rem);
+  color: #f7f3ff;
+  background: #2a1a47;
+  border: 1px solid #8067a7;
+  border-radius: 0.75rem;
+}
+
+.hosted-qr {
+  width: min(100%, 20rem);
+  height: auto;
+  border-radius: 0.75rem;
+}
+
+.hosted-list {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0;
+  list-style: none;
+}
+
+.hosted-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.hosted-panel button:focus-visible,
+.hosted-panel input:focus-visible,
+.hosted-secondary:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 3px;
+}
+
 .hosted-login:focus-visible {
   outline: 3px solid #fff;
   outline-offset: 3px;
@@ -93,6 +166,11 @@ select {
   }
 
   .hosted-login {
+    width: 100%;
+  }
+
+  .hosted-panel button,
+  .hosted-secondary {
     width: 100%;
   }
 }

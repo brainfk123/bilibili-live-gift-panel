@@ -134,7 +134,7 @@ func run() error {
 		if err != nil {
 			return errors.New("configure administrator HTTP")
 		}
-		server := newHTTPServer(config.ListenAddr, composeHostedHTTP(store, identityHTTP, adminHTTP, invitationHTTP))
+		server := newHTTPServer(config.ListenAddr, composeHostedHTTP(store, identityHTTP, adminHTTP, invitationHTTP, config.AdminCSRFToken))
 		return serveHTTP(
 			processContext,
 			server,
@@ -150,8 +150,8 @@ type hostedHealthChecker interface {
 	Health(context.Context) error
 }
 
-func composeHostedHTTP(database hostedHealthChecker, auth, admin, invitations http.Handler) http.Handler {
-	return app.New(app.Dependencies{DB: database, Auth: auth, Admin: admin, Invitation: invitations})
+func composeHostedHTTP(database hostedHealthChecker, auth, admin, invitations http.Handler, csrfToken string) http.Handler {
+	return app.New(app.Dependencies{DB: database, Auth: auth, Admin: admin, Invitation: invitations, CSRFToken: csrfToken})
 }
 
 func loadHostedKeyring(encryptionKeyFile, hmacKeyFile string) (security.Keyring, error) {

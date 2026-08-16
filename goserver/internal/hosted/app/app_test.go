@@ -50,3 +50,45 @@ func TestHealthReturnsServiceUnavailableWhenDatabaseFails(t *testing.T) {
 		t.Fatalf("health response exposed database error: %q", response.Body.String())
 	}
 }
+
+func TestBootstrapReturnsOnlyRuntimeCSRFAndRejectsQueries(t *testing.T) {
+	handler := New(Dependencies{DB: fakeHealth{}, CSRFToken: "runtime-csrf"})
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/bootstrap", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	if got := response.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	if got := response.Body.String(); got != "{\"csrfToken\":\"runtime-csrf\"}\n" {
+		t.Fatalf("body = %q", got)
+	}
+
+	for _, target := range []string{"/api/bootstrap?extra=1", "/api/bootstrap?x;y"} {
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("GET %s status = %d, want 400", target, response.Code)
+		}
+		if got := response.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("GET %s Cache-Control = %q", target, got)
+		}
+	}
+
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/bootstrap", strings.NewReader(`{}`)))
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status = %d, want 405", response.Code)
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("POST Cache-Control = %q", got)
+	}
+	if strings.Contains(response.Body.String(), "runtime-csrf") {
+		t.Fatalf("POST exposed bootstrap value: %q", response.Body.String())
+	}
+}
