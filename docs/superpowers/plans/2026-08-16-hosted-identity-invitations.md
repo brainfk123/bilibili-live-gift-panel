@@ -129,7 +129,7 @@ git commit -m "feat: add hosted identity storage"
 - Modify: `goserver/internal/hosted/app/app.go`
 
 **Interfaces:**
-- Produces: `identity.BiliVerifier` port, `Service.Begin`, `Poll`, `Login`, `Logout`, and `RequireSession`.
+- Produces: `identity.BiliVerifier` port, `Service.Begin`, `Poll`, `Cancel`, `Login`, `Logout`, and `RequireSession`.
 
 - [ ] **Step 1: Write failing service tests against an in-memory verifier**
 
@@ -158,10 +158,13 @@ Routes:
 ```text
 POST /api/auth/bili/challenges
 GET  /api/auth/bili/challenges/{id}
+DELETE /api/auth/bili/challenges/{id}
 POST /api/auth/session
 DELETE /api/auth/session
 GET  /api/auth/session
 ```
+
+Challenge cancellation is idempotent and returns the same generic response for known and unknown IDs. It immediately calls `Forget`, stops expiry cleanup, and removes in-memory QR state so the hosted UI can satisfy the required unmount cleanup without creating a challenge-existence oracle.
 
 Set the site token in `__Host-gift_panel_session` with `Secure`, `HttpOnly`, `Path=/`, `SameSite=Lax`, and an absolute expiry. Middleware hashes the cookie, loads a non-expired session, injects `AccountID` into context, and never accepts `accountId` from request JSON/query.
 
