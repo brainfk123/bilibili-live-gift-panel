@@ -274,6 +274,38 @@ func TestDecodeSimplePlayRejectsCrossSlotGiftReuse(t *testing.T) {
 	}
 }
 
+func TestDecodeSimplePlayPreservesDesktopSlotPrecedence(t *testing.T) {
+	document := validEnvelopeWire()
+	definition := document["payload"].(map[string]any)["definition"].(map[string]any)
+	definition["gifts"] = []any{map[string]any{"id": 1, "name": "gift", "price": 1, "coinType": "gold"}}
+	definition["simplePlay"] = map[string]any{
+		"version": 1, "templateId": "resource", "templateVersion": 1, "attributeId": "health", "managedFingerprint": "managed",
+		"parameters": map[string]any{"name": "n", "maximum": 100, "consumeInterval": 5, "consumeAmount": 1, "smallSupply": 10, "largeSupply": 30, "interference": 10, "broadcastMessage": "b"},
+		"gifts":      map[string]any{"small": []any{1}, "interference": []any{1}, "unknownSlot": []any{1}},
+	}
+	envelope, report, err := Decode(jsonReader(t, document), 2<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Definition.SimplePlay == nil {
+		t.Fatal("later duplicate caused the desktop-first slot to be removed")
+	}
+	if got := envelope.Definition.SimplePlay.Gifts["small"]; len(got) != 1 || got[0] != 1 {
+		t.Fatalf("first declared slot did not retain gift: %#v", envelope.Definition.SimplePlay.Gifts)
+	}
+	if got := envelope.Definition.SimplePlay.Gifts["interference"]; len(got) != 0 {
+		t.Fatalf("later declared slot retained duplicate: %#v", envelope.Definition.SimplePlay.Gifts)
+	}
+	for _, pointer := range []string{
+		"/payload/definition/simplePlay/gifts/interference/0",
+		"/payload/definition/simplePlay/gifts/unknownSlot",
+	} {
+		if !contains(report.Ignored, pointer) {
+			t.Fatalf("missing ignored pointer %q: %#v", pointer, report.Ignored)
+		}
+	}
+}
+
 func validEnvelopeWire() map[string]any {
 	return map[string]any{
 		"kind": "gift-panel-online-migration", "migrationVersion": 1,

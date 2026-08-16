@@ -252,12 +252,13 @@ type simpleParameter struct {
 	choices  map[string]struct{}
 }
 type simpleSlot struct {
+	id       string
 	minimum  int
 	multiple bool
 }
 type simpleTemplate struct {
 	parameters map[string]simpleParameter
-	slots      map[string]simpleSlot
+	slots      []simpleSlot
 	actions    bool
 }
 
@@ -287,8 +288,12 @@ func normalizeSimplePlay(wire wireSimplePlay, catalog []configuration.GiftDefini
 		}
 		parameters[key] = value
 	}
+	knownSlots := make(map[string]struct{}, len(template.slots))
+	for _, slot := range template.slots {
+		knownSlots[slot.id] = struct{}{}
+	}
 	for slot := range wire.Gifts {
-		if _, known := template.slots[slot]; !known {
+		if _, known := knownSlots[slot]; !known {
 			reportIgnored(report, "/payload/definition/simplePlay/gifts/"+escapePointer(slot))
 		}
 	}
@@ -298,35 +303,29 @@ func normalizeSimplePlay(wire wireSimplePlay, catalog []configuration.GiftDefini
 	}
 	seen := make(map[int]struct{})
 	gifts := make(map[string][]int, len(template.slots))
-	slotNames := make([]string, 0, len(template.slots))
-	for slot := range template.slots {
-		slotNames = append(slotNames, slot)
-	}
-	sort.Strings(slotNames)
-	for _, slot := range slotNames {
-		policy := template.slots[slot]
-		for index, giftID := range wire.Gifts[slot] {
+	for _, policy := range template.slots {
+		for index, giftID := range wire.Gifts[policy.id] {
 			if giftID <= 0 {
-				reportIgnored(report, "/payload/definition/simplePlay/gifts/"+slot+"/"+strconv.Itoa(index))
+				reportIgnored(report, "/payload/definition/simplePlay/gifts/"+policy.id+"/"+strconv.Itoa(index))
 				continue
 			}
 			if _, exists := knownGifts[giftID]; !exists {
-				reportIgnored(report, "/payload/definition/simplePlay/gifts/"+slot+"/"+strconv.Itoa(index))
+				reportIgnored(report, "/payload/definition/simplePlay/gifts/"+policy.id+"/"+strconv.Itoa(index))
 				continue
 			}
 			if _, duplicate := seen[giftID]; duplicate {
-				reportIgnored(report, "/payload/definition/simplePlay/gifts/"+slot+"/"+strconv.Itoa(index))
+				reportIgnored(report, "/payload/definition/simplePlay/gifts/"+policy.id+"/"+strconv.Itoa(index))
 				continue
 			}
-			if !policy.multiple && len(gifts[slot]) > 0 {
-				reportIgnored(report, "/payload/definition/simplePlay/gifts/"+slot+"/"+strconv.Itoa(index))
+			if !policy.multiple && len(gifts[policy.id]) > 0 {
+				reportIgnored(report, "/payload/definition/simplePlay/gifts/"+policy.id+"/"+strconv.Itoa(index))
 				continue
 			}
 			seen[giftID] = struct{}{}
-			gifts[slot] = append(gifts[slot], giftID)
+			gifts[policy.id] = append(gifts[policy.id], giftID)
 		}
-		if len(gifts[slot]) < policy.minimum {
-			reportIgnored(report, "/payload/definition/simplePlay/gifts/"+slot)
+		if len(gifts[policy.id]) < policy.minimum {
+			reportIgnored(report, "/payload/definition/simplePlay/gifts/"+policy.id)
 			return nil, nil
 		}
 	}
@@ -361,10 +360,10 @@ func migrationSimpleTemplate(id string, version int) (simpleTemplate, bool) {
 	slots := func(items ...struct {
 		id      string
 		minimum int
-	}) map[string]simpleSlot {
-		result := make(map[string]simpleSlot, len(items))
+	}) []simpleSlot {
+		result := make([]simpleSlot, 0, len(items))
 		for _, item := range items {
-			result[item.id] = simpleSlot{minimum: item.minimum, multiple: true}
+			result = append(result, simpleSlot{id: item.id, minimum: item.minimum, multiple: true})
 		}
 		return result
 	}
