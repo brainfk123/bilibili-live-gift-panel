@@ -1,3 +1,5 @@
+import { GAMEPLAY_TEMPLATES, type TemplateGiftSlotDefinition, type TemplateParameterDefinition } from '../gameplay-templates';
+
 export type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 export interface Challenge {
@@ -142,31 +144,37 @@ function display(value: unknown): boolean {
 function attributeDefinition(value: unknown): boolean {
   const item = object(value); return item !== undefined && exactKeys(item, ['id', 'name', 'unit', 'format', 'decimals', 'suffix'], ['color', 'broadcastMessage', 'display']) && string(item.id) && text(item.name) && text(item.unit) && text(item.format) && Number.isSafeInteger(item.decimals) && text(item.suffix) && optional(item.color, text) && optional(item.broadcastMessage, text) && optional(item.display, display);
 }
-const simpleTemplates: Record<string, { parameters: readonly string[]; slots: readonly string[] }> = {
-  'overtime:1': { parameters: ['name', 'minutesPerYuan', 'maxHours', 'broadcastMessage'], slots: ['overtime'] },
-  'overtime:2': { parameters: ['name', 'maxSeconds', 'broadcastMessage'], slots: ['overtime'] },
-  'countdown:1': { parameters: ['name', 'initialSeconds', 'growthMode', 'addSeconds', 'maxSeconds', 'broadcastMessage'], slots: ['extend'] },
-  'counter:1': { parameters: ['name', 'suffix', 'amount', 'cap', 'broadcastMessage'], slots: ['count'] },
-  'goal:1': { parameters: ['name', 'target', 'perYuan', 'broadcastMessage'], slots: ['progress'] },
-  'boss:1': { parameters: ['name', 'bossName', 'maxHealth', 'attack', 'heavy', 'heal', 'regenEnabled', 'regenInterval', 'regenAmount', 'broadcastMessage'], slots: ['attack', 'heavy', 'heal'] },
-  'resource:1': { parameters: ['name', 'maximum', 'consumeInterval', 'consumeAmount', 'smallSupply', 'largeSupply', 'interference', 'broadcastMessage'], slots: ['small', 'large', 'interference'] },
-  'tug:1': { parameters: ['name', 'leftLabel', 'rightLabel', 'initial', 'leftAmount', 'rightAmount', 'broadcastMessage'], slots: ['left', 'right'] },
-  'team-duel:1': { parameters: ['activityName', 'leftName', 'rightName', 'target', 'points', 'broadcastMessage'], slots: ['left', 'right'] },
-  'gift-vote:1': { parameters: ['activityName', 'leftName', 'rightName', 'votes', 'broadcastMessage'], slots: ['left', 'right'] },
-  'combo:1': { parameters: ['name', 'timeout', 'goal', 'broadcastMessage'], slots: ['combo'] },
-  'milestone:1': { parameters: ['name', 'target', 'amount', 'message', 'broadcastMessage'], slots: ['progress'] },
-  'random-event:1': { parameters: ['name', 'event1', 'event2', 'event3', 'event4', 'broadcastMessage'], slots: ['draw'] },
+const legacyOvertime = {
+  parameters: [
+    { id: 'name', kind: 'text', min: undefined, max: undefined, options: undefined },
+    { id: 'minutesPerYuan', kind: 'number', min: 1, max: 3600, options: undefined },
+    { id: 'maxHours', kind: 'number', min: 0, max: 240, options: undefined },
+    { id: 'broadcastMessage', kind: 'text', min: undefined, max: undefined, options: undefined },
+  ] as const,
+  giftSlots: [{ id: 'overtime', minimum: 1, multiple: true }] as const,
 };
-function primitive(value: unknown): boolean { return typeof value === 'string' || typeof value === 'boolean' || finite(value); }
+function simpleDescriptor(id: string, version: number): { parameters: readonly Pick<TemplateParameterDefinition, 'id' | 'kind' | 'min' | 'max' | 'options'>[]; giftSlots: readonly Pick<TemplateGiftSlotDefinition, 'id' | 'minimum' | 'multiple'>[] } | undefined {
+  if (id === 'overtime' && version === 1) return legacyOvertime;
+  return GAMEPLAY_TEMPLATES.find((template) => template.id === id && template.version === version);
+}
+function validParameter(value: unknown, parameter: Pick<TemplateParameterDefinition, 'kind' | 'min' | 'max' | 'options'>): boolean {
+  if (parameter.kind === 'text') return typeof value === 'string' && value.trim().length > 0 && value.length <= 4096;
+  if (parameter.kind === 'toggle') return typeof value === 'boolean';
+  if (parameter.kind === 'select') return typeof value === 'string' && parameter.options?.some((option) => option.value === value) === true;
+  return finite(value) && (parameter.min === undefined || value >= parameter.min) && (parameter.max === undefined || value <= parameter.max);
+}
 function validSimplePlay(value: unknown): boolean {
   const item = object(value);
   if (!item || !exactKeys(item, ['version', 'templateId', 'templateVersion', 'attributeId', 'parameters', 'gifts', 'managedFingerprint'], ['overtimeGiftActions']) || !Number.isSafeInteger(item.version) || item.version !== 1 || !string(item.templateId) || !Number.isSafeInteger(item.templateVersion) || !string(item.attributeId) || !string(item.managedFingerprint)) return false;
-  const template = simpleTemplates[`${item.templateId}:${item.templateVersion}`]; const parameters = object(item.parameters); const gifts = object(item.gifts);
-  if (!template || !parameters || !gifts || !Object.keys(parameters).every((key) => template.parameters.includes(key) && primitive(parameters[key])) || !Object.keys(gifts).every((key) => template.slots.includes(key) && integers(gifts[key]))) return false;
+  const template = simpleDescriptor(item.templateId, item.templateVersion as number); const parameters = object(item.parameters); const gifts = object(item.gifts);
+  if (!template || !parameters || !gifts || !exactKeys(parameters, template.parameters.map((parameter) => parameter.id), []) || !exactKeys(gifts, template.giftSlots.map((slot) => slot.id), [])) return false;
+  if (!template.parameters.every((parameter) => validParameter(parameters[parameter.id], parameter))) return false;
+  const assigned = new Set<number>(); for (const slot of template.giftSlots) { const slotGifts = gifts[slot.id]; if (!integers(slotGifts) || slotGifts.length < slot.minimum || (!slot.multiple && slotGifts.length > 1)) return false; for (const giftID of slotGifts) { if (assigned.has(giftID)) return false; assigned.add(giftID); } }
   if (item.overtimeGiftActions === undefined) return true;
   if (item.templateId !== 'overtime' || item.templateVersion !== 2) return false;
+  const actionIDs = new Set<number>();
   return arrayOf(item.overtimeGiftActions, (action) => {
-    const row = object(action); if (!row || !exactKeys(row, ['giftId', 'operation'], ['seconds']) || !number(row.giftId) || !string(row.operation)) return false;
+    const row = object(action); if (!row || !exactKeys(row, ['giftId', 'operation'], ['seconds']) || !number(row.giftId) || !string(row.operation) || !assigned.has(row.giftId) || actionIDs.has(row.giftId)) return false; actionIDs.add(row.giftId);
     if (row.operation === 'add' || row.operation === 'subtract') return Object.hasOwn(row, 'seconds') && number(row.seconds) && row.seconds > 0;
     return ['double', 'halve', 'reset'].includes(row.operation) && row.seconds === undefined;
   });

@@ -49,7 +49,7 @@ export function createConfigurationFlow(api: ConfigurationAPI, render: (state: C
 }
 
 export function mountConfigurationView(root: HTMLElement, api: ConfigurationAPI, callbacks: { onMigration(): void; onExit(): void }) {
-  const document = root.ownerDocument; let disposed = false; let loaded = false;
+  const document = root.ownerDocument; let disposed = false; let loaded = false; let definitionDirty = false; let runtimeDirty = false; let definitionEditVersion = 0; let runtimeEditVersion = 0;
   const panel = document.createElement('main'); panel.className = 'hosted-shell hosted-panel'; const title = document.createElement('h1'); title.textContent = '在线配置';
   const status = document.createElement('p'); status.setAttribute('role', 'alert'); status.setAttribute('aria-live', 'assertive');
   const definitionLabel = document.createElement('label'); definitionLabel.textContent = '配置定义 JSON（仅保存在本页内存）'; const definitionInput = document.createElement('textarea'); definitionLabel.append(definitionInput);
@@ -58,12 +58,14 @@ export function mountConfigurationView(root: HTMLElement, api: ConfigurationAPI,
   const parse = (input: HTMLTextAreaElement): HostedConfigurationDefinition => {
     const value: unknown = JSON.parse(input.value); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new HostedAPIError('invalid_request', 400); return value as HostedConfigurationDefinition;
   };
-  const saveDefinition = document.createElement('button'); saveDefinition.type = 'button'; saveDefinition.addEventListener('click', () => { try { flow.setDefinition(parse(definitionInput)); void flow.saveDefinition().catch(() => undefined); } catch { status.textContent = 'JSON 格式无效，未发送到服务器'; } });
-  const saveRuntime = document.createElement('button'); saveRuntime.type = 'button'; saveRuntime.addEventListener('click', () => { try { flow.setRuntime(parse(runtimeInput) as HostedConfigurationRuntime); void flow.saveRuntime().catch(() => undefined); } catch { status.textContent = 'JSON 格式无效，未发送到服务器'; } });
+  definitionInput.addEventListener('input', () => { definitionDirty = true; definitionEditVersion += 1; }); runtimeInput.addEventListener('input', () => { runtimeDirty = true; runtimeEditVersion += 1; });
+  const saveDefinition = document.createElement('button'); saveDefinition.type = 'button'; saveDefinition.addEventListener('click', () => { try { flow.setDefinition(parse(definitionInput)); const savedEditVersion = definitionEditVersion; void flow.saveDefinition().then(() => { if (definitionEditVersion === savedEditVersion) definitionDirty = false; }).catch(() => undefined); } catch { status.textContent = 'JSON 格式无效，未发送到服务器'; } });
+  const saveRuntime = document.createElement('button'); saveRuntime.type = 'button'; saveRuntime.addEventListener('click', () => { try { flow.setRuntime(parse(runtimeInput) as HostedConfigurationRuntime); const savedEditVersion = runtimeEditVersion; void flow.saveRuntime().then(() => { if (runtimeEditVersion === savedEditVersion) runtimeDirty = false; }).catch(() => undefined); } catch { status.textContent = 'JSON 格式无效，未发送到服务器'; } });
   const roomLabel = document.createElement('label'); roomLabel.textContent = '建议直播间号（不会自动运行）'; const room = document.createElement('input'); room.inputMode = 'numeric'; roomLabel.append(room);
   const roomButton = document.createElement('button'); roomButton.type = 'button'; roomButton.textContent = '保存房间建议'; roomButton.addEventListener('click', () => { void flow.suggestRoom(room.value).then(() => { room.value = ''; status.textContent = '已保存建议，尚未启动直播间。'; }).catch(() => { status.textContent = '房间建议保存失败'; }); });
-  const migration = document.createElement('button'); migration.type = 'button'; migration.textContent = '迁移本地配置'; migration.addEventListener('click', callbacks.onMigration);
-  const exit = document.createElement('button'); exit.type = 'button'; exit.textContent = '返回账号'; exit.addEventListener('click', callbacks.onExit);
+  const confirmDiscard = (): boolean => !definitionDirty && !runtimeDirty || document.defaultView?.confirm('存在未保存的配置草稿，确定离开吗？') !== false;
+  const migration = document.createElement('button'); migration.type = 'button'; migration.textContent = '迁移本地配置'; migration.addEventListener('click', () => { if (confirmDiscard()) callbacks.onMigration(); });
+  const exit = document.createElement('button'); exit.type = 'button'; exit.textContent = '返回账号'; exit.addEventListener('click', () => { if (confirmDiscard()) callbacks.onExit(); });
   panel.append(title, status, definitionLabel, saveDefinition, runtimeLabel, saveRuntime, compare, roomLabel, roomButton, migration, exit); root.replaceChildren(panel);
   const render = (state: ConfigurationViewState): void => {
     if (disposed) return;
@@ -74,5 +76,6 @@ export function mountConfigurationView(root: HTMLElement, api: ConfigurationAPI,
     saveRuntime.textContent = state.busy ? '正在保存…' : '保存当前状态'; saveRuntime.disabled = state.busy;
   };
   const flow = createConfigurationFlow(api, render); render({ conflict: false, busy: false }); const ready = flow.load().catch(() => undefined);
-  return Object.freeze({ ready, dispose(): void { disposed = true; definitionInput.value = ''; runtimeInput.value = ''; compare.textContent = ''; root.replaceChildren(); flow.dispose(); } });
+  const beforeUnload = (event: BeforeUnloadEvent): void => { if (definitionDirty || runtimeDirty) { event.preventDefault(); event.returnValue = ''; } }; document.defaultView?.addEventListener('beforeunload', beforeUnload);
+  return Object.freeze({ ready, dispose(): void { disposed = true; document.defaultView?.removeEventListener('beforeunload', beforeUnload); definitionDirty = false; runtimeDirty = false; definitionInput.value = ''; runtimeInput.value = ''; compare.textContent = ''; root.replaceChildren(); flow.dispose(); } });
 }

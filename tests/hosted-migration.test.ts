@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { HostedAPI, HostedAPIError } from '../src/hosted/api';
-import { createMigrationFlow, migrationFileLimit } from '../src/hosted/migration';
+import { createMigrationFlow, migrationFileLimit, mountMigrationView } from '../src/hosted/migration';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -52,6 +52,22 @@ describe('hosted migration contract', () => {
     expect(JSON.stringify(rendered)).not.toContain('UPLOAD-MUST-NOT-PERSIST');
   });
 
+  it('cancels a preview accepted by the server after a page-leave disposal barrier', async () => {
+    let release!: (value: typeof preview) => void; const submitted = new Promise<typeof preview>((resolve) => { release = resolve; });
+    const api = { previewMigration: vi.fn(() => submitted), cancelMigration: vi.fn(async () => ({ id: 12, status: 'cancelled' as const })) };
+    const flow = createMigrationFlow(api, vi.fn()); const pending = flow.preview({ name: 'package.json', size: 2, text: async () => '{}' });
+    await vi.waitFor(() => expect(api.previewMigration).toHaveBeenCalledTimes(1)); await flow.dispose(); release(preview); await expect(pending).rejects.toMatchObject({ code: 'operation_failed' });
+    await vi.waitFor(() => expect(api.cancelMigration).toHaveBeenCalledWith(12));
+  });
+
+  it('never cancels a reused pending migration after disposal', async () => {
+    let release!: (value: typeof preview) => void; const submitted = new Promise<typeof preview>((resolve) => { release = resolve; });
+    const api = { previewMigration: vi.fn(() => submitted), cancelMigration: vi.fn(async () => ({ id: 12, status: 'cancelled' as const })) };
+    const flow = createMigrationFlow(api, vi.fn()); const pending = flow.preview({ name: 'package.json', size: 2, text: async () => '{}' });
+    await vi.waitFor(() => expect(api.previewMigration).toHaveBeenCalledTimes(1)); await flow.dispose(); release({ ...preview, reused: true }); await expect(pending).rejects.toMatchObject({ code: 'operation_failed' });
+    expect(api.cancelMigration).not.toHaveBeenCalled();
+  });
+
   it('uses the server job state rather than assuming a reused preview is previewed', async () => {
     const rendered: unknown[] = [];
     const api = { previewMigration: vi.fn(async () => ({ ...preview, reused: true })), getMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const, expiresAt: preview.expiresAt })) };
@@ -59,6 +75,26 @@ describe('hosted migration contract', () => {
     await flow.preview({ name: 'package.json', size: 2, text: vi.fn(async () => '{}') });
     expect(api.getMigration).toHaveBeenCalledWith(12);
     expect(rendered.at(-1)).toEqual(expect.objectContaining({ job: expect.objectContaining({ id: 12, status: 'pending' }), canApply: false, canRefresh: true, canCancel: true }));
+  });
+
+  it('keeps migration confirmation controls mounted and focused across incremental updates', async () => {
+    class Element {
+      children: Element[] = []; textContent = ''; className = ''; type = ''; disabled = false; hidden = false; checked = false; value = ''; accept = ''; src = ''; alt = '';
+      listeners = new Map<string, () => void>(); attributes = new Map<string, string>(); files?: { item(index: number): unknown };
+      constructor(readonly tagName: string, readonly ownerDocument: { createElement(tag: string): Element; createTextNode(text: string): Element; activeElement?: Element; defaultView?: unknown }) {}
+      get firstChild() { return this.children[0]; } append(...nodes: Element[]) { this.children.push(...nodes); } replaceChildren(...nodes: Element[]) { this.children = nodes; } removeChild(node: Element) { this.children = this.children.filter((child) => child !== node); }
+      setAttribute(name: string, value: string) { this.attributes.set(name, value); } removeAttribute(name: string) { this.attributes.delete(name); } addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); } focus() { this.ownerDocument.activeElement = this; }
+    }
+    const view = { addEventListener: vi.fn(), removeEventListener: vi.fn() };
+    const document: { createElement(tag: string): Element; createTextNode(text: string): Element; activeElement?: Element; defaultView: unknown } = { createElement: (tag: string): Element => new Element(tag, document), createTextNode: (text: string): Element => { const node = new Element('#text', document); node.textContent = text; return node; }, defaultView: view };
+    const root = new Element('div', document) as unknown as HTMLElement;
+    const mounted = mountMigrationView(root, { previewMigration: vi.fn(async () => preview) }, { onConfiguration: vi.fn() });
+    const panel = (root as unknown as Element).children[0]; const file = panel.children[2]; const previewButton = panel.children[3];
+    file.files = { item: () => ({ name: 'package.json', size: 2, text: async () => '{}' }) }; file.listeners.get('change')?.(); previewButton.listeners.get('click')?.();
+    await vi.waitFor(() => expect(panel.children[5].hidden).toBe(false));
+    const confirmation = panel.children[5].children[0]; confirmation.focus(); confirmation.checked = true; confirmation.listeners.get('change')?.();
+    expect((root as unknown as Element).children[0]).toBe(panel); expect(panel.children[5].children[0]).toBe(confirmation); expect(document.activeElement).toBe(confirmation); expect(panel.children[7].hidden).toBe(false);
+    await mounted.dispose();
   });
 
   it('requires an explicit unchecked room suggestion and polls the reusable proof without creating a site session', async () => {
@@ -78,7 +114,7 @@ describe('hosted migration contract', () => {
     expect(api.createSession).not.toHaveBeenCalled();
   });
 
-  it('serializes proof operations and keeps a transient verification failure retryable', async () => {
+  it('rejects a duplicate proof operation while keeping a transient verification failure retryable', async () => {
     let release!: (value: { status: 'verified'; expiresAt: string }) => void;
     const polling = new Promise<{ status: 'verified'; expiresAt: string }>((resolve) => { release = resolve; });
     const api = {
@@ -86,10 +122,29 @@ describe('hosted migration contract', () => {
       pollLogin: vi.fn(() => polling), cancelLogin: vi.fn(async () => undefined), applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const })),
     };
     const flow = createMigrationFlow(api, vi.fn()); flow.acceptPreview(preview); flow.confirmReplacement(true);
-    const first = flow.apply(); const second = flow.apply();
+    const first = flow.apply(); const second = flow.apply().catch((error: unknown) => error);
     await vi.waitFor(() => { expect(api.beginLogin).toHaveBeenCalledTimes(1); expect(api.pollLogin).toHaveBeenCalledTimes(1); });
-    release({ status: 'verified', expiresAt: '2030-01-02T00:00:00Z' }); await first; await second;
+    await expect(second).resolves.toMatchObject({ code: 'operation_conflict' });
+    release({ status: 'verified', expiresAt: '2030-01-02T00:00:00Z' }); await first;
     expect(api.applyMigration).toHaveBeenCalledTimes(1);
+  });
+
+  it('freezes migration A while its proof is pending so it cannot apply to B', async () => {
+    let release!: (value: { status: 'verified'; expiresAt: string }) => void;
+    const pending = new Promise<{ status: 'verified'; expiresAt: string }>((resolve) => { release = resolve; });
+    const api = {
+      beginLogin: vi.fn(async () => ({ challengeId: 'proof-a', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })),
+      pollLogin: vi.fn(() => pending), cancelLogin: vi.fn(async () => undefined),
+      applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const })), cancelMigration: vi.fn(), previewMigration: vi.fn(),
+    };
+    const flow = createMigrationFlow(api, vi.fn()); flow.acceptPreview(preview); flow.confirmReplacement(true); flow.setKeepRoomSuggestion(false);
+    const applying = flow.apply(); await vi.waitFor(() => expect(api.pollLogin).toHaveBeenCalledWith('proof-a'));
+    flow.setKeepRoomSuggestion(true);
+    await expect(flow.preview({ name: 'b.json', size: 2, text: vi.fn(async () => '{}') })).rejects.toMatchObject({ code: 'operation_conflict' });
+    await expect(flow.cancel()).rejects.toMatchObject({ code: 'operation_conflict' });
+    await expect(flow.apply()).rejects.toMatchObject({ code: 'operation_conflict' });
+    release({ status: 'verified', expiresAt: '2030-01-02T00:00:00Z' }); await applying;
+    expect(api.applyMigration).toHaveBeenCalledWith(12, 'proof-a', false); expect(api.previewMigration).not.toHaveBeenCalled(); expect(api.cancelMigration).not.toHaveBeenCalled();
   });
 
   it('reuses an unexpired proof after a temporary verification outage', async () => {
