@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { defaultState } from '../src/storage';
-import { createOnlineMigration, onlineMigrationFilename } from '../src/migration';
+import { createOnlineMigration, downloadOnlineMigration, onlineMigrationFilename } from '../src/migration';
 
 describe('online migration exporter', () => {
   it('uses a deterministic versioned local migration filename', () => {
@@ -86,5 +86,85 @@ describe('online migration exporter', () => {
     const migration = createOnlineMigration(defaultState(), '0.4.4', new Date('2026-08-16T00:00:00.000Z'));
 
     expect(migration.payload.roomSuggestion).toBeNull();
+  });
+
+  it('exports only validated template parameters from a simple play', () => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: {}, managedFingerprint: 'safe',
+      parameters: {
+        name: '计数器', suffix: '次', amount: 2, cap: 9, broadcastMessage: '继续加油',
+        maxSeconds: 60, cookie: 'synthetic-value', token: 'synthetic-value', imageUrl: 'https://assets.invalid/image.png', custom: true,
+        nested: { value: 'synthetic-value' } as unknown as string,
+      } as NonNullable<typeof state.simplePlay>['parameters'],
+    };
+
+    const migration = createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12));
+
+    expect(migration.payload.definition.simplePlay?.parameters).toEqual({
+      name: '计数器', suffix: '次', amount: 2, cap: 9, broadcastMessage: '继续加油',
+    });
+    expect(JSON.stringify(migration)).not.toContain('synthetic-value');
+  });
+
+  it.each([
+    'https://assets.invalid/image.png',
+    'data:text/plain,blocked',
+    'file:///blocked',
+    '\\\\server\\share',
+    '//assets.invalid/image.png',
+    'javascript:blocked()',
+    'blob:blocked',
+  ])('fails closed for unsafe simple-play text parameters: %s', (unsafeValue) => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: {}, managedFingerprint: 'safe',
+      parameters: { name: unsafeValue, amount: 1 },
+    };
+
+    const migration = createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12));
+
+    expect(migration.payload.definition.simplePlay?.parameters).toEqual({ amount: 1 });
+    expect(JSON.stringify(migration)).not.toContain(unsafeValue);
+  });
+
+  it('exports only current-day non-negative counters for configured rules', () => {
+    const state = defaultState();
+    state.rules = [
+      { id: 'rule-limited', giftId: 1, attributeName: '积分', formula: '积分+1', dailyLimit: 10 },
+      { id: 'rule-zero', giftId: 2, attributeName: '积分', formula: '积分+1' },
+    ];
+    state.stats = {
+      '2026-08-16': {
+        date: '2026-08-16', giftTotals: { 1: 7 },
+        ruleTriggers: { 'rule-limited': 9, 'rule-zero': 0, removed: 99, negative: -1, fractional: 1.5 },
+      },
+      '2026-08-15': {
+        date: '2026-08-15', giftTotals: { 2: 4 }, ruleTriggers: { 'rule-limited': 8 },
+      },
+    };
+
+    const migration = createOnlineMigration(state, '0.4.4', new Date(2026, 7, 16, 12));
+
+    expect(migration.payload.runtime.ruleLimits).toEqual({
+      localDate: '2026-08-16', appliedCounts: { 'rule-limited': 9, 'rule-zero': 0 },
+    });
+    expect(JSON.stringify(migration)).not.toContain('giftTotals');
+    expect(JSON.stringify(migration)).not.toContain('removed');
+  });
+
+  it('revokes a local migration URL when the download click throws', () => {
+    const revokeObjectURL = vi.fn();
+    const click = vi.fn(() => { throw new Error('synthetic download failure'); });
+    const adapter = {
+      createBlob: vi.fn(() => ({} as Blob)),
+      createObjectURL: vi.fn(() => 'blob:synthetic-migration'),
+      click,
+      revokeObjectURL,
+    };
+
+    expect(() => downloadOnlineMigration(defaultState(), '0.4.4', new Date(2026, 7, 16, 12), adapter)).toThrow('synthetic download failure');
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenLastCalledWith('blob:synthetic-migration');
   });
 });

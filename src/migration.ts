@@ -9,6 +9,7 @@ import type {
   Settings,
   SimplePlay,
 } from './types';
+import { getGameplayTemplate, type TemplateParameterDefinition, type TemplateParameterValue } from './gameplay-templates';
 
 const CONFIG_SCHEMA_VERSION = 5;
 
@@ -24,6 +25,13 @@ export interface OnlineMigrationV1 {
     definition: OnlineMigrationDefinition;
     runtime: OnlineMigrationRuntime;
   };
+}
+
+export interface OnlineMigrationDownloadAdapter {
+  createBlob: (content: string) => Blob;
+  createObjectURL: (blob: Blob) => string;
+  click: (url: string, filename: string) => void;
+  revokeObjectURL: (url: string) => void;
 }
 
 export interface OnlineMigrationDefinition {
@@ -149,8 +157,30 @@ interface OnlineSimplePlay {
   managedFingerprint: string;
 }
 
+const SIMPLE_PLAY_PARAMETER_DEFINITIONS: Record<SimplePlay['templateId'], readonly TemplateParameterDefinition[]> = {
+  overtime: templateParameters('overtime'),
+  counter: templateParameters('counter'),
+  goal: templateParameters('goal'),
+};
+
 export function onlineMigrationFilename(exportedAt: Date): string {
   return `gift-panel-migration-v1-${exportedAt.toISOString().slice(0, 10)}.json`;
+}
+
+export function downloadOnlineMigration(
+  state: AppState,
+  appVersion: string,
+  exportedAt: Date,
+  adapter: OnlineMigrationDownloadAdapter,
+): void {
+  const content = JSON.stringify(createOnlineMigration(state, appVersion, exportedAt), null, 2);
+  let url: string | undefined;
+  try {
+    url = adapter.createObjectURL(adapter.createBlob(content));
+    adapter.click(url, onlineMigrationFilename(exportedAt));
+  } finally {
+    if (url !== undefined) adapter.revokeObjectURL(url);
+  }
 }
 
 /**
@@ -228,7 +258,7 @@ export function createOnlineMigration(state: AppState, appVersion: string, expor
         attributeValues: Object.fromEntries(state.attributes.map((attribute, index) => [attributeID(attribute, index), attribute.value])),
         giftTargetReceived: state.giftKpiPanels.flatMap((panel) => panel.items.map((item) => ({ panelId: panel.id, giftId: item.giftId, received: item.received }))),
         activities: state.activities.map((activity) => exportActivityRuntime(activity, idForName)),
-        ruleLimits: { localDate: '', appliedCounts: {} },
+        ruleLimits: exportRuleLimits(state, exportedAt),
       },
     },
   };
@@ -366,10 +396,11 @@ function exportSimplePlay(simplePlay: SimplePlay): OnlineSimplePlay {
     templateId: simplePlay.templateId,
     templateVersion: simplePlay.templateVersion,
     attributeId: simplePlay.attributeId,
-    parameters: Object.fromEntries(Object.entries(simplePlay.parameters)
-      .filter(([, value]) => typeof value !== 'string' || !isRemoteURL(value))
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, value]) => [key, value])),
+    parameters: Object.fromEntries(SIMPLE_PLAY_PARAMETER_DEFINITIONS[simplePlay.templateId]
+      .flatMap((definition) => {
+        const value = simplePlay.parameters[definition.id];
+        return isValidSimplePlayParameter(definition, value) ? [[definition.id, value]] : [];
+      })),
     gifts: Object.fromEntries(Object.entries(simplePlay.gifts)
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, giftIDs]) => [key, [...giftIDs]])),
@@ -382,6 +413,51 @@ function exportSimplePlay(simplePlay: SimplePlay): OnlineSimplePlay {
     }),
     managedFingerprint: simplePlay.managedFingerprint,
   };
+}
+
+function templateParameters(templateId: SimplePlay['templateId']): readonly TemplateParameterDefinition[] {
+  return getGameplayTemplate(templateId)?.parameters ?? [];
+}
+
+function isValidSimplePlayParameter(
+  definition: TemplateParameterDefinition,
+  value: unknown,
+): value is TemplateParameterValue {
+  switch (definition.kind) {
+    case 'text':
+      return typeof value === 'string' && value.length <= 4096 && isSafeTemplateText(value);
+    case 'select':
+      return typeof value === 'string' && definition.options?.some((option) => option.value === value) === true;
+    case 'toggle':
+      return typeof value === 'boolean';
+    case 'number':
+    case 'duration':
+      return typeof value === 'number'
+        && Number.isFinite(value)
+        && (definition.min === undefined || value >= definition.min)
+        && (definition.max === undefined || value <= definition.max);
+  }
+}
+
+function isSafeTemplateText(value: string): boolean {
+  return !/^(?:[a-z][a-z0-9+.-]*:|\/\/|\\\\)/i.test(value.trim());
+}
+
+function exportRuleLimits(state: AppState, exportedAt: Date): OnlineMigrationRuntime['ruleLimits'] {
+  const localDate = localDateString(exportedAt);
+  const day = Object.entries(state.stats)
+    .filter(([, candidate]) => candidate.date === localDate)
+    .sort(([left], [right]) => left.localeCompare(right))[0]?.[1];
+  const currentRuleIDs = new Set(state.rules.map((rule) => rule.id));
+  const appliedCounts = Object.fromEntries(Object.entries(day?.ruleTriggers ?? {})
+    .filter(([ruleID, count]) => currentRuleIDs.has(ruleID) && Number.isInteger(count) && count >= 0)
+    .sort(([left], [right]) => left.localeCompare(right)));
+  return { localDate, appliedCounts };
+}
+
+function localDateString(date: Date): string {
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
 function collectReferencedGiftIDs(state: AppState): Set<number> {
@@ -406,8 +482,4 @@ function exportGift(gift: GiftInfo): OnlineMigrationDefinition['gifts'][number] 
     ...(gift.blindBoxParentName === undefined ? {} : { blindBoxParentName: gift.blindBoxParentName }),
     ...(gift.blindBoxParentPrice === undefined ? {} : { blindBoxParentPrice: gift.blindBoxParentPrice }),
   };
-}
-
-function isRemoteURL(value: string): boolean {
-  return /^https?:\/\//i.test(value.trim());
 }

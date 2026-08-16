@@ -1,6 +1,6 @@
 import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftKpiBarStyle, GiftKpiLayout, GiftKpiPanel, GiftReceipt, GiftRule, MAX_GIFT_RECEIPTS, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
 import { clearRoomScopedRecords, commitAuthoritativeStateMutation, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState, saveStateFieldTransaction } from '../../storage';
-import { createOnlineMigration, onlineMigrationFilename } from '../../migration';
+import { downloadOnlineMigration } from '../../migration';
 import packageInfo from '../../../package.json';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { bindFloatingDetailCard, el, fieldControl, inputField, setFloatingDetailGuideExpanded, toast } from '../common';
@@ -5323,13 +5323,19 @@ export function mountConfig(root: HTMLElement): void {
     };
     const migrationButton = el('button', { class: 'btn ghost', type: 'button', text: '迁移到在线版' }) as HTMLButtonElement;
     migrationButton.onclick = () => {
-      const exportedAt = new Date();
-      const migration = createOnlineMigration(state, packageInfo.version, exportedAt);
-      const blob = new Blob([JSON.stringify(migration, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const link = el('a', { href: url, download: onlineMigrationFilename(exportedAt) }) as HTMLAnchorElement;
-      link.click();
-      URL.revokeObjectURL(url);
+      try {
+        downloadOnlineMigration(state, packageInfo.version, new Date(), {
+          createBlob: (content) => new Blob([content], { type: 'application/json' }),
+          createObjectURL: (blob) => URL.createObjectURL(blob),
+          click: (url, filename) => {
+            const link = el('a', { href: url, download: filename }) as HTMLAnchorElement;
+            link.click();
+          },
+          revokeObjectURL: (url) => URL.revokeObjectURL(url),
+        });
+      } catch {
+        toast('迁移文件下载失败，请重试。', root);
+      }
     };
     const importInput = el('input', { type: 'file', accept: '.json' }) as HTMLInputElement;
     importInput.hidden = true;
