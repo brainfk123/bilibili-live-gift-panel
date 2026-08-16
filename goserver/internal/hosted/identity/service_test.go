@@ -94,6 +94,74 @@ func TestServiceExistingAccountLoginUsesOnlyHashedSiteToken(t *testing.T) {
 	}
 }
 
+func TestServiceConsumeAccountProofIsBoundRecentAndOneShot(t *testing.T) {
+	now := time.Date(2026, 8, 16, 8, 15, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name        string
+		accountID   int64
+		completedAt time.Time
+		want        error
+	}{
+		{name: "matching recent account", accountID: 41, completedAt: now, want: nil},
+		{name: "mismatched account", accountID: 42, completedAt: now, want: ErrAuthenticationFailed},
+		{name: "expired completion", accountID: 41, completedAt: now, want: ErrAuthenticationFailed},
+		{name: "future completion", accountID: 41, completedAt: now.Add(30 * time.Second), want: ErrAuthenticationFailed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			verifier := &memoryVerifier{
+				challenge:     Challenge{ID: "proof-" + test.name, QRImage: "qr", ExpiresAt: now.Add(5 * time.Minute)},
+				verifications: []Verification{{UID: "32249588", CompletedAt: test.completedAt}},
+			}
+			service := newTestService(t, &memoryRepository{account: Account{ID: 41, CredentialEpoch: 3}}, verifier, now)
+			challenge, err := service.Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result, err := service.Poll(context.Background(), challenge.ID); err != nil || result.Status != ChallengeVerified {
+				t.Fatalf("Poll() = %#v, %v", result, err)
+			}
+			if test.name == "expired completion" {
+				service.mu.Lock()
+				service.challenges[challenge.ID].completedAt = now.Add(-15*time.Minute - time.Nanosecond)
+				service.mu.Unlock()
+			}
+
+			err = service.ConsumeAccountProof(context.Background(), challenge.ID, test.accountID, 15*time.Minute)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("ConsumeAccountProof() error = %v, want %v", err, test.want)
+			}
+			if err := service.ConsumeAccountProof(context.Background(), challenge.ID, 41, 15*time.Minute); !errors.Is(err, ErrAuthenticationFailed) {
+				t.Fatalf("reused proof error = %v, want terminal rejection", err)
+			}
+			service.mu.Lock()
+			_, present := service.challenges[challenge.ID]
+			service.mu.Unlock()
+			if present {
+				t.Fatal("terminal account proof remained reusable")
+			}
+		})
+	}
+}
+
+func TestServiceConsumeAccountProofLeavesPendingChallengeRetryable(t *testing.T) {
+	now := time.Date(2026, 8, 16, 8, 16, 0, 0, time.UTC)
+	verifier := &memoryVerifier{challenge: Challenge{ID: "proof-pending", QRImage: "qr", ExpiresAt: now.Add(time.Minute)}}
+	service := newTestService(t, &memoryRepository{}, verifier, now)
+	challenge, err := service.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ConsumeAccountProof(context.Background(), challenge.ID, 7, 15*time.Minute); !errors.Is(err, ErrVerificationPending) {
+		t.Fatalf("ConsumeAccountProof() error = %v", err)
+	}
+	service.mu.Lock()
+	_, present := service.challenges[challenge.ID]
+	service.mu.Unlock()
+	if !present {
+		t.Fatal("pending proof was consumed")
+	}
+}
+
 func TestServiceUnknownAccountReturnsSingleUseRegistrationIntent(t *testing.T) {
 	now := time.Date(2026, 8, 16, 8, 20, 0, 0, time.UTC)
 	verifier := &memoryVerifier{

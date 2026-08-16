@@ -113,6 +113,9 @@ func TestProductionMigrationsIncludeVersionedConfigurationStorage(t *testing.T) 
 			"PRIMARY KEY (account_id)",
 			"base_config_version_number BIGINT UNSIGNED NOT NULL DEFAULT 0",
 			"base_state_revision BIGINT UNSIGNED NOT NULL DEFAULT 0",
+			"keep_room_suggestion TINYINT NOT NULL DEFAULT 0",
+			"applied_config_version_id BIGINT UNSIGNED NULL",
+			"CHECK (keep_room_suggestion IN (0, 1))",
 			"CHECK (JSON_VALID(definition_json))",
 			"CHECK (JSON_VALID(runtime_json))",
 			"KEY idx_migration_jobs_hash (account_id, request_hash)",
@@ -121,6 +124,7 @@ func TestProductionMigrationsIncludeVersionedConfigurationStorage(t *testing.T) 
 			"KEY idx_migration_jobs_status_expiry (status, expires_at)",
 			"FOREIGN KEY (account_id, config_version_id) REFERENCES account_config_versions (account_id, id)",
 			"FOREIGN KEY (account_id, rollback_config_version_id) REFERENCES account_config_versions (account_id, id)",
+			"FOREIGN KEY (account_id, applied_config_version_id) REFERENCES account_config_versions (account_id, id)",
 		} {
 			if !strings.Contains(sql, required) {
 				t.Fatalf("0004 migration missing %q", required)

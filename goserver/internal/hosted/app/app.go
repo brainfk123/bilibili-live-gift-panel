@@ -17,6 +17,7 @@ type Dependencies struct {
 	Admin         http.Handler
 	Invitation    http.Handler
 	Configuration http.Handler
+	Migration     http.Handler
 	CSRFToken     string
 }
 
@@ -65,6 +66,13 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("PUT /api/configuration/definition", dependencies.Configuration)
 		mux.Handle("PUT /api/configuration/state", dependencies.Configuration)
 		mux.Handle("PUT /api/configuration/room-suggestion", dependencies.Configuration)
+	}
+	if dependencies.Migration != nil {
+		mux.Handle("POST /api/migrations/preview", dependencies.Migration)
+		mux.Handle("POST /api/migrations/{id}/apply", dependencies.Migration)
+		mux.Handle("DELETE /api/migrations/{id}", dependencies.Migration)
+		mux.Handle("POST /api/migrations/{id}/rollback", dependencies.Migration)
+		mux.Handle("GET /api/migrations/{id}", dependencies.Migration)
 	}
 	if dependencies.Auth != nil {
 		mux.Handle("/api/auth/", dependencies.Auth)

@@ -82,6 +82,7 @@ const (
 
 type serviceChallenge struct {
 	expiresAt         time.Time
+	completedAt       time.Time
 	stage             challengeStage
 	account           Account
 	verifierForgotten bool
@@ -276,6 +277,7 @@ func (service *Service) Poll(ctx context.Context, challengeID string) (PollResul
 		}
 		state.stage = challengeLoginReady
 		state.account = account
+		state.completedAt = verification.CompletedAt.UTC()
 		state.pollInProgress = false
 		state.verifierForgotten = true
 		service.mu.Unlock()
@@ -523,6 +525,37 @@ func (service *Service) Login(ctx context.Context, challengeID string) (SiteSess
 		return SiteSession{}, ErrAuthenticationFailed
 	}
 	return SiteSession{Token: token, AccountID: state.account.ID, ExpiresAt: expiresAt}, nil
+}
+
+// ConsumeAccountProof consumes one verified existing-account challenge for a
+// sensitive account-owned operation. It deliberately returns no identity or
+// credential material. Pending verification remains pollable; every terminal
+// proof outcome removes the challenge so it cannot be replayed.
+func (service *Service) ConsumeAccountProof(_ context.Context, challengeID string, accountID int64, maxAge time.Duration) error {
+	if service == nil || challengeID == "" {
+		return ErrAuthenticationFailed
+	}
+	service.collectExpired()
+	service.mu.Lock()
+	state, exists := service.challenges[challengeID]
+	if !exists || service.closed {
+		service.mu.Unlock()
+		return ErrAuthenticationFailed
+	}
+	if state.stage == challengePolling {
+		service.mu.Unlock()
+		return ErrVerificationPending
+	}
+	delete(service.challenges, challengeID)
+	stopChallengeTimer(state)
+	service.mu.Unlock()
+
+	now := service.now()
+	if accountID <= 0 || maxAge <= 0 || state.account.ID <= 0 || state.account.ID != accountID ||
+		state.completedAt.IsZero() || state.completedAt.After(now) || now.Sub(state.completedAt) > maxAge {
+		return ErrAuthenticationFailed
+	}
+	return nil
 }
 
 // RequireSession hashes the caller's Cookie value before crossing the

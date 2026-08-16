@@ -111,3 +111,22 @@ func TestConfigurationMethodRoutesWinOverBroaderPrefixes(t *testing.T) {
 		}
 	}
 }
+
+func TestMigrationMethodRoutesWinOverBroaderAuthenticationPrefix(t *testing.T) {
+	migration := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusTeapot) })
+	auth := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusAccepted) })
+	handler := New(Dependencies{DB: fakeHealth{}, Auth: auth, Migration: migration})
+	for _, route := range []struct{ method, path string }{
+		{http.MethodPost, "/api/migrations/preview"},
+		{http.MethodPost, "/api/migrations/9/apply"},
+		{http.MethodDelete, "/api/migrations/9"},
+		{http.MethodPost, "/api/migrations/9/rollback"},
+		{http.MethodGet, "/api/migrations/9"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))
+		if response.Code != http.StatusTeapot {
+			t.Fatalf("%s %s status=%d, want migration handler", route.method, route.path, response.Code)
+		}
+	}
+}

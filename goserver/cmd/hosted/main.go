@@ -22,6 +22,7 @@ import (
 	"bilibili-live-gift-panel/internal/hosted/identity"
 	"bilibili-live-gift-panel/internal/hosted/identity/biliqr"
 	"bilibili-live-gift-panel/internal/hosted/invitation"
+	"bilibili-live-gift-panel/internal/hosted/migration"
 	"bilibili-live-gift-panel/internal/hosted/platform"
 	"bilibili-live-gift-panel/internal/hosted/security"
 	"bilibili-live-gift-panel/internal/hosted/store/mysqlstore"
@@ -136,6 +137,14 @@ func run() error {
 		if err != nil {
 			return errors.New("configure hosted configuration HTTP")
 		}
+		migrationService := migration.NewService(migration.NewRepository(store.Database()), time.Now)
+		migrationHTTP, err := migration.NewHTTPHandler(migrationService, identityService, migration.HTTPOptions{
+			AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
+			Limiter: limiter, ClientIP: resolver, Authenticate: identityHTTP.Authenticate,
+		})
+		if err != nil {
+			return errors.New("configure hosted migration HTTP")
+		}
 		adminHTTP, err := adminidentity.NewHTTPHandler(adminService, adminidentity.HTTPOptions{
 			AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
 			Limiter: limiter, ClientIP: resolver,
@@ -143,7 +152,7 @@ func run() error {
 		if err != nil {
 			return errors.New("configure administrator HTTP")
 		}
-		server := newHTTPServer(config.ListenAddr, composeHostedHTTP(store, identityHTTP, adminHTTP, invitationHTTP, configurationHTTP, config.AdminCSRFToken))
+		server := newHTTPServer(config.ListenAddr, composeHostedHTTP(store, identityHTTP, adminHTTP, invitationHTTP, configurationHTTP, migrationHTTP, config.AdminCSRFToken))
 		return serveHTTP(
 			processContext,
 			server,
@@ -159,8 +168,8 @@ type hostedHealthChecker interface {
 	Health(context.Context) error
 }
 
-func composeHostedHTTP(database hostedHealthChecker, auth, admin, invitations, configurationHTTP http.Handler, csrfToken string) http.Handler {
-	return app.New(app.Dependencies{DB: database, Auth: auth, Admin: admin, Invitation: invitations, Configuration: configurationHTTP, CSRFToken: csrfToken})
+func composeHostedHTTP(database hostedHealthChecker, auth, admin, invitations, configurationHTTP, migrationHTTP http.Handler, csrfToken string) http.Handler {
+	return app.New(app.Dependencies{DB: database, Auth: auth, Admin: admin, Invitation: invitations, Configuration: configurationHTTP, Migration: migrationHTTP, CSRFToken: csrfToken})
 }
 
 func loadHostedKeyring(encryptionKeyFile, hmacKeyFile string) (security.Keyring, error) {

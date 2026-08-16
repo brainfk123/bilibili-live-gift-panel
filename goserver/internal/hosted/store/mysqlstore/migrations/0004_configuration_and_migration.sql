@@ -73,9 +73,11 @@ CREATE TABLE IF NOT EXISTS migration_jobs (
     source_app_version VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
     source_schema_version INT UNSIGNED NULL,
     report_json JSON NOT NULL,
+    keep_room_suggestion TINYINT NOT NULL DEFAULT 0,
     rollback_config_version_id BIGINT UNSIGNED NULL,
     rollback_runtime_json JSON NULL,
     rollback_expires_at TIMESTAMP(6) NULL,
+    applied_config_version_id BIGINT UNSIGNED NULL,
     created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     expires_at TIMESTAMP(6) NOT NULL,
     applied_at TIMESTAMP(6) NULL,
@@ -94,10 +96,14 @@ CREATE TABLE IF NOT EXISTS migration_jobs (
     CONSTRAINT fk_migration_jobs_rollback_config_version
         FOREIGN KEY (account_id, rollback_config_version_id) REFERENCES account_config_versions (account_id, id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT fk_migration_jobs_applied_config_version
+        FOREIGN KEY (account_id, applied_config_version_id) REFERENCES account_config_versions (account_id, id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT chk_migration_jobs_definition_json CHECK (JSON_VALID(definition_json)),
     CONSTRAINT chk_migration_jobs_runtime_json CHECK (JSON_VALID(runtime_json)),
     CONSTRAINT chk_migration_jobs_report_json CHECK (JSON_VALID(report_json)),
     CONSTRAINT chk_migration_jobs_rollback_runtime_json CHECK (rollback_runtime_json IS NULL OR JSON_VALID(rollback_runtime_json)),
+    CONSTRAINT chk_migration_jobs_keep_room_suggestion CHECK (keep_room_suggestion IN (0, 1)),
     CONSTRAINT chk_migration_jobs_status CHECK (status IN ('previewed', 'pending', 'applied', 'cancelled', 'rolled_back', 'expired')),
     CONSTRAINT chk_migration_jobs_expiry CHECK (expires_at > created_at)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
