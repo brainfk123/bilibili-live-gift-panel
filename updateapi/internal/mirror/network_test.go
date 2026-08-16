@@ -97,6 +97,7 @@ func TestRestrictedTransportRejectsNonPublicResolvedAddresses(t *testing.T) {
 	addresses := []string{
 		"127.0.0.1",       // loopback
 		"0.0.0.0",         // unspecified
+		"0.0.0.1",         // this-network block
 		"224.0.0.1",       // multicast
 		"169.254.1.1",     // link local
 		"10.0.0.1",        // RFC1918

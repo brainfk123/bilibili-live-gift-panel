@@ -3,6 +3,8 @@ package mirror
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -43,19 +44,22 @@ type downloaderOptions struct {
 	maxAttempts    int
 	backoff        func(context.Context, int) error
 	syncFile       func(*os.File) error
-	rename         func(string, string) error
+	beforeRename   func()
+	rename         func(*os.Root, string, string) error
 }
 
 type downloader struct {
-	client   *http.Client
-	stateDir string
-	options  downloaderOptions
-	mu       sync.Mutex
+	client    *http.Client
+	stateDir  string
+	stateInfo os.FileInfo
+	options   downloaderOptions
+	gate      chan struct{}
 }
 
 type partialDownload struct {
 	offset int64
 	etag   string
+	file   *os.File
 }
 
 type attemptError struct {
@@ -66,8 +70,8 @@ type attemptError struct {
 func (err *attemptError) Error() string { return err.err.Error() }
 func (err *attemptError) Unwrap() error { return err.err }
 
-func NewDownloader(client *http.Client, stateDir string) (ArtifactFetcher, error) {
-	return newDownloaderWithOptions(client, stateDir, downloaderOptions{
+func NewDownloader(stateDir string) (ArtifactFetcher, error) {
+	return newDownloaderWithOptions(NewRestrictedHTTPClient(), stateDir, downloaderOptions{
 		overallTimeout: defaultDownloadTimeout,
 		maxAttempts:    defaultMaxAttempts,
 		backoff:        defaultDownloadBackoff,
@@ -94,7 +98,9 @@ func newDownloaderWithOptions(client *http.Client, stateDir string, options down
 		options.backoff == nil || options.syncFile == nil || options.rename == nil {
 		return nil, errors.New("download options are invalid")
 	}
-	return &downloader{client: client, stateDir: stateDir, options: options}, nil
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	return &downloader{client: client, stateDir: stateDir, stateInfo: info, options: options, gate: gate}, nil
 }
 
 func (downloader *downloader) Download(ctx context.Context, spec DownloadSpec) (string, error) {
@@ -106,16 +112,28 @@ func (downloader *downloader) Download(ctx context.Context, spec DownloadSpec) (
 		return "", errors.New("artifact path escapes download state directory")
 	}
 
-	downloader.mu.Lock()
-	defer downloader.mu.Unlock()
-
 	downloadCtx, cancel := context.WithTimeout(ctx, downloader.options.overallTimeout)
 	defer cancel()
+	select {
+	case <-downloadCtx.Done():
+		return "", downloadCtx.Err()
+	case <-downloader.gate:
+	}
+	defer func() { downloader.gate <- struct{}{} }()
+	root, err := os.OpenRoot(downloader.stateDir)
+	if err != nil {
+		return "", errors.New("could not open download state directory")
+	}
+	defer root.Close()
+	if err := downloader.validateStateRoot(root); err != nil {
+		return "", err
+	}
+
 	for attempt := 1; attempt <= downloader.options.maxAttempts; attempt++ {
 		if err := downloadCtx.Err(); err != nil {
 			return "", err
 		}
-		err := downloader.downloadOnce(downloadCtx, spec, finalPath)
+		err := downloader.downloadOnce(downloadCtx, root, spec)
 		if err == nil {
 			return finalPath, nil
 		}
@@ -136,14 +154,20 @@ func (downloader *downloader) Download(ctx context.Context, spec DownloadSpec) (
 	return "", errors.New("artifact download failed")
 }
 
-func (downloader *downloader) downloadOnce(ctx context.Context, spec DownloadSpec, finalPath string) error {
-	if err := rejectUnsafeExistingPath(finalPath); err != nil {
+func (downloader *downloader) downloadOnce(ctx context.Context, root *os.Root, spec DownloadSpec) error {
+	finalName := spec.Name
+	if err := rejectUnsafeExistingPath(root, finalName); err != nil {
 		return err
 	}
-	partial, err := downloader.loadPartial(spec, finalPath)
+	partial, err := downloader.loadPartial(root, spec, finalName)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if partial.file != nil {
+			_ = partial.file.Close()
+		}
+	}()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, spec.URL, nil)
 	if err != nil {
@@ -161,9 +185,13 @@ func (downloader *downloader) downloadOnce(ctx context.Context, spec DownloadSpe
 		return &attemptError{err: errors.New("artifact request failed"), retryable: true}
 	}
 	defer response.Body.Close()
+	if err := downloader.validateStateRoot(root); err != nil {
+		return err
+	}
 
 	if response.StatusCode == http.StatusRequestedRangeNotSatisfiable {
-		downloader.removePartial(finalPath)
+		closePartial(&partial)
+		downloader.removePartial(root, finalName)
 		return errors.New("artifact server rejected requested range")
 	}
 	if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= http.StatusInternalServerError {
@@ -174,16 +202,19 @@ func (downloader *downloader) downloadOnce(ctx context.Context, spec DownloadSpe
 	if resume && response.StatusCode == http.StatusPartialContent {
 		expectedRange := fmt.Sprintf("bytes %d-%d/%d", partial.offset, spec.Size-1, spec.Size)
 		if response.Header.Get("Content-Range") != expectedRange || response.Header.Get("ETag") != partial.etag || !isStrongETag(response.Header.Get("ETag")) {
-			downloader.removePartial(finalPath)
+			closePartial(&partial)
+			downloader.removePartial(root, finalName)
 			return &attemptError{err: errors.New("artifact server returned an untrustworthy range"), retryable: true}
 		}
 	} else if response.StatusCode == http.StatusOK {
 		if resume {
-			downloader.removePartial(finalPath)
+			closePartial(&partial)
+			downloader.removePartial(root, finalName)
 			partial = partialDownload{}
 		}
 	} else {
-		downloader.removePartial(finalPath)
+		closePartial(&partial)
+		downloader.removePartial(root, finalName)
 		return errors.New("artifact server returned an unexpected status")
 	}
 
@@ -192,13 +223,13 @@ func (downloader *downloader) downloadOnce(ctx context.Context, spec DownloadSpe
 		etag := response.Header.Get("ETag")
 		if isStrongETag(etag) {
 			metadata := resumeMetadata{URL: spec.URL, ETag: etag, Size: spec.Size}
-			if err := downloader.writeResumeMetadata(finalPath, metadata); err != nil {
+			if err := downloader.writeResumeMetadata(root, finalName, metadata); err != nil {
 				return err
 			}
 			partial.etag = etag
 			resumable = true
 		} else {
-			_ = os.Remove(finalPath + ".part.meta")
+			_ = root.Remove(finalName + ".part.meta")
 		}
 	}
 
@@ -208,21 +239,49 @@ func (downloader *downloader) downloadOnce(ctx context.Context, spec DownloadSpe
 	} else {
 		flags |= os.O_TRUNC
 	}
-	partPath := finalPath + ".part"
-	file, err := openRegularNoFollow(partPath, flags, 0o600)
-	if err != nil {
-		return errors.New("could not safely open partial artifact")
+	partName := finalName + ".part"
+	var file *os.File
+	if partial.offset > 0 {
+		file = partial.file
+		partial.file = nil
+		if _, err := file.Seek(partial.offset, io.SeekStart); err != nil {
+			_ = file.Close()
+			downloader.removePartial(root, finalName)
+			return errors.New("could not seek partial artifact")
+		}
+	} else {
+		file, err = openRegularNoFollow(root, partName, flags, 0o600)
+		if err != nil {
+			return errors.New("could not safely open partial artifact")
+		}
 	}
+	defer file.Close()
 	remaining := spec.Size - partial.offset
 	written, copyErr := io.Copy(file, io.LimitReader(response.Body, remaining+1))
 	if copyErr != nil || written != remaining {
-		_ = file.Close()
 		if written > remaining {
-			downloader.removePartial(finalPath)
+			_ = file.Close()
+			downloader.removePartial(root, finalName)
 			return errors.New("artifact response exceeds declared size")
 		}
-		if !resumable {
-			downloader.removePartial(finalPath)
+		if resumable {
+			if err := downloader.options.syncFile(file); err != nil {
+				_ = file.Close()
+				downloader.removePartial(root, finalName)
+				return errors.New("could not sync partial artifact")
+			}
+		}
+		if err := file.Close(); err != nil {
+			downloader.removePartial(root, finalName)
+			return errors.New("could not close partial artifact")
+		}
+		if resumable {
+			if err := syncDownloadDirectory(root); err != nil {
+				downloader.removePartial(root, finalName)
+				return errors.New("could not sync partial artifact directory")
+			}
+		} else {
+			downloader.removePartial(root, finalName)
 		}
 		if ctx.Err() != nil {
 			return &attemptError{err: ctx.Err(), retryable: true}
@@ -233,19 +292,48 @@ func (downloader *downloader) downloadOnce(ctx context.Context, spec DownloadSpe
 		_ = file.Close()
 		return errors.New("could not sync completed artifact")
 	}
-	if err := file.Close(); err != nil {
-		return errors.New("could not close completed artifact")
+	completedInfo, err := file.Stat()
+	if err != nil || completedInfo.Size() != spec.Size {
+		_ = file.Close()
+		downloader.removePartial(root, finalName)
+		return errors.New("completed artifact identity is unavailable")
 	}
-	if err := rejectUnsafeExistingPath(finalPath); err != nil {
+	if err := downloader.validateStateRoot(root); err != nil {
 		return err
 	}
-	if err := downloader.options.rename(partPath, finalPath); err != nil {
+	if err := rejectUnsafeExistingPath(root, finalName); err != nil {
+		return err
+	}
+	if downloader.options.beforeRename != nil {
+		downloader.options.beforeRename()
+	}
+	sourceInfo, err := root.Lstat(partName)
+	if err != nil || !sourceInfo.Mode().IsRegular() || !os.SameFile(completedInfo, sourceInfo) || sourceInfo.Size() != spec.Size {
+		downloader.removePartial(root, finalName)
+		return errors.New("completed artifact changed before rename")
+	}
+	if err := downloader.options.rename(root, partName, finalName); err != nil {
 		return errors.New("could not atomically complete artifact")
 	}
-	if err := os.Remove(finalPath + ".part.meta"); err != nil && !errors.Is(err, os.ErrNotExist) {
+	installedInfo, installedErr := root.Lstat(finalName)
+	handleInfo, handleErr := file.Stat()
+	if installedErr != nil || handleErr != nil || !installedInfo.Mode().IsRegular() ||
+		!os.SameFile(handleInfo, installedInfo) || installedInfo.Size() != spec.Size {
+		_ = root.Remove(finalName)
+		return errors.New("completed artifact changed during rename")
+	}
+	if err := file.Close(); err != nil {
+		_ = root.Remove(finalName)
+		return errors.New("could not close completed artifact")
+	}
+	if err := downloader.validateStateRoot(root); err != nil {
+		_ = root.Remove(finalName)
+		return err
+	}
+	if err := root.Remove(finalName + ".part.meta"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return errors.New("could not remove completed artifact metadata")
 	}
-	if err := syncDownloadDirectory(downloader.stateDir); err != nil {
+	if err := syncDownloadDirectory(root); err != nil {
 		return errors.New("could not sync completed artifact directory")
 	}
 	return nil
@@ -265,11 +353,11 @@ func validateDownloadSpec(spec DownloadSpec) error {
 	return nil
 }
 
-func (downloader *downloader) loadPartial(spec DownloadSpec, finalPath string) (partialDownload, error) {
-	partPath := finalPath + ".part"
-	metadataPath := partPath + ".meta"
-	partInfo, partErr := os.Lstat(partPath)
-	metadataInfo, metadataErr := os.Lstat(metadataPath)
+func (downloader *downloader) loadPartial(root *os.Root, spec DownloadSpec, finalName string) (partialDownload, error) {
+	partName := finalName + ".part"
+	metadataName := partName + ".meta"
+	partInfo, partErr := root.Lstat(partName)
+	metadataInfo, metadataErr := root.Lstat(metadataName)
 	partMissing := errors.Is(partErr, os.ErrNotExist)
 	metadataMissing := errors.Is(metadataErr, os.ErrNotExist)
 	if partMissing && metadataMissing {
@@ -283,23 +371,39 @@ func (downloader *downloader) loadPartial(spec DownloadSpec, finalPath string) (
 			!metadataMissing && (metadataInfo.Mode()&os.ModeSymlink != 0 || !metadataInfo.Mode().IsRegular()) {
 			return partialDownload{}, errors.New("partial artifact state is not regular")
 		}
-		downloader.removePartial(finalPath)
+		downloader.removePartial(root, finalName)
 		return partialDownload{}, nil
 	}
 	if !partInfo.Mode().IsRegular() || partInfo.Mode()&os.ModeSymlink != 0 ||
 		!metadataInfo.Mode().IsRegular() || metadataInfo.Mode()&os.ModeSymlink != 0 {
 		return partialDownload{}, errors.New("partial artifact state is not regular")
 	}
-	metadata, err := readResumeMetadata(metadataPath)
+	metadata, err := readResumeMetadata(root, metadataName)
 	if err != nil || metadata.URL != spec.URL || metadata.Size != spec.Size || !isStrongETag(metadata.ETag) || partInfo.Size() <= 0 || partInfo.Size() >= spec.Size {
-		downloader.removePartial(finalPath)
+		downloader.removePartial(root, finalName)
 		return partialDownload{}, nil
 	}
-	return partialDownload{offset: partInfo.Size(), etag: metadata.ETag}, nil
+	file, err := openRegularNoFollow(root, partName, os.O_RDWR, 0)
+	if err != nil {
+		return partialDownload{}, errors.New("could not safely open resumable artifact")
+	}
+	openedInfo, err := file.Stat()
+	if err != nil || !os.SameFile(partInfo, openedInfo) || openedInfo.Size() != partInfo.Size() {
+		_ = file.Close()
+		return partialDownload{}, errors.New("resumable artifact changed while opening")
+	}
+	return partialDownload{offset: openedInfo.Size(), etag: metadata.ETag, file: file}, nil
 }
 
-func readResumeMetadata(path string) (resumeMetadata, error) {
-	file, err := openRegularNoFollow(path, os.O_RDONLY, 0)
+func closePartial(partial *partialDownload) {
+	if partial.file != nil {
+		_ = partial.file.Close()
+		partial.file = nil
+	}
+}
+
+func readResumeMetadata(root *os.Root, name string) (resumeMetadata, error) {
+	file, err := openRegularNoFollow(root, name, os.O_RDONLY, 0)
 	if err != nil {
 		return resumeMetadata{}, err
 	}
@@ -321,17 +425,16 @@ func readResumeMetadata(path string) (resumeMetadata, error) {
 	return metadata, nil
 }
 
-func (downloader *downloader) writeResumeMetadata(finalPath string, metadata resumeMetadata) error {
+func (downloader *downloader) writeResumeMetadata(root *os.Root, finalName string, metadata resumeMetadata) error {
 	data, err := json.Marshal(metadata)
 	if err != nil {
 		return errors.New("could not encode resume metadata")
 	}
-	temporary, err := os.CreateTemp(downloader.stateDir, ".resume-*.tmp")
+	temporary, temporaryName, err := createRootTemp(root)
 	if err != nil {
 		return errors.New("could not create resume metadata")
 	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer root.Remove(temporaryName)
 	if err := temporary.Chmod(0o600); err != nil {
 		_ = temporary.Close()
 		return errors.New("could not secure resume metadata")
@@ -347,22 +450,22 @@ func (downloader *downloader) writeResumeMetadata(finalPath string, metadata res
 	if err := temporary.Close(); err != nil {
 		return errors.New("could not close resume metadata")
 	}
-	if err := replaceDownloadFile(temporaryPath, finalPath+".part.meta"); err != nil {
+	if err := replaceDownloadFile(root, temporaryName, finalName+".part.meta"); err != nil {
 		return errors.New("could not install resume metadata")
 	}
-	if err := syncDownloadDirectory(downloader.stateDir); err != nil {
+	if err := syncDownloadDirectory(root); err != nil {
 		return errors.New("could not sync resume metadata directory")
 	}
 	return nil
 }
 
-func (downloader *downloader) removePartial(finalPath string) {
-	_ = os.Remove(finalPath + ".part")
-	_ = os.Remove(finalPath + ".part.meta")
+func (downloader *downloader) removePartial(root *os.Root, finalName string) {
+	_ = root.Remove(finalName + ".part")
+	_ = root.Remove(finalName + ".part.meta")
 }
 
-func rejectUnsafeExistingPath(path string) error {
-	info, err := os.Lstat(path)
+func rejectUnsafeExistingPath(root *os.Root, name string) error {
+	info, err := root.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -375,8 +478,8 @@ func rejectUnsafeExistingPath(path string) error {
 	return nil
 }
 
-func openRegularNoFollow(path string, flag int, perm os.FileMode) (*os.File, error) {
-	file, err := openDownloadFile(path, flag, perm)
+func openRegularNoFollow(root *os.Root, name string, flag int, perm os.FileMode) (*os.File, error) {
+	file, err := openDownloadFile(root, name, flag, perm)
 	if err != nil {
 		return nil, err
 	}
@@ -385,7 +488,7 @@ func openRegularNoFollow(path string, flag int, perm os.FileMode) (*os.File, err
 		_ = file.Close()
 		return nil, errors.New("opened artifact is not regular")
 	}
-	pathInfo, err := os.Lstat(path)
+	pathInfo, err := root.Lstat(name)
 	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() || !os.SameFile(openedInfo, pathInfo) {
 		_ = file.Close()
 		return nil, errors.New("artifact path changed while opening")
@@ -393,8 +496,47 @@ func openRegularNoFollow(path string, flag int, perm os.FileMode) (*os.File, err
 	return file, nil
 }
 
+func createRootTemp(root *os.Root) (*os.File, string, error) {
+	for attempt := 0; attempt < 16; attempt++ {
+		var randomBytes [16]byte
+		if _, err := rand.Read(randomBytes[:]); err != nil {
+			return nil, "", err
+		}
+		name := ".resume-" + hex.EncodeToString(randomBytes[:]) + ".tmp"
+		file, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return file, name, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, "", err
+		}
+	}
+	return nil, "", errors.New("could not allocate resume metadata name")
+}
+
+func (downloader *downloader) validateStateRoot(root *os.Root) error {
+	rootInfo, err := root.Stat(".")
+	if err != nil || !os.SameFile(downloader.stateInfo, rootInfo) {
+		return errors.New("download state directory identity changed")
+	}
+	pathInfo, err := os.Lstat(downloader.stateDir)
+	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.IsDir() || !os.SameFile(downloader.stateInfo, pathInfo) {
+		return errors.New("download state directory was replaced")
+	}
+	return nil
+}
+
 func isStrongETag(value string) bool {
-	return len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' && !strings.HasPrefix(value, "W/")
+	if len(value) < 2 || value[0] != '"' || value[len(value)-1] != '"' {
+		return false
+	}
+	for index := 1; index < len(value)-1; index++ {
+		character := value[index]
+		if character != 0x21 && (character < 0x23 || character > 0x7e) && character < 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 func defaultDownloadBackoff(ctx context.Context, attempt int) error {

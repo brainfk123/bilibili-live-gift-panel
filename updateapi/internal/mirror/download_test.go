@@ -7,9 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -33,9 +36,9 @@ func TestDownloaderCompletesBoundedDownloadAndSyncsBeforeRename(t *testing.T) {
 			events = append(events, "sync")
 			return file.Sync()
 		},
-		rename: func(oldPath, newPath string) error {
+		rename: func(root *os.Root, oldName, newName string) error {
 			events = append(events, "rename")
-			return os.Rename(oldPath, newPath)
+			return root.Rename(oldName, newName)
 		},
 	})
 	if err != nil {
@@ -136,6 +139,21 @@ func TestResumeDiscardsUntrustworthyMetadataBeforeRequest(t *testing.T) {
 	}
 }
 
+func TestStrongETagRequiresCompleteEntityTagGrammar(t *testing.T) {
+	for _, value := range []string{`""`, `"strong"`, `"back\\slash"`, "\"obs\x80text\""} {
+		if !isStrongETag(value) {
+			t.Errorf("isStrongETag(%q) = false, want true", value)
+		}
+	}
+	for _, value := range []string{
+		"", `W/"weak"`, `w/"weak"`, "strong", `"a" "b"`, "\"space here\"", "\"tab\there\"", "\"control\x01\"", "\"delete\x7f\"",
+	} {
+		if isStrongETag(value) {
+			t.Errorf("isStrongETag(%q) = true, want false", value)
+		}
+	}
+}
+
 func TestResumeRestartsWhenServerIgnoresRangeOrReturnsMalformedRange(t *testing.T) {
 	for _, response := range []string{"ignored", "malformed"} {
 		t.Run(response, func(t *testing.T) {
@@ -173,6 +191,48 @@ func TestResumeRestartsWhenServerIgnoresRangeOrReturnsMalformedRange(t *testing.
 			}
 		})
 	}
+}
+
+func TestResumeRejectsPartSwappedAfterOffsetValidation(t *testing.T) {
+	stateDir := t.TempDir()
+	finalPath := filepath.Join(stateDir, AssetManifest)
+	partPath := finalPath + ".part"
+	var swapped atomic.Bool
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Range") != "bytes=3-" {
+			t.Errorf("Range = %q, want bytes=3-", request.Header.Get("Range"))
+		}
+		if err := os.Remove(partPath); err == nil {
+			if err := os.WriteFile(partPath, []byte("XYZ"), 0o600); err != nil {
+				t.Errorf("replace validated part: %v", err)
+			} else {
+				swapped.Store(true)
+			}
+		}
+		writer.Header().Set("ETag", `"strong"`)
+		writer.Header().Set("Content-Range", "bytes 3-5/6")
+		writer.WriteHeader(http.StatusPartialContent)
+		_, _ = writer.Write([]byte("def"))
+	}))
+	defer server.Close()
+	serverURL = server.URL + "/asset"
+	writePartialState(t, finalPath, "abc", fmt.Sprintf(`{"url":%q,"etag":"\"strong\"","size":6}`, serverURL))
+
+	_, err := mustNewDownloader(t, server.Client(), stateDir).Download(context.Background(), DownloadSpec{
+		Name: AssetManifest, URL: serverURL, Size: 6, MaxBytes: maxManifestBytes,
+	})
+	if swapped.Load() {
+		if err == nil {
+			t.Fatal("Download() accepted a partial file swapped after offset validation")
+		}
+		assertPathMissing(t, finalPath)
+		return
+	}
+	if err != nil {
+		t.Fatalf("Download() failed after the open handle prevented swapping: %v", err)
+	}
+	assertFileContent(t, finalPath, "abcdef")
 }
 
 func TestDownloaderRejectsUnsafeResponsesAndBoundsRetries(t *testing.T) {
@@ -254,7 +314,7 @@ func TestDownloaderEnforcesOverallDeadline(t *testing.T) {
 		maxAttempts:    3,
 		backoff:        func(context.Context, int) error { return nil },
 		syncFile:       func(file *os.File) error { return file.Sync() },
-		rename:         os.Rename,
+		rename:         replaceDownloadFile,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -265,8 +325,173 @@ func TestDownloaderEnforcesOverallDeadline(t *testing.T) {
 	}
 }
 
+func TestDownloaderSyncsRetryablePartialBeforeRetainingResumeState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("ETag", `"strong"`)
+		writer.Header().Set("Content-Length", "6")
+		_, _ = writer.Write([]byte("a"))
+	}))
+	defer server.Close()
+
+	stateDir := t.TempDir()
+	syncCalls := 0
+	downloader, err := newDownloaderWithOptions(server.Client(), stateDir, downloaderOptions{
+		overallTimeout: time.Second,
+		maxAttempts:    1,
+		backoff:        func(context.Context, int) error { return nil },
+		syncFile: func(file *os.File) error {
+			syncCalls++
+			info, statErr := file.Stat()
+			if statErr != nil {
+				return statErr
+			}
+			if info.Size() != 1 {
+				return fmt.Errorf("partial size at sync = %d, want 1", info.Size())
+			}
+			return file.Sync()
+		},
+		rename: replaceDownloadFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = downloader.Download(context.Background(), DownloadSpec{
+		Name: AssetManifest, URL: server.URL, Size: 6, MaxBytes: maxManifestBytes,
+	})
+	if err == nil {
+		t.Fatal("Download() error = nil, want premature EOF")
+	}
+	if syncCalls != 1 {
+		t.Fatalf("partial sync calls = %d, want 1", syncCalls)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, AssetManifest) + ".part"); err != nil {
+		t.Fatalf("durable partial missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, AssetManifest) + ".part.meta"); err != nil {
+		t.Fatalf("durable resume metadata missing: %v", err)
+	}
+}
+
+func TestDownloaderRejectsPartSwappedBeforeRename(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("ETag", `"strong"`)
+		_, _ = writer.Write([]byte("abcdef"))
+	}))
+	defer server.Close()
+
+	stateDir := t.TempDir()
+	partPath := filepath.Join(stateDir, AssetManifest) + ".part"
+	swapped := false
+	downloader, err := newDownloaderWithOptions(server.Client(), stateDir, downloaderOptions{
+		overallTimeout: time.Second,
+		maxAttempts:    1,
+		backoff:        func(context.Context, int) error { return nil },
+		syncFile:       func(file *os.File) error { return file.Sync() },
+		beforeRename: func() {
+			if err := os.Remove(partPath); err != nil {
+				t.Errorf("remove completed part: %v", err)
+				return
+			}
+			if err := os.WriteFile(partPath, []byte("UVWXYZ"), 0o600); err != nil {
+				t.Errorf("replace completed part: %v", err)
+				return
+			}
+			swapped = true
+		},
+		rename: replaceDownloadFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = downloader.Download(context.Background(), DownloadSpec{
+		Name: AssetManifest, URL: server.URL, Size: 6, MaxBytes: maxManifestBytes,
+	})
+	if !swapped {
+		t.Fatal("test did not replace the completed part")
+	}
+	if err == nil {
+		t.Fatal("Download() accepted a completed part swapped before rename")
+	}
+	assertPathMissing(t, filepath.Join(stateDir, AssetManifest))
+}
+
+func TestDownloaderRejectsSourceSwappedInsideRenameBoundary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write([]byte("abcdef"))
+	}))
+	defer server.Close()
+
+	stateDir := t.TempDir()
+	downloader, err := newDownloaderWithOptions(server.Client(), stateDir, downloaderOptions{
+		overallTimeout: time.Second,
+		maxAttempts:    1,
+		backoff:        func(context.Context, int) error { return nil },
+		syncFile:       func(file *os.File) error { return file.Sync() },
+		rename: func(root *os.Root, oldName, newName string) error {
+			if err := root.Remove(oldName); err != nil {
+				return err
+			}
+			if err := root.WriteFile(oldName, []byte("UVWXYZ"), 0o600); err != nil {
+				return err
+			}
+			return root.Rename(oldName, newName)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = downloader.Download(context.Background(), DownloadSpec{
+		Name: AssetManifest, URL: server.URL, Size: 6, MaxBytes: maxManifestBytes,
+	})
+	if err == nil {
+		t.Fatal("Download() accepted a source swapped inside the rename boundary")
+	}
+	assertPathMissing(t, filepath.Join(stateDir, AssetManifest))
+}
+
+func TestDownloaderRejectsStateDirectoryReplacementDuringRequest(t *testing.T) {
+	parent := t.TempDir()
+	stateDir := filepath.Join(parent, "state")
+	movedDir := filepath.Join(parent, "original-state")
+	if err := os.Mkdir(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var replaced atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if err := os.Rename(stateDir, movedDir); err != nil {
+			_, _ = writer.Write([]byte("x"))
+			return
+		}
+		if err := os.Mkdir(stateDir, 0o700); err != nil {
+			t.Errorf("create replacement state directory: %v", err)
+			return
+		}
+		replaced.Store(true)
+		writer.Header().Set("ETag", `"strong"`)
+		_, _ = writer.Write([]byte("x"))
+	}))
+	defer server.Close()
+
+	downloader := mustNewDownloader(t, server.Client(), stateDir)
+	_, err := downloader.Download(context.Background(), DownloadSpec{
+		Name: AssetManifest, URL: server.URL, Size: 1, MaxBytes: maxManifestBytes,
+	})
+	if replaced.Load() {
+		if err == nil {
+			t.Fatal("Download() accepted a replaced state directory")
+		}
+		assertPathMissing(t, filepath.Join(stateDir, AssetManifest))
+		assertPathMissing(t, filepath.Join(movedDir, AssetManifest))
+		return
+	}
+	if err != nil {
+		t.Fatalf("Download() failed after the open root prevented replacement: %v", err)
+	}
+	assertFileContent(t, filepath.Join(stateDir, AssetManifest), "x")
+}
+
 func TestDownloaderRejectsUnsafeStatePaths(t *testing.T) {
-	if _, err := NewDownloader(http.DefaultClient, "relative"); err == nil {
+	if _, err := NewDownloader("relative"); err == nil {
 		t.Fatal("relative state directory accepted")
 	}
 
@@ -302,6 +527,31 @@ func TestDownloaderRejectsUnsafeStatePaths(t *testing.T) {
 	assertFileContent(t, outside, "do not replace")
 }
 
+func TestNewDownloaderAlwaysUsesRestrictedNetworkBoundary(t *testing.T) {
+	requested := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requested <- struct{}{}
+		_, _ = writer.Write([]byte("x"))
+	}))
+	defer server.Close()
+
+	fetcher, err := NewDownloader(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fetcher.Download(context.Background(), DownloadSpec{
+		Name: AssetManifest, URL: server.URL, Size: 1, MaxBytes: maxManifestBytes,
+	})
+	if err == nil {
+		t.Fatal("production downloader accepted an unrestricted HTTP URL")
+	}
+	select {
+	case <-requested:
+		t.Fatal("production downloader reached the unrestricted server")
+	default:
+	}
+}
+
 func TestDownloaderRejectsSymlinkPartialState(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		_, _ = writer.Write([]byte("x"))
@@ -323,9 +573,40 @@ func TestDownloaderRejectsSymlinkPartialState(t *testing.T) {
 	assertFileContent(t, outside, "do not append")
 }
 
+func TestDownloaderRejectsWindowsJunctionStateDirectory(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows junction evidence")
+	}
+	parent := t.TempDir()
+	target := filepath.Join(parent, "target")
+	junction := filepath.Join(parent, "junction")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", junction, target).CombinedOutput()
+	if err != nil {
+		t.Fatalf("create nonprivileged junction: %v: %s", err, output)
+	}
+	t.Cleanup(func() {
+		if err := os.Remove(junction); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove junction: %v", err)
+		}
+	})
+
+	if _, err := NewDownloader(junction); err == nil {
+		t.Fatal("production downloader accepted a junction state directory")
+	}
+}
+
 func mustNewDownloader(t *testing.T, client *http.Client, stateDir string) ArtifactFetcher {
 	t.Helper()
-	downloader, err := NewDownloader(client, stateDir)
+	downloader, err := newDownloaderWithOptions(client, stateDir, downloaderOptions{
+		overallTimeout: defaultDownloadTimeout,
+		maxAttempts:    defaultMaxAttempts,
+		backoff:        defaultDownloadBackoff,
+		syncFile:       func(file *os.File) error { return file.Sync() },
+		rename:         replaceDownloadFile,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,4 +660,48 @@ func TestDownloaderIsSafeForConcurrentIndependentAssets(t *testing.T) {
 		}()
 	}
 	wait.Wait()
+}
+
+func TestDownloaderObservesCancellationWhileQueued(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		started <- struct{}{}
+		<-release
+		_, _ = writer.Write([]byte("x"))
+	}))
+	defer server.Close()
+
+	downloader := mustNewDownloader(t, server.Client(), t.TempDir())
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := downloader.Download(context.Background(), DownloadSpec{Name: AssetManifest, URL: server.URL, Size: 1, MaxBytes: maxManifestBytes})
+		firstDone <- err
+	}()
+	<-started
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := downloader.Download(canceled, DownloadSpec{Name: AssetChecksum, URL: server.URL, Size: 1, MaxBytes: maxChecksumBytes})
+		secondDone <- err
+	}()
+
+	select {
+	case err := <-secondDone:
+		if !errors.Is(err, context.Canceled) {
+			close(release)
+			<-firstDone
+			t.Fatalf("queued Download() error = %v, want context canceled", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		close(release)
+		<-firstDone
+		t.Fatal("queued Download() did not observe canceled context promptly")
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Download(): %v", err)
+	}
 }
