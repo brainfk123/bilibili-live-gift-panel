@@ -50,7 +50,7 @@ func TestComposeHostedHTTPMakesAllInvitationRoutesReachableWithSpecificity(t *te
 	auth := statusHandler(http.StatusAccepted)
 	admin := statusHandler(http.StatusNonAuthoritativeInfo)
 	invitation := statusHandler(http.StatusTeapot)
-	handler := composeHostedHTTP(healthyHostedDatabase{}, auth, admin, invitation, "runtime-csrf")
+	handler := composeHostedHTTP(healthyHostedDatabase{}, auth, admin, invitation, nil, "runtime-csrf")
 
 	tests := []struct {
 		method string
@@ -73,6 +73,27 @@ func TestComposeHostedHTTPMakesAllInvitationRoutesReachableWithSpecificity(t *te
 		handler.ServeHTTP(response, httptest.NewRequest(test.method, test.path, nil))
 		if response.Code != test.want {
 			t.Fatalf("%s %s status=%d want=%d", test.method, test.path, response.Code, test.want)
+		}
+	}
+}
+
+func TestComposeHostedHTTPMakesAllConfigurationRoutesReachableWithSpecificity(t *testing.T) {
+	auth := statusHandler(http.StatusAccepted)
+	admin := statusHandler(http.StatusNonAuthoritativeInfo)
+	invitation := statusHandler(http.StatusTeapot)
+	configuration := statusHandler(http.StatusCreated)
+	handler := composeHostedHTTP(healthyHostedDatabase{}, auth, admin, invitation, configuration, "runtime-csrf")
+
+	for _, route := range []struct{ method, path string }{
+		{http.MethodGet, "/api/configuration"},
+		{http.MethodPut, "/api/configuration/definition"},
+		{http.MethodPut, "/api/configuration/state"},
+		{http.MethodPut, "/api/configuration/room-suggestion"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))
+		if response.Code != http.StatusCreated {
+			t.Fatalf("%s %s status=%d want configuration handler", route.method, route.path, response.Code)
 		}
 	}
 }

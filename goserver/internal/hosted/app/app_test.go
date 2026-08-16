@@ -92,3 +92,22 @@ func TestBootstrapReturnsOnlyRuntimeCSRFAndRejectsQueries(t *testing.T) {
 		t.Fatalf("POST exposed bootstrap value: %q", response.Body.String())
 	}
 }
+
+func TestConfigurationMethodRoutesWinOverBroaderPrefixes(t *testing.T) {
+	configuration := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusTeapot) })
+	auth := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusAccepted) })
+	handler := New(Dependencies{DB: fakeHealth{}, Auth: auth, Configuration: configuration})
+
+	for _, route := range []struct{ method, path string }{
+		{http.MethodGet, "/api/configuration"},
+		{http.MethodPut, "/api/configuration/definition"},
+		{http.MethodPut, "/api/configuration/state"},
+		{http.MethodPut, "/api/configuration/room-suggestion"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))
+		if response.Code != http.StatusTeapot {
+			t.Fatalf("%s %s status=%d, want configuration handler", route.method, route.path, response.Code)
+		}
+	}
+}

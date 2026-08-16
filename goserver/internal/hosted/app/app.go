@@ -12,11 +12,12 @@ type healthChecker interface {
 
 // Dependencies contains the hosted HTTP application's external services.
 type Dependencies struct {
-	DB         healthChecker
-	Auth       http.Handler
-	Admin      http.Handler
-	Invitation http.Handler
-	CSRFToken  string
+	DB            healthChecker
+	Auth          http.Handler
+	Admin         http.Handler
+	Invitation    http.Handler
+	Configuration http.Handler
+	CSRFToken     string
 }
 
 // New builds the hosted HTTP handler.
@@ -57,6 +58,14 @@ func New(dependencies Dependencies) http.Handler {
 			CSRFToken string `json:"csrfToken"`
 		}{CSRFToken: dependencies.CSRFToken})
 	})
+	// Keep these exact method-routes ahead of broad authentication and admin
+	// prefixes so requests cannot fall through to a less specific handler.
+	if dependencies.Configuration != nil {
+		mux.Handle("GET /api/configuration", dependencies.Configuration)
+		mux.Handle("PUT /api/configuration/definition", dependencies.Configuration)
+		mux.Handle("PUT /api/configuration/state", dependencies.Configuration)
+		mux.Handle("PUT /api/configuration/room-suggestion", dependencies.Configuration)
+	}
 	if dependencies.Auth != nil {
 		mux.Handle("/api/auth/", dependencies.Auth)
 		mux.Handle("/api/admin/accounts/", dependencies.Auth)

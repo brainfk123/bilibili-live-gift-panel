@@ -19,6 +19,7 @@ type Repository interface {
 	LoadActive(context.Context, int64) (Version, State, error)
 	CompareAndSwapState(context.Context, UpdateStateCommand) (State, error)
 	Activate(context.Context, ActivationCommand) (Version, State, error)
+	UpsertRoomSuggestion(context.Context, RoomSuggestion) error
 }
 
 // UpdateStateCommand atomically replaces runtime only if its revision is still
@@ -41,6 +42,14 @@ type ActivationCommand struct {
 	Source           string
 	MigrationJobID   *int64
 	At               time.Time
+}
+
+// RoomSuggestion is an untrusted room proposal awaiting a separate runtime
+// confirmation. It deliberately has no target-room or session fields.
+type RoomSuggestion struct {
+	AccountID   int64
+	RoomID      string
+	SuggestedAt time.Time
 }
 
 type sqlRepository struct {
@@ -221,6 +230,17 @@ func (repository *sqlRepository) Activate(ctx context.Context, command Activatio
 	return Version{ID: versionID, AccountID: command.AccountID, Number: number, Definition: command.Definition, Source: command.Source, CreatedAt: command.At}, State{AccountID: command.AccountID, ConfigVersionID: versionID, Revision: nextRevision, Runtime: command.Runtime, UpdatedAt: command.At}, nil
 }
 
+func (repository *sqlRepository) UpsertRoomSuggestion(ctx context.Context, suggestion RoomSuggestion) error {
+	if !repository.ready() || suggestion.AccountID <= 0 || !validRoomID(suggestion.RoomID) || suggestion.SuggestedAt.IsZero() {
+		return ErrInvalidInput
+	}
+	result, err := repository.db.ExecContext(ctx, "INSERT INTO account_room_suggestions (account_id, room_id, suggested_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE room_id = VALUES(room_id), suggested_at = VALUES(suggested_at)", suggestion.AccountID, suggestion.RoomID, suggestion.SuggestedAt)
+	if err != nil || !oneOrTwoRows(result) {
+		return ErrUnavailable
+	}
+	return nil
+}
+
 func marshalDefinition(definition Definition) ([]byte, error) {
 	return json.Marshal(definition)
 }
@@ -231,6 +251,18 @@ func marshalRuntime(runtime RuntimeState) ([]byte, error) {
 
 func validSource(source string) bool {
 	return source == "manual" || source == "migration" || source == "rollback"
+}
+
+func validRoomID(roomID string) bool {
+	if len(roomID) == 0 || len(roomID) > 128 {
+		return false
+	}
+	for _, character := range roomID {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func oneRow(result sql.Result) bool {
