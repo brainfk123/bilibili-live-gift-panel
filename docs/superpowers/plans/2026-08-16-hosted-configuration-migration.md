@@ -114,6 +114,8 @@ Run focused/race tests and full Go tests; commit the listed files as `feat: vers
 - Create: `goserver/internal/hosted/configuration/service_test.go`
 - Create: `goserver/internal/hosted/configuration/http.go`
 - Create: `goserver/internal/hosted/configuration/http_test.go`
+- Modify: `goserver/internal/hosted/configuration/repository.go`
+- Modify: `goserver/internal/hosted/configuration/repository_test.go`
 - Modify: `goserver/internal/hosted/app/app.go`
 - Modify: `goserver/internal/hosted/app/app_test.go`
 - Modify: `goserver/cmd/hosted/main.go`
@@ -136,7 +138,7 @@ type SaveStateCommand struct { ExpectedRevision uint64; Runtime RuntimeState }
 type RoomSuggestionCommand struct { RoomID string }
 ```
 
-The service receives `accountID int64` separately from trusted middleware context. Normalize through `Join` and `gameplay.Normalize` before any write. Saving a definition uses `Activate` with both expected version and expected state revision so a concurrent runtime update cannot be overwritten; for an account without active configuration it uses `DefaultRuntime`. `SuggestRoom` only creates/replaces the account's pending suggestion and never changes a target room or `live_sessions`.
+The service receives `accountID int64` separately from trusted middleware context. Normalize through `Join` and `gameplay.Normalize` before any write. Saving a definition uses `Activate` with both expected version and expected state revision so a concurrent runtime update cannot be overwritten; for an account without active configuration it uses `DefaultRuntime`. Extend the Task 1 repository with one narrow `UpsertRoomSuggestion(ctx, RoomSuggestion)` command so SQL ownership remains in the repository layer. `SuggestRoom` only creates/replaces the account's pending suggestion and never changes a target room or `live_sessions`.
 
 - [ ] **Step 3: Add HTTP routes**
 
@@ -157,7 +159,7 @@ Run configuration service/HTTP tests with `-count=10`, race tests, then full Go 
 
 - [ ] **Step 5: Commit**
 
-Stage only configuration/app files and commit `feat: add hosted configuration API`.
+Stage only the listed configuration/app/main files and commit `feat: add hosted configuration API`.
 
 ---
 
