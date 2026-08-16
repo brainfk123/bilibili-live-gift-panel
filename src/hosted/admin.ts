@@ -84,21 +84,25 @@ export interface RecoveryViewState {
   recoveryPassword?: string;
   canConfirm: boolean;
   acknowledged: Record<'totp' | 'password' | 'archive', boolean>;
+  error?: string;
 }
 
 export function createAdminRecoveryFlow(api: RecoveryAPI, render: (state: RecoveryViewState) => void) {
   let preparation: RecoveryPreparation | undefined;
   let generation = 0;
+  let error: string | undefined;
   const acknowledged = new Set<'totp' | 'password' | 'archive'>();
   const publish = (): void => render({
     archiveDelivery: 'email', totpUri: preparation?.totpUri, recoveryPassword: preparation?.recoveryPassword,
     canConfirm: Boolean(preparation && acknowledged.size === 3),
     acknowledged: { totp: acknowledged.has('totp'), password: acknowledged.has('password'), archive: acknowledged.has('archive') },
+    ...(error ? { error } : {}),
   });
   const clear = (): void => { generation += 1; preparation = undefined; acknowledged.clear(); publish(); };
   return Object.freeze({
     async prepare(challengeId: string, recoveryCode: string): Promise<void> {
       const current = ++generation;
+      error = undefined;
       const result = await api.prepareRecovery(challengeId, recoveryCode);
       if (current !== generation) return;
       preparation = result;
@@ -111,10 +115,53 @@ export function createAdminRecoveryFlow(api: RecoveryAPI, render: (state: Recove
     async confirm(totp: string): Promise<void> {
       if (!preparation || acknowledged.size !== 3) throw new HostedAPIError('invalid_request', 400);
       const token = preparation.handoffToken;
-      await api.confirmRecovery(token, totp);
+      try { await api.confirmRecovery(token, totp); } catch (cause) {
+        error = '确认失败，请重试'; publish(); throw cause;
+      }
       clear();
     },
     close: clear,
+  });
+}
+
+export interface AdminOneTimeSecretPresentation {
+  title: string;
+  copyLabel: string;
+  value: string;
+}
+
+export interface AdminOneTimeSecretState {
+  inFlight: boolean;
+  presentation?: AdminOneTimeSecretPresentation;
+}
+
+export function createAdminOneTimeSecretFlow(render: (state: AdminOneTimeSecretState) => void) {
+  let presentation: AdminOneTimeSecretPresentation | undefined;
+  let inFlight = false;
+  let disposed = false;
+  let generation = 0;
+  const clearPresentation = (): void => {
+    if (presentation) presentation.value = '';
+    presentation = undefined;
+  };
+  const publish = (): void => render({ inFlight, ...(presentation ? { presentation: { ...presentation } } : {}) });
+  return Object.freeze({
+    async run(load: () => Promise<AdminOneTimeSecretPresentation>): Promise<void> {
+      if (disposed || inFlight) return;
+      clearPresentation(); inFlight = true; const current = ++generation; publish();
+      let result: AdminOneTimeSecretPresentation;
+      try { result = await load(); } catch (error) {
+        if (current === generation) { inFlight = false; publish(); }
+        throw error;
+      }
+      if (disposed || current !== generation) { result.value = ''; return; }
+      inFlight = false; presentation = result; publish();
+    },
+    async copy(clipboard: { writeText(value: string): Promise<void> }): Promise<void> {
+      if (presentation?.value) await clipboard.writeText(presentation.value);
+    },
+    close(): void { generation += 1; inFlight = false; clearPresentation(); publish(); },
+    dispose(): void { disposed = true; generation += 1; inFlight = false; clearPresentation(); publish(); },
   });
 }
 
@@ -136,13 +183,14 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
   let recoveryProofGeneration = 0;
   let rebindProof: Challenge | undefined;
   let recoveryFlow: ReturnType<typeof createAdminRecoveryFlow> | undefined;
+  let adminSecretFlow: ReturnType<typeof createAdminOneTimeSecretFlow>;
   let clearTransientSecret: (() => void) | undefined;
   const secretInputs = new Set<HTMLInputElement>();
   const status = document.createElement('p'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
 
   const renderDashboard = (): void => {
     if (disposed) return;
-    clearTransientSecret?.(); clearTransientSecret = undefined;
+    adminSecretFlow.close();
     const panel = document.createElement('main'); panel.className = 'hosted-shell hosted-panel';
     const title = document.createElement('h1'); title.textContent = '管理员控制台'; panel.append(title, status);
     const [recentLabel, recent] = labelledInput(document, '当前 TOTP（高风险操作需要）', 'password'); secretInputs.add(recent); panel.append(recentLabel);
@@ -177,12 +225,18 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
 
     const invitation = document.createElement('section'); const invitationTitle = document.createElement('h2'); invitationTitle.textContent = '管理员邀请码'; invitation.append(invitationTitle);
     invitation.append(button(document, '生成不限额度邀请码', () => guarded(async () => {
-      const generated = await api.generateInvitation(true); showOneTimeSecret('邀请码仅显示一次', generated.code, '复制邀请码');
+      await adminSecretFlow.run(async () => {
+        const generated = await api.generateInvitation(true);
+        return { title: '邀请码仅显示一次', value: generated.code, copyLabel: '复制邀请码' };
+      });
     }))); panel.append(invitation);
 
     const recovery = document.createElement('section'); const recoveryTitle = document.createElement('h2'); recoveryTitle.textContent = '管理员恢复'; recovery.append(recoveryTitle);
     recovery.append(button(document, '发送新的加密恢复附件', () => guarded(async () => {
-      const result = await api.sendRecoveryArchive(); showOneTimeSecret('附件已发送到管理员邮箱', result.recoveryPassword, '复制解密密码');
+      await adminSecretFlow.run(async () => {
+        const result = await api.sendRecoveryArchive();
+        return { title: '附件已发送到管理员邮箱', value: result.recoveryPassword, copyLabel: '复制解密密码' };
+      });
     })));
     const [codeLabel, oldCode] = labelledInput(document, '旧恢复码', 'password'); secretInputs.add(oldCode); recovery.append(codeLabel);
     recovery.append(button(document, '创建恢复用 B 站验证', () => {
@@ -207,25 +261,33 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
     panel.append(recovery); root.replaceChildren(panel);
   };
 
-  const showOneTimeSecret = (titleText: string, value: string, copyLabel: string): void => {
-    const dialog = document.createElement('dialog'); dialog.setAttribute('aria-modal', 'true');
-    const title = document.createElement('h2'); title.textContent = titleText; const secret = document.createElement('code'); secret.textContent = value;
-    const close = (): void => { value = ''; secret.textContent = ''; dialog.remove(); clearTransientSecret = undefined; };
-    clearTransientSecret = close;
-    dialog.append(title, secret, button(document, copyLabel, () => { void navigator.clipboard.writeText(value); }), button(document, '已保存并关闭', close));
+  const showOneTimeSecret = (presentation: AdminOneTimeSecretPresentation): void => {
+    const dialog = document.createElement('dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.setAttribute('aria-labelledby', 'admin-one-time-secret-title');
+    const title = document.createElement('h2'); title.id = 'admin-one-time-secret-title'; title.textContent = presentation.title;
+    const secret = document.createElement('code'); secret.textContent = presentation.value;
+    const closeDOM = (): void => { presentation.value = ''; secret.textContent = ''; dialog.remove(); clearTransientSecret = undefined; };
+    clearTransientSecret?.(); clearTransientSecret = closeDOM;
+    const close = (): void => adminSecretFlow.close();
+    dialog.append(title, secret, button(document, presentation.copyLabel, () => { void adminSecretFlow.copy(navigator.clipboard); }), button(document, '已保存并关闭', close));
     dialog.addEventListener('cancel', (event) => { event.preventDefault(); close(); }); root.firstElementChild?.append(dialog);
     if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.open = true;
   };
 
-  const renderRecovery = (state: RecoveryViewState): void => {
+  adminSecretFlow = createAdminOneTimeSecretFlow((state) => {
     clearTransientSecret?.(); clearTransientSecret = undefined;
+    if (state.presentation) showOneTimeSecret(state.presentation);
+  });
+
+  const renderRecovery = (state: RecoveryViewState): void => {
+    adminSecretFlow.close();
     if (!state.totpUri || !state.recoveryPassword) { renderDashboard(); return; }
     const panel = document.createElement('main'); panel.className = 'hosted-shell hosted-panel';
     const title = document.createElement('h1'); title.textContent = '保存新的管理员恢复资料';
+    const recoveryStatus = document.createElement('p'); recoveryStatus.setAttribute('role', 'alert'); recoveryStatus.setAttribute('aria-live', 'assertive'); recoveryStatus.textContent = state.error ?? '';
     const note = document.createElement('p'); note.textContent = '加密恢复附件已发送到管理员邮箱，网页只显示独立解密密码。';
     const uri = document.createElement('code'); uri.textContent = state.totpUri; const password = document.createElement('code'); password.textContent = state.recoveryPassword;
     const acknowledgements = ['totp', 'password', 'archive'] as const;
-    panel.append(title, note, uri, password);
+    panel.append(title, recoveryStatus, note, uri, password);
     for (const item of acknowledgements) {
       const label = document.createElement('label'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox';
       checkbox.checked = state.acknowledged[item];
@@ -240,7 +302,7 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
   };
 
   const renderLogin = (): void => {
-    clearTransientSecret?.(); clearTransientSecret = undefined;
+    adminSecretFlow.close();
     const panel = document.createElement('main'); panel.className = 'hosted-shell hosted-panel'; const title = document.createElement('h1'); title.textContent = '管理员登录';
     const qr = document.createElement('img'); qr.className = 'hosted-qr'; qr.alt = '管理员 B 站登录二维码'; const [totpLabel, totp] = labelledInput(document, 'TOTP', 'password'); secretInputs.add(totp);
     panel.append(title, status, qr, button(document, '创建 B 站验证二维码', () => { void loginFlow.beginProof().then((proof) => { qr.src = proof.qrImage; status.textContent = '扫码后输入 TOTP'; }); }), totpLabel,
@@ -256,6 +318,7 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
   renderLogin();
   return Object.freeze({ dispose: async () => {
     disposed = true; recoveryProofGeneration += 1; recoveryFlow?.close(); recoveryFlow = undefined;
+    adminSecretFlow.dispose();
     clearTransientSecret?.(); clearTransientSecret = undefined;
     for (const input of secretInputs) input.value = '';
     secretInputs.clear();

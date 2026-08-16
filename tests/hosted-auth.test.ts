@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { HostedAPI, HostedAPIError } from '../src/hosted/api';
 import { createAuthFlow, mountAuthView } from '../src/hosted/auth';
-import { createAdminAccountFlow, createAdminFlow } from '../src/hosted/admin';
+import { createAdminAccountFlow, createAdminFlow, createAdminOneTimeSecretFlow, mountAdminView } from '../src/hosted/admin';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -75,6 +75,19 @@ describe('HostedAPI authentication contract', () => {
     mode = 'expired';
     await expect(api.pollLogin('challenge')).rejects.toMatchObject({ code: 'invalid_response' });
   });
+
+  it('accepts the real verified poll envelope with its expiry and rejects status-inconsistent account mutations', async () => {
+    const expiresAt = '2030-01-01T00:00:00Z';
+    let responseBody: unknown = { status: 'verified', expiresAt };
+    const api = await HostedAPI.connect(async (input) => input === '/api/bootstrap'
+      ? json({ csrfToken: 'csrf' })
+      : json(responseBody));
+    await expect(api.pollLogin('challenge')).resolves.toEqual({ status: 'verified', expiresAt });
+    responseBody = { accountId: 7, status: 'active' };
+    await expect(api.disableAccount(7, 'security')).rejects.toMatchObject({ code: 'invalid_response' });
+    responseBody = { accountId: 7, status: 'disabled' };
+    await expect(api.enableAccount(7, 'appeal')).rejects.toMatchObject({ code: 'invalid_response' });
+  });
 });
 
 describe('Bilibili authentication lifecycle', () => {
@@ -95,7 +108,7 @@ describe('Bilibili authentication lifecycle', () => {
     const onExit = vi.fn();
     const mounted = mountAuthView(root, {
       beginLogin: vi.fn(async () => ({ challengeId: 'secret-challenge', qrImage: 'https://qr.invalid/secret', expiresAt: '2030-01-01T00:00:00Z' })),
-      pollLogin: vi.fn(async () => ({ status: 'pending' as const })), createSession: vi.fn(), cancelLogin: cancel,
+      pollLogin: vi.fn(async () => ({ status: 'pending' as const, expiresAt: '2030-01-01T00:00:00Z' })), createSession: vi.fn(), cancelLogin: cancel, logout: vi.fn(async () => undefined),
     }, { onSignedIn: vi.fn(), onRegistrationRequired: vi.fn(), onExit }, { setInterval: () => 1, clearInterval: vi.fn() });
     await mounted.ready;
     expect(JSON.stringify(root)).toContain('https://qr.invalid/secret');
@@ -111,8 +124,8 @@ describe('Bilibili authentication lifecycle', () => {
     const cancel = vi.fn(async () => undefined);
     const api = {
       beginLogin: vi.fn(async () => ({ challengeId: 'challenge', qrImage: 'https://qr.invalid/x', expiresAt: '2030-01-01T00:00:00Z' })),
-      pollLogin: vi.fn().mockResolvedValueOnce({ status: 'pending' }).mockResolvedValueOnce({ status: 'verified' }),
-      createSession: vi.fn(async () => undefined), cancelLogin: cancel,
+      pollLogin: vi.fn().mockResolvedValueOnce({ status: 'pending', expiresAt: '2030-01-01T00:00:00Z' }).mockResolvedValueOnce({ status: 'verified', expiresAt: '2030-01-01T00:00:00Z' }),
+      createSession: vi.fn(async () => undefined), cancelLogin: cancel, logout: vi.fn(async () => undefined),
     };
     const statuses: string[] = [];
     const flow = createAuthFlow(api, { onStatus: (status) => statuses.push(status), onSignedIn: vi.fn(), onRegistrationRequired: vi.fn() });
@@ -131,8 +144,8 @@ describe('Bilibili authentication lifecycle', () => {
     const registration = vi.fn();
     const api = {
       beginLogin: vi.fn(async () => ({ challengeId: 'challenge', qrImage: 'qr', expiresAt: '2030-01-01T00:00:00Z' })),
-      pollLogin: vi.fn(async () => ({ status: 'registration_required' as const, registrationIntent: 'one-shot-intent' })),
-      createSession: vi.fn(), cancelLogin: vi.fn(async () => undefined),
+      pollLogin: vi.fn(async () => ({ status: 'registration_required' as const, registrationIntent: 'one-shot-intent', expiresAt: '2030-01-01T00:00:00Z' })),
+      createSession: vi.fn(), cancelLogin: vi.fn(async () => undefined), logout: vi.fn(async () => undefined),
     };
     const flow = createAuthFlow(api, { onStatus: vi.fn(), onSignedIn: vi.fn(), onRegistrationRequired: registration });
     await flow.start();
@@ -146,7 +159,7 @@ describe('Bilibili authentication lifecycle', () => {
     const cancel = vi.fn(async () => undefined);
     const api = {
       beginLogin: vi.fn(async () => ({ challengeId: 'challenge', qrImage: 'qr', expiresAt: '2030-01-01T00:00:00Z' })),
-      pollLogin: vi.fn(async () => ({ status: 'expired' as const })), createSession: vi.fn(), cancelLogin: cancel,
+      pollLogin: vi.fn(async () => ({ status: 'expired' as const })), createSession: vi.fn(), cancelLogin: cancel, logout: vi.fn(async () => undefined),
     };
     const statuses: string[] = [];
     const flow = createAuthFlow(api, { onStatus: (status) => statuses.push(status), onSignedIn: vi.fn(), onRegistrationRequired: vi.fn() });
@@ -157,7 +170,7 @@ describe('Bilibili authentication lifecycle', () => {
     expect(statuses).toEqual(['pending', 'expired']);
     expect(cancel).not.toHaveBeenCalled();
 
-    const active = createAuthFlow({ ...api, pollLogin: vi.fn(async () => ({ status: 'pending' as const })) }, { onStatus: vi.fn(), onSignedIn: vi.fn(), onRegistrationRequired: vi.fn() });
+    const active = createAuthFlow({ ...api, pollLogin: vi.fn(async () => ({ status: 'pending' as const, expiresAt: '2030-01-01T00:00:00Z' })) }, { onStatus: vi.fn(), onSignedIn: vi.fn(), onRegistrationRequired: vi.fn() });
     await active.start();
     await active.dispose();
     await active.dispose();
@@ -168,7 +181,7 @@ describe('Bilibili authentication lifecycle', () => {
     let release!: (challenge: { challengeId: string; qrImage: string; expiresAt: string }) => void;
     const begin = new Promise<{ challengeId: string; qrImage: string; expiresAt: string }>((resolve) => { release = resolve; });
     const cancel = vi.fn(async () => undefined);
-    const flow = createAuthFlow({ beginLogin: () => begin, pollLogin: vi.fn(), createSession: vi.fn(), cancelLogin: cancel }, { onStatus: vi.fn(), onSignedIn: vi.fn(), onRegistrationRequired: vi.fn() });
+    const flow = createAuthFlow({ beginLogin: () => begin, pollLogin: vi.fn(), createSession: vi.fn(), cancelLogin: cancel, logout: vi.fn(async () => undefined) }, { onStatus: vi.fn(), onSignedIn: vi.fn(), onRegistrationRequired: vi.fn() });
     const starting = flow.start();
     const disposing = flow.dispose();
     release({ challengeId: 'late-challenge', qrImage: 'qr', expiresAt: '2030-01-01T00:00:00Z' });
@@ -180,11 +193,27 @@ describe('Bilibili authentication lifecycle', () => {
     const cancel = vi.fn(async () => undefined);
     const flow = createAuthFlow({
       beginLogin: vi.fn(async () => ({ challengeId: 'verified-but-not-consumed', qrImage: 'qr', expiresAt: '2030-01-01T00:00:00Z' })),
-      pollLogin: vi.fn(async () => ({ status: 'verified' as const })),
-      createSession: vi.fn(async () => { throw new Error('network unavailable'); }), cancelLogin: cancel,
+      pollLogin: vi.fn(async () => ({ status: 'verified' as const, expiresAt: '2030-01-01T00:00:00Z' })),
+      createSession: vi.fn(async () => { throw new Error('network unavailable'); }), cancelLogin: cancel, logout: vi.fn(async () => undefined),
     }, { onStatus: vi.fn(), onSignedIn: vi.fn(), onRegistrationRequired: vi.fn() });
     await flow.start(); await expect(flow.poll()).rejects.toThrow('network unavailable'); await flow.dispose();
     expect(cancel).toHaveBeenCalledWith('verified-but-not-consumed');
+  });
+
+  it('logs out a site session that finishes after unmount and never announces sign-in', async () => {
+    let finishSession!: () => void;
+    const createSession = new Promise<void>((resolve) => { finishSession = resolve; });
+    const createSessionCall = vi.fn(() => createSession);
+    const logout = vi.fn(async () => undefined); const signedIn = vi.fn();
+    const flow = createAuthFlow({
+      beginLogin: vi.fn(async () => ({ challengeId: 'late-session', qrImage: 'qr', expiresAt: '2030-01-01T00:00:00Z' })),
+      pollLogin: vi.fn(async () => ({ status: 'verified' as const, expiresAt: '2030-01-01T00:00:00Z' })),
+      createSession: createSessionCall, cancelLogin: vi.fn(async () => undefined), logout,
+    }, { onStatus: vi.fn(), onSignedIn: signedIn, onRegistrationRequired: vi.fn() });
+    await flow.start(); const polling = flow.poll(); await vi.waitFor(() => expect(createSessionCall).toHaveBeenCalledTimes(1));
+    const disposing = flow.dispose(); finishSession(); await polling; await disposing;
+    expect(logout).toHaveBeenCalledTimes(1);
+    expect(signedIn).not.toHaveBeenCalled();
   });
 });
 
@@ -232,5 +261,84 @@ describe('administrator flow', () => {
     const flow = createAdminFlow(api);
     await flow.beginProof(); await flow.beginProof(); await flow.dispose();
     expect(cancel.mock.calls).toEqual([['old'], ['fresh']]);
+  });
+
+  it('serializes one-time admin secrets and drops late results after close or dispose', async () => {
+    let release!: (value: { title: string; copyLabel: string; value: string }) => void;
+    const pending = new Promise<{ title: string; copyLabel: string; value: string }>((resolve) => { release = resolve; });
+    const states: unknown[] = [];
+    const flow = createAdminOneTimeSecretFlow((state) => states.push(structuredClone(state)));
+    const load = vi.fn(() => pending);
+    const first = flow.run(load); const duplicate = flow.run(load);
+    expect(load).toHaveBeenCalledTimes(1);
+    flow.dispose();
+    release({ title: '一次性秘密', copyLabel: '复制', value: 'LATE-ADMIN-SECRET' });
+    await first; await duplicate;
+    expect(JSON.stringify(states)).not.toContain('LATE-ADMIN-SECRET');
+  });
+
+  it('wipes an old admin secret before replacing it and clears the replacement on close', async () => {
+    const states: unknown[] = [];
+    const flow = createAdminOneTimeSecretFlow((state) => states.push(structuredClone(state)));
+    await flow.run(async () => ({ title: '旧秘密', copyLabel: '复制', value: 'OLD-ADMIN-SECRET' }));
+    let release!: (value: { title: string; copyLabel: string; value: string }) => void;
+    const pending = new Promise<{ title: string; copyLabel: string; value: string }>((resolve) => { release = resolve; });
+    const replacing = flow.run(() => pending);
+    expect(JSON.stringify(states.at(-1))).not.toContain('OLD-ADMIN-SECRET');
+    release({ title: '新秘密', copyLabel: '复制', value: 'NEW-ADMIN-SECRET' }); await replacing;
+    expect(JSON.stringify(states.at(-1))).toContain('NEW-ADMIN-SECRET');
+    flow.close();
+    expect(JSON.stringify(states.at(-1))).not.toContain('NEW-ADMIN-SECRET');
+  });
+
+  it('erases an open admin secret before an earlier proof rerenders the dashboard', async () => {
+    class Element {
+      children: Element[] = []; parent?: Element; textContent = ''; className = ''; id = ''; type = ''; value = ''; autocomplete = ''; inputMode = ''; src = ''; alt = ''; disabled = false; open = false;
+      attributes = new Map<string, string>(); listeners = new Map<string, () => void>();
+      constructor(readonly tagName: string, readonly ownerDocument: { createElement(tag: string): Element }) {}
+      get firstElementChild() { return this.children[0]; }
+      append(...nodes: Element[]) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
+      replaceChildren(...nodes: Element[]) { for (const child of this.children) child.parent = undefined; this.children = []; this.append(...nodes); }
+      remove() { if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this); this.parent = undefined; }
+      setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+      addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); }
+    }
+    const document = { createElement: (tag: string): Element => new Element(tag, document) };
+    const root = new Element('div', document) as unknown as HTMLElement;
+    const findButton = (label: string): Element | undefined => {
+      const visit = (node: Element): Element | undefined => node.tagName === 'button' && node.textContent === label
+        ? node : node.children.map(visit).find(Boolean);
+      return visit(root as unknown as Element);
+    };
+    let releaseRebind!: (challenge: { challengeId: string; qrImage: string; expiresAt: string }) => void;
+    const pendingRebind = new Promise<{ challengeId: string; qrImage: string; expiresAt: string }>((resolve) => { releaseRebind = resolve; });
+    const beginAdminProof = vi.fn()
+      .mockResolvedValueOnce({ challengeId: 'login-proof', qrImage: 'login-qr', expiresAt: '2030-01-01T00:00:00Z' })
+      .mockImplementationOnce(() => pendingRebind);
+    const api = {
+      beginAdminProof, cancelAdminProof: vi.fn(async () => undefined), adminLogin: vi.fn(async () => undefined), verifyRecentTOTP: vi.fn(async () => undefined),
+      disableAccount: vi.fn(), enableAccount: vi.fn(), adjustQuota: vi.fn(), rebindAccount: vi.fn(),
+      generateInvitation: vi.fn(async () => ({ id: 8, codeHint: '****LAST', code: 'ONE-TIME-ADMIN-CODE', status: 'active' as const, createdAt: '2026-08-16T00:00:00Z', expiresAt: '2026-08-17T00:00:00Z' })),
+      sendRecoveryArchive: vi.fn(), prepareRecovery: vi.fn(), confirmRecovery: vi.fn(),
+    };
+    const writeText = vi.fn(async () => undefined);
+    const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText } } });
+    try {
+      const mounted = mountAdminView(root, api as unknown as HostedAPI);
+      findButton('创建 B 站验证二维码')?.listeners.get('click')?.(); await vi.waitFor(() => expect(beginAdminProof).toHaveBeenCalledTimes(1));
+      findButton('登录管理员控制台')?.listeners.get('click')?.(); await vi.waitFor(() => expect(findButton('创建新的 B 站身份验证')).toBeDefined());
+      findButton('创建新的 B 站身份验证')?.listeners.get('click')?.(); await vi.waitFor(() => expect(beginAdminProof).toHaveBeenCalledTimes(2));
+      findButton('生成不限额度邀请码')?.listeners.get('click')?.(); await vi.waitFor(() => expect(findButton('复制邀请码')).toBeDefined());
+      const staleCopy = findButton('复制邀请码');
+      releaseRebind({ challengeId: 'rebind-proof', qrImage: 'rebind-qr', expiresAt: '2030-01-01T00:00:00Z' });
+      await vi.waitFor(() => expect(findButton('复制邀请码')).toBeUndefined());
+      staleCopy?.listeners.get('click')?.(); await Promise.resolve();
+      expect(writeText).not.toHaveBeenCalled();
+      await mounted.dispose();
+    } finally {
+      if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator);
+      else Reflect.deleteProperty(globalThis, 'navigator');
+    }
   });
 });

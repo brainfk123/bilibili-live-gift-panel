@@ -1,8 +1,53 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createInvitationFlow } from '../src/hosted/invitations';
+import { HostedAPI } from '../src/hosted/api';
+import { createInvitationFlow, mountInvitationView } from '../src/hosted/invitations';
 import { createAdminRecoveryFlow } from '../src/hosted/admin';
 
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+}
+
 describe('streamer invitation view lifecycle', () => {
+  it('normalizes an omitted final streamer quota to zero and rejects non-masked code hints', async () => {
+    const generated = { id: 6, codeHint: '****LAST', code: 'FULL-LAST-CODE', status: 'active', createdAt: '2026-08-16T00:00:00Z', expiresAt: '2026-08-17T00:00:00Z' };
+    let payload: unknown = generated;
+    const api = await HostedAPI.connect(async (input, init) => input === '/api/bootstrap'
+      ? new Response(JSON.stringify({ csrfToken: 'csrf' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      : new Response(JSON.stringify(payload), { status: input === '/api/invitations' && init?.method === 'POST' ? 201 : 200, headers: { 'Content-Type': 'application/json' } }));
+    await expect(api.generateInvitation()).resolves.toEqual(expect.objectContaining({ remainingQuota: 0 }));
+    const { code: _code, ...record } = generated;
+    payload = { remainingQuota: 0, invitations: [{ ...record, codeHint: 'notmask!', status: 'revoked' }] };
+    await expect(api.listInvitations()).rejects.toMatchObject({ code: 'invalid_response' });
+  });
+
+  it('displays and enforces the final zero quota when generate omits it', async () => {
+    class Element {
+      children: Element[] = []; textContent = ''; className = ''; type = ''; disabled = false; open = false; id = '';
+      listeners = new Map<string, () => void>(); attributes = new Map<string, string>();
+      constructor(readonly tagName: string, readonly ownerDocument: { createElement(tag: string): Element }) {}
+      append(...nodes: Element[]) { this.children.push(...nodes); }
+      replaceChildren(...nodes: Element[]) { this.children = nodes; }
+      setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+      addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); }
+    }
+    const document = { createElement: (tag: string): Element => new Element(tag, document) };
+    const root = new Element('div', document) as unknown as HTMLElement;
+    const generated = { id: 6, codeHint: '****LAST', code: 'FULL-LAST-CODE', status: 'active', createdAt: '2026-08-16T00:00:00Z', expiresAt: '2026-08-17T00:00:00Z' };
+    const api = await HostedAPI.connect(async (input, init) => {
+      if (input === '/api/bootstrap') return json({ csrfToken: 'csrf' });
+      if (input === '/api/invitations' && init?.method === 'GET') return json({ remainingQuota: 1, invitations: [] });
+      return json(generated, 201);
+    });
+    const mounted = mountInvitationView(root, api); await mounted.ready;
+    let panel = (root as unknown as Element).children[0];
+    panel.children.find((child) => child.tagName === 'button' && child.textContent === '生成邀请码')?.listeners.get('click')?.();
+    await vi.waitFor(() => {
+      panel = (root as unknown as Element).children[0];
+      expect(panel.children.find((child) => child.tagName === 'p' && child.textContent.startsWith('剩余邀请码额度'))?.textContent).toBe('剩余邀请码额度：0');
+    });
+    expect(panel.children.find((child) => child.tagName === 'button' && child.textContent === '生成邀请码')?.disabled).toBe(true);
+    mounted.dispose();
+  });
   it('renders quota and masked permanent history including revoked rows', async () => {
     const render = vi.fn();
     const api = { listInvitations: vi.fn(async () => ({ remainingQuota: 2, invitations: [{ id: 9, codeHint: '••••WXYZ', status: 'revoked' as const, createdAt: '2026-08-16T00:00:00Z', expiresAt: '2026-08-17T00:00:00Z', revokedAt: '2026-08-16T01:00:00Z' }] })) };
@@ -33,6 +78,30 @@ describe('streamer invitation view lifecycle', () => {
     expect(globalThis.location?.href ?? '').not.toContain('invite-secret');
   });
 
+  it('does not transition a registration view when redeem completes after unmount', async () => {
+    class Element {
+      children: Element[] = []; textContent = ''; className = ''; type = ''; autocomplete = ''; required = false; value = '';
+      listeners = new Map<string, () => void>(); attributes = new Map<string, string>();
+      constructor(readonly tagName: string, readonly ownerDocument: { createElement(tag: string): Element }) {}
+      append(...nodes: Element[]) { this.children.push(...nodes); }
+      replaceChildren(...nodes: Element[]) { this.children = nodes; }
+      setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+      addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); }
+    }
+    const document = { createElement: (tag: string): Element => new Element(tag, document) };
+    const root = new Element('div', document) as unknown as HTMLElement;
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const redeem = vi.fn(() => pending); const registered = vi.fn();
+    const mounted = mountInvitationView(root, { redeemInvitation: redeem } as unknown as HostedAPI, 'registration-intent', registered);
+    const panel = (root as unknown as Element).children[0];
+    const input = panel.children.find((child) => child.tagName === 'label')?.children[0]; if (input) input.value = 'invite-code';
+    panel.children.find((child) => child.tagName === 'button')?.listeners.get('click')?.();
+    await vi.waitFor(() => expect(redeem).toHaveBeenCalledTimes(1)); mounted.dispose(); release(); await pending; await Promise.resolve();
+    expect(registered).not.toHaveBeenCalled();
+    expect((root as unknown as Element).children).toEqual([]);
+  });
+
   it('discards a generated full code that arrives after unmount', async () => {
     let release!: (value: { id: number; codeHint: string; code: string; status: 'active'; createdAt: string; expiresAt: string; remainingQuota: number }) => void;
     const pending = new Promise<{ id: number; codeHint: string; code: string; status: 'active'; createdAt: string; expiresAt: string; remainingQuota: number }>((resolve) => { release = resolve; });
@@ -54,7 +123,7 @@ describe('streamer invitation view lifecycle', () => {
     expect(generate).toHaveBeenCalledTimes(1);
     release({ id: 5, codeHint: '••••MASK', code: 'ONLY-FULL-CODE', status: 'active', createdAt: '2026-08-16T00:00:00Z', expiresAt: '2026-08-17T00:00:00Z', remainingQuota: 0 });
     await first; await second; flow.closeReveal();
-    expect(states.at(-1)?.invitations).toEqual([expect.objectContaining({ codeHint: '••••MASK' })]);
+    expect(states.at(-1)).toEqual(expect.objectContaining({ remainingQuota: 0, invitations: [expect.objectContaining({ codeHint: '••••MASK' })] }));
   });
 });
 
@@ -100,5 +169,19 @@ describe('administrator recovery secret lifecycle', () => {
     await preparing;
     expect(JSON.stringify(states)).not.toContain('late-secret');
     expect(JSON.stringify(states)).not.toContain('late-token');
+  });
+
+  it('publishes a visible generic recovery confirmation error without exposing secrets', async () => {
+    const states: unknown[] = [];
+    const flow = createAdminRecoveryFlow({
+      prepareRecovery: vi.fn(async () => ({ totpUri: 'otpauth://new-secret', recoveryPassword: '12345678901234567890', handoffToken: 'private-handoff' })),
+      confirmRecovery: vi.fn(async () => { throw new Error('private backend detail'); }),
+    }, (state) => states.push(structuredClone(state)));
+    await flow.prepare('proof', 'old-code');
+    flow.acknowledge('totp'); flow.acknowledge('password'); flow.acknowledge('archive');
+    await expect(flow.confirm('123456')).rejects.toThrow();
+    expect(states.at(-1)).toEqual(expect.objectContaining({ error: '确认失败，请重试' }));
+    expect(JSON.stringify(states.at(-1))).not.toContain('private backend detail');
+    expect(JSON.stringify(states.at(-1))).not.toContain('private-handoff');
   });
 });

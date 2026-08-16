@@ -7,9 +7,9 @@ export interface Challenge {
 }
 
 export type PollResult =
-  | { status: 'pending'; expiresAt?: string }
-  | { status: 'verified' }
-  | { status: 'registration_required'; registrationIntent: string; expiresAt?: string }
+  | { status: 'pending'; expiresAt: string }
+  | { status: 'verified'; expiresAt: string }
+  | { status: 'registration_required'; registrationIntent: string; expiresAt: string }
   | { status: 'expired' };
 
 export interface InvitationRecord {
@@ -88,7 +88,7 @@ function challenge(value: unknown): Challenge | undefined {
 
 function invitation(value: unknown, extraOptional: string[] = []): InvitationRecord | undefined {
   const item = object(value);
-  if (!item || !exactKeys(item, ['id', 'codeHint', 'status', 'createdAt', 'expiresAt'], ['revokedAt', 'usedAt', ...extraOptional]) || !number(item.id) || item.id <= 0 || !string(item.codeHint) || !string(item.status) ||
+  if (!item || !exactKeys(item, ['id', 'codeHint', 'status', 'createdAt', 'expiresAt'], ['revokedAt', 'usedAt', ...extraOptional]) || !number(item.id) || item.id <= 0 || typeof item.codeHint !== 'string' || !/^\*{4}[A-Za-z0-9_-]{4}$/.test(item.codeHint) || !string(item.status) ||
     !['active', 'revoked', 'used', 'expired'].includes(item.status) || !instant(item.createdAt) || !instant(item.expiresAt)) return undefined;
   if (item.revokedAt !== undefined && !instant(item.revokedAt)) return undefined;
   if (item.usedAt !== undefined && !instant(item.usedAt)) return undefined;
@@ -166,9 +166,9 @@ export class HostedAPI {
         if (exactKeys(data, ['status']) && data.status === 'expired') return { status: 'expired' };
         throw new HostedAPIError('invalid_response', response.status);
       }
-      if (data.status === 'pending' && exactKeys(data, ['status'], ['expiresAt'])) return data as PollResult;
-      if (data.status === 'verified' && exactKeys(data, ['status'])) return data as PollResult;
-      if (data.status === 'registration_required' && exactKeys(data, ['status', 'registrationIntent'], ['expiresAt']) && string(data.registrationIntent)) return data as PollResult;
+      if (data.status === 'pending' && exactKeys(data, ['status', 'expiresAt']) && instant(data.expiresAt)) return data as PollResult;
+      if (data.status === 'verified' && exactKeys(data, ['status', 'expiresAt']) && instant(data.expiresAt)) return data as PollResult;
+      if (data.status === 'registration_required' && exactKeys(data, ['status', 'registrationIntent', 'expiresAt']) && string(data.registrationIntent) && instant(data.expiresAt)) return data as PollResult;
       throw new HostedAPIError('invalid_response', 200);
     } catch (error) { throw error; }
   }
@@ -184,7 +184,8 @@ export class HostedAPI {
     const data = object((await this.request(admin ? '/api/admin/invitations' : '/api/invitations', 'POST', 201, {})).data);
     const record = invitation(data, ['code', 'remainingQuota']);
     if (!data || !exactKeys(data, ['id', 'codeHint', 'status', 'createdAt', 'expiresAt', 'code'], ['revokedAt', 'usedAt', 'remainingQuota']) || !record || !string(data.code) || (data.remainingQuota !== undefined && !number(data.remainingQuota))) throw new HostedAPIError('invalid_response', 200);
-    return { ...record, code: data.code, ...(data.remainingQuota === undefined ? {} : { remainingQuota: data.remainingQuota as number }) };
+    const remainingQuota = data.remainingQuota === undefined ? (admin ? undefined : 0) : data.remainingQuota as number;
+    return { ...record, code: data.code, ...(remainingQuota === undefined ? {} : { remainingQuota }) };
   }
   async revokeInvitation(id: number): Promise<void> { await this.request(`/api/invitations/${id}`, 'DELETE', 204); }
 
@@ -207,12 +208,12 @@ export class HostedAPI {
     const data = object((await this.request(`/api/admin/accounts/${accountId}/invitation-quota`, 'POST', 200, { remainingQuota, reason })).data);
     if (!data || !exactKeys(data, ['accountId', 'remainingQuota']) || data.accountId !== accountId || data.remainingQuota !== remainingQuota) throw new HostedAPIError('invalid_response', 200);
   }
-  async disableAccount(accountId: number, reason: string): Promise<ManagedAccount> { return this.accountMutation(accountId, 'disable', { reason }); }
-  async enableAccount(accountId: number, reason: string): Promise<ManagedAccount> { return this.accountMutation(accountId, 'enable', { reason }); }
-  async rebindAccount(accountId: number, challengeId: string, reason: string): Promise<ManagedAccount> { return this.accountMutation(accountId, 'rebind', { challengeId, reason }); }
-  private async accountMutation(accountId: number, action: string, body: unknown): Promise<ManagedAccount> {
+  async disableAccount(accountId: number, reason: string): Promise<ManagedAccount> { return this.accountMutation(accountId, 'disable', 'disabled', { reason }); }
+  async enableAccount(accountId: number, reason: string): Promise<ManagedAccount> { return this.accountMutation(accountId, 'enable', 'active', { reason }); }
+  async rebindAccount(accountId: number, challengeId: string, reason: string): Promise<ManagedAccount> { return this.accountMutation(accountId, 'rebind', 'active', { challengeId, reason }); }
+  private async accountMutation(accountId: number, action: string, expectedAccountStatus: ManagedAccount['status'], body: unknown): Promise<ManagedAccount> {
     const data = object((await this.request(`/api/admin/accounts/${accountId}/${action}`, 'POST', 200, body)).data);
-    if (!data || !exactKeys(data, ['accountId', 'status']) || data.accountId !== accountId || (data.status !== 'active' && data.status !== 'disabled')) throw new HostedAPIError('invalid_response', 200);
-    return { accountId, status: data.status };
+    if (!data || !exactKeys(data, ['accountId', 'status']) || data.accountId !== accountId || data.status !== expectedAccountStatus) throw new HostedAPIError('invalid_response', 200);
+    return { accountId, status: expectedAccountStatus };
   }
 }

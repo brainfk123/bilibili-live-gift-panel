@@ -146,6 +146,22 @@ describe('hosted web build contract', () => {
     expect(loginCalls).toBe(1);
   });
 
+  it('disposes the current hosted view before mounting its replacement', async () => {
+    const module = await import('../src/hosted/shell');
+    const events: string[] = [];
+    const host = module.createHostedViewHost();
+    await host.replace(() => {
+      events.push('mount-auth');
+      return { dispose: async () => { events.push('dispose-auth'); } };
+    });
+    await host.replace(() => {
+      events.push('mount-registration');
+      return { dispose: () => { events.push('dispose-registration'); } };
+    });
+    await host.dispose();
+    expect(events).toEqual(['mount-auth', 'dispose-auth', 'mount-registration', 'dispose-registration']);
+  });
+
   it('builds a multi-file hosted asset graph with a manifest and no desktop artifacts', async () => {
     if (!hostedSourceExists()) {
       expect(hostedSourceExists()).toBe(true);

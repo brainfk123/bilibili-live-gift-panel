@@ -5,6 +5,7 @@ interface AuthAPI {
   pollLogin(id: string): Promise<PollResult>;
   createSession(id: string): Promise<void>;
   cancelLogin(id: string): Promise<void>;
+  logout(): Promise<void>;
 }
 
 export type AuthStatus = 'pending' | 'verified' | 'registration_required' | 'expired';
@@ -97,7 +98,7 @@ export function createAuthFlow(api: AuthAPI, callbacks: AuthCallbacks) {
       }
       if (result.status === 'verified') {
         await api.createSession(current.challengeId);
-        if (disposed) return;
+        if (disposed) { await api.logout(); return; }
         activeChallenge = undefined;
         callbacks.onStatus('verified');
         callbacks.onSignedIn();

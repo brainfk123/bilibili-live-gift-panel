@@ -6,6 +6,41 @@ export interface HostedSession {
   onAdmin?: () => void;
 }
 
+export interface HostedView {
+  dispose(): void | Promise<void>;
+}
+
+/** Serializes view transitions so secret-bearing views are disposed before replacements mount. */
+export function createHostedViewHost() {
+  let current: HostedView | undefined;
+  let generation = 0;
+  let transition: Promise<void> = Promise.resolve();
+  const schedule = (operation: () => Promise<void>): Promise<void> => {
+    const scheduled = transition.then(operation, operation);
+    transition = scheduled.catch(() => undefined);
+    return scheduled;
+  };
+  return Object.freeze({
+    replace(mount: () => HostedView): Promise<void> {
+      const requested = ++generation;
+      return schedule(async () => {
+        const previous = current;
+        current = undefined;
+        await previous?.dispose();
+        if (requested === generation) current = mount();
+      });
+    },
+    dispose(): Promise<void> {
+      ++generation;
+      return schedule(async () => {
+        const previous = current;
+        current = undefined;
+        await previous?.dispose();
+      });
+    },
+  });
+}
+
 const statusCopy: Record<HostedServiceStatus, string> = {
   checking: '服务状态：正在确认服务可用性',
   ready: '服务状态：可用',

@@ -92,7 +92,14 @@ export function mountInvitationView(root: HTMLElement, api: HostedAPI, registrat
       const redeem = document.createElement('button'); redeem.type = 'button'; redeem.textContent = '注册并进入账号';
       redeem.addEventListener('click', () => {
         const value = code.value; code.value = '';
-        void flow.redeem(value).then(() => onRegistered?.()).catch(() => { live.textContent = '邀请码无效或已失效'; });
+        void flow.redeem(value).then(() => {
+          if (disposed) return;
+          disposed = true;
+          registrationIntent = undefined;
+          flow.dispose();
+          root.replaceChildren();
+          onRegistered?.();
+        }).catch(() => { live.textContent = '邀请码无效或已失效'; });
       });
       panel.append(label, redeem);
     } else {
@@ -132,5 +139,5 @@ export function mountInvitationView(root: HTMLElement, api: HostedAPI, registrat
   const flow = createInvitationFlow(api, render, clipboard, registrationIntent);
   render({ invitations: [] });
   const ready = registrationIntent ? Promise.resolve() : flow.refresh().catch(() => undefined);
-  return Object.freeze({ ready, dispose: () => { disposed = true; flow.dispose(); root.replaceChildren(); } });
+  return Object.freeze({ ready, dispose: () => { disposed = true; registrationIntent = undefined; flow.dispose(); root.replaceChildren(); } });
 }
