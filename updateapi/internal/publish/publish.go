@@ -12,8 +12,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -39,8 +37,6 @@ type Store interface {
 	Get(context.Context, string, int64) ([]byte, string, error)
 }
 
-var canonicalTag = regexp.MustCompile(`^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$`)
-
 // ErrPromotionIndeterminate means the stable pointer may have advanced and
 // automatic restoration could not be verified. Operators must inspect COS.
 var ErrPromotionIndeterminate = errors.New("stable promotion outcome is indeterminate")
@@ -60,6 +56,28 @@ type Input struct {
 	ChecksumPath  string
 	ChangelogPath string
 	PublishedAt   time.Time
+}
+
+// Publisher binds the existing immutable release transaction to one COS store.
+// It is intentionally a narrow object so orchestrators cannot reorder its steps.
+type Publisher struct {
+	store Store
+}
+
+// NewPublisher constructs an object adapter around the existing transaction.
+func NewPublisher(store Store) (*Publisher, error) {
+	if store == nil {
+		return nil, errors.New("COS store is required")
+	}
+	return &Publisher{store: store}, nil
+}
+
+// Publish delegates to the package transaction without changing its semantics.
+func (publisher *Publisher) Publish(ctx context.Context, input Input) (Outcome, error) {
+	if publisher == nil {
+		return "", errors.New("COS publisher is required")
+	}
+	return Publish(ctx, publisher.store, input)
 }
 
 type object struct {
@@ -82,7 +100,7 @@ func Publish(ctx context.Context, store Store, input Input) (Outcome, error) {
 	if store == nil {
 		return "", errors.New("COS store is required")
 	}
-	if !canonicalTag.MatchString(input.Tag) {
+	if _, err := release.ParseStableTag(input.Tag); err != nil {
 		return "", fmt.Errorf("release tag %q must use canonical vMAJOR.MINOR.PATCH syntax", input.Tag)
 	}
 	asset, err := readAsset(input.AssetPath)
@@ -192,26 +210,11 @@ func priorObject(prior *priorStable) *object {
 }
 
 func compareTags(left, right string) (int, error) {
-	parse := func(tag string) ([3]int, error) {
-		var version [3]int
-		parts := strings.Split(strings.TrimPrefix(tag, "v"), ".")
-		if len(parts) != len(version) {
-			return version, fmt.Errorf("invalid canonical release tag %q", tag)
-		}
-		for index, part := range parts {
-			number, err := strconv.Atoi(part)
-			if err != nil || number < 0 {
-				return version, fmt.Errorf("invalid canonical release tag %q", tag)
-			}
-			version[index] = number
-		}
-		return version, nil
-	}
-	leftVersion, err := parse(left)
+	leftVersion, err := release.ParseStableTag(left)
 	if err != nil {
 		return 0, err
 	}
-	rightVersion, err := parse(right)
+	rightVersion, err := release.ParseStableTag(right)
 	if err != nil {
 		return 0, err
 	}

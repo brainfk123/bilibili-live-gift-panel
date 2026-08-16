@@ -308,6 +308,7 @@ func TestCompareTagsUsesNumericSemverOrdering(t *testing.T) {
 		want  int
 	}{
 		{left: "v1.10.0", right: "v1.9.99", want: 1},
+		{left: "v0.10.0", right: "v0.9.9", want: 1},
 		{left: "v2.0.0", right: "v10.0.0", want: -1},
 		{left: "v3.4.5", right: "v3.4.5", want: 0},
 	} {
@@ -318,6 +319,33 @@ func TestCompareTagsUsesNumericSemverOrdering(t *testing.T) {
 		if got != test.want {
 			t.Fatalf("compareTags(%q, %q) = %d, want %d", test.left, test.right, got, test.want)
 		}
+	}
+}
+
+// Mutation caught: independently parsing the prior tag with strconv accepts forms rejected by the shared stable-tag boundary.
+func TestCompareTagsRejectsNonCanonicalPriorStableTag(t *testing.T) {
+	for _, prior := range []string{"1.2.3", "v01.2.3", "v1.2.3+build", "v18446744073709551616.0.0"} {
+		if _, err := compareTags("v2.0.0", prior); err == nil {
+			t.Fatalf("compareTags() accepted noncanonical prior tag %q", prior)
+		}
+	}
+}
+
+// Mutation caught: the orchestration adapter bypasses the existing immutable/stable-last transaction instead of delegating to it.
+func TestPublisherObjectUsesExistingTransaction(t *testing.T) {
+	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
+	store := newMemoryStore()
+	publisher, err := NewPublisher(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := publisher.Publish(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != OutcomeStablePromoted || !store.hasStablePut() {
+		t.Fatalf("Publish() outcome = %q, stable put = %v", outcome, store.hasStablePut())
 	}
 }
 
