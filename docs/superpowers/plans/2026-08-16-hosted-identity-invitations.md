@@ -47,6 +47,8 @@
 - Create: `goserver/internal/hosted/identity/model.go`
 - Create: `goserver/internal/hosted/identity/repository.go`
 - Create: `goserver/internal/hosted/identity/repository_test.go`
+- Modify: `goserver/internal/hosted/store/mysqlstore/store.go`
+- Modify: `goserver/internal/hosted/store/mysqlstore/store_test.go`
 
 **Interfaces:**
 - Produces: `security.Keyring.Seal`, `Open`, `Lookup`, `HashToken`, and `NewToken`.
@@ -78,6 +80,8 @@ Use AES-256-GCM with a fresh nonce, purpose as additional authenticated data, HM
 
 Migration `0002` creates `streamer_accounts`, `bili_uid_bindings`, `site_sessions`, `admin_identity`, `admin_totp`, `admin_recovery_codes`, `invitation_quotas`, `invitation_quota_events`, `invitations`, and `audit_events`. `streamer_accounts` includes a positive `credential_epoch` starting at 1. Enforce unique UID HMAC, one active binding per account, unique token/code hash, non-negative quota, immutable audit IDs, and foreign keys. Do not store UID plaintext columns.
 
+Refactor the migration runner behind an unexported `fs.FS` seam so migration unit tests use fixed fixture files rather than assuming the production embed contains exactly one migration. `Store.Migrate` must still use the embedded production filesystem; this prevents each later `000N` file from invalidating foundation tests.
+
 - [ ] **Step 4: Implement and test repository transactions**
 
 Define:
@@ -107,7 +111,7 @@ git diff --check
 Commit:
 
 ```powershell
-git add -- goserver/internal/hosted/security goserver/internal/hosted/identity/model.go goserver/internal/hosted/identity/repository.go goserver/internal/hosted/identity/repository_test.go goserver/internal/hosted/store/mysqlstore/migrations/0002_identity_and_invitations.sql goserver/go.mod goserver/go.sum
+git add -- goserver/internal/hosted/security goserver/internal/hosted/identity/model.go goserver/internal/hosted/identity/repository.go goserver/internal/hosted/identity/repository_test.go goserver/internal/hosted/store/mysqlstore/store.go goserver/internal/hosted/store/mysqlstore/store_test.go goserver/internal/hosted/store/mysqlstore/migrations/0002_identity_and_invitations.sql goserver/go.mod goserver/go.sum
 git commit -m "feat: add hosted identity storage"
 ```
 
