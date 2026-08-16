@@ -76,11 +76,12 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("GET /api/migrations/{id}", dependencies.Migration)
 	}
 	if dependencies.BiliService != nil {
-		// These methods are intentionally more specific than /api/admin/ so
-		// they cannot be handled by the broader administrator router.
-		mux.Handle("POST /api/admin/bili-service/challenge", dependencies.BiliService)
-		mux.Handle("POST /api/admin/bili-service/replace", dependencies.BiliService)
-		mux.Handle("GET /api/admin/bili-service/status", dependencies.BiliService)
+		// Own each complete path for every method. The Bili service handler
+		// returns 405 for unsupported methods instead of letting them fall
+		// through to the broader administrator router.
+		mux.Handle("/api/admin/bili-service/challenge", dependencies.BiliService)
+		mux.Handle("/api/admin/bili-service/replace", dependencies.BiliService)
+		mux.Handle("/api/admin/bili-service/status", dependencies.BiliService)
 	}
 	if dependencies.Auth != nil {
 		mux.Handle("/api/auth/", dependencies.Auth)

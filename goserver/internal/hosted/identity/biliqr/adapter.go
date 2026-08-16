@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -47,6 +48,8 @@ type pendingChallenge struct {
 	qrKey      string
 	expiresAt  time.Time
 	cookies    map[string]string
+	terminal   error
+	consuming  bool
 	polling    bool
 	nextPollAt time.Time
 	timer      *time.Timer
@@ -54,8 +57,10 @@ type pendingChallenge struct {
 }
 
 // CredentialConsumer is an internal trusted boundary for the one operation
-// that needs a Bilibili session Cookie. The byte slice is invalid once ConsumeCredential returns.
-type CredentialConsumer = func([]byte) error
+// that needs a Bilibili session Cookie. Its context is canceled at the
+// challenge's absolute TTL and when the adapter forgets or closes the
+// challenge. The byte slice is invalid once ConsumeCredential returns.
+type CredentialConsumer = func(context.Context, []byte) error
 
 // Adapter keeps QR keys and confirmation Cookies only in process memory.
 type Adapter struct {
@@ -174,6 +179,10 @@ func (adapter *Adapter) Poll(ctx context.Context, challengeID string) (identity.
 		adapter.mu.Unlock()
 		return identity.Verification{}, identity.ErrChallengeExpired
 	}
+	if state.consuming {
+		adapter.mu.Unlock()
+		return identity.Verification{}, identity.ErrVerificationPending
+	}
 	if state.polling {
 		adapter.mu.Unlock()
 		return identity.Verification{}, identity.ErrVerificationPending
@@ -287,10 +296,15 @@ func (adapter *Adapter) ConsumeCredential(ctx context.Context, challengeID strin
 		adapter.mu.Unlock()
 		return identity.ErrChallengeExpired
 	}
+	if state.consuming {
+		adapter.mu.Unlock()
+		return identity.ErrVerificationPending
+	}
 	if len(state.cookies) > 0 {
+		consumerContext, cleanup := reserveCredentialConsumer(ctx, state)
 		credential := []byte(cookieHeader(cloneCookies(state.cookies)))
 		adapter.mu.Unlock()
-		return adapter.consumeStoredCredential(challengeID, credential, consumer)
+		return adapter.consumeStoredCredential(challengeID, state, consumerContext, cleanup, credential, consumer)
 	}
 	if state.polling {
 		adapter.mu.Unlock()
@@ -357,19 +371,72 @@ func (adapter *Adapter) ConsumeCredential(ctx context.Context, challengeID strin
 			return identity.ErrChallengeNotFound
 		}
 		adapter.finishTransientPoll(challengeID, state)
-		return adapter.consumeStoredCredential(challengeID, []byte(cookieHeader(cookies)), consumer)
+		adapter.mu.Lock()
+		current := adapter.challenges[challengeID]
+		if current != state || adapter.closed {
+			terminal := state.terminal
+			adapter.mu.Unlock()
+			if terminal != nil {
+				return terminal
+			}
+			return identity.ErrChallengeNotFound
+		}
+		if !adapter.now().Before(state.expiresAt) {
+			adapter.destroyLocked(challengeID, identity.ErrChallengeExpired)
+			adapter.mu.Unlock()
+			return identity.ErrChallengeExpired
+		}
+		consumerContext, cleanup := reserveCredentialConsumer(ctx, state)
+		adapter.mu.Unlock()
+		return adapter.consumeStoredCredential(challengeID, state, consumerContext, cleanup, []byte(cookieHeader(cookies)), consumer)
 	default:
 		adapter.Forget(challengeID)
 		return identity.ErrVerificationFailed
 	}
 }
 
-func (adapter *Adapter) consumeStoredCredential(challengeID string, credential []byte, consumer CredentialConsumer) error {
+func reserveCredentialConsumer(ctx context.Context, state *pendingChallenge) (context.Context, func()) {
+	deadlineContext, cancelDeadline := context.WithDeadlineCause(ctx, state.expiresAt, identity.ErrChallengeExpired)
+	consumerContext, cancelConsumer := context.WithCancelCause(deadlineContext)
+	state.consuming = true
+	state.cancel = cancelConsumer
+	return consumerContext, func() {
+		cancelConsumer(nil)
+		cancelDeadline()
+	}
+}
+
+func (adapter *Adapter) consumeStoredCredential(challengeID string, expected *pendingChallenge, consumerContext context.Context, cleanup func(), credential []byte, consumer CredentialConsumer) error {
 	defer clear(credential)
-	if err := consumer(credential); err != nil {
+	defer cleanup()
+	err := consumer(consumerContext, credential)
+	consumerCause := context.Cause(consumerContext)
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	state := adapter.challenges[challengeID]
+	if state != expected || adapter.closed {
+		if expected.terminal != nil {
+			return expected.terminal
+		}
+		return identity.ErrChallengeNotFound
+	}
+	if errors.Is(consumerCause, identity.ErrChallengeExpired) {
+		adapter.destroyLocked(challengeID, identity.ErrChallengeExpired)
+		return identity.ErrChallengeExpired
+	}
+	if !adapter.now().Before(state.expiresAt) {
+		adapter.destroyLocked(challengeID, identity.ErrChallengeExpired)
+		return identity.ErrChallengeExpired
+	}
+	state.cancel = nil
+	state.consuming = false
+	if err != nil {
 		return err
 	}
-	adapter.Forget(challengeID)
+	if consumerCause != nil {
+		return consumerCause
+	}
+	adapter.destroyLocked(challengeID, identity.ErrChallengeNotFound)
 	return nil
 }
 
@@ -472,6 +539,7 @@ func (adapter *Adapter) destroyLocked(challengeID string, cause error) {
 		state.cancel(cause)
 		state.cancel = nil
 	}
+	state.terminal = cause
 	state.qrKey = ""
 	destroyCookies(state.cookies)
 	delete(adapter.challenges, challengeID)

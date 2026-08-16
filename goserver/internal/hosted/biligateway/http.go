@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math/rand/v2"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -22,6 +24,7 @@ import (
 	"bilibili-live-gift-panel/internal/hosted/adminidentity"
 	"bilibili-live-gift-panel/internal/hosted/identity"
 
+	"github.com/andybalholm/brotli"
 	"github.com/gorilla/websocket"
 )
 
@@ -32,7 +35,7 @@ var (
 
 type credentialVerifier interface {
 	Begin(context.Context) (identity.Challenge, error)
-	ConsumeCredential(context.Context, string, func([]byte) error) error
+	ConsumeCredential(context.Context, string, func(context.Context, []byte) error) error
 }
 
 type credentialReplacer interface {
@@ -93,8 +96,8 @@ func (service *Service) Replace(ctx context.Context, sessionToken, challengeID s
 		}
 		return ErrAuthenticationFailed
 	}
-	if err := service.verifier.ConsumeCredential(ctx, challengeID, func(cookie []byte) error {
-		_, replaceErr := service.credentials.Replace(ctx, cookie)
+	if err := service.verifier.ConsumeCredential(ctx, challengeID, func(consumerContext context.Context, cookie []byte) error {
+		_, replaceErr := service.credentials.Replace(consumerContext, cookie)
 		return replaceErr
 	}); err != nil {
 		if errors.Is(err, ErrCredentialUnavailable) {
@@ -158,7 +161,8 @@ func (handler *HTTPHandler) begin(response http.ResponseWriter, request *http.Re
 		writeHTTPError(response, http.StatusForbidden, "request_rejected")
 		return
 	}
-	if _, ok := handler.requireLimitedSession(response, request, "bili_service_challenge"); !ok {
+	token, ok := handler.limitRequest(response, request, "bili_service_challenge")
+	if !ok || !handler.authenticate(response, request, token) {
 		return
 	}
 	challenge, err := handler.service.Begin(request.Context())
@@ -174,6 +178,10 @@ func (handler *HTTPHandler) replace(response http.ResponseWriter, request *http.
 		writeHTTPError(response, http.StatusForbidden, "request_rejected")
 		return
 	}
+	token, ok := handler.limitRequest(response, request, "bili_service_replace")
+	if !ok {
+		return
+	}
 	var body struct {
 		ChallengeID string `json:"challengeId"`
 	}
@@ -181,11 +189,10 @@ func (handler *HTTPHandler) replace(response http.ResponseWriter, request *http.
 		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	cookie, ok := handler.requireLimitedSession(response, request, "bili_service_replace")
-	if !ok {
+	if !handler.authenticate(response, request, token) {
 		return
 	}
-	err := handler.service.Replace(request.Context(), cookie, body.ChallengeID)
+	err := handler.service.Replace(request.Context(), token, body.ChallengeID)
 	switch {
 	case err == nil:
 		response.WriteHeader(http.StatusNoContent)
@@ -202,11 +209,19 @@ func (handler *HTTPHandler) replace(response http.ResponseWriter, request *http.
 	}
 }
 func (handler *HTTPHandler) status(response http.ResponseWriter, request *http.Request) {
+	// net/http GET patterns also match HEAD. Status is an exact GET-only
+	// administrator route, so reject HEAD before rate limits or auth.
+	if request.Method != http.MethodGet {
+		response.Header().Set("Allow", http.MethodGet)
+		writeHTTPError(response, http.StatusMethodNotAllowed, "request_rejected")
+		return
+	}
 	if request.URL.RawQuery != "" {
 		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if _, ok := handler.requireLimitedSession(response, request, "bili_service_status"); !ok {
+	token, ok := handler.limitRequest(response, request, "bili_service_status")
+	if !ok || !handler.authenticate(response, request, token) {
 		return
 	}
 	status := handler.service.Status(request.Context())
@@ -223,47 +238,37 @@ func (handler *HTTPHandler) status(response http.ResponseWriter, request *http.R
 		LastVerifiedAt *time.Time `json:"lastVerifiedAt,omitempty"`
 	}{Version: status.Version, Health: status.Health, LastVerifiedAt: status.LastVerifiedAt})
 }
-func (handler *HTTPHandler) requireLimitedSession(response http.ResponseWriter, request *http.Request, operation string) (string, bool) {
-	cookie, err := request.Cookie(identity.SiteSessionCookie)
-	if err != nil || cookie == nil || cookie.Value == "" {
-		writeHTTPError(response, http.StatusUnauthorized, "authentication_failed")
-		return "", false
-	}
-	if !handler.allow(request, operation, cookie.Value) {
+func (handler *HTTPHandler) limitRequest(response http.ResponseWriter, request *http.Request, operation string) (string, bool) {
+	if !handler.limiter.Allow(request.Context(), identity.LimitGlobal, operation) ||
+		!handler.limiter.Allow(request.Context(), identity.LimitPerIP, operation+"\x00"+handler.clientIP(request)) {
 		writeHTTPError(response, http.StatusTooManyRequests, "rate_limited")
 		return "", false
 	}
-	if handler.service.RequireSession(request.Context(), cookie.Value) != nil {
-		writeHTTPError(response, http.StatusUnauthorized, "authentication_failed")
-		return "", false
-	}
-	return cookie.Value, true
-}
-func (handler *HTTPHandler) allow(request *http.Request, operation, sessionToken string) bool {
-	if !handler.limiter.Allow(request.Context(), identity.LimitGlobal, operation) || !handler.limiter.Allow(request.Context(), identity.LimitPerIP, operation+"\x00"+handler.clientIP(request)) {
-		return false
-	}
-	digest := sha256.Sum256([]byte(sessionToken))
-	return handler.limiter.Allow(request.Context(), identity.LimitPerChallenge, operation+"\x00"+hex.EncodeToString(digest[:]))
-}
-func (handler *HTTPHandler) requireSession(response http.ResponseWriter, request *http.Request) (string, bool) {
 	cookie, err := request.Cookie(identity.SiteSessionCookie)
 	if err != nil || cookie == nil || cookie.Value == "" {
-		writeHTTPError(response, http.StatusUnauthorized, "authentication_failed")
-		return "", false
+		return "", true
 	}
-	if handler.service.RequireSession(request.Context(), cookie.Value) != nil {
-		writeHTTPError(response, http.StatusUnauthorized, "authentication_failed")
+	digest := sha256.Sum256([]byte(cookie.Value))
+	if !handler.limiter.Allow(request.Context(), identity.LimitPerChallenge, operation+"\x00"+hex.EncodeToString(digest[:])) {
+		writeHTTPError(response, http.StatusTooManyRequests, "rate_limited")
 		return "", false
 	}
 	return cookie.Value, true
+}
+func (handler *HTTPHandler) authenticate(response http.ResponseWriter, request *http.Request, token string) bool {
+	if token == "" || handler.service.RequireSession(request.Context(), token) != nil {
+		writeHTTPError(response, http.StatusUnauthorized, "authentication_failed")
+		return false
+	}
+	return true
 }
 
 func (handler *HTTPHandler) acceptEmptyMutation(request *http.Request) bool {
 	return handler.acceptMutation(request) && request.URL.RawQuery == "" && request.Body != nil && request.ContentLength == 0
 }
 func (handler *HTTPHandler) acceptJSONMutation(request *http.Request) bool {
-	return handler.acceptMutation(request) && request.URL.RawQuery == "" && strings.HasPrefix(strings.ToLower(request.Header.Get("Content-Type")), "application/json")
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	return err == nil && mediaType == "application/json" && handler.acceptMutation(request) && request.URL.RawQuery == ""
 }
 func (handler *HTTPHandler) acceptMutation(request *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(request.Header.Get("Origin")), []byte(handler.allowedOrigin)) == 1 && subtle.ConstantTimeCompare([]byte(request.Header.Get("X-CSRF-Token")), []byte(handler.csrfToken)) == 1
@@ -291,12 +296,14 @@ func writeHTTPJSON(response http.ResponseWriter, status int, value any) {
 var _ = time.Second
 
 const (
-	danmakuHeaderLength              = 16
-	danmakuHeartbeatOperation uint32 = 2
-	danmakuMessageOperation   uint32 = 5
-	danmakuAuthOperation      uint32 = 7
-	danmakuAuthReplyOperation uint32 = 8
-	maximumDanmakuPayload            = 1 << 20
+	danmakuHeaderLength                 = 16
+	danmakuHeartbeatOperation    uint32 = 2
+	danmakuMessageOperation      uint32 = 5
+	danmakuAuthOperation         uint32 = 7
+	danmakuAuthReplyOperation    uint32 = 8
+	maximumDanmakuPayload               = 1 << 20
+	maximumDanmakuDecodeDepth           = 8
+	maximumBiliHTTPResponseBytes        = 1 << 20
 )
 
 type danmakuPacket struct {
@@ -315,6 +322,9 @@ func encodeDanmakuPacket(operation uint32, body []byte) []byte {
 	return output
 }
 func decodeDanmakuPackets(payload []byte) ([]danmakuPacket, error) {
+	if len(payload) > maximumDanmakuPayload {
+		return nil, ErrEgressUnavailable
+	}
 	var packets []danmakuPacket
 	for offset := 0; offset < len(payload); {
 		if offset+danmakuHeaderLength > len(payload) {
@@ -330,6 +340,14 @@ func decodeDanmakuPackets(payload []byte) ([]danmakuPacket, error) {
 	return packets, nil
 }
 func decodeDanmakuApplicationBodies(payload []byte) ([][]byte, error) {
+	remaining := maximumDanmakuPayload
+	return decodeDanmakuApplicationBodiesWithinBudget(payload, &remaining, 0)
+}
+
+func decodeDanmakuApplicationBodiesWithinBudget(payload []byte, remaining *int, depth int) ([][]byte, error) {
+	if depth > maximumDanmakuDecodeDepth {
+		return nil, ErrEgressUnavailable
+	}
 	packets, err := decodeDanmakuPackets(payload)
 	if err != nil {
 		return nil, err
@@ -339,34 +357,45 @@ func decodeDanmakuApplicationBodies(payload []byte) ([][]byte, error) {
 		if packet.operation != danmakuMessageOperation {
 			continue
 		}
-		if packet.protocol == 2 {
-			inflated, err := inflateDanmaku(packet.body)
+		if packet.protocol == 2 || packet.protocol == 3 {
+			inflated, err := inflateDanmaku(packet.body, packet.protocol, *remaining)
 			if err != nil {
 				return nil, err
 			}
-			nested, err := decodeDanmakuPackets(inflated)
+			*remaining -= len(inflated)
+			nested, err := decodeDanmakuApplicationBodiesWithinBudget(inflated, remaining, depth+1)
 			if err != nil {
 				return nil, err
 			}
-			for _, child := range nested {
-				if child.operation == danmakuMessageOperation {
-					bodies = append(bodies, child.body)
-				}
-			}
+			bodies = append(bodies, nested...)
 			continue
 		}
 		bodies = append(bodies, packet.body)
 	}
 	return bodies, nil
 }
-func inflateDanmaku(payload []byte) ([]byte, error) {
-	reader, err := zlib.NewReader(bytes.NewReader(payload))
-	if err != nil {
+func inflateDanmaku(payload []byte, protocol uint16, maximumOutput int) ([]byte, error) {
+	if maximumOutput <= 0 {
 		return nil, ErrEgressUnavailable
 	}
-	defer reader.Close()
-	result, err := io.ReadAll(io.LimitReader(reader, maximumDanmakuPayload+1))
-	if err != nil || len(result) > maximumDanmakuPayload {
+	var reader io.Reader
+	var closer io.Closer
+	if protocol == 2 {
+		value, err := zlib.NewReader(bytes.NewReader(payload))
+		if err != nil {
+			return nil, ErrEgressUnavailable
+		}
+		reader, closer = value, value
+	} else if protocol == 3 {
+		reader = brotli.NewReader(bytes.NewReader(payload))
+	} else {
+		return nil, ErrEgressUnavailable
+	}
+	if closer != nil {
+		defer closer.Close()
+	}
+	result, err := io.ReadAll(io.LimitReader(reader, int64(maximumOutput)+1))
+	if err != nil || len(result) > maximumOutput {
 		return nil, ErrEgressUnavailable
 	}
 	return result, nil
@@ -384,6 +413,7 @@ type HTTPUpstreamOptions struct {
 	NewTicker           func(time.Duration) danmakuTicker
 }
 type danmakuSocket interface {
+	SetReadLimit(int64)
 	ReadMessage() (int, []byte, error)
 	WriteMessage(int, []byte) error
 	SetReadDeadline(time.Time) error
@@ -418,6 +448,43 @@ func RetryAfter(err error) (time.Duration, bool) {
 		return 0, false
 	}
 	return failure.retryAfter, true
+}
+
+// RetryBackoff calculates one bounded reconnect delay for a zero-based
+// attempt number. Callers inject the [0,1] sample in tests and may use the
+// default source in production.
+type RetryBackoff func(attempt int) time.Duration
+
+// NewRetryBackoff returns the Task 1/2 retry policy seam: exponential seconds,
+// twenty percent jitter, and an absolute sixty-second cap.
+func NewRetryBackoff(sample func() float64) RetryBackoff {
+	if sample == nil {
+		sample = rand.Float64
+	}
+	return func(attempt int) time.Duration {
+		if attempt < 0 {
+			attempt = 0
+		}
+		base := time.Second
+		for range attempt {
+			if base >= 30*time.Second {
+				base = 60 * time.Second
+				break
+			}
+			base *= 2
+		}
+		unit := sample()
+		if unit < 0 {
+			unit = 0
+		} else if unit > 1 {
+			unit = 1
+		}
+		delay := time.Duration(float64(base) * (0.8 + 0.4*unit))
+		if delay > 60*time.Second {
+			return 60 * time.Second
+		}
+		return delay
+	}
 }
 
 func NewHTTPUpstream(options HTTPUpstreamOptions) (*HTTPUpstream, error) {
@@ -465,7 +532,7 @@ func (upstream *HTTPUpstream) RoomInfo(ctx context.Context, roomID string, cooki
 	if err := upstream.getJSON(ctx, upstream.roomInfoEndpoint, roomID, cookie, &payload); err != nil {
 		return RoomInfo{}, err
 	}
-	if payload.Code != 0 || payload.Data.RoomID <= 0 {
+	if payload.Data.RoomID <= 0 {
 		return RoomInfo{}, ErrEgressUnavailable
 	}
 	return RoomInfo{RoomID: roomID, CanonicalRoomID: strconv.FormatInt(payload.Data.RoomID, 10), Title: payload.Data.Title}, nil
@@ -488,9 +555,6 @@ func (upstream *HTTPUpstream) GiftCatalog(ctx context.Context, roomID string, co
 	}
 	if err := upstream.getJSON(ctx, upstream.giftCatalogEndpoint, roomID, cookie, &payload); err != nil {
 		return nil, err
-	}
-	if payload.Code != 0 {
-		return nil, ErrEgressUnavailable
 	}
 	result := make([]gameplay.GiftInfo, 0, len(payload.Data.List))
 	for _, gift := range payload.Data.List {
@@ -517,7 +581,7 @@ func (upstream *HTTPUpstream) OpenRoom(ctx context.Context, roomID string, cooki
 	if err := upstream.getJSON(ctx, upstream.danmakuInfoEndpoint, roomID, cookie, &info); err != nil {
 		return nil, err
 	}
-	if info.Code != 0 || info.Data.Token == "" || len(info.Data.HostList) == 0 {
+	if info.Data.Token == "" || len(info.Data.HostList) == 0 {
 		return nil, ErrEgressUnavailable
 	}
 	host := info.Data.HostList[0]
@@ -540,7 +604,8 @@ func (upstream *HTTPUpstream) OpenRoom(ctx context.Context, roomID string, cooki
 	if err != nil {
 		return nil, ErrEgressUnavailable
 	}
-	auth, _ := json.Marshal(map[string]any{"uid": uid, "roomid": numericRoomID, "protover": 2, "platform": "web", "type": 2, "key": info.Data.Token, "buvid": buvid})
+	connection.SetReadLimit(maximumDanmakuPayload)
+	auth, _ := json.Marshal(map[string]any{"uid": uid, "roomid": numericRoomID, "protover": 3, "platform": "web", "type": 2, "key": info.Data.Token, "buvid": buvid})
 	if err := connection.WriteMessage(websocket.BinaryMessage, encodeDanmakuPacket(danmakuAuthOperation, auth)); err != nil {
 		_ = connection.Close()
 		return nil, ErrEgressUnavailable
@@ -560,23 +625,40 @@ func (upstream *HTTPUpstream) OpenRoom(ctx context.Context, roomID string, cooki
 	return result, nil
 }
 
+func mapBiliApplicationCode(code int) error {
+	switch code {
+	case -352, -412, -403:
+		return ErrRiskRejected
+	case -509:
+		return ErrRateLimited
+	default:
+		return ErrEgressUnavailable
+	}
+}
+
 type websocketConnection struct {
 	connection danmakuSocket
 	done       chan struct{}
 	once       sync.Once
 	mu         sync.Mutex
 	err        error
-	closed     bool
+	terminal   bool
 	now        func() time.Time
 	newTicker  func(time.Duration) danmakuTicker
 }
 
 func (connection *websocketConnection) Close() error {
+	connection.mu.Lock()
+	if !connection.terminal {
+		connection.terminal = true
+		connection.err = nil
+	}
+	connection.mu.Unlock()
+	return connection.terminate()
+}
+func (connection *websocketConnection) terminate() error {
 	var result error
 	connection.once.Do(func() {
-		connection.mu.Lock()
-		connection.closed = true
-		connection.mu.Unlock()
 		close(connection.done)
 		result = connection.connection.Close()
 	})
@@ -590,13 +672,16 @@ func (connection *websocketConnection) Err() error {
 }
 func (connection *websocketConnection) fail(err error) {
 	connection.mu.Lock()
-	if !connection.closed {
-		connection.err = err
+	if connection.terminal {
+		connection.mu.Unlock()
+		return
 	}
+	connection.terminal = true
+	connection.err = err
 	connection.mu.Unlock()
+	_ = connection.terminate()
 }
 func (connection *websocketConnection) forward(sink Sink) {
-	defer connection.Close()
 	for {
 		_, payload, err := connection.connection.ReadMessage()
 		if err != nil {
@@ -657,7 +742,6 @@ func (connection *websocketConnection) heartbeat() {
 				default:
 				}
 				connection.fail(ErrEgressUnavailable)
-				_ = connection.Close()
 				return
 			}
 		}
@@ -706,10 +790,24 @@ func (upstream *HTTPUpstream) getJSON(ctx context.Context, endpoint, roomID stri
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
-		return mapUpstreamStatus(response)
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maximumBiliHTTPResponseBytes))
+		return mapUpstreamStatus(response, upstream.now())
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(target); err != nil {
+	body, err := io.ReadAll(io.LimitReader(response.Body, maximumBiliHTTPResponseBytes+1))
+	if err != nil || len(body) > maximumBiliHTTPResponseBytes {
+		return ErrEgressUnavailable
+	}
+	defer clear(body)
+	var envelope struct {
+		Code int `json:"code"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return ErrEgressUnavailable
+	}
+	if envelope.Code != 0 {
+		return withRetryAfter(mapBiliApplicationCode(envelope.Code), response.Header.Get("Retry-After"), upstream.now())
+	}
+	if err := json.Unmarshal(body, target); err != nil {
 		return ErrEgressUnavailable
 	}
 	return nil
@@ -738,17 +836,26 @@ func danmakuIdentity(cookie []byte) (int64, string, bool) {
 	}
 	return uid, buvid, uid > 0
 }
-func mapUpstreamStatus(response *http.Response) error {
+func mapUpstreamStatus(response *http.Response, now time.Time) error {
 	cause := ErrEgressUnavailable
 	if response.StatusCode == http.StatusTooManyRequests {
 		cause = ErrRateLimited
 	}
-	if response.StatusCode == http.StatusForbidden {
+	if response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusPreconditionFailed {
 		cause = ErrRiskRejected
 	}
-	seconds, _ := strconv.Atoi(response.Header.Get("Retry-After"))
-	if seconds > 0 {
+	return withRetryAfter(cause, response.Header.Get("Retry-After"), now)
+}
+
+func withRetryAfter(cause error, value string, now time.Time) error {
+	value = strings.TrimSpace(value)
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
 		return upstreamFailure{cause: cause, retryAfter: time.Duration(seconds) * time.Second}
+	}
+	if deadline, err := http.ParseTime(value); err == nil {
+		if delay := deadline.Sub(now); delay > 0 {
+			return upstreamFailure{cause: cause, retryAfter: delay}
+		}
 	}
 	return cause
 }

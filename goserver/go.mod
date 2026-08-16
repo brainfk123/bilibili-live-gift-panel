@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
+	github.com/andybalholm/brotli v1.1.1
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/gorilla/websocket v1.5.3
 	github.com/pquerna/otp v1.5.0

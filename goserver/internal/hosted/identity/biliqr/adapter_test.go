@@ -127,7 +127,7 @@ func TestAdapterConsumeCredentialRetainsOnlyUntilConsumerSucceeds(t *testing.T) 
 		t.Fatal(err)
 	}
 	consumerFailure := errors.New("transaction unavailable")
-	if err := adapter.ConsumeCredential(context.Background(), challenge.ID, func(cookie []byte) error {
+	if err := adapter.ConsumeCredential(context.Background(), challenge.ID, func(_ context.Context, cookie []byte) error {
 		if !strings.Contains(string(cookie), "SESSDATA=service-cookie") {
 			t.Fatalf("credential callback = %q", cookie)
 		}
@@ -135,7 +135,7 @@ func TestAdapterConsumeCredentialRetainsOnlyUntilConsumerSucceeds(t *testing.T) 
 	}); !errors.Is(err, consumerFailure) {
 		t.Fatalf("first ConsumeCredential() error = %v, want consumer failure", err)
 	}
-	if err := adapter.ConsumeCredential(context.Background(), challenge.ID, func(cookie []byte) error {
+	if err := adapter.ConsumeCredential(context.Background(), challenge.ID, func(_ context.Context, cookie []byte) error {
 		if !strings.Contains(string(cookie), "SESSDATA=service-cookie") {
 			t.Fatalf("retry callback = %q", cookie)
 		}
@@ -148,6 +148,253 @@ func TestAdapterConsumeCredentialRetainsOnlyUntilConsumerSucceeds(t *testing.T) 
 	}
 	if _, err := adapter.Poll(context.Background(), challenge.ID); !errors.Is(err, identity.ErrChallengeNotFound) {
 		t.Fatalf("successful callback kept credential: %v", err)
+	}
+}
+
+func TestAdapterConsumeCredentialReservesCompletedChallengeForOneConsumer(t *testing.T) {
+	adapter := &Adapter{now: time.Now, challenges: map[string]*pendingChallenge{"challenge": {expiresAt: time.Now().Add(time.Minute), cookies: map[string]string{"SESSDATA": "secret"}}}}
+	started, release := make(chan struct{}), make(chan struct{})
+	var calls sync.WaitGroup
+	calls.Add(1)
+	go func() {
+		defer calls.Done()
+		if err := adapter.ConsumeCredential(context.Background(), "challenge", func(context.Context, []byte) error { close(started); <-release; return nil }); err != nil {
+			t.Errorf("winner error=%v", err)
+		}
+	}()
+	<-started
+	if err := adapter.ConsumeCredential(context.Background(), "challenge", func(context.Context, []byte) error { t.Fatal("second consumer ran"); return nil }); !errors.Is(err, identity.ErrVerificationPending) {
+		t.Fatalf("second consumer error=%v", err)
+	}
+	close(release)
+	calls.Wait()
+}
+
+func TestAdapterPollDuringCredentialConsumptionStaysPendingAndPreservesChallenge(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"code": 86038}})
+	}))
+	defer server.Close()
+	state := &pendingChallenge{expiresAt: time.Now().Add(time.Minute), cookies: map[string]string{"SESSDATA": "secret"}}
+	adapter := &Adapter{client: server.Client(), pollEndpoint: server.URL, now: time.Now, challenges: map[string]*pendingChallenge{"challenge": state}}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		result <- adapter.ConsumeCredential(context.Background(), "challenge", func(context.Context, []byte) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	verification, err := adapter.Poll(context.Background(), "challenge")
+	if verification.UID != "" || !errors.Is(err, identity.ErrVerificationPending) {
+		t.Fatalf("Poll during credential consumption=%#v, %v", verification, err)
+	}
+	adapter.mu.Lock()
+	current, exists := adapter.challenges["challenge"]
+	stillConsuming := exists && current == state && state.consuming
+	adapter.mu.Unlock()
+	if !stillConsuming {
+		t.Fatal("Poll terminally consumed or forgot the reserved challenge")
+	}
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatalf("reserved credential consumer error=%v", err)
+	}
+}
+
+func TestAdapterConsumeCredentialDuringOrdinaryPollStaysPending(t *testing.T) {
+	pollStarted := make(chan struct{})
+	releasePoll := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		close(pollStarted)
+		<-releasePoll
+		writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"code": 86101}})
+	}))
+	defer server.Close()
+	state := &pendingChallenge{qrKey: "ordinary-key", expiresAt: time.Now().Add(time.Minute)}
+	adapter := &Adapter{client: server.Client(), pollEndpoint: server.URL, now: time.Now, challenges: map[string]*pendingChallenge{"challenge": state}}
+	type pollResult struct {
+		verification identity.Verification
+		err          error
+	}
+	pollDone := make(chan pollResult, 1)
+	go func() {
+		verification, err := adapter.Poll(context.Background(), "challenge")
+		pollDone <- pollResult{verification: verification, err: err}
+	}()
+	<-pollStarted
+	callbackRan := false
+	err := adapter.ConsumeCredential(context.Background(), "challenge", func(context.Context, []byte) error {
+		callbackRan = true
+		return nil
+	})
+	if !errors.Is(err, identity.ErrVerificationPending) || callbackRan {
+		t.Fatalf("ConsumeCredential during Poll error=%v callbackRan=%v", err, callbackRan)
+	}
+	close(releasePoll)
+	outcome := <-pollDone
+	if outcome.verification.UID != "" || !errors.Is(outcome.err, identity.ErrVerificationPending) {
+		t.Fatalf("ordinary Poll outcome=%#v, %v", outcome.verification, outcome.err)
+	}
+	adapter.mu.Lock()
+	_, exists := adapter.challenges["challenge"]
+	adapter.mu.Unlock()
+	if !exists {
+		t.Fatal("pending ordinary Poll lost challenge after competing ConsumeCredential")
+	}
+}
+
+func TestAdapterConsumeCredentialFailureCanRetryOnlyWithinAbsoluteTTL(t *testing.T) {
+	clock := &mutableAdapterClock{value: time.Now()}
+	state := &pendingChallenge{
+		expiresAt: clock.Now().Add(time.Minute),
+		cookies:   map[string]string{"SESSDATA": "secret"},
+	}
+	adapter := &Adapter{now: clock.Now, challenges: map[string]*pendingChallenge{"challenge": state}}
+	failure := errors.New("temporary persistence failure")
+	if err := adapter.ConsumeCredential(context.Background(), "challenge", func(context.Context, []byte) error { return failure }); !errors.Is(err, failure) {
+		t.Fatalf("first callback error=%v", err)
+	}
+	adapter.mu.Lock()
+	releasedForRetry := !state.consuming && state.cancel == nil
+	adapter.mu.Unlock()
+	if !releasedForRetry {
+		t.Fatal("valid failed callback retained its consumer reservation")
+	}
+	clock.Set(clock.Now().Add(59 * time.Second))
+	if err := adapter.ConsumeCredential(context.Background(), "challenge", func(context.Context, []byte) error { return nil }); err != nil {
+		t.Fatalf("retry before absolute TTL error=%v", err)
+	}
+	if _, exists := adapter.challenges["challenge"]; exists {
+		t.Fatal("successful retry retained challenge")
+	}
+}
+
+func TestAdapterConsumeCredentialPollCompletionAfterAbsoluteTTLDoesNotRunCallback(t *testing.T) {
+	clock := &mutableAdapterClock{value: time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)}
+	pollStarted := make(chan struct{})
+	releasePoll := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/generate":
+			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": "https://example.test/qr", "qrcode_key": "service-key"}})
+		case "/poll":
+			close(pollStarted)
+			<-releasePoll
+			http.SetCookie(response, &http.Cookie{Name: "SESSDATA", Value: "service-cookie"})
+			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"code": 0, "url": "https://example.test/"}})
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	adapter, err := New(Config{
+		Client: server.Client(), GenerateEndpoint: server.URL + "/generate", PollEndpoint: server.URL + "/poll", NavEndpoint: server.URL + "/nav",
+		Now: clock.Now, Lifetime: time.Minute, EncodeQR: func(string) (string, error) { return "qr", nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := adapter.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackRan := false
+	result := make(chan error, 1)
+	go func() {
+		result <- adapter.ConsumeCredential(context.Background(), challenge.ID, func(context.Context, []byte) error {
+			callbackRan = true
+			return nil
+		})
+	}()
+	<-pollStarted
+	clock.Set(challenge.ExpiresAt)
+	close(releasePoll)
+	if err := <-result; !errors.Is(err, identity.ErrChallengeExpired) {
+		t.Fatalf("completion at absolute TTL error=%v", err)
+	}
+	if callbackRan {
+		t.Fatal("expired poll completion ran credential callback")
+	}
+	if _, exists := adapter.challenges[challenge.ID]; exists {
+		t.Fatal("expired poll completion retained credential")
+	}
+}
+
+func TestAdapterConsumeCredentialExpiryDuringCallbackCannotCommitSuccess(t *testing.T) {
+	clock := &mutableAdapterClock{value: time.Now()}
+	adapter := &Adapter{now: clock.Now, challenges: make(map[string]*pendingChallenge)}
+	state := &pendingChallenge{
+		expiresAt: clock.Now().Add(time.Minute),
+		cookies:   map[string]string{"SESSDATA": "secret"},
+	}
+	adapter.challenges["challenge"] = state
+	started := make(chan struct{})
+	commit := make(chan struct{})
+	result := make(chan error, 1)
+	sideEffect := false
+	go func() {
+		result <- adapter.ConsumeCredential(context.Background(), "challenge", func(consumerContext context.Context, _ []byte) error {
+			deadline, ok := consumerContext.Deadline()
+			if !ok || !deadline.Equal(state.expiresAt) {
+				return errors.New("consumer context missing absolute challenge deadline")
+			}
+			close(started)
+			select {
+			case <-consumerContext.Done():
+				return context.Cause(consumerContext)
+			case <-commit:
+				sideEffect = true
+				return nil
+			}
+		})
+	}()
+	<-started
+	clock.Set(state.expiresAt)
+	adapter.expireChallenge("challenge", state)
+	if _, exists := adapter.challenges["challenge"]; exists {
+		t.Fatal("TTL did not destroy in-flight credential")
+	}
+	if err := <-result; !errors.Is(err, identity.ErrChallengeExpired) {
+		t.Fatalf("expiry during callback error=%v, want challenge expired", err)
+	}
+	if sideEffect {
+		t.Fatal("expired consumer context allowed transaction side effect")
+	}
+}
+
+func TestAdapterConsumeCredentialCloseDuringCallbackCannotCommitSuccess(t *testing.T) {
+	adapter := &Adapter{now: time.Now, challenges: map[string]*pendingChallenge{
+		"challenge": {expiresAt: time.Now().Add(time.Minute), cookies: map[string]string{"SESSDATA": "secret"}},
+	}}
+	started := make(chan struct{})
+	commit := make(chan struct{})
+	result := make(chan error, 1)
+	sideEffect := false
+	go func() {
+		result <- adapter.ConsumeCredential(context.Background(), "challenge", func(consumerContext context.Context, _ []byte) error {
+			close(started)
+			select {
+			case <-consumerContext.Done():
+				return context.Cause(consumerContext)
+			case <-commit:
+				sideEffect = true
+				return nil
+			}
+		})
+	}()
+	<-started
+	if err := adapter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; !errors.Is(err, identity.ErrChallengeNotFound) {
+		t.Fatalf("Close during callback error=%v, want challenge not found", err)
+	}
+	if sideEffect {
+		t.Fatal("closed consumer context allowed transaction side effect")
 	}
 }
 

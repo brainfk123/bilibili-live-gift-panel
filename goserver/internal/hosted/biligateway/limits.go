@@ -14,13 +14,24 @@ var (
 )
 
 type rateBucket struct {
-	started time.Time
-	count   int
+	initialized bool
+	tokens      float64
+	updated     time.Time
+	lastSeen    time.Time
 }
+
+const (
+	globalBucketCapacity   = 60
+	accountBucketCapacity  = 30
+	endpointBucketCapacity = 20
+	accountBucketRetention = 10 * time.Minute
+)
+
 type requestLimiter struct {
-	mu      sync.Mutex
-	now     func() time.Time
-	buckets map[string]rateBucket
+	mu          sync.Mutex
+	now         func() time.Time
+	buckets     map[string]rateBucket
+	lastCleanup time.Time
 }
 
 func newRequestLimiter(now func() time.Time) *requestLimiter {
@@ -30,8 +41,8 @@ func newRequestLimiter(now func() time.Time) *requestLimiter {
 	return &requestLimiter{now: now, buckets: make(map[string]rateBucket)}
 }
 
-// Allow applies all three bounded token windows. A missing trusted account ID
-// is fail-closed at the caller before this function is reached.
+// Allow atomically charges the global, trusted-account, and endpoint scopes.
+// If any scope is empty, none of the three scopes loses a token.
 func (limiter *requestLimiter) Allow(accountID int64, endpoint string) bool {
 	if limiter == nil || accountID <= 0 || endpoint == "" {
 		return false
@@ -39,27 +50,60 @@ func (limiter *requestLimiter) Allow(accountID int64, endpoint string) bool {
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
 	now := limiter.now()
-	for _, key := range []string{"global", "account:" + integerText(accountID), "endpoint:" + endpoint} {
-		bucket := limiter.buckets[key]
-		if bucket.started.IsZero() || !now.Before(bucket.started.Add(time.Minute)) {
-			bucket = rateBucket{started: now}
-		}
-		limit := 60
-		switch {
-		case key == "global":
-			limit = 60
-		case len(key) >= len("account:") && key[:len("account:")] == "account:":
-			limit = 30
-		case len(key) >= len("endpoint:") && key[:len("endpoint:")] == "endpoint:":
-			limit = 20
-		}
-		if bucket.count >= limit {
-			return false
-		}
-		bucket.count++
-		limiter.buckets[key] = bucket
+	limiter.cleanupStaleAccounts(now)
+
+	scopes := [...]struct {
+		key      string
+		capacity float64
+	}{
+		{key: "global", capacity: globalBucketCapacity},
+		{key: "account:" + integerText(accountID), capacity: accountBucketCapacity},
+		{key: "endpoint:" + endpoint, capacity: endpointBucketCapacity},
 	}
-	return true
+	var candidates [len(scopes)]rateBucket
+	allowed := true
+	for index, scope := range scopes {
+		candidate := refillBucket(limiter.buckets[scope.key], now, scope.capacity)
+		candidate.lastSeen = now
+		candidates[index] = candidate
+		if candidate.tokens < 1 {
+			allowed = false
+		}
+	}
+	for index, scope := range scopes {
+		candidate := candidates[index]
+		if allowed {
+			candidate.tokens--
+		}
+		limiter.buckets[scope.key] = candidate
+	}
+	return allowed
+}
+
+func refillBucket(bucket rateBucket, now time.Time, capacity float64) rateBucket {
+	if !bucket.initialized {
+		return rateBucket{initialized: true, tokens: capacity, updated: now, lastSeen: now}
+	}
+	if elapsed := now.Sub(bucket.updated); elapsed > 0 {
+		bucket.tokens += elapsed.Seconds() * capacity / time.Minute.Seconds()
+		if bucket.tokens > capacity {
+			bucket.tokens = capacity
+		}
+		bucket.updated = now
+	}
+	return bucket
+}
+
+func (limiter *requestLimiter) cleanupStaleAccounts(now time.Time) {
+	if !limiter.lastCleanup.IsZero() && now.Sub(limiter.lastCleanup) < accountBucketRetention {
+		return
+	}
+	for key, bucket := range limiter.buckets {
+		if len(key) >= len("account:") && key[:len("account:")] == "account:" && !now.Before(bucket.lastSeen.Add(accountBucketRetention)) {
+			delete(limiter.buckets, key)
+		}
+	}
+	limiter.lastCleanup = now
 }
 
 type riskSample struct {
@@ -82,12 +126,19 @@ func newEgressBreaker(now func() time.Time) *egressBreaker {
 	return &egressBreaker{now: now}
 }
 func (breaker *egressBreaker) RecordRisk(accountID int64) {
-	if breaker == nil {
+	if breaker == nil || accountID <= 0 {
 		return
 	}
 	breaker.mu.Lock()
 	defer breaker.mu.Unlock()
 	now := breaker.now()
+	if breaker.halfOpen {
+		breaker.openedUntil = now.Add(2 * time.Minute)
+		breaker.halfOpen = false
+		breaker.successes = 0
+		breaker.risks = []riskSample{{accountID: accountID, at: now}}
+		return
+	}
 	cutoff := now.Add(-time.Minute)
 	kept := breaker.risks[:0]
 	accounts := map[int64]struct{}{}
@@ -146,9 +197,8 @@ func (breaker *egressBreaker) RecordSuccess() {
 	breaker.halfOpen = false
 }
 
-// RecordFailure releases a half-open probe without treating an isolated
-// transport failure as correlated egress risk. The breaker remains open until
-// a later probe succeeds three times or correlated risk reopens its window.
+// RecordFailure reopens a failed half-open probe for a fresh two-minute hold
+// without treating an isolated transport failure as correlated egress risk.
 func (breaker *egressBreaker) RecordFailure() {
 	if breaker == nil {
 		return
@@ -157,6 +207,7 @@ func (breaker *egressBreaker) RecordFailure() {
 	defer breaker.mu.Unlock()
 	if breaker.halfOpen {
 		breaker.halfOpen = false
+		breaker.openedUntil = breaker.now().Add(2 * time.Minute)
 	}
 	breaker.successes = 0
 }

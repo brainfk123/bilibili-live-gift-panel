@@ -46,6 +46,19 @@ func TestControlledGatewayNormalizesRoomCacheKeysAndCoalescesMisses(t *testing.T
 	}
 }
 
+func TestControlledGatewayFailsClosedWithoutTrustedAccountScope(t *testing.T) {
+	upstream := &fakeGatewayUpstream{roomInfo: func(_ context.Context, roomID string, _ []byte) (RoomInfo, error) {
+		return RoomInfo{RoomID: roomID, CanonicalRoomID: roomID}, nil
+	}}
+	gateway := NewControlledGateway(upstream, fakeCredentialLoader{}, GatewayOptions{})
+	if _, err := gateway.RoomInfo(context.Background(), "12"); !errors.Is(err, ErrAccountScopeRequired) {
+		t.Fatalf("unscoped request error = %v", err)
+	}
+	if upstream.roomInfoCalls != 0 {
+		t.Fatalf("unscoped request reached upstream %d times", upstream.roomInfoCalls)
+	}
+}
+
 func TestEgressBreakerRequiresCorrelatedRiskAcrossAccounts(t *testing.T) {
 	clock := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
 	breaker := newEgressBreaker(func() time.Time { return clock })
@@ -174,7 +187,7 @@ func TestControlledGatewayCoalescesConcurrentHalfOpenMissIntoOneProbe(t *testing
 	}
 }
 
-func TestControlledGatewayOpenRoomLoadFailureReleasesHalfOpenProbe(t *testing.T) {
+func TestControlledGatewayOpenRoomLoadFailureReopensHalfOpenBreaker(t *testing.T) {
 	clock := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
 	gateway := NewControlledGateway(&fakeGatewayUpstream{}, failingCredentialLoader{}, GatewayOptions{Now: func() time.Time { return clock }})
 	for index := 0; index < 10; index++ {
@@ -184,8 +197,12 @@ func TestControlledGatewayOpenRoomLoadFailureReleasesHalfOpenProbe(t *testing.T)
 	if _, err := gateway.OpenRoom(WithAccount(context.Background(), 4), "9", func(Event) {}); !errors.Is(err, ErrCredentialUnavailable) {
 		t.Fatalf("load error=%v", err)
 	}
+	if gateway.breaker.Allow(4) {
+		t.Fatal("load failure released an immediate half-open probe")
+	}
+	clock = clock.Add(2 * time.Minute)
 	if !gateway.breaker.Allow(4) {
-		t.Fatal("load failure left half-open probe locked")
+		t.Fatal("load failure did not allow a probe after the two minute hold")
 	}
 }
 
@@ -204,6 +221,7 @@ func TestEgressBreakerRequiresThreeConsecutiveHalfOpenSuccesses(t *testing.T) {
 		t.Fatal("second half-open probe rejected")
 	}
 	breaker.RecordFailure()
+	clock = clock.Add(2 * time.Minute)
 	for range 2 {
 		if !breaker.Allow(4) {
 			t.Fatal("half-open probe rejected")
@@ -212,6 +230,26 @@ func TestEgressBreakerRequiresThreeConsecutiveHalfOpenSuccesses(t *testing.T) {
 	}
 	if breaker.openedUntil.IsZero() {
 		t.Fatal("two successes after a failure closed breaker")
+	}
+}
+
+func TestEgressBreakerHalfOpenFailureReopensTwoMinuteHold(t *testing.T) {
+	clock := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
+	breaker := newEgressBreaker(func() time.Time { return clock })
+	for index := 0; index < 10; index++ {
+		breaker.RecordRisk(int64(index%3 + 1))
+	}
+	clock = clock.Add(2 * time.Minute)
+	if !breaker.Allow(4) {
+		t.Fatal("half-open probe rejected")
+	}
+	breaker.RecordFailure()
+	if breaker.Allow(4) {
+		t.Fatal("failure released an immediate second probe")
+	}
+	clock = clock.Add(2 * time.Minute)
+	if !breaker.Allow(4) {
+		t.Fatal("breaker did not reopen after two minute hold")
 	}
 }
 

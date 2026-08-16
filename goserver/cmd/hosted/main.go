@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,6 +31,12 @@ import (
 )
 
 const shutdownTimeout = 30 * time.Second
+
+const (
+	biliRoomInfoEndpoint    = "https://api.live.bilibili.com/room/v1/Room/room_init"
+	biliGiftCatalogEndpoint = "https://api.live.bilibili.com/xlive/web-room/v1/giftPanel/giftConfig"
+	biliDanmakuInfoEndpoint = "https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo"
+)
 
 var errInvalidCommand = errors.New("invalid hosted command")
 
@@ -146,7 +153,11 @@ func run() error {
 		if err != nil {
 			return errors.New("configure hosted migration HTTP")
 		}
-		biliService, err := biligateway.NewService(verifier, biligateway.NewCredentialStore(store.Database(), keys, time.Now), adminService)
+		biliDependencies, err := newProductionBiliGateway(store.Database(), keys, biligateway.NewHTTPUpstream)
+		if err != nil {
+			return errors.New("configure Bilibili production gateway")
+		}
+		biliService, err := biligateway.NewService(verifier, biliDependencies.Credentials, adminService)
 		if err != nil {
 			return errors.New("configure Bilibili service credential")
 		}
@@ -164,7 +175,8 @@ func run() error {
 		if err != nil {
 			return errors.New("configure administrator HTTP")
 		}
-		server := newHTTPServer(config.ListenAddr, composeHostedHTTP(store, identityHTTP, adminHTTP, invitationHTTP, configurationHTTP, migrationHTTP, biliServiceHTTP, config.AdminCSRFToken))
+		handler := composeHostedHTTP(store, identityHTTP, adminHTTP, invitationHTTP, configurationHTTP, migrationHTTP, biliServiceHTTP, config.AdminCSRFToken)
+		server := newHTTPServer(config.ListenAddr, retainBiliGateway(handler, biliDependencies.Gateway))
 		return serveHTTP(
 			processContext,
 			server,
@@ -178,6 +190,47 @@ func run() error {
 
 type hostedHealthChecker interface {
 	Health(context.Context) error
+}
+
+type biliUpstreamFactory func(biligateway.HTTPUpstreamOptions) (*biligateway.HTTPUpstream, error)
+
+type productionBiliGateway struct {
+	Credentials *biligateway.CredentialStore
+	Gateway     biligateway.Gateway
+}
+
+func newProductionBiliGateway(database *sql.DB, keys security.Keyring, newUpstream biliUpstreamFactory) (productionBiliGateway, error) {
+	if database == nil || newUpstream == nil {
+		return productionBiliGateway{}, errors.New("invalid Bilibili production dependencies")
+	}
+	upstream, err := newUpstream(biligateway.HTTPUpstreamOptions{
+		RoomInfoEndpoint:    biliRoomInfoEndpoint,
+		GiftCatalogEndpoint: biliGiftCatalogEndpoint,
+		DanmakuInfoEndpoint: biliDanmakuInfoEndpoint,
+	})
+	if err != nil {
+		return productionBiliGateway{}, fmt.Errorf("construct Bilibili HTTP upstream: %w", err)
+	}
+	if upstream == nil {
+		return productionBiliGateway{}, errors.New("construct Bilibili HTTP upstream")
+	}
+	credentials := biligateway.NewCredentialStore(database, keys, time.Now)
+	gateway := biligateway.NewControlledGateway(upstream, credentials, biligateway.GatewayOptions{Now: time.Now})
+	if gateway == nil {
+		return productionBiliGateway{}, errors.New("construct controlled Bilibili gateway")
+	}
+	return productionBiliGateway{Credentials: credentials, Gateway: gateway}, nil
+}
+
+// biliGatewayOwner keeps the production gateway reachable for exactly the
+// HTTP server lifetime until the runtime manager becomes its direct consumer.
+type biliGatewayOwner struct {
+	http.Handler
+	Gateway biligateway.Gateway
+}
+
+func retainBiliGateway(handler http.Handler, gateway biligateway.Gateway) http.Handler {
+	return &biliGatewayOwner{Handler: handler, Gateway: gateway}
 }
 
 func composeHostedHTTP(database hostedHealthChecker, auth, admin, invitations, configurationHTTP, migrationHTTP, biliServiceHTTP http.Handler, csrfToken string) http.Handler {

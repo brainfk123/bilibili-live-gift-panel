@@ -18,6 +18,10 @@ import (
 	"time"
 
 	"bilibili-live-gift-panel/internal/hosted/adminidentity"
+	"bilibili-live-gift-panel/internal/hosted/biligateway"
+	"bilibili-live-gift-panel/internal/hosted/security"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 const recoveryArchiveFixture = "R1BSQQEQDCAAAIAAAAAACAAAAAEAAAEdsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy/OsZfWF1Ni/wJbLtaXhn3L2O7UBZh/umY584J8IxZQ+GUUnl/8Nh+dwlW3G4KjyUbDlP2vFi3PsyML32ProgId7mHDRyuhqypPGF36mEh81bubIw9oUqbRDCLXlH7+vOA4AGOfANiolmP1ODOAo65GMpTEd6XzXrCs1Lggs3Suw7aP3Rl6Uc3vxoiHvMtVTqU0qrLPlOfzrZrQNOA573Wn473x7Fw6asWQ56+8jRwCJEiZ9JudESX7gu2uLbcRUC5NZWg+49dRWCzZ3G5aYMZm80zWBlER9ZJUoEgz2pN8ZNf1m5q8uu0y4Oz+2oKpitpoUpNLvbAxa15gNiyuQGG5xQ11uUnhX3gTI7GYQthIpy9/koeG3cr45a8uCQQ=="
@@ -129,6 +133,102 @@ func TestComposeHostedHTTPMakesBiliServiceRoutesReachableWithSpecificity(t *test
 		if response.Code != http.StatusCreated {
 			t.Fatalf("%s %s status=%d", route.method, route.path, response.Code)
 		}
+	}
+}
+
+func TestComposeHostedHTTPKeepsWrongBiliServiceMethodsOutOfBroadAdmin(t *testing.T) {
+	allowed := map[string]string{
+		"/api/admin/bili-service/status":    http.MethodGet,
+		"/api/admin/bili-service/challenge": http.MethodPost,
+		"/api/admin/bili-service/replace":   http.MethodPost,
+	}
+	biliService := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != allowed[request.URL.Path] {
+			response.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		response.WriteHeader(http.StatusCreated)
+	})
+	handler := composeHostedHTTP(healthyHostedDatabase{}, statusHandler(http.StatusAccepted), statusHandler(http.StatusNonAuthoritativeInfo), statusHandler(http.StatusTeapot), nil, nil, biliService, "runtime-csrf")
+
+	for path, allowedMethod := range allowed {
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions, http.MethodHead, "BREW"} {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(method, path, nil))
+			want := http.StatusMethodNotAllowed
+			if method == allowedMethod {
+				want = http.StatusCreated
+			}
+			if response.Code != want {
+				t.Fatalf("%s %s status=%d want=%d from Bili service handler", method, path, response.Code, want)
+			}
+		}
+	}
+}
+
+func TestNewProductionBiliGatewayUsesCanonicalEndpointsAndIsRetainedByHTTP(t *testing.T) {
+	database, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	keys, err := security.NewKeyring(1, bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var captured biligateway.HTTPUpstreamOptions
+	dependencies, err := newProductionBiliGateway(database, keys, func(options biligateway.HTTPUpstreamOptions) (*biligateway.HTTPUpstream, error) {
+		captured = options
+		return biligateway.NewHTTPUpstream(options)
+	})
+	if err != nil {
+		t.Fatalf("newProductionBiliGateway() error = %v", err)
+	}
+	if dependencies.Credentials == nil || dependencies.Gateway == nil {
+		t.Fatalf("production Bili dependencies = %#v", dependencies)
+	}
+	if captured.RoomInfoEndpoint != "https://api.live.bilibili.com/room/v1/Room/room_init" ||
+		captured.GiftCatalogEndpoint != "https://api.live.bilibili.com/xlive/web-room/v1/giftPanel/giftConfig" ||
+		captured.DanmakuInfoEndpoint != "https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo" {
+		t.Fatalf("production Bili endpoints = %#v", captured)
+	}
+
+	base := statusHandler(http.StatusNoContent)
+	retained := retainBiliGateway(base, dependencies.Gateway)
+	owner, ok := retained.(*biliGatewayOwner)
+	if !ok || owner.Gateway != dependencies.Gateway {
+		t.Fatalf("HTTP lifecycle does not retain production gateway: %#v", retained)
+	}
+	response := httptest.NewRecorder()
+	owner.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("retaining wrapper changed HTTP behavior: status=%d", response.Code)
+	}
+}
+
+func TestNewProductionBiliGatewayFailsBeforeBindOnInvalidDependencies(t *testing.T) {
+	keys, err := security.NewKeyring(1, bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	factoryCalled := false
+	if _, err := newProductionBiliGateway(nil, keys, func(options biligateway.HTTPUpstreamOptions) (*biligateway.HTTPUpstream, error) {
+		factoryCalled = true
+		return biligateway.NewHTTPUpstream(options)
+	}); err == nil || factoryCalled {
+		t.Fatalf("nil database error=%v factoryCalled=%v", err, factoryCalled)
+	}
+
+	database, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	want := errors.New("upstream construction failed")
+	if _, err := newProductionBiliGateway(database, keys, func(biligateway.HTTPUpstreamOptions) (*biligateway.HTTPUpstream, error) {
+		return nil, want
+	}); !errors.Is(err, want) {
+		t.Fatalf("upstream construction error=%v, want wrapped %v", err, want)
 	}
 }
 

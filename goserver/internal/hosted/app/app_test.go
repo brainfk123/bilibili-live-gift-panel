@@ -147,3 +147,36 @@ func TestBiliServiceRoutesWinOverBroaderAdministratorPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestEveryMethodForExactBiliServicePathsStaysOutOfBroadAdministratorHandler(t *testing.T) {
+	allowed := map[string]string{
+		"/api/admin/bili-service/status":    http.MethodGet,
+		"/api/admin/bili-service/challenge": http.MethodPost,
+		"/api/admin/bili-service/replace":   http.MethodPost,
+	}
+	biliService := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != allowed[request.URL.Path] {
+			response.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		response.WriteHeader(http.StatusTeapot)
+	})
+	administrator := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusAccepted)
+	})
+	handler := New(Dependencies{DB: fakeHealth{}, Admin: administrator, BiliService: biliService})
+
+	for path, allowedMethod := range allowed {
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions, http.MethodHead, "BREW"} {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(method, path, nil))
+			want := http.StatusMethodNotAllowed
+			if method == allowedMethod {
+				want = http.StatusTeapot
+			}
+			if response.Code != want {
+				t.Fatalf("%s %s status=%d, want %d from Bili service handler", method, path, response.Code, want)
+			}
+		}
+	}
+}

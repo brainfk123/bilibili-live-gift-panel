@@ -146,6 +146,98 @@ func TestProductionMigrationsIncludeVersionedConfigurationStorage(t *testing.T) 
 	t.Fatal("production migrations do not include 0004_configuration_and_migration")
 }
 
+func TestPublishedRuntimeMigrationChecksumsRemainImmutable(t *testing.T) {
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"0004_configuration_and_migration": "8fb8fc88b8040b9806ea15612fdb62dd1fc12f764efcf23d623937779dc64f7c",
+		"0005_runtime_and_obs":             "aaeb739b1fd17b3751d733d36fd8e06c1320f5393ff77341bbac6fbd2a7bc9c2",
+	}
+	for _, item := range migrations {
+		checksum, exists := want[item.version]
+		if !exists {
+			continue
+		}
+		if item.checksum != checksum {
+			t.Fatalf("published migration %s checksum=%s want=%s", item.version, item.checksum, checksum)
+		}
+		delete(want, item.version)
+	}
+	if len(want) != 0 {
+		t.Fatalf("published migrations missing: %v", want)
+	}
+}
+
+func TestProductionRuntimeInvariantMigrationUsesOneCanonicalCreateOnlySchema(t *testing.T) {
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runtimeMigration migration
+	for _, item := range migrations {
+		if item.version == "0006_runtime_invariants" {
+			runtimeMigration = item
+			break
+		}
+	}
+	if runtimeMigration.version == "" {
+		t.Fatal("production migrations do not include 0006_runtime_invariants")
+	}
+	runtimeSQL := strings.Join(strings.Fields(string(runtimeMigration.contents)), " ")
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS runtime_session_identities",
+		"PRIMARY KEY (live_session_id)",
+		"UNIQUE KEY uq_runtime_session_identities_session_account (live_session_id, account_id)",
+		"FOREIGN KEY (live_session_id) REFERENCES live_sessions (id)",
+		"CREATE TABLE IF NOT EXISTS runtime_active_session_guards",
+		"PRIMARY KEY (account_id)",
+		"UNIQUE KEY uq_runtime_active_session_guards_session (live_session_id)",
+		"FOREIGN KEY (live_session_id, account_id) REFERENCES runtime_session_identities (live_session_id, account_id)",
+		"CREATE TABLE IF NOT EXISTS runtime_session_aggregates",
+		"KEY idx_runtime_session_aggregates_session_account (live_session_id, account_id)",
+		"CONSTRAINT fk_runtime_session_aggregates_identity FOREIGN KEY (live_session_id, account_id) REFERENCES runtime_session_identities (live_session_id, account_id)",
+		"CREATE TABLE IF NOT EXISTS runtime_event_dedup_receipts",
+		"CREATE TABLE IF NOT EXISTS runtime_event_dedup_receipts ( account_id BIGINT UNSIGNED NOT NULL, live_session_id BIGINT UNSIGNED NOT NULL",
+		"KEY idx_runtime_event_dedup_receipts_session_account (live_session_id, account_id)",
+		"CONSTRAINT fk_runtime_event_dedup_receipts_identity FOREIGN KEY (live_session_id, account_id) REFERENCES runtime_session_identities (live_session_id, account_id)",
+		"INSERT INTO runtime_session_identities (live_session_id, account_id) SELECT source.live_session_id, source.source_account_id FROM ( SELECT id AS live_session_id, account_id AS source_account_id FROM live_sessions ) AS source ON DUPLICATE KEY UPDATE account_id = IF(runtime_session_identities.account_id = source.source_account_id, runtime_session_identities.account_id, NULL)",
+		"INSERT INTO runtime_active_session_guards (account_id, live_session_id) SELECT source.source_account_id, source.live_session_id FROM ( SELECT account_id AS source_account_id, id AS live_session_id FROM live_sessions WHERE ended_at IS NULL ) AS source ON DUPLICATE KEY UPDATE live_session_id = IF(runtime_active_session_guards.account_id = source.source_account_id AND runtime_active_session_guards.live_session_id = source.live_session_id, runtime_active_session_guards.live_session_id, NULL)",
+	} {
+		if !strings.Contains(runtimeSQL, required) {
+			t.Fatalf("0006 runtime schema missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"ALTER TABLE", "session_status", "runtime_sessions", "ended_at TIMESTAMP", "CREATE TABLE IF NOT EXISTS live_session_runtime"} {
+		if strings.Contains(runtimeSQL, forbidden) {
+			t.Fatalf("0006 contains unsafe or ambiguous legacy seam %q", forbidden)
+		}
+	}
+	if count := strings.Count(runtimeSQL, "ended_at"); count != 1 {
+		t.Fatalf("0006 ended_at references=%d want only the live_sessions backfill predicate", count)
+	}
+	statements := splitStatements(runtimeMigration.contents)
+	if len(statements) != 6 {
+		t.Fatalf("0006 statements=%d want four idempotent CREATEs and two idempotent backfills", len(statements))
+	}
+	for index, statement := range statements {
+		trimmed := strings.TrimSpace(statement)
+		if strings.HasPrefix(trimmed, "--") {
+			if index := strings.Index(trimmed, "CREATE TABLE"); index >= 0 {
+				trimmed = trimmed[index:]
+			}
+		}
+		wantPrefix := "CREATE TABLE IF NOT EXISTS"
+		if index >= 4 {
+			wantPrefix = "INSERT INTO runtime_"
+		}
+		if trimmed != "" && !strings.HasPrefix(trimmed, wantPrefix) {
+			t.Fatalf("0006 statement %d has a partial-retry unsafe shape: %s", index, trimmed)
+		}
+	}
+}
+
 func TestIdentityMigrationTerminalInvitationsCannotAlsoBeRevoked(t *testing.T) {
 	migrations, err := readMigrations(migrationFiles)
 	if err != nil {
