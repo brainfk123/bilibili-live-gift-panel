@@ -80,10 +80,16 @@ func (store *Store) Health(ctx context.Context) error {
 // idempotent statements and record the checksum only after every statement has
 // succeeded; this function does not claim whole-file transactional atomicity.
 func (store *Store) Migrate(ctx context.Context) (resultErr error) {
+	return store.migrate(ctx, migrationFiles)
+}
+
+// migrate is the test seam for supplying a fixed migration filesystem.
+// Production callers must use Migrate, which always uses migrationFiles.
+func (store *Store) migrate(ctx context.Context, fileSystem fs.FS) (resultErr error) {
 	if store == nil || store.db == nil {
 		return errors.New("migrate mysql: store is not initialized")
 	}
-	migrations, err := readMigrations(migrationFiles)
+	migrations, err := readMigrations(fileSystem)
 	if err != nil {
 		return fmt.Errorf("read migrations: %w", err)
 	}

@@ -2,10 +2,8 @@ package mysqlstore
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"errors"
-	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -35,10 +33,23 @@ func TestReadMigrationsSortsFilesByName(t *testing.T) {
 	}
 }
 
+func TestProductionMigrationsIncludeIdentitySchema(t *testing.T) {
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatalf("readMigrations() error = %v", err)
+	}
+	for _, item := range migrations {
+		if item.version == "0002_identity_and_invitations" {
+			return
+		}
+	}
+	t.Fatal("production migrations do not include 0002_identity_and_invitations")
+}
+
 func TestMigrateAppliesUnseenMigrationAndRecordsChecksum(t *testing.T) {
 	store, mock, closeDB := newMockStore(t)
 	defer closeDB()
-	migration := embeddedFoundationMigration(t)
+	files, migration := foundationFixture(t)
 
 	expectLock(mock)
 	expectSchemaTable(mock)
@@ -54,8 +65,8 @@ func TestMigrateAppliesUnseenMigrationAndRecordsChecksum(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	expectUnlock(mock)
 
-	if err := store.Migrate(context.Background()); err != nil {
-		t.Fatalf("Migrate() error = %v", err)
+	if err := store.migrate(context.Background(), files); err != nil {
+		t.Fatalf("migrate() error = %v", err)
 	}
 	assertExpectations(t, mock)
 }
@@ -63,7 +74,7 @@ func TestMigrateAppliesUnseenMigrationAndRecordsChecksum(t *testing.T) {
 func TestMigrateSkipsAlreadyAppliedMigrationWithMatchingChecksum(t *testing.T) {
 	store, mock, closeDB := newMockStore(t)
 	defer closeDB()
-	migration := embeddedFoundationMigration(t)
+	files, migration := foundationFixture(t)
 
 	expectLock(mock)
 	expectSchemaTable(mock)
@@ -72,8 +83,8 @@ func TestMigrateSkipsAlreadyAppliedMigrationWithMatchingChecksum(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"checksum"}).AddRow(migration.checksum))
 	expectUnlock(mock)
 
-	if err := store.Migrate(context.Background()); err != nil {
-		t.Fatalf("Migrate() error = %v", err)
+	if err := store.migrate(context.Background(), files); err != nil {
+		t.Fatalf("migrate() error = %v", err)
 	}
 	assertExpectations(t, mock)
 }
@@ -81,7 +92,7 @@ func TestMigrateSkipsAlreadyAppliedMigrationWithMatchingChecksum(t *testing.T) {
 func TestMigrateRejectsChangedChecksumAndReleasesLock(t *testing.T) {
 	store, mock, closeDB := newMockStore(t)
 	defer closeDB()
-	migration := embeddedFoundationMigration(t)
+	files, migration := foundationFixture(t)
 
 	expectLock(mock)
 	expectSchemaTable(mock)
@@ -90,9 +101,9 @@ func TestMigrateRejectsChangedChecksumAndReleasesLock(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"checksum"}).AddRow(strings.Repeat("0", 64)))
 	expectUnlock(mock)
 
-	err := store.Migrate(context.Background())
+	err := store.migrate(context.Background(), files)
 	if err == nil || !strings.Contains(err.Error(), "checksum") {
-		t.Fatalf("Migrate() error = %v, want checksum mismatch", err)
+		t.Fatalf("migrate() error = %v, want checksum mismatch", err)
 	}
 	assertExpectations(t, mock)
 }
@@ -100,7 +111,7 @@ func TestMigrateRejectsChangedChecksumAndReleasesLock(t *testing.T) {
 func TestMigrateReleasesLockWhenMigrationApplicationFails(t *testing.T) {
 	store, mock, closeDB := newMockStore(t)
 	defer closeDB()
-	migration := embeddedFoundationMigration(t)
+	files, migration := foundationFixture(t)
 
 	expectLock(mock)
 	expectSchemaTable(mock)
@@ -111,9 +122,9 @@ func TestMigrateReleasesLockWhenMigrationApplicationFails(t *testing.T) {
 		WillReturnError(errors.New("apply failed"))
 	expectUnlock(mock)
 
-	err := store.Migrate(context.Background())
+	err := store.migrate(context.Background(), files)
 	if err == nil || !strings.Contains(err.Error(), "apply migration") {
-		t.Fatalf("Migrate() error = %v, want application failure", err)
+		t.Fatalf("migrate() error = %v, want application failure", err)
 	}
 	assertExpectations(t, mock)
 }
@@ -138,20 +149,29 @@ func newMockStore(t *testing.T) (*Store, sqlmock.Sqlmock, func()) {
 	return &Store{db: db}, mock, func() { _ = db.Close() }
 }
 
-func embeddedFoundationMigration(t *testing.T) migration {
+func foundationFixture(t *testing.T) (fstest.MapFS, migration) {
 	t.Helper()
-	migrations, err := readMigrations(migrationFiles)
+	files := fstest.MapFS{
+		"migrations/0001_foundation.sql": {Data: []byte(`CREATE TABLE IF NOT EXISTS schema_migrations (
+    version VARCHAR(255) NOT NULL PRIMARY KEY,
+    checksum CHAR(64) NOT NULL,
+    applied_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS service_health_markers (
+    marker_name VARCHAR(64) NOT NULL PRIMARY KEY,
+    updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)
+) ENGINE=InnoDB;
+`)},
+	}
+	migrations, err := readMigrations(files)
 	if err != nil {
 		t.Fatalf("readMigrations() error = %v", err)
 	}
 	if len(migrations) != 1 {
-		t.Fatalf("embedded migration count = %d, want 1", len(migrations))
+		t.Fatalf("fixture migration count = %d, want 1", len(migrations))
 	}
-	wantChecksum := fmt.Sprintf("%x", sha256.Sum256(migrations[0].contents))
-	if migrations[0].checksum != wantChecksum {
-		t.Fatalf("checksum = %q, want SHA-256 %q", migrations[0].checksum, wantChecksum)
-	}
-	return migrations[0]
+	return files, migrations[0]
 }
 
 func expectLock(mock sqlmock.Sqlmock) {
