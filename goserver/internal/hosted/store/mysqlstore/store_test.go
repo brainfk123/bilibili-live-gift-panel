@@ -21,6 +21,27 @@ const (
 	lockSeconds = 30
 )
 
+func TestStoreDatabaseReturnsBorrowedPoolOwnedByStore(t *testing.T) {
+	database, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &Store{db: database}
+	if borrowed := store.Database(); borrowed != database {
+		t.Fatalf("Database() = %p, want owned pool %p", borrowed, database)
+	}
+	mock.ExpectClose()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if (*Store)(nil).Database() != nil {
+		t.Fatal("nil Store returned a database")
+	}
+}
+
 func TestReadMigrationsSortsFilesByName(t *testing.T) {
 	files := fstest.MapFS{
 		"migrations/0002_second.sql": {Data: []byte("SELECT 2")},

@@ -20,6 +20,7 @@ import (
 	"bilibili-live-gift-panel/internal/hosted/app"
 	"bilibili-live-gift-panel/internal/hosted/identity"
 	"bilibili-live-gift-panel/internal/hosted/identity/biliqr"
+	"bilibili-live-gift-panel/internal/hosted/invitation"
 	"bilibili-live-gift-panel/internal/hosted/platform"
 	"bilibili-live-gift-panel/internal/hosted/security"
 	"bilibili-live-gift-panel/internal/hosted/store/mysqlstore"
@@ -73,11 +74,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	adminRepository, err := adminidentity.OpenRepository(processContext, config.MySQLDSN)
-	if err != nil {
-		return errors.New("open administrator repository")
-	}
-	defer adminRepository.Close()
+	// All hosted SQL modules borrow the Store-owned pool. Store is the only
+	// database Close owner for the process.
+	adminRepository := adminidentity.NewRepository(store.Database())
 	sender, err := adminidentity.NewSMTPSender(adminidentity.SMTPConfig{
 		Address: config.SMTPAddress, Host: config.SMTPHost, Username: config.SMTPUsername,
 		Password: config.SMTPPassword, From: config.SMTPFrom, Mode: adminidentity.SMTPMode(config.SMTPMode),
@@ -100,16 +99,42 @@ func run() error {
 	}, func() error {
 		resolver, err := identity.NewTrustedProxyClientIPResolver([]string{"127.0.0.1/32", "::1/128"})
 		if err != nil {
-			return errors.New("configure administrator client address policy")
+			return errors.New("configure hosted client address policy")
+		}
+		limiter := newLocalLimiter(time.Now)
+		identityService, err := identity.NewService(identity.NewRepository(store.Database()), keys, verifier, identity.ServiceOptions{})
+		if err != nil {
+			return errors.New("configure hosted identity")
+		}
+		// The identity service owns process-local intents and must close before
+		// the shared verifier and Store-owned database pool in the outer scope.
+		defer identityService.Close()
+		identityHTTP, err := identity.NewHTTPHandler(identityService, identity.HTTPOptions{
+			AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
+			Limiter: limiter, ClientIP: resolver,
+		})
+		if err != nil {
+			return errors.New("configure hosted identity HTTP")
+		}
+		invitationService, err := invitation.NewService(store.Database(), keys, identityService, invitation.ServiceOptions{})
+		if err != nil {
+			return errors.New("configure hosted invitations")
+		}
+		invitationHTTP, err := invitation.NewHTTPHandler(invitationService, invitation.HTTPOptions{
+			AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
+			Limiter: limiter, ClientIP: resolver, Authenticate: identityHTTP.Authenticate,
+		})
+		if err != nil {
+			return errors.New("configure hosted invitation HTTP")
 		}
 		adminHTTP, err := adminidentity.NewHTTPHandler(adminService, adminidentity.HTTPOptions{
 			AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
-			Limiter: newLocalLimiter(time.Now), ClientIP: resolver,
+			Limiter: limiter, ClientIP: resolver,
 		})
 		if err != nil {
 			return errors.New("configure administrator HTTP")
 		}
-		server := newHTTPServer(config.ListenAddr, app.New(app.Dependencies{DB: store, Admin: adminHTTP}))
+		server := newHTTPServer(config.ListenAddr, composeHostedHTTP(store, identityHTTP, adminHTTP, invitationHTTP))
 		return serveHTTP(
 			processContext,
 			server,
@@ -119,6 +144,14 @@ func run() error {
 			func() { slog.Info("hosted service listening", "address", config.ListenAddr) },
 		)
 	})
+}
+
+type hostedHealthChecker interface {
+	Health(context.Context) error
+}
+
+func composeHostedHTTP(database hostedHealthChecker, auth, admin, invitations http.Handler) http.Handler {
+	return app.New(app.Dependencies{DB: database, Auth: auth, Admin: admin, Invitation: invitations})
 }
 
 func loadHostedKeyring(encryptionKeyFile, hmacKeyFile string) (security.Keyring, error) {

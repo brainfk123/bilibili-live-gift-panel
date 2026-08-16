@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,36 @@ func TestNewHTTPServerConfiguresHostedTimeouts(t *testing.T) {
 	}
 	if server.IdleTimeout != 60*time.Second {
 		t.Fatalf("IdleTimeout = %v, want 60s", server.IdleTimeout)
+	}
+}
+
+func TestComposeHostedHTTPMakesAllInvitationRoutesReachableWithSpecificity(t *testing.T) {
+	auth := statusHandler(http.StatusAccepted)
+	admin := statusHandler(http.StatusNonAuthoritativeInfo)
+	invitation := statusHandler(http.StatusTeapot)
+	handler := composeHostedHTTP(healthyHostedDatabase{}, auth, admin, invitation)
+
+	tests := []struct {
+		method string
+		path   string
+		want   int
+	}{
+		{http.MethodPost, "/api/auth/registration", http.StatusTeapot},
+		{http.MethodGet, "/api/invitations", http.StatusTeapot},
+		{http.MethodPost, "/api/invitations", http.StatusTeapot},
+		{http.MethodDelete, "/api/invitations/71", http.StatusTeapot},
+		{http.MethodPost, "/api/admin/invitations", http.StatusTeapot},
+		{http.MethodPost, "/api/admin/accounts/41/invitation-quota", http.StatusTeapot},
+		{http.MethodPost, "/api/auth/session", http.StatusAccepted},
+		{http.MethodPost, "/api/admin/accounts/41/disable", http.StatusAccepted},
+		{http.MethodPost, "/api/admin/totp", http.StatusNonAuthoritativeInfo},
+	}
+	for _, test := range tests {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(test.method, test.path, nil))
+		if response.Code != test.want {
+			t.Fatalf("%s %s status=%d want=%d", test.method, test.path, response.Code, test.want)
+		}
 	}
 }
 
@@ -427,6 +458,16 @@ type initializerStub struct {
 	uid    string
 	email  string
 	calls  int
+}
+
+type healthyHostedDatabase struct{}
+
+func (healthyHostedDatabase) Health(context.Context) error { return nil }
+
+func statusHandler(status int) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(status)
+	})
 }
 
 func (initializer *initializerStub) Initialize(_ context.Context, uid, email string) (adminidentity.InitializeResult, error) {

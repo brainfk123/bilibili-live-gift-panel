@@ -90,9 +90,30 @@ type serviceChallenge struct {
 }
 
 type registrationIntent struct {
+	uid         EncryptedUID
+	expiresAt   time.Time
+	timer       *time.Timer
+	reservation *registrationReservation
+}
+
+// RegistrationIntentReservation is a short-lived, single-winner lease over
+// one registration intent. Identity returns caller-owned clones. Callers must
+// Commit only after their durable transaction commits and Abort on every
+// failure; both operations are idempotent.
+type RegistrationIntentReservation interface {
+	Identity() (EncryptedUID, time.Time, bool)
+	Valid() bool
+	Commit()
+	Abort()
+}
+
+type registrationReservation struct {
+	service   *Service
+	key       [sha256.Size]byte
+	intent    *registrationIntent
 	uid       EncryptedUID
 	expiresAt time.Time
-	timer     *time.Timer
+	done      bool
 }
 
 // Service owns the short-lived bridge between a Bilibili proof and a hosted
@@ -326,37 +347,143 @@ func (service *Service) Poll(ctx context.Context, challengeID string) (PollResul
 	return PollResult{Status: RegistrationRequired, RegistrationIntent: intentToken, ExpiresAt: expiresAt}, nil
 }
 
-// ConsumeRegistrationIntent atomically returns and destroys one verified,
-// encrypted UID. It is the narrow seam consumed by invitation redemption.
-func (service *Service) ConsumeRegistrationIntent(token string) (EncryptedUID, error) {
+// ReserveRegistrationIntent leases one verified encrypted UID without
+// irreversibly consuming it. Only one reservation can exist for a token.
+func (service *Service) ReserveRegistrationIntent(token string) (RegistrationIntentReservation, error) {
 	if service == nil || token == "" {
-		return EncryptedUID{}, ErrRegistrationIntentInvalid
+		return nil, ErrRegistrationIntentInvalid
 	}
 	service.collectExpired()
 	hash, err := service.keys.HashToken("registration_intent", []byte(token))
 	if err != nil {
-		return EncryptedUID{}, ErrRegistrationIntentInvalid
+		return nil, ErrRegistrationIntentInvalid
 	}
 	key, ok := digestKey(hash)
 	if !ok {
-		return EncryptedUID{}, ErrRegistrationIntentInvalid
+		return nil, ErrRegistrationIntentInvalid
 	}
 	service.mu.Lock()
 	intent, exists := service.registrations[key]
-	if exists {
-		delete(service.registrations, key)
-		stopRegistrationTimer(intent)
-	}
-	closed := service.closed
-	service.mu.Unlock()
-	if !exists || closed || !service.now().Before(intent.expiresAt) {
-		if exists {
+	if !exists || service.closed || intent.reservation != nil || !service.now().Before(intent.expiresAt) {
+		if exists && !service.now().Before(intent.expiresAt) {
+			delete(service.registrations, key)
+			stopRegistrationTimer(intent)
 			destroyRegistration(intent)
 		}
+		service.mu.Unlock()
+		return nil, ErrRegistrationIntentInvalid
+	}
+	reservation := &registrationReservation{
+		uid: EncryptedUID{
+			Ciphertext: append([]byte(nil), intent.uid.Ciphertext...),
+			Lookup:     append([]byte(nil), intent.uid.Lookup...),
+		},
+		expiresAt: intent.expiresAt,
+		service:   service,
+		key:       key,
+		intent:    intent,
+	}
+	intent.reservation = reservation
+	service.mu.Unlock()
+	return reservation, nil
+}
+
+// Identity returns a fresh clone of the encrypted UID and the intent's
+// absolute expiry while the reservation is live.
+func (reservation *registrationReservation) Identity() (EncryptedUID, time.Time, bool) {
+	if reservation == nil || reservation.service == nil {
+		return EncryptedUID{}, time.Time{}, false
+	}
+	service := reservation.service
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	intent := service.registrations[reservation.key]
+	if reservation.done || service.closed || intent != reservation.intent || intent == nil ||
+		intent.reservation != reservation || !service.now().Before(reservation.expiresAt) {
+		return EncryptedUID{}, reservation.expiresAt, false
+	}
+	return EncryptedUID{
+		Ciphertext: append([]byte(nil), reservation.uid.Ciphertext...),
+		Lookup:     append([]byte(nil), reservation.uid.Lookup...),
+	}, reservation.expiresAt, true
+}
+
+// Valid reports whether the reservation is still the live lease and is before
+// its absolute expiry. Invitation redemption rechecks this immediately before
+// committing its SQL transaction.
+func (reservation *registrationReservation) Valid() bool {
+	if reservation == nil || reservation.service == nil {
+		return false
+	}
+	service := reservation.service
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	intent := service.registrations[reservation.key]
+	return !reservation.done && !service.closed && intent == reservation.intent && intent != nil &&
+		intent.reservation == reservation && service.now().Before(reservation.expiresAt)
+}
+
+// Commit irreversibly destroys the leased intent. It is deliberately
+// infallible so it can follow a successful durable SQL commit.
+func (reservation *registrationReservation) Commit() {
+	if reservation == nil || reservation.service == nil {
+		return
+	}
+	service := reservation.service
+	service.mu.Lock()
+	if reservation.done {
+		service.mu.Unlock()
+		return
+	}
+	reservation.done = true
+	if intent := service.registrations[reservation.key]; intent == reservation.intent && intent.reservation == reservation {
+		delete(service.registrations, reservation.key)
+		stopRegistrationTimer(intent)
+		destroyRegistration(intent)
+	}
+	service.mu.Unlock()
+	destroyReservation(reservation)
+}
+
+// Abort releases a live lease for retry until its original absolute expiry.
+// Expired or closed intents are destroyed instead of restored.
+func (reservation *registrationReservation) Abort() {
+	if reservation == nil || reservation.service == nil {
+		return
+	}
+	service := reservation.service
+	service.mu.Lock()
+	if reservation.done {
+		service.mu.Unlock()
+		return
+	}
+	reservation.done = true
+	if intent := service.registrations[reservation.key]; intent == reservation.intent && intent.reservation == reservation {
+		if !service.closed && service.now().Before(intent.expiresAt) {
+			intent.reservation = nil
+		} else {
+			delete(service.registrations, reservation.key)
+			stopRegistrationTimer(intent)
+			destroyRegistration(intent)
+		}
+	}
+	service.mu.Unlock()
+	destroyReservation(reservation)
+}
+
+// ConsumeRegistrationIntent is the compatibility wrapper for callers that do
+// not need rollback: reserve, clone the identity, then commit irreversibly.
+func (service *Service) ConsumeRegistrationIntent(token string) (EncryptedUID, error) {
+	reservation, err := service.ReserveRegistrationIntent(token)
+	if err != nil {
+		return EncryptedUID{}, err
+	}
+	result, _, ok := reservation.Identity()
+	if !ok {
+		reservation.Abort()
 		return EncryptedUID{}, ErrRegistrationIntentInvalid
 	}
-	result := EncryptedUID{Ciphertext: append([]byte(nil), intent.uid.Ciphertext...), Lookup: append([]byte(nil), intent.uid.Lookup...)}
-	destroyRegistration(intent)
+	reservation.Commit()
 	return result, nil
 }
 
@@ -563,13 +690,33 @@ func destroyRegistration(intent *registrationIntent) {
 	if intent == nil {
 		return
 	}
-	for index := range intent.uid.Ciphertext {
-		intent.uid.Ciphertext[index] = 0
+	if intent.reservation != nil {
+		intent.reservation.done = true
+		destroyReservation(intent.reservation)
+		intent.reservation = nil
 	}
-	for index := range intent.uid.Lookup {
-		intent.uid.Lookup[index] = 0
-	}
+	destroyEncryptedUID(&intent.uid)
 	intent.uid = EncryptedUID{}
+}
+
+func destroyReservation(reservation *registrationReservation) {
+	if reservation == nil {
+		return
+	}
+	destroyEncryptedUID(&reservation.uid)
+	reservation.uid = EncryptedUID{}
+}
+
+func destroyEncryptedUID(uid *EncryptedUID) {
+	if uid == nil {
+		return
+	}
+	for index := range uid.Ciphertext {
+		uid.Ciphertext[index] = 0
+	}
+	for index := range uid.Lookup {
+		uid.Lookup[index] = 0
+	}
 }
 
 func canonicalUID(value string) (string, bool) {

@@ -86,6 +86,16 @@ func (store *Store) Close() error {
 	return store.db.Close()
 }
 
+// Database returns a borrowed reference to the Store-owned connection pool for
+// composition of SQL-backed hosted modules. Callers must never close it; Store
+// remains the sole owner and closes the pool during process shutdown.
+func (store *Store) Database() *sql.DB {
+	if store == nil {
+		return nil
+	}
+	return store.db
+}
+
 // Health reports whether MySQL is reachable without returning database error
 // details to the HTTP layer.
 func (store *Store) Health(ctx context.Context) error {

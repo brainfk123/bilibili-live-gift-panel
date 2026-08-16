@@ -172,6 +172,126 @@ func TestServiceRegistrationIntentExpires(t *testing.T) {
 	}
 }
 
+func TestServiceRegistrationIntentReservationHasOneConcurrentWinner(t *testing.T) {
+	now := time.Date(2026, 8, 16, 8, 32, 0, 0, time.UTC)
+	service, token, keys := newRegistrationIntentForTest(t, now, 5*time.Minute)
+
+	const contenders = 16
+	start := make(chan struct{})
+	results := make(chan RegistrationIntentReservation, contenders)
+	var wait sync.WaitGroup
+	for range contenders {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			reservation, err := service.ReserveRegistrationIntent(token)
+			if err == nil {
+				results <- reservation
+			}
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+
+	var winner RegistrationIntentReservation
+	for reservation := range results {
+		if winner != nil {
+			t.Fatal("more than one concurrent registration reservation succeeded")
+		}
+		winner = reservation
+	}
+	if winner == nil || !winner.Valid() {
+		t.Fatalf("winning reservation = %#v", winner)
+	}
+	uid, expiresAt, ok := winner.Identity()
+	if !ok || !expiresAt.Equal(now.Add(5*time.Minute)) {
+		t.Fatalf("Identity() expiry=%v ok=%v", expiresAt, ok)
+	}
+	plaintext, err := keys.Open("bili_uid", uid.Ciphertext)
+	if err != nil || string(plaintext) != "90000020" || len(uid.Lookup) != 32 {
+		t.Fatalf("reserved identity plaintext=%q lookup=%d error=%v", plaintext, len(uid.Lookup), err)
+	}
+	winner.Abort()
+}
+
+func TestServiceRegistrationIntentAbortRestoresUntilAbsoluteExpiry(t *testing.T) {
+	now := time.Date(2026, 8, 16, 8, 34, 0, 0, time.UTC)
+	clock := &mutableServiceClock{value: now}
+	service, token, _ := newRegistrationIntentForClockTest(t, clock, 5*time.Minute)
+
+	first, err := service.ReserveRegistrationIntent(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Abort()
+	second, err := service.ReserveRegistrationIntent(token)
+	if err != nil {
+		t.Fatalf("ReserveRegistrationIntent() after Abort error = %v", err)
+	}
+	_, expiresAt, ok := second.Identity()
+	if !ok {
+		t.Fatal("second reservation did not expose its identity")
+	}
+	clock.Set(expiresAt)
+	if second.Valid() {
+		t.Fatal("reservation remained valid at its absolute expiry")
+	}
+	second.Abort()
+	if _, err := service.ReserveRegistrationIntent(token); !errors.Is(err, ErrRegistrationIntentInvalid) {
+		t.Fatalf("ReserveRegistrationIntent() after expiry error = %v", err)
+	}
+}
+
+func TestServiceRegistrationIntentCommitIsIrreversible(t *testing.T) {
+	now := time.Date(2026, 8, 16, 8, 36, 0, 0, time.UTC)
+	service, token, _ := newRegistrationIntentForTest(t, now, 5*time.Minute)
+	reservation, err := service.ReserveRegistrationIntent(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation.Commit()
+	reservation.Abort()
+	if reservation.Valid() {
+		t.Fatal("committed reservation remained valid")
+	}
+	if _, err := service.ReserveRegistrationIntent(token); !errors.Is(err, ErrRegistrationIntentInvalid) {
+		t.Fatalf("ReserveRegistrationIntent() after Commit error = %v", err)
+	}
+}
+
+func TestServiceAbandonedReservedRegistrationIsDestroyedOnTimerAndClose(t *testing.T) {
+	now := time.Date(2026, 8, 16, 8, 38, 0, 0, time.UTC)
+	t.Run("timer", func(t *testing.T) {
+		service, token, _ := newRegistrationIntentForTest(t, now, 25*time.Millisecond)
+		reservation, err := service.ReserveRegistrationIntent(token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitForServiceState(t, func() bool {
+			service.mu.Lock()
+			defer service.mu.Unlock()
+			return len(service.registrations) == 0
+		})
+		if uid, _, ok := reservation.Identity(); reservation.Valid() || ok || len(uid.Ciphertext) != 0 || len(uid.Lookup) != 0 {
+			t.Fatalf("expired reservation retained identity: %#v", uid)
+		}
+	})
+
+	t.Run("close", func(t *testing.T) {
+		service, token, _ := newRegistrationIntentForTest(t, now, time.Minute)
+		reservation, err := service.ReserveRegistrationIntent(token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		service.Close()
+		if uid, _, ok := reservation.Identity(); reservation.Valid() || ok || len(uid.Ciphertext) != 0 || len(uid.Lookup) != 0 {
+			t.Fatalf("closed reservation retained identity: %#v", uid)
+		}
+	})
+}
+
 func TestServiceForgetsEveryTerminalCancelledAndShutdownChallenge(t *testing.T) {
 	now := time.Date(2026, 8, 16, 8, 40, 0, 0, time.UTC)
 	tests := []struct {
@@ -526,6 +646,35 @@ func newTestService(t *testing.T, repository Repository, verifier BiliVerifier, 
 		t.Fatalf("NewService() error = %v", err)
 	}
 	return service
+}
+
+func newRegistrationIntentForTest(t *testing.T, now time.Time, ttl time.Duration) (*Service, string, security.Keyring) {
+	t.Helper()
+	return newRegistrationIntentForClockTest(t, &mutableServiceClock{value: now}, ttl)
+}
+
+func newRegistrationIntentForClockTest(t *testing.T, clock *mutableServiceClock, ttl time.Duration) (*Service, string, security.Keyring) {
+	t.Helper()
+	keys := fixedServiceKeyring(t)
+	verifier := &memoryVerifier{
+		challenge:     Challenge{ID: "reservation-challenge", QRImage: "qr", ExpiresAt: clock.Now().Add(5 * time.Minute)},
+		verifications: []Verification{{UID: "90000020", CompletedAt: clock.Now()}},
+	}
+	service, err := NewService(&memoryRepository{findErr: ErrNotFound}, keys, verifier, ServiceOptions{
+		Now: clock.Now, ChallengeTTL: 5 * time.Minute, RegistrationTTL: ttl, SessionTTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := service.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Poll(context.Background(), challenge.ID)
+	if err != nil || result.RegistrationIntent == "" {
+		t.Fatalf("Poll() = %#v, %v", result, err)
+	}
+	return service, result.RegistrationIntent, keys
 }
 
 func fixedServiceKeyring(t *testing.T) security.Keyring {

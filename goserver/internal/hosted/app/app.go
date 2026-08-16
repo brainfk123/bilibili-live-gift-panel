@@ -12,9 +12,10 @@ type healthChecker interface {
 
 // Dependencies contains the hosted HTTP application's external services.
 type Dependencies struct {
-	DB    healthChecker
-	Auth  http.Handler
-	Admin http.Handler
+	DB         healthChecker
+	Auth       http.Handler
+	Admin      http.Handler
+	Invitation http.Handler
 }
 
 // New builds the hosted HTTP handler.
@@ -39,6 +40,14 @@ func New(dependencies Dependencies) http.Handler {
 	}
 	if dependencies.Admin != nil {
 		mux.Handle("/api/admin/", dependencies.Admin)
+	}
+	if dependencies.Invitation != nil {
+		mux.Handle("POST /api/auth/registration", dependencies.Invitation)
+		mux.Handle("GET /api/invitations", dependencies.Invitation)
+		mux.Handle("POST /api/invitations", dependencies.Invitation)
+		mux.Handle("DELETE /api/invitations/{id}", dependencies.Invitation)
+		mux.Handle("POST /api/admin/invitations", dependencies.Invitation)
+		mux.Handle("POST /api/admin/accounts/{id}/invitation-quota", dependencies.Invitation)
 	}
 	return mux
 }
