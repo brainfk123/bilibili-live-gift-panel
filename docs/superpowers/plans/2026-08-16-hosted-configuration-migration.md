@@ -17,6 +17,7 @@
 - Raw migration upload exists only for the request duration and is never written to disk, logs, object storage, or backups.
 - Accept JSON only, maximum 2 MiB, with bounded depth/count/string lengths.
 - Migrate attribute values, activity progress, and gift-target received counts; exclude credentials, viewer identity, history, logs, media paths, crop data, update/tutorial settings, caches, WAL, and dedupe keys.
+- Stored configuration is a room-independent projection. `Snapshot.RoomID` and every gift/target asset URL are excluded; the room remains a separately confirmed account setting and the later Bilibili gateway refreshes official resource URLs.
 - A local room ID is a suggestion requiring separate confirmation.
 - Running accounts stage migration until the current session naturally ends; no manual stop control is introduced.
 - Preview drafts expire after 24 hours; rollback snapshots expire after 7 days; each account gets at most 5 previews per day.
@@ -51,8 +52,8 @@
 - Modify: `goserver/internal/hosted/store/mysqlstore/store_test.go`
 
 **Interfaces:**
-- Produces: `configuration.Split(gameplay.Snapshot)` and `Join(Definition, RuntimeState)`.
-- Produces: `Repository.CreateVersion`, `LoadActive`, `CompareAndSwapState`, and `Activate`.
+- Produces: `configuration.Split(gameplay.Snapshot) (Definition, RuntimeState, error)`, `Join(Definition, RuntimeState) (gameplay.Snapshot, error)`, and `DefaultRuntime(Definition)`.
+- Produces: `Repository.LoadActive`, `CompareAndSwapState`, and one deep `Activate` command that creates and activates a version atomically.
 
 - [ ] **Step 1: Write failing split/join tests**
 
@@ -61,12 +62,16 @@ Prove definitions contain no current values and state contains no executable for
 ```go
 func TestSplitSeparatesDefinitionFromMutableState(t *testing.T) {
     snapshot := fixtureSnapshot()
-    definition, state := Split(snapshot)
+    definition, state, err := Split(snapshot)
+    if err != nil { t.Fatal(err) }
     definitionJSON, _ := json.Marshal(definition)
     stateJSON, _ := json.Marshal(state)
     if bytes.Contains(definitionJSON, []byte(`"value":42`)) { t.Fatal("value leaked into definition") }
     if bytes.Contains(stateJSON, []byte(`"formula"`)) { t.Fatal("formula leaked into runtime state") }
-    if got := Join(definition, state); !reflect.DeepEqual(got, snapshot) { t.Fatal("join mismatch") }
+    got, err := Join(definition, state)
+    if err != nil { t.Fatal(err) }
+    want := storageProjection(snapshot) // room ID and asset URLs cleared
+    if !reflect.DeepEqual(got, want) { t.Fatal("join mismatch") }
 }
 ```
 
@@ -86,13 +91,15 @@ var ErrRevisionConflict = errors.New("configuration revision conflict")
 
 `Source` accepts only `manual`, `migration`, and `rollback`.
 
+`Split` first normalizes and clones through `gameplay.Normalize`, then stores only allowlisted definition/runtime fields. `Join` rejects missing/extra runtime keys and returns a detached room-independent snapshot with all gift/target asset URLs empty. `DefaultRuntime` creates the complete zero/idle runtime needed for an account with no active configuration; it must also round-trip through `Join` and `gameplay.Normalize`.
+
 - [ ] **Step 3: Add database schema and repository semantics**
 
-Create `account_config_versions`, `account_runtime_state`, `account_room_suggestions`, `migration_jobs`, and `live_sessions`. Use `BIGINT UNSIGNED` IDs consistently with `streamer_accounts`, unique `(account_id, number)`, one state/suggestion row per account, foreign keys, JSON validity checks where MySQL supports them, and indexed job hash/status/expiry. A room suggestion is untrusted input awaiting the later runtime `SetRoom` confirmation; saving or applying it never sets a target room or opens a session. `CreateVersion` allocates number under account-row lock. `CompareAndSwapState` updates only when the submitted revision matches and increments it once.
+Create `account_config_versions`, `account_runtime_state`, `account_room_suggestions`, `migration_jobs`, and `live_sessions`. Use `BIGINT UNSIGNED` IDs consistently with `streamer_accounts`, unique `(account_id, number)`, one state/suggestion row per account, foreign keys, JSON validity checks where MySQL supports them, and indexed job hash/status/expiry. A room suggestion is untrusted input awaiting the later runtime `SetRoom` confirmation; saving or applying it never sets a target room or opens a session. `Activate` locks the account, verifies the expected active version number and state revision (`0/0` means no active configuration), allocates the next number, inserts the immutable version, replaces runtime state, and updates the active pointer in one transaction. `CompareAndSwapState` updates only when the submitted revision matches and increments it once. No public repository operation may create an inactive/orphan configuration version.
 
 - [ ] **Step 4: Test atomic activation**
 
-With `go-sqlmock`, require one transaction to insert a version, replace current runtime state, point `streamer_accounts.active_config_version_id`, and optionally mark a migration applied. Roll back all steps on any error.
+Use a typed `ActivationCommand` carrying account ID, expected version/revision, definition, runtime, source, optional migration job ID, and timestamp. With `go-sqlmock`, require one transaction to insert a version, replace current runtime state, point `streamer_accounts.active_config_version_id`, and optionally mark a migration applied. Roll back all steps on any error or revision mismatch.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -129,7 +136,7 @@ type SaveStateCommand struct { ExpectedRevision uint64; Runtime RuntimeState }
 type RoomSuggestionCommand struct { RoomID string }
 ```
 
-The service receives `accountID int64` separately from trusted middleware context. Normalize through `gameplay.Normalize(Join(...))` before any write. `SuggestRoom` only creates/replaces the account's pending suggestion and never changes a target room or `live_sessions`.
+The service receives `accountID int64` separately from trusted middleware context. Normalize through `Join` and `gameplay.Normalize` before any write. Saving a definition uses `Activate` with both expected version and expected state revision so a concurrent runtime update cannot be overwritten; for an account without active configuration it uses `DefaultRuntime`. `SuggestRoom` only creates/replaces the account's pending suggestion and never changes a target room or `live_sessions`.
 
 - [ ] **Step 3: Add HTTP routes**
 
@@ -237,7 +244,7 @@ Parse top-level `json.RawMessage`, copy only known keys, and record unknown JSON
 
 - [ ] **Step 3: Implement preview records**
 
-Rate-limit to 5 successful preview creations per account per UTC day. Reuse an unexpired job with the same account/hash rather than inserting a duplicate. Save only normalized definition/runtime, counts/warnings/hash/source versions, and optional room suggestion; never save raw bytes.
+Rate-limit to 5 successful preview creations per account per UTC day. Reuse an unexpired job with the same account/hash rather than inserting a duplicate. Save the owning account's base active version number and runtime revision together with only normalized definition/runtime, counts/warnings/hash/source versions, and optional room suggestion; never save raw bytes.
 
 - [ ] **Step 4: Test preview immutability and expiry**
 
@@ -272,7 +279,7 @@ Cover inactive immediate apply, active-session pending apply, cancellation, natu
 
 - [ ] **Step 2: Implement atomic apply**
 
-For an inactive account, one transaction captures old config/state IDs, inserts migration version/state, switches active version, stores rollback snapshot/expiry, and sets job `applied`. For an active account, set only `pending`; `ApplyPendingAfterSession` performs the same transaction after the session row is closed.
+For an inactive account, one transaction verifies the preview's base version/revision still match, captures old config/state IDs, inserts migration version/state, switches active version, stores rollback snapshot/expiry, and sets job `applied`. For an active account, set only `pending`; `ApplyPendingAfterSession` performs the same transaction after the session row is closed and still rejects base-version/revision drift. When the user explicitly keeps a migration room suggestion, copy it only into `account_room_suggestions`; never set a target room or create a session.
 
 - [ ] **Step 3: Implement cancellation and rollback**
 
