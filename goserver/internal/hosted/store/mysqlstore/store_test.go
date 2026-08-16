@@ -91,6 +91,42 @@ func TestProductionMigrationsIncludeRetryableAdministratorHandoffs(t *testing.T)
 	t.Fatal("production migrations do not include 0003_admin_handoffs")
 }
 
+func TestProductionMigrationsIncludeVersionedConfigurationStorage(t *testing.T) {
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range migrations {
+		if item.version != "0004_configuration_and_migration" {
+			continue
+		}
+		sql := strings.Join(strings.Fields(string(item.contents)), " ")
+		for _, required := range []string{
+			"ALTER TABLE streamer_accounts ADD COLUMN active_config_version_id BIGINT UNSIGNED NULL",
+			"CREATE TABLE IF NOT EXISTS account_config_versions",
+			"CREATE TABLE IF NOT EXISTS account_runtime_state",
+			"CREATE TABLE IF NOT EXISTS account_room_suggestions",
+			"CREATE TABLE IF NOT EXISTS migration_jobs",
+			"CREATE TABLE IF NOT EXISTS live_sessions",
+			"UNIQUE KEY uq_account_config_versions_account_number (account_id, number)",
+			"PRIMARY KEY (account_id)",
+			"CHECK (JSON_VALID(definition_json))",
+			"CHECK (JSON_VALID(runtime_json))",
+			"KEY idx_migration_jobs_hash (account_id, request_hash)",
+			"KEY idx_migration_jobs_status_expiry (status, expires_at)",
+		} {
+			if !strings.Contains(sql, required) {
+				t.Fatalf("0004 migration missing %q", required)
+			}
+		}
+		if strings.Contains(sql, "target_room") || strings.Contains(sql, "INSERT INTO live_sessions") {
+			t.Fatalf("0004 migration violates pending room suggestion boundary: %s", sql)
+		}
+		return
+	}
+	t.Fatal("production migrations do not include 0004_configuration_and_migration")
+}
+
 func TestIdentityMigrationTerminalInvitationsCannotAlsoBeRevoked(t *testing.T) {
 	migrations, err := readMigrations(migrationFiles)
 	if err != nil {
