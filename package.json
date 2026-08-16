@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "npm run build:ui && npm run build:exe",
     "build:ui": "vite build",
+    "build:hosted": "vite build --config vite.hosted.config.ts",
     "prepare:go-assets": "node scripts/prepare-go-assets.mjs",
     "build:exe": "node scripts/build-go.mjs",
     "build:ffmpeg": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-ffmpeg.ps1",
@@ -19,6 +20,7 @@
     "test:update-api": "go -C updateapi test ./... -count=1",
     "build:update-api": "node scripts/build-update-api.mjs",
     "test": "vitest run",
+    "test:hosted": "vitest run tests/hosted-build.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

@@ -1,0 +1,98 @@
+:root {
+  color: #f7f3ff;
+  background: #160d29;
+  font-family: "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.hosted-shell {
+  display: grid;
+  width: min(100% - 2rem, 38rem);
+  min-height: 100vh;
+  place-content: center;
+  gap: 1.25rem;
+  margin: 0 auto;
+  padding: 2rem 0;
+}
+
+.hosted-shell h1,
+.hosted-shell h2,
+.hosted-shell p {
+  margin: 0;
+}
+
+.hosted-shell h1 {
+  font-size: clamp(2rem, 7vw, 3.5rem);
+  line-height: 1.15;
+  letter-spacing: 0.04em;
+}
+
+.hosted-status {
+  color: #d9ccf5;
+  font-size: 1rem;
+}
+
+.hosted-login {
+  justify-self: start;
+  min-height: 2.75rem;
+  padding: 0.7rem 1.1rem;
+  color: #211033;
+  background: #ffb6dc;
+  border: 0;
+  border-radius: 0.75rem;
+  cursor: pointer;
+}
+
+.hosted-login:hover {
+  background: #ffd0e8;
+}
+
+.hosted-login:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 3px;
+}
+
+.hosted-privacy {
+  max-width: 34rem;
+  padding: 1rem;
+  color: #e8ddff;
+  background: #2a1a47;
+  border: 1px solid #5e467e;
+  border-radius: 0.75rem;
+}
+
+.hosted-privacy h2 {
+  margin-bottom: 0.5rem;
+  font-size: 1rem;
+}
+
+.hosted-privacy p {
+  line-height: 1.65;
+}
+
+@media (max-width: 480px) {
+  .hosted-shell {
+    width: min(100% - 1.5rem, 38rem);
+    padding: 1.5rem 0;
+  }
+
+  .hosted-login {
+    width: 100%;
+  }
+}
