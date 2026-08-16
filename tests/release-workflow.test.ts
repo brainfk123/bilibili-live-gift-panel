@@ -153,77 +153,43 @@ describe('release workflow supply-chain contract', () => {
     expect(source).not.toContain('github.sha');
   });
 
-  it('runs the publisher only from a separately checked-out protected-environment commit', () => {
-    const { release, steps } = releaseWorkflow();
-    const validateTag = stepIndex(steps, 'Validate release tag');
-    const validateTool = stepIndex(steps, 'Validate update publisher tool commit');
-    const checkoutRelease = stepIndex(steps, 'Check out release tag');
-    const checkoutTool = stepIndex(steps, 'Check out update publisher tooling');
-    const verifyTool = stepIndex(steps, 'Verify update publisher tool checkout');
-    const testUpdateApi = stepIndex(steps, 'Test domestic update tooling');
-    const mirror = stepIndex(steps, 'Mirror release to Tencent COS');
-    const mirrorStep = steps[mirror];
+  it('keeps GitHub Release independent from COS publishers and remote triggers', () => {
+    const { release, source, steps } = releaseWorkflow();
+    const checkoutSteps = steps.filter((step) => step.uses?.startsWith('actions/checkout@'));
 
     expect(release?.environment).toBe('release');
-    expect(release?.env?.UPDATE_PUBLISHER_TOOL_SHA)
-      .toBe('${{ vars.UPDATE_PUBLISHER_TOOL_SHA }}');
-    expect(steps.slice(0, validateTool).map((step) => step.name))
-      .toEqual(['Validate release tag']);
-    expect(validateTag).toBeLessThan(validateTool);
-    expect(validateTool).toBeLessThan(checkoutRelease);
-    expect(steps[validateTool]?.run).toContain(
-      "$env:UPDATE_PUBLISHER_TOOL_SHA -cnotmatch '\\A[0-9A-Fa-f]{40}\\z'",
-    );
-
-    expect(checkoutRelease).toBeLessThan(checkoutTool);
-    expect(steps[checkoutTool]).toMatchObject({
-      uses: 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
-      with: {
-        ref: '${{ env.UPDATE_PUBLISHER_TOOL_SHA }}',
-        path: '_update-publisher-tool',
-        'persist-credentials': false,
-      },
-    });
-    expect(checkoutTool).toBeLessThan(verifyTool);
-    expect(steps[verifyTool]?.run).toContain(
-      "$publisherCheckout = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE '_update-publisher-tool'))",
-    );
-    expect(steps[verifyTool]?.run).toContain('git -C "$publisherCheckout" rev-parse HEAD');
-    expect(steps[verifyTool]?.run).toContain('[StringComparison]::OrdinalIgnoreCase');
-    expect(verifyTool).toBeLessThan(testUpdateApi);
-    expect(steps[testUpdateApi]?.run)
-      .toBe('go -C _update-publisher-tool/updateapi test ./... -race -count=1');
-
-    expect(mirrorStep?.['working-directory']).toBeUndefined();
-    expect(mirrorStep?.run).toContain(
-      "$publisherModuleRoot = [IO.Path]::GetFullPath((Join-Path $releaseRoot '_update-publisher-tool\\updateapi'))",
-    );
-    expect(mirrorStep?.run).toContain(
-      "$assetPath = [IO.Path]::GetFullPath((Join-Path $releaseRoot 'dist\\gift-panel-windows-x64.exe'))",
-    );
-    expect(mirrorStep?.run).toContain('& go -C "$publisherModuleRoot" run ./cmd/publish');
-    expect(mirrorStep?.run).toContain('--asset "$assetPath"');
-    expect(mirrorStep?.run).toContain('--checksum "$checksumPath"');
-    expect(mirrorStep?.run).toContain('--changelog "$changelogPath"');
-    expect(mirrorStep?.run).not.toContain('go run ./cmd/publish');
-    expect(mirrorStep?.run).not.toContain('../dist/');
+    expect(checkoutSteps).toHaveLength(1);
+    expect(checkoutSteps[0]?.name).toBe('Check out release tag');
+    for (const [name, forbidden] of [
+      ['COS release secret ID', /COS_RELEASE_SECRET_ID/i],
+      ['COS release secret key', /COS_RELEASE_SECRET_KEY/i],
+      ['publisher tool pin', /UPDATE_PUBLISHER_TOOL_SHA/i],
+      ['publisher tool checkout', /_update-publisher-tool/i],
+      ['Tencent COS', /Tencent\s+COS/i],
+      ['TAT', /\bTAT\b/i],
+      ['webhook', /\bwebhooks?\b/i],
+      ['connectivity script', /test-cos-connectivity/i],
+    ]) {
+      expect(source, `release workflow must not reference ${name}`).not.toMatch(forbidden);
+    }
+    expect(source).not.toMatch(/\bgo(?:\.exe)?(?:\s+-C\s+\S+)?\s+run\s+\.\/cmd\/publish\b/);
   });
 
-  it('isolates every pinned publisher Go command from tag-controlled workspaces', () => {
+  it('race-tests the update module from the release tag checkout itself', () => {
     const { steps } = releaseWorkflow();
-    const pinnedToolGoSteps = steps.filter((step) => (
-      typeof step.run === 'string' &&
-      /\bgo(?:\.exe)?\b/.test(step.run) &&
-      (step.run.includes('_update-publisher-tool') || step.run.includes('$publisherModuleRoot'))
-    ));
+    const checkoutRelease = stepIndex(steps, 'Check out release tag');
+    const setupGo = stepIndex(steps, 'Set up Go');
+    const testUpdateApi = stepIndex(steps, 'Test domestic update tooling');
 
-    expect(pinnedToolGoSteps.map((step) => step.name)).toEqual([
-      'Test domestic update tooling',
-      'Mirror release to Tencent COS',
-    ]);
-    for (const step of pinnedToolGoSteps) {
-      expect(step.env?.GOWORK, `${step.name} must ignore a release-tag go.work`).toBe('off');
-    }
+    expect(checkoutRelease).toBeLessThan(setupGo);
+    expect(steps[setupGo]?.with).toMatchObject({
+      'go-version-file': 'updateapi/go.mod',
+      'cache-dependency-path': 'updateapi/go.sum',
+    });
+    expect(setupGo).toBeLessThan(testUpdateApi);
+    expect(steps[testUpdateApi]?.env?.GOWORK).toBe('off');
+    expect(steps[testUpdateApi]?.run)
+      .toBe('go -C updateapi test ./... -race -count=1');
   });
 
   it('uses the audited setup-msys2 v2 commit and rejects mutable refs', () => {
@@ -277,7 +243,7 @@ describe('release workflow supply-chain contract', () => {
     const githubRelease = stepIndex(steps, 'Create GitHub release');
 
     expect(steps[testUpdateApi]?.run)
-      .toBe('go -C _update-publisher-tool/updateapi test ./... -race -count=1');
+      .toBe('go -C updateapi test ./... -race -count=1');
     expect(testUpdateApi).toBeLessThan(githubRelease);
     expect(signOuter).toBeLessThan(githubRelease);
     expect(steps[signOuter]?.env?.EVSIGN_EXPECTED_SUBJECT)
@@ -291,13 +257,12 @@ describe('release workflow supply-chain contract', () => {
     );
   });
 
-  it('builds domestic update identity into the signed executable before mirroring it last', () => {
+  it('builds domestic update identity into the signed executable and ends at a validated GitHub Release', () => {
     const { steps } = releaseWorkflow();
     const build = stepIndex(steps, 'Build release executable');
     const sign = stepIndex(steps, 'Prepare and sign release executable');
     const githubRelease = stepIndex(steps, 'Create GitHub release');
-    const mirror = stepIndex(steps, 'Mirror release to Tencent COS');
-    const mirrorStep = steps[mirror];
+    const validate = stepIndex(steps, 'Validate published release assets');
 
     expect(steps[build]?.env).toMatchObject({
       APP_COMMIT: '${{ env.RELEASE_COMMIT }}',
@@ -307,25 +272,8 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[sign]?.run).toContain(
       'node scripts/sign-evsign.mjs dist/gift-panel-windows-x64.exe',
     );
-    expect(githubRelease).toBeLessThan(mirror);
-    expect(mirror).toBe(steps.length - 1);
-    expect(mirrorStep?.['working-directory']).toBeUndefined();
-    expect(mirrorStep?.run).toContain(
-      '& go -C "$publisherModuleRoot" run ./cmd/publish --tag $env:RELEASE_TAG --published-at $env:RELEASE_PUBLISHED_AT',
-    );
-    expect(mirrorStep?.run).toContain('throw "Tencent COS release mirror failed"');
-    expect(mirrorStep?.run).toContain("$publishOutput -contains 'stable unchanged'");
-    expect(mirrorStep?.run).toContain(
-      'stable unchanged because the channel is already on an equal or newer version',
-    );
-    expect(mirrorStep?.env).toEqual({
-      GOWORK: 'off',
-      COS_BUCKET: '${{ vars.COS_BUCKET }}',
-      COS_REGION: '${{ vars.COS_REGION }}',
-      COS_SECRET_ID: '${{ secrets.COS_RELEASE_SECRET_ID }}',
-      COS_SECRET_KEY: '${{ secrets.COS_RELEASE_SECRET_KEY }}',
-    });
-    expect(mirrorStep?.run).not.toMatch(/COS_(?:SECRET_ID|SECRET_KEY)/);
+    expect(githubRelease).toBeLessThan(validate);
+    expect(validate).toBe(steps.length - 1);
   });
 
   it('reuses complete existing GitHub assets without rebuilding, resigning, or clobbering', () => {
@@ -337,7 +285,6 @@ describe('release workflow supply-chain contract', () => {
     const prepare = stepIndex(steps, 'Prepare release assets');
     const create = stepIndex(steps, 'Create GitHub release');
     const validate = stepIndex(steps, 'Validate published release assets');
-    const mirror = stepIndex(steps, 'Mirror release to Tencent COS');
 
     expect(inspect).toBeLessThan(download);
     expect(steps[inspect]?.run).toContain('published_at');
@@ -388,19 +335,7 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[validate]?.run).toContain('Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel-windows-x64.exe');
     expect(steps[validate]?.run).toContain('gift-panel-windows-x64.exe.sha256');
     expect(steps[validate]?.run).toContain('dist/gift-panel-update.json');
-    expect(validate).toBeLessThan(mirror);
-  });
-
-  it('writes release publication timestamps as invariant UTC RFC3339 for the COS publisher', () => {
-    const { steps } = releaseWorkflow();
-    for (const name of ['Inspect existing GitHub release', 'Create GitHub release']) {
-      const run = steps[stepIndex(steps, name)]?.run ?? '';
-      expect(run, name).toContain('.ToUniversalTime()');
-      expect(run, name).toContain("yyyy-MM-dd'T'HH:mm:ss'Z'");
-      expect(run, name).toContain('[Globalization.CultureInfo]::InvariantCulture');
-      expect(run, name).toContain('RELEASE_PUBLISHED_AT=$publishedAtRFC3339');
-      expect(run, name).not.toContain('RELEASE_PUBLISHED_AT=$($release.published_at)');
-    }
+    expect(validate).toBe(steps.length - 1);
   });
 
   it('accepts the exact typed fallback update manifest contract', () => {
@@ -475,7 +410,7 @@ describe('release workflow supply-chain contract', () => {
   ];
 
   it.each(malformedManifestCases)(
-    'rejects fallback manifests with $name before COS repair',
+    'rejects fallback manifests with $name during GitHub Release repair',
     ({ mutate, serialize }) => {
       const manifest = publishedManifestFixture();
       const replacement = mutate(manifest);
