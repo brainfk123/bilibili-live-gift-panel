@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
@@ -13,6 +14,10 @@ const hostedFiles = [
   'src/hosted/shell.css',
   'vite.hosted.config.ts',
 ];
+
+function normalizePath(path: string): string {
+  return path.replaceAll('\\', '/');
+}
 
 function listFilesRecursively(directory: string): string[] {
   const files: string[] = [];
@@ -49,6 +54,21 @@ describe('hosted web build contract', () => {
 
     expect(packageJSON.scripts?.['build:hosted']).toBe('vite build --config vite.hosted.config.ts');
     expect(packageJSON.scripts?.['test:hosted']).toBe('vitest run tests/hosted-build.test.ts');
+  });
+
+  it('includes the hosted Vite config in the TypeScript program', () => {
+    const tsconfig = JSON.parse(readFileSync(join(projectRoot, 'tsconfig.json'), 'utf8')) as {
+      include?: string[];
+    };
+    const viteConfig = resolve(projectRoot, 'vite.hosted.config.ts').replaceAll('\\', '/');
+    const listedFiles = execFileSync(
+      process.execPath,
+      [join(projectRoot, 'node_modules', 'typescript', 'bin', 'tsc'), '--listFilesOnly'],
+      { cwd: projectRoot, encoding: 'utf8' },
+    ).replaceAll('\\', '/');
+
+    expect(tsconfig.include).toContain('vite.hosted.config.ts');
+    expect(listedFiles).toContain(viteConfig);
   });
 
   it('keeps hosted UI source free of desktop-only imports and browser persistence', () => {
@@ -141,12 +161,31 @@ describe('hosted web build contract', () => {
 
     const outDir = mkdtempSync(join(tmpdir(), 'gift-panel-hosted-build-'));
     try {
-      await viteBuild({
+      const build = await viteBuild({
         root: projectRoot,
         configFile: join(projectRoot, 'vite.hosted.config.ts'),
         logLevel: 'silent',
         build: { outDir },
       });
+
+      const outputs = (Array.isArray(build) ? build : [build]).flatMap((output) => (
+        'output' in output ? output.output : []
+      ));
+      const moduleIDs = outputs.flatMap((output) => (
+        output.type === 'chunk' ? Object.keys(output.modules) : []
+      ));
+      const hostedHTML = normalizePath(join(projectRoot, 'hosted.html'));
+      const hostedSource = `${normalizePath(join(projectRoot, 'src', 'hosted'))}/`;
+      const projectSource = `${normalizePath(projectRoot)}/`;
+      expect(moduleIDs.filter((moduleID) => {
+        const normalized = normalizePath(moduleID);
+        return normalized.startsWith(projectSource)
+          && normalized !== hostedHTML
+          && !normalized.startsWith(hostedSource);
+      })).toEqual([]);
+      expect(moduleIDs.filter((moduleID) => (
+        moduleID.startsWith('\0') && !moduleID.startsWith('\0vite/')
+      ))).toEqual([]);
 
       const files = listFilesRecursively(outDir);
       const relativeFiles = files.map((file) => relative(outDir, file).replaceAll('\\', '/'));
@@ -155,6 +194,9 @@ describe('hosted web build contract', () => {
         file: string;
         isEntry?: boolean;
         css?: string[];
+        assets?: string[];
+        imports?: string[];
+        dynamicImports?: string[];
       }>;
       const entry = manifest['hosted.html'];
 
@@ -163,7 +205,25 @@ describe('hosted web build contract', () => {
       expect(entry?.file).toBeTruthy();
       expect(relativeFiles).toContain(entry.file);
       expect(entry.css?.length).toBeGreaterThan(0);
-      for (const cssFile of entry.css ?? []) expect(relativeFiles).toContain(cssFile);
+      const referencedFiles = new Set<string>(['hosted.html', '.vite/manifest.json']);
+      const visitedEntries = new Set<string>();
+      const visitManifestEntry = (entryName: string): void => {
+        if (visitedEntries.has(entryName)) return;
+        visitedEntries.add(entryName);
+        const manifestEntry = manifest[entryName];
+        expect(manifestEntry, `missing manifest entry ${entryName}`).toBeDefined();
+        if (!manifestEntry) return;
+        referencedFiles.add(manifestEntry.file);
+        for (const file of manifestEntry.css ?? []) referencedFiles.add(file);
+        for (const file of manifestEntry.assets ?? []) referencedFiles.add(file);
+        for (const dependency of [
+          ...(manifestEntry.imports ?? []),
+          ...(manifestEntry.dynamicImports ?? []),
+        ]) visitManifestEntry(dependency);
+      };
+      visitManifestEntry('hosted.html');
+
+      expect(new Set(relativeFiles)).toEqual(referencedFiles);
       expect(relativeFiles.some((file) => /ffmpeg|gift-clip|update|dpapi|\.exe$/i.test(file))).toBe(false);
       expect(files.map((file) => readFileSync(file, 'utf8')).join('\n')).not.toMatch(
         /ffmpeg|gift-clip|autoUpdate|electron|DPAPI/i,
