@@ -146,19 +146,25 @@ func TestVerifyRecentTOTPRejectsReplayAndExpiresAfterFiveMinutes(t *testing.T) {
 
 func TestConcurrentInitializeHasExactlyOneWinner(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 30, 0, 0, time.UTC)
-	repository := newMemoryRepository()
-	service := newTestService(t, repository, &memoryVerifier{}, &MemorySender{}, now)
+	repository := &synchronizedPrepareRepository{
+		memoryRepository: newMemoryRepository(),
+		prepared:         make(chan struct{}, 2),
+		release:          make(chan struct{}),
+	}
+	sender := &MemorySender{}
+	service := newTestService(t, repository, &memoryVerifier{}, sender, now)
 
-	start := make(chan struct{})
 	results := make(chan error, 2)
 	for index := 0; index < 2; index++ {
 		go func() {
-			<-start
 			_, err := service.Initialize(context.Background(), "32249588", "owner@example.com")
 			results <- err
 		}()
 	}
-	close(start)
+	for index := 0; index < 2; index++ {
+		<-repository.prepared
+	}
+	close(repository.release)
 	winners := 0
 	alreadyInitialized := 0
 	for index := 0; index < 2; index++ {
@@ -175,8 +181,32 @@ func TestConcurrentInitializeHasExactlyOneWinner(t *testing.T) {
 	if winners != 2 || alreadyInitialized != 0 {
 		t.Fatalf("winners=%d alreadyInitialized=%d", winners, alreadyInitialized)
 	}
-	if got := len(service.sender.(*MemorySender).Messages()); got != 1 {
+	if got := len(sender.Messages()); got != 1 {
 		t.Fatalf("concurrent exact initialization sent %d attachments, want one", got)
+	}
+}
+
+func TestInitializeRetriesArchiveAfterSMTPFailure(t *testing.T) {
+	now := time.Date(2026, 8, 16, 10, 31, 0, 0, time.UTC)
+	repository := newMemoryRepository()
+	sender := &failOnceSender{}
+	service := newTestService(t, repository, &memoryVerifier{}, sender, now)
+
+	if _, err := service.Initialize(context.Background(), "32249588", "owner@example.com"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("first Initialize() error = %v, want ErrUnavailable", err)
+	}
+	result, err := service.Initialize(context.Background(), "32249588", "owner@example.com")
+	if err != nil {
+		t.Fatalf("retry Initialize() error = %v", err)
+	}
+	if result.TOTPURI == "" || result.RecoveryPassword == "" {
+		t.Fatalf("retry Initialize() result = %#v", result)
+	}
+	if sender.Attempts() != 2 {
+		t.Fatalf("SMTP attempts = %d, want 2", sender.Attempts())
+	}
+	if got := len(sender.Messages()); got != 1 {
+		t.Fatalf("accepted messages = %d, want 1", got)
 	}
 }
 
@@ -286,6 +316,128 @@ func TestSQLRepositoryCommitsPendingInitializationBeforeDelivery(t *testing.T) {
 	}
 	if handoff.ID != 9 || handoff.State != HandoffPending || !bytes.Equal(handoff.Archive, record.Archive) {
 		t.Fatalf("handoff=%#v", handoff)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryHandoffMailClaimSerializesAndRereadsDelivery(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 16, 10, 6, 30, 0, time.UTC)
+	lockName := handoffMailLockPrefix + "9"
+
+	mock.ExpectQuery(sqlPattern("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, handoffMailLockWait).
+		WillReturnRows(sqlmock.NewRows([]string{"acquired"}).AddRow(1))
+	mock.ExpectQuery(sqlPattern("SELECT handoff_state, mail_delivered_at IS NOT NULL FROM admin_credential_handoffs WHERE id = ?")).
+		WithArgs(int64(9)).
+		WillReturnRows(sqlmock.NewRows([]string{"handoff_state", "mail_delivered"}).AddRow(HandoffPending, false))
+	claim, err := repository.AcquireHandoffMailClaim(context.Background(), 9)
+	if err != nil {
+		t.Fatalf("AcquireHandoffMailClaim() error = %v", err)
+	}
+	if claim.MailDelivered() {
+		t.Fatal("fresh handoff unexpectedly marked delivered")
+	}
+	mock.ExpectExec(sqlPattern("UPDATE admin_credential_handoffs SET mail_attempt_count = mail_attempt_count + 1, last_mail_attempt_at = ?, mail_delivered_at = ? WHERE id = ? AND handoff_state = 'pending' AND mail_delivered_at IS NULL")).
+		WithArgs(now, now, int64(9)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := claim.MarkAttempt(now, true); err != nil {
+		t.Fatalf("MarkAttempt() error = %v", err)
+	}
+	mock.ExpectQuery(sqlPattern("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+	if err := claim.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryHandoffMailClaimReleaseIgnoresRequestCancellation(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	lockName := handoffMailLockPrefix + "11"
+	ctx, cancel := context.WithCancel(context.Background())
+
+	mock.ExpectQuery(sqlPattern("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, handoffMailLockWait).
+		WillReturnRows(sqlmock.NewRows([]string{"acquired"}).AddRow(1))
+	mock.ExpectQuery(sqlPattern("SELECT handoff_state, mail_delivered_at IS NOT NULL FROM admin_credential_handoffs WHERE id = ?")).
+		WithArgs(int64(11)).
+		WillReturnRows(sqlmock.NewRows([]string{"handoff_state", "mail_delivered"}).AddRow(HandoffPending, true))
+	claim, err := repository.AcquireHandoffMailClaim(ctx, 11)
+	if err != nil {
+		t.Fatalf("AcquireHandoffMailClaim() error = %v", err)
+	}
+	cancel()
+	mock.ExpectQuery(sqlPattern("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+	if err := claim.Release(); err != nil {
+		t.Fatalf("Release() after request cancellation error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryHandoffMailClaimHasBoundedContentionFailure(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	lockName := handoffMailLockPrefix + "13"
+
+	mock.ExpectQuery(sqlPattern("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, handoffMailLockWait).
+		WillReturnRows(sqlmock.NewRows([]string{"acquired"}).AddRow(0))
+	if _, err := repository.AcquireHandoffMailClaim(context.Background(), 13); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("AcquireHandoffMailClaim() error = %v, want ErrUnavailable", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryHandoffMailClaimReleaseFailureIsGeneric(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	lockName := handoffMailLockPrefix + "17"
+
+	mock.ExpectQuery(sqlPattern("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, handoffMailLockWait).
+		WillReturnRows(sqlmock.NewRows([]string{"acquired"}).AddRow(1))
+	mock.ExpectQuery(sqlPattern("SELECT handoff_state, mail_delivered_at IS NOT NULL FROM admin_credential_handoffs WHERE id = ?")).
+		WithArgs(int64(17)).
+		WillReturnRows(sqlmock.NewRows([]string{"handoff_state", "mail_delivered"}).AddRow(HandoffPending, true))
+	claim, err := repository.AcquireHandoffMailClaim(context.Background(), 17)
+	if err != nil {
+		t.Fatalf("AcquireHandoffMailClaim() error = %v", err)
+	}
+	mock.ExpectQuery(sqlPattern("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnError(errors.New("private database detail"))
+	if err := claim.Release(); !errors.Is(err, ErrUnavailable) || stringsContains(err.Error(), "private") {
+		t.Fatalf("Release() error = %v, want generic ErrUnavailable", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -574,6 +726,31 @@ type sequenceReader struct {
 	buffer  []byte
 }
 
+type failOnceSender struct {
+	mu       sync.Mutex
+	attempts int
+	accepted MemorySender
+}
+
+func (sender *failOnceSender) Send(ctx context.Context, message Message) error {
+	sender.mu.Lock()
+	sender.attempts++
+	attempt := sender.attempts
+	sender.mu.Unlock()
+	if attempt == 1 {
+		return errors.New("synthetic smtp failure")
+	}
+	return sender.accepted.Send(ctx, message)
+}
+
+func (sender *failOnceSender) Attempts() int {
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	return sender.attempts
+}
+
+func (sender *failOnceSender) Messages() []Message { return sender.accepted.Messages() }
+
 func (reader *sequenceReader) Read(buffer []byte) (int, error) {
 	reader.mu.Lock()
 	defer reader.mu.Unlock()
@@ -604,12 +781,30 @@ type memoryRepository struct {
 	usedCodes       map[[sha256.Size]byte]struct{}
 	handoffs        map[int64]PendingHandoff
 	handoffReserved map[int64][sha256.Size]byte
+	mailClaims      map[int64]chan struct{}
 	nextHandoffID   int64
+}
+
+type synchronizedPrepareRepository struct {
+	*memoryRepository
+	prepared chan struct{}
+	release  chan struct{}
+}
+
+func (repository *synchronizedPrepareRepository) PrepareInitialization(ctx context.Context, record HandoffRecord) (PendingHandoff, error) {
+	handoff, err := repository.memoryRepository.PrepareInitialization(ctx, record)
+	repository.prepared <- struct{}{}
+	select {
+	case <-repository.release:
+		return handoff, err
+	case <-ctx.Done():
+		return PendingHandoff{}, ctx.Err()
+	}
 }
 
 func newMemoryRepository() *memoryRepository {
 	return &memoryRepository{
-		sessions: make(map[[sha256.Size]byte]AdminSession), activeCodes: make(map[[sha256.Size]byte]struct{}), usedCodes: make(map[[sha256.Size]byte]struct{}), handoffs: make(map[int64]PendingHandoff), handoffReserved: make(map[int64][sha256.Size]byte),
+		sessions: make(map[[sha256.Size]byte]AdminSession), activeCodes: make(map[[sha256.Size]byte]struct{}), usedCodes: make(map[[sha256.Size]byte]struct{}), handoffs: make(map[int64]PendingHandoff), handoffReserved: make(map[int64][sha256.Size]byte), mailClaims: make(map[int64]chan struct{}),
 	}
 }
 
@@ -749,17 +944,57 @@ func (repository *memoryRepository) ConfirmRecoveryHandoff(_ context.Context, to
 	return ErrAuthenticationFailed
 }
 
-func (repository *memoryRepository) MarkHandoffMailAttempt(_ context.Context, id int64, _ time.Time, delivered bool) error {
+type memoryHandoffMailClaim struct {
+	repository *memoryRepository
+	handoffID  int64
+	delivered  bool
+	semaphore  chan struct{}
+	release    sync.Once
+}
+
+func (repository *memoryRepository) AcquireHandoffMailClaim(ctx context.Context, id int64) (HandoffMailClaim, error) {
 	repository.mu.Lock()
-	defer repository.mu.Unlock()
-	handoff, ok := repository.handoffs[id]
+	semaphore, ok := repository.mailClaims[id]
 	if !ok {
+		semaphore = make(chan struct{}, 1)
+		semaphore <- struct{}{}
+		repository.mailClaims[id] = semaphore
+	}
+	repository.mu.Unlock()
+	select {
+	case <-semaphore:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	repository.mu.Lock()
+	handoff, ok := repository.handoffs[id]
+	repository.mu.Unlock()
+	if !ok {
+		semaphore <- struct{}{}
+		return nil, ErrUnavailable
+	}
+	return &memoryHandoffMailClaim{repository: repository, handoffID: id, delivered: handoff.MailDelivered, semaphore: semaphore}, nil
+}
+
+func (claim *memoryHandoffMailClaim) MailDelivered() bool { return claim.delivered }
+
+func (claim *memoryHandoffMailClaim) MarkAttempt(_ time.Time, delivered bool) error {
+	claim.repository.mu.Lock()
+	defer claim.repository.mu.Unlock()
+	handoff, ok := claim.repository.handoffs[claim.handoffID]
+	if !ok || handoff.State != HandoffPending || handoff.MailDelivered {
 		return ErrUnavailable
 	}
 	if delivered {
 		handoff.MailDelivered = true
 	}
-	repository.handoffs[id] = handoff
+	claim.repository.handoffs[claim.handoffID] = handoff
+	claim.delivered = delivered
+	return nil
+}
+
+func (claim *memoryHandoffMailClaim) Release() error {
+	claim.release.Do(func() { claim.semaphore <- struct{}{} })
 	return nil
 }
 

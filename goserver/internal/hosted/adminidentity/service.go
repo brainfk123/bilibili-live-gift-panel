@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"io"
 	"net/mail"
@@ -90,12 +91,16 @@ type RecoveryCompletion struct {
 }
 
 const (
-	HandoffInitialization = "initialization"
-	HandoffRecovery       = "recovery"
-	HandoffPending        = "pending"
-	HandoffConfirmed      = "confirmed"
-	defaultHandoffTTL     = 30 * time.Minute
-	defaultCleanupLimit   = 100
+	HandoffInitialization     = "initialization"
+	HandoffRecovery           = "recovery"
+	HandoffPending            = "pending"
+	HandoffConfirmed          = "confirmed"
+	defaultHandoffTTL         = 30 * time.Minute
+	defaultCleanupLimit       = 100
+	handoffMailLockPrefix     = "gift_panel_admin_handoff_mail_"
+	handoffMailLockWait       = 5
+	handoffMailAcquireTimeout = 6 * time.Second
+	handoffMailDBTimeout      = 5 * time.Second
 )
 
 type HandoffRecord struct {
@@ -144,6 +149,12 @@ type ActivateInitializationAttempt struct {
 	TOTPStep  time.Time
 }
 
+type HandoffMailClaim interface {
+	MailDelivered() bool
+	MarkAttempt(time.Time, bool) error
+	Release() error
+}
+
 type HandoffRepository interface {
 	PrepareInitialization(context.Context, HandoffRecord) (PendingHandoff, error)
 	PendingInitialization(context.Context, []byte, time.Time) (PendingHandoff, error)
@@ -151,7 +162,7 @@ type HandoffRepository interface {
 	PrepareRecoveryHandoff(context.Context, []byte, []byte, HandoffRecord) (PendingHandoff, error)
 	HandoffByToken(context.Context, []byte) (PendingHandoff, error)
 	ConfirmRecoveryHandoff(context.Context, []byte, time.Time) error
-	MarkHandoffMailAttempt(context.Context, int64, time.Time, bool) error
+	AcquireHandoffMailClaim(context.Context, int64) (HandoffMailClaim, error)
 	CleanupExpiredHandoffs(context.Context, time.Time, int) error
 }
 
@@ -798,21 +809,93 @@ func (repository *SQLRepository) ConfirmRecoveryHandoff(ctx context.Context, tok
 	return nil
 }
 
-func (repository *SQLRepository) MarkHandoffMailAttempt(ctx context.Context, id int64, now time.Time, delivered bool) error {
-	if !repository.ready() || id <= 0 || now.IsZero() {
+type sqlHandoffMailClaim struct {
+	conn      *sql.Conn
+	handoffID int64
+	lockName  string
+	delivered bool
+}
+
+func (repository *SQLRepository) AcquireHandoffMailClaim(ctx context.Context, id int64) (HandoffMailClaim, error) {
+	if !repository.ready() || id <= 0 {
+		return nil, ErrInvalidInput
+	}
+	acquireCtx, cancel := context.WithTimeout(ctx, handoffMailAcquireTimeout)
+	defer cancel()
+	conn, err := repository.db.Conn(acquireCtx)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	lockName := handoffMailLockPrefix + strconv.FormatInt(id, 10)
+	var acquired sql.NullInt64
+	// GET_LOCK is scoped to this dedicated MySQL connection. A process crash or
+	// broken connection releases the claim instead of stranding a database row.
+	if err := conn.QueryRowContext(acquireCtx, "SELECT GET_LOCK(?, ?)", lockName, handoffMailLockWait).Scan(&acquired); err != nil {
+		discardSQLConn(conn)
+		return nil, ErrUnavailable
+	}
+	if !acquired.Valid || acquired.Int64 != 1 {
+		_ = conn.Close()
+		return nil, ErrUnavailable
+	}
+	claim := &sqlHandoffMailClaim{conn: conn, handoffID: id, lockName: lockName}
+	var state string
+	if err := conn.QueryRowContext(acquireCtx, "SELECT handoff_state, mail_delivered_at IS NOT NULL FROM admin_credential_handoffs WHERE id = ?", id).Scan(&state, &claim.delivered); err != nil || state != HandoffPending {
+		_ = claim.Release()
+		return nil, ErrUnavailable
+	}
+	return claim, nil
+}
+
+func (claim *sqlHandoffMailClaim) MailDelivered() bool {
+	return claim != nil && claim.delivered
+}
+
+func (claim *sqlHandoffMailClaim) MarkAttempt(now time.Time, delivered bool) error {
+	if claim == nil || claim.conn == nil || now.IsZero() || claim.delivered {
 		return ErrInvalidInput
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), handoffMailDBTimeout)
+	defer cancel()
 	var result sql.Result
 	var err error
 	if delivered {
-		result, err = repository.db.ExecContext(ctx, "UPDATE admin_credential_handoffs SET mail_attempt_count = mail_attempt_count + 1, last_mail_attempt_at = ?, mail_delivered_at = COALESCE(mail_delivered_at, ?) WHERE id = ? AND handoff_state = 'pending'", now, now, id)
+		result, err = claim.conn.ExecContext(ctx, "UPDATE admin_credential_handoffs SET mail_attempt_count = mail_attempt_count + 1, last_mail_attempt_at = ?, mail_delivered_at = ? WHERE id = ? AND handoff_state = 'pending' AND mail_delivered_at IS NULL", now, now, claim.handoffID)
 	} else {
-		result, err = repository.db.ExecContext(ctx, "UPDATE admin_credential_handoffs SET mail_attempt_count = mail_attempt_count + 1, last_mail_attempt_at = ? WHERE id = ? AND handoff_state = 'pending'", now, id)
+		result, err = claim.conn.ExecContext(ctx, "UPDATE admin_credential_handoffs SET mail_attempt_count = mail_attempt_count + 1, last_mail_attempt_at = ? WHERE id = ? AND handoff_state = 'pending' AND mail_delivered_at IS NULL", now, claim.handoffID)
 	}
 	if err != nil || !oneRow(result) {
 		return ErrUnavailable
 	}
+	claim.delivered = delivered
 	return nil
+}
+
+func (claim *sqlHandoffMailClaim) Release() error {
+	if claim == nil || claim.conn == nil {
+		return nil
+	}
+	conn := claim.conn
+	claim.conn = nil
+	ctx, cancel := context.WithTimeout(context.Background(), handoffMailDBTimeout)
+	defer cancel()
+	var released sql.NullInt64
+	if err := conn.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", claim.lockName).Scan(&released); err != nil || !released.Valid || released.Int64 != 1 {
+		discardSQLConn(conn)
+		return ErrUnavailable
+	}
+	if err := conn.Close(); err != nil {
+		return ErrUnavailable
+	}
+	return nil
+}
+
+func discardSQLConn(conn *sql.Conn) {
+	if conn == nil {
+		return
+	}
+	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	_ = conn.Close()
 }
 
 func (repository *SQLRepository) CleanupExpiredHandoffs(ctx context.Context, now time.Time, limit int) error {
@@ -1246,17 +1329,39 @@ func (service *Service) deliverPendingInitialization(ctx context.Context, reposi
 		return InitializeResult{}, ErrUnavailable
 	}
 	defer clear(email)
-	if !handoff.MailDelivered {
-		sendErr := service.sendArchive(ctx, string(email), handoff.Archive)
-		_ = repository.MarkHandoffMailAttempt(ctx, handoff.ID, service.now(), sendErr == nil)
-		if sendErr != nil {
-			return InitializeResult{}, ErrUnavailable
-		}
+	if err := service.deliverHandoffArchive(ctx, repository, handoff.ID, string(email), handoff.Archive); err != nil {
+		return InitializeResult{}, err
 	}
 	if len(password) != 20 || len(uri) == 0 {
 		return InitializeResult{}, ErrUnavailable
 	}
 	return InitializeResult{TOTPURI: string(uri), RecoveryPassword: string(password)}, nil
+}
+
+func (service *Service) deliverHandoffArchive(ctx context.Context, repository HandoffRepository, handoffID int64, email string, archive []byte) error {
+	claim, err := repository.AcquireHandoffMailClaim(ctx, handoffID)
+	if err != nil {
+		return ErrUnavailable
+	}
+	defer func() { _ = claim.Release() }()
+	if claim.MailDelivered() {
+		if err := claim.Release(); err != nil {
+			return ErrUnavailable
+		}
+		return nil
+	}
+
+	// The advisory claim prevents concurrent sends across service instances. It
+	// cannot make SMTP acceptance and the following database mark atomic: a
+	// process crash or mark failure in that narrow interval can cause the same
+	// still-valid attachment to be sent again by a later retry.
+	sendErr := service.sendArchive(ctx, email, archive)
+	markErr := claim.MarkAttempt(service.now(), sendErr == nil)
+	releaseErr := claim.Release()
+	if sendErr != nil || markErr != nil || releaseErr != nil {
+		return ErrUnavailable
+	}
+	return nil
 }
 
 func (service *Service) VerifyLogin(ctx context.Context, challengeID, code string) (LoginResult, error) {
@@ -1530,12 +1635,8 @@ func (service *Service) deliverPendingRecovery(ctx context.Context, repository H
 		return RecoveryPreparationResult{}, ErrUnavailable
 	}
 	defer clear(email)
-	if !handoff.MailDelivered {
-		sendErr := service.sendArchive(ctx, string(email), handoff.Archive)
-		_ = repository.MarkHandoffMailAttempt(ctx, handoff.ID, service.now(), sendErr == nil)
-		if sendErr != nil {
-			return RecoveryPreparationResult{}, ErrUnavailable
-		}
+	if err := service.deliverHandoffArchive(ctx, repository, handoff.ID, string(email), handoff.Archive); err != nil {
+		return RecoveryPreparationResult{}, err
 	}
 	if len(password) != 20 || len(uri) == 0 || len(token) == 0 {
 		return RecoveryPreparationResult{}, ErrUnavailable
