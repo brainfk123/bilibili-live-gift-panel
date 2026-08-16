@@ -81,8 +81,6 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 	}
 	codeDigest := sha256.Sum256([]byte(code))
 	hint := code[len(code)-4:]
-	now := service.now()
-	expiresAt := now.Add(service.invitationTTL)
 
 	purpose := "site_session"
 	if actor == ActorAdministrator {
@@ -105,24 +103,31 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 
 	var invitationID int64
 	var remaining uint64
+	var now, expiresAt time.Time
 	switch actor {
 	case ActorStreamer:
-		accountID, _, err := requireCurrentStreamer(ctx, transaction, tokenHash, now)
+		authorization, err := lockCurrentStreamer(ctx, transaction, tokenHash)
 		if err != nil {
 			return GeneratedInvitation{}, err
 		}
-		if err := transaction.QueryRowContext(ctx, "SELECT remaining_quota FROM invitation_quotas WHERE account_id = ? FOR UPDATE", accountID).Scan(&remaining); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return GeneratedInvitation{}, ErrQuotaExhausted
-			}
+		quotaErr := transaction.QueryRowContext(ctx, "SELECT remaining_quota FROM invitation_quotas WHERE account_id = ? FOR UPDATE", authorization.accountID).Scan(&remaining)
+		if quotaErr != nil && !errors.Is(quotaErr, sql.ErrNoRows) {
 			return GeneratedInvitation{}, ErrUnavailable
 		}
+		now = service.now()
+		if err := authorization.validate(now); err != nil {
+			return GeneratedInvitation{}, err
+		}
+		if errors.Is(quotaErr, sql.ErrNoRows) {
+			return GeneratedInvitation{}, ErrQuotaExhausted
+		}
+		expiresAt = now.Add(service.invitationTTL)
 		if remaining == 0 {
 			return GeneratedInvitation{}, ErrQuotaExhausted
 		}
 		result, err := transaction.ExecContext(ctx,
 			"INSERT INTO invitations (code_hash, code_hint, creator_account_id, status, created_at, expires_at) VALUES (?, ?, ?, 'active', ?, ?)",
-			codeDigest[:], hint, accountID, now, expiresAt,
+			codeDigest[:], hint, authorization.accountID, now, expiresAt,
 		)
 		if err != nil {
 			return GeneratedInvitation{}, ErrUnavailable
@@ -132,22 +137,30 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 			return GeneratedInvitation{}, err
 		}
 		remaining--
-		if result, err = transaction.ExecContext(ctx, "UPDATE invitation_quotas SET remaining_quota = ?, updated_at = ? WHERE account_id = ?", remaining, now, accountID); err != nil || !oneRow(result) {
+		if result, err = transaction.ExecContext(ctx, "UPDATE invitation_quotas SET remaining_quota = ?, updated_at = ? WHERE account_id = ?", remaining, now, authorization.accountID); err != nil || !oneRow(result) {
 			return GeneratedInvitation{}, ErrUnavailable
 		}
 		if result, err = transaction.ExecContext(ctx,
 			"INSERT INTO invitation_quota_events (account_id, invitation_id, quota_delta, quota_after, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-			accountID, invitationID, int64(-1), remaining, "invitation_generated", now,
+			authorization.accountID, invitationID, int64(-1), remaining, "invitation_generated", now,
 		); err != nil || !oneRow(result) {
 			return GeneratedInvitation{}, ErrUnavailable
 		}
-		if err := insertAudit(ctx, transaction, "invitation_generated", accountID, 0, 0, invitationID, now, nil); err != nil {
+		if err := insertAudit(ctx, transaction, auditEvent{
+			eventType: "invitation_generated", actor: streamerAuditActor(authorization.accountID), invitationID: invitationID,
+		}, now); err != nil {
 			return GeneratedInvitation{}, err
 		}
 	case ActorAdministrator:
-		if err := requireRecentAdministrator(ctx, transaction, tokenHash, now); err != nil {
+		authorization, err := lockRecentAdministrator(ctx, transaction, tokenHash)
+		if err != nil {
 			return GeneratedInvitation{}, err
 		}
+		now = service.now()
+		if err := authorization.validate(now); err != nil {
+			return GeneratedInvitation{}, err
+		}
+		expiresAt = now.Add(service.invitationTTL)
 		result, err := transaction.ExecContext(ctx,
 			"INSERT INTO invitations (code_hash, code_hint, creator_admin_identity_id, status, created_at, expires_at) VALUES (?, ?, 1, 'active', ?, ?)",
 			codeDigest[:], hint, now, expiresAt,
@@ -159,7 +172,9 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 		if err != nil {
 			return GeneratedInvitation{}, err
 		}
-		if err := insertAudit(ctx, transaction, "invitation_generated", 0, 1, 0, invitationID, now, nil); err != nil {
+		if err := insertAudit(ctx, transaction, auditEvent{
+			eventType: "invitation_generated", actor: administratorAuditActor(), invitationID: invitationID,
+		}, now); err != nil {
 			return GeneratedInvitation{}, err
 		}
 	}
@@ -182,7 +197,6 @@ func (service *Service) AdjustQuota(ctx context.Context, administratorSession st
 	if err != nil {
 		return Quota{}, ErrAuthentication
 	}
-	now := service.now()
 	transaction, err := service.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Quota{}, ErrUnavailable
@@ -193,12 +207,17 @@ func (service *Service) AdjustQuota(ctx context.Context, administratorSession st
 			_ = transaction.Rollback()
 		}
 	}()
-	if err := requireRecentAdministrator(ctx, transaction, tokenHash, now); err != nil {
+	authorization, err := lockRecentAdministrator(ctx, transaction, tokenHash)
+	if err != nil {
 		return Quota{}, err
 	}
 	var credentialEpoch int64
-	if err := transaction.QueryRowContext(ctx, "SELECT credential_epoch FROM streamer_accounts WHERE id = ? FOR UPDATE", accountID).Scan(&credentialEpoch); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+	if accountErr := transaction.QueryRowContext(ctx, "SELECT credential_epoch FROM streamer_accounts WHERE id = ? FOR UPDATE", accountID).Scan(&credentialEpoch); accountErr != nil {
+		now := service.now()
+		if err := authorization.validate(now); err != nil {
+			return Quota{}, err
+		}
+		if errors.Is(accountErr, sql.ErrNoRows) {
 			return Quota{}, ErrInvitationInvalid
 		}
 		return Quota{}, ErrUnavailable
@@ -207,14 +226,18 @@ func (service *Service) AdjustQuota(ctx context.Context, administratorSession st
 		return Quota{}, ErrUnavailable
 	}
 	if _, err := transaction.ExecContext(ctx,
-		"INSERT INTO invitation_quotas (account_id, remaining_quota, updated_at) VALUES (?, 0, ?) ON DUPLICATE KEY UPDATE account_id = account_id",
-		accountID, now,
+		"INSERT INTO invitation_quotas (account_id, remaining_quota, updated_at) VALUES (?, 0, CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE account_id = account_id",
+		accountID,
 	); err != nil {
 		return Quota{}, ErrUnavailable
 	}
 	var before uint64
 	if err := transaction.QueryRowContext(ctx, "SELECT remaining_quota FROM invitation_quotas WHERE account_id = ? FOR UPDATE", accountID).Scan(&before); err != nil {
 		return Quota{}, ErrUnavailable
+	}
+	now := service.now()
+	if err := authorization.validate(now); err != nil {
+		return Quota{}, err
 	}
 	delta, ok := signedDelta(before, remaining)
 	if !ok || delta == 0 {
@@ -231,7 +254,10 @@ func (service *Service) AdjustQuota(ctx context.Context, administratorSession st
 	if err != nil || !oneRow(result) {
 		return Quota{}, ErrUnavailable
 	}
-	if err := insertAudit(ctx, transaction, "invitation_quota_adjusted", 0, 1, accountID, 0, now, &quotaAudit{Reason: normalizedReason, Before: before, After: remaining, Delta: delta}); err != nil {
+	if err := insertAudit(ctx, transaction, auditEvent{
+		eventType: "invitation_quota_adjusted", actor: administratorAuditActor(), targetAccountID: accountID,
+		quota: &quotaAudit{Reason: normalizedReason, Before: before, After: remaining, Delta: delta},
+	}, now); err != nil {
 		return Quota{}, err
 	}
 	if err := transaction.Commit(); err != nil {
@@ -249,7 +275,6 @@ func (service *Service) Revoke(ctx context.Context, streamerSession string, invi
 	if err != nil {
 		return ErrAuthentication
 	}
-	now := service.now()
 	transaction, err := service.db.BeginTx(ctx, nil)
 	if err != nil {
 		return ErrUnavailable
@@ -260,17 +285,25 @@ func (service *Service) Revoke(ctx context.Context, streamerSession string, invi
 			_ = transaction.Rollback()
 		}
 	}()
-	accountID, _, err := requireCurrentStreamer(ctx, transaction, tokenHash, now)
+	authorization, err := lockCurrentStreamer(ctx, transaction, tokenHash)
 	if err != nil {
 		return err
 	}
 	var status string
 	var expiresAt time.Time
-	if err := transaction.QueryRowContext(ctx, "SELECT status, expires_at FROM invitations WHERE id = ? AND creator_account_id = ? FOR UPDATE", invitationID, accountID).Scan(&status, &expiresAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+	if invitationErr := transaction.QueryRowContext(ctx, "SELECT status, expires_at FROM invitations WHERE id = ? AND creator_account_id = ? FOR UPDATE", invitationID, authorization.accountID).Scan(&status, &expiresAt); invitationErr != nil {
+		now := service.now()
+		if err := authorization.validate(now); err != nil {
+			return err
+		}
+		if errors.Is(invitationErr, sql.ErrNoRows) {
 			return ErrInvitationInvalid
 		}
 		return ErrUnavailable
+	}
+	now := service.now()
+	if err := authorization.validate(now); err != nil {
+		return err
 	}
 	if status != StatusActive || !now.Before(expiresAt) {
 		return ErrInvitationInvalid
@@ -279,7 +312,9 @@ func (service *Service) Revoke(ctx context.Context, streamerSession string, invi
 	if err != nil || !oneRow(result) {
 		return ErrUnavailable
 	}
-	if err := insertAudit(ctx, transaction, "invitation_revoked", accountID, 0, 0, invitationID, now, nil); err != nil {
+	if err := insertAudit(ctx, transaction, auditEvent{
+		eventType: "invitation_revoked", actor: streamerAuditActor(authorization.accountID), invitationID: invitationID,
+	}, now); err != nil {
 		return err
 	}
 	if err := transaction.Commit(); err != nil {
@@ -293,7 +328,6 @@ func (service *Service) Expire(ctx context.Context, invitationID int64) error {
 	if service == nil || invitationID <= 0 {
 		return ErrInvalidInput
 	}
-	now := service.now()
 	transaction, err := service.db.BeginTx(ctx, nil)
 	if err != nil {
 		return ErrUnavailable
@@ -312,6 +346,7 @@ func (service *Service) Expire(ctx context.Context, invitationID int64) error {
 		}
 		return ErrUnavailable
 	}
+	now := service.now()
 	if status != StatusActive || now.Before(expiresAt) {
 		return ErrInvitationInvalid
 	}
@@ -319,7 +354,7 @@ func (service *Service) Expire(ctx context.Context, invitationID int64) error {
 	if err != nil || !oneRow(result) {
 		return ErrUnavailable
 	}
-	if err := insertAudit(ctx, transaction, "invitation_expired", 0, 0, 0, invitationID, now, nil); err != nil {
+	if err := insertAudit(ctx, transaction, auditEvent{eventType: "invitation_expired", invitationID: invitationID}, now); err != nil {
 		return err
 	}
 	if err := transaction.Commit(); err != nil {
@@ -337,7 +372,6 @@ func (service *Service) List(ctx context.Context, streamerSession string) (Invit
 	if err != nil {
 		return InvitationList{}, ErrAuthentication
 	}
-	now := service.now()
 	transaction, err := service.db.BeginTx(ctx, nil)
 	if err != nil {
 		return InvitationList{}, ErrUnavailable
@@ -348,10 +382,15 @@ func (service *Service) List(ctx context.Context, streamerSession string) (Invit
 			_ = transaction.Rollback()
 		}
 	}()
-	accountID, _, err := requireCurrentStreamer(ctx, transaction, tokenHash, now)
+	authorization, err := lockCurrentStreamer(ctx, transaction, tokenHash)
 	if err != nil {
 		return InvitationList{}, err
 	}
+	now := service.now()
+	if err := authorization.validate(now); err != nil {
+		return InvitationList{}, err
+	}
+	accountID := authorization.accountID
 	if _, err := transaction.ExecContext(ctx, "UPDATE invitations SET status = 'expired' WHERE creator_account_id = ? AND status = 'active' AND expires_at <= ?", accountID, now); err != nil {
 		return InvitationList{}, ErrUnavailable
 	}
@@ -407,10 +446,6 @@ func (service *Service) Redeem(ctx context.Context, code, registrationIntent str
 		return identity.SiteSession{}, ErrInvitationInvalid
 	}
 	defer destroyUID(&uid)
-	now := service.now()
-	if !now.Before(intentExpiresAt) {
-		return identity.SiteSession{}, ErrInvitationInvalid
-	}
 	siteToken, err := service.keys.NewToken()
 	if err != nil {
 		return identity.SiteSession{}, ErrUnavailable
@@ -439,8 +474,8 @@ func (service *Service) Redeem(ctx context.Context, code, registrationIntent str
 		}
 		return identity.SiteSession{}, ErrUnavailable
 	}
-	if invitationID <= 0 || status != StatusActive || !now.Before(expiresAt) {
-		return identity.SiteSession{}, ErrInvitationInvalid
+	if invitationID <= 0 {
+		return identity.SiteSession{}, ErrUnavailable
 	}
 	var existingAccountID int64
 	err = transaction.QueryRowContext(ctx, "SELECT account_id FROM bili_uid_bindings WHERE uid_lookup = ? LIMIT 1 FOR UPDATE", uid.Lookup).Scan(&existingAccountID)
@@ -449,6 +484,13 @@ func (service *Service) Redeem(ctx context.Context, code, registrationIntent str
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return identity.SiteSession{}, ErrUnavailable
+	}
+	if !reservation.Valid() {
+		return identity.SiteSession{}, ErrInvitationInvalid
+	}
+	now := service.now()
+	if status != StatusActive || !now.Before(expiresAt) || !now.Before(intentExpiresAt) {
+		return identity.SiteSession{}, ErrInvitationInvalid
 	}
 	result, err := transaction.ExecContext(ctx, "INSERT INTO streamer_accounts (credential_epoch, created_at, updated_at) VALUES (1, ?, ?)", now, now)
 	if err != nil {
@@ -478,10 +520,16 @@ func (service *Service) Redeem(ctx context.Context, code, registrationIntent str
 	if result, err = transaction.ExecContext(ctx, "UPDATE invitations SET status = 'used', used_at = ?, invited_account_id = ? WHERE id = ? AND status = 'active'", now, accountID, invitationID); err != nil || !oneRow(result) {
 		return identity.SiteSession{}, ErrUnavailable
 	}
-	if err := insertAudit(ctx, transaction, "invitation_redeemed", 0, 0, accountID, invitationID, now, nil); err != nil {
+	if err := insertAudit(ctx, transaction, auditEvent{
+		eventType: "invitation_redeemed", targetAccountID: accountID, invitationID: invitationID,
+	}, now); err != nil {
 		return identity.SiteSession{}, err
 	}
-	if !reservation.Valid() || !service.now().Before(intentExpiresAt) {
+	if !reservation.Valid() {
+		return identity.SiteSession{}, ErrInvitationInvalid
+	}
+	commitAt := service.now()
+	if !commitAt.Before(intentExpiresAt) || !commitAt.Before(expiresAt) {
 		return identity.SiteSession{}, ErrInvitationInvalid
 	}
 	if err := transaction.Commit(); err != nil {
@@ -492,70 +540,99 @@ func (service *Service) Redeem(ctx context.Context, code, registrationIntent str
 	return identity.SiteSession{Token: siteToken, AccountID: accountID, ExpiresAt: sessionExpiresAt}, nil
 }
 
-func requireCurrentStreamer(ctx context.Context, transaction *sql.Tx, tokenHash []byte, now time.Time) (int64, int64, error) {
+type streamerAuthorization struct {
+	accountID      int64
+	accountEpoch   int64
+	disabled       bool
+	sessionID      int64
+	sessionEpoch   int64
+	sessionExpires time.Time
+	sessionRevoked bool
+}
+
+func lockCurrentStreamer(ctx context.Context, transaction *sql.Tx, tokenHash []byte) (streamerAuthorization, error) {
+	var authorization streamerAuthorization
 	var accountID int64
 	if err := transaction.QueryRowContext(ctx, "SELECT account_id FROM site_sessions WHERE token_hash = ? AND account_id IS NOT NULL LIMIT 1", tokenHash).Scan(&accountID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, 0, ErrAuthentication
+			return authorization, ErrAuthentication
 		}
-		return 0, 0, ErrUnavailable
+		return authorization, ErrUnavailable
 	}
 	if accountID <= 0 {
-		return 0, 0, ErrUnavailable
+		return authorization, ErrUnavailable
 	}
-	var accountEpoch int64
 	var disabledAt sql.NullTime
-	if err := transaction.QueryRowContext(ctx, "SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE", accountID).Scan(&accountEpoch, &disabledAt); err != nil {
+	if err := transaction.QueryRowContext(ctx, "SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE", accountID).Scan(&authorization.accountEpoch, &disabledAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, 0, ErrAuthentication
+			return authorization, ErrAuthentication
 		}
-		return 0, 0, ErrUnavailable
+		return authorization, ErrUnavailable
 	}
-	if accountEpoch < 1 {
-		return 0, 0, ErrUnavailable
-	}
-	if disabledAt.Valid {
-		return 0, 0, ErrAuthentication
-	}
-	var sessionID, sessionEpoch int64
-	var expiresAt time.Time
 	var revokedAt sql.NullTime
-	if err := transaction.QueryRowContext(ctx, "SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE account_id = ? AND token_hash = ? FOR UPDATE", accountID, tokenHash).Scan(&sessionID, &sessionEpoch, &expiresAt, &revokedAt); err != nil {
+	if err := transaction.QueryRowContext(ctx, "SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE account_id = ? AND token_hash = ? FOR UPDATE", accountID, tokenHash).Scan(&authorization.sessionID, &authorization.sessionEpoch, &authorization.sessionExpires, &revokedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, 0, ErrAuthentication
+			return authorization, ErrAuthentication
 		}
-		return 0, 0, ErrUnavailable
+		return authorization, ErrUnavailable
 	}
-	if sessionID <= 0 || sessionEpoch < 1 || sessionEpoch != accountEpoch || !expiresAt.After(now) || revokedAt.Valid {
-		return 0, 0, ErrAuthentication
-	}
-	return accountID, accountEpoch, nil
+	authorization.accountID = accountID
+	authorization.disabled = disabledAt.Valid
+	authorization.sessionRevoked = revokedAt.Valid
+	return authorization, nil
 }
 
-func requireRecentAdministrator(ctx context.Context, transaction *sql.Tx, tokenHash []byte, now time.Time) error {
-	var administratorEpoch int64
-	err := transaction.QueryRowContext(ctx, "SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE").Scan(&administratorEpoch)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrAuthentication
-	}
-	if err != nil || administratorEpoch < 1 {
+func (authorization streamerAuthorization) validate(now time.Time) error {
+	if authorization.accountID <= 0 || authorization.accountEpoch < 1 {
 		return ErrUnavailable
 	}
-	var sessionID, sessionEpoch int64
-	var expiresAt time.Time
-	var revokedAt, verifiedAt sql.NullTime
-	err = transaction.QueryRowContext(ctx, "SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE", tokenHash).
-		Scan(&sessionID, &sessionEpoch, &expiresAt, &revokedAt, &verifiedAt)
-	if errors.Is(err, sql.ErrNoRows) {
+	if authorization.disabled || authorization.sessionID <= 0 || authorization.sessionEpoch < 1 ||
+		authorization.sessionEpoch != authorization.accountEpoch || !authorization.sessionExpires.After(now) || authorization.sessionRevoked {
 		return ErrAuthentication
+	}
+	return nil
+}
+
+type administratorAuthorization struct {
+	administratorEpoch int64
+	sessionID          int64
+	sessionEpoch       int64
+	sessionExpires     time.Time
+	sessionRevoked     bool
+	verifiedAt         sql.NullTime
+}
+
+func lockRecentAdministrator(ctx context.Context, transaction *sql.Tx, tokenHash []byte) (administratorAuthorization, error) {
+	var authorization administratorAuthorization
+	err := transaction.QueryRowContext(ctx, "SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE").Scan(&authorization.administratorEpoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return authorization, ErrAuthentication
 	}
 	if err != nil {
+		return authorization, ErrUnavailable
+	}
+	var revokedAt sql.NullTime
+	err = transaction.QueryRowContext(ctx, "SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE", tokenHash).
+		Scan(&authorization.sessionID, &authorization.sessionEpoch, &authorization.sessionExpires, &revokedAt, &authorization.verifiedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return authorization, ErrAuthentication
+	}
+	if err != nil {
+		return authorization, ErrUnavailable
+	}
+	authorization.sessionRevoked = revokedAt.Valid
+	return authorization, nil
+}
+
+func (authorization administratorAuthorization) validate(now time.Time) error {
+	if authorization.administratorEpoch < 1 {
 		return ErrUnavailable
 	}
-	if sessionID <= 0 || sessionEpoch < 1 || sessionEpoch != administratorEpoch || !expiresAt.After(now) || revokedAt.Valid {
+	if authorization.sessionID <= 0 || authorization.sessionEpoch < 1 || authorization.sessionEpoch != authorization.administratorEpoch ||
+		!authorization.sessionExpires.After(now) || authorization.sessionRevoked {
 		return ErrAuthentication
 	}
-	if !verifiedAt.Valid || verifiedAt.Time.After(now.Add(administratorClockSkew)) || now.Sub(verifiedAt.Time) > recentAdministratorTOTPWindow {
+	if !authorization.verifiedAt.Valid || authorization.verifiedAt.Time.After(now.Add(administratorClockSkew)) || now.Sub(authorization.verifiedAt.Time) > recentAdministratorTOTPWindow {
 		return ErrRecentTOTPRequired
 	}
 	return nil
@@ -568,27 +645,65 @@ type quotaAudit struct {
 	Delta  int64  `json:"delta"`
 }
 
-func insertAudit(ctx context.Context, transaction *sql.Tx, eventType string, actorAccountID, actorAdminID, targetAccountID, invitationID int64, now time.Time, quota *quotaAudit) error {
-	event := struct {
+type auditActorKind uint8
+
+const (
+	auditActorNone auditActorKind = iota
+	auditActorStreamer
+	auditActorAdministrator
+)
+
+type auditActor struct {
+	kind auditActorKind
+	id   int64
+}
+
+func streamerAuditActor(accountID int64) auditActor {
+	return auditActor{kind: auditActorStreamer, id: accountID}
+}
+
+func administratorAuditActor() auditActor {
+	return auditActor{kind: auditActorAdministrator, id: 1}
+}
+
+type auditEvent struct {
+	eventType       string
+	actor           auditActor
+	targetAccountID int64
+	invitationID    int64
+	quota           *quotaAudit
+}
+
+func insertAudit(ctx context.Context, transaction *sql.Tx, event auditEvent, now time.Time) error {
+	if event.eventType == "" || transaction == nil || event.targetAccountID < 0 || event.invitationID < 0 ||
+		(event.actor.kind == auditActorNone && event.actor.id != 0) ||
+		(event.actor.kind == auditActorStreamer && event.actor.id <= 0) ||
+		(event.actor.kind == auditActorAdministrator && event.actor.id != 1) ||
+		event.actor.kind > auditActorAdministrator {
+		return ErrUnavailable
+	}
+	payload := struct {
 		InvitationID int64       `json:"invitationId,omitempty"`
 		Quota        *quotaAudit `json:"quota,omitempty"`
-	}{InvitationID: invitationID, Quota: quota}
-	encoded, err := json.Marshal(event)
+	}{InvitationID: event.invitationID, Quota: event.quota}
+	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return ErrUnavailable
 	}
 	var result sql.Result
 	switch {
-	case actorAccountID > 0:
-		result, err = transaction.ExecContext(ctx, "INSERT INTO audit_events (event_type, actor_account_id, event_data, created_at) VALUES (?, ?, ?, ?)", eventType, actorAccountID, encoded, now)
-	case actorAdminID > 0 && targetAccountID > 0:
-		result, err = transaction.ExecContext(ctx, "INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, 1, ?, ?, ?)", eventType, targetAccountID, encoded, now)
-	case actorAdminID > 0:
-		result, err = transaction.ExecContext(ctx, "INSERT INTO audit_events (event_type, actor_admin_identity_id, event_data, created_at) VALUES (?, 1, ?, ?)", eventType, encoded, now)
-	case targetAccountID > 0:
-		result, err = transaction.ExecContext(ctx, "INSERT INTO audit_events (event_type, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?)", eventType, targetAccountID, encoded, now)
+	case event.actor.kind == auditActorStreamer && event.targetAccountID > 0:
+		result, err = transaction.ExecContext(ctx, "INSERT INTO audit_events (event_type, actor_account_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)", event.eventType, event.actor.id, event.targetAccountID, encoded, now)
+	case event.actor.kind == auditActorStreamer:
+		result, err = transaction.ExecContext(ctx, "INSERT INTO audit_events (event_type, actor_account_id, event_data, created_at) VALUES (?, ?, ?, ?)", event.eventType, event.actor.id, encoded, now)
+	case event.actor.kind == auditActorAdministrator && event.targetAccountID > 0:
+		result, err = transaction.ExecContext(ctx, "INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, 1, ?, ?, ?)", event.eventType, event.targetAccountID, encoded, now)
+	case event.actor.kind == auditActorAdministrator:
+		result, err = transaction.ExecContext(ctx, "INSERT INTO audit_events (event_type, actor_admin_identity_id, event_data, created_at) VALUES (?, 1, ?, ?)", event.eventType, encoded, now)
+	case event.targetAccountID > 0:
+		result, err = transaction.ExecContext(ctx, "INSERT INTO audit_events (event_type, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?)", event.eventType, event.targetAccountID, encoded, now)
 	default:
-		result, err = transaction.ExecContext(ctx, "INSERT INTO audit_events (event_type, event_data, created_at) VALUES (?, ?, ?)", eventType, encoded, now)
+		result, err = transaction.ExecContext(ctx, "INSERT INTO audit_events (event_type, event_data, created_at) VALUES (?, ?, ?)", event.eventType, encoded, now)
 	}
 	if err != nil || !oneRow(result) {
 		return ErrUnavailable

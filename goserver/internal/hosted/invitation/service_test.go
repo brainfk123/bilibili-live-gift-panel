@@ -9,6 +9,7 @@ import (
 	"errors"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -196,8 +197,8 @@ func TestAdjustQuotaUsesRecentAdministratorAndRejectsSignedDeltaOverflow(t *test
 		expectRecentAdministrator(mock, adminHash, now)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM streamer_accounts WHERE id = ? FOR UPDATE")).
 			WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(3)))
-		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitation_quotas (account_id, remaining_quota, updated_at) VALUES (?, 0, ?) ON DUPLICATE KEY UPDATE account_id = account_id")).
-			WithArgs(int64(41), now).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitation_quotas (account_id, remaining_quota, updated_at) VALUES (?, 0, CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE account_id = account_id")).
+			WithArgs(int64(41)).WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT remaining_quota FROM invitation_quotas WHERE account_id = ? FOR UPDATE")).
 			WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"remaining_quota"}).AddRow(uint64(2)))
 		mock.ExpectExec(regexp.QuoteMeta("UPDATE invitation_quotas SET remaining_quota = ?, updated_at = ? WHERE account_id = ?")).
@@ -229,8 +230,8 @@ func TestAdjustQuotaUsesRecentAdministratorAndRejectsSignedDeltaOverflow(t *test
 		expectRecentAdministrator(mock, adminHash, now)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM streamer_accounts WHERE id = ? FOR UPDATE")).
 			WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(3)))
-		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitation_quotas (account_id, remaining_quota, updated_at) VALUES (?, 0, ?) ON DUPLICATE KEY UPDATE account_id = account_id")).
-			WithArgs(int64(41), now).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitation_quotas (account_id, remaining_quota, updated_at) VALUES (?, 0, CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE account_id = account_id")).
+			WithArgs(int64(41)).WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT remaining_quota FROM invitation_quotas WHERE account_id = ? FOR UPDATE")).
 			WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"remaining_quota"}).AddRow("18446744073709551615"))
 		mock.ExpectRollback()
@@ -332,6 +333,8 @@ func TestRedeemRollsBackAndRestoresIntentAcrossFailureMatrix(t *testing.T) {
 				mock.ExpectBegin()
 				mock.ExpectQuery(regexp.QuoteMeta("SELECT id, status, expires_at FROM invitations WHERE code_hash = ? FOR UPDATE")).
 					WithArgs(codeHash[:]).WillReturnRows(sqlmock.NewRows([]string{"id", "status", "expires_at"}).AddRow(int64(75), status, now.Add(time.Hour)))
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT account_id FROM bili_uid_bindings WHERE uid_lookup = ? LIMIT 1 FOR UPDATE")).
+					WithArgs(reservation.uid.Lookup).WillReturnError(sql.ErrNoRows)
 				mock.ExpectRollback()
 
 				_, err = service.Redeem(context.Background(), "invalid-invitation-code", "registration-intent")
@@ -448,6 +451,289 @@ func TestRedeemRollsBackAndRestoresIntentAcrossFailureMatrix(t *testing.T) {
 	}
 }
 
+func TestTransactionExpiryChecksUseFreshTimeAfterRelevantLocks(t *testing.T) {
+	before := time.Date(2026, 8, 16, 21, 0, 0, 0, time.UTC)
+	after := before.Add(10 * time.Minute)
+
+	t.Run("generate validates session after quota lock", func(t *testing.T) {
+		database, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		marker := &atomic.Bool{}
+		keys := fixedInvitationKeys(t)
+		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: lockAwareClock(marker, before, after)})
+		sessionHash, _ := keys.HashToken("site_session", []byte("streamer-session"))
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT account_id FROM site_sessions WHERE token_hash = ? AND account_id IS NOT NULL LIMIT 1")).
+			WithArgs(sessionHash).WillReturnRows(sqlmock.NewRows([]string{"account_id"}).AddRow(int64(41)))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
+			WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(3), nil))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE account_id = ? AND token_hash = ? FOR UPDATE")).
+			WithArgs(int64(41), sessionHash).WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(int64(11), int64(3), before.Add(5*time.Minute), nil))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT remaining_quota FROM invitation_quotas WHERE account_id = ? FOR UPDATE")).
+			WithArgs(markingArgument{value: int64(41), marker: marker}).WillReturnRows(sqlmock.NewRows([]string{"remaining_quota"}).AddRow(uint64(1)))
+		mock.ExpectRollback()
+
+		_, err = service.Generate(context.Background(), "streamer-session", ActorStreamer)
+		if !errors.Is(err, ErrAuthentication) {
+			t.Fatalf("Generate() error=%v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("missing quota does not bypass fresh session validation", func(t *testing.T) {
+		database, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		marker := &atomic.Bool{}
+		keys := fixedInvitationKeys(t)
+		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: lockAwareClock(marker, before, after)})
+		sessionHash, _ := keys.HashToken("site_session", []byte("streamer-session"))
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT account_id FROM site_sessions WHERE token_hash = ? AND account_id IS NOT NULL LIMIT 1")).
+			WithArgs(sessionHash).WillReturnRows(sqlmock.NewRows([]string{"account_id"}).AddRow(int64(41)))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
+			WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(3), nil))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE account_id = ? AND token_hash = ? FOR UPDATE")).
+			WithArgs(int64(41), sessionHash).WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(int64(11), int64(3), before.Add(5*time.Minute), nil))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT remaining_quota FROM invitation_quotas WHERE account_id = ? FOR UPDATE")).
+			WithArgs(markingArgument{value: int64(41), marker: marker}).WillReturnError(sql.ErrNoRows)
+		mock.ExpectRollback()
+
+		_, err = service.Generate(context.Background(), "streamer-session", ActorStreamer)
+		if !errors.Is(err, ErrAuthentication) {
+			t.Fatalf("Generate(missing quota) error=%v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("quota adjustment validates recent TOTP after quota lock", func(t *testing.T) {
+		database, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		marker := &atomic.Bool{}
+		keys := fixedInvitationKeys(t)
+		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: lockAwareClock(marker, before, after)})
+		adminHash, _ := keys.HashToken("admin_session", []byte("admin-session"))
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+			WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
+			WithArgs(adminHash).WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at", "totp_verified_at"}).
+			AddRow(int64(12), int64(4), after.Add(time.Hour), nil, before.Add(-time.Minute)))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM streamer_accounts WHERE id = ? FOR UPDATE")).
+			WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(3)))
+		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitation_quotas (account_id, remaining_quota, updated_at) VALUES (?, 0, CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE account_id = account_id")).
+			WithArgs(int64(41)).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT remaining_quota FROM invitation_quotas WHERE account_id = ? FOR UPDATE")).
+			WithArgs(markingArgument{value: int64(41), marker: marker}).WillReturnRows(sqlmock.NewRows([]string{"remaining_quota"}).AddRow(uint64(2)))
+		mock.ExpectRollback()
+
+		_, err = service.AdjustQuota(context.Background(), "admin-session", 41, 5, "support grant")
+		if !errors.Is(err, ErrRecentTOTPRequired) {
+			t.Fatalf("AdjustQuota() error=%v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("missing target account does not bypass fresh administrator validation", func(t *testing.T) {
+		database, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		marker := &atomic.Bool{}
+		keys := fixedInvitationKeys(t)
+		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: lockAwareClock(marker, before, after)})
+		adminHash, _ := keys.HashToken("admin_session", []byte("admin-session"))
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+			WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
+			WithArgs(adminHash).WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at", "totp_verified_at"}).
+			AddRow(int64(12), int64(4), after.Add(time.Hour), nil, before.Add(-time.Minute)))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM streamer_accounts WHERE id = ? FOR UPDATE")).
+			WithArgs(markingArgument{value: int64(41), marker: marker}).WillReturnError(sql.ErrNoRows)
+		mock.ExpectRollback()
+
+		_, err = service.AdjustQuota(context.Background(), "admin-session", 41, 5, "support grant")
+		if !errors.Is(err, ErrRecentTOTPRequired) {
+			t.Fatalf("AdjustQuota(missing target) error=%v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("revoke validates invitation after its row lock", func(t *testing.T) {
+		database, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		marker := &atomic.Bool{}
+		keys := fixedInvitationKeys(t)
+		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: lockAwareClock(marker, before, after)})
+		sessionHash, _ := keys.HashToken("site_session", []byte("streamer-session"))
+		mock.ExpectBegin()
+		expectStreamerAuthorization(mock, sessionHash, 41, 3, after)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT status, expires_at FROM invitations WHERE id = ? AND creator_account_id = ? FOR UPDATE")).
+			WithArgs(markingArgument{value: int64(73), marker: marker}, int64(41)).
+			WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at"}).AddRow(StatusActive, before.Add(5*time.Minute)))
+		mock.ExpectRollback()
+
+		err = service.Revoke(context.Background(), "streamer-session", 73)
+		if !errors.Is(err, ErrInvitationInvalid) {
+			t.Fatalf("Revoke() error=%v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("missing invitation does not bypass fresh session validation", func(t *testing.T) {
+		database, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		marker := &atomic.Bool{}
+		keys := fixedInvitationKeys(t)
+		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: lockAwareClock(marker, before, after)})
+		sessionHash, _ := keys.HashToken("site_session", []byte("streamer-session"))
+		mock.ExpectBegin()
+		expectStreamerAuthorization(mock, sessionHash, 41, 3, before.Add(-55*time.Minute))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT status, expires_at FROM invitations WHERE id = ? AND creator_account_id = ? FOR UPDATE")).
+			WithArgs(markingArgument{value: int64(73), marker: marker}, int64(41)).WillReturnError(sql.ErrNoRows)
+		mock.ExpectRollback()
+
+		err = service.Revoke(context.Background(), "streamer-session", 73)
+		if !errors.Is(err, ErrAuthentication) {
+			t.Fatalf("Revoke(missing invitation) error=%v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("expire observes boundary reached after invitation lock", func(t *testing.T) {
+		database, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		marker := &atomic.Bool{}
+		service, _ := NewService(database, fixedInvitationKeys(t), &fakeIntentSource{}, ServiceOptions{Now: lockAwareClock(marker, before, after)})
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT status, expires_at FROM invitations WHERE id = ? FOR UPDATE")).
+			WithArgs(markingArgument{value: int64(74), marker: marker}).
+			WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at"}).AddRow(StatusActive, after))
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE invitations SET status = 'expired' WHERE id = ? AND status = 'active'")).
+			WithArgs(int64(74)).WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, event_data, created_at) VALUES (?, ?, ?)")).
+			WithArgs("invitation_expired", secretFreeJSON{}, after).WillReturnResult(sqlmock.NewResult(94, 1))
+		mock.ExpectCommit()
+
+		if err := service.Expire(context.Background(), 74); err != nil {
+			t.Fatalf("Expire() error=%v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("list validates session after session row lock", func(t *testing.T) {
+		database, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		marker := &atomic.Bool{}
+		keys := fixedInvitationKeys(t)
+		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: lockAwareClock(marker, before, after)})
+		sessionHash, _ := keys.HashToken("site_session", []byte("streamer-session"))
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT account_id FROM site_sessions WHERE token_hash = ? AND account_id IS NOT NULL LIMIT 1")).
+			WithArgs(sessionHash).WillReturnRows(sqlmock.NewRows([]string{"account_id"}).AddRow(int64(41)))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
+			WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(3), nil))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE account_id = ? AND token_hash = ? FOR UPDATE")).
+			WithArgs(int64(41), markingArgument{value: sessionHash, marker: marker}).
+			WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(int64(11), int64(3), before.Add(5*time.Minute), nil))
+		mock.ExpectRollback()
+
+		_, err = service.List(context.Background(), "streamer-session")
+		if !errors.Is(err, ErrAuthentication) {
+			t.Fatalf("List() error=%v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("redeem validates invitation and intent after UID lock", func(t *testing.T) {
+		database, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		marker := &atomic.Bool{}
+		reservation := newFakeReservation(after.Add(time.Hour))
+		service, _ := NewService(database, fixedInvitationKeys(t), &fakeIntentSource{reservations: map[string]*fakeReservation{"registration-intent": reservation}}, ServiceOptions{Now: lockAwareClock(marker, before, after)})
+		codeHash := sha256.Sum256([]byte("complete-invitation-code"))
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT id, status, expires_at FROM invitations WHERE code_hash = ? FOR UPDATE")).
+			WithArgs(codeHash[:]).WillReturnRows(sqlmock.NewRows([]string{"id", "status", "expires_at"}).AddRow(int64(75), StatusActive, before.Add(5*time.Minute)))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT account_id FROM bili_uid_bindings WHERE uid_lookup = ? LIMIT 1 FOR UPDATE")).
+			WithArgs(markingArgument{value: reservation.uid.Lookup, marker: marker}).WillReturnError(sql.ErrNoRows)
+		mock.ExpectRollback()
+
+		_, err = service.Redeem(context.Background(), "complete-invitation-code", "registration-intent")
+		committed, aborted := reservation.outcome()
+		if !errors.Is(err, ErrInvitationInvalid) || committed || !aborted {
+			t.Fatalf("Redeem() error=%v committed=%v aborted=%v", err, committed, aborted)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestRedeemRechecksInvitationExpiryImmediatelyBeforeCommit(t *testing.T) {
+	lockedAt := time.Date(2026, 8, 16, 21, 30, 0, 0, time.UTC)
+	commitAt := lockedAt.Add(10 * time.Minute)
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	reservation := newFakeReservation(commitAt.Add(time.Hour))
+	service, _ := NewService(database, fixedInvitationKeys(t), &fakeIntentSource{reservations: map[string]*fakeReservation{"registration-intent": reservation}}, ServiceOptions{Now: steppedClock(lockedAt, commitAt)})
+	expectRedeemThroughAuditWithExpiry(mock, reservation, lockedAt, "complete-invitation-code", lockedAt.Add(5*time.Minute), nil)
+	mock.ExpectRollback()
+
+	_, err = service.Redeem(context.Background(), "complete-invitation-code", "registration-intent")
+	committed, aborted := reservation.outcome()
+	if !errors.Is(err, ErrInvitationInvalid) || committed || !aborted {
+		t.Fatalf("Redeem() error=%v committed=%v aborted=%v", err, committed, aborted)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestConcurrentRedeemHasExactlyOneWinner(t *testing.T) {
 	now := time.Date(2026, 8, 16, 19, 10, 0, 0, time.UTC)
 	database, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
@@ -468,6 +754,8 @@ func TestConcurrentRedeemHasExactlyOneWinner(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "status", "expires_at"}).AddRow(int64(88), StatusActive, now.Add(time.Hour)))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, status, expires_at FROM invitations WHERE code_hash = ? FOR UPDATE")).WithArgs(codeHash[:]).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "status", "expires_at"}).AddRow(int64(88), StatusUsed, now.Add(time.Hour)))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT account_id FROM bili_uid_bindings WHERE uid_lookup = ? LIMIT 1 FOR UPDATE")).
+		WithArgs(first.uid.Lookup).WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT account_id FROM bili_uid_bindings WHERE uid_lookup = ? LIMIT 1 FOR UPDATE")).
 		WithArgs(first.uid.Lookup).WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO streamer_accounts (credential_epoch, created_at, updated_at) VALUES (1, ?, ?)")).
@@ -507,6 +795,61 @@ func TestConcurrentRedeemHasExactlyOneWinner(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInsertAuditMapsNamedActorAndTargetWithoutPositionalAmbiguity(t *testing.T) {
+	now := time.Date(2026, 8, 16, 22, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		event auditEvent
+		query string
+		args  []driver.Value
+	}{
+		{
+			name:  "streamer actor",
+			event: auditEvent{eventType: "invitation_generated", actor: streamerAuditActor(41), invitationID: 71},
+			query: "INSERT INTO audit_events (event_type, actor_account_id, event_data, created_at) VALUES (?, ?, ?, ?)",
+			args:  []driver.Value{"invitation_generated", int64(41), secretFreeJSON{}, now},
+		},
+		{
+			name:  "administrator actor and streamer target",
+			event: auditEvent{eventType: "invitation_quota_adjusted", actor: administratorAuditActor(), targetAccountID: 51},
+			query: "INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, 1, ?, ?, ?)",
+			args:  []driver.Value{"invitation_quota_adjusted", int64(51), secretFreeJSON{}, now},
+		},
+		{
+			name:  "streamer target without actor",
+			event: auditEvent{eventType: "invitation_redeemed", targetAccountID: 61, invitationID: 75},
+			query: "INSERT INTO audit_events (event_type, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?)",
+			args:  []driver.Value{"invitation_redeemed", int64(61), secretFreeJSON{}, now},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			database, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			mock.ExpectBegin()
+			transaction, err := database.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expectation := mock.ExpectExec(regexp.QuoteMeta(test.query))
+			expectation.WithArgs(test.args...).WillReturnResult(sqlmock.NewResult(1, 1))
+			mock.ExpectCommit()
+			if err := insertAudit(context.Background(), transaction, test.event, now); err != nil {
+				t.Fatalf("insertAudit() error=%v", err)
+			}
+			if err := transaction.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -554,10 +897,14 @@ func steppedClock(values ...time.Time) func() time.Time {
 }
 
 func expectRedeemThroughAudit(mock sqlmock.Sqlmock, reservation *fakeReservation, now time.Time, code string, auditError error) {
+	expectRedeemThroughAuditWithExpiry(mock, reservation, now, code, now.Add(time.Hour), auditError)
+}
+
+func expectRedeemThroughAuditWithExpiry(mock sqlmock.Sqlmock, reservation *fakeReservation, now time.Time, code string, invitationExpiresAt time.Time, auditError error) {
 	codeHash := sha256.Sum256([]byte(code))
 	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, status, expires_at FROM invitations WHERE code_hash = ? FOR UPDATE")).
-		WithArgs(codeHash[:]).WillReturnRows(sqlmock.NewRows([]string{"id", "status", "expires_at"}).AddRow(int64(75), StatusActive, now.Add(time.Hour)))
+		WithArgs(codeHash[:]).WillReturnRows(sqlmock.NewRows([]string{"id", "status", "expires_at"}).AddRow(int64(75), StatusActive, invitationExpiresAt))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT account_id FROM bili_uid_bindings WHERE uid_lookup = ? LIMIT 1 FOR UPDATE")).
 		WithArgs(reservation.uid.Lookup).WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO streamer_accounts (credential_epoch, created_at, updated_at) VALUES (1, ?, ?)")).
@@ -577,6 +924,35 @@ func expectRedeemThroughAudit(mock sqlmock.Sqlmock, reservation *fakeReservation
 	} else {
 		audit.WillReturnResult(sqlmock.NewResult(102, 1))
 	}
+}
+
+func lockAwareClock(marker *atomic.Bool, before, after time.Time) func() time.Time {
+	return func() time.Time {
+		if marker.Load() {
+			return after
+		}
+		return before
+	}
+}
+
+type markingArgument struct {
+	value  driver.Value
+	marker *atomic.Bool
+}
+
+func (argument markingArgument) Match(value driver.Value) bool {
+	matched := false
+	switch want := argument.value.(type) {
+	case []byte:
+		got, ok := value.([]byte)
+		matched = ok && bytes.Equal(got, want)
+	default:
+		matched = value == want
+	}
+	if matched {
+		argument.marker.Store(true)
+	}
+	return matched
 }
 
 type fakeIntentSource struct {

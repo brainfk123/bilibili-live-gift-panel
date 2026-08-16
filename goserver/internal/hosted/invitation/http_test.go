@@ -141,6 +141,63 @@ func TestHTTPRejectsUnexpectedGETAndDELETEBodiesBeforeService(t *testing.T) {
 	}
 }
 
+func TestHTTPStreamerMutationsRejectCheaplyAndRateLimitBeforeAuthentication(t *testing.T) {
+	now := time.Date(2026, 8, 16, 20, 10, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		mutate func(*http.Request)
+	}{
+		{name: "missing origin", method: http.MethodPost, path: "/api/invitations", body: `{}`, mutate: func(request *http.Request) { request.Header.Del("Origin") }},
+		{name: "malformed query", method: http.MethodPost, path: "/api/invitations?x;y", body: `{}`},
+		{name: "unexpected delete body", method: http.MethodDelete, path: "/api/invitations/1", body: `{"unexpected":true}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeHTTPService{}
+			steps := make([]string, 0, 4)
+			authenticate := recordingAuthentication(&steps, false)
+			handler := newTestHTTPHandlerWithAuth(t, service, &orderedLimits{steps: &steps}, now, authenticate)
+			request := invitationRequest(test.method, test.path, test.body, "invalid-session")
+			if test.mutate != nil {
+				test.mutate(request)
+			}
+			response := serveInvitation(handler, request)
+			if response.Code != http.StatusBadRequest && response.Code != http.StatusForbidden {
+				t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+			}
+			if service.calls != 0 || len(steps) != 0 {
+				t.Fatalf("cheap rejection reached dependency: service=%d steps=%v", service.calls, steps)
+			}
+		})
+	}
+
+	steps := make([]string, 0, 4)
+	service := &fakeHTTPService{}
+	handler := newTestHTTPHandlerWithAuth(t, service, &orderedLimits{steps: &steps}, now, recordingAuthentication(&steps, false))
+	response := serveInvitation(handler, invitationRequest(http.MethodPost, "/api/invitations", `{}`, "invalid-session"))
+	if response.Code != http.StatusUnauthorized || service.calls != 0 {
+		t.Fatalf("invalid cookie = %d %q service=%d", response.Code, response.Body.String(), service.calls)
+	}
+	wantSteps := []string{"limit:global", "limit:per_ip", "limit:per_challenge", "authenticate"}
+	if strings.Join(steps, ",") != strings.Join(wantSteps, ",") {
+		t.Fatalf("dependency order=%v want=%v", steps, wantSteps)
+	}
+
+	steps = make([]string, 0, 3)
+	service = &fakeHTTPService{}
+	handler = newTestHTTPHandlerWithAuth(t, service, &orderedLimits{steps: &steps}, now, recordingAuthentication(&steps, false))
+	response = serveInvitation(handler, invitationRequest(http.MethodDelete, "/api/invitations/1", "", ""))
+	if response.Code != http.StatusUnauthorized || service.calls != 0 {
+		t.Fatalf("missing cookie = %d %q service=%d", response.Code, response.Body.String(), service.calls)
+	}
+	wantSteps = []string{"limit:global", "limit:per_ip", "limit:per_challenge"}
+	if strings.Join(steps, ",") != strings.Join(wantSteps, ",") {
+		t.Fatalf("missing-cookie limit order=%v want=%v", steps, wantSteps)
+	}
+}
+
 func TestHTTPMutationsUseGlobalPerIPAndHashedCredentialLimits(t *testing.T) {
 	tests := []struct{ method, path, body, cookie string }{
 		{http.MethodPost, "/api/auth/registration", `{"code":"code-secret","registrationIntent":"intent-secret"}`, ""},
@@ -269,14 +326,39 @@ func (limiter *recordingLimits) Allow(_ context.Context, scope identity.LimitSco
 
 func newTestHTTPHandler(t *testing.T, service invitationHTTPService, limiter identity.ChallengeLimiter, now time.Time) *HTTPHandler {
 	t.Helper()
+	return newTestHTTPHandlerWithAuth(t, service, limiter, now, func(next http.Handler) http.Handler { return next })
+}
+
+func newTestHTTPHandlerWithAuth(t *testing.T, service invitationHTTPService, limiter identity.ChallengeLimiter, now time.Time, authenticate func(http.Handler) http.Handler) *HTTPHandler {
+	t.Helper()
 	handler, err := NewHTTPHandler(service, HTTPOptions{
 		AllowedOrigin: testOrigin, CSRFToken: testCSRF, Limiter: limiter, ClientIP: identity.DirectClientIP,
-		Authenticate: func(next http.Handler) http.Handler { return next }, Now: fixedNow(now),
+		Authenticate: authenticate, Now: fixedNow(now),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return handler
+}
+
+type orderedLimits struct{ steps *[]string }
+
+func (limiter *orderedLimits) Allow(_ context.Context, scope identity.LimitScope, _ string) bool {
+	*limiter.steps = append(*limiter.steps, "limit:"+string(scope))
+	return true
+}
+
+func recordingAuthentication(steps *[]string, allow bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			*steps = append(*steps, "authenticate")
+			if !allow {
+				writeError(response, http.StatusUnauthorized, "authentication_failed")
+				return
+			}
+			next.ServeHTTP(response, request)
+		})
+	}
 }
 
 func invitationRequest(method, path, body, cookie string) *http.Request {

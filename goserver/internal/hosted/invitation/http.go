@@ -41,6 +41,7 @@ type HTTPHandler struct {
 	csrfToken     string
 	limiter       identity.ChallengeLimiter
 	clientIP      identity.ClientIPResolver
+	authenticate  func(http.Handler) http.Handler
 	now           func() time.Time
 	mux           *http.ServeMux
 }
@@ -58,12 +59,13 @@ func NewHTTPHandler(service invitationHTTPService, options HTTPOptions) (*HTTPHa
 	}
 	handler := &HTTPHandler{
 		service: service, allowedOrigin: options.AllowedOrigin, csrfToken: options.CSRFToken,
-		limiter: options.Limiter, clientIP: options.ClientIP, now: options.Now, mux: http.NewServeMux(),
+		limiter: options.Limiter, clientIP: options.ClientIP, authenticate: options.Authenticate,
+		now: options.Now, mux: http.NewServeMux(),
 	}
 	handler.mux.HandleFunc("POST /api/auth/registration", handler.redeem)
 	handler.mux.Handle("GET /api/invitations", options.Authenticate(http.HandlerFunc(handler.list)))
-	handler.mux.Handle("POST /api/invitations", options.Authenticate(http.HandlerFunc(handler.generateStreamer)))
-	handler.mux.Handle("DELETE /api/invitations/{id}", options.Authenticate(http.HandlerFunc(handler.revoke)))
+	handler.mux.HandleFunc("POST /api/invitations", handler.generateStreamer)
+	handler.mux.HandleFunc("DELETE /api/invitations/{id}", handler.revoke)
 	handler.mux.HandleFunc("POST /api/admin/invitations", handler.generateAdministrator)
 	handler.mux.HandleFunc("POST /api/admin/accounts/{id}/invitation-quota", handler.adjustQuota)
 	return handler, nil
@@ -137,20 +139,27 @@ func (handler *HTTPHandler) generate(response http.ResponseWriter, request *http
 		return
 	}
 	token, ok := sessionToken(request)
-	if !ok {
-		writeError(response, http.StatusUnauthorized, "authentication_failed")
-		return
-	}
 	if !handler.allow(request, operation, token) {
 		writeError(response, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
-	result, err := handler.service.Generate(request.Context(), token, actor)
-	if err != nil || result.ID <= 0 || result.Code == "" || len(result.CodeHint) != 8 || result.Status != StatusActive || !result.ExpiresAt.After(handler.now()) {
-		handler.writeServiceError(response, err)
+	if !ok {
+		writeError(response, http.StatusUnauthorized, "authentication_failed")
 		return
 	}
-	writeJSON(response, http.StatusCreated, result)
+	execute := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		result, err := handler.service.Generate(request.Context(), token, actor)
+		if err != nil || result.ID <= 0 || result.Code == "" || len(result.CodeHint) != 8 || result.Status != StatusActive || !result.ExpiresAt.After(handler.now()) {
+			handler.writeServiceError(response, err)
+			return
+		}
+		writeJSON(response, http.StatusCreated, result)
+	})
+	if actor == ActorStreamer {
+		handler.authenticate(execute).ServeHTTP(response, request)
+		return
+	}
+	execute.ServeHTTP(response, request)
 }
 
 func (handler *HTTPHandler) revoke(response http.ResponseWriter, request *http.Request) {
@@ -172,19 +181,21 @@ func (handler *HTTPHandler) revoke(response http.ResponseWriter, request *http.R
 		return
 	}
 	token, ok := sessionToken(request)
-	if !ok {
-		writeError(response, http.StatusUnauthorized, "authentication_failed")
-		return
-	}
 	if !handler.allow(request, "invitation_revoke", token) {
 		writeError(response, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
-	if err := handler.service.Revoke(request.Context(), token, invitationID); err != nil {
-		handler.writeServiceError(response, err)
+	if !ok {
+		writeError(response, http.StatusUnauthorized, "authentication_failed")
 		return
 	}
-	response.WriteHeader(http.StatusNoContent)
+	handler.authenticate(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if err := handler.service.Revoke(request.Context(), token, invitationID); err != nil {
+			handler.writeServiceError(response, err)
+			return
+		}
+		response.WriteHeader(http.StatusNoContent)
+	})).ServeHTTP(response, request)
 }
 
 func (handler *HTTPHandler) adjustQuota(response http.ResponseWriter, request *http.Request) {
@@ -206,12 +217,12 @@ func (handler *HTTPHandler) adjustQuota(response http.ResponseWriter, request *h
 		return
 	}
 	token, ok := sessionToken(request)
-	if !ok {
-		writeError(response, http.StatusUnauthorized, "authentication_failed")
-		return
-	}
 	if !handler.allow(request, "invitation_quota_adjust", token) {
 		writeError(response, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
+	if !ok {
+		writeError(response, http.StatusUnauthorized, "authentication_failed")
 		return
 	}
 	result, err := handler.service.AdjustQuota(request.Context(), token, accountID, body.RemainingQuota, body.Reason)
