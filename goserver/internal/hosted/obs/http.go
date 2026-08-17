@@ -243,7 +243,7 @@ func (handler *HTTPHandler) events(response http.ResponseWriter, request *http.R
 	response.Header().Set("Content-Type", "text/event-stream")
 	response.Header().Set("X-Content-Type-Options", "nosniff")
 	response.Header().Set("X-Accel-Buffering", "no")
-	if handler.writeDisplay(response, controller, initial) != nil {
+	if handler.writeDisplay(response, controller, request, publicID, cookie.Value, accountID, lease, initial) != nil {
 		return
 	}
 	lastSessionID, lastRevision := initial.LiveSessionID, initial.Revision
@@ -277,7 +277,7 @@ func (handler *HTTPHandler) events(response http.ResponseWriter, request *http.R
 			if snapshot.LiveSessionID == lastSessionID && snapshot.Revision <= lastRevision {
 				continue
 			}
-			if handler.writeDisplay(response, controller, snapshot) != nil {
+			if handler.writeDisplay(response, controller, request, publicID, cookie.Value, accountID, lease, snapshot) != nil {
 				return
 			}
 			lastSessionID, lastRevision = snapshot.LiveSessionID, snapshot.Revision
@@ -293,7 +293,7 @@ func (handler *HTTPHandler) events(response http.ResponseWriter, request *http.R
 			latest, latestOK := handler.publisher.Latest(accountID)
 			if latestOK && latest.AccountID == accountID && latest.LiveSessionID == status.SessionID &&
 				(status.SessionID != lastSessionID || latest.Revision > lastRevision) {
-				if handler.writeDisplay(response, controller, latest) != nil {
+				if handler.writeDisplay(response, controller, request, publicID, cookie.Value, accountID, lease, latest) != nil {
 					return
 				}
 				lastSessionID, lastRevision = latest.LiveSessionID, latest.Revision
@@ -303,13 +303,13 @@ func (handler *HTTPHandler) events(response http.ResponseWriter, request *http.R
 					return
 				}
 				if reset.LiveSessionID != lastSessionID {
-					if handler.writeDisplay(response, controller, reset) != nil {
+					if handler.writeDisplay(response, controller, request, publicID, cookie.Value, accountID, lease, reset) != nil {
 						return
 					}
 					lastSessionID, lastRevision = reset.LiveSessionID, reset.Revision
 				}
 			}
-			if handler.writeKeepalive(response, controller) != nil {
+			if handler.writeKeepalive(response, controller, request, publicID, cookie.Value, accountID, lease) != nil {
 				return
 			}
 		}
@@ -353,7 +353,10 @@ func (handler *HTTPHandler) stableSnapshot(ctx context.Context, accountID int64,
 	return hostedruntime.DisplaySnapshot{}, hostedruntime.ErrUnavailable
 }
 
-func (handler *HTTPHandler) writeDisplay(response http.ResponseWriter, controller *http.ResponseController, snapshot hostedruntime.DisplaySnapshot) error {
+func (handler *HTTPHandler) writeDisplay(response http.ResponseWriter, controller *http.ResponseController, request *http.Request, publicID, shortToken string, accountID int64, lease hostedruntime.ConnectionLease, snapshot hostedruntime.DisplaySnapshot) error {
+	if err := handler.authorizeOBSFrame(request, publicID, shortToken, accountID, lease); err != nil {
+		return err
+	}
 	if err := handler.setWriteDeadline(controller); err != nil {
 		return err
 	}
@@ -363,7 +366,10 @@ func (handler *HTTPHandler) writeDisplay(response http.ResponseWriter, controlle
 	return controller.Flush()
 }
 
-func (handler *HTTPHandler) writeKeepalive(response io.Writer, controller *http.ResponseController) error {
+func (handler *HTTPHandler) writeKeepalive(response io.Writer, controller *http.ResponseController, request *http.Request, publicID, shortToken string, accountID int64, lease hostedruntime.ConnectionLease) error {
+	if err := handler.authorizeOBSFrame(request, publicID, shortToken, accountID, lease); err != nil {
+		return err
+	}
 	if err := handler.setWriteDeadline(controller); err != nil {
 		return err
 	}
@@ -371,6 +377,20 @@ func (handler *HTTPHandler) writeKeepalive(response io.Writer, controller *http.
 		return err
 	}
 	return controller.Flush()
+}
+
+func (handler *HTTPHandler) authorizeOBSFrame(request *http.Request, publicID, shortToken string, accountID int64, lease hostedruntime.ConnectionLease) error {
+	if request == nil || !validPublicID(publicID) || shortToken == "" || accountID <= 0 || lease == nil || lease.Kind() != hostedruntime.LeaseOBS {
+		return hostedruntime.ErrInvalidLease
+	}
+	authenticatedAccountID, err := handler.service.Authenticate(request.Context(), publicID, shortToken)
+	if err != nil {
+		return err
+	}
+	if authenticatedAccountID != accountID {
+		return ErrAuthenticationFailed
+	}
+	return lease.Renew(request.Context())
 }
 
 func (handler *HTTPHandler) setWriteDeadline(controller *http.ResponseController) error {

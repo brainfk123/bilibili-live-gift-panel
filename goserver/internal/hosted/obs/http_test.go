@@ -187,12 +187,12 @@ func TestEventsOwnsOBSLeaseAndStreamsInitialSnapshotThenIncrements(t *testing.T)
 		handler.ServeHTTP(response, request)
 		close(done)
 	}()
-	<-runtimeService.acquired
-	<-response.flushed
+	waitOBSSignal(t, runtimeService.acquired, "OBS lease acquisition")
+	waitOBSSignal(t, response.flushed, "initial display")
 	publisher.Publish(hostedruntime.DisplaySnapshot{AccountID: 41, LiveSessionID: 70, Revision: 2, Runtime: configuration.RuntimeState{AttributeValues: map[string]float64{"hp": 12}}})
-	<-response.flushed
+	waitOBSSignal(t, response.flushed, "increment display")
 	cancel()
-	<-done
+	waitOBSSignal(t, done, "OBS stream shutdown")
 
 	if runtimeService.acquireAccountID != 41 || runtimeService.acquireKind != hostedruntime.LeaseOBS || !runtimeService.lease.released {
 		t.Fatalf("lease = account %d kind %q released=%v", runtimeService.acquireAccountID, runtimeService.acquireKind, runtimeService.lease.released)
@@ -227,7 +227,7 @@ func TestEventsCoalescesPublisherOverflowToLatestSnapshot(t *testing.T) {
 	runtimeService := &fakeOBSRuntime{acquired: make(chan struct{}), status: hostedruntime.Status{State: hostedruntime.StateActive, SessionID: 70}}
 	service := &fakeHTTPService{
 		authenticatedAccountID: 41,
-		authenticateBlockAfter: 1,
+		authenticateBlockAfter: 2,
 		authenticateStarted:    make(chan struct{}),
 		authenticateRelease:    make(chan struct{}),
 	}
@@ -239,18 +239,18 @@ func TestEventsCoalescesPublisherOverflowToLatestSnapshot(t *testing.T) {
 	handler := newTestHTTPHandler(t, service, runtimeService, publisher, HTTPOptions{})
 	done := make(chan struct{})
 	go func() { handler.ServeHTTP(response, request); close(done) }()
-	<-response.flushed
+	waitOBSSignal(t, response.flushed, "initial display")
 	publisher.Publish(hostedruntime.DisplaySnapshot{AccountID: 41, LiveSessionID: 70, Revision: 1})
-	<-service.authenticateStarted
+	waitOBSSignal(t, service.authenticateStarted, "increment frame authentication")
 	for revision := uint64(2); revision <= 25; revision++ {
 		publisher.Publish(hostedruntime.DisplaySnapshot{AccountID: 41, LiveSessionID: 70, Revision: revision})
 	}
 	close(service.authenticateRelease)
 	for !strings.Contains(response.String(), `"revision":17`) && !strings.Contains(response.String(), `"revision":25`) {
-		<-response.flushed
+		waitOBSSignal(t, response.flushed, "coalesced display")
 	}
 	cancel()
-	<-done
+	waitOBSSignal(t, done, "coalesced OBS stream shutdown")
 	if !strings.Contains(response.String(), `"revision":25`) {
 		t.Fatalf("stream did not reconcile to publisher latest: %q", response.String())
 	}
@@ -278,14 +278,14 @@ func TestEventsRetriesInitialSnapshotAcrossSessionSwitchAndRejectsStaleSessionEv
 	handler := newTestHTTPHandler(t, service, runtimeService, publisher, HTTPOptions{})
 	done := make(chan struct{})
 	go func() { handler.ServeHTTP(response, request); close(done) }()
-	<-response.flushed
+	waitOBSSignal(t, response.flushed, "stable initial display")
 	publisher.Publish(hostedruntime.DisplaySnapshot{AccountID: 41, LiveSessionID: 70, Revision: 999})
 	publisher.Publish(hostedruntime.DisplaySnapshot{AccountID: 41, LiveSessionID: 72, Revision: 1})
 	for !strings.Contains(response.String(), `"liveSessionId":72`) {
-		<-response.flushed
+		waitOBSSignal(t, response.flushed, "current-session display")
 	}
 	cancel()
-	<-done
+	waitOBSSignal(t, done, "session-switch OBS stream shutdown")
 
 	body := response.String()
 	if !strings.Contains(body, `"liveSessionId":71`) || strings.Contains(body, `"liveSessionId":70`) {
@@ -302,7 +302,7 @@ func TestEventsDiscardsInFlightSnapshotWhenItsSessionEndsDuringAuthentication(t 
 	}
 	service := &fakeHTTPService{
 		authenticatedAccountID: 41,
-		authenticateBlockAfter: 1,
+		authenticateBlockAfter: 2,
 		authenticateStarted:    make(chan struct{}),
 		authenticateRelease:    make(chan struct{}),
 	}
@@ -314,21 +314,21 @@ func TestEventsDiscardsInFlightSnapshotWhenItsSessionEndsDuringAuthentication(t 
 	handler := newTestHTTPHandler(t, service, runtimeService, publisher, HTTPOptions{NewTimer: func(time.Duration) hostedruntime.Timer { return timer }})
 	done := make(chan struct{})
 	go func() { handler.ServeHTTP(response, request); close(done) }()
-	<-response.flushed
+	waitOBSSignal(t, response.flushed, "initial display")
 	publisher.Publish(hostedruntime.DisplaySnapshot{
 		AccountID: 41, LiveSessionID: 71, Revision: 1,
 		Viewers: []hostedruntime.ViewerRow{{UID: 9, Name: "ended-session-secret", Avatar: "secret-avatar"}},
 	})
-	<-service.authenticateStarted
+	waitOBSSignal(t, service.authenticateStarted, "in-flight display authentication")
 	runtimeService.SetStatus(hostedruntime.Status{State: hostedruntime.StateActive, SessionID: 72})
 	publisher.Clear(41, 71)
 	close(service.authenticateRelease)
 	timer.channel <- time.Now()
 	for !strings.Contains(response.String(), ": keepalive") {
-		<-response.flushed
+		waitOBSSignal(t, response.flushed, "session reset or keepalive")
 	}
 	cancel()
-	<-done
+	waitOBSSignal(t, done, "session-reset OBS stream shutdown")
 
 	body := response.String()
 	if strings.Contains(body, "ended-session-secret") || strings.Count(body, `"liveSessionId":71`) != 1 {
@@ -354,16 +354,16 @@ func TestEventsDoesNotRepeatSnapshotPublishedWhileInitialStateLoads(t *testing.T
 	done := make(chan struct{})
 	go func() { handler.ServeHTTP(response, request); close(done) }()
 
-	<-runtimeService.statusStarted
+	waitOBSSignal(t, runtimeService.statusStarted, "initial runtime status")
 	publisher.Publish(hostedruntime.DisplaySnapshot{AccountID: 41, LiveSessionID: 70, Revision: 2})
 	close(runtimeService.statusRelease)
-	<-response.flushed
+	waitOBSSignal(t, response.flushed, "initial published display")
 	publisher.Publish(hostedruntime.DisplaySnapshot{AccountID: 41, LiveSessionID: 70, Revision: 3})
 	for !strings.Contains(response.String(), `"revision":3`) {
-		<-response.flushed
+		waitOBSSignal(t, response.flushed, "next published display")
 	}
 	cancel()
-	<-done
+	waitOBSSignal(t, done, "initial-load OBS stream shutdown")
 
 	if count := strings.Count(response.String(), `"revision":2`); count != 1 {
 		t.Fatalf("revision 2 event count = %d, body = %q", count, response.String())
@@ -388,12 +388,12 @@ func TestEventsUsesInjectedTwentySecondKeepaliveWithoutSleeping(t *testing.T) {
 	}})
 	done := make(chan struct{})
 	go func() { handler.ServeHTTP(response, request); close(done) }()
-	<-runtimeService.acquired
-	<-response.flushed
+	waitOBSSignal(t, runtimeService.acquired, "OBS lease acquisition")
+	waitOBSSignal(t, response.flushed, "initial display")
 	timer.channel <- time.Now()
-	<-response.flushed
+	waitOBSSignal(t, response.flushed, "keepalive")
 	cancel()
-	<-done
+	waitOBSSignal(t, done, "keepalive OBS stream shutdown")
 	if !strings.Contains(response.String(), ": keepalive\n\n") {
 		t.Fatalf("body = %q", response.String())
 	}
@@ -416,14 +416,14 @@ func TestEventsKeepaliveSendsIdentityFreeResetWhenSessionChangesWithoutPublished
 	handler := newTestHTTPHandler(t, service, runtimeService, publisher, HTTPOptions{NewTimer: func(time.Duration) hostedruntime.Timer { return timer }})
 	done := make(chan struct{})
 	go func() { handler.ServeHTTP(response, request); close(done) }()
-	<-response.flushed
+	waitOBSSignal(t, response.flushed, "viewer-bearing initial display")
 	runtimeService.SetStatus(hostedruntime.Status{State: hostedruntime.StateActive, SessionID: 71})
 	runtimeService.SetSnapshot(configuration.RuntimeState{AttributeValues: map[string]float64{"hp": 20}})
 	publisher.Clear(41, 70)
 	timer.channel <- time.Now()
-	<-response.flushed
+	waitOBSSignal(t, response.flushed, "identity-free reset display")
 	cancel()
-	<-done
+	waitOBSSignal(t, done, "identity-free reset OBS stream shutdown")
 
 	body := response.String()
 	reset := body[strings.LastIndex(body, "event: display"):]
@@ -449,11 +449,11 @@ func TestEventsUsesRollingWriteDeadlines(t *testing.T) {
 	})
 	done := make(chan struct{})
 	go func() { handler.ServeHTTP(response, request); close(done) }()
-	<-response.flushed
+	waitOBSSignal(t, response.flushed, "initial display deadline")
 	timer.channel <- time.Now()
-	<-response.flushed
+	waitOBSSignal(t, response.flushed, "keepalive deadline")
 	cancel()
-	<-done
+	waitOBSSignal(t, done, "deadline OBS stream shutdown")
 
 	deadlines := response.Deadlines()
 	if len(deadlines) < 2 || deadlines[0].IsZero() || !deadlines[1].After(deadlines[0]) {
@@ -487,13 +487,19 @@ func TestEventsWriteOrFlushFailureImmediatelyReleasesLease(t *testing.T) {
 			}})
 			done := make(chan struct{})
 			go func() { handler.ServeHTTP(response, request); close(done) }()
+			waitTimer := time.NewTimer(5 * time.Second)
 			select {
 			case <-done:
 			case <-timerStarted:
 				cancel()
-				<-done
+				waitOBSSignal(t, done, "failed-output OBS stream shutdown")
 				t.Fatal("stream entered its event loop after output failure")
+			case <-waitTimer.C:
+				cancel()
+				waitOBSSignal(t, done, "timed-out output-failure OBS stream shutdown")
+				t.Fatal("timed out waiting for OBS stream output failure")
 			}
+			waitTimer.Stop()
 			if !runtimeService.lease.released {
 				t.Fatal("OBS lease was not released after output failure")
 			}
@@ -505,7 +511,7 @@ func TestEventsRevalidatesShortSessionBeforeKeepaliveAndReleasesLeaseAfterReset(
 	timer := &manualOBSTimer{channel: make(chan time.Time, 1)}
 	publisher := hostedruntime.NewPublisher()
 	runtimeService := &fakeOBSRuntime{acquired: make(chan struct{}), status: hostedruntime.Status{State: hostedruntime.StateActive, SessionID: 70}}
-	service := &fakeHTTPService{authenticatedAccountID: 41, authenticateErrAfter: 1}
+	service := &fakeHTTPService{authenticatedAccountID: 41, authenticateErrAfter: 2}
 	response := newStreamingRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/obs/"+testPublicID+"/events", nil)
 	ctx, cancel := context.WithCancel(request.Context())
@@ -515,12 +521,14 @@ func TestEventsRevalidatesShortSessionBeforeKeepaliveAndReleasesLeaseAfterReset(
 	handler := newTestHTTPHandler(t, service, runtimeService, publisher, HTTPOptions{NewTimer: func(time.Duration) hostedruntime.Timer { return timer }})
 	done := make(chan struct{})
 	go func() { handler.ServeHTTP(response, request); close(done) }()
-	<-runtimeService.acquired
-	<-response.flushed
+	waitOBSSignal(t, runtimeService.acquired, "OBS lease acquisition")
+	waitOBSSignal(t, response.flushed, "initial display")
 	timer.channel <- time.Now()
+	waitTimer := time.NewTimer(5 * time.Second)
+	defer waitTimer.Stop()
 	select {
 	case <-done:
-		if !runtimeService.lease.released || service.authenticateCalls != 2 {
+		if !runtimeService.lease.released || service.authenticateCalls != 3 {
 			t.Fatalf("released=%v Authenticate calls=%d", runtimeService.lease.released, service.authenticateCalls)
 		}
 		if strings.Contains(response.String(), ": keepalive") {
@@ -528,8 +536,160 @@ func TestEventsRevalidatesShortSessionBeforeKeepaliveAndReleasesLeaseAfterReset(
 		}
 	case <-response.flushed:
 		cancel()
-		<-done
+		waitOBSSignal(t, done, "revoked OBS stream shutdown")
 		t.Fatal("revoked short session remained connected")
+	case <-waitTimer.C:
+		cancel()
+		waitOBSSignal(t, done, "timed-out revoked OBS stream shutdown")
+		t.Fatal("timed out waiting for revoked short session disconnect")
+	}
+}
+
+func TestEventsRenewsExactOBSLeaseBeforeInitialIncrementResetAndKeepaliveFrames(t *testing.T) {
+	timer := &manualOBSTimer{channel: make(chan time.Time, 1)}
+	publisher := hostedruntime.NewPublisher()
+	runtimeService := &fakeOBSRuntime{
+		acquired: make(chan struct{}), status: hostedruntime.Status{State: hostedruntime.StateActive, SessionID: 70},
+		snapshot: configuration.RuntimeState{AttributeValues: map[string]float64{"hp": 10}},
+	}
+	service := &fakeHTTPService{authenticatedAccountID: 41}
+	response := newStreamingRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/obs/"+testPublicID+"/events", nil)
+	ctx, cancel := context.WithCancel(request.Context())
+	request = request.WithContext(ctx)
+	request.AddCookie(&http.Cookie{Name: OBSSessionCookie, Value: "short-secret"})
+	handler := newTestHTTPHandler(t, service, runtimeService, publisher, HTTPOptions{NewTimer: func(time.Duration) hostedruntime.Timer { return timer }})
+	done := make(chan struct{})
+	go func() { handler.ServeHTTP(response, request); close(done) }()
+	waitOBSSignal(t, response.flushed, "initial display")
+	if runtimeService.lease.RenewCalls() != 1 || service.authenticateCalls != 2 {
+		t.Fatalf("initial frame renew/auth calls = %d/%d, want 1/2", runtimeService.lease.RenewCalls(), service.authenticateCalls)
+	}
+
+	publisher.Publish(hostedruntime.DisplaySnapshot{AccountID: 41, LiveSessionID: 70, Revision: 2})
+	waitOBSSignal(t, response.flushed, "increment display")
+	runtimeService.SetStatus(hostedruntime.Status{State: hostedruntime.StateActive, SessionID: 71})
+	runtimeService.SetSnapshot(configuration.RuntimeState{AttributeValues: map[string]float64{"hp": 20}})
+	publisher.Clear(41, 70)
+	timer.channel <- time.Now()
+	waitOBSSignal(t, response.flushed, "identity-free reset display")
+	waitOBSSignal(t, response.flushed, "renewed keepalive")
+	cancel()
+	waitOBSSignal(t, done, "renewed OBS stream shutdown")
+
+	if runtimeService.acquireKind != hostedruntime.LeaseOBS || runtimeService.lease.RenewCalls() != 4 || runtimeService.lease.ReleaseCalls() != 1 || service.authenticateCalls != 7 {
+		t.Fatalf("kind/renew/release/auth = %q/%d/%d/%d, want obs/4/1/7", runtimeService.acquireKind, runtimeService.lease.RenewCalls(), runtimeService.lease.ReleaseCalls(), service.authenticateCalls)
+	}
+	body := response.String()
+	for _, required := range []string{`"revision":2`, `"liveSessionId":71`, `"hp":20`, ": keepalive"} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("renewed OBS stream missing %q: %q", required, body)
+		}
+	}
+}
+
+func TestEventsRenewFailureWritesNoLateFrameAndReleasesOBSLeaseOnce(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		err   error
+		phase string
+	}{
+		{name: "display ownership conflict", err: hostedruntime.ErrOwnershipConflict, phase: "display"},
+		{name: "reset account disabled", err: hostedruntime.ErrAccountDisabled, phase: "reset"},
+		{name: "keepalive renew failure", err: errors.New("renew unavailable"), phase: "keepalive"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			timer := &manualOBSTimer{channel: make(chan time.Time, 1)}
+			publisher := hostedruntime.NewPublisher()
+			runtimeService := &fakeOBSRuntime{acquired: make(chan struct{}), status: hostedruntime.Status{State: hostedruntime.StateActive, SessionID: 70}}
+			service := &fakeHTTPService{authenticatedAccountID: 41}
+			response := newStreamingRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/obs/"+testPublicID+"/events", nil)
+			ctx, cancel := context.WithCancel(request.Context())
+			defer cancel()
+			request = request.WithContext(ctx)
+			request.AddCookie(&http.Cookie{Name: OBSSessionCookie, Value: "short-secret"})
+			handler := newTestHTTPHandler(t, service, runtimeService, publisher, HTTPOptions{NewTimer: func(time.Duration) hostedruntime.Timer { return timer }})
+			done := make(chan struct{})
+			go func() { handler.ServeHTTP(response, request); close(done) }()
+			waitOBSSignal(t, response.flushed, "initial display before renew failure")
+			before := response.String()
+			runtimeService.lease.SetRenewError(test.err)
+			switch test.phase {
+			case "display":
+				publisher.Publish(hostedruntime.DisplaySnapshot{AccountID: 41, LiveSessionID: 70, Revision: 2})
+			case "reset":
+				runtimeService.SetStatus(hostedruntime.Status{State: hostedruntime.StateActive, SessionID: 71})
+				publisher.Clear(41, 70)
+				timer.channel <- time.Now()
+			case "keepalive":
+				timer.channel <- time.Now()
+			}
+			waitOBSSignal(t, done, "OBS stream renew failure shutdown")
+
+			if got := response.String(); got != before {
+				t.Fatalf("renew failure wrote a late %s frame: before=%q after=%q", test.phase, before, got)
+			}
+			if runtimeService.lease.RenewCalls() != 2 || runtimeService.lease.ReleaseCalls() != 1 {
+				t.Fatalf("renew/release calls = %d/%d, want 2/1", runtimeService.lease.RenewCalls(), runtimeService.lease.ReleaseCalls())
+			}
+		})
+	}
+}
+
+func TestEventsRejectsInvalidDisabledOrDifferentAccountBeforeInitialFrame(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		accounts    []int64
+		authErr     error
+		wantAccount int64
+	}{
+		{name: "invalid short session", accounts: []int64{41}, authErr: ErrAuthenticationFailed, wantAccount: 41},
+		{name: "disabled account", accounts: []int64{41}, authErr: ErrAccountDisabled, wantAccount: 41},
+		{name: "different account", accounts: []int64{41, 42}, wantAccount: 41},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtimeService := &fakeOBSRuntime{status: hostedruntime.Status{State: hostedruntime.StateActive, SessionID: 70}}
+			authenticateErrAfter := 0
+			if test.authErr != nil {
+				authenticateErrAfter = 1
+			}
+			service := &fakeHTTPService{
+				authenticatedAccountIDs: test.accounts,
+				authenticateErrAfter:    authenticateErrAfter,
+				authenticateErr:         test.authErr,
+			}
+			response := newStreamingRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/obs/"+testPublicID+"/events", nil)
+			ctx, cancel := context.WithCancel(request.Context())
+			defer cancel()
+			request = request.WithContext(ctx)
+			request.AddCookie(&http.Cookie{Name: OBSSessionCookie, Value: "short-secret"})
+
+			handler := newTestHTTPHandler(t, service, runtimeService, hostedruntime.NewPublisher(), HTTPOptions{})
+			done := make(chan struct{})
+			go func() { handler.ServeHTTP(response, request); close(done) }()
+			waitTimer := time.NewTimer(5 * time.Second)
+			select {
+			case <-done:
+			case <-response.flushed:
+				cancel()
+				waitOBSSignal(t, done, "unauthorized OBS stream shutdown")
+				t.Fatal("failed frame authorization entered the OBS stream loop")
+			case <-waitTimer.C:
+				cancel()
+				waitOBSSignal(t, done, "timed-out unauthorized OBS stream shutdown")
+				t.Fatal("timed out waiting for failed OBS frame authorization")
+			}
+			waitTimer.Stop()
+
+			if response.String() != "" {
+				t.Fatalf("failed frame authorization wrote an initial display: %q", response.String())
+			}
+			if runtimeService.acquireAccountID != test.wantAccount || runtimeService.lease.RenewCalls() != 0 || runtimeService.lease.ReleaseCalls() != 1 || service.authenticateCalls != 2 {
+				t.Fatalf("account/renew/release/auth = %d/%d/%d/%d, want %d/0/1/2", runtimeService.acquireAccountID, runtimeService.lease.RenewCalls(), runtimeService.lease.ReleaseCalls(), service.authenticateCalls, test.wantAccount)
+			}
+		})
 	}
 }
 
@@ -565,22 +725,24 @@ func TestAllOBSPathsAreReadOnlyOutsideTheirExactMethods(t *testing.T) {
 }
 
 type fakeHTTPService struct {
-	issued                 IssuedCredential
-	session                ShortSession
-	authenticatedAccountID int64
-	issueAccountID         int64
-	issueAdminToken        string
-	exchangePublicID       string
-	exchangeToken          string
-	exchangeCalls          int
-	issueCalls             int
-	issueErr               error
-	authenticateCalls      int
-	authenticateErrAfter   int
-	authenticateBlockAfter int
-	authenticateStarted    chan struct{}
-	authenticateRelease    chan struct{}
-	authenticateBlockOnce  sync.Once
+	issued                  IssuedCredential
+	session                 ShortSession
+	authenticatedAccountID  int64
+	authenticatedAccountIDs []int64
+	issueAccountID          int64
+	issueAdminToken         string
+	exchangePublicID        string
+	exchangeToken           string
+	exchangeCalls           int
+	issueCalls              int
+	issueErr                error
+	authenticateCalls       int
+	authenticateErrAfter    int
+	authenticateErr         error
+	authenticateBlockAfter  int
+	authenticateStarted     chan struct{}
+	authenticateRelease     chan struct{}
+	authenticateBlockOnce   sync.Once
 }
 
 func (service *fakeHTTPService) Issue(_ context.Context, token string, accountID int64) (IssuedCredential, error) {
@@ -600,7 +762,15 @@ func (service *fakeHTTPService) Authenticate(_ context.Context, _, _ string) (in
 		<-service.authenticateRelease
 	}
 	if service.authenticateErrAfter > 0 && service.authenticateCalls > service.authenticateErrAfter {
+		if service.authenticateErr != nil {
+			return 0, service.authenticateErr
+		}
 		return 0, ErrAuthenticationFailed
+	}
+	if len(service.authenticatedAccountIDs) > 0 {
+		accountID := service.authenticatedAccountIDs[0]
+		service.authenticatedAccountIDs = service.authenticatedAccountIDs[1:]
+		return accountID, nil
 	}
 	if service.authenticatedAccountID <= 0 {
 		return 0, ErrAuthenticationFailed
@@ -665,11 +835,42 @@ func (runtimeService *fakeOBSRuntime) SetSnapshot(snapshot configuration.Runtime
 	runtimeService.snapshotMu.Unlock()
 }
 
-type fakeOBSLease struct{ released bool }
+type fakeOBSLease struct {
+	mu           sync.Mutex
+	released     bool
+	releaseCalls int
+	renewCalls   int
+	renewErr     error
+}
 
 func (*fakeOBSLease) Kind() hostedruntime.LeaseKind { return hostedruntime.LeaseOBS }
-func (*fakeOBSLease) Renew(context.Context) error   { return nil }
-func (lease *fakeOBSLease) Release()                { lease.released = true }
+func (lease *fakeOBSLease) Renew(context.Context) error {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	lease.renewCalls++
+	return lease.renewErr
+}
+func (lease *fakeOBSLease) Release() {
+	lease.mu.Lock()
+	lease.released = true
+	lease.releaseCalls++
+	lease.mu.Unlock()
+}
+func (lease *fakeOBSLease) SetRenewError(err error) {
+	lease.mu.Lock()
+	lease.renewErr = err
+	lease.mu.Unlock()
+}
+func (lease *fakeOBSLease) RenewCalls() int {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	return lease.renewCalls
+}
+func (lease *fakeOBSLease) ReleaseCalls() int {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	return lease.releaseCalls
+}
 
 type allowAllLimiter struct{}
 
@@ -796,6 +997,20 @@ func (recorder *controlledStreamingRecorder) Deadlines() []time.Time {
 	recorder.controlMu.Lock()
 	defer recorder.controlMu.Unlock()
 	return append([]time.Time(nil), recorder.deadlines...)
+}
+
+func waitOBSSignal[T any](t *testing.T, channel <-chan T, label string) T {
+	t.Helper()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case value := <-channel:
+		return value
+	case <-timer.C:
+		t.Fatalf("timed out waiting for %s", label)
+		var zero T
+		return zero
+	}
 }
 
 var _ http.ResponseWriter = (*streamingRecorder)(nil)
