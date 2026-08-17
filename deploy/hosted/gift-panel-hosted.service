@@ -11,10 +11,16 @@ WorkingDirectory=/opt/gift-panel-hosted/current/deploy/hosted
 Environment=COMPOSE_PROJECT_NAME=gift-panel-hosted
 EnvironmentFile=/etc/gift-panel-hosted/env
 ExecStartPre=/usr/bin/docker compose config --quiet
+ExecStartPre=/usr/bin/install -d -o root -g root -m 0750 /var/log/gift-panel-hosted
+ExecStartPre=/usr/bin/test ! -L /var/log/gift-panel-hosted/app.log
+ExecStartPre=/usr/bin/test ! -e /var/log/gift-panel-hosted/app.log -o -f /var/log/gift-panel-hosted/app.log
+ExecStartPre=/usr/bin/touch /var/log/gift-panel-hosted/app.log
+ExecStartPre=/usr/bin/chown 65532:65532 /var/log/gift-panel-hosted/app.log
+ExecStartPre=/usr/bin/chmod 0640 /var/log/gift-panel-hosted/app.log
 ExecStart=/usr/bin/docker compose up -d --remove-orphans
-ExecStop=/usr/bin/docker compose stop -t 30
-TimeoutStartSec=180
-TimeoutStopSec=45
+ExecStop=/usr/bin/docker compose down --remove-orphans
+TimeoutStartSec=15min
+TimeoutStopSec=15min
 
 [Install]
 WantedBy=multi-user.target

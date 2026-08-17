@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Gift Panel hosted encrypted closed-log archive
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 UTC
+RandomizedDelaySec=900
+Persistent=true
+Unit=archive-logs.service
+
+[Install]
+WantedBy=timers.target

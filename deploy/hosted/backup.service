@@ -1,0 +1,29 @@
+[Unit]
+Description=Gift Panel hosted encrypted database backup
+Requires=docker.service
+After=docker.service gift-panel-hosted.service
+StartLimitIntervalSec=1h
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/gift-panel-hosted/current/deploy/hosted
+EnvironmentFile=/etc/gift-panel-hosted/env
+EnvironmentFile=/etc/gift-panel-hosted/backup.env
+ExecStart=/usr/bin/bash /opt/gift-panel-hosted/current/deploy/hosted/backup.sh
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+StateDirectory=gift-panel-hosted-backup
+StateDirectoryMode=0700
+ReadWritePaths=/run/lock
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+Restart=on-failure
+RestartSec=15min
+TimeoutStartSec=30min
+TimeoutStopSec=2min

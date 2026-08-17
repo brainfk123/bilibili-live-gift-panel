@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
@@ -18,6 +19,16 @@ const ingressFiles = [
   'deploy/hosted/nginx.conf.template',
   'deploy/hosted/logrotate.conf',
   'deploy/hosted/journald.conf',
+] as const;
+const backupFiles = [
+  'deploy/hosted/backup.sh',
+  'deploy/hosted/archive-logs.sh',
+  'deploy/hosted/restore-drill.sh',
+  'deploy/hosted/backup.service',
+  'deploy/hosted/backup.timer',
+  'deploy/hosted/archive-logs.service',
+  'deploy/hosted/archive-logs.timer',
+  'deploy/hosted/cos-lifecycle.json',
 ] as const;
 
 function readProjectFile(path: string): string {
@@ -115,6 +126,174 @@ function unresolvedRelativeTypeScriptImports(root: string): string[] {
     }
   }
   return unresolved.sort();
+}
+
+function bashPath(path: string): string {
+  return path.replace(/^([A-Za-z]):/, (_match, drive: string) => `/${drive.toLowerCase()}`).replaceAll('\\', '/');
+}
+
+function fakeBackupTools(root: string): { bin: string; calls: string; cos: string } {
+  const bin = join(root, 'bin');
+  const calls = join(root, 'calls.log');
+  const cos = join(root, 'cos');
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(cos, { recursive: true });
+  const executable = (name: string, source: string): void => {
+    const path = join(bin, name);
+    writeFileSync(path, `#!/usr/bin/env bash\nset -euo pipefail\n${source}`, 'utf8');
+    chmodSync(path, 0o755);
+  };
+  executable('flock', 'exit "${FAKE_FLOCK_EXIT:-0}"\n');
+  executable('timeout', String.raw`
+printf 'timeout\t%s\n' "$*" >>"$FAKE_CALLS"
+if [[ -v FAKE_TIMEOUT_MATCH && -n "$FAKE_TIMEOUT_MATCH" && "$*" == *"$FAKE_TIMEOUT_MATCH"* ]]; then
+  exit 124
+fi
+[[ "$1" == --foreground ]]
+shift 2
+exec "$@"
+`);
+  executable('hosted-date', String.raw`
+if [[ -v FAKE_DATE_CALLS ]]; then printf '%s\n' "$*" >>"$FAKE_DATE_CALLS"; fi
+if [[ "$FAKE_BACKUP_CALENDAR" == 1 ]]; then
+  case "$*" in
+    '-u +%Y%m%dT%H%M%SZ %u %d %F') printf '%s\n' '20261101T010203Z 7 01 2026-11-01'; exit 0;;
+    '-u -d 2026-10-30 + 1 day +%F') printf '%s\n' '2026-10-31'; exit 0;;
+    '-u -d 2026-10-31 + 1 day +%F') printf '%s\n' '2026-11-01'; exit 0;;
+    '-u -d 2026-11-01 + 1 day +%F') printf '%s\n' '2026-11-02'; exit 0;;
+    '-u -d 2026-10-25 + 7 days +%F') printf '%s\n' '2026-11-01'; exit 0;;
+    '-u -d 2026-11-01 + 7 days +%F') printf '%s\n' '2026-11-08'; exit 0;;
+    '-u -d 2026-10-01 + 1 month +%F') printf '%s\n' '2026-11-01'; exit 0;;
+    '-u -d 2026-11-01 + 1 month +%F') printf '%s\n' '2026-12-01'; exit 0;;
+  esac
+fi
+if [[ "$FAKE_ARCHIVE_CALENDAR" == 1 ]]; then
+  case "$*" in
+    '+%Z %z') printf '%s\n' 'CST +0800'; exit 0;;
+    '-u +%Y%m%dT%H%M%SZ %s') printf '%s\n' '20260817T010203Z 1786928523'; exit 0;;
+    '-u -d @1783990923 +%F') printf '%s\n' '2026-07-14'; exit 0;;
+    '-u -d @1784250123 +%F') printf '%s\n' '2026-07-17'; exit 0;;
+    '-u -d 2026-07-14 + 1 day +%F') printf '%s\n' '2026-07-15'; exit 0;;
+    '-u -d 2026-07-15 + 1 day +%F') printf '%s\n' '2026-07-16'; exit 0;;
+    '-u -d 2026-07-16 + 1 day +%F') printf '%s\n' '2026-07-17'; exit 0;;
+    '-u -d 2026-07-17 + 1 day +%F') printf '%s\n' '2026-07-18'; exit 0;;
+  esac
+fi
+if [[ -v FAKE_SPOOL_CALENDAR && "$FAKE_SPOOL_CALENDAR" == 1 ]]; then
+  case "$*" in
+    '-u +%F') printf '%s\n' "$FAKE_SPOOL_TODAY"; exit 0;;
+    '-u +%Y-%m-%dT%H:%M:%SZ') printf '%s\n' "$FAKE_SPOOL_NOW"; exit 0;;
+    '-u -d 2026-08-17 - 1 day +%F') printf '%s\n' '2026-08-16'; exit 0;;
+    '-u -d 2026-08-15 + 1 day +%F') printf '%s\n' '2026-08-16'; exit 0;;
+    '-u -d 2026-08-16 + 1 day +%F') printf '%s\n' '2026-08-17'; exit 0;;
+  esac
+fi
+exec /usr/bin/date "$@"
+`);
+  executable('journalctl', String.raw`
+printf 'journalctl\t%s\n' "$*" >>"$FAKE_CALLS"
+printf '%s\n' '{"MESSAGE":"synthetic hosted application event","SYSLOG_IDENTIFIER":"gift-panel-hosted-app"}'
+`);
+executable('docker', String.raw`
+printf 'docker\t%s\n' "$*" >>"$FAKE_CALLS"
+if [[ -v FAKE_DOCKER_FAIL_MATCH && -n "$FAKE_DOCKER_FAIL_MATCH" && "$*" == *"$FAKE_DOCKER_FAIL_MATCH"* ]]; then
+  exit 41
+fi
+if [[ "$*" == 'compose -p gift-panel-hosted -f '*' ps -q --all app' ]]; then
+  exists=1
+  [[ -v FAKE_APP_EXISTS ]] && exists="$FAKE_APP_EXISTS"
+  if [[ "$exists" == 1 ]]; then printf '%s\n' "$FAKE_APP_CONTAINER_ID"; fi
+elif [[ "$*" == 'compose -p gift-panel-hosted -f '*' ps -q app' ]]; then
+  running=1
+  [[ -v FAKE_APP_RUNNING ]] && running="$FAKE_APP_RUNNING"
+  if [[ "$running" == 1 ]]; then printf '%s\n' "$FAKE_APP_CONTAINER_ID"; fi
+elif [[ "$1" == inspect ]]; then
+  [[ "$2" == --format && "$3" == '{{.Created}}' && "$4" == "$FAKE_APP_CONTAINER_ID" ]]
+  printf '%s\n' "$FAKE_APP_CONTAINER_CREATED"
+elif [[ "$1" == logs ]]; then
+  [[ "$*" == *"$FAKE_APP_CONTAINER_ID" ]]
+  [[ -v FAKE_APP_LOG_CONTENT ]] && printf '%s' "$FAKE_APP_LOG_CONTENT"
+elif [[ "$*" == *"compose -p "*" up -d "* && "$FAKE_FAIL_UP" == 1 ]]; then
+  exit 41
+elif [[ "$*" == *"volume ls"* ]]; then
+  if [[ "$FAKE_UNSAFE_VOLUME" == 1 ]]; then
+    printf '%s\n' 'production-volume'
+  else
+    for argument in "$@"; do
+      case "$argument" in label=com.docker.compose.project=*) printf '%s-mysql-data\n' "$(printf '%s' "$argument" | sed 's/^.*=//')";; esac
+    done
+  fi
+elif [[ "$*" == *"SELECT COUNT(*) FROM schema_migrations"* ]]; then
+  printf '%s\n' 7
+elif [[ "$*" == *"information_schema.tables"* ]]; then
+  printf '%s\n' 24
+elif [[ "$*" == *"invitation_quotas WHERE"* ]]; then
+  printf '%s\n' 0
+elif [[ "$*" == *"compose -f"*" exec -T mysql"* ]]; then
+  printf '%s\n' 'CREATE TABLE synthetic_backup(id BIGINT);'
+else
+  cat >/dev/null || true
+fi
+`);
+  executable('zstd', String.raw`
+output=''
+input=''
+for argument in "$@"; do
+  case "$argument" in --output=*) output="$(printf '%s' "$argument" | cut -d= -f2-)";; --*) ;; *) input="$argument";; esac
+done
+cp -- "$input" "$output"
+`);
+  executable('age', String.raw`
+output=''
+input=''
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output) output=$2; shift 2;;
+    --recipients-file|--identity) shift 2;;
+    --encrypt|--decrypt) shift;;
+    *) input=$1; shift;;
+  esac
+done
+cp -- "$input" "$output"
+`);
+  executable('coscli', String.raw`
+printf 'coscli\t%s\n' "$*" >>"$FAKE_CALLS"
+[[ "$1" == cp ]]
+process_log_disabled=false
+for argument in "$@"; do
+  [[ "$argument" == '--process-log=false' ]] && process_log_disabled=true
+done
+if [[ -v FAKE_PROCESS_LOG_ROOT && -n "$FAKE_PROCESS_LOG_ROOT" && "$process_log_disabled" == false ]]; then
+  mkdir -p -- "$FAKE_PROCESS_LOG_ROOT/coscli_output"
+fi
+source_path=$2
+destination=$3
+if [[ "$FAKE_COS_FAIL_SHA" == 1 && "$destination" == *.sha256 ]]; then
+  exit 42
+fi
+if [[ -v FAKE_COS_FAIL_DAY && -n "$FAKE_COS_FAIL_DAY" && "$destination" == *"$FAKE_COS_FAIL_DAY"* ]]; then
+  exit 43
+fi
+if [[ "$source_path" == cos://* ]]; then
+  stored="$FAKE_COS/$(printf '%s' "$source_path" | sed 's#^cos://##')"
+  cp -- "$stored" "$destination"
+else
+  stored="$FAKE_COS/$(printf '%s' "$destination" | sed 's#^cos://##')"
+  mkdir -p -- "$(dirname -- "$stored")"
+  cp -- "$source_path" "$stored"
+fi
+`);
+  return { bin, calls, cos };
+}
+
+function runBash(script: string, environment: NodeJS.ProcessEnv, args: string[] = []) {
+  const command = existsSync('C:\\Program Files\\Git\\bin\\bash.exe') ? 'C:\\Program Files\\Git\\bin\\bash.exe' : 'bash';
+  return spawnSync(command, [bashPath(resolve(projectRoot, script)), ...args], {
+    cwd: projectRoot,
+    env: environment,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
 }
 
 describe('hosted single-host deployment contract', () => {
@@ -225,6 +404,15 @@ describe('hosted single-host deployment contract', () => {
     expect(mysql?.networks).toEqual(['hosted_internal']);
     expect(compose.networks?.hosted_internal?.internal).toBe(true);
     expect(compose.networks?.hosted_egress?.internal).not.toBe(true);
+    expect(app?.logging).toEqual({
+      driver: 'local',
+      options: { 'max-size': '512m', 'max-file': '4', compress: 'true' },
+    });
+    expect(512 * 1024 * 1024 * 4).toBeGreaterThan(256 * 1024 * 1024);
+    expect(mysql?.logging).toEqual({
+      driver: 'local',
+      options: { 'max-size': '20m', 'max-file': '5', compress: 'true' },
+    });
     expect(readProjectFile('deploy/hosted/env.example')).toContain('Docker Compose 2.33.1+');
     expect(mysql?.image).toMatch(/^mysql:8\.4\.\d+@sha256:[0-9a-f]{64}$/);
     expect(app?.image).not.toMatch(/:latest(?:@|$)/);
@@ -246,6 +434,12 @@ describe('hosted single-host deployment contract', () => {
     expect(app.tmpfs).toEqual(['/tmp:rw,noexec,nosuid,nodev,size=64m']);
     expect(app.mem_limit).toBe('1g');
     expect(app.environment?.GOMEMLIMIT).toBe('768MiB');
+    expect(app.environment?.HOSTED_LOG_FILE).toBe('/var/log/gift-panel-hosted/app.log');
+    expect(app.volumes).toContainEqual({
+      type: 'bind',
+      source: '/var/log/gift-panel-hosted/app.log',
+      target: '/var/log/gift-panel-hosted/app.log',
+    });
     expect(app.healthcheck?.test?.[0]).toBe('CMD-SHELL');
     expect(app.depends_on?.mysql?.condition).toBe('service_healthy');
 
@@ -449,15 +643,21 @@ describe('hosted single-host deployment contract', () => {
     ]);
   });
 
-  it('uses a credential-free systemd Compose lifecycle with a bounded stop', () => {
+  it('prepares the exact host application log before a credential-free Compose lifecycle', () => {
     if (!existsSync(resolve(projectRoot, 'deploy/hosted/gift-panel-hosted.service'))) {
       expect(existsSync(resolve(projectRoot, 'deploy/hosted/gift-panel-hosted.service'))).toBe(true);
       return;
     }
     const service = readProjectFile('deploy/hosted/gift-panel-hosted.service');
     expect(service).toContain('EnvironmentFile=/etc/gift-panel-hosted/env');
-    expect(service).toContain('docker compose up -d --remove-orphans');
-    expect(service).toContain('docker compose stop -t 30');
+    expect(service).toContain('ExecStartPre=/usr/bin/install -d -o root -g root -m 0750 /var/log/gift-panel-hosted');
+    expect(service).toContain('ExecStartPre=/usr/bin/test ! -L /var/log/gift-panel-hosted/app.log');
+    expect(service).toContain('ExecStartPre=/usr/bin/test ! -e /var/log/gift-panel-hosted/app.log -o -f /var/log/gift-panel-hosted/app.log');
+    expect(service).toContain('ExecStartPre=/usr/bin/touch /var/log/gift-panel-hosted/app.log');
+    expect(service).toContain('ExecStartPre=/usr/bin/chown 65532:65532 /var/log/gift-panel-hosted/app.log');
+    expect(service).toContain('ExecStartPre=/usr/bin/chmod 0640 /var/log/gift-panel-hosted/app.log');
+    expect(service).toContain('ExecStart=/usr/bin/docker compose up -d --remove-orphans');
+    expect(service).toContain('ExecStop=/usr/bin/docker compose down --remove-orphans');
     expect(service).not.toMatch(/Environment=.*(?:PASSWORD|TOKEN|KEY|DSN)=/i);
     expect(readProjectFile('deploy/hosted/env.example')).toContain(
       'docker compose --env-file deploy/hosted/env.example -f deploy/hosted/docker-compose.yml config',
@@ -595,10 +795,698 @@ describe('hosted single-host deployment contract', () => {
     expect(logrotate).toMatch(/\/var\/log\/nginx\/gift-panel-hosted\.access\.log/);
     expect(logrotate).toMatch(/\/var\/log\/nginx\/gift-panel-hosted\.error\.log/);
     expect(logrotate).toMatch(/^\s*daily\s*$/m);
-    expect(logrotate).toMatch(/^\s*rotate 30\s*$/m);
+    expect(logrotate).toMatch(/^\s*rotate 35\s*$/m);
     expect(logrotate).toMatch(/kill -USR1/);
+    expect(logrotate).toMatch(/\/var\/log\/gift-panel-hosted\/app\.log\s*\{/);
+    expect(logrotate).toMatch(/\/var\/log\/gift-panel-hosted\/app\.log\s*\{[^}]*copytruncate/s);
+    expect(readProjectFile('goserver/cmd/hosted/main.go')).toContain('hostedLogMaxBytes = 256 * 1024 * 1024');
+    expect(36 * 256 * 1024 * 1024).toBeLessThanOrEqual(10 * 1024 * 1024 * 1024);
     expect(journald).toMatch(/^\[Journal\]$/m);
-    expect(journald).toMatch(/^MaxRetentionSec=30day$/m);
+    expect(logrotate).toMatch(/^\s*dateext\s*$/m);
+    expect(logrotate).toMatch(/^\s*dateformat -%Y%m%d\s*$/m);
+    expect(logrotate).not.toMatch(/^\s*notifempty\s*$/m);
+    expect(journald).toMatch(/^MaxRetentionSec=35day$/m);
     expect(`${logrotate}\n${journald}`).not.toMatch(/(?:PASSWORD|TOKEN|AUTHORIZATION|COOKIE|PRIVATE[_ -]?KEY)\s*=/i);
+  });
+
+  it('ships fail-closed encrypted backup, archive, and restore artifacts', () => {
+    expect(backupFiles.map((path) => existsSync(resolve(projectRoot, path))))
+      .toEqual(backupFiles.map(() => true));
+  });
+
+  it('keeps backup and log artifacts secret, unique, checksummed, and append-only', () => {
+    if (!backupFiles.every((path) => existsSync(resolve(projectRoot, path)))) return;
+    const backup = readProjectFile('deploy/hosted/backup.sh');
+    const archive = readProjectFile('deploy/hosted/archive-logs.sh');
+    for (const source of [backup, archive]) {
+      expect(source).toMatch(/^set -euo pipefail$/m);
+      expect(source).toMatch(/^umask 077$/m);
+      expect(source).toMatch(/\bflock\b/);
+      expect(source).toMatch(/mktemp -d/);
+      expect(source).toMatch(/trap ['"]cleanup['"] EXIT/);
+      expect(source).toMatch(/date_bin=.*\$\{HOSTED_DATE_BIN:-date\}/);
+      expect(source).toMatch(/"\$date_bin" -u ['"]?\+%Y%m%dT%H%M%SZ/);
+      expect(source).toMatch(/random_suffix/);
+      expect(source).toMatch(/sha256sum/);
+      expect(source).toMatch(/\.complete/);
+      expect(source).toMatch(/age[^\n]*--recipients-file/);
+      expect(source).toMatch(/--endpoint cos\.ap-hongkong\.myqcloud\.com/);
+      const cosCopies = source.split(/\r?\n/).filter((line) => line.includes('"$cos_bin" cp '));
+      expect(cosCopies.length).toBeGreaterThan(0);
+      for (const copy of cosCopies) {
+        expect(copy).toContain('--disable-log');
+        expect(copy).toContain('--process-log=false');
+        expect(copy).toContain('--forbid-overwrite');
+      }
+      expect(source).not.toMatch(/age[^\n]*(?:--identity|-i\s)/);
+      expect(source).not.toMatch(/(?:coscli|COS_BIN)[^\n]*(?:\brm\b|\bdelete\b)/i);
+      expect(source).not.toMatch(/(?:MYSQL_PWD|PASSWORD)=[^"'$\n][^\n]*/i);
+      const markerUpload = source.lastIndexOf('.complete');
+      expect(markerUpload).toBeGreaterThan(source.lastIndexOf('.sha256'));
+    }
+    expect(backup).toContain('--single-transaction');
+    expect(backup).toContain('--quick');
+    expect(backup).toContain('--routines');
+    expect(backup).toContain('--events');
+    expect(backup).toContain('--hex-blob');
+    expect(backup).toContain('hosted/backups/$period/');
+    expect(backup.match(/\+%Y%m%dT%H%M%SZ %u %d %F/g)).toHaveLength(1);
+    expect(backup).not.toMatch(/AGE_(?:IDENTITY|SECRET)|--decrypt/);
+
+    expect(archive).toMatch(/-mmin \+43200/);
+    expect(archive).not.toMatch(/-mtime \+30/);
+    expect(archive).toMatch(/\.tar\.zst\.age/);
+    expect(archive).toMatch(/manifest/);
+    expect(archive).toContain('-name "gift-panel-hosted.access.log-${day_compact}.gz"');
+    expect(archive).toMatch(/app_log_root=.*\$\{HOSTED_APP_LOG_ROOT:-\/var\/log\/gift-panel-hosted\}/);
+    expect(archive).toContain('-name "app.log-${day_compact}.gz"');
+    expect(archive).toMatch(/checkpoint/);
+    expect(archive).toMatch(/app_rotation_date_host_local/);
+    expect(archive).toMatch(/nginx_rotation_date_host_local/);
+    expect(archive).toMatch(/host_timezone_observed/);
+    expect(archive).not.toMatch(/archive_day_utc/);
+    expect(archive).toMatch(/delivery=at-least-once/);
+    expect(archive).toMatch(/while \[\[ "\$archive_day"/);
+    expect(archive).not.toMatch(/journalctl|docker\s+logs|--unit|CONTAINER_TAG=|SYSLOG_IDENTIFIER=/);
+    expect(archive).not.toContain("-name '*.journal~'");
+    expect(archive).not.toContain('/var/log/journal');
+    expect(archive).not.toMatch(/(?:cat|sed|head|tail)\s+[^\n]*\.log/);
+    for (const source of [backup, archive, readProjectFile('deploy/hosted/restore-drill.sh')]) {
+      expect(source).toMatch(/timeout_bin=.*HOSTED_TIMEOUT_BIN/);
+      expect(source).toContain('--foreground');
+    }
+
+    const utcDayStart = Date.parse('2026-07-17T00:00:00Z');
+    const asiaShanghaiLocalDayStart = Date.parse('2026-07-17T00:00:00+08:00');
+    const documentedNginxHostTimezone = 'Asia/Shanghai';
+    expect(documentedNginxHostTimezone).toBe('Asia/Shanghai');
+    expect(new Date(asiaShanghaiLocalDayStart).toISOString()).toBe('2026-07-16T16:00:00.000Z');
+    expect(asiaShanghaiLocalDayStart).toBe(utcDayStart - 8 * 60 * 60 * 1000);
+    expect(asiaShanghaiLocalDayStart).not.toBe(utcDayStart);
+  });
+
+  it('defines lifecycle deletion separately from write-only production upload scripts', () => {
+    if (!existsSync(resolve(projectRoot, 'deploy/hosted/cos-lifecycle.json'))) return;
+    const lifecycle = JSON.parse(readProjectFile('deploy/hosted/cos-lifecycle.json')) as { Rules?: Array<Record<string, any>> };
+    expect(lifecycle.Rules).toEqual([
+      { ID: 'hosted-backup-daily', Status: 'Enabled', Filter: { Prefix: 'hosted/backups/daily/' }, Expiration: { Days: 7 } },
+      { ID: 'hosted-backup-weekly', Status: 'Enabled', Filter: { Prefix: 'hosted/backups/weekly/' }, Expiration: { Days: 28 } },
+      { ID: 'hosted-backup-monthly', Status: 'Enabled', Filter: { Prefix: 'hosted/backups/monthly/' }, Expiration: { Days: 183 } },
+      { ID: 'hosted-log-archives', Status: 'Enabled', Filter: { Prefix: 'hosted/logs/' }, Expiration: { Days: 190 } },
+      {
+        ID: 'hosted-abort-incomplete-multipart',
+        Status: 'Enabled',
+        Filter: { Prefix: 'hosted/' },
+        AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 },
+      },
+    ]);
+    const uploadScripts = `${readProjectFile('deploy/hosted/backup.sh')}\n${readProjectFile('deploy/hosted/archive-logs.sh')}`;
+    expect(uploadScripts).not.toMatch(/(?:lifecycle|delete-object|remove-object|\bcoscli\s+rm\b)/i);
+  });
+
+  it('schedules hardened single-instance backup and archive jobs without credentials', () => {
+    if (!backupFiles.every((path) => existsSync(resolve(projectRoot, path)))) return;
+    const backupService = readProjectFile('deploy/hosted/backup.service');
+    const archiveService = readProjectFile('deploy/hosted/archive-logs.service');
+    for (const [source, script] of [[backupService, 'backup.sh'], [archiveService, 'archive-logs.sh']] as const) {
+      expect(source).toContain('Type=oneshot');
+      expect(source).toContain('WorkingDirectory=/opt/gift-panel-hosted/current/deploy/hosted');
+      expect(source).toContain(`ExecStart=/usr/bin/bash /opt/gift-panel-hosted/current/deploy/hosted/${script}`);
+      expect(source).toContain('EnvironmentFile=/etc/gift-panel-hosted/env');
+      expect(source).toContain('EnvironmentFile=/etc/gift-panel-hosted/backup.env');
+      expect(source).toContain('ProtectSystem=strict');
+      expect(source).toContain('PrivateTmp=true');
+      expect(source).not.toMatch(/Environment=.*(?:PASSWORD|TOKEN|KEY|DSN)=/i);
+    }
+    expect(readProjectFile('deploy/hosted/backup.sh')).toContain(
+      'HOSTED_COMPOSE_FILE:-/opt/gift-panel-hosted/current/deploy/hosted/docker-compose.yml',
+    );
+    expect(archiveService).toContain('StateDirectory=gift-panel-hosted-log-archive');
+    expect(archiveService).toContain('StateDirectoryMode=0700');
+    expect(archiveService).toContain('ReadWritePaths=/run/lock /var/lib/gift-panel-hosted-log-archive');
+    expect(archiveService).toContain('ReadOnlyPaths=/var/log/gift-panel-hosted /var/log/nginx');
+    expect(archiveService).toContain('Restart=on-failure');
+    expect(archiveService).toContain('RestartSec=15min');
+    expect(backupService).toContain('StateDirectory=gift-panel-hosted-backup');
+    expect(backupService).toContain('StateDirectoryMode=0700');
+    expect(backupService).toContain('Restart=on-failure');
+    expect(backupService).toContain('RestartSec=15min');
+    for (const source of [backupService, archiveService]) {
+      expect(source).toMatch(/^TimeoutStartSec=\d+(?:min|s)$/m);
+      expect(source).toMatch(/^TimeoutStopSec=\d+(?:min|s)$/m);
+    }
+    const backupTimer = readProjectFile('deploy/hosted/backup.timer');
+    const archiveTimer = readProjectFile('deploy/hosted/archive-logs.timer');
+    expect(backupTimer).toContain('OnCalendar=*-*-* 03:00:00 UTC');
+    expect(archiveTimer).toContain('OnCalendar=*-*-* 04:00:00 UTC');
+    for (const timer of [backupTimer, archiveTimer]) {
+      expect(timer).toContain('Persistent=true');
+      expect(timer).toMatch(/RandomizedDelaySec=\d+/);
+    }
+  });
+
+  it('bounds restore cleanup to an explicitly resolved gift-panel-restore project and volume', () => {
+    if (!existsSync(resolve(projectRoot, 'deploy/hosted/restore-drill.sh'))) return;
+    const restore = readProjectFile('deploy/hosted/restore-drill.sh');
+    expect(restore).toMatch(/^set -euo pipefail$/m);
+    expect(restore).toMatch(/^umask 077$/m);
+    expect(restore).toMatch(/mktemp -d/);
+    expect(restore).toMatch(/chmod 0700 -- "\$work_dir"/);
+    expect(restore).toMatch(/trap ['"]cleanup['"] EXIT/);
+    expect(restore).toMatch(/age[^\n]*--decrypt[^\n]*--identity/);
+    expect(restore).toMatch(/sha256sum[^\n]*--check/);
+    expect(restore).toMatch(/--endpoint cos\.ap-hongkong\.myqcloud\.com/);
+    const restoreCosCopies = restore.split(/\r?\n/).filter((line) => line.includes('"$cos_bin" cp '));
+    expect(restoreCosCopies.length).toBeGreaterThan(0);
+    for (const copy of restoreCosCopies) {
+      expect(copy).toContain('--disable-log');
+      expect(copy).toContain('--process-log=false');
+      expect(copy).toContain('--forbid-overwrite');
+    }
+    expect(restore).toMatch(/gift-panel-restore-/);
+    expect(restore).toMatch(/docker[^\n]*volume[^\n]*label=com\.docker\.compose\.project/);
+    expect(restore).toMatch(/resolved_volume/);
+    expect(restore).toMatch(/"\$resolved_volume" != "\$volume_name"/);
+    expect(restore).toMatch(/down[^\n]*--volumes[^\n]*--remove-orphans/);
+    expect(restore).toMatch(/\.complete/);
+    expect(restore).toMatch(/completed_utc/);
+    expect(restore).toMatch(/RPO/);
+    expect(restore).toMatch(/RTO/);
+    expect(restore).toMatch(/schema_migrations/);
+    expect(restore).not.toMatch(/(?:rm\s+-rf|docker\s+(?:system|volume)\s+prune)/);
+  });
+
+  it('runs synthetic encrypted backups with unique keys, completion last, and exact temp cleanup', () => {
+    const root = mkdtempSync(join(projectRoot, '.gift-panel-backup-contract-'));
+    try {
+      const fake = fakeBackupTools(root);
+      const config = join(root, 'cos.yaml');
+      const recipient = join(root, 'recipient.txt');
+      const compose = join(root, 'compose.yml');
+      const temporary = join(root, 'temporary');
+      const state = join(root, 'state');
+      mkdirSync(temporary);
+      mkdirSync(state);
+      writeFileSync(config, 'synthetic config without credentials\n');
+      writeFileSync(recipient, 'age1syntheticrecipient\n');
+      writeFileSync(compose, 'services: {}\n');
+      const environment = {
+        ...process.env,
+        PATH: `${bashPath(fake.bin)}:/usr/bin:/bin`,
+        FAKE_CALLS: bashPath(fake.calls),
+        FAKE_COS: bashPath(fake.cos),
+        FAKE_UNSAFE_VOLUME: '',
+        FAKE_FAIL_UP: '',
+        FAKE_COS_FAIL_SHA: '',
+        FAKE_BACKUP_CALENDAR: '1',
+        FAKE_ARCHIVE_CALENDAR: '',
+        TMPDIR: bashPath(temporary),
+        HOSTED_DOCKER_BIN: 'docker',
+        HOSTED_DATE_BIN: 'hosted-date',
+        HOSTED_COS_BIN: 'coscli',
+        HOSTED_ZSTD_BIN: 'zstd',
+        HOSTED_AGE_BIN: 'age',
+        HOSTED_COMPOSE_FILE: bashPath(compose),
+        HOSTED_COS_CONFIG_FILE: bashPath(config),
+        HOSTED_COS_BUCKET: 'synthetic-backups-1250000000',
+        HOSTED_COS_REGION: 'ap-hongkong',
+        HOSTED_AGE_RECIPIENT_FILE: bashPath(recipient),
+        HOSTED_BACKUP_LOCK_FILE: bashPath(join(root, 'backup.lock')),
+        HOSTED_BACKUP_STATE_ROOT: bashPath(state),
+      };
+      const first = runBash('deploy/hosted/backup.sh', environment);
+      const second = runBash('deploy/hosted/backup.sh', environment);
+      expect(first.status, first.stderr).toBe(0);
+      expect(second.status, second.stderr).toBe(0);
+      const uploads = readFileSync(fake.calls, 'utf8').split(/\r?\n/).filter((line) => line.startsWith('coscli\t'));
+      const daily = uploads.filter((line) => line.includes('/hosted/backups/daily/'));
+      const weekly = uploads.filter((line) => line.includes('/hosted/backups/weekly/'));
+      const monthly = uploads.filter((line) => line.includes('/hosted/backups/monthly/'));
+      expect(daily).toHaveLength(3);
+      expect(weekly).toHaveLength(3);
+      expect(monthly).toHaveLength(3);
+      expect(daily[0]).toMatch(/gift-panel-20261101-20261101T010203Z-[0-9a-f]{16}\.sql\.zst\.age/);
+      for (let index = 0; index < daily.length; index += 3) {
+        expect(daily[index]).not.toContain('.sha256');
+        expect(daily[index + 1]).toContain('.sha256');
+        expect(daily[index + 2]).toContain('.complete');
+      }
+      expect(readdirSync(temporary)).toEqual([]);
+      expect(readFileSync(join(state, 'daily.next'), 'utf8')).toBe('2026-11-02\n');
+      expect(readFileSync(join(state, 'weekly.next'), 'utf8')).toBe('2026-11-08\n');
+      expect(readFileSync(join(state, 'monthly.next'), 'utf8')).toBe('2026-12-01\n');
+      expect(readFileSync(fake.calls, 'utf8')).not.toMatch(/age1syntheticrecipient|synthetic-operator-identity-not-a-key/);
+
+      writeFileSync(fake.calls, '');
+      writeFileSync(join(state, 'daily.next'), '2026-11-01\n');
+      const failedChecksumUpload = runBash('deploy/hosted/backup.sh', { ...environment, FAKE_COS_FAIL_SHA: '1' });
+      expect(failedChecksumUpload.status).not.toBe(0);
+      const failedCalls = readFileSync(fake.calls, 'utf8');
+      expect(failedCalls).toContain('.sha256');
+      expect(failedCalls).not.toContain('.complete');
+      expect(readFileSync(join(state, 'daily.next'), 'utf8')).toBe('2026-11-01\n');
+      expect(readdirSync(temporary)).toEqual([]);
+
+      writeFileSync(fake.calls, '');
+      const timedOut = runBash('deploy/hosted/backup.sh', {
+        ...environment,
+        FAKE_TIMEOUT_MATCH: 'docker compose',
+        HOSTED_TIMEOUT_BIN: bashPath(join(fake.bin, 'timeout')),
+      });
+      expect(timedOut.status).toBe(124);
+      expect(readFileSync(join(state, 'daily.next'), 'utf8')).toBe('2026-11-01\n');
+      expect(readFileSync(fake.calls, 'utf8')).not.toContain('coscli\t');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('backfills independent backup periods and advances only each completed period checkpoint', () => {
+    const root = mkdtempSync(join(projectRoot, '.gift-panel-backup-checkpoint-contract-'));
+    try {
+      const fake = fakeBackupTools(root);
+      const config = join(root, 'cos.yaml');
+      const recipient = join(root, 'recipient.txt');
+      const compose = join(root, 'compose.yml');
+      const temporary = join(root, 'temporary');
+      const state = join(root, 'state');
+      for (const directory of [temporary, state]) mkdirSync(directory);
+      writeFileSync(config, 'synthetic config\n');
+      writeFileSync(recipient, 'age1syntheticrecipient\n');
+      writeFileSync(compose, 'services: {}\n');
+      writeFileSync(join(state, 'daily.next'), '2026-10-30\n');
+      writeFileSync(join(state, 'weekly.next'), '2026-10-25\n');
+      writeFileSync(join(state, 'monthly.next'), '2026-10-01\n');
+      const environment = {
+        ...process.env,
+        PATH: `${bashPath(fake.bin)}:/usr/bin:/bin`,
+        FAKE_CALLS: bashPath(fake.calls),
+        FAKE_COS: bashPath(fake.cos),
+        FAKE_COS_FAIL_SHA: '',
+        FAKE_COS_FAIL_DAY: 'weekly/gift-panel-20261025-',
+        FAKE_BACKUP_CALENDAR: '1',
+        FAKE_ARCHIVE_CALENDAR: '',
+        TMPDIR: bashPath(temporary),
+        HOSTED_DOCKER_BIN: 'docker',
+        HOSTED_DATE_BIN: 'hosted-date',
+        HOSTED_COS_BIN: 'coscli',
+        HOSTED_ZSTD_BIN: 'zstd',
+        HOSTED_AGE_BIN: 'age',
+        HOSTED_COMPOSE_FILE: bashPath(compose),
+        HOSTED_COS_CONFIG_FILE: bashPath(config),
+        HOSTED_COS_BUCKET: 'synthetic-backups-1250000000',
+        HOSTED_COS_REGION: 'ap-hongkong',
+        HOSTED_AGE_RECIPIENT_FILE: bashPath(recipient),
+        HOSTED_BACKUP_LOCK_FILE: bashPath(join(root, 'backup.lock')),
+        HOSTED_BACKUP_STATE_ROOT: bashPath(state),
+      };
+
+      const interrupted = runBash('deploy/hosted/backup.sh', environment);
+      expect(interrupted.status).not.toBe(0);
+      expect(readFileSync(join(state, 'daily.next'), 'utf8')).toBe('2026-11-02\n');
+      expect(readFileSync(join(state, 'weekly.next'), 'utf8')).toBe('2026-10-25\n');
+      expect(readFileSync(join(state, 'monthly.next'), 'utf8')).toBe('2026-12-01\n');
+      const interruptedCalls = readFileSync(fake.calls, 'utf8');
+      for (const day of ['20261030', '20261031', '20261101']) expect(interruptedCalls).toContain(`daily/gift-panel-${day}-`);
+      expect(interruptedCalls).toContain('weekly/gift-panel-20261025-');
+      for (const day of ['20261001', '20261101']) expect(interruptedCalls).toContain(`monthly/gift-panel-${day}-`);
+
+      writeFileSync(fake.calls, '');
+      const retried = runBash('deploy/hosted/backup.sh', { ...environment, FAKE_COS_FAIL_DAY: '' });
+      expect(retried.status, retried.stderr).toBe(0);
+      expect(readFileSync(join(state, 'daily.next'), 'utf8')).toBe('2026-11-02\n');
+      expect(readFileSync(join(state, 'weekly.next'), 'utf8')).toBe('2026-11-08\n');
+      expect(readFileSync(join(state, 'monthly.next'), 'utf8')).toBe('2026-12-01\n');
+      const retriedCalls = readFileSync(fake.calls, 'utf8');
+      expect(retriedCalls).not.toContain('/daily/');
+      expect(retriedCalls).not.toContain('/monthly/');
+      for (const day of ['20261025', '20261101']) expect(retriedCalls).toContain(`weekly/gift-panel-${day}-`);
+      expect(readdirSync(temporary)).toEqual([]);
+
+      writeFileSync(fake.calls, '');
+      writeFileSync(join(state, 'daily.next'), '2026-10-25\n');
+      const staleCheckpoint = runBash('deploy/hosted/backup.sh', { ...environment, FAKE_COS_FAIL_DAY: '' });
+      expect(staleCheckpoint.status).not.toBe(0);
+      expect(readFileSync(join(state, 'daily.next'), 'utf8')).toBe('2026-10-25\n');
+      expect(readFileSync(fake.calls, 'utf8')).not.toContain('/hosted/backups/');
+
+      writeFileSync(fake.calls, '');
+      writeFileSync(join(state, 'daily.next'), '2026-11-03\n');
+      const futureCheckpoint = runBash('deploy/hosted/backup.sh', { ...environment, FAKE_COS_FAIL_DAY: '' });
+      expect(futureCheckpoint.status).not.toBe(0);
+      expect(readFileSync(join(state, 'daily.next'), 'utf8')).toBe('2026-11-03\n');
+      expect(readFileSync(fake.calls, 'utf8')).not.toContain('/hosted/backups/');
+
+      writeFileSync(fake.calls, '');
+      writeFileSync(join(state, 'daily.next'), '2026-11-02\n');
+      writeFileSync(join(state, 'weekly.next'), '2026-10-26\n');
+      const wrongWeeklyCadence = runBash('deploy/hosted/backup.sh', { ...environment, FAKE_COS_FAIL_DAY: '' });
+      expect(wrongWeeklyCadence.status).not.toBe(0);
+      expect(readFileSync(join(state, 'weekly.next'), 'utf8')).toBe('2026-10-26\n');
+      expect(readFileSync(fake.calls, 'utf8')).not.toContain('/hosted/backups/');
+
+      writeFileSync(fake.calls, '');
+      writeFileSync(join(state, 'weekly.next'), '2026-11-08\n');
+      writeFileSync(join(state, 'monthly.next'), '2026-10-02\n');
+      const wrongMonthlyCadence = runBash('deploy/hosted/backup.sh', { ...environment, FAKE_COS_FAIL_DAY: '' });
+      expect(wrongMonthlyCadence.status).not.toBe(0);
+      expect(readFileSync(join(state, 'monthly.next'), 'utf8')).toBe('2026-10-02\n');
+      expect(readFileSync(fake.calls, 'utf8')).not.toContain('/hosted/backups/');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('archives only closed rotated logs older than 30 days and removes only its temp tree', () => {
+    const root = mkdtempSync(join(projectRoot, '.gift-panel-log-contract-'));
+    try {
+      const fake = fakeBackupTools(root);
+      const config = join(root, 'cos.yaml');
+      const recipient = join(root, 'recipient.txt');
+      const nginxLogs = join(root, 'nginx');
+      const appLogs = join(root, 'app');
+      const temporary = join(root, 'temporary');
+      const state = join(root, 'state');
+      for (const directory of [nginxLogs, appLogs, temporary, state]) mkdirSync(directory);
+      writeFileSync(config, 'synthetic config\n');
+      writeFileSync(recipient, 'age1syntheticrecipient\n');
+      const oldNginx = join(nginxLogs, 'gift-panel-hosted.access.log-20260717.gz');
+      const oldNginxError = join(nginxLogs, 'gift-panel-hosted.error.log-20260717.gz');
+      const unrelatedNginx = join(nginxLogs, 'other-vhost.access.log-20260601.gz');
+      const unrelatedJournal = join(appLogs, 'system.journal~');
+      const active = join(nginxLogs, 'gift-panel-hosted.access.log');
+      const recent = join(appLogs, 'app.log-20260816.gz');
+      const rotatedApp = join(appLogs, 'app.log-20260717.gz');
+      for (const path of [oldNginx, oldNginxError, unrelatedNginx, unrelatedJournal, active, recent, rotatedApp]) writeFileSync(path, `synthetic:${path}\n`);
+      const oldDate = new Date(Date.now() - 32 * 24 * 60 * 60 * 1000);
+      utimesSync(oldNginx, oldDate, oldDate);
+      utimesSync(oldNginxError, oldDate, oldDate);
+      utimesSync(unrelatedNginx, oldDate, oldDate);
+      utimesSync(unrelatedJournal, oldDate, oldDate);
+      utimesSync(rotatedApp, oldDate, oldDate);
+      const result = runBash('deploy/hosted/archive-logs.sh', {
+        ...process.env,
+        PATH: `${bashPath(fake.bin)}:/usr/bin:/bin`,
+        FAKE_CALLS: bashPath(fake.calls),
+        FAKE_COS: bashPath(fake.cos),
+        FAKE_UNSAFE_VOLUME: '',
+        FAKE_FAIL_UP: '',
+        FAKE_COS_FAIL_SHA: '',
+        FAKE_BACKUP_CALENDAR: '',
+        FAKE_ARCHIVE_CALENDAR: '1',
+        FAKE_PROCESS_LOG_ROOT: bashPath(root),
+        TMPDIR: bashPath(temporary),
+        HOSTED_COS_BIN: 'coscli',
+        HOSTED_ZSTD_BIN: 'zstd',
+        HOSTED_AGE_BIN: 'age',
+        HOSTED_DATE_BIN: 'hosted-date',
+        HOSTED_COS_CONFIG_FILE: bashPath(config),
+        HOSTED_COS_BUCKET: 'synthetic-backups-1250000000',
+        HOSTED_COS_REGION: 'ap-hongkong',
+        HOSTED_AGE_RECIPIENT_FILE: bashPath(recipient),
+        HOSTED_NGINX_LOG_ROOT: bashPath(nginxLogs),
+        HOSTED_APP_LOG_ROOT: bashPath(appLogs),
+        HOSTED_ARCHIVE_LOCK_FILE: bashPath(join(root, 'archive.lock')),
+        HOSTED_ARCHIVE_STATE_ROOT: bashPath(state),
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('files=3');
+      expect(readFileSync(fake.calls, 'utf8')).not.toContain('journalctl');
+      expect(readFileSync(join(state, 'next-day'), 'utf8')).toBe('2026-07-18\n');
+      expect(existsSync(join(root, 'coscli_output'))).toBe(false);
+      expect(readFileSync(fake.calls, 'utf8')).toMatch(/hosted\/logs\/gift-panel-logs-20260717-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}\.tar\.zst\.age/);
+      expect(existsSync(oldNginx)).toBe(true);
+      expect(existsSync(oldNginxError)).toBe(true);
+      expect(existsSync(unrelatedNginx)).toBe(true);
+      expect(existsSync(unrelatedJournal)).toBe(true);
+      expect(existsSync(active)).toBe(true);
+      expect(existsSync(recent)).toBe(true);
+      expect(existsSync(rotatedApp)).toBe(true);
+      expect(readdirSync(temporary)).toEqual([]);
+
+      rmSync(oldNginxError);
+      writeFileSync(join(state, 'next-day'), '2026-07-17\n');
+      writeFileSync(fake.calls, '');
+      const incomplete = runBash('deploy/hosted/archive-logs.sh', {
+        ...process.env,
+        PATH: `${bashPath(fake.bin)}:/usr/bin:/bin`,
+        FAKE_CALLS: bashPath(fake.calls),
+        FAKE_COS: bashPath(fake.cos),
+        FAKE_COS_FAIL_SHA: '',
+        FAKE_ARCHIVE_CALENDAR: '1',
+        FAKE_BACKUP_CALENDAR: '',
+        TMPDIR: bashPath(temporary),
+        HOSTED_COS_BIN: 'coscli',
+        HOSTED_ZSTD_BIN: 'zstd',
+        HOSTED_AGE_BIN: 'age',
+        HOSTED_DATE_BIN: 'hosted-date',
+        HOSTED_COS_CONFIG_FILE: bashPath(config),
+        HOSTED_COS_BUCKET: 'synthetic-backups-1250000000',
+        HOSTED_COS_REGION: 'ap-hongkong',
+        HOSTED_AGE_RECIPIENT_FILE: bashPath(recipient),
+        HOSTED_NGINX_LOG_ROOT: bashPath(nginxLogs),
+        HOSTED_APP_LOG_ROOT: bashPath(appLogs),
+        HOSTED_ARCHIVE_LOCK_FILE: bashPath(join(root, 'archive.lock')),
+        HOSTED_ARCHIVE_STATE_ROOT: bashPath(state),
+      });
+      expect(incomplete.status).not.toBe(0);
+      expect(incomplete.stderr).toContain('closed hosted rotation set is incomplete');
+      expect(readFileSync(join(state, 'next-day'), 'utf8')).toBe('2026-07-17\n');
+      expect(readFileSync(fake.calls, 'utf8')).not.toContain('.complete');
+      writeFileSync(oldNginxError, 'synthetic restored closed error log\n');
+      utimesSync(oldNginxError, oldDate, oldDate);
+
+      writeFileSync(join(state, 'next-day'), '2026-07-17\n');
+      writeFileSync(fake.calls, '');
+      const timedOut = runBash('deploy/hosted/archive-logs.sh', {
+        ...process.env,
+        PATH: `${bashPath(fake.bin)}:/usr/bin:/bin`,
+        FAKE_CALLS: bashPath(fake.calls),
+        FAKE_COS: bashPath(fake.cos),
+        FAKE_COS_FAIL_SHA: '',
+        FAKE_ARCHIVE_CALENDAR: '1',
+        FAKE_BACKUP_CALENDAR: '',
+        FAKE_TIMEOUT_MATCH: 'zstd',
+        HOSTED_TIMEOUT_BIN: bashPath(join(fake.bin, 'timeout')),
+        TMPDIR: bashPath(temporary),
+        HOSTED_COS_BIN: 'coscli',
+        HOSTED_ZSTD_BIN: 'zstd',
+        HOSTED_AGE_BIN: 'age',
+        HOSTED_DATE_BIN: 'hosted-date',
+        HOSTED_COS_CONFIG_FILE: bashPath(config),
+        HOSTED_COS_BUCKET: 'synthetic-backups-1250000000',
+        HOSTED_COS_REGION: 'ap-hongkong',
+        HOSTED_AGE_RECIPIENT_FILE: bashPath(recipient),
+        HOSTED_NGINX_LOG_ROOT: bashPath(nginxLogs),
+        HOSTED_APP_LOG_ROOT: bashPath(appLogs),
+        HOSTED_ARCHIVE_LOCK_FILE: bashPath(join(root, 'archive.lock')),
+        HOSTED_ARCHIVE_STATE_ROOT: bashPath(state),
+      });
+      expect(timedOut.status).toBe(124);
+      expect(readFileSync(join(state, 'next-day'), 'utf8')).toBe('2026-07-17\n');
+      expect(existsSync(rotatedApp)).toBe(true);
+      expect(readFileSync(fake.calls, 'utf8')).not.toContain('.complete');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('checkpoints each completed host-local rotation date, retries interruptions, and does not reprocess checkpointed dates', () => {
+    const root = mkdtempSync(join(projectRoot, '.gift-panel-log-checkpoint-contract-'));
+    try {
+      const fake = fakeBackupTools(root);
+      const config = join(root, 'cos.yaml');
+      const recipient = join(root, 'recipient.txt');
+      const nginxLogs = join(root, 'nginx');
+      const appLogs = join(root, 'app');
+      const temporary = join(root, 'temporary');
+      const state = join(root, 'state');
+      for (const directory of [nginxLogs, appLogs, temporary, state]) mkdirSync(directory);
+      writeFileSync(config, 'synthetic config\n');
+      writeFileSync(recipient, 'age1syntheticrecipient\n');
+      for (const day of ['2026-07-14', '2026-07-15', '2026-07-16', '2026-07-17']) {
+        const rotated = join(appLogs, `app.log-${day.replaceAll('-', '')}.gz`);
+        writeFileSync(rotated, `${day} synthetic app log\n`);
+        const oldDate = new Date(Date.now() - 32 * 24 * 60 * 60 * 1000);
+        utimesSync(rotated, oldDate, oldDate);
+        for (const kind of ['access', 'error']) {
+          const nginxRotation = join(nginxLogs, `gift-panel-hosted.${kind}.log-${day.replaceAll('-', '')}.gz`);
+          writeFileSync(nginxRotation, `${day} synthetic Nginx ${kind} log\n`);
+          utimesSync(nginxRotation, oldDate, oldDate);
+        }
+      }
+      const environment = {
+        ...process.env,
+        PATH: `${bashPath(fake.bin)}:/usr/bin:/bin`,
+        FAKE_CALLS: bashPath(fake.calls),
+        FAKE_COS: bashPath(fake.cos),
+        FAKE_COS_FAIL_SHA: '',
+        FAKE_COS_FAIL_DAY: '20260715',
+        FAKE_ARCHIVE_CALENDAR: '1',
+        FAKE_BACKUP_CALENDAR: '',
+        FAKE_PROCESS_LOG_ROOT: bashPath(root),
+        TMPDIR: bashPath(temporary),
+        HOSTED_COS_BIN: 'coscli',
+        HOSTED_ZSTD_BIN: 'zstd',
+        HOSTED_AGE_BIN: 'age',
+        HOSTED_DATE_BIN: 'hosted-date',
+        HOSTED_COS_CONFIG_FILE: bashPath(config),
+        HOSTED_COS_BUCKET: 'synthetic-backups-1250000000',
+        HOSTED_COS_REGION: 'ap-hongkong',
+        HOSTED_AGE_RECIPIENT_FILE: bashPath(recipient),
+        HOSTED_NGINX_LOG_ROOT: bashPath(nginxLogs),
+        HOSTED_APP_LOG_ROOT: bashPath(appLogs),
+        HOSTED_ARCHIVE_LOCK_FILE: bashPath(join(root, 'archive.lock')),
+        HOSTED_ARCHIVE_STATE_ROOT: bashPath(state),
+      };
+
+      const interrupted = runBash('deploy/hosted/archive-logs.sh', environment);
+      expect(interrupted.status).not.toBe(0);
+      expect(readFileSync(join(state, 'next-day'), 'utf8')).toBe('2026-07-15\n');
+      const interruptedCalls = readFileSync(fake.calls, 'utf8');
+      expect(interruptedCalls).toContain('gift-panel-logs-20260714-');
+      expect(interruptedCalls).toContain('gift-panel-logs-20260715-');
+      expect(interruptedCalls).not.toContain('gift-panel-logs-20260716-');
+      expect(existsSync(join(appLogs, 'app.log-20260714.gz'))).toBe(true);
+      expect(existsSync(join(appLogs, 'app.log-20260715.gz'))).toBe(true);
+      expect(readdirSync(temporary)).toEqual([]);
+
+      writeFileSync(fake.calls, '');
+      const retried = runBash('deploy/hosted/archive-logs.sh', { ...environment, FAKE_COS_FAIL_DAY: '' });
+      expect(retried.status, retried.stderr).toBe(0);
+      expect(readFileSync(join(state, 'next-day'), 'utf8')).toBe('2026-07-18\n');
+      const retryCalls = readFileSync(fake.calls, 'utf8');
+      expect(retryCalls).not.toContain('gift-panel-logs-20260714-');
+      for (const day of ['20260715', '20260716', '20260717']) {
+        expect(retryCalls).toContain(`gift-panel-logs-${day}-`);
+      }
+      expect(readdirSync(appLogs)).toHaveLength(4);
+      expect(readdirSync(temporary)).toEqual([]);
+
+      writeFileSync(fake.calls, '');
+      const idempotent = runBash('deploy/hosted/archive-logs.sh', { ...environment, FAKE_COS_FAIL_DAY: '' });
+      expect(idempotent.status, idempotent.stderr).toBe(0);
+      expect(readFileSync(fake.calls, 'utf8')).toBe('');
+      expect(existsSync(join(root, 'coscli_output'))).toBe(false);
+      expect(readdirSync(temporary)).toEqual([]);
+
+      writeFileSync(join(state, 'next-day'), '2026-07-13\n');
+      writeFileSync(fake.calls, '');
+      const retentionGap = runBash('deploy/hosted/archive-logs.sh', { ...environment, FAKE_COS_FAIL_DAY: '' });
+      expect(retentionGap.status).not.toBe(0);
+      expect(retentionGap.stderr).toContain('archive checkpoint is older than retained logs');
+      expect(readFileSync(fake.calls, 'utf8')).toBe('');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('restores a selected checksum-valid artifact and tears down only its resolved prefixed volume', () => {
+    const root = mkdtempSync(join(projectRoot, '.gift-panel-restore-contract-'));
+    try {
+      const fake = fakeBackupTools(root);
+      const config = join(root, 'cos.yaml');
+      const identity = join(root, 'identity.txt');
+      const reports = join(root, 'reports');
+      const temporary = join(root, 'temporary');
+      mkdirSync(reports);
+      mkdirSync(temporary);
+      writeFileSync(config, 'synthetic operator config\n');
+      writeFileSync(identity, 'synthetic-operator-identity-not-a-key\n');
+      const object = 'cos://synthetic-backups-1250000000/hosted/backups/daily/gift-panel-20260817-20260817T010203Z-0123456789abcdef.sql.zst.age';
+      const stored = join(fake.cos, object.slice('cos://'.length));
+      mkdirSync(resolve(stored, '..'), { recursive: true });
+      const payload = Buffer.from('encrypted synthetic SQL');
+      writeFileSync(stored, payload);
+      const artifactHash = createHash('sha256').update(payload).digest('hex');
+      const artifactName = object.split('/').at(-1) ?? '';
+      const validChecksum = `${artifactHash}  ${artifactName}\n`;
+      const validCompletion = [
+        `artifact=${artifactName}`,
+        'period=daily',
+        'scheduled_utc=2026-08-17',
+        'delivery=at-least-once',
+        'completed_utc=20260817T010203Z',
+        '',
+      ].join('\n');
+      writeFileSync(`${stored}.sha256`, validChecksum);
+      writeFileSync(`${stored}.complete`, validCompletion);
+      const environment = {
+        ...process.env,
+        PATH: `${bashPath(fake.bin)}:/usr/bin:/bin`,
+        FAKE_CALLS: bashPath(fake.calls),
+        FAKE_COS: bashPath(fake.cos),
+        FAKE_UNSAFE_VOLUME: '',
+        FAKE_FAIL_UP: '',
+        FAKE_COS_FAIL_SHA: '',
+        FAKE_BACKUP_CALENDAR: '',
+        FAKE_ARCHIVE_CALENDAR: '',
+        TMPDIR: bashPath(temporary),
+        HOSTED_DOCKER_BIN: 'docker',
+        HOSTED_COS_BIN: 'coscli',
+        HOSTED_ZSTD_BIN: 'zstd',
+        HOSTED_AGE_BIN: 'age',
+        HOSTED_COS_CONFIG_FILE: bashPath(config),
+        HOSTED_COS_REGION: 'ap-hongkong',
+        HOSTED_AGE_IDENTITY_FILE: bashPath(identity),
+        HOSTED_RESTORE_OBJECT: object,
+        HOSTED_RESTORE_REPORT_ROOT: bashPath(reports),
+      };
+      const result = runBash('deploy/hosted/restore-drill.sh', environment);
+      expect(result.status, result.stderr).toBe(0);
+      const calls = readFileSync(fake.calls, 'utf8');
+      expect(calls).toMatch(/docker\tvolume ls --filter label=com\.docker\.compose\.project=gift-panel-restore-/);
+      expect(calls).toMatch(/docker\tcompose -p gift-panel-restore-[^\s]+ -f [^\s]+ down --volumes --remove-orphans/);
+      expect(readdirSync(reports)).toHaveLength(1);
+      const successfulReport = readdirSync(reports)[0];
+      expect(readFileSync(join(reports, successfulReport), 'utf8')).toMatch(/RPO_timestamp_utc=20260817T010203Z\nRTO_seconds=\d+/);
+      expect(readdirSync(temporary)).toEqual([]);
+
+      for (const malformedChecksum of [
+        `${validChecksum}${validChecksum}`,
+        `${artifactHash}  ./${artifactName}\n`,
+        `${'g'.repeat(64)}  ${artifactName}\n`,
+      ]) {
+        writeFileSync(fake.calls, '');
+        writeFileSync(`${stored}.sha256`, malformedChecksum);
+        const malformed = runBash('deploy/hosted/restore-drill.sh', environment);
+        expect(malformed.status).not.toBe(0);
+        expect(readFileSync(fake.calls, 'utf8')).not.toContain('docker\t');
+        expect(readdirSync(reports)).toEqual([successfulReport]);
+        expect(readdirSync(temporary)).toEqual([]);
+      }
+      writeFileSync(`${stored}.sha256`, validChecksum);
+
+      writeFileSync(fake.calls, '');
+      const partialStartup = runBash('deploy/hosted/restore-drill.sh', { ...environment, FAKE_FAIL_UP: '1' });
+      expect(partialStartup.status).not.toBe(0);
+      expect(readFileSync(fake.calls, 'utf8')).toContain('down --volumes --remove-orphans');
+      expect(readdirSync(temporary)).toEqual([]);
+
+      writeFileSync(fake.calls, '');
+      rmSync(`${stored}.complete`);
+      const incomplete = runBash('deploy/hosted/restore-drill.sh', environment);
+      expect(incomplete.status).not.toBe(0);
+      expect(readFileSync(fake.calls, 'utf8')).not.toContain('docker\t');
+      expect(readdirSync(reports)).toEqual([successfulReport]);
+      expect(readdirSync(temporary)).toEqual([]);
+      writeFileSync(`${stored}.complete`, validCompletion);
+
+      writeFileSync(fake.calls, '');
+      const unsafe = runBash('deploy/hosted/restore-drill.sh', { ...environment, FAKE_UNSAFE_VOLUME: '1' });
+      expect(unsafe.status).not.toBe(0);
+      const unsafeCalls = readFileSync(fake.calls, 'utf8');
+      expect(unsafeCalls).not.toContain('down --volumes --remove-orphans');
+      expect(unsafeCalls.match(/docker\tvolume ls/g)).toHaveLength(2);
+      expect(readdirSync(reports)).toEqual([successfulReport]);
+      const remediationDirectories = readdirSync(temporary);
+      expect(remediationDirectories).toHaveLength(1);
+      const remediationDirectory = join(temporary, remediationDirectories[0]);
+      expect(readdirSync(remediationDirectory)).toContain('docker-compose.yml');
+      expect(unsafe.stderr).toContain(`restore cleanup failed; retained remediation directory: ${bashPath(remediationDirectory)}`);
+      expect(unsafe.stderr).toContain('disposable restore project may still be running');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

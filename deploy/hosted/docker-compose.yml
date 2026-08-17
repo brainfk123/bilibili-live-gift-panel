@@ -4,6 +4,12 @@ services:
   mysql:
     image: mysql:8.4.11@sha256:1d6b6a8fcee8ff758ff151d017f5203cd06792a0e698f0a593c9dfcb14609cf0
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: 20m
+        max-file: "5"
+        compress: "true"
     command:
       - --skip-name-resolve
       - --character-set-server=utf8mb4
@@ -33,6 +39,12 @@ services:
   app:
     image: ${HOSTED_IMAGE:-gift-panel-hosted:test}
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: 512m
+        max-file: "4"
+        compress: "true"
     init: true
     user: "65532:65532"
     depends_on:
@@ -41,6 +53,7 @@ services:
     environment:
       HOSTED_LISTEN_ADDR: 0.0.0.0:12500
       HOSTED_CONTAINER_LISTEN: "true"
+      HOSTED_LOG_FILE: /var/log/gift-panel-hosted/app.log
       HOSTED_MYSQL_DSN_FILE: /run/secrets/mysql_dsn
       HOSTED_ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
       HOSTED_HMAC_KEY_FILE: /run/secrets/hmac_key
@@ -61,6 +74,10 @@ services:
       - hmac_key
       - admin_csrf_token
       - smtp_password
+    volumes:
+      - type: bind
+        source: /var/log/gift-panel-hosted/app.log
+        target: /var/log/gift-panel-hosted/app.log
     ports:
       - "127.0.0.1:12500:12500"
     networks:

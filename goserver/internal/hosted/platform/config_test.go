@@ -104,6 +104,40 @@ func TestLoadRejectsMalformedContainerListenMode(t *testing.T) {
 	}
 }
 
+func TestLoadValidatesExplicitHostedLogFile(t *testing.T) {
+	setValidEnvironment(t)
+	config, err := Load()
+	if err != nil {
+		t.Fatalf("Load() default logging: %v", err)
+	}
+	if config.LogFile != "" {
+		t.Fatalf("LogFile = %q, want disabled by default", config.LogFile)
+	}
+
+	t.Setenv("HOSTED_CONTAINER_LISTEN", "true")
+	t.Setenv("HOSTED_LISTEN_ADDR", "0.0.0.0:12500")
+	t.Setenv("HOSTED_LOG_FILE", "/var/log/gift-panel-hosted/app.log")
+	config, err = Load()
+	if err != nil {
+		t.Fatalf("Load() exact container log path: %v", err)
+	}
+	if config.LogFile != "/var/log/gift-panel-hosted/app.log" {
+		t.Fatalf("LogFile = %q", config.LogFile)
+	}
+
+	for _, path := range []string{"app.log", "/tmp/app.log", "/var/log/gift-panel-hosted/../app.log", "/var/log/gift-panel-hosted/app.log/"} {
+		t.Run(path, func(t *testing.T) {
+			setValidEnvironment(t)
+			t.Setenv("HOSTED_CONTAINER_LISTEN", "true")
+			t.Setenv("HOSTED_LISTEN_ADDR", "0.0.0.0:12500")
+			t.Setenv("HOSTED_LOG_FILE", path)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "HOSTED_LOG_FILE") {
+				t.Fatalf("Load() accepted container log path %q: %v", path, err)
+			}
+		})
+	}
+}
+
 func TestLoadErrorsDoNotExposeSecrets(t *testing.T) {
 	setValidEnvironment(t)
 	t.Setenv("HOSTED_LISTEN_ADDR", "0.0.0.0:12500")

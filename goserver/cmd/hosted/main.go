@@ -35,8 +35,9 @@ import (
 )
 
 const (
-	shutdownTimeout = 30 * time.Second
-	hostedUIRoot    = "/srv/gift-panel-hosted/ui"
+	shutdownTimeout   = 30 * time.Second
+	hostedUIRoot      = "/srv/gift-panel-hosted/ui"
+	hostedLogMaxBytes = 256 * 1024 * 1024
 )
 
 const (
@@ -76,6 +77,18 @@ func run() error {
 	config, err := platform.Load()
 	if err != nil {
 		return fmt.Errorf("load hosted configuration: %w", err)
+	}
+	logFile, err := openHostedLogWithLimit(config.LogFile, hostedLogMaxBytes, stopSignals)
+	if err != nil {
+		return errors.New("open hosted application log")
+	}
+	if logFile != nil {
+		previousLogger := slog.Default()
+		slog.SetDefault(newHostedLogger(os.Stderr, logFile))
+		defer func() {
+			slog.SetDefault(previousLogger)
+			_ = logFile.Close()
+		}()
 	}
 
 	store, err := mysqlstore.Open(processContext, config.MySQLDSN)
@@ -264,6 +277,92 @@ func run() error {
 	})
 }
 
+var errHostedLogCapacity = errors.New("hosted application log capacity reached")
+
+type hostedLogFile struct {
+	file       hostedLogBackend
+	maxBytes   int64
+	onCapacity func()
+	once       sync.Once
+	mu         sync.Mutex
+}
+
+type hostedLogBackend interface {
+	io.Writer
+	Stat() (os.FileInfo, error)
+	Close() error
+}
+
+func (file *hostedLogFile) signalFailure() {
+	file.once.Do(func() {
+		if file.onCapacity != nil {
+			file.onCapacity()
+		}
+	})
+}
+
+func openHostedLog(path string) (*hostedLogFile, error) {
+	return openHostedLogWithLimit(path, hostedLogMaxBytes, nil)
+}
+
+func openHostedLogWithLimit(path string, maxBytes int64, onCapacity func()) (*hostedLogFile, error) {
+	if path == "" {
+		return nil, nil
+	}
+	if maxBytes <= 0 {
+		return nil, errors.New("hosted log capacity is invalid")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, errors.New("hosted log path is not a regular file")
+	}
+	if info.Size() >= maxBytes {
+		return nil, errHostedLogCapacity
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return nil, err
+	}
+	return &hostedLogFile{file: file, maxBytes: maxBytes, onCapacity: onCapacity}, nil
+}
+
+func (file *hostedLogFile) Write(payload []byte) (int, error) {
+	file.mu.Lock()
+	defer file.mu.Unlock()
+	info, err := file.file.Stat()
+	if err != nil {
+		file.signalFailure()
+		return 0, err
+	}
+	if int64(len(payload)) > file.maxBytes-info.Size() {
+		file.signalFailure()
+		return 0, errHostedLogCapacity
+	}
+	written, err := file.file.Write(payload)
+	if err != nil {
+		file.signalFailure()
+		return written, err
+	}
+	if written != len(payload) {
+		file.signalFailure()
+		return written, io.ErrShortWrite
+	}
+	return written, nil
+}
+
+func (file *hostedLogFile) Close() error {
+	file.mu.Lock()
+	defer file.mu.Unlock()
+	return file.file.Close()
+}
+
+func newHostedLogger(stderr, file io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.MultiWriter(file, stderr), nil))
+}
+
 func shutdownAndJoinRuntime(ctx context.Context, shutdown, wait func(context.Context) error) error {
 	shutdownErr := shutdown(ctx)
 	if !errors.Is(shutdownErr, context.Canceled) && !errors.Is(shutdownErr, context.DeadlineExceeded) {
@@ -415,6 +514,7 @@ func newHTTPServer(address string, handler http.Handler) *http.Server {
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		ErrorLog:          slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
 	}
 }
 

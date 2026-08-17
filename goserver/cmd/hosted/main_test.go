@@ -52,6 +52,9 @@ func TestNewHTTPServerConfiguresHostedTimeouts(t *testing.T) {
 	if server.IdleTimeout != 60*time.Second {
 		t.Fatalf("IdleTimeout = %v, want 60s", server.IdleTimeout)
 	}
+	if server.ErrorLog == nil {
+		t.Fatal("ErrorLog = nil, want hosted structured logger bridge")
+	}
 }
 
 func TestLoadHostedStaticFailsFastWhenBundleIsMissing(t *testing.T) {
@@ -59,6 +62,159 @@ func TestLoadHostedStaticFailsFastWhenBundleIsMissing(t *testing.T) {
 		t.Fatal("loadHostedStatic() accepted a missing production bundle")
 	}
 }
+
+func TestOpenHostedLogRequiresSafeExistingRegularFileAndAppends(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "app.log")
+	if _, err := openHostedLog(filepath.Join(directory, "missing.log")); err == nil {
+		t.Fatal("openHostedLog() accepted a missing file")
+	}
+	if _, err := openHostedLog(directory); err == nil {
+		t.Fatal("openHostedLog() accepted a directory")
+	}
+	if err := os.WriteFile(path, []byte("existing\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(directory, "linked.log")
+	if err := os.Symlink(path, link); err == nil {
+		if _, err := openHostedLog(link); err == nil {
+			t.Fatal("openHostedLog() accepted a symlink")
+		}
+	}
+
+	file, err := openHostedLog(path)
+	if err != nil {
+		t.Fatalf("openHostedLog(): %v", err)
+	}
+	var stderr bytes.Buffer
+	logger := newHostedLogger(&stderr, file)
+	logger.Info("synthetic hosted event")
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close(): %v", err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(contents), "existing\n") || !strings.Contains(string(contents), "synthetic hosted event") {
+		t.Fatalf("log file was truncated or not written: %q", contents)
+	}
+	if !strings.Contains(stderr.String(), "synthetic hosted event") {
+		t.Fatalf("stderr did not receive hosted log: %q", stderr.String())
+	}
+}
+
+func TestHostedLogWriterFailsClosedAtCapacityAndRecoversAfterCopytruncate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.log")
+	if err := os.WriteFile(path, []byte("12345678"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	fullSignals := 0
+	file, err := openHostedLogWithLimit(path, 10, func() { fullSignals++ })
+	if err != nil {
+		t.Fatalf("openHostedLogWithLimit(): %v", err)
+	}
+	defer file.Close()
+	if _, err := file.Write([]byte("abc")); !errors.Is(err, errHostedLogCapacity) {
+		t.Fatalf("Write() error = %v, want capacity failure", err)
+	}
+	if fullSignals != 1 {
+		t.Fatalf("capacity signals = %d, want 1", fullSignals)
+	}
+	if _, err := file.Write([]byte("abc")); !errors.Is(err, errHostedLogCapacity) || fullSignals != 1 {
+		t.Fatalf("second Write() error/signals = %v/%d, want same failure once", err, fullSignals)
+	}
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte("fresh")); err != nil {
+		t.Fatalf("Write() after copytruncate: %v", err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "fresh" {
+		t.Fatalf("contents after copytruncate = %q", contents)
+	}
+
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, 10); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openHostedLogWithLimit(path, 10, func() {}); !errors.Is(err, errHostedLogCapacity) {
+		t.Fatalf("open at capacity error = %v", err)
+	}
+}
+
+func TestHostedLogWriterCancelsOnceOnEveryPersistentFileFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "info.log")
+	if err := os.WriteFile(path, nil, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		backend hostedLogBackend
+	}{
+		{name: "stat", backend: &hostedLogBackendStub{statInfo: info, statErr: errors.New("synthetic stat failure")}},
+		{name: "write", backend: &hostedLogBackendStub{statInfo: info, writeErr: errors.New("synthetic write failure")}},
+		{name: "short_write", backend: &hostedLogBackendStub{statInfo: info, writeN: 1}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			signals := 0
+			writer := &hostedLogFile{file: test.backend, maxBytes: 10, onCapacity: func() { signals++ }}
+			if _, err := writer.Write([]byte("payload")); err == nil {
+				t.Fatal("Write() error = nil")
+			}
+			_, _ = writer.Write([]byte("payload"))
+			if signals != 1 {
+				t.Fatalf("failure signals = %d, want 1", signals)
+			}
+		})
+	}
+}
+
+func TestHostedLoggerWritesPrimaryFileBeforeBestEffortStderr(t *testing.T) {
+	var primary bytes.Buffer
+	logger := newHostedLogger(errorWriter{}, &primary)
+	logger.Info("primary survives stderr failure")
+	if !strings.Contains(primary.String(), "primary survives stderr failure") {
+		t.Fatalf("primary log = %q", primary.String())
+	}
+}
+
+type errorWriter struct{}
+
+func (errorWriter) Write([]byte) (int, error) { return 0, errors.New("synthetic secondary failure") }
+
+type hostedLogBackendStub struct {
+	statInfo os.FileInfo
+	statErr  error
+	writeN   int
+	writeErr error
+}
+
+func (backend *hostedLogBackendStub) Stat() (os.FileInfo, error) {
+	return backend.statInfo, backend.statErr
+}
+
+func (backend *hostedLogBackendStub) Write(payload []byte) (int, error) {
+	if backend.writeErr != nil {
+		return 0, backend.writeErr
+	}
+	if backend.writeN != 0 {
+		return backend.writeN, nil
+	}
+	return len(payload), nil
+}
+
+func (*hostedLogBackendStub) Close() error { return nil }
 
 func TestStaticCompositionDoesNotStealOBSOrAPIRoutes(t *testing.T) {
 	static := statusHandler(http.StatusNonAuthoritativeInfo)

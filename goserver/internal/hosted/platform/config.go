@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	pathpkg "path"
 	"strconv"
 	"strings"
 )
@@ -13,6 +14,7 @@ import (
 // complete value because it contains the MySQL DSN and secret file locations.
 type Config struct {
 	ListenAddr                 string
+	LogFile                    string
 	MySQLDSN                   string
 	EncryptionKeyFile          string
 	HMACKeyFile                string
@@ -56,6 +58,15 @@ func Load() (Config, error) {
 	if err := validateListenAddr(listenAddr, containerListen); err != nil {
 		return Config{}, fmt.Errorf("HOSTED_LISTEN_ADDR is invalid: %w", err)
 	}
+	logFile := strings.TrimSpace(os.Getenv("HOSTED_LOG_FILE"))
+	if logFile != "" {
+		if !pathpkg.IsAbs(logFile) || pathpkg.Clean(logFile) != logFile {
+			return Config{}, errors.New("HOSTED_LOG_FILE must be a clean absolute path")
+		}
+		if containerListen && logFile != "/var/log/gift-panel-hosted/app.log" {
+			return Config{}, errors.New("HOSTED_LOG_FILE must be exactly /var/log/gift-panel-hosted/app.log in container mode")
+		}
+	}
 
 	allowInsecureLocalhost := false
 	if raw := strings.TrimSpace(os.Getenv("HOSTED_SMTP_ALLOW_INSECURE_LOCALHOST")); raw != "" {
@@ -66,6 +77,7 @@ func Load() (Config, error) {
 	}
 	return Config{
 		ListenAddr:                 listenAddr,
+		LogFile:                    logFile,
 		MySQLDSN:                   dsn,
 		EncryptionKeyFile:          encryptionKeyFile,
 		HMACKeyFile:                hmacKeyFile,

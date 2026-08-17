@@ -1,0 +1,34 @@
+{
+  "Rules": [
+    {
+      "ID": "hosted-backup-daily",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "hosted/backups/daily/" },
+      "Expiration": { "Days": 7 }
+    },
+    {
+      "ID": "hosted-backup-weekly",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "hosted/backups/weekly/" },
+      "Expiration": { "Days": 28 }
+    },
+    {
+      "ID": "hosted-backup-monthly",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "hosted/backups/monthly/" },
+      "Expiration": { "Days": 183 }
+    },
+    {
+      "ID": "hosted-log-archives",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "hosted/logs/" },
+      "Expiration": { "Days": 190 }
+    },
+    {
+      "ID": "hosted-abort-incomplete-multipart",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "hosted/" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+    }
+  ]
+}

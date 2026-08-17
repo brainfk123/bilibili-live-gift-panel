@@ -1,0 +1,31 @@
+[Unit]
+Description=Gift Panel hosted encrypted closed-log archive
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=1h
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/gift-panel-hosted/current/deploy/hosted
+EnvironmentFile=/etc/gift-panel-hosted/env
+EnvironmentFile=/etc/gift-panel-hosted/backup.env
+ExecStart=/usr/bin/bash /opt/gift-panel-hosted/current/deploy/hosted/archive-logs.sh
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+StateDirectory=gift-panel-hosted-log-archive
+StateDirectoryMode=0700
+ReadOnlyPaths=/var/log/nginx
+ReadWritePaths=/run/lock /var/lib/gift-panel-hosted-log-archive
+ReadOnlyPaths=/var/log/gift-panel-hosted /var/log/nginx
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+Restart=on-failure
+RestartSec=15min
+TimeoutStartSec=45min
+TimeoutStopSec=2min

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Gift Panel hosted encrypted database backup
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+RandomizedDelaySec=900
+Persistent=true
+Unit=backup.service
+
+[Install]
+WantedBy=timers.target
