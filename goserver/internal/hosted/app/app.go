@@ -3,7 +3,15 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"mime"
 	"net/http"
+	"os"
+	"path"
+	"path/filepath"
+	"regexp"
+	"strings"
 )
 
 type healthChecker interface {
@@ -21,7 +29,162 @@ type Dependencies struct {
 	BiliService   http.Handler
 	Runtime       http.Handler
 	OBS           http.Handler
+	Static        http.Handler
 	CSRFToken     string
+}
+
+var obsLandingPublicIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+
+var obsLandingThemes = map[string]struct{}{
+	"minimal": {},
+	"glass":   {},
+	"rpg":     {},
+	"pixel":   {},
+	"neon":    {},
+	"kawaii":  {},
+}
+
+type manifestEntry struct {
+	File   string   `json:"file"`
+	CSS    []string `json:"css"`
+	Assets []string `json:"assets"`
+}
+
+type staticContent struct {
+	body        []byte
+	contentType string
+	cache       string
+}
+
+type staticHandler struct {
+	hosted staticContent
+	obs    staticContent
+	assets map[string]staticContent
+}
+
+// NewStaticHandler validates and preloads the immutable hosted UI bundle. Only
+// the two entry pages and files named by Vite's manifest can ever be served.
+func NewStaticHandler(root string) (http.Handler, error) {
+	if root == "" || !filepath.IsAbs(root) {
+		return nil, errors.New("hosted UI root must be absolute")
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("hosted UI root is unavailable")
+	}
+	read := func(name string) ([]byte, error) {
+		fileName := filepath.Join(root, filepath.FromSlash(name))
+		info, statErr := os.Lstat(fileName)
+		if statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("hosted UI file %q is unavailable", name)
+		}
+		contents, readErr := os.ReadFile(fileName)
+		if readErr != nil {
+			return nil, fmt.Errorf("read hosted UI file %q", name)
+		}
+		return contents, nil
+	}
+	hostedPage, err := read("hosted.html")
+	if err != nil {
+		return nil, err
+	}
+	obsPage, err := read("obs.html")
+	if err != nil {
+		return nil, err
+	}
+	manifestBytes, err := read(".vite/manifest.json")
+	if err != nil {
+		return nil, err
+	}
+	var manifest map[string]manifestEntry
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil || len(manifest) == 0 {
+		return nil, errors.New("hosted UI manifest is invalid")
+	}
+	if _, ok := manifest["hosted.html"]; !ok {
+		return nil, errors.New("hosted UI manifest lacks hosted entry")
+	}
+	if _, ok := manifest["obs.html"]; !ok {
+		return nil, errors.New("hosted UI manifest lacks OBS entry")
+	}
+	assets := make(map[string]staticContent)
+	for _, entry := range manifest {
+		files := append([]string{entry.File}, entry.CSS...)
+		files = append(files, entry.Assets...)
+		for _, name := range files {
+			if name == "" {
+				continue
+			}
+			if !strings.HasPrefix(name, "assets/") || path.Clean(name) != name || strings.Contains(name, `\`) {
+				return nil, errors.New("hosted UI manifest contains an invalid asset path")
+			}
+			contents, readErr := read(name)
+			if readErr != nil {
+				return nil, readErr
+			}
+			contentType := mime.TypeByExtension(filepath.Ext(name))
+			if contentType == "" {
+				contentType = "application/octet-stream"
+			}
+			assets["/"+name] = staticContent{body: contents, contentType: contentType, cache: "public, max-age=31536000, immutable"}
+		}
+	}
+	return &staticHandler{
+		hosted: staticContent{body: hostedPage, contentType: "text/html; charset=utf-8", cache: "no-store"},
+		obs:    staticContent{body: obsPage, contentType: "text/html; charset=utf-8", cache: "no-store"},
+		assets: assets,
+	}, nil
+}
+
+func (handler *staticHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if handler == nil || request == nil {
+		http.NotFound(response, request)
+		return
+	}
+	if request.Method != http.MethodGet && request.Method != http.MethodHead {
+		response.Header().Set("Allow", "GET, HEAD")
+		response.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var content staticContent
+	var ok bool
+	switch {
+	case request.URL.Path == "/" || request.URL.Path == "/hosted.html":
+		if request.URL.RawQuery == "" {
+			content, ok = handler.hosted, true
+		}
+	case strings.HasPrefix(request.URL.Path, "/obs/") && obsLandingPublicIDPattern.MatchString(strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/obs/"), "/")):
+		if validOBSThemeQuery(request.URL.RawQuery) {
+			content, ok = handler.obs, true
+		}
+	default:
+		if request.URL.RawQuery == "" {
+			content, ok = handler.assets[request.URL.Path]
+		}
+	}
+	if !ok {
+		http.NotFound(response, request)
+		return
+	}
+	response.Header().Set("Content-Type", content.contentType)
+	response.Header().Set("Cache-Control", content.cache)
+	response.Header().Set("X-Content-Type-Options", "nosniff")
+	if request.Method == http.MethodHead {
+		response.WriteHeader(http.StatusOK)
+		return
+	}
+	_, _ = response.Write(content.body)
+}
+
+func validOBSThemeQuery(rawQuery string) bool {
+	if rawQuery == "" {
+		return true
+	}
+	for theme := range obsLandingThemes {
+		if rawQuery == "theme="+theme {
+			return true
+		}
+	}
+	return false
 }
 
 // New builds the hosted HTTP handler.
@@ -114,6 +277,13 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("DELETE /api/invitations/{id}", dependencies.Invitation)
 		mux.Handle("POST /api/admin/invitations", dependencies.Invitation)
 		mux.Handle("POST /api/admin/accounts/{id}/invitation-quota", dependencies.Invitation)
+	}
+	if dependencies.Static != nil {
+		mux.Handle("GET /{$}", dependencies.Static)
+		mux.Handle("GET /hosted.html", dependencies.Static)
+		mux.Handle("GET /obs/{publicID}", dependencies.Static)
+		mux.Handle("GET /obs/{publicID}/{$}", dependencies.Static)
+		mux.Handle("GET /assets/", dependencies.Static)
 	}
 	return mux
 }

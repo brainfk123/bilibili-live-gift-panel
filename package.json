@@ -8,6 +8,8 @@
     "build": "npm run build:ui && npm run build:exe",
     "build:ui": "vite build",
     "build:hosted": "vite build --config vite.hosted.config.ts",
+    "build:hosted-server": "node scripts/build-hosted.mjs",
+    "verify:hosted-server-repro": "node scripts/build-hosted.mjs --verify-reproducible",
     "prepare:go-assets": "node scripts/prepare-go-assets.mjs",
     "build:exe": "node scripts/build-go.mjs",
     "build:ffmpeg": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-ffmpeg.ps1",

@@ -54,6 +54,41 @@ func TestNewHTTPServerConfiguresHostedTimeouts(t *testing.T) {
 	}
 }
 
+func TestLoadHostedStaticFailsFastWhenBundleIsMissing(t *testing.T) {
+	if _, err := loadHostedStatic(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("loadHostedStatic() accepted a missing production bundle")
+	}
+}
+
+func TestStaticCompositionDoesNotStealOBSOrAPIRoutes(t *testing.T) {
+	static := statusHandler(http.StatusNonAuthoritativeInfo)
+	obs := statusHandler(http.StatusTeapot)
+	handler := composeHostedHTTPWithRuntimeOBSAndStatic(
+		healthyHostedDatabase{}, statusHandler(http.StatusAccepted), statusHandler(http.StatusAccepted),
+		statusHandler(http.StatusAccepted), nil, nil, nil, nil, obs, static, "runtime-csrf",
+	)
+	publicID := strings.Repeat("A", 43)
+	for _, test := range []struct {
+		method, path string
+		want         int
+	}{
+		{http.MethodGet, "/", http.StatusNonAuthoritativeInfo},
+		{http.MethodGet, "/hosted.html", http.StatusNonAuthoritativeInfo},
+		{http.MethodGet, "/assets/app.js", http.StatusNonAuthoritativeInfo},
+		{http.MethodGet, "/obs/" + publicID, http.StatusNonAuthoritativeInfo},
+		{http.MethodGet, "/obs/" + publicID + "/events", http.StatusTeapot},
+		{http.MethodPost, "/obs/" + publicID + "/exchange", http.StatusTeapot},
+		{http.MethodGet, "/api/bootstrap", http.StatusOK},
+		{http.MethodPost, "/", http.StatusMethodNotAllowed},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(test.method, test.path, nil))
+		if response.Code != test.want {
+			t.Fatalf("%s %s status = %d, want %d", test.method, test.path, response.Code, test.want)
+		}
+	}
+}
+
 func TestProductionHTTPServerContextsFollowProcessShutdown(t *testing.T) {
 	processContext, cancel := context.WithCancel(context.Background())
 	server := newHTTPServerWithContext(processContext, "127.0.0.1:12500", http.NewServeMux())

@@ -1,0 +1,112 @@
+name: gift-panel-hosted
+
+services:
+  mysql:
+    image: mysql:8.4.11@sha256:1d6b6a8fcee8ff758ff151d017f5203cd06792a0e698f0a593c9dfcb14609cf0
+    restart: unless-stopped
+    command:
+      - --skip-name-resolve
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --innodb-buffer-pool-size=536870912
+    environment:
+      MYSQL_DATABASE: ${HOSTED_MYSQL_DATABASE:-gift_panel}
+      MYSQL_USER: ${HOSTED_MYSQL_USER:-gift_panel}
+      MYSQL_PASSWORD_FILE: /run/secrets/mysql_password
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql_root_password
+      TZ: UTC
+    secrets:
+      - mysql_root_password
+      - mysql_password
+    volumes:
+      - hosted_mysql_data:/var/lib/mysql
+    networks:
+      - hosted_internal
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping --host=127.0.0.1 --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    mem_limit: 1280m
+
+  app:
+    image: ${HOSTED_IMAGE:-gift-panel-hosted:test}
+    restart: unless-stopped
+    init: true
+    user: "65532:65532"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      HOSTED_LISTEN_ADDR: 0.0.0.0:12500
+      HOSTED_CONTAINER_LISTEN: "true"
+      HOSTED_MYSQL_DSN_FILE: /run/secrets/mysql_dsn
+      HOSTED_ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
+      HOSTED_HMAC_KEY_FILE: /run/secrets/hmac_key
+      HOSTED_ADMIN_CSRF_TOKEN_FILE: /run/secrets/admin_csrf_token
+      HOSTED_ADMIN_ALLOWED_ORIGIN: ${HOSTED_ADMIN_ALLOWED_ORIGIN:?set HOSTED_ADMIN_ALLOWED_ORIGIN}
+      HOSTED_SMTP_ADDRESS: ${HOSTED_SMTP_ADDRESS:?set HOSTED_SMTP_ADDRESS}
+      HOSTED_SMTP_HOST: ${HOSTED_SMTP_HOST:?set HOSTED_SMTP_HOST}
+      HOSTED_SMTP_USERNAME: ${HOSTED_SMTP_USERNAME:?set HOSTED_SMTP_USERNAME}
+      HOSTED_SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      HOSTED_SMTP_FROM: ${HOSTED_SMTP_FROM:?set HOSTED_SMTP_FROM}
+      HOSTED_SMTP_MODE: ${HOSTED_SMTP_MODE:-starttls}
+      HOSTED_SMTP_ALLOW_INSECURE_LOCALHOST: "false"
+      GOMEMLIMIT: 768MiB
+      TZ: UTC
+    secrets:
+      - mysql_dsn
+      - encryption_key
+      - hmac_key
+      - admin_csrf_token
+      - smtp_password
+    ports:
+      - "127.0.0.1:12500:12500"
+    networks:
+      hosted_internal: {}
+      hosted_egress:
+        gw_priority: 1
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          /bin/bash -ec 'exec 3<>/dev/tcp/127.0.0.1/12500;
+          printf "GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3;
+          grep -q " 200 " <&3'
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+    mem_limit: 1g
+
+networks:
+  hosted_internal:
+    internal: true
+  hosted_egress: {}
+
+volumes:
+  hosted_mysql_data: {}
+
+secrets:
+  mysql_root_password:
+    file: ${HOSTED_MYSQL_ROOT_PASSWORD_FILE:?set HOSTED_MYSQL_ROOT_PASSWORD_FILE}
+  mysql_password:
+    file: ${HOSTED_MYSQL_PASSWORD_FILE:?set HOSTED_MYSQL_PASSWORD_FILE}
+  mysql_dsn:
+    file: ${HOSTED_MYSQL_DSN_FILE:?set HOSTED_MYSQL_DSN_FILE}
+  encryption_key:
+    file: ${HOSTED_ENCRYPTION_KEY_FILE:?set HOSTED_ENCRYPTION_KEY_FILE}
+  hmac_key:
+    file: ${HOSTED_HMAC_KEY_FILE:?set HOSTED_HMAC_KEY_FILE}
+  admin_csrf_token:
+    file: ${HOSTED_ADMIN_CSRF_TOKEN_FILE:?set HOSTED_ADMIN_CSRF_TOKEN_FILE}
+  smtp_password:
+    file: ${HOSTED_SMTP_PASSWORD_FILE:?set HOSTED_SMTP_PASSWORD_FILE}

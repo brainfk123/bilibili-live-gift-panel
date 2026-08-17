@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -234,4 +236,107 @@ func TestOBSOwnsEveryMethodOnCredentialExchangeAndEventPaths(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestStaticHandlerFailsFastWhenManifestAssetsAreMissing(t *testing.T) {
+	root := writeStaticFixture(t)
+	if err := os.Remove(filepath.Join(root, "assets", "obs.css")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewStaticHandler(root); err == nil {
+		t.Fatal("NewStaticHandler() accepted a manifest with a missing asset")
+	}
+}
+
+func TestStaticRoutesServeOnlyHostedPagesAndManifestAssets(t *testing.T) {
+	staticHandler, err := NewStaticHandler(writeStaticFixture(t))
+	if err != nil {
+		t.Fatalf("NewStaticHandler() error = %v", err)
+	}
+	obsHandler := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusTeapot)
+	})
+	handler := New(Dependencies{DB: fakeHealth{}, OBS: obsHandler, Static: staticHandler})
+	publicID := strings.Repeat("A", 43)
+	for _, target := range []string{
+		"/obs/" + publicID + "/",
+		"/obs/" + publicID + "/?theme=glass",
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+		if response.Code != http.StatusOK || response.Body.String() != "obs-page" {
+			t.Fatalf("GET %s = (%d, %q), want trailing-slash OBS page", target, response.Code, response.Body.String())
+		}
+	}
+	for _, theme := range []string{"minimal", "glass", "rpg", "pixel", "neon", "kawaii"} {
+		response := httptest.NewRecorder()
+		target := "/obs/" + publicID + "?theme=" + theme
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+		if response.Code != http.StatusOK || response.Body.String() != "obs-page" {
+			t.Fatalf("GET %s = (%d, %q), want themed OBS page", target, response.Code, response.Body.String())
+		}
+	}
+
+	for _, test := range []struct {
+		method, target string
+		want           int
+		body           string
+	}{
+		{http.MethodGet, "/", http.StatusOK, "hosted-page"},
+		{http.MethodGet, "/hosted.html", http.StatusOK, "hosted-page"},
+		{http.MethodHead, "/hosted.html", http.StatusOK, ""},
+		{http.MethodGet, "/obs/" + publicID, http.StatusOK, "obs-page"},
+		{http.MethodGet, "/assets/hosted.js", http.StatusOK, "hosted-script"},
+		{http.MethodGet, "/assets/obs.css", http.StatusOK, "obs-style"},
+		{http.MethodGet, "/obs/short", http.StatusNotFound, ""},
+		{http.MethodGet, "/obs/" + publicID + "/extra", http.StatusNotFound, ""},
+		{http.MethodGet, "/obs/" + publicID + "/events/", http.StatusNotFound, ""},
+		{http.MethodGet, "/obs/" + publicID + "/exchange/", http.StatusNotFound, ""},
+		{http.MethodGet, "/assets/unlisted.js", http.StatusNotFound, ""},
+		{http.MethodGet, "/.vite/manifest.json", http.StatusNotFound, ""},
+		{http.MethodGet, "/secret.txt", http.StatusNotFound, ""},
+		{http.MethodGet, "/assets/", http.StatusNotFound, ""},
+		{http.MethodGet, "/hosted.html?theme=glass", http.StatusNotFound, ""},
+		{http.MethodGet, "/obs/" + publicID + "?theme=", http.StatusNotFound, ""},
+		{http.MethodGet, "/obs/" + publicID + "?theme=unknown", http.StatusNotFound, ""},
+		{http.MethodGet, "/obs/" + publicID + "?theme=glass&theme=neon", http.StatusNotFound, ""},
+		{http.MethodGet, "/obs/" + publicID + "?theme=glass&file=secret.txt", http.StatusNotFound, ""},
+		{http.MethodGet, "/obs/" + publicID + "?theme=%67lass", http.StatusNotFound, ""},
+		{http.MethodGet, "/obs/" + publicID + "?theme=glass%2F..%2Fsecret", http.StatusNotFound, ""},
+		{http.MethodPost, "/", http.StatusMethodNotAllowed, ""},
+		{http.MethodGet, "/obs/" + publicID + "/events", http.StatusTeapot, ""},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(test.method, test.target, nil))
+		if response.Code != test.want || (test.body != "" && response.Body.String() != test.body) {
+			t.Fatalf("%s %s = (%d, %q), want (%d, %q)", test.method, test.target, response.Code, response.Body.String(), test.want, test.body)
+		}
+	}
+}
+
+func writeStaticFixture(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".vite"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"hosted.html":         "hosted-page",
+		"obs.html":            "obs-page",
+		"assets/hosted.js":    "hosted-script",
+		"assets/obs.css":      "obs-style",
+		"assets/unlisted.js":  "must-not-serve",
+		"secret.txt":          "must-not-serve",
+		".vite/manifest.json": `{"hosted.html":{"file":"assets/hosted.js"},"obs.html":{"file":"assets/hosted.js","css":["assets/obs.css"]}}`,
+	}
+	for name, contents := range files {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
 }

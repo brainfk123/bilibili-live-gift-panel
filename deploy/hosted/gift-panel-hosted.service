@@ -1,0 +1,20 @@
+[Unit]
+Description=Bilibili Gift Panel Hosted Service
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/gift-panel-hosted/current/deploy/hosted
+Environment=COMPOSE_PROJECT_NAME=gift-panel-hosted
+EnvironmentFile=/etc/gift-panel-hosted/env
+ExecStartPre=/usr/bin/docker compose config --quiet
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+ExecStop=/usr/bin/docker compose stop -t 30
+TimeoutStartSec=180
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

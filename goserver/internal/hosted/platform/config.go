@@ -45,9 +45,16 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	containerListen := false
+	if raw := strings.TrimSpace(os.Getenv("HOSTED_CONTAINER_LISTEN")); raw != "" {
+		containerListen, err = strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, errors.New("HOSTED_CONTAINER_LISTEN must be a boolean")
+		}
+	}
 
-	if err := validateListenAddr(listenAddr); err != nil {
-		return Config{}, fmt.Errorf("HOSTED_LISTEN_ADDR must be a literal loopback address: %w", err)
+	if err := validateListenAddr(listenAddr, containerListen); err != nil {
+		return Config{}, fmt.Errorf("HOSTED_LISTEN_ADDR is invalid: %w", err)
 	}
 
 	allowInsecureLocalhost := false
@@ -82,7 +89,13 @@ func required(name string) (string, error) {
 	return value, nil
 }
 
-func validateListenAddr(address string) error {
+func validateListenAddr(address string, containerListen bool) error {
+	if containerListen {
+		if address != "0.0.0.0:12500" {
+			return errors.New("container listener must be exactly 0.0.0.0:12500")
+		}
+		return nil
+	}
 	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
 		return errors.New("invalid host and port")

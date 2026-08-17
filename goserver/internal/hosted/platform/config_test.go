@@ -67,6 +67,43 @@ func TestLoadAcceptsOnlyLiteralLoopbackListeners(t *testing.T) {
 	}
 }
 
+func TestLoadAllowsOnlyTheExactContainerListenerWhenExplicitlyEnabled(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("HOSTED_LISTEN_ADDR", "0.0.0.0:12500")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() accepted the container listener while container mode was disabled")
+	}
+
+	t.Setenv("HOSTED_CONTAINER_LISTEN", "true")
+	config, err := Load()
+	if err != nil {
+		t.Fatalf("Load() rejected the exact container listener: %v", err)
+	}
+	if config.ListenAddr != "0.0.0.0:12500" {
+		t.Fatalf("ListenAddr = %q, want exact container listener", config.ListenAddr)
+	}
+
+	for _, address := range []string{"0.0.0.0:12501", "0.0.0.0:80", "[::]:12500", "192.0.2.10:12500"} {
+		t.Run(address, func(t *testing.T) {
+			setValidEnvironment(t)
+			t.Setenv("HOSTED_CONTAINER_LISTEN", "true")
+			t.Setenv("HOSTED_LISTEN_ADDR", address)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load() accepted non-exact container listener %q", address)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsMalformedContainerListenMode(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("HOSTED_CONTAINER_LISTEN", "sometimes")
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "HOSTED_CONTAINER_LISTEN") {
+		t.Fatalf("Load() error = %v, want stable container mode validation", err)
+	}
+}
+
 func TestLoadErrorsDoNotExposeSecrets(t *testing.T) {
 	setValidEnvironment(t)
 	t.Setenv("HOSTED_LISTEN_ADDR", "0.0.0.0:12500")
