@@ -20,6 +20,7 @@ type Dependencies struct {
 	Migration     http.Handler
 	BiliService   http.Handler
 	Runtime       http.Handler
+	OBS           http.Handler
 	CSRFToken     string
 }
 
@@ -91,6 +92,13 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("/api/runtime/room", dependencies.Runtime)
 		mux.Handle("/api/runtime/events", dependencies.Runtime)
 		mux.Handle("/api/runtime/status", dependencies.Runtime)
+	}
+	if dependencies.OBS != nil {
+		// OBS owns every method on its credential, exchange, and event paths so
+		// mutations cannot fall through to broader account/admin handlers.
+		mux.Handle("/api/admin/accounts/{id}/obs-credential", dependencies.OBS)
+		mux.Handle("/obs/{publicID}/exchange", dependencies.OBS)
+		mux.Handle("/obs/{publicID}/events", dependencies.OBS)
 	}
 	if dependencies.Auth != nil {
 		mux.Handle("/api/auth/", dependencies.Auth)

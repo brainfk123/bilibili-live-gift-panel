@@ -9,9 +9,13 @@ import { describe, expect, it } from 'vitest';
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const hostedFiles = [
   'hosted.html',
+  'obs.html',
   'src/hosted/main.ts',
   'src/hosted/shell.ts',
   'src/hosted/shell.css',
+  'src/hosted/obs/main.ts',
+  'src/hosted/obs/view.ts',
+  'src/hosted/obs/obs.css',
   'vite.hosted.config.ts',
 ];
 
@@ -38,13 +42,7 @@ function hostedSourceExists(): boolean {
 
 describe('hosted web build contract', () => {
   it('declares an independent hosted entry, shell, and Vite config', () => {
-    expect(hostedFiles.map((file) => existsSync(join(projectRoot, file)))).toEqual([
-      true,
-      true,
-      true,
-      true,
-      true,
-    ]);
+    expect(hostedFiles.map((file) => existsSync(join(projectRoot, file)))).toEqual(hostedFiles.map(() => true));
   });
 
   it('adds reproducible hosted build scripts', () => {
@@ -191,13 +189,44 @@ describe('hosted web build contract', () => {
         output.type === 'chunk' ? Object.keys(output.modules) : []
       ));
       const hostedHTML = normalizePath(join(projectRoot, 'hosted.html'));
+      const obsHTML = normalizePath(join(projectRoot, 'obs.html'));
       const hostedSource = `${normalizePath(join(projectRoot, 'src', 'hosted'))}/`;
       const projectSource = `${normalizePath(projectRoot)}/`;
+      const allowedSharedModules = new Set([
+        normalizePath(join(projectRoot, 'src', 'format.ts')),
+        normalizePath(join(projectRoot, 'src', 'display-themes.ts')),
+      ]);
       expect(moduleIDs.filter((moduleID) => {
         const normalized = normalizePath(moduleID);
         return normalized.startsWith(projectSource)
           && normalized !== hostedHTML
-          && !normalized.startsWith(hostedSource);
+          && normalized !== obsHTML
+          && !normalized.startsWith(hostedSource)
+          && !allowedSharedModules.has(normalized);
+      })).toEqual([]);
+
+      const obsEntryChunk = outputs.find((output) => output.type === 'chunk'
+        && normalizePath(output.facadeModuleId ?? '') === obsHTML);
+      expect(obsEntryChunk?.type).toBe('chunk');
+      const obsChunkFiles = new Set<string>();
+      const visitOBSChunk = (fileName: string): void => {
+        if (obsChunkFiles.has(fileName)) return;
+        obsChunkFiles.add(fileName);
+        const chunk = outputs.find((output) => output.type === 'chunk' && output.fileName === fileName);
+        if (!chunk || chunk.type !== 'chunk') return;
+        for (const dependency of [...chunk.imports, ...chunk.dynamicImports]) visitOBSChunk(dependency);
+      };
+      if (obsEntryChunk?.type === 'chunk') visitOBSChunk(obsEntryChunk.fileName);
+      const obsModules = outputs.flatMap((output) => (
+        output.type === 'chunk' && obsChunkFiles.has(output.fileName) ? Object.keys(output.modules) : []
+      ));
+      const obsSource = `${normalizePath(join(projectRoot, 'src', 'hosted', 'obs'))}/`;
+      expect(obsModules.filter((moduleID) => {
+        const normalized = normalizePath(moduleID);
+        return normalized.startsWith(projectSource)
+          && normalized !== obsHTML
+          && !normalized.startsWith(obsSource)
+          && !allowedSharedModules.has(normalized);
       })).toEqual([]);
       expect(moduleIDs.filter((moduleID) => (
         moduleID.startsWith('\0') && !moduleID.startsWith('\0vite/')
@@ -215,13 +244,27 @@ describe('hosted web build contract', () => {
         dynamicImports?: string[];
       }>;
       const entry = manifest['hosted.html'];
+      const obsEntry = manifest['obs.html'];
 
       expect(relativeFiles).toContain('hosted.html');
+      expect(relativeFiles).toContain('obs.html');
+	  const builtOBSHTML = readFileSync(join(outDir, 'obs.html'), 'utf8');
+	  const obsAssetReferences = [...builtOBSHTML.matchAll(/(?:src|href)="([^"]+)"/g)]
+	    .map((match) => match[1])
+	    .filter((reference) => reference.includes('assets/'));
+	  const credentialURL = `https://host.example/obs/${'A'.repeat(43)}`;
+	  expect(obsAssetReferences.length).toBeGreaterThan(0);
+	  expect(obsAssetReferences.map((reference) => new URL(reference, credentialURL).pathname))
+	    .toEqual(obsAssetReferences.map((reference) => `/${reference.replace(/^\.?\//, '')}`));
       expect(entry?.isEntry).toBe(true);
+      expect(obsEntry?.isEntry).toBe(true);
       expect(entry?.file).toBeTruthy();
+      expect(obsEntry?.file).toBeTruthy();
       expect(relativeFiles).toContain(entry.file);
+      expect(relativeFiles).toContain(obsEntry.file);
       expect(entry.css?.length).toBeGreaterThan(0);
-      const referencedFiles = new Set<string>(['hosted.html', '.vite/manifest.json']);
+      expect(obsEntry.css?.length).toBeGreaterThan(0);
+      const referencedFiles = new Set<string>(['hosted.html', 'obs.html', '.vite/manifest.json']);
       const visitedEntries = new Set<string>();
       const visitManifestEntry = (entryName: string): void => {
         if (visitedEntries.has(entryName)) return;
@@ -238,6 +281,7 @@ describe('hosted web build contract', () => {
         ]) visitManifestEntry(dependency);
       };
       visitManifestEntry('hosted.html');
+      visitManifestEntry('obs.html');
 
       expect(new Set(relativeFiles)).toEqual(referencedFiles);
       expect(relativeFiles.some((file) => /ffmpeg|gift-clip|update|dpapi|\.exe$/i.test(file))).toBe(false);

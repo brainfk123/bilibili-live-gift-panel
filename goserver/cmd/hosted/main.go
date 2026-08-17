@@ -26,6 +26,7 @@ import (
 	"bilibili-live-gift-panel/internal/hosted/identity/biliqr"
 	"bilibili-live-gift-panel/internal/hosted/invitation"
 	"bilibili-live-gift-panel/internal/hosted/migration"
+	hostedobs "bilibili-live-gift-panel/internal/hosted/obs"
 	"bilibili-live-gift-panel/internal/hosted/platform"
 	"bilibili-live-gift-panel/internal/hosted/roomsource"
 	hostedruntime "bilibili-live-gift-panel/internal/hosted/runtime"
@@ -209,6 +210,25 @@ func run() error {
 			cancelCleanup()
 			return errors.New("configure hosted runtime HTTP")
 		}
+		obsService, err := hostedobs.NewService(store.Database(), adminService, hostedobs.ServiceOptions{PublicOrigin: config.AdminAllowedOrigin})
+		if err != nil {
+			runtimeOwner.Store(nil)
+			cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), shutdownTimeout)
+			_ = runtimeManager.Shutdown(cleanupContext)
+			cancelCleanup()
+			return errors.New("configure hosted OBS")
+		}
+		obsHTTP, err := hostedobs.NewHTTPHandler(obsService, hostedobs.HTTPOptions{
+			AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
+			Limiter: limiter, ClientIP: resolver, Runtime: runtimeManager, Publisher: runtimePublisher,
+		})
+		if err != nil {
+			runtimeOwner.Store(nil)
+			cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), shutdownTimeout)
+			_ = runtimeManager.Shutdown(cleanupContext)
+			cancelCleanup()
+			return errors.New("configure hosted OBS HTTP")
+		}
 		adminHTTP, err := adminidentity.NewHTTPHandler(adminService, adminidentity.HTTPOptions{
 			AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
 			Limiter: limiter, ClientIP: resolver,
@@ -216,7 +236,7 @@ func run() error {
 		if err != nil {
 			return errors.New("configure administrator HTTP")
 		}
-		handler := composeHostedHTTPWithRuntime(store, identityHTTP, adminHTTP, invitationHTTP, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, config.AdminCSRFToken)
+		handler := composeHostedHTTPWithRuntimeAndOBS(store, identityHTTP, adminHTTP, invitationHTTP, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, obsHTTP, config.AdminCSRFToken)
 		server := newHTTPServerWithContext(processContext, config.ListenAddr, retainBiliGateway(handler, biliDependencies.Gateway))
 		serveErr := serveHTTPWithRuntime(
 			processContext,
@@ -295,7 +315,11 @@ func composeHostedHTTP(database hostedHealthChecker, auth, admin, invitations, c
 }
 
 func composeHostedHTTPWithRuntime(database hostedHealthChecker, auth, admin, invitations, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP http.Handler, csrfToken string) http.Handler {
-	return app.New(app.Dependencies{DB: database, Auth: auth, Admin: admin, Invitation: invitations, Configuration: configurationHTTP, Migration: migrationHTTP, BiliService: biliServiceHTTP, Runtime: runtimeHTTP, CSRFToken: csrfToken})
+	return composeHostedHTTPWithRuntimeAndOBS(database, auth, admin, invitations, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, nil, csrfToken)
+}
+
+func composeHostedHTTPWithRuntimeAndOBS(database hostedHealthChecker, auth, admin, invitations, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, obsHTTP http.Handler, csrfToken string) http.Handler {
+	return app.New(app.Dependencies{DB: database, Auth: auth, Admin: admin, Invitation: invitations, Configuration: configurationHTTP, Migration: migrationHTTP, BiliService: biliServiceHTTP, Runtime: runtimeHTTP, OBS: obsHTTP, CSRFToken: csrfToken})
 }
 
 func loadHostedKeyring(encryptionKeyFile, hmacKeyFile string) (security.Keyring, error) {

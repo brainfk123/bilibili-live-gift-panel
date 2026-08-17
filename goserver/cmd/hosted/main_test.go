@@ -185,6 +185,30 @@ func TestComposeHostedHTTPMountsOnlyAutomaticRuntimeRoutes(t *testing.T) {
 	}
 }
 
+func TestComposeHostedHTTPMountsOBSPathsAheadOfBroadAccountAndAdminHandlers(t *testing.T) {
+	obsHandler := statusHandler(http.StatusPartialContent)
+	handler := composeHostedHTTPWithRuntimeAndOBS(
+		healthyHostedDatabase{},
+		statusHandler(http.StatusAccepted),
+		statusHandler(http.StatusNonAuthoritativeInfo),
+		statusHandler(http.StatusTeapot),
+		nil, nil, nil, nil, obsHandler, "runtime-csrf",
+	)
+	for _, route := range []struct{ method, path string }{
+		{http.MethodPost, "/api/admin/accounts/41/obs-credential"},
+		{http.MethodPut, "/api/admin/accounts/41/obs-credential"},
+		{http.MethodPost, "/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/exchange"},
+		{http.MethodGet, "/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/events"},
+		{http.MethodDelete, "/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/events"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))
+		if response.Code != http.StatusPartialContent {
+			t.Fatalf("%s %s status=%d, want OBS handler", route.method, route.path, response.Code)
+		}
+	}
+}
+
 func TestComposeHostedHTTPKeepsWrongBiliServiceMethodsOutOfBroadAdmin(t *testing.T) {
 	allowed := map[string]string{
 		"/api/admin/bili-service/status":    http.MethodGet,

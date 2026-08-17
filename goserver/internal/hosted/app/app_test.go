@@ -215,3 +215,23 @@ func TestRuntimeRoutesAreExactAndExposeNoStartOrStop(t *testing.T) {
 		}
 	}
 }
+
+func TestOBSOwnsEveryMethodOnCredentialExchangeAndEventPaths(t *testing.T) {
+	obsHandler := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusTeapot) })
+	broad := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusAccepted) })
+	handler := New(Dependencies{DB: fakeHealth{}, Auth: broad, Admin: broad, OBS: obsHandler})
+	paths := []string{
+		"/api/admin/accounts/41/obs-credential",
+		"/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/exchange",
+		"/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/events",
+	}
+	for _, path := range paths {
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodOptions} {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(method, path, nil))
+			if response.Code != http.StatusTeapot {
+				t.Fatalf("%s %s status=%d, want OBS handler", method, path, response.Code)
+			}
+		}
+	}
+}

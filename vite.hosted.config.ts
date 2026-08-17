@@ -5,14 +5,17 @@ import { defineConfig } from 'vite';
 const projectRoot = fileURLToPath(new URL('.', import.meta.url));
 
 export default defineConfig({
-  base: './',
+  base: '/',
   build: {
     target: 'es2022',
     outDir: resolve(projectRoot, 'goserver/cmd/hosted/dist'),
     emptyOutDir: true,
     manifest: true,
     rollupOptions: {
-      input: resolve(projectRoot, 'hosted.html'),
+      input: {
+        hosted: resolve(projectRoot, 'hosted.html'),
+        obs: resolve(projectRoot, 'obs.html'),
+      },
     },
   },
 });

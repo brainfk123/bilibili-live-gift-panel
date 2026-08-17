@@ -2,6 +2,8 @@ import { GAMEPLAY_TEMPLATES, type TemplateGiftSlotDefinition, type TemplateParam
 
 export type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
+const obsPublicIDPattern = /^[A-Za-z0-9_-]{43}$/;
+
 export interface Challenge {
   challengeId: string;
   qrImage: string;
@@ -40,6 +42,11 @@ export interface GeneratedInvitation extends InvitationRecord {
 export interface ManagedAccount {
   accountId: number;
   status: 'active' | 'disabled';
+}
+
+export interface OBSCredentialAccess {
+  publicId: string;
+  url: string;
 }
 
 export interface RecoveryPreparation {
@@ -94,7 +101,7 @@ const stableErrors = new Set([
   'quota_exhausted', 'rate_limited', 'recent_totp_required', 'request_rejected',
   'temporarily_unavailable', 'verification_pending', 'revision_conflict', 'not_found',
   'proof_rejected', 'expired', 'operation_conflict',
-  'credential_unavailable',
+  'credential_unavailable', 'account_disabled',
 ]);
 
 export class HostedAPIError extends Error {
@@ -421,6 +428,19 @@ export class HostedAPI {
   async replaceBiliServiceCredential(challengeId: string): Promise<void> {
     if (!string(challengeId) || challengeId.length > 256) throw new HostedAPIError('invalid_request', 400);
     await this.request('/api/admin/bili-service/replace', 'POST', 204, { challengeId });
+  }
+  async issueOBSCredential(accountId: number): Promise<OBSCredentialAccess> {
+    if (!Number.isSafeInteger(accountId) || accountId <= 0) throw new HostedAPIError('invalid_request', 0);
+    const data = object((await this.request(`/api/admin/accounts/${accountId}/obs-credential`, 'POST', 201, {})).data);
+    if (!data || !exactKeys(data, ['publicId', 'url']) || typeof data.publicId !== 'string' || !obsPublicIDPattern.test(data.publicId) || typeof data.url !== 'string') {
+      throw new HostedAPIError('invalid_response', 201);
+    }
+    let parsed: URL;
+    try { parsed = new URL(data.url); } catch { throw new HostedAPIError('invalid_response', 201); }
+    if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '' || parsed.search !== '' || parsed.pathname !== `/obs/${data.publicId}` || !/^#token=[A-Za-z0-9_%~-]+$/.test(parsed.hash)) {
+      throw new HostedAPIError('invalid_response', 201);
+    }
+    return { publicId: data.publicId, url: data.url };
   }
   async cancelAdminProof(id: string): Promise<void> { await this.request(`/api/admin/auth/bili/challenges/${encodeURIComponent(id)}`, 'DELETE', 204); }
   async adminLogin(challengeId: string, totp: string): Promise<void> { await this.request('/api/admin/session', 'POST', 204, { challengeId, totp }); }
