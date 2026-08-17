@@ -12,6 +12,7 @@ const deploymentFiles = [
   'deploy/hosted/gift-panel-hosted.service',
   'deploy/hosted/env.example',
   'scripts/build-hosted.mjs',
+  'scripts/test-hosted-mysql.mjs',
 ] as const;
 const ingressFiles = [
   'deploy/hosted/nginx.conf.template',
@@ -123,6 +124,88 @@ describe('hosted single-host deployment contract', () => {
     const packageJSON = JSON.parse(readProjectFile('package.json')) as { scripts?: Record<string, string> };
     expect(packageJSON.scripts?.['build:hosted-server']).toBe('node scripts/build-hosted.mjs');
     expect(packageJSON.scripts?.['verify:hosted-server-repro']).toBe('node scripts/build-hosted.mjs --verify-reproducible');
+    expect(packageJSON.scripts?.['test:hosted-mysql']).toBe('node scripts/test-hosted-mysql.mjs');
+  });
+
+  it('runs the real MySQL gate without exposing its DSN or password', async () => {
+    const moduleURL = new URL('../scripts/test-hosted-mysql.mjs', import.meta.url).href;
+    const { runHostedMySQLTests } = await import(`${moduleURL}?privacy=${Date.now()}`) as {
+      runHostedMySQLTests: (options: {
+        execute: (command: string, args: string[], options: { env: NodeJS.ProcessEnv }) => { status: number | null };
+        environment: NodeJS.ProcessEnv;
+      }) => void;
+    };
+    const calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+    expect(() => runHostedMySQLTests({
+      environment: {
+        RUNNER_TEST_MARKER: 'kept',
+        HOSTED_MYSQL_TEST_DSN: 'must-not-reach-docker',
+        HOSTED_MYSQL_TEST_REQUIRED: 'must-not-reach-docker',
+        HOSTED_MYSQL_TEST_ROOT_PASSWORD: 'must-not-reach-go',
+        hosted_mysql_test_dsn: 'lowercase-must-not-reach-docker',
+        Hosted_MySql_Test_Required: 'mixed-must-not-reach-docker',
+        hosted_mysql_test_root_password: 'lowercase-must-not-reach-go',
+      },
+      execute(command, args, options) {
+        calls.push({ command, args, env: options.env });
+        return { status: command === 'go' ? 1 : 0 };
+      },
+    })).toThrow('hosted MySQL integration tests failed');
+
+    expect(calls.map(({ command, args }) => [command, ...args])).toEqual([
+      ['docker', 'compose', '-p', 'gift-panel-hosted-test', '-f', 'deploy/hosted/docker-compose.test.yml', 'up', '-d', '--wait', '--wait-timeout', '120'],
+      ['go', '-C', 'goserver', 'test', '-tags=integration', './internal/hosted/store/mysqlstore', '-run', '^TestIntegration', '-count=1'],
+      ['docker', 'compose', '-p', 'gift-panel-hosted-test', '-f', 'deploy/hosted/docker-compose.test.yml', 'down', '--volumes', '--remove-orphans'],
+    ]);
+    const goEnvironment = calls[1].env;
+    expect(goEnvironment.HOSTED_MYSQL_TEST_REQUIRED).toBe('1');
+    expect(goEnvironment.HOSTED_MYSQL_TEST_DSN).toMatch(/^root:[^@]+@tcp\(127\.0\.0\.1:13306\)\/\?multiStatements=false&parseTime=true$/);
+    expect(goEnvironment.HOSTED_MYSQL_TEST_ROOT_PASSWORD).toBeUndefined();
+    expect(goEnvironment.RUNNER_TEST_MARKER).toBe('kept');
+    expect(calls[0].env.HOSTED_MYSQL_TEST_DSN).toBeUndefined();
+    expect(calls[0].env.HOSTED_MYSQL_TEST_REQUIRED).toBeUndefined();
+    expect(calls[2].env.HOSTED_MYSQL_TEST_DSN).toBeUndefined();
+    expect(calls[2].env.HOSTED_MYSQL_TEST_REQUIRED).toBeUndefined();
+    expect(calls[0].env.RUNNER_TEST_MARKER).toBe('kept');
+    expect(Object.keys(calls[0].env).filter((key) => key.toUpperCase() === 'HOSTED_MYSQL_TEST_DSN')).toEqual([]);
+    expect(Object.keys(calls[0].env).filter((key) => key.toUpperCase() === 'HOSTED_MYSQL_TEST_REQUIRED')).toEqual([]);
+    expect(Object.keys(calls[0].env).filter((key) => key.toUpperCase() === 'HOSTED_MYSQL_TEST_ROOT_PASSWORD')).toEqual(['HOSTED_MYSQL_TEST_ROOT_PASSWORD']);
+    expect(Object.keys(goEnvironment).filter((key) => key.toUpperCase() === 'HOSTED_MYSQL_TEST_DSN')).toEqual(['HOSTED_MYSQL_TEST_DSN']);
+    expect(Object.keys(goEnvironment).filter((key) => key.toUpperCase() === 'HOSTED_MYSQL_TEST_REQUIRED')).toEqual(['HOSTED_MYSQL_TEST_REQUIRED']);
+    expect(Object.keys(goEnvironment).filter((key) => key.toUpperCase() === 'HOSTED_MYSQL_TEST_ROOT_PASSWORD')).toEqual([]);
+
+    const packageSource = readProjectFile('package.json');
+    expect(packageSource).not.toContain('HOSTED_MYSQL_TEST_DSN');
+    expect(packageSource).not.toContain('gift-panel-root-test-only');
+  });
+
+  it.each([
+    ['startup nonzero', 0, 'status'],
+    ['startup throw', 0, 'throw'],
+    ['teardown nonzero', 2, 'status'],
+    ['teardown throw', 2, 'throw'],
+  ] as const)('always attempts exact private teardown after %s', async (_name, failureIndex, failureMode) => {
+    const moduleURL = new URL('../scripts/test-hosted-mysql.mjs', import.meta.url).href;
+    const { runHostedMySQLTests } = await import(`${moduleURL}?failure=${failureIndex}-${failureMode}-${Date.now()}`) as {
+      runHostedMySQLTests: (options: {
+        execute: (command: string, args: string[], options: { env: NodeJS.ProcessEnv }) => { status: number | null };
+        environment: NodeJS.ProcessEnv;
+      }) => void;
+    };
+    const calls: string[][] = [];
+    expect(() => runHostedMySQLTests({
+      environment: {},
+      execute(command, args) {
+        const index = calls.length;
+        calls.push([command, ...args]);
+        if (index === failureIndex && failureMode === 'throw') throw new Error('secret-bearing child failure');
+        return { status: index === failureIndex ? 1 : 0 };
+      },
+    })).toThrow(/^hosted MySQL integration tests failed$/);
+    expect(calls.at(-1)).toEqual([
+      'docker', 'compose', '-p', 'gift-panel-hosted-test', '-f', 'deploy/hosted/docker-compose.test.yml',
+      'down', '--volumes', '--remove-orphans',
+    ]);
   });
 
   it('keeps MySQL private and publishes only the application loopback port', () => {

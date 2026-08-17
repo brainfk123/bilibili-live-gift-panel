@@ -1,0 +1,29 @@
+name: gift-panel-hosted-test
+
+services:
+  mysql:
+    image: mysql:8.4.11@sha256:1d6b6a8fcee8ff758ff151d017f5203cd06792a0e698f0a593c9dfcb14609cf0
+    command:
+      - --skip-name-resolve
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --sql-mode=STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION
+    environment:
+      MYSQL_DATABASE: gift_panel_test
+      MYSQL_ROOT_PASSWORD: ${HOSTED_MYSQL_TEST_ROOT_PASSWORD:-gift-panel-root-test-only}
+      TZ: UTC
+    ports:
+      - "127.0.0.1:13306:3306"
+    volumes:
+      - hosted_mysql_test_data:/var/lib/mysql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping --host=127.0.0.1 --user=root --silent
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  hosted_mysql_test_data: {}

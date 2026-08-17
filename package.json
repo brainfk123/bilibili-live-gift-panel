@@ -20,6 +20,7 @@
     "verify:gift-clip-export": "node scripts/verify-gift-clip-export.mjs",
     "fetch:catalog": "node scripts/fetch-gift-catalog.mjs",
     "test:update-api": "go -C updateapi test ./... -count=1",
+    "test:hosted-mysql": "node scripts/test-hosted-mysql.mjs",
     "build:update-api": "node scripts/build-update-api.mjs",
     "test": "vitest run",
     "test:hosted": "vitest run tests/hosted-build.test.ts",
