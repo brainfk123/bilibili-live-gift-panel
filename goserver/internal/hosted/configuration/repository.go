@@ -2,16 +2,21 @@ package configuration
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 var (
 	ErrInvalidInput = errors.New("configuration: invalid input")
 	ErrNotFound     = errors.New("configuration: not found")
 	ErrUnavailable  = errors.New("configuration: repository unavailable")
+	ErrOwnership    = errors.New("configuration: runtime ownership conflict")
 )
 
 // Repository owns the durable configuration state for hosted accounts.
@@ -52,12 +57,243 @@ type RoomSuggestion struct {
 	SuggestedAt time.Time
 }
 
+// RuntimeEventCommand contains only trusted tenancy/fencing values and
+// identity-free gameplay data. Viewer identity and raw room events must never
+// cross this repository boundary.
+type RuntimeEventCommand struct {
+	AccountID        int64
+	LiveSessionID    int64
+	ConfigVersionID  int64
+	OwnerToken       [32]byte
+	OwnerEpoch       uint64
+	ExpectedRevision uint64
+	Runtime          RuntimeState
+	AggregateDelta   RuntimeAggregate
+	StableEventHash  *[32]byte
+	UpdatedAt        time.Time
+}
+
+// RuntimeAggregate is the identity-free durable summary of gameplay events.
+// Keeping this type at the repository boundary prevents callers from smuggling
+// viewer identity or raw room-event data into the aggregate JSON column.
+type RuntimeAggregate struct {
+	EventCount int     `json:"eventCount"`
+	GiftCount  int     `json:"giftCount"`
+	GiftCoin   float64 `json:"giftCoin,omitempty"`
+}
+
+type RuntimeEventResult struct {
+	Revision  uint64
+	Duplicate bool
+}
+
 type sqlRepository struct {
 	db *sql.DB
 }
 
-func NewRepository(db *sql.DB) Repository {
+func NewRepository(db *sql.DB) *sqlRepository {
 	return &sqlRepository{db: db}
+}
+
+// CommitRuntimeEvent atomically validates the captured owner fence and trusted
+// session identity, records stable-ID dedupe, replaces identity-free runtime
+// state, and updates the identity-free session aggregate.
+func (repository *sqlRepository) CommitRuntimeEvent(ctx context.Context, command RuntimeEventCommand) (RuntimeEventResult, error) {
+	if !repository.ready() || ctx == nil || command.AccountID <= 0 || command.LiveSessionID <= 0 || command.ConfigVersionID <= 0 || command.OwnerToken == ([32]byte{}) || command.OwnerEpoch == 0 || command.ExpectedRevision == 0 || command.UpdatedAt.IsZero() || command.AggregateDelta.EventCount <= 0 || command.AggregateDelta.GiftCount <= 0 || command.AggregateDelta.GiftCoin < 0 {
+		return RuntimeEventResult{}, ErrInvalidInput
+	}
+	runtimeJSON, err := marshalRuntime(command.Runtime)
+	if err != nil {
+		return RuntimeEventResult{}, ErrInvalidInput
+	}
+	command.UpdatedAt = databaseTime(command.UpdatedAt)
+
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RuntimeEventResult{}, ErrUnavailable
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			_ = transaction.Rollback()
+		}
+	}()
+
+	var enabled bool
+	if err := transaction.QueryRowContext(ctx, "SELECT disabled_at IS NULL FROM streamer_accounts WHERE id = ? FOR UPDATE", command.AccountID).Scan(&enabled); err != nil || !enabled {
+		return RuntimeEventResult{}, ErrUnavailable
+	}
+	cleanup, err := transaction.ExecContext(ctx, "DELETE FROM runtime_event_dedup_receipts WHERE account_id = ? AND expires_at <= UTC_TIMESTAMP(6) ORDER BY expires_at, event_hash LIMIT 100", command.AccountID)
+	if err != nil || !atMostRows(cleanup, 100) {
+		return RuntimeEventResult{}, ErrUnavailable
+	}
+	var ownerToken []byte
+	var ownerEpoch uint64
+	var current bool
+	if err := transaction.QueryRowContext(ctx, "SELECT owner_token, fencing_epoch, expires_at > UTC_TIMESTAMP(6) FROM runtime_account_owners WHERE account_id = ? FOR UPDATE", command.AccountID).Scan(&ownerToken, &ownerEpoch, &current); err != nil {
+		return RuntimeEventResult{}, ErrUnavailable
+	}
+	if len(ownerToken) != len(command.OwnerToken) || subtle.ConstantTimeCompare(ownerToken, command.OwnerToken[:]) != 1 || ownerEpoch != command.OwnerEpoch || !current {
+		return RuntimeEventResult{}, ErrOwnership
+	}
+
+	var configVersionID int64
+	var revision uint64
+	if err := transaction.QueryRowContext(ctx, "SELECT config_version_id, revision FROM account_runtime_state WHERE account_id = ? FOR UPDATE", command.AccountID).Scan(&configVersionID, &revision); err != nil {
+		return RuntimeEventResult{}, ErrUnavailable
+	}
+	if configVersionID != command.ConfigVersionID {
+		return RuntimeEventResult{}, ErrRevisionConflict
+	}
+	var sessionAccountID int64
+	if err := transaction.QueryRowContext(ctx, "SELECT i.account_id FROM runtime_session_identities AS i JOIN live_sessions AS l ON l.id = i.live_session_id AND l.account_id = i.account_id JOIN runtime_active_session_guards AS g ON g.account_id = i.account_id AND g.live_session_id = i.live_session_id WHERE i.live_session_id = ? AND i.account_id = ? AND l.ended_at IS NULL FOR UPDATE", command.LiveSessionID, command.AccountID).Scan(&sessionAccountID); err != nil || sessionAccountID != command.AccountID {
+		return RuntimeEventResult{}, ErrUnavailable
+	}
+
+	if command.StableEventHash != nil {
+		result, err := transaction.ExecContext(ctx, "DELETE FROM runtime_event_dedup_receipts WHERE account_id = ? AND event_hash = ? AND expires_at <= UTC_TIMESTAMP(6)", command.AccountID, command.StableEventHash[:])
+		if err != nil || !zeroOrOneRow(result) {
+			return RuntimeEventResult{}, ErrUnavailable
+		}
+		result, err = transaction.ExecContext(ctx, "INSERT INTO runtime_event_dedup_receipts (event_hash, live_session_id, account_id, created_at, expires_at) VALUES (?, ?, ?, UTC_TIMESTAMP(6), TIMESTAMPADD(HOUR, 24, UTC_TIMESTAMP(6)))", command.StableEventHash[:], command.LiveSessionID, command.AccountID)
+		if err != nil {
+			var mysqlError *mysql.MySQLError
+			if !errors.As(err, &mysqlError) || mysqlError.Number != 1062 {
+				return RuntimeEventResult{}, ErrUnavailable
+			}
+			if !scanReusableRuntimeReceipt(transaction.QueryRowContext(ctx, reusableRuntimeReceiptForUpdateQuery, command.AccountID, command.StableEventHash[:])) {
+				return RuntimeEventResult{}, ErrUnavailable
+			}
+			if err := transaction.Commit(); err != nil {
+				finished = true
+				if repository.verifyReusableRuntimeReceipt(command) {
+					return RuntimeEventResult{Revision: revision, Duplicate: true}, nil
+				}
+				return RuntimeEventResult{}, ErrUnavailable
+			}
+			finished = true
+			return RuntimeEventResult{Revision: revision, Duplicate: true}, nil
+		}
+		rows, err := result.RowsAffected()
+		if err != nil || rows != 1 {
+			return RuntimeEventResult{}, ErrUnavailable
+		}
+	}
+	if revision != command.ExpectedRevision {
+		return RuntimeEventResult{}, ErrRevisionConflict
+	}
+
+	var aggregate RuntimeAggregate
+	var storedAggregate []byte
+	err = transaction.QueryRowContext(ctx, "SELECT aggregate_json FROM runtime_session_aggregates WHERE live_session_id = ? AND account_id = ? FOR UPDATE", command.LiveSessionID, command.AccountID).Scan(&storedAggregate)
+	if err == nil {
+		if json.Unmarshal(storedAggregate, &aggregate) != nil || aggregate.EventCount < 0 || aggregate.GiftCount < 0 || aggregate.GiftCoin < 0 {
+			return RuntimeEventResult{}, ErrUnavailable
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return RuntimeEventResult{}, ErrUnavailable
+	}
+	nextAggregate := RuntimeAggregate{
+		EventCount: aggregate.EventCount + command.AggregateDelta.EventCount,
+		GiftCount:  aggregate.GiftCount + command.AggregateDelta.GiftCount,
+		GiftCoin:   aggregate.GiftCoin + command.AggregateDelta.GiftCoin,
+	}
+	if nextAggregate.EventCount < aggregate.EventCount || nextAggregate.GiftCount < aggregate.GiftCount {
+		return RuntimeEventResult{}, ErrUnavailable
+	}
+	aggregateJSON, err := json.Marshal(nextAggregate)
+	if err != nil {
+		return RuntimeEventResult{}, ErrInvalidInput
+	}
+
+	nextRevision := revision + 1
+	if nextRevision == 0 {
+		return RuntimeEventResult{}, ErrUnavailable
+	}
+	result, err := transaction.ExecContext(ctx, "UPDATE account_runtime_state SET runtime_json = ?, revision = ?, updated_at = ? WHERE account_id = ? AND config_version_id = ? AND revision = ?", runtimeJSON, nextRevision, command.UpdatedAt, command.AccountID, command.ConfigVersionID, revision)
+	if err != nil || !oneRow(result) {
+		return RuntimeEventResult{}, ErrUnavailable
+	}
+	result, err = transaction.ExecContext(ctx, "INSERT INTO runtime_session_aggregates (live_session_id, account_id, aggregate_json, updated_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE aggregate_json = VALUES(aggregate_json), updated_at = VALUES(updated_at)", command.LiveSessionID, command.AccountID, aggregateJSON, command.UpdatedAt)
+	if err != nil || !oneOrTwoRows(result) {
+		return RuntimeEventResult{}, ErrUnavailable
+	}
+	if err := transaction.Commit(); err != nil {
+		finished = true
+		if repository.verifyCommittedRuntimeEvent(command, runtimeJSON, aggregateJSON, nextRevision) {
+			return RuntimeEventResult{Revision: nextRevision}, nil
+		}
+		return RuntimeEventResult{}, ErrUnavailable
+	}
+	finished = true
+	return RuntimeEventResult{Revision: nextRevision}, nil
+}
+
+func (repository *sqlRepository) verifyCommittedRuntimeEvent(command RuntimeEventCommand, runtimeJSON, aggregateJSON []byte, revision uint64) bool {
+	verificationContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	const query = "SELECT s.revision, s.runtime_json, a.aggregate_json, o.owner_token, o.fencing_epoch, o.expires_at > UTC_TIMESTAMP(6) FROM account_runtime_state AS s JOIN runtime_session_aggregates AS a ON a.account_id = s.account_id JOIN runtime_session_identities AS i ON i.account_id = a.account_id AND i.live_session_id = a.live_session_id JOIN runtime_account_owners AS o ON o.account_id = s.account_id WHERE s.account_id = ? AND s.config_version_id = ? AND i.live_session_id = ? AND i.account_id = ?"
+	var storedRevision uint64
+	var storedRuntime, storedAggregate, storedOwner []byte
+	var storedEpoch uint64
+	var current bool
+	if err := repository.db.QueryRowContext(verificationContext, query, command.AccountID, command.ConfigVersionID, command.LiveSessionID, command.AccountID).Scan(&storedRevision, &storedRuntime, &storedAggregate, &storedOwner, &storedEpoch, &current); err != nil {
+		return false
+	}
+	if storedRevision != revision || !jsonSemanticallyEqual(storedRuntime, runtimeJSON) || !jsonSemanticallyEqual(storedAggregate, aggregateJSON) || len(storedOwner) != len(command.OwnerToken) || subtle.ConstantTimeCompare(storedOwner, command.OwnerToken[:]) != 1 || storedEpoch != command.OwnerEpoch || !current {
+		return false
+	}
+	if command.StableEventHash == nil {
+		return true
+	}
+	return scanCurrentRuntimeReceipt(repository.db.QueryRowContext(verificationContext, runtimeReceiptQuery, command.AccountID, command.StableEventHash[:]), command.LiveSessionID)
+}
+
+const runtimeReceiptQuery = "SELECT live_session_id, created_at, expires_at, expires_at > UTC_TIMESTAMP(6), TIMESTAMPDIFF(MICROSECOND, created_at, expires_at) = 86400000000 FROM runtime_event_dedup_receipts WHERE account_id = ? AND event_hash = ?"
+const reusableRuntimeReceiptQuery = "SELECT expires_at > UTC_TIMESTAMP(6) FROM runtime_event_dedup_receipts WHERE account_id = ? AND event_hash = ?"
+const reusableRuntimeReceiptForUpdateQuery = reusableRuntimeReceiptQuery + " FOR UPDATE"
+
+type runtimeReceiptScanner interface {
+	Scan(...any) error
+}
+
+func scanCurrentRuntimeReceipt(row runtimeReceiptScanner, liveSessionID int64) bool {
+	var storedLiveSessionID int64
+	var createdAt, expiresAt time.Time
+	var current, exactTTL bool
+	if row.Scan(&storedLiveSessionID, &createdAt, &expiresAt, &current, &exactTTL) != nil {
+		return false
+	}
+	return storedLiveSessionID == liveSessionID && !createdAt.IsZero() && expiresAt.After(createdAt) && current && exactTTL
+}
+
+func scanReusableRuntimeReceipt(row runtimeReceiptScanner) bool {
+	var current bool
+	return row.Scan(&current) == nil && current
+}
+
+func (repository *sqlRepository) verifyReusableRuntimeReceipt(command RuntimeEventCommand) bool {
+	if command.StableEventHash == nil {
+		return false
+	}
+	verificationContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return scanReusableRuntimeReceipt(repository.db.QueryRowContext(verificationContext, reusableRuntimeReceiptQuery, command.AccountID, command.StableEventHash[:]))
+}
+
+func jsonSemanticallyEqual(left, right []byte) bool {
+	var leftValue, rightValue any
+	if json.Unmarshal(left, &leftValue) != nil || json.Unmarshal(right, &rightValue) != nil {
+		return false
+	}
+	return reflect.DeepEqual(leftValue, rightValue)
+}
+
+func databaseTime(value time.Time) time.Time {
+	if value.IsZero() {
+		return value
+	}
+	return value.UTC().Truncate(time.Microsecond)
 }
 
 func (repository *sqlRepository) LoadActive(ctx context.Context, accountID int64) (Version, State, error) {
@@ -271,6 +507,22 @@ func oneRow(result sql.Result) bool {
 	}
 	rows, err := result.RowsAffected()
 	return err == nil && rows == 1
+}
+
+func zeroOrOneRow(result sql.Result) bool {
+	if result == nil {
+		return false
+	}
+	rows, err := result.RowsAffected()
+	return err == nil && (rows == 0 || rows == 1)
+}
+
+func atMostRows(result sql.Result, maximum int64) bool {
+	if result == nil || maximum < 0 {
+		return false
+	}
+	rows, err := result.RowsAffected()
+	return err == nil && rows >= 0 && rows <= maximum
 }
 
 // MySQL reports one affected row for an insert and two for an ON DUPLICATE

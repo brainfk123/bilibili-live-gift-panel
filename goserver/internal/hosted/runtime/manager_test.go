@@ -5,10 +5,13 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"bilibili-live-gift-panel/internal/hosted/configuration"
 	"bilibili-live-gift-panel/internal/hosted/migration"
 	"bilibili-live-gift-panel/internal/hosted/roomsource"
 )
@@ -90,6 +93,317 @@ func TestAdmittedProcessReceivesCapturedOwnerFence(t *testing.T) {
 	if owner := <-received; owner.AccountID != 7 || owner.Token != token || owner.Epoch != 1 {
 		t.Fatalf("Process owner = %#v", owner)
 	}
+}
+
+func TestManagerCreatesBoundProcessorAndClosesItBeforeEndingSession(t *testing.T) {
+	log := &operationLog{}
+	sessions := &orderedSessions{enabled: true, target: "42", log: log}
+	sources := newOrderedRoomSources(log, map[string]string{"42": "42"})
+	factory := &recordingProcessorFactory{log: log, accepted: make(chan roomsource.Event, 1)}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: orderedMigration{log: log}, RoomSources: sources}, Options{ProcessorFactory: factory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := manager.Acquire(context.Background(), 7, LeaseConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := roomsource.Event{ID: "gift-1", RoomID: "42"}
+	sources.subscription(t, 0).Emit(event)
+	if received := <-factory.accepted; received.ID != event.ID {
+		t.Fatalf("accepted event = %#v", received)
+	}
+	lease.Release()
+	if err := manager.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := log.snapshot(); !containsOrderedOperations(got, []string{"processor-new:7:1", "processor-accept:gift-1", "processor-close", "end:1"}) {
+		t.Fatalf("processor lifecycle order = %v", got)
+	}
+}
+
+func TestManagerStatusIncludesBoundProcessorDegradation(t *testing.T) {
+	log := &operationLog{}
+	sessions := &orderedSessions{enabled: true, target: "42", log: log}
+	sources := newOrderedRoomSources(log, map[string]string{"42": "42"})
+	factory := &recordingProcessorFactory{log: log, accepted: make(chan roomsource.Event, 1), status: ProcessorStatus{Degraded: true, Buffered: 1, ConnectionHealthy: true}}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: orderedMigration{log: log}, RoomSources: sources}, Options{ProcessorFactory: factory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	if _, err := manager.Acquire(context.Background(), 7, LeaseConfig); err != nil {
+		t.Fatal(err)
+	}
+	status, err := manager.Status(context.Background(), 7)
+	if err != nil || status.State != StateDegraded || !status.Degraded || status.PersistenceBuffered != 1 || !status.ConnectionHealthy {
+		t.Fatalf("Status() = %#v, %v", status, err)
+	}
+}
+
+func TestManagerKeepsProcessorConnectionHealthVisibleAcrossSourceErrors(t *testing.T) {
+	log := &operationLog{}
+	sessions := &orderedSessions{enabled: true, target: "42", log: log}
+	sources := newOrderedRoomSources(log, map[string]string{"42": "42"})
+	factory := &recordingProcessorFactory{log: log, accepted: make(chan roomsource.Event, 1), status: ProcessorStatus{ConnectionHealthy: true}}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: orderedMigration{log: log}, RoomSources: sources}, Options{ProcessorFactory: factory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	if _, err := manager.Acquire(context.Background(), 7, LeaseConfig); err != nil {
+		t.Fatal(err)
+	}
+	subscription := sources.subscription(t, 0)
+	subscription.Fail(errors.New("upstream lost"))
+	if status, _ := manager.Status(context.Background(), 7); status.ConnectionHealthy {
+		t.Fatalf("connection health remained true after source error: %#v", status)
+	}
+	subscription.Emit(roomsource.Event{ID: "healthy", RoomID: "42"})
+	<-factory.accepted
+	if status, _ := manager.Status(context.Background(), 7); !status.ConnectionHealthy || status.Degraded || status.State != StateActive {
+		t.Fatalf("source health did not recover on frame: %#v", status)
+	}
+}
+
+func TestManagerDoesNotOverwriteSourceFailureDuringProcessorStartup(t *testing.T) {
+	log := &operationLog{}
+	sessions := &orderedSessions{enabled: true, target: "42", log: log}
+	sources := newOrderedRoomSources(log, map[string]string{"42": "42"})
+	processor := &startupHealthProcessor{initialHealthyStarted: make(chan struct{}), releaseInitialHealthy: make(chan struct{}), unhealthyApplied: make(chan struct{})}
+	factory := processorFactoryFunc(func(context.Context, OwnerFence, Session) (SessionProcessor, error) { return processor, nil })
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: orderedMigration{log: log}, RoomSources: sources}, Options{ProcessorFactory: factory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	acquired := make(chan error, 1)
+	go func() {
+		_, err := manager.Acquire(context.Background(), 7, LeaseConfig)
+		acquired <- err
+	}()
+	<-processor.initialHealthyStarted
+	failureDelivered := make(chan struct{})
+	go func() {
+		sources.subscription(t, 0).Fail(errors.New("failed during startup"))
+		close(failureDelivered)
+	}()
+	select {
+	case <-processor.unhealthyApplied:
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(processor.releaseInitialHealthy)
+	<-failureDelivered
+	if err := <-acquired; err != nil {
+		t.Fatal(err)
+	}
+	status, err := manager.Status(context.Background(), 7)
+	if err != nil || status.ConnectionHealthy || !status.Degraded || status.State != StateDegraded {
+		t.Fatalf("startup failure status = %#v, %v", status, err)
+	}
+}
+
+func TestManagerSerializesSourceErrorStateBeforeConcurrentHealthyFrame(t *testing.T) {
+	log := &operationLog{}
+	sessions := &orderedSessions{enabled: true, target: "42", log: log}
+	sources := newOrderedRoomSources(log, map[string]string{"42": "42"})
+	processor := &callbackOrderProcessor{unhealthyApplied: make(chan struct{}), recoveredApplied: make(chan struct{})}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: orderedMigration{log: log}, RoomSources: sources}, Options{ProcessorFactory: processorFactoryFunc(func(context.Context, OwnerFence, Session) (SessionProcessor, error) { return processor, nil })})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	if _, err := manager.Acquire(context.Background(), 7, LeaseConfig); err != nil {
+		t.Fatal(err)
+	}
+	account, err := manager.accountExisting(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription := sources.subscription(t, 0)
+	account.mu.Lock()
+	errorDone := make(chan struct{})
+	go func() {
+		subscription.Fail(errors.New("overlapping source failure"))
+		close(errorDone)
+	}()
+	<-processor.unhealthyApplied
+	eventDone := make(chan struct{})
+	go func() {
+		subscription.Emit(roomsource.Event{ID: "healthy", RoomID: "42"})
+		close(eventDone)
+	}()
+	recoveredBeforeErrorState := false
+	select {
+	case <-processor.recoveredApplied:
+		recoveredBeforeErrorState = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	account.mu.Unlock()
+	<-errorDone
+	<-eventDone
+	if recoveredBeforeErrorState {
+		t.Fatal("healthy frame changed connection health before source error state was serialized")
+	}
+	status, err := manager.Status(context.Background(), 7)
+	if err != nil || !status.ConnectionHealthy || status.Degraded || status.State != StateActive {
+		t.Fatalf("overlap recovery status = %#v, %v", status, err)
+	}
+}
+
+func TestManagerRevokesAdmissionImmediatelyWhenBufferedRetryLosesOwnership(t *testing.T) {
+	log := &operationLog{}
+	sessions := &orderedSessions{enabled: true, target: "42", log: log}
+	sources := newOrderedRoomSources(log, map[string]string{"42": "42"})
+	repository := processorRepositoryFixture()
+	attempts := 0
+	repository.commit = func(context.Context, configuration.RuntimeEventCommand) (configuration.RuntimeEventResult, error) {
+		attempts++
+		if attempts == 1 {
+			return configuration.RuntimeEventResult{}, configuration.ErrUnavailable
+		}
+		return configuration.RuntimeEventResult{}, configuration.ErrOwnership
+	}
+	retryTimers := &manualTimerFactory{created: make(chan *manualTimer, 1)}
+	publisher := NewPublisher()
+	factory, err := NewProcessorFactory(repository, publisher, ProcessorOptions{Now: processorNow, NewRetryTimer: retryTimers.New})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: processorManagerConfiguration{version: repository.version, state: repository.state}, Migration: orderedMigration{log: log}, RoomSources: sources}, Options{ProcessorFactory: factory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	lease, err := manager.Acquire(context.Background(), 7, LeaseConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription := sources.subscription(t, 0)
+	subscription.Emit(giftEventFixture("event-1", 123, "secret", "avatar"))
+	(<-retryTimers.created).Fire()
+	select {
+	case <-subscription.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("ownership loss during buffered retry did not revoke admission before heartbeat")
+	}
+	status, err := manager.Status(context.Background(), 7)
+	if err != nil || status.Leases != 0 || status.State == StateActive {
+		t.Fatalf("status after retry ownership loss = %#v, %v", status, err)
+	}
+	subscription.Emit(giftEventFixture("event-after-takeover", 456, "other", "avatar-two"))
+	if attempts != 2 {
+		t.Fatalf("repository attempts after revoked admission = %d, want 2", attempts)
+	}
+	if err := lease.Renew(context.Background()); err == nil {
+		t.Fatal("lease remained usable after retry ownership loss")
+	}
+}
+
+type processorManagerConfiguration struct {
+	version configuration.Version
+	state   configuration.State
+}
+
+func (repository processorManagerConfiguration) LoadActive(context.Context, int64) (configuration.Version, configuration.State, error) {
+	return repository.version, repository.state, nil
+}
+
+type processorFactoryFunc func(context.Context, OwnerFence, Session) (SessionProcessor, error)
+
+func (factory processorFactoryFunc) New(ctx context.Context, owner OwnerFence, session Session) (SessionProcessor, error) {
+	return factory(ctx, owner, session)
+}
+
+type startupHealthProcessor struct {
+	healthy               atomic.Bool
+	initialHealthyStarted chan struct{}
+	releaseInitialHealthy chan struct{}
+	unhealthyApplied      chan struct{}
+	initialOnce           sync.Once
+	unhealthyOnce         sync.Once
+}
+
+type callbackOrderProcessor struct {
+	healthy          atomic.Bool
+	healthyCalls     atomic.Int64
+	unhealthyApplied chan struct{}
+	recoveredApplied chan struct{}
+	unhealthyOnce    sync.Once
+	recoveredOnce    sync.Once
+}
+
+func (processor *callbackOrderProcessor) Accept(roomsource.Event) error { return nil }
+func (processor *callbackOrderProcessor) Close(context.Context) error   { return nil }
+func (processor *callbackOrderProcessor) Status() ProcessorStatus {
+	return ProcessorStatus{ConnectionHealthy: processor.healthy.Load()}
+}
+func (processor *callbackOrderProcessor) SetConnectionHealthy(healthy bool) {
+	processor.healthy.Store(healthy)
+	if !healthy {
+		processor.unhealthyOnce.Do(func() { close(processor.unhealthyApplied) })
+		return
+	}
+	if processor.healthyCalls.Add(1) > 1 {
+		processor.recoveredOnce.Do(func() { close(processor.recoveredApplied) })
+	}
+}
+
+func (processor *startupHealthProcessor) Accept(roomsource.Event) error { return nil }
+func (processor *startupHealthProcessor) Close(context.Context) error   { return nil }
+func (processor *startupHealthProcessor) Status() ProcessorStatus {
+	return ProcessorStatus{ConnectionHealthy: processor.healthy.Load()}
+}
+func (processor *startupHealthProcessor) SetConnectionHealthy(healthy bool) {
+	if healthy {
+		processor.initialOnce.Do(func() {
+			close(processor.initialHealthyStarted)
+			<-processor.releaseInitialHealthy
+		})
+	}
+	processor.healthy.Store(healthy)
+	if !healthy {
+		processor.unhealthyOnce.Do(func() { close(processor.unhealthyApplied) })
+	}
+}
+
+type recordingProcessorFactory struct {
+	log      *operationLog
+	accepted chan roomsource.Event
+	status   ProcessorStatus
+}
+
+func (factory *recordingProcessorFactory) New(_ context.Context, owner OwnerFence, session Session) (SessionProcessor, error) {
+	factory.log.add("processor-new:" + strconv.FormatInt(owner.AccountID, 10) + ":" + strconv.FormatInt(session.ID, 10))
+	return &recordingSessionProcessor{factory: factory}, nil
+}
+
+type recordingSessionProcessor struct{ factory *recordingProcessorFactory }
+
+func (processor *recordingSessionProcessor) Accept(event roomsource.Event) error {
+	processor.factory.log.add("processor-accept:" + event.ID)
+	processor.factory.accepted <- event
+	return nil
+}
+
+func (processor *recordingSessionProcessor) Close(context.Context) error {
+	processor.factory.log.add("processor-close")
+	return nil
+}
+
+func (processor *recordingSessionProcessor) Status() ProcessorStatus { return processor.factory.status }
+func (processor *recordingSessionProcessor) SetConnectionHealthy(healthy bool) {
+	processor.factory.status.ConnectionHealthy = healthy
+}
+
+func containsOrderedOperations(got, want []string) bool {
+	index := 0
+	for _, operation := range got {
+		if index < len(want) && operation == want[index] {
+			index++
+		}
+	}
+	return index == len(want)
 }
 
 func TestLastLeaseExpiryEndsSessionAndShutdownWaitsForRoomSourceQuiescence(t *testing.T) {

@@ -77,6 +77,7 @@ type Options struct {
 	NewHeartbeatTimer     func(time.Duration) Timer
 	NewShutdownTimer      func(time.Duration) Timer
 	Process               ProcessEvent
+	ProcessorFactory      ProcessorFactory
 	OwnerToken            OwnerToken
 	OwnerTTL              time.Duration
 	HeartbeatInterval     time.Duration
@@ -89,7 +90,7 @@ type Manager struct {
 	dependencies           Dependencies
 	now                    func() time.Time
 	newTimer               func(time.Duration) Timer
-	process                ProcessEvent
+	processorFactory       ProcessorFactory
 	ownerToken             OwnerToken
 	ownerTTL               time.Duration
 	heartbeat              time.Duration
@@ -120,50 +121,56 @@ type Manager struct {
 }
 
 type accountRuntime struct {
-	manager      *Manager
-	accountID    int64
-	opMu         sync.Mutex
-	mu           sync.Mutex
-	leases       map[uint64]LeaseKind
-	disabled     bool
-	shutting     bool
-	degraded     bool
-	current      *activeSession
-	idleTimer    Timer
-	idleCancel   chan struct{}
-	idleDone     chan struct{}
-	closeDone    chan struct{}
-	stale        bool
-	staleDone    chan struct{}
-	staleRelease OwnerFence
-	owner        OwnerFence
-	reconcile    bool
-	operation    bool
+	manager        *Manager
+	accountID      int64
+	opMu           sync.Mutex
+	mu             sync.Mutex
+	leases         map[uint64]LeaseKind
+	disabled       bool
+	shutting       bool
+	degraded       bool
+	sourceDegraded bool
+	current        *activeSession
+	idleTimer      Timer
+	idleCancel     chan struct{}
+	idleDone       chan struct{}
+	closeDone      chan struct{}
+	stale          bool
+	staleDone      chan struct{}
+	staleRelease   OwnerFence
+	owner          OwnerFence
+	reconcile      bool
+	operation      bool
 }
 
 type activeSession struct {
-	account       *accountRuntime
-	owner         OwnerFence
-	session       Session
-	subscription  roomsource.Subscription
-	events        chan roomsource.Event
-	workerDone    chan struct{}
-	admissionMu   sync.Mutex
-	admitting     bool
-	workerStarted bool
-	eventsClosed  bool
-	drained       bool
-	endedAt       time.Time
+	account         *accountRuntime
+	owner           OwnerFence
+	session         Session
+	processor       SessionProcessor
+	subscription    roomsource.Subscription
+	events          chan roomsource.Event
+	workerDone      chan struct{}
+	admissionMu     sync.Mutex
+	admitting       bool
+	workerStarted   bool
+	eventsClosed    bool
+	drained         bool
+	endedAt         time.Time
+	processorClosed bool
+	sourceHealthy   bool
 }
 
 type Status struct {
-	State       string `json:"state"`
-	RoomID      string `json:"roomId,omitempty"`
-	SessionID   int64  `json:"sessionId,omitempty"`
-	Leases      int    `json:"leases"`
-	ConfigLease bool   `json:"configLease"`
-	OBSLease    bool   `json:"obsLease"`
-	Degraded    bool   `json:"degraded"`
+	State               string `json:"state"`
+	RoomID              string `json:"roomId,omitempty"`
+	SessionID           int64  `json:"sessionId,omitempty"`
+	Leases              int    `json:"leases"`
+	ConfigLease         bool   `json:"configLease"`
+	OBSLease            bool   `json:"obsLease"`
+	Degraded            bool   `json:"degraded"`
+	PersistenceBuffered int    `json:"persistenceBuffered,omitempty"`
+	ConnectionHealthy   bool   `json:"connectionHealthy"`
 }
 
 type operationContext struct {
@@ -218,13 +225,19 @@ func NewManager(dependencies Dependencies, options Options) (*Manager, error) {
 			return nil, ErrUnavailable
 		}
 	}
-	if options.Process == nil {
+	if options.Process != nil && options.ProcessorFactory != nil {
+		return nil, ErrInvalidInput
+	}
+	if options.Process == nil && options.ProcessorFactory == nil {
 		options.Process = func(context.Context, OwnerFence, Session, roomsource.Event) error { return nil }
+	}
+	if options.ProcessorFactory == nil {
+		options.ProcessorFactory = processEventProcessorFactory{process: options.Process}
 	}
 	lifecycle, cancel := context.WithCancel(context.Background())
 	processing, cancelProcessing := context.WithCancel(context.Background())
 	ownershipControl, cancelOwnershipControl := context.WithCancel(context.Background())
-	manager := &Manager{dependencies: dependencies, now: options.Now, newTimer: options.NewTimer, process: options.Process, ownerToken: options.OwnerToken, ownerTTL: options.OwnerTTL, heartbeat: options.HeartbeatInterval, ownerOperationTimeout: options.OwnerOperationTimeout, newHeartbeatTimer: options.NewHeartbeatTimer, newShutdownTimer: options.NewShutdownTimer, shutdownRetryBackoff: options.ShutdownRetryBackoff, beforeSessionPublish: options.BeforeSessionPublish, heartbeatDone: make(chan struct{}), ownershipControl: ownershipControl, cancelOwnershipControl: cancelOwnershipControl, ownershipStop: make(chan struct{}), accounts: make(map[int64]*accountRuntime), closing: make(chan struct{}), done: make(chan struct{}), lifecycle: lifecycle, cancel: cancel, processing: processing, cancelProcessing: cancelProcessing}
+	manager := &Manager{dependencies: dependencies, now: options.Now, newTimer: options.NewTimer, processorFactory: options.ProcessorFactory, ownerToken: options.OwnerToken, ownerTTL: options.OwnerTTL, heartbeat: options.HeartbeatInterval, ownerOperationTimeout: options.OwnerOperationTimeout, newHeartbeatTimer: options.NewHeartbeatTimer, newShutdownTimer: options.NewShutdownTimer, shutdownRetryBackoff: options.ShutdownRetryBackoff, beforeSessionPublish: options.BeforeSessionPublish, heartbeatDone: make(chan struct{}), ownershipControl: ownershipControl, cancelOwnershipControl: cancelOwnershipControl, ownershipStop: make(chan struct{}), accounts: make(map[int64]*accountRuntime), closing: make(chan struct{}), done: make(chan struct{}), lifecycle: lifecycle, cancel: cancel, processing: processing, cancelProcessing: cancelProcessing}
 	go manager.runHeartbeat()
 	return manager, nil
 }
@@ -512,6 +525,12 @@ func (manager *Manager) Status(ctx context.Context, accountID int64) (Status, er
 	account.mu.Lock()
 	defer account.mu.Unlock()
 	status := Status{State: StateIdle, Leases: len(account.leases), Degraded: account.degraded}
+	if account.current != nil && account.current.processor != nil {
+		processorStatus := account.current.processor.Status()
+		status.Degraded = status.Degraded || account.sourceDegraded || processorStatus.Degraded
+		status.PersistenceBuffered = processorStatus.Buffered
+		status.ConnectionHealthy = processorStatus.ConnectionHealthy
+	}
 	for _, kind := range account.leases {
 		status.ConfigLease = status.ConfigLease || kind == LeaseConfig
 		status.OBSLease = status.OBSLease || kind == LeaseOBS
@@ -520,7 +539,7 @@ func (manager *Manager) Status(ctx context.Context, accountID int64) (Status, er
 		status.State = StateDisabled
 	} else if account.shutting {
 		status.State = StateShuttingDown
-	} else if account.degraded {
+	} else if status.Degraded {
 		status.State = StateDegraded
 	} else if account.current != nil {
 		status.State = StateActive

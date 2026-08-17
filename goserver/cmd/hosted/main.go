@@ -181,10 +181,18 @@ func run() error {
 			return errors.New("configure Bilibili service HTTP")
 		}
 		roomSources := roomsource.NewManager(biliDependencies.Gateway, roomsource.Options{})
+		runtimePublisher := hostedruntime.NewPublisher()
+		runtimeProcessorFactory, err := hostedruntime.NewProcessorFactory(configurationRepository, runtimePublisher, hostedruntime.ProcessorOptions{Alert: func(status hostedruntime.ProcessorStatus) {
+			slog.Warn("hosted runtime persistence degraded", "account_id", status.AccountID, "live_session_id", status.LiveSessionID, "buffered", status.Buffered, "rejecting", status.Rejecting, "connection_healthy", status.ConnectionHealthy)
+		}})
+		if err != nil {
+			roomSources.Close()
+			return errors.New("configure hosted runtime processor")
+		}
 		runtimeManager, err := hostedruntime.NewManager(hostedruntime.Dependencies{
 			Sessions: hostedruntime.NewSessionRepository(store.Database()), Configuration: configurationRepository,
 			Migration: migrationService, RoomSources: roomSources,
-		}, hostedruntime.Options{})
+		}, hostedruntime.Options{ProcessorFactory: runtimeProcessorFactory})
 		if err != nil {
 			roomSources.Close()
 			return errors.New("configure hosted runtime")

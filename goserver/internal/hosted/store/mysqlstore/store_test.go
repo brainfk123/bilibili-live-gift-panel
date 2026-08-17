@@ -152,9 +152,10 @@ func TestPublishedRuntimeMigrationChecksumsRemainImmutable(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"0004_configuration_and_migration": "8fb8fc88b8040b9806ea15612fdb62dd1fc12f764efcf23d623937779dc64f7c",
-		"0005_runtime_and_obs":             "aaeb739b1fd17b3751d733d36fd8e06c1320f5393ff77341bbac6fbd2a7bc9c2",
-		"0007_runtime_ownership":           "a56cd452a649bd928b5a48a3e8ffacca15fd889eab5161fb7bc96d782be9caa4",
+		"0004_configuration_and_migration":  "8fb8fc88b8040b9806ea15612fdb62dd1fc12f764efcf23d623937779dc64f7c",
+		"0005_runtime_and_obs":              "aaeb739b1fd17b3751d733d36fd8e06c1320f5393ff77341bbac6fbd2a7bc9c2",
+		"0007_runtime_ownership":            "a56cd452a649bd928b5a48a3e8ffacca15fd889eab5161fb7bc96d782be9caa4",
+		"0008_runtime_dedupe_cleanup_index": "7d69109e076d085e0988e0c196df8480d1dcd8a03e60495f6302e382ea94e064",
 	}
 	for _, item := range migrations {
 		checksum, exists := want[item.version]
@@ -235,6 +236,54 @@ func TestProductionRuntimeInvariantMigrationUsesOneCanonicalCreateOnlySchema(t *
 		}
 		if trimmed != "" && !strings.HasPrefix(trimmed, wantPrefix) {
 			t.Fatalf("0006 statement %d has a partial-retry unsafe shape: %s", index, trimmed)
+		}
+	}
+}
+
+func TestProductionRuntimeDedupeCleanupIndexMigrationIsCrashRetrySafe(t *testing.T) {
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cleanupIndex migration
+	for _, item := range migrations {
+		if item.version == "0008_runtime_dedupe_cleanup_index" {
+			cleanupIndex = item
+			break
+		}
+	}
+	if cleanupIndex.version == "" {
+		t.Fatal("production migrations do not include 0008_runtime_dedupe_cleanup_index")
+	}
+	normalized := strings.Join(strings.Fields(string(cleanupIndex.contents)), " ")
+	for _, required := range []string{
+		"FROM information_schema.statistics",
+		"table_schema = DATABASE()",
+		"table_name = 'runtime_event_dedup_receipts'",
+		"index_name = 'idx_runtime_event_dedup_receipts_account_expiry'",
+		"COUNT(*) = 3",
+		"SEQ_IN_INDEX = 1 AND COLUMN_NAME = 'account_id'",
+		"SEQ_IN_INDEX = 2 AND COLUMN_NAME = 'expires_at'",
+		"SEQ_IN_INDEX = 3 AND COLUMN_NAME = 'event_hash'",
+		"SUM(CASE WHEN COLLATION = 'A' THEN 1 ELSE 0 END) = 3",
+		"CREATE INDEX idx_runtime_event_dedup_receipts_account_expiry ON runtime_event_dedup_receipts (account_id, expires_at, event_hash)",
+		"SELECT * FROM information_schema.runtime_dedupe_cleanup_index_definition_mismatch",
+	} {
+		if !strings.Contains(normalized, required) {
+			t.Fatalf("0008 cleanup index migration missing %q", required)
+		}
+	}
+	if strings.Contains(normalized, "CREATE INDEX IF NOT EXISTS") {
+		t.Fatal("0008 uses unsupported MySQL CREATE INDEX IF NOT EXISTS syntax")
+	}
+	statements := splitStatements(cleanupIndex.contents)
+	if len(statements) != 5 {
+		t.Fatalf("0008 statements=%d want state check, SQL selection, prepare, execute, deallocate", len(statements))
+	}
+	prefixes := []string{"SET @runtime_dedupe_cleanup_index_state", "SET @runtime_dedupe_cleanup_index_sql", "PREPARE runtime_dedupe_cleanup_index_stmt", "EXECUTE runtime_dedupe_cleanup_index_stmt", "DEALLOCATE PREPARE runtime_dedupe_cleanup_index_stmt"}
+	for index, prefix := range prefixes {
+		if !strings.HasPrefix(strings.TrimSpace(statements[index]), prefix) {
+			t.Fatalf("0008 statement %d = %q, want prefix %q", index, statements[index], prefix)
 		}
 	}
 }

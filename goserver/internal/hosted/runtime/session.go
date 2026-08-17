@@ -465,7 +465,7 @@ func (manager *Manager) startRoom(ctx context.Context, account *accountRuntime, 
 	if err != nil || version.ID <= 0 {
 		return ErrUnavailable
 	}
-	active := &activeSession{account: account, owner: owner, events: make(chan roomsource.Event, 256), workerDone: make(chan struct{}), admitting: true}
+	active := &activeSession{account: account, owner: owner, events: make(chan roomsource.Event, 256), workerDone: make(chan struct{}), admitting: true, sourceHealthy: true}
 	subscription, err := manager.dependencies.RoomSources.SubscribeCanonical(ctx, roomID, account.accountID, sessionSink{active: active})
 	if err != nil {
 		return ErrUnavailable
@@ -485,7 +485,23 @@ func (manager *Manager) startRoom(ctx context.Context, account *accountRuntime, 
 		}
 		return ErrUnavailable
 	}
-	active.session, active.subscription = session, subscription
+	processor, err := manager.processorFactory.New(manager.processing, owner, session)
+	if err != nil {
+		subscription.Cancel()
+		_ = subscription.Wait(ctx)
+		endErr := manager.dependencies.Sessions.EndSession(ctx, EndSessionCommand{Owner: owner, AccountID: account.accountID, SessionID: session.ID, EndedAt: normalizeDatabaseTime(manager.now())})
+		if errors.Is(err, ErrOwnershipConflict) || errors.Is(endErr, ErrOwnershipConflict) {
+			return ErrOwnershipConflict
+		}
+		return ErrUnavailable
+	}
+	if reporter, ok := processor.(ownershipLossReporter); ok {
+		reporter.SetOwnershipLost(func() { manager.handleProcessOwnershipConflict(account, active) })
+	}
+	active.admissionMu.Lock()
+	active.session, active.subscription, active.processor = session, subscription, processor
+	active.processor.SetConnectionHealthy(active.sourceHealthy)
+	active.admissionMu.Unlock()
 	if manager.beforeSessionPublish != nil {
 		manager.beforeSessionPublish()
 	}
@@ -522,6 +538,7 @@ func (manager *Manager) startRoom(ctx context.Context, account *accountRuntime, 
 	account.current = active
 	account.reconcile = false
 	account.degraded = false
+	account.sourceDegraded = !active.sourceHealthy
 	active.workerStarted = true
 	go active.run(manager, account)
 	account.mu.Unlock()
@@ -535,6 +552,9 @@ func (manager *Manager) discardUnpublishedSession(ctx context.Context, active *a
 	active.subscription.Cancel()
 	active.admissionMu.Unlock()
 	_ = active.subscription.Wait(ctx)
+	if active.processor != nil {
+		_ = active.processor.Close(ctx)
+	}
 	active.admissionMu.Lock()
 	active.eventsClosed = true
 	active.drained = true
@@ -552,6 +572,13 @@ func (sink sessionSink) OnEvent(event roomsource.Event) {
 	if !sink.active.admitting {
 		return
 	}
+	sink.active.sourceHealthy = true
+	if sink.active.processor != nil {
+		sink.active.processor.SetConnectionHealthy(true)
+	}
+	sink.active.account.mu.Lock()
+	sink.active.account.sourceDegraded = false
+	sink.active.account.mu.Unlock()
 	select {
 	case sink.active.events <- event:
 	default:
@@ -564,18 +591,27 @@ func (sink sessionSink) OnError(error) {
 	if sink.active == nil || sink.active.account == nil {
 		return
 	}
+	sink.active.admissionMu.Lock()
+	sink.active.sourceHealthy = false
+	if sink.active.processor != nil {
+		sink.active.processor.SetConnectionHealthy(false)
+	}
 	sink.active.account.mu.Lock()
-	sink.active.account.degraded = true
+	sink.active.account.sourceDegraded = true
 	sink.active.account.mu.Unlock()
+	sink.active.admissionMu.Unlock()
 }
 
 func (active *activeSession) run(manager *Manager, account *accountRuntime) {
 	defer close(active.workerDone)
 	for event := range active.events {
-		if err := manager.process(manager.processing, active.owner, active.session, event); err != nil {
+		if err := active.processor.Accept(event); err != nil {
 			if errors.Is(err, ErrOwnershipConflict) {
 				manager.handleProcessOwnershipConflict(account, active)
 				return
+			}
+			if errors.Is(err, ErrPersistenceUnavailable) {
+				continue
 			}
 			account.mu.Lock()
 			account.degraded = true
@@ -688,6 +724,17 @@ func (manager *Manager) stopActive(ctx context.Context, account *accountRuntime,
 		}
 		active.admissionMu.Lock()
 		active.drained = true
+		active.admissionMu.Unlock()
+	}
+	active.admissionMu.Lock()
+	processorClosed := active.processorClosed
+	active.admissionMu.Unlock()
+	if !processorClosed {
+		if err := active.processor.Close(ctx); err != nil {
+			return err
+		}
+		active.admissionMu.Lock()
+		active.processorClosed = true
 		active.admissionMu.Unlock()
 	}
 	active.admissionMu.Lock()
