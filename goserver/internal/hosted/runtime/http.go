@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	maximumRuntimeBody = 4096
-	runtimeKeepalive   = 20 * time.Second
+	maximumRuntimeBody  = 4096
+	runtimeKeepalive    = 20 * time.Second
+	runtimeWriteTimeout = 5 * time.Second
 )
 
 type runtimeHTTPService interface {
@@ -37,6 +38,7 @@ type HTTPOptions struct {
 	ClientIP      identity.ClientIPResolver
 	Authenticate  func(http.Handler) http.Handler
 	AccountID     func(context.Context) (int64, bool)
+	Now           func() time.Time
 	NewTimer      func(time.Duration) Timer
 }
 
@@ -48,6 +50,7 @@ type HTTPHandler struct {
 	clientIP      identity.ClientIPResolver
 	authenticate  func(http.Handler) http.Handler
 	accountID     func(context.Context) (int64, bool)
+	now           func() time.Time
 	newTimer      func(time.Duration) Timer
 	mux           *http.ServeMux
 }
@@ -66,10 +69,13 @@ func NewHTTPHandler(service runtimeHTTPService, options HTTPOptions) (*HTTPHandl
 	if options.NewTimer == nil {
 		options.NewTimer = newSystemTimer
 	}
+	if options.Now == nil {
+		options.Now = time.Now
+	}
 	handler := &HTTPHandler{
 		service: service, allowedOrigin: options.AllowedOrigin, csrfToken: options.CSRFToken,
 		limiter: options.Limiter, clientIP: options.ClientIP, authenticate: options.Authenticate,
-		accountID: options.AccountID, newTimer: options.NewTimer, mux: http.NewServeMux(),
+		accountID: options.AccountID, now: options.Now, newTimer: options.NewTimer, mux: http.NewServeMux(),
 	}
 	handler.mux.HandleFunc("PUT /api/runtime/room", handler.setRoom)
 	handler.mux.HandleFunc("GET /api/runtime/status", handler.status)
@@ -161,7 +167,7 @@ func (handler *HTTPHandler) events(response http.ResponseWriter, request *http.R
 		writeRuntimeError(response, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
-	flusher, ok := response.(http.Flusher)
+	_, ok := response.(http.Flusher)
 	if !ok {
 		writeRuntimeError(response, http.StatusInternalServerError, "stream_unavailable")
 		return
@@ -183,19 +189,18 @@ func (handler *HTTPHandler) events(response http.ResponseWriter, request *http.R
 			handler.writeServiceError(response, err)
 			return
 		}
-		// The shared server has a finite write timeout for ordinary JSON
-		// requests. This authenticated streaming response owns its lifetime
-		// through the request context and injected keepalive timer instead.
-		_ = http.NewResponseController(response).SetWriteDeadline(time.Time{})
+		controller := http.NewResponseController(response)
 		response.Header().Set("Content-Type", "text/event-stream")
 		response.Header().Set("X-Content-Type-Options", "nosniff")
 		response.Header().Set("X-Accel-Buffering", "no")
-		writeRuntimeEvent(response, "status", status)
-		writeRuntimeEvent(response, "snapshot", snapshot)
-		writeRuntimeEvent(response, "degraded", struct {
-			Degraded bool `json:"degraded"`
-		}{Degraded: status.Degraded})
-		flusher.Flush()
+		if handler.writeEvent(response, controller, request, accountID, lease, "status", status) != nil ||
+			handler.writeEvent(response, controller, request, accountID, lease, "snapshot", snapshot) != nil ||
+			handler.writeEvent(response, controller, request, accountID, lease, "degraded", struct {
+				Degraded bool `json:"degraded"`
+			}{Degraded: status.Degraded}) != nil {
+			return
+		}
+		lastStatus := status
 		for {
 			timer := handler.newTimer(runtimeKeepalive)
 			select {
@@ -204,11 +209,75 @@ func (handler *HTTPHandler) events(response http.ResponseWriter, request *http.R
 				return
 			case <-timer.C():
 				timer.Stop()
-				_, _ = io.WriteString(response, ": keepalive\n\n")
-				flusher.Flush()
+				current, statusErr := handler.service.Status(request.Context(), accountID)
+				if statusErr != nil {
+					return
+				}
+				if current != lastStatus {
+					if handler.writeEvent(response, controller, request, accountID, lease, "status", current) != nil {
+						return
+					}
+					if current.Degraded != lastStatus.Degraded && handler.writeEvent(response, controller, request, accountID, lease, "degraded", struct {
+						Degraded bool `json:"degraded"`
+					}{Degraded: current.Degraded}) != nil {
+						return
+					}
+					lastStatus = current
+				}
+				if handler.writeKeepalive(response, controller, request, accountID, lease) != nil {
+					return
+				}
 			}
 		}
 	})
+}
+
+func (handler *HTTPHandler) writeEvent(response io.Writer, controller *http.ResponseController, request *http.Request, accountID int64, lease ConnectionLease, event string, value any) error {
+	if err := handler.authorizeConfigFrame(request, accountID, lease); err != nil {
+		return err
+	}
+	if err := handler.setWriteDeadline(controller); err != nil {
+		return err
+	}
+	if err := writeRuntimeEvent(response, event, value); err != nil {
+		return err
+	}
+	return controller.Flush()
+}
+
+func (handler *HTTPHandler) writeKeepalive(response io.Writer, controller *http.ResponseController, request *http.Request, accountID int64, lease ConnectionLease) error {
+	if err := handler.authorizeConfigFrame(request, accountID, lease); err != nil {
+		return err
+	}
+	if err := handler.setWriteDeadline(controller); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(response, ": keepalive\n\n"); err != nil {
+		return err
+	}
+	return controller.Flush()
+}
+
+func (handler *HTTPHandler) authorizeConfigFrame(request *http.Request, accountID int64, lease ConnectionLease) error {
+	if request == nil || accountID <= 0 || lease == nil || lease.Kind() != LeaseConfig {
+		return ErrInvalidLease
+	}
+	authenticatedAccountID, authenticated := int64(0), false
+	handler.authenticate(http.HandlerFunc(func(_ http.ResponseWriter, authenticatedRequest *http.Request) {
+		authenticatedAccountID, authenticated = handler.accountID(authenticatedRequest.Context())
+	})).ServeHTTP(newRuntimeAuthProbe(), request)
+	if !authenticated || authenticatedAccountID != accountID {
+		return ErrAccountDisabled
+	}
+	return lease.Renew(request.Context())
+}
+
+func (handler *HTTPHandler) setWriteDeadline(controller *http.ResponseController) error {
+	err := controller.SetWriteDeadline(handler.now().Add(runtimeWriteTimeout))
+	if errors.Is(err, http.ErrNotSupported) {
+		return nil
+	}
+	return err
 }
 
 func (handler *HTTPHandler) withAccount(response http.ResponseWriter, request *http.Request, next func(int64)) {
@@ -258,12 +327,13 @@ func (handler *HTTPHandler) writeServiceError(response http.ResponseWriter, err 
 	}
 }
 
-func writeRuntimeEvent(response io.Writer, event string, value any) {
+func writeRuntimeEvent(response io.Writer, event string, value any) error {
 	payload, err := json.Marshal(value)
 	if err != nil {
-		return
+		return err
 	}
-	_, _ = fmt.Fprintf(response, "event: %s\ndata: %s\n\n", event, payload)
+	_, err = fmt.Fprintf(response, "event: %s\ndata: %s\n\n", event, payload)
+	return err
 }
 
 func writeRuntimeError(response http.ResponseWriter, status int, code string) {
@@ -278,3 +348,10 @@ func writeRuntimeJSON(response http.ResponseWriter, status int, value any) {
 	response.WriteHeader(status)
 	_ = json.NewEncoder(response).Encode(value)
 }
+
+type runtimeAuthProbe struct{ header http.Header }
+
+func newRuntimeAuthProbe() *runtimeAuthProbe              { return &runtimeAuthProbe{header: make(http.Header)} }
+func (response *runtimeAuthProbe) Header() http.Header    { return response.header }
+func (*runtimeAuthProbe) WriteHeader(int)                 {}
+func (*runtimeAuthProbe) Write(value []byte) (int, error) { return len(value), nil }

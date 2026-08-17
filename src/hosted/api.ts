@@ -1,4 +1,5 @@
 import { GAMEPLAY_TEMPLATES, type TemplateGiftSlotDefinition, type TemplateParameterDefinition } from '../gameplay-templates';
+import { validHostedRoomID } from './room-id';
 
 export type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -102,6 +103,7 @@ const stableErrors = new Set([
   'temporarily_unavailable', 'verification_pending', 'revision_conflict', 'not_found',
   'proof_rejected', 'expired', 'operation_conflict',
   'credential_unavailable', 'account_disabled',
+  'shutting_down',
 ]);
 
 export class HostedAPIError extends Error {
@@ -396,6 +398,10 @@ export class HostedAPI {
     return { revision: data.revision };
   }
   async suggestRoom(roomId: string): Promise<void> { await this.request('/api/configuration/room-suggestion', 'PUT', 204, { roomId }); }
+  async setRuntimeRoom(roomId: string): Promise<void> {
+    if (!validHostedRoomID(roomId)) throw new HostedAPIError('invalid_request', 0);
+    await this.request('/api/runtime/room', 'PUT', 204, { roomId });
+  }
 
   async previewMigration(rawJSON: string): Promise<MigrationPreview> {
     const result = migrationPreview((await this.requestRawJSON('/api/migrations/preview', 201, rawJSON)).data);

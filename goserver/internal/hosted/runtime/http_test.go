@@ -3,12 +3,14 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -208,14 +210,14 @@ func TestRuntimeHTTPEventsOwnsConfigLeaseAndUsesInjectedTwentySecondKeepalive(t 
 		handler.ServeHTTP(response, request)
 		close(done)
 	}()
-	timer := <-timerCreated
+	timer := receiveRuntimeSignal(t, timerCreated, "initial keepalive timer")
 	if timer.delay != 20*time.Second {
 		t.Fatalf("keepalive delay = %v, want 20s", timer.delay)
 	}
 	timer.Fire()
-	<-timerCreated
+	receiveRuntimeSignal(t, timerCreated, "next keepalive timer")
 	cancel()
-	<-done
+	receiveRuntimeSignal(t, done, "config stream shutdown")
 
 	body := response.Body.String()
 	for _, required := range []string{"event: status", "event: snapshot", `"health":9`, "event: degraded", ": keepalive"} {
@@ -226,8 +228,221 @@ func TestRuntimeHTTPEventsOwnsConfigLeaseAndUsesInjectedTwentySecondKeepalive(t 
 	if response.Header().Get("Content-Type") != "text/event-stream" || response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("SSE headers = %#v", response.Header())
 	}
-	if service.acquireKind != LeaseConfig || service.accountID != 7 || lease.releaseCalls != 1 {
+	if service.acquireKind != LeaseConfig || service.accountID != 7 || lease.ReleaseCalls() != 1 {
 		t.Fatalf("lease ownership service=%#v lease=%#v", service, lease)
+	}
+}
+
+func TestRuntimeHTTPEventsStreamsChangedAuthoritativeStatusWithRollingDeadlines(t *testing.T) {
+	lease := &recordingHTTPLease{kind: LeaseConfig}
+	service := &recordingHTTPRuntime{status: Status{State: StateIdle, ConnectionHealthy: true}, snapshot: configuration.RuntimeState{}, lease: lease}
+	timers := make(chan *manualTimer, 8)
+	base := time.Date(2026, 8, 17, 1, 2, 3, 0, time.UTC)
+	var nowCalls atomic.Int64
+	handler, err := NewHTTPHandler(service, HTTPOptions{
+		AllowedOrigin: "https://panel.example", CSRFToken: "csrf", Limiter: allowRuntimeRequests{}, ClientIP: func(*http.Request) string { return "127.0.0.1" },
+		Authenticate: func(next http.Handler) http.Handler { return next }, AccountID: func(context.Context) (int64, bool) { return 7, true },
+		Now: func() time.Time { return base.Add(time.Duration(nowCalls.Add(1)) * time.Second) },
+		NewTimer: func(delay time.Duration) Timer {
+			timer := &manualTimer{delay: delay, ch: make(chan time.Time, 1)}
+			timers <- timer
+			return timer
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := newRuntimeStreamingRecorder()
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodGet, "/api/runtime/events", nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() { handler.ServeHTTP(response, request); close(done) }()
+	waitRuntimeFlushes(t, response, 3)
+
+	transitions := []Status{
+		{State: StateDegraded, RoomID: "42", SessionID: 70, Degraded: true, ConnectionHealthy: false},
+		{State: StateActive, RoomID: "42", SessionID: 70, ConnectionHealthy: true},
+		{State: StateActive, RoomID: "84", SessionID: 71, ConnectionHealthy: true},
+		{State: StateDisabled, RoomID: "84", SessionID: 71},
+		{State: StateShuttingDown, RoomID: "84", SessionID: 71},
+	}
+	for index, status := range transitions {
+		service.setStatus(status)
+		timer := receiveRuntimeSignal(t, timers, fmt.Sprintf("transition %d timer", index))
+		if timer.delay != runtimeKeepalive {
+			t.Fatalf("transition %d timer = %v", index, timer.delay)
+		}
+		timer.Fire()
+		flushes := 2
+		if index < 2 {
+			flushes = 3
+		}
+		waitRuntimeFlushes(t, response, flushes)
+	}
+	unchanged := receiveRuntimeSignal(t, timers, "unchanged-status timer")
+	unchanged.Fire()
+	waitRuntimeFlushes(t, response, 1)
+	receiveRuntimeSignal(t, timers, "post-keepalive timer")
+	cancel()
+	receiveRuntimeSignal(t, done, "status stream shutdown")
+
+	body := response.String()
+	if got := strings.Count(body, "event: status"); got != 1+len(transitions) {
+		t.Fatalf("status frames = %d, want %d: %q", got, 1+len(transitions), body)
+	}
+	if got := strings.Count(body, "event: degraded"); got != 3 {
+		t.Fatalf("degraded/recovery frames = %d, want 3: %q", got, body)
+	}
+	for _, required := range []string{`"state":"degraded"`, `"connectionHealthy":false`, `"roomId":"84"`, `"state":"disabled"`, `"state":"shutting_down"`} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("status stream missing %q: %q", required, body)
+		}
+	}
+	deadlines := response.Deadlines()
+	if len(deadlines) < 4 {
+		t.Fatalf("rolling write deadlines = %v", deadlines)
+	}
+	for index := range deadlines {
+		if deadlines[index].IsZero() || (index > 0 && !deadlines[index].After(deadlines[index-1])) {
+			t.Fatalf("write deadlines are not rolling and bounded: %v", deadlines)
+		}
+	}
+}
+
+func TestRuntimeHTTPEventsWriteOrFlushFailureImmediatelyReleasesConfigLease(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		phase      string
+		writeError bool
+	}{
+		{name: "initial write", phase: "initial", writeError: true},
+		{name: "initial flush", phase: "initial"},
+		{name: "keepalive write", phase: "keepalive", writeError: true},
+		{name: "keepalive flush", phase: "keepalive"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lease := &recordingHTTPLease{kind: LeaseConfig}
+			service := &recordingHTTPRuntime{status: Status{State: StateIdle}, snapshot: configuration.RuntimeState{}, lease: lease}
+			timers := make(chan *manualTimer, 1)
+			handler := newHTTPTestHandler(t, service, func(delay time.Duration) Timer {
+				timer := &manualTimer{delay: delay, ch: make(chan time.Time, 1)}
+				timers <- timer
+				return timer
+			})
+			response := newRuntimeStreamingRecorder()
+			failure := errors.New("stream output failed")
+			if test.phase == "initial" {
+				response.setFailure(test.writeError, failure)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			request := httptest.NewRequest(http.MethodGet, "/api/runtime/events", nil).WithContext(ctx)
+			done := make(chan struct{})
+			go func() { handler.ServeHTTP(response, request); close(done) }()
+			if test.phase == "keepalive" {
+				waitRuntimeFlushes(t, response, 3)
+				response.setFailure(test.writeError, failure)
+				receiveRuntimeSignal(t, timers, "keepalive failure timer").Fire()
+			}
+			deadline := time.NewTimer(5 * time.Second)
+			defer deadline.Stop()
+			select {
+			case <-done:
+			case <-timers:
+				cancel()
+				receiveRuntimeSignal(t, done, "stream shutdown after unexpected timer")
+				t.Fatal("config stream remained open after output failure")
+			case <-deadline.C:
+				cancel()
+				t.Fatal("config stream did not exit after output failure")
+			}
+			if lease.ReleaseCalls() != 1 {
+				t.Fatalf("config lease release calls = %d, want 1", lease.ReleaseCalls())
+			}
+		})
+	}
+}
+
+func TestRuntimeHTTPEventsReauthenticatesSameAccountAndRenewsBeforeEveryFrame(t *testing.T) {
+	lease := &recordingHTTPLease{kind: LeaseConfig}
+	service := &recordingHTTPRuntime{status: Status{State: StateIdle, ConnectionHealthy: true}, snapshot: configuration.RuntimeState{}, lease: lease}
+	authentication := &rotatingRuntimeAuthentication{accountID: 7}
+	timers := make(chan *manualTimer, 3)
+	handler := newReauthHTTPTestHandler(t, service, authentication, func(delay time.Duration) Timer {
+		timer := &manualTimer{delay: delay, ch: make(chan time.Time, 1)}
+		timers <- timer
+		return timer
+	})
+	response := newRuntimeStreamingRecorder()
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodGet, "/api/runtime/events", nil).WithContext(ctx)
+	request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "current-cookie"})
+	done := make(chan struct{})
+	go func() { handler.ServeHTTP(response, request); close(done) }()
+	waitRuntimeFlushes(t, response, 3)
+	if calls, renewals := authentication.Calls(), lease.RenewCalls(); calls != 4 || renewals != 3 {
+		t.Fatalf("handshake+initial auth/renew calls = %d/%d, want 4/3", calls, renewals)
+	}
+
+	receiveRuntimeSignal(t, timers, "unchanged keepalive timer").Fire()
+	waitRuntimeFlushes(t, response, 1)
+	service.setStatus(Status{State: StateDegraded, RoomID: "42", SessionID: 70, Degraded: true})
+	receiveRuntimeSignal(t, timers, "changed-status timer").Fire()
+	waitRuntimeFlushes(t, response, 3)
+	receiveRuntimeSignal(t, timers, "post-status timer")
+	cancel()
+	receiveRuntimeSignal(t, done, "renewed config stream shutdown")
+
+	if calls, renewals := authentication.Calls(), lease.RenewCalls(); calls != 8 || renewals != 7 {
+		t.Fatalf("all-frame auth/renew calls = %d/%d, want 8/7", calls, renewals)
+	}
+	if strings.Count(response.String(), ": keepalive") != 2 || lease.ReleaseCalls() != 1 {
+		t.Fatalf("keepalives/release = %d/%d, want 2/1", strings.Count(response.String(), ": keepalive"), lease.ReleaseCalls())
+	}
+}
+
+func TestRuntimeHTTPEventsStopsOnRevokedChangedAccountOrRenewFailure(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		accountID  int64
+		renewError error
+		wantRenew  int
+	}{
+		{name: "cookie revoked", accountID: 0, wantRenew: 3},
+		{name: "cookie changed account", accountID: 8, wantRenew: 3},
+		{name: "lease ownership lost", accountID: 7, renewError: ErrOwnershipConflict, wantRenew: 4},
+		{name: "lease account disabled", accountID: 7, renewError: ErrAccountDisabled, wantRenew: 4},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lease := &recordingHTTPLease{kind: LeaseConfig}
+			service := &recordingHTTPRuntime{status: Status{State: StateIdle}, snapshot: configuration.RuntimeState{}, lease: lease}
+			authentication := &rotatingRuntimeAuthentication{accountID: 7}
+			timers := make(chan *manualTimer, 1)
+			handler := newReauthHTTPTestHandler(t, service, authentication, func(delay time.Duration) Timer {
+				timer := &manualTimer{delay: delay, ch: make(chan time.Time, 1)}
+				timers <- timer
+				return timer
+			})
+			response := newRuntimeStreamingRecorder()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			request := httptest.NewRequest(http.MethodGet, "/api/runtime/events", nil).WithContext(ctx)
+			request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "current-cookie"})
+			done := make(chan struct{})
+			go func() { handler.ServeHTTP(response, request); close(done) }()
+			waitRuntimeFlushes(t, response, 3)
+			authentication.SetAccount(test.accountID)
+			lease.SetRenewError(test.renewError)
+			receiveRuntimeSignal(t, timers, "revocation keepalive timer").Fire()
+			receiveRuntimeSignal(t, done, "revoked config stream shutdown")
+
+			if strings.Contains(response.String(), ": keepalive") {
+				t.Fatalf("revoked stream received keepalive: %q", response.String())
+			}
+			if lease.RenewCalls() != test.wantRenew || lease.ReleaseCalls() != 1 {
+				t.Fatalf("renew/release calls = %d/%d, want %d/1", lease.RenewCalls(), lease.ReleaseCalls(), test.wantRenew)
+			}
+		})
 	}
 }
 
@@ -273,6 +488,11 @@ func (service *recordingHTTPRuntime) Status(context.Context, int64) (Status, err
 	service.statusCalls++
 	return service.status, service.statusError
 }
+func (service *recordingHTTPRuntime) setStatus(status Status) {
+	service.mu.Lock()
+	service.status = status
+	service.mu.Unlock()
+}
 func (service *recordingHTTPRuntime) Snapshot(context.Context, int64) (configuration.RuntimeState, error) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
@@ -280,13 +500,40 @@ func (service *recordingHTTPRuntime) Snapshot(context.Context, int64) (configura
 }
 
 type recordingHTTPLease struct {
+	mu           sync.Mutex
 	kind         LeaseKind
 	releaseCalls int
+	renewCalls   int
+	renewError   error
 }
 
-func (lease *recordingHTTPLease) Kind() LeaseKind             { return lease.kind }
-func (lease *recordingHTTPLease) Renew(context.Context) error { return nil }
-func (lease *recordingHTTPLease) Release()                    { lease.releaseCalls++ }
+func (lease *recordingHTTPLease) Kind() LeaseKind { return lease.kind }
+func (lease *recordingHTTPLease) Renew(context.Context) error {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	lease.renewCalls++
+	return lease.renewError
+}
+func (lease *recordingHTTPLease) Release() {
+	lease.mu.Lock()
+	lease.releaseCalls++
+	lease.mu.Unlock()
+}
+func (lease *recordingHTTPLease) SetRenewError(err error) {
+	lease.mu.Lock()
+	lease.renewError = err
+	lease.mu.Unlock()
+}
+func (lease *recordingHTTPLease) RenewCalls() int {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	return lease.renewCalls
+}
+func (lease *recordingHTTPLease) ReleaseCalls() int {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	return lease.releaseCalls
+}
 
 type allowRuntimeRequests struct{}
 
@@ -335,6 +582,146 @@ func newHTTPTestHandlerWithLimiter(t *testing.T, service runtimeHTTPService, lim
 		t.Fatal(err)
 	}
 	return handler
+}
+
+type runtimeAuthenticationAccountKey struct{}
+
+type rotatingRuntimeAuthentication struct {
+	mu        sync.Mutex
+	accountID int64
+	calls     int
+}
+
+func (authentication *rotatingRuntimeAuthentication) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		authentication.mu.Lock()
+		authentication.calls++
+		accountID := authentication.accountID
+		authentication.mu.Unlock()
+		if accountID <= 0 {
+			response.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		ctx := context.WithValue(request.Context(), runtimeAuthenticationAccountKey{}, accountID)
+		next.ServeHTTP(response, request.WithContext(ctx))
+	})
+}
+func (authentication *rotatingRuntimeAuthentication) SetAccount(accountID int64) {
+	authentication.mu.Lock()
+	authentication.accountID = accountID
+	authentication.mu.Unlock()
+}
+func (authentication *rotatingRuntimeAuthentication) Calls() int {
+	authentication.mu.Lock()
+	defer authentication.mu.Unlock()
+	return authentication.calls
+}
+
+func newReauthHTTPTestHandler(t *testing.T, service runtimeHTTPService, authentication *rotatingRuntimeAuthentication, newTimer func(time.Duration) Timer) *HTTPHandler {
+	t.Helper()
+	handler, err := NewHTTPHandler(service, HTTPOptions{
+		AllowedOrigin: "https://panel.example", CSRFToken: "csrf", Limiter: allowRuntimeRequests{}, ClientIP: func(*http.Request) string { return "127.0.0.1" },
+		Authenticate: authentication.Middleware,
+		AccountID: func(ctx context.Context) (int64, bool) {
+			accountID, ok := ctx.Value(runtimeAuthenticationAccountKey{}).(int64)
+			return accountID, ok && accountID > 0
+		},
+		NewTimer: newTimer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return handler
+}
+
+type runtimeStreamingRecorder struct {
+	mu        sync.Mutex
+	header    http.Header
+	body      strings.Builder
+	status    int
+	flushed   chan struct{}
+	writeErr  error
+	flushErr  error
+	deadlines []time.Time
+}
+
+func newRuntimeStreamingRecorder() *runtimeStreamingRecorder {
+	return &runtimeStreamingRecorder{header: make(http.Header), flushed: make(chan struct{}, 64)}
+}
+func (recorder *runtimeStreamingRecorder) Header() http.Header { return recorder.header }
+func (recorder *runtimeStreamingRecorder) WriteHeader(status int) {
+	recorder.mu.Lock()
+	if recorder.status == 0 {
+		recorder.status = status
+	}
+	recorder.mu.Unlock()
+}
+func (recorder *runtimeStreamingRecorder) Write(value []byte) (int, error) {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if recorder.writeErr != nil {
+		return 0, recorder.writeErr
+	}
+	if recorder.status == 0 {
+		recorder.status = http.StatusOK
+	}
+	return recorder.body.Write(value)
+}
+func (recorder *runtimeStreamingRecorder) Flush() { _ = recorder.FlushError() }
+func (recorder *runtimeStreamingRecorder) FlushError() error {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if recorder.flushErr != nil {
+		return recorder.flushErr
+	}
+	recorder.flushed <- struct{}{}
+	return nil
+}
+func (recorder *runtimeStreamingRecorder) SetWriteDeadline(deadline time.Time) error {
+	recorder.mu.Lock()
+	recorder.deadlines = append(recorder.deadlines, deadline)
+	recorder.mu.Unlock()
+	return nil
+}
+func (recorder *runtimeStreamingRecorder) setFailure(write bool, failure error) {
+	recorder.mu.Lock()
+	if write {
+		recorder.writeErr = failure
+	} else {
+		recorder.flushErr = failure
+	}
+	recorder.mu.Unlock()
+}
+func (recorder *runtimeStreamingRecorder) String() string {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	return recorder.body.String()
+}
+func (recorder *runtimeStreamingRecorder) Deadlines() []time.Time {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	return append([]time.Time(nil), recorder.deadlines...)
+}
+
+func waitRuntimeFlushes(t *testing.T, recorder *runtimeStreamingRecorder, count int) {
+	t.Helper()
+	for index := 0; index < count; index++ {
+		receiveRuntimeSignal(t, recorder.flushed, fmt.Sprintf("flush %d of %d", index+1, count))
+	}
+}
+
+func receiveRuntimeSignal[T any](t *testing.T, channel <-chan T, label string) T {
+	t.Helper()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case value := <-channel:
+		return value
+	case <-timer.C:
+		t.Fatalf("timed out waiting for %s", label)
+		var zero T
+		return zero
+	}
 }
 
 var _ = errors.Is
