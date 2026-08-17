@@ -154,6 +154,7 @@ func TestPublishedRuntimeMigrationChecksumsRemainImmutable(t *testing.T) {
 	want := map[string]string{
 		"0004_configuration_and_migration": "8fb8fc88b8040b9806ea15612fdb62dd1fc12f764efcf23d623937779dc64f7c",
 		"0005_runtime_and_obs":             "aaeb739b1fd17b3751d733d36fd8e06c1320f5393ff77341bbac6fbd2a7bc9c2",
+		"0007_runtime_ownership":           "a56cd452a649bd928b5a48a3e8ffacca15fd889eab5161fb7bc96d782be9caa4",
 	}
 	for _, item := range migrations {
 		checksum, exists := want[item.version]
@@ -235,6 +236,46 @@ func TestProductionRuntimeInvariantMigrationUsesOneCanonicalCreateOnlySchema(t *
 		if trimmed != "" && !strings.HasPrefix(trimmed, wantPrefix) {
 			t.Fatalf("0006 statement %d has a partial-retry unsafe shape: %s", index, trimmed)
 		}
+	}
+}
+
+func TestProductionRuntimeOwnershipMigrationCreatesImmutableFencingLease(t *testing.T) {
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ownershipMigration migration
+	for _, item := range migrations {
+		if item.version == "0007_runtime_ownership" {
+			ownershipMigration = item
+			break
+		}
+	}
+	if ownershipMigration.version == "" {
+		t.Fatal("production migrations do not include 0007_runtime_ownership")
+	}
+	ownershipSQL := strings.Join(strings.Fields(string(ownershipMigration.contents)), " ")
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS runtime_account_owners",
+		"account_id BIGINT UNSIGNED NOT NULL",
+		"owner_token BINARY(32) NOT NULL",
+		"fencing_epoch BIGINT UNSIGNED NOT NULL",
+		"expires_at TIMESTAMP(6) NOT NULL",
+		"PRIMARY KEY (account_id)",
+		"KEY idx_runtime_account_owners_expiry (expires_at, account_id)",
+		"FOREIGN KEY (account_id) REFERENCES streamer_accounts (id)",
+		"CHECK (fencing_epoch > 0)",
+		"INSERT IGNORE INTO runtime_account_owners",
+		"FROM live_sessions",
+		"WHERE ended_at IS NULL",
+	} {
+		if !strings.Contains(ownershipSQL, required) {
+			t.Fatalf("0007 ownership schema missing %q", required)
+		}
+	}
+	statements := splitStatements(ownershipMigration.contents)
+	if len(statements) != 2 || !strings.Contains(statements[0], "CREATE TABLE IF NOT EXISTS") || !strings.Contains(statements[1], "INSERT IGNORE") {
+		t.Fatalf("0007 statements=%d want idempotent CREATE plus open-session bootstrap", len(statements))
 	}
 }
 

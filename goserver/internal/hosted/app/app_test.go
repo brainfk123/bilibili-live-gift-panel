@@ -180,3 +180,38 @@ func TestEveryMethodForExactBiliServicePathsStaysOutOfBroadAdministratorHandler(
 		}
 	}
 }
+
+func TestRuntimeRoutesAreExactAndExposeNoStartOrStop(t *testing.T) {
+	runtimeHandler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		allowed := map[string]string{
+			"/api/runtime/room":   http.MethodPut,
+			"/api/runtime/events": http.MethodGet,
+			"/api/runtime/status": http.MethodGet,
+		}
+		if request.Method != allowed[request.URL.Path] {
+			response.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		response.WriteHeader(http.StatusTeapot)
+	})
+	auth := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusAccepted) })
+	handler := New(Dependencies{DB: fakeHealth{}, Auth: auth, Runtime: runtimeHandler})
+	for _, route := range []struct{ method, path string }{
+		{http.MethodPut, "/api/runtime/room"},
+		{http.MethodGet, "/api/runtime/events"},
+		{http.MethodGet, "/api/runtime/status"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))
+		if response.Code != http.StatusTeapot {
+			t.Fatalf("%s %s status = %d, want runtime handler", route.method, route.path, response.Code)
+		}
+	}
+	for _, path := range []string{"/api/runtime/start", "/api/runtime/stop"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("POST %s status = %d, want no route", path, response.Code)
+		}
+	}
+}

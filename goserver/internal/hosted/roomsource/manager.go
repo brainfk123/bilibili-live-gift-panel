@@ -26,6 +26,7 @@ type Sink interface {
 }
 
 type Subscription interface {
+	RoomID() string
 	Cancel()
 	Done() <-chan struct{}
 	Wait(context.Context) error
@@ -107,17 +108,37 @@ func NewManager(gateway biligateway.Gateway, options Options) *Manager {
 }
 
 func (manager *Manager) Subscribe(ctx context.Context, roomID string, accountID int64, sink Sink) (Subscription, error) {
-	if manager == nil || manager.gateway == nil || ctx == nil || accountID <= 0 || sink == nil {
-		return nil, ErrInvalidSubscription
+	canonical, err := manager.Resolve(ctx, roomID, accountID)
+	if err != nil {
+		return nil, err
+	}
+	return manager.SubscribeCanonical(ctx, canonical, accountID, sink)
+}
+
+// Resolve performs only room metadata normalization. It never creates or
+// joins an upstream room connection.
+func (manager *Manager) Resolve(ctx context.Context, roomID string, accountID int64) (string, error) {
+	if manager == nil || manager.gateway == nil || ctx == nil || accountID <= 0 {
+		return "", ErrInvalidSubscription
 	}
 	info, err := manager.gateway.RoomInfo(biligateway.WithAccount(ctx, accountID), roomID)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	canonical, err := canonicalRoomID(info.CanonicalRoomID)
-	if err != nil {
-		return nil, err
+	return canonicalRoomID(info.CanonicalRoomID)
+}
+
+// SubscribeCanonical joins or creates the source for an already-resolved
+// canonical room without another metadata lookup.
+func (manager *Manager) SubscribeCanonical(ctx context.Context, canonical string, accountID int64, sink Sink) (Subscription, error) {
+	if manager == nil || manager.gateway == nil || ctx == nil || accountID <= 0 || sink == nil {
+		return nil, ErrInvalidSubscription
 	}
+	normalized, err := canonicalRoomID(canonical)
+	if err != nil || normalized != strings.TrimSpace(canonical) {
+		return nil, ErrInvalidRoom
+	}
+	canonical = normalized
 
 	var source *roomSource
 	var subscription *subscriber
@@ -320,6 +341,15 @@ func (subscription *subscriber) Done() <-chan struct{} {
 		return nil
 	}
 	return subscription.done
+}
+
+// RoomID returns the immutable canonical room selected before the
+// subscription was admitted. It performs no additional gateway lookup.
+func (subscription *subscriber) RoomID() string {
+	if subscription == nil || subscription.source == nil {
+		return ""
+	}
+	return subscription.source.roomID
 }
 
 func (subscription *subscriber) Wait(ctx context.Context) error {

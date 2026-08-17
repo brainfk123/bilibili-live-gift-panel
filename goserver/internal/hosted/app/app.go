@@ -19,6 +19,7 @@ type Dependencies struct {
 	Configuration http.Handler
 	Migration     http.Handler
 	BiliService   http.Handler
+	Runtime       http.Handler
 	CSRFToken     string
 }
 
@@ -82,6 +83,14 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("/api/admin/bili-service/challenge", dependencies.BiliService)
 		mux.Handle("/api/admin/bili-service/replace", dependencies.BiliService)
 		mux.Handle("/api/admin/bili-service/status", dependencies.BiliService)
+	}
+	if dependencies.Runtime != nil {
+		// Own each complete runtime path so unsupported methods cannot fall
+		// through to an unrelated broad handler. There is deliberately no
+		// start or stop path.
+		mux.Handle("/api/runtime/room", dependencies.Runtime)
+		mux.Handle("/api/runtime/events", dependencies.Runtime)
+		mux.Handle("/api/runtime/status", dependencies.Runtime)
 	}
 	if dependencies.Auth != nil {
 		mux.Handle("/api/auth/", dependencies.Auth)

@@ -19,6 +19,10 @@ import (
 
 	"bilibili-live-gift-panel/internal/hosted/adminidentity"
 	"bilibili-live-gift-panel/internal/hosted/biligateway"
+	"bilibili-live-gift-panel/internal/hosted/configuration"
+	"bilibili-live-gift-panel/internal/hosted/migration"
+	"bilibili-live-gift-panel/internal/hosted/roomsource"
+	hostedruntime "bilibili-live-gift-panel/internal/hosted/runtime"
 	"bilibili-live-gift-panel/internal/hosted/security"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -47,6 +51,21 @@ func TestNewHTTPServerConfiguresHostedTimeouts(t *testing.T) {
 	}
 	if server.IdleTimeout != 60*time.Second {
 		t.Fatalf("IdleTimeout = %v, want 60s", server.IdleTimeout)
+	}
+}
+
+func TestProductionHTTPServerContextsFollowProcessShutdown(t *testing.T) {
+	processContext, cancel := context.WithCancel(context.Background())
+	server := newHTTPServerWithContext(processContext, "127.0.0.1:12500", http.NewServeMux())
+	if server.BaseContext == nil {
+		t.Fatal("BaseContext is nil")
+	}
+	requestContext := server.BaseContext(nil)
+	cancel()
+	select {
+	case <-requestContext.Done():
+	default:
+		t.Fatal("process cancellation did not cancel active request base context")
 	}
 }
 
@@ -132,6 +151,36 @@ func TestComposeHostedHTTPMakesBiliServiceRoutesReachableWithSpecificity(t *test
 		handler.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))
 		if response.Code != http.StatusCreated {
 			t.Fatalf("%s %s status=%d", route.method, route.path, response.Code)
+		}
+	}
+}
+
+func TestComposeHostedHTTPMountsOnlyAutomaticRuntimeRoutes(t *testing.T) {
+	runtimeHandler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		allowed := map[string]string{
+			"/api/runtime/room": http.MethodPut, "/api/runtime/events": http.MethodGet, "/api/runtime/status": http.MethodGet,
+		}
+		if request.Method != allowed[request.URL.Path] {
+			response.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		response.WriteHeader(http.StatusCreated)
+	})
+	handler := composeHostedHTTPWithRuntime(healthyHostedDatabase{}, statusHandler(http.StatusAccepted), statusHandler(http.StatusNonAuthoritativeInfo), statusHandler(http.StatusTeapot), nil, nil, nil, runtimeHandler, "runtime-csrf")
+	for _, route := range []struct{ method, path string }{
+		{http.MethodPut, "/api/runtime/room"}, {http.MethodGet, "/api/runtime/events"}, {http.MethodGet, "/api/runtime/status"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))
+		if response.Code != http.StatusCreated {
+			t.Fatalf("%s %s status=%d, want runtime handler", route.method, route.path, response.Code)
+		}
+	}
+	for _, path := range []string{"/api/runtime/start", "/api/runtime/stop"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("POST %s status=%d, want no route", path, response.Code)
 		}
 	}
 }
@@ -354,6 +403,129 @@ func TestServeHTTPShutdownUsesConfiguredDeadlineAndWaitsForServerClosed(t *testi
 	}
 	if !listener.isClosed() {
 		t.Fatal("listener remained open after graceful shutdown")
+	}
+}
+
+func TestServeHTTPWithRuntimeStartsRuntimeShutdownBeforeWaitingForBlockedHTTPAndJoinsErrors(t *testing.T) {
+	processContext, cancelProcess := context.WithCancel(context.Background())
+	listener := newTrackedListener()
+	runtimeStarted := make(chan struct{})
+	releaseRuntime := make(chan struct{})
+	releaseServe := make(chan struct{})
+	runtimeErr := errors.New("runtime shutdown failed")
+	httpErr := errors.New("HTTP shutdown failed")
+	server := lifecycleStub{
+		serve: func(net.Listener) error {
+			<-releaseServe
+			return http.ErrServerClosed
+		},
+		shutdown: func(context.Context) error {
+			select {
+			case <-runtimeStarted:
+			case <-time.After(time.Second):
+				return errors.New("HTTP shutdown waited before runtime shutdown was initiated")
+			}
+			close(releaseRuntime)
+			return httpErr
+		},
+		close: func() error {
+			close(releaseServe)
+			return nil
+		},
+	}
+	runtimeShutdown := func(context.Context) error {
+		close(runtimeStarted)
+		<-releaseRuntime
+		return runtimeErr
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- serveHTTPWithRuntime(
+			processContext,
+			server,
+			"127.0.0.1:12500",
+			func(string, string) (net.Listener, error) { return listener, nil },
+			30*time.Second,
+			func() {},
+			runtimeShutdown,
+		)
+	}()
+	cancelProcess()
+	select {
+	case err := <-done:
+		if !errors.Is(err, httpErr) || !errors.Is(err, runtimeErr) {
+			t.Fatalf("serveHTTPWithRuntime error = %v, want joined HTTP and runtime errors", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("concurrent runtime/HTTP shutdown deadlocked")
+	}
+}
+
+func TestShutdownAndJoinRuntimeNeverWaitsBeyondGraceContext(t *testing.T) {
+	graceContext, cancel := context.WithDeadline(context.Background(), time.Unix(1, 0))
+	defer cancel()
+	var waitContextErr error
+	err := shutdownAndJoinRuntime(
+		graceContext,
+		func(ctx context.Context) error { return ctx.Err() },
+		func(ctx context.Context) error {
+			waitContextErr = ctx.Err()
+			return ctx.Err()
+		},
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v, want original grace timeout", err)
+	}
+	if !errors.Is(waitContextErr, context.DeadlineExceeded) {
+		t.Fatalf("runtime Wait context error = %v, want same expired grace context", waitContextErr)
+	}
+}
+
+func TestProcessShutdownCancelsBlockedSetRoomBeforeHTTPShutdownWaits(t *testing.T) {
+	sessions := &blockedSwitchSessions{pendingStarted: make(chan struct{})}
+	sources := &mainRuntimeSources{}
+	manager, err := hostedruntime.NewManager(hostedruntime.Dependencies{
+		Sessions: sessions, Configuration: mainRuntimeConfiguration{}, Migration: mainRuntimeMigration{}, RoomSources: sources,
+	}, hostedruntime.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Acquire(context.Background(), 7, hostedruntime.LeaseConfig); err != nil {
+		t.Fatal(err)
+	}
+	switchDone := make(chan error, 1)
+	go func() { switchDone <- manager.SetRoom(context.Background(), 7, "84") }()
+	<-sessions.pendingStarted
+
+	processContext, cancelProcess := context.WithCancel(context.Background())
+	releaseServe := make(chan struct{})
+	listener := newTrackedListener()
+	server := lifecycleStub{
+		serve: func(net.Listener) error {
+			<-releaseServe
+			return http.ErrServerClosed
+		},
+		shutdown: func(context.Context) error {
+			if err := <-switchDone; !errors.Is(err, hostedruntime.ErrUnavailable) {
+				t.Errorf("blocked SetRoom error = %v, want unavailable", err)
+			}
+			close(releaseServe)
+			return nil
+		},
+		close: func() error { return nil },
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- serveHTTPWithRuntime(processContext, server, "127.0.0.1:12500", func(string, string) (net.Listener, error) { return listener, nil }, 30*time.Second, func() {}, manager.Shutdown)
+	}()
+	cancelProcess()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked SetRoom prevented process shutdown")
 	}
 }
 
@@ -614,6 +786,103 @@ type initializerStub struct {
 	uid    string
 	email  string
 	calls  int
+}
+
+type blockedSwitchSessions struct {
+	mu             sync.Mutex
+	nextID         int64
+	pendingOnce    sync.Once
+	pendingStarted chan struct{}
+	owner          hostedruntime.OwnerFence
+}
+
+func (*blockedSwitchSessions) AccountEnabled(context.Context, int64) (bool, error) {
+	return true, nil
+}
+func (sessions *blockedSwitchSessions) ClaimOwnership(_ context.Context, accountID int64, token hostedruntime.OwnerToken, _ time.Duration) (hostedruntime.OwnerClaim, error) {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	if sessions.owner == (hostedruntime.OwnerFence{}) {
+		sessions.owner = hostedruntime.OwnerFence{AccountID: accountID, Token: token, Epoch: 1}
+	}
+	return hostedruntime.OwnerClaim{Fence: sessions.owner, Reconcile: false}, nil
+}
+func (*blockedSwitchSessions) RenewOwnership(context.Context, hostedruntime.OwnerFence, time.Duration) error {
+	return nil
+}
+func (*blockedSwitchSessions) ReleaseOwnership(context.Context, hostedruntime.OwnerFence) error {
+	return nil
+}
+func (*blockedSwitchSessions) TargetRoom(context.Context, int64) (string, error) {
+	return "42", nil
+}
+func (*blockedSwitchSessions) PersistTargetRoom(context.Context, hostedruntime.PersistTargetRoomCommand) error {
+	return nil
+}
+func (sessions *blockedSwitchSessions) StartSession(_ context.Context, command hostedruntime.StartSessionCommand) (hostedruntime.Session, error) {
+	sessions.mu.Lock()
+	sessions.nextID++
+	id := sessions.nextID
+	sessions.mu.Unlock()
+	return hostedruntime.Session{ID: id, AccountID: command.AccountID, RoomID: command.RoomID, ConfigVersionID: command.ConfigVersionID, StartedAt: command.StartedAt}, nil
+}
+func (*blockedSwitchSessions) EndSession(context.Context, hostedruntime.EndSessionCommand) error {
+	return nil
+}
+func (sessions *blockedSwitchSessions) PendingMigration(ctx context.Context, _ int64) (int64, bool, error) {
+	sessions.pendingOnce.Do(func() { close(sessions.pendingStarted) })
+	<-ctx.Done()
+	return 0, false, ctx.Err()
+}
+
+type mainRuntimeConfiguration struct{}
+
+func (mainRuntimeConfiguration) LoadActive(context.Context, int64) (configuration.Version, configuration.State, error) {
+	return configuration.Version{ID: 1}, configuration.State{}, nil
+}
+
+type mainRuntimeMigration struct{}
+
+func (mainRuntimeMigration) ApplyPendingAfterSession(context.Context, migration.OwnerFence, int64) (migration.Job, error) {
+	return migration.Job{}, nil
+}
+
+type mainRuntimeSources struct {
+	mu     sync.Mutex
+	closed bool
+}
+
+func (*mainRuntimeSources) Resolve(_ context.Context, roomID string, _ int64) (string, error) {
+	return roomID, nil
+}
+func (*mainRuntimeSources) SubscribeCanonical(_ context.Context, roomID string, _ int64, _ roomsource.Sink) (roomsource.Subscription, error) {
+	return &mainRuntimeSubscription{roomID: roomID, done: make(chan struct{})}, nil
+}
+func (sources *mainRuntimeSources) Close() {
+	sources.mu.Lock()
+	sources.closed = true
+	sources.mu.Unlock()
+}
+func (*mainRuntimeSources) Wait(context.Context) error { return nil }
+
+type mainRuntimeSubscription struct {
+	roomID string
+	done   chan struct{}
+	once   sync.Once
+}
+
+func (subscription *mainRuntimeSubscription) RoomID() string { return subscription.roomID }
+func (subscription *mainRuntimeSubscription) Cancel() {
+	subscription.once.Do(func() { close(subscription.done) })
+}
+func (subscription *mainRuntimeSubscription) Done() <-chan struct{} { return subscription.done }
+func (subscription *mainRuntimeSubscription) Wait(ctx context.Context) error {
+	select {
+	case <-subscription.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type healthyHostedDatabase struct{}

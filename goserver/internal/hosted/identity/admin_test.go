@@ -25,7 +25,19 @@ func TestDisableAccountAuthorizesRecentAdministratorAndCommitsAtomicChanges(t *t
 	}
 	defer database.Close()
 	keys := fixedServiceKeyring(t)
-	service, err := NewService(NewRepository(database), keys, &memoryVerifier{}, ServiceOptions{Now: nowFunc(now)})
+	disableHookCalls := 0
+	service, err := NewService(NewRepository(database), keys, &memoryVerifier{}, ServiceOptions{
+		Now: nowFunc(now),
+		OnAccountDisabled: func(accountID int64) {
+			disableHookCalls++
+			if accountID != 42 {
+				t.Fatalf("OnAccountDisabled accountID = %d, want 42", accountID)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("OnAccountDisabled fired before disable transaction committed: %v", err)
+			}
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,6 +70,9 @@ func TestDisableAccountAuthorizesRecentAdministratorAndCommitsAtomicChanges(t *t
 	}
 	if result.AccountID != 42 || result.Status != AccountStatusDisabled {
 		t.Fatalf("DisableAccount() = %#v", result)
+	}
+	if disableHookCalls != 1 {
+		t.Fatalf("OnAccountDisabled calls = %d, want exactly 1", disableHookCalls)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -279,7 +294,8 @@ func TestDisableAccountRollsBackStatusEpochWhenRevokeOrAuditFails(t *testing.T) 
 			}
 			defer database.Close()
 			keys := fixedServiceKeyring(t)
-			service, err := NewService(NewRepository(database), keys, &memoryVerifier{}, ServiceOptions{Now: nowFunc(now)})
+			disableHookCalls := 0
+			service, err := NewService(NewRepository(database), keys, &memoryVerifier{}, ServiceOptions{Now: nowFunc(now), OnAccountDisabled: func(int64) { disableHookCalls++ }})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -307,6 +323,9 @@ func TestDisableAccountRollsBackStatusEpochWhenRevokeOrAuditFails(t *testing.T) 
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatal(err)
+			}
+			if disableHookCalls != 0 {
+				t.Fatalf("OnAccountDisabled calls = %d after rollback, want 0", disableHookCalls)
 			}
 		})
 	}

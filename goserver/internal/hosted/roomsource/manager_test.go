@@ -24,6 +24,9 @@ func TestManagerSharesCanonicalRoomAndClosesOnLastCancel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Subscribe(%q): %v", roomIDs[index], err)
 		}
+		if got := subscription.RoomID(); got != "42" {
+			t.Fatalf("Subscribe(%q).RoomID() = %q, want canonical room 42", roomIDs[index], got)
+		}
 		subscriptions[index] = subscription
 	}
 
@@ -67,6 +70,33 @@ func TestManagerSharesCanonicalRoomAndClosesOnLastCancel(t *testing.T) {
 	subscriptions[2].Cancel()
 	if got := connection.closeCount(); got != 1 {
 		t.Fatalf("close count after repeated cancel = %d, want 1", got)
+	}
+}
+
+func TestResolveDoesNotOpenAndSubscribeCanonicalSkipsSecondResolution(t *testing.T) {
+	gateway := newFakeGateway(map[string]string{"7": "42"})
+	manager := NewManager(gateway, Options{})
+	canonical, err := manager.Resolve(context.Background(), "7", 91)
+	if err != nil || canonical != "42" {
+		t.Fatalf("Resolve() = %q, %v", canonical, err)
+	}
+	if gateway.roomInfoCount() != 1 || len(gateway.openedRooms()) != 0 {
+		t.Fatalf("after Resolve room-info/open calls = %d/%d, want 1/0", gateway.roomInfoCount(), len(gateway.openedRooms()))
+	}
+	subscription, err := manager.SubscribeCanonical(context.Background(), canonical, 91, newRecordingSink())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gateway.roomInfoCount() != 1 || len(gateway.openedRooms()) != 1 {
+		t.Fatalf("after SubscribeCanonical room-info/open calls = %d/%d, want 1/1", gateway.roomInfoCount(), len(gateway.openedRooms()))
+	}
+	subscription.Cancel()
+	if err := subscription.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	manager.Close()
+	if err := manager.Wait(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -701,6 +731,7 @@ func (sink *recordingSink) nextEvent(t *testing.T) Event {
 type fakeGateway struct {
 	mu          sync.Mutex
 	canonical   map[string]string
+	roomInfos   int
 	openRooms   []string
 	connections []*fakeConnection
 }
@@ -710,6 +741,9 @@ func newFakeGateway(canonical map[string]string) *fakeGateway {
 }
 
 func (gateway *fakeGateway) RoomInfo(_ context.Context, roomID string) (biligateway.RoomInfo, error) {
+	gateway.mu.Lock()
+	gateway.roomInfos++
+	gateway.mu.Unlock()
 	return biligateway.RoomInfo{RoomID: roomID, CanonicalRoomID: gateway.canonical[roomID]}, nil
 }
 func (*fakeGateway) GiftCatalog(context.Context, string) ([]gameplay.GiftInfo, error) {
@@ -728,6 +762,11 @@ func (gateway *fakeGateway) openedRooms() []string {
 	gateway.mu.Lock()
 	defer gateway.mu.Unlock()
 	return append([]string(nil), gateway.openRooms...)
+}
+func (gateway *fakeGateway) roomInfoCount() int {
+	gateway.mu.Lock()
+	defer gateway.mu.Unlock()
+	return gateway.roomInfos
 }
 func (gateway *fakeGateway) onlyConnection(t *testing.T) *fakeConnection {
 	t.Helper()

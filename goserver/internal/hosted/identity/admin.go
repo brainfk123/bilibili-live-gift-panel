@@ -59,7 +59,14 @@ func (service *Service) DisableAccount(ctx context.Context, administratorSession
 	if !ok {
 		return ManagedAccount{}, ErrRepositoryUnavailable
 	}
-	return repository.disableAccount(ctx, tokenHash, accountID, normalizedReason, service.now())
+	result, err := repository.disableAccount(ctx, tokenHash, accountID, normalizedReason, service.now())
+	if err != nil {
+		return ManagedAccount{}, err
+	}
+	if service.onAccountDisabled != nil {
+		service.onAccountDisabled(result.AccountID)
+	}
+	return result, nil
 }
 
 // EnableAccount clears only the disabled marker. Revoked credentials and

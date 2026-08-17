@@ -67,10 +67,11 @@ type SiteSession struct {
 
 // ServiceOptions contains bounded lifetimes and an injectable clock.
 type ServiceOptions struct {
-	Now             func() time.Time
-	ChallengeTTL    time.Duration
-	RegistrationTTL time.Duration
-	SessionTTL      time.Duration
+	Now               func() time.Time
+	ChallengeTTL      time.Duration
+	RegistrationTTL   time.Duration
+	SessionTTL        time.Duration
+	OnAccountDisabled func(int64)
 }
 
 type challengeStage uint8
@@ -120,13 +121,14 @@ type registrationReservation struct {
 // Service owns the short-lived bridge between a Bilibili proof and a hosted
 // site session. Its maps are process-local by design.
 type Service struct {
-	repository      Repository
-	keys            security.Keyring
-	verifier        BiliVerifier
-	now             func() time.Time
-	challengeTTL    time.Duration
-	registrationTTL time.Duration
-	sessionTTL      time.Duration
+	repository        Repository
+	keys              security.Keyring
+	verifier          BiliVerifier
+	now               func() time.Time
+	challengeTTL      time.Duration
+	registrationTTL   time.Duration
+	sessionTTL        time.Duration
+	onAccountDisabled func(int64)
 
 	mu            sync.Mutex
 	closed        bool
@@ -161,7 +163,8 @@ func NewService(repository Repository, keys security.Keyring, verifier BiliVerif
 	return &Service{
 		repository: repository, keys: keys, verifier: verifier, now: options.Now,
 		challengeTTL: options.ChallengeTTL, registrationTTL: options.RegistrationTTL, sessionTTL: options.SessionTTL,
-		challenges: make(map[string]*serviceChallenge), registrations: make(map[[sha256.Size]byte]*registrationIntent),
+		onAccountDisabled: options.OnAccountDisabled,
+		challenges:        make(map[string]*serviceChallenge), registrations: make(map[[sha256.Size]byte]*registrationIntent),
 	}, nil
 }
 

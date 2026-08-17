@@ -12,12 +12,13 @@ import (
 )
 
 var (
-	ErrInvalidInput = errors.New("migration: invalid input")
-	ErrUnavailable  = errors.New("migration: unavailable")
-	ErrPreviewLimit = errors.New("migration: preview limit reached")
-	ErrNotFound     = errors.New("migration: not found")
-	ErrConflict     = errors.New("migration: conflict")
-	ErrExpired      = errors.New("migration: expired")
+	ErrInvalidInput      = errors.New("migration: invalid input")
+	ErrUnavailable       = errors.New("migration: unavailable")
+	ErrPreviewLimit      = errors.New("migration: preview limit reached")
+	ErrNotFound          = errors.New("migration: not found")
+	ErrConflict          = errors.New("migration: conflict")
+	ErrOwnershipConflict = errors.New("migration: ownership conflict")
+	ErrExpired           = errors.New("migration: expired")
 )
 
 const (
@@ -36,6 +37,14 @@ type Job struct {
 	Status            string    `json:"status"`
 	ExpiresAt         time.Time `json:"expiresAt,omitempty"`
 	RollbackExpiresAt time.Time `json:"rollbackExpiresAt,omitempty"`
+}
+
+// OwnerFence is the exact cross-process runtime ownership claim authorized to
+// finish a pending migration after its live session has ended.
+type OwnerFence struct {
+	AccountID int64
+	Token     [32]byte
+	Epoch     uint64
 }
 
 type applyCommand struct {
@@ -96,7 +105,7 @@ type Repository interface {
 // narrow for callers that never need to mutate a migration job.
 type lifecycleRepository interface {
 	Apply(context.Context, applyCommand) (storedJob, error)
-	ApplyPendingAfterSession(context.Context, int64, int64) (storedJob, error)
+	ApplyPendingAfterSession(context.Context, OwnerFence, int64) (storedJob, error)
 	PreauthorizeApply(context.Context, int64, int64) (storedJob, error)
 	PreauthorizeRollback(context.Context, int64, int64) (storedJob, error)
 	Cancel(context.Context, int64, int64) (storedJob, error)
@@ -174,16 +183,16 @@ func (service *Service) PreauthorizeRollback(ctx context.Context, accountID, job
 	return publicJob(stored, accountID, err)
 }
 
-func (service *Service) ApplyPendingAfterSession(ctx context.Context, accountID, jobID int64) (Job, error) {
-	if service == nil || accountID <= 0 || jobID <= 0 {
+func (service *Service) ApplyPendingAfterSession(ctx context.Context, owner OwnerFence, jobID int64) (Job, error) {
+	if service == nil || !validOwnerFence(owner) || jobID <= 0 {
 		return Job{}, ErrInvalidInput
 	}
 	repository, ok := service.repository.(lifecycleRepository)
 	if !ok {
 		return Job{}, ErrUnavailable
 	}
-	stored, err := repository.ApplyPendingAfterSession(ctx, accountID, jobID)
-	return publicJob(stored, accountID, err)
+	stored, err := repository.ApplyPendingAfterSession(ctx, owner, jobID)
+	return publicJob(stored, owner.AccountID, err)
 }
 
 func (service *Service) Cancel(ctx context.Context, accountID, jobID int64) (Job, error) {
@@ -589,14 +598,17 @@ func (repository *sqlRepository) PreauthorizeRollback(ctx context.Context, accou
 }
 
 func (repository *sqlRepository) Apply(ctx context.Context, command applyCommand) (storedJob, error) {
-	return repository.apply(ctx, command, false)
+	return repository.apply(ctx, command, false, OwnerFence{})
 }
 
-func (repository *sqlRepository) ApplyPendingAfterSession(ctx context.Context, accountID, jobID int64) (storedJob, error) {
-	return repository.apply(ctx, applyCommand{AccountID: accountID, JobID: jobID}, true)
+func (repository *sqlRepository) ApplyPendingAfterSession(ctx context.Context, owner OwnerFence, jobID int64) (storedJob, error) {
+	if !validOwnerFence(owner) {
+		return storedJob{}, ErrInvalidInput
+	}
+	return repository.apply(ctx, applyCommand{AccountID: owner.AccountID, JobID: jobID}, true, owner)
 }
 
-func (repository *sqlRepository) apply(ctx context.Context, command applyCommand, pendingOnly bool) (storedJob, error) {
+func (repository *sqlRepository) apply(ctx context.Context, command applyCommand, pendingOnly bool, owner OwnerFence) (storedJob, error) {
 	if repository == nil || repository.db == nil || command.AccountID <= 0 || command.JobID <= 0 {
 		return storedJob{}, ErrInvalidInput
 	}
@@ -613,6 +625,11 @@ func (repository *sqlRepository) apply(ctx context.Context, command applyCommand
 	activeID, currentVersion, currentRevision, currentRuntime, err := loadLockedAccount(ctx, transaction, command.AccountID)
 	if err != nil {
 		return storedJob{}, err
+	}
+	if pendingOnly {
+		if err := validateOwnerFence(ctx, transaction, owner); err != nil {
+			return storedJob{}, err
+		}
 	}
 	job, err := loadLockedJob(ctx, transaction, command.AccountID, command.JobID)
 	if err != nil {
@@ -677,6 +694,22 @@ func (repository *sqlRepository) apply(ctx context.Context, command applyCommand
 	}
 	committed = true
 	return result, nil
+}
+
+func validateOwnerFence(ctx context.Context, transaction *sql.Tx, owner OwnerFence) error {
+	var active bool
+	err := transaction.QueryRowContext(ctx, "SELECT expires_at > UTC_TIMESTAMP(6) FROM runtime_account_owners WHERE account_id = ? AND owner_token = ? AND fencing_epoch = ? FOR UPDATE", owner.AccountID, owner.Token[:], owner.Epoch).Scan(&active)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && !active {
+		return ErrOwnershipConflict
+	}
+	if err != nil {
+		return ErrUnavailable
+	}
+	return nil
+}
+
+func validOwnerFence(owner OwnerFence) bool {
+	return owner.AccountID > 0 && owner.Token != ([32]byte{}) && owner.Epoch > 0
 }
 
 func (repository *sqlRepository) Cancel(ctx context.Context, accountID, jobID int64) (storedJob, error) {

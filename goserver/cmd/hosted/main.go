@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -26,6 +27,8 @@ import (
 	"bilibili-live-gift-panel/internal/hosted/invitation"
 	"bilibili-live-gift-panel/internal/hosted/migration"
 	"bilibili-live-gift-panel/internal/hosted/platform"
+	"bilibili-live-gift-panel/internal/hosted/roomsource"
+	hostedruntime "bilibili-live-gift-panel/internal/hosted/runtime"
 	"bilibili-live-gift-panel/internal/hosted/security"
 	"bilibili-live-gift-panel/internal/hosted/store/mysqlstore"
 )
@@ -112,7 +115,14 @@ func run() error {
 			return errors.New("configure hosted client address policy")
 		}
 		limiter := newLocalLimiter(time.Now)
-		identityService, err := identity.NewService(identity.NewRepository(store.Database()), keys, verifier, identity.ServiceOptions{})
+		var runtimeOwner atomic.Pointer[hostedruntime.Manager]
+		identityService, err := identity.NewService(identity.NewRepository(store.Database()), keys, verifier, identity.ServiceOptions{
+			OnAccountDisabled: func(accountID int64) {
+				if manager := runtimeOwner.Load(); manager != nil {
+					manager.AccountDisabled(accountID)
+				}
+			},
+		})
 		if err != nil {
 			return errors.New("configure hosted identity")
 		}
@@ -137,7 +147,8 @@ func run() error {
 		if err != nil {
 			return errors.New("configure hosted invitation HTTP")
 		}
-		configurationService := configuration.NewService(configuration.NewRepository(store.Database()), time.Now)
+		configurationRepository := configuration.NewRepository(store.Database())
+		configurationService := configuration.NewService(configurationRepository, time.Now)
 		configurationHTTP, err := configuration.NewHTTPHandler(configurationService, configuration.HTTPOptions{
 			AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
 			Limiter: limiter, ClientIP: resolver, Authenticate: identityHTTP.Authenticate,
@@ -145,7 +156,8 @@ func run() error {
 		if err != nil {
 			return errors.New("configure hosted configuration HTTP")
 		}
-		migrationService := migration.NewService(migration.NewRepository(store.Database()), time.Now)
+		migrationRepository := migration.NewRepository(store.Database())
+		migrationService := migration.NewService(migrationRepository, time.Now)
 		migrationHTTP, err := migration.NewHTTPHandler(migrationService, identityService, migration.HTTPOptions{
 			AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
 			Limiter: limiter, ClientIP: resolver, Authenticate: identityHTTP.Authenticate,
@@ -168,6 +180,27 @@ func run() error {
 		if err != nil {
 			return errors.New("configure Bilibili service HTTP")
 		}
+		roomSources := roomsource.NewManager(biliDependencies.Gateway, roomsource.Options{})
+		runtimeManager, err := hostedruntime.NewManager(hostedruntime.Dependencies{
+			Sessions: hostedruntime.NewSessionRepository(store.Database()), Configuration: configurationRepository,
+			Migration: migrationService, RoomSources: roomSources,
+		}, hostedruntime.Options{})
+		if err != nil {
+			roomSources.Close()
+			return errors.New("configure hosted runtime")
+		}
+		runtimeOwner.Store(runtimeManager)
+		runtimeHTTP, err := hostedruntime.NewHTTPHandler(runtimeManager, hostedruntime.HTTPOptions{
+			AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
+			Limiter: limiter, ClientIP: resolver, Authenticate: identityHTTP.Authenticate,
+		})
+		if err != nil {
+			runtimeOwner.Store(nil)
+			cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), shutdownTimeout)
+			_ = runtimeManager.Shutdown(cleanupContext)
+			cancelCleanup()
+			return errors.New("configure hosted runtime HTTP")
+		}
 		adminHTTP, err := adminidentity.NewHTTPHandler(adminService, adminidentity.HTTPOptions{
 			AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
 			Limiter: limiter, ClientIP: resolver,
@@ -175,17 +208,33 @@ func run() error {
 		if err != nil {
 			return errors.New("configure administrator HTTP")
 		}
-		handler := composeHostedHTTP(store, identityHTTP, adminHTTP, invitationHTTP, configurationHTTP, migrationHTTP, biliServiceHTTP, config.AdminCSRFToken)
-		server := newHTTPServer(config.ListenAddr, retainBiliGateway(handler, biliDependencies.Gateway))
-		return serveHTTP(
+		handler := composeHostedHTTPWithRuntime(store, identityHTTP, adminHTTP, invitationHTTP, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, config.AdminCSRFToken)
+		server := newHTTPServerWithContext(processContext, config.ListenAddr, retainBiliGateway(handler, biliDependencies.Gateway))
+		serveErr := serveHTTPWithRuntime(
 			processContext,
 			server,
 			config.ListenAddr,
 			net.Listen,
 			shutdownTimeout,
 			func() { slog.Info("hosted service listening", "address", config.ListenAddr) },
+			func(ctx context.Context) error {
+				return shutdownAndJoinRuntime(ctx, runtimeManager.Shutdown, runtimeManager.Wait)
+			},
 		)
+		runtimeOwner.Store(nil)
+		if serveErr != nil {
+			return serveErr
+		}
+		return nil
 	})
+}
+
+func shutdownAndJoinRuntime(ctx context.Context, shutdown, wait func(context.Context) error) error {
+	shutdownErr := shutdown(ctx)
+	if !errors.Is(shutdownErr, context.Canceled) && !errors.Is(shutdownErr, context.DeadlineExceeded) {
+		return shutdownErr
+	}
+	return errors.Join(shutdownErr, wait(ctx))
 }
 
 type hostedHealthChecker interface {
@@ -234,7 +283,11 @@ func retainBiliGateway(handler http.Handler, gateway biligateway.Gateway) http.H
 }
 
 func composeHostedHTTP(database hostedHealthChecker, auth, admin, invitations, configurationHTTP, migrationHTTP, biliServiceHTTP http.Handler, csrfToken string) http.Handler {
-	return app.New(app.Dependencies{DB: database, Auth: auth, Admin: admin, Invitation: invitations, Configuration: configurationHTTP, Migration: migrationHTTP, BiliService: biliServiceHTTP, CSRFToken: csrfToken})
+	return composeHostedHTTPWithRuntime(database, auth, admin, invitations, configurationHTTP, migrationHTTP, biliServiceHTTP, nil, csrfToken)
+}
+
+func composeHostedHTTPWithRuntime(database hostedHealthChecker, auth, admin, invitations, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP http.Handler, csrfToken string) http.Handler {
+	return app.New(app.Dependencies{DB: database, Auth: auth, Admin: admin, Invitation: invitations, Configuration: configurationHTTP, Migration: migrationHTTP, BiliService: biliServiceHTTP, Runtime: runtimeHTTP, CSRFToken: csrfToken})
 }
 
 func loadHostedKeyring(encryptionKeyFile, hmacKeyFile string) (security.Keyring, error) {
@@ -316,6 +369,15 @@ func newHTTPServer(address string, handler http.Handler) *http.Server {
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+}
+
+func newHTTPServerWithContext(processContext context.Context, address string, handler http.Handler) *http.Server {
+	if processContext == nil {
+		processContext = context.Background()
+	}
+	server := newHTTPServer(address, handler)
+	server.BaseContext = func(net.Listener) context.Context { return processContext }
+	return server
 }
 
 func runMode(ctx context.Context, args []string, initializer adminInitializer, output io.Writer, serve func() error) error {
@@ -473,4 +535,39 @@ func serveHTTP(
 		return fmt.Errorf("serve hosted HTTP during shutdown: %w", err)
 	}
 	return nil
+}
+
+func serveHTTPWithRuntime(
+	ctx context.Context,
+	server serverLifecycle,
+	address string,
+	listen listenFunc,
+	gracePeriod time.Duration,
+	onListening func(),
+	shutdownRuntime func(context.Context) error,
+) error {
+	if shutdownRuntime == nil {
+		return serveHTTP(ctx, server, address, listen, gracePeriod, onListening)
+	}
+	shutdownRequested := make(chan struct{})
+	var requestOnce sync.Once
+	requestShutdown := func() { requestOnce.Do(func() { close(shutdownRequested) }) }
+	runtimeErrors := make(chan error, 1)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-shutdownRequested:
+		}
+		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), gracePeriod)
+		defer cancelShutdown()
+		runtimeErrors <- shutdownRuntime(shutdownContext)
+	}()
+
+	serveErr := serveHTTP(ctx, server, address, listen, gracePeriod, onListening)
+	requestShutdown()
+	runtimeErr := <-runtimeErrors
+	if runtimeErr != nil {
+		runtimeErr = fmt.Errorf("shutdown hosted runtime: %w", runtimeErr)
+	}
+	return errors.Join(serveErr, runtimeErr)
 }
