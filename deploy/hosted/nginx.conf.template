@@ -1,0 +1,187 @@
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    server_tokens off;
+
+    upstream hosted_app {
+        server 127.0.0.1:12500;
+        keepalive 32;
+    }
+
+    map $uri $hosted_route {
+        default                                              unmatched;
+        /                                                    hosted_landing;
+        /hosted.html                                         hosted_landing;
+        ~^/assets/                                           hosted_asset;
+        ~^/obs/[^/]+/events$                                 obs_events;
+        ~^/obs/[^/]+/exchange$                               obs_exchange;
+        ~^/obs/[^/]+/?$                                      obs_landing;
+        ~^/api/auth/bili/challenges(?:/[^/]+)?$               auth_bili_challenge;
+        /api/auth/session                                    auth_session;
+        ~^/api/admin/auth/bili/challenges(?:/[^/]+)?$         admin_bili_challenge;
+        /api/admin/session                                   admin_session;
+        /api/admin/totp                                      admin_totp;
+        /api/admin/bili-service/challenge                    admin_bili_service_challenge;
+        /api/admin/bili-service/replace                      admin_bili_service_replace;
+        ~^/api/admin/recovery/(?:archive|prepare|confirm)$    admin_recovery;
+        /api/auth/registration                               invitation_redeem;
+        ~^/api/invitations(?:/[^/]+)?$                        invitations;
+        /api/admin/invitations                               admin_invitations;
+        ~^/api/admin/accounts/[^/]+/invitation-quota$         invitation_quota;
+        ~^/api/migrations(?:/.*)?$                            migrations;
+        /api/runtime/events                                  runtime_events;
+        ~^/api/                                              api;
+    }
+
+    map $uri $hosted_sse_path {
+        default                                      0;
+        /api/runtime/events                          1;
+        "~^/obs/[A-Za-z0-9_-]{43}/events$"          1;
+    }
+
+    map $request_method $hosted_non_get {
+        default 1;
+        GET     0;
+    }
+
+    map "$hosted_sse_path:$hosted_non_get:$status" $hosted_allow {
+        default   "";
+        "1:1:405" GET;
+    }
+
+    log_format hosted_json escape=json
+        '{"request_id":"$request_id",'
+        '"status":"$status",'
+        '"duration":"$request_time",'
+        '"method":"$request_method",'
+        '"route":"$hosted_route",'
+        '"source_ip":"$remote_addr",'
+        '"user_agent":"$http_user_agent"}';
+
+    access_log /var/log/nginx/gift-panel-hosted.access.log hosted_json;
+    # Per-request upstream/client failures can include the raw request line.
+    # Keep only process-critical diagnostics; sanitized access logs carry HTTP status.
+    error_log /var/log/nginx/gift-panel-hosted.error.log crit;
+
+    limit_req_zone $binary_remote_addr zone=hosted_auth:10m rate=10r/m;
+    limit_req_zone $binary_remote_addr zone=hosted_account:10m rate=30r/m;
+    limit_req_zone $binary_remote_addr zone=hosted_api:10m rate=120r/m;
+    limit_conn_zone $binary_remote_addr zone=hosted_connections:10m;
+
+    server {
+        listen 80;
+        listen [::]:80;
+        server_name {{ONLINE_DOMAIN}};
+        return 308 https://{{ONLINE_DOMAIN}}$request_uri;
+    }
+
+    server {
+        listen 443 ssl;
+        listen [::]:443 ssl;
+        server_name {{ONLINE_DOMAIN}};
+
+        ssl_certificate {{TLS_CERTIFICATE}};
+        ssl_certificate_key {{TLS_CERTIFICATE_KEY}};
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_session_tickets off;
+
+        add_header Strict-Transport-Security "max-age=15552000" always;
+        add_header Content-Security-Policy "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; img-src 'self' data:; style-src 'self'; style-src-attr 'unsafe-inline'" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+        add_header X-Request-ID "$request_id" always;
+        add_header Allow $hosted_allow always;
+
+        client_max_body_size 2m;
+        limit_req_status 429;
+        limit_conn_status 429;
+        limit_conn hosted_connections 20;
+
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Request-ID $request_id;
+
+        location = /healthz {
+            return 404;
+        }
+
+        location = /internal {
+            return 404;
+        }
+
+        location ^~ /internal/ {
+            return 404;
+        }
+
+        location = /api/runtime/events {
+            if ($request_method != GET) {
+                return 405;
+            }
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout 75s;
+            proxy_pass http://hosted_app;
+        }
+
+        location ~ "^/obs/[A-Za-z0-9_-]{43}/events$" {
+            if ($request_method != GET) {
+                return 405;
+            }
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout 75s;
+            proxy_pass http://hosted_app;
+        }
+
+        location ~ "^/obs/[A-Za-z0-9_-]{43}/exchange$" {
+            limit_req zone=hosted_auth burst=5 nodelay;
+            proxy_pass http://hosted_app;
+        }
+
+        location ~ ^/api/(?:auth/bili/challenges(?:/[A-Za-z0-9_-]+)?|auth/session|admin/auth/bili/challenges(?:/[A-Za-z0-9_-]+)?|admin/session|admin/totp|admin/bili-service/(?:challenge|replace)|admin/recovery/(?:archive|prepare|confirm))$ {
+            limit_req zone=hosted_auth burst=5 nodelay;
+            proxy_pass http://hosted_app;
+        }
+
+        location ~ ^/api/(?:auth/registration|invitations(?:/[0-9]+)?|admin/invitations|admin/accounts/[0-9]+/invitation-quota|migrations(?:/.*)?)$ {
+            limit_req zone=hosted_account burst=10 nodelay;
+            proxy_pass http://hosted_app;
+        }
+
+        location /api/ {
+            limit_req zone=hosted_api burst=30 nodelay;
+            proxy_pass http://hosted_app;
+        }
+
+        location = / {
+            proxy_pass http://hosted_app;
+        }
+
+        location = /hosted.html {
+            proxy_pass http://hosted_app;
+        }
+
+        location /assets/ {
+            proxy_pass http://hosted_app;
+        }
+
+        location ~ "^/obs/[A-Za-z0-9_-]{43}/?$" {
+            proxy_pass http://hosted_app;
+        }
+
+        location / {
+            return 404;
+        }
+    }
+}

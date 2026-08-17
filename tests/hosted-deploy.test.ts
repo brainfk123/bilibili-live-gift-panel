@@ -13,6 +13,11 @@ const deploymentFiles = [
   'deploy/hosted/env.example',
   'scripts/build-hosted.mjs',
 ] as const;
+const ingressFiles = [
+  'deploy/hosted/nginx.conf.template',
+  'deploy/hosted/logrotate.conf',
+  'deploy/hosted/journald.conf',
+] as const;
 
 function readProjectFile(path: string): string {
   return readFileSync(resolve(projectRoot, path), 'utf8');
@@ -20,6 +25,59 @@ function readProjectFile(path: string): string {
 
 function composeDocument(): Record<string, any> {
   return parse(readProjectFile('deploy/hosted/docker-compose.yml')) as Record<string, any>;
+}
+
+function nginxBlock(config: string, signature: RegExp): string {
+  const match = signature.exec(config);
+  if (!match) return '';
+  let open = -1;
+  const matchEnd = match.index + match[0].length;
+  for (let index = match.index; index < matchEnd; index += 1) {
+    if (config[index] === '{' && !/[0-9]/.test(config[index + 1] ?? '')) {
+      open = index;
+      break;
+    }
+  }
+  if (open < 0) open = config.indexOf('{', matchEnd);
+  if (open < 0) return '';
+  let depth = 0;
+  for (let index = open; index < config.length; index += 1) {
+    if (config[index] === '{') depth += 1;
+    if (config[index] === '}') {
+      depth -= 1;
+      if (depth === 0) return config.slice(match.index, index + 1);
+    }
+  }
+  return '';
+}
+
+function nginxRegexLocationMatches(block: string, path: string): boolean {
+  const match = block.match(/^location ~ (?:"([^"]+)"|(\S+))\s*\{/);
+  const source = match?.[1] ?? match?.[2];
+  return source ? new RegExp(source).test(path) : false;
+}
+
+function nginxLocationDecision(block: string, method: string): 'proxy' | number | 'none' {
+  const guard = block.match(/if \(\$request_method != ([A-Z]+)\)\s*\{\s*return ([0-9]{3});\s*\}/);
+  if (guard && method !== guard[1]) return Number(guard[2]);
+  return block.includes('proxy_pass ') ? 'proxy' : 'none';
+}
+
+function nginxMapValue(block: string, input: string): string {
+  let fallback = '';
+  const bodyStart = block.indexOf('{');
+  const bodyEnd = block.lastIndexOf('}');
+  for (const rawLine of block.slice(bodyStart + 1, bodyEnd).split(/\r?\n/)) {
+    const line = rawLine.replace(/#.*$/, '').trim();
+    const directive = line.match(/^("[^"]*"|\S+)\s+("[^"]*"|\S+);$/);
+    if (!directive) continue;
+    const key = directive[1].replace(/^"|"$/g, '');
+    const value = directive[2].replace(/^"|"$/g, '');
+    if (key === 'default') fallback = value;
+    else if (key.startsWith('~') && new RegExp(key.slice(1)).test(input)) return value;
+    else if (key === input) return value;
+  }
+  return fallback;
 }
 
 function contextManifest(root: string, current = ''): string[] {
@@ -321,5 +379,143 @@ describe('hosted single-host deployment contract', () => {
     expect(readProjectFile('deploy/hosted/env.example')).toContain(
       'docker compose --env-file deploy/hosted/env.example -f deploy/hosted/docker-compose.yml config',
     );
+  });
+
+  it('ships the Task 2 ingress and 30-day hot-log policies', () => {
+    expect(ingressFiles.map((path) => existsSync(resolve(projectRoot, path))))
+      .toEqual(ingressFiles.map(() => true));
+  });
+
+  it('renders a bounded TLS ingress with the required browser security policy', () => {
+    if (!ingressFiles.every((path) => existsSync(resolve(projectRoot, path)))) return;
+    const template = readProjectFile('deploy/hosted/nginx.conf.template');
+    const rendered = template
+      .replaceAll('{{ONLINE_DOMAIN}}', 'hosted.example.invalid')
+      .replaceAll('{{TLS_CERTIFICATE}}', '/etc/ssl/hosted/fullchain.pem')
+      .replaceAll('{{TLS_CERTIFICATE_KEY}}', '/etc/ssl/hosted/privkey.pem');
+    expect(rendered).not.toMatch(/\{\{[^}]+\}\}/);
+
+    const plainHTTP = nginxBlock(rendered, /server\s*\{\s*listen 80;/);
+    const https = nginxBlock(rendered, /server\s*\{\s*listen 443 ssl;/);
+    expect(plainHTTP).toContain('return 308 https://hosted.example.invalid$request_uri;');
+    expect(plainHTTP).not.toContain('https://$host');
+    expect(https).toContain('ssl_protocols TLSv1.2 TLSv1.3;');
+    expect(rendered).toContain('server_tokens off;');
+    expect(https).toContain('client_max_body_size 2m;');
+    expect(https).toContain('add_header Strict-Transport-Security "max-age=15552000" always;');
+    expect(rendered).not.toMatch(/includeSubDomains/i);
+    expect(https).toContain("add_header Content-Security-Policy \"default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none';");
+    expect(https).toContain("img-src 'self' data:");
+    expect(https).toContain("style-src 'self'; style-src-attr 'unsafe-inline'");
+    expect(https).toContain('add_header X-Content-Type-Options "nosniff" always;');
+    expect(https).toContain('add_header Referrer-Policy "no-referrer" always;');
+    expect(https).toContain('add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;');
+  });
+
+  it('keeps private endpoints private and disables buffering only on exact SSE routes', () => {
+    if (!existsSync(resolve(projectRoot, 'deploy/hosted/nginx.conf.template'))) return;
+    const config = readProjectFile('deploy/hosted/nginx.conf.template');
+    const health = nginxBlock(config, /location = \/healthz\s*/);
+    const internalExact = nginxBlock(config, /location = \/internal\s*/);
+    const internalTree = nginxBlock(config, /location \^~ \/internal\/\s*/);
+    expect(health).toMatch(/return 404;/);
+    expect(internalExact).toMatch(/return 404;/);
+    expect(internalTree).toMatch(/return 404;/);
+    for (const privateBlock of [health, internalExact, internalTree]) {
+      expect(privateBlock).not.toContain('proxy_pass');
+    }
+    expect(config).not.toMatch(/(?:3306|docker\.sock|\/var\/run\/docker)/i);
+    expect(config.match(/proxy_pass http:\/\/hosted_app;/g)?.length).toBeGreaterThan(0);
+    expect(config).toMatch(/upstream hosted_app\s*\{[\s\S]*?server 127\.0\.0\.1:12500;/);
+
+    const runtimeEvents = nginxBlock(config, /location = \/api\/runtime\/events\s*/);
+    const obsEvents = nginxBlock(config, /location ~ "\^\/obs\/\[A-Za-z0-9_-\]\{43\}\/events\$"\s*/);
+    expect(runtimeEvents).toContain('proxy_buffering off;');
+    expect(obsEvents).toContain('proxy_buffering off;');
+    expect(config.match(/proxy_buffering off;/g)).toHaveLength(2);
+    expect(runtimeEvents).not.toContain('limit_req ');
+    expect(obsEvents).not.toContain('limit_req ');
+    for (const [route, block] of [['/api/runtime/events', runtimeEvents], ['/obs/:publicID/events', obsEvents]] as const) {
+      expect(nginxLocationDecision(block, 'GET'), `${route} GET`).toBe('proxy');
+      for (const method of ['POST', 'HEAD', 'DELETE']) {
+        expect(nginxLocationDecision(block, method), `${route} ${method}`).toBe(405);
+      }
+      expect(block).not.toContain('rewrite ');
+      expect(block).not.toContain('add_header ');
+    }
+    const ssePathMap = nginxBlock(config, /map \$uri \$hosted_sse_path\s*/);
+    const nonGETMap = nginxBlock(config, /map \$request_method \$hosted_non_get\s*/);
+    const allowMap = nginxBlock(config, /map "\$hosted_sse_path:\$hosted_non_get:\$status" \$hosted_allow\s*/);
+    const allowFor = (path: string, method: string, status: number): string => nginxMapValue(
+      allowMap,
+      `${nginxMapValue(ssePathMap, path)}:${nginxMapValue(nonGETMap, method)}:${status}`,
+    );
+    for (const path of ['/api/runtime/events', `/obs/${'A'.repeat(43)}/events`]) {
+      for (const method of ['POST', 'HEAD', 'DELETE']) expect(allowFor(path, method, 405), `${path} ${method}`).toBe('GET');
+      expect(allowFor(path, 'GET', 200), `${path} GET`).toBe('');
+      expect(allowFor(path, 'GET', 405), `${path} GET 405`).toBe('');
+    }
+    expect(allowFor('/api/configuration', 'POST', 405)).toBe('');
+    const https = nginxBlock(config, /server\s*\{\s*listen 443 ssl;/);
+    expect(https).toContain('add_header Allow $hosted_allow always;');
+    expect(https).toContain('add_header Strict-Transport-Security "max-age=15552000" always;');
+    expect(https).toContain('add_header Content-Security-Policy ');
+    const fallback = nginxBlock(config, /location \/\s*\{/);
+    expect(fallback).toMatch(/return 404;/);
+    expect(fallback).not.toContain('proxy_pass');
+  });
+
+  it('logs only the approved normalized request metadata', () => {
+    if (!existsSync(resolve(projectRoot, 'deploy/hosted/nginx.conf.template'))) return;
+    const config = readProjectFile('deploy/hosted/nginx.conf.template');
+    const format = config.match(/log_format hosted_json escape=json[\s\S]*?;/)?.[0] ?? '';
+    for (const field of ['$request_id', '$status', '$request_time', '$request_method', '$hosted_route', '$remote_addr', '$http_user_agent']) {
+      expect(format).toContain(field);
+    }
+    expect(format).not.toMatch(/\$(?:request_uri|request(?![_A-Za-z0-9])|args|query_string|cookie_|http_cookie|http_authorization|upstream_http_)/);
+    expect(config).toContain('map $uri $hosted_route');
+    expect(config).toMatch(/access_log \/var\/log\/nginx\/gift-panel-hosted\.access\.log hosted_json;/);
+    expect(config).toContain('error_log /var/log/nginx/gift-panel-hosted.error.log crit;');
+  });
+
+  it('uses separate request buckets while SSE relies only on the per-IP connection cap', () => {
+    if (!existsSync(resolve(projectRoot, 'deploy/hosted/nginx.conf.template'))) return;
+    const config = readProjectFile('deploy/hosted/nginx.conf.template');
+    expect(config).toContain('limit_req_zone $binary_remote_addr zone=hosted_auth:10m rate=10r/m;');
+    expect(config).toContain('limit_req_zone $binary_remote_addr zone=hosted_account:10m rate=30r/m;');
+    expect(config).toContain('limit_req_zone $binary_remote_addr zone=hosted_api:10m rate=120r/m;');
+    expect(config).toContain('limit_conn_zone $binary_remote_addr zone=hosted_connections:10m;');
+    expect(config).toContain('limit_conn hosted_connections 20;');
+    expect(config).toContain('limit_req_status 429;');
+    expect(config).toContain('limit_conn_status 429;');
+
+    const auth = nginxBlock(config, /location ~ \^\/api\/\(\?:auth\/bili\/challenges/);
+    const exchange = nginxBlock(config, /location ~ "\^\/obs\/\[A-Za-z0-9_-\]\{43\}\/exchange\$"/);
+    const account = nginxBlock(config, /location ~ \^\/api\/\(\?:auth\/registration/);
+    const api = nginxBlock(config, /location \/api\/\s*/);
+    expect(auth).toContain('limit_req zone=hosted_auth burst=5 nodelay;');
+    for (const endpoint of ['/api/admin/bili-service/challenge', '/api/admin/bili-service/replace']) {
+      expect(nginxRegexLocationMatches(auth, endpoint), endpoint).toBe(true);
+    }
+    expect(nginxRegexLocationMatches(auth, '/api/admin/bili-service/status')).toBe(false);
+    expect(nginxRegexLocationMatches(account, '/api/admin/bili-service/status')).toBe(false);
+    expect('/api/admin/bili-service/status'.startsWith('/api/')).toBe(true);
+    expect(exchange).toContain('limit_req zone=hosted_auth burst=5 nodelay;');
+    expect(account).toContain('limit_req zone=hosted_account burst=10 nodelay;');
+    expect(api).toContain('limit_req zone=hosted_api burst=30 nodelay;');
+  });
+
+  it('retains hot Nginx and journal logs for 30 days without embedding secrets', () => {
+    if (!ingressFiles.every((path) => existsSync(resolve(projectRoot, path)))) return;
+    const logrotate = readProjectFile('deploy/hosted/logrotate.conf');
+    const journald = readProjectFile('deploy/hosted/journald.conf');
+    expect(logrotate).toMatch(/\/var\/log\/nginx\/gift-panel-hosted\.access\.log/);
+    expect(logrotate).toMatch(/\/var\/log\/nginx\/gift-panel-hosted\.error\.log/);
+    expect(logrotate).toMatch(/^\s*daily\s*$/m);
+    expect(logrotate).toMatch(/^\s*rotate 30\s*$/m);
+    expect(logrotate).toMatch(/kill -USR1/);
+    expect(journald).toMatch(/^\[Journal\]$/m);
+    expect(journald).toMatch(/^MaxRetentionSec=30day$/m);
+    expect(`${logrotate}\n${journald}`).not.toMatch(/(?:PASSWORD|TOKEN|AUTHORIZATION|COOKIE|PRIVATE[_ -]?KEY)\s*=/i);
   });
 });
