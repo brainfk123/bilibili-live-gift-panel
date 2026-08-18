@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 
 function deploymentAsset(name: string): string {
-  return readFileSync(new URL(`../deploy/update-api/${name}`, import.meta.url), 'utf8');
+  return readFileSync(new URL(`../deploy/update-api/${name}`, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 }
 
 type Unit = Map<string, Map<string, string[]>>;
