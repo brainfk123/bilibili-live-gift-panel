@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"bilibili-live-gift-panel/internal/gameplay"
@@ -90,9 +89,6 @@ type ControlledGateway struct {
 	breaker           *egressBreaker
 	limits            *requestLimiter
 	credentialVersion int64
-	rateLimited       atomic.Uint64
-	riskEvents        atomic.Uint64
-	failures          atomic.Uint64
 }
 
 func NewControlledGateway(upstream upstreamGateway, credentials credentialLoader, options GatewayOptions) *ControlledGateway {
@@ -125,7 +121,6 @@ func (gateway *ControlledGateway) RoomInfo(ctx context.Context, roomID string) (
 			return nil, ErrEgressUnavailable
 		}
 		if !gateway.limits.Allow(accountID, "room_info") {
-			gateway.rateLimited.Add(1)
 			gateway.breaker.RecordFailure()
 			return nil, ErrRateLimited
 		}
@@ -184,7 +179,6 @@ func (gateway *ControlledGateway) GiftCatalog(ctx context.Context, roomID string
 			return nil, ErrEgressUnavailable
 		}
 		if !gateway.limits.Allow(accountID, "gift_catalog") {
-			gateway.rateLimited.Add(1)
 			gateway.breaker.RecordFailure()
 			return nil, ErrRateLimited
 		}
@@ -230,7 +224,6 @@ func (gateway *ControlledGateway) OpenRoom(ctx context.Context, roomID string, s
 		return nil, ErrEgressUnavailable
 	}
 	if !gateway.limits.Allow(accountID, "open_room") {
-		gateway.rateLimited.Add(1)
 		gateway.breaker.RecordFailure()
 		return nil, ErrRateLimited
 	}
@@ -251,34 +244,10 @@ func (gateway *ControlledGateway) OpenRoom(ctx context.Context, roomID string, s
 }
 func (gateway *ControlledGateway) observeEgress(accountID int64, err error) {
 	if errors.Is(err, ErrRateLimited) || errors.Is(err, ErrRiskRejected) {
-		if errors.Is(err, ErrRateLimited) {
-			gateway.rateLimited.Add(1)
-		}
-		gateway.riskEvents.Add(1)
 		gateway.breaker.RecordRisk(accountID)
 		return
 	}
-	gateway.failures.Add(1)
 	gateway.breaker.RecordFailure()
-}
-
-type Metrics struct {
-	RiskEvents  uint64
-	RateLimited uint64
-	Failures    uint64
-	BreakerOpen bool
-}
-
-func (gateway *ControlledGateway) Metrics() Metrics {
-	if gateway == nil {
-		return Metrics{}
-	}
-	return Metrics{
-		RiskEvents:  gateway.riskEvents.Load(),
-		RateLimited: gateway.rateLimited.Load(),
-		Failures:    gateway.failures.Load(),
-		BreakerOpen: gateway.breaker.Open(),
-	}
 }
 
 type cachedRoomResult struct {

@@ -43,7 +43,6 @@ func (source *roomSource) supervise(connection *managedConnection) {
 }
 
 func (source *roomSource) reconnect(cause error) *managedConnection {
-	source.manager.reconnects.Add(1)
 	delay := source.nextReconnectDelay(cause)
 	for {
 		if !source.wait(delay) {
