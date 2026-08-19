@@ -213,6 +213,15 @@ func registerAttributeEditRoutes(mux *http.ServeMux, store *configStore, backgro
 	mux.Handle("/api/attribute-edits", handler)
 }
 
+func updateReadyExitHandler(updateExit chan<- struct{}) func(string) {
+	return func(_ string) {
+		select {
+		case updateExit <- struct{}{}:
+		default:
+		}
+	}
+}
+
 func main() {
 	if handled, updateErr := runUpdateHelper(os.Args[1:]); handled {
 		if updateErr != nil {
@@ -296,22 +305,7 @@ func main() {
 	presence := newPagePresence(notifications)
 	updateExit := make(chan struct{}, 1)
 	instanceExit := make(chan struct{}, 1)
-	requestIdleUpdate := func() {
-		if !presence.IsIdle() {
-			return
-		}
-		if updater.HasPending() {
-			select {
-			case updateExit <- struct{}{}:
-			default:
-			}
-			return
-		}
-		updater.NotifyIdle()
-	}
-	updater.SetAutomaticAllowed(presence.IsIdle)
-	updater.SetOnReady(func(_ string) { requestIdleUpdate() })
-	presence.SetOnIdle(requestIdleUpdate)
+	updater.SetOnReady(updateReadyExitHandler(updateExit))
 	runtimeContext, stopRuntime := context.WithCancel(context.Background())
 	background := newBackgroundRuntime(store, func() giftEventSource {
 		return &bilibiliGiftSource{sessionProvider: login.Session}

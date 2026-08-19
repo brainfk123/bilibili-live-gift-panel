@@ -124,7 +124,6 @@ type autoUpdater struct {
 	checkPeriod      time.Duration
 	now              func() time.Time
 	trigger          chan bool
-	automaticAllowed func() bool
 	onReady          func(string)
 	verifyExecutable func(string) error
 	launchInstaller  func(string, int, bool) error
@@ -288,7 +287,6 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 		checkPeriod:      period,
 		now:              now,
 		trigger:          make(chan bool, 1),
-		automaticAllowed: func() bool { return true },
 		verifyExecutable: verifyExecutable,
 		launchInstaller:  launchInstaller,
 		removeFile:       removeFile,
@@ -380,16 +378,6 @@ func (updater *autoUpdater) NotifySettingsChanged() {
 	}
 }
 
-func (updater *autoUpdater) NotifyIdle() {
-	if updater == nil || !updater.autoUpdateEnabled() {
-		return
-	}
-	select {
-	case updater.trigger <- false:
-	default:
-	}
-}
-
 func (updater *autoUpdater) CheckNow() updateStatus {
 	if updater == nil {
 		return updateStatus{State: "error", CurrentVersion: appVersion, Message: "更新模块未初始化。"}
@@ -418,16 +406,6 @@ func (updater *autoUpdater) Status() updateStatus {
 		status.Message = "自动更新已关闭，仍可手动检查。"
 	}
 	return status
-}
-
-func (updater *autoUpdater) SetAutomaticAllowed(allowed func() bool) {
-	if updater == nil {
-		return
-	}
-	if allowed == nil {
-		allowed = func() bool { return true }
-	}
-	updater.automaticAllowed = allowed
 }
 
 func (updater *autoUpdater) SetOnReady(onReady func(string)) {
@@ -533,10 +511,6 @@ func (updater *autoUpdater) autoUpdateEnabled() bool {
 	return err == nil && autoUpdateEnabled(state)
 }
 
-func (updater *autoUpdater) automaticUpdateAllowed() bool {
-	return updater.automaticAllowed == nil || updater.automaticAllowed()
-}
-
 func (updater *autoUpdater) automaticCheckDue() bool {
 	status := updater.Status()
 	return status.LastCheckedAt == 0 || updater.now().Sub(time.Unix(status.LastCheckedAt, 0)) >= updater.checkPeriod
@@ -569,14 +543,14 @@ func (updater *autoUpdater) checkAndDownload(ctx context.Context, manual bool) {
 	if !updater.canCheck() {
 		return
 	}
-	if !manual && (!updater.autoUpdateEnabled() || !updater.automaticUpdateAllowed() || !updater.automaticCheckDue()) {
+	if !manual && (!updater.autoUpdateEnabled() || !updater.automaticCheckDue()) {
 		return
 	}
 	updater.mu.Lock()
 	pending := updater.pending
 	updater.mu.Unlock()
 	if pending != nil {
-		updater.setStatus("ready", pending.Version, fmt.Sprintf("v%s 已下载，页面全部关闭后将自动安装。", pending.Version), 100, true)
+		updater.setStatus("ready", pending.Version, fmt.Sprintf("v%s 已下载，即将自动安装；已打开页面会短暂重连。", pending.Version), 100, true)
 		updater.notifyReady(pending.Version)
 		return
 	}
@@ -654,7 +628,7 @@ func (updater *autoUpdater) checkAndDownload(ctx context.Context, manual bool) {
 		updater.mu.Lock()
 		updater.pending = pending
 		updater.mu.Unlock()
-		updater.setStatus("ready", candidate.Version, fmt.Sprintf("v%s 已下载，页面全部关闭后将自动安装。", candidate.Version), 100, true)
+		updater.setStatus("ready", candidate.Version, fmt.Sprintf("v%s 已下载，即将自动安装；已打开页面会短暂重连。", candidate.Version), 100, true)
 		updater.notifyReady(candidate.Version)
 		return
 	}
@@ -1035,7 +1009,7 @@ func (updater *autoUpdater) restorePendingUpdate() {
 		State:           "ready",
 		CurrentVersion:  updater.currentVersion,
 		LatestVersion:   pending.Version,
-		Message:         fmt.Sprintf("v%s 已下载，页面全部关闭后将自动安装。", pending.Version),
+		Message:         fmt.Sprintf("v%s 已下载，即将自动安装；已打开页面会短暂重连。", pending.Version),
 		Progress:        100,
 		RestartRequired: true,
 	}
