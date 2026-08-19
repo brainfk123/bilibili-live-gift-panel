@@ -153,7 +153,7 @@ archive_one_day() {
   printf 'summary\tfile_count=%s\trange_start_epoch=%s\trange_end_epoch=%s\n' "$file_count" "$range_start" "$range_end" >>"$manifest_file"
 
   tar --create --file "$tar_file" -C "$day_work" manifest.tsv --null --verbatim-files-from --files-from="$file_list"
-  run_external "$zstd_bin" --quiet --threads=0 --ultra -19 --output="$compressed_file" "$tar_file"
+  run_external "$zstd_bin" --quiet -T0 --ultra -19 -o "$compressed_file" "$tar_file"
   run_external "$age_bin" --encrypt --recipients-file "$recipient_file" --output "$artifact_file" "$compressed_file"
   (
     cd "$day_work"

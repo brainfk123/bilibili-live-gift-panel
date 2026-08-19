@@ -30,6 +30,11 @@ const backupFiles = [
   'deploy/hosted/archive-logs.timer',
   'deploy/hosted/cos-lifecycle.json',
 ] as const;
+const operationsFiles = [
+  'deploy/hosted/README.md',
+  'deploy/hosted/health-check.sh',
+  'docs/operations/hosted-pilot-checklist.md',
+] as const;
 
 function readProjectFile(path: string): string {
   return readFileSync(resolve(projectRoot, path), 'utf8');
@@ -238,8 +243,15 @@ fi
   executable('zstd', String.raw`
 output=''
 input=''
-for argument in "$@"; do
-  case "$argument" in --output=*) output="$(printf '%s' "$argument" | cut -d= -f2-)";; --*) ;; *) input="$argument";; esac
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) output=$2; shift 2;;
+    --output=*) output="\${1#--output=}"; shift;;
+    --quiet|--ultra|--decompress|-d|-q) shift;;
+    -T*|-19|--threads=*) shift;;
+    --*) shift;;
+    *) input=$1; shift;;
+  esac
 done
 cp -- "$input" "$output"
 `);
@@ -448,6 +460,7 @@ describe('hosted single-host deployment contract', () => {
       '--skip-name-resolve',
       '--character-set-server=utf8mb4',
       '--innodb-buffer-pool-size=536870912',
+      '--log-bin-trust-function-creators=1',
     ]));
     expect(mysql.healthcheck?.test?.[0]).toBe('CMD-SHELL');
     expect(mysql.volumes).toContain('hosted_mysql_data:/var/lib/mysql');
@@ -468,8 +481,38 @@ describe('hosted single-host deployment contract', () => {
     for (const secret of requiredSecrets) {
       expect(compose.secrets[secret]?.file).toMatch(/^\$\{HOSTED_[A-Z0-9_]+_FILE:\?/);
     }
-    expect(compose.services.app.secrets).toEqual(expect.arrayContaining([
-      'mysql_dsn', 'encryption_key', 'hmac_key', 'admin_csrf_token', 'smtp_password',
+    expect(compose.services.app.secrets).toBeUndefined();
+    expect(compose.services.app.volumes).toEqual(expect.arrayContaining([
+      {
+        type: 'bind',
+        source: '${HOSTED_MYSQL_DSN_FILE:?set HOSTED_MYSQL_DSN_FILE}',
+        target: '/run/secrets/mysql_dsn',
+        read_only: true,
+      },
+      {
+        type: 'bind',
+        source: '${HOSTED_ENCRYPTION_KEY_FILE:?set HOSTED_ENCRYPTION_KEY_FILE}',
+        target: '/run/secrets/encryption_key',
+        read_only: true,
+      },
+      {
+        type: 'bind',
+        source: '${HOSTED_HMAC_KEY_FILE:?set HOSTED_HMAC_KEY_FILE}',
+        target: '/run/secrets/hmac_key',
+        read_only: true,
+      },
+      {
+        type: 'bind',
+        source: '${HOSTED_ADMIN_CSRF_TOKEN_FILE:?set HOSTED_ADMIN_CSRF_TOKEN_FILE}',
+        target: '/run/secrets/admin_csrf_token',
+        read_only: true,
+      },
+      {
+        type: 'bind',
+        source: '${HOSTED_SMTP_PASSWORD_FILE:?set HOSTED_SMTP_PASSWORD_FILE}',
+        target: '/run/secrets/smtp_password',
+        read_only: true,
+      },
     ]));
     expect(compose.services.mysql.secrets).toEqual(expect.arrayContaining(['mysql_root_password', 'mysql_password']));
 
@@ -1485,6 +1528,190 @@ describe('hosted single-host deployment contract', () => {
       expect(readdirSync(remediationDirectory)).toContain('docker-compose.yml');
       expect(unsafe.stderr).toContain(`restore cleanup failed; retained remediation directory: ${bashPath(remediationDirectory)}`);
       expect(unsafe.stderr).toContain('disposable restore project may still be running');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('hosted operations runbook and private monitoring', () => {
+  const procedureHeadings = [
+    'Provisioning',
+    'DNS and TLS',
+    'Firewall',
+    'Secrets file modes',
+    'Administrator initialization',
+    'Bilibili service credential',
+    'Deploy',
+    'Database migration',
+    'Canary check',
+    'Rollback',
+    'Application key rotation',
+    'HMAC key rotation',
+    'Encryption key rotation',
+    'SMTP rotation',
+    'COS rotation',
+    'TLS rotation',
+    'Backup restore',
+    'Service-account compromise',
+    'Bilibili breaker',
+    'Disk full',
+    'Account disable',
+    'Server decommission',
+  ];
+
+  it('ships the operations runbook, health check, and pilot checklist', () => {
+    expect(operationsFiles.map((path) => existsSync(resolve(projectRoot, path))))
+      .toEqual(operationsFiles.map(() => true));
+  });
+
+  it('documents executable deploy, rollback, rotation, and incident procedures', () => {
+    const readme = readProjectFile('deploy/hosted/README.md');
+    for (const heading of procedureHeadings) {
+      expect(readme, heading).toContain(heading);
+    }
+    expect(readme).toContain('image digest');
+    expect(readme).toContain('migration head');
+    expect(readme).toContain('backup object');
+    expect(readme).toContain('checksum');
+    expect(readme).toContain('health output');
+    expect(readme).toContain('smoke-test');
+    expect(readme).toContain('previous digest');
+    expect(readme).toMatch(/never reverses? an applied schema destructively/i);
+    expect(readme).toContain('http://127.0.0.1:12500/healthz');
+    expect(readme).toContain('http://127.0.0.1:12500/internal/metrics');
+    expect(readme).not.toContain('proxy_pass');
+    expect(readme).not.toMatch(/(?:PASSWORD|TOKEN|COOKIE|PRIVATE[_ -]?KEY)\s*=\s*\S+/i);
+  });
+
+  it('keeps health-check private, fail-closed, and free of secret output', () => {
+    const script = readProjectFile('deploy/hosted/health-check.sh');
+    expect(script).toMatch(/^set -euo pipefail$/m);
+    expect(script).toMatch(/^umask 077$/m);
+    expect(script).toContain('127.0.0.1:12500/healthz');
+    expect(script).not.toContain('/internal/metrics');
+    expect(script).toMatch(/df_bin=.*HOSTED_DF_BIN/);
+    expect(script).toMatch(/docker_bin=.*HOSTED_DOCKER_BIN/);
+    expect(script).toMatch(/openssl_bin=.*HOSTED_OPENSSL_BIN/);
+    expect(script).toMatch(/curl_bin=.*HOSTED_CURL_BIN/);
+    expect(script).toContain('HOSTED_BACKUP_STATE_ROOT');
+    expect(script).toContain('HOSTED_TLS_CERTIFICATE');
+    expect(script).toContain('HOSTED_ARCHIVE_STATE_ROOT');
+    expect(script).toMatch(/exit 10/);
+    expect(script).toMatch(/exit 11/);
+    expect(script).toMatch(/exit 12/);
+    expect(script).toMatch(/exit 13/);
+    expect(script).toMatch(/exit 14/);
+    expect(script).toMatch(/exit 15/);
+    expect(script).not.toMatch(/(?:PASSWORD|TOKEN|COOKIE|PRIVATE[_ -]?KEY)\s*=/);
+    expect(script).not.toMatch(/echo[^\n]*(?:MYSQL_PWD|DSN|COOKIE|TOKEN)/i);
+  });
+
+  it('records seven-day go/no-go evidence without tenant identifiers', () => {
+    const checklist = readProjectFile('docs/operations/hosted-pilot-checklist.md');
+    expect(checklist).toContain('China Telecom');
+    expect(checklist).toContain('China Unicom');
+    expect(checklist).toContain('China Mobile');
+    expect(checklist).toContain('p95');
+    expect(checklist).toContain('500 ms');
+    expect(checklist).toContain('70%');
+    expect(checklist).toContain('80%');
+    expect(checklist).toContain('90 days');
+    expect(checklist).toContain('go/no-go');
+    expect(checklist).not.toMatch(/\b(?:uid|cookie|nickname)\b/i);
+  });
+
+  it('returns stable health-check codes for loopback, disk, compose, backup, cert, and archive failures', () => {
+    const root = mkdtempSync(join(projectRoot, '.cache', 'hosted-health-'));
+    try {
+      const fake = fakeBackupTools(root);
+      const backupState = join(root, 'backup-state');
+      const archiveState = join(root, 'archive-state');
+      const certFile = join(root, 'tls.crt');
+      mkdirSync(backupState, { recursive: true });
+      mkdirSync(archiveState, { recursive: true });
+      writeFileSync(join(backupState, 'daily.next'), '2026-08-19\n');
+      writeFileSync(join(archiveState, 'next-day'), '2026-07-18\n');
+      writeFileSync(certFile, 'placeholder-cert\n');
+      const composeFile = resolve(projectRoot, 'deploy/hosted/docker-compose.yml');
+      writeFileSync(join(fake.bin, 'hosted-curl'), `#!/usr/bin/env bash
+set -euo pipefail
+printf 'curl\\t%s\\n' "$*" >>"$FAKE_CALLS"
+[[ "\${FAKE_HEALTH_FAIL:-}" == 1 ]] && exit 22
+printf '%s\\n' '{"status":"ok"}'
+`, 'utf8');
+      writeFileSync(join(fake.bin, 'hosted-df'), `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on'
+printf '%s\\n' "/dev/sda1 100 80 20 \${FAKE_DISK_PERCENT:-10}% /"
+`, 'utf8');
+      writeFileSync(join(fake.bin, 'hosted-docker'), `#!/usr/bin/env bash
+set -euo pipefail
+printf 'docker\\t%s\\n' "$*" >>"$FAKE_CALLS"
+[[ "\${FAKE_COMPOSE_FAIL:-}" == 1 ]] && exit 1
+printf '%s\\n' 'mysql healthy'
+printf '%s\\n' 'app healthy'
+`, 'utf8');
+      writeFileSync(join(fake.bin, 'hosted-openssl'), `#!/usr/bin/env bash
+set -euo pipefail
+printf 'openssl\\t%s\\n' "$*" >>"$FAKE_CALLS"
+printf '%s\\n' "notAfter=\${FAKE_CERT_NOT_AFTER:-Aug 18 00:00:00 2027 GMT}"
+`, 'utf8');
+      writeFileSync(join(fake.bin, 'hosted-health-date'), `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  '-u +%F') printf '%s\\n' '2026-08-18'; exit 0;;
+  '-u +%s') printf '%s\\n' '1787001600'; exit 0;;
+  '-u -d 2026-08-18 - 34 days +%F') printf '%s\\n' '2026-07-15'; exit 0;;
+  '-u -d Aug 18 00:00:00 2027 GMT +%s') printf '%s\\n' '1818547200'; exit 0;;
+  '-u -d Aug 19 00:00:00 2026 GMT +%s') printf '%s\\n' '1787088000'; exit 0;;
+esac
+exit 4
+`, 'utf8');
+      chmodSync(join(fake.bin, 'hosted-curl'), 0o755);
+      chmodSync(join(fake.bin, 'hosted-df'), 0o755);
+      chmodSync(join(fake.bin, 'hosted-docker'), 0o755);
+      chmodSync(join(fake.bin, 'hosted-openssl'), 0o755);
+      chmodSync(join(fake.bin, 'hosted-health-date'), 0o755);
+
+      const environment: NodeJS.ProcessEnv = {
+        PATH: `${bashPath(fake.bin)}${process.env.PATH ? `:${process.env.PATH.replaceAll('\\', '/')}` : ''}`,
+        FAKE_CALLS: bashPath(fake.calls),
+        HOSTED_CURL_BIN: bashPath(join(fake.bin, 'hosted-curl')),
+        HOSTED_DF_BIN: bashPath(join(fake.bin, 'hosted-df')),
+        HOSTED_DOCKER_BIN: bashPath(join(fake.bin, 'hosted-docker')),
+        HOSTED_OPENSSL_BIN: bashPath(join(fake.bin, 'hosted-openssl')),
+        HOSTED_DATE_BIN: bashPath(join(fake.bin, 'hosted-health-date')),
+        HOSTED_COMPOSE_FILE: bashPath(composeFile),
+        HOSTED_BACKUP_STATE_ROOT: bashPath(backupState),
+        HOSTED_TLS_CERTIFICATE: bashPath(certFile),
+        HOSTED_ARCHIVE_STATE_ROOT: bashPath(archiveState),
+        HOSTED_HEALTH_URL: 'http://127.0.0.1:12500/healthz',
+        HOSTED_DISK_PATH: '/',
+      };
+      writeFileSync(fake.calls, '');
+      const healthy = runBash('deploy/hosted/health-check.sh', environment);
+      expect(healthy.status, healthy.stderr).toBe(0);
+      expect(healthy.stdout).not.toMatch(/password|cookie|token|dsn/i);
+
+      const healthFail = runBash('deploy/hosted/health-check.sh', { ...environment, FAKE_HEALTH_FAIL: '1' });
+      expect(healthFail.status).toBe(10);
+      const diskFail = runBash('deploy/hosted/health-check.sh', { ...environment, FAKE_DISK_PERCENT: '90' });
+      expect(diskFail.status).toBe(11);
+      const composeFail = runBash('deploy/hosted/health-check.sh', { ...environment, FAKE_COMPOSE_FAIL: '1' });
+      expect(composeFail.status).toBe(12);
+      writeFileSync(join(backupState, 'daily.next'), '2026-07-01\n');
+      const backupFail = runBash('deploy/hosted/health-check.sh', environment);
+      expect(backupFail.status).toBe(13);
+      writeFileSync(join(backupState, 'daily.next'), '2026-08-19\n');
+      const certFail = runBash('deploy/hosted/health-check.sh', {
+        ...environment,
+        FAKE_CERT_NOT_AFTER: 'Aug 19 00:00:00 2026 GMT',
+      });
+      expect(certFail.status).toBe(14);
+      writeFileSync(join(archiveState, 'next-day'), '2026-06-01\n');
+      const archiveFail = runBash('deploy/hosted/health-check.sh', environment);
+      expect(archiveFail.status).toBe(15);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

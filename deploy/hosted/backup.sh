@@ -80,7 +80,7 @@ run_external "$docker_bin" compose -f "$compose_file" exec -T mysql sh -euc '
   export MYSQL_PWD
   exec mysqldump --user=root --single-transaction --quick --routines --events --hex-blob "$MYSQL_DATABASE"
 ' >"$sql_file"
-run_external "$zstd_bin" --quiet --threads=0 --ultra -19 --output="$compressed_file" "$sql_file"
+run_external "$zstd_bin" --quiet -T0 --ultra -19 -o "$compressed_file" "$sql_file"
 run_external "$age_bin" --encrypt --recipients-file "$recipient_file" --output "$encrypted_payload" "$compressed_file"
 
 advance_day() {

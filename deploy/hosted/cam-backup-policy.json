@@ -1,0 +1,66 @@
+{
+  "version": "2.0",
+  "statement": [
+    {
+      "effect": "allow",
+      "action": [
+        "name/cos:PutObject",
+        "name/cos:PostObject",
+        "name/cos:InitiateMultipartUpload",
+        "name/cos:ListParts",
+        "name/cos:UploadPart",
+        "name/cos:CompleteMultipartUpload",
+        "name/cos:AbortMultipartUpload",
+        "name/cos:HeadObject",
+        "name/cos:GetObject"
+      ],
+      "resource": [
+        "qcs::cos:ap-hongkong:uid/1256302443:gift-panel-hosted-1256302443/hosted/*"
+      ]
+    },
+    {
+      "effect": "allow",
+      "action": [
+        "name/cos:HeadBucket",
+        "name/cos:ListMultipartUploads"
+      ],
+      "resource": [
+        "qcs::cos:ap-hongkong:uid/1256302443:gift-panel-hosted-1256302443/*"
+      ]
+    },
+    {
+      "effect": "allow",
+      "action": [
+        "name/cos:GetBucket"
+      ],
+      "resource": [
+        "qcs::cos:ap-hongkong:uid/1256302443:gift-panel-hosted-1256302443/*"
+      ],
+      "condition": {
+        "string_like": {
+          "cos:prefix": [
+            "hosted",
+            "hosted/*"
+          ]
+        }
+      }
+    },
+    {
+      "effect": "deny",
+      "action": [
+        "name/cos:DeleteObject",
+        "name/cos:DeleteMultipleObjects",
+        "name/cos:DeleteBucket",
+        "name/cos:PutBucket",
+        "name/cos:PutBucketLifecycle",
+        "name/cos:DeleteBucketLifecycle",
+        "name/cos:PutBucketACL",
+        "name/cos:PutObjectACL"
+      ],
+      "resource": [
+        "qcs::cos:ap-hongkong:uid/1256302443:gift-panel-hosted-1256302443",
+        "qcs::cos:ap-hongkong:uid/1256302443:gift-panel-hosted-1256302443/*"
+      ]
+    }
+  ]
+}

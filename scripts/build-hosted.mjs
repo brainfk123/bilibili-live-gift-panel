@@ -62,6 +62,7 @@ function prepareHostedContext(projectRoot, contextRoot) {
     'goserver/go.mod',
     'goserver/go.sum',
     'goserver/cmd/hosted/main.go',
+    'goserver/cmd/hosted/metrics.go',
     'deploy/hosted/Dockerfile',
   ]) {
     copyProjectPath(projectRoot, contextRoot, path);

@@ -140,8 +140,13 @@ describe('hosted web build contract', () => {
     expect(button?.textContent).toBe('使用 B 站账号登录');
     expect(button?.type).toBe('button');
     expect(button?.attributes.get('aria-label')).toBe('使用 B 站账号登录');
+    expect(textContent(shell)).not.toContain('管理员');
+    expect(shell.children.filter((child) => child.tagName === 'button')).toHaveLength(1);
     button?.onclick?.();
     expect(loginCalls).toBe(1);
+    expect(module.isAdminEntryHash('#admin')).toBe(true);
+    expect(module.isAdminEntryHash('')).toBe(false);
+    expect(module.isAdminEntryHash('#login')).toBe(false);
   });
 
   it('disposes the current hosted view before mounting its replacement', async () => {

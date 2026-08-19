@@ -16,7 +16,7 @@ ARG SOURCE_DATE_EPOCH=0
 WORKDIR /build/goserver
 COPY goserver/go.mod goserver/go.sum ./
 RUN go mod download
-COPY goserver/cmd/hosted/main.go ./cmd/hosted/main.go
+COPY goserver/cmd/hosted/main.go goserver/cmd/hosted/metrics.go ./cmd/hosted/
 COPY goserver/internal ./internal
 RUN mkdir -p /out && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /out/gift-panel-hosted ./cmd/hosted
 

@@ -15,6 +15,7 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
       - --innodb-buffer-pool-size=536870912
+      - --log-bin-trust-function-creators=1
     environment:
       MYSQL_DATABASE: ${HOSTED_MYSQL_DATABASE:-gift_panel}
       MYSQL_USER: ${HOSTED_MYSQL_USER:-gift_panel}
@@ -68,16 +69,30 @@ services:
       HOSTED_SMTP_ALLOW_INSECURE_LOCALHOST: "false"
       GOMEMLIMIT: 768MiB
       TZ: UTC
-    secrets:
-      - mysql_dsn
-      - encryption_key
-      - hmac_key
-      - admin_csrf_token
-      - smtp_password
     volumes:
       - type: bind
         source: /var/log/gift-panel-hosted/app.log
         target: /var/log/gift-panel-hosted/app.log
+      - type: bind
+        source: ${HOSTED_MYSQL_DSN_FILE:?set HOSTED_MYSQL_DSN_FILE}
+        target: /run/secrets/mysql_dsn
+        read_only: true
+      - type: bind
+        source: ${HOSTED_ENCRYPTION_KEY_FILE:?set HOSTED_ENCRYPTION_KEY_FILE}
+        target: /run/secrets/encryption_key
+        read_only: true
+      - type: bind
+        source: ${HOSTED_HMAC_KEY_FILE:?set HOSTED_HMAC_KEY_FILE}
+        target: /run/secrets/hmac_key
+        read_only: true
+      - type: bind
+        source: ${HOSTED_ADMIN_CSRF_TOKEN_FILE:?set HOSTED_ADMIN_CSRF_TOKEN_FILE}
+        target: /run/secrets/admin_csrf_token
+        read_only: true
+      - type: bind
+        source: ${HOSTED_SMTP_PASSWORD_FILE:?set HOSTED_SMTP_PASSWORD_FILE}
+        target: /run/secrets/smtp_password
+        read_only: true
     ports:
       - "127.0.0.1:12500:12500"
     networks:

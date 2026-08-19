@@ -120,7 +120,7 @@ readonly checksum_pattern='^([0-9a-f]{64})  ([A-Za-z0-9._-]+)$'
   sha256sum --check "${artifact_name}.sha256"
 )
 run_external "$age_bin" --decrypt --identity "$identity_file" --output "$compressed_file" "$artifact_file"
-run_external "$zstd_bin" --decompress --quiet --output="$sql_file" "$compressed_file"
+run_external "$zstd_bin" --decompress --quiet -o "$sql_file" "$compressed_file"
 
 container_started=true
 run_external "$docker_bin" compose -p "$project_name" -f "$compose_file" up -d --wait --wait-timeout 120
