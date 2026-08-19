@@ -358,6 +358,84 @@ func TestParseBiliGiftExtractsBlindBoxParent(t *testing.T) {
 	}
 }
 
+func currentBlindBoxGiftV2Payload(t *testing.T) []byte {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"cmd": "SEND_GIFT_V2",
+		"data": map[string]any{
+			"uid": 123456789, "uname": "盲盒观众", "face": "https://example.test/viewer.png",
+			"timestamp": 1787200000, "coin_type": "gold",
+			"blind_gift": map[string]any{
+				"blind_gift_config_id": 88001,
+				"original_gift_id":     35786,
+				"original_gift_name":   "七夕鹊匣",
+				"original_gift_price":  25000,
+				"gift_action":          "爆出",
+			},
+			"gift_list": []any{
+				map[string]any{
+					"tid": "v2-reward-one", "gift_id": 35787, "gift_name": "月下牵丝",
+					"gift_price": 5000, "gift_num": 1,
+					"gift_info": map[string]any{"img_basic": "one.png", "webp": "one.webp", "effect_id": 10},
+				},
+				map[string]any{
+					"tid": "v2-reward-two", "gift_id": 35788, "gift_name": "锦书传意",
+					"gift_price": 19000, "gift_num": 2,
+					"gift_info": map[string]any{"img_basic": "two.png", "webp": "two.webp", "effect_id": 20},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+func TestParseBiliGiftEventsExtractsEveryV2BlindBoxReward(t *testing.T) {
+	gifts, reason, ok := parseBiliGiftEventsDetailed(currentBlindBoxGiftV2Payload(t))
+	if !ok {
+		t.Fatalf("SEND_GIFT_V2 blind box was not parsed: reason=%q", reason)
+	}
+	if len(gifts) != 2 {
+		t.Fatalf("parsed gifts = %#v, want two rewards", gifts)
+	}
+	first, second := gifts[0], gifts[1]
+	if first.GiftID != 35787 || first.GiftName != "月下牵丝" || first.Num != 1 || first.Price != 5000 || first.TotalCoin != 5000 || first.Rnd != "v2-reward-one" {
+		t.Fatalf("first reward = %#v", first)
+	}
+	if second.GiftID != 35788 || second.GiftName != "锦书传意" || second.Num != 2 || second.Price != 19000 || second.TotalCoin != 38000 || second.Rnd != "v2-reward-two" {
+		t.Fatalf("second reward = %#v", second)
+	}
+	for _, gift := range gifts {
+		if gift.BlindGiftID != 35786 || gift.BlindGiftName != "七夕鹊匣" || gift.BlindGiftPrice != 25000 {
+			t.Fatalf("blind parent = %#v", gift)
+		}
+		if gift.UID != 123456789 || gift.Uname != "盲盒观众" || gift.Avatar != "https://example.test/viewer.png" || gift.CoinType != "gold" {
+			t.Fatalf("shared sender = %#v", gift)
+		}
+	}
+	if first.AnimationWebP != "one.webp" || first.EffectID != 10 || second.AnimationWebP != "two.webp" || second.EffectID != 20 {
+		t.Fatalf("reward animations = %#v", gifts)
+	}
+}
+
+func TestBilibiliSourceDeliversEveryV2BlindBoxReward(t *testing.T) {
+	frame := encodeBiliPacket(biliOpMessage, currentBlindBoxGiftV2Payload(t))
+	socket := &fakeBiliSocket{reads: [][]byte{frame}, readErr: errors.New("stop")}
+	var gifts []giftEvent
+	err := (&bilibiliGiftSource{heartbeatInterval: time.Hour}).runSocket(
+		context.Background(), socket, roomInfo{}, biliSession{}, nil, nil,
+		runtimeCallbacks{onGift: func(gift giftEvent) { gifts = append(gifts, gift) }},
+	)
+	if err == nil {
+		t.Fatal("runSocket returned nil after fixture exhaustion")
+	}
+	if len(gifts) != 2 || gifts[0].GiftID != 35787 || gifts[1].GiftID != 35788 {
+		t.Fatalf("delivered gifts = %#v", gifts)
+	}
+}
+
 func TestParseBiliPaidEventParsesGuardBuy(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{
 		"cmd": "GUARD_BUY",

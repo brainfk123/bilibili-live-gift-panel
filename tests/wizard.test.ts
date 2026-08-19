@@ -1734,6 +1734,62 @@ describe('single-page configuration rendering', () => {
     expect(textOf(searchedById.get(String(manualGift.id))?.querySelector('.gift-listing-status')!)).toBe('历史礼物');
   });
 
+  it('shows a matched blind box and every reward as independently selectable search results', async () => {
+    const parent = {
+      id: 35786, name: '七夕鹊匣', price: 25000, coinType: 'gold' as const, imgBasic: 'parent.png', listed: true,
+    };
+    const firstReward = {
+      id: 35787, name: '月下牵丝', price: 5000, coinType: 'gold' as const, imgBasic: 'one.png', listed: true,
+      blindBoxParentId: parent.id, blindBoxParentName: parent.name, blindBoxParentPrice: parent.price,
+    };
+    const secondReward = {
+      id: 35788, name: '锦书传意', price: 19000, coinType: 'gold' as const, imgBasic: 'two.png', listed: true,
+      blindBoxParentId: parent.id, blindBoxParentName: parent.name, blindBoxParentPrice: parent.price,
+    };
+    const unrelated = {
+      id: 999001, name: '普通礼物', price: 1000, coinType: 'gold' as const, imgBasic: 'other.png', listed: true,
+    };
+    await saveState({
+      ...state('88888888'),
+      settings: { ...defaultState().settings, showTutorial: false, configExperience: 'advanced' },
+    });
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/attribute-edits/session') return preparedSessionFixture(init);
+      if (url === '/api/attribute-edit-lease') {
+        return Response.json(init?.method === 'POST' ? { code: 0, token: 'A'.repeat(24) } : { code: 0 });
+      }
+      if (url === '/api/config' && !init?.method) return Response.json(loadState());
+      if (url === '/api/gifts?roomId=88888888') {
+        return Response.json({ code: 0, gifts: [secondReward, unrelated, parent, firstReward] });
+      }
+      if (url.includes('/api/runtime')) return Response.json({ code: 0, runtime: { state: 'idle', roomId: '' } });
+      if (url.includes('/api/auth/status')) return Response.json({ code: 0, auth: { state: 'anonymous' } });
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/gifts?roomId=88888888', { cache: 'no-store' }));
+    await openExistingAttributeEditor(root);
+
+    const search = root.querySelector('.gift-search') as TestElement & { oninput?: () => void };
+    search.value = parent.name;
+    search.oninput?.();
+
+    const choices = root.querySelectorAll('.gift-choice');
+    expect(choices.map((choice) => choice.dataset.giftId)).toEqual([
+      String(parent.id), String(secondReward.id), String(firstReward.id),
+    ]);
+    expect(choices.some((choice) => choice.dataset.giftId === String(unrelated.id))).toBe(false);
+
+    const firstRewardChoice = choices.find((choice) => choice.dataset.giftId === String(firstReward.id));
+    firstRewardChoice?.onclick?.();
+    const selectedRules = root.querySelectorAll('.selected-gift-rule');
+    expect(selectedRules.some((rule) => rule.dataset.giftId === String(firstReward.id))).toBe(true);
+    expect(selectedRules.some((rule) => rule.dataset.giftId === String(parent.id))).toBe(false);
+  });
+
   it('uses themed scrollbars and keeps focused inputs inside their existing border', () => {
     const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
 
