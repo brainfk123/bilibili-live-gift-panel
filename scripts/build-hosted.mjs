@@ -122,10 +122,12 @@ function ensureBuildCapabilities(run) {
 
 function buildHostedImage(projectRoot, run, tag, noCache) {
   const contextRoot = mkdtempSync(join(tmpdir(), 'gift-panel-hosted-context-'));
+  const archivePath = join(contextRoot, 'hosted-image.tar');
+  const exporterPath = archivePath.replaceAll('\\', '/');
   try {
     prepareHostedContext(projectRoot, contextRoot);
     const args = [
-      'buildx', 'build', '--output', 'type=docker,rewrite-timestamp=true', '--provenance=false', '--sbom=false',
+      'buildx', 'build', '--output', `type=docker,dest=${exporterPath},rewrite-timestamp=true`, '--provenance=false', '--sbom=false',
       '--platform', 'linux/amd64', '--build-arg', 'SOURCE_DATE_EPOCH=0',
     ];
     if (noCache) args.push('--no-cache', '--pull');
@@ -135,6 +137,7 @@ function buildHostedImage(projectRoot, run, tag, noCache) {
       env: { ...process.env, DOCKER_BUILDKIT: '1', SOURCE_DATE_EPOCH: '0' },
       stdio: 'inherit',
     });
+    runDocker(run, ['load', '--input', archivePath], { stdio: 'inherit' });
   } finally {
     rmSync(contextRoot, { recursive: true, force: true });
   }

@@ -570,6 +570,7 @@ describe('hosted single-host deployment contract', () => {
       if (commandArgs.join(' ') === 'buildx inspect --bootstrap') {
         return buildKitInspectCount++ === 0 ? 'Name: default\nBuildKit: v0.13.2' : 'Name: default\nBuildKit version: v0.13.2';
       }
+      if (commandArgs[0] === 'load' && commandArgs[1] === '--input') return '';
       if (commandArgs[0] !== 'buildx' || commandArgs[1] !== 'build') throw new Error(`unexpected docker call: ${commandArgs.join(' ')}`);
       const context = args[2].cwd as string;
       manifests.push(contextManifest(context));
@@ -590,15 +591,19 @@ describe('hosted single-host deployment contract', () => {
     build();
     build();
 
-    expect(calls).toHaveLength(6);
+    expect(calls).toHaveLength(8);
     expect(manifests[1]).toEqual(manifests[0]);
     const buildCalls = calls.filter((call) => call[1][0] === 'buildx' && call[1][1] === 'build');
     expect(buildCalls).toHaveLength(2);
     expect(buildCalls[0][0]).toBe('docker');
-    expect(buildCalls[0][1]).toEqual([
-      'buildx', 'build', '--output', 'type=docker,rewrite-timestamp=true', '--provenance=false', '--sbom=false',
-      '--platform', 'linux/amd64', '--build-arg', 'SOURCE_DATE_EPOCH=0',
+    expect(buildCalls[0][1].slice(0, 3)).toEqual(['buildx', 'build', '--output']);
+    expect(buildCalls[0][1][3]).toMatch(/^type=docker,dest=.+hosted-image\.tar,rewrite-timestamp=true$/);
+    expect(buildCalls[0][1].slice(4)).toEqual([
+      '--provenance=false', '--sbom=false', '--platform', 'linux/amd64', '--build-arg', 'SOURCE_DATE_EPOCH=0',
       '--file', 'deploy/hosted/Dockerfile', '--tag', 'gift-panel-hosted:test', '.',
+    ]);
+    expect(calls.filter((call) => call[1][0] === 'load').map((call) => call[1].slice(0, 2))).toEqual([
+      ['load', '--input'], ['load', '--input'],
     ]);
   });
 
@@ -662,6 +667,7 @@ describe('hosted single-host deployment contract', () => {
           buildContexts.push(options.cwd ?? '');
           return '';
         }
+        if (args[0] === 'load' && args[1] === '--input') return '';
         if (args[0] === 'image' && args[1] === 'inspect') {
           return inspectCount++ === 0 ? `sha256:${'1'.repeat(64)}` : `sha256:${'2'.repeat(64)}`;
         }
@@ -677,7 +683,7 @@ describe('hosted single-host deployment contract', () => {
     for (const [index, args] of builds.entries()) {
       expect(args).toContain('--no-cache');
       expect(args).toContain('--pull');
-      expect(args).toContain('type=docker,rewrite-timestamp=true');
+      expect(args.some((arg) => /^type=docker,dest=.+hosted-image\.tar,rewrite-timestamp=true$/.test(arg))).toBe(true);
       expect(args).toContain(`gift-panel-hosted:repro-contract-${index === 0 ? 'a' : 'b'}`);
     }
     expect(calls.filter((args) => args[0] === 'image' && args[1] === 'rm')).toEqual([
