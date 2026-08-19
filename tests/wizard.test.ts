@@ -2206,13 +2206,13 @@ describe('single-page configuration rendering', () => {
     const dialog = root.querySelector('.changelog-dialog');
     expect(dialog).not.toBeNull();
     expect(textOf(dialog!)).toContain('这次更新了什么？');
-    expect(textOf(dialog!)).toContain('属性编辑与规则体验升级');
-    expect(textOf(dialog!)).toContain('属性编辑现在采用原子保存并支持更直观的时间输入；新增用户身份与随机公式能力，同时提升本地恢复和礼物视频导出的可靠性。');
+    expect(textOf(dialog!)).toContain('盲盒礼物与自动更新修复');
+    expect(textOf(dialog!)).toContain('修复新版盲盒礼物无法触发的问题，搜索盲盒时可分别选择爆出礼物；自动更新现在可在页面打开时完成，并在服务恢复后自动刷新页面。');
     expect(root.querySelectorAll('.changelog-visual')).toHaveLength(0);
     expect(textOf(dialog!)).not.toContain('训练中心');
     (root.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
 
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.4'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.5'));
     expect(root.querySelector('.changelog-dialog')).toBeNull();
   });
 
@@ -2253,7 +2253,7 @@ describe('single-page configuration rendering', () => {
         return Response.json({
           code: 0,
           update: {
-            state: 'up-to-date', currentVersion: '0.4.4', latestVersion: '0.4.4',
+            state: 'up-to-date', currentVersion: '0.4.5', latestVersion: '0.4.5',
             message: '当前已经是最新版本。', autoUpdate: true, restartRequired: false,
           },
         });
@@ -2271,7 +2271,7 @@ describe('single-page configuration rendering', () => {
     mountConfig(firstRoot as unknown as HTMLElement);
     await vi.waitFor(() => expect(firstRoot.querySelector('.changelog-dialog')).not.toBeNull());
     (firstRoot.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.4'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.5'));
 
     const secondRoot = new TestElement('div');
     mountConfig(secondRoot as unknown as HTMLElement);
