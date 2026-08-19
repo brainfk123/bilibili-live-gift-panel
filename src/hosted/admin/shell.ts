@@ -3,7 +3,7 @@ import { adminSections, type AdminSection } from './routes';
 
 export function mountAdminShell(
   root: HTMLElement,
-  options: { initial: AdminSection; mount(section: AdminSection, host: HTMLElement): HostedView; onLogout?(): void },
+  options: { initial: AdminSection; mount(section: AdminSection, host: HTMLElement, navigate: (next: AdminSection) => void): HostedView; onLogout?(): void },
 ): HostedView {
   const document = root.ownerDocument;
   const frame = document.createElement('div'); frame.className = 'hosted-admin-frame';
@@ -20,7 +20,7 @@ export function mountAdminShell(
 
   const buttons = new Map<AdminSection, HTMLButtonElement>();
   let active = options.initial;
-  let current = options.mount(active, content);
+  let current: HostedView = { dispose() {} };
   let disposed = false;
   let transition: Promise<void> = Promise.resolve();
   const refreshNavigation = (): void => {
@@ -35,7 +35,7 @@ export function mountAdminShell(
       const old = current; current = { dispose() {} };
       await old.dispose();
       if (disposed) return;
-      active = section; refreshNavigation(); content.replaceChildren(); current = options.mount(section, content);
+      active = section; refreshNavigation(); content.replaceChildren(); current = options.mount(section, content, navigate);
     });
   };
   for (const item of adminSections) {
@@ -43,6 +43,7 @@ export function mountAdminShell(
     buttons.set(item.id, button); sidebar.append(button);
   }
   refreshNavigation();
+  current = options.mount(active, content, navigate);
 
   return Object.freeze({ dispose: async (): Promise<void> => {
     if (disposed) return; disposed = true;

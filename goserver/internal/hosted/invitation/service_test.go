@@ -57,6 +57,12 @@ func TestGenerateDeductsQuotaAtCreation(t *testing.T) {
 	if generated.ID != 71 || generated.Code == "" || len(generated.CodeHint) != 8 || generated.CodeHint[:4] != "****" || generated.Status != StatusActive || generated.RemainingQuota != 1 {
 		t.Fatalf("Generate() = %#v", generated)
 	}
+	if matched, err := regexp.MatchString(`^[A-Za-z0-9]{8}$`, generated.Code); err != nil || !matched {
+		t.Fatalf("generated code = %q, want exactly 8 ASCII letters or digits", generated.Code)
+	}
+	if generated.CodeHint != "****"+generated.Code[4:] {
+		t.Fatalf("CodeHint = %q, want masked final four characters", generated.CodeHint)
+	}
 	if !generated.ExpiresAt.Equal(now.Add(7 * 24 * time.Hour)) {
 		t.Fatalf("ExpiresAt=%v", generated.ExpiresAt)
 	}

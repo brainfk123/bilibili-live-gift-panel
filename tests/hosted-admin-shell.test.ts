@@ -35,4 +35,22 @@ describe('A3 administrator shell', () => {
     expect(buttons[1].attributes.get('aria-current')).toBe('page');
     await shell.dispose(); expect(events.at(-1)).toBe('dispose:accounts');
   });
+
+  it('lets overview content navigate through the same serialized section transition', async () => {
+    const document: Doc = { createElement: (tag) => new Element(tag, document) }; const root = new Element('div', document);
+    const events: string[] = [];
+    const shell = mountAdminShell(root as unknown as HTMLElement, {
+      initial: 'overview', mount: (section, host, navigate) => {
+        events.push(`mount:${section}`);
+        if (section === 'overview') {
+          const open = document.createElement('button'); open.textContent = '进入账号'; open.addEventListener('click', () => navigate('accounts')); (host as unknown as Element).append(open);
+        }
+        return { dispose: () => { events.push(`dispose:${section}`); } };
+      },
+    });
+    const content = root.children[0].children[1].children[1];
+    content.children[0].listeners.get('click')?.();
+    await vi.waitFor(() => expect(events).toEqual(['mount:overview', 'dispose:overview', 'mount:accounts']));
+    await shell.dispose();
+  });
 });

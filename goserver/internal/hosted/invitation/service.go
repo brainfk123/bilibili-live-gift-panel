@@ -17,6 +17,7 @@ import (
 
 const (
 	digestSize                    = sha256.Size
+	invitationCodeLength          = 8
 	recentAdministratorTOTPWindow = 5 * time.Minute
 	administratorClockSkew        = 30 * time.Second
 )
@@ -75,8 +76,8 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 	if service == nil || sessionToken == "" || (actor != ActorStreamer && actor != ActorAdministrator) {
 		return GeneratedInvitation{}, ErrInvalidInput
 	}
-	code, err := service.keys.NewToken()
-	if err != nil || len(code) < 4 {
+	code, err := newInvitationCode(service.keys)
+	if err != nil {
 		return GeneratedInvitation{}, ErrUnavailable
 	}
 	codeDigest := sha256.Sum256([]byte(code))
@@ -186,6 +187,23 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 		Invitation: Invitation{ID: invitationID, CodeHint: "****" + hint, Status: StatusActive, CreatedAt: now, ExpiresAt: expiresAt},
 		Code:       code, RemainingQuota: remaining,
 	}, nil
+}
+
+func newInvitationCode(keys security.Keyring) (string, error) {
+	code := make([]byte, 0, invitationCodeLength)
+	for len(code) < invitationCodeLength {
+		token, err := keys.NewToken()
+		if err != nil {
+			return "", err
+		}
+		for index := 0; index < len(token) && len(code) < invitationCodeLength; index++ {
+			character := token[index]
+			if (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') {
+				code = append(code, character)
+			}
+		}
+	}
+	return string(code), nil
 }
 
 func (service *Service) AdjustQuota(ctx context.Context, administratorSession string, accountID int64, remaining uint64, reason string) (Quota, error) {

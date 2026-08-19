@@ -345,6 +345,34 @@ select {
   margin: 0 0 0.6rem;
 }
 
+.hosted-admin-content .hosted-admin-card-link {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 1.25rem;
+  color: #172033;
+  text-align: left;
+  background: #fff;
+  border: 1px solid #dce2ea;
+  box-shadow: 0 0.25rem 1rem rgb(23 32 51 / 5%);
+}
+
+.hosted-admin-content .hosted-admin-card-link:hover {
+  border-color: var(--admin-blue);
+  box-shadow: 0 0.5rem 1.4rem rgb(36 107 206 / 14%);
+}
+
+.hosted-admin-content .hosted-admin-card-link:focus-visible {
+  outline: 3px solid var(--admin-blue);
+  outline-offset: 3px;
+}
+
+.hosted-admin-card-link p {
+  margin-bottom: 0;
+  color: #637087;
+  font-weight: 500;
+}
+
 .hosted-admin-content label {
   display: grid;
   gap: 0.35rem;

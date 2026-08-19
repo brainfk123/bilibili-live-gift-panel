@@ -266,7 +266,7 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
     adminSecretFlow.close();
     adminShell = mountAdminShell(root, {
       initial: activeSection,
-      mount: (section, host) => {
+      mount: (section, host, navigate) => {
         activeSection = section;
         const localSecrets: HTMLInputElement[] = [];
         const title = document.createElement('h2'); title.className = 'hosted-admin-section-title';
@@ -283,8 +283,8 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
         if (section === 'overview') {
           title.textContent = '运行总览'; intro.textContent = '按业务域进入操作页，避免在同一长列表中误操作。';
           const grid = document.createElement('div'); grid.className = 'hosted-admin-card-grid';
-          for (const [heading, detail] of [['账号管理', '停用、启用、额度与例外换绑'], ['邀请管理', '生成一次性管理员邀请码'], ['服务账号', '检查或替换 B 站服务凭据'], ['OBS 凭据', '按账号签发新的 OBS 访问地址'], ['安全与恢复', '恢复附件、恢复码与身份重置']] as const) {
-            const card = document.createElement('article'); card.className = 'hosted-admin-card'; const h3 = document.createElement('h3'); h3.textContent = heading; const p = document.createElement('p'); p.textContent = detail; card.append(h3, p); grid.append(card);
+          for (const [target, heading, detail] of [['accounts', '账号管理', '停用、启用、额度与例外换绑'], ['invitations', '邀请管理', '生成一次性管理员邀请码'], ['bili-service', '服务账号', '检查或替换 B 站服务凭据'], ['obs', 'OBS 凭据', '按账号签发新的 OBS 访问地址'], ['security', '安全与恢复', '恢复附件、恢复码与身份重置']] as const) {
+            const card = document.createElement('button'); card.type = 'button'; card.className = 'hosted-admin-card hosted-admin-card-link'; card.setAttribute('aria-label', `进入${heading}`); const h3 = document.createElement('h3'); h3.textContent = heading; const p = document.createElement('p'); p.textContent = detail; card.append(h3, p); card.addEventListener('click', () => navigate(target)); grid.append(card);
           }
           host.append(grid);
         }
