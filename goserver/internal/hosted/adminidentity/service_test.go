@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"regexp"
@@ -101,7 +102,7 @@ func TestVerifyLoginRequiresMatchingUIDAndRejectsReplayedTOTPStep(t *testing.T) 
 	if err != nil {
 		t.Fatalf("VerifyLogin() error = %v", err)
 	}
-	if login.Token == "" || !login.ExpiresAt.Equal(now.Add(12*time.Hour)) {
+	if login.Token == "" || !login.ExpiresAt.Equal(now.Add(7*24*time.Hour)) {
 		t.Fatalf("VerifyLogin() = %#v", login)
 	}
 	if repository.containsSessionToken(login.Token) {
@@ -116,7 +117,67 @@ func TestVerifyLoginRequiresMatchingUIDAndRejectsReplayedTOTPStep(t *testing.T) 
 	}
 }
 
-func TestVerifyRecentTOTPRejectsReplayAndExpiresAfterFiveMinutes(t *testing.T) {
+func TestServiceAdminProofStatusVerifiesWithoutReturningUIDAndLoginConsumesOnce(t *testing.T) {
+	now := time.Date(2026, 8, 16, 10, 15, 0, 0, time.UTC)
+	repository := initializedMemoryRepository(t, now)
+	verifier := &memoryVerifier{
+		challenge: identity.Challenge{ID: "status-proof", QRImage: "qr", ExpiresAt: now.Add(time.Minute)},
+		verification: identity.Verification{UID: "32249588", CompletedAt: now},
+	}
+	service := newTestService(t, repository, verifier, &MemorySender{}, now)
+	challenge, err := service.BeginVerification(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := service.PollVerification(context.Background(), challenge.ID)
+	if err != nil || status.Status != AdminProofVerified || !status.ExpiresAt.Equal(challenge.ExpiresAt) {
+		t.Fatalf("PollVerification() = %#v, %v", status, err)
+	}
+	encoded, _ := json.Marshal(status)
+	if bytes.Contains(encoded, []byte("32249588")) || bytes.Contains(encoded, []byte("uid")) {
+		t.Fatalf("proof status exposed identity: %s", encoded)
+	}
+	if verifier.pollCalls != 1 || len(verifier.forgotten) != 1 || verifier.forgotten[0] != challenge.ID {
+		t.Fatalf("verifier polls=%d forgotten=%v", verifier.pollCalls, verifier.forgotten)
+	}
+	login, err := service.VerifyLogin(context.Background(), challenge.ID, "123456")
+	if err != nil || login.Token == "" {
+		t.Fatalf("VerifyLogin() = %#v, %v", login, err)
+	}
+	if verifier.pollCalls != 1 {
+		t.Fatalf("VerifyLogin repolled verifier: %d", verifier.pollCalls)
+	}
+	if _, err := service.VerifyLogin(context.Background(), challenge.ID, "123456"); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("duplicate VerifyLogin() error = %v", err)
+	}
+}
+
+func TestServiceAdminProofStatusKeepsPendingAndRejectsWrongAdministrator(t *testing.T) {
+	now := time.Date(2026, 8, 16, 10, 16, 0, 0, time.UTC)
+	repository := initializedMemoryRepository(t, now)
+	verifier := &memoryVerifier{
+		challenge: identity.Challenge{ID: "pending-proof", QRImage: "qr", ExpiresAt: now.Add(time.Minute)},
+		verification: identity.Verification{UID: "11111111", CompletedAt: now},
+		pollErrs: []error{identity.ErrVerificationPending, nil},
+	}
+	service := newTestService(t, repository, verifier, &MemorySender{}, now)
+	challenge, err := service.BeginVerification(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := service.PollVerification(context.Background(), challenge.ID)
+	if err != nil || status.Status != AdminProofPending || len(verifier.forgotten) != 0 {
+		t.Fatalf("pending status = %#v, %v forgotten=%v", status, err, verifier.forgotten)
+	}
+	if _, err := service.PollVerification(context.Background(), challenge.ID); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("wrong administrator PollVerification() error = %v", err)
+	}
+	if len(verifier.forgotten) != 1 || verifier.forgotten[0] != challenge.ID {
+		t.Fatalf("terminal proof forgotten=%v", verifier.forgotten)
+	}
+}
+
+func TestVerifyRecentTOTPRejectsReplayAndExpiresAfterTenMinutes(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 20, 0, 0, time.UTC)
 	clock := now
 	repository := initializedMemoryRepository(t, now)
@@ -138,7 +199,11 @@ func TestVerifyRecentTOTPRejectsReplayAndExpiresAfterFiveMinutes(t *testing.T) {
 		t.Fatalf("VerifyRecentTOTP(replay) error = %v", err)
 	}
 
-	clock = now.Add(5*time.Minute + 31*time.Second)
+	clock = now.Add(10*time.Minute + 30*time.Second)
+	if err := service.RequireRecentTOTP(context.Background(), login.Token); err != nil {
+		t.Fatalf("RequireRecentTOTP(at boundary) error = %v", err)
+	}
+	clock = now.Add(10*time.Minute + 30*time.Second + time.Nanosecond)
 	if err := service.RequireRecentTOTP(context.Background(), login.Token); !errors.Is(err, ErrRecentTOTPRequired) {
 		t.Fatalf("RequireRecentTOTP(expired) error = %v, want ErrRecentTOTPRequired", err)
 	}
@@ -672,6 +737,8 @@ type memoryVerifier struct {
 	verification identity.Verification
 	challenge    identity.Challenge
 	err          error
+	pollErrs     []error
+	pollCalls    int
 	forgotten    []string
 }
 
@@ -687,6 +754,12 @@ func (verifier *memoryVerifier) Begin(context.Context) (identity.Challenge, erro
 func (verifier *memoryVerifier) Poll(context.Context, string) (identity.Verification, error) {
 	verifier.mu.Lock()
 	defer verifier.mu.Unlock()
+	verifier.pollCalls++
+	if len(verifier.pollErrs) != 0 {
+		err := verifier.pollErrs[0]
+		verifier.pollErrs = verifier.pollErrs[1:]
+		return verifier.verification, err
+	}
 	return verifier.verification, verifier.err
 }
 
@@ -708,7 +781,7 @@ func newTestServiceWithClock(t *testing.T, repository Repository, verifier ident
 		t.Fatal(err)
 	}
 	service, err := NewService(repository, keys, verifier, sender, ServiceOptions{
-		Now: now, TOTP: fixedTOTP{}, Random: &sequenceReader{}, SessionTTL: 12 * time.Hour,
+		Now: now, TOTP: fixedTOTP{}, Random: &sequenceReader{},
 	})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)

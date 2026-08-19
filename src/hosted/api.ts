@@ -8,6 +8,7 @@ const obsPublicIDPattern = /^[A-Za-z0-9_-]{43}$/;
 export interface Challenge {
   challengeId: string;
   qrImage: string;
+  verificationUrl?: string;
   expiresAt: string;
 }
 export type BiliServiceStatus =
@@ -18,6 +19,11 @@ export type PollResult =
   | { status: 'pending'; expiresAt: string }
   | { status: 'verified'; expiresAt: string }
   | { status: 'registration_required'; registrationIntent: string; expiresAt: string }
+  | { status: 'expired' };
+
+export type AdminProofStatus =
+  | { status: 'pending'; expiresAt: string }
+  | { status: 'verified'; expiresAt: string }
   | { status: 'expired' };
 
 export interface InvitationRecord {
@@ -261,9 +267,26 @@ function migrationJob(value: unknown): MigrationJob | undefined {
 
 function challenge(value: unknown): Challenge | undefined {
   const item = object(value);
-  return item && exactKeys(item, ['challengeId', 'qrImage', 'expiresAt']) && string(item.challengeId) && string(item.qrImage) && instant(item.expiresAt)
-    ? { challengeId: item.challengeId, qrImage: item.qrImage, expiresAt: item.expiresAt }
+  return item && exactKeys(item, ['challengeId', 'qrImage', 'expiresAt'], ['verificationUrl']) && string(item.challengeId) && string(item.qrImage) && instant(item.expiresAt)
+    && (item.verificationUrl === undefined || validBilibiliVerificationURL(item.verificationUrl))
+    ? { challengeId: item.challengeId, qrImage: item.qrImage, ...(item.verificationUrl ? { verificationUrl: item.verificationUrl } : {}), expiresAt: item.expiresAt }
     : undefined;
+}
+
+function validBilibiliVerificationURL(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 2048) return false;
+  let parsed: URL;
+  try { parsed = new URL(value); } catch { return false; }
+  if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '' || parsed.port !== '' || parsed.hash !== '') return false;
+  const allowedPath = (parsed.hostname === 'passport.bilibili.com' && parsed.pathname === '/h5-app/passport/login/scan')
+    || (parsed.hostname === 'account.bilibili.com' && parsed.pathname === '/scan');
+  if (!allowedPath) return false;
+  const keys = [...parsed.searchParams.keys()];
+  if (keys.some((key) => key !== 'qrcode_key' && key !== 'navhide')) return false;
+  const qrKeys = parsed.searchParams.getAll('qrcode_key');
+  if (qrKeys.length !== 1 || qrKeys[0].length === 0 || qrKeys[0].length > 512) return false;
+  const navhide = parsed.searchParams.getAll('navhide');
+  return navhide.length === 0 || (navhide.length === 1 && navhide[0] === '1');
 }
 
 function invitation(value: unknown, extraOptional: string[] = []): InvitationRecord | undefined {
@@ -419,6 +442,20 @@ export class HostedAPI {
   }
 
   async beginAdminProof(): Promise<Challenge> { return this.requireChallenge((await this.request('/api/admin/auth/bili/challenges', 'POST', 201)).data); }
+  async pollAdminProof(id: string): Promise<AdminProofStatus> {
+    const response = await this.request(`/api/admin/auth/bili/challenges/${encodeURIComponent(id)}`, 'GET', [200, 410]);
+    const data = object(response.data);
+    if (!data || !string(data.status)) throw new HostedAPIError('invalid_response', response.status);
+    if (response.status === 410) {
+      if (data.status === 'expired' && exactKeys(data, ['status'])) return { status: 'expired' };
+      throw new HostedAPIError('invalid_response', response.status);
+    }
+    if ((data.status === 'pending' || data.status === 'verified') && exactKeys(data, ['status', 'expiresAt']) && instant(data.expiresAt)) {
+      return { status: data.status, expiresAt: data.expiresAt };
+    }
+    throw new HostedAPIError('invalid_response', response.status);
+  }
+  async adminSession(): Promise<void> { await this.request('/api/admin/session', 'GET', 204); }
   async biliServiceStatus(): Promise<BiliServiceStatus> {
     const data = object((await this.request('/api/admin/bili-service/status', 'GET', 200)).data);
     if (!data || !number(data.version) || !string(data.health)) throw new HostedAPIError('invalid_response', 200);

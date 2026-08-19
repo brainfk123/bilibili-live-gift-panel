@@ -159,6 +159,105 @@ select {
   line-height: 1.65;
 }
 
+.hosted-code-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.hosted-code-cell {
+  display: inline-grid;
+  place-items: center;
+  width: clamp(2.25rem, 12vw, 3rem);
+  aspect-ratio: 1;
+  margin-right: 0.45rem;
+  color: #172033;
+  font: 700 1.25rem/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+  background: #f7f9fc;
+  border: 1px solid #c8d1df;
+  border-radius: 0.65rem;
+}
+
+:focus-within > .hosted-code-cell {
+  border-color: #246bce;
+  box-shadow: 0 0 0 2px rgb(36 107 206 / 18%);
+}
+
+.is-busy > .hosted-code-cell {
+  color: #748094;
+  background: #eef1f5;
+}
+
+.hosted-admin-login {
+  width: min(100% - 2rem, 30rem);
+  margin: clamp(2rem, 10vh, 7rem) auto;
+  padding: clamp(1.5rem, 5vw, 2.5rem);
+  color: #172033;
+  background: #fff;
+  border: 1px solid #d9dee7;
+  border-radius: 1rem;
+  box-shadow: 0 1.25rem 3rem rgb(23 32 51 / 10%);
+}
+
+.hosted-admin-login h1 {
+  margin: 0.35rem 0 0.75rem;
+  font-size: clamp(1.65rem, 6vw, 2.2rem);
+}
+
+.hosted-admin-eyebrow {
+  margin: 0;
+  color: #526078;
+  font-size: 0.75rem;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+}
+
+.hosted-admin-login-status {
+  min-height: 1.5rem;
+  color: #526078;
+}
+
+.hosted-admin-login button,
+.hosted-admin-mobile-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.75rem;
+  margin: 0.35rem 0.5rem 0.35rem 0;
+  padding: 0.7rem 1rem;
+  color: #fff;
+  font-weight: 700;
+  text-decoration: none;
+  background: #246bce;
+  border: 0;
+  border-radius: 0.6rem;
+}
+
+.hosted-code-control {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  margin: 1.5rem 0 0.5rem;
+}
+
+@media (max-width: 480px) {
+  .hosted-admin-mobile-action {
+    display: flex;
+    width: 100%;
+    margin-right: 0;
+  }
+
+  .hosted-admin-login .hosted-qr {
+    width: min(78vw, 17rem);
+    margin-inline: auto;
+  }
+}
+
 @media (max-width: 480px) {
   .hosted-shell {
     width: min(100% - 1.5rem, 38rem);

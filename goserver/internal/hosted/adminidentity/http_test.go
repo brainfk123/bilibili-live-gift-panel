@@ -113,6 +113,91 @@ func TestHTTPAdministratorLoginSetsHostOnlySessionCookie(t *testing.T) {
 	}
 }
 
+func TestHTTPAdminSessionProbeIsEmptyAndDistinguishesUnavailable(t *testing.T) {
+	tests := []struct {
+		name       string
+		cookie     string
+		body       string
+		serviceErr error
+		wantStatus int
+		wantCode   string
+		wantCalls  int
+	}{
+		{name: "valid", cookie: "admin-session", wantStatus: http.StatusNoContent, wantCalls: 1},
+		{name: "missing cookie", wantStatus: http.StatusUnauthorized, wantCode: "authentication_failed"},
+		{name: "expired", cookie: "expired-session", serviceErr: ErrAuthenticationFailed, wantStatus: http.StatusUnauthorized, wantCode: "authentication_failed", wantCalls: 1},
+		{name: "repository unavailable", cookie: "admin-session", serviceErr: ErrUnavailable, wantStatus: http.StatusServiceUnavailable, wantCode: "temporarily_unavailable", wantCalls: 1},
+		{name: "query rejected", cookie: "admin-session", wantStatus: http.StatusBadRequest, wantCode: "invalid_request"},
+		{name: "body rejected", cookie: "admin-session", body: `{}`, wantStatus: http.StatusBadRequest, wantCode: "invalid_request"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &adminHTTPService{requireSessionErr: test.serviceErr}
+			handler := newTestHTTPHandler(t, service)
+			path := "/api/admin/session"
+			if test.name == "query rejected" {
+				path += "?unexpected=1"
+			}
+			request := httptest.NewRequest(http.MethodGet, path, strings.NewReader(test.body))
+			if test.cookie != "" {
+				request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: test.cookie})
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus || service.requireSessionCalls != test.wantCalls {
+				t.Fatalf("status=%d calls=%d body=%q", response.Code, service.requireSessionCalls, response.Body.String())
+			}
+			if test.wantCode == "" {
+				if response.Body.Len() != 0 {
+					t.Fatalf("body=%q, want empty", response.Body.String())
+				}
+			} else if response.Body.String() != `{"error":"`+test.wantCode+`"}`+"\n" {
+				t.Fatalf("body=%q", response.Body.String())
+			}
+		})
+	}
+	for _, method := range []string{http.MethodHead, http.MethodDelete} {
+		response := httptest.NewRecorder()
+		newTestHTTPHandler(t, &adminHTTPService{}).ServeHTTP(response, httptest.NewRequest(method, "/api/admin/session", nil))
+		if response.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s status=%d, want 405", method, response.Code)
+		}
+	}
+}
+
+func TestHTTPAdminProofStatusExposesStateWithoutIdentity(t *testing.T) {
+	now := time.Date(2026, 8, 16, 13, 5, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		status     AdminProofStatus
+		err        error
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "pending", status: AdminProofStatus{Status: AdminProofPending, ExpiresAt: now.Add(time.Minute)}, wantStatus: http.StatusOK, wantBody: `{"status":"pending","expiresAt":"2026-08-16T13:06:00Z"}` + "\n"},
+		{name: "verified", status: AdminProofStatus{Status: AdminProofVerified, ExpiresAt: now.Add(time.Minute)}, wantStatus: http.StatusOK, wantBody: `{"status":"verified","expiresAt":"2026-08-16T13:06:00Z"}` + "\n"},
+		{name: "expired", err: identity.ErrChallengeExpired, wantStatus: http.StatusGone, wantBody: `{"status":"expired"}` + "\n"},
+		{name: "unavailable", err: ErrUnavailable, wantStatus: http.StatusServiceUnavailable, wantBody: `{"error":"temporarily_unavailable"}` + "\n"},
+		{name: "invalid", err: ErrAuthenticationFailed, wantStatus: http.StatusUnauthorized, wantBody: `{"error":"authentication_failed"}` + "\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &adminHTTPService{proofStatus: test.status, proofStatusErr: test.err}
+			handler := newTestHTTPHandler(t, service)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/admin/auth/bili/challenges/proof-status", nil))
+			if response.Code != test.wantStatus || response.Body.String() != test.wantBody || service.proofStatusChallenge != "proof-status" {
+				t.Fatalf("status=%d body=%q challenge=%q", response.Code, response.Body.String(), service.proofStatusChallenge)
+			}
+			for _, forbidden := range []string{"uid", "32249588", "SESSDATA"} {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("response exposed %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
 func TestHTTPLoginPendingAndFailuresAreGeneric(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -292,6 +377,23 @@ type adminHTTPService struct {
 	confirmToken     string
 	confirmCode      string
 	cancelled        []string
+	requireSessionErr   error
+	requireSessionToken string
+	requireSessionCalls int
+	proofStatus          AdminProofStatus
+	proofStatusErr       error
+	proofStatusChallenge string
+}
+
+func (service *adminHTTPService) RequireSession(_ context.Context, token string) error {
+	service.requireSessionCalls++
+	service.requireSessionToken = token
+	return service.requireSessionErr
+}
+
+func (service *adminHTTPService) PollVerification(_ context.Context, challengeID string) (AdminProofStatus, error) {
+	service.proofStatusChallenge = challengeID
+	return service.proofStatus, service.proofStatusErr
 }
 
 func (service *adminHTTPService) BeginVerification(context.Context) (identity.Challenge, error) {

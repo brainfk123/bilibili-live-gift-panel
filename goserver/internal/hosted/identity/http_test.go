@@ -23,7 +23,10 @@ const (
 func TestHTTPExposesAuthRoutesWithoutUIDOrCookieLeakage(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 0, 0, 0, time.UTC)
 	service := &fakeHTTPService{
-		challenge:   Challenge{ID: "challenge-http", QRImage: "data:image/png;base64,public-qr", ExpiresAt: now.Add(5 * time.Minute)},
+		challenge: Challenge{
+			ID: "challenge-http", QRImage: "data:image/png;base64,public-qr",
+			VerificationURL: "https://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=public-key", ExpiresAt: now.Add(5 * time.Minute),
+		},
 		pollResult:  PollResult{Status: RegistrationRequired, RegistrationIntent: "registration-intent", ExpiresAt: now.Add(5 * time.Minute)},
 		loginResult: SiteSession{Token: "site-token", AccountID: 72, ExpiresAt: now.Add(time.Hour)},
 		session:     Session{AccountID: 72, ExpiresAt: now.Add(time.Hour)},
@@ -38,6 +41,12 @@ func TestHTTPExposesAuthRoutesWithoutUIDOrCookieLeakage(t *testing.T) {
 		t.Fatalf("challenge Cache-Control = %q, want no-store", challengeResponse.Header().Get("Cache-Control"))
 	}
 	assertBodyOmitsSecrets(t, challengeResponse.Body.String(), "32249588", "SESSDATA", "qr-key")
+	var challengeBody struct {
+		VerificationURL string `json:"verificationUrl"`
+	}
+	if err := json.Unmarshal(challengeResponse.Body.Bytes(), &challengeBody); err != nil || challengeBody.VerificationURL != service.challenge.VerificationURL {
+		t.Fatalf("challenge body = %s, verification URL = %q, error = %v", challengeResponse.Body.String(), challengeBody.VerificationURL, err)
+	}
 
 	pollResponse := serveAuthRequest(handler, http.MethodGet, "/api/auth/bili/challenges/challenge-http", "", "203.0.113.9:4000", false)
 	if pollResponse.Code != http.StatusOK || !strings.Contains(pollResponse.Body.String(), "registration-intent") {

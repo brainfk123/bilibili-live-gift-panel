@@ -7,7 +7,7 @@ import { mountInvitationView } from './invitations';
 import { mountMigrationView } from './migration';
 import { mountRoomControls } from './room';
 import { createHostedApplicationLifecycle, createHostedRuntimePresence, type HostedRuntimePresence } from './runtime';
-import { createHostedViewHost, renderHostedShell, type HostedSession, type HostedView } from './shell';
+import { createHostedViewHost, isAdminEntryHash, renderHostedShell, type HostedSession, type HostedView } from './shell';
 
 const root = document.getElementById('hosted-app');
 
@@ -53,19 +53,27 @@ const mountShell = (api: HostedAPI, serviceStatus: HostedSession['serviceStatus'
         onRegistrationRequired: (intent) => { applicationLifecycle.run(() => { void viewHost.replace(() => mountInvitationView(root, api, intent, () => returnToAccount(api))); }); },
         onExit: () => returnToSignedOut(api),
       })); },
-    onAdmin: () => { void viewHost.replace(() => mountAdminView(root, api)); },
   });
   return { dispose: () => { root.replaceChildren(); } };
 };
+const showAdmin = (api: HostedAPI): void => { disposeRuntimePresence(); void viewHost.replace(() => mountAdminView(root, api)); };
+const showSignedOut = (api: HostedAPI, serviceStatus: HostedSession['serviceStatus']): void => {
+  if (isAdminEntryHash(window.location.hash)) showAdmin(api);
+  else showShell(api, serviceStatus);
+};
 const showShell = (api: HostedAPI, serviceStatus: HostedSession['serviceStatus']): void => { disposeRuntimePresence(); void viewHost.replace(() => mountShell(api, serviceStatus)); };
 const returnToAccount = (api: HostedAPI): void => { applicationLifecycle.run(() => showAccount(api)); };
-const returnToSignedOut = (api: HostedAPI): void => { applicationLifecycle.run(() => showShell(api, 'ready')); };
+const returnToSignedOut = (api: HostedAPI): void => { applicationLifecycle.run(() => showSignedOut(api, 'ready')); };
 
 renderHostedShell(root, { serviceStatus: 'checking', onLogin: () => undefined });
 void HostedAPI.connect().then(async (api) => {
   if (!applicationLifecycle.active()) return;
+  window.addEventListener('hashchange', () => {
+    if (!applicationLifecycle.active()) return;
+    applicationLifecycle.run(() => showSignedOut(api, 'ready'));
+  });
   try { await api.session(); applicationLifecycle.run(() => showAccount(api)); }
-  catch { applicationLifecycle.run(() => showShell(api, 'ready')); }
+  catch { applicationLifecycle.run(() => showSignedOut(api, 'ready')); }
 }).catch(() => {
   applicationLifecycle.run(() => renderHostedShell(root, { serviceStatus: 'unavailable', onLogin: () => undefined }));
 });

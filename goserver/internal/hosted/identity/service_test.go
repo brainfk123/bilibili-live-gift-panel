@@ -42,6 +42,19 @@ func TestServicePollPendingKeepsChallengeAlive(t *testing.T) {
 	}
 }
 
+func TestServiceBeginRejectsUntrustedVerificationURL(t *testing.T) {
+	now := time.Date(2026, 8, 16, 8, 5, 0, 0, time.UTC)
+	verifier := &memoryVerifier{challenge: Challenge{
+		ID: "challenge-untrusted-url", QRImage: "data:image/png;base64,qr",
+		VerificationURL: "https://example.test/scan?qrcode_key=secret", ExpiresAt: now.Add(time.Minute),
+	}}
+	service := newTestService(t, &memoryRepository{}, verifier, now)
+	if _, err := service.Begin(context.Background()); !errors.Is(err, ErrVerificationFailed) {
+		t.Fatalf("Begin() error = %v, want verification failed", err)
+	}
+	assertForgottenExactly(t, verifier, "challenge-untrusted-url")
+}
+
 func TestServiceExistingAccountLoginUsesOnlyHashedSiteToken(t *testing.T) {
 	now := time.Date(2026, 8, 16, 8, 10, 0, 0, time.UTC)
 	verifier := &memoryVerifier{

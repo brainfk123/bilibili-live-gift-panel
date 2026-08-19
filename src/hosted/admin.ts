@@ -1,7 +1,9 @@
-import { HostedAPIError, type BiliServiceStatus, type Challenge, type HostedAPI, type RecoveryPreparation } from './api';
+import { HostedAPIError, type AdminProofStatus, type BiliServiceStatus, type Challenge, type HostedAPI, type RecoveryPreparation } from './api';
+import { mountAdminLogin } from './admin-login';
 
 interface AdminLoginAPI {
   beginAdminProof(): Promise<Challenge>;
+  pollAdminProof(id: string): Promise<AdminProofStatus>;
   cancelAdminProof(id: string): Promise<void>;
   adminLogin(challengeId: string, totp: string): Promise<void>;
   verifyRecentTOTP(totp: string): Promise<void>;
@@ -19,6 +21,13 @@ export function createAdminFlow(api: AdminLoginAPI) {
       const created = await api.beginAdminProof();
       if (disposed || current !== generation) { await api.cancelAdminProof(created.challengeId); return created; }
       proof = created; return proof;
+    },
+    async pollProof(): Promise<AdminProofStatus> {
+      if (!proof) throw new HostedAPIError('invalid_request', 400);
+      const id = proof.challengeId;
+      const status = await api.pollAdminProof(id);
+      if (status.status === 'expired') proof = undefined;
+      return status;
     },
     async login(totp: string): Promise<void> {
       if (!proof) throw new HostedAPIError('invalid_request', 400);
@@ -242,11 +251,13 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
   let recoveryFlow: ReturnType<typeof createAdminRecoveryFlow> | undefined;
   let adminSecretFlow: ReturnType<typeof createAdminOneTimeSecretFlow>;
   let clearTransientSecret: (() => void) | undefined;
+  let loginMount: { dispose(): Promise<void> } | undefined;
   const secretInputs = new Set<HTMLInputElement>();
   const status = document.createElement('p'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
 
   const renderDashboard = (): void => {
     if (disposed) return;
+    const previousLogin = loginMount; loginMount = undefined; if (previousLogin) void previousLogin.dispose();
     adminSecretFlow.close();
     const panel = document.createElement('main'); panel.className = 'hosted-shell hosted-panel';
     const title = document.createElement('h1'); title.textContent = '管理员控制台'; panel.append(title, status);
@@ -377,17 +388,8 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
 
   const renderLogin = (): void => {
     adminSecretFlow.close();
-    const panel = document.createElement('main'); panel.className = 'hosted-shell hosted-panel'; const title = document.createElement('h1'); title.textContent = '管理员登录';
-    const qr = document.createElement('img'); qr.className = 'hosted-qr'; qr.alt = '管理员 B 站登录二维码'; const [totpLabel, totp] = labelledInput(document, 'TOTP', 'password'); secretInputs.add(totp);
-    panel.append(title, status, qr, button(document, '创建 B 站验证二维码', () => { void loginFlow.beginProof().then((proof) => { qr.src = proof.qrImage; status.textContent = '扫码后输入 TOTP'; }); }), totpLabel,
-      button(document, '登录管理员控制台', () => {
-        const value = totp.value; totp.value = '';
-        void loginFlow.login(value).then(renderDashboard).catch((error) => {
-          if (error instanceof HostedAPIError && error.code === 'verification_pending') status.textContent = '等待 B 站扫码确认，请稍后再提交';
-          else { status.textContent = '登录失败'; renderLogin(); }
-        });
-      }));
-    root.replaceChildren(panel);
+    const previous = loginMount; loginMount = undefined; if (previous) void previous.dispose();
+    loginMount = mountAdminLogin(root, api, { onSignedIn: renderDashboard });
   };
   renderLogin();
   return Object.freeze({ dispose: async () => {
@@ -398,6 +400,7 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
     for (const input of secretInputs) input.value = '';
     secretInputs.clear();
     if (recoveryProof) await api.cancelAdminProof(recoveryProof.challengeId);
+    await loginMount?.dispose(); loginMount = undefined;
     await accountFlow.dispose();
     recoveryProof = undefined; rebindProof = undefined; await loginFlow.dispose(); root.replaceChildren();
   } });

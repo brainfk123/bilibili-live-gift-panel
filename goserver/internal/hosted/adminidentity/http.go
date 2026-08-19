@@ -18,8 +18,10 @@ import (
 
 type adminHTTPServicePort interface {
 	BeginVerification(context.Context) (identity.Challenge, error)
+	PollVerification(context.Context, string) (AdminProofStatus, error)
 	CancelVerification(string)
 	VerifyLogin(context.Context, string, string) (LoginResult, error)
+	RequireSession(context.Context, string) error
 	VerifyRecentTOTP(context.Context, string, string) error
 	SendRecovery(context.Context, string) (RecoveryResult, error)
 	PrepareRecovery(context.Context, string, string) (RecoveryPreparationResult, error)
@@ -60,13 +62,45 @@ func NewHTTPHandler(service adminHTTPServicePort, options HTTPOptions) (*HTTPHan
 		limiter: options.Limiter, clientIP: options.ClientIP, now: options.Now, mux: http.NewServeMux(),
 	}
 	handler.mux.HandleFunc("POST /api/admin/auth/bili/challenges", handler.beginVerification)
+	handler.mux.HandleFunc("GET /api/admin/auth/bili/challenges/{id}", handler.pollVerification)
 	handler.mux.HandleFunc("DELETE /api/admin/auth/bili/challenges/{id}", handler.cancelVerification)
+	handler.mux.HandleFunc("GET /api/admin/session", handler.getSession)
 	handler.mux.HandleFunc("POST /api/admin/session", handler.verifyLogin)
 	handler.mux.HandleFunc("POST /api/admin/totp", handler.verifyRecentTOTP)
 	handler.mux.HandleFunc("POST /api/admin/recovery/archive", handler.sendRecovery)
 	handler.mux.HandleFunc("POST /api/admin/recovery/prepare", handler.prepareRecovery)
 	handler.mux.HandleFunc("POST /api/admin/recovery/confirm", handler.confirmRecovery)
 	return handler, nil
+}
+
+func (handler *HTTPHandler) pollVerification(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		response.Header().Set("Allow", http.MethodGet)
+		http.Error(response, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	challengeID := request.PathValue("id")
+	if challengeID == "" || len(challengeID) > 256 || request.URL.RawQuery != "" || !emptyAdminBody(request) {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if !handler.allow(request, "admin_proof_poll", challengeID) {
+		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
+	status, err := handler.service.PollVerification(request.Context(), challengeID)
+	switch {
+	case err == nil:
+		writeAdminJSON(response, http.StatusOK, status)
+	case errors.Is(err, identity.ErrChallengeExpired):
+		writeAdminJSON(response, http.StatusGone, struct {
+			Status string `json:"status"`
+		}{Status: "expired"})
+	case errors.Is(err, ErrUnavailable), errors.Is(err, identity.ErrVerificationUnavailable):
+		writeAdminError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
+	default:
+		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
+	}
 }
 
 func (handler *HTTPHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -107,6 +141,31 @@ func (handler *HTTPHandler) cancelVerification(response http.ResponseWriter, req
 	}
 	handler.service.CancelVerification(challengeID)
 	response.WriteHeader(http.StatusNoContent)
+}
+
+func (handler *HTTPHandler) getSession(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		response.Header().Set("Allow", http.MethodGet)
+		http.Error(response, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if request.URL.RawQuery != "" || !emptyAdminBody(request) {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	token, ok := adminSessionToken(request)
+	if !ok {
+		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
+		return
+	}
+	switch err := handler.service.RequireSession(request.Context(), token); {
+	case err == nil:
+		response.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, ErrAuthenticationFailed):
+		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
+	default:
+		writeAdminError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
+	}
 }
 
 func (handler *HTTPHandler) verifyLogin(response http.ResponseWriter, request *http.Request) {
@@ -292,6 +351,15 @@ func decodeAdminJSON(response http.ResponseWriter, request *http.Request, target
 		return false
 	}
 	return errors.Is(decoder.Decode(&struct{}{}), io.EOF)
+}
+
+func emptyAdminBody(request *http.Request) bool {
+	if request.Body == nil || request.Body == http.NoBody {
+		return true
+	}
+	var one [1]byte
+	read, err := request.Body.Read(one[:])
+	return read == 0 && errors.Is(err, io.EOF)
 }
 
 func adminSessionToken(request *http.Request) (string, bool) {

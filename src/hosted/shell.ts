@@ -3,7 +3,10 @@ export type HostedServiceStatus = 'checking' | 'ready' | 'unavailable';
 export interface HostedSession {
   serviceStatus: HostedServiceStatus;
   onLogin: () => void;
-  onAdmin?: () => void;
+}
+
+export function isAdminEntryHash(hash: string): boolean {
+  return hash === '#admin';
 }
 
 export interface HostedView {
@@ -85,10 +88,6 @@ export function renderHostedShell(root: HTMLElement, session: HostedSession): vo
   privacySummary.textContent = '仅在登录授权后处理账号信息；不会在此页面读取或保存浏览器 Cookie。';
 
   privacy.append(privacyTitle, privacySummary);
-  shell.append(title, status, login);
-  if (session.onAdmin) {
-    const admin = document.createElement('button'); admin.type = 'button'; admin.className = 'hosted-secondary'; admin.textContent = '管理员入口'; admin.setAttribute('aria-label', '进入管理员登录'); admin.addEventListener('click', session.onAdmin); shell.append(admin);
-  }
-  shell.append(privacy);
+  shell.append(title, status, login, privacy);
   root.replaceChildren(shell);
 }

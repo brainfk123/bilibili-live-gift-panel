@@ -288,10 +288,11 @@ func (handler *HTTPHandler) beginChallenge(response http.ResponseWriter, request
 		return
 	}
 	writeHTTPJSON(response, http.StatusCreated, struct {
-		ChallengeID string    `json:"challengeId"`
-		QRImage     string    `json:"qrImage"`
-		ExpiresAt   time.Time `json:"expiresAt"`
-	}{ChallengeID: challenge.ID, QRImage: challenge.QRImage, ExpiresAt: challenge.ExpiresAt})
+		ChallengeID    string    `json:"challengeId"`
+		QRImage        string    `json:"qrImage"`
+		VerificationURL string    `json:"verificationUrl,omitempty"`
+		ExpiresAt      time.Time `json:"expiresAt"`
+	}{ChallengeID: challenge.ID, QRImage: challenge.QRImage, VerificationURL: challenge.VerificationURL, ExpiresAt: challenge.ExpiresAt})
 }
 
 func (handler *HTTPHandler) pollChallenge(response http.ResponseWriter, request *http.Request) {

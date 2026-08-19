@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -31,9 +32,41 @@ var (
 // Challenge is the public, credential-free representation of one Bilibili QR
 // verification attempt. QRImage is intended for immediate display only.
 type Challenge struct {
-	ID        string    `json:"challengeId"`
-	QRImage   string    `json:"qrImage"`
-	ExpiresAt time.Time `json:"expiresAt"`
+	ID              string    `json:"challengeId"`
+	QRImage         string    `json:"qrImage"`
+	VerificationURL string    `json:"verificationUrl,omitempty"`
+	ExpiresAt       time.Time `json:"expiresAt"`
+}
+
+// ValidateBilibiliVerificationURL keeps the public mobile verification link
+// on the same narrow Bilibili surface encoded by the QR image.
+func ValidateBilibiliVerificationURL(raw string) (canonical, qrKey string, ok bool) {
+	if raw == "" || len(raw) > 2048 {
+		return "", "", false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Fragment != "" {
+		return "", "", false
+	}
+	allowedPath := (parsed.Host == "passport.bilibili.com" && parsed.Path == "/h5-app/passport/login/scan") ||
+		(parsed.Host == "account.bilibili.com" && parsed.Path == "/scan")
+	if !allowedPath {
+		return "", "", false
+	}
+	query := parsed.Query()
+	for key := range query {
+		if key != "qrcode_key" && key != "navhide" {
+			return "", "", false
+		}
+	}
+	keys := query["qrcode_key"]
+	if len(keys) != 1 || keys[0] == "" || len(keys[0]) > 512 {
+		return "", "", false
+	}
+	if navhide, present := query["navhide"]; present && (len(navhide) != 1 || navhide[0] != "1") {
+		return "", "", false
+	}
+	return parsed.String(), keys[0], true
 }
 
 // Verification is the only identity material allowed out of a Bilibili QR
@@ -183,6 +216,14 @@ func (service *Service) Begin(ctx context.Context) (Challenge, error) {
 	if challenge.ID == "" || len(challenge.ID) > 256 || challenge.QRImage == "" || len(challenge.QRImage) > 2<<20 || !challenge.ExpiresAt.After(now) {
 		service.verifier.Forget(challenge.ID)
 		return Challenge{}, ErrVerificationFailed
+	}
+	if challenge.VerificationURL != "" {
+		canonical, _, ok := ValidateBilibiliVerificationURL(challenge.VerificationURL)
+		if !ok {
+			service.verifier.Forget(challenge.ID)
+			return Challenge{}, ErrVerificationFailed
+		}
+		challenge.VerificationURL = canonical
 	}
 	maximumExpiry := now.Add(service.challengeTTL)
 	if challenge.ExpiresAt.After(maximumExpiry) {

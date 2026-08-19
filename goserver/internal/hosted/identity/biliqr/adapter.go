@@ -142,7 +142,11 @@ func (adapter *Adapter) Begin(ctx context.Context) (identity.Challenge, error) {
 	if payload.Code != 0 || payload.Data.URL == "" || payload.Data.Key == "" {
 		return identity.Challenge{}, identity.ErrVerificationFailed
 	}
-	image, err := adapter.encodeQR(payload.Data.URL)
+	verificationURL, qrKey, ok := identity.ValidateBilibiliVerificationURL(payload.Data.URL)
+	if !ok || qrKey != payload.Data.Key {
+		return identity.Challenge{}, identity.ErrVerificationFailed
+	}
+	image, err := adapter.encodeQR(verificationURL)
 	if err != nil || image == "" {
 		return identity.Challenge{}, identity.ErrVerificationFailed
 	}
@@ -162,7 +166,7 @@ func (adapter *Adapter) Begin(ctx context.Context) (identity.Challenge, error) {
 		adapter.expireChallenge(challengeID, state)
 	})
 	adapter.mu.Unlock()
-	return identity.Challenge{ID: challengeID, QRImage: image, ExpiresAt: expiresAt}, nil
+	return identity.Challenge{ID: challengeID, QRImage: image, VerificationURL: verificationURL, ExpiresAt: expiresAt}, nil
 }
 
 // Poll returns only a UID and completion time. All Cookies are destroyed on

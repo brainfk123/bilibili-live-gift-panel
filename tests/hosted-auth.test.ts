@@ -50,6 +50,24 @@ describe('HostedAPI authentication contract', () => {
     await expect(api.beginLogin()).rejects.toMatchObject({ code: 'invalid_response' });
   });
 
+  it('accepts only an allowlisted Bilibili mobile verification URL', async () => {
+    const verificationUrl = 'https://passport.bilibili.com/h5-app/passport/login/scan?navhide=1&qrcode_key=public-key';
+    const connect = async (url: string) => HostedAPI.connect(async (input) => input === '/api/bootstrap'
+      ? json({ csrfToken: 'csrf' })
+      : json({ challengeId: 'challenge', qrImage: 'qr', verificationUrl: url, expiresAt: '2030-01-01T00:00:00Z' }, 201));
+    await expect((await connect(verificationUrl)).beginLogin()).resolves.toEqual({
+      challengeId: 'challenge', qrImage: 'qr', verificationUrl, expiresAt: '2030-01-01T00:00:00Z',
+    });
+    for (const invalid of [
+      'http://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=key',
+      'https://user@passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=key',
+      'https://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=key#fragment',
+      'https://example.test/h5-app/passport/login/scan?qrcode_key=key',
+      'https://passport.bilibili.com/other?qrcode_key=key',
+      'https://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=one&qrcode_key=two',
+    ]) await expect((await connect(invalid)).beginLogin()).rejects.toMatchObject({ code: 'invalid_response' });
+  });
+
   it('maps stable JSON error codes without retaining the response payload', async () => {
     const api = await HostedAPI.connect(async (input) => input === '/api/bootstrap'
       ? json({ csrfToken: 'csrf' })
@@ -64,6 +82,38 @@ describe('HostedAPI authentication contract', () => {
       ? json({ csrfToken: 'csrf' })
       : json({ error: 'verification_pending' }, 202));
     await expect(api.adminLogin('challenge', '123456')).rejects.toMatchObject({ code: 'verification_pending', status: 202 });
+  });
+
+  it('checks an existing administrator session without a request body', async () => {
+    const requests: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    const api = await HostedAPI.connect(async (input, init) => {
+      requests.push([input, init]);
+      return input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : new Response(null, { status: 204 });
+    });
+    await api.adminSession();
+    expect(requests[1]).toEqual(['/api/admin/session', {
+      credentials: 'same-origin', headers: { Accept: 'application/json' }, method: 'GET',
+    }]);
+  });
+
+  it('polls administrator proof status without accepting identity fields', async () => {
+    const expiresAt = '2030-01-01T00:00:00Z';
+    let response = json({ status: 'pending', expiresAt });
+    const requests: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    const api = await HostedAPI.connect(async (input, init) => {
+      requests.push([input, init]);
+      return input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : response;
+    });
+    await expect(api.pollAdminProof('proof/id')).resolves.toEqual({ status: 'pending', expiresAt });
+    expect(requests[1]).toEqual(['/api/admin/auth/bili/challenges/proof%2Fid', {
+      credentials: 'same-origin', headers: { Accept: 'application/json' }, method: 'GET',
+    }]);
+    response = json({ status: 'verified', expiresAt });
+    await expect(api.pollAdminProof('proof')).resolves.toEqual({ status: 'verified', expiresAt });
+    response = json({ status: 'expired' }, 410);
+    await expect(api.pollAdminProof('proof')).resolves.toEqual({ status: 'expired' });
+    response = json({ status: 'verified', expiresAt, uid: 32249588 });
+    await expect(api.pollAdminProof('proof')).rejects.toMatchObject({ code: 'invalid_response' });
   });
 
   it('requires exact 204 void success and exact 410 expiry envelopes', async () => {
@@ -265,9 +315,10 @@ describe('Bilibili authentication lifecycle', () => {
 
 describe('administrator flow', () => {
   it('supports Bilibili proof plus TOTP and recent-TOTP retry', async () => {
-    const api = { beginAdminProof: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: '2030-01-01T00:00:00Z' })), adminLogin: vi.fn(async () => undefined), verifyRecentTOTP: vi.fn(async () => undefined), cancelAdminProof: vi.fn(async () => undefined) };
+    const api = { beginAdminProof: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: '2030-01-01T00:00:00Z' })), pollAdminProof: vi.fn(async () => ({ status: 'verified' as const, expiresAt: '2030-01-01T00:00:00Z' })), adminLogin: vi.fn(async () => undefined), verifyRecentTOTP: vi.fn(async () => undefined), cancelAdminProof: vi.fn(async () => undefined) };
     const flow = createAdminFlow(api);
     await flow.beginProof();
+    await expect(flow.pollProof()).resolves.toMatchObject({ status: 'verified' });
     await flow.login('123456');
     let attempts = 0;
     await flow.runWithRecentTOTP('654321', async () => {
@@ -275,6 +326,7 @@ describe('administrator flow', () => {
       if (attempts === 1) throw new HostedAPIError('recent_totp_required', 403);
     });
     expect(api.adminLogin).toHaveBeenCalledWith('proof', '123456');
+    expect(api.pollAdminProof).toHaveBeenCalledWith('proof');
     expect(api.verifyRecentTOTP).toHaveBeenCalledWith('654321');
     expect(attempts).toBe(2);
   });
@@ -302,6 +354,7 @@ describe('administrator flow', () => {
     const cancel = vi.fn(async () => undefined);
     const api = {
       beginAdminProof: vi.fn().mockResolvedValueOnce({ challengeId: 'old', qrImage: 'old-qr', expiresAt: '2030-01-01T00:00:00Z' }).mockResolvedValueOnce({ challengeId: 'fresh', qrImage: 'fresh-qr', expiresAt: '2030-01-01T00:00:00Z' }),
+      pollAdminProof: vi.fn(),
       adminLogin: vi.fn(), verifyRecentTOTP: vi.fn(), cancelAdminProof: cancel,
     };
     const flow = createAdminFlow(api);
@@ -348,6 +401,8 @@ describe('administrator flow', () => {
       remove() { if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this); this.parent = undefined; }
       setAttribute(name: string, value: string) { this.attributes.set(name, value); }
       addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); }
+      removeEventListener(name: string) { this.listeners.delete(name); }
+      focus() {}
     }
     const document = { createElement: (tag: string): Element => new Element(tag, document) };
     const root = new Element('div', document) as unknown as HTMLElement;
@@ -362,7 +417,8 @@ describe('administrator flow', () => {
       .mockResolvedValueOnce({ challengeId: 'login-proof', qrImage: 'login-qr', expiresAt: '2030-01-01T00:00:00Z' })
       .mockImplementationOnce(() => pendingRebind);
     const api = {
-      beginAdminProof, cancelAdminProof: vi.fn(async () => undefined), adminLogin: vi.fn(async () => undefined), verifyRecentTOTP: vi.fn(async () => undefined),
+      adminSession: vi.fn(async () => { throw new HostedAPIError('authentication_failed', 401); }),
+      beginAdminProof, pollAdminProof: vi.fn(async () => ({ status: 'verified' as const, expiresAt: '2030-01-01T00:00:00Z' })), cancelAdminProof: vi.fn(async () => undefined), adminLogin: vi.fn(async () => undefined), logout: vi.fn(async () => undefined), verifyRecentTOTP: vi.fn(async () => undefined),
       disableAccount: vi.fn(), enableAccount: vi.fn(), adjustQuota: vi.fn(), rebindAccount: vi.fn(),
       biliServiceStatus: vi.fn(async () => ({ version: 0 as const, health: 'missing' as const })),
       generateInvitation: vi.fn(async () => ({ id: 8, codeHint: '****LAST', code: 'ONE-TIME-ADMIN-CODE', status: 'active' as const, createdAt: '2026-08-16T00:00:00Z', expiresAt: '2026-08-17T00:00:00Z' })),
@@ -373,8 +429,12 @@ describe('administrator flow', () => {
     Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText } } });
     try {
       const mounted = mountAdminView(root, api as unknown as HostedAPI);
-      findButton('创建 B 站验证二维码')?.listeners.get('click')?.(); await vi.waitFor(() => expect(beginAdminProof).toHaveBeenCalledTimes(1));
-      findButton('登录管理员控制台')?.listeners.get('click')?.(); await vi.waitFor(() => expect(findButton('创建新的 B 站身份验证')).toBeDefined());
+      await vi.waitFor(() => expect(beginAdminProof).toHaveBeenCalledTimes(1));
+      findButton('我已完成验证')?.listeners.get('click')?.();
+      await vi.waitFor(() => expect((root as unknown as Element).children[0].children.find((child) => child.className === 'hosted-code-control')).toBeDefined());
+      const codeRoot = (root as unknown as Element).children[0].children.find((child) => child.className === 'hosted-code-control');
+      const codeInput = codeRoot?.children[0]; if (codeInput) { codeInput.value = '123456'; codeInput.listeners.get('input')?.(); }
+      await vi.waitFor(() => expect(findButton('创建新的 B 站身份验证')).toBeDefined());
       findButton('创建新的 B 站身份验证')?.listeners.get('click')?.(); await vi.waitFor(() => expect(beginAdminProof).toHaveBeenCalledTimes(2));
       findButton('生成不限额度邀请码')?.listeners.get('click')?.(); await vi.waitFor(() => expect(findButton('复制邀请码')).toBeDefined());
       const staleCopy = findButton('复制邀请码');

@@ -102,12 +102,74 @@ func TestAdapterPollsRealBilibiliShapeAndReturnsUIDOnly(t *testing.T) {
 	}
 }
 
+func TestAdapterBeginReturnsOnlyAllowlistedBilibiliVerificationURL(t *testing.T) {
+	const verificationURL = "https://passport.bilibili.com/h5-app/passport/login/scan?navhide=1&qrcode_key=public-key"
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		writeAdapterJSON(response, map[string]any{
+			"code": 0,
+			"data": map[string]any{"url": verificationURL, "qrcode_key": "public-key"},
+		})
+	}))
+	defer server.Close()
+
+	adapter, err := New(Config{
+		Client: server.Client(), GenerateEndpoint: server.URL, PollEndpoint: server.URL, NavEndpoint: server.URL,
+		EncodeQR: func(value string) (string, error) {
+			if value != verificationURL {
+				t.Fatalf("encoded URL = %q", value)
+			}
+			return "data:image/png;base64,qr", nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := adapter.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("Begin() error = %v", err)
+	}
+	if challenge.VerificationURL != verificationURL {
+		t.Fatalf("VerificationURL = %q, want %q", challenge.VerificationURL, verificationURL)
+	}
+}
+
+func TestAdapterBeginRejectsUntrustedVerificationURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{name: "http", url: "http://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=key"},
+		{name: "userinfo", url: "https://user@passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=key"},
+		{name: "fragment", url: "https://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=key#secret"},
+		{name: "unknown host", url: "https://example.test/h5-app/passport/login/scan?qrcode_key=key"},
+		{name: "unknown path", url: "https://passport.bilibili.com/other?qrcode_key=key"},
+		{name: "missing key", url: "https://passport.bilibili.com/h5-app/passport/login/scan"},
+		{name: "duplicate key", url: "https://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=one&qrcode_key=two"},
+		{name: "credential query", url: "https://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=key&SESSDATA=secret"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": test.url, "qrcode_key": "key"}})
+			}))
+			defer server.Close()
+			adapter, err := New(Config{Client: server.Client(), GenerateEndpoint: server.URL, PollEndpoint: server.URL, NavEndpoint: server.URL, EncodeQR: func(string) (string, error) { return "qr", nil }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := adapter.Begin(context.Background()); !errors.Is(err, identity.ErrVerificationFailed) {
+				t.Fatalf("Begin() error = %v, want verification failed", err)
+			}
+		})
+	}
+}
+
 func TestAdapterConsumeCredentialRetainsOnlyUntilConsumerSucceeds(t *testing.T) {
 	var pollCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/generate":
-			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": "https://example.test/qr", "qrcode_key": "service-qr-key"}})
+			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": testVerificationURL("service-qr-key"), "qrcode_key": "service-qr-key"}})
 		case "/poll":
 			pollCalls++
 			http.SetCookie(response, &http.Cookie{Name: "SESSDATA", Value: "service-cookie"})
@@ -280,7 +342,7 @@ func TestAdapterConsumeCredentialPollCompletionAfterAbsoluteTTLDoesNotRunCallbac
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/generate":
-			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": "https://example.test/qr", "qrcode_key": "service-key"}})
+			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": testVerificationURL("service-key"), "qrcode_key": "service-key"}})
 		case "/poll":
 			close(pollStarted)
 			<-releasePoll
@@ -408,7 +470,7 @@ func TestAdapterExpiresForgetsAndClosesAllChallenges(t *testing.T) {
 		if key == "" {
 			key = "generated-key"
 		}
-		writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": "https://example.test/qr?key=" + url.QueryEscape(key), "qrcode_key": key}})
+		writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": testVerificationURL(key), "qrcode_key": key}})
 	}))
 	defer server.Close()
 
@@ -471,7 +533,7 @@ func TestAdapterTerminalBilibiliResultsAlwaysForgetSecrets(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 				switch request.URL.Path {
 				case "/generate":
-					writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": "https://example.test/qr", "qrcode_key": "secret-key"}})
+					writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": testVerificationURL("secret-key"), "qrcode_key": "secret-key"}})
 				case "/poll":
 					if test.setCookie {
 						http.SetCookie(response, &http.Cookie{Name: "SESSDATA", Value: "secret-cookie"})
@@ -506,7 +568,7 @@ func TestAdapterCloseDuringIdentityLookupCannotReturnUID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/generate":
-			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": "https://example.test/qr", "qrcode_key": "secret-key"}})
+			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": testVerificationURL("secret-key"), "qrcode_key": "secret-key"}})
 		case "/poll":
 			http.SetCookie(response, &http.Cookie{Name: "SESSDATA", Value: "secret-cookie"})
 			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"code": 0, "url": "https://example.test/"}})
@@ -560,7 +622,7 @@ func TestAdapterTTLExpiryCancelsInFlightIdentityRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/generate":
-			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": "https://example.test/qr", "qrcode_key": "ttl-key"}})
+			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": testVerificationURL("ttl-key"), "qrcode_key": "ttl-key"}})
 		case "/poll":
 			http.SetCookie(response, &http.Cookie{Name: "SESSDATA", Value: "ttl-cookie"})
 			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"code": 0, "url": "https://example.test/"}})
@@ -612,7 +674,7 @@ func TestAdapterActivelyDeletesAbandonedQRKeyAtTTL(t *testing.T) {
 			http.NotFound(response, request)
 			return
 		}
-		writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": "https://example.test/qr", "qrcode_key": "abandoned-secret-key"}})
+		writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": testVerificationURL("abandoned-secret-key"), "qrcode_key": "abandoned-secret-key"}})
 	}))
 	defer server.Close()
 	adapter, err := New(Config{
@@ -652,7 +714,7 @@ func TestAdapterThrottlesEachChallengeToBilibiliPollingInterval(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/generate":
-			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": "https://example.test/qr", "qrcode_key": "throttled-key"}})
+			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": testVerificationURL("throttled-key"), "qrcode_key": "throttled-key"}})
 		case "/poll":
 			pollCount++
 			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"code": 86101}})
@@ -695,7 +757,7 @@ func TestAdapterPollCompletionAfterLogicalExpiryCannotReturnUID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/generate":
-			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": "https://example.test/qr", "qrcode_key": "expiring-key"}})
+			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": testVerificationURL("expiring-key"), "qrcode_key": "expiring-key"}})
 		case "/poll":
 			http.SetCookie(response, &http.Cookie{Name: "SESSDATA", Value: "expiring-cookie"})
 			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"code": 0, "url": "https://example.test/"}})
@@ -738,6 +800,10 @@ func TestAdapterPollCompletionAfterLogicalExpiryCannotReturnUID(t *testing.T) {
 func writeAdapterJSON(response http.ResponseWriter, value any) {
 	response.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(response).Encode(value)
+}
+
+func testVerificationURL(key string) string {
+	return "https://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=" + url.QueryEscape(key)
 }
 
 type mutableAdapterClock struct {

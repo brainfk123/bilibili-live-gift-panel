@@ -13,6 +13,7 @@ import (
 	"net/mail"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"bilibili-live-gift-panel/internal/hosted/identity"
@@ -24,9 +25,9 @@ import (
 )
 
 const (
-	RecentTOTPWindow  = 5 * time.Minute
+	RecentTOTPWindow  = 10 * time.Minute
 	defaultProofTTL   = 5 * time.Minute
-	defaultSessionTTL = 12 * time.Hour
+	defaultSessionTTL = 7 * 24 * time.Hour
 )
 
 var (
@@ -1110,6 +1111,8 @@ type Service struct {
 	proofTTL   time.Duration
 	sessionTTL time.Duration
 	handoffTTL time.Duration
+	proofMu    sync.Mutex
+	proofs     map[string]*adminProofState
 }
 
 type InitializeResult struct {
@@ -1120,6 +1123,25 @@ type InitializeResult struct {
 type LoginResult struct {
 	Token     string    `json:"-"`
 	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+const (
+	AdminProofPending  = "pending"
+	AdminProofVerified = "verified"
+)
+
+type AdminProofStatus struct {
+	Status    string    `json:"status"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+type adminProofState struct {
+	expiresAt         time.Time
+	uidLookup         []byte
+	verified          bool
+	polling           bool
+	verifierForgotten bool
+	timer             *time.Timer
 }
 
 type RecoveryResult struct {
@@ -1172,6 +1194,7 @@ func NewService(repository Repository, keys security.Keyring, verifier identity.
 		repository: repository, keys: keys, verifier: verifier, sender: sender,
 		now: options.Now, random: options.Random, totp: options.TOTP, issuer: options.Issuer,
 		proofTTL: options.ProofTTL, sessionTTL: options.SessionTTL, handoffTTL: options.HandoffTTL,
+		proofs: make(map[string]*adminProofState),
 	}, nil
 }
 
@@ -1180,19 +1203,108 @@ func (service *Service) BeginVerification(ctx context.Context) (identity.Challen
 		return identity.Challenge{}, ErrUnavailable
 	}
 	challenge, err := service.verifier.Begin(ctx)
-	if err != nil || challenge.ID == "" || challenge.QRImage == "" || !challenge.ExpiresAt.After(service.now()) {
+	now := service.now()
+	if err != nil || challenge.ID == "" || challenge.QRImage == "" || !challenge.ExpiresAt.After(now) {
 		if challenge.ID != "" {
 			service.verifier.Forget(challenge.ID)
 		}
 		return identity.Challenge{}, ErrUnavailable
 	}
+	if maximum := now.Add(service.proofTTL); challenge.ExpiresAt.After(maximum) {
+		challenge.ExpiresAt = maximum
+	}
+	state := &adminProofState{expiresAt: challenge.ExpiresAt}
+	service.proofMu.Lock()
+	if previous := service.proofs[challenge.ID]; previous != nil {
+		service.proofMu.Unlock()
+		service.verifier.Forget(challenge.ID)
+		return identity.Challenge{}, ErrUnavailable
+	}
+	service.proofs[challenge.ID] = state
+	state.timer = time.AfterFunc(challenge.ExpiresAt.Sub(now), func() { service.expireProof(challenge.ID, state) })
+	service.proofMu.Unlock()
 	return challenge, nil
 }
 
 func (service *Service) CancelVerification(challengeID string) {
-	if service != nil && challengeID != "" {
+	if service == nil || challengeID == "" {
+		return
+	}
+	state, forget := service.removeProof(challengeID)
+	if state == nil || forget {
 		service.verifier.Forget(challengeID)
 	}
+}
+
+func (service *Service) PollVerification(ctx context.Context, challengeID string) (AdminProofStatus, error) {
+	if service == nil || challengeID == "" {
+		return AdminProofStatus{}, ErrAuthenticationFailed
+	}
+	now := service.now()
+	service.proofMu.Lock()
+	state := service.proofs[challengeID]
+	if state == nil {
+		service.proofMu.Unlock()
+		return AdminProofStatus{}, ErrAuthenticationFailed
+	}
+	if !now.Before(state.expiresAt) {
+		service.proofMu.Unlock()
+		service.expireProof(challengeID, state)
+		return AdminProofStatus{}, identity.ErrChallengeExpired
+	}
+	if state.verified {
+		status := AdminProofStatus{Status: AdminProofVerified, ExpiresAt: state.expiresAt}
+		service.proofMu.Unlock()
+		return status, nil
+	}
+	if len(state.uidLookup) != 0 {
+		lookup := bytes.Clone(state.uidLookup)
+		state.polling = true
+		service.proofMu.Unlock()
+		return service.finishVerifiedLookup(ctx, challengeID, state, lookup, now)
+	}
+	if state.polling {
+		status := AdminProofStatus{Status: AdminProofPending, ExpiresAt: state.expiresAt}
+		service.proofMu.Unlock()
+		return status, nil
+	}
+	state.polling = true
+	service.proofMu.Unlock()
+
+	verification, err := service.verifier.Poll(ctx, challengeID)
+	if errors.Is(err, identity.ErrVerificationPending) {
+		service.finishProofPoll(challengeID, state)
+		return AdminProofStatus{Status: AdminProofPending, ExpiresAt: state.expiresAt}, nil
+	}
+	if errors.Is(err, identity.ErrVerificationUnavailable) {
+		service.finishProofPoll(challengeID, state)
+		return AdminProofStatus{}, ErrUnavailable
+	}
+	service.verifier.Forget(challengeID)
+	service.proofMu.Lock()
+	if service.proofs[challengeID] == state {
+		state.verifierForgotten = true
+	}
+	service.proofMu.Unlock()
+	if err != nil {
+		service.removeProof(challengeID)
+		return AdminProofStatus{}, ErrAuthenticationFailed
+	}
+	if verification.CompletedAt.IsZero() || verification.CompletedAt.After(now.Add(time.Minute)) || verification.CompletedAt.Before(now.Add(-service.proofTTL)) {
+		service.removeProof(challengeID)
+		return AdminProofStatus{}, ErrAuthenticationFailed
+	}
+	uid, ok := canonicalAdminUID(verification.UID)
+	if !ok {
+		service.removeProof(challengeID)
+		return AdminProofStatus{}, ErrAuthenticationFailed
+	}
+	lookup, err := service.keys.Lookup("bili_uid", []byte(uid))
+	if err != nil {
+		service.removeProof(challengeID)
+		return AdminProofStatus{}, ErrAuthenticationFailed
+	}
+	return service.finishVerifiedLookup(ctx, challengeID, state, lookup, now)
 }
 
 func (service *Service) Initialize(ctx context.Context, uid, email string) (InitializeResult, error) {
@@ -1368,18 +1480,11 @@ func (service *Service) VerifyLogin(ctx context.Context, challengeID, code strin
 	if service == nil || challengeID == "" || !validTOTPCode(code) {
 		return LoginResult{}, ErrAuthenticationFailed
 	}
-	verification, err := service.consumeProof(ctx, challengeID)
+	lookup, err := service.consumeProofLookup(ctx, challengeID)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	uid, ok := canonicalAdminUID(verification.UID)
-	if !ok {
-		return LoginResult{}, ErrAuthenticationFailed
-	}
-	lookup, err := service.keys.Lookup("bili_uid", []byte(uid))
-	if err != nil {
-		return LoginResult{}, ErrAuthenticationFailed
-	}
+	defer clear(lookup)
 	now := service.now()
 	record, identityErr := service.repository.Identity(ctx)
 	if identityErr != nil {
@@ -1564,18 +1669,11 @@ func (service *Service) PrepareRecovery(ctx context.Context, challengeID, recove
 	if !ok {
 		return RecoveryPreparationResult{}, ErrUnavailable
 	}
-	verification, err := service.consumeProof(ctx, challengeID)
+	uidLookup, err := service.consumeProofLookup(ctx, challengeID)
 	if err != nil {
 		return RecoveryPreparationResult{}, err
 	}
-	uid, ok := canonicalAdminUID(verification.UID)
-	if !ok {
-		return RecoveryPreparationResult{}, ErrAuthenticationFailed
-	}
-	uidLookup, err := service.keys.Lookup("bili_uid", []byte(uid))
-	if err != nil {
-		return RecoveryPreparationResult{}, ErrAuthenticationFailed
-	}
+	defer clear(uidLookup)
 	record, err := service.repository.Identity(ctx)
 	if err != nil || subtle.ConstantTimeCompare(uidLookup, record.UIDLookup) != 1 {
 		return RecoveryPreparationResult{}, ErrAuthenticationFailed
@@ -1720,18 +1818,11 @@ func (service *Service) CompleteRecovery(ctx context.Context, challengeID, recov
 	if service == nil || challengeID == "" || recoveryCode == "" || len(recoveryCode) > 256 {
 		return RecoveryCompletionResult{}, ErrAuthenticationFailed
 	}
-	verification, err := service.consumeProof(ctx, challengeID)
+	uidLookup, err := service.consumeProofLookup(ctx, challengeID)
 	if err != nil {
 		return RecoveryCompletionResult{}, err
 	}
-	uid, ok := canonicalAdminUID(verification.UID)
-	if !ok {
-		return RecoveryCompletionResult{}, ErrAuthenticationFailed
-	}
-	uidLookup, err := service.keys.Lookup("bili_uid", []byte(uid))
-	if err != nil {
-		return RecoveryCompletionResult{}, ErrAuthenticationFailed
-	}
+	defer clear(uidLookup)
 	record, err := service.repository.Identity(ctx)
 	if err != nil || subtle.ConstantTimeCompare(uidLookup, record.UIDLookup) != 1 {
 		return RecoveryCompletionResult{}, ErrAuthenticationFailed
@@ -1777,18 +1868,11 @@ func (service *Service) CompleteRecovery(ctx context.Context, challengeID, recov
 }
 
 func (service *Service) verifyProofAndTOTP(ctx context.Context, challengeID, code string) (IdentityRecord, time.Time, error) {
-	verification, err := service.consumeProof(ctx, challengeID)
+	lookup, err := service.consumeProofLookup(ctx, challengeID)
 	if err != nil {
 		return IdentityRecord{}, time.Time{}, err
 	}
-	uid, ok := canonicalAdminUID(verification.UID)
-	if !ok {
-		return IdentityRecord{}, time.Time{}, ErrAuthenticationFailed
-	}
-	lookup, err := service.keys.Lookup("bili_uid", []byte(uid))
-	if err != nil {
-		return IdentityRecord{}, time.Time{}, ErrAuthenticationFailed
-	}
+	defer clear(lookup)
 	record, err := service.repository.Identity(ctx)
 	if err != nil || subtle.ConstantTimeCompare(lookup, record.UIDLookup) != 1 || record.CredentialEpoch < 1 {
 		return IdentityRecord{}, time.Time{}, ErrAuthenticationFailed
@@ -1803,6 +1887,148 @@ func (service *Service) verifyProofAndTOTP(ctx context.Context, challengeID, cod
 		return IdentityRecord{}, time.Time{}, ErrAuthenticationFailed
 	}
 	return record, step, nil
+}
+
+func (service *Service) finishVerifiedLookup(ctx context.Context, challengeID string, state *adminProofState, lookup []byte, now time.Time) (AdminProofStatus, error) {
+	defer clear(lookup)
+	if err := service.matchAdministratorLookup(ctx, lookup, now); err != nil {
+		if errors.Is(err, ErrUnavailable) {
+			service.proofMu.Lock()
+			if service.proofs[challengeID] == state && service.now().Before(state.expiresAt) {
+				clear(state.uidLookup)
+				state.uidLookup = bytes.Clone(lookup)
+				state.polling = false
+			}
+			service.proofMu.Unlock()
+			return AdminProofStatus{}, ErrUnavailable
+		}
+		service.removeProof(challengeID)
+		return AdminProofStatus{}, ErrAuthenticationFailed
+	}
+	service.proofMu.Lock()
+	if service.proofs[challengeID] != state || !service.now().Before(state.expiresAt) {
+		service.proofMu.Unlock()
+		service.removeProof(challengeID)
+		return AdminProofStatus{}, identity.ErrChallengeExpired
+	}
+	clear(state.uidLookup)
+	state.uidLookup = bytes.Clone(lookup)
+	state.verified = true
+	state.polling = false
+	status := AdminProofStatus{Status: AdminProofVerified, ExpiresAt: state.expiresAt}
+	service.proofMu.Unlock()
+	return status, nil
+}
+
+func (service *Service) matchAdministratorLookup(ctx context.Context, lookup []byte, now time.Time) error {
+	record, err := service.repository.Identity(ctx)
+	if err == nil {
+		if subtle.ConstantTimeCompare(lookup, record.UIDLookup) == 1 && record.CredentialEpoch >= 1 {
+			return nil
+		}
+		return ErrAuthenticationFailed
+	}
+	if !errors.Is(err, ErrAuthenticationFailed) {
+		return ErrUnavailable
+	}
+	repository, ok := service.repository.(HandoffRepository)
+	if !ok {
+		return ErrAuthenticationFailed
+	}
+	handoff, err := repository.PendingInitialization(ctx, lookup, now)
+	if err != nil {
+		if errors.Is(err, ErrUnavailable) {
+			return ErrUnavailable
+		}
+		return ErrAuthenticationFailed
+	}
+	if subtle.ConstantTimeCompare(lookup, handoff.UIDLookup) != 1 {
+		return ErrAuthenticationFailed
+	}
+	return nil
+}
+
+func (service *Service) finishProofPoll(challengeID string, expected *adminProofState) {
+	service.proofMu.Lock()
+	if service.proofs[challengeID] == expected {
+		expected.polling = false
+	}
+	service.proofMu.Unlock()
+}
+
+func (service *Service) removeProof(challengeID string) (*adminProofState, bool) {
+	service.proofMu.Lock()
+	state := service.proofs[challengeID]
+	if state != nil {
+		delete(service.proofs, challengeID)
+		if state.timer != nil {
+			state.timer.Stop()
+		}
+		clear(state.uidLookup)
+		state.uidLookup = nil
+	}
+	service.proofMu.Unlock()
+	return state, state != nil && !state.verifierForgotten
+}
+
+func (service *Service) expireProof(challengeID string, expected *adminProofState) {
+	service.proofMu.Lock()
+	state := service.proofs[challengeID]
+	if state != expected {
+		service.proofMu.Unlock()
+		return
+	}
+	delete(service.proofs, challengeID)
+	clear(state.uidLookup)
+	state.uidLookup = nil
+	forget := !state.verifierForgotten
+	service.proofMu.Unlock()
+	if forget {
+		service.verifier.Forget(challengeID)
+	}
+}
+
+func (service *Service) consumeProofLookup(ctx context.Context, challengeID string) ([]byte, error) {
+	status, err := service.PollVerification(ctx, challengeID)
+	if err != nil {
+		service.proofMu.Lock()
+		_, tracked := service.proofs[challengeID]
+		service.proofMu.Unlock()
+		if errors.Is(err, ErrAuthenticationFailed) && !tracked {
+			verification, legacyErr := service.consumeProof(ctx, challengeID)
+			if legacyErr != nil {
+				return nil, legacyErr
+			}
+			uid, ok := canonicalAdminUID(verification.UID)
+			if !ok {
+				return nil, ErrAuthenticationFailed
+			}
+			lookup, lookupErr := service.keys.Lookup("bili_uid", []byte(uid))
+			if lookupErr != nil {
+				return nil, ErrAuthenticationFailed
+			}
+			return lookup, nil
+		}
+		return nil, err
+	}
+	if status.Status != AdminProofVerified {
+		return nil, identity.ErrVerificationPending
+	}
+	service.proofMu.Lock()
+	state := service.proofs[challengeID]
+	if state == nil || !state.verified || !service.now().Before(state.expiresAt) {
+		service.proofMu.Unlock()
+		return nil, ErrAuthenticationFailed
+	}
+	lookup := bytes.Clone(state.uidLookup)
+	delete(service.proofs, challengeID)
+	if state.timer != nil {
+		state.timer.Stop()
+	}
+	clear(state.uidLookup)
+	state.uidLookup = nil
+	service.proofMu.Unlock()
+	return lookup, nil
 }
 
 func (service *Service) consumeProof(ctx context.Context, challengeID string) (identity.Verification, error) {
