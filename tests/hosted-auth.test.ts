@@ -400,6 +400,7 @@ describe('administrator flow', () => {
       replaceChildren(...nodes: Element[]) { for (const child of this.children) child.parent = undefined; this.children = []; this.append(...nodes); }
       remove() { if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this); this.parent = undefined; }
       setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+      removeAttribute(name: string) { this.attributes.delete(name); }
       addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); }
       removeEventListener(name: string) { this.listeners.delete(name); }
       focus() {}
@@ -434,8 +435,12 @@ describe('administrator flow', () => {
       await vi.waitFor(() => expect((root as unknown as Element).children[0].children.find((child) => child.className === 'hosted-code-control')).toBeDefined());
       const codeRoot = (root as unknown as Element).children[0].children.find((child) => child.className === 'hosted-code-control');
       const codeInput = codeRoot?.children[0]; if (codeInput) { codeInput.value = '123456'; codeInput.listeners.get('input')?.(); }
+      await vi.waitFor(() => expect(findButton('账号')).toBeDefined());
+      findButton('账号')?.listeners.get('click')?.();
       await vi.waitFor(() => expect(findButton('创建新的 B 站身份验证')).toBeDefined());
       findButton('创建新的 B 站身份验证')?.listeners.get('click')?.(); await vi.waitFor(() => expect(beginAdminProof).toHaveBeenCalledTimes(2));
+      findButton('邀请')?.listeners.get('click')?.();
+      await vi.waitFor(() => expect(findButton('生成不限额度邀请码')).toBeDefined());
       findButton('生成不限额度邀请码')?.listeners.get('click')?.(); await vi.waitFor(() => expect(findButton('复制邀请码')).toBeDefined());
       const staleCopy = findButton('复制邀请码');
       releaseRebind({ challengeId: 'rebind-proof', qrImage: 'rebind-qr', expiresAt: '2030-01-01T00:00:00Z' });

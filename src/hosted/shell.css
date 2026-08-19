@@ -245,6 +245,182 @@ select {
   margin: 1.5rem 0 0.5rem;
 }
 
+.hosted-admin-frame {
+  --admin-navy: #142033;
+  --admin-blue: #246bce;
+  --admin-canvas: #f3f5f8;
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr);
+  min-height: 100vh;
+  color: #172033;
+  background: var(--admin-canvas);
+}
+
+.hosted-admin-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 1.5rem 1rem;
+  background: var(--admin-navy);
+}
+
+.hosted-admin-sidebar::before {
+  content: "GIFT PANEL";
+  margin: 0.25rem 0.75rem 1.25rem;
+  color: #fff;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
+
+.hosted-admin-sidebar button {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.7rem 0.85rem;
+  color: #cbd5e4;
+  text-align: left;
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+  border-radius: 0.55rem;
+}
+
+.hosted-admin-sidebar button[aria-current="page"] {
+  color: #fff;
+  font-weight: 750;
+  background: var(--admin-blue);
+}
+
+.hosted-admin-workspace {
+  min-width: 0;
+}
+
+.hosted-admin-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 4.5rem;
+  padding: 0 2rem;
+  background: #fff;
+  border-bottom: 1px solid #dce2ea;
+}
+
+.hosted-admin-header h1 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.hosted-admin-content {
+  width: min(100% - 3rem, 70rem);
+  margin: 0 auto;
+  padding: 2rem 0 4rem;
+}
+
+.hosted-admin-section-title {
+  margin: 0;
+  font-size: clamp(1.55rem, 4vw, 2rem);
+}
+
+.hosted-admin-section-intro {
+  margin: 0.5rem 0 1.5rem;
+  color: #637087;
+}
+
+.hosted-admin-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.hosted-admin-card {
+  margin: 1rem 0;
+  padding: 1.25rem;
+  background: #fff;
+  border: 1px solid #dce2ea;
+  border-radius: 0.8rem;
+  box-shadow: 0 0.25rem 1rem rgb(23 32 51 / 5%);
+}
+
+.hosted-admin-card h3 {
+  margin: 0 0 0.6rem;
+}
+
+.hosted-admin-content label {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.8rem 0;
+  color: #39465a;
+  font-weight: 650;
+}
+
+.hosted-admin-content input {
+  min-width: 0;
+  min-height: 2.65rem;
+  padding: 0.55rem 0.7rem;
+  color: #172033;
+  background: #fff;
+  border: 1px solid #bfc9d8;
+  border-radius: 0.5rem;
+}
+
+.hosted-admin-content button {
+  min-height: 2.6rem;
+  margin: 0.35rem 0.5rem 0.35rem 0;
+  padding: 0.65rem 0.9rem;
+  color: #fff;
+  font-weight: 700;
+  background: var(--admin-blue);
+  border: 0;
+  border-radius: 0.5rem;
+}
+
+.hosted-admin-danger {
+  border-left: 4px solid #c0392b;
+}
+
+.hosted-admin-danger button:first-of-type {
+  background: #a93428;
+}
+
+@media (max-width: 720px) {
+  .hosted-admin-frame {
+    display: block;
+  }
+
+  .hosted-admin-sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    flex-direction: row;
+    gap: 0.35rem;
+    padding: 0.65rem;
+    overflow-x: auto;
+  }
+
+  .hosted-admin-sidebar::before {
+    display: none;
+  }
+
+  .hosted-admin-sidebar button {
+    width: auto;
+    flex: 0 0 auto;
+  }
+
+  .hosted-admin-header {
+    min-height: 3.75rem;
+    padding: 0 1rem;
+  }
+
+  .hosted-admin-content {
+    width: min(100% - 1.5rem, 42rem);
+    padding-top: 1.25rem;
+  }
+
+  .hosted-admin-card-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 480px) {
   .hosted-admin-mobile-action {
     display: flex;
