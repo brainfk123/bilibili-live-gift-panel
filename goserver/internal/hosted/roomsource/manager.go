@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"bilibili-live-gift-panel/internal/hosted/biligateway"
@@ -53,6 +54,7 @@ type Manager struct {
 	done          chan struct{}
 	subscriberWG  sync.WaitGroup
 	sourceWG      sync.WaitGroup
+	reconnects    atomic.Uint64
 }
 
 type roomSource struct {
@@ -468,6 +470,29 @@ func (manager *Manager) Wait(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// Metrics is identity-free. It never includes room IDs, account IDs, or cookies.
+type Metrics struct {
+	DistinctRooms uint64
+	Healthy       bool
+	Reconnects    uint64
+}
+
+func (manager *Manager) Metrics() Metrics {
+	if manager == nil {
+		return Metrics{}
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	metrics := Metrics{DistinctRooms: uint64(len(manager.rooms)), Healthy: true, Reconnects: manager.reconnects.Load()}
+	for _, source := range manager.rooms {
+		if source == nil || source.closed || source.connection == nil {
+			metrics.Healthy = false
+			break
+		}
+	}
+	return metrics
 }
 
 func (connection *managedConnection) close() {

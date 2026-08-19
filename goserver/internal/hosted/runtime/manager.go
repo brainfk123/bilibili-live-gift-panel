@@ -173,6 +173,57 @@ type Status struct {
 	ConnectionHealthy   bool   `json:"connectionHealthy"`
 }
 
+// Metrics is identity-free. It never includes account, room, session, or viewer labels.
+type Metrics struct {
+	ActiveAccounts    uint64
+	QueueDepth        uint64
+	QueueDepthMax     uint64
+	DegradedAccounts  uint64
+	RejectingAccounts uint64
+}
+
+func (manager *Manager) Metrics() Metrics {
+	if manager == nil {
+		return Metrics{}
+	}
+	manager.mu.Lock()
+	accounts := make([]*accountRuntime, 0, len(manager.accounts))
+	for _, account := range manager.accounts {
+		accounts = append(accounts, account)
+	}
+	manager.mu.Unlock()
+	var metrics Metrics
+	for _, account := range accounts {
+		account.mu.Lock()
+		if account.disabled || account.current == nil {
+			account.mu.Unlock()
+			continue
+		}
+		metrics.ActiveAccounts++
+		depth := uint64(len(account.current.events))
+		degraded := account.degraded || account.sourceDegraded
+		rejecting := false
+		if account.current.processor != nil {
+			status := account.current.processor.Status()
+			depth += uint64(status.Buffered)
+			degraded = degraded || status.Degraded
+			rejecting = status.Rejecting
+		}
+		account.mu.Unlock()
+		metrics.QueueDepth += depth
+		if depth > metrics.QueueDepthMax {
+			metrics.QueueDepthMax = depth
+		}
+		if degraded {
+			metrics.DegradedAccounts++
+		}
+		if rejecting {
+			metrics.RejectingAccounts++
+		}
+	}
+	return metrics
+}
+
 type operationContext struct {
 	values    context.Context
 	lifecycle context.Context

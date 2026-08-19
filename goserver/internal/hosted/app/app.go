@@ -11,12 +11,49 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 type healthChecker interface {
 	Health(context.Context) error
 }
+
+// MetricsSnapshot is deliberately identity-free. It contains only fixed,
+// process-wide aggregates so the private endpoint cannot accidentally grow
+// labels containing account, room, viewer, request, or configuration data.
+type MetricsSnapshot struct {
+	ProcessCPUSeconds          float64
+	ProcessResidentMemoryBytes uint64
+	MySQLHealthy               bool
+	MySQLLatencySeconds        float64
+	ActiveAccounts             uint64
+	DistinctRoomSources        uint64
+	RuntimeQueueDepth          uint64
+	RuntimeQueueDepthMax       uint64
+	RuntimeDegradedAccounts    uint64
+	RuntimeRejectingAccounts   uint64
+	RoomSourcesHealthy         bool
+	BiliReconnects             uint64
+	BiliRiskEvents             uint64
+	BiliRateLimited            uint64
+	BiliFailures               uint64
+	BiliBreakerOpen            bool
+	MigrationsPending          uint64
+	MigrationsFailed           uint64
+	MigrationsApplied          uint64
+	BackupAgeSeconds           uint64
+	CertificateExpirySeconds   uint64
+	CertificateValid           bool
+}
+
+type metricsProvider interface {
+	Metrics(context.Context) (MetricsSnapshot, error)
+}
+
+// MetricsProvider supplies identity-free process gauges for the private metrics endpoint.
+type MetricsProvider = metricsProvider
 
 // Dependencies contains the hosted HTTP application's external services.
 type Dependencies struct {
@@ -30,7 +67,74 @@ type Dependencies struct {
 	Runtime       http.Handler
 	OBS           http.Handler
 	Static        http.Handler
+	Metrics       metricsProvider
 	CSRFToken     string
+}
+
+type httpStatusMetrics struct {
+	classes [5]atomic.Uint64
+}
+
+func (metrics *httpStatusMetrics) record(status int) {
+	class := status / 100
+	if class >= 1 && class <= len(metrics.classes) {
+		metrics.classes[class-1].Add(1)
+	}
+}
+
+type statusResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (writer *statusResponseWriter) WriteHeader(status int) {
+	if writer.status != 0 {
+		return
+	}
+	writer.status = status
+	writer.ResponseWriter.WriteHeader(status)
+}
+
+func (writer *statusResponseWriter) Write(body []byte) (int, error) {
+	if writer.status == 0 {
+		writer.status = http.StatusOK
+	}
+	return writer.ResponseWriter.Write(body)
+}
+
+func (writer *statusResponseWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+
+type flushingStatusResponseWriter struct {
+	*statusResponseWriter
+	flusher http.Flusher
+}
+
+func (writer *flushingStatusResponseWriter) Flush() {
+	if writer.status == 0 {
+		writer.status = http.StatusOK
+	}
+	writer.flusher.Flush()
+}
+
+type metricsHandler struct {
+	handler http.Handler
+	status  *httpStatusMetrics
+}
+
+func (handler metricsHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	tracked := &statusResponseWriter{ResponseWriter: response}
+	var destination http.ResponseWriter = tracked
+	if flusher, ok := response.(http.Flusher); ok {
+		destination = &flushingStatusResponseWriter{statusResponseWriter: tracked, flusher: flusher}
+	}
+	handler.handler.ServeHTTP(destination, request)
+	status := tracked.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	handler.status.record(status)
 }
 
 var obsLandingPublicIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
@@ -190,8 +294,19 @@ func validOBSThemeQuery(rawQuery string) bool {
 // New builds the hosted HTTP handler.
 func New(dependencies Dependencies) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(response http.ResponseWriter, request *http.Request) {
+	statusMetrics := &httpStatusMetrics{}
+	mux.HandleFunc("/healthz", func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Cache-Control", "no-store")
 		response.Header().Set("Content-Type", "application/json")
+		if request.Method != http.MethodGet {
+			response.Header().Set("Allow", http.MethodGet)
+			response.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if request.URL.RawQuery != "" {
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		status := "ok"
 		statusCode := http.StatusOK
 		if dependencies.DB == nil || dependencies.DB.Health(request.Context()) != nil {
@@ -202,6 +317,66 @@ func New(dependencies Dependencies) http.Handler {
 		_ = json.NewEncoder(response).Encode(struct {
 			Status string `json:"status"`
 		}{Status: status})
+	})
+	mux.HandleFunc("/internal/metrics", func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Cache-Control", "no-store")
+		response.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		if request.Method != http.MethodGet {
+			response.Header().Set("Allow", http.MethodGet)
+			response.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if request.URL.RawQuery != "" {
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if dependencies.Metrics == nil {
+			response.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		snapshot, err := dependencies.Metrics.Metrics(request.Context())
+		if err != nil {
+			response.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		writeMetric := func(name, value string) {
+			_, _ = fmt.Fprintf(response, "%s %s\n", name, value)
+		}
+		writeUintMetric := func(name string, value uint64) {
+			writeMetric(name, strconv.FormatUint(value, 10))
+		}
+		writeBoolMetric := func(name string, value bool) {
+			if value {
+				writeMetric(name, "1")
+				return
+			}
+			writeMetric(name, "0")
+		}
+		writeMetric("hosted_process_cpu_seconds_total", strconv.FormatFloat(snapshot.ProcessCPUSeconds, 'g', -1, 64))
+		writeUintMetric("hosted_process_resident_memory_bytes", snapshot.ProcessResidentMemoryBytes)
+		writeBoolMetric("hosted_mysql_up", snapshot.MySQLHealthy)
+		writeMetric("hosted_mysql_latency_seconds", strconv.FormatFloat(snapshot.MySQLLatencySeconds, 'g', -1, 64))
+		for index := range statusMetrics.classes {
+			writeUintMetric(fmt.Sprintf("hosted_http_responses_%dxx_total", index+1), statusMetrics.classes[index].Load())
+		}
+		writeUintMetric("hosted_active_accounts", snapshot.ActiveAccounts)
+		writeUintMetric("hosted_distinct_room_sources", snapshot.DistinctRoomSources)
+		writeUintMetric("hosted_runtime_queue_depth", snapshot.RuntimeQueueDepth)
+		writeUintMetric("hosted_runtime_queue_depth_max", snapshot.RuntimeQueueDepthMax)
+		writeUintMetric("hosted_runtime_degraded_accounts", snapshot.RuntimeDegradedAccounts)
+		writeUintMetric("hosted_runtime_rejecting_accounts", snapshot.RuntimeRejectingAccounts)
+		writeBoolMetric("hosted_room_sources_healthy", snapshot.RoomSourcesHealthy)
+		writeUintMetric("hosted_bilibili_reconnects_total", snapshot.BiliReconnects)
+		writeUintMetric("hosted_bilibili_risk_events_total", snapshot.BiliRiskEvents)
+		writeUintMetric("hosted_bilibili_rate_limited_total", snapshot.BiliRateLimited)
+		writeUintMetric("hosted_bilibili_failures_total", snapshot.BiliFailures)
+		writeBoolMetric("hosted_bilibili_breaker_open", snapshot.BiliBreakerOpen)
+		writeUintMetric("hosted_migrations_pending", snapshot.MigrationsPending)
+		writeUintMetric("hosted_migrations_failed", snapshot.MigrationsFailed)
+		writeUintMetric("hosted_migrations_applied", snapshot.MigrationsApplied)
+		writeUintMetric("hosted_backup_age_seconds", snapshot.BackupAgeSeconds)
+		writeUintMetric("hosted_certificate_expiry_seconds", snapshot.CertificateExpirySeconds)
+		writeBoolMetric("hosted_certificate_valid", snapshot.CertificateValid)
 	})
 	mux.HandleFunc("/api/bootstrap", func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Cache-Control", "no-store")
@@ -285,5 +460,5 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("GET /obs/{publicID}/{$}", dependencies.Static)
 		mux.Handle("GET /assets/", dependencies.Static)
 	}
-	return mux
+	return metricsHandler{handler: mux, status: statusMetrics}
 }
