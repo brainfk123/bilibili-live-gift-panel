@@ -2,7 +2,7 @@
 Description=Check for Gift Panel releases to mirror
 
 [Timer]
-OnBootSec=1min
+OnActiveSec=1min
 OnUnitInactiveSec=5min
 Persistent=true
 Unit=gift-panel-release-mirror.service

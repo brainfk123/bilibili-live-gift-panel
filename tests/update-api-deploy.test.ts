@@ -482,14 +482,15 @@ describe('update API deployment assets', () => {
     expect(sectionValue(journal, 'Journal', 'MaxRetentionSec')).toBe('7day');
   });
 
-  it('schedules the mirror after boot and then after each completed invocation', () => {
+  it('schedules the mirror after timer activation and then after each completed invocation', () => {
     const timer = parseUnit(deploymentAsset('gift-panel-release-mirror.timer'));
 
-    expect(sectionValue(timer, 'Timer', 'OnBootSec')).toBe('1min');
+    expect(sectionValue(timer, 'Timer', 'OnActiveSec')).toBe('1min');
+    expect(sectionValue(timer, 'Timer', 'OnBootSec')).toBeUndefined();
     expect(sectionValue(timer, 'Timer', 'OnUnitInactiveSec')).toBe('5min');
     expect(sectionValue(timer, 'Timer', 'Persistent')).toBe('true');
     expect(sectionValue(timer, 'Timer', 'Unit')).toBe('gift-panel-release-mirror.service');
-    for (const [key, value] of Object.entries({ OnBootSec: '1min', OnUnitInactiveSec: '5min', Persistent: 'true', Unit: 'gift-panel-release-mirror.service' })) {
+    for (const [key, value] of Object.entries({ OnActiveSec: '1min', OnUnitInactiveSec: '5min', Persistent: 'true', Unit: 'gift-panel-release-mirror.service' })) {
       expect(sectionValues(timer, 'Timer', key)).toEqual([value]);
     }
     expect(sectionValue(timer, 'Install', 'WantedBy')).toBe('timers.target');
