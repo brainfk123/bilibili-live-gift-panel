@@ -392,6 +392,24 @@ func TestSMTPTransportModeIsExplicitAndPlaintextIsLocalhostOnly(t *testing.T) {
 	}
 }
 
+func TestSMTPMessageAllowsPlainTextAdministratorLoginWithoutAttachment(t *testing.T) {
+	wire, err := composeSMTPMessage("noreply@example.com", Message{
+		To: "owner@example.com", Subject: "Administrator login code", Text: "Your code is 123456.",
+	}, "boundary-for-test")
+	if err != nil {
+		t.Fatalf("composeSMTPMessage() error = %v", err)
+	}
+	text := string(wire)
+	for _, want := range []string{"From: noreply@example.com", "To: owner@example.com", "Administrator login code", "Your code is 123456."} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("SMTP message missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "Content-Disposition: attachment") {
+		t.Fatal("plain-text administrator login message unexpectedly contains an attachment")
+	}
+}
+
 func TestSMTPSTARTTLSRefusesDowngradeBeforeAuthentication(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

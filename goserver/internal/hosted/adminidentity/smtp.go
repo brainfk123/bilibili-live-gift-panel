@@ -192,7 +192,7 @@ func (sender *SMTPSender) Send(ctx context.Context, message Message) error {
 }
 
 func composeSMTPMessage(from string, message Message, boundary string) ([]byte, error) {
-	if !validAddress(from) || !validAddress(message.To) || !validHeader(message.Subject) || message.Subject == "" || len(message.Text) > 1<<20 || len(message.Attachments) == 0 || len(message.Attachments) > 4 {
+	if !validAddress(from) || !validAddress(message.To) || !validHeader(message.Subject) || message.Subject == "" || len(message.Text) > 1<<20 || len(message.Attachments) > 4 {
 		return nil, ErrInvalidInput
 	}
 	for _, attachment := range message.Attachments {
