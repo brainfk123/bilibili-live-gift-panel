@@ -174,16 +174,17 @@ git commit -m "refactor: remove administrator Bilibili authentication"
 - Modify: `goserver/internal/hosted/obs/http.go`, `http_test.go`
 
 **Interfaces:**
-- Keeps `RequireRecentTOTP(context.Context, sessionToken string) error` read-only.
-- Adds `RenewRecentTOTP(context.Context, sessionToken string) error`.
-- Shared boundary:
+- Keeps `RequireRecentTOTP(context.Context, sessionToken string) error` for read-only authorization checks that never renew.
+- Adds a transaction-aware boundary used by every protected mutation:
 
 ```go
 type SensitiveAuthorizer interface {
-    RequireRecentTOTP(context.Context, string) error
-    RenewRecentTOTP(context.Context, string) error
+    AuthorizeRecentTOTP(context.Context, *sql.Tx, string, time.Time) (SensitiveSession, error)
+    RenewRecentTOTP(context.Context, *sql.Tx, SensitiveSession, time.Time) error
 }
 ```
+
+`SensitiveSession` carries only exact session identity and credential epoch needed for the fenced update; it contains no raw token or principal data.
 
 - [ ] **Step 1: Write deterministic RED tests** using an injected clock: email login starts without TOTP; valid TOTP opens the window; successful protected mutation renews it; reads/failures do not; 9m59s remains valid; 10m idle expires; revoked/expired/wrong-epoch sessions cannot renew.
 
@@ -193,7 +194,7 @@ type SensitiveAuthorizer interface {
 go test ./internal/hosted/adminidentity ./internal/hosted/biligateway ./internal/hosted/obs -run "Test.*RecentTOTP|Test.*Sensitive" -count=1
 ```
 
-- [ ] **Step 3: Implement exact renewal**. Hash token, lock identity then exact session, require active epoch/session and a non-expired existing window, then update one row:
+- [ ] **Step 3: Implement exact transaction-aware renewal**. In the caller's transaction, hash token, lock identity then exact session, require active epoch/session and a non-expired existing window, and return a fenced `SensitiveSession`. After the domain mutation and audit insert succeed, renew exactly one row in that same transaction:
 
 ```sql
 UPDATE site_sessions SET totp_verified_at = ?
@@ -202,7 +203,7 @@ WHERE id = ? AND credential_epoch = ? AND revoked_at IS NULL;
 
 Do not revive an expired window.
 
-- [ ] **Step 4: Wire success-only renewal**. Keep `RequireRecentTOTP` before mutation. Call `RenewRecentTOTP` only after successful service-account replacement and OBS reset. For account disable/enable and invitation quota adjustment, update `totp_verified_at` inside their existing mutation transaction after the domain write and audit insert succeed. Recovery archive/material rotation renews inside the existing adminidentity transaction. Reads, validation failures, and mutation failures never renew. If a cross-service post-commit renewal fails, keep the mutation success but leave the old timestamp, so the next operation fails closed.
+- [ ] **Step 4: Wire atomic success-only renewal**. Service-account replacement, OBS reset, account disable/enable, invitation quota adjustment, recovery archive/material rotation, and administrator email change must call `AuthorizeRecentTOTP` after beginning their existing mutation transaction, perform domain writes and audit insert, call `RenewRecentTOTP`, then commit. Any authorization, mutation, audit, or renewal error rolls back both the domain mutation and renewal. Reads, validation failures, and failed mutations never renew.
 
 - [ ] **Step 5: Verify and commit**
 
