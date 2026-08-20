@@ -142,7 +142,7 @@ func TestVerifyLoginRequiresMatchingUIDAndRejectsReplayedTOTPStep(t *testing.T) 
 	}
 }
 
-func TestEmailLoginSendsOneShortCodeAndCreatesOneSevenDaySession(t *testing.T) {
+func TestEmailLoginSendsOneShortCodeAndCreatesOneSevenDaySessionWithoutTOTP(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 12, 0, 0, time.UTC)
 	repository := initializedMemoryRepository(t, now)
 	sender := &MemorySender{}
@@ -160,15 +160,22 @@ func TestEmailLoginSendsOneShortCodeAndCreatesOneSevenDaySession(t *testing.T) {
 	if code == "" {
 		t.Fatalf("email omitted six-digit code: %q", messages[0].Text)
 	}
-	login, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code, "123456")
+	login, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code)
 	if err != nil || login.Token == "" || !login.ExpiresAt.Equal(now.Add(7*24*time.Hour)) {
 		t.Fatalf("VerifyEmailLogin() = %#v, %v", login, err)
 	}
-	if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code, "123456"); !errors.Is(err, ErrAuthenticationFailed) {
+	if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code); !errors.Is(err, ErrAuthenticationFailed) {
 		t.Fatalf("replayed VerifyEmailLogin() error = %v", err)
 	}
 	if repository.sessionCount() != 1 {
 		t.Fatalf("sessions = %d, want one", repository.sessionCount())
+	}
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	for _, session := range repository.sessions {
+		if !session.TOTPVerifiedAt.IsZero() {
+			t.Fatalf("email-login session TOTPVerifiedAt = %s, want zero", session.TOTPVerifiedAt)
+		}
 	}
 }
 
@@ -184,7 +191,7 @@ func TestEmailLoginExpiresAndSMTPFailureLeavesNoUsableChallenge(t *testing.T) {
 	}
 	code := regexp.MustCompile(`\b[0-9]{6}\b`).FindString(sender.Messages()[0].Text)
 	clock = now.Add(5 * time.Minute)
-	if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code, "123456"); !errors.Is(err, ErrAuthenticationFailed) {
+	if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code); !errors.Is(err, ErrAuthenticationFailed) {
 		t.Fatalf("expired VerifyEmailLogin() error = %v", err)
 	}
 	if repository.sessionCount() != 0 {
@@ -201,6 +208,53 @@ func TestEmailLoginExpiresAndSMTPFailureLeavesNoUsableChallenge(t *testing.T) {
 	failed.emailMu.Unlock()
 	if remaining != 0 {
 		t.Fatalf("SMTP failure retained %d challenges", remaining)
+	}
+}
+
+func TestEmailLoginCountsFiveFailuresAndRejectsRotatedEpoch(t *testing.T) {
+	now := time.Date(2026, 8, 16, 10, 14, 0, 0, time.UTC)
+	repository := initializedMemoryRepository(t, now)
+	sender := &MemorySender{}
+	service := newTestService(t, repository, &memoryVerifier{}, sender, now)
+
+	challenge, err := service.BeginEmailLogin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := regexp.MustCompile(`\b[0-9]{6}\b`).FindString(sender.Messages()[0].Text)
+	wrongCode := "000000"
+	if wrongCode == code {
+		wrongCode = "999999"
+	}
+	for attempt := 0; attempt < emailCodeAttempts-1; attempt++ {
+		if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, wrongCode); !errors.Is(err, ErrAuthenticationFailed) {
+			t.Fatalf("failure %d error = %v", attempt+1, err)
+		}
+	}
+	if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code); err != nil {
+		t.Fatalf("correct code after four failures error = %v", err)
+	}
+
+	challenge, err = service.BeginEmailLogin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < emailCodeAttempts+1; attempt++ {
+		if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, wrongCode); !errors.Is(err, ErrAuthenticationFailed) {
+			t.Fatalf("failure %d error = %v", attempt+1, err)
+		}
+	}
+
+	challenge, err = service.BeginEmailLogin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedCode := regexp.MustCompile(`\b[0-9]{6}\b`).FindString(sender.Messages()[2].Text)
+	repository.mu.Lock()
+	repository.identity.CredentialEpoch++
+	repository.mu.Unlock()
+	if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, rotatedCode); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("rotated epoch VerifyEmailLogin() error = %v", err)
 	}
 }
 
@@ -707,6 +761,34 @@ func TestSQLRepositorySerializesLoginAndRejectsGlobalTOTPStepReplay(t *testing.T
 	mock.ExpectCommit()
 	if err := repository.CreateLoginSession(context.Background(), attempt); err != nil {
 		t.Fatalf("new-step CreateLoginSession() error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryEmailLoginSessionWritesNullTOTPAndVerifiesAmbiguousCommit(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 16, 12, 12, 0, 0, time.UTC)
+	attempt := EmailLoginSessionAttempt{ExpectedCredentialEpoch: 3, TokenHash: bytes.Repeat([]byte{0x53}, sha256.Size), CreatedAt: now, ExpiresAt: now.Add(7 * 24 * time.Hour)}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(3))
+	mock.ExpectExec(sqlPattern("INSERT INTO site_sessions (admin_identity_id, token_hash, credential_epoch, created_at, expires_at, totp_verified_at) VALUES (?, ?, ?, ?, ?, NULL)")).
+		WithArgs(int64(1), attempt.TokenHash, int64(3), now, now.Add(7*24*time.Hour)).
+		WillReturnResult(sqlmock.NewResult(10, 1))
+	mock.ExpectCommit().WillReturnError(errors.New("ambiguous commit"))
+	mock.ExpectQuery(sqlPattern("SELECT 1 FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? AND credential_epoch = ? AND created_at = ? AND expires_at = ? AND totp_verified_at IS NULL LIMIT 1")).
+		WithArgs(attempt.TokenHash, int64(3), now, now.Add(7*24*time.Hour)).
+		WillReturnRows(sqlmock.NewRows([]string{"present"}).AddRow(1))
+	if err := repository.CreateEmailLoginSession(context.Background(), attempt); err != nil {
+		t.Fatalf("CreateEmailLoginSession() error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -1229,6 +1311,20 @@ func (repository *memoryRepository) CreateLoginSession(_ context.Context, attemp
 	}
 	repository.lastStep = attempt.TOTPStep
 	repository.sessions[key] = AdminSession{ID: int64(len(repository.sessions) + 1), CredentialEpoch: attempt.ExpectedCredentialEpoch, ExpiresAt: attempt.ExpiresAt, TOTPVerifiedAt: attempt.TOTPStep}
+	return nil
+}
+
+func (repository *memoryRepository) CreateEmailLoginSession(_ context.Context, attempt EmailLoginSessionAttempt) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	if !repository.initialized || attempt.ExpectedCredentialEpoch != repository.identity.CredentialEpoch {
+		return ErrAuthenticationFailed
+	}
+	key, ok := hashKey(attempt.TokenHash)
+	if !ok {
+		return ErrUnavailable
+	}
+	repository.sessions[key] = AdminSession{ID: int64(len(repository.sessions) + 1), CredentialEpoch: attempt.ExpectedCredentialEpoch, ExpiresAt: attempt.ExpiresAt}
 	return nil
 }
 

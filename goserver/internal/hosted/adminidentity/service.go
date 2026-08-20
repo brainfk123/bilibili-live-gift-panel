@@ -71,6 +71,13 @@ type LoginSessionAttempt struct {
 	TOTPStep                time.Time
 }
 
+type EmailLoginSessionAttempt struct {
+	ExpectedCredentialEpoch int64
+	TokenHash               []byte
+	CreatedAt               time.Time
+	ExpiresAt               time.Time
+}
+
 type ConfirmTOTPAttempt struct {
 	ExpectedCredentialEpoch int64
 	TokenHash               []byte
@@ -173,6 +180,7 @@ type Repository interface {
 	Initialize(context.Context, InitializationRecord) error
 	Identity(context.Context) (IdentityRecord, error)
 	CreateLoginSession(context.Context, LoginSessionAttempt) error
+	CreateEmailLoginSession(context.Context, EmailLoginSessionAttempt) error
 	FindSession(context.Context, []byte, time.Time) (AdminSession, error)
 	ConfirmTOTP(context.Context, ConfirmTOTPAttempt) error
 	ReplaceRecoveryCodes(context.Context, RecoveryReplacement) ([]byte, error)
@@ -334,6 +342,53 @@ func (repository *SQLRepository) CreateLoginSession(ctx context.Context, attempt
 	return nil
 }
 
+func (repository *SQLRepository) CreateEmailLoginSession(ctx context.Context, attempt EmailLoginSessionAttempt) error {
+	if !repository.ready() || !validEmailLoginSessionAttempt(attempt) {
+		return ErrInvalidInput
+	}
+	attempt.TokenHash = bytes.Clone(attempt.TokenHash)
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ErrUnavailable
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	epoch, err := lockAdminEpoch(ctx, transaction)
+	if err != nil {
+		return err
+	}
+	if epoch != attempt.ExpectedCredentialEpoch {
+		return ErrAuthenticationFailed
+	}
+	result, err := transaction.ExecContext(ctx,
+		"INSERT INTO site_sessions (admin_identity_id, token_hash, credential_epoch, created_at, expires_at, totp_verified_at) VALUES (?, ?, ?, ?, ?, NULL)",
+		int64(1), attempt.TokenHash, attempt.ExpectedCredentialEpoch, attempt.CreatedAt, attempt.ExpiresAt,
+	)
+	if err != nil || !oneRow(result) {
+		return ErrUnavailable
+	}
+	if err := transaction.Commit(); err != nil {
+		committed = true
+		return repository.verifyEmailLoginSession(ctx, attempt)
+	}
+	committed = true
+	return nil
+}
+
+func (repository *SQLRepository) verifyEmailLoginSession(ctx context.Context, attempt EmailLoginSessionAttempt) error {
+	const query = "SELECT 1 FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? AND credential_epoch = ? AND created_at = ? AND expires_at = ? AND totp_verified_at IS NULL LIMIT 1"
+	var present int
+	err := repository.db.QueryRowContext(ctx, query, attempt.TokenHash, attempt.ExpectedCredentialEpoch, attempt.CreatedAt, attempt.ExpiresAt).Scan(&present)
+	if err != nil || present != 1 {
+		return ErrUnavailable
+	}
+	return nil
+}
+
 func (repository *SQLRepository) FindSession(ctx context.Context, tokenHash []byte, now time.Time) (AdminSession, error) {
 	if !repository.ready() || len(tokenHash) != sha256.Size || now.IsZero() {
 		return AdminSession{}, ErrInvalidInput
@@ -350,10 +405,12 @@ func (repository *SQLRepository) FindSession(ctx context.Context, tokenHash []by
 	if err != nil {
 		return AdminSession{}, ErrUnavailable
 	}
-	if session.ID <= 0 || session.CredentialEpoch < 1 || session.CredentialEpoch != currentEpoch || !session.ExpiresAt.After(now) || revokedAt.Valid || !verifiedAt.Valid {
+	if session.ID <= 0 || session.CredentialEpoch < 1 || session.CredentialEpoch != currentEpoch || !session.ExpiresAt.After(now) || revokedAt.Valid {
 		return AdminSession{}, ErrAuthenticationFailed
 	}
-	session.TOTPVerifiedAt = verifiedAt.Time
+	if verifiedAt.Valid {
+		session.TOTPVerifiedAt = verifiedAt.Time
+	}
 	return session, nil
 }
 
@@ -1047,6 +1104,10 @@ func validLoginAttempt(attempt LoginSessionAttempt) bool {
 	return attempt.ExpectedCredentialEpoch >= 1 && len(attempt.TokenHash) == sha256.Size && !attempt.CreatedAt.IsZero() && attempt.ExpiresAt.After(attempt.CreatedAt) && !attempt.TOTPStep.IsZero()
 }
 
+func validEmailLoginSessionAttempt(attempt EmailLoginSessionAttempt) bool {
+	return attempt.ExpectedCredentialEpoch >= 1 && len(attempt.TokenHash) == sha256.Size && !attempt.CreatedAt.IsZero() && attempt.ExpiresAt.After(attempt.CreatedAt)
+}
+
 func validCodeHashes(hashes [][]byte) bool {
 	if len(hashes) != RecoveryCodeCount {
 		return false
@@ -1265,8 +1326,8 @@ func (service *Service) BeginEmailLogin(ctx context.Context) (EmailLoginChalleng
 	return EmailLoginChallenge{ChallengeID: challengeID, ExpiresAt: expiresAt}, nil
 }
 
-func (service *Service) VerifyEmailLogin(ctx context.Context, challengeID, emailCode, totpCode string) (LoginResult, error) {
-	if service == nil || challengeID == "" || !validEmailLoginCode(emailCode) || !validTOTPCode(totpCode) {
+func (service *Service) VerifyEmailLogin(ctx context.Context, challengeID, emailCode string) (LoginResult, error) {
+	if service == nil || challengeID == "" || !validEmailLoginCode(emailCode) {
 		return LoginResult{}, ErrAuthenticationFailed
 	}
 	codeHash, err := service.keys.Lookup("admin_email_login_code", []byte(emailCode))
@@ -1295,17 +1356,6 @@ func (service *Service) VerifyEmailLogin(ctx context.Context, challengeID, email
 		service.failEmailLogin(challengeID, state)
 		return LoginResult{}, ErrAuthenticationFailed
 	}
-	secret, err := service.keys.Open("admin_totp", record.TOTPSecretCiphertext)
-	if err != nil {
-		service.failEmailLogin(challengeID, state)
-		return LoginResult{}, ErrAuthenticationFailed
-	}
-	step, valid := service.totp.Validate(totpCode, string(secret), now)
-	clear(secret)
-	if !valid || step.IsZero() {
-		service.failEmailLogin(challengeID, state)
-		return LoginResult{}, ErrAuthenticationFailed
-	}
 	if !service.consumeEmailLogin(challengeID, state) {
 		return LoginResult{}, ErrAuthenticationFailed
 	}
@@ -1318,7 +1368,7 @@ func (service *Service) VerifyEmailLogin(ctx context.Context, challengeID, email
 		return LoginResult{}, ErrUnavailable
 	}
 	expiresAt := now.Add(service.sessionTTL)
-	if err := service.repository.CreateLoginSession(ctx, LoginSessionAttempt{ExpectedCredentialEpoch: expectedEpoch, TokenHash: tokenHash, CreatedAt: now, ExpiresAt: expiresAt, TOTPStep: step}); err != nil {
+	if err := service.repository.CreateEmailLoginSession(ctx, EmailLoginSessionAttempt{ExpectedCredentialEpoch: expectedEpoch, TokenHash: tokenHash, CreatedAt: now, ExpiresAt: expiresAt}); err != nil {
 		return LoginResult{}, ErrAuthenticationFailed
 	}
 	return LoginResult{Token: token, ExpiresAt: expiresAt}, nil

@@ -18,7 +18,7 @@ import (
 
 type adminHTTPServicePort interface {
 	BeginEmailLogin(context.Context) (EmailLoginChallenge, error)
-	VerifyEmailLogin(context.Context, string, string, string) (LoginResult, error)
+	VerifyEmailLogin(context.Context, string, string) (LoginResult, error)
 	BeginVerification(context.Context) (identity.Challenge, error)
 	PollVerification(context.Context, string) (AdminProofStatus, error)
 	CancelVerification(string)
@@ -233,9 +233,8 @@ func (handler *HTTPHandler) verifyEmailLogin(response http.ResponseWriter, reque
 	var body struct {
 		ChallengeID string `json:"challengeId"`
 		EmailCode   string `json:"emailCode"`
-		TOTP        string `json:"totp"`
 	}
-	if !decodeAdminJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 || !validEmailLoginCode(body.EmailCode) || !validTOTPCode(body.TOTP) {
+	if !decodeAdminJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 || !validEmailLoginCode(body.EmailCode) {
 		writeAdminError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -243,7 +242,7 @@ func (handler *HTTPHandler) verifyEmailLogin(response http.ResponseWriter, reque
 		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
-	result, err := handler.service.VerifyEmailLogin(request.Context(), body.ChallengeID, body.EmailCode, body.TOTP)
+	result, err := handler.service.VerifyEmailLogin(request.Context(), body.ChallengeID, body.EmailCode)
 	if err != nil || result.Token == "" || !result.ExpiresAt.After(handler.now()) {
 		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
 		return

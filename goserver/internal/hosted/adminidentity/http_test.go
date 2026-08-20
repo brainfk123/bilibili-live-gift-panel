@@ -241,13 +241,29 @@ func TestHTTPEmailLoginReturnsOnlyChallengeThenSetsSevenDayCookie(t *testing.T) 
 		t.Fatalf("begin response exposed email or code: %q", response.Body.String())
 	}
 	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, mutationRequest(http.MethodPost, "/api/admin/session/email", `{"challengeId":"email-proof","emailCode":"654321","totp":"123456"}`))
-	if response.Code != http.StatusNoContent || service.emailLoginChallenge != "email-proof" || service.emailLoginCode != "654321" || service.emailLoginTOTP != "123456" {
-		t.Fatalf("login response=%d %q args=%q %q %q", response.Code, response.Body.String(), service.emailLoginChallenge, service.emailLoginCode, service.emailLoginTOTP)
+	handler.ServeHTTP(response, mutationRequest(http.MethodPost, "/api/admin/session/email", `{"challengeId":"email-proof","emailCode":"654321"}`))
+	if response.Code != http.StatusNoContent || service.emailLoginChallenge != "email-proof" || service.emailLoginCode != "654321" {
+		t.Fatalf("login response=%d %q args=%q %q", response.Code, response.Body.String(), service.emailLoginChallenge, service.emailLoginCode)
 	}
 	cookies := response.Result().Cookies()
 	if len(cookies) != 1 || cookies[0].Value != "email-session" || !cookies[0].HttpOnly || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteLaxMode || !cookies[0].Expires.Equal(now.Add(7*24*time.Hour)) {
 		t.Fatalf("cookies=%#v", cookies)
+	}
+}
+
+func TestHTTPEmailLoginRejectsTOTPAndNeverReturnsEmailOrCode(t *testing.T) {
+	now := time.Date(2026, 8, 16, 13, 0, 0, 0, time.UTC)
+	service := &adminHTTPService{emailLogin: LoginResult{Token: "email-session", ExpiresAt: now.Add(7 * 24 * time.Hour)}}
+	handler := newTestHTTPHandlerAt(t, service, now)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, mutationRequest(http.MethodPost, "/api/admin/session/email", `{"challengeId":"email-proof","emailCode":"654321","totp":"123456"}`))
+	if response.Code != http.StatusBadRequest || response.Body.String() != "{\"error\":\"invalid_request\"}\n" || service.emailLoginChallenge != "" {
+		t.Fatalf("response=%d %q service=%#v", response.Code, response.Body.String(), service)
+	}
+	for _, secret := range []string{"owner@example.com", "654321", "123456", "email-proof"} {
+		if strings.Contains(response.Body.String(), secret) {
+			t.Fatalf("response exposed %q: %q", secret, response.Body.String())
+		}
 	}
 }
 
@@ -386,7 +402,6 @@ type adminHTTPService struct {
 	emailLoginErr        error
 	emailLoginChallenge  string
 	emailLoginCode       string
-	emailLoginTOTP       string
 	beginCalls           int
 	challenge            identity.Challenge
 	challengeErr         error
@@ -421,8 +436,8 @@ func (service *adminHTTPService) BeginEmailLogin(context.Context) (EmailLoginCha
 	return service.emailChallenge, service.emailChallengeErr
 }
 
-func (service *adminHTTPService) VerifyEmailLogin(_ context.Context, challengeID, emailCode, totp string) (LoginResult, error) {
-	service.emailLoginChallenge, service.emailLoginCode, service.emailLoginTOTP = challengeID, emailCode, totp
+func (service *adminHTTPService) VerifyEmailLogin(_ context.Context, challengeID, emailCode string) (LoginResult, error) {
+	service.emailLoginChallenge, service.emailLoginCode = challengeID, emailCode
 	return service.emailLogin, service.emailLoginErr
 }
 
