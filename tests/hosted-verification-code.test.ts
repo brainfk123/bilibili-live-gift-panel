@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import { mountVerificationCode } from '../src/hosted/verification-code';
@@ -41,9 +43,21 @@ describe('hosted verification code control', () => {
     expect(input.tagName).toBe('input');
     expect(input.inputMode).toBe('numeric');
     expect(input.autocomplete).toBe('one-time-code');
+    expect(input.attributes.get('pattern')).toBe('[0-9]*');
     expect(input.attributes.get('aria-label')).toBe('六位动态验证码');
     expect(root.children.slice(1).every((cell) => cell.attributes.get('aria-hidden') === 'true')).toBe(true);
     control.dispose();
+  });
+
+  it('keeps the native input over all six cells so iOS Safari taps open the keyboard', () => {
+    const css = readFileSync(resolve(import.meta.dirname, '../src/hosted/shell.css'), 'utf8');
+    const inputRule = css.match(/\.hosted-code-input\s*\{([^}]*)\}/)?.[1] ?? '';
+    const cellRule = css.match(/\.hosted-code-cell\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(inputRule).toMatch(/inset:\s*0/);
+    expect(inputRule).toMatch(/width:\s*100%/);
+    expect(inputRule).toMatch(/height:\s*100%/);
+    expect(inputRule).not.toMatch(/clip:/);
+    expect(cellRule).toMatch(/pointer-events:\s*none/);
   });
 
   it('normalizes paste, completes once, respects busy, and clears securely', () => {

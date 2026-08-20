@@ -15,6 +15,7 @@ export function mountVerificationCode(
   input.inputMode = 'numeric';
   input.autocomplete = 'one-time-code';
   input.className = 'hosted-code-input';
+  input.setAttribute('pattern', '[0-9]*');
   input.setAttribute('aria-label', options.label);
   input.setAttribute('maxlength', '6');
 
