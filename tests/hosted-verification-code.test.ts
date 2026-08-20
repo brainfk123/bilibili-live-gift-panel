@@ -79,4 +79,20 @@ describe('hosted verification code control', () => {
     expect(input.value).toBe(''); expect(root.children).toHaveLength(0);
     expect(JSON.stringify(control)).not.toContain('654321');
   });
+
+  it('shows a caret in the next empty cell while the native input is focused', () => {
+    const { root } = fixture();
+    const control = mountVerificationCode(root as unknown as HTMLElement, { label: '验证码', onComplete: vi.fn() });
+    const input = root.children[0];
+    input.listeners.get('focus')?.();
+    expect(root.children.slice(1).map((cell) => cell.className)).toEqual([
+      'hosted-code-cell is-active', 'hosted-code-cell', 'hosted-code-cell', 'hosted-code-cell', 'hosted-code-cell', 'hosted-code-cell',
+    ]);
+    input.value = '12'; input.listeners.get('input')?.();
+    expect(root.children[3]?.className).toBe('hosted-code-cell is-active');
+    expect(root.children[1]?.className).toBe('hosted-code-cell');
+    input.listeners.get('blur')?.();
+    expect(root.children.slice(1).every((cell) => cell.className === 'hosted-code-cell')).toBe(true);
+    control.dispose();
+  });
 });

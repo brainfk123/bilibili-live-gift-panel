@@ -175,6 +175,7 @@ select {
 }
 
 .hosted-code-cell {
+  position: relative;
   display: inline-grid;
   place-items: center;
   width: clamp(2.25rem, 12vw, 3rem);
@@ -186,6 +187,25 @@ select {
   border: 1px solid #c8d1df;
   border-radius: 0.65rem;
   pointer-events: none;
+}
+
+.hosted-code-cell.is-active::after {
+  position: absolute;
+  width: 2px;
+  height: 1.35rem;
+  content: '';
+  background: #246bce;
+  border-radius: 1px;
+  animation: hosted-code-caret 1s steps(1, end) infinite;
+}
+
+@keyframes hosted-code-caret {
+  0%, 45% { opacity: 1; }
+  46%, 100% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hosted-code-cell.is-active::after { animation: none; }
 }
 
 :focus-within > .hosted-code-cell {

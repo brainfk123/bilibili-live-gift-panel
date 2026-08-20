@@ -28,10 +28,14 @@ export function mountVerificationCode(
   let digits = '';
   let completed = '';
   let busy = false;
+  let focused = false;
   let disposed = false;
   const render = (): void => {
     input.value = digits;
-    cells.forEach((cell, index) => { cell.textContent = digits[index] ?? ''; });
+    cells.forEach((cell, index) => {
+      cell.textContent = digits[index] ?? '';
+      cell.className = `hosted-code-cell${focused && !busy && digits.length < 6 && index === digits.length ? ' is-active' : ''}`;
+    });
   };
   const onInput = (): void => {
     if (disposed || busy) { render(); return; }
@@ -44,7 +48,11 @@ export function mountVerificationCode(
       completed = '';
     }
   };
+  const onFocus = (): void => { if (!disposed) { focused = true; render(); } };
+  const onBlur = (): void => { focused = false; render(); };
   input.addEventListener('input', onInput);
+  input.addEventListener('focus', onFocus);
+  input.addEventListener('blur', onBlur);
   root.replaceChildren(input, ...cells);
 
   return Object.freeze({
@@ -58,8 +66,10 @@ export function mountVerificationCode(
       root.classList?.toggle('is-busy', nextBusy);
     },
     dispose(): void {
-      disposed = true; busy = true; digits = ''; completed = ''; render();
+      disposed = true; busy = true; focused = false; digits = ''; completed = ''; render();
       input.removeEventListener('input', onInput);
+      input.removeEventListener('focus', onFocus);
+      input.removeEventListener('blur', onBlur);
       root.replaceChildren();
     },
   });
