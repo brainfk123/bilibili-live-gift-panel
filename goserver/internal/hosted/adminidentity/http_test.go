@@ -228,6 +228,29 @@ func TestHTTPLoginPendingAndFailuresAreGeneric(t *testing.T) {
 	}
 }
 
+func TestHTTPEmailLoginReturnsOnlyChallengeThenSetsSevenDayCookie(t *testing.T) {
+	now := time.Date(2026, 8, 16, 13, 0, 0, 0, time.UTC)
+	service := &adminHTTPService{emailChallenge: EmailLoginChallenge{ChallengeID: "email-proof", ExpiresAt: now.Add(5 * time.Minute)}, emailLogin: LoginResult{Token: "email-session", ExpiresAt: now.Add(7 * 24 * time.Hour)}}
+	handler := newTestHTTPHandlerAt(t, service, now)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, mutationRequest(http.MethodPost, "/api/admin/auth/email/challenges", `{}`))
+	if response.Code != http.StatusCreated || response.Body.String() != "{\"challengeId\":\"email-proof\",\"expiresAt\":\"2026-08-16T13:05:00Z\"}\n" || service.emailBeginCalls != 1 {
+		t.Fatalf("begin response=%d %q calls=%d", response.Code, response.Body.String(), service.emailBeginCalls)
+	}
+	if strings.Contains(response.Body.String(), "owner@") || strings.Contains(response.Body.String(), "123456") {
+		t.Fatalf("begin response exposed email or code: %q", response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, mutationRequest(http.MethodPost, "/api/admin/session/email", `{"challengeId":"email-proof","emailCode":"654321","totp":"123456"}`))
+	if response.Code != http.StatusNoContent || service.emailLoginChallenge != "email-proof" || service.emailLoginCode != "654321" || service.emailLoginTOTP != "123456" {
+		t.Fatalf("login response=%d %q args=%q %q %q", response.Code, response.Body.String(), service.emailLoginChallenge, service.emailLoginCode, service.emailLoginTOTP)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Value != "email-session" || !cookies[0].HttpOnly || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteLaxMode || !cookies[0].Expires.Equal(now.Add(7*24*time.Hour)) {
+		t.Fatalf("cookies=%#v", cookies)
+	}
+}
+
 func TestHTTPRecoveryReturnsPasswordOnceWithoutArchiveOrUID(t *testing.T) {
 	service := &adminHTTPService{recovery: RecoveryResult{RecoveryPassword: "12345678901234567890"}}
 	handler := newTestHTTPHandler(t, service)
@@ -356,33 +379,51 @@ func TestAppMountsAdministratorHandlerOnlyUnderAdminPrefix(t *testing.T) {
 }
 
 type adminHTTPService struct {
-	beginCalls       int
-	challenge        identity.Challenge
-	challengeErr     error
-	login            LoginResult
-	loginErr         error
-	loginChallenge   string
-	loginCode        string
-	verifyErr        error
-	verifySession    string
-	verifyCode       string
-	recovery         RecoveryResult
-	recoveryErr      error
-	recoverySession  string
-	preparation      RecoveryPreparationResult
-	preparationErr   error
-	prepareChallenge string
-	prepareCode      string
-	confirmErr       error
-	confirmToken     string
-	confirmCode      string
-	cancelled        []string
-	requireSessionErr   error
-	requireSessionToken string
-	requireSessionCalls int
+	emailBeginCalls      int
+	emailChallenge       EmailLoginChallenge
+	emailChallengeErr    error
+	emailLogin           LoginResult
+	emailLoginErr        error
+	emailLoginChallenge  string
+	emailLoginCode       string
+	emailLoginTOTP       string
+	beginCalls           int
+	challenge            identity.Challenge
+	challengeErr         error
+	login                LoginResult
+	loginErr             error
+	loginChallenge       string
+	loginCode            string
+	verifyErr            error
+	verifySession        string
+	verifyCode           string
+	recovery             RecoveryResult
+	recoveryErr          error
+	recoverySession      string
+	preparation          RecoveryPreparationResult
+	preparationErr       error
+	prepareChallenge     string
+	prepareCode          string
+	confirmErr           error
+	confirmToken         string
+	confirmCode          string
+	cancelled            []string
+	requireSessionErr    error
+	requireSessionToken  string
+	requireSessionCalls  int
 	proofStatus          AdminProofStatus
 	proofStatusErr       error
 	proofStatusChallenge string
+}
+
+func (service *adminHTTPService) BeginEmailLogin(context.Context) (EmailLoginChallenge, error) {
+	service.emailBeginCalls++
+	return service.emailChallenge, service.emailChallengeErr
+}
+
+func (service *adminHTTPService) VerifyEmailLogin(_ context.Context, challengeID, emailCode, totp string) (LoginResult, error) {
+	service.emailLoginChallenge, service.emailLoginCode, service.emailLoginTOTP = challengeID, emailCode, totp
+	return service.emailLogin, service.emailLoginErr
 }
 
 func (service *adminHTTPService) RequireSession(_ context.Context, token string) error {
@@ -431,7 +472,7 @@ func (service *adminHTTPService) ConfirmRecovery(_ context.Context, token, code 
 }
 
 func (service *adminHTTPService) wasCalled() bool {
-	return service.beginCalls != 0 || service.loginChallenge != "" || service.loginCode != "" || service.verifySession != "" ||
+	return service.beginCalls != 0 || service.emailBeginCalls != 0 || service.emailLoginChallenge != "" || service.loginChallenge != "" || service.loginCode != "" || service.verifySession != "" ||
 		service.verifyCode != "" || service.recoverySession != "" || service.prepareChallenge != "" || service.prepareCode != "" ||
 		service.confirmToken != "" || service.confirmCode != "" || len(service.cancelled) != 0
 }

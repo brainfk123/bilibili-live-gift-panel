@@ -17,6 +17,8 @@ import (
 )
 
 type adminHTTPServicePort interface {
+	BeginEmailLogin(context.Context) (EmailLoginChallenge, error)
+	VerifyEmailLogin(context.Context, string, string, string) (LoginResult, error)
 	BeginVerification(context.Context) (identity.Challenge, error)
 	PollVerification(context.Context, string) (AdminProofStatus, error)
 	CancelVerification(string)
@@ -64,13 +66,37 @@ func NewHTTPHandler(service adminHTTPServicePort, options HTTPOptions) (*HTTPHan
 	handler.mux.HandleFunc("POST /api/admin/auth/bili/challenges", handler.beginVerification)
 	handler.mux.HandleFunc("GET /api/admin/auth/bili/challenges/{id}", handler.pollVerification)
 	handler.mux.HandleFunc("DELETE /api/admin/auth/bili/challenges/{id}", handler.cancelVerification)
+	handler.mux.HandleFunc("POST /api/admin/auth/email/challenges", handler.beginEmailLogin)
 	handler.mux.HandleFunc("GET /api/admin/session", handler.getSession)
 	handler.mux.HandleFunc("POST /api/admin/session", handler.verifyLogin)
+	handler.mux.HandleFunc("POST /api/admin/session/email", handler.verifyEmailLogin)
 	handler.mux.HandleFunc("POST /api/admin/totp", handler.verifyRecentTOTP)
 	handler.mux.HandleFunc("POST /api/admin/recovery/archive", handler.sendRecovery)
 	handler.mux.HandleFunc("POST /api/admin/recovery/prepare", handler.prepareRecovery)
 	handler.mux.HandleFunc("POST /api/admin/recovery/confirm", handler.confirmRecovery)
 	return handler, nil
+}
+
+func (handler *HTTPHandler) beginEmailLogin(response http.ResponseWriter, request *http.Request) {
+	if !handler.acceptJSONMutation(request) {
+		writeAdminError(response, http.StatusForbidden, "request_rejected")
+		return
+	}
+	var body struct{}
+	if !decodeAdminJSON(response, request, &body) {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if !handler.allowAdministrator(request, "admin_email_begin") {
+		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
+	challenge, err := handler.service.BeginEmailLogin(request.Context())
+	if err != nil || challenge.ChallengeID == "" || !challenge.ExpiresAt.After(handler.now()) {
+		writeAdminError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	}
+	writeAdminJSON(response, http.StatusCreated, challenge)
 }
 
 func (handler *HTTPHandler) pollVerification(response http.ResponseWriter, request *http.Request) {
@@ -197,6 +223,33 @@ func (handler *HTTPHandler) verifyLogin(response http.ResponseWriter, request *h
 	default:
 		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
 	}
+}
+
+func (handler *HTTPHandler) verifyEmailLogin(response http.ResponseWriter, request *http.Request) {
+	if !handler.acceptJSONMutation(request) {
+		writeAdminError(response, http.StatusForbidden, "request_rejected")
+		return
+	}
+	var body struct {
+		ChallengeID string `json:"challengeId"`
+		EmailCode   string `json:"emailCode"`
+		TOTP        string `json:"totp"`
+	}
+	if !decodeAdminJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 || !validEmailLoginCode(body.EmailCode) || !validTOTPCode(body.TOTP) {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if !handler.allow(request, "admin_email_login", body.ChallengeID) {
+		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
+	result, err := handler.service.VerifyEmailLogin(request.Context(), body.ChallengeID, body.EmailCode, body.TOTP)
+	if err != nil || result.Token == "" || !result.ExpiresAt.After(handler.now()) {
+		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
+		return
+	}
+	http.SetCookie(response, adminCookie(result.Token, result.ExpiresAt))
+	response.WriteHeader(http.StatusNoContent)
 }
 
 func (handler *HTTPHandler) verifyRecentTOTP(response http.ResponseWriter, request *http.Request) {

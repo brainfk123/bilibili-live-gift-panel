@@ -100,6 +100,20 @@ describe('HostedAPI authentication contract', () => {
     }]);
   });
 
+  it('uses an opaque email challenge and submits only the two short codes', async () => {
+    const requests: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    const api = await HostedAPI.connect(async (input, init) => {
+      requests.push([input, init]);
+      if (input === '/api/bootstrap') return json({ csrfToken: 'csrf' });
+      if (input === '/api/admin/auth/email/challenges') return json({ challengeId: 'email-proof', expiresAt: '2030-01-01T00:00:00Z' }, 201);
+      return new Response(null, { status: 204 });
+    });
+    await expect(api.beginAdminEmailLogin()).resolves.toEqual({ challengeId: 'email-proof', expiresAt: '2030-01-01T00:00:00Z' });
+    await api.adminEmailLogin('email-proof', '654321', '123456');
+    expect(requests[1]?.[0]).toBe('/api/admin/auth/email/challenges');
+    expect(requests[2]).toEqual(['/api/admin/session/email', { credentials: 'same-origin', headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': 'csrf' }, method: 'POST', body: '{"challengeId":"email-proof","emailCode":"654321","totp":"123456"}' }]);
+  });
+
   it('polls administrator proof status without accepting identity fields', async () => {
     const expiresAt = '2030-01-01T00:00:00Z';
     let response = json({ status: 'pending', expiresAt });
@@ -423,6 +437,7 @@ describe('administrator flow', () => {
       .mockImplementationOnce(() => pendingRebind);
     const api = {
       adminSession: vi.fn(async () => { throw new HostedAPIError('authentication_failed', 401); }),
+      beginAdminEmailLogin: vi.fn(async () => ({ challengeId: 'email-proof', expiresAt: '2030-01-01T00:00:00Z' })), adminEmailLogin: vi.fn(async () => undefined),
       beginAdminProof, pollAdminProof: vi.fn(async () => ({ status: 'verified' as const, expiresAt: '2030-01-01T00:00:00Z' })), cancelAdminProof: vi.fn(async () => undefined), adminLogin: vi.fn(async () => undefined), logout: vi.fn(async () => undefined), verifyRecentTOTP: vi.fn(async () => undefined),
       disableAccount: vi.fn(), enableAccount: vi.fn(), adjustQuota: vi.fn(), rebindAccount: vi.fn(),
       biliServiceStatus: vi.fn(async () => ({ version: 0 as const, health: 'missing' as const })),
@@ -434,6 +449,8 @@ describe('administrator flow', () => {
     Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText } } });
     try {
       const mounted = mountAdminView(root, api as unknown as HostedAPI);
+      await vi.waitFor(() => expect(findButton('使用 B站扫码')).toBeDefined());
+      findButton('使用 B站扫码')?.listeners.get('click')?.();
       await vi.waitFor(() => expect(beginAdminProof).toHaveBeenCalledTimes(1));
       findButton('我已完成验证')?.listeners.get('click')?.();
       await vi.waitFor(() => expect((root as unknown as Element).children[0].children.find((child) => child.className === 'hosted-code-control')).toBeDefined());

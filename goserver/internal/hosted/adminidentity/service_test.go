@@ -117,11 +117,73 @@ func TestVerifyLoginRequiresMatchingUIDAndRejectsReplayedTOTPStep(t *testing.T) 
 	}
 }
 
+func TestEmailLoginSendsOneShortCodeAndCreatesOneSevenDaySession(t *testing.T) {
+	now := time.Date(2026, 8, 16, 10, 12, 0, 0, time.UTC)
+	repository := initializedMemoryRepository(t, now)
+	sender := &MemorySender{}
+	service := newTestService(t, repository, &memoryVerifier{}, sender, now)
+
+	challenge, err := service.BeginEmailLogin(context.Background())
+	if err != nil || challenge.ChallengeID == "" || !challenge.ExpiresAt.Equal(now.Add(5*time.Minute)) {
+		t.Fatalf("BeginEmailLogin() = %#v, %v", challenge, err)
+	}
+	messages := sender.Messages()
+	if len(messages) != 1 || messages[0].To != "owner@example.com" || len(messages[0].Attachments) != 0 {
+		t.Fatalf("email messages = %#v", messages)
+	}
+	code := regexp.MustCompile(`\b[0-9]{6}\b`).FindString(messages[0].Text)
+	if code == "" {
+		t.Fatalf("email omitted six-digit code: %q", messages[0].Text)
+	}
+	login, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code, "123456")
+	if err != nil || login.Token == "" || !login.ExpiresAt.Equal(now.Add(7*24*time.Hour)) {
+		t.Fatalf("VerifyEmailLogin() = %#v, %v", login, err)
+	}
+	if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code, "123456"); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("replayed VerifyEmailLogin() error = %v", err)
+	}
+	if repository.sessionCount() != 1 {
+		t.Fatalf("sessions = %d, want one", repository.sessionCount())
+	}
+}
+
+func TestEmailLoginExpiresAndSMTPFailureLeavesNoUsableChallenge(t *testing.T) {
+	now := time.Date(2026, 8, 16, 10, 13, 0, 0, time.UTC)
+	repository := initializedMemoryRepository(t, now)
+	sender := &MemorySender{}
+	clock := now
+	service := newTestServiceWithClock(t, repository, &memoryVerifier{}, sender, func() time.Time { return clock })
+	challenge, err := service.BeginEmailLogin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := regexp.MustCompile(`\b[0-9]{6}\b`).FindString(sender.Messages()[0].Text)
+	clock = now.Add(5 * time.Minute)
+	if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code, "123456"); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("expired VerifyEmailLogin() error = %v", err)
+	}
+	if repository.sessionCount() != 0 {
+		t.Fatal("expired email challenge created a session")
+	}
+
+	failedSender := &MemorySender{Err: errors.New("smtp unavailable")}
+	failed := newTestService(t, repository, &memoryVerifier{}, failedSender, now)
+	if _, err := failed.BeginEmailLogin(context.Background()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("SMTP-failed BeginEmailLogin() error = %v", err)
+	}
+	failed.emailMu.Lock()
+	remaining := len(failed.emailLogins)
+	failed.emailMu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("SMTP failure retained %d challenges", remaining)
+	}
+}
+
 func TestServiceAdminProofStatusVerifiesWithoutReturningUIDAndLoginConsumesOnce(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 15, 0, 0, time.UTC)
 	repository := initializedMemoryRepository(t, now)
 	verifier := &memoryVerifier{
-		challenge: identity.Challenge{ID: "status-proof", QRImage: "qr", ExpiresAt: now.Add(time.Minute)},
+		challenge:    identity.Challenge{ID: "status-proof", QRImage: "qr", ExpiresAt: now.Add(time.Minute)},
 		verification: identity.Verification{UID: "32249588", CompletedAt: now},
 	}
 	service := newTestService(t, repository, verifier, &MemorySender{}, now)
@@ -156,9 +218,9 @@ func TestServiceAdminProofStatusKeepsPendingAndRejectsWrongAdministrator(t *test
 	now := time.Date(2026, 8, 16, 10, 16, 0, 0, time.UTC)
 	repository := initializedMemoryRepository(t, now)
 	verifier := &memoryVerifier{
-		challenge: identity.Challenge{ID: "pending-proof", QRImage: "qr", ExpiresAt: now.Add(time.Minute)},
+		challenge:    identity.Challenge{ID: "pending-proof", QRImage: "qr", ExpiresAt: now.Add(time.Minute)},
 		verification: identity.Verification{UID: "11111111", CompletedAt: now},
-		pollErrs: []error{identity.ErrVerificationPending, nil},
+		pollErrs:     []error{identity.ErrVerificationPending, nil},
 	}
 	service := newTestService(t, repository, verifier, &MemorySender{}, now)
 	challenge, err := service.BeginVerification(context.Background())

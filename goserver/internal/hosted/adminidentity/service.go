@@ -28,6 +28,8 @@ const (
 	RecentTOTPWindow  = 10 * time.Minute
 	defaultProofTTL   = 5 * time.Minute
 	defaultSessionTTL = 7 * 24 * time.Hour
+	emailCodeLength   = 6
+	emailCodeAttempts = 5
 )
 
 var (
@@ -1100,19 +1102,21 @@ type ServiceOptions struct {
 }
 
 type Service struct {
-	repository Repository
-	keys       security.Keyring
-	verifier   identity.BiliVerifier
-	sender     MailSender
-	now        func() time.Time
-	random     io.Reader
-	totp       TOTPProvider
-	issuer     string
-	proofTTL   time.Duration
-	sessionTTL time.Duration
-	handoffTTL time.Duration
-	proofMu    sync.Mutex
-	proofs     map[string]*adminProofState
+	repository  Repository
+	keys        security.Keyring
+	verifier    identity.BiliVerifier
+	sender      MailSender
+	now         func() time.Time
+	random      io.Reader
+	totp        TOTPProvider
+	issuer      string
+	proofTTL    time.Duration
+	sessionTTL  time.Duration
+	handoffTTL  time.Duration
+	proofMu     sync.Mutex
+	proofs      map[string]*adminProofState
+	emailMu     sync.Mutex
+	emailLogins map[string]*emailLoginState
 }
 
 type InitializeResult struct {
@@ -1133,6 +1137,20 @@ const (
 type AdminProofStatus struct {
 	Status    string    `json:"status"`
 	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+type EmailLoginChallenge struct {
+	ChallengeID string    `json:"challengeId"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+}
+
+type emailLoginState struct {
+	expiresAt time.Time
+	codeHash  []byte
+	epoch     int64
+	attempts  int
+	verifying bool
+	timer     *time.Timer
 }
 
 type adminProofState struct {
@@ -1194,8 +1212,187 @@ func NewService(repository Repository, keys security.Keyring, verifier identity.
 		repository: repository, keys: keys, verifier: verifier, sender: sender,
 		now: options.Now, random: options.Random, totp: options.TOTP, issuer: options.Issuer,
 		proofTTL: options.ProofTTL, sessionTTL: options.SessionTTL, handoffTTL: options.HandoffTTL,
-		proofs: make(map[string]*adminProofState),
+		proofs: make(map[string]*adminProofState), emailLogins: make(map[string]*emailLoginState),
 	}, nil
+}
+
+func (service *Service) BeginEmailLogin(ctx context.Context) (EmailLoginChallenge, error) {
+	if service == nil {
+		return EmailLoginChallenge{}, ErrUnavailable
+	}
+	record, err := service.repository.Identity(ctx)
+	if err != nil || record.CredentialEpoch < 1 {
+		return EmailLoginChallenge{}, ErrUnavailable
+	}
+	email, err := service.keys.Open("admin_email", record.EmailCiphertext)
+	if err != nil || !validEmail(string(email)) {
+		clear(email)
+		return EmailLoginChallenge{}, ErrUnavailable
+	}
+	defer clear(email)
+	code, err := randomNumericCode(service.random, emailCodeLength)
+	if err != nil {
+		return EmailLoginChallenge{}, ErrUnavailable
+	}
+	defer clear(code)
+	codeHash, err := service.keys.Lookup("admin_email_login_code", code)
+	if err != nil {
+		return EmailLoginChallenge{}, ErrUnavailable
+	}
+	challengeID, err := service.keys.NewToken()
+	if err != nil {
+		return EmailLoginChallenge{}, ErrUnavailable
+	}
+	now := service.now()
+	expiresAt := now.Add(service.proofTTL)
+	state := &emailLoginState{expiresAt: expiresAt, codeHash: bytes.Clone(codeHash), epoch: record.CredentialEpoch}
+	service.emailMu.Lock()
+	if service.emailLogins[challengeID] != nil {
+		service.emailMu.Unlock()
+		clear(state.codeHash)
+		return EmailLoginChallenge{}, ErrUnavailable
+	}
+	service.emailLogins[challengeID] = state
+	state.timer = time.AfterFunc(service.proofTTL, func() { service.expireEmailLogin(challengeID, state) })
+	service.emailMu.Unlock()
+	message := Message{To: string(email), Subject: "Gift Panel administrator login code", Text: "Your Gift Panel administrator login code is " + string(code) + ". It expires in five minutes."}
+	if err := service.sender.Send(ctx, message); err != nil {
+		service.removeEmailLogin(challengeID, state)
+		return EmailLoginChallenge{}, ErrUnavailable
+	}
+	return EmailLoginChallenge{ChallengeID: challengeID, ExpiresAt: expiresAt}, nil
+}
+
+func (service *Service) VerifyEmailLogin(ctx context.Context, challengeID, emailCode, totpCode string) (LoginResult, error) {
+	if service == nil || challengeID == "" || !validEmailLoginCode(emailCode) || !validTOTPCode(totpCode) {
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	codeHash, err := service.keys.Lookup("admin_email_login_code", []byte(emailCode))
+	if err != nil {
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	now := service.now()
+	service.emailMu.Lock()
+	state := service.emailLogins[challengeID]
+	if state == nil || state.verifying || !now.Before(state.expiresAt) || subtle.ConstantTimeCompare(codeHash, state.codeHash) != 1 {
+		if state != nil && !state.verifying {
+			state.attempts++
+			if state.attempts >= emailCodeAttempts || !now.Before(state.expiresAt) {
+				service.deleteEmailLoginLocked(challengeID, state)
+			}
+		}
+		service.emailMu.Unlock()
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	state.verifying = true
+	expectedEpoch := state.epoch
+	service.emailMu.Unlock()
+
+	record, err := service.repository.Identity(ctx)
+	if err != nil || record.CredentialEpoch != expectedEpoch {
+		service.failEmailLogin(challengeID, state)
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	secret, err := service.keys.Open("admin_totp", record.TOTPSecretCiphertext)
+	if err != nil {
+		service.failEmailLogin(challengeID, state)
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	step, valid := service.totp.Validate(totpCode, string(secret), now)
+	clear(secret)
+	if !valid || step.IsZero() {
+		service.failEmailLogin(challengeID, state)
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	if !service.consumeEmailLogin(challengeID, state) {
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	token, err := service.keys.NewToken()
+	if err != nil {
+		return LoginResult{}, ErrUnavailable
+	}
+	tokenHash, err := service.keys.HashToken("admin_session", []byte(token))
+	if err != nil {
+		return LoginResult{}, ErrUnavailable
+	}
+	expiresAt := now.Add(service.sessionTTL)
+	if err := service.repository.CreateLoginSession(ctx, LoginSessionAttempt{ExpectedCredentialEpoch: expectedEpoch, TokenHash: tokenHash, CreatedAt: now, ExpiresAt: expiresAt, TOTPStep: step}); err != nil {
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	return LoginResult{Token: token, ExpiresAt: expiresAt}, nil
+}
+
+func randomNumericCode(random io.Reader, length int) ([]byte, error) {
+	if random == nil || length <= 0 || length > 32 {
+		return nil, ErrInvalidInput
+	}
+	code := make([]byte, 0, length)
+	buffer := []byte{0}
+	for len(code) < length {
+		if _, err := io.ReadFull(random, buffer); err != nil {
+			clear(code)
+			return nil, ErrUnavailable
+		}
+		if buffer[0] < 250 {
+			code = append(code, '0'+buffer[0]%10)
+		}
+	}
+	return code, nil
+}
+
+func validEmailLoginCode(code string) bool {
+	if len(code) != emailCodeLength {
+		return false
+	}
+	for index := range code {
+		if code[index] < '0' || code[index] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func (service *Service) failEmailLogin(challengeID string, expected *emailLoginState) {
+	service.emailMu.Lock()
+	if state := service.emailLogins[challengeID]; state == expected {
+		state.verifying = false
+		state.attempts++
+		if state.attempts >= emailCodeAttempts || !service.now().Before(state.expiresAt) {
+			service.deleteEmailLoginLocked(challengeID, state)
+		}
+	}
+	service.emailMu.Unlock()
+}
+
+func (service *Service) expireEmailLogin(challengeID string, expected *emailLoginState) {
+	service.removeEmailLogin(challengeID, expected)
+}
+
+func (service *Service) consumeEmailLogin(challengeID string, expected *emailLoginState) bool {
+	service.emailMu.Lock()
+	defer service.emailMu.Unlock()
+	if service.emailLogins[challengeID] != expected || !expected.verifying || !service.now().Before(expected.expiresAt) {
+		return false
+	}
+	service.deleteEmailLoginLocked(challengeID, expected)
+	return true
+}
+
+func (service *Service) removeEmailLogin(challengeID string, expected *emailLoginState) {
+	service.emailMu.Lock()
+	if service.emailLogins[challengeID] == expected {
+		service.deleteEmailLoginLocked(challengeID, expected)
+	}
+	service.emailMu.Unlock()
+}
+
+func (service *Service) deleteEmailLoginLocked(challengeID string, state *emailLoginState) {
+	delete(service.emailLogins, challengeID)
+	if state.timer != nil {
+		state.timer.Stop()
+		state.timer = nil
+	}
+	clear(state.codeHash)
 }
 
 func (service *Service) BeginVerification(ctx context.Context) (identity.Challenge, error) {

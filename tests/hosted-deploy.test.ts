@@ -826,7 +826,7 @@ describe('hosted single-host deployment contract', () => {
     const account = nginxBlock(config, /location ~ \^\/api\/\(\?:auth\/registration/);
     const api = nginxBlock(config, /location \/api\/\s*/);
     expect(auth).toContain('limit_req zone=hosted_auth burst=5 nodelay;');
-    for (const endpoint of ['/api/admin/bili-service/challenge', '/api/admin/bili-service/replace']) {
+    for (const endpoint of ['/api/admin/bili-service/challenge', '/api/admin/bili-service/replace', '/api/admin/auth/email/challenges', '/api/admin/session/email']) {
       expect(nginxRegexLocationMatches(auth, endpoint), endpoint).toBe(true);
     }
     expect(nginxRegexLocationMatches(auth, '/api/admin/bili-service/status')).toBe(false);

@@ -8,6 +8,8 @@ const challenge = { challengeId: 'admin-proof', qrImage: 'data:image/png;base64,
 function api(overrides: Record<string, unknown> = {}) {
   return {
     adminSession: vi.fn(async () => { throw new HostedAPIError('authentication_failed', 401); }),
+    beginAdminEmailLogin: vi.fn(async () => ({ challengeId: 'email-proof', expiresAt: challenge.expiresAt })),
+    adminEmailLogin: vi.fn(async () => undefined),
     beginAdminProof: vi.fn(async () => challenge),
     pollAdminProof: vi.fn(async () => ({ status: 'pending' as const, expiresAt: challenge.expiresAt })),
     adminLogin: vi.fn(async () => undefined),
@@ -32,6 +34,8 @@ describe('progressive administrator login flow', () => {
     const states: string[] = [];
     const flow = createAdminLoginFlow(client, (state) => states.push(state.kind));
     await Promise.all([flow.start(), flow.start()]);
+    expect(states.at(-1)).toBe('choosing-method');
+    await flow.startBilibili();
     expect(client.beginAdminProof).toHaveBeenCalledTimes(1);
     await flow.poll(); await flow.poll();
     expect(states.at(-1)).toBe('awaiting-totp');
@@ -39,6 +43,30 @@ describe('progressive administrator login flow', () => {
     expect(client.adminLogin).toHaveBeenCalledTimes(1);
     expect(client.adminLogin).toHaveBeenCalledWith('admin-proof', '123456');
     expect(states.at(-1)).toBe('signed-in');
+  });
+
+  it('uses email code then TOTP without creating a Bilibili proof', async () => {
+    const client = api(); const states: string[] = [];
+    const flow = createAdminLoginFlow(client, (state) => states.push(state.kind));
+    await flow.start(); await Promise.all([flow.startEmail(), flow.startEmail()]);
+    expect(client.beginAdminEmailLogin).toHaveBeenCalledTimes(1);
+    expect(states.at(-1)).toBe('awaiting-email-code');
+    flow.acceptEmailCode('654321');
+    expect(states.at(-1)).toBe('awaiting-email-totp');
+    await flow.submitEmailTOTP('123456');
+    expect(client.adminEmailLogin).toHaveBeenCalledWith('email-proof', '654321', '123456');
+    expect(client.beginAdminProof).not.toHaveBeenCalled();
+    expect(states.at(-1)).toBe('signed-in');
+  });
+
+  it('logs out a late email login that completes after the view is disposed', async () => {
+    let finish!: () => void; const pending = new Promise<void>((resolve) => { finish = resolve; });
+    const client = api({ adminEmailLogin: vi.fn(async () => pending) });
+    const flow = createAdminLoginFlow(client, vi.fn());
+    await flow.start(); await flow.startEmail(); flow.acceptEmailCode('654321');
+    const submitting = flow.submitEmailTOTP('123456'); const disposing = flow.dispose();
+    finish(); await Promise.all([submitting, disposing]);
+    expect(client.logout).toHaveBeenCalledTimes(1);
   });
 
   it('keeps service failure retryable without creating a proof', async () => {
@@ -55,6 +83,7 @@ describe('progressive administrator login flow', () => {
     const states: string[] = [];
     const flow = createAdminLoginFlow(client, (state) => states.push(state.kind));
     await flow.start();
+    await flow.startBilibili();
     expect(states.at(-1)).toBe('service-unavailable');
   });
 
@@ -63,7 +92,7 @@ describe('progressive administrator login flow', () => {
     const pending = new Promise<void>((resolve) => { finish = resolve; });
     const client = api({ pollAdminProof: vi.fn(async () => ({ status: 'verified', expiresAt: challenge.expiresAt })), adminLogin: vi.fn(async () => pending) });
     const flow = createAdminLoginFlow(client, vi.fn());
-    await flow.start(); await flow.poll();
+    await flow.start(); await flow.startBilibili(); await flow.poll();
     const submitting = flow.submit('123456');
     const disposing = flow.dispose();
     finish(); await Promise.all([submitting, disposing]);
@@ -89,6 +118,8 @@ describe('progressive administrator login view', () => {
     const root = new Element('div', document);
     const client = api({ pollAdminProof: vi.fn(async () => ({ status: 'verified', expiresAt: challenge.expiresAt })) });
     const mounted = mountAdminLogin(root as unknown as HTMLElement, client, { onSignedIn: vi.fn() });
+    await vi.waitFor(() => expect(root.children[0]?.children.some((child) => child.tagName === 'button' && child.textContent === '使用 B站扫码')).toBe(true));
+    root.children[0].children.find((child) => child.tagName === 'button' && child.textContent === '使用 B站扫码')?.listeners.get('click')?.();
     await vi.waitFor(() => expect(root.children[0]?.children.some((child) => child.tagName === 'img')).toBe(true));
     const panel = root.children[0]; const link = panel.children.find((child) => child.tagName === 'a');
     expect(link).toMatchObject({ href: challenge.verificationUrl, target: '_blank', rel: 'noopener noreferrer' });

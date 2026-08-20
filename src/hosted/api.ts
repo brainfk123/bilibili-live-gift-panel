@@ -11,6 +11,8 @@ export interface Challenge {
   verificationUrl?: string;
   expiresAt: string;
 }
+
+export interface EmailLoginChallenge { challengeId: string; expiresAt: string }
 export type BiliServiceStatus =
   | { version: number; health: 'healthy'; lastVerifiedAt: string }
   | { version: 0; health: 'missing' | 'unavailable' };
@@ -449,6 +451,11 @@ export class HostedAPI {
   }
 
   async beginAdminProof(): Promise<Challenge> { return this.requireChallenge((await this.request('/api/admin/auth/bili/challenges', 'POST', 201)).data); }
+  async beginAdminEmailLogin(): Promise<EmailLoginChallenge> {
+    const data = object((await this.request('/api/admin/auth/email/challenges', 'POST', 201, {})).data);
+    if (!data || !exactKeys(data, ['challengeId', 'expiresAt']) || !string(data.challengeId) || !instant(data.expiresAt)) throw new HostedAPIError('invalid_response', 201);
+    return { challengeId: data.challengeId, expiresAt: data.expiresAt };
+  }
   async pollAdminProof(id: string): Promise<AdminProofStatus> {
     const response = await this.request(`/api/admin/auth/bili/challenges/${encodeURIComponent(id)}`, 'GET', [200, 410]);
     const data = object(response.data);
@@ -463,6 +470,7 @@ export class HostedAPI {
     throw new HostedAPIError('invalid_response', response.status);
   }
   async adminSession(): Promise<void> { await this.request('/api/admin/session', 'GET', 204); }
+  async adminEmailLogin(challengeId: string, emailCode: string, totp: string): Promise<void> { await this.request('/api/admin/session/email', 'POST', 204, { challengeId, emailCode, totp }); }
   async biliServiceStatus(): Promise<BiliServiceStatus> {
     const data = object((await this.request('/api/admin/bili-service/status', 'GET', 200)).data);
     if (!data || !number(data.version) || !string(data.health)) throw new HostedAPIError('invalid_response', 200);
