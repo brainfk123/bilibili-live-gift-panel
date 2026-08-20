@@ -653,7 +653,7 @@ func (repository *SQLRepository) ActivateInitialization(ctx context.Context, att
 	if !validCodeHashes(handoff.RecoveryCodeHashes) {
 		return ErrUnavailable
 	}
-	if _, err := transaction.ExecContext(ctx, "INSERT INTO admin_identity (id, credential_epoch, uid_ciphertext, uid_lookup, email_ciphertext, created_at, updated_at) VALUES (1, 1, ?, ?, ?, ?, ?)", handoff.UIDCiphertext, handoff.UIDLookup, handoff.EmailCiphertext, attempt.CreatedAt, attempt.CreatedAt); err != nil {
+	if _, err := transaction.ExecContext(ctx, "INSERT INTO admin_identity (id, credential_epoch, uid_ciphertext, uid_lookup, email_ciphertext, created_at, updated_at) VALUES (1, 1, ?, ?, ?, ?, ?)", nil, nil, handoff.EmailCiphertext, attempt.CreatedAt, attempt.CreatedAt); err != nil {
 		return ErrAuthenticationFailed
 	}
 	if _, err := transaction.ExecContext(ctx, "INSERT INTO admin_totp (admin_identity_id, secret_ciphertext, rotated_at) VALUES (1, ?, ?)", handoff.TOTPSecretCiphertext, attempt.CreatedAt); err != nil {
@@ -1038,7 +1038,9 @@ func validInitialization(record InitializationRecord) bool {
 }
 
 func validIdentityRecord(record IdentityRecord) bool {
-	return record.CredentialEpoch >= 1 && len(record.UIDCiphertext) > 0 && len(record.UIDCiphertext) <= 512 && len(record.UIDLookup) == sha256.Size && len(record.EmailCiphertext) > 0 && len(record.EmailCiphertext) <= 1024 && len(record.TOTPSecretCiphertext) > 0 && len(record.TOTPSecretCiphertext) <= 512
+	legacyUID := (len(record.UIDCiphertext) == 0 && len(record.UIDLookup) == 0) ||
+		(len(record.UIDCiphertext) > 0 && len(record.UIDCiphertext) <= 512 && len(record.UIDLookup) == sha256.Size)
+	return record.CredentialEpoch >= 1 && legacyUID && len(record.EmailCiphertext) > 0 && len(record.EmailCiphertext) <= 1024 && len(record.TOTPSecretCiphertext) > 0 && len(record.TOTPSecretCiphertext) <= 512
 }
 
 func validLoginAttempt(attempt LoginSessionAttempt) bool {
@@ -1524,14 +1526,6 @@ func (service *Service) Initialize(ctx context.Context, uid, email string) (Init
 	if err != nil {
 		return InitializeResult{}, ErrUnavailable
 	}
-	uidCiphertext, err := service.keys.Seal("admin_uid", []byte(canonical))
-	if err != nil {
-		return InitializeResult{}, ErrUnavailable
-	}
-	uidLookup, err := service.keys.Lookup("bili_uid", []byte(canonical))
-	if err != nil {
-		return InitializeResult{}, ErrUnavailable
-	}
 	emailCiphertext, err := service.keys.Seal("admin_email", []byte(email))
 	if err != nil {
 		return InitializeResult{}, ErrUnavailable
@@ -1544,7 +1538,7 @@ func (service *Service) Initialize(ctx context.Context, uid, email string) (Init
 		return InitializeResult{}, err
 	}
 	err = service.repository.Initialize(ctx, InitializationRecord{
-		Identity:           IdentityRecord{CredentialEpoch: 1, UIDCiphertext: uidCiphertext, UIDLookup: uidLookup, EmailCiphertext: emailCiphertext, TOTPSecretCiphertext: secretCiphertext},
+		Identity:           IdentityRecord{CredentialEpoch: 1, EmailCiphertext: emailCiphertext, TOTPSecretCiphertext: secretCiphertext},
 		RecoveryCodeHashes: hashes, CreatedAt: service.now(),
 	})
 	if err != nil {

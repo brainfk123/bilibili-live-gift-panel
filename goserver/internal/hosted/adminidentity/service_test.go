@@ -56,7 +56,7 @@ func TestInitializeStoresOneAdministratorAndEmailsOnlyEncryptedCodes(t *testing.
 	stored := repository.identity
 	codeHashes := cloneHashes(repository.activeCodes)
 	repository.mu.Unlock()
-	if stored.CredentialEpoch != 1 || len(stored.UIDLookup) != sha256.Size {
+	if stored.CredentialEpoch != 1 || len(stored.UIDCiphertext) != 0 || len(stored.UIDLookup) != 0 {
 		t.Fatalf("stored identity = %#v", stored)
 	}
 	if bytes.Contains(stored.UIDCiphertext, []byte("32249588")) || bytes.Contains(stored.EmailCiphertext, []byte("owner@example.com")) || bytes.Contains(stored.TOTPSecretCiphertext, []byte("TESTSECRET")) {
@@ -81,6 +81,31 @@ func TestInitializeStoresOneAdministratorAndEmailsOnlyEncryptedCodes(t *testing.
 
 	if _, err := service.Initialize(context.Background(), "32249588", "owner@example.com"); !errors.Is(err, ErrAlreadyInitialized) {
 		t.Fatalf("post-activation Initialize() error = %v, want ErrAlreadyInitialized", err)
+	}
+}
+
+func TestIdentityRecordAllowsOnlyAbsentOrCompleteLegacyUIDPair(t *testing.T) {
+	base := IdentityRecord{
+		CredentialEpoch:      1,
+		EmailCiphertext:      bytes.Repeat([]byte{0x31}, 64),
+		TOTPSecretCiphertext: bytes.Repeat([]byte{0x32}, 64),
+	}
+	tests := []struct {
+		name   string
+		record IdentityRecord
+		want   bool
+	}{
+		{name: "absent legacy pair", record: base, want: true},
+		{name: "complete legacy pair", record: IdentityRecord{CredentialEpoch: base.CredentialEpoch, UIDCiphertext: bytes.Repeat([]byte{0x33}, 48), UIDLookup: bytes.Repeat([]byte{0x34}, sha256.Size), EmailCiphertext: base.EmailCiphertext, TOTPSecretCiphertext: base.TOTPSecretCiphertext}, want: true},
+		{name: "ciphertext without lookup", record: IdentityRecord{CredentialEpoch: base.CredentialEpoch, UIDCiphertext: []byte{0x33}, EmailCiphertext: base.EmailCiphertext, TOTPSecretCiphertext: base.TOTPSecretCiphertext}, want: false},
+		{name: "lookup without ciphertext", record: IdentityRecord{CredentialEpoch: base.CredentialEpoch, UIDLookup: bytes.Repeat([]byte{0x34}, sha256.Size), EmailCiphertext: base.EmailCiphertext, TOTPSecretCiphertext: base.TOTPSecretCiphertext}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := validIdentityRecord(test.record); got != test.want {
+				t.Fatalf("validIdentityRecord() = %t, want %t", got, test.want)
+			}
+		})
 	}
 }
 
@@ -759,7 +784,6 @@ func sqlInitializationRecord(now time.Time) InitializationRecord {
 	return InitializationRecord{
 		Identity: IdentityRecord{
 			CredentialEpoch: 1,
-			UIDCiphertext:   bytes.Repeat([]byte{0x11}, 48), UIDLookup: bytes.Repeat([]byte{0x22}, sha256.Size),
 			EmailCiphertext: bytes.Repeat([]byte{0x33}, 64), TOTPSecretCiphertext: bytes.Repeat([]byte{0x44}, 64),
 		},
 		RecoveryCodeHashes: hashes,
@@ -1002,7 +1026,7 @@ func (repository *memoryRepository) ActivateInitialization(_ context.Context, at
 		return ErrAuthenticationFailed
 	}
 	repository.initialized = true
-	repository.identity = IdentityRecord{CredentialEpoch: 1, UIDCiphertext: bytes.Clone(handoff.UIDCiphertext), UIDLookup: bytes.Clone(handoff.UIDLookup), EmailCiphertext: bytes.Clone(handoff.EmailCiphertext), TOTPSecretCiphertext: bytes.Clone(handoff.TOTPSecretCiphertext)}
+	repository.identity = IdentityRecord{CredentialEpoch: 1, EmailCiphertext: bytes.Clone(handoff.EmailCiphertext), TOTPSecretCiphertext: bytes.Clone(handoff.TOTPSecretCiphertext)}
 	for _, hash := range handoff.RecoveryCodeHashes {
 		key, _ := hashKey(hash)
 		repository.activeCodes[key] = struct{}{}

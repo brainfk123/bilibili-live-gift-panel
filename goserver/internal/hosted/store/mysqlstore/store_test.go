@@ -71,6 +71,53 @@ func TestProductionMigrationsIncludeIdentitySchema(t *testing.T) {
 	t.Fatal("production migrations do not include 0002_identity_and_invitations")
 }
 
+func TestProductionAdminEmailIdentityMigrationMakesLegacyUIDNullable(t *testing.T) {
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantChecksums := map[string]string{
+		"0001_foundation":                   "d49617d9a14c87bd9d1526b99ec2399422da047baff7b89b6832c9adfc8c0031",
+		"0002_identity_and_invitations":     "fddd12bb00938fad7b94c7cc903e13900f12d583f3e426c603fdd7b4cb2a8a6a",
+		"0003_admin_handoffs":               "3e44ef4db3db1dc48d9161df002a9e19578241218b804b3b5db08c157cb78b89",
+		"0004_configuration_and_migration":  "8fb8fc88b8040b9806ea15612fdb62dd1fc12f764efcf23d623937779dc64f7c",
+		"0005_runtime_and_obs":              "aaeb739b1fd17b3751d733d36fd8e06c1320f5393ff77341bbac6fbd2a7bc9c2",
+		"0006_runtime_invariants":           "aef0529f46dc18d47d6770b71fe5f6d16ddb8d23c622f660a1718b4a2d4038b3",
+		"0007_runtime_ownership":            "a56cd452a649bd928b5a48a3e8ffacca15fd889eab5161fb7bc96d782be9caa4",
+		"0008_runtime_dedupe_cleanup_index": "7d69109e076d085e0988e0c196df8480d1dcd8a03e60495f6302e382ea94e064",
+	}
+	if len(migrations) != 9 {
+		t.Fatalf("migration count = %d, want 9", len(migrations))
+	}
+	var emailIdentity migration
+	for _, item := range migrations {
+		if checksum, ok := wantChecksums[item.version]; ok {
+			if item.checksum != checksum {
+				t.Fatalf("published migration %s checksum=%s want=%s", item.version, item.checksum, checksum)
+			}
+			delete(wantChecksums, item.version)
+		}
+		if item.version == "0009_admin_email_identity" {
+			emailIdentity = item
+		}
+	}
+	if len(wantChecksums) != 0 {
+		t.Fatalf("published migrations missing: %v", wantChecksums)
+	}
+	if emailIdentity.version == "" {
+		t.Fatal("production migrations do not include 0009_admin_email_identity")
+	}
+	statements := splitStatements(emailIdentity.contents)
+	if len(statements) != 1 {
+		t.Fatalf("0009 statements = %d, want one atomic ALTER TABLE", len(statements))
+	}
+	got := strings.Join(strings.Fields(statements[0]), " ")
+	want := "ALTER TABLE admin_identity MODIFY COLUMN uid_ciphertext VARBINARY(512) NULL, MODIFY COLUMN uid_lookup BINARY(32) NULL"
+	if got != want {
+		t.Fatalf("0009 statement = %q, want %q", got, want)
+	}
+}
+
 func TestProductionMigrationsIncludeRetryableAdministratorHandoffs(t *testing.T) {
 	migrations, err := readMigrations(migrationFiles)
 	if err != nil {
