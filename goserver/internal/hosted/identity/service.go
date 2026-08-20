@@ -56,7 +56,7 @@ func ValidateBilibiliVerificationURL(raw string) (canonical, qrKey string, ok bo
 	}
 	query := parsed.Query()
 	for key := range query {
-		if key != "qrcode_key" && key != "navhide" && !(currentMobilePath && key == "callback") {
+		if key != "qrcode_key" && key != "navhide" && !(currentMobilePath && (key == "callback" || key == "from")) {
 			return "", "", false
 		}
 	}
@@ -70,7 +70,8 @@ func ValidateBilibiliVerificationURL(raw string) (canonical, qrKey string, ok bo
 	if currentMobilePath {
 		callback := query["callback"]
 		navhide := query["navhide"]
-		if len(callback) != 1 || callback[0] != "close" || len(navhide) != 1 || navhide[0] != "1" {
+		from := query["from"]
+		if len(callback) != 1 || callback[0] != "close" || len(navhide) != 1 || navhide[0] != "1" || (len(from) != 0 && (len(from) != 1 || from[0] != "")) {
 			return "", "", false
 		}
 	}

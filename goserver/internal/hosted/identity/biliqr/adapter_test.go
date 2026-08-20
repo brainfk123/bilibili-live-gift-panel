@@ -134,7 +134,7 @@ func TestAdapterBeginReturnsOnlyAllowlistedBilibiliVerificationURL(t *testing.T)
 }
 
 func TestAdapterBeginAcceptsCurrentBilibiliMobileVerificationURL(t *testing.T) {
-	const verificationURL = "https://account.bilibili.com/h5/account-h5/auth/scan-web?navhide=1&callback=close&qrcode_key=public-key"
+	const verificationURL = "https://account.bilibili.com/h5/account-h5/auth/scan-web?navhide=1&callback=close&from=&qrcode_key=public-key"
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": verificationURL, "qrcode_key": "public-key"}})
 	}))
@@ -163,6 +163,7 @@ func TestAdapterBeginRejectsUntrustedVerificationURL(t *testing.T) {
 		{name: "duplicate key", url: "https://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=one&qrcode_key=two"},
 		{name: "credential query", url: "https://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=key&SESSDATA=secret"},
 		{name: "unknown callback", url: "https://account.bilibili.com/h5/account-h5/auth/scan-web?navhide=1&callback=other&qrcode_key=key"},
+		{name: "nonempty source", url: "https://account.bilibili.com/h5/account-h5/auth/scan-web?navhide=1&callback=close&from=other&qrcode_key=key"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -283,13 +283,15 @@ function validBilibiliVerificationURL(value: unknown): value is string {
     || (parsed.hostname === 'account.bilibili.com' && parsed.pathname === '/scan') || currentMobilePath;
   if (!allowedPath) return false;
   const keys = [...parsed.searchParams.keys()];
-  if (keys.some((key) => key !== 'qrcode_key' && key !== 'navhide' && !(currentMobilePath && key === 'callback'))) return false;
+  if (keys.some((key) => key !== 'qrcode_key' && key !== 'navhide' && !(currentMobilePath && (key === 'callback' || key === 'from')))) return false;
   const qrKeys = parsed.searchParams.getAll('qrcode_key');
   if (qrKeys.length !== 1 || qrKeys[0].length === 0 || qrKeys[0].length > 512) return false;
   const navhide = parsed.searchParams.getAll('navhide');
   if (currentMobilePath) {
     const callback = parsed.searchParams.getAll('callback');
-    return navhide.length === 1 && navhide[0] === '1' && callback.length === 1 && callback[0] === 'close';
+    const from = parsed.searchParams.getAll('from');
+    return navhide.length === 1 && navhide[0] === '1' && callback.length === 1 && callback[0] === 'close'
+      && (from.length === 0 || (from.length === 1 && from[0] === ''));
   }
   return navhide.length === 0 || (navhide.length === 1 && navhide[0] === '1');
 }
