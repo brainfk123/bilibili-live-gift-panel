@@ -67,6 +67,18 @@ type denySessionLimit struct {
 	deniedKey    string
 }
 
+type adminLimitCall struct {
+	scope identity.LimitScope
+	key   string
+}
+
+type denyAdministratorEmailLoginLimit struct{ calls []adminLimitCall }
+
+func (limiter *denyAdministratorEmailLoginLimit) Allow(_ context.Context, scope identity.LimitScope, key string) bool {
+	limiter.calls = append(limiter.calls, adminLimitCall{scope: scope, key: key})
+	return scope != identity.LimitPerChallenge || key != "admin:1"
+}
+
 func (limiter *denySessionLimit) Allow(_ context.Context, scope identity.LimitScope, key string) bool {
 	if key == limiter.deniedKey && limiter.deniedKey != "admin:1" {
 		limiter.sawPlaintext = true
@@ -263,6 +275,53 @@ func TestHTTPEmailLoginRejectsTOTPAndNeverReturnsEmailOrCode(t *testing.T) {
 	for _, secret := range []string{"owner@example.com", "654321", "123456", "email-proof"} {
 		if strings.Contains(response.Body.String(), secret) {
 			t.Fatalf("response exposed %q: %q", secret, response.Body.String())
+		}
+	}
+}
+
+func TestHTTPEmailLoginMapsUnavailableSessionCreationToServiceUnavailable(t *testing.T) {
+	service := &adminHTTPService{emailLoginErr: ErrUnavailable}
+	handler := newTestHTTPHandler(t, service)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, mutationRequest(http.MethodPost, "/api/admin/session/email", `{"challengeId":"email-proof","emailCode":"654321"}`))
+	if response.Code != http.StatusServiceUnavailable || response.Body.String() != "{\"error\":\"temporarily_unavailable\"}\n" {
+		t.Fatalf("response=%d %q", response.Code, response.Body.String())
+	}
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatalf("cookies=%#v", response.Result().Cookies())
+	}
+}
+
+func TestHTTPEmailLoginAdministratorLimitRunsAfterGlobalIPAndChallengeBeforeService(t *testing.T) {
+	limiter := &denyAdministratorEmailLoginLimit{}
+	service := &adminHTTPService{}
+	handler, err := NewHTTPHandler(service, HTTPOptions{
+		AllowedOrigin: "https://panel.example.com", CSRFToken: "csrf-test-token",
+		Limiter: limiter, ClientIP: identity.DirectClientIP,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, mutationRequest(http.MethodPost, "/api/admin/session/email", `{"challengeId":"email-proof","emailCode":"654321"}`))
+	if response.Code != http.StatusTooManyRequests || response.Body.String() != "{\"error\":\"rate_limited\"}\n" {
+		t.Fatalf("response=%d %q", response.Code, response.Body.String())
+	}
+	if service.emailLoginChallenge != "" {
+		t.Fatalf("rate-limited request reached service: %#v", service)
+	}
+	want := []adminLimitCall{
+		{scope: identity.LimitGlobal, key: "admin_email_login"},
+		{scope: identity.LimitPerIP, key: "192.0.2.1"},
+		{scope: identity.LimitPerChallenge, key: "email-proof"},
+		{scope: identity.LimitPerChallenge, key: "admin:1"},
+	}
+	if len(limiter.calls) != len(want) {
+		t.Fatalf("limiter calls=%#v, want %#v", limiter.calls, want)
+	}
+	for index := range want {
+		if limiter.calls[index] != want[index] {
+			t.Fatalf("limiter call %d=%#v, want %#v", index, limiter.calls[index], want[index])
 		}
 	}
 }

@@ -25,11 +25,12 @@ import (
 )
 
 const (
-	RecentTOTPWindow  = 10 * time.Minute
-	defaultProofTTL   = 5 * time.Minute
-	defaultSessionTTL = 7 * 24 * time.Hour
-	emailCodeLength   = 6
-	emailCodeAttempts = 5
+	RecentTOTPWindow                     = 10 * time.Minute
+	defaultProofTTL                      = 5 * time.Minute
+	defaultSessionTTL                    = 7 * 24 * time.Hour
+	emailCodeLength                      = 6
+	emailCodeAttempts                    = 5
+	emailLoginSessionVerificationTimeout = 2 * time.Second
 )
 
 var (
@@ -379,10 +380,12 @@ func (repository *SQLRepository) CreateEmailLoginSession(ctx context.Context, at
 	return nil
 }
 
-func (repository *SQLRepository) verifyEmailLoginSession(ctx context.Context, attempt EmailLoginSessionAttempt) error {
+func (repository *SQLRepository) verifyEmailLoginSession(_ context.Context, attempt EmailLoginSessionAttempt) error {
 	const query = "SELECT 1 FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? AND credential_epoch = ? AND created_at = ? AND expires_at = ? AND totp_verified_at IS NULL LIMIT 1"
+	verificationContext, cancel := context.WithTimeout(context.Background(), emailLoginSessionVerificationTimeout)
+	defer cancel()
 	var present int
-	err := repository.db.QueryRowContext(ctx, query, attempt.TokenHash, attempt.ExpectedCredentialEpoch, attempt.CreatedAt, attempt.ExpiresAt).Scan(&present)
+	err := repository.db.QueryRowContext(verificationContext, query, attempt.TokenHash, attempt.ExpectedCredentialEpoch, attempt.CreatedAt, attempt.ExpiresAt).Scan(&present)
 	if err != nil || present != 1 {
 		return ErrUnavailable
 	}
@@ -1369,7 +1372,10 @@ func (service *Service) VerifyEmailLogin(ctx context.Context, challengeID, email
 	}
 	expiresAt := now.Add(service.sessionTTL)
 	if err := service.repository.CreateEmailLoginSession(ctx, EmailLoginSessionAttempt{ExpectedCredentialEpoch: expectedEpoch, TokenHash: tokenHash, CreatedAt: now, ExpiresAt: expiresAt}); err != nil {
-		return LoginResult{}, ErrAuthenticationFailed
+		if errors.Is(err, ErrAuthenticationFailed) {
+			return LoginResult{}, ErrAuthenticationFailed
+		}
+		return LoginResult{}, ErrUnavailable
 	}
 	return LoginResult{Token: token, ExpiresAt: expiresAt}, nil
 }

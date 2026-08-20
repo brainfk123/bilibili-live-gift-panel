@@ -238,11 +238,15 @@ func (handler *HTTPHandler) verifyEmailLogin(response http.ResponseWriter, reque
 		writeAdminError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if !handler.allow(request, "admin_email_login", body.ChallengeID) {
+	if !handler.allow(request, "admin_email_login", body.ChallengeID) || !handler.limiter.Allow(request.Context(), identity.LimitPerChallenge, "admin:1") {
 		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
 	result, err := handler.service.VerifyEmailLogin(request.Context(), body.ChallengeID, body.EmailCode)
+	if errors.Is(err, ErrUnavailable) {
+		writeAdminError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	}
 	if err != nil || result.Token == "" || !result.ExpiresAt.After(handler.now()) {
 		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
 		return

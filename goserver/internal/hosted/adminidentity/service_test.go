@@ -258,6 +258,71 @@ func TestEmailLoginCountsFiveFailuresAndRejectsRotatedEpoch(t *testing.T) {
 	}
 }
 
+func TestEmailLoginRejectsCorrectCodeAfterExactlyFiveFailures(t *testing.T) {
+	now := time.Date(2026, 8, 16, 10, 14, 15, 0, time.UTC)
+	repository := initializedMemoryRepository(t, now)
+	sender := &MemorySender{}
+	service := newTestService(t, repository, &memoryVerifier{}, sender, now)
+	challenge, err := service.BeginEmailLogin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := regexp.MustCompile(`\b[0-9]{6}\b`).FindString(sender.Messages()[0].Text)
+	wrongCode := "000000"
+	if wrongCode == code {
+		wrongCode = "999999"
+	}
+	for attempt := 0; attempt < emailCodeAttempts; attempt++ {
+		if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, wrongCode); !errors.Is(err, ErrAuthenticationFailed) {
+			t.Fatalf("failure %d error = %v", attempt+1, err)
+		}
+	}
+	if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("correct code after five failures error = %v", err)
+	}
+	if repository.sessionCount() != 0 {
+		t.Fatal("correct code after five failures created a session")
+	}
+}
+
+func TestEmailLoginPropagatesUnavailableSessionCreationAfterConsumingChallenge(t *testing.T) {
+	now := time.Date(2026, 8, 16, 10, 14, 30, 0, time.UTC)
+	memory := initializedMemoryRepository(t, now)
+	repository := unavailableEmailSessionRepository{memoryRepository: memory}
+	sender := &MemorySender{}
+	service := newTestService(t, repository, &memoryVerifier{}, sender, now)
+	challenge, err := service.BeginEmailLogin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := regexp.MustCompile(`\b[0-9]{6}\b`).FindString(sender.Messages()[0].Text)
+	if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("VerifyEmailLogin() error = %v, want ErrUnavailable", err)
+	}
+	if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("replayed VerifyEmailLogin() error = %v, want ErrAuthenticationFailed", err)
+	}
+	if memory.sessionCount() != 0 {
+		t.Fatal("unavailable session creation created a session")
+	}
+}
+
+func TestEmailLoginTreatsUnexpectedSessionCreationFailureAsUnavailable(t *testing.T) {
+	now := time.Date(2026, 8, 16, 10, 14, 45, 0, time.UTC)
+	memory := initializedMemoryRepository(t, now)
+	repository := failedEmailSessionRepository{memoryRepository: memory, err: ErrInvalidInput}
+	sender := &MemorySender{}
+	service := newTestService(t, repository, &memoryVerifier{}, sender, now)
+	challenge, err := service.BeginEmailLogin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := regexp.MustCompile(`\b[0-9]{6}\b`).FindString(sender.Messages()[0].Text)
+	if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("VerifyEmailLogin() error = %v, want ErrUnavailable", err)
+	}
+}
+
 func TestServiceAdminProofStatusVerifiesWithoutReturningUIDAndLoginConsumesOnce(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 15, 0, 0, time.UTC)
 	repository := initializedMemoryRepository(t, now)
@@ -795,6 +860,49 @@ func TestSQLRepositoryEmailLoginSessionWritesNullTOTPAndVerifiesAmbiguousCommit(
 	}
 }
 
+func TestSQLRepositoryEmailLoginSessionVerificationSurvivesCancelledRequest(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 16, 12, 13, 0, 0, time.UTC)
+	attempt := EmailLoginSessionAttempt{ExpectedCredentialEpoch: 3, TokenHash: bytes.Repeat([]byte{0x54}, sha256.Size), CreatedAt: now, ExpiresAt: now.Add(7 * 24 * time.Hour)}
+	requestContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	mock.ExpectQuery(sqlPattern("SELECT 1 FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? AND credential_epoch = ? AND created_at = ? AND expires_at = ? AND totp_verified_at IS NULL LIMIT 1")).
+		WithArgs(attempt.TokenHash, int64(3), now, now.Add(7*24*time.Hour)).
+		WillReturnRows(sqlmock.NewRows([]string{"present"}).AddRow(1))
+	if err := repository.verifyEmailLoginSession(requestContext, attempt); err != nil {
+		t.Fatalf("verifyEmailLoginSession() error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryFindSessionAcceptsNullEmailLoginTOTP(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 16, 12, 14, 0, 0, time.UTC)
+	tokenHash := bytes.Repeat([]byte{0x55}, sha256.Size)
+	mock.ExpectQuery(sqlPattern("SELECT s.id, s.credential_epoch, s.expires_at, s.totp_verified_at, s.revoked_at, a.credential_epoch FROM site_sessions AS s JOIN admin_identity AS a ON a.id = s.admin_identity_id WHERE s.admin_identity_id = 1 AND s.token_hash = ? LIMIT 1")).
+		WithArgs(tokenHash).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "totp_verified_at", "revoked_at", "current_epoch"}).AddRow(9, 3, now.Add(time.Hour), nil, nil, 3))
+	session, err := repository.FindSession(context.Background(), tokenHash, now)
+	if err != nil || session.ID != 9 || session.CredentialEpoch != 3 || !session.ExpiresAt.Equal(now.Add(time.Hour)) || !session.TOTPVerifiedAt.IsZero() {
+		t.Fatalf("FindSession() = %#v, %v", session, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSQLRepositoryRecoveryRollsBackEpochTOTPCodeAndSessionChangesTogether(t *testing.T) {
 	database, mock, err := sqlmock.New()
 	if err != nil {
@@ -1040,6 +1148,21 @@ type memoryRepository struct {
 	handoffReserved map[int64][sha256.Size]byte
 	mailClaims      map[int64]chan struct{}
 	nextHandoffID   int64
+}
+
+type unavailableEmailSessionRepository struct{ *memoryRepository }
+
+func (unavailableEmailSessionRepository) CreateEmailLoginSession(context.Context, EmailLoginSessionAttempt) error {
+	return ErrUnavailable
+}
+
+type failedEmailSessionRepository struct {
+	*memoryRepository
+	err error
+}
+
+func (repository failedEmailSessionRepository) CreateEmailLoginSession(context.Context, EmailLoginSessionAttempt) error {
+	return repository.err
 }
 
 type synchronizedPrepareRepository struct {
