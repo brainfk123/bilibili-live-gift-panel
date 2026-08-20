@@ -48,14 +48,15 @@ func ValidateBilibiliVerificationURL(raw string) (canonical, qrKey string, ok bo
 	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Fragment != "" {
 		return "", "", false
 	}
+	currentMobilePath := parsed.Host == "account.bilibili.com" && parsed.Path == "/h5/account-h5/auth/scan-web"
 	allowedPath := (parsed.Host == "passport.bilibili.com" && parsed.Path == "/h5-app/passport/login/scan") ||
-		(parsed.Host == "account.bilibili.com" && parsed.Path == "/scan")
+		(parsed.Host == "account.bilibili.com" && parsed.Path == "/scan") || currentMobilePath
 	if !allowedPath {
 		return "", "", false
 	}
 	query := parsed.Query()
 	for key := range query {
-		if key != "qrcode_key" && key != "navhide" {
+		if key != "qrcode_key" && key != "navhide" && !(currentMobilePath && key == "callback") {
 			return "", "", false
 		}
 	}
@@ -65,6 +66,13 @@ func ValidateBilibiliVerificationURL(raw string) (canonical, qrKey string, ok bo
 	}
 	if navhide, present := query["navhide"]; present && (len(navhide) != 1 || navhide[0] != "1") {
 		return "", "", false
+	}
+	if currentMobilePath {
+		callback := query["callback"]
+		navhide := query["navhide"]
+		if len(callback) != 1 || callback[0] != "close" || len(navhide) != 1 || navhide[0] != "1" {
+			return "", "", false
+		}
 	}
 	return parsed.String(), keys[0], true
 }

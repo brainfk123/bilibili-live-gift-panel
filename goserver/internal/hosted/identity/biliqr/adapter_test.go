@@ -133,6 +133,22 @@ func TestAdapterBeginReturnsOnlyAllowlistedBilibiliVerificationURL(t *testing.T)
 	}
 }
 
+func TestAdapterBeginAcceptsCurrentBilibiliMobileVerificationURL(t *testing.T) {
+	const verificationURL = "https://account.bilibili.com/h5/account-h5/auth/scan-web?navhide=1&callback=close&qrcode_key=public-key"
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": verificationURL, "qrcode_key": "public-key"}})
+	}))
+	defer server.Close()
+	adapter, err := New(Config{Client: server.Client(), GenerateEndpoint: server.URL, PollEndpoint: server.URL, NavEndpoint: server.URL, EncodeQR: func(value string) (string, error) { return "qr", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := adapter.Begin(context.Background())
+	if err != nil || challenge.VerificationURL != verificationURL {
+		t.Fatalf("Begin() = %#v, %v", challenge, err)
+	}
+}
+
 func TestAdapterBeginRejectsUntrustedVerificationURL(t *testing.T) {
 	tests := []struct {
 		name string
@@ -146,6 +162,7 @@ func TestAdapterBeginRejectsUntrustedVerificationURL(t *testing.T) {
 		{name: "missing key", url: "https://passport.bilibili.com/h5-app/passport/login/scan"},
 		{name: "duplicate key", url: "https://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=one&qrcode_key=two"},
 		{name: "credential query", url: "https://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=key&SESSDATA=secret"},
+		{name: "unknown callback", url: "https://account.bilibili.com/h5/account-h5/auth/scan-web?navhide=1&callback=other&qrcode_key=key"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

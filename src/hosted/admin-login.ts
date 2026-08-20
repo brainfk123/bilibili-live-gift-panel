@@ -46,7 +46,13 @@ export function createAdminLoginFlow(api: AdminLoginAPI, render: (state: AdminLo
           return;
         }
       }
-      const created = await api.beginAdminProof();
+      let created: Challenge;
+      try {
+        created = await api.beginAdminProof();
+      } catch {
+        if (!disposed && current === generation) publish({ kind: 'service-unavailable' });
+        return;
+      }
       if (disposed || current !== generation) { await api.cancelAdminProof(created.challengeId); return; }
       challenge = created;
       publish({ kind: 'awaiting-bilibili', challenge: { ...created } });

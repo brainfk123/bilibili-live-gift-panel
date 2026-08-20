@@ -50,6 +50,14 @@ describe('progressive administrator login flow', () => {
     expect(client.beginAdminProof).not.toHaveBeenCalled();
   });
 
+  it('makes a failed Bilibili proof request retryable instead of leaving session recovery pending', async () => {
+    const client = api({ beginAdminProof: vi.fn(async () => { throw new HostedAPIError('temporarily_unavailable', 503); }) });
+    const states: string[] = [];
+    const flow = createAdminLoginFlow(client, (state) => states.push(state.kind));
+    await flow.start();
+    expect(states.at(-1)).toBe('service-unavailable');
+  });
+
   it('cancels its proof on disposal and compensates a late completed login', async () => {
     let finish!: () => void;
     const pending = new Promise<void>((resolve) => { finish = resolve; });

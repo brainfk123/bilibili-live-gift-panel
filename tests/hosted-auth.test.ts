@@ -58,6 +58,8 @@ describe('HostedAPI authentication contract', () => {
     await expect((await connect(verificationUrl)).beginLogin()).resolves.toEqual({
       challengeId: 'challenge', qrImage: 'qr', verificationUrl, expiresAt: '2030-01-01T00:00:00Z',
     });
+    const currentMobileUrl = 'https://account.bilibili.com/h5/account-h5/auth/scan-web?navhide=1&callback=close&qrcode_key=public-key';
+    await expect((await connect(currentMobileUrl)).beginLogin()).resolves.toMatchObject({ verificationUrl: currentMobileUrl });
     for (const invalid of [
       'http://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=key',
       'https://user@passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=key',
@@ -65,6 +67,7 @@ describe('HostedAPI authentication contract', () => {
       'https://example.test/h5-app/passport/login/scan?qrcode_key=key',
       'https://passport.bilibili.com/other?qrcode_key=key',
       'https://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=one&qrcode_key=two',
+      'https://account.bilibili.com/h5/account-h5/auth/scan-web?navhide=1&callback=other&qrcode_key=key',
     ]) await expect((await connect(invalid)).beginLogin()).rejects.toMatchObject({ code: 'invalid_response' });
   });
 

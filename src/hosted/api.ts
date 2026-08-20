@@ -278,14 +278,19 @@ function validBilibiliVerificationURL(value: unknown): value is string {
   let parsed: URL;
   try { parsed = new URL(value); } catch { return false; }
   if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '' || parsed.port !== '' || parsed.hash !== '') return false;
+  const currentMobilePath = parsed.hostname === 'account.bilibili.com' && parsed.pathname === '/h5/account-h5/auth/scan-web';
   const allowedPath = (parsed.hostname === 'passport.bilibili.com' && parsed.pathname === '/h5-app/passport/login/scan')
-    || (parsed.hostname === 'account.bilibili.com' && parsed.pathname === '/scan');
+    || (parsed.hostname === 'account.bilibili.com' && parsed.pathname === '/scan') || currentMobilePath;
   if (!allowedPath) return false;
   const keys = [...parsed.searchParams.keys()];
-  if (keys.some((key) => key !== 'qrcode_key' && key !== 'navhide')) return false;
+  if (keys.some((key) => key !== 'qrcode_key' && key !== 'navhide' && !(currentMobilePath && key === 'callback'))) return false;
   const qrKeys = parsed.searchParams.getAll('qrcode_key');
   if (qrKeys.length !== 1 || qrKeys[0].length === 0 || qrKeys[0].length > 512) return false;
   const navhide = parsed.searchParams.getAll('navhide');
+  if (currentMobilePath) {
+    const callback = parsed.searchParams.getAll('callback');
+    return navhide.length === 1 && navhide[0] === '1' && callback.length === 1 && callback[0] === 'close';
+  }
   return navhide.length === 0 || (navhide.length === 1 && navhide[0] === '1');
 }
 
