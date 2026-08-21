@@ -137,7 +137,7 @@ func run() error {
 		}
 		limiter := newLocalLimiter(time.Now)
 		var runtimeOwner atomic.Pointer[hostedruntime.Manager]
-		identityService, err := identity.NewService(identity.NewRepository(store.Database()), keys, verifier, identity.ServiceOptions{
+		identityService, err := identity.NewService(identity.NewRepository(store.Database(), adminService), keys, verifier, identity.ServiceOptions{
 			OnAccountDisabled: func(accountID int64) {
 				if manager := runtimeOwner.Load(); manager != nil {
 					manager.AccountDisabled(accountID)
@@ -157,7 +157,7 @@ func run() error {
 		if err != nil {
 			return errors.New("configure hosted identity HTTP")
 		}
-		invitationService, err := invitation.NewService(store.Database(), keys, identityService, invitation.ServiceOptions{})
+		invitationService, err := invitation.NewService(store.Database(), keys, identityService, invitation.ServiceOptions{Administrator: adminService})
 		if err != nil {
 			return errors.New("configure hosted invitations")
 		}
@@ -190,7 +190,7 @@ func run() error {
 		if err != nil {
 			return errors.New("configure Bilibili production gateway")
 		}
-		biliService, err := biligateway.NewService(verifier, biliDependencies.Credentials, adminService)
+		biliService, err := biligateway.NewService(verifier, biliDependencies.Credentials, adminService, biligateway.ServiceOptions{})
 		if err != nil {
 			return errors.New("configure Bilibili service credential")
 		}
@@ -397,7 +397,7 @@ func newProductionBiliGateway(database *sql.DB, keys security.Keyring, newUpstre
 	if upstream == nil {
 		return productionBiliGateway{}, errors.New("construct Bilibili HTTP upstream")
 	}
-	credentials := biligateway.NewCredentialStore(database, keys, time.Now)
+	credentials := biligateway.NewCredentialStore(database, keys)
 	gateway := biligateway.NewControlledGateway(upstream, credentials, biligateway.GatewayOptions{Now: time.Now})
 	if gateway == nil {
 		return productionBiliGateway{}, errors.New("construct controlled Bilibili gateway")

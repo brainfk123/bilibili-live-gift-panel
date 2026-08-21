@@ -45,18 +45,25 @@ type CredentialStatus struct {
 type CredentialStore struct {
 	database *sql.DB
 	keys     security.Keyring
-	now      func() time.Time
 }
 
-func NewCredentialStore(database *sql.DB, keys security.Keyring, now func() time.Time) *CredentialStore {
-	if now == nil {
-		now = time.Now
+func NewCredentialStore(database *sql.DB, keys security.Keyring) *CredentialStore {
+	return &CredentialStore{database: database, keys: keys}
+}
+
+func (store *CredentialStore) BeginTx(ctx context.Context, options *sql.TxOptions) (*sql.Tx, error) {
+	if store == nil || store.database == nil {
+		return nil, ErrCredentialUnavailable
 	}
-	return &CredentialStore{database: database, keys: keys, now: now}
+	transaction, err := store.database.BeginTx(ctx, options)
+	if err != nil {
+		return nil, ErrCredentialUnavailable
+	}
+	return transaction, nil
 }
 
-func (store *CredentialStore) Replace(ctx context.Context, cookie []byte) (Credential, error) {
-	if store == nil || store.database == nil || len(cookie) == 0 {
+func (store *CredentialStore) Replace(ctx context.Context, transaction *sql.Tx, cookie []byte, now time.Time) (Credential, error) {
+	if store == nil || store.database == nil || transaction == nil || len(cookie) == 0 || now.IsZero() {
 		return Credential{}, ErrCredentialUnavailable
 	}
 	ciphertext, err := store.keys.Seal(credentialPurpose, cookie)
@@ -64,14 +71,9 @@ func (store *CredentialStore) Replace(ctx context.Context, cookie []byte) (Crede
 		return Credential{}, ErrCredentialUnavailable
 	}
 	defer clear(ciphertext)
-	now := store.now().UTC()
-	tx, err := store.database.BeginTx(ctx, nil)
-	if err != nil {
-		return Credential{}, ErrCredentialUnavailable
-	}
-	defer tx.Rollback()
+	now = now.UTC()
 	var priorID, priorVersion int64
-	err = tx.QueryRowContext(ctx, activeCredentialQuery).Scan(&priorID, &priorVersion)
+	err = transaction.QueryRowContext(ctx, activeCredentialQuery).Scan(&priorID, &priorVersion)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Credential{}, ErrCredentialUnavailable
 	}
@@ -80,7 +82,7 @@ func (store *CredentialStore) Replace(ctx context.Context, cookie []byte) (Crede
 		version = 1
 	}
 	if priorID != 0 {
-		result, execErr := tx.ExecContext(ctx, revokeCredentialQuery, now, priorID)
+		result, execErr := transaction.ExecContext(ctx, revokeCredentialQuery, now, priorID)
 		if execErr != nil {
 			return Credential{}, ErrCredentialUnavailable
 		}
@@ -89,19 +91,16 @@ func (store *CredentialStore) Replace(ctx context.Context, cookie []byte) (Crede
 			return Credential{}, ErrCredentialUnavailable
 		}
 	}
-	if _, err := tx.ExecContext(ctx, insertCredentialQuery, version, ciphertext, now); err != nil {
+	if _, err := transaction.ExecContext(ctx, insertCredentialQuery, version, ciphertext, now); err != nil {
 		return Credential{}, ErrCredentialUnavailable
 	}
 	audit := []byte(`{"credentialVersion":` + integerText(version) + `}`)
 	defer clear(audit)
-	if _, err := tx.ExecContext(ctx, insertCredentialAuditQuery, audit, now); err != nil {
-		return Credential{}, ErrCredentialUnavailable
-	}
-	if err := tx.Commit(); err != nil {
+	if _, err := transaction.ExecContext(ctx, insertCredentialAuditQuery, audit, now); err != nil {
 		return Credential{}, ErrCredentialUnavailable
 	}
 	// Replace never returns plaintext. The caller already owns the callback
-	// buffer and biliqr destroys it once this transaction succeeds.
+	// buffer and biliqr destroys it once the caller commits.
 	return Credential{Version: version, CreatedAt: now}, nil
 }
 

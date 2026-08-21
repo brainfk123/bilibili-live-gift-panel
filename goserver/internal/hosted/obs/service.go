@@ -16,7 +16,7 @@ import (
 	"regexp"
 	"time"
 
-	"bilibili-live-gift-panel/internal/hosted/adminidentity"
+	"bilibili-live-gift-panel/internal/hosted/security"
 )
 
 const shortSessionTTL = 12 * time.Hour
@@ -32,8 +32,7 @@ var (
 var publicIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
 type administratorAuthorizer interface {
-	RequireSession(context.Context, string) error
-	RequireRecentTOTP(context.Context, string) error
+	security.SensitiveAuthorizer
 }
 
 type ServiceOptions struct {
@@ -85,14 +84,15 @@ func (service *Service) Issue(ctx context.Context, administratorToken string, ac
 	if service == nil || ctx == nil || administratorToken == "" || accountID <= 0 {
 		return IssuedCredential{}, ErrInvalidInput
 	}
-	if err := service.admin.RequireSession(ctx, administratorToken); err != nil {
-		return IssuedCredential{}, ErrAuthenticationFailed
+	transaction, err := service.database.BeginTx(ctx, nil)
+	if err != nil {
+		return IssuedCredential{}, ErrUnavailable
 	}
-	if err := service.admin.RequireRecentTOTP(ctx, administratorToken); err != nil {
-		if errors.Is(err, adminidentity.ErrRecentTOTPRequired) {
-			return IssuedCredential{}, ErrRecentTOTPRequired
-		}
-		return IssuedCredential{}, ErrAuthenticationFailed
+	defer transaction.Rollback()
+	authorizedAt := service.now().UTC()
+	sensitiveSession, err := service.admin.AuthorizeRecentTOTP(ctx, transaction, administratorToken, authorizedAt)
+	if err != nil {
+		return IssuedCredential{}, mapAdministratorError(err)
 	}
 	publicBytes, publicID, err := service.randomToken()
 	if err != nil {
@@ -105,12 +105,7 @@ func (service *Service) Issue(ctx context.Context, administratorToken string, ac
 	}
 	defer wipe(longBytes)
 	tokenHash := sha256.Sum256([]byte(longToken))
-	now := service.now().UTC()
-	transaction, err := service.database.BeginTx(ctx, nil)
-	if err != nil {
-		return IssuedCredential{}, ErrUnavailable
-	}
-	defer transaction.Rollback()
+	now := authorizedAt
 	var epoch int64
 	var disabledAt sql.NullTime
 	if err := transaction.QueryRowContext(ctx, "SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE", accountID).Scan(&epoch, &disabledAt); err != nil {
@@ -135,10 +130,31 @@ func (service *Service) Issue(ctx context.Context, administratorToken string, ac
 	if err != nil || !oneRow(result) {
 		return IssuedCredential{}, ErrUnavailable
 	}
+	result, err = transaction.ExecContext(ctx,
+		"INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)",
+		"obs_credential_reset", int64(1), accountID, []byte("{}"), now,
+	)
+	if err != nil || !oneRow(result) {
+		return IssuedCredential{}, ErrUnavailable
+	}
+	if err := service.admin.RenewRecentTOTP(ctx, transaction, sensitiveSession, service.now().UTC()); err != nil {
+		return IssuedCredential{}, mapAdministratorError(err)
+	}
 	if err := transaction.Commit(); err != nil {
 		return IssuedCredential{}, ErrUnavailable
 	}
 	return IssuedCredential{PublicID: publicID, URL: service.publicOrigin + "/obs/" + publicID + "#token=" + url.QueryEscape(longToken)}, nil
+}
+
+func mapAdministratorError(err error) error {
+	switch {
+	case errors.Is(err, security.ErrSensitiveRecentTOTPRequired):
+		return ErrRecentTOTPRequired
+	case errors.Is(err, security.ErrSensitiveAuthenticationFailed):
+		return ErrAuthenticationFailed
+	default:
+		return ErrUnavailable
+	}
 }
 
 func (service *Service) Exchange(ctx context.Context, publicID, longToken string) (ShortSession, error) {

@@ -431,7 +431,7 @@ func TestComposeHostedHTTPKeepsWrongBiliServiceMethodsOutOfBroadAdmin(t *testing
 }
 
 func TestNewProductionBiliGatewayUsesCanonicalEndpointsAndIsRetainedByHTTP(t *testing.T) {
-	database, _, err := sqlmock.New()
+	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,6 +450,18 @@ func TestNewProductionBiliGatewayUsesCanonicalEndpointsAndIsRetainedByHTTP(t *te
 	}
 	if dependencies.Credentials == nil || dependencies.Gateway == nil {
 		t.Fatalf("production Bili dependencies = %#v", dependencies)
+	}
+	mock.ExpectBegin()
+	transaction, err := dependencies.Credentials.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("production credential transaction: %v", err)
+	}
+	mock.ExpectRollback()
+	if err := transaction.Rollback(); err != nil {
+		t.Fatalf("rollback production credential transaction: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("production credential transaction expectations: %v", err)
 	}
 	if captured.RoomInfoEndpoint != "https://api.live.bilibili.com/room/v1/Room/room_init" ||
 		captured.GiftCatalogEndpoint != "https://api.live.bilibili.com/xlive/web-room/v1/giftPanel/giftConfig" ||

@@ -13,9 +13,125 @@ import (
 	"testing"
 	"time"
 
+	"bilibili-live-gift-panel/internal/hosted/security"
+
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
 )
+
+func TestSensitiveDisableAccountRenewsOnlyAfterAuditInSameTransaction(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authorizedAt := time.Date(2026, 8, 21, 13, 0, 0, 0, time.UTC)
+	completedAt := authorizedAt.Add(2 * time.Second)
+	clock := &identityTimeSequence{values: []time.Time{authorizedAt, completedAt}}
+	authorizer := &identitySensitiveAuthorizer{writeMarkers: true}
+	disableHookCalls := 0
+	service, err := NewService(NewRepository(database, authorizer), fixedServiceKeyring(t), &memoryVerifier{}, ServiceOptions{
+		Now: clock.Now, OnAccountDisabled: func(int64) { disableHookCalls++ },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectExec("sensitive_authorize").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
+		WithArgs(int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(6), nil))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE streamer_accounts SET disabled_at = ?, credential_epoch = credential_epoch + 1 WHERE id = ? AND disabled_at IS NULL")).
+		WithArgs(authorizedAt, int64(42)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE site_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE account_id = ?")).
+		WithArgs(authorizedAt, int64(42)).WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)")).
+		WithArgs("streamer_account_disabled", int64(1), int64(42), sqlmock.AnyArg(), authorizedAt).
+		WillReturnResult(sqlmock.NewResult(10, 1))
+	mock.ExpectExec("sensitive_renew").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	result, err := service.DisableAccount(context.Background(), "administrator-session", 42, "policy violation")
+	if err != nil {
+		t.Fatalf("DisableAccount() error = %v", err)
+	}
+	if result.AccountID != 42 || result.Status != AccountStatusDisabled || disableHookCalls != 1 {
+		t.Fatalf("DisableAccount() = %#v, hook calls = %d", result, disableHookCalls)
+	}
+	if authorizer.authorizeCalls != 1 || authorizer.renewCalls != 1 || authorizer.authorizeTx != authorizer.renewTx {
+		t.Fatalf("sensitive calls authorize=%d renew=%d sameTx=%t", authorizer.authorizeCalls, authorizer.renewCalls, authorizer.authorizeTx == authorizer.renewTx)
+	}
+	if !authorizer.authorizedAt.Equal(authorizedAt) || !authorizer.renewedAt.Equal(completedAt) {
+		t.Fatalf("sensitive timestamps authorize=%s renew=%s", authorizer.authorizedAt, authorizer.renewedAt)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSensitiveDisableRenewalFailureRollsBackDomainAuditAndHook(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 21, 13, 10, 0, 0, time.UTC)
+	authorizer := &identitySensitiveAuthorizer{writeMarkers: true, renewErr: errors.New("private renewal failure")}
+	disableHookCalls := 0
+	service, err := NewService(NewRepository(database, authorizer), fixedServiceKeyring(t), &memoryVerifier{}, ServiceOptions{
+		Now: func() time.Time { return now }, OnAccountDisabled: func(int64) { disableHookCalls++ },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectExec("sensitive_authorize").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(6), nil))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE streamer_accounts SET disabled_at = ?, credential_epoch = credential_epoch + 1 WHERE id = ? AND disabled_at IS NULL")).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE site_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE account_id = ?")).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)")).
+		WillReturnResult(sqlmock.NewResult(10, 1))
+	mock.ExpectExec("sensitive_renew").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectRollback()
+
+	if _, err := service.DisableAccount(context.Background(), "administrator-session", 42, "policy violation"); !errors.Is(err, ErrRepositoryUnavailable) {
+		t.Fatalf("DisableAccount() error = %v, want ErrRepositoryUnavailable", err)
+	}
+	if disableHookCalls != 0 {
+		t.Fatalf("rollback invoked disable hook %d times", disableHookCalls)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSensitiveDisableMapsRecentTOTPBeforeDomainWork(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 21, 13, 20, 0, 0, time.UTC)
+	authorizer := &identitySensitiveAuthorizer{authorizeErr: security.ErrSensitiveRecentTOTPRequired}
+	service, err := NewService(NewRepository(database, authorizer), fixedServiceKeyring(t), &memoryVerifier{}, ServiceOptions{Now: nowFunc(now)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+
+	if _, err := service.DisableAccount(context.Background(), "administrator-session", 42, "policy violation"); !errors.Is(err, ErrRecentTOTPRequired) {
+		t.Fatalf("DisableAccount() error = %v, want ErrRecentTOTPRequired", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestDisableAccountAuthorizesRecentAdministratorAndCommitsAtomicChanges(t *testing.T) {
 	now := time.Date(2026, 8, 16, 14, 0, 0, 0, time.UTC)
@@ -25,8 +141,9 @@ func TestDisableAccountAuthorizesRecentAdministratorAndCommitsAtomicChanges(t *t
 	}
 	defer database.Close()
 	keys := fixedServiceKeyring(t)
+	authorizer := &identitySensitiveAuthorizer{}
 	disableHookCalls := 0
-	service, err := NewService(NewRepository(database), keys, &memoryVerifier{}, ServiceOptions{
+	service, err := NewService(NewRepository(database, authorizer), keys, &memoryVerifier{}, ServiceOptions{
 		Now: nowFunc(now),
 		OnAccountDisabled: func(accountID int64) {
 			disableHookCalls++
@@ -41,13 +158,7 @@ func TestDisableAccountAuthorizesRecentAdministratorAndCommitsAtomicChanges(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokenHash, err := keys.HashToken("admin_session", []byte("administrator-session"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	mock.ExpectBegin()
-	expectRecentAdministrator(mock, tokenHash, now, now.Add(-time.Minute))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
 		WithArgs(int64(42)).
 		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(7), nil))
@@ -79,23 +190,24 @@ func TestDisableAccountAuthorizesRecentAdministratorAndCommitsAtomicChanges(t *t
 	}
 }
 
-func TestEnableAccountClearsDisabledStateWithoutRestoringCredentials(t *testing.T) {
-	now := time.Date(2026, 8, 16, 14, 10, 0, 0, time.UTC)
-	disabledAt := now.Add(-time.Hour)
+func TestSensitiveEnableAccountRenewsAfterAuditWithoutRestoringCredentials(t *testing.T) {
+	authorizedAt := time.Date(2026, 8, 16, 14, 10, 0, 0, time.UTC)
+	completedAt := authorizedAt.Add(2 * time.Second)
+	disabledAt := authorizedAt.Add(-time.Hour)
+	clock := &identityTimeSequence{values: []time.Time{authorizedAt, completedAt}}
 	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer database.Close()
 	keys := fixedServiceKeyring(t)
-	service, err := NewService(NewRepository(database), keys, &memoryVerifier{}, ServiceOptions{Now: nowFunc(now)})
+	authorizer := &identitySensitiveAuthorizer{writeMarkers: true}
+	service, err := NewService(NewRepository(database, authorizer), keys, &memoryVerifier{}, ServiceOptions{Now: clock.Now})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokenHash, _ := keys.HashToken("admin_session", []byte("administrator-session"))
-
 	mock.ExpectBegin()
-	expectRecentAdministrator(mock, tokenHash, now, now.Add(-2*time.Minute))
+	mock.ExpectExec("sensitive_authorize").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
 		WithArgs(int64(43)).
 		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(8), disabledAt))
@@ -103,8 +215,9 @@ func TestEnableAccountClearsDisabledStateWithoutRestoringCredentials(t *testing.
 		WithArgs(int64(43)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)")).
-		WithArgs("streamer_account_enabled", int64(1), int64(43), auditJSONArgument{wantReason: "appeal accepted"}, now).
+		WithArgs("streamer_account_enabled", int64(1), int64(43), auditJSONArgument{wantReason: "appeal accepted"}, authorizedAt).
 		WillReturnResult(sqlmock.NewResult(82, 1))
+	mock.ExpectExec("sensitive_renew").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	result, err := service.EnableAccount(context.Background(), "administrator-session", 43, " appeal accepted ")
@@ -114,25 +227,34 @@ func TestEnableAccountClearsDisabledStateWithoutRestoringCredentials(t *testing.
 	if result.AccountID != 43 || result.Status != AccountStatusActive {
 		t.Fatalf("EnableAccount() = %#v", result)
 	}
+	if authorizer.authorizeCalls != 1 || authorizer.renewCalls != 1 || authorizer.authorizeTx != authorizer.renewTx {
+		t.Fatalf("sensitive calls authorize=%d renew=%d sameTx=%t", authorizer.authorizeCalls, authorizer.renewCalls, authorizer.authorizeTx == authorizer.renewTx)
+	}
+	if !authorizer.authorizedAt.Equal(authorizedAt) || !authorizer.renewedAt.Equal(completedAt) {
+		t.Fatalf("sensitive timestamps authorize=%s renew=%s", authorizer.authorizedAt, authorizer.renewedAt)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestRebindVerifiedUIDForgetsProofAndCommitsEncryptedBindingAtomically(t *testing.T) {
-	now := time.Date(2026, 8, 16, 14, 20, 0, 0, time.UTC)
+func TestSensitiveRebindVerifiedUIDRenewsAfterAuditAndCommitsEncryptedBinding(t *testing.T) {
+	proofCheckedAt := time.Date(2026, 8, 16, 14, 20, 0, 0, time.UTC)
+	authorizedAt := proofCheckedAt.Add(time.Second)
+	completedAt := authorizedAt.Add(time.Second)
+	clock := &identityTimeSequence{values: []time.Time{proofCheckedAt, authorizedAt, completedAt}}
 	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer database.Close()
 	keys := fixedServiceKeyring(t)
-	verifier := &memoryVerifier{verifications: []Verification{{UID: "987654321", CompletedAt: now}}}
-	service, err := NewService(NewRepository(database), keys, verifier, ServiceOptions{Now: nowFunc(now), ChallengeTTL: 5 * time.Minute})
+	verifier := &memoryVerifier{verifications: []Verification{{UID: "987654321", CompletedAt: proofCheckedAt}}}
+	authorizer := &identitySensitiveAuthorizer{writeMarkers: true}
+	service, err := NewService(NewRepository(database, authorizer), keys, verifier, ServiceOptions{Now: clock.Now, ChallengeTTL: 5 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokenHash, _ := keys.HashToken("admin_session", []byte("administrator-session"))
 	oldLookup := bytes.Repeat([]byte{0x44}, sha256.Size)
 	newLookup, err := keys.Lookup("bili_uid", []byte("987654321"))
 	if err != nil {
@@ -140,10 +262,7 @@ func TestRebindVerifiedUIDForgetsProofAndCommitsEncryptedBindingAtomically(t *te
 	}
 
 	mock.ExpectBegin()
-	expectRecentAdministrator(mock, tokenHash, now, now.Add(-time.Minute))
-	mock.ExpectCommit()
-	mock.ExpectBegin()
-	expectRecentAdministrator(mock, tokenHash, now, now.Add(-time.Minute))
+	mock.ExpectExec("sensitive_authorize").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
 		WithArgs(int64(44)).
 		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(9), nil))
@@ -154,23 +273,24 @@ func TestRebindVerifiedUIDForgetsProofAndCommitsEncryptedBindingAtomically(t *te
 		WithArgs(newLookup).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE bili_uid_bindings SET unbound_at = ? WHERE account_id = ? AND unbound_at IS NULL")).
-		WithArgs(now, int64(44)).
+		WithArgs(authorizedAt, int64(44)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO bili_uid_bindings (account_id, uid_ciphertext, uid_lookup, bound_at) VALUES (?, ?, ?, ?)")).
-		WithArgs(int64(44), encryptedUIDArgument{plaintext: "987654321"}, newLookup, now).
+		WithArgs(int64(44), encryptedUIDArgument{plaintext: "987654321"}, newLookup, authorizedAt).
 		WillReturnResult(sqlmock.NewResult(92, 1))
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE streamer_accounts SET credential_epoch = credential_epoch + 1 WHERE id = ?")).
 		WithArgs(int64(44)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE site_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE account_id = ?")).
-		WithArgs(now, int64(44)).
+		WithArgs(authorizedAt, int64(44)).
 		WillReturnResult(sqlmock.NewResult(0, 2))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)")).
 		WithArgs("streamer_account_uid_rebound", int64(1), int64(44), auditJSONArgument{
 			wantReason: "verified ownership exception", wantOldLookup: oldLookup, wantNewLookup: newLookup,
 			forbidden: []string{"987654321", "administrator-session"},
-		}, now).
+		}, authorizedAt).
 		WillReturnResult(sqlmock.NewResult(93, 1))
+	mock.ExpectExec("sensitive_renew").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	result, err := service.RebindVerifiedUID(context.Background(), "administrator-session", 44, "rebind-proof", " verified ownership exception ")
@@ -179,6 +299,12 @@ func TestRebindVerifiedUIDForgetsProofAndCommitsEncryptedBindingAtomically(t *te
 	}
 	if result.AccountID != 44 || result.Status != AccountStatusActive {
 		t.Fatalf("RebindVerifiedUID() = %#v", result)
+	}
+	if authorizer.authorizeCalls != 1 || authorizer.renewCalls != 1 || authorizer.authorizeTx != authorizer.renewTx {
+		t.Fatalf("sensitive calls authorize=%d renew=%d sameTx=%t", authorizer.authorizeCalls, authorizer.renewCalls, authorizer.authorizeTx == authorizer.renewTx)
+	}
+	if !authorizer.authorizedAt.Equal(authorizedAt) || !authorizer.renewedAt.Equal(completedAt) {
+		t.Fatalf("sensitive timestamps authorize=%s renew=%s", authorizer.authorizedAt, authorizer.renewedAt)
 	}
 	assertForgottenExactly(t, verifier, "rebind-proof")
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -195,20 +321,11 @@ func TestRebindRejectsNonAdministratorBeforeConsumingBilibiliProof(t *testing.T)
 	defer database.Close()
 	keys := fixedServiceKeyring(t)
 	verifier := &memoryVerifier{verifications: []Verification{{UID: "987654321", CompletedAt: now}}}
-	service, err := NewService(NewRepository(database), keys, verifier, ServiceOptions{Now: nowFunc(now)})
+	authorizer := &identitySensitiveAuthorizer{requireErr: security.ErrSensitiveAuthenticationFailed}
+	service, err := NewService(NewRepository(database, authorizer), keys, verifier, ServiceOptions{Now: nowFunc(now)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokenHash, _ := keys.HashToken("admin_session", []byte("streamer-or-invalid-session"))
-
-	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
-		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
-		WithArgs(tokenHash).
-		WillReturnError(sql.ErrNoRows)
-	mock.ExpectRollback()
-
 	_, err = service.RebindVerifiedUID(context.Background(), "streamer-or-invalid-session", 44, "victim-proof", "support exception")
 	if !errors.Is(err, ErrAuthenticationFailed) {
 		t.Fatalf("RebindVerifiedUID() error = %v", err)
@@ -218,69 +335,6 @@ func TestRebindRejectsNonAdministratorBeforeConsumingBilibiliProof(t *testing.T)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestAdministratorAuthorizationUsesPersistedRecentTOTPBoundaries(t *testing.T) {
-	now := time.Date(2026, 8, 16, 14, 30, 0, 0, time.UTC)
-	revokedAt := now.Add(-time.Minute)
-	tests := []struct {
-		name         string
-		expiresAt    time.Time
-		revokedAt    any
-		verifiedAt   any
-		sessionEpoch int64
-		adminEpoch   int64
-		sessionError error
-		wantError    error
-	}{
-		{name: "exactly five minutes is recent", expiresAt: now.Add(time.Hour), verifiedAt: now.Add(-5 * time.Minute), sessionEpoch: 4, adminEpoch: 4},
-		{name: "future skew boundary accepted", expiresAt: now.Add(time.Hour), verifiedAt: now.Add(30 * time.Second), sessionEpoch: 4, adminEpoch: 4},
-		{name: "older than five minutes", expiresAt: now.Add(time.Hour), verifiedAt: now.Add(-5*time.Minute - time.Nanosecond), sessionEpoch: 4, adminEpoch: 4, wantError: ErrRecentTOTPRequired},
-		{name: "future beyond skew", expiresAt: now.Add(time.Hour), verifiedAt: now.Add(30*time.Second + time.Nanosecond), sessionEpoch: 4, adminEpoch: 4, wantError: ErrRecentTOTPRequired},
-		{name: "missing recent totp", expiresAt: now.Add(time.Hour), sessionEpoch: 4, adminEpoch: 4, wantError: ErrRecentTOTPRequired},
-		{name: "revoked admin session", expiresAt: now.Add(time.Hour), revokedAt: revokedAt, verifiedAt: now, sessionEpoch: 4, adminEpoch: 4, wantError: ErrAuthenticationFailed},
-		{name: "expired admin session", expiresAt: now, verifiedAt: now, sessionEpoch: 4, adminEpoch: 4, wantError: ErrAuthenticationFailed},
-		{name: "stale admin epoch", expiresAt: now.Add(time.Hour), verifiedAt: now, sessionEpoch: 3, adminEpoch: 4, wantError: ErrAuthenticationFailed},
-		{name: "streamer or unknown session", adminEpoch: 4, sessionError: sql.ErrNoRows, wantError: ErrAuthenticationFailed},
-		{name: "second query database failure rolls back generically", adminEpoch: 4, sessionError: errors.New("private administrator database detail"), wantError: ErrRepositoryUnavailable},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			database, mock, err := sqlmock.New()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer database.Close()
-			repository := NewRepository(database).(*sqlRepository)
-			tokenHash := bytes.Repeat([]byte{0x51}, sha256.Size)
-			mock.ExpectBegin()
-			mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
-				WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(test.adminEpoch))
-			expectation := mock.ExpectQuery(regexp.QuoteMeta("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).WithArgs(tokenHash)
-			if test.sessionError != nil {
-				expectation.WillReturnError(test.sessionError)
-			} else {
-				expectation.WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at", "totp_verified_at"}).
-					AddRow(int64(9), test.sessionEpoch, test.expiresAt, test.revokedAt, test.verifiedAt))
-			}
-			if test.wantError == nil {
-				mock.ExpectCommit()
-			} else {
-				mock.ExpectRollback()
-			}
-
-			err = repository.authorizeAccountAdministrator(context.Background(), tokenHash, now)
-			if !errors.Is(err, test.wantError) {
-				t.Fatalf("authorizeAccountAdministrator() error = %v, want %v", err, test.wantError)
-			}
-			if err != nil && strings.Contains(err.Error(), "private") {
-				t.Fatalf("authorization error leaked database text: %v", err)
-			}
-			if err := mock.ExpectationsWereMet(); err != nil {
-				t.Fatal(err)
-			}
-		})
 	}
 }
 
@@ -294,14 +348,13 @@ func TestDisableAccountRollsBackStatusEpochWhenRevokeOrAuditFails(t *testing.T) 
 			}
 			defer database.Close()
 			keys := fixedServiceKeyring(t)
+			authorizer := &identitySensitiveAuthorizer{}
 			disableHookCalls := 0
-			service, err := NewService(NewRepository(database), keys, &memoryVerifier{}, ServiceOptions{Now: nowFunc(now), OnAccountDisabled: func(int64) { disableHookCalls++ }})
+			service, err := NewService(NewRepository(database, authorizer), keys, &memoryVerifier{}, ServiceOptions{Now: nowFunc(now), OnAccountDisabled: func(int64) { disableHookCalls++ }})
 			if err != nil {
 				t.Fatal(err)
 			}
-			tokenHash, _ := keys.HashToken("admin_session", []byte("administrator-session"))
 			mock.ExpectBegin()
-			expectRecentAdministrator(mock, tokenHash, now, now.Add(-time.Minute))
 			mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
 				WithArgs(int64(52)).WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(2), nil))
 			mock.ExpectExec(regexp.QuoteMeta("UPDATE streamer_accounts SET disabled_at = ?, credential_epoch = credential_epoch + 1 WHERE id = ? AND disabled_at IS NULL")).
@@ -339,13 +392,12 @@ func TestEnableAccountRollsBackWhenAuditWriteFails(t *testing.T) {
 	}
 	defer database.Close()
 	keys := fixedServiceKeyring(t)
-	service, err := NewService(NewRepository(database), keys, &memoryVerifier{}, ServiceOptions{Now: nowFunc(now)})
+	authorizer := &identitySensitiveAuthorizer{}
+	service, err := NewService(NewRepository(database, authorizer), keys, &memoryVerifier{}, ServiceOptions{Now: nowFunc(now)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokenHash, _ := keys.HashToken("admin_session", []byte("administrator-session"))
 	mock.ExpectBegin()
-	expectRecentAdministrator(mock, tokenHash, now, now.Add(-time.Minute))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).WithArgs(int64(53)).
 		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(4), now.Add(-time.Hour)))
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE streamer_accounts SET disabled_at = NULL WHERE id = ? AND disabled_at IS NOT NULL")).WithArgs(int64(53)).
@@ -373,10 +425,9 @@ func TestAccountMutationsClassifyInvalidCredentialEpochAsRepositoryUnavailable(t
 				t.Fatal(err)
 			}
 			defer database.Close()
-			repository := NewRepository(database).(*sqlRepository)
-			tokenHash := bytes.Repeat([]byte{0x54}, sha256.Size)
+			authorizer := &identitySensitiveAuthorizer{}
+			repository := NewRepository(database, authorizer).(*sqlRepository)
 			mock.ExpectBegin()
-			expectRecentAdministrator(mock, tokenHash, now, now.Add(-time.Minute))
 			disabledAt := any(nil)
 			if operation == "enable" {
 				disabledAt = now.Add(-time.Hour)
@@ -388,13 +439,13 @@ func TestAccountMutationsClassifyInvalidCredentialEpochAsRepositoryUnavailable(t
 
 			switch operation {
 			case "disable":
-				_, err = repository.disableAccount(context.Background(), tokenHash, 54, "security", now)
+				_, err = repository.disableAccount(context.Background(), "administrator-session", 54, "security", nowFunc(now))
 			case "enable":
-				_, err = repository.enableAccount(context.Background(), tokenHash, 54, "appeal", now)
+				_, err = repository.enableAccount(context.Background(), "administrator-session", 54, "appeal", nowFunc(now))
 			case "rebind":
-				_, err = repository.rebindAccount(context.Background(), tokenHash, 54, EncryptedUID{
+				_, err = repository.rebindAccount(context.Background(), "administrator-session", 54, EncryptedUID{
 					Ciphertext: []byte("encrypted-new-uid"), Lookup: bytes.Repeat([]byte{0x55}, sha256.Size),
-				}, "support", now)
+				}, "support", nowFunc(now))
 			}
 			if !errors.Is(err, ErrRepositoryUnavailable) {
 				t.Fatalf("%s invalid credential epoch error = %v", operation, err)
@@ -444,10 +495,9 @@ func TestRebindRejectsSameOrPreviouslyBoundUIDAndMapsDuplicateInsertGenerically(
 				t.Fatal(err)
 			}
 			defer database.Close()
-			repository := NewRepository(database).(*sqlRepository)
-			tokenHash := bytes.Repeat([]byte{0x60}, sha256.Size)
+			authorizer := &identitySensitiveAuthorizer{}
+			repository := NewRepository(database, authorizer).(*sqlRepository)
 			mock.ExpectBegin()
-			expectRecentAdministrator(mock, tokenHash, now, now.Add(-time.Minute))
 			mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).WithArgs(int64(61)).
 				WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(3), nil))
 			mock.ExpectQuery(regexp.QuoteMeta("SELECT uid_lookup FROM bili_uid_bindings WHERE account_id = ? AND unbound_at IS NULL FOR UPDATE")).WithArgs(int64(61)).
@@ -467,7 +517,7 @@ func TestRebindRejectsSameOrPreviouslyBoundUIDAndMapsDuplicateInsertGenerically(
 			}
 			mock.ExpectRollback()
 
-			_, err = repository.rebindAccount(context.Background(), tokenHash, 61, EncryptedUID{Ciphertext: []byte("encrypted-new-uid"), Lookup: newLookup}, "exception", now)
+			_, err = repository.rebindAccount(context.Background(), "administrator-session", 61, EncryptedUID{Ciphertext: []byte("encrypted-new-uid"), Lookup: newLookup}, "exception", nowFunc(now))
 			if !errors.Is(err, ErrAccountManagementFailed) || strings.Contains(err.Error(), "987654321") || strings.Contains(err.Error(), "Duplicate") {
 				t.Fatalf("rebindAccount() error = %v", err)
 			}
@@ -489,10 +539,9 @@ func TestRebindRollsBackBindingEpochWhenSessionRevocationOrAuditFails(t *testing
 				t.Fatal(err)
 			}
 			defer database.Close()
-			repository := NewRepository(database).(*sqlRepository)
-			tokenHash := bytes.Repeat([]byte{0x70}, sha256.Size)
+			authorizer := &identitySensitiveAuthorizer{}
+			repository := NewRepository(database, authorizer).(*sqlRepository)
 			mock.ExpectBegin()
-			expectRecentAdministrator(mock, tokenHash, now, now.Add(-time.Minute))
 			mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).WithArgs(int64(70)).
 				WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(5), nil))
 			mock.ExpectQuery(regexp.QuoteMeta("SELECT uid_lookup FROM bili_uid_bindings WHERE account_id = ? AND unbound_at IS NULL FOR UPDATE")).WithArgs(int64(70)).
@@ -517,7 +566,7 @@ func TestRebindRollsBackBindingEpochWhenSessionRevocationOrAuditFails(t *testing
 			}
 			mock.ExpectRollback()
 
-			_, err = repository.rebindAccount(context.Background(), tokenHash, 70, EncryptedUID{Ciphertext: []byte("encrypted-new-uid"), Lookup: newLookup}, "exception", now)
+			_, err = repository.rebindAccount(context.Background(), "administrator-session", 70, EncryptedUID{Ciphertext: []byte("encrypted-new-uid"), Lookup: newLookup}, "exception", nowFunc(now))
 			if !errors.Is(err, ErrRepositoryUnavailable) || strings.Contains(err.Error(), "private") {
 				t.Fatalf("rebindAccount() error = %v", err)
 			}
@@ -552,15 +601,11 @@ func TestRebindBilibiliProofForgettingMatchesTerminalState(t *testing.T) {
 			defer database.Close()
 			keys := fixedServiceKeyring(t)
 			verifier := &memoryVerifier{verifications: []Verification{test.verification}, pollErrs: []error{test.pollError}}
-			service, err := NewService(NewRepository(database), keys, verifier, ServiceOptions{Now: nowFunc(now), ChallengeTTL: 5 * time.Minute})
+			authorizer := &identitySensitiveAuthorizer{}
+			service, err := NewService(NewRepository(database, authorizer), keys, verifier, ServiceOptions{Now: nowFunc(now), ChallengeTTL: 5 * time.Minute})
 			if err != nil {
 				t.Fatal(err)
 			}
-			tokenHash, _ := keys.HashToken("admin_session", []byte("administrator-session"))
-			mock.ExpectBegin()
-			expectRecentAdministrator(mock, tokenHash, now, now.Add(-time.Minute))
-			mock.ExpectCommit()
-
 			_, err = service.RebindVerifiedUID(context.Background(), "administrator-session", 61, "proof-state", "exception")
 			if !errors.Is(err, test.wantError) || strings.Contains(err.Error(), "987654321") {
 				t.Fatalf("RebindVerifiedUID() error = %v, want %v", err, test.wantError)
@@ -576,20 +621,69 @@ func TestRebindBilibiliProofForgettingMatchesTerminalState(t *testing.T) {
 	}
 }
 
-func expectRecentAdministrator(mock sqlmock.Sqlmock, tokenHash []byte, now, verifiedAt time.Time) {
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
-		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
-		WithArgs(tokenHash).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at", "totp_verified_at"}).
-			AddRow(int64(9), int64(4), now.Add(time.Hour), nil, verifiedAt))
-}
-
 type auditJSONArgument struct {
 	wantReason    string
 	wantOldLookup []byte
 	wantNewLookup []byte
 	forbidden     []string
+}
+
+type identitySensitiveAuthorizer struct {
+	writeMarkers   bool
+	authorizeErr   error
+	renewErr       error
+	requireErr     error
+	authorizeCalls int
+	renewCalls     int
+	authorizedAt   time.Time
+	renewedAt      time.Time
+	authorizeTx    *sql.Tx
+	renewTx        *sql.Tx
+}
+
+func (authorizer *identitySensitiveAuthorizer) AuthorizeRecentTOTP(ctx context.Context, transaction *sql.Tx, _ string, now time.Time) (security.SensitiveSession, error) {
+	authorizer.authorizeCalls++
+	authorizer.authorizedAt = now
+	authorizer.authorizeTx = transaction
+	if authorizer.authorizeErr != nil {
+		return security.SensitiveSession{}, authorizer.authorizeErr
+	}
+	if authorizer.writeMarkers {
+		if _, err := transaction.ExecContext(ctx, "sensitive_authorize"); err != nil {
+			return security.SensitiveSession{}, err
+		}
+	}
+	return security.SensitiveSession{}, nil
+}
+
+func (authorizer *identitySensitiveAuthorizer) RenewRecentTOTP(ctx context.Context, transaction *sql.Tx, _ security.SensitiveSession, now time.Time) error {
+	authorizer.renewCalls++
+	authorizer.renewedAt = now
+	authorizer.renewTx = transaction
+	if authorizer.writeMarkers {
+		if _, err := transaction.ExecContext(ctx, "sensitive_renew"); err != nil {
+			return err
+		}
+	}
+	return authorizer.renewErr
+}
+
+func (authorizer *identitySensitiveAuthorizer) RequireRecentTOTP(context.Context, string) error {
+	return authorizer.requireErr
+}
+
+type identityTimeSequence struct {
+	values []time.Time
+	index  int
+}
+
+func (sequence *identityTimeSequence) Now() time.Time {
+	if sequence.index >= len(sequence.values) {
+		return sequence.values[len(sequence.values)-1]
+	}
+	value := sequence.values[sequence.index]
+	sequence.index++
+	return value
 }
 
 func (argument auditJSONArgument) Match(value driver.Value) bool {

@@ -23,7 +23,7 @@ func TestCredentialStoreReplaceSealsCookieAndAuditsInOneTransaction(t *testing.T
 	defer database.Close()
 	keys := testCredentialKeys(t)
 	now := time.Date(2026, 8, 17, 8, 0, 0, 0, time.UTC)
-	store := NewCredentialStore(database, keys, func() time.Time { return now })
+	store := NewCredentialStore(database, keys)
 	secret := []byte("SESSDATA=service-cookie; bili_jct=private-csrf")
 	ciphertext := &capturedValue{}
 	audit := &capturedValue{}
@@ -34,7 +34,11 @@ func TestCredentialStoreReplaceSealsCookieAndAuditsInOneTransaction(t *testing.T
 	mock.ExpectExec(regexp.QuoteMeta(insertCredentialAuditQuery)).WithArgs(audit, now).WillReturnResult(sqlmock.NewResult(10, 1))
 	mock.ExpectCommit()
 
-	credential, err := store.Replace(context.Background(), secret)
+	transaction, err := store.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := store.Replace(context.Background(), transaction, secret, now)
 	if err != nil {
 		if expectationErr := mock.ExpectationsWereMet(); expectationErr != nil {
 			t.Fatalf("Replace() error = %v; SQL = %v", err, expectationErr)
@@ -50,6 +54,9 @@ func TestCredentialStoreReplaceSealsCookieAndAuditsInOneTransaction(t *testing.T
 	if len(credential.Cookie) != 0 {
 		t.Fatalf("Replace() returned plaintext cookie = %q", credential.Cookie)
 	}
+	if err := transaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +68,7 @@ func TestCredentialStoreLoadHidesDecryptionFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	store := NewCredentialStore(database, testCredentialKeys(t), time.Now)
+	store := NewCredentialStore(database, testCredentialKeys(t))
 	privateCiphertext := []byte("not-a-valid-ciphertext-private")
 	mock.ExpectQuery(regexp.QuoteMeta(loadCredentialQuery)).WillReturnRows(sqlmock.NewRows([]string{"credential_version", "cookie_ciphertext", "created_at"}).AddRow(int64(3), privateCiphertext, time.Now()))
 

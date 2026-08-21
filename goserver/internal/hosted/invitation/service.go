@@ -16,10 +16,8 @@ import (
 )
 
 const (
-	digestSize                    = sha256.Size
-	invitationCodeLength          = 8
-	recentAdministratorTOTPWindow = 5 * time.Minute
-	administratorClockSkew        = 30 * time.Second
+	digestSize           = sha256.Size
+	invitationCodeLength = 8
 )
 
 var (
@@ -39,12 +37,14 @@ type ServiceOptions struct {
 	Now           func() time.Time
 	InvitationTTL time.Duration
 	SessionTTL    time.Duration
+	Administrator security.SensitiveAuthorizer
 }
 
 type Service struct {
 	db            *sql.DB
 	keys          security.Keyring
 	intents       registrationIntentSource
+	administrator security.SensitiveAuthorizer
 	now           func() time.Time
 	invitationTTL time.Duration
 	sessionTTL    time.Duration
@@ -69,7 +69,7 @@ func NewService(db *sql.DB, keys security.Keyring, intents registrationIntentSou
 	if options.InvitationTTL <= 0 || options.InvitationTTL > 30*24*time.Hour || options.SessionTTL <= 0 {
 		return nil, ErrInvalidInput
 	}
-	return &Service{db: db, keys: keys, intents: intents, now: options.Now, invitationTTL: options.InvitationTTL, sessionTTL: options.SessionTTL}, nil
+	return &Service{db: db, keys: keys, intents: intents, administrator: options.Administrator, now: options.Now, invitationTTL: options.InvitationTTL, sessionTTL: options.SessionTTL}, nil
 }
 
 func (service *Service) Generate(ctx context.Context, sessionToken string, actor ActorKind) (GeneratedInvitation, error) {
@@ -83,13 +83,14 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 	codeDigest := sha256.Sum256([]byte(code))
 	hint := code[len(code)-4:]
 
-	purpose := "site_session"
-	if actor == ActorAdministrator {
-		purpose = "admin_session"
-	}
-	tokenHash, err := service.keys.HashToken(purpose, []byte(sessionToken))
-	if err != nil {
-		return GeneratedInvitation{}, ErrAuthentication
+	var tokenHash []byte
+	if actor == ActorStreamer {
+		tokenHash, err = service.keys.HashToken("site_session", []byte(sessionToken))
+		if err != nil {
+			return GeneratedInvitation{}, ErrAuthentication
+		}
+	} else if service.administrator == nil {
+		return GeneratedInvitation{}, ErrUnavailable
 	}
 	transaction, err := service.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -105,6 +106,7 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 	var invitationID int64
 	var remaining uint64
 	var now, expiresAt time.Time
+	var sensitiveSession security.SensitiveSession
 	switch actor {
 	case ActorStreamer:
 		authorization, err := lockCurrentStreamer(ctx, transaction, tokenHash)
@@ -153,13 +155,10 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 			return GeneratedInvitation{}, err
 		}
 	case ActorAdministrator:
-		authorization, err := lockRecentAdministrator(ctx, transaction, tokenHash)
+		now = service.now().UTC()
+		sensitiveSession, err = service.administrator.AuthorizeRecentTOTP(ctx, transaction, sessionToken, now)
 		if err != nil {
-			return GeneratedInvitation{}, err
-		}
-		now = service.now()
-		if err := authorization.validate(now); err != nil {
-			return GeneratedInvitation{}, err
+			return GeneratedInvitation{}, mapSensitiveError(err)
 		}
 		expiresAt = now.Add(service.invitationTTL)
 		result, err := transaction.ExecContext(ctx,
@@ -177,6 +176,9 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 			eventType: "invitation_generated", actor: administratorAuditActor(), invitationID: invitationID,
 		}, now); err != nil {
 			return GeneratedInvitation{}, err
+		}
+		if err := service.administrator.RenewRecentTOTP(ctx, transaction, sensitiveSession, service.now().UTC()); err != nil {
+			return GeneratedInvitation{}, mapSensitiveError(err)
 		}
 	}
 	if err := transaction.Commit(); err != nil {
@@ -208,12 +210,8 @@ func newInvitationCode(keys security.Keyring) (string, error) {
 
 func (service *Service) AdjustQuota(ctx context.Context, administratorSession string, accountID int64, remaining uint64, reason string) (Quota, error) {
 	normalizedReason, valid := normalizeReason(reason)
-	if service == nil || administratorSession == "" || accountID <= 0 || !valid {
+	if service == nil || service.administrator == nil || administratorSession == "" || accountID <= 0 || !valid {
 		return Quota{}, ErrInvalidInput
-	}
-	tokenHash, err := service.keys.HashToken("admin_session", []byte(administratorSession))
-	if err != nil {
-		return Quota{}, ErrAuthentication
 	}
 	transaction, err := service.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -225,16 +223,13 @@ func (service *Service) AdjustQuota(ctx context.Context, administratorSession st
 			_ = transaction.Rollback()
 		}
 	}()
-	authorization, err := lockRecentAdministrator(ctx, transaction, tokenHash)
+	now := service.now().UTC()
+	sensitiveSession, err := service.administrator.AuthorizeRecentTOTP(ctx, transaction, administratorSession, now)
 	if err != nil {
-		return Quota{}, err
+		return Quota{}, mapSensitiveError(err)
 	}
 	var credentialEpoch int64
 	if accountErr := transaction.QueryRowContext(ctx, "SELECT credential_epoch FROM streamer_accounts WHERE id = ? FOR UPDATE", accountID).Scan(&credentialEpoch); accountErr != nil {
-		now := service.now()
-		if err := authorization.validate(now); err != nil {
-			return Quota{}, err
-		}
 		if errors.Is(accountErr, sql.ErrNoRows) {
 			return Quota{}, ErrInvitationInvalid
 		}
@@ -252,10 +247,6 @@ func (service *Service) AdjustQuota(ctx context.Context, administratorSession st
 	var before uint64
 	if err := transaction.QueryRowContext(ctx, "SELECT remaining_quota FROM invitation_quotas WHERE account_id = ? FOR UPDATE", accountID).Scan(&before); err != nil {
 		return Quota{}, ErrUnavailable
-	}
-	now := service.now()
-	if err := authorization.validate(now); err != nil {
-		return Quota{}, err
 	}
 	delta, ok := signedDelta(before, remaining)
 	if !ok || delta == 0 {
@@ -277,6 +268,9 @@ func (service *Service) AdjustQuota(ctx context.Context, administratorSession st
 		quota: &quotaAudit{Reason: normalizedReason, Before: before, After: remaining, Delta: delta},
 	}, now); err != nil {
 		return Quota{}, err
+	}
+	if err := service.administrator.RenewRecentTOTP(ctx, transaction, sensitiveSession, service.now().UTC()); err != nil {
+		return Quota{}, mapSensitiveError(err)
 	}
 	if err := transaction.Commit(); err != nil {
 		return Quota{}, ErrUnavailable
@@ -611,49 +605,15 @@ func (authorization streamerAuthorization) validate(now time.Time) error {
 	return nil
 }
 
-type administratorAuthorization struct {
-	administratorEpoch int64
-	sessionID          int64
-	sessionEpoch       int64
-	sessionExpires     time.Time
-	sessionRevoked     bool
-	verifiedAt         sql.NullTime
-}
-
-func lockRecentAdministrator(ctx context.Context, transaction *sql.Tx, tokenHash []byte) (administratorAuthorization, error) {
-	var authorization administratorAuthorization
-	err := transaction.QueryRowContext(ctx, "SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE").Scan(&authorization.administratorEpoch)
-	if errors.Is(err, sql.ErrNoRows) {
-		return authorization, ErrAuthentication
-	}
-	if err != nil {
-		return authorization, ErrUnavailable
-	}
-	var revokedAt sql.NullTime
-	err = transaction.QueryRowContext(ctx, "SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE", tokenHash).
-		Scan(&authorization.sessionID, &authorization.sessionEpoch, &authorization.sessionExpires, &revokedAt, &authorization.verifiedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return authorization, ErrAuthentication
-	}
-	if err != nil {
-		return authorization, ErrUnavailable
-	}
-	authorization.sessionRevoked = revokedAt.Valid
-	return authorization, nil
-}
-
-func (authorization administratorAuthorization) validate(now time.Time) error {
-	if authorization.administratorEpoch < 1 {
+func mapSensitiveError(err error) error {
+	switch {
+	case errors.Is(err, security.ErrSensitiveRecentTOTPRequired):
+		return ErrRecentTOTPRequired
+	case errors.Is(err, security.ErrSensitiveAuthenticationFailed):
+		return ErrAuthentication
+	default:
 		return ErrUnavailable
 	}
-	if authorization.sessionID <= 0 || authorization.sessionEpoch < 1 || authorization.sessionEpoch != authorization.administratorEpoch ||
-		!authorization.sessionExpires.After(now) || authorization.sessionRevoked {
-		return ErrAuthentication
-	}
-	if !authorization.verifiedAt.Valid || authorization.verifiedAt.Time.After(now.Add(administratorClockSkew)) || now.Sub(authorization.verifiedAt.Time) > recentAdministratorTOTPWindow {
-		return ErrRecentTOTPRequired
-	}
-	return nil
 }
 
 type quotaAudit struct {

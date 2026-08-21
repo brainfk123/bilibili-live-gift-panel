@@ -11,14 +11,14 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"bilibili-live-gift-panel/internal/hosted/security"
 )
 
 const (
 	AccountStatusActive   = "active"
 	AccountStatusDisabled = "disabled"
 
-	recentAdministratorTOTPWindow  = 5 * time.Minute
-	administratorClockSkew         = 30 * time.Second
 	maximumAdministratorReasonSize = 512
 )
 
@@ -35,10 +35,14 @@ type ManagedAccount struct {
 }
 
 type accountAdminRepository interface {
-	authorizeAccountAdministrator(context.Context, []byte, time.Time) error
-	disableAccount(context.Context, []byte, int64, string, time.Time) (ManagedAccount, error)
-	enableAccount(context.Context, []byte, int64, string, time.Time) (ManagedAccount, error)
-	rebindAccount(context.Context, []byte, int64, EncryptedUID, string, time.Time) (ManagedAccount, error)
+	requireRecentAdministrator(context.Context, string) error
+	disableAccount(context.Context, string, int64, string, func() time.Time) (ManagedAccount, error)
+	enableAccount(context.Context, string, int64, string, func() time.Time) (ManagedAccount, error)
+	rebindAccount(context.Context, string, int64, EncryptedUID, string, func() time.Time) (ManagedAccount, error)
+}
+
+type recentTOTPReader interface {
+	RequireRecentTOTP(context.Context, string) error
 }
 
 // DisableAccount authenticates the administrator from the hash-only site
@@ -51,15 +55,11 @@ func (service *Service) DisableAccount(ctx context.Context, administratorSession
 	if accountID <= 0 || !ok {
 		return ManagedAccount{}, ErrInvalidInput
 	}
-	tokenHash, err := service.keys.HashToken("admin_session", []byte(administratorSession))
-	if err != nil {
-		return ManagedAccount{}, ErrAuthenticationFailed
-	}
 	repository, ok := service.repository.(accountAdminRepository)
 	if !ok {
 		return ManagedAccount{}, ErrRepositoryUnavailable
 	}
-	result, err := repository.disableAccount(ctx, tokenHash, accountID, normalizedReason, service.now())
+	result, err := repository.disableAccount(ctx, administratorSession, accountID, normalizedReason, service.now)
 	if err != nil {
 		return ManagedAccount{}, err
 	}
@@ -79,15 +79,11 @@ func (service *Service) EnableAccount(ctx context.Context, administratorSession 
 	if accountID <= 0 || !ok {
 		return ManagedAccount{}, ErrInvalidInput
 	}
-	tokenHash, err := service.keys.HashToken("admin_session", []byte(administratorSession))
-	if err != nil {
-		return ManagedAccount{}, ErrAuthenticationFailed
-	}
 	repository, ok := service.repository.(accountAdminRepository)
 	if !ok {
 		return ManagedAccount{}, ErrRepositoryUnavailable
 	}
-	return repository.enableAccount(ctx, tokenHash, accountID, normalizedReason, service.now())
+	return repository.enableAccount(ctx, administratorSession, accountID, normalizedReason, service.now)
 }
 
 // RebindVerifiedUID consumes a terminal Bilibili proof and stores only the
@@ -100,16 +96,11 @@ func (service *Service) RebindVerifiedUID(ctx context.Context, administratorSess
 	if accountID <= 0 || !ok {
 		return ManagedAccount{}, ErrInvalidInput
 	}
-	tokenHash, err := service.keys.HashToken("admin_session", []byte(administratorSession))
-	if err != nil {
-		return ManagedAccount{}, ErrAuthenticationFailed
-	}
 	repository, ok := service.repository.(accountAdminRepository)
 	if !ok {
 		return ManagedAccount{}, ErrRepositoryUnavailable
 	}
-	now := service.now()
-	if err := repository.authorizeAccountAdministrator(ctx, tokenHash, now); err != nil {
+	if err := repository.requireRecentAdministrator(ctx, administratorSession); err != nil {
 		return ManagedAccount{}, err
 	}
 	verification, err := service.verifier.Poll(ctx, challengeID)
@@ -120,7 +111,7 @@ func (service *Service) RebindVerifiedUID(ctx context.Context, administratorSess
 	if err != nil {
 		return ManagedAccount{}, ErrAuthenticationFailed
 	}
-	now = service.now()
+	now := service.now()
 	uid, valid := canonicalUID(verification.UID)
 	if !valid || verification.CompletedAt.IsZero() || verification.CompletedAt.After(now.Add(time.Minute)) || verification.CompletedAt.Before(now.Add(-service.challengeTTL)) {
 		return ManagedAccount{}, ErrAuthenticationFailed
@@ -134,14 +125,13 @@ func (service *Service) RebindVerifiedUID(ctx context.Context, administratorSess
 		return ManagedAccount{}, ErrAuthenticationFailed
 	}
 	defer clear(ciphertext)
-	return repository.rebindAccount(ctx, tokenHash, accountID, EncryptedUID{Ciphertext: ciphertext, Lookup: lookup}, normalizedReason, now)
+	return repository.rebindAccount(ctx, administratorSession, accountID, EncryptedUID{Ciphertext: ciphertext, Lookup: lookup}, normalizedReason, service.now)
 }
 
-func (repository *sqlRepository) disableAccount(ctx context.Context, tokenHash []byte, accountID int64, reason string, now time.Time) (ManagedAccount, error) {
-	if !repository.ready() || len(tokenHash) != digestSize || accountID <= 0 || now.IsZero() {
+func (repository *sqlRepository) disableAccount(ctx context.Context, sessionToken string, accountID int64, reason string, clock func() time.Time) (ManagedAccount, error) {
+	if !repository.ready() || repository.administrator == nil || sessionToken == "" || accountID <= 0 || clock == nil {
 		return ManagedAccount{}, ErrInvalidInput
 	}
-	tokenHash = bytes.Clone(tokenHash)
 	transaction, err := repository.db.BeginTx(ctx, nil)
 	if err != nil {
 		return ManagedAccount{}, ErrRepositoryUnavailable
@@ -152,8 +142,10 @@ func (repository *sqlRepository) disableAccount(ctx context.Context, tokenHash [
 			_ = transaction.Rollback()
 		}
 	}()
-	if err := requireRecentAdministrator(ctx, transaction, tokenHash, now); err != nil {
-		return ManagedAccount{}, err
+	now := clock().UTC()
+	sensitiveSession, err := repository.administrator.AuthorizeRecentTOTP(ctx, transaction, sessionToken, now)
+	if err != nil {
+		return ManagedAccount{}, mapSensitiveAdministratorError(err)
 	}
 
 	disabledAt, err := lockManagedAccount(ctx, transaction, accountID)
@@ -179,6 +171,9 @@ func (repository *sqlRepository) disableAccount(ctx context.Context, tokenHash [
 	if err := insertAccountAudit(ctx, transaction, "streamer_account_disabled", accountID, reason, nil, nil, now); err != nil {
 		return ManagedAccount{}, err
 	}
+	if err := repository.administrator.RenewRecentTOTP(ctx, transaction, sensitiveSession, clock().UTC()); err != nil {
+		return ManagedAccount{}, mapSensitiveAdministratorError(err)
+	}
 	if err := transaction.Commit(); err != nil {
 		return ManagedAccount{}, ErrRepositoryUnavailable
 	}
@@ -186,11 +181,10 @@ func (repository *sqlRepository) disableAccount(ctx context.Context, tokenHash [
 	return ManagedAccount{AccountID: accountID, Status: AccountStatusDisabled}, nil
 }
 
-func (repository *sqlRepository) enableAccount(ctx context.Context, tokenHash []byte, accountID int64, reason string, now time.Time) (ManagedAccount, error) {
-	if !repository.ready() || len(tokenHash) != digestSize || accountID <= 0 || now.IsZero() {
+func (repository *sqlRepository) enableAccount(ctx context.Context, sessionToken string, accountID int64, reason string, clock func() time.Time) (ManagedAccount, error) {
+	if !repository.ready() || repository.administrator == nil || sessionToken == "" || accountID <= 0 || clock == nil {
 		return ManagedAccount{}, ErrInvalidInput
 	}
-	tokenHash = bytes.Clone(tokenHash)
 	transaction, err := repository.db.BeginTx(ctx, nil)
 	if err != nil {
 		return ManagedAccount{}, ErrRepositoryUnavailable
@@ -201,8 +195,10 @@ func (repository *sqlRepository) enableAccount(ctx context.Context, tokenHash []
 			_ = transaction.Rollback()
 		}
 	}()
-	if err := requireRecentAdministrator(ctx, transaction, tokenHash, now); err != nil {
-		return ManagedAccount{}, err
+	now := clock().UTC()
+	sensitiveSession, err := repository.administrator.AuthorizeRecentTOTP(ctx, transaction, sessionToken, now)
+	if err != nil {
+		return ManagedAccount{}, mapSensitiveAdministratorError(err)
 	}
 
 	disabledAt, err := lockManagedAccount(ctx, transaction, accountID)
@@ -222,6 +218,9 @@ func (repository *sqlRepository) enableAccount(ctx context.Context, tokenHash []
 	if err := insertAccountAudit(ctx, transaction, "streamer_account_enabled", accountID, reason, nil, nil, now); err != nil {
 		return ManagedAccount{}, err
 	}
+	if err := repository.administrator.RenewRecentTOTP(ctx, transaction, sensitiveSession, clock().UTC()); err != nil {
+		return ManagedAccount{}, mapSensitiveAdministratorError(err)
+	}
 	if err := transaction.Commit(); err != nil {
 		return ManagedAccount{}, ErrRepositoryUnavailable
 	}
@@ -229,11 +228,10 @@ func (repository *sqlRepository) enableAccount(ctx context.Context, tokenHash []
 	return ManagedAccount{AccountID: accountID, Status: AccountStatusActive}, nil
 }
 
-func (repository *sqlRepository) rebindAccount(ctx context.Context, tokenHash []byte, accountID int64, uid EncryptedUID, reason string, now time.Time) (ManagedAccount, error) {
-	if !repository.ready() || len(tokenHash) != digestSize || accountID <= 0 || len(uid.Ciphertext) == 0 || len(uid.Ciphertext) > 512 || len(uid.Lookup) != digestSize || now.IsZero() {
+func (repository *sqlRepository) rebindAccount(ctx context.Context, sessionToken string, accountID int64, uid EncryptedUID, reason string, clock func() time.Time) (ManagedAccount, error) {
+	if !repository.ready() || repository.administrator == nil || sessionToken == "" || accountID <= 0 || len(uid.Ciphertext) == 0 || len(uid.Ciphertext) > 512 || len(uid.Lookup) != digestSize || clock == nil {
 		return ManagedAccount{}, ErrInvalidInput
 	}
-	tokenHash = bytes.Clone(tokenHash)
 	uid = EncryptedUID{Ciphertext: bytes.Clone(uid.Ciphertext), Lookup: bytes.Clone(uid.Lookup)}
 	transaction, err := repository.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -245,8 +243,10 @@ func (repository *sqlRepository) rebindAccount(ctx context.Context, tokenHash []
 			_ = transaction.Rollback()
 		}
 	}()
-	if err := requireRecentAdministrator(ctx, transaction, tokenHash, now); err != nil {
-		return ManagedAccount{}, err
+	now := clock().UTC()
+	sensitiveSession, err := repository.administrator.AuthorizeRecentTOTP(ctx, transaction, sessionToken, now)
+	if err != nil {
+		return ManagedAccount{}, mapSensitiveAdministratorError(err)
 	}
 
 	disabledAt, err := lockManagedAccount(ctx, transaction, accountID)
@@ -312,6 +312,9 @@ func (repository *sqlRepository) rebindAccount(ctx context.Context, tokenHash []
 	if err := insertAccountAudit(ctx, transaction, "streamer_account_uid_rebound", accountID, reason, oldLookup, uid.Lookup, now); err != nil {
 		return ManagedAccount{}, err
 	}
+	if err := repository.administrator.RenewRecentTOTP(ctx, transaction, sensitiveSession, clock().UTC()); err != nil {
+		return ManagedAccount{}, mapSensitiveAdministratorError(err)
+	}
 	if err := transaction.Commit(); err != nil {
 		return ManagedAccount{}, ErrRepositoryUnavailable
 	}
@@ -323,28 +326,12 @@ func (repository *sqlRepository) rebindAccount(ctx context.Context, tokenHash []
 	return ManagedAccount{AccountID: accountID, Status: status}, nil
 }
 
-func (repository *sqlRepository) authorizeAccountAdministrator(ctx context.Context, tokenHash []byte, now time.Time) error {
-	if !repository.ready() || len(tokenHash) != digestSize || now.IsZero() {
-		return ErrInvalidInput
-	}
-	transaction, err := repository.db.BeginTx(ctx, nil)
-	if err != nil {
+func (repository *sqlRepository) requireRecentAdministrator(ctx context.Context, sessionToken string) error {
+	reader, ok := repository.administrator.(recentTOTPReader)
+	if !repository.ready() || !ok || sessionToken == "" {
 		return ErrRepositoryUnavailable
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = transaction.Rollback()
-		}
-	}()
-	if err := requireRecentAdministrator(ctx, transaction, bytes.Clone(tokenHash), now); err != nil {
-		return err
-	}
-	if err := transaction.Commit(); err != nil {
-		return ErrRepositoryUnavailable
-	}
-	committed = true
-	return nil
+	return mapSensitiveAdministratorError(reader.RequireRecentTOTP(ctx, sessionToken))
 }
 
 func lockManagedAccount(ctx context.Context, transaction *sql.Tx, accountID int64) (sql.NullTime, error) {
@@ -361,36 +348,17 @@ func lockManagedAccount(ctx context.Context, transaction *sql.Tx, accountID int6
 	return disabledAt, nil
 }
 
-func requireRecentAdministrator(ctx context.Context, transaction *sql.Tx, tokenHash []byte, now time.Time) error {
-	var administratorEpoch int64
-	err := transaction.QueryRowContext(ctx, "SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE").Scan(&administratorEpoch)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrAuthenticationFailed
-	}
-	if err != nil || administratorEpoch < 1 {
-		return ErrRepositoryUnavailable
-	}
-
-	const query = "SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE"
-	var sessionID, sessionEpoch int64
-	var expiresAt time.Time
-	var revokedAt, verifiedAt sql.NullTime
-	err = transaction.QueryRowContext(ctx, query, tokenHash).Scan(
-		&sessionID, &sessionEpoch, &expiresAt, &revokedAt, &verifiedAt,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrAuthenticationFailed
-	}
-	if err != nil {
-		return ErrRepositoryUnavailable
-	}
-	if sessionID <= 0 || sessionEpoch < 1 || administratorEpoch < 1 || sessionEpoch != administratorEpoch || !expiresAt.After(now) || revokedAt.Valid {
-		return ErrAuthenticationFailed
-	}
-	if !verifiedAt.Valid || verifiedAt.Time.After(now.Add(administratorClockSkew)) || now.Sub(verifiedAt.Time) > recentAdministratorTOTPWindow {
+func mapSensitiveAdministratorError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, security.ErrSensitiveRecentTOTPRequired):
 		return ErrRecentTOTPRequired
+	case errors.Is(err, security.ErrSensitiveAuthenticationFailed):
+		return ErrAuthenticationFailed
+	default:
+		return ErrRepositoryUnavailable
 	}
-	return nil
 }
 
 func insertAccountAudit(ctx context.Context, transaction *sql.Tx, eventType string, accountID int64, reason string, oldLookup, newLookup []byte, now time.Time) error {

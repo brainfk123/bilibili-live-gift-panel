@@ -19,6 +19,87 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
+func TestSensitiveAdministratorInvitationGenerationRenewsOnlyAfterAudit(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authorizedAt := time.Date(2026, 8, 21, 14, 0, 0, 0, time.UTC)
+	completedAt := authorizedAt.Add(2 * time.Second)
+	clock := &invitationTimeSequence{values: []time.Time{authorizedAt, completedAt}}
+	authorizer := &invitationSensitiveAuthorizer{writeMarkers: true}
+	service, err := NewService(database, fixedInvitationKeys(t), &fakeIntentSource{}, ServiceOptions{Now: clock.Now, Administrator: authorizer})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectExec("sensitive_authorize").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitations (code_hash, code_hint, creator_admin_identity_id, status, created_at, expires_at) VALUES (?, ?, 1, 'active', ?, ?)")).
+		WillReturnResult(sqlmock.NewResult(72, 1))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, event_data, created_at) VALUES (?, 1, ?, ?)")).
+		WithArgs("invitation_generated", secretFreeJSON{}, authorizedAt).
+		WillReturnResult(sqlmock.NewResult(92, 1))
+	mock.ExpectExec("sensitive_renew").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	generated, err := service.Generate(context.Background(), "administrator-session", ActorAdministrator)
+	if err != nil || generated.ID != 72 || generated.Code == "" {
+		t.Fatalf("Generate(admin) = %#v, %v", generated, err)
+	}
+	if authorizer.authorizeCalls != 1 || authorizer.renewCalls != 1 || authorizer.authorizeTx != authorizer.renewTx {
+		t.Fatalf("sensitive calls authorize=%d renew=%d sameTx=%t", authorizer.authorizeCalls, authorizer.renewCalls, authorizer.authorizeTx == authorizer.renewTx)
+	}
+	if !authorizer.authorizedAt.Equal(authorizedAt) || !authorizer.renewedAt.Equal(completedAt) {
+		t.Fatalf("sensitive timestamps authorize=%s renew=%s", authorizer.authorizedAt, authorizer.renewedAt)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSensitiveQuotaRenewalFailureRollsBackDomainAndAudit(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 21, 14, 10, 0, 0, time.UTC)
+	authorizer := &invitationSensitiveAuthorizer{writeMarkers: true, renewErr: errors.New("private renewal failure")}
+	service, err := NewService(database, fixedInvitationKeys(t), &fakeIntentSource{}, ServiceOptions{Now: fixedNow(now), Administrator: authorizer})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectExec("sensitive_authorize").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM streamer_accounts WHERE id = ? FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(3)))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitation_quotas (account_id, remaining_quota, updated_at) VALUES (?, 0, CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE account_id = account_id")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT remaining_quota FROM invitation_quotas WHERE account_id = ? FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"remaining_quota"}).AddRow(uint64(2)))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE invitation_quotas SET remaining_quota = ?, updated_at = ? WHERE account_id = ?")).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitation_quota_events (account_id, actor_admin_identity_id, quota_delta, quota_after, reason, created_at) VALUES (?, 1, ?, ?, ?, ?)")).
+		WillReturnResult(sqlmock.NewResult(95, 1))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, 1, ?, ?, ?)")).
+		WillReturnResult(sqlmock.NewResult(96, 1))
+	mock.ExpectExec("sensitive_renew").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectRollback()
+
+	if _, err := service.AdjustQuota(context.Background(), "administrator-session", 41, 5, "support grant"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("AdjustQuota() error = %v, want ErrUnavailable", err)
+	}
+	if authorizer.renewCalls != 1 {
+		t.Fatalf("RenewRecentTOTP calls = %d, want 1", authorizer.renewCalls)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateDeductsQuotaAtCreation(t *testing.T) {
 	now := time.Date(2026, 8, 16, 18, 0, 0, 0, time.UTC)
 	database, mock, err := sqlmock.New()
@@ -27,7 +108,8 @@ func TestGenerateDeductsQuotaAtCreation(t *testing.T) {
 	}
 	defer database.Close()
 	keys := fixedInvitationKeys(t)
-	service, err := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: fixedNow(now)})
+	authorizer := &invitationSensitiveAuthorizer{}
+	service, err := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: fixedNow(now), Administrator: authorizer})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,14 +161,12 @@ func TestAdminGenerationDoesNotConsumeQuota(t *testing.T) {
 	}
 	defer database.Close()
 	keys := fixedInvitationKeys(t)
-	service, err := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: fixedNow(now)})
+	authorizer := &invitationSensitiveAuthorizer{}
+	service, err := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: fixedNow(now), Administrator: authorizer})
 	if err != nil {
 		t.Fatal(err)
 	}
-	adminHash, _ := keys.HashToken("admin_session", []byte("admin-session"))
-
 	mock.ExpectBegin()
-	expectRecentAdministrator(mock, adminHash, now)
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitations (code_hash, code_hint, creator_admin_identity_id, status, created_at, expires_at) VALUES (?, ?, 1, 'active', ?, ?)")).
 		WithArgs(hashOnlyArgument{forbidden: "admin-session"}, fourCharacterHint{}, now, now.Add(7*24*time.Hour)).
 		WillReturnResult(sqlmock.NewResult(72, 1))
@@ -188,7 +268,7 @@ func TestRevokedInvitationRemainsListable(t *testing.T) {
 	}
 }
 
-func TestAdjustQuotaUsesRecentAdministratorAndRejectsSignedDeltaOverflow(t *testing.T) {
+func TestSensitiveAdjustQuotaRenewsAfterAuditAndRejectsSignedDeltaOverflow(t *testing.T) {
 	now := time.Date(2026, 8, 16, 18, 40, 0, 0, time.UTC)
 	t.Run("atomic adjustment", func(t *testing.T) {
 		database, mock, err := sqlmock.New()
@@ -197,10 +277,12 @@ func TestAdjustQuotaUsesRecentAdministratorAndRejectsSignedDeltaOverflow(t *test
 		}
 		defer database.Close()
 		keys := fixedInvitationKeys(t)
-		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: fixedNow(now)})
-		adminHash, _ := keys.HashToken("admin_session", []byte("admin-session"))
+		completedAt := now.Add(2 * time.Second)
+		clock := &invitationTimeSequence{values: []time.Time{now, completedAt}}
+		authorizer := &invitationSensitiveAuthorizer{writeMarkers: true}
+		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: clock.Now, Administrator: authorizer})
 		mock.ExpectBegin()
-		expectRecentAdministrator(mock, adminHash, now)
+		mock.ExpectExec("sensitive_authorize").WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM streamer_accounts WHERE id = ? FOR UPDATE")).
 			WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(3)))
 		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitation_quotas (account_id, remaining_quota, updated_at) VALUES (?, 0, CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE account_id = account_id")).
@@ -213,10 +295,17 @@ func TestAdjustQuotaUsesRecentAdministratorAndRejectsSignedDeltaOverflow(t *test
 			WithArgs(int64(41), int64(3), uint64(5), "support grant", now).WillReturnResult(sqlmock.NewResult(95, 1))
 		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, 1, ?, ?, ?)")).
 			WithArgs("invitation_quota_adjusted", int64(41), secretFreeJSON{}, now).WillReturnResult(sqlmock.NewResult(96, 1))
+		mock.ExpectExec("sensitive_renew").WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectCommit()
 		quota, err := service.AdjustQuota(context.Background(), "admin-session", 41, 5, " support grant ")
 		if err != nil || quota.AccountID != 41 || quota.RemainingQuota != 5 {
 			t.Fatalf("AdjustQuota() = %#v, %v", quota, err)
+		}
+		if authorizer.authorizeCalls != 1 || authorizer.renewCalls != 1 || authorizer.authorizeTx != authorizer.renewTx {
+			t.Fatalf("sensitive calls authorize=%d renew=%d sameTx=%t", authorizer.authorizeCalls, authorizer.renewCalls, authorizer.authorizeTx == authorizer.renewTx)
+		}
+		if !authorizer.authorizedAt.Equal(now) || !authorizer.renewedAt.Equal(completedAt) {
+			t.Fatalf("sensitive timestamps authorize=%s renew=%s", authorizer.authorizedAt, authorizer.renewedAt)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatal(err)
@@ -230,10 +319,9 @@ func TestAdjustQuotaUsesRecentAdministratorAndRejectsSignedDeltaOverflow(t *test
 		}
 		defer database.Close()
 		keys := fixedInvitationKeys(t)
-		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: fixedNow(now)})
-		adminHash, _ := keys.HashToken("admin_session", []byte("admin-session"))
+		authorizer := &invitationSensitiveAuthorizer{}
+		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: fixedNow(now), Administrator: authorizer})
 		mock.ExpectBegin()
-		expectRecentAdministrator(mock, adminHash, now)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM streamer_accounts WHERE id = ? FOR UPDATE")).
 			WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(3)))
 		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitation_quotas (account_id, remaining_quota, updated_at) VALUES (?, 0, CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE account_id = account_id")).
@@ -244,6 +332,9 @@ func TestAdjustQuotaUsesRecentAdministratorAndRejectsSignedDeltaOverflow(t *test
 		_, err = service.AdjustQuota(context.Background(), "admin-session", 41, 0, "support_revoke")
 		if !errors.Is(err, ErrInvalidInput) {
 			t.Fatalf("AdjustQuota(overflow) error=%v", err)
+		}
+		if authorizer.renewCalls != 0 {
+			t.Fatalf("overflow renewed recent TOTP %d times", authorizer.renewCalls)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatal(err)
@@ -521,7 +612,7 @@ func TestTransactionExpiryChecksUseFreshTimeAfterRelevantLocks(t *testing.T) {
 		}
 	})
 
-	t.Run("quota adjustment validates recent TOTP after quota lock", func(t *testing.T) {
+	t.Run("quota adjustment rolls back when recent TOTP expires before renewal", func(t *testing.T) {
 		database, mock, err := sqlmock.New()
 		if err != nil {
 			t.Fatal(err)
@@ -529,32 +620,36 @@ func TestTransactionExpiryChecksUseFreshTimeAfterRelevantLocks(t *testing.T) {
 		defer database.Close()
 		marker := &atomic.Bool{}
 		keys := fixedInvitationKeys(t)
-		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: lockAwareClock(marker, before, after)})
-		adminHash, _ := keys.HashToken("admin_session", []byte("admin-session"))
+		authorizer := &invitationSensitiveAuthorizer{renewErr: security.ErrSensitiveRecentTOTPRequired}
+		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: lockAwareClock(marker, before, after), Administrator: authorizer})
 		mock.ExpectBegin()
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
-			WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
-			WithArgs(adminHash).WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at", "totp_verified_at"}).
-			AddRow(int64(12), int64(4), after.Add(time.Hour), nil, before.Add(-time.Minute)))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM streamer_accounts WHERE id = ? FOR UPDATE")).
 			WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(3)))
 		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitation_quotas (account_id, remaining_quota, updated_at) VALUES (?, 0, CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE account_id = account_id")).
 			WithArgs(int64(41)).WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT remaining_quota FROM invitation_quotas WHERE account_id = ? FOR UPDATE")).
 			WithArgs(markingArgument{value: int64(41), marker: marker}).WillReturnRows(sqlmock.NewRows([]string{"remaining_quota"}).AddRow(uint64(2)))
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE invitation_quotas SET remaining_quota = ?, updated_at = ? WHERE account_id = ?")).
+			WithArgs(uint64(5), before, int64(41)).WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitation_quota_events (account_id, actor_admin_identity_id, quota_delta, quota_after, reason, created_at) VALUES (?, 1, ?, ?, ?, ?)")).
+			WithArgs(int64(41), int64(3), uint64(5), "support grant", before).WillReturnResult(sqlmock.NewResult(95, 1))
+		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, 1, ?, ?, ?)")).
+			WithArgs("invitation_quota_adjusted", int64(41), secretFreeJSON{}, before).WillReturnResult(sqlmock.NewResult(96, 1))
 		mock.ExpectRollback()
 
 		_, err = service.AdjustQuota(context.Background(), "admin-session", 41, 5, "support grant")
 		if !errors.Is(err, ErrRecentTOTPRequired) {
 			t.Fatalf("AdjustQuota() error=%v", err)
 		}
+		if authorizer.renewCalls != 1 || !authorizer.renewedAt.Equal(after) {
+			t.Fatalf("renew calls=%d at=%s, want once at %s", authorizer.renewCalls, authorizer.renewedAt, after)
+		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatal(err)
 		}
 	})
 
-	t.Run("missing target account does not bypass fresh administrator validation", func(t *testing.T) {
+	t.Run("missing target account fails after transaction authorization without renewal", func(t *testing.T) {
 		database, mock, err := sqlmock.New()
 		if err != nil {
 			t.Fatal(err)
@@ -562,21 +657,19 @@ func TestTransactionExpiryChecksUseFreshTimeAfterRelevantLocks(t *testing.T) {
 		defer database.Close()
 		marker := &atomic.Bool{}
 		keys := fixedInvitationKeys(t)
-		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: lockAwareClock(marker, before, after)})
-		adminHash, _ := keys.HashToken("admin_session", []byte("admin-session"))
+		authorizer := &invitationSensitiveAuthorizer{}
+		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: lockAwareClock(marker, before, after), Administrator: authorizer})
 		mock.ExpectBegin()
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
-			WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
-			WithArgs(adminHash).WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at", "totp_verified_at"}).
-			AddRow(int64(12), int64(4), after.Add(time.Hour), nil, before.Add(-time.Minute)))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM streamer_accounts WHERE id = ? FOR UPDATE")).
 			WithArgs(markingArgument{value: int64(41), marker: marker}).WillReturnError(sql.ErrNoRows)
 		mock.ExpectRollback()
 
 		_, err = service.AdjustQuota(context.Background(), "admin-session", 41, 5, "support grant")
-		if !errors.Is(err, ErrRecentTOTPRequired) {
-			t.Fatalf("AdjustQuota(missing target) error=%v", err)
+		if !errors.Is(err, ErrInvitationInvalid) {
+			t.Fatalf("AdjustQuota(missing target) error=%v, want ErrInvitationInvalid", err)
+		}
+		if authorizer.renewCalls != 0 {
+			t.Fatalf("missing target renewed %d times", authorizer.renewCalls)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatal(err)
@@ -869,14 +962,6 @@ func expectStreamerAuthorization(mock sqlmock.Sqlmock, tokenHash []byte, account
 		AddRow(int64(11), epoch, now.Add(time.Hour), nil))
 }
 
-func expectRecentAdministrator(mock sqlmock.Sqlmock, tokenHash []byte, now time.Time) {
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
-		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
-		WithArgs(tokenHash).WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at", "totp_verified_at"}).
-		AddRow(int64(12), int64(4), now.Add(time.Hour), nil, now.Add(-time.Minute)))
-}
-
 func fixedInvitationKeys(t *testing.T) security.Keyring {
 	t.Helper()
 	keys, err := security.NewKeyring(1, bytes.Repeat([]byte{0x31}, 32), bytes.Repeat([]byte{0x72}, 32))
@@ -959,6 +1044,59 @@ func (argument markingArgument) Match(value driver.Value) bool {
 		argument.marker.Store(true)
 	}
 	return matched
+}
+
+type invitationSensitiveAuthorizer struct {
+	writeMarkers   bool
+	authorizeErr   error
+	renewErr       error
+	authorizeCalls int
+	renewCalls     int
+	authorizedAt   time.Time
+	renewedAt      time.Time
+	authorizeTx    *sql.Tx
+	renewTx        *sql.Tx
+}
+
+func (authorizer *invitationSensitiveAuthorizer) AuthorizeRecentTOTP(ctx context.Context, transaction *sql.Tx, _ string, now time.Time) (security.SensitiveSession, error) {
+	authorizer.authorizeCalls++
+	authorizer.authorizedAt = now
+	authorizer.authorizeTx = transaction
+	if authorizer.authorizeErr != nil {
+		return security.SensitiveSession{}, authorizer.authorizeErr
+	}
+	if authorizer.writeMarkers {
+		if _, err := transaction.ExecContext(ctx, "sensitive_authorize"); err != nil {
+			return security.SensitiveSession{}, err
+		}
+	}
+	return security.SensitiveSession{}, nil
+}
+
+func (authorizer *invitationSensitiveAuthorizer) RenewRecentTOTP(ctx context.Context, transaction *sql.Tx, _ security.SensitiveSession, now time.Time) error {
+	authorizer.renewCalls++
+	authorizer.renewedAt = now
+	authorizer.renewTx = transaction
+	if authorizer.writeMarkers {
+		if _, err := transaction.ExecContext(ctx, "sensitive_renew"); err != nil {
+			return err
+		}
+	}
+	return authorizer.renewErr
+}
+
+type invitationTimeSequence struct {
+	values []time.Time
+	index  int
+}
+
+func (sequence *invitationTimeSequence) Now() time.Time {
+	if sequence.index >= len(sequence.values) {
+		return sequence.values[len(sequence.values)-1]
+	}
+	value := sequence.values[sequence.index]
+	sequence.index++
+	return value
 }
 
 type fakeIntentSource struct {

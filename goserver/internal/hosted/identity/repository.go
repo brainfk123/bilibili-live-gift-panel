@@ -7,6 +7,8 @@ import (
 	"errors"
 	"time"
 
+	"bilibili-live-gift-panel/internal/hosted/security"
+
 	"github.com/go-sql-driver/mysql"
 )
 
@@ -33,12 +35,17 @@ type Repository interface {
 }
 
 type sqlRepository struct {
-	db *sql.DB
+	db            *sql.DB
+	administrator security.SensitiveAuthorizer
 }
 
 // NewRepository builds the MySQL-backed identity repository.
-func NewRepository(db *sql.DB) Repository {
-	return &sqlRepository{db: db}
+func NewRepository(db *sql.DB, administrator ...security.SensitiveAuthorizer) Repository {
+	repository := &sqlRepository{db: db}
+	if len(administrator) > 0 {
+		repository.administrator = administrator[0]
+	}
+	return repository
 }
 
 func (repository *sqlRepository) FindAccountByUIDLookup(ctx context.Context, lookup []byte) (Account, error) {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -21,8 +22,8 @@ import (
 	"time"
 
 	"bilibili-live-gift-panel/internal/gameplay"
-	"bilibili-live-gift-panel/internal/hosted/adminidentity"
 	"bilibili-live-gift-panel/internal/hosted/identity"
+	"bilibili-live-gift-panel/internal/hosted/security"
 
 	"github.com/andybalholm/brotli"
 	"github.com/gorilla/websocket"
@@ -39,14 +40,19 @@ type credentialVerifier interface {
 }
 
 type credentialReplacer interface {
-	Replace(context.Context, []byte) (Credential, error)
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+	Replace(context.Context, *sql.Tx, []byte, time.Time) (Credential, error)
 }
 type credentialStatusReader interface {
 	Status(context.Context) CredentialStatus
 }
 type recentTOTPAuthorizer interface {
-	RequireRecentTOTP(context.Context, string) error
+	security.SensitiveAuthorizer
 	RequireSession(context.Context, string) error
+}
+
+type ServiceOptions struct {
+	Now func() time.Time
 }
 
 // Service composes the already-authenticated administrator session with the
@@ -55,13 +61,17 @@ type Service struct {
 	verifier    credentialVerifier
 	credentials credentialReplacer
 	admin       recentTOTPAuthorizer
+	now         func() time.Time
 }
 
-func NewService(verifier credentialVerifier, credentials credentialReplacer, admin recentTOTPAuthorizer) (*Service, error) {
+func NewService(verifier credentialVerifier, credentials credentialReplacer, admin recentTOTPAuthorizer, options ServiceOptions) (*Service, error) {
 	if verifier == nil || credentials == nil || admin == nil {
 		return nil, errors.New("invalid_bili_service")
 	}
-	return &Service{verifier: verifier, credentials: credentials, admin: admin}, nil
+	if options.Now == nil {
+		options.Now = time.Now
+	}
+	return &Service{verifier: verifier, credentials: credentials, admin: admin, now: options.Now}, nil
 }
 
 func (service *Service) Begin(ctx context.Context) (identity.Challenge, error) {
@@ -90,14 +100,18 @@ func (service *Service) Replace(ctx context.Context, sessionToken, challengeID s
 	if service == nil || sessionToken == "" || challengeID == "" {
 		return ErrAuthenticationFailed
 	}
-	if err := service.admin.RequireRecentTOTP(ctx, sessionToken); err != nil {
-		if errors.Is(err, adminidentity.ErrRecentTOTPRequired) {
-			return ErrRecentTOTPRequired
-		}
-		return ErrAuthenticationFailed
+	transaction, err := service.credentials.BeginTx(ctx, nil)
+	if err != nil {
+		return ErrCredentialUnavailable
+	}
+	defer transaction.Rollback()
+	authorizedAt := service.now().UTC()
+	sensitiveSession, err := service.admin.AuthorizeRecentTOTP(ctx, transaction, sessionToken, authorizedAt)
+	if err != nil {
+		return mapSensitiveError(err)
 	}
 	if err := service.verifier.ConsumeCredential(ctx, challengeID, func(consumerContext context.Context, cookie []byte) error {
-		_, replaceErr := service.credentials.Replace(consumerContext, cookie)
+		_, replaceErr := service.credentials.Replace(consumerContext, transaction, cookie, authorizedAt)
 		return replaceErr
 	}); err != nil {
 		if errors.Is(err, ErrCredentialUnavailable) {
@@ -111,7 +125,24 @@ func (service *Service) Replace(ctx context.Context, sessionToken, challengeID s
 		}
 		return ErrAuthenticationFailed
 	}
+	if err := service.admin.RenewRecentTOTP(ctx, transaction, sensitiveSession, service.now().UTC()); err != nil {
+		return mapSensitiveError(err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return ErrCredentialUnavailable
+	}
 	return nil
+}
+
+func mapSensitiveError(err error) error {
+	switch {
+	case errors.Is(err, security.ErrSensitiveRecentTOTPRequired):
+		return ErrRecentTOTPRequired
+	case errors.Is(err, security.ErrSensitiveAuthenticationFailed):
+		return ErrAuthenticationFailed
+	default:
+		return ErrCredentialUnavailable
+	}
 }
 
 type httpService interface {
