@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { HostedAPI } from '../src/hosted/api';
 import { createInvitationFlow, mountInvitationView } from '../src/hosted/invitations';
 import { createAdminRecoveryFlow } from '../src/hosted/admin';
@@ -134,7 +134,8 @@ describe('administrator recovery secret lifecycle', () => {
     const states: unknown[] = [];
     const api = { prepareRecovery: vi.fn(async () => ({ totpUri: secretURI, recoveryPassword: password, handoffToken: 'opaque-handoff' })), confirmRecovery: vi.fn(async () => undefined) };
     const flow = createAdminRecoveryFlow(api, (state) => states.push(structuredClone(state)));
-    await flow.prepare('proof', 'old-recovery-code');
+    expectTypeOf(flow.prepare).parameters.toEqualTypeOf<[recoveryCode: string]>();
+    await flow.prepare('old-recovery-code');
     expect(states.at(-1)).toEqual(expect.objectContaining({ totpUri: secretURI, recoveryPassword: password, archiveDelivery: 'email', canConfirm: false }));
     flow.acknowledge('totp'); flow.acknowledge('password');
     expect(states.at(-1)).toEqual(expect.objectContaining({ canConfirm: false }));
@@ -150,13 +151,13 @@ describe('administrator recovery secret lifecycle', () => {
     expect(JSON.stringify(flow)).not.toContain('opaque-handoff');
   });
 
-  it('can retry prepare with the same old code and a fresh Bilibili proof', async () => {
+  it('can retry prepare with the same old code without a Bilibili proof', async () => {
     const prepare = vi.fn(async () => ({ totpUri: 'otpauth://new', recoveryPassword: '12345678901234567890', handoffToken: 'same-handoff' }));
     const flow = createAdminRecoveryFlow({ prepareRecovery: prepare, confirmRecovery: vi.fn() }, vi.fn());
-    await flow.prepare('proof-one', 'same-old-code');
+    await flow.prepare('same-old-code');
     flow.close();
-    await flow.prepare('proof-two', 'same-old-code');
-    expect(prepare).toHaveBeenNthCalledWith(2, 'proof-two', 'same-old-code');
+    await flow.prepare('same-old-code');
+    expect(prepare).toHaveBeenNthCalledWith(2, 'same-old-code');
   });
 
   it('discards recovery handoff secrets that arrive after close', async () => {
@@ -164,7 +165,7 @@ describe('administrator recovery secret lifecycle', () => {
     const pending = new Promise<{ totpUri: string; recoveryPassword: string; handoffToken: string }>((resolve) => { release = resolve; });
     const states: unknown[] = [];
     const flow = createAdminRecoveryFlow({ prepareRecovery: () => pending, confirmRecovery: vi.fn() }, (state) => states.push(structuredClone(state)));
-    const preparing = flow.prepare('proof', 'old-code'); flow.close();
+    const preparing = flow.prepare('old-code'); flow.close();
     release({ totpUri: 'otpauth://late-secret', recoveryPassword: '12345678901234567890', handoffToken: 'late-token' });
     await preparing;
     expect(JSON.stringify(states)).not.toContain('late-secret');
@@ -177,7 +178,7 @@ describe('administrator recovery secret lifecycle', () => {
       prepareRecovery: vi.fn(async () => ({ totpUri: 'otpauth://new-secret', recoveryPassword: '12345678901234567890', handoffToken: 'private-handoff' })),
       confirmRecovery: vi.fn(async () => { throw new Error('private backend detail'); }),
     }, (state) => states.push(structuredClone(state)));
-    await flow.prepare('proof', 'old-code');
+    await flow.prepare('old-code');
     flow.acknowledge('totp'); flow.acknowledge('password'); flow.acknowledge('archive');
     await expect(flow.confirm('123456')).rejects.toThrow();
     expect(states.at(-1)).toEqual(expect.objectContaining({ error: '确认失败，请重试' }));

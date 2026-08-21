@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { HostedAPI, HostedAPIError } from '../src/hosted/api';
 import { createAuthFlow, mountAuthView } from '../src/hosted/auth';
-import { createAdminAccountFlow, createAdminFlow, createAdminOneTimeSecretFlow, mountAdminView } from '../src/hosted/admin';
+import { createAdminAccountFlow, createAdminFlow, createAdminOneTimeSecretFlow, createAdminRecoveryFlow } from '../src/hosted/admin';
 import { createHostedViewHost } from '../src/hosted/shell';
 
 function json(body: unknown, status = 200): Response {
@@ -81,13 +81,6 @@ describe('HostedAPI authentication contract', () => {
     );
   });
 
-  it('treats HTTP 202 verification_pending as an error state rather than login success', async () => {
-    const api = await HostedAPI.connect(async (input) => input === '/api/bootstrap'
-      ? json({ csrfToken: 'csrf' })
-      : json({ error: 'verification_pending' }, 202));
-    await expect(api.adminLogin('challenge', '123456')).rejects.toMatchObject({ code: 'verification_pending', status: 202 });
-  });
-
   it('checks an existing administrator session without a request body', async () => {
     const requests: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     const api = await HostedAPI.connect(async (input, init) => {
@@ -100,7 +93,20 @@ describe('HostedAPI authentication contract', () => {
     }]);
   });
 
-  it('uses an opaque email challenge and submits only the two short codes', async () => {
+  it('logs out only the administrator session through its exact DELETE route', async () => {
+    const requests: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    const api = await HostedAPI.connect(async (input, init) => {
+      requests.push([input, init]);
+      return input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : new Response(null, { status: 204 });
+    });
+    await api.adminLogout();
+    expect(requests[1]).toEqual(['/api/admin/session', {
+      credentials: 'same-origin', headers: { Accept: 'application/json', 'X-CSRF-Token': 'csrf' }, method: 'DELETE',
+    }]);
+    expect(requests.map(([input]) => input)).not.toContain('/api/auth/session');
+  });
+
+  it('uses an opaque email challenge and submits only its six email digits', async () => {
     const requests: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     const api = await HostedAPI.connect(async (input, init) => {
       requests.push([input, init]);
@@ -109,29 +115,32 @@ describe('HostedAPI authentication contract', () => {
       return new Response(null, { status: 204 });
     });
     await expect(api.beginAdminEmailLogin()).resolves.toEqual({ challengeId: 'email-proof', expiresAt: '2030-01-01T00:00:00Z' });
-    await api.adminEmailLogin('email-proof', '654321', '123456');
+    await api.adminEmailLogin('email-proof', '654321');
     expect(requests[1]?.[0]).toBe('/api/admin/auth/email/challenges');
-    expect(requests[2]).toEqual(['/api/admin/session/email', { credentials: 'same-origin', headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': 'csrf' }, method: 'POST', body: '{"challengeId":"email-proof","emailCode":"654321","totp":"123456"}' }]);
+    expect(requests[2]).toEqual(['/api/admin/session/email', { credentials: 'same-origin', headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': 'csrf' }, method: 'POST', body: '{"challengeId":"email-proof","emailCode":"654321"}' }]);
   });
 
-  it('polls administrator proof status without accepting identity fields', async () => {
-    const expiresAt = '2030-01-01T00:00:00Z';
-    let response = json({ status: 'pending', expiresAt });
+  it('prepares administrator recovery with only the recovery code', async () => {
     const requests: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     const api = await HostedAPI.connect(async (input, init) => {
       requests.push([input, init]);
-      return input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : response;
+      if (input === '/api/bootstrap') return json({ csrfToken: 'csrf' });
+      return json({ totpUri: 'otpauth://totp/panel?secret=NEWSECRET', recoveryPassword: '12345678901234567890', handoffToken: 'opaque-handoff' });
     });
-    await expect(api.pollAdminProof('proof/id')).resolves.toEqual({ status: 'pending', expiresAt });
-    expect(requests[1]).toEqual(['/api/admin/auth/bili/challenges/proof%2Fid', {
-      credentials: 'same-origin', headers: { Accept: 'application/json' }, method: 'GET',
+    await api.prepareRecovery('old-recovery-code');
+    expect(requests[1]).toEqual(['/api/admin/recovery/prepare', {
+      credentials: 'same-origin', headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': 'csrf' }, method: 'POST', body: '{"recoveryCode":"old-recovery-code"}',
     }]);
-    response = json({ status: 'verified', expiresAt });
-    await expect(api.pollAdminProof('proof')).resolves.toEqual({ status: 'verified', expiresAt });
-    response = json({ status: 'expired' }, 410);
-    await expect(api.pollAdminProof('proof')).resolves.toEqual({ status: 'expired' });
-    response = json({ status: 'verified', expiresAt, uid: 32249588 });
-    await expect(api.pollAdminProof('proof')).rejects.toMatchObject({ code: 'invalid_response' });
+  });
+
+  it('does not retain administrator Bilibili login methods while preserving service replacement', async () => {
+    const api = await HostedAPI.connect(async (input) => input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : new Response(null, { status: 204 }));
+    expect(api).not.toHaveProperty('beginAdminProof');
+    expect(api).not.toHaveProperty('pollAdminProof');
+    expect(api).not.toHaveProperty('cancelAdminProof');
+    expect(api).not.toHaveProperty('adminLogin');
+    expect(api).toHaveProperty('beginBiliServiceChallenge');
+    expect(api).toHaveProperty('replaceBiliServiceCredential');
   });
 
   it('requires exact 204 void success and exact 410 expiry envelopes', async () => {
@@ -158,12 +167,6 @@ describe('HostedAPI authentication contract', () => {
     await expect(api.enableAccount(7, 'appeal')).rejects.toMatchObject({ code: 'invalid_response' });
   });
 
-  it('accepts a disabled account returned by a committed rebind', async () => {
-    const api = await HostedAPI.connect(async (input) => input === '/api/bootstrap'
-      ? json({ csrfToken: 'csrf' })
-      : json({ accountId: 7, status: 'disabled' }));
-    await expect(api.rebindAccount(7, 'fresh-proof', 'security hold')).resolves.toEqual({ accountId: 7, status: 'disabled' });
-  });
 });
 
 describe('Bilibili authentication lifecycle', () => {
@@ -332,52 +335,36 @@ describe('Bilibili authentication lifecycle', () => {
 });
 
 describe('administrator flow', () => {
-  it('supports Bilibili proof plus TOTP and recent-TOTP retry', async () => {
-    const api = { beginAdminProof: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: '2030-01-01T00:00:00Z' })), pollAdminProof: vi.fn(async () => ({ status: 'verified' as const, expiresAt: '2030-01-01T00:00:00Z' })), adminLogin: vi.fn(async () => undefined), verifyRecentTOTP: vi.fn(async () => undefined), cancelAdminProof: vi.fn(async () => undefined) };
+  it('uses TOTP only after a protected operation requires it', async () => {
+    const api = { verifyRecentTOTP: vi.fn(async () => undefined) };
     const flow = createAdminFlow(api);
-    await flow.beginProof();
-    await expect(flow.pollProof()).resolves.toMatchObject({ status: 'verified' });
-    await flow.login('123456');
     let attempts = 0;
     await flow.runWithRecentTOTP('654321', async () => {
       attempts += 1;
       if (attempts === 1) throw new HostedAPIError('recent_totp_required', 403);
     });
-    expect(api.adminLogin).toHaveBeenCalledWith('proof', '123456');
-    expect(api.pollAdminProof).toHaveBeenCalledWith('proof');
     expect(api.verifyRecentTOTP).toHaveBeenCalledWith('654321');
     expect(attempts).toBe(2);
   });
 
-  it('drives disable, enable, quota, and fresh-proof reasoned rebind without caller UID', async () => {
+  it('drives disable, enable, and quota mutations without an administrator Bilibili proof', async () => {
     const api = {
       disableAccount: vi.fn(async () => ({ accountId: 7, status: 'disabled' as const })),
       enableAccount: vi.fn(async () => ({ accountId: 7, status: 'active' as const })),
       adjustQuota: vi.fn(async () => undefined),
-      beginAdminProof: vi.fn(async () => ({ challengeId: 'fresh-proof', qrImage: 'qr', expiresAt: '2030-01-01T00:00:00Z' })),
-      cancelAdminProof: vi.fn(async () => undefined),
-      rebindAccount: vi.fn(async () => ({ accountId: 7, status: 'active' as const })),
     };
     const flow = createAdminAccountFlow(api);
     await flow.disable(7, 'security'); await flow.enable(7, 'appeal'); await flow.adjustQuota(7, 3, 'pilot');
-    await flow.beginRebind(); await flow.rebind(7, 'verified ownership');
     expect(api.disableAccount).toHaveBeenCalledWith(7, 'security');
     expect(api.enableAccount).toHaveBeenCalledWith(7, 'appeal');
     expect(api.adjustQuota).toHaveBeenCalledWith(7, 3, 'pilot');
-    expect(api.rebindAccount).toHaveBeenCalledWith(7, 'fresh-proof', 'verified ownership');
-    expect(JSON.stringify(api.rebindAccount.mock.calls)).not.toContain('uid');
   });
 
-  it('forgets the previous administrator proof before replacing it', async () => {
-    const cancel = vi.fn(async () => undefined);
-    const api = {
-      beginAdminProof: vi.fn().mockResolvedValueOnce({ challengeId: 'old', qrImage: 'old-qr', expiresAt: '2030-01-01T00:00:00Z' }).mockResolvedValueOnce({ challengeId: 'fresh', qrImage: 'fresh-qr', expiresAt: '2030-01-01T00:00:00Z' }),
-      pollAdminProof: vi.fn(),
-      adminLogin: vi.fn(), verifyRecentTOTP: vi.fn(), cancelAdminProof: cancel,
-    };
-    const flow = createAdminFlow(api);
-    await flow.beginProof(); await flow.beginProof(); await flow.dispose();
-    expect(cancel.mock.calls).toEqual([['old'], ['fresh']]);
+  it('prepares recovery without carrying a Bilibili challenge through the admin flow', async () => {
+    const prepareRecovery = vi.fn(async () => ({ totpUri: 'otpauth://new', recoveryPassword: '12345678901234567890', handoffToken: 'handoff' }));
+    const flow = createAdminRecoveryFlow({ prepareRecovery, confirmRecovery: vi.fn() }, vi.fn());
+    await flow.prepare('old-recovery-code');
+    expect(prepareRecovery).toHaveBeenCalledWith('old-recovery-code');
   });
 
   it('serializes one-time admin secrets and drops late results after close or dispose', async () => {
@@ -408,70 +395,4 @@ describe('administrator flow', () => {
     expect(JSON.stringify(states.at(-1))).not.toContain('NEW-ADMIN-SECRET');
   });
 
-  it('erases an open admin secret before an earlier proof rerenders the dashboard', async () => {
-    class Element {
-      children: Element[] = []; parent?: Element; textContent = ''; className = ''; id = ''; type = ''; value = ''; autocomplete = ''; inputMode = ''; src = ''; alt = ''; disabled = false; open = false;
-      attributes = new Map<string, string>(); listeners = new Map<string, () => void>();
-      constructor(readonly tagName: string, readonly ownerDocument: { createElement(tag: string): Element }) {}
-      get firstElementChild() { return this.children[0]; }
-      append(...nodes: Element[]) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
-      replaceChildren(...nodes: Element[]) { for (const child of this.children) child.parent = undefined; this.children = []; this.append(...nodes); }
-      remove() { if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this); this.parent = undefined; }
-      setAttribute(name: string, value: string) { this.attributes.set(name, value); }
-      removeAttribute(name: string) { this.attributes.delete(name); }
-      addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); }
-      removeEventListener(name: string) { this.listeners.delete(name); }
-      focus() {}
-    }
-    const document = { createElement: (tag: string): Element => new Element(tag, document) };
-    const root = new Element('div', document) as unknown as HTMLElement;
-    const findButton = (label: string): Element | undefined => {
-      const visit = (node: Element): Element | undefined => node.tagName === 'button' && node.textContent === label
-        ? node : node.children.map(visit).find(Boolean);
-      return visit(root as unknown as Element);
-    };
-    let releaseRebind!: (challenge: { challengeId: string; qrImage: string; expiresAt: string }) => void;
-    const pendingRebind = new Promise<{ challengeId: string; qrImage: string; expiresAt: string }>((resolve) => { releaseRebind = resolve; });
-    const beginAdminProof = vi.fn()
-      .mockResolvedValueOnce({ challengeId: 'login-proof', qrImage: 'login-qr', expiresAt: '2030-01-01T00:00:00Z' })
-      .mockImplementationOnce(() => pendingRebind);
-    const api = {
-      adminSession: vi.fn(async () => { throw new HostedAPIError('authentication_failed', 401); }),
-      beginAdminEmailLogin: vi.fn(async () => ({ challengeId: 'email-proof', expiresAt: '2030-01-01T00:00:00Z' })), adminEmailLogin: vi.fn(async () => undefined),
-      beginAdminProof, pollAdminProof: vi.fn(async () => ({ status: 'verified' as const, expiresAt: '2030-01-01T00:00:00Z' })), cancelAdminProof: vi.fn(async () => undefined), adminLogin: vi.fn(async () => undefined), logout: vi.fn(async () => undefined), verifyRecentTOTP: vi.fn(async () => undefined),
-      disableAccount: vi.fn(), enableAccount: vi.fn(), adjustQuota: vi.fn(), rebindAccount: vi.fn(),
-      biliServiceStatus: vi.fn(async () => ({ version: 0 as const, health: 'missing' as const })),
-      generateInvitation: vi.fn(async () => ({ id: 8, codeHint: '****LAST', code: 'ONE-TIME-ADMIN-CODE', status: 'active' as const, createdAt: '2026-08-16T00:00:00Z', expiresAt: '2026-08-17T00:00:00Z' })),
-      sendRecoveryArchive: vi.fn(), prepareRecovery: vi.fn(), confirmRecovery: vi.fn(),
-    };
-    const writeText = vi.fn(async () => undefined);
-    const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
-    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText } } });
-    try {
-      const mounted = mountAdminView(root, api as unknown as HostedAPI);
-      await vi.waitFor(() => expect(findButton('使用 B站扫码')).toBeDefined());
-      findButton('使用 B站扫码')?.listeners.get('click')?.();
-      await vi.waitFor(() => expect(beginAdminProof).toHaveBeenCalledTimes(1));
-      findButton('我已完成验证')?.listeners.get('click')?.();
-      await vi.waitFor(() => expect((root as unknown as Element).children[0].children.find((child) => child.className === 'hosted-code-control')).toBeDefined());
-      const codeRoot = (root as unknown as Element).children[0].children.find((child) => child.className === 'hosted-code-control');
-      const codeInput = codeRoot?.children[0]; if (codeInput) { codeInput.value = '123456'; codeInput.listeners.get('input')?.(); }
-      await vi.waitFor(() => expect(findButton('账号')).toBeDefined());
-      findButton('账号')?.listeners.get('click')?.();
-      await vi.waitFor(() => expect(findButton('创建新的 B 站身份验证')).toBeDefined());
-      findButton('创建新的 B 站身份验证')?.listeners.get('click')?.(); await vi.waitFor(() => expect(beginAdminProof).toHaveBeenCalledTimes(2));
-      findButton('邀请')?.listeners.get('click')?.();
-      await vi.waitFor(() => expect(findButton('生成不限额度邀请码')).toBeDefined());
-      findButton('生成不限额度邀请码')?.listeners.get('click')?.(); await vi.waitFor(() => expect(findButton('复制邀请码')).toBeDefined());
-      const staleCopy = findButton('复制邀请码');
-      releaseRebind({ challengeId: 'rebind-proof', qrImage: 'rebind-qr', expiresAt: '2030-01-01T00:00:00Z' });
-      await vi.waitFor(() => expect(findButton('复制邀请码')).toBeUndefined());
-      staleCopy?.listeners.get('click')?.(); await Promise.resolve();
-      expect(writeText).not.toHaveBeenCalled();
-      await mounted.dispose();
-    } finally {
-      if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator);
-      else Reflect.deleteProperty(globalThis, 'navigator');
-    }
-  });
 });

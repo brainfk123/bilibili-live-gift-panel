@@ -1,44 +1,14 @@
-import { HostedAPIError, type AdminProofStatus, type BiliServiceStatus, type Challenge, type HostedAPI, type RecoveryPreparation } from './api';
+import { HostedAPIError, type BiliServiceStatus, type Challenge, type HostedAPI, type RecoveryPreparation } from './api';
 import { mountAdminLogin } from './admin-login';
 import { mountAdminShell } from './admin/shell';
 import type { AdminSection } from './admin/routes';
 
 interface AdminLoginAPI {
-  beginAdminProof(): Promise<Challenge>;
-  pollAdminProof(id: string): Promise<AdminProofStatus>;
-  cancelAdminProof(id: string): Promise<void>;
-  adminLogin(challengeId: string, totp: string): Promise<void>;
   verifyRecentTOTP(totp: string): Promise<void>;
 }
 
 export function createAdminFlow(api: AdminLoginAPI) {
-  let proof: Challenge | undefined;
-  let generation = 0;
-  let disposed = false;
   return Object.freeze({
-    async beginProof(): Promise<Challenge> {
-      if (proof) await api.cancelAdminProof(proof.challengeId);
-      proof = undefined;
-      const current = ++generation;
-      const created = await api.beginAdminProof();
-      if (disposed || current !== generation) { await api.cancelAdminProof(created.challengeId); return created; }
-      proof = created; return proof;
-    },
-    async pollProof(): Promise<AdminProofStatus> {
-      if (!proof) throw new HostedAPIError('invalid_request', 400);
-      const id = proof.challengeId;
-      const status = await api.pollAdminProof(id);
-      if (status.status === 'expired') proof = undefined;
-      return status;
-    },
-    async login(totp: string): Promise<void> {
-      if (!proof) throw new HostedAPIError('invalid_request', 400);
-      const id = proof.challengeId;
-      try { await api.adminLogin(id, totp); proof = undefined; } catch (error) {
-        if (!(error instanceof HostedAPIError && error.code === 'verification_pending')) proof = undefined;
-        throw error;
-      }
-    },
     async runWithRecentTOTP(totp: string, action: () => Promise<void>): Promise<void> {
       try { await action(); } catch (error) {
         if (!(error instanceof HostedAPIError) || error.code !== 'recent_totp_required') throw error;
@@ -46,7 +16,7 @@ export function createAdminFlow(api: AdminLoginAPI) {
         await action();
       }
     },
-    async dispose(): Promise<void> { disposed = true; generation += 1; const current = proof; proof = undefined; if (current) await api.cancelAdminProof(current.challengeId); },
+    async dispose(): Promise<void> {},
   });
 }
 
@@ -107,41 +77,22 @@ export function createBiliServiceFlow(api: BiliServiceAPI) {
 }
 
 interface AdminAccountAPI {
-  beginAdminProof(): Promise<Challenge>;
-  cancelAdminProof(id: string): Promise<void>;
   disableAccount(accountId: number, reason: string): Promise<unknown>;
   enableAccount(accountId: number, reason: string): Promise<unknown>;
   adjustQuota(accountId: number, remainingQuota: number, reason: string): Promise<void>;
-  rebindAccount(accountId: number, challengeId: string, reason: string): Promise<unknown>;
 }
 
 export function createAdminAccountFlow(api: AdminAccountAPI) {
-  let rebindProof: Challenge | undefined;
-  let generation = 0;
-  let disposed = false;
   return Object.freeze({
     async disable(accountId: number, reason: string): Promise<void> { await api.disableAccount(accountId, reason); },
     async enable(accountId: number, reason: string): Promise<void> { await api.enableAccount(accountId, reason); },
     async adjustQuota(accountId: number, remainingQuota: number, reason: string): Promise<void> { await api.adjustQuota(accountId, remainingQuota, reason); },
-    async beginRebind(): Promise<Challenge> {
-      if (rebindProof) await api.cancelAdminProof(rebindProof.challengeId);
-      rebindProof = undefined;
-      const current = ++generation;
-      const created = await api.beginAdminProof();
-      if (disposed || current !== generation) { await api.cancelAdminProof(created.challengeId); return created; }
-      rebindProof = created; return rebindProof;
-    },
-    async rebind(accountId: number, reason: string): Promise<void> {
-      if (!rebindProof || !reason.trim()) throw new HostedAPIError('invalid_request', 400);
-      await api.rebindAccount(accountId, rebindProof.challengeId, reason);
-      rebindProof = undefined;
-    },
-    async dispose(): Promise<void> { disposed = true; generation += 1; const current = rebindProof; rebindProof = undefined; if (current) await api.cancelAdminProof(current.challengeId); },
+    async dispose(): Promise<void> {},
   });
 }
 
 interface RecoveryAPI {
-  prepareRecovery(challengeId: string, recoveryCode: string): Promise<RecoveryPreparation>;
+  prepareRecovery(recoveryCode: string): Promise<RecoveryPreparation>;
   confirmRecovery(handoffToken: string, totp: string): Promise<void>;
 }
 
@@ -167,10 +118,10 @@ export function createAdminRecoveryFlow(api: RecoveryAPI, render: (state: Recove
   });
   const clear = (): void => { generation += 1; preparation = undefined; acknowledged.clear(); publish(); };
   return Object.freeze({
-    async prepare(challengeId: string, recoveryCode: string): Promise<void> {
+    async prepare(recoveryCode: string): Promise<void> {
       const current = ++generation;
       error = undefined;
-      const result = await api.prepareRecovery(challengeId, recoveryCode);
+      const result = await api.prepareRecovery(recoveryCode);
       if (current !== generation) return;
       preparation = result;
       acknowledged.clear(); publish();
@@ -247,10 +198,6 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
   const biliServiceFlow = createBiliServiceFlow(api);
   const accountFlow = createAdminAccountFlow(api);
   let disposed = false;
-  let recoveryProof: Challenge | undefined;
-  let recoveryProofGeneration = 0;
-  let rebindProof: Challenge | undefined;
-  let recoveryFlow: ReturnType<typeof createAdminRecoveryFlow> | undefined;
   let adminSecretFlow: ReturnType<typeof createAdminOneTimeSecretFlow>;
   let clearTransientSecret: (() => void) | undefined;
   let loginMount: { dispose(): Promise<void> } | undefined;
@@ -276,7 +223,7 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
           const [label, input] = labelledInput(document, '当前 TOTP（仅高风险操作需要）', 'password'); addSecret(input); return [label, input];
         };
         const guarded = (recent: HTMLInputElement, action: () => Promise<void>): void => {
-          void loginFlow.runWithRecentTOTP(recent.value, action).then(() => { recent.value = ''; status.textContent = '操作成功'; }).catch(() => { status.textContent = '操作失败，请检查验证码与输入'; });
+          void loginFlow.runWithRecentTOTP(recent.value, action).then(() => { status.textContent = '操作成功'; }).catch(() => { status.textContent = '操作失败，请检查验证码与输入'; }).finally(() => { recent.value = ''; });
         };
         host.append(title, intro, status);
 
@@ -300,14 +247,7 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
             button(document, '启用账号', () => guarded(recent, async () => { await accountFlow.enable(accountID(), reason.value); })),
             button(document, '调整邀请码额度', () => guarded(recent, async () => { await accountFlow.adjustQuota(accountID(), Number(quota.value), reason.value); })),
           );
-          const rebind = document.createElement('section'); rebind.className = 'hosted-admin-card'; const rebindTitle = document.createElement('h3'); rebindTitle.textContent = '例外换绑'; rebind.append(rebindTitle, button(document, '创建新的 B 站身份验证', () => {
-            void accountFlow.beginRebind().then((created) => { if (!disposed) { rebindProof = created; renderDashboard(); } }).catch(() => { status.textContent = '无法创建验证'; });
-          }));
-          if (rebindProof) {
-            const qr = document.createElement('img'); qr.className = 'hosted-qr'; qr.alt = '换绑身份验证二维码'; qr.src = rebindProof.qrImage;
-            rebind.append(qr, button(document, '确认换绑', () => guarded(recent, async () => { if (!reason.value.trim()) throw new HostedAPIError('invalid_request', 400); await accountFlow.rebind(accountID(), reason.value); rebindProof = undefined; })));
-          }
-          host.append(recentLabel, danger, rebind);
+          host.append(recentLabel, danger);
         }
 
         if (section === 'invitations') {
@@ -340,12 +280,6 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
           title.textContent = '安全与恢复'; intro.textContent = '恢复资料属于最高敏感操作，完成后页面会清除一次性内容。';
           const [recentLabel, recent] = recentControl(); const card = document.createElement('section'); card.className = 'hosted-admin-card hosted-admin-danger';
           card.append(button(document, '发送新的加密恢复附件', () => guarded(recent, async () => { await adminSecretFlow.run(async () => { const result = await api.sendRecoveryArchive(); return { title: '附件已发送到管理员邮箱', value: result.recoveryPassword, copyLabel: '复制解密密码' }; }); })));
-          const [codeLabel, oldCode] = labelledInput(document, '旧恢复码', 'password'); addSecret(oldCode); card.append(codeLabel, button(document, '创建恢复用 B 站验证', () => {
-            void (async () => { if (recoveryProof) await api.cancelAdminProof(recoveryProof.challengeId); recoveryProof = undefined; const generation = ++recoveryProofGeneration; const created = await api.beginAdminProof(); if (disposed || generation !== recoveryProofGeneration) { await api.cancelAdminProof(created.challengeId); return; } recoveryProof = created; renderDashboard(); })().catch(() => { status.textContent = '无法创建验证'; });
-          }));
-          if (recoveryProof) {
-            const qr = document.createElement('img'); qr.className = 'hosted-qr'; qr.alt = '管理员恢复二维码'; qr.src = recoveryProof.qrImage; card.append(qr, button(document, '准备恢复或重试取回交接', () => { const proof = recoveryProof; if (!proof) return; recoveryFlow ??= createAdminRecoveryFlow(api, renderRecovery); void recoveryFlow.prepare(proof.challengeId, oldCode.value).then(() => { recoveryProof = undefined; }).catch(() => { status.textContent = '验证待确认或恢复失败'; }); oldCode.value = ''; }));
-          }
           host.append(recentLabel, card);
         }
         return { dispose: () => { for (const input of localSecrets) { input.value = ''; secretInputs.delete(input); } } };
@@ -370,30 +304,6 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
     if (state.presentation) showOneTimeSecret(state.presentation);
   });
 
-  const renderRecovery = (state: RecoveryViewState): void => {
-    const previousShell = adminShell; adminShell = undefined; if (previousShell) void previousShell.dispose();
-    adminSecretFlow.close();
-    if (!state.totpUri || !state.recoveryPassword) { renderDashboard(); return; }
-    const panel = document.createElement('main'); panel.className = 'hosted-shell hosted-panel';
-    const title = document.createElement('h1'); title.textContent = '保存新的管理员恢复资料';
-    const recoveryStatus = document.createElement('p'); recoveryStatus.setAttribute('role', 'alert'); recoveryStatus.setAttribute('aria-live', 'assertive'); recoveryStatus.textContent = state.error ?? '';
-    const note = document.createElement('p'); note.textContent = '加密恢复附件已发送到管理员邮箱，网页只显示独立解密密码。';
-    const uri = document.createElement('code'); uri.textContent = state.totpUri; const password = document.createElement('code'); password.textContent = state.recoveryPassword;
-    const acknowledgements = ['totp', 'password', 'archive'] as const;
-    panel.append(title, recoveryStatus, note, uri, password);
-    for (const item of acknowledgements) {
-      const label = document.createElement('label'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox';
-      checkbox.checked = state.acknowledged[item];
-      label.append(checkbox, document.createTextNode(item === 'totp' ? '我已保存新 TOTP' : item === 'password' ? '我已保存解密密码' : '我已收到邮件附件'));
-      checkbox.addEventListener('change', () => recoveryFlow?.acknowledge(item, checkbox.checked)); panel.append(label);
-    }
-    const [totpLabel, totp] = labelledInput(document, '新 TOTP', 'password'); secretInputs.add(totp); const confirm = button(document, '确认恢复', () => {
-      const value = totp.value; totp.value = '';
-      void recoveryFlow?.confirm(value).then(() => { recoveryFlow = undefined; renderLogin(); }).catch(() => { status.textContent = '确认失败'; });
-    }); confirm.disabled = !state.canConfirm;
-    panel.append(totpLabel, confirm, button(document, '关闭并清除页面秘密', () => { recoveryFlow?.close(); recoveryFlow = undefined; renderLogin(); })); root.replaceChildren(panel);
-  };
-
   const renderLogin = (): void => {
     adminSecretFlow.close();
     const previousShell = adminShell; adminShell = undefined; if (previousShell) void previousShell.dispose();
@@ -402,16 +312,15 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
   };
   renderLogin();
   return Object.freeze({ dispose: async () => {
-    disposed = true; recoveryProofGeneration += 1; recoveryFlow?.close(); recoveryFlow = undefined;
+    disposed = true;
     adminSecretFlow.dispose();
     biliServiceFlow.dispose();
     clearTransientSecret?.(); clearTransientSecret = undefined;
     for (const input of secretInputs) input.value = '';
     secretInputs.clear();
-    if (recoveryProof) await api.cancelAdminProof(recoveryProof.challengeId);
     await loginMount?.dispose(); loginMount = undefined;
     await adminShell?.dispose(); adminShell = undefined;
     await accountFlow.dispose();
-    recoveryProof = undefined; rebindProof = undefined; await loginFlow.dispose(); root.replaceChildren();
+    await loginFlow.dispose(); root.replaceChildren();
   } });
 }

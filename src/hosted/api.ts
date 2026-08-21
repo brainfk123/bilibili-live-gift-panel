@@ -23,11 +23,6 @@ export type PollResult =
   | { status: 'registration_required'; registrationIntent: string; expiresAt: string }
   | { status: 'expired' };
 
-export type AdminProofStatus =
-  | { status: 'pending'; expiresAt: string }
-  | { status: 'verified'; expiresAt: string }
-  | { status: 'expired' };
-
 export interface InvitationRecord {
   id: number;
   codeHint: string;
@@ -450,27 +445,14 @@ export class HostedAPI {
     return result;
   }
 
-  async beginAdminProof(): Promise<Challenge> { return this.requireChallenge((await this.request('/api/admin/auth/bili/challenges', 'POST', 201)).data); }
   async beginAdminEmailLogin(): Promise<EmailLoginChallenge> {
     const data = object((await this.request('/api/admin/auth/email/challenges', 'POST', 201, {})).data);
     if (!data || !exactKeys(data, ['challengeId', 'expiresAt']) || !string(data.challengeId) || !instant(data.expiresAt)) throw new HostedAPIError('invalid_response', 201);
     return { challengeId: data.challengeId, expiresAt: data.expiresAt };
   }
-  async pollAdminProof(id: string): Promise<AdminProofStatus> {
-    const response = await this.request(`/api/admin/auth/bili/challenges/${encodeURIComponent(id)}`, 'GET', [200, 410]);
-    const data = object(response.data);
-    if (!data || !string(data.status)) throw new HostedAPIError('invalid_response', response.status);
-    if (response.status === 410) {
-      if (data.status === 'expired' && exactKeys(data, ['status'])) return { status: 'expired' };
-      throw new HostedAPIError('invalid_response', response.status);
-    }
-    if ((data.status === 'pending' || data.status === 'verified') && exactKeys(data, ['status', 'expiresAt']) && instant(data.expiresAt)) {
-      return { status: data.status, expiresAt: data.expiresAt };
-    }
-    throw new HostedAPIError('invalid_response', response.status);
-  }
   async adminSession(): Promise<void> { await this.request('/api/admin/session', 'GET', 204); }
-  async adminEmailLogin(challengeId: string, emailCode: string, totp: string): Promise<void> { await this.request('/api/admin/session/email', 'POST', 204, { challengeId, emailCode, totp }); }
+  async adminLogout(): Promise<void> { await this.request('/api/admin/session', 'DELETE', 204); }
+  async adminEmailLogin(challengeId: string, emailCode: string): Promise<void> { await this.request('/api/admin/session/email', 'POST', 204, { challengeId, emailCode }); }
   async biliServiceStatus(): Promise<BiliServiceStatus> {
     const data = object((await this.request('/api/admin/bili-service/status', 'GET', 200)).data);
     if (!data || !number(data.version) || !string(data.health)) throw new HostedAPIError('invalid_response', 200);
@@ -500,16 +482,14 @@ export class HostedAPI {
     }
     return { publicId: data.publicId, url: data.url };
   }
-  async cancelAdminProof(id: string): Promise<void> { await this.request(`/api/admin/auth/bili/challenges/${encodeURIComponent(id)}`, 'DELETE', 204); }
-  async adminLogin(challengeId: string, totp: string): Promise<void> { await this.request('/api/admin/session', 'POST', 204, { challengeId, totp }); }
   async verifyRecentTOTP(totp: string): Promise<void> { await this.request('/api/admin/totp', 'POST', 204, { totp }); }
   async sendRecoveryArchive(): Promise<{ recoveryPassword: string }> {
     const data = object((await this.request('/api/admin/recovery/archive', 'POST', 200, {})).data);
     if (!data || Object.keys(data).length !== 1 || !string(data.recoveryPassword) || data.recoveryPassword.length !== 20) throw new HostedAPIError('invalid_response', 200);
     return { recoveryPassword: data.recoveryPassword };
   }
-  async prepareRecovery(challengeId: string, recoveryCode: string): Promise<RecoveryPreparation> {
-    const data = object((await this.request('/api/admin/recovery/prepare', 'POST', 200, { challengeId, recoveryCode })).data);
+  async prepareRecovery(recoveryCode: string): Promise<RecoveryPreparation> {
+    const data = object((await this.request('/api/admin/recovery/prepare', 'POST', 200, { recoveryCode })).data);
     if (!data || !exactKeys(data, ['totpUri', 'recoveryPassword', 'handoffToken']) || !string(data.totpUri) || !data.totpUri.startsWith('otpauth://') || !string(data.recoveryPassword) || data.recoveryPassword.length !== 20 || !string(data.handoffToken)) throw new HostedAPIError('invalid_response', 200);
     return { totpUri: data.totpUri, recoveryPassword: data.recoveryPassword, handoffToken: data.handoffToken };
   }
@@ -520,7 +500,6 @@ export class HostedAPI {
   }
   async disableAccount(accountId: number, reason: string): Promise<ManagedAccount> { return this.accountMutation(accountId, 'disable', ['disabled'], { reason }); }
   async enableAccount(accountId: number, reason: string): Promise<ManagedAccount> { return this.accountMutation(accountId, 'enable', ['active'], { reason }); }
-  async rebindAccount(accountId: number, challengeId: string, reason: string): Promise<ManagedAccount> { return this.accountMutation(accountId, 'rebind', ['active', 'disabled'], { challengeId, reason }); }
   private async accountMutation(accountId: number, action: string, expectedAccountStatuses: readonly ManagedAccount['status'][], body: unknown): Promise<ManagedAccount> {
     const data = object((await this.request(`/api/admin/accounts/${accountId}/${action}`, 'POST', 200, body)).data);
     const status = expectedAccountStatuses.find((expected) => data?.status === expected);
