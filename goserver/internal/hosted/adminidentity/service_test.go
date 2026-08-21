@@ -362,6 +362,90 @@ func TestVerifyRecentTOTPRejectsReplayAndExpiresAtTenMinutes(t *testing.T) {
 	}
 }
 
+func TestVerifyRecentTOTPOpensExactWindowFromVerificationInstant(t *testing.T) {
+	verifiedAt := time.Date(2026, 8, 16, 10, 20, 29, 0, time.UTC)
+	clock := verifiedAt
+	repository := initializedMemoryRepository(t, verifiedAt)
+	sender := &MemorySender{}
+	service := newTestServiceWithClock(t, repository, sender, func() time.Time { return clock })
+	login := emailLoginForTest(t, service, sender)
+
+	if err := service.VerifyRecentTOTP(context.Background(), login.Token, "123456"); err != nil {
+		t.Fatalf("VerifyRecentTOTP() error = %v", err)
+	}
+	clock = verifiedAt.Add(9*time.Minute + 59*time.Second)
+	if err := service.RequireRecentTOTP(context.Background(), login.Token); err != nil {
+		t.Fatalf("RequireRecentTOTP(9m59s after verification) error = %v", err)
+	}
+	clock = verifiedAt.Add(10 * time.Minute)
+	if err := service.RequireRecentTOTP(context.Background(), login.Token); !errors.Is(err, ErrRecentTOTPRequired) {
+		t.Fatalf("RequireRecentTOTP(10m after verification) error = %v, want ErrRecentTOTPRequired", err)
+	}
+}
+
+func TestSQLRepositoryConfirmTOTPStoresVerificationInstantNotCodeStep(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	verifiedAt := time.Date(2026, 8, 16, 10, 20, 29, 0, time.UTC)
+	codeStep := verifiedAt.Truncate(30 * time.Second)
+	tokenHash := bytes.Repeat([]byte{0x5a}, sha256.Size)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
+	mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
+		WithArgs(tokenHash).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).
+			AddRow(int64(17), int64(4), verifiedAt.Add(time.Hour), nil))
+	mock.ExpectQuery(sqlPattern("SELECT MAX(totp_verified_at) FROM site_sessions WHERE admin_identity_id = 1 AND credential_epoch = ?")).
+		WithArgs(int64(4)).
+		WillReturnRows(sqlmock.NewRows([]string{"totp_verified_at"}).AddRow(nil))
+	mock.ExpectExec(sqlPattern("UPDATE site_sessions SET totp_verified_at = ? WHERE id = ? AND revoked_at IS NULL AND credential_epoch = ?")).
+		WithArgs(verifiedAt, int64(17), int64(4)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := repository.ConfirmTOTP(context.Background(), ConfirmTOTPAttempt{
+		ExpectedCredentialEpoch: 4,
+		TokenHash:               tokenHash,
+		Now:                     verifiedAt,
+		TOTPStep:                codeStep,
+	}); err != nil {
+		t.Fatalf("ConfirmTOTP() error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVerifyRecentTOTPRejectsFutureCodeStep(t *testing.T) {
+	now := time.Date(2026, 8, 16, 10, 21, 29, 0, time.UTC)
+	repository := initializedMemoryRepository(t, now)
+	sender := &MemorySender{}
+	keys, err := security.NewKeyring(1, bytes.Repeat([]byte{0x41}, 32), bytes.Repeat([]byte{0x72}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(repository, keys, sender, ServiceOptions{
+		Now: func() time.Time { return now }, TOTP: futureStepTOTP{}, Random: &sequenceReader{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := emailLoginForTest(t, service, sender)
+
+	if err := service.VerifyRecentTOTP(context.Background(), login.Token, "123456"); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("VerifyRecentTOTP(future step) error = %v, want ErrAuthenticationFailed", err)
+	}
+	if err := service.RequireRecentTOTP(context.Background(), login.Token); !errors.Is(err, ErrRecentTOTPRequired) {
+		t.Fatalf("RequireRecentTOTP() after rejected future step error = %v, want ErrRecentTOTPRequired", err)
+	}
+}
+
 func TestSensitiveAuthorizationRenewsExactSessionAtOperationCompletion(t *testing.T) {
 	database, mock, err := sqlmock.New()
 	if err != nil {
@@ -428,6 +512,7 @@ func TestSensitiveAuthorizationUsesExactTenMinuteBoundaryAndActiveEpoch(t *testi
 		{name: "9m59s remains active", sessionEpoch: 4, expiresAt: now.Add(time.Hour), verifiedAt: now.Add(-9*time.Minute - 59*time.Second)},
 		{name: "10m idle is expired", sessionEpoch: 4, expiresAt: now.Add(time.Hour), verifiedAt: now.Add(-10 * time.Minute), wantError: ErrRecentTOTPRequired},
 		{name: "missing totp", sessionEpoch: 4, expiresAt: now.Add(time.Hour), verifiedAt: nil, wantError: ErrRecentTOTPRequired},
+		{name: "any future timestamp is invalid", sessionEpoch: 4, expiresAt: now.Add(time.Hour), verifiedAt: now.Add(time.Nanosecond), wantError: ErrRecentTOTPRequired},
 		{name: "future beyond skew", sessionEpoch: 4, expiresAt: now.Add(time.Hour), verifiedAt: now.Add(30*time.Second + time.Nanosecond), wantError: ErrRecentTOTPRequired},
 		{name: "revoked session", sessionEpoch: 4, expiresAt: now.Add(time.Hour), revokedAt: revokedAt, verifiedAt: now.Add(-time.Minute), wantError: ErrAuthenticationFailed},
 		{name: "expired session", sessionEpoch: 4, expiresAt: now, verifiedAt: now.Add(-time.Minute), wantError: ErrAuthenticationFailed},
@@ -1083,7 +1168,7 @@ func TestSQLRepositoryHandoffMailClaimReleaseFailureIsGeneric(t *testing.T) {
 	}
 }
 
-func TestSQLRepositoryRecoveryHandoffRollsBackAllCredentialChanges(t *testing.T) {
+func TestSQLRepositoryRecoveryHandoffLocksAdminIdentityBeforeHandoffAndRecoveryCodes(t *testing.T) {
 	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -1093,14 +1178,16 @@ func TestSQLRepositoryRecoveryHandoffRollsBackAllCredentialChanges(t *testing.T)
 	now := time.Date(2026, 8, 16, 10, 7, 0, 0, time.UTC)
 	tokenHash := bytes.Repeat([]byte{2}, sha256.Size)
 	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(1))
 	columns := []string{"id", "handoff_kind", "handoff_state", "request_hash", "token_hash", "token_ciphertext", "uid_ciphertext", "uid_lookup", "email_ciphertext", "totp_secret_ciphertext", "totp_uri_ciphertext", "archive_password_ciphertext", "recovery_archive", "created_at", "expires_at", "mail_delivered_at", "reserved_recovery_code_id"}
-	mock.ExpectQuery("SELECT .*reserved_recovery_code_id.*FOR UPDATE").WithArgs(tokenHash).WillReturnRows(sqlmock.NewRows(columns).AddRow(7, HandoffRecovery, HandoffPending, bytes.Repeat([]byte{1}, 32), tokenHash, []byte("token"), nil, nil, []byte("email"), []byte("secret"), []byte("uri"), []byte("password"), []byte("archive"), now.Add(-time.Minute), now.Add(time.Minute), nil, 11))
+	mock.ExpectQuery(sqlPattern("SELECT " + handoffColumns + ", reserved_recovery_code_id FROM admin_credential_handoffs WHERE token_hash = ? FOR UPDATE")).WithArgs(tokenHash).WillReturnRows(sqlmock.NewRows(columns).AddRow(7, HandoffRecovery, HandoffPending, bytes.Repeat([]byte{1}, 32), tokenHash, []byte("token"), nil, nil, []byte("email"), []byte("secret"), []byte("uri"), []byte("password"), []byte("archive"), now.Add(-time.Minute), now.Add(time.Minute), nil, 11))
 	codeRows := sqlmock.NewRows([]string{"code_hash"})
 	for index := 0; index < RecoveryCodeCount; index++ {
 		codeRows.AddRow(bytes.Repeat([]byte{byte(index + 1)}, sha256.Size))
 	}
-	mock.ExpectQuery("SELECT code_hash FROM admin_handoff_recovery_codes").WithArgs(int64(7)).WillReturnRows(codeRows)
-	mock.ExpectQuery("SELECT 1 FROM admin_recovery_codes").WithArgs(int64(11)).WillReturnRows(sqlmock.NewRows([]string{"active"}).AddRow(1))
+	mock.ExpectQuery(sqlPattern("SELECT code_hash FROM admin_handoff_recovery_codes WHERE handoff_id = ? ORDER BY code_ordinal")).WithArgs(int64(7)).WillReturnRows(codeRows)
+	mock.ExpectQuery(sqlPattern("SELECT 1 FROM admin_recovery_codes WHERE id = ? AND admin_identity_id = 1 AND used_at IS NULL AND invalidated_at IS NULL FOR UPDATE")).WithArgs(int64(11)).WillReturnRows(sqlmock.NewRows([]string{"active"}).AddRow(1))
 	mock.ExpectExec("UPDATE admin_recovery_codes SET used_at").WithArgs(now, int64(11)).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE admin_recovery_codes SET invalidated_at").WithArgs(now).WillReturnResult(sqlmock.NewResult(0, 4))
 	mock.ExpectExec("UPDATE admin_totp SET secret_ciphertext").WithArgs([]byte("secret"), now).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -1108,6 +1195,58 @@ func TestSQLRepositoryRecoveryHandoffRollsBackAllCredentialChanges(t *testing.T)
 	mock.ExpectRollback()
 	if err := repository.ConfirmRecoveryHandoff(context.Background(), tokenHash, now); !errors.Is(err, ErrUnavailable) || stringsContains(err.Error(), "database detail") {
 		t.Fatalf("ConfirmRecoveryHandoff() error=%v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryRecoveryHandoffLocksAdminIdentityBeforeConfirmedHandoff(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
+	tokenHash := bytes.Repeat([]byte{3}, sha256.Size)
+	columns := []string{"id", "handoff_kind", "handoff_state", "request_hash", "token_hash", "token_ciphertext", "uid_ciphertext", "uid_lookup", "email_ciphertext", "totp_secret_ciphertext", "totp_uri_ciphertext", "archive_password_ciphertext", "recovery_archive", "created_at", "expires_at", "mail_delivered_at", "reserved_recovery_code_id"}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(1))
+	mock.ExpectQuery(sqlPattern("SELECT " + handoffColumns + ", reserved_recovery_code_id FROM admin_credential_handoffs WHERE token_hash = ? FOR UPDATE")).
+		WithArgs(tokenHash).
+		WillReturnRows(sqlmock.NewRows(columns).AddRow(7, HandoffRecovery, HandoffConfirmed, bytes.Repeat([]byte{1}, sha256.Size), tokenHash, nil, nil, nil, nil, nil, nil, nil, nil, now.Add(-time.Minute), now.Add(time.Minute), nil, nil))
+	mock.ExpectCommit()
+	if err := repository.ConfirmRecoveryHandoff(context.Background(), tokenHash, now); err != nil {
+		t.Fatalf("ConfirmRecoveryHandoff() error=%v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryRecoveryHandoffLocksAdminIdentityBeforeExpiredHandoff(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 21, 10, 1, 0, 0, time.UTC)
+	tokenHash := bytes.Repeat([]byte{4}, sha256.Size)
+	columns := []string{"id", "handoff_kind", "handoff_state", "request_hash", "token_hash", "token_ciphertext", "uid_ciphertext", "uid_lookup", "email_ciphertext", "totp_secret_ciphertext", "totp_uri_ciphertext", "archive_password_ciphertext", "recovery_archive", "created_at", "expires_at", "mail_delivered_at", "reserved_recovery_code_id"}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(1))
+	mock.ExpectQuery(sqlPattern("SELECT " + handoffColumns + ", reserved_recovery_code_id FROM admin_credential_handoffs WHERE token_hash = ? FOR UPDATE")).
+		WithArgs(tokenHash).
+		WillReturnRows(sqlmock.NewRows(columns).AddRow(8, HandoffRecovery, HandoffPending, bytes.Repeat([]byte{1}, sha256.Size), tokenHash, nil, nil, nil, nil, nil, nil, nil, nil, now.Add(-time.Minute), now, nil, nil))
+	mock.ExpectRollback()
+	if err := repository.ConfirmRecoveryHandoff(context.Background(), tokenHash, now); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("ConfirmRecoveryHandoff() error=%v, want ErrAuthenticationFailed", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -1304,6 +1443,15 @@ func (fixedTOTP) Validate(code, secret string, now time.Time) (time.Time, bool) 
 		return time.Time{}, false
 	}
 	return now.Truncate(30 * time.Second), true
+}
+
+type futureStepTOTP struct{ fixedTOTP }
+
+func (futureStepTOTP) Validate(code, secret string, now time.Time) (time.Time, bool) {
+	if code != "123456" || secret != "TESTSECRET" {
+		return time.Time{}, false
+	}
+	return now.Add(30 * time.Second), true
 }
 
 func newTestService(t *testing.T, repository Repository, sender MailSender, now time.Time) *Service {
@@ -1742,11 +1890,11 @@ func (repository *memoryRepository) ConfirmTOTP(_ context.Context, attempt Confi
 	defer repository.mu.Unlock()
 	key, ok := hashKey(attempt.TokenHash)
 	session, found := repository.sessions[key]
-	if !ok || !found || session.Revoked || !session.ExpiresAt.After(attempt.Now) || attempt.ExpectedCredentialEpoch != repository.identity.CredentialEpoch || !attempt.TOTPStep.After(repository.lastStep) {
+	if !ok || !found || session.Revoked || !session.ExpiresAt.After(attempt.Now) || attempt.ExpectedCredentialEpoch != repository.identity.CredentialEpoch || attempt.TOTPStep.After(attempt.Now) || !attempt.TOTPStep.After(repository.lastStep) {
 		return ErrAuthenticationFailed
 	}
-	repository.lastStep = attempt.TOTPStep
-	session.TOTPVerifiedAt = attempt.TOTPStep
+	repository.lastStep = attempt.Now
+	session.TOTPVerifiedAt = attempt.Now
 	repository.sessions[key] = session
 	return nil
 }

@@ -369,7 +369,7 @@ func (repository *SQLRepository) RevokeSession(ctx context.Context, tokenHash []
 }
 
 func (repository *SQLRepository) ConfirmTOTP(ctx context.Context, attempt ConfirmTOTPAttempt) error {
-	if !repository.ready() || len(attempt.TokenHash) != sha256.Size || attempt.ExpectedCredentialEpoch < 1 || attempt.Now.IsZero() || attempt.TOTPStep.IsZero() {
+	if !repository.ready() || len(attempt.TokenHash) != sha256.Size || attempt.ExpectedCredentialEpoch < 1 || attempt.Now.IsZero() || attempt.TOTPStep.IsZero() || attempt.TOTPStep.After(attempt.Now) {
 		return ErrInvalidInput
 	}
 	attempt.TokenHash = bytes.Clone(attempt.TokenHash)
@@ -403,7 +403,7 @@ func (repository *SQLRepository) ConfirmTOTP(ctx context.Context, attempt Confir
 	}
 	result, err := transaction.ExecContext(ctx,
 		"UPDATE site_sessions SET totp_verified_at = ? WHERE id = ? AND revoked_at IS NULL AND credential_epoch = ?",
-		attempt.TOTPStep, sessionID, epoch,
+		attempt.Now, sessionID, epoch,
 	)
 	if err != nil || !oneRow(result) {
 		return ErrUnavailable
@@ -791,6 +791,9 @@ func (repository *SQLRepository) ConfirmRecoveryHandoff(ctx context.Context, tok
 			_ = transaction.Rollback()
 		}
 	}()
+	if _, err := lockAdminEpoch(ctx, transaction); err != nil {
+		return err
+	}
 	query := "SELECT " + handoffColumns + ", reserved_recovery_code_id FROM admin_credential_handoffs WHERE token_hash = ? FOR UPDATE"
 	handoff, reserved, err := scanHandoffWithReservedCode(transaction.QueryRowContext(ctx, query, bytes.Clone(tokenHash)))
 	if err != nil || handoff.Kind != HandoffRecovery {
@@ -1071,7 +1074,7 @@ func oneRow(result sql.Result) bool {
 }
 
 func recentTOTPAt(verifiedAt sql.NullTime, now time.Time) bool {
-	return verifiedAt.Valid && !verifiedAt.Time.After(now.Add(30*time.Second)) && now.Sub(verifiedAt.Time) < RecentTOTPWindow
+	return verifiedAt.Valid && !verifiedAt.Time.After(now) && now.Sub(verifiedAt.Time) < RecentTOTPWindow
 }
 
 func repositoryDuplicate(err error) bool {
@@ -1557,7 +1560,7 @@ func (service *Service) VerifyRecentTOTP(ctx context.Context, sessionToken, code
 	}
 	defer clear(secret)
 	step, valid := service.totp.Validate(code, string(secret), now)
-	if !valid || step.IsZero() {
+	if !valid || step.IsZero() || step.After(now) {
 		return ErrAuthenticationFailed
 	}
 	if err := service.repository.ConfirmTOTP(ctx, ConfirmTOTPAttempt{
