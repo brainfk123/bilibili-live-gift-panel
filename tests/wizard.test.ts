@@ -2206,13 +2206,13 @@ describe('single-page configuration rendering', () => {
     const dialog = root.querySelector('.changelog-dialog');
     expect(dialog).not.toBeNull();
     expect(textOf(dialog!)).toContain('这次更新了什么？');
-    expect(textOf(dialog!)).toContain('盲盒礼物与自动更新修复');
-    expect(textOf(dialog!)).toContain('修复新版盲盒礼物无法触发的问题，搜索盲盒时可分别选择爆出礼物；自动更新现在可在页面打开时完成，并在服务恢复后自动刷新页面。');
+    expect(textOf(dialog!)).toContain('盲盒榜与房间切换体验修复');
+    expect(textOf(dialog!)).toContain('盲盒盈亏榜现在会在收到礼物后自动刷新；切换直播间时只显示一条包含主播名称和头像的通知，不再暴露房间号。');
     expect(root.querySelectorAll('.changelog-visual')).toHaveLength(0);
     expect(textOf(dialog!)).not.toContain('训练中心');
     (root.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
 
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.5'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.6'));
     expect(root.querySelector('.changelog-dialog')).toBeNull();
   });
 
@@ -2253,7 +2253,7 @@ describe('single-page configuration rendering', () => {
         return Response.json({
           code: 0,
           update: {
-            state: 'up-to-date', currentVersion: '0.4.5', latestVersion: '0.4.5',
+            state: 'up-to-date', currentVersion: '0.4.6', latestVersion: '0.4.6',
             message: '当前已经是最新版本。', autoUpdate: true, restartRequired: false,
           },
         });
@@ -2271,7 +2271,7 @@ describe('single-page configuration rendering', () => {
     mountConfig(firstRoot as unknown as HTMLElement);
     await vi.waitFor(() => expect(firstRoot.querySelector('.changelog-dialog')).not.toBeNull());
     (firstRoot.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.5'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.6'));
 
     const secondRoot = new TestElement('div');
     mountConfig(secondRoot as unknown as HTMLElement);
