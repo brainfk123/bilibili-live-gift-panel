@@ -229,13 +229,13 @@ func TestExchangeCreatesOpaqueTwelveHourSessionBoundToCurrentEpoch(t *testing.T)
 	}
 }
 
-func TestExchangeRejectsLongCredentialAfterDisableOrRebindEpochChange(t *testing.T) {
+func TestExchangeRejectsLongCredentialAfterDisableOrCredentialEpochChange(t *testing.T) {
 	for _, test := range []struct {
 		name         string
 		accountEpoch int64
 		disabledAt   any
 	}{
-		{name: "rebind changed epoch", accountEpoch: 8},
+		{name: "credential epoch changed", accountEpoch: 8},
 		{name: "account disabled", accountEpoch: 7, disabledAt: testAuthNow},
 	} {
 		t.Run(test.name, func(t *testing.T) {

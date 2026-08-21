@@ -51,7 +51,6 @@ type sessionService interface {
 type accountAdminService interface {
 	DisableAccount(context.Context, string, int64, string) (ManagedAccount, error)
 	EnableAccount(context.Context, string, int64, string) (ManagedAccount, error)
-	RebindVerifiedUID(context.Context, string, int64, string, string) (ManagedAccount, error)
 }
 
 type identityHTTPService interface {
@@ -106,7 +105,6 @@ func NewHTTPHandler(service identityHTTPService, options HTTPOptions) (*HTTPHand
 	handler.mux.Handle("GET /api/auth/session", handler.Authenticate(http.HandlerFunc(handler.getSession)))
 	handler.mux.HandleFunc("POST /api/admin/accounts/{id}/disable", handler.disableAccount)
 	handler.mux.HandleFunc("POST /api/admin/accounts/{id}/enable", handler.enableAccount)
-	handler.mux.HandleFunc("POST /api/admin/accounts/{id}/rebind", handler.rebindAccount)
 	return handler, nil
 }
 
@@ -150,28 +148,6 @@ func (handler *HTTPHandler) enableAccount(response http.ResponseWriter, request 
 	}
 	result, err := handler.service.EnableAccount(request.Context(), sessionToken, accountID, normalizedReason)
 	handler.writeAccountMutation(response, accountID, result, err, AccountStatusActive)
-}
-
-func (handler *HTTPHandler) rebindAccount(response http.ResponseWriter, request *http.Request) {
-	accountID, sessionToken, ok := handler.acceptAccountMutation(response, request, "admin_account_rebind")
-	if !ok {
-		return
-	}
-	var body struct {
-		ChallengeID string `json:"challengeId"`
-		Reason      string `json:"reason"`
-	}
-	if !decodeHTTPJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 {
-		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
-		return
-	}
-	normalizedReason, validReason := normalizeAdministratorReason(body.Reason)
-	if !validReason {
-		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
-		return
-	}
-	result, err := handler.service.RebindVerifiedUID(request.Context(), sessionToken, accountID, body.ChallengeID, normalizedReason)
-	handler.writeAccountMutation(response, accountID, result, err, "")
 }
 
 func (handler *HTTPHandler) acceptAccountMutation(response http.ResponseWriter, request *http.Request, operation string) (int64, string, bool) {
@@ -288,10 +264,10 @@ func (handler *HTTPHandler) beginChallenge(response http.ResponseWriter, request
 		return
 	}
 	writeHTTPJSON(response, http.StatusCreated, struct {
-		ChallengeID    string    `json:"challengeId"`
-		QRImage        string    `json:"qrImage"`
+		ChallengeID     string    `json:"challengeId"`
+		QRImage         string    `json:"qrImage"`
 		VerificationURL string    `json:"verificationUrl,omitempty"`
-		ExpiresAt      time.Time `json:"expiresAt"`
+		ExpiresAt       time.Time `json:"expiresAt"`
 	}{ChallengeID: challenge.ID, QRImage: challenge.QRImage, VerificationURL: challenge.VerificationURL, ExpiresAt: challenge.ExpiresAt})
 }
 

@@ -16,7 +16,6 @@ import (
 	"bilibili-live-gift-panel/internal/hosted/security"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/go-sql-driver/mysql"
 )
 
 func TestSensitiveDisableAccountRenewsOnlyAfterAuditInSameTransaction(t *testing.T) {
@@ -238,106 +237,6 @@ func TestSensitiveEnableAccountRenewsAfterAuditWithoutRestoringCredentials(t *te
 	}
 }
 
-func TestSensitiveRebindVerifiedUIDRenewsAfterAuditAndCommitsEncryptedBinding(t *testing.T) {
-	proofCheckedAt := time.Date(2026, 8, 16, 14, 20, 0, 0, time.UTC)
-	authorizedAt := proofCheckedAt.Add(time.Second)
-	completedAt := authorizedAt.Add(time.Second)
-	clock := &identityTimeSequence{values: []time.Time{proofCheckedAt, authorizedAt, completedAt}}
-	database, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	keys := fixedServiceKeyring(t)
-	verifier := &memoryVerifier{verifications: []Verification{{UID: "987654321", CompletedAt: proofCheckedAt}}}
-	authorizer := &identitySensitiveAuthorizer{writeMarkers: true}
-	service, err := NewService(NewRepository(database, authorizer), keys, verifier, ServiceOptions{Now: clock.Now, ChallengeTTL: 5 * time.Minute})
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldLookup := bytes.Repeat([]byte{0x44}, sha256.Size)
-	newLookup, err := keys.Lookup("bili_uid", []byte("987654321"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	mock.ExpectBegin()
-	mock.ExpectExec("sensitive_authorize").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
-		WithArgs(int64(44)).
-		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(9), nil))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT uid_lookup FROM bili_uid_bindings WHERE account_id = ? AND unbound_at IS NULL FOR UPDATE")).
-		WithArgs(int64(44)).
-		WillReturnRows(sqlmock.NewRows([]string{"uid_lookup"}).AddRow(oldLookup))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT account_id FROM bili_uid_bindings WHERE uid_lookup = ? LIMIT 1 FOR UPDATE")).
-		WithArgs(newLookup).
-		WillReturnError(sql.ErrNoRows)
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE bili_uid_bindings SET unbound_at = ? WHERE account_id = ? AND unbound_at IS NULL")).
-		WithArgs(authorizedAt, int64(44)).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO bili_uid_bindings (account_id, uid_ciphertext, uid_lookup, bound_at) VALUES (?, ?, ?, ?)")).
-		WithArgs(int64(44), encryptedUIDArgument{plaintext: "987654321"}, newLookup, authorizedAt).
-		WillReturnResult(sqlmock.NewResult(92, 1))
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE streamer_accounts SET credential_epoch = credential_epoch + 1 WHERE id = ?")).
-		WithArgs(int64(44)).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE site_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE account_id = ?")).
-		WithArgs(authorizedAt, int64(44)).
-		WillReturnResult(sqlmock.NewResult(0, 2))
-	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)")).
-		WithArgs("streamer_account_uid_rebound", int64(1), int64(44), auditJSONArgument{
-			wantReason: "verified ownership exception", wantOldLookup: oldLookup, wantNewLookup: newLookup,
-			forbidden: []string{"987654321", "administrator-session"},
-		}, authorizedAt).
-		WillReturnResult(sqlmock.NewResult(93, 1))
-	mock.ExpectExec("sensitive_renew").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
-
-	result, err := service.RebindVerifiedUID(context.Background(), "administrator-session", 44, "rebind-proof", " verified ownership exception ")
-	if err != nil {
-		t.Fatalf("RebindVerifiedUID() error = %v", err)
-	}
-	if result.AccountID != 44 || result.Status != AccountStatusActive {
-		t.Fatalf("RebindVerifiedUID() = %#v", result)
-	}
-	if authorizer.authorizeCalls != 1 || authorizer.renewCalls != 1 || authorizer.authorizeTx != authorizer.renewTx {
-		t.Fatalf("sensitive calls authorize=%d renew=%d sameTx=%t", authorizer.authorizeCalls, authorizer.renewCalls, authorizer.authorizeTx == authorizer.renewTx)
-	}
-	if !authorizer.authorizedAt.Equal(authorizedAt) || !authorizer.renewedAt.Equal(completedAt) {
-		t.Fatalf("sensitive timestamps authorize=%s renew=%s", authorizer.authorizedAt, authorizer.renewedAt)
-	}
-	assertForgottenExactly(t, verifier, "rebind-proof")
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestRebindRejectsNonAdministratorBeforeConsumingBilibiliProof(t *testing.T) {
-	now := time.Date(2026, 8, 16, 14, 25, 0, 0, time.UTC)
-	database, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	keys := fixedServiceKeyring(t)
-	verifier := &memoryVerifier{verifications: []Verification{{UID: "987654321", CompletedAt: now}}}
-	authorizer := &identitySensitiveAuthorizer{requireErr: security.ErrSensitiveAuthenticationFailed}
-	service, err := NewService(NewRepository(database, authorizer), keys, verifier, ServiceOptions{Now: nowFunc(now)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = service.RebindVerifiedUID(context.Background(), "streamer-or-invalid-session", 44, "victim-proof", "support exception")
-	if !errors.Is(err, ErrAuthenticationFailed) {
-		t.Fatalf("RebindVerifiedUID() error = %v", err)
-	}
-	if verifier.polls != 0 || len(verifier.forgotten()) != 0 {
-		t.Fatalf("unauthorized rebind consumed proof: polls=%d forget=%v", verifier.polls, verifier.forgotten())
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestDisableAccountRollsBackStatusEpochWhenRevokeOrAuditFails(t *testing.T) {
 	now := time.Date(2026, 8, 16, 14, 40, 0, 0, time.UTC)
 	for _, failure := range []string{"session revocation", "audit"} {
@@ -418,7 +317,7 @@ func TestEnableAccountRollsBackWhenAuditWriteFails(t *testing.T) {
 
 func TestAccountMutationsClassifyInvalidCredentialEpochAsRepositoryUnavailable(t *testing.T) {
 	now := time.Date(2026, 8, 16, 14, 46, 0, 0, time.UTC)
-	for _, operation := range []string{"disable", "enable", "rebind"} {
+	for _, operation := range []string{"disable", "enable"} {
 		t.Run(operation, func(t *testing.T) {
 			database, mock, err := sqlmock.New()
 			if err != nil {
@@ -442,10 +341,6 @@ func TestAccountMutationsClassifyInvalidCredentialEpochAsRepositoryUnavailable(t
 				_, err = repository.disableAccount(context.Background(), "administrator-session", 54, "security", nowFunc(now))
 			case "enable":
 				_, err = repository.enableAccount(context.Background(), "administrator-session", 54, "appeal", nowFunc(now))
-			case "rebind":
-				_, err = repository.rebindAccount(context.Background(), "administrator-session", 54, EncryptedUID{
-					Ciphertext: []byte("encrypted-new-uid"), Lookup: bytes.Repeat([]byte{0x55}, sha256.Size),
-				}, "support", nowFunc(now))
 			}
 			if !errors.Is(err, ErrRepositoryUnavailable) {
 				t.Fatalf("%s invalid credential epoch error = %v", operation, err)
@@ -475,152 +370,6 @@ func TestDisabledAccountCannotCreateNewSiteSession(t *testing.T) {
 	assertSQLExpectations(t, mock)
 }
 
-func TestRebindRejectsSameOrPreviouslyBoundUIDAndMapsDuplicateInsertGenerically(t *testing.T) {
-	now := time.Date(2026, 8, 16, 14, 50, 0, 0, time.UTC)
-	newLookup := bytes.Repeat([]byte{0x62}, sha256.Size)
-	tests := []struct {
-		name       string
-		oldLookup  []byte
-		boundOwner any
-		duplicate  bool
-	}{
-		{name: "same current uid", oldLookup: newLookup},
-		{name: "historically bound uid", oldLookup: bytes.Repeat([]byte{0x61}, sha256.Size), boundOwner: int64(77)},
-		{name: "duplicate insert race", oldLookup: bytes.Repeat([]byte{0x61}, sha256.Size), duplicate: true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			database, mock, err := sqlmock.New()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer database.Close()
-			authorizer := &identitySensitiveAuthorizer{}
-			repository := NewRepository(database, authorizer).(*sqlRepository)
-			mock.ExpectBegin()
-			mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).WithArgs(int64(61)).
-				WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(3), nil))
-			mock.ExpectQuery(regexp.QuoteMeta("SELECT uid_lookup FROM bili_uid_bindings WHERE account_id = ? AND unbound_at IS NULL FOR UPDATE")).WithArgs(int64(61)).
-				WillReturnRows(sqlmock.NewRows([]string{"uid_lookup"}).AddRow(test.oldLookup))
-			if !bytes.Equal(test.oldLookup, newLookup) {
-				duplicateQuery := mock.ExpectQuery(regexp.QuoteMeta("SELECT account_id FROM bili_uid_bindings WHERE uid_lookup = ? LIMIT 1 FOR UPDATE")).WithArgs(newLookup)
-				if test.boundOwner != nil {
-					duplicateQuery.WillReturnRows(sqlmock.NewRows([]string{"account_id"}).AddRow(test.boundOwner))
-				} else {
-					duplicateQuery.WillReturnError(sql.ErrNoRows)
-					mock.ExpectExec(regexp.QuoteMeta("UPDATE bili_uid_bindings SET unbound_at = ? WHERE account_id = ? AND unbound_at IS NULL")).WithArgs(now, int64(61)).
-						WillReturnResult(sqlmock.NewResult(0, 1))
-					mock.ExpectExec(regexp.QuoteMeta("INSERT INTO bili_uid_bindings (account_id, uid_ciphertext, uid_lookup, bound_at) VALUES (?, ?, ?, ?)")).
-						WithArgs(int64(61), []byte("encrypted-new-uid"), newLookup, now).
-						WillReturnError(&mysql.MySQLError{Number: 1062, Message: "Duplicate entry UID 987654321 private"})
-				}
-			}
-			mock.ExpectRollback()
-
-			_, err = repository.rebindAccount(context.Background(), "administrator-session", 61, EncryptedUID{Ciphertext: []byte("encrypted-new-uid"), Lookup: newLookup}, "exception", nowFunc(now))
-			if !errors.Is(err, ErrAccountManagementFailed) || strings.Contains(err.Error(), "987654321") || strings.Contains(err.Error(), "Duplicate") {
-				t.Fatalf("rebindAccount() error = %v", err)
-			}
-			if err := mock.ExpectationsWereMet(); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-}
-
-func TestRebindRollsBackBindingEpochWhenSessionRevocationOrAuditFails(t *testing.T) {
-	now := time.Date(2026, 8, 16, 14, 55, 0, 0, time.UTC)
-	oldLookup := bytes.Repeat([]byte{0x71}, sha256.Size)
-	newLookup := bytes.Repeat([]byte{0x72}, sha256.Size)
-	for _, failure := range []string{"session revocation", "audit"} {
-		t.Run(failure, func(t *testing.T) {
-			database, mock, err := sqlmock.New()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer database.Close()
-			authorizer := &identitySensitiveAuthorizer{}
-			repository := NewRepository(database, authorizer).(*sqlRepository)
-			mock.ExpectBegin()
-			mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).WithArgs(int64(70)).
-				WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(5), nil))
-			mock.ExpectQuery(regexp.QuoteMeta("SELECT uid_lookup FROM bili_uid_bindings WHERE account_id = ? AND unbound_at IS NULL FOR UPDATE")).WithArgs(int64(70)).
-				WillReturnRows(sqlmock.NewRows([]string{"uid_lookup"}).AddRow(oldLookup))
-			mock.ExpectQuery(regexp.QuoteMeta("SELECT account_id FROM bili_uid_bindings WHERE uid_lookup = ? LIMIT 1 FOR UPDATE")).WithArgs(newLookup).
-				WillReturnError(sql.ErrNoRows)
-			mock.ExpectExec(regexp.QuoteMeta("UPDATE bili_uid_bindings SET unbound_at = ? WHERE account_id = ? AND unbound_at IS NULL")).WithArgs(now, int64(70)).
-				WillReturnResult(sqlmock.NewResult(0, 1))
-			mock.ExpectExec(regexp.QuoteMeta("INSERT INTO bili_uid_bindings (account_id, uid_ciphertext, uid_lookup, bound_at) VALUES (?, ?, ?, ?)")).
-				WithArgs(int64(70), []byte("encrypted-new-uid"), newLookup, now).
-				WillReturnResult(sqlmock.NewResult(101, 1))
-			mock.ExpectExec(regexp.QuoteMeta("UPDATE streamer_accounts SET credential_epoch = credential_epoch + 1 WHERE id = ?")).WithArgs(int64(70)).
-				WillReturnResult(sqlmock.NewResult(0, 1))
-			revoke := mock.ExpectExec(regexp.QuoteMeta("UPDATE site_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE account_id = ?")).WithArgs(now, int64(70))
-			if failure == "session revocation" {
-				revoke.WillReturnError(errors.New("private rebind revoke failure"))
-			} else {
-				revoke.WillReturnResult(sqlmock.NewResult(0, 3))
-				mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)")).
-					WithArgs("streamer_account_uid_rebound", int64(1), int64(70), sqlmock.AnyArg(), now).
-					WillReturnError(errors.New("private rebind audit failure"))
-			}
-			mock.ExpectRollback()
-
-			_, err = repository.rebindAccount(context.Background(), "administrator-session", 70, EncryptedUID{Ciphertext: []byte("encrypted-new-uid"), Lookup: newLookup}, "exception", nowFunc(now))
-			if !errors.Is(err, ErrRepositoryUnavailable) || strings.Contains(err.Error(), "private") {
-				t.Fatalf("rebindAccount() error = %v", err)
-			}
-			if err := mock.ExpectationsWereMet(); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-}
-
-func TestRebindBilibiliProofForgettingMatchesTerminalState(t *testing.T) {
-	now := time.Date(2026, 8, 16, 15, 0, 0, 0, time.UTC)
-	tests := []struct {
-		name         string
-		verification Verification
-		pollError    error
-		wantError    error
-		wantForget   bool
-	}{
-		{name: "pending retained", pollError: ErrVerificationPending, wantError: ErrVerificationPending},
-		{name: "temporary unavailable retained", pollError: ErrVerificationUnavailable, wantError: ErrVerificationUnavailable},
-		{name: "terminal verifier failure forgotten", pollError: errors.New("terminal private UID 987654321"), wantError: ErrAuthenticationFailed, wantForget: true},
-		{name: "expired successful proof forgotten", verification: Verification{UID: "987654321", CompletedAt: now.Add(-5*time.Minute - time.Nanosecond)}, wantError: ErrAuthenticationFailed, wantForget: true},
-		{name: "malformed uid forgotten", verification: Verification{UID: "not-a-uid", CompletedAt: now}, wantError: ErrAuthenticationFailed, wantForget: true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			database, mock, err := sqlmock.New()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer database.Close()
-			keys := fixedServiceKeyring(t)
-			verifier := &memoryVerifier{verifications: []Verification{test.verification}, pollErrs: []error{test.pollError}}
-			authorizer := &identitySensitiveAuthorizer{}
-			service, err := NewService(NewRepository(database, authorizer), keys, verifier, ServiceOptions{Now: nowFunc(now), ChallengeTTL: 5 * time.Minute})
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = service.RebindVerifiedUID(context.Background(), "administrator-session", 61, "proof-state", "exception")
-			if !errors.Is(err, test.wantError) || strings.Contains(err.Error(), "987654321") {
-				t.Fatalf("RebindVerifiedUID() error = %v, want %v", err, test.wantError)
-			}
-			forgotten := verifier.forgotten()
-			if (len(forgotten) == 1) != test.wantForget || (test.wantForget && forgotten[0] != "proof-state") {
-				t.Fatalf("Forget calls = %v, wantForget=%v", forgotten, test.wantForget)
-			}
-			if err := mock.ExpectationsWereMet(); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-}
-
 type auditJSONArgument struct {
 	wantReason    string
 	wantOldLookup []byte
@@ -632,7 +381,6 @@ type identitySensitiveAuthorizer struct {
 	writeMarkers   bool
 	authorizeErr   error
 	renewErr       error
-	requireErr     error
 	authorizeCalls int
 	renewCalls     int
 	authorizedAt   time.Time
@@ -666,10 +414,6 @@ func (authorizer *identitySensitiveAuthorizer) RenewRecentTOTP(ctx context.Conte
 		}
 	}
 	return authorizer.renewErr
-}
-
-func (authorizer *identitySensitiveAuthorizer) RequireRecentTOTP(context.Context, string) error {
-	return authorizer.requireErr
 }
 
 type identityTimeSequence struct {
@@ -711,13 +455,4 @@ func (argument auditJSONArgument) Match(value driver.Value) bool {
 		return false
 	}
 	return true
-}
-
-type encryptedUIDArgument struct {
-	plaintext string
-}
-
-func (argument encryptedUIDArgument) Match(value driver.Value) bool {
-	ciphertext, ok := value.([]byte)
-	return ok && len(ciphertext) > 32 && !bytes.Contains(ciphertext, []byte(argument.plaintext))
 }

@@ -268,7 +268,6 @@ func TestHTTPForbiddenMalformedQueryNeverReachesService(t *testing.T) {
 		{name: "delete session", method: http.MethodDelete, path: "/api/auth/session?x;y", cookie: "site-session"},
 		{name: "disable account", method: http.MethodPost, path: "/api/admin/accounts/41/disable?x;y", body: `{"reason":"security"}`, cookie: "admin-session"},
 		{name: "enable account", method: http.MethodPost, path: "/api/admin/accounts/41/enable?x;y", body: `{"reason":"appeal"}`, cookie: "admin-session"},
-		{name: "rebind account", method: http.MethodPost, path: "/api/admin/accounts/41/rebind?x;y", body: `{"challengeId":"proof","reason":"support"}`, cookie: "admin-session"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -378,12 +377,10 @@ func TestHTTPAdministratorAccountRoutesExposeOnlyInternalStatus(t *testing.T) {
 		path       string
 		body       string
 		wantStatus string
-		challenge  string
 		reason     string
 	}{
 		{name: "disable", path: "/api/admin/accounts/71/disable", body: `{"reason":" policy violation "}`, wantStatus: AccountStatusDisabled, reason: "policy violation"},
 		{name: "enable", path: "/api/admin/accounts/71/enable", body: `{"reason":" appeal accepted "}`, wantStatus: AccountStatusActive, reason: "appeal accepted"},
-		{name: "rebind", path: "/api/admin/accounts/71/rebind", body: `{"challengeId":"fresh-proof","reason":" ownership exception "}`, wantStatus: AccountStatusActive, challenge: "fresh-proof", reason: "ownership exception"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -404,13 +401,52 @@ func TestHTTPAdministratorAccountRoutesExposeOnlyInternalStatus(t *testing.T) {
 				t.Fatalf("response = %q", response.Body.String())
 			}
 			assertBodyOmitsSecrets(t, response.Body.String(), "987654321", "administrator-cookie", "fresh-proof")
-			if service.adminSession != "administrator-cookie" || service.adminAccountID != 71 || service.adminChallenge != test.challenge {
-				t.Fatalf("service args session=%q account=%d challenge=%q", service.adminSession, service.adminAccountID, service.adminChallenge)
+			if service.adminSession != "administrator-cookie" || service.adminAccountID != 71 {
+				t.Fatalf("service args session=%q account=%d", service.adminSession, service.adminAccountID)
 			}
 			if service.adminReason != test.reason {
 				t.Fatalf("service reason = %q, want %q", service.adminReason, test.reason)
 			}
 		})
+	}
+}
+
+func TestHTTPAdministratorAccountRoutesRejectRebindButKeepDisableEnable(t *testing.T) {
+	service := &fakeHTTPService{adminResult: ManagedAccount{AccountID: 71, Status: AccountStatusActive}}
+	handler := newTestHTTPHandler(t, service, allowLimiter{})
+
+	rebind := httptest.NewRequest(http.MethodPost, "/api/admin/accounts/71/rebind", strings.NewReader(`{"challengeId":"fresh-proof","reason":"ownership exception"}`))
+	rebind.Header.Set("Content-Type", "application/json")
+	rebind.Header.Set("Origin", testOrigin)
+	rebind.Header.Set("X-CSRF-Token", testCSRF)
+	rebind.AddCookie(&http.Cookie{Name: SiteSessionCookie, Value: "administrator-cookie"})
+	rebindResponse := httptest.NewRecorder()
+	handler.ServeHTTP(rebindResponse, rebind)
+	if rebindResponse.Code != http.StatusNotFound {
+		t.Fatalf("rebind status=%d body=%q, want 404", rebindResponse.Code, rebindResponse.Body.String())
+	}
+	if service.wasCalled() {
+		t.Fatalf("rebind reached identity service: %#v", service)
+	}
+
+	for _, route := range []struct {
+		path   string
+		status string
+	}{
+		{path: "/api/admin/accounts/71/disable", status: AccountStatusDisabled},
+		{path: "/api/admin/accounts/71/enable", status: AccountStatusActive},
+	} {
+		service.adminResult = ManagedAccount{AccountID: 71, Status: route.status}
+		request := httptest.NewRequest(http.MethodPost, route.path, strings.NewReader(`{"reason":"policy"}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Origin", testOrigin)
+		request.Header.Set("X-CSRF-Token", testCSRF)
+		request.AddCookie(&http.Cookie{Name: SiteSessionCookie, Value: "administrator-cookie"})
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%q, want 200", route.path, response.Code, response.Body.String())
+		}
 	}
 }
 
@@ -422,7 +458,6 @@ func TestHTTPAdministratorAccountRoutesApplyGlobalIPAndHashedSessionLimits(t *te
 	}{
 		{operation: "admin_account_disable", path: "/api/admin/accounts/71/disable", body: `{"reason":"security"}`},
 		{operation: "admin_account_enable", path: "/api/admin/accounts/71/enable", body: `{"reason":"appeal"}`},
-		{operation: "admin_account_rebind", path: "/api/admin/accounts/71/rebind", body: `{"challengeId":"proof","reason":"ownership"}`},
 	}
 	for _, route := range routes {
 		for _, deniedScope := range []LimitScope{LimitGlobal, LimitPerIP, LimitPerChallenge} {
@@ -482,7 +517,6 @@ func TestHTTPAdministratorAccountRoutesRejectUntrustedOrInjectedInputBeforeServi
 		{name: "missing cookie", path: "/api/admin/accounts/71/disable", body: `{"reason":"security"}`, origin: testOrigin, csrf: testCSRF, contentType: "application/json", wantStatus: http.StatusUnauthorized},
 		{name: "query account injection", path: "/api/admin/accounts/71/disable?accountId=99", body: `{"reason":"security"}`, origin: testOrigin, csrf: testCSRF, contentType: "application/json", withCookie: true, wantStatus: http.StatusBadRequest},
 		{name: "body account injection", path: "/api/admin/accounts/71/disable", body: `{"accountId":99,"reason":"security"}`, origin: testOrigin, csrf: testCSRF, contentType: "application/json", withCookie: true, wantStatus: http.StatusBadRequest},
-		{name: "uid injection", path: "/api/admin/accounts/71/rebind", body: `{"uid":"987654321","challengeId":"proof","reason":"ownership"}`, origin: testOrigin, csrf: testCSRF, contentType: "application/json", withCookie: true, wantStatus: http.StatusBadRequest},
 		{name: "noncanonical path id", path: "/api/admin/accounts/071/disable", body: `{"reason":"security"}`, origin: testOrigin, csrf: testCSRF, contentType: "application/json", withCookie: true, wantStatus: http.StatusBadRequest},
 		{name: "empty reason", path: "/api/admin/accounts/71/disable", body: `{"reason":"   "}`, origin: testOrigin, csrf: testCSRF, contentType: "application/json", withCookie: true, wantStatus: http.StatusBadRequest},
 		{name: "control reason", path: "/api/admin/accounts/71/enable", body: "{\"reason\":\"line one\\nline two\"}", origin: testOrigin, csrf: testCSRF, contentType: "application/json", withCookie: true, wantStatus: http.StatusBadRequest},
@@ -593,7 +627,6 @@ type fakeHTTPService struct {
 	adminErr       error
 	adminSession   string
 	adminAccountID int64
-	adminChallenge string
 	adminReason    string
 }
 
@@ -627,24 +660,19 @@ func (service *fakeHTTPService) Cancel(challengeID string) {
 }
 
 func (service *fakeHTTPService) DisableAccount(_ context.Context, session string, accountID int64, reason string) (ManagedAccount, error) {
-	service.adminSession, service.adminAccountID, service.adminReason, service.adminChallenge = session, accountID, reason, ""
+	service.adminSession, service.adminAccountID, service.adminReason = session, accountID, reason
 	return service.adminResult, service.adminErr
 }
 
 func (service *fakeHTTPService) EnableAccount(_ context.Context, session string, accountID int64, reason string) (ManagedAccount, error) {
-	service.adminSession, service.adminAccountID, service.adminReason, service.adminChallenge = session, accountID, reason, ""
-	return service.adminResult, service.adminErr
-}
-
-func (service *fakeHTTPService) RebindVerifiedUID(_ context.Context, session string, accountID int64, challengeID, reason string) (ManagedAccount, error) {
-	service.adminSession, service.adminAccountID, service.adminReason, service.adminChallenge = session, accountID, reason, challengeID
+	service.adminSession, service.adminAccountID, service.adminReason = session, accountID, reason
 	return service.adminResult, service.adminErr
 }
 
 func (service *fakeHTTPService) wasCalled() bool {
 	return service.beginCalls != 0 || service.pollCalls != 0 || service.loginChallenge != "" || service.requiredToken != "" ||
 		service.logoutToken != "" || len(service.cancelCalls) != 0 || service.adminSession != "" || service.adminAccountID != 0 ||
-		service.adminChallenge != "" || service.adminReason != ""
+		service.adminReason != ""
 }
 
 type allowLimiter struct{}

@@ -2,6 +2,7 @@ import { HostedAPIError, type BiliServiceStatus, type Challenge, type HostedAPI,
 import { mountAdminLogin } from './admin-login';
 import { mountAdminShell } from './admin/shell';
 import type { AdminSection } from './admin/routes';
+import { mountVerificationCode, type VerificationCodeControl } from './verification-code';
 
 interface AdminLoginAPI {
   verifyRecentTOTP(totp: string): Promise<void>;
@@ -9,9 +10,10 @@ interface AdminLoginAPI {
 
 export function createAdminFlow(api: AdminLoginAPI) {
   return Object.freeze({
-    async runWithRecentTOTP(totp: string, action: () => Promise<void>): Promise<void> {
+    async runWithRecentTOTP(totp: string | undefined, action: () => Promise<void>): Promise<void> {
       try { await action(); } catch (error) {
         if (!(error instanceof HostedAPIError) || error.code !== 'recent_totp_required') throw error;
+        if (!totp) throw error;
         await api.verifyRecentTOTP(totp);
         await action();
       }
@@ -52,7 +54,7 @@ export function createBiliServiceFlow(api: BiliServiceAPI) {
       beginOperation = operation;
       return operation;
     },
-    replace(totp: string): Promise<void> {
+    replace(totp?: string): Promise<void> {
       if (disposed) return Promise.reject(unavailable());
       if (replaceOperation) return replaceOperation;
       if (busy) return Promise.reject(new HostedAPIError('operation_conflict', 409));
@@ -61,6 +63,7 @@ export function createBiliServiceFlow(api: BiliServiceAPI) {
       const operation = (async () => {
         try { await api.replaceBiliServiceCredential(id); } catch (error) {
           if (!(error instanceof HostedAPIError) || error.code !== 'recent_totp_required') throw error;
+          if (!totp) throw error;
           await api.verifyRecentTOTP(totp);
           if (disposed || current !== generation) throw unavailable();
           await api.replaceBiliServiceCredential(id);
@@ -109,6 +112,9 @@ export function createAdminRecoveryFlow(api: RecoveryAPI, render: (state: Recove
   let preparation: RecoveryPreparation | undefined;
   let generation = 0;
   let error: string | undefined;
+  let disposed = false;
+  let prepareOperation: Promise<void> | undefined;
+  let confirmOperation: Promise<void> | undefined;
   const acknowledged = new Set<'totp' | 'password' | 'archive'>();
   const publish = (): void => render({
     archiveDelivery: 'email', totpUri: preparation?.totpUri, recoveryPassword: preparation?.recoveryPassword,
@@ -116,29 +122,46 @@ export function createAdminRecoveryFlow(api: RecoveryAPI, render: (state: Recove
     acknowledged: { totp: acknowledged.has('totp'), password: acknowledged.has('password'), archive: acknowledged.has('archive') },
     ...(error ? { error } : {}),
   });
-  const clear = (): void => { generation += 1; preparation = undefined; acknowledged.clear(); publish(); };
+  const clear = (): void => { generation += 1; preparation = undefined; error = undefined; acknowledged.clear(); publish(); };
+  const unavailable = (): HostedAPIError => new HostedAPIError('operation_failed', 0);
   return Object.freeze({
-    async prepare(recoveryCode: string): Promise<void> {
+    prepare(recoveryCode: string): Promise<void> {
+      if (disposed) return Promise.reject(unavailable());
+      if (prepareOperation) return prepareOperation;
+      if (confirmOperation) return Promise.reject(new HostedAPIError('operation_conflict', 409));
       const current = ++generation;
       error = undefined;
-      const result = await api.prepareRecovery(recoveryCode);
-      if (current !== generation) return;
-      preparation = result;
-      acknowledged.clear(); publish();
+      const operation = api.prepareRecovery(recoveryCode).then((result) => {
+        if (disposed || current !== generation) return;
+        preparation = result;
+        acknowledged.clear(); publish();
+      }).finally(() => { if (prepareOperation === operation) prepareOperation = undefined; });
+      prepareOperation = operation;
+      return operation;
     },
     acknowledge(item: 'totp' | 'password' | 'archive', checked = true): void {
       if (preparation) { if (checked) acknowledged.add(item); else acknowledged.delete(item); }
       publish();
     },
-    async confirm(totp: string): Promise<void> {
+    confirm(totp: string): Promise<void> {
+      if (disposed) return Promise.reject(unavailable());
+      if (confirmOperation) return confirmOperation;
+      if (prepareOperation) return Promise.reject(new HostedAPIError('operation_conflict', 409));
       if (!preparation || acknowledged.size !== 3) throw new HostedAPIError('invalid_request', 400);
       const token = preparation.handoffToken;
-      try { await api.confirmRecovery(token, totp); } catch (cause) {
-        error = '确认失败，请重试'; publish(); throw cause;
-      }
-      clear();
+      const current = ++generation;
+      const operation = api.confirmRecovery(token, totp).then(() => {
+        if (disposed || current !== generation) return;
+        clear();
+      }).catch((cause) => {
+        if (!disposed && current === generation) { error = '确认失败，请重试'; publish(); }
+        throw cause;
+      }).finally(() => { if (confirmOperation === operation) confirmOperation = undefined; });
+      confirmOperation = operation;
+      return operation;
     },
     close: clear,
+    dispose(): void { if (!disposed) { disposed = true; clear(); } },
   });
 }
 
@@ -202,12 +225,21 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
   let clearTransientSecret: (() => void) | undefined;
   let loginMount: { dispose(): Promise<void> } | undefined;
   let adminShell: { dispose(): void | Promise<void> } | undefined;
+  let recoveryFlow: ReturnType<typeof createAdminRecoveryFlow> | undefined;
+  let recoveryCodeControl: VerificationCodeControl | undefined;
+  let recoveryCodeInput: HTMLInputElement | undefined;
   let activeSection: AdminSection = 'overview';
-  const secretInputs = new Set<HTMLInputElement>();
+  let sectionGeneration = 0;
   const status = document.createElement('p'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+  const clearRecoveryPanel = (): void => {
+    recoveryCodeControl?.dispose(); recoveryCodeControl = undefined;
+    if (recoveryCodeInput) recoveryCodeInput.value = '';
+    recoveryCodeInput = undefined;
+  };
 
   const renderDashboard = (): void => {
     if (disposed) return;
+    const previousRecovery = recoveryFlow; recoveryFlow = undefined; clearRecoveryPanel(); previousRecovery?.dispose();
     const previousLogin = loginMount; loginMount = undefined; if (previousLogin) void previousLogin.dispose();
     const previousShell = adminShell; adminShell = undefined; if (previousShell) void previousShell.dispose();
     adminSecretFlow.close();
@@ -215,22 +247,56 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
       initial: activeSection,
       mount: (section, host, navigate) => {
         activeSection = section;
-        const localSecrets: HTMLInputElement[] = [];
+        const currentGeneration = ++sectionGeneration;
+        let sectionDisposed = false;
+        const isCurrentSection = (): boolean => !disposed && !sectionDisposed && currentGeneration === sectionGeneration;
+        const unavailable = (): HostedAPIError => new HostedAPIError('operation_failed', 0);
+        const localDisposers: Array<() => void> = [];
         const title = document.createElement('h2'); title.className = 'hosted-admin-section-title';
         const intro = document.createElement('p'); intro.className = 'hosted-admin-section-intro';
-        const addSecret = (input: HTMLInputElement): HTMLInputElement => { secretInputs.add(input); localSecrets.push(input); return input; };
-        const recentControl = (): [HTMLLabelElement, HTMLInputElement] => {
-          const [label, input] = labelledInput(document, '当前 TOTP（仅高风险操作需要）', 'password'); addSecret(input); return [label, input];
-        };
-        const guarded = (recent: HTMLInputElement, action: () => Promise<void>): void => {
-          void loginFlow.runWithRecentTOTP(recent.value, action).then(() => { status.textContent = '操作成功'; }).catch(() => { status.textContent = '操作失败，请检查验证码与输入'; }).finally(() => { recent.value = ''; });
+        const needsRecentTOTP = (error: unknown): boolean => error instanceof HostedAPIError && error.code === 'recent_totp_required';
+        const recentControl = (): { element: HTMLElement; guarded(action: () => Promise<void>, retry?: (totp: string) => Promise<void>, onSuccess?: () => void): void } => {
+          const element = document.createElement('section'); element.className = 'hosted-admin-recent-totp';
+          const hint = document.createElement('p'); hint.textContent = '高风险操作仅在服务端要求时才需要当前 TOTP。';
+          const codeHost = document.createElement('div'); element.append(hint, codeHost);
+          let control: VerificationCodeControl | undefined;
+          let busy = false;
+          const clearPrompt = (): void => { control?.dispose(); control = undefined; codeHost.replaceChildren(); };
+          const prompt = (retry: (totp: string) => Promise<void>): void => {
+            if (!isCurrentSection()) return;
+            clearPrompt();
+            const mounted = mountVerificationCode(codeHost, {
+              label: '当前六位 TOTP（仅高风险操作需要）',
+              onComplete: (totp) => { if (isCurrentSection()) { mounted.setBusy(true); run(() => retry(totp), retry, mounted); } },
+            });
+            control = mounted; mounted.focus();
+          };
+          const run = (operation: () => Promise<void>, retry: (totp: string) => Promise<void>, attempted?: VerificationCodeControl, onSuccess?: () => void): void => {
+            if (!isCurrentSection() || busy) return;
+            busy = true;
+            void operation().then(() => {
+              if (!isCurrentSection()) return;
+              clearPrompt(); status.textContent = '操作成功'; onSuccess?.();
+            }).catch((error) => {
+              if (!isCurrentSection()) return;
+              if (needsRecentTOTP(error)) prompt(retry); else status.textContent = '操作失败，请检查验证码与输入';
+            }).finally(() => {
+              if (!isCurrentSection()) return;
+              busy = false; attempted?.clear(); attempted?.setBusy(false);
+            });
+          };
+          localDisposers.push(clearPrompt);
+          return {
+            element,
+            guarded: (action, retry = (totp) => loginFlow.runWithRecentTOTP(totp, action), onSuccess) => run(action, retry, undefined, onSuccess),
+          };
         };
         host.append(title, intro, status);
 
         if (section === 'overview') {
           title.textContent = '运行总览'; intro.textContent = '按业务域进入操作页，避免在同一长列表中误操作。';
           const grid = document.createElement('div'); grid.className = 'hosted-admin-card-grid';
-          for (const [target, heading, detail] of [['accounts', '账号管理', '停用、启用、额度与例外换绑'], ['invitations', '邀请管理', '生成一次性管理员邀请码'], ['bili-service', '服务账号', '检查或替换 B 站服务凭据'], ['obs', 'OBS 凭据', '按账号签发新的 OBS 访问地址'], ['security', '安全与恢复', '恢复附件、恢复码与身份重置']] as const) {
+          for (const [target, heading, detail] of [['accounts', '账号管理', '停用、启用与邀请码额度调整'], ['invitations', '邀请管理', '生成一次性管理员邀请码'], ['bili-service', '服务账号', '检查或替换 B 站服务凭据'], ['obs', 'OBS 凭据', '按账号签发新的 OBS 访问地址'], ['security', '安全与恢复', '恢复附件、恢复码与身份重置']] as const) {
             const card = document.createElement('button'); card.type = 'button'; card.className = 'hosted-admin-card hosted-admin-card-link'; card.setAttribute('aria-label', `进入${heading}`); const h3 = document.createElement('h3'); h3.textContent = heading; const p = document.createElement('p'); p.textContent = detail; card.append(h3, p); card.addEventListener('click', () => navigate(target)); grid.append(card);
           }
           host.append(grid);
@@ -238,53 +304,123 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
 
         if (section === 'accounts') {
           title.textContent = '账号'; intro.textContent = '账号状态与配额操作集中在这里；危险操作必须填写原因。';
-          const [recentLabel, recent] = recentControl(); const [accountLabel, account] = labelledInput(document, '账号 ID'); account.inputMode = 'numeric';
+          const recent = recentControl(); const [accountLabel, account] = labelledInput(document, '账号 ID'); account.inputMode = 'numeric';
           const [reasonLabel, reason] = labelledInput(document, '操作原因'); const [quotaLabel, quota] = labelledInput(document, '剩余额度'); quota.inputMode = 'numeric';
           const danger = document.createElement('section'); danger.className = 'hosted-admin-card hosted-admin-danger'; const dangerTitle = document.createElement('h3'); dangerTitle.textContent = '账号变更';
           const accountID = (): number => Number(account.value);
           danger.append(dangerTitle, accountLabel, reasonLabel, quotaLabel,
-            button(document, '停用账号', () => guarded(recent, async () => { await accountFlow.disable(accountID(), reason.value); })),
-            button(document, '启用账号', () => guarded(recent, async () => { await accountFlow.enable(accountID(), reason.value); })),
-            button(document, '调整邀请码额度', () => guarded(recent, async () => { await accountFlow.adjustQuota(accountID(), Number(quota.value), reason.value); })),
+            button(document, '停用账号', () => recent.guarded(async () => { await accountFlow.disable(accountID(), reason.value); })),
+            button(document, '启用账号', () => recent.guarded(async () => { await accountFlow.enable(accountID(), reason.value); })),
+            button(document, '调整邀请码额度', () => recent.guarded(async () => { await accountFlow.adjustQuota(accountID(), Number(quota.value), reason.value); })),
           );
-          host.append(recentLabel, danger);
+          host.append(recent.element, danger);
         }
 
         if (section === 'invitations') {
           title.textContent = '邀请'; intro.textContent = '管理员邀请码只显示一次，请立即保存并通过可信渠道交付。';
-          const [recentLabel, recent] = recentControl(); const card = document.createElement('section'); card.className = 'hosted-admin-card';
-          card.append(button(document, '生成不限额度邀请码', () => guarded(recent, async () => { await adminSecretFlow.run(async () => { const generated = await api.generateInvitation(true); return { title: '邀请码仅显示一次', value: generated.code, copyLabel: '复制邀请码' }; }); })));
-          host.append(recentLabel, card);
+          const recent = recentControl(); const card = document.createElement('section'); card.className = 'hosted-admin-card';
+          card.append(button(document, '生成不限额度邀请码', () => recent.guarded(async () => { await adminSecretFlow.run(async () => { const generated = await api.generateInvitation(true); if (!isCurrentSection()) throw unavailable(); return { title: '邀请码仅显示一次', value: generated.code, copyLabel: '复制邀请码' }; }); })));
+          host.append(recent.element, card);
         }
 
         if (section === 'bili-service') {
           title.textContent = 'B 站服务账号'; intro.textContent = '用于直播间连接的独立服务账号，不应与管理员日常账号混用。';
-          const [recentLabel, recent] = recentControl(); const card = document.createElement('section'); card.className = 'hosted-admin-card'; const serviceStatus = document.createElement('p'); serviceStatus.textContent = '正在读取服务账号状态…'; card.append(serviceStatus);
-          void api.biliServiceStatus().then((value) => { if (!disposed) serviceStatus.textContent = biliServiceStatusText(value); }).catch(() => { if (!disposed) serviceStatus.textContent = '服务账号状态暂不可用'; });
-          const serviceState = biliServiceFlow.state(); const begin = button(document, serviceState.busy ? '正在创建验证…' : '创建服务账号验证', () => { const operation = biliServiceFlow.begin(); renderDashboard(); void operation.then(renderDashboard).catch(() => { status.textContent = '无法创建服务账号验证'; renderDashboard(); }); }); begin.disabled = serviceState.busy; card.append(begin);
+          const recent = recentControl(); const card = document.createElement('section'); card.className = 'hosted-admin-card'; const serviceStatus = document.createElement('p'); serviceStatus.textContent = '正在读取服务账号状态…'; card.append(serviceStatus);
+          void api.biliServiceStatus().then((value) => { if (isCurrentSection()) serviceStatus.textContent = biliServiceStatusText(value); }).catch(() => { if (isCurrentSection()) serviceStatus.textContent = '服务账号状态暂不可用'; });
+          const serviceState = biliServiceFlow.state(); const begin = button(document, serviceState.busy ? '正在创建验证…' : '创建服务账号验证', () => {
+            if (!isCurrentSection()) return;
+            begin.disabled = true;
+            const operation = biliServiceFlow.begin();
+            void operation.then(() => { if (isCurrentSection()) renderDashboard(); }).catch(() => { if (isCurrentSection()) { status.textContent = '无法创建服务账号验证'; renderDashboard(); } });
+          }); begin.disabled = serviceState.busy; card.append(begin);
           if (serviceState.challenge) {
             const qr = document.createElement('img'); qr.className = 'hosted-qr'; qr.alt = 'B 站服务账号二维码'; qr.src = serviceState.challenge.qrImage;
-            const replace = button(document, serviceState.busy ? '正在替换…' : '确认替换服务账号', () => { const totp = recent.value; recent.value = ''; const operation = biliServiceFlow.replace(totp); renderDashboard(); void operation.then(() => { status.textContent = '服务账号已替换'; renderDashboard(); }).catch(() => { status.textContent = '服务账号替换失败，请检查 TOTP'; renderDashboard(); }); }); replace.disabled = serviceState.busy; card.append(qr, replace);
+            const replace = button(document, serviceState.busy ? '正在替换…' : '确认替换服务账号', () => recent.guarded(
+              () => biliServiceFlow.replace(),
+              (totp) => biliServiceFlow.replace(totp),
+              renderDashboard,
+            )); replace.disabled = serviceState.busy; card.append(qr, replace);
           }
-          host.append(recentLabel, card);
+          host.append(recent.element, card);
         }
 
         if (section === 'obs') {
           title.textContent = 'OBS 凭据'; intro.textContent = '重置后旧地址立即失效，新地址只显示一次。';
-          const [recentLabel, recent] = recentControl(); const [accountLabel, account] = labelledInput(document, '账号 ID'); account.inputMode = 'numeric'; const card = document.createElement('section'); card.className = 'hosted-admin-card hosted-admin-danger';
-          card.append(accountLabel, button(document, '重置 OBS 凭据', () => guarded(recent, async () => { await adminSecretFlow.run(async () => { const issued = await api.issueOBSCredential(Number(account.value)); return { title: 'OBS 地址仅显示一次', value: issued.url, copyLabel: '复制 OBS 地址' }; }); })));
-          host.append(recentLabel, card);
+          const recent = recentControl(); const [accountLabel, account] = labelledInput(document, '账号 ID'); account.inputMode = 'numeric'; const card = document.createElement('section'); card.className = 'hosted-admin-card hosted-admin-danger';
+          card.append(accountLabel, button(document, '重置 OBS 凭据', () => recent.guarded(async () => { await adminSecretFlow.run(async () => { const issued = await api.issueOBSCredential(Number(account.value)); if (!isCurrentSection()) throw unavailable(); return { title: 'OBS 地址仅显示一次', value: issued.url, copyLabel: '复制 OBS 地址' }; }); })));
+          host.append(recent.element, card);
         }
 
         if (section === 'security') {
           title.textContent = '安全与恢复'; intro.textContent = '恢复资料属于最高敏感操作，完成后页面会清除一次性内容。';
-          const [recentLabel, recent] = recentControl(); const card = document.createElement('section'); card.className = 'hosted-admin-card hosted-admin-danger';
-          card.append(button(document, '发送新的加密恢复附件', () => guarded(recent, async () => { await adminSecretFlow.run(async () => { const result = await api.sendRecoveryArchive(); return { title: '附件已发送到管理员邮箱', value: result.recoveryPassword, copyLabel: '复制解密密码' }; }); })));
-          host.append(recentLabel, card);
+          const recent = recentControl(); const card = document.createElement('section'); card.className = 'hosted-admin-card hosted-admin-danger';
+          card.append(
+            button(document, '发送新的加密恢复附件', () => recent.guarded(async () => { await adminSecretFlow.run(async () => { const result = await api.sendRecoveryArchive(); if (!isCurrentSection()) throw unavailable(); return { title: '附件已发送到管理员邮箱', value: result.recoveryPassword, copyLabel: '复制解密密码' }; }); })),
+            button(document, '使用恢复码重置管理员', () => openRecovery()),
+          );
+          host.append(recent.element, card);
         }
-        return { dispose: () => { for (const input of localSecrets) { input.value = ''; secretInputs.delete(input); } } };
+        return { dispose: () => { sectionDisposed = true; for (const dispose of localDisposers) dispose(); } };
       },
     });
+  };
+
+  const closeRecovery = (): void => {
+    const current = recoveryFlow; recoveryFlow = undefined; clearRecoveryPanel(); current?.close();
+    activeSection = 'security'; renderDashboard();
+  };
+
+  const renderRecovery = (state: RecoveryViewState): void => {
+    const flow = recoveryFlow;
+    if (!flow || disposed) return;
+    clearRecoveryPanel();
+    const panel = document.createElement('main'); panel.className = 'hosted-shell hosted-panel';
+    const title = document.createElement('h1'); title.textContent = '管理员恢复';
+    const recoveryStatus = document.createElement('p'); recoveryStatus.setAttribute('role', 'alert'); recoveryStatus.setAttribute('aria-live', 'assertive'); recoveryStatus.textContent = state.error ?? '';
+    panel.append(title, recoveryStatus);
+    if (!state.totpUri || !state.recoveryPassword) {
+      const note = document.createElement('p'); note.textContent = '输入恢复码后，系统会生成新的 TOTP 与恢复资料。此流程不使用日常邮箱登录。';
+      const [codeLabel, code] = labelledInput(document, '恢复码', 'password'); recoveryCodeInput = code;
+      const prepare = button(document, '准备恢复', () => {
+        const recoveryCode = code.value; code.value = ''; prepare.disabled = true;
+        void flow.prepare(recoveryCode).catch(() => { recoveryStatus.textContent = '无法准备恢复，请检查恢复码'; }).finally(() => { code.value = ''; prepare.disabled = false; });
+      });
+      panel.append(note, codeLabel, prepare, button(document, '关闭并清除页面秘密', closeRecovery)); root.replaceChildren(panel);
+      return;
+    }
+    const note = document.createElement('p'); note.textContent = '加密恢复附件已发送到管理员邮箱；请保存下面的新 TOTP、解密密码并确认已收到附件。';
+    const uri = document.createElement('code'); uri.textContent = state.totpUri;
+    const password = document.createElement('code'); password.textContent = state.recoveryPassword;
+    panel.append(note, uri, password);
+    for (const item of ['totp', 'password', 'archive'] as const) {
+      const label = document.createElement('label'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = state.acknowledged[item];
+      label.append(checkbox, document.createTextNode(item === 'totp' ? '我已保存新 TOTP' : item === 'password' ? '我已保存解密密码' : '我已收到邮件附件'));
+      checkbox.addEventListener('change', () => flow.acknowledge(item, checkbox.checked)); panel.append(label);
+    }
+    if (state.canConfirm) {
+      const codeHost = document.createElement('div'); panel.append(codeHost);
+      const control = mountVerificationCode(codeHost, {
+        label: '新六位 TOTP',
+        onComplete: (totp) => {
+          control.setBusy(true);
+          void flow.confirm(totp).then(() => {
+            if (recoveryFlow === flow) { status.textContent = '恢复已确认'; closeRecovery(); }
+          }).catch(() => undefined).finally(() => { control.clear(); control.setBusy(false); });
+        },
+      });
+      recoveryCodeControl = control; control.focus();
+    } else {
+      const hint = document.createElement('p'); hint.textContent = '完成三项确认后可输入新 TOTP。'; panel.append(hint);
+    }
+    panel.append(button(document, '关闭并清除页面秘密', closeRecovery)); root.replaceChildren(panel);
+  };
+
+  const openRecovery = (): void => {
+    const previousShell = adminShell; adminShell = undefined; if (previousShell) void previousShell.dispose();
+    adminSecretFlow.close(); clearRecoveryPanel();
+    const previous = recoveryFlow; recoveryFlow = undefined; previous?.dispose();
+    recoveryFlow = createAdminRecoveryFlow(api, renderRecovery);
+    renderRecovery({ archiveDelivery: 'email', canConfirm: false, acknowledged: { totp: false, password: false, archive: false } });
   };
 
   const showOneTimeSecret = (presentation: AdminOneTimeSecretPresentation): void => {
@@ -305,6 +441,7 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
   });
 
   const renderLogin = (): void => {
+    const previousRecovery = recoveryFlow; recoveryFlow = undefined; clearRecoveryPanel(); previousRecovery?.dispose();
     adminSecretFlow.close();
     const previousShell = adminShell; adminShell = undefined; if (previousShell) void previousShell.dispose();
     const previous = loginMount; loginMount = undefined; if (previous) void previous.dispose();
@@ -313,11 +450,10 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
   renderLogin();
   return Object.freeze({ dispose: async () => {
     disposed = true;
+    const previousRecovery = recoveryFlow; recoveryFlow = undefined; clearRecoveryPanel(); previousRecovery?.dispose();
     adminSecretFlow.dispose();
     biliServiceFlow.dispose();
     clearTransientSecret?.(); clearTransientSecret = undefined;
-    for (const input of secretInputs) input.value = '';
-    secretInputs.clear();
     await loginMount?.dispose(); loginMount = undefined;
     await adminShell?.dispose(); adminShell = undefined;
     await accountFlow.dispose();

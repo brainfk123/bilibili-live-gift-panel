@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { HostedAPI, HostedAPIError } from '../src/hosted/api';
 import { createAuthFlow, mountAuthView } from '../src/hosted/auth';
-import { createAdminAccountFlow, createAdminFlow, createAdminOneTimeSecretFlow, createAdminRecoveryFlow } from '../src/hosted/admin';
+import { createAdminAccountFlow, createAdminFlow, createAdminOneTimeSecretFlow, createAdminRecoveryFlow, createBiliServiceFlow } from '../src/hosted/admin';
 import { createHostedViewHost } from '../src/hosted/shell';
 
 function json(body: unknown, status = 200): Response {
@@ -345,6 +345,22 @@ describe('administrator flow', () => {
     });
     expect(api.verifyRecentTOTP).toHaveBeenCalledWith('654321');
     expect(attempts).toBe(2);
+  });
+
+  it('leaves the step-up prompt to the server before a TOTP code is entered', async () => {
+    const api = { verifyRecentTOTP: vi.fn(async () => undefined) };
+    const flow = createAdminFlow(api);
+    await expect(flow.runWithRecentTOTP(undefined, async () => { throw new HostedAPIError('recent_totp_required', 403); })).rejects.toMatchObject({ code: 'recent_totp_required' });
+    expect(api.verifyRecentTOTP).not.toHaveBeenCalled();
+
+    const service = createBiliServiceFlow({
+      beginBiliServiceChallenge: vi.fn(async () => ({ challengeId: 'service', qrImage: 'qr', expiresAt: '2030-01-01T00:00:00Z' })),
+      replaceBiliServiceCredential: vi.fn(async () => { throw new HostedAPIError('recent_totp_required', 403); }),
+      verifyRecentTOTP: vi.fn(async () => undefined),
+    });
+    await service.begin();
+    await expect(service.replace()).rejects.toMatchObject({ code: 'recent_totp_required' });
+    expect(service.state()).toEqual(expect.objectContaining({ busy: false, challenge: expect.objectContaining({ challengeId: 'service' }) }));
   });
 
   it('drives disable, enable, and quota mutations without an administrator Bilibili proof', async () => {

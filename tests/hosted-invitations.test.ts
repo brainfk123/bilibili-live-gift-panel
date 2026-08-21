@@ -172,6 +172,35 @@ describe('administrator recovery secret lifecycle', () => {
     expect(JSON.stringify(states)).not.toContain('late-token');
   });
 
+  it('single-flights recovery preparation and fences a late confirmation after close', async () => {
+    let releasePrepare!: (value: { totpUri: string; recoveryPassword: string; handoffToken: string }) => void;
+    const preparation = new Promise<{ totpUri: string; recoveryPassword: string; handoffToken: string }>((resolve) => { releasePrepare = resolve; });
+    const prepareRecovery = vi.fn(() => preparation);
+    const states: unknown[] = [];
+    const flow = createAdminRecoveryFlow({ prepareRecovery, confirmRecovery: vi.fn() }, (state) => states.push(structuredClone(state)));
+    const first = flow.prepare('first-recovery-code');
+    const duplicate = flow.prepare('second-recovery-code');
+    expect(prepareRecovery).toHaveBeenCalledTimes(1);
+    releasePrepare({ totpUri: 'otpauth://late', recoveryPassword: '12345678901234567890', handoffToken: 'late-handoff' });
+    await Promise.all([first, duplicate]);
+
+    flow.acknowledge('totp'); flow.acknowledge('password'); flow.acknowledge('archive');
+    let rejectConfirm!: (error: Error) => void;
+    const confirming = new Promise<void>((_resolve, reject) => { rejectConfirm = reject; });
+    const confirmRecovery = vi.fn(() => confirming);
+    const confirmingFlow = createAdminRecoveryFlow({ prepareRecovery: vi.fn(async () => ({ totpUri: 'otpauth://new', recoveryPassword: '12345678901234567890', handoffToken: 'handoff' })), confirmRecovery }, (state) => states.push(structuredClone(state)));
+    await confirmingFlow.prepare('recovery-code');
+    confirmingFlow.acknowledge('totp'); confirmingFlow.acknowledge('password'); confirmingFlow.acknowledge('archive');
+    const firstConfirm = confirmingFlow.confirm('123456');
+    const duplicateConfirm = confirmingFlow.confirm('654321');
+    expect(confirmRecovery).toHaveBeenCalledTimes(1);
+    confirmingFlow.close();
+    rejectConfirm(new Error('late confirmation'));
+    await expect(firstConfirm).rejects.toThrow('late confirmation');
+    await expect(duplicateConfirm).rejects.toThrow('late confirmation');
+    expect(JSON.stringify(states.at(-1))).not.toContain('确认失败，请重试');
+  });
+
   it('publishes a visible generic recovery confirmation error without exposing secrets', async () => {
     const states: unknown[] = [];
     const flow = createAdminRecoveryFlow({
