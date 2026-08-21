@@ -1594,6 +1594,24 @@ describe('hosted operations runbook and private monitoring', () => {
     expect(readme).not.toMatch(/(?:PASSWORD|TOKEN|COOKIE|PRIVATE[_ -]?KEY)\s*=\s*\S+/i);
   });
 
+  it('documents email-only administrator initialization and private token plus TOTP confirmation', () => {
+    const readme = readProjectFile('deploy/hosted/README.md');
+    const initialization = readme.match(/^## Administrator initialization\s*$([\s\S]*?)(?=^## )/m)?.[1] ?? '';
+
+    expect(initialization).toContain('docker compose exec app /usr/local/bin/hosted-entrypoint admin init --email <recovery-email>');
+    expect(initialization).not.toContain('--uid');
+    expect(initialization).toContain('TOTP URI, recovery package password, and confirmation token');
+    expect(initialization).toContain("read -r -s -p 'Confirmation token: ' HANDOFF_TOKEN");
+    expect(initialization).toContain("read -r -s -p 'Current TOTP code: ' TOTP_CODE");
+    expect(initialization).toContain(`printf '{"handoffToken":"%s","totp":"%s"}' "$HANDOFF_TOKEN" "$TOTP_CODE"`);
+    expect(initialization).toContain('--request POST');
+    expect(initialization).toContain('--header "Origin: $HOSTED_ADMIN_ALLOWED_ORIGIN"');
+    expect(initialization).toContain('--header "X-CSRF-Token: $HOSTED_ADMIN_CSRF_TOKEN"');
+    expect(initialization).toContain("--header 'Content-Type: application/json'");
+    expect(initialization).toContain('http://127.0.0.1:12500/api/admin/recovery/confirm');
+    expect(initialization).not.toMatch(/(?:HANDOFF_TOKEN|TOTP_CODE)=['"][^'"]+['"]/);
+  });
+
   it('keeps health-check private, fail-closed, and free of secret output', () => {
     const script = readProjectFile('deploy/hosted/health-check.sh');
     expect(script).toMatch(/^set -euo pipefail$/m);

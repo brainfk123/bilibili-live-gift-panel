@@ -26,7 +26,36 @@ Install secret files as `root:root` mode `0600`. The environment file is `root:r
 
 ## Administrator initialization
 
-From the running app container, run `hosted admin init --uid <administrator-bili-uid> --email <recovery-email>` once. Capture the TOTP URI and recovery package password over an approved offline channel, then destroy the terminal scrollback. Store the recovery archive offline. Do not log the URI or password.
+From a private root shell on the host, load the deployment environment and run the image entrypoint in the running app container once:
+
+```bash
+set -a
+. /etc/gift-panel-hosted/env
+set +a
+cd /opt/gift-panel-hosted/current/deploy/hosted
+docker compose exec app /usr/local/bin/hosted-entrypoint admin init --email <recovery-email>
+```
+
+Capture the TOTP URI, recovery package password, and confirmation token privately over an approved offline channel. Store the recovery archive offline and enroll the TOTP URI before confirming initialization. In the same private root shell, read the CSRF token, confirmation token, and current TOTP code without placing their values in command history. Do not paste any of these secrets into shell assignments or command arguments.
+
+```bash
+IFS= read -r HOSTED_ADMIN_CSRF_TOKEN < /etc/gift-panel-hosted/secrets/admin-csrf-token
+read -r -s -p 'Confirmation token: ' HANDOFF_TOKEN
+printf '\n'
+read -r -s -p 'Current TOTP code: ' TOTP_CODE
+printf '\n'
+printf '{"handoffToken":"%s","totp":"%s"}' "$HANDOFF_TOKEN" "$TOTP_CODE" |
+  curl --fail --silent --show-error \
+    --request POST \
+    --header "Origin: $HOSTED_ADMIN_ALLOWED_ORIGIN" \
+    --header "X-CSRF-Token: $HOSTED_ADMIN_CSRF_TOKEN" \
+    --header 'Content-Type: application/json' \
+    --data-binary @- \
+    http://127.0.0.1:12500/api/admin/recovery/confirm
+unset HANDOFF_TOKEN TOTP_CODE HOSTED_ADMIN_CSRF_TOKEN
+```
+
+Successful confirmation returns HTTP 204 with no response body. Destroy the terminal scrollback and close the private shell. Do not log the URI, password, confirmation token, TOTP code, or CSRF token.
 
 ## Bilibili service credential
 
