@@ -49,7 +49,7 @@ const (
 var errInvalidCommand = errors.New("invalid hosted command")
 
 type adminInitializer interface {
-	Initialize(context.Context, string, string) (adminidentity.InitializeResult, error)
+	Initialize(context.Context, string) (adminidentity.InitializeResult, error)
 }
 
 type serverLifecycle interface {
@@ -115,15 +115,15 @@ func run() error {
 	if err != nil {
 		return errors.New("configure administrator mail delivery")
 	}
+	adminService, err := adminidentity.NewService(adminRepository, keys, sender, adminidentity.ServiceOptions{})
+	if err != nil {
+		return errors.New("configure administrator identity")
+	}
 	verifier, err := biliqr.New(biliqr.Config{})
 	if err != nil {
 		return errors.New("configure Bilibili verification")
 	}
 	defer verifier.Close()
-	adminService, err := adminidentity.NewService(adminRepository, keys, verifier, sender, adminidentity.ServiceOptions{})
-	if err != nil {
-		return errors.New("configure administrator identity")
-	}
 	return runModeWithCleanup(processContext, os.Args[1:], adminService, os.Stdin, os.Stdout, func(cleanupContext context.Context) {
 		adminService.RunHandoffCleanup(cleanupContext, time.Minute)
 	}, func() error {
@@ -546,19 +546,18 @@ func runModeWithInput(ctx context.Context, args []string, initializer adminIniti
 	}
 	flags := flag.NewFlagSet("admin init", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	uid := flags.String("uid", "", "administrator Bilibili UID")
 	email := flags.String("email", "", "administrator recovery email")
-	if err := flags.Parse(args[2:]); err != nil || flags.NArg() != 0 || *uid == "" || *email == "" {
+	if err := flags.Parse(args[2:]); err != nil || flags.NArg() != 0 || *email == "" {
 		return errInvalidCommand
 	}
-	result, err := initializer.Initialize(ctx, *uid, *email)
+	result, err := initializer.Initialize(ctx, *email)
 	if err != nil {
 		return err
 	}
-	if result.TOTPURI == "" || len(result.RecoveryPassword) != 20 {
+	if result.TOTPURI == "" || len(result.RecoveryPassword) != 20 || result.HandoffToken == "" {
 		return adminidentity.ErrUnavailable
 	}
-	if _, err := fmt.Fprintf(output, "TOTP URI: %s\nRecovery package password: %s\n", result.TOTPURI, result.RecoveryPassword); err != nil {
+	if _, err := fmt.Fprintf(output, "TOTP URI: %s\nRecovery package password: %s\nConfirmation token: %s\n", result.TOTPURI, result.RecoveryPassword, result.HandoffToken); err != nil {
 		return errors.New("write administrator initialization result")
 	}
 	return nil

@@ -829,6 +829,10 @@ describe('hosted single-host deployment contract', () => {
     for (const endpoint of ['/api/admin/bili-service/challenge', '/api/admin/bili-service/replace', '/api/admin/auth/email/challenges', '/api/admin/session/email']) {
       expect(nginxRegexLocationMatches(auth, endpoint), endpoint).toBe(true);
     }
+    for (const endpoint of ['/api/admin/auth/bili/challenges', '/api/admin/auth/bili/challenges/legacy-proof']) {
+      expect(nginxRegexLocationMatches(auth, endpoint), endpoint).toBe(false);
+    }
+    expect(nginxRegexLocationMatches(auth, '/api/auth/bili/challenges')).toBe(true);
     expect(nginxRegexLocationMatches(auth, '/api/admin/bili-service/status')).toBe(false);
     expect(nginxRegexLocationMatches(account, '/api/admin/bili-service/status')).toBe(false);
     expect('/api/admin/bili-service/status'.startsWith('/api/')).toBe(true);

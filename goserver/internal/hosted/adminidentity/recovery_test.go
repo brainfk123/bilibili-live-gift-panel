@@ -12,8 +12,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"bilibili-live-gift-panel/internal/hosted/identity"
 )
 
 func TestRecoveryArchiveUsesPinnedScryptAndAuthenticatedEncryption(t *testing.T) {
@@ -78,12 +76,11 @@ func TestSendRecoveryRequiresRecentTOTPAndNeverEmailsPassword(t *testing.T) {
 	now := time.Date(2026, 8, 16, 11, 0, 0, 0, time.UTC)
 	clock := now
 	repository := initializedMemoryRepository(t, now)
-	verifier := &memoryVerifier{verification: identity.Verification{UID: "32249588", CompletedAt: now}}
 	sender := &MemorySender{}
-	service := newTestServiceWithClock(t, repository, verifier, sender, func() time.Time { return clock })
-	login, err := service.VerifyLogin(context.Background(), "login-proof", "123456")
-	if err != nil {
-		t.Fatal(err)
+	service := newTestServiceWithClock(t, repository, sender, func() time.Time { return clock })
+	login := emailLoginForTest(t, service, sender)
+	if err := service.VerifyRecentTOTP(context.Background(), login.Token, "123456"); err != nil {
+		t.Fatalf("VerifyRecentTOTP() error = %v", err)
 	}
 
 	result, err := service.SendRecovery(context.Background(), login.Token)
@@ -94,10 +91,10 @@ func TestSendRecoveryRequiresRecentTOTPAndNeverEmailsPassword(t *testing.T) {
 		t.Fatalf("RecoveryPassword length = %d", len(result.RecoveryPassword))
 	}
 	messages := sender.Messages()
-	if len(messages) != 1 || len(messages[0].Attachments) != 1 {
+	if len(messages) != 2 || len(messages[1].Attachments) != 1 {
 		t.Fatalf("messages = %#v", messages)
 	}
-	encodedMessage := messages[0].Text + string(messages[0].Attachments[0].Data)
+	encodedMessage := messages[1].Text + string(messages[1].Attachments[0].Data)
 	if strings.Contains(encodedMessage, result.RecoveryPassword) {
 		t.Fatal("recovery email exposed archive password")
 	}
@@ -106,51 +103,8 @@ func TestSendRecoveryRequiresRecentTOTPAndNeverEmailsPassword(t *testing.T) {
 	if _, err := service.SendRecovery(context.Background(), login.Token); !errors.Is(err, ErrRecentTOTPRequired) {
 		t.Fatalf("SendRecovery(stale TOTP) error = %v", err)
 	}
-	if got := len(sender.Messages()); got != 1 {
-		t.Fatalf("stale TOTP sent %d messages, want still one", got)
-	}
-}
-
-func TestCompleteRecoveryRequiresFreshMatchingProofAndAtomicallyRotatesEverything(t *testing.T) {
-	now := time.Date(2026, 8, 16, 11, 10, 0, 0, time.UTC)
-	repository := initializedMemoryRepository(t, now)
-	oldCode := "old-recovery-code"
-	oldHash := sha256.Sum256([]byte(oldCode))
-	repository.activeCodes[oldHash] = struct{}{}
-	verifier := &memoryVerifier{verification: identity.Verification{UID: "32249588", CompletedAt: now}}
-	sender := &MemorySender{}
-	service := newTestService(t, repository, verifier, sender, now)
-	login, err := service.VerifyLogin(context.Background(), "login-proof", "123456")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	result, err := service.CompleteRecovery(context.Background(), "recovery-proof", oldCode)
-	if err != nil {
-		t.Fatalf("CompleteRecovery() error = %v", err)
-	}
-	if result.TOTPURI == "" || len(result.RecoveryPassword) != 20 {
-		t.Fatalf("CompleteRecovery() = %#v", result)
-	}
-
-	repository.mu.Lock()
-	_, consumed := repository.usedCodes[oldHash]
-	_, stillActive := repository.activeCodes[oldHash]
-	activeCount := len(repository.activeCodes)
-	newEpoch := repository.identity.CredentialEpoch
-	rotatedSecret := bytes.Clone(repository.identity.TOTPSecretCiphertext)
-	repository.mu.Unlock()
-	if !consumed || stillActive || activeCount != RecoveryCodeCount || newEpoch != 2 {
-		t.Fatalf("recovery state consumed=%v oldActive=%v active=%d epoch=%d", consumed, stillActive, activeCount, newEpoch)
-	}
-	if bytes.Equal(rotatedSecret, initializedMemoryRepository(t, now).identity.TOTPSecretCiphertext) {
-		t.Fatal("recovery did not rotate the TOTP ciphertext")
-	}
-	if err := service.RequireRecentTOTP(context.Background(), login.Token); !errors.Is(err, ErrAuthenticationFailed) {
-		t.Fatalf("old session after recovery error = %v, want ErrAuthenticationFailed", err)
-	}
-	if len(sender.Messages()) != 1 || strings.Contains(sender.Messages()[0].Text, result.RecoveryPassword) {
-		t.Fatal("recovery delivery missing or included its password")
+	if got := len(sender.Messages()); got != 2 {
+		t.Fatalf("stale TOTP sent %d messages, want still two", got)
 	}
 }
 
@@ -160,14 +114,9 @@ func TestPrepareConfirmRecoveryIsRetryableAndDefersCredentialMutation(t *testing
 	oldCode := "reserved-old-recovery-code"
 	oldHash := sha256.Sum256([]byte(oldCode))
 	repository.activeCodes[oldHash] = struct{}{}
-	verifier := &memoryVerifier{verification: identity.Verification{UID: "32249588", CompletedAt: now}}
 	sender := &MemorySender{Err: ErrUnavailable}
-	service := newTestService(t, repository, verifier, sender, now)
-	login, err := service.VerifyLogin(context.Background(), "login-proof", "123456")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.PrepareRecovery(context.Background(), "prepare-proof", oldCode); !errors.Is(err, ErrUnavailable) {
+	service := newTestService(t, repository, sender, now)
+	if _, err := service.PrepareRecovery(context.Background(), oldCode); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("SMTP-failed prepare error=%v", err)
 	}
 	repository.mu.Lock()
@@ -185,7 +134,7 @@ func TestPrepareConfirmRecoveryIsRetryableAndDefersCredentialMutation(t *testing
 		t.Fatal("SMTP failure did not leave committed retryable handoff")
 	}
 	sender.Err = nil
-	prepared, err := service.PrepareRecovery(context.Background(), "retry-proof", oldCode)
+	prepared, err := service.PrepareRecovery(context.Background(), oldCode)
 	if err != nil {
 		t.Fatalf("retry PrepareRecovery() error=%v", err)
 	}
@@ -195,14 +144,14 @@ func TestPrepareConfirmRecoveryIsRetryableAndDefersCredentialMutation(t *testing
 	if messages := sender.Messages(); len(messages) != 1 || !bytes.Equal(messages[0].Attachments[0].Data, stableArchive) {
 		t.Fatal("retry did not send the stable committed attachment")
 	}
-	if err := service.ConfirmRecovery(context.Background(), prepared.HandoffToken, "000000"); !errors.Is(err, ErrAuthenticationFailed) {
+	if err := service.ConfirmHandoff(context.Background(), prepared.HandoffToken, "000000"); !errors.Is(err, ErrAuthenticationFailed) {
 		t.Fatalf("wrong pending TOTP error=%v", err)
 	}
-	if err := service.ConfirmRecovery(context.Background(), prepared.HandoffToken, "123456"); err != nil {
-		t.Fatalf("ConfirmRecovery() error=%v", err)
+	if err := service.ConfirmHandoff(context.Background(), prepared.HandoffToken, "123456"); err != nil {
+		t.Fatalf("ConfirmHandoff() error=%v", err)
 	}
-	if err := service.ConfirmRecovery(context.Background(), prepared.HandoffToken, "123456"); err != nil {
-		t.Fatalf("idempotent ConfirmRecovery() error=%v", err)
+	if err := service.ConfirmHandoff(context.Background(), prepared.HandoffToken, "123456"); err != nil {
+		t.Fatalf("idempotent ConfirmHandoff() error=%v", err)
 	}
 	repository.mu.Lock()
 	_, consumed := repository.usedCodes[oldHash]
@@ -220,9 +169,6 @@ func TestPrepareConfirmRecoveryIsRetryableAndDefersCredentialMutation(t *testing
 	if !consumed || activeCount != RecoveryCodeCount || epoch != 2 || secretRetained {
 		t.Fatalf("confirmed state consumed=%v active=%d epoch=%d secretRetained=%v", consumed, activeCount, epoch, secretRetained)
 	}
-	if err := service.RequireRecentTOTP(context.Background(), login.Token); !errors.Is(err, ErrAuthenticationFailed) {
-		t.Fatalf("old session survived confirmation: %v", err)
-	}
 }
 
 func TestConcurrentRecoveryPreparationAcrossInstancesAllowsOnePendingAdministratorHandoff(t *testing.T) {
@@ -235,15 +181,15 @@ func TestConcurrentRecoveryPreparationAcrossInstancesAllowsOnePendingAdministrat
 	}
 	senders := []*MemorySender{{}, {}}
 	services := []*Service{
-		newTestService(t, repository, &memoryVerifier{verification: identity.Verification{UID: "32249588", CompletedAt: now}}, senders[0], now),
-		newTestService(t, repository, &memoryVerifier{verification: identity.Verification{UID: "32249588", CompletedAt: now}}, senders[1], now),
+		newTestService(t, repository, senders[0], now),
+		newTestService(t, repository, senders[1], now),
 	}
 	start := make(chan struct{})
 	results := make(chan error, len(services))
 	for index := range services {
 		go func(index int) {
 			<-start
-			_, err := services[index].PrepareRecovery(context.Background(), "proof", codes[index])
+			_, err := services[index].PrepareRecovery(context.Background(), codes[index])
 			results <- err
 		}(index)
 	}
@@ -278,12 +224,13 @@ func TestExistingRecoveryHandoffRequiresMatchingRequestHash(t *testing.T) {
 	codeHash := sha256.Sum256([]byte("same-code"))
 	repository.activeCodes[codeHash] = struct{}{}
 	record := sqlHandoffRecord(now, HandoffRecovery)
-	first, err := repository.PrepareRecoveryHandoff(context.Background(), repository.identity.UIDLookup, codeHash[:], record)
+	record.EmailCiphertext = bytes.Clone(repository.identity.EmailCiphertext)
+	first, err := repository.PrepareRecoveryHandoff(context.Background(), repository.identity.CredentialEpoch, codeHash[:], record)
 	if err != nil {
 		t.Fatal(err)
 	}
 	record.RequestHash = bytes.Repeat([]byte{0x7f}, sha256.Size)
-	second, err := repository.PrepareRecoveryHandoff(context.Background(), repository.identity.UIDLookup, codeHash[:], record)
+	second, err := repository.PrepareRecoveryHandoff(context.Background(), repository.identity.CredentialEpoch, codeHash[:], record)
 	if !errors.Is(err, ErrAuthenticationFailed) || second.ID != 0 || first.ID == 0 {
 		t.Fatalf("mismatched retry handoff=%#v error=%v", second, err)
 	}
@@ -297,14 +244,16 @@ func TestExpiredRecoveryHandoffIsErasedBeforeDifferentCodeCanPrepare(t *testing.
 	repository.activeCodes[oldCodeHash] = struct{}{}
 	repository.activeCodes[newCodeHash] = struct{}{}
 	expired := sqlHandoffRecord(now.Add(-time.Hour), HandoffRecovery)
+	expired.EmailCiphertext = bytes.Clone(repository.identity.EmailCiphertext)
 	expired.ExpiresAt = now.Add(-time.Minute)
-	oldHandoff, err := repository.PrepareRecoveryHandoff(context.Background(), repository.identity.UIDLookup, oldCodeHash[:], expired)
+	oldHandoff, err := repository.PrepareRecoveryHandoff(context.Background(), repository.identity.CredentialEpoch, oldCodeHash[:], expired)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fresh := sqlHandoffRecord(now, HandoffRecovery)
+	fresh.EmailCiphertext = bytes.Clone(repository.identity.EmailCiphertext)
 	fresh.RequestHash = bytes.Repeat([]byte{0x55}, sha256.Size)
-	newHandoff, err := repository.PrepareRecoveryHandoff(context.Background(), repository.identity.UIDLookup, newCodeHash[:], fresh)
+	newHandoff, err := repository.PrepareRecoveryHandoff(context.Background(), repository.identity.CredentialEpoch, newCodeHash[:], fresh)
 	if err != nil {
 		t.Fatalf("fresh PrepareRecoveryHandoff() error=%v", err)
 	}
@@ -313,33 +262,6 @@ func TestExpiredRecoveryHandoffIsErasedBeforeDifferentCodeCanPrepare(t *testing.
 	repository.mu.Unlock()
 	if oldStillPresent || newHandoff.ID == oldHandoff.ID || len(newHandoff.Archive) == 0 {
 		t.Fatalf("oldPresent=%v oldID=%d new=%#v", oldStillPresent, oldHandoff.ID, newHandoff)
-	}
-}
-
-func TestCompleteRecoveryRejectsMismatchedOrStaleBilibiliProofWithoutConsumingCode(t *testing.T) {
-	now := time.Date(2026, 8, 16, 11, 20, 0, 0, time.UTC)
-	tests := []identity.Verification{
-		{UID: "11111111", CompletedAt: now},
-		{UID: "32249588", CompletedAt: now.Add(-5*time.Minute - time.Second)},
-	}
-	for _, proof := range tests {
-		t.Run(proof.UID+proof.CompletedAt.String(), func(t *testing.T) {
-			repository := initializedMemoryRepository(t, now)
-			code := "still-active-code"
-			hash := sha256.Sum256([]byte(code))
-			repository.activeCodes[hash] = struct{}{}
-			service := newTestService(t, repository, &memoryVerifier{verification: proof}, &MemorySender{}, now)
-			if _, err := service.CompleteRecovery(context.Background(), "bad-proof", code); !errors.Is(err, ErrAuthenticationFailed) {
-				t.Fatalf("CompleteRecovery() error = %v", err)
-			}
-			repository.mu.Lock()
-			_, active := repository.activeCodes[hash]
-			epoch := repository.identity.CredentialEpoch
-			repository.mu.Unlock()
-			if !active || epoch != 1 {
-				t.Fatalf("failed proof changed recovery state: active=%v epoch=%d", active, epoch)
-			}
-		})
 	}
 }
 

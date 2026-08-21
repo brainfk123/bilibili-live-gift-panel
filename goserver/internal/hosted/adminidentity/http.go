@@ -19,15 +19,12 @@ import (
 type adminHTTPServicePort interface {
 	BeginEmailLogin(context.Context) (EmailLoginChallenge, error)
 	VerifyEmailLogin(context.Context, string, string) (LoginResult, error)
-	BeginVerification(context.Context) (identity.Challenge, error)
-	PollVerification(context.Context, string) (AdminProofStatus, error)
-	CancelVerification(string)
-	VerifyLogin(context.Context, string, string) (LoginResult, error)
 	RequireSession(context.Context, string) error
+	Logout(context.Context, string) error
 	VerifyRecentTOTP(context.Context, string, string) error
 	SendRecovery(context.Context, string) (RecoveryResult, error)
-	PrepareRecovery(context.Context, string, string) (RecoveryPreparationResult, error)
-	ConfirmRecovery(context.Context, string, string) error
+	PrepareRecovery(context.Context, string) (RecoveryPreparationResult, error)
+	ConfirmHandoff(context.Context, string, string) error
 }
 
 type HTTPOptions struct {
@@ -63,12 +60,9 @@ func NewHTTPHandler(service adminHTTPServicePort, options HTTPOptions) (*HTTPHan
 		service: service, allowedOrigin: options.AllowedOrigin, csrfToken: options.CSRFToken,
 		limiter: options.Limiter, clientIP: options.ClientIP, now: options.Now, mux: http.NewServeMux(),
 	}
-	handler.mux.HandleFunc("POST /api/admin/auth/bili/challenges", handler.beginVerification)
-	handler.mux.HandleFunc("GET /api/admin/auth/bili/challenges/{id}", handler.pollVerification)
-	handler.mux.HandleFunc("DELETE /api/admin/auth/bili/challenges/{id}", handler.cancelVerification)
 	handler.mux.HandleFunc("POST /api/admin/auth/email/challenges", handler.beginEmailLogin)
 	handler.mux.HandleFunc("GET /api/admin/session", handler.getSession)
-	handler.mux.HandleFunc("POST /api/admin/session", handler.verifyLogin)
+	handler.mux.HandleFunc("DELETE /api/admin/session", handler.deleteSession)
 	handler.mux.HandleFunc("POST /api/admin/session/email", handler.verifyEmailLogin)
 	handler.mux.HandleFunc("POST /api/admin/totp", handler.verifyRecentTOTP)
 	handler.mux.HandleFunc("POST /api/admin/recovery/archive", handler.sendRecovery)
@@ -99,74 +93,9 @@ func (handler *HTTPHandler) beginEmailLogin(response http.ResponseWriter, reques
 	writeAdminJSON(response, http.StatusCreated, challenge)
 }
 
-func (handler *HTTPHandler) pollVerification(response http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodGet {
-		response.Header().Set("Allow", http.MethodGet)
-		http.Error(response, "Method Not Allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	challengeID := request.PathValue("id")
-	if challengeID == "" || len(challengeID) > 256 || request.URL.RawQuery != "" || !emptyAdminBody(request) {
-		writeAdminError(response, http.StatusBadRequest, "invalid_request")
-		return
-	}
-	if !handler.allow(request, "admin_proof_poll", challengeID) {
-		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
-		return
-	}
-	status, err := handler.service.PollVerification(request.Context(), challengeID)
-	switch {
-	case err == nil:
-		writeAdminJSON(response, http.StatusOK, status)
-	case errors.Is(err, identity.ErrChallengeExpired):
-		writeAdminJSON(response, http.StatusGone, struct {
-			Status string `json:"status"`
-		}{Status: "expired"})
-	case errors.Is(err, ErrUnavailable), errors.Is(err, identity.ErrVerificationUnavailable):
-		writeAdminError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
-	default:
-		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
-	}
-}
-
 func (handler *HTTPHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")
 	handler.mux.ServeHTTP(response, request)
-}
-
-func (handler *HTTPHandler) beginVerification(response http.ResponseWriter, request *http.Request) {
-	if !handler.acceptMutation(request) {
-		writeAdminError(response, http.StatusForbidden, "request_rejected")
-		return
-	}
-	if request.URL.RawQuery != "" || !handler.allow(request, "admin_proof_begin", "") {
-		if request.URL.RawQuery != "" {
-			writeAdminError(response, http.StatusBadRequest, "invalid_request")
-		} else {
-			writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
-		}
-		return
-	}
-	challenge, err := handler.service.BeginVerification(request.Context())
-	if err != nil {
-		writeAdminError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
-		return
-	}
-	writeAdminJSON(response, http.StatusCreated, challenge)
-}
-
-func (handler *HTTPHandler) cancelVerification(response http.ResponseWriter, request *http.Request) {
-	if !handler.acceptMutation(request) {
-		writeAdminError(response, http.StatusForbidden, "request_rejected")
-		return
-	}
-	challengeID := request.PathValue("id")
-	if challengeID == "" || len(challengeID) > 256 || request.URL.RawQuery != "" {
-		writeAdminError(response, http.StatusBadRequest, "invalid_request")
-		return
-	}
-	handler.service.CancelVerification(challengeID)
-	response.WriteHeader(http.StatusNoContent)
 }
 
 func (handler *HTTPHandler) getSession(response http.ResponseWriter, request *http.Request) {
@@ -194,35 +123,22 @@ func (handler *HTTPHandler) getSession(response http.ResponseWriter, request *ht
 	}
 }
 
-func (handler *HTTPHandler) verifyLogin(response http.ResponseWriter, request *http.Request) {
-	if !handler.acceptJSONMutation(request) {
+func (handler *HTTPHandler) deleteSession(response http.ResponseWriter, request *http.Request) {
+	if !handler.acceptMutation(request) {
 		writeAdminError(response, http.StatusForbidden, "request_rejected")
 		return
 	}
-	var body struct {
-		ChallengeID string `json:"challengeId"`
-		TOTP        string `json:"totp"`
-	}
-	if !decodeAdminJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 || !validTOTPCode(body.TOTP) {
+	if request.URL.RawQuery != "" || !emptyAdminBody(request) {
 		writeAdminError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if !handler.allow(request, "admin_login", body.ChallengeID) {
-		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
+	token, ok := adminSessionToken(request)
+	if !ok || handler.service.Logout(request.Context(), token) != nil {
+		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
 		return
 	}
-	result, err := handler.service.VerifyLogin(request.Context(), body.ChallengeID, body.TOTP)
-	switch {
-	case err == nil && result.Token != "" && result.ExpiresAt.After(handler.now()):
-		http.SetCookie(response, adminCookie(result.Token, result.ExpiresAt))
-		response.WriteHeader(http.StatusNoContent)
-	case errors.Is(err, identity.ErrVerificationPending):
-		writeAdminError(response, http.StatusAccepted, "verification_pending")
-	case errors.Is(err, identity.ErrVerificationUnavailable):
-		writeAdminError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
-	default:
-		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
-	}
+	http.SetCookie(response, adminCookie("", time.Unix(1, 0)))
+	response.WriteHeader(http.StatusNoContent)
 }
 
 func (handler *HTTPHandler) verifyEmailLogin(response http.ResponseWriter, request *http.Request) {
@@ -330,10 +246,9 @@ func (handler *HTTPHandler) prepareRecovery(response http.ResponseWriter, reques
 		return
 	}
 	var body struct {
-		ChallengeID  string `json:"challengeId"`
 		RecoveryCode string `json:"recoveryCode"`
 	}
-	if !decodeAdminJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 || body.RecoveryCode == "" || len(body.RecoveryCode) > 256 {
+	if !decodeAdminJSON(response, request, &body) || body.RecoveryCode == "" || len(body.RecoveryCode) > 256 {
 		writeAdminError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -341,13 +256,11 @@ func (handler *HTTPHandler) prepareRecovery(response http.ResponseWriter, reques
 		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
-	result, err := handler.service.PrepareRecovery(request.Context(), body.ChallengeID, body.RecoveryCode)
+	result, err := handler.service.PrepareRecovery(request.Context(), body.RecoveryCode)
 	switch {
 	case err == nil && result.TOTPURI != "" && len(result.RecoveryPassword) == 20 && result.HandoffToken != "":
 		writeAdminJSON(response, http.StatusOK, result)
-	case errors.Is(err, identity.ErrVerificationPending):
-		writeAdminError(response, http.StatusAccepted, "verification_pending")
-	case errors.Is(err, identity.ErrVerificationUnavailable):
+	case errors.Is(err, ErrUnavailable):
 		writeAdminError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
 	default:
 		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
@@ -377,7 +290,7 @@ func (handler *HTTPHandler) confirmRecovery(response http.ResponseWriter, reques
 		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
-	if err := handler.service.ConfirmRecovery(request.Context(), body.HandoffToken, body.TOTP); err != nil {
+	if err := handler.service.ConfirmHandoff(request.Context(), body.HandoffToken, body.TOTP); err != nil {
 		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
 		return
 	}

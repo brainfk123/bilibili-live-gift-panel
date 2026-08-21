@@ -36,7 +36,7 @@ func TestHTTPSensitiveEndpointRateLimitUsesHashedSessionBeforeService(t *testing
 	for _, test := range []struct{ path, body, key string }{
 		{path: "/api/admin/totp", body: `{"totp":"123456"}`, key: "plain-cookie-must-not-be-a-key"},
 		{path: "/api/admin/recovery/archive", body: `{}`, key: "plain-cookie-must-not-be-a-key"},
-		{path: "/api/admin/recovery/prepare", body: `{"challengeId":"proof","recoveryCode":"code"}`, key: "admin:1"},
+		{path: "/api/admin/recovery/prepare", body: `{"recoveryCode":"code"}`, key: "admin:1"},
 	} {
 		limiter := &denySessionLimit{deniedKey: test.key}
 		service := &adminHTTPService{}
@@ -53,7 +53,7 @@ func TestHTTPSensitiveEndpointRateLimitUsesHashedSessionBeforeService(t *testing
 		if response.Code != http.StatusTooManyRequests {
 			t.Fatalf("POST %s status=%d body=%s", test.path, response.Code, response.Body.String())
 		}
-		if service.verifySession != "" || service.recoverySession != "" || service.prepareChallenge != "" {
+		if service.verifySession != "" || service.recoverySession != "" || service.prepareCode != "" {
 			t.Fatalf("POST %s reached service", test.path)
 		}
 		if limiter.sawPlaintext {
@@ -73,6 +73,13 @@ type adminLimitCall struct {
 }
 
 type denyAdministratorEmailLoginLimit struct{ calls []adminLimitCall }
+
+type countingAdminLimiter struct{ calls int }
+
+func (limiter *countingAdminLimiter) Allow(context.Context, identity.LimitScope, string) bool {
+	limiter.calls++
+	return true
+}
 
 func (limiter *denyAdministratorEmailLoginLimit) Allow(_ context.Context, scope identity.LimitScope, key string) bool {
 	limiter.calls = append(limiter.calls, adminLimitCall{scope: scope, key: key})
@@ -101,27 +108,63 @@ func TestHTTPHandlerExposesNoAdministratorInitializationRoute(t *testing.T) {
 	}
 }
 
-func TestHTTPAdministratorLoginSetsHostOnlySessionCookie(t *testing.T) {
-	now := time.Date(2026, 8, 16, 13, 0, 0, 0, time.UTC)
-	service := &adminHTTPService{login: LoginResult{Token: "plain-admin-token", ExpiresAt: now.Add(time.Hour)}}
-	handler := newTestHTTPHandlerAt(t, service, now)
-	request := mutationRequest(http.MethodPost, "/api/admin/session", `{"challengeId":"proof-id","totp":"123456"}`)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusNoContent {
-		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+func TestHTTPAdministratorBiliRoutesAreAbsentForEveryMethodWithoutSideEffects(t *testing.T) {
+	service := &adminHTTPService{}
+	limiter := &countingAdminLimiter{}
+	handler, err := NewHTTPHandler(service, HTTPOptions{
+		AllowedOrigin: "https://panel.example.com", CSRFToken: "csrf-test-token",
+		Limiter: limiter, ClientIP: identity.DirectClientIP,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if service.loginChallenge != "proof-id" || service.loginCode != "123456" {
-		t.Fatalf("login arguments challenge=%q code=%q", service.loginChallenge, service.loginCode)
+
+	for _, path := range []string{
+		"/api/admin/auth/bili/challenges",
+		"/api/admin/auth/bili/challenges/legacy-proof",
+		"/api/admin/auth/bili/challenges/legacy-proof/child",
+	} {
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodOptions, "BREW"} {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, mutationRequest(method, path, `{}`))
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("%s %s status=%d, want 404", method, path, response.Code)
+			}
+		}
+	}
+	if limiter.calls != 0 || service.wasCalled() {
+		t.Fatalf("removed Bilibili routes had side effects: limiter=%d service=%#v", limiter.calls, service)
+	}
+}
+
+func TestHTTPAdministratorSessionOwnsOnlyGetAndDelete(t *testing.T) {
+	service := &adminHTTPService{}
+	handler := newTestHTTPHandler(t, service)
+
+	get := httptest.NewRequest(http.MethodGet, "/api/admin/session", nil)
+	get.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "admin-session"})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, get)
+	if response.Code != http.StatusNoContent || service.requireSessionCalls != 1 {
+		t.Fatalf("GET status=%d require calls=%d", response.Code, service.requireSessionCalls)
+	}
+
+	remove := mutationRequest(http.MethodDelete, "/api/admin/session", ``)
+	remove.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "admin-session"})
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, remove)
+	if response.Code != http.StatusNoContent || service.logoutCalls != 1 || service.logoutToken != "admin-session" {
+		t.Fatalf("DELETE status=%d logout calls=%d token=%q", response.Code, service.logoutCalls, service.logoutToken)
 	}
 	cookies := response.Result().Cookies()
-	if len(cookies) != 1 {
-		t.Fatalf("cookies = %v", cookies)
+	if len(cookies) != 1 || cookies[0].Value != "" || cookies[0].MaxAge != -1 {
+		t.Fatalf("DELETE cookies=%#v", cookies)
 	}
-	cookie := cookies[0]
-	if cookie.Name != identity.SiteSessionCookie || cookie.Value != "plain-admin-token" || !cookie.Secure || !cookie.HttpOnly || cookie.Path != "/" || cookie.Domain != "" || cookie.SameSite != http.SameSiteLaxMode || !cookie.Expires.Equal(now.Add(time.Hour)) {
-		t.Fatalf("administrator cookie = %#v", cookie)
+
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, mutationRequest(http.MethodPost, "/api/admin/session", `{"challengeId":"legacy-proof","totp":"123456"}`))
+	if response.Code != http.StatusMethodNotAllowed || service.requireSessionCalls != 1 || service.logoutCalls != 1 {
+		t.Fatalf("POST status=%d service=%#v", response.Code, service)
 	}
 }
 
@@ -168,75 +211,12 @@ func TestHTTPAdminSessionProbeIsEmptyAndDistinguishesUnavailable(t *testing.T) {
 			}
 		})
 	}
-	for _, method := range []string{http.MethodHead, http.MethodDelete} {
+	for _, method := range []string{http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch} {
 		response := httptest.NewRecorder()
 		newTestHTTPHandler(t, &adminHTTPService{}).ServeHTTP(response, httptest.NewRequest(method, "/api/admin/session", nil))
 		if response.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("%s status=%d, want 405", method, response.Code)
 		}
-	}
-}
-
-func TestHTTPAdminProofStatusExposesStateWithoutIdentity(t *testing.T) {
-	now := time.Date(2026, 8, 16, 13, 5, 0, 0, time.UTC)
-	tests := []struct {
-		name       string
-		status     AdminProofStatus
-		err        error
-		wantStatus int
-		wantBody   string
-	}{
-		{name: "pending", status: AdminProofStatus{Status: AdminProofPending, ExpiresAt: now.Add(time.Minute)}, wantStatus: http.StatusOK, wantBody: `{"status":"pending","expiresAt":"2026-08-16T13:06:00Z"}` + "\n"},
-		{name: "verified", status: AdminProofStatus{Status: AdminProofVerified, ExpiresAt: now.Add(time.Minute)}, wantStatus: http.StatusOK, wantBody: `{"status":"verified","expiresAt":"2026-08-16T13:06:00Z"}` + "\n"},
-		{name: "expired", err: identity.ErrChallengeExpired, wantStatus: http.StatusGone, wantBody: `{"status":"expired"}` + "\n"},
-		{name: "unavailable", err: ErrUnavailable, wantStatus: http.StatusServiceUnavailable, wantBody: `{"error":"temporarily_unavailable"}` + "\n"},
-		{name: "invalid", err: ErrAuthenticationFailed, wantStatus: http.StatusUnauthorized, wantBody: `{"error":"authentication_failed"}` + "\n"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			service := &adminHTTPService{proofStatus: test.status, proofStatusErr: test.err}
-			handler := newTestHTTPHandler(t, service)
-			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/admin/auth/bili/challenges/proof-status", nil))
-			if response.Code != test.wantStatus || response.Body.String() != test.wantBody || service.proofStatusChallenge != "proof-status" {
-				t.Fatalf("status=%d body=%q challenge=%q", response.Code, response.Body.String(), service.proofStatusChallenge)
-			}
-			for _, forbidden := range []string{"uid", "32249588", "SESSDATA"} {
-				if strings.Contains(response.Body.String(), forbidden) {
-					t.Fatalf("response exposed %q: %s", forbidden, response.Body.String())
-				}
-			}
-		})
-	}
-}
-
-func TestHTTPLoginPendingAndFailuresAreGeneric(t *testing.T) {
-	tests := []struct {
-		name       string
-		err        error
-		wantStatus int
-		wantCode   string
-	}{
-		{name: "pending", err: identity.ErrVerificationPending, wantStatus: http.StatusAccepted, wantCode: "verification_pending"},
-		{name: "wrong uid or totp", err: ErrAuthenticationFailed, wantStatus: http.StatusUnauthorized, wantCode: "authentication_failed"},
-		{name: "upstream unavailable", err: identity.ErrVerificationUnavailable, wantStatus: http.StatusServiceUnavailable, wantCode: "temporarily_unavailable"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			service := &adminHTTPService{loginErr: test.err}
-			handler := newTestHTTPHandler(t, service)
-			request := mutationRequest(http.MethodPost, "/api/admin/session", `{"challengeId":"proof-secret","totp":"123456"}`)
-			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, request)
-			if response.Code != test.wantStatus || !strings.Contains(response.Body.String(), test.wantCode) {
-				t.Fatalf("response = %d %q", response.Code, response.Body.String())
-			}
-			for _, forbidden := range []string{"proof-secret", "123456", "32249588", test.err.Error()} {
-				if strings.Contains(response.Body.String(), forbidden) {
-					t.Fatalf("response exposed %q: %q", forbidden, response.Body.String())
-				}
-			}
-		})
 	}
 }
 
@@ -351,13 +331,13 @@ func TestHTTPRecoveryReturnsPasswordOnceWithoutArchiveOrUID(t *testing.T) {
 func TestHTTPRecoveryPrepareThenConfirmClearsOldCookie(t *testing.T) {
 	service := &adminHTTPService{preparation: RecoveryPreparationResult{TOTPURI: "otpauth://new", RecoveryPassword: "abcdefghijklmnopqrst", HandoffToken: "opaque-handoff"}}
 	handler := newTestHTTPHandler(t, service)
-	request := mutationRequest(http.MethodPost, "/api/admin/recovery/prepare", `{"challengeId":"fresh-proof","recoveryCode":"one-time-code"}`)
+	request := mutationRequest(http.MethodPost, "/api/admin/recovery/prepare", `{"recoveryCode":"one-time-code"}`)
 	request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "old-session"})
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK || service.prepareChallenge != "fresh-proof" || service.prepareCode != "one-time-code" {
-		t.Fatalf("response=%d %q args=%q %q", response.Code, response.Body.String(), service.prepareChallenge, service.prepareCode)
+	if response.Code != http.StatusOK || service.prepareCode != "one-time-code" {
+		t.Fatalf("response=%d %q code=%q", response.Code, response.Body.String(), service.prepareCode)
 	}
 	if len(response.Result().Cookies()) != 0 {
 		t.Fatal("prepare cleared an old session before confirmation")
@@ -379,9 +359,9 @@ func TestHTTPMutationsRejectOriginCSRFAndUnexpectedFields(t *testing.T) {
 	service := &adminHTTPService{}
 	handler := newTestHTTPHandler(t, service)
 	tests := []*http.Request{
-		httptest.NewRequest(http.MethodPost, "/api/admin/session", strings.NewReader(`{"challengeId":"proof","totp":"123456"}`)),
-		mutationRequest(http.MethodPost, "/api/admin/session", `{"challengeId":"proof","totp":"123456","uid":"32249588"}`),
-		mutationRequest(http.MethodPost, "/api/admin/session?accountId=1", `{"challengeId":"proof","totp":"123456"}`),
+		httptest.NewRequest(http.MethodPost, "/api/admin/recovery/prepare", strings.NewReader(`{"recoveryCode":"code"}`)),
+		mutationRequest(http.MethodPost, "/api/admin/recovery/prepare", `{"recoveryCode":"code","challengeId":"legacy-proof"}`),
+		mutationRequest(http.MethodPost, "/api/admin/recovery/prepare?accountId=1", `{"recoveryCode":"code"}`),
 	}
 	for index, request := range tests {
 		request.Header.Set("Content-Type", "application/json")
@@ -391,7 +371,7 @@ func TestHTTPMutationsRejectOriginCSRFAndUnexpectedFields(t *testing.T) {
 			t.Fatalf("case %d status=%d body=%s", index, response.Code, response.Body.String())
 		}
 	}
-	if service.loginChallenge != "" {
+	if service.prepareCode != "" {
 		t.Fatal("rejected mutation reached service")
 	}
 }
@@ -405,12 +385,9 @@ func TestHTTPForbiddenMalformedQueryNeverReachesService(t *testing.T) {
 		wantStatus int
 		wantCode   string
 	}{
-		{name: "begin proof", method: http.MethodPost, path: "/api/admin/auth/bili/challenges?x;y", wantStatus: http.StatusBadRequest, wantCode: "invalid_request"},
-		{name: "cancel proof", method: http.MethodDelete, path: "/api/admin/auth/bili/challenges/proof?x;y", wantStatus: http.StatusBadRequest, wantCode: "invalid_request"},
-		{name: "login", method: http.MethodPost, path: "/api/admin/session?x;y", body: `{"challengeId":"proof","totp":"123456"}`, wantStatus: http.StatusForbidden, wantCode: "request_rejected"},
 		{name: "recent totp", method: http.MethodPost, path: "/api/admin/totp?x;y", body: `{"totp":"123456"}`, wantStatus: http.StatusForbidden, wantCode: "request_rejected"},
 		{name: "recovery archive", method: http.MethodPost, path: "/api/admin/recovery/archive?x;y", body: `{}`, wantStatus: http.StatusForbidden, wantCode: "request_rejected"},
-		{name: "recovery prepare", method: http.MethodPost, path: "/api/admin/recovery/prepare?x;y", body: `{"challengeId":"proof","recoveryCode":"code"}`, wantStatus: http.StatusForbidden, wantCode: "request_rejected"},
+		{name: "recovery prepare", method: http.MethodPost, path: "/api/admin/recovery/prepare?x;y", body: `{"recoveryCode":"code"}`, wantStatus: http.StatusForbidden, wantCode: "request_rejected"},
 		{name: "recovery confirm", method: http.MethodPost, path: "/api/admin/recovery/confirm?x;y", body: `{"handoffToken":"handoff","totp":"123456"}`, wantStatus: http.StatusForbidden, wantCode: "request_rejected"},
 	}
 	for _, test := range tests {
@@ -453,41 +430,62 @@ func TestAppMountsAdministratorHandlerOnlyUnderAdminPrefix(t *testing.T) {
 	}
 }
 
+func TestAppCompositionKeepsRemovedAdminBiliPathsOutOfOtherHandlers(t *testing.T) {
+	service := &adminHTTPService{}
+	limiter := &countingAdminLimiter{}
+	administrator, err := NewHTTPHandler(service, HTTPOptions{
+		AllowedOrigin: "https://panel.example.com", CSRFToken: "csrf-test-token",
+		Limiter: limiter, ClientIP: identity.DirectClientIP,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherCalls := 0
+	other := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		otherCalls++
+		response.WriteHeader(http.StatusTeapot)
+	})
+	handler := app.New(app.Dependencies{DB: healthyDatabase{}, Auth: other, Admin: administrator, BiliService: other})
+
+	for _, path := range []string{"/api/admin/auth/bili/challenges", "/api/admin/auth/bili/challenges/legacy-proof"} {
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodOptions, "BREW"} {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, mutationRequest(method, path, `{}`))
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("%s %s status=%d, want 404", method, path, response.Code)
+			}
+		}
+	}
+	if otherCalls != 0 || limiter.calls != 0 || service.wasCalled() {
+		t.Fatalf("removed route escaped ownership boundary: other=%d limiter=%d service=%#v", otherCalls, limiter.calls, service)
+	}
+}
+
 type adminHTTPService struct {
-	emailBeginCalls      int
-	emailChallenge       EmailLoginChallenge
-	emailChallengeErr    error
-	emailLogin           LoginResult
-	emailLoginErr        error
-	emailLoginChallenge  string
-	emailLoginCode       string
-	beginCalls           int
-	challenge            identity.Challenge
-	challengeErr         error
-	login                LoginResult
-	loginErr             error
-	loginChallenge       string
-	loginCode            string
-	verifyErr            error
-	verifySession        string
-	verifyCode           string
-	recovery             RecoveryResult
-	recoveryErr          error
-	recoverySession      string
-	preparation          RecoveryPreparationResult
-	preparationErr       error
-	prepareChallenge     string
-	prepareCode          string
-	confirmErr           error
-	confirmToken         string
-	confirmCode          string
-	cancelled            []string
-	requireSessionErr    error
-	requireSessionToken  string
-	requireSessionCalls  int
-	proofStatus          AdminProofStatus
-	proofStatusErr       error
-	proofStatusChallenge string
+	emailBeginCalls     int
+	emailChallenge      EmailLoginChallenge
+	emailChallengeErr   error
+	emailLogin          LoginResult
+	emailLoginErr       error
+	emailLoginChallenge string
+	emailLoginCode      string
+	verifyErr           error
+	verifySession       string
+	verifyCode          string
+	recovery            RecoveryResult
+	recoveryErr         error
+	recoverySession     string
+	preparation         RecoveryPreparationResult
+	preparationErr      error
+	prepareCode         string
+	confirmErr          error
+	confirmToken        string
+	confirmCode         string
+	requireSessionErr   error
+	requireSessionToken string
+	requireSessionCalls int
+	logoutCalls         int
+	logoutToken         string
 }
 
 func (service *adminHTTPService) BeginEmailLogin(context.Context) (EmailLoginChallenge, error) {
@@ -506,23 +504,10 @@ func (service *adminHTTPService) RequireSession(_ context.Context, token string)
 	return service.requireSessionErr
 }
 
-func (service *adminHTTPService) PollVerification(_ context.Context, challengeID string) (AdminProofStatus, error) {
-	service.proofStatusChallenge = challengeID
-	return service.proofStatus, service.proofStatusErr
-}
-
-func (service *adminHTTPService) BeginVerification(context.Context) (identity.Challenge, error) {
-	service.beginCalls++
-	return service.challenge, service.challengeErr
-}
-
-func (service *adminHTTPService) CancelVerification(challengeID string) {
-	service.cancelled = append(service.cancelled, challengeID)
-}
-
-func (service *adminHTTPService) VerifyLogin(_ context.Context, challengeID, code string) (LoginResult, error) {
-	service.loginChallenge, service.loginCode = challengeID, code
-	return service.login, service.loginErr
+func (service *adminHTTPService) Logout(_ context.Context, token string) error {
+	service.logoutCalls++
+	service.logoutToken = token
+	return nil
 }
 
 func (service *adminHTTPService) VerifyRecentTOTP(_ context.Context, sessionToken, code string) error {
@@ -535,20 +520,20 @@ func (service *adminHTTPService) SendRecovery(_ context.Context, sessionToken st
 	return service.recovery, service.recoveryErr
 }
 
-func (service *adminHTTPService) PrepareRecovery(_ context.Context, challengeID, code string) (RecoveryPreparationResult, error) {
-	service.prepareChallenge, service.prepareCode = challengeID, code
+func (service *adminHTTPService) PrepareRecovery(_ context.Context, code string) (RecoveryPreparationResult, error) {
+	service.prepareCode = code
 	return service.preparation, service.preparationErr
 }
 
-func (service *adminHTTPService) ConfirmRecovery(_ context.Context, token, code string) error {
+func (service *adminHTTPService) ConfirmHandoff(_ context.Context, token, code string) error {
 	service.confirmToken, service.confirmCode = token, code
 	return service.confirmErr
 }
 
 func (service *adminHTTPService) wasCalled() bool {
-	return service.beginCalls != 0 || service.emailBeginCalls != 0 || service.emailLoginChallenge != "" || service.loginChallenge != "" || service.loginCode != "" || service.verifySession != "" ||
-		service.verifyCode != "" || service.recoverySession != "" || service.prepareChallenge != "" || service.prepareCode != "" ||
-		service.confirmToken != "" || service.confirmCode != "" || len(service.cancelled) != 0
+	return service.emailBeginCalls != 0 || service.emailLoginChallenge != "" || service.verifySession != "" || service.verifyCode != "" ||
+		service.recoverySession != "" || service.prepareCode != "" || service.confirmToken != "" || service.confirmCode != "" ||
+		service.requireSessionCalls != 0 || service.logoutCalls != 0
 }
 
 type allowAdminLimits struct{}

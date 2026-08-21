@@ -818,13 +818,14 @@ func TestRunModeAdminInitPrintsOneTimeSecretsAndNeverStartsHTTP(t *testing.T) {
 	initializer := &initializerStub{result: adminidentity.InitializeResult{
 		TOTPURI:          "otpauth://totp/GiftPanel:owner?secret=ONCE",
 		RecoveryPassword: "12345678901234567890",
+		HandoffToken:     "one-time-confirmation-token",
 	}}
 	var output bytes.Buffer
 	serveCalls := 0
 
 	err := runMode(
 		context.Background(),
-		[]string{"admin", "init", "--uid", "32249588", "--email", "owner@example.com"},
+		[]string{"admin", "init", "--email", "owner@example.com"},
 		initializer,
 		&output,
 		func() error { serveCalls++; return nil },
@@ -835,10 +836,10 @@ func TestRunModeAdminInitPrintsOneTimeSecretsAndNeverStartsHTTP(t *testing.T) {
 	if serveCalls != 0 {
 		t.Fatalf("HTTP serve called %d times during local admin init", serveCalls)
 	}
-	if initializer.uid != "32249588" || initializer.email != "owner@example.com" {
-		t.Fatalf("Initialize arguments uid=%q email=%q", initializer.uid, initializer.email)
+	if initializer.email != "owner@example.com" {
+		t.Fatalf("Initialize email=%q", initializer.email)
 	}
-	for _, secret := range []string{initializer.result.TOTPURI, initializer.result.RecoveryPassword} {
+	for _, secret := range []string{initializer.result.TOTPURI, initializer.result.RecoveryPassword, initializer.result.HandoffToken} {
 		if got := bytes.Count(output.Bytes(), []byte(secret)); got != 1 {
 			t.Fatalf("secret %q appeared %d times in output %q", secret, got, output.String())
 		}
@@ -928,7 +929,7 @@ func TestRunModeRepeatedAdminInitFailsClosedWithoutPrintingOrListening(t *testin
 	serveCalls := 0
 	err := runMode(
 		context.Background(),
-		[]string{"admin", "init", "--uid", "32249588", "--email", "owner@example.com"},
+		[]string{"admin", "init", "--email", "owner@example.com"},
 		initializer,
 		&output,
 		func() error { serveCalls++; return nil },
@@ -953,16 +954,20 @@ func TestRunModeNormalServiceAndInvalidCommandLifecycle(t *testing.T) {
 
 	serveCalls = 0
 	var output bytes.Buffer
-	err := runMode(context.Background(), []string{"admin", "init", "--uid", "32249588", "--email", "owner@example.com", "unexpected"}, initializer, &output, func() error { serveCalls++; return nil })
+	err := runMode(context.Background(), []string{"admin", "init", "--email", "owner@example.com", "unexpected"}, initializer, &output, func() error { serveCalls++; return nil })
 	if !errors.Is(err, errInvalidCommand) || serveCalls != 0 || output.Len() != 0 {
 		t.Fatalf("invalid command error=%v serveCalls=%d output=%q", err, serveCalls, output.String())
+	}
+	err = runMode(context.Background(), []string{"admin", "init", "--uid", "32249588", "--email", "owner@example.com"}, initializer, &output, func() error { serveCalls++; return nil })
+	if !errors.Is(err, errInvalidCommand) || serveCalls != 0 || output.Len() != 0 || initializer.calls != 0 {
+		t.Fatalf("legacy UID command error=%v initCalls=%d serveCalls=%d output=%q", err, initializer.calls, serveCalls, output.String())
 	}
 }
 
 func TestRunModeWithCleanupDoesNotStartCleanupForAdministratorCLI(t *testing.T) {
-	initializer := &initializerStub{result: adminidentity.InitializeResult{TOTPURI: "otpauth://pending", RecoveryPassword: "12345678901234567890"}}
+	initializer := &initializerStub{result: adminidentity.InitializeResult{TOTPURI: "otpauth://pending", RecoveryPassword: "12345678901234567890", HandoffToken: "pending-handoff"}}
 	cleanupCalls, serveCalls := 0, 0
-	err := runModeWithCleanup(context.Background(), []string{"admin", "init", "--uid", "32249588", "--email", "owner@example.com"}, initializer, strings.NewReader(""), &bytes.Buffer{}, func(context.Context) { cleanupCalls++ }, func() error { serveCalls++; return nil })
+	err := runModeWithCleanup(context.Background(), []string{"admin", "init", "--email", "owner@example.com"}, initializer, strings.NewReader(""), &bytes.Buffer{}, func(context.Context) { cleanupCalls++ }, func() error { serveCalls++; return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -998,7 +1003,6 @@ func TestRunModeWithCleanupJoinsCleanupBeforeRepositoryClose(t *testing.T) {
 type initializerStub struct {
 	result adminidentity.InitializeResult
 	err    error
-	uid    string
 	email  string
 	calls  int
 }
@@ -1110,9 +1114,9 @@ func statusHandler(status int) http.Handler {
 	})
 }
 
-func (initializer *initializerStub) Initialize(_ context.Context, uid, email string) (adminidentity.InitializeResult, error) {
+func (initializer *initializerStub) Initialize(_ context.Context, email string) (adminidentity.InitializeResult, error) {
 	initializer.calls++
-	initializer.uid, initializer.email = uid, email
+	initializer.email = email
 	return initializer.result, initializer.err
 }
 

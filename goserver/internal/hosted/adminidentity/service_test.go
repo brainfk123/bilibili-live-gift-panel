@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"io"
 	"regexp"
@@ -14,21 +13,29 @@ import (
 	"testing"
 	"time"
 
-	"bilibili-live-gift-panel/internal/hosted/identity"
 	"bilibili-live-gift-panel/internal/hosted/security"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
 )
 
-func TestInitializeStoresOneAdministratorAndEmailsOnlyEncryptedCodes(t *testing.T) {
+func TestAdminCompositionDoesNotRequireAdministratorBilibiliVerifier(t *testing.T) {
+	keys, err := security.NewKeyring(1, bytes.Repeat([]byte{0x41}, 32), bytes.Repeat([]byte{0x72}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewService(newMemoryRepository(), keys, &MemorySender{}, ServiceOptions{}); err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+}
+
+func TestInitializeUsesEmailAndRandomHandoffTokenWithoutCreatingSession(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 0, 0, 0, time.UTC)
 	repository := newMemoryRepository()
 	sender := &MemorySender{}
-	verifier := &memoryVerifier{verification: identity.Verification{UID: "32249588", CompletedAt: now}}
-	service := newTestService(t, repository, verifier, sender, now)
+	service := newTestService(t, repository, sender, now)
 
-	result, err := service.Initialize(context.Background(), "32249588", "owner@example.com")
+	result, err := service.Initialize(context.Background(), "owner@example.com")
 	if err != nil {
 		t.Fatalf("Initialize() error = %v", err)
 	}
@@ -38,18 +45,21 @@ func TestInitializeStoresOneAdministratorAndEmailsOnlyEncryptedCodes(t *testing.
 	if len(result.RecoveryPassword) != 20 {
 		t.Fatalf("RecoveryPassword length = %d, want 20", len(result.RecoveryPassword))
 	}
+	if result.HandoffToken == "" {
+		t.Fatal("Initialize() omitted the random confirmation token")
+	}
 
 	if repository.initialized {
-		t.Fatal("initialization activated administrator before matching Bilibili proof and new TOTP")
+		t.Fatal("initialization activated administrator before token and new TOTP confirmation")
 	}
-	second, err := service.Initialize(context.Background(), "32249588", "owner@example.com")
+	second, err := service.Initialize(context.Background(), "owner@example.com")
 	if err != nil || second != result {
 		t.Fatalf("retry Initialize() = %#v, %v; want same handoff", second, err)
 	}
 	if len(sender.Messages()) != 1 {
 		t.Fatalf("successful retry sent %d archives, want stable prior delivery", len(sender.Messages()))
 	}
-	if _, err := service.VerifyLogin(context.Background(), "activate-proof", "123456"); err != nil {
+	if err := service.ConfirmHandoff(context.Background(), result.HandoffToken, "123456"); err != nil {
 		t.Fatalf("activate pending initialization error = %v", err)
 	}
 	repository.mu.Lock()
@@ -65,6 +75,9 @@ func TestInitializeStoresOneAdministratorAndEmailsOnlyEncryptedCodes(t *testing.
 	if len(codeHashes) != RecoveryCodeCount {
 		t.Fatalf("stored recovery hashes = %d, want %d", len(codeHashes), RecoveryCodeCount)
 	}
+	if repository.sessionCount() != 0 {
+		t.Fatal("initialization confirmation created an administrator login session")
+	}
 	for hash := range codeHashes {
 		if len(hash) != sha256.Size {
 			t.Fatalf("stored recovery hash length = %d", len(hash))
@@ -79,8 +92,38 @@ func TestInitializeStoresOneAdministratorAndEmailsOnlyEncryptedCodes(t *testing.
 		t.Fatal("initial recovery email omitted recipient or exposed its password")
 	}
 
-	if _, err := service.Initialize(context.Background(), "32249588", "owner@example.com"); !errors.Is(err, ErrAlreadyInitialized) {
+	if _, err := service.Initialize(context.Background(), "owner@example.com"); !errors.Is(err, ErrAlreadyInitialized) {
 		t.Fatalf("post-activation Initialize() error = %v, want ErrAlreadyInitialized", err)
+	}
+}
+
+func TestLegacyUIDInitializationHandoffCannotConfirmAndIsCleaned(t *testing.T) {
+	now := time.Date(2026, 8, 16, 10, 5, 0, 0, time.UTC)
+	repository := newMemoryRepository()
+	service := newTestService(t, repository, &MemorySender{}, now)
+	token := "legacy-handoff-token"
+	tokenHash, err := service.keys.HashToken("admin_handoff_token", []byte(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := sqlHandoffRecord(now, HandoffInitialization)
+	record.TokenHash = tokenHash
+	record.UIDCiphertext = bytes.Repeat([]byte{0x41}, 48)
+	record.UIDLookup = bytes.Repeat([]byte{0x42}, sha256.Size)
+	handoff := pendingFromRecord(1, record)
+	repository.handoffs[handoff.ID] = handoff
+
+	if err := service.ConfirmHandoff(context.Background(), token, "123456"); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("legacy ConfirmHandoff() error = %v", err)
+	}
+	if repository.initialized || repository.sessionCount() != 0 {
+		t.Fatal("legacy UID handoff authenticated an administrator")
+	}
+	if err := repository.CleanupExpiredHandoffs(context.Background(), now, defaultCleanupLimit); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := repository.handoffs[handoff.ID]; found {
+		t.Fatal("legacy UID handoff survived cleanup")
 	}
 }
 
@@ -109,44 +152,11 @@ func TestIdentityRecordAllowsOnlyAbsentOrCompleteLegacyUIDPair(t *testing.T) {
 	}
 }
 
-func TestVerifyLoginRequiresMatchingUIDAndRejectsReplayedTOTPStep(t *testing.T) {
-	now := time.Date(2026, 8, 16, 10, 10, 0, 0, time.UTC)
-	repository := initializedMemoryRepository(t, now)
-	verifier := &memoryVerifier{verification: identity.Verification{UID: "11111111", CompletedAt: now}}
-	service := newTestService(t, repository, verifier, &MemorySender{}, now)
-
-	if _, err := service.VerifyLogin(context.Background(), "wrong-uid-proof", "123456"); !errors.Is(err, ErrAuthenticationFailed) {
-		t.Fatalf("VerifyLogin(wrong UID) error = %v", err)
-	}
-	if repository.sessionCount() != 0 {
-		t.Fatal("wrong UID created an administrator session")
-	}
-
-	verifier.verification = identity.Verification{UID: "32249588", CompletedAt: now}
-	login, err := service.VerifyLogin(context.Background(), "matching-proof", "123456")
-	if err != nil {
-		t.Fatalf("VerifyLogin() error = %v", err)
-	}
-	if login.Token == "" || !login.ExpiresAt.Equal(now.Add(7*24*time.Hour)) {
-		t.Fatalf("VerifyLogin() = %#v", login)
-	}
-	if repository.containsSessionToken(login.Token) {
-		t.Fatal("repository observed plaintext administrator session token")
-	}
-
-	if _, err := service.VerifyLogin(context.Background(), "replayed-proof", "123456"); !errors.Is(err, ErrAuthenticationFailed) {
-		t.Fatalf("VerifyLogin(replayed TOTP step) error = %v", err)
-	}
-	if repository.sessionCount() != 1 {
-		t.Fatalf("replayed TOTP created %d sessions, want one total", repository.sessionCount())
-	}
-}
-
 func TestEmailLoginSendsOneShortCodeAndCreatesOneSevenDaySessionWithoutTOTP(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 12, 0, 0, time.UTC)
 	repository := initializedMemoryRepository(t, now)
 	sender := &MemorySender{}
-	service := newTestService(t, repository, &memoryVerifier{}, sender, now)
+	service := newTestService(t, repository, sender, now)
 
 	challenge, err := service.BeginEmailLogin(context.Background())
 	if err != nil || challenge.ChallengeID == "" || !challenge.ExpiresAt.Equal(now.Add(5*time.Minute)) {
@@ -184,7 +194,7 @@ func TestEmailLoginExpiresAndSMTPFailureLeavesNoUsableChallenge(t *testing.T) {
 	repository := initializedMemoryRepository(t, now)
 	sender := &MemorySender{}
 	clock := now
-	service := newTestServiceWithClock(t, repository, &memoryVerifier{}, sender, func() time.Time { return clock })
+	service := newTestServiceWithClock(t, repository, sender, func() time.Time { return clock })
 	challenge, err := service.BeginEmailLogin(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -199,7 +209,7 @@ func TestEmailLoginExpiresAndSMTPFailureLeavesNoUsableChallenge(t *testing.T) {
 	}
 
 	failedSender := &MemorySender{Err: errors.New("smtp unavailable")}
-	failed := newTestService(t, repository, &memoryVerifier{}, failedSender, now)
+	failed := newTestService(t, repository, failedSender, now)
 	if _, err := failed.BeginEmailLogin(context.Background()); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("SMTP-failed BeginEmailLogin() error = %v", err)
 	}
@@ -215,7 +225,7 @@ func TestEmailLoginCountsFiveFailuresAndRejectsRotatedEpoch(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 14, 0, 0, time.UTC)
 	repository := initializedMemoryRepository(t, now)
 	sender := &MemorySender{}
-	service := newTestService(t, repository, &memoryVerifier{}, sender, now)
+	service := newTestService(t, repository, sender, now)
 
 	challenge, err := service.BeginEmailLogin(context.Background())
 	if err != nil {
@@ -262,7 +272,7 @@ func TestEmailLoginRejectsCorrectCodeAfterExactlyFiveFailures(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 14, 15, 0, time.UTC)
 	repository := initializedMemoryRepository(t, now)
 	sender := &MemorySender{}
-	service := newTestService(t, repository, &memoryVerifier{}, sender, now)
+	service := newTestService(t, repository, sender, now)
 	challenge, err := service.BeginEmailLogin(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -290,7 +300,7 @@ func TestEmailLoginPropagatesUnavailableSessionCreationAfterConsumingChallenge(t
 	memory := initializedMemoryRepository(t, now)
 	repository := unavailableEmailSessionRepository{memoryRepository: memory}
 	sender := &MemorySender{}
-	service := newTestService(t, repository, &memoryVerifier{}, sender, now)
+	service := newTestService(t, repository, sender, now)
 	challenge, err := service.BeginEmailLogin(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -312,7 +322,7 @@ func TestEmailLoginTreatsUnexpectedSessionCreationFailureAsUnavailable(t *testin
 	memory := initializedMemoryRepository(t, now)
 	repository := failedEmailSessionRepository{memoryRepository: memory, err: ErrInvalidInput}
 	sender := &MemorySender{}
-	service := newTestService(t, repository, &memoryVerifier{}, sender, now)
+	service := newTestService(t, repository, sender, now)
 	challenge, err := service.BeginEmailLogin(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -323,93 +333,29 @@ func TestEmailLoginTreatsUnexpectedSessionCreationFailureAsUnavailable(t *testin
 	}
 }
 
-func TestServiceAdminProofStatusVerifiesWithoutReturningUIDAndLoginConsumesOnce(t *testing.T) {
-	now := time.Date(2026, 8, 16, 10, 15, 0, 0, time.UTC)
-	repository := initializedMemoryRepository(t, now)
-	verifier := &memoryVerifier{
-		challenge:    identity.Challenge{ID: "status-proof", QRImage: "qr", ExpiresAt: now.Add(time.Minute)},
-		verification: identity.Verification{UID: "32249588", CompletedAt: now},
-	}
-	service := newTestService(t, repository, verifier, &MemorySender{}, now)
-	challenge, err := service.BeginVerification(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	status, err := service.PollVerification(context.Background(), challenge.ID)
-	if err != nil || status.Status != AdminProofVerified || !status.ExpiresAt.Equal(challenge.ExpiresAt) {
-		t.Fatalf("PollVerification() = %#v, %v", status, err)
-	}
-	encoded, _ := json.Marshal(status)
-	if bytes.Contains(encoded, []byte("32249588")) || bytes.Contains(encoded, []byte("uid")) {
-		t.Fatalf("proof status exposed identity: %s", encoded)
-	}
-	if verifier.pollCalls != 1 || len(verifier.forgotten) != 1 || verifier.forgotten[0] != challenge.ID {
-		t.Fatalf("verifier polls=%d forgotten=%v", verifier.pollCalls, verifier.forgotten)
-	}
-	login, err := service.VerifyLogin(context.Background(), challenge.ID, "123456")
-	if err != nil || login.Token == "" {
-		t.Fatalf("VerifyLogin() = %#v, %v", login, err)
-	}
-	if verifier.pollCalls != 1 {
-		t.Fatalf("VerifyLogin repolled verifier: %d", verifier.pollCalls)
-	}
-	if _, err := service.VerifyLogin(context.Background(), challenge.ID, "123456"); !errors.Is(err, ErrAuthenticationFailed) {
-		t.Fatalf("duplicate VerifyLogin() error = %v", err)
-	}
-}
-
-func TestServiceAdminProofStatusKeepsPendingAndRejectsWrongAdministrator(t *testing.T) {
-	now := time.Date(2026, 8, 16, 10, 16, 0, 0, time.UTC)
-	repository := initializedMemoryRepository(t, now)
-	verifier := &memoryVerifier{
-		challenge:    identity.Challenge{ID: "pending-proof", QRImage: "qr", ExpiresAt: now.Add(time.Minute)},
-		verification: identity.Verification{UID: "11111111", CompletedAt: now},
-		pollErrs:     []error{identity.ErrVerificationPending, nil},
-	}
-	service := newTestService(t, repository, verifier, &MemorySender{}, now)
-	challenge, err := service.BeginVerification(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	status, err := service.PollVerification(context.Background(), challenge.ID)
-	if err != nil || status.Status != AdminProofPending || len(verifier.forgotten) != 0 {
-		t.Fatalf("pending status = %#v, %v forgotten=%v", status, err, verifier.forgotten)
-	}
-	if _, err := service.PollVerification(context.Background(), challenge.ID); !errors.Is(err, ErrAuthenticationFailed) {
-		t.Fatalf("wrong administrator PollVerification() error = %v", err)
-	}
-	if len(verifier.forgotten) != 1 || verifier.forgotten[0] != challenge.ID {
-		t.Fatalf("terminal proof forgotten=%v", verifier.forgotten)
-	}
-}
-
 func TestVerifyRecentTOTPRejectsReplayAndExpiresAfterTenMinutes(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 20, 0, 0, time.UTC)
 	clock := now
 	repository := initializedMemoryRepository(t, now)
-	verifier := &memoryVerifier{verification: identity.Verification{UID: "32249588", CompletedAt: now}}
-	service := newTestServiceWithClock(t, repository, verifier, &MemorySender{}, func() time.Time { return clock })
-	login, err := service.VerifyLogin(context.Background(), "login-proof", "123456")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := service.RequireRecentTOTP(context.Background(), login.Token); err != nil {
-		t.Fatalf("RequireRecentTOTP() immediately error = %v", err)
+	sender := &MemorySender{}
+	service := newTestServiceWithClock(t, repository, sender, func() time.Time { return clock })
+	login := emailLoginForTest(t, service, sender)
+	if err := service.RequireRecentTOTP(context.Background(), login.Token); !errors.Is(err, ErrRecentTOTPRequired) {
+		t.Fatalf("RequireRecentTOTP() before confirmation error = %v", err)
 	}
 
-	clock = now.Add(30 * time.Second)
 	if err := service.VerifyRecentTOTP(context.Background(), login.Token, "123456"); err != nil {
-		t.Fatalf("VerifyRecentTOTP(new step) error = %v", err)
+		t.Fatalf("VerifyRecentTOTP() error = %v", err)
 	}
 	if err := service.VerifyRecentTOTP(context.Background(), login.Token, "123456"); !errors.Is(err, ErrAuthenticationFailed) {
 		t.Fatalf("VerifyRecentTOTP(replay) error = %v", err)
 	}
 
-	clock = now.Add(10*time.Minute + 30*time.Second)
+	clock = now.Add(10 * time.Minute)
 	if err := service.RequireRecentTOTP(context.Background(), login.Token); err != nil {
 		t.Fatalf("RequireRecentTOTP(at boundary) error = %v", err)
 	}
-	clock = now.Add(10*time.Minute + 30*time.Second + time.Nanosecond)
+	clock = now.Add(10*time.Minute + time.Nanosecond)
 	if err := service.RequireRecentTOTP(context.Background(), login.Token); !errors.Is(err, ErrRecentTOTPRequired) {
 		t.Fatalf("RequireRecentTOTP(expired) error = %v, want ErrRecentTOTPRequired", err)
 	}
@@ -418,11 +364,9 @@ func TestVerifyRecentTOTPRejectsReplayAndExpiresAfterTenMinutes(t *testing.T) {
 func TestRequireSessionAcceptsActiveAdminWithoutRequiringRecentTOTP(t *testing.T) {
 	now := time.Date(2026, 8, 17, 11, 0, 0, 0, time.UTC)
 	repository := initializedMemoryRepository(t, now)
-	service := newTestService(t, repository, &memoryVerifier{verification: identity.Verification{UID: "32249588", CompletedAt: now}}, &MemorySender{}, now)
-	login, err := service.VerifyLogin(context.Background(), "login", "123456")
-	if err != nil {
-		t.Fatal(err)
-	}
+	sender := &MemorySender{}
+	service := newTestService(t, repository, sender, now)
+	login := emailLoginForTest(t, service, sender)
 	if err := service.RequireSession(context.Background(), login.Token); err != nil {
 		t.Fatalf("RequireSession(active admin) = %v", err)
 	}
@@ -439,12 +383,12 @@ func TestConcurrentInitializeHasExactlyOneWinner(t *testing.T) {
 		release:          make(chan struct{}),
 	}
 	sender := &MemorySender{}
-	service := newTestService(t, repository, &memoryVerifier{}, sender, now)
+	service := newTestService(t, repository, sender, now)
 
 	results := make(chan error, 2)
 	for index := 0; index < 2; index++ {
 		go func() {
-			_, err := service.Initialize(context.Background(), "32249588", "owner@example.com")
+			_, err := service.Initialize(context.Background(), "owner@example.com")
 			results <- err
 		}()
 	}
@@ -477,12 +421,12 @@ func TestInitializeRetriesArchiveAfterSMTPFailure(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 31, 0, 0, time.UTC)
 	repository := newMemoryRepository()
 	sender := &failOnceSender{}
-	service := newTestService(t, repository, &memoryVerifier{}, sender, now)
+	service := newTestService(t, repository, sender, now)
 
-	if _, err := service.Initialize(context.Background(), "32249588", "owner@example.com"); !errors.Is(err, ErrUnavailable) {
+	if _, err := service.Initialize(context.Background(), "owner@example.com"); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("first Initialize() error = %v, want ErrUnavailable", err)
 	}
-	result, err := service.Initialize(context.Background(), "32249588", "owner@example.com")
+	result, err := service.Initialize(context.Background(), "owner@example.com")
 	if err != nil {
 		t.Fatalf("retry Initialize() error = %v", err)
 	}
@@ -513,22 +457,6 @@ func TestSequenceReaderDoesNotWrapAfter256Bytes(t *testing.T) {
 	}
 	if bytes.Equal(first, next) {
 		t.Fatal("sequenceReader wrapped after 256 bytes")
-	}
-}
-
-func TestBeginVerificationForgetsMalformedVerifierState(t *testing.T) {
-	now := time.Date(2026, 8, 16, 10, 40, 0, 0, time.UTC)
-	verifier := &memoryVerifier{challenge: identity.Challenge{ID: "malformed-admin-proof", ExpiresAt: now.Add(time.Minute)}}
-	service := newTestService(t, newMemoryRepository(), verifier, &MemorySender{}, now)
-
-	if _, err := service.BeginVerification(context.Background()); !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("BeginVerification() error = %v", err)
-	}
-	verifier.mu.Lock()
-	forgotten := append([]string(nil), verifier.forgotten...)
-	verifier.mu.Unlock()
-	if len(forgotten) != 1 || forgotten[0] != "malformed-admin-proof" {
-		t.Fatalf("Forget calls = %v", forgotten)
 	}
 }
 
@@ -603,6 +531,59 @@ func TestSQLRepositoryCommitsPendingInitializationBeforeDelivery(t *testing.T) {
 	}
 	if handoff.ID != 9 || handoff.State != HandoffPending || !bytes.Equal(handoff.Archive, record.Archive) {
 		t.Fatalf("handoff=%#v", handoff)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryActivatesInitializationByTokenWithoutCreatingSession(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 16, 10, 6, 15, 0, time.UTC)
+	handoff := sqlHandoffRecord(now.Add(-time.Minute), HandoffInitialization)
+	handoffID := int64(9)
+	columns := []string{"id", "handoff_kind", "handoff_state", "request_hash", "token_hash", "token_ciphertext", "uid_ciphertext", "uid_lookup", "email_ciphertext", "totp_secret_ciphertext", "totp_uri_ciphertext", "archive_password_ciphertext", "recovery_archive", "created_at", "expires_at", "mail_delivered_at"}
+	rows := sqlmock.NewRows(columns).AddRow(handoffID, handoff.Kind, HandoffPending, handoff.RequestHash, handoff.TokenHash, handoff.TokenCiphertext, nil, nil, handoff.EmailCiphertext, handoff.TOTPSecretCiphertext, handoff.TOTPURICiphertext, handoff.PasswordCiphertext, handoff.Archive, handoff.CreatedAt, handoff.ExpiresAt, now.Add(-time.Second))
+	codeRows := sqlmock.NewRows([]string{"code_hash"})
+	for _, hash := range handoff.RecoveryCodeHashes {
+		codeRows.AddRow(hash)
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("FROM admin_credential_handoffs WHERE token_hash = ? FOR UPDATE")).WithArgs(handoff.TokenHash).WillReturnRows(rows)
+	mock.ExpectQuery(sqlPattern("SELECT code_hash FROM admin_handoff_recovery_codes WHERE handoff_id = ? ORDER BY code_ordinal")).WithArgs(handoffID).WillReturnRows(codeRows)
+	mock.ExpectExec(sqlPattern("INSERT INTO admin_identity")).WithArgs(nil, nil, handoff.EmailCiphertext, now, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(sqlPattern("INSERT INTO admin_totp")).WithArgs(handoff.TOTPSecretCiphertext, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	for _, hash := range handoff.RecoveryCodeHashes {
+		mock.ExpectExec(sqlPattern("INSERT INTO admin_recovery_codes")).WithArgs(int64(1), hash, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	}
+	mock.ExpectExec(sqlPattern("DELETE FROM admin_handoff_recovery_codes WHERE handoff_id = ?")).WithArgs(handoffID).WillReturnResult(sqlmock.NewResult(0, RecoveryCodeCount))
+	mock.ExpectExec(sqlPattern("UPDATE admin_credential_handoffs SET handoff_state = 'confirmed'")).WithArgs(now, handoffID).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	if err := repository.ActivateInitialization(context.Background(), ActivateInitializationAttempt{TokenHash: handoff.TokenHash, Now: now, TOTPStep: now.Truncate(30 * time.Second)}); err != nil {
+		t.Fatalf("ActivateInitialization() error=%v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryCleanupRemovesExpiredAndLegacyUIDPendingHandoffs(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 16, 10, 6, 20, 0, time.UTC)
+	mock.ExpectExec(sqlPattern("DELETE FROM admin_credential_handoffs WHERE handoff_state = 'pending' AND (expires_at <= ? OR uid_ciphertext IS NOT NULL OR uid_lookup IS NOT NULL) ORDER BY id LIMIT ?")).WithArgs(now, defaultCleanupLimit).WillReturnResult(sqlmock.NewResult(0, 2))
+	if err := repository.CleanupExpiredHandoffs(context.Background(), now, defaultCleanupLimit); err != nil {
+		t.Fatalf("CleanupExpiredHandoffs() error=%v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -771,15 +752,14 @@ func TestSQLRepositoryRejectsDifferentRequestForPendingAdministratorRecovery(t *
 	repository := NewRepository(database)
 	now := time.Date(2026, 8, 16, 10, 8, 0, 0, time.UTC)
 	candidate := sqlHandoffRecord(now, HandoffRecovery)
-	uidLookup := bytes.Repeat([]byte{0x31}, sha256.Size)
 	codeHash := bytes.Repeat([]byte{0x32}, sha256.Size)
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT uid_lookup FROM admin_identity").WillReturnRows(sqlmock.NewRows([]string{"uid_lookup"}).AddRow(uidLookup))
+	mock.ExpectQuery("SELECT credential_epoch, email_ciphertext FROM admin_identity").WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "email_ciphertext"}).AddRow(1, candidate.EmailCiphertext))
 	mock.ExpectQuery("SELECT id FROM admin_recovery_codes").WithArgs(codeHash).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(11))
 	columns := []string{"id", "handoff_kind", "handoff_state", "request_hash", "token_hash", "token_ciphertext", "uid_ciphertext", "uid_lookup", "email_ciphertext", "totp_secret_ciphertext", "totp_uri_ciphertext", "archive_password_ciphertext", "recovery_archive", "created_at", "expires_at", "mail_delivered_at", "reserved_recovery_code_id"}
 	mock.ExpectQuery("SELECT .*admin_identity_id = 1 FOR UPDATE").WillReturnRows(sqlmock.NewRows(columns).AddRow(7, HandoffRecovery, HandoffPending, bytes.Repeat([]byte{0x7f}, sha256.Size), candidate.TokenHash, candidate.TokenCiphertext, nil, nil, candidate.EmailCiphertext, candidate.TOTPSecretCiphertext, candidate.TOTPURICiphertext, candidate.PasswordCiphertext, candidate.Archive, now, now.Add(time.Minute), nil, 11))
 	mock.ExpectRollback()
-	if _, err := repository.PrepareRecoveryHandoff(context.Background(), uidLookup, codeHash, candidate); !errors.Is(err, ErrAuthenticationFailed) {
+	if _, err := repository.PrepareRecoveryHandoff(context.Background(), 1, codeHash, candidate); !errors.Is(err, ErrAuthenticationFailed) {
 		t.Fatalf("PrepareRecoveryHandoff() error=%v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -787,45 +767,23 @@ func TestSQLRepositoryRejectsDifferentRequestForPendingAdministratorRecovery(t *
 	}
 }
 
-func TestSQLRepositorySerializesLoginAndRejectsGlobalTOTPStepReplay(t *testing.T) {
+func TestSQLRepositoryRecoveryPreparationRejectsChangedEmailIdentity(t *testing.T) {
 	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer database.Close()
 	repository := NewRepository(database)
-	now := time.Date(2026, 8, 16, 12, 10, 0, 0, time.UTC)
-	previousStep := now.Truncate(30 * time.Second)
-	attempt := LoginSessionAttempt{
-		ExpectedCredentialEpoch: 3, TokenHash: bytes.Repeat([]byte{0x51}, sha256.Size),
-		CreatedAt: now, ExpiresAt: now.Add(time.Hour), TOTPStep: previousStep,
-	}
-
+	now := time.Date(2026, 8, 16, 10, 8, 30, 0, time.UTC)
+	candidate := sqlHandoffRecord(now, HandoffRecovery)
+	codeHash := bytes.Repeat([]byte{0x33}, sha256.Size)
 	mock.ExpectBegin()
-	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
-		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(3))
-	mock.ExpectQuery(sqlPattern("SELECT MAX(totp_verified_at) FROM site_sessions WHERE admin_identity_id = 1 AND credential_epoch = ?")).
-		WithArgs(int64(3)).
-		WillReturnRows(sqlmock.NewRows([]string{"max_totp_verified_at"}).AddRow(previousStep))
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch, email_ciphertext FROM admin_identity WHERE id = 1 FOR UPDATE")).WillReturnRows(
+		sqlmock.NewRows([]string{"credential_epoch", "email_ciphertext"}).AddRow(3, bytes.Repeat([]byte{0x7f}, 48)),
+	)
 	mock.ExpectRollback()
-	if err := repository.CreateLoginSession(context.Background(), attempt); !errors.Is(err, ErrAuthenticationFailed) {
-		t.Fatalf("replayed CreateLoginSession() error = %v", err)
-	}
-
-	attempt.TOTPStep = previousStep.Add(30 * time.Second)
-	attempt.TokenHash = bytes.Repeat([]byte{0x52}, sha256.Size)
-	mock.ExpectBegin()
-	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
-		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(3))
-	mock.ExpectQuery(sqlPattern("SELECT MAX(totp_verified_at) FROM site_sessions WHERE admin_identity_id = 1 AND credential_epoch = ?")).
-		WithArgs(int64(3)).
-		WillReturnRows(sqlmock.NewRows([]string{"max_totp_verified_at"}).AddRow(previousStep))
-	mock.ExpectExec(sqlPattern("INSERT INTO site_sessions")).
-		WithArgs(int64(1), attempt.TokenHash, int64(3), now, now.Add(time.Hour), attempt.TOTPStep).
-		WillReturnResult(sqlmock.NewResult(9, 1))
-	mock.ExpectCommit()
-	if err := repository.CreateLoginSession(context.Background(), attempt); err != nil {
-		t.Fatalf("new-step CreateLoginSession() error = %v", err)
+	if _, err := repository.PrepareRecoveryHandoff(context.Background(), 2, codeHash, candidate); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("PrepareRecoveryHandoff() changed identity error=%v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -903,49 +861,18 @@ func TestSQLRepositoryFindSessionAcceptsNullEmailLoginTOTP(t *testing.T) {
 	}
 }
 
-func TestSQLRepositoryRecoveryRollsBackEpochTOTPCodeAndSessionChangesTogether(t *testing.T) {
+func TestSQLRepositoryRevokesOnlyAdministratorSessionToken(t *testing.T) {
 	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer database.Close()
 	repository := NewRepository(database)
-	now := time.Date(2026, 8, 16, 12, 20, 0, 0, time.UTC)
-	attempt := RecoveryCompletion{
-		ExpectedCredentialEpoch: 4,
-		UIDLookup:               bytes.Repeat([]byte{0x61}, sha256.Size),
-		ConsumedCodeHash:        bytes.Repeat([]byte{0x62}, sha256.Size),
-		NewTOTPSecretCiphertext: bytes.Repeat([]byte{0x63}, 48),
-		NewCodeHashes:           make([][]byte, RecoveryCodeCount),
-		Now:                     now,
-	}
-	for index := range attempt.NewCodeHashes {
-		attempt.NewCodeHashes[index] = bytes.Repeat([]byte{byte(0x70 + index)}, sha256.Size)
-	}
-	emailCiphertext := bytes.Repeat([]byte{0x42}, 64)
-
-	mock.ExpectBegin()
-	mock.ExpectQuery(sqlPattern("SELECT credential_epoch, email_ciphertext FROM admin_identity WHERE id = 1 AND uid_lookup = ? FOR UPDATE")).
-		WithArgs(attempt.UIDLookup).
-		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "email_ciphertext"}).AddRow(4, emailCiphertext))
-	mock.ExpectExec(sqlPattern("UPDATE admin_recovery_codes SET used_at = ?")).
-		WithArgs(now, int64(1), attempt.ConsumedCodeHash).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(sqlPattern("UPDATE admin_recovery_codes SET invalidated_at = ?")).
-		WithArgs(now, int64(1)).
-		WillReturnResult(sqlmock.NewResult(0, 9))
-	mock.ExpectExec(sqlPattern("UPDATE admin_totp SET secret_ciphertext = ?, rotated_at = ?")).
-		WithArgs(attempt.NewTOTPSecretCiphertext, now, int64(1)).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(sqlPattern("UPDATE admin_identity SET credential_epoch = credential_epoch + 1, updated_at = ?")).
-		WithArgs(now, int64(1), int64(4)).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(sqlPattern("UPDATE site_sessions SET revoked_at = COALESCE(revoked_at, ?)")).
-		WithArgs(now, int64(1)).
-		WillReturnError(errors.New("database detail that must be hidden"))
-	mock.ExpectRollback()
-	if _, err := repository.CompleteRecovery(context.Background(), attempt); !errors.Is(err, ErrUnavailable) || stringsContains(err.Error(), "database detail") {
-		t.Fatalf("CompleteRecovery() error = %v", err)
+	now := time.Date(2026, 8, 16, 12, 15, 0, 0, time.UTC)
+	tokenHash := bytes.Repeat([]byte{0x56}, sha256.Size)
+	mock.ExpectExec(sqlPattern("UPDATE site_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE admin_identity_id = 1 AND token_hash = ?")).WithArgs(now, tokenHash).WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := repository.RevokeSession(context.Background(), tokenHash, now); err != nil {
+		t.Fatalf("RevokeSession() error=%v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -986,7 +913,7 @@ func sqlHandoffRecord(now time.Time, kind string) HandoffRecord {
 	for index := range hashes {
 		hashes[index] = bytes.Repeat([]byte{byte(index + 1)}, sha256.Size)
 	}
-	return HandoffRecord{Kind: kind, RequestHash: bytes.Repeat([]byte{1}, sha256.Size), TokenHash: bytes.Repeat([]byte{2}, sha256.Size), TokenCiphertext: []byte("token-ciphertext"), UIDCiphertext: []byte("uid-ciphertext"), UIDLookup: bytes.Repeat([]byte{3}, sha256.Size), EmailCiphertext: []byte("email-ciphertext"), TOTPSecretCiphertext: []byte("totp-ciphertext"), TOTPURICiphertext: []byte("uri-ciphertext"), PasswordCiphertext: []byte("password-ciphertext"), Archive: []byte("encrypted-archive"), RecoveryCodeHashes: hashes, CreatedAt: now, ExpiresAt: now.Add(defaultHandoffTTL)}
+	return HandoffRecord{Kind: kind, RequestHash: bytes.Repeat([]byte{1}, sha256.Size), TokenHash: bytes.Repeat([]byte{2}, sha256.Size), TokenCiphertext: []byte("token-ciphertext"), EmailCiphertext: []byte("email-ciphertext"), TOTPSecretCiphertext: []byte("totp-ciphertext"), TOTPURICiphertext: []byte("uri-ciphertext"), PasswordCiphertext: []byte("password-ciphertext"), Archive: []byte("encrypted-archive"), RecoveryCodeHashes: hashes, CreatedAt: now, ExpiresAt: now.Add(defaultHandoffTTL)}
 }
 
 func sqlPattern(fragment string) string { return ".*" + regexp.QuoteMeta(fragment) + ".*" }
@@ -1008,61 +935,46 @@ func (fixedTOTP) Validate(code, secret string, now time.Time) (time.Time, bool) 
 	return now.Truncate(30 * time.Second), true
 }
 
-type memoryVerifier struct {
-	mu           sync.Mutex
-	verification identity.Verification
-	challenge    identity.Challenge
-	err          error
-	pollErrs     []error
-	pollCalls    int
-	forgotten    []string
-}
-
-func (verifier *memoryVerifier) Begin(context.Context) (identity.Challenge, error) {
-	verifier.mu.Lock()
-	defer verifier.mu.Unlock()
-	if verifier.challenge.ID == "" {
-		verifier.challenge = identity.Challenge{ID: "admin-proof", QRImage: "data:image/png;base64,qr", ExpiresAt: time.Now().Add(time.Minute)}
-	}
-	return verifier.challenge, verifier.err
-}
-
-func (verifier *memoryVerifier) Poll(context.Context, string) (identity.Verification, error) {
-	verifier.mu.Lock()
-	defer verifier.mu.Unlock()
-	verifier.pollCalls++
-	if len(verifier.pollErrs) != 0 {
-		err := verifier.pollErrs[0]
-		verifier.pollErrs = verifier.pollErrs[1:]
-		return verifier.verification, err
-	}
-	return verifier.verification, verifier.err
-}
-
-func (verifier *memoryVerifier) Forget(challengeID string) {
-	verifier.mu.Lock()
-	verifier.forgotten = append(verifier.forgotten, challengeID)
-	verifier.mu.Unlock()
-}
-
-func newTestService(t *testing.T, repository Repository, verifier identity.BiliVerifier, sender MailSender, now time.Time) *Service {
+func newTestService(t *testing.T, repository Repository, sender MailSender, now time.Time) *Service {
 	t.Helper()
-	return newTestServiceWithClock(t, repository, verifier, sender, func() time.Time { return now })
+	return newTestServiceWithClock(t, repository, sender, func() time.Time { return now })
 }
 
-func newTestServiceWithClock(t *testing.T, repository Repository, verifier identity.BiliVerifier, sender MailSender, now func() time.Time) *Service {
+func newTestServiceWithClock(t *testing.T, repository Repository, sender MailSender, now func() time.Time) *Service {
 	t.Helper()
 	keys, err := security.NewKeyring(1, bytes.Repeat([]byte{0x41}, 32), bytes.Repeat([]byte{0x72}, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(repository, keys, verifier, sender, ServiceOptions{
+	service, err := NewService(repository, keys, sender, ServiceOptions{
 		Now: now, TOTP: fixedTOTP{}, Random: &sequenceReader{},
 	})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
 	return service
+}
+
+func emailLoginForTest(t *testing.T, service *Service, sender *MemorySender) LoginResult {
+	t.Helper()
+	before := len(sender.Messages())
+	challenge, err := service.BeginEmailLogin(context.Background())
+	if err != nil {
+		t.Fatalf("BeginEmailLogin() error = %v", err)
+	}
+	messages := sender.Messages()
+	if len(messages) != before+1 {
+		t.Fatalf("email login messages=%d, want %d", len(messages), before+1)
+	}
+	code := regexp.MustCompile(`\b[0-9]{6}\b`).FindString(messages[len(messages)-1].Text)
+	if code == "" {
+		t.Fatalf("email login message omitted code: %q", messages[len(messages)-1].Text)
+	}
+	login, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code)
+	if err != nil {
+		t.Fatalf("VerifyEmailLogin() error = %v", err)
+	}
+	return login
 }
 
 func initializedMemoryRepository(t *testing.T, now time.Time) *memoryRepository {
@@ -1072,13 +984,10 @@ func initializedMemoryRepository(t *testing.T, now time.Time) *memoryRepository 
 	if err != nil {
 		t.Fatal(err)
 	}
-	uidCiphertext, _ := keys.Seal("admin_uid", []byte("32249588"))
-	uidLookup, _ := keys.Lookup("bili_uid", []byte("32249588"))
 	emailCiphertext, _ := keys.Seal("admin_email", []byte("owner@example.com"))
 	secretCiphertext, _ := keys.Seal("admin_totp", []byte("TESTSECRET"))
 	repository.identity = IdentityRecord{
-		CredentialEpoch: 1, UIDCiphertext: uidCiphertext, UIDLookup: uidLookup,
-		EmailCiphertext: emailCiphertext, TOTPSecretCiphertext: secretCiphertext,
+		CredentialEpoch: 1, EmailCiphertext: emailCiphertext, TOTPSecretCiphertext: secretCiphertext,
 	}
 	repository.initialized = true
 	repository.rotatedAt = now
@@ -1200,6 +1109,10 @@ func (repository *memoryRepository) PrepareInitialization(_ context.Context, rec
 	}
 	for _, handoff := range repository.handoffs {
 		if handoff.Kind == HandoffInitialization && handoff.State == HandoffPending {
+			if len(handoff.UIDCiphertext) != 0 || len(handoff.UIDLookup) != 0 || !handoff.ExpiresAt.After(record.CreatedAt) {
+				delete(repository.handoffs, handoff.ID)
+				continue
+			}
 			if handoff.ExpiresAt.After(record.CreatedAt) && bytes.Equal(handoff.RequestHash, record.RequestHash) {
 				return handoff, nil
 			}
@@ -1212,22 +1125,17 @@ func (repository *memoryRepository) PrepareInitialization(_ context.Context, rec
 	return handoff, nil
 }
 
-func (repository *memoryRepository) PendingInitialization(_ context.Context, lookup []byte, now time.Time) (PendingHandoff, error) {
-	repository.mu.Lock()
-	defer repository.mu.Unlock()
-	for _, handoff := range repository.handoffs {
-		if handoff.Kind == HandoffInitialization && handoff.State == HandoffPending && handoff.ExpiresAt.After(now) && bytes.Equal(handoff.UIDLookup, lookup) {
-			return handoff, nil
-		}
-	}
-	return PendingHandoff{}, ErrAuthenticationFailed
-}
-
 func (repository *memoryRepository) ActivateInitialization(_ context.Context, attempt ActivateInitializationAttempt) error {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
-	handoff, found := repository.handoffs[attempt.HandoffID]
-	if !found || repository.initialized || handoff.State != HandoffPending || !handoff.ExpiresAt.After(attempt.CreatedAt) || !bytes.Equal(handoff.UIDLookup, attempt.UIDLookup) {
+	var handoff PendingHandoff
+	for _, candidate := range repository.handoffs {
+		if bytes.Equal(candidate.TokenHash, attempt.TokenHash) {
+			handoff = candidate
+			break
+		}
+	}
+	if handoff.ID == 0 || repository.initialized || handoff.State != HandoffPending || !handoff.ExpiresAt.After(attempt.Now) || len(handoff.UIDCiphertext) != 0 || len(handoff.UIDLookup) != 0 {
 		return ErrAuthenticationFailed
 	}
 	repository.initialized = true
@@ -1236,19 +1144,16 @@ func (repository *memoryRepository) ActivateInitialization(_ context.Context, at
 		key, _ := hashKey(hash)
 		repository.activeCodes[key] = struct{}{}
 	}
-	key, _ := hashKey(attempt.TokenHash)
-	repository.sessions[key] = AdminSession{ID: 1, CredentialEpoch: 1, ExpiresAt: attempt.ExpiresAt, TOTPVerifiedAt: attempt.TOTPStep}
-	repository.lastStep = attempt.TOTPStep
 	handoff.State, handoff.TokenCiphertext, handoff.TOTPSecretCiphertext, handoff.TOTPURICiphertext, handoff.PasswordCiphertext, handoff.Archive, handoff.RecoveryCodeHashes = HandoffConfirmed, nil, nil, nil, nil, nil, nil
 	repository.handoffs[handoff.ID] = handoff
 	return nil
 }
 
-func (repository *memoryRepository) PrepareRecoveryHandoff(_ context.Context, uidLookup, codeHash []byte, record HandoffRecord) (PendingHandoff, error) {
+func (repository *memoryRepository) PrepareRecoveryHandoff(_ context.Context, expectedCredentialEpoch int64, codeHash []byte, record HandoffRecord) (PendingHandoff, error) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
 	codeKey, ok := hashKey(codeHash)
-	if !ok || !repository.initialized || !bytes.Equal(uidLookup, repository.identity.UIDLookup) {
+	if !ok || !repository.initialized || repository.identity.CredentialEpoch != expectedCredentialEpoch || subtle.ConstantTimeCompare(repository.identity.EmailCiphertext, record.EmailCiphertext) != 1 {
 		return PendingHandoff{}, ErrAuthenticationFailed
 	}
 	if _, active := repository.activeCodes[codeKey]; !active {
@@ -1385,7 +1290,7 @@ func (repository *memoryRepository) CleanupExpiredHandoffs(_ context.Context, no
 		if limit == 0 {
 			break
 		}
-		if handoff.State == HandoffPending && !handoff.ExpiresAt.After(now) {
+		if handoff.State == HandoffPending && (!handoff.ExpiresAt.After(now) || len(handoff.UIDCiphertext) != 0 || len(handoff.UIDLookup) != 0) {
 			delete(repository.handoffs, id)
 			delete(repository.handoffReserved, id)
 			limit--
@@ -1422,21 +1327,6 @@ func (repository *memoryRepository) Identity(context.Context) (IdentityRecord, e
 	return cloneIdentity(repository.identity), nil
 }
 
-func (repository *memoryRepository) CreateLoginSession(_ context.Context, attempt LoginSessionAttempt) error {
-	repository.mu.Lock()
-	defer repository.mu.Unlock()
-	if !repository.initialized || attempt.ExpectedCredentialEpoch != repository.identity.CredentialEpoch || !attempt.TOTPStep.After(repository.lastStep) {
-		return ErrAuthenticationFailed
-	}
-	key, ok := hashKey(attempt.TokenHash)
-	if !ok {
-		return ErrUnavailable
-	}
-	repository.lastStep = attempt.TOTPStep
-	repository.sessions[key] = AdminSession{ID: int64(len(repository.sessions) + 1), CredentialEpoch: attempt.ExpectedCredentialEpoch, ExpiresAt: attempt.ExpiresAt, TOTPVerifiedAt: attempt.TOTPStep}
-	return nil
-}
-
 func (repository *memoryRepository) CreateEmailLoginSession(_ context.Context, attempt EmailLoginSessionAttempt) error {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
@@ -1460,6 +1350,20 @@ func (repository *memoryRepository) FindSession(_ context.Context, tokenHash []b
 		return AdminSession{}, ErrAuthenticationFailed
 	}
 	return session, nil
+}
+
+func (repository *memoryRepository) RevokeSession(_ context.Context, tokenHash []byte, _ time.Time) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	key, ok := hashKey(tokenHash)
+	if !ok {
+		return ErrAuthenticationFailed
+	}
+	if session, found := repository.sessions[key]; found {
+		session.Revoked = true
+		repository.sessions[key] = session
+	}
+	return nil
 }
 
 func (repository *memoryRepository) ConfirmTOTP(_ context.Context, attempt ConfirmTOTPAttempt) error {
@@ -1491,36 +1395,6 @@ func (repository *memoryRepository) ReplaceRecoveryCodes(_ context.Context, atte
 			return nil, ErrUnavailable
 		}
 		repository.activeCodes[codeKey] = struct{}{}
-	}
-	return bytes.Clone(repository.identity.EmailCiphertext), nil
-}
-
-func (repository *memoryRepository) CompleteRecovery(_ context.Context, attempt RecoveryCompletion) ([]byte, error) {
-	repository.mu.Lock()
-	defer repository.mu.Unlock()
-	codeKey, ok := hashKey(attempt.ConsumedCodeHash)
-	if !ok || !repository.initialized || attempt.ExpectedCredentialEpoch != repository.identity.CredentialEpoch || !bytes.Equal(attempt.UIDLookup, repository.identity.UIDLookup) {
-		return nil, ErrAuthenticationFailed
-	}
-	if _, active := repository.activeCodes[codeKey]; !active {
-		return nil, ErrAuthenticationFailed
-	}
-	delete(repository.activeCodes, codeKey)
-	repository.usedCodes[codeKey] = struct{}{}
-	clear(repository.activeCodes)
-	repository.identity.TOTPSecretCiphertext = bytes.Clone(attempt.NewTOTPSecretCiphertext)
-	repository.identity.CredentialEpoch++
-	repository.rotatedAt = attempt.Now
-	for key, session := range repository.sessions {
-		session.Revoked = true
-		repository.sessions[key] = session
-	}
-	for _, hash := range attempt.NewCodeHashes {
-		newKey, valid := hashKey(hash)
-		if !valid {
-			return nil, ErrUnavailable
-		}
-		repository.activeCodes[newKey] = struct{}{}
 	}
 	return bytes.Clone(repository.identity.EmailCiphertext), nil
 }
