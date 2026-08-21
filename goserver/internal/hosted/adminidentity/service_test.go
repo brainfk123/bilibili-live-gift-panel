@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -333,7 +334,7 @@ func TestEmailLoginTreatsUnexpectedSessionCreationFailureAsUnavailable(t *testin
 	}
 }
 
-func TestVerifyRecentTOTPRejectsReplayAndExpiresAfterTenMinutes(t *testing.T) {
+func TestVerifyRecentTOTPRejectsReplayAndExpiresAtTenMinutes(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 20, 0, 0, time.UTC)
 	clock := now
 	repository := initializedMemoryRepository(t, now)
@@ -351,13 +352,383 @@ func TestVerifyRecentTOTPRejectsReplayAndExpiresAfterTenMinutes(t *testing.T) {
 		t.Fatalf("VerifyRecentTOTP(replay) error = %v", err)
 	}
 
-	clock = now.Add(10 * time.Minute)
+	clock = now.Add(9*time.Minute + 59*time.Second)
 	if err := service.RequireRecentTOTP(context.Background(), login.Token); err != nil {
-		t.Fatalf("RequireRecentTOTP(at boundary) error = %v", err)
+		t.Fatalf("RequireRecentTOTP(at 9m59s) error = %v", err)
 	}
-	clock = now.Add(10*time.Minute + time.Nanosecond)
+	clock = now.Add(10 * time.Minute)
 	if err := service.RequireRecentTOTP(context.Background(), login.Token); !errors.Is(err, ErrRecentTOTPRequired) {
-		t.Fatalf("RequireRecentTOTP(expired) error = %v, want ErrRecentTOTPRequired", err)
+		t.Fatalf("RequireRecentTOTP(at 10m) error = %v, want ErrRecentTOTPRequired", err)
+	}
+}
+
+func TestSensitiveAuthorizationRenewsExactSessionAtOperationCompletion(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authorizedAt := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	completedAt := authorizedAt.Add(500 * time.Millisecond)
+	verifiedAt := authorizedAt.Add(-9*time.Minute - 59*time.Second)
+	service := newTestService(t, NewRepository(database), &MemorySender{}, authorizedAt)
+	tokenHash, err := service.keys.HashToken("admin_session", []byte("administrator-session"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
+	mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
+		WithArgs(tokenHash).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at", "totp_verified_at"}).
+			AddRow(int64(17), int64(4), authorizedAt.Add(time.Hour), nil, verifiedAt))
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
+	mock.ExpectQuery(sqlPattern("SELECT expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE id = ? AND admin_identity_id = 1 AND credential_epoch = ? FOR UPDATE")).
+		WithArgs(int64(17), int64(4)).
+		WillReturnRows(sqlmock.NewRows([]string{"expires_at", "revoked_at", "totp_verified_at"}).
+			AddRow(authorizedAt.Add(time.Hour), nil, verifiedAt))
+	mock.ExpectExec(sqlPattern("UPDATE site_sessions SET totp_verified_at = ? WHERE id = ? AND credential_epoch = ? AND revoked_at IS NULL")).
+		WithArgs(completedAt, int64(17), int64(4)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	transaction, err := database.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := service.AuthorizeRecentTOTP(context.Background(), transaction, "administrator-session", authorizedAt)
+	if err != nil {
+		t.Fatalf("AuthorizeRecentTOTP() error = %v", err)
+	}
+	if err := service.RenewRecentTOTP(context.Background(), transaction, session, completedAt); err != nil {
+		t.Fatalf("RenewRecentTOTP() error = %v", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSensitiveAuthorizationUsesExactTenMinuteBoundaryAndActiveEpoch(t *testing.T) {
+	now := time.Date(2026, 8, 21, 9, 20, 0, 0, time.UTC)
+	revokedAt := now.Add(-time.Minute)
+	tests := []struct {
+		name         string
+		sessionEpoch int64
+		expiresAt    time.Time
+		revokedAt    any
+		verifiedAt   any
+		wantError    error
+	}{
+		{name: "9m59s remains active", sessionEpoch: 4, expiresAt: now.Add(time.Hour), verifiedAt: now.Add(-9*time.Minute - 59*time.Second)},
+		{name: "10m idle is expired", sessionEpoch: 4, expiresAt: now.Add(time.Hour), verifiedAt: now.Add(-10 * time.Minute), wantError: ErrRecentTOTPRequired},
+		{name: "missing totp", sessionEpoch: 4, expiresAt: now.Add(time.Hour), verifiedAt: nil, wantError: ErrRecentTOTPRequired},
+		{name: "future beyond skew", sessionEpoch: 4, expiresAt: now.Add(time.Hour), verifiedAt: now.Add(30*time.Second + time.Nanosecond), wantError: ErrRecentTOTPRequired},
+		{name: "revoked session", sessionEpoch: 4, expiresAt: now.Add(time.Hour), revokedAt: revokedAt, verifiedAt: now.Add(-time.Minute), wantError: ErrAuthenticationFailed},
+		{name: "expired session", sessionEpoch: 4, expiresAt: now, verifiedAt: now.Add(-time.Minute), wantError: ErrAuthenticationFailed},
+		{name: "wrong epoch", sessionEpoch: 3, expiresAt: now.Add(time.Hour), verifiedAt: now.Add(-time.Minute), wantError: ErrAuthenticationFailed},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			database, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			service := newTestService(t, NewRepository(database), &MemorySender{}, now)
+			tokenHash, err := service.keys.HashToken("admin_session", []byte("administrator-session"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			mock.ExpectBegin()
+			mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+				WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
+			mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
+				WithArgs(tokenHash).
+				WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at", "totp_verified_at"}).
+					AddRow(int64(17), test.sessionEpoch, test.expiresAt, test.revokedAt, test.verifiedAt))
+			mock.ExpectRollback()
+
+			transaction, err := database.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, gotErr := service.AuthorizeRecentTOTP(context.Background(), transaction, "administrator-session", now)
+			if test.wantError == nil && gotErr != nil {
+				t.Fatalf("AuthorizeRecentTOTP() error = %v", gotErr)
+			}
+			if test.wantError != nil && !errors.Is(gotErr, test.wantError) {
+				t.Fatalf("AuthorizeRecentTOTP() error = %v, want %v", gotErr, test.wantError)
+			}
+			if err := transaction.Rollback(); err != nil {
+				t.Fatal(err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestSensitiveRenewalDoesNotReviveWindowThatExpiresDuringMutation(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authorizedAt := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
+	verifiedAt := authorizedAt.Add(-9*time.Minute - 59*time.Second)
+	service := newTestService(t, NewRepository(database), &MemorySender{}, authorizedAt)
+	tokenHash, err := service.keys.HashToken("admin_session", []byte("administrator-session"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
+	mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
+		WithArgs(tokenHash).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at", "totp_verified_at"}).
+			AddRow(int64(17), int64(4), authorizedAt.Add(time.Hour), nil, verifiedAt))
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
+	mock.ExpectQuery(sqlPattern("SELECT expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE id = ? AND admin_identity_id = 1 AND credential_epoch = ? FOR UPDATE")).
+		WithArgs(int64(17), int64(4)).
+		WillReturnRows(sqlmock.NewRows([]string{"expires_at", "revoked_at", "totp_verified_at"}).
+			AddRow(authorizedAt.Add(time.Hour), nil, verifiedAt))
+	mock.ExpectRollback()
+
+	transaction, err := database.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := service.AuthorizeRecentTOTP(context.Background(), transaction, "administrator-session", authorizedAt)
+	if err != nil {
+		t.Fatalf("AuthorizeRecentTOTP() error = %v", err)
+	}
+	if err := service.RenewRecentTOTP(context.Background(), transaction, session, authorizedAt.Add(time.Second)); !errors.Is(err, ErrRecentTOTPRequired) {
+		t.Fatalf("RenewRecentTOTP() error = %v, want ErrRecentTOTPRequired", err)
+	}
+	if err := transaction.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSensitiveRenewalRejectsRevokedExpiredAndWrongEpochFence(t *testing.T) {
+	now := time.Date(2026, 8, 21, 10, 20, 0, 0, time.UTC)
+	revokedAt := now.Add(-time.Minute)
+	tests := []struct {
+		name               string
+		administratorEpoch int64
+		sessionRow         *sqlmock.Rows
+		wantError          error
+	}{
+		{name: "wrong administrator epoch", administratorEpoch: 5, wantError: ErrAuthenticationFailed},
+		{name: "missing exact session", administratorEpoch: 4, wantError: ErrAuthenticationFailed},
+		{name: "revoked exact session", administratorEpoch: 4, sessionRow: sqlmock.NewRows([]string{"expires_at", "revoked_at", "totp_verified_at"}).AddRow(now.Add(time.Hour), revokedAt, now.Add(-time.Minute)), wantError: ErrAuthenticationFailed},
+		{name: "expired exact session", administratorEpoch: 4, sessionRow: sqlmock.NewRows([]string{"expires_at", "revoked_at", "totp_verified_at"}).AddRow(now, nil, now.Add(-time.Minute)), wantError: ErrAuthenticationFailed},
+		{name: "expired recent window", administratorEpoch: 4, sessionRow: sqlmock.NewRows([]string{"expires_at", "revoked_at", "totp_verified_at"}).AddRow(now.Add(time.Hour), nil, now.Add(-10*time.Minute)), wantError: ErrRecentTOTPRequired},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			database, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			repository := NewRepository(database)
+			service := newTestService(t, repository, &MemorySender{}, now)
+			fence, valid := repository.sensitiveSessions.Issue(17, 4)
+			if !valid {
+				t.Fatal("test fence is invalid")
+			}
+			mock.ExpectBegin()
+			mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+				WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(test.administratorEpoch))
+			if test.administratorEpoch == 4 {
+				expectation := mock.ExpectQuery(sqlPattern("SELECT expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE id = ? AND admin_identity_id = 1 AND credential_epoch = ? FOR UPDATE")).
+					WithArgs(int64(17), int64(4))
+				if test.sessionRow == nil {
+					expectation.WillReturnError(sql.ErrNoRows)
+				} else {
+					expectation.WillReturnRows(test.sessionRow)
+				}
+			}
+			mock.ExpectRollback()
+
+			transaction, err := database.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := service.RenewRecentTOTP(context.Background(), transaction, fence, now); !errors.Is(err, test.wantError) {
+				t.Fatalf("RenewRecentTOTP() error = %v, want %v", err, test.wantError)
+			}
+			if err := transaction.Rollback(); err != nil {
+				t.Fatal(err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestSensitiveRenewalRejectsForeignOpaqueFenceBeforeDatabaseLookup(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 21, 10, 30, 0, 0, time.UTC)
+	repository := NewRepository(database)
+	service := newTestService(t, repository, &MemorySender{}, now)
+	foreignFence, valid := security.NewSensitiveSessionIssuer().Issue(17, 4)
+	if !valid {
+		t.Fatal("foreign test fence is invalid")
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+	transaction, err := database.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RenewRecentTOTP(context.Background(), transaction, foreignFence, now); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("RenewRecentTOTP(foreign fence) error = %v, want ErrAuthenticationFailed", err)
+	}
+	if err := transaction.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSensitiveRecoveryRotationRenewsOnlyAfterAuditInSameTransaction(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authorizedAt := time.Date(2026, 8, 21, 10, 40, 0, 0, time.UTC)
+	completedAt := authorizedAt.Add(2 * time.Second)
+	verifiedAt := authorizedAt.Add(-time.Minute)
+	repository := NewRepository(database)
+	service := newTestService(t, repository, &MemorySender{}, authorizedAt)
+	tokenHash, err := service.keys.HashToken("admin_session", []byte("administrator-session"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	emailCiphertext, err := service.keys.Seal("admin_email", []byte("owner@example.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashes := sqlInitializationRecord(authorizedAt).RecoveryCodeHashes
+	clockCalls := 0
+	clock := func() time.Time {
+		clockCalls++
+		if clockCalls == 1 {
+			return authorizedAt
+		}
+		return completedAt
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
+	mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
+		WithArgs(tokenHash).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at", "totp_verified_at"}).
+			AddRow(int64(17), int64(4), authorizedAt.Add(time.Hour), nil, verifiedAt))
+	mock.ExpectQuery(sqlPattern("SELECT email_ciphertext FROM admin_identity WHERE id = 1")).
+		WillReturnRows(sqlmock.NewRows([]string{"email_ciphertext"}).AddRow(emailCiphertext))
+	mock.ExpectExec(sqlPattern("UPDATE admin_recovery_codes SET invalidated_at = ? WHERE admin_identity_id = ? AND used_at IS NULL AND invalidated_at IS NULL")).
+		WithArgs(authorizedAt, int64(1)).WillReturnResult(sqlmock.NewResult(0, 10))
+	for _, hash := range hashes {
+		mock.ExpectExec(sqlPattern("INSERT INTO admin_recovery_codes (admin_identity_id, code_hash, created_at) VALUES (?, ?, ?)")).
+			WithArgs(int64(1), hash, authorizedAt).WillReturnResult(sqlmock.NewResult(20, 1))
+	}
+	mock.ExpectExec(sqlPattern("INSERT INTO audit_events (event_type, actor_admin_identity_id, event_data, created_at) VALUES (?, ?, ?, ?)")).
+		WithArgs("admin_recovery_material_rotated", int64(1), []byte("{}"), authorizedAt).
+		WillReturnResult(sqlmock.NewResult(30, 1))
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
+	mock.ExpectQuery(sqlPattern("SELECT expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE id = ? AND admin_identity_id = 1 AND credential_epoch = ? FOR UPDATE")).
+		WithArgs(int64(17), int64(4)).
+		WillReturnRows(sqlmock.NewRows([]string{"expires_at", "revoked_at", "totp_verified_at"}).
+			AddRow(authorizedAt.Add(time.Hour), nil, verifiedAt))
+	mock.ExpectExec(sqlPattern("UPDATE site_sessions SET totp_verified_at = ? WHERE id = ? AND credential_epoch = ? AND revoked_at IS NULL")).
+		WithArgs(completedAt, int64(17), int64(4)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	storedEmail, err := repository.RotateRecoveryCodes(context.Background(), service, "administrator-session", hashes, clock)
+	if err != nil {
+		t.Fatalf("RotateRecoveryCodes() error = %v", err)
+	}
+	if subtle.ConstantTimeCompare(storedEmail, emailCiphertext) != 1 || clockCalls != 2 {
+		t.Fatalf("RotateRecoveryCodes() email match=%t clock calls=%d", subtle.ConstantTimeCompare(storedEmail, emailCiphertext) == 1, clockCalls)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSensitiveRecoveryRotationRenewalFailureRollsBackMaterialAndAudit(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 21, 10, 50, 0, 0, time.UTC)
+	repository := NewRepository(database)
+	service := newTestService(t, repository, &MemorySender{}, now)
+	tokenHash, err := service.keys.HashToken("admin_session", []byte("administrator-session"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashes := sqlInitializationRecord(now).RecoveryCodeHashes
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
+	mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
+		WithArgs(tokenHash).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at", "totp_verified_at"}).
+			AddRow(int64(17), int64(4), now.Add(time.Hour), nil, now.Add(-time.Minute)))
+	mock.ExpectQuery(sqlPattern("SELECT email_ciphertext FROM admin_identity WHERE id = 1")).
+		WillReturnRows(sqlmock.NewRows([]string{"email_ciphertext"}).AddRow([]byte("email-ciphertext")))
+	mock.ExpectExec(sqlPattern("UPDATE admin_recovery_codes SET invalidated_at = ? WHERE admin_identity_id = ? AND used_at IS NULL AND invalidated_at IS NULL")).
+		WillReturnResult(sqlmock.NewResult(0, 10))
+	for range hashes {
+		mock.ExpectExec(sqlPattern("INSERT INTO admin_recovery_codes (admin_identity_id, code_hash, created_at) VALUES (?, ?, ?)")).
+			WillReturnResult(sqlmock.NewResult(20, 1))
+	}
+	mock.ExpectExec(sqlPattern("INSERT INTO audit_events (event_type, actor_admin_identity_id, event_data, created_at) VALUES (?, ?, ?, ?)")).
+		WillReturnResult(sqlmock.NewResult(30, 1))
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(int64(4)))
+	mock.ExpectQuery(sqlPattern("SELECT expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE id = ? AND admin_identity_id = 1 AND credential_epoch = ? FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"expires_at", "revoked_at", "totp_verified_at"}).AddRow(now.Add(time.Hour), nil, now.Add(-time.Minute)))
+	mock.ExpectExec(sqlPattern("UPDATE site_sessions SET totp_verified_at = ? WHERE id = ? AND credential_epoch = ? AND revoked_at IS NULL")).
+		WillReturnError(errors.New("private renewal failure"))
+	mock.ExpectRollback()
+
+	if _, err := repository.RotateRecoveryCodes(context.Background(), service, "administrator-session", hashes, func() time.Time { return now }); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("RotateRecoveryCodes() error = %v, want ErrUnavailable", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1380,22 +1751,39 @@ func (repository *memoryRepository) ConfirmTOTP(_ context.Context, attempt Confi
 	return nil
 }
 
-func (repository *memoryRepository) ReplaceRecoveryCodes(_ context.Context, attempt RecoveryReplacement) ([]byte, error) {
+func (repository *memoryRepository) RotateRecoveryCodes(_ context.Context, _ security.SensitiveAuthorizer, sessionToken string, newCodeHashes [][]byte, clock func() time.Time) ([]byte, error) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
-	key, ok := hashKey(attempt.SessionTokenHash)
-	session, found := repository.sessions[key]
-	if !ok || !found || session.Revoked || !session.ExpiresAt.After(attempt.Now) || session.CredentialEpoch != repository.identity.CredentialEpoch || attempt.Now.Sub(session.TOTPVerifiedAt) > RecentTOTPWindow {
+	if sessionToken == "" || clock == nil || !validCodeHashes(newCodeHashes) {
+		return nil, ErrInvalidInput
+	}
+	authorizedAt := clock()
+	var sessionKey [sha256.Size]byte
+	var session AdminSession
+	found := false
+	for key, candidate := range repository.sessions {
+		if !candidate.Revoked && candidate.ExpiresAt.After(authorizedAt) && candidate.CredentialEpoch == repository.identity.CredentialEpoch && recentTOTPAt(sql.NullTime{Time: candidate.TOTPVerifiedAt, Valid: !candidate.TOTPVerifiedAt.IsZero()}, authorizedAt) {
+			sessionKey, session, found = key, candidate, true
+			break
+		}
+	}
+	if !found {
+		return nil, ErrRecentTOTPRequired
+	}
+	completedAt := clock()
+	if !session.ExpiresAt.After(completedAt) || !recentTOTPAt(sql.NullTime{Time: session.TOTPVerifiedAt, Valid: !session.TOTPVerifiedAt.IsZero()}, completedAt) {
 		return nil, ErrRecentTOTPRequired
 	}
 	clear(repository.activeCodes)
-	for _, hash := range attempt.NewCodeHashes {
+	for _, hash := range newCodeHashes {
 		codeKey, valid := hashKey(hash)
 		if !valid {
 			return nil, ErrUnavailable
 		}
 		repository.activeCodes[codeKey] = struct{}{}
 	}
+	session.TOTPVerifiedAt = completedAt
+	repository.sessions[sessionKey] = session
 	return bytes.Clone(repository.identity.EmailCiphertext), nil
 }
 

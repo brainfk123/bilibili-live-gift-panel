@@ -35,8 +35,8 @@ const (
 var (
 	ErrInvalidInput          = errors.New("admin identity: invalid input")
 	ErrAlreadyInitialized    = errors.New("admin identity: already initialized")
-	ErrAuthenticationFailed  = errors.New("admin identity: authentication failed")
-	ErrRecentTOTPRequired    = errors.New("admin identity: recent totp required")
+	ErrAuthenticationFailed  = security.ErrSensitiveAuthenticationFailed
+	ErrRecentTOTPRequired    = security.ErrSensitiveRecentTOTPRequired
 	ErrUnavailable           = errors.New("admin identity: unavailable")
 	ErrArchiveAuthentication = errors.New("admin identity: archive authentication failed")
 )
@@ -75,12 +75,6 @@ type ConfirmTOTPAttempt struct {
 	TokenHash               []byte
 	Now                     time.Time
 	TOTPStep                time.Time
-}
-
-type RecoveryReplacement struct {
-	SessionTokenHash []byte
-	Now              time.Time
-	NewCodeHashes    [][]byte
 }
 
 const (
@@ -162,15 +156,24 @@ type Repository interface {
 	FindSession(context.Context, []byte, time.Time) (AdminSession, error)
 	RevokeSession(context.Context, []byte, time.Time) error
 	ConfirmTOTP(context.Context, ConfirmTOTPAttempt) error
-	ReplaceRecoveryCodes(context.Context, RecoveryReplacement) ([]byte, error)
+}
+
+type sensitiveSessionRepository interface {
+	authorizeRecentTOTP(context.Context, *sql.Tx, []byte, time.Time) (security.SensitiveSession, error)
+	renewRecentTOTP(context.Context, *sql.Tx, security.SensitiveSession, time.Time) error
+}
+
+type recoveryRotationRepository interface {
+	RotateRecoveryCodes(context.Context, security.SensitiveAuthorizer, string, [][]byte, func() time.Time) ([]byte, error)
 }
 
 type SQLRepository struct {
-	db *sql.DB
+	db                *sql.DB
+	sensitiveSessions *security.SensitiveSessionIssuer
 }
 
 func NewRepository(database *sql.DB) *SQLRepository {
-	return &SQLRepository{db: database}
+	return &SQLRepository{db: database, sensitiveSessions: security.NewSensitiveSessionIssuer()}
 }
 
 func OpenRepository(ctx context.Context, dsn string) (*SQLRepository, error) {
@@ -412,12 +415,90 @@ func (repository *SQLRepository) ConfirmTOTP(ctx context.Context, attempt Confir
 	return nil
 }
 
-func (repository *SQLRepository) ReplaceRecoveryCodes(ctx context.Context, attempt RecoveryReplacement) ([]byte, error) {
-	if !repository.ready() || len(attempt.SessionTokenHash) != sha256.Size || attempt.Now.IsZero() || !validCodeHashes(attempt.NewCodeHashes) {
+func (repository *SQLRepository) authorizeRecentTOTP(ctx context.Context, transaction *sql.Tx, tokenHash []byte, now time.Time) (security.SensitiveSession, error) {
+	if !repository.ready() || transaction == nil || len(tokenHash) != sha256.Size || now.IsZero() {
+		return security.SensitiveSession{}, ErrInvalidInput
+	}
+	epoch, err := lockAdminEpoch(ctx, transaction)
+	if err != nil {
+		return security.SensitiveSession{}, err
+	}
+	const query = "SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE"
+	var sessionID, sessionEpoch int64
+	var expiresAt time.Time
+	var revokedAt, verifiedAt sql.NullTime
+	err = transaction.QueryRowContext(ctx, query, bytes.Clone(tokenHash)).Scan(&sessionID, &sessionEpoch, &expiresAt, &revokedAt, &verifiedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return security.SensitiveSession{}, ErrAuthenticationFailed
+	}
+	if err != nil {
+		return security.SensitiveSession{}, ErrUnavailable
+	}
+	if sessionID <= 0 || sessionEpoch != epoch || !expiresAt.After(now) || revokedAt.Valid {
+		return security.SensitiveSession{}, ErrAuthenticationFailed
+	}
+	if !recentTOTPAt(verifiedAt, now) {
+		return security.SensitiveSession{}, ErrRecentTOTPRequired
+	}
+	if repository.sensitiveSessions == nil {
+		return security.SensitiveSession{}, ErrUnavailable
+	}
+	fence, valid := repository.sensitiveSessions.Issue(sessionID, sessionEpoch)
+	if !valid {
+		return security.SensitiveSession{}, ErrUnavailable
+	}
+	return fence, nil
+}
+
+func (repository *SQLRepository) renewRecentTOTP(ctx context.Context, transaction *sql.Tx, fence security.SensitiveSession, now time.Time) error {
+	if !repository.ready() || transaction == nil || now.IsZero() {
+		return ErrInvalidInput
+	}
+	if repository.sensitiveSessions == nil {
+		return ErrUnavailable
+	}
+	sessionID, credentialEpoch, valid := repository.sensitiveSessions.Open(fence)
+	if !valid {
+		return ErrAuthenticationFailed
+	}
+	currentEpoch, err := lockAdminEpoch(ctx, transaction)
+	if err != nil {
+		return err
+	}
+	if currentEpoch != credentialEpoch {
+		return ErrAuthenticationFailed
+	}
+	const query = "SELECT expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE id = ? AND admin_identity_id = 1 AND credential_epoch = ? FOR UPDATE"
+	var expiresAt time.Time
+	var revokedAt, verifiedAt sql.NullTime
+	err = transaction.QueryRowContext(ctx, query, sessionID, credentialEpoch).Scan(&expiresAt, &revokedAt, &verifiedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrAuthenticationFailed
+	}
+	if err != nil {
+		return ErrUnavailable
+	}
+	if !expiresAt.After(now) || revokedAt.Valid {
+		return ErrAuthenticationFailed
+	}
+	if !recentTOTPAt(verifiedAt, now) {
+		return ErrRecentTOTPRequired
+	}
+	result, err := transaction.ExecContext(ctx,
+		"UPDATE site_sessions SET totp_verified_at = ? WHERE id = ? AND credential_epoch = ? AND revoked_at IS NULL",
+		now, sessionID, credentialEpoch,
+	)
+	if err != nil || !oneRow(result) {
+		return ErrUnavailable
+	}
+	return nil
+}
+
+func (repository *SQLRepository) RotateRecoveryCodes(ctx context.Context, authorizer security.SensitiveAuthorizer, sessionToken string, newCodeHashes [][]byte, clock func() time.Time) ([]byte, error) {
+	if !repository.ready() || authorizer == nil || sessionToken == "" || !validCodeHashes(newCodeHashes) || clock == nil {
 		return nil, ErrInvalidInput
 	}
-	attempt.SessionTokenHash = bytes.Clone(attempt.SessionTokenHash)
-	attempt.NewCodeHashes = cloneByteSlices(attempt.NewCodeHashes)
+	newCodeHashes = cloneByteSlices(newCodeHashes)
 	transaction, err := repository.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, ErrUnavailable
@@ -428,29 +509,36 @@ func (repository *SQLRepository) ReplaceRecoveryCodes(ctx context.Context, attem
 			_ = transaction.Rollback()
 		}
 	}()
-	const identityQuery = "SELECT credential_epoch, email_ciphertext FROM admin_identity WHERE id = 1 FOR UPDATE"
-	var epoch int64
+	now := clock().UTC()
+	if now.IsZero() {
+		return nil, ErrInvalidInput
+	}
+	sensitiveSession, err := authorizer.AuthorizeRecentTOTP(ctx, transaction, sessionToken, now)
+	if err != nil {
+		return nil, err
+	}
+	const identityQuery = "SELECT email_ciphertext FROM admin_identity WHERE id = 1"
 	var emailCiphertext []byte
-	if err := transaction.QueryRowContext(ctx, identityQuery).Scan(&epoch, &emailCiphertext); err != nil || epoch < 1 || len(emailCiphertext) == 0 {
+	if err := transaction.QueryRowContext(ctx, identityQuery).Scan(&emailCiphertext); err != nil || len(emailCiphertext) == 0 {
 		return nil, ErrAuthenticationFailed
-	}
-	const sessionQuery = "SELECT id, credential_epoch, expires_at, revoked_at, totp_verified_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE"
-	var sessionID, sessionEpoch int64
-	var expiresAt time.Time
-	var revokedAt, verifiedAt sql.NullTime
-	if err := transaction.QueryRowContext(ctx, sessionQuery, attempt.SessionTokenHash).Scan(&sessionID, &sessionEpoch, &expiresAt, &revokedAt, &verifiedAt); err != nil || sessionID <= 0 || sessionEpoch != epoch || !expiresAt.After(attempt.Now) || revokedAt.Valid {
-		return nil, ErrAuthenticationFailed
-	}
-	if !verifiedAt.Valid || verifiedAt.Time.After(attempt.Now.Add(30*time.Second)) || attempt.Now.Sub(verifiedAt.Time) > RecentTOTPWindow {
-		return nil, ErrRecentTOTPRequired
 	}
 	if _, err := transaction.ExecContext(ctx,
 		"UPDATE admin_recovery_codes SET invalidated_at = ? WHERE admin_identity_id = ? AND used_at IS NULL AND invalidated_at IS NULL",
-		attempt.Now, int64(1),
+		now, int64(1),
 	); err != nil {
 		return nil, ErrUnavailable
 	}
-	if err := insertRecoveryCodes(ctx, transaction, attempt.NewCodeHashes, attempt.Now); err != nil {
+	if err := insertRecoveryCodes(ctx, transaction, newCodeHashes, now); err != nil {
+		return nil, err
+	}
+	result, err := transaction.ExecContext(ctx,
+		"INSERT INTO audit_events (event_type, actor_admin_identity_id, event_data, created_at) VALUES (?, ?, ?, ?)",
+		"admin_recovery_material_rotated", int64(1), []byte("{}"), now,
+	)
+	if err != nil || !oneRow(result) {
+		return nil, ErrUnavailable
+	}
+	if err := authorizer.RenewRecentTOTP(ctx, transaction, sensitiveSession, clock().UTC()); err != nil {
 		return nil, err
 	}
 	if err := transaction.Commit(); err != nil {
@@ -982,6 +1070,10 @@ func oneRow(result sql.Result) bool {
 	return err == nil && rows == 1
 }
 
+func recentTOTPAt(verifiedAt sql.NullTime, now time.Time) bool {
+	return verifiedAt.Valid && !verifiedAt.Time.After(now.Add(30*time.Second)) && now.Sub(verifiedAt.Time) < RecentTOTPWindow
+}
+
 func repositoryDuplicate(err error) bool {
 	var mysqlError *mysql.MySQLError
 	return errors.As(err, &mysqlError) && mysqlError.Number == 1062
@@ -1476,6 +1568,32 @@ func (service *Service) VerifyRecentTOTP(ctx context.Context, sessionToken, code
 	return nil
 }
 
+func (service *Service) AuthorizeRecentTOTP(ctx context.Context, transaction *sql.Tx, sessionToken string, now time.Time) (security.SensitiveSession, error) {
+	if service == nil || transaction == nil || sessionToken == "" || now.IsZero() {
+		return security.SensitiveSession{}, ErrAuthenticationFailed
+	}
+	repository, ok := service.repository.(sensitiveSessionRepository)
+	if !ok {
+		return security.SensitiveSession{}, ErrUnavailable
+	}
+	tokenHash, err := service.keys.HashToken("admin_session", []byte(sessionToken))
+	if err != nil {
+		return security.SensitiveSession{}, ErrAuthenticationFailed
+	}
+	return repository.authorizeRecentTOTP(ctx, transaction, tokenHash, now)
+}
+
+func (service *Service) RenewRecentTOTP(ctx context.Context, transaction *sql.Tx, session security.SensitiveSession, now time.Time) error {
+	if service == nil || transaction == nil || now.IsZero() {
+		return ErrAuthenticationFailed
+	}
+	repository, ok := service.repository.(sensitiveSessionRepository)
+	if !ok {
+		return ErrUnavailable
+	}
+	return repository.renewRecentTOTP(ctx, transaction, session, now)
+}
+
 func (service *Service) RequireRecentTOTP(ctx context.Context, sessionToken string) error {
 	if service == nil || sessionToken == "" {
 		return ErrAuthenticationFailed
@@ -1489,7 +1607,7 @@ func (service *Service) RequireRecentTOTP(ctx context.Context, sessionToken stri
 	if err != nil {
 		return ErrAuthenticationFailed
 	}
-	if session.TOTPVerifiedAt.IsZero() || session.TOTPVerifiedAt.After(now.Add(30*time.Second)) || now.Sub(session.TOTPVerifiedAt) > RecentTOTPWindow {
+	if !recentTOTPAt(sql.NullTime{Time: session.TOTPVerifiedAt, Valid: !session.TOTPVerifiedAt.IsZero()}, now) {
 		return ErrRecentTOTPRequired
 	}
 	return nil
@@ -1530,9 +1648,9 @@ func (service *Service) SendRecovery(ctx context.Context, sessionToken string) (
 	if err := service.RequireRecentTOTP(ctx, sessionToken); err != nil {
 		return RecoveryResult{}, err
 	}
-	tokenHash, err := service.keys.HashToken("admin_session", []byte(sessionToken))
-	if err != nil {
-		return RecoveryResult{}, ErrAuthenticationFailed
+	repository, ok := service.repository.(recoveryRotationRepository)
+	if !ok {
+		return RecoveryResult{}, ErrUnavailable
 	}
 	material, err := buildRecoveryPackage(service.random)
 	if err != nil {
@@ -1555,12 +1673,15 @@ func (service *Service) SendRecovery(ctx context.Context, sessionToken string) (
 	if err := service.sendArchive(ctx, string(email), material.Archive); err != nil {
 		return RecoveryResult{}, err
 	}
-	storedEmail, err := service.repository.ReplaceRecoveryCodes(ctx, RecoveryReplacement{SessionTokenHash: tokenHash, Now: service.now(), NewCodeHashes: hashes})
+	storedEmail, err := repository.RotateRecoveryCodes(ctx, service, sessionToken, hashes, service.now)
 	if err != nil {
 		if errors.Is(err, ErrRecentTOTPRequired) {
 			return RecoveryResult{}, ErrRecentTOTPRequired
 		}
-		return RecoveryResult{}, ErrAuthenticationFailed
+		if errors.Is(err, ErrAuthenticationFailed) {
+			return RecoveryResult{}, ErrAuthenticationFailed
+		}
+		return RecoveryResult{}, ErrUnavailable
 	}
 	if subtle.ConstantTimeCompare(storedEmail, record.EmailCiphertext) != 1 {
 		return RecoveryResult{}, ErrUnavailable
