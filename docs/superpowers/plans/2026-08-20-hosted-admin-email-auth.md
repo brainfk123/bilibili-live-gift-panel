@@ -167,11 +167,13 @@ git commit -m "refactor: remove administrator Bilibili authentication"
 
 **Files:**
 - Modify: `goserver/internal/hosted/adminidentity/service.go`, `http.go` and tests
-- Modify: `goserver/internal/hosted/biligateway/http.go`, `http_test.go`
+- Modify: `goserver/internal/hosted/biligateway/http.go`, `http_test.go`, `credential.go`, `credential_test.go`
 - Modify: `goserver/internal/hosted/obs/service.go`, `service_test.go`
 - Modify: `goserver/internal/hosted/identity/admin.go`, `admin_test.go`, `http.go`, `repository.go`, `repository_test.go`
 - Modify: `goserver/internal/hosted/invitation/http.go`, `service.go`, `service_test.go`
 - Modify: `goserver/internal/hosted/obs/http.go`, `http_test.go`
+- Create: `goserver/internal/hosted/security/sensitive.go`, with focused tests in `sensitive_test.go` if behavior is added there
+- Modify: `goserver/cmd/hosted/main.go`, `main_test.go`
 
 **Interfaces:**
 - Keeps `RequireRecentTOTP(context.Context, sessionToken string) error` for read-only authorization checks that never renew.
@@ -185,6 +187,8 @@ type SensitiveAuthorizer interface {
 ```
 
 `SensitiveSession` carries only exact session identity and credential epoch needed for the fenced update; it contains no raw token or principal data.
+
+Place the transaction-aware interface and opaque fence in `internal/hosted/security` so `adminidentity`, `identity`, `invitation`, `biligateway`, and `obs` can share it without an import cycle. Keep the existing request-limiter contract in `identity`; no limiter refactor is needed.
 
 - [ ] **Step 1: Write deterministic RED tests** using an injected clock: email login starts without TOTP; valid TOTP opens the window; successful protected mutation renews it; reads/failures do not; 9m59s remains valid; 10m idle expires; revoked/expired/wrong-epoch sessions cannot renew.
 
@@ -203,7 +207,7 @@ WHERE id = ? AND credential_epoch = ? AND revoked_at IS NULL;
 
 Do not revive an expired window.
 
-- [ ] **Step 4: Wire atomic success-only renewal**. Service-account replacement, OBS reset, account disable/enable, invitation quota adjustment, recovery archive/material rotation, and administrator email change must call `AuthorizeRecentTOTP` after beginning their existing mutation transaction, perform domain writes and audit insert, call `RenewRecentTOTP`, then commit. Any authorization, mutation, audit, or renewal error rolls back both the domain mutation and renewal. Reads, validation failures, and failed mutations never renew.
+- [ ] **Step 4: Wire atomic success-only renewal**. Service-account replacement, OBS reset, account disable/enable, invitation quota adjustment, recovery archive/material rotation, and administrator email change must call `AuthorizeRecentTOTP` after beginning their existing mutation transaction, perform domain writes and audit insert, call `RenewRecentTOTP`, then commit. Any authorization, mutation, audit, or renewal error rolls back both the domain mutation and renewal. Reads, validation failures, and failed mutations never renew. Recovery SMTP delivery remains an external pre-transaction side effect: if later database rotation fails, the delivered material is unusable and the TOTP window is not renewed; do not introduce an outbox in this task.
 
 - [ ] **Step 5: Verify and commit**
 
