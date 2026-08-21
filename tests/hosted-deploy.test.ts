@@ -40,6 +40,22 @@ function readProjectFile(path: string): string {
   return readFileSync(resolve(projectRoot, path), 'utf8');
 }
 
+function expectSafeAdministratorInitialization(initialization: string): void {
+  expect(initialization).toContain('docker compose exec app /usr/local/bin/hosted-entrypoint admin init --email <recovery-email>');
+  expect(initialization).not.toContain('--uid');
+  expect(initialization).toContain('TOTP URI, recovery package password, and confirmation token');
+  expect(initialization).toContain("read -r -s -p 'Confirmation token: ' HANDOFF_TOKEN");
+  expect(initialization).toContain("read -r -s -p 'Current TOTP code: ' TOTP_CODE");
+  expect(initialization).toContain(`printf '{"handoffToken":"%s","totp":"%s"}' "$HANDOFF_TOKEN" "$TOTP_CODE"`);
+  expect(initialization).toContain('--request POST');
+  expect(initialization).toContain('--header "Origin: $HOSTED_ADMIN_ALLOWED_ORIGIN"');
+  expect(initialization).toContain('--header "X-CSRF-Token: $HOSTED_ADMIN_CSRF_TOKEN"');
+  expect(initialization).toContain("--header 'Content-Type: application/json'");
+  expect(initialization).toContain('http://127.0.0.1:12500/api/admin/recovery/confirm');
+  expect(initialization).not.toMatch(/\b(?:HANDOFF_TOKEN|TOTP_CODE)\s*=/);
+  expect(initialization).not.toMatch(/"(?:handoffToken|totp)"\s*:\s*"(?!%s")[^"]+"/);
+}
+
 function composeDocument(): Record<string, any> {
   return parse(readProjectFile('deploy/hosted/docker-compose.yml')) as Record<string, any>;
 }
@@ -1598,18 +1614,19 @@ describe('hosted operations runbook and private monitoring', () => {
     const readme = readProjectFile('deploy/hosted/README.md');
     const initialization = readme.match(/^## Administrator initialization\s*$([\s\S]*?)(?=^## )/m)?.[1] ?? '';
 
-    expect(initialization).toContain('docker compose exec app /usr/local/bin/hosted-entrypoint admin init --email <recovery-email>');
-    expect(initialization).not.toContain('--uid');
-    expect(initialization).toContain('TOTP URI, recovery package password, and confirmation token');
-    expect(initialization).toContain("read -r -s -p 'Confirmation token: ' HANDOFF_TOKEN");
-    expect(initialization).toContain("read -r -s -p 'Current TOTP code: ' TOTP_CODE");
-    expect(initialization).toContain(`printf '{"handoffToken":"%s","totp":"%s"}' "$HANDOFF_TOKEN" "$TOTP_CODE"`);
-    expect(initialization).toContain('--request POST');
-    expect(initialization).toContain('--header "Origin: $HOSTED_ADMIN_ALLOWED_ORIGIN"');
-    expect(initialization).toContain('--header "X-CSRF-Token: $HOSTED_ADMIN_CSRF_TOKEN"');
-    expect(initialization).toContain("--header 'Content-Type: application/json'");
-    expect(initialization).toContain('http://127.0.0.1:12500/api/admin/recovery/confirm');
-    expect(initialization).not.toMatch(/(?:HANDOFF_TOKEN|TOTP_CODE)=['"][^'"]+['"]/);
+    expectSafeAdministratorInitialization(initialization);
+  });
+
+  it.each([
+    ['an unquoted TOTP assignment', 'TOTP_CODE=123456'],
+    ['an unquoted handoff-token assignment', 'HANDOFF_TOKEN=literal-token'],
+    ['a literal TOTP in a confirmation payload', `printf '{"totp":"123456"}'`],
+    ['a literal handoff token in a confirmation payload', `printf '{"handoffToken":"literal-token"}'`],
+  ])('rejects %s even when the required variable flow remains', (_name, unsafeFragment) => {
+    const readme = readProjectFile('deploy/hosted/README.md');
+    const initialization = readme.match(/^## Administrator initialization\s*$([\s\S]*?)(?=^## )/m)?.[1] ?? '';
+
+    expect(() => expectSafeAdministratorInitialization(`${initialization}\n${unsafeFragment}`)).toThrow();
   });
 
   it('keeps health-check private, fail-closed, and free of secret output', () => {
