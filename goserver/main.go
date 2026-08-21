@@ -310,6 +310,7 @@ func main() {
 	background := newBackgroundRuntime(store, func() giftEventSource {
 		return &bilibiliGiftSource{sessionProvider: login.Session}
 	}, notifications)
+	background.roomNotificationResolver = newRoomNotificationProfileResolver(login.roomOwnerUID, background.profileResolver)
 	attributeEditLeases := newDefaultAttributeEditLeaseCoordinator()
 	attributeEdits := newAttributeEditService(store, attributeEditLeases, newAttributeEditID)
 	background.setDiagnosticLogger(diagnostics)

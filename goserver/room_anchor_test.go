@@ -69,3 +69,24 @@ func TestRoomAnchorHandlerKeepsUIDWhenProfileLookupFails(t *testing.T) {
 		t.Fatalf("fallback anchor = %#v", anchor)
 	}
 }
+
+func TestRoomNotificationProfileResolverUsesBroadcasterProfile(t *testing.T) {
+	resolver := newRoomNotificationProfileResolver(
+		func(_ context.Context, roomID string) (int64, error) {
+			if roomID != "room-a" {
+				t.Fatalf("room ID = %q", roomID)
+			}
+			return 32249588, nil
+		},
+		roomAnchorProfileResolver{profile: userProfile{
+			UID: 32249588, Name: " 测试主播 ", Avatar: " https://example.test/avatar.png ",
+		}},
+	)
+	profile, err := resolver(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Name != "测试主播" || profile.AvatarURL != "https://example.test/avatar.png" {
+		t.Fatalf("notification profile = %#v", profile)
+	}
+}

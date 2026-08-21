@@ -603,7 +603,10 @@ export function mountConfig(root: HTMLElement): void {
       if (activityStateSignature(state) !== previousActivities) renderActivities(true);
       if (giftTargetProgressSignature(state.giftKpiPanels) !== previousGiftTargetProgress) renderGiftKpiPanels(true);
       syncLiveAttributeValues();
-      if (contributionStateSignature(state) !== previousContributions) renderContributionLeaderboard(true);
+      if (contributionStateSignature(state) !== previousContributions) {
+        renderContributionLeaderboard(true);
+        void refreshBlindBoxLeaderboard(leaderboardBlindBoxGiftId);
+      }
       if (giftHistoryStateSignature(state) !== previousGiftHistory) renderGiftHistory(true);
     } finally {
       stateRefreshActive = false;

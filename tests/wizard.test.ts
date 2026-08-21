@@ -4327,6 +4327,70 @@ describe('single-page configuration rendering', () => {
     expect(textOf(root.querySelector('.blind-box-scope-bar') as TestElement)).toContain('scope A · 1 位观众 · 1 个 · 投入 9 元 · 开出 12 元 · 净盈亏 +3 元');
   });
 
+  it('refreshes the applied blind-box scope when backend contributions change', async () => {
+    vi.useFakeTimers();
+    const configured = defaultAdvancedState();
+    configured.settings.showTutorial = false;
+    configured.contributions = {
+      updatedAt: 1,
+      viewers: [{
+        key: 'uid:1', uid: 1, uname: '旧观众', avatar: '', giftCount: 1, goldValue: 9_000, silverValue: 0,
+        ruleTriggers: 0, attributeDeltas: {}, blindBoxCount: 1, blindBoxCost: 9_000,
+        blindBoxValue: 12_000, blindBoxProfit: 3_000, lastGiftAt: 1,
+      }],
+    };
+    await saveState(configured);
+    let serverState = JSON.parse(JSON.stringify(configured));
+    let leaderboardRequest = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === '/api/config') return Response.json(serverState);
+      if (url.includes('/api/blind-box/leaderboard')) {
+        leaderboardRequest += 1;
+        const fresh = leaderboardRequest > 1;
+        return Response.json({
+          code: 0,
+          leaderboard: {
+            updatedAt: fresh ? 2 : 1,
+            summary: {
+              viewerCount: 1, blindBoxCount: fresh ? 2 : 1, cost: fresh ? 18_000 : 9_000,
+              value: fresh ? 30_000 : 12_000, profit: fresh ? 12_000 : 3_000, unpricedCount: 0,
+            },
+            viewers: [{
+              ...serverState.contributions.viewers[0],
+              uname: fresh ? '新礼物观众' : '旧观众',
+              blindBoxCount: fresh ? 2 : 1,
+              blindBoxCost: fresh ? 18_000 : 9_000,
+              blindBoxValue: fresh ? 30_000 : 12_000,
+              blindBoxProfit: fresh ? 12_000 : 3_000,
+            }],
+            scopes: [{ giftId: 990001, giftName: '心动盲盒', count: fresh ? 2 : 1, lastGiftAt: fresh ? 2 : 1 }],
+          },
+        });
+      }
+      if (url.includes('/api/runtime')) return Response.json({ code: 0, runtime: { state: 'connected', roomId: 'room-a' } });
+      if (url.includes('/api/auth/status')) return Response.json({ code: 0, auth: { state: 'anonymous' } });
+      return new Response(null, { status: 204 });
+    }));
+
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    await vi.advanceTimersByTimeAsync(0);
+    root.querySelectorAll('.contribution-tab')[2].onclick?.();
+    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('旧观众');
+
+    serverState = JSON.parse(JSON.stringify(configured));
+    serverState.contributions.updatedAt = 2;
+    serverState.contributions.viewers[0].giftCount = 2;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(leaderboardRequest).toBe(2);
+    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('新礼物观众');
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
   it('reserves enough horizontal space for the complete blind-box scope name', () => {
     const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
 
