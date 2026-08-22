@@ -34,7 +34,7 @@ export interface RuntimeStatus {
   ingestionErrorKind?: string;
 }
 
-export type UpdateState = 'idle' | 'disabled' | 'development' | 'unsupported' | 'checking' | 'downloading' | 'ready' | 'up-to-date' | 'error';
+export type UpdateState = 'idle' | 'disabled' | 'development' | 'unsupported' | 'checking' | 'downloading' | 'verifying' | 'ready' | 'installing' | 'up-to-date' | 'error';
 
 export interface UpdateStatus {
   state: UpdateState;
@@ -45,6 +45,7 @@ export interface UpdateStatus {
   lastCheckedAt?: number;
   autoUpdate: boolean;
   restartRequired: boolean;
+  installAt?: number;
 }
 
 export type PagePresenceMode = 'config' | 'display';

@@ -31,6 +31,7 @@ import {
   parseBilibiliRoomId,
   simpleDraftSummary,
 } from '../src/ui/config/simple-mode';
+import { plannedUpdateRestartExpected, setPlannedUpdateRestart } from '../src/server-continuity';
 
 vi.mock('../src/ui/brand', () => ({
   createBrandIcon: (size = 40, className = 'brand-icon') => {
@@ -2191,6 +2192,37 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(root.querySelector('.update-settings-card')?.dataset.updateState).toBe('up-to-date'));
     expect(textOf(root.querySelector('.update-settings-card') as TestElement)).toContain('当前已经是最新版本。');
     expect(fetchMock).toHaveBeenCalledWith('/api/update/check', { cache: 'no-store', method: 'POST' });
+  });
+
+  it('shows a stable install countdown and allows installing immediately', async () => {
+    setPlannedUpdateRestart(false);
+    const installAt = Date.now() + 3_000;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === '/api/update') return Response.json({
+        code: 0,
+        update: {
+          state: 'ready', currentVersion: '1.0.0', latestVersion: '1.1.0', progress: 100,
+          message: '校验完成，3 秒后自动安装。', installAt, autoUpdate: true, restartRequired: true,
+        },
+      });
+      if (url === '/api/update/install') return Response.json({ code: 0 }, { status: 202 });
+      if (url.includes('/api/runtime')) return Response.json({ code: 0, runtime: { state: 'idle', roomId: '' } });
+      if (url.includes('/api/auth/status')) return Response.json({ code: 0, auth: { state: 'anonymous' } });
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    root.querySelector('.program-settings-toggle')?.onclick?.();
+
+    await vi.waitFor(() => expect(textOf(root.querySelector('.update-settings-card') as TestElement)).toContain('3 秒后自动安装'));
+    expect(plannedUpdateRestartExpected()).toBe(false);
+    const installButton = findByText(root, '立即安装');
+    expect(installButton).toBeDefined();
+    installButton?.onclick?.();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/update/install', { cache: 'no-store', method: 'POST' }));
+    expect(plannedUpdateRestartExpected()).toBe(true);
   });
 
   it('opens a visual changelog manually and remembers the latest viewed version', async () => {

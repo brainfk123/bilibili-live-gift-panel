@@ -5,17 +5,29 @@ export interface ServerContinuityActions {
 }
 
 export interface ServerContinuityController {
-  unavailable: () => void;
+  unavailable: (plannedUpdate?: boolean) => void;
   ready: (version: string) => void;
+}
+
+let plannedUpdateRestart = false;
+
+export function setPlannedUpdateRestart(planned: boolean): void {
+  plannedUpdateRestart = planned;
+}
+
+export function plannedUpdateRestartExpected(): boolean {
+  return plannedUpdateRestart;
 }
 
 export function createServerContinuityController(actions: ServerContinuityActions): ServerContinuityController {
   let connectedVersion = '';
   let unavailable = false;
   return {
-    unavailable: () => {
+    unavailable: (plannedUpdate = false) => {
       unavailable = true;
-      actions.show('本地服务暂时不可用，可能正在安装更新。页面会自动重连。');
+      actions.show(plannedUpdate
+        ? '正在替换程序并重新连接…'
+        : '本地服务暂时不可用，可能正在安装更新。页面会自动重连。');
     },
     ready: (version) => {
       const normalized = version.trim();

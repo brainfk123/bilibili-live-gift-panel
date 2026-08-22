@@ -128,20 +128,6 @@ func TestMainGiftClipShutdownOrdersRuntimeJobsServerInstallOnce(t *testing.T) {
 	}
 }
 
-func TestMainPendingGiftClipUpdateClosesOnceBeforeInstall(t *testing.T) {
-	order := []string{}
-	closeCount := 0
-	closeJobs := newMainGiftClipCloser(func() {
-		closeCount++
-		order = append(order, "jobs")
-	})
-	runMainPendingGiftClipUpdate(closeJobs, func() { order = append(order, "install") })
-	closeJobs() // mirrors the deferred close on the pending-update return path.
-	if got := strings.Join(order, ","); got != "jobs,install" || closeCount != 1 {
-		t.Fatalf("pending update order=%q closeCount=%d", got, closeCount)
-	}
-}
-
 func TestMainGiftClipCloserRunsOnlyOnce(t *testing.T) {
 	count := 0
 	closeJobs := newMainGiftClipCloser(func() { count++ })
@@ -1247,8 +1233,13 @@ func TestUpdateReadyRequestsInstallWithoutConsultingPagePresence(t *testing.T) {
 	handler("0.4.5")
 	select {
 	case <-updateExit:
-	default:
-		t.Fatal("ready update did not request installation")
+		t.Fatal("ready update requested installation before the visible countdown")
+	case <-time.After(100 * time.Millisecond):
+	}
+	select {
+	case <-updateExit:
+	case <-time.After(4 * time.Second):
+		t.Fatal("ready update did not request installation after the countdown")
 	}
 	// Repeated readiness notifications must remain non-blocking and coalesce.
 	handler("0.4.5")
