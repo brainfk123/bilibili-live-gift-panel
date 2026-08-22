@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   REQUIRED_COMPONENT_ASSETS,
   buildChecksumManifest,
+  writePreparedComponentAssets,
   verifyChecksumManifest,
   verifyComponentMetadata,
   verifyPinnedSourceAssets,
@@ -24,6 +25,17 @@ function temporaryRoot() {
 }
 
 describe('FFmpeg component assets', () => {
+  it('writes the exact canonical bytes used by the checksum manifest', async () => {
+    const root = temporaryRoot();
+    const files = new Map(REQUIRED_COMPONENT_ASSETS.map((name) => [name, Buffer.from(`asset:${name}`)]));
+    files.set('ffmpeg-component-gate.txt', Buffer.from('canonical\nbytes\n'));
+
+    await writePreparedComponentAssets(root, files);
+
+    expect(readFileSync(join(root, 'ffmpeg-component-gate.txt'))).toEqual(files.get('ffmpeg-component-gate.txt'));
+    await expect(verifyChecksumManifest(root)).resolves.toBeUndefined();
+  });
+
   it('uses one fixed compliance closure and canonical checksum order', () => {
     expect(REQUIRED_COMPONENT_ASSETS).toEqual([
       'ffmpeg.zip', 'manifest.json', 'gift-clip-test-tools.zip', 'ffmpeg-9.0.tar.xz', 'ffmpeg-9.0.tar.xz.asc',

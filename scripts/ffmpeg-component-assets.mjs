@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { copyFile, lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { FFMPEG_SOURCE_SIGNATURE_SHA256, ffmpegComponentIdentity, loadFFmpegPolicy } from './ffmpeg-policy.mjs';
@@ -29,6 +29,16 @@ export function buildChecksumManifest(files) {
     throw new Error('FFmpeg component files are missing or out of canonical order.');
   }
   return Buffer.from(`${REQUIRED_COMPONENT_ASSETS.map((name) => `${sha256(files.get(name))}  ${name}`).join('\n')}\n`);
+}
+
+export async function writePreparedComponentAssets(outputDirectory, files) {
+  if (!(files instanceof Map)) throw new Error('FFmpeg component files must be a Map.');
+  for (const name of REQUIRED_COMPONENT_ASSETS) {
+    const bytes = files.get(name);
+    if (!Buffer.isBuffer(bytes)) throw new Error(`FFmpeg component asset ${name} is not binary data.`);
+    await writeFile(join(outputDirectory, name), bytes, { flag: 'wx' });
+  }
+  await writeFile(join(outputDirectory, CHECKSUM_ASSET), buildChecksumManifest(files), { flag: 'wx' });
 }
 
 export async function verifyChecksumManifest(directory) {
@@ -113,9 +123,8 @@ export async function prepareComponentAssets({ projectRoot = root, outputDirecto
     if (!info.isFile() || info.isSymbolicLink()) throw new Error(`FFmpeg component source ${name} is not a regular file.`);
     const bytes = name === 'ffmpeg-component-gate.txt' ? Buffer.from(manifest.component_gate, 'utf8') : await readFile(source);
     files.set(name, bytes);
-    await copyFile(source, join(outputDirectory, name));
   }
-  await writeFile(join(outputDirectory, CHECKSUM_ASSET), buildChecksumManifest(files), { flag: 'wx' });
+  await writePreparedComponentAssets(outputDirectory, files);
   return ffmpegComponentIdentity(await loadFFmpegPolicy(projectRoot));
 }
 
