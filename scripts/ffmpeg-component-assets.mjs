@@ -9,6 +9,7 @@ import { publishPairTransactionally } from './package-ffmpeg.mjs';
 export const REQUIRED_COMPONENT_ASSETS = Object.freeze([
   'ffmpeg.zip',
   'manifest.json',
+  'gift-clip-test-tools.zip',
   'ffmpeg-9.0.tar.xz',
   'ffmpeg-9.0.tar.xz.asc',
   'ffmpeg-build-config.txt',
@@ -137,6 +138,7 @@ function componentSourcePaths(projectRoot) {
   return new Map([
     ['ffmpeg.zip', join(projectRoot, 'goserver', 'ffmpeg', 'ffmpeg.zip')],
     ['manifest.json', join(projectRoot, 'goserver', 'ffmpeg', 'manifest.json')],
+    ['gift-clip-test-tools.zip', join(projectRoot, 'dist', 'gift-clip-test-tools.zip')],
     ['ffmpeg-9.0.tar.xz', join(projectRoot, 'dist', 'ffmpeg-source', 'ffmpeg-9.0.tar.xz')],
     ['ffmpeg-9.0.tar.xz.asc', join(projectRoot, 'dist', 'ffmpeg-source', 'ffmpeg-9.0.tar.xz.asc')],
     ['ffmpeg-build-config.txt', join(projectRoot, 'dist', 'ffmpeg-build-config.txt')],

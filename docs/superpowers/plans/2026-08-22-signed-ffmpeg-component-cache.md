@@ -231,7 +231,7 @@ git commit -m "feat: bind FFmpeg payload to component identity"
 
 **Interfaces:**
 - Consumes: Task 1 identity and Task 2 strict payload pair.
-- Produces: `REQUIRED_COMPONENT_ASSETS` in this exact order: `ffmpeg.zip`, `manifest.json`, `ffmpeg-9.0.tar.xz`, `ffmpeg-9.0.tar.xz.asc`, `ffmpeg-build-config.txt`, `ffmpeg-component-gate.txt`, `toolchain-lock.json`, `NOTICE.md`, `COPYING.LGPLv2.1`.
+- Produces: `REQUIRED_COMPONENT_ASSETS` in this exact order: `ffmpeg.zip`, `manifest.json`, `gift-clip-test-tools.zip`, `ffmpeg-9.0.tar.xz`, `ffmpeg-9.0.tar.xz.asc`, `ffmpeg-build-config.txt`, `ffmpeg-component-gate.txt`, `toolchain-lock.json`, `NOTICE.md`, `COPYING.LGPLv2.1`.
 - Produces: `prepareComponentAssets({ root, outputDirectory }): Promise<ComponentIdentity>`.
 - Produces: `verifyComponentAssets({ root, inputDirectory, expectedSigner }): Promise<ComponentIdentity>`.
 - Produces CLI commands: `identity`, `prepare`, `verify`, and `install`.
@@ -428,7 +428,7 @@ Condition MSYS2 setup and all current FFmpeg build steps on a miss. Add `EVSIGN_
 
 - [ ] **Step 7: Implement immutable component publication**
 
-Create the component tag at `RELEASE_COMMIT` only after all local checks pass. Create a draft Release with exact title, upload the ten explicit assets without `--clobber`, publish it as non-latest, refetch metadata, delete the local download directory, redownload the published assets, and run the same verify/install path used by a hit.
+Create the component tag at `RELEASE_COMMIT` only after all local checks pass. Attest every component asset, create a draft Release with exact title, upload the eleven explicit assets without `--clobber`, publish it as non-latest, refetch metadata, delete the local download directory, redownload the published assets, verify every repository attestation, and run the same verify/install path used by a hit.
 
 If tag or Release creation reports an already-exists conflict, do not upload. Refetch the winner and route through full cache-hit verification. Any incomplete existing state fails with `Manual recovery required` and is left untouched.
 

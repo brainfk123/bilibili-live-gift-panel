@@ -24,7 +24,7 @@ function temporaryRoot() {
 describe('FFmpeg component assets', () => {
   it('uses one fixed compliance closure and canonical checksum order', () => {
     expect(REQUIRED_COMPONENT_ASSETS).toEqual([
-      'ffmpeg.zip', 'manifest.json', 'ffmpeg-9.0.tar.xz', 'ffmpeg-9.0.tar.xz.asc',
+      'ffmpeg.zip', 'manifest.json', 'gift-clip-test-tools.zip', 'ffmpeg-9.0.tar.xz', 'ffmpeg-9.0.tar.xz.asc',
       'ffmpeg-build-config.txt', 'ffmpeg-component-gate.txt', 'toolchain-lock.json',
       'NOTICE.md', 'COPYING.LGPLv2.1',
     ]);

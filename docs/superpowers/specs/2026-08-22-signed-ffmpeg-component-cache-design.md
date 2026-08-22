@@ -57,6 +57,7 @@ Each component Release contains exactly these release-facing assets:
 ffmpeg.zip
 manifest.json
 SHA256SUMS.txt
+gift-clip-test-tools.zip
 ffmpeg-9.0.tar.xz
 ffmpeg-9.0.tar.xz.asc
 ffmpeg-build-config.txt
@@ -79,9 +80,11 @@ COPYING.LGPLv2.1
 
 Published component manifests always require `authenticode=true`, a non-empty exact signer Subject, and a real lowercase 40-character release commit. The checked-in unsigned development payload uses the same exact schema with `authenticode=false`, an empty `signer_subject`, and forty zeroes for `source_release_commit`; release verification rejects that development-only state.
 
-The remaining assets preserve the source, source signature, exact build record, toolchain, notice, and LGPL license closure already attached to application Releases. A cache hit downloads them from the component Release so the application Release can continue publishing the same compliance assets without rebuilding FFmpeg.
+`gift-clip-test-tools.zip` preserves the pinned full FFmpeg/FFprobe test-tool directory used by the deterministic browser export E2E. After extraction, its existing strict tool manifest and binary hashes must pass before use. The remaining assets preserve the source, source signature, exact build record, toolchain, notice, and LGPL license closure already attached to application Releases. A cache hit downloads them from the component Release so the application Release can continue publishing the same compliance assets and running the same E2E without rebuilding FFmpeg.
 
 `SHA256SUMS.txt` contains lowercase SHA-256 values for every other component asset in a strict fixed order and format. GitHub's asset digest, when present, is an additional check and never replaces the repository's own digest checks.
+
+Before publication, GitHub artifact attestations are issued for every component asset. Every cache hit and post-publication redownload verifies those attestations against this repository before any unsigned test tool is extracted or executed. This authenticates the full component closure in addition to the inner FFmpeg Authenticode check.
 
 The component Release is published, non-draft, and non-prerelease. Existing assets are never replaced with `--clobber`. A tag or Release that already exists but is incomplete, draft, prerelease, duplicated, or inconsistent is an integrity failure requiring manual recovery.
 
@@ -112,6 +115,7 @@ A component cache hit is accepted only when all of the following pass:
 - exact canonical component tag and published Release state;
 - exactly one asset of each required name and no conflicting duplicate name;
 - `SHA256SUMS.txt`, manifest hashes, archive hash, binary hash, size, and available GitHub asset digests agree;
+- every component asset has a valid GitHub artifact attestation for this repository;
 - source archive, detached signature, build config, component gate, toolchain lock, notice, and license hashes agree with `SHA256SUMS.txt`, and checked-in policy files equal their downloaded canonical counterparts;
 - manifest has only the allowed schema-1 keys with correct JSON types;
 - manifest fingerprint equals the locally calculated fingerprint;

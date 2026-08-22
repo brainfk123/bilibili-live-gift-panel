@@ -254,6 +254,36 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[e2e]?.run).toContain('npm run verify:gift-clip-export');
   });
 
+  it('reuses an immutable signed FFmpeg component before entering the build path', () => {
+    const { steps } = releaseWorkflow();
+    const identity = stepIndex(steps, 'Resolve FFmpeg component identity');
+    const inspect = stepIndex(steps, 'Inspect signed FFmpeg component');
+    const downloadHit = stepIndex(steps, 'Download signed FFmpeg component');
+    const setup = stepIndex(steps, 'Set up MSYS2 host environment');
+    const build = stepIndex(steps, 'Build and verify pinned FFmpeg');
+    const sign = stepIndex(steps, 'Sign and verify inner FFmpeg');
+    const packageComponent = stepIndex(steps, 'Package signed FFmpeg component');
+    const attestComponent = stepIndex(steps, 'Attest signed FFmpeg component');
+    const publish = stepIndex(steps, 'Publish signed FFmpeg component');
+    const downloadPublished = stepIndex(steps, 'Download published FFmpeg component');
+    const install = stepIndex(steps, 'Verify and install signed FFmpeg component');
+    const buildOuter = stepIndex(steps, 'Build release executable');
+
+    expect([identity, inspect, downloadHit, setup, build, sign, packageComponent, attestComponent, publish, downloadPublished, install, buildOuter])
+      .toEqual([...new Set([identity, inspect, downloadHit, setup, build, sign, packageComponent, attestComponent, publish, downloadPublished, install, buildOuter])].sort((a, b) => a - b));
+    for (const index of [setup, build, sign, packageComponent, publish, downloadPublished]) {
+      expect(steps[index]?.if).toContain("env.FFMPEG_COMPONENT_EXISTS != 'true'");
+    }
+    expect(steps[downloadHit]?.if).toContain("env.FFMPEG_COMPONENT_EXISTS == 'true'");
+    expect(steps[install]?.run).toContain('scripts/ffmpeg-component-assets.mjs install');
+    expect(steps[attestComponent]?.uses).toBe('actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6');
+    expect(steps[install]?.run).toContain('gh attestation verify');
+    expect(steps[publish]?.run).not.toContain('--clobber');
+    expect(steps[publish]?.run).toContain('--latest=false');
+    expect(steps[publish]?.run).toContain('Another publisher created the FFmpeg component');
+    expect(steps[publish]?.run).toContain('Invoke-RestMethod');
+  });
+
   it('gates release publication on update tooling tests and the expected signer subject', () => {
     const { steps } = releaseWorkflow();
     const testUpdateApi = stepIndex(steps, 'Test domestic update tooling');
@@ -330,8 +360,16 @@ describe('release workflow supply-chain contract', () => {
       'Prepare release assets',
       'Attest executable provenance',
     ]) {
+      const ffmpegMissOnly = new Set([
+        'Set up MSYS2 host environment',
+        'Build and verify pinned FFmpeg',
+        'Sign and verify inner FFmpeg',
+        'Package and verify signed FFmpeg payload',
+      ]);
       expect(steps[stepIndex(steps, name)]?.if, `${name} must be skipped for repair`)
-        .toBe("env.RELEASE_EXISTS != 'true'");
+        .toBe(ffmpegMissOnly.has(name)
+          ? "env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'"
+          : "env.RELEASE_EXISTS != 'true'");
     }
     expect(steps[build]?.if).toBe("env.RELEASE_EXISTS != 'true'");
     expect(steps[sign]?.if).toBe("env.RELEASE_EXISTS != 'true'");
@@ -444,15 +482,22 @@ describe('release workflow supply-chain contract', () => {
     const { steps } = releaseWorkflow();
     const ghRuns = steps
       .map((step) => step.run)
-      .filter((run): run is string => typeof run === 'string' && /\bgh (?:api|release)\b/.test(run));
+      .filter((run): run is string => typeof run === 'string' && /\bgh (?:api|release|attestation)\b/.test(run));
     expect(ghRuns.length).toBeGreaterThan(0);
 
     for (const run of ghRuns) {
       const lines = run.split(/\r?\n/);
       for (let index = 0; index < lines.length; index += 1) {
-        if (!/\bgh (?:api|release)\b/.test(lines[index] ?? '')) continue;
-        expect(lines[index + 1]?.trim(), `unchecked gh command: ${lines[index]?.trim()}`)
-          .toMatch(/^if \(\$LASTEXITCODE -ne 0\) \{ throw /);
+        if (!/\bgh (?:api|release|attestation)\b/.test(lines[index] ?? '')) continue;
+        const guard = lines[index + 1]?.trim() ?? '';
+        if (lines[index]?.includes('/git/refs')) {
+          expect(guard, `unchecked gh command: ${lines[index]?.trim()}`).toBe('if ($LASTEXITCODE -ne 0) {');
+          expect(run).toContain('Another publisher created the FFmpeg component');
+          expect(run).toContain('Invoke-RestMethod');
+        } else {
+          expect(guard, `unchecked gh command: ${lines[index]?.trim()}`)
+            .toMatch(/^if \(\$LASTEXITCODE -ne 0\) \{ throw /);
+        }
       }
     }
   });
