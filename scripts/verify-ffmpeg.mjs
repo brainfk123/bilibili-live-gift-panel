@@ -5,26 +5,22 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
+import {
+  canonicalToolchainLock,
+  componentGateRecord,
+  loadFFmpegPolicy,
+  validateToolchainLock,
+} from './ffmpeg-policy.mjs';
 
 const maximumSize = 40_000_000;
 const warningSize = 30_000_000;
-const sourceSha256 = '7f607a00dd0d28a729d5a4811205812eef01cf6ef6155025febb6f36a9062d52';
-const sourceDateEpoch = '1785797913';
-const exactComponents = [
-  'AAC_ADTSTOASC_BSF', 'AC3_PARSER', 'AFORMAT_FILTER', 'ALPHAMERGE_FILTER', 'ANULL_FILTER', 'ATRIM_FILTER',
-  'CROP_FILTER', 'FILE_PROTOCOL', 'FORMAT_FILTER', 'FPS_FILTER', 'GIF_DECODER', 'GIF_DEMUXER', 'GIF_PARSER',
-  'H264_DECODER', 'H264_MF_ENCODER', 'H264_PARSER', 'HFLIP_FILTER', 'IMAGE2_DEMUXER',
-  'IMAGE_WEBP_PIPE_DEMUXER', 'MOV_DEMUXER', 'MOV_MUXER', 'MP4_MUXER', 'NULL_FILTER', 'OVERLAY_FILTER',
-  'PIPE_PROTOCOL', 'PNG_DECODER', 'ROTATE_FILTER', 'SCALE_FILTER', 'SETPTS_FILTER', 'SPLIT_FILTER',
-  'TRANSPOSE_FILTER', 'TRIM_FILTER', 'VFLIP_FILTER', 'VP8_DECODER', 'VP9_SUPERFRAME_BSF',
-  'WEBP_ANIM_DECODER', 'WEBP_ANIM_DEMUXER', 'WEBP_DECODER',
-];
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 if (process.argv.includes('--self-test')) await runSelfTests();
 else await main();
 
 async function main() {
+  const policy = await loadFFmpegPolicy(root);
   const payloadOnly = process.argv.includes('--payload-only');
   const payloadDirectory = join(root, 'goserver', 'ffmpeg');
   const manifest = parseManifest(await readFile(join(payloadDirectory, 'manifest.json'), 'utf8'));
@@ -33,7 +29,7 @@ async function main() {
   if (archive.length > warningSize) console.warn(`WARNING: FFmpeg ZIP exceeds the ${warningSize}-byte target: ${archive.length}`);
   const binary = readSingleFileZip(archive, 'ffmpeg.exe', manifest.size);
   assert(createHash('sha256').update(binary).digest('hex') === manifest.sha256, 'Binary SHA-256 does not match manifest.');
-  const expectedGate = await componentGateRecord(manifest.sha256, manifest.size, binary);
+  const expectedGate = componentGateRecord(policy, binary);
   validateComponentGate(expectedGate, Buffer.from(manifest.component_gate, 'utf8'), manifest);
   if ((process.env.APP_VERSION || 'dev').replace(/^v/, '') !== 'dev' && manifest.authenticode !== true) {
     throw new Error('Release verification requires an Authenticode-signed inner FFmpeg payload.');
@@ -45,7 +41,7 @@ async function main() {
     await writeFile(executable, binary, { flag: 'wx' });
     await chmod(executable, 0o700);
     if (manifest.authenticode) verifyAuthenticode(executable);
-    verifyRuntimeSurface(executable, await configureFlags());
+    verifyRuntimeSurface(executable, policy.configureFlags);
     if (!payloadOnly) runGoVerification(executable);
     console.log(`verified FFmpeg ${manifest.version}: binary ${manifest.size} bytes, ZIP ${archive.length} bytes, SHA-256 ${manifest.sha256}, authenticode=${manifest.authenticode}`);
   } finally {
@@ -187,65 +183,10 @@ function readSingleFileZip(buffer, expectedName, expectedSize) {
   return contents;
 }
 
-async function componentGateRecord(binarySha256, binarySize, binary) {
-  const flags = await configureFlags();
-  const configureHash = createHash('sha256').update(`${flags.join('\n')}\n`).digest('hex');
-  const { lock, bytes: toolchainLockBytes } = await readToolchainLock();
-  return Buffer.from([
-    'ffmpeg_version=9.0', `source_sha256=${sourceSha256}`, `source_date_epoch=${sourceDateEpoch}`,
-    `configure_sha256=${configureHash}`, `binary_sha256=${binarySha256}`, `binary_size=${binarySize}`,
-    `pe_authenticode_content_sha256=${authenticodeContentHash(binary)}`,
-    `toolchain_lock_sha256=${createHash('sha256').update(toolchainLockBytes).digest('hex')}`,
-    '[toolchain]',
-    ...lock.packages.map(({ name, version }) => `${name}=${version}`).sort(),
-    `gcc_version=${lock.executables.gcc}`, `ld_version=${lock.executables.ld}`, `make_version=${lock.executables.make}`,
-    '[components]', ...exactComponents, '[infrastructure]', 'D3D11VA', 'MEDIAFOUNDATION', '',
-  ].join('\n'));
-}
-
-async function readToolchainLock() {
-  const bytes = await readFile(join(root, 'third_party', 'ffmpeg', 'toolchain-lock.json'));
-  let lock;
-  try { lock = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('FFmpeg toolchain lock is not valid JSON.'); }
-  validateToolchainLock(lock);
-  return { lock, bytes: canonicalToolchainLock(lock) };
-}
-
-function canonicalToolchainLock(lock) {
-  validateToolchainLock(lock);
-  const lines = [`schema=${lock.schema}`, `source=${lock.source}`];
-  for (const item of lock.packages) lines.push(`package\t${item.name}\t${item.version}\t${item.url}\t${item.sha256}\t${item.signature_url}\t${item.signature_sha256}`);
-  lines.push(`gcc=${lock.executables.gcc}`, `ld=${lock.executables.ld}`, `make=${lock.executables.make}`);
-  return Buffer.from(`${lines.join('\n')}\n`);
-}
-
-function validateToolchainLock(lock) {
-  assert(lock && Object.getPrototypeOf(lock) === Object.prototype, 'Toolchain lock must be one object.');
-  assert(Object.keys(lock).sort().join(',') === 'executables,packages,schema,source', 'Toolchain lock schema is unexpected.');
-  assert(lock.schema === 1 && lock.source === 'https://repo.msys2.org', 'Toolchain lock source/schema is invalid.');
-  assert(Array.isArray(lock.packages) && lock.packages.length > 0, 'Toolchain lock packages are missing.');
-  const seen = new Set();
-  for (const item of lock.packages) {
-    assert(item && Object.getPrototypeOf(item) === Object.prototype && Object.keys(item).sort().join(',') === 'name,sha256,signature_sha256,signature_url,url,version', 'Toolchain lock package schema is invalid.');
-    assert(/^[a-z0-9][a-z0-9+._-]*$/.test(item.name) && /^[0-9A-Za-z][0-9A-Za-z.+_~-]*$/.test(item.version) && !seen.has(item.name), 'Toolchain lock package identity is invalid or duplicated.');
-    seen.add(item.name);
-    assert(/^https:\/\/repo\.msys2\.org\/(?:msys\/x86_64|mingw\/ucrt64)\/[A-Za-z0-9+._~-]+\.pkg\.tar\.zst$/.test(item.url) && item.signature_url === `${item.url}.sig`, 'Toolchain lock package URL is invalid.');
-    assert(/^[0-9a-f]{64}$/.test(item.sha256) && /^[0-9a-f]{64}$/.test(item.signature_sha256), 'Toolchain lock package hash is invalid.');
-  }
-  const requiredPackages = ['bash','coreutils','diffutils','gawk','gcc-libs','gmp','grep','libiconv','libintl','libpcre','libreadline','make','mingw-w64-ucrt-x86_64-binutils','mingw-w64-ucrt-x86_64-crt','mingw-w64-ucrt-x86_64-gcc','mingw-w64-ucrt-x86_64-gcc-libs','mingw-w64-ucrt-x86_64-gettext-runtime','mingw-w64-ucrt-x86_64-gmp','mingw-w64-ucrt-x86_64-headers','mingw-w64-ucrt-x86_64-isl','mingw-w64-ucrt-x86_64-libiconv','mingw-w64-ucrt-x86_64-libwinpthread','mingw-w64-ucrt-x86_64-mpc','mingw-w64-ucrt-x86_64-mpfr','mingw-w64-ucrt-x86_64-tzdata','mingw-w64-ucrt-x86_64-windows-default-manifest','mingw-w64-ucrt-x86_64-winpthreads','mingw-w64-ucrt-x86_64-zlib','mingw-w64-ucrt-x86_64-zstd','mpfr','msys2-runtime','nasm','ncurses','pkgconf','sed'];
-  assert([...seen].sort().join(',') === requiredPackages.sort().join(','), 'Toolchain package closure differs from the approved exact set.');
-  assert(lock.executables && Object.getPrototypeOf(lock.executables) === Object.prototype && Object.keys(lock.executables).sort().join(',') === 'gcc,ld,make', 'Toolchain lock executable schema is invalid.');
-  for (const value of Object.values(lock.executables)) assert(typeof value === 'string' && value.length > 0 && !/[\r\n]/.test(value), 'Toolchain lock executable version is invalid.');
-}
-
 function validateComponentGate(expected, actual, manifest) {
   assert(Buffer.isBuffer(actual), 'FFmpeg component gate record is absent.');
   assert(actual.equals(expected), 'FFmpeg component gate record is mismatched or stale.');
   assert(createHash('sha256').update(actual).digest('hex') === manifest.component_gate_sha256, 'FFmpeg component gate record hash does not match manifest.');
-}
-
-async function configureFlags() {
-  return (await readFile(join(root, 'third_party', 'ffmpeg', 'configure.flags'), 'utf8')).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
 function run(executable, arguments_) {
@@ -278,16 +219,6 @@ function parseSimpleList(output, header) { const result = new Set(); for (const 
 function parseDevices(output) { const result = new Set(); for (const line of output.split(/\r?\n/)) { const match = line.match(/^\s*[D.][E.]\s+([^\s]+)\s/); if (match && match[1] !== '=') result.add(match[1]); } return result; }
 function assertExactSet(actual, expected, label) { const unexpected = [...actual].filter((name) => !expected.has(name)); const missing = [...expected].filter((name) => !actual.has(name)); assert(!unexpected.length && !missing.length, `${label} whitelist mismatch; unexpected=[${unexpected}], missing=[${missing}].`); }
 function crc32(contents) { let crc = 0xffffffff; for (const byte of contents) { crc ^= byte; for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1)); } return (crc ^ 0xffffffff) >>> 0; }
-function authenticodeContentHash(binary) {
-  assert(binary.length >= 0x100 && binary.readUInt16LE(0) === 0x5a4d, 'FFmpeg input is not a valid PE image.');
-  const pe = binary.readUInt32LE(0x3c); assert(pe + 24 <= binary.length && binary.readUInt32LE(pe) === 0x00004550, 'FFmpeg input PE header is invalid.');
-  const optional = pe + 24; const magic = binary.readUInt16LE(optional); const dataDirectory = optional + (magic === 0x20b ? 112 : magic === 0x10b ? 96 : -1);
-  const checksum = optional + 64; const securityDirectory = dataDirectory + 32; assert(dataDirectory >= optional && securityDirectory + 8 <= binary.length, 'FFmpeg input PE optional header is invalid.');
-  const certificateOffset = binary.readUInt32LE(securityDirectory); const certificateSize = binary.readUInt32LE(securityDirectory + 4);
-  assert((certificateOffset === 0) === (certificateSize === 0) && certificateOffset <= binary.length && certificateSize <= binary.length - certificateOffset && (!certificateSize || certificateOffset + certificateSize === binary.length), 'FFmpeg input PE certificate table is invalid.');
-  const normalized = Buffer.from(binary.subarray(0, certificateSize ? certificateOffset : binary.length)); normalized.fill(0, checksum, checksum + 4); normalized.fill(0, securityDirectory, securityDirectory + 8);
-  return createHash('sha256').update(normalized).digest('hex');
-}
 function assert(condition, message) { if (!condition) throw new Error(message); }
 
 async function runSelfTests() {
