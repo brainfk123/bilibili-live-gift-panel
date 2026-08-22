@@ -24,7 +24,8 @@ async function main() {
   const policy = await loadFFmpegPolicy(root);
   const identity = ffmpegComponentIdentity(policy);
   const payloadOnly = process.argv.includes('--payload-only');
-  const payloadDirectory = join(root, 'goserver', 'ffmpeg');
+  const payloadDirectoryArgument = readArgument('--payload-directory');
+  const payloadDirectory = payloadDirectoryArgument ? resolve(payloadDirectoryArgument) : join(root, 'goserver', 'ffmpeg');
   const manifest = parseManifest(await readFile(join(payloadDirectory, 'manifest.json'), 'utf8'));
   const archive = await readFile(join(payloadDirectory, 'ffmpeg.zip'));
   validateManifest(manifest, archive, identity);
@@ -225,6 +226,14 @@ function verifyAuthenticode(path, expectedSubject) {
   try { signature = JSON.parse(output); } catch { throw new Error('FFmpeg Authenticode verification returned malformed output.'); }
   assert(signature.status === 'Valid', `FFmpeg Authenticode signature status is ${signature.status || 'missing'}, expected Valid.`);
   assert(signature.subject === expectedSubject, 'FFmpeg Authenticode signer subject does not match manifest.');
+}
+
+function readArgument(name) {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return undefined;
+  const value = process.argv[index + 1];
+  assert(value && !value.startsWith('--'), `${name} requires a value.`);
+  return value;
 }
 
 function parseProtocols(output) { const result = new Set(); for (const line of output.split(/\r?\n/)) { const value = line.trim(); if (value && !value.endsWith(':') && !value.startsWith('Supported file protocols')) result.add(value); } return result; }
