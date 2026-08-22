@@ -260,7 +260,9 @@ func TestGiftClipPayloadStrictZipShapeRejectsAmbiguity(t *testing.T) {
 func TestGiftClipPayloadManifestJSONIsStrict(t *testing.T) {
 	gate := "gate\n"
 	gateHash := sha256.Sum256([]byte(gate))
-	valid := `{"version":"9.0","sha256":"` + strings.Repeat("0", 64) + `","archive_sha256":"` + strings.Repeat("1", 64) + `","component_gate":"gate\n","component_gate_sha256":"` + fmt.Sprintf("%x", gateHash) + `","size":4,"authenticode":false}`
+	descriptor := "schema=1\nfixture=true\n"
+	descriptorHash := sha256.Sum256([]byte(descriptor))
+	valid := `{"schema":1,"component_fingerprint":"` + fmt.Sprintf("%x", descriptorHash) + `","descriptor":"schema=1\nfixture=true\n","descriptor_sha256":"` + fmt.Sprintf("%x", descriptorHash) + `","version":"9.0","sha256":"` + strings.Repeat("0", 64) + `","archive_sha256":"` + strings.Repeat("1", 64) + `","component_gate":"gate\n","component_gate_sha256":"` + fmt.Sprintf("%x", gateHash) + `","size":4,"authenticode":false,"signer_subject":"","source_release_commit":"` + strings.Repeat("0", 40) + `"}`
 	if _, err := parseGiftClipFFmpegManifest([]byte(valid)); err != nil {
 		t.Fatalf("strict manifest rejected: %v", err)
 	}
@@ -507,10 +509,12 @@ func newTestGiftClipPayload(t *testing.T, root string, binary []byte) *giftClipP
 	archiveHash := sha256.Sum256(archive)
 	componentGate := "fixture component gate\n"
 	componentGateHash := sha256.Sum256([]byte(componentGate))
+	descriptor := "schema=1\nfixture=true\n"
+	descriptorHash := sha256.Sum256([]byte(descriptor))
 	return &giftClipPayload{
 		Archive: archive,
 		Manifest: giftClipFFmpegManifest{
-			Version: "8.1.2", SHA256: fmt.Sprintf("%x", hash), ArchiveSHA256: fmt.Sprintf("%x", archiveHash), ComponentGate: componentGate, ComponentGateSHA256: fmt.Sprintf("%x", componentGateHash), Size: int64(len(binary)),
+			Schema: 1, ComponentFingerprint: fmt.Sprintf("%x", descriptorHash), Descriptor: descriptor, DescriptorSHA256: fmt.Sprintf("%x", descriptorHash), Version: "8.1.2", SHA256: fmt.Sprintf("%x", hash), ArchiveSHA256: fmt.Sprintf("%x", archiveHash), ComponentGate: componentGate, ComponentGateSHA256: fmt.Sprintf("%x", componentGateHash), Size: int64(len(binary)), SourceReleaseCommit: strings.Repeat("0", 40),
 		},
 		CacheRoot: root,
 	}

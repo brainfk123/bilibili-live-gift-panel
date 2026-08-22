@@ -3,8 +3,9 @@ import { execFile, execFileSync } from 'node:child_process';
 import { link, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
+import { ffmpegComponentIdentity, loadFFmpegPolicy } from './ffmpeg-policy.mjs';
 
 const version = '9.0';
 const warningSize = 30_000_000;
@@ -14,16 +15,18 @@ const outputDirectory = join(root, 'goserver', 'ffmpeg');
 const componentGatePath = join(root, 'dist', 'ffmpeg-component-gate.txt');
 const ownerLivenessCache = new Map();
 
-if (process.argv.includes('--publish-worker')) {
-  const directory = resolve(readArgument('--directory'));
-  const archive = await readFile(resolve(readArgument('--archive')));
-  const manifest = await readFile(resolve(readArgument('--manifest')));
-  const options = JSON.parse(Buffer.from(readArgument('--options'), 'base64url').toString('utf8'));
-  await publishPairInWorker(directory, archive, manifest, options);
-} else if (process.argv.includes('--self-test')) {
-  await runSelfTests();
-} else {
-  await main();
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  if (process.argv.includes('--publish-worker')) {
+    const directory = resolve(readArgument('--directory'));
+    const archive = await readFile(resolve(readArgument('--archive')));
+    const manifest = await readFile(resolve(readArgument('--manifest')));
+    const options = JSON.parse(Buffer.from(readArgument('--options'), 'base64url').toString('utf8'));
+    await publishPairInWorker(directory, archive, manifest, options);
+  } else if (process.argv.includes('--self-test')) {
+    await runSelfTests();
+  } else {
+    await main();
+  }
 }
 
 async function main() {
@@ -39,23 +42,49 @@ async function main() {
   }
   if (authenticode) await verifyAuthenticode(binary);
   componentGate = bindBuildRecordToBinary(componentGate, binary, authenticode);
+  const identity = ffmpegComponentIdentity(await loadFFmpegPolicy(root));
 
   const sha256 = createHash('sha256').update(binary).digest('hex');
   const archive = writeSingleFileZip('ffmpeg.exe', binary);
   if (archive.length > maximumSize) throw new Error(`FFmpeg ZIP is ${archive.length} bytes; hard limit is ${maximumSize} bytes.`);
   if (archive.length > warningSize) console.warn(`WARNING: FFmpeg ZIP is ${archive.length} bytes, above the ${warningSize}-byte target.`);
-  const manifest = {
+  const signerSubject = authenticode ? process.env.EVSIGN_EXPECTED_SUBJECT?.trim() || '' : '';
+  const sourceReleaseCommit = authenticode ? process.env.APP_COMMIT?.trim() || '' : '0'.repeat(40);
+  const manifest = buildPackageManifest({ identity, binary, archive, componentGate, authenticode, signerSubject, sourceReleaseCommit });
+  await mkdir(outputDirectory, { recursive: true });
+  await publishPairTransactionally(outputDirectory, archive, Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`));
+  console.log(`packaged FFmpeg ${version}: ${binary.length} bytes, ZIP ${archive.length} bytes, SHA-256 ${sha256}, authenticode=${authenticode}`);
+}
+
+export function buildPackageManifest({ identity, binary, archive, componentGate, authenticode, signerSubject, sourceReleaseCommit }) {
+  if (!identity || !Buffer.isBuffer(identity.descriptor) || !/^[0-9a-f]{64}$/.test(identity.descriptorSha256) || identity.fingerprint !== identity.descriptorSha256) {
+    throw new Error('FFmpeg component identity is invalid.');
+  }
+  if (!Buffer.isBuffer(binary) || binary.length === 0 || !Buffer.isBuffer(archive) || archive.length === 0 || !Buffer.isBuffer(componentGate) || componentGate.length === 0) {
+    throw new Error('FFmpeg package inputs are invalid.');
+  }
+  if (!/^[0-9a-f]{40}$/.test(sourceReleaseCommit)) throw new Error('FFmpeg source release commit is invalid.');
+  if (authenticode) {
+    if (typeof signerSubject !== 'string' || signerSubject.length === 0 || /[\r\n]/.test(signerSubject)) throw new Error('FFmpeg signer subject is invalid.');
+    if (/^0{40}$/.test(sourceReleaseCommit)) throw new Error('Signed FFmpeg source release commit is invalid.');
+  } else if (signerSubject !== '' || sourceReleaseCommit !== '0'.repeat(40)) {
+    throw new Error('Unsigned development FFmpeg metadata is invalid.');
+  }
+  return {
+    schema: 1,
+    component_fingerprint: identity.fingerprint,
+    descriptor: identity.descriptor.toString('utf8'),
+    descriptor_sha256: identity.descriptorSha256,
     version,
-    sha256,
+    sha256: createHash('sha256').update(binary).digest('hex'),
     archive_sha256: createHash('sha256').update(archive).digest('hex'),
     component_gate: componentGate.toString('utf8'),
     component_gate_sha256: createHash('sha256').update(componentGate).digest('hex'),
     size: binary.length,
     authenticode,
+    signer_subject: signerSubject,
+    source_release_commit: sourceReleaseCommit,
   };
-  await mkdir(outputDirectory, { recursive: true });
-  await publishPairTransactionally(outputDirectory, archive, Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`));
-  console.log(`packaged FFmpeg ${version}: ${binary.length} bytes, ZIP ${archive.length} bytes, SHA-256 ${sha256}, authenticode=${authenticode}`);
 }
 
 function validatePackageInputs(binary, componentGate) {
@@ -179,7 +208,7 @@ function crc32(contents) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-async function publishPairTransactionally(directory, archive, manifest, options = {}) {
+export async function publishPairTransactionally(directory, archive, manifest, options = {}) {
   const inputs = await mkdtemp(join(tmpdir(), 'gift-panel-ffmpeg-publish-'));
   const archivePath = join(inputs, 'archive.new');
   const manifestPath = join(inputs, 'manifest.new');

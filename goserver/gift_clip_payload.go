@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 )
 
@@ -21,13 +22,19 @@ import (
 var giftClipFFmpegFS embed.FS
 
 type giftClipFFmpegManifest struct {
-	Version             string `json:"version"`
-	SHA256              string `json:"sha256"`
-	ArchiveSHA256       string `json:"archive_sha256"`
-	ComponentGate       string `json:"component_gate"`
-	ComponentGateSHA256 string `json:"component_gate_sha256"`
-	Size                int64  `json:"size"`
-	Authenticode        bool   `json:"authenticode"`
+	Schema               int    `json:"schema"`
+	ComponentFingerprint string `json:"component_fingerprint"`
+	Descriptor           string `json:"descriptor"`
+	DescriptorSHA256     string `json:"descriptor_sha256"`
+	Version              string `json:"version"`
+	SHA256               string `json:"sha256"`
+	ArchiveSHA256        string `json:"archive_sha256"`
+	ComponentGate        string `json:"component_gate"`
+	ComponentGateSHA256  string `json:"component_gate_sha256"`
+	Size                 int64  `json:"size"`
+	Authenticode         bool   `json:"authenticode"`
+	SignerSubject        string `json:"signer_subject"`
+	SourceReleaseCommit  string `json:"source_release_commit"`
 }
 
 type giftClipPayload struct {
@@ -39,6 +46,8 @@ type giftClipPayload struct {
 }
 
 var giftClipManifestVersionPattern = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]*$`)
+var giftClipManifestHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var giftClipManifestCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var giftClipCacheLocks sync.Map
 
 func embeddedGiftClipPayload(cacheRoot string) (*giftClipPayload, error) {
@@ -70,7 +79,7 @@ func parseGiftClipFFmpegManifest(data []byte) (giftClipFFmpegManifest, error) {
 		return giftClipFFmpegManifest{}, fmt.Errorf("%w: manifest must be one object", errGiftClipPayloadIntegrity)
 	}
 	var manifest giftClipFFmpegManifest
-	seen := make(map[string]bool, 7)
+	seen := make(map[string]bool, 13)
 	for decoder.More() {
 		keyToken, err := decoder.Token()
 		key, ok := keyToken.(string)
@@ -79,6 +88,14 @@ func parseGiftClipFFmpegManifest(data []byte) (giftClipFFmpegManifest, error) {
 		}
 		seen[key] = true
 		switch key {
+		case "schema":
+			err = decoder.Decode(&manifest.Schema)
+		case "component_fingerprint":
+			err = decoder.Decode(&manifest.ComponentFingerprint)
+		case "descriptor":
+			err = decoder.Decode(&manifest.Descriptor)
+		case "descriptor_sha256":
+			err = decoder.Decode(&manifest.DescriptorSHA256)
 		case "version":
 			err = decoder.Decode(&manifest.Version)
 		case "sha256":
@@ -93,6 +110,10 @@ func parseGiftClipFFmpegManifest(data []byte) (giftClipFFmpegManifest, error) {
 			err = decoder.Decode(&manifest.Size)
 		case "authenticode":
 			err = decoder.Decode(&manifest.Authenticode)
+		case "signer_subject":
+			err = decoder.Decode(&manifest.SignerSubject)
+		case "source_release_commit":
+			err = decoder.Decode(&manifest.SourceReleaseCommit)
 		default:
 			return giftClipFFmpegManifest{}, fmt.Errorf("%w: unknown manifest field", errGiftClipPayloadIntegrity)
 		}
@@ -100,7 +121,7 @@ func parseGiftClipFFmpegManifest(data []byte) (giftClipFFmpegManifest, error) {
 			return giftClipFFmpegManifest{}, fmt.Errorf("%w: manifest field value is invalid", errGiftClipPayloadIntegrity)
 		}
 	}
-	if token, err = decoder.Token(); err != nil || token != json.Delim('}') || len(seen) != 7 {
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') || len(seen) != 13 {
 		return giftClipFFmpegManifest{}, fmt.Errorf("%w: manifest object is incomplete", errGiftClipPayloadIntegrity)
 	}
 	if token, err = decoder.Token(); err != io.EOF {
@@ -137,14 +158,25 @@ func (payload *giftClipPayload) Prepare(ctx context.Context) (string, error) {
 }
 
 func validateGiftClipFFmpegManifest(manifest giftClipFFmpegManifest) error {
-	if !giftClipManifestVersionPattern.MatchString(manifest.Version) || manifest.Size <= 0 || len(manifest.ComponentGate) == 0 || len(manifest.ComponentGate) > 16_384 {
+	if manifest.Schema != 1 || !giftClipManifestHashPattern.MatchString(manifest.ComponentFingerprint) || !giftClipManifestHashPattern.MatchString(manifest.DescriptorSHA256) || manifest.ComponentFingerprint != manifest.DescriptorSHA256 || len(manifest.Descriptor) == 0 || len(manifest.Descriptor) > 16_384 || !giftClipManifestCommitPattern.MatchString(manifest.SourceReleaseCommit) || strings.ContainsAny(manifest.SignerSubject, "\r\n") || !giftClipManifestVersionPattern.MatchString(manifest.Version) || manifest.Size <= 0 || len(manifest.ComponentGate) == 0 || len(manifest.ComponentGate) > 16_384 {
 		return fmt.Errorf("%w: invalid manifest", errGiftClipPayloadIntegrity)
+	}
+	descriptorHash := sha256.Sum256([]byte(manifest.Descriptor))
+	if hex.EncodeToString(descriptorHash[:]) != manifest.DescriptorSHA256 {
+		return fmt.Errorf("%w: descriptor hash mismatch", errGiftClipPayloadIntegrity)
+	}
+	if manifest.Authenticode {
+		if manifest.SignerSubject == "" || manifest.SourceReleaseCommit == strings.Repeat("0", 40) {
+			return fmt.Errorf("%w: invalid signed manifest metadata", errGiftClipPayloadIntegrity)
+		}
+	} else if manifest.SignerSubject != "" || manifest.SourceReleaseCommit != strings.Repeat("0", 40) {
+		return fmt.Errorf("%w: invalid development manifest metadata", errGiftClipPayloadIntegrity)
 	}
 	componentGateHash := sha256.Sum256([]byte(manifest.ComponentGate))
 	if hex.EncodeToString(componentGateHash[:]) != manifest.ComponentGateSHA256 {
 		return fmt.Errorf("%w: component gate hash mismatch", errGiftClipPayloadIntegrity)
 	}
-	for _, value := range []string{manifest.SHA256, manifest.ArchiveSHA256, manifest.ComponentGateSHA256} {
+	for _, value := range []string{manifest.ComponentFingerprint, manifest.DescriptorSHA256, manifest.SHA256, manifest.ArchiveSHA256, manifest.ComponentGateSHA256} {
 		decoded, err := hex.DecodeString(value)
 		if err != nil || len(decoded) != sha256.Size || hex.EncodeToString(decoded) != value {
 			return fmt.Errorf("%w: invalid manifest hash", errGiftClipPayloadIntegrity)

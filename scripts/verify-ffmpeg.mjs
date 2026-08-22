@@ -8,6 +8,7 @@ import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import {
   canonicalToolchainLock,
   componentGateRecord,
+  ffmpegComponentIdentity,
   loadFFmpegPolicy,
   validateToolchainLock,
 } from './ffmpeg-policy.mjs';
@@ -21,11 +22,12 @@ else await main();
 
 async function main() {
   const policy = await loadFFmpegPolicy(root);
+  const identity = ffmpegComponentIdentity(policy);
   const payloadOnly = process.argv.includes('--payload-only');
   const payloadDirectory = join(root, 'goserver', 'ffmpeg');
   const manifest = parseManifest(await readFile(join(payloadDirectory, 'manifest.json'), 'utf8'));
   const archive = await readFile(join(payloadDirectory, 'ffmpeg.zip'));
-  validateManifest(manifest, archive);
+  validateManifest(manifest, archive, identity);
   if (archive.length > warningSize) console.warn(`WARNING: FFmpeg ZIP exceeds the ${warningSize}-byte target: ${archive.length}`);
   const binary = readSingleFileZip(archive, 'ffmpeg.exe', manifest.size);
   assert(createHash('sha256').update(binary).digest('hex') === manifest.sha256, 'Binary SHA-256 does not match manifest.');
@@ -40,7 +42,7 @@ async function main() {
     const executable = join(temporaryRoot, 'ffmpeg.exe');
     await writeFile(executable, binary, { flag: 'wx' });
     await chmod(executable, 0o700);
-    if (manifest.authenticode) verifyAuthenticode(executable);
+    if (manifest.authenticode) verifyAuthenticode(executable, manifest.signer_subject);
     verifyRuntimeSurface(executable, policy.configureFlags);
     if (!payloadOnly) runGoVerification(executable);
     console.log(`verified FFmpeg ${manifest.version}: binary ${manifest.size} bytes, ZIP ${archive.length} bytes, SHA-256 ${manifest.sha256}, authenticode=${manifest.authenticode}`);
@@ -71,7 +73,7 @@ function verifyRuntimeSurface(executable, flags) {
 }
 
 function parseManifest(text) {
-  const allowed = new Set(['version', 'sha256', 'archive_sha256', 'component_gate', 'component_gate_sha256', 'size', 'authenticode']);
+  const allowed = new Set(['schema', 'component_fingerprint', 'descriptor', 'descriptor_sha256', 'version', 'sha256', 'archive_sha256', 'component_gate', 'component_gate_sha256', 'size', 'authenticode', 'signer_subject', 'source_release_commit']);
   let offset = 0;
   const skipSpace = () => { while (/\s/.test(text[offset] || '')) offset += 1; };
   const expect = (character) => { skipSpace(); assert(text[offset] === character, `Manifest expected ${character}.`); offset += 1; };
@@ -120,15 +122,27 @@ function parseManifest(text) {
   return result;
 }
 
-function validateManifest(value, archive) {
+function validateManifest(value, archive, identity) {
   const keys = Object.keys(value).sort().join(',');
-  assert(keys === 'archive_sha256,authenticode,component_gate,component_gate_sha256,sha256,size,version', `Unexpected manifest schema: ${keys}`);
+  assert(keys === 'archive_sha256,authenticode,component_fingerprint,component_gate,component_gate_sha256,descriptor,descriptor_sha256,schema,sha256,signer_subject,size,source_release_commit,version', `Unexpected manifest schema: ${keys}`);
+  assert(value.schema === 1, 'Manifest schema version is invalid.');
   assert(value.version === '9.0', `Manifest version is ${value.version}.`);
-  for (const [name, hash] of [['binary', value.sha256], ['archive', value.archive_sha256], ['component gate', value.component_gate_sha256]]) {
+  for (const [name, hash] of [['component fingerprint', value.component_fingerprint], ['descriptor', value.descriptor_sha256], ['binary', value.sha256], ['archive', value.archive_sha256], ['component gate', value.component_gate_sha256]]) {
     assert(/^[0-9a-f]{64}$/.test(hash), `Manifest ${name} SHA-256 is malformed.`);
   }
+  assert(typeof value.descriptor === 'string' && Buffer.byteLength(value.descriptor) > 0 && Buffer.byteLength(value.descriptor) <= 16_384, 'Manifest descriptor is invalid.');
+  assert(createHash('sha256').update(value.descriptor).digest('hex') === value.descriptor_sha256, 'Manifest descriptor SHA-256 does not match descriptor.');
+  assert(value.component_fingerprint === identity.fingerprint && value.descriptor_sha256 === identity.descriptorSha256 && value.descriptor === identity.descriptor.toString('utf8'), 'Manifest component identity does not match local policy.');
   assert(Number.isSafeInteger(value.size) && value.size > 0 && value.size <= maximumSize, 'Manifest size is invalid.');
   assert(typeof value.authenticode === 'boolean', 'Manifest authenticode field is invalid.');
+  assert(typeof value.signer_subject === 'string' && !/[\r\n]/.test(value.signer_subject), 'Manifest signer subject is invalid.');
+  assert(typeof value.source_release_commit === 'string' && /^[0-9a-f]{40}$/.test(value.source_release_commit), 'Manifest source release commit is invalid.');
+  if (value.authenticode) {
+    assert(value.signer_subject.length > 0 && value.source_release_commit !== '0'.repeat(40), 'Signed manifest metadata is invalid.');
+    assert(value.signer_subject === process.env.EVSIGN_EXPECTED_SUBJECT?.trim(), 'Manifest signer subject does not match EVSIGN_EXPECTED_SUBJECT.');
+  } else {
+    assert(value.signer_subject === '' && value.source_release_commit === '0'.repeat(40), 'Unsigned development manifest metadata is invalid.');
+  }
   assert(typeof value.component_gate === 'string' && value.component_gate.length > 0 && value.component_gate.length <= 16_384, 'Manifest component gate record is invalid.');
   assert(archive.length <= maximumSize, `FFmpeg ZIP exceeds the ${maximumSize}-byte hard limit: ${archive.length}`);
   assert(createHash('sha256').update(archive).digest('hex') === value.archive_sha256, 'Archive SHA-256 does not match manifest.');
@@ -205,9 +219,12 @@ function runGoVerification(executable) {
   }
 }
 
-function verifyAuthenticode(path) {
-  const status = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "& { param([string]$path) Import-Module (Join-Path $env:WINDIR 'System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security'); (Get-AuthenticodeSignature -LiteralPath $path).Status.ToString() }", path], { encoding: 'utf8', windowsHide: true }).trim();
-  assert(status === 'Valid', `FFmpeg Authenticode signature status is ${status || 'missing'}, expected Valid.`);
+function verifyAuthenticode(path, expectedSubject) {
+  const output = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "& { param([string]$path) Import-Module (Join-Path $env:WINDIR 'System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security'); $signature = Get-AuthenticodeSignature -LiteralPath $path; @{ status = $signature.Status.ToString(); subject = if ($null -eq $signature.SignerCertificate) { '' } else { $signature.SignerCertificate.Subject } } | ConvertTo-Json -Compress }", path], { encoding: 'utf8', windowsHide: true }).trim();
+  let signature;
+  try { signature = JSON.parse(output); } catch { throw new Error('FFmpeg Authenticode verification returned malformed output.'); }
+  assert(signature.status === 'Valid', `FFmpeg Authenticode signature status is ${signature.status || 'missing'}, expected Valid.`);
+  assert(signature.subject === expectedSubject, 'FFmpeg Authenticode signer subject does not match manifest.');
 }
 
 function parseProtocols(output) { const result = new Set(); for (const line of output.split(/\r?\n/)) { const value = line.trim(); if (value && !value.endsWith(':') && !value.startsWith('Supported file protocols')) result.add(value); } return result; }
@@ -222,6 +239,8 @@ function crc32(contents) { let crc = 0xffffffff; for (const byte of contents) { 
 function assert(condition, message) { if (!condition) throw new Error(message); }
 
 async function runSelfTests() {
+  const policy = await loadFFmpegPolicy(root);
+  const identity = ffmpegComponentIdentity(policy);
   const lockFixture = JSON.parse(await readFile(join(root, 'third_party', 'ffmpeg', 'toolchain-lock.json'), 'utf8'));
   validateToolchainLock(lockFixture);
   const crlfFixture = JSON.parse(JSON.stringify(lockFixture, null, 2).replaceAll('\n', '\r\n'));
@@ -244,7 +263,7 @@ async function runSelfTests() {
   const bombCentral = bomb.length - 22 - 46 - 'ffmpeg.exe'.length;
   bomb.writeUInt32LE(maximumSize, 22); bomb.writeUInt32LE(maximumSize, bombCentral + 24);
   assertThrows(() => readSingleFileZip(bomb, 'ffmpeg.exe', maximumSize), 'expansion bomb');
-  const baseManifest = `{"version":"9.0","sha256":"${'0'.repeat(64)}","archive_sha256":"${'1'.repeat(64)}","component_gate":"gate\\n","component_gate_sha256":"${'2'.repeat(64)}","size":1,"authenticode":false}`;
+  const baseManifest = JSON.stringify({ schema: 1, component_fingerprint: identity.fingerprint, descriptor: identity.descriptor.toString('utf8'), descriptor_sha256: identity.descriptorSha256, version: '9.0', sha256: '0'.repeat(64), archive_sha256: '1'.repeat(64), component_gate: 'gate\n', component_gate_sha256: '2'.repeat(64), size: 1, authenticode: false, signer_subject: '', source_release_commit: '0'.repeat(40) });
   for (const invalid of [`${baseManifest}{}`, baseManifest.replace('"size":1', '"size":1,"size":1'), baseManifest.replace('"size":1', '"size":1,"extra":1'), baseManifest.replace(/}$/, ',}')]) assertThrows(() => parseManifest(invalid), 'strict manifest');
   const expectedGate = Buffer.from('expected component gate\n');
   const gateManifest = { component_gate_sha256: createHash('sha256').update(expectedGate).digest('hex') };
