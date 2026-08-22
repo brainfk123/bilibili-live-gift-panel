@@ -27,6 +27,7 @@ export interface FFmpegPolicy {
   components: string[];
   infrastructure: string[];
 }
+export const FFMPEG_SOURCE_SIGNATURE_SHA256: string;
 
 export function loadFFmpegPolicy(root: string): Promise<FFmpegPolicy>;
 export function serializeFFmpegDescriptor(policy: FFmpegPolicy): Buffer;

@@ -8,6 +8,8 @@ import {
   buildChecksumManifest,
   verifyChecksumManifest,
   verifyComponentMetadata,
+  verifyPinnedSourceAssets,
+  verifyGitHubReleaseMetadata,
 } from '../scripts/ffmpeg-component-assets.mjs';
 
 const roots: string[] = [];
@@ -72,5 +74,35 @@ describe('FFmpeg component assets', () => {
     expect(() => verifyComponentMetadata({ ...manifest, component_fingerprint: '0'.repeat(64) }, {
       descriptor: Buffer.from(descriptor), descriptorSha256: fingerprint, fingerprint,
     }, 'CN=Release Test')).toThrow(/identity/);
+  });
+
+  it('binds source and detached signature assets to pinned local hashes', () => {
+    const archive = Buffer.from('source archive');
+    const signature = Buffer.from('detached signature');
+    const policy = {
+      sourceSha256: createHash('sha256').update(archive).digest('hex'),
+      sourceSignatureSha256: createHash('sha256').update(signature).digest('hex'),
+    };
+    expect(() => verifyPinnedSourceAssets(archive, signature, policy)).not.toThrow();
+    expect(() => verifyPinnedSourceAssets(Buffer.from('other archive'), signature, policy)).toThrow(/source archive/);
+    expect(() => verifyPinnedSourceAssets(archive, Buffer.from('other signature'), policy)).toThrow(/detached signature/);
+  });
+
+  it('binds published GitHub asset size and available digest to downloaded bytes', async () => {
+    const root = temporaryRoot();
+    const files = new Map(REQUIRED_COMPONENT_ASSETS.map((name) => [name, Buffer.from(`asset:${name}`)]));
+    for (const [name, value] of files) writeFileSync(join(root, name), value);
+    writeFileSync(join(root, 'SHA256SUMS.txt'), buildChecksumManifest(files));
+    const allFiles = new Map([...files, ['SHA256SUMS.txt', readFileSync(join(root, 'SHA256SUMS.txt'))]]);
+    const metadata = {
+      tag_name: `ffmpeg-component-v1-${'a'.repeat(64)}`,
+      draft: false,
+      prerelease: false,
+      published_at: '2026-08-22T00:00:00Z',
+      assets: [...allFiles].map(([name, bytes]) => ({ name, size: bytes.length, digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}` })),
+    };
+    await expect(verifyGitHubReleaseMetadata(metadata, root, metadata.tag_name)).resolves.toBeUndefined();
+    metadata.assets[0]!.digest = `sha256:${'0'.repeat(64)}`;
+    await expect(verifyGitHubReleaseMetadata(metadata, root, metadata.tag_name)).rejects.toThrow(/GitHub asset digest/);
   });
 });

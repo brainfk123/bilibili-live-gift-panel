@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { copyFile, lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { ffmpegComponentIdentity, loadFFmpegPolicy } from './ffmpeg-policy.mjs';
+import { FFMPEG_SOURCE_SIGNATURE_SHA256, ffmpegComponentIdentity, loadFFmpegPolicy } from './ffmpeg-policy.mjs';
 import { publishPairTransactionally } from './package-ffmpeg.mjs';
 
 export const REQUIRED_COMPONENT_ASSETS = Object.freeze([
@@ -57,6 +57,26 @@ export async function verifyChecksumManifest(directory) {
   throw new Error('FFmpeg component asset digest is invalid.');
 }
 
+export async function verifyGitHubReleaseMetadata(metadata, directory, expectedTag) {
+  const requiredNames = [...REQUIRED_COMPONENT_ASSETS, CHECKSUM_ASSET];
+  if (!metadata || Object.getPrototypeOf(metadata) !== Object.prototype || metadata.tag_name !== expectedTag || metadata.draft !== false || metadata.prerelease !== false || typeof metadata.published_at !== 'string' || Number.isNaN(Date.parse(metadata.published_at)) || !Array.isArray(metadata.assets) || metadata.assets.length !== requiredNames.length) {
+    throw new Error('GitHub FFmpeg component Release metadata is invalid.');
+  }
+  const seen = new Set();
+  for (const asset of metadata.assets) {
+    if (!asset || Object.getPrototypeOf(asset) !== Object.prototype || typeof asset.name !== 'string' || !requiredNames.includes(asset.name) || seen.has(asset.name) || !Number.isSafeInteger(asset.size) || asset.size <= 0) {
+      throw new Error('GitHub FFmpeg component asset metadata is invalid or duplicated.');
+    }
+    seen.add(asset.name);
+    const bytes = await readFile(join(directory, asset.name));
+    if (bytes.length !== asset.size) throw new Error(`GitHub asset size does not match ${asset.name}.`);
+    if (asset.digest !== undefined && asset.digest !== null) {
+      if (typeof asset.digest !== 'string' || asset.digest !== `sha256:${sha256(bytes)}`) throw new Error(`GitHub asset digest does not match ${asset.name}.`);
+    }
+  }
+  if (requiredNames.some((name) => !seen.has(name))) throw new Error('GitHub FFmpeg component asset closure is incomplete.');
+}
+
 export function verifyComponentMetadata(manifest, identity, expectedSigner) {
   if (!manifest || Object.getPrototypeOf(manifest) !== Object.prototype || manifest.schema !== 1) {
     throw new Error('FFmpeg component manifest schema is invalid.');
@@ -73,6 +93,11 @@ export function verifyComponentMetadata(manifest, identity, expectedSigner) {
   if (!/^[0-9a-f]{40}$/.test(manifest.source_release_commit) || /^0{40}$/.test(manifest.source_release_commit)) {
     throw new Error('FFmpeg component source release commit is invalid.');
   }
+}
+
+export function verifyPinnedSourceAssets(archive, signature, policy) {
+  if (sha256(archive) !== policy.sourceSha256) throw new Error('FFmpeg source archive does not match the pinned SHA-256.');
+  if (sha256(signature) !== policy.sourceSignatureSha256) throw new Error('FFmpeg detached signature does not match the pinned SHA-256.');
 }
 
 export async function prepareComponentAssets({ projectRoot = root, outputDirectory }) {
@@ -96,11 +121,17 @@ export async function prepareComponentAssets({ projectRoot = root, outputDirecto
 
 export async function verifyComponentAssets({ projectRoot = root, inputDirectory, expectedSigner, verifyPayload = verifyPayloadDirectory }) {
   await verifyChecksumManifest(inputDirectory);
-  const identity = ffmpegComponentIdentity(await loadFFmpegPolicy(projectRoot));
+  const policy = await loadFFmpegPolicy(projectRoot);
+  const identity = ffmpegComponentIdentity(policy);
   let manifest;
   try { manifest = JSON.parse(await readFile(join(inputDirectory, 'manifest.json'), 'utf8')); }
   catch { throw new Error('FFmpeg component manifest is malformed.'); }
   verifyComponentMetadata(manifest, identity, expectedSigner);
+  verifyPinnedSourceAssets(
+    await readFile(join(inputDirectory, 'ffmpeg-9.0.tar.xz')),
+    await readFile(join(inputDirectory, 'ffmpeg-9.0.tar.xz.asc')),
+    { sourceSha256: policy.sourceSha256, sourceSignatureSha256: FFMPEG_SOURCE_SIGNATURE_SHA256 },
+  );
   for (const [asset, local] of [
     ['toolchain-lock.json', join(projectRoot, 'third_party', 'ffmpeg', 'toolchain-lock.json')],
     ['NOTICE.md', join(projectRoot, 'third_party', 'ffmpeg', 'NOTICE.md')],
@@ -126,7 +157,7 @@ export async function installComponentAssets({ projectRoot = root, inputDirector
 }
 
 function verifyPayloadDirectory(directory, expectedSigner) {
-  execFileSync(process.execPath, [join(root, 'scripts', 'verify-ffmpeg.mjs'), '--payload-only', '--payload-directory', directory], {
+  execFileSync(process.execPath, [join(root, 'scripts', 'verify-ffmpeg.mjs'), '--payload-only', '--payload-directory', directory, '--build-config', join(directory, 'ffmpeg-build-config.txt')], {
     cwd: root,
     env: { ...process.env, APP_VERSION: 'component', EVSIGN_EXPECTED_SUBJECT: expectedSigner },
     stdio: 'inherit',
@@ -161,9 +192,13 @@ function assertContainedDirectory(parent, child, label) {
 }
 
 function argument(name) {
+  return resolve(stringArgument(name));
+}
+
+function stringArgument(name) {
   const index = process.argv.indexOf(name);
   if (index < 0 || !process.argv[index + 1]) throw new Error(`${name} requires a value.`);
-  return resolve(process.argv[index + 1]);
+  return process.argv[index + 1];
 }
 
 async function main() {
@@ -177,7 +212,8 @@ async function main() {
   if (command === 'prepare') await prepareComponentAssets({ outputDirectory: argument('--output') });
   else if (command === 'verify') await verifyComponentAssets({ inputDirectory: argument('--input'), expectedSigner });
   else if (command === 'install') await installComponentAssets({ inputDirectory: argument('--input'), expectedSigner });
-  else throw new Error('Usage: node scripts/ffmpeg-component-assets.mjs identity|prepare --output <dir>|verify|install --input <dir>');
+  else if (command === 'verify-metadata') await verifyGitHubReleaseMetadata(JSON.parse(await readFile(argument('--metadata'), 'utf8')), argument('--input'), stringArgument('--tag'));
+  else throw new Error('Usage: node scripts/ffmpeg-component-assets.mjs identity|prepare --output <dir>|verify|install --input <dir>|verify-metadata --metadata <json> --input <dir> --tag <tag>');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main();

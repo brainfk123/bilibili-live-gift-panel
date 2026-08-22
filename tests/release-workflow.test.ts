@@ -276,8 +276,12 @@ describe('release workflow supply-chain contract', () => {
     }
     expect(steps[downloadHit]?.if).toContain("env.FFMPEG_COMPONENT_EXISTS == 'true'");
     expect(steps[install]?.run).toContain('scripts/ffmpeg-component-assets.mjs install');
+    expect(steps[install]?.run).toContain('verify-metadata');
+    expect(steps[downloadPublished]?.run).toContain('Invoke-RestMethod');
+    expect(steps[downloadPublished]?.run).toContain('ffmpeg-component-release.json');
     expect(steps[attestComponent]?.uses).toBe('actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6');
     expect(steps[install]?.run).toContain('gh attestation verify');
+    expect(steps[install]?.run).toContain('ffmpeg-build-config.txt');
     expect(steps[publish]?.run).not.toContain('--clobber');
     expect(steps[publish]?.run).toContain('--latest=false');
     expect(steps[publish]?.run).toContain('Another publisher created the FFmpeg component');

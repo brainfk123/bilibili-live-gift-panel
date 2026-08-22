@@ -26,6 +26,8 @@ async function main() {
   const payloadOnly = process.argv.includes('--payload-only');
   const payloadDirectoryArgument = readArgument('--payload-directory');
   const payloadDirectory = payloadDirectoryArgument ? resolve(payloadDirectoryArgument) : join(root, 'goserver', 'ffmpeg');
+  const buildConfigArgument = readArgument('--build-config');
+  const expectedBuildConfig = buildConfigArgument ? await readFile(resolve(buildConfigArgument), 'utf8') : undefined;
   const manifest = parseManifest(await readFile(join(payloadDirectory, 'manifest.json'), 'utf8'));
   const archive = await readFile(join(payloadDirectory, 'ffmpeg.zip'));
   validateManifest(manifest, archive, identity);
@@ -44,7 +46,7 @@ async function main() {
     await writeFile(executable, binary, { flag: 'wx' });
     await chmod(executable, 0o700);
     if (manifest.authenticode) verifyAuthenticode(executable, manifest.signer_subject);
-    verifyRuntimeSurface(executable, policy.configureFlags);
+    verifyRuntimeSurface(executable, policy.configureFlags, expectedBuildConfig);
     if (!payloadOnly) runGoVerification(executable);
     console.log(`verified FFmpeg ${manifest.version}: binary ${manifest.size} bytes, ZIP ${archive.length} bytes, SHA-256 ${manifest.sha256}, authenticode=${manifest.authenticode}`);
   } finally {
@@ -52,10 +54,14 @@ async function main() {
   }
 }
 
-function verifyRuntimeSurface(executable, flags) {
+function verifyRuntimeSurface(executable, flags, expectedBuildConfig) {
   const version = run(executable, ['-version']);
   assert(/^ffmpeg version 9\.0(?:\s|$)/m.test(version), 'FFmpeg version is not exactly 9.0.');
   const buildconf = run(executable, ['-buildconf']);
+  if (expectedBuildConfig !== undefined) {
+    const normalize = (value) => value.replace(/\r\n/g, '\n').trimEnd();
+    assert(normalize(buildconf) === normalize(expectedBuildConfig), 'FFmpeg build config asset does not match executable output.');
+  }
   const normalizedBuildconf = buildconf.replaceAll("'", '');
   assert(!/--enable-(?:gpl|nonfree)\b/i.test(buildconf), 'GPL or nonfree support is enabled.');
   for (const flag of flags) assert(normalizedBuildconf.includes(flag), `Build configuration is missing ${flag}.`);
