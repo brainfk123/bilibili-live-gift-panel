@@ -356,6 +356,7 @@ jobs:
           APP_COMMIT: ${{ env.RELEASE_COMMIT }}
           APP_UPDATE_API_URL: ${{ vars.UPDATE_API_BASE_URL }}
           APP_UPDATE_PUBLISHER: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
+          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
 
       - name: Run backend tests
         if: env.RELEASE_EXISTS != 'true'

@@ -320,6 +320,7 @@ describe('release workflow supply-chain contract', () => {
       APP_COMMIT: '${{ env.RELEASE_COMMIT }}',
       APP_UPDATE_API_URL: '${{ vars.UPDATE_API_BASE_URL }}',
       APP_UPDATE_PUBLISHER: '${{ vars.EVSIGN_EXPECTED_SUBJECT }}',
+      EVSIGN_EXPECTED_SUBJECT: '${{ vars.EVSIGN_EXPECTED_SUBJECT }}',
     });
     expect(steps[sign]?.run).toContain(
       'node scripts/sign-evsign.mjs dist/gift-panel-windows-x64.exe',
