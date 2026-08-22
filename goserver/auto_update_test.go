@@ -231,6 +231,129 @@ func TestAutomaticUpdateRunsWhileAPageIsOpen(t *testing.T) {
 	}
 }
 
+func TestCheckNowDoesNotResetAnActiveDownload(t *testing.T) {
+	root := t.TempDir()
+	updater := newAutoUpdater(autoUpdaterOptions{
+		CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"), UpdatesDir: root,
+		ReleaseSources: []updateReleaseSource{{Name: "test", URL: "https://example.test/release"}},
+	})
+	updater.setStatus("downloading", "1.1.0", "正在下载", 42, false)
+
+	status := updater.CheckNow()
+	if status.State != "downloading" || status.Progress != 42 {
+		t.Fatalf("reentrant check status = %#v", status)
+	}
+}
+
+func TestDownloadPublishesRealByteProgressBeforeCompletion(t *testing.T) {
+	binary := []byte("0123456789abcdef")
+	digestBytes := sha256.Sum256(binary)
+	digest := hex.EncodeToString(digestBytes[:])
+	firstHalfSent := make(chan struct{})
+	finishDownload := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "16")
+		_, _ = w.Write(binary[:8])
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(firstHalfSent)
+		<-finishDownload
+		_, _ = w.Write(binary[8:])
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	updater := newAutoUpdater(autoUpdaterOptions{
+		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
+		UpdatesDir: filepath.Join(root, "updates"), AssetName: updateAssetName,
+	})
+	updater.setStatus("downloading", "1.1.0", "正在下载", 0, false)
+	done := make(chan error, 1)
+	go func() {
+		_, err := updater.downloadAsset(context.Background(), "1.1.0", githubAsset{
+			Name: updateAssetName, DownloadURL: server.URL, Size: int64(len(binary)), Digest: "sha256:" + digest,
+		})
+		done <- err
+	}()
+
+	<-firstHalfSent
+	deadline := time.Now().Add(time.Second)
+	for updater.Status().Progress == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	progress := updater.Status().Progress
+	close(finishDownload)
+	if progress <= 0 || progress >= 100 {
+		t.Fatalf("in-flight progress = %d, want 1..99", progress)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSlowVerificationBecomesVisibleOnlyAfterTheNoticeDelay(t *testing.T) {
+	binary := []byte("signed executable")
+	digestBytes := sha256.Sum256(binary)
+	digest := hex.EncodeToString(digestBytes[:])
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(binary) }))
+	defer server.Close()
+	verificationStarted := make(chan struct{})
+	finishVerification := make(chan struct{})
+	root := t.TempDir()
+	updater := newAutoUpdater(autoUpdaterOptions{
+		Client: server.Client(), CurrentVersion: "1.0.0", ExecutablePath: filepath.Join(root, "gift-panel.exe"),
+		UpdatesDir: filepath.Join(root, "updates"), AssetName: updateAssetName,
+		VerifyExecutable: func(string) error {
+			select {
+			case <-verificationStarted:
+			default:
+				close(verificationStarted)
+			}
+			<-finishVerification
+			return nil
+		},
+	})
+	updater.setStatus("downloading", "1.1.0", "正在下载", 0, false)
+	done := make(chan error, 1)
+	go func() {
+		_, err := updater.downloadAsset(context.Background(), "1.1.0", githubAsset{
+			Name: updateAssetName, DownloadURL: server.URL, Size: int64(len(binary)), Digest: "sha256:" + digest,
+		})
+		done <- err
+	}()
+	<-verificationStarted
+	if status := updater.Status(); status.State != "downloading" {
+		t.Fatalf("immediate verification state = %q, want downloading to avoid a flash", status.State)
+	}
+	time.Sleep(350 * time.Millisecond)
+	if status := updater.Status(); status.State != "verifying" || status.Message != "正在校验更新文件…" {
+		t.Fatalf("delayed verification status = %#v", status)
+	}
+	close(finishVerification)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInstallNowEndpointRequestsPendingUpdateInstallation(t *testing.T) {
+	updater := newAutoUpdater(autoUpdaterOptions{CurrentVersion: "1.0.0"})
+	updater.pending = &pendingUpdate{Version: "1.1.0"}
+	requested := make(chan struct{}, 1)
+	updater.SetOnInstallNow(func() { requested <- struct{}{} })
+
+	response := httptest.NewRecorder()
+	updater.handleInstall(response, httptest.NewRequest(http.MethodPost, "/api/update/install", nil))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	select {
+	case <-requested:
+	default:
+		t.Fatal("install endpoint did not request installation")
+	}
+}
+
 func TestInstalledUpdateMarkerIsConsumedOnce(t *testing.T) {
 	root := t.TempDir()
 	metadataPath := filepath.Join(root, "pending-update.json")
@@ -246,6 +369,55 @@ func TestInstalledUpdateMarkerIsConsumedOnce(t *testing.T) {
 	}
 	if version := updater.ConsumeInstalledVersion(); version != "" {
 		t.Fatalf("installed marker was consumed twice: %q", version)
+	}
+}
+
+func TestRunSchedulesARestoredPendingUpdateAfterReadyCallbackRegistration(t *testing.T) {
+	root := t.TempDir()
+	updatesDir := filepath.Join(root, "updates")
+	if err := os.MkdirAll(updatesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binary := []byte("restored signed executable")
+	digestBytes := sha256.Sum256(binary)
+	digest := hex.EncodeToString(digestBytes[:])
+	pendingPath := filepath.Join(updatesDir, "gift-panel-pending.exe")
+	targetPath := filepath.Join(root, "gift-panel.exe")
+	if err := os.WriteFile(pendingPath, binary, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pending := pendingUpdate{Version: "1.1.0", Size: int64(len(binary)), SHA256: digest, PendingPath: pendingPath, TargetPath: targetPath}
+	metadata, err := json.Marshal(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(updatesDir, "pending-update.json"), metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	disabled := false
+	state.Settings.AutoUpdate = &disabled
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	updater := newAutoUpdater(autoUpdaterOptions{
+		Store: store, CurrentVersion: "1.0.0", ExecutablePath: targetPath, UpdatesDir: updatesDir,
+		ReleaseSources:   []updateReleaseSource{{Name: "test", URL: "https://example.test/release"}},
+		VerifyExecutable: func(string) error { return nil },
+	})
+	ready := make(chan string, 1)
+	updater.SetOnReady(func(version string) { ready <- version })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go updater.Run(ctx)
+	select {
+	case version := <-ready:
+		if version != "1.1.0" {
+			t.Fatalf("ready version = %q", version)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("restored pending update was not scheduled after callback registration")
 	}
 }
 

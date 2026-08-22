@@ -116,6 +116,7 @@ import {
   type ChangelogRelease,
 } from '../../changelog';
 import { createChangelogDialog } from './changelog-dialog';
+import { setPlannedUpdateRestart } from '../../server-continuity';
 import { bindTwoStepDelete } from './two-step-delete';
 import {
   configPageDefinition,
@@ -273,6 +274,13 @@ export function mountConfig(root: HTMLElement): void {
   let requestedBlindBoxScopeName = '全部盲盒';
   let blindBoxLeaderboardSnapshot: BlindBoxLeaderboardSnapshot | undefined;
   let blindBoxLeaderboardLoading = false;
+
+  function syncPlannedUpdateRestart(status: UpdateStatus): void {
+    const countdownEnding = status.state === 'ready'
+      && typeof status.installAt === 'number'
+      && status.installAt - Date.now() <= 1_000;
+    setPlannedUpdateRestart(status.state === 'installing' || countdownEnding);
+  }
   let blindBoxLeaderboardError = false;
   const blindBoxLeaderboardResource = createBlindBoxLeaderboardResource();
   let activePage = parseConfigPage(globalThis.location?.search);
@@ -446,6 +454,7 @@ export function mountConfig(root: HTMLElement): void {
     updateRefreshActive = true;
     try {
       currentUpdateStatus = await getUpdateStatus();
+      syncPlannedUpdateRestart(currentUpdateStatus);
     } catch (error) {
       currentUpdateStatus = {
         ...currentUpdateStatus,
@@ -481,8 +490,9 @@ export function mountConfig(root: HTMLElement): void {
   async function runManualUpdateCheck(): Promise<void> {
     try {
       currentUpdateStatus = await checkForUpdates();
+      syncPlannedUpdateRestart(currentUpdateStatus);
       refreshUpdateCard?.();
-      for (let attempt = 0; attempt < 120 && ['checking', 'downloading'].includes(currentUpdateStatus.state); attempt++) {
+      for (let attempt = 0; attempt < 120 && ['checking', 'downloading', 'verifying'].includes(currentUpdateStatus.state); attempt++) {
         await new Promise((resolve) => globalThis.setTimeout(resolve, 500));
         await refreshUpdateStatus();
       }
@@ -5402,13 +5412,15 @@ export function mountConfig(root: HTMLElement): void {
       el('span', { class: 'setting-switch-track', ariaHidden: 'true' }),
       el('span', { class: 'setting-switch-copy' }, [
         el('strong', { text: '自动更新' }),
-        el('small', { text: '启动时和每 6 小时检查；下载完成后，在退出后台程序时安装。' }),
+        el('small', { text: '启动时和每 6 小时检查；下载并校验完成后自动安装。' }),
       ]),
     ]);
     const checkUpdateButton = el('button', { class: 'btn update-check-button', type: 'button', text: '检查更新' }) as HTMLButtonElement;
     checkUpdateButton.onclick = () => { void runManualUpdateCheck(); };
+    const installUpdateButton = el('button', { class: 'btn primary update-install-button', type: 'button', text: '立即安装' }) as HTMLButtonElement;
+    installUpdateButton.hidden = true;
     const lastChecked = el('small', { class: 'update-last-checked', text: '尚未检查' });
-    const updateActions = el('div', { class: 'update-actions' }, [checkUpdateButton, lastChecked]);
+    const updateActions = el('div', { class: 'update-actions' }, [checkUpdateButton, installUpdateButton, lastChecked]);
     updateCard.append(
       el('div', { class: 'update-heading' }, [
         el('div', {}, [el('h3', { text: '程序更新' }), el('span', { class: 'update-version-label', text: '当前版本' }), versionText]),
@@ -5427,7 +5439,9 @@ export function mountConfig(root: HTMLElement): void {
       unsupported: '不支持',
       checking: '检查中',
       downloading: '下载中',
+      verifying: '安全校验',
       ready: '等待安装',
+      installing: '正在安装',
       'up-to-date': '已是最新',
       error: '检查失败',
     };
@@ -5439,24 +5453,54 @@ export function mountConfig(root: HTMLElement): void {
         : '读取中…';
       stateBadge.className = `update-state-badge is-${updateState}`;
       stateBadge.textContent = updateStateLabels[updateState];
-      statusMessage.textContent = currentUpdateStatus.message;
+      if (updateState === 'ready' && currentUpdateStatus.installAt) {
+        const remaining = Math.max(0, Math.ceil((currentUpdateStatus.installAt - Date.now()) / 1000));
+        statusMessage.textContent = `校验完成，${remaining} 秒后自动安装。`;
+      } else {
+        statusMessage.textContent = currentUpdateStatus.message;
+      }
       const progress = Math.min(100, Math.max(0, currentUpdateStatus.progress ?? 0));
       progressTrack.hidden = updateState !== 'downloading';
       progressBar.style.width = `${progress}%`;
       autoUpdateInput.checked = state.settings.autoUpdate;
-      checkUpdateButton.disabled = updateState === 'checking' || updateState === 'downloading' || updateState === 'ready';
+      checkUpdateButton.disabled = ['checking', 'downloading', 'verifying', 'ready', 'installing'].includes(updateState);
+      installUpdateButton.hidden = updateState !== 'ready';
+      installUpdateButton.disabled = updateState !== 'ready';
       checkUpdateButton.textContent = updateState === 'checking'
         ? '正在检查…'
         : updateState === 'downloading'
           ? '正在下载…'
+          : updateState === 'verifying'
+            ? '正在校验…'
           : updateState === 'ready'
             ? '更新已下载'
+            : updateState === 'installing'
+              ? '正在安装…'
             : '检查更新';
       lastChecked.textContent = currentUpdateStatus.lastCheckedAt
         ? `上次检查：${new Date(currentUpdateStatus.lastCheckedAt * 1000).toLocaleString('zh-CN')}`
         : '尚未检查';
     };
     refreshUpdateCard = localUpdateSync;
+    installUpdateButton.onclick = async () => {
+      installUpdateButton.disabled = true;
+      currentUpdateStatus = { ...currentUpdateStatus, state: 'installing', message: '正在安装更新，本地服务将短暂重启…' };
+      setPlannedUpdateRestart(true);
+      localUpdateSync();
+      try {
+        const response = await fetch('/api/update/install', { cache: 'no-store', method: 'POST' });
+        if (!response.ok) throw new Error(`立即安装失败：HTTP ${response.status}`);
+      } catch (error) {
+        if (error instanceof TypeError) return;
+        setPlannedUpdateRestart(false);
+        currentUpdateStatus = {
+          ...currentUpdateStatus,
+          state: 'error',
+          message: error instanceof Error ? error.message : '立即安装失败',
+        };
+        localUpdateSync();
+      }
+    };
     localUpdateSync();
 
     dataCard.append(updateCard);
@@ -5531,11 +5575,18 @@ export function mountConfig(root: HTMLElement): void {
     void refreshBackendState();
   }, 1000);
   const authPollTimer = globalThis.setInterval(() => void refreshBiliAuth(), 10000);
-  const updatePollTimer = globalThis.setInterval(() => void refreshUpdateStatus(), 5000);
+  const updatePollTimer = globalThis.setInterval(() => void refreshUpdateStatus(), 500);
+  const updateCountdownTimer = globalThis.setInterval(() => {
+    if (currentUpdateStatus.state === 'ready') {
+      syncPlannedUpdateRestart(currentUpdateStatus);
+      refreshUpdateCard?.();
+    }
+  }, 250);
   const disposePolling = (): void => {
     globalThis.clearInterval(pollTimer);
     globalThis.clearInterval(authPollTimer);
     globalThis.clearInterval(updatePollTimer);
+    globalThis.clearInterval(updateCountdownTimer);
     if (loginPollTimer !== undefined) globalThis.clearInterval(loginPollTimer);
     blindBoxLeaderboardResource.cancel();
   };
