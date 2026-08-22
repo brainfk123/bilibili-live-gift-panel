@@ -1293,6 +1293,44 @@ describe('hosted single-host deployment contract', () => {
       expect(existsSync(rotatedApp)).toBe(true);
       expect(readdirSync(temporary)).toEqual([]);
 
+      rmSync(oldNginx);
+      rmSync(oldNginxError);
+      rmSync(rotatedApp);
+      writeFileSync(join(state, 'next-day'), '2026-07-17\n');
+      writeFileSync(fake.calls, '');
+      const empty = runBash('deploy/hosted/archive-logs.sh', {
+        ...process.env,
+        PATH: `${bashPath(fake.bin)}:/usr/bin:/bin`,
+        FAKE_CALLS: bashPath(fake.calls),
+        FAKE_COS: bashPath(fake.cos),
+        FAKE_COS_FAIL_SHA: '',
+        FAKE_ARCHIVE_CALENDAR: '1',
+        FAKE_BACKUP_CALENDAR: '',
+        TMPDIR: bashPath(temporary),
+        HOSTED_COS_BIN: 'coscli',
+        HOSTED_ZSTD_BIN: 'zstd',
+        HOSTED_AGE_BIN: 'age',
+        HOSTED_DATE_BIN: 'hosted-date',
+        HOSTED_COS_CONFIG_FILE: bashPath(config),
+        HOSTED_COS_BUCKET: 'synthetic-backups-1250000000',
+        HOSTED_COS_REGION: 'ap-hongkong',
+        HOSTED_AGE_RECIPIENT_FILE: bashPath(recipient),
+        HOSTED_NGINX_LOG_ROOT: bashPath(nginxLogs),
+        HOSTED_APP_LOG_ROOT: bashPath(appLogs),
+        HOSTED_ARCHIVE_LOCK_FILE: bashPath(join(root, 'archive.lock')),
+        HOSTED_ARCHIVE_STATE_ROOT: bashPath(state),
+      });
+      expect(empty.status, empty.stderr).toBe(0);
+      expect(empty.stdout).toContain('log_archive_skipped_empty_day=2026-07-17');
+      expect(readFileSync(join(state, 'next-day'), 'utf8')).toBe('2026-07-18\n');
+      expect(readFileSync(fake.calls, 'utf8')).not.toContain('coscli');
+
+      writeFileSync(oldNginx, 'synthetic restored closed access log\n');
+      writeFileSync(oldNginxError, 'synthetic restored closed error log\n');
+      writeFileSync(rotatedApp, 'synthetic restored closed app log\n');
+      utimesSync(oldNginx, oldDate, oldDate);
+      utimesSync(oldNginxError, oldDate, oldDate);
+      utimesSync(rotatedApp, oldDate, oldDate);
       rmSync(oldNginxError);
       writeFileSync(join(state, 'next-day'), '2026-07-17\n');
       writeFileSync(fake.calls, '');

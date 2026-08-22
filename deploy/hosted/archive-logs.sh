@@ -146,6 +146,10 @@ archive_one_day() {
     [[ "$range_start" == none || "$modified_epoch" -lt "$range_start" ]] && range_start="$modified_epoch"
     [[ "$range_end" == none || "$modified_epoch" -gt "$range_end" ]] && range_end="$modified_epoch"
   done <"$file_list"
+  if (( file_count == 0 )); then
+    printf 'log_archive_skipped_empty_day=%s\n' "$day"
+    return 0
+  fi
   if (( file_count != 3 )); then
     printf 'closed hosted rotation set is incomplete: date=%s files=%s want=3\n' "$day" "$file_count" >&2
     return 5

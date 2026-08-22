@@ -1,0 +1,3 @@
+deploy/hosted/*.sh text eol=lf
+deploy/hosted/*.service text eol=lf
+deploy/hosted/*.timer text eol=lf
