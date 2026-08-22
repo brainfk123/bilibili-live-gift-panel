@@ -165,10 +165,11 @@ The expected implementation touches:
 - `scripts/sign-evsign.mjs` for bounded HTTPS retries and atomic output;
 - a focused component descriptor/cache helper under `scripts/` rather than embedding complex parsing in YAML;
 - `scripts/package-ffmpeg.mjs` and `scripts/verify-ffmpeg.mjs` for schema-1 component metadata and exact signer checks;
+- `goserver/gift_clip_payload.go` and its focused tests so the embedded runtime manifest continues to use strict exact-key parsing while requiring and validating the new schema-1 component fields;
 - `tests/release-workflow.test.ts` plus focused script tests for descriptor, cache verification, and signing retry behavior; and
 - release documentation describing immutable component recovery.
 
-The Go embed contract remains `goserver/ffmpeg/ffmpeg.zip` plus `goserver/ffmpeg/manifest.json`. Application runtime behavior and FFmpeg execution behavior do not change.
+The Go embed file contract remains `goserver/ffmpeg/ffmpeg.zip` plus `goserver/ffmpeg/manifest.json`. Its strict manifest parser is extended to require the schema-1 component fields rather than ignoring unknown metadata. Application runtime behavior and FFmpeg execution behavior do not change.
 
 ## Test strategy
 
@@ -178,6 +179,7 @@ The Go embed contract remains `goserver/ffmpeg/ffmpeg.zip` plus `goserver/ffmpeg
 - Fingerprint changes for each build-defining input and remains independent of application version and commit.
 - Strict manifest keys/types and checksum closure.
 - Cache hit accepts a valid signed fixture and rejects wrong fingerprint, descriptor, archive, binary, component gate, signer, or runtime surface.
+- Go payload parsing accepts the exact schema-1 manifest and rejects a missing, duplicated, mistyped, unknown, or inconsistent component field.
 - A found-but-invalid Release never enters the cache-miss signing path.
 - Sign transport retries the exact allowed network/status classes with deterministic injected timers.
 - Sign transport does not retry terminal 4xx, empty/oversized 200 responses, filesystem errors, or exhausted attempts.
