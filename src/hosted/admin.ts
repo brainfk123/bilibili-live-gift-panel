@@ -1,6 +1,7 @@
 import { HostedAPIError, type BiliServiceStatus, type Challenge, type HostedAPI, type RecoveryPreparation } from './api';
 import { mountAdminLogin } from './admin-login';
 import { mountAdminShell } from './admin/shell';
+import { createOneTimeSecretDialog } from './one-time-secret';
 import type { AdminSection } from './admin/routes';
 import { mountVerificationCode, type VerificationCodeControl } from './verification-code';
 
@@ -424,14 +425,15 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
   };
 
   const showOneTimeSecret = (presentation: AdminOneTimeSecretPresentation): void => {
-    const dialog = document.createElement('dialog'); dialog.setAttribute('aria-modal', 'true'); dialog.setAttribute('aria-labelledby', 'admin-one-time-secret-title');
-    const title = document.createElement('h2'); title.id = 'admin-one-time-secret-title'; title.textContent = presentation.title;
-    const secret = document.createElement('code'); secret.textContent = presentation.value;
+    const close = (): void => adminSecretFlow.close();
+    const dialog = createOneTimeSecretDialog(document, {
+      titleID: 'admin-one-time-secret-title', title: presentation.title, value: presentation.value, copyLabel: presentation.copyLabel,
+      onCopy: () => { void adminSecretFlow.copy(navigator.clipboard); }, onClose: close,
+    });
+    const secret = dialog.children[1] as HTMLElement;
     const closeDOM = (): void => { presentation.value = ''; secret.textContent = ''; dialog.remove(); clearTransientSecret = undefined; };
     clearTransientSecret?.(); clearTransientSecret = closeDOM;
-    const close = (): void => adminSecretFlow.close();
-    dialog.append(title, secret, button(document, presentation.copyLabel, () => { void adminSecretFlow.copy(navigator.clipboard); }), button(document, '已保存并关闭', close));
-    dialog.addEventListener('cancel', (event) => { event.preventDefault(); close(); }); root.firstElementChild?.append(dialog);
+    root.firstElementChild?.append(dialog);
     if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.open = true;
   };
 

@@ -48,6 +48,38 @@ describe('streamer invitation view lifecycle', () => {
     expect(panel.children.find((child) => child.tagName === 'button' && child.textContent === '生成邀请码')?.disabled).toBe(true);
     mounted.dispose();
   });
+  it('uses the shared styled dialog for a generated streamer invitation', async () => {
+    class Element {
+      children: Element[] = []; textContent = ''; className = ''; type = ''; disabled = false; open = false; id = '';
+      listeners = new Map<string, () => void>(); attributes = new Map<string, string>();
+      constructor(readonly tagName: string, readonly ownerDocument: { createElement(tag: string): Element }) {}
+      append(...nodes: Element[]) { this.children.push(...nodes); }
+      replaceChildren(...nodes: Element[]) { this.children = nodes; }
+      setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+      addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); }
+    }
+    const document = { createElement: (tag: string): Element => new Element(tag, document) };
+    const root = new Element('div', document) as unknown as HTMLElement;
+    const generated = { id: 6, codeHint: '••••CD34', code: 'AB12CD34', status: 'active' as const, createdAt: '2026-08-16T00:00:00Z', expiresAt: '2026-08-17T00:00:00Z', remainingQuota: 0 };
+    const api = {
+      listInvitations: vi.fn(async () => ({ remainingQuota: 1, invitations: [] })),
+      generateInvitation: vi.fn(async () => generated),
+    };
+    const mounted = mountInvitationView(root, api as unknown as HostedAPI); await mounted.ready;
+    let panel = (root as unknown as Element).children[0];
+    panel.children.find((child) => child.tagName === 'button' && child.textContent === '生成邀请码')?.listeners.get('click')?.();
+    await vi.waitFor(() => {
+      panel = (root as unknown as Element).children[0];
+      expect(panel.children.find((child) => child.tagName === 'dialog')?.className).toBe('hosted-secret-dialog');
+    });
+    const dialog = panel.children.find((child) => child.tagName === 'dialog');
+    expect(dialog?.children.map((element) => element.className)).toEqual([
+      'hosted-secret-dialog-header',
+      'hosted-secret-dialog-value',
+      'hosted-secret-dialog-actions',
+    ]);
+    mounted.dispose();
+  });
   it('renders quota and masked permanent history including revoked rows', async () => {
     const render = vi.fn();
     const api = { listInvitations: vi.fn(async () => ({ remainingQuota: 2, invitations: [{ id: 9, codeHint: '••••WXYZ', status: 'revoked' as const, createdAt: '2026-08-16T00:00:00Z', expiresAt: '2026-08-17T00:00:00Z', revokedAt: '2026-08-16T01:00:00Z' }] })) };

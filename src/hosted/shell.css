@@ -178,9 +178,9 @@ select {
   position: relative;
   display: inline-grid;
   place-items: center;
+  flex: 0 0 clamp(2.25rem, 12vw, 3rem);
   width: clamp(2.25rem, 12vw, 3rem);
-  aspect-ratio: 1;
-  margin-right: 0.45rem;
+  height: clamp(2.25rem, 12vw, 3rem);
   color: #172033;
   font: 700 1.25rem/1 ui-monospace, SFMono-Regular, Consolas, monospace;
   background: #f7f9fc;
@@ -266,8 +266,94 @@ select {
 .hosted-code-control {
   position: relative;
   display: flex;
+  align-items: center;
   justify-content: center;
+  gap: 0.45rem;
+  min-width: 0;
   margin: 1.5rem 0 0.5rem;
+}
+
+.hosted-secret-dialog,
+.hosted-panel .hosted-secret-dialog {
+  width: min(calc(100vw - 2rem), 32rem);
+  margin: auto;
+  padding: clamp(1.25rem, 5vw, 2rem);
+  color: #172033;
+  background: #fff;
+  border: 1px solid #d9dee7;
+  border-radius: 1rem;
+  box-shadow: 0 1.5rem 4rem rgb(13 24 43 / 28%);
+}
+
+.hosted-secret-dialog::backdrop {
+  background: rgb(10 16 28 / 62%);
+  backdrop-filter: blur(3px);
+}
+
+.hosted-secret-dialog-header {
+  display: grid;
+  gap: 0.45rem;
+  margin-bottom: 1.25rem;
+}
+
+.hosted-secret-dialog-header h2,
+.hosted-secret-dialog-header p {
+  margin: 0;
+}
+
+.hosted-secret-dialog-header h2 {
+  font-size: clamp(1.35rem, 5vw, 1.75rem);
+}
+
+.hosted-secret-dialog-header p {
+  color: #647189;
+  line-height: 1.55;
+}
+
+.hosted-panel .hosted-secret-dialog-value,
+.hosted-secret-dialog-value {
+  display: block;
+  width: 100%;
+  padding: 1rem;
+  overflow-wrap: anywhere;
+  color: #172033;
+  font: 750 1.1rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+  text-align: center;
+  user-select: all;
+  background: #f3f6fa;
+  border: 1px solid #cdd6e3;
+  border-radius: 0.75rem;
+}
+
+.hosted-secret-dialog-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+}
+
+.hosted-panel .hosted-secret-dialog-actions button,
+.hosted-secret-dialog-actions button {
+  flex: 1;
+  margin: 0;
+  font-weight: 700;
+}
+
+.hosted-panel .hosted-secret-dialog-primary,
+.hosted-secret-dialog-primary {
+  color: #fff;
+  background: #246bce;
+  border-color: #246bce;
+}
+
+.hosted-panel .hosted-secret-dialog-secondary,
+.hosted-secret-dialog-secondary {
+  color: #26344c;
+  background: #eef2f7;
+  border-color: #d3dae5;
+}
+
+@media (max-width: 34rem) {
+  .hosted-secret-dialog-actions { flex-direction: column; }
 }
 
 .hosted-admin-frame {

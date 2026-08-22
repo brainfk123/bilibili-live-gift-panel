@@ -46,6 +46,7 @@ describe('hosted verification code control', () => {
     expect(input.attributes.get('pattern')).toBe('[0-9]*');
     expect(input.attributes.get('aria-label')).toBe('六位动态验证码');
     expect(root.children.slice(1).every((cell) => cell.attributes.get('aria-hidden') === 'true')).toBe(true);
+    expect(root.className).toBe('hosted-code-control');
     control.dispose();
   });
 

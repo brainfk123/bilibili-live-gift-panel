@@ -10,6 +10,7 @@ export function mountVerificationCode(
   options: { label: string; onComplete(code: string): void },
 ): VerificationCodeControl {
   const document = root.ownerDocument;
+  root.className = [...new Set([...root.className.split(/\s+/).filter(Boolean), 'hosted-code-control'])].join(' ');
   const input = document.createElement('input');
   input.type = 'text';
   input.inputMode = 'numeric';

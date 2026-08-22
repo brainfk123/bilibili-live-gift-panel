@@ -1,5 +1,6 @@
 import type { GeneratedInvitation, InvitationList, InvitationRecord } from './api';
 import type { HostedAPI } from './api';
+import { createOneTimeSecretDialog } from './one-time-secret';
 
 interface InvitationAPI {
   listInvitations?(): Promise<InvitationList>;
@@ -122,13 +123,11 @@ export function mountInvitationView(root: HTMLElement, api: HostedAPI, registrat
       panel.append(logout);
     }
     if (state.revealedCode) {
-      const dialog = document.createElement('dialog'); dialog.setAttribute('aria-labelledby', 'invite-secret-title');
-      const heading = document.createElement('h2'); heading.id = 'invite-secret-title'; heading.textContent = '邀请码仅显示一次';
-      const secret = document.createElement('code'); secret.textContent = state.revealedCode;
-      const copy = document.createElement('button'); copy.type = 'button'; copy.textContent = '复制邀请码'; copy.addEventListener('click', () => { void flow.copy(); });
-      const close = document.createElement('button'); close.type = 'button'; close.textContent = '已保存并关闭'; close.addEventListener('click', () => flow.closeReveal());
-      dialog.addEventListener('cancel', (event) => { event.preventDefault(); flow.closeReveal(); });
-      dialog.append(heading, secret, copy, close); panel.append(dialog); modal = dialog;
+      const dialog = createOneTimeSecretDialog(document, {
+        titleID: 'invite-secret-title', title: '邀请码仅显示一次', value: state.revealedCode, copyLabel: '复制邀请码',
+        onCopy: () => { void flow.copy(); }, onClose: () => flow.closeReveal(),
+      });
+      panel.append(dialog); modal = dialog;
     }
     root.replaceChildren(panel);
     if (modal) {

@@ -44,6 +44,36 @@ function button(root: Element, text: string): Element {
 }
 
 describe('administrator section lifetime fence', () => {
+  it('presents a generated invitation in the styled one-time-secret dialog', async () => {
+    const api = {
+      adminSession: vi.fn(async () => undefined),
+      generateInvitation: vi.fn(async () => ({ code: 'AB12CD34' })),
+    };
+    const document: DocumentLike = {
+      createElement: (tag) => new Element(tag, document),
+      createTextNode: (text) => { const node = new Element('#text', document); node.textContent = text; return node; },
+    };
+    const root = new Element('div', document);
+    const mounted = mountAdminView(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountAdminView>[1]);
+
+    await vi.waitFor(() => expect(button(root, '邀请')).toBeDefined());
+    button(root, '邀请').listeners.get('click')?.();
+    await vi.waitFor(() => expect(button(root, '生成不限额度邀请码')).toBeDefined());
+    button(root, '生成不限额度邀请码').listeners.get('click')?.();
+    await vi.waitFor(() => expect(descendants(root).some((element) => element.tagName === 'dialog')).toBe(true));
+
+    const dialog = descendants(root).find((element) => element.tagName === 'dialog');
+    expect(dialog?.className).toBe('hosted-secret-dialog');
+    expect(dialog?.children.map((element) => element.className)).toEqual([
+      'hosted-secret-dialog-header',
+      'hosted-secret-dialog-value',
+      'hosted-secret-dialog-actions',
+    ]);
+    expect(descendants(dialog as Element).some((element) => element.textContent === '只显示一次，请先复制并妥善保存。')).toBe(true);
+    expect(descendants(dialog as Element).find((element) => element.textContent === '复制邀请码')?.className).toBe('hosted-secret-dialog-primary');
+    await mounted.dispose();
+  });
+
   it('does not let a late account mutation overwrite the next section status', async () => {
     let resolveDisable!: () => void;
     const disablePending = new Promise<void>((resolve) => { resolveDisable = resolve; });
