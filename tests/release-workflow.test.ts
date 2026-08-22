@@ -312,6 +312,7 @@ describe('release workflow supply-chain contract', () => {
   it('builds domestic update identity into the signed executable and ends at a validated GitHub Release', () => {
     const { steps } = releaseWorkflow();
     const build = stepIndex(steps, 'Build release executable');
+    const prepareCli = stepIndex(steps, 'Prepare pinned EVSign CLI for outer executable');
     const sign = stepIndex(steps, 'Prepare and sign release executable');
     const githubRelease = stepIndex(steps, 'Create GitHub release');
     const validate = stepIndex(steps, 'Validate published release assets');
@@ -322,9 +323,13 @@ describe('release workflow supply-chain contract', () => {
       APP_UPDATE_PUBLISHER: '${{ vars.EVSIGN_EXPECTED_SUBJECT }}',
       EVSIGN_EXPECTED_SUBJECT: '${{ vars.EVSIGN_EXPECTED_SUBJECT }}',
     });
-    expect(steps[sign]?.run).toContain(
-      'node scripts/sign-evsign.mjs dist/gift-panel-windows-x64.exe',
-    );
+    expect(build).toBeLessThan(prepareCli);
+    expect(prepareCli).toBeLessThan(sign);
+    expect(steps[prepareCli]?.run).toContain('https://mc.evsign.cn/evsign-client-cli-windows-latest');
+    expect(steps[prepareCli]?.run).toContain('b1b2168a1d0ea757f26db18ac2e2b14e06fb74021f0d67add5e6be1a47dffd97');
+    expect(steps[prepareCli]?.run).toContain('6DCBCC70A507DCAE74135DCB57047CC3365E9F03');
+    expect(steps[sign]?.env?.EVSIGN_CLI_PATH).toBe('${{ runner.temp }}\\evsign-client-1.0.1.exe');
+    expect(steps[sign]?.run).toContain('node scripts/sign-evsign-cli.mjs dist/gift-panel-windows-x64.exe');
     expect(githubRelease).toBeLessThan(validate);
     expect(validate).toBe(steps.length - 1);
   });
