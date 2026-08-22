@@ -77,6 +77,8 @@ COPYING.LGPLv2.1
 
 `source_release_commit` is audit metadata and is not part of the component fingerprint. The same component may therefore be reused by later commits with identical canonical build inputs.
 
+Published component manifests always require `authenticode=true`, a non-empty exact signer Subject, and a real lowercase 40-character release commit. The checked-in unsigned development payload uses the same exact schema with `authenticode=false`, an empty `signer_subject`, and forty zeroes for `source_release_commit`; release verification rejects that development-only state.
+
 The remaining assets preserve the source, source signature, exact build record, toolchain, notice, and LGPL license closure already attached to application Releases. A cache hit downloads them from the component Release so the application Release can continue publishing the same compliance assets without rebuilding FFmpeg.
 
 `SHA256SUMS.txt` contains lowercase SHA-256 values for every other component asset in a strict fixed order and format. GitHub's asset digest, when present, is an additional check and never replaces the repository's own digest checks.
