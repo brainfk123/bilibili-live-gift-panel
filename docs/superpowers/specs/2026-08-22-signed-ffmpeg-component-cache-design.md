@@ -57,6 +57,13 @@ Each component Release contains exactly these release-facing assets:
 ffmpeg.zip
 manifest.json
 SHA256SUMS.txt
+ffmpeg-9.0.tar.xz
+ffmpeg-9.0.tar.xz.asc
+ffmpeg-build-config.txt
+ffmpeg-component-gate.txt
+toolchain-lock.json
+NOTICE.md
+COPYING.LGPLv2.1
 ```
 
 `ffmpeg.zip` remains the deterministic single-file archive consumed by the Go embed path. `manifest.json` extends the existing strict manifest with:
@@ -70,7 +77,9 @@ SHA256SUMS.txt
 
 `source_release_commit` is audit metadata and is not part of the component fingerprint. The same component may therefore be reused by later commits with identical canonical build inputs.
 
-`SHA256SUMS.txt` contains lowercase SHA-256 values for `ffmpeg.zip` and `manifest.json` in a strict fixed format. GitHub's asset digest, when present, is an additional check and never replaces the repository's own digest checks.
+The remaining assets preserve the source, source signature, exact build record, toolchain, notice, and LGPL license closure already attached to application Releases. A cache hit downloads them from the component Release so the application Release can continue publishing the same compliance assets without rebuilding FFmpeg.
+
+`SHA256SUMS.txt` contains lowercase SHA-256 values for every other component asset in a strict fixed order and format. GitHub's asset digest, when present, is an additional check and never replaces the repository's own digest checks.
 
 The component Release is published, non-draft, and non-prerelease. Existing assets are never replaced with `--clobber`. A tag or Release that already exists but is incomplete, draft, prerelease, duplicated, or inconsistent is an integrity failure requiring manual recovery.
 
@@ -101,6 +110,7 @@ A component cache hit is accepted only when all of the following pass:
 - exact canonical component tag and published Release state;
 - exactly one asset of each required name and no conflicting duplicate name;
 - `SHA256SUMS.txt`, manifest hashes, archive hash, binary hash, size, and available GitHub asset digests agree;
+- source archive, detached signature, build config, component gate, toolchain lock, notice, and license hashes agree with `SHA256SUMS.txt`, and checked-in policy files equal their downloaded canonical counterparts;
 - manifest has only the allowed schema-1 keys with correct JSON types;
 - manifest fingerprint equals the locally calculated fingerprint;
 - descriptor hash and every descriptor field equal the locally calculated checked-in build inputs;
@@ -178,6 +188,7 @@ The Go embed file contract remains `goserver/ffmpeg/ffmpeg.zip` plus `goserver/f
 - Canonical descriptor serialization and stable fingerprint fixture.
 - Fingerprint changes for each build-defining input and remains independent of application version and commit.
 - Strict manifest keys/types and checksum closure.
+- Compliance closure rejects a missing, renamed, duplicated, reordered-checksum, or digest-mismatched source, toolchain, build-record, notice, or license asset.
 - Cache hit accepts a valid signed fixture and rejects wrong fingerprint, descriptor, archive, binary, component gate, signer, or runtime surface.
 - Go payload parsing accepts the exact schema-1 manifest and rejects a missing, duplicated, mistyped, unknown, or inconsistent component field.
 - A found-but-invalid Release never enters the cache-miss signing path.
@@ -206,7 +217,7 @@ On the first post-change release with the current FFmpeg inputs:
 
 On a second synthetic or real release with unchanged FFmpeg inputs:
 
-- observe the same fingerprint, component cache hit, no MSYS2 setup or FFmpeg compilation, zero FFmpeg EV signing calls, successful Authenticode and runtime verification of the downloaded component, and successful application packaging.
+- observe the same fingerprint, component cache hit, no MSYS2 setup or FFmpeg compilation, zero FFmpeg EV signing calls, successful Authenticode and runtime verification of the downloaded component, preservation of all application Release FFmpeg compliance assets, and successful application packaging.
 
 Change one canonical FFmpeg build input in an isolated test fixture:
 
