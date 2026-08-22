@@ -1,5 +1,6 @@
 export const REQUIRED_COMPONENT_ASSETS: readonly string[];
 export function buildChecksumManifest(files: Map<string, Buffer>): Buffer;
+export function writePreparedComponentAssets(outputDirectory: string, files: Map<string, Buffer>): Promise<void>;
 export function verifyChecksumManifest(directory: string): Promise<void>;
 export function verifyGitHubReleaseMetadata(metadata: Record<string, unknown>, directory: string, expectedTag: string): Promise<void>;
 export function verifyComponentMetadata(manifest: Record<string, unknown>, identity: { descriptor: Buffer; descriptorSha256: string; fingerprint: string }, expectedSigner: string): void;
