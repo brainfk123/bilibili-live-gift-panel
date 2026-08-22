@@ -1,7 +1,7 @@
 {
   "name": "bilibili-live-gift-panel",
   "private": true,
-  "version": "0.4.4",
+  "version": "0.4.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,6 +12,7 @@
     "build:ffmpeg": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-ffmpeg.ps1",
     "package:ffmpeg": "node scripts/package-ffmpeg.mjs",
     "verify:ffmpeg": "node scripts/verify-ffmpeg.mjs",
+    "ffmpeg:component": "node scripts/ffmpeg-component-assets.mjs",
     "verify:go-linux-compile": "node scripts/verify-go-linux-compile.mjs",
     "verify:frontend-display-only": "node scripts/verify-frontend-display-only.mjs",
     "verify:gift-clip-export": "node scripts/verify-gift-clip-export.mjs",

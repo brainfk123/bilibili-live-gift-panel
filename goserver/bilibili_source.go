@@ -248,10 +248,12 @@ func (source *bilibiliGiftSource) runSocket(ctx context.Context, connection bili
 				}
 			}
 			for _, body := range bodies {
-				gift, reason, giftOK := parseBiliGiftDetailed(body)
+				gifts, reason, giftOK := parseBiliGiftEventsDetailed(body)
 				if giftOK {
 					if callbacks.onGift != nil {
-						callbacks.onGift(enrichGiftAnimationFromRoomCatalog(gift, catalogByID))
+						for _, gift := range gifts {
+							callbacks.onGift(enrichGiftAnimationFromRoomCatalog(gift, catalogByID))
+						}
 					}
 					continue
 				}
@@ -353,16 +355,36 @@ func parseBiliGift(body []byte) (giftEvent, bool) {
 }
 
 func parseBiliGiftDetailed(body []byte) (giftEvent, string, bool) {
+	gifts, reason, ok := parseBiliGiftEventsDetailed(body)
+	if !ok || len(gifts) == 0 {
+		return giftEvent{}, reason, false
+	}
+	return gifts[0], reason, true
+}
+
+func parseBiliGiftEventsDetailed(body []byte) ([]giftEvent, string, bool) {
 	var envelope struct {
 		Command string          `json:"cmd"`
 		Data    json.RawMessage `json:"data"`
 	}
 	if json.Unmarshal(body, &envelope) != nil {
-		return giftEvent{}, "malformed_envelope", false
+		return nil, "malformed_envelope", false
 	}
-	if envelope.Command != "SEND_GIFT" {
-		return giftEvent{}, "ignored_command", false
+	switch envelope.Command {
+	case "SEND_GIFT":
+		gift, reason, ok := parseLegacyBiliGiftData(envelope.Data)
+		if !ok {
+			return nil, reason, false
+		}
+		return []giftEvent{gift}, reason, true
+	case "SEND_GIFT_V2":
+		return parseBiliGiftV2Data(envelope.Data)
+	default:
+		return nil, "ignored_command", false
 	}
+}
+
+func parseLegacyBiliGiftData(raw json.RawMessage) (giftEvent, string, bool) {
 	var data struct {
 		GiftID            int     `json:"giftId"`
 		BlindGiftID       biliUID `json:"blind_gift_id"`
@@ -398,7 +420,7 @@ func parseBiliGiftDetailed(body []byte) (giftEvent, string, bool) {
 		} `json:"gift_info"`
 		SenderUinfo biliSenderUinfo `json:"sender_uinfo"`
 	}
-	if json.Unmarshal(envelope.Data, &data) != nil {
+	if json.Unmarshal(raw, &data) != nil {
 		return giftEvent{}, "malformed_gift_data", false
 	}
 	if data.BlindGiftID <= 0 {
@@ -448,6 +470,85 @@ func parseBiliGiftDetailed(body []byte) (giftEvent, string, bool) {
 		EffectID: data.GiftInfo.EffectID,
 		Rnd:      rnd,
 	}, "SEND_GIFT", true
+}
+
+func parseBiliGiftV2Data(raw json.RawMessage) ([]giftEvent, string, bool) {
+	var data struct {
+		UID        biliUID `json:"uid"`
+		Uname      string  `json:"uname"`
+		Face       string  `json:"face"`
+		Timestamp  int64   `json:"timestamp"`
+		CoinType   string  `json:"coin_type"`
+		GuardLevel int     `json:"guard_level"`
+		MedalInfo  struct {
+			MedalName  string `json:"medal_name"`
+			MedalLevel int    `json:"medal_level"`
+		} `json:"medal_info"`
+		SenderUinfo biliSenderUinfo `json:"sender_uinfo"`
+		BlindGift   struct {
+			OriginalGiftID    biliUID `json:"original_gift_id"`
+			OriginalGiftName  string  `json:"original_gift_name"`
+			OriginalGiftPrice float64 `json:"original_gift_price"`
+			GiftTipPrice      float64 `json:"gift_tip_price"`
+		} `json:"blind_gift"`
+		GiftList []struct {
+			TID       json.RawMessage `json:"tid"`
+			GiftID    int             `json:"gift_id"`
+			GiftName  string          `json:"gift_name"`
+			GiftPrice float64         `json:"gift_price"`
+			GiftNum   int             `json:"gift_num"`
+			GiftInfo  struct {
+				ImgBasic string `json:"img_basic"`
+				GIF      string `json:"gif"`
+				WebP     string `json:"webp"`
+				EffectID int    `json:"effect_id"`
+			} `json:"gift_info"`
+		} `json:"gift_list"`
+	}
+	if json.Unmarshal(raw, &data) != nil || len(data.GiftList) == 0 {
+		return nil, "malformed_gift_data", false
+	}
+	uid := int64(data.UID)
+	if uid <= 0 {
+		uid = int64(data.SenderUinfo.UID)
+	}
+	uname := strings.TrimSpace(data.Uname)
+	for _, candidate := range []string{data.SenderUinfo.Base.Name, data.SenderUinfo.Base.OriginInfo.Name} {
+		if isMaskedUsername(uname) && !isMaskedUsername(candidate) {
+			uname = strings.TrimSpace(candidate)
+		}
+	}
+	avatar := strings.TrimSpace(data.SenderUinfo.Base.Face)
+	if avatar == "" {
+		avatar = strings.TrimSpace(data.SenderUinfo.Base.OriginInfo.Face)
+	}
+	if avatar == "" {
+		avatar = strings.TrimSpace(data.Face)
+	}
+	parentPrice := firstPositiveFloat(data.BlindGift.OriginalGiftPrice, data.BlindGift.GiftTipPrice)
+	membership := biliMembership(firstPositiveInt(data.GuardLevel, data.SenderUinfo.Guard.Level), firstNonEmptyEventField(data.MedalInfo.MedalName, data.SenderUinfo.Medal.Name))
+	gifts := make([]giftEvent, 0, len(data.GiftList))
+	for index, item := range data.GiftList {
+		if item.GiftID <= 0 || strings.TrimSpace(item.GiftName) == "" {
+			return nil, "malformed_gift_data", false
+		}
+		if item.GiftNum < 1 {
+			item.GiftNum = 1
+		}
+		rnd := strings.Trim(strings.TrimSpace(string(item.TID)), `"`)
+		if rnd == "" || rnd == "null" {
+			rnd = fmt.Sprintf("%d-%d-%d-%d", data.Timestamp, uid, item.GiftID, index)
+		}
+		gifts = append(gifts, giftEvent{
+			GiftID: item.GiftID, GiftName: item.GiftName, Num: item.GiftNum, Price: item.GiftPrice,
+			BlindGiftID: int(data.BlindGift.OriginalGiftID), BlindGiftName: strings.TrimSpace(data.BlindGift.OriginalGiftName), BlindGiftPrice: parentPrice,
+			CoinType: data.CoinType, TotalCoin: item.GiftPrice * float64(item.GiftNum), Uname: uname, Avatar: avatar, UID: uid,
+			Timestamp: data.Timestamp, ImgBasic: item.GiftInfo.ImgBasic, Membership: membership,
+			AnimationGIF: strings.TrimSpace(item.GiftInfo.GIF), AnimationWebP: strings.TrimSpace(item.GiftInfo.WebP), EffectID: item.GiftInfo.EffectID,
+			Rnd: rnd,
+		})
+	}
+	return gifts, "SEND_GIFT_V2", true
 }
 
 func (source *bilibiliGiftSource) recordDiagnostic(event string, keyValues ...any) {

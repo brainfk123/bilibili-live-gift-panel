@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
@@ -80,7 +81,7 @@ func (presence *pagePresence) handleStream(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("X-Accel-Buffering", "no")
 	closePage := presence.register(mode)
 	defer closePage()
-	_, _ = fmt.Fprint(w, "retry: 500\nevent: ready\ndata: {}\n\n")
+	_, _ = fmt.Fprint(w, pagePresenceReadyEvent(appVersion))
 	flusher.Flush()
 
 	keepAlive := time.NewTicker(15 * time.Second)
@@ -96,6 +97,11 @@ func (presence *pagePresence) handleStream(w http.ResponseWriter, r *http.Reques
 			flusher.Flush()
 		}
 	}
+}
+
+func pagePresenceReadyEvent(version string) string {
+	payload, _ := json.Marshal(map[string]string{"version": version})
+	return fmt.Sprintf("retry: 500\nevent: ready\ndata: %s\n\n", payload)
 }
 
 func (presence *pagePresence) register(mode pageMode) func() {

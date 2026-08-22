@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -13,12 +14,19 @@ const (
 	notificationDisplayPagesClosed notificationKind = "display-pages-closed"
 	notificationRoomConnected      notificationKind = "room-connected"
 	notificationRoomDisconnected   notificationKind = "room-disconnected"
+	notificationRoomSwitched       notificationKind = "room-switched"
 	notificationUpdateSucceeded    notificationKind = "update-succeeded"
 )
 
 type desktopNotification struct {
-	Title string
-	Body  string
+	Title   string
+	Body    string
+	IconURL string
+}
+
+type roomNotificationProfile struct {
+	Name      string
+	AvatarURL string
 }
 
 type notificationCenter struct {
@@ -35,7 +43,13 @@ func (center *notificationCenter) Publish(kind notificationKind, roomID string) 
 	if center == nil {
 		return
 	}
-	notification := makeDesktopNotification(kind, roomID)
+	center.PublishNotification(makeDesktopNotification(kind, roomID))
+}
+
+func (center *notificationCenter) PublishNotification(notification desktopNotification) {
+	if center == nil {
+		return
+	}
 	center.mu.Lock()
 	sink := center.sink
 	if sink == nil {
@@ -95,12 +109,12 @@ func makeDesktopNotification(kind notificationKind, roomID string) desktopNotifi
 	case notificationRoomConnected:
 		return desktopNotification{
 			Title: "直播间连接成功",
-			Body:  fmt.Sprintf("已连接直播间 %s，后台正在接收礼物消息。", roomID),
+			Body:  "已连接直播间主播，后台正在接收礼物消息。",
 		}
 	case notificationRoomDisconnected:
 		return desktopNotification{
 			Title: "直播间连接已断开",
-			Body:  fmt.Sprintf("直播间 %s 的连接已断开，后台将根据当前配置继续尝试连接。", roomID),
+			Body:  "与直播间主播的连接已断开，后台将根据当前配置继续尝试连接。",
 		}
 	case notificationUpdateSucceeded:
 		return desktopNotification{
@@ -109,5 +123,35 @@ func makeDesktopNotification(kind notificationKind, roomID string) desktopNotifi
 		}
 	default:
 		return desktopNotification{Title: "直播礼物面板", Body: "后台状态已更新。"}
+	}
+}
+
+func makeRoomDesktopNotification(kind notificationKind, current, previous roomNotificationProfile) desktopNotification {
+	currentName := strings.TrimSpace(current.Name)
+	if currentName == "" {
+		currentName = "直播间主播"
+	}
+	previousName := strings.TrimSpace(previous.Name)
+	if previousName == "" {
+		previousName = "原直播间主播"
+	}
+	switch kind {
+	case notificationRoomConnected:
+		return desktopNotification{
+			Title: "直播间连接成功", Body: fmt.Sprintf("已连接「%s」，后台正在接收礼物消息。", currentName),
+			IconURL: strings.TrimSpace(current.AvatarURL),
+		}
+	case notificationRoomDisconnected:
+		return desktopNotification{
+			Title: "直播间连接已断开", Body: fmt.Sprintf("与「%s」的连接已断开，后台将继续尝试连接。", currentName),
+			IconURL: strings.TrimSpace(current.AvatarURL),
+		}
+	case notificationRoomSwitched:
+		return desktopNotification{
+			Title: "直播间已切换", Body: fmt.Sprintf("已从「%s」切换至「%s」，后台正在接收礼物消息。", previousName, currentName),
+			IconURL: strings.TrimSpace(current.AvatarURL),
+		}
+	default:
+		return makeDesktopNotification(kind, "")
 	}
 }

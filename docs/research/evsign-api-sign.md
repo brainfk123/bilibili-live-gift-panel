@@ -158,3 +158,19 @@ jobs:
 6. 错误处理：200 成功，其余失败且响应体为文本错误；CLI 返回码 0/1。
 7. 限流：官方文档未公布限流/配额，需自做保守重试与并发控制；X-Key 视为敏感凭证，仅经 Secrets 注入。
 8. GitHub Actions：build →（可选 artifact）→ 单次 POST 签名 → 按状态码判定 → 上传签名产物；大文件走官方 CLI。
+
+## 10. 本项目的签名重试与 FFmpeg 组件复用
+
+本项目的 `scripts/sign-evsign.mjs` 使用自管 HTTPS deadline，避免 Node `fetch` 内部约 5 分钟的 headers timeout 早于外层中止计时器。默认策略固定为：
+
+- 最多 3 次；每次总 deadline 10 分钟；第 2、3 次前等待 15 秒、45 秒。
+- 仅重试 DNS/连接/TLS 中断、超时、HTTP 408、429 与 5xx。
+- 其他 4xx、空响应、超限响应和本地文件错误立即失败。
+- 每次上传原始未签名字节；完整 200 响应先写唯一临时文件，再原子替换目标。
+- 日志不输出许可证、密码、证书选择器、请求头、响应正文或文件内容。
+
+EV Sign 公开 API 文档没有幂等键或签名任务查询接口。因此服务端已经完成、客户端却丢失响应时，重试可能产生额外签名记录；客户端只能保证本地产物原子性，不能宣称服务端 exactly-once。
+
+固定 FFmpeg 采用不可变组件 Release：标签为 `ffmpeg-component-v1-<64位指纹>`。指纹覆盖源码、SOURCE_DATE_EPOCH、configure、工具链锁和组件策略。缓存命中时跳过 MSYS2、FFmpeg 编译和内层签名；下载的所有组件资产必须先通过 GitHub artifact attestation、SHA-256 闭包、严格 manifest、组件门禁、Authenticode 精确签名者和真实 FFmpeg 运行面验证。
+
+组件 Release 不允许覆盖或 `--clobber`。已存在但不完整、校验失败或证明失败时，发布立即停止并要求人工恢复；不得静默改走重新构建。只有 GitHub API 对精确组件标签返回 404 才能进入首次构建/签名路径。

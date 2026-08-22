@@ -181,7 +181,7 @@ func TestDomesticUpdateURLRejectsUnsafeBaseURLs(t *testing.T) {
 	}
 }
 
-func TestAutomaticUpdateWaitsUntilBackgroundIsIdle(t *testing.T) {
+func TestAutomaticUpdateRunsWhileAPageIsOpen(t *testing.T) {
 	binary := []byte("idle update executable")
 	digestBytes := sha256.Sum256(binary)
 	digest := hex.EncodeToString(digestBytes[:])
@@ -212,27 +212,19 @@ func TestAutomaticUpdateWaitsUntilBackgroundIsIdle(t *testing.T) {
 		UpdatesDir: filepath.Join(root, "updates"), AssetName: updateAssetName, CheckPeriod: time.Hour,
 		ReleaseSources: []updateReleaseSource{{Name: "GitHub", URL: server.URL + "/release", GitHub: true}},
 	})
-	var idle atomic.Bool
 	ready := make(chan string, 1)
-	updater.SetAutomaticAllowed(idle.Load)
 	updater.SetOnReady(func(version string) { ready <- version })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go updater.Run(ctx)
 
-	time.Sleep(40 * time.Millisecond)
-	if got := requests.Load(); got != 0 {
-		t.Fatalf("automatic update made %d request(s) while a page was open", got)
-	}
-	idle.Store(true)
-	updater.NotifyIdle()
 	select {
 	case version := <-ready:
 		if version != "1.1.0" {
 			t.Fatalf("ready version = %q", version)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("idle automatic update did not download")
+		t.Fatal("automatic update did not download while a page was open")
 	}
 	if status := updater.Status(); status.State != "ready" || !status.RestartRequired {
 		t.Fatalf("status = %#v", status)

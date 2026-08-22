@@ -49,6 +49,11 @@ export interface UpdateStatus {
 
 export type PagePresenceMode = 'config' | 'display';
 
+export interface PagePresenceCallbacks {
+  onUnavailable?: () => void;
+  onReady?: (version: string) => void;
+}
+
 export type BiliAuthState = 'anonymous' | 'waiting' | 'scanned' | 'logged_in' | 'expired' | 'error';
 
 export interface BiliAuthStatus {
@@ -70,14 +75,24 @@ export interface RoomAnchorInfo {
   avatar?: string;
 }
 
-export function startPagePresence(mode: PagePresenceMode): () => void {
+export function startPagePresence(mode: PagePresenceMode, callbacks: PagePresenceCallbacks = {}): () => void {
   const EventSourceConstructor = globalThis.EventSource;
   if (typeof EventSourceConstructor !== 'function') return () => {};
   const sessionID = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const url = `/api/pages/presence/stream?mode=${mode}&id=${encodeURIComponent(sessionID)}`;
   let source: EventSource | undefined;
   const connect = (): void => {
-    if (!source) source = new EventSourceConstructor(url);
+    if (source) return;
+    source = new EventSourceConstructor(url);
+    source.onerror = () => callbacks.onUnavailable?.();
+    source.addEventListener('ready', (event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent<string>).data) as { version?: unknown };
+        if (typeof payload.version === 'string' && payload.version.trim()) callbacks.onReady?.(payload.version.trim());
+      } catch {
+        // A malformed readiness event must not break EventSource reconnection.
+      }
+    });
   };
   const disconnect = (): void => {
     source?.close();

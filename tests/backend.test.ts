@@ -366,6 +366,8 @@ describe('page presence', () => {
     class FakeEventSource {
       close = vi.fn();
 
+      addEventListener(): void {}
+
       constructor(readonly url: string) {
         opened.push({ url, close: this.close });
       }
@@ -386,6 +388,33 @@ describe('page presence', () => {
 
     stop();
     expect(opened[1].close).toHaveBeenCalledOnce();
+  });
+
+  it('reports temporary server loss and the backend version on every ready event', () => {
+    const listeners = new Map<string, (event: { data?: string }) => void>();
+    class FakeEventSource {
+      static last: FakeEventSource | undefined;
+      close = vi.fn();
+      onerror: (() => void) | null = null;
+
+      constructor() {
+        FakeEventSource.last = this;
+      }
+
+      addEventListener(name: string, listener: (event: { data?: string }) => void): void {
+        listeners.set(name, listener);
+      }
+    }
+    vi.stubGlobal('EventSource', FakeEventSource);
+    const onUnavailable = vi.fn();
+    const onReady = vi.fn();
+
+    startPagePresence('display', { onUnavailable, onReady });
+    listeners.get('ready')?.({ data: JSON.stringify({ version: '0.4.5' }) });
+    expect(onReady).toHaveBeenCalledWith('0.4.5');
+
+    FakeEventSource.last?.onerror?.();
+    expect(onUnavailable).toHaveBeenCalledOnce();
   });
 });
 

@@ -1239,3 +1239,17 @@ func TestListenWithFallbackUsesRequestedPortWhenAvailable(t *testing.T) {
 		t.Fatalf("selected port %d, want %d", selected, port)
 	}
 }
+
+func TestUpdateReadyRequestsInstallWithoutConsultingPagePresence(t *testing.T) {
+	updateExit := make(chan struct{}, 1)
+	handler := updateReadyExitHandler(updateExit)
+
+	handler("0.4.5")
+	select {
+	case <-updateExit:
+	default:
+		t.Fatal("ready update did not request installation")
+	}
+	// Repeated readiness notifications must remain non-blocking and coalesce.
+	handler("0.4.5")
+}

@@ -1734,6 +1734,62 @@ describe('single-page configuration rendering', () => {
     expect(textOf(searchedById.get(String(manualGift.id))?.querySelector('.gift-listing-status')!)).toBe('历史礼物');
   });
 
+  it('shows a matched blind box and every reward as independently selectable search results', async () => {
+    const parent = {
+      id: 35786, name: '七夕鹊匣', price: 25000, coinType: 'gold' as const, imgBasic: 'parent.png', listed: true,
+    };
+    const firstReward = {
+      id: 35787, name: '月下牵丝', price: 5000, coinType: 'gold' as const, imgBasic: 'one.png', listed: true,
+      blindBoxParentId: parent.id, blindBoxParentName: parent.name, blindBoxParentPrice: parent.price,
+    };
+    const secondReward = {
+      id: 35788, name: '锦书传意', price: 19000, coinType: 'gold' as const, imgBasic: 'two.png', listed: true,
+      blindBoxParentId: parent.id, blindBoxParentName: parent.name, blindBoxParentPrice: parent.price,
+    };
+    const unrelated = {
+      id: 999001, name: '普通礼物', price: 1000, coinType: 'gold' as const, imgBasic: 'other.png', listed: true,
+    };
+    await saveState({
+      ...state('88888888'),
+      settings: { ...defaultState().settings, showTutorial: false, configExperience: 'advanced' },
+    });
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/attribute-edits/session') return preparedSessionFixture(init);
+      if (url === '/api/attribute-edit-lease') {
+        return Response.json(init?.method === 'POST' ? { code: 0, token: 'A'.repeat(24) } : { code: 0 });
+      }
+      if (url === '/api/config' && !init?.method) return Response.json(loadState());
+      if (url === '/api/gifts?roomId=88888888') {
+        return Response.json({ code: 0, gifts: [secondReward, unrelated, parent, firstReward] });
+      }
+      if (url.includes('/api/runtime')) return Response.json({ code: 0, runtime: { state: 'idle', roomId: '' } });
+      if (url.includes('/api/auth/status')) return Response.json({ code: 0, auth: { state: 'anonymous' } });
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/gifts?roomId=88888888', { cache: 'no-store' }));
+    await openExistingAttributeEditor(root);
+
+    const search = root.querySelector('.gift-search') as TestElement & { oninput?: () => void };
+    search.value = parent.name;
+    search.oninput?.();
+
+    const choices = root.querySelectorAll('.gift-choice');
+    expect(choices.map((choice) => choice.dataset.giftId)).toEqual([
+      String(parent.id), String(secondReward.id), String(firstReward.id),
+    ]);
+    expect(choices.some((choice) => choice.dataset.giftId === String(unrelated.id))).toBe(false);
+
+    const firstRewardChoice = choices.find((choice) => choice.dataset.giftId === String(firstReward.id));
+    firstRewardChoice?.onclick?.();
+    const selectedRules = root.querySelectorAll('.selected-gift-rule');
+    expect(selectedRules.some((rule) => rule.dataset.giftId === String(firstReward.id))).toBe(true);
+    expect(selectedRules.some((rule) => rule.dataset.giftId === String(parent.id))).toBe(false);
+  });
+
   it('uses themed scrollbars and keeps focused inputs inside their existing border', () => {
     const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
 
@@ -2150,13 +2206,13 @@ describe('single-page configuration rendering', () => {
     const dialog = root.querySelector('.changelog-dialog');
     expect(dialog).not.toBeNull();
     expect(textOf(dialog!)).toContain('这次更新了什么？');
-    expect(textOf(dialog!)).toContain('属性编辑与规则体验升级');
-    expect(textOf(dialog!)).toContain('属性编辑现在采用原子保存并支持更直观的时间输入；新增用户身份与随机公式能力，同时提升本地恢复和礼物视频导出的可靠性。');
+    expect(textOf(dialog!)).toContain('盲盒榜与房间切换体验修复');
+    expect(textOf(dialog!)).toContain('盲盒盈亏榜现在会在收到礼物后自动刷新；切换直播间时只显示一条包含主播名称和头像的通知，不再暴露房间号。');
     expect(root.querySelectorAll('.changelog-visual')).toHaveLength(0);
     expect(textOf(dialog!)).not.toContain('训练中心');
     (root.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
 
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.4'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.6'));
     expect(root.querySelector('.changelog-dialog')).toBeNull();
   });
 
@@ -2197,7 +2253,7 @@ describe('single-page configuration rendering', () => {
         return Response.json({
           code: 0,
           update: {
-            state: 'up-to-date', currentVersion: '0.4.4', latestVersion: '0.4.4',
+            state: 'up-to-date', currentVersion: '0.4.6', latestVersion: '0.4.6',
             message: '当前已经是最新版本。', autoUpdate: true, restartRequired: false,
           },
         });
@@ -2215,7 +2271,7 @@ describe('single-page configuration rendering', () => {
     mountConfig(firstRoot as unknown as HTMLElement);
     await vi.waitFor(() => expect(firstRoot.querySelector('.changelog-dialog')).not.toBeNull());
     (firstRoot.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.4'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.6'));
 
     const secondRoot = new TestElement('div');
     mountConfig(secondRoot as unknown as HTMLElement);
@@ -4269,6 +4325,70 @@ describe('single-page configuration rendering', () => {
     await vi.waitFor(() => expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('scope A 成功观众'));
     expect(textOf(root.querySelector('.blind-box-scope-trigger') as TestElement)).toContain('scope A');
     expect(textOf(root.querySelector('.blind-box-scope-bar') as TestElement)).toContain('scope A · 1 位观众 · 1 个 · 投入 9 元 · 开出 12 元 · 净盈亏 +3 元');
+  });
+
+  it('refreshes the applied blind-box scope when backend contributions change', async () => {
+    vi.useFakeTimers();
+    const configured = defaultAdvancedState();
+    configured.settings.showTutorial = false;
+    configured.contributions = {
+      updatedAt: 1,
+      viewers: [{
+        key: 'uid:1', uid: 1, uname: '旧观众', avatar: '', giftCount: 1, goldValue: 9_000, silverValue: 0,
+        ruleTriggers: 0, attributeDeltas: {}, blindBoxCount: 1, blindBoxCost: 9_000,
+        blindBoxValue: 12_000, blindBoxProfit: 3_000, lastGiftAt: 1,
+      }],
+    };
+    await saveState(configured);
+    let serverState = JSON.parse(JSON.stringify(configured));
+    let leaderboardRequest = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === '/api/config') return Response.json(serverState);
+      if (url.includes('/api/blind-box/leaderboard')) {
+        leaderboardRequest += 1;
+        const fresh = leaderboardRequest > 1;
+        return Response.json({
+          code: 0,
+          leaderboard: {
+            updatedAt: fresh ? 2 : 1,
+            summary: {
+              viewerCount: 1, blindBoxCount: fresh ? 2 : 1, cost: fresh ? 18_000 : 9_000,
+              value: fresh ? 30_000 : 12_000, profit: fresh ? 12_000 : 3_000, unpricedCount: 0,
+            },
+            viewers: [{
+              ...serverState.contributions.viewers[0],
+              uname: fresh ? '新礼物观众' : '旧观众',
+              blindBoxCount: fresh ? 2 : 1,
+              blindBoxCost: fresh ? 18_000 : 9_000,
+              blindBoxValue: fresh ? 30_000 : 12_000,
+              blindBoxProfit: fresh ? 12_000 : 3_000,
+            }],
+            scopes: [{ giftId: 990001, giftName: '心动盲盒', count: fresh ? 2 : 1, lastGiftAt: fresh ? 2 : 1 }],
+          },
+        });
+      }
+      if (url.includes('/api/runtime')) return Response.json({ code: 0, runtime: { state: 'connected', roomId: 'room-a' } });
+      if (url.includes('/api/auth/status')) return Response.json({ code: 0, auth: { state: 'anonymous' } });
+      return new Response(null, { status: 204 });
+    }));
+
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+    await vi.advanceTimersByTimeAsync(0);
+    root.querySelectorAll('.contribution-tab')[2].onclick?.();
+    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('旧观众');
+
+    serverState = JSON.parse(JSON.stringify(configured));
+    serverState.contributions.updatedAt = 2;
+    serverState.contributions.viewers[0].giftCount = 2;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(leaderboardRequest).toBe(2);
+    expect(textOf(root.querySelector('.contribution-list-host') as TestElement)).toContain('新礼物观众');
+    vi.clearAllTimers();
+    vi.useRealTimers();
   });
 
   it('reserves enough horizontal space for the complete blind-box scope name', () => {
