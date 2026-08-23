@@ -8,8 +8,10 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
 	"errors"
 	"io"
+	"net"
 	"net/mail"
 	"strconv"
 	"strings"
@@ -31,6 +33,8 @@ const (
 	emailCodeAttempts                    = 5
 	emailLoginSessionVerificationTimeout = 2 * time.Second
 	operationAuthorizationTTL            = 5 * time.Minute
+	administratorSessionTouchInterval    = 5 * time.Minute
+	maximumAdministratorLoginEvents      = 50
 )
 
 var (
@@ -40,6 +44,8 @@ var (
 	ErrRecentTOTPRequired    = security.ErrSensitiveRecentTOTPRequired
 	ErrUnavailable           = errors.New("admin identity: unavailable")
 	ErrArchiveAuthentication = errors.New("admin identity: archive authentication failed")
+	ErrCurrentAdminSession   = errors.New("admin identity: current session cannot be revoked")
+	ErrAdminSessionNotFound  = errors.New("admin identity: session not found")
 )
 
 type IdentityRecord struct {
@@ -62,6 +68,29 @@ type AdminSession struct {
 	ExpiresAt       time.Time
 	TOTPVerifiedAt  time.Time
 	Revoked         bool
+}
+
+// AdministratorSession is the privacy-bounded projection used by session
+// inventory consumers. It intentionally contains neither the session token nor
+// its hash.
+type AdministratorSession struct {
+	PublicID      string
+	DeviceLabel   string
+	ClientNetwork string
+	CreatedAt     time.Time
+	LastSeenAt    time.Time
+	ExpiresAt     time.Time
+	Current       bool
+}
+
+// AdministratorLoginEvent is the bounded login audit projection. Result is
+// restricted to success or failure and client metadata must already be safely
+// summarized.
+type AdministratorLoginEvent struct {
+	Result        string
+	DeviceLabel   string
+	ClientNetwork string
+	OccurredAt    time.Time
 }
 
 type EmailLoginSessionAttempt struct {
@@ -175,6 +204,18 @@ type Repository interface {
 	FindSession(context.Context, []byte, time.Time) (AdminSession, error)
 	RevokeSession(context.Context, []byte, time.Time) error
 	ConfirmTOTP(context.Context, ConfirmTOTPAttempt) error
+}
+
+// AdministratorSessionRepository is the persistence contract consumed by the
+// session inventory and login-audit services. It is separate from Repository
+// so existing identity-only test doubles do not need unrelated operations.
+type AdministratorSessionRepository interface {
+	CreateAdminSession(context.Context, EmailLoginSessionAttempt, ClientSummary) (AdministratorSession, error)
+	TouchAdminSession(context.Context, []byte, time.Time) error
+	ListAdminSessions(context.Context, []byte, time.Time) ([]AdministratorSession, error)
+	RevokeAdminSession(context.Context, []byte, string, time.Time) error
+	RecordAdminLoginEvent(context.Context, AdministratorLoginEvent) error
+	ListAdminLoginEvents(context.Context, int) ([]AdministratorLoginEvent, error)
 }
 
 type sensitiveSessionRepository interface {
@@ -390,6 +431,222 @@ func (repository *SQLRepository) RevokeSession(ctx context.Context, tokenHash []
 		return ErrUnavailable
 	}
 	return nil
+}
+
+// CreateAdminSession persists a new administrator session together with the
+// allowlisted client summary and returns only its public projection.
+func (repository *SQLRepository) CreateAdminSession(ctx context.Context, attempt EmailLoginSessionAttempt, summary ClientSummary) (AdministratorSession, error) {
+	if !repository.ready() || !validEmailLoginSessionAttempt(attempt) || !validClientSummary(summary) {
+		return AdministratorSession{}, ErrInvalidInput
+	}
+	attempt.TokenHash = bytes.Clone(attempt.TokenHash)
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AdministratorSession{}, ErrUnavailable
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	epoch, err := lockAdminEpoch(ctx, transaction)
+	if err != nil {
+		return AdministratorSession{}, err
+	}
+	if epoch != attempt.ExpectedCredentialEpoch {
+		return AdministratorSession{}, ErrAuthenticationFailed
+	}
+	result, err := transaction.ExecContext(ctx,
+		"INSERT INTO site_sessions (admin_identity_id, token_hash, credential_epoch, device_label, client_network, created_at, last_seen_at, expires_at, totp_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+		int64(1), attempt.TokenHash, attempt.ExpectedCredentialEpoch, summary.DeviceLabel, summary.ClientNetwork, attempt.CreatedAt, attempt.CreatedAt, attempt.ExpiresAt,
+	)
+	if err != nil || !oneRow(result) {
+		return AdministratorSession{}, ErrUnavailable
+	}
+	sessionID, err := result.LastInsertId()
+	if err != nil || sessionID <= 0 {
+		return AdministratorSession{}, ErrUnavailable
+	}
+	const query = "SELECT HEX(public_id), device_label, client_network, created_at, last_seen_at, expires_at FROM site_sessions WHERE id = ? AND admin_identity_id = 1"
+	var session AdministratorSession
+	if err := transaction.QueryRowContext(ctx, query, sessionID).Scan(&session.PublicID, &session.DeviceLabel, &session.ClientNetwork, &session.CreatedAt, &session.LastSeenAt, &session.ExpiresAt); err != nil {
+		return AdministratorSession{}, ErrUnavailable
+	}
+	session.PublicID = strings.ToLower(session.PublicID)
+	session.Current = true
+	if !validAdministratorSession(session, attempt.CreatedAt) {
+		return AdministratorSession{}, ErrUnavailable
+	}
+	if err := transaction.Commit(); err != nil {
+		return AdministratorSession{}, ErrUnavailable
+	}
+	committed = true
+	return session, nil
+}
+
+// TouchAdminSession advances last_seen_at at most once per five-minute window.
+// A throttled update affects zero rows and is still successful.
+func (repository *SQLRepository) TouchAdminSession(ctx context.Context, tokenHash []byte, now time.Time) error {
+	if !repository.ready() || len(tokenHash) != sha256.Size || now.IsZero() {
+		return ErrInvalidInput
+	}
+	_, err := repository.db.ExecContext(ctx,
+		"UPDATE site_sessions SET last_seen_at = ? WHERE admin_identity_id = 1 AND token_hash = ? AND revoked_at IS NULL AND expires_at > ? AND last_seen_at < ?",
+		now, bytes.Clone(tokenHash), now, now.Add(-administratorSessionTouchInterval),
+	)
+	if err != nil {
+		return ErrUnavailable
+	}
+	return nil
+}
+
+// ListAdminSessions returns active administrator sessions without selecting any
+// token material. The current flag is calculated inside MySQL from the supplied
+// hash and only the boolean crosses the repository boundary.
+func (repository *SQLRepository) ListAdminSessions(ctx context.Context, currentTokenHash []byte, now time.Time) ([]AdministratorSession, error) {
+	if !repository.ready() || len(currentTokenHash) != sha256.Size || now.IsZero() {
+		return nil, ErrInvalidInput
+	}
+	const query = "SELECT HEX(s.public_id), s.device_label, s.client_network, s.created_at, s.last_seen_at, s.expires_at, (s.token_hash = ?) AS is_current FROM site_sessions AS s JOIN admin_identity AS a ON a.id = s.admin_identity_id WHERE s.admin_identity_id = 1 AND s.credential_epoch = a.credential_epoch AND s.revoked_at IS NULL ORDER BY is_current DESC, s.last_seen_at DESC, s.id DESC"
+	rows, err := repository.db.QueryContext(ctx, query, bytes.Clone(currentTokenHash))
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	defer rows.Close()
+	sessions := make([]AdministratorSession, 0)
+	for rows.Next() {
+		var session AdministratorSession
+		if err := rows.Scan(&session.PublicID, &session.DeviceLabel, &session.ClientNetwork, &session.CreatedAt, &session.LastSeenAt, &session.ExpiresAt, &session.Current); err != nil {
+			return nil, ErrUnavailable
+		}
+		session.PublicID = strings.ToLower(session.PublicID)
+		if !session.ExpiresAt.After(now) {
+			continue
+		}
+		if !validAdministratorSession(session, now) {
+			return nil, ErrUnavailable
+		}
+		sessions = append(sessions, session)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, ErrUnavailable
+	}
+	return sessions, nil
+}
+
+// RevokeAdminSession locks both the authenticated current session and the
+// requested target before applying a one-time revocation.
+func (repository *SQLRepository) RevokeAdminSession(ctx context.Context, currentTokenHash []byte, targetPublicID string, now time.Time) error {
+	if !repository.ready() || len(currentTokenHash) != sha256.Size || !validAdministratorPublicID(targetPublicID) || now.IsZero() {
+		return ErrInvalidInput
+	}
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ErrUnavailable
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	const currentQuery = "SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE"
+	var currentID, currentEpoch int64
+	var currentExpires time.Time
+	var currentRevoked sql.NullTime
+	if err := transaction.QueryRowContext(ctx, currentQuery, bytes.Clone(currentTokenHash)).Scan(&currentID, &currentEpoch, &currentExpires, &currentRevoked); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrAuthenticationFailed
+		}
+		return ErrUnavailable
+	}
+	if currentID <= 0 || currentEpoch < 1 || currentRevoked.Valid || !currentExpires.After(now) {
+		return ErrAuthenticationFailed
+	}
+	const targetQuery = "SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND public_id = UNHEX(?) FOR UPDATE"
+	var targetID, targetEpoch int64
+	var targetExpires time.Time
+	var targetRevoked sql.NullTime
+	if err := transaction.QueryRowContext(ctx, targetQuery, targetPublicID).Scan(&targetID, &targetEpoch, &targetExpires, &targetRevoked); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrAdminSessionNotFound
+		}
+		return ErrUnavailable
+	}
+	if targetID == currentID {
+		return ErrCurrentAdminSession
+	}
+	if targetID <= 0 || targetEpoch != currentEpoch || targetRevoked.Valid || !targetExpires.After(now) {
+		return ErrAdminSessionNotFound
+	}
+	result, err := transaction.ExecContext(ctx, "UPDATE site_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", now, targetID)
+	if err != nil || !oneRow(result) {
+		return ErrUnavailable
+	}
+	if err := transaction.Commit(); err != nil {
+		return ErrUnavailable
+	}
+	committed = true
+	return nil
+}
+
+// RecordAdminLoginEvent appends one safe event and prunes everything older
+// than the newest 100 IDs in the same transaction.
+func (repository *SQLRepository) RecordAdminLoginEvent(ctx context.Context, event AdministratorLoginEvent) error {
+	if !repository.ready() || !validAdministratorLoginEvent(event) {
+		return ErrInvalidInput
+	}
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ErrUnavailable
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	if result, err := transaction.ExecContext(ctx,
+		"INSERT INTO admin_login_events (result, device_label, client_network, occurred_at) VALUES (?, ?, ?, ?)",
+		event.Result, event.DeviceLabel, event.ClientNetwork, event.OccurredAt,
+	); err != nil || !oneRow(result) {
+		return ErrUnavailable
+	}
+	const prune = "DELETE FROM admin_login_events WHERE id <= (SELECT retention_id FROM (SELECT id AS retention_id FROM admin_login_events ORDER BY id DESC LIMIT 1 OFFSET 100) AS retention_boundary)"
+	if _, err := transaction.ExecContext(ctx, prune); err != nil {
+		return ErrUnavailable
+	}
+	if err := transaction.Commit(); err != nil {
+		return ErrUnavailable
+	}
+	committed = true
+	return nil
+}
+
+// ListAdminLoginEvents returns at most 50 newest safe audit projections.
+func (repository *SQLRepository) ListAdminLoginEvents(ctx context.Context, limit int) ([]AdministratorLoginEvent, error) {
+	if !repository.ready() || limit < 1 || limit > maximumAdministratorLoginEvents {
+		return nil, ErrInvalidInput
+	}
+	const query = "SELECT result, device_label, client_network, occurred_at FROM admin_login_events ORDER BY occurred_at DESC, id DESC LIMIT ?"
+	rows, err := repository.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	defer rows.Close()
+	events := make([]AdministratorLoginEvent, 0)
+	for rows.Next() {
+		var event AdministratorLoginEvent
+		if err := rows.Scan(&event.Result, &event.DeviceLabel, &event.ClientNetwork, &event.OccurredAt); err != nil || !validAdministratorLoginEvent(event) {
+			return nil, ErrUnavailable
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, ErrUnavailable
+	}
+	return events, nil
 }
 
 func (repository *SQLRepository) ConfirmTOTP(ctx context.Context, attempt ConfirmTOTPAttempt) error {
@@ -1183,6 +1440,59 @@ func validIdentityRecord(record IdentityRecord) bool {
 
 func validEmailLoginSessionAttempt(attempt EmailLoginSessionAttempt) bool {
 	return attempt.ExpectedCredentialEpoch >= 1 && len(attempt.TokenHash) == sha256.Size && !attempt.CreatedAt.IsZero() && attempt.ExpiresAt.After(attempt.CreatedAt)
+}
+
+func validAdministratorSession(session AdministratorSession, now time.Time) bool {
+	return validAdministratorPublicID(session.PublicID) &&
+		validClientSummary(ClientSummary{DeviceLabel: session.DeviceLabel, ClientNetwork: session.ClientNetwork}) &&
+		!session.CreatedAt.IsZero() && !session.LastSeenAt.Before(session.CreatedAt) &&
+		session.ExpiresAt.After(session.CreatedAt) && session.ExpiresAt.After(now)
+}
+
+func validAdministratorPublicID(publicID string) bool {
+	if len(publicID) != 32 || publicID != strings.ToLower(publicID) {
+		return false
+	}
+	decoded, err := hex.DecodeString(publicID)
+	return err == nil && len(decoded) == 16
+}
+
+func validClientSummary(summary ClientSummary) bool {
+	if len(summary.DeviceLabel) == 0 || len(summary.DeviceLabel) > 80 || len(summary.ClientNetwork) == 0 || len(summary.ClientNetwork) > 64 {
+		return false
+	}
+	device, browser, ok := strings.Cut(summary.DeviceLabel, " · ")
+	if !ok || !oneOf(device, "iPhone", "iPad", "Android", "Windows", "macOS", "Linux", "其他设备") || !oneOf(browser, "Edge", "Firefox", "Chrome", "Safari", "其他浏览器") {
+		return false
+	}
+	if summary.ClientNetwork == "—" {
+		return true
+	}
+	if strings.HasSuffix(summary.ClientNetwork, ".*") {
+		address := strings.TrimSuffix(summary.ClientNetwork, "*") + "0"
+		parsed := net.ParseIP(address)
+		return parsed != nil && parsed.To4() != nil
+	}
+	if strings.HasSuffix(summary.ClientNetwork, "::*") {
+		address := strings.TrimSuffix(summary.ClientNetwork, "*")
+		parsed := net.ParseIP(address)
+		return parsed != nil && parsed.To4() == nil
+	}
+	return false
+}
+
+func validAdministratorLoginEvent(event AdministratorLoginEvent) bool {
+	return (event.Result == "success" || event.Result == "failure") && !event.OccurredAt.IsZero() &&
+		validClientSummary(ClientSummary{DeviceLabel: event.DeviceLabel, ClientNetwork: event.ClientNetwork})
+}
+
+func oneOf(candidate string, allowed ...string) bool {
+	for _, value := range allowed {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
 }
 
 func validCodeHashes(hashes [][]byte) bool {

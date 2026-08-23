@@ -85,9 +85,10 @@ func TestProductionAdminEmailIdentityMigrationMakesLegacyUIDNullable(t *testing.
 		"0006_runtime_invariants":           "aef0529f46dc18d47d6770b71fe5f6d16ddb8d23c622f660a1718b4a2d4038b3",
 		"0007_runtime_ownership":            "a56cd452a649bd928b5a48a3e8ffacca15fd889eab5161fb7bc96d782be9caa4",
 		"0008_runtime_dedupe_cleanup_index": "7d69109e076d085e0988e0c196df8480d1dcd8a03e60495f6302e382ea94e064",
+		"0012_admin_session_inventory":      "e707f3edc1a7d49ffd4a636ad0e14bc579599d194aef37e5c9fe7ee19afa9a03",
 	}
-	if len(migrations) != 11 {
-		t.Fatalf("migration count = %d, want 11", len(migrations))
+	if len(migrations) != 12 {
+		t.Fatalf("migration count = %d, want 12", len(migrations))
 	}
 	var emailIdentity migration
 	for _, item := range migrations {
@@ -115,6 +116,38 @@ func TestProductionAdminEmailIdentityMigrationMakesLegacyUIDNullable(t *testing.
 	want := "ALTER TABLE admin_identity MODIFY COLUMN uid_ciphertext VARBINARY(512) NULL, MODIFY COLUMN uid_lookup BINARY(32) NULL"
 	if got != want {
 		t.Fatalf("0009 statement = %q, want %q", got, want)
+	}
+}
+
+func TestProductionSessionInventoryMigrationIsForwardOnlyAndPrivacyBounded(t *testing.T) {
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sqlText string
+	for _, item := range migrations {
+		if item.version == "0012_admin_session_inventory" {
+			sqlText = strings.Join(strings.Fields(string(item.contents)), " ")
+			break
+		}
+	}
+	if sqlText == "" {
+		t.Fatal("0012_admin_session_inventory migration is missing")
+	}
+	for _, required := range []string{
+		"public_id BINARY(16)",
+		"device_label VARCHAR(80)",
+		"client_network VARCHAR(64)",
+		"last_seen_at DATETIME(6)",
+		"UUID_TO_BIN(UUID())",
+		"其他设备 · 其他浏览器",
+		"CREATE TABLE IF NOT EXISTS admin_login_events",
+		"CHECK (result IN ('success', 'failure'))",
+		"KEY idx_admin_login_events_occurred (occurred_at DESC, id DESC)",
+	} {
+		if !strings.Contains(sqlText, required) {
+			t.Fatalf("0012 migration missing %q", required)
+		}
 	}
 }
 

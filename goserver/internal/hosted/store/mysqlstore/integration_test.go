@@ -18,11 +18,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
 
+	"bilibili-live-gift-panel/internal/hosted/adminidentity"
 	"bilibili-live-gift-panel/internal/hosted/configuration"
 	"bilibili-live-gift-panel/internal/hosted/identity"
 	"bilibili-live-gift-panel/internal/hosted/invitation"
@@ -35,6 +37,148 @@ const (
 )
 
 var testSchemaSequence atomic.Uint64
+
+func TestIntegrationRealMySQLSessionInventoryMigration(t *testing.T) {
+	dsn := integrationDSN(t)
+
+	t.Run("schema constraints", func(t *testing.T) {
+		store := freshIntegrationStore(t, dsn, true)
+		ctx := integrationContext(t)
+		db := store.Database()
+		for _, column := range []struct {
+			name, dataType string
+		}{
+			{"public_id", "binary"},
+			{"device_label", "varchar"},
+			{"client_network", "varchar"},
+			{"last_seen_at", "datetime"},
+		} {
+			var dataType, nullable string
+			if err := db.QueryRowContext(ctx, `SELECT DATA_TYPE, IS_NULLABLE FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'site_sessions' AND column_name = ?`, column.name).Scan(&dataType, &nullable); err != nil {
+				t.Fatalf("read site_sessions.%s: %v", column.name, err)
+			}
+			if dataType != column.dataType || nullable != "NO" {
+				t.Fatalf("site_sessions.%s type=%s nullable=%s, want %s/NO", column.name, dataType, nullable, column.dataType)
+			}
+		}
+		var uniquePublicID int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'site_sessions' AND index_name = 'uq_site_sessions_public_id' AND non_unique = 0`).Scan(&uniquePublicID); err != nil || uniquePublicID != 1 {
+			t.Fatalf("unique public ID index count=%d error=%v", uniquePublicID, err)
+		}
+		var retentionColumns string
+		if err := db.QueryRowContext(ctx, `SELECT GROUP_CONCAT(CONCAT(column_name, ':', collation) ORDER BY seq_in_index SEPARATOR ',') FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'admin_login_events' AND index_name = 'idx_admin_login_events_occurred'`).Scan(&retentionColumns); err != nil || retentionColumns != "occurred_at:D,id:D" {
+			t.Fatalf("login retention index=%q error=%v", retentionColumns, err)
+		}
+		var createTable, tableName string
+		if err := db.QueryRowContext(ctx, "SHOW CREATE TABLE admin_login_events").Scan(&tableName, &createTable); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(createTable, "`result` in (_utf8mb4'success',_utf8mb4'failure')") {
+			t.Fatalf("admin_login_events result CHECK missing: %s", createTable)
+		}
+	})
+
+	t.Run("legacy rows are backfilled and future account sessions keep safe defaults", func(t *testing.T) {
+		store := freshIntegrationStore(t, dsn, false)
+		ctx := integrationContext(t)
+		prior := fstest.MapFS{}
+		migrations, err := readMigrations(migrationFiles)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range migrations {
+			if item.version != "0012_admin_session_inventory" {
+				prior["migrations/"+item.version+".sql"] = &fstest.MapFile{Data: bytes.Clone(item.contents)}
+			}
+		}
+		if err := store.migrate(ctx, prior); err != nil {
+			t.Fatalf("migrate through 0011: %v", err)
+		}
+		db := store.Database()
+		account := insertAccount(t, ctx, db)
+		created := time.Date(2026, 8, 23, 11, 0, 0, 0, time.UTC)
+		if _, err := db.ExecContext(ctx, "INSERT INTO site_sessions (account_id, token_hash, credential_epoch, created_at, expires_at) VALUES (?, ?, 1, ?, ?)", account, bytesOf(0x71), created, created.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Migrate(ctx); err != nil {
+			t.Fatalf("apply 0012: %v", err)
+		}
+		var publicID, deviceLabel, clientNetwork string
+		var lastSeen time.Time
+		if err := db.QueryRowContext(ctx, "SELECT HEX(public_id), device_label, client_network, last_seen_at FROM site_sessions WHERE token_hash = ?", bytesOf(0x71)).Scan(&publicID, &deviceLabel, &clientNetwork, &lastSeen); err != nil {
+			t.Fatal(err)
+		}
+		if len(publicID) != 32 || deviceLabel != "其他设备 · 其他浏览器" || clientNetwork != "—" || !lastSeen.Equal(created) {
+			t.Fatalf("backfill publicID=%q device=%q network=%q lastSeen=%s", publicID, deviceLabel, clientNetwork, lastSeen)
+		}
+		if _, err := db.ExecContext(ctx, "INSERT INTO site_sessions (account_id, token_hash, credential_epoch, created_at, expires_at) VALUES (?, ?, 1, ?, ?)", account, bytesOf(0x72), created.Add(time.Minute), created.Add(2*time.Hour)); err != nil {
+			t.Fatalf("post-migration account session defaults: %v", err)
+		}
+		var generatedPublicID string
+		if err := db.QueryRowContext(ctx, "SELECT HEX(public_id) FROM site_sessions WHERE token_hash = ?", bytesOf(0x72)).Scan(&generatedPublicID); err != nil || len(generatedPublicID) != 32 || generatedPublicID == publicID {
+			t.Fatalf("generated public ID=%q error=%v", generatedPublicID, err)
+		}
+	})
+
+	t.Run("repository operations enforce touch revoke and retention boundaries", func(t *testing.T) {
+		store := freshIntegrationStore(t, dsn, true)
+		ctx := integrationContext(t)
+		db := store.Database()
+		now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+		if _, err := db.ExecContext(ctx, "INSERT INTO admin_identity (id, credential_epoch, email_ciphertext, created_at, updated_at) VALUES (1, 1, ?, ?, ?)", []byte("encrypted-email"), now, now); err != nil {
+			t.Fatal(err)
+		}
+		repository := adminidentity.NewRepository(db)
+		firstHash := bytesOf(0x81)
+		first, err := repository.CreateAdminSession(ctx, adminidentity.EmailLoginSessionAttempt{ExpectedCredentialEpoch: 1, TokenHash: firstHash, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}, adminidentity.ClientSummary{DeviceLabel: "iPhone · Safari", ClientNetwork: "203.0.113.*"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := repository.CreateAdminSession(ctx, adminidentity.EmailLoginSessionAttempt{ExpectedCredentialEpoch: 1, TokenHash: bytesOf(0x82), CreatedAt: now, ExpiresAt: now.Add(time.Hour)}, adminidentity.ClientSummary{DeviceLabel: "Windows · Edge", ClientNetwork: "198.51.100.*"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repository.TouchAdminSession(ctx, firstHash, now.Add(4*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		var lastSeen time.Time
+		if err := db.QueryRowContext(ctx, "SELECT last_seen_at FROM site_sessions WHERE public_id = UNHEX(?)", first.PublicID).Scan(&lastSeen); err != nil || !lastSeen.Equal(now) {
+			t.Fatalf("throttled lastSeen=%s error=%v", lastSeen, err)
+		}
+		if err := repository.TouchAdminSession(ctx, firstHash, now.Add(6*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRowContext(ctx, "SELECT last_seen_at FROM site_sessions WHERE public_id = UNHEX(?)", first.PublicID).Scan(&lastSeen); err != nil || !lastSeen.Equal(now.Add(6*time.Minute)) {
+			t.Fatalf("advanced lastSeen=%s error=%v", lastSeen, err)
+		}
+		if err := repository.RevokeAdminSession(ctx, firstHash, first.PublicID, now.Add(7*time.Minute)); !errors.Is(err, adminidentity.ErrCurrentAdminSession) {
+			t.Fatalf("current revoke error=%v", err)
+		}
+		if err := repository.RevokeAdminSession(ctx, firstHash, second.PublicID, now.Add(7*time.Minute)); err != nil {
+			t.Fatalf("target revoke: %v", err)
+		}
+		sessions, err := repository.ListAdminSessions(ctx, firstHash, now.Add(7*time.Minute))
+		if err != nil || len(sessions) != 1 || !sessions[0].Current || sessions[0].PublicID != first.PublicID {
+			t.Fatalf("sessions=%#v error=%v", sessions, err)
+		}
+		for index := 0; index < 105; index++ {
+			if err := repository.RecordAdminLoginEvent(ctx, adminidentity.AdministratorLoginEvent{Result: "failure", DeviceLabel: "Android · Chrome", ClientNetwork: "2001:db8:abcd:1234::*", OccurredAt: now.Add(time.Duration(index) * time.Second)}); err != nil {
+				t.Fatalf("record login event %d: %v", index, err)
+			}
+		}
+		var retained int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM admin_login_events").Scan(&retained); err != nil || retained != 100 {
+			t.Fatalf("retained login events=%d error=%v", retained, err)
+		}
+		events, err := repository.ListAdminLoginEvents(ctx, 50)
+		if err != nil || len(events) != 50 {
+			t.Fatalf("events=%d error=%v", len(events), err)
+		}
+		if !events[0].OccurredAt.Equal(now.Add(104 * time.Second)) {
+			t.Fatalf("newest event=%v", events[0].OccurredAt)
+		}
+	})
+}
 
 const invitationContentionQuery = `SELECT COUNT(DISTINCT trx.trx_id)
 FROM information_schema.innodb_trx AS trx

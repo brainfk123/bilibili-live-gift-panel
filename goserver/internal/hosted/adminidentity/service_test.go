@@ -1446,6 +1446,193 @@ func TestSQLRepositoryRevokesOnlyAdministratorSessionToken(t *testing.T) {
 	}
 }
 
+func TestSQLRepositorySessionInventoryCreatesSafeAdministratorSession(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 23, 9, 0, 0, 0, time.UTC)
+	attempt := EmailLoginSessionAttempt{ExpectedCredentialEpoch: 3, TokenHash: bytes.Repeat([]byte{0x61}, sha256.Size), CreatedAt: now, ExpiresAt: now.Add(30 * 24 * time.Hour)}
+	summary := ClientSummary{DeviceLabel: "iPhone · Safari", ClientNetwork: "203.0.113.*"}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(3))
+	mock.ExpectExec(sqlPattern("INSERT INTO site_sessions (admin_identity_id, token_hash, credential_epoch, device_label, client_network, created_at, last_seen_at, expires_at, totp_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)")).
+		WithArgs(int64(1), attempt.TokenHash, int64(3), summary.DeviceLabel, summary.ClientNetwork, now, now, attempt.ExpiresAt).
+		WillReturnResult(sqlmock.NewResult(41, 1))
+	mock.ExpectQuery(sqlPattern("SELECT HEX(public_id), device_label, client_network, created_at, last_seen_at, expires_at FROM site_sessions WHERE id = ? AND admin_identity_id = 1")).
+		WithArgs(int64(41)).
+		WillReturnRows(sqlmock.NewRows([]string{"public_id", "device_label", "client_network", "created_at", "last_seen_at", "expires_at"}).
+			AddRow("AABBCCDDEEFF00112233445566778899", summary.DeviceLabel, summary.ClientNetwork, now, now, attempt.ExpiresAt))
+	mock.ExpectCommit()
+
+	session, err := repository.CreateAdminSession(context.Background(), attempt, summary)
+	if err != nil || session.PublicID != "aabbccddeeff00112233445566778899" || !session.Current || session.DeviceLabel != summary.DeviceLabel || session.ClientNetwork != summary.ClientNetwork {
+		t.Fatalf("CreateAdminSession() = %#v, %v", session, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositorySessionInventoryTouchUsesFiveMinuteThrottle(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 23, 9, 10, 0, 0, time.UTC)
+	tokenHash := bytes.Repeat([]byte{0x62}, sha256.Size)
+	mock.ExpectExec(sqlPattern("UPDATE site_sessions SET last_seen_at = ? WHERE admin_identity_id = 1 AND token_hash = ? AND revoked_at IS NULL AND expires_at > ? AND last_seen_at < ?")).
+		WithArgs(now, tokenHash, now, now.Add(-5*time.Minute)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := repository.TouchAdminSession(context.Background(), tokenHash, now); err != nil {
+		t.Fatalf("TouchAdminSession() error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositorySessionInventoryListsSafeAdministratorSessions(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 23, 9, 20, 0, 0, time.UTC)
+	created := now.Add(-24 * time.Hour)
+	active := now.Add(-time.Minute)
+	expires := now.Add(29 * 24 * time.Hour)
+	tokenHash := bytes.Repeat([]byte{0x63}, sha256.Size)
+	rows := sqlmock.NewRows([]string{"public_id", "device_label", "client_network", "created_at", "last_seen_at", "expires_at", "is_current"}).
+		AddRow("00112233445566778899AABBCCDDEEFF", "iPhone · Safari", "203.0.113.*", created, active, expires, true).
+		AddRow("FFEEDDCCBBAA99887766554433221100", "Windows · Edge", "198.51.100.*", created, active, now.Add(-time.Second), false)
+	mock.ExpectQuery("SELECT HEX\\(s.public_id\\)").WithArgs(tokenHash).WillReturnRows(rows)
+
+	sessions, err := repository.ListAdminSessions(context.Background(), tokenHash, now)
+	if err != nil || len(sessions) != 1 || !sessions[0].Current || sessions[0].PublicID != "00112233445566778899aabbccddeeff" {
+		t.Fatalf("ListAdminSessions() = %#v, %v", sessions, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositorySessionInventoryProtectsCurrentSession(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 23, 9, 30, 0, 0, time.UTC)
+	tokenHash := bytes.Repeat([]byte{0x64}, sha256.Size)
+	publicID := "00112233445566778899aabbccddeeff"
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
+		WithArgs(tokenHash).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(51, 3, now.Add(time.Hour), nil))
+	mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND public_id = UNHEX(?) FOR UPDATE")).
+		WithArgs(publicID).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(51, 3, now.Add(time.Hour), nil))
+	mock.ExpectRollback()
+
+	if err := repository.RevokeAdminSession(context.Background(), tokenHash, publicID, now); !errors.Is(err, ErrCurrentAdminSession) {
+		t.Fatalf("RevokeAdminSession() error = %v, want ErrCurrentAdminSession", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositorySessionInventoryRevokesTargetOnce(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 23, 9, 40, 0, 0, time.UTC)
+	tokenHash := bytes.Repeat([]byte{0x65}, sha256.Size)
+	publicID := "ffeeddccbbaa99887766554433221100"
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
+		WithArgs(tokenHash).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(61, 3, now.Add(time.Hour), nil))
+	mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND public_id = UNHEX(?) FOR UPDATE")).
+		WithArgs(publicID).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(62, 3, now.Add(time.Hour), nil))
+	mock.ExpectExec(sqlPattern("UPDATE site_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")).
+		WithArgs(now, int64(62)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := repository.RevokeAdminSession(context.Background(), tokenHash, publicID, now); err != nil {
+		t.Fatalf("RevokeAdminSession() error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryLoginEventRecordsAndPrunesNewestHundred(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 23, 9, 50, 0, 0, time.UTC)
+	event := AdministratorLoginEvent{Result: "failure", DeviceLabel: "Android · Chrome", ClientNetwork: "2001:db8:abcd:1234::*", OccurredAt: now}
+	mock.ExpectBegin()
+	mock.ExpectExec(sqlPattern("INSERT INTO admin_login_events (result, device_label, client_network, occurred_at) VALUES (?, ?, ?, ?)")).
+		WithArgs(event.Result, event.DeviceLabel, event.ClientNetwork, now).
+		WillReturnResult(sqlmock.NewResult(101, 1))
+	mock.ExpectExec(sqlPattern("DELETE FROM admin_login_events WHERE id <= (SELECT retention_id FROM (SELECT id AS retention_id FROM admin_login_events ORDER BY id DESC LIMIT 1 OFFSET 100) AS retention_boundary)")).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := repository.RecordAdminLoginEvent(context.Background(), event); err != nil {
+		t.Fatalf("RecordAdminLoginEvent() error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryLoginEventListsBoundedSafeProjection(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+	rows := sqlmock.NewRows([]string{"result", "device_label", "client_network", "occurred_at"}).
+		AddRow("success", "Windows · Edge", "198.51.100.*", now)
+	mock.ExpectQuery(sqlPattern("SELECT result, device_label, client_network, occurred_at FROM admin_login_events ORDER BY occurred_at DESC, id DESC LIMIT ?")).
+		WithArgs(20).
+		WillReturnRows(rows)
+
+	events, err := repository.ListAdminLoginEvents(context.Background(), 20)
+	if err != nil || len(events) != 1 || events[0].Result != "success" || events[0].ClientNetwork != "198.51.100.*" {
+		t.Fatalf("ListAdminLoginEvents() = %#v, %v", events, err)
+	}
+	if _, err := repository.ListAdminLoginEvents(context.Background(), 51); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("ListAdminLoginEvents(51) error = %v, want ErrInvalidInput", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNormalizeRepositoryDSNForcesParsedUTCTime(t *testing.T) {
 	normalized, err := normalizeRepositoryDSN("user:password@tcp(127.0.0.1:3306)/gift_panel")
 	if err != nil {
