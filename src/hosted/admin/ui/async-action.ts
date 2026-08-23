@@ -5,6 +5,8 @@ export async function runAdminAction(
   labels: AdminActionLabels,
   operation: () => Promise<void>,
 ): Promise<'success' | 'failure'> {
+  const previousWidth = button.style.width;
+  button.style.width = `${button.offsetWidth}px`;
   button.disabled = true;
   button.setAttribute('aria-busy', 'true');
   button.textContent = labels.busy;
@@ -21,5 +23,6 @@ export async function runAdminAction(
     button.disabled = false;
     button.removeAttribute('aria-busy');
     button.textContent = labels.idle;
+    button.style.width = previousWidth;
   }
 }
