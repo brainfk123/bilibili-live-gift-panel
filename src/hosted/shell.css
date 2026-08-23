@@ -228,7 +228,12 @@ select {
 .hosted-admin-account-detail:empty { display:none; }
 .hosted-admin-invitation-actions { display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;margin:1rem 0; }
 .hosted-admin-invitation-actions input { flex:1 1 16rem; }
-.hosted-admin-invitation-create { display:flex;gap:.75rem;padding:1rem;margin-bottom:1rem;border:1px solid #d8e0ec;border-radius:1rem;background:#fff; }
+.hosted-admin-invitation-create { display:flex;gap:.75rem;align-items:end;flex-wrap:wrap;padding:1rem;margin-bottom:1rem;border:1px solid #d8e0ec;border-radius:1rem;background:#fff; }
+.hosted-admin-invitation-create .hosted-admin-field { flex:1 1 9rem; }
+.hosted-admin-empty { display:grid;justify-items:start;gap:.45rem;margin:1rem 0;padding:1.5rem;color:#526078;background:#fff;border:1px dashed #bfc9d8;border-radius:1rem; }
+.hosted-admin-empty h3,.hosted-admin-empty p { margin:0; }
+.hosted-admin-manual-copy { margin:.9rem 1rem .3rem;color:#8d2920; }
+.hosted-admin-invitation-table > code { display:block;margin:0 1rem 1rem;padding:.75rem;overflow-wrap:anywhere;color:#172033;user-select:all;background:#f3f6fa;border:1px solid #cdd6e3;border-radius:.5rem; }
 .hosted-admin-feedback:empty { display:none; }
 .hosted-admin-invitation-table { overflow:hidden;border:1px solid #d8e0ec;border-radius:1rem;background:#fff; }
 .hosted-admin-invitation-row { display:grid;grid-template-columns:minmax(9rem,1.2fr) minmax(6rem,.7fr) minmax(9rem,1fr) minmax(9rem,1fr) minmax(9rem,1fr);gap:.75rem;align-items:center;padding:.9rem 1rem;border-bottom:1px solid #e5eaf1; }
