@@ -12,6 +12,12 @@ var (
 	ErrSensitiveRecentTOTPRequired   = errors.New("admin identity: recent totp required")
 )
 
+// SessionValidator checks an active administrator session without requiring
+// an operation-specific second factor.
+type SessionValidator interface {
+	RequireSession(context.Context, string) error
+}
+
 // SensitiveAuthorizer binds recent-TOTP authorization and renewal to the
 // caller-owned transaction that contains a protected mutation.
 type SensitiveAuthorizer interface {

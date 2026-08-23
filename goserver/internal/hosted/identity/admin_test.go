@@ -18,16 +18,15 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
-func TestSensitiveDisableAccountRenewsOnlyAfterAuditInSameTransaction(t *testing.T) {
+func TestDisableAccountUsesSessionOnlyAndCommitsAudit(t *testing.T) {
 	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer database.Close()
 	authorizedAt := time.Date(2026, 8, 21, 13, 0, 0, 0, time.UTC)
-	completedAt := authorizedAt.Add(2 * time.Second)
-	clock := &identityTimeSequence{values: []time.Time{authorizedAt, completedAt}}
-	authorizer := &identitySensitiveAuthorizer{writeMarkers: true}
+	clock := &identityTimeSequence{values: []time.Time{authorizedAt}}
+	authorizer := &identitySensitiveAuthorizer{}
 	disableHookCalls := 0
 	service, err := NewService(NewRepository(database, authorizer), fixedServiceKeyring(t), &memoryVerifier{}, ServiceOptions{
 		Now: clock.Now, OnAccountDisabled: func(int64) { disableHookCalls++ },
@@ -37,7 +36,6 @@ func TestSensitiveDisableAccountRenewsOnlyAfterAuditInSameTransaction(t *testing
 	}
 
 	mock.ExpectBegin()
-	mock.ExpectExec("sensitive_authorize").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
 		WithArgs(int64(42)).
 		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(6), nil))
@@ -48,7 +46,6 @@ func TestSensitiveDisableAccountRenewsOnlyAfterAuditInSameTransaction(t *testing
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)")).
 		WithArgs("streamer_account_disabled", int64(1), int64(42), sqlmock.AnyArg(), authorizedAt).
 		WillReturnResult(sqlmock.NewResult(10, 1))
-	mock.ExpectExec("sensitive_renew").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	result, err := service.DisableAccount(context.Background(), "administrator-session", 42, "policy violation")
@@ -58,25 +55,22 @@ func TestSensitiveDisableAccountRenewsOnlyAfterAuditInSameTransaction(t *testing
 	if result.AccountID != 42 || result.Status != AccountStatusDisabled || disableHookCalls != 1 {
 		t.Fatalf("DisableAccount() = %#v, hook calls = %d", result, disableHookCalls)
 	}
-	if authorizer.authorizeCalls != 1 || authorizer.renewCalls != 1 || authorizer.authorizeTx != authorizer.renewTx {
-		t.Fatalf("sensitive calls authorize=%d renew=%d sameTx=%t", authorizer.authorizeCalls, authorizer.renewCalls, authorizer.authorizeTx == authorizer.renewTx)
-	}
-	if !authorizer.authorizedAt.Equal(authorizedAt) || !authorizer.renewedAt.Equal(completedAt) {
-		t.Fatalf("sensitive timestamps authorize=%s renew=%s", authorizer.authorizedAt, authorizer.renewedAt)
+	if authorizer.authorizeCalls != 1 || authorizer.renewCalls != 0 {
+		t.Fatalf("session calls=%d sensitive renew calls=%d", authorizer.authorizeCalls, authorizer.renewCalls)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestSensitiveDisableRenewalFailureRollsBackDomainAuditAndHook(t *testing.T) {
+func TestDisableAccountRejectsRevokedSessionBeforeTransaction(t *testing.T) {
 	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer database.Close()
 	now := time.Date(2026, 8, 21, 13, 10, 0, 0, time.UTC)
-	authorizer := &identitySensitiveAuthorizer{writeMarkers: true, renewErr: errors.New("private renewal failure")}
+	authorizer := &identitySensitiveAuthorizer{authorizeErr: errors.New("revoked session")}
 	disableHookCalls := 0
 	service, err := NewService(NewRepository(database, authorizer), fixedServiceKeyring(t), &memoryVerifier{}, ServiceOptions{
 		Now: func() time.Time { return now }, OnAccountDisabled: func(int64) { disableHookCalls++ },
@@ -85,21 +79,8 @@ func TestSensitiveDisableRenewalFailureRollsBackDomainAuditAndHook(t *testing.T)
 		t.Fatal(err)
 	}
 
-	mock.ExpectBegin()
-	mock.ExpectExec("sensitive_authorize").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
-		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(6), nil))
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE streamer_accounts SET disabled_at = ?, credential_epoch = credential_epoch + 1 WHERE id = ? AND disabled_at IS NULL")).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE site_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE account_id = ?")).
-		WillReturnResult(sqlmock.NewResult(0, 2))
-	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)")).
-		WillReturnResult(sqlmock.NewResult(10, 1))
-	mock.ExpectExec("sensitive_renew").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectRollback()
-
-	if _, err := service.DisableAccount(context.Background(), "administrator-session", 42, "policy violation"); !errors.Is(err, ErrRepositoryUnavailable) {
-		t.Fatalf("DisableAccount() error = %v, want ErrRepositoryUnavailable", err)
+	if _, err := service.DisableAccount(context.Background(), "administrator-session", 42, "policy violation"); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("DisableAccount() error = %v, want ErrAuthenticationFailed", err)
 	}
 	if disableHookCalls != 0 {
 		t.Fatalf("rollback invoked disable hook %d times", disableHookCalls)
@@ -109,7 +90,7 @@ func TestSensitiveDisableRenewalFailureRollsBackDomainAuditAndHook(t *testing.T)
 	}
 }
 
-func TestSensitiveDisableMapsRecentTOTPBeforeDomainWork(t *testing.T) {
+func TestDisableAccountDoesNotInterpretSessionFailureAsTOTPChallenge(t *testing.T) {
 	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -121,11 +102,8 @@ func TestSensitiveDisableMapsRecentTOTPBeforeDomainWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mock.ExpectBegin()
-	mock.ExpectRollback()
-
-	if _, err := service.DisableAccount(context.Background(), "administrator-session", 42, "policy violation"); !errors.Is(err, ErrRecentTOTPRequired) {
-		t.Fatalf("DisableAccount() error = %v, want ErrRecentTOTPRequired", err)
+	if _, err := service.DisableAccount(context.Background(), "administrator-session", 42, "policy violation"); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("DisableAccount() error = %v, want ErrAuthenticationFailed", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -189,24 +167,22 @@ func TestDisableAccountAuthorizesRecentAdministratorAndCommitsAtomicChanges(t *t
 	}
 }
 
-func TestSensitiveEnableAccountRenewsAfterAuditWithoutRestoringCredentials(t *testing.T) {
+func TestEnableAccountUsesSessionOnlyWithoutRestoringCredentials(t *testing.T) {
 	authorizedAt := time.Date(2026, 8, 16, 14, 10, 0, 0, time.UTC)
-	completedAt := authorizedAt.Add(2 * time.Second)
 	disabledAt := authorizedAt.Add(-time.Hour)
-	clock := &identityTimeSequence{values: []time.Time{authorizedAt, completedAt}}
+	clock := &identityTimeSequence{values: []time.Time{authorizedAt}}
 	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer database.Close()
 	keys := fixedServiceKeyring(t)
-	authorizer := &identitySensitiveAuthorizer{writeMarkers: true}
+	authorizer := &identitySensitiveAuthorizer{}
 	service, err := NewService(NewRepository(database, authorizer), keys, &memoryVerifier{}, ServiceOptions{Now: clock.Now})
 	if err != nil {
 		t.Fatal(err)
 	}
 	mock.ExpectBegin()
-	mock.ExpectExec("sensitive_authorize").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
 		WithArgs(int64(43)).
 		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(8), disabledAt))
@@ -216,7 +192,6 @@ func TestSensitiveEnableAccountRenewsAfterAuditWithoutRestoringCredentials(t *te
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)")).
 		WithArgs("streamer_account_enabled", int64(1), int64(43), auditJSONArgument{wantReason: "appeal accepted"}, authorizedAt).
 		WillReturnResult(sqlmock.NewResult(82, 1))
-	mock.ExpectExec("sensitive_renew").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	result, err := service.EnableAccount(context.Background(), "administrator-session", 43, " appeal accepted ")
@@ -226,11 +201,8 @@ func TestSensitiveEnableAccountRenewsAfterAuditWithoutRestoringCredentials(t *te
 	if result.AccountID != 43 || result.Status != AccountStatusActive {
 		t.Fatalf("EnableAccount() = %#v", result)
 	}
-	if authorizer.authorizeCalls != 1 || authorizer.renewCalls != 1 || authorizer.authorizeTx != authorizer.renewTx {
-		t.Fatalf("sensitive calls authorize=%d renew=%d sameTx=%t", authorizer.authorizeCalls, authorizer.renewCalls, authorizer.authorizeTx == authorizer.renewTx)
-	}
-	if !authorizer.authorizedAt.Equal(authorizedAt) || !authorizer.renewedAt.Equal(completedAt) {
-		t.Fatalf("sensitive timestamps authorize=%s renew=%s", authorizer.authorizedAt, authorizer.renewedAt)
+	if authorizer.authorizeCalls != 1 || authorizer.renewCalls != 0 {
+		t.Fatalf("session calls=%d sensitive renew calls=%d", authorizer.authorizeCalls, authorizer.renewCalls)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -387,6 +359,11 @@ type identitySensitiveAuthorizer struct {
 	renewedAt      time.Time
 	authorizeTx    *sql.Tx
 	renewTx        *sql.Tx
+}
+
+func (authorizer *identitySensitiveAuthorizer) RequireSession(_ context.Context, _ string) error {
+	authorizer.authorizeCalls++
+	return authorizer.authorizeErr
 }
 
 func (authorizer *identitySensitiveAuthorizer) AuthorizeRecentTOTP(ctx context.Context, transaction *sql.Tx, _ string, now time.Time) (security.SensitiveSession, error) {

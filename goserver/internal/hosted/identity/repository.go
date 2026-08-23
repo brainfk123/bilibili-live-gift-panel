@@ -36,11 +36,11 @@ type Repository interface {
 
 type sqlRepository struct {
 	db            *sql.DB
-	administrator security.SensitiveAuthorizer
+	administrator security.SessionValidator
 }
 
 // NewRepository builds the MySQL-backed identity repository.
-func NewRepository(db *sql.DB, administrator ...security.SensitiveAuthorizer) Repository {
+func NewRepository(db *sql.DB, administrator ...security.SessionValidator) Repository {
 	repository := &sqlRepository{db: db}
 	if len(administrator) > 0 {
 		repository.administrator = administrator[0]

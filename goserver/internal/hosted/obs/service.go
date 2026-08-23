@@ -32,7 +32,7 @@ var (
 var publicIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
 type administratorAuthorizer interface {
-	security.SensitiveAuthorizer
+	security.SessionValidator
 }
 
 type ServiceOptions struct {
@@ -84,16 +84,15 @@ func (service *Service) Issue(ctx context.Context, administratorToken string, ac
 	if service == nil || ctx == nil || administratorToken == "" || accountID <= 0 {
 		return IssuedCredential{}, ErrInvalidInput
 	}
+	if err := service.admin.RequireSession(ctx, administratorToken); err != nil {
+		return IssuedCredential{}, ErrAuthenticationFailed
+	}
 	transaction, err := service.database.BeginTx(ctx, nil)
 	if err != nil {
 		return IssuedCredential{}, ErrUnavailable
 	}
 	defer transaction.Rollback()
 	authorizedAt := service.now().UTC()
-	sensitiveSession, err := service.admin.AuthorizeRecentTOTP(ctx, transaction, administratorToken, authorizedAt)
-	if err != nil {
-		return IssuedCredential{}, mapAdministratorError(err)
-	}
 	publicBytes, publicID, err := service.randomToken()
 	if err != nil {
 		return IssuedCredential{}, err
@@ -137,24 +136,10 @@ func (service *Service) Issue(ctx context.Context, administratorToken string, ac
 	if err != nil || !oneRow(result) {
 		return IssuedCredential{}, ErrUnavailable
 	}
-	if err := service.admin.RenewRecentTOTP(ctx, transaction, sensitiveSession, service.now().UTC()); err != nil {
-		return IssuedCredential{}, mapAdministratorError(err)
-	}
 	if err := transaction.Commit(); err != nil {
 		return IssuedCredential{}, ErrUnavailable
 	}
 	return IssuedCredential{PublicID: publicID, URL: service.publicOrigin + "/obs/" + publicID + "#token=" + url.QueryEscape(longToken)}, nil
-}
-
-func mapAdministratorError(err error) error {
-	switch {
-	case errors.Is(err, security.ErrSensitiveRecentTOTPRequired):
-		return ErrRecentTOTPRequired
-	case errors.Is(err, security.ErrSensitiveAuthenticationFailed):
-		return ErrAuthenticationFailed
-	default:
-		return ErrUnavailable
-	}
 }
 
 func (service *Service) Exchange(ctx context.Context, publicID, longToken string) (ShortSession, error) {

@@ -37,14 +37,14 @@ type ServiceOptions struct {
 	Now           func() time.Time
 	InvitationTTL time.Duration
 	SessionTTL    time.Duration
-	Administrator security.SensitiveAuthorizer
+	Administrator security.SessionValidator
 }
 
 type Service struct {
 	db            *sql.DB
 	keys          security.Keyring
 	intents       registrationIntentSource
-	administrator security.SensitiveAuthorizer
+	administrator security.SessionValidator
 	now           func() time.Time
 	invitationTTL time.Duration
 	sessionTTL    time.Duration
@@ -92,6 +92,11 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 	} else if service.administrator == nil {
 		return GeneratedInvitation{}, ErrUnavailable
 	}
+	if actor == ActorAdministrator {
+		if err := service.administrator.RequireSession(ctx, sessionToken); err != nil {
+			return GeneratedInvitation{}, ErrAuthentication
+		}
+	}
 	transaction, err := service.db.BeginTx(ctx, nil)
 	if err != nil {
 		return GeneratedInvitation{}, ErrUnavailable
@@ -106,7 +111,6 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 	var invitationID int64
 	var remaining uint64
 	var now, expiresAt time.Time
-	var sensitiveSession security.SensitiveSession
 	switch actor {
 	case ActorStreamer:
 		authorization, err := lockCurrentStreamer(ctx, transaction, tokenHash)
@@ -156,10 +160,6 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 		}
 	case ActorAdministrator:
 		now = service.now().UTC()
-		sensitiveSession, err = service.administrator.AuthorizeRecentTOTP(ctx, transaction, sessionToken, now)
-		if err != nil {
-			return GeneratedInvitation{}, mapSensitiveError(err)
-		}
 		expiresAt = now.Add(service.invitationTTL)
 		result, err := transaction.ExecContext(ctx,
 			"INSERT INTO invitations (code_hash, code_hint, creator_admin_identity_id, status, created_at, expires_at) VALUES (?, ?, 1, 'active', ?, ?)",
@@ -176,9 +176,6 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 			eventType: "invitation_generated", actor: administratorAuditActor(), invitationID: invitationID,
 		}, now); err != nil {
 			return GeneratedInvitation{}, err
-		}
-		if err := service.administrator.RenewRecentTOTP(ctx, transaction, sensitiveSession, service.now().UTC()); err != nil {
-			return GeneratedInvitation{}, mapSensitiveError(err)
 		}
 	}
 	if err := transaction.Commit(); err != nil {
@@ -213,6 +210,9 @@ func (service *Service) AdjustQuota(ctx context.Context, administratorSession st
 	if service == nil || service.administrator == nil || administratorSession == "" || accountID <= 0 || !valid {
 		return Quota{}, ErrInvalidInput
 	}
+	if err := service.administrator.RequireSession(ctx, administratorSession); err != nil {
+		return Quota{}, ErrAuthentication
+	}
 	transaction, err := service.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Quota{}, ErrUnavailable
@@ -224,10 +224,6 @@ func (service *Service) AdjustQuota(ctx context.Context, administratorSession st
 		}
 	}()
 	now := service.now().UTC()
-	sensitiveSession, err := service.administrator.AuthorizeRecentTOTP(ctx, transaction, administratorSession, now)
-	if err != nil {
-		return Quota{}, mapSensitiveError(err)
-	}
 	var credentialEpoch int64
 	if accountErr := transaction.QueryRowContext(ctx, "SELECT credential_epoch FROM streamer_accounts WHERE id = ? FOR UPDATE", accountID).Scan(&credentialEpoch); accountErr != nil {
 		if errors.Is(accountErr, sql.ErrNoRows) {
@@ -268,9 +264,6 @@ func (service *Service) AdjustQuota(ctx context.Context, administratorSession st
 		quota: &quotaAudit{Reason: normalizedReason, Before: before, After: remaining, Delta: delta},
 	}, now); err != nil {
 		return Quota{}, err
-	}
-	if err := service.administrator.RenewRecentTOTP(ctx, transaction, sensitiveSession, service.now().UTC()); err != nil {
-		return Quota{}, mapSensitiveError(err)
 	}
 	if err := transaction.Commit(); err != nil {
 		return Quota{}, ErrUnavailable

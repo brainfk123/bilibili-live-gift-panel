@@ -9,8 +9,6 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
-
-	"bilibili-live-gift-panel/internal/hosted/security"
 )
 
 const (
@@ -82,6 +80,9 @@ func (repository *sqlRepository) disableAccount(ctx context.Context, sessionToke
 	if !repository.ready() || repository.administrator == nil || sessionToken == "" || accountID <= 0 || clock == nil {
 		return ManagedAccount{}, ErrInvalidInput
 	}
+	if err := repository.administrator.RequireSession(ctx, sessionToken); err != nil {
+		return ManagedAccount{}, ErrAuthenticationFailed
+	}
 	transaction, err := repository.db.BeginTx(ctx, nil)
 	if err != nil {
 		return ManagedAccount{}, ErrRepositoryUnavailable
@@ -93,11 +94,6 @@ func (repository *sqlRepository) disableAccount(ctx context.Context, sessionToke
 		}
 	}()
 	now := clock().UTC()
-	sensitiveSession, err := repository.administrator.AuthorizeRecentTOTP(ctx, transaction, sessionToken, now)
-	if err != nil {
-		return ManagedAccount{}, mapSensitiveAdministratorError(err)
-	}
-
 	disabledAt, err := lockManagedAccount(ctx, transaction, accountID)
 	if err != nil {
 		return ManagedAccount{}, err
@@ -121,9 +117,6 @@ func (repository *sqlRepository) disableAccount(ctx context.Context, sessionToke
 	if err := insertAccountAudit(ctx, transaction, "streamer_account_disabled", accountID, reason, nil, nil, now); err != nil {
 		return ManagedAccount{}, err
 	}
-	if err := repository.administrator.RenewRecentTOTP(ctx, transaction, sensitiveSession, clock().UTC()); err != nil {
-		return ManagedAccount{}, mapSensitiveAdministratorError(err)
-	}
 	if err := transaction.Commit(); err != nil {
 		return ManagedAccount{}, ErrRepositoryUnavailable
 	}
@@ -134,6 +127,9 @@ func (repository *sqlRepository) disableAccount(ctx context.Context, sessionToke
 func (repository *sqlRepository) enableAccount(ctx context.Context, sessionToken string, accountID int64, reason string, clock func() time.Time) (ManagedAccount, error) {
 	if !repository.ready() || repository.administrator == nil || sessionToken == "" || accountID <= 0 || clock == nil {
 		return ManagedAccount{}, ErrInvalidInput
+	}
+	if err := repository.administrator.RequireSession(ctx, sessionToken); err != nil {
+		return ManagedAccount{}, ErrAuthenticationFailed
 	}
 	transaction, err := repository.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -146,11 +142,6 @@ func (repository *sqlRepository) enableAccount(ctx context.Context, sessionToken
 		}
 	}()
 	now := clock().UTC()
-	sensitiveSession, err := repository.administrator.AuthorizeRecentTOTP(ctx, transaction, sessionToken, now)
-	if err != nil {
-		return ManagedAccount{}, mapSensitiveAdministratorError(err)
-	}
-
 	disabledAt, err := lockManagedAccount(ctx, transaction, accountID)
 	if err != nil {
 		return ManagedAccount{}, err
@@ -167,9 +158,6 @@ func (repository *sqlRepository) enableAccount(ctx context.Context, sessionToken
 	}
 	if err := insertAccountAudit(ctx, transaction, "streamer_account_enabled", accountID, reason, nil, nil, now); err != nil {
 		return ManagedAccount{}, err
-	}
-	if err := repository.administrator.RenewRecentTOTP(ctx, transaction, sensitiveSession, clock().UTC()); err != nil {
-		return ManagedAccount{}, mapSensitiveAdministratorError(err)
 	}
 	if err := transaction.Commit(); err != nil {
 		return ManagedAccount{}, ErrRepositoryUnavailable
@@ -190,19 +178,6 @@ func lockManagedAccount(ctx context.Context, transaction *sql.Tx, accountID int6
 		return sql.NullTime{}, ErrRepositoryUnavailable
 	}
 	return disabledAt, nil
-}
-
-func mapSensitiveAdministratorError(err error) error {
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, security.ErrSensitiveRecentTOTPRequired):
-		return ErrRecentTOTPRequired
-	case errors.Is(err, security.ErrSensitiveAuthenticationFailed):
-		return ErrAuthenticationFailed
-	default:
-		return ErrRepositoryUnavailable
-	}
 }
 
 func insertAccountAudit(ctx context.Context, transaction *sql.Tx, eventType string, accountID int64, reason string, oldLookup, newLookup []byte, now time.Time) error {

@@ -16,16 +16,15 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
-func TestSensitiveOBSCredentialResetRenewsOnlyAfterAuditInSameTransaction(t *testing.T) {
+func TestOBSCredentialResetUsesSessionOnlyAndAudits(t *testing.T) {
 	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer database.Close()
 	authorizedAt := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
-	completedAt := authorizedAt.Add(2 * time.Second)
-	clock := &obsTimeSequence{values: []time.Time{authorizedAt, completedAt}}
-	authorizer := &adminAuthorizerStub{writeMarkers: true}
+	clock := &obsTimeSequence{values: []time.Time{authorizedAt}}
+	authorizer := &adminAuthorizerStub{}
 	random := bytes.NewReader(append(bytes.Repeat([]byte{0x11}, 32), bytes.Repeat([]byte{0x22}, 32)...))
 	service, err := NewService(database, authorizer, ServiceOptions{Now: clock.Now, Random: random, PublicOrigin: "https://host.example"})
 	if err != nil {
@@ -33,7 +32,6 @@ func TestSensitiveOBSCredentialResetRenewsOnlyAfterAuditInSameTransaction(t *tes
 	}
 
 	mock.ExpectBegin()
-	mock.ExpectExec("sensitive_authorize").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
 		WithArgs(int64(41)).
 		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(7), nil))
@@ -46,27 +44,20 @@ func TestSensitiveOBSCredentialResetRenewsOnlyAfterAuditInSameTransaction(t *tes
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)")).
 		WithArgs("obs_credential_reset", int64(1), int64(41), []byte("{}"), authorizedAt).
 		WillReturnResult(sqlmock.NewResult(10, 1))
-	mock.ExpectExec("sensitive_renew").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	if _, err := service.Issue(context.Background(), "administrator-secret", 41); err != nil {
 		t.Fatalf("Issue() error = %v", err)
 	}
-	if authorizer.authorizeCalls != 1 || authorizer.renewCalls != 1 || authorizer.authorizedToken != "administrator-secret" {
-		t.Fatalf("sensitive calls authorize=%d renew=%d token=%q", authorizer.authorizeCalls, authorizer.renewCalls, authorizer.authorizedToken)
-	}
-	if authorizer.authorizeTx == nil || authorizer.authorizeTx != authorizer.renewTx {
-		t.Fatal("authorization and renewal did not use the same caller-owned transaction")
-	}
-	if !authorizer.authorizedAt.Equal(authorizedAt) || !authorizer.renewedAt.Equal(completedAt) {
-		t.Fatalf("sensitive timestamps authorize=%s renew=%s", authorizer.authorizedAt, authorizer.renewedAt)
+	if authorizer.sessionToken != "administrator-secret" || authorizer.authorizeCalls != 0 || authorizer.renewCalls != 0 {
+		t.Fatalf("session token=%q sensitive authorize=%d renew=%d", authorizer.sessionToken, authorizer.authorizeCalls, authorizer.renewCalls)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestSensitiveOBSResetFailureNeverRenewsAndRenewalFailureRollsBack(t *testing.T) {
+func TestOBSResetAuditFailureRollsBackWithoutTOTPCalls(t *testing.T) {
 	now := time.Date(2026, 8, 21, 12, 10, 0, 0, time.UTC)
 	for _, test := range []struct {
 		name           string
@@ -75,7 +66,6 @@ func TestSensitiveOBSResetFailureNeverRenewsAndRenewalFailureRollsBack(t *testin
 		wantRenewCalls int
 	}{
 		{name: "audit failure", auditError: errors.New("private audit failure")},
-		{name: "renewal failure", renewError: errors.New("private renewal failure"), wantRenewCalls: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			database, mock, err := sqlmock.New()
@@ -83,7 +73,7 @@ func TestSensitiveOBSResetFailureNeverRenewsAndRenewalFailureRollsBack(t *testin
 				t.Fatal(err)
 			}
 			defer database.Close()
-			authorizer := &adminAuthorizerStub{writeMarkers: true, renewErr: test.renewError}
+			authorizer := &adminAuthorizerStub{renewErr: test.renewError}
 			random := bytes.NewReader(append(bytes.Repeat([]byte{0x11}, 32), bytes.Repeat([]byte{0x22}, 32)...))
 			service, err := NewService(database, authorizer, ServiceOptions{Now: func() time.Time { return now }, Random: random, PublicOrigin: "https://host.example"})
 			if err != nil {
@@ -91,7 +81,6 @@ func TestSensitiveOBSResetFailureNeverRenewsAndRenewalFailureRollsBack(t *testin
 			}
 
 			mock.ExpectBegin()
-			mock.ExpectExec("sensitive_authorize").WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).
 				WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(int64(7), nil))
 			mock.ExpectExec(regexp.QuoteMeta("UPDATE obs_sessions AS s JOIN obs_credentials AS c ON c.id = s.obs_credential_id SET s.revoked_at = ? WHERE c.account_id = ? AND s.revoked_at IS NULL")).
@@ -105,7 +94,6 @@ func TestSensitiveOBSResetFailureNeverRenewsAndRenewalFailureRollsBack(t *testin
 				audit.WillReturnError(test.auditError)
 			} else {
 				audit.WillReturnResult(sqlmock.NewResult(10, 1))
-				mock.ExpectExec("sensitive_renew").WillReturnResult(sqlmock.NewResult(0, 1))
 			}
 			mock.ExpectRollback()
 
@@ -164,29 +152,27 @@ func TestIssueCredentialStoresOnlyHashesAndRevokesEveryEarlierCredential(t *test
 	if issued.URL != "https://host.example/obs/ERERERERERERERERERERERERERERERERERERERERERE#token="+longToken {
 		t.Fatalf("URL = %q", issued.URL)
 	}
-	if admin.authorizedToken != "administrator-secret" || admin.authorizeCalls != 1 || admin.renewCalls != 1 {
-		t.Fatalf("administrator authorization token=%q authorize=%d renew=%d", admin.authorizedToken, admin.authorizeCalls, admin.renewCalls)
+	if admin.sessionToken != "administrator-secret" || admin.authorizeCalls != 0 || admin.renewCalls != 0 {
+		t.Fatalf("administrator session token=%q authorize=%d renew=%d", admin.sessionToken, admin.authorizeCalls, admin.renewCalls)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestIssueCredentialRequiresRecentAdministratorTOTPBeforeDomainWork(t *testing.T) {
+func TestIssueCredentialRejectsRevokedAdministratorSessionBeforeDomainWork(t *testing.T) {
 	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	admin := &adminAuthorizerStub{recentErr: security.ErrSensitiveRecentTOTPRequired}
+	admin := &adminAuthorizerStub{sessionErr: errors.New("revoked session")}
 	service, err := NewService(database, admin, ServiceOptions{Random: bytes.NewReader(make([]byte, 64)), PublicOrigin: "https://host.example"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	mock.ExpectBegin()
-	mock.ExpectRollback()
-	if _, err := service.Issue(context.Background(), "stale", 1); !errors.Is(err, ErrRecentTOTPRequired) {
-		t.Fatalf("Issue() error = %v, want recent TOTP", err)
+	if _, err := service.Issue(context.Background(), "stale", 1); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("Issue() error = %v, want authentication failure", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
