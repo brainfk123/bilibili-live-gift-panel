@@ -44,11 +44,11 @@ func clientDevice(userAgent string) string {
 
 func clientBrowser(userAgent string) string {
 	switch {
-	case strings.Contains(userAgent, "Edg/"), strings.Contains(userAgent, "Edge/"):
+	case strings.Contains(userAgent, "Edg/"), strings.Contains(userAgent, "EdgA/"), strings.Contains(userAgent, "EdgiOS/"), strings.Contains(userAgent, "Edge/"):
 		return "Edge"
-	case strings.Contains(userAgent, "Firefox/"):
+	case strings.Contains(userAgent, "Firefox/"), strings.Contains(userAgent, "FxiOS/"):
 		return "Firefox"
-	case strings.Contains(userAgent, "Chrome/"):
+	case strings.Contains(userAgent, "Chrome/"), strings.Contains(userAgent, "CriOS/"):
 		return "Chrome"
 	case strings.Contains(userAgent, "Safari/"):
 		return "Safari"

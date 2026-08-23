@@ -10,6 +10,10 @@ func TestSummarizeClientAllowlistAndNetworkMasking(t *testing.T) {
 	iphoneSafari := "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1"
 	windowsEdge := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"
 	androidChrome := "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36"
+	androidEdge := "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36 EdgA/131.0.0.0"
+	iosEdge := "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 EdgiOS/131.0.0 Mobile/15E148 Safari/604.1"
+	iosFirefox := "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 FxiOS/131.0 Mobile/15E148 Safari/605.1.15"
+	iosChrome := "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 CriOS/131.0.6778.49 Mobile/15E148 Safari/604.1"
 
 	tests := []struct {
 		name    string
@@ -21,6 +25,10 @@ func TestSummarizeClientAllowlistAndNetworkMasking(t *testing.T) {
 		{"iPhone Safari IPv4", iphoneSafari, "203.0.113.45", "iPhone · Safari", "203.0.113.*"},
 		{"Windows Edge IPv4", windowsEdge, "198.51.100.9", "Windows · Edge", "198.51.100.*"},
 		{"Android Chrome IPv6", androidChrome, "2001:db8:abcd:1234:5678::1", "Android · Chrome", "2001:db8:abcd:1234::*"},
+		{"Android Edge mobile token", androidEdge, "203.0.113.45", "Android · Edge", "203.0.113.*"},
+		{"iOS Edge mobile token", iosEdge, "203.0.113.45", "iPhone · Edge", "203.0.113.*"},
+		{"iOS Firefox mobile token", iosFirefox, "203.0.113.45", "iPhone · Firefox", "203.0.113.*"},
+		{"iOS Chrome mobile token", iosChrome, "203.0.113.45", "iPhone · Chrome", "203.0.113.*"},
 		{"unknown values", "secret custom agent", "not-an-ip", "其他设备 · 其他浏览器", "—"},
 	}
 
