@@ -220,11 +220,21 @@ select {
 .hosted-admin-account-head { color:#66738a;background:#f6f8fb;font-weight:700; }
 .hosted-admin-account-detail { position:fixed;z-index:25;inset:0 0 0 auto;width:min(31rem,100vw);padding:1.5rem;overflow:auto;background:#fff;box-shadow:-1rem 0 3rem rgb(18 34 56 / .18); }
 .hosted-admin-account-detail:empty { display:none; }
+.hosted-admin-invitation-actions { display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;margin:1rem 0; }
+.hosted-admin-invitation-actions input { flex:1 1 16rem; }
+.hosted-admin-invitation-create { display:flex;gap:.75rem;padding:1rem;margin-bottom:1rem;border:1px solid #d8e0ec;border-radius:1rem;background:#fff; }
+.hosted-admin-feedback:empty { display:none; }
+.hosted-admin-invitation-table { overflow:hidden;border:1px solid #d8e0ec;border-radius:1rem;background:#fff; }
+.hosted-admin-invitation-row { display:grid;grid-template-columns:minmax(9rem,1.2fr) minmax(6rem,.7fr) minmax(9rem,1fr) minmax(9rem,1fr) minmax(9rem,1fr);gap:.75rem;align-items:center;padding:.9rem 1rem;border-bottom:1px solid #e5eaf1; }
+.hosted-admin-invitation-head { background:#f6f8fb;color:#66738a;font-weight:700; }
+.hosted-admin-invitation-row button { margin-right:.35rem; }
 @media (max-width:720px) {
   .hosted-admin-metrics { grid-template-columns:1fr; }
   .hosted-admin-account-row { grid-template-columns:2.5rem 1fr 4.5rem; }
   .hosted-admin-account-row > :nth-child(3),.hosted-admin-account-row > :nth-child(4),.hosted-admin-account-row > :nth-child(5) { display:none; }
   .hosted-admin-account-detail { width:100vw; }
+  .hosted-admin-invitation-row { grid-template-columns:1fr 6rem; }
+  .hosted-admin-invitation-row > :nth-child(3),.hosted-admin-invitation-row > :nth-child(4),.hosted-admin-invitation-row > :nth-child(5) { display:none; }
 }
 
 :focus-within > .hosted-code-cell {

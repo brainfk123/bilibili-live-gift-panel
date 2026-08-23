@@ -1,0 +1,2 @@
+import type {AdminInvitationQuery} from '../../api';
+export function createInvitationQueryState(initial:AdminInvitationQuery={sort:'created_at',direction:'desc'}){let value={sort:'created_at',direction:'desc',...initial} as AdminInvitationQuery;return Object.freeze({get:()=>({...value}),update(patch:Partial<AdminInvitationQuery>){value={...value,...patch};delete value.cursor;return{...value}},toggleSort(sort:'status'|'created_at'){value={...value,sort,direction:value.sort===sort&&value.direction==='desc'?'asc':'desc'};delete value.cursor;return{...value}}})}

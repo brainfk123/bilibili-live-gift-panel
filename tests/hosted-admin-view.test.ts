@@ -43,10 +43,13 @@ function button(root: Element, text: string): Element {
 }
 
 describe('administrator section lifetime fence', () => {
-  it('presents a generated invitation in the styled one-time-secret dialog', async () => {
+  it('opens compact invitation creation under the inventory title', async () => {
     const api = {
       adminSession: vi.fn(async () => undefined),
-      generateInvitation: vi.fn(async () => ({ code: 'AB12CD34' })),
+      adminOverview: vi.fn(async () => ({totalAccounts:0,activeAccounts:0,disabledAccounts:0,missingRooms:0,missingObs:0,attention:[],recentEvents:[]})),
+      adminInvitations: vi.fn(async () => ({invitations:[]})),
+      createAdminInvitations: vi.fn(async () => []),
+      revokeAdminInvitation: vi.fn(async () => undefined),
     };
     const document: DocumentLike = {
       createElement: (tag) => new Element(tag, document),
@@ -57,19 +60,10 @@ describe('administrator section lifetime fence', () => {
 
     await vi.waitFor(() => expect(button(root, '邀请码')).toBeDefined());
     button(root, '邀请码').listeners.get('click')?.();
-    await vi.waitFor(() => expect(button(root, '生成不限额度邀请码')).toBeDefined());
-    button(root, '生成不限额度邀请码').listeners.get('click')?.();
-    await vi.waitFor(() => expect(descendants(root).some((element) => element.tagName === 'dialog')).toBe(true));
-
-    const dialog = descendants(root).find((element) => element.tagName === 'dialog');
-    expect(dialog?.className).toBe('hosted-secret-dialog');
-    expect(dialog?.children.map((element) => element.className)).toEqual([
-      'hosted-secret-dialog-header',
-      'hosted-secret-dialog-value',
-      'hosted-secret-dialog-actions',
-    ]);
-    expect(descendants(dialog as Element).some((element) => element.textContent === '只显示一次，请先复制并妥善保存。')).toBe(true);
-    expect(descendants(dialog as Element).find((element) => element.textContent === '复制邀请码')?.className).toBe('hosted-secret-dialog-primary');
+    await vi.waitFor(() => expect(button(root, '创建邀请码')).toBeDefined());
+    button(root, '创建邀请码').listeners.get('click')?.();
+    await vi.waitFor(() => expect(button(root, '创建')).toBeDefined());
+    expect(descendants(root).filter((element)=>element.className==='hosted-admin-invitation-create')).toHaveLength(1);
     await mounted.dispose();
   });
 

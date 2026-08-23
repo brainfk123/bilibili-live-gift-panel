@@ -3,6 +3,7 @@ import { mountAdminLogin } from './admin-login';
 import { mountAdminShell } from './admin/shell';
 import { mountAdminOverview } from './admin/overview';
 import { mountAccountList } from './admin/accounts/list';
+import { mountAdminInvitationView } from './admin/invitations/view';
 import { createOneTimeSecretDialog } from './one-time-secret';
 import type { AdminSection } from './admin/routes';
 import { mountVerificationCode, type VerificationCodeControl } from './verification-code';
@@ -307,10 +308,8 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
         }
 
         if (section === 'invitations') {
-          title.textContent = '邀请'; intro.textContent = '管理员邀请码只显示一次，请立即保存并通过可信渠道交付。';
-          const recent = recentControl(); const card = document.createElement('section'); card.className = 'hosted-admin-card';
-          card.append(button(document, '生成不限额度邀请码', () => recent.guarded(async () => { await adminSecretFlow.run(async () => { const generated = await api.generateInvitation(true); if (!isCurrentSection()) throw unavailable(); return { title: '邀请码仅显示一次', value: generated.code, copyLabel: '复制邀请码' }; }); })));
-          host.append(recent.element, card);
+          title.textContent = '邀请码'; intro.textContent = '搜索、排序、复制、分享或作废邀请码；创建设置按需展开。';
+          const view=mountAdminInvitationView(host,api);localDisposers.push(()=>{void view.dispose()});
         }
 
         if (section === 'bili-service') {
