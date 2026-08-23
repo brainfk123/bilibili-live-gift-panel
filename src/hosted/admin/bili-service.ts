@@ -43,7 +43,7 @@ export function mountBiliServiceView(host: HTMLElement, api: BiliServiceAPI): Ho
     const actions = document.createElement('div'); actions.className = 'hosted-admin-bili-flow-actions';
     const continueButton = document.createElement('button'); continueButton.type = 'button'; continueButton.dataset.variant = 'primary'; continueButton.textContent = '二维码确认后继续';
     continueButton.disabled = snapshot.phase !== 'qr';
-    continueButton.addEventListener('click', () => render({ ...snapshot, phase: 'authorizing' }));
+    continueButton.addEventListener('click', () => controller.enterAuthorization());
     const regenerate = document.createElement('button'); regenerate.type = 'button'; regenerate.dataset.variant = 'secondary'; regenerate.textContent = '重新生成'; regenerate.disabled = snapshot.phase !== 'qr';
     regenerate.addEventListener('click', () => { void runAdminAction(regenerate, { idle: '重新生成', busy: '生成中…' }, () => controller.beginReplacement()); });
     const cancel = document.createElement('button'); cancel.type = 'button'; cancel.dataset.variant = 'quiet'; cancel.textContent = '取消'; cancel.disabled = snapshot.phase !== 'qr'; cancel.addEventListener('click', () => controller.cancelReplacement());

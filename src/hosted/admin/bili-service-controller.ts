@@ -17,6 +17,7 @@ export interface BiliServiceController {
   load(): Promise<void>;
   check(): Promise<void>;
   beginReplacement(): Promise<void>;
+  enterAuthorization(): void;
   cancelReplacement(): void;
   authorizeAndReplace(totp: string): Promise<void>;
   dispose(): void;
@@ -78,6 +79,13 @@ export function createBiliServiceController(api: Partial<BiliServiceAPI>, render
         notice = { kind: 'error', message: '无法创建服务账号登录二维码，请重试' };
       }
       if (complete(current)) publish();
+    },
+
+    enterAuthorization(): void {
+      if (disposed || !challenge || phase !== 'qr') return;
+      phase = 'authorizing';
+      notice = undefined;
+      publish();
     },
 
     cancelReplacement(): void {
