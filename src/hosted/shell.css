@@ -212,6 +212,12 @@ select {
 .hosted-admin-metric { display:flex;flex-direction:column;gap:.25rem;padding:1rem;border:1px solid var(--hosted-border,#d8e0ec);border-radius:1rem;background:#fff; }
 .hosted-admin-metric strong { font-size:1.8rem;color:#17243a; }
 .hosted-admin-resource-row,.hosted-admin-account-controls,.hosted-admin-bulk-toolbar { display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;margin:1rem 0; }
+.hosted-admin-resource-row { display:grid;grid-template-columns:repeat(3,minmax(0,1fr)); }
+.hosted-admin-content .hosted-admin-resource-card { display:grid;grid-template-columns:1fr auto;gap:.35rem .75rem;min-height:8rem;margin:0;padding:1rem;color:#172033;text-align:left;background:#fff;border:1px solid #d8e0ec;box-shadow:0 .25rem 1rem rgb(23 32 51 / 5%); }
+.hosted-admin-resource-card strong { font-size:1.05rem; }
+.hosted-admin-resource-card > span:first-of-type { grid-column:1;color:#637087;font-weight:500;line-height:1.5; }
+.hosted-admin-resource-card > span:last-child { grid-column:2;grid-row:1 / span 2;align-self:center;color:var(--admin-blue,#246bce);font-size:1.4rem; }
+.hosted-admin-field { display:grid;gap:.3rem;margin:0;color:#39465a;font-size:.85rem;font-weight:650; }
 .hosted-admin-account-controls input { flex:1 1 16rem; }
 .hosted-admin-bulk-toolbar:empty { display:none; }
 .hosted-admin-account-table { border:1px solid #d8e0ec;border-radius:1rem;overflow:hidden;background:#fff; }
@@ -230,6 +236,7 @@ select {
 .hosted-admin-invitation-row button { margin-right:.35rem; }
 @media (max-width:720px) {
   .hosted-admin-metrics { grid-template-columns:1fr; }
+  .hosted-admin-resource-row { grid-template-columns:1fr; }
   .hosted-admin-account-row { grid-template-columns:2.5rem 1fr 4.5rem; }
   .hosted-admin-account-row > :nth-child(3),.hosted-admin-account-row > :nth-child(4),.hosted-admin-account-row > :nth-child(5) { display:none; }
   .hosted-admin-account-detail { width:100vw; }

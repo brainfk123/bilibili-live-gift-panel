@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { mountAdminView } from '../src/hosted/admin';
+import { mountAdminOverview } from '../src/hosted/admin/overview';
+import { mountAccountList } from '../src/hosted/admin/accounts/list';
 
 class Element {
   children: Element[] = [];
@@ -15,6 +17,11 @@ class Element {
   src = '';
   alt = '';
   open = false;
+  checked = false;
+  hidden = false;
+  dataset: Record<string, string> = {};
+  style = { width: '' };
+  offsetWidth = 100;
   attributes = new Map<string, string>();
   listeners = new Map<string, () => void>();
   constructor(readonly tagName: string, readonly ownerDocument: DocumentLike) {}
@@ -23,6 +30,7 @@ class Element {
   replaceChildren(...nodes: Element[]) { for (const child of this.children) child.parent = undefined; this.children = []; this.append(...nodes); }
   remove() { if (this.parent) { this.parent.children = this.parent.children.filter((child) => child !== this); this.parent = undefined; } }
   setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+  getAttribute(name: string) { return this.attributes.get(name) ?? null; }
   removeAttribute(name: string) { this.attributes.delete(name); }
   addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); }
   removeEventListener(name: string) { this.listeners.delete(name); }
@@ -42,7 +50,81 @@ function button(root: Element, text: string): Element {
   return found;
 }
 
+function control(root: Element, tag: string, label: string): Element {
+  const found = descendants(root).find((element) => element.tagName === tag && element.attributes.get('aria-label') === label);
+  if (!found) throw new Error(`${tag} not found: ${label}`);
+  return found;
+}
+
+function text(root: Element): string {
+  return descendants(root).map((element) => element.textContent).join('');
+}
+
+async function flush(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 describe('administrator section lifetime fence', () => {
+  it('labels both account filters and the current-page checkbox', async () => {
+    const document: DocumentLike = {
+      createElement: (tag) => new Element(tag, document),
+      createTextNode: (value) => { const node = new Element('#text', document); node.textContent = value; return node; },
+    };
+    const root = new Element('div', document);
+    const api = { adminAccounts: vi.fn(async () => ({ items: [] })) };
+    const view = mountAccountList(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountAccountList>[1]);
+    await flush();
+
+    expect(control(root, 'select', '账号状态').getAttribute('aria-label')).toBe('账号状态');
+    expect(control(root, 'select', '关注事项').getAttribute('aria-label')).toBe('关注事项');
+    expect(control(root, 'input', '全选当前页').getAttribute('aria-label')).toBe('全选当前页');
+    await view.dispose();
+  });
+
+  it('renders resource destinations as descriptive cards', async () => {
+    const document: DocumentLike = {
+      createElement: (tag) => new Element(tag, document),
+      createTextNode: (value) => { const node = new Element('#text', document); node.textContent = value; return node; },
+    };
+    const root = new Element('div', document);
+    mountAdminOverview(root as unknown as HTMLElement, { adminOverview: vi.fn(async () => ({ totalAccounts: 0, activeAccounts: 0, disabledAccounts: 0, missingRooms: 0, missingObs: 0, attention: [], recentEvents: [] })) }, () => undefined);
+    await flush();
+
+    expect(text(root)).toContain('管理直播间、邀请额度与 OBS');
+    expect(text(root)).toContain('创建、分享与作废邀请码');
+  });
+
+  it('keeps failed batch accounts selected and reports exact result counts', async () => {
+    const document: DocumentLike = {
+      createElement: (tag) => new Element(tag, document),
+      createTextNode: (value) => { const node = new Element('#text', document); node.textContent = value; return node; },
+    };
+    const root = new Element('div', document);
+    const api = {
+      adminAccounts: vi.fn(async () => ({ items: [
+        { id: 41, status: 'active', roomId: '123', invitationQuota: 8, hasObs: true, createdAt: '', updatedAt: '' },
+        { id: 52, status: 'active', roomId: '456', invitationQuota: 8, hasObs: true, createdAt: '', updatedAt: '' },
+      ] })),
+      adminBatch: vi.fn(async () => [{ accountId: 41, status: 'succeeded' as const }, { accountId: 52, status: 'failed' as const }]),
+    };
+    const prompt = vi.fn(() => 'maintenance');
+    vi.stubGlobal('prompt', prompt);
+    const view = mountAccountList(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountAccountList>[1]);
+    await flush();
+    const currentPage = control(root, 'input', '全选当前页');
+    currentPage.checked = true;
+    currentPage.listeners.get('change')?.();
+    button(root, '停用').listeners.get('click')?.();
+    await flush();
+
+    expect(text(root)).toContain('1 个成功，1 个失败');
+    expect(control(root, 'input', '选择主播账号 #52').checked).toBe(true);
+    expect(control(root, 'input', '选择主播账号 #41').checked).toBe(false);
+    vi.unstubAllGlobals();
+    await view.dispose();
+  });
+
   it('opens compact invitation creation under the inventory title', async () => {
     const api = {
       adminSession: vi.fn(async () => undefined),
