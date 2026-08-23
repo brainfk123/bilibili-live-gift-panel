@@ -1,3 +1,4 @@
 deploy/hosted/*.sh text eol=lf
 deploy/hosted/*.service text eol=lf
 deploy/hosted/*.timer text eol=lf
+goserver/internal/hosted/store/mysqlstore/migrations/*.sql text eol=lf
