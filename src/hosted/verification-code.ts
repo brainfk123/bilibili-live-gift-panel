@@ -1,13 +1,14 @@
 export interface VerificationCodeControl {
   focus(): void;
   clear(): void;
+  value(): string;
   setBusy(busy: boolean): void;
   dispose(): void;
 }
 
 export function mountVerificationCode(
   root: HTMLElement,
-  options: { label: string; onComplete(code: string): void },
+  options: { label: string; initialValue?: string; onComplete(code: string): void },
 ): VerificationCodeControl {
   const document = root.ownerDocument;
   root.className = [...new Set([...root.className.split(/\s+/).filter(Boolean), 'hosted-code-control'])].join(' ');
@@ -26,7 +27,7 @@ export function mountVerificationCode(
     cell.setAttribute('aria-hidden', 'true');
     return cell;
   });
-  let digits = '';
+  let digits = (options.initialValue ?? '').replace(/[^0-9]/g, '').slice(0, 6);
   let completed = '';
   let busy = false;
   let focused = false;
@@ -55,6 +56,7 @@ export function mountVerificationCode(
   input.addEventListener('focus', onFocus);
   input.addEventListener('blur', onBlur);
   root.replaceChildren(input, ...cells);
+  render();
 
   return Object.freeze({
     focus(): void { if (!disposed) input.focus(); },
@@ -62,6 +64,7 @@ export function mountVerificationCode(
       digits = ''; completed = ''; render();
       if (!disposed) input.focus();
     },
+    value(): string { return digits; },
     setBusy(nextBusy: boolean): void {
       busy = nextBusy; input.disabled = nextBusy;
       root.classList?.toggle('is-busy', nextBusy);

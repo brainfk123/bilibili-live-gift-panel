@@ -81,6 +81,16 @@ describe('hosted verification code control', () => {
     expect(JSON.stringify(control)).not.toContain('654321');
   });
 
+  it('can remount a retained network-failure code for explicit retry', () => {
+    const { root } = fixture();
+    const completed = vi.fn();
+    const control = mountVerificationCode(root as unknown as HTMLElement, { label: '验证码', initialValue: '654321', onComplete: completed });
+    expect(root.children[0].value).toBe('654321');
+    expect(control.value()).toBe('654321');
+    expect(completed).not.toHaveBeenCalled();
+    control.dispose();
+  });
+
   it('shows a caret in the next empty cell while the native input is focused', () => {
     const { root } = fixture();
     const control = mountVerificationCode(root as unknown as HTMLElement, { label: '验证码', onComplete: vi.fn() });

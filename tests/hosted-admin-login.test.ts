@@ -16,13 +16,42 @@ function api(overrides: Record<string, unknown> = {}) {
 }
 
 describe('email-only administrator login flow', () => {
-  it('uses a valid seven-day session without requesting an email code', async () => {
+  it('uses a valid administrator session without requesting an email code', async () => {
     const client = api({ adminSession: vi.fn(async () => undefined) });
     const states: string[] = [];
     const flow = createAdminLoginFlow(client, (state) => states.push(state.kind));
     await flow.start();
     expect(states).toEqual(['checking-session', 'signed-in']);
     expect(client.beginAdminEmailLogin).not.toHaveBeenCalled();
+  });
+
+  it('stops letting a stalled session probe own the page after three seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = api({ adminSession: vi.fn(() => new Promise<void>(() => undefined)) });
+      const flow = createAdminLoginFlow(client, vi.fn());
+      void flow.start();
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(flow.state()).toEqual({ kind: 'checking-session' });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(flow.state()).toEqual({ kind: 'restore-timeout' });
+      await flow.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains the challenge after a network failure so the same code can be retried', async () => {
+    const adminEmailLogin = vi.fn()
+      .mockRejectedValueOnce(new HostedAPIError('operation_failed', 0))
+      .mockResolvedValueOnce(undefined);
+    const flow = createAdminLoginFlow(api({ adminEmailLogin }), vi.fn());
+    await flow.start(); await flow.startEmail();
+    await expect(flow.submitEmailCode('654321')).rejects.toMatchObject({ status: 0 });
+    expect(flow.state()).toEqual({ kind: 'network-error' });
+    await flow.submitEmailCode('654321');
+    expect(adminEmailLogin).toHaveBeenCalledTimes(2);
+    expect(flow.state()).toEqual({ kind: 'signed-in' });
   });
 
   it('submits six email digits directly and signs in without a login TOTP step', async () => {
@@ -174,5 +203,42 @@ describe('email-only administrator login view', () => {
     await vi.waitFor(() => expect(rateRoot.children[0]?.children.some((child) => child.textContent === '操作过于频繁，请稍后重试')).toBe(true));
     expect(rateRoot.children[0].children.filter((child) => child.tagName === 'button')).toHaveLength(0);
     await rateMount.dispose();
+  });
+
+  it('shows verification progress and retains six digits for a network retry', async () => {
+    class Element {
+      children: Element[] = []; parent?: Element; connected = false; textContent = ''; className = ''; type = ''; value = ''; disabled = false; inputMode = ''; autocomplete = ''; selectionStart: number | null = null;
+      attributes = new Map<string, string>(); listeners = new Map<string, () => void>(); classList = { toggle: vi.fn() };
+      constructor(readonly tagName: string, readonly ownerDocument: { createElement(tag: string): Element; activeElement?: Element }) {}
+      get isConnected(): boolean { return this.connected || this.parent?.isConnected === true; }
+      append(...nodes: Element[]) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
+      replaceChildren(...nodes: Element[]) { for (const child of this.children) child.parent = undefined; this.children = []; this.append(...nodes); }
+      setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+      addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); }
+      removeEventListener(name: string) { this.listeners.delete(name); }
+      focus() { if (this.isConnected) { this.ownerDocument.activeElement = this; this.selectionStart = this.value.length; } }
+    }
+    const document = { createElement: (tag: string): Element => new Element(tag, document), activeElement: undefined as Element | undefined };
+    const root = new Element('div', document); root.connected = true;
+    let rejectNetwork!: (error: Error) => void;
+    const adminEmailLogin = vi.fn()
+      .mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectNetwork = reject; }))
+      .mockResolvedValueOnce(undefined);
+    const mounted = mountAdminLogin(root as unknown as HTMLElement, api({ adminEmailLogin }), { onSignedIn: vi.fn() });
+    await vi.waitFor(() => expect(root.children[0]?.children.some((child) => child.textContent === '发送邮箱验证码')).toBe(true));
+    root.children[0].children.find((child) => child.tagName === 'button')?.listeners.get('click')?.();
+    await vi.waitFor(() => expect(root.children[0]?.children.some((child) => child.className === 'hosted-code-control')).toBe(true));
+    let codeRoot = root.children[0].children.find((child) => child.className === 'hosted-code-control');
+    if (!codeRoot) throw new Error('code control missing');
+    codeRoot.children[0].value = '654321'; codeRoot.children[0].listeners.get('input')?.();
+    await vi.waitFor(() => expect(root.children[0]?.children.some((child) => child.textContent === '正在验证验证码…')).toBe(true));
+    expect(root.children[0].children.some((child) => child.className === 'hosted-admin-spinner')).toBe(true);
+    rejectNetwork(new HostedAPIError('operation_failed', 0));
+    await vi.waitFor(() => expect(root.children[0]?.children.some((child) => child.textContent === '网络连接失败，请检查网络后重试')).toBe(true));
+    codeRoot = root.children[0].children.find((child) => child.className === 'hosted-code-control');
+    expect(codeRoot?.children[0].value).toBe('654321');
+    root.children[0].children.find((child) => child.textContent === '重新验证')?.listeners.get('click')?.();
+    await vi.waitFor(() => expect(adminEmailLogin).toHaveBeenCalledTimes(2));
+    await mounted.dispose();
   });
 });

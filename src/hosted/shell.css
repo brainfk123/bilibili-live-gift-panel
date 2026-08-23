@@ -247,6 +247,25 @@ select {
   color: #526078;
 }
 
+.hosted-admin-spinner {
+  display: block;
+  width: 1.1rem;
+  height: 1.1rem;
+  margin: 0.75rem auto;
+  border: 0.15rem solid #c9daf2;
+  border-top-color: #246bce;
+  border-radius: 50%;
+  animation: hosted-admin-spin 0.75s linear infinite;
+}
+
+@keyframes hosted-admin-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hosted-admin-spinner { animation: none; }
+}
+
 .hosted-admin-login button,
 .hosted-admin-mobile-action {
   display: inline-flex;
