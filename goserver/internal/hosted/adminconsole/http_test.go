@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"bilibili-live-gift-panel/internal/hosted/identity"
@@ -56,5 +57,28 @@ func TestHTTPRejectsMalformedCursorBeforeRepository(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHTTPBatchReturnsEveryTargetResult(t *testing.T) {
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	service, _ := NewService(db, "https://panel.example.com", MutationServices{Disable: func(_ context.Context, _ string, id int64, _ string) error {
+		if id == 52 {
+			return errors.New("disabled")
+		}
+		return nil
+	}})
+	handler, _ := NewHTTPHandler(service, &testSessions{})
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/accounts/batch", strings.NewReader(`{"accountIds":[41,52],"action":"disable","reason":"maintenance"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "admin-token"})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"accountId":41`) || !strings.Contains(response.Body.String(), `"accountId":52`) || !strings.Contains(response.Body.String(), `"failed"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }

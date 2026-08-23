@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
+	"unicode"
 )
 
 var (
@@ -17,16 +19,140 @@ var (
 	ErrNotFound      = errors.New("account not found")
 )
 
+type MutationServices struct {
+	Enable   func(context.Context, string, int64, string) error
+	Disable  func(context.Context, string, int64, string) error
+	SetQuota func(context.Context, string, int64, uint64, string) error
+}
+
 type Service struct {
 	db           *sql.DB
 	publicOrigin string
+	mutations    MutationServices
 }
 
-func NewService(db *sql.DB, publicOrigin string) (*Service, error) {
+func NewService(db *sql.DB, publicOrigin string, mutations ...MutationServices) (*Service, error) {
 	if db == nil {
 		return nil, errors.New("database is required")
 	}
-	return &Service{db: db, publicOrigin: strings.TrimRight(publicOrigin, "/")}, nil
+	service := &Service{db: db, publicOrigin: strings.TrimRight(publicOrigin, "/")}
+	if len(mutations) > 0 {
+		service.mutations = mutations[0]
+	}
+	return service, nil
+}
+
+func (service *Service) Batch(ctx context.Context, token string, request BatchRequest) (BatchResponse, error) {
+	if service == nil || token == "" || len(request.AccountIDs) < 1 || len(request.AccountIDs) > 100 || !validReason(request.Reason) {
+		return BatchResponse{}, ErrInvalidQuery
+	}
+	request.Reason = strings.TrimSpace(request.Reason)
+	seen := map[int64]struct{}{}
+	for _, id := range request.AccountIDs {
+		if id <= 0 {
+			return BatchResponse{}, ErrInvalidQuery
+		}
+		if _, ok := seen[id]; ok {
+			return BatchResponse{}, ErrInvalidQuery
+		}
+		seen[id] = struct{}{}
+	}
+	if request.Action != BatchEnable && request.Action != BatchDisable && request.Action != BatchQuota {
+		return BatchResponse{}, ErrInvalidQuery
+	}
+	if request.Action == BatchQuota && (request.RemainingQuota == nil || *request.RemainingQuota < 0) {
+		return BatchResponse{}, ErrInvalidQuery
+	}
+	if request.Action != BatchQuota && request.RemainingQuota != nil {
+		return BatchResponse{}, ErrInvalidQuery
+	}
+	response := BatchResponse{Results: make([]BatchItemResult, 0, len(request.AccountIDs))}
+	for _, id := range request.AccountIDs {
+		item := BatchItemResult{AccountID: id, Status: BatchSucceeded}
+		var err error
+		switch request.Action {
+		case BatchEnable:
+			item.AccountStatus = AccountStatusActive
+			if service.mutations.Enable == nil {
+				err = errors.New("unavailable")
+			} else {
+				err = service.mutations.Enable(ctx, token, id, request.Reason)
+			}
+		case BatchDisable:
+			item.AccountStatus = AccountStatusDisabled
+			if service.mutations.Disable == nil {
+				err = errors.New("unavailable")
+			} else {
+				err = service.mutations.Disable(ctx, token, id, request.Reason)
+			}
+		case BatchQuota:
+			if service.mutations.SetQuota == nil {
+				err = errors.New("unavailable")
+			} else {
+				err = service.mutations.SetQuota(ctx, token, id, uint64(*request.RemainingQuota), request.Reason)
+			}
+		}
+		if err != nil {
+			item.Status = BatchFailed
+			item.AccountStatus = ""
+			item.Error = "operation_failed"
+		}
+		response.Results = append(response.Results, item)
+	}
+	return response, nil
+}
+
+func validReason(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 512 {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func (service *Service) UpdateRoom(ctx context.Context, id int64, roomID string) (AccountDetail, error) {
+	if service == nil || service.db == nil || id <= 0 || !validRoomID(roomID) {
+		return AccountDetail{}, ErrInvalidQuery
+	}
+	tx, err := service.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AccountDetail{}, err
+	}
+	defer tx.Rollback()
+	var old string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(room.room_id,'') FROM streamer_accounts a LEFT JOIN account_runtime_rooms room ON room.account_id=a.id WHERE a.id=? FOR UPDATE`, id).Scan(&old); errors.Is(err, sql.ErrNoRows) {
+		return AccountDetail{}, ErrNotFound
+	} else if err != nil {
+		return AccountDetail{}, err
+	}
+	now := time.Now().UTC()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO account_runtime_rooms (account_id,room_id,updated_at) VALUES (?,?,?) ON DUPLICATE KEY UPDATE room_id=VALUES(room_id),updated_at=VALUES(updated_at)`, id, roomID, now); err != nil {
+		return AccountDetail{}, err
+	}
+	payload, _ := json.Marshal(map[string]string{"oldRoomId": old, "newRoomId": roomID})
+	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events (event_type,actor_admin_identity_id,target_account_id,event_data,created_at) VALUES ('admin_room_updated',1,?,?,?)`, id, payload, now); err != nil {
+		return AccountDetail{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return AccountDetail{}, err
+	}
+	return service.Account(ctx, id)
+}
+func validRoomID(value string) bool {
+	if len(value) < 1 || len(value) > 20 || value[0] == '0' {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func encodeCursor(cursor Cursor) string {

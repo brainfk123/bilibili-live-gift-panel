@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -28,16 +29,22 @@ func NewHTTPHandler(service *Service, sessions sessionValidator) (*HTTPHandler, 
 	h.mux.HandleFunc("GET /api/admin/overview", h.overview)
 	h.mux.HandleFunc("GET /api/admin/accounts", h.accounts)
 	h.mux.HandleFunc("GET /api/admin/accounts/{id}", h.account)
+	h.mux.HandleFunc("POST /api/admin/accounts/batch", h.batch)
+	h.mux.HandleFunc("PUT /api/admin/accounts/{id}/room", h.updateRoom)
 	return h, nil
 }
 func (h *HTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.ServeHTTP(w, r) }
 func (h *HTTPHandler) authorize(w http.ResponseWriter, r *http.Request) bool {
+	_, ok := h.sessionToken(w, r)
+	return ok
+}
+func (h *HTTPHandler) sessionToken(w http.ResponseWriter, r *http.Request) (string, bool) {
 	cookie, err := r.Cookie(identity.SiteSessionCookie)
 	if err != nil || cookie.Value == "" || h.sessions.RequireSession(r.Context(), cookie.Value) != nil {
 		writeError(w, http.StatusUnauthorized, "authentication_required")
-		return false
+		return "", false
 	}
-	return true
+	return cookie.Value, true
 }
 func (h *HTTPHandler) overview(w http.ResponseWriter, r *http.Request) {
 	if !h.authorize(w, r) {
@@ -108,6 +115,85 @@ func (h *HTTPHandler) account(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, value)
+}
+
+func (h *HTTPHandler) batch(w http.ResponseWriter, r *http.Request) {
+	token, ok := h.sessionToken(w, r)
+	if !ok {
+		return
+	}
+	if r.URL.RawQuery != "" {
+		writeError(w, 400, "invalid_request")
+		return
+	}
+	var request BatchRequest
+	if !decodeBody(r, &request) {
+		writeError(w, 400, "invalid_request")
+		return
+	}
+	value, err := h.service.Batch(r.Context(), token, request)
+	if errors.Is(err, ErrInvalidQuery) {
+		writeError(w, 400, "invalid_request")
+		return
+	}
+	if err != nil {
+		writeError(w, 503, "temporarily_unavailable")
+		return
+	}
+	writeJSON(w, value)
+}
+func (h *HTTPHandler) updateRoom(w http.ResponseWriter, r *http.Request) {
+	if !h.authorize(w, r) {
+		return
+	}
+	if r.URL.RawQuery != "" {
+		writeError(w, 400, "invalid_request")
+		return
+	}
+	suffix := strings.TrimPrefix(r.URL.Path, "/api/admin/accounts/")
+	idText, ok := strings.CutSuffix(suffix, "/room")
+	if !ok {
+		writeError(w, 400, "invalid_request")
+		return
+	}
+	id, err := parseAccountID(idText)
+	if err != nil {
+		writeError(w, 400, "invalid_request")
+		return
+	}
+	var body struct {
+		RoomID string `json:"roomId"`
+	}
+	if !decodeBody(r, &body) {
+		writeError(w, 400, "invalid_request")
+		return
+	}
+	value, err := h.service.UpdateRoom(r.Context(), id, body.RoomID)
+	if errors.Is(err, ErrInvalidQuery) {
+		writeError(w, 400, "invalid_request")
+		return
+	}
+	if errors.Is(err, ErrNotFound) {
+		writeError(w, 404, "account_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, 503, "temporarily_unavailable")
+		return
+	}
+	writeJSON(w, value)
+}
+func decodeBody(r *http.Request, target any) bool {
+	if r.Header.Get("Content-Type") != "application/json" {
+		return false
+	}
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(target) != nil {
+		return false
+	}
+	var extra any
+	return errors.Is(decoder.Decode(&extra), io.EOF)
 }
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")

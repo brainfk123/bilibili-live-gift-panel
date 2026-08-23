@@ -270,6 +270,8 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("GET /api/admin/overview", dependencies.AdminConsole)
 		mux.Handle("GET /api/admin/accounts", dependencies.AdminConsole)
 		mux.Handle("GET /api/admin/accounts/{id}", dependencies.AdminConsole)
+		mux.Handle("POST /api/admin/accounts/batch", dependencies.AdminConsole)
+		mux.Handle("PUT /api/admin/accounts/{id}/room", dependencies.AdminConsole)
 	}
 	if dependencies.Auth != nil {
 		mux.Handle("/api/auth/", dependencies.Auth)

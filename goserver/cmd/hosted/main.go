@@ -257,7 +257,20 @@ func run() error {
 		if err != nil {
 			return errors.New("configure administrator HTTP")
 		}
-		adminConsoleService, err := adminconsole.NewService(store.Database(), config.AdminAllowedOrigin)
+		adminConsoleService, err := adminconsole.NewService(store.Database(), config.AdminAllowedOrigin, adminconsole.MutationServices{
+			Enable: func(ctx context.Context, token string, accountID int64, reason string) error {
+				_, mutationErr := identityService.EnableAccount(ctx, token, accountID, reason)
+				return mutationErr
+			},
+			Disable: func(ctx context.Context, token string, accountID int64, reason string) error {
+				_, mutationErr := identityService.DisableAccount(ctx, token, accountID, reason)
+				return mutationErr
+			},
+			SetQuota: func(ctx context.Context, token string, accountID int64, quota uint64, reason string) error {
+				_, mutationErr := invitationService.AdjustQuota(ctx, token, accountID, quota, reason)
+				return mutationErr
+			},
+		})
 		if err != nil {
 			return errors.New("configure administrator console")
 		}

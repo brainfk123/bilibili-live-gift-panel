@@ -73,3 +73,34 @@ type Cursor struct {
 	CreatedAt time.Time `json:"createdAt"`
 	ID        int64     `json:"id"`
 }
+
+type BatchAction string
+
+const (
+	BatchEnable  BatchAction = "enable"
+	BatchDisable BatchAction = "disable"
+	BatchQuota   BatchAction = "set_invitation_quota"
+)
+
+type BatchRequest struct {
+	AccountIDs     []int64     `json:"accountIds"`
+	Action         BatchAction `json:"action"`
+	RemainingQuota *int64      `json:"remainingQuota,omitempty"`
+	Reason         string      `json:"reason"`
+}
+type BatchResultStatus string
+
+const (
+	BatchSucceeded BatchResultStatus = "succeeded"
+	BatchFailed    BatchResultStatus = "failed"
+)
+
+type BatchItemResult struct {
+	AccountID     int64             `json:"accountId"`
+	Status        BatchResultStatus `json:"status"`
+	AccountStatus AccountStatus     `json:"accountStatus,omitempty"`
+	Error         string            `json:"error,omitempty"`
+}
+type BatchResponse struct {
+	Results []BatchItemResult `json:"results"`
+}

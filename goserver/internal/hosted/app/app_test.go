@@ -161,6 +161,13 @@ func TestAdministratorConsoleQueriesWinOverBroadAccountHandler(t *testing.T) {
 			t.Fatalf("GET %s status=%d, want administrator console", path, response.Code)
 		}
 	}
+	for _, route := range []struct{ method, path string }{{http.MethodPost, "/api/admin/accounts/batch"}, {http.MethodPut, "/api/admin/accounts/41/room"}} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))
+		if response.Code != http.StatusTeapot {
+			t.Fatalf("%s %s status=%d, want administrator console", route.method, route.path, response.Code)
+		}
+	}
 }
 
 func TestEveryMethodForExactBiliServicePathsStaysOutOfBroadAdministratorHandler(t *testing.T) {

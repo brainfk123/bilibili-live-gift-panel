@@ -80,3 +80,69 @@ func TestAccountsUsesStablePaginationAndCapsLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestBatchValidationAndStableMixedResults(t *testing.T) {
+	calls := []int64{}
+	service := &Service{mutations: MutationServices{Disable: func(_ context.Context, _ string, id int64, _ string) error {
+		calls = append(calls, id)
+		if id == 52 {
+			return errors.New("already disabled")
+		}
+		return nil
+	}}}
+	result, err := service.Batch(context.Background(), "admin-session", BatchRequest{AccountIDs: []int64{41, 52, 68}, Action: BatchDisable, Reason: "maintenance"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != 3 || result.Results[0].Status != BatchSucceeded || result.Results[1].Status != BatchFailed || result.Results[2].AccountID != 68 {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("calls = %v", calls)
+	}
+	for _, invalid := range []BatchRequest{
+		{Action: BatchDisable, AccountIDs: nil, Reason: "reason"},
+		{Action: BatchDisable, AccountIDs: []int64{41, 41}, Reason: "reason"},
+		{Action: BatchQuota, AccountIDs: []int64{41}, Reason: "reason"},
+		{Action: BatchQuota, AccountIDs: []int64{41}, RemainingQuota: int64Pointer(-1), Reason: "reason"},
+		{Action: BatchEnable, AccountIDs: []int64{41}, Reason: "   "},
+	} {
+		if _, err := service.Batch(context.Background(), "admin-session", invalid); !errors.Is(err, ErrInvalidQuery) {
+			t.Fatalf("Batch(%#v) error=%v", invalid, err)
+		}
+	}
+}
+
+func int64Pointer(value int64) *int64 { return &value }
+
+func TestUpdateRoomAuditsAndReturnsRefreshedDetail(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Date(2026, 8, 23, 9, 0, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT COALESCE.*FROM streamer_accounts").WithArgs(int64(41)).
+		WillReturnRows(sqlmock.NewRows([]string{"room"}).AddRow("111"))
+	mock.ExpectExec("INSERT INTO account_runtime_rooms").WithArgs(int64(41), "123456", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO audit_events").WithArgs(int64(41), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(9, 1))
+	mock.ExpectCommit()
+	mock.ExpectQuery("SELECT a.id.*FROM streamer_accounts").WithArgs(int64(41)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "active", "room", "quota", "obs", "public", "created", "updated"}).AddRow(41, true, "123456", 8, false, "", now, now))
+	mock.ExpectQuery("SELECT event_type").WithArgs(int64(41), 20).
+		WillReturnRows(sqlmock.NewRows([]string{"type", "account", "created"}).AddRow("admin_room_updated", 41, now))
+	service, _ := NewService(db, "https://panel.example.com")
+	detail, err := service.UpdateRoom(context.Background(), 41, "123456")
+	if err != nil || detail.RoomID != "123456" || len(detail.RecentEvents) != 1 {
+		t.Fatalf("detail=%#v err=%v", detail, err)
+	}
+	if _, err := service.UpdateRoom(context.Background(), 41, "0123"); !errors.Is(err, ErrInvalidQuery) {
+		t.Fatalf("invalid room error=%v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
