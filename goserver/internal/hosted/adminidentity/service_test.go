@@ -362,6 +362,50 @@ func TestVerifyRecentTOTPRejectsReplayAndExpiresAtTenMinutes(t *testing.T) {
 	}
 }
 
+func TestAuthorizeOperationIssuesPurposeBoundSingleUseTokenAndRejectsTOTPStepReplay(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 23, 1, 2, 3, 0, time.UTC)
+	repository := initializedMemoryRepository(t, now)
+	sender := &MemorySender{}
+	service := newTestService(t, repository, sender, now)
+	login := emailLoginForTest(t, service, sender)
+
+	token, err := service.AuthorizeOperation(context.Background(), login.Token, "123456", security.OperationBiliServiceReplace, "global")
+	if err != nil {
+		t.Fatalf("AuthorizeOperation() error = %v", err)
+	}
+	if token == "" || bytes.Contains([]byte(token), []byte("123456")) {
+		t.Fatalf("AuthorizeOperation() token = %q", token)
+	}
+	stored, ok := repository.operationByToken(service.keys, token)
+	if !ok {
+		t.Fatal("AuthorizeOperation() did not persist the token hash")
+	}
+	if stored.Purpose != security.OperationBiliServiceReplace || stored.Target != "global" || !stored.ExpiresAt.Equal(now.Add(5*time.Minute)) {
+		t.Fatalf("stored operation = %#v", stored)
+	}
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mock.ExpectBegin()
+	transaction, err := database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ConsumeOperation(context.Background(), transaction, login.Token, token, security.OperationBiliServiceReplace, "global", now.Add(time.Second)); err != nil {
+		t.Fatalf("ConsumeOperation() error = %v", err)
+	}
+	if err := service.ConsumeOperation(context.Background(), transaction, login.Token, token, security.OperationBiliServiceReplace, "global", now.Add(2*time.Second)); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("ConsumeOperation(replay) error = %v, want ErrAuthenticationFailed", err)
+	}
+	_ = transaction.Rollback()
+	if _, err := service.AuthorizeOperation(context.Background(), login.Token, "123456", security.OperationAdminEmailChange, "email-target"); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("AuthorizeOperation(replayed TOTP step) error = %v, want ErrAuthenticationFailed", err)
+	}
+}
+
 func TestVerifyRecentTOTPOpensExactWindowFromVerificationInstant(t *testing.T) {
 	verifiedAt := time.Date(2026, 8, 16, 10, 20, 29, 0, time.UTC)
 	clock := verifiedAt
@@ -1576,6 +1620,8 @@ type memoryRepository struct {
 	handoffReserved map[int64][sha256.Size]byte
 	mailClaims      map[int64]chan struct{}
 	nextHandoffID   int64
+	operations      map[[sha256.Size]byte]OperationAuthorization
+	operationSteps  map[time.Time]struct{}
 }
 
 type unavailableEmailSessionRepository struct{ *memoryRepository }
@@ -1612,8 +1658,66 @@ func (repository *synchronizedPrepareRepository) PrepareInitialization(ctx conte
 
 func newMemoryRepository() *memoryRepository {
 	return &memoryRepository{
-		sessions: make(map[[sha256.Size]byte]AdminSession), activeCodes: make(map[[sha256.Size]byte]struct{}), usedCodes: make(map[[sha256.Size]byte]struct{}), handoffs: make(map[int64]PendingHandoff), handoffReserved: make(map[int64][sha256.Size]byte), mailClaims: make(map[int64]chan struct{}),
+		sessions: make(map[[sha256.Size]byte]AdminSession), activeCodes: make(map[[sha256.Size]byte]struct{}), usedCodes: make(map[[sha256.Size]byte]struct{}), handoffs: make(map[int64]PendingHandoff), handoffReserved: make(map[int64][sha256.Size]byte), mailClaims: make(map[int64]chan struct{}), operations: make(map[[sha256.Size]byte]OperationAuthorization), operationSteps: make(map[time.Time]struct{}),
 	}
+}
+
+func (repository *memoryRepository) CreateOperationAuthorization(_ context.Context, attempt OperationAuthorizationAttempt) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	var session AdminSession
+	for hash, candidate := range repository.sessions {
+		if bytes.Equal(hash[:], attempt.SessionTokenHash) {
+			session = candidate
+			break
+		}
+	}
+	if session.ID == 0 || session.Revoked || !session.ExpiresAt.After(attempt.CreatedAt) || session.CredentialEpoch != attempt.ExpectedCredentialEpoch {
+		return ErrAuthenticationFailed
+	}
+	if _, exists := repository.operationSteps[attempt.TOTPStep]; exists {
+		return ErrAuthenticationFailed
+	}
+	var tokenHash [sha256.Size]byte
+	copy(tokenHash[:], attempt.AuthorizationTokenHash)
+	repository.operations[tokenHash] = OperationAuthorization{Purpose: attempt.Purpose, Target: attempt.Target, ExpiresAt: attempt.ExpiresAt}
+	repository.operationSteps[attempt.TOTPStep] = struct{}{}
+	return nil
+}
+
+func (repository *memoryRepository) ConsumeOperationAuthorization(_ context.Context, _ *sql.Tx, sessionTokenHash, authorizationTokenHash []byte, purpose security.OperationPurpose, target string, now time.Time) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	var session AdminSession
+	for hash, candidate := range repository.sessions {
+		if bytes.Equal(hash[:], sessionTokenHash) {
+			session = candidate
+			break
+		}
+	}
+	var key [sha256.Size]byte
+	copy(key[:], authorizationTokenHash)
+	operation, ok := repository.operations[key]
+	if session.ID == 0 || session.Revoked || !session.ExpiresAt.After(now) || !ok || operation.ConsumedAt != nil || !operation.ExpiresAt.After(now) || operation.Purpose != purpose || operation.Target != target {
+		return ErrAuthenticationFailed
+	}
+	consumedAt := now
+	operation.ConsumedAt = &consumedAt
+	repository.operations[key] = operation
+	return nil
+}
+
+func (repository *memoryRepository) operationByToken(keys security.Keyring, token string) (OperationAuthorization, bool) {
+	hash, err := keys.HashToken("admin_operation_authorization", []byte(token))
+	if err != nil {
+		return OperationAuthorization{}, false
+	}
+	var key [sha256.Size]byte
+	copy(key[:], hash)
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	operation, ok := repository.operations[key]
+	return operation, ok
 }
 
 func pendingFromRecord(id int64, record HandoffRecord) PendingHandoff {

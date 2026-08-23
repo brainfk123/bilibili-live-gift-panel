@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"bilibili-live-gift-panel/internal/hosted/identity"
+	"bilibili-live-gift-panel/internal/hosted/security"
 )
 
 type adminHTTPServicePort interface {
@@ -22,6 +23,7 @@ type adminHTTPServicePort interface {
 	RequireSession(context.Context, string) error
 	Logout(context.Context, string) error
 	VerifyRecentTOTP(context.Context, string, string) error
+	AuthorizeOperation(context.Context, string, string, security.OperationPurpose, string) (string, error)
 	SendRecovery(context.Context, string) (RecoveryResult, error)
 	PrepareRecovery(context.Context, string) (RecoveryPreparationResult, error)
 	ConfirmHandoff(context.Context, string, string) error
@@ -65,10 +67,52 @@ func NewHTTPHandler(service adminHTTPServicePort, options HTTPOptions) (*HTTPHan
 	handler.mux.HandleFunc("DELETE /api/admin/session", handler.deleteSession)
 	handler.mux.HandleFunc("POST /api/admin/session/email", handler.verifyEmailLogin)
 	handler.mux.HandleFunc("POST /api/admin/totp", handler.verifyRecentTOTP)
+	handler.mux.HandleFunc("POST /api/admin/operation-authorizations", handler.authorizeOperation)
 	handler.mux.HandleFunc("POST /api/admin/recovery/archive", handler.sendRecovery)
 	handler.mux.HandleFunc("POST /api/admin/recovery/prepare", handler.prepareRecovery)
 	handler.mux.HandleFunc("POST /api/admin/recovery/confirm", handler.confirmRecovery)
 	return handler, nil
+}
+
+func (handler *HTTPHandler) authorizeOperation(response http.ResponseWriter, request *http.Request) {
+	if !handler.acceptJSONMutation(request) {
+		writeAdminError(response, http.StatusForbidden, "request_rejected")
+		return
+	}
+	var body struct {
+		TOTP    string `json:"totp"`
+		Purpose string `json:"purpose"`
+		Target  string `json:"target"`
+	}
+	if !decodeAdminJSON(response, request, &body) {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	purpose, validPurpose := security.ParseOperationPurpose(body.Purpose)
+	if !validTOTPCode(body.TOTP) || !validPurpose || !security.ValidOperationTarget(body.Target) {
+		writeAdminError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	token, ok := adminSessionToken(request)
+	if !ok {
+		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
+		return
+	}
+	if !handler.allowSensitive(request, "admin_operation_authorization", token) {
+		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
+	authorizationToken, err := handler.service.AuthorizeOperation(request.Context(), token, body.TOTP, purpose, body.Target)
+	switch {
+	case err == nil && authorizationToken != "":
+		writeAdminJSON(response, http.StatusCreated, struct {
+			AuthorizationToken string `json:"authorizationToken"`
+		}{AuthorizationToken: authorizationToken})
+	case errors.Is(err, ErrAuthenticationFailed):
+		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
+	default:
+		writeAdminError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
+	}
 }
 
 func (handler *HTTPHandler) beginEmailLogin(response http.ResponseWriter, request *http.Request) {

@@ -12,7 +12,24 @@ import (
 
 	"bilibili-live-gift-panel/internal/hosted/app"
 	"bilibili-live-gift-panel/internal/hosted/identity"
+	"bilibili-live-gift-panel/internal/hosted/security"
 )
+
+func TestHTTPOperationAuthorizationReturnsSingleUseTokenForBoundPurposeAndTarget(t *testing.T) {
+	service := &adminHTTPService{operationToken: "operation-token"}
+	handler := newTestHTTPHandler(t, service)
+	request := mutationRequest(http.MethodPost, "/api/admin/operation-authorizations", `{"totp":"123456","purpose":"bili_service_replace","target":"global"}`)
+	request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "administrator-session"})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated || response.Body.String() != "{\"authorizationToken\":\"operation-token\"}\n" {
+		t.Fatalf("authorize response = %d %q", response.Code, response.Body.String())
+	}
+	if service.operationSession != "administrator-session" || service.operationCode != "123456" || service.operationPurpose != security.OperationBiliServiceReplace || service.operationTarget != "global" {
+		t.Fatalf("operation request = %#v", service)
+	}
+}
 
 func TestHTTPSensitiveEndpointsRejectMissingCookieWithoutPanic(t *testing.T) {
 	handler := newTestHTTPHandler(t, &adminHTTPService{})
@@ -486,6 +503,12 @@ type adminHTTPService struct {
 	requireSessionCalls int
 	logoutCalls         int
 	logoutToken         string
+	operationToken      string
+	operationErr        error
+	operationSession    string
+	operationCode       string
+	operationPurpose    security.OperationPurpose
+	operationTarget     string
 }
 
 func (service *adminHTTPService) BeginEmailLogin(context.Context) (EmailLoginChallenge, error) {
@@ -513,6 +536,11 @@ func (service *adminHTTPService) Logout(_ context.Context, token string) error {
 func (service *adminHTTPService) VerifyRecentTOTP(_ context.Context, sessionToken, code string) error {
 	service.verifySession, service.verifyCode = sessionToken, code
 	return service.verifyErr
+}
+
+func (service *adminHTTPService) AuthorizeOperation(_ context.Context, sessionToken, code string, purpose security.OperationPurpose, target string) (string, error) {
+	service.operationSession, service.operationCode, service.operationPurpose, service.operationTarget = sessionToken, code, purpose, target
+	return service.operationToken, service.operationErr
 }
 
 func (service *adminHTTPService) SendRecovery(_ context.Context, sessionToken string) (RecoveryResult, error) {

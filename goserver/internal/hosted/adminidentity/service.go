@@ -30,6 +30,7 @@ const (
 	emailCodeLength                      = 6
 	emailCodeAttempts                    = 5
 	emailLoginSessionVerificationTimeout = 2 * time.Second
+	operationAuthorizationTTL            = 5 * time.Minute
 )
 
 var (
@@ -74,6 +75,24 @@ type ConfirmTOTPAttempt struct {
 	ExpectedCredentialEpoch int64
 	TokenHash               []byte
 	Now                     time.Time
+	TOTPStep                time.Time
+}
+
+type OperationAuthorization struct {
+	Purpose    security.OperationPurpose
+	Target     string
+	ExpiresAt  time.Time
+	ConsumedAt *time.Time
+}
+
+type OperationAuthorizationAttempt struct {
+	SessionTokenHash        []byte
+	AuthorizationTokenHash  []byte
+	ExpectedCredentialEpoch int64
+	Purpose                 security.OperationPurpose
+	Target                  string
+	CreatedAt               time.Time
+	ExpiresAt               time.Time
 	TOTPStep                time.Time
 }
 
@@ -161,6 +180,11 @@ type Repository interface {
 type sensitiveSessionRepository interface {
 	authorizeRecentTOTP(context.Context, *sql.Tx, []byte, time.Time) (security.SensitiveSession, error)
 	renewRecentTOTP(context.Context, *sql.Tx, security.SensitiveSession, time.Time) error
+}
+
+type operationAuthorizationRepository interface {
+	CreateOperationAuthorization(context.Context, OperationAuthorizationAttempt) error
+	ConsumeOperationAuthorization(context.Context, *sql.Tx, []byte, []byte, security.OperationPurpose, string, time.Time) error
 }
 
 type recoveryRotationRepository interface {
@@ -412,6 +436,71 @@ func (repository *SQLRepository) ConfirmTOTP(ctx context.Context, attempt Confir
 		return ErrUnavailable
 	}
 	committed = true
+	return nil
+}
+
+func (repository *SQLRepository) CreateOperationAuthorization(ctx context.Context, attempt OperationAuthorizationAttempt) error {
+	if !repository.ready() || len(attempt.SessionTokenHash) != sha256.Size || len(attempt.AuthorizationTokenHash) != sha256.Size || attempt.ExpectedCredentialEpoch < 1 || attempt.CreatedAt.IsZero() || !attempt.ExpiresAt.After(attempt.CreatedAt) || attempt.TOTPStep.IsZero() || attempt.TOTPStep.After(attempt.CreatedAt) || !security.ValidOperationTarget(attempt.Target) {
+		return ErrInvalidInput
+	}
+	if parsed, ok := security.ParseOperationPurpose(string(attempt.Purpose)); !ok || parsed != attempt.Purpose {
+		return ErrInvalidInput
+	}
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ErrUnavailable
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	epoch, err := lockAdminEpoch(ctx, transaction)
+	if err != nil || epoch != attempt.ExpectedCredentialEpoch {
+		return ErrAuthenticationFailed
+	}
+	const sessionQuery = "SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE"
+	var sessionID, sessionEpoch int64
+	var expiresAt time.Time
+	var revokedAt sql.NullTime
+	if err := transaction.QueryRowContext(ctx, sessionQuery, bytes.Clone(attempt.SessionTokenHash)).Scan(&sessionID, &sessionEpoch, &expiresAt, &revokedAt); err != nil || sessionID <= 0 || sessionEpoch != epoch || !expiresAt.After(attempt.CreatedAt) || revokedAt.Valid {
+		return ErrAuthenticationFailed
+	}
+	result, err := transaction.ExecContext(ctx,
+		"INSERT INTO admin_operation_authorizations (token_hash, session_id, credential_epoch, purpose, target, totp_step, created_at, expires_at, consumed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+		bytes.Clone(attempt.AuthorizationTokenHash), sessionID, epoch, string(attempt.Purpose), attempt.Target, attempt.TOTPStep, attempt.CreatedAt, attempt.ExpiresAt,
+	)
+	if err != nil || !oneRow(result) {
+		return ErrAuthenticationFailed
+	}
+	if err := transaction.Commit(); err != nil {
+		return ErrUnavailable
+	}
+	committed = true
+	return nil
+}
+
+func (repository *SQLRepository) ConsumeOperationAuthorization(ctx context.Context, transaction *sql.Tx, sessionTokenHash, authorizationTokenHash []byte, purpose security.OperationPurpose, target string, now time.Time) error {
+	if !repository.ready() || transaction == nil || len(sessionTokenHash) != sha256.Size || len(authorizationTokenHash) != sha256.Size || now.IsZero() || !security.ValidOperationTarget(target) {
+		return ErrInvalidInput
+	}
+	parsed, ok := security.ParseOperationPurpose(string(purpose))
+	if !ok || parsed != purpose {
+		return ErrInvalidInput
+	}
+	const query = "SELECT o.id, o.credential_epoch, o.expires_at, o.consumed_at, s.credential_epoch, s.expires_at, s.revoked_at, a.credential_epoch FROM admin_operation_authorizations AS o JOIN site_sessions AS s ON s.id = o.session_id JOIN admin_identity AS a ON a.id = s.admin_identity_id WHERE o.token_hash = ? AND s.admin_identity_id = 1 AND s.token_hash = ? AND o.purpose = ? AND o.target = ? FOR UPDATE"
+	var operationID, operationEpoch, sessionEpoch, identityEpoch int64
+	var operationExpiresAt, sessionExpiresAt time.Time
+	var consumedAt, revokedAt sql.NullTime
+	err := transaction.QueryRowContext(ctx, query, bytes.Clone(authorizationTokenHash), bytes.Clone(sessionTokenHash), string(purpose), target).Scan(&operationID, &operationEpoch, &operationExpiresAt, &consumedAt, &sessionEpoch, &sessionExpiresAt, &revokedAt, &identityEpoch)
+	if err != nil || operationID <= 0 || operationEpoch != sessionEpoch || sessionEpoch != identityEpoch || consumedAt.Valid || revokedAt.Valid || !operationExpiresAt.After(now) || !sessionExpiresAt.After(now) {
+		return ErrAuthenticationFailed
+	}
+	result, err := transaction.ExecContext(ctx, "UPDATE admin_operation_authorizations SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL", now, operationID)
+	if err != nil || !oneRow(result) {
+		return ErrAuthenticationFailed
+	}
 	return nil
 }
 
@@ -1566,6 +1655,84 @@ func (service *Service) VerifyRecentTOTP(ctx context.Context, sessionToken, code
 	if err := service.repository.ConfirmTOTP(ctx, ConfirmTOTPAttempt{
 		ExpectedCredentialEpoch: record.CredentialEpoch, TokenHash: tokenHash, Now: now, TOTPStep: step,
 	}); err != nil {
+		return ErrAuthenticationFailed
+	}
+	return nil
+}
+
+func (service *Service) AuthorizeOperation(ctx context.Context, sessionToken, code string, purpose security.OperationPurpose, target string) (string, error) {
+	if service == nil || sessionToken == "" || !validTOTPCode(code) || !security.ValidOperationTarget(target) {
+		return "", ErrAuthenticationFailed
+	}
+	parsed, ok := security.ParseOperationPurpose(string(purpose))
+	if !ok || parsed != purpose {
+		return "", ErrAuthenticationFailed
+	}
+	repository, ok := service.repository.(operationAuthorizationRepository)
+	if !ok {
+		return "", ErrUnavailable
+	}
+	sessionHash, err := service.keys.HashToken("admin_session", []byte(sessionToken))
+	if err != nil {
+		return "", ErrAuthenticationFailed
+	}
+	now := service.now().UTC()
+	session, err := service.repository.FindSession(ctx, sessionHash, now)
+	if err != nil {
+		return "", ErrAuthenticationFailed
+	}
+	record, err := service.repository.Identity(ctx)
+	if err != nil || record.CredentialEpoch != session.CredentialEpoch {
+		return "", ErrAuthenticationFailed
+	}
+	secret, err := service.keys.Open("admin_totp", record.TOTPSecretCiphertext)
+	if err != nil {
+		return "", ErrAuthenticationFailed
+	}
+	defer clear(secret)
+	step, valid := service.totp.Validate(code, string(secret), now)
+	if !valid || step.IsZero() || step.After(now) {
+		return "", ErrAuthenticationFailed
+	}
+	authorizationToken, err := service.keys.NewToken()
+	if err != nil {
+		return "", ErrUnavailable
+	}
+	authorizationHash, err := service.keys.HashToken("admin_operation_authorization", []byte(authorizationToken))
+	if err != nil {
+		return "", ErrUnavailable
+	}
+	if err := repository.CreateOperationAuthorization(ctx, OperationAuthorizationAttempt{
+		SessionTokenHash: sessionHash, AuthorizationTokenHash: authorizationHash,
+		ExpectedCredentialEpoch: record.CredentialEpoch, Purpose: purpose, Target: target,
+		CreatedAt: now, ExpiresAt: now.Add(operationAuthorizationTTL), TOTPStep: step,
+	}); err != nil {
+		return "", ErrAuthenticationFailed
+	}
+	return authorizationToken, nil
+}
+
+func (service *Service) ConsumeOperation(ctx context.Context, transaction *sql.Tx, sessionToken, authorizationToken string, purpose security.OperationPurpose, target string, now time.Time) error {
+	if service == nil || transaction == nil || sessionToken == "" || authorizationToken == "" || now.IsZero() || !security.ValidOperationTarget(target) {
+		return ErrAuthenticationFailed
+	}
+	parsed, ok := security.ParseOperationPurpose(string(purpose))
+	if !ok || parsed != purpose {
+		return ErrAuthenticationFailed
+	}
+	repository, ok := service.repository.(operationAuthorizationRepository)
+	if !ok {
+		return ErrUnavailable
+	}
+	sessionHash, err := service.keys.HashToken("admin_session", []byte(sessionToken))
+	if err != nil {
+		return ErrAuthenticationFailed
+	}
+	authorizationHash, err := service.keys.HashToken("admin_operation_authorization", []byte(authorizationToken))
+	if err != nil {
+		return ErrAuthenticationFailed
+	}
+	if err := repository.ConsumeOperationAuthorization(ctx, transaction, sessionHash, authorizationHash, purpose, target, now.UTC()); err != nil {
 		return ErrAuthenticationFailed
 	}
 	return nil

@@ -86,8 +86,8 @@ func TestProductionAdminEmailIdentityMigrationMakesLegacyUIDNullable(t *testing.
 		"0007_runtime_ownership":            "a56cd452a649bd928b5a48a3e8ffacca15fd889eab5161fb7bc96d782be9caa4",
 		"0008_runtime_dedupe_cleanup_index": "7d69109e076d085e0988e0c196df8480d1dcd8a03e60495f6302e382ea94e064",
 	}
-	if len(migrations) != 9 {
-		t.Fatalf("migration count = %d, want 9", len(migrations))
+	if len(migrations) != 10 {
+		t.Fatalf("migration count = %d, want 10", len(migrations))
 	}
 	var emailIdentity migration
 	for _, item := range migrations {
@@ -116,6 +116,38 @@ func TestProductionAdminEmailIdentityMigrationMakesLegacyUIDNullable(t *testing.
 	if got != want {
 		t.Fatalf("0009 statement = %q, want %q", got, want)
 	}
+}
+
+func TestProductionMigrationsIncludeSingleUseAdministratorOperationAuthorizations(t *testing.T) {
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range migrations {
+		if item.version != "0010_admin_operation_authorizations" {
+			continue
+		}
+		normalized := strings.Join(strings.Fields(string(item.contents)), " ")
+		for _, required := range []string{
+			"CREATE TABLE IF NOT EXISTS admin_operation_authorizations",
+			"token_hash BINARY(32) NOT NULL",
+			"session_id BIGINT UNSIGNED NOT NULL",
+			"credential_epoch BIGINT UNSIGNED NOT NULL",
+			"purpose VARCHAR(64) NOT NULL",
+			"target VARCHAR(256) NOT NULL",
+			"totp_step TIMESTAMP(6) NOT NULL",
+			"consumed_at TIMESTAMP(6) NULL",
+			"UNIQUE KEY uq_admin_operation_authorizations_token_hash (token_hash)",
+			"UNIQUE KEY uq_admin_operation_authorizations_totp_step (credential_epoch, totp_step)",
+			"FOREIGN KEY (session_id) REFERENCES site_sessions (id)",
+		} {
+			if !strings.Contains(normalized, required) {
+				t.Fatalf("0010 migration missing %q", required)
+			}
+		}
+		return
+	}
+	t.Fatal("production migrations do not include 0010_admin_operation_authorizations")
 }
 
 func TestProductionMigrationsIncludeRetryableAdministratorHandoffs(t *testing.T) {
