@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"io"
 	"regexp"
@@ -27,6 +28,17 @@ func TestAdminCompositionDoesNotRequireAdministratorBilibiliVerifier(t *testing.
 	}
 	if _, err := NewService(newMemoryRepository(), keys, &MemorySender{}, ServiceOptions{}); err != nil {
 		t.Fatalf("NewService() error = %v", err)
+	}
+}
+
+func TestNewServiceRejectsRepositoryWithoutAdministratorSessionInventory(t *testing.T) {
+	keys, err := security.NewKeyring(1, bytes.Repeat([]byte{0x41}, 32), bytes.Repeat([]byte{0x72}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := &identityOnlyRepository{Repository: newMemoryRepository()}
+	if service, err := NewService(legacy, keys, &MemorySender{}, ServiceOptions{}); !errors.Is(err, ErrInvalidInput) || service != nil {
+		t.Fatalf("NewService() = %#v, %v; want nil, ErrInvalidInput", service, err)
 	}
 }
 
@@ -1478,6 +1490,42 @@ func TestSQLRepositorySessionInventoryCreatesSafeAdministratorSession(t *testing
 	}
 }
 
+func TestSQLRepositoryLoginEventFailureRollsBackSuccessfulSession(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 23, 9, 5, 0, 0, time.UTC)
+	attempt := EmailLoginSessionAttempt{ExpectedCredentialEpoch: 3, TokenHash: bytes.Repeat([]byte{0x68}, sha256.Size), CreatedAt: now, ExpiresAt: now.Add(30 * 24 * time.Hour)}
+	summary := ClientSummary{DeviceLabel: "iPhone · Safari", ClientNetwork: "203.0.113.*"}
+	event := AdministratorLoginEvent{Result: "success", DeviceLabel: summary.DeviceLabel, ClientNetwork: summary.ClientNetwork, OccurredAt: now}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(3))
+	mock.ExpectExec(sqlPattern("INSERT INTO site_sessions (admin_identity_id, token_hash, credential_epoch, device_label, client_network, created_at, last_seen_at, expires_at, totp_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)")).
+		WithArgs(int64(1), attempt.TokenHash, int64(3), summary.DeviceLabel, summary.ClientNetwork, now, now, attempt.ExpiresAt).
+		WillReturnResult(sqlmock.NewResult(42, 1))
+	mock.ExpectQuery(sqlPattern("SELECT HEX(public_id), device_label, client_network, created_at, last_seen_at, expires_at FROM site_sessions WHERE id = ? AND admin_identity_id = 1")).
+		WithArgs(int64(42)).
+		WillReturnRows(sqlmock.NewRows([]string{"public_id", "device_label", "client_network", "created_at", "last_seen_at", "expires_at"}).
+			AddRow("AABBCCDDEEFF00112233445566778899", summary.DeviceLabel, summary.ClientNetwork, now, now, attempt.ExpiresAt))
+	mock.ExpectExec(sqlPattern("INSERT INTO admin_login_events (result, device_label, client_network, occurred_at) VALUES (?, ?, ?, ?)")).
+		WithArgs("success", summary.DeviceLabel, summary.ClientNetwork, now).
+		WillReturnError(errors.New("event insert failed"))
+	mock.ExpectRollback()
+
+	session, err := repository.CreateAdminSessionWithLoginEvent(context.Background(), attempt, summary, event)
+	if !errors.Is(err, ErrUnavailable) || session != (AdministratorSession{}) {
+		t.Fatalf("CreateAdminSessionWithLoginEvent() = %#v, %v", session, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSQLRepositorySessionInventoryTouchUsesFiveMinuteThrottle(t *testing.T) {
 	database, mock, err := sqlmock.New()
 	if err != nil {
@@ -1536,6 +1584,8 @@ func TestSQLRepositorySessionInventoryProtectsCurrentSession(t *testing.T) {
 	tokenHash := bytes.Repeat([]byte{0x64}, sha256.Size)
 	publicID := "00112233445566778899aabbccddeeff"
 	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(3))
 	mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
 		WithArgs(tokenHash).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(51, 3, now.Add(time.Hour), nil))
@@ -1546,6 +1596,32 @@ func TestSQLRepositorySessionInventoryProtectsCurrentSession(t *testing.T) {
 
 	if err := repository.RevokeAdminSession(context.Background(), tokenHash, publicID, now); !errors.Is(err, ErrCurrentAdminSession) {
 		t.Fatalf("RevokeAdminSession() error = %v, want ErrCurrentAdminSession", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositorySessionInventoryRejectsStaleCurrentCredentialEpoch(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repository := NewRepository(database)
+	now := time.Date(2026, 8, 23, 9, 35, 0, 0, time.UTC)
+	tokenHash := bytes.Repeat([]byte{0x67}, sha256.Size)
+	publicID := "ffeeddccbbaa99887766554433221100"
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(4))
+	mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
+		WithArgs(tokenHash).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(51, 3, now.Add(time.Hour), nil))
+	mock.ExpectRollback()
+
+	if err := repository.RevokeAdminSession(context.Background(), tokenHash, publicID, now); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("RevokeAdminSession() error = %v, want ErrAuthenticationFailed", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -1563,6 +1639,8 @@ func TestSQLRepositorySessionInventoryRevokesTargetOnce(t *testing.T) {
 	tokenHash := bytes.Repeat([]byte{0x65}, sha256.Size)
 	publicID := "ffeeddccbbaa99887766554433221100"
 	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(3))
 	mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
 		WithArgs(tokenHash).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(61, 3, now.Add(time.Hour), nil))
@@ -1575,6 +1653,8 @@ func TestSQLRepositorySessionInventoryRevokesTargetOnce(t *testing.T) {
 	mock.ExpectCommit()
 	retryAt := now.Add(time.Minute)
 	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(3))
 	mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
 		WithArgs(tokenHash).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(61, 3, now.Add(time.Hour), nil))
@@ -1614,6 +1694,8 @@ func TestSQLRepositorySessionInventoryKeepsMissingAndEpochMismatchAsNotFound(t *
 			tokenHash := bytes.Repeat([]byte{0x66}, sha256.Size)
 			publicID := "11223344556677889900aabbccddeeff"
 			mock.ExpectBegin()
+			mock.ExpectQuery(sqlPattern("SELECT credential_epoch FROM admin_identity WHERE id = 1 FOR UPDATE")).
+				WillReturnRows(sqlmock.NewRows([]string{"credential_epoch"}).AddRow(3))
 			mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
 				WithArgs(tokenHash).
 				WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(71, 3, now.Add(time.Hour), nil))
@@ -1857,26 +1939,34 @@ func (reader *sequenceReader) Read(buffer []byte) (int, error) {
 }
 
 type memoryRepository struct {
-	mu              sync.Mutex
-	initialized     bool
-	identity        IdentityRecord
-	rotatedAt       time.Time
-	lastStep        time.Time
-	sessions        map[[sha256.Size]byte]AdminSession
-	activeCodes     map[[sha256.Size]byte]struct{}
-	usedCodes       map[[sha256.Size]byte]struct{}
-	handoffs        map[int64]PendingHandoff
-	handoffReserved map[int64][sha256.Size]byte
-	mailClaims      map[int64]chan struct{}
-	nextHandoffID   int64
-	operations      map[[sha256.Size]byte]OperationAuthorization
-	operationSteps  map[time.Time]struct{}
+	mu               sync.Mutex
+	initialized      bool
+	identity         IdentityRecord
+	rotatedAt        time.Time
+	lastStep         time.Time
+	sessions         map[[sha256.Size]byte]AdminSession
+	sessionInventory map[[sha256.Size]byte]AdministratorSession
+	loginEvents      []AdministratorLoginEvent
+	activeCodes      map[[sha256.Size]byte]struct{}
+	usedCodes        map[[sha256.Size]byte]struct{}
+	handoffs         map[int64]PendingHandoff
+	handoffReserved  map[int64][sha256.Size]byte
+	mailClaims       map[int64]chan struct{}
+	nextHandoffID    int64
+	operations       map[[sha256.Size]byte]OperationAuthorization
+	operationSteps   map[time.Time]struct{}
 }
+
+type identityOnlyRepository struct{ Repository }
 
 type unavailableEmailSessionRepository struct{ *memoryRepository }
 
 func (unavailableEmailSessionRepository) CreateEmailLoginSession(context.Context, EmailLoginSessionAttempt) error {
 	return ErrUnavailable
+}
+
+func (unavailableEmailSessionRepository) CreateAdminSessionWithLoginEvent(context.Context, EmailLoginSessionAttempt, ClientSummary, AdministratorLoginEvent) (AdministratorSession, error) {
+	return AdministratorSession{}, ErrUnavailable
 }
 
 type failedEmailSessionRepository struct {
@@ -1886,6 +1976,10 @@ type failedEmailSessionRepository struct {
 
 func (repository failedEmailSessionRepository) CreateEmailLoginSession(context.Context, EmailLoginSessionAttempt) error {
 	return repository.err
+}
+
+func (repository failedEmailSessionRepository) CreateAdminSessionWithLoginEvent(context.Context, EmailLoginSessionAttempt, ClientSummary, AdministratorLoginEvent) (AdministratorSession, error) {
+	return AdministratorSession{}, repository.err
 }
 
 type synchronizedPrepareRepository struct {
@@ -1907,7 +2001,7 @@ func (repository *synchronizedPrepareRepository) PrepareInitialization(ctx conte
 
 func newMemoryRepository() *memoryRepository {
 	return &memoryRepository{
-		sessions: make(map[[sha256.Size]byte]AdminSession), activeCodes: make(map[[sha256.Size]byte]struct{}), usedCodes: make(map[[sha256.Size]byte]struct{}), handoffs: make(map[int64]PendingHandoff), handoffReserved: make(map[int64][sha256.Size]byte), mailClaims: make(map[int64]chan struct{}), operations: make(map[[sha256.Size]byte]OperationAuthorization), operationSteps: make(map[time.Time]struct{}),
+		sessions: make(map[[sha256.Size]byte]AdminSession), sessionInventory: make(map[[sha256.Size]byte]AdministratorSession), activeCodes: make(map[[sha256.Size]byte]struct{}), usedCodes: make(map[[sha256.Size]byte]struct{}), handoffs: make(map[int64]PendingHandoff), handoffReserved: make(map[int64][sha256.Size]byte), mailClaims: make(map[int64]chan struct{}), operations: make(map[[sha256.Size]byte]OperationAuthorization), operationSteps: make(map[time.Time]struct{}),
 	}
 }
 
@@ -2211,6 +2305,128 @@ func (repository *memoryRepository) CreateEmailLoginSession(_ context.Context, a
 	}
 	repository.sessions[key] = AdminSession{ID: int64(len(repository.sessions) + 1), CredentialEpoch: attempt.ExpectedCredentialEpoch, ExpiresAt: attempt.ExpiresAt}
 	return nil
+}
+
+func (repository *memoryRepository) CreateAdminSession(_ context.Context, attempt EmailLoginSessionAttempt, summary ClientSummary) (AdministratorSession, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	return repository.createAdminSessionLocked(attempt, summary)
+}
+
+func (repository *memoryRepository) CreateAdminSessionWithLoginEvent(_ context.Context, attempt EmailLoginSessionAttempt, summary ClientSummary, event AdministratorLoginEvent) (AdministratorSession, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	if !validAdministratorLoginEvent(event) || event.Result != "success" || event.DeviceLabel != summary.DeviceLabel || event.ClientNetwork != summary.ClientNetwork || !event.OccurredAt.Equal(attempt.CreatedAt) {
+		return AdministratorSession{}, ErrInvalidInput
+	}
+	session, err := repository.createAdminSessionLocked(attempt, summary)
+	if err != nil {
+		return AdministratorSession{}, err
+	}
+	repository.loginEvents = append(repository.loginEvents, event)
+	return session, nil
+}
+
+func (repository *memoryRepository) createAdminSessionLocked(attempt EmailLoginSessionAttempt, summary ClientSummary) (AdministratorSession, error) {
+	if !repository.initialized || attempt.ExpectedCredentialEpoch != repository.identity.CredentialEpoch || !validEmailLoginSessionAttempt(attempt) || !validClientSummary(summary) {
+		return AdministratorSession{}, ErrAuthenticationFailed
+	}
+	key, ok := hashKey(attempt.TokenHash)
+	if !ok {
+		return AdministratorSession{}, ErrUnavailable
+	}
+	base := AdminSession{ID: int64(len(repository.sessions) + 1), CredentialEpoch: attempt.ExpectedCredentialEpoch, ExpiresAt: attempt.ExpiresAt}
+	projection := AdministratorSession{PublicID: hex.EncodeToString(attempt.TokenHash[:16]), DeviceLabel: summary.DeviceLabel, ClientNetwork: summary.ClientNetwork, CreatedAt: attempt.CreatedAt, LastSeenAt: attempt.CreatedAt, ExpiresAt: attempt.ExpiresAt, Current: true}
+	repository.sessions[key] = base
+	repository.sessionInventory[key] = projection
+	return projection, nil
+}
+
+func (repository *memoryRepository) TouchAdminSession(_ context.Context, tokenHash []byte, now time.Time) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	key, ok := hashKey(tokenHash)
+	base, found := repository.sessions[key]
+	if !ok || !found || base.Revoked || base.CredentialEpoch != repository.identity.CredentialEpoch || !base.ExpiresAt.After(now) {
+		return ErrAuthenticationFailed
+	}
+	projection := repository.sessionInventory[key]
+	if projection.LastSeenAt.Before(now.Add(-administratorSessionTouchInterval)) {
+		projection.LastSeenAt = now
+		repository.sessionInventory[key] = projection
+	}
+	return nil
+}
+
+func (repository *memoryRepository) ListAdminSessions(_ context.Context, currentTokenHash []byte, now time.Time) ([]AdministratorSession, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	currentKey, ok := hashKey(currentTokenHash)
+	if !ok {
+		return nil, ErrAuthenticationFailed
+	}
+	result := make([]AdministratorSession, 0, len(repository.sessionInventory))
+	for key, projection := range repository.sessionInventory {
+		base := repository.sessions[key]
+		if base.Revoked || base.CredentialEpoch != repository.identity.CredentialEpoch || !base.ExpiresAt.After(now) {
+			continue
+		}
+		projection.Current = key == currentKey
+		result = append(result, projection)
+	}
+	return result, nil
+}
+
+func (repository *memoryRepository) RevokeAdminSession(_ context.Context, currentTokenHash []byte, publicID string, now time.Time) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	currentKey, ok := hashKey(currentTokenHash)
+	current, found := repository.sessions[currentKey]
+	if !ok || !found || current.Revoked || current.CredentialEpoch != repository.identity.CredentialEpoch || !current.ExpiresAt.After(now) {
+		return ErrAuthenticationFailed
+	}
+	for key, projection := range repository.sessionInventory {
+		if projection.PublicID != publicID {
+			continue
+		}
+		if key == currentKey {
+			return ErrCurrentAdminSession
+		}
+		target := repository.sessions[key]
+		if target.Revoked || target.CredentialEpoch != repository.identity.CredentialEpoch || !target.ExpiresAt.After(now) {
+			return ErrAdminSessionNotFound
+		}
+		target.Revoked = true
+		repository.sessions[key] = target
+		return nil
+	}
+	return ErrAdminSessionNotFound
+}
+
+func (repository *memoryRepository) RecordAdminLoginEvent(_ context.Context, event AdministratorLoginEvent) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	if !validAdministratorLoginEvent(event) {
+		return ErrInvalidInput
+	}
+	repository.loginEvents = append(repository.loginEvents, event)
+	return nil
+}
+
+func (repository *memoryRepository) ListAdminLoginEvents(_ context.Context, limit int) ([]AdministratorLoginEvent, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	if limit < 1 || limit > maximumAdministratorLoginEvents {
+		return nil, ErrInvalidInput
+	}
+	if limit > len(repository.loginEvents) {
+		limit = len(repository.loginEvents)
+	}
+	result := make([]AdministratorLoginEvent, 0, limit)
+	for index := len(repository.loginEvents) - 1; index >= len(repository.loginEvents)-limit; index-- {
+		result = append(result, repository.loginEvents[index])
+	}
+	return result, nil
 }
 
 func (repository *memoryRepository) FindSession(_ context.Context, tokenHash []byte, now time.Time) (AdminSession, error) {

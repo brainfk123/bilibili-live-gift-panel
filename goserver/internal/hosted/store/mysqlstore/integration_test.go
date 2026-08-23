@@ -192,6 +192,71 @@ func TestIntegrationRealMySQLSessionInventoryMigration(t *testing.T) {
 			t.Fatalf("newest event=%v", events[0].OccurredAt)
 		}
 	})
+
+	t.Run("stale administrator session cannot revoke after credential rotation", func(t *testing.T) {
+		store := freshIntegrationStore(t, dsn, true)
+		ctx := integrationContext(t)
+		db := store.Database()
+		now := time.Date(2026, 8, 23, 12, 30, 0, 0, time.UTC)
+		if _, err := db.ExecContext(ctx, "INSERT INTO admin_identity (id, credential_epoch, email_ciphertext, created_at, updated_at) VALUES (1, 1, ?, ?, ?)", []byte("encrypted-email"), now, now); err != nil {
+			t.Fatal(err)
+		}
+		repository := adminidentity.NewRepository(db)
+		currentHash := bytesOf(0x91)
+		if _, err := repository.CreateAdminSession(ctx, adminidentity.EmailLoginSessionAttempt{ExpectedCredentialEpoch: 1, TokenHash: currentHash, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}, adminidentity.ClientSummary{DeviceLabel: "iPhone · Safari", ClientNetwork: "203.0.113.*"}); err != nil {
+			t.Fatal(err)
+		}
+		target, err := repository.CreateAdminSession(ctx, adminidentity.EmailLoginSessionAttempt{ExpectedCredentialEpoch: 1, TokenHash: bytesOf(0x92), CreatedAt: now, ExpiresAt: now.Add(time.Hour)}, adminidentity.ClientSummary{DeviceLabel: "Windows · Edge", ClientNetwork: "198.51.100.*"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, "UPDATE admin_identity SET credential_epoch = 2 WHERE id = 1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := repository.RevokeAdminSession(ctx, currentHash, target.PublicID, now.Add(time.Minute)); !errors.Is(err, adminidentity.ErrAuthenticationFailed) {
+			t.Fatalf("stale current session revoke error=%v", err)
+		}
+		var revoked sql.NullTime
+		if err := db.QueryRowContext(ctx, "SELECT revoked_at FROM site_sessions WHERE public_id = UNHEX(?)", target.PublicID).Scan(&revoked); err != nil {
+			t.Fatal(err)
+		}
+		if revoked.Valid {
+			t.Fatalf("stale session revoked target at %v", revoked.Time)
+		}
+	})
+
+	t.Run("successful login event failure rolls back administrator session", func(t *testing.T) {
+		store := freshIntegrationStore(t, dsn, true)
+		ctx := integrationContext(t)
+		db := store.Database()
+		now := time.Date(2026, 8, 23, 12, 45, 0, 0, time.UTC)
+		if _, err := db.ExecContext(ctx, "INSERT INTO admin_identity (id, credential_epoch, email_ciphertext, created_at, updated_at) VALUES (1, 1, ?, ?, ?)", []byte("encrypted-email"), now, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, "CREATE TRIGGER fail_admin_login_event BEFORE INSERT ON admin_login_events FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'forced login event failure'"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _, _ = db.ExecContext(context.Background(), "DROP TRIGGER IF EXISTS fail_admin_login_event") })
+		repository := adminidentity.NewRepository(db)
+		tokenHash := bytesOf(0x93)
+		attempt := adminidentity.EmailLoginSessionAttempt{ExpectedCredentialEpoch: 1, TokenHash: tokenHash, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+		summary := adminidentity.ClientSummary{DeviceLabel: "iPhone · Safari", ClientNetwork: "203.0.113.*"}
+		event := adminidentity.AdministratorLoginEvent{Result: "success", DeviceLabel: summary.DeviceLabel, ClientNetwork: summary.ClientNetwork, OccurredAt: now}
+		session, err := repository.CreateAdminSessionWithLoginEvent(ctx, attempt, summary, event)
+		if err == nil || session != (adminidentity.AdministratorSession{}) {
+			t.Fatalf("atomic login session=%#v error=%v", session, err)
+		}
+		var sessions, successes int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM site_sessions WHERE token_hash = ?", tokenHash).Scan(&sessions); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM admin_login_events WHERE result = 'success'").Scan(&successes); err != nil {
+			t.Fatal(err)
+		}
+		if sessions != 0 || successes != 0 {
+			t.Fatalf("rolled-back login left sessions=%d success_events=%d", sessions, successes)
+		}
+	})
 }
 
 const invitationContentionQuery = `SELECT COUNT(DISTINCT trx.trx_id)

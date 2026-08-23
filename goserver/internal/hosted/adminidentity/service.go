@@ -211,6 +211,7 @@ type Repository interface {
 // so existing identity-only test doubles do not need unrelated operations.
 type AdministratorSessionRepository interface {
 	CreateAdminSession(context.Context, EmailLoginSessionAttempt, ClientSummary) (AdministratorSession, error)
+	CreateAdminSessionWithLoginEvent(context.Context, EmailLoginSessionAttempt, ClientSummary, AdministratorLoginEvent) (AdministratorSession, error)
 	TouchAdminSession(context.Context, []byte, time.Time) error
 	ListAdminSessions(context.Context, []byte, time.Time) ([]AdministratorSession, error)
 	RevokeAdminSession(context.Context, []byte, string, time.Time) error
@@ -439,6 +440,19 @@ func (repository *SQLRepository) CreateAdminSession(ctx context.Context, attempt
 	if !repository.ready() || !validEmailLoginSessionAttempt(attempt) || !validClientSummary(summary) {
 		return AdministratorSession{}, ErrInvalidInput
 	}
+	return repository.createAdminSession(ctx, attempt, summary, nil)
+}
+
+// CreateAdminSessionWithLoginEvent atomically persists a successful
+// administrator login session and its matching safe success audit event.
+func (repository *SQLRepository) CreateAdminSessionWithLoginEvent(ctx context.Context, attempt EmailLoginSessionAttempt, summary ClientSummary, event AdministratorLoginEvent) (AdministratorSession, error) {
+	if !repository.ready() || !validEmailLoginSessionAttempt(attempt) || !validClientSummary(summary) || !validAdministratorLoginEvent(event) || event.Result != "success" || event.DeviceLabel != summary.DeviceLabel || event.ClientNetwork != summary.ClientNetwork || !event.OccurredAt.Equal(attempt.CreatedAt) {
+		return AdministratorSession{}, ErrInvalidInput
+	}
+	return repository.createAdminSession(ctx, attempt, summary, &event)
+}
+
+func (repository *SQLRepository) createAdminSession(ctx context.Context, attempt EmailLoginSessionAttempt, summary ClientSummary, successEvent *AdministratorLoginEvent) (AdministratorSession, error) {
 	attempt.TokenHash = bytes.Clone(attempt.TokenHash)
 	transaction, err := repository.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -477,6 +491,11 @@ func (repository *SQLRepository) CreateAdminSession(ctx context.Context, attempt
 	session.Current = true
 	if !validAdministratorSession(session, attempt.CreatedAt) {
 		return AdministratorSession{}, ErrUnavailable
+	}
+	if successEvent != nil {
+		if err := insertAdminLoginEvent(ctx, transaction, *successEvent); err != nil {
+			return AdministratorSession{}, err
+		}
 	}
 	if err := transaction.Commit(); err != nil {
 		return AdministratorSession{}, ErrUnavailable
@@ -551,6 +570,10 @@ func (repository *SQLRepository) RevokeAdminSession(ctx context.Context, current
 			_ = transaction.Rollback()
 		}
 	}()
+	authoritativeEpoch, err := lockAdminEpoch(ctx, transaction)
+	if err != nil {
+		return err
+	}
 	const currentQuery = "SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE"
 	var currentID, currentEpoch int64
 	var currentExpires time.Time
@@ -561,7 +584,7 @@ func (repository *SQLRepository) RevokeAdminSession(ctx context.Context, current
 		}
 		return ErrUnavailable
 	}
-	if currentID <= 0 || currentEpoch < 1 || currentRevoked.Valid || !currentExpires.After(now) {
+	if currentID <= 0 || currentEpoch != authoritativeEpoch || currentRevoked.Valid || !currentExpires.After(now) {
 		return ErrAuthenticationFailed
 	}
 	const targetQuery = "SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND public_id = UNHEX(?) FOR UPDATE"
@@ -577,7 +600,7 @@ func (repository *SQLRepository) RevokeAdminSession(ctx context.Context, current
 	if targetID == currentID {
 		return ErrCurrentAdminSession
 	}
-	if targetID <= 0 || targetEpoch != currentEpoch {
+	if targetID <= 0 || targetEpoch != authoritativeEpoch {
 		return ErrAdminSessionNotFound
 	}
 	if targetRevoked.Valid {
@@ -617,6 +640,17 @@ func (repository *SQLRepository) RecordAdminLoginEvent(ctx context.Context, even
 			_ = transaction.Rollback()
 		}
 	}()
+	if err := insertAdminLoginEvent(ctx, transaction, event); err != nil {
+		return err
+	}
+	if err := transaction.Commit(); err != nil {
+		return ErrUnavailable
+	}
+	committed = true
+	return nil
+}
+
+func insertAdminLoginEvent(ctx context.Context, transaction *sql.Tx, event AdministratorLoginEvent) error {
 	if result, err := transaction.ExecContext(ctx,
 		"INSERT INTO admin_login_events (result, device_label, client_network, occurred_at) VALUES (?, ?, ?, ?)",
 		event.Result, event.DeviceLabel, event.ClientNetwork, event.OccurredAt,
@@ -627,10 +661,6 @@ func (repository *SQLRepository) RecordAdminLoginEvent(ctx context.Context, even
 	if _, err := transaction.ExecContext(ctx, prune); err != nil {
 		return ErrUnavailable
 	}
-	if err := transaction.Commit(); err != nil {
-		return ErrUnavailable
-	}
-	committed = true
 	return nil
 }
 
@@ -1562,18 +1592,19 @@ type ServiceOptions struct {
 }
 
 type Service struct {
-	repository  Repository
-	keys        security.Keyring
-	sender      MailSender
-	now         func() time.Time
-	random      io.Reader
-	totp        TOTPProvider
-	issuer      string
-	emailTTL    time.Duration
-	sessionTTL  time.Duration
-	handoffTTL  time.Duration
-	emailMu     sync.Mutex
-	emailLogins map[string]*emailLoginState
+	repository        Repository
+	sessionRepository AdministratorSessionRepository
+	keys              security.Keyring
+	sender            MailSender
+	now               func() time.Time
+	random            io.Reader
+	totp              TOTPProvider
+	issuer            string
+	emailTTL          time.Duration
+	sessionTTL        time.Duration
+	handoffTTL        time.Duration
+	emailMu           sync.Mutex
+	emailLogins       map[string]*emailLoginState
 }
 
 type InitializeResult struct {
@@ -1616,6 +1647,10 @@ func NewService(repository Repository, keys security.Keyring, sender MailSender,
 	if repository == nil || sender == nil {
 		return nil, ErrInvalidInput
 	}
+	sessionRepository, ok := repository.(AdministratorSessionRepository)
+	if !ok {
+		return nil, ErrInvalidInput
+	}
 	if _, err := keys.HashToken("admin_session", []byte("constructor-check")); err != nil {
 		return nil, ErrInvalidInput
 	}
@@ -1644,7 +1679,7 @@ func NewService(repository Repository, keys security.Keyring, sender MailSender,
 		return nil, ErrInvalidInput
 	}
 	return &Service{
-		repository: repository, keys: keys, sender: sender,
+		repository: repository, sessionRepository: sessionRepository, keys: keys, sender: sender,
 		now: options.Now, random: options.Random, totp: options.TOTP, issuer: options.Issuer,
 		emailTTL: options.EmailChallengeTTL, sessionTTL: options.SessionTTL, handoffTTL: options.HandoffTTL,
 		emailLogins: make(map[string]*emailLoginState),
@@ -1714,14 +1749,13 @@ func (service *Service) VerifyEmailLogin(ctx context.Context, challengeID, email
 	}
 	now := service.now()
 	summary := SummarizeClient("", nil)
-	resultName := "failure"
+	loginSucceeded := false
 	defer func() {
-		repository, ok := service.repository.(AdministratorSessionRepository)
-		if !ok {
+		if loginSucceeded {
 			return
 		}
-		event := AdministratorLoginEvent{Result: resultName, DeviceLabel: summary.DeviceLabel, ClientNetwork: summary.ClientNetwork, OccurredAt: now}
-		if err := repository.RecordAdminLoginEvent(ctx, event); err != nil {
+		event := AdministratorLoginEvent{Result: "failure", DeviceLabel: summary.DeviceLabel, ClientNetwork: summary.ClientNetwork, OccurredAt: now}
+		if err := service.sessionRepository.RecordAdminLoginEvent(ctx, event); err != nil {
 			result = LoginResult{}
 			resultErr = ErrUnavailable
 		}
@@ -1770,18 +1804,15 @@ func (service *Service) VerifyEmailLogin(ctx context.Context, challengeID, email
 	}
 	expiresAt := now.Add(service.sessionTTL)
 	attempt := EmailLoginSessionAttempt{ExpectedCredentialEpoch: expectedEpoch, TokenHash: tokenHash, CreatedAt: now, ExpiresAt: expiresAt}
-	if repository, ok := service.repository.(AdministratorSessionRepository); ok {
-		_, err = repository.CreateAdminSession(ctx, attempt, summary)
-	} else {
-		err = service.repository.CreateEmailLoginSession(ctx, attempt)
-	}
+	successEvent := AdministratorLoginEvent{Result: "success", DeviceLabel: summary.DeviceLabel, ClientNetwork: summary.ClientNetwork, OccurredAt: now}
+	_, err = service.sessionRepository.CreateAdminSessionWithLoginEvent(ctx, attempt, summary, successEvent)
 	if err != nil {
 		if errors.Is(err, ErrAuthenticationFailed) {
 			return LoginResult{}, ErrAuthenticationFailed
 		}
 		return LoginResult{}, ErrUnavailable
 	}
-	resultName = "success"
+	loginSucceeded = true
 	return LoginResult{Token: token, ExpiresAt: expiresAt}, nil
 }
 
@@ -2155,9 +2186,7 @@ func (service *Service) RequireSession(ctx context.Context, sessionToken string)
 	if _, err := service.repository.FindSession(ctx, tokenHash, now); err != nil {
 		return ErrAuthenticationFailed
 	}
-	if repository, ok := service.repository.(AdministratorSessionRepository); ok {
-		_ = repository.TouchAdminSession(ctx, tokenHash, now)
-	}
+	_ = service.sessionRepository.TouchAdminSession(ctx, tokenHash, now)
 	return nil
 }
 
@@ -2167,15 +2196,11 @@ func (service *Service) AdministratorSessions(ctx context.Context, sessionToken 
 	if err := service.RequireSession(ctx, sessionToken); err != nil {
 		return nil, err
 	}
-	repository, ok := service.repository.(AdministratorSessionRepository)
-	if !ok {
-		return nil, ErrUnavailable
-	}
 	tokenHash, err := service.keys.HashToken("admin_session", []byte(sessionToken))
 	if err != nil {
 		return nil, ErrAuthenticationFailed
 	}
-	return repository.ListAdminSessions(ctx, tokenHash, service.now())
+	return service.sessionRepository.ListAdminSessions(ctx, tokenHash, service.now())
 }
 
 // RevokeAdministratorSession revokes one non-current administrator session by
@@ -2184,15 +2209,11 @@ func (service *Service) RevokeAdministratorSession(ctx context.Context, sessionT
 	if service == nil || sessionToken == "" || !validAdministratorPublicID(publicID) {
 		return ErrInvalidInput
 	}
-	repository, ok := service.repository.(AdministratorSessionRepository)
-	if !ok {
-		return ErrUnavailable
-	}
 	tokenHash, err := service.keys.HashToken("admin_session", []byte(sessionToken))
 	if err != nil {
 		return ErrAuthenticationFailed
 	}
-	return repository.RevokeAdminSession(ctx, tokenHash, publicID, service.now())
+	return service.sessionRepository.RevokeAdminSession(ctx, tokenHash, publicID, service.now())
 }
 
 // AdministratorLoginEvents returns a bounded newest-first audit projection
@@ -2204,11 +2225,7 @@ func (service *Service) AdministratorLoginEvents(ctx context.Context, sessionTok
 	if err := service.RequireSession(ctx, sessionToken); err != nil {
 		return nil, err
 	}
-	repository, ok := service.repository.(AdministratorSessionRepository)
-	if !ok {
-		return nil, ErrUnavailable
-	}
-	return repository.ListAdminLoginEvents(ctx, limit)
+	return service.sessionRepository.ListAdminLoginEvents(ctx, limit)
 }
 
 func (service *Service) Logout(ctx context.Context, sessionToken string) error {

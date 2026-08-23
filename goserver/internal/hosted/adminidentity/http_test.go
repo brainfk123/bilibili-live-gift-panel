@@ -72,6 +72,9 @@ func TestLoginEventVerificationRecordsSafeFailureAndSuccessAndTouchesSession(t *
 	if repository.createdSummary != summary {
 		t.Fatalf("created summary=%#v, want %#v", repository.createdSummary, summary)
 	}
+	if repository.atomicLoginCalls != 1 {
+		t.Fatalf("atomic login calls=%d, want 1", repository.atomicLoginCalls)
+	}
 	if len(repository.events) != 2 || repository.events[0].Result != "failure" || repository.events[1].Result != "success" {
 		t.Fatalf("events=%#v", repository.events)
 	}
@@ -649,10 +652,11 @@ func (service *adminHTTPService) wasCalled() bool {
 
 type inventoryMemoryRepository struct {
 	*memoryRepository
-	createdSummary ClientSummary
-	events         []AdministratorLoginEvent
-	touchCalls     int
-	touchedHash    []byte
+	createdSummary   ClientSummary
+	events           []AdministratorLoginEvent
+	touchCalls       int
+	touchedHash      []byte
+	atomicLoginCalls int
 }
 
 func (repository *inventoryMemoryRepository) CreateAdminSession(ctx context.Context, attempt EmailLoginSessionAttempt, summary ClientSummary) (AdministratorSession, error) {
@@ -665,6 +669,16 @@ func (repository *inventoryMemoryRepository) CreateAdminSession(ctx context.Cont
 		ClientNetwork: summary.ClientNetwork, CreatedAt: attempt.CreatedAt, LastSeenAt: attempt.CreatedAt,
 		ExpiresAt: attempt.ExpiresAt, Current: true,
 	}, nil
+}
+
+func (repository *inventoryMemoryRepository) CreateAdminSessionWithLoginEvent(ctx context.Context, attempt EmailLoginSessionAttempt, summary ClientSummary, event AdministratorLoginEvent) (AdministratorSession, error) {
+	repository.atomicLoginCalls++
+	session, err := repository.CreateAdminSession(ctx, attempt, summary)
+	if err != nil {
+		return AdministratorSession{}, err
+	}
+	repository.events = append(repository.events, event)
+	return session, nil
 }
 
 func (repository *inventoryMemoryRepository) TouchAdminSession(_ context.Context, tokenHash []byte, _ time.Time) error {
