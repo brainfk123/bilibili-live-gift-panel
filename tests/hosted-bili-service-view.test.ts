@@ -70,6 +70,31 @@ describe('Bilibili service action state', () => {
 });
 
 describe('Bilibili service replacement view', () => {
+  it('keeps the currently rendered check button visibly busy until a deferred check settles', async () => {
+    let finish!: (status: { version: number; health: 'healthy'; lastVerifiedAt: string }) => void;
+    const pending = new Promise<{ version: number; health: 'healthy'; lastVerifiedAt: string }>((resolve) => { finish = resolve; });
+    const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (text) => { const node = new Element('#text', document); node.textContent = text; return node; } };
+    const root = new Element('div', document);
+    const api = {
+      biliServiceStatus: vi.fn(async () => ({ version: 0 as const, health: 'missing' as const })),
+      checkBiliService: vi.fn(() => pending), beginBiliServiceChallenge: vi.fn(), replaceBiliServiceCredential: vi.fn(), authorizeAdminOperation: vi.fn(),
+    };
+    const view = mountBiliServiceView(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountBiliServiceView>[1]);
+    await flush();
+    button(root, '立即检查').listeners.get('click')?.();
+
+    const visible = button(root, '检查中…');
+    expect(visible.disabled).toBe(true);
+    expect(visible.getAttribute('aria-busy')).toBe('true');
+    expect(descendants(visible).some((node) => node.className === 'hosted-admin-action-spinner')).toBe(true);
+    finish({ version: 1, health: 'healthy', lastVerifiedAt: '2030-01-01T00:00:00Z' });
+    await flush();
+
+    expect(button(root, '立即检查').disabled).toBe(false);
+    expect(descendants(root).some((node) => node.textContent === '检查完成，服务账号运行正常')).toBe(true);
+    await view.dispose();
+  });
+
   it('keeps the continue button below a bounded QR image', async () => {
     const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (text) => { const node = new Element('#text', document); node.textContent = text; return node; } };
     const root = new Element('div', document);

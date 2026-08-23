@@ -61,13 +61,23 @@ export function mountBiliServiceView(host: HTMLElement, api: BiliServiceAPI): Ho
   const render = (snapshot: BiliServiceSnapshot): void => {
     if (disposed) return;
     status.textContent = statusText(snapshot.status);
-    check.disabled = snapshot.phase === 'checking'; begin.disabled = snapshot.phase !== 'idle';
+    const checking = snapshot.phase === 'checking';
+    check.disabled = checking;
+    if (checking) {
+      check.setAttribute('aria-busy', 'true');
+      check.textContent = '检查中…';
+      const spinner = document.createElement('span'); spinner.className = 'hosted-admin-action-spinner'; spinner.setAttribute('aria-hidden', 'true'); check.append(spinner);
+    } else {
+      check.removeAttribute('aria-busy');
+      check.textContent = '立即检查';
+    }
+    begin.disabled = snapshot.phase !== 'idle';
     if (snapshot.notice) notice.show(snapshot.notice.kind, snapshot.notice.message, snapshot.notice.kind === 'error' ? () => { void controller.load(); } : undefined); else notice.clear();
     renderFlow(snapshot);
   };
 
   controller = createBiliServiceController(api, render);
-  check.addEventListener('click', () => { void runAdminAction(check, { idle: '立即检查', busy: '检查中…' }, () => controller.check()); });
+  check.addEventListener('click', () => { void controller.check(); });
   begin.addEventListener('click', () => { void runAdminAction(begin, { idle: '更换服务账号', busy: '创建中…' }, () => controller.beginReplacement()); });
   void controller.load();
   return { async dispose() { disposed = true; controller.dispose(); code?.dispose(); notice.dispose(); flowHost.replaceChildren(); } };
