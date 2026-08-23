@@ -5,9 +5,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +18,225 @@ import (
 	"bilibili-live-gift-panel/internal/hosted/security"
 	"github.com/go-sql-driver/mysql"
 )
+
+type adminInvitationCursor struct {
+	CreatedAt time.Time `json:"createdAt"`
+	ID        int64     `json:"id"`
+	Rank      int       `json:"rank,omitempty"`
+}
+
+func (service *Service) ListAdministrator(ctx context.Context, token string, query AdminInvitationQuery) (AdminInvitationPage, error) {
+	if service == nil || service.administrator == nil || token == "" {
+		return AdminInvitationPage{}, ErrAuthentication
+	}
+	if err := service.administrator.RequireSession(ctx, token); err != nil {
+		return AdminInvitationPage{}, ErrAuthentication
+	}
+	query.Query = strings.TrimSpace(strings.ToUpper(query.Query))
+	if query.Limit == 0 {
+		query.Limit = 50
+	}
+	if query.Limit < 1 || query.Limit > 100 {
+		return AdminInvitationPage{}, ErrInvalidInput
+	}
+	if query.Sort == "" {
+		query.Sort = "created_at"
+	}
+	if query.Direction == "" {
+		query.Direction = "desc"
+	}
+	if query.Sort != "created_at" && query.Sort != "status" || query.Direction != "asc" && query.Direction != "desc" || query.Status != "" && query.Status != StatusActive && query.Status != StatusUsed && query.Status != StatusRevoked && query.Status != StatusExpired {
+		return AdminInvitationPage{}, ErrInvalidInput
+	}
+	where := []string{"creator_admin_identity_id=1"}
+	args := []any{}
+	if query.Status != "" {
+		where = append(where, "status=?")
+		args = append(args, query.Status)
+	}
+	if query.Query != "" {
+		suffix := query.Query
+		if len(suffix) > 4 {
+			suffix = suffix[len(suffix)-4:]
+		}
+		if id, err := strconv.ParseInt(query.Query, 10, 64); err == nil && id > 0 {
+			where = append(where, "(code_hint LIKE ? OR invited_account_id=?)")
+			args = append(args, "%"+suffix, id)
+		} else {
+			where = append(where, "code_hint LIKE ?")
+			args = append(args, "%"+suffix)
+		}
+	}
+	direction := "DESC"
+	comparison := "<"
+	if query.Direction == "asc" {
+		direction = "ASC"
+		comparison = ">"
+	}
+	order := "created_at"
+	if query.Sort == "status" {
+		order = "CASE status WHEN 'active' THEN 1 WHEN 'used' THEN 2 WHEN 'revoked' THEN 3 ELSE 4 END"
+	}
+	if query.Cursor != "" {
+		cursor, err := decodeAdminInvitationCursor(query.Cursor)
+		if err != nil {
+			return AdminInvitationPage{}, ErrInvalidInput
+		}
+		if query.Sort == "created_at" {
+			where = append(where, fmt.Sprintf("(created_at %s ? OR (created_at = ? AND id %s ?))", comparison, comparison))
+			args = append(args, cursor.CreatedAt, cursor.CreatedAt, cursor.ID)
+		} else {
+			where = append(where, fmt.Sprintf("(%s %s ? OR (%s = ? AND id %s ?))", order, comparison, order, comparison))
+			args = append(args, cursor.Rank, cursor.Rank, cursor.ID)
+		}
+	}
+	args = append(args, query.Limit+1)
+	rows, err := service.db.QueryContext(ctx, `SELECT id,code_ciphertext,code_hint,status,created_at,expires_at,COALESCE(invited_account_id,0) FROM invitations WHERE `+strings.Join(where, " AND ")+` ORDER BY `+order+` `+direction+`,id `+direction+` LIMIT ?`, args...)
+	if err != nil {
+		return AdminInvitationPage{}, ErrUnavailable
+	}
+	defer rows.Close()
+	items := []AdminInvitationRecord{}
+	for rows.Next() {
+		var item AdminInvitationRecord
+		var cipher []byte
+		var expiry sql.NullTime
+		if err := rows.Scan(&item.ID, &cipher, &item.CodeHint, &item.Status, &item.CreatedAt, &expiry, &item.UsedByAccountID); err != nil {
+			return AdminInvitationPage{}, ErrUnavailable
+		}
+		item.CodeHint = "****" + item.CodeHint
+		if expiry.Valid {
+			value := expiry.Time
+			item.ExpiresAt = &value
+		}
+		if item.Status == StatusActive {
+			plain, err := service.keys.Open("invitation_code_ciphertext", cipher)
+			if err != nil {
+				return AdminInvitationPage{}, ErrUnavailable
+			}
+			item.Code = string(plain)
+		}
+		items = append(items, item)
+	}
+	page := AdminInvitationPage{Invitations: items}
+	if len(items) > query.Limit {
+		last := items[query.Limit-1]
+		page.Invitations = items[:query.Limit]
+		rank := statusRank(last.Status)
+		page.NextCursor = encodeAdminInvitationCursor(adminInvitationCursor{last.CreatedAt, last.ID, rank})
+	}
+	return page, rows.Err()
+}
+
+func encodeAdminInvitationCursor(cursor adminInvitationCursor) string {
+	data, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+func decodeAdminInvitationCursor(value string) (adminInvitationCursor, error) {
+	var cursor adminInvitationCursor
+	data, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || json.Unmarshal(data, &cursor) != nil || cursor.ID <= 0 || cursor.CreatedAt.IsZero() {
+		return cursor, ErrInvalidInput
+	}
+	return cursor, nil
+}
+func statusRank(status string) int {
+	switch status {
+	case StatusActive:
+		return 1
+	case StatusUsed:
+		return 2
+	case StatusRevoked:
+		return 3
+	default:
+		return 4
+	}
+}
+
+func (service *Service) GenerateAdministratorBatch(ctx context.Context, token string, count int, validity string) ([]AdminInvitationRecord, error) {
+	if service == nil || service.administrator == nil || token == "" || count < 1 || count > 50 {
+		return nil, ErrInvalidInput
+	}
+	if err := service.administrator.RequireSession(ctx, token); err != nil {
+		return nil, ErrAuthentication
+	}
+	var ttl time.Duration
+	switch validity {
+	case "7d":
+		ttl = 7 * 24 * time.Hour
+	case "30d":
+		ttl = 30 * 24 * time.Hour
+	case "permanent":
+		ttl = 0
+	default:
+		return nil, ErrInvalidInput
+	}
+	tx, err := service.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	defer tx.Rollback()
+	now := service.now().UTC()
+	items := make([]AdminInvitationRecord, 0, count)
+	for range count {
+		code, err := newInvitationCode(service.keys)
+		if err != nil {
+			return nil, ErrUnavailable
+		}
+		digest := sha256.Sum256([]byte(code))
+		cipher, err := service.keys.Seal("invitation_code_ciphertext", []byte(code))
+		if err != nil {
+			return nil, ErrUnavailable
+		}
+		hint := code[4:]
+		var expiry any
+		var expiryPointer *time.Time
+		if ttl > 0 {
+			value := now.Add(ttl)
+			expiry = value
+			expiryPointer = &value
+		}
+		result, err := tx.ExecContext(ctx, "INSERT INTO invitations (code_hash,code_ciphertext,code_hint,creator_admin_identity_id,status,created_at,expires_at) VALUES (?,?,?,1,'active',?,?)", digest[:], cipher, hint, now, expiry)
+		if err != nil {
+			return nil, ErrUnavailable
+		}
+		id, err := positiveInsertID(result)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, AdminInvitationRecord{ID: id, Code: code, CodeHint: "****" + hint, Status: StatusActive, CreatedAt: now, ExpiresAt: expiryPointer})
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, ErrUnavailable
+	}
+	return items, nil
+}
+
+func (service *Service) RevokeAdministrator(ctx context.Context, token string, id int64) error {
+	if service == nil || service.administrator == nil || token == "" || id <= 0 {
+		return ErrInvalidInput
+	}
+	if err := service.administrator.RequireSession(ctx, token); err != nil {
+		return ErrAuthentication
+	}
+	tx, err := service.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ErrUnavailable
+	}
+	defer tx.Rollback()
+	now := service.now().UTC()
+	result, err := tx.ExecContext(ctx, "UPDATE invitations SET status='revoked',revoked_at=?,code_ciphertext=NULL WHERE id=? AND creator_admin_identity_id=1 AND status='active'", now, id)
+	if err != nil || !oneRow(result) {
+		return ErrInvitationInvalid
+	}
+	if err := insertAudit(ctx, tx, auditEvent{eventType: "invitation_revoked", actor: administratorAuditActor(), invitationID: id}, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return ErrUnavailable
+	}
+	return nil
+}
 
 const (
 	digestSize           = sha256.Size

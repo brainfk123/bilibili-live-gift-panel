@@ -52,9 +52,9 @@ func TestHTTPExposesSixInvitationMethodRoutesWithoutSecretLeakage(t *testing.T) 
 		t.Fatalf("revoke=%d %q id=%d token=%q", revokeResponse.Code, revokeResponse.Body.String(), service.revokeID, service.revokeSession)
 	}
 
-	adminGenerate := serveInvitation(handler, invitationRequest(http.MethodPost, "/api/admin/invitations", `{}`, "admin-cookie"))
-	if adminGenerate.Code != http.StatusCreated || service.generateActor != ActorAdministrator || service.generateSession != "admin-cookie" {
-		t.Fatalf("admin generate=%d %q actor=%q token=%q", adminGenerate.Code, adminGenerate.Body.String(), service.generateActor, service.generateSession)
+	adminGenerate := serveInvitation(handler, invitationRequest(http.MethodPost, "/api/admin/invitations", `{"count":1,"validity":"7d"}`, "admin-cookie"))
+	if adminGenerate.Code != http.StatusCreated || !strings.Contains(adminGenerate.Body.String(), "ABCDEFGH") {
+		t.Fatalf("admin generate=%d %q", adminGenerate.Code, adminGenerate.Body.String())
 	}
 
 	quotaResponse := serveInvitation(handler, invitationRequest(http.MethodPost, "/api/admin/accounts/41/invitation-quota", `{"remainingQuota":5,"reason":"support grant"}`, "admin-cookie"))
@@ -203,7 +203,7 @@ func TestHTTPMutationsUseGlobalPerIPAndHashedCredentialLimits(t *testing.T) {
 		{http.MethodPost, "/api/auth/registration", `{"code":"code-secret","registrationIntent":"intent-secret"}`, ""},
 		{http.MethodPost, "/api/invitations", `{}`, "streamer-secret"},
 		{http.MethodDelete, "/api/invitations/1", "", "streamer-secret"},
-		{http.MethodPost, "/api/admin/invitations", `{}`, "admin-secret"},
+		{http.MethodPost, "/api/admin/invitations", `{"count":1,"validity":"7d"}`, "admin-secret"},
 		{http.MethodPost, "/api/admin/accounts/41/invitation-quota", `{"remainingQuota":1,"reason":"support"}`, "admin-secret"},
 	}
 	for _, test := range tests {
@@ -273,6 +273,19 @@ type fakeHTTPService struct {
 	redeemErr       error
 	redeemCode      string
 	redeemIntent    string
+}
+
+func (service *fakeHTTPService) ListAdministrator(_ context.Context, _ string, _ AdminInvitationQuery) (AdminInvitationPage, error) {
+	service.calls++
+	return AdminInvitationPage{}, nil
+}
+func (service *fakeHTTPService) GenerateAdministratorBatch(_ context.Context, _ string, _ int, _ string) ([]AdminInvitationRecord, error) {
+	service.calls++
+	return []AdminInvitationRecord{{ID: 71, Code: "ABCDEFGH", CodeHint: "****EFGH", Status: StatusActive}}, nil
+}
+func (service *fakeHTTPService) RevokeAdministrator(_ context.Context, _ string, _ int64) error {
+	service.calls++
+	return nil
 }
 
 func (service *fakeHTTPService) Generate(_ context.Context, session string, actor ActorKind) (GeneratedInvitation, error) {

@@ -102,6 +102,58 @@ func TestQuotaAdjustmentIgnoresObsoleteTOTPRenewal(t *testing.T) {
 	}
 }
 
+func TestAdministratorInventoryDecryptsOnlyActiveCodesAndSupportsPermanentBatch(t *testing.T) {
+	now := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+	keys := fixedInvitationKeys(t)
+	cipher, err := keys.Seal("invitation_code_ciphertext", []byte("ABCDEFGH"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("list", func(t *testing.T) {
+		database, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		authorizer := &invitationSensitiveAuthorizer{}
+		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: fixedNow(now), Administrator: authorizer})
+		mock.ExpectQuery("SELECT id,code_ciphertext.*FROM invitations").WithArgs(51).WillReturnRows(sqlmock.NewRows([]string{"id", "cipher", "hint", "status", "created", "expires", "used"}).AddRow(1, cipher, "EFGH", StatusActive, now, now.Add(7*24*time.Hour), 0).AddRow(2, nil, "WXYZ", StatusUsed, now.Add(-time.Hour), now, 52))
+		page, err := service.ListAdministrator(context.Background(), "admin", AdminInvitationQuery{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Invitations) != 2 || page.Invitations[0].Code != "ABCDEFGH" || page.Invitations[1].Code != "" || page.Invitations[1].CodeHint != "****WXYZ" || page.Invitations[1].UsedByAccountID != 52 {
+			t.Fatalf("page=%#v", page)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("permanent batch", func(t *testing.T) {
+		database, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer database.Close()
+		service, _ := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: fixedNow(now), Administrator: &invitationSensitiveAuthorizer{}})
+		mock.ExpectBegin()
+		for index := range 2 {
+			mock.ExpectExec("INSERT INTO invitations").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), fourCharacterHint{}, now, nil).WillReturnResult(sqlmock.NewResult(int64(71+index), 1))
+		}
+		mock.ExpectCommit()
+		items, err := service.GenerateAdministratorBatch(context.Background(), "admin", 2, "permanent")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 2 || items[0].ExpiresAt != nil || items[0].Code == items[1].Code {
+			t.Fatalf("items=%#v", items)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 func TestGenerateDeductsQuotaAtCreation(t *testing.T) {
 	now := time.Date(2026, 8, 16, 18, 0, 0, 0, time.UTC)
 	database, mock, err := sqlmock.New()

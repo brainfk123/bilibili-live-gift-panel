@@ -286,6 +286,8 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("POST /api/invitations", dependencies.Invitation)
 		mux.Handle("DELETE /api/invitations/{id}", dependencies.Invitation)
 		mux.Handle("POST /api/admin/invitations", dependencies.Invitation)
+		mux.Handle("GET /api/admin/invitations", dependencies.Invitation)
+		mux.Handle("DELETE /api/admin/invitations/{id}", dependencies.Invitation)
 		mux.Handle("POST /api/admin/accounts/{id}/invitation-quota", dependencies.Invitation)
 	}
 	if dependencies.Static != nil {

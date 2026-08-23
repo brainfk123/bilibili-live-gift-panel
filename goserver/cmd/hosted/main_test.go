@@ -276,6 +276,8 @@ func TestComposeHostedHTTPMakesAllInvitationRoutesReachableWithSpecificity(t *te
 		{http.MethodPost, "/api/invitations", http.StatusTeapot},
 		{http.MethodDelete, "/api/invitations/71", http.StatusTeapot},
 		{http.MethodPost, "/api/admin/invitations", http.StatusTeapot},
+		{http.MethodGet, "/api/admin/invitations?sort=status&direction=asc", http.StatusTeapot},
+		{http.MethodDelete, "/api/admin/invitations/71", http.StatusTeapot},
 		{http.MethodPost, "/api/admin/accounts/41/invitation-quota", http.StatusTeapot},
 		{http.MethodPost, "/api/auth/session", http.StatusAccepted},
 		{http.MethodPost, "/api/admin/accounts/41/disable", http.StatusAccepted},

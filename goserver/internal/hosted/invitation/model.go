@@ -48,3 +48,21 @@ type Quota struct {
 	AccountID      int64  `json:"accountId"`
 	RemainingQuota uint64 `json:"remainingQuota"`
 }
+
+type AdminInvitationRecord struct {
+	ID              int64      `json:"id"`
+	Code            string     `json:"code,omitempty"`
+	CodeHint        string     `json:"codeHint"`
+	Status          string     `json:"status"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	ExpiresAt       *time.Time `json:"expiresAt"`
+	UsedByAccountID int64      `json:"usedByAccountId,omitempty"`
+}
+type AdminInvitationPage struct {
+	Invitations []AdminInvitationRecord `json:"invitations"`
+	NextCursor  string                  `json:"nextCursor,omitempty"`
+}
+type AdminInvitationQuery struct {
+	Query, Status, Sort, Direction, Cursor string
+	Limit                                  int
+}

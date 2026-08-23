@@ -24,6 +24,9 @@ type invitationHTTPService interface {
 	Revoke(context.Context, string, int64) error
 	AdjustQuota(context.Context, string, int64, uint64, string) (Quota, error)
 	Redeem(context.Context, string, string) (identity.SiteSession, error)
+	ListAdministrator(context.Context, string, AdminInvitationQuery) (AdminInvitationPage, error)
+	GenerateAdministratorBatch(context.Context, string, int, string) ([]AdminInvitationRecord, error)
+	RevokeAdministrator(context.Context, string, int64) error
 }
 
 type HTTPOptions struct {
@@ -67,6 +70,8 @@ func NewHTTPHandler(service invitationHTTPService, options HTTPOptions) (*HTTPHa
 	handler.mux.HandleFunc("POST /api/invitations", handler.generateStreamer)
 	handler.mux.HandleFunc("DELETE /api/invitations/{id}", handler.revoke)
 	handler.mux.HandleFunc("POST /api/admin/invitations", handler.generateAdministrator)
+	handler.mux.HandleFunc("GET /api/admin/invitations", handler.listAdministrator)
+	handler.mux.HandleFunc("DELETE /api/admin/invitations/{id}", handler.revokeAdministrator)
 	handler.mux.HandleFunc("POST /api/admin/accounts/{id}/invitation-quota", handler.adjustQuota)
 	return handler, nil
 }
@@ -125,7 +130,94 @@ func (handler *HTTPHandler) generateStreamer(response http.ResponseWriter, reque
 }
 
 func (handler *HTTPHandler) generateAdministrator(response http.ResponseWriter, request *http.Request) {
-	handler.generate(response, request, ActorAdministrator, "invitation_generate_admin")
+	if !handler.acceptJSONMutation(request) {
+		handler.writeRequestRejection(response, request)
+		return
+	}
+	var body struct {
+		Count    int    `json:"count"`
+		Validity string `json:"validity"`
+	}
+	if !decodeJSON(response, request, &body) {
+		writeError(response, 400, "invalid_request")
+		return
+	}
+	token, ok := sessionToken(request)
+	if !handler.allow(request, "invitation_generate_admin", token) {
+		writeError(response, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
+	if !ok {
+		writeError(response, 401, "authentication_failed")
+		return
+	}
+	items, err := handler.service.GenerateAdministratorBatch(request.Context(), token, body.Count, body.Validity)
+	if err != nil {
+		handler.writeServiceError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusCreated, struct {
+		Invitations []AdminInvitationRecord `json:"invitations"`
+	}{items})
+}
+
+func (handler *HTTPHandler) listAdministrator(response http.ResponseWriter, request *http.Request) {
+	if !hasEmptyBody(response, request) {
+		writeError(response, 400, "invalid_request")
+		return
+	}
+	values := request.URL.Query()
+	for key := range values {
+		if key != "query" && key != "status" && key != "sort" && key != "direction" && key != "cursor" && key != "limit" {
+			writeError(response, 400, "invalid_request")
+			return
+		}
+	}
+	limit := 0
+	var err error
+	if values.Get("limit") != "" {
+		limit, err = strconv.Atoi(values.Get("limit"))
+		if err != nil {
+			writeError(response, 400, "invalid_request")
+			return
+		}
+	}
+	token, ok := sessionToken(request)
+	if !ok {
+		writeError(response, 401, "authentication_failed")
+		return
+	}
+	page, err := handler.service.ListAdministrator(request.Context(), token, AdminInvitationQuery{Query: values.Get("query"), Status: values.Get("status"), Sort: values.Get("sort"), Direction: values.Get("direction"), Cursor: values.Get("cursor"), Limit: limit})
+	if err != nil {
+		handler.writeServiceError(response, err)
+		return
+	}
+	writeJSON(response, 200, page)
+}
+func (handler *HTTPHandler) revokeAdministrator(response http.ResponseWriter, request *http.Request) {
+	if !handler.acceptMutation(request) {
+		writeError(response, 403, "request_rejected")
+		return
+	}
+	if request.URL.RawQuery != "" || !hasEmptyBody(response, request) {
+		writeError(response, 400, "invalid_request")
+		return
+	}
+	id, ok := canonicalPathID(request.PathValue("id"))
+	if !ok {
+		writeError(response, 400, "invalid_request")
+		return
+	}
+	token, ok := sessionToken(request)
+	if !ok {
+		writeError(response, 401, "authentication_failed")
+		return
+	}
+	if err := handler.service.RevokeAdministrator(request.Context(), token, id); err != nil {
+		handler.writeServiceError(response, err)
+		return
+	}
+	response.WriteHeader(204)
 }
 
 func (handler *HTTPHandler) generate(response http.ResponseWriter, request *http.Request, actor ActorKind, operation string) {
