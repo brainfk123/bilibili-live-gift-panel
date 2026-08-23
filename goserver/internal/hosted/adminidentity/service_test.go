@@ -30,6 +30,19 @@ func TestAdminCompositionDoesNotRequireAdministratorBilibiliVerifier(t *testing.
 	}
 }
 
+func TestAdministratorSessionTTLAcceptsThirtyDaysAndRejectsLonger(t *testing.T) {
+	keys, err := security.NewKeyring(1, bytes.Repeat([]byte{0x41}, 32), bytes.Repeat([]byte{0x72}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewService(newMemoryRepository(), keys, &MemorySender{}, ServiceOptions{SessionTTL: 30 * 24 * time.Hour}); err != nil {
+		t.Fatalf("NewService(30 days) error = %v", err)
+	}
+	if _, err := NewService(newMemoryRepository(), keys, &MemorySender{}, ServiceOptions{SessionTTL: 30*24*time.Hour + time.Nanosecond}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("NewService(over 30 days) error = %v, want ErrInvalidInput", err)
+	}
+}
+
 func TestInitializeUsesEmailAndRandomHandoffTokenWithoutCreatingSession(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 0, 0, 0, time.UTC)
 	repository := newMemoryRepository()
@@ -153,7 +166,7 @@ func TestIdentityRecordAllowsOnlyAbsentOrCompleteLegacyUIDPair(t *testing.T) {
 	}
 }
 
-func TestEmailLoginSendsOneShortCodeAndCreatesOneSevenDaySessionWithoutTOTP(t *testing.T) {
+func TestEmailLoginSendsOneShortCodeAndCreatesOneThirtyDaySessionWithoutTOTP(t *testing.T) {
 	now := time.Date(2026, 8, 16, 10, 12, 0, 0, time.UTC)
 	repository := initializedMemoryRepository(t, now)
 	sender := &MemorySender{}
@@ -172,7 +185,7 @@ func TestEmailLoginSendsOneShortCodeAndCreatesOneSevenDaySessionWithoutTOTP(t *t
 		t.Fatalf("email omitted six-digit code: %q", messages[0].Text)
 	}
 	login, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code)
-	if err != nil || login.Token == "" || !login.ExpiresAt.Equal(now.Add(7*24*time.Hour)) {
+	if err != nil || login.Token == "" || !login.ExpiresAt.Equal(now.Add(30*24*time.Hour)) {
 		t.Fatalf("VerifyEmailLogin() = %#v, %v", login, err)
 	}
 	if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code); !errors.Is(err, ErrAuthenticationFailed) {

@@ -237,9 +237,9 @@ func TestHTTPAdminSessionProbeIsEmptyAndDistinguishesUnavailable(t *testing.T) {
 	}
 }
 
-func TestHTTPEmailLoginReturnsOnlyChallengeThenSetsSevenDayCookie(t *testing.T) {
+func TestHTTPEmailLoginReturnsOnlyChallengeThenSetsThirtyDayCookie(t *testing.T) {
 	now := time.Date(2026, 8, 16, 13, 0, 0, 0, time.UTC)
-	service := &adminHTTPService{emailChallenge: EmailLoginChallenge{ChallengeID: "email-proof", ExpiresAt: now.Add(5 * time.Minute)}, emailLogin: LoginResult{Token: "email-session", ExpiresAt: now.Add(7 * 24 * time.Hour)}}
+	service := &adminHTTPService{emailChallenge: EmailLoginChallenge{ChallengeID: "email-proof", ExpiresAt: now.Add(5 * time.Minute)}, emailLogin: LoginResult{Token: "email-session", ExpiresAt: now.Add(30 * 24 * time.Hour)}}
 	handler := newTestHTTPHandlerAt(t, service, now)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, mutationRequest(http.MethodPost, "/api/admin/auth/email/challenges", `{}`))
@@ -255,7 +255,7 @@ func TestHTTPEmailLoginReturnsOnlyChallengeThenSetsSevenDayCookie(t *testing.T) 
 		t.Fatalf("login response=%d %q args=%q %q", response.Code, response.Body.String(), service.emailLoginChallenge, service.emailLoginCode)
 	}
 	cookies := response.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Value != "email-session" || !cookies[0].HttpOnly || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteLaxMode || !cookies[0].Expires.Equal(now.Add(7*24*time.Hour)) {
+	if len(cookies) != 1 || cookies[0].Value != "email-session" || !cookies[0].HttpOnly || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteLaxMode || !cookies[0].Expires.Equal(now.Add(30*24*time.Hour)) || cookies[0].MaxAge != 30*24*60*60 {
 		t.Fatalf("cookies=%#v", cookies)
 	}
 }

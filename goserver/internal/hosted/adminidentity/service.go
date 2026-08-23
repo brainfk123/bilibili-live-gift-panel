@@ -26,7 +26,7 @@ import (
 const (
 	RecentTOTPWindow                     = 10 * time.Minute
 	defaultEmailChallengeTTL             = 5 * time.Minute
-	defaultSessionTTL                    = 7 * 24 * time.Hour
+	DefaultAdministratorSessionTTL       = 30 * 24 * time.Hour
 	emailCodeLength                      = 6
 	emailCodeAttempts                    = 5
 	emailLoginSessionVerificationTimeout = 2 * time.Second
@@ -1314,12 +1314,12 @@ func NewService(repository Repository, keys security.Keyring, sender MailSender,
 		options.EmailChallengeTTL = defaultEmailChallengeTTL
 	}
 	if options.SessionTTL == 0 {
-		options.SessionTTL = defaultSessionTTL
+		options.SessionTTL = DefaultAdministratorSessionTTL
 	}
 	if options.HandoffTTL == 0 {
 		options.HandoffTTL = defaultHandoffTTL
 	}
-	if options.EmailChallengeTTL <= 0 || options.EmailChallengeTTL > defaultEmailChallengeTTL || options.SessionTTL <= 0 || options.SessionTTL > 7*24*time.Hour || options.HandoffTTL <= 0 || options.HandoffTTL > 24*time.Hour || len(options.Issuer) > 128 {
+	if options.EmailChallengeTTL <= 0 || options.EmailChallengeTTL > defaultEmailChallengeTTL || options.SessionTTL <= 0 || options.SessionTTL > DefaultAdministratorSessionTTL || options.HandoffTTL <= 0 || options.HandoffTTL > 24*time.Hour || len(options.Issuer) > 128 {
 		return nil, ErrInvalidInput
 	}
 	return &Service{

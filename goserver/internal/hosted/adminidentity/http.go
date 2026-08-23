@@ -390,6 +390,8 @@ func adminCookie(value string, expiresAt time.Time) *http.Cookie {
 	}
 	if value == "" {
 		cookie.MaxAge = -1
+	} else {
+		cookie.MaxAge = int(DefaultAdministratorSessionTTL / time.Second)
 	}
 	return cookie
 }
