@@ -21,13 +21,15 @@ const (
 // Invitation is the secret-free history representation. CodeHint contains a
 // fixed mask plus the persisted four-character suffix, never a complete code.
 type Invitation struct {
-	ID        int64      `json:"id"`
-	CodeHint  string     `json:"codeHint"`
-	Status    string     `json:"status"`
-	CreatedAt time.Time  `json:"createdAt"`
-	ExpiresAt time.Time  `json:"expiresAt"`
-	RevokedAt *time.Time `json:"revokedAt,omitempty"`
-	UsedAt    *time.Time `json:"usedAt,omitempty"`
+	ID              int64      `json:"id"`
+	CodeHint        string     `json:"codeHint"`
+	Status          string     `json:"status"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	ExpiresAt       time.Time  `json:"expiresAt"`
+	RevokedAt       *time.Time `json:"revokedAt,omitempty"`
+	UsedAt          *time.Time `json:"usedAt,omitempty"`
+	CodeCiphertext  []byte     `json:"-"`
+	UsedByAccountID int64      `json:"-"`
 }
 
 // GeneratedInvitation includes the complete code exactly once, after commit.

@@ -2,6 +2,7 @@ package invitation
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -81,6 +82,10 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 		return GeneratedInvitation{}, ErrUnavailable
 	}
 	codeDigest := sha256.Sum256([]byte(code))
+	codeCiphertext, err := service.keys.Seal("invitation_code_ciphertext", []byte(code))
+	if err != nil {
+		return GeneratedInvitation{}, ErrUnavailable
+	}
 	hint := code[len(code)-4:]
 
 	var tokenHash []byte
@@ -133,8 +138,8 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 			return GeneratedInvitation{}, ErrQuotaExhausted
 		}
 		result, err := transaction.ExecContext(ctx,
-			"INSERT INTO invitations (code_hash, code_hint, creator_account_id, status, created_at, expires_at) VALUES (?, ?, ?, 'active', ?, ?)",
-			codeDigest[:], hint, authorization.accountID, now, expiresAt,
+			"INSERT INTO invitations (code_hash, code_ciphertext, code_hint, creator_account_id, status, created_at, expires_at) VALUES (?, ?, ?, ?, 'active', ?, ?)",
+			codeDigest[:], codeCiphertext, hint, authorization.accountID, now, expiresAt,
 		)
 		if err != nil {
 			return GeneratedInvitation{}, ErrUnavailable
@@ -162,8 +167,8 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 		now = service.now().UTC()
 		expiresAt = now.Add(service.invitationTTL)
 		result, err := transaction.ExecContext(ctx,
-			"INSERT INTO invitations (code_hash, code_hint, creator_admin_identity_id, status, created_at, expires_at) VALUES (?, ?, 1, 'active', ?, ?)",
-			codeDigest[:], hint, now, expiresAt,
+			"INSERT INTO invitations (code_hash, code_ciphertext, code_hint, creator_admin_identity_id, status, created_at, expires_at) VALUES (?, ?, ?, 1, 'active', ?, ?)",
+			codeDigest[:], codeCiphertext, hint, now, expiresAt,
 		)
 		if err != nil {
 			return GeneratedInvitation{}, ErrUnavailable
@@ -188,19 +193,15 @@ func (service *Service) Generate(ctx context.Context, sessionToken string, actor
 	}, nil
 }
 
-func newInvitationCode(keys security.Keyring) (string, error) {
-	code := make([]byte, 0, invitationCodeLength)
-	for len(code) < invitationCodeLength {
-		token, err := keys.NewToken()
-		if err != nil {
-			return "", err
-		}
-		for index := 0; index < len(token) && len(code) < invitationCodeLength; index++ {
-			character := token[index]
-			if (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') {
-				code = append(code, character)
-			}
-		}
+func newInvitationCode(_ security.Keyring) (string, error) {
+	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	code := make([]byte, invitationCodeLength)
+	random := make([]byte, invitationCodeLength)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	for index, value := range random {
+		code[index] = alphabet[int(value)%len(alphabet)]
 	}
 	return string(code), nil
 }
@@ -313,7 +314,7 @@ func (service *Service) Revoke(ctx context.Context, streamerSession string, invi
 	if status != StatusActive || !now.Before(expiresAt) {
 		return ErrInvitationInvalid
 	}
-	result, err := transaction.ExecContext(ctx, "UPDATE invitations SET status = 'revoked', revoked_at = ? WHERE id = ? AND status = 'active'", now, invitationID)
+	result, err := transaction.ExecContext(ctx, "UPDATE invitations SET status = 'revoked', revoked_at = ?, code_ciphertext = NULL WHERE id = ? AND status = 'active'", now, invitationID)
 	if err != nil || !oneRow(result) {
 		return ErrUnavailable
 	}
@@ -355,7 +356,7 @@ func (service *Service) Expire(ctx context.Context, invitationID int64) error {
 	if status != StatusActive || now.Before(expiresAt) {
 		return ErrInvitationInvalid
 	}
-	result, err := transaction.ExecContext(ctx, "UPDATE invitations SET status = 'expired' WHERE id = ? AND status = 'active'", invitationID)
+	result, err := transaction.ExecContext(ctx, "UPDATE invitations SET status = 'expired', code_ciphertext = NULL WHERE id = ? AND status = 'active'", invitationID)
 	if err != nil || !oneRow(result) {
 		return ErrUnavailable
 	}
@@ -396,7 +397,7 @@ func (service *Service) List(ctx context.Context, streamerSession string) (Invit
 		return InvitationList{}, err
 	}
 	accountID := authorization.accountID
-	if _, err := transaction.ExecContext(ctx, "UPDATE invitations SET status = 'expired' WHERE creator_account_id = ? AND status = 'active' AND expires_at <= ?", accountID, now); err != nil {
+	if _, err := transaction.ExecContext(ctx, "UPDATE invitations SET status = 'expired', code_ciphertext = NULL WHERE creator_account_id = ? AND status = 'active' AND expires_at <= ?", accountID, now); err != nil {
 		return InvitationList{}, ErrUnavailable
 	}
 	var remaining uint64
@@ -522,7 +523,7 @@ func (service *Service) Redeem(ctx context.Context, code, registrationIntent str
 	if result, err = transaction.ExecContext(ctx, "INSERT INTO site_sessions (account_id, token_hash, credential_epoch, created_at, expires_at) VALUES (?, ?, 1, ?, ?)", accountID, siteHash, now, sessionExpiresAt); err != nil || !oneRow(result) {
 		return identity.SiteSession{}, ErrUnavailable
 	}
-	if result, err = transaction.ExecContext(ctx, "UPDATE invitations SET status = 'used', used_at = ?, invited_account_id = ? WHERE id = ? AND status = 'active'", now, accountID, invitationID); err != nil || !oneRow(result) {
+	if result, err = transaction.ExecContext(ctx, "UPDATE invitations SET status = 'used', used_at = ?, invited_account_id = ?, code_ciphertext = NULL WHERE id = ? AND status = 'active'", now, accountID, invitationID); err != nil || !oneRow(result) {
 		return identity.SiteSession{}, ErrUnavailable
 	}
 	if err := insertAudit(ctx, transaction, auditEvent{

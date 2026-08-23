@@ -28,13 +28,16 @@ func TestAdministratorInvitationGenerationUsesSessionOnly(t *testing.T) {
 	authorizedAt := time.Date(2026, 8, 21, 14, 0, 0, 0, time.UTC)
 	clock := &invitationTimeSequence{values: []time.Time{authorizedAt}}
 	authorizer := &invitationSensitiveAuthorizer{}
-	service, err := NewService(database, fixedInvitationKeys(t), &fakeIntentSource{}, ServiceOptions{Now: clock.Now, Administrator: authorizer})
+	keys := fixedInvitationKeys(t)
+	service, err := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: clock.Now, Administrator: authorizer})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitations (code_hash, code_hint, creator_admin_identity_id, status, created_at, expires_at) VALUES (?, ?, 1, 'active', ?, ?)")).
+	ciphertext := &ciphertextCapture{}
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitations (code_hash, code_ciphertext, code_hint, creator_admin_identity_id, status, created_at, expires_at) VALUES (?, ?, ?, 1, 'active', ?, ?)")).
+		WithArgs(sqlmock.AnyArg(), ciphertext, fourCharacterHint{}, authorizedAt, authorizedAt.Add(7*24*time.Hour)).
 		WillReturnResult(sqlmock.NewResult(72, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, event_data, created_at) VALUES (?, 1, ?, ?)")).
 		WithArgs("invitation_generated", secretFreeJSON{}, authorizedAt).
@@ -44,6 +47,13 @@ func TestAdministratorInvitationGenerationUsesSessionOnly(t *testing.T) {
 	generated, err := service.Generate(context.Background(), "administrator-session", ActorAdministrator)
 	if err != nil || generated.ID != 72 || generated.Code == "" {
 		t.Fatalf("Generate(admin) = %#v, %v", generated, err)
+	}
+	opened, err := keys.Open("invitation_code_ciphertext", ciphertext.value)
+	if err != nil || string(opened) != generated.Code || bytes.Contains(ciphertext.value, []byte(generated.Code)) {
+		t.Fatalf("stored invitation ciphertext was not purpose-separated encryption")
+	}
+	if matched, _ := regexp.MatchString(`^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$`, generated.Code); !matched {
+		t.Fatalf("generated code = %q", generated.Code)
 	}
 	if authorizer.authorizeCalls != 1 || authorizer.renewCalls != 0 {
 		t.Fatalf("session calls=%d sensitive renew calls=%d", authorizer.authorizeCalls, authorizer.renewCalls)
@@ -111,8 +121,8 @@ func TestGenerateDeductsQuotaAtCreation(t *testing.T) {
 	expectStreamerAuthorization(mock, sessionHash, 41, 3, now)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT remaining_quota FROM invitation_quotas WHERE account_id = ? FOR UPDATE")).
 		WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"remaining_quota"}).AddRow(uint64(2)))
-	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitations (code_hash, code_hint, creator_account_id, status, created_at, expires_at) VALUES (?, ?, ?, 'active', ?, ?)")).
-		WithArgs(hashOnlyArgument{forbidden: "streamer-session"}, fourCharacterHint{}, int64(41), now, now.Add(7*24*time.Hour)).
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitations (code_hash, code_ciphertext, code_hint, creator_account_id, status, created_at, expires_at) VALUES (?, ?, ?, ?, 'active', ?, ?)")).
+		WithArgs(hashOnlyArgument{forbidden: "streamer-session"}, sqlmock.AnyArg(), fourCharacterHint{}, int64(41), now, now.Add(7*24*time.Hour)).
 		WillReturnResult(sqlmock.NewResult(71, 1))
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE invitation_quotas SET remaining_quota = ?, updated_at = ? WHERE account_id = ?")).
 		WithArgs(uint64(1), now, int64(41)).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -159,8 +169,8 @@ func TestAdminGenerationDoesNotConsumeQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitations (code_hash, code_hint, creator_admin_identity_id, status, created_at, expires_at) VALUES (?, ?, 1, 'active', ?, ?)")).
-		WithArgs(hashOnlyArgument{forbidden: "admin-session"}, fourCharacterHint{}, now, now.Add(7*24*time.Hour)).
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO invitations (code_hash, code_ciphertext, code_hint, creator_admin_identity_id, status, created_at, expires_at) VALUES (?, ?, ?, 1, 'active', ?, ?)")).
+		WithArgs(hashOnlyArgument{forbidden: "admin-session"}, sqlmock.AnyArg(), fourCharacterHint{}, now, now.Add(7*24*time.Hour)).
 		WillReturnResult(sqlmock.NewResult(72, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_admin_identity_id, event_data, created_at) VALUES (?, 1, ?, ?)")).
 		WithArgs("invitation_generated", secretFreeJSON{}, now).WillReturnResult(sqlmock.NewResult(92, 1))
@@ -190,7 +200,7 @@ func TestRevokeAndExpireNeverRefundQuota(t *testing.T) {
 		expectStreamerAuthorization(mock, sessionHash, 41, 3, now)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT status, expires_at FROM invitations WHERE id = ? AND creator_account_id = ? FOR UPDATE")).
 			WithArgs(int64(73), int64(41)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at"}).AddRow(StatusActive, now.Add(time.Hour)))
-		mock.ExpectExec(regexp.QuoteMeta("UPDATE invitations SET status = 'revoked', revoked_at = ? WHERE id = ? AND status = 'active'")).
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE invitations SET status = 'revoked', revoked_at = ?, code_ciphertext = NULL WHERE id = ? AND status = 'active'")).
 			WithArgs(now, int64(73)).WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_account_id, event_data, created_at) VALUES (?, ?, ?, ?)")).
 			WithArgs("invitation_revoked", int64(41), secretFreeJSON{}, now).WillReturnResult(sqlmock.NewResult(93, 1))
@@ -213,7 +223,7 @@ func TestRevokeAndExpireNeverRefundQuota(t *testing.T) {
 		mock.ExpectBegin()
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT status, expires_at FROM invitations WHERE id = ? FOR UPDATE")).
 			WithArgs(int64(74)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at"}).AddRow(StatusActive, now))
-		mock.ExpectExec(regexp.QuoteMeta("UPDATE invitations SET status = 'expired' WHERE id = ? AND status = 'active'")).
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE invitations SET status = 'expired', code_ciphertext = NULL WHERE id = ? AND status = 'active'")).
 			WithArgs(int64(74)).WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, event_data, created_at) VALUES (?, ?, ?)")).
 			WithArgs("invitation_expired", secretFreeJSON{}, now).WillReturnResult(sqlmock.NewResult(94, 1))
@@ -239,7 +249,7 @@ func TestRevokedInvitationRemainsListable(t *testing.T) {
 	sessionHash, _ := keys.HashToken("site_session", []byte("streamer-session"))
 	mock.ExpectBegin()
 	expectStreamerAuthorization(mock, sessionHash, 41, 3, now)
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE invitations SET status = 'expired' WHERE creator_account_id = ? AND status = 'active' AND expires_at <= ?")).
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE invitations SET status = 'expired', code_ciphertext = NULL WHERE creator_account_id = ? AND status = 'active' AND expires_at <= ?")).
 		WithArgs(int64(41), now).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT remaining_quota FROM invitation_quotas WHERE account_id = ?")).
 		WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"remaining_quota"}).AddRow(uint64(1)))
@@ -353,7 +363,7 @@ func TestRedeemCommitsAccountBindingQuotaSessionInviteAndIntentTogether(t *testi
 		WithArgs(int64(51), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO site_sessions (account_id, token_hash, credential_epoch, created_at, expires_at) VALUES (?, ?, 1, ?, ?)")).
 		WithArgs(int64(51), hashOnlyArgument{forbidden: "complete-invitation-code"}, now, now.Add(24*time.Hour)).WillReturnResult(sqlmock.NewResult(101, 1))
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE invitations SET status = 'used', used_at = ?, invited_account_id = ? WHERE id = ? AND status = 'active'")).
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE invitations SET status = 'used', used_at = ?, invited_account_id = ?, code_ciphertext = NULL WHERE id = ? AND status = 'active'")).
 		WithArgs(now, int64(51), int64(75)).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?)")).
 		WithArgs("invitation_redeemed", int64(51), secretFreeJSON{forbidden: []string{"complete-invitation-code", "90000030"}}, now).
@@ -725,7 +735,7 @@ func TestTransactionExpiryChecksUseFreshTimeAfterRelevantLocks(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT status, expires_at FROM invitations WHERE id = ? FOR UPDATE")).
 			WithArgs(markingArgument{value: int64(74), marker: marker}).
 			WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at"}).AddRow(StatusActive, after))
-		mock.ExpectExec(regexp.QuoteMeta("UPDATE invitations SET status = 'expired' WHERE id = ? AND status = 'active'")).
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE invitations SET status = 'expired', code_ciphertext = NULL WHERE id = ? AND status = 'active'")).
 			WithArgs(int64(74)).WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, event_data, created_at) VALUES (?, ?, ?)")).
 			WithArgs("invitation_expired", secretFreeJSON{}, after).WillReturnResult(sqlmock.NewResult(94, 1))
@@ -851,7 +861,7 @@ func TestConcurrentRedeemHasExactlyOneWinner(t *testing.T) {
 		WithArgs(int64(52), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO site_sessions (account_id, token_hash, credential_epoch, created_at, expires_at) VALUES (?, ?, 1, ?, ?)")).
 		WithArgs(int64(52), sqlmock.AnyArg(), now, now.Add(24*time.Hour)).WillReturnResult(sqlmock.NewResult(103, 1))
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE invitations SET status = 'used', used_at = ?, invited_account_id = ? WHERE id = ? AND status = 'active'")).
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE invitations SET status = 'used', used_at = ?, invited_account_id = ?, code_ciphertext = NULL WHERE id = ? AND status = 'active'")).
 		WithArgs(now, int64(52), int64(88)).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?)")).
 		WithArgs("invitation_redeemed", int64(52), sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(104, 1))
@@ -992,7 +1002,7 @@ func expectRedeemThroughAuditWithExpiry(mock sqlmock.Sqlmock, reservation *fakeR
 		WithArgs(int64(51), now).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO site_sessions (account_id, token_hash, credential_epoch, created_at, expires_at) VALUES (?, ?, 1, ?, ?)")).
 		WithArgs(int64(51), hashOnlyArgument{forbidden: code}, now, now.Add(24*time.Hour)).WillReturnResult(sqlmock.NewResult(101, 1))
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE invitations SET status = 'used', used_at = ?, invited_account_id = ? WHERE id = ? AND status = 'active'")).
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE invitations SET status = 'used', used_at = ?, invited_account_id = ?, code_ciphertext = NULL WHERE id = ? AND status = 'active'")).
 		WithArgs(now, int64(51), int64(75)).WillReturnResult(sqlmock.NewResult(0, 1))
 	audit := mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?)")).
 		WithArgs("invitation_redeemed", int64(51), secretFreeJSON{forbidden: []string{code, "encrypted-uid"}}, now)
@@ -1042,6 +1052,17 @@ type invitationSensitiveAuthorizer struct {
 	renewedAt      time.Time
 	authorizeTx    *sql.Tx
 	renewTx        *sql.Tx
+}
+
+type ciphertextCapture struct{ value []byte }
+
+func (capture *ciphertextCapture) Match(value driver.Value) bool {
+	bytes, ok := value.([]byte)
+	if !ok {
+		return false
+	}
+	capture.value = append([]byte(nil), bytes...)
+	return len(bytes) > 0
 }
 
 func (authorizer *invitationSensitiveAuthorizer) RequireSession(_ context.Context, _ string) error {

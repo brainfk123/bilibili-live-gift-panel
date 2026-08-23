@@ -86,8 +86,8 @@ func TestProductionAdminEmailIdentityMigrationMakesLegacyUIDNullable(t *testing.
 		"0007_runtime_ownership":            "a56cd452a649bd928b5a48a3e8ffacca15fd889eab5161fb7bc96d782be9caa4",
 		"0008_runtime_dedupe_cleanup_index": "7d69109e076d085e0988e0c196df8480d1dcd8a03e60495f6302e382ea94e064",
 	}
-	if len(migrations) != 10 {
-		t.Fatalf("migration count = %d, want 10", len(migrations))
+	if len(migrations) != 11 {
+		t.Fatalf("migration count = %d, want 11", len(migrations))
 	}
 	var emailIdentity migration
 	for _, item := range migrations {
@@ -115,6 +115,27 @@ func TestProductionAdminEmailIdentityMigrationMakesLegacyUIDNullable(t *testing.
 	want := "ALTER TABLE admin_identity MODIFY COLUMN uid_ciphertext VARBINARY(512) NULL, MODIFY COLUMN uid_lookup BINARY(32) NULL"
 	if got != want {
 		t.Fatalf("0009 statement = %q, want %q", got, want)
+	}
+}
+
+func TestRecoverableAdministratorInvitationMigrationIsNullableAndIdempotent(t *testing.T) {
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sqlText string
+	for _, migration := range migrations {
+		if migration.version == "0011_recoverable_admin_invitations" {
+			sqlText = strings.Join(strings.Fields(string(migration.contents)), " ")
+		}
+	}
+	if sqlText == "" {
+		t.Fatal("0011 migration is missing")
+	}
+	for _, required := range []string{"ADD COLUMN IF NOT EXISTS code_ciphertext VARBINARY(512) NULL", "MODIFY COLUMN expires_at TIMESTAMP(6) NULL"} {
+		if !strings.Contains(sqlText, required) {
+			t.Fatalf("0011 missing %q", required)
+		}
 	}
 }
 
