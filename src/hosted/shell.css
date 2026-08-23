@@ -440,6 +440,10 @@ select {
   font-size: 1.15rem;
 }
 
+.hosted-admin-menu-trigger {
+  display: none;
+}
+
 .hosted-admin-content {
   width: min(100% - 3rem, 70rem);
   margin: 0 auto;
@@ -546,27 +550,43 @@ select {
   }
 
   .hosted-admin-sidebar {
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    flex-direction: row;
-    gap: 0.35rem;
-    padding: 0.65rem;
-    overflow-x: auto;
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 4;
+    width: min(18rem, 84vw);
+    padding: 1.25rem 1rem;
+    overflow-y: auto;
+    box-shadow: 1rem 0 2.5rem rgb(10 21 38 / 30%);
+    transform: translateX(-105%);
+    transition: transform 160ms ease;
   }
 
-  .hosted-admin-sidebar::before {
-    display: none;
+  .hosted-admin-sidebar[data-open="true"] {
+    transform: translateX(0);
   }
 
   .hosted-admin-sidebar button {
-    width: auto;
-    flex: 0 0 auto;
+    width: 100%;
   }
 
   .hosted-admin-header {
+    justify-content: flex-start;
+    gap: 0.75rem;
     min-height: 3.75rem;
     padding: 0 1rem;
+  }
+
+  .hosted-admin-menu-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.5rem;
+    padding: 0.55rem 0.75rem;
+    color: #fff;
+    font-weight: 700;
+    background: var(--admin-blue);
+    border: 0;
+    border-radius: 0.5rem;
   }
 
   .hosted-admin-content {
@@ -577,6 +597,10 @@ select {
   .hosted-admin-card-grid {
     grid-template-columns: 1fr;
   }
+}
+
+@media (max-width: 720px) and (prefers-reduced-motion: reduce) {
+  .hosted-admin-sidebar { transition: none; }
 }
 
 @media (max-width: 480px) {

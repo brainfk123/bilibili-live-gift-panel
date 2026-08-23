@@ -1,10 +1,9 @@
-export type AdminSection = 'overview' | 'accounts' | 'invitations' | 'bili-service' | 'obs' | 'security';
+export type AdminSection = 'overview' | 'accounts' | 'invitations' | 'bili-service' | 'settings';
 
 export const adminSections: ReadonlyArray<{ id: AdminSection; label: string }> = Object.freeze([
-  { id: 'overview', label: '总览' },
-  { id: 'accounts', label: '账号' },
-  { id: 'invitations', label: '邀请' },
-  { id: 'bili-service', label: '服务账号' },
-  { id: 'obs', label: 'OBS' },
-  { id: 'security', label: '安全与恢复' },
+  { id: 'overview', label: '运营总览' },
+  { id: 'accounts', label: '主播账号' },
+  { id: 'invitations', label: '邀请码' },
+  { id: 'bili-service', label: 'B站服务账号' },
+  { id: 'settings', label: '系统设置' },
 ]);

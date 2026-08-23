@@ -56,8 +56,8 @@ describe('administrator section lifetime fence', () => {
     const root = new Element('div', document);
     const mounted = mountAdminView(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountAdminView>[1]);
 
-    await vi.waitFor(() => expect(button(root, '邀请')).toBeDefined());
-    button(root, '邀请').listeners.get('click')?.();
+    await vi.waitFor(() => expect(button(root, '邀请码')).toBeDefined());
+    button(root, '邀请码').listeners.get('click')?.();
     await vi.waitFor(() => expect(button(root, '生成不限额度邀请码')).toBeDefined());
     button(root, '生成不限额度邀请码').listeners.get('click')?.();
     await vi.waitFor(() => expect(descendants(root).some((element) => element.tagName === 'dialog')).toBe(true));
@@ -89,13 +89,13 @@ describe('administrator section lifetime fence', () => {
     const root = new Element('div', document);
     const mounted = mountAdminView(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountAdminView>[1]);
 
-    await vi.waitFor(() => expect(button(root, '账号')).toBeDefined());
-    button(root, '账号').listeners.get('click')?.();
+    await vi.waitFor(() => expect(button(root, '主播账号')).toBeDefined());
+    button(root, '主播账号').listeners.get('click')?.();
     await vi.waitFor(() => expect(button(root, '停用账号')).toBeDefined());
     button(root, '停用账号').listeners.get('click')?.();
     await vi.waitFor(() => expect(api.disableAccount).toHaveBeenCalledTimes(1));
 
-    button(root, '服务账号').listeners.get('click')?.();
+    button(root, 'B站服务账号').listeners.get('click')?.();
     await vi.waitFor(() => expect(button(root, '创建服务账号验证')).toBeDefined());
     resolveDisable();
     await disablePending;
@@ -122,12 +122,12 @@ describe('administrator section lifetime fence', () => {
     const root = new Element('div', document);
     const mounted = mountAdminView(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountAdminView>[1]);
 
-    await vi.waitFor(() => expect(button(root, '账号')).toBeDefined());
-    button(root, '账号').listeners.get('click')?.();
+    await vi.waitFor(() => expect(button(root, '主播账号')).toBeDefined());
+    button(root, '主播账号').listeners.get('click')?.();
     await vi.waitFor(() => expect(button(root, '停用账号')).toBeDefined());
     button(root, '停用账号').listeners.get('click')?.();
     await vi.waitFor(() => expect(api.disableAccount).toHaveBeenCalledTimes(1));
-    button(root, '服务账号').listeners.get('click')?.();
+    button(root, 'B站服务账号').listeners.get('click')?.();
     await vi.waitFor(() => expect(button(root, '创建服务账号验证')).toBeDefined());
     rejectDisable(new HostedAPIError('recent_totp_required', 403));
     await disablePending.catch(() => undefined);

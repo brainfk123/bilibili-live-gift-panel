@@ -297,7 +297,7 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
         if (section === 'overview') {
           title.textContent = '运行总览'; intro.textContent = '按业务域进入操作页，避免在同一长列表中误操作。';
           const grid = document.createElement('div'); grid.className = 'hosted-admin-card-grid';
-          for (const [target, heading, detail] of [['accounts', '账号管理', '停用、启用与邀请码额度调整'], ['invitations', '邀请管理', '生成一次性管理员邀请码'], ['bili-service', '服务账号', '检查或替换 B 站服务凭据'], ['obs', 'OBS 凭据', '按账号签发新的 OBS 访问地址'], ['security', '安全与恢复', '恢复附件、恢复码与身份重置']] as const) {
+          for (const [target, heading, detail] of [['accounts', '主播账号', '账号状态、房间、额度与 OBS'], ['invitations', '邀请码', '创建和管理注册邀请码'], ['bili-service', 'B站服务账号', '检查或替换 B 站服务凭据'], ['settings', '系统设置', '管理员登录、恢复与诊断']] as const) {
             const card = document.createElement('button'); card.type = 'button'; card.className = 'hosted-admin-card hosted-admin-card-link'; card.setAttribute('aria-label', `进入${heading}`); const h3 = document.createElement('h3'); h3.textContent = heading; const p = document.createElement('p'); p.textContent = detail; card.append(h3, p); card.addEventListener('click', () => navigate(target)); grid.append(card);
           }
           host.append(grid);
@@ -345,15 +345,8 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
           host.append(recent.element, card);
         }
 
-        if (section === 'obs') {
-          title.textContent = 'OBS 凭据'; intro.textContent = '重置后旧地址立即失效，新地址只显示一次。';
-          const recent = recentControl(); const [accountLabel, account] = labelledInput(document, '账号 ID'); account.inputMode = 'numeric'; const card = document.createElement('section'); card.className = 'hosted-admin-card hosted-admin-danger';
-          card.append(accountLabel, button(document, '重置 OBS 凭据', () => recent.guarded(async () => { await adminSecretFlow.run(async () => { const issued = await api.issueOBSCredential(Number(account.value)); if (!isCurrentSection()) throw unavailable(); return { title: 'OBS 地址仅显示一次', value: issued.url, copyLabel: '复制 OBS 地址' }; }); })));
-          host.append(recent.element, card);
-        }
-
-        if (section === 'security') {
-          title.textContent = '安全与恢复'; intro.textContent = '恢复资料属于最高敏感操作，完成后页面会清除一次性内容。';
+        if (section === 'settings') {
+          title.textContent = '系统设置'; intro.textContent = '管理管理员登录、恢复资料与诊断。';
           const recent = recentControl(); const card = document.createElement('section'); card.className = 'hosted-admin-card hosted-admin-danger';
           card.append(
             button(document, '发送新的加密恢复附件', () => recent.guarded(async () => { await adminSecretFlow.run(async () => { const result = await api.sendRecoveryArchive(); if (!isCurrentSection()) throw unavailable(); return { title: '附件已发送到管理员邮箱', value: result.recoveryPassword, copyLabel: '复制解密密码' }; }); })),
@@ -368,7 +361,7 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
 
   const closeRecovery = (): void => {
     const current = recoveryFlow; recoveryFlow = undefined; clearRecoveryPanel(); current?.close();
-    activeSection = 'security'; renderDashboard();
+    activeSection = 'settings'; renderDashboard();
   };
 
   const renderRecovery = (state: RecoveryViewState): void => {

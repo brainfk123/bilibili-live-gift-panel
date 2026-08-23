@@ -4,13 +4,14 @@ import { mountAdminShell } from '../src/hosted/admin/shell';
 
 class Element {
   children: Element[] = []; textContent = ''; className = ''; type = ''; disabled = false;
-  attributes = new Map<string, string>(); listeners = new Map<string, () => void>();
+  attributes = new Map<string, string>(); listeners = new Map<string, (event?: { key?: string; shiftKey?: boolean; preventDefault?(): void }) => void>();
   constructor(readonly tagName: string, readonly ownerDocument: Doc) {}
   append(...nodes: Element[]) { this.children.push(...nodes); }
   replaceChildren(...nodes: Element[]) { this.children = nodes; }
   setAttribute(name: string, value: string) { this.attributes.set(name, value); }
   removeAttribute(name: string) { this.attributes.delete(name); }
-  addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); }
+  addEventListener(name: string, listener: (event?: { key?: string; shiftKey?: boolean; preventDefault?(): void }) => void) { this.listeners.set(name, listener); }
+  removeEventListener(name: string) { this.listeners.delete(name); }
   focus() { this.ownerDocument.activeElement = this; }
 }
 interface Doc { activeElement?: Element; createElement(tag: string): Element }
@@ -27,13 +28,31 @@ describe('A3 administrator shell', () => {
     });
     const frame = root.children[0]; const sidebar = frame.children[0]; const header = frame.children[1].children[0];
     const buttons = sidebar.children.filter((child) => child.tagName === 'button');
-    expect(buttons.map((item) => item.textContent)).toEqual(['总览', '账号', '邀请', '服务账号', 'OBS', '安全与恢复']);
+    expect(buttons.map((item) => item.textContent)).toEqual(['运营总览', '主播账号', '邀请码', 'B站服务账号', '系统设置']);
     expect(buttons[0].attributes.get('aria-current')).toBe('page');
     buttons[1].listeners.get('click')?.();
     await vi.waitFor(() => expect(events).toEqual(['mount:overview', 'dispose:overview', 'mount:accounts']));
     expect(root.children[0].children[0]).toBe(sidebar); expect(root.children[0].children[1].children[0]).toBe(header);
     expect(buttons[1].attributes.get('aria-current')).toBe('page');
     await shell.dispose(); expect(events.at(-1)).toBe('dispose:accounts');
+  });
+
+  it('opens and closes the mobile navigation with focus restoration', async () => {
+    const document: Doc = { createElement: (tag) => new Element(tag, document) }; const root = new Element('div', document);
+    const shell = mountAdminShell(root as unknown as HTMLElement, { initial: 'overview', mount: () => ({ dispose() {} }) });
+    const frame = root.children[0]; const sidebar = frame.children[0]; const workspace = frame.children[1]; const header = workspace.children[0];
+    const trigger = header.children.find((child) => child.className === 'hosted-admin-menu-trigger');
+    if (!trigger) throw new Error('mobile menu trigger missing');
+    trigger.listeners.get('click')?.();
+    expect(sidebar.attributes.get('data-open')).toBe('true');
+    expect(document.activeElement).toBe(sidebar.children[0]);
+    frame.listeners.get('keydown')?.({ key: 'Escape', preventDefault: vi.fn() });
+    expect(sidebar.attributes.get('data-open')).toBe('false');
+    expect(document.activeElement).toBe(trigger);
+    trigger.listeners.get('click')?.();
+    sidebar.children[1].listeners.get('click')?.();
+    await vi.waitFor(() => expect(sidebar.attributes.get('data-open')).toBe('false'));
+    await shell.dispose();
   });
 
   it('lets overview content navigate through the same serialized section transition', async () => {
