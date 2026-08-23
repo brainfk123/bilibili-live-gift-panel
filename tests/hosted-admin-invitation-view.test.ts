@@ -92,4 +92,54 @@ describe('administrator invitation inventory view state', () => {
     expect(render.mock.lastCall?.[0].rows).toEqual([created, active]);
     expect(render.mock.lastCall?.[0].notice).toEqual({ kind: 'success', message: '已创建 1 个邀请码，已复制，有效期 30 天' });
   });
+
+  it('keeps a successful creation when an older reload resolves afterwards', async () => {
+    let resolveReload!: (value: { invitations: typeof active[] }) => void;
+    const created = { ...active, id: 3, code: 'JKLMNPQR', codeHint: '****NPQR' };
+    const api = {
+      adminInvitations: vi.fn().mockResolvedValueOnce({ invitations: [active] }).mockImplementationOnce(() => new Promise((resolve) => { resolveReload = resolve; })),
+      createAdminInvitations: vi.fn().mockResolvedValue([created]),
+    };
+    const render = vi.fn();
+    const controller = createInvitationInventoryController(api, render);
+
+    await controller.reload();
+    const staleReload = controller.reload();
+    await controller.create(1, '7d');
+    resolveReload({ invitations: [active] });
+    await staleReload;
+
+    expect(render.mock.lastCall?.[0].rows).toEqual([created, active]);
+  });
+
+  it('keeps a successful revocation and removes its code when an older reload resolves afterwards', async () => {
+    let resolveReload!: (value: { invitations: typeof active[] }) => void;
+    const api = {
+      adminInvitations: vi.fn().mockResolvedValueOnce({ invitations: [active] }).mockImplementationOnce(() => new Promise((resolve) => { resolveReload = resolve; })),
+      revokeAdminInvitation: vi.fn().mockResolvedValue(undefined),
+    };
+    const render = vi.fn();
+    const controller = createInvitationInventoryController(api, render);
+
+    await controller.reload();
+    const staleReload = controller.reload();
+    await controller.revoke(active.id);
+    resolveReload({ invitations: [active] });
+    await staleReload;
+
+    expect(render.mock.lastCall?.[0].rows).toEqual([{ ...active, code: undefined, status: 'revoked' }]);
+  });
+
+  it('shows a selectable manual-copy fallback when clipboard sharing fails', async () => {
+    const api = { adminInvitations: vi.fn().mockResolvedValue({ invitations: [active] }) };
+    const render = vi.fn();
+    const clipboard = { writeText: vi.fn().mockRejectedValue(new Error('denied')) };
+    const controller = createInvitationInventoryController(api, render, clipboard);
+
+    await controller.reload();
+    await controller.share(active.id);
+
+    expect(render.mock.lastCall?.[0].rows).toEqual([active]);
+    expect(render.mock.lastCall?.[0].notice).toEqual({ kind: 'error', message: '分享失败，请长按或拖选后复制', code: active.code });
+  });
 });

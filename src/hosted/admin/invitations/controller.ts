@@ -43,6 +43,7 @@ export function createInvitationInventoryController(
 
   const publish = (): void => render({ rows: rows.map(clone), loading, creating, ...(error ? { error } : {}), ...(notice ? { notice: { ...notice } } : {}) });
   const rowFor = (id: number): AdminInvitationRecord | undefined => rows.find((row) => row.id === id);
+  const fenceReloads = (): void => { generation++; loading = false; };
 
   return {
     async reload(query = {}): Promise<void> {
@@ -73,6 +74,7 @@ export function createInvitationInventoryController(
       try {
         const created = await api.createAdminInvitations(count, validity);
         if (disposed) return;
+        fenceReloads();
         const createdIds = new Set(created.map((row) => row.id));
         rows = [...created.map(clone), ...rows.filter((row) => !createdIds.has(row.id))];
         const codes = created.flatMap((row) => row.code ? [row.code] : []);
@@ -99,6 +101,7 @@ export function createInvitationInventoryController(
       try {
         await api.revokeAdminInvitation(id);
         if (disposed) return;
+        fenceReloads();
         rows = rows.map((row) => row.id === id ? { ...row, status: 'revoked', code: undefined } : row);
         notice = { kind: 'success', message: '邀请码已作废' };
         publish();
@@ -138,8 +141,10 @@ export function createInvitationInventoryController(
           publish();
         }
       } catch (reason) {
-        if (disposed || (reason instanceof DOMException && reason.name === 'AbortError')) return;
-        notice = { kind: 'error', message: '分享失败，请重试' };
+        if (disposed || (reason as { name?: unknown })?.name === 'AbortError') return;
+        notice = sharePort
+          ? { kind: 'error', message: '分享失败，请重试' }
+          : { kind: 'error', message: '分享失败，请长按或拖选后复制', code: row.code };
         publish();
       }
     },
