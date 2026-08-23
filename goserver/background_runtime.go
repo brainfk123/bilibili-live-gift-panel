@@ -105,6 +105,9 @@ type backgroundRuntime struct {
 	inboxRetryDelay          time.Duration
 	profileTimeout           time.Duration
 	profileResolver          userProfileResolver
+	roomNotificationResolver func(context.Context, string) (roomNotificationProfile, error)
+	roomNotificationProfiles map[string]roomNotificationProfile
+	pendingRoomSwitchFrom    string
 	diagnostics              *diagnosticLogger
 	onWorkerStart            func(string)
 }
@@ -123,17 +126,18 @@ func newBackgroundRuntime(store *configStore, sourceFactory func() giftEventSour
 		center = notifications[0]
 	}
 	return &backgroundRuntime{
-		store:             store,
-		sourceFactory:     sourceFactory,
-		reload:            make(chan struct{}, 1),
-		startupResetReady: make(chan struct{}, 1),
-		status:            runtimeStatus{State: "idle"},
-		timerSchedules:    map[string]timerSchedule{},
-		notifications:     center,
-		inboxWake:         make(chan struct{}, 1),
-		inboxRetryDelay:   250 * time.Millisecond,
-		profileTimeout:    2 * time.Second,
-		profileResolver:   newBilibiliUserProfileResolver(nil, ""),
+		store:                    store,
+		sourceFactory:            sourceFactory,
+		reload:                   make(chan struct{}, 1),
+		startupResetReady:        make(chan struct{}, 1),
+		status:                   runtimeStatus{State: "idle"},
+		timerSchedules:           map[string]timerSchedule{},
+		notifications:            center,
+		inboxWake:                make(chan struct{}, 1),
+		inboxRetryDelay:          250 * time.Millisecond,
+		profileTimeout:           2 * time.Second,
+		profileResolver:          newBilibiliUserProfileResolver(nil, ""),
+		roomNotificationProfiles: map[string]roomNotificationProfile{},
 	}
 }
 
@@ -1401,6 +1405,9 @@ func (runtime *backgroundRuntime) connectionGapRoom() string {
 func (runtime *backgroundRuntime) setStatus(state, roomID string, err error) {
 	runtime.mu.Lock()
 	previous := runtime.status
+	roomNotificationKind := notificationKind("")
+	roomNotificationCurrent := roomID
+	roomNotificationPrevious := ""
 	nextLastError := ""
 	runtime.status.State = state
 	if runtime.status.RoomID != roomID {
@@ -1413,6 +1420,27 @@ func (runtime *backgroundRuntime) setStatus(state, roomID string, err error) {
 		nextLastError = err.Error()
 		runtime.status.LastError = nextLastError
 	}
+	roomChanged := roomID != "" && previous.RoomID != "" && roomID != previous.RoomID
+	if roomChanged {
+		runtime.pendingRoomSwitchFrom = previous.RoomID
+	}
+	if previous.State == "connected" && state != "connected" {
+		if !roomChanged {
+			roomNotificationKind = notificationRoomDisconnected
+			roomNotificationCurrent = previous.RoomID
+		}
+	}
+	if previous.State != "connected" && state == "connected" {
+		if runtime.pendingRoomSwitchFrom != "" && runtime.pendingRoomSwitchFrom != roomID {
+			roomNotificationKind = notificationRoomSwitched
+			roomNotificationPrevious = runtime.pendingRoomSwitchFrom
+			runtime.pendingRoomSwitchFrom = ""
+		} else {
+			roomNotificationKind = notificationRoomConnected
+		}
+		runtime.pendingRoomSwitchFrom = ""
+	}
+	roomNotificationResolver := runtime.roomNotificationResolver
 	runtime.mu.Unlock()
 	if previous.State != state || previous.RoomID != roomID || previous.LastError != nextLastError {
 		if err != nil {
@@ -1422,16 +1450,58 @@ func (runtime *backgroundRuntime) setStatus(state, roomID string, err error) {
 		}
 	}
 
-	if previous.State != "connected" && state == "connected" {
-		runtime.notifications.Publish(notificationRoomConnected, roomID)
+	if roomNotificationKind != "" {
+		runtime.publishRoomNotification(
+			roomNotificationKind, roomNotificationCurrent,
+			roomNotificationPrevious, roomNotificationResolver,
+		)
 	}
-	if previous.State == "connected" && state != "connected" {
-		disconnectedRoomID := previous.RoomID
-		if disconnectedRoomID == "" {
-			disconnectedRoomID = roomID
+}
+
+func (runtime *backgroundRuntime) publishRoomNotification(
+	kind notificationKind,
+	currentRoomID string,
+	previousRoomID string,
+	resolve func(context.Context, string) (roomNotificationProfile, error),
+) {
+	if runtime.notifications == nil {
+		return
+	}
+	if resolve == nil {
+		runtime.notifications.PublishNotification(makeRoomDesktopNotification(kind, roomNotificationProfile{}, roomNotificationProfile{}))
+		return
+	}
+	runtime.mu.RLock()
+	current, currentCached := runtime.roomNotificationProfiles[currentRoomID]
+	previous, previousCached := runtime.roomNotificationProfiles[previousRoomID]
+	runtime.mu.RUnlock()
+	if currentCached && (previousRoomID == "" || previousCached) {
+		runtime.notifications.PublishNotification(makeRoomDesktopNotification(kind, current, previous))
+		return
+	}
+	go func() {
+		timeout := runtime.profileTimeout
+		if timeout <= 0 {
+			timeout = 2 * time.Second
 		}
-		runtime.notifications.Publish(notificationRoomDisconnected, disconnectedRoomID)
-	}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		if !currentCached {
+			current, _ = resolve(ctx, currentRoomID)
+		}
+		if previousRoomID != "" && !previousCached {
+			previous, _ = resolve(ctx, previousRoomID)
+		}
+		runtime.mu.Lock()
+		if strings.TrimSpace(current.Name) != "" || strings.TrimSpace(current.AvatarURL) != "" {
+			runtime.roomNotificationProfiles[currentRoomID] = current
+		}
+		if previousRoomID != "" && (strings.TrimSpace(previous.Name) != "" || strings.TrimSpace(previous.AvatarURL) != "") {
+			runtime.roomNotificationProfiles[previousRoomID] = previous
+		}
+		runtime.mu.Unlock()
+		runtime.notifications.PublishNotification(makeRoomDesktopNotification(kind, current, previous))
+	}()
 }
 
 func (runtime *backgroundRuntime) wait(ctx context.Context, delay time.Duration) bool {

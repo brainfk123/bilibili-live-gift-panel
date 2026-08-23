@@ -26,20 +26,12 @@ jobs:
     environment: release
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-      UPDATE_PUBLISHER_TOOL_SHA: ${{ vars.UPDATE_PUBLISHER_TOOL_SHA }}
     steps:
       - name: Validate release tag
         shell: pwsh
         run: |
           if ($env:RELEASE_TAG -cnotmatch '^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$') {
             throw "Release tag must use canonical vMAJOR.MINOR.PATCH syntax"
-          }
-
-      - name: Validate update publisher tool commit
-        shell: pwsh
-        run: |
-          if ($env:UPDATE_PUBLISHER_TOOL_SHA -cnotmatch '\A[0-9A-Fa-f]{40}\z') {
-            throw "UPDATE_PUBLISHER_TOOL_SHA must be an exact 40-hex commit SHA"
           }
 
       - name: Check out release tag
@@ -55,24 +47,6 @@ jobs:
           $releaseCommit = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0) { throw "Could not resolve checked-out release commit" }
           "RELEASE_COMMIT=$releaseCommit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Check out update publisher tooling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ env.UPDATE_PUBLISHER_TOOL_SHA }}
-          path: _update-publisher-tool
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Verify update publisher tool checkout
-        shell: pwsh
-        run: |
-          $publisherCheckout = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE '_update-publisher-tool'))
-          $publisherCommit = git -C "$publisherCheckout" rev-parse HEAD
-          if ($LASTEXITCODE -ne 0) { throw "Could not resolve update publisher tool commit" }
-          if (-not [String]::Equals($publisherCommit.Trim(), $env:UPDATE_PUBLISHER_TOOL_SHA, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Update publisher tool checkout does not match UPDATE_PUBLISHER_TOOL_SHA"
-          }
 
       - name: Inspect existing GitHub release
         shell: pwsh
@@ -100,12 +74,10 @@ jobs:
 
           try {
             $publishedAt = [DateTimeOffset]$release.published_at
-            $publishedAtRFC3339 = $publishedAt.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
           } catch {
             throw "Existing GitHub Release publication timestamp is invalid. Manual recovery required before rerunning."
           }
           'RELEASE_EXISTS=true' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "RELEASE_PUBLISHED_AT=$publishedAtRFC3339" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Download existing release assets
         if: env.RELEASE_EXISTS == 'true'
@@ -132,13 +104,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version-file: _update-publisher-tool/updateapi/go.mod
-          cache-dependency-path: _update-publisher-tool/updateapi/go.sum
+          go-version-file: updateapi/go.mod
+          cache-dependency-path: updateapi/go.sum
 
       - name: Test domestic update tooling
         env:
           GOWORK: 'off'
-        run: go -C _update-publisher-tool/updateapi test ./... -race -count=1
+        run: go -C updateapi test ./... -race -count=1
 
       - name: Verify tag matches package version
         shell: pwsh
@@ -168,8 +140,60 @@ jobs:
         if: env.RELEASE_EXISTS != 'true'
         run: npm run prepare:go-assets
 
-      - name: Set up MSYS2 host environment
+      - name: Resolve FFmpeg component identity
         if: env.RELEASE_EXISTS != 'true'
+        shell: pwsh
+        run: |
+          $identityJSON = node scripts/ffmpeg-component-assets.mjs identity
+          if ($LASTEXITCODE -ne 0) { throw "FFmpeg component identity resolution failed" }
+          $identity = $identityJSON | ConvertFrom-Json
+          if ($identity.schema -ne 1 -or [string]$identity.fingerprint -cnotmatch '^[0-9a-f]{64}$' -or [string]$identity.tag -cne "ffmpeg-component-v1-$($identity.fingerprint)") {
+            throw "FFmpeg component identity output is invalid"
+          }
+          "FFMPEG_COMPONENT_FINGERPRINT=$($identity.fingerprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFMPEG_COMPONENT_TAG=$($identity.tag)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Inspect signed FFmpeg component
+        if: env.RELEASE_EXISTS != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $encodedTag = [Uri]::EscapeDataString($env:FFMPEG_COMPONENT_TAG)
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          try {
+            $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$encodedTag" -Headers $headers
+          } catch {
+            if ($_.Exception.Response.StatusCode -eq [Net.HttpStatusCode]::NotFound) {
+              'FFMPEG_COMPONENT_EXISTS=false' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              exit 0
+            }
+            throw "FFmpeg component lookup failed without an exact 404"
+          }
+          $requiredAssets = @('ffmpeg.zip','manifest.json','gift-clip-test-tools.zip','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','SHA256SUMS.txt')
+          $assetNames = @($release.assets | ForEach-Object { [string]$_.name })
+          if ($release.tag_name -cne $env:FFMPEG_COMPONENT_TAG -or $release.draft -or $release.prerelease -or -not $release.published_at -or $assetNames.Count -ne $requiredAssets.Count) {
+            throw "Existing FFmpeg component Release is incomplete. Manual recovery required."
+          }
+          foreach ($name in $requiredAssets) {
+            if (@($assetNames | Where-Object { $_ -ceq $name }).Count -ne 1) { throw "Existing FFmpeg component asset closure is invalid. Manual recovery required." }
+          }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $release | ConvertTo-Json -Depth 10 | Set-Content -NoNewline -Encoding utf8 dist/ffmpeg-component-release.json
+          'FFMPEG_COMPONENT_EXISTS=true' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Download signed FFmpeg component
+        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/ffmpeg-component-download | Out-Null
+          gh release download $env:FFMPEG_COMPONENT_TAG --dir dist/ffmpeg-component-download --pattern ffmpeg.zip --pattern manifest.json --pattern gift-clip-test-tools.zip --pattern ffmpeg-9.0.tar.xz --pattern ffmpeg-9.0.tar.xz.asc --pattern ffmpeg-build-config.txt --pattern ffmpeg-component-gate.txt --pattern toolchain-lock.json --pattern NOTICE.md --pattern COPYING.LGPLv2.1 --pattern SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw "Signed FFmpeg component download failed" }
+
+      - name: Set up MSYS2 host environment
+        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
         id: msys2
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
         with:
@@ -178,7 +202,7 @@ jobs:
           cache: false
 
       - name: Build and verify pinned FFmpeg
-        if: env.RELEASE_EXISTS != 'true'
+        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
         shell: pwsh
         run: |
           $msys2Root = '${{ steps.msys2.outputs.msys2-location }}'
@@ -193,12 +217,13 @@ jobs:
           }
 
       - name: Sign and verify inner FFmpeg
-        if: env.RELEASE_EXISTS != 'true'
+        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
         shell: pwsh
         env:
           EVSIGN_KEY: ${{ secrets.EVSIGN_KEY }}
           EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
           EVSIGN_CERT: ${{ vars.EVSIGN_CERT }}
+          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
         run: |
           node scripts/sign-evsign.mjs dist/ffmpeg/ffmpeg.exe
           if ($LASTEXITCODE -ne 0) {
@@ -208,14 +233,19 @@ jobs:
           if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
             throw "Inner FFmpeg Authenticode verification failed: $($signature.Status) - $($signature.StatusMessage)"
           }
+          if ($null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT) {
+            throw "Inner FFmpeg Authenticode signer does not match EVSIGN_EXPECTED_SUBJECT"
+          }
           Write-Host 'Verified inner FFmpeg Authenticode signature.'
 
       - name: Package and verify signed FFmpeg payload
-        if: env.RELEASE_EXISTS != 'true'
+        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
         shell: pwsh
         env:
           FFMPEG_AUTHENTICODE: 'true'
           APP_VERSION: ${{ env.RELEASE_TAG }}
+          APP_COMMIT: ${{ env.RELEASE_COMMIT }}
+          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
         run: |
           node scripts/package-ffmpeg.mjs --input dist/ffmpeg/ffmpeg.exe
           if ($LASTEXITCODE -ne 0) {
@@ -226,6 +256,98 @@ jobs:
             throw "Signed FFmpeg payload verification failed with exit code $LASTEXITCODE"
           }
 
+      - name: Package signed FFmpeg component
+        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
+        shell: pwsh
+        run: |
+          Compress-Archive -LiteralPath dist/gift-clip-test-tools/ffmpeg.exe,dist/gift-clip-test-tools/ffprobe.exe,dist/gift-clip-test-tools/manifest.json -DestinationPath dist/gift-clip-test-tools.zip -CompressionLevel Optimal
+          node scripts/ffmpeg-component-assets.mjs prepare --output dist/ffmpeg-component-publish
+          if ($LASTEXITCODE -ne 0) { throw "FFmpeg component asset packaging failed" }
+
+      - name: Attest signed FFmpeg component
+        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/ffmpeg-component-publish/*
+
+      - name: Publish signed FFmpeg component
+        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$env:GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$env:FFMPEG_COMPONENT_TAG" -f sha="$env:RELEASE_COMMIT"
+          if ($LASTEXITCODE -ne 0) {
+            $global:LASTEXITCODE = 0
+            $encodedTag = [Uri]::EscapeDataString($env:FFMPEG_COMPONENT_TAG)
+            $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+            try {
+              $winner = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$encodedTag" -Headers $headers
+            } catch {
+              throw "FFmpeg component tag conflict has no complete Release. Manual recovery required."
+            }
+            $requiredAssets = @('ffmpeg.zip','manifest.json','gift-clip-test-tools.zip','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','SHA256SUMS.txt')
+            $assetNames = @($winner.assets | ForEach-Object { [string]$_.name })
+            if ($winner.tag_name -cne $env:FFMPEG_COMPONENT_TAG -or $winner.draft -or $winner.prerelease -or -not $winner.published_at -or $assetNames.Count -ne $requiredAssets.Count) {
+              throw "Conflicting FFmpeg component Release is incomplete. Manual recovery required."
+            }
+            foreach ($name in $requiredAssets) {
+              if (@($assetNames | Where-Object { $_ -ceq $name }).Count -ne 1) { throw "Conflicting FFmpeg component asset closure is invalid. Manual recovery required." }
+            }
+            Write-Host 'Another publisher created the FFmpeg component; the winner will be redownloaded and fully verified.'
+            exit 0
+          }
+          gh release create $env:FFMPEG_COMPONENT_TAG --draft --verify-tag --title $env:FFMPEG_COMPONENT_TAG --latest=false
+          if ($LASTEXITCODE -ne 0) { throw "FFmpeg component draft creation failed. Manual recovery required." }
+          gh release upload $env:FFMPEG_COMPONENT_TAG dist/ffmpeg-component-publish/ffmpeg.zip dist/ffmpeg-component-publish/manifest.json dist/ffmpeg-component-publish/gift-clip-test-tools.zip dist/ffmpeg-component-publish/ffmpeg-9.0.tar.xz dist/ffmpeg-component-publish/ffmpeg-9.0.tar.xz.asc dist/ffmpeg-component-publish/ffmpeg-build-config.txt dist/ffmpeg-component-publish/ffmpeg-component-gate.txt dist/ffmpeg-component-publish/toolchain-lock.json dist/ffmpeg-component-publish/NOTICE.md dist/ffmpeg-component-publish/COPYING.LGPLv2.1 dist/ffmpeg-component-publish/SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw "FFmpeg component upload failed; draft retained for manual recovery" }
+          gh release edit $env:FFMPEG_COMPONENT_TAG --draft=false --latest=false
+          if ($LASTEXITCODE -ne 0) { throw "FFmpeg component publication failed. Manual recovery required." }
+
+      - name: Download published FFmpeg component
+        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/ffmpeg-component-published | Out-Null
+          gh release download $env:FFMPEG_COMPONENT_TAG --dir dist/ffmpeg-component-published --pattern ffmpeg.zip --pattern manifest.json --pattern gift-clip-test-tools.zip --pattern ffmpeg-9.0.tar.xz --pattern ffmpeg-9.0.tar.xz.asc --pattern ffmpeg-build-config.txt --pattern ffmpeg-component-gate.txt --pattern toolchain-lock.json --pattern NOTICE.md --pattern COPYING.LGPLv2.1 --pattern SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw "Published FFmpeg component redownload failed" }
+          $encodedTag = [Uri]::EscapeDataString($env:FFMPEG_COMPONENT_TAG)
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          try {
+            $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$encodedTag" -Headers $headers
+          } catch {
+            throw "Published FFmpeg component metadata refetch failed. Manual recovery required."
+          }
+          $release | ConvertTo-Json -Depth 10 | Set-Content -NoNewline -Encoding utf8 dist/ffmpeg-component-release.json
+
+      - name: Verify and install signed FFmpeg component
+        if: env.RELEASE_EXISTS != 'true'
+        shell: pwsh
+        env:
+          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $componentDirectory = if ($env:FFMPEG_COMPONENT_EXISTS -eq 'true') { 'dist/ffmpeg-component-download' } else { 'dist/ffmpeg-component-published' }
+          node scripts/ffmpeg-component-assets.mjs verify-metadata --metadata dist/ffmpeg-component-release.json --input $componentDirectory --tag $env:FFMPEG_COMPONENT_TAG
+          if ($LASTEXITCODE -ne 0) { throw "FFmpeg component GitHub metadata or digest verification failed" }
+          foreach ($asset in Get-ChildItem -LiteralPath $componentDirectory -File) {
+            gh attestation verify $asset.FullName --repo $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw "FFmpeg component attestation verification failed for $($asset.Name)" }
+          }
+          node scripts/ffmpeg-component-assets.mjs install --input $componentDirectory
+          if ($LASTEXITCODE -ne 0) { throw "Signed FFmpeg component verification or installation failed" }
+          New-Item -ItemType Directory -Force -Path dist/ffmpeg-source | Out-Null
+          Copy-Item -LiteralPath "$componentDirectory/ffmpeg-9.0.tar.xz" -Destination dist/ffmpeg-source/ffmpeg-9.0.tar.xz
+          Copy-Item -LiteralPath "$componentDirectory/ffmpeg-9.0.tar.xz.asc" -Destination dist/ffmpeg-source/ffmpeg-9.0.tar.xz.asc
+          Copy-Item -LiteralPath "$componentDirectory/ffmpeg-build-config.txt" -Destination dist/ffmpeg-build-config.txt
+          Copy-Item -LiteralPath "$componentDirectory/ffmpeg-component-gate.txt" -Destination dist/ffmpeg-component-gate.txt
+          if (Test-Path dist/gift-clip-test-tools) { Remove-Item -LiteralPath dist/gift-clip-test-tools -Recurse -Force }
+          Expand-Archive -LiteralPath "$componentDirectory/gift-clip-test-tools.zip" -DestinationPath dist/gift-clip-test-tools
+          node scripts/gift-clip-test-tools.mjs | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Cached gift clip test tools failed verification" }
+
       - name: Build release executable
         if: env.RELEASE_EXISTS != 'true'
         run: npm run build:exe
@@ -234,11 +356,30 @@ jobs:
           APP_COMMIT: ${{ env.RELEASE_COMMIT }}
           APP_UPDATE_API_URL: ${{ vars.UPDATE_API_BASE_URL }}
           APP_UPDATE_PUBLISHER: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
+          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
 
       - name: Run backend tests
         if: env.RELEASE_EXISTS != 'true'
         working-directory: goserver
         run: go test ./...
+
+      - name: Prepare pinned EVSign CLI for outer executable
+        if: env.RELEASE_EXISTS != 'true'
+        shell: pwsh
+        run: |
+          $cliPath = Join-Path $env:RUNNER_TEMP 'evsign-client-1.0.1.exe'
+          Invoke-WebRequest -Uri 'https://mc.evsign.cn/evsign-client-cli-windows-latest' -OutFile $cliPath -TimeoutSec 120
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $cliPath).Hash.ToLowerInvariant()
+          if ($hash -cne 'b1b2168a1d0ea757f26db18ac2e2b14e06fb74021f0d67add5e6be1a47dffd97') {
+            throw 'Pinned EVSign CLI SHA-256 verification failed.'
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $cliPath
+          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+            throw "Pinned EVSign CLI Authenticode verification failed: $($signature.Status)"
+          }
+          if ($null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -cne '6DCBCC70A507DCAE74135DCB57047CC3365E9F03') {
+            throw 'Pinned EVSign CLI signer certificate does not match the reviewed binary.'
+          }
 
       - name: Prepare and sign release executable
         if: env.RELEASE_EXISTS != 'true'
@@ -248,9 +389,10 @@ jobs:
           EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
           EVSIGN_CERT: ${{ vars.EVSIGN_CERT }}
           EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
+          EVSIGN_CLI_PATH: ${{ runner.temp }}\evsign-client-1.0.1.exe
         run: |
           Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.exe
-          node scripts/sign-evsign.mjs dist/gift-panel-windows-x64.exe
+          node scripts/sign-evsign-cli.mjs dist/gift-panel-windows-x64.exe
 
           $signature = Get-AuthenticodeSignature -LiteralPath dist/gift-panel-windows-x64.exe
           if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
@@ -387,11 +529,9 @@ jobs:
 
           try {
             $publishedAt = [DateTimeOffset]$release.published_at
-            $publishedAtRFC3339 = $publishedAt.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
           } catch {
             throw "Published GitHub Release publication timestamp is invalid; manual recovery required"
           }
-          "RELEASE_PUBLISHED_AT=$publishedAtRFC3339" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Validate published release assets
         shell: pwsh
@@ -508,25 +648,4 @@ jobs:
           }
           if ($changelog.schemaVersion -ne 1 -or @($changelog.releases).Count -eq 0) {
             throw "Published changelog is incomplete. Manual recovery required."
-          }
-
-      - name: Mirror release to Tencent COS
-        shell: pwsh
-        env:
-          GOWORK: 'off'
-          COS_BUCKET: ${{ vars.COS_BUCKET }}
-          COS_REGION: ${{ vars.COS_REGION }}
-          COS_SECRET_ID: ${{ secrets.COS_RELEASE_SECRET_ID }}
-          COS_SECRET_KEY: ${{ secrets.COS_RELEASE_SECRET_KEY }}
-        run: |
-          $releaseRoot = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
-          $publisherModuleRoot = [IO.Path]::GetFullPath((Join-Path $releaseRoot '_update-publisher-tool\updateapi'))
-          $assetPath = [IO.Path]::GetFullPath((Join-Path $releaseRoot 'dist\gift-panel-windows-x64.exe'))
-          $checksumPath = [IO.Path]::GetFullPath((Join-Path $releaseRoot 'dist\gift-panel-windows-x64.exe.sha256'))
-          $changelogPath = [IO.Path]::GetFullPath((Join-Path $releaseRoot 'dist\gift-panel-changelog.json'))
-          $publishOutput = @(& go -C "$publisherModuleRoot" run ./cmd/publish --tag $env:RELEASE_TAG --published-at $env:RELEASE_PUBLISHED_AT --asset "$assetPath" --checksum "$checksumPath" --changelog "$changelogPath")
-          if ($LASTEXITCODE -ne 0) { throw "Tencent COS release mirror failed" }
-          $publishOutput | ForEach-Object { Write-Host $_ }
-          if ($publishOutput -contains 'stable unchanged') {
-            Write-Host 'COS immutable release verified; stable unchanged because the channel is already on an equal or newer version.'
           }

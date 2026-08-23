@@ -24,6 +24,43 @@ func validChannelManifest() release.ChannelManifest {
 	}
 }
 
+func TestParseStableTag(t *testing.T) {
+	tests := []struct {
+		name    string
+		tag     string
+		want    [3]uint64
+		wantErr bool
+	}{
+		{name: "canonical tag", tag: "v0.4.4", want: [3]uint64{0, 4, 4}},
+		{name: "numeric comparison data", tag: "v18446744073709551615.10.2", want: [3]uint64{18446744073709551615, 10, 2}},
+		{name: "leading zero", tag: "v0.04.4", wantErr: true},
+		{name: "missing v", tag: "0.4.4", wantErr: true},
+		{name: "prerelease suffix", tag: "v0.4.4-rc.1", wantErr: true},
+		{name: "build suffix", tag: "v0.4.4+build.1", wantErr: true},
+		{name: "whitespace", tag: " v0.4.4 ", wantErr: true},
+		{name: "overflow", tag: "v18446744073709551616.0.0", wantErr: true},
+		{name: "non ASCII digits", tag: "v٠.4.4", wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := release.ParseStableTag(test.tag)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("ParseStableTag(%q) error = nil, want rejection", test.tag)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseStableTag(%q) error = %v", test.tag, err)
+			}
+			if got != test.want {
+				t.Fatalf("ParseStableTag(%q) = %v, want %v", test.tag, got, test.want)
+			}
+		})
+	}
+}
+
 func TestChannelManifestValidateRejectsUntrustedValues(t *testing.T) {
 	tests := []struct {
 		name   string

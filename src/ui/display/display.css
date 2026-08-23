@@ -1,4 +1,21 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
+.server-continuity-notice {
+  position: fixed;
+  z-index: 2147483647;
+  top: 16px;
+  left: 50%;
+  max-width: min(560px, calc(100vw - 32px));
+  transform: translateX(-50%);
+  border: 1px solid rgba(251, 114, 153, 0.7);
+  border-radius: 12px;
+  padding: 10px 16px;
+  background: rgba(20, 21, 28, 0.94);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.38);
+  color: #fff;
+  font: 600 14px/1.5 system-ui, sans-serif;
+  text-align: center;
+}
+.server-continuity-notice[hidden] { display: none; }
 body.display-mode { overflow: hidden; background: transparent; }
 .display-root {
   --panel-outline: rgba(255, 255, 255, 0.28);

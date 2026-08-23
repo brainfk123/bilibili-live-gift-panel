@@ -8,6 +8,25 @@ import (
 
 type roomOwnerUIDResolver func(context.Context, string) (int64, error)
 
+func newRoomNotificationProfileResolver(
+	resolveOwnerUID roomOwnerUIDResolver,
+	profiles userProfileResolver,
+) func(context.Context, string) (roomNotificationProfile, error) {
+	return func(ctx context.Context, roomID string) (roomNotificationProfile, error) {
+		uid, err := resolveOwnerUID(ctx, roomID)
+		if err != nil {
+			return roomNotificationProfile{}, err
+		}
+		profile, err := profiles.Resolve(ctx, uid)
+		if err != nil {
+			return roomNotificationProfile{}, err
+		}
+		return roomNotificationProfile{
+			Name: strings.TrimSpace(profile.Name), AvatarURL: strings.TrimSpace(profile.Avatar),
+		}, nil
+	}
+}
+
 func newRoomAnchorHandler(resolveOwnerUID roomOwnerUIDResolver, profiles userProfileResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

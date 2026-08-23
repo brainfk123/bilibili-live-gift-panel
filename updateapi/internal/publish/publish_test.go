@@ -308,6 +308,7 @@ func TestCompareTagsUsesNumericSemverOrdering(t *testing.T) {
 		want  int
 	}{
 		{left: "v1.10.0", right: "v1.9.99", want: 1},
+		{left: "v0.10.0", right: "v0.9.9", want: 1},
 		{left: "v2.0.0", right: "v10.0.0", want: -1},
 		{left: "v3.4.5", right: "v3.4.5", want: 0},
 	} {
@@ -318,6 +319,82 @@ func TestCompareTagsUsesNumericSemverOrdering(t *testing.T) {
 		if got != test.want {
 			t.Fatalf("compareTags(%q, %q) = %d, want %d", test.left, test.right, got, test.want)
 		}
+	}
+}
+
+// Mutation caught: independently parsing the prior tag with strconv accepts forms rejected by the shared stable-tag boundary.
+func TestCompareTagsRejectsNonCanonicalPriorStableTag(t *testing.T) {
+	for _, prior := range []string{"1.2.3", "v01.2.3", "v1.2.3+build", "v18446744073709551616.0.0"} {
+		if _, err := compareTags("v2.0.0", prior); err == nil {
+			t.Fatalf("compareTags() accepted noncanonical prior tag %q", prior)
+		}
+	}
+}
+
+// Mutation caught: the orchestration adapter bypasses the existing immutable/stable-last transaction instead of delegating to it.
+func TestPublisherObjectUsesExistingTransaction(t *testing.T) {
+	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
+	store := newMemoryStore()
+	publisher, err := NewPublisher(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := publisher.Publish(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != OutcomeStablePromoted || !store.hasStablePut() {
+		t.Fatalf("Publish() outcome = %q, stable put = %v", outcome, store.hasStablePut())
+	}
+}
+
+// Mutation caught: retaining caller-owned slices lets bytes change after strict validation but before the immutable transaction consumes them.
+func TestPublishPreparedReleaseUsesAnImmutableCopiedSnapshot(t *testing.T) {
+	asset := []byte("validated executable")
+	digest := sha256.Sum256(asset)
+	checksum := []byte(hex.EncodeToString(digest[:]) + "  gift-panel-windows-x64.exe")
+	changelog := []byte(`{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
+	prepared, err := NewPreparedRelease(asset, checksum, changelog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset[0] = 'X'
+	checksum[0] = '0'
+	changelog[0] = 'X'
+	store := newMemoryStore()
+
+	outcome, err := Publish(context.Background(), store, Input{
+		Tag:         "v1.2.3",
+		PublishedAt: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC),
+		Prepared:    prepared,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != OutcomeStablePromoted {
+		t.Fatalf("Publish() outcome = %q", outcome)
+	}
+	if got := store.objects["releases/v1.2.3/gift-panel-windows-x64.exe"].body; string(got) != "validated executable" {
+		t.Fatalf("published asset = %q, want immutable validated snapshot", got)
+	}
+}
+
+// Mutation caught: accepting both paths and a prepared snapshot makes the publisher's authoritative input ambiguous.
+func TestPublishRejectsAmbiguousPreparedAndPathInputBeforeCOS(t *testing.T) {
+	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
+	prepared, err := NewPreparedRelease([]byte("snapshot"), []byte(strings.Repeat("0", 64)+"  gift-panel-windows-x64.exe"), []byte(`{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Prepared = prepared
+	store := newMemoryStore()
+
+	if _, err := Publish(context.Background(), store, input); err == nil {
+		t.Fatal("Publish() accepted paths and a prepared snapshot")
+	}
+	if len(store.operations) != 0 {
+		t.Fatalf("COS operations = %v, want none for ambiguous input", store.operations)
 	}
 }
 

@@ -18,23 +18,23 @@ describe('versioned changelog', () => {
     expect(css).toMatch(/\.changelog-content\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*auto/s);
   });
 
-  it('bundles only the v0.4.4 release with its attribute and rule experience improvements', () => {
+  it('bundles only the v0.4.7 release with smoother automatic updates', () => {
     expect(CHANGELOG_RELEASES).toHaveLength(1);
     expect(latestChangelogRelease()).toBe(CHANGELOG_RELEASES[0]);
-    expect(normalizeChangelogVersion(' v0.4.4 ')).toBe('0.4.4');
-    expect(changelogReleaseForVersion('v0.4.4')).toEqual({
-      version: '0.4.4',
-      date: '2026-08-15',
-      title: '属性编辑与规则体验升级',
-      summary: '属性编辑现在采用原子保存并支持更直观的时间输入；新增用户身份与随机公式能力，同时提升本地恢复和礼物视频导出的可靠性。',
+    expect(normalizeChangelogVersion(' v0.4.7 ')).toBe('0.4.7');
+    expect(changelogReleaseForVersion('v0.4.7')).toEqual({
+      version: '0.4.7',
+      date: '2026-08-22',
+      title: '自动更新体验优化',
+      summary: '更新下载现在会显示真实进度；校验完成后提供 3 秒安装倒计时和立即安装按钮，替换程序期间页面会持续提示并自动重连。',
       highlights: [],
       visuals: [],
     });
   });
 
   it('opens once for a known installed version and ignores development builds', () => {
-    expect(shouldShowChangelog('0.4.4', '')).toBe(true);
-    expect(shouldShowChangelog('v0.4.4', '0.4.4')).toBe(false);
+    expect(shouldShowChangelog('0.4.7', '')).toBe(true);
+    expect(shouldShowChangelog('v0.4.7', '0.4.7')).toBe(false);
     expect(shouldShowChangelog('dev', '')).toBe(false);
     expect(shouldShowChangelog('9.9.9', '')).toBe(false);
   });
@@ -50,12 +50,12 @@ describe('versioned changelog', () => {
       ],
     });
     const merged = mergeChangelogReleases(hosted);
-    expect(merged.map((release) => release.version)).toEqual(['0.4.4', '0.1.0']);
+    expect(merged.map((release) => release.version)).toEqual(['0.4.7', '0.1.0']);
     expect(normalizeChangelogReleases({ releases: [{ version: 'broken' }] })).toEqual([]);
   });
 
   it('ignores the removed training visual from bundled and hosted changelogs', () => {
-    expect(changelogReleaseForVersion('0.4.4')?.visuals).toEqual([]);
+    expect(changelogReleaseForVersion('0.4.7')?.visuals).toEqual([]);
     const [hosted] = normalizeChangelogReleases({
       releases: [{
         version: '0.2.5', date: '2026-08-09', title: '测试版本', summary: '测试在线日志。',

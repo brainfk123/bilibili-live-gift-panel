@@ -86,10 +86,34 @@ export function createGiftLoginBadge(gift: Pick<GiftInfo, 'requiresLogin'>): HTM
 }
 
 export function filterGiftPickerGifts(catalog: GiftPickerCatalog, query: string): GiftInfo[] {
-  return catalog.gifts.filter((gift) => (query.length > 0
+  const eligible = catalog.gifts.filter((gift) => query.length > 0
     || !catalog.hasLiveListingStatus
-    || catalog.availabilityById.get(gift.id) !== 'historical')
-    && matchesGiftSearch(gift, query));
+    || catalog.availabilityById.get(gift.id) !== 'historical');
+  const directMatches = eligible.filter((gift) => matchesGiftSearch(gift, query));
+  if (query.length === 0) return directMatches;
+
+  const directIDs = new Set(directMatches.map((gift) => gift.id));
+  const expandedParentIDs = new Set(directMatches
+    .filter((gift) => eligible.some((candidate) => candidate.blindBoxParentId === gift.id))
+    .map((gift) => gift.id));
+  const result: GiftInfo[] = [];
+  const appended = new Set<number>();
+  const append = (gift: GiftInfo): void => {
+    if (appended.has(gift.id)) return;
+    appended.add(gift.id);
+    result.push(gift);
+  };
+
+  for (const gift of directMatches) {
+    if (expandedParentIDs.has(gift.id)) append(gift);
+  }
+  for (const gift of eligible) {
+    if (gift.blindBoxParentId && expandedParentIDs.has(gift.blindBoxParentId)) append(gift);
+  }
+  for (const gift of directMatches) {
+    if (directIDs.has(gift.id)) append(gift);
+  }
+  return result;
 }
 
 export function createGiftPicker(options: GiftPickerOptions): GiftPicker {

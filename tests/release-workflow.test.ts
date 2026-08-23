@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -153,77 +153,61 @@ describe('release workflow supply-chain contract', () => {
     expect(source).not.toContain('github.sha');
   });
 
-  it('runs the publisher only from a separately checked-out protected-environment commit', () => {
-    const { release, steps } = releaseWorkflow();
-    const validateTag = stepIndex(steps, 'Validate release tag');
-    const validateTool = stepIndex(steps, 'Validate update publisher tool commit');
-    const checkoutRelease = stepIndex(steps, 'Check out release tag');
-    const checkoutTool = stepIndex(steps, 'Check out update publisher tooling');
-    const verifyTool = stepIndex(steps, 'Verify update publisher tool checkout');
-    const testUpdateApi = stepIndex(steps, 'Test domestic update tooling');
-    const mirror = stepIndex(steps, 'Mirror release to Tencent COS');
-    const mirrorStep = steps[mirror];
+  it('keeps GitHub Release independent from COS publishers and remote triggers', () => {
+    const { release, source, steps } = releaseWorkflow();
+    const checkoutSteps = steps.filter((step) => step.uses?.startsWith('actions/checkout@'));
 
     expect(release?.environment).toBe('release');
-    expect(release?.env?.UPDATE_PUBLISHER_TOOL_SHA)
-      .toBe('${{ vars.UPDATE_PUBLISHER_TOOL_SHA }}');
-    expect(steps.slice(0, validateTool).map((step) => step.name))
-      .toEqual(['Validate release tag']);
-    expect(validateTag).toBeLessThan(validateTool);
-    expect(validateTool).toBeLessThan(checkoutRelease);
-    expect(steps[validateTool]?.run).toContain(
-      "$env:UPDATE_PUBLISHER_TOOL_SHA -cnotmatch '\\A[0-9A-Fa-f]{40}\\z'",
-    );
-
-    expect(checkoutRelease).toBeLessThan(checkoutTool);
-    expect(steps[checkoutTool]).toMatchObject({
-      uses: 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
-      with: {
-        ref: '${{ env.UPDATE_PUBLISHER_TOOL_SHA }}',
-        path: '_update-publisher-tool',
-        'persist-credentials': false,
-      },
-    });
-    expect(checkoutTool).toBeLessThan(verifyTool);
-    expect(steps[verifyTool]?.run).toContain(
-      "$publisherCheckout = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE '_update-publisher-tool'))",
-    );
-    expect(steps[verifyTool]?.run).toContain('git -C "$publisherCheckout" rev-parse HEAD');
-    expect(steps[verifyTool]?.run).toContain('[StringComparison]::OrdinalIgnoreCase');
-    expect(verifyTool).toBeLessThan(testUpdateApi);
-    expect(steps[testUpdateApi]?.run)
-      .toBe('go -C _update-publisher-tool/updateapi test ./... -race -count=1');
-
-    expect(mirrorStep?.['working-directory']).toBeUndefined();
-    expect(mirrorStep?.run).toContain(
-      "$publisherModuleRoot = [IO.Path]::GetFullPath((Join-Path $releaseRoot '_update-publisher-tool\\updateapi'))",
-    );
-    expect(mirrorStep?.run).toContain(
-      "$assetPath = [IO.Path]::GetFullPath((Join-Path $releaseRoot 'dist\\gift-panel-windows-x64.exe'))",
-    );
-    expect(mirrorStep?.run).toContain('& go -C "$publisherModuleRoot" run ./cmd/publish');
-    expect(mirrorStep?.run).toContain('--asset "$assetPath"');
-    expect(mirrorStep?.run).toContain('--checksum "$checksumPath"');
-    expect(mirrorStep?.run).toContain('--changelog "$changelogPath"');
-    expect(mirrorStep?.run).not.toContain('go run ./cmd/publish');
-    expect(mirrorStep?.run).not.toContain('../dist/');
+    expect(checkoutSteps).toHaveLength(1);
+    expect(checkoutSteps[0]?.name).toBe('Check out release tag');
+    for (const [name, forbidden] of [
+      ['COS release secret ID', /COS_RELEASE_SECRET_ID/i],
+      ['COS release secret key', /COS_RELEASE_SECRET_KEY/i],
+      ['publisher tool pin', /UPDATE_PUBLISHER_TOOL_SHA/i],
+      ['publisher tool checkout', /_update-publisher-tool/i],
+      ['Tencent COS', /Tencent\s+COS/i],
+      ['TAT', /\bTAT\b/i],
+      ['webhook', /\bwebhooks?\b/i],
+      ['connectivity script', /test-cos-connectivity/i],
+    ]) {
+      expect(source, `release workflow must not reference ${name}`).not.toMatch(forbidden);
+    }
+    expect(source).not.toMatch(/\bgo(?:\.exe)?(?:\s+-C\s+\S+)?\s+run\s+\.\/cmd\/publish\b/);
   });
 
-  it('isolates every pinned publisher Go command from tag-controlled workspaces', () => {
-    const { steps } = releaseWorkflow();
-    const pinnedToolGoSteps = steps.filter((step) => (
-      typeof step.run === 'string' &&
-      /\bgo(?:\.exe)?\b/.test(step.run) &&
-      (step.run.includes('_update-publisher-tool') || step.run.includes('$publisherModuleRoot'))
-    ));
+  it('keeps obsolete direct COS connectivity entry points deleted', () => {
+    expect(existsSync(new URL('../.github/workflows/cos-connectivity-test.yml', import.meta.url)))
+      .toBe(false);
+    expect(existsSync(new URL('../scripts/test-cos-connectivity.mjs', import.meta.url)))
+      .toBe(false);
+  });
 
-    expect(pinnedToolGoSteps.map((step) => step.name)).toEqual([
-      'Test domestic update tooling',
-      'Mirror release to Tencent COS',
-    ]);
-    for (const step of pinnedToolGoSteps) {
-      expect(step.env?.GOWORK, `${step.name} must ignore a release-tag go.work`).toBe('off');
+  it('validates release publication timestamps without producing unused publisher metadata', () => {
+    const { steps } = releaseWorkflow();
+
+    for (const name of ['Inspect existing GitHub release', 'Create GitHub release']) {
+      const run = steps[stepIndex(steps, name)]?.run ?? '';
+      expect(run, name).toContain('$publishedAt = [DateTimeOffset]$release.published_at');
+      expect(run, name).not.toContain('$publishedAtRFC3339');
+      expect(run, name).toContain('publication timestamp is invalid');
     }
+  });
+
+  it('race-tests the update module from the release tag checkout itself', () => {
+    const { steps } = releaseWorkflow();
+    const checkoutRelease = stepIndex(steps, 'Check out release tag');
+    const setupGo = stepIndex(steps, 'Set up Go');
+    const testUpdateApi = stepIndex(steps, 'Test domestic update tooling');
+
+    expect(checkoutRelease).toBeLessThan(setupGo);
+    expect(steps[setupGo]?.with).toMatchObject({
+      'go-version-file': 'updateapi/go.mod',
+      'cache-dependency-path': 'updateapi/go.sum',
+    });
+    expect(setupGo).toBeLessThan(testUpdateApi);
+    expect(steps[testUpdateApi]?.env?.GOWORK).toBe('off');
+    expect(steps[testUpdateApi]?.run)
+      .toBe('go -C updateapi test ./... -race -count=1');
   });
 
   it('uses the audited setup-msys2 v2 commit and rejects mutable refs', () => {
@@ -270,6 +254,40 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[e2e]?.run).toContain('npm run verify:gift-clip-export');
   });
 
+  it('reuses an immutable signed FFmpeg component before entering the build path', () => {
+    const { steps } = releaseWorkflow();
+    const identity = stepIndex(steps, 'Resolve FFmpeg component identity');
+    const inspect = stepIndex(steps, 'Inspect signed FFmpeg component');
+    const downloadHit = stepIndex(steps, 'Download signed FFmpeg component');
+    const setup = stepIndex(steps, 'Set up MSYS2 host environment');
+    const build = stepIndex(steps, 'Build and verify pinned FFmpeg');
+    const sign = stepIndex(steps, 'Sign and verify inner FFmpeg');
+    const packageComponent = stepIndex(steps, 'Package signed FFmpeg component');
+    const attestComponent = stepIndex(steps, 'Attest signed FFmpeg component');
+    const publish = stepIndex(steps, 'Publish signed FFmpeg component');
+    const downloadPublished = stepIndex(steps, 'Download published FFmpeg component');
+    const install = stepIndex(steps, 'Verify and install signed FFmpeg component');
+    const buildOuter = stepIndex(steps, 'Build release executable');
+
+    expect([identity, inspect, downloadHit, setup, build, sign, packageComponent, attestComponent, publish, downloadPublished, install, buildOuter])
+      .toEqual([...new Set([identity, inspect, downloadHit, setup, build, sign, packageComponent, attestComponent, publish, downloadPublished, install, buildOuter])].sort((a, b) => a - b));
+    for (const index of [setup, build, sign, packageComponent, publish, downloadPublished]) {
+      expect(steps[index]?.if).toContain("env.FFMPEG_COMPONENT_EXISTS != 'true'");
+    }
+    expect(steps[downloadHit]?.if).toContain("env.FFMPEG_COMPONENT_EXISTS == 'true'");
+    expect(steps[install]?.run).toContain('scripts/ffmpeg-component-assets.mjs install');
+    expect(steps[install]?.run).toContain('verify-metadata');
+    expect(steps[downloadPublished]?.run).toContain('Invoke-RestMethod');
+    expect(steps[downloadPublished]?.run).toContain('ffmpeg-component-release.json');
+    expect(steps[attestComponent]?.uses).toBe('actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6');
+    expect(steps[install]?.run).toContain('gh attestation verify');
+    expect(steps[install]?.run).toContain('ffmpeg-build-config.txt');
+    expect(steps[publish]?.run).not.toContain('--clobber');
+    expect(steps[publish]?.run).toContain('--latest=false');
+    expect(steps[publish]?.run).toContain('Another publisher created the FFmpeg component');
+    expect(steps[publish]?.run).toContain('Invoke-RestMethod');
+  });
+
   it('gates release publication on update tooling tests and the expected signer subject', () => {
     const { steps } = releaseWorkflow();
     const testUpdateApi = stepIndex(steps, 'Test domestic update tooling');
@@ -277,7 +295,7 @@ describe('release workflow supply-chain contract', () => {
     const githubRelease = stepIndex(steps, 'Create GitHub release');
 
     expect(steps[testUpdateApi]?.run)
-      .toBe('go -C _update-publisher-tool/updateapi test ./... -race -count=1');
+      .toBe('go -C updateapi test ./... -race -count=1');
     expect(testUpdateApi).toBeLessThan(githubRelease);
     expect(signOuter).toBeLessThan(githubRelease);
     expect(steps[signOuter]?.env?.EVSIGN_EXPECTED_SUBJECT)
@@ -291,41 +309,29 @@ describe('release workflow supply-chain contract', () => {
     );
   });
 
-  it('builds domestic update identity into the signed executable before mirroring it last', () => {
+  it('builds domestic update identity into the signed executable and ends at a validated GitHub Release', () => {
     const { steps } = releaseWorkflow();
     const build = stepIndex(steps, 'Build release executable');
+    const prepareCli = stepIndex(steps, 'Prepare pinned EVSign CLI for outer executable');
     const sign = stepIndex(steps, 'Prepare and sign release executable');
     const githubRelease = stepIndex(steps, 'Create GitHub release');
-    const mirror = stepIndex(steps, 'Mirror release to Tencent COS');
-    const mirrorStep = steps[mirror];
+    const validate = stepIndex(steps, 'Validate published release assets');
 
     expect(steps[build]?.env).toMatchObject({
       APP_COMMIT: '${{ env.RELEASE_COMMIT }}',
       APP_UPDATE_API_URL: '${{ vars.UPDATE_API_BASE_URL }}',
       APP_UPDATE_PUBLISHER: '${{ vars.EVSIGN_EXPECTED_SUBJECT }}',
+      EVSIGN_EXPECTED_SUBJECT: '${{ vars.EVSIGN_EXPECTED_SUBJECT }}',
     });
-    expect(steps[sign]?.run).toContain(
-      'node scripts/sign-evsign.mjs dist/gift-panel-windows-x64.exe',
-    );
-    expect(githubRelease).toBeLessThan(mirror);
-    expect(mirror).toBe(steps.length - 1);
-    expect(mirrorStep?.['working-directory']).toBeUndefined();
-    expect(mirrorStep?.run).toContain(
-      '& go -C "$publisherModuleRoot" run ./cmd/publish --tag $env:RELEASE_TAG --published-at $env:RELEASE_PUBLISHED_AT',
-    );
-    expect(mirrorStep?.run).toContain('throw "Tencent COS release mirror failed"');
-    expect(mirrorStep?.run).toContain("$publishOutput -contains 'stable unchanged'");
-    expect(mirrorStep?.run).toContain(
-      'stable unchanged because the channel is already on an equal or newer version',
-    );
-    expect(mirrorStep?.env).toEqual({
-      GOWORK: 'off',
-      COS_BUCKET: '${{ vars.COS_BUCKET }}',
-      COS_REGION: '${{ vars.COS_REGION }}',
-      COS_SECRET_ID: '${{ secrets.COS_RELEASE_SECRET_ID }}',
-      COS_SECRET_KEY: '${{ secrets.COS_RELEASE_SECRET_KEY }}',
-    });
-    expect(mirrorStep?.run).not.toMatch(/COS_(?:SECRET_ID|SECRET_KEY)/);
+    expect(build).toBeLessThan(prepareCli);
+    expect(prepareCli).toBeLessThan(sign);
+    expect(steps[prepareCli]?.run).toContain('https://mc.evsign.cn/evsign-client-cli-windows-latest');
+    expect(steps[prepareCli]?.run).toContain('b1b2168a1d0ea757f26db18ac2e2b14e06fb74021f0d67add5e6be1a47dffd97');
+    expect(steps[prepareCli]?.run).toContain('6DCBCC70A507DCAE74135DCB57047CC3365E9F03');
+    expect(steps[sign]?.env?.EVSIGN_CLI_PATH).toBe('${{ runner.temp }}\\evsign-client-1.0.1.exe');
+    expect(steps[sign]?.run).toContain('node scripts/sign-evsign-cli.mjs dist/gift-panel-windows-x64.exe');
+    expect(githubRelease).toBeLessThan(validate);
+    expect(validate).toBe(steps.length - 1);
   });
 
   it('reuses complete existing GitHub assets without rebuilding, resigning, or clobbering', () => {
@@ -337,7 +343,6 @@ describe('release workflow supply-chain contract', () => {
     const prepare = stepIndex(steps, 'Prepare release assets');
     const create = stepIndex(steps, 'Create GitHub release');
     const validate = stepIndex(steps, 'Validate published release assets');
-    const mirror = stepIndex(steps, 'Mirror release to Tencent COS');
 
     expect(inspect).toBeLessThan(download);
     expect(steps[inspect]?.run).toContain('published_at');
@@ -365,8 +370,16 @@ describe('release workflow supply-chain contract', () => {
       'Prepare release assets',
       'Attest executable provenance',
     ]) {
+      const ffmpegMissOnly = new Set([
+        'Set up MSYS2 host environment',
+        'Build and verify pinned FFmpeg',
+        'Sign and verify inner FFmpeg',
+        'Package and verify signed FFmpeg payload',
+      ]);
       expect(steps[stepIndex(steps, name)]?.if, `${name} must be skipped for repair`)
-        .toBe("env.RELEASE_EXISTS != 'true'");
+        .toBe(ffmpegMissOnly.has(name)
+          ? "env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'"
+          : "env.RELEASE_EXISTS != 'true'");
     }
     expect(steps[build]?.if).toBe("env.RELEASE_EXISTS != 'true'");
     expect(steps[sign]?.if).toBe("env.RELEASE_EXISTS != 'true'");
@@ -388,19 +401,7 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[validate]?.run).toContain('Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel-windows-x64.exe');
     expect(steps[validate]?.run).toContain('gift-panel-windows-x64.exe.sha256');
     expect(steps[validate]?.run).toContain('dist/gift-panel-update.json');
-    expect(validate).toBeLessThan(mirror);
-  });
-
-  it('writes release publication timestamps as invariant UTC RFC3339 for the COS publisher', () => {
-    const { steps } = releaseWorkflow();
-    for (const name of ['Inspect existing GitHub release', 'Create GitHub release']) {
-      const run = steps[stepIndex(steps, name)]?.run ?? '';
-      expect(run, name).toContain('.ToUniversalTime()');
-      expect(run, name).toContain("yyyy-MM-dd'T'HH:mm:ss'Z'");
-      expect(run, name).toContain('[Globalization.CultureInfo]::InvariantCulture');
-      expect(run, name).toContain('RELEASE_PUBLISHED_AT=$publishedAtRFC3339');
-      expect(run, name).not.toContain('RELEASE_PUBLISHED_AT=$($release.published_at)');
-    }
+    expect(validate).toBe(steps.length - 1);
   });
 
   it('accepts the exact typed fallback update manifest contract', () => {
@@ -475,7 +476,7 @@ describe('release workflow supply-chain contract', () => {
   ];
 
   it.each(malformedManifestCases)(
-    'rejects fallback manifests with $name before COS repair',
+    'rejects fallback manifests with $name during GitHub Release repair',
     ({ mutate, serialize }) => {
       const manifest = publishedManifestFixture();
       const replacement = mutate(manifest);
@@ -491,15 +492,22 @@ describe('release workflow supply-chain contract', () => {
     const { steps } = releaseWorkflow();
     const ghRuns = steps
       .map((step) => step.run)
-      .filter((run): run is string => typeof run === 'string' && /\bgh (?:api|release)\b/.test(run));
+      .filter((run): run is string => typeof run === 'string' && /\bgh (?:api|release|attestation)\b/.test(run));
     expect(ghRuns.length).toBeGreaterThan(0);
 
     for (const run of ghRuns) {
       const lines = run.split(/\r?\n/);
       for (let index = 0; index < lines.length; index += 1) {
-        if (!/\bgh (?:api|release)\b/.test(lines[index] ?? '')) continue;
-        expect(lines[index + 1]?.trim(), `unchecked gh command: ${lines[index]?.trim()}`)
-          .toMatch(/^if \(\$LASTEXITCODE -ne 0\) \{ throw /);
+        if (!/\bgh (?:api|release|attestation)\b/.test(lines[index] ?? '')) continue;
+        const guard = lines[index + 1]?.trim() ?? '';
+        if (lines[index]?.includes('/git/refs')) {
+          expect(guard, `unchecked gh command: ${lines[index]?.trim()}`).toBe('if ($LASTEXITCODE -ne 0) {');
+          expect(run).toContain('Another publisher created the FFmpeg component');
+          expect(run).toContain('Invoke-RestMethod');
+        } else {
+          expect(guard, `unchecked gh command: ${lines[index]?.trim()}`)
+            .toMatch(/^if \(\$LASTEXITCODE -ne 0\) \{ throw /);
+        }
       }
     }
   });

@@ -2,9 +2,17 @@ package main
 
 import (
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestPagePresenceReadyEventIncludesBackendVersion(t *testing.T) {
+	event := pagePresenceReadyEvent("0.4.5")
+	if !strings.Contains(event, "event: ready\n") || !strings.Contains(event, `"version":"0.4.5"`) {
+		t.Fatalf("ready event = %q", event)
+	}
+}
 
 func TestPagePresenceStreamTracksHTTPConnectionLifecycle(t *testing.T) {
 	server := httptest.NewServer(newPagePresence(nil))

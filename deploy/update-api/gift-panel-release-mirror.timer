@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for Gift Panel releases to mirror
+
+[Timer]
+OnActiveSec=1min
+OnUnitInactiveSec=5min
+Persistent=true
+Unit=gift-panel-release-mirror.service
+
+[Install]
+WantedBy=timers.target

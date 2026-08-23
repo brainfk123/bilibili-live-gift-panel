@@ -35,6 +35,8 @@ const (
 	updateMaxBytes         = int64(256 << 20)
 	updateCheckPeriod      = 6 * time.Hour
 	updateSourceTimeout    = 20 * time.Second
+	updateVerifyNoticeWait = 300 * time.Millisecond
+	updateInstallCountdown = 3 * time.Second
 	updateChecksumMaxBytes = int64(4096)
 	updateInstalledMarker  = "installed-update.json"
 	updateCleanupAttempts  = 3
@@ -56,6 +58,7 @@ type updateStatus struct {
 	LastCheckedAt   int64  `json:"lastCheckedAt,omitempty"`
 	AutoUpdate      bool   `json:"autoUpdate"`
 	RestartRequired bool   `json:"restartRequired"`
+	InstallAt       int64  `json:"installAt,omitempty"`
 }
 
 type githubRelease struct {
@@ -98,37 +101,39 @@ type updateReleaseCandidate struct {
 }
 
 type autoUpdaterOptions struct {
-	Store            *configStore
-	Client           *http.Client
-	CurrentVersion   string
-	ExecutablePath   string
-	UpdatesDir       string
-	ReleaseURL       string
-	ReleaseSources   []updateReleaseSource
-	AssetName        string
-	CheckPeriod      time.Duration
-	Now              func() time.Time
-	VerifyExecutable func(string) error
-	LaunchInstaller  func(string, int, bool) error
-	RemoveFile       func(string) error
+	Store                   *configStore
+	Client                  *http.Client
+	CurrentVersion          string
+	ExecutablePath          string
+	UpdatesDir              string
+	ReleaseURL              string
+	ReleaseSources          []updateReleaseSource
+	AssetName               string
+	CheckPeriod             time.Duration
+	Now                     func() time.Time
+	VerifyExecutable        func(string) error
+	LaunchInstaller         func(string, int, bool) error
+	RemoveFile              func(string) error
+	VerificationNoticeDelay time.Duration
 }
 
 type autoUpdater struct {
-	store            *configStore
-	client           *http.Client
-	currentVersion   string
-	executablePath   string
-	updatesDir       string
-	releaseSources   []updateReleaseSource
-	assetName        string
-	checkPeriod      time.Duration
-	now              func() time.Time
-	trigger          chan bool
-	automaticAllowed func() bool
-	onReady          func(string)
-	verifyExecutable func(string) error
-	launchInstaller  func(string, int, bool) error
-	removeFile       func(string) error
+	store                   *configStore
+	client                  *http.Client
+	currentVersion          string
+	executablePath          string
+	updatesDir              string
+	releaseSources          []updateReleaseSource
+	assetName               string
+	checkPeriod             time.Duration
+	now                     func() time.Time
+	trigger                 chan bool
+	onReady                 func(string)
+	onInstallNow            func()
+	verifyExecutable        func(string) error
+	launchInstaller         func(string, int, bool) error
+	removeFile              func(string) error
+	verificationNoticeDelay time.Duration
 
 	mu      sync.Mutex
 	status  updateStatus
@@ -270,6 +275,10 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 	if removeFile == nil {
 		removeFile = os.Remove
 	}
+	verificationNoticeDelay := options.VerificationNoticeDelay
+	if verificationNoticeDelay <= 0 {
+		verificationNoticeDelay = updateVerifyNoticeWait
+	}
 	releaseSources := append([]updateReleaseSource(nil), options.ReleaseSources...)
 	if len(releaseSources) == 0 && strings.TrimSpace(options.ReleaseURL) != "" {
 		releaseSources = []updateReleaseSource{{Name: "更新源", URL: options.ReleaseURL, GitHub: true}}
@@ -278,20 +287,20 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 		releaseSources = defaultUpdateReleaseSources()
 	}
 	updater := &autoUpdater{
-		store:            options.Store,
-		client:           client,
-		currentVersion:   strings.TrimPrefix(strings.TrimSpace(options.CurrentVersion), "v"),
-		executablePath:   options.ExecutablePath,
-		updatesDir:       options.UpdatesDir,
-		releaseSources:   releaseSources,
-		assetName:        options.AssetName,
-		checkPeriod:      period,
-		now:              now,
-		trigger:          make(chan bool, 1),
-		automaticAllowed: func() bool { return true },
-		verifyExecutable: verifyExecutable,
-		launchInstaller:  launchInstaller,
-		removeFile:       removeFile,
+		store:                   options.Store,
+		client:                  client,
+		currentVersion:          strings.TrimPrefix(strings.TrimSpace(options.CurrentVersion), "v"),
+		executablePath:          options.ExecutablePath,
+		updatesDir:              options.UpdatesDir,
+		releaseSources:          releaseSources,
+		assetName:               options.AssetName,
+		checkPeriod:             period,
+		now:                     now,
+		trigger:                 make(chan bool, 1),
+		verifyExecutable:        verifyExecutable,
+		launchInstaller:         launchInstaller,
+		removeFile:              removeFile,
+		verificationNoticeDelay: verificationNoticeDelay,
 	}
 	if updater.currentVersion == "" {
 		updater.currentVersion = "dev"
@@ -349,8 +358,13 @@ func (updater *autoUpdater) Run(ctx context.Context) {
 	if updater == nil {
 		return
 	}
-	if updater.canCheck() && updater.autoUpdateEnabled() && updater.Status().State != "ready" {
-		updater.checkAndDownload(ctx, false)
+	if updater.canCheck() {
+		status := updater.Status()
+		if status.State == "ready" && updater.HasPending() {
+			updater.notifyReady(status.LatestVersion)
+		} else if updater.autoUpdateEnabled() && status.State != "ready" {
+			updater.checkAndDownload(ctx, false)
+		}
 	}
 	ticker := time.NewTicker(updater.checkPeriod)
 	defer ticker.Stop()
@@ -380,22 +394,16 @@ func (updater *autoUpdater) NotifySettingsChanged() {
 	}
 }
 
-func (updater *autoUpdater) NotifyIdle() {
-	if updater == nil || !updater.autoUpdateEnabled() {
-		return
-	}
-	select {
-	case updater.trigger <- false:
-	default:
-	}
-}
-
 func (updater *autoUpdater) CheckNow() updateStatus {
 	if updater == nil {
 		return updateStatus{State: "error", CurrentVersion: appVersion, Message: "更新模块未初始化。"}
 	}
 	if !updater.canCheck() {
 		return updater.Status()
+	}
+	status := updater.Status()
+	if status.State == "checking" || status.State == "downloading" || status.State == "verifying" || status.State == "ready" || status.State == "installing" {
+		return status
 	}
 	updater.setStatus("checking", updater.Status().LatestVersion, "正在检查最新版本…", 0, false)
 	select {
@@ -413,21 +421,11 @@ func (updater *autoUpdater) Status() updateStatus {
 	status := updater.status
 	updater.mu.Unlock()
 	status.AutoUpdate = updater.autoUpdateEnabled()
-	if !status.AutoUpdate && status.State != "ready" && status.State != "downloading" && status.State != "checking" && updater.canCheck() {
+	if !status.AutoUpdate && status.State != "ready" && status.State != "downloading" && status.State != "verifying" && status.State != "installing" && status.State != "checking" && updater.canCheck() {
 		status.State = "disabled"
 		status.Message = "自动更新已关闭，仍可手动检查。"
 	}
 	return status
-}
-
-func (updater *autoUpdater) SetAutomaticAllowed(allowed func() bool) {
-	if updater == nil {
-		return
-	}
-	if allowed == nil {
-		allowed = func() bool { return true }
-	}
-	updater.automaticAllowed = allowed
 }
 
 func (updater *autoUpdater) SetOnReady(onReady func(string)) {
@@ -435,6 +433,13 @@ func (updater *autoUpdater) SetOnReady(onReady func(string)) {
 		return
 	}
 	updater.onReady = onReady
+}
+
+func (updater *autoUpdater) SetOnInstallNow(onInstallNow func()) {
+	if updater == nil {
+		return
+	}
+	updater.onInstallNow = onInstallNow
 }
 
 func (updater *autoUpdater) HasPending() bool {
@@ -521,6 +526,25 @@ func (updater *autoUpdater) handleCheck(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusAccepted, map[string]any{"code": 0, "update": updater.CheckNow()})
 }
 
+func (updater *autoUpdater) handleInstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"code": -1, "message": "不支持的请求方法"})
+		return
+	}
+	updater.mu.Lock()
+	pending := updater.pending != nil
+	install := updater.onInstallNow
+	updater.mu.Unlock()
+	if !pending || install == nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"code": -1, "message": "当前没有等待安装的更新"})
+		return
+	}
+	updater.setStatus("installing", updater.Status().LatestVersion, "正在安装更新，本地服务将短暂重启…", 100, true)
+	install()
+	writeJSON(w, http.StatusAccepted, map[string]any{"code": 0})
+}
+
 func (updater *autoUpdater) canCheck() bool {
 	return isAutoUpdateSupported() && updater.currentVersion != "dev" && len(updater.releaseSources) > 0 && updater.executablePath != "" && updater.updatesDir != ""
 }
@@ -531,10 +555,6 @@ func (updater *autoUpdater) autoUpdateEnabled() bool {
 	}
 	state, err := updater.store.readState()
 	return err == nil && autoUpdateEnabled(state)
-}
-
-func (updater *autoUpdater) automaticUpdateAllowed() bool {
-	return updater.automaticAllowed == nil || updater.automaticAllowed()
 }
 
 func (updater *autoUpdater) automaticCheckDue() bool {
@@ -557,6 +577,55 @@ func (updater *autoUpdater) setStatus(state, latestVersion, message string, prog
 	updater.status.Message = message
 	updater.status.Progress = progress
 	updater.status.RestartRequired = restartRequired
+	updater.status.InstallAt = 0
+}
+
+func (updater *autoUpdater) setReadyStatus(version string) {
+	updater.setStatus("ready", version, "校验完成，3 秒后自动安装。", 100, true)
+	updater.mu.Lock()
+	updater.status.InstallAt = updater.now().Add(updateInstallCountdown).UnixMilli()
+	updater.mu.Unlock()
+}
+
+func (updater *autoUpdater) showVerificationIfDownloading() {
+	updater.mu.Lock()
+	defer updater.mu.Unlock()
+	if updater.status.State == "downloading" {
+		updater.status.State = "verifying"
+		updater.status.Message = "正在校验更新文件…"
+		updater.status.Progress = 99
+	}
+}
+
+func (updater *autoUpdater) setDownloadProgress(received, total int64) {
+	if total <= 0 || received <= 0 {
+		return
+	}
+	progress := int(received * 100 / total)
+	if progress > 99 {
+		progress = 99
+	}
+	updater.mu.Lock()
+	defer updater.mu.Unlock()
+	if updater.status.State == "downloading" && progress > updater.status.Progress {
+		updater.status.Progress = progress
+	}
+}
+
+type updateProgressReader struct {
+	reader   io.Reader
+	total    int64
+	received int64
+	report   func(int64, int64)
+}
+
+func (reader *updateProgressReader) Read(buffer []byte) (int, error) {
+	count, err := reader.reader.Read(buffer)
+	if count > 0 {
+		reader.received += int64(count)
+		reader.report(reader.received, reader.total)
+	}
+	return count, err
 }
 
 func (updater *autoUpdater) markChecked() {
@@ -569,14 +638,14 @@ func (updater *autoUpdater) checkAndDownload(ctx context.Context, manual bool) {
 	if !updater.canCheck() {
 		return
 	}
-	if !manual && (!updater.autoUpdateEnabled() || !updater.automaticUpdateAllowed() || !updater.automaticCheckDue()) {
+	if !manual && (!updater.autoUpdateEnabled() || !updater.automaticCheckDue()) {
 		return
 	}
 	updater.mu.Lock()
 	pending := updater.pending
 	updater.mu.Unlock()
 	if pending != nil {
-		updater.setStatus("ready", pending.Version, fmt.Sprintf("v%s 已下载，页面全部关闭后将自动安装。", pending.Version), 100, true)
+		updater.setReadyStatus(pending.Version)
 		updater.notifyReady(pending.Version)
 		return
 	}
@@ -654,7 +723,7 @@ func (updater *autoUpdater) checkAndDownload(ctx context.Context, manual bool) {
 		updater.mu.Lock()
 		updater.pending = pending
 		updater.mu.Unlock()
-		updater.setStatus("ready", candidate.Version, fmt.Sprintf("v%s 已下载，页面全部关闭后将自动安装。", candidate.Version), 100, true)
+		updater.setReadyStatus(candidate.Version)
 		updater.notifyReady(candidate.Version)
 		return
 	}
@@ -821,7 +890,9 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 			resultErr = errors.Join(resultErr, err)
 		}
 	}()
-	written, copyErr := io.Copy(temporary, io.LimitReader(response.Body, updateMaxBytes+1))
+	limited := io.LimitReader(response.Body, updateMaxBytes+1)
+	progressReader := &updateProgressReader{reader: limited, total: expectedSize, report: updater.setDownloadProgress}
+	written, copyErr := io.Copy(temporary, progressReader)
 	closeErr := temporary.Close()
 	if copyErr != nil {
 		return nil, copyErr
@@ -835,6 +906,8 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 	if written != expectedSize {
 		return nil, fmt.Errorf("下载大小不符：收到 %d 字节，预期 %d 字节", written, expectedSize)
 	}
+	verificationTimer := time.AfterFunc(updater.verificationNoticeDelay, updater.showVerificationIfDownloading)
+	defer verificationTimer.Stop()
 	if err := verifyFileSHA256(temporaryPath, expectedSHA); err != nil {
 		return nil, fmt.Errorf("SHA-256 校验不通过，已丢弃下载文件：%w", err)
 	}
@@ -1034,10 +1107,11 @@ func (updater *autoUpdater) restorePendingUpdate() {
 	updater.status = updateStatus{
 		State:           "ready",
 		CurrentVersion:  updater.currentVersion,
-		LatestVersion:   pending.Version,
-		Message:         fmt.Sprintf("v%s 已下载，页面全部关闭后将自动安装。", pending.Version),
+		LatestVersion:   strings.TrimPrefix(pending.Version, "v"),
+		Message:         "校验完成，3 秒后自动安装。",
 		Progress:        100,
 		RestartRequired: true,
+		InstallAt:       updater.now().Add(updateInstallCountdown).UnixMilli(),
 	}
 }
 

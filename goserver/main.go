@@ -200,17 +200,26 @@ func runMainGiftClipShutdown(stopRuntime, closeGiftClips, closeServer, installUp
 	installUpdate()
 }
 
-func runMainPendingGiftClipUpdate(closeGiftClips, installUpdate func()) {
-	closeGiftClips()
-	installUpdate()
-}
-
 func registerAttributeEditRoutes(mux *http.ServeMux, store *configStore, background *backgroundRuntime, leases *attributeEditLeaseCoordinator, service *attributeEditService) {
 	background.setAttributeFreezeChecker(leases)
 	mux.Handle("/api/attribute-edit-lease", newAttributeEditLeaseHandler(store, leases))
 	handler := newAttributeEditHandler(service)
 	mux.Handle("/api/attribute-edits/session", handler)
 	mux.Handle("/api/attribute-edits", handler)
+}
+
+func updateReadyExitHandler(updateExit chan<- struct{}) func(string) {
+	var once sync.Once
+	return func(_ string) {
+		once.Do(func() {
+			time.AfterFunc(updateInstallCountdown, func() {
+				select {
+				case updateExit <- struct{}{}:
+				default:
+				}
+			})
+		})
+	}
 }
 
 func main() {
@@ -285,37 +294,21 @@ func main() {
 	notifications := newNotificationCenter()
 	updater := newDefaultAutoUpdater(store)
 	installedVersion := updater.ConsumeInstalledVersion()
-	if installedVersion == "" && updater.HasPending() {
-		runMainPendingGiftClipUpdate(closeGiftClips, func() {
-			if err := updater.InstallOnExit(true); err != nil {
-				showStartupError(err.Error())
-			}
-		})
-		return
-	}
 	presence := newPagePresence(notifications)
 	updateExit := make(chan struct{}, 1)
 	instanceExit := make(chan struct{}, 1)
-	requestIdleUpdate := func() {
-		if !presence.IsIdle() {
-			return
+	updater.SetOnReady(updateReadyExitHandler(updateExit))
+	updater.SetOnInstallNow(func() {
+		select {
+		case updateExit <- struct{}{}:
+		default:
 		}
-		if updater.HasPending() {
-			select {
-			case updateExit <- struct{}{}:
-			default:
-			}
-			return
-		}
-		updater.NotifyIdle()
-	}
-	updater.SetAutomaticAllowed(presence.IsIdle)
-	updater.SetOnReady(func(_ string) { requestIdleUpdate() })
-	presence.SetOnIdle(requestIdleUpdate)
+	})
 	runtimeContext, stopRuntime := context.WithCancel(context.Background())
 	background := newBackgroundRuntime(store, func() giftEventSource {
 		return &bilibiliGiftSource{sessionProvider: login.Session}
 	}, notifications)
+	background.roomNotificationResolver = newRoomNotificationProfileResolver(login.roomOwnerUID, background.profileResolver)
 	attributeEditLeases := newDefaultAttributeEditLeaseCoordinator()
 	attributeEdits := newAttributeEditService(store, attributeEditLeases, newAttributeEditID)
 	background.setDiagnosticLogger(diagnostics)
@@ -346,6 +339,7 @@ func main() {
 	mux.Handle("/api/gift-clips/", giftClipAPI)
 	mux.HandleFunc("/api/update", updater.handleStatus)
 	mux.HandleFunc("/api/update/check", updater.handleCheck)
+	mux.HandleFunc("/api/update/install", updater.handleInstall)
 	mux.HandleFunc("/api/changelog", newHostedChangelogHandler(nil, defaultHostedChangelogSources()))
 	mux.HandleFunc("/api/diagnostics/log", func(w http.ResponseWriter, r *http.Request) {
 		if diagnostics == nil {

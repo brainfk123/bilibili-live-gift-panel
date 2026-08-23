@@ -3,7 +3,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"net/http"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -23,14 +26,20 @@ const (
 	trayMessage     = wmApp + 1
 	trayExitCommand = 1001
 
-	nifMessage = 0x00000001
-	nifIcon    = 0x00000002
-	nifTip     = 0x00000004
-	nifInfo    = 0x00000010
-	nimAdd     = 0x00000000
-	nimModify  = 0x00000001
-	nimDelete  = 0x00000002
-	niifInfo   = 0x00000001
+	nifMessage     = 0x00000001
+	nifIcon        = 0x00000002
+	nifTip         = 0x00000004
+	nifInfo        = 0x00000010
+	nimAdd         = 0x00000000
+	nimModify      = 0x00000001
+	nimDelete      = 0x00000002
+	niifInfo       = 0x00000001
+	niifUser       = 0x00000004
+	niifLargeIcon  = 0x00000020
+	imageIcon      = 1
+	lrLoadFromFile = 0x00000010
+	smCXIcon       = 11
+	smCYIcon       = 12
 
 	mfString       = 0x00000000
 	tpmRightButton = 0x00000002
@@ -55,7 +64,10 @@ var (
 	procDispatchMessageW    = user32.NewProc("DispatchMessageW")
 	procGetCursorPos        = user32.NewProc("GetCursorPos")
 	procGetMessageW         = user32.NewProc("GetMessageW")
+	procGetSystemMetrics    = user32.NewProc("GetSystemMetrics")
 	procLoadIconW           = user32.NewProc("LoadIconW")
+	procLoadImageW          = user32.NewProc("LoadImageW")
+	procDestroyIcon         = user32.NewProc("DestroyIcon")
 	procMessageBoxW         = user32.NewProc("MessageBoxW")
 	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
 	procPostMessageW        = user32.NewProc("PostMessageW")
@@ -290,6 +302,8 @@ func trayWindowProc(hWnd, msg, wParam, lParam uintptr) uintptr {
 }
 
 func showTrayNotification(notification desktopNotification) {
+	balloonIcon, releaseBalloonIcon := loadNotificationBalloonIcon(notification.IconURL)
+	defer releaseBalloonIcon()
 	trayIconMu.Lock()
 	defer trayIconMu.Unlock()
 	if !trayIconReady {
@@ -299,11 +313,58 @@ func showTrayNotification(notification desktopNotification) {
 	data.uFlags = nifInfo
 	data.timeoutOrVersion = 10000
 	data.infoFlags = niifInfo
+	if balloonIcon != 0 {
+		data.infoFlags = niifUser | niifLargeIcon
+		data.balloonIcon = balloonIcon
+	}
 	data.info = [256]uint16{}
 	data.infoTitle = [64]uint16{}
 	copy(data.info[:], syscall.StringToUTF16(notification.Body))
 	copy(data.infoTitle[:], syscall.StringToUTF16(notification.Title))
 	_, _, _ = procShellNotifyIconW.Call(nimModify, uintptr(unsafe.Pointer(&data)))
+}
+
+func loadNotificationBalloonIcon(iconURL string) (uintptr, func()) {
+	if strings.TrimSpace(iconURL) == "" {
+		return 0, func() {}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	data, err := buildNotificationIcon(ctx, &http.Client{Timeout: 3 * time.Second}, iconURL)
+	if err != nil {
+		return 0, func() {}
+	}
+	file, err := os.CreateTemp("", "gift-panel-notification-*.ico")
+	if err != nil {
+		return 0, func() {}
+	}
+	path := file.Name()
+	if _, err = file.Write(data); err == nil {
+		err = file.Close()
+	} else {
+		_ = file.Close()
+	}
+	defer os.Remove(path)
+	if err != nil {
+		return 0, func() {}
+	}
+	pathUTF16, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return 0, func() {}
+	}
+	iconWidth, _, _ := procGetSystemMetrics.Call(smCXIcon)
+	iconHeight, _, _ := procGetSystemMetrics.Call(smCYIcon)
+	if iconWidth == 0 || iconHeight == 0 {
+		iconWidth, iconHeight = notificationIconSize, notificationIconSize
+	}
+	icon, _, _ := procLoadImageW.Call(
+		0, uintptr(unsafe.Pointer(pathUTF16)), imageIcon,
+		iconWidth, iconHeight, lrLoadFromFile,
+	)
+	if icon == 0 {
+		return 0, func() {}
+	}
+	return icon, func() { _, _, _ = procDestroyIcon.Call(icon) }
 }
 
 func runTrayNotificationQueue(queue <-chan desktopNotification, stop <-chan struct{}) {

@@ -2,38 +2,39 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
+import {
+  canonicalToolchainLock,
+  componentGateRecord,
+  ffmpegComponentIdentity,
+  loadFFmpegPolicy,
+  validateToolchainLock,
+} from './ffmpeg-policy.mjs';
 
 const maximumSize = 40_000_000;
 const warningSize = 30_000_000;
-const sourceSha256 = '7f607a00dd0d28a729d5a4811205812eef01cf6ef6155025febb6f36a9062d52';
-const sourceDateEpoch = '1785797913';
-const exactComponents = [
-  'AAC_ADTSTOASC_BSF', 'AC3_PARSER', 'AFORMAT_FILTER', 'ALPHAMERGE_FILTER', 'ANULL_FILTER', 'ATRIM_FILTER',
-  'CROP_FILTER', 'FILE_PROTOCOL', 'FORMAT_FILTER', 'FPS_FILTER', 'GIF_DECODER', 'GIF_DEMUXER', 'GIF_PARSER',
-  'H264_DECODER', 'H264_MF_ENCODER', 'H264_PARSER', 'HFLIP_FILTER', 'IMAGE2_DEMUXER',
-  'IMAGE_WEBP_PIPE_DEMUXER', 'MOV_DEMUXER', 'MOV_MUXER', 'MP4_MUXER', 'NULL_FILTER', 'OVERLAY_FILTER',
-  'PIPE_PROTOCOL', 'PNG_DECODER', 'ROTATE_FILTER', 'SCALE_FILTER', 'SETPTS_FILTER', 'SPLIT_FILTER',
-  'TRANSPOSE_FILTER', 'TRIM_FILTER', 'VFLIP_FILTER', 'VP8_DECODER', 'VP9_SUPERFRAME_BSF',
-  'WEBP_ANIM_DECODER', 'WEBP_ANIM_DEMUXER', 'WEBP_DECODER',
-];
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 if (process.argv.includes('--self-test')) await runSelfTests();
 else await main();
 
 async function main() {
+  const policy = await loadFFmpegPolicy(root);
+  const identity = ffmpegComponentIdentity(policy);
   const payloadOnly = process.argv.includes('--payload-only');
-  const payloadDirectory = join(root, 'goserver', 'ffmpeg');
+  const payloadDirectoryArgument = readArgument('--payload-directory');
+  const payloadDirectory = payloadDirectoryArgument ? resolve(payloadDirectoryArgument) : join(root, 'goserver', 'ffmpeg');
+  const buildConfigArgument = readArgument('--build-config');
+  const expectedBuildConfig = buildConfigArgument ? await readFile(resolve(buildConfigArgument), 'utf8') : undefined;
   const manifest = parseManifest(await readFile(join(payloadDirectory, 'manifest.json'), 'utf8'));
   const archive = await readFile(join(payloadDirectory, 'ffmpeg.zip'));
-  validateManifest(manifest, archive);
+  validateManifest(manifest, archive, identity);
   if (archive.length > warningSize) console.warn(`WARNING: FFmpeg ZIP exceeds the ${warningSize}-byte target: ${archive.length}`);
   const binary = readSingleFileZip(archive, 'ffmpeg.exe', manifest.size);
   assert(createHash('sha256').update(binary).digest('hex') === manifest.sha256, 'Binary SHA-256 does not match manifest.');
-  const expectedGate = await componentGateRecord(manifest.sha256, manifest.size, binary);
+  const expectedGate = componentGateRecord(policy, binary);
   validateComponentGate(expectedGate, Buffer.from(manifest.component_gate, 'utf8'), manifest);
   if ((process.env.APP_VERSION || 'dev').replace(/^v/, '') !== 'dev' && manifest.authenticode !== true) {
     throw new Error('Release verification requires an Authenticode-signed inner FFmpeg payload.');
@@ -44,8 +45,8 @@ async function main() {
     const executable = join(temporaryRoot, 'ffmpeg.exe');
     await writeFile(executable, binary, { flag: 'wx' });
     await chmod(executable, 0o700);
-    if (manifest.authenticode) verifyAuthenticode(executable);
-    verifyRuntimeSurface(executable, await configureFlags());
+    if (manifest.authenticode) verifyAuthenticode(executable, manifest.signer_subject);
+    verifyRuntimeSurface(executable, policy.configureFlags, expectedBuildConfig);
     if (!payloadOnly) runGoVerification(executable);
     console.log(`verified FFmpeg ${manifest.version}: binary ${manifest.size} bytes, ZIP ${archive.length} bytes, SHA-256 ${manifest.sha256}, authenticode=${manifest.authenticode}`);
   } finally {
@@ -53,10 +54,14 @@ async function main() {
   }
 }
 
-function verifyRuntimeSurface(executable, flags) {
+function verifyRuntimeSurface(executable, flags, expectedBuildConfig) {
   const version = run(executable, ['-version']);
   assert(/^ffmpeg version 9\.0(?:\s|$)/m.test(version), 'FFmpeg version is not exactly 9.0.');
   const buildconf = run(executable, ['-buildconf']);
+  if (expectedBuildConfig !== undefined) {
+    const normalize = (value) => value.replace(/\r\n/g, '\n').trimEnd();
+    assert(normalize(buildconf) === normalize(expectedBuildConfig), 'FFmpeg build config asset does not match executable output.');
+  }
   const normalizedBuildconf = buildconf.replaceAll("'", '');
   assert(!/--enable-(?:gpl|nonfree)\b/i.test(buildconf), 'GPL or nonfree support is enabled.');
   for (const flag of flags) assert(normalizedBuildconf.includes(flag), `Build configuration is missing ${flag}.`);
@@ -75,7 +80,7 @@ function verifyRuntimeSurface(executable, flags) {
 }
 
 function parseManifest(text) {
-  const allowed = new Set(['version', 'sha256', 'archive_sha256', 'component_gate', 'component_gate_sha256', 'size', 'authenticode']);
+  const allowed = new Set(['schema', 'component_fingerprint', 'descriptor', 'descriptor_sha256', 'version', 'sha256', 'archive_sha256', 'component_gate', 'component_gate_sha256', 'size', 'authenticode', 'signer_subject', 'source_release_commit']);
   let offset = 0;
   const skipSpace = () => { while (/\s/.test(text[offset] || '')) offset += 1; };
   const expect = (character) => { skipSpace(); assert(text[offset] === character, `Manifest expected ${character}.`); offset += 1; };
@@ -124,15 +129,27 @@ function parseManifest(text) {
   return result;
 }
 
-function validateManifest(value, archive) {
+function validateManifest(value, archive, identity) {
   const keys = Object.keys(value).sort().join(',');
-  assert(keys === 'archive_sha256,authenticode,component_gate,component_gate_sha256,sha256,size,version', `Unexpected manifest schema: ${keys}`);
+  assert(keys === 'archive_sha256,authenticode,component_fingerprint,component_gate,component_gate_sha256,descriptor,descriptor_sha256,schema,sha256,signer_subject,size,source_release_commit,version', `Unexpected manifest schema: ${keys}`);
+  assert(value.schema === 1, 'Manifest schema version is invalid.');
   assert(value.version === '9.0', `Manifest version is ${value.version}.`);
-  for (const [name, hash] of [['binary', value.sha256], ['archive', value.archive_sha256], ['component gate', value.component_gate_sha256]]) {
+  for (const [name, hash] of [['component fingerprint', value.component_fingerprint], ['descriptor', value.descriptor_sha256], ['binary', value.sha256], ['archive', value.archive_sha256], ['component gate', value.component_gate_sha256]]) {
     assert(/^[0-9a-f]{64}$/.test(hash), `Manifest ${name} SHA-256 is malformed.`);
   }
+  assert(typeof value.descriptor === 'string' && Buffer.byteLength(value.descriptor) > 0 && Buffer.byteLength(value.descriptor) <= 16_384, 'Manifest descriptor is invalid.');
+  assert(createHash('sha256').update(value.descriptor).digest('hex') === value.descriptor_sha256, 'Manifest descriptor SHA-256 does not match descriptor.');
+  assert(value.component_fingerprint === identity.fingerprint && value.descriptor_sha256 === identity.descriptorSha256 && value.descriptor === identity.descriptor.toString('utf8'), 'Manifest component identity does not match local policy.');
   assert(Number.isSafeInteger(value.size) && value.size > 0 && value.size <= maximumSize, 'Manifest size is invalid.');
   assert(typeof value.authenticode === 'boolean', 'Manifest authenticode field is invalid.');
+  assert(typeof value.signer_subject === 'string' && !/[\r\n]/.test(value.signer_subject), 'Manifest signer subject is invalid.');
+  assert(typeof value.source_release_commit === 'string' && /^[0-9a-f]{40}$/.test(value.source_release_commit), 'Manifest source release commit is invalid.');
+  if (value.authenticode) {
+    assert(value.signer_subject.length > 0 && value.source_release_commit !== '0'.repeat(40), 'Signed manifest metadata is invalid.');
+    assert(value.signer_subject === process.env.EVSIGN_EXPECTED_SUBJECT?.trim(), 'Manifest signer subject does not match EVSIGN_EXPECTED_SUBJECT.');
+  } else {
+    assert(value.signer_subject === '' && value.source_release_commit === '0'.repeat(40), 'Unsigned development manifest metadata is invalid.');
+  }
   assert(typeof value.component_gate === 'string' && value.component_gate.length > 0 && value.component_gate.length <= 16_384, 'Manifest component gate record is invalid.');
   assert(archive.length <= maximumSize, `FFmpeg ZIP exceeds the ${maximumSize}-byte hard limit: ${archive.length}`);
   assert(createHash('sha256').update(archive).digest('hex') === value.archive_sha256, 'Archive SHA-256 does not match manifest.');
@@ -187,65 +204,10 @@ function readSingleFileZip(buffer, expectedName, expectedSize) {
   return contents;
 }
 
-async function componentGateRecord(binarySha256, binarySize, binary) {
-  const flags = await configureFlags();
-  const configureHash = createHash('sha256').update(`${flags.join('\n')}\n`).digest('hex');
-  const { lock, bytes: toolchainLockBytes } = await readToolchainLock();
-  return Buffer.from([
-    'ffmpeg_version=9.0', `source_sha256=${sourceSha256}`, `source_date_epoch=${sourceDateEpoch}`,
-    `configure_sha256=${configureHash}`, `binary_sha256=${binarySha256}`, `binary_size=${binarySize}`,
-    `pe_authenticode_content_sha256=${authenticodeContentHash(binary)}`,
-    `toolchain_lock_sha256=${createHash('sha256').update(toolchainLockBytes).digest('hex')}`,
-    '[toolchain]',
-    ...lock.packages.map(({ name, version }) => `${name}=${version}`).sort(),
-    `gcc_version=${lock.executables.gcc}`, `ld_version=${lock.executables.ld}`, `make_version=${lock.executables.make}`,
-    '[components]', ...exactComponents, '[infrastructure]', 'D3D11VA', 'MEDIAFOUNDATION', '',
-  ].join('\n'));
-}
-
-async function readToolchainLock() {
-  const bytes = await readFile(join(root, 'third_party', 'ffmpeg', 'toolchain-lock.json'));
-  let lock;
-  try { lock = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('FFmpeg toolchain lock is not valid JSON.'); }
-  validateToolchainLock(lock);
-  return { lock, bytes: canonicalToolchainLock(lock) };
-}
-
-function canonicalToolchainLock(lock) {
-  validateToolchainLock(lock);
-  const lines = [`schema=${lock.schema}`, `source=${lock.source}`];
-  for (const item of lock.packages) lines.push(`package\t${item.name}\t${item.version}\t${item.url}\t${item.sha256}\t${item.signature_url}\t${item.signature_sha256}`);
-  lines.push(`gcc=${lock.executables.gcc}`, `ld=${lock.executables.ld}`, `make=${lock.executables.make}`);
-  return Buffer.from(`${lines.join('\n')}\n`);
-}
-
-function validateToolchainLock(lock) {
-  assert(lock && Object.getPrototypeOf(lock) === Object.prototype, 'Toolchain lock must be one object.');
-  assert(Object.keys(lock).sort().join(',') === 'executables,packages,schema,source', 'Toolchain lock schema is unexpected.');
-  assert(lock.schema === 1 && lock.source === 'https://repo.msys2.org', 'Toolchain lock source/schema is invalid.');
-  assert(Array.isArray(lock.packages) && lock.packages.length > 0, 'Toolchain lock packages are missing.');
-  const seen = new Set();
-  for (const item of lock.packages) {
-    assert(item && Object.getPrototypeOf(item) === Object.prototype && Object.keys(item).sort().join(',') === 'name,sha256,signature_sha256,signature_url,url,version', 'Toolchain lock package schema is invalid.');
-    assert(/^[a-z0-9][a-z0-9+._-]*$/.test(item.name) && /^[0-9A-Za-z][0-9A-Za-z.+_~-]*$/.test(item.version) && !seen.has(item.name), 'Toolchain lock package identity is invalid or duplicated.');
-    seen.add(item.name);
-    assert(/^https:\/\/repo\.msys2\.org\/(?:msys\/x86_64|mingw\/ucrt64)\/[A-Za-z0-9+._~-]+\.pkg\.tar\.zst$/.test(item.url) && item.signature_url === `${item.url}.sig`, 'Toolchain lock package URL is invalid.');
-    assert(/^[0-9a-f]{64}$/.test(item.sha256) && /^[0-9a-f]{64}$/.test(item.signature_sha256), 'Toolchain lock package hash is invalid.');
-  }
-  const requiredPackages = ['bash','coreutils','diffutils','gawk','gcc-libs','gmp','grep','libiconv','libintl','libpcre','libreadline','make','mingw-w64-ucrt-x86_64-binutils','mingw-w64-ucrt-x86_64-crt','mingw-w64-ucrt-x86_64-gcc','mingw-w64-ucrt-x86_64-gcc-libs','mingw-w64-ucrt-x86_64-gettext-runtime','mingw-w64-ucrt-x86_64-gmp','mingw-w64-ucrt-x86_64-headers','mingw-w64-ucrt-x86_64-isl','mingw-w64-ucrt-x86_64-libiconv','mingw-w64-ucrt-x86_64-libwinpthread','mingw-w64-ucrt-x86_64-mpc','mingw-w64-ucrt-x86_64-mpfr','mingw-w64-ucrt-x86_64-tzdata','mingw-w64-ucrt-x86_64-windows-default-manifest','mingw-w64-ucrt-x86_64-winpthreads','mingw-w64-ucrt-x86_64-zlib','mingw-w64-ucrt-x86_64-zstd','mpfr','msys2-runtime','nasm','ncurses','pkgconf','sed'];
-  assert([...seen].sort().join(',') === requiredPackages.sort().join(','), 'Toolchain package closure differs from the approved exact set.');
-  assert(lock.executables && Object.getPrototypeOf(lock.executables) === Object.prototype && Object.keys(lock.executables).sort().join(',') === 'gcc,ld,make', 'Toolchain lock executable schema is invalid.');
-  for (const value of Object.values(lock.executables)) assert(typeof value === 'string' && value.length > 0 && !/[\r\n]/.test(value), 'Toolchain lock executable version is invalid.');
-}
-
 function validateComponentGate(expected, actual, manifest) {
   assert(Buffer.isBuffer(actual), 'FFmpeg component gate record is absent.');
   assert(actual.equals(expected), 'FFmpeg component gate record is mismatched or stale.');
   assert(createHash('sha256').update(actual).digest('hex') === manifest.component_gate_sha256, 'FFmpeg component gate record hash does not match manifest.');
-}
-
-async function configureFlags() {
-  return (await readFile(join(root, 'third_party', 'ffmpeg', 'configure.flags'), 'utf8')).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
 function run(executable, arguments_) {
@@ -264,9 +226,20 @@ function runGoVerification(executable) {
   }
 }
 
-function verifyAuthenticode(path) {
-  const status = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "& { param([string]$path) Import-Module (Join-Path $env:WINDIR 'System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security'); (Get-AuthenticodeSignature -LiteralPath $path).Status.ToString() }", path], { encoding: 'utf8', windowsHide: true }).trim();
-  assert(status === 'Valid', `FFmpeg Authenticode signature status is ${status || 'missing'}, expected Valid.`);
+function verifyAuthenticode(path, expectedSubject) {
+  const output = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "& { param([string]$path) Import-Module (Join-Path $env:WINDIR 'System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security'); $signature = Get-AuthenticodeSignature -LiteralPath $path; @{ status = $signature.Status.ToString(); subject = if ($null -eq $signature.SignerCertificate) { '' } else { $signature.SignerCertificate.Subject } } | ConvertTo-Json -Compress }", path], { encoding: 'utf8', windowsHide: true }).trim();
+  let signature;
+  try { signature = JSON.parse(output); } catch { throw new Error('FFmpeg Authenticode verification returned malformed output.'); }
+  assert(signature.status === 'Valid', `FFmpeg Authenticode signature status is ${signature.status || 'missing'}, expected Valid.`);
+  assert(signature.subject === expectedSubject, 'FFmpeg Authenticode signer subject does not match manifest.');
+}
+
+function readArgument(name) {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return undefined;
+  const value = process.argv[index + 1];
+  assert(value && !value.startsWith('--'), `${name} requires a value.`);
+  return value;
 }
 
 function parseProtocols(output) { const result = new Set(); for (const line of output.split(/\r?\n/)) { const value = line.trim(); if (value && !value.endsWith(':') && !value.startsWith('Supported file protocols')) result.add(value); } return result; }
@@ -278,19 +251,11 @@ function parseSimpleList(output, header) { const result = new Set(); for (const 
 function parseDevices(output) { const result = new Set(); for (const line of output.split(/\r?\n/)) { const match = line.match(/^\s*[D.][E.]\s+([^\s]+)\s/); if (match && match[1] !== '=') result.add(match[1]); } return result; }
 function assertExactSet(actual, expected, label) { const unexpected = [...actual].filter((name) => !expected.has(name)); const missing = [...expected].filter((name) => !actual.has(name)); assert(!unexpected.length && !missing.length, `${label} whitelist mismatch; unexpected=[${unexpected}], missing=[${missing}].`); }
 function crc32(contents) { let crc = 0xffffffff; for (const byte of contents) { crc ^= byte; for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1)); } return (crc ^ 0xffffffff) >>> 0; }
-function authenticodeContentHash(binary) {
-  assert(binary.length >= 0x100 && binary.readUInt16LE(0) === 0x5a4d, 'FFmpeg input is not a valid PE image.');
-  const pe = binary.readUInt32LE(0x3c); assert(pe + 24 <= binary.length && binary.readUInt32LE(pe) === 0x00004550, 'FFmpeg input PE header is invalid.');
-  const optional = pe + 24; const magic = binary.readUInt16LE(optional); const dataDirectory = optional + (magic === 0x20b ? 112 : magic === 0x10b ? 96 : -1);
-  const checksum = optional + 64; const securityDirectory = dataDirectory + 32; assert(dataDirectory >= optional && securityDirectory + 8 <= binary.length, 'FFmpeg input PE optional header is invalid.');
-  const certificateOffset = binary.readUInt32LE(securityDirectory); const certificateSize = binary.readUInt32LE(securityDirectory + 4);
-  assert((certificateOffset === 0) === (certificateSize === 0) && certificateOffset <= binary.length && certificateSize <= binary.length - certificateOffset && (!certificateSize || certificateOffset + certificateSize === binary.length), 'FFmpeg input PE certificate table is invalid.');
-  const normalized = Buffer.from(binary.subarray(0, certificateSize ? certificateOffset : binary.length)); normalized.fill(0, checksum, checksum + 4); normalized.fill(0, securityDirectory, securityDirectory + 8);
-  return createHash('sha256').update(normalized).digest('hex');
-}
 function assert(condition, message) { if (!condition) throw new Error(message); }
 
 async function runSelfTests() {
+  const policy = await loadFFmpegPolicy(root);
+  const identity = ffmpegComponentIdentity(policy);
   const lockFixture = JSON.parse(await readFile(join(root, 'third_party', 'ffmpeg', 'toolchain-lock.json'), 'utf8'));
   validateToolchainLock(lockFixture);
   const crlfFixture = JSON.parse(JSON.stringify(lockFixture, null, 2).replaceAll('\n', '\r\n'));
@@ -313,7 +278,7 @@ async function runSelfTests() {
   const bombCentral = bomb.length - 22 - 46 - 'ffmpeg.exe'.length;
   bomb.writeUInt32LE(maximumSize, 22); bomb.writeUInt32LE(maximumSize, bombCentral + 24);
   assertThrows(() => readSingleFileZip(bomb, 'ffmpeg.exe', maximumSize), 'expansion bomb');
-  const baseManifest = `{"version":"9.0","sha256":"${'0'.repeat(64)}","archive_sha256":"${'1'.repeat(64)}","component_gate":"gate\\n","component_gate_sha256":"${'2'.repeat(64)}","size":1,"authenticode":false}`;
+  const baseManifest = JSON.stringify({ schema: 1, component_fingerprint: identity.fingerprint, descriptor: identity.descriptor.toString('utf8'), descriptor_sha256: identity.descriptorSha256, version: '9.0', sha256: '0'.repeat(64), archive_sha256: '1'.repeat(64), component_gate: 'gate\n', component_gate_sha256: '2'.repeat(64), size: 1, authenticode: false, signer_subject: '', source_release_commit: '0'.repeat(40) });
   for (const invalid of [`${baseManifest}{}`, baseManifest.replace('"size":1', '"size":1,"size":1'), baseManifest.replace('"size":1', '"size":1,"extra":1'), baseManifest.replace(/}$/, ',}')]) assertThrows(() => parseManifest(invalid), 'strict manifest');
   const expectedGate = Buffer.from('expected component gate\n');
   const gateManifest = { component_gate_sha256: createHash('sha256').update(expectedGate).digest('hex') };
