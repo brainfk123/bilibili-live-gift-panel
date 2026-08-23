@@ -1,8 +1,10 @@
 package adminidentity
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +16,80 @@ import (
 	"bilibili-live-gift-panel/internal/hosted/identity"
 	"bilibili-live-gift-panel/internal/hosted/security"
 )
+
+func TestLoginEventChallengeCaptureUsesTrustedClientSummaryWithoutReturningIt(t *testing.T) {
+	now := time.Date(2026, 8, 23, 8, 0, 0, 0, time.UTC)
+	service := &adminHTTPService{emailChallenge: EmailLoginChallenge{ChallengeID: "challenge", ExpiresAt: now.Add(time.Minute)}}
+	handler, err := NewHTTPHandler(service, HTTPOptions{
+		AllowedOrigin: "https://panel.example.com", CSRFToken: "csrf-test-token",
+		Limiter: allowAdminLimits{}, ClientIP: func(*http.Request) string { return "203.0.113.45" },
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := mutationRequest(http.MethodPost, "/api/admin/auth/email/challenges", `{}`)
+	request.Header.Set("User-Agent", "Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	want := ClientSummary{DeviceLabel: "iPhone · Safari", ClientNetwork: "203.0.113.*"}
+	if service.emailSummary != want {
+		t.Fatalf("summary=%#v, want %#v", service.emailSummary, want)
+	}
+	for _, forbidden := range []string{"iPhone", "Safari", "203.0.113.45", "203.0.113.*"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("challenge response leaked %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestLoginEventVerificationRecordsSafeFailureAndSuccessAndTouchesSession(t *testing.T) {
+	now := time.Date(2026, 8, 23, 8, 5, 0, 0, time.UTC)
+	repository := &inventoryMemoryRepository{memoryRepository: initializedMemoryRepository(t, now)}
+	sender := &MemorySender{}
+	service := newTestService(t, repository, sender, now)
+	summary := ClientSummary{DeviceLabel: "Windows · Edge", ClientNetwork: "198.51.100.*"}
+	challenge, err := service.BeginEmailLogin(context.Background(), summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := emailCodeFromMessages(t, sender.Messages())
+	wrongCode := "000000"
+	if wrongCode == code {
+		wrongCode = "999999"
+	}
+	if _, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, wrongCode); !errors.Is(err, ErrAuthenticationFailed) {
+		t.Fatalf("failed verification error=%v", err)
+	}
+	login, err := service.VerifyEmailLogin(context.Background(), challenge.ChallengeID, code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repository.createdSummary != summary {
+		t.Fatalf("created summary=%#v, want %#v", repository.createdSummary, summary)
+	}
+	if len(repository.events) != 2 || repository.events[0].Result != "failure" || repository.events[1].Result != "success" {
+		t.Fatalf("events=%#v", repository.events)
+	}
+	for _, event := range repository.events {
+		if event.DeviceLabel != summary.DeviceLabel || event.ClientNetwork != summary.ClientNetwork || !event.OccurredAt.Equal(now) {
+			t.Fatalf("event=%#v", event)
+		}
+		if strings.Contains(event.DeviceLabel, code) || strings.Contains(event.ClientNetwork, code) {
+			t.Fatalf("event retained email code: %#v", event)
+		}
+	}
+	if err := service.RequireSession(context.Background(), login.Token); err != nil {
+		t.Fatal(err)
+	}
+	if repository.touchCalls != 1 || len(repository.touchedHash) != sha256.Size {
+		t.Fatalf("touch calls=%d hash=%x", repository.touchCalls, repository.touchedHash)
+	}
+}
 
 func TestHTTPOperationAuthorizationReturnsSingleUseTokenForBoundPurposeAndTarget(t *testing.T) {
 	service := &adminHTTPService{operationToken: "operation-token"}
@@ -485,6 +561,7 @@ type adminHTTPService struct {
 	emailBeginCalls     int
 	emailChallenge      EmailLoginChallenge
 	emailChallengeErr   error
+	emailSummary        ClientSummary
 	emailLogin          LoginResult
 	emailLoginErr       error
 	emailLoginChallenge string
@@ -514,8 +591,11 @@ type adminHTTPService struct {
 	operationTarget     string
 }
 
-func (service *adminHTTPService) BeginEmailLogin(context.Context) (EmailLoginChallenge, error) {
+func (service *adminHTTPService) BeginEmailLogin(_ context.Context, summaries ...ClientSummary) (EmailLoginChallenge, error) {
 	service.emailBeginCalls++
+	if len(summaries) == 1 {
+		service.emailSummary = summaries[0]
+	}
 	return service.emailChallenge, service.emailChallengeErr
 }
 
@@ -565,6 +645,64 @@ func (service *adminHTTPService) wasCalled() bool {
 	return service.emailBeginCalls != 0 || service.emailLoginChallenge != "" || service.verifySession != "" || service.verifyCode != "" ||
 		service.recoverySession != "" || service.prepareCode != "" || service.confirmToken != "" || service.confirmCode != "" ||
 		service.requireSessionCalls != 0 || service.logoutCalls != 0
+}
+
+type inventoryMemoryRepository struct {
+	*memoryRepository
+	createdSummary ClientSummary
+	events         []AdministratorLoginEvent
+	touchCalls     int
+	touchedHash    []byte
+}
+
+func (repository *inventoryMemoryRepository) CreateAdminSession(ctx context.Context, attempt EmailLoginSessionAttempt, summary ClientSummary) (AdministratorSession, error) {
+	repository.createdSummary = summary
+	if err := repository.CreateEmailLoginSession(ctx, attempt); err != nil {
+		return AdministratorSession{}, err
+	}
+	return AdministratorSession{
+		PublicID: "00112233445566778899aabbccddeeff", DeviceLabel: summary.DeviceLabel,
+		ClientNetwork: summary.ClientNetwork, CreatedAt: attempt.CreatedAt, LastSeenAt: attempt.CreatedAt,
+		ExpiresAt: attempt.ExpiresAt, Current: true,
+	}, nil
+}
+
+func (repository *inventoryMemoryRepository) TouchAdminSession(_ context.Context, tokenHash []byte, _ time.Time) error {
+	repository.touchCalls++
+	repository.touchedHash = bytes.Clone(tokenHash)
+	return nil
+}
+
+func (repository *inventoryMemoryRepository) ListAdminSessions(context.Context, []byte, time.Time) ([]AdministratorSession, error) {
+	return nil, nil
+}
+
+func (repository *inventoryMemoryRepository) RevokeAdminSession(context.Context, []byte, string, time.Time) error {
+	return nil
+}
+
+func (repository *inventoryMemoryRepository) RecordAdminLoginEvent(_ context.Context, event AdministratorLoginEvent) error {
+	repository.events = append(repository.events, event)
+	return nil
+}
+
+func (repository *inventoryMemoryRepository) ListAdminLoginEvents(context.Context, int) ([]AdministratorLoginEvent, error) {
+	return append([]AdministratorLoginEvent(nil), repository.events...), nil
+}
+
+func emailCodeFromMessages(t *testing.T, messages []Message) string {
+	t.Helper()
+	if len(messages) != 1 {
+		t.Fatalf("messages=%d, want 1", len(messages))
+	}
+	for index := 0; index+emailCodeLength <= len(messages[0].Text); index++ {
+		candidate := messages[0].Text[index : index+emailCodeLength]
+		if validEmailLoginCode(candidate) {
+			return candidate
+		}
+	}
+	t.Fatalf("message omitted email code: %q", messages[0].Text)
+	return ""
 }
 
 type allowAdminLimits struct{}

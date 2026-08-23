@@ -1595,6 +1595,7 @@ type EmailLoginChallenge struct {
 type emailLoginState struct {
 	expiresAt time.Time
 	codeHash  []byte
+	summary   ClientSummary
 	epoch     int64
 	attempts  int
 	verifying bool
@@ -1650,9 +1651,19 @@ func NewService(repository Repository, keys security.Keyring, sender MailSender,
 	}, nil
 }
 
-func (service *Service) BeginEmailLogin(ctx context.Context) (EmailLoginChallenge, error) {
+func (service *Service) BeginEmailLogin(ctx context.Context, summaries ...ClientSummary) (EmailLoginChallenge, error) {
 	if service == nil {
 		return EmailLoginChallenge{}, ErrUnavailable
+	}
+	summary := SummarizeClient("", nil)
+	if len(summaries) > 1 {
+		return EmailLoginChallenge{}, ErrInvalidInput
+	}
+	if len(summaries) == 1 {
+		summary = summaries[0]
+	}
+	if !validClientSummary(summary) {
+		return EmailLoginChallenge{}, ErrInvalidInput
 	}
 	record, err := service.repository.Identity(ctx)
 	if err != nil || record.CredentialEpoch < 1 {
@@ -1679,7 +1690,7 @@ func (service *Service) BeginEmailLogin(ctx context.Context) (EmailLoginChalleng
 	}
 	now := service.now()
 	expiresAt := now.Add(service.emailTTL)
-	state := &emailLoginState{expiresAt: expiresAt, codeHash: bytes.Clone(codeHash), epoch: record.CredentialEpoch}
+	state := &emailLoginState{expiresAt: expiresAt, codeHash: bytes.Clone(codeHash), summary: summary, epoch: record.CredentialEpoch}
 	service.emailMu.Lock()
 	if service.emailLogins[challengeID] != nil {
 		service.emailMu.Unlock()
@@ -1697,17 +1708,36 @@ func (service *Service) BeginEmailLogin(ctx context.Context) (EmailLoginChalleng
 	return EmailLoginChallenge{ChallengeID: challengeID, ExpiresAt: expiresAt}, nil
 }
 
-func (service *Service) VerifyEmailLogin(ctx context.Context, challengeID, emailCode string) (LoginResult, error) {
-	if service == nil || challengeID == "" || !validEmailLoginCode(emailCode) {
+func (service *Service) VerifyEmailLogin(ctx context.Context, challengeID, emailCode string) (result LoginResult, resultErr error) {
+	if service == nil {
+		return LoginResult{}, ErrAuthenticationFailed
+	}
+	now := service.now()
+	summary := SummarizeClient("", nil)
+	resultName := "failure"
+	defer func() {
+		repository, ok := service.repository.(AdministratorSessionRepository)
+		if !ok {
+			return
+		}
+		event := AdministratorLoginEvent{Result: resultName, DeviceLabel: summary.DeviceLabel, ClientNetwork: summary.ClientNetwork, OccurredAt: now}
+		if err := repository.RecordAdminLoginEvent(ctx, event); err != nil {
+			result = LoginResult{}
+			resultErr = ErrUnavailable
+		}
+	}()
+	if challengeID == "" || !validEmailLoginCode(emailCode) {
 		return LoginResult{}, ErrAuthenticationFailed
 	}
 	codeHash, err := service.keys.Lookup("admin_email_login_code", []byte(emailCode))
 	if err != nil {
 		return LoginResult{}, ErrAuthenticationFailed
 	}
-	now := service.now()
 	service.emailMu.Lock()
 	state := service.emailLogins[challengeID]
+	if state != nil {
+		summary = state.summary
+	}
 	if state == nil || state.verifying || !now.Before(state.expiresAt) || subtle.ConstantTimeCompare(codeHash, state.codeHash) != 1 {
 		if state != nil && !state.verifying {
 			state.attempts++
@@ -1739,12 +1769,19 @@ func (service *Service) VerifyEmailLogin(ctx context.Context, challengeID, email
 		return LoginResult{}, ErrUnavailable
 	}
 	expiresAt := now.Add(service.sessionTTL)
-	if err := service.repository.CreateEmailLoginSession(ctx, EmailLoginSessionAttempt{ExpectedCredentialEpoch: expectedEpoch, TokenHash: tokenHash, CreatedAt: now, ExpiresAt: expiresAt}); err != nil {
+	attempt := EmailLoginSessionAttempt{ExpectedCredentialEpoch: expectedEpoch, TokenHash: tokenHash, CreatedAt: now, ExpiresAt: expiresAt}
+	if repository, ok := service.repository.(AdministratorSessionRepository); ok {
+		_, err = repository.CreateAdminSession(ctx, attempt, summary)
+	} else {
+		err = service.repository.CreateEmailLoginSession(ctx, attempt)
+	}
+	if err != nil {
 		if errors.Is(err, ErrAuthenticationFailed) {
 			return LoginResult{}, ErrAuthenticationFailed
 		}
 		return LoginResult{}, ErrUnavailable
 	}
+	resultName = "success"
 	return LoginResult{Token: token, ExpiresAt: expiresAt}, nil
 }
 
@@ -2114,10 +2151,64 @@ func (service *Service) RequireSession(ctx context.Context, sessionToken string)
 	if err != nil {
 		return ErrAuthenticationFailed
 	}
-	if _, err := service.repository.FindSession(ctx, tokenHash, service.now()); err != nil {
+	now := service.now()
+	if _, err := service.repository.FindSession(ctx, tokenHash, now); err != nil {
 		return ErrAuthenticationFailed
 	}
+	if repository, ok := service.repository.(AdministratorSessionRepository); ok {
+		_ = repository.TouchAdminSession(ctx, tokenHash, now)
+	}
 	return nil
+}
+
+// AdministratorSessions returns only the public projections for active
+// sessions after validating the current administrator session.
+func (service *Service) AdministratorSessions(ctx context.Context, sessionToken string) ([]AdministratorSession, error) {
+	if err := service.RequireSession(ctx, sessionToken); err != nil {
+		return nil, err
+	}
+	repository, ok := service.repository.(AdministratorSessionRepository)
+	if !ok {
+		return nil, ErrUnavailable
+	}
+	tokenHash, err := service.keys.HashToken("admin_session", []byte(sessionToken))
+	if err != nil {
+		return nil, ErrAuthenticationFailed
+	}
+	return repository.ListAdminSessions(ctx, tokenHash, service.now())
+}
+
+// RevokeAdministratorSession revokes one non-current administrator session by
+// its opaque public ID. The repository owns the current-session conflict check.
+func (service *Service) RevokeAdministratorSession(ctx context.Context, sessionToken, publicID string) error {
+	if service == nil || sessionToken == "" || !validAdministratorPublicID(publicID) {
+		return ErrInvalidInput
+	}
+	repository, ok := service.repository.(AdministratorSessionRepository)
+	if !ok {
+		return ErrUnavailable
+	}
+	tokenHash, err := service.keys.HashToken("admin_session", []byte(sessionToken))
+	if err != nil {
+		return ErrAuthenticationFailed
+	}
+	return repository.RevokeAdminSession(ctx, tokenHash, publicID, service.now())
+}
+
+// AdministratorLoginEvents returns a bounded newest-first audit projection
+// after validating the current administrator session.
+func (service *Service) AdministratorLoginEvents(ctx context.Context, sessionToken string, limit int) ([]AdministratorLoginEvent, error) {
+	if limit < 1 || limit > maximumAdministratorLoginEvents {
+		return nil, ErrInvalidInput
+	}
+	if err := service.RequireSession(ctx, sessionToken); err != nil {
+		return nil, err
+	}
+	repository, ok := service.repository.(AdministratorSessionRepository)
+	if !ok {
+		return nil, ErrUnavailable
+	}
+	return repository.ListAdminLoginEvents(ctx, limit)
 }
 
 func (service *Service) Logout(ctx context.Context, sessionToken string) error {

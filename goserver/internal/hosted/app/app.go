@@ -277,6 +277,13 @@ func New(dependencies Dependencies) http.Handler {
 	}
 	if dependencies.AdminSettings != nil {
 		mux.Handle("GET /api/admin/settings", dependencies.AdminSettings)
+		// Own every method on the three session-inventory paths. The settings
+		// handler returns 405 for unsupported methods instead of allowing a
+		// request to fall through to broad authentication or administrator
+		// prefixes.
+		mux.Handle("/api/admin/sessions", dependencies.AdminSettings)
+		mux.Handle("/api/admin/sessions/{publicId}", dependencies.AdminSettings)
+		mux.Handle("/api/admin/login-events", dependencies.AdminSettings)
 		mux.Handle("POST /api/admin/sessions/revoke-others", dependencies.AdminSettings)
 		mux.Handle("GET /api/admin/events", dependencies.AdminSettings)
 		mux.Handle("GET /api/admin/diagnostics", dependencies.AdminSettings)

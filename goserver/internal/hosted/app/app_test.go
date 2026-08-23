@@ -171,6 +171,41 @@ func TestAdministratorConsoleQueriesWinOverBroadAccountHandler(t *testing.T) {
 	}
 }
 
+func TestSessionInventoryRoutesStayInsideAdministratorSettings(t *testing.T) {
+	allowed := map[string]string{
+		"/api/admin/sessions": http.MethodGet,
+		"/api/admin/sessions/00112233445566778899aabbccddeeff": http.MethodDelete,
+		"/api/admin/login-events":                              http.MethodGet,
+	}
+	settings := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != allowed[request.URL.Path] {
+			response.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		response.WriteHeader(http.StatusTeapot)
+	})
+	broad := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusAccepted) })
+	handler := New(Dependencies{DB: fakeHealth{}, Auth: broad, Admin: broad, Invitation: broad, AdminSettings: settings})
+	for path, method := range allowed {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(method, path, nil))
+		if response.Code != http.StatusTeapot {
+			t.Fatalf("%s %s status=%d, want administrator settings", method, path, response.Code)
+		}
+	}
+	for _, route := range []struct{ method, path string }{
+		{http.MethodPost, "/api/admin/sessions"},
+		{http.MethodPost, "/api/admin/sessions/00112233445566778899aabbccddeeff"},
+		{http.MethodDelete, "/api/admin/login-events"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))
+		if response.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s %s status=%d, want 405 from administrator settings", route.method, route.path, response.Code)
+		}
+	}
+}
+
 func TestEveryMethodForExactBiliServicePathsStaysOutOfBroadAdministratorHandler(t *testing.T) {
 	allowed := map[string]string{
 		"/api/admin/bili-service/status":    http.MethodGet,

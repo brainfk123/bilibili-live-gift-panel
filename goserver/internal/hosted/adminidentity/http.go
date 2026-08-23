@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,7 +19,7 @@ import (
 )
 
 type adminHTTPServicePort interface {
-	BeginEmailLogin(context.Context) (EmailLoginChallenge, error)
+	BeginEmailLogin(context.Context, ...ClientSummary) (EmailLoginChallenge, error)
 	VerifyEmailLogin(context.Context, string, string) (LoginResult, error)
 	RequireSession(context.Context, string) error
 	Logout(context.Context, string) error
@@ -127,7 +128,8 @@ func (handler *HTTPHandler) beginEmailLogin(response http.ResponseWriter, reques
 		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
-	challenge, err := handler.service.BeginEmailLogin(request.Context())
+	summary := SummarizeClient(request.UserAgent(), net.ParseIP(handler.clientIP(request)))
+	challenge, err := handler.service.BeginEmailLogin(request.Context(), summary)
 	if err != nil || challenge.ChallengeID == "" || !challenge.ExpiresAt.After(handler.now()) {
 		writeAdminError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
 		return
