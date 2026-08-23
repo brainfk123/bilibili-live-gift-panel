@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"bilibili-live-gift-panel/internal/hosted/security"
@@ -36,7 +37,9 @@ type Credential struct {
 type CredentialStatus struct {
 	Version        int64
 	Health         string
+	MaskedUID      string
 	LastVerifiedAt *time.Time
+	LastReplacedAt *time.Time
 }
 
 // CredentialStore serializes replacement through an InnoDB transaction:
@@ -129,12 +132,26 @@ func (store *CredentialStore) Status(ctx context.Context) CredentialStatus {
 	if err == nil {
 		defer clear(credential.Cookie)
 		verifiedAt := credential.CreatedAt.UTC()
-		return CredentialStatus{Version: credential.Version, Health: "healthy", LastVerifiedAt: &verifiedAt}
+		return CredentialStatus{Version: credential.Version, Health: "healthy", MaskedUID: maskedBiliUID(credential.Cookie), LastVerifiedAt: &verifiedAt, LastReplacedAt: &verifiedAt}
 	}
 	if errors.Is(err, ErrCredentialNotFound) {
 		return CredentialStatus{Health: "missing"}
 	}
 	return CredentialStatus{Health: "unavailable"}
+}
+
+func maskedBiliUID(cookie []byte) string {
+	for _, part := range strings.Split(string(cookie), ";") {
+		name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if ok && name == "DedeUserID" && value != "" {
+			runes := []rune(value)
+			if len(runes) <= 4 {
+				return "****"
+			}
+			return "****" + string(runes[len(runes)-4:])
+		}
+	}
+	return ""
 }
 
 func integerText(value int64) string {

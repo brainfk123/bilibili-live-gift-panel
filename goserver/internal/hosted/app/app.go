@@ -248,6 +248,7 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("/api/admin/bili-service/challenge", dependencies.BiliService)
 		mux.Handle("/api/admin/bili-service/replace", dependencies.BiliService)
 		mux.Handle("/api/admin/bili-service/status", dependencies.BiliService)
+		mux.Handle("/api/admin/bili-service/check", dependencies.BiliService)
 	}
 	if dependencies.Runtime != nil {
 		// Own each complete runtime path so unsupported methods cannot fall

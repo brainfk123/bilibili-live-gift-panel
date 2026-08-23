@@ -141,6 +141,7 @@ func TestBiliServiceRoutesWinOverBroaderAdministratorPrefix(t *testing.T) {
 		{http.MethodGet, "/api/admin/bili-service/status"},
 		{http.MethodPost, "/api/admin/bili-service/challenge"},
 		{http.MethodPost, "/api/admin/bili-service/replace"},
+		{http.MethodPost, "/api/admin/bili-service/check"},
 	} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))
@@ -175,6 +176,7 @@ func TestEveryMethodForExactBiliServicePathsStaysOutOfBroadAdministratorHandler(
 		"/api/admin/bili-service/status":    http.MethodGet,
 		"/api/admin/bili-service/challenge": http.MethodPost,
 		"/api/admin/bili-service/replace":   http.MethodPost,
+		"/api/admin/bili-service/check":     http.MethodPost,
 	}
 	biliService := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.Method != allowed[request.URL.Path] {

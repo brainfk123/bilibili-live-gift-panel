@@ -27,7 +27,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func TestSensitiveServiceAccountReplacementRenewsOnlyAfterCredentialAudit(t *testing.T) {
+func TestServiceAccountReplacementConsumesScopedAuthorizationBeforeCredentialAudit(t *testing.T) {
 	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -38,9 +38,8 @@ func TestSensitiveServiceAccountReplacementRenewsOnlyAfterCredentialAudit(t *tes
 		t.Fatal(err)
 	}
 	authorizedAt := time.Date(2026, 8, 21, 11, 0, 0, 0, time.UTC)
-	completedAt := authorizedAt.Add(2 * time.Second)
-	clock := &timeSequence{values: []time.Time{authorizedAt, completedAt}}
-	authorizer := &recordingSensitiveAuthorizer{writeMarkers: true}
+	clock := &timeSequence{values: []time.Time{authorizedAt}}
+	authorizer := &recordingSensitiveAuthorizer{}
 	store := NewCredentialStore(database, keys)
 	service, err := NewService(successfulCredentialVerifier{}, store, authorizer, ServiceOptions{Now: clock.Now})
 	if err != nil {
@@ -48,7 +47,6 @@ func TestSensitiveServiceAccountReplacementRenewsOnlyAfterCredentialAudit(t *tes
 	}
 
 	mock.ExpectBegin()
-	mock.ExpectExec("sensitive_authorize").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(regexp.QuoteMeta(activeCredentialQuery)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(regexp.QuoteMeta(insertCredentialQuery)).
 		WithArgs(int64(1), sqlmock.AnyArg(), authorizedAt).
@@ -56,27 +54,20 @@ func TestSensitiveServiceAccountReplacementRenewsOnlyAfterCredentialAudit(t *tes
 	mock.ExpectExec(regexp.QuoteMeta(insertCredentialAuditQuery)).
 		WithArgs([]byte(`{"credentialVersion":1}`), authorizedAt).
 		WillReturnResult(sqlmock.NewResult(10, 1))
-	mock.ExpectExec("sensitive_renew").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	if err := service.Replace(context.Background(), "administrator-session", "challenge"); err != nil {
+	if err := service.Replace(context.Background(), "administrator-session", "operation-token", "challenge"); err != nil {
 		t.Fatalf("Replace() error = %v", err)
 	}
-	if authorizer.authorizeCalls != 1 || authorizer.renewCalls != 1 || authorizer.authorizedToken != "administrator-session" {
-		t.Fatalf("sensitive calls authorize=%d renew=%d token=%q", authorizer.authorizeCalls, authorizer.renewCalls, authorizer.authorizedToken)
-	}
-	if authorizer.authorizeTx == nil || authorizer.authorizeTx != authorizer.renewTx {
-		t.Fatal("authorization and renewal did not use the same caller-owned transaction")
-	}
-	if !authorizer.authorizedAt.Equal(authorizedAt) || !authorizer.renewedAt.Equal(completedAt) {
-		t.Fatalf("sensitive timestamps authorize=%s renew=%s", authorizer.authorizedAt, authorizer.renewedAt)
+	if authorizer.authorizeCalls != 1 || authorizer.renewCalls != 0 || authorizer.authorizedToken != "administrator-session:operation-token:bili_service_replace:global" {
+		t.Fatalf("operation authorization calls=%d renew=%d binding=%q", authorizer.authorizeCalls, authorizer.renewCalls, authorizer.authorizedToken)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestSensitiveServiceAccountReplacementFailureNeverRenewsAndRenewalFailureRollsBack(t *testing.T) {
+func TestServiceAccountReplacementAuditFailureRollsBackWithoutTOTPCalls(t *testing.T) {
 	authorizedAt := time.Date(2026, 8, 21, 11, 10, 0, 0, time.UTC)
 	for _, test := range []struct {
 		name           string
@@ -85,7 +76,6 @@ func TestSensitiveServiceAccountReplacementFailureNeverRenewsAndRenewalFailureRo
 		wantRenewCalls int
 	}{
 		{name: "audit failure", auditError: errors.New("private audit failure"), wantRenewCalls: 0},
-		{name: "renewal failure", renewError: errors.New("private renewal failure"), wantRenewCalls: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			database, mock, err := sqlmock.New()
@@ -97,7 +87,7 @@ func TestSensitiveServiceAccountReplacementFailureNeverRenewsAndRenewalFailureRo
 			if err != nil {
 				t.Fatal(err)
 			}
-			authorizer := &recordingSensitiveAuthorizer{writeMarkers: true, renewErr: test.renewError}
+			authorizer := &recordingSensitiveAuthorizer{renewErr: test.renewError}
 			store := NewCredentialStore(database, keys)
 			service, err := NewService(successfulCredentialVerifier{}, store, authorizer, ServiceOptions{Now: func() time.Time { return authorizedAt }})
 			if err != nil {
@@ -105,7 +95,6 @@ func TestSensitiveServiceAccountReplacementFailureNeverRenewsAndRenewalFailureRo
 			}
 
 			mock.ExpectBegin()
-			mock.ExpectExec("sensitive_authorize").WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectQuery(regexp.QuoteMeta(activeCredentialQuery)).WillReturnError(sql.ErrNoRows)
 			mock.ExpectExec(regexp.QuoteMeta(insertCredentialQuery)).WillReturnResult(sqlmock.NewResult(9, 1))
 			audit := mock.ExpectExec(regexp.QuoteMeta(insertCredentialAuditQuery))
@@ -114,12 +103,9 @@ func TestSensitiveServiceAccountReplacementFailureNeverRenewsAndRenewalFailureRo
 			} else {
 				audit.WillReturnResult(sqlmock.NewResult(10, 1))
 			}
-			if test.renewError != nil {
-				mock.ExpectExec("sensitive_renew").WillReturnResult(sqlmock.NewResult(0, 1))
-			}
 			mock.ExpectRollback()
 
-			if err := service.Replace(context.Background(), "administrator-session", "challenge"); err == nil {
+			if err := service.Replace(context.Background(), "administrator-session", "operation-token", "challenge"); err == nil {
 				t.Fatal("Replace() unexpectedly succeeded")
 			}
 			if authorizer.renewCalls != test.wantRenewCalls {
@@ -147,7 +133,7 @@ func TestServiceReplaceUsesCredentialConsumerContextForTransaction(t *testing.T)
 	}
 	mock.ExpectBegin()
 	mock.ExpectRollback()
-	err = service.Replace(context.Background(), "administrator-session", "challenge")
+	err = service.Replace(context.Background(), "administrator-session", "operation-token", "challenge")
 	if !errors.Is(err, identity.ErrChallengeExpired) {
 		t.Fatalf("Replace error=%v", err)
 	}
@@ -169,6 +155,7 @@ func TestHTTPReplaceUsesAdminCookieAndNeverReturnsServiceCookie(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/admin/bili-service/replace", strings.NewReader(`{"challengeId":"service-challenge"}`))
+	request.Header.Set("X-Admin-Authorization", "operation-token")
 	request.Header.Set("Origin", "https://admin.example.test")
 	request.Header.Set("X-CSRF-Token", "csrf")
 	request.Header.Set("Content-Type", "application/json")
@@ -259,6 +246,7 @@ func TestHTTPReplaceRejectsJSONLikeContentTypesBeforeRateLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/admin/bili-service/replace", strings.NewReader(`{"challengeId":"service-challenge"}`))
+	request.Header.Set("X-Admin-Authorization", "operation-token")
 	request.Header.Set("Origin", "https://admin.example.test")
 	request.Header.Set("X-CSRF-Token", "csrf")
 	request.Header.Set("Content-Type", "application/jsonp")
@@ -297,6 +285,7 @@ func TestHTTPReplaceLimitsBeforeDecodeAndSession(t *testing.T) {
 				t.Fatal(err)
 			}
 			request := httptest.NewRequest(http.MethodPost, "/api/admin/bili-service/replace", strings.NewReader(test.body))
+			request.Header.Set("X-Admin-Authorization", "operation-token")
 			request.Header.Set("Origin", "https://admin.example.test")
 			request.Header.Set("X-CSRF-Token", "csrf")
 			request.Header.Set("Content-Type", "application/json; charset=utf-8")
@@ -853,6 +842,14 @@ type recordingSensitiveAuthorizer struct {
 	renewTx         *sql.Tx
 }
 
+func (authorizer *recordingSensitiveAuthorizer) ConsumeOperation(_ context.Context, transaction *sql.Tx, sessionToken, authorizationToken string, purpose security.OperationPurpose, target string, now time.Time) error {
+	authorizer.authorizeCalls++
+	authorizer.authorizedToken = sessionToken + ":" + authorizationToken + ":" + string(purpose) + ":" + target
+	authorizer.authorizedAt = now
+	authorizer.authorizeTx = transaction
+	return nil
+}
+
 func (authorizer *recordingSensitiveAuthorizer) AuthorizeRecentTOTP(ctx context.Context, transaction *sql.Tx, token string, now time.Time) (security.SensitiveSession, error) {
 	authorizer.authorizeCalls++
 	authorizer.authorizedToken = token
@@ -916,6 +913,9 @@ func (allowingRecentTOTP) AuthorizeRecentTOTP(context.Context, *sql.Tx, string, 
 func (allowingRecentTOTP) RenewRecentTOTP(context.Context, *sql.Tx, security.SensitiveSession, time.Time) error {
 	return nil
 }
+func (allowingRecentTOTP) ConsumeOperation(context.Context, *sql.Tx, string, string, security.OperationPurpose, string, time.Time) error {
+	return nil
+}
 
 type allowHTTPRequests struct{}
 
@@ -942,10 +942,13 @@ func testHTTPOptions() HTTPOptions {
 func (service *fakeHTTPService) Begin(context.Context) (identity.Challenge, error) {
 	return identity.Challenge{ID: "service-challenge", QRImage: "data:image/png;base64,qr", ExpiresAt: time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)}, nil
 }
-func (service *fakeHTTPService) Replace(_ context.Context, token, challengeID string) error {
+func (service *fakeHTTPService) Replace(_ context.Context, token, _ string, challengeID string) error {
 	service.replaceCalls++
 	service.token, service.challengeID = token, challengeID
 	return nil
+}
+func (service *fakeHTTPService) Check(ctx context.Context) CredentialStatus {
+	return service.Status(ctx)
 }
 func (service *fakeHTTPService) RequireSession(context.Context, string) error {
 	service.requireSessionCalls++

@@ -47,8 +47,8 @@ type credentialStatusReader interface {
 	Status(context.Context) CredentialStatus
 }
 type recentTOTPAuthorizer interface {
-	security.SensitiveAuthorizer
 	RequireSession(context.Context, string) error
+	ConsumeOperation(context.Context, *sql.Tx, string, string, security.OperationPurpose, string, time.Time) error
 }
 
 type ServiceOptions struct {
@@ -86,6 +86,7 @@ func (service *Service) Status(ctx context.Context) CredentialStatus {
 	}
 	return CredentialStatus{Health: "unavailable"}
 }
+func (service *Service) Check(ctx context.Context) CredentialStatus { return service.Status(ctx) }
 func (service *Service) RequireSession(ctx context.Context, token string) error {
 	if service == nil {
 		return ErrAuthenticationFailed
@@ -96,8 +97,8 @@ func (service *Service) RequireSession(ctx context.Context, token string) error 
 	return nil
 }
 
-func (service *Service) Replace(ctx context.Context, sessionToken, challengeID string) error {
-	if service == nil || sessionToken == "" || challengeID == "" {
+func (service *Service) Replace(ctx context.Context, sessionToken, authorizationToken, challengeID string) error {
+	if service == nil || sessionToken == "" || authorizationToken == "" || challengeID == "" {
 		return ErrAuthenticationFailed
 	}
 	transaction, err := service.credentials.BeginTx(ctx, nil)
@@ -106,9 +107,8 @@ func (service *Service) Replace(ctx context.Context, sessionToken, challengeID s
 	}
 	defer transaction.Rollback()
 	authorizedAt := service.now().UTC()
-	sensitiveSession, err := service.admin.AuthorizeRecentTOTP(ctx, transaction, sessionToken, authorizedAt)
-	if err != nil {
-		return mapSensitiveError(err)
+	if err := service.admin.ConsumeOperation(ctx, transaction, sessionToken, authorizationToken, security.OperationBiliServiceReplace, "global", authorizedAt); err != nil {
+		return ErrAuthenticationFailed
 	}
 	if err := service.verifier.ConsumeCredential(ctx, challengeID, func(consumerContext context.Context, cookie []byte) error {
 		_, replaceErr := service.credentials.Replace(consumerContext, transaction, cookie, authorizedAt)
@@ -125,31 +125,18 @@ func (service *Service) Replace(ctx context.Context, sessionToken, challengeID s
 		}
 		return ErrAuthenticationFailed
 	}
-	if err := service.admin.RenewRecentTOTP(ctx, transaction, sensitiveSession, service.now().UTC()); err != nil {
-		return mapSensitiveError(err)
-	}
 	if err := transaction.Commit(); err != nil {
 		return ErrCredentialUnavailable
 	}
 	return nil
 }
 
-func mapSensitiveError(err error) error {
-	switch {
-	case errors.Is(err, security.ErrSensitiveRecentTOTPRequired):
-		return ErrRecentTOTPRequired
-	case errors.Is(err, security.ErrSensitiveAuthenticationFailed):
-		return ErrAuthenticationFailed
-	default:
-		return ErrCredentialUnavailable
-	}
-}
-
 type httpService interface {
 	Begin(context.Context) (identity.Challenge, error)
-	Replace(context.Context, string, string) error
+	Replace(context.Context, string, string, string) error
 	RequireSession(context.Context, string) error
 	Status(context.Context) CredentialStatus
+	Check(context.Context) CredentialStatus
 }
 
 type HTTPOptions struct {
@@ -179,6 +166,7 @@ func NewHTTPHandler(service httpService, options HTTPOptions) (*HTTPHandler, err
 	handler.mux.HandleFunc("POST /api/admin/bili-service/challenge", handler.begin)
 	handler.mux.HandleFunc("POST /api/admin/bili-service/replace", handler.replace)
 	handler.mux.HandleFunc("GET /api/admin/bili-service/status", handler.status)
+	handler.mux.HandleFunc("POST /api/admin/bili-service/check", handler.check)
 	return handler, nil
 }
 
@@ -223,7 +211,12 @@ func (handler *HTTPHandler) replace(response http.ResponseWriter, request *http.
 	if !handler.authenticate(response, request, token) {
 		return
 	}
-	err := handler.service.Replace(request.Context(), token, body.ChallengeID)
+	authorizationToken := request.Header.Get("X-Admin-Authorization")
+	if authorizationToken == "" || len(authorizationToken) > 512 {
+		writeHTTPError(response, http.StatusUnauthorized, "authentication_failed")
+		return
+	}
+	err := handler.service.Replace(request.Context(), token, authorizationToken, body.ChallengeID)
 	switch {
 	case err == nil:
 		response.WriteHeader(http.StatusNoContent)
@@ -238,6 +231,17 @@ func (handler *HTTPHandler) replace(response http.ResponseWriter, request *http.
 	default:
 		writeHTTPError(response, http.StatusUnauthorized, "authentication_failed")
 	}
+}
+func (handler *HTTPHandler) check(response http.ResponseWriter, request *http.Request) {
+	if !handler.acceptEmptyMutation(request) {
+		writeHTTPError(response, 403, "request_rejected")
+		return
+	}
+	token, ok := handler.limitRequest(response, request, "bili_service_check")
+	if !ok || !handler.authenticate(response, request, token) {
+		return
+	}
+	handler.writeStatus(response, handler.service.Check(request.Context()))
 }
 func (handler *HTTPHandler) status(response http.ResponseWriter, request *http.Request) {
 	// net/http GET patterns also match HEAD. Status is an exact GET-only
@@ -255,19 +259,25 @@ func (handler *HTTPHandler) status(response http.ResponseWriter, request *http.R
 	if !ok || !handler.authenticate(response, request, token) {
 		return
 	}
-	status := handler.service.Status(request.Context())
+	handler.writeStatus(response, handler.service.Status(request.Context()))
+}
+func (handler *HTTPHandler) writeStatus(response http.ResponseWriter, status CredentialStatus) {
 	if status.Health != "healthy" || status.Version <= 0 || status.LastVerifiedAt == nil || status.LastVerifiedAt.IsZero() {
 		if status.Health != "missing" {
 			status.Health = "unavailable"
 		}
 		status.Version = 0
 		status.LastVerifiedAt = nil
+		status.LastReplacedAt = nil
+		status.MaskedUID = ""
 	}
 	writeHTTPJSON(response, http.StatusOK, struct {
 		Version        int64      `json:"version"`
 		Health         string     `json:"health"`
 		LastVerifiedAt *time.Time `json:"lastVerifiedAt,omitempty"`
-	}{Version: status.Version, Health: status.Health, LastVerifiedAt: status.LastVerifiedAt})
+		MaskedUID      string     `json:"maskedUid,omitempty"`
+		LastReplacedAt *time.Time `json:"lastReplacedAt,omitempty"`
+	}{Version: status.Version, Health: status.Health, LastVerifiedAt: status.LastVerifiedAt, MaskedUID: status.MaskedUID, LastReplacedAt: status.LastReplacedAt})
 }
 func (handler *HTTPHandler) limitRequest(response http.ResponseWriter, request *http.Request, operation string) (string, bool) {
 	if !handler.limiter.Allow(request.Context(), identity.LimitGlobal, operation) ||

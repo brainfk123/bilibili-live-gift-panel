@@ -106,3 +106,9 @@ func testCredentialKeys(t *testing.T) security.Keyring {
 	}
 	return keys
 }
+
+func TestCredentialStatusMasksBilibiliUID(t *testing.T) {
+	if got := maskedBiliUID([]byte("SESSDATA=private; DedeUserID=32249588; bili_jct=secret")); got != "****9588" {
+		t.Fatalf("masked UID = %q", got)
+	}
+}
