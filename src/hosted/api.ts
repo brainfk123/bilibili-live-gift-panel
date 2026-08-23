@@ -14,7 +14,7 @@ export interface Challenge {
 
 export interface EmailLoginChallenge { challengeId: string; expiresAt: string }
 export type BiliServiceStatus =
-  | { version: number; health: 'healthy'; lastVerifiedAt: string }
+  | { version: number; health: 'healthy'; maskedUid?: string; lastVerifiedAt: string; lastReplacedAt?:string }
   | { version: 0; health: 'missing' | 'unavailable' };
 
 export type PollResult =
@@ -67,6 +67,8 @@ export type AdminInvitationStatus='active'|'used'|'revoked'|'expired';
 export interface AdminInvitationRecord { id:number;code?:string;codeHint:string;status:AdminInvitationStatus;createdAt:string;expiresAt:string|null;usedByAccountId?:number }
 export interface AdminInvitationPage { invitations:AdminInvitationRecord[];nextCursor?:string }
 export interface AdminInvitationQuery { query?:string;status?:AdminInvitationStatus;sort?:'status'|'created_at';direction?:'asc'|'desc';cursor?:string;limit?:number }
+export interface AdminSettings{maskedEmail:string;sessionExpiresAt:string;totpEnabled:boolean;recoveryGeneratedAt:string|null;serviceHealth:string}
+export interface AdminDiagnostic{database:string;biliService:string;checkedAt:string}
 
 export interface RecoveryPreparation {
   totpUri: string;
@@ -346,11 +348,12 @@ export class HostedAPI {
     try { return await response.json(); } catch { throw new HostedAPIError('invalid_response', response.status); }
   }
 
-  private async request(path: string, method: string, expectedStatus: number | readonly number[], body?: unknown): Promise<{ status: number; data: unknown }> {
+  private async request(path: string, method: string, expectedStatus: number | readonly number[], body?: unknown, extraHeaders:Record<string,string>={}): Promise<{ status: number; data: unknown }> {
     const mutation = method !== 'GET';
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (mutation) headers['X-CSRF-Token'] = this.csrfToken;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
+    Object.assign(headers,extraHeaders);
     const response = await this.fetcher(path, {
       method, credentials: 'same-origin', headers,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -493,8 +496,8 @@ export class HostedAPI {
   async biliServiceStatus(): Promise<BiliServiceStatus> {
     const data = object((await this.request('/api/admin/bili-service/status', 'GET', 200)).data);
     if (!data || !number(data.version) || !string(data.health)) throw new HostedAPIError('invalid_response', 200);
-    if (data.health === 'healthy' && data.version > 0 && exactKeys(data, ['version', 'health', 'lastVerifiedAt']) && instant(data.lastVerifiedAt)) {
-      return { version: data.version, health: 'healthy', lastVerifiedAt: data.lastVerifiedAt };
+    if (data.health === 'healthy' && data.version > 0 && exactKeys(data, ['version', 'health', 'lastVerifiedAt'],['maskedUid','lastReplacedAt']) && instant(data.lastVerifiedAt)&&optional(data.maskedUid,string)&&optional(data.lastReplacedAt,instant)) {
+      return { version: data.version, health: 'healthy', lastVerifiedAt: data.lastVerifiedAt,...(data.maskedUid?{maskedUid:data.maskedUid as string}:{}),...(data.lastReplacedAt?{lastReplacedAt:data.lastReplacedAt as string}:{}) };
     }
     if ((data.health === 'missing' || data.health === 'unavailable') && data.version === 0 && exactKeys(data, ['version', 'health'])) {
       return { version: 0, health: data.health };
@@ -502,10 +505,17 @@ export class HostedAPI {
     throw new HostedAPIError('invalid_response', 200);
   }
   async beginBiliServiceChallenge(): Promise<Challenge> { return this.requireChallenge((await this.request('/api/admin/bili-service/challenge', 'POST', 201)).data); }
-  async replaceBiliServiceCredential(challengeId: string): Promise<void> {
+  async checkBiliService():Promise<BiliServiceStatus>{const data=object((await this.request('/api/admin/bili-service/check','POST',200)).data);if(!data||!number(data.version)||!string(data.health))throw new HostedAPIError('invalid_response',200);return this.parseBiliStatus(data)}
+  private parseBiliStatus(data:Record<string,unknown>):BiliServiceStatus{if(data.health==='healthy'&&number(data.version)&&data.version>0&&instant(data.lastVerifiedAt)&&exactKeys(data,['version','health','lastVerifiedAt'],['maskedUid','lastReplacedAt']))return{version:data.version,health:'healthy',lastVerifiedAt:data.lastVerifiedAt,...(typeof data.maskedUid==='string'?{maskedUid:data.maskedUid}:{}),...(typeof data.lastReplacedAt==='string'?{lastReplacedAt:data.lastReplacedAt}:{})};if((data.health==='missing'||data.health==='unavailable')&&data.version===0&&exactKeys(data,['version','health']))return{version:0,health:data.health};throw new HostedAPIError('invalid_response',200)}
+  async authorizeAdminOperation(totp:string,purpose:'bili_service_replace'|'admin_email_change'|'recovery_regenerate',target:string):Promise<string>{const data=object((await this.request('/api/admin/operation-authorizations','POST',201,{totp,purpose,target})).data);if(!data||!exactKeys(data,['authorizationToken'])||!string(data.authorizationToken))throw new HostedAPIError('invalid_response',201);return data.authorizationToken}
+  async replaceBiliServiceCredential(challengeId: string,authorizationToken?:string): Promise<void> {
     if (!string(challengeId) || challengeId.length > 256) throw new HostedAPIError('invalid_request', 400);
-    await this.request('/api/admin/bili-service/replace', 'POST', 204, { challengeId });
+    await this.request('/api/admin/bili-service/replace', 'POST', 204, { challengeId },authorizationToken?{'X-Admin-Authorization':authorizationToken}:{});
   }
+  async adminSettings():Promise<AdminSettings>{const data=object((await this.request('/api/admin/settings','GET',200)).data);if(!data||!exactKeys(data,['maskedEmail','sessionExpiresAt','totpEnabled','recoveryGeneratedAt','serviceHealth'])||!string(data.maskedEmail)||!instant(data.sessionExpiresAt)||typeof data.totpEnabled!=='boolean'||(data.recoveryGeneratedAt!==null&&!instant(data.recoveryGeneratedAt))||!string(data.serviceHealth))throw new HostedAPIError('invalid_response',200);return data as unknown as AdminSettings}
+  async revokeOtherAdminSessions():Promise<void>{await this.request('/api/admin/sessions/revoke-others','POST',204)}
+  async adminEvents():Promise<AdminEvent[]>{const data=object((await this.request('/api/admin/events','GET',200)).data);if(!data||!exactKeys(data,['events'])||!Array.isArray(data.events))throw new HostedAPIError('invalid_response',200);const events=data.events.map(adminEvent);if(events.some((event)=>!event))throw new HostedAPIError('invalid_response',200);return events as AdminEvent[]}
+  async adminDiagnostics():Promise<AdminDiagnostic>{const data=object((await this.request('/api/admin/diagnostics','GET',200)).data);if(!data||!exactKeys(data,['database','biliService','checkedAt'])||!string(data.database)||!string(data.biliService)||!instant(data.checkedAt))throw new HostedAPIError('invalid_response',200);return data as unknown as AdminDiagnostic}
   async issueOBSCredential(accountId: number): Promise<OBSCredentialAccess> {
     if (!Number.isSafeInteger(accountId) || accountId <= 0) throw new HostedAPIError('invalid_request', 0);
     const data = object((await this.request(`/api/admin/accounts/${accountId}/obs-credential`, 'POST', 201, {})).data);

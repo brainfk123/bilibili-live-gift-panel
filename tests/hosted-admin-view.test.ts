@@ -88,7 +88,7 @@ describe('administrator section lifetime fence', () => {
     await vi.waitFor(() => expect(api.adminAccounts).toHaveBeenCalledTimes(1));
 
     button(root, 'B站服务账号').listeners.get('click')?.();
-    await vi.waitFor(() => expect(button(root, '创建服务账号验证')).toBeDefined());
+    await vi.waitFor(() => expect(button(root, '更换服务账号')).toBeDefined());
     resolveAccounts({items:[]});
     await accountsPending;
     await Promise.resolve();
