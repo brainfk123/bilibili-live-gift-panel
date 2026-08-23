@@ -31,13 +31,18 @@ func TestHTTPOperationAuthorizationReturnsSingleUseTokenForBoundPurposeAndTarget
 	}
 }
 
+func TestHTTPRecentTOTPCompatibilityRouteIsRemoved(t *testing.T) {
+	response := httptest.NewRecorder()
+	newTestHTTPHandler(t, &adminHTTPService{}).ServeHTTP(response, mutationRequest(http.MethodPost, "/api/admin/totp", `{"totp":"123456"}`))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("POST /api/admin/totp status=%d, want 404", response.Code)
+	}
+}
+
 func TestHTTPSensitiveEndpointsRejectMissingCookieWithoutPanic(t *testing.T) {
 	handler := newTestHTTPHandler(t, &adminHTTPService{})
-	for _, path := range []string{"/api/admin/totp", "/api/admin/recovery/archive"} {
-		request := mutationRequest(http.MethodPost, path, `{"totp":"123456"}`)
-		if path != "/api/admin/totp" {
-			request = mutationRequest(http.MethodPost, path, `{}`)
-		}
+	for _, path := range []string{"/api/admin/recovery/archive"} {
+		request := mutationRequest(http.MethodPost, path, `{}`)
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		if response.Code != http.StatusUnauthorized || response.Body.String() != "{\"error\":\"authentication_failed\"}\n" {
@@ -51,7 +56,6 @@ func TestHTTPSensitiveEndpointsRejectMissingCookieWithoutPanic(t *testing.T) {
 
 func TestHTTPSensitiveEndpointRateLimitUsesHashedSessionBeforeService(t *testing.T) {
 	for _, test := range []struct{ path, body, key string }{
-		{path: "/api/admin/totp", body: `{"totp":"123456"}`, key: "plain-cookie-must-not-be-a-key"},
 		{path: "/api/admin/recovery/archive", body: `{}`, key: "plain-cookie-must-not-be-a-key"},
 		{path: "/api/admin/recovery/prepare", body: `{"recoveryCode":"code"}`, key: "admin:1"},
 	} {
@@ -402,7 +406,6 @@ func TestHTTPForbiddenMalformedQueryNeverReachesService(t *testing.T) {
 		wantStatus int
 		wantCode   string
 	}{
-		{name: "recent totp", method: http.MethodPost, path: "/api/admin/totp?x;y", body: `{"totp":"123456"}`, wantStatus: http.StatusForbidden, wantCode: "request_rejected"},
 		{name: "recovery archive", method: http.MethodPost, path: "/api/admin/recovery/archive?x;y", body: `{}`, wantStatus: http.StatusForbidden, wantCode: "request_rejected"},
 		{name: "recovery prepare", method: http.MethodPost, path: "/api/admin/recovery/prepare?x;y", body: `{"recoveryCode":"code"}`, wantStatus: http.StatusForbidden, wantCode: "request_rejected"},
 		{name: "recovery confirm", method: http.MethodPost, path: "/api/admin/recovery/confirm?x;y", body: `{"handoffToken":"handoff","totp":"123456"}`, wantStatus: http.StatusForbidden, wantCode: "request_rejected"},

@@ -22,7 +22,6 @@ type adminHTTPServicePort interface {
 	VerifyEmailLogin(context.Context, string, string) (LoginResult, error)
 	RequireSession(context.Context, string) error
 	Logout(context.Context, string) error
-	VerifyRecentTOTP(context.Context, string, string) error
 	AuthorizeOperation(context.Context, string, string, security.OperationPurpose, string) (string, error)
 	SendRecovery(context.Context, string) (RecoveryResult, error)
 	PrepareRecovery(context.Context, string) (RecoveryPreparationResult, error)
@@ -66,7 +65,6 @@ func NewHTTPHandler(service adminHTTPServicePort, options HTTPOptions) (*HTTPHan
 	handler.mux.HandleFunc("GET /api/admin/session", handler.getSession)
 	handler.mux.HandleFunc("DELETE /api/admin/session", handler.deleteSession)
 	handler.mux.HandleFunc("POST /api/admin/session/email", handler.verifyEmailLogin)
-	handler.mux.HandleFunc("POST /api/admin/totp", handler.verifyRecentTOTP)
 	handler.mux.HandleFunc("POST /api/admin/operation-authorizations", handler.authorizeOperation)
 	handler.mux.HandleFunc("POST /api/admin/recovery/archive", handler.sendRecovery)
 	handler.mux.HandleFunc("POST /api/admin/recovery/prepare", handler.prepareRecovery)
@@ -212,34 +210,6 @@ func (handler *HTTPHandler) verifyEmailLogin(response http.ResponseWriter, reque
 		return
 	}
 	http.SetCookie(response, adminCookie(result.Token, result.ExpiresAt))
-	response.WriteHeader(http.StatusNoContent)
-}
-
-func (handler *HTTPHandler) verifyRecentTOTP(response http.ResponseWriter, request *http.Request) {
-	if !handler.acceptJSONMutation(request) {
-		writeAdminError(response, http.StatusForbidden, "request_rejected")
-		return
-	}
-	var body struct {
-		TOTP string `json:"totp"`
-	}
-	if !decodeAdminJSON(response, request, &body) || !validTOTPCode(body.TOTP) {
-		writeAdminError(response, http.StatusBadRequest, "invalid_request")
-		return
-	}
-	token, ok := adminSessionToken(request)
-	if !ok {
-		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
-		return
-	}
-	if !handler.allowSensitive(request, "admin_totp", token) {
-		writeAdminError(response, http.StatusTooManyRequests, "rate_limited")
-		return
-	}
-	if handler.service.VerifyRecentTOTP(request.Context(), token, body.TOTP) != nil {
-		writeAdminError(response, http.StatusUnauthorized, "authentication_failed")
-		return
-	}
 	response.WriteHeader(http.StatusNoContent)
 }
 

@@ -529,7 +529,6 @@ export class HostedAPI {
     }
     return { publicId: data.publicId, url: data.url };
   }
-  async verifyRecentTOTP(totp: string): Promise<void> { await this.request('/api/admin/totp', 'POST', 204, { totp }); }
   async sendRecoveryArchive(): Promise<{ recoveryPassword: string }> {
     const data = object((await this.request('/api/admin/recovery/archive', 'POST', 200, {})).data);
     if (!data || Object.keys(data).length !== 1 || !string(data.recoveryPassword) || data.recoveryPassword.length !== 20) throw new HostedAPIError('invalid_response', 200);

@@ -1,4 +1,4 @@
-import { HostedAPIError, type BiliServiceStatus, type Challenge, type HostedAPI, type RecoveryPreparation } from './api';
+import { HostedAPIError, type HostedAPI, type RecoveryPreparation } from './api';
 import { mountAdminLogin } from './admin-login';
 import { mountAdminShell } from './admin/shell';
 import { mountAdminOverview } from './admin/overview';
@@ -7,96 +7,6 @@ import { mountAdminInvitationView } from './admin/invitations/view';
 import { mountBiliServiceView } from './admin/bili-service';
 import { mountAdminSettingsView } from './admin/settings';
 import type { AdminSection } from './admin/routes';
-
-interface AdminLoginAPI {
-  verifyRecentTOTP(totp: string): Promise<void>;
-}
-
-export function createAdminFlow(api: AdminLoginAPI) {
-  return Object.freeze({
-    async runWithRecentTOTP(totp: string | undefined, action: () => Promise<void>): Promise<void> {
-      try { await action(); } catch (error) {
-        if (!(error instanceof HostedAPIError) || error.code !== 'recent_totp_required') throw error;
-        if (!totp) throw error;
-        await api.verifyRecentTOTP(totp);
-        await action();
-      }
-    },
-    async dispose(): Promise<void> {},
-  });
-}
-
-interface BiliServiceAPI {
-  beginBiliServiceChallenge(): Promise<Challenge>;
-  replaceBiliServiceCredential(challengeId: string): Promise<void>;
-  verifyRecentTOTP(totp: string): Promise<void>;
-}
-
-export function biliServiceStatusText(status: BiliServiceStatus): string {
-  if (status.health === 'healthy') return `版本 ${status.version}；最近验证 ${status.lastVerifiedAt}`;
-  return status.health === 'missing' ? '服务账号未配置' : '服务账号状态暂不可用';
-}
-
-export function createBiliServiceFlow(api: BiliServiceAPI) {
-  let challenge: Challenge | undefined;
-  let busy = false;
-  let disposed = false;
-  let generation = 0;
-  let beginOperation: Promise<Challenge> | undefined;
-  let replaceOperation: Promise<void> | undefined;
-  const unavailable = (): HostedAPIError => new HostedAPIError('operation_failed', 0);
-  return Object.freeze({
-    begin(): Promise<Challenge> {
-      if (disposed) return Promise.reject(unavailable());
-      if (beginOperation) return beginOperation;
-      if (busy) return Promise.reject(new HostedAPIError('operation_conflict', 409));
-      const current = ++generation; busy = true;
-      const operation = api.beginBiliServiceChallenge().then((created) => {
-        if (disposed || current !== generation) throw unavailable();
-        challenge = created; return created;
-      }).finally(() => { if (!disposed && current === generation) busy = false; if (beginOperation === operation) beginOperation = undefined; });
-      beginOperation = operation;
-      return operation;
-    },
-    replace(totp?: string): Promise<void> {
-      if (disposed) return Promise.reject(unavailable());
-      if (replaceOperation) return replaceOperation;
-      if (busy) return Promise.reject(new HostedAPIError('operation_conflict', 409));
-      if (!challenge) return Promise.reject(new HostedAPIError('invalid_request', 400));
-      const id = challenge.challengeId; const current = ++generation; busy = true;
-      const operation = (async () => {
-        try { await api.replaceBiliServiceCredential(id); } catch (error) {
-          if (!(error instanceof HostedAPIError) || error.code !== 'recent_totp_required') throw error;
-          if (!totp) throw error;
-          await api.verifyRecentTOTP(totp);
-          if (disposed || current !== generation) throw unavailable();
-          await api.replaceBiliServiceCredential(id);
-        }
-        if (disposed || current !== generation) throw unavailable();
-        challenge = undefined;
-      })().finally(() => { if (!disposed && current === generation) busy = false; if (replaceOperation === operation) replaceOperation = undefined; });
-      replaceOperation = operation;
-      return operation;
-    },
-    state(): { challenge?: Challenge; busy: boolean } { return { busy, ...(challenge ? { challenge: { ...challenge } } : {}) }; },
-    dispose(): void { disposed = true; generation += 1; busy = false; challenge = undefined; },
-  });
-}
-
-interface AdminAccountAPI {
-  disableAccount(accountId: number, reason: string): Promise<unknown>;
-  enableAccount(accountId: number, reason: string): Promise<unknown>;
-  adjustQuota(accountId: number, remainingQuota: number, reason: string): Promise<void>;
-}
-
-export function createAdminAccountFlow(api: AdminAccountAPI) {
-  return Object.freeze({
-    async disable(accountId: number, reason: string): Promise<void> { await api.disableAccount(accountId, reason); },
-    async enable(accountId: number, reason: string): Promise<void> { await api.enableAccount(accountId, reason); },
-    async adjustQuota(accountId: number, remainingQuota: number, reason: string): Promise<void> { await api.adjustQuota(accountId, remainingQuota, reason); },
-    async dispose(): Promise<void> {},
-  });
-}
 
 interface RecoveryAPI {
   prepareRecovery(recoveryCode: string): Promise<RecoveryPreparation>;
@@ -166,47 +76,6 @@ export function createAdminRecoveryFlow(api: RecoveryAPI, render: (state: Recove
     },
     close: clear,
     dispose(): void { if (!disposed) { disposed = true; clear(); } },
-  });
-}
-
-export interface AdminOneTimeSecretPresentation {
-  title: string;
-  copyLabel: string;
-  value: string;
-}
-
-export interface AdminOneTimeSecretState {
-  inFlight: boolean;
-  presentation?: AdminOneTimeSecretPresentation;
-}
-
-export function createAdminOneTimeSecretFlow(render: (state: AdminOneTimeSecretState) => void) {
-  let presentation: AdminOneTimeSecretPresentation | undefined;
-  let inFlight = false;
-  let disposed = false;
-  let generation = 0;
-  const clearPresentation = (): void => {
-    if (presentation) presentation.value = '';
-    presentation = undefined;
-  };
-  const publish = (): void => render({ inFlight, ...(presentation ? { presentation: { ...presentation } } : {}) });
-  return Object.freeze({
-    async run(load: () => Promise<AdminOneTimeSecretPresentation>): Promise<void> {
-      if (disposed || inFlight) return;
-      clearPresentation(); inFlight = true; const current = ++generation; publish();
-      let result: AdminOneTimeSecretPresentation;
-      try { result = await load(); } catch (error) {
-        if (current === generation) { inFlight = false; publish(); }
-        throw error;
-      }
-      if (disposed || current !== generation) { result.value = ''; return; }
-      inFlight = false; presentation = result; publish();
-    },
-    async copy(clipboard: { writeText(value: string): Promise<void> }): Promise<void> {
-      if (presentation?.value) await clipboard.writeText(presentation.value);
-    },
-    close(): void { generation += 1; inFlight = false; clearPresentation(); publish(); },
-    dispose(): void { disposed = true; generation += 1; inFlight = false; clearPresentation(); publish(); },
   });
 }
 

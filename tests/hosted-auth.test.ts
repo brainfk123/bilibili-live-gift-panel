@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { HostedAPI, HostedAPIError } from '../src/hosted/api';
 import { createAuthFlow, mountAuthView } from '../src/hosted/auth';
-import { createAdminAccountFlow, createAdminFlow, createAdminOneTimeSecretFlow, createAdminRecoveryFlow, createBiliServiceFlow } from '../src/hosted/admin';
+import { createAdminRecoveryFlow } from '../src/hosted/admin';
 import { createHostedViewHost } from '../src/hosted/shell';
 
 function json(body: unknown, status = 200): Response {
@@ -334,81 +334,12 @@ describe('Bilibili authentication lifecycle', () => {
   });
 });
 
-describe('administrator flow', () => {
-  it('uses TOTP only after a protected operation requires it', async () => {
-    const api = { verifyRecentTOTP: vi.fn(async () => undefined) };
-    const flow = createAdminFlow(api);
-    let attempts = 0;
-    await flow.runWithRecentTOTP('654321', async () => {
-      attempts += 1;
-      if (attempts === 1) throw new HostedAPIError('recent_totp_required', 403);
-    });
-    expect(api.verifyRecentTOTP).toHaveBeenCalledWith('654321');
-    expect(attempts).toBe(2);
-  });
-
-  it('leaves the step-up prompt to the server before a TOTP code is entered', async () => {
-    const api = { verifyRecentTOTP: vi.fn(async () => undefined) };
-    const flow = createAdminFlow(api);
-    await expect(flow.runWithRecentTOTP(undefined, async () => { throw new HostedAPIError('recent_totp_required', 403); })).rejects.toMatchObject({ code: 'recent_totp_required' });
-    expect(api.verifyRecentTOTP).not.toHaveBeenCalled();
-
-    const service = createBiliServiceFlow({
-      beginBiliServiceChallenge: vi.fn(async () => ({ challengeId: 'service', qrImage: 'qr', expiresAt: '2030-01-01T00:00:00Z' })),
-      replaceBiliServiceCredential: vi.fn(async () => { throw new HostedAPIError('recent_totp_required', 403); }),
-      verifyRecentTOTP: vi.fn(async () => undefined),
-    });
-    await service.begin();
-    await expect(service.replace()).rejects.toMatchObject({ code: 'recent_totp_required' });
-    expect(service.state()).toEqual(expect.objectContaining({ busy: false, challenge: expect.objectContaining({ challengeId: 'service' }) }));
-  });
-
-  it('drives disable, enable, and quota mutations without an administrator Bilibili proof', async () => {
-    const api = {
-      disableAccount: vi.fn(async () => ({ accountId: 7, status: 'disabled' as const })),
-      enableAccount: vi.fn(async () => ({ accountId: 7, status: 'active' as const })),
-      adjustQuota: vi.fn(async () => undefined),
-    };
-    const flow = createAdminAccountFlow(api);
-    await flow.disable(7, 'security'); await flow.enable(7, 'appeal'); await flow.adjustQuota(7, 3, 'pilot');
-    expect(api.disableAccount).toHaveBeenCalledWith(7, 'security');
-    expect(api.enableAccount).toHaveBeenCalledWith(7, 'appeal');
-    expect(api.adjustQuota).toHaveBeenCalledWith(7, 3, 'pilot');
-  });
-
+describe('administrator recovery flow', () => {
   it('prepares recovery without carrying a Bilibili challenge through the admin flow', async () => {
     const prepareRecovery = vi.fn(async () => ({ totpUri: 'otpauth://new', recoveryPassword: '12345678901234567890', handoffToken: 'handoff' }));
     const flow = createAdminRecoveryFlow({ prepareRecovery, confirmRecovery: vi.fn() }, vi.fn());
     await flow.prepare('old-recovery-code');
     expect(prepareRecovery).toHaveBeenCalledWith('old-recovery-code');
-  });
-
-  it('serializes one-time admin secrets and drops late results after close or dispose', async () => {
-    let release!: (value: { title: string; copyLabel: string; value: string }) => void;
-    const pending = new Promise<{ title: string; copyLabel: string; value: string }>((resolve) => { release = resolve; });
-    const states: unknown[] = [];
-    const flow = createAdminOneTimeSecretFlow((state) => states.push(structuredClone(state)));
-    const load = vi.fn(() => pending);
-    const first = flow.run(load); const duplicate = flow.run(load);
-    expect(load).toHaveBeenCalledTimes(1);
-    flow.dispose();
-    release({ title: '一次性秘密', copyLabel: '复制', value: 'LATE-ADMIN-SECRET' });
-    await first; await duplicate;
-    expect(JSON.stringify(states)).not.toContain('LATE-ADMIN-SECRET');
-  });
-
-  it('wipes an old admin secret before replacing it and clears the replacement on close', async () => {
-    const states: unknown[] = [];
-    const flow = createAdminOneTimeSecretFlow((state) => states.push(structuredClone(state)));
-    await flow.run(async () => ({ title: '旧秘密', copyLabel: '复制', value: 'OLD-ADMIN-SECRET' }));
-    let release!: (value: { title: string; copyLabel: string; value: string }) => void;
-    const pending = new Promise<{ title: string; copyLabel: string; value: string }>((resolve) => { release = resolve; });
-    const replacing = flow.run(() => pending);
-    expect(JSON.stringify(states.at(-1))).not.toContain('OLD-ADMIN-SECRET');
-    release({ title: '新秘密', copyLabel: '复制', value: 'NEW-ADMIN-SECRET' }); await replacing;
-    expect(JSON.stringify(states.at(-1))).toContain('NEW-ADMIN-SECRET');
-    flow.close();
-    expect(JSON.stringify(states.at(-1))).not.toContain('NEW-ADMIN-SECRET');
   });
 
 });
