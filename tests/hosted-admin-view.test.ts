@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { HostedAPIError } from '../src/hosted/api';
 import { mountAdminView } from '../src/hosted/admin';
 
 class Element {
@@ -74,12 +73,13 @@ describe('administrator section lifetime fence', () => {
     await mounted.dispose();
   });
 
-  it('does not let a late account mutation overwrite the next section status', async () => {
-    let resolveDisable!: () => void;
-    const disablePending = new Promise<void>((resolve) => { resolveDisable = resolve; });
+  it('does not let a late account-list response overwrite the next section', async () => {
+    let resolveAccounts!: (value: {items: never[]}) => void;
+    const accountsPending = new Promise<{items: never[]}>((resolve) => { resolveAccounts = resolve; });
     const api = {
       adminSession: vi.fn(async () => undefined),
-      disableAccount: vi.fn(() => disablePending),
+      adminOverview: vi.fn(async () => ({totalAccounts:0,activeAccounts:0,disabledAccounts:0,missingRooms:0,missingObs:0,attention:[],recentEvents:[]})),
+      adminAccounts: vi.fn(() => accountsPending),
       biliServiceStatus: vi.fn(async () => ({ version: 0, health: 'missing' as const })),
     };
     const document: DocumentLike = {
@@ -91,14 +91,12 @@ describe('administrator section lifetime fence', () => {
 
     await vi.waitFor(() => expect(button(root, '主播账号')).toBeDefined());
     button(root, '主播账号').listeners.get('click')?.();
-    await vi.waitFor(() => expect(button(root, '停用账号')).toBeDefined());
-    button(root, '停用账号').listeners.get('click')?.();
-    await vi.waitFor(() => expect(api.disableAccount).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(api.adminAccounts).toHaveBeenCalledTimes(1));
 
     button(root, 'B站服务账号').listeners.get('click')?.();
     await vi.waitFor(() => expect(button(root, '创建服务账号验证')).toBeDefined());
-    resolveDisable();
-    await disablePending;
+    resolveAccounts({items:[]});
+    await accountsPending;
     await Promise.resolve();
     await Promise.resolve();
 
@@ -107,12 +105,11 @@ describe('administrator section lifetime fence', () => {
     await mounted.dispose();
   });
 
-  it('does not mount a TOTP prompt after its account section is disposed', async () => {
-    let rejectDisable!: (error: Error) => void;
-    const disablePending = new Promise<void>((_resolve, reject) => { rejectDisable = reject; });
+  it('does not mount a routine TOTP prompt in the account workspace', async () => {
     const api = {
       adminSession: vi.fn(async () => undefined),
-      disableAccount: vi.fn(() => disablePending),
+      adminOverview: vi.fn(async () => ({totalAccounts:0,activeAccounts:0,disabledAccounts:0,missingRooms:0,missingObs:0,attention:[],recentEvents:[]})),
+      adminAccounts: vi.fn(async () => ({items:[]})),
       biliServiceStatus: vi.fn(async () => ({ version: 0, health: 'missing' as const })),
     };
     const document: DocumentLike = {
@@ -124,17 +121,7 @@ describe('administrator section lifetime fence', () => {
 
     await vi.waitFor(() => expect(button(root, '主播账号')).toBeDefined());
     button(root, '主播账号').listeners.get('click')?.();
-    await vi.waitFor(() => expect(button(root, '停用账号')).toBeDefined());
-    button(root, '停用账号').listeners.get('click')?.();
-    await vi.waitFor(() => expect(api.disableAccount).toHaveBeenCalledTimes(1));
-    button(root, 'B站服务账号').listeners.get('click')?.();
-    await vi.waitFor(() => expect(button(root, '创建服务账号验证')).toBeDefined());
-    rejectDisable(new HostedAPIError('recent_totp_required', 403));
-    await disablePending.catch(() => undefined);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(document.activeElement).toBeUndefined();
+    await vi.waitFor(() => expect(api.adminAccounts).toHaveBeenCalledTimes(1));
     expect(descendants(root).some((element) => element.className === 'hosted-code-control')).toBe(false);
     await mounted.dispose();
   });

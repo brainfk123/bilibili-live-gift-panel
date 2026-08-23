@@ -1,0 +1,10 @@
+import {describe,expect,it} from 'vitest';
+import {HostedAPI} from '../src/hosted/api';
+import {createAccountSelection} from '../src/hosted/admin/accounts/selection';
+const json=(body:unknown,status=200)=>new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json'}});
+const account={id:41,status:'active',roomId:'123456',invitationQuota:8,hasObs:true,createdAt:'2026-08-23T00:00:00Z',updatedAt:'2026-08-23T00:00:00Z'};
+describe('administrator account resource',()=>{
+ it('keeps selection independent from fetched pages',()=>{const selection=createAccountSelection();selection.togglePage([41,52]);selection.togglePage([68]);expect(selection.values()).toEqual([41,52,68]);selection.togglePage([41,52]);expect(selection.values()).toEqual([68]);selection.clear();expect(selection.size()).toBe(0)});
+ it('strictly parses pages, details, OBS URL and ordered batch results',async()=>{const requests:string[]=[];const api=await HostedAPI.connect(async(input)=>{requests.push(String(input));if(input==='/api/bootstrap')return json({csrfToken:'csrf'});if(String(input).startsWith('/api/admin/accounts?'))return json({items:[account],nextCursor:'opaque'});if(input==='/api/admin/accounts/41')return json({...account,obsUrl:'https://panel.example.com/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',recentEvents:[]});return json({results:[{accountId:41,status:'succeeded',accountStatus:'disabled'}]})});await expect(api.adminAccounts({status:'active',limit:50})).resolves.toMatchObject({items:[account],nextCursor:'opaque'});await expect(api.adminAccount(41)).resolves.toMatchObject({id:41,hasObs:true});await expect(api.adminBatch([41],'disable','maintenance')).resolves.toHaveLength(1);expect(requests[1]).toContain('status=active')});
+ it('rejects detail payloads with UID or malformed OBS paths',async()=>{for(const detail of [{...account,recentEvents:[],uid:'123'},{...account,recentEvents:[],obsUrl:'https://panel.example.com/not-obs'}]){const api=await HostedAPI.connect(async(input)=>input==='/api/bootstrap'?json({csrfToken:'csrf'}):json(detail));await expect(api.adminAccount(41)).rejects.toMatchObject({code:'invalid_response'})}});
+});

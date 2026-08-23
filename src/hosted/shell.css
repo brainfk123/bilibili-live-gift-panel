@@ -208,6 +208,25 @@ select {
   .hosted-code-cell.is-active::after { animation: none; }
 }
 
+.hosted-admin-metrics { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;margin:1rem 0; }
+.hosted-admin-metric { display:flex;flex-direction:column;gap:.25rem;padding:1rem;border:1px solid var(--hosted-border,#d8e0ec);border-radius:1rem;background:#fff; }
+.hosted-admin-metric strong { font-size:1.8rem;color:#17243a; }
+.hosted-admin-resource-row,.hosted-admin-account-controls,.hosted-admin-bulk-toolbar { display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;margin:1rem 0; }
+.hosted-admin-account-controls input { flex:1 1 16rem; }
+.hosted-admin-bulk-toolbar:empty { display:none; }
+.hosted-admin-account-table { border:1px solid #d8e0ec;border-radius:1rem;overflow:hidden;background:#fff; }
+.hosted-admin-account-row { display:grid;grid-template-columns:2.5rem minmax(11rem,1.5fr) minmax(8rem,1fr) minmax(6rem,.7fr) minmax(6rem,.7fr) 5rem;gap:.75rem;align-items:center;padding:.9rem 1rem;border-bottom:1px solid #e5eaf1; }
+.hosted-admin-account-row:last-child { border-bottom:0; }
+.hosted-admin-account-head { color:#66738a;background:#f6f8fb;font-weight:700; }
+.hosted-admin-account-detail { position:fixed;z-index:25;inset:0 0 0 auto;width:min(31rem,100vw);padding:1.5rem;overflow:auto;background:#fff;box-shadow:-1rem 0 3rem rgb(18 34 56 / .18); }
+.hosted-admin-account-detail:empty { display:none; }
+@media (max-width:720px) {
+  .hosted-admin-metrics { grid-template-columns:1fr; }
+  .hosted-admin-account-row { grid-template-columns:2.5rem 1fr 4.5rem; }
+  .hosted-admin-account-row > :nth-child(3),.hosted-admin-account-row > :nth-child(4),.hosted-admin-account-row > :nth-child(5) { display:none; }
+  .hosted-admin-account-detail { width:100vw; }
+}
+
 :focus-within > .hosted-code-cell {
   border-color: #246bce;
   box-shadow: 0 0 0 2px rgb(36 107 206 / 18%);

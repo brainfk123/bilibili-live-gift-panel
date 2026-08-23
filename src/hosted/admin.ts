@@ -1,6 +1,8 @@
 import { HostedAPIError, type BiliServiceStatus, type Challenge, type HostedAPI, type RecoveryPreparation } from './api';
 import { mountAdminLogin } from './admin-login';
 import { mountAdminShell } from './admin/shell';
+import { mountAdminOverview } from './admin/overview';
+import { mountAccountList } from './admin/accounts/list';
 import { createOneTimeSecretDialog } from './one-time-secret';
 import type { AdminSection } from './admin/routes';
 import { mountVerificationCode, type VerificationCodeControl } from './verification-code';
@@ -295,26 +297,13 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
         host.append(title, intro, status);
 
         if (section === 'overview') {
-          title.textContent = '运行总览'; intro.textContent = '按业务域进入操作页，避免在同一长列表中误操作。';
-          const grid = document.createElement('div'); grid.className = 'hosted-admin-card-grid';
-          for (const [target, heading, detail] of [['accounts', '主播账号', '账号状态、房间、额度与 OBS'], ['invitations', '邀请码', '创建和管理注册邀请码'], ['bili-service', 'B站服务账号', '检查或替换 B 站服务凭据'], ['settings', '系统设置', '管理员登录、恢复与诊断']] as const) {
-            const card = document.createElement('button'); card.type = 'button'; card.className = 'hosted-admin-card hosted-admin-card-link'; card.setAttribute('aria-label', `进入${heading}`); const h3 = document.createElement('h3'); h3.textContent = heading; const p = document.createElement('p'); p.textContent = detail; card.append(h3, p); card.addEventListener('click', () => navigate(target)); grid.append(card);
-          }
-          host.append(grid);
+          title.textContent = '运营总览'; intro.textContent = '先看需要处理的事项，再进入对应资源。';
+          const view=mountAdminOverview(host,api,navigate);localDisposers.push(()=>{void view.dispose()});
         }
 
         if (section === 'accounts') {
-          title.textContent = '账号'; intro.textContent = '账号状态与配额操作集中在这里；危险操作必须填写原因。';
-          const recent = recentControl(); const [accountLabel, account] = labelledInput(document, '账号 ID'); account.inputMode = 'numeric';
-          const [reasonLabel, reason] = labelledInput(document, '操作原因'); const [quotaLabel, quota] = labelledInput(document, '剩余额度'); quota.inputMode = 'numeric';
-          const danger = document.createElement('section'); danger.className = 'hosted-admin-card hosted-admin-danger'; const dangerTitle = document.createElement('h3'); dangerTitle.textContent = '账号变更';
-          const accountID = (): number => Number(account.value);
-          danger.append(dangerTitle, accountLabel, reasonLabel, quotaLabel,
-            button(document, '停用账号', () => recent.guarded(async () => { await accountFlow.disable(accountID(), reason.value); })),
-            button(document, '启用账号', () => recent.guarded(async () => { await accountFlow.enable(accountID(), reason.value); })),
-            button(document, '调整邀请码额度', () => recent.guarded(async () => { await accountFlow.adjustQuota(accountID(), Number(quota.value), reason.value); })),
-          );
-          host.append(recent.element, danger);
+          title.textContent = '主播账号'; intro.textContent = '搜索、筛选和批量管理账号；OBS 设置位于账号详情。';
+          const view=mountAccountList(host,api);localDisposers.push(()=>{void view.dispose()});
         }
 
         if (section === 'invitations') {

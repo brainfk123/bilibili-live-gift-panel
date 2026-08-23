@@ -53,6 +53,17 @@ export interface OBSCredentialAccess {
   url: string;
 }
 
+export type AdminAccountStatus = 'active' | 'disabled';
+export type AdminAttentionKind = 'missing_room' | 'missing_obs';
+export interface AdminEvent { type: string; text: string; accountId?: number; createdAt: string }
+export interface AdminAttentionItem { kind: AdminAttentionKind; accountId: number; text: string; priority: number }
+export interface AdminOverview { totalAccounts: number; activeAccounts: number; disabledAccounts: number; missingRooms: number; missingObs: number; attention: AdminAttentionItem[]; recentEvents: AdminEvent[] }
+export interface AdminAccountSummary { id: number; status: AdminAccountStatus; roomId?: string; invitationQuota: number; hasObs: boolean; createdAt: string; updatedAt: string }
+export interface AdminAccountDetail extends AdminAccountSummary { obsUrl?: string; recentEvents: AdminEvent[] }
+export interface AdminAccountPage { items: AdminAccountSummary[]; nextCursor?: string }
+export type AdminBatchAction = 'enable' | 'disable' | 'set_invitation_quota';
+export interface AdminBatchResult { accountId: number; status: 'succeeded' | 'failed'; accountStatus?: AdminAccountStatus; error?: string }
+
 export interface RecoveryPreparation {
   totpUri: string;
   recoveryPassword: string;
@@ -302,6 +313,13 @@ function invitation(value: unknown, extraOptional: string[] = []): InvitationRec
   return item as unknown as InvitationRecord;
 }
 
+function adminEvent(value: unknown): AdminEvent | undefined {
+  const item=object(value); if(!item||!exactKeys(item,['type','text','createdAt'],['accountId'])||!string(item.type)||!string(item.text)||!instant(item.createdAt)||!optional(item.accountId,(id)=>number(id)&&id>0)) return undefined; return item as unknown as AdminEvent;
+}
+function adminAccount(value: unknown, extraOptional: string[] = []): AdminAccountSummary | undefined {
+  const item=object(value);if(!item||!exactKeys(item,['id','status','invitationQuota','hasObs','createdAt','updatedAt'],['roomId',...extraOptional])||!number(item.id)||item.id<=0||(item.status!=='active'&&item.status!=='disabled')||!number(item.invitationQuota)||typeof item.hasObs!=='boolean'||!instant(item.createdAt)||!instant(item.updatedAt)||!optional(item.roomId,(room)=>typeof room==='string'&&/^[1-9][0-9]{0,19}$/.test(room)))return undefined;return item as unknown as AdminAccountSummary;
+}
+
 export class HostedAPI {
   private constructor(private readonly fetcher: Fetcher, private readonly csrfToken: string) {}
 
@@ -453,6 +471,17 @@ export class HostedAPI {
   async adminSession(): Promise<void> { await this.request('/api/admin/session', 'GET', 204); }
   async adminLogout(): Promise<void> { await this.request('/api/admin/session', 'DELETE', 204); }
   async adminEmailLogin(challengeId: string, emailCode: string): Promise<void> { await this.request('/api/admin/session/email', 'POST', 204, { challengeId, emailCode }); }
+  async adminOverview(): Promise<AdminOverview> {
+    const data=object((await this.request('/api/admin/overview','GET',200)).data);if(!data||!exactKeys(data,['totalAccounts','activeAccounts','disabledAccounts','missingRooms','missingObs','attention','recentEvents'])||!number(data.totalAccounts)||!number(data.activeAccounts)||!number(data.disabledAccounts)||!number(data.missingRooms)||!number(data.missingObs)||!Array.isArray(data.attention)||!Array.isArray(data.recentEvents))throw new HostedAPIError('invalid_response',200);
+    const attention=data.attention.map((value)=>{const item=object(value);return item&&exactKeys(item,['kind','accountId','text','priority'])&&(item.kind==='missing_room'||item.kind==='missing_obs')&&number(item.accountId)&&item.accountId>0&&string(item.text)&&number(item.priority)?item as unknown as AdminAttentionItem:undefined;});const events=data.recentEvents.map(adminEvent);if(attention.some((item)=>!item)||events.some((item)=>!item))throw new HostedAPIError('invalid_response',200);return {...data,attention,recentEvents:events} as AdminOverview;
+  }
+  async adminAccounts(query: { query?: string; status?: AdminAccountStatus; attention?: AdminAttentionKind; cursor?: string; limit?: number } = {}): Promise<AdminAccountPage> {
+    const parameters=new URLSearchParams();for(const [key,value] of Object.entries(query)){if(value!==undefined&&value!=='')parameters.set(key,String(value))}const suffix=parameters.size?`?${parameters}`:'';const data=object((await this.request(`/api/admin/accounts${suffix}`,'GET',200)).data);if(!data||!exactKeys(data,['items'],['nextCursor'])||!Array.isArray(data.items)||!optional(data.nextCursor,string))throw new HostedAPIError('invalid_response',200);const items=data.items.map((value)=>adminAccount(value));if(items.some((item)=>!item))throw new HostedAPIError('invalid_response',200);return {items:items as AdminAccountSummary[],...(data.nextCursor?{nextCursor:data.nextCursor as string}:{})};
+  }
+  async adminAccount(id:number):Promise<AdminAccountDetail>{if(!Number.isSafeInteger(id)||id<=0)throw new HostedAPIError('invalid_request',0);const data=object((await this.request(`/api/admin/accounts/${id}`,'GET',200)).data);const summary=adminAccount(data,['recentEvents','obsUrl']);if(!data||!summary||!Array.isArray(data.recentEvents)||!optional(data.obsUrl,(url)=>{try{const parsed=new URL(url as string);return parsed.protocol==='https:'&&!parsed.search&&!parsed.hash&&/^\/obs\/[A-Za-z0-9_-]{43}$/.test(parsed.pathname)}catch{return false}}))throw new HostedAPIError('invalid_response',200);const events=data.recentEvents.map(adminEvent);if(events.some((event)=>!event))throw new HostedAPIError('invalid_response',200);return {...summary,...(data.obsUrl?{obsUrl:data.obsUrl as string}:{}),recentEvents:events as AdminEvent[]};}
+  async adminBatch(accountIds:number[],action:AdminBatchAction,reason:string,remainingQuota?:number):Promise<AdminBatchResult[]>{const data=object((await this.request('/api/admin/accounts/batch','POST',200,{accountIds,action,reason,...(remainingQuota===undefined?{}:{remainingQuota})})).data);if(!data||!exactKeys(data,['results'])||!Array.isArray(data.results))throw new HostedAPIError('invalid_response',200);const results=data.results.map((value)=>{const item=object(value);if(!item||!exactKeys(item,['accountId','status'],['accountStatus','error'])||!number(item.accountId)||item.accountId<=0||(item.status!=='succeeded'&&item.status!=='failed')||!optional(item.accountStatus,(status)=>status==='active'||status==='disabled')||!optional(item.error,string))return undefined;return item as unknown as AdminBatchResult});if(results.some((item)=>!item)||results.length!==accountIds.length||results.some((item,index)=>item?.accountId!==accountIds[index]))throw new HostedAPIError('invalid_response',200);return results as AdminBatchResult[];}
+  async updateAdminRoom(id:number,roomId:string):Promise<AdminAccountDetail>{const data=await this.request(`/api/admin/accounts/${id}/room`,'PUT',200,{roomId});return this.parseAdminAccountDetail(data.data);}
+  private parseAdminAccountDetail(value:unknown):AdminAccountDetail{const data=object(value);const summary=adminAccount(data,['recentEvents','obsUrl']);if(!data||!summary||!Array.isArray(data.recentEvents))throw new HostedAPIError('invalid_response',200);const events=data.recentEvents.map(adminEvent);if(events.some((event)=>!event))throw new HostedAPIError('invalid_response',200);return {...summary,...(typeof data.obsUrl==='string'?{obsUrl:data.obsUrl}:{}),recentEvents:events as AdminEvent[]};}
   async biliServiceStatus(): Promise<BiliServiceStatus> {
     const data = object((await this.request('/api/admin/bili-service/status', 'GET', 200)).data);
     if (!data || !number(data.version) || !string(data.health)) throw new HostedAPIError('invalid_response', 200);
