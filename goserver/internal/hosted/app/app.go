@@ -24,6 +24,7 @@ type Dependencies struct {
 	Auth          http.Handler
 	Admin         http.Handler
 	AdminConsole  http.Handler
+	AdminSettings http.Handler
 	Invitation    http.Handler
 	Configuration http.Handler
 	Migration     http.Handler
@@ -273,6 +274,12 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("GET /api/admin/accounts/{id}", dependencies.AdminConsole)
 		mux.Handle("POST /api/admin/accounts/batch", dependencies.AdminConsole)
 		mux.Handle("PUT /api/admin/accounts/{id}/room", dependencies.AdminConsole)
+	}
+	if dependencies.AdminSettings != nil {
+		mux.Handle("GET /api/admin/settings", dependencies.AdminSettings)
+		mux.Handle("POST /api/admin/sessions/revoke-others", dependencies.AdminSettings)
+		mux.Handle("GET /api/admin/events", dependencies.AdminSettings)
+		mux.Handle("GET /api/admin/diagnostics", dependencies.AdminSettings)
 	}
 	if dependencies.Auth != nil {
 		mux.Handle("/api/auth/", dependencies.Auth)
