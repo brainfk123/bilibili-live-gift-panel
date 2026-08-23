@@ -577,7 +577,17 @@ func (repository *SQLRepository) RevokeAdminSession(ctx context.Context, current
 	if targetID == currentID {
 		return ErrCurrentAdminSession
 	}
-	if targetID <= 0 || targetEpoch != currentEpoch || targetRevoked.Valid || !targetExpires.After(now) {
+	if targetID <= 0 || targetEpoch != currentEpoch {
+		return ErrAdminSessionNotFound
+	}
+	if targetRevoked.Valid {
+		if err := transaction.Commit(); err != nil {
+			return ErrUnavailable
+		}
+		committed = true
+		return nil
+	}
+	if !targetExpires.After(now) {
 		return ErrAdminSessionNotFound
 	}
 	result, err := transaction.ExecContext(ctx, "UPDATE site_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", now, targetID)

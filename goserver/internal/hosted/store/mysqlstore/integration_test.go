@@ -157,6 +157,20 @@ func TestIntegrationRealMySQLSessionInventoryMigration(t *testing.T) {
 		if err := repository.RevokeAdminSession(ctx, firstHash, second.PublicID, now.Add(7*time.Minute)); err != nil {
 			t.Fatalf("target revoke: %v", err)
 		}
+		var firstRevokedAt time.Time
+		if err := db.QueryRowContext(ctx, "SELECT revoked_at FROM site_sessions WHERE public_id = UNHEX(?)", second.PublicID).Scan(&firstRevokedAt); err != nil {
+			t.Fatalf("read first revocation: %v", err)
+		}
+		if err := repository.RevokeAdminSession(ctx, firstHash, second.PublicID, now.Add(8*time.Minute)); err != nil {
+			t.Fatalf("idempotent target revoke retry: %v", err)
+		}
+		var retriedRevokedAt time.Time
+		if err := db.QueryRowContext(ctx, "SELECT revoked_at FROM site_sessions WHERE public_id = UNHEX(?)", second.PublicID).Scan(&retriedRevokedAt); err != nil {
+			t.Fatalf("read retried revocation: %v", err)
+		}
+		if !firstRevokedAt.Equal(now.Add(7*time.Minute)) || !retriedRevokedAt.Equal(firstRevokedAt) {
+			t.Fatalf("revoked_at first=%v retry=%v", firstRevokedAt, retriedRevokedAt)
+		}
 		sessions, err := repository.ListAdminSessions(ctx, firstHash, now.Add(7*time.Minute))
 		if err != nil || len(sessions) != 1 || !sessions[0].Current || sessions[0].PublicID != first.PublicID {
 			t.Fatalf("sessions=%#v error=%v", sessions, err)

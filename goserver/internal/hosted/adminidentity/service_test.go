@@ -1573,12 +1573,61 @@ func TestSQLRepositorySessionInventoryRevokesTargetOnce(t *testing.T) {
 		WithArgs(now, int64(62)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
+	retryAt := now.Add(time.Minute)
+	mock.ExpectBegin()
+	mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
+		WithArgs(tokenHash).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(61, 3, now.Add(time.Hour), nil))
+	mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND public_id = UNHEX(?) FOR UPDATE")).
+		WithArgs(publicID).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(62, 3, now.Add(time.Hour), now))
+	mock.ExpectCommit()
 
 	if err := repository.RevokeAdminSession(context.Background(), tokenHash, publicID, now); err != nil {
 		t.Fatalf("RevokeAdminSession() error = %v", err)
 	}
+	if err := repository.RevokeAdminSession(context.Background(), tokenHash, publicID, retryAt); err != nil {
+		t.Fatalf("RevokeAdminSession() retry error = %v", err)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositorySessionInventoryKeepsMissingAndEpochMismatchAsNotFound(t *testing.T) {
+	tests := []struct {
+		name       string
+		targetRows *sqlmock.Rows
+	}{
+		{name: "missing target", targetRows: sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"})},
+		{name: "credential epoch mismatch", targetRows: sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(72, 2, time.Date(2026, 8, 23, 11, 0, 0, 0, time.UTC), nil)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			database, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			repository := NewRepository(database)
+			now := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+			tokenHash := bytes.Repeat([]byte{0x66}, sha256.Size)
+			publicID := "11223344556677889900aabbccddeeff"
+			mock.ExpectBegin()
+			mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND token_hash = ? FOR UPDATE")).
+				WithArgs(tokenHash).
+				WillReturnRows(sqlmock.NewRows([]string{"id", "credential_epoch", "expires_at", "revoked_at"}).AddRow(71, 3, now.Add(time.Hour), nil))
+			mock.ExpectQuery(sqlPattern("SELECT id, credential_epoch, expires_at, revoked_at FROM site_sessions WHERE admin_identity_id = 1 AND public_id = UNHEX(?) FOR UPDATE")).
+				WithArgs(publicID).
+				WillReturnRows(test.targetRows)
+			mock.ExpectRollback()
+			if err := repository.RevokeAdminSession(context.Background(), tokenHash, publicID, now); !errors.Is(err, ErrAdminSessionNotFound) {
+				t.Fatalf("RevokeAdminSession() error = %v, want ErrAdminSessionNotFound", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
