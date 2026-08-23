@@ -221,7 +221,7 @@ func TestStaticCompositionDoesNotStealOBSOrAPIRoutes(t *testing.T) {
 	obs := statusHandler(http.StatusTeapot)
 	handler := composeHostedHTTPWithRuntimeOBSAndStatic(
 		healthyHostedDatabase{}, statusHandler(http.StatusAccepted), statusHandler(http.StatusAccepted),
-		statusHandler(http.StatusAccepted), nil, nil, nil, nil, obs, static, "runtime-csrf",
+		statusHandler(http.StatusAccepted), nil, nil, nil, nil, obs, nil, static, "runtime-csrf",
 	)
 	publicID := strings.Repeat("A", 43)
 	for _, test := range []struct {

@@ -23,6 +23,7 @@ type Dependencies struct {
 	DB            healthChecker
 	Auth          http.Handler
 	Admin         http.Handler
+	AdminConsole  http.Handler
 	Invitation    http.Handler
 	Configuration http.Handler
 	Migration     http.Handler
@@ -262,6 +263,13 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("/api/admin/accounts/{id}/obs-credential", dependencies.OBS)
 		mux.Handle("/obs/{publicID}/exchange", dependencies.OBS)
 		mux.Handle("/obs/{publicID}/events", dependencies.OBS)
+	}
+	if dependencies.AdminConsole != nil {
+		// Administrator projections own these exact read paths before the
+		// legacy broad account mutation handler.
+		mux.Handle("GET /api/admin/overview", dependencies.AdminConsole)
+		mux.Handle("GET /api/admin/accounts", dependencies.AdminConsole)
+		mux.Handle("GET /api/admin/accounts/{id}", dependencies.AdminConsole)
 	}
 	if dependencies.Auth != nil {
 		mux.Handle("/api/auth/", dependencies.Auth)

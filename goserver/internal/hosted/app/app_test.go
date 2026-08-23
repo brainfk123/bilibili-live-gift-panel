@@ -150,6 +150,19 @@ func TestBiliServiceRoutesWinOverBroaderAdministratorPrefix(t *testing.T) {
 	}
 }
 
+func TestAdministratorConsoleQueriesWinOverBroadAccountHandler(t *testing.T) {
+	console := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusTeapot) })
+	broad := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusAccepted) })
+	handler := New(Dependencies{DB: fakeHealth{}, Auth: broad, Admin: broad, AdminConsole: console})
+	for _, path := range []string{"/api/admin/overview", "/api/admin/accounts", "/api/admin/accounts/41"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusTeapot {
+			t.Fatalf("GET %s status=%d, want administrator console", path, response.Code)
+		}
+	}
+}
+
 func TestEveryMethodForExactBiliServicePathsStaysOutOfBroadAdministratorHandler(t *testing.T) {
 	allowed := map[string]string{
 		"/api/admin/bili-service/status":    http.MethodGet,

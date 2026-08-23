@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"bilibili-live-gift-panel/internal/hosted/adminconsole"
 	"bilibili-live-gift-panel/internal/hosted/adminidentity"
 	"bilibili-live-gift-panel/internal/hosted/app"
 	"bilibili-live-gift-panel/internal/hosted/biligateway"
@@ -256,7 +257,15 @@ func run() error {
 		if err != nil {
 			return errors.New("configure administrator HTTP")
 		}
-		handler := composeHostedHTTPWithRuntimeOBSAndStatic(store, identityHTTP, adminHTTP, invitationHTTP, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, obsHTTP, staticHTTP, config.AdminCSRFToken)
+		adminConsoleService, err := adminconsole.NewService(store.Database(), config.AdminAllowedOrigin)
+		if err != nil {
+			return errors.New("configure administrator console")
+		}
+		adminConsoleHTTP, err := adminconsole.NewHTTPHandler(adminConsoleService, adminService)
+		if err != nil {
+			return errors.New("configure administrator console HTTP")
+		}
+		handler := composeHostedHTTPWithRuntimeOBSAndStatic(store, identityHTTP, adminHTTP, invitationHTTP, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, obsHTTP, adminConsoleHTTP, staticHTTP, config.AdminCSRFToken)
 		server := newHTTPServerWithContext(processContext, config.ListenAddr, retainBiliGateway(handler, biliDependencies.Gateway))
 		serveErr := serveHTTPWithRuntime(
 			processContext,
@@ -425,11 +434,11 @@ func composeHostedHTTPWithRuntime(database hostedHealthChecker, auth, admin, inv
 }
 
 func composeHostedHTTPWithRuntimeAndOBS(database hostedHealthChecker, auth, admin, invitations, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, obsHTTP http.Handler, csrfToken string) http.Handler {
-	return composeHostedHTTPWithRuntimeOBSAndStatic(database, auth, admin, invitations, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, obsHTTP, nil, csrfToken)
+	return composeHostedHTTPWithRuntimeOBSAndStatic(database, auth, admin, invitations, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, obsHTTP, nil, nil, csrfToken)
 }
 
-func composeHostedHTTPWithRuntimeOBSAndStatic(database hostedHealthChecker, auth, admin, invitations, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, obsHTTP, staticHTTP http.Handler, csrfToken string) http.Handler {
-	return app.New(app.Dependencies{DB: database, Auth: auth, Admin: admin, Invitation: invitations, Configuration: configurationHTTP, Migration: migrationHTTP, BiliService: biliServiceHTTP, Runtime: runtimeHTTP, OBS: obsHTTP, Static: staticHTTP, CSRFToken: csrfToken})
+func composeHostedHTTPWithRuntimeOBSAndStatic(database hostedHealthChecker, auth, admin, invitations, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, obsHTTP, adminConsoleHTTP, staticHTTP http.Handler, csrfToken string) http.Handler {
+	return app.New(app.Dependencies{DB: database, Auth: auth, Admin: admin, AdminConsole: adminConsoleHTTP, Invitation: invitations, Configuration: configurationHTTP, Migration: migrationHTTP, BiliService: biliServiceHTTP, Runtime: runtimeHTTP, OBS: obsHTTP, Static: staticHTTP, CSRFToken: csrfToken})
 }
 
 func loadHostedStatic(root string) (http.Handler, error) {
