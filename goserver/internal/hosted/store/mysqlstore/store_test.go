@@ -132,7 +132,7 @@ func TestRecoverableAdministratorInvitationMigrationIsNullableAndIdempotent(t *t
 	if sqlText == "" {
 		t.Fatal("0011 migration is missing")
 	}
-	for _, required := range []string{"ADD COLUMN IF NOT EXISTS code_ciphertext VARBINARY(512) NULL", "MODIFY COLUMN expires_at TIMESTAMP(6) NULL"} {
+	for _, required := range []string{"information_schema.columns", "ALTER TABLE invitations ADD COLUMN code_ciphertext VARBINARY(512) NULL", "WHEN 'exact' THEN 'DO 0'", "invitation_ciphertext_column_definition_mismatch", "MODIFY COLUMN expires_at TIMESTAMP(6) NULL"} {
 		if !strings.Contains(sqlText, required) {
 			t.Fatalf("0011 missing %q", required)
 		}
