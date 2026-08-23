@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { mountAdminView } from '../src/hosted/admin';
 import { mountAdminOverview } from '../src/hosted/admin/overview';
 import { mountAccountList } from '../src/hosted/admin/accounts/list';
+import { HostedAPIError } from '../src/hosted/api';
 
 class Element {
   children: Element[] = [];
@@ -121,6 +122,64 @@ describe('administrator section lifetime fence', () => {
     expect(text(root)).toContain('1 个成功，1 个失败');
     expect(control(root, 'input', '选择主播账号 #52').checked).toBe(true);
     expect(control(root, 'input', '选择主播账号 #41').checked).toBe(false);
+    vi.unstubAllGlobals();
+    await view.dispose();
+  });
+
+  it('clears every selected account after an all-success batch and reports the exact count', async () => {
+    const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (value) => { const node = new Element('#text', document); node.textContent = value; return node; } };
+    const root = new Element('div', document);
+    const api = { adminAccounts: vi.fn(async () => ({ items: [
+      { id: 41, status: 'active', roomId: '123', invitationQuota: 8, hasObs: true, createdAt: '', updatedAt: '' },
+      { id: 52, status: 'active', roomId: '456', invitationQuota: 8, hasObs: true, createdAt: '', updatedAt: '' },
+    ] })), adminBatch: vi.fn(async () => [{ accountId: 41, status: 'succeeded' as const }, { accountId: 52, status: 'succeeded' as const }]) };
+    vi.stubGlobal('prompt', vi.fn(() => 'maintenance'));
+    const view = mountAccountList(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountAccountList>[1]);
+    await flush();
+    const currentPage = control(root, 'input', '全选当前页'); currentPage.checked = true; currentPage.listeners.get('change')?.();
+    button(root, '停用').listeners.get('click')?.();
+    await flush();
+
+    expect(text(root)).toContain('2 个账号操作成功');
+    expect(control(root, 'input', '选择主播账号 #41').checked).toBe(false);
+    expect(control(root, 'input', '选择主播账号 #52').checked).toBe(false);
+    vi.unstubAllGlobals();
+    await view.dispose();
+  });
+
+  it('shows only the safe rejected-request reason after a batch rejection', async () => {
+    const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (value) => { const node = new Element('#text', document); node.textContent = value; return node; } };
+    const root = new Element('div', document);
+    const api = { adminAccounts: vi.fn(async () => ({ items: [{ id: 41, status: 'active', roomId: '123', invitationQuota: 8, hasObs: true, createdAt: '', updatedAt: '' }] })), adminBatch: vi.fn(async () => { throw new HostedAPIError('request_rejected', 400); }) };
+    vi.stubGlobal('prompt', vi.fn(() => 'maintenance'));
+    const view = mountAccountList(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountAccountList>[1]);
+    await flush();
+    const currentPage = control(root, 'input', '全选当前页'); currentPage.checked = true; currentPage.listeners.get('change')?.();
+    button(root, '停用').listeners.get('click')?.();
+    await flush();
+
+    expect(text(root)).toContain('批量操作失败：请求被拒绝，请重试');
+    expect(text(root)).not.toContain('Hosted request failed');
+    vi.unstubAllGlobals();
+    await view.dispose();
+  });
+
+  it('retries the exact captured batch request without clearing its failed selection', async () => {
+    const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (value) => { const node = new Element('#text', document); node.textContent = value; return node; } };
+    const root = new Element('div', document);
+    const api = { adminAccounts: vi.fn(async () => ({ items: [{ id: 41, status: 'active', roomId: '123', invitationQuota: 8, hasObs: true, createdAt: '', updatedAt: '' }] })), adminBatch: vi.fn(async () => { throw new HostedAPIError('temporarily_unavailable', 503); }) };
+    vi.stubGlobal('prompt', vi.fn().mockReturnValueOnce('maintenance').mockReturnValueOnce('9'));
+    const view = mountAccountList(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountAccountList>[1]);
+    await flush();
+    const currentPage = control(root, 'input', '全选当前页'); currentPage.checked = true; currentPage.listeners.get('change')?.();
+    button(root, '调整邀请额度').listeners.get('click')?.();
+    await flush();
+    button(root, '重试').listeners.get('click')?.();
+    await flush();
+
+    expect(api.adminBatch).toHaveBeenNthCalledWith(1, [41], 'set_invitation_quota', 'maintenance', 9);
+    expect(api.adminBatch).toHaveBeenNthCalledWith(2, [41], 'set_invitation_quota', 'maintenance', 9);
+    expect(control(root, 'input', '选择主播账号 #41').checked).toBe(true);
     vi.unstubAllGlobals();
     await view.dispose();
   });
