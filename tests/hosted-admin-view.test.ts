@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { mountAdminView } from '../src/hosted/admin';
 import { mountAdminOverview } from '../src/hosted/admin/overview';
 import { mountAccountList } from '../src/hosted/admin/accounts/list';
+import { mountBiliServiceView } from '../src/hosted/admin/bili-service';
 import { HostedAPIError } from '../src/hosted/api';
 
 class Element {
@@ -94,6 +95,11 @@ describe('administrator section lifetime fence', () => {
 
     expect(text(root)).toContain('管理直播间、邀请额度与 OBS');
     expect(text(root)).toContain('创建、分享与作废邀请码');
+    expect(root.children.map((element) => element.className)).toEqual([
+      'hosted-admin-metrics',
+      'hosted-admin-resource-row',
+      'hosted-admin-overview-bottom',
+    ]);
   });
 
   it('keeps failed batch accounts selected and reports exact result counts', async () => {
@@ -259,5 +265,35 @@ describe('administrator section lifetime fence', () => {
     await vi.waitFor(() => expect(api.adminAccounts).toHaveBeenCalledTimes(1));
     expect(descendants(root).some((element) => element.className === 'hosted-code-control')).toBe(false);
     await mounted.dispose();
+  });
+
+  it('keeps the Bilibili TOTP cells in a dedicated horizontal control', async () => {
+    const document: DocumentLike = {
+      createElement: (tag) => new Element(tag, document),
+      createTextNode: (value) => { const node = new Element('#text', document); node.textContent = value; return node; },
+    };
+    const root = new Element('div', document);
+    const api = {
+      biliServiceStatus: vi.fn(async () => ({ version: 4, health: 'healthy' as const, lastVerifiedAt: '2026-08-23T08:00:00Z' })),
+      checkBiliService: vi.fn(),
+      beginBiliServiceChallenge: vi.fn(async () => ({ challengeId: 'challenge', qrImage: 'data:image/png;base64,AA==', expiresAt: '2026-08-23T08:10:00Z' })),
+      authorizeAdminOperation: vi.fn(),
+      replaceBiliServiceCredential: vi.fn(),
+    };
+    const view = mountBiliServiceView(root as unknown as HTMLElement, api as never);
+    await flush();
+    button(root, '更换服务账号').listeners.get('click')?.();
+    await flush();
+    button(root, '二维码确认后继续').listeners.get('click')?.();
+    await flush();
+
+    const totp = descendants(root).find((element) => element.className.split(/\s+/).includes('hosted-admin-bili-totp'));
+    const control = descendants(root).find((element) => element.className.split(/\s+/).includes('hosted-code-control'));
+    expect(totp).toBeDefined();
+    expect(control).toBeDefined();
+    expect(control).not.toBe(totp);
+    expect(control?.parent).toBe(totp);
+    expect(control?.children.filter((element) => element.className === 'hosted-code-cell')).toHaveLength(6);
+    await view.dispose();
   });
 });

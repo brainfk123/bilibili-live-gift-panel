@@ -8,7 +8,9 @@ export function mountAdminShell(
   const document = root.ownerDocument;
   const frame = document.createElement('div'); frame.className = 'hosted-admin-frame';
   const sidebar = document.createElement('nav'); sidebar.className = 'hosted-admin-sidebar'; sidebar.setAttribute('aria-label', '管理员功能');
+  const sidebarClose = document.createElement('button'); sidebarClose.type = 'button'; sidebarClose.className = 'hosted-admin-sidebar-close'; sidebarClose.setAttribute('aria-label', '关闭菜单'); sidebarClose.textContent = '×';
   const workspace = document.createElement('div'); workspace.className = 'hosted-admin-workspace';
+  const backdrop = document.createElement('div'); backdrop.className = 'hosted-admin-sidebar-backdrop'; backdrop.hidden = true;
   const header = document.createElement('header'); header.className = 'hosted-admin-header';
   const menuTrigger = document.createElement('button'); menuTrigger.type = 'button'; menuTrigger.className = 'hosted-admin-menu-trigger'; menuTrigger.textContent = '菜单'; menuTrigger.setAttribute('aria-expanded', 'false');
   const title = document.createElement('h1'); title.textContent = '管理员控制台';
@@ -17,7 +19,8 @@ export function mountAdminShell(
     const logout = document.createElement('button'); logout.type = 'button'; logout.textContent = '退出登录'; logout.addEventListener('click', options.onLogout); header.append(logout);
   }
   const content = document.createElement('main'); content.className = 'hosted-admin-content';
-  workspace.append(header, content); frame.append(sidebar, workspace); root.replaceChildren(frame);
+  sidebar.append(sidebarClose);
+  workspace.append(header, content); frame.append(sidebar, workspace, backdrop); root.replaceChildren(frame);
 
   const buttons = new Map<AdminSection, HTMLButtonElement>();
   let active = options.initial;
@@ -29,6 +32,7 @@ export function mountAdminShell(
     menuOpen = open;
     sidebar.setAttribute('data-open', String(open));
     menuTrigger.setAttribute('aria-expanded', String(open));
+    backdrop.hidden = !open;
     if (open) buttons.values().next().value?.focus();
     else if (restoreFocus) menuTrigger.focus();
   };
@@ -52,12 +56,14 @@ export function mountAdminShell(
     const button = document.createElement('button'); button.type = 'button'; button.textContent = item.label; button.addEventListener('click', () => navigate(item.id));
     buttons.set(item.id, button); sidebar.append(button);
   }
+  sidebarClose.addEventListener('click', () => setMenuOpen(false, true));
+  backdrop.addEventListener('click', () => setMenuOpen(false, true));
   menuTrigger.addEventListener('click', () => setMenuOpen(!menuOpen));
   const onKeyDown = (event: KeyboardEvent): void => {
     if (!menuOpen) return;
     if (event.key === 'Escape') { event.preventDefault(); setMenuOpen(false, true); return; }
     if (event.key !== 'Tab') return;
-    const items = [...buttons.values()];
+    const items = [sidebarClose, ...buttons.values()];
     if (items.length === 0) return;
     if (!event.shiftKey && document.activeElement === items.at(-1)) { event.preventDefault(); items[0].focus(); }
     if (event.shiftKey && document.activeElement === items[0]) { event.preventDefault(); items.at(-1)?.focus(); }

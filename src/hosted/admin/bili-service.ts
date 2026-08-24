@@ -52,7 +52,7 @@ export function mountBiliServiceView(host: HTMLElement, api: BiliServiceAPI): Ho
     if (snapshot.phase === 'authorizing' || snapshot.phase === 'replacing') {
       const totpStep = document.createElement('div'); totpStep.className = 'hosted-admin-bili-step hosted-admin-bili-totp';
       const totpTitle = document.createElement('h4'); totpTitle.textContent = snapshot.phase === 'replacing' ? '正在替换服务账号…' : '输入 6 位 TOTP 以授权替换'; totpStep.append(totpTitle);
-      if (snapshot.phase === 'authorizing') { code = mountVerificationCode(totpStep, { label: '输入 6 位 TOTP 以授权替换', onComplete: (totp) => { void controller.authorizeAndReplace(totp); } }); code.focus(); }
+      if (snapshot.phase === 'authorizing') { const codeHost = document.createElement('div'); totpStep.append(codeHost); code = mountVerificationCode(codeHost, { label: '输入 6 位 TOTP 以授权替换', onComplete: (totp) => { void controller.authorizeAndReplace(totp); } }); code.focus(); }
       flow.append(totpStep);
     }
     flowHost.append(flow);

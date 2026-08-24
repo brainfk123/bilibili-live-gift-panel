@@ -232,6 +232,7 @@ select {
 .hosted-admin-invitation-create .hosted-admin-field { flex:1 1 9rem; }
 .hosted-admin-empty { display:grid;justify-items:start;gap:.45rem;margin:1rem 0;padding:1.5rem;color:#526078;background:#fff;border:1px dashed #bfc9d8;border-radius:1rem; }
 .hosted-admin-empty h3,.hosted-admin-empty p { margin:0; }
+.hosted-admin-empty:empty { display:none; }
 .hosted-admin-manual-copy { margin:.9rem 1rem .3rem;color:#8d2920; }
 .hosted-admin-invitation-table > code { display:block;margin:0 1rem 1rem;padding:.75rem;overflow-wrap:anywhere;color:#172033;user-select:all;background:#f3f6fa;border:1px solid #cdd6e3;border-radius:.5rem; }
 .hosted-admin-feedback:empty { display:none; }
@@ -755,5 +756,664 @@ select {
   .hosted-panel button,
   .hosted-secondary {
     width: 100%;
+  }
+}
+
+/* Final hosted administrator layout, matched to the approved Figma boards. */
+.hosted-admin-frame {
+  font-family: "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+.hosted-admin-sidebar-close,
+.hosted-admin-sidebar-backdrop {
+  display: none;
+}
+
+.hosted-admin-content {
+  width: min(calc(100% - 5rem), 75rem);
+  padding: 2.5rem 0 4rem;
+}
+
+.hosted-admin-section-title {
+  font-size: 2rem;
+  line-height: 1.25;
+}
+
+.hosted-admin-section-intro {
+  margin: 0.4rem 0 1.5rem;
+  line-height: 1.5;
+}
+
+.hosted-admin-content button {
+  min-height: 2rem;
+  margin: 0;
+  padding: 0.4rem 0.75rem;
+  line-height: 1.2;
+}
+
+.hosted-admin-content button[data-variant="danger-outline"] {
+  color: #b83228;
+  background: #fff7f5;
+  border: 1px solid #ef9b93;
+}
+
+.hosted-admin-content button[data-variant="danger-outline"]:hover {
+  color: #fff;
+  background: #b83228;
+}
+
+.hosted-admin-content input,
+.hosted-admin-content select {
+  min-height: 2.75rem;
+  box-sizing: border-box;
+}
+
+.hosted-admin-feedback {
+  margin: 0;
+}
+
+.hosted-admin-feedback:not(:has(.hosted-admin-notice:not([hidden]))) {
+  display: none;
+}
+
+.hosted-admin-notice[hidden] {
+  display: none;
+}
+
+.hosted-admin-notice {
+  justify-content: flex-start;
+  min-height: 2.75rem;
+  box-sizing: border-box;
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.75rem;
+}
+
+.hosted-admin-notice > span {
+  flex: 1;
+}
+
+.hosted-admin-metrics {
+  gap: 1.25rem;
+  margin: 0 0 1.5rem;
+}
+
+.hosted-admin-metric {
+  min-height: 5.5rem;
+  box-sizing: border-box;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.hosted-admin-metric strong {
+  font-size: 1.7rem;
+  line-height: 1;
+}
+
+.hosted-admin-resource-row {
+  gap: 1.25rem;
+  margin: 0 0 1.5rem;
+}
+
+.hosted-admin-content .hosted-admin-resource-card {
+  min-height: 8.25rem;
+  padding: 1.25rem;
+  border-radius: 0.9rem;
+}
+
+.hosted-admin-content .hosted-admin-resource-card:first-child,
+.hosted-admin-content .hosted-admin-resource-card:hover {
+  color: #fff;
+  background: #2b68ea;
+  border-color: #2b68ea;
+}
+
+.hosted-admin-content .hosted-admin-resource-card:first-child > span,
+.hosted-admin-content .hosted-admin-resource-card:hover > span {
+  color: #fff;
+}
+
+.hosted-admin-overview-bottom {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.25rem;
+}
+
+.hosted-admin-overview-bottom .hosted-admin-card {
+  min-height: 11.75rem;
+  margin: 0;
+  padding: 1.25rem;
+}
+
+.hosted-admin-overview-bottom p {
+  margin: 0.65rem 0;
+}
+
+.hosted-admin-account-controls {
+  display: grid;
+  grid-template-columns: minmax(16rem, 1fr) 10rem 10rem;
+  gap: 1rem;
+  align-items: end;
+  margin: 0 0 1rem;
+}
+
+.hosted-admin-account-controls input {
+  width: 100%;
+}
+
+.hosted-admin-field {
+  gap: 0.35rem;
+}
+
+.hosted-admin-bulk-toolbar {
+  min-height: 3rem;
+  box-sizing: border-box;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+  padding: 0.5rem 0.75rem;
+  color: #fff;
+  background: #1f304b;
+  border-radius: 0.7rem;
+}
+
+.hosted-admin-bulk-toolbar > span {
+  margin-right: auto;
+}
+
+.hosted-admin-bulk-toolbar button {
+  color: #fff;
+  background: transparent;
+  border: 1px solid #738095;
+}
+
+.hosted-admin-account-table,
+.hosted-admin-invitation-table {
+  border-radius: 0.9rem;
+}
+
+.hosted-admin-account-row {
+  min-height: 5rem;
+  box-sizing: border-box;
+  grid-template-columns: 2rem minmax(10rem, 1.45fr) minmax(7rem, 1fr) minmax(6rem, 0.75fr) minmax(5rem, 0.65fr) 4rem;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+}
+
+.hosted-admin-account-head {
+  min-height: 3rem;
+}
+
+.hosted-admin-account-row > button:last-child {
+  justify-self: end;
+  width: 4rem;
+}
+
+.hosted-admin-content input[type="checkbox"] {
+  width: 1.125rem;
+  min-width: 1.125rem;
+  height: 1.125rem;
+  min-height: 1.125rem;
+  padding: 0;
+}
+
+.hosted-admin-invitation-actions {
+  display: grid;
+  grid-template-columns: minmax(16rem, 1fr) 10rem auto;
+  gap: 1rem;
+  align-items: end;
+  margin: 0 0 1rem;
+}
+
+.hosted-admin-invitation-actions input {
+  width: 100%;
+}
+
+.hosted-admin-invitation-actions > button {
+  min-height: 2.75rem;
+}
+
+.hosted-admin-invitation-create {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(8rem, 1fr)) auto auto;
+  gap: 0.75rem;
+  align-items: end;
+  margin: 0 0 1rem;
+  padding: 1rem;
+}
+
+.hosted-admin-invitation-row {
+  min-height: 4.5rem;
+  box-sizing: border-box;
+  grid-template-columns: minmax(9rem, 1.15fr) minmax(6rem, 0.65fr) minmax(9rem, 0.95fr) minmax(9rem, 0.95fr) minmax(12rem, 1.2fr);
+  padding: 0.75rem 1rem;
+}
+
+.hosted-admin-invitation-head {
+  min-height: 3rem;
+}
+
+.hosted-admin-invitation-head button {
+  justify-content: flex-start;
+  padding-inline: 0;
+}
+
+.hosted-admin-invitation-row > span:last-child {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+
+.hosted-admin-invitation-row button {
+  margin: 0;
+}
+
+.hosted-admin-bili-service {
+  margin: 0;
+}
+
+.hosted-admin-bili-actions,
+.hosted-admin-bili-flow-actions {
+  justify-content: flex-end;
+}
+
+.hosted-admin-bili-qr img {
+  inline-size: min(100%, 20rem);
+}
+
+.hosted-admin-settings {
+  display: grid;
+  gap: 1rem;
+}
+
+.hosted-admin-settings .hosted-admin-card {
+  margin: 0;
+  padding: 1rem;
+}
+
+.hosted-admin-settings-profile {
+  min-height: 6.4rem;
+  box-sizing: border-box;
+}
+
+.hosted-admin-settings-profile p {
+  margin: 0.25rem 0 0;
+  color: #596982;
+}
+
+.hosted-admin-card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.65rem;
+}
+
+.hosted-admin-card-heading h3 {
+  margin: 0;
+}
+
+.hosted-admin-card-heading > span {
+  color: #66738a;
+}
+
+.hosted-admin-device-list,
+.hosted-admin-login-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.hosted-admin-device-row,
+.hosted-admin-login-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+  min-height: 3.4rem;
+  box-sizing: border-box;
+  padding: 0.65rem 0.75rem;
+  background: #f6f8fb;
+  border-radius: 0.65rem;
+}
+
+.hosted-admin-login-row {
+  grid-template-columns: 1fr;
+}
+
+.hosted-admin-device-row.is-current {
+  background: #edf4ff;
+}
+
+.hosted-admin-device-row > div,
+.hosted-admin-login-row {
+  min-width: 0;
+}
+
+.hosted-admin-device-row > div,
+.hosted-admin-login-row {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.hosted-admin-device-row span,
+.hosted-admin-login-row span {
+  overflow-wrap: anywhere;
+  color: #66738a;
+  font-size: 0.85rem;
+}
+
+.hosted-admin-current-badge {
+  color: #246bce !important;
+  font-weight: 700;
+}
+
+.hosted-admin-login-row.is-success strong {
+  color: #147a45;
+}
+
+.hosted-admin-login-row.is-failure strong {
+  color: #b83228;
+}
+
+.hosted-admin-device-actions,
+.hosted-admin-settings-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.75rem;
+}
+
+.hosted-admin-settings-advanced {
+  padding: 0.75rem 1rem;
+  background: #fff;
+  border: 1px solid #dce2ea;
+  border-radius: 0.8rem;
+}
+
+.hosted-admin-settings-advanced summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.hosted-admin-account-detail {
+  position: fixed;
+  z-index: 25;
+  inset: 0;
+  display: flex;
+  justify-content: flex-end;
+  width: auto;
+  padding: 0;
+  overflow: hidden;
+  background: rgb(10 21 38 / 32%);
+  box-shadow: none;
+}
+
+.hosted-admin-account-detail:empty {
+  display: none;
+}
+
+.hosted-admin-account-detail-panel {
+  width: min(27.5rem, 100vw);
+  box-sizing: border-box;
+  padding: 1.25rem;
+  overflow-y: auto;
+  background: #f6f8fb;
+  box-shadow: -1rem 0 3rem rgb(18 34 56 / 18%);
+}
+
+.hosted-admin-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.hosted-admin-detail-header h3,
+.hosted-admin-detail-header p {
+  margin: 0;
+}
+
+.hosted-admin-detail-header p {
+  margin-top: 0.25rem;
+  color: #66738a;
+}
+
+.hosted-admin-content .hosted-admin-detail-close {
+  flex: 0 0 2rem;
+  width: 2rem;
+  min-height: 2rem;
+  padding: 0;
+  font-size: 1.35rem;
+}
+
+.hosted-admin-detail-card {
+  margin: 0 0 1rem;
+  padding: 1rem;
+}
+
+.hosted-admin-detail-card h4 {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+}
+
+.hosted-admin-detail-card p {
+  margin: 0 0 0.75rem;
+  color: #66738a;
+}
+
+.hosted-admin-detail-action-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 5.25rem;
+  gap: 0.75rem;
+}
+
+.hosted-admin-detail-action-row button {
+  min-height: 2.65rem;
+}
+
+.hosted-admin-detail-card-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.hosted-admin-detail-events:empty {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .hosted-admin-sidebar {
+    z-index: 31;
+  }
+
+  .hosted-admin-sidebar::before {
+    margin-right: 3rem;
+  }
+
+  .hosted-admin-sidebar-close {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem !important;
+    min-height: 2rem !important;
+    padding: 0 !important;
+    color: #fff !important;
+    font-size: 1.35rem;
+    background: rgb(255 255 255 / 10%) !important;
+    border: 1px solid rgb(255 255 255 / 24%) !important;
+  }
+
+  .hosted-admin-sidebar-backdrop:not([hidden]) {
+    position: fixed;
+    z-index: 30;
+    inset: 0;
+    display: block;
+    background: rgb(10 21 38 / 38%);
+  }
+
+  .hosted-admin-content {
+    width: min(calc(100% - 2.5rem), 42rem);
+    padding: 1.25rem 0 3rem;
+  }
+
+  .hosted-admin-section-title {
+    font-size: 1.8rem;
+  }
+
+  .hosted-admin-metrics,
+  .hosted-admin-overview-bottom {
+    grid-template-columns: 1fr;
+  }
+
+  .hosted-admin-account-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .hosted-admin-account-controls > input {
+    grid-column: 1 / -1;
+  }
+
+  .hosted-admin-account-row {
+    grid-template-columns: 1.5rem minmax(0, 1fr) 4rem;
+    min-height: 4.5rem;
+    gap: 0.75rem;
+    padding: 0.75rem;
+  }
+
+  .hosted-admin-account-head {
+    display: none;
+  }
+
+  .hosted-admin-account-row > :nth-child(3),
+  .hosted-admin-account-row > :nth-child(4),
+  .hosted-admin-account-row > :nth-child(5) {
+    display: none;
+  }
+
+  .hosted-admin-invitation-actions {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.75rem;
+  }
+
+  .hosted-admin-invitation-actions > input {
+    grid-column: 1 / -1;
+  }
+
+  .hosted-admin-invitation-create {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .hosted-admin-invitation-create > button {
+    justify-self: end;
+  }
+
+  .hosted-admin-invitation-head {
+    display: none;
+  }
+
+  .hosted-admin-invitation-table {
+    display: grid;
+    gap: 0.75rem;
+    overflow: visible;
+    background: transparent;
+    border: 0;
+  }
+
+  .hosted-admin-invitation-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.4rem 0.75rem;
+    min-height: 0;
+    padding: 0.75rem;
+    background: #fff;
+    border: 1px solid #d8e0ec;
+    border-radius: 0.75rem;
+  }
+
+  .hosted-admin-invitation-row.hosted-admin-invitation-head {
+    display: none;
+  }
+
+  .hosted-admin-invitation-row > :nth-child(3),
+  .hosted-admin-invitation-row > :nth-child(4),
+  .hosted-admin-invitation-row > :nth-child(5) {
+    display: initial;
+  }
+
+  .hosted-admin-invitation-row > time,
+  .hosted-admin-invitation-row > span:nth-child(4) {
+    color: #66738a;
+    font-size: 0.85rem;
+  }
+
+  .hosted-admin-invitation-row > span:last-child {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+    margin-top: 0.25rem;
+  }
+
+  .hosted-admin-bili-qr img {
+    inline-size: min(100%, 12.5rem);
+  }
+
+  .hosted-admin-account-detail-panel {
+    width: min(100%, 24.375rem);
+    padding: 1.25rem;
+  }
+
+  .hosted-admin-settings .hosted-admin-card,
+  .hosted-admin-settings-advanced {
+    padding: 1rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .hosted-admin-header {
+    padding: 0 1.25rem;
+  }
+
+  .hosted-admin-content {
+    width: calc(100% - 2.5rem);
+  }
+
+  .hosted-admin-resource-row {
+    gap: 0.75rem;
+  }
+
+  .hosted-admin-content .hosted-admin-resource-card {
+    min-height: 6.5rem;
+  }
+
+  .hosted-admin-bulk-toolbar {
+    justify-content: flex-end;
+  }
+
+  .hosted-admin-bulk-toolbar > span {
+    flex-basis: 100%;
+  }
+
+  .hosted-admin-device-row,
+  .hosted-admin-login-row {
+    padding: 0.6rem 0.75rem;
+  }
+
+  .hosted-admin-device-row button {
+    align-self: center;
+  }
+
+  .hosted-admin-bili-actions,
+  .hosted-admin-bili-flow-actions {
+    justify-content: flex-end;
+  }
+
+  .hosted-admin-bili-flow-actions {
+    flex-wrap: nowrap;
+    gap: 0.4rem;
+  }
+
+  .hosted-admin-bili-flow-actions button {
+    padding-inline: 0.6rem;
+    font-size: 0.875rem;
+    white-space: nowrap;
   }
 }

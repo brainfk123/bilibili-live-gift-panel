@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { mountAdminShell } from '../src/hosted/admin/shell';
 
 class Element {
-  children: Element[] = []; textContent = ''; className = ''; type = ''; disabled = false;
+  children: Element[] = []; textContent = ''; className = ''; type = ''; disabled = false; hidden = false;
   attributes = new Map<string, string>(); listeners = new Map<string, (event?: { key?: string; shiftKey?: boolean; preventDefault?(): void }) => void>();
   constructor(readonly tagName: string, readonly ownerDocument: Doc) {}
   append(...nodes: Element[]) { this.children.push(...nodes); }
@@ -27,7 +27,7 @@ describe('A3 administrator shell', () => {
       },
     });
     const frame = root.children[0]; const sidebar = frame.children[0]; const header = frame.children[1].children[0];
-    const buttons = sidebar.children.filter((child) => child.tagName === 'button');
+    const buttons = sidebar.children.filter((child) => child.tagName === 'button' && child.className !== 'hosted-admin-sidebar-close');
     expect(buttons.map((item) => item.textContent)).toEqual(['运营总览', '主播账号', '邀请码', 'B站服务账号', '系统设置']);
     expect(buttons[0].attributes.get('aria-current')).toBe('page');
     buttons[1].listeners.get('click')?.();
@@ -40,17 +40,28 @@ describe('A3 administrator shell', () => {
   it('opens and closes the mobile navigation with focus restoration', async () => {
     const document: Doc = { createElement: (tag) => new Element(tag, document) }; const root = new Element('div', document);
     const shell = mountAdminShell(root as unknown as HTMLElement, { initial: 'overview', mount: () => ({ dispose() {} }) });
-    const frame = root.children[0]; const sidebar = frame.children[0]; const workspace = frame.children[1]; const header = workspace.children[0];
+    const frame = root.children[0]; const sidebar = frame.children[0]; const workspace = frame.children[1]; const backdrop = frame.children[2]; const header = workspace.children[0];
     const trigger = header.children.find((child) => child.className === 'hosted-admin-menu-trigger');
+    const close = sidebar.children.find((child) => child.className === 'hosted-admin-sidebar-close');
     if (!trigger) throw new Error('mobile menu trigger missing');
+    if (!close) throw new Error('mobile menu close missing');
     trigger.listeners.get('click')?.();
     expect(sidebar.attributes.get('data-open')).toBe('true');
-    expect(document.activeElement).toBe(sidebar.children[0]);
+    expect(backdrop.hidden).toBe(false);
+    expect(document.activeElement).toBe(sidebar.children[1]);
+    close.listeners.get('click')?.();
+    expect(sidebar.attributes.get('data-open')).toBe('false');
+    expect(document.activeElement).toBe(trigger);
+    trigger.listeners.get('click')?.();
+    backdrop.listeners.get('click')?.();
+    expect(sidebar.attributes.get('data-open')).toBe('false');
+    expect(document.activeElement).toBe(trigger);
+    trigger.listeners.get('click')?.();
     frame.listeners.get('keydown')?.({ key: 'Escape', preventDefault: vi.fn() });
     expect(sidebar.attributes.get('data-open')).toBe('false');
     expect(document.activeElement).toBe(trigger);
     trigger.listeners.get('click')?.();
-    sidebar.children[1].listeners.get('click')?.();
+    sidebar.children[2].listeners.get('click')?.();
     await vi.waitFor(() => expect(sidebar.attributes.get('data-open')).toBe('false'));
     await shell.dispose();
   });

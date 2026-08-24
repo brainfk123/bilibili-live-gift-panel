@@ -69,6 +69,21 @@ export interface AdminInvitationPage { invitations:AdminInvitationRecord[];nextC
 export interface AdminInvitationQuery { query?:string;status?:AdminInvitationStatus;sort?:'status'|'created_at';direction?:'asc'|'desc';cursor?:string;limit?:number }
 export interface AdminSettings{maskedEmail:string;sessionExpiresAt:string;totpEnabled:boolean;recoveryGeneratedAt:string|null;serviceHealth:string}
 export interface AdminDiagnostic{database:string;biliService:string;checkedAt:string}
+export interface AdminDeviceSession {
+  id: string;
+  deviceLabel: string;
+  clientNetwork: string;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+  current: boolean;
+}
+export interface AdminLoginEvent {
+  result: 'success' | 'failure';
+  deviceLabel: string;
+  clientNetwork: string;
+  occurredAt: string;
+}
 
 export interface RecoveryPreparation {
   totpUri: string;
@@ -123,6 +138,7 @@ const stableErrors = new Set([
   'temporarily_unavailable', 'verification_pending', 'revision_conflict', 'not_found',
   'proof_rejected', 'expired', 'operation_conflict',
   'credential_unavailable', 'account_disabled',
+  'current_session', 'session_not_found',
   'shutting_down',
 ]);
 
@@ -145,6 +161,28 @@ function string(value: unknown): value is string {
 
 function instant(value: unknown): value is string {
   return string(value) && Number.isFinite(Date.parse(value));
+}
+
+function utcRFC3339(value: unknown): value is string {
+  return typeof value === 'string'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(value)
+    && Number.isFinite(Date.parse(value));
+}
+
+function redactedClientNetwork(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 64) return false;
+  if (value === '—') return true;
+  const ipv4Mask = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}\*$/;
+  const ipv6Mask = /^(?:[0-9a-f]{1,4}:){1,7}:\*$/i;
+  return ipv4Mask.test(value) || ipv6Mask.test(value);
+}
+
+function deviceLabel(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 80) return false;
+  const [device, browser, extra] = value.split(' · ');
+  const devices = new Set(['iPhone', 'iPad', 'Android', 'Windows', 'macOS', 'Linux', '其他设备']);
+  const browsers = new Set(['Edge', 'Firefox', 'Chrome', 'Safari', '其他浏览器']);
+  return extra === undefined && devices.has(device) && browsers.has(browser);
 }
 
 function number(value: unknown): value is number {
@@ -326,6 +364,30 @@ function adminAccount(value: unknown, extraOptional: string[] = []): AdminAccoun
   const item=object(value);if(!item||!exactKeys(item,['id','status','invitationQuota','hasObs','createdAt','updatedAt'],['roomId',...extraOptional])||!number(item.id)||item.id<=0||(item.status!=='active'&&item.status!=='disabled')||!number(item.invitationQuota)||typeof item.hasObs!=='boolean'||!instant(item.createdAt)||!instant(item.updatedAt)||!optional(item.roomId,(room)=>typeof room==='string'&&/^[1-9][0-9]{0,19}$/.test(room)))return undefined;return item as unknown as AdminAccountSummary;
 }
 function adminInvitation(value:unknown):AdminInvitationRecord|undefined{const item=object(value);if(!item||!exactKeys(item,['id','codeHint','status','createdAt','expiresAt'],['code','usedByAccountId'])||!number(item.id)||item.id<=0||typeof item.codeHint!=='string'||!/^\*{4}[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/.test(item.codeHint)||!string(item.status)||!['active','used','revoked','expired'].includes(item.status)||!instant(item.createdAt)||(item.expiresAt!==null&&!instant(item.expiresAt))||!optional(item.usedByAccountId,(id)=>number(id)&&id>0))return undefined;if(item.status==='active'){if(typeof item.code!=='string'||!/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$/.test(item.code))return undefined}else if(item.code!==undefined)return undefined;return item as unknown as AdminInvitationRecord}
+function adminDeviceSession(value: unknown): AdminDeviceSession | undefined {
+  const item = object(value);
+  if (!item
+    || !exactKeys(item, ['id', 'deviceLabel', 'clientNetwork', 'createdAt', 'lastSeenAt', 'expiresAt', 'current'])
+    || typeof item.id !== 'string'
+    || !/^[0-9a-f]{32}$/.test(item.id)
+    || !deviceLabel(item.deviceLabel)
+    || !redactedClientNetwork(item.clientNetwork)
+    || !utcRFC3339(item.createdAt)
+    || !utcRFC3339(item.lastSeenAt)
+    || !utcRFC3339(item.expiresAt)
+    || typeof item.current !== 'boolean') return undefined;
+  return item as unknown as AdminDeviceSession;
+}
+function adminLoginEvent(value: unknown): AdminLoginEvent | undefined {
+  const item = object(value);
+  if (!item
+    || !exactKeys(item, ['result', 'deviceLabel', 'clientNetwork', 'occurredAt'])
+    || (item.result !== 'success' && item.result !== 'failure')
+    || !deviceLabel(item.deviceLabel)
+    || !redactedClientNetwork(item.clientNetwork)
+    || !utcRFC3339(item.occurredAt)) return undefined;
+  return item as unknown as AdminLoginEvent;
+}
 
 export class HostedAPI {
   private constructor(private readonly fetcher: Fetcher, private readonly csrfToken: string) {}
@@ -513,7 +575,26 @@ export class HostedAPI {
     await this.request('/api/admin/bili-service/replace', 'POST', 204, { challengeId },authorizationToken?{'X-Admin-Authorization':authorizationToken}:{});
   }
   async adminSettings():Promise<AdminSettings>{const data=object((await this.request('/api/admin/settings','GET',200)).data);if(!data||!exactKeys(data,['maskedEmail','sessionExpiresAt','totpEnabled','recoveryGeneratedAt','serviceHealth'])||!string(data.maskedEmail)||!instant(data.sessionExpiresAt)||typeof data.totpEnabled!=='boolean'||(data.recoveryGeneratedAt!==null&&!instant(data.recoveryGeneratedAt))||!string(data.serviceHealth))throw new HostedAPIError('invalid_response',200);return data as unknown as AdminSettings}
+  async adminSessions(): Promise<AdminDeviceSession[]> {
+    const data = object((await this.request('/api/admin/sessions', 'GET', 200)).data);
+    if (!data || !exactKeys(data, ['sessions']) || !Array.isArray(data.sessions)) throw new HostedAPIError('invalid_response', 200);
+    const sessions = data.sessions.map(adminDeviceSession);
+    if (sessions.some((session) => !session)) throw new HostedAPIError('invalid_response', 200);
+    return sessions as AdminDeviceSession[];
+  }
+  async revokeAdminSession(id: string): Promise<void> {
+    if (!/^[0-9a-f]{32}$/.test(id)) throw new HostedAPIError('invalid_request', 0);
+    await this.request(`/api/admin/sessions/${id}`, 'DELETE', 204);
+  }
   async revokeOtherAdminSessions():Promise<void>{await this.request('/api/admin/sessions/revoke-others','POST',204)}
+  async adminLoginEvents(limit = 20): Promise<AdminLoginEvent[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new HostedAPIError('invalid_request', 0);
+    const data = object((await this.request(`/api/admin/login-events?limit=${limit}`, 'GET', 200)).data);
+    if (!data || !exactKeys(data, ['events']) || !Array.isArray(data.events)) throw new HostedAPIError('invalid_response', 200);
+    const events = data.events.map(adminLoginEvent);
+    if (events.some((event) => !event)) throw new HostedAPIError('invalid_response', 200);
+    return events as AdminLoginEvent[];
+  }
   async adminEvents():Promise<AdminEvent[]>{const data=object((await this.request('/api/admin/events','GET',200)).data);if(!data||!exactKeys(data,['events'])||!Array.isArray(data.events))throw new HostedAPIError('invalid_response',200);const events=data.events.map(adminEvent);if(events.some((event)=>!event))throw new HostedAPIError('invalid_response',200);return events as AdminEvent[]}
   async adminDiagnostics():Promise<AdminDiagnostic>{const data=object((await this.request('/api/admin/diagnostics','GET',200)).data);if(!data||!exactKeys(data,['database','biliService','checkedAt'])||!string(data.database)||!string(data.biliService)||!instant(data.checkedAt))throw new HostedAPIError('invalid_response',200);return data as unknown as AdminDiagnostic}
   async issueOBSCredential(accountId: number): Promise<OBSCredentialAccess> {
