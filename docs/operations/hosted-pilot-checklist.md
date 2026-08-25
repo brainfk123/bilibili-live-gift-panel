@@ -11,6 +11,8 @@ Fill this form during the invitation-only Hong Kong pilot. Record aggregates, ti
 - Application key custody confirmed (yes/no, no values):
 - Bilibili service credential version:
 - Active invite count (at most 50 registered / 10 active):
+- Administrator invitation legacy-active count (`active` with NULL ciphertext; must be 0):
+- Test invitation disposition (none / retained with reason / backed up and transactionally removed):
 
 ## Security and privacy
 
@@ -19,6 +21,7 @@ Fill this form during the invitation-only Hong Kong pilot. Record aggregates, ti
 | Cross-account configuration / migration / OBS denied |  |  |
 | Stale CSRF rejected |  |  |
 | Reused invite rejected |  |  |
+| New administrator invitation remains listed after logout and login |  |  |
 | Revoked OBS token rejected |  |  |
 | Oversized or deep migration JSON rejected |  |  |
 | Wrong admin TOTP rejected |  |  |
@@ -54,6 +57,8 @@ Go only when every item below is true. Otherwise keep invitations capped, file a
 
 - [ ] No critical tenant, privacy, or credential issue
 - [ ] Backups restored successfully
+- [ ] No unrecoverable active administrator invitation remains
+- [ ] Test invitation data is absent or explicitly documented
 - [ ] No lost committed gameplay transitions
 - [ ] p95 event commit-to-OBS under 500 ms at 10 active accounts
 - [ ] Queue never exceeds 50% capacity in normal operation

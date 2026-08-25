@@ -69,6 +69,44 @@ Build with `npm run build:hosted-server` from a reviewed commit. Record the imag
 
 Schema migrations run on process start through the embedded SQL files. Record the migration head from `SELECT version FROM schema_migrations ORDER BY version`. Account configuration migrations apply only after the owning session ends. Rollback never reverses an applied schema destructively. If a release cannot start, restore the previous application image and keep the applied schema, or follow Backup restore when a documented restore decision is approved.
 
+### Administrator invitation compatibility gate
+
+Migration `0011_recoverable_admin_invitations` adds nullable invitation ciphertext but cannot reconstruct full codes for rows created before that migration. A pre-migration invitation can therefore remain `active` while `code_ciphertext` is NULL. Do not assume schema success means every active administrator invitation is recoverable: the administrator inventory may fail closed when it encounters such a row.
+
+Before enabling the administrator invitation inventory on an existing database, record only aggregate results and require the legacy-active count to be zero:
+
+```sql
+SELECT status,
+       COUNT(*) AS total,
+       SUM(code_ciphertext IS NULL) AS missing_ciphertext
+FROM invitations
+WHERE creator_admin_identity_id IS NOT NULL
+GROUP BY status
+ORDER BY status;
+```
+
+For a service that has already admitted users, preserve invitation history and implement a reviewed compatibility or retirement path; do not delete records merely to make the page load. For an unopened pilot containing confirmed test data only, cleanup is allowed after explicit approval and a fresh encrypted backup. Inventory creator types first, remove only the approved administrator test scope, and delete foreign-key dependants in the same transaction:
+
+```sql
+START TRANSACTION;
+SELECT COUNT(*)
+FROM invitations
+WHERE creator_admin_identity_id IS NOT NULL;
+
+DELETE quota_event
+FROM invitation_quota_events AS quota_event
+JOIN invitations AS invitation ON invitation.id = quota_event.invitation_id
+WHERE invitation.creator_admin_identity_id IS NOT NULL;
+
+DELETE FROM invitations
+WHERE creator_admin_identity_id IS NOT NULL;
+COMMIT;
+
+SELECT COUNT(*) FROM invitations;
+```
+
+Record the backup completion marker, affected-row counts, post-cleanup aggregate count, application image digest, and loopback health result. Never print full codes, ciphertext, administrator identities, account identifiers, or secret-file contents. Creating a new invitation after cleanup is the functional canary; logging out and back in must still show the newly created row.
+
 ## Canary check
 
 After deploy, run `deploy/hosted/health-check.sh` on the host. Confirm loopback `http://127.0.0.1:12500/healthz` returns `{"status":"ok"}`. Confirm loopback `http://127.0.0.1:12500/internal/metrics` returns identity-free gauges. Record health output and smoke-test IDs for one admin login, one invitation redeem, one runtime room switch, and one OBS event stream. Public `/healthz` and `/internal/metrics` must remain unrouted.

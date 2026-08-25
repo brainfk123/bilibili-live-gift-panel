@@ -10,6 +10,19 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-22-hosted-admin-system-redesign.md`
 
+## Post-deployment compatibility note (2026-08-25)
+
+The original plan assumed every active administrator invitation would have recoverable ciphertext. That is true for invitations created after migration `0011_recoverable_admin_invitations`, but the migration only adds the nullable column and does not backfill codes created earlier. A migrated database can therefore contain an active row with NULL ciphertext.
+
+Treat these as separate contracts:
+
+- New administrator invitation creation must commit an eight-character code, lookup digest, suffix, and recoverable purpose-separated ciphertext.
+- Terminal rows must clear ciphertext and retain only the masked suffix.
+- Existing databases require a deployment preflight for active rows with NULL ciphertext. A live service must preserve history and use a reviewed compatibility or retirement path. An unopened pilot may remove confirmed administrator test records only after an encrypted backup and explicit destructive authorization.
+- Acceptance evidence must include a logout/login reload of a newly created invitation, not only its immediate insertion into browser state.
+
+The operational commands and go/no-go check are maintained in `deploy/hosted/README.md` and `docs/operations/hosted-pilot-checklist.md`; do not duplicate credentials or production record values here.
+
 ## Global Constraints
 
 - Codes are exactly eight characters from one explicit uppercase alphanumeric alphabet.
