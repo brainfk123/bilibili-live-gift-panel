@@ -138,8 +138,9 @@ type Manager struct {
 }
 
 type roomTransitionState struct {
-	leaseEpoch uint64
-	accounts   []int64
+	leaseEpoch    uint64
+	accounts      []int64
+	pendingOwners map[int64]OwnerFence
 }
 
 type accountRuntime struct {
@@ -632,6 +633,7 @@ func (manager *Manager) ApplyRoomTransition(ctx context.Context, transition room
 			if err := manager.startTransitionAccount(ctx, accountID, transition.RoomID, broadcastSessionID); err != nil {
 				return err
 			}
+			room.pendingOwners = manager.roomTransitions[transition.RoomID].pendingOwners
 			if !containsTransitionAccount(room.accounts, accountID) {
 				room.accounts = append(room.accounts, accountID)
 			}
@@ -648,9 +650,16 @@ func (manager *Manager) ApplyRoomTransition(ctx context.Context, transition room
 		}
 	case roomwatcher.StateOffline:
 		for _, accountID := range room.accounts {
-			if err := manager.stopTransitionAccount(ctx, accountID, transition.RoomID); err != nil {
+			if err := manager.stopTransitionAccount(ctx, accountID, transition.RoomID, room.pendingOwners[accountID]); err != nil {
 				return err
 			}
+			delete(room.pendingOwners, accountID)
+		}
+		for _, accountID := range pendingTransitionAccounts(room.pendingOwners) {
+			if err := manager.stopTransitionAccount(ctx, accountID, transition.RoomID, room.pendingOwners[accountID]); err != nil {
+				return err
+			}
+			delete(room.pendingOwners, accountID)
 		}
 		room.accounts = nil
 	}
@@ -701,6 +710,15 @@ func containsTransitionAccount(accounts []int64, accountID int64) bool {
 	return false
 }
 
+func pendingTransitionAccounts(owners map[int64]OwnerFence) []int64 {
+	accounts := make([]int64, 0, len(owners))
+	for accountID := range owners {
+		accounts = append(accounts, accountID)
+	}
+	sort.Slice(accounts, func(left, right int) bool { return accounts[left] < accounts[right] })
+	return accounts
+}
+
 func (manager *Manager) setTransitionAdmission(accounts []int64, roomID string, admitting bool) error {
 	for _, accountID := range accounts {
 		account, err := manager.accountExisting(accountID)
@@ -722,6 +740,28 @@ func (manager *Manager) setTransitionAdmission(accounts []int64, roomID string, 
 		active.admissionMu.Unlock()
 	}
 	return nil
+}
+
+// registerTransitionOwner runs while ApplyRoomTransition holds transitionMu.
+// It precedes every fallible admission operation after ClaimOwnership so an
+// interrupted live transition cannot lose the exact fence that offline must
+// release.
+func (manager *Manager) registerTransitionOwner(roomID string, accountID int64, fence OwnerFence) {
+	room := manager.roomTransitions[roomID]
+	if room.pendingOwners == nil {
+		room.pendingOwners = make(map[int64]OwnerFence)
+	}
+	room.pendingOwners[accountID] = fence
+	manager.roomTransitions[roomID] = room
+}
+
+func (manager *Manager) clearTransitionOwner(roomID string, accountID int64, fence OwnerFence) {
+	room := manager.roomTransitions[roomID]
+	if room.pendingOwners[accountID] != fence {
+		return
+	}
+	delete(room.pendingOwners, accountID)
+	manager.roomTransitions[roomID] = room
 }
 
 func (manager *Manager) startTransitionAccount(ctx context.Context, accountID int64, roomID string, broadcastSessionID int64) error {
@@ -752,15 +792,20 @@ func (manager *Manager) startTransitionAccount(ctx context.Context, accountID in
 	account.mu.Lock()
 	account.owner, account.reconcile = claim.Fence, claim.Reconcile
 	account.mu.Unlock()
+	manager.registerTransitionOwner(roomID, accountID, claim.Fence)
 	jobID, pending, err := manager.dependencies.Sessions.PendingMigration(ctx, accountID)
 	if err != nil {
-		_ = manager.releaseOwner(ctx, account, claim.Fence)
+		if manager.releaseOwner(ctx, account, claim.Fence) == nil {
+			manager.clearTransitionOwner(roomID, accountID, claim.Fence)
+		}
 		return ErrUnavailable
 	}
 	if pending {
 		migrationOwner := migration.OwnerFence{AccountID: claim.Fence.AccountID, Token: [32]byte(claim.Fence.Token), Epoch: claim.Fence.Epoch}
 		if err := manager.applyPendingMigration(ctx, migrationOwner, jobID); err != nil {
-			_ = manager.releaseOwner(ctx, account, claim.Fence)
+			if manager.releaseOwner(ctx, account, claim.Fence) == nil {
+				manager.clearTransitionOwner(roomID, accountID, claim.Fence)
+			}
 			if errors.Is(err, ErrOwnershipConflict) {
 				return ErrUnavailable
 			}
@@ -771,7 +816,9 @@ func (manager *Manager) startTransitionAccount(ctx context.Context, accountID in
 		account.mu.Lock()
 		fence := account.owner
 		account.mu.Unlock()
-		_ = manager.releaseOwner(ctx, account, fence)
+		if manager.releaseOwner(ctx, account, fence) == nil {
+			manager.clearTransitionOwner(roomID, accountID, fence)
+		}
 		if errors.Is(err, ErrOwnershipConflict) {
 			return ErrUnavailable
 		}
@@ -780,7 +827,7 @@ func (manager *Manager) startTransitionAccount(ctx context.Context, accountID in
 	return nil
 }
 
-func (manager *Manager) stopTransitionAccount(ctx context.Context, accountID int64, roomID string) error {
+func (manager *Manager) stopTransitionAccount(ctx context.Context, accountID int64, roomID string, transitionOwner OwnerFence) error {
 	account, err := manager.accountExisting(accountID)
 	if err != nil {
 		return nil
@@ -805,6 +852,9 @@ func (manager *Manager) stopTransitionAccount(ctx context.Context, accountID int
 		pendingRelease = account.owner
 		account.transitionRelease = pendingRelease
 		account.mu.Unlock()
+	}
+	if !validOwnerFence(pendingRelease) {
+		pendingRelease = transitionOwner
 	}
 	if !validOwnerFence(pendingRelease) {
 		return nil

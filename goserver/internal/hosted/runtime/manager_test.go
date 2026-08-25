@@ -187,6 +187,39 @@ func TestOfflineTransitionRetriesReleaseAfterExecutionEnded(t *testing.T) {
 	}
 }
 
+func TestOfflineTransitionRetriesClaimedOwnerAfterStartFailure(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, releaseFailures: 2, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}, startFailures: map[int64]int{7: 1}}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}
+	offline := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateLive, To: roomwatcher.StateOffline, ConfirmedAt: time.Unix(101, 0), Sequence: 2, LeaseEpoch: 2}
+	if err := manager.ApplyRoomTransition(context.Background(), live); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("live start failure = %v, want unavailable", err)
+	}
+	wantFence := sessions.currentOwner()
+	if !validOwnerFence(wantFence) {
+		t.Fatal("failed start released ownership despite configured release failure")
+	}
+	if err := manager.ApplyRoomTransition(context.Background(), offline); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("first offline release = %v, want unavailable", err)
+	}
+	if err := manager.ApplyRoomTransition(context.Background(), offline); err != nil {
+		t.Fatalf("offline release retry = %v", err)
+	}
+	for _, fence := range sessions.releaseFences() {
+		if fence != wantFence {
+			t.Fatalf("release fence = %#v, want %#v", fence, wantFence)
+		}
+	}
+	if len(sessions.releaseFences()) != 3 {
+		t.Fatalf("release attempts = %d, want 3", len(sessions.releaseFences()))
+	}
+}
+
 func TestShutdownAndApplyRoomTransitionSerializeClosedState(t *testing.T) {
 	log := &operationLog{}
 	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
@@ -1008,6 +1041,7 @@ type orderedSessions struct {
 	log             *operationLog
 	owner           OwnerFence
 	epoch           uint64
+	releases        []OwnerFence
 }
 
 type transitionSessions struct {
@@ -1103,6 +1137,7 @@ func (sessions *orderedSessions) RenewOwnership(_ context.Context, fence OwnerFe
 func (sessions *orderedSessions) ReleaseOwnership(_ context.Context, fence OwnerFence) error {
 	sessions.mu.Lock()
 	defer sessions.mu.Unlock()
+	sessions.releases = append(sessions.releases, fence)
 	if sessions.releaseFailures > 0 {
 		sessions.releaseFailures--
 		return ErrUnavailable
@@ -1115,6 +1150,16 @@ func (sessions *orderedSessions) ReleaseOwnership(_ context.Context, fence Owner
 		sessions.log.add("release")
 	}
 	return nil
+}
+func (sessions *orderedSessions) currentOwner() OwnerFence {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	return sessions.owner
+}
+func (sessions *orderedSessions) releaseFences() []OwnerFence {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	return append([]OwnerFence(nil), sessions.releases...)
 }
 func (sessions *orderedSessions) setEnabled(enabled bool) {
 	sessions.mu.Lock()
