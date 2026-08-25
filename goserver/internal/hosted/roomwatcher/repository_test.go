@@ -134,6 +134,36 @@ func TestRepositoryRejectsLiveBoundaryWithWrongBroadcastMarker(t *testing.T) {
 	assertRepositoryExpectations(t, mock)
 }
 
+// This test fails if a caller can attach a grace deadline to a state that is
+// already live or terminal, allowing an impossible durable receipt to escape.
+func TestRepositoryRejectsGraceDeadlineOutsideGraceBeforeTransaction(t *testing.T) {
+	confirmedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	graceUntil := confirmedAt.Add(time.Minute)
+	for _, transition := range []Transition{
+		{RoomID: "7", From: StateOffline, To: StateLive, ConfirmedAt: confirmedAt, GraceUntil: &graceUntil, NewBroadcast: true},
+		{RoomID: "7", From: StateLive, To: StateOffline, ConfirmedAt: confirmedAt, GraceUntil: &graceUntil},
+	} {
+		repository, mock, closeDB := newMockRepository(t)
+		if _, err := repository.RecordTransition(context.Background(), transition); !errors.Is(err, ErrInvalidInput) {
+			closeDB()
+			t.Fatalf("RecordTransition(%s -> %s) error = %v, want ErrInvalidInput", transition.From, transition.To, err)
+		}
+		assertRepositoryExpectations(t, mock)
+		closeDB()
+	}
+}
+
+func TestRepositorySyncReferencesRejectsTerminalGraceDeadlineBeforeTransaction(t *testing.T) {
+	repository, mock, closeDB := newMockRepository(t)
+	defer closeDB()
+	confirmedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	graceUntil := confirmedAt.Add(time.Minute)
+	if _, err := repository.SyncReferences(context.Background(), nil, []Transition{{RoomID: "7", From: StateLive, To: StateOffline, ConfirmedAt: confirmedAt, GraceUntil: &graceUntil}}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("SyncReferences() error = %v, want ErrInvalidInput", err)
+	}
+	assertRepositoryExpectations(t, mock)
+}
+
 // This test fails if consumers cannot recover every coalesced notification in
 // the same global order in which the transaction persisted it.
 func TestRepositoryReplayTransitionsReturnsDurableSequenceOrder(t *testing.T) {
@@ -150,8 +180,24 @@ func TestRepositoryReplayTransitionsReturnsDurableSequenceOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReplayTransitions() error = %v", err)
 	}
-	if len(got) != 2 || got[0].Sequence != 41 || got[1].Sequence != 42 || got[1].To != StateGrace {
+	if len(got) != 2 || got[0].Sequence != 41 || got[0].GraceUntil != nil || got[1].Sequence != 42 || got[1].To != StateGrace || got[1].GraceUntil == nil {
 		t.Fatalf("ReplayTransitions() = %#v, want ordered durable transitions", got)
+	}
+	assertRepositoryExpectations(t, mock)
+}
+
+// This test fails if a corrupt outbox row can publish a transition shape that
+// could never be returned as an immediate durable RecordTransition receipt.
+func TestRepositoryReplayTransitionsRejectsImpossibleGraceShape(t *testing.T) {
+	repository, mock, closeDB := newMockRepository(t)
+	defer closeDB()
+	confirmedAt := time.Date(2026, 8, 26, 12, 1, 0, 0, time.UTC)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT sequence, room_id, lease_epoch, from_state, to_state, confirmed_at, grace_until, new_broadcast FROM room_monitor_transitions WHERE sequence > ? ORDER BY sequence LIMIT ?")).
+		WithArgs(uint64(0), 1).
+		WillReturnRows(sqlmock.NewRows([]string{"sequence", "room_id", "lease_epoch", "from_state", "to_state", "confirmed_at", "grace_until", "new_broadcast"}).
+			AddRow(uint64(42), "7", uint64(8), "offline", "live", confirmedAt, confirmedAt.Add(time.Minute), true))
+	if _, err := repository.ReplayTransitions(context.Background(), 0, 1); !errors.Is(err, ErrRepositoryUnavailable) {
+		t.Fatalf("ReplayTransitions() error = %v, want ErrRepositoryUnavailable", err)
 	}
 	assertRepositoryExpectations(t, mock)
 }

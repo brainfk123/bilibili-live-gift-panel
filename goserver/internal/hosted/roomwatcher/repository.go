@@ -276,13 +276,16 @@ func (repository *sqlRepository) ReplayTransitions(ctx context.Context, afterSeq
 	for rows.Next() {
 		var transition Transition
 		var graceUntil sql.NullTime
-		if err := rows.Scan(&transition.Sequence, &transition.RoomID, &transition.LeaseEpoch, &transition.From, &transition.To, &transition.ConfirmedAt, &graceUntil, &transition.NewBroadcast); err != nil || transition.Sequence == 0 || transition.LeaseEpoch == 0 || !validState(transition.From) || !validState(transition.To) || transition.ConfirmedAt.IsZero() {
+		if err := rows.Scan(&transition.Sequence, &transition.RoomID, &transition.LeaseEpoch, &transition.From, &transition.To, &transition.ConfirmedAt, &graceUntil, &transition.NewBroadcast); err != nil || transition.Sequence == 0 || transition.LeaseEpoch == 0 || transition.ConfirmedAt.IsZero() {
 			return nil, ErrRepositoryUnavailable
 		}
 		transition.ConfirmedAt = databaseTime(transition.ConfirmedAt)
 		if graceUntil.Valid {
 			value := databaseTime(graceUntil.Time)
 			transition.GraceUntil = &value
+		}
+		if !validDurableTransition(transition) {
+			return nil, ErrRepositoryUnavailable
 		}
 		transitions = append(transitions, transition)
 	}
@@ -342,10 +345,24 @@ func validTransition(transition Transition) bool {
 	if transition.RoomID == "" || !validState(transition.From) || !validState(transition.To) || transition.From == transition.To || transition.ConfirmedAt.IsZero() || transition.Sequence != 0 || transition.LeaseEpoch != 0 {
 		return false
 	}
-	if transition.To == StateGrace && transition.GraceUntil == nil {
+	switch transition.To {
+	case StateLive:
+		return transition.GraceUntil == nil && (transition.From == StateOffline || transition.From == StateGrace) && transition.NewBroadcast == (transition.From == StateOffline)
+	case StateGrace:
+		return transition.From == StateLive && transition.GraceUntil != nil && transition.GraceUntil.After(transition.ConfirmedAt) && !transition.NewBroadcast
+	case StateOffline:
+		return transition.GraceUntil == nil && (transition.From == StateLive || transition.From == StateGrace) && !transition.NewBroadcast
+	}
+	return false
+}
+
+func validDurableTransition(transition Transition) bool {
+	if transition.Sequence == 0 || transition.LeaseEpoch == 0 {
 		return false
 	}
-	return transition.NewBroadcast == (transition.From == StateOffline && transition.To == StateLive)
+	transition.Sequence = 0
+	transition.LeaseEpoch = 0
+	return validTransition(transition)
 }
 
 func normalizeTerminalTransitions(transitions []Transition) ([]Transition, error) {
