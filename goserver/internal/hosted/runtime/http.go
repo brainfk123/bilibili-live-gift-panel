@@ -25,7 +25,6 @@ const (
 )
 
 type runtimeHTTPService interface {
-	Acquire(context.Context, int64, LeaseKind) (ConnectionLease, error)
 	SetRoom(context.Context, int64, string) error
 	Status(context.Context, int64) (Status, error)
 	Snapshot(context.Context, int64) (configuration.RuntimeState, error)
@@ -173,12 +172,6 @@ func (handler *HTTPHandler) events(response http.ResponseWriter, request *http.R
 		return
 	}
 	handler.withAccount(response, request, func(accountID int64) {
-		lease, err := handler.service.Acquire(request.Context(), accountID, LeaseConfig)
-		if err != nil {
-			handler.writeServiceError(response, err)
-			return
-		}
-		defer lease.Release()
 		snapshot, err := handler.service.Snapshot(request.Context(), accountID)
 		if err != nil {
 			handler.writeServiceError(response, err)
@@ -193,9 +186,9 @@ func (handler *HTTPHandler) events(response http.ResponseWriter, request *http.R
 		response.Header().Set("Content-Type", "text/event-stream")
 		response.Header().Set("X-Content-Type-Options", "nosniff")
 		response.Header().Set("X-Accel-Buffering", "no")
-		if handler.writeEvent(response, controller, request, accountID, lease, "status", status) != nil ||
-			handler.writeEvent(response, controller, request, accountID, lease, "snapshot", snapshot) != nil ||
-			handler.writeEvent(response, controller, request, accountID, lease, "degraded", struct {
+		if handler.writeEvent(response, controller, request, accountID, "status", status) != nil ||
+			handler.writeEvent(response, controller, request, accountID, "snapshot", snapshot) != nil ||
+			handler.writeEvent(response, controller, request, accountID, "degraded", struct {
 				Degraded bool `json:"degraded"`
 			}{Degraded: status.Degraded}) != nil {
 			return
@@ -214,17 +207,17 @@ func (handler *HTTPHandler) events(response http.ResponseWriter, request *http.R
 					return
 				}
 				if current != lastStatus {
-					if handler.writeEvent(response, controller, request, accountID, lease, "status", current) != nil {
+					if handler.writeEvent(response, controller, request, accountID, "status", current) != nil {
 						return
 					}
-					if current.Degraded != lastStatus.Degraded && handler.writeEvent(response, controller, request, accountID, lease, "degraded", struct {
+					if current.Degraded != lastStatus.Degraded && handler.writeEvent(response, controller, request, accountID, "degraded", struct {
 						Degraded bool `json:"degraded"`
 					}{Degraded: current.Degraded}) != nil {
 						return
 					}
 					lastStatus = current
 				}
-				if handler.writeKeepalive(response, controller, request, accountID, lease) != nil {
+				if handler.writeKeepalive(response, controller, request, accountID) != nil {
 					return
 				}
 			}
@@ -232,8 +225,8 @@ func (handler *HTTPHandler) events(response http.ResponseWriter, request *http.R
 	})
 }
 
-func (handler *HTTPHandler) writeEvent(response io.Writer, controller *http.ResponseController, request *http.Request, accountID int64, lease ConnectionLease, event string, value any) error {
-	if err := handler.authorizeConfigFrame(request, accountID, lease); err != nil {
+func (handler *HTTPHandler) writeEvent(response io.Writer, controller *http.ResponseController, request *http.Request, accountID int64, event string, value any) error {
+	if err := handler.authorizeConfigFrame(request, accountID); err != nil {
 		return err
 	}
 	if err := handler.setWriteDeadline(controller); err != nil {
@@ -245,8 +238,8 @@ func (handler *HTTPHandler) writeEvent(response io.Writer, controller *http.Resp
 	return controller.Flush()
 }
 
-func (handler *HTTPHandler) writeKeepalive(response io.Writer, controller *http.ResponseController, request *http.Request, accountID int64, lease ConnectionLease) error {
-	if err := handler.authorizeConfigFrame(request, accountID, lease); err != nil {
+func (handler *HTTPHandler) writeKeepalive(response io.Writer, controller *http.ResponseController, request *http.Request, accountID int64) error {
+	if err := handler.authorizeConfigFrame(request, accountID); err != nil {
 		return err
 	}
 	if err := handler.setWriteDeadline(controller); err != nil {
@@ -258,9 +251,9 @@ func (handler *HTTPHandler) writeKeepalive(response io.Writer, controller *http.
 	return controller.Flush()
 }
 
-func (handler *HTTPHandler) authorizeConfigFrame(request *http.Request, accountID int64, lease ConnectionLease) error {
-	if request == nil || accountID <= 0 || lease == nil || lease.Kind() != LeaseConfig {
-		return ErrInvalidLease
+func (handler *HTTPHandler) authorizeConfigFrame(request *http.Request, accountID int64) error {
+	if request == nil || accountID <= 0 {
+		return ErrInvalidInput
 	}
 	authenticatedAccountID, authenticated := int64(0), false
 	handler.authenticate(http.HandlerFunc(func(_ http.ResponseWriter, authenticatedRequest *http.Request) {
@@ -269,7 +262,7 @@ func (handler *HTTPHandler) authorizeConfigFrame(request *http.Request, accountI
 	if !authenticated || authenticatedAccountID != accountID {
 		return ErrAccountDisabled
 	}
-	return lease.Renew(request.Context())
+	return nil
 }
 
 func (handler *HTTPHandler) setWriteDeadline(controller *http.ResponseController) error {

@@ -14,20 +14,22 @@ import (
 var ErrNoTargetRoom = errors.New("runtime: target room not configured")
 
 type Session struct {
-	ID              int64
-	AccountID       int64
-	RoomID          string
-	ConfigVersionID int64
-	StartedAt       time.Time
+	ID                 int64
+	BroadcastSessionID int64
+	AccountID          int64
+	RoomID             string
+	ConfigVersionID    int64
+	StartedAt          time.Time
 }
 
 type StartSessionCommand struct {
-	Owner           OwnerFence
-	AccountID       int64
-	RoomID          string
-	ConfigVersionID int64
-	StartedAt       time.Time
-	Reconcile       bool
+	Owner              OwnerFence
+	AccountID          int64
+	RoomID             string
+	BroadcastSessionID int64
+	ConfigVersionID    int64
+	StartedAt          time.Time
+	Reconcile          bool
 }
 
 type EndSessionCommand struct {
@@ -99,6 +101,45 @@ func (repository *SessionRepository) TargetRoom(ctx context.Context, accountID i
 	return roomID, nil
 }
 
+// OpenBroadcastSession returns the durable, still-open business broadcast for
+// a room. It is used only after a roomwatcher transition has committed; the
+// subsequent StartSession transaction rechecks the exact ID before linking an
+// account execution to it.
+func (repository *SessionRepository) OpenBroadcastSession(ctx context.Context, roomID string) (int64, error) {
+	if !repository.ready() || ctx == nil || !validRoomID(roomID) {
+		return 0, ErrInvalidInput
+	}
+	var broadcastSessionID int64
+	err := repository.db.QueryRowContext(ctx, "SELECT id FROM broadcast_sessions WHERE room_id = ? AND ended_at IS NULL", roomID).Scan(&broadcastSessionID)
+	if err != nil || broadcastSessionID <= 0 {
+		return 0, ErrUnavailable
+	}
+	return broadcastSessionID, nil
+}
+
+func (repository *SessionRepository) EnabledAccountsForRoom(ctx context.Context, roomID string) ([]int64, error) {
+	if !repository.ready() || ctx == nil || !validRoomID(roomID) {
+		return nil, ErrInvalidInput
+	}
+	rows, err := repository.db.QueryContext(ctx, "SELECT r.account_id FROM account_runtime_rooms AS r JOIN streamer_accounts AS a ON a.id = r.account_id AND a.disabled_at IS NULL WHERE r.room_id = ? ORDER BY r.account_id", roomID)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	defer rows.Close()
+	accounts := make([]int64, 0)
+	for rows.Next() {
+		var accountID int64
+		if err := rows.Scan(&accountID); err != nil || accountID <= 0 {
+			return nil, ErrUnavailable
+		}
+		accounts = append(accounts, accountID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, ErrUnavailable
+	}
+	return accounts, nil
+}
+
 func (repository *SessionRepository) PersistTargetRoom(ctx context.Context, command PersistTargetRoomCommand) error {
 	if !repository.ready() || ctx == nil || !validOwnerFence(command.Owner) || !validRoomID(command.RoomID) || command.UpdatedAt.IsZero() {
 		return ErrInvalidInput
@@ -133,7 +174,7 @@ func (repository *SessionRepository) PersistTargetRoom(ctx context.Context, comm
 }
 
 func (repository *SessionRepository) StartSession(ctx context.Context, command StartSessionCommand) (Session, error) {
-	if !repository.ready() || ctx == nil || !validOwnerFence(command.Owner) || command.Owner.AccountID != command.AccountID || command.ConfigVersionID <= 0 || !validRoomID(command.RoomID) || command.StartedAt.IsZero() {
+	if !repository.ready() || ctx == nil || !validOwnerFence(command.Owner) || command.Owner.AccountID != command.AccountID || command.BroadcastSessionID < 0 || command.ConfigVersionID <= 0 || !validRoomID(command.RoomID) || command.StartedAt.IsZero() {
 		return Session{}, ErrInvalidInput
 	}
 	command.StartedAt = normalizeDatabaseTime(command.StartedAt)
@@ -158,7 +199,13 @@ func (repository *SessionRepository) StartSession(ctx context.Context, command S
 			return Session{}, err
 		}
 	}
-	result, err := transaction.ExecContext(ctx, "INSERT INTO live_sessions (account_id, room_id, config_version_id, started_at) SELECT a.id, ?, v.id, ? FROM streamer_accounts AS a JOIN account_config_versions AS v ON v.account_id = a.id AND v.id = ? WHERE a.id = ? AND a.disabled_at IS NULL", command.RoomID, command.StartedAt, command.ConfigVersionID, command.AccountID)
+	insert := "INSERT INTO live_sessions (account_id, room_id, config_version_id, started_at) SELECT a.id, ?, v.id, ? FROM streamer_accounts AS a JOIN account_config_versions AS v ON v.account_id = a.id AND v.id = ? WHERE a.id = ? AND a.disabled_at IS NULL"
+	arguments := []any{command.RoomID, command.StartedAt, command.ConfigVersionID, command.AccountID}
+	if command.BroadcastSessionID > 0 {
+		insert = "INSERT INTO live_sessions (broadcast_session_id, account_id, room_id, config_version_id, started_at) SELECT b.id, a.id, ?, v.id, ? FROM streamer_accounts AS a JOIN account_config_versions AS v ON v.account_id = a.id AND v.id = ? JOIN broadcast_sessions AS b ON b.id = ? AND b.room_id = ? AND b.ended_at IS NULL WHERE a.id = ? AND a.disabled_at IS NULL"
+		arguments = []any{command.RoomID, command.StartedAt, command.ConfigVersionID, command.BroadcastSessionID, command.RoomID, command.AccountID}
+	}
+	result, err := transaction.ExecContext(ctx, insert, arguments...)
 	if err != nil || !oneAffected(result) {
 		return Session{}, ErrUnavailable
 	}
@@ -174,7 +221,7 @@ func (repository *SessionRepository) StartSession(ctx context.Context, command S
 	if err != nil || !oneAffected(result) {
 		return Session{}, ErrUnavailable
 	}
-	session := Session{ID: sessionID, AccountID: command.AccountID, RoomID: command.RoomID, ConfigVersionID: command.ConfigVersionID, StartedAt: command.StartedAt}
+	session := Session{ID: sessionID, BroadcastSessionID: command.BroadcastSessionID, AccountID: command.AccountID, RoomID: command.RoomID, ConfigVersionID: command.ConfigVersionID, StartedAt: command.StartedAt}
 	if err := transaction.Commit(); err != nil {
 		finished = true
 		if repository.verifyStartedSession(session, command.Owner) {
@@ -438,10 +485,10 @@ func (manager *Manager) startPersisted(ctx context.Context, account *accountRunt
 		}
 		return ErrUnavailable
 	}
-	return manager.startRoom(ctx, account, roomID, false, true)
+	return manager.startRoom(ctx, account, roomID, false, true, 0)
 }
 
-func (manager *Manager) startRoom(ctx context.Context, account *accountRuntime, roomID string, persist, activate bool) error {
+func (manager *Manager) startRoom(ctx context.Context, account *accountRuntime, roomID string, persist, activate bool, broadcastSessionID int64) error {
 	account.mu.Lock()
 	owner := account.owner
 	reconcile := account.reconcile
@@ -476,7 +523,7 @@ func (manager *Manager) startRoom(ctx context.Context, account *accountRuntime, 
 		_ = subscription.Wait(ctx)
 		return ErrUnavailable
 	}
-	session, err := manager.dependencies.Sessions.StartSession(ctx, StartSessionCommand{Owner: owner, AccountID: account.accountID, RoomID: canonical, ConfigVersionID: version.ID, StartedAt: manager.now(), Reconcile: reconcile})
+	session, err := manager.dependencies.Sessions.StartSession(ctx, StartSessionCommand{Owner: owner, AccountID: account.accountID, RoomID: canonical, BroadcastSessionID: broadcastSessionID, ConfigVersionID: version.ID, StartedAt: manager.now(), Reconcile: reconcile})
 	if err != nil {
 		subscription.Cancel()
 		_ = subscription.Wait(ctx)

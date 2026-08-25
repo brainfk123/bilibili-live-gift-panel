@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
 	"testing"
 	"time"
 
@@ -42,6 +43,55 @@ func TestSessionRepositoryStartsIdentityAndActiveGuardInOneTransaction(t *testin
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSessionRepositoryLinksExecutionToOpenBusinessBroadcast(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 26, 2, 0, 0, 0, time.UTC)
+	fence := OwnerFence{AccountID: 7, Token: ownerToken(0x55), Epoch: 3}
+	mock.ExpectBegin()
+	expectOwnershipAccountLock(mock, 7, true)
+	expectOwnerFence(mock, fence, true)
+	expectNoOpenSession(mock, 7)
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO live_sessions (broadcast_session_id, account_id, room_id, config_version_id, started_at) SELECT b.id, a.id, ?, v.id, ? FROM streamer_accounts AS a JOIN account_config_versions AS v ON v.account_id = a.id AND v.id = ? JOIN broadcast_sessions AS b ON b.id = ? AND b.room_id = ? AND b.ended_at IS NULL WHERE a.id = ? AND a.disabled_at IS NULL")).
+		WithArgs("42", now, int64(31), int64(99), "42", int64(7)).WillReturnResult(sqlmock.NewResult(81, 1))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO runtime_session_identities (live_session_id, account_id) SELECT id, account_id FROM live_sessions WHERE id = ? AND account_id = ?")).
+		WithArgs(int64(81), int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO runtime_active_session_guards (account_id, live_session_id) SELECT account_id, id FROM live_sessions WHERE id = ? AND account_id = ? AND ended_at IS NULL")).
+		WithArgs(int64(81), int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	session, err := NewSessionRepository(database).StartSession(context.Background(), StartSessionCommand{Owner: fence, AccountID: 7, RoomID: "42", BroadcastSessionID: 99, ConfigVersionID: 31, StartedAt: now, Reconcile: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.BroadcastSessionID != 99 {
+		t.Fatalf("broadcast session ID = %d, want 99", session.BroadcastSessionID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionRepositoryListsOnlyEnabledAccountsForCanonicalRoom(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT r.account_id FROM account_runtime_rooms AS r JOIN streamer_accounts AS a ON a.id = r.account_id AND a.disabled_at IS NULL WHERE r.room_id = ? ORDER BY r.account_id")).
+		WithArgs("42").WillReturnRows(sqlmock.NewRows([]string{"account_id"}).AddRow(int64(7)).AddRow(int64(8)))
+	accounts, err := NewSessionRepository(database).EnabledAccountsForRoom(context.Background(), "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(accounts, []int64{7, 8}) {
+		t.Fatalf("accounts = %v, want [7 8]", accounts)
 	}
 }
 

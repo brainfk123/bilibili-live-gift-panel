@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"bilibili-live-gift-panel/internal/hosted/configuration"
 	"bilibili-live-gift-panel/internal/hosted/migration"
 	"bilibili-live-gift-panel/internal/hosted/roomsource"
+	"bilibili-live-gift-panel/internal/hosted/roomwatcher"
 )
 
 const idleRuntimeTimeout = 10 * time.Minute
@@ -45,6 +47,15 @@ type SessionStore interface {
 	StartSession(context.Context, StartSessionCommand) (Session, error)
 	EndSession(context.Context, EndSessionCommand) error
 	PendingMigration(context.Context, int64) (int64, bool, error)
+}
+
+// roomTransitionSessionStore is deliberately a narrow read port. The room
+// watcher persists the authoritative reference snapshot before it emits a
+// transition; runtime uses that snapshot rather than web connection leases to
+// decide which account executions belong to a live room.
+type roomTransitionSessionStore interface {
+	EnabledAccountsForRoom(context.Context, string) ([]int64, error)
+	OpenBroadcastSession(context.Context, string) (int64, error)
 }
 
 type ConfigurationRepository interface {
@@ -118,6 +129,15 @@ type Manager struct {
 	processCancelOnce sync.Once
 	closeOnce         sync.Once
 	shutdownErr       error
+
+	transitionMu    sync.Mutex
+	lastSequence    uint64
+	roomTransitions map[string]roomTransitionState
+}
+
+type roomTransitionState struct {
+	leaseEpoch uint64
+	accounts   []int64
 }
 
 type accountRuntime struct {
@@ -237,7 +257,7 @@ func NewManager(dependencies Dependencies, options Options) (*Manager, error) {
 	lifecycle, cancel := context.WithCancel(context.Background())
 	processing, cancelProcessing := context.WithCancel(context.Background())
 	ownershipControl, cancelOwnershipControl := context.WithCancel(context.Background())
-	manager := &Manager{dependencies: dependencies, now: options.Now, newTimer: options.NewTimer, processorFactory: options.ProcessorFactory, ownerToken: options.OwnerToken, ownerTTL: options.OwnerTTL, heartbeat: options.HeartbeatInterval, ownerOperationTimeout: options.OwnerOperationTimeout, newHeartbeatTimer: options.NewHeartbeatTimer, newShutdownTimer: options.NewShutdownTimer, shutdownRetryBackoff: options.ShutdownRetryBackoff, beforeSessionPublish: options.BeforeSessionPublish, heartbeatDone: make(chan struct{}), ownershipControl: ownershipControl, cancelOwnershipControl: cancelOwnershipControl, ownershipStop: make(chan struct{}), accounts: make(map[int64]*accountRuntime), closing: make(chan struct{}), done: make(chan struct{}), lifecycle: lifecycle, cancel: cancel, processing: processing, cancelProcessing: cancelProcessing}
+	manager := &Manager{dependencies: dependencies, now: options.Now, newTimer: options.NewTimer, processorFactory: options.ProcessorFactory, ownerToken: options.OwnerToken, ownerTTL: options.OwnerTTL, heartbeat: options.HeartbeatInterval, ownerOperationTimeout: options.OwnerOperationTimeout, newHeartbeatTimer: options.NewHeartbeatTimer, newShutdownTimer: options.NewShutdownTimer, shutdownRetryBackoff: options.ShutdownRetryBackoff, beforeSessionPublish: options.BeforeSessionPublish, heartbeatDone: make(chan struct{}), ownershipControl: ownershipControl, cancelOwnershipControl: cancelOwnershipControl, ownershipStop: make(chan struct{}), accounts: make(map[int64]*accountRuntime), closing: make(chan struct{}), done: make(chan struct{}), lifecycle: lifecycle, cancel: cancel, processing: processing, cancelProcessing: cancelProcessing, roomTransitions: make(map[string]roomTransitionState)}
 	go manager.runHeartbeat()
 	return manager, nil
 }
@@ -562,6 +582,184 @@ func (manager *Manager) Snapshot(ctx context.Context, accountID int64) (configur
 	return state.Runtime, nil
 }
 
+// ApplyRoomTransition serializes the durable room-monitor outbox into account
+// executions. A transition is accepted only after its Sequence and per-room
+// LeaseEpoch pass fencing; retries of an already-applied outbox record are
+// intentionally no-ops. Web and OBS leases remain view-presence hints and do
+// not participate in this lifecycle.
+func (manager *Manager) ApplyRoomTransition(ctx context.Context, transition roomwatcher.Transition) error {
+	if manager == nil || ctx == nil || !validRoomTransition(transition) {
+		return ErrInvalidInput
+	}
+	store, ok := manager.dependencies.Sessions.(roomTransitionSessionStore)
+	if !ok {
+		return ErrUnavailable
+	}
+	manager.transitionMu.Lock()
+	defer manager.transitionMu.Unlock()
+	if manager.closed {
+		return ErrClosed
+	}
+	if transition.Sequence <= manager.lastSequence {
+		return nil
+	}
+	room := manager.roomTransitions[transition.RoomID]
+	if transition.LeaseEpoch <= room.leaseEpoch {
+		return ErrUnavailable
+	}
+
+	switch transition.To {
+	case roomwatcher.StateLive:
+		broadcastSessionID, err := store.OpenBroadcastSession(ctx, transition.RoomID)
+		if err != nil || broadcastSessionID <= 0 {
+			return ErrUnavailable
+		}
+		accounts, err := store.EnabledAccountsForRoom(ctx, transition.RoomID)
+		if err != nil {
+			return ErrUnavailable
+		}
+		accounts, err = normalizeTransitionAccounts(accounts)
+		if err != nil {
+			return ErrUnavailable
+		}
+		for _, accountID := range accounts {
+			if err := manager.startTransitionAccount(ctx, accountID, transition.RoomID, broadcastSessionID); err != nil {
+				return err
+			}
+		}
+		room.accounts = accounts
+	case roomwatcher.StateGrace:
+		// The business broadcast and each execution remain live through grace.
+	case roomwatcher.StateOffline:
+		for _, accountID := range room.accounts {
+			if err := manager.stopTransitionAccount(ctx, accountID, transition.RoomID); err != nil {
+				return err
+			}
+		}
+		room.accounts = nil
+	}
+	room.leaseEpoch = transition.LeaseEpoch
+	manager.roomTransitions[transition.RoomID] = room
+	manager.lastSequence = transition.Sequence
+	return nil
+}
+
+func validRoomTransition(transition roomwatcher.Transition) bool {
+	if !validRoomID(transition.RoomID) || transition.Sequence == 0 || transition.LeaseEpoch == 0 || transition.ConfirmedAt.IsZero() {
+		return false
+	}
+	switch transition.To {
+	case roomwatcher.StateLive:
+		return transition.GraceUntil == nil && ((transition.From == roomwatcher.StateOffline && transition.NewBroadcast) || (transition.From == roomwatcher.StateGrace && !transition.NewBroadcast))
+	case roomwatcher.StateGrace:
+		return transition.From == roomwatcher.StateLive && !transition.NewBroadcast && transition.GraceUntil != nil && transition.GraceUntil.After(transition.ConfirmedAt)
+	case roomwatcher.StateOffline:
+		return transition.GraceUntil == nil && !transition.NewBroadcast && (transition.From == roomwatcher.StateLive || transition.From == roomwatcher.StateGrace)
+	default:
+		return false
+	}
+}
+
+func normalizeTransitionAccounts(accountIDs []int64) ([]int64, error) {
+	unique := make(map[int64]struct{}, len(accountIDs))
+	for _, accountID := range accountIDs {
+		if accountID <= 0 {
+			return nil, ErrInvalidInput
+		}
+		unique[accountID] = struct{}{}
+	}
+	accounts := make([]int64, 0, len(unique))
+	for accountID := range unique {
+		accounts = append(accounts, accountID)
+	}
+	sort.Slice(accounts, func(left, right int) bool { return accounts[left] < accounts[right] })
+	return accounts, nil
+}
+
+func (manager *Manager) startTransitionAccount(ctx context.Context, accountID int64, roomID string, broadcastSessionID int64) error {
+	account, err := manager.account(accountID)
+	if err != nil {
+		return err
+	}
+	account.opMu.Lock()
+	defer account.opMu.Unlock()
+	account.mu.Lock()
+	if account.stale || account.shutting || account.disabled {
+		account.mu.Unlock()
+		return ErrUnavailable
+	}
+	if current := account.current; current != nil {
+		if current.session.RoomID == roomID {
+			account.mu.Unlock()
+			return nil
+		}
+		account.mu.Unlock()
+		return ErrUnavailable
+	}
+	account.mu.Unlock()
+	claim, err := manager.dependencies.Sessions.ClaimOwnership(ctx, accountID, manager.ownerToken, manager.ownerTTL)
+	if err != nil {
+		return err
+	}
+	account.mu.Lock()
+	account.owner, account.reconcile = claim.Fence, claim.Reconcile
+	account.mu.Unlock()
+	jobID, pending, err := manager.dependencies.Sessions.PendingMigration(ctx, accountID)
+	if err != nil {
+		_ = manager.releaseOwner(ctx, account, claim.Fence)
+		return ErrUnavailable
+	}
+	if pending {
+		migrationOwner := migration.OwnerFence{AccountID: claim.Fence.AccountID, Token: [32]byte(claim.Fence.Token), Epoch: claim.Fence.Epoch}
+		if err := manager.applyPendingMigration(ctx, migrationOwner, jobID); err != nil {
+			_ = manager.releaseOwner(ctx, account, claim.Fence)
+			if errors.Is(err, ErrOwnershipConflict) {
+				return ErrUnavailable
+			}
+			return ErrUnavailable
+		}
+	}
+	if err := manager.startRoom(ctx, account, roomID, false, true, broadcastSessionID); err != nil {
+		account.mu.Lock()
+		fence := account.owner
+		account.mu.Unlock()
+		_ = manager.releaseOwner(ctx, account, fence)
+		if errors.Is(err, ErrOwnershipConflict) {
+			return ErrUnavailable
+		}
+		return err
+	}
+	return nil
+}
+
+func (manager *Manager) stopTransitionAccount(ctx context.Context, accountID int64, roomID string) error {
+	account, err := manager.accountExisting(accountID)
+	if err != nil {
+		return nil
+	}
+	account.opMu.Lock()
+	defer account.opMu.Unlock()
+	account.mu.Lock()
+	active := account.current
+	account.mu.Unlock()
+	if active == nil || active.session.RoomID != roomID {
+		return nil
+	}
+	if err := manager.closeCurrent(ctx, account); err != nil {
+		if errors.Is(err, ErrOwnershipConflict) {
+			return ErrUnavailable
+		}
+		return err
+	}
+	account.mu.Lock()
+	fence := account.owner
+	account.mu.Unlock()
+	if err := manager.releaseOwner(ctx, account, fence); err != nil {
+		return ErrUnavailable
+	}
+	return nil
+}
+
 func (manager *Manager) SetRoom(ctx context.Context, accountID int64, roomID string) (resultErr error) {
 	roomID = strings.TrimSpace(roomID)
 	if manager == nil || ctx == nil || accountID <= 0 || !validRoomID(roomID) {
@@ -596,8 +794,6 @@ func (manager *Manager) SetRoom(ctx context.Context, accountID int64, roomID str
 		account.mu.Unlock()
 		return ErrClosed
 	}
-	wasActive := account.current != nil
-	hasPresence := len(account.leases) != 0
 	active := account.current
 	account.mu.Unlock()
 	claim, err := manager.dependencies.Sessions.ClaimOwnership(operationContext, accountID, manager.ownerToken, manager.ownerTTL)
@@ -628,7 +824,7 @@ func (manager *Manager) SetRoom(ctx context.Context, accountID int64, roomID str
 		account.operation = false
 		account.mu.Unlock()
 	}()
-	temporaryClaim := !wasActive && !hasPresence
+	temporaryClaim := active == nil
 	if temporaryClaim {
 		defer func() {
 			if err := manager.releaseOwner(operationContext, account, claim.Fence); err != nil {
@@ -638,10 +834,6 @@ func (manager *Manager) SetRoom(ctx context.Context, accountID int64, roomID str
 				}
 			}
 		}()
-	}
-	if active != nil && active.owner != claim.Fence {
-		manager.beginStaleCleanupLocked(account, active, claim.Fence)
-		return ErrUnavailable
 	}
 	canonical, err := manager.dependencies.RoomSources.Resolve(operationContext, roomID, accountID)
 	if err != nil || !validRoomID(canonical) {
@@ -653,45 +845,60 @@ func (manager *Manager) SetRoom(ctx context.Context, accountID int64, roomID str
 	if stale {
 		return ErrUnavailable
 	}
-	if err := manager.closeCurrent(operationContext, account); err != nil {
-		if errors.Is(err, ErrOwnershipConflict) {
-			return ErrUnavailable
-		}
-		account.markDegraded()
-		return err
-	}
-	jobID, pending, err := manager.dependencies.Sessions.PendingMigration(operationContext, accountID)
-	if err != nil {
-		account.markDegraded()
-		return ErrUnavailable
-	}
-	if pending {
-		migrationOwner := migration.OwnerFence{AccountID: claim.Fence.AccountID, Token: [32]byte(claim.Fence.Token), Epoch: claim.Fence.Epoch}
-		if err := manager.applyPendingMigration(operationContext, migrationOwner, jobID); err != nil {
+	// A session created before roomwatcher composition has no business-broadcast
+	// link. Keep the old switch path only for that temporary compatibility
+	// state; monitor-owned executions (which always carry the link) are changed
+	// exclusively by durable room transitions.
+	if active != nil && active.session.BroadcastSessionID == 0 {
+		if err := manager.closeCurrent(operationContext, account); err != nil {
 			if errors.Is(err, ErrOwnershipConflict) {
-				manager.beginStaleCleanupLocked(account, nil, OwnerFence{})
 				return ErrUnavailable
 			}
 			account.markDegraded()
-			return ErrUnavailable
+			return err
+		}
+		if err := manager.applyPendingMigrationForOwner(operationContext, claim.Fence, accountID); err != nil {
+			return err
+		}
+		if err := manager.startRoom(operationContext, account, canonical, true, true, 0); err != nil {
+			if errors.Is(err, ErrOwnershipConflict) {
+				return ErrUnavailable
+			}
+			account.markDegraded()
+			return err
+		}
+		return nil
+	}
+	if temporaryClaim {
+		if err := manager.applyPendingMigrationForOwner(operationContext, claim.Fence, accountID); err != nil {
+			return err
 		}
 	}
-	account.mu.Lock()
-	stale = account.stale
-	account.mu.Unlock()
-	if stale {
-		return ErrUnavailable
-	}
-	if err := manager.startRoom(operationContext, account, canonical, true, wasActive || hasPresence); err != nil {
+	if err := manager.dependencies.Sessions.PersistTargetRoom(operationContext, PersistTargetRoomCommand{Owner: claim.Fence, RoomID: canonical, UpdatedAt: manager.now()}); err != nil {
 		if errors.Is(err, ErrOwnershipConflict) {
-			account.mu.Lock()
-			active := account.current
-			account.mu.Unlock()
-			manager.beginStaleCleanupLocked(account, active, OwnerFence{})
+			manager.beginStaleCleanupLocked(account, nil, OwnerFence{})
 			return ErrUnavailable
 		}
 		account.markDegraded()
 		return err
+	}
+	return nil
+}
+
+func (manager *Manager) applyPendingMigrationForOwner(ctx context.Context, owner OwnerFence, accountID int64) error {
+	jobID, pending, err := manager.dependencies.Sessions.PendingMigration(ctx, accountID)
+	if err != nil {
+		return ErrUnavailable
+	}
+	if !pending {
+		return nil
+	}
+	migrationOwner := migration.OwnerFence{AccountID: owner.AccountID, Token: [32]byte(owner.Token), Epoch: owner.Epoch}
+	if err := manager.applyPendingMigration(ctx, migrationOwner, jobID); err != nil {
+		if errors.Is(err, ErrOwnershipConflict) {
+			return ErrUnavailable
+		}
+		return ErrUnavailable
 	}
 	return nil
 }

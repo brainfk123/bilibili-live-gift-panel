@@ -193,7 +193,7 @@ func TestRuntimeHTTPStatusRejectsQueryAndBodyBeforeAuthentication(t *testing.T) 
 	}
 }
 
-func TestRuntimeHTTPEventsOwnsConfigLeaseAndUsesInjectedTwentySecondKeepalive(t *testing.T) {
+func TestRuntimeHTTPEventsStayConnectedWithoutOwningExecutionLease(t *testing.T) {
 	lease := &recordingHTTPLease{kind: LeaseConfig}
 	service := &recordingHTTPRuntime{status: Status{State: StateDegraded, RoomID: "42", Degraded: true}, snapshot: configuration.RuntimeState{AttributeValues: map[string]float64{"health": 9}}, lease: lease}
 	timerCreated := make(chan *manualTimer, 2)
@@ -228,8 +228,8 @@ func TestRuntimeHTTPEventsOwnsConfigLeaseAndUsesInjectedTwentySecondKeepalive(t 
 	if response.Header().Get("Content-Type") != "text/event-stream" || response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("SSE headers = %#v", response.Header())
 	}
-	if service.acquireKind != LeaseConfig || service.accountID != 7 || lease.ReleaseCalls() != 1 {
-		t.Fatalf("lease ownership service=%#v lease=%#v", service, lease)
+	if service.acquireCalls != 0 {
+		t.Fatalf("status stream acquired execution lease %d times", service.acquireCalls)
 	}
 }
 
@@ -309,7 +309,7 @@ func TestRuntimeHTTPEventsStreamsChangedAuthoritativeStatusWithRollingDeadlines(
 	}
 }
 
-func TestRuntimeHTTPEventsWriteOrFlushFailureImmediatelyReleasesConfigLease(t *testing.T) {
+func TestRuntimeHTTPEventsOutputFailureDoesNotTouchExecutionLease(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		phase      string
@@ -356,14 +356,14 @@ func TestRuntimeHTTPEventsWriteOrFlushFailureImmediatelyReleasesConfigLease(t *t
 				cancel()
 				t.Fatal("config stream did not exit after output failure")
 			}
-			if lease.ReleaseCalls() != 1 {
-				t.Fatalf("config lease release calls = %d, want 1", lease.ReleaseCalls())
+			if service.acquireCalls != 0 || lease.ReleaseCalls() != 0 {
+				t.Fatalf("stream output touched execution lease: acquire/release = %d/%d", service.acquireCalls, lease.ReleaseCalls())
 			}
 		})
 	}
 }
 
-func TestRuntimeHTTPEventsReauthenticatesSameAccountAndRenewsBeforeEveryFrame(t *testing.T) {
+func TestRuntimeHTTPEventsReauthenticatesEveryFrameWithoutRenewingExecution(t *testing.T) {
 	lease := &recordingHTTPLease{kind: LeaseConfig}
 	service := &recordingHTTPRuntime{status: Status{State: StateIdle, ConnectionHealthy: true}, snapshot: configuration.RuntimeState{}, lease: lease}
 	authentication := &rotatingRuntimeAuthentication{accountID: 7}
@@ -380,8 +380,8 @@ func TestRuntimeHTTPEventsReauthenticatesSameAccountAndRenewsBeforeEveryFrame(t 
 	done := make(chan struct{})
 	go func() { handler.ServeHTTP(response, request); close(done) }()
 	waitRuntimeFlushes(t, response, 3)
-	if calls, renewals := authentication.Calls(), lease.RenewCalls(); calls != 4 || renewals != 3 {
-		t.Fatalf("handshake+initial auth/renew calls = %d/%d, want 4/3", calls, renewals)
+	if calls, renewals := authentication.Calls(), lease.RenewCalls(); calls != 4 || renewals != 0 {
+		t.Fatalf("handshake+initial auth/renew calls = %d/%d, want 4/0", calls, renewals)
 	}
 
 	receiveRuntimeSignal(t, timers, "unchanged keepalive timer").Fire()
@@ -393,25 +393,21 @@ func TestRuntimeHTTPEventsReauthenticatesSameAccountAndRenewsBeforeEveryFrame(t 
 	cancel()
 	receiveRuntimeSignal(t, done, "renewed config stream shutdown")
 
-	if calls, renewals := authentication.Calls(), lease.RenewCalls(); calls != 8 || renewals != 7 {
-		t.Fatalf("all-frame auth/renew calls = %d/%d, want 8/7", calls, renewals)
+	if calls, renewals := authentication.Calls(), lease.RenewCalls(); calls != 8 || renewals != 0 {
+		t.Fatalf("all-frame auth/renew calls = %d/%d, want 8/0", calls, renewals)
 	}
-	if strings.Count(response.String(), ": keepalive") != 2 || lease.ReleaseCalls() != 1 {
-		t.Fatalf("keepalives/release = %d/%d, want 2/1", strings.Count(response.String(), ": keepalive"), lease.ReleaseCalls())
+	if strings.Count(response.String(), ": keepalive") != 2 || lease.ReleaseCalls() != 0 || service.acquireCalls != 0 {
+		t.Fatalf("keepalives/release/acquire = %d/%d/%d, want 2/0/0", strings.Count(response.String(), ": keepalive"), lease.ReleaseCalls(), service.acquireCalls)
 	}
 }
 
-func TestRuntimeHTTPEventsStopsOnRevokedChangedAccountOrRenewFailure(t *testing.T) {
+func TestRuntimeHTTPEventsStopsOnRevokedOrChangedAccountWithoutExecutionLease(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		accountID  int64
-		renewError error
-		wantRenew  int
+		name      string
+		accountID int64
 	}{
-		{name: "cookie revoked", accountID: 0, wantRenew: 3},
-		{name: "cookie changed account", accountID: 8, wantRenew: 3},
-		{name: "lease ownership lost", accountID: 7, renewError: ErrOwnershipConflict, wantRenew: 4},
-		{name: "lease account disabled", accountID: 7, renewError: ErrAccountDisabled, wantRenew: 4},
+		{name: "cookie revoked", accountID: 0},
+		{name: "cookie changed account", accountID: 8},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			lease := &recordingHTTPLease{kind: LeaseConfig}
@@ -432,15 +428,14 @@ func TestRuntimeHTTPEventsStopsOnRevokedChangedAccountOrRenewFailure(t *testing.
 			go func() { handler.ServeHTTP(response, request); close(done) }()
 			waitRuntimeFlushes(t, response, 3)
 			authentication.SetAccount(test.accountID)
-			lease.SetRenewError(test.renewError)
 			receiveRuntimeSignal(t, timers, "revocation keepalive timer").Fire()
 			receiveRuntimeSignal(t, done, "revoked config stream shutdown")
 
 			if strings.Contains(response.String(), ": keepalive") {
 				t.Fatalf("revoked stream received keepalive: %q", response.String())
 			}
-			if lease.RenewCalls() != test.wantRenew || lease.ReleaseCalls() != 1 {
-				t.Fatalf("renew/release calls = %d/%d, want %d/1", lease.RenewCalls(), lease.ReleaseCalls(), test.wantRenew)
+			if lease.RenewCalls() != 0 || lease.ReleaseCalls() != 0 || service.acquireCalls != 0 {
+				t.Fatalf("renew/release/acquire calls = %d/%d/%d, want 0/0/0", lease.RenewCalls(), lease.ReleaseCalls(), service.acquireCalls)
 			}
 		})
 	}

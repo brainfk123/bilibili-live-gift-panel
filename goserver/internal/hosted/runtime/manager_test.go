@@ -14,58 +14,108 @@ import (
 	"bilibili-live-gift-panel/internal/hosted/configuration"
 	"bilibili-live-gift-panel/internal/hosted/migration"
 	"bilibili-live-gift-panel/internal/hosted/roomsource"
+	"bilibili-live-gift-panel/internal/hosted/roomwatcher"
 )
 
-func TestSetRoomClosesAdmissionDrainsThenEndsMigratesPersistsAndStarts(t *testing.T) {
+func TestManagerAppliesRoomTransitionsAcrossGraceAndOffline(t *testing.T) {
 	log := &operationLog{}
-	sessions := &orderedSessions{enabled: true, target: "42", pendingJob: 91, log: log}
-	sources := newOrderedRoomSources(log, map[string]string{"7": "42", "8": "84"})
-	migrations := orderedMigration{log: log}
-	processingStarted := make(chan struct{})
-	allowCommit := make(chan struct{})
-	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: migrations, RoomSources: sources}, Options{
-		Now: func() time.Time { return time.Date(2026, 8, 17, 1, 0, 0, 0, time.UTC) },
-		Process: func(context.Context, OwnerFence, Session, roomsource.Event) error {
-			close(processingStarted)
-			<-allowCommit
-			log.add("commit")
-			return nil
-		},
-	})
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
+	sources := newOrderedRoomSources(log, map[string]string{"42": "42"})
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: sources}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
-	lease, err := manager.Acquire(context.Background(), 7, LeaseConfig)
+
+	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0).UTC(), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}
+	if err := manager.ApplyRoomTransition(context.Background(), live); err != nil {
+		t.Fatalf("ApplyRoomTransition(live) = %v", err)
+	}
+	if sessions.startedCount() != 1 || sources.maximumActive() != 1 {
+		t.Fatalf("live starts/sources = %d/%d, want 1/1", sessions.startedCount(), sources.maximumActive())
+	}
+
+	graceUntil := live.ConfirmedAt.Add(10 * time.Minute)
+	grace := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateLive, To: roomwatcher.StateGrace, ConfirmedAt: live.ConfirmedAt.Add(time.Minute), GraceUntil: &graceUntil, Sequence: 2, LeaseEpoch: 2}
+	if err := manager.ApplyRoomTransition(context.Background(), grace); err != nil {
+		t.Fatalf("ApplyRoomTransition(grace) = %v", err)
+	}
+	if sessions.startedCount() != 1 || sources.maximumActive() != 1 {
+		t.Fatalf("grace starts/sources = %d/%d, want 1/1", sessions.startedCount(), sources.maximumActive())
+	}
+
+	offline := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateGrace, To: roomwatcher.StateOffline, ConfirmedAt: graceUntil, Sequence: 3, LeaseEpoch: 3}
+	if err := manager.ApplyRoomTransition(context.Background(), offline); err != nil {
+		t.Fatalf("ApplyRoomTransition(offline) = %v", err)
+	}
+	if !containsOperation(log.snapshot(), "end:1") {
+		t.Fatalf("offline did not end the execution session: %v", log.snapshot())
+	}
+}
+
+func TestManagerSetRoomPersistsSelectionWithoutReplacingLiveExecution(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
+	sources := newOrderedRoomSources(log, map[string]string{"42": "42", "84": "84"})
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: sources}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lease.Release()
-	old := sources.subscription(t, 0)
-	old.Emit(roomsource.Event{ID: "gift-1", RoomID: "42"})
-	<-processingStarted
-
-	switchDone := make(chan error, 1)
-	go func() { switchDone <- manager.SetRoom(context.Background(), 7, "8") }()
-	<-old.cancelled
-	if got := log.snapshot(); containsOperation(got, "end:1") {
-		t.Fatalf("old session ended before admitted event committed: %v", got)
-	}
-	close(allowCommit)
-	if err := <-switchDone; err != nil {
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	if err := manager.ApplyRoomTransition(context.Background(), roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0).UTC(), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}); err != nil {
 		t.Fatal(err)
 	}
-
-	want := []string{"subscribe:42", "start:42", "resolve:84", "cancel:42", "commit", "end:1", "pending:91", "apply:91", "persist:84", "subscribe:84", "start:84"}
-	if got := log.snapshot(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("room switch operations = %v\nwant %v", got, want)
-	}
-	if sources.maximumActive() != 1 {
-		t.Fatalf("maximum simultaneous upstream subscriptions = %d, want 1", sources.maximumActive())
+	if err := manager.SetRoom(context.Background(), 7, "84"); err != nil {
+		t.Fatal(err)
 	}
 	status, err := manager.Status(context.Background(), 7)
-	if err != nil || status.RoomID != "84" || status.State != StateActive {
-		t.Fatalf("Status() = %#v, %v", status, err)
+	if err != nil || status.RoomID != "42" || status.SessionID == 0 {
+		t.Fatalf("selection replaced live execution: status=%#v err=%v", status, err)
+	}
+}
+
+func TestManagerRejectsStaleRoomTransitionEpochAndIgnoresDuplicateSequence(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 3}
+	if err := manager.ApplyRoomTransition(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ApplyRoomTransition(context.Background(), live); err != nil {
+		t.Fatalf("duplicate transition = %v", err)
+	}
+	graceUntil := time.Unix(800, 0)
+	staleEpoch := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateLive, To: roomwatcher.StateGrace, ConfirmedAt: time.Unix(200, 0), GraceUntil: &graceUntil, Sequence: 2, LeaseEpoch: 3}
+	if err := manager.ApplyRoomTransition(context.Background(), staleEpoch); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("stale epoch = %v, want unavailable", err)
+	}
+	if sessions.startedCount() != 1 {
+		t.Fatalf("stale/duplicate transition started %d sessions, want one", sessions.startedCount())
+	}
+}
+
+func TestSetRoomPersistsSelectionWithoutStartingRuntime(t *testing.T) {
+	log := &operationLog{}
+	sessions := &orderedSessions{enabled: true, log: log}
+	sources := newOrderedRoomSources(log, map[string]string{"8": "84"})
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: sources}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	if err := manager.SetRoom(context.Background(), 7, "8"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := log.snapshot(), []string{"resolve:84", "persist:84"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("selection operations = %v, want %v", got, want)
+	}
+	if sources.maximumActive() != 0 {
+		t.Fatalf("selection started %d room sources", sources.maximumActive())
 	}
 }
 
@@ -683,108 +733,66 @@ func TestSetRoomWithoutPresenceReportsTemporaryOwnershipReleaseFailure(t *testin
 	}
 }
 
-func TestFailedSessionEndIsRetriedBeforeAnyReplacementCanStart(t *testing.T) {
+func TestOfflineTransitionRetriesFailedExecutionEndBeforeLaterTransitions(t *testing.T) {
 	log := &operationLog{}
-	sessions := &orderedSessions{enabled: true, target: "42", endFailures: 1, log: log}
-	sources := newOrderedRoomSources(log, map[string]string{"7": "42", "8": "84"})
-	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: orderedMigration{log: log}, RoomSources: sources}, Options{})
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, endFailures: 1, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
+	sources := newOrderedRoomSources(log, map[string]string{"42": "42"})
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: sources}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
-	lease, err := manager.Acquire(context.Background(), 7, LeaseConfig)
-	if err != nil {
+	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}
+	offline := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateLive, To: roomwatcher.StateOffline, ConfirmedAt: time.Unix(101, 0), Sequence: 2, LeaseEpoch: 2}
+	if err := manager.ApplyRoomTransition(context.Background(), live); err != nil {
 		t.Fatal(err)
 	}
-	defer lease.Release()
-	if err := manager.SetRoom(context.Background(), 7, "8"); !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("first SetRoom error = %v", err)
+	if err := manager.ApplyRoomTransition(context.Background(), offline); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("first offline error = %v, want unavailable", err)
 	}
-	if status, _ := manager.Status(context.Background(), 7); status.State != StateDegraded || !status.Degraded {
-		t.Fatalf("failed switch status = %#v", status)
+	if err := manager.ApplyRoomTransition(context.Background(), offline); err != nil {
+		t.Fatalf("offline retry = %v", err)
 	}
-	if sources.maximumActive() != 1 || len(sources.subs) != 1 {
-		t.Fatalf("replacement subscribed after failed end: max=%d subscriptions=%d", sources.maximumActive(), len(sources.subs))
-	}
-	if err := manager.SetRoom(context.Background(), 7, "8"); err != nil {
-		t.Fatalf("retry SetRoom error = %v", err)
-	}
-	want := []string{"subscribe:42", "start:42", "resolve:84", "cancel:42", "end:1", "resolve:84", "end:1", "persist:84", "subscribe:84", "start:84"}
-	if got := log.snapshot(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("retry operations = %v\nwant %v", got, want)
+	if got := log.snapshot(); !reflect.DeepEqual(got, []string{"subscribe:42", "start:42", "cancel:42", "end:1", "end:1"}) {
+		t.Fatalf("offline retry operations = %v", got)
 	}
 }
 
-func TestRoomSwitchBarrierCompletesAfterCallerCancellation(t *testing.T) {
+func TestOfflineTransitionDrainsAcceptedEventBeforeEndingExecution(t *testing.T) {
 	log := &operationLog{}
-	sessions := &orderedSessions{enabled: true, target: "42", log: log}
-	sources := newOrderedRoomSources(log, map[string]string{"7": "42", "8": "84"})
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
+	sources := newOrderedRoomSources(log, map[string]string{"42": "42"})
 	processingStarted := make(chan struct{})
 	allowCommit := make(chan struct{})
-	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: orderedMigration{log: log}, RoomSources: sources}, Options{Process: func(context.Context, OwnerFence, Session, roomsource.Event) error {
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: sources}, Options{Process: func(context.Context, OwnerFence, Session, roomsource.Event) error {
 		close(processingStarted)
 		<-allowCommit
+		log.add("commit")
 		return nil
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
-	lease, err := manager.Acquire(context.Background(), 7, LeaseConfig)
-	if err != nil {
+	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}
+	offline := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateLive, To: roomwatcher.StateOffline, ConfirmedAt: time.Unix(101, 0), Sequence: 2, LeaseEpoch: 2}
+	if err := manager.ApplyRoomTransition(context.Background(), live); err != nil {
 		t.Fatal(err)
 	}
-	defer lease.Release()
-	old := sources.subscription(t, 0)
-	old.Emit(roomsource.Event{ID: "gift"})
+	sources.subscription(t, 0).Emit(roomsource.Event{ID: "gift"})
 	<-processingStarted
-	ctx, cancel := context.WithCancel(context.Background())
-	firstDone := make(chan error, 1)
-	go func() { firstDone <- manager.SetRoom(ctx, 7, "8") }()
-	<-old.cancelled
-	cancel()
-	select {
-	case err := <-firstDone:
-		t.Fatalf("SetRoom returned before admitted work drained: %v", err)
-	default:
+	done := make(chan error, 1)
+	go func() { done <- manager.ApplyRoomTransition(context.Background(), offline) }()
+	<-sources.subscription(t, 0).cancelled
+	if containsOperation(log.snapshot(), "end:1") {
+		t.Fatalf("ended before accepted event committed: %v", log.snapshot())
 	}
 	close(allowCommit)
-	if err := <-firstDone; err != nil {
-		t.Fatalf("SetRoom after caller cancellation error = %v", err)
-	}
-}
-
-func TestRuntimeShutdownCancelsManagerOwnedRoomSwitchContext(t *testing.T) {
-	log := &operationLog{}
-	baseSessions := &orderedSessions{enabled: true, target: "42", log: log}
-	sessions := &blockingPendingSessions{orderedSessions: baseSessions, started: make(chan struct{}), release: make(chan struct{})}
-	sources := newOrderedRoomSources(log, map[string]string{"7": "42", "8": "84"})
-	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: orderedMigration{log: log}, RoomSources: sources}, Options{})
-	if err != nil {
+	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Acquire(context.Background(), 7, LeaseConfig); err != nil {
-		t.Fatal(err)
-	}
-	switchDone := make(chan error, 1)
-	go func() { switchDone <- manager.SetRoom(context.Background(), 7, "8") }()
-	<-sessions.started
-	shutdownContext, cancelShutdown := context.WithCancel(context.Background())
-	cancelShutdown()
-	if err := manager.Shutdown(shutdownContext); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Shutdown error = %v", err)
-	}
-	if err := sessions.contextError(); !errors.Is(err, context.Canceled) {
-		close(sessions.release)
-		<-switchDone
-		_ = manager.Wait(context.Background())
-		t.Fatalf("room switch context after runtime shutdown = %v", err)
-	}
-	if err := <-switchDone; !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("room switch error after shutdown = %v", err)
-	}
-	if err := manager.Wait(context.Background()); err != nil {
-		t.Fatal(err)
+	if got := log.snapshot(); !reflect.DeepEqual(got, []string{"subscribe:42", "start:42", "cancel:42", "commit", "end:1"}) {
+		t.Fatalf("offline drain operations = %v", got)
 	}
 }
 
@@ -894,6 +902,30 @@ type orderedSessions struct {
 	log             *operationLog
 	owner           OwnerFence
 	epoch           uint64
+}
+
+type transitionSessions struct {
+	*orderedSessions
+	accounts   map[string][]int64
+	broadcasts map[string]int64
+}
+
+func (sessions *transitionSessions) EnabledAccountsForRoom(_ context.Context, roomID string) ([]int64, error) {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	return append([]int64(nil), sessions.accounts[roomID]...), nil
+}
+
+func (sessions *transitionSessions) OpenBroadcastSession(_ context.Context, roomID string) (int64, error) {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	return sessions.broadcasts[roomID], nil
+}
+
+func (sessions *transitionSessions) StartSession(ctx context.Context, command StartSessionCommand) (Session, error) {
+	session, err := sessions.orderedSessions.StartSession(ctx, command)
+	session.BroadcastSessionID = command.BroadcastSessionID
+	return session, err
 }
 
 type blockingPendingSessions struct {
