@@ -259,6 +259,14 @@ func (repository *memorySessionRepository) EndSession(context.Context, EndSessio
 	repository.mu.Unlock()
 	return nil
 }
+func (repository *memorySessionRepository) ReconcileSession(_ context.Context, command ReconcileSessionCommand) error {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	if repository.owner == command.LostOwner {
+		return ErrOwnershipConflict
+	}
+	return nil
+}
 func (repository *memorySessionRepository) PendingMigration(context.Context, int64) (int64, bool, error) {
 	return 0, false, nil
 }

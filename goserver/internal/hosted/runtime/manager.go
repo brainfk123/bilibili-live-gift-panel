@@ -58,6 +58,12 @@ type roomTransitionSessionStore interface {
 	OpenBroadcastSession(context.Context, string) (int64, error)
 }
 
+// lostOwnershipSessionStore is the narrow administrative cleanup port used
+// only after the repository has rejected the captured owner fence.
+type lostOwnershipSessionStore interface {
+	ReconcileSession(context.Context, ReconcileSessionCommand) error
+}
+
 type ConfigurationRepository interface {
 	LoadActive(context.Context, int64) (configuration.Version, configuration.State, error)
 }
@@ -131,6 +137,7 @@ type Manager struct {
 	processCancelOnce sync.Once
 	closeOnce         sync.Once
 	shutdownErr       error
+	shutdownMu        sync.Mutex
 
 	transitionMu    sync.Mutex
 	lastSequence    uint64
@@ -183,7 +190,19 @@ type activeSession struct {
 	endedAt         time.Time
 	processorClosed bool
 	sourceHealthy   bool
+	cleanupPhase    durableCleanupPhase
+	cleanupFence    OwnerFence
+	needsReconcile  bool
 }
+
+type durableCleanupPhase uint8
+
+const (
+	cleanupPhaseStarted durableCleanupPhase = iota + 1
+	cleanupPhaseEnded
+	cleanupPhaseFinalized
+	cleanupPhaseReleased
+)
 
 type Status struct {
 	State               string `json:"state"`
@@ -499,21 +518,8 @@ func (account *accountRuntime) scheduleCloseLocked(delay time.Duration) {
 		account.idleTimer, account.idleCancel = nil, nil
 		account.mu.Unlock()
 		ctx, cancel := account.manager.ownerOperationContext()
-		err := account.manager.closeCurrent(ctx, account)
+		err := account.manager.closeCurrentTerminal(ctx, account, OwnerFence{})
 		cancel()
-		if errors.Is(err, ErrOwnershipConflict) {
-			err = nil
-		}
-		if err == nil {
-			account.mu.Lock()
-			fence := account.owner
-			account.mu.Unlock()
-			if validOwnerFence(fence) {
-				ctx, cancel = account.manager.ownerOperationContext()
-				err = account.manager.releaseOwner(ctx, account, fence)
-				cancel()
-			}
-		}
 		account.mu.Lock()
 		if err != nil {
 			account.degraded = true
@@ -869,13 +875,10 @@ func (manager *Manager) stopTransitionAccountLocked(ctx context.Context, account
 		if active.session.RoomID != roomID {
 			return nil
 		}
-		if err := manager.closeCurrent(ctx, account); err != nil {
-			if errors.Is(err, ErrOwnershipConflict) {
-				return ErrUnavailable
-			}
+		if err := manager.closeCurrentTerminal(ctx, account, transitionOwner); err != nil {
 			return err
 		}
-		pendingRelease = active.owner
+		return nil
 	}
 	if !validOwnerFence(pendingRelease) {
 		return nil
@@ -1103,20 +1106,8 @@ func (manager *Manager) drainDisabled(account *accountRuntime, done chan struct{
 			return
 		}
 		ctx, cancel := manager.ownerOperationContext()
-		err := manager.closeCurrent(ctx, account)
+		err := manager.closeCurrentTerminal(ctx, account, OwnerFence{})
 		cancel()
-		if errors.Is(err, ErrOwnershipConflict) {
-			account.opMu.Unlock()
-			return
-		}
-		account.mu.Lock()
-		fence := account.owner
-		account.mu.Unlock()
-		if err == nil && validOwnerFence(fence) {
-			ctx, cancel = manager.ownerOperationContext()
-			err = manager.releaseOwner(ctx, account, fence)
-			cancel()
-		}
 		account.opMu.Unlock()
 		if err == nil {
 			return
@@ -1174,8 +1165,8 @@ func (manager *Manager) releaseOwnerDuringShutdown(ctx context.Context, account 
 
 func (manager *Manager) closeCurrentDuringShutdown(ctx context.Context, account *accountRuntime) error {
 	for {
-		err := manager.closeCurrent(ctx, account)
-		if err == nil || errors.Is(err, ErrOwnershipConflict) {
+		err := manager.closeCurrentTerminal(ctx, account, OwnerFence{})
+		if err == nil {
 			return err
 		}
 		account.markDegraded()
@@ -1187,7 +1178,23 @@ func (manager *Manager) closeCurrentDuringShutdown(ctx context.Context, account 
 			<-ctx.Done()
 			return ctx.Err()
 		}
-		timer := manager.newShutdownTimer(delay)
+		newRetryTimer := manager.newShutdownTimer
+		account.mu.Lock()
+		active := account.current
+		if active == nil {
+			active = account.transitionPending
+		}
+		account.mu.Unlock()
+		if active != nil {
+			active.admissionMu.Lock()
+			phase := active.cleanupPhase
+			active.admissionMu.Unlock()
+			if phase == cleanupPhaseFinalized {
+				delay = manager.heartbeat
+				newRetryTimer = manager.newTimer
+			}
+		}
+		timer := newRetryTimer(delay)
 		select {
 		case <-timer.C():
 			timer.Stop()
@@ -1213,8 +1220,9 @@ func (manager *Manager) shutdownRetryDelay(ctx context.Context) (time.Duration, 
 }
 
 // beginStaleCleanupLocked revokes process-local use of a fence that the
-// repository has rejected. The caller holds account.opMu. Cleanup never ends
-// the persisted session because its captured fence is already stale.
+// repository has rejected. The caller holds account.opMu. A started session
+// remains attached to the account until it has been reconciled, finalized and
+// marked released; losing a fence must never erase durable cleanup work.
 func (manager *Manager) beginStaleOnConflictLocked(account *accountRuntime) {
 	account.mu.Lock()
 	active := account.current
@@ -1267,6 +1275,13 @@ func (manager *Manager) beginStaleCleanup(account *accountRuntime, active *activ
 
 	if active != nil {
 		active.admissionMu.Lock()
+		if validOwnerFence(releaseFence) {
+			active.cleanupFence = releaseFence
+			active.needsReconcile = false
+		} else {
+			active.cleanupFence = OwnerFence{}
+			active.needsReconcile = true
+		}
 		if active.admitting {
 			active.admitting = false
 			active.subscription.Cancel()
@@ -1278,119 +1293,32 @@ func (manager *Manager) beginStaleCleanup(account *accountRuntime, active *activ
 
 func (manager *Manager) finishStaleCleanup(account *accountRuntime, active *activeSession, releaseFence OwnerFence, done chan struct{}) {
 	account.opMu.Lock()
-	defer account.opMu.Unlock()
-	account.mu.Lock()
-	if account.staleDone != done {
+	for {
+		account.mu.Lock()
+		if account.staleDone != done {
+			account.mu.Unlock()
+			account.opMu.Unlock()
+			return
+		}
+		releaseFence = account.staleRelease
 		account.mu.Unlock()
-		return
-	}
-	releaseFence = account.staleRelease
-	account.mu.Unlock()
-	released := make(chan bool, 1)
-	go func() { released <- manager.releaseUnusableOwner(account, releaseFence) }()
-	drained := manager.drainStaleActive(active)
-	releaseSucceeded := <-released
 
-	account.mu.Lock()
-	defer account.mu.Unlock()
-	if account.staleDone != done {
-		return
-	}
-	if drained && account.current == active {
-		account.current = nil
-	}
-	if drained && account.transitionPending == active {
-		account.transitionPending = nil
-	}
-	if drained && releaseSucceeded {
-		if !validOwnerFence(releaseFence) {
-			account.owner = OwnerFence{}
-			account.reconcile = false
-		}
-		account.stale = false
-		account.degraded = false
-		account.staleRelease = OwnerFence{}
-	}
-	close(done)
-	account.staleDone = nil
-}
-
-func (manager *Manager) drainStaleActive(active *activeSession) bool {
-	if active == nil {
-		return true
-	}
-	for {
-		active.admissionMu.Lock()
-		eventsClosed := active.eventsClosed
-		active.admissionMu.Unlock()
-		if eventsClosed {
-			break
-		}
-		select {
-		case <-active.subscription.Done():
-			active.admissionMu.Lock()
-			if !active.eventsClosed {
-				close(active.events)
-				active.eventsClosed = true
-			}
-			active.admissionMu.Unlock()
-			break
-		default:
+		var err error
+		if active != nil {
 			ctx, cancel := manager.ownerOperationContext()
-			err := active.subscription.Wait(ctx)
+			err = manager.advanceSessionCleanup(ctx, account, active, cleanupPhaseReleased, releaseFence)
 			cancel()
-			if err == nil {
-				continue
-			}
-			if manager.ownershipControl.Err() != nil {
-				return false
-			}
-			timer := manager.newTimer(manager.heartbeat)
-			select {
-			case <-timer.C():
-				timer.Stop()
-			case <-manager.ownershipControl.Done():
-				timer.Stop()
-				return false
-			}
-			continue
+		} else if validOwnerFence(releaseFence) {
+			ctx, cancel := manager.ownerOperationContext()
+			err = manager.releaseOwner(ctx, account, releaseFence)
+			cancel()
 		}
-		break
-	}
-	active.admissionMu.Lock()
-	workerStarted := active.workerStarted
-	if !workerStarted {
-		active.drained = true
-	}
-	drained := active.drained
-	active.admissionMu.Unlock()
-	if drained {
-		return true
-	}
-	select {
-	case <-active.workerDone:
-		active.admissionMu.Lock()
-		active.drained = true
-		active.admissionMu.Unlock()
-		return true
-	case <-manager.ownershipControl.Done():
-		return false
-	}
-}
-
-func (manager *Manager) releaseUnusableOwner(account *accountRuntime, fence OwnerFence) bool {
-	if !validOwnerFence(fence) {
-		return true
-	}
-	for {
-		ctx, cancel := manager.ownerOperationContext()
-		err := manager.releaseOwner(ctx, account, fence)
-		cancel()
 		if err == nil {
-			return true
+			break
 		}
 		if manager.ownershipControl.Err() != nil {
-			return false
+			account.opMu.Unlock()
+			return
 		}
 		timer := manager.newTimer(manager.heartbeat)
 		select {
@@ -1398,7 +1326,52 @@ func (manager *Manager) releaseUnusableOwner(account *accountRuntime, fence Owne
 			timer.Stop()
 		case <-manager.ownershipControl.Done():
 			timer.Stop()
-			return false
+			account.opMu.Unlock()
+			return
+		}
+	}
+
+	needsReconcile := false
+	if active != nil {
+		active.admissionMu.Lock()
+		needsReconcile = active.needsReconcile
+		active.admissionMu.Unlock()
+	}
+	account.mu.Lock()
+	if account.staleDone != done {
+		account.mu.Unlock()
+		account.opMu.Unlock()
+		return
+	}
+	if account.current == active {
+		account.current = nil
+	}
+	if account.transitionPending == active {
+		account.transitionPending = nil
+	}
+	if (!validOwnerFence(releaseFence) && active == nil) || needsReconcile {
+		account.owner = OwnerFence{}
+		account.reconcile = false
+	}
+	account.stale = false
+	account.degraded = false
+	account.staleRelease = OwnerFence{}
+	close(done)
+	account.staleDone = nil
+	account.mu.Unlock()
+	account.opMu.Unlock()
+	if active != nil {
+		manager.forgetLostTransitionOwner(account.accountID, active.owner)
+	}
+}
+
+func (manager *Manager) forgetLostTransitionOwner(accountID int64, fence OwnerFence) {
+	manager.transitionMu.Lock()
+	defer manager.transitionMu.Unlock()
+	for roomID, room := range manager.roomTransitions {
+		if room.pendingOwners[accountID] == fence {
+			delete(room.pendingOwners, accountID)
+			manager.roomTransitions[roomID] = room
 		}
 	}
 }
@@ -1516,7 +1489,6 @@ func (manager *Manager) Shutdown(ctx context.Context) error {
 	if manager == nil || ctx == nil {
 		return ErrInvalidInput
 	}
-	entryErr := ctx.Err()
 	manager.closeOnce.Do(func() {
 		manager.cancel()
 		manager.mu.Lock()
@@ -1534,83 +1506,95 @@ func (manager *Manager) Shutdown(ctx context.Context) error {
 			account.cancelIdleLocked()
 			account.mu.Unlock()
 		}
-		go func() {
-			select {
-			case <-ctx.Done():
-				manager.stopOwnershipControl()
-				manager.processCancelOnce.Do(manager.cancelProcessing)
-			case <-manager.done:
-			}
-		}()
-		go func() {
-			var workers sync.WaitGroup
-			failures := make(chan struct{}, 2*len(accounts)+1)
-			for _, account := range accounts {
-				workers.Add(1)
-				go func(account *accountRuntime) {
-					defer workers.Done()
-					for {
-						if err := manager.waitStaleCleanup(ctx, account); err != nil {
-							failures <- struct{}{}
-							return
-						}
-						account.opMu.Lock()
-						account.mu.Lock()
-						stale := account.stale
-						account.mu.Unlock()
-						if !stale {
-							break
-						}
-						account.opMu.Unlock()
-					}
-					if err := manager.closeCurrentDuringShutdown(ctx, account); err != nil && !errors.Is(err, ErrOwnershipConflict) {
-						failures <- struct{}{}
-					}
-					account.mu.Lock()
-					fence := account.owner
-					account.mu.Unlock()
-					if validOwnerFence(fence) {
-						if err := manager.releaseOwnerDuringShutdown(ctx, account, fence); err != nil {
-							failures <- struct{}{}
-						}
-					}
-					account.opMu.Unlock()
-				}(account)
-			}
-			workers.Wait()
-			manager.stopOwnershipHeartbeat()
-			<-manager.heartbeatDone
-			for _, account := range accounts {
-				if err := manager.waitStaleCleanup(ctx, account); err != nil {
-					failures <- struct{}{}
-				}
-			}
-			manager.processCancelOnce.Do(manager.cancelProcessing)
-			manager.stopOwnershipControl()
-			manager.dependencies.RoomSources.Close()
-			if err := manager.dependencies.RoomSources.Wait(ctx); err != nil && ctx.Err() == nil {
-				failures <- struct{}{}
-			}
-			close(failures)
-			if _, failed := <-failures; failed {
-				manager.mu.Lock()
-				manager.shutdownErr = ErrUnavailable
-				manager.mu.Unlock()
-			}
-			close(manager.done)
-		}()
 	})
-	err := manager.Wait(ctx)
-	if entryErr != nil {
-		manager.stopOwnershipControl()
+	if err := ctx.Err(); err != nil {
 		manager.processCancelOnce.Do(manager.cancelProcessing)
-		return entryErr
+		return err
 	}
-	if err != nil && ctx.Err() != nil {
-		manager.stopOwnershipControl()
+
+	manager.shutdownMu.Lock()
+	defer manager.shutdownMu.Unlock()
+	select {
+	case <-manager.done:
+		manager.mu.Lock()
+		err := manager.shutdownErr
+		manager.mu.Unlock()
+		return err
+	default:
+	}
+
+	manager.mu.Lock()
+	accounts := make([]*accountRuntime, 0, len(manager.accounts))
+	for _, account := range manager.accounts {
+		accounts = append(accounts, account)
+	}
+	manager.mu.Unlock()
+	for _, account := range accounts {
+		if err := manager.waitStaleCleanup(ctx, account); err != nil {
+			if ctx.Err() != nil {
+				manager.processCancelOnce.Do(manager.cancelProcessing)
+				return ctx.Err()
+			}
+			return ErrUnavailable
+		}
+		account.opMu.Lock()
+		if err := ctx.Err(); err != nil {
+			account.opMu.Unlock()
+			manager.processCancelOnce.Do(manager.cancelProcessing)
+			return err
+		}
+		err := manager.closeCurrentDuringShutdown(ctx, account)
+		if err != nil {
+			account.opMu.Unlock()
+			if ctx.Err() != nil {
+				manager.processCancelOnce.Do(manager.cancelProcessing)
+				return ctx.Err()
+			}
+			return ErrUnavailable
+		}
+		account.mu.Lock()
+		fence := account.owner
+		account.mu.Unlock()
+		if validOwnerFence(fence) {
+			err = manager.releaseOwnerDuringShutdown(ctx, account, fence)
+		}
+		account.opMu.Unlock()
+		if err != nil {
+			if ctx.Err() != nil {
+				manager.processCancelOnce.Do(manager.cancelProcessing)
+				return ctx.Err()
+			}
+			return ErrUnavailable
+		}
+	}
+
+	manager.stopOwnershipHeartbeat()
+	select {
+	case <-manager.heartbeatDone:
+	case <-ctx.Done():
 		manager.processCancelOnce.Do(manager.cancelProcessing)
+		return ctx.Err()
 	}
-	return err
+	for _, account := range accounts {
+		if err := manager.waitStaleCleanup(ctx, account); err != nil {
+			if ctx.Err() != nil {
+				manager.processCancelOnce.Do(manager.cancelProcessing)
+				return ctx.Err()
+			}
+			return ErrUnavailable
+		}
+	}
+	manager.processCancelOnce.Do(manager.cancelProcessing)
+	manager.stopOwnershipControl()
+	manager.dependencies.RoomSources.Close()
+	if err := manager.dependencies.RoomSources.Wait(ctx); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return ErrUnavailable
+	}
+	close(manager.done)
+	return nil
 }
 
 func (manager *Manager) Wait(ctx context.Context) error {

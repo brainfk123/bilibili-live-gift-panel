@@ -228,6 +228,18 @@ func (store *capacitySessionStore) EndSession(_ context.Context, command EndSess
 	return nil
 }
 
+func (store *capacitySessionStore) ReconcileSession(_ context.Context, command ReconcileSessionCommand) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.owners[command.AccountID] == command.LostOwner {
+		return ErrOwnershipConflict
+	}
+	if session, ok := store.sessions[command.AccountID]; ok && session.ID == command.SessionID {
+		delete(store.sessions, command.AccountID)
+	}
+	return nil
+}
+
 func (*capacitySessionStore) PendingMigration(context.Context, int64) (int64, bool, error) {
 	return 0, false, nil
 }

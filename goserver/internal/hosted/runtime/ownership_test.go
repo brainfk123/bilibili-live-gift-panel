@@ -374,7 +374,7 @@ func TestShutdownRetryRequiresBackoffWindowBeforeDeadline(t *testing.T) {
 	}
 }
 
-func TestShutdownEndRetryOwnershipConflictLeavesTakeoverLifecycleUntouched(t *testing.T) {
+func TestShutdownEndRetryOwnershipConflictReconcilesOnlyCapturedSession(t *testing.T) {
 	clock := &ownershipClock{now: time.Date(2026, 8, 17, 5, 35, 0, 0, time.UTC)}
 	sessions := newSharedOwnershipSessions(clock.Now)
 	sessions.target = "42"
@@ -408,10 +408,11 @@ func TestShutdownEndRetryOwnershipConflictLeavesTakeoverLifecycleUntouched(t *te
 	sessions.mu.Lock()
 	open := sessions.open
 	ends := sessions.ends
+	reconciles := sessions.reconciles
 	owner := sessions.owner.fence
 	sessions.mu.Unlock()
-	if open == nil || ends != 0 || owner != takeover.Fence {
-		t.Fatalf("stale shutdown mutated takeover lifecycle open=%#v ends=%d owner=%#v, want open/0/%#v", open, ends, owner, takeover.Fence)
+	if open != nil || ends != 0 || reconciles != 1 || owner != takeover.Fence {
+		t.Fatalf("stale shutdown reconcile open=%#v ends=%d reconciles=%d owner=%#v, want nil/0/1/%#v", open, ends, reconciles, owner, takeover.Fence)
 	}
 }
 
@@ -498,10 +499,11 @@ func TestShutdownHandoffHeartbeatConflictDrainsWorkerlessCandidate(t *testing.T)
 	sessions.mu.Lock()
 	open := sessions.open
 	ends := sessions.ends
+	reconciles := sessions.reconciles
 	owner := sessions.owner.fence
 	sessions.mu.Unlock()
-	if open == nil || ends != 0 || owner != takeover.Fence {
-		t.Fatalf("heartbeat conflict mutated takeover lifecycle open=%#v ends=%d owner=%#v", open, ends, owner)
+	if open != nil || ends != 0 || reconciles != 1 || owner != takeover.Fence {
+		t.Fatalf("heartbeat reconcile open=%#v ends=%d reconciles=%d owner=%#v", open, ends, reconciles, owner)
 	}
 	stoppedHeartbeat := <-heartbeatTimers.created
 	if !stoppedHeartbeat.Stopped() {
@@ -658,7 +660,7 @@ func TestHeartbeatRenewsAccountsConcurrentlyWithBoundedControlContexts(t *testin
 	sessions := newConcurrentRenewSessions()
 	timers := &manualTimerFactory{created: make(chan *manualTimer, 2)}
 	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: &fakeRoomSources{}}, Options{
-		OwnerToken: ownerToken(0xc5), OwnerTTL: 30 * time.Second, HeartbeatInterval: 10 * time.Second, OwnerOperationTimeout: 9 * time.Second, NewHeartbeatTimer: timers.New,
+		OwnerToken: ownerToken(0xc5), OwnerTTL: 30 * time.Second, HeartbeatInterval: 10 * time.Second, OwnerOperationTimeout: 50 * time.Millisecond, NewHeartbeatTimer: timers.New,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -692,7 +694,10 @@ func TestHeartbeatRenewsAccountsConcurrentlyWithBoundedControlContexts(t *testin
 	select {
 	case <-sessions.blockedExited:
 	case <-time.After(time.Second):
-		t.Fatal("force deadline did not cancel blocked ownership renewal")
+		t.Fatal("bounded ownership control context did not cancel blocked renewal")
+	}
+	if err := manager.Shutdown(context.Background()); err != nil {
+		t.Fatalf("second Shutdown error = %v", err)
 	}
 }
 
@@ -800,7 +805,7 @@ func TestOwnershipConflictFailsClosedUntilBlockedStaleCurrentDrains(t *testing.T
 	}
 }
 
-func TestExpiredSameProcessClaimReleasesNewFenceBeforeRestartingCapturedCurrent(t *testing.T) {
+func TestExpiredSameProcessClaimUsesNewFenceBeforeRestartingCapturedCurrent(t *testing.T) {
 	clock := &ownershipClock{now: time.Date(2026, 8, 17, 5, 47, 0, 0, time.UTC)}
 	sessions := newSharedOwnershipSessions(clock.Now)
 	sessions.target = "42"
@@ -847,8 +852,8 @@ func TestExpiredSameProcessClaimReleasesNewFenceBeforeRestartingCapturedCurrent(
 		t.Fatalf("old epoch queued write = %v, want ownership conflict", err)
 	}
 	<-staleDone
-	if sessions.endCount() != 0 {
-		t.Fatalf("stale fence attempted database EndSession %d times", sessions.endCount())
+	if sessions.endCount() != 1 {
+		t.Fatalf("new valid fence ended captured session %d times, want one", sessions.endCount())
 	}
 	lease, err := manager.Acquire(context.Background(), 7, LeaseOBS)
 	if err != nil {
@@ -859,8 +864,8 @@ func TestExpiredSameProcessClaimReleasesNewFenceBeforeRestartingCapturedCurrent(
 	if err != nil || status.State != StateActive || status.Leases != 1 || status.SessionID != 2 {
 		t.Fatalf("replacement after captured-fence cleanup = %#v, %v", status, err)
 	}
-	if epoch, reconciles := sessions.ownerEpochAndReconciles(); epoch != 3 || reconciles != 1 {
-		t.Fatalf("replacement epoch/reconciles = %d/%d, want 3/1", epoch, reconciles)
+	if epoch, reconciles := sessions.ownerEpochAndReconciles(); epoch != 3 || reconciles != 0 {
+		t.Fatalf("replacement epoch/reconciles = %d/%d, want 3/0", epoch, reconciles)
 	}
 }
 
@@ -1380,6 +1385,21 @@ func (sessions *sharedOwnershipSessions) EndSession(_ context.Context, command E
 	return nil
 }
 
+func (sessions *sharedOwnershipSessions) ReconcileSession(_ context.Context, command ReconcileSessionCommand) error {
+	sessions.recordOperationStart()
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	if sessions.ownsLocked(command.LostOwner) {
+		return ErrOwnershipConflict
+	}
+	if sessions.open == nil || sessions.open.ID != command.SessionID || sessions.open.AccountID != command.AccountID {
+		return nil
+	}
+	sessions.open = nil
+	sessions.reconciles++
+	return nil
+}
+
 func (sessions *sharedOwnershipSessions) recordOperationStart() {
 	if sessions.waitReturned != nil && sessions.waitReturned.Load() {
 		sessions.lateOperations.Add(1)
@@ -1595,6 +1615,9 @@ func (*concurrentRenewSessions) StartSession(context.Context, StartSessionComman
 }
 func (*concurrentRenewSessions) EndSession(context.Context, EndSessionCommand) error {
 	return ErrUnavailable
+}
+func (sessions *concurrentRenewSessions) ReconcileSession(ctx context.Context, command ReconcileSessionCommand) error {
+	return sessions.repository(command.AccountID).ReconcileSession(ctx, command)
 }
 func (*concurrentRenewSessions) PendingMigration(context.Context, int64) (int64, bool, error) {
 	return 0, false, nil

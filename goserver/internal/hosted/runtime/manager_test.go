@@ -433,6 +433,175 @@ func TestTransitionPrePublishShutdownEndsBeforeFinalizeAndOwnerRelease(t *testin
 	}
 }
 
+func TestTransitionPrePublishShutdownDeadlineRetainsCleanupForSecondShutdown(t *testing.T) {
+	log := &operationLog{}
+	base := &transitionSessions{
+		orderedSessions: &orderedSessions{enabled: true, logOwnership: true, log: log},
+		accounts:        map[string][]int64{"42": {7}},
+		broadcasts:      map[string]int64{"42": 99},
+	}
+	sessions := &sequencedShutdownEndSessions{
+		transitionSessions: base,
+		secondEndStarted:   make(chan struct{}),
+		secondEndReturned:  make(chan struct{}),
+		releaseCalled:      make(chan struct{}, 1),
+	}
+	startCommitted := make(chan struct{})
+	allowPublish := make(chan struct{})
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{
+		ProcessorFactory:     finalizingProcessorFactory{log: log},
+		BeforeSessionPublish: func() { close(startCommitted); <-allowPublish },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}
+	applied := make(chan error, 1)
+	go func() { applied <- manager.ApplyRoomTransition(context.Background(), live) }()
+	<-startCommitted
+
+	shutdownContext, cancelShutdown := context.WithCancel(context.Background())
+	firstShutdown := make(chan error, 1)
+	go func() { firstShutdown <- manager.Shutdown(shutdownContext) }()
+	account, accountErr := manager.accountExisting(7)
+	if accountErr != nil {
+		t.Fatal(accountErr)
+	}
+	for {
+		account.mu.Lock()
+		shutting := account.shutting
+		account.mu.Unlock()
+		if shutting {
+			break
+		}
+		goruntime.Gosched()
+	}
+	close(allowPublish)
+	if err := <-applied; err == nil {
+		t.Fatal("live during shutdown unexpectedly succeeded")
+	}
+	<-sessions.secondEndStarted
+	cancelShutdown()
+	<-sessions.secondEndReturned
+	if err := <-firstShutdown; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first Shutdown error = %v, want canceled", err)
+	}
+	select {
+	case <-sessions.releaseCalled:
+		t.Fatalf("expired shutdown released before EndSession succeeded: %v", log.snapshot())
+	case <-time.After(100 * time.Millisecond):
+	}
+	if containsOperation(log.snapshot(), "processor-finalize") {
+		t.Fatalf("expired shutdown finalized before EndSession succeeded: %v", log.snapshot())
+	}
+	account.mu.Lock()
+	pending := account.transitionPending
+	account.mu.Unlock()
+	if pending == nil || pending.session.ID != 1 || pending.owner != sessions.firstFence() {
+		t.Fatalf("expired shutdown lost pending session/fence: pending=%#v fence=%#v", pending, sessions.firstFence())
+	}
+
+	if err := manager.Shutdown(context.Background()); err != nil {
+		t.Fatalf("second Shutdown error = %v", err)
+	}
+	if got := log.snapshot(); !containsOrderedOperations(got, []string{"end:1", "end:1", "end:1", "processor-finalize", "release", "sources-close", "sources-wait"}) {
+		t.Fatalf("shutdown retry order = %v", got)
+	}
+	commands, releases := sessions.endCommands(), sessions.releaseFences()
+	if len(commands) != 3 || len(releases) != 1 {
+		t.Fatalf("end/release attempts = %#v / %#v", commands, releases)
+	}
+	for _, command := range commands {
+		if command.SessionID != 1 || command.Owner != releases[0] {
+			t.Fatalf("EndSession command = %#v, release fence = %#v", command, releases[0])
+		}
+	}
+}
+
+func TestHeartbeatOwnershipConflictReconcilesPrePublishStartedSession(t *testing.T) {
+	log := &operationLog{}
+	base := &transitionSessions{
+		orderedSessions: &orderedSessions{enabled: true, logOwnership: true, log: log},
+		accounts:        map[string][]int64{"42": {7}},
+		broadcasts:      map[string]int64{"42": 99},
+	}
+	sessions := &heartbeatConflictSessions{transitionSessions: base, renewed: make(chan OwnerFence, 1), reconciled: make(chan ReconcileSessionCommand, 1)}
+	heartbeats := &manualTimerFactory{created: make(chan *manualTimer, 2)}
+	startCommitted := make(chan struct{})
+	allowPublish := make(chan struct{})
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{
+		ProcessorFactory:     finalizingProcessorFactory{log: log},
+		NewHeartbeatTimer:    heartbeats.New,
+		BeforeSessionPublish: func() { close(startCommitted); <-allowPublish },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}
+	applied := make(chan error, 1)
+	go func() { applied <- manager.ApplyRoomTransition(context.Background(), live) }()
+	<-startCommitted
+	account, accountErr := manager.accountExisting(7)
+	if accountErr != nil {
+		t.Fatal(accountErr)
+	}
+	account.mu.Lock()
+	pending := account.transitionPending
+	account.mu.Unlock()
+	if pending == nil || pending.session.ID != 1 {
+		t.Fatalf("pre-publish pending = %#v", pending)
+	}
+	(<-heartbeats.created).Fire()
+	lostFence := <-sessions.renewed
+	for {
+		account.mu.Lock()
+		stale := account.stale
+		account.mu.Unlock()
+		if stale {
+			break
+		}
+		goruntime.Gosched()
+	}
+	close(allowPublish)
+	if err := <-applied; err == nil {
+		t.Fatal("ownership-conflicted live unexpectedly succeeded")
+	}
+	command := <-sessions.reconciled
+	cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), time.Second)
+	defer cancelCleanup()
+	if err := manager.waitStaleCleanup(cleanupContext, account); err != nil {
+		t.Fatalf("wait stale cleanup = %v", err)
+	}
+
+	if command.AccountID != 7 || command.SessionID != 1 || command.LostOwner != lostFence || command.EndedAt.IsZero() {
+		t.Fatalf("reconcile command = %#v, lost fence %#v", command, lostFence)
+	}
+	if commands := sessions.endCommands(); len(commands) != 0 {
+		t.Fatalf("lost fence used for EndSession: %#v", commands)
+	}
+	if releases := sessions.releaseFences(); len(releases) != 0 {
+		t.Fatalf("lost owner was released after conflict: %#v", releases)
+	}
+	pending.admissionMu.Lock()
+	phase := pending.cleanupPhase
+	pending.admissionMu.Unlock()
+	if phase != cleanupPhaseReleased {
+		t.Fatalf("cleanup phase = %d, want released", phase)
+	}
+	account.mu.Lock()
+	current, retained, stale := account.current, account.transitionPending, account.stale
+	account.mu.Unlock()
+	if current != nil || retained != nil || stale {
+		t.Fatalf("reconciled account state = current %#v pending %#v stale %v", current, retained, stale)
+	}
+	if got := log.snapshot(); !containsOrderedOperations(got, []string{"start:42", "cancel:42", "processor-close", "reconcile:1", "processor-finalize"}) {
+		t.Fatalf("reconcile cleanup order = %v", got)
+	}
+	if err := manager.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestShutdownAndApplyRoomTransitionSerializeClosedState(t *testing.T) {
 	log := &operationLog{}
 	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
@@ -986,7 +1155,7 @@ func TestShutdownDrainsAdmittedCommitBeforeEndAndOwnershipRelease(t *testing.T) 
 	}
 }
 
-func TestShutdownGraceExpiryForceCancelsProcessingThenWaitCanJoin(t *testing.T) {
+func TestShutdownGraceExpiryForceCancelsProcessingThenSecondShutdownCanJoin(t *testing.T) {
 	log := &operationLog{}
 	sessions := &orderedSessions{enabled: true, target: "42", log: log, logOwnership: true}
 	sources := newOrderedRoomSources(log, map[string]string{"42": "42"})
@@ -1014,15 +1183,21 @@ func TestShutdownGraceExpiryForceCancelsProcessingThenWaitCanJoin(t *testing.T) 
 	if err := manager.Shutdown(expired); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Shutdown expired error = %v", err)
 	}
-	if err := manager.Wait(context.Background()); err != nil && !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("Wait error = %v, want nil or cleanup unavailable after grace deadline", err)
-	}
 	<-processingExited
+	if items := log.snapshot(); containsOperation(items, "end:1") || containsOperation(items, "release") {
+		t.Fatalf("expired shutdown ended or released before retry: %v", items)
+	}
+	if err := manager.Shutdown(context.Background()); err != nil {
+		t.Fatalf("second Shutdown error = %v", err)
+	}
+	if err := manager.Wait(context.Background()); err != nil {
+		t.Fatalf("Wait after successful retry = %v", err)
+	}
 	items := log.snapshot()
 	forced := slices.Index(items, "forced-exit")
 	ended := slices.Index(items, "end:1")
 	released := slices.Index(items, "release")
-	if forced < 0 || released < 0 || (ended >= 0 && released <= ended) {
+	if forced < 0 || ended <= forced || released <= ended {
 		t.Fatalf("forced shutdown order = %v", items)
 	}
 }
@@ -1275,6 +1450,7 @@ type orderedSessions struct {
 	epoch           uint64
 	releases        []OwnerFence
 	ends            []EndSessionCommand
+	reconciles      []ReconcileSessionCommand
 }
 
 type transitionSessions struct {
@@ -1282,6 +1458,77 @@ type transitionSessions struct {
 	accounts      map[string][]int64
 	broadcasts    map[string]int64
 	startFailures map[int64]int
+}
+
+type sequencedShutdownEndSessions struct {
+	*transitionSessions
+	mu                 sync.Mutex
+	endCalls           int
+	secondEndStarted   chan struct{}
+	secondEndReturned  chan struct{}
+	releaseCalled      chan struct{}
+	firstObservedFence OwnerFence
+}
+
+type heartbeatConflictSessions struct {
+	*transitionSessions
+	renewed    chan OwnerFence
+	reconciled chan ReconcileSessionCommand
+	mu         sync.Mutex
+	reconciles []ReconcileSessionCommand
+}
+
+func (sessions *heartbeatConflictSessions) RenewOwnership(_ context.Context, fence OwnerFence, _ time.Duration) error {
+	sessions.renewed <- fence
+	return ErrOwnershipConflict
+}
+
+func (sessions *heartbeatConflictSessions) ReconcileSession(_ context.Context, command ReconcileSessionCommand) error {
+	sessions.mu.Lock()
+	sessions.reconciles = append(sessions.reconciles, command)
+	sessions.mu.Unlock()
+	sessions.orderedSessions.log.add("reconcile:" + integer(command.SessionID))
+	sessions.reconciled <- command
+	return nil
+}
+
+func (sessions *sequencedShutdownEndSessions) EndSession(ctx context.Context, command EndSessionCommand) error {
+	sessions.orderedSessions.log.add("end:" + integer(command.SessionID))
+	sessions.orderedSessions.mu.Lock()
+	sessions.orderedSessions.ends = append(sessions.orderedSessions.ends, command)
+	sessions.orderedSessions.mu.Unlock()
+	sessions.mu.Lock()
+	sessions.endCalls++
+	call := sessions.endCalls
+	if call == 1 {
+		sessions.firstObservedFence = command.Owner
+	}
+	sessions.mu.Unlock()
+	switch call {
+	case 1:
+		return ErrUnavailable
+	case 2:
+		close(sessions.secondEndStarted)
+		<-ctx.Done()
+		close(sessions.secondEndReturned)
+		return ctx.Err()
+	default:
+		return nil
+	}
+}
+
+func (sessions *sequencedShutdownEndSessions) ReleaseOwnership(ctx context.Context, fence OwnerFence) error {
+	select {
+	case sessions.releaseCalled <- struct{}{}:
+	default:
+	}
+	return sessions.orderedSessions.ReleaseOwnership(ctx, fence)
+}
+
+func (sessions *sequencedShutdownEndSessions) firstFence() OwnerFence {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	return sessions.firstObservedFence
 }
 
 func (sessions *transitionSessions) EnabledAccountsForRoom(_ context.Context, roomID string) ([]int64, error) {
@@ -1446,6 +1693,12 @@ func (sessions *orderedSessions) EndSession(_ context.Context, command EndSessio
 		sessions.endFailures--
 		return ErrUnavailable
 	}
+	return nil
+}
+func (sessions *orderedSessions) ReconcileSession(_ context.Context, command ReconcileSessionCommand) error {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	sessions.reconciles = append(sessions.reconciles, command)
 	return nil
 }
 func (sessions *orderedSessions) endCommands() []EndSessionCommand {

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"regexp"
@@ -72,6 +73,103 @@ func TestSessionRepositoryLinksExecutionToOpenBusinessBroadcast(t *testing.T) {
 	}
 	if session.BroadcastSessionID != 99 {
 		t.Fatalf("broadcast session ID = %d, want 99", session.BroadcastSessionID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionRepositoryReconcilesExactSessionAfterLostFence(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 26, 6, 0, 0, 0, time.UTC)
+	lost := OwnerFence{AccountID: 7, Token: ownerToken(0x71), Epoch: 4}
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM streamer_accounts WHERE id = ? FOR UPDATE")).
+		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(7)))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT owner_token = ? AND fencing_epoch = ? AND expires_at > UTC_TIMESTAMP(6) FROM runtime_account_owners WHERE account_id = ? FOR UPDATE")).
+		WithArgs(lost.Token[:], lost.Epoch, int64(7)).WillReturnRows(sqlmock.NewRows([]string{"lost_owner_active"}).AddRow(false))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT ended_at FROM live_sessions WHERE id = ? AND account_id = ? FOR UPDATE")).
+		WithArgs(int64(81), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"ended_at"}).AddRow(nil))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM runtime_active_session_guards WHERE account_id = ? AND live_session_id = ?")).
+		WithArgs(int64(7), int64(81)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE live_sessions SET ended_at = ? WHERE id = ? AND account_id = ? AND ended_at IS NULL")).
+		WithArgs(now, int64(81), int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	err = NewSessionRepository(database).ReconcileSession(context.Background(), ReconcileSessionCommand{LostOwner: lost, AccountID: 7, SessionID: 81, EndedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionRepositoryReconcileRejectsStillActiveLostFence(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	lost := OwnerFence{AccountID: 7, Token: ownerToken(0x72), Epoch: 5}
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM streamer_accounts WHERE id = ? FOR UPDATE")).
+		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(7)))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT owner_token = ? AND fencing_epoch = ? AND expires_at > UTC_TIMESTAMP(6) FROM runtime_account_owners WHERE account_id = ? FOR UPDATE")).
+		WithArgs(lost.Token[:], lost.Epoch, int64(7)).WillReturnRows(sqlmock.NewRows([]string{"lost_owner_active"}).AddRow(true))
+	mock.ExpectRollback()
+
+	err = NewSessionRepository(database).ReconcileSession(context.Background(), ReconcileSessionCommand{LostOwner: lost, AccountID: 7, SessionID: 81, EndedAt: time.Date(2026, 8, 26, 6, 0, 0, 0, time.UTC)})
+	if !errors.Is(err, ErrOwnershipConflict) {
+		t.Fatalf("ReconcileSession error = %v, want ownership conflict", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionRepositoryReconcileIsIdempotentAfterAnotherOwnerClosedExactSession(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	lost := OwnerFence{AccountID: 7, Token: ownerToken(0x74), Epoch: 7}
+	endedAt := time.Date(2026, 8, 26, 5, 59, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM streamer_accounts WHERE id = ? FOR UPDATE")).
+		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(7)))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT owner_token = ? AND fencing_epoch = ? AND expires_at > UTC_TIMESTAMP(6) FROM runtime_account_owners WHERE account_id = ? FOR UPDATE")).
+		WithArgs(lost.Token[:], lost.Epoch, int64(7)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT ended_at FROM live_sessions WHERE id = ? AND account_id = ? FOR UPDATE")).
+		WithArgs(int64(81), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"ended_at"}).AddRow(endedAt))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM runtime_active_session_guards WHERE account_id = ? AND live_session_id = ?")).
+		WithArgs(int64(7), int64(81)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	err = NewSessionRepository(database).ReconcileSession(context.Background(), ReconcileSessionCommand{LostOwner: lost, AccountID: 7, SessionID: 81, EndedAt: endedAt.Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionRepositoryReconcileRejectsCrossAccountCommandBeforeDatabase(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	lost := OwnerFence{AccountID: 8, Token: ownerToken(0x73), Epoch: 6}
+	err = NewSessionRepository(database).ReconcileSession(context.Background(), ReconcileSessionCommand{LostOwner: lost, AccountID: 7, SessionID: 81, EndedAt: time.Date(2026, 8, 26, 6, 0, 0, 0, time.UTC)})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("ReconcileSession error = %v, want invalid input", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

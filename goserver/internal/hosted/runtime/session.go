@@ -39,6 +39,13 @@ type EndSessionCommand struct {
 	EndedAt   time.Time
 }
 
+type ReconcileSessionCommand struct {
+	LostOwner OwnerFence
+	AccountID int64
+	SessionID int64
+	EndedAt   time.Time
+}
+
 type PersistTargetRoomCommand struct {
 	Owner     OwnerFence
 	RoomID    string
@@ -284,6 +291,66 @@ func (repository *SessionRepository) EndSession(ctx context.Context, command End
 	return nil
 }
 
+// ReconcileSession closes one exact execution after LostOwner has been
+// rejected by ownership fencing. It is intentionally narrower than the normal
+// owner-scoped EndSession path: the transaction locks the account owner row,
+// refuses to act while the lost fence is still active, and binds every session
+// mutation to the same account/session pair.
+func (repository *SessionRepository) ReconcileSession(ctx context.Context, command ReconcileSessionCommand) error {
+	if !repository.ready() || ctx == nil || !validOwnerFence(command.LostOwner) || command.LostOwner.AccountID != command.AccountID || command.SessionID <= 0 || command.EndedAt.IsZero() {
+		return ErrInvalidInput
+	}
+	command.EndedAt = normalizeDatabaseTime(command.EndedAt)
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ErrUnavailable
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			_ = transaction.Rollback()
+		}
+	}()
+	if err := lockOwnerAccount(ctx, transaction, command.AccountID); err != nil {
+		return err
+	}
+	var lostOwnerActive bool
+	err = transaction.QueryRowContext(ctx, "SELECT owner_token = ? AND fencing_epoch = ? AND expires_at > UTC_TIMESTAMP(6) FROM runtime_account_owners WHERE account_id = ? FOR UPDATE", command.LostOwner.Token[:], command.LostOwner.Epoch, command.AccountID).Scan(&lostOwnerActive)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return ErrUnavailable
+	}
+	if lostOwnerActive {
+		return ErrOwnershipConflict
+	}
+	var endedAt sql.NullTime
+	if err := transaction.QueryRowContext(ctx, "SELECT ended_at FROM live_sessions WHERE id = ? AND account_id = ? FOR UPDATE", command.SessionID, command.AccountID).Scan(&endedAt); err != nil {
+		return ErrUnavailable
+	}
+	result, err := transaction.ExecContext(ctx, "DELETE FROM runtime_active_session_guards WHERE account_id = ? AND live_session_id = ?", command.AccountID, command.SessionID)
+	if err != nil {
+		return ErrUnavailable
+	}
+	guardRows, err := result.RowsAffected()
+	if err != nil || guardRows < 0 || guardRows > 1 || !endedAt.Valid && guardRows != 1 {
+		return ErrUnavailable
+	}
+	if !endedAt.Valid {
+		result, err = transaction.ExecContext(ctx, "UPDATE live_sessions SET ended_at = ? WHERE id = ? AND account_id = ? AND ended_at IS NULL", command.EndedAt, command.SessionID, command.AccountID)
+		if err != nil || !oneAffected(result) {
+			return ErrUnavailable
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		finished = true
+		if repository.verifyReconciledSession(command) {
+			return nil
+		}
+		return ErrUnavailable
+	}
+	finished = true
+	return nil
+}
+
 type queryRower interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
@@ -341,6 +408,15 @@ func (repository *SessionRepository) verifyEndedSessionAfterCommit(command EndSe
 	ctx, cancel := repository.verificationContext()
 	defer cancel()
 	return repository.verifyEndedSession(ctx, repository.db, command)
+}
+
+func (repository *SessionRepository) verifyReconciledSession(command ReconcileSessionCommand) bool {
+	ctx, cancel := repository.verificationContext()
+	defer cancel()
+	var endedAt time.Time
+	var guardAbsent bool
+	err := repository.db.QueryRowContext(ctx, "SELECT ended_at, NOT EXISTS (SELECT 1 FROM runtime_active_session_guards WHERE account_id = ? AND live_session_id = ?) FROM live_sessions WHERE id = ? AND account_id = ? AND ended_at IS NOT NULL", command.AccountID, command.SessionID, command.SessionID, command.AccountID).Scan(&endedAt, &guardAbsent)
+	return err == nil && !endedAt.IsZero() && guardAbsent
 }
 
 func (repository *SessionRepository) verificationContext() (context.Context, context.CancelFunc) {
@@ -533,7 +609,7 @@ func (manager *Manager) startRoom(ctx context.Context, account *accountRuntime, 
 		return ErrUnavailable
 	}
 	active.admissionMu.Lock()
-	active.session, active.subscription = session, subscription
+	active.session, active.subscription, active.cleanupPhase = session, subscription, cleanupPhaseStarted
 	active.admissionMu.Unlock()
 	transitionOwned := broadcastSessionID > 0
 	if transitionOwned {
@@ -712,6 +788,14 @@ func (manager *Manager) handleProcessOwnershipConflict(account *accountRuntime, 
 }
 
 func (manager *Manager) closeCurrent(ctx context.Context, account *accountRuntime) error {
+	return manager.closeCurrentToPhase(ctx, account, cleanupPhaseFinalized, OwnerFence{})
+}
+
+func (manager *Manager) closeCurrentTerminal(ctx context.Context, account *accountRuntime, releaseFence OwnerFence) error {
+	return manager.closeCurrentToPhase(ctx, account, cleanupPhaseReleased, releaseFence)
+}
+
+func (manager *Manager) closeCurrentToPhase(ctx context.Context, account *accountRuntime, target durableCleanupPhase, releaseFence OwnerFence) error {
 	account.mu.Lock()
 	active := account.current
 	if active == nil {
@@ -721,10 +805,7 @@ func (manager *Manager) closeCurrent(ctx context.Context, account *accountRuntim
 	if active == nil {
 		return nil
 	}
-	if err := manager.stopActive(ctx, account, active); err != nil {
-		if errors.Is(err, ErrOwnershipConflict) {
-			manager.completeDrainedOwnershipConflict(account, active)
-		}
+	if err := manager.advanceSessionCleanup(ctx, account, active, target, releaseFence); err != nil {
 		return err
 	}
 	account.mu.Lock()
@@ -738,23 +819,72 @@ func (manager *Manager) closeCurrent(ctx context.Context, account *accountRuntim
 	return nil
 }
 
-func (manager *Manager) completeDrainedOwnershipConflict(account *accountRuntime, active *activeSession) {
-	account.mu.Lock()
-	defer account.mu.Unlock()
-	if account.stale || account.current != active {
-		return
+func (manager *Manager) advanceSessionCleanup(ctx context.Context, account *accountRuntime, active *activeSession, target durableCleanupPhase, releaseFence OwnerFence) error {
+	if ctx == nil || active == nil || target < cleanupPhaseStarted || target > cleanupPhaseReleased {
+		return ErrInvalidInput
 	}
-	account.stale = true
-	account.leases = make(map[uint64]LeaseKind)
-	account.cancelIdleLocked()
-	account.current = nil
-	account.owner = OwnerFence{}
-	account.reconcile = false
-	account.stale = false
-	account.degraded = false
+	active.admissionMu.Lock()
+	if active.cleanupPhase == 0 && active.session.ID > 0 {
+		active.cleanupPhase = cleanupPhaseStarted
+	}
+	if validOwnerFence(releaseFence) && (!active.needsReconcile || releaseFence != active.owner) {
+		active.cleanupFence = releaseFence
+		active.needsReconcile = false
+	}
+	phase := active.cleanupPhase
+	active.admissionMu.Unlock()
+	if phase < cleanupPhaseStarted {
+		return ErrUnavailable
+	}
+	if phase == cleanupPhaseStarted {
+		if err := manager.drainActive(ctx, active); err != nil {
+			return err
+		}
+		if err := manager.endActiveSession(ctx, account, active); err != nil {
+			return err
+		}
+		active.admissionMu.Lock()
+		active.cleanupPhase = cleanupPhaseEnded
+		phase = active.cleanupPhase
+		active.admissionMu.Unlock()
+	}
+	if target >= cleanupPhaseFinalized && phase == cleanupPhaseEnded {
+		if finalizer, ok := active.processor.(sessionPublisherFinalizer); ok {
+			finalizer.FinalizeSession()
+		}
+		active.admissionMu.Lock()
+		active.cleanupPhase = cleanupPhaseFinalized
+		phase = active.cleanupPhase
+		active.admissionMu.Unlock()
+	}
+	if target >= cleanupPhaseReleased && phase == cleanupPhaseFinalized {
+		active.admissionMu.Lock()
+		needsReconcile := active.needsReconcile
+		fence := active.cleanupFence
+		if !validOwnerFence(fence) {
+			fence = active.owner
+		}
+		active.admissionMu.Unlock()
+		if !needsReconcile {
+			if err := manager.releaseOwner(ctx, account, fence); err != nil {
+				return err
+			}
+		} else {
+			account.mu.Lock()
+			if account.owner == active.owner {
+				account.owner = OwnerFence{}
+				account.reconcile = false
+			}
+			account.mu.Unlock()
+		}
+		active.admissionMu.Lock()
+		active.cleanupPhase = cleanupPhaseReleased
+		active.admissionMu.Unlock()
+	}
+	return nil
 }
 
-func (manager *Manager) stopActive(ctx context.Context, account *accountRuntime, active *activeSession) error {
+func (manager *Manager) drainActive(ctx context.Context, active *activeSession) error {
 	active.admissionMu.Lock()
 	if !active.drained {
 		active.admitting = false
@@ -771,6 +901,9 @@ func (manager *Manager) stopActive(ctx context.Context, account *accountRuntime,
 		case <-active.subscription.Done():
 		default:
 			if err := active.subscription.Wait(ctx); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				return ErrUnavailable
 			}
 		}
@@ -819,24 +952,37 @@ func (manager *Manager) stopActive(ctx context.Context, account *accountRuntime,
 		active.processorClosed = true
 		active.admissionMu.Unlock()
 	}
+	return nil
+}
+
+func (manager *Manager) endActiveSession(ctx context.Context, account *accountRuntime, active *activeSession) error {
 	active.admissionMu.Lock()
 	if active.endedAt.IsZero() {
 		active.endedAt = normalizeDatabaseTime(manager.now())
 	}
 	endedAt := active.endedAt
+	needsReconcile := active.needsReconcile
+	owner := active.cleanupFence
+	if !validOwnerFence(owner) {
+		owner = active.owner
+	}
 	active.admissionMu.Unlock()
-	account.mu.Lock()
-	if account.stale {
-		account.mu.Unlock()
-		return ErrOwnershipConflict
+	if !needsReconcile {
+		err := manager.dependencies.Sessions.EndSession(ctx, EndSessionCommand{Owner: owner, AccountID: account.accountID, SessionID: active.session.ID, EndedAt: endedAt})
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, ErrOwnershipConflict) {
+			return err
+		}
+		active.admissionMu.Lock()
+		active.needsReconcile = true
+		active.cleanupFence = OwnerFence{}
+		active.admissionMu.Unlock()
 	}
-	owner := active.owner
-	account.mu.Unlock()
-	if err := manager.dependencies.Sessions.EndSession(ctx, EndSessionCommand{Owner: owner, AccountID: account.accountID, SessionID: active.session.ID, EndedAt: endedAt}); err != nil {
-		return err
+	reconciler, ok := manager.dependencies.Sessions.(lostOwnershipSessionStore)
+	if !ok {
+		return ErrUnavailable
 	}
-	if finalizer, ok := active.processor.(sessionPublisherFinalizer); ok {
-		finalizer.FinalizeSession()
-	}
-	return nil
+	return reconciler.ReconcileSession(ctx, ReconcileSessionCommand{LostOwner: active.owner, AccountID: account.accountID, SessionID: active.session.ID, EndedAt: endedAt})
 }
