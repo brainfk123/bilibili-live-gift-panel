@@ -15,6 +15,10 @@ var (
 	ErrClosed       = errors.New("roomwatcher: closed")
 )
 
+// MaxReplayLimit bounds one outbox page before either manager or repository
+// allocates a result slice from a caller-provided limit.
+const MaxReplayLimit = 256
+
 type ObservedState string
 
 const (
@@ -31,7 +35,11 @@ type Probe interface {
 // Repository persists shared room references and state transitions. Its MySQL
 // implementation belongs outside this package's state-machine core.
 type Repository interface {
-	SyncReferences(context.Context, []Reference) error
+	// SyncReferences atomically replaces the reference snapshot and persists
+	// final watcher transitions caused by removed rooms. Returned transitions
+	// are durable outbox receipts and are the only removal notifications Manager
+	// may publish.
+	SyncReferences(context.Context, []Reference, []Transition) ([]Transition, error)
 	// RecordTransition atomically records the candidate and returns its durable
 	// form with a monotonically increasing Sequence and fencing LeaseEpoch.
 	RecordTransition(context.Context, Transition) (Transition, error)
@@ -106,24 +114,30 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 	if manager.closed {
 		return ErrClosed
 	}
-	if err := manager.repository.SyncReferences(ctx, normalized); err != nil {
-		return err
-	}
 	now := manager.now()
+	terminal := make([]Transition, 0)
+	removedRooms := make([]string, 0)
 	for roomID, current := range manager.watchers {
 		if counts[roomID] != 0 {
 			continue
 		}
-		before := *current.machine
-		persisted, changed, err := manager.persistLocked(ctx, roomID, current.machine.close(now))
-		if err != nil {
-			*current.machine = before
-			return err
+		candidate := *current.machine
+		transition := candidate.close(now)
+		if transition.From != transition.To {
+			transition.RoomID = roomID
+			terminal = append(terminal, transition)
 		}
-		if changed {
-			manager.notifyLocked(persisted)
-		}
+		removedRooms = append(removedRooms, roomID)
+	}
+	persistedTerminal, err := manager.repository.SyncReferences(ctx, normalized, terminal)
+	if err != nil {
+		return err
+	}
+	for _, roomID := range removedRooms {
 		delete(manager.watchers, roomID)
+	}
+	for _, transition := range persistedTerminal {
+		manager.notifyLocked(transition)
 	}
 	rooms := make([]string, 0, len(counts))
 	for roomID := range counts {
@@ -159,7 +173,7 @@ func (manager *Manager) Transitions() <-chan Transition {
 // applied Sequence. It remains available after Close so a final notification
 // can be drained before the consumer releases its replay cursor.
 func (manager *Manager) ReplayTransitions(ctx context.Context, afterSequence uint64, limit int) ([]Transition, error) {
-	if manager == nil || ctx == nil || limit <= 0 {
+	if manager == nil || ctx == nil || limit <= 0 || limit > MaxReplayLimit {
 		return nil, ErrInvalidInput
 	}
 	return manager.repository.ReplayTransitions(ctx, afterSequence, limit)

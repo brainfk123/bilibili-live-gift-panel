@@ -34,7 +34,7 @@ func TestRepositorySyncReferencesLocksFormerAndNextRoomsBeforeReplacingSnapshot(
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	if err := repository.SyncReferences(context.Background(), []Reference{{AccountID: 2, RoomID: "8"}, {AccountID: 1, RoomID: "7"}}); err != nil {
+	if _, err := repository.SyncReferences(context.Background(), []Reference{{AccountID: 2, RoomID: "8"}, {AccountID: 1, RoomID: "7"}}, nil); err != nil {
 		t.Fatalf("SyncReferences() error = %v", err)
 	}
 	assertRepositoryExpectations(t, mock)
@@ -48,6 +48,8 @@ func TestRepositoryRecordTransitionCreatesBusinessBroadcastAndDurableOutbox(t *t
 	confirmedAt := time.Date(2026, 8, 25, 12, 0, 0, 123456000, time.UTC)
 
 	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT next_sequence FROM room_monitor_outbox_tail WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"next_sequence"}).AddRow(uint64(42)))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT state, grace_until, broadcast_session_id, lease_epoch FROM room_monitor_states WHERE room_id = ? FOR UPDATE")).
 		WithArgs("7").
 		WillReturnRows(sqlmock.NewRows([]string{"state", "grace_until", "broadcast_session_id", "lease_epoch"}).AddRow("offline", nil, nil, uint64(7)))
@@ -57,9 +59,12 @@ func TestRepositoryRecordTransitionCreatesBusinessBroadcastAndDurableOutbox(t *t
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE room_monitor_states SET state = ?, grace_until = NULL, broadcast_session_id = ?, lease_epoch = ?, updated_at = ? WHERE room_id = ? AND lease_epoch = ?")).
 		WithArgs(StateLive, int64(99), uint64(8), confirmedAt, "7", uint64(7)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO room_monitor_transitions (room_id, lease_epoch, from_state, to_state, confirmed_at, grace_until, new_broadcast) VALUES (?, ?, ?, ?, ?, ?, ?)")).
-		WithArgs("7", uint64(8), StateOffline, StateLive, confirmedAt, nil, true).
-		WillReturnResult(sqlmock.NewResult(42, 1))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO room_monitor_transitions (sequence, room_id, lease_epoch, from_state, to_state, confirmed_at, grace_until, new_broadcast) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")).
+		WithArgs(uint64(42), "7", uint64(8), StateOffline, StateLive, confirmedAt, nil, true).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE room_monitor_outbox_tail SET next_sequence = ? WHERE id = 1 AND next_sequence = ?")).
+		WithArgs(uint64(43), uint64(42)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	got, err := repository.RecordTransition(context.Background(), Transition{RoomID: "7", From: StateOffline, To: StateLive, ConfirmedAt: confirmedAt, NewBroadcast: true})
@@ -68,6 +73,50 @@ func TestRepositoryRecordTransitionCreatesBusinessBroadcastAndDurableOutbox(t *t
 	}
 	if got.Sequence != 42 || got.LeaseEpoch != 8 || !got.NewBroadcast || got.To != StateLive {
 		t.Fatalf("RecordTransition() = %#v, want durable live transition", got)
+	}
+	assertRepositoryExpectations(t, mock)
+}
+
+// This test fails if a last-reference removal can commit independently from
+// its terminal state/broadcast close and leave a recoverable active room.
+func TestRepositorySyncReferencesCommitsFinalReferenceRemovalAndTerminalTransitionTogether(t *testing.T) {
+	repository, mock, closeDB := newMockRepository(t)
+	defer closeDB()
+	confirmedAt := time.Date(2026, 8, 25, 12, 2, 0, 0, time.UTC)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT next_sequence FROM room_monitor_outbox_tail WHERE id = 1 FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"next_sequence"}).AddRow(uint64(42)))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT room_id FROM room_monitor_references FOR UPDATE")).
+		WillReturnRows(sqlmock.NewRows([]string{"room_id"}).AddRow("7"))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO room_monitor_states (room_id) VALUES (?) ON DUPLICATE KEY UPDATE room_id = VALUES(room_id)")).
+		WithArgs("7").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM room_monitor_references")).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT state, grace_until, broadcast_session_id, lease_epoch FROM room_monitor_states WHERE room_id = ? FOR UPDATE")).
+		WithArgs("7").
+		WillReturnRows(sqlmock.NewRows([]string{"state", "grace_until", "broadcast_session_id", "lease_epoch"}).AddRow("live", nil, int64(99), uint64(7)))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE broadcast_sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL")).
+		WithArgs(confirmedAt, int64(99)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE room_monitor_states SET state = ?, grace_until = NULL, broadcast_session_id = ?, lease_epoch = ?, updated_at = ? WHERE room_id = ? AND lease_epoch = ?")).
+		WithArgs(StateOffline, nil, uint64(8), confirmedAt, "7", uint64(7)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO room_monitor_transitions (sequence, room_id, lease_epoch, from_state, to_state, confirmed_at, grace_until, new_broadcast) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")).
+		WithArgs(uint64(42), "7", uint64(8), StateLive, StateOffline, confirmedAt, nil, false).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE room_monitor_outbox_tail SET next_sequence = ? WHERE id = 1 AND next_sequence = ?")).
+		WithArgs(uint64(43), uint64(42)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	got, err := repository.SyncReferences(context.Background(), nil, []Transition{{RoomID: "7", From: StateLive, To: StateOffline, ConfirmedAt: confirmedAt}})
+	if err != nil {
+		t.Fatalf("SyncReferences() error = %v", err)
+	}
+	if len(got) != 1 || got[0].Sequence != 42 || got[0].LeaseEpoch != 8 || got[0].To != StateOffline {
+		t.Fatalf("SyncReferences() durable terminal transitions = %#v, want fenced offline transition", got)
 	}
 	assertRepositoryExpectations(t, mock)
 }
@@ -103,6 +152,19 @@ func TestRepositoryReplayTransitionsReturnsDurableSequenceOrder(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].Sequence != 41 || got[1].Sequence != 42 || got[1].To != StateGrace {
 		t.Fatalf("ReplayTransitions() = %#v, want ordered durable transitions", got)
+	}
+	assertRepositoryExpectations(t, mock)
+}
+
+// This test fails if untrusted cursors can request an allocation beyond the
+// bounded replay contract before repository code validates the limit.
+func TestRepositoryReplayTransitionsRejectsOutOfRangeLimitBeforeQuery(t *testing.T) {
+	repository, mock, closeDB := newMockRepository(t)
+	defer closeDB()
+	for _, limit := range []int{0, MaxReplayLimit + 1, int(^uint(0) >> 1)} {
+		if _, err := repository.ReplayTransitions(context.Background(), 0, limit); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("ReplayTransitions(limit=%d) error = %v, want ErrInvalidInput", limit, err)
+		}
 	}
 	assertRepositoryExpectations(t, mock)
 }

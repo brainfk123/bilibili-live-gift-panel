@@ -29,7 +29,11 @@ CREATE TABLE IF NOT EXISTS room_monitor_states (
     CONSTRAINT chk_room_monitor_states_room_id CHECK (room_id REGEXP '^[1-9][0-9]{0,19}$'),
     CONSTRAINT chk_room_monitor_states_state CHECK (state IN ('offline', 'live', 'grace')),
     CONSTRAINT chk_room_monitor_states_epoch CHECK (lease_epoch >= 1),
-    CONSTRAINT chk_room_monitor_states_grace CHECK ((state = 'grace') = (grace_until IS NOT NULL))
+    CONSTRAINT chk_room_monitor_states_shape CHECK (
+        (state = 'offline' AND broadcast_session_id IS NULL AND grace_until IS NULL)
+        OR (state = 'live' AND broadcast_session_id IS NOT NULL AND grace_until IS NULL)
+        OR (state = 'grace' AND broadcast_session_id IS NOT NULL AND grace_until IS NOT NULL)
+    )
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS room_monitor_references (
@@ -45,7 +49,7 @@ CREATE TABLE IF NOT EXISTS room_monitor_references (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS room_monitor_transitions (
-    sequence BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    sequence BIGINT UNSIGNED NOT NULL,
     room_id VARCHAR(20) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     lease_epoch BIGINT UNSIGNED NOT NULL,
     from_state VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -63,6 +67,19 @@ CREATE TABLE IF NOT EXISTS room_monitor_transitions (
     CONSTRAINT chk_room_monitor_transitions_change CHECK (from_state <> to_state),
     CONSTRAINT chk_room_monitor_transitions_broadcast CHECK (new_broadcast IN (0, 1))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+
+-- Every transition takes this row first, then its room row. Serializing the
+-- allocator ensures a committed cursor never observes a later sequence while
+-- an earlier one remains uncommitted in another transaction.
+CREATE TABLE IF NOT EXISTS room_monitor_outbox_tail (
+    id TINYINT UNSIGNED NOT NULL,
+    next_sequence BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT chk_room_monitor_outbox_tail_id CHECK (id = 1),
+    CONSTRAINT chk_room_monitor_outbox_tail_sequence CHECK (next_sequence >= 1)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+
+INSERT IGNORE INTO room_monitor_outbox_tail (id, next_sequence) VALUES (1, 1);
 
 SET @room_monitor_live_broadcast_column_state := (
     SELECT CASE

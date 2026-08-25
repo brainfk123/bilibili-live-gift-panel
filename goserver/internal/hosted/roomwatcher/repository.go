@@ -42,18 +42,22 @@ var _ Repository = (*sqlRepository)(nil)
 // SyncReferences atomically replaces the enabled account-to-room snapshot.
 // State rows are retained after the final reference disappears so the terminal
 // transition can be recorded by Manager before this method's next snapshot.
-func (repository *sqlRepository) SyncReferences(ctx context.Context, references []Reference) error {
+func (repository *sqlRepository) SyncReferences(ctx context.Context, references []Reference, terminal []Transition) ([]Transition, error) {
 	if !repository.ready() || ctx == nil {
-		return ErrInvalidInput
+		return nil, ErrInvalidInput
 	}
 	normalized, _, err := normalizeReferences(references)
 	if err != nil {
-		return ErrInvalidInput
+		return nil, ErrInvalidInput
+	}
+	terminal, err = normalizeTerminalTransitions(terminal)
+	if err != nil {
+		return nil, ErrInvalidInput
 	}
 
 	transaction, err := repository.db.BeginTx(ctx, nil)
 	if err != nil {
-		return ErrRepositoryUnavailable
+		return nil, ErrRepositoryUnavailable
 	}
 	committed := false
 	defer func() {
@@ -62,24 +66,28 @@ func (repository *sqlRepository) SyncReferences(ctx context.Context, references 
 		}
 	}()
 
+	tail, err := lockOutboxTail(ctx, transaction, len(terminal) != 0)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := transaction.QueryContext(ctx, "SELECT DISTINCT room_id FROM room_monitor_references FOR UPDATE")
 	if err != nil {
-		return ErrRepositoryUnavailable
+		return nil, ErrRepositoryUnavailable
 	}
 	formerRooms := make([]string, 0)
 	for rows.Next() {
 		var roomID string
 		if err := rows.Scan(&roomID); err != nil {
 			_ = rows.Close()
-			return ErrRepositoryUnavailable
+			return nil, ErrRepositoryUnavailable
 		}
 		formerRooms = append(formerRooms, roomID)
 	}
 	if err := rows.Close(); err != nil {
-		return ErrRepositoryUnavailable
+		return nil, ErrRepositoryUnavailable
 	}
 	if err := rows.Err(); err != nil {
-		return ErrRepositoryUnavailable
+		return nil, ErrRepositoryUnavailable
 	}
 
 	rooms := make(map[string]struct{}, len(formerRooms)+len(normalized))
@@ -97,23 +105,34 @@ func (repository *sqlRepository) SyncReferences(ctx context.Context, references 
 	for _, roomID := range roomIDs {
 		result, err := transaction.ExecContext(ctx, "INSERT INTO room_monitor_states (room_id) VALUES (?) ON DUPLICATE KEY UPDATE room_id = VALUES(room_id)", roomID)
 		if err != nil || !zeroOneOrTwoRows(result) {
-			return ErrRepositoryUnavailable
+			return nil, ErrRepositoryUnavailable
 		}
 	}
 	if _, err := transaction.ExecContext(ctx, "DELETE FROM room_monitor_references"); err != nil {
-		return ErrRepositoryUnavailable
+		return nil, ErrRepositoryUnavailable
 	}
 	for _, reference := range normalized {
 		result, err := transaction.ExecContext(ctx, "INSERT INTO room_monitor_references (account_id, room_id) VALUES (?, ?)", reference.AccountID, reference.RoomID)
 		if err != nil || !oneRow(result) {
-			return ErrRepositoryUnavailable
+			return nil, ErrRepositoryUnavailable
 		}
 	}
+	persisted := make([]Transition, 0, len(terminal))
+	for _, transition := range terminal {
+		durable, err := repository.recordTransition(ctx, transaction, &tail, transition)
+		if err != nil {
+			return nil, err
+		}
+		persisted = append(persisted, durable)
+	}
+	if err := storeOutboxTail(ctx, transaction, tail); err != nil {
+		return nil, err
+	}
 	if err := transaction.Commit(); err != nil {
-		return ErrRepositoryUnavailable
+		return nil, ErrRepositoryUnavailable
 	}
 	committed = true
-	return nil
+	return persisted, nil
 }
 
 // RecordTransition applies one validated state-machine boundary, changes the
@@ -144,12 +163,33 @@ func (repository *sqlRepository) RecordTransition(ctx context.Context, transitio
 			_ = transaction.Rollback()
 		}
 	}()
+	tail, err := lockOutboxTail(ctx, transaction, true)
+	if err != nil {
+		return Transition{}, err
+	}
+	durable, err := repository.recordTransition(ctx, transaction, &tail, transition)
+	if err != nil {
+		return Transition{}, err
+	}
+	if err := storeOutboxTail(ctx, transaction, tail); err != nil {
+		return Transition{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return Transition{}, ErrRepositoryUnavailable
+	}
+	committed = true
+	return durable, nil
+}
 
+func (repository *sqlRepository) recordTransition(ctx context.Context, transaction *sql.Tx, tail *outboxTail, transition Transition) (Transition, error) {
+	if tail == nil || tail.nextSequence == 0 || tail.nextSequence == ^uint64(0) {
+		return Transition{}, ErrRepositoryUnavailable
+	}
 	var storedState string
 	var storedGrace sql.NullTime
 	var broadcastSessionID sql.NullInt64
 	var leaseEpoch uint64
-	err = transaction.QueryRowContext(ctx, "SELECT state, grace_until, broadcast_session_id, lease_epoch FROM room_monitor_states WHERE room_id = ? FOR UPDATE", roomID).Scan(&storedState, &storedGrace, &broadcastSessionID, &leaseEpoch)
+	err := transaction.QueryRowContext(ctx, "SELECT state, grace_until, broadcast_session_id, lease_epoch FROM room_monitor_states WHERE room_id = ? FOR UPDATE", transition.RoomID).Scan(&storedState, &storedGrace, &broadcastSessionID, &leaseEpoch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Transition{}, ErrTransitionConflict
 	}
@@ -171,7 +211,7 @@ func (repository *sqlRepository) RecordTransition(ctx context.Context, transitio
 	switch transition.To {
 	case StateLive:
 		if transition.From == StateOffline {
-			result, err := transaction.ExecContext(ctx, "INSERT INTO broadcast_sessions (room_id, started_at) VALUES (?, ?)", roomID, transition.ConfirmedAt)
+			result, err := transaction.ExecContext(ctx, "INSERT INTO broadcast_sessions (room_id, started_at) VALUES (?, ?)", transition.RoomID, transition.ConfirmedAt)
 			if err != nil || !oneRow(result) {
 				return Transition{}, ErrRepositoryUnavailable
 			}
@@ -202,26 +242,21 @@ func (repository *sqlRepository) RecordTransition(ctx context.Context, transitio
 		return Transition{}, ErrTransitionConflict
 	}
 
-	result, err := transaction.ExecContext(ctx, "UPDATE room_monitor_states SET state = ?, grace_until = NULL, broadcast_session_id = ?, lease_epoch = ?, updated_at = ? WHERE room_id = ? AND lease_epoch = ?", transition.To, nextBroadcast, nextEpoch, transition.ConfirmedAt, roomID, leaseEpoch)
+	result, err := transaction.ExecContext(ctx, "UPDATE room_monitor_states SET state = ?, grace_until = NULL, broadcast_session_id = ?, lease_epoch = ?, updated_at = ? WHERE room_id = ? AND lease_epoch = ?", transition.To, nextBroadcast, nextEpoch, transition.ConfirmedAt, transition.RoomID, leaseEpoch)
 	if transition.To == StateGrace {
-		result, err = transaction.ExecContext(ctx, "UPDATE room_monitor_states SET state = ?, grace_until = ?, broadcast_session_id = ?, lease_epoch = ?, updated_at = ? WHERE room_id = ? AND lease_epoch = ?", transition.To, nextGrace, nextBroadcast, nextEpoch, transition.ConfirmedAt, roomID, leaseEpoch)
+		result, err = transaction.ExecContext(ctx, "UPDATE room_monitor_states SET state = ?, grace_until = ?, broadcast_session_id = ?, lease_epoch = ?, updated_at = ? WHERE room_id = ? AND lease_epoch = ?", transition.To, nextGrace, nextBroadcast, nextEpoch, transition.ConfirmedAt, transition.RoomID, leaseEpoch)
 	}
 	if err != nil || !oneRow(result) {
 		return Transition{}, ErrTransitionConflict
 	}
-	result, err = transaction.ExecContext(ctx, "INSERT INTO room_monitor_transitions (room_id, lease_epoch, from_state, to_state, confirmed_at, grace_until, new_broadcast) VALUES (?, ?, ?, ?, ?, ?, ?)", roomID, nextEpoch, transition.From, transition.To, transition.ConfirmedAt, nextGrace, transition.NewBroadcast)
+	sequence := tail.nextSequence
+	result, err = transaction.ExecContext(ctx, "INSERT INTO room_monitor_transitions (sequence, room_id, lease_epoch, from_state, to_state, confirmed_at, grace_until, new_broadcast) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", sequence, transition.RoomID, nextEpoch, transition.From, transition.To, transition.ConfirmedAt, nextGrace, transition.NewBroadcast)
 	if err != nil || !oneRow(result) {
 		return Transition{}, ErrRepositoryUnavailable
 	}
-	sequence, err := result.LastInsertId()
-	if err != nil || sequence <= 0 {
-		return Transition{}, ErrRepositoryUnavailable
-	}
-	if err := transaction.Commit(); err != nil {
-		return Transition{}, ErrRepositoryUnavailable
-	}
-	committed = true
-	transition.Sequence = uint64(sequence)
+	tail.nextSequence++
+	tail.dirty = true
+	transition.Sequence = sequence
 	transition.LeaseEpoch = nextEpoch
 	return transition, nil
 }
@@ -229,7 +264,7 @@ func (repository *sqlRepository) RecordTransition(ctx context.Context, transitio
 // ReplayTransitions fetches the ordered, durable outbox after a consumer's
 // cursor. The caller chooses the bounded batch size.
 func (repository *sqlRepository) ReplayTransitions(ctx context.Context, afterSequence uint64, limit int) ([]Transition, error) {
-	if !repository.ready() || ctx == nil || limit <= 0 {
+	if !repository.ready() || ctx == nil || limit <= 0 || limit > MaxReplayLimit {
 		return nil, ErrInvalidInput
 	}
 	rows, err := repository.db.QueryContext(ctx, "SELECT sequence, room_id, lease_epoch, from_state, to_state, confirmed_at, grace_until, new_broadcast FROM room_monitor_transitions WHERE sequence > ? ORDER BY sequence LIMIT ?", afterSequence, limit)
@@ -311,6 +346,59 @@ func validTransition(transition Transition) bool {
 		return false
 	}
 	return transition.NewBroadcast == (transition.From == StateOffline && transition.To == StateLive)
+}
+
+func normalizeTerminalTransitions(transitions []Transition) ([]Transition, error) {
+	normalized := make([]Transition, len(transitions))
+	seen := make(map[string]struct{}, len(transitions))
+	for index, transition := range transitions {
+		if !validTransition(transition) || transition.To != StateOffline || transition.NewBroadcast {
+			return nil, ErrInvalidInput
+		}
+		roomID, err := canonicalRoomID(transition.RoomID)
+		if err != nil {
+			return nil, ErrInvalidInput
+		}
+		if _, exists := seen[roomID]; exists {
+			return nil, ErrInvalidInput
+		}
+		seen[roomID] = struct{}{}
+		transition.RoomID = roomID
+		transition.ConfirmedAt = databaseTime(transition.ConfirmedAt)
+		normalized[index] = transition
+	}
+	sort.Slice(normalized, func(left, right int) bool { return normalized[left].RoomID < normalized[right].RoomID })
+	return normalized, nil
+}
+
+type outboxTail struct {
+	nextSequence     uint64
+	expectedSequence uint64
+	dirty            bool
+}
+
+func lockOutboxTail(ctx context.Context, transaction *sql.Tx, needed bool) (outboxTail, error) {
+	if !needed {
+		return outboxTail{}, nil
+	}
+	var tail outboxTail
+	err := transaction.QueryRowContext(ctx, "SELECT next_sequence FROM room_monitor_outbox_tail WHERE id = 1 FOR UPDATE").Scan(&tail.nextSequence)
+	if errors.Is(err, sql.ErrNoRows) || err != nil || tail.nextSequence == 0 {
+		return outboxTail{}, ErrRepositoryUnavailable
+	}
+	tail.expectedSequence = tail.nextSequence
+	return tail, nil
+}
+
+func storeOutboxTail(ctx context.Context, transaction *sql.Tx, tail outboxTail) error {
+	if !tail.dirty {
+		return nil
+	}
+	result, err := transaction.ExecContext(ctx, "UPDATE room_monitor_outbox_tail SET next_sequence = ? WHERE id = 1 AND next_sequence = ?", tail.nextSequence, tail.expectedSequence)
+	if err != nil || !oneRow(result) {
+		return ErrRepositoryUnavailable
+	}
+	return nil
 }
 
 func validState(state State) bool {

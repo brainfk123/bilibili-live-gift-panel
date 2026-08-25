@@ -56,6 +56,27 @@ func TestManagerRemovesLastReferenceAfterPersistingTerminalState(t *testing.T) {
 	}
 }
 
+func TestManagerRemovesLastReferenceOnlyAfterAtomicRepositoryReceipt(t *testing.T) {
+	repository := &fakeRepository{}
+	manager, err := NewManager(fakeProbe{state: ObservedLive}, repository, Options{Now: func() time.Time { return time.Unix(100, 0).UTC() }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetReferences(context.Background(), []Reference{{AccountID: 1, RoomID: "7"}}); err != nil {
+		t.Fatal(err)
+	}
+	<-manager.Transitions()
+	if err := manager.SetReferences(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := repository.atomicTerminalsSnapshot(); len(got) != 1 || got[0].RoomID != "7" || got[0].From != StateLive || got[0].To != StateOffline {
+		t.Fatalf("atomic terminal candidates = %#v, want room 7 live -> offline", got)
+	}
+	if transition := awaitTransition(t, manager.Transitions()); transition.To != StateOffline || transition.Sequence != 2 {
+		t.Fatalf("terminal notification = %#v, want durable receipt sequence 2", transition)
+	}
+}
+
 func TestManagerRetriesInitialProbeAndPersistenceFailuresWithoutLeakingWatcher(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -209,6 +230,20 @@ func TestManagerCloseDrainsNotificationClosesStreamAndRejectsNewWrites(t *testin
 	}
 }
 
+func TestManagerRejectsReplayLimitBeforeRepositoryAllocation(t *testing.T) {
+	repository := &fakeRepository{}
+	manager, err := NewManager(fakeProbe{state: ObservedOffline}, repository, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ReplayTransitions(context.Background(), 0, int(^uint(0)>>1)); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("ReplayTransitions() error = %v, want ErrInvalidInput", err)
+	}
+	if repository.replayCalls() != 0 {
+		t.Fatalf("ReplayTransitions reached repository %d times, want 0", repository.replayCalls())
+	}
+}
+
 type fakeProbe struct {
 	state ObservedState
 	err   error
@@ -233,26 +268,38 @@ func (probe fakeProbe) Probe(context.Context, string) (ObservedState, error) {
 }
 
 type fakeRepository struct {
-	mu             sync.Mutex
-	references     []Reference
-	transitions    []Transition
-	firstRecordErr error
-	sequence       uint64
-	syncCount      int
+	mu              sync.Mutex
+	references      []Reference
+	transitions     []Transition
+	firstRecordErr  error
+	sequence        uint64
+	syncCount       int
+	atomicTerminals []Transition
+	replayCount     int
 }
 
-func (repository *fakeRepository) SyncReferences(_ context.Context, references []Reference) error {
+func (repository *fakeRepository) SyncReferences(_ context.Context, references []Reference, terminal []Transition) ([]Transition, error) {
 	repository.mu.Lock()
 	repository.references = append([]Reference(nil), references...)
 	repository.syncCount++
+	repository.atomicTerminals = append([]Transition(nil), terminal...)
+	persisted := make([]Transition, 0, len(terminal))
+	for _, transition := range terminal {
+		repository.sequence++
+		transition.Sequence = repository.sequence
+		transition.LeaseEpoch = 7
+		repository.transitions = append(repository.transitions, transition)
+		persisted = append(persisted, transition)
+	}
 	repository.mu.Unlock()
-	return nil
+	return persisted, nil
 }
 
 func (repository *fakeRepository) ReplayTransitions(_ context.Context, after uint64, limit int) ([]Transition, error) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
-	result := make([]Transition, 0, limit)
+	repository.replayCount++
+	result := make([]Transition, 0, min(limit, len(repository.transitions)))
 	for _, transition := range repository.transitions {
 		if transition.Sequence > after {
 			result = append(result, transition)
@@ -289,6 +336,18 @@ func (repository *fakeRepository) syncCalls() int {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
 	return repository.syncCount
+}
+
+func (repository *fakeRepository) atomicTerminalsSnapshot() []Transition {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	return append([]Transition(nil), repository.atomicTerminals...)
+}
+
+func (repository *fakeRepository) replayCalls() int {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	return repository.replayCount
 }
 
 func integer(value int) string { return strconv.Itoa(value) }

@@ -57,8 +57,12 @@ func TestRoomMonitorMigrationSeparatesBroadcastFromRuntimeSession(t *testing.T) 
 			"CREATE TABLE IF NOT EXISTS room_monitor_references",
 			"CREATE TABLE IF NOT EXISTS broadcast_sessions",
 			"CREATE TABLE IF NOT EXISTS room_monitor_transitions",
+			"CREATE TABLE IF NOT EXISTS room_monitor_outbox_tail",
 			"ALTER TABLE live_sessions ADD COLUMN broadcast_session_id",
 			"UNIQUE KEY uq_broadcast_sessions_open_room (open_room_id)",
+			"(state = 'offline' AND broadcast_session_id IS NULL AND grace_until IS NULL)",
+			"(state = 'live' AND broadcast_session_id IS NOT NULL AND grace_until IS NULL)",
+			"(state = 'grace' AND broadcast_session_id IS NOT NULL AND grace_until IS NOT NULL)",
 		} {
 			if !strings.Contains(sql, fragment) {
 				t.Fatalf("0013 migration missing %q", fragment)
