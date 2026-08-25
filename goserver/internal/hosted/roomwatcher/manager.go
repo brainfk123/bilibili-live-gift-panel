@@ -40,6 +40,9 @@ type Repository interface {
 	// are durable outbox receipts and are the only removal notifications Manager
 	// may publish.
 	SyncReferences(context.Context, []Reference, []Transition) ([]Transition, error)
+	// LoadRecoverable exposes persisted live/grace watchers to startup
+	// composition without requiring a concrete SQL repository type.
+	LoadRecoverable(context.Context) ([]RecoverableRoom, error)
 	// RecordTransition atomically records the candidate and returns its durable
 	// form with a monotonically increasing Sequence and fencing LeaseEpoch.
 	RecordTransition(context.Context, Transition) (Transition, error)

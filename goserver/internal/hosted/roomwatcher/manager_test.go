@@ -27,6 +27,20 @@ func TestManagerDeduplicatesCanonicalRoomReferences(t *testing.T) {
 	}
 }
 
+// This test fails to compile until the public repository port exposes startup
+// recovery without consumers depending on the unexported SQL implementation.
+func TestRepositoryInterfaceExposesRecoverableLoader(t *testing.T) {
+	want := []RecoverableRoom{{RoomID: "7", State: StateLive, LeaseEpoch: 8, References: []Reference{{AccountID: 1, RoomID: "7"}}}}
+	var repository Repository = &fakeRepository{recoverable: want}
+	got, err := repository.LoadRecoverable(context.Background())
+	if err != nil {
+		t.Fatalf("LoadRecoverable() error = %v", err)
+	}
+	if len(got) != 1 || got[0].RoomID != "7" || got[0].State != StateLive || got[0].LeaseEpoch != 8 || len(got[0].References) != 1 {
+		t.Fatalf("LoadRecoverable() = %#v, want %#v", got, want)
+	}
+}
+
 func TestManagerRemovesLastReferenceAfterPersistingTerminalState(t *testing.T) {
 	repository := &fakeRepository{}
 	manager, err := NewManager(fakeProbe{state: ObservedLive}, repository, Options{Now: func() time.Time { return time.Unix(100, 0).UTC() }})
@@ -276,6 +290,7 @@ type fakeRepository struct {
 	syncCount       int
 	atomicTerminals []Transition
 	replayCount     int
+	recoverable     []RecoverableRoom
 }
 
 func (repository *fakeRepository) SyncReferences(_ context.Context, references []Reference, terminal []Transition) ([]Transition, error) {
@@ -309,6 +324,12 @@ func (repository *fakeRepository) ReplayTransitions(_ context.Context, after uin
 		}
 	}
 	return result, nil
+}
+
+func (repository *fakeRepository) LoadRecoverable(context.Context) ([]RecoverableRoom, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	return append([]RecoverableRoom(nil), repository.recoverable...), nil
 }
 
 func (repository *fakeRepository) RecordTransition(_ context.Context, transition Transition) (Transition, error) {
