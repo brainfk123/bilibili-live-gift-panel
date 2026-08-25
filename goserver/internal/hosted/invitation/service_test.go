@@ -102,6 +102,39 @@ func TestQuotaAdjustmentIgnoresObsoleteTOTPRenewal(t *testing.T) {
 	}
 }
 
+func TestAdministratorInventoryLoadsHistoricalAlphanumericCodes(t *testing.T) {
+	now := time.Date(2026, 8, 25, 13, 0, 0, 0, time.UTC)
+	keys := fixedInvitationKeys(t)
+	cipher, err := keys.Seal("invitation_code_ciphertext", []byte("Ab01Z9x8"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service, err := NewService(database, keys, &fakeIntentSource{}, ServiceOptions{Now: fixedNow(now), Administrator: &invitationSensitiveAuthorizer{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery("SELECT id,code_ciphertext.*FROM invitations").WithArgs(51).WillReturnRows(
+		sqlmock.NewRows([]string{"id", "cipher", "hint", "status", "created", "expires", "used"}).
+			AddRow(1, cipher, "Z9x8", StatusActive, now, now.Add(7*24*time.Hour), 0).
+			AddRow(2, nil, "old4", StatusUsed, now.Add(-time.Hour), now, 52),
+	)
+	page, err := service.ListAdministrator(context.Background(), "admin", AdminInvitationQuery{})
+	if err != nil {
+		t.Fatalf("ListAdministrator() error = %v", err)
+	}
+	if len(page.Invitations) != 2 || page.Invitations[0].Code != "Ab01Z9x8" || page.Invitations[1].CodeHint != "****old4" {
+		t.Fatalf("page = %#v", page)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAdministratorInventoryDecryptsOnlyActiveCodesAndSupportsPermanentBatch(t *testing.T) {
 	now := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
 	keys := fixedInvitationKeys(t)

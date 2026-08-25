@@ -111,7 +111,7 @@ func (service *Service) ListAdministrator(ctx context.Context, token string, que
 		}
 		if item.Status == StatusActive {
 			plain, err := service.keys.Open("invitation_code_ciphertext", cipher)
-			if err != nil || !validInvitationCode(string(plain)) {
+			if err != nil || !validStoredInvitationCode(string(plain)) {
 				return AdminInvitationPage{}, ErrUnavailable
 			}
 			item.Code = string(plain)
@@ -128,13 +128,12 @@ func (service *Service) ListAdministrator(ctx context.Context, token string, que
 	return page, rows.Err()
 }
 
-func validInvitationCode(value string) bool {
+func validStoredInvitationCode(value string) bool {
 	if len(value) != invitationCodeLength {
 		return false
 	}
-	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 	for _, character := range value {
-		if !strings.ContainsRune(alphabet, character) {
+		if character < '0' || character > '9' && character < 'A' || character > 'Z' && character < 'a' || character > 'z' {
 			return false
 		}
 	}
