@@ -53,6 +53,49 @@ func TestManagerAppliesRoomTransitionsAcrossGraceAndOffline(t *testing.T) {
 	}
 }
 
+func TestGraceDropsNewGiftsAndRecoveredLiveRestoresAdmission(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
+	sources := newOrderedRoomSources(log, map[string]string{"42": "42"})
+	processed := make(chan string, 2)
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: sources}, Options{Process: func(_ context.Context, _ OwnerFence, _ Session, event roomsource.Event) error {
+		processed <- event.ID
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}
+	graceUntil := time.Unix(800, 0)
+	grace := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateLive, To: roomwatcher.StateGrace, ConfirmedAt: time.Unix(200, 0), GraceUntil: &graceUntil, Sequence: 2, LeaseEpoch: 2}
+	recovered := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateGrace, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(300, 0), Sequence: 3, LeaseEpoch: 3}
+	if err := manager.ApplyRoomTransition(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	subscription := sources.subscription(t, 0)
+	subscription.Emit(roomsource.Event{ID: "live-before-grace"})
+	if got := receiveRuntimeSignal(t, processed, "live gift"); got != "live-before-grace" {
+		t.Fatalf("live processing = %q", got)
+	}
+	if err := manager.ApplyRoomTransition(context.Background(), grace); err != nil {
+		t.Fatal(err)
+	}
+	subscription.Emit(roomsource.Event{ID: "grace-gift"})
+	select {
+	case got := <-processed:
+		t.Fatalf("grace processed gift %q", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := manager.ApplyRoomTransition(context.Background(), recovered); err != nil {
+		t.Fatal(err)
+	}
+	subscription.Emit(roomsource.Event{ID: "recovered-live-gift"})
+	if got := receiveRuntimeSignal(t, processed, "recovered live gift"); got != "recovered-live-gift" {
+		t.Fatalf("recovered processing = %q", got)
+	}
+}
+
 func TestManagerSetRoomPersistsSelectionWithoutReplacingLiveExecution(t *testing.T) {
 	log := &operationLog{}
 	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}

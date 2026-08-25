@@ -637,8 +637,15 @@ func (manager *Manager) ApplyRoomTransition(ctx context.Context, transition room
 			}
 			manager.roomTransitions[transition.RoomID] = room
 		}
+		if err := manager.setTransitionAdmission(room.accounts, transition.RoomID, true); err != nil {
+			return err
+		}
 	case roomwatcher.StateGrace:
-		// The business broadcast and each execution remain live through grace.
+		// Keep the source/session open for a recovered broadcast, but fence new
+		// gifts immediately. Events admitted before this gate closes still drain.
+		if err := manager.setTransitionAdmission(room.accounts, transition.RoomID, false); err != nil {
+			return err
+		}
 	case roomwatcher.StateOffline:
 		for _, accountID := range room.accounts {
 			if err := manager.stopTransitionAccount(ctx, accountID, transition.RoomID); err != nil {
@@ -692,6 +699,29 @@ func containsTransitionAccount(accounts []int64, accountID int64) bool {
 		}
 	}
 	return false
+}
+
+func (manager *Manager) setTransitionAdmission(accounts []int64, roomID string, admitting bool) error {
+	for _, accountID := range accounts {
+		account, err := manager.accountExisting(accountID)
+		if err != nil {
+			return ErrUnavailable
+		}
+		account.mu.Lock()
+		active := account.current
+		account.mu.Unlock()
+		if active == nil || active.session.RoomID != roomID {
+			return ErrUnavailable
+		}
+		active.admissionMu.Lock()
+		if active.eventsClosed || active.drained {
+			active.admissionMu.Unlock()
+			return ErrUnavailable
+		}
+		active.admitting = admitting
+		active.admissionMu.Unlock()
+	}
+	return nil
 }
 
 func (manager *Manager) startTransitionAccount(ctx context.Context, accountID int64, roomID string, broadcastSessionID int64) error {

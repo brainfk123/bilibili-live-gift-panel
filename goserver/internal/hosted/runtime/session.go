@@ -721,7 +721,7 @@ func (manager *Manager) completeDrainedOwnershipConflict(account *accountRuntime
 
 func (manager *Manager) stopActive(ctx context.Context, account *accountRuntime, active *activeSession) error {
 	active.admissionMu.Lock()
-	if active.admitting && !active.drained {
+	if !active.drained {
 		active.admitting = false
 		active.subscription.Cancel()
 	}
