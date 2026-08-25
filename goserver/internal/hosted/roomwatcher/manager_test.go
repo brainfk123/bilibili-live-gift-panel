@@ -90,7 +90,7 @@ func TestManagerRetriesInitialProbeAndPersistenceFailuresWithoutLeakingWatcher(t
 	}
 }
 
-func TestManagerPublishesEveryDurableTransitionWithoutBlockingReferenceUpdates(t *testing.T) {
+func TestManagerNotifiesAndReplaysEveryDurableTransitionWithPausedConsumer(t *testing.T) {
 	repository := &fakeRepository{}
 	manager, err := NewManager(fakeProbe{state: ObservedLive}, repository, Options{})
 	if err != nil {
@@ -110,15 +110,102 @@ func TestManagerPublishesEveryDurableTransitionWithoutBlockingReferenceUpdates(t
 	case <-time.After(time.Second):
 		t.Fatal("SetReferences blocked while its transition consumer was paused")
 	}
-	for sequence := uint64(1); sequence <= 129; sequence++ {
-		select {
-		case transition := <-manager.Transitions():
-			if transition.Sequence != sequence || transition.LeaseEpoch != 7 {
-				t.Fatalf("published durable transition = %#v, want sequence %d and lease epoch 7", transition, sequence)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("durable transition %d was not published", sequence)
+	select {
+	case transition := <-manager.Transitions():
+		if transition.Sequence != 1 || transition.LeaseEpoch != 7 {
+			t.Fatalf("first notification = %#v, want durable sequence 1", transition)
 		}
+	case <-time.After(time.Second):
+		t.Fatal("paused consumer did not receive a bounded replay notification")
+	}
+	replayed, err := manager.ReplayTransitions(context.Background(), 0, 129)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replayed) != 129 {
+		t.Fatalf("replayed transitions = %d, want 129", len(replayed))
+	}
+	for index, transition := range replayed {
+		if want := uint64(index + 1); transition.Sequence != want || transition.LeaseEpoch != 7 {
+			t.Fatalf("replayed transition %d = %#v, want durable sequence %d", index, transition, want)
+		}
+	}
+}
+
+func TestManagerKeepsNotificationOrderDuringForcedInterleavedReferenceUpdates(t *testing.T) {
+	notifyStarted := make(chan struct{})
+	releaseNotify := make(chan struct{})
+	secondNotifyStarted := make(chan struct{})
+	releaseSecondNotify := make(chan struct{})
+	repository := &fakeRepository{}
+	manager, err := NewManager(fakeProbe{state: ObservedLive}, repository, Options{beforeNotify: func(transition Transition) {
+		if transition.Sequence == 1 {
+			close(notifyStarted)
+			<-releaseNotify
+		}
+		if transition.Sequence == 2 {
+			close(secondNotifyStarted)
+			<-releaseSecondNotify
+		}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- manager.SetReferences(context.Background(), []Reference{{AccountID: 1, RoomID: "1"}})
+	}()
+	<-notifyStarted
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- manager.SetReferences(context.Background(), []Reference{{AccountID: 1, RoomID: "1"}, {AccountID: 2, RoomID: "2"}})
+	}()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second SetReferences completed before sequence 1 notification: %v", err)
+	default:
+	}
+	close(releaseNotify)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first SetReferences: %v", err)
+	}
+	if transition := awaitTransition(t, manager.Transitions()); transition.Sequence != 1 {
+		t.Fatalf("first notification sequence = %d, want 1", transition.Sequence)
+	}
+	<-secondNotifyStarted
+	close(releaseSecondNotify)
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second SetReferences: %v", err)
+	}
+	if transition := awaitTransition(t, manager.Transitions()); transition.Sequence != 2 {
+		t.Fatalf("second notification sequence = %d, want 2", transition.Sequence)
+	}
+}
+
+func TestManagerCloseDrainsNotificationClosesStreamAndRejectsNewWrites(t *testing.T) {
+	repository := &fakeRepository{}
+	manager, err := NewManager(fakeProbe{state: ObservedLive}, repository, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetReferences(context.Background(), []Reference{{AccountID: 1, RoomID: "7"}}); err != nil {
+		t.Fatal(err)
+	}
+	manager.Close()
+	if err := manager.Wait(context.Background()); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if transition, ok := <-manager.Transitions(); !ok || transition.Sequence != 1 {
+		t.Fatalf("drained transition/ok = %#v/%v, want sequence 1/true", transition, ok)
+	}
+	if _, ok := <-manager.Transitions(); ok {
+		t.Fatal("transition stream remained open after buffered notification drained")
+	}
+	if err := manager.SetReferences(context.Background(), nil); !errors.Is(err, ErrClosed) {
+		t.Fatalf("SetReferences after Close error = %v, want ErrClosed", err)
+	}
+	if repository.syncCalls() != 1 {
+		t.Fatalf("SyncReferences calls after Close = %d, want 1", repository.syncCalls())
 	}
 }
 
@@ -151,13 +238,30 @@ type fakeRepository struct {
 	transitions    []Transition
 	firstRecordErr error
 	sequence       uint64
+	syncCount      int
 }
 
 func (repository *fakeRepository) SyncReferences(_ context.Context, references []Reference) error {
 	repository.mu.Lock()
 	repository.references = append([]Reference(nil), references...)
+	repository.syncCount++
 	repository.mu.Unlock()
 	return nil
+}
+
+func (repository *fakeRepository) ReplayTransitions(_ context.Context, after uint64, limit int) ([]Transition, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	result := make([]Transition, 0, limit)
+	for _, transition := range repository.transitions {
+		if transition.Sequence > after {
+			result = append(result, transition)
+			if len(result) == limit {
+				break
+			}
+		}
+	}
+	return result, nil
 }
 
 func (repository *fakeRepository) RecordTransition(_ context.Context, transition Transition) (Transition, error) {
@@ -181,10 +285,27 @@ func (repository *fakeRepository) referencesSnapshot() []Reference {
 	return append([]Reference(nil), repository.references...)
 }
 
+func (repository *fakeRepository) syncCalls() int {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	return repository.syncCount
+}
+
 func integer(value int) string { return strconv.Itoa(value) }
 
 func (repository *fakeRepository) transitionsSnapshot() []Transition {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
 	return append([]Transition(nil), repository.transitions...)
+}
+
+func awaitTransition(t *testing.T, transitions <-chan Transition) Transition {
+	t.Helper()
+	select {
+	case transition := <-transitions:
+		return transition
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transition notification")
+		return Transition{}
+	}
 }

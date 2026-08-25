@@ -12,6 +12,7 @@ import (
 
 var (
 	ErrInvalidInput = errors.New("roomwatcher: invalid input")
+	ErrClosed       = errors.New("roomwatcher: closed")
 )
 
 type ObservedState string
@@ -34,6 +35,10 @@ type Repository interface {
 	// RecordTransition atomically records the candidate and returns its durable
 	// form with a monotonically increasing Sequence and fencing LeaseEpoch.
 	RecordTransition(context.Context, Transition) (Transition, error)
+	// ReplayTransitions returns the durable outbox strictly after afterSequence,
+	// in increasing Sequence order. Notifications are bounded wake-ups only;
+	// consumers resume losslessly from this repository cursor.
+	ReplayTransitions(context.Context, uint64, int) ([]Transition, error)
 }
 
 // Reference is one enabled account's use of a canonical room.
@@ -45,7 +50,8 @@ type Reference struct {
 type Options struct {
 	Now func() time.Time
 
-	gracePeriod time.Duration
+	gracePeriod  time.Duration
+	beforeNotify func(Transition)
 }
 
 type Manager struct {
@@ -54,10 +60,12 @@ type Manager struct {
 	now        func() time.Time
 	grace      time.Duration
 
-	mu          sync.Mutex
-	watchers    map[string]*watcher
-	transitions chan Transition
-	publish     chan Transition
+	mu           sync.Mutex
+	watchers     map[string]*watcher
+	transitions  chan Transition
+	done         chan struct{}
+	closed       bool
+	beforeNotify func(Transition)
 }
 
 type watcher struct {
@@ -80,9 +88,8 @@ func NewManager(probe Probe, repository Repository, options Options) (*Manager, 
 	}
 	manager := &Manager{
 		probe: probe, repository: repository, now: options.Now, grace: options.gracePeriod,
-		watchers: make(map[string]*watcher), transitions: make(chan Transition), publish: make(chan Transition),
+		watchers: make(map[string]*watcher), transitions: make(chan Transition, 1), done: make(chan struct{}), beforeNotify: options.beforeNotify,
 	}
-	go manager.forwardTransitions()
 	return manager, nil
 }
 
@@ -94,14 +101,11 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 	if err != nil {
 		return err
 	}
-	published := make([]Transition, 0)
 	manager.mu.Lock()
-	defer func() {
-		manager.mu.Unlock()
-		for _, transition := range published {
-			manager.publish <- transition
-		}
-	}()
+	defer manager.mu.Unlock()
+	if manager.closed {
+		return ErrClosed
+	}
 	if err := manager.repository.SyncReferences(ctx, normalized); err != nil {
 		return err
 	}
@@ -117,7 +121,7 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 			return err
 		}
 		if changed {
-			published = append(published, persisted)
+			manager.notifyLocked(persisted)
 		}
 		delete(manager.watchers, roomID)
 	}
@@ -134,7 +138,9 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 			if err != nil {
 				return err
 			}
-			published = append(published, persisted...)
+			for _, transition := range persisted {
+				manager.notifyLocked(transition)
+			}
 			manager.watchers[roomID] = current
 		}
 		current.refs = counts[roomID]
@@ -147,6 +153,43 @@ func (manager *Manager) Transitions() <-chan Transition {
 		return nil
 	}
 	return manager.transitions
+}
+
+// ReplayTransitions resumes the durable outbox after the caller's last
+// applied Sequence. It remains available after Close so a final notification
+// can be drained before the consumer releases its replay cursor.
+func (manager *Manager) ReplayTransitions(ctx context.Context, afterSequence uint64, limit int) ([]Transition, error) {
+	if manager == nil || ctx == nil || limit <= 0 {
+		return nil, ErrInvalidInput
+	}
+	return manager.repository.ReplayTransitions(ctx, afterSequence, limit)
+}
+
+// Close rejects future writes, retains one already-buffered wake-up for a
+// final outbox replay, then closes Transitions after that wake-up is drained.
+func (manager *Manager) Close() {
+	if manager == nil {
+		return
+	}
+	manager.mu.Lock()
+	if !manager.closed {
+		manager.closed = true
+		close(manager.transitions)
+		close(manager.done)
+	}
+	manager.mu.Unlock()
+}
+
+func (manager *Manager) Wait(ctx context.Context) error {
+	if manager == nil || ctx == nil {
+		return ErrInvalidInput
+	}
+	select {
+	case <-manager.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (manager *Manager) probeLocked(ctx context.Context, roomID string, current *watcher) ([]Transition, error) {
@@ -184,24 +227,18 @@ func (manager *Manager) persistLocked(ctx context.Context, roomID string, transi
 	return persisted, true, nil
 }
 
-// forwardTransitions is an unbounded FIFO boundary between durable writes and
-// callers. It accepts every persisted transition before waiting for a slow
-// consumer, so SetReferences never sends to an output channel while holding
-// the manager lock and never silently drops an acknowledged transition.
-func (manager *Manager) forwardTransitions() {
-	queue := make([]Transition, 0)
-	for {
-		var output chan Transition
-		var next Transition
-		if len(queue) > 0 {
-			output, next = manager.transitions, queue[0]
-		}
-		select {
-		case transition := <-manager.publish:
-			queue = append(queue, transition)
-		case output <- next:
-			queue = queue[1:]
-		}
+// notifyLocked is intentionally bounded and non-blocking. The notification
+// is sent while manager.mu serializes RecordTransition calls, so every
+// delivered notification is strictly ordered by durable Sequence. A full
+// buffer coalesces later notifications; consumers recover them through the
+// repository outbox rather than an unbounded in-memory queue.
+func (manager *Manager) notifyLocked(transition Transition) {
+	if manager.beforeNotify != nil {
+		manager.beforeNotify(transition)
+	}
+	select {
+	case manager.transitions <- transition:
+	default:
 	}
 }
 
