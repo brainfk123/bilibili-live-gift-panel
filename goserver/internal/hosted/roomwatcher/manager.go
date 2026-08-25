@@ -31,7 +31,9 @@ type Probe interface {
 // implementation belongs outside this package's state-machine core.
 type Repository interface {
 	SyncReferences(context.Context, []Reference) error
-	RecordTransition(context.Context, Transition) error
+	// RecordTransition atomically records the candidate and returns its durable
+	// form with a monotonically increasing Sequence and fencing LeaseEpoch.
+	RecordTransition(context.Context, Transition) (Transition, error)
 }
 
 // Reference is one enabled account's use of a canonical room.
@@ -41,8 +43,9 @@ type Reference struct {
 }
 
 type Options struct {
-	Now         func() time.Time
-	GracePeriod time.Duration
+	Now func() time.Time
+
+	gracePeriod time.Duration
 }
 
 type Manager struct {
@@ -54,6 +57,7 @@ type Manager struct {
 	mu          sync.Mutex
 	watchers    map[string]*watcher
 	transitions chan Transition
+	publish     chan Transition
 }
 
 type watcher struct {
@@ -68,16 +72,18 @@ func NewManager(probe Probe, repository Repository, options Options) (*Manager, 
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	if options.GracePeriod == 0 {
-		options.GracePeriod = 10 * time.Minute
+	if options.gracePeriod == 0 {
+		options.gracePeriod = GracePeriod
 	}
-	if options.GracePeriod <= 0 {
+	if options.gracePeriod <= 0 {
 		return nil, ErrInvalidInput
 	}
-	return &Manager{
-		probe: probe, repository: repository, now: options.Now, grace: options.GracePeriod,
-		watchers: make(map[string]*watcher), transitions: make(chan Transition, 128),
-	}, nil
+	manager := &Manager{
+		probe: probe, repository: repository, now: options.Now, grace: options.gracePeriod,
+		watchers: make(map[string]*watcher), transitions: make(chan Transition), publish: make(chan Transition),
+	}
+	go manager.forwardTransitions()
+	return manager, nil
 }
 
 func (manager *Manager) SetReferences(ctx context.Context, references []Reference) error {
@@ -88,8 +94,14 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 	if err != nil {
 		return err
 	}
+	published := make([]Transition, 0)
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
+	defer func() {
+		manager.mu.Unlock()
+		for _, transition := range published {
+			manager.publish <- transition
+		}
+	}()
 	if err := manager.repository.SyncReferences(ctx, normalized); err != nil {
 		return err
 	}
@@ -98,8 +110,14 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 		if counts[roomID] != 0 {
 			continue
 		}
-		if err := manager.persistLocked(ctx, roomID, current.machine.close(now)); err != nil {
+		before := *current.machine
+		persisted, changed, err := manager.persistLocked(ctx, roomID, current.machine.close(now))
+		if err != nil {
+			*current.machine = before
 			return err
+		}
+		if changed {
+			published = append(published, persisted)
 		}
 		delete(manager.watchers, roomID)
 	}
@@ -111,11 +129,13 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 	for _, roomID := range rooms {
 		current := manager.watchers[roomID]
 		if current == nil {
-			current = &watcher{machine: NewStateMachine(manager.grace)}
-			manager.watchers[roomID] = current
-			if err := manager.probeLocked(ctx, roomID, current); err != nil {
+			current = &watcher{machine: newStateMachine(manager.grace)}
+			persisted, err := manager.probeLocked(ctx, roomID, current)
+			if err != nil {
 				return err
 			}
+			published = append(published, persisted...)
+			manager.watchers[roomID] = current
 		}
 		current.refs = counts[roomID]
 	}
@@ -129,28 +149,60 @@ func (manager *Manager) Transitions() <-chan Transition {
 	return manager.transitions
 }
 
-func (manager *Manager) probeLocked(ctx context.Context, roomID string, current *watcher) error {
+func (manager *Manager) probeLocked(ctx context.Context, roomID string, current *watcher) ([]Transition, error) {
 	observed, err := manager.probe.Probe(ctx, roomID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	state, err := observedState(observed)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return manager.persistLocked(ctx, roomID, current.machine.Observe(state, manager.now()))
+	transitions := current.machine.Observe(state, manager.now())
+	persisted := make([]Transition, 0, len(transitions))
+	for _, transition := range transitions {
+		durable, changed, err := manager.persistLocked(ctx, roomID, transition)
+		if err != nil {
+			return nil, err
+		}
+		if changed {
+			persisted = append(persisted, durable)
+		}
+	}
+	return persisted, nil
 }
 
-func (manager *Manager) persistLocked(ctx context.Context, roomID string, transition Transition) error {
+func (manager *Manager) persistLocked(ctx context.Context, roomID string, transition Transition) (Transition, bool, error) {
 	if transition.From == transition.To {
-		return nil
+		return Transition{}, false, nil
 	}
 	transition.RoomID = roomID
-	if err := manager.repository.RecordTransition(ctx, transition); err != nil {
-		return err
+	persisted, err := manager.repository.RecordTransition(ctx, transition)
+	if err != nil {
+		return Transition{}, false, err
 	}
-	manager.transitions <- transition
-	return nil
+	return persisted, true, nil
+}
+
+// forwardTransitions is an unbounded FIFO boundary between durable writes and
+// callers. It accepts every persisted transition before waiting for a slow
+// consumer, so SetReferences never sends to an output channel while holding
+// the manager lock and never silently drops an acknowledged transition.
+func (manager *Manager) forwardTransitions() {
+	queue := make([]Transition, 0)
+	for {
+		var output chan Transition
+		var next Transition
+		if len(queue) > 0 {
+			output, next = manager.transitions, queue[0]
+		}
+		select {
+		case transition := <-manager.publish:
+			queue = append(queue, transition)
+		case output <- next:
+			queue = queue[1:]
+		}
+	}
 }
 
 func normalizeReferences(references []Reference) ([]Reference, map[string]int, error) {

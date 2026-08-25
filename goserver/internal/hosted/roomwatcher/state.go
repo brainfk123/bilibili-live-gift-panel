@@ -8,6 +8,8 @@ const (
 	StateOffline State = "offline"
 	StateLive    State = "live"
 	StateGrace   State = "grace"
+
+	GracePeriod = 10 * time.Minute
 )
 
 // Transition is the durable, room-scoped boundary emitted by a watcher. A
@@ -19,6 +21,10 @@ type Transition struct {
 	ConfirmedAt  time.Time
 	GraceUntil   *time.Time
 	NewBroadcast bool
+	// Sequence and LeaseEpoch are assigned transactionally by Repository.
+	// Consumers use the returned pair to fence stale transition delivery.
+	Sequence   uint64
+	LeaseEpoch uint64
 }
 
 // StateMachine is deliberately independent of probes, repositories, and
@@ -29,14 +35,34 @@ type StateMachine struct {
 	graceUntil  time.Time
 }
 
-func NewStateMachine(gracePeriod time.Duration) *StateMachine {
+// NewStateMachine always uses the product-mandated ten-minute grace period.
+// Tests inside this package may use newStateMachine for a shorter clock seam.
+func NewStateMachine() *StateMachine {
+	return newStateMachine(GracePeriod)
+}
+
+func newStateMachine(gracePeriod time.Duration) *StateMachine {
 	return &StateMachine{state: StateOffline, gracePeriod: gracePeriod}
 }
 
-func (machine *StateMachine) Observe(observed State, confirmedAt time.Time) Transition {
+// Observe returns every durable boundary caused by one observation. A delayed
+// live result first closes an expired grace period and only then opens a new
+// broadcast, so callers cannot accidentally merge distinct broadcasts.
+func (machine *StateMachine) Observe(observed State, confirmedAt time.Time) []Transition {
 	if machine == nil {
-		return Transition{}
+		return nil
 	}
+	transitions := make([]Transition, 0, 2)
+	if machine.state == StateGrace && !confirmedAt.Before(machine.graceUntil) {
+		transitions = append(transitions, machine.Advance(confirmedAt))
+	}
+	if transition, changed := machine.observeOne(observed, confirmedAt); changed {
+		transitions = append(transitions, transition)
+	}
+	return transitions
+}
+
+func (machine *StateMachine) observeOne(observed State, confirmedAt time.Time) (Transition, bool) {
 	from := machine.state
 	transition := Transition{From: from, To: from, ConfirmedAt: confirmedAt}
 	switch {
@@ -44,19 +70,20 @@ func (machine *StateMachine) Observe(observed State, confirmedAt time.Time) Tran
 		machine.state = StateLive
 		transition.To = StateLive
 		transition.NewBroadcast = true
+		return transition, true
 	case from == StateLive && observed == StateOffline:
 		machine.state = StateGrace
 		machine.graceUntil = confirmedAt.Add(machine.gracePeriod)
 		transition.To = StateGrace
 		transition.GraceUntil = timePointer(machine.graceUntil)
+		return transition, true
 	case from == StateGrace && observed == StateLive:
 		machine.state = StateLive
 		machine.graceUntil = time.Time{}
 		transition.To = StateLive
-	case from == StateGrace:
-		transition.GraceUntil = timePointer(machine.graceUntil)
+		return transition, true
 	}
-	return transition
+	return Transition{}, false
 }
 
 func (machine *StateMachine) Advance(now time.Time) Transition {
@@ -71,9 +98,11 @@ func (machine *StateMachine) Advance(now time.Time) Transition {
 		transition.GraceUntil = timePointer(machine.graceUntil)
 		return transition
 	}
+	endedAt := machine.graceUntil
 	machine.state = StateOffline
 	machine.graceUntil = time.Time{}
 	transition.To = StateOffline
+	transition.ConfirmedAt = endedAt
 	return transition
 }
 

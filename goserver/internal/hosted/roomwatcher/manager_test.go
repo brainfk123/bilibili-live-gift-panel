@@ -2,6 +2,8 @@ package roomwatcher
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -36,10 +38,10 @@ func TestManagerRemovesLastReferenceAfterPersistingTerminalState(t *testing.T) {
 	}
 	select {
 	case transition := <-manager.Transitions():
-		if transition.RoomID != "7" || transition.From != StateOffline || transition.To != StateLive || !transition.NewBroadcast {
+		if transition.RoomID != "7" || transition.From != StateOffline || transition.To != StateLive || !transition.NewBroadcast || transition.Sequence != 1 || transition.LeaseEpoch != 7 {
 			t.Fatalf("published transition = %#v, want opening live transition for room 7", transition)
 		}
-	default:
+	case <-time.After(time.Second):
 		t.Fatal("opening live transition was not published")
 	}
 	if err := manager.SetReferences(context.Background(), nil); err != nil {
@@ -54,9 +56,89 @@ func TestManagerRemovesLastReferenceAfterPersistingTerminalState(t *testing.T) {
 	}
 }
 
+func TestManagerRetriesInitialProbeAndPersistenceFailuresWithoutLeakingWatcher(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		probeErr   error
+		recordErr  error
+		wantProbes int
+	}{
+		{name: "probe", probeErr: errors.New("probe failed"), wantProbes: 2},
+		{name: "persistence", recordErr: errors.New("record failed"), wantProbes: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			probe := &retryProbe{state: ObservedLive, firstErr: test.probeErr}
+			repository := &fakeRepository{firstRecordErr: test.recordErr}
+			manager, err := NewManager(probe, repository, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			references := []Reference{{AccountID: 1, RoomID: "7"}}
+			if err := manager.SetReferences(context.Background(), references); err == nil {
+				t.Fatal("first SetReferences error = nil, want probe or persistence failure")
+			}
+			if got := len(manager.watchers); got != 0 {
+				t.Fatalf("watchers after failed initial admission = %d, want 0", got)
+			}
+			if err := manager.SetReferences(context.Background(), references); err != nil {
+				t.Fatalf("retry SetReferences: %v", err)
+			}
+			if probe.calls != test.wantProbes || len(manager.watchers) != 1 {
+				t.Fatalf("probe calls/watchers = %d/%d, want %d/1", probe.calls, len(manager.watchers), test.wantProbes)
+			}
+		})
+	}
+}
+
+func TestManagerPublishesEveryDurableTransitionWithoutBlockingReferenceUpdates(t *testing.T) {
+	repository := &fakeRepository{}
+	manager, err := NewManager(fakeProbe{state: ObservedLive}, repository, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	references := make([]Reference, 129)
+	for index := range references {
+		references[index] = Reference{AccountID: int64(index + 1), RoomID: integer(index + 1)}
+	}
+	done := make(chan error, 1)
+	go func() { done <- manager.SetReferences(context.Background(), references) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SetReferences: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SetReferences blocked while its transition consumer was paused")
+	}
+	for sequence := uint64(1); sequence <= 129; sequence++ {
+		select {
+		case transition := <-manager.Transitions():
+			if transition.Sequence != sequence || transition.LeaseEpoch != 7 {
+				t.Fatalf("published durable transition = %#v, want sequence %d and lease epoch 7", transition, sequence)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("durable transition %d was not published", sequence)
+		}
+	}
+}
+
 type fakeProbe struct {
 	state ObservedState
 	err   error
+}
+
+type retryProbe struct {
+	state    ObservedState
+	firstErr error
+	calls    int
+}
+
+func (probe *retryProbe) Probe(context.Context, string) (ObservedState, error) {
+	probe.calls++
+	if probe.calls == 1 && probe.firstErr != nil {
+		return "", probe.firstErr
+	}
+	return probe.state, nil
 }
 
 func (probe fakeProbe) Probe(context.Context, string) (ObservedState, error) {
@@ -64,9 +146,11 @@ func (probe fakeProbe) Probe(context.Context, string) (ObservedState, error) {
 }
 
 type fakeRepository struct {
-	mu          sync.Mutex
-	references  []Reference
-	transitions []Transition
+	mu             sync.Mutex
+	references     []Reference
+	transitions    []Transition
+	firstRecordErr error
+	sequence       uint64
 }
 
 func (repository *fakeRepository) SyncReferences(_ context.Context, references []Reference) error {
@@ -76,11 +160,19 @@ func (repository *fakeRepository) SyncReferences(_ context.Context, references [
 	return nil
 }
 
-func (repository *fakeRepository) RecordTransition(_ context.Context, transition Transition) error {
+func (repository *fakeRepository) RecordTransition(_ context.Context, transition Transition) (Transition, error) {
 	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	if repository.firstRecordErr != nil {
+		err := repository.firstRecordErr
+		repository.firstRecordErr = nil
+		return Transition{}, err
+	}
+	repository.sequence++
+	transition.Sequence = repository.sequence
+	transition.LeaseEpoch = 7
 	repository.transitions = append(repository.transitions, transition)
-	repository.mu.Unlock()
-	return nil
+	return transition, nil
 }
 
 func (repository *fakeRepository) referencesSnapshot() []Reference {
@@ -88,6 +180,8 @@ func (repository *fakeRepository) referencesSnapshot() []Reference {
 	defer repository.mu.Unlock()
 	return append([]Reference(nil), repository.references...)
 }
+
+func integer(value int) string { return strconv.Itoa(value) }
 
 func (repository *fakeRepository) transitionsSnapshot() []Transition {
 	repository.mu.Lock()
