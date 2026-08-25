@@ -42,6 +42,33 @@ func TestStoreDatabaseReturnsBorrowedPoolOwnedByStore(t *testing.T) {
 	}
 }
 
+func TestRoomMonitorMigrationSeparatesBroadcastFromRuntimeSession(t *testing.T) {
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range migrations {
+		if item.version != "0013_room_monitoring_and_broadcast_sessions" {
+			continue
+		}
+		sql := strings.Join(strings.Fields(string(item.contents)), " ")
+		for _, fragment := range []string{
+			"CREATE TABLE IF NOT EXISTS room_monitor_states",
+			"CREATE TABLE IF NOT EXISTS room_monitor_references",
+			"CREATE TABLE IF NOT EXISTS broadcast_sessions",
+			"CREATE TABLE IF NOT EXISTS room_monitor_transitions",
+			"ALTER TABLE live_sessions ADD COLUMN broadcast_session_id",
+			"UNIQUE KEY uq_broadcast_sessions_open_room (open_room_id)",
+		} {
+			if !strings.Contains(sql, fragment) {
+				t.Fatalf("0013 migration missing %q", fragment)
+			}
+		}
+		return
+	}
+	t.Fatal("production migrations do not include 0013_room_monitoring_and_broadcast_sessions")
+}
+
 func TestReadMigrationsSortsFilesByName(t *testing.T) {
 	files := fstest.MapFS{
 		"migrations/0002_second.sql": {Data: []byte("SELECT 2")},
@@ -87,8 +114,8 @@ func TestProductionAdminEmailIdentityMigrationMakesLegacyUIDNullable(t *testing.
 		"0008_runtime_dedupe_cleanup_index": "7d69109e076d085e0988e0c196df8480d1dcd8a03e60495f6302e382ea94e064",
 		"0012_admin_session_inventory":      "e707f3edc1a7d49ffd4a636ad0e14bc579599d194aef37e5c9fe7ee19afa9a03",
 	}
-	if len(migrations) != 12 {
-		t.Fatalf("migration count = %d, want 12", len(migrations))
+	if len(migrations) != 13 {
+		t.Fatalf("migration count = %d, want 13", len(migrations))
 	}
 	var emailIdentity migration
 	for _, item := range migrations {
