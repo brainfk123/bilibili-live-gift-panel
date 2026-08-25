@@ -407,7 +407,7 @@ func (processor *Processor) Close(ctx context.Context) error {
 	case <-drained:
 		processor.cancelOnce.Do(processor.cancel)
 		processor.retryWorkers.Wait()
-		processor.clearPublishedSession()
+		processor.clearViewerState()
 		return nil
 	case <-ctx.Done():
 		processor.cancelOnce.Do(processor.cancel)
@@ -429,14 +429,24 @@ func (processor *Processor) Close(ctx context.Context) error {
 		processor.syncStatusLocked()
 		processor.signalDrainedLocked()
 		processor.mu.Unlock()
-		processor.clearPublishedSession()
+		processor.clearViewerState()
 		return ctx.Err()
 	}
 }
 
+// FinalizeSession clears the externally visible snapshot only after the
+// manager has committed EndSession. Close deliberately drains and freezes the
+// processor without removing that last snapshot, so a failed end transaction
+// cannot make OBS observe a session that is still durable as live.
+func (processor *Processor) FinalizeSession() { processor.clearPublishedSession() }
+
+func (processor *Processor) clearViewerState() {
+	processor.viewers.Clear()
+}
+
 func (processor *Processor) clearPublishedSession() {
 	processor.clearOnce.Do(func() {
-		processor.viewers.Clear()
+		processor.clearViewerState()
 		if cleaner, ok := processor.publisher.(sessionSnapshotCleaner); ok {
 			cleaner.Clear(processor.binding.Owner.AccountID, processor.binding.Session.ID)
 		}

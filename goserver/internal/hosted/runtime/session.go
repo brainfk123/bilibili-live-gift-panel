@@ -800,5 +800,8 @@ func (manager *Manager) stopActive(ctx context.Context, account *accountRuntime,
 	if err := manager.dependencies.Sessions.EndSession(ctx, EndSessionCommand{Owner: owner, AccountID: account.accountID, SessionID: active.session.ID, EndedAt: endedAt}); err != nil {
 		return err
 	}
+	if finalizer, ok := active.processor.(sessionPublisherFinalizer); ok {
+		finalizer.FinalizeSession()
+	}
 	return nil
 }

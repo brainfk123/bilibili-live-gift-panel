@@ -99,6 +99,69 @@ func TestManagerRejectsStaleRoomTransitionEpochAndIgnoresDuplicateSequence(t *te
 	}
 }
 
+func TestOfflineTransitionCleansAccountsStartedBeforeLaterLiveFailure(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, accounts: map[string][]int64{"42": {7, 8}}, broadcasts: map[string]int64{"42": 99}, startFailures: map[int64]int{8: 1}}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}
+	offline := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateLive, To: roomwatcher.StateOffline, ConfirmedAt: time.Unix(101, 0), Sequence: 2, LeaseEpoch: 2}
+	if err := manager.ApplyRoomTransition(context.Background(), live); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("live error = %v, want unavailable", err)
+	}
+	if err := manager.ApplyRoomTransition(context.Background(), offline); err != nil {
+		t.Fatalf("offline cleanup = %v", err)
+	}
+	if !containsOperation(log.snapshot(), "end:1") {
+		t.Fatalf("offline did not end the successful account: %v", log.snapshot())
+	}
+}
+
+func TestOfflineTransitionRetriesReleaseAfterExecutionEnded(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, releaseFailures: 1, logOwnership: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}
+	offline := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateLive, To: roomwatcher.StateOffline, ConfirmedAt: time.Unix(101, 0), Sequence: 2, LeaseEpoch: 2}
+	if err := manager.ApplyRoomTransition(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ApplyRoomTransition(context.Background(), offline); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("first offline = %v, want unavailable", err)
+	}
+	if err := manager.ApplyRoomTransition(context.Background(), offline); err != nil {
+		t.Fatalf("offline release retry = %v", err)
+	}
+	if got := log.snapshot(); !containsOrderedOperations(got, []string{"end:1", "release"}) {
+		t.Fatalf("end/release order = %v", got)
+	}
+}
+
+func TestShutdownAndApplyRoomTransitionSerializeClosedState(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}
+	applied := make(chan error, 1)
+	go func() { applied <- manager.ApplyRoomTransition(context.Background(), live) }()
+	if err := manager.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-applied; err != nil && !errors.Is(err, ErrClosed) {
+		t.Fatalf("concurrent ApplyRoomTransition = %v", err)
+	}
+}
+
 func TestSetRoomPersistsSelectionWithoutStartingRuntime(t *testing.T) {
 	log := &operationLog{}
 	sessions := &orderedSessions{enabled: true, log: log}
@@ -906,8 +969,9 @@ type orderedSessions struct {
 
 type transitionSessions struct {
 	*orderedSessions
-	accounts   map[string][]int64
-	broadcasts map[string]int64
+	accounts      map[string][]int64
+	broadcasts    map[string]int64
+	startFailures map[int64]int
 }
 
 func (sessions *transitionSessions) EnabledAccountsForRoom(_ context.Context, roomID string) ([]int64, error) {
@@ -923,6 +987,13 @@ func (sessions *transitionSessions) OpenBroadcastSession(_ context.Context, room
 }
 
 func (sessions *transitionSessions) StartSession(ctx context.Context, command StartSessionCommand) (Session, error) {
+	sessions.mu.Lock()
+	if sessions.startFailures[command.AccountID] > 0 {
+		sessions.startFailures[command.AccountID]--
+		sessions.mu.Unlock()
+		return Session{}, ErrUnavailable
+	}
+	sessions.mu.Unlock()
 	session, err := sessions.orderedSessions.StartSession(ctx, command)
 	session.BroadcastSessionID = command.BroadcastSessionID
 	return session, err

@@ -75,6 +75,8 @@ type RoomSources interface {
 
 type ProcessEvent func(context.Context, OwnerFence, Session, roomsource.Event) error
 
+type sessionPublisherFinalizer interface{ FinalizeSession() }
+
 type Dependencies struct {
 	Sessions      SessionStore
 	Configuration ConfigurationRepository
@@ -141,26 +143,27 @@ type roomTransitionState struct {
 }
 
 type accountRuntime struct {
-	manager        *Manager
-	accountID      int64
-	opMu           sync.Mutex
-	mu             sync.Mutex
-	leases         map[uint64]LeaseKind
-	disabled       bool
-	shutting       bool
-	degraded       bool
-	sourceDegraded bool
-	current        *activeSession
-	idleTimer      Timer
-	idleCancel     chan struct{}
-	idleDone       chan struct{}
-	closeDone      chan struct{}
-	stale          bool
-	staleDone      chan struct{}
-	staleRelease   OwnerFence
-	owner          OwnerFence
-	reconcile      bool
-	operation      bool
+	manager           *Manager
+	accountID         int64
+	opMu              sync.Mutex
+	mu                sync.Mutex
+	leases            map[uint64]LeaseKind
+	disabled          bool
+	shutting          bool
+	degraded          bool
+	sourceDegraded    bool
+	current           *activeSession
+	idleTimer         Timer
+	idleCancel        chan struct{}
+	idleDone          chan struct{}
+	closeDone         chan struct{}
+	stale             bool
+	staleDone         chan struct{}
+	staleRelease      OwnerFence
+	owner             OwnerFence
+	reconcile         bool
+	operation         bool
+	transitionRelease OwnerFence
 }
 
 type activeSession struct {
@@ -597,7 +600,10 @@ func (manager *Manager) ApplyRoomTransition(ctx context.Context, transition room
 	}
 	manager.transitionMu.Lock()
 	defer manager.transitionMu.Unlock()
-	if manager.closed {
+	manager.mu.Lock()
+	closed := manager.closed
+	manager.mu.Unlock()
+	if closed {
 		return ErrClosed
 	}
 	if transition.Sequence <= manager.lastSequence {
@@ -626,8 +632,11 @@ func (manager *Manager) ApplyRoomTransition(ctx context.Context, transition room
 			if err := manager.startTransitionAccount(ctx, accountID, transition.RoomID, broadcastSessionID); err != nil {
 				return err
 			}
+			if !containsTransitionAccount(room.accounts, accountID) {
+				room.accounts = append(room.accounts, accountID)
+			}
+			manager.roomTransitions[transition.RoomID] = room
 		}
-		room.accounts = accounts
 	case roomwatcher.StateGrace:
 		// The business broadcast and each execution remain live through grace.
 	case roomwatcher.StateOffline:
@@ -674,6 +683,15 @@ func normalizeTransitionAccounts(accountIDs []int64) ([]int64, error) {
 	}
 	sort.Slice(accounts, func(left, right int) bool { return accounts[left] < accounts[right] })
 	return accounts, nil
+}
+
+func containsTransitionAccount(accounts []int64, accountID int64) bool {
+	for _, current := range accounts {
+		if current == accountID {
+			return true
+		}
+	}
+	return false
 }
 
 func (manager *Manager) startTransitionAccount(ctx context.Context, accountID int64, roomID string, broadcastSessionID int64) error {
@@ -741,22 +759,34 @@ func (manager *Manager) stopTransitionAccount(ctx context.Context, accountID int
 	defer account.opMu.Unlock()
 	account.mu.Lock()
 	active := account.current
+	pendingRelease := account.transitionRelease
 	account.mu.Unlock()
-	if active == nil || active.session.RoomID != roomID {
+	if active != nil {
+		if active.session.RoomID != roomID {
+			return nil
+		}
+		if err := manager.closeCurrent(ctx, account); err != nil {
+			if errors.Is(err, ErrOwnershipConflict) {
+				return ErrUnavailable
+			}
+			return err
+		}
+		account.mu.Lock()
+		pendingRelease = account.owner
+		account.transitionRelease = pendingRelease
+		account.mu.Unlock()
+	}
+	if !validOwnerFence(pendingRelease) {
 		return nil
 	}
-	if err := manager.closeCurrent(ctx, account); err != nil {
-		if errors.Is(err, ErrOwnershipConflict) {
-			return ErrUnavailable
-		}
-		return err
-	}
-	account.mu.Lock()
-	fence := account.owner
-	account.mu.Unlock()
-	if err := manager.releaseOwner(ctx, account, fence); err != nil {
+	if err := manager.releaseOwner(ctx, account, pendingRelease); err != nil {
 		return ErrUnavailable
 	}
+	account.mu.Lock()
+	if account.transitionRelease == pendingRelease {
+		account.transitionRelease = OwnerFence{}
+	}
+	account.mu.Unlock()
 	return nil
 }
 

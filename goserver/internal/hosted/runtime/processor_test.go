@@ -809,6 +809,10 @@ func TestProcessorCloseClearsSessionViewerSnapshotsFromPublisherAndQueuedSubscri
 	if err := processor.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if snapshot, ok := publisher.Latest(7); !ok || snapshot.LiveSessionID != 81 || len(snapshot.Viewers) != 1 {
+		t.Fatalf("Close cleared publisher before lifecycle finalization: %#v, %v", snapshot, ok)
+	}
+	processor.FinalizeSession()
 	if rows := processor.Viewers(); len(rows) != 0 {
 		t.Fatalf("processor retained viewer PII after close: %#v", rows)
 	}
