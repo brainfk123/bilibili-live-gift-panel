@@ -7,12 +7,12 @@ import type {
 import type { HostedView } from '../shell';
 import { runAdminAction } from './ui/async-action';
 import { mountAdminNotice } from './ui/notice';
+import { createAdminState } from './ui/state';
 
 type SettingsAPI = Pick<HostedAPI,
   | 'adminSettings'
   | 'adminSessions'
   | 'revokeAdminSession'
-  | 'revokeOtherAdminSessions'
   | 'adminLoginEvents'
   | 'adminEvents'
   | 'adminDiagnostics'
@@ -34,11 +34,12 @@ export function mountAdminSettingsView(
   let sessions: AdminDeviceSession[] = [];
   let loginEvents: AdminLoginEvent[] = [];
 
-  host.className = 'hosted-admin-settings';
+  host.classList.add('hosted-admin-settings');
 
   const feedback = document.createElement('div');
   feedback.className = 'hosted-admin-feedback';
   const notice = mountAdminNotice(feedback);
+  const loading = createAdminState(document, 'loading', '正在加载系统设置…');
 
   const profile = document.createElement('section');
   profile.className = 'hosted-admin-card hosted-admin-settings-profile';
@@ -75,7 +76,8 @@ export function mountAdminSettingsView(
   });
   footer.append(logout);
 
-  host.append(feedback, profile, devices, logins, advanced, footer);
+  for (const section of [profile, devices, logins, advanced]) section.hidden = true;
+  host.append(feedback, loading, profile, devices, logins, advanced, footer);
 
   const renderProfile = (): void => {
     if (!settings) return;
@@ -101,23 +103,6 @@ export function mountAdminSettingsView(
       }
       sessions = sessions.filter((session) => session.id !== id);
       notice.show('success', '设备已退出');
-      renderDevices();
-    });
-  };
-
-  const revokeOthers = (button: HTMLButtonElement): void => {
-    const count = sessions.filter((session) => !session.current).length;
-    if (count === 0 || !globalThis.confirm(`确认退出其他 ${count} 台设备？`)) return;
-    void runAdminAction(button, { idle: '退出其他设备', busy: '正在退出…' }, async () => {
-      await api.revokeOtherAdminSessions();
-    }).then((outcome) => {
-      if (disposed) return;
-      if (outcome === 'failure') {
-        notice.show('error', '退出其他设备失败，请重试', () => revokeOthers(button));
-        return;
-      }
-      sessions = sessions.filter((session) => session.current);
-      notice.show('success', `已退出其他 ${count} 台设备`);
       renderDevices();
     });
   };
@@ -159,17 +144,7 @@ export function mountAdminSettingsView(
       list.append(row);
     }
 
-    const actions = document.createElement('div');
-    actions.className = 'hosted-admin-device-actions';
-    if (sessions.some((session) => !session.current)) {
-      const revoke = document.createElement('button');
-      revoke.type = 'button';
-      revoke.dataset.variant = 'danger-outline';
-      revoke.textContent = '退出其他设备';
-      revoke.addEventListener('click', () => revokeOthers(revoke));
-      actions.append(revoke);
-    }
-    devices.replaceChildren(headingRow, list, actions);
+    devices.replaceChildren(headingRow, list);
   };
 
   const renderLogins = (): void => {
@@ -186,6 +161,11 @@ export function mountAdminSettingsView(
       meta.textContent = `${localTime(event.occurredAt)} · ${event.deviceLabel} · ${event.clientNetwork}`;
       row.append(result, meta);
       list.append(row);
+    }
+    if (!loginEvents.length) {
+      const empty = document.createElement('p');
+      empty.textContent = '暂无登录记录';
+      list.append(empty);
     }
     logins.replaceChildren(heading, list);
   };
@@ -227,14 +207,22 @@ export function mountAdminSettingsView(
   const load = (): void => {
     const current = ++loadGeneration;
     notice.clear();
+    loading.hidden = false;
+    for (const section of [profile, devices, logins, advanced]) section.hidden = true;
     void Promise.all([api.adminSettings(), api.adminSessions(), api.adminLoginEvents()]).then((values) => {
       if (disposed || current !== loadGeneration) return;
       [settings, sessions, loginEvents] = values;
+      loading.hidden = true;
+      for (const section of [profile, devices, logins, advanced]) section.hidden = false;
       renderProfile();
       renderDevices();
       renderLogins();
     }).catch(() => {
-      if (!disposed && current === loadGeneration) notice.show('error', '系统设置加载失败，请重试', load);
+      if (!disposed && current === loadGeneration) {
+        loading.hidden = true;
+        for (const section of [profile, devices, logins, advanced]) section.hidden = true;
+        notice.show('error', '系统设置加载失败，请重试', load);
+      }
     });
   };
   load();
@@ -243,6 +231,7 @@ export function mountAdminSettingsView(
     dispose() {
       disposed = true;
       loadGeneration += 1;
+      host.classList.remove('hosted-admin-settings');
       notice.dispose();
       advancedNotice.dispose();
       advancedContent.replaceChildren();

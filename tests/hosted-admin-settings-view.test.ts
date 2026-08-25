@@ -18,6 +18,18 @@ class Element {
   offsetWidth = 100;
   attributes = new Map<string, string>();
   listeners = new Map<string, Listener>();
+  classList = {
+    add: (...tokens: string[]) => {
+      const classes = new Set(this.className.split(/\s+/).filter(Boolean));
+      for (const token of tokens) classes.add(token);
+      this.className = [...classes].join(' ');
+    },
+    remove: (...tokens: string[]) => {
+      const removed = new Set(tokens);
+      this.className = this.className.split(/\s+/).filter((token) => token && !removed.has(token)).join(' ');
+    },
+    contains: (token: string) => this.className.split(/\s+/).includes(token),
+  };
 
   constructor(readonly tagName: string, readonly ownerDocument: DocumentLike) {}
 
@@ -103,6 +115,20 @@ function fixture(overrides: Record<string, unknown> = {}) {
 }
 
 describe('administrator settings view', () => {
+  it('preserves the shared content container class for layout and removes only its page class on dispose', async () => {
+    const document: DocumentLike = { createElement: (tag) => new Element(tag, document) };
+    const root = new Element('main', document);
+    root.className = 'hosted-admin-content';
+
+    const view = mountAdminSettingsView(root as unknown as HTMLElement, fixture() as never, vi.fn());
+    await flush();
+
+    expect(root.classList.contains('hosted-admin-content')).toBe(true);
+    expect(root.classList.contains('hosted-admin-settings')).toBe(true);
+    await view.dispose();
+    expect(root.className).toBe('hosted-admin-content');
+  });
+
   it('lists the current device, revocable devices and recent login outcomes', async () => {
     const document: DocumentLike = { createElement: (tag) => new Element(tag, document) };
     const root = new Element('div', document);
@@ -123,23 +149,15 @@ describe('administrator settings view', () => {
     await view.dispose();
   });
 
-  it('confirms the exact non-current count and removes them after bulk revoke', async () => {
+  it('offers only per-device revocation and no bulk exit action', async () => {
     const document: DocumentLike = { createElement: (tag) => new Element(tag, document) };
     const root = new Element('div', document);
     const api = fixture();
-    const confirm = vi.fn(() => true);
-    vi.stubGlobal('confirm', confirm);
     const view = mountAdminSettingsView(root as unknown as HTMLElement, api as never, vi.fn());
     await flush();
 
-    buttons(root, '退出其他设备')[0].listeners.get('click')?.();
-    await flush();
-
-    expect(confirm).toHaveBeenCalledWith('确认退出其他 2 台设备？');
-    expect(api.revokeOtherAdminSessions).toHaveBeenCalledTimes(1);
-    expect(buttons(root, '退出此设备')).toHaveLength(0);
-    expect(text(root)).toContain('已退出其他 2 台设备');
-    vi.unstubAllGlobals();
+    expect(buttons(root, '退出其他设备')).toHaveLength(0);
+    expect(buttons(root, '退出此设备')).toHaveLength(2);
     await view.dispose();
   });
 
@@ -181,11 +199,31 @@ describe('administrator settings view', () => {
     await flush();
 
     expect(text(root)).toContain('系统设置加载失败，请重试');
+    expect(descendants(root).filter((element) => element.className.includes('hosted-admin-card') && !element.hidden)).toHaveLength(0);
     buttons(root, '重试')[0].listeners.get('click')?.();
     await flush();
 
     expect(adminSettings).toHaveBeenCalledTimes(2);
     expect(text(root)).toContain('管理员账号');
+    await view.dispose();
+  });
+
+  it('shows a loading state before settings resolve and explains an empty login history', async () => {
+    let resolveSettings!: (value: { maskedEmail: string; sessionExpiresAt: string; totpEnabled: boolean; recoveryGeneratedAt: null; serviceHealth: string }) => void;
+    const document: DocumentLike = { createElement: (tag) => new Element(tag, document) };
+    const root = new Element('div', document);
+    const api = fixture({
+      adminSettings: vi.fn(() => new Promise((resolve) => { resolveSettings = resolve; })),
+      adminLoginEvents: vi.fn(async () => []),
+    });
+    const view = mountAdminSettingsView(root as unknown as HTMLElement, api as never, vi.fn());
+
+    expect(text(root)).toContain('正在加载系统设置…');
+    expect(descendants(root).filter((element) => element.className.includes('hosted-admin-card') && !element.hidden)).toHaveLength(0);
+    resolveSettings({ maskedEmail: 'o***@example.com', sessionExpiresAt: sessions[0].expiresAt, totpEnabled: true, recoveryGeneratedAt: null, serviceHealth: 'healthy' });
+    await flush();
+
+    expect(text(root)).toContain('暂无登录记录');
     await view.dispose();
   });
 

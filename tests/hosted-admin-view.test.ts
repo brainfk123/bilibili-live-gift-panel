@@ -4,6 +4,7 @@ import { mountAdminView } from '../src/hosted/admin';
 import { mountAdminOverview } from '../src/hosted/admin/overview';
 import { mountAccountList } from '../src/hosted/admin/accounts/list';
 import { mountBiliServiceView } from '../src/hosted/admin/bili-service';
+import { mountAdminInvitationView } from '../src/hosted/admin/invitations/view';
 import { HostedAPIError } from '../src/hosted/api';
 
 class Element {
@@ -68,13 +69,56 @@ async function flush(): Promise<void> {
 }
 
 describe('administrator section lifetime fence', () => {
+  it('renders actionable loading, empty and error states instead of blank account tables', async () => {
+    let resolveAccounts!: (value: { items: never[] }) => void;
+    const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (value) => { const node = new Element('#text', document); node.textContent = value; return node; } };
+    const root = new Element('div', document);
+    const api = { adminAccounts: vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveAccounts = resolve; }))
+      .mockRejectedValueOnce(new Error('offline')) };
+    const view = mountAccountList(root as unknown as HTMLElement, api as never);
+
+    expect(text(root)).toContain('正在加载主播账号…');
+    resolveAccounts({ items: [] });
+    await flush();
+    expect(text(root)).toContain('还没有主播账号');
+
+    control(root, 'select', '账号状态').listeners.get('change')?.();
+    await flush();
+    expect(text(root)).toContain('账号列表加载失败，请重试');
+    expect(button(root, '重试')).toBeDefined();
+    await view.dispose();
+  });
+
+  it('uses a visible loading card while invitations are pending', async () => {
+    const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (value) => { const node = new Element('#text', document); node.textContent = value; return node; } };
+    const root = new Element('div', document);
+    const view = mountAdminInvitationView(root as unknown as HTMLElement, { adminInvitations: vi.fn(() => new Promise(() => undefined)) } as never);
+
+    expect(text(root)).toContain('正在加载邀请码…');
+    expect(descendants(root).some((element) => element.className.includes('hosted-admin-state'))).toBe(true);
+    await view.dispose();
+  });
+
+  it('gives overview failures a retry action', async () => {
+    const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (value) => { const node = new Element('#text', document); node.textContent = value; return node; } };
+    const root = new Element('div', document);
+    const api = { adminOverview: vi.fn().mockRejectedValue(new Error('offline')) };
+    const view = mountAdminOverview(root as unknown as HTMLElement, api, vi.fn());
+    await flush();
+
+    expect(text(root)).toContain('运营数据暂不可用');
+    expect(button(root, '重试')).toBeDefined();
+    await view.dispose();
+  });
+
   it('labels both account filters and the current-page checkbox', async () => {
     const document: DocumentLike = {
       createElement: (tag) => new Element(tag, document),
       createTextNode: (value) => { const node = new Element('#text', document); node.textContent = value; return node; },
     };
     const root = new Element('div', document);
-    const api = { adminAccounts: vi.fn(async () => ({ items: [] })) };
+    const api = { adminAccounts: vi.fn(async () => ({ items: [{ id: 1, status: 'active', roomId: null, invitationQuota: 0, hasObs: false, createdAt: '', updatedAt: '' }] })) };
     const view = mountAccountList(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountAccountList>[1]);
     await flush();
 

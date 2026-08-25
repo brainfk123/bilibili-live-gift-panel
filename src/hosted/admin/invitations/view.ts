@@ -4,6 +4,7 @@ import { mountAdminNotice } from '../ui/notice';
 import { createInvitationInventoryController, type InvitationInventorySnapshot } from './controller';
 import { mountInvitationCreatePanel } from './create-panel';
 import { createInvitationQueryState } from './model';
+import { createAdminState } from '../ui/state';
 
 const statusLabel = (status: AdminInvitationRecord['status']): string => ({ active: '可用', used: '已兑换', revoked: '已作废', expired: '已过期' })[status];
 
@@ -25,7 +26,9 @@ export function mountAdminInvitationView(host: HTMLElement, api: Pick<HostedAPI,
   const closeCreate = (): void => { void createView?.dispose(); createView = undefined; createHost.replaceChildren(); open.setAttribute('aria-expanded', 'false'); };
   const renderTable = (snapshot: InvitationInventorySnapshot): void => {
     table.replaceChildren(); empty.replaceChildren();
-    if (!snapshot.rows.length && !snapshot.loading) { const title = document.createElement('h3'); title.textContent = '还没有邀请码'; const description = document.createElement('p'); description.textContent = '创建邀请码后可分享给新的主播账号。'; const createFirst = document.createElement('button'); createFirst.type = 'button'; createFirst.dataset.variant = 'secondary'; createFirst.textContent = '创建第一个邀请码'; createFirst.addEventListener('click', () => open.click()); empty.append(title, description, createFirst); return; }
+    if (!snapshot.rows.length && snapshot.loading) { table.append(createAdminState(document,'loading','正在加载邀请码…')); return; }
+    if (!snapshot.rows.length && snapshot.error) return;
+    if (!snapshot.rows.length) { const title = document.createElement('h3'); title.textContent = '还没有邀请码'; const description = document.createElement('p'); description.textContent = '创建邀请码后可分享给新的主播账号。'; const createFirst = document.createElement('button'); createFirst.type = 'button'; createFirst.dataset.variant = 'secondary'; createFirst.textContent = '创建第一个邀请码'; createFirst.addEventListener('click', () => open.click()); empty.append(title, description, createFirst); return; }
     const header = document.createElement('div'); header.className = 'hosted-admin-invitation-row hosted-admin-invitation-head'; const codeLabel = document.createElement('span'); codeLabel.textContent = '邀请码'; header.append(codeLabel);
     for (const [label, sort] of [['状态', 'status'], ['创建时间', 'created_at']] as const) { const button = document.createElement('button'); button.type = 'button'; button.dataset.variant = 'quiet'; button.textContent = label; button.setAttribute('aria-sort', query.get().sort === sort ? (query.get().direction === 'asc' ? 'ascending' : 'descending') : 'none'); button.addEventListener('click', () => { query.toggleSort(sort); void controller.reload(query.get()); }); header.append(button); }
     for (const label of ['兑换账号', '操作']) { const cell = document.createElement('span'); cell.textContent = label; header.append(cell); } table.append(header);

@@ -774,6 +774,10 @@ select {
   padding: 2.5rem 0 4rem;
 }
 
+.hosted-admin-content [hidden] {
+  display: none !important;
+}
+
 .hosted-admin-section-title {
   font-size: 2rem;
   line-height: 1.25;
@@ -820,6 +824,28 @@ select {
   display: none;
 }
 
+.hosted-admin-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  min-height: 5rem;
+  box-sizing: border-box;
+  padding: 1rem;
+  color: #52627a;
+  text-align: center;
+  background: #fff;
+  border: 1px dashed #c4cfdd;
+  border-radius: 0.8rem;
+}
+
+.hosted-admin-state p { margin: 0; }
+.hosted-admin-state.is-error { color: #8d2920; background: #fff1ef; border-style: solid; border-color: #e7a49d; }
+.hosted-admin-state.is-loading .hosted-admin-action-spinner { color: #246bce; }
+.hosted-admin-account-table > .hosted-admin-state,
+.hosted-admin-invitation-table > .hosted-admin-state { border: 0; border-radius: 0.8rem; }
+.hosted-admin-bili-status > .hosted-admin-state { min-height: 4.5rem; }
+
 .hosted-admin-notice {
   justify-content: flex-start;
   min-height: 2.75rem;
@@ -860,15 +886,15 @@ select {
   border-radius: 0.9rem;
 }
 
-.hosted-admin-content .hosted-admin-resource-card:first-child,
-.hosted-admin-content .hosted-admin-resource-card:hover {
+.hosted-admin-content .hosted-admin-resource-card:hover,
+.hosted-admin-content .hosted-admin-resource-card:focus-visible {
   color: #fff;
   background: #2b68ea;
   border-color: #2b68ea;
 }
 
-.hosted-admin-content .hosted-admin-resource-card:first-child > span,
-.hosted-admin-content .hosted-admin-resource-card:hover > span {
+.hosted-admin-content .hosted-admin-resource-card:hover > span,
+.hosted-admin-content .hosted-admin-resource-card:focus-visible > span {
   color: #fff;
 }
 
@@ -898,6 +924,10 @@ select {
 
 .hosted-admin-account-controls input {
   width: 100%;
+}
+
+.hosted-admin-account-controls .hosted-admin-field {
+  margin: 0;
 }
 
 .hosted-admin-field {
@@ -972,6 +1002,11 @@ select {
   min-height: 2.75rem;
 }
 
+.hosted-admin-invitation-actions .hosted-admin-field,
+.hosted-admin-invitation-create .hosted-admin-field {
+  margin: 0;
+}
+
 .hosted-admin-invitation-create {
   display: grid;
   grid-template-columns: repeat(2, minmax(8rem, 1fr)) auto auto;
@@ -979,6 +1014,10 @@ select {
   align-items: end;
   margin: 0 0 1rem;
   padding: 1rem;
+}
+
+.hosted-admin-invitation-create > button {
+  min-height: 2.75rem;
 }
 
 .hosted-admin-invitation-row {

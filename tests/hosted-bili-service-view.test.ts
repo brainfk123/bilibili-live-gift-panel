@@ -70,6 +70,31 @@ describe('Bilibili service action state', () => {
 });
 
 describe('Bilibili service replacement view', () => {
+  it('shows a loading state and withholds actions until the initial status resolves', async () => {
+    const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (text) => { const node = new Element('#text', document); node.textContent = text; return node; } };
+    const root = new Element('div', document);
+    const api = { biliServiceStatus: vi.fn(() => new Promise(() => undefined)), checkBiliService: vi.fn(), beginBiliServiceChallenge: vi.fn(), replaceBiliServiceCredential: vi.fn(), authorizeAdminOperation: vi.fn() };
+    const view = mountBiliServiceView(root as unknown as HTMLElement, api as never);
+
+    expect(descendants(root).some((node) => node.className.includes('hosted-admin-state'))).toBe(true);
+    expect(descendants(root).some((node) => node.textContent.includes('正在加载服务账号状态'))).toBe(true);
+    expect(button(root, '立即检查').hidden).toBe(true);
+    expect(button(root, '更换服务账号').hidden).toBe(true);
+    await view.dispose();
+  });
+
+  it('replaces the loading state with the error notice when status loading fails', async () => {
+    const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (text) => { const node = new Element('#text', document); node.textContent = text; return node; } };
+    const root = new Element('div', document);
+    const api = { biliServiceStatus: vi.fn(async () => { throw new Error('offline'); }), checkBiliService: vi.fn(), beginBiliServiceChallenge: vi.fn(), replaceBiliServiceCredential: vi.fn(), authorizeAdminOperation: vi.fn() };
+    const view = mountBiliServiceView(root as unknown as HTMLElement, api as never);
+    await flush();
+
+    expect(descendants(root).some((node) => node.className.includes('hosted-admin-state'))).toBe(false);
+    expect(descendants(root).some((node) => node.textContent.includes('服务账号状态暂不可用'))).toBe(true);
+    await view.dispose();
+  });
+
   it('keeps the currently rendered check button visibly busy until a deferred check settles', async () => {
     let finish!: (status: { version: number; health: 'healthy'; lastVerifiedAt: string }) => void;
     const pending = new Promise<{ version: number; health: 'healthy'; lastVerifiedAt: string }>((resolve) => { finish = resolve; });

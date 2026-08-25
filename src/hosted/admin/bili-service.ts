@@ -4,6 +4,7 @@ import { mountVerificationCode, type VerificationCodeControl } from '../verifica
 import { createBiliServiceController, type BiliServiceSnapshot } from './bili-service-controller';
 import { runAdminAction } from './ui/async-action';
 import { mountAdminNotice } from './ui/notice';
+import { createAdminState } from './ui/state';
 
 type BiliServiceAPI = Pick<HostedAPI, 'biliServiceStatus' | 'checkBiliService' | 'beginBiliServiceChallenge' | 'replaceBiliServiceCredential' | 'authorizeAdminOperation'>;
 
@@ -26,6 +27,8 @@ export function mountBiliServiceView(host: HTMLElement, api: BiliServiceAPI): Ho
   actionRow.append(check, begin);
   const noticeHost = document.createElement('div'); const notice = mountAdminNotice(noticeHost);
   const flowHost = document.createElement('div');
+  status.append(createAdminState(document, 'loading', '正在加载服务账号状态…'));
+  actionRow.hidden = true; check.hidden = true; begin.hidden = true;
   card.append(title, status, actionRow, noticeHost, flowHost); host.append(card);
   let controller!: ReturnType<typeof createBiliServiceController>;
 
@@ -60,7 +63,12 @@ export function mountBiliServiceView(host: HTMLElement, api: BiliServiceAPI): Ho
 
   const render = (snapshot: BiliServiceSnapshot): void => {
     if (disposed) return;
-    status.textContent = statusText(snapshot.status);
+    status.replaceChildren();
+    if (snapshot.status) status.textContent = statusText(snapshot.status);
+    else if (snapshot.notice?.kind !== 'error') status.append(createAdminState(document, 'loading', '正在加载服务账号状态…'));
+    actionRow.hidden = !snapshot.status;
+    check.hidden = !snapshot.status;
+    begin.hidden = !snapshot.status;
     const checking = snapshot.phase === 'checking';
     check.disabled = checking;
     if (checking) {
