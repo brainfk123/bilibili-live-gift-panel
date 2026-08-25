@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	goruntime "runtime"
 	"slices"
 	"strconv"
 	"sync"
@@ -217,6 +218,218 @@ func TestOfflineTransitionRetriesClaimedOwnerAfterStartFailure(t *testing.T) {
 	}
 	if len(sessions.releaseFences()) != 3 {
 		t.Fatalf("release attempts = %d, want 3", len(sessions.releaseFences()))
+	}
+}
+
+func TestTransitionProcessorCreationEndFailureRetainsExactSessionAndFenceForOfflineRetry(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, endFailures: 1, logOwnership: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{ProcessorFactory: processorFactoryFunc(func(context.Context, OwnerFence, Session) (SessionProcessor, error) {
+		log.add("processor-create-failed")
+		return nil, ErrUnavailable
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}
+	offline := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateLive, To: roomwatcher.StateOffline, ConfirmedAt: time.Unix(101, 0), Sequence: 2, LeaseEpoch: 2}
+
+	if err := manager.ApplyRoomTransition(context.Background(), live); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("live processor failure = %v, want unavailable", err)
+	}
+	wantFence := sessions.currentOwner()
+	if !validOwnerFence(wantFence) {
+		t.Fatal("failed EndSession released the owner fence")
+	}
+	if got := log.snapshot(); containsOperation(got, "release") {
+		t.Fatalf("failed EndSession released ownership: %v", got)
+	}
+	if err := manager.ApplyRoomTransition(context.Background(), offline); err != nil {
+		t.Fatalf("offline EndSession retry = %v", err)
+	}
+	afterCleanup := log.snapshot()
+	if !containsOrderedOperations(afterCleanup, []string{"start:42", "processor-create-failed", "end:1", "end:1", "release"}) {
+		t.Fatalf("cleanup order = %v", afterCleanup)
+	}
+	if err := manager.ApplyRoomTransition(context.Background(), offline); err != nil {
+		t.Fatalf("duplicate offline = %v", err)
+	}
+	if got := log.snapshot(); !reflect.DeepEqual(got, afterCleanup) {
+		t.Fatalf("duplicate offline repeated cleanup: before=%v after=%v", afterCleanup, got)
+	}
+	for _, command := range sessions.endCommands() {
+		if command.SessionID != 1 || command.Owner != wantFence {
+			t.Fatalf("EndSession command = %#v, want session 1 fence %#v", command, wantFence)
+		}
+	}
+}
+
+func TestTransitionLiveRetryFinishesPendingEndBeforeStartingReplacement(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, endFailures: 1, logOwnership: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
+	var factoryCalls int
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{ProcessorFactory: processorFactoryFunc(func(context.Context, OwnerFence, Session) (SessionProcessor, error) {
+		factoryCalls++
+		if factoryCalls == 1 {
+			return nil, ErrUnavailable
+		}
+		return &finalizingSessionProcessor{log: log}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}
+	if err := manager.ApplyRoomTransition(context.Background(), live); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("first live = %v, want unavailable", err)
+	}
+	firstFence := sessions.currentOwner()
+	if err := manager.ApplyRoomTransition(context.Background(), live); err != nil {
+		t.Fatalf("live retry = %v", err)
+	}
+	if sessions.startedCount() != 2 || factoryCalls != 2 {
+		t.Fatalf("starts/factory calls = %d/%d, want 2/2", sessions.startedCount(), factoryCalls)
+	}
+	ends, releases := sessions.endCommands(), sessions.releaseFences()
+	if len(ends) != 2 || ends[0].SessionID != 1 || ends[1].SessionID != 1 || ends[0].Owner != firstFence || ends[1].Owner != firstFence {
+		t.Fatalf("pending EndSession retries = %#v, want session 1 fence %#v", ends, firstFence)
+	}
+	if len(releases) != 1 || releases[0] != firstFence {
+		t.Fatalf("pending release = %#v, want %#v", releases, firstFence)
+	}
+	afterRetry := log.snapshot()
+	if !containsOrderedOperations(afterRetry, []string{"start:42", "end:1", "end:1", "release", "start:42"}) {
+		t.Fatalf("live retry order = %v", afterRetry)
+	}
+	if err := manager.ApplyRoomTransition(context.Background(), live); err != nil {
+		t.Fatalf("duplicate successful live = %v", err)
+	}
+	if got := log.snapshot(); !reflect.DeepEqual(got, afterRetry) {
+		t.Fatalf("duplicate live repeated admission: before=%v after=%v", afterRetry, got)
+	}
+}
+
+func TestTransitionLiveRetryFinishesPendingReleaseBeforeStartingReplacement(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, releaseFailures: 1, logOwnership: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
+	var factoryCalls int
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{ProcessorFactory: processorFactoryFunc(func(context.Context, OwnerFence, Session) (SessionProcessor, error) {
+		factoryCalls++
+		if factoryCalls == 1 {
+			return nil, ErrUnavailable
+		}
+		return &finalizingSessionProcessor{log: log}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}
+	if err := manager.ApplyRoomTransition(context.Background(), live); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("first live = %v, want unavailable", err)
+	}
+	if err := manager.ApplyRoomTransition(context.Background(), live); err != nil {
+		t.Fatalf("live release retry = %v", err)
+	}
+	if got := log.snapshot(); !containsOrderedOperations(got, []string{"start:42", "end:1", "release", "start:42"}) {
+		t.Fatalf("release retry/start order = %v", got)
+	}
+	if releases := sessions.releaseFences(); len(releases) != 2 || releases[0] != releases[1] {
+		t.Fatalf("release retries = %#v, want same exact fence twice", releases)
+	}
+}
+
+func TestTransitionPrePublishAbortEndsBeforeFinalizeAndExactOwnerRelease(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		abort func(*accountRuntime)
+	}{
+		{name: "owner fence changed", abort: func(account *accountRuntime) {
+			account.owner = OwnerFence{AccountID: account.accountID, Token: ownerToken(0x99), Epoch: 99}
+		}},
+		{name: "account disabled", abort: func(account *accountRuntime) { account.disabled = true }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			log := &operationLog{}
+			sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, logOwnership: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
+			var manager *Manager
+			var err error
+			manager, err = NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{
+				ProcessorFactory: finalizingProcessorFactory{log: log},
+				BeforeSessionPublish: func() {
+					account, err := manager.accountExisting(7)
+					if err != nil {
+						t.Fatal(err)
+					}
+					account.mu.Lock()
+					test.abort(account)
+					account.mu.Unlock()
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+			live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}
+			if err := manager.ApplyRoomTransition(context.Background(), live); err == nil {
+				t.Fatal("pre-publish abort unexpectedly succeeded")
+			}
+			commands, releases := sessions.endCommands(), sessions.releaseFences()
+			if len(commands) != 1 || len(releases) != 1 || commands[0].SessionID != 1 || commands[0].Owner != releases[0] {
+				t.Fatalf("end/release fences = %#v / %#v", commands, releases)
+			}
+			if got := log.snapshot(); !containsOrderedOperations(got, []string{"end:1", "processor-finalize", "release"}) {
+				t.Fatalf("EndSession/finalize/release order = %v", got)
+			}
+		})
+	}
+}
+
+func TestTransitionPrePublishShutdownEndsBeforeFinalizeAndOwnerRelease(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, logOwnership: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
+	startCommitted := make(chan struct{})
+	allowPublish := make(chan struct{})
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{
+		ProcessorFactory:     finalizingProcessorFactory{log: log},
+		BeforeSessionPublish: func() { close(startCommitted); <-allowPublish },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 1}
+	applied := make(chan error, 1)
+	go func() { applied <- manager.ApplyRoomTransition(context.Background(), live) }()
+	<-startCommitted
+	shutdown := make(chan error, 1)
+	go func() { shutdown <- manager.Shutdown(context.Background()) }()
+	account, accountErr := manager.accountExisting(7)
+	if accountErr != nil {
+		t.Fatal(accountErr)
+	}
+	for {
+		account.mu.Lock()
+		shutting := account.shutting
+		account.mu.Unlock()
+		if shutting {
+			break
+		}
+		goruntime.Gosched()
+	}
+	close(allowPublish)
+	if err := <-applied; !errors.Is(err, ErrClosed) {
+		t.Fatalf("live during shutdown = %v, want closed", err)
+	}
+	if err := <-shutdown; err != nil {
+		t.Fatal(err)
+	}
+	commands, releases := sessions.endCommands(), sessions.releaseFences()
+	if len(commands) != 1 || len(releases) != 1 || commands[0].Owner != releases[0] || !validOwnerFence(commands[0].Owner) {
+		t.Fatalf("shutdown end/release fences = %#v / %#v", commands, releases)
+	}
+	if got := log.snapshot(); !containsOrderedOperations(got, []string{"end:1", "processor-finalize", "release"}) {
+		t.Fatalf("shutdown cleanup order = %v", got)
 	}
 }
 
@@ -583,6 +796,25 @@ func (processor *recordingSessionProcessor) Close(context.Context) error {
 func (processor *recordingSessionProcessor) Status() ProcessorStatus { return processor.factory.status }
 func (processor *recordingSessionProcessor) SetConnectionHealthy(healthy bool) {
 	processor.factory.status.ConnectionHealthy = healthy
+}
+
+type finalizingProcessorFactory struct{ log *operationLog }
+
+func (factory finalizingProcessorFactory) New(context.Context, OwnerFence, Session) (SessionProcessor, error) {
+	return &finalizingSessionProcessor{log: factory.log}, nil
+}
+
+type finalizingSessionProcessor struct{ log *operationLog }
+
+func (*finalizingSessionProcessor) Accept(roomsource.Event) error { return nil }
+func (processor *finalizingSessionProcessor) Close(context.Context) error {
+	processor.log.add("processor-close")
+	return nil
+}
+func (*finalizingSessionProcessor) Status() ProcessorStatus   { return ProcessorStatus{} }
+func (*finalizingSessionProcessor) SetConnectionHealthy(bool) {}
+func (processor *finalizingSessionProcessor) FinalizeSession() {
+	processor.log.add("processor-finalize")
 }
 
 func containsOrderedOperations(got, want []string) bool {
@@ -1042,6 +1274,7 @@ type orderedSessions struct {
 	owner           OwnerFence
 	epoch           uint64
 	releases        []OwnerFence
+	ends            []EndSessionCommand
 }
 
 type transitionSessions struct {
@@ -1208,11 +1441,17 @@ func (sessions *orderedSessions) EndSession(_ context.Context, command EndSessio
 	sessions.log.add("end:" + integer(command.SessionID))
 	sessions.mu.Lock()
 	defer sessions.mu.Unlock()
+	sessions.ends = append(sessions.ends, command)
 	if sessions.endFailures > 0 {
 		sessions.endFailures--
 		return ErrUnavailable
 	}
 	return nil
+}
+func (sessions *orderedSessions) endCommands() []EndSessionCommand {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	return append([]EndSessionCommand(nil), sessions.ends...)
 }
 func (sessions *orderedSessions) PendingMigration(context.Context, int64) (int64, bool, error) {
 	sessions.mu.Lock()

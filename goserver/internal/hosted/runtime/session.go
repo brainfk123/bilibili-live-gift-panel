@@ -532,8 +532,20 @@ func (manager *Manager) startRoom(ctx context.Context, account *accountRuntime, 
 		}
 		return ErrUnavailable
 	}
+	active.admissionMu.Lock()
+	active.session, active.subscription = session, subscription
+	active.admissionMu.Unlock()
+	transitionOwned := broadcastSessionID > 0
+	if transitionOwned {
+		account.mu.Lock()
+		account.transitionPending = active
+		account.mu.Unlock()
+	}
 	processor, err := manager.processorFactory.New(manager.processing, owner, session)
 	if err != nil {
+		if transitionOwned {
+			return ErrUnavailable
+		}
 		subscription.Cancel()
 		_ = subscription.Wait(ctx)
 		endErr := manager.dependencies.Sessions.EndSession(ctx, EndSessionCommand{Owner: owner, AccountID: account.accountID, SessionID: session.ID, EndedAt: normalizeDatabaseTime(manager.now())})
@@ -546,7 +558,7 @@ func (manager *Manager) startRoom(ctx context.Context, account *accountRuntime, 
 		reporter.SetOwnershipLost(func() { manager.handleProcessOwnershipConflict(account, active) })
 	}
 	active.admissionMu.Lock()
-	active.session, active.subscription, active.processor = session, subscription, processor
+	active.processor = processor
 	active.processor.SetConnectionHealthy(active.sourceHealthy)
 	active.admissionMu.Unlock()
 	if manager.beforeSessionPublish != nil {
@@ -557,16 +569,27 @@ func (manager *Manager) startRoom(ctx context.Context, account *accountRuntime, 
 	if account.stale || account.owner != owner {
 		account.mu.Unlock()
 		active.admissionMu.Unlock()
+		if transitionOwned {
+			return ErrOwnershipConflict
+		}
 		manager.discardUnpublishedSession(ctx, active)
 		return ErrOwnershipConflict
 	}
 	if account.current != expectedCurrent {
 		account.mu.Unlock()
 		active.admissionMu.Unlock()
+		if transitionOwned {
+			return ErrUnavailable
+		}
 		manager.discardUnpublishedSession(ctx, active)
 		return ErrUnavailable
 	}
 	if account.shutting {
+		if transitionOwned {
+			account.mu.Unlock()
+			active.admissionMu.Unlock()
+			return ErrClosed
+		}
 		active.admitting = false
 		active.subscription.Cancel()
 		account.current = active
@@ -579,10 +602,16 @@ func (manager *Manager) startRoom(ctx context.Context, account *accountRuntime, 
 	if account.disabled {
 		account.mu.Unlock()
 		active.admissionMu.Unlock()
+		if transitionOwned {
+			return ErrAccountDisabled
+		}
 		manager.discardUnpublishedSession(ctx, active)
 		return ErrAccountDisabled
 	}
 	account.current = active
+	if account.transitionPending == active {
+		account.transitionPending = nil
+	}
 	account.reconcile = false
 	account.degraded = false
 	account.sourceDegraded = !active.sourceHealthy
@@ -685,6 +714,9 @@ func (manager *Manager) handleProcessOwnershipConflict(account *accountRuntime, 
 func (manager *Manager) closeCurrent(ctx context.Context, account *accountRuntime) error {
 	account.mu.Lock()
 	active := account.current
+	if active == nil {
+		active = account.transitionPending
+	}
 	account.mu.Unlock()
 	if active == nil {
 		return nil
@@ -698,6 +730,9 @@ func (manager *Manager) closeCurrent(ctx context.Context, account *accountRuntim
 	account.mu.Lock()
 	if account.current == active {
 		account.current = nil
+	}
+	if account.transitionPending == active {
+		account.transitionPending = nil
 	}
 	account.mu.Unlock()
 	return nil
@@ -776,7 +811,7 @@ func (manager *Manager) stopActive(ctx context.Context, account *accountRuntime,
 	active.admissionMu.Lock()
 	processorClosed := active.processorClosed
 	active.admissionMu.Unlock()
-	if !processorClosed {
+	if !processorClosed && active.processor != nil {
 		if err := active.processor.Close(ctx); err != nil {
 			return err
 		}
@@ -795,7 +830,7 @@ func (manager *Manager) stopActive(ctx context.Context, account *accountRuntime,
 		account.mu.Unlock()
 		return ErrOwnershipConflict
 	}
-	owner := account.owner
+	owner := active.owner
 	account.mu.Unlock()
 	if err := manager.dependencies.Sessions.EndSession(ctx, EndSessionCommand{Owner: owner, AccountID: account.accountID, SessionID: active.session.ID, EndedAt: endedAt}); err != nil {
 		return err
