@@ -4,7 +4,7 @@ import { mountAdminShell } from '../src/hosted/admin/shell';
 
 class Element {
   children: Element[] = []; textContent = ''; className = ''; type = ''; disabled = false; hidden = false;
-  attributes = new Map<string, string>(); listeners = new Map<string, (event?: { key?: string; shiftKey?: boolean; preventDefault?(): void }) => void>();
+  attributes = new Map<string, string>(); listeners = new Map<string, (event?: { key?: string; shiftKey?: boolean; target?: Element; preventDefault?(): void }) => void>();
   constructor(readonly tagName: string, readonly ownerDocument: Doc) {}
   append(...nodes: Element[]) { this.children.push(...nodes); }
   replaceChildren(...nodes: Element[]) { this.children = nodes; }
@@ -53,7 +53,8 @@ describe('A3 administrator shell', () => {
     expect(sidebar.attributes.get('data-open')).toBe('false');
     expect(document.activeElement).toBe(trigger);
     trigger.listeners.get('click')?.();
-    backdrop.listeners.get('click')?.();
+    backdrop.listeners.get('pointerdown')?.({ target: backdrop });
+    backdrop.listeners.get('click')?.({ target: backdrop });
     expect(sidebar.attributes.get('data-open')).toBe('false');
     expect(document.activeElement).toBe(trigger);
     trigger.listeners.get('click')?.();
@@ -63,6 +64,22 @@ describe('A3 administrator shell', () => {
     trigger.listeners.get('click')?.();
     sidebar.children[2].listeners.get('click')?.();
     await vi.waitFor(() => expect(sidebar.attributes.get('data-open')).toBe('false'));
+    await shell.dispose();
+  });
+
+  it('keeps the mobile navigation open when a press starts inside and releases over the backdrop', async () => {
+    const document: Doc = { createElement: (tag) => new Element(tag, document) }; const root = new Element('div', document);
+    const shell = mountAdminShell(root as unknown as HTMLElement, { initial: 'overview', mount: () => ({ dispose() {} }) });
+    const frame = root.children[0]; const sidebar = frame.children[0]; const workspace = frame.children[1]; const backdrop = frame.children[2]; const header = workspace.children[0];
+    const trigger = header.children.find((child) => child.className === 'hosted-admin-menu-trigger');
+    if (!trigger) throw new Error('mobile menu trigger missing');
+
+    trigger.listeners.get('click')?.();
+    expect(sidebar.attributes.get('data-open')).toBe('true');
+    backdrop.listeners.get('click')?.({ target: backdrop });
+
+    expect(sidebar.attributes.get('data-open')).toBe('true');
+    expect(backdrop.hidden).toBe(false);
     await shell.dispose();
   });
 

@@ -28,7 +28,9 @@ export function mountAdminShell(
   let disposed = false;
   let transition: Promise<void> = Promise.resolve();
   let menuOpen = false;
+  let backdropPressStarted = false;
   const setMenuOpen = (open: boolean, restoreFocus = false): void => {
+    backdropPressStarted = false;
     menuOpen = open;
     sidebar.setAttribute('data-open', String(open));
     menuTrigger.setAttribute('aria-expanded', String(open));
@@ -57,7 +59,13 @@ export function mountAdminShell(
     buttons.set(item.id, button); sidebar.append(button);
   }
   sidebarClose.addEventListener('click', () => setMenuOpen(false, true));
-  backdrop.addEventListener('click', () => setMenuOpen(false, true));
+  backdrop.addEventListener('pointerdown', (event) => { backdropPressStarted = event.target === backdrop; });
+  backdrop.addEventListener('pointercancel', () => { backdropPressStarted = false; });
+  backdrop.addEventListener('click', (event) => {
+    const shouldClose = backdropPressStarted && event.target === backdrop;
+    backdropPressStarted = false;
+    if (shouldClose) setMenuOpen(false, true);
+  });
   menuTrigger.addEventListener('click', () => setMenuOpen(!menuOpen));
   const onKeyDown = (event: KeyboardEvent): void => {
     if (!menuOpen) return;
