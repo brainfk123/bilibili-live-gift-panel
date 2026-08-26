@@ -85,6 +85,7 @@ export function createBiliChallengePoller(
     if (stopped) return;
     clearTimer();
     publish(false, kind, kind ? delay : undefined);
+    if (stopped) return;
     timer = timers.setTimeout(() => {
       timer = undefined;
       attempt();

@@ -94,6 +94,17 @@ export function createAuthFlow(api: AuthAPI, callbacks: AuthCallbacks): AuthFlow
   return Object.freeze({
     async start(): Promise<void> {
       if (disposed) return;
+      const previous = activeChallenge;
+      activeChallenge = undefined;
+      if (previous) {
+        try {
+          await api.cancelLogin(previous.challengeId);
+        } catch (error) {
+          if (!disposed && !activeChallenge) activeChallenge = previous;
+          throw error;
+        }
+      }
+      if (disposed) return;
       const created = await api.beginLogin();
       if (disposed) {
         await api.cancelLogin(created.challengeId);

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createBiliChallengePoller,
+  type BiliChallengePoller,
   type BiliChallengePollSnapshot,
   type BiliChallengeTimerPort,
 } from '../src/hosted/bili-challenge-poller';
@@ -190,14 +191,32 @@ describe('Bilibili challenge poller', () => {
 
     poller.start();
     await timers.fireNext();
+    timers.elapse(2_000);
     poller.retryNow();
     poller.retryNow();
     poller.retryNow();
+    for (let turn = 0; turn < 5; turn++) await Promise.resolve();
 
     expect(poll).toHaveBeenCalledTimes(1);
     release('pending');
     for (let turn = 0; turn < 5; turn++) await Promise.resolve();
     expect(timers.count()).toBe(1);
+  });
+
+  it('does not install a timer after render synchronously stops the poller', async () => {
+    const timers = new ControlledTimers();
+    let poller!: BiliChallengePoller;
+    let stopping: Promise<void> | undefined;
+    poller = createBiliChallengePoller(
+      { poll: vi.fn(async () => 'pending' as const) },
+      timers,
+      () => { stopping = poller.stop(); },
+    );
+
+    poller.start();
+    await stopping;
+
+    expect(timers.count()).toBe(0);
   });
 
   it('enforces a two-second manual retry cooldown and replaces the automatic timer', async () => {
