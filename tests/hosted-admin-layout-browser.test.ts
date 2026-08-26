@@ -115,4 +115,25 @@ describe('administrator layout in a real browser', () => {
     }
     await page.close();
   });
+
+  it('stops the rendered administrator action spinner when reduced motion is requested', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.setContent(`
+      <style>${css}</style>
+      <main class="hosted-admin-content">
+        <button type="button" aria-busy="true">
+          检查中…
+          <span class="hosted-admin-action-spinner" aria-hidden="true"></span>
+        </button>
+      </main>
+    `);
+
+    const spinner = page.locator('.hosted-admin-action-spinner');
+    expect(await spinner.evaluate((element) => getComputedStyle(element).animationName)).toBe('hosted-admin-action-spin');
+
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    expect(await spinner.evaluate((element) => getComputedStyle(element).animationName)).toBe('none');
+    await page.close();
+  });
 });

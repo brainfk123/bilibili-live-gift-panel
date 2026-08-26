@@ -86,7 +86,7 @@ describe('administrator interaction primitives', () => {
     expect(button.style.width).toBe('9rem');
   });
 
-  it('keeps native select, checkbox, and reduced-motion CSS contracts scoped to administrator controls', () => {
+  it('keeps native select and checkbox CSS contracts scoped to administrator controls', () => {
     const css = readFileSync(new URL('../src/hosted/shell.css', import.meta.url), 'utf8');
     const rule = (selector: string): string => {
       const start = css.indexOf(`${selector} {`);
@@ -98,6 +98,5 @@ describe('administrator interaction primitives', () => {
     expect(rule('.hosted-admin-content select')).toContain('data:image/svg+xml');
     expect(rule('.hosted-admin-content input[type=checkbox]')).toContain('appearance: none');
     expect(rule('.hosted-admin-content input[type=checkbox]:checked')).toContain('background: #246bce');
-    expect(css).toContain('.hosted-admin-action-spinner { animation: none; }');
   });
 });
