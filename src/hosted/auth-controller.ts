@@ -1,4 +1,4 @@
-import type { Challenge, PollResult } from './api';
+import { HostedAPIError, type Challenge, type PollResult } from './api';
 import type {
   AuthPollOutcome,
   BiliChallengePoller,
@@ -76,8 +76,7 @@ export function createAuthController(
     },
 
     async dispose(): Promise<void> {
-      if (disposed) return;
-      disposed = true;
+      if (!disposed) disposed = true;
       const current = poller;
       poller = undefined;
       await Promise.all([flow.dispose(), current?.stop(), starting]);
@@ -90,28 +89,36 @@ export function createAuthFlow(api: AuthAPI, callbacks: AuthCallbacks): AuthFlow
   let disposed = false;
   let polling = false;
   let sessionCompletion: Promise<void> | undefined;
+  let cleanupOperation: Promise<void> | undefined;
+  const cleanupFailure = (): HostedAPIError => new HostedAPIError('operation_failed', 0);
+  const cleanupChallenge = (): Promise<void> => {
+    const current = activeChallenge;
+    if (!current) return Promise.resolve();
+    if (cleanupOperation) return cleanupOperation;
+    let owned!: Promise<void>;
+    owned = (async () => {
+      try {
+        await api.cancelLogin(current.challengeId);
+      } catch {
+        throw cleanupFailure();
+      }
+      if (activeChallenge === current) activeChallenge = undefined;
+    })().finally(() => {
+      if (cleanupOperation === owned) cleanupOperation = undefined;
+    });
+    cleanupOperation = owned;
+    return owned;
+  };
 
   return Object.freeze({
     async start(): Promise<void> {
       if (disposed) return;
-      const previous = activeChallenge;
-      activeChallenge = undefined;
-      if (previous) {
-        try {
-          await api.cancelLogin(previous.challengeId);
-        } catch (error) {
-          if (disposed) {
-            await api.cancelLogin(previous.challengeId);
-            return;
-          }
-          if (!activeChallenge) activeChallenge = previous;
-          throw error;
-        }
-      }
+      if (activeChallenge) await cleanupChallenge();
       if (disposed) return;
       const created = await api.beginLogin();
       if (disposed) {
-        await api.cancelLogin(created.challengeId);
+        activeChallenge = created;
+        await cleanupChallenge();
         return;
       }
       activeChallenge = created;
@@ -159,13 +166,16 @@ export function createAuthFlow(api: AuthAPI, callbacks: AuthCallbacks): AuthFlow
     },
 
     async dispose(): Promise<void> {
-      if (disposed) return;
-      disposed = true;
-      const current = activeChallenge;
+      if (!disposed) disposed = true;
       const pendingSession = sessionCompletion;
-      activeChallenge = undefined;
-      if (current) await api.cancelLogin(current.challengeId);
+      let cleanupError: unknown;
+      try {
+        await cleanupChallenge();
+      } catch (error) {
+        cleanupError = error;
+      }
       await pendingSession;
+      if (cleanupError) throw cleanupError;
     },
   });
 }

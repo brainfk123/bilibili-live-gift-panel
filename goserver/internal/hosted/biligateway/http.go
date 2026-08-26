@@ -232,6 +232,10 @@ func (handler *HTTPHandler) pollChallenge(response http.ResponseWriter, request 
 		writeHTTPError(response, http.StatusGone, "expired")
 		return
 	}
+	if errors.Is(err, identity.ErrVerificationUnavailable) {
+		writeHTTPError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	}
 	if err != nil {
 		writeHTTPError(response, http.StatusUnauthorized, "authentication_failed")
 		return

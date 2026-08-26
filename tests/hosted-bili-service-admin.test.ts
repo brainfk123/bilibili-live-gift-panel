@@ -1,5 +1,17 @@
-import{describe,expect,it}from'vitest';import{HostedAPI}from'../src/hosted/api';
+import{describe,expect,it}from'vitest';import{HostedAPI,HostedAPIError}from'../src/hosted/api';
 const json=(body:unknown,status=200)=>new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json'}});
+
+describe('administrator Bilibili service polling failures', () => {
+  it('preserves the exact temporarily-unavailable transport classification', async () => {
+    const api = await HostedAPI.connect(async (input) => input === '/api/bootstrap'
+      ? json({ csrfToken: 'csrf' })
+      : json({ error: 'temporarily_unavailable' }, 503));
+
+    await expect(api.pollBiliServiceChallenge('private-proof')).rejects.toEqual(
+      new HostedAPIError('temporarily_unavailable', 503),
+    );
+  });
+});
 
 describe('administrator Bilibili service challenge cancellation', () => {
   it('sends an encoded same-origin DELETE and accepts only an empty 204 response', async () => {

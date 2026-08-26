@@ -311,6 +311,92 @@ describe('administrator section lifetime fence', () => {
     await mounted.dispose();
   });
 
+  it('awaits Bilibili challenge cleanup before mounting the next administrator section', async () => {
+    let releaseCleanup!: () => void;
+    const cleanupPending = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    const api = {
+      adminSession: vi.fn(async () => undefined),
+      adminOverview: vi.fn(async () => ({totalAccounts:0,activeAccounts:0,disabledAccounts:0,missingRooms:0,missingObs:0,attention:[],recentEvents:[]})),
+      adminAccounts: vi.fn(async () => ({items:[]})),
+      biliServiceStatus: vi.fn(async () => ({version:0,health:'missing' as const})),
+      checkBiliService: vi.fn(),
+      beginBiliServiceChallenge: vi.fn(async () => ({challengeId:'composition-private',qrImage:'data:image/png;base64,qr',expiresAt:'2030-01-01T00:05:00Z'})),
+      cancelBiliServiceChallenge: vi.fn(() => cleanupPending),
+      replaceBiliServiceCredential: vi.fn(),
+      authorizeAdminOperation: vi.fn(),
+    };
+    const document: DocumentLike = {
+      createElement: (tag) => new Element(tag, document),
+      createTextNode: (text) => { const node = new Element('#text', document); node.textContent = text; return node; },
+    };
+    const root = new Element('div', document);
+    const mounted = mountAdminView(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountAdminView>[1]);
+    await vi.waitFor(() => expect(button(root, 'B站服务账号')).toBeDefined());
+    button(root, 'B站服务账号').listeners.get('click')?.();
+    await vi.waitFor(() => expect(button(root, '更换服务账号')).toBeDefined());
+    button(root, '更换服务账号').listeners.get('click')?.();
+    await vi.waitFor(() => expect(descendants(root).some((element) => element.tagName === 'img')).toBe(true));
+
+    button(root, '主播账号').listeners.get('click')?.();
+    await vi.waitFor(() => expect(api.cancelBiliServiceChallenge).toHaveBeenCalledWith('composition-private'));
+
+    expect(api.adminAccounts).not.toHaveBeenCalled();
+    releaseCleanup();
+    await vi.waitFor(() => expect(api.adminAccounts).toHaveBeenCalledTimes(1));
+
+    expect(text(root)).toContain('搜索、筛选和批量管理账号');
+    await mounted.dispose();
+  });
+
+  it('propagates Bilibili section disposal failure and retries its retained cleanup ownership', async () => {
+    const cleanupFailure = new Error('RAW COMPOSITION DELETE composition-retry-private');
+    let rejectCleanup!: (reason: Error) => void;
+    const cleanupPending = new Promise<void>((_resolve, reject) => { rejectCleanup = reject; });
+    const api = {
+      adminSession: vi.fn(async () => undefined),
+      adminOverview: vi.fn(async () => ({totalAccounts:0,activeAccounts:0,disabledAccounts:0,missingRooms:0,missingObs:0,attention:[],recentEvents:[]})),
+      adminAccounts: vi.fn(async () => ({items:[]})),
+      biliServiceStatus: vi.fn(async () => ({version:0,health:'missing' as const})),
+      checkBiliService: vi.fn(),
+      beginBiliServiceChallenge: vi.fn(async () => ({challengeId:'composition-retry-private',qrImage:'data:image/png;base64,qr',expiresAt:'2030-01-01T00:05:00Z'})),
+      cancelBiliServiceChallenge: vi.fn()
+        .mockImplementationOnce(() => cleanupPending)
+        .mockResolvedValue(undefined),
+      replaceBiliServiceCredential: vi.fn(),
+      authorizeAdminOperation: vi.fn(),
+    };
+    const document: DocumentLike = {
+      createElement: (tag) => new Element(tag, document),
+      createTextNode: (text) => { const node = new Element('#text', document); node.textContent = text; return node; },
+    };
+    const root = new Element('div', document);
+    const mounted = mountAdminView(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountAdminView>[1]);
+    await vi.waitFor(() => expect(button(root, 'B站服务账号')).toBeDefined());
+    button(root, 'B站服务账号').listeners.get('click')?.();
+    await vi.waitFor(() => expect(button(root, '更换服务账号')).toBeDefined());
+    button(root, '更换服务账号').listeners.get('click')?.();
+    await vi.waitFor(() => expect(descendants(root).some((element) => element.tagName === 'img')).toBe(true));
+
+    button(root, '主播账号').listeners.get('click')?.();
+    await vi.waitFor(() => expect(api.cancelBiliServiceChallenge).toHaveBeenCalledTimes(1));
+    const disposing = mounted.dispose();
+    rejectCleanup(cleanupFailure);
+
+    await expect(disposing).rejects.toMatchObject({code:'operation_failed'});
+
+    expect(api.cancelBiliServiceChallenge).toHaveBeenCalledTimes(1);
+    expect(api.cancelBiliServiceChallenge).toHaveBeenNthCalledWith(1, 'composition-retry-private');
+    expect(api.adminAccounts).not.toHaveBeenCalled();
+    expect(descendants(root).some((element) => element.tagName === 'img')).toBe(false);
+    expect(text(root)).not.toContain(cleanupFailure.message);
+
+    await mounted.dispose();
+
+    expect(api.cancelBiliServiceChallenge).toHaveBeenCalledTimes(2);
+    expect(api.cancelBiliServiceChallenge).toHaveBeenNthCalledWith(2, 'composition-retry-private');
+    expect(root.children).toHaveLength(0);
+  });
+
   it('keeps the Bilibili TOTP cells in a dedicated horizontal control', async () => {
     let poll!: () => void;
     const timers = {

@@ -94,36 +94,36 @@ export function mountAdminView(root: HTMLElement, api: HostedAPI) {
       initial: activeSection,
       mount: (section, host, navigate) => {
         activeSection = section;
-        const localDisposers: Array<() => void> = [];
+        const localDisposers: Array<() => void | Promise<void>> = [];
         const title = document.createElement('h2'); title.className = 'hosted-admin-section-title';
         const intro = document.createElement('p'); intro.className = 'hosted-admin-section-intro';
         host.append(title, intro, status);
 
         if (section === 'overview') {
           title.textContent = '运营总览'; intro.textContent = '先看需要处理的事项，再进入对应资源。';
-          const view=mountAdminOverview(host,api,navigate);localDisposers.push(()=>{void view.dispose()});
+          const view=mountAdminOverview(host,api,navigate);localDisposers.push(()=>view.dispose());
         }
 
         if (section === 'accounts') {
           title.textContent = '主播账号'; intro.textContent = '搜索、筛选和批量管理账号；OBS 设置位于账号详情。';
-          const view=mountAccountList(host,api);localDisposers.push(()=>{void view.dispose()});
+          const view=mountAccountList(host,api);localDisposers.push(()=>view.dispose());
         }
 
         if (section === 'invitations') {
           title.textContent = '邀请码'; intro.textContent = '搜索、排序、复制、分享或作废邀请码；创建设置按需展开。';
-          const view=mountAdminInvitationView(host,api);localDisposers.push(()=>{void view.dispose()});
+          const view=mountAdminInvitationView(host,api);localDisposers.push(()=>view.dispose());
         }
 
         if (section === 'bili-service') {
           title.textContent = 'B站服务账号'; intro.textContent = '查看健康状态、主动检查或按三步流程安全替换。';
-          const view=mountBiliServiceView(host,api);localDisposers.push(()=>{void view.dispose()});
+          const view=mountBiliServiceView(host,api);localDisposers.push(()=>view.dispose());
         }
 
         if (section === 'settings') {
           title.textContent = '系统设置'; intro.textContent = '查看登录状态和恢复资料；诊断信息默认收起。';
-          const view=mountAdminSettingsView(host,api,renderLogin);localDisposers.push(()=>{void view.dispose()});
+          const view=mountAdminSettingsView(host,api,renderLogin);localDisposers.push(()=>view.dispose());
         }
-        return { dispose: () => { for (const dispose of localDisposers) dispose(); } };
+        return { dispose: async () => { for (const dispose of localDisposers) await dispose(); } };
       },
     });
   };

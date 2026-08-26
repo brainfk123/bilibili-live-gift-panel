@@ -497,6 +497,51 @@ describe('Bilibili service replacement view', () => {
     await view.dispose();
   });
 
+  it('retains the same QR through temporary unavailability and resumes polling successfully', async () => {
+    const timers = new ControlledTimers();
+    const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (text) => { const node = new Element('#text', document); node.textContent = text; return node; } };
+    const root = new Element('div', document);
+    const cancelBiliServiceChallenge = vi.fn(async () => undefined);
+    const pollBiliServiceChallenge = vi.fn()
+      .mockRejectedValueOnce(new HostedAPIError('temporarily_unavailable', 503))
+      .mockResolvedValueOnce({ status: 'scanned' as const });
+    const api = {
+      biliServiceStatus: vi.fn(async () => ({ version: 0 as const, health: 'missing' as const })),
+      checkBiliService: vi.fn(),
+      beginBiliServiceChallenge: vi.fn(async () => ({
+        challengeId: 'admin-private-challenge',
+        qrImage: 'data:image/png;base64,retained-qr',
+        expiresAt: '2030-01-01T00:05:00Z',
+      })),
+      pollBiliServiceChallenge,
+      cancelBiliServiceChallenge,
+      replaceBiliServiceCredential: vi.fn(),
+      authorizeAdminOperation: vi.fn(),
+    };
+    const view = mountBiliServiceView(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountBiliServiceView>[1], timers);
+    await flush();
+    button(root, '更换服务账号').listeners.get('click')?.();
+    await flush();
+
+    await timers.fireNext();
+
+    expect(descendants(root).some((node) => node.textContent === '登录服务暂不可用，稍后将自动重试')).toBe(true);
+    expect(descendants(root).find((node) => node.tagName === 'img')?.src).toBe('data:image/png;base64,retained-qr');
+    expect(descendants(root).flatMap((node) => [node.textContent, node.src, ...node.attributes.values()]).join('|')).not.toContain('admin-private-challenge');
+    expect(cancelBiliServiceChallenge).not.toHaveBeenCalled();
+    expect(timers.nextDelay()).toBe(2_000);
+
+    await timers.fireNext();
+    await timers.fireNext();
+
+    expect(pollBiliServiceChallenge).toHaveBeenCalledTimes(2);
+    expect(descendants(root).some((node) => node.textContent === '已扫码，请在手机确认')).toBe(true);
+    expect(descendants(root).find((node) => node.tagName === 'img')?.src).toBe('data:image/png;base64,retained-qr');
+    expect(cancelBiliServiceChallenge).not.toHaveBeenCalled();
+    expect(timers.nextDelay()).toBe(6_000);
+    await view.dispose();
+  });
+
   it('clears service challenge polling on cancel and dispose', async () => {
     const mount = async () => {
       const timers = new ControlledTimers();

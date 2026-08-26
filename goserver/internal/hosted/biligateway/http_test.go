@@ -232,7 +232,7 @@ func TestHTTPPollChallengeProjectsOnlyCredentialStage(t *testing.T) {
 	}
 }
 
-func TestHTTPPollChallengeRejectsExpiredAndUnknownStages(t *testing.T) {
+func TestHTTPPollChallengeProjectsErrorsWithoutLeakingChallengeState(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		stage      identity.VerificationStage
@@ -241,6 +241,7 @@ func TestHTTPPollChallengeRejectsExpiredAndUnknownStages(t *testing.T) {
 		wantBody   string
 	}{
 		{name: "expired", pollErr: identity.ErrChallengeExpired, wantStatus: http.StatusGone, wantBody: "{\"error\":\"expired\"}\n"},
+		{name: "temporary upstream failure", pollErr: identity.ErrVerificationUnavailable, wantStatus: http.StatusServiceUnavailable, wantBody: "{\"error\":\"temporarily_unavailable\"}\n"},
 		{name: "unknown stage", stage: identity.VerificationStage("private-future-stage"), wantStatus: http.StatusUnauthorized, wantBody: "{\"error\":\"authentication_failed\"}\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

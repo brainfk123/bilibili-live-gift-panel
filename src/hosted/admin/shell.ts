@@ -46,13 +46,17 @@ export function mountAdminShell(
   const navigate = (section: AdminSection): void => {
     if (menuOpen) setMenuOpen(false);
     if (disposed || section === active) return;
-    transition = transition.then(async () => {
+    const run = async (): Promise<void> => {
       if (disposed || section === active) return;
-      const old = current; current = { dispose() {} };
+      const old = current;
       await old.dispose();
+      if (current === old) current = { dispose() {} };
       if (disposed) return;
       active = section; refreshNavigation(); content.replaceChildren(); current = options.mount(section, content, navigate);
-    });
+    };
+    const scheduled = transition.then(run, run);
+    transition = scheduled;
+    void scheduled.catch(() => undefined);
   };
   for (const item of adminSections) {
     const button = document.createElement('button'); button.type = 'button'; button.textContent = item.label; button.addEventListener('click', () => navigate(item.id));
@@ -81,7 +85,15 @@ export function mountAdminShell(
   current = options.mount(active, content, navigate);
 
   return Object.freeze({ dispose: async (): Promise<void> => {
-    if (disposed) return; disposed = true; frame.removeEventListener('keydown', onKeyDown);
-    await transition; await current.dispose();
+    if (!disposed) { disposed = true; frame.removeEventListener('keydown', onKeyDown); }
+    try {
+      await transition;
+    } catch (error) {
+      transition = Promise.resolve();
+      throw error;
+    }
+    const activeView = current;
+    await activeView.dispose();
+    if (current === activeView) current = { dispose() {} };
   } });
 }

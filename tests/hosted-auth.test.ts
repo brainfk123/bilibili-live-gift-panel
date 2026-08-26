@@ -586,6 +586,101 @@ describe('Bilibili authentication lifecycle', () => {
     expect(JSON.stringify(root)).not.toContain('qr.invalid/secret');
   });
 
+  it('removes QR secrets immediately and offers a safe retry when cancellation fails', async () => {
+    let rejectCleanup!: (reason: Error) => void;
+    const cleanupPending = new Promise<void>((_resolve, reject) => { rejectCleanup = reject; });
+    const rawFailure = new Error('RAW DELETE secret-challenge-1 public-key-1');
+    const cancelLogin = vi.fn()
+      .mockImplementationOnce(() => cleanupPending)
+      .mockResolvedValue(undefined);
+    const onExit = vi.fn();
+    const { root } = authDOM();
+    const mounted = mountAuthView(root as unknown as HTMLElement, authAPI({ cancelLogin }), {
+      onSignedIn: vi.fn(), onRegistrationRequired: vi.fn(), onExit,
+    }, new AuthControlledTimers());
+    await mounted.ready;
+
+    button(root, '取消').click();
+
+    expect(image(root).src).toBe('');
+    expect(link(root, '在本机打开 B 站确认').href).toBe('');
+    expect(onExit).not.toHaveBeenCalled();
+    rejectCleanup(rawFailure);
+    await vi.waitFor(() => expect(status(root).textContent).toBe('二维码清理失败，请重试返回'));
+
+    expect(status(root).dataset.kind).toBe('error');
+    expect(button(root, '重试返回').disabled).toBe(false);
+    const rendered = descendants(root).flatMap((element) => [
+      element.textContent,
+      element.src,
+      element.href,
+      ...element.attributes.values(),
+      ...Object.values(element.dataset),
+    ]).join('|');
+    expect(rendered).not.toContain(challenge().challengeId);
+    expect(rendered).not.toContain(challenge().qrImage);
+    expect(rendered).not.toContain(challenge().verificationUrl);
+    expect(rendered).not.toContain(rawFailure.message);
+
+    button(root, '重试返回').click();
+    await vi.waitFor(() => expect(onExit).toHaveBeenCalledTimes(1));
+
+    expect(cancelLogin).toHaveBeenCalledTimes(2);
+    expect(cancelLogin).toHaveBeenNthCalledWith(1, challenge().challengeId);
+    expect(cancelLogin).toHaveBeenNthCalledWith(2, challenge().challengeId);
+    expect(root.children).toHaveLength(0);
+  });
+
+  it('rejects failed public disposal, clears local secrets in finally, and retries the retained challenge', async () => {
+    const cancelLogin = vi.fn()
+      .mockRejectedValueOnce(new Error('RAW PUBLIC DISPOSE secret-challenge-1'))
+      .mockResolvedValue(undefined);
+    const { root } = authDOM();
+    const mounted = mountAuthView(root as unknown as HTMLElement, authAPI({ cancelLogin }), {
+      onSignedIn: vi.fn(), onRegistrationRequired: vi.fn(), onExit: vi.fn(),
+    }, new AuthControlledTimers());
+    await mounted.ready;
+
+    await expect(mounted.dispose()).rejects.toMatchObject({ code: 'operation_failed' });
+
+    expect(root.children).toHaveLength(0);
+    await mounted.dispose();
+
+    expect(cancelLogin).toHaveBeenCalledTimes(2);
+    expect(cancelLogin).toHaveBeenNthCalledWith(1, challenge().challengeId);
+    expect(cancelLogin).toHaveBeenNthCalledWith(2, challenge().challengeId);
+  });
+
+  it('joins concurrent disposal with late challenge cleanup without duplicate DELETE requests', async () => {
+    let releaseBegin!: (value: ReturnType<typeof challenge>) => void;
+    let releaseCleanup!: () => void;
+    const creating = new Promise<ReturnType<typeof challenge>>((resolve) => { releaseBegin = resolve; });
+    const cleanupPending = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    const cancelLogin = vi.fn(() => cleanupPending);
+    const beginLogin = vi.fn(() => creating);
+    const { root } = authDOM();
+    const mounted = mountAuthView(root as unknown as HTMLElement, authAPI({
+      beginLogin,
+      cancelLogin,
+    }), { onSignedIn: vi.fn(), onRegistrationRequired: vi.fn(), onExit: vi.fn() }, new AuthControlledTimers());
+    await vi.waitFor(() => expect(beginLogin).toHaveBeenCalledTimes(1));
+
+    const first = mounted.dispose();
+    let secondSettled = false;
+    const second = mounted.dispose().finally(() => { secondSettled = true; });
+    releaseBegin(challenge());
+    await vi.waitFor(() => expect(cancelLogin).toHaveBeenCalledTimes(1));
+    await Promise.resolve();
+
+    expect(secondSettled).toBe(false);
+    releaseCleanup();
+    await Promise.all([mounted.ready, first, second]);
+
+    expect(cancelLogin).toHaveBeenCalledTimes(1);
+    expect(cancelLogin).toHaveBeenCalledWith(challenge().challengeId);
+    expect(root.children).toHaveLength(0);
+  });
+
   it('polls pending and scanned then creates a site session and forgets the terminal challenge', async () => {
     const cancel = vi.fn(async () => undefined);
     const api = {
@@ -759,14 +854,18 @@ describe('Bilibili authentication lifecycle', () => {
     rejectCancellation(new Error('first cancellation failed'));
     const completions = await Promise.allSettled([regenerating, disposing]);
 
-    expect(cancelLogin).toHaveBeenCalledTimes(2);
+    expect(cancelLogin).toHaveBeenCalledTimes(1);
     expect(cancelLogin).toHaveBeenNthCalledWith(1, 'challenge-1');
-    expect(cancelLogin).toHaveBeenNthCalledWith(2, 'challenge-1');
     expect(beginLogin).toHaveBeenCalledTimes(1);
-    expect(completions).toEqual([
-      { status: 'fulfilled', value: undefined },
-      { status: 'fulfilled', value: undefined },
-    ]);
+    expect(completions.map((result) => result.status)).toEqual(['rejected', 'rejected']);
+    expect(completions.every((result) => result.status === 'rejected'
+      && result.reason instanceof HostedAPIError
+      && result.reason.code === 'operation_failed')).toBe(true);
+
+    await controller.dispose();
+
+    expect(cancelLogin).toHaveBeenCalledTimes(2);
+    expect(cancelLogin).toHaveBeenNthCalledWith(2, 'challenge-1');
   });
 
   it('passes a one-shot registration intent only through the registration callback', async () => {

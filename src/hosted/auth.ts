@@ -4,6 +4,7 @@ import {
   type AuthAPI,
   type AuthCallbacks,
 } from './auth-controller';
+import { HostedAPIError } from './api';
 import {
   createBiliChallengePoller,
   type BiliChallengePollSnapshot,
@@ -58,6 +59,8 @@ export function mountAuthView(
   type PrimaryMode = 'none' | 'retry' | 'regenerate';
   let primaryMode: PrimaryMode = 'none';
   let disposed = false;
+  let cancellationRequested = false;
+  let cancellationOperation: Promise<void> | undefined;
 
   const setStatus = (message: string, kind: string, busy = false): void => {
     status.textContent = message;
@@ -103,11 +106,29 @@ export function mountAuthView(
     primary.disabled = false;
     primary.setAttribute('aria-busy', 'false');
   };
+  const showCancel = (label = '取消', busy = false): void => {
+    cancel.textContent = label;
+    cancel.disabled = busy;
+    cancel.setAttribute('aria-busy', String(busy));
+  };
+  const renderCleanupFailure = (action: 'cancel' | 'regenerate'): void => {
+    clearChallenge('二维码清理失败');
+    if (action === 'cancel') {
+      setStatus('二维码清理失败，请重试返回', 'error');
+      hidePrimary();
+      showCancel('重试返回');
+      return;
+    }
+    setStatus('二维码清理失败，请先重试清理', 'error');
+    showPrimary('重试清理并重新生成', 'regenerate');
+    showCancel();
+  };
   const renderCreating = (): void => {
     clearChallenge('二维码生成中');
     showPlaceholder('二维码生成中', true);
     setStatus('正在创建二维码', 'creating', true);
     showPrimary('正在创建', 'regenerate', true);
+    showCancel();
   };
   const renderChallenge = (next: 'pending' | 'scanned', challenge: Parameters<AuthCallbacks['onStatus']>[1]): void => {
     if (!challenge) return;
@@ -128,6 +149,7 @@ export function mountAuthView(
     expiry.hidden = false;
     setStatus(next === 'pending' ? '请使用 B 站客户端扫码' : '已扫码，请在手机确认', next === 'pending' ? 'pending' : 'success');
     hidePrimary();
+    showCancel();
   };
   const flow = createAuthFlow(api, {
     onStatus(next, challenge) {
@@ -174,8 +196,13 @@ export function mountAuthView(
   const startChallenge = (): Promise<void> => {
     if (disposed) return Promise.resolve();
     renderCreating();
-    return controller.start().catch(() => {
+    return controller.start().catch((error) => {
       if (disposed) return;
+      if (cancellationRequested) return;
+      if (error instanceof HostedAPIError && error.code === 'operation_failed') {
+        renderCleanupFailure('regenerate');
+        return;
+      }
       clearChallenge('二维码创建失败');
       setStatus('无法创建二维码，请再次尝试', 'error');
       showPrimary('再次尝试', 'regenerate');
@@ -187,17 +214,43 @@ export function mountAuthView(
   });
   const ready = startChallenge();
   const dispose = async (): Promise<void> => {
-    if (disposed) return;
     disposed = true;
-    await controller.dispose();
-    qr.removeAttribute('src');
-    mobileLink.removeAttribute('href');
-    root.replaceChildren();
+    try {
+      await controller.dispose();
+    } finally {
+      qr.removeAttribute('src');
+      mobileLink.removeAttribute('href');
+      root.replaceChildren();
+    }
+  };
+  const cancelAndExit = (): Promise<void> => {
+    if (disposed) return Promise.resolve();
+    if (cancellationOperation) return cancellationOperation;
+    cancellationRequested = true;
+    clearChallenge('正在清理二维码');
+    setStatus('正在清理二维码', 'creating', true);
+    hidePrimary();
+    showCancel('正在返回…', true);
+    let owned!: Promise<void>;
+    owned = (async () => {
+      try {
+        await controller.dispose();
+      } catch {
+        if (!disposed) renderCleanupFailure('cancel');
+        return;
+      }
+      if (disposed) return;
+      disposed = true;
+      root.replaceChildren();
+      callbacks.onExit?.();
+    })().finally(() => {
+      if (cancellationOperation === owned) cancellationOperation = undefined;
+    });
+    cancellationOperation = owned;
+    return owned;
   };
   cancel.addEventListener('click', () => {
-    if (disposed) return;
-    cancel.disabled = true;
-    void dispose().then(() => callbacks.onExit?.());
+    void cancelAndExit();
   });
   return Object.freeze({ ready, dispose });
 }
