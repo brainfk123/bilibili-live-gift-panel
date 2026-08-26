@@ -38,9 +38,12 @@ export function mountBiliServiceView(host: HTMLElement, api: BiliServiceAPI, tim
     if (!snapshot.challenge) return;
     const flow = document.createElement('section'); flow.className = 'hosted-admin-bili-flow';
     const intro = document.createElement('div'); intro.className = 'hosted-admin-bili-step';
-    const heading = document.createElement('h4'); heading.textContent = snapshot.phase === 'qr' ? '1. 扫描二维码登录服务账号' : '2. 输入授权码以确认替换';
+    const qrPhase = snapshot.phase === 'qr' || snapshot.phase === 'cleanup_failed';
+    const heading = document.createElement('h4'); heading.textContent = qrPhase ? '1. 扫描二维码登录服务账号' : '2. 输入授权码以确认替换';
     const guidance = document.createElement('p');
-    guidance.textContent = snapshot.challengeStatus === 'verified'
+    guidance.textContent = snapshot.phase === 'cleanup_failed'
+      ? '二维码清理失败，请重试取消或重新生成'
+      : snapshot.challengeStatus === 'verified'
       ? '二维码已确认，可以继续'
       : snapshot.challengeStatus === 'scanned'
         ? '已扫码，请在手机确认'
@@ -54,9 +57,9 @@ export function mountBiliServiceView(host: HTMLElement, api: BiliServiceAPI, tim
     const continueButton = document.createElement('button'); continueButton.type = 'button'; continueButton.dataset.variant = 'primary'; continueButton.textContent = '二维码确认后继续';
     continueButton.disabled = snapshot.phase !== 'qr' || snapshot.challengeStatus !== 'verified';
     continueButton.addEventListener('click', () => controller.enterAuthorization());
-    const regenerate = document.createElement('button'); regenerate.type = 'button'; regenerate.dataset.variant = 'secondary'; regenerate.textContent = '重新生成'; regenerate.disabled = snapshot.phase !== 'qr';
+    const regenerate = document.createElement('button'); regenerate.type = 'button'; regenerate.dataset.variant = 'secondary'; regenerate.textContent = '重新生成'; regenerate.disabled = !qrPhase;
     regenerate.addEventListener('click', () => { void runAdminAction(regenerate, { idle: '重新生成', busy: '生成中…' }, () => controller.beginReplacement()); });
-    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.dataset.variant = 'quiet'; cancel.textContent = '取消'; cancel.disabled = snapshot.phase !== 'qr'; cancel.addEventListener('click', () => { void controller.cancelReplacement(); });
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.dataset.variant = 'quiet'; cancel.textContent = '取消'; cancel.disabled = !qrPhase; cancel.addEventListener('click', () => { void controller.cancelReplacement().catch(() => undefined); });
     actions.append(continueButton, regenerate, cancel);
     flow.append(intro, figure, actions);
     if (snapshot.phase === 'authorizing' || snapshot.phase === 'replacing') {
@@ -87,7 +90,7 @@ export function mountBiliServiceView(host: HTMLElement, api: BiliServiceAPI, tim
       check.textContent = '立即检查';
     }
     begin.disabled = snapshot.phase !== 'idle';
-    if (snapshot.notice) notice.show(snapshot.notice.kind, snapshot.notice.message, snapshot.notice.kind === 'error' ? () => { void controller.load(); } : undefined); else notice.clear();
+    if (snapshot.notice) notice.show(snapshot.notice.kind, snapshot.notice.message, snapshot.notice.kind === 'error' && snapshot.phase === 'idle' ? () => { void controller.load(); } : undefined); else notice.clear();
     renderFlow(snapshot);
   };
 
@@ -95,5 +98,9 @@ export function mountBiliServiceView(host: HTMLElement, api: BiliServiceAPI, tim
   check.addEventListener('click', () => { void controller.check(); });
   begin.addEventListener('click', () => { void runAdminAction(begin, { idle: '更换服务账号', busy: '创建中…' }, () => controller.beginReplacement()); });
   void controller.load();
-  return { async dispose() { disposed = true; await controller.dispose(); code?.dispose(); notice.dispose(); flowHost.replaceChildren(); } };
+  return { async dispose() {
+    disposed = true;
+    try { await controller.dispose(); }
+    finally { code?.dispose(); code = undefined; notice.dispose(); flowHost.replaceChildren(); }
+  } };
 }

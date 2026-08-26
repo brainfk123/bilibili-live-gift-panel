@@ -8,13 +8,13 @@ import {
 } from '../bili-challenge-poller';
 import { authorizeAdminOperation } from './operation-authorization';
 
-export type BiliServicePhase = 'idle' | 'checking' | 'creating' | 'qr' | 'authorizing' | 'replacing';
+export type BiliServicePhase = 'idle' | 'checking' | 'creating' | 'cleaning' | 'cleanup_failed' | 'qr' | 'authorizing' | 'replacing';
 export type BiliServiceNotice = { kind: 'success' | 'error'; message: string };
 
 export interface BiliServiceSnapshot {
   phase: BiliServicePhase;
   status?: BiliServiceStatus;
-  challenge?: Challenge;
+  challenge?: Pick<Challenge, 'qrImage' | 'expiresAt'>;
   challengeStatus?: BiliServiceChallengeStage;
   notice?: BiliServiceNotice;
 }
@@ -51,9 +51,20 @@ export function createBiliServiceController(
   let notice: BiliServiceNotice | undefined;
   let poller: BiliChallengePoller | undefined;
   let beginOperation: Promise<void> | undefined;
+  let cleanupOperation: Promise<void> | undefined;
   let generation = 0;
   let disposed = false;
-  const publish = (): void => { if (!disposed) render({ phase, ...(status ? { status } : {}), ...(challenge ? { challenge: { ...challenge } } : {}), ...(challengeStatus ? { challengeStatus } : {}), ...(notice ? { notice: { ...notice } } : {}) }); };
+  const publish = (): void => {
+    if (disposed) return;
+    const revealChallenge = phase === 'qr' || phase === 'cleanup_failed' || phase === 'authorizing' || phase === 'replacing';
+    render({
+      phase,
+      ...(status ? { status } : {}),
+      ...(challenge && revealChallenge ? { challenge: { qrImage: challenge.qrImage, expiresAt: challenge.expiresAt } } : {}),
+      ...(challengeStatus ? { challengeStatus } : {}),
+      ...(notice ? { notice: { ...notice } } : {}),
+    });
+  };
   const complete = (current: number): boolean => !disposed && current === generation;
   const clearChallenge = (): void => { challenge = undefined; challengeStatus = undefined; };
   const stopPolling = (): Promise<void> => {
@@ -61,8 +72,29 @@ export function createBiliServiceController(
     poller = undefined;
     return current?.stop() ?? Promise.resolve();
   };
-  const cancelChallenge = async (active?: Challenge): Promise<void> => {
-    if (active && api.cancelBiliServiceChallenge) await api.cancelBiliServiceChallenge(active.challengeId);
+  const cleanupFailure = (): HostedAPIError => new HostedAPIError('operation_failed', 0);
+  const publishCleanupFailure = (): void => {
+    if (disposed) return;
+    phase = 'cleanup_failed';
+    notice = { kind: 'error', message: '二维码清理失败，请重试取消或重新生成' };
+    publish();
+  };
+  const cleanupChallenge = (): Promise<void> => {
+    if (!challenge) return Promise.resolve();
+    if (cleanupOperation) return cleanupOperation;
+    const active = challenge;
+    let owned!: Promise<void>;
+    owned = (async () => {
+      if (!api.cancelBiliServiceChallenge) throw cleanupFailure();
+      try {
+        await api.cancelBiliServiceChallenge(active.challengeId);
+      } catch {
+        throw cleanupFailure();
+      }
+      if (challenge?.challengeId === active.challengeId) clearChallenge();
+    })().finally(() => { if (cleanupOperation === owned) cleanupOperation = undefined; });
+    cleanupOperation = owned;
+    return owned;
   };
   const failureNotice = (snapshot: BiliChallengePollSnapshot): BiliServiceNotice | undefined => {
     if (!snapshot.failureKind) return undefined;
@@ -149,27 +181,38 @@ export function createBiliServiceController(
       if (!api.beginBiliServiceChallenge || disposed) return Promise.resolve();
       if (beginOperation) return beginOperation;
       const current = ++generation;
-      const previous = challenge;
-      phase = 'creating'; notice = undefined; clearChallenge(); publish();
+      phase = 'creating'; notice = undefined; publish();
       let owned!: Promise<void>;
       owned = (async () => {
+        await stopPolling();
         try {
-          await stopPolling();
-          await cancelChallenge(previous);
-          if (!complete(current)) return;
-          const created = await api.beginBiliServiceChallenge!();
-          if (!complete(current)) { await cancelChallenge(created); return; }
-          challenge = { ...created };
-          challengeStatus = 'pending';
-          phase = 'qr';
-          publish();
-          startPolling(current);
+          await cleanupChallenge();
+        } catch {
+          if (complete(current)) publishCleanupFailure();
+          throw cleanupFailure();
+        }
+        if (!complete(current)) return;
+        let created: Challenge;
+        try {
+          created = await api.beginBiliServiceChallenge!();
         } catch {
           if (!complete(current)) return;
           phase = 'idle';
           notice = { kind: 'error', message: '无法创建服务账号登录二维码，请重试' };
           publish();
+          return;
         }
+        if (!complete(current)) {
+          challenge = { ...created };
+          challengeStatus = 'pending';
+          await cleanupChallenge();
+          return;
+        }
+        challenge = { ...created };
+        challengeStatus = 'pending';
+        phase = 'qr';
+        publish();
+        startPolling(current);
       })().finally(() => { if (beginOperation === owned) beginOperation = undefined; });
       beginOperation = owned;
       return owned;
@@ -186,9 +229,17 @@ export function createBiliServiceController(
     async cancelReplacement(): Promise<void> {
       if (disposed) return;
       generation++;
-      const active = challenge;
-      phase = 'idle'; clearChallenge(); notice = undefined; publish();
-      await Promise.allSettled([stopPolling(), cancelChallenge(active), beginOperation]);
+      const starting = beginOperation;
+      phase = 'cleaning'; notice = undefined; publish();
+      try {
+        await stopPolling();
+        if (starting) await starting;
+        await cleanupChallenge();
+        phase = 'idle'; notice = undefined; publish();
+      } catch {
+        publishCleanupFailure();
+        throw cleanupFailure();
+      }
     },
 
     async authorizeAndReplace(totp: string): Promise<void> {
@@ -213,12 +264,18 @@ export function createBiliServiceController(
     },
 
     async dispose(): Promise<void> {
-      if (disposed) return;
-      disposed = true;
-      generation++;
-      const active = challenge;
-      clearChallenge();
-      await Promise.allSettled([stopPolling(), cancelChallenge(active), beginOperation]);
+      if (!disposed) {
+        disposed = true;
+        generation++;
+      }
+      const starting = beginOperation;
+      try {
+        await stopPolling();
+        if (starting) await starting;
+        await cleanupChallenge();
+      } catch {
+        throw cleanupFailure();
+      }
     },
   };
 }
