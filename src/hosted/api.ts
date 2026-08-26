@@ -19,9 +19,12 @@ export type BiliServiceStatus =
 
 export type PollResult =
   | { status: 'pending'; expiresAt: string }
+  | { status: 'scanned'; expiresAt: string }
   | { status: 'verified'; expiresAt: string }
   | { status: 'registration_required'; registrationIntent: string; expiresAt: string }
   | { status: 'expired' };
+
+export type BiliServiceChallengeStage = 'pending' | 'scanned' | 'verified';
 
 export interface InvitationRecord {
   id: number;
@@ -473,6 +476,7 @@ export class HostedAPI {
         throw new HostedAPIError('invalid_response', response.status);
       }
       if (data.status === 'pending' && exactKeys(data, ['status', 'expiresAt']) && instant(data.expiresAt)) return data as PollResult;
+      if (data.status === 'scanned' && exactKeys(data, ['status', 'expiresAt']) && instant(data.expiresAt)) return data as PollResult;
       if (data.status === 'verified' && exactKeys(data, ['status', 'expiresAt']) && instant(data.expiresAt)) return data as PollResult;
       if (data.status === 'registration_required' && exactKeys(data, ['status', 'registrationIntent', 'expiresAt']) && string(data.registrationIntent) && instant(data.expiresAt)) return data as PollResult;
       throw new HostedAPIError('invalid_response', 200);
@@ -567,6 +571,16 @@ export class HostedAPI {
     throw new HostedAPIError('invalid_response', 200);
   }
   async beginBiliServiceChallenge(): Promise<Challenge> { return this.requireChallenge((await this.request('/api/admin/bili-service/challenge', 'POST', 201)).data); }
+  async pollBiliServiceChallenge(id: string): Promise<{ status: BiliServiceChallengeStage }> {
+    const value = object((await this.request(
+      `/api/admin/bili-service/challenge/${encodeURIComponent(id)}`, 'GET', 200,
+    )).data);
+    if (!value || !exactKeys(value, ['status']) || typeof value.status !== 'string'
+      || !['pending', 'scanned', 'verified'].includes(String(value.status))) {
+      throw new HostedAPIError('invalid_response', 200);
+    }
+    return value as { status: BiliServiceChallengeStage };
+  }
   async checkBiliService():Promise<BiliServiceStatus>{const data=object((await this.request('/api/admin/bili-service/check','POST',200)).data);if(!data||!number(data.version)||!string(data.health))throw new HostedAPIError('invalid_response',200);return this.parseBiliStatus(data)}
   private parseBiliStatus(data:Record<string,unknown>):BiliServiceStatus{if(data.health==='healthy'&&number(data.version)&&data.version>0&&instant(data.lastVerifiedAt)&&exactKeys(data,['version','health','lastVerifiedAt'],['maskedUid','lastReplacedAt']))return{version:data.version,health:'healthy',lastVerifiedAt:data.lastVerifiedAt,...(typeof data.maskedUid==='string'?{maskedUid:data.maskedUid}:{}),...(typeof data.lastReplacedAt==='string'?{lastReplacedAt:data.lastReplacedAt}:{})};if((data.health==='missing'||data.health==='unavailable')&&data.version===0&&exactKeys(data,['version','health']))return{version:0,health:data.health};throw new HostedAPIError('invalid_response',200)}
   async authorizeAdminOperation(totp:string,purpose:'bili_service_replace'|'admin_email_change'|'recovery_regenerate',target:string):Promise<string>{const data=object((await this.request('/api/admin/operation-authorizations','POST',201,{totp,purpose,target})).data);if(!data||!exactKeys(data,['authorizationToken'])||!string(data.authorizationToken))throw new HostedAPIError('invalid_response',201);return data.authorizationToken}

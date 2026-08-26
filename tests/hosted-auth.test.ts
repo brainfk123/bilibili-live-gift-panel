@@ -167,6 +167,28 @@ describe('HostedAPI authentication contract', () => {
     await expect(api.enableAccount(7, 'appeal')).rejects.toMatchObject({ code: 'invalid_response' });
   });
 
+  it('accepts only the exact scanned poll envelope', async () => {
+    const expiresAt = '2030-01-01T00:00:00Z';
+    let responseBody: unknown = { status: 'scanned', expiresAt };
+    const api = await HostedAPI.connect(async (input) => input === '/api/bootstrap'
+      ? json({ csrfToken: 'csrf' })
+      : json(responseBody));
+
+    await expect(api.pollLogin('challenge')).resolves.toEqual({ status: 'scanned', expiresAt });
+    for (const invalid of [
+      { status: 'scanned' },
+      { status: 'scanned', expiresAt, uid: 'must-not-cross' },
+      { status: 'scanned', expiresAt, cookie: 'must-not-cross' },
+      { status: 'scanned', expiresAt, qrcode_key: 'must-not-cross' },
+      { status: 'scanned', expiresAt, rawPayload: 'must-not-cross' },
+      { status: 'scanned', expiresAt, challengeId: 'must-not-cross' },
+      { status: 'scanned', expiresAt, unexpected: 'must-not-cross' },
+    ]) {
+      responseBody = invalid;
+      await expect(api.pollLogin('challenge')).rejects.toMatchObject({ code: 'invalid_response' });
+    }
+  });
+
 });
 
 describe('Bilibili authentication lifecycle', () => {

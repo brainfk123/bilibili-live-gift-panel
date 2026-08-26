@@ -7,7 +7,7 @@ interface MigrationAPI {
   cancelMigration?(id: number): Promise<MigrationJob>;
   rollbackMigration?(id: number, challengeID: string): Promise<MigrationJob>;
   beginLogin?(): Promise<Challenge>;
-  pollLogin?(id: string): Promise<{ status: 'pending' | 'verified' | 'registration_required' | 'expired'; expiresAt?: string }>;
+  pollLogin?(id: string): Promise<{ status: 'pending' | 'scanned' | 'verified' | 'registration_required' | 'expired'; expiresAt?: string }>;
   cancelLogin?(id: string): Promise<void>;
 }
 
