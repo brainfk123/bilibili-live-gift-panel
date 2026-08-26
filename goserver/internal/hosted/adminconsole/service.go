@@ -23,6 +23,14 @@ type MutationServices struct {
 	Enable   func(context.Context, string, int64, string) error
 	Disable  func(context.Context, string, int64, string) error
 	SetQuota func(context.Context, string, int64, uint64, string) error
+	Room     RoomMutation
+}
+
+// RoomMutation is the single administrator room-change interface. Success
+// means the canonical target was persisted through runtime ownership fencing
+// and the durable enabled-account reference snapshot was synchronized.
+type RoomMutation interface {
+	SetRoom(context.Context, int64, string) error
 }
 
 type Service struct {
@@ -119,26 +127,28 @@ func (service *Service) UpdateRoom(ctx context.Context, id int64, roomID string)
 	if service == nil || service.db == nil || id <= 0 || !validRoomID(roomID) {
 		return AccountDetail{}, ErrInvalidQuery
 	}
-	tx, err := service.db.BeginTx(ctx, nil)
-	if err != nil {
-		return AccountDetail{}, err
+	if service.mutations.Room == nil {
+		return AccountDetail{}, errors.New("unavailable")
 	}
-	defer tx.Rollback()
 	var old string
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(room.room_id,'') FROM streamer_accounts a LEFT JOIN account_runtime_rooms room ON room.account_id=a.id WHERE a.id=? FOR UPDATE`, id).Scan(&old); errors.Is(err, sql.ErrNoRows) {
+	if err := service.db.QueryRowContext(ctx, `SELECT COALESCE(room.room_id,'') FROM streamer_accounts a LEFT JOIN account_runtime_rooms room ON room.account_id=a.id WHERE a.id=?`, id).Scan(&old); errors.Is(err, sql.ErrNoRows) {
 		return AccountDetail{}, ErrNotFound
 	} else if err != nil {
 		return AccountDetail{}, err
 	}
+	if err := service.mutations.Room.SetRoom(ctx, id, roomID); err != nil {
+		return AccountDetail{}, err
+	}
+	var canonical string
+	if err := service.db.QueryRowContext(ctx, `SELECT room_id FROM account_runtime_rooms WHERE account_id=?`, id).Scan(&canonical); err != nil || !validRoomID(canonical) {
+		if err != nil {
+			return AccountDetail{}, err
+		}
+		return AccountDetail{}, errors.New("unavailable")
+	}
 	now := time.Now().UTC()
-	if _, err = tx.ExecContext(ctx, `INSERT INTO account_runtime_rooms (account_id,room_id,updated_at) VALUES (?,?,?) ON DUPLICATE KEY UPDATE room_id=VALUES(room_id),updated_at=VALUES(updated_at)`, id, roomID, now); err != nil {
-		return AccountDetail{}, err
-	}
-	payload, _ := json.Marshal(map[string]string{"oldRoomId": old, "newRoomId": roomID})
-	if _, err = tx.ExecContext(ctx, `INSERT INTO audit_events (event_type,actor_admin_identity_id,target_account_id,event_data,created_at) VALUES ('admin_room_updated',1,?,?,?)`, id, payload, now); err != nil {
-		return AccountDetail{}, err
-	}
-	if err = tx.Commit(); err != nil {
+	payload, _ := json.Marshal(map[string]string{"oldRoomId": old, "newRoomId": canonical})
+	if _, err := service.db.ExecContext(ctx, `INSERT INTO audit_events (event_type,actor_admin_identity_id,target_account_id,event_data,created_at) VALUES ('admin_room_updated',1,?,?,?)`, id, payload, now); err != nil {
 		return AccountDetail{}, err
 	}
 	return service.Account(ctx, id)

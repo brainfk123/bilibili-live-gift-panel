@@ -118,6 +118,35 @@ func TestWatcherCompositionPollsThenReloadsLiveReferencesOnCadence(t *testing.T)
 	}
 }
 
+// This test fails if administrator room changes must wait for the cadence, or
+// if a failed durable reference sync is hidden instead of remaining retryable.
+func TestWatcherCompositionRefreshesReferencesImmediatelyAndPropagatesRetry(t *testing.T) {
+	watcher := newFakeRoomWatcher(nil)
+	loader := &fakeReferenceLoader{snapshots: [][]roomwatcher.Reference{
+		{{AccountID: 7, RoomID: "42"}},
+		{{AccountID: 7, RoomID: "84"}},
+	}}
+	composition, err := StartRoomRuntime(context.Background(), watcher, &fakeRoomRuntime{}, loader, RoomRuntimeOptions{ProbeInterval: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer shutdownRoomRuntime(t, composition)
+
+	watcher.failNextReferenceSet()
+	if err := composition.RefreshReferences(context.Background()); !errors.Is(err, ErrRoomRuntimeUnavailable) {
+		t.Fatalf("first RefreshReferences error = %v, want unavailable", err)
+	}
+	if got := watcher.referencesSnapshot(); !slices.Equal(got, []roomwatcher.Reference{{AccountID: 7, RoomID: "42"}}) {
+		t.Fatalf("failed refresh changed watcher references: %#v", got)
+	}
+	if err := composition.RefreshReferences(context.Background()); err != nil {
+		t.Fatalf("retry RefreshReferences: %v", err)
+	}
+	if got := watcher.referencesSnapshot(); !slices.Equal(got, []roomwatcher.Reference{{AccountID: 7, RoomID: "84"}}) {
+		t.Fatalf("immediate refreshed references = %#v", got)
+	}
+}
+
 func TestWatcherCompositionStartsDegradedAndRetriesInitialProbeFailure(t *testing.T) {
 	watcher := newFakeRoomWatcher(nil)
 	watcher.setReferenceFailures = 1
@@ -412,6 +441,12 @@ func (watcher *fakeRoomWatcher) referencesSnapshot() []roomwatcher.Reference {
 	watcher.mu.Lock()
 	defer watcher.mu.Unlock()
 	return append([]roomwatcher.Reference(nil), watcher.refs...)
+}
+
+func (watcher *fakeRoomWatcher) failNextReferenceSet() {
+	watcher.mu.Lock()
+	watcher.setReferenceFailures++
+	watcher.mu.Unlock()
 }
 
 type fakeRoomRuntime struct {

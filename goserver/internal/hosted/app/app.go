@@ -157,6 +157,8 @@ type RoomRuntime struct {
 	cursor uint64
 	status RoomRuntimeStatus
 
+	referenceMu sync.Mutex
+
 	pollCancel    context.CancelFunc
 	consumeCancel context.CancelFunc
 	pollDone      chan struct{}
@@ -278,17 +280,31 @@ func (runtime *RoomRuntime) pollLoop(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		references, err := runtime.references.LoadEnabledRoomReferences(ctx)
-		if err != nil {
-			runtime.recordFailure(err)
-			continue
-		}
-		if err := runtime.watcher.SetReferences(ctx, references); err != nil {
-			runtime.recordFailure(err)
-			continue
-		}
-		runtime.setWatchedRooms(references)
+		_ = runtime.RefreshReferences(ctx)
 	}
+}
+
+// RefreshReferences immediately reloads the complete enabled-account room
+// projection and durably syncs it through roomwatcher. The lock covers both
+// the database read and SetReferences so a cadence refresh cannot overwrite a
+// newer administrator-triggered snapshot with an older in-flight read.
+func (runtime *RoomRuntime) RefreshReferences(ctx context.Context) error {
+	if runtime == nil || ctx == nil {
+		return ErrRoomRuntimeInvalid
+	}
+	runtime.referenceMu.Lock()
+	defer runtime.referenceMu.Unlock()
+	references, err := runtime.references.LoadEnabledRoomReferences(ctx)
+	if err != nil {
+		runtime.recordFailure(err)
+		return ErrRoomRuntimeUnavailable
+	}
+	if err := runtime.watcher.SetReferences(ctx, references); err != nil {
+		runtime.recordFailure(err)
+		return ErrRoomRuntimeUnavailable
+	}
+	runtime.setWatchedRooms(references)
+	return nil
 }
 
 func (runtime *RoomRuntime) consumeLoop(ctx context.Context) {

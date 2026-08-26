@@ -115,29 +115,41 @@ func TestBatchValidationAndStableMixedResults(t *testing.T) {
 
 func int64Pointer(value int64) *int64 { return &value }
 
-func TestUpdateRoomAuditsAndReturnsRefreshedDetail(t *testing.T) {
+// This test fails if administrator room changes write account_runtime_rooms
+// directly, audit the requested short ID, or audit before the injected deep
+// mutation has persisted and synced the canonical room.
+func TestUpdateRoomDelegatesMutationThenAuditsCanonicalRoom(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	now := time.Date(2026, 8, 23, 9, 0, 0, 0, time.UTC)
-	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT COALESCE.*FROM streamer_accounts").WithArgs(int64(41)).
 		WillReturnRows(sqlmock.NewRows([]string{"room"}).AddRow("111"))
-	mock.ExpectExec("INSERT INTO account_runtime_rooms").WithArgs(int64(41), "123456", sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO audit_events").WithArgs(int64(41), sqlmock.AnyArg(), sqlmock.AnyArg()).
+	calls := []string{}
+	mutation := roomMutationFunc(func(_ context.Context, accountID int64, roomID string) error {
+		calls = append(calls, "set:"+roomID)
+		if accountID != 41 || roomID != "7" {
+			t.Fatalf("SetRoom(%d, %q)", accountID, roomID)
+		}
+		return nil
+	})
+	mock.ExpectQuery("SELECT room_id FROM account_runtime_rooms").WithArgs(int64(41)).
+		WillReturnRows(sqlmock.NewRows([]string{"room_id"}).AddRow("42"))
+	mock.ExpectExec("INSERT INTO audit_events").WithArgs(int64(41), []byte(`{"newRoomId":"42","oldRoomId":"111"}`), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(9, 1))
-	mock.ExpectCommit()
 	mock.ExpectQuery("SELECT a.id.*FROM streamer_accounts").WithArgs(int64(41)).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "active", "room", "quota", "obs", "public", "created", "updated"}).AddRow(41, true, "123456", 8, false, "", now, now))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "active", "room", "quota", "obs", "public", "created", "updated"}).AddRow(41, true, "42", 8, false, "", now, now))
 	mock.ExpectQuery("SELECT event_type").WithArgs(int64(41), 20).
 		WillReturnRows(sqlmock.NewRows([]string{"type", "account", "created"}).AddRow("admin_room_updated", 41, now))
-	service, _ := NewService(db, "https://panel.example.com")
-	detail, err := service.UpdateRoom(context.Background(), 41, "123456")
-	if err != nil || detail.RoomID != "123456" || len(detail.RecentEvents) != 1 {
+	service, _ := NewService(db, "https://panel.example.com", MutationServices{Room: mutation})
+	detail, err := service.UpdateRoom(context.Background(), 41, "7")
+	if err != nil || detail.RoomID != "42" || len(detail.RecentEvents) != 1 {
 		t.Fatalf("detail=%#v err=%v", detail, err)
+	}
+	if len(calls) != 1 || calls[0] != "set:7" {
+		t.Fatalf("room mutation calls = %#v", calls)
 	}
 	if _, err := service.UpdateRoom(context.Background(), 41, "0123"); !errors.Is(err, ErrInvalidQuery) {
 		t.Fatalf("invalid room error=%v", err)
@@ -145,4 +157,30 @@ func TestUpdateRoomAuditsAndReturnsRefreshedDetail(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// This test fails if a failed runtime/reference mutation can still create an
+// audit row or be reported as a successful administrator room change.
+func TestUpdateRoomMutationFailureDoesNotAuditOrClaimSuccess(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SELECT COALESCE.*FROM streamer_accounts").WithArgs(int64(41)).
+		WillReturnRows(sqlmock.NewRows([]string{"room"}).AddRow("111"))
+	want := errors.New("reference sync failed")
+	service, _ := NewService(db, "https://panel.example.com", MutationServices{Room: roomMutationFunc(func(context.Context, int64, string) error { return want })})
+	if _, err := service.UpdateRoom(context.Background(), 41, "7"); !errors.Is(err, want) {
+		t.Fatalf("UpdateRoom error = %v, want mutation failure", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type roomMutationFunc func(context.Context, int64, string) error
+
+func (mutation roomMutationFunc) SetRoom(ctx context.Context, accountID int64, roomID string) error {
+	return mutation(ctx, accountID, roomID)
 }

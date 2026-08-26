@@ -259,27 +259,6 @@ func run() error {
 		if err != nil {
 			return errors.New("configure administrator HTTP")
 		}
-		adminConsoleService, err := adminconsole.NewService(store.Database(), config.AdminAllowedOrigin, adminconsole.MutationServices{
-			Enable: func(ctx context.Context, token string, accountID int64, reason string) error {
-				_, mutationErr := identityService.EnableAccount(ctx, token, accountID, reason)
-				return mutationErr
-			},
-			Disable: func(ctx context.Context, token string, accountID int64, reason string) error {
-				_, mutationErr := identityService.DisableAccount(ctx, token, accountID, reason)
-				return mutationErr
-			},
-			SetQuota: func(ctx context.Context, token string, accountID int64, quota uint64, reason string) error {
-				_, mutationErr := invitationService.AdjustQuota(ctx, token, accountID, quota, reason)
-				return mutationErr
-			},
-		})
-		if err != nil {
-			return errors.New("configure administrator console")
-		}
-		adminConsoleHTTP, err := adminconsole.NewHTTPHandler(adminConsoleService, adminService)
-		if err != nil {
-			return errors.New("configure administrator console HTTP")
-		}
 		adminSettingsService, err := adminsettings.NewService(store.Database(), keys, adminService, func(ctx context.Context) string { return biliService.Status(ctx).Health })
 		if err != nil {
 			return errors.New("configure administrator settings")
@@ -327,6 +306,38 @@ func run() error {
 			_ = runtimeManager.Shutdown(cleanupContext)
 			cancelCleanup()
 			return errors.New("start hosted room watcher")
+		}
+		adminConsoleService, err := adminconsole.NewService(store.Database(), config.AdminAllowedOrigin, adminconsole.MutationServices{
+			Enable: func(ctx context.Context, token string, accountID int64, reason string) error {
+				_, mutationErr := identityService.EnableAccount(ctx, token, accountID, reason)
+				return mutationErr
+			},
+			Disable: func(ctx context.Context, token string, accountID int64, reason string) error {
+				_, mutationErr := identityService.DisableAccount(ctx, token, accountID, reason)
+				return mutationErr
+			},
+			SetQuota: func(ctx context.Context, token string, accountID int64, quota uint64, reason string) error {
+				_, mutationErr := invitationService.AdjustQuota(ctx, token, accountID, quota, reason)
+				return mutationErr
+			},
+			Room: productionRoomMutation{runtime: runtimeManager, references: roomRuntime},
+		})
+		if err != nil {
+			cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), shutdownTimeout)
+			_ = roomRuntime.Shutdown(cleanupContext)
+			_ = roomRuntime.Wait(cleanupContext)
+			_ = runtimeManager.Shutdown(cleanupContext)
+			cancelCleanup()
+			return errors.New("configure administrator console")
+		}
+		adminConsoleHTTP, err := adminconsole.NewHTTPHandler(adminConsoleService, adminService)
+		if err != nil {
+			cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), shutdownTimeout)
+			_ = roomRuntime.Shutdown(cleanupContext)
+			_ = roomRuntime.Wait(cleanupContext)
+			_ = runtimeManager.Shutdown(cleanupContext)
+			cancelCleanup()
+			return errors.New("configure administrator console HTTP")
 		}
 		handler := composeHostedHTTPWithRuntimeOBSAndStatic(store, identityHTTP, adminHTTP, invitationHTTP, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, obsHTTP, adminConsoleHTTP, adminSettingsHTTP, staticHTTP, config.AdminCSRFToken)
 		server := newHTTPServerWithContext(processContext, config.ListenAddr, retainBiliGateway(handler, biliDependencies.Gateway))
@@ -454,6 +465,32 @@ type biliUpstreamFactory func(biligateway.HTTPUpstreamOptions) (*biligateway.HTT
 type productionBiliGateway struct {
 	Credentials *biligateway.CredentialStore
 	Gateway     *biligateway.ControlledGateway
+}
+
+type runtimeRoomSetter interface {
+	SetRoom(context.Context, int64, string) error
+}
+
+type roomReferenceRefresher interface {
+	RefreshReferences(context.Context) error
+}
+
+// productionRoomMutation is the single administrator room-change adapter:
+// runtime owns canonicalization, ownership fencing and persistence; only a
+// successful runtime mutation may publish the new durable reference snapshot.
+type productionRoomMutation struct {
+	runtime    runtimeRoomSetter
+	references roomReferenceRefresher
+}
+
+func (mutation productionRoomMutation) SetRoom(ctx context.Context, accountID int64, roomID string) error {
+	if mutation.runtime == nil || mutation.references == nil {
+		return errors.New("hosted room mutation unavailable")
+	}
+	if err := mutation.runtime.SetRoom(ctx, accountID, roomID); err != nil {
+		return err
+	}
+	return mutation.references.RefreshReferences(ctx)
 }
 
 func newProductionBiliGateway(database *sql.DB, keys security.Keyring, newUpstream biliUpstreamFactory) (productionBiliGateway, error) {

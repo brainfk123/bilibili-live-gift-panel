@@ -512,6 +512,49 @@ func TestNewProductionBiliGatewayFailsBeforeBindOnInvalidDependencies(t *testing
 	}
 }
 
+// This test fails if main bypasses runtime.Manager.SetRoom, refreshes before
+// the canonical target is persisted, or hides a durable reference-sync error.
+func TestProductionRoomMutationCanonicalizesThenRefreshesAndRetries(t *testing.T) {
+	sessions := &mainRoomMutationSessions{}
+	sources := &mainRoomMutationSources{}
+	manager, err := hostedruntime.NewManager(hostedruntime.Dependencies{
+		Sessions: sessions, Configuration: mainRuntimeConfiguration{}, Migration: mainRuntimeMigration{}, RoomSources: sources,
+	}, hostedruntime.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	wantSyncErr := errors.New("reference sync unavailable")
+	refresher := &mainRoomReferenceRefresher{sessions: sessions, failures: 1, err: wantSyncErr}
+	mutation := productionRoomMutation{runtime: manager, references: refresher}
+
+	if err := mutation.SetRoom(context.Background(), 7, "7"); !errors.Is(err, wantSyncErr) {
+		t.Fatalf("first SetRoom error = %v, want reference sync failure", err)
+	}
+	if err := mutation.SetRoom(context.Background(), 7, "7"); err != nil {
+		t.Fatalf("retry SetRoom: %v", err)
+	}
+	if targets := sessions.persistedTargets(); len(targets) != 2 || targets[0] != "42" || targets[1] != "42" {
+		t.Fatalf("persisted canonical targets = %#v, want [42 42]", targets)
+	}
+	if observed := refresher.observedTargets(); len(observed) != 2 || observed[0] != "42" || observed[1] != "42" {
+		t.Fatalf("refresh observed targets = %#v, want canonical persistence before each refresh", observed)
+	}
+}
+
+func TestProductionRoomMutationStopsBeforeRefreshWhenRuntimeFenceFails(t *testing.T) {
+	want := errors.New("fence mismatch")
+	setter := roomSetterFunc(func(context.Context, int64, string) error { return want })
+	refresher := &mainRoomReferenceRefresher{}
+	mutation := productionRoomMutation{runtime: setter, references: refresher}
+	if err := mutation.SetRoom(context.Background(), 7, "7"); !errors.Is(err, want) {
+		t.Fatalf("SetRoom error = %v", err)
+	}
+	if refresher.calls != 0 {
+		t.Fatalf("runtime failure still refreshed references %d times", refresher.calls)
+	}
+}
+
 func TestServeHTTPReturnsBindErrorBeforeServingOrAnnouncing(t *testing.T) {
 	bindErr := errors.New("bind failed")
 	var serveCalls atomic.Int32
@@ -1080,6 +1123,93 @@ type mainRuntimeMigration struct{}
 
 func (mainRuntimeMigration) ApplyPendingAfterSession(context.Context, migration.OwnerFence, int64) (migration.Job, error) {
 	return migration.Job{}, nil
+}
+
+type mainRoomMutationSessions struct {
+	mu        sync.Mutex
+	target    string
+	persisted []string
+}
+
+func (*mainRoomMutationSessions) ClaimOwnership(_ context.Context, accountID int64, token hostedruntime.OwnerToken, _ time.Duration) (hostedruntime.OwnerClaim, error) {
+	return hostedruntime.OwnerClaim{Fence: hostedruntime.OwnerFence{AccountID: accountID, Token: token, Epoch: 1}}, nil
+}
+func (*mainRoomMutationSessions) RenewOwnership(context.Context, hostedruntime.OwnerFence, time.Duration) error {
+	return nil
+}
+func (*mainRoomMutationSessions) ReleaseOwnership(context.Context, hostedruntime.OwnerFence) error {
+	return nil
+}
+func (sessions *mainRoomMutationSessions) TargetRoom(context.Context, int64) (string, error) {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	return sessions.target, nil
+}
+func (sessions *mainRoomMutationSessions) PersistTargetRoom(_ context.Context, command hostedruntime.PersistTargetRoomCommand) error {
+	sessions.mu.Lock()
+	sessions.target = command.RoomID
+	sessions.persisted = append(sessions.persisted, command.RoomID)
+	sessions.mu.Unlock()
+	return nil
+}
+func (*mainRoomMutationSessions) StartSession(context.Context, hostedruntime.StartSessionCommand) (hostedruntime.Session, error) {
+	return hostedruntime.Session{}, errors.New("unexpected session start")
+}
+func (*mainRoomMutationSessions) EndSession(context.Context, hostedruntime.EndSessionCommand) error {
+	return errors.New("unexpected session end")
+}
+func (*mainRoomMutationSessions) PendingMigration(context.Context, int64) (int64, bool, error) {
+	return 0, false, nil
+}
+func (sessions *mainRoomMutationSessions) persistedTargets() []string {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	return append([]string(nil), sessions.persisted...)
+}
+
+type mainRoomMutationSources struct{}
+
+func (*mainRoomMutationSources) Resolve(_ context.Context, roomID string, _ int64) (string, error) {
+	if roomID == "7" {
+		return "42", nil
+	}
+	return roomID, nil
+}
+func (*mainRoomMutationSources) SubscribeCanonical(context.Context, string, int64, roomsource.Sink) (roomsource.Subscription, error) {
+	return nil, errors.New("unexpected room subscription")
+}
+func (*mainRoomMutationSources) Close()                     {}
+func (*mainRoomMutationSources) Wait(context.Context) error { return nil }
+
+type mainRoomReferenceRefresher struct {
+	sessions *mainRoomMutationSessions
+	failures int
+	err      error
+	calls    int
+	observed []string
+}
+
+func (refresher *mainRoomReferenceRefresher) RefreshReferences(context.Context) error {
+	refresher.calls++
+	if refresher.sessions != nil {
+		refresher.sessions.mu.Lock()
+		refresher.observed = append(refresher.observed, refresher.sessions.target)
+		refresher.sessions.mu.Unlock()
+	}
+	if refresher.failures > 0 {
+		refresher.failures--
+		return refresher.err
+	}
+	return nil
+}
+func (refresher *mainRoomReferenceRefresher) observedTargets() []string {
+	return append([]string(nil), refresher.observed...)
+}
+
+type roomSetterFunc func(context.Context, int64, string) error
+
+func (setter roomSetterFunc) SetRoom(ctx context.Context, accountID int64, roomID string) error {
+	return setter(ctx, accountID, roomID)
 }
 
 type mainRuntimeSources struct {
