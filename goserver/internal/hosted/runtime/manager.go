@@ -56,6 +56,11 @@ type roomEventSessionStore interface {
 	OpenBroadcastSession(context.Context, string) (int64, error)
 }
 
+type RoomEventSource interface {
+	LoadBootstrap(context.Context) (roomwatcher.Bootstrap, error)
+	ReplayEvents(context.Context, uint64, int) ([]roomwatcher.Event, error)
+}
+
 // legacyRoomTransitionSessionStore exists only for the pre-Event unit-level
 // compatibility entry point below. Production composition must use the
 // commit-ordered reference payloads through ApplyRoomEvent.
@@ -108,6 +113,9 @@ type Options struct {
 	OwnerOperationTimeout time.Duration
 	ShutdownRetryBackoff  time.Duration
 	BeforeSessionPublish  func()
+
+	beforeForgetLostOwner func()
+	afterForgetLostOwner  func()
 }
 
 type Manager struct {
@@ -123,6 +131,8 @@ type Manager struct {
 	newShutdownTimer       func(time.Duration) Timer
 	shutdownRetryBackoff   time.Duration
 	beforeSessionPublish   func()
+	beforeForgetLostOwner  func()
+	afterForgetLostOwner   func()
 	heartbeatDone          chan struct{}
 	ownershipControl       context.Context
 	cancelOwnershipControl context.CancelFunc
@@ -150,11 +160,12 @@ type Manager struct {
 }
 
 type roomTransitionState struct {
-	leaseEpoch     uint64
-	state          roomwatcher.State
-	accounts       []int64
-	activeAccounts []int64
-	pendingOwners  map[int64]OwnerFence
+	leaseEpoch         uint64
+	state              roomwatcher.State
+	broadcastSessionID int64
+	accounts           []int64
+	activeAccounts     []int64
+	pendingOwners      map[int64]OwnerFence
 }
 
 type accountRuntime struct {
@@ -287,7 +298,7 @@ func NewManager(dependencies Dependencies, options Options) (*Manager, error) {
 	lifecycle, cancel := context.WithCancel(context.Background())
 	processing, cancelProcessing := context.WithCancel(context.Background())
 	ownershipControl, cancelOwnershipControl := context.WithCancel(context.Background())
-	manager := &Manager{dependencies: dependencies, now: options.Now, newTimer: options.NewTimer, processorFactory: options.ProcessorFactory, ownerToken: options.OwnerToken, ownerTTL: options.OwnerTTL, heartbeat: options.HeartbeatInterval, ownerOperationTimeout: options.OwnerOperationTimeout, newHeartbeatTimer: options.NewHeartbeatTimer, newShutdownTimer: options.NewShutdownTimer, shutdownRetryBackoff: options.ShutdownRetryBackoff, beforeSessionPublish: options.BeforeSessionPublish, heartbeatDone: make(chan struct{}), ownershipControl: ownershipControl, cancelOwnershipControl: cancelOwnershipControl, ownershipStop: make(chan struct{}), accounts: make(map[int64]*accountRuntime), closing: make(chan struct{}), done: make(chan struct{}), lifecycle: lifecycle, cancel: cancel, processing: processing, cancelProcessing: cancelProcessing, roomTransitions: make(map[string]roomTransitionState)}
+	manager := &Manager{dependencies: dependencies, now: options.Now, newTimer: options.NewTimer, processorFactory: options.ProcessorFactory, ownerToken: options.OwnerToken, ownerTTL: options.OwnerTTL, heartbeat: options.HeartbeatInterval, ownerOperationTimeout: options.OwnerOperationTimeout, newHeartbeatTimer: options.NewHeartbeatTimer, newShutdownTimer: options.NewShutdownTimer, shutdownRetryBackoff: options.ShutdownRetryBackoff, beforeSessionPublish: options.BeforeSessionPublish, beforeForgetLostOwner: options.beforeForgetLostOwner, afterForgetLostOwner: options.afterForgetLostOwner, heartbeatDone: make(chan struct{}), ownershipControl: ownershipControl, cancelOwnershipControl: cancelOwnershipControl, ownershipStop: make(chan struct{}), accounts: make(map[int64]*accountRuntime), closing: make(chan struct{}), done: make(chan struct{}), lifecycle: lifecycle, cancel: cancel, processing: processing, cancelProcessing: cancelProcessing, roomTransitions: make(map[string]roomTransitionState)}
 	go manager.runHeartbeat()
 	return manager, nil
 }
@@ -628,6 +639,93 @@ func (manager *Manager) ApplyRoomEvent(ctx context.Context, event roomwatcher.Ev
 	return nil
 }
 
+// BootstrapRoomProjection installs one transactionally consistent current
+// projection before incremental replay. Its cursor fences every historical
+// outbox event at or before the snapshot boundary.
+func (manager *Manager) BootstrapRoomProjection(ctx context.Context, bootstrap roomwatcher.Bootstrap) error {
+	if manager == nil || ctx == nil || !validBootstrapProjection(bootstrap) {
+		return ErrInvalidInput
+	}
+	manager.transitionMu.Lock()
+	defer manager.transitionMu.Unlock()
+	manager.mu.Lock()
+	closed := manager.closed
+	manager.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+	if manager.lastSequence != 0 {
+		if bootstrap.Cursor <= manager.lastSequence {
+			return nil
+		}
+		return ErrUnavailable
+	}
+	for _, projected := range bootstrap.Rooms {
+		room := manager.roomTransitions[projected.RoomID]
+		if room.leaseEpoch != 0 && room.leaseEpoch != projected.LeaseEpoch {
+			return ErrUnavailable
+		}
+		room.state = projected.State
+		room.leaseEpoch = projected.LeaseEpoch
+		room.broadcastSessionID = projected.BroadcastSessionID
+		room.accounts = append([]int64(nil), projected.AccountIDs...)
+		manager.roomTransitions[projected.RoomID] = room
+		if projected.State != roomwatcher.StateLive {
+			continue
+		}
+		for _, accountID := range transitionDifference(projected.AccountIDs, room.activeAccounts) {
+			if err := manager.stopTransitionAccountInOtherRooms(ctx, accountID, projected.RoomID); err != nil {
+				return err
+			}
+			if err := manager.startTransitionAccount(ctx, accountID, projected.RoomID, projected.BroadcastSessionID); err != nil {
+				return err
+			}
+			room = manager.roomTransitions[projected.RoomID]
+			if !containsTransitionAccount(room.activeAccounts, accountID) {
+				room.activeAccounts = append(room.activeAccounts, accountID)
+			}
+			manager.roomTransitions[projected.RoomID] = room
+		}
+	}
+	manager.lastSequence = bootstrap.Cursor
+	return nil
+}
+
+// BootstrapAndReplayRoomEvents is the restart catch-up boundary: it installs
+// the current projection first, then asks durable replay only for events after
+// that transaction's cursor.
+func (manager *Manager) BootstrapAndReplayRoomEvents(ctx context.Context, source RoomEventSource, limit int) (uint64, error) {
+	if manager == nil || ctx == nil || source == nil || limit <= 0 || limit > roomwatcher.MaxReplayLimit {
+		return 0, ErrInvalidInput
+	}
+	bootstrap, err := source.LoadBootstrap(ctx)
+	if err != nil {
+		return 0, ErrUnavailable
+	}
+	if err := manager.BootstrapRoomProjection(ctx, bootstrap); err != nil {
+		return 0, err
+	}
+	cursor := bootstrap.Cursor
+	for {
+		events, err := source.ReplayEvents(ctx, cursor, limit)
+		if err != nil {
+			return cursor, ErrUnavailable
+		}
+		for _, event := range events {
+			if event.Sequence <= cursor {
+				return cursor, ErrUnavailable
+			}
+			if err := manager.ApplyRoomEvent(ctx, event); err != nil {
+				return cursor, err
+			}
+			cursor = event.Sequence
+		}
+		if len(events) < limit {
+			return cursor, nil
+		}
+	}
+}
+
 // ApplyRoomTransition remains a compatibility wrapper for in-package callers
 // while production composition consumes ApplyRoomEvent.
 func (manager *Manager) ApplyRoomTransition(ctx context.Context, transition roomwatcher.Transition) error {
@@ -675,12 +773,8 @@ func (manager *Manager) applyRoomReferencesChanged(ctx context.Context, changed 
 	if room.state == roomwatcher.StateLive {
 		additions := transitionDifference(changed.AccountIDs, room.activeAccounts)
 		if len(additions) != 0 {
-			store, ok := manager.dependencies.Sessions.(roomEventSessionStore)
-			if !ok {
-				return ErrUnavailable
-			}
-			broadcastSessionID, err := store.OpenBroadcastSession(ctx, roomID)
-			if err != nil || broadcastSessionID <= 0 {
+			broadcastSessionID := room.broadcastSessionID
+			if broadcastSessionID <= 0 {
 				return ErrUnavailable
 			}
 			for _, accountID := range additions {
@@ -712,13 +806,19 @@ func (manager *Manager) applyRoomStateChanged(ctx context.Context, transition ro
 	}
 	switch transition.To {
 	case roomwatcher.StateLive:
-		store, ok := manager.dependencies.Sessions.(roomEventSessionStore)
-		if !ok {
-			return ErrUnavailable
-		}
-		broadcastSessionID, err := store.OpenBroadcastSession(ctx, roomID)
-		if err != nil || broadcastSessionID <= 0 {
-			return ErrUnavailable
+		broadcastSessionID := room.broadcastSessionID
+		if broadcastSessionID <= 0 || transition.From == roomwatcher.StateOffline {
+			store, ok := manager.dependencies.Sessions.(roomEventSessionStore)
+			if !ok {
+				return ErrUnavailable
+			}
+			var err error
+			broadcastSessionID, err = store.OpenBroadcastSession(ctx, roomID)
+			if err != nil || broadcastSessionID <= 0 {
+				return ErrUnavailable
+			}
+			room.broadcastSessionID = broadcastSessionID
+			manager.roomTransitions[roomID] = room
 		}
 		for _, accountID := range transitionDifference(room.accounts, room.activeAccounts) {
 			if err := manager.stopTransitionAccountInOtherRooms(ctx, accountID, roomID); err != nil {
@@ -762,6 +862,9 @@ func (manager *Manager) applyRoomStateChanged(ctx context.Context, transition ro
 	room = manager.roomTransitions[roomID]
 	room.state = transition.To
 	room.leaseEpoch = transition.LeaseEpoch
+	if transition.To == roomwatcher.StateOffline {
+		room.broadcastSessionID = 0
+	}
 	manager.roomTransitions[roomID] = room
 	return nil
 }
@@ -805,6 +908,45 @@ func validRoomEvent(event roomwatcher.Event) bool {
 			return false
 		}
 		previous = accountID
+	}
+	return true
+}
+
+func validBootstrapProjection(bootstrap roomwatcher.Bootstrap) bool {
+	var previousRoom string
+	accounts := make(map[int64]struct{})
+	for _, room := range bootstrap.Rooms {
+		if !validRoomID(room.RoomID) || (previousRoom != "" && previousRoom >= room.RoomID) || room.LeaseEpoch == 0 {
+			return false
+		}
+		previousRoom = room.RoomID
+		switch room.State {
+		case roomwatcher.StateOffline:
+			if room.BroadcastSessionID != 0 || room.GraceUntil != nil {
+				return false
+			}
+		case roomwatcher.StateLive:
+			if room.BroadcastSessionID <= 0 || room.GraceUntil != nil {
+				return false
+			}
+		case roomwatcher.StateGrace:
+			if room.BroadcastSessionID <= 0 || room.GraceUntil == nil || room.GraceUntil.IsZero() {
+				return false
+			}
+		default:
+			return false
+		}
+		var previousAccount int64
+		for _, accountID := range room.AccountIDs {
+			if accountID <= previousAccount {
+				return false
+			}
+			if _, duplicate := accounts[accountID]; duplicate {
+				return false
+			}
+			accounts[accountID] = struct{}{}
+			previousAccount = accountID
+		}
 	}
 	return true
 }
@@ -1269,11 +1411,21 @@ func (manager *Manager) drainDisabled(account *accountRuntime, done chan struct{
 			return
 		}
 		ctx, cancel := manager.ownerOperationContext()
+		account.mu.Lock()
+		active := account.current
+		if active == nil {
+			active = account.transitionPending
+		}
+		fence := account.owner
+		if active != nil {
+			fence = active.owner
+		}
+		account.mu.Unlock()
 		err := manager.closeCurrentTerminal(ctx, account, OwnerFence{})
 		cancel()
 		account.opMu.Unlock()
 		if err == nil {
-			manager.forgetTransitionAccount(account.accountID, OwnerFence{})
+			manager.forgetTransitionAccount(account.accountID, fence)
 			return
 		}
 		account.mu.Lock()
@@ -1528,7 +1680,13 @@ func (manager *Manager) finishStaleCleanup(account *accountRuntime, active *acti
 	account.mu.Unlock()
 	account.opMu.Unlock()
 	if active != nil {
+		if manager.beforeForgetLostOwner != nil {
+			manager.beforeForgetLostOwner()
+		}
 		manager.forgetLostTransitionOwner(account.accountID, active.owner)
+		if manager.afterForgetLostOwner != nil {
+			manager.afterForgetLostOwner()
+		}
 	}
 }
 
@@ -1540,9 +1698,10 @@ func (manager *Manager) forgetTransitionAccount(accountID int64, fence OwnerFenc
 	manager.transitionMu.Lock()
 	defer manager.transitionMu.Unlock()
 	for roomID, room := range manager.roomTransitions {
-		if !validOwnerFence(fence) || room.pendingOwners[accountID] == fence {
-			delete(room.pendingOwners, accountID)
+		if !validOwnerFence(fence) || room.pendingOwners[accountID] != fence {
+			continue
 		}
+		delete(room.pendingOwners, accountID)
 		room.activeAccounts = removeTransitionAccount(room.activeAccounts, accountID)
 		manager.roomTransitions[roomID] = room
 	}

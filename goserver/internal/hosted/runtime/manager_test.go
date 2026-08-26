@@ -153,6 +153,155 @@ func TestManagerRejectsRoomEventWithoutExactlyOnePayload(t *testing.T) {
 	}
 }
 
+// This test fails if a lagged consumer replays a historical live event after
+// restart instead of accepting the current offline projection and cursor.
+func TestManagerBootstrapOfflineSkipsHistoricalLiveReplay(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, broadcasts: map[string]int64{"42": 99}}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	graceUntil := time.Unix(800, 0)
+	bootstrap := roomwatcher.Bootstrap{Cursor: 10, Rooms: []roomwatcher.BootstrapRoom{
+		{RoomID: "42", State: roomwatcher.StateOffline, LeaseEpoch: 3, AccountIDs: []int64{7}},
+		{RoomID: "84", State: roomwatcher.StateGrace, BroadcastSessionID: 100, GraceUntil: &graceUntil, LeaseEpoch: 4, AccountIDs: []int64{8}},
+	}}
+	if err := manager.BootstrapRoomProjection(context.Background(), bootstrap); err != nil {
+		t.Fatal(err)
+	}
+	historicalLive := stateEvent(2, roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, LeaseEpoch: 1})
+	if err := manager.ApplyRoomEvent(context.Background(), historicalLive); err != nil {
+		t.Fatal(err)
+	}
+	if sessions.startedCount() != 0 {
+		t.Fatalf("historical live replay started %d sessions", sessions.startedCount())
+	}
+}
+
+// This test fails if restart binds executions to an old historical broadcast
+// or if post-bootstrap reference events ignore the current projection.
+func TestManagerBootstrapLiveUsesCurrentBroadcastThenAppliesIncrementalReplay(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, broadcasts: map[string]int64{"42": 999}}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	source := &bootstrapReplaySource{
+		bootstrap: roomwatcher.Bootstrap{Cursor: 20, Rooms: []roomwatcher.BootstrapRoom{{RoomID: "42", State: roomwatcher.StateLive, BroadcastSessionID: 200, LeaseEpoch: 9, AccountIDs: []int64{7}}}},
+		events:    []roomwatcher.Event{referencesEvent(21, "42", 7, 8)},
+	}
+	cursor, replayErr := manager.BootstrapAndReplayRoomEvents(context.Background(), source, 10)
+	if replayErr != nil {
+		t.Fatal(replayErr)
+	}
+	if cursor != 21 || !slices.Equal(source.replayAfter, []uint64{20}) {
+		t.Fatalf("bootstrap replay cursor/after = %d/%v, want 21/[20]", cursor, source.replayAfter)
+	}
+	if manager.lastSequence != 21 {
+		t.Fatalf("manager sequence = %d, want 21", manager.lastSequence)
+	}
+	for _, accountID := range []int64{7, 8} {
+		account, accountErr := manager.accountExisting(accountID)
+		if accountErr != nil {
+			t.Fatal(accountErr)
+		}
+		account.mu.Lock()
+		active := account.current
+		account.mu.Unlock()
+		if active == nil || active.session.BroadcastSessionID != 200 {
+			t.Fatalf("account %d bootstrap session = %#v, want broadcast 200", accountID, active)
+		}
+	}
+	if sessions.startedCount() != 2 {
+		t.Fatalf("bootstrap plus incremental starts = %d, want 2", sessions.startedCount())
+	}
+}
+
+type bootstrapReplaySource struct {
+	bootstrap   roomwatcher.Bootstrap
+	events      []roomwatcher.Event
+	replayAfter []uint64
+}
+
+func (source *bootstrapReplaySource) LoadBootstrap(context.Context) (roomwatcher.Bootstrap, error) {
+	return source.bootstrap, nil
+}
+
+func (source *bootstrapReplaySource) ReplayEvents(_ context.Context, after uint64, limit int) ([]roomwatcher.Event, error) {
+	source.replayAfter = append(source.replayAfter, after)
+	result := make([]roomwatcher.Event, 0, min(limit, len(source.events)))
+	for _, event := range source.events {
+		if event.Sequence > after {
+			result = append(result, event)
+			if len(result) == limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
+// This test fails if an old F1 stale-cleanup forget runs after F2 started and
+// removes F2 from the room projection without matching its exact fence.
+func TestStaleCleanupForgetDoesNotRemoveNewFenceFromActiveRoom(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, broadcasts: map[string]int64{"42": 99, "84": 100}}
+	forgetStarted := make(chan struct{})
+	allowForget := make(chan struct{})
+	forgetDone := make(chan struct{})
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42", "84": "84"})}, Options{
+		beforeForgetLostOwner: func() { close(forgetStarted); <-allowForget },
+		afterForgetLostOwner:  func() { close(forgetDone) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	for _, event := range []roomwatcher.Event{
+		referencesEvent(1, "42", 7),
+		stateEvent(2, roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, LeaseEpoch: 1}),
+		stateEvent(3, roomwatcher.Transition{RoomID: "84", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(101, 0), NewBroadcast: true, LeaseEpoch: 1}),
+	} {
+		if err := manager.ApplyRoomEvent(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	account, accountErr := manager.accountExisting(7)
+	if accountErr != nil {
+		t.Fatal(accountErr)
+	}
+	account.mu.Lock()
+	first := account.current
+	account.mu.Unlock()
+	manager.beginStaleCleanup(account, first, first.owner, OwnerFence{})
+	<-forgetStarted
+	sessions.mu.Lock()
+	sessions.owner = OwnerFence{}
+	sessions.mu.Unlock()
+	if err := manager.ApplyRoomEvent(context.Background(), referencesEvent(4, "84", 7)); err != nil {
+		t.Fatal(err)
+	}
+	account.mu.Lock()
+	second := account.current
+	account.mu.Unlock()
+	if second == nil || second.owner == first.owner {
+		t.Fatalf("replacement session = %#v, want new F2", second)
+	}
+	close(allowForget)
+	<-forgetDone
+	if err := manager.ApplyRoomEvent(context.Background(), referencesEvent(5, "84")); err != nil {
+		t.Fatal(err)
+	}
+	ends := sessions.endCommands()
+	if len(ends) != 1 || ends[0].SessionID != second.session.ID || ends[0].Owner != second.owner {
+		t.Fatalf("reference removal ends = %#v, want exact F2 session/fence", ends)
+	}
+}
+
 func referencesEvent(sequence uint64, roomID string, accountIDs ...int64) roomwatcher.Event {
 	return roomwatcher.Event{Sequence: sequence, RoomReferencesChanged: &roomwatcher.RoomReferencesChanged{RoomID: roomID, AccountIDs: accountIDs}}
 }

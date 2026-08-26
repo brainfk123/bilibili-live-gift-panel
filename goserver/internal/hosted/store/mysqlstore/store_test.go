@@ -108,18 +108,19 @@ func TestProductionAdminEmailIdentityMigrationMakesLegacyUIDNullable(t *testing.
 		t.Fatal(err)
 	}
 	wantChecksums := map[string]string{
-		"0001_foundation":                   "d49617d9a14c87bd9d1526b99ec2399422da047baff7b89b6832c9adfc8c0031",
-		"0002_identity_and_invitations":     "fddd12bb00938fad7b94c7cc903e13900f12d583f3e426c603fdd7b4cb2a8a6a",
-		"0003_admin_handoffs":               "3e44ef4db3db1dc48d9161df002a9e19578241218b804b3b5db08c157cb78b89",
-		"0004_configuration_and_migration":  "8fb8fc88b8040b9806ea15612fdb62dd1fc12f764efcf23d623937779dc64f7c",
-		"0005_runtime_and_obs":              "aaeb739b1fd17b3751d733d36fd8e06c1320f5393ff77341bbac6fbd2a7bc9c2",
-		"0006_runtime_invariants":           "aef0529f46dc18d47d6770b71fe5f6d16ddb8d23c622f660a1718b4a2d4038b3",
-		"0007_runtime_ownership":            "a56cd452a649bd928b5a48a3e8ffacca15fd889eab5161fb7bc96d782be9caa4",
-		"0008_runtime_dedupe_cleanup_index": "7d69109e076d085e0988e0c196df8480d1dcd8a03e60495f6302e382ea94e064",
-		"0012_admin_session_inventory":      "e707f3edc1a7d49ffd4a636ad0e14bc579599d194aef37e5c9fe7ee19afa9a03",
+		"0001_foundation":                             "d49617d9a14c87bd9d1526b99ec2399422da047baff7b89b6832c9adfc8c0031",
+		"0002_identity_and_invitations":               "fddd12bb00938fad7b94c7cc903e13900f12d583f3e426c603fdd7b4cb2a8a6a",
+		"0003_admin_handoffs":                         "3e44ef4db3db1dc48d9161df002a9e19578241218b804b3b5db08c157cb78b89",
+		"0004_configuration_and_migration":            "8fb8fc88b8040b9806ea15612fdb62dd1fc12f764efcf23d623937779dc64f7c",
+		"0005_runtime_and_obs":                        "aaeb739b1fd17b3751d733d36fd8e06c1320f5393ff77341bbac6fbd2a7bc9c2",
+		"0006_runtime_invariants":                     "aef0529f46dc18d47d6770b71fe5f6d16ddb8d23c622f660a1718b4a2d4038b3",
+		"0007_runtime_ownership":                      "a56cd452a649bd928b5a48a3e8ffacca15fd889eab5161fb7bc96d782be9caa4",
+		"0008_runtime_dedupe_cleanup_index":           "7d69109e076d085e0988e0c196df8480d1dcd8a03e60495f6302e382ea94e064",
+		"0012_admin_session_inventory":                "e707f3edc1a7d49ffd4a636ad0e14bc579599d194aef37e5c9fe7ee19afa9a03",
+		"0013_room_monitoring_and_broadcast_sessions": "08160c85b38570ae490959a7356b77a97958bfa1a17a84407b388db8496606f8",
 	}
-	if len(migrations) != 13 {
-		t.Fatalf("migration count = %d, want 13", len(migrations))
+	if len(migrations) != 14 {
+		t.Fatalf("migration count = %d, want 14", len(migrations))
 	}
 	var emailIdentity migration
 	for _, item := range migrations {
@@ -147,6 +148,44 @@ func TestProductionAdminEmailIdentityMigrationMakesLegacyUIDNullable(t *testing.
 	want := "ALTER TABLE admin_identity MODIFY COLUMN uid_ciphertext VARBINARY(512) NULL, MODIFY COLUMN uid_lookup BINARY(32) NULL"
 	if got != want {
 		t.Fatalf("0009 statement = %q, want %q", got, want)
+	}
+}
+
+func TestRoomEventOutboxUsesForwardMigrationWithoutChangingPublished0013(t *testing.T) {
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var base, forward migration
+	for _, item := range migrations {
+		switch item.version {
+		case "0013_room_monitoring_and_broadcast_sessions":
+			base = item
+		case "0014_room_event_outbox":
+			forward = item
+		}
+	}
+	if base.version == "" || forward.version == "" {
+		t.Fatalf("room event migrations = base:%q forward:%q", base.version, forward.version)
+	}
+	if strings.Contains(string(base.contents), "event_kind") || strings.Contains(string(base.contents), "account_ids_json") {
+		t.Fatal("published 0013 was rewritten with room event columns")
+	}
+	if base.checksum != "08160c85b38570ae490959a7356b77a97958bfa1a17a84407b388db8496606f8" {
+		t.Fatalf("published 0013 checksum = %s", base.checksum)
+	}
+	normalized := strings.Join(strings.Fields(string(forward.contents)), " ")
+	for _, required := range []string{
+		"ALTER TABLE room_monitor_transitions ADD COLUMN event_kind",
+		"ADD COLUMN account_ids_json JSON NULL",
+		"UPDATE room_monitor_transitions SET event_kind = 'room_state_changed'",
+		"MODIFY COLUMN event_kind VARCHAR(32)",
+		"MODIFY COLUMN lease_epoch BIGINT UNSIGNED NULL",
+		"ADD CONSTRAINT chk_room_monitor_transitions_payload CHECK",
+	} {
+		if !strings.Contains(normalized, required) {
+			t.Fatalf("0014 migration missing %q", required)
+		}
 	}
 }
 

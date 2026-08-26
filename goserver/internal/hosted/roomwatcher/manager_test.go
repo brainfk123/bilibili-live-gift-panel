@@ -342,6 +342,7 @@ type fakeRepository struct {
 	atomicTerminals []Transition
 	replayCount     int
 	recoverable     []RecoverableRoom
+	bootstrap       Bootstrap
 }
 
 func (repository *fakeRepository) SyncReferences(_ context.Context, references []Reference, terminal []Transition) ([]Event, error) {
@@ -391,6 +392,12 @@ func (repository *fakeRepository) LoadRecoverable(context.Context) ([]Recoverabl
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
 	return append([]RecoverableRoom(nil), repository.recoverable...), nil
+}
+
+func (repository *fakeRepository) LoadBootstrap(context.Context) (Bootstrap, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	return repository.bootstrap, nil
 }
 
 func (repository *fakeRepository) RecordTransition(_ context.Context, transition Transition) (Event, error) {

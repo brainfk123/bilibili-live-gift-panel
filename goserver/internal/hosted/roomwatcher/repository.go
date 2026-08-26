@@ -358,6 +358,103 @@ func (repository *sqlRepository) ReplayEvents(ctx context.Context, afterSequence
 	return events, nil
 }
 
+// LoadBootstrap reads the tail boundary first so Repeatable Read establishes
+// one snapshot for both the replay cursor and current room projection.
+func (repository *sqlRepository) LoadBootstrap(ctx context.Context) (Bootstrap, error) {
+	if !repository.ready() || ctx == nil {
+		return Bootstrap{}, ErrInvalidInput
+	}
+	transaction, err := repository.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return Bootstrap{}, ErrRepositoryUnavailable
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	var nextSequence uint64
+	if err := transaction.QueryRowContext(ctx, "SELECT next_sequence FROM room_monitor_outbox_tail WHERE id = 1").Scan(&nextSequence); err != nil || nextSequence == 0 {
+		return Bootstrap{}, ErrRepositoryUnavailable
+	}
+	rows, err := transaction.QueryContext(ctx, "SELECT s.room_id, s.state, s.grace_until, s.broadcast_session_id, s.lease_epoch, r.account_id FROM room_monitor_states AS s LEFT JOIN room_monitor_references AS r ON r.room_id = s.room_id WHERE r.account_id IS NOT NULL OR s.state IN ('live', 'grace') ORDER BY s.room_id, r.account_id")
+	if err != nil {
+		return Bootstrap{}, ErrRepositoryUnavailable
+	}
+	bootstrap := Bootstrap{Cursor: nextSequence - 1, Rooms: make([]BootstrapRoom, 0)}
+	for rows.Next() {
+		var roomID, stateValue string
+		var graceUntil sql.NullTime
+		var broadcastSessionID, accountID sql.NullInt64
+		var leaseEpoch uint64
+		if err := rows.Scan(&roomID, &stateValue, &graceUntil, &broadcastSessionID, &leaseEpoch, &accountID); err != nil || leaseEpoch == 0 {
+			_ = rows.Close()
+			return Bootstrap{}, ErrRepositoryUnavailable
+		}
+		state := State(stateValue)
+		if !validState(state) || !validBootstrapShape(state, graceUntil, broadcastSessionID) {
+			_ = rows.Close()
+			return Bootstrap{}, ErrRepositoryUnavailable
+		}
+		if len(bootstrap.Rooms) == 0 || bootstrap.Rooms[len(bootstrap.Rooms)-1].RoomID != roomID {
+			canonical, canonicalErr := canonicalRoomID(roomID)
+			if canonicalErr != nil || canonical != roomID || (len(bootstrap.Rooms) != 0 && bootstrap.Rooms[len(bootstrap.Rooms)-1].RoomID >= roomID) {
+				_ = rows.Close()
+				return Bootstrap{}, ErrRepositoryUnavailable
+			}
+			room := BootstrapRoom{RoomID: roomID, State: state, LeaseEpoch: leaseEpoch}
+			if graceUntil.Valid {
+				value := databaseTime(graceUntil.Time)
+				room.GraceUntil = &value
+			}
+			if broadcastSessionID.Valid {
+				room.BroadcastSessionID = broadcastSessionID.Int64
+			}
+			bootstrap.Rooms = append(bootstrap.Rooms, room)
+		} else {
+			room := bootstrap.Rooms[len(bootstrap.Rooms)-1]
+			if room.State != state || room.LeaseEpoch != leaseEpoch || room.BroadcastSessionID != broadcastSessionID.Int64 || (room.GraceUntil != nil) != graceUntil.Valid || (room.GraceUntil != nil && !room.GraceUntil.Equal(databaseTime(graceUntil.Time))) {
+				_ = rows.Close()
+				return Bootstrap{}, ErrRepositoryUnavailable
+			}
+		}
+		if accountID.Valid {
+			index := len(bootstrap.Rooms) - 1
+			accounts := bootstrap.Rooms[index].AccountIDs
+			if accountID.Int64 <= 0 || (len(accounts) != 0 && accounts[len(accounts)-1] >= accountID.Int64) {
+				_ = rows.Close()
+				return Bootstrap{}, ErrRepositoryUnavailable
+			}
+			bootstrap.Rooms[index].AccountIDs = append(accounts, accountID.Int64)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return Bootstrap{}, ErrRepositoryUnavailable
+	}
+	if err := rows.Err(); err != nil {
+		return Bootstrap{}, ErrRepositoryUnavailable
+	}
+	if err := transaction.Commit(); err != nil {
+		return Bootstrap{}, ErrRepositoryUnavailable
+	}
+	committed = true
+	return bootstrap, nil
+}
+
+func validBootstrapShape(state State, graceUntil sql.NullTime, broadcastSessionID sql.NullInt64) bool {
+	switch state {
+	case StateOffline:
+		return !graceUntil.Valid && !broadcastSessionID.Valid
+	case StateLive:
+		return !graceUntil.Valid && broadcastSessionID.Valid && broadcastSessionID.Int64 > 0
+	case StateGrace:
+		return graceUntil.Valid && !graceUntil.Time.IsZero() && broadcastSessionID.Valid && broadcastSessionID.Int64 > 0
+	default:
+		return false
+	}
+}
+
 // LoadRecoverable restores active and grace rooms with their shared account
 // references. An offline room has no live work to recover.
 func (repository *sqlRepository) LoadRecoverable(ctx context.Context) ([]RecoverableRoom, error) {

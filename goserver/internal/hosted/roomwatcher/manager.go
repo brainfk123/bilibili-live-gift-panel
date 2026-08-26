@@ -43,6 +43,10 @@ type Repository interface {
 	// LoadRecoverable exposes persisted live/grace watchers to startup
 	// composition without requiring a concrete SQL repository type.
 	LoadRecoverable(context.Context) ([]RecoverableRoom, error)
+	// LoadBootstrap reads the current room projection and the outbox cursor from
+	// one consistent database snapshot so restart never replays historical live
+	// side effects to reconstruct current state.
+	LoadBootstrap(context.Context) (Bootstrap, error)
 	// RecordTransition atomically records the candidate and returns its durable
 	// Event envelope with a monotonically increasing Sequence and LeaseEpoch.
 	RecordTransition(context.Context, Transition) (Event, error)
@@ -56,6 +60,20 @@ type Repository interface {
 type Reference struct {
 	AccountID int64
 	RoomID    string
+}
+
+type Bootstrap struct {
+	Cursor uint64
+	Rooms  []BootstrapRoom
+}
+
+type BootstrapRoom struct {
+	RoomID             string
+	State              State
+	GraceUntil         *time.Time
+	BroadcastSessionID int64
+	LeaseEpoch         uint64
+	AccountIDs         []int64
 }
 
 // RoomReferencesChanged is the complete enabled-account snapshot for one
@@ -195,6 +213,13 @@ func (manager *Manager) ReplayEvents(ctx context.Context, afterSequence uint64, 
 		return nil, ErrInvalidInput
 	}
 	return manager.repository.ReplayEvents(ctx, afterSequence, limit)
+}
+
+func (manager *Manager) LoadBootstrap(ctx context.Context) (Bootstrap, error) {
+	if manager == nil || ctx == nil {
+		return Bootstrap{}, ErrInvalidInput
+	}
+	return manager.repository.LoadBootstrap(ctx)
 }
 
 // Close rejects future writes, retains one already-buffered wake-up for a

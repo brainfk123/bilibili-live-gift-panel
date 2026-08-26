@@ -280,6 +280,38 @@ func TestRepositoryReplayEventsRejectsOutOfRangeLimitBeforeQuery(t *testing.T) {
 	assertRepositoryExpectations(t, mock)
 }
 
+// This test fails if restart projection and its replay cursor are read from
+// different database snapshots, allowing historical live events to run again.
+func TestRepositoryLoadBootstrapReadsCursorAndCurrentProjectionInOneTransaction(t *testing.T) {
+	repository, mock, closeDB := newMockRepository(t)
+	defer closeDB()
+	graceUntil := time.Date(2026, 8, 26, 12, 10, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT next_sequence FROM room_monitor_outbox_tail WHERE id = 1")).
+		WillReturnRows(sqlmock.NewRows([]string{"next_sequence"}).AddRow(uint64(51)))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT s.room_id, s.state, s.grace_until, s.broadcast_session_id, s.lease_epoch, r.account_id FROM room_monitor_states AS s LEFT JOIN room_monitor_references AS r ON r.room_id = s.room_id WHERE r.account_id IS NOT NULL OR s.state IN ('live', 'grace') ORDER BY s.room_id, r.account_id")).
+		WillReturnRows(sqlmock.NewRows([]string{"room_id", "state", "grace_until", "broadcast_session_id", "lease_epoch", "account_id"}).
+			AddRow("42", "grace", graceUntil, int64(99), uint64(8), int64(7)).
+			AddRow("42", "grace", graceUntil, int64(99), uint64(8), int64(8)).
+			AddRow("84", "offline", nil, nil, uint64(3), int64(9)))
+	mock.ExpectCommit()
+
+	got, err := repository.LoadBootstrap(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Cursor != 50 || len(got.Rooms) != 2 {
+		t.Fatalf("LoadBootstrap() = %#v, want cursor 50 and two rooms", got)
+	}
+	if room := got.Rooms[0]; room.RoomID != "42" || room.State != StateGrace || room.BroadcastSessionID != 99 || room.GraceUntil == nil || room.LeaseEpoch != 8 || !slices.Equal(room.AccountIDs, []int64{7, 8}) {
+		t.Fatalf("grace bootstrap room = %#v", room)
+	}
+	if room := got.Rooms[1]; room.RoomID != "84" || room.State != StateOffline || room.BroadcastSessionID != 0 || room.GraceUntil != nil || room.LeaseEpoch != 3 || !slices.Equal(room.AccountIDs, []int64{9}) {
+		t.Fatalf("offline bootstrap room = %#v", room)
+	}
+	assertRepositoryExpectations(t, mock)
+}
+
 // This test fails if restart recovery loses the reference set or the persisted
 // grace deadline needed to resume one shared watcher per canonical room.
 func TestRepositoryLoadRecoverableGroupsReferencesByRoom(t *testing.T) {
