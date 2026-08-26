@@ -191,6 +191,21 @@ func TestOperationGateDoubleReleaseCannotWakeSecondQueuedWaiter(t *testing.T) {
 	}
 }
 
+func TestMustReleaseOperationPermitPanicsOnDuplicateRelease(t *testing.T) {
+	var gate operationGate
+	permit, err := gate.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustReleaseOperationPermit(permit)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("duplicate production release did not fail fast")
+		}
+	}()
+	mustReleaseOperationPermit(permit)
+}
+
 func waitForOperationGateQueue(t *testing.T, gate *operationGate, want int) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

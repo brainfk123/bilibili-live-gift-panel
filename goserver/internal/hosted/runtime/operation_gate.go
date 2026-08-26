@@ -46,7 +46,7 @@ func (gate *operationGate) Acquire(ctx context.Context) (*operationPermit, error
 		permit := &operationPermit{gate: gate, generation: gate.owner}
 		gate.mu.Unlock()
 		if err := ctx.Err(); err != nil {
-			_ = permit.Release()
+			mustReleaseOperationPermit(permit)
 			return nil, err
 		}
 		return permit, nil
@@ -58,7 +58,7 @@ func (gate *operationGate) Acquire(ctx context.Context) (*operationPermit, error
 	case <-waiter.ready:
 		permit := &operationPermit{gate: gate, generation: waiter.generation}
 		if err := ctx.Err(); err != nil {
-			_ = permit.Release()
+			mustReleaseOperationPermit(permit)
 			return nil, err
 		}
 		return permit, nil
@@ -66,7 +66,7 @@ func (gate *operationGate) Acquire(ctx context.Context) (*operationPermit, error
 		gate.mu.Lock()
 		if waiter.granted {
 			gate.mu.Unlock()
-			_ = (&operationPermit{gate: gate, generation: waiter.generation}).Release()
+			mustReleaseOperationPermit(&operationPermit{gate: gate, generation: waiter.generation})
 			return nil, ctx.Err()
 		}
 		for index, queued := range gate.waiters {
@@ -109,4 +109,10 @@ func (permit *operationPermit) Release() error {
 	waiter.generation = gate.owner
 	close(waiter.ready)
 	return nil
+}
+
+func mustReleaseOperationPermit(permit *operationPermit) {
+	if err := permit.Release(); err != nil {
+		panic("runtime: invalid operation gate release: " + err.Error())
+	}
 }

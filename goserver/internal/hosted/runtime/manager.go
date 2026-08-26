@@ -350,7 +350,7 @@ func (manager *Manager) acquireKnownAccount(ctx context.Context, accountID int64
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = opPermit.Release() }()
+	defer func() { mustReleaseOperationPermit(opPermit) }()
 	account.mu.Lock()
 	if account.stale {
 		account.mu.Unlock()
@@ -480,7 +480,7 @@ func (manager *Manager) renew(ctx context.Context, lease *Lease) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = opPermit.Release() }()
+	defer func() { mustReleaseOperationPermit(opPermit) }()
 	account.mu.Lock()
 	if account.stale {
 		account.mu.Unlock()
@@ -553,7 +553,7 @@ func (account *accountRuntime) scheduleCloseLocked(delay time.Duration) {
 		if err != nil {
 			return
 		}
-		defer func() { _ = opPermit.Release() }()
+		defer func() { mustReleaseOperationPermit(opPermit) }()
 		account.mu.Lock()
 		if account.idleCancel != cancel || len(account.leases) != 0 || account.disabled || account.shutting {
 			account.mu.Unlock()
@@ -647,7 +647,7 @@ func (manager *Manager) ApplyRoomEvent(ctx context.Context, event roomwatcher.Ev
 	if err != nil {
 		return err
 	}
-	defer func() { _ = transitionPermit.Release() }()
+	defer func() { mustReleaseOperationPermit(transitionPermit) }()
 	manager.mu.Lock()
 	closed := manager.closed
 	manager.mu.Unlock()
@@ -679,7 +679,7 @@ func (manager *Manager) BootstrapRoomProjection(ctx context.Context, bootstrap r
 	if err != nil {
 		return err
 	}
-	defer func() { _ = transitionPermit.Release() }()
+	defer func() { mustReleaseOperationPermit(transitionPermit) }()
 	manager.mu.Lock()
 	closed := manager.closed
 	manager.mu.Unlock()
@@ -786,7 +786,7 @@ func (manager *Manager) ApplyRoomTransition(ctx context.Context, transition room
 			room.accounts = accounts
 			manager.roomTransitions[transition.RoomID] = room
 		}
-		_ = transitionPermit.Release()
+		mustReleaseOperationPermit(transitionPermit)
 	}
 	sequence := transition.Sequence
 	transition.Sequence = 0
@@ -1114,7 +1114,7 @@ func (manager *Manager) startTransitionAccount(ctx context.Context, accountID in
 	if err != nil {
 		return err
 	}
-	defer func() { _ = opPermit.Release() }()
+	defer func() { mustReleaseOperationPermit(opPermit) }()
 	account.mu.Lock()
 	pendingSession := account.transitionPending
 	account.mu.Unlock()
@@ -1197,7 +1197,7 @@ func (manager *Manager) stopTransitionAccount(ctx context.Context, accountID int
 	if err != nil {
 		return err
 	}
-	defer func() { _ = opPermit.Release() }()
+	defer func() { mustReleaseOperationPermit(opPermit) }()
 	return manager.stopTransitionAccountLocked(ctx, account, roomID, transitionOwner)
 }
 
@@ -1261,7 +1261,7 @@ func (manager *Manager) MutateRoom(ctx context.Context, accountID int64, roomID 
 	if err != nil {
 		return RoomMutationResult{}, err
 	}
-	defer func() { _ = opPermit.Release() }()
+	defer func() { mustReleaseOperationPermit(opPermit) }()
 	if err := ctx.Err(); err != nil {
 		return RoomMutationResult{}, err
 	}
@@ -1499,7 +1499,7 @@ func (manager *Manager) AccountDisabled(accountID int64) {
 			return
 		}
 		manager.markDisabledLocked(account)
-		_ = opPermit.Release()
+		mustReleaseOperationPermit(opPermit)
 	}()
 }
 
@@ -1539,7 +1539,7 @@ func (manager *Manager) drainDisabled(account *accountRuntime, done chan struct{
 		stillDisabled := account.disabled && account.closeDone == done
 		account.mu.Unlock()
 		if !stillDisabled {
-			_ = opPermit.Release()
+			mustReleaseOperationPermit(opPermit)
 			return
 		}
 		ctx, cancel := manager.ownerOperationContext()
@@ -1555,7 +1555,7 @@ func (manager *Manager) drainDisabled(account *accountRuntime, done chan struct{
 		account.mu.Unlock()
 		err = manager.closeCurrentTerminal(ctx, account, OwnerFence{})
 		cancel()
-		_ = opPermit.Release()
+		mustReleaseOperationPermit(opPermit)
 		if err == nil {
 			manager.forgetTransitionAccount(account.accountID, fence)
 			return
@@ -1748,7 +1748,7 @@ func (manager *Manager) finishStaleCleanup(account *accountRuntime, active *acti
 		account.mu.Lock()
 		if account.staleDone != done {
 			account.mu.Unlock()
-			_ = opPermit.Release()
+			mustReleaseOperationPermit(opPermit)
 			return
 		}
 		releaseFence = account.staleRelease
@@ -1768,7 +1768,7 @@ func (manager *Manager) finishStaleCleanup(account *accountRuntime, active *acti
 			break
 		}
 		if manager.ownershipControl.Err() != nil {
-			_ = opPermit.Release()
+			mustReleaseOperationPermit(opPermit)
 			return
 		}
 		timer := manager.newTimer(manager.heartbeat)
@@ -1777,7 +1777,7 @@ func (manager *Manager) finishStaleCleanup(account *accountRuntime, active *acti
 			timer.Stop()
 		case <-manager.ownershipControl.Done():
 			timer.Stop()
-			_ = opPermit.Release()
+			mustReleaseOperationPermit(opPermit)
 			return
 		}
 	}
@@ -1791,7 +1791,7 @@ func (manager *Manager) finishStaleCleanup(account *accountRuntime, active *acti
 	account.mu.Lock()
 	if account.staleDone != done {
 		account.mu.Unlock()
-		_ = opPermit.Release()
+		mustReleaseOperationPermit(opPermit)
 		return
 	}
 	if account.current == active {
@@ -1813,7 +1813,7 @@ func (manager *Manager) finishStaleCleanup(account *accountRuntime, active *acti
 	close(done)
 	account.staleDone = nil
 	account.mu.Unlock()
-	_ = opPermit.Release()
+	mustReleaseOperationPermit(opPermit)
 	if active != nil {
 		if manager.beforeForgetLostOwner != nil {
 			manager.beforeForgetLostOwner()
@@ -1834,7 +1834,7 @@ func (manager *Manager) forgetTransitionAccount(accountID int64, fence OwnerFenc
 	if err != nil {
 		return
 	}
-	defer func() { _ = transitionPermit.Release() }()
+	defer func() { mustReleaseOperationPermit(transitionPermit) }()
 	for roomID, room := range manager.roomTransitions {
 		if !validOwnerFence(fence) || room.pendingOwners[accountID] != fence {
 			continue
@@ -1942,7 +1942,7 @@ func (manager *Manager) heartbeatOwners() {
 				return
 			}
 			cancelGate()
-			defer func() { _ = opPermit.Release() }()
+			defer func() { mustReleaseOperationPermit(opPermit) }()
 			account.mu.Lock()
 			stillCurrent := account.owner == fence
 			account.mu.Unlock()
@@ -1992,7 +1992,7 @@ func (manager *Manager) Shutdown(ctx context.Context) error {
 		manager.processCancelOnce.Do(manager.cancelProcessing)
 		return err
 	}
-	defer func() { _ = shutdownPermit.Release() }()
+	defer func() { mustReleaseOperationPermit(shutdownPermit) }()
 	select {
 	case <-manager.done:
 		manager.mu.Lock()
@@ -2022,13 +2022,13 @@ func (manager *Manager) Shutdown(ctx context.Context) error {
 			return err
 		}
 		if err := ctx.Err(); err != nil {
-			_ = opPermit.Release()
+			mustReleaseOperationPermit(opPermit)
 			manager.processCancelOnce.Do(manager.cancelProcessing)
 			return err
 		}
 		err = manager.closeCurrentDuringShutdown(ctx, account)
 		if err != nil {
-			_ = opPermit.Release()
+			mustReleaseOperationPermit(opPermit)
 			if ctx.Err() != nil {
 				manager.processCancelOnce.Do(manager.cancelProcessing)
 				return ctx.Err()
@@ -2041,7 +2041,7 @@ func (manager *Manager) Shutdown(ctx context.Context) error {
 		if validOwnerFence(fence) {
 			err = manager.releaseOwnerDuringShutdown(ctx, account, fence)
 		}
-		_ = opPermit.Release()
+		mustReleaseOperationPermit(opPermit)
 		if err != nil {
 			if ctx.Err() != nil {
 				manager.processCancelOnce.Do(manager.cancelProcessing)
