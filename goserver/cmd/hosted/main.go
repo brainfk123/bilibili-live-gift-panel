@@ -222,143 +222,115 @@ func run() error {
 			return errors.New("configure hosted runtime")
 		}
 		runtimeOwner.Store(runtimeManager)
-		runtimeHTTP, err := hostedruntime.NewHTTPHandler(runtimeManager, hostedruntime.HTTPOptions{
-			AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
-			Limiter: limiter, ClientIP: resolver, Authenticate: identityHTTP.Authenticate,
+		return withProductionRuntimeLifecycle(processContext, shutdownTimeout, runtimeManager, func() { runtimeOwner.Store(nil) }, func(runtimeLifecycle *productionRuntimeLifecycle) error {
+			runtimeHTTP, err := hostedruntime.NewHTTPHandler(runtimeManager, hostedruntime.HTTPOptions{
+				AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
+				Limiter: limiter, ClientIP: resolver, Authenticate: identityHTTP.Authenticate,
+			})
+			if err != nil {
+				return errors.New("configure hosted runtime HTTP")
+			}
+			obsService, err := hostedobs.NewService(store.Database(), adminService, hostedobs.ServiceOptions{PublicOrigin: config.AdminAllowedOrigin})
+			if err != nil {
+				return errors.New("configure hosted OBS")
+			}
+			obsHTTP, err := hostedobs.NewHTTPHandler(obsService, hostedobs.HTTPOptions{
+				AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
+				Limiter: limiter, ClientIP: resolver, Runtime: runtimeManager, Publisher: runtimePublisher,
+			})
+			if err != nil {
+				return errors.New("configure hosted OBS HTTP")
+			}
+			adminHTTP, err := adminidentity.NewHTTPHandler(adminService, adminidentity.HTTPOptions{
+				AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
+				Limiter: limiter, ClientIP: resolver,
+			})
+			if err != nil {
+				return errors.New("configure administrator HTTP")
+			}
+			adminSettingsService, err := adminsettings.NewService(store.Database(), keys, adminService, func(ctx context.Context) string { return biliService.Status(ctx).Health })
+			if err != nil {
+				return errors.New("configure administrator settings")
+			}
+			adminSettingsHTTP, err := adminsettings.NewHTTPHandler(adminSettingsService, config.AdminAllowedOrigin, config.AdminCSRFToken)
+			if err != nil {
+				return errors.New("configure administrator settings HTTP")
+			}
+			probeInterval, err := app.RoomProbeIntervalFromEnvironment()
+			if err != nil {
+				return errors.New("configure hosted room probe cadence")
+			}
+			watcherManager, err := roomwatcher.NewManager(biliDependencies.Gateway, roomwatcher.NewRepository(store.Database()), roomwatcher.Options{})
+			if err != nil {
+				return errors.New("configure hosted room watcher")
+			}
+			runtimeLifecycle.TrackWatcher(watcherManager)
+			roomRuntime, err := app.StartRoomRuntime(processContext, watcherManager, runtimeManager, app.NewSQLRoomReferenceLoader(store.Database()), app.RoomRuntimeOptions{
+				ProbeInterval: probeInterval,
+				OnError: func(error) {
+					slog.Warn("hosted room watcher transition retry")
+				},
+				OnStatus: func(status app.RoomRuntimeStatus) {
+					log := slog.Info
+					if status.ReadinessAlert {
+						log = slog.Warn
+					}
+					log("hosted room watcher aggregate",
+						"watched_rooms", status.WatchedRooms,
+						"transition_failures", status.TransitionFailures,
+						"grace_transitions", status.GraceTransitions,
+						"confirmed_to_ready_samples", status.ReadinessSamples,
+						"confirmed_to_ready_within_10_seconds", status.ReadinessWithin10,
+						"confirmed_to_ready_within_30_seconds", status.ReadinessWithin30,
+						"confirmed_to_ready_over_30_seconds", status.ReadinessOver30,
+						"confirmed_to_ready_total", status.ReadinessTotal,
+						"confirmed_to_ready_maximum", status.ReadinessMaximum,
+						"readiness_alert", status.ReadinessAlert,
+					)
+				},
+			})
+			if err != nil {
+				return errors.New("start hosted room watcher")
+			}
+			runtimeLifecycle.TrackRoomRuntime(roomRuntime)
+			adminConsoleService, err := adminconsole.NewService(store.Database(), config.AdminAllowedOrigin, adminconsole.MutationServices{
+				Enable: func(ctx context.Context, token string, accountID int64, reason string) error {
+					_, mutationErr := identityService.EnableAccount(ctx, token, accountID, reason)
+					return mutationErr
+				},
+				Disable: func(ctx context.Context, token string, accountID int64, reason string) error {
+					_, mutationErr := identityService.DisableAccount(ctx, token, accountID, reason)
+					return mutationErr
+				},
+				SetQuota: func(ctx context.Context, token string, accountID int64, quota uint64, reason string) error {
+					_, mutationErr := invitationService.AdjustQuota(ctx, token, accountID, quota, reason)
+					return mutationErr
+				},
+				Room: productionRoomMutation{runtime: runtimeManager, references: roomRuntime},
+			})
+			if err != nil {
+				return errors.New("configure administrator console")
+			}
+			adminConsoleHTTP, err := adminconsole.NewHTTPHandler(adminConsoleService, adminService)
+			if err != nil {
+				return errors.New("configure administrator console HTTP")
+			}
+			handler := composeHostedHTTPWithRuntimeOBSAndStatic(store, identityHTTP, adminHTTP, invitationHTTP, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, obsHTTP, adminConsoleHTTP, adminSettingsHTTP, staticHTTP, config.AdminCSRFToken)
+			server := newHTTPServerWithContext(processContext, config.ListenAddr, retainBiliGateway(handler, biliDependencies.Gateway))
+			serveErr := serveHTTPWithRuntime(
+				processContext,
+				server,
+				config.ListenAddr,
+				net.Listen,
+				shutdownTimeout,
+				func() { slog.Info("hosted service listening", "address", config.ListenAddr) },
+				runtimeLifecycle.Shutdown,
+			)
+			if serveErr != nil {
+				return serveErr
+			}
+			return nil
 		})
-		if err != nil {
-			runtimeOwner.Store(nil)
-			cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), shutdownTimeout)
-			_ = runtimeManager.Shutdown(cleanupContext)
-			cancelCleanup()
-			return errors.New("configure hosted runtime HTTP")
-		}
-		obsService, err := hostedobs.NewService(store.Database(), adminService, hostedobs.ServiceOptions{PublicOrigin: config.AdminAllowedOrigin})
-		if err != nil {
-			runtimeOwner.Store(nil)
-			cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), shutdownTimeout)
-			_ = runtimeManager.Shutdown(cleanupContext)
-			cancelCleanup()
-			return errors.New("configure hosted OBS")
-		}
-		obsHTTP, err := hostedobs.NewHTTPHandler(obsService, hostedobs.HTTPOptions{
-			AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
-			Limiter: limiter, ClientIP: resolver, Runtime: runtimeManager, Publisher: runtimePublisher,
-		})
-		if err != nil {
-			runtimeOwner.Store(nil)
-			cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), shutdownTimeout)
-			_ = runtimeManager.Shutdown(cleanupContext)
-			cancelCleanup()
-			return errors.New("configure hosted OBS HTTP")
-		}
-		adminHTTP, err := adminidentity.NewHTTPHandler(adminService, adminidentity.HTTPOptions{
-			AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
-			Limiter: limiter, ClientIP: resolver,
-		})
-		if err != nil {
-			return errors.New("configure administrator HTTP")
-		}
-		adminSettingsService, err := adminsettings.NewService(store.Database(), keys, adminService, func(ctx context.Context) string { return biliService.Status(ctx).Health })
-		if err != nil {
-			return errors.New("configure administrator settings")
-		}
-		adminSettingsHTTP, err := adminsettings.NewHTTPHandler(adminSettingsService, config.AdminAllowedOrigin, config.AdminCSRFToken)
-		if err != nil {
-			return errors.New("configure administrator settings HTTP")
-		}
-		probeInterval, err := app.RoomProbeIntervalFromEnvironment()
-		if err != nil {
-			return errors.New("configure hosted room probe cadence")
-		}
-		watcherManager, err := roomwatcher.NewManager(biliDependencies.Gateway, roomwatcher.NewRepository(store.Database()), roomwatcher.Options{})
-		if err != nil {
-			return errors.New("configure hosted room watcher")
-		}
-		roomRuntime, err := app.StartRoomRuntime(processContext, watcherManager, runtimeManager, app.NewSQLRoomReferenceLoader(store.Database()), app.RoomRuntimeOptions{
-			ProbeInterval: probeInterval,
-			OnError: func(error) {
-				slog.Warn("hosted room watcher transition retry")
-			},
-			OnStatus: func(status app.RoomRuntimeStatus) {
-				log := slog.Info
-				if status.ReadinessAlert {
-					log = slog.Warn
-				}
-				log("hosted room watcher aggregate",
-					"watched_rooms", status.WatchedRooms,
-					"transition_failures", status.TransitionFailures,
-					"grace_transitions", status.GraceTransitions,
-					"confirmed_to_ready_samples", status.ReadinessSamples,
-					"confirmed_to_ready_within_10_seconds", status.ReadinessWithin10,
-					"confirmed_to_ready_within_30_seconds", status.ReadinessWithin30,
-					"confirmed_to_ready_over_30_seconds", status.ReadinessOver30,
-					"confirmed_to_ready_total", status.ReadinessTotal,
-					"confirmed_to_ready_maximum", status.ReadinessMaximum,
-					"readiness_alert", status.ReadinessAlert,
-				)
-			},
-		})
-		if err != nil {
-			watcherManager.Close()
-			cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), shutdownTimeout)
-			_ = watcherManager.Wait(cleanupContext)
-			_ = runtimeManager.Shutdown(cleanupContext)
-			cancelCleanup()
-			return errors.New("start hosted room watcher")
-		}
-		adminConsoleService, err := adminconsole.NewService(store.Database(), config.AdminAllowedOrigin, adminconsole.MutationServices{
-			Enable: func(ctx context.Context, token string, accountID int64, reason string) error {
-				_, mutationErr := identityService.EnableAccount(ctx, token, accountID, reason)
-				return mutationErr
-			},
-			Disable: func(ctx context.Context, token string, accountID int64, reason string) error {
-				_, mutationErr := identityService.DisableAccount(ctx, token, accountID, reason)
-				return mutationErr
-			},
-			SetQuota: func(ctx context.Context, token string, accountID int64, quota uint64, reason string) error {
-				_, mutationErr := invitationService.AdjustQuota(ctx, token, accountID, quota, reason)
-				return mutationErr
-			},
-			Room: productionRoomMutation{runtime: runtimeManager, references: roomRuntime},
-		})
-		if err != nil {
-			cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), shutdownTimeout)
-			_ = roomRuntime.Shutdown(cleanupContext)
-			_ = roomRuntime.Wait(cleanupContext)
-			_ = runtimeManager.Shutdown(cleanupContext)
-			cancelCleanup()
-			return errors.New("configure administrator console")
-		}
-		adminConsoleHTTP, err := adminconsole.NewHTTPHandler(adminConsoleService, adminService)
-		if err != nil {
-			cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), shutdownTimeout)
-			_ = roomRuntime.Shutdown(cleanupContext)
-			_ = roomRuntime.Wait(cleanupContext)
-			_ = runtimeManager.Shutdown(cleanupContext)
-			cancelCleanup()
-			return errors.New("configure administrator console HTTP")
-		}
-		handler := composeHostedHTTPWithRuntimeOBSAndStatic(store, identityHTTP, adminHTTP, invitationHTTP, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, obsHTTP, adminConsoleHTTP, adminSettingsHTTP, staticHTTP, config.AdminCSRFToken)
-		server := newHTTPServerWithContext(processContext, config.ListenAddr, retainBiliGateway(handler, biliDependencies.Gateway))
-		serveErr := serveHTTPWithRuntime(
-			processContext,
-			server,
-			config.ListenAddr,
-			net.Listen,
-			shutdownTimeout,
-			func() { slog.Info("hosted service listening", "address", config.ListenAddr) },
-			func(ctx context.Context) error {
-				roomErr := errors.Join(roomRuntime.Shutdown(ctx), roomRuntime.Wait(ctx))
-				runtimeErr := shutdownAndJoinRuntime(ctx, runtimeManager.Shutdown, runtimeManager.Wait)
-				return errors.Join(roomErr, runtimeErr)
-			},
-		)
-		runtimeOwner.Store(nil)
-		if serveErr != nil {
-			return serveErr
-		}
-		return nil
 	})
 }
 
@@ -456,6 +428,80 @@ func shutdownAndJoinRuntime(ctx context.Context, shutdown, wait func(context.Con
 	return errors.Join(shutdownErr, wait(ctx))
 }
 
+type productionManagedRuntime interface {
+	Shutdown(context.Context) error
+	Wait(context.Context) error
+}
+
+type productionStandaloneWatcher interface {
+	Close()
+	Wait(context.Context) error
+}
+
+// productionRuntimeLifecycle is the one post-Manager ownership module. Before
+// RoomRuntime starts it owns the standalone watcher; afterwards RoomRuntime
+// owns that watcher. Shutdown always quiesces those goroutines before runtime
+// closes RoomSources, and only the outer guard clears runtimeOwner.
+type productionRuntimeLifecycle struct {
+	runtime   productionManagedRuntime
+	watcher   productionStandaloneWatcher
+	room      productionManagedRuntime
+	quiesced  bool
+	quiesceMu sync.Mutex
+}
+
+func (lifecycle *productionRuntimeLifecycle) TrackWatcher(watcher productionStandaloneWatcher) {
+	lifecycle.quiesceMu.Lock()
+	lifecycle.watcher = watcher
+	lifecycle.quiesceMu.Unlock()
+}
+
+func (lifecycle *productionRuntimeLifecycle) TrackRoomRuntime(room productionManagedRuntime) {
+	lifecycle.quiesceMu.Lock()
+	lifecycle.room = room
+	lifecycle.watcher = nil
+	lifecycle.quiesceMu.Unlock()
+}
+
+func (lifecycle *productionRuntimeLifecycle) Shutdown(ctx context.Context) error {
+	if lifecycle == nil || ctx == nil || lifecycle.runtime == nil {
+		return errors.New("invalid production runtime lifecycle")
+	}
+	lifecycle.quiesceMu.Lock()
+	defer lifecycle.quiesceMu.Unlock()
+	if lifecycle.quiesced {
+		return nil
+	}
+	var roomErr error
+	if lifecycle.room != nil {
+		roomErr = errors.Join(lifecycle.room.Shutdown(ctx), lifecycle.room.Wait(ctx))
+	} else if lifecycle.watcher != nil {
+		lifecycle.watcher.Close()
+		roomErr = lifecycle.watcher.Wait(ctx)
+	}
+	runtimeErr := errors.Join(lifecycle.runtime.Shutdown(ctx), lifecycle.runtime.Wait(ctx))
+	err := errors.Join(roomErr, runtimeErr)
+	if err == nil {
+		lifecycle.quiesced = true
+	}
+	return err
+}
+
+func withProductionRuntimeLifecycle(ctx context.Context, timeout time.Duration, runtime productionManagedRuntime, clearOwner func(), initialize func(*productionRuntimeLifecycle) error) (resultErr error) {
+	if ctx == nil || timeout <= 0 || runtime == nil || clearOwner == nil || initialize == nil {
+		return errors.New("invalid production runtime composition")
+	}
+	lifecycle := &productionRuntimeLifecycle{runtime: runtime}
+	defer func() {
+		cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), timeout)
+		cleanupErr := lifecycle.Shutdown(cleanupContext)
+		cancelCleanup()
+		clearOwner()
+		resultErr = errors.Join(resultErr, cleanupErr)
+	}()
+	return initialize(lifecycle)
+}
+
 type hostedHealthChecker interface {
 	Health(context.Context) error
 }
@@ -468,7 +514,7 @@ type productionBiliGateway struct {
 }
 
 type runtimeRoomSetter interface {
-	SetRoom(context.Context, int64, string) error
+	MutateRoom(context.Context, int64, string) (hostedruntime.RoomMutationResult, error)
 }
 
 type roomReferenceRefresher interface {
@@ -483,14 +529,21 @@ type productionRoomMutation struct {
 	references roomReferenceRefresher
 }
 
-func (mutation productionRoomMutation) SetRoom(ctx context.Context, accountID int64, roomID string) error {
+func (mutation productionRoomMutation) SetRoom(ctx context.Context, accountID int64, roomID string) (adminconsole.RoomMutationResult, error) {
 	if mutation.runtime == nil || mutation.references == nil {
-		return errors.New("hosted room mutation unavailable")
+		return adminconsole.RoomMutationResult{}, errors.New("hosted room mutation unavailable")
 	}
-	if err := mutation.runtime.SetRoom(ctx, accountID, roomID); err != nil {
-		return err
+	result, err := mutation.runtime.MutateRoom(ctx, accountID, roomID)
+	if err != nil {
+		if errors.Is(err, hostedruntime.ErrAccountNotFound) {
+			return adminconsole.RoomMutationResult{}, adminconsole.ErrNotFound
+		}
+		return adminconsole.RoomMutationResult{}, err
 	}
-	return mutation.references.RefreshReferences(ctx)
+	if err := mutation.references.RefreshReferences(ctx); err != nil {
+		return adminconsole.RoomMutationResult{}, err
+	}
+	return adminconsole.RoomMutationResult{OldCanonical: result.OldCanonical, NewCanonical: result.NewCanonical}, nil
 }
 
 func newProductionBiliGateway(database *sql.DB, keys security.Keyring, newUpstream biliUpstreamFactory) (productionBiliGateway, error) {

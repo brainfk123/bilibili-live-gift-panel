@@ -125,18 +125,14 @@ func TestUpdateRoomDelegatesMutationThenAuditsCanonicalRoom(t *testing.T) {
 	}
 	defer db.Close()
 	now := time.Date(2026, 8, 23, 9, 0, 0, 0, time.UTC)
-	mock.ExpectQuery("SELECT COALESCE.*FROM streamer_accounts").WithArgs(int64(41)).
-		WillReturnRows(sqlmock.NewRows([]string{"room"}).AddRow("111"))
 	calls := []string{}
-	mutation := roomMutationFunc(func(_ context.Context, accountID int64, roomID string) error {
+	mutation := roomMutationFunc(func(_ context.Context, accountID int64, roomID string) (RoomMutationResult, error) {
 		calls = append(calls, "set:"+roomID)
 		if accountID != 41 || roomID != "7" {
 			t.Fatalf("SetRoom(%d, %q)", accountID, roomID)
 		}
-		return nil
+		return RoomMutationResult{OldCanonical: "111", NewCanonical: "42"}, nil
 	})
-	mock.ExpectQuery("SELECT room_id FROM account_runtime_rooms").WithArgs(int64(41)).
-		WillReturnRows(sqlmock.NewRows([]string{"room_id"}).AddRow("42"))
 	mock.ExpectExec("INSERT INTO audit_events").WithArgs(int64(41), []byte(`{"newRoomId":"42","oldRoomId":"111"}`), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(9, 1))
 	mock.ExpectQuery("SELECT a.id.*FROM streamer_accounts").WithArgs(int64(41)).
@@ -167,10 +163,10 @@ func TestUpdateRoomMutationFailureDoesNotAuditOrClaimSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	mock.ExpectQuery("SELECT COALESCE.*FROM streamer_accounts").WithArgs(int64(41)).
-		WillReturnRows(sqlmock.NewRows([]string{"room"}).AddRow("111"))
 	want := errors.New("reference sync failed")
-	service, _ := NewService(db, "https://panel.example.com", MutationServices{Room: roomMutationFunc(func(context.Context, int64, string) error { return want })})
+	service, _ := NewService(db, "https://panel.example.com", MutationServices{Room: roomMutationFunc(func(context.Context, int64, string) (RoomMutationResult, error) {
+		return RoomMutationResult{}, want
+	})})
 	if _, err := service.UpdateRoom(context.Background(), 41, "7"); !errors.Is(err, want) {
 		t.Fatalf("UpdateRoom error = %v, want mutation failure", err)
 	}
@@ -179,8 +175,8 @@ func TestUpdateRoomMutationFailureDoesNotAuditOrClaimSuccess(t *testing.T) {
 	}
 }
 
-type roomMutationFunc func(context.Context, int64, string) error
+type roomMutationFunc func(context.Context, int64, string) (RoomMutationResult, error)
 
-func (mutation roomMutationFunc) SetRoom(ctx context.Context, accountID int64, roomID string) error {
+func (mutation roomMutationFunc) SetRoom(ctx context.Context, accountID int64, roomID string) (RoomMutationResult, error) {
 	return mutation(ctx, accountID, roomID)
 }

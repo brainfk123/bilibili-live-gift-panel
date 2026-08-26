@@ -52,6 +52,19 @@ type PersistTargetRoomCommand struct {
 	UpdatedAt time.Time
 }
 
+type PersistDisabledTargetRoomCommand struct {
+	AccountID int64
+	RoomID    string
+	UpdatedAt time.Time
+}
+
+// RoomMutationResult is the immutable canonical pair captured by the
+// transaction that persisted a room mutation.
+type RoomMutationResult struct {
+	OldCanonical string
+	NewCanonical string
+}
+
 type AggregateCommand struct {
 	Owner         OwnerFence
 	AccountID     int64
@@ -85,7 +98,7 @@ func (repository *SessionRepository) AccountEnabled(ctx context.Context, account
 	var enabled bool
 	err := repository.db.QueryRowContext(ctx, "SELECT disabled_at IS NULL FROM streamer_accounts WHERE id = ?", accountID).Scan(&enabled)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return false, ErrAccountNotFound
 	}
 	if err != nil {
 		return false, ErrUnavailable
@@ -125,13 +138,18 @@ func (repository *SessionRepository) OpenBroadcastSession(ctx context.Context, r
 }
 
 func (repository *SessionRepository) PersistTargetRoom(ctx context.Context, command PersistTargetRoomCommand) error {
+	_, err := repository.MutateTargetRoom(ctx, command)
+	return err
+}
+
+func (repository *SessionRepository) MutateTargetRoom(ctx context.Context, command PersistTargetRoomCommand) (RoomMutationResult, error) {
 	if !repository.ready() || ctx == nil || !validOwnerFence(command.Owner) || !validRoomID(command.RoomID) || command.UpdatedAt.IsZero() {
-		return ErrInvalidInput
+		return RoomMutationResult{}, ErrInvalidInput
 	}
 	command.UpdatedAt = normalizeDatabaseTime(command.UpdatedAt)
 	transaction, err := repository.db.BeginTx(ctx, nil)
 	if err != nil {
-		return ErrUnavailable
+		return RoomMutationResult{}, ErrUnavailable
 	}
 	finished := false
 	defer func() {
@@ -140,21 +158,83 @@ func (repository *SessionRepository) PersistTargetRoom(ctx context.Context, comm
 		}
 	}()
 	if err := lockEnabledOwnerAccount(ctx, transaction, command.Owner.AccountID); err != nil {
-		return err
+		return RoomMutationResult{}, err
 	}
 	if err := validateOwnerFence(ctx, transaction, command.Owner); err != nil {
-		return err
+		return RoomMutationResult{}, err
+	}
+	oldCanonical, err := targetRoomUnderAccountLock(ctx, transaction, command.Owner.AccountID)
+	if err != nil {
+		return RoomMutationResult{}, err
 	}
 	result, err := transaction.ExecContext(ctx, "INSERT INTO account_runtime_rooms (account_id, room_id, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE room_id = VALUES(room_id), updated_at = VALUES(updated_at)", command.Owner.AccountID, command.RoomID, command.UpdatedAt)
 	if err != nil || !atLeastOneAffected(result) {
-		return ErrUnavailable
+		return RoomMutationResult{}, ErrUnavailable
 	}
 	if err := transaction.Commit(); err != nil {
 		finished = true
-		return ErrUnavailable
+		return RoomMutationResult{}, ErrUnavailable
 	}
 	finished = true
-	return nil
+	return RoomMutationResult{OldCanonical: oldCanonical, NewCanonical: command.RoomID}, nil
+}
+
+// PersistDisabledTargetRoom is the non-owning administrative path. The
+// account row lock serializes the exact old/new result and rejects a target
+// overwrite until every durable active-session guard has been cleaned up.
+func (repository *SessionRepository) PersistDisabledTargetRoom(ctx context.Context, command PersistDisabledTargetRoomCommand) (RoomMutationResult, error) {
+	if !repository.ready() || ctx == nil || command.AccountID <= 0 || !validRoomID(command.RoomID) || command.UpdatedAt.IsZero() {
+		return RoomMutationResult{}, ErrInvalidInput
+	}
+	command.UpdatedAt = normalizeDatabaseTime(command.UpdatedAt)
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			_ = transaction.Rollback()
+		}
+	}()
+	var enabled bool
+	err = transaction.QueryRowContext(ctx, "SELECT disabled_at IS NULL FROM streamer_accounts WHERE id = ? FOR UPDATE", command.AccountID).Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RoomMutationResult{}, ErrAccountNotFound
+	}
+	if err != nil || enabled {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	var activeGuards int
+	if err := transaction.QueryRowContext(ctx, "SELECT COUNT(*) FROM runtime_active_session_guards WHERE account_id = ?", command.AccountID).Scan(&activeGuards); err != nil || activeGuards != 0 {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	oldCanonical, err := targetRoomUnderAccountLock(ctx, transaction, command.AccountID)
+	if err != nil {
+		return RoomMutationResult{}, err
+	}
+	result, err := transaction.ExecContext(ctx, "INSERT INTO account_runtime_rooms (account_id, room_id, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE room_id = VALUES(room_id), updated_at = VALUES(updated_at)", command.AccountID, command.RoomID, command.UpdatedAt)
+	if err != nil || !atLeastOneAffected(result) {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	if err := transaction.Commit(); err != nil {
+		finished = true
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	finished = true
+	return RoomMutationResult{OldCanonical: oldCanonical, NewCanonical: command.RoomID}, nil
+}
+
+func targetRoomUnderAccountLock(ctx context.Context, transaction *sql.Tx, accountID int64) (string, error) {
+	var roomID string
+	err := transaction.QueryRowContext(ctx, "SELECT room_id FROM account_runtime_rooms WHERE account_id = ?", accountID).Scan(&roomID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil || !validRoomID(roomID) {
+		return "", ErrUnavailable
+	}
+	return roomID, nil
 }
 
 func (repository *SessionRepository) StartSession(ctx context.Context, command StartSessionCommand) (Session, error) {

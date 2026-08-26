@@ -162,7 +162,9 @@ func (repository *SessionRepository) ReleaseOwnership(ctx context.Context, fence
 
 func lockEnabledOwnerAccount(ctx context.Context, transaction *sql.Tx, accountID int64) error {
 	var enabled bool
-	if err := transaction.QueryRowContext(ctx, "SELECT disabled_at IS NULL FROM streamer_accounts WHERE id = ? FOR UPDATE", accountID).Scan(&enabled); err != nil {
+	if err := transaction.QueryRowContext(ctx, "SELECT disabled_at IS NULL FROM streamer_accounts WHERE id = ? FOR UPDATE", accountID).Scan(&enabled); errors.Is(err, sql.ErrNoRows) {
+		return ErrAccountNotFound
+	} else if err != nil {
 		return ErrUnavailable
 	}
 	if !enabled {

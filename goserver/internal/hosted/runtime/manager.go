@@ -25,6 +25,7 @@ const defaultOwnerOperationTimeout = 5 * time.Second
 
 var (
 	ErrInvalidInput    = errors.New("runtime: invalid input")
+	ErrAccountNotFound = errors.New("runtime: account not found")
 	ErrAccountDisabled = errors.New("runtime: account disabled")
 	ErrUnavailable     = errors.New("runtime: unavailable")
 	ErrClosed          = errors.New("runtime: closed")
@@ -47,6 +48,18 @@ type SessionStore interface {
 	StartSession(context.Context, StartSessionCommand) (Session, error)
 	EndSession(context.Context, EndSessionCommand) error
 	PendingMigration(context.Context, int64) (int64, bool, error)
+}
+
+type accountEnabledSessionStore interface {
+	AccountEnabled(context.Context, int64) (bool, error)
+}
+
+type targetRoomMutationSessionStore interface {
+	MutateTargetRoom(context.Context, PersistTargetRoomCommand) (RoomMutationResult, error)
+}
+
+type disabledTargetRoomMutationSessionStore interface {
+	PersistDisabledTargetRoom(context.Context, PersistDisabledTargetRoomCommand) (RoomMutationResult, error)
 }
 
 // roomEventSessionStore resolves only the business broadcast selected by a
@@ -1189,42 +1202,59 @@ func (manager *Manager) stopTransitionAccountLocked(ctx context.Context, account
 	return nil
 }
 
-func (manager *Manager) SetRoom(ctx context.Context, accountID int64, roomID string) (resultErr error) {
+func (manager *Manager) SetRoom(ctx context.Context, accountID int64, roomID string) error {
+	_, err := manager.MutateRoom(ctx, accountID, roomID)
+	return err
+}
+
+// MutateRoom is the deep administrative room-change interface. It owns
+// canonicalization, disabled-account admission rules, fencing, persistence,
+// and the immutable old/new result consumed by audit callers.
+func (manager *Manager) MutateRoom(ctx context.Context, accountID int64, roomID string) (result RoomMutationResult, resultErr error) {
 	roomID = strings.TrimSpace(roomID)
 	if manager == nil || ctx == nil || accountID <= 0 || !validRoomID(roomID) {
-		return ErrInvalidInput
+		return RoomMutationResult{}, ErrInvalidInput
 	}
 	account, err := manager.account(accountID)
 	if err != nil {
-		return err
+		return RoomMutationResult{}, err
 	}
 	account.mu.Lock()
 	if account.stale {
 		account.mu.Unlock()
-		return ErrUnavailable
+		return RoomMutationResult{}, ErrUnavailable
 	}
 	if account.shutting {
 		account.mu.Unlock()
-		return ErrClosed
+		return RoomMutationResult{}, ErrClosed
 	}
 	account.mu.Unlock()
 	account.opMu.Lock()
 	defer account.opMu.Unlock()
 	if err := ctx.Err(); err != nil {
-		return err
+		return RoomMutationResult{}, err
 	}
 	operationContext := operationContext{values: context.WithoutCancel(ctx), lifecycle: manager.lifecycle}
 	account.mu.Lock()
 	if account.stale {
 		account.mu.Unlock()
-		return ErrUnavailable
+		return RoomMutationResult{}, ErrUnavailable
 	}
 	if account.shutting {
 		account.mu.Unlock()
-		return ErrClosed
+		return RoomMutationResult{}, ErrClosed
 	}
 	active := account.current
+	if active == nil {
+		active = account.transitionPending
+	}
 	account.mu.Unlock()
+	if active == nil {
+		handled, disabledResult, disabledErr := manager.mutateDisabledTargetRoom(operationContext, account, accountID, roomID)
+		if handled {
+			return disabledResult, disabledErr
+		}
+	}
 	claim, err := manager.dependencies.Sessions.ClaimOwnership(operationContext, accountID, manager.ownerToken, manager.ownerTTL)
 	if err != nil {
 		if errors.Is(err, ErrAccountDisabled) {
@@ -1232,21 +1262,21 @@ func (manager *Manager) SetRoom(ctx context.Context, accountID int64, roomID str
 		} else if errors.Is(err, ErrOwnershipConflict) {
 			manager.beginStaleOnConflictLocked(account)
 		}
-		return err
+		return RoomMutationResult{}, err
 	}
 	account.mu.Lock()
 	stale := account.stale
 	if active != nil && active.owner != claim.Fence {
 		account.mu.Unlock()
 		manager.beginStaleCleanupLocked(account, active, claim.Fence)
-		return ErrUnavailable
+		return RoomMutationResult{}, ErrUnavailable
 	}
 	account.owner = claim.Fence
 	account.reconcile = claim.Reconcile
 	if stale {
 		account.mu.Unlock()
 		manager.beginStaleCleanupLocked(account, active, claim.Fence)
-		return ErrUnavailable
+		return RoomMutationResult{}, ErrUnavailable
 	}
 	account.disabled = false
 	account.degraded = false
@@ -1271,13 +1301,13 @@ func (manager *Manager) SetRoom(ctx context.Context, accountID int64, roomID str
 	}
 	canonical, err := manager.dependencies.RoomSources.Resolve(operationContext, roomID, accountID)
 	if err != nil || !validRoomID(canonical) {
-		return ErrUnavailable
+		return RoomMutationResult{}, ErrUnavailable
 	}
 	account.mu.Lock()
 	stale = account.stale
 	account.mu.Unlock()
 	if stale {
-		return ErrUnavailable
+		return RoomMutationResult{}, ErrUnavailable
 	}
 	// A session created before roomwatcher composition has no business-broadcast
 	// link. Keep the old switch path only for that temporary compatibility
@@ -1286,37 +1316,91 @@ func (manager *Manager) SetRoom(ctx context.Context, accountID int64, roomID str
 	if active != nil && active.session.BroadcastSessionID == 0 {
 		if err := manager.closeCurrent(operationContext, account); err != nil {
 			if errors.Is(err, ErrOwnershipConflict) {
-				return ErrUnavailable
+				return RoomMutationResult{}, ErrUnavailable
 			}
 			account.markDegraded()
-			return err
+			return RoomMutationResult{}, err
 		}
 		if err := manager.applyPendingMigrationForOwner(operationContext, claim.Fence, accountID); err != nil {
-			return err
+			return RoomMutationResult{}, err
 		}
-		if err := manager.startRoom(operationContext, account, canonical, true, true, 0); err != nil {
+		result, err = manager.persistTargetRoomMutation(operationContext, claim.Fence, canonical)
+		if err != nil {
+			return RoomMutationResult{}, manager.roomMutationPersistenceError(account, err)
+		}
+		if err := manager.startRoom(operationContext, account, canonical, false, true, 0); err != nil {
 			if errors.Is(err, ErrOwnershipConflict) {
-				return ErrUnavailable
+				return RoomMutationResult{}, ErrUnavailable
 			}
 			account.markDegraded()
-			return err
+			return RoomMutationResult{}, err
 		}
-		return nil
+		return result, nil
 	}
 	if temporaryClaim {
 		if err := manager.applyPendingMigrationForOwner(operationContext, claim.Fence, accountID); err != nil {
-			return err
+			return RoomMutationResult{}, err
 		}
 	}
-	if err := manager.dependencies.Sessions.PersistTargetRoom(operationContext, PersistTargetRoomCommand{Owner: claim.Fence, RoomID: canonical, UpdatedAt: manager.now()}); err != nil {
-		if errors.Is(err, ErrOwnershipConflict) {
-			manager.beginStaleCleanupLocked(account, nil, OwnerFence{})
-			return ErrUnavailable
-		}
-		account.markDegraded()
-		return err
+	result, err = manager.persistTargetRoomMutation(operationContext, claim.Fence, canonical)
+	if err != nil {
+		return RoomMutationResult{}, manager.roomMutationPersistenceError(account, err)
 	}
-	return nil
+	return result, nil
+}
+
+func (manager *Manager) mutateDisabledTargetRoom(ctx context.Context, account *accountRuntime, accountID int64, requested string) (bool, RoomMutationResult, error) {
+	states, stateOK := manager.dependencies.Sessions.(accountEnabledSessionStore)
+	persistence, persistenceOK := manager.dependencies.Sessions.(disabledTargetRoomMutationSessionStore)
+	if !stateOK || !persistenceOK {
+		return false, RoomMutationResult{}, nil
+	}
+	enabled, err := states.AccountEnabled(ctx, accountID)
+	if err != nil {
+		if errors.Is(err, ErrAccountNotFound) {
+			return true, RoomMutationResult{}, ErrAccountNotFound
+		}
+		return true, RoomMutationResult{}, ErrUnavailable
+	}
+	if enabled {
+		return false, RoomMutationResult{}, nil
+	}
+	canonical, err := manager.dependencies.RoomSources.Resolve(ctx, requested, accountID)
+	if err != nil || !validRoomID(canonical) {
+		return true, RoomMutationResult{}, ErrUnavailable
+	}
+	result, err := persistence.PersistDisabledTargetRoom(ctx, PersistDisabledTargetRoomCommand{AccountID: accountID, RoomID: canonical, UpdatedAt: manager.now()})
+	if err != nil {
+		return true, RoomMutationResult{}, err
+	}
+	manager.markDisabledLocked(account)
+	return true, result, nil
+}
+
+func (manager *Manager) persistTargetRoomMutation(ctx context.Context, owner OwnerFence, roomID string) (RoomMutationResult, error) {
+	command := PersistTargetRoomCommand{Owner: owner, RoomID: roomID, UpdatedAt: manager.now()}
+	if persistence, ok := manager.dependencies.Sessions.(targetRoomMutationSessionStore); ok {
+		return persistence.MutateTargetRoom(ctx, command)
+	}
+	oldCanonical, err := manager.dependencies.Sessions.TargetRoom(ctx, owner.AccountID)
+	if errors.Is(err, ErrNoTargetRoom) {
+		oldCanonical = ""
+	} else if err != nil {
+		return RoomMutationResult{}, err
+	}
+	if err := manager.dependencies.Sessions.PersistTargetRoom(ctx, command); err != nil {
+		return RoomMutationResult{}, err
+	}
+	return RoomMutationResult{OldCanonical: oldCanonical, NewCanonical: roomID}, nil
+}
+
+func (manager *Manager) roomMutationPersistenceError(account *accountRuntime, err error) error {
+	if errors.Is(err, ErrOwnershipConflict) {
+		manager.beginStaleCleanupLocked(account, nil, OwnerFence{})
+		return ErrUnavailable
+	}
+	account.markDegraded()
+	return err
 }
 
 func (manager *Manager) applyPendingMigrationForOwner(ctx context.Context, owner OwnerFence, accountID int64) error {

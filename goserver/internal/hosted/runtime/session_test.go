@@ -175,7 +175,7 @@ func TestSessionRepositoryReconcileRejectsCrossAccountCommandBeforeDatabase(t *t
 	}
 }
 
-func TestSessionRepositoryPersistsTargetOnlyUnderExactUnexpiredOwnerFence(t *testing.T) {
+func TestSessionRepositoryMutatesTargetAndReturnsPairOnlyUnderExactUnexpiredOwnerFence(t *testing.T) {
 	fence := OwnerFence{AccountID: 7, Token: ownerToken(0x41), Epoch: 3}
 	now := time.Date(2026, 8, 17, 4, 0, 0, 123456789, time.UTC)
 	database, mock, err := sqlmock.New()
@@ -186,11 +186,65 @@ func TestSessionRepositoryPersistsTargetOnlyUnderExactUnexpiredOwnerFence(t *tes
 	mock.ExpectBegin()
 	expectOwnershipAccountLock(mock, 7, true)
 	expectOwnerFence(mock, fence, true)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT room_id FROM account_runtime_rooms WHERE account_id = ?")).
+		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"room_id"}).AddRow("111"))
 	mock.ExpectExec("INSERT INTO account_runtime_rooms").WithArgs(int64(7), "42", now.UTC().Truncate(time.Microsecond)).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	command := PersistTargetRoomCommand{Owner: fence, RoomID: "42", UpdatedAt: now}
-	if err := NewSessionRepository(database).PersistTargetRoom(context.Background(), command); err != nil {
+	result, err := NewSessionRepository(database).MutateTargetRoom(context.Background(), command)
+	if err != nil || result != (RoomMutationResult{OldCanonical: "111", NewCanonical: "42"}) {
+		t.Fatalf("MutateTargetRoom() = %#v, %v", result, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// This test fails if a disabled-account room edit can claim ownership, skip
+// the account row lock, overwrite during active cleanup, or lose the exact
+// old/new canonical pair committed by its transaction.
+func TestSessionRepositoryPersistsDisabledTargetUnderAccountLockWithoutActiveExecution(t *testing.T) {
+	now := time.Date(2026, 8, 26, 12, 45, 0, 0, time.UTC)
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT disabled_at IS NULL FROM streamer_accounts WHERE id = ? FOR UPDATE")).
+		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"enabled"}).AddRow(false))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM runtime_active_session_guards WHERE account_id = ?")).
+		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT room_id FROM account_runtime_rooms WHERE account_id = ?")).
+		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"room_id"}).AddRow("111"))
+	mock.ExpectExec("INSERT INTO account_runtime_rooms").WithArgs(int64(7), "42", now.UTC().Truncate(time.Microsecond)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	result, err := NewSessionRepository(database).PersistDisabledTargetRoom(context.Background(), PersistDisabledTargetRoomCommand{AccountID: 7, RoomID: "42", UpdatedAt: now})
+	if err != nil || result != (RoomMutationResult{OldCanonical: "111", NewCanonical: "42"}) {
+		t.Fatalf("PersistDisabledTargetRoom() = %#v, %v", result, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionRepositoryRejectsDisabledTargetPersistWhileExecutionCleanupRemains(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT disabled_at IS NULL FROM streamer_accounts WHERE id = ? FOR UPDATE")).
+		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"enabled"}).AddRow(false))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM runtime_active_session_guards WHERE account_id = ?")).
+		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectRollback()
+
+	_, err = NewSessionRepository(database).PersistDisabledTargetRoom(context.Background(), PersistDisabledTargetRoomCommand{AccountID: 7, RoomID: "42", UpdatedAt: time.Now()})
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("PersistDisabledTargetRoom error = %v, want unavailable", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

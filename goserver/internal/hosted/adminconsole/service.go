@@ -30,7 +30,12 @@ type MutationServices struct {
 // means the canonical target was persisted through runtime ownership fencing
 // and the durable enabled-account reference snapshot was synchronized.
 type RoomMutation interface {
-	SetRoom(context.Context, int64, string) error
+	SetRoom(context.Context, int64, string) (RoomMutationResult, error)
+}
+
+type RoomMutationResult struct {
+	OldCanonical string
+	NewCanonical string
 }
 
 type Service struct {
@@ -130,24 +135,15 @@ func (service *Service) UpdateRoom(ctx context.Context, id int64, roomID string)
 	if service.mutations.Room == nil {
 		return AccountDetail{}, errors.New("unavailable")
 	}
-	var old string
-	if err := service.db.QueryRowContext(ctx, `SELECT COALESCE(room.room_id,'') FROM streamer_accounts a LEFT JOIN account_runtime_rooms room ON room.account_id=a.id WHERE a.id=?`, id).Scan(&old); errors.Is(err, sql.ErrNoRows) {
-		return AccountDetail{}, ErrNotFound
-	} else if err != nil {
+	result, err := service.mutations.Room.SetRoom(ctx, id, roomID)
+	if err != nil {
 		return AccountDetail{}, err
 	}
-	if err := service.mutations.Room.SetRoom(ctx, id, roomID); err != nil {
-		return AccountDetail{}, err
-	}
-	var canonical string
-	if err := service.db.QueryRowContext(ctx, `SELECT room_id FROM account_runtime_rooms WHERE account_id=?`, id).Scan(&canonical); err != nil || !validRoomID(canonical) {
-		if err != nil {
-			return AccountDetail{}, err
-		}
+	if result.OldCanonical != "" && !validRoomID(result.OldCanonical) || !validRoomID(result.NewCanonical) {
 		return AccountDetail{}, errors.New("unavailable")
 	}
 	now := time.Now().UTC()
-	payload, _ := json.Marshal(map[string]string{"oldRoomId": old, "newRoomId": canonical})
+	payload, _ := json.Marshal(map[string]string{"oldRoomId": result.OldCanonical, "newRoomId": result.NewCanonical})
 	if _, err := service.db.ExecContext(ctx, `INSERT INTO audit_events (event_type,actor_admin_identity_id,target_account_id,event_data,created_at) VALUES ('admin_room_updated',1,?,?,?)`, id, payload, now); err != nil {
 		return AccountDetail{}, err
 	}

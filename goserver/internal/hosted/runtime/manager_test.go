@@ -1584,6 +1584,67 @@ func TestSetRoomWithoutPresencePersistsCanonicalTargetWithoutStartingSession(t *
 	}
 }
 
+// This test fails if an inactive disabled account room edit claims runtime
+// ownership, starts a source/session, skips canonicalization, or returns a
+// result reconstructed outside the serialized mutation.
+func TestMutateRoomPersistsDisabledCanonicalTargetWithoutClaimOrRuntimeAdmission(t *testing.T) {
+	log := &operationLog{}
+	sessions := &orderedSessions{enabled: false, target: "111", log: log}
+	sources := newOrderedRoomSources(log, map[string]string{"7": "42"})
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: orderedMigration{log: log}, RoomSources: sources}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+
+	result, err := manager.MutateRoom(context.Background(), 7, "7")
+	if err != nil || result != (RoomMutationResult{OldCanonical: "111", NewCanonical: "42"}) {
+		t.Fatalf("MutateRoom() = %#v, %v", result, err)
+	}
+	if got := log.snapshot(); !reflect.DeepEqual(got, []string{"resolve:42", "persist-disabled:42"}) {
+		t.Fatalf("disabled room mutation operations = %v", got)
+	}
+	sessions.mu.Lock()
+	claims, starts := sessions.claims, sessions.nextID
+	sessions.mu.Unlock()
+	if claims != 0 || starts != 0 || sources.maximumActive() != 0 {
+		t.Fatalf("disabled room mutation claims=%d starts=%d activeSources=%d", claims, starts, sources.maximumActive())
+	}
+	status, err := manager.Status(context.Background(), 7)
+	if err != nil || status.State != StateDisabled || status.SessionID != 0 {
+		t.Fatalf("disabled room mutation status = %#v, %v", status, err)
+	}
+}
+
+// This test fails if the disabled-account shortcut can overwrite the target
+// while an admitted execution still requires fenced cleanup.
+func TestMutateRoomDoesNotBypassFenceWhileDisabledExecutionNeedsCleanup(t *testing.T) {
+	log := &operationLog{}
+	sessions := &orderedSessions{enabled: true, target: "111", log: log}
+	sources := newOrderedRoomSources(log, map[string]string{"111": "111", "7": "42"})
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: orderedMigration{log: log}, RoomSources: sources}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	lease, err := manager.Acquire(context.Background(), 7, LeaseConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	sessions.setEnabled(false)
+
+	if _, err := manager.MutateRoom(context.Background(), 7, "7"); !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("MutateRoom with disabled active execution = %v, want account disabled", err)
+	}
+	sessions.mu.Lock()
+	target := sessions.target
+	sessions.mu.Unlock()
+	if target != "111" || containsOperation(log.snapshot(), "persist-disabled:42") {
+		t.Fatalf("disabled cleanup bypassed fence: target=%q operations=%v", target, log.snapshot())
+	}
+}
+
 func TestSetRoomPersistFailureDoesNotOpenUpstreamOrStartSession(t *testing.T) {
 	log := &operationLog{}
 	sessions := &orderedSessions{enabled: true, persistFailures: 1, log: log}
@@ -1793,6 +1854,7 @@ type orderedSessions struct {
 	releases        []OwnerFence
 	ends            []EndSessionCommand
 	reconciles      []ReconcileSessionCommand
+	claims          int
 }
 
 type transitionSessions struct {
@@ -1949,6 +2011,7 @@ func (sessions *orderedSessions) AccountEnabled(context.Context, int64) (bool, e
 func (sessions *orderedSessions) ClaimOwnership(_ context.Context, accountID int64, token OwnerToken, _ time.Duration) (OwnerClaim, error) {
 	sessions.mu.Lock()
 	defer sessions.mu.Unlock()
+	sessions.claims++
 	if !sessions.enabled {
 		return OwnerClaim{}, ErrAccountDisabled
 	}
@@ -1961,6 +2024,18 @@ func (sessions *orderedSessions) ClaimOwnership(_ context.Context, accountID int
 		sessions.owner = OwnerFence{AccountID: accountID, Token: token, Epoch: sessions.epoch}
 	}
 	return OwnerClaim{Fence: sessions.owner, Reconcile: false}, nil
+}
+
+func (sessions *orderedSessions) PersistDisabledTargetRoom(_ context.Context, command PersistDisabledTargetRoomCommand) (RoomMutationResult, error) {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	if sessions.enabled {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	old := sessions.target
+	sessions.target = command.RoomID
+	sessions.log.add("persist-disabled:" + command.RoomID)
+	return RoomMutationResult{OldCanonical: old, NewCanonical: command.RoomID}, nil
 }
 func (sessions *orderedSessions) RenewOwnership(_ context.Context, fence OwnerFence, _ time.Duration) error {
 	sessions.mu.Lock()

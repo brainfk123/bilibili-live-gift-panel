@@ -11,12 +11,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"bilibili-live-gift-panel/internal/hosted/adminconsole"
 	"bilibili-live-gift-panel/internal/hosted/adminidentity"
 	"bilibili-live-gift-panel/internal/hosted/biligateway"
 	"bilibili-live-gift-panel/internal/hosted/configuration"
@@ -528,11 +530,15 @@ func TestProductionRoomMutationCanonicalizesThenRefreshesAndRetries(t *testing.T
 	refresher := &mainRoomReferenceRefresher{sessions: sessions, failures: 1, err: wantSyncErr}
 	mutation := productionRoomMutation{runtime: manager, references: refresher}
 
-	if err := mutation.SetRoom(context.Background(), 7, "7"); !errors.Is(err, wantSyncErr) {
+	if _, err := mutation.SetRoom(context.Background(), 7, "7"); !errors.Is(err, wantSyncErr) {
 		t.Fatalf("first SetRoom error = %v, want reference sync failure", err)
 	}
-	if err := mutation.SetRoom(context.Background(), 7, "7"); err != nil {
+	result, err := mutation.SetRoom(context.Background(), 7, "7")
+	if err != nil {
 		t.Fatalf("retry SetRoom: %v", err)
+	}
+	if result.OldCanonical != "42" || result.NewCanonical != "42" {
+		t.Fatalf("retry mutation result = %#v, want exact committed 42 -> 42", result)
 	}
 	if targets := sessions.persistedTargets(); len(targets) != 2 || targets[0] != "42" || targets[1] != "42" {
 		t.Fatalf("persisted canonical targets = %#v, want [42 42]", targets)
@@ -544,14 +550,73 @@ func TestProductionRoomMutationCanonicalizesThenRefreshesAndRetries(t *testing.T
 
 func TestProductionRoomMutationStopsBeforeRefreshWhenRuntimeFenceFails(t *testing.T) {
 	want := errors.New("fence mismatch")
-	setter := roomSetterFunc(func(context.Context, int64, string) error { return want })
+	setter := roomSetterFunc(func(context.Context, int64, string) (hostedruntime.RoomMutationResult, error) {
+		return hostedruntime.RoomMutationResult{}, want
+	})
 	refresher := &mainRoomReferenceRefresher{}
 	mutation := productionRoomMutation{runtime: setter, references: refresher}
-	if err := mutation.SetRoom(context.Background(), 7, "7"); !errors.Is(err, want) {
+	if _, err := mutation.SetRoom(context.Background(), 7, "7"); !errors.Is(err, want) {
 		t.Fatalf("SetRoom error = %v", err)
 	}
 	if refresher.calls != 0 {
 		t.Fatalf("runtime failure still refreshed references %d times", refresher.calls)
+	}
+}
+
+func TestProductionRoomMutationPreservesAdministratorNotFoundContract(t *testing.T) {
+	setter := roomSetterFunc(func(context.Context, int64, string) (hostedruntime.RoomMutationResult, error) {
+		return hostedruntime.RoomMutationResult{}, hostedruntime.ErrAccountNotFound
+	})
+	mutation := productionRoomMutation{runtime: setter, references: &mainRoomReferenceRefresher{}}
+	if _, err := mutation.SetRoom(context.Background(), 404, "7"); !errors.Is(err, adminconsole.ErrNotFound) {
+		t.Fatalf("missing-account SetRoom error = %v, want administrator not found", err)
+	}
+}
+
+// This table fails if any post-Manager initialization return escapes without
+// the one production cleanup path, or if ownership is cleared before the
+// watcher/runtime goroutines and room sources have quiesced.
+func TestProductionRuntimeLifecycleCleansEveryPostManagerInitializationFailure(t *testing.T) {
+	cases := []struct {
+		name       string
+		standalone bool
+		room       bool
+		want       []string
+	}{
+		{name: "runtime HTTP", want: []string{"runtime-shutdown", "runtime-wait", "owner-clear"}},
+		{name: "OBS service", want: []string{"runtime-shutdown", "runtime-wait", "owner-clear"}},
+		{name: "OBS HTTP", want: []string{"runtime-shutdown", "runtime-wait", "owner-clear"}},
+		{name: "administrator HTTP", want: []string{"runtime-shutdown", "runtime-wait", "owner-clear"}},
+		{name: "administrator settings", want: []string{"runtime-shutdown", "runtime-wait", "owner-clear"}},
+		{name: "administrator settings HTTP", want: []string{"runtime-shutdown", "runtime-wait", "owner-clear"}},
+		{name: "probe cadence", want: []string{"runtime-shutdown", "runtime-wait", "owner-clear"}},
+		{name: "room watcher", want: []string{"runtime-shutdown", "runtime-wait", "owner-clear"}},
+		{name: "room runtime", standalone: true, want: []string{"watcher-close", "watcher-wait", "runtime-shutdown", "runtime-wait", "owner-clear"}},
+		{name: "administrator console", room: true, want: []string{"room-shutdown", "room-wait", "runtime-shutdown", "runtime-wait", "owner-clear"}},
+		{name: "administrator console HTTP", room: true, want: []string{"room-shutdown", "room-wait", "runtime-shutdown", "runtime-wait", "owner-clear"}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			log := &runtimeStartupLog{}
+			runtime := &runtimeStartupResource{name: "runtime", log: log}
+			want := errors.New("fail " + test.name)
+			err := withProductionRuntimeLifecycle(context.Background(), time.Second, runtime, func() { log.add("owner-clear") }, func(lifecycle *productionRuntimeLifecycle) error {
+				if test.standalone {
+					lifecycle.TrackWatcher(&watcherStartupResource{log: log})
+				}
+				if test.room {
+					lifecycle.TrackWatcher(&watcherStartupResource{log: log})
+					lifecycle.TrackRoomRuntime(&runtimeStartupResource{name: "room", log: log})
+				}
+				return want
+			})
+			if !errors.Is(err, want) {
+				t.Fatalf("initialization error = %v, want %v", err, want)
+			}
+			if got := log.snapshot(); !slices.Equal(got, test.want) {
+				t.Fatalf("cleanup order = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 
@@ -1206,10 +1271,49 @@ func (refresher *mainRoomReferenceRefresher) observedTargets() []string {
 	return append([]string(nil), refresher.observed...)
 }
 
-type roomSetterFunc func(context.Context, int64, string) error
+type roomSetterFunc func(context.Context, int64, string) (hostedruntime.RoomMutationResult, error)
 
-func (setter roomSetterFunc) SetRoom(ctx context.Context, accountID int64, roomID string) error {
+func (setter roomSetterFunc) MutateRoom(ctx context.Context, accountID int64, roomID string) (hostedruntime.RoomMutationResult, error) {
 	return setter(ctx, accountID, roomID)
+}
+
+type runtimeStartupLog struct {
+	mu    sync.Mutex
+	items []string
+}
+
+func (log *runtimeStartupLog) add(item string) {
+	log.mu.Lock()
+	log.items = append(log.items, item)
+	log.mu.Unlock()
+}
+
+func (log *runtimeStartupLog) snapshot() []string {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	return append([]string(nil), log.items...)
+}
+
+type runtimeStartupResource struct {
+	name string
+	log  *runtimeStartupLog
+}
+
+func (resource *runtimeStartupResource) Shutdown(context.Context) error {
+	resource.log.add(resource.name + "-shutdown")
+	return nil
+}
+func (resource *runtimeStartupResource) Wait(context.Context) error {
+	resource.log.add(resource.name + "-wait")
+	return nil
+}
+
+type watcherStartupResource struct{ log *runtimeStartupLog }
+
+func (resource *watcherStartupResource) Close() { resource.log.add("watcher-close") }
+func (resource *watcherStartupResource) Wait(context.Context) error {
+	resource.log.add("watcher-wait")
+	return nil
 }
 
 type mainRuntimeSources struct {
