@@ -742,6 +742,7 @@ func New(dependencies Dependencies) http.Handler {
 		// returns 405 for unsupported methods instead of letting them fall
 		// through to the broader administrator router.
 		mux.Handle("/api/admin/bili-service/challenge", dependencies.BiliService)
+		mux.Handle("/api/admin/bili-service/challenge/{id}", dependencies.BiliService)
 		mux.Handle("/api/admin/bili-service/replace", dependencies.BiliService)
 		mux.Handle("/api/admin/bili-service/status", dependencies.BiliService)
 		mux.Handle("/api/admin/bili-service/check", dependencies.BiliService)

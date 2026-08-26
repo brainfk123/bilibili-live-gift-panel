@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -175,6 +176,196 @@ func TestHTTPReplaceUsesAdminCookieAndNeverReturnsServiceCookie(t *testing.T) {
 	}
 	if response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("Cache-Control = %q", response.Header().Get("Cache-Control"))
+	}
+}
+
+func TestHTTPPollChallengeProjectsOnlyCredentialStage(t *testing.T) {
+	tests := []struct {
+		name       string
+		stage      identity.VerificationStage
+		wantStatus string
+	}{
+		{name: "waiting becomes pending", stage: identity.VerificationWaiting, wantStatus: "pending"},
+		{name: "scanned stays scanned", stage: identity.VerificationScanned, wantStatus: "scanned"},
+		{name: "verified stays verified", stage: identity.VerificationVerified, wantStatus: "verified"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			verifier := &recordingCredentialVerifier{stage: test.stage}
+			authorizer := &recordingSensitiveAuthorizer{}
+			service, err := NewService(verifier, &contextGuardedCredentialReplacer{}, authorizer, ServiceOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler, err := NewHTTPHandler(service, testHTTPOptions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodGet, "/api/admin/bili-service/challenge/proof", nil)
+			request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "administrator-session"})
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if len(body) != 1 || body["status"] != test.wantStatus {
+				t.Fatalf("body=%v", body)
+			}
+			if authorizer.requireSessionCalls != 1 || authorizer.requiredToken != "administrator-session" {
+				t.Fatalf("administrator authentication calls=%d token=%q", authorizer.requireSessionCalls, authorizer.requiredToken)
+			}
+			if verifier.pollCalls != 1 || verifier.challengeID != "proof" {
+				t.Fatalf("credential polls=%d challenge=%q", verifier.pollCalls, verifier.challengeID)
+			}
+			lowerBody := strings.ToLower(response.Body.String())
+			for _, forbidden := range []string{"uid", "cookie", "challenge", "proof", "sessdata"} {
+				if strings.Contains(lowerBody, forbidden) {
+					t.Fatalf("response exposed %q: %q", forbidden, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestHTTPPollChallengeRejectsExpiredAndUnknownStages(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		stage      identity.VerificationStage
+		pollErr    error
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "expired", pollErr: identity.ErrChallengeExpired, wantStatus: http.StatusGone, wantBody: "{\"error\":\"expired\"}\n"},
+		{name: "unknown stage", stage: identity.VerificationStage("private-future-stage"), wantStatus: http.StatusUnauthorized, wantBody: "{\"error\":\"authentication_failed\"}\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			verifier := &recordingCredentialVerifier{stage: test.stage, pollErr: test.pollErr}
+			service, err := NewService(verifier, &contextGuardedCredentialReplacer{}, &recordingSensitiveAuthorizer{}, ServiceOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler, err := NewHTTPHandler(service, testHTTPOptions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodGet, "/api/admin/bili-service/challenge/proof", nil)
+			request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "administrator-session"})
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus || response.Body.String() != test.wantBody {
+				t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+			}
+			if verifier.pollCalls != 1 {
+				t.Fatalf("credential polls=%d, want 1", verifier.pollCalls)
+			}
+		})
+	}
+}
+
+func TestHTTPPollChallengeRejectsInvalidRequestsBeforeCredentialPoll(t *testing.T) {
+	longID := strings.Repeat("a", 257)
+	tests := []struct {
+		name       string
+		method     string
+		target     string
+		body       io.Reader
+		wantStatus int
+	}{
+		{name: "head", method: http.MethodHead, target: "/api/admin/bili-service/challenge/proof", wantStatus: http.StatusMethodNotAllowed},
+		{name: "query", method: http.MethodGet, target: "/api/admin/bili-service/challenge/proof?private=query", wantStatus: http.StatusBadRequest},
+		{name: "empty id", method: http.MethodGet, target: "/api/admin/bili-service/challenge/", wantStatus: http.StatusNotFound},
+		{name: "overlong id", method: http.MethodGet, target: "/api/admin/bili-service/challenge/" + longID, wantStatus: http.StatusBadRequest},
+		{name: "request body", method: http.MethodGet, target: "/api/admin/bili-service/challenge/proof", body: strings.NewReader(`{}`), wantStatus: http.StatusBadRequest},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			verifier := &recordingCredentialVerifier{stage: identity.VerificationWaiting}
+			authorizer := &recordingSensitiveAuthorizer{}
+			limiter := &recordingHTTPRateLimiter{}
+			options := testHTTPOptions()
+			options.Limiter = limiter
+			service, err := NewService(verifier, &contextGuardedCredentialReplacer{}, authorizer, ServiceOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler, err := NewHTTPHandler(service, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(test.method, test.target, test.body)
+			request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "administrator-session"})
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status=%d body=%q want=%d", response.Code, response.Body.String(), test.wantStatus)
+			}
+			if verifier.pollCalls != 0 || authorizer.requireSessionCalls != 0 || len(limiter.calls) != 0 {
+				t.Fatalf("invalid request reached protected work: polls=%d sessions=%d limits=%v", verifier.pollCalls, authorizer.requireSessionCalls, limiter.calls)
+			}
+		})
+	}
+}
+
+func TestHTTPPollChallengeRequiresSessionAndEveryLimiterScope(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		cookie       string
+		deniedScope  identity.LimitScope
+		wantStatus   int
+		wantScopes   []identity.LimitScope
+		wantSessions int
+	}{
+		{name: "missing session", wantStatus: http.StatusUnauthorized, wantScopes: []identity.LimitScope{identity.LimitGlobal, identity.LimitPerIP}},
+		{name: "global limit", cookie: "administrator-session", deniedScope: identity.LimitGlobal, wantStatus: http.StatusTooManyRequests, wantScopes: []identity.LimitScope{identity.LimitGlobal}},
+		{name: "per ip limit", cookie: "administrator-session", deniedScope: identity.LimitPerIP, wantStatus: http.StatusTooManyRequests, wantScopes: []identity.LimitScope{identity.LimitGlobal, identity.LimitPerIP}},
+		{name: "session digest limit", cookie: "administrator-session", deniedScope: identity.LimitPerChallenge, wantStatus: http.StatusTooManyRequests, wantScopes: []identity.LimitScope{identity.LimitGlobal, identity.LimitPerIP, identity.LimitPerChallenge}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			verifier := &recordingCredentialVerifier{stage: identity.VerificationWaiting}
+			authorizer := &recordingSensitiveAuthorizer{}
+			limiter := &recordingHTTPRateLimiter{denyScope: test.deniedScope}
+			options := testHTTPOptions()
+			options.Limiter = limiter
+			service, err := NewService(verifier, &contextGuardedCredentialReplacer{}, authorizer, ServiceOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler, err := NewHTTPHandler(service, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodGet, "/api/admin/bili-service/challenge/proof", nil)
+			if test.cookie != "" {
+				request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: test.cookie})
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status=%d body=%q want=%d", response.Code, response.Body.String(), test.wantStatus)
+			}
+			if verifier.pollCalls != 0 || authorizer.requireSessionCalls != test.wantSessions {
+				t.Fatalf("rejected request reached service: polls=%d sessions=%d", verifier.pollCalls, authorizer.requireSessionCalls)
+			}
+			if len(limiter.calls) != len(test.wantScopes) {
+				t.Fatalf("limiter calls=%v want scopes=%v", limiter.calls, test.wantScopes)
+			}
+			for index, scope := range test.wantScopes {
+				if limiter.calls[index].scope != scope {
+					t.Fatalf("limiter call %d=%v want scope=%s", index, limiter.calls[index], scope)
+				}
+			}
+			if test.cookie != "" && len(limiter.calls) == 3 {
+				digest := sha256.Sum256([]byte(test.cookie))
+				if strings.Contains(limiter.calls[2].key, test.cookie) || !strings.HasSuffix(limiter.calls[2].key, fmt.Sprintf("%x", digest[:])) {
+					t.Fatalf("session limiter key is not a secret-free digest: %q", limiter.calls[2].key)
+				}
+			}
+		})
 	}
 }
 
@@ -805,11 +996,17 @@ type canceledCredentialVerifier struct{}
 func (canceledCredentialVerifier) Begin(context.Context) (identity.Challenge, error) {
 	return identity.Challenge{}, nil
 }
+func (canceledCredentialVerifier) PollCredential(context.Context, string) (identity.VerificationStage, error) {
+	return "", identity.ErrChallengeExpired
+}
 
 type successfulCredentialVerifier struct{}
 
 func (successfulCredentialVerifier) Begin(context.Context) (identity.Challenge, error) {
 	return identity.Challenge{}, nil
+}
+func (successfulCredentialVerifier) PollCredential(context.Context, string) (identity.VerificationStage, error) {
+	return identity.VerificationVerified, nil
 }
 
 func (successfulCredentialVerifier) ConsumeCredential(ctx context.Context, _ string, consumer func(context.Context, []byte) error) error {
@@ -831,15 +1028,17 @@ func (sequence *timeSequence) Now() time.Time {
 }
 
 type recordingSensitiveAuthorizer struct {
-	writeMarkers    bool
-	renewErr        error
-	authorizeCalls  int
-	renewCalls      int
-	authorizedToken string
-	authorizedAt    time.Time
-	renewedAt       time.Time
-	authorizeTx     *sql.Tx
-	renewTx         *sql.Tx
+	writeMarkers        bool
+	renewErr            error
+	authorizeCalls      int
+	renewCalls          int
+	requireSessionCalls int
+	authorizedToken     string
+	requiredToken       string
+	authorizedAt        time.Time
+	renewedAt           time.Time
+	authorizeTx         *sql.Tx
+	renewTx             *sql.Tx
 }
 
 func (authorizer *recordingSensitiveAuthorizer) ConsumeOperation(_ context.Context, transaction *sql.Tx, sessionToken, authorizationToken string, purpose security.OperationPurpose, target string, now time.Time) error {
@@ -875,7 +1074,32 @@ func (authorizer *recordingSensitiveAuthorizer) RenewRecentTOTP(ctx context.Cont
 	return authorizer.renewErr
 }
 
-func (*recordingSensitiveAuthorizer) RequireSession(context.Context, string) error { return nil }
+func (authorizer *recordingSensitiveAuthorizer) RequireSession(_ context.Context, token string) error {
+	authorizer.requireSessionCalls++
+	authorizer.requiredToken = token
+	return nil
+}
+
+type recordingCredentialVerifier struct {
+	stage       identity.VerificationStage
+	pollErr     error
+	pollCalls   int
+	challengeID string
+}
+
+func (*recordingCredentialVerifier) Begin(context.Context) (identity.Challenge, error) {
+	return identity.Challenge{}, nil
+}
+
+func (verifier *recordingCredentialVerifier) PollCredential(_ context.Context, challengeID string) (identity.VerificationStage, error) {
+	verifier.pollCalls++
+	verifier.challengeID = challengeID
+	return verifier.stage, verifier.pollErr
+}
+
+func (*recordingCredentialVerifier) ConsumeCredential(context.Context, string, func(context.Context, []byte) error) error {
+	return identity.ErrVerificationPending
+}
 func (canceledCredentialVerifier) ConsumeCredential(ctx context.Context, _ string, consumer func(context.Context, []byte) error) error {
 	consumerContext, cancel := context.WithCancelCause(ctx)
 	cancel(identity.ErrChallengeExpired)
@@ -929,11 +1153,14 @@ type httpRateLimitCall struct {
 	scope identity.LimitScope
 	key   string
 }
-type recordingHTTPRateLimiter struct{ calls []httpRateLimitCall }
+type recordingHTTPRateLimiter struct {
+	denyScope identity.LimitScope
+	calls     []httpRateLimitCall
+}
 
 func (limiter *recordingHTTPRateLimiter) Allow(_ context.Context, scope identity.LimitScope, key string) bool {
 	limiter.calls = append(limiter.calls, httpRateLimitCall{scope: scope, key: key})
-	return true
+	return scope != limiter.denyScope
 }
 func testHTTPOptions() HTTPOptions {
 	return HTTPOptions{AllowedOrigin: "https://admin.example.test", CSRFToken: "csrf", Limiter: allowHTTPRequests{}, ClientIP: func(*http.Request) string { return "127.0.0.1" }}
@@ -941,6 +1168,9 @@ func testHTTPOptions() HTTPOptions {
 
 func (service *fakeHTTPService) Begin(context.Context) (identity.Challenge, error) {
 	return identity.Challenge{ID: "service-challenge", QRImage: "data:image/png;base64,qr", ExpiresAt: time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)}, nil
+}
+func (*fakeHTTPService) PollChallenge(context.Context, string) (identity.VerificationStage, error) {
+	return identity.VerificationWaiting, nil
 }
 func (service *fakeHTTPService) Replace(_ context.Context, token, _ string, challengeID string) error {
 	service.replaceCalls++

@@ -821,7 +821,11 @@ describe('hosted single-host deployment contract', () => {
       expect(format).toContain(field);
     }
     expect(format).not.toMatch(/\$(?:request_uri|request(?![_A-Za-z0-9])|args|query_string|cookie_|http_cookie|http_authorization|upstream_http_)/);
-    expect(config).toContain('map $uri $hosted_route');
+    const routeMap = nginxBlock(config, /map \$uri \$hosted_route\s*/);
+    expect(routeMap).not.toBe('');
+    expect(nginxMapValue(routeMap, '/api/admin/bili-service/challenge')).toBe('admin_bili_service_challenge');
+    expect(nginxMapValue(routeMap, '/api/admin/bili-service/challenge/proof')).toBe('admin_bili_service_challenge');
+    expect(nginxMapValue(routeMap, '/api/admin/bili-service/challenge/proof/extra')).not.toBe('admin_bili_service_challenge');
     expect(config).toMatch(/access_log \/var\/log\/nginx\/gift-panel-hosted\.access\.log hosted_json;/);
     expect(config).toContain('error_log /var/log/nginx/gift-panel-hosted.error.log crit;');
   });
@@ -849,6 +853,8 @@ describe('hosted single-host deployment contract', () => {
       expect(nginxRegexLocationMatches(auth, endpoint), endpoint).toBe(false);
     }
     expect(nginxRegexLocationMatches(auth, '/api/auth/bili/challenges')).toBe(true);
+    expect(nginxRegexLocationMatches(auth, '/api/admin/bili-service/challenge/proof')).toBe(true);
+    expect(nginxRegexLocationMatches(auth, '/api/admin/bili-service/challenge/proof/extra')).toBe(false);
     expect(nginxRegexLocationMatches(auth, '/api/admin/bili-service/status')).toBe(false);
     expect(nginxRegexLocationMatches(account, '/api/admin/bili-service/status')).toBe(false);
     expect('/api/admin/bili-service/status'.startsWith('/api/')).toBe(true);

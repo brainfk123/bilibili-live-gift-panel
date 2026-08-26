@@ -28,7 +28,7 @@ http {
         /api/admin/session                                   admin_session;
         /api/admin/session/email                             admin_email_session;
         /api/admin/totp                                      admin_totp;
-        /api/admin/bili-service/challenge                    admin_bili_service_challenge;
+        ~^/api/admin/bili-service/challenge(?:/[A-Za-z0-9_-]+)?$ admin_bili_service_challenge;
         /api/admin/bili-service/replace                      admin_bili_service_replace;
         ~^/api/admin/recovery/(?:archive|prepare|confirm)$    admin_recovery;
         /api/auth/registration                               invitation_redeem;
@@ -150,7 +150,7 @@ http {
             proxy_pass http://hosted_app;
         }
 
-        location ~ ^/api/(?:auth/bili/challenges(?:/[A-Za-z0-9_-]+)?|auth/session|admin/auth/email/challenges|admin/session(?:/email)?|admin/totp|admin/bili-service/(?:challenge|replace)|admin/recovery/(?:archive|prepare|confirm))$ {
+        location ~ ^/api/(?:auth/bili/challenges(?:/[A-Za-z0-9_-]+)?|auth/session|admin/auth/email/challenges|admin/session(?:/email)?|admin/totp|admin/bili-service/(?:challenge(?:/[A-Za-z0-9_-]+)?|replace)|admin/recovery/(?:archive|prepare|confirm))$ {
             limit_req zone=hosted_auth burst=5 nodelay;
             proxy_pass http://hosted_app;
         }

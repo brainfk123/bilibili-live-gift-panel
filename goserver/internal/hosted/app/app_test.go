@@ -1000,6 +1000,7 @@ func TestBiliServiceRoutesWinOverBroaderAdministratorPrefix(t *testing.T) {
 	for _, route := range []struct{ method, path string }{
 		{http.MethodGet, "/api/admin/bili-service/status"},
 		{http.MethodPost, "/api/admin/bili-service/challenge"},
+		{http.MethodGet, "/api/admin/bili-service/challenge/proof"},
 		{http.MethodPost, "/api/admin/bili-service/replace"},
 		{http.MethodPost, "/api/admin/bili-service/check"},
 	} {
@@ -1068,10 +1069,11 @@ func TestSessionInventoryRoutesStayInsideAdministratorSettings(t *testing.T) {
 
 func TestEveryMethodForExactBiliServicePathsStaysOutOfBroadAdministratorHandler(t *testing.T) {
 	allowed := map[string]string{
-		"/api/admin/bili-service/status":    http.MethodGet,
-		"/api/admin/bili-service/challenge": http.MethodPost,
-		"/api/admin/bili-service/replace":   http.MethodPost,
-		"/api/admin/bili-service/check":     http.MethodPost,
+		"/api/admin/bili-service/status":          http.MethodGet,
+		"/api/admin/bili-service/challenge":       http.MethodPost,
+		"/api/admin/bili-service/challenge/proof": http.MethodGet,
+		"/api/admin/bili-service/replace":         http.MethodPost,
+		"/api/admin/bili-service/check":           http.MethodPost,
 	}
 	biliService := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.Method != allowed[request.URL.Path] {
@@ -1097,6 +1099,11 @@ func TestEveryMethodForExactBiliServicePathsStaysOutOfBroadAdministratorHandler(
 				t.Fatalf("%s %s status=%d, want %d from Bili service handler", method, path, response.Code, want)
 			}
 		}
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/admin/bili-service/challenge/proof/extra", nil))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("deeper challenge path status=%d, want broader administrator handler", response.Code)
 	}
 }
 

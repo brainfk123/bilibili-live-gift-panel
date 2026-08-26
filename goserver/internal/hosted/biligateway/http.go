@@ -36,6 +36,7 @@ var (
 
 type credentialVerifier interface {
 	Begin(context.Context) (identity.Challenge, error)
+	PollCredential(context.Context, string) (identity.VerificationStage, error)
 	ConsumeCredential(context.Context, string, func(context.Context, []byte) error) error
 }
 
@@ -79,6 +80,12 @@ func (service *Service) Begin(ctx context.Context) (identity.Challenge, error) {
 		return identity.Challenge{}, identity.ErrVerificationUnavailable
 	}
 	return service.verifier.Begin(ctx)
+}
+func (service *Service) PollChallenge(ctx context.Context, id string) (identity.VerificationStage, error) {
+	if service == nil {
+		return "", identity.ErrVerificationUnavailable
+	}
+	return service.verifier.PollCredential(ctx, id)
 }
 func (service *Service) Status(ctx context.Context) CredentialStatus {
 	if store, ok := service.credentials.(credentialStatusReader); ok {
@@ -133,6 +140,7 @@ func (service *Service) Replace(ctx context.Context, sessionToken, authorization
 
 type httpService interface {
 	Begin(context.Context) (identity.Challenge, error)
+	PollChallenge(context.Context, string) (identity.VerificationStage, error)
 	Replace(context.Context, string, string, string) error
 	RequireSession(context.Context, string) error
 	Status(context.Context) CredentialStatus
@@ -164,6 +172,7 @@ func NewHTTPHandler(service httpService, options HTTPOptions) (*HTTPHandler, err
 	}
 	handler := &HTTPHandler{service: service, allowedOrigin: options.AllowedOrigin, csrfToken: options.CSRFToken, limiter: options.Limiter, clientIP: options.ClientIP, mux: http.NewServeMux()}
 	handler.mux.HandleFunc("POST /api/admin/bili-service/challenge", handler.begin)
+	handler.mux.HandleFunc("GET /api/admin/bili-service/challenge/{id}", handler.pollChallenge)
 	handler.mux.HandleFunc("POST /api/admin/bili-service/replace", handler.replace)
 	handler.mux.HandleFunc("GET /api/admin/bili-service/status", handler.status)
 	handler.mux.HandleFunc("POST /api/admin/bili-service/check", handler.check)
@@ -190,6 +199,49 @@ func (handler *HTTPHandler) begin(response http.ResponseWriter, request *http.Re
 		return
 	}
 	writeHTTPJSON(response, http.StatusCreated, challenge)
+}
+
+func (handler *HTTPHandler) pollChallenge(response http.ResponseWriter, request *http.Request) {
+	// net/http GET patterns also match HEAD. This projection is an exact
+	// GET-only administrator route and accepts no query string or body.
+	if request.Method != http.MethodGet {
+		response.Header().Set("Allow", http.MethodGet)
+		writeHTTPError(response, http.StatusMethodNotAllowed, "request_rejected")
+		return
+	}
+	challengeID := request.PathValue("id")
+	if challengeID == "" || len(challengeID) > 256 || request.URL.RawQuery != "" || request.ContentLength != 0 {
+		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	token, ok := handler.limitRequest(response, request, "bili_service_challenge")
+	if !ok || !handler.authenticate(response, request, token) {
+		return
+	}
+	stage, err := handler.service.PollChallenge(request.Context(), challengeID)
+	if errors.Is(err, identity.ErrChallengeExpired) {
+		writeHTTPError(response, http.StatusGone, "expired")
+		return
+	}
+	if err != nil {
+		writeHTTPError(response, http.StatusUnauthorized, "authentication_failed")
+		return
+	}
+	var status string
+	switch stage {
+	case identity.VerificationWaiting:
+		status = "pending"
+	case identity.VerificationScanned:
+		status = "scanned"
+	case identity.VerificationVerified:
+		status = "verified"
+	default:
+		writeHTTPError(response, http.StatusUnauthorized, "authentication_failed")
+		return
+	}
+	writeHTTPJSON(response, http.StatusOK, struct {
+		Status string `json:"status"`
+	}{Status: status})
 }
 
 func (handler *HTTPHandler) replace(response http.ResponseWriter, request *http.Request) {
