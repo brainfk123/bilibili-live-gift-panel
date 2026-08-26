@@ -30,11 +30,12 @@ var (
 )
 
 const (
-	DefaultRoomProbeInterval = 30 * time.Second
-	minimumRoomProbeInterval = 10 * time.Second
-	maximumRoomProbeInterval = 5 * time.Minute
-	defaultRoomReplayLimit   = roomwatcher.MaxReplayLimit
-	defaultRoomRetryInterval = 5 * time.Second
+	DefaultRoomProbeInterval     = 30 * time.Second
+	DefaultRoomFinalDrainTimeout = 10 * time.Second
+	minimumRoomProbeInterval     = 10 * time.Second
+	maximumRoomProbeInterval     = 5 * time.Minute
+	defaultRoomReplayLimit       = roomwatcher.MaxReplayLimit
+	defaultRoomRetryInterval     = 5 * time.Second
 )
 
 // RoomWatcher is the narrow production composition surface. Events is a
@@ -139,11 +140,12 @@ func (ticker *systemRoomRuntimeTicker) C() <-chan time.Time { return ticker.tick
 func (ticker *systemRoomRuntimeTicker) Stop()               { ticker.ticker.Stop() }
 
 type RoomRuntimeOptions struct {
-	ProbeInterval time.Duration
-	ReplayLimit   int
-	Now           func() time.Time
-	OnStatus      func(RoomRuntimeStatus)
-	OnError       func(error)
+	ProbeInterval     time.Duration
+	ReplayLimit       int
+	FinalDrainTimeout time.Duration
+	Now               func() time.Time
+	OnStatus          func(RoomRuntimeStatus)
+	OnError           func(error)
 
 	newTicker  func(time.Duration) roomRuntimeTicker
 	retryAfter func(time.Duration) <-chan time.Time
@@ -186,6 +188,12 @@ func StartRoomRuntime(ctx context.Context, watcher RoomWatcher, runtime RoomEven
 		options.ReplayLimit = defaultRoomReplayLimit
 	}
 	if options.ReplayLimit <= 0 || options.ReplayLimit > roomwatcher.MaxReplayLimit {
+		return nil, ErrRoomRuntimeInvalid
+	}
+	if options.FinalDrainTimeout == 0 {
+		options.FinalDrainTimeout = DefaultRoomFinalDrainTimeout
+	}
+	if options.FinalDrainTimeout < 0 {
 		return nil, ErrRoomRuntimeInvalid
 	}
 	if options.Now == nil {
@@ -477,7 +485,13 @@ func (runtime *RoomRuntime) shutdownSequence() {
 	// cannot prevent the lifecycle join.
 	runtime.consumeCancel()
 	<-runtime.consumeDone
-	err := runtime.watcher.Wait(context.Background())
+	drainContext, cancelDrain := context.WithTimeout(context.Background(), runtime.options.FinalDrainTimeout)
+	drainErr := runtime.replay(drainContext)
+	cancelDrain()
+	if drainErr != nil {
+		runtime.recordFailure(drainErr)
+	}
+	err := errors.Join(drainErr, runtime.watcher.Wait(context.Background()))
 	runtime.mu.Lock()
 	runtime.shutdownErr = err
 	runtime.mu.Unlock()

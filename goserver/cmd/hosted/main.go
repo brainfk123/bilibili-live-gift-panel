@@ -266,7 +266,8 @@ func run() error {
 			}
 			runtimeLifecycle.TrackWatcher(watcherManager)
 			roomRuntime, err := app.StartRoomRuntime(processContext, watcherManager, runtimeManager, app.NewSQLRoomReferenceLoader(store.Database()), app.RoomRuntimeOptions{
-				ProbeInterval: probeInterval,
+				ProbeInterval:     probeInterval,
+				FinalDrainTimeout: app.DefaultRoomFinalDrainTimeout,
 				OnError: func(error) {
 					slog.Warn("hosted room watcher transition retry")
 				},

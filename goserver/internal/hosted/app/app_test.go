@@ -307,6 +307,62 @@ func TestWatcherShutdownTimeoutDoesNotAbandonLifecycleJoin(t *testing.T) {
 	}
 }
 
+// This test fails if shutdown cancels the normal consumer without giving a
+// durable event written before producer Close a separate final replay budget.
+func TestWatcherShutdownAppliesDurableEventAfterStoppingNormalConsumer(t *testing.T) {
+	watcher := newBlockedNormalReplayWatcher(newFakeRoomWatcher(nil))
+	applied := &fakeRoomRuntime{}
+	composition, err := StartRoomRuntime(context.Background(), watcher, applied, &fakeReferenceLoader{snapshots: [][]roomwatcher.Reference{{}}}, RoomRuntimeOptions{ProbeInterval: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	watcher.blockNextReplay()
+	watcher.appendEvent(referencesEvent(1, "7", 1))
+	watcher.waitUntilBlocked(t)
+	shutdownRoomRuntime(t, composition)
+
+	if got := applied.eventSequences(); !slices.Equal(got, []uint64{1}) {
+		t.Fatalf("events applied through shutdown = %#v, want final durable event 1", got)
+	}
+}
+
+// This test fails if final replay advances its cursor only after a whole page,
+// advances past a failed event, or hides that final ApplyRoomEvent failure.
+func TestWatcherShutdownRetainsLastSuccessfulCursorWithinFailedBatch(t *testing.T) {
+	watcher := newBlockedNormalReplayWatcher(newFakeRoomWatcher(nil))
+	applied := &fakeRoomRuntime{failSequence: 2, failRemaining: 100}
+	composition, err := StartRoomRuntime(context.Background(), watcher, applied, &fakeReferenceLoader{snapshots: [][]roomwatcher.Reference{{}}}, RoomRuntimeOptions{ProbeInterval: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	watcher.blockNextReplay()
+	watcher.appendEvent(referencesEvent(1, "7", 1))
+	watcher.appendEvent(referencesEvent(2, "7", 1, 2))
+	watcher.waitUntilBlocked(t)
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := composition.Shutdown(shutdownContext); !errors.Is(err, ErrRoomRuntimeUnavailable) {
+		t.Fatalf("RoomRuntime.Shutdown() error = %v, want final apply failure", err)
+	}
+	if err := composition.Wait(shutdownContext); !errors.Is(err, ErrRoomRuntimeUnavailable) {
+		t.Fatalf("RoomRuntime.Wait() error = %v, want final apply failure", err)
+	}
+	composition.mu.Lock()
+	cursor := composition.cursor
+	composition.mu.Unlock()
+	if cursor != 1 {
+		t.Fatalf("cursor after event 1 success/event 2 failure = %d, want 1", cursor)
+	}
+	if got := applied.eventSequences(); !slices.Equal(got, []uint64{1}) {
+		t.Fatalf("successfully applied events = %#v, want [1]", got)
+	}
+	if status := composition.Status(); status.TransitionFailures != 1 {
+		t.Fatalf("final failure aggregate = %#v, want one transition failure", status)
+	}
+}
+
 // This test fails if closing the producer leaves the consumer in its normal
 // five-second retry loop forever when final durable replay is permanently
 // unavailable, preventing RoomRuntime and the outer lifecycle from joining.
@@ -322,11 +378,105 @@ func TestWatcherShutdownJoinsWhenFinalReplayPermanentlyFails(t *testing.T) {
 
 	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancelShutdown()
-	if err := composition.Shutdown(shutdownContext); err != nil {
-		t.Fatalf("RoomRuntime.Shutdown() with permanent final replay failure = %v", err)
+	if err := composition.Shutdown(shutdownContext); !errors.Is(err, ErrRoomRuntimeUnavailable) {
+		t.Fatalf("RoomRuntime.Shutdown() with permanent final replay failure = %v, want reported failure", err)
 	}
-	if err := composition.Wait(shutdownContext); err != nil {
-		t.Fatalf("RoomRuntime.Wait() with permanent final replay failure = %v", err)
+	if err := composition.Wait(shutdownContext); !errors.Is(err, ErrRoomRuntimeUnavailable) {
+		t.Fatalf("RoomRuntime.Wait() with permanent final replay failure = %v, want reported failure", err)
+	}
+	if status := composition.Status(); status.TransitionFailures != 1 {
+		t.Fatalf("permanent replay failure aggregate = %#v, want one transition failure", status)
+	}
+}
+
+func TestWatcherShutdownJoinsWhenFinalApplyPermanentlyFails(t *testing.T) {
+	watcher := newBlockedNormalReplayWatcher(newFakeRoomWatcher(nil))
+	applied := &fakeRoomRuntime{failSequence: 1, failRemaining: 100}
+	composition, err := StartRoomRuntime(context.Background(), watcher, applied, &fakeReferenceLoader{snapshots: [][]roomwatcher.Reference{{}}}, RoomRuntimeOptions{ProbeInterval: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	watcher.blockNextReplay()
+	watcher.appendEvent(referencesEvent(1, "7", 1))
+	watcher.waitUntilBlocked(t)
+
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancelShutdown()
+	if err := composition.Shutdown(shutdownContext); !errors.Is(err, ErrRoomRuntimeUnavailable) {
+		t.Fatalf("RoomRuntime.Shutdown() with permanent final apply failure = %v, want reported failure", err)
+	}
+	if err := composition.Wait(shutdownContext); !errors.Is(err, ErrRoomRuntimeUnavailable) {
+		t.Fatalf("RoomRuntime.Wait() with permanent final apply failure = %v, want reported failure", err)
+	}
+	if status := composition.Status(); status.TransitionFailures != 1 {
+		t.Fatalf("permanent apply failure aggregate = %#v, want one transition failure", status)
+	}
+}
+
+func TestWatcherShutdownBoundsBlockedFinalReplayAndApply(t *testing.T) {
+	t.Run("ReplayEvents", func(t *testing.T) {
+		watcher := newDeadlineReplayWatcher(newFakeRoomWatcher(nil))
+		composition, err := StartRoomRuntime(context.Background(), watcher, &fakeRoomRuntime{}, &fakeReferenceLoader{snapshots: [][]roomwatcher.Reference{{}}}, RoomRuntimeOptions{
+			ProbeInterval:     time.Minute,
+			FinalDrainTimeout: 20 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		watcher.blockNextReplay()
+		watcher.appendEvent(referencesEvent(1, "7", 1))
+		watcher.waitUntilBlocked(t)
+		assertBoundedFinalDrain(t, composition, watcher.finalStarted)
+	})
+
+	t.Run("ApplyRoomEvent", func(t *testing.T) {
+		watcher := newCloseSignalingReplayWatcher(newFakeRoomWatcher(nil))
+		applied := &blockingFinalApplyRuntime{closed: watcher.closed, started: make(chan struct{})}
+		composition, err := StartRoomRuntime(context.Background(), watcher, applied, &fakeReferenceLoader{snapshots: [][]roomwatcher.Reference{{}}}, RoomRuntimeOptions{
+			ProbeInterval:     time.Minute,
+			FinalDrainTimeout: 20 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		watcher.blockNextReplay()
+		watcher.appendEvent(referencesEvent(1, "7", 1))
+		watcher.waitUntilBlocked(t)
+		assertBoundedFinalDrain(t, composition, applied.started)
+	})
+}
+
+func TestWatcherCompositionRejectsNegativeFinalDrainTimeout(t *testing.T) {
+	composition, err := StartRoomRuntime(context.Background(), newFakeRoomWatcher(nil), &fakeRoomRuntime{}, &fakeReferenceLoader{snapshots: [][]roomwatcher.Reference{{}}}, RoomRuntimeOptions{
+		ProbeInterval:     time.Minute,
+		FinalDrainTimeout: -time.Second,
+	})
+	if composition != nil {
+		shutdownRoomRuntime(t, composition)
+	}
+	if !errors.Is(err, ErrRoomRuntimeInvalid) {
+		t.Fatalf("negative FinalDrainTimeout error = %v, want invalid input", err)
+	}
+}
+
+func assertBoundedFinalDrain(t *testing.T, composition *RoomRuntime, finalStarted <-chan struct{}) {
+	t.Helper()
+	startedAt := time.Now()
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancelShutdown()
+	if err := composition.Shutdown(shutdownContext); !errors.Is(err, ErrRoomRuntimeUnavailable) {
+		t.Fatalf("RoomRuntime.Shutdown() error = %v, want bounded final drain failure", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed >= 250*time.Millisecond {
+		t.Fatalf("bounded final drain took %v, caller budget was 250ms", elapsed)
+	}
+	select {
+	case <-finalStarted:
+	default:
+		t.Fatal("shutdown returned without executing the final drain")
+	}
+	if err := composition.Wait(shutdownContext); !errors.Is(err, ErrRoomRuntimeUnavailable) {
+		t.Fatalf("RoomRuntime.Wait() error = %v, want persisted final drain failure", err)
 	}
 }
 
@@ -410,6 +560,107 @@ type permanentReplayFailureWatcher struct {
 	*fakeRoomWatcher
 	closed    chan struct{}
 	closeOnce sync.Once
+}
+
+type blockedNormalReplayWatcher struct {
+	*fakeRoomWatcher
+	blockMu sync.Mutex
+	block   bool
+	started chan struct{}
+}
+
+type closeSignalingReplayWatcher struct {
+	*blockedNormalReplayWatcher
+	closed     chan struct{}
+	signalOnce sync.Once
+}
+
+type deadlineReplayWatcher struct {
+	*closeSignalingReplayWatcher
+	finalStarted chan struct{}
+	finalOnce    sync.Once
+}
+
+type blockingFinalApplyRuntime struct {
+	closed  <-chan struct{}
+	started chan struct{}
+	once    sync.Once
+}
+
+func newBlockedNormalReplayWatcher(watcher *fakeRoomWatcher) *blockedNormalReplayWatcher {
+	return &blockedNormalReplayWatcher{fakeRoomWatcher: watcher}
+}
+
+func newCloseSignalingReplayWatcher(watcher *fakeRoomWatcher) *closeSignalingReplayWatcher {
+	return &closeSignalingReplayWatcher{blockedNormalReplayWatcher: newBlockedNormalReplayWatcher(watcher), closed: make(chan struct{})}
+}
+
+func newDeadlineReplayWatcher(watcher *fakeRoomWatcher) *deadlineReplayWatcher {
+	return &deadlineReplayWatcher{closeSignalingReplayWatcher: newCloseSignalingReplayWatcher(watcher), finalStarted: make(chan struct{})}
+}
+
+func (watcher *blockedNormalReplayWatcher) blockNextReplay() {
+	watcher.blockMu.Lock()
+	watcher.block = true
+	watcher.started = make(chan struct{})
+	watcher.blockMu.Unlock()
+}
+
+func (watcher *blockedNormalReplayWatcher) ReplayEvents(ctx context.Context, after uint64, limit int) ([]roomwatcher.Event, error) {
+	watcher.blockMu.Lock()
+	if watcher.block {
+		watcher.block = false
+		started := watcher.started
+		watcher.blockMu.Unlock()
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	watcher.blockMu.Unlock()
+	return watcher.fakeRoomWatcher.ReplayEvents(ctx, after, limit)
+}
+
+func (watcher *blockedNormalReplayWatcher) waitUntilBlocked(t *testing.T) {
+	t.Helper()
+	watcher.blockMu.Lock()
+	started := watcher.started
+	watcher.blockMu.Unlock()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("normal replay did not block before shutdown")
+	}
+}
+
+func (watcher *closeSignalingReplayWatcher) Close() {
+	watcher.signalOnce.Do(func() { close(watcher.closed) })
+	watcher.fakeRoomWatcher.Close()
+}
+
+func (watcher *deadlineReplayWatcher) ReplayEvents(ctx context.Context, after uint64, limit int) ([]roomwatcher.Event, error) {
+	select {
+	case <-watcher.closed:
+		watcher.finalOnce.Do(func() { close(watcher.finalStarted) })
+		<-ctx.Done()
+		return nil, ctx.Err()
+	default:
+		return watcher.blockedNormalReplayWatcher.ReplayEvents(ctx, after, limit)
+	}
+}
+
+func (*blockingFinalApplyRuntime) BootstrapRoomProjection(context.Context, roomwatcher.Bootstrap) error {
+	return nil
+}
+
+func (runtime *blockingFinalApplyRuntime) ApplyRoomEvent(ctx context.Context, _ roomwatcher.Event) error {
+	select {
+	case <-runtime.closed:
+		runtime.once.Do(func() { close(runtime.started) })
+		<-ctx.Done()
+		return ctx.Err()
+	default:
+		return nil
+	}
 }
 
 func (watcher *permanentReplayFailureWatcher) ReplayEvents(ctx context.Context, after uint64, limit int) ([]roomwatcher.Event, error) {
