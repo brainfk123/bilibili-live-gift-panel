@@ -1456,3 +1456,303 @@ select {
     white-space: nowrap;
   }
 }
+
+/* Ordinary Bilibili login, aligned with the administrator light palette. */
+:root:has(.hosted-auth-page),
+body:has(.hosted-auth-page) {
+  color: #172033;
+  background: #f3f5f8;
+}
+
+.hosted-auth-page {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  min-height: 100vh;
+  padding: clamp(1.25rem, 4vw, 3rem);
+  overflow-x: clip;
+  color: #172033;
+  font-family: "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+  background: #f3f5f8;
+  place-items: center;
+}
+
+.hosted-auth-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(15rem, 17.5rem);
+  align-items: center;
+  width: min(100%, 53.75rem);
+  min-width: 0;
+  padding: clamp(2rem, 4vw, 3rem);
+  column-gap: clamp(2rem, 5vw, 4rem);
+  background: #fff;
+  border: 1px solid #d8e0ec;
+  border-radius: 1rem;
+  box-shadow: 0 1.25rem 3rem rgb(23 32 51 / 10%);
+}
+
+.hosted-auth-copy,
+.hosted-auth-qr-column {
+  min-width: 0;
+}
+
+.hosted-auth-copy {
+  display: grid;
+  align-content: center;
+  gap: 0.85rem;
+}
+
+.hosted-auth-copy h1,
+.hosted-auth-copy p {
+  margin: 0;
+}
+
+.hosted-auth-copy h1 {
+  color: #172033;
+  font-size: clamp(1.75rem, 4vw, 2.35rem);
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.hosted-auth-eyebrow {
+  color: #246bce;
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.hosted-auth-description,
+.hosted-auth-expiry {
+  color: #637087;
+  line-height: 1.55;
+}
+
+.hosted-auth-steps {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0.3rem 0 0;
+  padding-left: 1.35rem;
+  color: #39465a;
+  line-height: 1.5;
+}
+
+.hosted-auth-steps li::marker {
+  color: #246bce;
+  font-weight: 800;
+}
+
+.hosted-auth-status {
+  display: flex;
+  align-items: center;
+  min-height: 3rem;
+  padding: 0.7rem 0.85rem;
+  color: #39465a;
+  font-weight: 650;
+  line-height: 1.45;
+  background: #f6f8fb;
+  border: 1px solid #d8e0ec;
+  border-radius: 0.65rem;
+}
+
+.hosted-auth-status[data-kind="pending"] {
+  color: #1f5da9;
+  background: #edf4ff;
+  border-color: #9cbfe9;
+}
+
+.hosted-auth-status[data-kind="success"] {
+  color: #17613b;
+  background: #effaf3;
+  border-color: #8bcba5;
+}
+
+.hosted-auth-status[data-kind="warning"] {
+  color: #73520c;
+  background: #fff8df;
+  border-color: #e5c65a;
+}
+
+.hosted-auth-status[data-kind="expired"],
+.hosted-auth-status[data-kind="error"] {
+  color: #8d2920;
+  background: #fff1ef;
+  border-color: #e7a49d;
+}
+
+.hosted-auth-expiry {
+  min-height: 1.4rem;
+  font-size: 0.85rem;
+}
+
+.hosted-auth-qr-column {
+  display: grid;
+  justify-self: end;
+  width: 17.5rem;
+  max-width: 100%;
+  gap: 0.8rem;
+}
+
+.hosted-auth-qr-frame {
+  display: grid;
+  width: 100%;
+  aspect-ratio: 1;
+  padding: 0.75rem;
+  overflow: hidden;
+  background: #f6f8fb;
+  border: 1px solid #d8e0ec;
+  border-radius: 0.85rem;
+  place-items: center;
+}
+
+.hosted-auth-qr-frame > * {
+  grid-area: 1 / 1;
+}
+
+.hosted-auth-qr-frame .hosted-qr {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 0.45rem;
+}
+
+.hosted-auth-qr-placeholder {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  align-content: center;
+  justify-items: center;
+  gap: 0.75rem;
+  padding: 1rem;
+  color: #526078;
+  font-weight: 650;
+  text-align: center;
+}
+
+.hosted-auth-spinner {
+  color: #246bce;
+}
+
+.hosted-auth-mobile-link {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.65rem;
+  padding: 0.65rem 1rem;
+  color: #1f5da9;
+  font-weight: 700;
+  text-align: center;
+  text-decoration: none;
+  background: #edf4ff;
+  border: 1px solid #9cbfe9;
+  border-radius: 0.6rem;
+}
+
+.hosted-auth-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.65rem;
+  min-height: 2.65rem;
+}
+
+.hosted-auth-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  min-width: 6.75rem;
+  min-height: 2.65rem;
+  margin: 0;
+  padding: 0.65rem 1rem;
+  color: #fff;
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
+  background: #246bce;
+  border: 1px solid #246bce;
+  border-radius: 0.6rem;
+  cursor: pointer;
+}
+
+.hosted-auth-actions button[data-variant="secondary"] {
+  color: #26344c;
+  background: #eef2f7;
+  border-color: #d3dae5;
+}
+
+.hosted-auth-actions button:not(:disabled):hover {
+  color: #fff;
+  background: #1d59aa;
+  border-color: #1d59aa;
+}
+
+.hosted-auth-actions button[data-variant="secondary"]:not(:disabled):hover {
+  color: #172033;
+  background: #dfe6ef;
+  border-color: #bfc9d8;
+}
+
+.hosted-auth-actions button:not(:disabled):active {
+  transform: translateY(1px);
+}
+
+.hosted-auth-actions button:focus-visible,
+.hosted-auth-mobile-link:focus-visible {
+  outline: 3px solid #246bce;
+  outline-offset: 3px;
+}
+
+.hosted-auth-actions button:disabled,
+.hosted-auth-actions button[aria-busy="true"] {
+  cursor: wait;
+  opacity: 0.68;
+}
+
+.hosted-auth-page [hidden] {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .hosted-auth-page {
+    align-items: start;
+    padding: 1rem 0.75rem;
+  }
+
+  .hosted-auth-card {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.25rem;
+    padding: 1.25rem;
+  }
+
+  .hosted-auth-copy {
+    gap: 0.7rem;
+  }
+
+  .hosted-auth-copy h1 {
+    font-size: clamp(1.65rem, 8vw, 2rem);
+  }
+
+  .hosted-auth-qr-column {
+    justify-self: center;
+    width: min(72vw, 17.5rem);
+  }
+
+  .hosted-auth-mobile-link {
+    display: inline-flex;
+  }
+
+  .hosted-auth-mobile-link[hidden] {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hosted-auth-actions button,
+  .hosted-auth-mobile-link {
+    transition: none;
+  }
+
+  .hosted-auth-page .hosted-admin-action-spinner {
+    animation: none;
+  }
+}

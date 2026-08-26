@@ -23,6 +23,7 @@ class AuthControlledTimers implements BiliChallengeTimerPort {
   clearTimeout(id: number): void { this.scheduled.delete(id); }
   now(): number { return this.clock; }
   count(): number { return this.scheduled.size; }
+  advance(milliseconds: number): void { this.clock += milliseconds; }
 
   async fireNext(): Promise<void> {
     const next = [...this.scheduled.entries()].sort((left, right) => left[1].dueAt - right[1].dueAt)[0];
@@ -33,6 +34,132 @@ class AuthControlledTimers implements BiliChallengeTimerPort {
     task.callback();
     for (let turn = 0; turn < 5; turn++) await Promise.resolve();
   }
+}
+
+class AuthElement {
+  children: AuthElement[] = [];
+  textContent = '';
+  className = '';
+  id = '';
+  type = '';
+  src = '';
+  alt = '';
+  href = '';
+  hidden = false;
+  disabled = false;
+  dataset: Record<string, string> = {};
+  parent?: AuthElement;
+  readonly attributes = new Map<string, string>();
+  readonly listeners = new Map<string, Array<() => void>>();
+
+  constructor(readonly tagName: string, readonly ownerDocument: AuthDocument) {}
+
+  append(...nodes: AuthElement[]): void {
+    for (const node of nodes) {
+      node.parent = this;
+      this.children.push(node);
+    }
+  }
+
+  replaceChildren(...nodes: AuthElement[]): void {
+    for (const child of this.children) child.parent = undefined;
+    this.children = [];
+    this.append(...nodes);
+  }
+
+  setAttribute(name: string, value: string): void {
+    this.attributes.set(name, value);
+  }
+
+  getAttribute(name: string): string | null {
+    return this.attributes.get(name) ?? null;
+  }
+
+  removeAttribute(name: string): void {
+    this.attributes.delete(name);
+    if (name === 'src') this.src = '';
+    if (name === 'href') this.href = '';
+  }
+
+  remove(): void {
+    if (!this.parent) return;
+    this.parent.children = this.parent.children.filter((child) => child !== this);
+    this.parent = undefined;
+  }
+
+  addEventListener(name: string, listener: () => void): void {
+    this.listeners.set(name, [...(this.listeners.get(name) ?? []), listener]);
+  }
+
+  click(): void {
+    if (this.disabled) return;
+    for (const listener of this.listeners.get('click') ?? []) listener();
+  }
+}
+
+interface AuthDocument {
+  createElement(tag: string): AuthElement;
+}
+
+function authDOM(): { document: AuthDocument; root: AuthElement } {
+  const document = { createElement: (tag: string): AuthElement => new AuthElement(tag, document) };
+  return { document, root: new AuthElement('div', document) };
+}
+
+function descendants(root: AuthElement): AuthElement[] {
+  return [root, ...root.children.flatMap(descendants)];
+}
+
+function text(root: AuthElement): string {
+  return descendants(root).map((element) => element.textContent).join(' ');
+}
+
+function hasClass(root: AuthElement, name: string): boolean {
+  return descendants(root).some((element) => element.className.split(/\s+/).includes(name));
+}
+
+function status(root: AuthElement): AuthElement {
+  const match = descendants(root).find((element) => element.getAttribute('role') === 'status');
+  if (!match) throw new Error('Missing login status region.');
+  return match;
+}
+
+function link(root: AuthElement, label: string): AuthElement {
+  const match = descendants(root).find((element) => element.tagName === 'a' && text(element).includes(label));
+  if (!match) throw new Error(`Missing link: ${label}`);
+  return match;
+}
+
+function button(root: AuthElement, label: string): AuthElement {
+  const match = descendants(root).find((element) => element.tagName === 'button' && text(element).includes(label));
+  if (!match) throw new Error(`Missing button: ${label}`);
+  return match;
+}
+
+function image(root: AuthElement): AuthElement {
+  const match = descendants(root).find((element) => element.tagName === 'img');
+  if (!match) throw new Error('Missing QR image.');
+  return match;
+}
+
+function challenge(number = 1) {
+  return {
+    challengeId: `secret-challenge-${number}`,
+    qrImage: `https://qr.invalid/secret-${number}`,
+    verificationUrl: `https://passport.bilibili.com/h5-app/passport/login/scan?navhide=1&qrcode_key=public-key-${number}`,
+    expiresAt: '2030-01-01T00:00:00Z',
+  };
+}
+
+function authAPI(overrides: Partial<HostedAPI> = {}) {
+  return {
+    beginLogin: vi.fn(async () => challenge()),
+    pollLogin: vi.fn(async () => ({ status: 'pending' as const, expiresAt: challenge().expiresAt })),
+    createSession: vi.fn(async () => undefined),
+    cancelLogin: vi.fn(async () => undefined),
+    logout: vi.fn(async () => undefined),
+    ...overrides,
+  };
 }
 
 describe('HostedAPI authentication contract', () => {
@@ -219,32 +346,242 @@ describe('HostedAPI authentication contract', () => {
 });
 
 describe('Bilibili authentication lifecycle', () => {
-  it('mounts an accessible QR view and cancellation removes the challenge secret from DOM', async () => {
-    class Element {
-      children: Element[] = []; textContent = ''; className = ''; id = ''; type = ''; src = ''; alt = '';
-      attributes = new Map<string, string>(); listeners = new Map<string, () => void>();
-      constructor(readonly tagName: string, readonly ownerDocument: { createElement(tag: string): Element }) {}
-      append(...nodes: Element[]) { this.children.push(...nodes); }
-      replaceChildren(...nodes: Element[]) { this.children = nodes; }
-      setAttribute(name: string, value: string) { this.attributes.set(name, value); }
-      removeAttribute(name: string) { this.attributes.delete(name); if (name === 'src') this.src = ''; }
-      addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); }
-    }
-    const document = { createElement: (tag: string): Element => new Element(tag, document) };
-    const root = new Element('div', document) as unknown as HTMLElement;
-    const cancel = vi.fn(async () => undefined);
-    const onExit = vi.fn();
-    const timers = new AuthControlledTimers();
-    const mounted = mountAuthView(root, {
-      beginLogin: vi.fn(async () => ({ challengeId: 'secret-challenge', qrImage: 'https://qr.invalid/secret', expiresAt: '2030-01-01T00:00:00Z' })),
-      pollLogin: vi.fn(async () => ({ status: 'pending' as const, expiresAt: '2030-01-01T00:00:00Z' })), createSession: vi.fn(), cancelLogin: cancel, logout: vi.fn(async () => undefined),
-    }, { onSignedIn: vi.fn(), onRegistrationRequired: vi.fn(), onExit }, timers);
+  it('login view renders the compact two-column structure and only the allowlisted same-device URL', async () => {
+    const { root } = authDOM();
+    const api = authAPI();
+    const mounted = mountAuthView(root as unknown as HTMLElement, api, {
+      onSignedIn: vi.fn(), onRegistrationRequired: vi.fn(), onExit: vi.fn(),
+    }, new AuthControlledTimers());
+
     await mounted.ready;
-    expect(JSON.stringify(root)).toContain('https://qr.invalid/secret');
-    const panel = (root as unknown as Element).children[0];
-    panel.children.find((child) => child.tagName === 'button')?.listeners.get('click')?.();
+
+    expect(text(root)).toContain('使用 B 站账号登录');
+    expect(status(root).textContent).toBe('请使用 B 站客户端扫码');
+    expect(hasClass(root, 'hosted-auth-page')).toBe(true);
+    expect(hasClass(root, 'hosted-auth-card')).toBe(true);
+    expect(hasClass(root, 'hosted-auth-copy')).toBe(true);
+    expect(hasClass(root, 'hosted-auth-qr-column')).toBe(true);
+    expect(hasClass(root, 'hosted-auth-status')).toBe(true);
+    expect(hasClass(root, 'hosted-auth-actions')).toBe(true);
+    expect(hasClass(root, 'hosted-auth-mobile-link')).toBe(true);
+    expect(link(root, '在本机打开 B 站确认').href).toBe(challenge().verificationUrl);
+    expect(image(root).src).toBe(challenge().qrImage);
+
+    await mounted.dispose();
+  });
+
+  it('login view exposes an observable busy creating state with a fixed QR placeholder', async () => {
+    let release!: (value: ReturnType<typeof challenge>) => void;
+    const creating = new Promise<ReturnType<typeof challenge>>((resolve) => { release = resolve; });
+    const { root } = authDOM();
+    const mounted = mountAuthView(root as unknown as HTMLElement, authAPI({ beginLogin: vi.fn(() => creating) }), {
+      onSignedIn: vi.fn(), onRegistrationRequired: vi.fn(),
+    }, new AuthControlledTimers());
+
+    expect(status(root).textContent).toBe('正在创建二维码');
+    expect(status(root).dataset.kind).toBe('creating');
+    expect(text(root)).toContain('正在创建');
+    expect(image(root).src).toBe('');
+    expect(image(root).hidden).toBe(true);
+    expect(button(root, '正在创建').disabled).toBe(true);
+    expect(button(root, '正在创建').getAttribute('aria-busy')).toBe('true');
+
+    release(challenge());
+    await mounted.ready;
+    await mounted.dispose();
+  });
+
+  it('login view keeps a failed creation idle until the user explicitly tries again', async () => {
+    const beginLogin = vi.fn()
+      .mockRejectedValueOnce(new Error('service unavailable'))
+      .mockResolvedValueOnce(challenge(2));
+    const { root } = authDOM();
+    const mounted = mountAuthView(root as unknown as HTMLElement, authAPI({ beginLogin }), {
+      onSignedIn: vi.fn(), onRegistrationRequired: vi.fn(),
+    }, new AuthControlledTimers());
+
+    await mounted.ready;
+
+    expect(status(root).textContent).toBe('无法创建二维码，请再次尝试');
+    expect(status(root).dataset.kind).toBe('error');
+    expect(image(root).src).toBe('');
+    expect(link(root, '在本机打开 B 站确认').href).toBe('');
+    expect(button(root, '再次尝试').disabled).toBe(false);
+    expect(beginLogin).toHaveBeenCalledTimes(1);
+
+    button(root, '再次尝试').click();
+    await vi.waitFor(() => expect(status(root).textContent).toBe('请使用 B 站客户端扫码'));
+    expect(beginLogin).toHaveBeenCalledTimes(2);
+    expect(image(root).src).toBe(challenge(2).qrImage);
+    await mounted.dispose();
+  });
+
+  it('login view preserves the QR and link after scan while showing success state', async () => {
+    const timers = new AuthControlledTimers();
+    const { root } = authDOM();
+    const mounted = mountAuthView(root as unknown as HTMLElement, authAPI({
+      pollLogin: vi.fn(async () => ({ status: 'scanned' as const, expiresAt: challenge().expiresAt })),
+    }), { onSignedIn: vi.fn(), onRegistrationRequired: vi.fn() }, timers);
+
+    await mounted.ready;
+    await timers.fireNext();
+
+    expect(status(root).textContent).toBe('已扫码，请在手机确认');
+    expect(status(root).dataset.kind).toBe('success');
+    expect(image(root).src).toBe(challenge().qrImage);
+    expect(link(root, '在本机打开 B 站确认').href).toBe(challenge().verificationUrl);
+    await mounted.dispose();
+  });
+
+  it.each([
+    {
+      name: 'network',
+      error: new Error('offline'),
+      message: '网络暂不可用，2 秒后自动重试',
+    },
+    {
+      name: 'rate-limited',
+      error: new HostedAPIError('rate_limited', 429),
+      message: '请求较频繁，稍后自动重试',
+    },
+  ])('login view maps $name polling snapshots without discarding the active challenge', async ({ error, message }) => {
+    const timers = new AuthControlledTimers();
+    const { root } = authDOM();
+    const mounted = mountAuthView(root as unknown as HTMLElement, authAPI({
+      pollLogin: vi.fn(async () => { throw error; }),
+    }), { onSignedIn: vi.fn(), onRegistrationRequired: vi.fn() }, timers);
+
+    await mounted.ready;
+    await timers.fireNext();
+
+    expect(status(root).textContent).toBe(message);
+    expect(status(root).dataset.kind).toBe('warning');
+    expect(image(root).src).toBe(challenge().qrImage);
+    expect(link(root, '在本机打开 B 站确认').href).toBe(challenge().verificationUrl);
+    expect(button(root, '立即重试').disabled).toBe(true);
+    await mounted.dispose();
+  });
+
+  it('login view delegates an enabled manual retry to the shared poller once', async () => {
+    let rejectPoll!: (reason: Error) => void;
+    const delayedFailure = new Promise<never>((_resolve, reject) => { rejectPoll = reject; });
+    const pollLogin = vi.fn()
+      .mockImplementationOnce(() => delayedFailure)
+      .mockResolvedValueOnce({ status: 'pending', expiresAt: challenge().expiresAt });
+    const timers = new AuthControlledTimers();
+    const { root } = authDOM();
+    const mounted = mountAuthView(root as unknown as HTMLElement, authAPI({ pollLogin }), {
+      onSignedIn: vi.fn(), onRegistrationRequired: vi.fn(),
+    }, timers);
+
+    await mounted.ready;
+    const polling = timers.fireNext();
+    await vi.waitFor(() => expect(pollLogin).toHaveBeenCalledTimes(1));
+    timers.advance(2_000);
+    rejectPoll(new Error('offline'));
+    await polling;
+
+    await vi.waitFor(() => expect(status(root).textContent).toBe('网络暂不可用，2 秒后自动重试'));
+    expect(button(root, '立即重试').disabled).toBe(false);
+    button(root, '立即重试').click();
+    await vi.waitFor(() => expect(pollLogin).toHaveBeenCalledTimes(2));
+    expect(timers.count()).toBe(1);
+    await mounted.dispose();
+  });
+
+  it('login view expires in place, removes old QR data, and regenerates only after explicit action', async () => {
+    let releaseReplacement!: (value: ReturnType<typeof challenge>) => void;
+    const replacement = new Promise<ReturnType<typeof challenge>>((resolve) => { releaseReplacement = resolve; });
+    const beginLogin = vi.fn()
+      .mockResolvedValueOnce(challenge())
+      .mockImplementationOnce(() => replacement);
+    const timers = new AuthControlledTimers();
+    const { root } = authDOM();
+    const mounted = mountAuthView(root as unknown as HTMLElement, authAPI({
+      beginLogin,
+      pollLogin: vi.fn(async () => ({ status: 'expired' as const })),
+    }), { onSignedIn: vi.fn(), onRegistrationRequired: vi.fn() }, timers);
+
+    await mounted.ready;
+    await timers.fireNext();
+
+    expect(status(root).textContent).toBe('二维码已过期');
+    expect(status(root).dataset.kind).toBe('expired');
+    expect(image(root).src).toBe('');
+    expect(image(root).hidden).toBe(true);
+    expect(link(root, '在本机打开 B 站确认').href).toBe('');
+    expect(text(root)).toContain('二维码已过期');
+    expect(beginLogin).toHaveBeenCalledTimes(1);
+
+    button(root, '重新生成').click();
+    await vi.waitFor(() => expect(beginLogin).toHaveBeenCalledTimes(2));
+    expect(status(root).textContent).toBe('正在创建二维码');
+    expect(button(root, '正在创建').disabled).toBe(true);
+    expect(button(root, '正在创建').getAttribute('aria-busy')).toBe('true');
+    releaseReplacement(challenge(2));
+    await vi.waitFor(() => expect(status(root).textContent).toBe('请使用 B 站客户端扫码'));
+    expect(image(root).src).toBe(challenge(2).qrImage);
+    expect(link(root, '在本机打开 B 站确认').href).toBe(challenge(2).verificationUrl);
+    await mounted.dispose();
+  });
+
+  it('login view announces verification before handing off and removes terminal QR data', async () => {
+    const timers = new AuthControlledTimers();
+    const { root } = authDOM();
+    let announced = '';
+    const onSignedIn = vi.fn(() => { announced = status(root).textContent; });
+    const api = authAPI({
+      pollLogin: vi.fn(async () => ({ status: 'verified' as const, expiresAt: challenge().expiresAt })),
+    });
+    const mounted = mountAuthView(root as unknown as HTMLElement, api, {
+      onSignedIn, onRegistrationRequired: vi.fn(),
+    }, timers);
+
+    await mounted.ready;
+    await timers.fireNext();
+
+    expect(announced).toBe('验证成功');
+    expect(status(root).dataset.kind).toBe('success');
+    expect(image(root).src).toBe('');
+    expect(link(root, '在本机打开 B 站确认').href).toBe('');
+    expect(api.createSession).toHaveBeenCalledWith(challenge().challengeId);
+    await mounted.dispose();
+  });
+
+  it('login view stops on a fatal poll response and waits for explicit regeneration', async () => {
+    const beginLogin = vi.fn(async () => challenge());
+    const timers = new AuthControlledTimers();
+    const { root } = authDOM();
+    const mounted = mountAuthView(root as unknown as HTMLElement, authAPI({
+      beginLogin,
+      pollLogin: vi.fn(async () => { throw new HostedAPIError('invalid_response', 200); }),
+    }), { onSignedIn: vi.fn(), onRegistrationRequired: vi.fn() }, timers);
+
+    await mounted.ready;
+    await timers.fireNext();
+
+    expect(status(root).textContent).toBe('登录响应无效，请重新生成二维码');
+    expect(status(root).dataset.kind).toBe('error');
+    expect(image(root).src).toBe('');
+    expect(link(root, '在本机打开 B 站确认').href).toBe('');
+    expect(button(root, '重新生成').disabled).toBe(false);
+    expect(beginLogin).toHaveBeenCalledTimes(1);
+    await mounted.dispose();
+  });
+
+  it('login view cancellation removes challenge data and exits exactly once', async () => {
+    const { root } = authDOM();
+    const cancelLogin = vi.fn(async () => undefined);
+    const onExit = vi.fn();
+    const mounted = mountAuthView(root as unknown as HTMLElement, authAPI({ cancelLogin }), {
+      onSignedIn: vi.fn(), onRegistrationRequired: vi.fn(), onExit,
+    }, new AuthControlledTimers());
+    await mounted.ready;
+
+    button(root, '取消').click();
+
     await vi.waitFor(() => expect(onExit).toHaveBeenCalledTimes(1));
-    expect(cancel).toHaveBeenCalledWith('secret-challenge');
+    expect(cancelLogin).toHaveBeenCalledWith(challenge().challengeId);
     expect(JSON.stringify(root)).not.toContain('secret-challenge');
     expect(JSON.stringify(root)).not.toContain('qr.invalid/secret');
   });
