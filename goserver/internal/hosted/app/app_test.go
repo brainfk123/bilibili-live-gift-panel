@@ -2,14 +2,511 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"bilibili-live-gift-panel/internal/hosted/roomwatcher"
+	"github.com/DATA-DOG/go-sqlmock"
 )
+
+func TestWatcherCompositionBootstrapsThenReplaysOnlyAfterCursor(t *testing.T) {
+	trace := &lockedTrace{}
+	watcher := newFakeRoomWatcher(trace)
+	watcher.bootstrap = roomwatcher.Bootstrap{Cursor: 4, Rooms: []roomwatcher.BootstrapRoom{{RoomID: "7", State: roomwatcher.StateOffline, LeaseEpoch: 3, AccountIDs: []int64{1, 2}}}}
+	watcher.durable = []roomwatcher.Event{
+		referencesEvent(3, "7", 1),
+		referencesEvent(5, "7", 1, 2),
+		stateEvent(6, "7", roomwatcher.StateOffline, roomwatcher.StateLive, time.Unix(90, 0).UTC()),
+	}
+	runtime := &fakeRoomRuntime{trace: trace}
+	loader := &fakeReferenceLoader{trace: trace, snapshots: [][]roomwatcher.Reference{{{AccountID: 1, RoomID: "7"}, {AccountID: 2, RoomID: "7"}}}}
+	composition, err := StartRoomRuntime(context.Background(), watcher, runtime, loader, RoomRuntimeOptions{
+		ProbeInterval: time.Minute,
+		Now:           func() time.Time { return time.Unix(100, 0).UTC() },
+	})
+	if err != nil {
+		t.Fatalf("StartRoomRuntime() error = %v", err)
+	}
+	defer shutdownRoomRuntime(t, composition)
+
+	want := []string{"load-bootstrap", "bootstrap:4", "restore-watcher:4", "replay:4", "apply:5", "apply:6", "poll", "load-references", "set-references"}
+	if got := trace.snapshot(); !slices.Equal(got[:min(len(got), len(want))], want) || len(got) < len(want) {
+		t.Fatalf("startup trace = %#v, want prefix %#v", got, want)
+	}
+	if got := runtime.eventSequences(); !slices.Equal(got, []uint64{5, 6}) {
+		t.Fatalf("applied sequences = %#v, want only cursor-after events", got)
+	}
+	if status := composition.Status(); status.WatchedRooms != 1 {
+		t.Fatalf("startup status = %#v", status)
+	}
+}
+
+func TestWatcherCompositionRetriesFailedEventWithoutAdvancingCursor(t *testing.T) {
+	watcher := newFakeRoomWatcher(nil)
+	watcher.bootstrap = roomwatcher.Bootstrap{Cursor: 10}
+	runtime := &fakeRoomRuntime{failSequence: 11, failRemaining: 1}
+	retry := make(chan time.Time, 1)
+	composition, err := StartRoomRuntime(context.Background(), watcher, runtime, &fakeReferenceLoader{snapshots: [][]roomwatcher.Reference{{}}}, RoomRuntimeOptions{
+		ProbeInterval: time.Minute,
+		retryAfter:    func(time.Duration) <-chan time.Time { return retry },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer shutdownRoomRuntime(t, composition)
+	watcher.clearReplayCalls()
+	watcher.appendEvent(referencesEvent(11, "7", 1))
+	eventually(t, func() bool { return runtime.attemptsFor(11) == 1 })
+	if status := composition.Status(); status.TransitionFailures != 1 {
+		t.Fatalf("status after failed apply = %#v, want one failure", status)
+	}
+	retry <- time.Now()
+	deadline := time.Now().Add(time.Second)
+	for !slices.Equal(runtime.eventSequences(), []uint64{11}) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !slices.Equal(runtime.eventSequences(), []uint64{11}) {
+		t.Fatalf("retry status=%#v replay calls=%#v attempts=%d", composition.Status(), watcher.replayCallsSnapshot(), runtime.attemptsFor(11))
+	}
+	if got := watcher.replayCallsSnapshot(); len(got) != 2 || got[0] != 10 || got[1] != 10 {
+		t.Fatalf("retry replay cursors = %#v, want the failed cursor 10 twice", got)
+	}
+}
+
+func TestWatcherCompositionPollsThenReloadsLiveReferencesOnCadence(t *testing.T) {
+	trace := &lockedTrace{}
+	watcher := newFakeRoomWatcher(trace)
+	watcher.bootstrap = roomwatcher.Bootstrap{Rooms: []roomwatcher.BootstrapRoom{{RoomID: "7", State: roomwatcher.StateOffline, LeaseEpoch: 1, AccountIDs: []int64{1}}}}
+	ticks := make(chan time.Time, 1)
+	loader := &fakeReferenceLoader{trace: trace, snapshots: [][]roomwatcher.Reference{
+		{{AccountID: 1, RoomID: "7"}, {AccountID: 2, RoomID: "7"}},
+		{{AccountID: 2, RoomID: "7"}, {AccountID: 3, RoomID: "8"}},
+	}}
+	composition, err := StartRoomRuntime(context.Background(), watcher, &fakeRoomRuntime{}, loader, RoomRuntimeOptions{
+		ProbeInterval: time.Minute,
+		newTicker: func(time.Duration) roomRuntimeTicker {
+			return &fakeRoomRuntimeTicker{ticks: ticks}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer shutdownRoomRuntime(t, composition)
+	trace.clear()
+	ticks <- time.Now()
+	eventually(t, func() bool {
+		return slices.Equal(watcher.referencesSnapshot(), []roomwatcher.Reference{{AccountID: 2, RoomID: "7"}, {AccountID: 3, RoomID: "8"}})
+	})
+	if got := trace.snapshot(); len(got) < 3 || !slices.Equal(got[:3], []string{"poll", "load-references", "set-references"}) {
+		t.Fatalf("cadence trace = %#v", got)
+	}
+	if got := watcher.referencesSnapshot(); !slices.Equal(got, []roomwatcher.Reference{{AccountID: 2, RoomID: "7"}, {AccountID: 3, RoomID: "8"}}) {
+		t.Fatalf("reloaded references = %#v", got)
+	}
+	if status := composition.Status(); status.WatchedRooms != 2 {
+		t.Fatalf("watched room aggregate = %#v", status)
+	}
+}
+
+func TestWatcherCompositionStartsDegradedAndRetriesInitialProbeFailure(t *testing.T) {
+	watcher := newFakeRoomWatcher(nil)
+	watcher.setReferenceFailures = 1
+	ticks := make(chan time.Time, 1)
+	composition, err := StartRoomRuntime(context.Background(), watcher, &fakeRoomRuntime{}, &fakeReferenceLoader{snapshots: [][]roomwatcher.Reference{{{AccountID: 1, RoomID: "7"}}}}, RoomRuntimeOptions{
+		ProbeInterval: time.Minute,
+		newTicker: func(time.Duration) roomRuntimeTicker {
+			return &fakeRoomRuntimeTicker{ticks: ticks}
+		},
+	})
+	if err != nil {
+		t.Fatalf("transient initial probe stopped Web/API startup: %v", err)
+	}
+	defer shutdownRoomRuntime(t, composition)
+	if status := composition.Status(); status.TransitionFailures != 1 || status.WatchedRooms != 0 {
+		t.Fatalf("degraded startup status = %#v", status)
+	}
+	ticks <- time.Now()
+	eventually(t, func() bool { return composition.Status().WatchedRooms == 1 })
+}
+
+func TestWatcherCompositionAggregatesTenThirtySecondReadinessWithoutIdentifiers(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	watcher := newFakeRoomWatcher(nil)
+	composition, err := StartRoomRuntime(context.Background(), watcher, &fakeRoomRuntime{}, &fakeReferenceLoader{snapshots: [][]roomwatcher.Reference{{}}}, RoomRuntimeOptions{
+		ProbeInterval: time.Minute,
+		Now:           func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer shutdownRoomRuntime(t, composition)
+	watcher.appendEvent(stateEvent(1, "7", roomwatcher.StateOffline, roomwatcher.StateLive, now.Add(-5*time.Second)))
+	watcher.appendEvent(stateEvent(2, "8", roomwatcher.StateOffline, roomwatcher.StateLive, now.Add(-20*time.Second)))
+	watcher.appendEvent(stateEvent(3, "9", roomwatcher.StateOffline, roomwatcher.StateLive, now.Add(-31*time.Second)))
+	eventually(t, func() bool { return composition.Status().ReadinessSamples == 3 })
+	status := composition.Status()
+	if status.ReadinessWithin10 != 1 || status.ReadinessWithin30 != 2 || status.ReadinessOver30 != 1 || !status.ReadinessAlert || status.ReadinessMaximum != 31*time.Second {
+		t.Fatalf("readiness status = %#v", status)
+	}
+	payload, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), "roomId") || strings.Contains(strings.ToLower(string(payload)), "viewer") || strings.Contains(string(payload), `"7"`) {
+		t.Fatalf("aggregate status exposed an identifier: %s", payload)
+	}
+}
+
+func TestWatcherShutdownCancelsAndJoinsPollBeforeClosingStream(t *testing.T) {
+	trace := &lockedTrace{}
+	watcher := newFakeRoomWatcher(trace)
+	watcher.bootstrap = roomwatcher.Bootstrap{Rooms: []roomwatcher.BootstrapRoom{{RoomID: "7", State: roomwatcher.StateOffline, LeaseEpoch: 1, AccountIDs: []int64{1}}}}
+	started := make(chan struct{})
+	var pollMu sync.Mutex
+	pollCalls := 0
+	watcher.poll = func(ctx context.Context) error {
+		pollMu.Lock()
+		pollCalls++
+		call := pollCalls
+		pollMu.Unlock()
+		if call == 1 {
+			return nil
+		}
+		close(started)
+		<-ctx.Done()
+		trace.add("poll-exit")
+		return ctx.Err()
+	}
+	ticks := make(chan time.Time, 1)
+	composition, err := StartRoomRuntime(context.Background(), watcher, &fakeRoomRuntime{}, &fakeReferenceLoader{snapshots: [][]roomwatcher.Reference{{}}}, RoomRuntimeOptions{
+		ProbeInterval: time.Minute,
+		newTicker: func(time.Duration) roomRuntimeTicker {
+			return &fakeRoomRuntimeTicker{ticks: ticks}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace.clear()
+	ticks <- time.Now()
+	<-started
+	shutdownRoomRuntime(t, composition)
+	got := trace.snapshot()
+	if len(got) < 4 || !slices.Equal(got[len(got)-4:], []string{"poll-exit", "watcher-close", "replay:0", "watcher-wait"}) {
+		t.Fatalf("shutdown trace = %#v", got)
+	}
+}
+
+func TestWatcherShutdownTimeoutDoesNotAbandonLifecycleJoin(t *testing.T) {
+	watcher := newFakeRoomWatcher(nil)
+	watcher.bootstrap = roomwatcher.Bootstrap{Rooms: []roomwatcher.BootstrapRoom{{RoomID: "7", State: roomwatcher.StateOffline, LeaseEpoch: 1, AccountIDs: []int64{1}}}}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var pollMu sync.Mutex
+	pollCalls := 0
+	watcher.poll = func(context.Context) error {
+		pollMu.Lock()
+		pollCalls++
+		call := pollCalls
+		pollMu.Unlock()
+		if call == 1 {
+			return nil
+		}
+		close(started)
+		<-release
+		return nil
+	}
+	ticks := make(chan time.Time, 1)
+	composition, err := StartRoomRuntime(context.Background(), watcher, &fakeRoomRuntime{}, &fakeReferenceLoader{snapshots: [][]roomwatcher.Reference{{}}}, RoomRuntimeOptions{
+		ProbeInterval: time.Minute,
+		newTicker: func(time.Duration) roomRuntimeTicker {
+			return &fakeRoomRuntimeTicker{ticks: ticks}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticks <- time.Now()
+	<-started
+	short, cancelShort := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancelShort()
+	if err := composition.Shutdown(short); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("short Shutdown error = %v", err)
+	}
+	close(release)
+	joined, cancelJoined := context.WithTimeout(context.Background(), time.Second)
+	defer cancelJoined()
+	if err := composition.Wait(joined); err != nil {
+		t.Fatalf("lifecycle join was abandoned after timeout: %v", err)
+	}
+}
+
+func TestRoomProbeCadenceEnvironmentIsConfigurableWithConservativeDefault(t *testing.T) {
+	t.Setenv("HOSTED_ROOM_PROBE_INTERVAL", "")
+	if got, err := RoomProbeIntervalFromEnvironment(); err != nil || got != 30*time.Second {
+		t.Fatalf("default probe interval = %v, %v", got, err)
+	}
+	t.Setenv("HOSTED_ROOM_PROBE_INTERVAL", "45s")
+	if got, err := RoomProbeIntervalFromEnvironment(); err != nil || got != 45*time.Second {
+		t.Fatalf("configured probe interval = %v, %v", got, err)
+	}
+	t.Setenv("HOSTED_ROOM_PROBE_INTERVAL", "2s")
+	if _, err := RoomProbeIntervalFromEnvironment(); err == nil {
+		t.Fatal("risk-aggressive probe interval was accepted")
+	}
+}
+
+func TestSQLRoomReferenceLoaderReadsOnlyEnabledAccountsWithValidTargets(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mock.ExpectQuery("SELECT a.id, r.room_id FROM streamer_accounts AS a JOIN account_runtime_rooms AS r ON r.account_id = a.id WHERE a.disabled_at IS NULL ORDER BY r.room_id, a.id").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "room_id"}).AddRow(2, "7").AddRow(3, "8"))
+	loader := NewSQLRoomReferenceLoader(database)
+	got, err := loader.LoadEnabledRoomReferences(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []roomwatcher.Reference{{AccountID: 2, RoomID: "7"}, {AccountID: 3, RoomID: "8"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("references = %#v, want %#v", got, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type lockedTrace struct {
+	mu     sync.Mutex
+	values []string
+}
+
+func (trace *lockedTrace) add(value string) {
+	if trace == nil {
+		return
+	}
+	trace.mu.Lock()
+	trace.values = append(trace.values, value)
+	trace.mu.Unlock()
+}
+func (trace *lockedTrace) snapshot() []string {
+	trace.mu.Lock()
+	defer trace.mu.Unlock()
+	return append([]string(nil), trace.values...)
+}
+func (trace *lockedTrace) clear() {
+	trace.mu.Lock()
+	trace.values = nil
+	trace.mu.Unlock()
+}
+
+type fakeRoomWatcher struct {
+	mu                   sync.Mutex
+	trace                *lockedTrace
+	bootstrap            roomwatcher.Bootstrap
+	durable              []roomwatcher.Event
+	replays              []uint64
+	refs                 []roomwatcher.Reference
+	setReferenceFailures int
+	poll                 func(context.Context) error
+	events               chan roomwatcher.Event
+	done                 chan struct{}
+	closeOnce            sync.Once
+}
+
+func newFakeRoomWatcher(trace *lockedTrace) *fakeRoomWatcher {
+	return &fakeRoomWatcher{trace: trace, events: make(chan roomwatcher.Event, 1), done: make(chan struct{})}
+}
+func (watcher *fakeRoomWatcher) LoadBootstrap(context.Context) (roomwatcher.Bootstrap, error) {
+	watcher.trace.add("load-bootstrap")
+	return watcher.bootstrap, nil
+}
+func (watcher *fakeRoomWatcher) RestoreBootstrap(bootstrap roomwatcher.Bootstrap) error {
+	watcher.trace.add("restore-watcher:" + integerString(bootstrap.Cursor))
+	return nil
+}
+func (watcher *fakeRoomWatcher) ReplayEvents(_ context.Context, after uint64, limit int) ([]roomwatcher.Event, error) {
+	watcher.trace.add("replay:" + integerString(after))
+	watcher.mu.Lock()
+	defer watcher.mu.Unlock()
+	watcher.replays = append(watcher.replays, after)
+	result := make([]roomwatcher.Event, 0, limit)
+	for _, event := range watcher.durable {
+		if event.Sequence > after {
+			result = append(result, event)
+			if len(result) == limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+func (watcher *fakeRoomWatcher) SetReferences(_ context.Context, refs []roomwatcher.Reference) error {
+	watcher.trace.add("set-references")
+	watcher.mu.Lock()
+	if watcher.setReferenceFailures > 0 {
+		watcher.setReferenceFailures--
+		watcher.mu.Unlock()
+		return errors.New("initial probe unavailable")
+	}
+	watcher.refs = append([]roomwatcher.Reference(nil), refs...)
+	watcher.mu.Unlock()
+	return nil
+}
+func (watcher *fakeRoomWatcher) Poll(ctx context.Context) error {
+	watcher.trace.add("poll")
+	if watcher.poll != nil {
+		return watcher.poll(ctx)
+	}
+	return nil
+}
+func (watcher *fakeRoomWatcher) Events() <-chan roomwatcher.Event { return watcher.events }
+func (watcher *fakeRoomWatcher) Close() {
+	watcher.closeOnce.Do(func() {
+		watcher.trace.add("watcher-close")
+		close(watcher.events)
+		close(watcher.done)
+	})
+}
+func (watcher *fakeRoomWatcher) Wait(ctx context.Context) error {
+	watcher.trace.add("watcher-wait")
+	select {
+	case <-watcher.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (watcher *fakeRoomWatcher) appendEvent(event roomwatcher.Event) {
+	watcher.mu.Lock()
+	watcher.durable = append(watcher.durable, event)
+	watcher.mu.Unlock()
+	select {
+	case watcher.events <- event:
+	default:
+	}
+}
+func (watcher *fakeRoomWatcher) clearReplayCalls() {
+	watcher.mu.Lock()
+	watcher.replays = nil
+	watcher.mu.Unlock()
+}
+func (watcher *fakeRoomWatcher) replayCallsSnapshot() []uint64 {
+	watcher.mu.Lock()
+	defer watcher.mu.Unlock()
+	return append([]uint64(nil), watcher.replays...)
+}
+func (watcher *fakeRoomWatcher) referencesSnapshot() []roomwatcher.Reference {
+	watcher.mu.Lock()
+	defer watcher.mu.Unlock()
+	return append([]roomwatcher.Reference(nil), watcher.refs...)
+}
+
+type fakeRoomRuntime struct {
+	mu            sync.Mutex
+	trace         *lockedTrace
+	events        []uint64
+	attempts      map[uint64]int
+	failSequence  uint64
+	failRemaining int
+}
+
+func (runtime *fakeRoomRuntime) BootstrapRoomProjection(_ context.Context, bootstrap roomwatcher.Bootstrap) error {
+	runtime.trace.add("bootstrap:" + integerString(bootstrap.Cursor))
+	return nil
+}
+func (runtime *fakeRoomRuntime) ApplyRoomEvent(_ context.Context, event roomwatcher.Event) error {
+	runtime.trace.add("apply:" + integerString(event.Sequence))
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.attempts == nil {
+		runtime.attempts = make(map[uint64]int)
+	}
+	runtime.attempts[event.Sequence]++
+	if event.Sequence == runtime.failSequence && runtime.failRemaining > 0 {
+		runtime.failRemaining--
+		return errors.New("runtime apply failed")
+	}
+	runtime.events = append(runtime.events, event.Sequence)
+	return nil
+}
+func (runtime *fakeRoomRuntime) eventSequences() []uint64 {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	return append([]uint64(nil), runtime.events...)
+}
+func (runtime *fakeRoomRuntime) attemptsFor(sequence uint64) int {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	return runtime.attempts[sequence]
+}
+
+type fakeReferenceLoader struct {
+	mu        sync.Mutex
+	trace     *lockedTrace
+	snapshots [][]roomwatcher.Reference
+	calls     int
+}
+
+func (loader *fakeReferenceLoader) LoadEnabledRoomReferences(context.Context) ([]roomwatcher.Reference, error) {
+	loader.trace.add("load-references")
+	loader.mu.Lock()
+	defer loader.mu.Unlock()
+	index := min(loader.calls, len(loader.snapshots)-1)
+	loader.calls++
+	if index < 0 {
+		return nil, nil
+	}
+	return append([]roomwatcher.Reference(nil), loader.snapshots[index]...), nil
+}
+
+type fakeRoomRuntimeTicker struct{ ticks <-chan time.Time }
+
+func (ticker *fakeRoomRuntimeTicker) C() <-chan time.Time { return ticker.ticks }
+func (*fakeRoomRuntimeTicker) Stop()                      {}
+
+func referencesEvent(sequence uint64, roomID string, accountIDs ...int64) roomwatcher.Event {
+	return roomwatcher.Event{Sequence: sequence, RoomReferencesChanged: &roomwatcher.RoomReferencesChanged{RoomID: roomID, AccountIDs: accountIDs}}
+}
+func stateEvent(sequence uint64, roomID string, from, to roomwatcher.State, confirmed time.Time) roomwatcher.Event {
+	return roomwatcher.Event{Sequence: sequence, RoomStateChanged: &roomwatcher.Transition{RoomID: roomID, From: from, To: to, ConfirmedAt: confirmed, NewBroadcast: from == roomwatcher.StateOffline && to == roomwatcher.StateLive, LeaseEpoch: sequence}}
+}
+func integerString(value uint64) string {
+	return strconv.FormatUint(value, 10)
+}
+func eventually(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition did not become true")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+func shutdownRoomRuntime(t *testing.T, composition *RoomRuntime) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := composition.Shutdown(ctx); err != nil {
+		t.Fatalf("RoomRuntime.Shutdown() error = %v", err)
+	}
+	if err := composition.Wait(ctx); err != nil {
+		t.Fatalf("RoomRuntime.Wait() error = %v", err)
+	}
+}
 
 type fakeHealth struct {
 	err error

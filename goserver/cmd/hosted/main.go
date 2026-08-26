@@ -31,6 +31,7 @@ import (
 	hostedobs "bilibili-live-gift-panel/internal/hosted/obs"
 	"bilibili-live-gift-panel/internal/hosted/platform"
 	"bilibili-live-gift-panel/internal/hosted/roomsource"
+	"bilibili-live-gift-panel/internal/hosted/roomwatcher"
 	hostedruntime "bilibili-live-gift-panel/internal/hosted/runtime"
 	"bilibili-live-gift-panel/internal/hosted/security"
 	"bilibili-live-gift-panel/internal/hosted/store/mysqlstore"
@@ -287,6 +288,46 @@ func run() error {
 		if err != nil {
 			return errors.New("configure administrator settings HTTP")
 		}
+		probeInterval, err := app.RoomProbeIntervalFromEnvironment()
+		if err != nil {
+			return errors.New("configure hosted room probe cadence")
+		}
+		watcherManager, err := roomwatcher.NewManager(biliDependencies.Gateway, roomwatcher.NewRepository(store.Database()), roomwatcher.Options{})
+		if err != nil {
+			return errors.New("configure hosted room watcher")
+		}
+		roomRuntime, err := app.StartRoomRuntime(processContext, watcherManager, runtimeManager, app.NewSQLRoomReferenceLoader(store.Database()), app.RoomRuntimeOptions{
+			ProbeInterval: probeInterval,
+			OnError: func(error) {
+				slog.Warn("hosted room watcher transition retry")
+			},
+			OnStatus: func(status app.RoomRuntimeStatus) {
+				log := slog.Info
+				if status.ReadinessAlert {
+					log = slog.Warn
+				}
+				log("hosted room watcher aggregate",
+					"watched_rooms", status.WatchedRooms,
+					"transition_failures", status.TransitionFailures,
+					"grace_transitions", status.GraceTransitions,
+					"confirmed_to_ready_samples", status.ReadinessSamples,
+					"confirmed_to_ready_within_10_seconds", status.ReadinessWithin10,
+					"confirmed_to_ready_within_30_seconds", status.ReadinessWithin30,
+					"confirmed_to_ready_over_30_seconds", status.ReadinessOver30,
+					"confirmed_to_ready_total", status.ReadinessTotal,
+					"confirmed_to_ready_maximum", status.ReadinessMaximum,
+					"readiness_alert", status.ReadinessAlert,
+				)
+			},
+		})
+		if err != nil {
+			watcherManager.Close()
+			cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), shutdownTimeout)
+			_ = watcherManager.Wait(cleanupContext)
+			_ = runtimeManager.Shutdown(cleanupContext)
+			cancelCleanup()
+			return errors.New("start hosted room watcher")
+		}
 		handler := composeHostedHTTPWithRuntimeOBSAndStatic(store, identityHTTP, adminHTTP, invitationHTTP, configurationHTTP, migrationHTTP, biliServiceHTTP, runtimeHTTP, obsHTTP, adminConsoleHTTP, adminSettingsHTTP, staticHTTP, config.AdminCSRFToken)
 		server := newHTTPServerWithContext(processContext, config.ListenAddr, retainBiliGateway(handler, biliDependencies.Gateway))
 		serveErr := serveHTTPWithRuntime(
@@ -297,7 +338,9 @@ func run() error {
 			shutdownTimeout,
 			func() { slog.Info("hosted service listening", "address", config.ListenAddr) },
 			func(ctx context.Context) error {
-				return shutdownAndJoinRuntime(ctx, runtimeManager.Shutdown, runtimeManager.Wait)
+				roomErr := errors.Join(roomRuntime.Shutdown(ctx), roomRuntime.Wait(ctx))
+				runtimeErr := shutdownAndJoinRuntime(ctx, runtimeManager.Shutdown, runtimeManager.Wait)
+				return errors.Join(roomErr, runtimeErr)
 			},
 		)
 		runtimeOwner.Store(nil)
@@ -410,7 +453,7 @@ type biliUpstreamFactory func(biligateway.HTTPUpstreamOptions) (*biligateway.HTT
 
 type productionBiliGateway struct {
 	Credentials *biligateway.CredentialStore
-	Gateway     biligateway.Gateway
+	Gateway     *biligateway.ControlledGateway
 }
 
 func newProductionBiliGateway(database *sql.DB, keys security.Keyring, newUpstream biliUpstreamFactory) (productionBiliGateway, error) {

@@ -2,14 +2,72 @@ package biligateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"bilibili-live-gift-panel/internal/gameplay"
+	"bilibili-live-gift-panel/internal/hosted/roomwatcher"
 )
+
+// This test fails if the production probe exposes room_init's numeric status
+// instead of the normalized roomwatcher contract, treats looping as a real
+// broadcast, or lets an upstream body escape through its error.
+func TestControlledGatewayWatcherProbeNormalizesLiveStateWithoutRawPayload(t *testing.T) {
+	var status atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("id") != "12" {
+			t.Fatalf("probe room query = %q, want canonical room 12", request.URL.RawQuery)
+		}
+		if got := request.Header.Get("Cookie"); got != "SESSDATA=only-in-memory" {
+			t.Fatalf("probe credential = %q", got)
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{
+			"code": 0,
+			"data": map[string]any{"live_status": status.Load()},
+		})
+	}))
+	defer server.Close()
+	upstream, err := NewHTTPUpstream(HTTPUpstreamOptions{Client: server.Client(), RoomInfoEndpoint: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := NewControlledGateway(upstream, fakeCredentialLoader{}, GatewayOptions{})
+
+	for _, test := range []struct {
+		name   string
+		status int
+		want   roomwatcher.ObservedState
+	}{
+		{name: "offline", status: 0, want: roomwatcher.ObservedOffline},
+		{name: "live", status: 1, want: roomwatcher.ObservedLive},
+		{name: "looping is not a real broadcast", status: 2, want: roomwatcher.ObservedOffline},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			status.Store(int64(test.status))
+			got, err := gateway.Probe(context.Background(), "00012")
+			if err != nil || got != test.want {
+				t.Fatalf("Probe() = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+
+	status.Store(99)
+	_, err = gateway.Probe(context.Background(), "12")
+	if !errors.Is(err, ErrEgressUnavailable) {
+		t.Fatalf("unknown live status error = %v", err)
+	}
+	if strings.Contains(err.Error(), "99") || strings.Contains(err.Error(), "live_status") {
+		t.Fatalf("probe error exposed raw upstream payload: %v", err)
+	}
+}
 
 func TestControlledGatewayNormalizesRoomCacheKeysAndCoalescesMisses(t *testing.T) {
 	clock := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)

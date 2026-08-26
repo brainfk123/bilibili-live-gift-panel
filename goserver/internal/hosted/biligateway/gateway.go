@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"bilibili-live-gift-panel/internal/gameplay"
+	"bilibili-live-gift-panel/internal/hosted/roomwatcher"
 
 	"golang.org/x/sync/singleflight"
 )
@@ -47,6 +48,10 @@ type upstreamGateway interface {
 	RoomInfo(context.Context, string, []byte) (RoomInfo, error)
 	GiftCatalog(context.Context, string, []byte) ([]gameplay.GiftInfo, error)
 	OpenRoom(context.Context, string, []byte, Sink) (Connection, error)
+}
+
+type liveProbeUpstream interface {
+	probeLive(context.Context, string, []byte) (roomwatcher.ObservedState, error)
 }
 type credentialLoader interface {
 	Load(context.Context) (Credential, error)
@@ -96,6 +101,82 @@ func NewControlledGateway(upstream upstreamGateway, credentials credentialLoader
 		options.Now = time.Now
 	}
 	return &ControlledGateway{upstream: upstream, credentials: credentials, now: options.Now, roomInfo: make(map[string]cachedRoomInfo), catalog: make(map[string]cachedCatalog), breaker: newEgressBreaker(options.Now), limits: newRequestLimiter(options.Now)}
+}
+
+const liveProbeScopeID int64 = 1<<63 - 1
+
+// Probe is the production roomwatcher adapter. It converts room_init's
+// numeric upstream field into the two-state watcher contract and never
+// returns the upstream response body or status value to callers.
+func (gateway *ControlledGateway) Probe(ctx context.Context, roomID string) (roomwatcher.ObservedState, error) {
+	key, err := normalizeRoomID(roomID)
+	if err != nil {
+		return "", err
+	}
+	if gateway == nil || gateway.upstream == nil || gateway.credentials == nil {
+		return "", ErrCredentialUnavailable
+	}
+	probe, ok := gateway.upstream.(liveProbeUpstream)
+	if !ok {
+		return "", ErrEgressUnavailable
+	}
+	result, err, _ := gateway.flights.Do("live-probe:"+key, func() (any, error) {
+		if !gateway.breaker.Allow(liveProbeScopeID) {
+			return nil, ErrEgressUnavailable
+		}
+		if !gateway.limits.Allow(liveProbeScopeID, "room_live_probe") {
+			gateway.breaker.RecordFailure()
+			return nil, ErrRateLimited
+		}
+		credential, loadErr := gateway.credentials.Load(ctx)
+		if loadErr != nil {
+			gateway.observeEgress(liveProbeScopeID, loadErr)
+			return nil, loadErr
+		}
+		gateway.rememberCredentialVersion(credential.Version)
+		defer clear(credential.Cookie)
+		state, probeErr := probe.probeLive(ctx, key, credential.Cookie)
+		if probeErr != nil {
+			gateway.observeEgress(liveProbeScopeID, probeErr)
+			return nil, probeErr
+		}
+		gateway.breaker.RecordSuccess()
+		return state, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	state, ok := result.(roomwatcher.ObservedState)
+	if !ok || (state != roomwatcher.ObservedOffline && state != roomwatcher.ObservedLive) {
+		return "", ErrEgressUnavailable
+	}
+	return state, nil
+}
+
+// probeLive stays in this package so the raw room_init payload terminates at
+// the Bilibili I/O boundary. Status 2 is looping content, not a real live
+// broadcast, and therefore normalizes to offline for runtime activation.
+func (upstream *HTTPUpstream) probeLive(ctx context.Context, roomID string, cookie []byte) (roomwatcher.ObservedState, error) {
+	if upstream == nil {
+		return "", ErrEgressUnavailable
+	}
+	var payload struct {
+		Code int `json:"code"`
+		Data struct {
+			LiveStatus int `json:"live_status"`
+		} `json:"data"`
+	}
+	if err := upstream.getJSON(ctx, upstream.roomInfoEndpoint, roomID, cookie, &payload); err != nil {
+		return "", err
+	}
+	switch payload.Data.LiveStatus {
+	case 0, 2:
+		return roomwatcher.ObservedOffline, nil
+	case 1:
+		return roomwatcher.ObservedLive, nil
+	default:
+		return "", ErrEgressUnavailable
+	}
 }
 
 func (gateway *ControlledGateway) RoomInfo(ctx context.Context, roomID string) (RoomInfo, error) {

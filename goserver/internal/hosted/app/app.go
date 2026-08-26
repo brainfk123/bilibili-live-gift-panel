@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,11 +12,441 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
+
+	"bilibili-live-gift-panel/internal/hosted/roomwatcher"
 )
 
 type healthChecker interface {
 	Health(context.Context) error
+}
+
+var (
+	ErrRoomRuntimeInvalid     = errors.New("hosted room runtime: invalid input")
+	ErrRoomRuntimeUnavailable = errors.New("hosted room runtime: unavailable")
+)
+
+const (
+	DefaultRoomProbeInterval = 30 * time.Second
+	minimumRoomProbeInterval = 10 * time.Second
+	maximumRoomProbeInterval = 5 * time.Minute
+	defaultRoomReplayLimit   = roomwatcher.MaxReplayLimit
+	defaultRoomRetryInterval = 5 * time.Second
+)
+
+// RoomWatcher is the narrow production composition surface. Events is a
+// bounded wake-up stream; ReplayEvents is the authoritative durable stream.
+type RoomWatcher interface {
+	LoadBootstrap(context.Context) (roomwatcher.Bootstrap, error)
+	RestoreBootstrap(roomwatcher.Bootstrap) error
+	ReplayEvents(context.Context, uint64, int) ([]roomwatcher.Event, error)
+	SetReferences(context.Context, []roomwatcher.Reference) error
+	Poll(context.Context) error
+	Events() <-chan roomwatcher.Event
+	Close()
+	Wait(context.Context) error
+}
+
+type RoomEventRuntime interface {
+	BootstrapRoomProjection(context.Context, roomwatcher.Bootstrap) error
+	ApplyRoomEvent(context.Context, roomwatcher.Event) error
+}
+
+type RoomReferenceLoader interface {
+	LoadEnabledRoomReferences(context.Context) ([]roomwatcher.Reference, error)
+}
+
+type SQLRoomReferenceLoader struct{ db *sql.DB }
+
+func NewSQLRoomReferenceLoader(database *sql.DB) *SQLRoomReferenceLoader {
+	return &SQLRoomReferenceLoader{db: database}
+}
+
+// LoadEnabledRoomReferences reads the complete current product projection.
+// Invalid database rows fail closed before roomwatcher changes its snapshot.
+func (loader *SQLRoomReferenceLoader) LoadEnabledRoomReferences(ctx context.Context) ([]roomwatcher.Reference, error) {
+	if loader == nil || loader.db == nil || ctx == nil {
+		return nil, ErrRoomRuntimeInvalid
+	}
+	rows, err := loader.db.QueryContext(ctx, "SELECT a.id, r.room_id FROM streamer_accounts AS a JOIN account_runtime_rooms AS r ON r.account_id = a.id WHERE a.disabled_at IS NULL ORDER BY r.room_id, a.id")
+	if err != nil {
+		return nil, ErrRoomRuntimeUnavailable
+	}
+	defer rows.Close()
+	references := make([]roomwatcher.Reference, 0)
+	for rows.Next() {
+		var reference roomwatcher.Reference
+		if err := rows.Scan(&reference.AccountID, &reference.RoomID); err != nil || reference.AccountID <= 0 || !canonicalRoomReference(reference.RoomID) {
+			return nil, ErrRoomRuntimeUnavailable
+		}
+		references = append(references, reference)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, ErrRoomRuntimeUnavailable
+	}
+	return references, nil
+}
+
+func canonicalRoomReference(roomID string) bool {
+	numeric, err := strconv.ParseUint(roomID, 10, 64)
+	return err == nil && numeric > 0 && strconv.FormatUint(numeric, 10) == roomID
+}
+
+// RoomProbeIntervalFromEnvironment keeps cadence configurable without adding
+// the pilot value to the stable product configuration contract. The 30-second
+// default is intentionally conservative and is not claimed as a real-room
+// validated final value.
+func RoomProbeIntervalFromEnvironment() (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv("HOSTED_ROOM_PROBE_INTERVAL"))
+	if raw == "" {
+		return DefaultRoomProbeInterval, nil
+	}
+	interval, err := time.ParseDuration(raw)
+	if err != nil || interval < minimumRoomProbeInterval || interval > maximumRoomProbeInterval {
+		return 0, ErrRoomRuntimeInvalid
+	}
+	return interval, nil
+}
+
+type RoomRuntimeStatus struct {
+	WatchedRooms       int           `json:"watchedRooms"`
+	TransitionFailures uint64        `json:"transitionFailures"`
+	GraceTransitions   uint64        `json:"graceTransitions"`
+	ReadinessSamples   uint64        `json:"confirmedToReadySamples"`
+	ReadinessWithin10  uint64        `json:"confirmedToReadyWithin10Seconds"`
+	ReadinessWithin30  uint64        `json:"confirmedToReadyWithin30Seconds"`
+	ReadinessOver30    uint64        `json:"confirmedToReadyOver30Seconds"`
+	ReadinessTotal     time.Duration `json:"confirmedToReadyTotal"`
+	ReadinessMaximum   time.Duration `json:"confirmedToReadyMaximum"`
+	ReadinessAlert     bool          `json:"confirmedToReadyAlert"`
+}
+
+type roomRuntimeTicker interface {
+	C() <-chan time.Time
+	Stop()
+}
+
+type systemRoomRuntimeTicker struct{ ticker *time.Ticker }
+
+func (ticker *systemRoomRuntimeTicker) C() <-chan time.Time { return ticker.ticker.C }
+func (ticker *systemRoomRuntimeTicker) Stop()               { ticker.ticker.Stop() }
+
+type RoomRuntimeOptions struct {
+	ProbeInterval time.Duration
+	ReplayLimit   int
+	Now           func() time.Time
+	OnStatus      func(RoomRuntimeStatus)
+	OnError       func(error)
+
+	newTicker  func(time.Duration) roomRuntimeTicker
+	retryAfter func(time.Duration) <-chan time.Time
+}
+
+// RoomRuntime owns production composition only: durable bootstrap/replay,
+// reference refresh, watcher scheduling, and aggregate readiness metrics.
+type RoomRuntime struct {
+	watcher    RoomWatcher
+	runtime    RoomEventRuntime
+	references RoomReferenceLoader
+	options    RoomRuntimeOptions
+
+	mu     sync.Mutex
+	cursor uint64
+	status RoomRuntimeStatus
+
+	pollCancel    context.CancelFunc
+	consumeCancel context.CancelFunc
+	pollDone      chan struct{}
+	consumeDone   chan struct{}
+	done          chan struct{}
+	shutdownOnce  sync.Once
+	shutdownErr   error
+}
+
+func StartRoomRuntime(ctx context.Context, watcher RoomWatcher, runtime RoomEventRuntime, references RoomReferenceLoader, options RoomRuntimeOptions) (*RoomRuntime, error) {
+	if ctx == nil || watcher == nil || runtime == nil || references == nil {
+		return nil, ErrRoomRuntimeInvalid
+	}
+	if options.ProbeInterval == 0 {
+		options.ProbeInterval = DefaultRoomProbeInterval
+	}
+	if options.ProbeInterval < minimumRoomProbeInterval || options.ProbeInterval > maximumRoomProbeInterval {
+		return nil, ErrRoomRuntimeInvalid
+	}
+	if options.ReplayLimit == 0 {
+		options.ReplayLimit = defaultRoomReplayLimit
+	}
+	if options.ReplayLimit <= 0 || options.ReplayLimit > roomwatcher.MaxReplayLimit {
+		return nil, ErrRoomRuntimeInvalid
+	}
+	if options.Now == nil {
+		options.Now = time.Now
+	}
+	if options.newTicker == nil {
+		options.newTicker = func(interval time.Duration) roomRuntimeTicker {
+			return &systemRoomRuntimeTicker{ticker: time.NewTicker(interval)}
+		}
+	}
+	if options.retryAfter == nil {
+		options.retryAfter = func(delay time.Duration) <-chan time.Time { return time.After(delay) }
+	}
+	composition := &RoomRuntime{
+		watcher: watcher, runtime: runtime, references: references, options: options,
+		pollDone: make(chan struct{}), consumeDone: make(chan struct{}), done: make(chan struct{}),
+	}
+	bootstrap, err := watcher.LoadBootstrap(ctx)
+	if err != nil {
+		return nil, ErrRoomRuntimeUnavailable
+	}
+	if err := runtime.BootstrapRoomProjection(ctx, bootstrap); err != nil {
+		return nil, ErrRoomRuntimeUnavailable
+	}
+	if err := watcher.RestoreBootstrap(bootstrap); err != nil {
+		return nil, ErrRoomRuntimeUnavailable
+	}
+	composition.cursor = bootstrap.Cursor
+	if err := composition.replay(ctx); err != nil {
+		return nil, err
+	}
+	// Restored rooms need one immediate observation. Fresh rooms are probed by
+	// SetReferences below, so polling first avoids probing an added shared room
+	// twice during the same startup cadence.
+	if len(bootstrap.Rooms) != 0 {
+		if err := watcher.Poll(ctx); err != nil {
+			composition.recordFailure(err)
+		}
+	}
+	currentReferences, err := references.LoadEnabledRoomReferences(ctx)
+	if err != nil {
+		return nil, ErrRoomRuntimeUnavailable
+	}
+	if err := watcher.SetReferences(ctx, currentReferences); err != nil {
+		composition.recordFailure(err)
+	} else {
+		composition.setWatchedRooms(currentReferences)
+	}
+	pollContext, pollCancel := context.WithCancel(context.Background())
+	consumeContext, consumeCancel := context.WithCancel(context.Background())
+	composition.pollCancel = pollCancel
+	composition.consumeCancel = consumeCancel
+	go composition.pollLoop(pollContext)
+	go composition.consumeLoop(consumeContext)
+	return composition, nil
+}
+
+func (runtime *RoomRuntime) replay(ctx context.Context) error {
+	for {
+		runtime.mu.Lock()
+		cursor := runtime.cursor
+		runtime.mu.Unlock()
+		events, err := runtime.watcher.ReplayEvents(ctx, cursor, runtime.options.ReplayLimit)
+		if err != nil {
+			return ErrRoomRuntimeUnavailable
+		}
+		for _, event := range events {
+			if event.Sequence <= cursor {
+				return ErrRoomRuntimeUnavailable
+			}
+			if err := runtime.runtime.ApplyRoomEvent(ctx, event); err != nil {
+				return ErrRoomRuntimeUnavailable
+			}
+			cursor = event.Sequence
+			runtime.recordApplied(event, cursor)
+		}
+		if len(events) < runtime.options.ReplayLimit {
+			return nil
+		}
+	}
+}
+
+func (runtime *RoomRuntime) pollLoop(ctx context.Context) {
+	defer close(runtime.pollDone)
+	ticker := runtime.options.newTicker(runtime.options.ProbeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C():
+		}
+		if err := runtime.watcher.Poll(ctx); err != nil && ctx.Err() == nil {
+			runtime.recordFailure(err)
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		references, err := runtime.references.LoadEnabledRoomReferences(ctx)
+		if err != nil {
+			runtime.recordFailure(err)
+			continue
+		}
+		if err := runtime.watcher.SetReferences(ctx, references); err != nil {
+			runtime.recordFailure(err)
+			continue
+		}
+		runtime.setWatchedRooms(references)
+	}
+}
+
+func (runtime *RoomRuntime) consumeLoop(ctx context.Context) {
+	defer close(runtime.consumeDone)
+	events := runtime.watcher.Events()
+	closed := false
+	for {
+		if !closed {
+			select {
+			case <-ctx.Done():
+				return
+			case _, ok := <-events:
+				closed = !ok
+			}
+		}
+		for {
+			err := runtime.replay(ctx)
+			if err == nil {
+				break
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			runtime.recordFailure(err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-runtime.options.retryAfter(defaultRoomRetryInterval):
+			}
+		}
+		if closed {
+			return
+		}
+	}
+}
+
+func (runtime *RoomRuntime) recordApplied(event roomwatcher.Event, cursor uint64) {
+	runtime.mu.Lock()
+	runtime.cursor = cursor
+	if transition := event.RoomStateChanged; transition != nil {
+		if transition.To == roomwatcher.StateGrace {
+			runtime.status.GraceTransitions++
+		}
+		if transition.To == roomwatcher.StateLive {
+			duration := runtime.options.Now().Sub(transition.ConfirmedAt)
+			if duration < 0 {
+				duration = 0
+			}
+			runtime.status.ReadinessSamples++
+			runtime.status.ReadinessTotal += duration
+			if duration > runtime.status.ReadinessMaximum {
+				runtime.status.ReadinessMaximum = duration
+			}
+			if duration <= 10*time.Second {
+				runtime.status.ReadinessWithin10++
+			}
+			if duration <= 30*time.Second {
+				runtime.status.ReadinessWithin30++
+			} else {
+				runtime.status.ReadinessOver30++
+				runtime.status.ReadinessAlert = true
+			}
+		}
+	}
+	status, onStatus := runtime.status, runtime.options.OnStatus
+	runtime.mu.Unlock()
+	if onStatus != nil {
+		onStatus(status)
+	}
+}
+
+func (runtime *RoomRuntime) recordFailure(err error) {
+	runtime.mu.Lock()
+	runtime.status.TransitionFailures++
+	status, onStatus, onError := runtime.status, runtime.options.OnStatus, runtime.options.OnError
+	runtime.mu.Unlock()
+	if onError != nil {
+		onError(ErrRoomRuntimeUnavailable)
+	}
+	if onStatus != nil {
+		onStatus(status)
+	}
+	_ = err
+}
+
+func (runtime *RoomRuntime) setWatchedRooms(references []roomwatcher.Reference) {
+	rooms := make(map[string]struct{}, len(references))
+	for _, reference := range references {
+		rooms[reference.RoomID] = struct{}{}
+	}
+	runtime.mu.Lock()
+	changed := runtime.status.WatchedRooms != len(rooms)
+	runtime.status.WatchedRooms = len(rooms)
+	status, onStatus := runtime.status, runtime.options.OnStatus
+	runtime.mu.Unlock()
+	if changed && onStatus != nil {
+		onStatus(status)
+	}
+}
+
+func (runtime *RoomRuntime) Status() RoomRuntimeStatus {
+	if runtime == nil {
+		return RoomRuntimeStatus{}
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	return runtime.status
+}
+
+// Shutdown first stops and joins polling, then closes the producer, drains
+// its final durable wake-up, and finally joins the watcher lifecycle.
+func (runtime *RoomRuntime) Shutdown(ctx context.Context) error {
+	if runtime == nil || ctx == nil {
+		return ErrRoomRuntimeInvalid
+	}
+	runtime.shutdownOnce.Do(func() {
+		go runtime.shutdownSequence()
+	})
+	select {
+	case <-runtime.done:
+		runtime.mu.Lock()
+		err := runtime.shutdownErr
+		runtime.mu.Unlock()
+		return err
+	case <-ctx.Done():
+		// A timed-out caller requests a hard consumer stop, but the background
+		// sequence continues joining every owned goroutine and closes done.
+		runtime.consumeCancel()
+		return ctx.Err()
+	}
+}
+
+func (runtime *RoomRuntime) shutdownSequence() {
+	runtime.pollCancel()
+	<-runtime.pollDone
+	runtime.watcher.Close()
+	<-runtime.consumeDone
+	err := runtime.watcher.Wait(context.Background())
+	runtime.consumeCancel()
+	runtime.mu.Lock()
+	runtime.shutdownErr = err
+	runtime.mu.Unlock()
+	close(runtime.done)
+}
+
+func (runtime *RoomRuntime) Wait(ctx context.Context) error {
+	if runtime == nil || ctx == nil {
+		return ErrRoomRuntimeInvalid
+	}
+	select {
+	case <-runtime.done:
+		runtime.mu.Lock()
+		err := runtime.shutdownErr
+		runtime.mu.Unlock()
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Dependencies contains the hosted HTTP application's external services.
