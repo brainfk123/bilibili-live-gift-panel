@@ -169,32 +169,49 @@ func (adapter *Adapter) Begin(ctx context.Context) (identity.Challenge, error) {
 	return identity.Challenge{ID: challengeID, QRImage: image, VerificationURL: verificationURL, ExpiresAt: expiresAt}, nil
 }
 
-// Poll returns only a UID and completion time. All Cookies are destroyed on
-// every terminal Bilibili result, including identity-discovery failure.
-func (adapter *Adapter) Poll(ctx context.Context, challengeID string) (identity.Verification, error) {
+// Poll returns QR progress and, only after verification, a UID and completion
+// time. All Cookies are destroyed on every terminal result for this normal
+// identity-verification path.
+func (adapter *Adapter) Poll(ctx context.Context, challengeID string) (identity.VerificationPoll, error) {
+	return adapter.poll(ctx, challengeID, false)
+}
+
+// PollCredential returns QR progress for the service-account path. On a
+// verified stage it retains the Cookie inside the adapter until exactly one
+// ConsumeCredential call succeeds; it never performs an identity lookup.
+func (adapter *Adapter) PollCredential(ctx context.Context, challengeID string) (identity.VerificationStage, error) {
+	poll, err := adapter.poll(ctx, challengeID, true)
+	return poll.Stage, err
+}
+
+func (adapter *Adapter) poll(ctx context.Context, challengeID string, retainCredential bool) (identity.VerificationPoll, error) {
 	adapter.mu.Lock()
 	state, exists := adapter.challenges[challengeID]
 	if !exists || adapter.closed {
 		adapter.mu.Unlock()
-		return identity.Verification{}, identity.ErrChallengeNotFound
+		return identity.VerificationPoll{}, identity.ErrChallengeNotFound
 	}
 	if !adapter.now().Before(state.expiresAt) {
 		adapter.destroyLocked(challengeID, identity.ErrChallengeExpired)
 		adapter.mu.Unlock()
-		return identity.Verification{}, identity.ErrChallengeExpired
+		return identity.VerificationPoll{}, identity.ErrChallengeExpired
+	}
+	if retainCredential && len(state.cookies) > 0 {
+		adapter.mu.Unlock()
+		return identity.VerificationPoll{Stage: identity.VerificationVerified}, nil
 	}
 	if state.consuming {
 		adapter.mu.Unlock()
-		return identity.Verification{}, identity.ErrVerificationPending
+		return identity.VerificationPoll{Stage: identity.VerificationWaiting}, nil
 	}
 	if state.polling {
 		adapter.mu.Unlock()
-		return identity.Verification{}, identity.ErrVerificationPending
+		return identity.VerificationPoll{Stage: identity.VerificationWaiting}, nil
 	}
 	now := adapter.now()
 	if !state.nextPollAt.IsZero() && now.Before(state.nextPollAt) {
 		adapter.mu.Unlock()
-		return identity.Verification{}, identity.ErrVerificationPending
+		return identity.VerificationPoll{Stage: identity.VerificationWaiting}, nil
 	}
 	state.polling = true
 	state.nextPollAt = now.Add(adapter.pollInterval)
@@ -207,7 +224,7 @@ func (adapter *Adapter) Poll(ctx context.Context, challengeID string) (identity.
 	endpoint, err := url.Parse(adapter.pollEndpoint)
 	if err != nil {
 		adapter.finishTransientPoll(challengeID, state)
-		return identity.Verification{}, identity.ErrVerificationUnavailable
+		return identity.VerificationPoll{}, identity.ErrVerificationUnavailable
 	}
 	query := endpoint.Query()
 	query.Set("qrcode_key", qrKey)
@@ -222,42 +239,63 @@ func (adapter *Adapter) Poll(ctx context.Context, challengeID string) (identity.
 	response, err := adapter.getJSON(pollContext, endpoint.String(), nil, &payload)
 	if err != nil {
 		if terminal := cancellationResult(pollContext); terminal != nil {
-			return identity.Verification{}, terminal
+			return identity.VerificationPoll{}, terminal
 		}
 		adapter.finishTransientPoll(challengeID, state)
-		return identity.Verification{}, err
+		return identity.VerificationPoll{}, err
 	}
 	if payload.Code != 0 {
 		adapter.Forget(challengeID)
-		return identity.Verification{}, identity.ErrVerificationFailed
+		return identity.VerificationPoll{}, identity.ErrVerificationFailed
 	}
 	switch payload.Data.Code {
-	case 86101, 86090:
+	case 86101:
 		adapter.finishTransientPoll(challengeID, state)
-		return identity.Verification{}, identity.ErrVerificationPending
+		return identity.VerificationPoll{Stage: identity.VerificationWaiting}, nil
+	case 86090:
+		adapter.finishTransientPoll(challengeID, state)
+		return identity.VerificationPoll{Stage: identity.VerificationScanned}, nil
 	case 86038:
 		adapter.Forget(challengeID)
-		return identity.Verification{}, identity.ErrChallengeExpired
+		return identity.VerificationPoll{}, identity.ErrChallengeExpired
 	case 0:
 		cookies, ok := loginCookies(response, payload.Data.URL)
 		if !ok {
 			adapter.Forget(challengeID)
-			return identity.Verification{}, identity.ErrVerificationFailed
+			return identity.VerificationPoll{}, identity.ErrVerificationFailed
 		}
 		defer destroyCookies(cookies)
 		if !adapter.storeCookies(challengeID, state, cookies) {
 			if terminal := cancellationResult(pollContext); terminal != nil {
-				return identity.Verification{}, terminal
+				return identity.VerificationPoll{}, terminal
 			}
-			return identity.Verification{}, identity.ErrChallengeNotFound
+			return identity.VerificationPoll{}, identity.ErrChallengeNotFound
+		}
+		if retainCredential {
+			adapter.finishTransientPoll(challengeID, state)
+			adapter.mu.Lock()
+			current, present := adapter.challenges[challengeID]
+			expired := present && current == state && !adapter.now().Before(state.expiresAt)
+			if expired {
+				adapter.destroyLocked(challengeID, identity.ErrChallengeExpired)
+			}
+			active := present && current == state && !adapter.closed && !expired
+			adapter.mu.Unlock()
+			if expired {
+				return identity.VerificationPoll{}, identity.ErrChallengeExpired
+			}
+			if !active {
+				return identity.VerificationPoll{}, identity.ErrChallengeNotFound
+			}
+			return identity.VerificationPoll{Stage: identity.VerificationVerified}, nil
 		}
 		defer adapter.Forget(challengeID)
 		uid, err := adapter.fetchUID(pollContext, cookies)
 		if err != nil {
 			if terminal := cancellationResult(pollContext); terminal != nil {
-				return identity.Verification{}, terminal
+				return identity.VerificationPoll{}, terminal
 			}
-			return identity.Verification{}, err
+			return identity.VerificationPoll{}, err
 		}
 		adapter.mu.Lock()
 		current, present := adapter.challenges[challengeID]
@@ -268,15 +306,15 @@ func (adapter *Adapter) Poll(ctx context.Context, challengeID string) (identity.
 		active := present && current == state && !adapter.closed && !expired
 		adapter.mu.Unlock()
 		if expired {
-			return identity.Verification{}, identity.ErrChallengeExpired
+			return identity.VerificationPoll{}, identity.ErrChallengeExpired
 		}
 		if !active {
-			return identity.Verification{}, identity.ErrChallengeNotFound
+			return identity.VerificationPoll{}, identity.ErrChallengeNotFound
 		}
-		return identity.Verification{UID: uid, CompletedAt: adapter.now()}, nil
+		return identity.VerificationPoll{Stage: identity.VerificationVerified, Verification: identity.Verification{UID: uid, CompletedAt: adapter.now()}}, nil
 	default:
 		adapter.Forget(challengeID)
-		return identity.Verification{}, identity.ErrVerificationFailed
+		return identity.VerificationPoll{}, identity.ErrVerificationFailed
 	}
 }
 
@@ -289,6 +327,17 @@ func (adapter *Adapter) ConsumeCredential(ctx context.Context, challengeID strin
 	if consumer == nil {
 		return identity.ErrVerificationFailed
 	}
+	stage, err := adapter.PollCredential(ctx, challengeID)
+	if err != nil {
+		return err
+	}
+	if stage != identity.VerificationVerified {
+		return identity.ErrVerificationPending
+	}
+	return adapter.consumeCredential(ctx, challengeID, consumer)
+}
+
+func (adapter *Adapter) consumeCredential(ctx context.Context, challengeID string, consumer CredentialConsumer) error {
 	adapter.mu.Lock()
 	state, exists := adapter.challenges[challengeID]
 	if !exists || adapter.closed {
@@ -304,99 +353,14 @@ func (adapter *Adapter) ConsumeCredential(ctx context.Context, challengeID strin
 		adapter.mu.Unlock()
 		return identity.ErrVerificationPending
 	}
-	if len(state.cookies) > 0 {
-		consumerContext, cleanup := reserveCredentialConsumer(ctx, state)
-		credential := []byte(cookieHeader(cloneCookies(state.cookies)))
+	if len(state.cookies) == 0 {
 		adapter.mu.Unlock()
-		return adapter.consumeStoredCredential(challengeID, state, consumerContext, cleanup, credential, consumer)
+		return identity.ErrVerificationFailed
 	}
-	if state.polling {
-		adapter.mu.Unlock()
-		return identity.ErrVerificationPending
-	}
-	now := adapter.now()
-	if !state.nextPollAt.IsZero() && now.Before(state.nextPollAt) {
-		adapter.mu.Unlock()
-		return identity.ErrVerificationPending
-	}
-	state.polling = true
-	state.nextPollAt = now.Add(adapter.pollInterval)
-	qrKey := state.qrKey
-	pollContext, cancelPoll := context.WithCancelCause(ctx)
-	state.cancel = cancelPoll
+	consumerContext, cleanup := reserveCredentialConsumer(ctx, state)
+	credential := []byte(cookieHeader(cloneCookies(state.cookies)))
 	adapter.mu.Unlock()
-	defer cancelPoll(nil)
-
-	endpoint, err := url.Parse(adapter.pollEndpoint)
-	if err != nil {
-		adapter.finishTransientPoll(challengeID, state)
-		return identity.ErrVerificationUnavailable
-	}
-	query := endpoint.Query()
-	query.Set("qrcode_key", qrKey)
-	endpoint.RawQuery = query.Encode()
-	var payload struct {
-		Code int `json:"code"`
-		Data struct {
-			URL  string `json:"url"`
-			Code int    `json:"code"`
-		} `json:"data"`
-	}
-	response, err := adapter.getJSON(pollContext, endpoint.String(), nil, &payload)
-	if err != nil {
-		if terminal := cancellationResult(pollContext); terminal != nil {
-			return terminal
-		}
-		adapter.finishTransientPoll(challengeID, state)
-		return err
-	}
-	if payload.Code != 0 {
-		adapter.Forget(challengeID)
-		return identity.ErrVerificationFailed
-	}
-	switch payload.Data.Code {
-	case 86101, 86090:
-		adapter.finishTransientPoll(challengeID, state)
-		return identity.ErrVerificationPending
-	case 86038:
-		adapter.Forget(challengeID)
-		return identity.ErrChallengeExpired
-	case 0:
-		cookies, ok := loginCookies(response, payload.Data.URL)
-		if !ok {
-			adapter.Forget(challengeID)
-			return identity.ErrVerificationFailed
-		}
-		defer destroyCookies(cookies)
-		if !adapter.storeCookies(challengeID, state, cookies) {
-			if terminal := cancellationResult(pollContext); terminal != nil {
-				return terminal
-			}
-			return identity.ErrChallengeNotFound
-		}
-		adapter.finishTransientPoll(challengeID, state)
-		adapter.mu.Lock()
-		current := adapter.challenges[challengeID]
-		if current != state || adapter.closed {
-			terminal := state.terminal
-			adapter.mu.Unlock()
-			if terminal != nil {
-				return terminal
-			}
-			return identity.ErrChallengeNotFound
-		}
-		if !adapter.now().Before(state.expiresAt) {
-			adapter.destroyLocked(challengeID, identity.ErrChallengeExpired)
-			adapter.mu.Unlock()
-			return identity.ErrChallengeExpired
-		}
-		consumerContext, cleanup := reserveCredentialConsumer(ctx, state)
-		adapter.mu.Unlock()
-		return adapter.consumeStoredCredential(challengeID, state, consumerContext, cleanup, []byte(cookieHeader(cookies)), consumer)
-	default:
-		adapter.Forget(challengeID)
-		return identity.ErrVerificationFailed
-	}
+	return adapter.consumeStoredCredential(challengeID, state, consumerContext, cleanup, credential, consumer)
 }
 
 func reserveCredentialConsumer(ctx context.Context, state *pendingChallenge) (context.Context, func()) {

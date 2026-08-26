@@ -621,7 +621,7 @@ func (verifier *memoryVerifier) Begin(context.Context) (Challenge, error) {
 	return verifier.challenge, verifier.beginErr
 }
 
-func (verifier *memoryVerifier) Poll(context.Context, string) (Verification, error) {
+func (verifier *memoryVerifier) Poll(context.Context, string) (VerificationPoll, error) {
 	verifier.mu.Lock()
 	defer verifier.mu.Unlock()
 	index := verifier.polls
@@ -631,9 +631,9 @@ func (verifier *memoryVerifier) Poll(context.Context, string) (Verification, err
 		verification = verifier.verifications[index]
 	}
 	if index < len(verifier.pollErrs) {
-		return verification, verifier.pollErrs[index]
+		return VerificationPoll{Stage: VerificationVerified, Verification: verification}, verifier.pollErrs[index]
 	}
-	return verification, nil
+	return VerificationPoll{Stage: VerificationVerified, Verification: verification}, nil
 }
 
 func (verifier *memoryVerifier) Forget(challengeID string) {

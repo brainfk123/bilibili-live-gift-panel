@@ -85,10 +85,27 @@ type Verification struct {
 	CompletedAt time.Time `json:"completedAt"`
 }
 
+// VerificationStage is the public progress state reported by a Bilibili QR
+// verifier. Only a verified stage may carry identity material.
+type VerificationStage string
+
+const (
+	VerificationWaiting  VerificationStage = "waiting"
+	VerificationScanned  VerificationStage = "scanned"
+	VerificationVerified VerificationStage = "verified"
+)
+
+// VerificationPoll separates non-terminal QR progress from a completed
+// identity proof. Waiting and scanned polls always carry a zero Verification.
+type VerificationPoll struct {
+	Stage        VerificationStage
+	Verification Verification
+}
+
 // BiliVerifier proves control of a Bilibili account with ephemeral state.
 type BiliVerifier interface {
 	Begin(context.Context) (Challenge, error)
-	Poll(context.Context, string) (Verification, error)
+	Poll(context.Context, string) (VerificationPoll, error)
 	Forget(string)
 }
 
@@ -279,7 +296,7 @@ func (service *Service) Poll(ctx context.Context, challengeID string) (PollResul
 	state.pollInProgress = true
 	service.mu.Unlock()
 
-	verification, err := service.verifier.Poll(ctx, challengeID)
+	poll, err := service.verifier.Poll(ctx, challengeID)
 	if errors.Is(err, ErrVerificationPending) {
 		service.finishPoll(challengeID)
 		return PollResult{Status: ChallengePending, ExpiresAt: state.expiresAt}, nil
@@ -295,6 +312,15 @@ func (service *Service) Poll(ctx context.Context, challengeID string) (PollResul
 		}
 		return PollResult{}, ErrAuthenticationFailed
 	}
+	if poll.Stage == VerificationWaiting || poll.Stage == VerificationScanned {
+		service.finishPoll(challengeID)
+		return PollResult{Status: ChallengePending, ExpiresAt: state.expiresAt}, nil
+	}
+	if poll.Stage != VerificationVerified {
+		service.removeAndForget(challengeID)
+		return PollResult{}, ErrAuthenticationFailed
+	}
+	verification := poll.Verification
 
 	uid, valid := canonicalUID(verification.UID)
 	now := service.now()

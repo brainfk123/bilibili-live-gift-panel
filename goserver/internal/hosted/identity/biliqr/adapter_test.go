@@ -15,6 +15,162 @@ import (
 	"bilibili-live-gift-panel/internal/hosted/identity"
 )
 
+func TestAdapterPollMapsBiliQRCodeStages(t *testing.T) {
+	tests := []struct {
+		name string
+		code int
+		want identity.VerificationStage
+	}{
+		{name: "waiting", code: 86101, want: identity.VerificationWaiting},
+		{name: "scanned", code: 86090, want: identity.VerificationScanned},
+		{name: "verified", code: 0, want: identity.VerificationVerified},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Date(2026, 8, 26, 8, 0, 0, 0, time.UTC)
+			clock := &mutableAdapterClock{value: now}
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/generate":
+					writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": testVerificationURL("stage-key"), "qrcode_key": "stage-key"}})
+				case "/poll":
+					if test.code == 0 {
+						http.SetCookie(response, &http.Cookie{Name: "SESSDATA", Value: "stage-cookie"})
+						writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"code": 0, "url": "https://example.test/"}})
+						return
+					}
+					writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"code": test.code}})
+				case "/nav":
+					writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"isLogin": true, "mid": 32249588}})
+				default:
+					http.NotFound(response, request)
+				}
+			}))
+			defer server.Close()
+
+			adapter, err := New(Config{
+				Client: server.Client(), GenerateEndpoint: server.URL + "/generate", PollEndpoint: server.URL + "/poll", NavEndpoint: server.URL + "/nav",
+				Now: clock.Now, Lifetime: time.Minute, PollInterval: time.Nanosecond, EncodeQR: func(string) (string, error) { return "qr", nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			challenge, err := adapter.Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			poll, err := adapter.Poll(context.Background(), challenge.ID)
+			if err != nil {
+				t.Fatalf("Poll() error = %v", err)
+			}
+			if poll.Stage != test.want {
+				t.Fatalf("Poll() stage = %q, want %q", poll.Stage, test.want)
+			}
+			if test.code == 0 {
+				if poll.Verification.UID != "32249588" || !poll.Verification.CompletedAt.Equal(now) {
+					t.Fatalf("verified Poll() = %#v", poll.Verification)
+				}
+				return
+			}
+			if poll.Verification != (identity.Verification{}) {
+				t.Fatal("non-terminal Poll() exposed verification")
+			}
+			clock.Set(now.Add(time.Nanosecond))
+			if _, err := adapter.Poll(context.Background(), challenge.ID); err != nil {
+				t.Fatalf("subsequent %s Poll() error = %v", test.name, err)
+			}
+		})
+	}
+}
+
+func TestAdapterPollExpiresAndCleansChallenge(t *testing.T) {
+	tests := []struct {
+		name    string
+		code    int
+		wantErr error
+	}{
+		{name: "expired", code: 86038, wantErr: identity.ErrChallengeExpired},
+		{name: "unknown", code: 12345, wantErr: identity.ErrVerificationFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/generate":
+					writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": testVerificationURL("cleanup-key"), "qrcode_key": "cleanup-key"}})
+				case "/poll":
+					writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"code": test.code}})
+				default:
+					http.NotFound(response, request)
+				}
+			}))
+			defer server.Close()
+			adapter, err := New(Config{Client: server.Client(), GenerateEndpoint: server.URL + "/generate", PollEndpoint: server.URL + "/poll", NavEndpoint: server.URL + "/nav", EncodeQR: func(string) (string, error) { return "qr", nil }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			challenge, err := adapter.Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := adapter.Poll(context.Background(), challenge.ID); !errors.Is(err, test.wantErr) {
+				t.Fatalf("Poll() error = %v", err)
+			}
+			adapter.mu.Lock()
+			_, retained := adapter.challenges[challenge.ID]
+			adapter.mu.Unlock()
+			if retained {
+				t.Fatal("terminal Bilibili code retained its challenge")
+			}
+		})
+	}
+}
+
+func TestAdapterPollCredentialRetainsVerifiedCredentialForOneConsumer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/generate":
+			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": testVerificationURL("credential-key"), "qrcode_key": "credential-key"}})
+		case "/poll":
+			http.SetCookie(response, &http.Cookie{Name: "SESSDATA", Value: "credential-cookie"})
+			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"code": 0, "url": "https://example.test/"}})
+		case "/nav":
+			t.Fatal("PollCredential() must not perform identity lookup")
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	adapter, err := New(Config{Client: server.Client(), GenerateEndpoint: server.URL + "/generate", PollEndpoint: server.URL + "/poll", NavEndpoint: server.URL + "/nav", EncodeQR: func(string) (string, error) { return "qr", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := adapter.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, err := adapter.PollCredential(context.Background(), challenge.ID)
+	if err != nil || stage != identity.VerificationVerified {
+		t.Fatalf("PollCredential() = %q, %v", stage, err)
+	}
+	var consumed int
+	if err := adapter.ConsumeCredential(context.Background(), challenge.ID, func(_ context.Context, credential []byte) error {
+		if string(credential) != "SESSDATA=credential-cookie" {
+			return errors.New("consumer received an unexpected credential")
+		}
+		consumed++
+		return nil
+	}); err != nil {
+		t.Fatalf("ConsumeCredential() error = %v", err)
+	}
+	if consumed != 1 {
+		t.Fatalf("credential consumer calls = %d, want 1", consumed)
+	}
+	if err := adapter.ConsumeCredential(context.Background(), challenge.ID, func(context.Context, []byte) error { return nil }); !errors.Is(err, identity.ErrChallengeNotFound) {
+		t.Fatalf("second ConsumeCredential() error = %v", err)
+	}
+}
+
 func TestAdapterPollsRealBilibiliShapeAndReturnsUIDOnly(t *testing.T) {
 	var pollCount int
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -26,7 +182,7 @@ func TestAdapterPollsRealBilibiliShapeAndReturnsUIDOnly(t *testing.T) {
 			})
 		case "/poll":
 			if request.URL.Query().Get("qrcode_key") != "private-qr-key" {
-				t.Fatalf("poll qrcode_key = %q", request.URL.Query().Get("qrcode_key"))
+				t.Fatal("poll did not use the expected QR key")
 			}
 			pollCount++
 			if pollCount == 1 {
@@ -42,7 +198,7 @@ func TestAdapterPollsRealBilibiliShapeAndReturnsUIDOnly(t *testing.T) {
 		case "/nav":
 			cookie := request.Header.Get("Cookie")
 			if !strings.Contains(cookie, "SESSDATA=private-session") || !strings.Contains(cookie, "bili_jct=private-csrf") {
-				t.Fatalf("nav Cookie = %q", cookie)
+				t.Fatal("nav request omitted the required Cookies")
 			}
 			writeAdapterJSON(response, map[string]any{
 				"code": 0,
@@ -61,7 +217,7 @@ func TestAdapterPollsRealBilibiliShapeAndReturnsUIDOnly(t *testing.T) {
 		Now: clock.Now, Lifetime: 5 * time.Minute,
 		EncodeQR: func(value string) (string, error) {
 			if !strings.Contains(value, "qrcode_key=private-qr-key") {
-				t.Fatalf("encoded QR value = %q", value)
+				t.Fatal("encoded QR value omitted its QR key")
 			}
 			return "data:image/png;base64,public-image", nil
 		},
@@ -74,27 +230,28 @@ func TestAdapterPollsRealBilibiliShapeAndReturnsUIDOnly(t *testing.T) {
 		t.Fatalf("Begin() error = %v", err)
 	}
 	if challenge.ID == "" || challenge.QRImage != "data:image/png;base64,public-image" || !challenge.ExpiresAt.Equal(now.Add(5*time.Minute)) {
-		t.Fatalf("Begin() = %#v", challenge)
+		t.Fatal("Begin() returned an incomplete challenge")
 	}
 	if strings.Contains(challenge.ID, "private-qr-key") {
-		t.Fatalf("challenge ID exposed QR key: %q", challenge.ID)
+		t.Fatal("challenge ID exposed the QR key")
 	}
 
-	if _, err := adapter.Poll(context.Background(), challenge.ID); !errors.Is(err, identity.ErrVerificationPending) {
-		t.Fatalf("first Poll() error = %v, want pending", err)
+	firstPoll, err := adapter.Poll(context.Background(), challenge.ID)
+	if err != nil || firstPoll.Stage != identity.VerificationWaiting || firstPoll.Verification != (identity.Verification{}) {
+		t.Fatalf("first Poll() = %#v, %v", firstPoll, err)
 	}
 	clock.Set(now.Add(2 * time.Second))
 	verification, err := adapter.Poll(context.Background(), challenge.ID)
 	if err != nil {
 		t.Fatalf("second Poll() error = %v", err)
 	}
-	if verification.UID != "32249588" || !verification.CompletedAt.Equal(now.Add(2*time.Second)) {
-		t.Fatalf("verification = %#v", verification)
+	if verification.Stage != identity.VerificationVerified || verification.Verification.UID != "32249588" || !verification.Verification.CompletedAt.Equal(now.Add(2*time.Second)) {
+		t.Fatal("verification did not contain the expected completed identity")
 	}
 	encoded, _ := json.Marshal(verification)
 	for _, forbidden := range []string{"private-session", "private-csrf", "must-not-return"} {
 		if strings.Contains(string(encoded), forbidden) {
-			t.Fatalf("verification exposed %q: %s", forbidden, encoded)
+			t.Fatal("verification exposed private Bilibili data")
 		}
 	}
 	if _, err := adapter.Poll(context.Background(), challenge.ID); !errors.Is(err, identity.ErrChallengeNotFound) {
@@ -116,7 +273,7 @@ func TestAdapterBeginReturnsOnlyAllowlistedBilibiliVerificationURL(t *testing.T)
 		Client: server.Client(), GenerateEndpoint: server.URL, PollEndpoint: server.URL, NavEndpoint: server.URL,
 		EncodeQR: func(value string) (string, error) {
 			if value != verificationURL {
-				t.Fatalf("encoded URL = %q", value)
+				t.Fatal("encoded URL did not match the validated verification URL")
 			}
 			return "data:image/png;base64,qr", nil
 		},
@@ -129,7 +286,7 @@ func TestAdapterBeginReturnsOnlyAllowlistedBilibiliVerificationURL(t *testing.T)
 		t.Fatalf("Begin() error = %v", err)
 	}
 	if challenge.VerificationURL != verificationURL {
-		t.Fatalf("VerificationURL = %q, want %q", challenge.VerificationURL, verificationURL)
+		t.Fatal("VerificationURL did not preserve the validated public URL")
 	}
 }
 
@@ -145,7 +302,7 @@ func TestAdapterBeginAcceptsCurrentBilibiliMobileVerificationURL(t *testing.T) {
 	}
 	challenge, err := adapter.Begin(context.Background())
 	if err != nil || challenge.VerificationURL != verificationURL {
-		t.Fatalf("Begin() = %#v, %v", challenge, err)
+		t.Fatalf("Begin() did not return the current mobile verification URL: %v", err)
 	}
 }
 
@@ -209,7 +366,7 @@ func TestAdapterConsumeCredentialRetainsOnlyUntilConsumerSucceeds(t *testing.T) 
 	consumerFailure := errors.New("transaction unavailable")
 	if err := adapter.ConsumeCredential(context.Background(), challenge.ID, func(_ context.Context, cookie []byte) error {
 		if !strings.Contains(string(cookie), "SESSDATA=service-cookie") {
-			t.Fatalf("credential callback = %q", cookie)
+			t.Fatal("credential callback omitted the required Cookie")
 		}
 		return consumerFailure
 	}); !errors.Is(err, consumerFailure) {
@@ -217,7 +374,7 @@ func TestAdapterConsumeCredentialRetainsOnlyUntilConsumerSucceeds(t *testing.T) 
 	}
 	if err := adapter.ConsumeCredential(context.Background(), challenge.ID, func(_ context.Context, cookie []byte) error {
 		if !strings.Contains(string(cookie), "SESSDATA=service-cookie") {
-			t.Fatalf("retry callback = %q", cookie)
+			t.Fatal("retry callback omitted the required Cookie")
 		}
 		return nil
 	}); err != nil {
@@ -269,8 +426,8 @@ func TestAdapterPollDuringCredentialConsumptionStaysPendingAndPreservesChallenge
 	}()
 	<-started
 	verification, err := adapter.Poll(context.Background(), "challenge")
-	if verification.UID != "" || !errors.Is(err, identity.ErrVerificationPending) {
-		t.Fatalf("Poll during credential consumption=%#v, %v", verification, err)
+	if verification.Verification != (identity.Verification{}) || err != nil || verification.Stage != identity.VerificationWaiting {
+		t.Fatalf("Poll during credential consumption did not stay waiting: %v", err)
 	}
 	adapter.mu.Lock()
 	current, exists := adapter.challenges["challenge"]
@@ -297,7 +454,7 @@ func TestAdapterConsumeCredentialDuringOrdinaryPollStaysPending(t *testing.T) {
 	state := &pendingChallenge{qrKey: "ordinary-key", expiresAt: time.Now().Add(time.Minute)}
 	adapter := &Adapter{client: server.Client(), pollEndpoint: server.URL, now: time.Now, challenges: map[string]*pendingChallenge{"challenge": state}}
 	type pollResult struct {
-		verification identity.Verification
+		verification identity.VerificationPoll
 		err          error
 	}
 	pollDone := make(chan pollResult, 1)
@@ -316,8 +473,8 @@ func TestAdapterConsumeCredentialDuringOrdinaryPollStaysPending(t *testing.T) {
 	}
 	close(releasePoll)
 	outcome := <-pollDone
-	if outcome.verification.UID != "" || !errors.Is(outcome.err, identity.ErrVerificationPending) {
-		t.Fatalf("ordinary Poll outcome=%#v, %v", outcome.verification, outcome.err)
+	if outcome.verification.Verification != (identity.Verification{}) || outcome.err != nil || outcome.verification.Stage != identity.VerificationWaiting {
+		t.Fatalf("ordinary Poll did not stay waiting: %v", outcome.err)
 	}
 	adapter.mu.Lock()
 	_, exists := adapter.challenges["challenge"]
@@ -611,7 +768,7 @@ func TestAdapterCloseDuringIdentityLookupCannotReturnUID(t *testing.T) {
 	}
 
 	type pollOutcome struct {
-		verification identity.Verification
+		verification identity.VerificationPoll
 		err          error
 	}
 	outcomes := make(chan pollOutcome, 1)
@@ -629,8 +786,8 @@ func TestAdapterCloseDuringIdentityLookupCannotReturnUID(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Close did not cancel the in-flight Bilibili identity request")
 	}
-	if outcome.verification.UID != "" || !errors.Is(outcome.err, identity.ErrChallengeNotFound) {
-		t.Fatalf("Poll() after Close = %#v, %v; want no UID", outcome.verification, outcome.err)
+	if outcome.verification.Verification != (identity.Verification{}) || !errors.Is(outcome.err, identity.ErrChallengeNotFound) {
+		t.Fatalf("Poll() after Close did not discard identity material: %v", outcome.err)
 	}
 }
 
@@ -667,7 +824,7 @@ func TestAdapterTTLExpiryCancelsInFlightIdentityRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	type pollOutcome struct {
-		verification identity.Verification
+		verification identity.VerificationPoll
 		err          error
 	}
 	outcomes := make(chan pollOutcome, 1)
@@ -678,8 +835,8 @@ func TestAdapterTTLExpiryCancelsInFlightIdentityRequest(t *testing.T) {
 	<-navStarted
 	select {
 	case outcome := <-outcomes:
-		if outcome.verification.UID != "" || !errors.Is(outcome.err, identity.ErrChallengeExpired) {
-			t.Fatalf("Poll() after TTL = %#v, %v", outcome.verification, outcome.err)
+		if outcome.verification.Verification != (identity.Verification{}) || !errors.Is(outcome.err, identity.ErrChallengeExpired) {
+			t.Fatalf("Poll() after TTL did not discard identity material: %v", outcome.err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("TTL expiry did not cancel the in-flight Bilibili identity request")
@@ -751,16 +908,18 @@ func TestAdapterThrottlesEachChallengeToBilibiliPollingInterval(t *testing.T) {
 		t.Fatal(err)
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		if _, err := adapter.Poll(context.Background(), challenge.ID); !errors.Is(err, identity.ErrVerificationPending) {
-			t.Fatalf("Poll() attempt %d error = %v", attempt+1, err)
+		poll, err := adapter.Poll(context.Background(), challenge.ID)
+		if err != nil || poll.Stage != identity.VerificationWaiting {
+			t.Fatalf("Poll() attempt %d = %#v, %v", attempt+1, poll, err)
 		}
 	}
 	if pollCount != 1 {
 		t.Fatalf("immediate Poll HTTP calls = %d, want 1", pollCount)
 	}
 	clock.Set(initial.Add(2 * time.Second))
-	if _, err := adapter.Poll(context.Background(), challenge.ID); !errors.Is(err, identity.ErrVerificationPending) {
-		t.Fatalf("Poll() after interval error = %v", err)
+	poll, err := adapter.Poll(context.Background(), challenge.ID)
+	if err != nil || poll.Stage != identity.VerificationWaiting {
+		t.Fatalf("Poll() after interval = %#v, %v", poll, err)
 	}
 	if pollCount != 2 {
 		t.Fatalf("Poll HTTP calls after interval = %d, want 2", pollCount)
@@ -798,7 +957,7 @@ func TestAdapterPollCompletionAfterLogicalExpiryCannotReturnUID(t *testing.T) {
 		t.Fatal(err)
 	}
 	type pollOutcome struct {
-		verification identity.Verification
+		verification identity.VerificationPoll
 		err          error
 	}
 	outcomes := make(chan pollOutcome, 1)
@@ -810,8 +969,8 @@ func TestAdapterPollCompletionAfterLogicalExpiryCannotReturnUID(t *testing.T) {
 	clock.Set(initial.Add(2 * time.Second))
 	close(releaseNav)
 	outcome := <-outcomes
-	if outcome.verification.UID != "" || !errors.Is(outcome.err, identity.ErrChallengeExpired) {
-		t.Fatalf("Poll() after logical expiry = %#v, %v", outcome.verification, outcome.err)
+	if outcome.verification.Verification != (identity.Verification{}) || !errors.Is(outcome.err, identity.ErrChallengeExpired) {
+		t.Fatalf("Poll() after logical expiry did not discard identity material: %v", outcome.err)
 	}
 }
 
