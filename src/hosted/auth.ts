@@ -161,8 +161,8 @@ export function mountAuthView(
     const message = snapshot.failureKind === 'rate_limited'
       ? '请求较频繁，稍后自动重试'
       : snapshot.failureKind === 'temporarily_unavailable'
-        ? `登录服务暂不可用，${snapshot.retryInSeconds ?? 2} 秒后自动重试`
-        : `网络暂不可用，${snapshot.retryInSeconds ?? 2} 秒后自动重试`;
+        ? `登录服务暂不可用，${snapshot.retryInSeconds} 秒后自动重试`
+        : `网络暂不可用，${snapshot.retryInSeconds} 秒后自动重试`;
     setStatus(message, 'warning', snapshot.busy);
     showPrimary('立即重试', 'retry', snapshot.busy, !snapshot.canRetryNow);
   };

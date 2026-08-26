@@ -13,12 +13,12 @@ export type BiliChallengePollFailureKind =
   | 'temporarily_unavailable'
   | 'fatal';
 
-export interface BiliChallengePollSnapshot {
-  busy: boolean;
-  failureKind?: BiliChallengePollFailureKind;
-  retryInSeconds?: number;
-  canRetryNow: boolean;
-}
+type BiliChallengePollRecoverableFailureKind = Exclude<BiliChallengePollFailureKind, 'fatal'>;
+
+export type BiliChallengePollSnapshot =
+  | { busy: boolean; failureKind?: undefined; retryInSeconds?: undefined; canRetryNow: false }
+  | { busy: false; failureKind: BiliChallengePollRecoverableFailureKind; retryInSeconds: number; canRetryNow: boolean }
+  | { busy: false; failureKind: 'fatal'; retryInSeconds?: undefined; canRetryNow: false };
 
 export interface BiliChallengePollPort {
   poll(): Promise<AuthPollOutcome>;
@@ -62,34 +62,50 @@ export function createBiliChallengePoller(
     timer = undefined;
   };
 
-  const publish = (
-    busy: boolean,
-    kind?: BiliChallengePollFailureKind,
-    retryDelay?: number,
-  ): void => {
+  type FailurePublication =
+    | { kind: BiliChallengePollRecoverableFailureKind; retryDelay: number }
+    | { kind: 'fatal' };
+
+  const publish = (busy: boolean, failure?: FailurePublication): void => {
     if (stopped) return;
-    const canRetryNow = kind !== undefined
-      && kind !== 'fatal'
-      && !busy
+    if (!failure) { render({ busy, canRetryNow: false }); return; }
+    if (failure.kind === 'fatal') {
+      render({ busy: false, failureKind: 'fatal', canRetryNow: false });
+      return;
+    }
+    const canRetryNow = !busy
       && manualRetryAt !== undefined
       && timers.now() >= manualRetryAt;
     render({
-      busy,
-      ...(kind ? { failureKind: kind } : {}),
-      ...(retryDelay === undefined ? {} : { retryInSeconds: Math.ceil(retryDelay / 1_000) }),
+      busy: false,
+      failureKind: failure.kind,
+      retryInSeconds: Math.ceil(failure.retryDelay / 1_000),
       canRetryNow,
     });
   };
 
-  const schedule = (delay: number, kind?: BiliChallengePollFailureKind): void => {
+  const schedule = (delay: number, kind?: BiliChallengePollRecoverableFailureKind): void => {
     if (stopped) return;
     clearTimer();
-    publish(false, kind, kind ? delay : undefined);
+    publish(false, kind ? { kind, retryDelay: delay } : undefined);
     if (stopped) return;
+    const automaticRetryAt = timers.now() + delay;
+    const cooldownPending = kind !== undefined
+      && manualRetryAt !== undefined
+      && manualRetryAt > timers.now();
+    const installAttempt = (milliseconds: number): void => {
+      timer = timers.setTimeout(() => {
+        timer = undefined;
+        attempt();
+      }, milliseconds);
+    };
+    if (!cooldownPending) { installAttempt(delay); return; }
     timer = timers.setTimeout(() => {
       timer = undefined;
-      attempt();
-    }, delay);
+      const remaining = Math.max(0, automaticRetryAt - timers.now());
+      publish(false, { kind, retryDelay: remaining });
+      if (!stopped) installAttempt(remaining);
+    }, Math.max(0, Math.min(manualRetryAt ?? automaticRetryAt, automaticRetryAt) - timers.now()));
   };
 
   const handleSuccess = (outcome: AuthPollOutcome): void => {
@@ -109,7 +125,7 @@ export function createBiliChallengePoller(
     if (stopped) return;
     const kind = failureKind(error);
     if (kind === 'fatal') {
-      publish(false, kind);
+      publish(false, { kind });
       stopped = true;
       clearTimer();
       return;

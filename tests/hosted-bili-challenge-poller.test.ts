@@ -67,16 +67,16 @@ describe('Bilibili challenge poller', () => {
   it('backs browser network failures off at two, four, eight, then fifteen seconds', async () => {
     const timers = new ControlledTimers();
     const poll = vi.fn(async () => { throw new TypeError('Failed to fetch'); });
-    const poller = createBiliChallengePoller({ poll }, timers, vi.fn());
-    const networkDelays: number[] = [];
+    const snapshots: BiliChallengePollSnapshot[] = [];
+    const poller = createBiliChallengePoller({ poll }, timers, (snapshot) => snapshots.push(snapshot));
 
     poller.start();
-    for (let attempt = 0; attempt < 5; attempt++) {
-      await timers.fireNext();
-      networkDelays.push(timers.nextDelay() ?? -1);
-    }
+    while (poll.mock.calls.length < 5) await timers.fireNext();
 
-    expect(networkDelays).toEqual([2_000, 4_000, 8_000, 15_000, 15_000]);
+    expect(snapshots
+      .filter((snapshot) => snapshot.failureKind === 'network' && !snapshot.canRetryNow)
+      .map((snapshot) => (snapshot.retryInSeconds ?? -1) * 1_000))
+      .toEqual([2_000, 4_000, 8_000, 15_000, 15_000]);
   });
 
   it.each(['pending', 'scanned'] as const)(
@@ -99,6 +99,8 @@ describe('Bilibili challenge poller', () => {
       await timers.fireNext();
       expect(timers.nextDelay()).toBe(2_000);
       await timers.fireNext();
+      expect(timers.nextDelay()).toBe(0);
+      await timers.fireNext();
       expect(timers.nextDelay()).toBe(6_000);
       await timers.fireNext();
 
@@ -116,7 +118,7 @@ describe('Bilibili challenge poller', () => {
     poller.start();
     await timers.fireNext();
 
-    expect(snapshots.at(-1)).toMatchObject({ failureKind: 'rate_limited', canRetryNow: false });
+    expect(snapshots.at(-1)).toEqual({ busy: false, failureKind: 'rate_limited', retryInSeconds: 15, canRetryNow: false });
     expect(timers.nextDelay()).toBeGreaterThanOrEqual(15_000);
   });
 
@@ -130,7 +132,7 @@ describe('Bilibili challenge poller', () => {
     poller.start();
     await timers.fireNext();
 
-    expect(snapshots.at(-1)).toMatchObject({ failureKind: 'temporarily_unavailable' });
+    expect(snapshots.at(-1)).toEqual({ busy: false, failureKind: 'temporarily_unavailable', retryInSeconds: 2, canRetryNow: false });
     expect(timers.nextDelay()).toBe(2_000);
   });
 
@@ -148,6 +150,43 @@ describe('Bilibili challenge poller', () => {
     await timers.fireNext();
 
     expect(snapshots.at(-1)).toMatchObject({ failureKind: 'network', canRetryNow: true });
+  });
+
+  it('publishes manual retry enablement when the two-second cooldown expires', async () => {
+    const timers = new ControlledTimers();
+    const snapshots: BiliChallengePollSnapshot[] = [];
+    const poll = vi.fn()
+      .mockRejectedValueOnce(new TypeError('quick network failure'))
+      .mockResolvedValueOnce('pending');
+    const poller = createBiliChallengePoller({ poll }, timers, (snapshot) => snapshots.push(snapshot));
+
+    poller.start();
+    await timers.fireNext();
+    expect(snapshots.at(-1)).toEqual({
+      busy: false,
+      failureKind: 'network',
+      retryInSeconds: 2,
+      canRetryNow: false,
+    });
+    expect(timers.nextDelay()).toBe(2_000);
+
+    await timers.fireNext();
+
+    expect(poll).toHaveBeenCalledTimes(1);
+    expect(snapshots.at(-1)).toEqual({
+      busy: false,
+      failureKind: 'network',
+      retryInSeconds: 0,
+      canRetryNow: true,
+    });
+    expect(timers.count()).toBe(1);
+    expect(timers.nextDelay()).toBe(0);
+
+    poller.retryNow();
+    for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+    expect(poll).toHaveBeenCalledTimes(2);
+    expect(timers.count()).toBe(1);
+    expect(timers.nextDelay()).toBe(6_000);
   });
 
   it('stops on an invalid response instead of retrying a fatal contract failure', async () => {

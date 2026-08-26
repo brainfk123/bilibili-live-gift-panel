@@ -1648,6 +1648,19 @@ body:has(.hosted-auth-page) {
   border-radius: 0.6rem;
 }
 
+.hosted-auth-mobile-link:hover {
+  color: #174d90;
+  background: #dbeaff;
+  border-color: #6f9dd6;
+}
+
+.hosted-auth-mobile-link:active {
+  color: #123e76;
+  background: #c9def8;
+  border-color: #5e8dc8;
+  transform: translateY(1px);
+}
+
 .hosted-auth-actions {
   display: flex;
   justify-content: flex-end;
