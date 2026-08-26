@@ -68,7 +68,7 @@ func TestAdapterPollMapsBiliQRCodeStages(t *testing.T) {
 			}
 			if test.code == 0 {
 				if poll.Verification.UID != "32249588" || !poll.Verification.CompletedAt.Equal(now) {
-					t.Fatalf("verified Poll() = %#v", poll.Verification)
+					t.Fatal("verified Poll() did not contain the expected completed identity")
 				}
 				return
 			}
@@ -113,6 +113,12 @@ func TestAdapterPollExpiresAndCleansChallenge(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			adapter.mu.Lock()
+			state := adapter.challenges[challenge.ID]
+			if test.code == 86038 {
+				state.cookies = map[string]string{"SESSDATA": "cleanup-cookie"}
+			}
+			adapter.mu.Unlock()
 			if _, err := adapter.Poll(context.Background(), challenge.ID); !errors.Is(err, test.wantErr) {
 				t.Fatalf("Poll() error = %v", err)
 			}
@@ -121,6 +127,9 @@ func TestAdapterPollExpiresAndCleansChallenge(t *testing.T) {
 			adapter.mu.Unlock()
 			if retained {
 				t.Fatal("terminal Bilibili code retained its challenge")
+			}
+			if test.code == 86038 && len(state.cookies) != 0 {
+				t.Fatal("expired challenge retained temporary credential material")
 			}
 		})
 	}
@@ -238,7 +247,7 @@ func TestAdapterPollsRealBilibiliShapeAndReturnsUIDOnly(t *testing.T) {
 
 	firstPoll, err := adapter.Poll(context.Background(), challenge.ID)
 	if err != nil || firstPoll.Stage != identity.VerificationWaiting || firstPoll.Verification != (identity.Verification{}) {
-		t.Fatalf("first Poll() = %#v, %v", firstPoll, err)
+		t.Fatalf("first Poll() did not return a zero waiting result: %v", err)
 	}
 	clock.Set(now.Add(2 * time.Second))
 	verification, err := adapter.Poll(context.Background(), challenge.ID)
@@ -685,7 +694,7 @@ func TestAdapterExpiresForgetsAndClosesAllChallenges(t *testing.T) {
 	}
 	for _, challenge := range []identity.Challenge{first, second} {
 		if _, err := adapter.Poll(context.Background(), challenge.ID); !errors.Is(err, identity.ErrChallengeNotFound) {
-			t.Fatalf("Close() left challenge %q in memory: %v", challenge.ID, err)
+			t.Fatalf("Close() retained a challenge: %v", err)
 		}
 	}
 }
@@ -910,7 +919,7 @@ func TestAdapterThrottlesEachChallengeToBilibiliPollingInterval(t *testing.T) {
 	for attempt := 0; attempt < 2; attempt++ {
 		poll, err := adapter.Poll(context.Background(), challenge.ID)
 		if err != nil || poll.Stage != identity.VerificationWaiting {
-			t.Fatalf("Poll() attempt %d = %#v, %v", attempt+1, poll, err)
+			t.Fatalf("Poll() attempt %d did not return waiting: %v", attempt+1, err)
 		}
 	}
 	if pollCount != 1 {
@@ -919,7 +928,7 @@ func TestAdapterThrottlesEachChallengeToBilibiliPollingInterval(t *testing.T) {
 	clock.Set(initial.Add(2 * time.Second))
 	poll, err := adapter.Poll(context.Background(), challenge.ID)
 	if err != nil || poll.Stage != identity.VerificationWaiting {
-		t.Fatalf("Poll() after interval = %#v, %v", poll, err)
+		t.Fatalf("Poll() after interval did not return waiting: %v", err)
 	}
 	if pollCount != 2 {
 		t.Fatalf("Poll HTTP calls after interval = %d, want 2", pollCount)
