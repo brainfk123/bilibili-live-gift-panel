@@ -14,6 +14,7 @@ import (
 
 const (
 	ChallengePending     = "pending"
+	ChallengeScanned     = "scanned"
 	ChallengeVerified    = "verified"
 	RegistrationRequired = "registration_required"
 )
@@ -312,11 +313,23 @@ func (service *Service) Poll(ctx context.Context, challengeID string) (PollResul
 		}
 		return PollResult{}, ErrAuthenticationFailed
 	}
-	if poll.Stage == VerificationWaiting || poll.Stage == VerificationScanned {
+	switch poll.Stage {
+	case VerificationWaiting:
+		if poll.Verification != (Verification{}) {
+			service.removeAndForget(challengeID)
+			return PollResult{}, ErrAuthenticationFailed
+		}
 		service.finishPoll(challengeID)
 		return PollResult{Status: ChallengePending, ExpiresAt: state.expiresAt}, nil
-	}
-	if poll.Stage != VerificationVerified {
+	case VerificationScanned:
+		if poll.Verification != (Verification{}) {
+			service.removeAndForget(challengeID)
+			return PollResult{}, ErrAuthenticationFailed
+		}
+		service.finishPoll(challengeID)
+		return PollResult{Status: ChallengeScanned, ExpiresAt: state.expiresAt}, nil
+	case VerificationVerified:
+	default:
 		service.removeAndForget(challengeID)
 		return PollResult{}, ErrAuthenticationFailed
 	}

@@ -82,6 +82,33 @@ func TestHTTPExposesAuthRoutesWithoutUIDOrCookieLeakage(t *testing.T) {
 	}
 }
 
+func TestHTTPPollChallengeReturnsScannedWithoutIdentity(t *testing.T) {
+	now := time.Date(2026, 8, 16, 10, 2, 0, 0, time.UTC)
+	service := &fakeHTTPService{pollResult: PollResult{
+		Status:             ChallengeScanned,
+		ExpiresAt:          now.Add(5 * time.Minute),
+		RegistrationIntent: "must-not-leave-the-service",
+	}}
+	handler := newTestHTTPHandler(t, service, allowLimiter{})
+
+	response := serveAuthRequest(handler, http.MethodGet, "/api/auth/bili/challenges/challenge-scanned", "", "203.0.113.9:4000", false)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q, want 200", response.Code, response.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != 2 || body["status"] == nil || body["expiresAt"] == nil {
+		t.Fatalf("response keys=%v, want exactly status and expiresAt", body)
+	}
+	var status string
+	if err := json.Unmarshal(body["status"], &status); err != nil || status != ChallengeScanned {
+		t.Fatalf("status=%q error=%v, want %q", status, err, ChallengeScanned)
+	}
+	assertBodyOmitsSecrets(t, response.Body.String(), "uid", "cookie", "qrcode_key", "must-not-leave-the-service")
+}
+
 func TestHTTPChallengeCancellationIsCSRFProtectedIdempotentAndNonEnumerating(t *testing.T) {
 	service := &fakeHTTPService{}
 	handler := newTestHTTPHandler(t, service, allowLimiter{})

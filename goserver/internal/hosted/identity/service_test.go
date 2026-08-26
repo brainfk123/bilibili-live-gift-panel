@@ -42,6 +42,72 @@ func TestServicePollPendingKeepsChallengeAlive(t *testing.T) {
 	}
 }
 
+func TestServicePollPreservesScannedChallenge(t *testing.T) {
+	now := time.Date(2026, 8, 16, 8, 2, 0, 0, time.UTC)
+	verifier := &memoryVerifier{
+		challenge: Challenge{ID: "challenge-scanned", QRImage: "data:image/png;base64,qr", ExpiresAt: now.Add(5 * time.Minute)},
+		polls: []VerificationPoll{
+			{Stage: VerificationScanned},
+			{Stage: VerificationVerified, Verification: Verification{UID: "123", CompletedAt: now}},
+		},
+	}
+	service := newTestService(t, &memoryRepository{account: Account{ID: 43, CredentialEpoch: 1}}, verifier, now)
+
+	challenge, err := service.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("Begin() error = %v", err)
+	}
+	result, err := service.Poll(context.Background(), challenge.ID)
+	if err != nil {
+		t.Fatalf("first Poll() error = %v", err)
+	}
+	if result.Status != ChallengeScanned || !result.ExpiresAt.Equal(challenge.ExpiresAt) || result.RegistrationIntent != "" {
+		t.Fatalf("first Poll() = %#v, want scanned without identity material", result)
+	}
+	if got := verifier.forgotten(); len(got) != 0 {
+		t.Fatalf("scanned verification called Forget: %v", got)
+	}
+
+	result, err = service.Poll(context.Background(), challenge.ID)
+	if err != nil {
+		t.Fatalf("second Poll() error = %v", err)
+	}
+	if result.Status != ChallengeVerified {
+		t.Fatalf("second Poll() = %#v, want verified", result)
+	}
+	assertForgottenExactly(t, verifier, challenge.ID)
+}
+
+func TestServicePollFailsClosedOnInvalidVerificationPollShapes(t *testing.T) {
+	now := time.Date(2026, 8, 16, 8, 3, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name string
+		poll VerificationPoll
+	}{
+		{name: "waiting carries identity", poll: VerificationPoll{Stage: VerificationWaiting, Verification: Verification{UID: "123", CompletedAt: now}}},
+		{name: "scanned carries identity", poll: VerificationPoll{Stage: VerificationScanned, Verification: Verification{UID: "123", CompletedAt: now}}},
+		{name: "verified lacks uid", poll: VerificationPoll{Stage: VerificationVerified, Verification: Verification{CompletedAt: now}}},
+		{name: "verified lacks completion", poll: VerificationPoll{Stage: VerificationVerified, Verification: Verification{UID: "123"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			verifier := &memoryVerifier{
+				challenge: Challenge{ID: "challenge-invalid-poll", QRImage: "data:image/png;base64,qr", ExpiresAt: now.Add(5 * time.Minute)},
+				polls:     []VerificationPoll{test.poll},
+			}
+			service := newTestService(t, &memoryRepository{account: Account{ID: 43, CredentialEpoch: 1}}, verifier, now)
+			challenge, err := service.Begin(context.Background())
+			if err != nil {
+				t.Fatalf("Begin() error = %v", err)
+			}
+			result, err := service.Poll(context.Background(), challenge.ID)
+			if !errors.Is(err, ErrAuthenticationFailed) || result.Status != "" || result.RegistrationIntent != "" {
+				t.Fatalf("Poll() = %#v, %v; want authentication failed without public result", result, err)
+			}
+			assertForgottenExactly(t, verifier, challenge.ID)
+		})
+	}
+}
+
 func TestServiceBeginRejectsUntrustedVerificationURL(t *testing.T) {
 	now := time.Date(2026, 8, 16, 8, 5, 0, 0, time.UTC)
 	verifier := &memoryVerifier{challenge: Challenge{
@@ -613,7 +679,8 @@ type memoryVerifier struct {
 	beginErr      error
 	verifications []Verification
 	pollErrs      []error
-	polls         int
+	polls         []VerificationPoll
+	pollIndex     int
 	forgetCalls   []string
 }
 
@@ -624,8 +691,11 @@ func (verifier *memoryVerifier) Begin(context.Context) (Challenge, error) {
 func (verifier *memoryVerifier) Poll(context.Context, string) (VerificationPoll, error) {
 	verifier.mu.Lock()
 	defer verifier.mu.Unlock()
-	index := verifier.polls
-	verifier.polls++
+	index := verifier.pollIndex
+	verifier.pollIndex++
+	if index < len(verifier.polls) {
+		return verifier.polls[index], nil
+	}
 	var verification Verification
 	if index < len(verifier.verifications) {
 		verification = verifier.verifications[index]

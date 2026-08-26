@@ -291,6 +291,13 @@ func (handler *HTTPHandler) pollChallenge(response http.ResponseWriter, request 
 	}
 	result, err := handler.service.Poll(request.Context(), challengeID)
 	if err == nil {
+		if result.Status == ChallengeScanned {
+			writeHTTPJSON(response, http.StatusOK, struct {
+				Status    string    `json:"status"`
+				ExpiresAt time.Time `json:"expiresAt"`
+			}{Status: ChallengeScanned, ExpiresAt: result.ExpiresAt})
+			return
+		}
 		writeHTTPJSON(response, http.StatusOK, result)
 		return
 	}
