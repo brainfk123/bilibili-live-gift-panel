@@ -1,4 +1,5 @@
 import type { HostedAPI } from '../api';
+import type { BiliChallengeTimerPort } from '../bili-challenge-poller';
 import type { HostedView } from '../shell';
 import { mountVerificationCode, type VerificationCodeControl } from '../verification-code';
 import { createBiliServiceController, type BiliServiceSnapshot } from './bili-service-controller';
@@ -6,7 +7,7 @@ import { runAdminAction } from './ui/async-action';
 import { mountAdminNotice } from './ui/notice';
 import { createAdminState } from './ui/state';
 
-type BiliServiceAPI = Pick<HostedAPI, 'biliServiceStatus' | 'checkBiliService' | 'beginBiliServiceChallenge' | 'replaceBiliServiceCredential' | 'authorizeAdminOperation'>;
+type BiliServiceAPI = Pick<HostedAPI, 'biliServiceStatus' | 'checkBiliService' | 'beginBiliServiceChallenge' | 'pollBiliServiceChallenge' | 'replaceBiliServiceCredential' | 'authorizeAdminOperation'>;
 
 const statusText = (status: BiliServiceSnapshot['status']): string => {
   if (!status) return '正在加载服务账号状态…';
@@ -14,7 +15,7 @@ const statusText = (status: BiliServiceSnapshot['status']): string => {
   return status.health === 'missing' ? '尚未配置 B站服务账号' : '服务账号暂不可用';
 };
 
-export function mountBiliServiceView(host: HTMLElement, api: BiliServiceAPI): HostedView {
+export function mountBiliServiceView(host: HTMLElement, api: BiliServiceAPI, timers?: BiliChallengeTimerPort): HostedView {
   const document = host.ownerDocument;
   let disposed = false;
   let code: VerificationCodeControl | undefined;
@@ -38,14 +39,20 @@ export function mountBiliServiceView(host: HTMLElement, api: BiliServiceAPI): Ho
     const flow = document.createElement('section'); flow.className = 'hosted-admin-bili-flow';
     const intro = document.createElement('div'); intro.className = 'hosted-admin-bili-step';
     const heading = document.createElement('h4'); heading.textContent = snapshot.phase === 'qr' ? '1. 扫描二维码登录服务账号' : '2. 输入授权码以确认替换';
-    intro.append(heading);
+    const guidance = document.createElement('p');
+    guidance.textContent = snapshot.challengeStatus === 'verified'
+      ? '二维码已确认，可以继续'
+      : snapshot.challengeStatus === 'scanned'
+        ? '已扫码，请在手机确认'
+        : '请使用 B 站客户端扫码';
+    intro.append(heading, guidance);
     const figure = document.createElement('figure'); figure.className = 'hosted-admin-bili-qr';
     const image = document.createElement('img'); image.src = snapshot.challenge.qrImage; image.alt = 'B站服务账号登录二维码'; image.setAttribute('width', '448'); image.setAttribute('height', '448');
     const caption = document.createElement('figcaption'); caption.textContent = `二维码有效期至 ${new Date(snapshot.challenge.expiresAt).toLocaleString()}`;
     figure.append(image, caption);
     const actions = document.createElement('div'); actions.className = 'hosted-admin-bili-flow-actions';
     const continueButton = document.createElement('button'); continueButton.type = 'button'; continueButton.dataset.variant = 'primary'; continueButton.textContent = '二维码确认后继续';
-    continueButton.disabled = snapshot.phase !== 'qr';
+    continueButton.disabled = snapshot.phase !== 'qr' || snapshot.challengeStatus !== 'verified';
     continueButton.addEventListener('click', () => controller.enterAuthorization());
     const regenerate = document.createElement('button'); regenerate.type = 'button'; regenerate.dataset.variant = 'secondary'; regenerate.textContent = '重新生成'; regenerate.disabled = snapshot.phase !== 'qr';
     regenerate.addEventListener('click', () => { void runAdminAction(regenerate, { idle: '重新生成', busy: '生成中…' }, () => controller.beginReplacement()); });
@@ -84,9 +91,9 @@ export function mountBiliServiceView(host: HTMLElement, api: BiliServiceAPI): Ho
     renderFlow(snapshot);
   };
 
-  controller = createBiliServiceController(api, render);
+  controller = createBiliServiceController(api, render, timers);
   check.addEventListener('click', () => { void controller.check(); });
   begin.addEventListener('click', () => { void runAdminAction(begin, { idle: '更换服务账号', busy: '创建中…' }, () => controller.beginReplacement()); });
   void controller.load();
-  return { async dispose() { disposed = true; controller.dispose(); code?.dispose(); notice.dispose(); flowHost.replaceChildren(); } };
+  return { async dispose() { disposed = true; await controller.dispose(); code?.dispose(); notice.dispose(); flowHost.replaceChildren(); } };
 }

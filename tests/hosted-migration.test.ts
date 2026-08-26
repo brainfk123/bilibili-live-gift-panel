@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { HostedAPI, HostedAPIError } from '../src/hosted/api';
-import { createMigrationFlow, migrationFileLimit, mountMigrationView } from '../src/hosted/migration';
+import { createMigrationFlow, migrationFileLimit, mountMigrationView, type MigrationViewState } from '../src/hosted/migration';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -120,10 +120,39 @@ describe('hosted migration contract', () => {
     await expect(flow.apply()).rejects.toMatchObject({ code: 'invalid_request' });
     flow.confirmReplacement(true); flow.setKeepRoomSuggestion(false);
     await expect(flow.apply()).rejects.toMatchObject({ code: 'verification_pending' });
-    expect(states.at(-1)).toEqual(expect.objectContaining({ proof: expect.objectContaining({ qrImage: 'qr' }), operationInFlight: false }));
+    expect(states.at(-1)).toEqual(expect.objectContaining({
+      proof: expect.objectContaining({ qrImage: 'qr' }),
+      proofStatus: 'pending',
+      error: '等待 B 站扫码确认，请稍后重试',
+      operationInFlight: false,
+    }));
     await flow.apply();
     expect(api.applyMigration).toHaveBeenCalledWith(12, 'proof', false);
     expect(api.createSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps a scanned migration proof and asks for phone confirmation', async () => {
+    const api = {
+      beginLogin: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })),
+      pollLogin: vi.fn(async () => ({ status: 'scanned' as const, expiresAt: '2030-01-02T00:00:00Z' })),
+      cancelLogin: vi.fn(async () => undefined),
+      applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const })),
+    };
+    const states: MigrationViewState[] = [];
+    const flow = createMigrationFlow(api, (state) => states.push(structuredClone(state)));
+    flow.acceptPreview(preview);
+    flow.confirmReplacement(true);
+
+    await expect(flow.apply()).rejects.toMatchObject({ code: 'verification_pending' });
+
+    expect(states.at(-1)).toEqual(expect.objectContaining({
+      proof: { qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' },
+      proofStatus: 'scanned',
+      error: '已扫码，请在手机确认',
+      operationInFlight: false,
+    }));
+    expect(api.cancelLogin).not.toHaveBeenCalled();
+    expect(api.applyMigration).not.toHaveBeenCalled();
   });
 
   it('rejects a duplicate proof operation while keeping a transient verification failure retryable', async () => {

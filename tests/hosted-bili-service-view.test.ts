@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { HostedAPIError } from '../src/hosted/api';
+import type { BiliChallengeTimerPort } from '../src/hosted/bili-challenge-poller';
 import { createBiliServiceController } from '../src/hosted/admin/bili-service-controller';
 import { mountBiliServiceView } from '../src/hosted/admin/bili-service';
 
@@ -26,6 +28,36 @@ const button = (root: Element, label: string): Element => {
   return found;
 };
 const flush = async (): Promise<void> => { await Promise.resolve(); await Promise.resolve(); };
+
+class ControlledTimers implements BiliChallengeTimerPort {
+  private clock = 0;
+  private nextID = 1;
+  private readonly scheduled = new Map<number, { callback: () => void; dueAt: number }>();
+
+  setTimeout(callback: () => void, milliseconds: number): number {
+    const id = this.nextID++;
+    this.scheduled.set(id, { callback, dueAt: this.clock + milliseconds });
+    return id;
+  }
+
+  clearTimeout(id: number): void { this.scheduled.delete(id); }
+  now(): number { return this.clock; }
+  count(): number { return this.scheduled.size; }
+  nextDelay(): number | undefined {
+    const next = [...this.scheduled.values()].sort((left, right) => left.dueAt - right.dueAt)[0];
+    return next ? next.dueAt - this.clock : undefined;
+  }
+
+  async fireNext(): Promise<void> {
+    const next = [...this.scheduled.entries()].sort((left, right) => left[1].dueAt - right[1].dueAt)[0];
+    if (!next) throw new Error('No controlled timer is scheduled.');
+    const [id, task] = next;
+    this.scheduled.delete(id);
+    this.clock = task.dueAt;
+    task.callback();
+    for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+  }
+}
 
 describe('Bilibili service action state', () => {
   it('publishes checking and a visible success result', async () => {
@@ -56,13 +88,20 @@ describe('Bilibili service action state', () => {
   });
 
   it('publishes authorizing only after a QR challenge enters the TOTP step', async () => {
-    const api = { beginBiliServiceChallenge: vi.fn(async () => ({ challengeId: 'replace', qrImage: 'data:image/png;base64,qr', expiresAt: '2030-01-01T00:05:00Z' })) };
+    const timers = new ControlledTimers();
+    const api = {
+      beginBiliServiceChallenge: vi.fn(async () => ({ challengeId: 'replace', qrImage: 'data:image/png;base64,qr', expiresAt: '2030-01-01T00:05:00Z' })),
+      pollBiliServiceChallenge: vi.fn(async () => ({ status: 'verified' as const })),
+    };
     const render = vi.fn();
-    const controller = createBiliServiceController(api as Parameters<typeof createBiliServiceController>[0], render);
+    const controller = createBiliServiceController(api as Parameters<typeof createBiliServiceController>[0], render, timers);
 
     controller.enterAuthorization();
     expect(render).not.toHaveBeenCalled();
     await controller.beginReplacement();
+    controller.enterAuthorization();
+    expect(render.mock.lastCall?.[0]).toMatchObject({ phase: 'qr', challengeStatus: 'pending' });
+    await timers.fireNext();
     controller.enterAuthorization();
 
     expect(render.mock.lastCall?.[0]).toMatchObject({ phase: 'authorizing', challenge: { challengeId: 'replace' } });
@@ -120,7 +159,7 @@ describe('Bilibili service replacement view', () => {
     await view.dispose();
   });
 
-  it('keeps the continue button below a bounded QR image', async () => {
+  it('keeps the continue button below a bounded QR image while confirmation is pending', async () => {
     const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (text) => { const node = new Element('#text', document); node.textContent = text; return node; } };
     const root = new Element('div', document);
     const api = {
@@ -141,8 +180,106 @@ describe('Bilibili service replacement view', () => {
     const image = descendants(root).find((node) => node.tagName === 'img');
     expect(image?.getAttribute('width')).toBe('448');
     expect(image?.getAttribute('height')).toBe('448');
+    expect(button(root, '二维码确认后继续').disabled).toBe(true);
+    button(root, '二维码确认后继续').listeners.get('click')?.();
+    expect(descendants(root).some((node) => node.className.includes('hosted-admin-bili-totp'))).toBe(false);
+    await view.dispose();
+  });
+
+  it('shows scanned then enables continue only after verified', async () => {
+    const timers = new ControlledTimers();
+    const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (text) => { const node = new Element('#text', document); node.textContent = text; return node; } };
+    const root = new Element('div', document);
+    const api = {
+      biliServiceStatus: vi.fn(async () => ({ version: 0 as const, health: 'missing' as const })),
+      checkBiliService: vi.fn(),
+      beginBiliServiceChallenge: vi.fn(async () => ({ challengeId: 'service-challenge-secret', qrImage: 'data:image/png;base64,qr', expiresAt: '2030-01-01T00:05:00Z' })),
+      pollBiliServiceChallenge: vi.fn()
+        .mockResolvedValueOnce({ status: 'pending' as const })
+        .mockResolvedValueOnce({ status: 'scanned' as const })
+        .mockResolvedValueOnce({ status: 'verified' as const }),
+      replaceBiliServiceCredential: vi.fn(),
+      authorizeAdminOperation: vi.fn(),
+    };
+    const view = mountBiliServiceView(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountBiliServiceView>[1], timers);
+    await flush();
+    button(root, '更换服务账号').listeners.get('click')?.();
+    await flush();
+
+    expect(button(root, '二维码确认后继续').disabled).toBe(true);
+    expect(timers.count()).toBe(1);
+    expect(timers.nextDelay()).toBe(6_000);
+    await timers.fireNext();
+    expect(button(root, '二维码确认后继续').disabled).toBe(true);
+    expect(timers.nextDelay()).toBe(6_000);
+    await timers.fireNext();
+    expect(button(root, '二维码确认后继续').disabled).toBe(true);
+    expect(descendants(root).some((node) => node.textContent === '已扫码，请在手机确认')).toBe(true);
+    expect(timers.nextDelay()).toBe(6_000);
+    await timers.fireNext();
+
+    expect(button(root, '二维码确认后继续').disabled).toBe(false);
+    expect(timers.count()).toBe(0);
+    expect(descendants(root).flatMap((node) => [node.textContent, node.src]).join('|')).not.toContain('service-challenge-secret');
     button(root, '二维码确认后继续').listeners.get('click')?.();
     expect(descendants(root).some((node) => node.className.includes('hosted-admin-bili-totp'))).toBe(true);
+    await view.dispose();
+  });
+
+  it('clears service challenge polling on cancel and dispose', async () => {
+    const mount = async () => {
+      const timers = new ControlledTimers();
+      const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (text) => { const node = new Element('#text', document); node.textContent = text; return node; } };
+      const root = new Element('div', document);
+      const api = {
+        biliServiceStatus: vi.fn(async () => ({ version: 0 as const, health: 'missing' as const })),
+        checkBiliService: vi.fn(),
+        beginBiliServiceChallenge: vi.fn(async () => ({ challengeId: 'replace', qrImage: 'data:image/png;base64,qr', expiresAt: '2030-01-01T00:05:00Z' })),
+        pollBiliServiceChallenge: vi.fn(async () => ({ status: 'pending' as const })),
+        replaceBiliServiceCredential: vi.fn(), authorizeAdminOperation: vi.fn(),
+      };
+      const view = mountBiliServiceView(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountBiliServiceView>[1], timers);
+      await flush();
+      button(root, '更换服务账号').listeners.get('click')?.();
+      await flush();
+      return { timers, root, view };
+    };
+
+    const cancelled = await mount();
+    expect(cancelled.timers.count()).toBe(1);
+    button(cancelled.root, '取消').listeners.get('click')?.();
+    expect(cancelled.timers.count()).toBe(0);
+    await cancelled.view.dispose();
+
+    const disposed = await mount();
+    expect(disposed.timers.count()).toBe(1);
+    await disposed.view.dispose();
+    expect(disposed.timers.count()).toBe(0);
+  });
+
+  it.each([
+    ['expired', new HostedAPIError('expired', 410), '二维码已过期，请重新生成'],
+    ['fatal', new HostedAPIError('invalid_response', 200), '登录响应无效，请重新生成二维码'],
+  ])('never enters TOTP after an %s service challenge poll', async (_kind, pollError, guidance) => {
+    const timers = new ControlledTimers();
+    const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (text) => { const node = new Element('#text', document); node.textContent = text; return node; } };
+    const root = new Element('div', document);
+    const api = {
+      biliServiceStatus: vi.fn(async () => ({ version: 0 as const, health: 'missing' as const })),
+      checkBiliService: vi.fn(),
+      beginBiliServiceChallenge: vi.fn(async () => ({ challengeId: 'replace', qrImage: 'data:image/png;base64,qr', expiresAt: '2030-01-01T00:05:00Z' })),
+      pollBiliServiceChallenge: vi.fn(async () => { throw pollError; }),
+      replaceBiliServiceCredential: vi.fn(), authorizeAdminOperation: vi.fn(),
+    };
+    const view = mountBiliServiceView(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountBiliServiceView>[1], timers);
+    await flush();
+    button(root, '更换服务账号').listeners.get('click')?.();
+    await flush();
+    await timers.fireNext();
+
+    expect(timers.count()).toBe(0);
+    expect(descendants(root).some((node) => node.className.includes('hosted-admin-bili-totp'))).toBe(false);
+    expect(descendants(root).some((node) => node.textContent === guidance)).toBe(true);
     await view.dispose();
   });
 });
