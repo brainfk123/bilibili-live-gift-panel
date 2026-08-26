@@ -76,8 +76,18 @@ func (manager *Manager) Poll(ctx context.Context) error {
 }
 
 func (manager *Manager) poll(ctx context.Context, selected map[string]*watcher) error {
-	manager.pollMu.Lock()
-	defer manager.pollMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-manager.pollGate:
+	}
+	defer func() { manager.pollGate <- struct{}{} }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	manager.mu.Lock()
 	if manager.closed {
 		manager.mu.Unlock()
@@ -99,6 +109,7 @@ func (manager *Manager) poll(ctx context.Context, selected map[string]*watcher) 
 	if manager.pollRemaining <= 0 || manager.pollRemaining > len(manager.watchers) {
 		manager.pollRemaining = len(manager.watchers)
 	}
+	scheduleEpoch := manager.scheduleEpoch
 	rooms = rotateRooms(rooms, manager.nextRoom)
 	budget := len(rooms)
 	if probeBudget, ok := manager.probe.(ProbeBudget); ok {
@@ -123,32 +134,53 @@ func (manager *Manager) poll(ctx context.Context, selected map[string]*watcher) 
 		current := manager.watchers[roomID]
 		manager.mu.Unlock()
 		if current == nil || selected != nil && selected[roomID] != current {
-			manager.advanceProbeCursor(rooms, index)
+			manager.advanceProbeCursor(roomID, scheduleEpoch)
 			continue
 		}
 		observed, err := manager.probe.Probe(ctx, roomID)
+		manager.mu.Lock()
+		closed := manager.closed
+		currentStillReferenced := manager.watchers[roomID] == current
+		manager.mu.Unlock()
+		if closed {
+			return errors.Join(result, ErrClosed)
+		}
+		if !currentStillReferenced {
+			manager.advanceProbeCursor(roomID, scheduleEpoch)
+			continue
+		}
 		if err != nil {
 			if errors.Is(err, ErrProbeBudgetExhausted) {
 				manager.mu.Lock()
-				manager.nextRoom = roomID
+				if manager.closed {
+					manager.mu.Unlock()
+					return errors.Join(result, ErrClosed)
+				}
+				if manager.scheduleEpoch == scheduleEpoch {
+					manager.nextRoom = roomID
+				}
 				manager.updateProbeStatusLocked(manager.pollRemaining)
 				manager.mu.Unlock()
 				return errors.Join(result, err)
 			}
 			result = errors.Join(result, err)
-			manager.advanceProbeCursor(rooms, index)
+			manager.advanceProbeCursor(roomID, scheduleEpoch)
 			continue
 		}
 		state, err := observedState(observed)
 		if err != nil {
 			result = errors.Join(result, err)
-			manager.advanceProbeCursor(rooms, index)
+			manager.advanceProbeCursor(roomID, scheduleEpoch)
 			continue
 		}
 		manager.mu.Lock()
+		if manager.closed {
+			manager.mu.Unlock()
+			return errors.Join(result, ErrClosed)
+		}
 		if manager.watchers[roomID] != current {
 			manager.mu.Unlock()
-			manager.advanceProbeCursor(rooms, index)
+			manager.advanceProbeCursor(roomID, scheduleEpoch)
 			continue
 		}
 		candidate := *current.machine
@@ -166,7 +198,7 @@ func (manager *Manager) poll(ctx context.Context, selected map[string]*watcher) 
 			manager.notifyLocked(durable)
 		}
 		manager.mu.Unlock()
-		manager.advanceProbeCursor(rooms, index)
+		manager.advanceProbeCursor(roomID, scheduleEpoch)
 	}
 	return result
 }
@@ -183,13 +215,32 @@ func rotateRooms(rooms []string, next string) []string {
 	return append(rotated, rooms[:index]...)
 }
 
-func (manager *Manager) advanceProbeCursor(rooms []string, index int) {
+func (manager *Manager) advanceProbeCursor(roomID string, scheduleEpoch uint64) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.closed || manager.scheduleEpoch != scheduleEpoch {
+		return
+	}
 	if manager.pollRemaining > 0 {
 		manager.pollRemaining--
 	}
-	manager.nextRoom = rooms[(index+1)%len(rooms)]
+	rooms := make([]string, 0, len(manager.watchers))
+	for currentRoom := range manager.watchers {
+		rooms = append(rooms, currentRoom)
+	}
+	sort.Strings(rooms)
+	if len(rooms) == 0 {
+		manager.nextRoom = ""
+	} else {
+		index := sort.SearchStrings(rooms, roomID)
+		if index < len(rooms) && rooms[index] == roomID {
+			index++
+		}
+		if index == len(rooms) {
+			index = 0
+		}
+		manager.nextRoom = rooms[index]
+	}
 	manager.updateProbeStatusLocked(manager.pollRemaining)
 }
 

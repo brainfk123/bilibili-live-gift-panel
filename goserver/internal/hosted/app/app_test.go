@@ -255,8 +255,11 @@ func TestWatcherShutdownCancelsAndJoinsPollBeforeClosingStream(t *testing.T) {
 	<-started
 	shutdownRoomRuntime(t, composition)
 	got := trace.snapshot()
-	if len(got) < 4 || !slices.Equal(got[len(got)-4:], []string{"poll-exit", "watcher-close", "replay:0", "watcher-wait"}) {
-		t.Fatalf("shutdown trace = %#v", got)
+	pollExit := slices.Index(got, "poll-exit")
+	watcherClose := slices.Index(got, "watcher-close")
+	watcherWait := slices.Index(got, "watcher-wait")
+	if pollExit < 0 || watcherClose <= pollExit || watcherWait <= watcherClose {
+		t.Fatalf("shutdown trace = %#v, want poll exit before producer close before watcher join", got)
 	}
 }
 
@@ -301,6 +304,29 @@ func TestWatcherShutdownTimeoutDoesNotAbandonLifecycleJoin(t *testing.T) {
 	defer cancelJoined()
 	if err := composition.Wait(joined); err != nil {
 		t.Fatalf("lifecycle join was abandoned after timeout: %v", err)
+	}
+}
+
+// This test fails if closing the producer leaves the consumer in its normal
+// five-second retry loop forever when final durable replay is permanently
+// unavailable, preventing RoomRuntime and the outer lifecycle from joining.
+func TestWatcherShutdownJoinsWhenFinalReplayPermanentlyFails(t *testing.T) {
+	watcher := &permanentReplayFailureWatcher{
+		fakeRoomWatcher: newFakeRoomWatcher(nil),
+		closed:          make(chan struct{}),
+	}
+	composition, err := StartRoomRuntime(context.Background(), watcher, &fakeRoomRuntime{}, &fakeReferenceLoader{snapshots: [][]roomwatcher.Reference{{}}}, RoomRuntimeOptions{ProbeInterval: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancelShutdown()
+	if err := composition.Shutdown(shutdownContext); err != nil {
+		t.Fatalf("RoomRuntime.Shutdown() with permanent final replay failure = %v", err)
+	}
+	if err := composition.Wait(shutdownContext); err != nil {
+		t.Fatalf("RoomRuntime.Wait() with permanent final replay failure = %v", err)
 	}
 }
 
@@ -378,6 +404,26 @@ type fakeRoomWatcher struct {
 	done                 chan struct{}
 	closeOnce            sync.Once
 	probeCapacity        roomwatcher.ProbeCapacityStatus
+}
+
+type permanentReplayFailureWatcher struct {
+	*fakeRoomWatcher
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (watcher *permanentReplayFailureWatcher) ReplayEvents(ctx context.Context, after uint64, limit int) ([]roomwatcher.Event, error) {
+	select {
+	case <-watcher.closed:
+		return nil, errors.New("permanent final replay failure")
+	default:
+		return watcher.fakeRoomWatcher.ReplayEvents(ctx, after, limit)
+	}
+}
+
+func (watcher *permanentReplayFailureWatcher) Close() {
+	watcher.closeOnce.Do(func() { close(watcher.closed) })
+	watcher.fakeRoomWatcher.Close()
 }
 
 func (watcher *fakeRoomWatcher) ProbeCapacity() roomwatcher.ProbeCapacityStatus {

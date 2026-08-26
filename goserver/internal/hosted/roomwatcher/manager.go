@@ -117,7 +117,7 @@ type Manager struct {
 	grace      time.Duration
 
 	mu            sync.Mutex
-	pollMu        sync.Mutex
+	pollGate      chan struct{}
 	watchers      map[string]*watcher
 	events        chan Event
 	done          chan struct{}
@@ -125,6 +125,7 @@ type Manager struct {
 	beforeNotify  func(Event)
 	nextRoom      string
 	pollRemaining int
+	scheduleEpoch uint64
 	probeStatus   ProbeCapacityStatus
 }
 
@@ -148,8 +149,9 @@ func NewManager(probe Probe, repository Repository, options Options) (*Manager, 
 	}
 	manager := &Manager{
 		probe: probe, repository: repository, now: options.Now, grace: options.gracePeriod,
-		watchers: make(map[string]*watcher), events: make(chan Event, 1), done: make(chan struct{}), beforeNotify: options.beforeNotify,
+		pollGate: make(chan struct{}, 1), watchers: make(map[string]*watcher), events: make(chan Event, 1), done: make(chan struct{}), beforeNotify: options.beforeNotify,
 	}
+	manager.pollGate <- struct{}{}
 	return manager, nil
 }
 
@@ -208,7 +210,14 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 		current.refs = counts[roomID]
 	}
 	if len(newRooms) != 0 || len(removedRooms) != 0 {
+		manager.scheduleEpoch++
 		manager.pollRemaining = len(manager.watchers)
+		for _, roomID := range rooms {
+			if newRooms[roomID] != nil {
+				manager.nextRoom = roomID
+				break
+			}
+		}
 		if manager.nextRoom == "" && len(rooms) != 0 {
 			manager.nextRoom = rooms[0]
 		}
@@ -218,13 +227,14 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 		return nil
 	}
 	err = manager.poll(ctx, newRooms)
-	if err != nil && !errors.Is(err, ErrProbeBudgetExhausted) {
+	if err != nil && !errors.Is(err, ErrProbeBudgetExhausted) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, ErrClosed) {
 		manager.mu.Lock()
 		for roomID, added := range newRooms {
 			if manager.watchers[roomID] == added {
 				delete(manager.watchers, roomID)
 			}
 		}
+		manager.scheduleEpoch++
 		manager.pollRemaining = len(manager.watchers)
 		manager.mu.Unlock()
 	}

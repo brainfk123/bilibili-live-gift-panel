@@ -98,6 +98,114 @@ func TestReferenceRefreshCompletesWhileCadenceProbeIsBlocked(t *testing.T) {
 	}
 }
 
+// This test fails if a durable reference update waits on an uncancellable
+// in-flight probe, removes the newly durable watcher on cancellation, or lets
+// the stale probe overwrite the fair cursor that must eventually reach it.
+func TestSetReferencesCancellationKeepsDurableNewRoomInFairProbeSchedule(t *testing.T) {
+	probe := newCadenceBudgetProbe(1)
+	repository := &fakeRepository{}
+	manager, err := NewManager(probe, repository, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetReferences(context.Background(), []Reference{{AccountID: 1, RoomID: "1001"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	probe.refill(2)
+	probe.blockRoom = "1001"
+	probe.started = make(chan struct{})
+	probe.release = make(chan struct{})
+	pollDone := make(chan error, 1)
+	go func() { pollDone <- manager.Poll(context.Background()) }()
+	<-probe.started
+
+	refreshContext, cancelRefresh := context.WithCancel(context.Background())
+	refreshDone := make(chan error, 1)
+	go func() {
+		refreshDone <- manager.SetReferences(refreshContext, []Reference{{AccountID: 1, RoomID: "1001"}, {AccountID: 2, RoomID: "1002"}})
+	}()
+	durableDeadline := time.Now().Add(time.Second)
+	for len(repository.referencesSnapshot()) != 2 && time.Now().Before(durableDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	durable := repository.referencesSnapshot()
+	cancelRefresh()
+
+	var refreshErr error
+	returnedBeforeProbeRelease := false
+	select {
+	case refreshErr = <-refreshDone:
+		returnedBeforeProbeRelease = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(probe.release)
+	if !returnedBeforeProbeRelease {
+		refreshErr = <-refreshDone
+	}
+	if err := <-pollDone; err != nil {
+		t.Fatalf("blocked Poll() error = %v", err)
+	}
+
+	if !returnedBeforeProbeRelease {
+		t.Fatal("canceled SetReferences waited for the blocked cadence probe")
+	}
+	if !errors.Is(refreshErr, context.Canceled) {
+		t.Fatalf("canceled SetReferences error = %v, want context canceled", refreshErr)
+	}
+	if len(durable) != 2 || durable[1] != (Reference{AccountID: 2, RoomID: "1002"}) {
+		t.Fatalf("durable references = %#v, want new room 1002 committed", durable)
+	}
+	if err := manager.Poll(context.Background()); err != nil {
+		t.Fatalf("fair follow-up Poll() error = %v", err)
+	}
+	if got := probe.callsFor("1002"); got != 1 {
+		t.Fatalf("new durable room probe calls = %d; order=%v", got, probe.snapshot())
+	}
+}
+
+// This test fails if an observation that returns after Close can still write
+// a durable transition or notify the already-closed wake-up channel.
+func TestCloseFencesInFlightProbeBeforeTransitionPersistence(t *testing.T) {
+	probe := &closeRaceProbe{started: make(chan struct{}), release: make(chan struct{})}
+	repository := &fakeRepository{}
+	manager, err := NewManager(probe, repository, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetReferences(context.Background(), []Reference{{AccountID: 1, RoomID: "1001"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	type pollResult struct {
+		err       error
+		recovered any
+	}
+	pollDone := make(chan pollResult, 1)
+	go func() {
+		result := pollResult{}
+		defer func() {
+			result.recovered = recover()
+			pollDone <- result
+		}()
+		result.err = manager.Poll(context.Background())
+	}()
+	<-probe.started
+	manager.Close()
+	close(probe.release)
+	result := <-pollDone
+
+	if result.recovered != nil {
+		t.Fatalf("in-flight probe panicked after Close: %v", result.recovered)
+	}
+	if !errors.Is(result.err, ErrClosed) {
+		t.Fatalf("in-flight Poll error = %v, want ErrClosed", result.err)
+	}
+	if transitions := repository.transitionsSnapshot(); len(transitions) != 0 {
+		t.Fatalf("post-Close transitions = %#v, want none", transitions)
+	}
+}
+
 // This test fails if shared references create duplicate probes, existing
 // watchers are never polled, or a grace recovery opens a second broadcast.
 func TestAcceptanceSharedRoomPollingAndGraceRecovery(t *testing.T) {
@@ -220,6 +328,26 @@ type cadenceBudgetProbe struct {
 	blockRoom  string
 	started    chan struct{}
 	release    chan struct{}
+}
+
+type closeRaceProbe struct {
+	mu      sync.Mutex
+	calls   int
+	started chan struct{}
+	release chan struct{}
+}
+
+func (probe *closeRaceProbe) Probe(context.Context, string) (ObservedState, error) {
+	probe.mu.Lock()
+	probe.calls++
+	call := probe.calls
+	probe.mu.Unlock()
+	if call == 1 {
+		return ObservedOffline, nil
+	}
+	close(probe.started)
+	<-probe.release
+	return ObservedLive, nil
 }
 
 func newCadenceBudgetProbe(tokens int) *cadenceBudgetProbe {

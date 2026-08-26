@@ -448,8 +448,8 @@ func (runtime *RoomRuntime) Status() RoomRuntimeStatus {
 	return runtime.status
 }
 
-// Shutdown first stops and joins polling, then closes the producer, drains
-// its final durable wake-up, and finally joins the watcher lifecycle.
+// Shutdown starts one background-owned join. Caller cancellation only stops
+// waiting; it never controls whether owned goroutines are allowed to finish.
 func (runtime *RoomRuntime) Shutdown(ctx context.Context) error {
 	if runtime == nil || ctx == nil {
 		return ErrRoomRuntimeInvalid
@@ -464,9 +464,6 @@ func (runtime *RoomRuntime) Shutdown(ctx context.Context) error {
 		runtime.mu.Unlock()
 		return err
 	case <-ctx.Done():
-		// A timed-out caller requests a hard consumer stop, but the background
-		// sequence continues joining every owned goroutine and closes done.
-		runtime.consumeCancel()
 		return ctx.Err()
 	}
 }
@@ -475,9 +472,12 @@ func (runtime *RoomRuntime) shutdownSequence() {
 	runtime.pollCancel()
 	<-runtime.pollDone
 	runtime.watcher.Close()
+	// Once the producer is closed, no new wake-up can arrive. Cancel the
+	// normal retry loop so permanent ReplayEvents/ApplyRoomEvent failures
+	// cannot prevent the lifecycle join.
+	runtime.consumeCancel()
 	<-runtime.consumeDone
 	err := runtime.watcher.Wait(context.Background())
-	runtime.consumeCancel()
 	runtime.mu.Lock()
 	runtime.shutdownErr = err
 	runtime.mu.Unlock()
