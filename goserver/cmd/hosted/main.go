@@ -286,6 +286,10 @@ func run() error {
 						"confirmed_to_ready_total", status.ReadinessTotal,
 						"confirmed_to_ready_maximum", status.ReadinessMaximum,
 						"readiness_alert", status.ReadinessAlert,
+						"probe_capacity_per_minute", status.ProbeCapacityPerMinute,
+						"probe_available", status.ProbeAvailable,
+						"probe_backlog", status.ProbeBacklog,
+						"probe_capacity_alert", status.ProbeCapacityAlert,
 					)
 				},
 			})
@@ -443,60 +447,83 @@ type productionStandaloneWatcher interface {
 // owns that watcher. Shutdown always quiesces those goroutines before runtime
 // closes RoomSources, and only the outer guard clears runtimeOwner.
 type productionRuntimeLifecycle struct {
-	runtime   productionManagedRuntime
-	watcher   productionStandaloneWatcher
-	room      productionManagedRuntime
-	quiesced  bool
-	quiesceMu sync.Mutex
+	runtime     productionManagedRuntime
+	watcher     productionStandaloneWatcher
+	room        productionManagedRuntime
+	clearOwner  func()
+	mu          sync.Mutex
+	startOnce   sync.Once
+	done        chan struct{}
+	shutdownErr error
 }
 
 func (lifecycle *productionRuntimeLifecycle) TrackWatcher(watcher productionStandaloneWatcher) {
-	lifecycle.quiesceMu.Lock()
+	lifecycle.mu.Lock()
 	lifecycle.watcher = watcher
-	lifecycle.quiesceMu.Unlock()
+	lifecycle.mu.Unlock()
 }
 
 func (lifecycle *productionRuntimeLifecycle) TrackRoomRuntime(room productionManagedRuntime) {
-	lifecycle.quiesceMu.Lock()
+	lifecycle.mu.Lock()
 	lifecycle.room = room
 	lifecycle.watcher = nil
-	lifecycle.quiesceMu.Unlock()
+	lifecycle.mu.Unlock()
 }
 
 func (lifecycle *productionRuntimeLifecycle) Shutdown(ctx context.Context) error {
 	if lifecycle == nil || ctx == nil || lifecycle.runtime == nil {
 		return errors.New("invalid production runtime lifecycle")
 	}
-	lifecycle.quiesceMu.Lock()
-	defer lifecycle.quiesceMu.Unlock()
-	if lifecycle.quiesced {
+	lifecycle.startOnce.Do(func() { go lifecycle.shutdownSequence() })
+	select {
+	case <-lifecycle.done:
+		lifecycle.mu.Lock()
+		err := lifecycle.shutdownErr
+		lifecycle.mu.Unlock()
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (lifecycle *productionRuntimeLifecycle) shutdownSequence() {
+	lifecycle.mu.Lock()
+	room, watcher, runtime, clearOwner := lifecycle.room, lifecycle.watcher, lifecycle.runtime, lifecycle.clearOwner
+	lifecycle.mu.Unlock()
+	var roomErr error
+	if room != nil {
+		roomErr = errors.Join(room.Shutdown(context.Background()), room.Wait(context.Background()))
+	} else if watcher != nil {
+		watcher.Close()
+		roomErr = watcher.Wait(context.Background())
+	}
+	runtimeErr := errors.Join(runtime.Shutdown(context.Background()), runtime.Wait(context.Background()))
+	err := errors.Join(roomErr, runtimeErr)
+	if clearOwner != nil {
+		clearOwner()
+	}
+	lifecycle.mu.Lock()
+	lifecycle.shutdownErr = err
+	lifecycle.mu.Unlock()
+	close(lifecycle.done)
+}
+
+func (lifecycle *productionRuntimeLifecycle) Done() <-chan struct{} {
+	if lifecycle == nil {
 		return nil
 	}
-	var roomErr error
-	if lifecycle.room != nil {
-		roomErr = errors.Join(lifecycle.room.Shutdown(ctx), lifecycle.room.Wait(ctx))
-	} else if lifecycle.watcher != nil {
-		lifecycle.watcher.Close()
-		roomErr = lifecycle.watcher.Wait(ctx)
-	}
-	runtimeErr := errors.Join(lifecycle.runtime.Shutdown(ctx), lifecycle.runtime.Wait(ctx))
-	err := errors.Join(roomErr, runtimeErr)
-	if err == nil {
-		lifecycle.quiesced = true
-	}
-	return err
+	return lifecycle.done
 }
 
 func withProductionRuntimeLifecycle(ctx context.Context, timeout time.Duration, runtime productionManagedRuntime, clearOwner func(), initialize func(*productionRuntimeLifecycle) error) (resultErr error) {
 	if ctx == nil || timeout <= 0 || runtime == nil || clearOwner == nil || initialize == nil {
 		return errors.New("invalid production runtime composition")
 	}
-	lifecycle := &productionRuntimeLifecycle{runtime: runtime}
+	lifecycle := &productionRuntimeLifecycle{runtime: runtime, clearOwner: clearOwner, done: make(chan struct{})}
 	defer func() {
 		cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), timeout)
 		cleanupErr := lifecycle.Shutdown(cleanupContext)
 		cancelCleanup()
-		clearOwner()
 		resultErr = errors.Join(resultErr, cleanupErr)
 	}()
 	return initialize(lifecycle)
@@ -515,6 +542,7 @@ type productionBiliGateway struct {
 
 type runtimeRoomSetter interface {
 	MutateRoom(context.Context, int64, string) (hostedruntime.RoomMutationResult, error)
+	AdvanceRoomMutation(context.Context, hostedruntime.RoomMutationID, hostedruntime.RoomMutationPhase, hostedruntime.RoomMutationPhase) (hostedruntime.RoomMutationResult, error)
 }
 
 type roomReferenceRefresher interface {
@@ -540,10 +568,18 @@ func (mutation productionRoomMutation) SetRoom(ctx context.Context, accountID in
 		}
 		return adminconsole.RoomMutationResult{}, err
 	}
-	if err := mutation.references.RefreshReferences(ctx); err != nil {
-		return adminconsole.RoomMutationResult{}, err
+	if result.Phase == hostedruntime.RoomMutationTargetPersisted {
+		if err := mutation.references.RefreshReferences(ctx); err != nil {
+			return adminconsole.RoomMutationResult{}, err
+		}
+		result, err = mutation.runtime.AdvanceRoomMutation(ctx, result.MutationID, hostedruntime.RoomMutationTargetPersisted, hostedruntime.RoomMutationReferencesSynced)
+		if err != nil {
+			return adminconsole.RoomMutationResult{}, err
+		}
+	} else if result.Phase != hostedruntime.RoomMutationReferencesSynced && result.Phase != hostedruntime.RoomMutationAudited {
+		return adminconsole.RoomMutationResult{}, errors.New("hosted room mutation receipt unavailable")
 	}
-	return adminconsole.RoomMutationResult{OldCanonical: result.OldCanonical, NewCanonical: result.NewCanonical}, nil
+	return adminconsole.RoomMutationResult{MutationID: [16]byte(result.MutationID), AccountID: result.AccountID, DesiredCanonical: result.DesiredCanonical, OldCanonical: result.OldCanonical, NewCanonical: result.NewCanonical, Phase: adminconsole.RoomMutationPhase(result.Phase)}, nil
 }
 
 func newProductionBiliGateway(database *sql.DB, keys security.Keyring, newUpstream biliUpstreamFactory) (productionBiliGateway, error) {

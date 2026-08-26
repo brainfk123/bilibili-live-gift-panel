@@ -25,20 +25,94 @@ const (
 	accountBucketCapacity  = 30
 	endpointBucketCapacity = 20
 	accountBucketRetention = 10 * time.Minute
+	probeBucketCapacity    = 20
 )
+
+// probeLimiter is deliberately independent from the normal global/account/
+// endpoint limiter. Room monitoring cannot consume the budget needed by
+// reference refresh and administrator canonicalization, and its conservative
+// 20/minute risk budget is not raised without real shared-egress evidence.
+type probeLimiter struct {
+	mu     sync.Mutex
+	now    func() time.Time
+	bucket rateBucket
+	global *globalRequestBudget
+}
+
+func newProbeLimiter(now func() time.Time) *probeLimiter {
+	return newProbeLimiterWithGlobal(now, newGlobalRequestBudget(now))
+}
+
+func newProbeLimiterWithGlobal(now func() time.Time, global *globalRequestBudget) *probeLimiter {
+	if now == nil {
+		now = time.Now
+	}
+	if global == nil {
+		global = newGlobalRequestBudget(now)
+	}
+	return &probeLimiter{now: now, global: global}
+}
+
+func (limiter *probeLimiter) Allow() bool {
+	if limiter == nil {
+		return false
+	}
+	limiter.global.mu.Lock()
+	defer limiter.global.mu.Unlock()
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	limiter.bucket = refillBucket(limiter.bucket, limiter.now(), probeBucketCapacity)
+	limiter.global.bucket = refillBucket(limiter.global.bucket, limiter.now(), globalBucketCapacity)
+	if limiter.bucket.tokens < 1 || limiter.global.bucket.tokens < 1 {
+		return false
+	}
+	limiter.bucket.tokens--
+	limiter.global.bucket.tokens--
+	return true
+}
+
+func (limiter *probeLimiter) Available() int {
+	if limiter == nil {
+		return 0
+	}
+	limiter.global.mu.Lock()
+	defer limiter.global.mu.Unlock()
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	limiter.bucket = refillBucket(limiter.bucket, limiter.now(), probeBucketCapacity)
+	limiter.global.bucket = refillBucket(limiter.global.bucket, limiter.now(), globalBucketCapacity)
+	return min(int(limiter.bucket.tokens), int(limiter.global.bucket.tokens))
+}
+
+type globalRequestBudget struct {
+	mu     sync.Mutex
+	bucket rateBucket
+}
+
+func newGlobalRequestBudget(func() time.Time) *globalRequestBudget {
+	return &globalRequestBudget{}
+}
 
 type requestLimiter struct {
 	mu          sync.Mutex
 	now         func() time.Time
 	buckets     map[string]rateBucket
 	lastCleanup time.Time
+	global      *globalRequestBudget
 }
 
 func newRequestLimiter(now func() time.Time) *requestLimiter {
+	return newRequestLimiterWithGlobal(now, newGlobalRequestBudget(now))
+}
+
+func newRequestLimiterWithGlobal(now func() time.Time, global *globalRequestBudget) *requestLimiter {
 	if now == nil {
 		now = time.Now
 	}
-	return &requestLimiter{now: now, buckets: make(map[string]rateBucket)}
+	if global == nil {
+		global = newGlobalRequestBudget(now)
+	}
+	return &requestLimiter{now: now, buckets: make(map[string]rateBucket), global: global}
 }
 
 // Allow atomically charges the global, trusted-account, and endpoint scopes.
@@ -47,21 +121,23 @@ func (limiter *requestLimiter) Allow(accountID int64, endpoint string) bool {
 	if limiter == nil || accountID <= 0 || endpoint == "" {
 		return false
 	}
+	limiter.global.mu.Lock()
+	defer limiter.global.mu.Unlock()
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
 	now := limiter.now()
 	limiter.cleanupStaleAccounts(now)
 
+	global := refillBucket(limiter.global.bucket, now, globalBucketCapacity)
 	scopes := [...]struct {
 		key      string
 		capacity float64
 	}{
-		{key: "global", capacity: globalBucketCapacity},
 		{key: "account:" + integerText(accountID), capacity: accountBucketCapacity},
 		{key: "endpoint:" + endpoint, capacity: endpointBucketCapacity},
 	}
 	var candidates [len(scopes)]rateBucket
-	allowed := true
+	allowed := global.tokens >= 1
 	for index, scope := range scopes {
 		candidate := refillBucket(limiter.buckets[scope.key], now, scope.capacity)
 		candidate.lastSeen = now
@@ -77,6 +153,10 @@ func (limiter *requestLimiter) Allow(accountID int64, endpoint string) bool {
 		}
 		limiter.buckets[scope.key] = candidate
 	}
+	if allowed {
+		global.tokens--
+	}
+	limiter.global.bucket = global
 	return allowed
 }
 

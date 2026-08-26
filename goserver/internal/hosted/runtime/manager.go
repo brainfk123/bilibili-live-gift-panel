@@ -62,6 +62,10 @@ type disabledTargetRoomMutationSessionStore interface {
 	PersistDisabledTargetRoom(context.Context, PersistDisabledTargetRoomCommand) (RoomMutationResult, error)
 }
 
+type roomMutationPhaseSessionStore interface {
+	AdvanceRoomMutation(context.Context, RoomMutationID, RoomMutationPhase, RoomMutationPhase, time.Time) (RoomMutationResult, error)
+}
+
 // roomEventSessionStore resolves only the business broadcast selected by a
 // durable state event. Account membership comes exclusively from the ordered
 // RoomReferencesChanged payload, never from a second database read path.
@@ -1392,6 +1396,17 @@ func (manager *Manager) persistTargetRoomMutation(ctx context.Context, owner Own
 		return RoomMutationResult{}, err
 	}
 	return RoomMutationResult{OldCanonical: oldCanonical, NewCanonical: roomID}, nil
+}
+
+func (manager *Manager) AdvanceRoomMutation(ctx context.Context, mutationID RoomMutationID, expected, next RoomMutationPhase) (RoomMutationResult, error) {
+	if manager == nil || ctx == nil || mutationID == (RoomMutationID{}) {
+		return RoomMutationResult{}, ErrInvalidInput
+	}
+	persistence, ok := manager.dependencies.Sessions.(roomMutationPhaseSessionStore)
+	if !ok {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	return persistence.AdvanceRoomMutation(ctx, mutationID, expected, next, manager.now())
 }
 
 func (manager *Manager) roomMutationPersistenceError(account *accountRuntime, err error) error {

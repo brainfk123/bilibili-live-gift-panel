@@ -29,6 +29,53 @@ func TestRequestLimiterRejectsAtomicallyWithoutChargingEarlierScopes(t *testing.
 	}
 }
 
+func TestDedicatedProbeBudgetStaysAtTwentyPerMinuteWithoutChargingNormalRequests(t *testing.T) {
+	clock := time.Date(2026, 8, 26, 13, 0, 0, 0, time.UTC)
+	budget := newProbeLimiter(func() time.Time { return clock })
+	if available := budget.Available(); available != 20 {
+		t.Fatalf("initial available probe budget = %d, want 20", available)
+	}
+	for range 20 {
+		if !budget.Allow() {
+			t.Fatal("initial probe budget rejected before 20 requests")
+		}
+	}
+	if budget.Allow() || budget.Available() != 0 {
+		t.Fatalf("exhausted probe budget allowed or reported tokens: %d", budget.Available())
+	}
+	clock = clock.Add(30 * time.Second)
+	if available := budget.Available(); available != 10 {
+		t.Fatalf("30-second refill = %d, want 10", available)
+	}
+	normal := newRequestLimiter(func() time.Time { return clock })
+	for range 20 {
+		if !normal.Allow(1, "room_info") {
+			t.Fatal("dedicated probe usage charged normal room_info budget")
+		}
+	}
+}
+
+func TestProbeBudgetSharesExistingGlobalSixtyWithoutRaisingTotalEgress(t *testing.T) {
+	clock := time.Date(2026, 8, 26, 13, 30, 0, 0, time.UTC)
+	global := newGlobalRequestBudget(func() time.Time { return clock })
+	probes := newProbeLimiterWithGlobal(func() time.Time { return clock }, global)
+	normal := newRequestLimiterWithGlobal(func() time.Time { return clock }, global)
+	for range 20 {
+		if !probes.Allow() {
+			t.Fatal("probe sub-budget rejected before 20")
+		}
+	}
+	for index := 0; index < 40; index++ {
+		accountID := int64(1 + index/20)
+		if !normal.Allow(accountID, "normal_"+strconv.Itoa(index)) {
+			t.Fatalf("normal request %d rejected before shared global 60", index+1)
+		}
+	}
+	if normal.Allow(3, "sixty_first") || probes.Allow() {
+		t.Fatal("shared probe+normal egress exceeded the existing global 60/min budget")
+	}
+}
+
 func TestRequestLimiterAccountRejectionDoesNotChargeGlobalScope(t *testing.T) {
 	clock := time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC)
 	limiter := newRequestLimiter(func() time.Time { return clock })

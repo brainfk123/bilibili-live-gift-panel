@@ -72,30 +72,83 @@ func (manager *Manager) Poll(ctx context.Context) error {
 	if manager == nil || ctx == nil {
 		return ErrInvalidInput
 	}
+	return manager.poll(ctx, nil)
+}
+
+func (manager *Manager) poll(ctx context.Context, selected map[string]*watcher) error {
+	manager.pollMu.Lock()
+	defer manager.pollMu.Unlock()
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
 	if manager.closed {
+		manager.mu.Unlock()
 		return ErrClosed
 	}
 	rooms := make([]string, 0, len(manager.watchers))
-	for roomID := range manager.watchers {
+	for roomID, current := range manager.watchers {
+		if selected != nil && selected[roomID] != current {
+			continue
+		}
 		rooms = append(rooms, roomID)
 	}
 	sort.Strings(rooms)
+	if len(rooms) == 0 {
+		manager.updateProbeStatusLocked(0)
+		manager.mu.Unlock()
+		return nil
+	}
+	if manager.pollRemaining <= 0 || manager.pollRemaining > len(manager.watchers) {
+		manager.pollRemaining = len(manager.watchers)
+	}
+	rooms = rotateRooms(rooms, manager.nextRoom)
+	budget := len(rooms)
+	if probeBudget, ok := manager.probe.(ProbeBudget); ok {
+		budget = min(budget, max(0, probeBudget.AvailableProbeBudget()))
+		manager.probeStatus.CapacityPerMinute = probeBudget.ProbeCapacityPerMinute()
+		manager.probeStatus.Available = probeBudget.AvailableProbeBudget()
+	}
+	budget = min(budget, manager.pollRemaining)
+	if budget == 0 {
+		manager.updateProbeStatusLocked(manager.pollRemaining)
+		manager.mu.Unlock()
+		return nil
+	}
+	manager.mu.Unlock()
 	var result error
-	for _, roomID := range rooms {
+	for index := 0; index < budget; index++ {
+		roomID := rooms[index]
 		if err := ctx.Err(); err != nil {
 			return errors.Join(result, err)
 		}
+		manager.mu.Lock()
 		current := manager.watchers[roomID]
+		manager.mu.Unlock()
+		if current == nil || selected != nil && selected[roomID] != current {
+			manager.advanceProbeCursor(rooms, index)
+			continue
+		}
 		observed, err := manager.probe.Probe(ctx, roomID)
 		if err != nil {
+			if errors.Is(err, ErrProbeBudgetExhausted) {
+				manager.mu.Lock()
+				manager.nextRoom = roomID
+				manager.updateProbeStatusLocked(manager.pollRemaining)
+				manager.mu.Unlock()
+				return errors.Join(result, err)
+			}
 			result = errors.Join(result, err)
+			manager.advanceProbeCursor(rooms, index)
 			continue
 		}
 		state, err := observedState(observed)
 		if err != nil {
 			result = errors.Join(result, err)
+			manager.advanceProbeCursor(rooms, index)
+			continue
+		}
+		manager.mu.Lock()
+		if manager.watchers[roomID] != current {
+			manager.mu.Unlock()
+			manager.advanceProbeCursor(rooms, index)
 			continue
 		}
 		candidate := *current.machine
@@ -112,8 +165,50 @@ func (manager *Manager) Poll(ctx context.Context) error {
 			applyDurableTransition(current.machine, transition)
 			manager.notifyLocked(durable)
 		}
+		manager.mu.Unlock()
+		manager.advanceProbeCursor(rooms, index)
 	}
 	return result
+}
+
+func rotateRooms(rooms []string, next string) []string {
+	if len(rooms) == 0 || next == "" {
+		return rooms
+	}
+	index := sort.SearchStrings(rooms, next)
+	if index == len(rooms) {
+		index = 0
+	}
+	rotated := append([]string(nil), rooms[index:]...)
+	return append(rotated, rooms[:index]...)
+}
+
+func (manager *Manager) advanceProbeCursor(rooms []string, index int) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.pollRemaining > 0 {
+		manager.pollRemaining--
+	}
+	manager.nextRoom = rooms[(index+1)%len(rooms)]
+	manager.updateProbeStatusLocked(manager.pollRemaining)
+}
+
+func (manager *Manager) updateProbeStatusLocked(backlog int) {
+	manager.probeStatus.Backlog = max(0, backlog)
+	if budget, ok := manager.probe.(ProbeBudget); ok {
+		manager.probeStatus.CapacityPerMinute = budget.ProbeCapacityPerMinute()
+		manager.probeStatus.Available = budget.AvailableProbeBudget()
+	}
+}
+
+func (manager *Manager) ProbeCapacity() ProbeCapacityStatus {
+	if manager == nil {
+		return ProbeCapacityStatus{}
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	manager.updateProbeStatusLocked(manager.pollRemaining)
+	return manager.probeStatus
 }
 
 func applyDurableTransition(machine *StateMachine, transition Transition) {

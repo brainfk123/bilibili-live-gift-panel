@@ -537,11 +537,11 @@ func TestProductionRoomMutationCanonicalizesThenRefreshesAndRetries(t *testing.T
 	if err != nil {
 		t.Fatalf("retry SetRoom: %v", err)
 	}
-	if result.OldCanonical != "42" || result.NewCanonical != "42" {
-		t.Fatalf("retry mutation result = %#v, want exact committed 42 -> 42", result)
+	if result.OldCanonical != "" || result.NewCanonical != "42" {
+		t.Fatalf("retry mutation result = %#v, want original empty -> 42 receipt", result)
 	}
-	if targets := sessions.persistedTargets(); len(targets) != 2 || targets[0] != "42" || targets[1] != "42" {
-		t.Fatalf("persisted canonical targets = %#v, want [42 42]", targets)
+	if targets := sessions.persistedTargets(); len(targets) != 1 || targets[0] != "42" {
+		t.Fatalf("persisted canonical targets = %#v, want one durable [42]", targets)
 	}
 	if observed := refresher.observedTargets(); len(observed) != 2 || observed[0] != "42" || observed[1] != "42" {
 		t.Fatalf("refresh observed targets = %#v, want canonical persistence before each refresh", observed)
@@ -570,6 +570,48 @@ func TestProductionRoomMutationPreservesAdministratorNotFoundContract(t *testing
 	mutation := productionRoomMutation{runtime: setter, references: &mainRoomReferenceRefresher{}}
 	if _, err := mutation.SetRoom(context.Background(), 404, "7"); !errors.Is(err, adminconsole.ErrNotFound) {
 		t.Fatalf("missing-account SetRoom error = %v, want administrator not found", err)
+	}
+}
+
+// This test fails if refresh failure/cancellation creates a replacement
+// old==new receipt instead of resuming the durable target receipt and only
+// advancing its phase after reference synchronization succeeds.
+func TestProductionRoomMutationRetriesSameReceiptAcrossRefreshFailure(t *testing.T) {
+	mutationID := hostedruntime.RoomMutationID{1, 3, 5, 7}
+	receipt := hostedruntime.RoomMutationResult{MutationID: mutationID, AccountID: 7, DesiredCanonical: "42", OldCanonical: "111", NewCanonical: "42", Phase: hostedruntime.RoomMutationTargetPersisted}
+	runtime := &receiptRoomRuntime{receipt: receipt}
+	want := errors.New("reference outbox unavailable")
+	refresher := &mainRoomReferenceRefresher{failures: 1, err: want}
+	mutation := productionRoomMutation{runtime: runtime, references: refresher}
+
+	if _, err := mutation.SetRoom(context.Background(), 7, "7"); !errors.Is(err, want) {
+		t.Fatalf("first SetRoom error = %v", err)
+	}
+	result, err := mutation.SetRoom(context.Background(), 7, "7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MutationID != mutationID || result.OldCanonical != "111" || result.NewCanonical != "42" || result.Phase != adminconsole.RoomMutationReferencesSynced {
+		t.Fatalf("retried receipt = %#v", result)
+	}
+	if runtime.mutateCalls != 2 || runtime.advanceCalls != 1 || refresher.calls != 2 {
+		t.Fatalf("mutate/advance/refresh calls = %d/%d/%d", runtime.mutateCalls, runtime.advanceCalls, refresher.calls)
+	}
+}
+
+func TestProductionRoomMutationRequestCancellationLeavesReceiptRetryable(t *testing.T) {
+	mutationID := hostedruntime.RoomMutationID{2, 4, 6, 8}
+	runtime := &receiptRoomRuntime{receipt: hostedruntime.RoomMutationResult{MutationID: mutationID, AccountID: 7, DesiredCanonical: "42", OldCanonical: "111", NewCanonical: "42", Phase: hostedruntime.RoomMutationTargetPersisted}}
+	refresher := &cancelAwareRoomRefresher{}
+	mutation := productionRoomMutation{runtime: runtime, references: refresher}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := mutation.SetRoom(canceled, 7, "7"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled SetRoom error = %v", err)
+	}
+	result, err := mutation.SetRoom(context.Background(), 7, "7")
+	if err != nil || result.MutationID != mutationID || result.OldCanonical != "111" {
+		t.Fatalf("retry after cancellation = %#v, %v", result, err)
 	}
 }
 
@@ -617,6 +659,51 @@ func TestProductionRuntimeLifecycleCleansEveryPostManagerInitializationFailure(t
 				t.Fatalf("cleanup order = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+// This test fails if an initialization caller deadline becomes the resource
+// shutdown context, or if runtimeOwner is cleared before blocked RoomRuntime,
+// runtime.Manager, and RoomSources have actually joined.
+func TestProductionRuntimeLifecycleTimeoutKeepsBackgroundJoinAndDelaysOwnerClear(t *testing.T) {
+	log := &runtimeStartupLog{}
+	runtime := &runtimeStartupResource{name: "runtime", log: log}
+	room := &blockingRuntimeStartupResource{log: log, started: make(chan struct{}), release: make(chan struct{})}
+	ownerCleared := make(chan struct{})
+	want := errors.New("post-manager initialization failed")
+	result := make(chan error, 1)
+	go func() {
+		result <- withProductionRuntimeLifecycle(context.Background(), 5*time.Millisecond, runtime, func() {
+			log.add("owner-clear")
+			close(ownerCleared)
+		}, func(lifecycle *productionRuntimeLifecycle) error {
+			lifecycle.TrackRoomRuntime(room)
+			return want
+		})
+	}()
+	<-room.started
+	select {
+	case err := <-result:
+		if !errors.Is(err, want) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("initialization result = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("caller deadline did not stop waiting for blocked background join")
+	}
+	select {
+	case <-ownerCleared:
+		t.Fatal("runtimeOwner cleared before RoomRuntime released")
+	default:
+	}
+	close(room.release)
+	select {
+	case <-ownerCleared:
+	case <-time.After(time.Second):
+		t.Fatal("background lifecycle did not finish join and clear owner")
+	}
+	wantOrder := []string{"room-shutdown", "room-wait", "runtime-shutdown", "runtime-wait", "owner-clear"}
+	if got := log.snapshot(); !slices.Equal(got, wantOrder) {
+		t.Fatalf("background cleanup order = %v, want %v", got, wantOrder)
 	}
 }
 
@@ -1194,6 +1281,7 @@ type mainRoomMutationSessions struct {
 	mu        sync.Mutex
 	target    string
 	persisted []string
+	receipt   hostedruntime.RoomMutationResult
 }
 
 func (*mainRoomMutationSessions) ClaimOwnership(_ context.Context, accountID int64, token hostedruntime.OwnerToken, _ time.Duration) (hostedruntime.OwnerClaim, error) {
@@ -1216,6 +1304,27 @@ func (sessions *mainRoomMutationSessions) PersistTargetRoom(_ context.Context, c
 	sessions.persisted = append(sessions.persisted, command.RoomID)
 	sessions.mu.Unlock()
 	return nil
+}
+func (sessions *mainRoomMutationSessions) MutateTargetRoom(_ context.Context, command hostedruntime.PersistTargetRoomCommand) (hostedruntime.RoomMutationResult, error) {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	if sessions.receipt.MutationID != (hostedruntime.RoomMutationID{}) && sessions.target == command.RoomID {
+		return sessions.receipt, nil
+	}
+	old := sessions.target
+	sessions.target = command.RoomID
+	sessions.persisted = append(sessions.persisted, command.RoomID)
+	sessions.receipt = hostedruntime.RoomMutationResult{MutationID: hostedruntime.RoomMutationID{7, 7, 7, 7}, AccountID: command.Owner.AccountID, DesiredCanonical: command.RoomID, OldCanonical: old, NewCanonical: command.RoomID, Phase: hostedruntime.RoomMutationTargetPersisted}
+	return sessions.receipt, nil
+}
+func (sessions *mainRoomMutationSessions) AdvanceRoomMutation(_ context.Context, mutationID hostedruntime.RoomMutationID, expected, next hostedruntime.RoomMutationPhase, _ time.Time) (hostedruntime.RoomMutationResult, error) {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	if sessions.receipt.MutationID != mutationID || sessions.receipt.Phase != expected {
+		return hostedruntime.RoomMutationResult{}, errors.New("unexpected room mutation phase")
+	}
+	sessions.receipt.Phase = next
+	return sessions.receipt, nil
 }
 func (*mainRoomMutationSessions) StartSession(context.Context, hostedruntime.StartSessionCommand) (hostedruntime.Session, error) {
 	return hostedruntime.Session{}, errors.New("unexpected session start")
@@ -1276,6 +1385,33 @@ type roomSetterFunc func(context.Context, int64, string) (hostedruntime.RoomMuta
 func (setter roomSetterFunc) MutateRoom(ctx context.Context, accountID int64, roomID string) (hostedruntime.RoomMutationResult, error) {
 	return setter(ctx, accountID, roomID)
 }
+func (roomSetterFunc) AdvanceRoomMutation(context.Context, hostedruntime.RoomMutationID, hostedruntime.RoomMutationPhase, hostedruntime.RoomMutationPhase) (hostedruntime.RoomMutationResult, error) {
+	return hostedruntime.RoomMutationResult{}, errors.New("unexpected room mutation phase advance")
+}
+
+type receiptRoomRuntime struct {
+	receipt      hostedruntime.RoomMutationResult
+	mutateCalls  int
+	advanceCalls int
+}
+
+func (runtime *receiptRoomRuntime) MutateRoom(context.Context, int64, string) (hostedruntime.RoomMutationResult, error) {
+	runtime.mutateCalls++
+	return runtime.receipt, nil
+}
+
+func (runtime *receiptRoomRuntime) AdvanceRoomMutation(_ context.Context, mutationID hostedruntime.RoomMutationID, expected, next hostedruntime.RoomMutationPhase) (hostedruntime.RoomMutationResult, error) {
+	runtime.advanceCalls++
+	if mutationID != runtime.receipt.MutationID || expected != hostedruntime.RoomMutationTargetPersisted || next != hostedruntime.RoomMutationReferencesSynced {
+		return hostedruntime.RoomMutationResult{}, errors.New("unexpected phase advance")
+	}
+	runtime.receipt.Phase = next
+	return runtime.receipt, nil
+}
+
+type cancelAwareRoomRefresher struct{}
+
+func (*cancelAwareRoomRefresher) RefreshReferences(ctx context.Context) error { return ctx.Err() }
 
 type runtimeStartupLog struct {
 	mu    sync.Mutex
@@ -1297,6 +1433,23 @@ func (log *runtimeStartupLog) snapshot() []string {
 type runtimeStartupResource struct {
 	name string
 	log  *runtimeStartupLog
+}
+
+type blockingRuntimeStartupResource struct {
+	log     *runtimeStartupLog
+	started chan struct{}
+	release chan struct{}
+}
+
+func (resource *blockingRuntimeStartupResource) Shutdown(context.Context) error {
+	close(resource.started)
+	<-resource.release
+	resource.log.add("room-shutdown")
+	return nil
+}
+func (resource *blockingRuntimeStartupResource) Wait(context.Context) error {
+	resource.log.add("room-wait")
+	return nil
 }
 
 func (resource *runtimeStartupResource) Shutdown(context.Context) error {

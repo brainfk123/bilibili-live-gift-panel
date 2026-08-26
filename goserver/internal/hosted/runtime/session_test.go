@@ -178,6 +178,7 @@ func TestSessionRepositoryReconcileRejectsCrossAccountCommandBeforeDatabase(t *t
 func TestSessionRepositoryMutatesTargetAndReturnsPairOnlyUnderExactUnexpiredOwnerFence(t *testing.T) {
 	fence := OwnerFence{AccountID: 7, Token: ownerToken(0x41), Epoch: 3}
 	now := time.Date(2026, 8, 17, 4, 0, 0, 123456789, time.UTC)
+	mutationID := RoomMutationID{1, 1, 1, 1}
 	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -188,12 +189,136 @@ func TestSessionRepositoryMutatesTargetAndReturnsPairOnlyUnderExactUnexpiredOwne
 	expectOwnerFence(mock, fence, true)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT room_id FROM account_runtime_rooms WHERE account_id = ?")).
 		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"room_id"}).AddRow("111"))
+	mock.ExpectQuery("SELECT mutation_id, account_id, desired_room_id, old_room_id, new_room_id, phase FROM room_mutation_receipts").WithArgs(int64(7)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec("INSERT INTO account_runtime_rooms").WithArgs(int64(7), "42", now.UTC().Truncate(time.Microsecond)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO room_mutation_receipts").WithArgs(mutationID[:], int64(7), "42", "111", "42", string(RoomMutationTargetPersisted), now.UTC().Truncate(time.Microsecond), now.UTC().Truncate(time.Microsecond)).WillReturnResult(sqlmock.NewResult(90, 1))
 	mock.ExpectCommit()
 	command := PersistTargetRoomCommand{Owner: fence, RoomID: "42", UpdatedAt: now}
-	result, err := NewSessionRepository(database).MutateTargetRoom(context.Background(), command)
-	if err != nil || result != (RoomMutationResult{OldCanonical: "111", NewCanonical: "42"}) {
+	repository := NewSessionRepository(database)
+	repository.newMutationID = func() (RoomMutationID, error) { return mutationID, nil }
+	result, err := repository.MutateTargetRoom(context.Background(), command)
+	if err != nil || result != (RoomMutationResult{MutationID: mutationID, AccountID: 7, DesiredCanonical: "42", OldCanonical: "111", NewCanonical: "42", Phase: RoomMutationTargetPersisted}) {
 		t.Fatalf("MutateTargetRoom() = %#v, %v", result, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// This test fails if target persistence and the immutable retry receipt are
+// not committed under the same account/fence transaction.
+func TestSessionRepositoryCreatesTargetReceiptAtomically(t *testing.T) {
+	fence := OwnerFence{AccountID: 7, Token: ownerToken(0x51), Epoch: 4}
+	now := time.Date(2026, 8, 26, 14, 0, 0, 123456789, time.UTC).Truncate(time.Microsecond)
+	mutationID := RoomMutationID{1, 2, 3, 4}
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mock.ExpectBegin()
+	expectOwnershipAccountLock(mock, 7, true)
+	expectOwnerFence(mock, fence, true)
+	mock.ExpectQuery("SELECT room_id FROM account_runtime_rooms").WithArgs(int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"room_id"}).AddRow("111"))
+	mock.ExpectQuery("SELECT mutation_id, account_id, desired_room_id, old_room_id, new_room_id, phase FROM room_mutation_receipts").WithArgs(int64(7)).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec("INSERT INTO account_runtime_rooms").WithArgs(int64(7), "42", now).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO room_mutation_receipts").WithArgs(mutationID[:], int64(7), "42", "111", "42", string(RoomMutationTargetPersisted), now, now).
+		WillReturnResult(sqlmock.NewResult(91, 1))
+	mock.ExpectCommit()
+	repository := NewSessionRepository(database)
+	repository.newMutationID = func() (RoomMutationID, error) { return mutationID, nil }
+
+	result, err := repository.MutateTargetRoom(context.Background(), PersistTargetRoomCommand{Owner: fence, RoomID: "42", UpdatedAt: now})
+	want := RoomMutationResult{MutationID: mutationID, AccountID: 7, DesiredCanonical: "42", OldCanonical: "111", NewCanonical: "42", Phase: RoomMutationTargetPersisted}
+	if err != nil || result != want {
+		t.Fatalf("MutateTargetRoom() = %#v, %v; want %#v", result, err, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionRepositoryRecoversOriginalReceiptInsteadOfSynthesizingSameRoomPair(t *testing.T) {
+	fence := OwnerFence{AccountID: 7, Token: ownerToken(0x52), Epoch: 5}
+	now := time.Date(2026, 8, 26, 14, 5, 0, 0, time.UTC)
+	mutationID := RoomMutationID{9, 8, 7, 6}
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mock.ExpectBegin()
+	expectOwnershipAccountLock(mock, 7, true)
+	expectOwnerFence(mock, fence, true)
+	mock.ExpectQuery("SELECT room_id FROM account_runtime_rooms").WithArgs(int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"room_id"}).AddRow("42"))
+	mock.ExpectQuery("SELECT mutation_id, account_id, desired_room_id, old_room_id, new_room_id, phase FROM room_mutation_receipts").WithArgs(int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"mutation_id", "account_id", "desired", "old", "new", "phase"}).AddRow(mutationID[:], 7, "42", "111", "42", string(RoomMutationReferencesSynced)))
+	mock.ExpectCommit()
+
+	result, err := NewSessionRepository(database).MutateTargetRoom(context.Background(), PersistTargetRoomCommand{Owner: fence, RoomID: "42", UpdatedAt: now})
+	if err != nil || result.MutationID != mutationID || result.OldCanonical != "111" || result.NewCanonical != "42" || result.Phase != RoomMutationReferencesSynced {
+		t.Fatalf("recovered receipt = %#v, %v", result, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionRepositoryVerifiesReceiptAfterAmbiguousTargetCommit(t *testing.T) {
+	fence := OwnerFence{AccountID: 7, Token: ownerToken(0x53), Epoch: 6}
+	now := time.Date(2026, 8, 26, 14, 10, 0, 0, time.UTC)
+	mutationID := RoomMutationID{5, 4, 3, 2}
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mock.ExpectBegin()
+	expectOwnershipAccountLock(mock, 7, true)
+	expectOwnerFence(mock, fence, true)
+	mock.ExpectQuery("SELECT room_id FROM account_runtime_rooms").WithArgs(int64(7)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT mutation_id, account_id, desired_room_id, old_room_id, new_room_id, phase FROM room_mutation_receipts").WithArgs(int64(7)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec("INSERT INTO account_runtime_rooms").WithArgs(int64(7), "42", now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO room_mutation_receipts").WithArgs(mutationID[:], int64(7), "42", nil, "42", string(RoomMutationTargetPersisted), now, now).WillReturnResult(sqlmock.NewResult(92, 1))
+	mock.ExpectCommit().WillReturnError(errors.New("ambiguous commit"))
+	mock.ExpectQuery("SELECT mutation_id, account_id, desired_room_id, old_room_id, new_room_id, phase FROM room_mutation_receipts WHERE mutation_id").WithArgs(mutationID[:]).
+		WillReturnRows(sqlmock.NewRows([]string{"mutation_id", "account_id", "desired", "old", "new", "phase"}).AddRow(mutationID[:], 7, "42", nil, "42", string(RoomMutationTargetPersisted)))
+	repository := NewSessionRepository(database)
+	repository.newMutationID = func() (RoomMutationID, error) { return mutationID, nil }
+
+	result, err := repository.MutateTargetRoom(context.Background(), PersistTargetRoomCommand{Owner: fence, RoomID: "42", UpdatedAt: now})
+	if err != nil || result.MutationID != mutationID || result.OldCanonical != "" || result.NewCanonical != "42" {
+		t.Fatalf("ambiguous commit verification = %#v, %v", result, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionRepositoryAdvancesReferencePhaseIdempotentlyAfterAmbiguousCommit(t *testing.T) {
+	now := time.Date(2026, 8, 26, 14, 15, 0, 0, time.UTC)
+	mutationID := RoomMutationID{4, 4, 4, 4}
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT mutation_id, account_id, desired_room_id, old_room_id, new_room_id, phase FROM room_mutation_receipts WHERE mutation_id.*FOR UPDATE").WithArgs(mutationID[:]).
+		WillReturnRows(sqlmock.NewRows([]string{"mutation_id", "account_id", "desired", "old", "new", "phase"}).AddRow(mutationID[:], 7, "42", "111", "42", string(RoomMutationTargetPersisted)))
+	mock.ExpectExec("UPDATE room_mutation_receipts SET phase").WithArgs(string(RoomMutationReferencesSynced), now, mutationID[:], string(RoomMutationTargetPersisted)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit().WillReturnError(errors.New("ambiguous phase commit"))
+	mock.ExpectQuery("SELECT mutation_id, account_id, desired_room_id, old_room_id, new_room_id, phase FROM room_mutation_receipts WHERE mutation_id").WithArgs(mutationID[:]).
+		WillReturnRows(sqlmock.NewRows([]string{"mutation_id", "account_id", "desired", "old", "new", "phase"}).AddRow(mutationID[:], 7, "42", "111", "42", string(RoomMutationReferencesSynced)))
+	repository := NewSessionRepository(database)
+
+	result, err := repository.AdvanceRoomMutation(context.Background(), mutationID, RoomMutationTargetPersisted, RoomMutationReferencesSynced, now)
+	if err != nil || result.Phase != RoomMutationReferencesSynced || result.OldCanonical != "111" {
+		t.Fatalf("AdvanceRoomMutation() = %#v, %v", result, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -205,6 +330,7 @@ func TestSessionRepositoryMutatesTargetAndReturnsPairOnlyUnderExactUnexpiredOwne
 // old/new canonical pair committed by its transaction.
 func TestSessionRepositoryPersistsDisabledTargetUnderAccountLockWithoutActiveExecution(t *testing.T) {
 	now := time.Date(2026, 8, 26, 12, 45, 0, 0, time.UTC)
+	mutationID := RoomMutationID{2, 2, 2, 2}
 	database, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -217,11 +343,14 @@ func TestSessionRepositoryPersistsDisabledTargetUnderAccountLockWithoutActiveExe
 		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT room_id FROM account_runtime_rooms WHERE account_id = ?")).
 		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"room_id"}).AddRow("111"))
+	mock.ExpectQuery("SELECT mutation_id, account_id, desired_room_id, old_room_id, new_room_id, phase FROM room_mutation_receipts").WithArgs(int64(7)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec("INSERT INTO account_runtime_rooms").WithArgs(int64(7), "42", now.UTC().Truncate(time.Microsecond)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO room_mutation_receipts").WithArgs(mutationID[:], int64(7), "42", "111", "42", string(RoomMutationTargetPersisted), now.UTC().Truncate(time.Microsecond), now.UTC().Truncate(time.Microsecond)).WillReturnResult(sqlmock.NewResult(91, 1))
 	mock.ExpectCommit()
-
-	result, err := NewSessionRepository(database).PersistDisabledTargetRoom(context.Background(), PersistDisabledTargetRoomCommand{AccountID: 7, RoomID: "42", UpdatedAt: now})
-	if err != nil || result != (RoomMutationResult{OldCanonical: "111", NewCanonical: "42"}) {
+	repository := NewSessionRepository(database)
+	repository.newMutationID = func() (RoomMutationID, error) { return mutationID, nil }
+	result, err := repository.PersistDisabledTargetRoom(context.Background(), PersistDisabledTargetRoomCommand{AccountID: 7, RoomID: "42", UpdatedAt: now})
+	if err != nil || result != (RoomMutationResult{MutationID: mutationID, AccountID: 7, DesiredCanonical: "42", OldCanonical: "111", NewCanonical: "42", Phase: RoomMutationTargetPersisted}) {
 		t.Fatalf("PersistDisabledTargetRoom() = %#v, %v", result, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

@@ -112,16 +112,20 @@ func RoomProbeIntervalFromEnvironment() (time.Duration, error) {
 }
 
 type RoomRuntimeStatus struct {
-	WatchedRooms       int           `json:"watchedRooms"`
-	TransitionFailures uint64        `json:"transitionFailures"`
-	GraceTransitions   uint64        `json:"graceTransitions"`
-	ReadinessSamples   uint64        `json:"confirmedToReadySamples"`
-	ReadinessWithin10  uint64        `json:"confirmedToReadyWithin10Seconds"`
-	ReadinessWithin30  uint64        `json:"confirmedToReadyWithin30Seconds"`
-	ReadinessOver30    uint64        `json:"confirmedToReadyOver30Seconds"`
-	ReadinessTotal     time.Duration `json:"confirmedToReadyTotal"`
-	ReadinessMaximum   time.Duration `json:"confirmedToReadyMaximum"`
-	ReadinessAlert     bool          `json:"confirmedToReadyAlert"`
+	WatchedRooms           int           `json:"watchedRooms"`
+	TransitionFailures     uint64        `json:"transitionFailures"`
+	GraceTransitions       uint64        `json:"graceTransitions"`
+	ReadinessSamples       uint64        `json:"confirmedToReadySamples"`
+	ReadinessWithin10      uint64        `json:"confirmedToReadyWithin10Seconds"`
+	ReadinessWithin30      uint64        `json:"confirmedToReadyWithin30Seconds"`
+	ReadinessOver30        uint64        `json:"confirmedToReadyOver30Seconds"`
+	ReadinessTotal         time.Duration `json:"confirmedToReadyTotal"`
+	ReadinessMaximum       time.Duration `json:"confirmedToReadyMaximum"`
+	ReadinessAlert         bool          `json:"confirmedToReadyAlert"`
+	ProbeCapacityPerMinute int           `json:"probeCapacityPerMinute"`
+	ProbeAvailable         int           `json:"probeAvailable"`
+	ProbeBacklog           int           `json:"probeBacklog"`
+	ProbeCapacityAlert     bool          `json:"probeCapacityAlert"`
 }
 
 type roomRuntimeTicker interface {
@@ -220,6 +224,7 @@ func StartRoomRuntime(ctx context.Context, watcher RoomWatcher, runtime RoomEven
 		if err := watcher.Poll(ctx); err != nil {
 			composition.recordFailure(err)
 		}
+		composition.recordProbeCapacity()
 	}
 	currentReferences, err := references.LoadEnabledRoomReferences(ctx)
 	if err != nil {
@@ -229,6 +234,7 @@ func StartRoomRuntime(ctx context.Context, watcher RoomWatcher, runtime RoomEven
 		composition.recordFailure(err)
 	} else {
 		composition.setWatchedRooms(currentReferences)
+		composition.recordProbeCapacity()
 	}
 	pollContext, pollCancel := context.WithCancel(context.Background())
 	consumeContext, consumeCancel := context.WithCancel(context.Background())
@@ -277,6 +283,7 @@ func (runtime *RoomRuntime) pollLoop(ctx context.Context) {
 		if err := runtime.watcher.Poll(ctx); err != nil && ctx.Err() == nil {
 			runtime.recordFailure(err)
 		}
+		runtime.recordProbeCapacity()
 		if ctx.Err() != nil {
 			return
 		}
@@ -304,6 +311,7 @@ func (runtime *RoomRuntime) RefreshReferences(ctx context.Context) error {
 		return ErrRoomRuntimeUnavailable
 	}
 	runtime.setWatchedRooms(references)
+	runtime.recordProbeCapacity()
 	return nil
 }
 
@@ -401,6 +409,32 @@ func (runtime *RoomRuntime) setWatchedRooms(references []roomwatcher.Reference) 
 	status, onStatus := runtime.status, runtime.options.OnStatus
 	runtime.mu.Unlock()
 	if changed && onStatus != nil {
+		onStatus(status)
+	}
+}
+
+type roomProbeCapacityReporter interface {
+	ProbeCapacity() roomwatcher.ProbeCapacityStatus
+}
+
+func (runtime *RoomRuntime) recordProbeCapacity() {
+	reporter, ok := runtime.watcher.(roomProbeCapacityReporter)
+	if !ok {
+		return
+	}
+	capacity := reporter.ProbeCapacity()
+	runtime.mu.Lock()
+	runtime.status.ProbeCapacityPerMinute = capacity.CapacityPerMinute
+	runtime.status.ProbeAvailable = capacity.Available
+	runtime.status.ProbeBacklog = capacity.Backlog
+	requiredSweep := time.Duration(0)
+	if capacity.CapacityPerMinute > 0 {
+		requiredSweep = time.Duration(runtime.status.WatchedRooms) * time.Minute / time.Duration(capacity.CapacityPerMinute)
+	}
+	runtime.status.ProbeCapacityAlert = capacity.Backlog > 0 || runtime.status.WatchedRooms > 0 && (capacity.CapacityPerMinute <= 0 || requiredSweep > runtime.options.ProbeInterval)
+	status, onStatus := runtime.status, runtime.options.OnStatus
+	runtime.mu.Unlock()
+	if onStatus != nil {
 		onStatus(status)
 	}
 }

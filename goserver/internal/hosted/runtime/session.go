@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -58,11 +59,25 @@ type PersistDisabledTargetRoomCommand struct {
 	UpdatedAt time.Time
 }
 
+type RoomMutationID [16]byte
+
+type RoomMutationPhase string
+
+const (
+	RoomMutationTargetPersisted  RoomMutationPhase = "target_persisted"
+	RoomMutationReferencesSynced RoomMutationPhase = "references_synced"
+	RoomMutationAudited          RoomMutationPhase = "audited"
+)
+
 // RoomMutationResult is the immutable canonical pair captured by the
 // transaction that persisted a room mutation.
 type RoomMutationResult struct {
-	OldCanonical string
-	NewCanonical string
+	MutationID       RoomMutationID
+	AccountID        int64
+	DesiredCanonical string
+	OldCanonical     string
+	NewCanonical     string
+	Phase            RoomMutationPhase
 }
 
 type AggregateCommand struct {
@@ -85,10 +100,17 @@ type StableEventCommand struct {
 type SessionRepository struct {
 	db                  *sql.DB
 	verificationTimeout time.Duration
+	newMutationID       func() (RoomMutationID, error)
 }
 
 func NewSessionRepository(database *sql.DB) *SessionRepository {
-	return &SessionRepository{db: database, verificationTimeout: 2 * time.Second}
+	return &SessionRepository{db: database, verificationTimeout: 2 * time.Second, newMutationID: randomRoomMutationID}
+}
+
+func randomRoomMutationID() (RoomMutationID, error) {
+	var mutationID RoomMutationID
+	_, err := rand.Read(mutationID[:])
+	return mutationID, err
 }
 
 func (repository *SessionRepository) AccountEnabled(ctx context.Context, accountID int64) (bool, error) {
@@ -163,20 +185,19 @@ func (repository *SessionRepository) MutateTargetRoom(ctx context.Context, comma
 	if err := validateOwnerFence(ctx, transaction, command.Owner); err != nil {
 		return RoomMutationResult{}, err
 	}
-	oldCanonical, err := targetRoomUnderAccountLock(ctx, transaction, command.Owner.AccountID)
+	receipt, err := repository.persistRoomMutation(ctx, transaction, command.Owner.AccountID, command.RoomID, command.UpdatedAt)
 	if err != nil {
 		return RoomMutationResult{}, err
 	}
-	result, err := transaction.ExecContext(ctx, "INSERT INTO account_runtime_rooms (account_id, room_id, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE room_id = VALUES(room_id), updated_at = VALUES(updated_at)", command.Owner.AccountID, command.RoomID, command.UpdatedAt)
-	if err != nil || !atLeastOneAffected(result) {
-		return RoomMutationResult{}, ErrUnavailable
-	}
 	if err := transaction.Commit(); err != nil {
 		finished = true
+		if verified, ok := repository.verifyRoomMutation(receipt.MutationID); ok {
+			return verified, nil
+		}
 		return RoomMutationResult{}, ErrUnavailable
 	}
 	finished = true
-	return RoomMutationResult{OldCanonical: oldCanonical, NewCanonical: command.RoomID}, nil
+	return receipt, nil
 }
 
 // PersistDisabledTargetRoom is the non-owning administrative path. The
@@ -209,20 +230,171 @@ func (repository *SessionRepository) PersistDisabledTargetRoom(ctx context.Conte
 	if err := transaction.QueryRowContext(ctx, "SELECT COUNT(*) FROM runtime_active_session_guards WHERE account_id = ?", command.AccountID).Scan(&activeGuards); err != nil || activeGuards != 0 {
 		return RoomMutationResult{}, ErrUnavailable
 	}
-	oldCanonical, err := targetRoomUnderAccountLock(ctx, transaction, command.AccountID)
+	receipt, err := repository.persistRoomMutation(ctx, transaction, command.AccountID, command.RoomID, command.UpdatedAt)
 	if err != nil {
 		return RoomMutationResult{}, err
 	}
-	result, err := transaction.ExecContext(ctx, "INSERT INTO account_runtime_rooms (account_id, room_id, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE room_id = VALUES(room_id), updated_at = VALUES(updated_at)", command.AccountID, command.RoomID, command.UpdatedAt)
-	if err != nil || !atLeastOneAffected(result) {
-		return RoomMutationResult{}, ErrUnavailable
-	}
 	if err := transaction.Commit(); err != nil {
 		finished = true
+		if verified, ok := repository.verifyRoomMutation(receipt.MutationID); ok {
+			return verified, nil
+		}
 		return RoomMutationResult{}, ErrUnavailable
 	}
 	finished = true
-	return RoomMutationResult{OldCanonical: oldCanonical, NewCanonical: command.RoomID}, nil
+	return receipt, nil
+}
+
+func (repository *SessionRepository) persistRoomMutation(ctx context.Context, transaction *sql.Tx, accountID int64, roomID string, updatedAt time.Time) (RoomMutationResult, error) {
+	current, err := targetRoomUnderAccountLock(ctx, transaction, accountID)
+	if err != nil {
+		return RoomMutationResult{}, err
+	}
+	latest, found, err := loadLatestRoomMutation(ctx, transaction, accountID)
+	if err != nil {
+		return RoomMutationResult{}, err
+	}
+	if found && current == roomID && latest.NewCanonical == roomID {
+		return latest, nil
+	}
+	if found && latest.Phase != RoomMutationAudited {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	newMutationID := repository.newMutationID
+	if newMutationID == nil {
+		newMutationID = randomRoomMutationID
+	}
+	mutationID, err := newMutationID()
+	if err != nil || mutationID == (RoomMutationID{}) {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	result, err := transaction.ExecContext(ctx, "INSERT INTO account_runtime_rooms (account_id, room_id, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE room_id = VALUES(room_id), updated_at = VALUES(updated_at)", accountID, roomID, updatedAt)
+	if err != nil || !atLeastOneAffected(result) {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	var old any
+	if current != "" {
+		old = current
+	}
+	result, err = transaction.ExecContext(ctx, "INSERT INTO room_mutation_receipts (mutation_id, account_id, desired_room_id, old_room_id, new_room_id, phase, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", mutationID[:], accountID, roomID, old, roomID, string(RoomMutationTargetPersisted), updatedAt, updatedAt)
+	if err != nil || !oneAffected(result) {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	return RoomMutationResult{MutationID: mutationID, AccountID: accountID, DesiredCanonical: roomID, OldCanonical: current, NewCanonical: roomID, Phase: RoomMutationTargetPersisted}, nil
+}
+
+func loadLatestRoomMutation(ctx context.Context, queryer queryRower, accountID int64) (RoomMutationResult, bool, error) {
+	result, err := scanRoomMutation(queryer.QueryRowContext(ctx, "SELECT mutation_id, account_id, desired_room_id, old_room_id, new_room_id, phase FROM room_mutation_receipts WHERE account_id = ? ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE", accountID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return RoomMutationResult{}, false, nil
+	}
+	if err != nil {
+		return RoomMutationResult{}, false, ErrUnavailable
+	}
+	return result, true, nil
+}
+
+func scanRoomMutation(row *sql.Row) (RoomMutationResult, error) {
+	var result RoomMutationResult
+	var mutationID []byte
+	var old sql.NullString
+	var phase string
+	if err := row.Scan(&mutationID, &result.AccountID, &result.DesiredCanonical, &old, &result.NewCanonical, &phase); err != nil {
+		return RoomMutationResult{}, err
+	}
+	if len(mutationID) != len(result.MutationID) {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	copy(result.MutationID[:], mutationID)
+	if old.Valid {
+		result.OldCanonical = old.String
+	}
+	result.Phase = RoomMutationPhase(phase)
+	if result.AccountID <= 0 || !validRoomID(result.DesiredCanonical) || result.OldCanonical != "" && !validRoomID(result.OldCanonical) || !validRoomID(result.NewCanonical) || roomMutationPhaseRank(result.Phase) == 0 {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	return result, nil
+}
+
+func (repository *SessionRepository) roomMutation(ctx context.Context, queryer queryRower, mutationID RoomMutationID, forUpdate bool) (RoomMutationResult, error) {
+	query := "SELECT mutation_id, account_id, desired_room_id, old_room_id, new_room_id, phase FROM room_mutation_receipts WHERE mutation_id = ?"
+	if forUpdate {
+		query += " FOR UPDATE"
+	}
+	result, err := scanRoomMutation(queryer.QueryRowContext(ctx, query, mutationID[:]))
+	if err != nil {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	return result, nil
+}
+
+func (repository *SessionRepository) verifyRoomMutation(mutationID RoomMutationID) (RoomMutationResult, bool) {
+	ctx, cancel := repository.verificationContext()
+	defer cancel()
+	result, err := repository.roomMutation(ctx, repository.db, mutationID, false)
+	return result, err == nil
+}
+
+func (repository *SessionRepository) AdvanceRoomMutation(ctx context.Context, mutationID RoomMutationID, expected, next RoomMutationPhase, updatedAt time.Time) (RoomMutationResult, error) {
+	if !repository.ready() || ctx == nil || mutationID == (RoomMutationID{}) || roomMutationPhaseRank(expected) == 0 || roomMutationPhaseRank(next) != roomMutationPhaseRank(expected)+1 || updatedAt.IsZero() {
+		return RoomMutationResult{}, ErrInvalidInput
+	}
+	updatedAt = normalizeDatabaseTime(updatedAt)
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			_ = transaction.Rollback()
+		}
+	}()
+	receipt, err := repository.roomMutation(ctx, transaction, mutationID, true)
+	if err != nil {
+		return RoomMutationResult{}, err
+	}
+	if roomMutationPhaseRank(receipt.Phase) >= roomMutationPhaseRank(next) {
+		if err := transaction.Commit(); err != nil {
+			finished = true
+			if verified, ok := repository.verifyRoomMutation(mutationID); ok && roomMutationPhaseRank(verified.Phase) >= roomMutationPhaseRank(next) {
+				return verified, nil
+			}
+			return RoomMutationResult{}, ErrUnavailable
+		}
+		finished = true
+		return receipt, nil
+	}
+	if receipt.Phase != expected {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	result, err := transaction.ExecContext(ctx, "UPDATE room_mutation_receipts SET phase = ?, updated_at = ? WHERE mutation_id = ? AND phase = ?", string(next), updatedAt, mutationID[:], string(expected))
+	if err != nil || !oneAffected(result) {
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	receipt.Phase = next
+	if err := transaction.Commit(); err != nil {
+		finished = true
+		if verified, ok := repository.verifyRoomMutation(mutationID); ok && roomMutationPhaseRank(verified.Phase) >= roomMutationPhaseRank(next) {
+			return verified, nil
+		}
+		return RoomMutationResult{}, ErrUnavailable
+	}
+	finished = true
+	return receipt, nil
+}
+
+func roomMutationPhaseRank(phase RoomMutationPhase) int {
+	switch phase {
+	case RoomMutationTargetPersisted:
+		return 1
+	case RoomMutationReferencesSynced:
+		return 2
+	case RoomMutationAudited:
+		return 3
+	default:
+		return 0
+	}
 }
 
 func targetRoomUnderAccountLock(ctx context.Context, transaction *sql.Tx, accountID int64) (string, error) {

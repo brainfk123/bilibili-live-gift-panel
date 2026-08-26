@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
@@ -34,21 +35,40 @@ type RoomMutation interface {
 }
 
 type RoomMutationResult struct {
-	OldCanonical string
-	NewCanonical string
+	MutationID       [16]byte
+	AccountID        int64
+	DesiredCanonical string
+	OldCanonical     string
+	NewCanonical     string
+	Phase            RoomMutationPhase
+}
+
+type RoomMutationPhase string
+
+const (
+	RoomMutationTargetPersisted  RoomMutationPhase = "target_persisted"
+	RoomMutationReferencesSynced RoomMutationPhase = "references_synced"
+	RoomMutationAudited          RoomMutationPhase = "audited"
+)
+
+type RoomUpdateResult struct {
+	AccountDetail
+	Receipt RoomMutationResult `json:"-"`
 }
 
 type Service struct {
 	db           *sql.DB
 	publicOrigin string
 	mutations    MutationServices
+	roomLocksMu  sync.Mutex
+	roomLocks    map[int64]*sync.Mutex
 }
 
 func NewService(db *sql.DB, publicOrigin string, mutations ...MutationServices) (*Service, error) {
 	if db == nil {
 		return nil, errors.New("database is required")
 	}
-	service := &Service{db: db, publicOrigin: strings.TrimRight(publicOrigin, "/")}
+	service := &Service{db: db, publicOrigin: strings.TrimRight(publicOrigin, "/"), roomLocks: make(map[int64]*sync.Mutex)}
 	if len(mutations) > 0 {
 		service.mutations = mutations[0]
 	}
@@ -128,26 +148,126 @@ func validReason(value string) bool {
 	return true
 }
 
-func (service *Service) UpdateRoom(ctx context.Context, id int64, roomID string) (AccountDetail, error) {
+func (service *Service) UpdateRoom(ctx context.Context, id int64, roomID string) (RoomUpdateResult, error) {
 	if service == nil || service.db == nil || id <= 0 || !validRoomID(roomID) {
-		return AccountDetail{}, ErrInvalidQuery
+		return RoomUpdateResult{}, ErrInvalidQuery
 	}
 	if service.mutations.Room == nil {
-		return AccountDetail{}, errors.New("unavailable")
+		return RoomUpdateResult{}, errors.New("unavailable")
 	}
+	accountLock := service.roomMutationLock(id)
+	accountLock.Lock()
+	defer accountLock.Unlock()
 	result, err := service.mutations.Room.SetRoom(ctx, id, roomID)
 	if err != nil {
-		return AccountDetail{}, err
+		return RoomUpdateResult{}, err
 	}
-	if result.OldCanonical != "" && !validRoomID(result.OldCanonical) || !validRoomID(result.NewCanonical) {
-		return AccountDetail{}, errors.New("unavailable")
+	if result.MutationID == ([16]byte{}) || result.AccountID != id || result.DesiredCanonical != result.NewCanonical || result.OldCanonical != "" && !validRoomID(result.OldCanonical) || !validRoomID(result.NewCanonical) || result.Phase != RoomMutationReferencesSynced && result.Phase != RoomMutationAudited {
+		return RoomUpdateResult{}, errors.New("unavailable")
+	}
+	result, err = service.auditRoomMutation(ctx, result)
+	if err != nil {
+		return RoomUpdateResult{}, err
+	}
+	detail, err := service.Account(ctx, id)
+	if err != nil {
+		return RoomUpdateResult{}, err
+	}
+	return RoomUpdateResult{AccountDetail: detail, Receipt: result}, nil
+}
+
+func (service *Service) roomMutationLock(accountID int64) *sync.Mutex {
+	service.roomLocksMu.Lock()
+	defer service.roomLocksMu.Unlock()
+	lock := service.roomLocks[accountID]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		service.roomLocks[accountID] = lock
+	}
+	return lock
+}
+
+func (service *Service) auditRoomMutation(ctx context.Context, receipt RoomMutationResult) (RoomMutationResult, error) {
+	transaction, err := service.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RoomMutationResult{}, err
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			_ = transaction.Rollback()
+		}
+	}()
+	var accountID int64
+	var desired, newCanonical, phase string
+	var old sql.NullString
+	var auditEventID sql.NullInt64
+	err = transaction.QueryRowContext(ctx, "SELECT account_id, desired_room_id, old_room_id, new_room_id, phase, audit_event_id FROM room_mutation_receipts WHERE mutation_id = ? FOR UPDATE", receipt.MutationID[:]).Scan(&accountID, &desired, &old, &newCanonical, &phase, &auditEventID)
+	oldCanonical := ""
+	if old.Valid {
+		oldCanonical = old.String
+	}
+	if err != nil || accountID != receipt.AccountID || desired != receipt.DesiredCanonical || oldCanonical != receipt.OldCanonical || newCanonical != receipt.NewCanonical {
+		return RoomMutationResult{}, errors.New("unavailable")
+	}
+	if RoomMutationPhase(phase) == RoomMutationAudited && auditEventID.Valid && auditEventID.Int64 > 0 {
+		if err := transaction.Commit(); err != nil {
+			finished = true
+			if service.verifyRoomMutationAudited(receipt.MutationID) {
+				receipt.Phase = RoomMutationAudited
+				return receipt, nil
+			}
+			return RoomMutationResult{}, errors.New("unavailable")
+		}
+		finished = true
+		receipt.Phase = RoomMutationAudited
+		return receipt, nil
+	}
+	if RoomMutationPhase(phase) != RoomMutationReferencesSynced || auditEventID.Valid {
+		return RoomMutationResult{}, errors.New("unavailable")
 	}
 	now := time.Now().UTC()
-	payload, _ := json.Marshal(map[string]string{"oldRoomId": result.OldCanonical, "newRoomId": result.NewCanonical})
-	if _, err := service.db.ExecContext(ctx, `INSERT INTO audit_events (event_type,actor_admin_identity_id,target_account_id,event_data,created_at) VALUES ('admin_room_updated',1,?,?,?)`, id, payload, now); err != nil {
-		return AccountDetail{}, err
+	payload, _ := json.Marshal(map[string]string{"oldRoomId": receipt.OldCanonical, "newRoomId": receipt.NewCanonical})
+	insert, err := transaction.ExecContext(ctx, `INSERT INTO audit_events (event_type,actor_admin_identity_id,target_account_id,event_data,created_at) VALUES ('admin_room_updated',1,?,?,?)`, receipt.AccountID, payload, now)
+	if err != nil {
+		return RoomMutationResult{}, err
 	}
-	return service.Account(ctx, id)
+	insertedID, err := insert.LastInsertId()
+	if err != nil || insertedID <= 0 {
+		return RoomMutationResult{}, errors.New("unavailable")
+	}
+	updated, err := transaction.ExecContext(ctx, "UPDATE room_mutation_receipts SET phase = ?, audit_event_id = ?, updated_at = ? WHERE mutation_id = ? AND phase = ?", string(RoomMutationAudited), insertedID, now, receipt.MutationID[:], string(RoomMutationReferencesSynced))
+	if err != nil || !oneAffected(updated) {
+		return RoomMutationResult{}, errors.New("unavailable")
+	}
+	if err := transaction.Commit(); err != nil {
+		finished = true
+		if service.verifyRoomMutationAudited(receipt.MutationID) {
+			receipt.Phase = RoomMutationAudited
+			return receipt, nil
+		}
+		return RoomMutationResult{}, errors.New("unavailable")
+	}
+	finished = true
+	receipt.Phase = RoomMutationAudited
+	return receipt, nil
+}
+
+func (service *Service) verifyRoomMutationAudited(mutationID [16]byte) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var phase string
+	var auditEventID sql.NullInt64
+	err := service.db.QueryRowContext(ctx, "SELECT phase, audit_event_id FROM room_mutation_receipts WHERE mutation_id = ?", mutationID[:]).Scan(&phase, &auditEventID)
+	return err == nil && RoomMutationPhase(phase) == RoomMutationAudited && auditEventID.Valid && auditEventID.Int64 > 0
+}
+
+func oneAffected(result sql.Result) bool {
+	if result == nil {
+		return false
+	}
+	rows, err := result.RowsAffected()
+	return err == nil && rows == 1
 }
 func validRoomID(value string) bool {
 	if len(value) < 1 || len(value) > 20 || value[0] == '0' {

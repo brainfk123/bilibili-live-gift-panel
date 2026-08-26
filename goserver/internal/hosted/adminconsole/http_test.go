@@ -94,16 +94,22 @@ func TestHTTPUpdateRoomPersistsCanonicalTargetForDisabledAccount(t *testing.T) {
 	}
 	defer db.Close()
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	mutationID := [16]byte{1, 1, 1, 1}
 	called := false
 	mutation := roomMutationFunc(func(_ context.Context, accountID int64, roomID string) (RoomMutationResult, error) {
 		called = true
 		if accountID != 41 || roomID != "7" {
 			t.Fatalf("SetRoom(%d, %q)", accountID, roomID)
 		}
-		return RoomMutationResult{OldCanonical: "111", NewCanonical: "42"}, nil
+		return RoomMutationResult{MutationID: mutationID, AccountID: 41, DesiredCanonical: "42", OldCanonical: "111", NewCanonical: "42", Phase: RoomMutationReferencesSynced}, nil
 	})
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT account_id, desired_room_id, old_room_id, new_room_id, phase, audit_event_id FROM room_mutation_receipts").WithArgs(mutationID[:]).
+		WillReturnRows(sqlmock.NewRows([]string{"account", "desired", "old", "new", "phase", "audit"}).AddRow(41, "42", "111", "42", string(RoomMutationReferencesSynced), nil))
 	mock.ExpectExec("INSERT INTO audit_events").WithArgs(int64(41), []byte(`{"newRoomId":"42","oldRoomId":"111"}`), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE room_mutation_receipts SET phase").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 	mock.ExpectQuery("SELECT a.id.*FROM streamer_accounts").WithArgs(int64(41)).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "active", "room", "quota", "obs", "public", "created", "updated"}).AddRow(41, false, "42", 0, false, "", now, now))
 	mock.ExpectQuery("SELECT event_type").WithArgs(int64(41), 20).
@@ -125,6 +131,43 @@ func TestHTTPUpdateRoomPersistsCanonicalTargetForDisabledAccount(t *testing.T) {
 	}
 }
 
+func TestHTTPRoomUpdateRetryCompletesSameReceiptAfterAuditFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mutationID := [16]byte{9, 9, 9, 9}
+	receipt := RoomMutationResult{MutationID: mutationID, AccountID: 41, DesiredCanonical: "42", OldCanonical: "111", NewCanonical: "42", Phase: RoomMutationReferencesSynced}
+	service, _ := NewService(db, "https://panel.example.com", MutationServices{Room: roomMutationFunc(func(context.Context, int64, string) (RoomMutationResult, error) { return receipt, nil })})
+	handler, _ := NewHTTPHandler(service, &testSessions{})
+	put := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPut, "/api/admin/accounts/41/room", strings.NewReader(`{"roomId":"7"}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "admin-token"})
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT account_id, desired_room_id, old_room_id, new_room_id, phase, audit_event_id FROM room_mutation_receipts").WithArgs(mutationID[:]).WillReturnRows(sqlmock.NewRows([]string{"account", "desired", "old", "new", "phase", "audit"}).AddRow(41, "42", "111", "42", string(RoomMutationReferencesSynced), nil))
+	mock.ExpectExec("INSERT INTO audit_events").WillReturnError(errors.New("audit unavailable"))
+	mock.ExpectRollback()
+	if first := put(); first.Code != http.StatusServiceUnavailable {
+		t.Fatalf("first PUT status=%d body=%s", first.Code, first.Body.String())
+	}
+	expectHTTPRoomAudit(mock, mutationID, "111", "42", 21)
+	now := time.Date(2026, 8, 26, 14, 40, 0, 0, time.UTC)
+	mock.ExpectQuery("SELECT a.id.*FROM streamer_accounts").WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"id", "active", "room", "quota", "obs", "public", "created", "updated"}).AddRow(41, false, "42", 0, false, "", now, now))
+	mock.ExpectQuery("SELECT event_type").WithArgs(int64(41), 20).WillReturnRows(sqlmock.NewRows([]string{"type", "account", "created"}))
+	if second := put(); second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"roomId":"42"`) {
+		t.Fatalf("retry PUT status=%d body=%s", second.Code, second.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // This test fails if concurrent PUT audits reconstruct old/new room IDs with
 // before/after queries instead of using the immutable result returned by each
 // serialized deep mutation.
@@ -134,36 +177,31 @@ func TestHTTPConcurrentRoomUpdatesAuditEachMutationResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	mock.MatchExpectationsInOrder(false)
 	now := time.Date(2026, 8, 26, 12, 30, 0, 0, time.UTC)
 	firstStarted := make(chan struct{})
 	allowFirst := make(chan struct{})
-	secondReturned := make(chan struct{})
+	secondStarted := make(chan struct{})
+	firstID := [16]byte{2, 2, 2, 2}
+	secondID := [16]byte{3, 3, 3, 3}
 	mutation := roomMutationFunc(func(_ context.Context, _ int64, roomID string) (RoomMutationResult, error) {
 		switch roomID {
 		case "20":
 			close(firstStarted)
 			<-allowFirst
-			return RoomMutationResult{OldCanonical: "10", NewCanonical: "20"}, nil
+			return RoomMutationResult{MutationID: firstID, AccountID: 41, DesiredCanonical: "20", OldCanonical: "10", NewCanonical: "20", Phase: RoomMutationReferencesSynced}, nil
 		case "30":
-			close(secondReturned)
-			return RoomMutationResult{OldCanonical: "20", NewCanonical: "30"}, nil
+			close(secondStarted)
+			return RoomMutationResult{MutationID: secondID, AccountID: 41, DesiredCanonical: "30", OldCanonical: "20", NewCanonical: "30", Phase: RoomMutationReferencesSynced}, nil
 		default:
 			return RoomMutationResult{}, errors.New("unexpected room")
 		}
 	})
-	for _, payload := range [][]byte{
-		[]byte(`{"newRoomId":"20","oldRoomId":"10"}`),
-		[]byte(`{"newRoomId":"30","oldRoomId":"20"}`),
-	} {
-		mock.ExpectExec("INSERT INTO audit_events").WithArgs(int64(41), payload, sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(1, 1))
-	}
-	for range 2 {
-		mock.ExpectQuery("SELECT a.id.*FROM streamer_accounts").WithArgs(int64(41)).
-			WillReturnRows(sqlmock.NewRows([]string{"id", "active", "room", "quota", "obs", "public", "created", "updated"}).AddRow(41, false, "30", 0, false, "", now, now))
-		mock.ExpectQuery("SELECT event_type").WithArgs(int64(41), 20).
-			WillReturnRows(sqlmock.NewRows([]string{"type", "account", "created"}))
-	}
+	expectHTTPRoomAudit(mock, firstID, "10", "20", 11)
+	mock.ExpectQuery("SELECT a.id.*FROM streamer_accounts").WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"id", "active", "room", "quota", "obs", "public", "created", "updated"}).AddRow(41, false, "20", 0, false, "", now, now))
+	mock.ExpectQuery("SELECT event_type").WithArgs(int64(41), 20).WillReturnRows(sqlmock.NewRows([]string{"type", "account", "created"}))
+	expectHTTPRoomAudit(mock, secondID, "20", "30", 12)
+	mock.ExpectQuery("SELECT a.id.*FROM streamer_accounts").WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"id", "active", "room", "quota", "obs", "public", "created", "updated"}).AddRow(41, false, "30", 0, false, "", now, now))
+	mock.ExpectQuery("SELECT event_type").WithArgs(int64(41), 20).WillReturnRows(sqlmock.NewRows([]string{"type", "account", "created"}))
 	service, _ := NewService(db, "https://panel.example.com", MutationServices{Room: mutation})
 	handler, _ := NewHTTPHandler(service, &testSessions{})
 	put := func(roomID string) *httptest.ResponseRecorder {
@@ -179,12 +217,28 @@ func TestHTTPConcurrentRoomUpdatesAuditEachMutationResult(t *testing.T) {
 	<-firstStarted
 	secondDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { secondDone <- put("30") }()
-	<-secondReturned
+	select {
+	case <-secondStarted:
+		t.Fatal("second concurrent PUT entered mutation before first receipt was audited")
+	case <-time.After(50 * time.Millisecond):
+	}
 	close(allowFirst)
-	if first, second := <-firstDone, <-secondDone; first.Code != http.StatusOK || second.Code != http.StatusOK {
+	first := <-firstDone
+	<-secondStarted
+	second := <-secondDone
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
 		t.Fatalf("concurrent PUT status = %d/%d body=%s / %s", first.Code, second.Code, first.Body.String(), second.Body.String())
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func expectHTTPRoomAudit(mock sqlmock.Sqlmock, mutationID [16]byte, oldRoom, newRoom string, auditID int64) {
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT account_id, desired_room_id, old_room_id, new_room_id, phase, audit_event_id FROM room_mutation_receipts").WithArgs(mutationID[:]).
+		WillReturnRows(sqlmock.NewRows([]string{"account", "desired", "old", "new", "phase", "audit"}).AddRow(41, newRoom, oldRoom, newRoom, string(RoomMutationReferencesSynced), nil))
+	mock.ExpectExec("INSERT INTO audit_events").WithArgs(int64(41), []byte(`{"newRoomId":"`+newRoom+`","oldRoomId":"`+oldRoom+`"}`), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(auditID, 1))
+	mock.ExpectExec("UPDATE room_mutation_receipts SET phase").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 }

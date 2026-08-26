@@ -125,23 +125,30 @@ func TestUpdateRoomDelegatesMutationThenAuditsCanonicalRoom(t *testing.T) {
 	}
 	defer db.Close()
 	now := time.Date(2026, 8, 23, 9, 0, 0, 0, time.UTC)
+	mutationID := [16]byte{1, 2, 3, 4}
 	calls := []string{}
 	mutation := roomMutationFunc(func(_ context.Context, accountID int64, roomID string) (RoomMutationResult, error) {
 		calls = append(calls, "set:"+roomID)
 		if accountID != 41 || roomID != "7" {
 			t.Fatalf("SetRoom(%d, %q)", accountID, roomID)
 		}
-		return RoomMutationResult{OldCanonical: "111", NewCanonical: "42"}, nil
+		return RoomMutationResult{MutationID: mutationID, AccountID: 41, DesiredCanonical: "42", OldCanonical: "111", NewCanonical: "42", Phase: RoomMutationReferencesSynced}, nil
 	})
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT account_id, desired_room_id, old_room_id, new_room_id, phase, audit_event_id FROM room_mutation_receipts").WithArgs(mutationID[:]).
+		WillReturnRows(sqlmock.NewRows([]string{"account", "desired", "old", "new", "phase", "audit"}).AddRow(41, "42", "111", "42", string(RoomMutationReferencesSynced), nil))
 	mock.ExpectExec("INSERT INTO audit_events").WithArgs(int64(41), []byte(`{"newRoomId":"42","oldRoomId":"111"}`), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(9, 1))
+	mock.ExpectExec("UPDATE room_mutation_receipts SET phase").WithArgs(string(RoomMutationAudited), int64(9), sqlmock.AnyArg(), mutationID[:], string(RoomMutationReferencesSynced)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 	mock.ExpectQuery("SELECT a.id.*FROM streamer_accounts").WithArgs(int64(41)).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "active", "room", "quota", "obs", "public", "created", "updated"}).AddRow(41, true, "42", 8, false, "", now, now))
 	mock.ExpectQuery("SELECT event_type").WithArgs(int64(41), 20).
 		WillReturnRows(sqlmock.NewRows([]string{"type", "account", "created"}).AddRow("admin_room_updated", 41, now))
 	service, _ := NewService(db, "https://panel.example.com", MutationServices{Room: mutation})
 	detail, err := service.UpdateRoom(context.Background(), 41, "7")
-	if err != nil || detail.RoomID != "42" || len(detail.RecentEvents) != 1 {
+	if err != nil || detail.RoomID != "42" || len(detail.RecentEvents) != 1 || detail.Receipt.MutationID != mutationID || detail.Receipt.Phase != RoomMutationAudited {
 		t.Fatalf("detail=%#v err=%v", detail, err)
 	}
 	if len(calls) != 1 || calls[0] != "set:7" {
@@ -149,6 +156,79 @@ func TestUpdateRoomDelegatesMutationThenAuditsCanonicalRoom(t *testing.T) {
 	}
 	if _, err := service.UpdateRoom(context.Background(), 41, "0123"); !errors.Is(err, ErrInvalidQuery) {
 		t.Fatalf("invalid room error=%v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpdateRoomRetriesSameReceiptAfterAuditFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mutationID := [16]byte{5, 6, 7, 8}
+	receipt := RoomMutationResult{MutationID: mutationID, AccountID: 41, DesiredCanonical: "42", OldCanonical: "111", NewCanonical: "42", Phase: RoomMutationReferencesSynced}
+	mutationCalls := 0
+	mutation := roomMutationFunc(func(context.Context, int64, string) (RoomMutationResult, error) {
+		mutationCalls++
+		return receipt, nil
+	})
+	auditErr := errors.New("audit unavailable")
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT account_id, desired_room_id, old_room_id, new_room_id, phase, audit_event_id FROM room_mutation_receipts").WithArgs(mutationID[:]).
+		WillReturnRows(sqlmock.NewRows([]string{"account", "desired", "old", "new", "phase", "audit"}).AddRow(41, "42", "111", "42", string(RoomMutationReferencesSynced), nil))
+	mock.ExpectExec("INSERT INTO audit_events").WillReturnError(auditErr)
+	mock.ExpectRollback()
+	service, _ := NewService(db, "https://panel.example.com", MutationServices{Room: mutation})
+	if _, err := service.UpdateRoom(context.Background(), 41, "7"); !errors.Is(err, auditErr) {
+		t.Fatalf("first UpdateRoom error = %v", err)
+	}
+	now := time.Date(2026, 8, 26, 14, 30, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT account_id, desired_room_id, old_room_id, new_room_id, phase, audit_event_id FROM room_mutation_receipts").WithArgs(mutationID[:]).
+		WillReturnRows(sqlmock.NewRows([]string{"account", "desired", "old", "new", "phase", "audit"}).AddRow(41, "42", "111", "42", string(RoomMutationReferencesSynced), nil))
+	mock.ExpectExec("INSERT INTO audit_events").WithArgs(int64(41), []byte(`{"newRoomId":"42","oldRoomId":"111"}`), sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(19, 1))
+	mock.ExpectExec("UPDATE room_mutation_receipts SET phase").WithArgs(string(RoomMutationAudited), int64(19), sqlmock.AnyArg(), mutationID[:], string(RoomMutationReferencesSynced)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	mock.ExpectQuery("SELECT a.id.*FROM streamer_accounts").WithArgs(int64(41)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "active", "room", "quota", "obs", "public", "created", "updated"}).AddRow(41, true, "42", 8, false, "", now, now))
+	mock.ExpectQuery("SELECT event_type").WithArgs(int64(41), 20).WillReturnRows(sqlmock.NewRows([]string{"type", "account", "created"}))
+	result, err := service.UpdateRoom(context.Background(), 41, "7")
+	if err != nil || result.Receipt.MutationID != mutationID || result.Receipt.OldCanonical != "111" || result.Receipt.Phase != RoomMutationAudited || mutationCalls != 2 {
+		t.Fatalf("audit retry result=%#v mutationCalls=%d err=%v", result, mutationCalls, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpdateRoomVerifiesAuditedReceiptAfterAmbiguousCommit(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mutationID := [16]byte{8, 8, 8, 8}
+	receipt := RoomMutationResult{MutationID: mutationID, AccountID: 41, DesiredCanonical: "42", OldCanonical: "111", NewCanonical: "42", Phase: RoomMutationReferencesSynced}
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT account_id, desired_room_id, old_room_id, new_room_id, phase, audit_event_id FROM room_mutation_receipts").WithArgs(mutationID[:]).
+		WillReturnRows(sqlmock.NewRows([]string{"account", "desired", "old", "new", "phase", "audit"}).AddRow(41, "42", "111", "42", string(RoomMutationReferencesSynced), nil))
+	mock.ExpectExec("INSERT INTO audit_events").WillReturnResult(sqlmock.NewResult(29, 1))
+	mock.ExpectExec("UPDATE room_mutation_receipts SET phase").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit().WillReturnError(errors.New("ambiguous audit commit"))
+	mock.ExpectQuery("SELECT phase, audit_event_id FROM room_mutation_receipts WHERE mutation_id").WithArgs(mutationID[:]).
+		WillReturnRows(sqlmock.NewRows([]string{"phase", "audit"}).AddRow(string(RoomMutationAudited), 29))
+	now := time.Date(2026, 8, 26, 14, 35, 0, 0, time.UTC)
+	mock.ExpectQuery("SELECT a.id.*FROM streamer_accounts").WithArgs(int64(41)).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "active", "room", "quota", "obs", "public", "created", "updated"}).AddRow(41, true, "42", 8, false, "", now, now))
+	mock.ExpectQuery("SELECT event_type").WithArgs(int64(41), 20).WillReturnRows(sqlmock.NewRows([]string{"type", "account", "created"}))
+	service, _ := NewService(db, "https://panel.example.com", MutationServices{Room: roomMutationFunc(func(context.Context, int64, string) (RoomMutationResult, error) { return receipt, nil })})
+
+	result, err := service.UpdateRoom(context.Background(), 41, "7")
+	if err != nil || result.Receipt.Phase != RoomMutationAudited || result.Receipt.OldCanonical != "111" {
+		t.Fatalf("ambiguous audit verification = %#v, %v", result, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

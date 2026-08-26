@@ -11,8 +11,9 @@ import (
 )
 
 var (
-	ErrInvalidInput = errors.New("roomwatcher: invalid input")
-	ErrClosed       = errors.New("roomwatcher: closed")
+	ErrInvalidInput         = errors.New("roomwatcher: invalid input")
+	ErrClosed               = errors.New("roomwatcher: closed")
+	ErrProbeBudgetExhausted = errors.New("roomwatcher: probe budget exhausted")
 )
 
 // MaxReplayLimit bounds one outbox page before either manager or repository
@@ -30,6 +31,17 @@ const (
 // state from gifts because those may arrive while a room is offline.
 type Probe interface {
 	Probe(context.Context, string) (ObservedState, error)
+}
+
+type ProbeBudget interface {
+	AvailableProbeBudget() int
+	ProbeCapacityPerMinute() int
+}
+
+type ProbeCapacityStatus struct {
+	CapacityPerMinute int
+	Available         int
+	Backlog           int
 }
 
 // Repository persists shared room references and state transitions. Its MySQL
@@ -104,12 +116,16 @@ type Manager struct {
 	now        func() time.Time
 	grace      time.Duration
 
-	mu           sync.Mutex
-	watchers     map[string]*watcher
-	events       chan Event
-	done         chan struct{}
-	closed       bool
-	beforeNotify func(Event)
+	mu            sync.Mutex
+	pollMu        sync.Mutex
+	watchers      map[string]*watcher
+	events        chan Event
+	done          chan struct{}
+	closed        bool
+	beforeNotify  func(Event)
+	nextRoom      string
+	pollRemaining int
+	probeStatus   ProbeCapacityStatus
 }
 
 type watcher struct {
@@ -146,8 +162,8 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 		return err
 	}
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
 	if manager.closed {
+		manager.mu.Unlock()
 		return ErrClosed
 	}
 	now := manager.now()
@@ -167,6 +183,7 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 	}
 	persistedEvents, err := manager.repository.SyncReferences(ctx, normalized, terminal)
 	if err != nil {
+		manager.mu.Unlock()
 		return err
 	}
 	for _, roomID := range removedRooms {
@@ -176,6 +193,7 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 		manager.notifyLocked(event)
 	}
 	rooms := make([]string, 0, len(counts))
+	newRooms := make(map[string]*watcher)
 	for roomID := range counts {
 		rooms = append(rooms, roomID)
 	}
@@ -184,18 +202,33 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 		current := manager.watchers[roomID]
 		if current == nil {
 			current = &watcher{machine: newStateMachine(manager.grace)}
-			persisted, err := manager.probeLocked(ctx, roomID, current)
-			if err != nil {
-				return err
-			}
-			for _, event := range persisted {
-				manager.notifyLocked(event)
-			}
 			manager.watchers[roomID] = current
+			newRooms[roomID] = current
 		}
 		current.refs = counts[roomID]
 	}
-	return nil
+	if len(newRooms) != 0 || len(removedRooms) != 0 {
+		manager.pollRemaining = len(manager.watchers)
+		if manager.nextRoom == "" && len(rooms) != 0 {
+			manager.nextRoom = rooms[0]
+		}
+	}
+	manager.mu.Unlock()
+	if len(newRooms) == 0 {
+		return nil
+	}
+	err = manager.poll(ctx, newRooms)
+	if err != nil && !errors.Is(err, ErrProbeBudgetExhausted) {
+		manager.mu.Lock()
+		for roomID, added := range newRooms {
+			if manager.watchers[roomID] == added {
+				delete(manager.watchers, roomID)
+			}
+		}
+		manager.pollRemaining = len(manager.watchers)
+		manager.mu.Unlock()
+	}
+	return err
 }
 
 func (manager *Manager) Events() <-chan Event {

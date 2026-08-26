@@ -93,6 +93,7 @@ type ControlledGateway struct {
 	flights           singleflight.Group
 	breaker           *egressBreaker
 	limits            *requestLimiter
+	probeLimits       *probeLimiter
 	credentialVersion int64
 }
 
@@ -100,7 +101,8 @@ func NewControlledGateway(upstream upstreamGateway, credentials credentialLoader
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	return &ControlledGateway{upstream: upstream, credentials: credentials, now: options.Now, roomInfo: make(map[string]cachedRoomInfo), catalog: make(map[string]cachedCatalog), breaker: newEgressBreaker(options.Now), limits: newRequestLimiter(options.Now)}
+	globalLimits := newGlobalRequestBudget(options.Now)
+	return &ControlledGateway{upstream: upstream, credentials: credentials, now: options.Now, roomInfo: make(map[string]cachedRoomInfo), catalog: make(map[string]cachedCatalog), breaker: newEgressBreaker(options.Now), limits: newRequestLimiterWithGlobal(options.Now, globalLimits), probeLimits: newProbeLimiterWithGlobal(options.Now, globalLimits)}
 }
 
 const liveProbeScopeID int64 = 1<<63 - 1
@@ -124,9 +126,8 @@ func (gateway *ControlledGateway) Probe(ctx context.Context, roomID string) (roo
 		if !gateway.breaker.Allow(liveProbeScopeID) {
 			return nil, ErrEgressUnavailable
 		}
-		if !gateway.limits.Allow(liveProbeScopeID, "room_live_probe") {
-			gateway.breaker.RecordFailure()
-			return nil, ErrRateLimited
+		if !gateway.probeLimits.Allow() {
+			return nil, roomwatcher.ErrProbeBudgetExhausted
 		}
 		credential, loadErr := gateway.credentials.Load(ctx)
 		if loadErr != nil {
@@ -152,6 +153,15 @@ func (gateway *ControlledGateway) Probe(ctx context.Context, roomID string) (roo
 	}
 	return state, nil
 }
+
+func (gateway *ControlledGateway) AvailableProbeBudget() int {
+	if gateway == nil {
+		return 0
+	}
+	return gateway.probeLimits.Available()
+}
+
+func (*ControlledGateway) ProbeCapacityPerMinute() int { return probeBucketCapacity }
 
 // probeLive stays in this package so the raw room_init payload terminates at
 // the Bilibili I/O boundary. Status 2 is looping content, not a real live

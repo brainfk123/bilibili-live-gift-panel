@@ -251,14 +251,14 @@ func TestManagerKeepsNotificationOrderDuringForcedInterleavedReferenceUpdates(t 
 	default:
 	}
 	close(releaseNotify)
-	if err := <-firstDone; err != nil {
-		t.Fatalf("first SetReferences: %v", err)
-	}
 	if event := awaitEvent(t, manager.Events()); event.Sequence != 1 {
 		t.Fatalf("first notification sequence = %d, want 1", event.Sequence)
 	}
 	<-secondNotifyStarted
 	close(releaseSecondNotify)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first SetReferences: %v", err)
+	}
 	if err := <-secondDone; err != nil {
 		t.Fatalf("second SetReferences: %v", err)
 	}

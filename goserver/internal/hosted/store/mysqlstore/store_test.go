@@ -119,8 +119,8 @@ func TestProductionAdminEmailIdentityMigrationMakesLegacyUIDNullable(t *testing.
 		"0012_admin_session_inventory":                "e707f3edc1a7d49ffd4a636ad0e14bc579599d194aef37e5c9fe7ee19afa9a03",
 		"0013_room_monitoring_and_broadcast_sessions": "08160c85b38570ae490959a7356b77a97958bfa1a17a84407b388db8496606f8",
 	}
-	if len(migrations) != 14 {
-		t.Fatalf("migration count = %d, want 14", len(migrations))
+	if len(migrations) != 15 {
+		t.Fatalf("migration count = %d, want 15", len(migrations))
 	}
 	var emailIdentity migration
 	for _, item := range migrations {
@@ -185,6 +185,47 @@ func TestRoomEventOutboxUsesForwardMigrationWithoutChangingPublished0013(t *test
 	} {
 		if !strings.Contains(normalized, required) {
 			t.Fatalf("0014 migration missing %q", required)
+		}
+	}
+}
+
+func TestRoomMutationReceiptsUseForward0015WithoutChangingPublishedRoomMigrations(t *testing.T) {
+	migrations, err := readMigrations(migrationFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantChecksums := map[string]string{
+		"0013_room_monitoring_and_broadcast_sessions": "08160c85b38570ae490959a7356b77a97958bfa1a17a84407b388db8496606f8",
+		"0014_room_event_outbox":                      "1528536798d20952766b705fb1bedf030a5361248633f09b05e7b901d96abc70",
+	}
+	var receipts migration
+	for _, item := range migrations {
+		if want, ok := wantChecksums[item.version]; ok {
+			if item.checksum != want {
+				t.Fatalf("published %s checksum = %s, want %s", item.version, item.checksum, want)
+			}
+			delete(wantChecksums, item.version)
+		}
+		if item.version == "0015_room_mutation_receipts" {
+			receipts = item
+		}
+	}
+	if len(wantChecksums) != 0 || receipts.version == "" {
+		t.Fatalf("migration coverage missing published=%v receipts=%q", wantChecksums, receipts.version)
+	}
+	normalized := strings.Join(strings.Fields(string(receipts.contents)), " ")
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS room_mutation_receipts",
+		"mutation_id BINARY(16) NOT NULL",
+		"desired_room_id VARCHAR(20)",
+		"old_room_id VARCHAR(20)",
+		"new_room_id VARCHAR(20)",
+		"phase VARCHAR(32)",
+		"audit_event_id BIGINT UNSIGNED NULL",
+		"UNIQUE KEY uq_room_mutation_receipts_active_account",
+	} {
+		if !strings.Contains(normalized, required) {
+			t.Fatalf("0015 missing %q", required)
 		}
 	}
 }

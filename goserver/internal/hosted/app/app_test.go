@@ -196,6 +196,30 @@ func TestWatcherCompositionAggregatesTenThirtySecondReadinessWithoutIdentifiers(
 	}
 }
 
+// This test fails if a 50-room deployment at the fixed 20/min probe budget is
+// represented as meeting a 30-second discovery cadence, or if capacity is
+// conflated with confirmed-live-to-runtime readiness.
+func TestWatcherCompositionExposesProbeCapacityBacklogWithoutFakingReadinessSLO(t *testing.T) {
+	watcher := newFakeRoomWatcher(nil)
+	watcher.probeCapacity = roomwatcher.ProbeCapacityStatus{CapacityPerMinute: 20, Available: 0, Backlog: 30}
+	references := make([]roomwatcher.Reference, 50)
+	for index := range references {
+		references[index] = roomwatcher.Reference{AccountID: int64(index + 1), RoomID: strconv.Itoa(1001 + index)}
+	}
+	composition, err := StartRoomRuntime(context.Background(), watcher, &fakeRoomRuntime{}, &fakeReferenceLoader{snapshots: [][]roomwatcher.Reference{references}}, RoomRuntimeOptions{ProbeInterval: 30 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer shutdownRoomRuntime(t, composition)
+	status := composition.Status()
+	if status.ProbeCapacityPerMinute != 20 || status.ProbeBacklog != 30 || !status.ProbeCapacityAlert {
+		t.Fatalf("probe capacity status = %#v", status)
+	}
+	if status.ReadinessSamples != 0 || status.ReadinessAlert {
+		t.Fatalf("capacity pressure fabricated confirmed-live readiness: %#v", status)
+	}
+}
+
 func TestWatcherShutdownCancelsAndJoinsPollBeforeClosingStream(t *testing.T) {
 	trace := &lockedTrace{}
 	watcher := newFakeRoomWatcher(trace)
@@ -353,6 +377,13 @@ type fakeRoomWatcher struct {
 	events               chan roomwatcher.Event
 	done                 chan struct{}
 	closeOnce            sync.Once
+	probeCapacity        roomwatcher.ProbeCapacityStatus
+}
+
+func (watcher *fakeRoomWatcher) ProbeCapacity() roomwatcher.ProbeCapacityStatus {
+	watcher.mu.Lock()
+	defer watcher.mu.Unlock()
+	return watcher.probeCapacity
 }
 
 func newFakeRoomWatcher(trace *lockedTrace) *fakeRoomWatcher {
