@@ -89,6 +89,20 @@ func TestReadMigrationsSortsFilesByName(t *testing.T) {
 	}
 }
 
+func TestSplitStatementsIgnoresSemicolonsInCommentsAndQuotedValues(t *testing.T) {
+	contents := []byte("-- state rows exist; reference rows follow\nSET @value := 'left;right';\n/* keep; together */ SELECT 2;")
+	statements := splitStatements(contents)
+	if len(statements) != 2 {
+		t.Fatalf("splitStatements() returned %d statements, want 2: %#v", len(statements), statements)
+	}
+	if !strings.Contains(statements[0], "SET @value := 'left;right'") {
+		t.Fatalf("first statement split inside comment or quoted value: %q", statements[0])
+	}
+	if !strings.Contains(statements[1], "SELECT 2") {
+		t.Fatalf("second statement = %q, want SELECT 2", statements[1])
+	}
+}
+
 func TestProductionMigrationsIncludeIdentitySchema(t *testing.T) {
 	migrations, err := readMigrations(migrationFiles)
 	if err != nil {

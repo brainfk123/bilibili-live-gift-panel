@@ -230,12 +230,83 @@ func readMigrations(fileSystem fs.FS) ([]migration, error) {
 }
 
 func splitStatements(contents []byte) []string {
-	parts := strings.Split(string(contents), ";")
-	statements := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if statement := strings.TrimSpace(part); statement != "" {
-			statements = append(statements, statement)
+	statements := make([]string, 0)
+	var statement strings.Builder
+	var quote byte
+	lineComment := false
+	blockComment := false
+	flush := func() {
+		if value := strings.TrimSpace(statement.String()); value != "" {
+			statements = append(statements, value)
+		}
+		statement.Reset()
+	}
+	for index := 0; index < len(contents); index++ {
+		current := contents[index]
+		next := byte(0)
+		if index+1 < len(contents) {
+			next = contents[index+1]
+		}
+		if lineComment {
+			statement.WriteByte(current)
+			if current == '\n' {
+				lineComment = false
+			}
+			continue
+		}
+		if blockComment {
+			statement.WriteByte(current)
+			if current == '*' && next == '/' {
+				statement.WriteByte(next)
+				index++
+				blockComment = false
+			}
+			continue
+		}
+		if quote != 0 {
+			statement.WriteByte(current)
+			if current == '\\' && next != 0 {
+				statement.WriteByte(next)
+				index++
+				continue
+			}
+			if current == quote {
+				if next == quote {
+					statement.WriteByte(next)
+					index++
+				} else {
+					quote = 0
+				}
+			}
+			continue
+		}
+		switch {
+		case current == '-' && next == '-' && (index+2 == len(contents) || isSQLCommentSpace(contents[index+2])):
+			statement.WriteByte(current)
+			statement.WriteByte(next)
+			index++
+			lineComment = true
+		case current == '#':
+			statement.WriteByte(current)
+			lineComment = true
+		case current == '/' && next == '*':
+			statement.WriteByte(current)
+			statement.WriteByte(next)
+			index++
+			blockComment = true
+		case current == '\'' || current == '"' || current == '`':
+			statement.WriteByte(current)
+			quote = current
+		case current == ';':
+			flush()
+		default:
+			statement.WriteByte(current)
 		}
 	}
+	flush()
 	return statements
+}
+
+func isSQLCommentSpace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n'
 }
