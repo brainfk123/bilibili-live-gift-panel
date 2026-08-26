@@ -100,7 +100,11 @@ export function createAuthFlow(api: AuthAPI, callbacks: AuthCallbacks): AuthFlow
         try {
           await api.cancelLogin(previous.challengeId);
         } catch (error) {
-          if (!disposed && !activeChallenge) activeChallenge = previous;
+          if (disposed) {
+            await api.cancelLogin(previous.challengeId);
+            return;
+          }
+          if (!activeChallenge) activeChallenge = previous;
           throw error;
         }
       }

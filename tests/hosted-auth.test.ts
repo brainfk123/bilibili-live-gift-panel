@@ -385,6 +385,53 @@ describe('Bilibili authentication lifecycle', () => {
     await controller.dispose();
   });
 
+  it('retries regeneration cleanup when dispose wins and the in-flight cancellation rejects', async () => {
+    const timers = new AuthControlledTimers();
+    let rejectCancellation!: (reason: Error) => void;
+    const firstCancellation = new Promise<void>((_resolve, reject) => { rejectCancellation = reject; });
+    const cancelLogin = vi.fn()
+      .mockImplementationOnce(() => firstCancellation)
+      .mockResolvedValue(undefined);
+    const beginLogin = vi.fn(async () => ({
+      challengeId: 'challenge-1',
+      qrImage: 'qr',
+      expiresAt: '2030-01-01T00:00:00Z',
+    }));
+    const flow = createAuthFlow({
+      beginLogin,
+      pollLogin: vi.fn(async () => { throw new HostedAPIError('invalid_response', 200); }),
+      createSession: vi.fn(async () => undefined),
+      cancelLogin,
+      logout: vi.fn(async () => undefined),
+    }, {
+      onStatus: vi.fn(),
+      onSignedIn: vi.fn(),
+      onRegistrationRequired: vi.fn(),
+    });
+    const controller = createAuthController(
+      flow,
+      (port, render) => createBiliChallengePoller(port, timers, render),
+      vi.fn(),
+    );
+
+    await controller.start();
+    await timers.fireNext();
+    const regenerating = controller.start();
+    await vi.waitFor(() => expect(cancelLogin).toHaveBeenCalledTimes(1));
+    const disposing = controller.dispose();
+    rejectCancellation(new Error('first cancellation failed'));
+    const completions = await Promise.allSettled([regenerating, disposing]);
+
+    expect(cancelLogin).toHaveBeenCalledTimes(2);
+    expect(cancelLogin).toHaveBeenNthCalledWith(1, 'challenge-1');
+    expect(cancelLogin).toHaveBeenNthCalledWith(2, 'challenge-1');
+    expect(beginLogin).toHaveBeenCalledTimes(1);
+    expect(completions).toEqual([
+      { status: 'fulfilled', value: undefined },
+      { status: 'fulfilled', value: undefined },
+    ]);
+  });
+
   it('passes a one-shot registration intent only through the registration callback', async () => {
     const registration = vi.fn();
     const api = {
