@@ -169,9 +169,9 @@ type Manager struct {
 	processCancelOnce sync.Once
 	closeOnce         sync.Once
 	shutdownErr       error
-	shutdownMu        sync.Mutex
+	shutdownGate      operationGate
 
-	transitionMu    sync.Mutex
+	transitionGate  operationGate
 	lastSequence    uint64
 	roomTransitions map[string]roomTransitionState
 }
@@ -188,7 +188,7 @@ type roomTransitionState struct {
 type accountRuntime struct {
 	manager           *Manager
 	accountID         int64
-	opMu              sync.Mutex
+	opGate            operationGate
 	mu                sync.Mutex
 	leases            map[uint64]LeaseKind
 	disabled          bool
@@ -346,8 +346,10 @@ func (manager *Manager) acquireKnownAccount(ctx context.Context, accountID int64
 		return nil, ErrAccountDisabled
 	}
 	account.mu.Unlock()
-	account.opMu.Lock()
-	defer account.opMu.Unlock()
+	if err := account.opGate.Acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer account.opGate.Release()
 	account.mu.Lock()
 	if account.stale {
 		account.mu.Unlock()
@@ -473,8 +475,10 @@ func (manager *Manager) renew(ctx context.Context, lease *Lease) error {
 		return ErrUnavailable
 	}
 	account.mu.Unlock()
-	account.opMu.Lock()
-	defer account.opMu.Unlock()
+	if err := account.opGate.Acquire(ctx); err != nil {
+		return err
+	}
+	defer account.opGate.Release()
 	account.mu.Lock()
 	if account.stale {
 		account.mu.Unlock()
@@ -543,8 +547,10 @@ func (account *accountRuntime) scheduleCloseLocked(delay time.Duration) {
 			timer.Stop()
 			return
 		}
-		account.opMu.Lock()
-		defer account.opMu.Unlock()
+		if err := account.opGate.Acquire(account.manager.lifecycle); err != nil {
+			return
+		}
+		defer account.opGate.Release()
 		account.mu.Lock()
 		if account.idleCancel != cancel || len(account.leases) != 0 || account.disabled || account.shutting {
 			account.mu.Unlock()
@@ -634,8 +640,10 @@ func (manager *Manager) ApplyRoomEvent(ctx context.Context, event roomwatcher.Ev
 	if manager == nil || ctx == nil || !validRoomEvent(event) {
 		return ErrInvalidInput
 	}
-	manager.transitionMu.Lock()
-	defer manager.transitionMu.Unlock()
+	if err := manager.transitionGate.Acquire(ctx); err != nil {
+		return err
+	}
+	defer manager.transitionGate.Release()
 	manager.mu.Lock()
 	closed := manager.closed
 	manager.mu.Unlock()
@@ -663,8 +671,10 @@ func (manager *Manager) BootstrapRoomProjection(ctx context.Context, bootstrap r
 	if manager == nil || ctx == nil || !validBootstrapProjection(bootstrap) {
 		return ErrInvalidInput
 	}
-	manager.transitionMu.Lock()
-	defer manager.transitionMu.Unlock()
+	if err := manager.transitionGate.Acquire(ctx); err != nil {
+		return err
+	}
+	defer manager.transitionGate.Release()
 	manager.mu.Lock()
 	closed := manager.closed
 	manager.mu.Unlock()
@@ -762,13 +772,15 @@ func (manager *Manager) ApplyRoomTransition(ctx context.Context, transition room
 		if err != nil {
 			return ErrUnavailable
 		}
-		manager.transitionMu.Lock()
+		if err := manager.transitionGate.Acquire(ctx); err != nil {
+			return err
+		}
 		room := manager.roomTransitions[transition.RoomID]
 		if room.state == "" && len(room.accounts) == 0 {
 			room.accounts = accounts
 			manager.roomTransitions[transition.RoomID] = room
 		}
-		manager.transitionMu.Unlock()
+		manager.transitionGate.Release()
 	}
 	sequence := transition.Sequence
 	transition.Sequence = 0
@@ -1065,7 +1077,7 @@ func (manager *Manager) setTransitionAdmission(accounts []int64, roomID string, 
 	return nil
 }
 
-// registerTransitionOwner runs while ApplyRoomTransition holds transitionMu.
+// registerTransitionOwner runs while ApplyRoomTransition holds transitionGate.
 // It precedes every fallible admission operation after ClaimOwnership so an
 // interrupted live transition cannot lose the exact fence that offline must
 // release.
@@ -1092,8 +1104,10 @@ func (manager *Manager) startTransitionAccount(ctx context.Context, accountID in
 	if err != nil {
 		return err
 	}
-	account.opMu.Lock()
-	defer account.opMu.Unlock()
+	if err := account.opGate.Acquire(ctx); err != nil {
+		return err
+	}
+	defer account.opGate.Release()
 	account.mu.Lock()
 	pendingSession := account.transitionPending
 	account.mu.Unlock()
@@ -1172,13 +1186,15 @@ func (manager *Manager) stopTransitionAccount(ctx context.Context, accountID int
 	if err != nil {
 		return nil
 	}
-	account.opMu.Lock()
-	defer account.opMu.Unlock()
+	if err := account.opGate.Acquire(ctx); err != nil {
+		return err
+	}
+	defer account.opGate.Release()
 	return manager.stopTransitionAccountLocked(ctx, account, roomID, transitionOwner)
 }
 
 // stopTransitionAccountLocked is the single post-StartSession cleanup owner.
-// The caller holds account.opMu, including admission failure paths that have
+// The caller holds account.opGate, including admission failure paths that have
 // not yet returned from startTransitionAccount.
 func (manager *Manager) stopTransitionAccountLocked(ctx context.Context, account *accountRuntime, roomID string, transitionOwner OwnerFence) error {
 	account.mu.Lock()
@@ -1233,8 +1249,10 @@ func (manager *Manager) MutateRoom(ctx context.Context, accountID int64, roomID 
 		return RoomMutationResult{}, ErrClosed
 	}
 	account.mu.Unlock()
-	account.opMu.Lock()
-	defer account.opMu.Unlock()
+	if err := account.opGate.Acquire(ctx); err != nil {
+		return RoomMutationResult{}, err
+	}
+	defer account.opGate.Release()
 	if err := ctx.Err(); err != nil {
 		return RoomMutationResult{}, err
 	}
@@ -1467,14 +1485,16 @@ func (manager *Manager) AccountDisabled(accountID int64) {
 		return
 	}
 	go func() {
-		account.opMu.Lock()
+		if err := account.opGate.Acquire(manager.lifecycle); err != nil {
+			return
+		}
 		manager.markDisabledLocked(account)
-		account.opMu.Unlock()
+		account.opGate.Release()
 	}()
 }
 
 // markDisabledLocked serializes the post-commit disable hook with ownership
-// claims. The caller must hold account.opMu.
+// claims. The caller must hold account.opGate.
 func (manager *Manager) markDisabledLocked(account *accountRuntime) {
 	account.mu.Lock()
 	if account.stale {
@@ -1501,12 +1521,14 @@ func (manager *Manager) markDisabledLocked(account *accountRuntime) {
 func (manager *Manager) drainDisabled(account *accountRuntime, done chan struct{}) {
 	defer close(done)
 	for {
-		account.opMu.Lock()
+		if err := account.opGate.Acquire(manager.lifecycle); err != nil {
+			return
+		}
 		account.mu.Lock()
 		stillDisabled := account.disabled && account.closeDone == done
 		account.mu.Unlock()
 		if !stillDisabled {
-			account.opMu.Unlock()
+			account.opGate.Release()
 			return
 		}
 		ctx, cancel := manager.ownerOperationContext()
@@ -1522,7 +1544,7 @@ func (manager *Manager) drainDisabled(account *accountRuntime, done chan struct{
 		account.mu.Unlock()
 		err := manager.closeCurrentTerminal(ctx, account, OwnerFence{})
 		cancel()
-		account.opMu.Unlock()
+		account.opGate.Release()
 		if err == nil {
 			manager.forgetTransitionAccount(account.accountID, fence)
 			return
@@ -1635,7 +1657,7 @@ func (manager *Manager) shutdownRetryDelay(ctx context.Context) (time.Duration, 
 }
 
 // beginStaleCleanupLocked revokes process-local use of a fence that the
-// repository has rejected. The caller holds account.opMu. A started session
+// repository has rejected. The caller holds account.opGate. A started session
 // remains attached to the account until it has been reconciled, finalized and
 // marked released; losing a fence must never erase durable cleanup work.
 func (manager *Manager) beginStaleOnConflictLocked(account *accountRuntime) {
@@ -1707,12 +1729,14 @@ func (manager *Manager) beginStaleCleanup(account *accountRuntime, active *activ
 }
 
 func (manager *Manager) finishStaleCleanup(account *accountRuntime, active *activeSession, releaseFence OwnerFence, done chan struct{}) {
-	account.opMu.Lock()
+	if err := account.opGate.Acquire(manager.ownershipControl); err != nil {
+		return
+	}
 	for {
 		account.mu.Lock()
 		if account.staleDone != done {
 			account.mu.Unlock()
-			account.opMu.Unlock()
+			account.opGate.Release()
 			return
 		}
 		releaseFence = account.staleRelease
@@ -1732,7 +1756,7 @@ func (manager *Manager) finishStaleCleanup(account *accountRuntime, active *acti
 			break
 		}
 		if manager.ownershipControl.Err() != nil {
-			account.opMu.Unlock()
+			account.opGate.Release()
 			return
 		}
 		timer := manager.newTimer(manager.heartbeat)
@@ -1741,7 +1765,7 @@ func (manager *Manager) finishStaleCleanup(account *accountRuntime, active *acti
 			timer.Stop()
 		case <-manager.ownershipControl.Done():
 			timer.Stop()
-			account.opMu.Unlock()
+			account.opGate.Release()
 			return
 		}
 	}
@@ -1755,7 +1779,7 @@ func (manager *Manager) finishStaleCleanup(account *accountRuntime, active *acti
 	account.mu.Lock()
 	if account.staleDone != done {
 		account.mu.Unlock()
-		account.opMu.Unlock()
+		account.opGate.Release()
 		return
 	}
 	if account.current == active {
@@ -1777,7 +1801,7 @@ func (manager *Manager) finishStaleCleanup(account *accountRuntime, active *acti
 	close(done)
 	account.staleDone = nil
 	account.mu.Unlock()
-	account.opMu.Unlock()
+	account.opGate.Release()
 	if active != nil {
 		if manager.beforeForgetLostOwner != nil {
 			manager.beforeForgetLostOwner()
@@ -1794,8 +1818,10 @@ func (manager *Manager) forgetLostTransitionOwner(accountID int64, fence OwnerFe
 }
 
 func (manager *Manager) forgetTransitionAccount(accountID int64, fence OwnerFence) {
-	manager.transitionMu.Lock()
-	defer manager.transitionMu.Unlock()
+	if err := manager.transitionGate.Acquire(manager.ownershipControl); err != nil {
+		return
+	}
+	defer manager.transitionGate.Release()
 	for roomID, room := range manager.roomTransitions {
 		if !validOwnerFence(fence) || room.pendingOwners[accountID] != fence {
 			continue
@@ -1896,8 +1922,13 @@ func (manager *Manager) heartbeatOwners() {
 				manager.beginStaleCleanup(account, active, fence, OwnerFence{})
 				return
 			}
-			account.opMu.Lock()
-			defer account.opMu.Unlock()
+			gateContext, cancelGate := manager.ownerOperationContext()
+			if gateErr := account.opGate.Acquire(gateContext); gateErr != nil {
+				cancelGate()
+				return
+			}
+			cancelGate()
+			defer account.opGate.Release()
 			account.mu.Lock()
 			stillCurrent := account.owner == fence
 			account.mu.Unlock()
@@ -1942,8 +1973,11 @@ func (manager *Manager) Shutdown(ctx context.Context) error {
 		return err
 	}
 
-	manager.shutdownMu.Lock()
-	defer manager.shutdownMu.Unlock()
+	if err := manager.shutdownGate.Acquire(ctx); err != nil {
+		manager.processCancelOnce.Do(manager.cancelProcessing)
+		return err
+	}
+	defer manager.shutdownGate.Release()
 	select {
 	case <-manager.done:
 		manager.mu.Lock()
@@ -1967,15 +2001,18 @@ func (manager *Manager) Shutdown(ctx context.Context) error {
 			}
 			return ErrUnavailable
 		}
-		account.opMu.Lock()
+		if err := account.opGate.Acquire(ctx); err != nil {
+			manager.processCancelOnce.Do(manager.cancelProcessing)
+			return err
+		}
 		if err := ctx.Err(); err != nil {
-			account.opMu.Unlock()
+			account.opGate.Release()
 			manager.processCancelOnce.Do(manager.cancelProcessing)
 			return err
 		}
 		err := manager.closeCurrentDuringShutdown(ctx, account)
 		if err != nil {
-			account.opMu.Unlock()
+			account.opGate.Release()
 			if ctx.Err() != nil {
 				manager.processCancelOnce.Do(manager.cancelProcessing)
 				return ctx.Err()
@@ -1988,7 +2025,7 @@ func (manager *Manager) Shutdown(ctx context.Context) error {
 		if validOwnerFence(fence) {
 			err = manager.releaseOwnerDuringShutdown(ctx, account, fence)
 		}
-		account.opMu.Unlock()
+		account.opGate.Release()
 		if err != nil {
 			if ctx.Err() != nil {
 				manager.processCancelOnce.Do(manager.cancelProcessing)

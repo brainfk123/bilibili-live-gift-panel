@@ -20,10 +20,12 @@ import (
 
 	"bilibili-live-gift-panel/internal/hosted/adminconsole"
 	"bilibili-live-gift-panel/internal/hosted/adminidentity"
+	"bilibili-live-gift-panel/internal/hosted/app"
 	"bilibili-live-gift-panel/internal/hosted/biligateway"
 	"bilibili-live-gift-panel/internal/hosted/configuration"
 	"bilibili-live-gift-panel/internal/hosted/migration"
 	"bilibili-live-gift-panel/internal/hosted/roomsource"
+	"bilibili-live-gift-panel/internal/hosted/roomwatcher"
 	hostedruntime "bilibili-live-gift-panel/internal/hosted/runtime"
 	"bilibili-live-gift-panel/internal/hosted/security"
 
@@ -704,6 +706,89 @@ func TestProductionRuntimeLifecycleTimeoutKeepsBackgroundJoinAndDelaysOwnerClear
 	wantOrder := []string{"room-shutdown", "room-wait", "runtime-shutdown", "runtime-wait", "owner-clear"}
 	if got := log.snapshot(); !slices.Equal(got, wantOrder) {
 		t.Fatalf("background cleanup order = %v, want %v", got, wantOrder)
+	}
+}
+
+// This test fails if the final durable replay waits on an uninterruptible
+// account operation lock. The room drain must spend its own deadline before
+// the outer lifecycle cancels runtime.Manager, which releases the administrator
+// mutation and lets RoomSources join before runtimeOwner is cleared.
+func TestProductionRuntimeLifecycleFinalDrainDeadlineBreaksAdministratorMutationCycle(t *testing.T) {
+	sessions := newGateLifecycleSessions()
+	sources := &mainRuntimeSources{joined: make(chan struct{})}
+	manager, err := hostedruntime.NewManager(hostedruntime.Dependencies{
+		Sessions: sessions, Configuration: mainRuntimeConfiguration{}, Migration: mainRuntimeMigration{}, RoomSources: sources,
+	}, hostedruntime.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ApplyRoomEvent(context.Background(), roomwatcher.Event{
+		Sequence: 1,
+		RoomReferencesChanged: &roomwatcher.RoomReferencesChanged{
+			RoomID: "42", AccountIDs: []int64{7},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mutationResult := make(chan error, 1)
+	go func() {
+		_, mutationErr := manager.MutateRoom(context.Background(), 7, "42")
+		mutationResult <- mutationErr
+	}()
+	select {
+	case <-sessions.pendingStarted:
+	case <-time.After(time.Second):
+		t.Fatal("administrator mutation did not reach lifecycle-owned claim")
+	}
+
+	watcher := newGateLifecycleWatcher(roomwatcher.Event{Sequence: 2, RoomStateChanged: &roomwatcher.Transition{
+		RoomID: "42", LeaseEpoch: 1, From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Now(), NewBroadcast: true,
+	}})
+	room, err := app.StartRoomRuntime(context.Background(), watcher, manager, gateLifecycleReferenceLoader{}, app.RoomRuntimeOptions{
+		ProbeInterval: 10 * time.Second, FinalDrainTimeout: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerCleared := make(chan struct{})
+	lifecycle := &productionRuntimeLifecycle{
+		runtime:    manager,
+		clearOwner: func() { close(ownerCleared) },
+		done:       make(chan struct{}),
+	}
+	lifecycle.TrackRoomRuntime(room)
+	shutdownResult := make(chan error, 1)
+	go func() { shutdownResult <- lifecycle.Shutdown(context.Background()) }()
+
+	select {
+	case <-sessions.finalDrainAttempted:
+	case <-time.After(time.Second):
+		t.Fatal("final drain did not attempt the durable live event")
+	}
+	select {
+	case <-ownerCleared:
+	case <-time.After(250 * time.Millisecond):
+		forceContext, cancelForce := context.WithTimeout(context.Background(), time.Second)
+		_ = manager.Shutdown(forceContext)
+		cancelForce()
+		select {
+		case <-ownerCleared:
+		case <-time.After(time.Second):
+		}
+		t.Fatal("final drain deadline did not break the runtime lifecycle cycle")
+	}
+
+	if err := <-shutdownResult; !errors.Is(err, app.ErrRoomRuntimeUnavailable) {
+		t.Fatalf("lifecycle shutdown error = %v, want bounded final-drain failure", err)
+	}
+	if err := <-mutationResult; !errors.Is(err, hostedruntime.ErrUnavailable) {
+		t.Fatalf("administrator mutation error = %v, want lifecycle-canceled unavailable", err)
+	}
+	select {
+	case <-sources.joined:
+	default:
+		t.Fatal("runtimeOwner cleared before RoomSources joined")
 	}
 }
 
@@ -1470,8 +1555,74 @@ func (resource *watcherStartupResource) Wait(context.Context) error {
 }
 
 type mainRuntimeSources struct {
-	mu     sync.Mutex
-	closed bool
+	mu       sync.Mutex
+	closed   bool
+	joined   chan struct{}
+	joinOnce sync.Once
+}
+
+type gateLifecycleSessions struct {
+	*blockedSwitchSessions
+	finalDrainAttempted chan struct{}
+	finalDrainOnce      sync.Once
+}
+
+func newGateLifecycleSessions() *gateLifecycleSessions {
+	return &gateLifecycleSessions{
+		blockedSwitchSessions: &blockedSwitchSessions{pendingStarted: make(chan struct{})},
+		finalDrainAttempted:   make(chan struct{}),
+	}
+}
+func (sessions *gateLifecycleSessions) OpenBroadcastSession(context.Context, string) (int64, error) {
+	sessions.finalDrainOnce.Do(func() { close(sessions.finalDrainAttempted) })
+	return 91, nil
+}
+
+type gateLifecycleWatcher struct {
+	mu        sync.Mutex
+	event     roomwatcher.Event
+	events    chan roomwatcher.Event
+	closed    bool
+	closeOnce sync.Once
+}
+
+func newGateLifecycleWatcher(event roomwatcher.Event) *gateLifecycleWatcher {
+	return &gateLifecycleWatcher{event: event, events: make(chan roomwatcher.Event)}
+}
+
+func (*gateLifecycleWatcher) LoadBootstrap(context.Context) (roomwatcher.Bootstrap, error) {
+	return roomwatcher.Bootstrap{Cursor: 1}, nil
+}
+func (*gateLifecycleWatcher) RestoreBootstrap(roomwatcher.Bootstrap) error { return nil }
+func (watcher *gateLifecycleWatcher) ReplayEvents(_ context.Context, after uint64, _ int) ([]roomwatcher.Event, error) {
+	watcher.mu.Lock()
+	defer watcher.mu.Unlock()
+	if !watcher.closed || watcher.event.Sequence <= after {
+		return nil, nil
+	}
+	return []roomwatcher.Event{watcher.event}, nil
+}
+func (*gateLifecycleWatcher) SetReferences(context.Context, []roomwatcher.Reference) error {
+	return nil
+}
+func (*gateLifecycleWatcher) Poll(context.Context) error { return nil }
+func (watcher *gateLifecycleWatcher) Events() <-chan roomwatcher.Event {
+	return watcher.events
+}
+func (watcher *gateLifecycleWatcher) Close() {
+	watcher.closeOnce.Do(func() {
+		watcher.mu.Lock()
+		watcher.closed = true
+		close(watcher.events)
+		watcher.mu.Unlock()
+	})
+}
+func (*gateLifecycleWatcher) Wait(context.Context) error { return nil }
+
+type gateLifecycleReferenceLoader struct{}
+
+func (gateLifecycleReferenceLoader) LoadEnabledRoomReferences(context.Context) ([]roomwatcher.Reference, error) {
+	return nil, nil
 }
 
 func (*mainRuntimeSources) Resolve(_ context.Context, roomID string, _ int64) (string, error) {
@@ -1485,7 +1636,12 @@ func (sources *mainRuntimeSources) Close() {
 	sources.closed = true
 	sources.mu.Unlock()
 }
-func (*mainRuntimeSources) Wait(context.Context) error { return nil }
+func (sources *mainRuntimeSources) Wait(context.Context) error {
+	if sources.joined != nil {
+		sources.joinOnce.Do(func() { close(sources.joined) })
+	}
+	return nil
+}
 
 type mainRuntimeSubscription struct {
 	roomID string

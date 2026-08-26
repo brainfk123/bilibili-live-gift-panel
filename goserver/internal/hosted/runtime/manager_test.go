@@ -153,6 +153,56 @@ func TestManagerRejectsRoomEventWithoutExactlyOnePayload(t *testing.T) {
 	}
 }
 
+// This test fails if ApplyRoomEvent waits on an uninterruptible transition
+// lock after its caller's final-drain budget has expired.
+func TestApplyRoomEventDeadlineInterruptsTransitionGateWait(t *testing.T) {
+	log := &operationLog{}
+	base := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, broadcasts: map[string]int64{"42": 99}}
+	sessions := &blockingBroadcastSessions{transitionSessions: base, started: make(chan struct{}), release: make(chan struct{})}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ApplyRoomEvent(context.Background(), referencesEvent(1, "42", 7)); err != nil {
+		t.Fatal(err)
+	}
+	firstResult := make(chan error, 1)
+	go func() {
+		firstResult <- manager.ApplyRoomEvent(context.Background(), stateEvent(2, roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, LeaseEpoch: 1}))
+	}()
+	select {
+	case <-sessions.started:
+	case <-time.After(time.Second):
+		t.Fatal("first room event did not hold the transition gate")
+	}
+
+	deadline, cancelDeadline := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- manager.ApplyRoomEvent(deadline, referencesEvent(3, "42", 7, 8)) }()
+	select {
+	case err := <-secondResult:
+		cancelDeadline()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			close(sessions.release)
+			t.Fatalf("second ApplyRoomEvent error = %v, want deadline", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		cancelDeadline()
+		close(sessions.release)
+		<-firstResult
+		t.Fatal("ApplyRoomEvent ignored deadline while waiting for transition gate")
+	}
+	close(sessions.release)
+	if err := <-firstResult; err != nil {
+		t.Fatal(err)
+	}
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := manager.Shutdown(shutdownContext); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // This test fails if a lagged consumer replays a historical live event after
 // restart instead of accepting the current offline projection and cursor.
 func TestManagerBootstrapOfflineSkipsHistoricalLiveReplay(t *testing.T) {
@@ -959,6 +1009,47 @@ func TestShutdownAndApplyRoomTransitionSerializeClosedState(t *testing.T) {
 	}
 	if err := <-applied; err != nil && !errors.Is(err, ErrClosed) {
 		t.Fatalf("concurrent ApplyRoomTransition = %v", err)
+	}
+}
+
+// This test fails if a second Shutdown call blocks on the first caller's
+// internal serialization lock after its own context deadline.
+func TestConcurrentShutdownWaiterHonorsOwnDeadline(t *testing.T) {
+	sources := &blockingShutdownRoomSources{waitStarted: make(chan struct{}), release: make(chan struct{})}
+	manager, err := NewManager(Dependencies{Sessions: &orderedSessions{enabled: true, log: &operationLog{}}, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: sources}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- manager.Shutdown(context.Background()) }()
+	select {
+	case <-sources.waitStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first Shutdown did not reach RoomSources.Wait")
+	}
+
+	deadline, cancelDeadline := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- manager.Shutdown(deadline) }()
+	select {
+	case err := <-secondResult:
+		cancelDeadline()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			close(sources.release)
+			t.Fatalf("second Shutdown error = %v, want deadline", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		cancelDeadline()
+		close(sources.release)
+		<-firstResult
+		t.Fatal("concurrent Shutdown ignored its deadline while waiting for serialization")
+	}
+	close(sources.release)
+	if err := <-firstResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1862,6 +1953,46 @@ type transitionSessions struct {
 	accounts      map[string][]int64
 	broadcasts    map[string]int64
 	startFailures map[int64]int
+}
+
+type blockingBroadcastSessions struct {
+	*transitionSessions
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (sessions *blockingBroadcastSessions) OpenBroadcastSession(ctx context.Context, roomID string) (int64, error) {
+	sessions.once.Do(func() { close(sessions.started) })
+	select {
+	case <-sessions.release:
+		return sessions.transitionSessions.OpenBroadcastSession(ctx, roomID)
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+}
+
+type blockingShutdownRoomSources struct {
+	waitStarted chan struct{}
+	release     chan struct{}
+	startOnce   sync.Once
+}
+
+func (*blockingShutdownRoomSources) Resolve(_ context.Context, roomID string, _ int64) (string, error) {
+	return roomID, nil
+}
+func (*blockingShutdownRoomSources) SubscribeCanonical(context.Context, string, int64, roomsource.Sink) (roomsource.Subscription, error) {
+	return nil, errors.New("unexpected room subscription")
+}
+func (*blockingShutdownRoomSources) Close() {}
+func (sources *blockingShutdownRoomSources) Wait(ctx context.Context) error {
+	sources.startOnce.Do(func() { close(sources.waitStarted) })
+	select {
+	case <-sources.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type fenceMismatchSessions struct {
