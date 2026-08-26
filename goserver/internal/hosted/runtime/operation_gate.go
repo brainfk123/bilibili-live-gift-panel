@@ -9,51 +9,65 @@ import (
 // use. A canceled waiter either leaves the queue before handoff or immediately
 // hands an already-granted turn to the next waiter.
 type operationGate struct {
-	mu      sync.Mutex
-	held    bool
-	waiters []*operationGateWaiter
+	mu         sync.Mutex
+	held       bool
+	generation uint64
+	owner      uint64
+	waiters    []*operationGateWaiter
 }
 
 type operationGateWaiter struct {
-	ready   chan struct{}
-	granted bool
+	ready      chan struct{}
+	granted    bool
+	generation uint64
 }
 
-func (gate *operationGate) Acquire(ctx context.Context) error {
+type operationPermit struct {
+	gate       *operationGate
+	generation uint64
+	released   bool
+	mu         sync.Mutex
+}
+
+func (gate *operationGate) Acquire(ctx context.Context) (*operationPermit, error) {
 	if ctx == nil {
-		return ErrInvalidInput
+		return nil, ErrInvalidInput
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
 	waiter := &operationGateWaiter{ready: make(chan struct{})}
 	gate.mu.Lock()
 	if !gate.held && len(gate.waiters) == 0 {
+		gate.generation++
 		gate.held = true
+		gate.owner = gate.generation
+		permit := &operationPermit{gate: gate, generation: gate.owner}
 		gate.mu.Unlock()
 		if err := ctx.Err(); err != nil {
-			gate.Release()
-			return err
+			_ = permit.Release()
+			return nil, err
 		}
-		return nil
+		return permit, nil
 	}
 	gate.waiters = append(gate.waiters, waiter)
 	gate.mu.Unlock()
 
 	select {
 	case <-waiter.ready:
+		permit := &operationPermit{gate: gate, generation: waiter.generation}
 		if err := ctx.Err(); err != nil {
-			gate.Release()
-			return err
+			_ = permit.Release()
+			return nil, err
 		}
-		return nil
+		return permit, nil
 	case <-ctx.Done():
 		gate.mu.Lock()
 		if waiter.granted {
 			gate.mu.Unlock()
-			gate.Release()
-			return ctx.Err()
+			_ = (&operationPermit{gate: gate, generation: waiter.generation}).Release()
+			return nil, ctx.Err()
 		}
 		for index, queued := range gate.waiters {
 			if queued == waiter {
@@ -62,22 +76,37 @@ func (gate *operationGate) Acquire(ctx context.Context) error {
 			}
 		}
 		gate.mu.Unlock()
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
 }
 
-func (gate *operationGate) Release() {
+func (permit *operationPermit) Release() error {
+	if permit == nil || permit.gate == nil {
+		return ErrInvalidInput
+	}
+	permit.mu.Lock()
+	defer permit.mu.Unlock()
+	if permit.released {
+		return ErrUnavailable
+	}
+	gate := permit.gate
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
-	if !gate.held {
-		panic("runtime: release of unlocked operation gate")
+	if !gate.held || gate.owner != permit.generation {
+		return ErrUnavailable
 	}
+	permit.released = true
 	if len(gate.waiters) == 0 {
 		gate.held = false
-		return
+		gate.owner = 0
+		return nil
 	}
 	waiter := gate.waiters[0]
 	gate.waiters = gate.waiters[1:]
+	gate.generation++
+	gate.owner = gate.generation
 	waiter.granted = true
+	waiter.generation = gate.owner
 	close(waiter.ready)
+	return nil
 }
