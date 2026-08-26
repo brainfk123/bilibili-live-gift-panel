@@ -312,6 +312,12 @@ describe('administrator section lifetime fence', () => {
   });
 
   it('keeps the Bilibili TOTP cells in a dedicated horizontal control', async () => {
+    let poll!: () => void;
+    const timers = {
+      setTimeout(callback: () => void): number { poll = callback; return 1; },
+      clearTimeout: vi.fn(),
+      now: () => 0,
+    };
     const document: DocumentLike = {
       createElement: (tag) => new Element(tag, document),
       createTextNode: (value) => { const node = new Element('#text', document); node.textContent = value; return node; },
@@ -321,12 +327,16 @@ describe('administrator section lifetime fence', () => {
       biliServiceStatus: vi.fn(async () => ({ version: 4, health: 'healthy' as const, lastVerifiedAt: '2026-08-23T08:00:00Z' })),
       checkBiliService: vi.fn(),
       beginBiliServiceChallenge: vi.fn(async () => ({ challengeId: 'challenge', qrImage: 'data:image/png;base64,AA==', expiresAt: '2026-08-23T08:10:00Z' })),
+      pollBiliServiceChallenge: vi.fn(async () => ({ status: 'verified' as const })),
+      cancelBiliServiceChallenge: vi.fn(async () => undefined),
       authorizeAdminOperation: vi.fn(),
       replaceBiliServiceCredential: vi.fn(),
     };
-    const view = mountBiliServiceView(root as unknown as HTMLElement, api as never);
+    const view = mountBiliServiceView(root as unknown as HTMLElement, api as never, timers);
     await flush();
     button(root, '更换服务账号').listeners.get('click')?.();
+    await flush();
+    poll();
     await flush();
     button(root, '二维码确认后继续').listeners.get('click')?.();
     await flush();
