@@ -369,6 +369,161 @@ func TestHTTPPollChallengeRequiresSessionAndEveryLimiterScope(t *testing.T) {
 	}
 }
 
+func TestHTTPCancelChallengeForgetsAfterAuthenticationWithoutExposingID(t *testing.T) {
+	verifier := &recordingCredentialVerifier{stage: identity.VerificationWaiting}
+	authorizer := &recordingSensitiveAuthorizer{}
+	limiter := &recordingHTTPRateLimiter{}
+	options := testHTTPOptions()
+	options.Limiter = limiter
+	service, err := NewService(verifier, &contextGuardedCredentialReplacer{}, authorizer, ServiceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	biliHandler, err := NewHTTPHandler(service, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broadAdmin := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusAccepted) })
+	handler := hostedapp.New(hostedapp.Dependencies{BiliService: biliHandler, Admin: broadAdmin})
+	request := httptest.NewRequest(http.MethodDelete, "/api/admin/bili-service/challenge/service-challenge-private", nil)
+	request.Header.Set("Origin", "https://admin.example.test")
+	request.Header.Set("X-CSRF-Token", "csrf")
+	request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "administrator-session"})
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent || response.Body.Len() != 0 {
+		t.Fatalf("cancel status=%d body=%q", response.Code, response.Body.String())
+	}
+	if len(verifier.forgotten) != 1 || verifier.forgotten[0] != "service-challenge-private" {
+		t.Fatalf("forgotten challenges=%v", verifier.forgotten)
+	}
+	if authorizer.requireSessionCalls != 1 || authorizer.requiredToken != "administrator-session" {
+		t.Fatalf("administrator authentication calls=%d token=%q", authorizer.requireSessionCalls, authorizer.requiredToken)
+	}
+	if len(limiter.calls) != 3 {
+		t.Fatalf("limiter calls=%v, want global/IP/session digest", limiter.calls)
+	}
+	for _, header := range response.Header() {
+		if strings.Contains(strings.Join(header, "\n"), "service-challenge-private") {
+			t.Fatalf("response header exposed challenge ID: %v", response.Header())
+		}
+	}
+}
+
+func TestHTTPCancelChallengeRejectsInvalidRequestsBeforeVerifierWork(t *testing.T) {
+	longID := strings.Repeat("a", 257)
+	for _, test := range []struct {
+		name       string
+		target     string
+		body       io.Reader
+		origin     string
+		csrf       string
+		wantStatus int
+	}{
+		{name: "missing origin", target: "/api/admin/bili-service/challenge/proof", csrf: "csrf", wantStatus: http.StatusForbidden},
+		{name: "missing csrf", target: "/api/admin/bili-service/challenge/proof", origin: "https://admin.example.test", wantStatus: http.StatusForbidden},
+		{name: "query", target: "/api/admin/bili-service/challenge/proof?private=query", origin: "https://admin.example.test", csrf: "csrf", wantStatus: http.StatusBadRequest},
+		{name: "request body", target: "/api/admin/bili-service/challenge/proof", body: strings.NewReader(`{}`), origin: "https://admin.example.test", csrf: "csrf", wantStatus: http.StatusBadRequest},
+		{name: "overlong id", target: "/api/admin/bili-service/challenge/" + longID, origin: "https://admin.example.test", csrf: "csrf", wantStatus: http.StatusBadRequest},
+		{name: "empty id", target: "/api/admin/bili-service/challenge/", origin: "https://admin.example.test", csrf: "csrf", wantStatus: http.StatusNotFound},
+		{name: "deeper path", target: "/api/admin/bili-service/challenge/proof/extra", origin: "https://admin.example.test", csrf: "csrf", wantStatus: http.StatusNotFound},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			verifier := &recordingCredentialVerifier{stage: identity.VerificationWaiting}
+			authorizer := &recordingSensitiveAuthorizer{}
+			limiter := &recordingHTTPRateLimiter{}
+			options := testHTTPOptions()
+			options.Limiter = limiter
+			service, err := NewService(verifier, &contextGuardedCredentialReplacer{}, authorizer, ServiceOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler, err := NewHTTPHandler(service, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodDelete, test.target, test.body)
+			request.Header.Set("Origin", test.origin)
+			request.Header.Set("X-CSRF-Token", test.csrf)
+			request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: "administrator-session"})
+			response := httptest.NewRecorder()
+
+			handler.ServeHTTP(response, request)
+
+			if response.Code != test.wantStatus {
+				t.Fatalf("status=%d body=%q want=%d", response.Code, response.Body.String(), test.wantStatus)
+			}
+			if len(verifier.forgotten) != 0 || authorizer.requireSessionCalls != 0 || len(limiter.calls) != 0 {
+				t.Fatalf("invalid request reached protected work: forgotten=%v sessions=%d limits=%v", verifier.forgotten, authorizer.requireSessionCalls, limiter.calls)
+			}
+		})
+	}
+}
+
+func TestHTTPCancelChallengeRequiresSessionAndEveryLimiterScope(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		cookie       string
+		deniedScope  identity.LimitScope
+		wantStatus   int
+		wantScopes   []identity.LimitScope
+		wantSessions int
+	}{
+		{name: "missing session", wantStatus: http.StatusUnauthorized, wantScopes: []identity.LimitScope{identity.LimitGlobal, identity.LimitPerIP}},
+		{name: "global limit", cookie: "administrator-session", deniedScope: identity.LimitGlobal, wantStatus: http.StatusTooManyRequests, wantScopes: []identity.LimitScope{identity.LimitGlobal}},
+		{name: "per ip limit", cookie: "administrator-session", deniedScope: identity.LimitPerIP, wantStatus: http.StatusTooManyRequests, wantScopes: []identity.LimitScope{identity.LimitGlobal, identity.LimitPerIP}},
+		{name: "session digest limit", cookie: "administrator-session", deniedScope: identity.LimitPerChallenge, wantStatus: http.StatusTooManyRequests, wantScopes: []identity.LimitScope{identity.LimitGlobal, identity.LimitPerIP, identity.LimitPerChallenge}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			verifier := &recordingCredentialVerifier{stage: identity.VerificationWaiting}
+			authorizer := &recordingSensitiveAuthorizer{}
+			limiter := &recordingHTTPRateLimiter{denyScope: test.deniedScope}
+			options := testHTTPOptions()
+			options.Limiter = limiter
+			service, err := NewService(verifier, &contextGuardedCredentialReplacer{}, authorizer, ServiceOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler, err := NewHTTPHandler(service, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodDelete, "/api/admin/bili-service/challenge/proof", nil)
+			request.Header.Set("Origin", "https://admin.example.test")
+			request.Header.Set("X-CSRF-Token", "csrf")
+			if test.cookie != "" {
+				request.AddCookie(&http.Cookie{Name: identity.SiteSessionCookie, Value: test.cookie})
+			}
+			response := httptest.NewRecorder()
+
+			handler.ServeHTTP(response, request)
+
+			if response.Code != test.wantStatus {
+				t.Fatalf("status=%d body=%q want=%d", response.Code, response.Body.String(), test.wantStatus)
+			}
+			if len(verifier.forgotten) != 0 || authorizer.requireSessionCalls != test.wantSessions {
+				t.Fatalf("rejected request reached service: forgotten=%v sessions=%d", verifier.forgotten, authorizer.requireSessionCalls)
+			}
+			if len(limiter.calls) != len(test.wantScopes) {
+				t.Fatalf("limiter calls=%v want scopes=%v", limiter.calls, test.wantScopes)
+			}
+			for index, scope := range test.wantScopes {
+				if limiter.calls[index].scope != scope {
+					t.Fatalf("limiter call %d=%v want scope=%s", index, limiter.calls[index], scope)
+				}
+			}
+			if test.cookie != "" && len(limiter.calls) == 3 {
+				digest := sha256.Sum256([]byte(test.cookie))
+				if strings.Contains(limiter.calls[2].key, test.cookie) || !strings.HasSuffix(limiter.calls[2].key, fmt.Sprintf("%x", digest[:])) {
+					t.Fatalf("session limiter key is not a secret-free digest: %q", limiter.calls[2].key)
+				}
+			}
+		})
+	}
+}
+
 func TestHTTPChallengeAndReplaceRejectWrongMethods(t *testing.T) {
 	handler, err := NewHTTPHandler(&fakeHTTPService{}, testHTTPOptions())
 	if err != nil {
@@ -999,6 +1154,7 @@ func (canceledCredentialVerifier) Begin(context.Context) (identity.Challenge, er
 func (canceledCredentialVerifier) PollCredential(context.Context, string) (identity.VerificationStage, error) {
 	return "", identity.ErrChallengeExpired
 }
+func (canceledCredentialVerifier) Forget(string) {}
 
 type successfulCredentialVerifier struct{}
 
@@ -1008,6 +1164,7 @@ func (successfulCredentialVerifier) Begin(context.Context) (identity.Challenge, 
 func (successfulCredentialVerifier) PollCredential(context.Context, string) (identity.VerificationStage, error) {
 	return identity.VerificationVerified, nil
 }
+func (successfulCredentialVerifier) Forget(string) {}
 
 func (successfulCredentialVerifier) ConsumeCredential(ctx context.Context, _ string, consumer func(context.Context, []byte) error) error {
 	return consumer(ctx, []byte("SESSDATA=private"))
@@ -1085,6 +1242,7 @@ type recordingCredentialVerifier struct {
 	pollErr     error
 	pollCalls   int
 	challengeID string
+	forgotten   []string
 }
 
 func (*recordingCredentialVerifier) Begin(context.Context) (identity.Challenge, error) {
@@ -1095,6 +1253,10 @@ func (verifier *recordingCredentialVerifier) PollCredential(_ context.Context, c
 	verifier.pollCalls++
 	verifier.challengeID = challengeID
 	return verifier.stage, verifier.pollErr
+}
+
+func (verifier *recordingCredentialVerifier) Forget(challengeID string) {
+	verifier.forgotten = append(verifier.forgotten, challengeID)
 }
 
 func (*recordingCredentialVerifier) ConsumeCredential(context.Context, string, func(context.Context, []byte) error) error {
@@ -1172,6 +1334,7 @@ func (service *fakeHTTPService) Begin(context.Context) (identity.Challenge, erro
 func (*fakeHTTPService) PollChallenge(context.Context, string) (identity.VerificationStage, error) {
 	return identity.VerificationWaiting, nil
 }
+func (*fakeHTTPService) CancelChallenge(string) {}
 func (service *fakeHTTPService) Replace(_ context.Context, token, _ string, challengeID string) error {
 	service.replaceCalls++
 	service.token, service.challengeID = token, challengeID

@@ -8,7 +8,7 @@ import {
 } from '../bili-challenge-poller';
 import { authorizeAdminOperation } from './operation-authorization';
 
-export type BiliServicePhase = 'idle' | 'checking' | 'qr' | 'authorizing' | 'replacing';
+export type BiliServicePhase = 'idle' | 'checking' | 'creating' | 'qr' | 'authorizing' | 'replacing';
 export type BiliServiceNotice = { kind: 'success' | 'error'; message: string };
 
 export interface BiliServiceSnapshot {
@@ -19,14 +19,14 @@ export interface BiliServiceSnapshot {
   notice?: BiliServiceNotice;
 }
 
-type BiliServiceAPI = Pick<HostedAPI, 'biliServiceStatus' | 'checkBiliService' | 'beginBiliServiceChallenge' | 'pollBiliServiceChallenge' | 'replaceBiliServiceCredential' | 'authorizeAdminOperation'>;
+type BiliServiceAPI = Pick<HostedAPI, 'biliServiceStatus' | 'checkBiliService' | 'beginBiliServiceChallenge' | 'pollBiliServiceChallenge' | 'cancelBiliServiceChallenge' | 'replaceBiliServiceCredential' | 'authorizeAdminOperation'>;
 
 export interface BiliServiceController {
   load(): Promise<void>;
   check(): Promise<void>;
   beginReplacement(): Promise<void>;
   enterAuthorization(): void;
-  cancelReplacement(): void;
+  cancelReplacement(): Promise<void>;
   authorizeAndReplace(totp: string): Promise<void>;
   dispose(): Promise<void>;
 }
@@ -50,6 +50,7 @@ export function createBiliServiceController(
   let challengeStatus: BiliServiceChallengeStage | undefined;
   let notice: BiliServiceNotice | undefined;
   let poller: BiliChallengePoller | undefined;
+  let beginOperation: Promise<void> | undefined;
   let generation = 0;
   let disposed = false;
   const publish = (): void => { if (!disposed) render({ phase, ...(status ? { status } : {}), ...(challenge ? { challenge: { ...challenge } } : {}), ...(challengeStatus ? { challengeStatus } : {}), ...(notice ? { notice: { ...notice } } : {}) }); };
@@ -59,6 +60,9 @@ export function createBiliServiceController(
     const current = poller;
     poller = undefined;
     return current?.stop() ?? Promise.resolve();
+  };
+  const cancelChallenge = async (active?: Challenge): Promise<void> => {
+    if (active && api.cancelBiliServiceChallenge) await api.cancelBiliServiceChallenge(active.challengeId);
   };
   const failureNotice = (snapshot: BiliChallengePollSnapshot): BiliServiceNotice | undefined => {
     if (!snapshot.failureKind) return undefined;
@@ -141,26 +145,34 @@ export function createBiliServiceController(
       if (complete(current)) { phase = 'idle'; publish(); }
     },
 
-    async beginReplacement(): Promise<void> {
-      if (!api.beginBiliServiceChallenge || disposed) return;
+    beginReplacement(): Promise<void> {
+      if (!api.beginBiliServiceChallenge || disposed) return Promise.resolve();
+      if (beginOperation) return beginOperation;
       const current = ++generation;
-      phase = 'idle'; notice = undefined; clearChallenge(); publish();
-      await stopPolling();
-      if (!complete(current)) return;
-      try {
-        const next = await api.beginBiliServiceChallenge();
-        if (!complete(current)) return;
-        challenge = { ...next };
-        challengeStatus = 'pending';
-        phase = 'qr';
-      } catch {
-        if (!complete(current)) return;
-        notice = { kind: 'error', message: '无法创建服务账号登录二维码，请重试' };
-      }
-      if (complete(current)) {
-        publish();
-        if (challenge) startPolling(current);
-      }
+      const previous = challenge;
+      phase = 'creating'; notice = undefined; clearChallenge(); publish();
+      let owned!: Promise<void>;
+      owned = (async () => {
+        try {
+          await stopPolling();
+          await cancelChallenge(previous);
+          if (!complete(current)) return;
+          const created = await api.beginBiliServiceChallenge!();
+          if (!complete(current)) { await cancelChallenge(created); return; }
+          challenge = { ...created };
+          challengeStatus = 'pending';
+          phase = 'qr';
+          publish();
+          startPolling(current);
+        } catch {
+          if (!complete(current)) return;
+          phase = 'idle';
+          notice = { kind: 'error', message: '无法创建服务账号登录二维码，请重试' };
+          publish();
+        }
+      })().finally(() => { if (beginOperation === owned) beginOperation = undefined; });
+      beginOperation = owned;
+      return owned;
     },
 
     enterAuthorization(): void {
@@ -171,11 +183,12 @@ export function createBiliServiceController(
       publish();
     },
 
-    cancelReplacement(): void {
+    async cancelReplacement(): Promise<void> {
       if (disposed) return;
       generation++;
-      void stopPolling();
+      const active = challenge;
       phase = 'idle'; clearChallenge(); notice = undefined; publish();
+      await Promise.allSettled([stopPolling(), cancelChallenge(active), beginOperation]);
     },
 
     async authorizeAndReplace(totp: string): Promise<void> {
@@ -199,6 +212,13 @@ export function createBiliServiceController(
       }
     },
 
-    async dispose(): Promise<void> { if (disposed) return; disposed = true; generation++; clearChallenge(); await stopPolling(); },
+    async dispose(): Promise<void> {
+      if (disposed) return;
+      disposed = true;
+      generation++;
+      const active = challenge;
+      clearChallenge();
+      await Promise.allSettled([stopPolling(), cancelChallenge(active), beginOperation]);
+    },
   };
 }

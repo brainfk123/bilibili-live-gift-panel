@@ -106,9 +106,106 @@ describe('Bilibili service action state', () => {
 
     expect(render.mock.lastCall?.[0]).toMatchObject({ phase: 'authorizing', challenge: { challengeId: 'replace' } });
   });
+
+  it('keeps regeneration single-flight until the old poll stops and challenge is cancelled', async () => {
+    const timers = new ControlledTimers();
+    const events: string[] = [];
+    let challengeNumber = 0;
+    let releasePoll!: (value: { status: 'pending' }) => void;
+    const inFlightPoll = new Promise<{ status: 'pending' }>((resolve) => { releasePoll = resolve; });
+    const api = {
+      beginBiliServiceChallenge: vi.fn(async () => {
+        const id = `challenge-${++challengeNumber}`;
+        events.push(`begin:${id}`);
+        return { challengeId: id, qrImage: 'data:image/png;base64,qr', expiresAt: '2030-01-01T00:05:00Z' };
+      }),
+      pollBiliServiceChallenge: vi.fn(() => inFlightPoll),
+      cancelBiliServiceChallenge: vi.fn(async (id: string) => { events.push(`cancel:${id}`); }),
+    };
+    const render = vi.fn();
+    const controller = createBiliServiceController(api as Parameters<typeof createBiliServiceController>[0], render, timers);
+    await controller.beginReplacement();
+    await timers.fireNext();
+
+    const first = controller.beginReplacement();
+    const second = controller.beginReplacement();
+    await flush();
+
+    expect(render.mock.lastCall?.[0]).toMatchObject({ phase: 'creating' });
+    expect(api.beginBiliServiceChallenge).toHaveBeenCalledTimes(1);
+    expect(api.cancelBiliServiceChallenge).not.toHaveBeenCalled();
+
+    releasePoll({ status: 'pending' });
+    await Promise.all([first, second]);
+
+    expect(api.beginBiliServiceChallenge).toHaveBeenCalledTimes(2);
+    expect(events).toEqual(['begin:challenge-1', 'cancel:challenge-1', 'begin:challenge-2']);
+    expect(render.mock.lastCall?.[0]).toMatchObject({ phase: 'qr', challenge: { challengeId: 'challenge-2' } });
+    await controller.dispose();
+  });
+
+  it('cancels a challenge created after cancel invalidates its begin operation', async () => {
+    let releaseBegin!: (value: { challengeId: string; qrImage: string; expiresAt: string }) => void;
+    const creating = new Promise<{ challengeId: string; qrImage: string; expiresAt: string }>((resolve) => { releaseBegin = resolve; });
+    const api = {
+      beginBiliServiceChallenge: vi.fn(() => creating),
+      cancelBiliServiceChallenge: vi.fn(async () => undefined),
+    };
+    const render = vi.fn();
+    const controller = createBiliServiceController(api as Parameters<typeof createBiliServiceController>[0], render, new ControlledTimers());
+    const starting = controller.beginReplacement();
+    await vi.waitFor(() => expect(api.beginBiliServiceChallenge).toHaveBeenCalledTimes(1));
+    const cancelling = controller.cancelReplacement();
+    releaseBegin({ challengeId: 'late-after-cancel', qrImage: 'data:image/png;base64,qr', expiresAt: '2030-01-01T00:05:00Z' });
+
+    await Promise.all([starting, cancelling]);
+
+    expect(api.cancelBiliServiceChallenge).toHaveBeenCalledWith('late-after-cancel');
+    expect(render.mock.calls.some(([snapshot]) => snapshot.challenge?.challengeId === 'late-after-cancel')).toBe(false);
+  });
+
+  it('dispose joins begin and cancels its late-created challenge', async () => {
+    let releaseBegin!: (value: { challengeId: string; qrImage: string; expiresAt: string }) => void;
+    const creating = new Promise<{ challengeId: string; qrImage: string; expiresAt: string }>((resolve) => { releaseBegin = resolve; });
+    const api = {
+      beginBiliServiceChallenge: vi.fn(() => creating),
+      cancelBiliServiceChallenge: vi.fn(async () => undefined),
+    };
+    const controller = createBiliServiceController(api as Parameters<typeof createBiliServiceController>[0], vi.fn(), new ControlledTimers());
+    const starting = controller.beginReplacement();
+    await vi.waitFor(() => expect(api.beginBiliServiceChallenge).toHaveBeenCalledTimes(1));
+    const disposing = controller.dispose();
+    releaseBegin({ challengeId: 'late-after-dispose', qrImage: 'data:image/png;base64,qr', expiresAt: '2030-01-01T00:05:00Z' });
+
+    await Promise.all([starting, disposing]);
+
+    expect(api.cancelBiliServiceChallenge).toHaveBeenCalledWith('late-after-dispose');
+  });
 });
 
 describe('Bilibili service replacement view', () => {
+  it('never renders masked UID material in visible text or DOM attributes', async () => {
+    const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (text) => { const node = new Element('#text', document); node.textContent = text; return node; } };
+    const root = new Element('div', document);
+    const api = {
+      biliServiceStatus: vi.fn(async () => ({ version: 1, health: 'healthy' as const, maskedUid: '****UID-PRIVATE-9588', lastVerifiedAt: '2030-01-01T00:00:00Z' })),
+      checkBiliService: vi.fn(), beginBiliServiceChallenge: vi.fn(), pollBiliServiceChallenge: vi.fn(), cancelBiliServiceChallenge: vi.fn(), replaceBiliServiceCredential: vi.fn(), authorizeAdminOperation: vi.fn(),
+    };
+    const view = mountBiliServiceView(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountBiliServiceView>[1]);
+    await flush();
+
+    const rendered = descendants(root).flatMap((node) => [
+      node.textContent,
+      node.src,
+      node.alt,
+      ...node.attributes.values(),
+      ...Object.values(node.dataset),
+    ]).join('|');
+    expect(rendered).not.toContain('UID-PRIVATE-9588');
+    expect(rendered).not.toMatch(/\bUID\b/i);
+    await view.dispose();
+  });
+
   it('shows a loading state and withholds actions until the initial status resolves', async () => {
     const document: DocumentLike = { createElement: (tag) => new Element(tag, document), createTextNode: (text) => { const node = new Element('#text', document); node.textContent = text; return node; } };
     const root = new Element('div', document);

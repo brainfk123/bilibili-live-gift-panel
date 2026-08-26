@@ -7,11 +7,11 @@ import { runAdminAction } from './ui/async-action';
 import { mountAdminNotice } from './ui/notice';
 import { createAdminState } from './ui/state';
 
-type BiliServiceAPI = Pick<HostedAPI, 'biliServiceStatus' | 'checkBiliService' | 'beginBiliServiceChallenge' | 'pollBiliServiceChallenge' | 'replaceBiliServiceCredential' | 'authorizeAdminOperation'>;
+type BiliServiceAPI = Pick<HostedAPI, 'biliServiceStatus' | 'checkBiliService' | 'beginBiliServiceChallenge' | 'pollBiliServiceChallenge' | 'cancelBiliServiceChallenge' | 'replaceBiliServiceCredential' | 'authorizeAdminOperation'>;
 
 const statusText = (status: BiliServiceSnapshot['status']): string => {
   if (!status) return '正在加载服务账号状态…';
-  if (status.health === 'healthy') return `运行正常 · UID ${status.maskedUid ?? '已隐藏'} · 最近验证 ${new Date(status.lastVerifiedAt).toLocaleString()}`;
+  if (status.health === 'healthy') return `运行正常 · 最近验证 ${new Date(status.lastVerifiedAt).toLocaleString()}`;
   return status.health === 'missing' ? '尚未配置 B站服务账号' : '服务账号暂不可用';
 };
 
@@ -56,7 +56,7 @@ export function mountBiliServiceView(host: HTMLElement, api: BiliServiceAPI, tim
     continueButton.addEventListener('click', () => controller.enterAuthorization());
     const regenerate = document.createElement('button'); regenerate.type = 'button'; regenerate.dataset.variant = 'secondary'; regenerate.textContent = '重新生成'; regenerate.disabled = snapshot.phase !== 'qr';
     regenerate.addEventListener('click', () => { void runAdminAction(regenerate, { idle: '重新生成', busy: '生成中…' }, () => controller.beginReplacement()); });
-    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.dataset.variant = 'quiet'; cancel.textContent = '取消'; cancel.disabled = snapshot.phase !== 'qr'; cancel.addEventListener('click', () => controller.cancelReplacement());
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.dataset.variant = 'quiet'; cancel.textContent = '取消'; cancel.disabled = snapshot.phase !== 'qr'; cancel.addEventListener('click', () => { void controller.cancelReplacement(); });
     actions.append(continueButton, regenerate, cancel);
     flow.append(intro, figure, actions);
     if (snapshot.phase === 'authorizing' || snapshot.phase === 'replacing') {
@@ -77,7 +77,7 @@ export function mountBiliServiceView(host: HTMLElement, api: BiliServiceAPI, tim
     check.hidden = !snapshot.status;
     begin.hidden = !snapshot.status;
     const checking = snapshot.phase === 'checking';
-    check.disabled = checking;
+    check.disabled = snapshot.phase !== 'idle';
     if (checking) {
       check.setAttribute('aria-busy', 'true');
       check.textContent = '检查中…';

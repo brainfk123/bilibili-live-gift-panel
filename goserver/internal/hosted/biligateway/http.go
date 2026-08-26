@@ -38,6 +38,7 @@ type credentialVerifier interface {
 	Begin(context.Context) (identity.Challenge, error)
 	PollCredential(context.Context, string) (identity.VerificationStage, error)
 	ConsumeCredential(context.Context, string, func(context.Context, []byte) error) error
+	Forget(string)
 }
 
 type credentialReplacer interface {
@@ -86,6 +87,12 @@ func (service *Service) PollChallenge(ctx context.Context, id string) (identity.
 		return "", identity.ErrVerificationUnavailable
 	}
 	return service.verifier.PollCredential(ctx, id)
+}
+func (service *Service) CancelChallenge(id string) {
+	if service == nil || id == "" {
+		return
+	}
+	service.verifier.Forget(id)
 }
 func (service *Service) Status(ctx context.Context) CredentialStatus {
 	if store, ok := service.credentials.(credentialStatusReader); ok {
@@ -141,6 +148,7 @@ func (service *Service) Replace(ctx context.Context, sessionToken, authorization
 type httpService interface {
 	Begin(context.Context) (identity.Challenge, error)
 	PollChallenge(context.Context, string) (identity.VerificationStage, error)
+	CancelChallenge(string)
 	Replace(context.Context, string, string, string) error
 	RequireSession(context.Context, string) error
 	Status(context.Context) CredentialStatus
@@ -173,6 +181,7 @@ func NewHTTPHandler(service httpService, options HTTPOptions) (*HTTPHandler, err
 	handler := &HTTPHandler{service: service, allowedOrigin: options.AllowedOrigin, csrfToken: options.CSRFToken, limiter: options.Limiter, clientIP: options.ClientIP, mux: http.NewServeMux()}
 	handler.mux.HandleFunc("POST /api/admin/bili-service/challenge", handler.begin)
 	handler.mux.HandleFunc("GET /api/admin/bili-service/challenge/{id}", handler.pollChallenge)
+	handler.mux.HandleFunc("DELETE /api/admin/bili-service/challenge/{id}", handler.cancelChallenge)
 	handler.mux.HandleFunc("POST /api/admin/bili-service/replace", handler.replace)
 	handler.mux.HandleFunc("GET /api/admin/bili-service/status", handler.status)
 	handler.mux.HandleFunc("POST /api/admin/bili-service/check", handler.check)
@@ -242,6 +251,24 @@ func (handler *HTTPHandler) pollChallenge(response http.ResponseWriter, request 
 	writeHTTPJSON(response, http.StatusOK, struct {
 		Status string `json:"status"`
 	}{Status: status})
+}
+
+func (handler *HTTPHandler) cancelChallenge(response http.ResponseWriter, request *http.Request) {
+	if !handler.acceptMutation(request) {
+		writeHTTPError(response, http.StatusForbidden, "request_rejected")
+		return
+	}
+	challengeID := request.PathValue("id")
+	if challengeID == "" || len(challengeID) > 256 || request.URL.RawQuery != "" || request.ContentLength != 0 {
+		writeHTTPError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	token, ok := handler.limitRequest(response, request, "bili_service_challenge")
+	if !ok || !handler.authenticate(response, request, token) {
+		return
+	}
+	handler.service.CancelChallenge(challengeID)
+	response.WriteHeader(http.StatusNoContent)
 }
 
 func (handler *HTTPHandler) replace(response http.ResponseWriter, request *http.Request) {
