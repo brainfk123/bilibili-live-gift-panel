@@ -3,11 +3,51 @@ package roomwatcher
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 )
+
+// This test fails if SetReferences cannot publish complete membership
+// snapshots, publishes an unchanged room, or starts an added room before the
+// removed room's snapshot has been durably ordered.
+func TestManagerPublishesOnlyChangedReferenceSnapshotsInRemovalFirstOrder(t *testing.T) {
+	repository := &fakeRepository{}
+	manager, err := NewManager(fakeProbe{state: ObservedOffline}, repository, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetReferences(context.Background(), []Reference{{AccountID: 1, RoomID: "7"}, {AccountID: 2, RoomID: "7"}, {AccountID: 3, RoomID: "9"}}); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := manager.ReplayEvents(context.Background(), 0, 2)
+	if err != nil || len(initial) != 2 {
+		t.Fatalf("initial ReplayEvents = %#v, %v", initial, err)
+	}
+	if err := manager.SetReferences(context.Background(), []Reference{{AccountID: 2, RoomID: "7"}, {AccountID: 1, RoomID: "8"}, {AccountID: 3, RoomID: "9"}}); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := manager.ReplayEvents(context.Background(), 2, 2)
+	if err != nil || len(changed) != 2 {
+		t.Fatalf("changed ReplayEvents = %#v, %v", changed, err)
+	}
+	removed, added := changed[0], changed[1]
+	if removed.Sequence != 3 || removed.RoomReferencesChanged == nil || removed.RoomReferencesChanged.RoomID != "7" || !slices.Equal(removed.RoomReferencesChanged.AccountIDs, []int64{2}) {
+		t.Fatalf("removed-room event = %#v, want sequence 3 and room 7 snapshot [2]", removed)
+	}
+	if added.Sequence != 4 || added.RoomReferencesChanged == nil || added.RoomReferencesChanged.RoomID != "8" || !slices.Equal(added.RoomReferencesChanged.AccountIDs, []int64{1}) {
+		t.Fatalf("added-room event = %#v, want sequence 4 and room 8 snapshot [1]", added)
+	}
+	if err := manager.SetReferences(context.Background(), []Reference{{AccountID: 1, RoomID: "8"}, {AccountID: 2, RoomID: "7"}, {AccountID: 3, RoomID: "9"}}); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := manager.ReplayEvents(context.Background(), 4, 1)
+	if err != nil || len(unchanged) != 0 {
+		t.Fatalf("duplicate snapshot replay = %#v, %v; want no new event", unchanged, err)
+	}
+}
 
 func TestManagerDeduplicatesCanonicalRoomReferences(t *testing.T) {
 	repository := &fakeRepository{}
@@ -50,13 +90,16 @@ func TestManagerRemovesLastReferenceAfterPersistingTerminalState(t *testing.T) {
 	if err := manager.SetReferences(context.Background(), []Reference{{AccountID: 1, RoomID: "7"}}); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case transition := <-manager.Transitions():
-		if transition.RoomID != "7" || transition.From != StateOffline || transition.To != StateLive || !transition.NewBroadcast || transition.Sequence != 1 || transition.LeaseEpoch != 7 {
-			t.Fatalf("published transition = %#v, want opening live transition for room 7", transition)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("opening live transition was not published")
+	events, replayErr := manager.ReplayEvents(context.Background(), 0, 2)
+	if replayErr != nil || len(events) != 2 {
+		t.Fatalf("ReplayEvents = %#v, %v", events, replayErr)
+	}
+	references, state := events[0], events[1]
+	if references.Sequence != 1 || references.RoomReferencesChanged == nil || !slices.Equal(references.RoomReferencesChanged.AccountIDs, []int64{1}) {
+		t.Fatalf("published references = %#v, want room 7 snapshot [1]", references)
+	}
+	if transition := state.RoomStateChanged; state.Sequence != 2 || transition == nil || transition.RoomID != "7" || transition.From != StateOffline || transition.To != StateLive || !transition.NewBroadcast || transition.LeaseEpoch != 7 {
+		t.Fatalf("published state event = %#v, want opening live transition for room 7", state)
 	}
 	if err := manager.SetReferences(context.Background(), nil); err != nil {
 		t.Fatal(err)
@@ -79,15 +122,22 @@ func TestManagerRemovesLastReferenceOnlyAfterAtomicRepositoryReceipt(t *testing.
 	if err := manager.SetReferences(context.Background(), []Reference{{AccountID: 1, RoomID: "7"}}); err != nil {
 		t.Fatal(err)
 	}
-	<-manager.Transitions()
+	_ = awaitEvent(t, manager.Events())
 	if err := manager.SetReferences(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := repository.atomicTerminalsSnapshot(); len(got) != 1 || got[0].RoomID != "7" || got[0].From != StateLive || got[0].To != StateOffline {
 		t.Fatalf("atomic terminal candidates = %#v, want room 7 live -> offline", got)
 	}
-	if transition := awaitTransition(t, manager.Transitions()); transition.To != StateOffline || transition.Sequence != 2 {
-		t.Fatalf("terminal notification = %#v, want durable receipt sequence 2", transition)
+	if references := awaitEvent(t, manager.Events()); references.Sequence != 3 || references.RoomReferencesChanged == nil || len(references.RoomReferencesChanged.AccountIDs) != 0 {
+		t.Fatalf("terminal reference notification = %#v, want empty sequence 3 snapshot", references)
+	}
+	events, replayErr := manager.ReplayEvents(context.Background(), 3, 1)
+	if replayErr != nil || len(events) != 1 {
+		t.Fatalf("terminal ReplayEvents = %#v, %v", events, replayErr)
+	}
+	if event := events[0]; event.Sequence != 4 || event.RoomStateChanged == nil || event.RoomStateChanged.To != StateOffline {
+		t.Fatalf("terminal state notification = %#v, want durable receipt sequence 4", event)
 	}
 }
 
@@ -125,9 +175,9 @@ func TestManagerRetriesInitialProbeAndPersistenceFailuresWithoutLeakingWatcher(t
 	}
 }
 
-func TestManagerNotifiesAndReplaysEveryDurableTransitionWithPausedConsumer(t *testing.T) {
+func TestManagerNotifiesAndReplaysEveryDurableEventWithPausedConsumer(t *testing.T) {
 	repository := &fakeRepository{}
-	manager, err := NewManager(fakeProbe{state: ObservedLive}, repository, Options{})
+	manager, err := NewManager(fakeProbe{state: ObservedOffline}, repository, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,23 +196,23 @@ func TestManagerNotifiesAndReplaysEveryDurableTransitionWithPausedConsumer(t *te
 		t.Fatal("SetReferences blocked while its transition consumer was paused")
 	}
 	select {
-	case transition := <-manager.Transitions():
-		if transition.Sequence != 1 || transition.LeaseEpoch != 7 {
-			t.Fatalf("first notification = %#v, want durable sequence 1", transition)
+	case event := <-manager.Events():
+		if event.Sequence != 1 || event.RoomReferencesChanged == nil {
+			t.Fatalf("first notification = %#v, want durable reference sequence 1", event)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("paused consumer did not receive a bounded replay notification")
 	}
-	replayed, err := manager.ReplayTransitions(context.Background(), 0, 129)
+	replayed, err := manager.ReplayEvents(context.Background(), 0, 129)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(replayed) != 129 {
-		t.Fatalf("replayed transitions = %d, want 129", len(replayed))
+		t.Fatalf("replayed events = %d, want 129", len(replayed))
 	}
-	for index, transition := range replayed {
-		if want := uint64(index + 1); transition.Sequence != want || transition.LeaseEpoch != 7 {
-			t.Fatalf("replayed transition %d = %#v, want durable sequence %d", index, transition, want)
+	for index, event := range replayed {
+		if want := uint64(index + 1); event.Sequence != want || event.RoomReferencesChanged == nil {
+			t.Fatalf("replayed event %d = %#v, want durable reference sequence %d", index, event, want)
 		}
 	}
 }
@@ -173,12 +223,12 @@ func TestManagerKeepsNotificationOrderDuringForcedInterleavedReferenceUpdates(t 
 	secondNotifyStarted := make(chan struct{})
 	releaseSecondNotify := make(chan struct{})
 	repository := &fakeRepository{}
-	manager, err := NewManager(fakeProbe{state: ObservedLive}, repository, Options{beforeNotify: func(transition Transition) {
-		if transition.Sequence == 1 {
+	manager, err := NewManager(fakeProbe{state: ObservedOffline}, repository, Options{beforeNotify: func(event Event) {
+		if event.Sequence == 1 {
 			close(notifyStarted)
 			<-releaseNotify
 		}
-		if transition.Sequence == 2 {
+		if event.Sequence == 2 {
 			close(secondNotifyStarted)
 			<-releaseSecondNotify
 		}
@@ -204,16 +254,16 @@ func TestManagerKeepsNotificationOrderDuringForcedInterleavedReferenceUpdates(t 
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first SetReferences: %v", err)
 	}
-	if transition := awaitTransition(t, manager.Transitions()); transition.Sequence != 1 {
-		t.Fatalf("first notification sequence = %d, want 1", transition.Sequence)
+	if event := awaitEvent(t, manager.Events()); event.Sequence != 1 {
+		t.Fatalf("first notification sequence = %d, want 1", event.Sequence)
 	}
 	<-secondNotifyStarted
 	close(releaseSecondNotify)
 	if err := <-secondDone; err != nil {
 		t.Fatalf("second SetReferences: %v", err)
 	}
-	if transition := awaitTransition(t, manager.Transitions()); transition.Sequence != 2 {
-		t.Fatalf("second notification sequence = %d, want 2", transition.Sequence)
+	if event := awaitEvent(t, manager.Events()); event.Sequence != 2 {
+		t.Fatalf("second notification sequence = %d, want 2", event.Sequence)
 	}
 }
 
@@ -230,11 +280,11 @@ func TestManagerCloseDrainsNotificationClosesStreamAndRejectsNewWrites(t *testin
 	if err := manager.Wait(context.Background()); err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
-	if transition, ok := <-manager.Transitions(); !ok || transition.Sequence != 1 {
-		t.Fatalf("drained transition/ok = %#v/%v, want sequence 1/true", transition, ok)
+	if event, ok := <-manager.Events(); !ok || event.Sequence != 1 {
+		t.Fatalf("drained event/ok = %#v/%v, want sequence 1/true", event, ok)
 	}
-	if _, ok := <-manager.Transitions(); ok {
-		t.Fatal("transition stream remained open after buffered notification drained")
+	if _, ok := <-manager.Events(); ok {
+		t.Fatal("event stream remained open after buffered notification drained")
 	}
 	if err := manager.SetReferences(context.Background(), nil); !errors.Is(err, ErrClosed) {
 		t.Fatalf("SetReferences after Close error = %v, want ErrClosed", err)
@@ -250,11 +300,11 @@ func TestManagerRejectsReplayLimitBeforeRepositoryAllocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.ReplayTransitions(context.Background(), 0, int(^uint(0)>>1)); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("ReplayTransitions() error = %v, want ErrInvalidInput", err)
+	if _, err := manager.ReplayEvents(context.Background(), 0, int(^uint(0)>>1)); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("ReplayEvents() error = %v, want ErrInvalidInput", err)
 	}
 	if repository.replayCalls() != 0 {
-		t.Fatalf("ReplayTransitions reached repository %d times, want 0", repository.replayCalls())
+		t.Fatalf("ReplayEvents reached repository %d times, want 0", repository.replayCalls())
 	}
 }
 
@@ -285,6 +335,7 @@ type fakeRepository struct {
 	mu              sync.Mutex
 	references      []Reference
 	transitions     []Transition
+	events          []Event
 	firstRecordErr  error
 	sequence        uint64
 	syncCount       int
@@ -293,31 +344,41 @@ type fakeRepository struct {
 	recoverable     []RecoverableRoom
 }
 
-func (repository *fakeRepository) SyncReferences(_ context.Context, references []Reference, terminal []Transition) ([]Transition, error) {
+func (repository *fakeRepository) SyncReferences(_ context.Context, references []Reference, terminal []Transition) ([]Event, error) {
 	repository.mu.Lock()
+	snapshots := changedReferenceSnapshots(repository.references, references)
 	repository.references = append([]Reference(nil), references...)
 	repository.syncCount++
 	repository.atomicTerminals = append([]Transition(nil), terminal...)
-	persisted := make([]Transition, 0, len(terminal))
+	persisted := make([]Event, 0, len(snapshots)+len(terminal))
+	for _, snapshot := range snapshots {
+		repository.sequence++
+		copy := snapshot
+		copy.AccountIDs = append([]int64(nil), snapshot.AccountIDs...)
+		event := Event{Sequence: repository.sequence, RoomReferencesChanged: &copy}
+		repository.events = append(repository.events, event)
+		persisted = append(persisted, event)
+	}
 	for _, transition := range terminal {
 		repository.sequence++
-		transition.Sequence = repository.sequence
 		transition.LeaseEpoch = 7
 		repository.transitions = append(repository.transitions, transition)
-		persisted = append(persisted, transition)
+		event := Event{Sequence: repository.sequence, RoomStateChanged: &transition}
+		repository.events = append(repository.events, event)
+		persisted = append(persisted, event)
 	}
 	repository.mu.Unlock()
 	return persisted, nil
 }
 
-func (repository *fakeRepository) ReplayTransitions(_ context.Context, after uint64, limit int) ([]Transition, error) {
+func (repository *fakeRepository) ReplayEvents(_ context.Context, after uint64, limit int) ([]Event, error) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
 	repository.replayCount++
-	result := make([]Transition, 0, min(limit, len(repository.transitions)))
-	for _, transition := range repository.transitions {
-		if transition.Sequence > after {
-			result = append(result, transition)
+	result := make([]Event, 0, min(limit, len(repository.events)))
+	for _, event := range repository.events {
+		if event.Sequence > after {
+			result = append(result, event)
 			if len(result) == limit {
 				break
 			}
@@ -332,19 +393,20 @@ func (repository *fakeRepository) LoadRecoverable(context.Context) ([]Recoverabl
 	return append([]RecoverableRoom(nil), repository.recoverable...), nil
 }
 
-func (repository *fakeRepository) RecordTransition(_ context.Context, transition Transition) (Transition, error) {
+func (repository *fakeRepository) RecordTransition(_ context.Context, transition Transition) (Event, error) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
 	if repository.firstRecordErr != nil {
 		err := repository.firstRecordErr
 		repository.firstRecordErr = nil
-		return Transition{}, err
+		return Event{}, err
 	}
 	repository.sequence++
-	transition.Sequence = repository.sequence
 	transition.LeaseEpoch = 7
 	repository.transitions = append(repository.transitions, transition)
-	return transition, nil
+	event := Event{Sequence: repository.sequence, RoomStateChanged: &transition}
+	repository.events = append(repository.events, event)
+	return event, nil
 }
 
 func (repository *fakeRepository) referencesSnapshot() []Reference {
@@ -379,13 +441,13 @@ func (repository *fakeRepository) transitionsSnapshot() []Transition {
 	return append([]Transition(nil), repository.transitions...)
 }
 
-func awaitTransition(t *testing.T, transitions <-chan Transition) Transition {
+func awaitEvent(t *testing.T, events <-chan Event) Event {
 	t.Helper()
 	select {
-	case transition := <-transitions:
-		return transition
+	case event := <-events:
+		return event
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for transition notification")
-		return Transition{}
+		t.Fatal("timed out waiting for room event notification")
+		return Event{}
 	}
 }

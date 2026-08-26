@@ -3,7 +3,9 @@ package roomwatcher
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"slices"
 	"sort"
 	"time"
 )
@@ -41,8 +43,8 @@ var _ Repository = (*sqlRepository)(nil)
 
 // SyncReferences atomically replaces the enabled account-to-room snapshot.
 // State rows are retained after the final reference disappears so the terminal
-// transition can be recorded by Manager before this method's next snapshot.
-func (repository *sqlRepository) SyncReferences(ctx context.Context, references []Reference, terminal []Transition) ([]Transition, error) {
+// state event and empty reference snapshot can share this transaction.
+func (repository *sqlRepository) SyncReferences(ctx context.Context, references []Reference, terminal []Transition) ([]Event, error) {
 	if !repository.ready() || ctx == nil {
 		return nil, ErrInvalidInput
 	}
@@ -66,22 +68,30 @@ func (repository *sqlRepository) SyncReferences(ctx context.Context, references 
 		}
 	}()
 
-	tail, err := lockOutboxTail(ctx, transaction, len(terminal) != 0)
+	// Reference changes also allocate outbox sequences. Take the singleton tail
+	// before any room/reference lock so every writer uses one lock order.
+	tail, err := lockOutboxTail(ctx, transaction, true)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := transaction.QueryContext(ctx, "SELECT DISTINCT room_id FROM room_monitor_references FOR UPDATE")
+	rows, err := transaction.QueryContext(ctx, "SELECT account_id, room_id FROM room_monitor_references ORDER BY room_id, account_id FOR UPDATE")
 	if err != nil {
 		return nil, ErrRepositoryUnavailable
 	}
-	formerRooms := make([]string, 0)
+	formerReferences := make([]Reference, 0)
 	for rows.Next() {
+		var accountID int64
 		var roomID string
-		if err := rows.Scan(&roomID); err != nil {
+		if err := rows.Scan(&accountID, &roomID); err != nil || accountID <= 0 {
 			_ = rows.Close()
 			return nil, ErrRepositoryUnavailable
 		}
-		formerRooms = append(formerRooms, roomID)
+		canonical, canonicalErr := canonicalRoomID(roomID)
+		if canonicalErr != nil || canonical != roomID {
+			_ = rows.Close()
+			return nil, ErrRepositoryUnavailable
+		}
+		formerReferences = append(formerReferences, Reference{AccountID: accountID, RoomID: roomID})
 	}
 	if err := rows.Close(); err != nil {
 		return nil, ErrRepositoryUnavailable
@@ -90,9 +100,10 @@ func (repository *sqlRepository) SyncReferences(ctx context.Context, references 
 		return nil, ErrRepositoryUnavailable
 	}
 
-	rooms := make(map[string]struct{}, len(formerRooms)+len(normalized))
-	for _, roomID := range formerRooms {
-		rooms[roomID] = struct{}{}
+	referenceEvents := changedReferenceSnapshots(formerReferences, normalized)
+	rooms := make(map[string]struct{}, len(formerReferences)+len(normalized))
+	for _, reference := range formerReferences {
+		rooms[reference.RoomID] = struct{}{}
 	}
 	for _, reference := range normalized {
 		rooms[reference.RoomID] = struct{}{}
@@ -117,7 +128,14 @@ func (repository *sqlRepository) SyncReferences(ctx context.Context, references 
 			return nil, ErrRepositoryUnavailable
 		}
 	}
-	persisted := make([]Transition, 0, len(terminal))
+	persisted := make([]Event, 0, len(referenceEvents)+len(terminal))
+	for _, snapshot := range referenceEvents {
+		durable, err := repository.recordReferenceEvent(ctx, transaction, &tail, snapshot)
+		if err != nil {
+			return nil, err
+		}
+		persisted = append(persisted, durable)
+	}
 	for _, transition := range terminal {
 		durable, err := repository.recordTransition(ctx, transaction, &tail, transition)
 		if err != nil {
@@ -138,13 +156,13 @@ func (repository *sqlRepository) SyncReferences(ctx context.Context, references 
 // RecordTransition applies one validated state-machine boundary, changes the
 // business broadcast when needed, and inserts a replayable outbox record in
 // the same transaction.
-func (repository *sqlRepository) RecordTransition(ctx context.Context, transition Transition) (Transition, error) {
+func (repository *sqlRepository) RecordTransition(ctx context.Context, transition Transition) (Event, error) {
 	if !repository.ready() || ctx == nil || !validTransition(transition) {
-		return Transition{}, ErrInvalidInput
+		return Event{}, ErrInvalidInput
 	}
 	roomID, err := canonicalRoomID(transition.RoomID)
 	if err != nil {
-		return Transition{}, ErrInvalidInput
+		return Event{}, ErrInvalidInput
 	}
 	transition.RoomID = roomID
 	transition.ConfirmedAt = databaseTime(transition.ConfirmedAt)
@@ -155,7 +173,7 @@ func (repository *sqlRepository) RecordTransition(ctx context.Context, transitio
 
 	transaction, err := repository.db.BeginTx(ctx, nil)
 	if err != nil {
-		return Transition{}, ErrRepositoryUnavailable
+		return Event{}, ErrRepositoryUnavailable
 	}
 	committed := false
 	defer func() {
@@ -165,25 +183,25 @@ func (repository *sqlRepository) RecordTransition(ctx context.Context, transitio
 	}()
 	tail, err := lockOutboxTail(ctx, transaction, true)
 	if err != nil {
-		return Transition{}, err
+		return Event{}, err
 	}
 	durable, err := repository.recordTransition(ctx, transaction, &tail, transition)
 	if err != nil {
-		return Transition{}, err
+		return Event{}, err
 	}
 	if err := storeOutboxTail(ctx, transaction, tail); err != nil {
-		return Transition{}, err
+		return Event{}, err
 	}
 	if err := transaction.Commit(); err != nil {
-		return Transition{}, ErrRepositoryUnavailable
+		return Event{}, ErrRepositoryUnavailable
 	}
 	committed = true
 	return durable, nil
 }
 
-func (repository *sqlRepository) recordTransition(ctx context.Context, transaction *sql.Tx, tail *outboxTail, transition Transition) (Transition, error) {
+func (repository *sqlRepository) recordTransition(ctx context.Context, transaction *sql.Tx, tail *outboxTail, transition Transition) (Event, error) {
 	if tail == nil || tail.nextSequence == 0 || tail.nextSequence == ^uint64(0) {
-		return Transition{}, ErrRepositoryUnavailable
+		return Event{}, ErrRepositoryUnavailable
 	}
 	var storedState string
 	var storedGrace sql.NullTime
@@ -191,18 +209,18 @@ func (repository *sqlRepository) recordTransition(ctx context.Context, transacti
 	var leaseEpoch uint64
 	err := transaction.QueryRowContext(ctx, "SELECT state, grace_until, broadcast_session_id, lease_epoch FROM room_monitor_states WHERE room_id = ? FOR UPDATE", transition.RoomID).Scan(&storedState, &storedGrace, &broadcastSessionID, &leaseEpoch)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Transition{}, ErrTransitionConflict
+		return Event{}, ErrTransitionConflict
 	}
 	if err != nil || !validState(State(storedState)) || leaseEpoch == 0 {
-		return Transition{}, ErrRepositoryUnavailable
+		return Event{}, ErrRepositoryUnavailable
 	}
 	if (State(storedState) == StateOffline && (storedGrace.Valid || broadcastSessionID.Valid)) ||
 		(State(storedState) == StateLive && (storedGrace.Valid || !broadcastSessionID.Valid)) ||
 		(State(storedState) == StateGrace && (!storedGrace.Valid || !broadcastSessionID.Valid)) {
-		return Transition{}, ErrRepositoryUnavailable
+		return Event{}, ErrRepositoryUnavailable
 	}
 	if State(storedState) != transition.From || leaseEpoch == ^uint64(0) {
-		return Transition{}, ErrTransitionConflict
+		return Event{}, ErrTransitionConflict
 	}
 	nextEpoch := leaseEpoch + 1
 
@@ -213,33 +231,33 @@ func (repository *sqlRepository) recordTransition(ctx context.Context, transacti
 		if transition.From == StateOffline {
 			result, err := transaction.ExecContext(ctx, "INSERT INTO broadcast_sessions (room_id, started_at) VALUES (?, ?)", transition.RoomID, transition.ConfirmedAt)
 			if err != nil || !oneRow(result) {
-				return Transition{}, ErrRepositoryUnavailable
+				return Event{}, ErrRepositoryUnavailable
 			}
 			broadcastSessionID.Int64, err = result.LastInsertId()
 			if err != nil || broadcastSessionID.Int64 <= 0 {
-				return Transition{}, ErrRepositoryUnavailable
+				return Event{}, ErrRepositoryUnavailable
 			}
 			broadcastSessionID.Valid = true
 		} else if transition.From != StateGrace || !broadcastSessionID.Valid || transition.NewBroadcast {
-			return Transition{}, ErrTransitionConflict
+			return Event{}, ErrTransitionConflict
 		}
 		nextBroadcast = broadcastSessionID.Int64
 	case StateGrace:
 		if transition.From != StateLive || !broadcastSessionID.Valid || transition.NewBroadcast || transition.GraceUntil == nil || !transition.GraceUntil.After(transition.ConfirmedAt) {
-			return Transition{}, ErrTransitionConflict
+			return Event{}, ErrTransitionConflict
 		}
 		nextBroadcast = broadcastSessionID.Int64
 		nextGrace = *transition.GraceUntil
 	case StateOffline:
 		if (transition.From != StateLive && transition.From != StateGrace) || !broadcastSessionID.Valid || transition.NewBroadcast {
-			return Transition{}, ErrTransitionConflict
+			return Event{}, ErrTransitionConflict
 		}
 		result, err := transaction.ExecContext(ctx, "UPDATE broadcast_sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL", transition.ConfirmedAt, broadcastSessionID.Int64)
 		if err != nil || !oneRow(result) {
-			return Transition{}, ErrTransitionConflict
+			return Event{}, ErrTransitionConflict
 		}
 	default:
-		return Transition{}, ErrTransitionConflict
+		return Event{}, ErrTransitionConflict
 	}
 
 	result, err := transaction.ExecContext(ctx, "UPDATE room_monitor_states SET state = ?, grace_until = NULL, broadcast_session_id = ?, lease_epoch = ?, updated_at = ? WHERE room_id = ? AND lease_epoch = ?", transition.To, nextBroadcast, nextEpoch, transition.ConfirmedAt, transition.RoomID, leaseEpoch)
@@ -247,52 +265,97 @@ func (repository *sqlRepository) recordTransition(ctx context.Context, transacti
 		result, err = transaction.ExecContext(ctx, "UPDATE room_monitor_states SET state = ?, grace_until = ?, broadcast_session_id = ?, lease_epoch = ?, updated_at = ? WHERE room_id = ? AND lease_epoch = ?", transition.To, nextGrace, nextBroadcast, nextEpoch, transition.ConfirmedAt, transition.RoomID, leaseEpoch)
 	}
 	if err != nil || !oneRow(result) {
-		return Transition{}, ErrTransitionConflict
+		return Event{}, ErrTransitionConflict
 	}
 	sequence := tail.nextSequence
-	result, err = transaction.ExecContext(ctx, "INSERT INTO room_monitor_transitions (sequence, room_id, lease_epoch, from_state, to_state, confirmed_at, grace_until, new_broadcast) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", sequence, transition.RoomID, nextEpoch, transition.From, transition.To, transition.ConfirmedAt, nextGrace, transition.NewBroadcast)
+	result, err = transaction.ExecContext(ctx, "INSERT INTO room_monitor_transitions (sequence, event_kind, room_id, lease_epoch, from_state, to_state, confirmed_at, grace_until, new_broadcast, account_ids_json) VALUES (?, 'room_state_changed', ?, ?, ?, ?, ?, ?, ?, NULL)", sequence, transition.RoomID, nextEpoch, transition.From, transition.To, transition.ConfirmedAt, nextGrace, transition.NewBroadcast)
 	if err != nil || !oneRow(result) {
-		return Transition{}, ErrRepositoryUnavailable
+		return Event{}, ErrRepositoryUnavailable
 	}
 	tail.nextSequence++
 	tail.dirty = true
-	transition.Sequence = sequence
 	transition.LeaseEpoch = nextEpoch
-	return transition, nil
+	return Event{Sequence: sequence, RoomStateChanged: &transition}, nil
 }
 
-// ReplayTransitions fetches the ordered, durable outbox after a consumer's
+func (repository *sqlRepository) recordReferenceEvent(ctx context.Context, transaction *sql.Tx, tail *outboxTail, snapshot RoomReferencesChanged) (Event, error) {
+	if tail == nil || tail.nextSequence == 0 || tail.nextSequence == ^uint64(0) || !validReferencesChanged(snapshot) {
+		return Event{}, ErrRepositoryUnavailable
+	}
+	payload, err := json.Marshal(snapshot.AccountIDs)
+	if err != nil {
+		return Event{}, ErrRepositoryUnavailable
+	}
+	sequence := tail.nextSequence
+	result, err := transaction.ExecContext(ctx, "INSERT INTO room_monitor_transitions (sequence, event_kind, room_id, lease_epoch, from_state, to_state, confirmed_at, grace_until, new_broadcast, account_ids_json) VALUES (?, 'room_references_changed', ?, NULL, NULL, NULL, NULL, NULL, NULL, ?)", sequence, snapshot.RoomID, payload)
+	if err != nil || !oneRow(result) {
+		return Event{}, ErrRepositoryUnavailable
+	}
+	tail.nextSequence++
+	tail.dirty = true
+	copy := snapshot
+	copy.AccountIDs = append([]int64(nil), snapshot.AccountIDs...)
+	return Event{Sequence: sequence, RoomReferencesChanged: &copy}, nil
+}
+
+// ReplayEvents fetches the ordered, durable outbox after a consumer's
 // cursor. The caller chooses the bounded batch size.
-func (repository *sqlRepository) ReplayTransitions(ctx context.Context, afterSequence uint64, limit int) ([]Transition, error) {
+func (repository *sqlRepository) ReplayEvents(ctx context.Context, afterSequence uint64, limit int) ([]Event, error) {
 	if !repository.ready() || ctx == nil || limit <= 0 || limit > MaxReplayLimit {
 		return nil, ErrInvalidInput
 	}
-	rows, err := repository.db.QueryContext(ctx, "SELECT sequence, room_id, lease_epoch, from_state, to_state, confirmed_at, grace_until, new_broadcast FROM room_monitor_transitions WHERE sequence > ? ORDER BY sequence LIMIT ?", afterSequence, limit)
+	rows, err := repository.db.QueryContext(ctx, "SELECT sequence, event_kind, room_id, lease_epoch, from_state, to_state, confirmed_at, grace_until, new_broadcast, account_ids_json FROM room_monitor_transitions WHERE sequence > ? ORDER BY sequence LIMIT ?", afterSequence, limit)
 	if err != nil {
 		return nil, ErrRepositoryUnavailable
 	}
 	defer rows.Close()
-	transitions := make([]Transition, 0, limit)
+	events := make([]Event, 0, limit)
+	previousSequence := afterSequence
 	for rows.Next() {
-		var transition Transition
-		var graceUntil sql.NullTime
-		if err := rows.Scan(&transition.Sequence, &transition.RoomID, &transition.LeaseEpoch, &transition.From, &transition.To, &transition.ConfirmedAt, &graceUntil, &transition.NewBroadcast); err != nil || transition.Sequence == 0 || transition.LeaseEpoch == 0 || transition.ConfirmedAt.IsZero() {
+		var sequence uint64
+		var eventKind, roomID string
+		var leaseEpoch sql.Null[uint64]
+		var fromState, toState sql.NullString
+		var confirmedAt, graceUntil sql.NullTime
+		var newBroadcast sql.NullBool
+		var accountIDsJSON []byte
+		if err := rows.Scan(&sequence, &eventKind, &roomID, &leaseEpoch, &fromState, &toState, &confirmedAt, &graceUntil, &newBroadcast, &accountIDsJSON); err != nil || sequence <= previousSequence {
 			return nil, ErrRepositoryUnavailable
 		}
-		transition.ConfirmedAt = databaseTime(transition.ConfirmedAt)
-		if graceUntil.Valid {
-			value := databaseTime(graceUntil.Time)
-			transition.GraceUntil = &value
-		}
-		if !validDurableTransition(transition) {
+		event := Event{Sequence: sequence}
+		switch eventKind {
+		case "room_state_changed":
+			if !leaseEpoch.Valid || leaseEpoch.V == 0 || !fromState.Valid || !toState.Valid || !confirmedAt.Valid || !newBroadcast.Valid || accountIDsJSON != nil {
+				return nil, ErrRepositoryUnavailable
+			}
+			transition := Transition{RoomID: roomID, LeaseEpoch: leaseEpoch.V, From: State(fromState.String), To: State(toState.String), ConfirmedAt: databaseTime(confirmedAt.Time), NewBroadcast: newBroadcast.Bool}
+			if graceUntil.Valid {
+				value := databaseTime(graceUntil.Time)
+				transition.GraceUntil = &value
+			}
+			event.RoomStateChanged = &transition
+		case "room_references_changed":
+			if leaseEpoch.Valid || fromState.Valid || toState.Valid || confirmedAt.Valid || graceUntil.Valid || newBroadcast.Valid || accountIDsJSON == nil {
+				return nil, ErrRepositoryUnavailable
+			}
+			var accountIDs []int64
+			if err := json.Unmarshal(accountIDsJSON, &accountIDs); err != nil {
+				return nil, ErrRepositoryUnavailable
+			}
+			event.RoomReferencesChanged = &RoomReferencesChanged{RoomID: roomID, AccountIDs: accountIDs}
+		default:
 			return nil, ErrRepositoryUnavailable
 		}
-		transitions = append(transitions, transition)
+		if !validEvent(event) {
+			return nil, ErrRepositoryUnavailable
+		}
+		events = append(events, event)
+		previousSequence = sequence
 	}
 	if err := rows.Err(); err != nil {
 		return nil, ErrRepositoryUnavailable
 	}
-	return transitions, nil
+	return events, nil
 }
 
 // LoadRecoverable restores active and grace rooms with their shared account
@@ -357,12 +420,88 @@ func validTransition(transition Transition) bool {
 }
 
 func validDurableTransition(transition Transition) bool {
-	if transition.Sequence == 0 || transition.LeaseEpoch == 0 {
+	if transition.Sequence != 0 || transition.LeaseEpoch == 0 {
 		return false
 	}
-	transition.Sequence = 0
 	transition.LeaseEpoch = 0
 	return validTransition(transition)
+}
+
+func validReferencesChanged(snapshot RoomReferencesChanged) bool {
+	canonical, err := canonicalRoomID(snapshot.RoomID)
+	if err != nil || canonical != snapshot.RoomID {
+		return false
+	}
+	var previous int64
+	for _, accountID := range snapshot.AccountIDs {
+		if accountID <= previous {
+			return false
+		}
+		previous = accountID
+	}
+	return true
+}
+
+func validEvent(event Event) bool {
+	if event.Sequence == 0 || (event.RoomStateChanged == nil) == (event.RoomReferencesChanged == nil) {
+		return false
+	}
+	if event.RoomStateChanged != nil {
+		return validDurableTransition(*event.RoomStateChanged)
+	}
+	return validReferencesChanged(*event.RoomReferencesChanged)
+}
+
+// changedReferenceSnapshots compares two normalized snapshots and returns
+// removals before additions. Both groups are canonical-room sorted, and every
+// payload contains the complete next account set for that room.
+func changedReferenceSnapshots(former, next []Reference) []RoomReferencesChanged {
+	formerByRoom := referencesByRoom(former)
+	nextByRoom := referencesByRoom(next)
+	rooms := make(map[string]struct{}, len(formerByRoom)+len(nextByRoom))
+	for roomID := range formerByRoom {
+		rooms[roomID] = struct{}{}
+	}
+	for roomID := range nextByRoom {
+		rooms[roomID] = struct{}{}
+	}
+	removed, added := make([]RoomReferencesChanged, 0), make([]RoomReferencesChanged, 0)
+	for roomID := range rooms {
+		before, after := formerByRoom[roomID], nextByRoom[roomID]
+		if slices.Equal(before, after) {
+			continue
+		}
+		snapshot := RoomReferencesChanged{RoomID: roomID, AccountIDs: append([]int64{}, after...)}
+		if containsRemovedAccount(before, after) {
+			removed = append(removed, snapshot)
+		} else {
+			added = append(added, snapshot)
+		}
+	}
+	sort.Slice(removed, func(left, right int) bool { return removed[left].RoomID < removed[right].RoomID })
+	sort.Slice(added, func(left, right int) bool { return added[left].RoomID < added[right].RoomID })
+	return append(removed, added...)
+}
+
+func referencesByRoom(references []Reference) map[string][]int64 {
+	result := make(map[string][]int64)
+	for _, reference := range references {
+		result[reference.RoomID] = append(result[reference.RoomID], reference.AccountID)
+	}
+	return result
+}
+
+func containsRemovedAccount(former, next []int64) bool {
+	nextSet := make(map[int64]struct{}, len(next))
+	for _, accountID := range next {
+		nextSet[accountID] = struct{}{}
+	}
+	for _, accountID := range former {
+		if _, exists := nextSet[accountID]; !exists {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeTerminalTransitions(transitions []Transition) ([]Transition, error) {

@@ -124,29 +124,6 @@ func (repository *SessionRepository) OpenBroadcastSession(ctx context.Context, r
 	return broadcastSessionID, nil
 }
 
-func (repository *SessionRepository) EnabledAccountsForRoom(ctx context.Context, roomID string) ([]int64, error) {
-	if !repository.ready() || ctx == nil || !validRoomID(roomID) {
-		return nil, ErrInvalidInput
-	}
-	rows, err := repository.db.QueryContext(ctx, "SELECT r.account_id FROM account_runtime_rooms AS r JOIN streamer_accounts AS a ON a.id = r.account_id AND a.disabled_at IS NULL WHERE r.room_id = ? ORDER BY r.account_id", roomID)
-	if err != nil {
-		return nil, ErrUnavailable
-	}
-	defer rows.Close()
-	accounts := make([]int64, 0)
-	for rows.Next() {
-		var accountID int64
-		if err := rows.Scan(&accountID); err != nil || accountID <= 0 {
-			return nil, ErrUnavailable
-		}
-		accounts = append(accounts, accountID)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, ErrUnavailable
-	}
-	return accounts, nil
-}
-
 func (repository *SessionRepository) PersistTargetRoom(ctx context.Context, command PersistTargetRoomCommand) error {
 	if !repository.ready() || ctx == nil || !validOwnerFence(command.Owner) || !validRoomID(command.RoomID) || command.UpdatedAt.IsZero() {
 		return ErrInvalidInput

@@ -36,20 +36,20 @@ type Probe interface {
 // implementation belongs outside this package's state-machine core.
 type Repository interface {
 	// SyncReferences atomically replaces the reference snapshot and persists
-	// final watcher transitions caused by removed rooms. Returned transitions
-	// are durable outbox receipts and are the only removal notifications Manager
-	// may publish.
-	SyncReferences(context.Context, []Reference, []Transition) ([]Transition, error)
+	// complete snapshots for changed rooms plus final state boundaries caused
+	// by removed rooms. Returned events are the only notifications Manager may
+	// publish.
+	SyncReferences(context.Context, []Reference, []Transition) ([]Event, error)
 	// LoadRecoverable exposes persisted live/grace watchers to startup
 	// composition without requiring a concrete SQL repository type.
 	LoadRecoverable(context.Context) ([]RecoverableRoom, error)
 	// RecordTransition atomically records the candidate and returns its durable
-	// form with a monotonically increasing Sequence and fencing LeaseEpoch.
-	RecordTransition(context.Context, Transition) (Transition, error)
-	// ReplayTransitions returns the durable outbox strictly after afterSequence,
+	// Event envelope with a monotonically increasing Sequence and LeaseEpoch.
+	RecordTransition(context.Context, Transition) (Event, error)
+	// ReplayEvents returns the durable outbox strictly after afterSequence,
 	// in increasing Sequence order. Notifications are bounded wake-ups only;
 	// consumers resume losslessly from this repository cursor.
-	ReplayTransitions(context.Context, uint64, int) ([]Transition, error)
+	ReplayEvents(context.Context, uint64, int) ([]Event, error)
 }
 
 // Reference is one enabled account's use of a canonical room.
@@ -58,11 +58,26 @@ type Reference struct {
 	RoomID    string
 }
 
+// RoomReferencesChanged is the complete enabled-account snapshot for one
+// canonical room. AccountIDs are strictly increasing and duplicate-free.
+type RoomReferencesChanged struct {
+	RoomID     string
+	AccountIDs []int64
+}
+
+// Event is the only durable room-watcher delivery contract. Exactly one
+// payload is present; both kinds share the same commit-ordered Sequence.
+type Event struct {
+	Sequence              uint64
+	RoomStateChanged      *Transition
+	RoomReferencesChanged *RoomReferencesChanged
+}
+
 type Options struct {
 	Now func() time.Time
 
 	gracePeriod  time.Duration
-	beforeNotify func(Transition)
+	beforeNotify func(Event)
 }
 
 type Manager struct {
@@ -73,10 +88,10 @@ type Manager struct {
 
 	mu           sync.Mutex
 	watchers     map[string]*watcher
-	transitions  chan Transition
+	events       chan Event
 	done         chan struct{}
 	closed       bool
-	beforeNotify func(Transition)
+	beforeNotify func(Event)
 }
 
 type watcher struct {
@@ -99,7 +114,7 @@ func NewManager(probe Probe, repository Repository, options Options) (*Manager, 
 	}
 	manager := &Manager{
 		probe: probe, repository: repository, now: options.Now, grace: options.gracePeriod,
-		watchers: make(map[string]*watcher), transitions: make(chan Transition, 1), done: make(chan struct{}), beforeNotify: options.beforeNotify,
+		watchers: make(map[string]*watcher), events: make(chan Event, 1), done: make(chan struct{}), beforeNotify: options.beforeNotify,
 	}
 	return manager, nil
 }
@@ -132,15 +147,15 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 		}
 		removedRooms = append(removedRooms, roomID)
 	}
-	persistedTerminal, err := manager.repository.SyncReferences(ctx, normalized, terminal)
+	persistedEvents, err := manager.repository.SyncReferences(ctx, normalized, terminal)
 	if err != nil {
 		return err
 	}
 	for _, roomID := range removedRooms {
 		delete(manager.watchers, roomID)
 	}
-	for _, transition := range persistedTerminal {
-		manager.notifyLocked(transition)
+	for _, event := range persistedEvents {
+		manager.notifyLocked(event)
 	}
 	rooms := make([]string, 0, len(counts))
 	for roomID := range counts {
@@ -155,8 +170,8 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 			if err != nil {
 				return err
 			}
-			for _, transition := range persisted {
-				manager.notifyLocked(transition)
+			for _, event := range persisted {
+				manager.notifyLocked(event)
 			}
 			manager.watchers[roomID] = current
 		}
@@ -165,21 +180,21 @@ func (manager *Manager) SetReferences(ctx context.Context, references []Referenc
 	return nil
 }
 
-func (manager *Manager) Transitions() <-chan Transition {
+func (manager *Manager) Events() <-chan Event {
 	if manager == nil {
 		return nil
 	}
-	return manager.transitions
+	return manager.events
 }
 
-// ReplayTransitions resumes the durable outbox after the caller's last
+// ReplayEvents resumes the durable outbox after the caller's last
 // applied Sequence. It remains available after Close so a final notification
 // can be drained before the consumer releases its replay cursor.
-func (manager *Manager) ReplayTransitions(ctx context.Context, afterSequence uint64, limit int) ([]Transition, error) {
+func (manager *Manager) ReplayEvents(ctx context.Context, afterSequence uint64, limit int) ([]Event, error) {
 	if manager == nil || ctx == nil || limit <= 0 || limit > MaxReplayLimit {
 		return nil, ErrInvalidInput
 	}
-	return manager.repository.ReplayTransitions(ctx, afterSequence, limit)
+	return manager.repository.ReplayEvents(ctx, afterSequence, limit)
 }
 
 // Close rejects future writes, retains one already-buffered wake-up for a
@@ -191,7 +206,7 @@ func (manager *Manager) Close() {
 	manager.mu.Lock()
 	if !manager.closed {
 		manager.closed = true
-		close(manager.transitions)
+		close(manager.events)
 		close(manager.done)
 	}
 	manager.mu.Unlock()
@@ -209,7 +224,7 @@ func (manager *Manager) Wait(ctx context.Context) error {
 	}
 }
 
-func (manager *Manager) probeLocked(ctx context.Context, roomID string, current *watcher) ([]Transition, error) {
+func (manager *Manager) probeLocked(ctx context.Context, roomID string, current *watcher) ([]Event, error) {
 	observed, err := manager.probe.Probe(ctx, roomID)
 	if err != nil {
 		return nil, err
@@ -219,7 +234,7 @@ func (manager *Manager) probeLocked(ctx context.Context, roomID string, current 
 		return nil, err
 	}
 	transitions := current.machine.Observe(state, manager.now())
-	persisted := make([]Transition, 0, len(transitions))
+	persisted := make([]Event, 0, len(transitions))
 	for _, transition := range transitions {
 		durable, changed, err := manager.persistLocked(ctx, roomID, transition)
 		if err != nil {
@@ -232,14 +247,14 @@ func (manager *Manager) probeLocked(ctx context.Context, roomID string, current 
 	return persisted, nil
 }
 
-func (manager *Manager) persistLocked(ctx context.Context, roomID string, transition Transition) (Transition, bool, error) {
+func (manager *Manager) persistLocked(ctx context.Context, roomID string, transition Transition) (Event, bool, error) {
 	if transition.From == transition.To {
-		return Transition{}, false, nil
+		return Event{}, false, nil
 	}
 	transition.RoomID = roomID
 	persisted, err := manager.repository.RecordTransition(ctx, transition)
 	if err != nil {
-		return Transition{}, false, err
+		return Event{}, false, err
 	}
 	return persisted, true, nil
 }
@@ -249,12 +264,12 @@ func (manager *Manager) persistLocked(ctx context.Context, roomID string, transi
 // delivered notification is strictly ordered by durable Sequence. A full
 // buffer coalesces later notifications; consumers recover them through the
 // repository outbox rather than an unbounded in-memory queue.
-func (manager *Manager) notifyLocked(transition Transition) {
+func (manager *Manager) notifyLocked(event Event) {
 	if manager.beforeNotify != nil {
-		manager.beforeNotify(transition)
+		manager.beforeNotify(event)
 	}
 	select {
-	case manager.transitions <- transition:
+	case manager.events <- event:
 	default:
 	}
 }

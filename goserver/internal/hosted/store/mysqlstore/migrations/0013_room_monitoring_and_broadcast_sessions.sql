@@ -50,25 +50,38 @@ CREATE TABLE IF NOT EXISTS room_monitor_references (
 
 CREATE TABLE IF NOT EXISTS room_monitor_transitions (
     sequence BIGINT UNSIGNED NOT NULL,
+    event_kind VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     room_id VARCHAR(20) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    lease_epoch BIGINT UNSIGNED NOT NULL,
-    from_state VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    to_state VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    confirmed_at TIMESTAMP(6) NOT NULL,
+    lease_epoch BIGINT UNSIGNED NULL,
+    from_state VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    to_state VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    confirmed_at TIMESTAMP(6) NULL,
     grace_until TIMESTAMP(6) NULL,
-    new_broadcast TINYINT NOT NULL DEFAULT 0,
+    new_broadcast TINYINT NULL,
+    account_ids_json JSON NULL,
     PRIMARY KEY (sequence),
     KEY idx_room_monitor_transitions_room_sequence (room_id, sequence),
     CONSTRAINT fk_room_monitor_transitions_state FOREIGN KEY (room_id) REFERENCES room_monitor_states (room_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
-    CONSTRAINT chk_room_monitor_transitions_epoch CHECK (lease_epoch >= 1),
-    CONSTRAINT chk_room_monitor_transitions_from CHECK (from_state IN ('offline', 'live', 'grace')),
-    CONSTRAINT chk_room_monitor_transitions_to CHECK (to_state IN ('offline', 'live', 'grace')),
-    CONSTRAINT chk_room_monitor_transitions_change CHECK (from_state <> to_state),
-    CONSTRAINT chk_room_monitor_transitions_broadcast CHECK (new_broadcast IN (0, 1))
+    CONSTRAINT chk_room_monitor_transitions_kind CHECK (event_kind IN ('room_state_changed', 'room_references_changed')),
+    CONSTRAINT chk_room_monitor_transitions_epoch CHECK (lease_epoch IS NULL OR lease_epoch >= 1),
+    CONSTRAINT chk_room_monitor_transitions_from CHECK (from_state IS NULL OR from_state IN ('offline', 'live', 'grace')),
+    CONSTRAINT chk_room_monitor_transitions_to CHECK (to_state IS NULL OR to_state IN ('offline', 'live', 'grace')),
+    CONSTRAINT chk_room_monitor_transitions_change CHECK (from_state IS NULL OR to_state IS NULL OR from_state <> to_state),
+    CONSTRAINT chk_room_monitor_transitions_broadcast CHECK (new_broadcast IS NULL OR new_broadcast IN (0, 1)),
+    CONSTRAINT chk_room_monitor_transitions_payload CHECK (
+        (event_kind = 'room_state_changed'
+            AND lease_epoch IS NOT NULL AND from_state IS NOT NULL AND to_state IS NOT NULL
+            AND confirmed_at IS NOT NULL AND new_broadcast IS NOT NULL AND account_ids_json IS NULL)
+        OR (event_kind = 'room_references_changed'
+            AND lease_epoch IS NULL AND from_state IS NULL AND to_state IS NULL
+            AND confirmed_at IS NULL AND grace_until IS NULL AND new_broadcast IS NULL
+            AND account_ids_json IS NOT NULL AND JSON_TYPE(account_ids_json) = 'ARRAY')
+    )
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
--- Every transition takes this row first, then its room row. Serializing the
+-- Every room event takes this row first, then its room/reference rows. The
+-- reference snapshot and state payloads therefore share one commit order.
 -- allocator ensures a committed cursor never observes a later sequence while
 -- an earlier one remains uncommitted in another transaction.
 CREATE TABLE IF NOT EXISTS room_monitor_outbox_tail (

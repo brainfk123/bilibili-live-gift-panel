@@ -49,13 +49,18 @@ type SessionStore interface {
 	PendingMigration(context.Context, int64) (int64, bool, error)
 }
 
-// roomTransitionSessionStore is deliberately a narrow read port. The room
-// watcher persists the authoritative reference snapshot before it emits a
-// transition; runtime uses that snapshot rather than web connection leases to
-// decide which account executions belong to a live room.
-type roomTransitionSessionStore interface {
-	EnabledAccountsForRoom(context.Context, string) ([]int64, error)
+// roomEventSessionStore resolves only the business broadcast selected by a
+// durable state event. Account membership comes exclusively from the ordered
+// RoomReferencesChanged payload, never from a second database read path.
+type roomEventSessionStore interface {
 	OpenBroadcastSession(context.Context, string) (int64, error)
+}
+
+// legacyRoomTransitionSessionStore exists only for the pre-Event unit-level
+// compatibility entry point below. Production composition must use the
+// commit-ordered reference payloads through ApplyRoomEvent.
+type legacyRoomTransitionSessionStore interface {
+	EnabledAccountsForRoom(context.Context, string) ([]int64, error)
 }
 
 // lostOwnershipSessionStore is the narrow administrative cleanup port used
@@ -145,9 +150,11 @@ type Manager struct {
 }
 
 type roomTransitionState struct {
-	leaseEpoch    uint64
-	accounts      []int64
-	pendingOwners map[int64]OwnerFence
+	leaseEpoch     uint64
+	state          roomwatcher.State
+	accounts       []int64
+	activeAccounts []int64
+	pendingOwners  map[int64]OwnerFence
 }
 
 type accountRuntime struct {
@@ -592,18 +599,12 @@ func (manager *Manager) Snapshot(ctx context.Context, accountID int64) (configur
 	return state.Runtime, nil
 }
 
-// ApplyRoomTransition serializes the durable room-monitor outbox into account
-// executions. A transition is accepted only after its Sequence and per-room
-// LeaseEpoch pass fencing; retries of an already-applied outbox record are
-// intentionally no-ops. Web and OBS leases remain view-presence hints and do
-// not participate in this lifecycle.
-func (manager *Manager) ApplyRoomTransition(ctx context.Context, transition roomwatcher.Transition) error {
-	if manager == nil || ctx == nil || !validRoomTransition(transition) {
+// ApplyRoomEvent serializes the one durable room-monitor outbox into account
+// executions. Full reference snapshots define current membership; state
+// payloads apply lifecycle behavior to that latest roster.
+func (manager *Manager) ApplyRoomEvent(ctx context.Context, event roomwatcher.Event) error {
+	if manager == nil || ctx == nil || !validRoomEvent(event) {
 		return ErrInvalidInput
-	}
-	store, ok := manager.dependencies.Sessions.(roomTransitionSessionStore)
-	if !ok {
-		return ErrUnavailable
 	}
 	manager.transitionMu.Lock()
 	defer manager.transitionMu.Unlock()
@@ -613,18 +614,29 @@ func (manager *Manager) ApplyRoomTransition(ctx context.Context, transition room
 	if closed {
 		return ErrClosed
 	}
-	if transition.Sequence <= manager.lastSequence {
+	if event.Sequence <= manager.lastSequence {
 		return nil
 	}
-	room := manager.roomTransitions[transition.RoomID]
-	if transition.LeaseEpoch <= room.leaseEpoch {
-		return ErrUnavailable
+	if event.RoomReferencesChanged != nil {
+		if err := manager.applyRoomReferencesChanged(ctx, *event.RoomReferencesChanged); err != nil {
+			return err
+		}
+	} else if err := manager.applyRoomStateChanged(ctx, *event.RoomStateChanged); err != nil {
+		return err
 	}
+	manager.lastSequence = event.Sequence
+	return nil
+}
 
-	switch transition.To {
-	case roomwatcher.StateLive:
-		broadcastSessionID, err := store.OpenBroadcastSession(ctx, transition.RoomID)
-		if err != nil || broadcastSessionID <= 0 {
+// ApplyRoomTransition remains a compatibility wrapper for in-package callers
+// while production composition consumes ApplyRoomEvent.
+func (manager *Manager) ApplyRoomTransition(ctx context.Context, transition roomwatcher.Transition) error {
+	if manager == nil || ctx == nil {
+		return ErrInvalidInput
+	}
+	if transition.To == roomwatcher.StateLive {
+		store, ok := manager.dependencies.Sessions.(legacyRoomTransitionSessionStore)
+		if !ok {
 			return ErrUnavailable
 		}
 		accounts, err := store.EnabledAccountsForRoom(ctx, transition.RoomID)
@@ -635,48 +647,170 @@ func (manager *Manager) ApplyRoomTransition(ctx context.Context, transition room
 		if err != nil {
 			return ErrUnavailable
 		}
-		for _, accountID := range accounts {
-			if err := manager.startTransitionAccount(ctx, accountID, transition.RoomID, broadcastSessionID); err != nil {
-				return err
-			}
-			room.pendingOwners = manager.roomTransitions[transition.RoomID].pendingOwners
-			if !containsTransitionAccount(room.accounts, accountID) {
-				room.accounts = append(room.accounts, accountID)
-			}
+		manager.transitionMu.Lock()
+		room := manager.roomTransitions[transition.RoomID]
+		if room.state == "" && len(room.accounts) == 0 {
+			room.accounts = accounts
 			manager.roomTransitions[transition.RoomID] = room
 		}
-		if err := manager.setTransitionAdmission(room.accounts, transition.RoomID, true); err != nil {
-			return err
-		}
-	case roomwatcher.StateGrace:
-		// Keep the source/session open for a recovered broadcast, but fence new
-		// gifts immediately. Events admitted before this gate closes still drain.
-		if err := manager.setTransitionAdmission(room.accounts, transition.RoomID, false); err != nil {
-			return err
-		}
-	case roomwatcher.StateOffline:
-		for _, accountID := range room.accounts {
-			if err := manager.stopTransitionAccount(ctx, accountID, transition.RoomID, room.pendingOwners[accountID]); err != nil {
-				return err
-			}
-			delete(room.pendingOwners, accountID)
-		}
-		for _, accountID := range pendingTransitionAccounts(room.pendingOwners) {
-			if err := manager.stopTransitionAccount(ctx, accountID, transition.RoomID, room.pendingOwners[accountID]); err != nil {
-				return err
-			}
-			delete(room.pendingOwners, accountID)
-		}
-		room.accounts = nil
+		manager.transitionMu.Unlock()
 	}
-	room.leaseEpoch = transition.LeaseEpoch
-	manager.roomTransitions[transition.RoomID] = room
-	manager.lastSequence = transition.Sequence
+	sequence := transition.Sequence
+	transition.Sequence = 0
+	return manager.ApplyRoomEvent(ctx, roomwatcher.Event{Sequence: sequence, RoomStateChanged: &transition})
+}
+
+func (manager *Manager) applyRoomReferencesChanged(ctx context.Context, changed roomwatcher.RoomReferencesChanged) error {
+	roomID := changed.RoomID
+	room := manager.roomTransitions[roomID]
+	for _, accountID := range transitionDifference(room.activeAccounts, changed.AccountIDs) {
+		if err := manager.stopTransitionAccount(ctx, accountID, roomID, room.pendingOwners[accountID]); err != nil {
+			return err
+		}
+		room = manager.roomTransitions[roomID]
+		delete(room.pendingOwners, accountID)
+		room.activeAccounts = removeTransitionAccount(room.activeAccounts, accountID)
+		manager.roomTransitions[roomID] = room
+	}
+	if room.state == roomwatcher.StateLive {
+		additions := transitionDifference(changed.AccountIDs, room.activeAccounts)
+		if len(additions) != 0 {
+			store, ok := manager.dependencies.Sessions.(roomEventSessionStore)
+			if !ok {
+				return ErrUnavailable
+			}
+			broadcastSessionID, err := store.OpenBroadcastSession(ctx, roomID)
+			if err != nil || broadcastSessionID <= 0 {
+				return ErrUnavailable
+			}
+			for _, accountID := range additions {
+				if err := manager.stopTransitionAccountInOtherRooms(ctx, accountID, roomID); err != nil {
+					return err
+				}
+				if err := manager.startTransitionAccount(ctx, accountID, roomID, broadcastSessionID); err != nil {
+					return err
+				}
+				room = manager.roomTransitions[roomID]
+				if !containsTransitionAccount(room.activeAccounts, accountID) {
+					room.activeAccounts = append(room.activeAccounts, accountID)
+				}
+				manager.roomTransitions[roomID] = room
+			}
+		}
+	}
+	room = manager.roomTransitions[roomID]
+	room.accounts = append([]int64(nil), changed.AccountIDs...)
+	manager.roomTransitions[roomID] = room
 	return nil
 }
 
+func (manager *Manager) applyRoomStateChanged(ctx context.Context, transition roomwatcher.Transition) error {
+	roomID := transition.RoomID
+	room := manager.roomTransitions[roomID]
+	if transition.LeaseEpoch <= room.leaseEpoch {
+		return ErrUnavailable
+	}
+	switch transition.To {
+	case roomwatcher.StateLive:
+		store, ok := manager.dependencies.Sessions.(roomEventSessionStore)
+		if !ok {
+			return ErrUnavailable
+		}
+		broadcastSessionID, err := store.OpenBroadcastSession(ctx, roomID)
+		if err != nil || broadcastSessionID <= 0 {
+			return ErrUnavailable
+		}
+		for _, accountID := range transitionDifference(room.accounts, room.activeAccounts) {
+			if err := manager.stopTransitionAccountInOtherRooms(ctx, accountID, roomID); err != nil {
+				return err
+			}
+			if err := manager.startTransitionAccount(ctx, accountID, roomID, broadcastSessionID); err != nil {
+				return err
+			}
+			room = manager.roomTransitions[roomID]
+			if !containsTransitionAccount(room.activeAccounts, accountID) {
+				room.activeAccounts = append(room.activeAccounts, accountID)
+			}
+			manager.roomTransitions[roomID] = room
+		}
+		if err := manager.setTransitionAdmission(room.activeAccounts, roomID, true); err != nil {
+			return err
+		}
+	case roomwatcher.StateGrace:
+		if err := manager.setTransitionAdmission(room.activeAccounts, roomID, false); err != nil {
+			return err
+		}
+	case roomwatcher.StateOffline:
+		for _, accountID := range append([]int64(nil), room.activeAccounts...) {
+			if err := manager.stopTransitionAccount(ctx, accountID, roomID, room.pendingOwners[accountID]); err != nil {
+				return err
+			}
+			room = manager.roomTransitions[roomID]
+			delete(room.pendingOwners, accountID)
+			room.activeAccounts = removeTransitionAccount(room.activeAccounts, accountID)
+			manager.roomTransitions[roomID] = room
+		}
+		for _, accountID := range pendingTransitionAccounts(room.pendingOwners) {
+			if err := manager.stopTransitionAccount(ctx, accountID, roomID, room.pendingOwners[accountID]); err != nil {
+				return err
+			}
+			room = manager.roomTransitions[roomID]
+			delete(room.pendingOwners, accountID)
+			manager.roomTransitions[roomID] = room
+		}
+	}
+	room = manager.roomTransitions[roomID]
+	room.state = transition.To
+	room.leaseEpoch = transition.LeaseEpoch
+	manager.roomTransitions[roomID] = room
+	return nil
+}
+
+func (manager *Manager) stopTransitionAccountInOtherRooms(ctx context.Context, accountID int64, targetRoomID string) error {
+	roomIDs := make([]string, 0)
+	for roomID, room := range manager.roomTransitions {
+		if roomID != targetRoomID && (containsTransitionAccount(room.activeAccounts, accountID) || validOwnerFence(room.pendingOwners[accountID])) {
+			roomIDs = append(roomIDs, roomID)
+		}
+	}
+	sort.Strings(roomIDs)
+	for _, roomID := range roomIDs {
+		room := manager.roomTransitions[roomID]
+		if err := manager.stopTransitionAccount(ctx, accountID, roomID, room.pendingOwners[accountID]); err != nil {
+			return err
+		}
+		room = manager.roomTransitions[roomID]
+		delete(room.pendingOwners, accountID)
+		room.activeAccounts = removeTransitionAccount(room.activeAccounts, accountID)
+		room.accounts = removeTransitionAccount(room.accounts, accountID)
+		manager.roomTransitions[roomID] = room
+	}
+	return nil
+}
+
+func validRoomEvent(event roomwatcher.Event) bool {
+	if event.Sequence == 0 || (event.RoomStateChanged == nil) == (event.RoomReferencesChanged == nil) {
+		return false
+	}
+	if event.RoomStateChanged != nil {
+		return validRoomTransition(*event.RoomStateChanged)
+	}
+	changed := event.RoomReferencesChanged
+	if changed == nil || !validRoomID(changed.RoomID) {
+		return false
+	}
+	var previous int64
+	for _, accountID := range changed.AccountIDs {
+		if accountID <= previous {
+			return false
+		}
+		previous = accountID
+	}
+	return true
+}
+
 func validRoomTransition(transition roomwatcher.Transition) bool {
-	if !validRoomID(transition.RoomID) || transition.Sequence == 0 || transition.LeaseEpoch == 0 || transition.ConfirmedAt.IsZero() {
+	if !validRoomID(transition.RoomID) || transition.Sequence != 0 || transition.LeaseEpoch == 0 || transition.ConfirmedAt.IsZero() {
 		return false
 	}
 	switch transition.To {
@@ -689,6 +823,30 @@ func validRoomTransition(transition roomwatcher.Transition) bool {
 	default:
 		return false
 	}
+}
+
+func transitionDifference(left, right []int64) []int64 {
+	rightSet := make(map[int64]struct{}, len(right))
+	for _, accountID := range right {
+		rightSet[accountID] = struct{}{}
+	}
+	result := make([]int64, 0)
+	for _, accountID := range left {
+		if _, exists := rightSet[accountID]; !exists {
+			result = append(result, accountID)
+		}
+	}
+	return result
+}
+
+func removeTransitionAccount(accounts []int64, accountID int64) []int64 {
+	result := accounts[:0]
+	for _, current := range accounts {
+		if current != accountID {
+			result = append(result, current)
+		}
+	}
+	return result
 }
 
 func normalizeTransitionAccounts(accountIDs []int64) ([]int64, error) {
@@ -936,6 +1094,11 @@ func (manager *Manager) SetRoom(ctx context.Context, accountID int64, roomID str
 	}
 	account.mu.Lock()
 	stale := account.stale
+	if active != nil && active.owner != claim.Fence {
+		account.mu.Unlock()
+		manager.beginStaleCleanupLocked(account, active, claim.Fence)
+		return ErrUnavailable
+	}
 	account.owner = claim.Fence
 	account.reconcile = claim.Reconcile
 	if stale {
@@ -1110,6 +1273,7 @@ func (manager *Manager) drainDisabled(account *accountRuntime, done chan struct{
 		cancel()
 		account.opMu.Unlock()
 		if err == nil {
+			manager.forgetTransitionAccount(account.accountID, OwnerFence{})
 			return
 		}
 		account.mu.Lock()
@@ -1349,7 +1513,10 @@ func (manager *Manager) finishStaleCleanup(account *accountRuntime, active *acti
 	if account.transitionPending == active {
 		account.transitionPending = nil
 	}
-	if (!validOwnerFence(releaseFence) && active == nil) || needsReconcile {
+	if active != nil && account.owner == active.owner {
+		account.owner = OwnerFence{}
+		account.reconcile = false
+	} else if (!validOwnerFence(releaseFence) && active == nil) || needsReconcile {
 		account.owner = OwnerFence{}
 		account.reconcile = false
 	}
@@ -1366,13 +1533,18 @@ func (manager *Manager) finishStaleCleanup(account *accountRuntime, active *acti
 }
 
 func (manager *Manager) forgetLostTransitionOwner(accountID int64, fence OwnerFence) {
+	manager.forgetTransitionAccount(accountID, fence)
+}
+
+func (manager *Manager) forgetTransitionAccount(accountID int64, fence OwnerFence) {
 	manager.transitionMu.Lock()
 	defer manager.transitionMu.Unlock()
 	for roomID, room := range manager.roomTransitions {
-		if room.pendingOwners[accountID] == fence {
+		if !validOwnerFence(fence) || room.pendingOwners[accountID] == fence {
 			delete(room.pendingOwners, accountID)
-			manager.roomTransitions[roomID] = room
 		}
+		room.activeAccounts = removeTransitionAccount(room.activeAccounts, accountID)
+		manager.roomTransitions[roomID] = room
 	}
 }
 

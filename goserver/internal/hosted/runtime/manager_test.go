@@ -18,6 +18,149 @@ import (
 	"bilibili-live-gift-panel/internal/hosted/roomwatcher"
 )
 
+// This test fails if a live room keeps the membership captured at the state
+// boundary instead of reconciling later full reference snapshots.
+func TestManagerReconcilesReferencesWhileRoomIsAlreadyLive(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, broadcasts: map[string]int64{"42": 99}}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	if err := manager.ApplyRoomEvent(context.Background(), referencesEvent(1, "42", 7, 8)); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ApplyRoomEvent(context.Background(), stateEvent(2, roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, LeaseEpoch: 1})); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ApplyRoomEvent(context.Background(), referencesEvent(3, "42", 8, 9)); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ApplyRoomEvent(context.Background(), referencesEvent(4, "42", 8, 9)); err != nil {
+		t.Fatal(err)
+	}
+	if sessions.startedCount() != 3 {
+		t.Fatalf("started sessions = %d, want accounts 7, 8, then 9", sessions.startedCount())
+	}
+	ends := sessions.endCommands()
+	if len(ends) != 1 || ends[0].AccountID != 7 {
+		t.Fatalf("ended sessions = %#v, want only removed account 7", ends)
+	}
+	for _, accountID := range []int64{8, 9} {
+		status, statusErr := manager.Status(context.Background(), accountID)
+		if statusErr != nil || status.State != StateActive || status.RoomID != "42" {
+			t.Fatalf("account %d status = %#v, %v", accountID, status, statusErr)
+		}
+	}
+}
+
+// This test fails if disable cleanup leaves historical room membership that a
+// later grace/offline state event attempts to clean a second time.
+func TestDisabledAccountIsNotRevisitedByLaterGraceOrOfflineEvents(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log, logOwnership: true}, broadcasts: map[string]int64{"42": 99}}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	if err := manager.ApplyRoomEvent(context.Background(), referencesEvent(1, "42", 7)); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ApplyRoomEvent(context.Background(), stateEvent(2, roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, LeaseEpoch: 1})); err != nil {
+		t.Fatal(err)
+	}
+	manager.AccountDisabled(7)
+	account, accountErr := manager.accountExisting(7)
+	if accountErr != nil {
+		t.Fatal(accountErr)
+	}
+	var disabledDone <-chan struct{}
+	for disabledDone == nil {
+		account.mu.Lock()
+		disabledDone = account.closeDone
+		account.mu.Unlock()
+		goruntime.Gosched()
+	}
+	<-disabledDone
+	graceUntil := time.Unix(800, 0)
+	if err := manager.ApplyRoomEvent(context.Background(), stateEvent(3, roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateLive, To: roomwatcher.StateGrace, ConfirmedAt: time.Unix(200, 0), GraceUntil: &graceUntil, LeaseEpoch: 2})); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ApplyRoomEvent(context.Background(), referencesEvent(4, "42", 8)); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ApplyRoomEvent(context.Background(), stateEvent(5, roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateGrace, To: roomwatcher.StateOffline, ConfirmedAt: graceUntil, LeaseEpoch: 3})); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ApplyRoomEvent(context.Background(), referencesEvent(6, "42", 8, 9)); err != nil {
+		t.Fatal(err)
+	}
+	if sessions.startedCount() != 1 {
+		t.Fatalf("grace/offline reference additions started %d sessions, want the original one only", sessions.startedCount())
+	}
+	if got := len(sessions.releaseFences()); got != 1 {
+		t.Fatalf("ownership release calls = %d, want only disable cleanup", got)
+	}
+}
+
+func TestManagerSwitchesAlreadyLiveRoomsAfterOldCleanup(t *testing.T) {
+	log := &operationLog{}
+	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, broadcasts: map[string]int64{"42": 99, "84": 100}}
+	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42", "84": "84"})}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	for _, event := range []roomwatcher.Event{
+		referencesEvent(1, "42", 7),
+		stateEvent(2, roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, LeaseEpoch: 1}),
+		stateEvent(3, roomwatcher.Transition{RoomID: "84", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(101, 0), NewBroadcast: true, LeaseEpoch: 1}),
+		referencesEvent(4, "84", 7),
+		referencesEvent(5, "42"),
+	} {
+		if err := manager.ApplyRoomEvent(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := log.snapshot(); !containsOrderedOperations(got, []string{"start:42", "end:1", "start:84"}) {
+		t.Fatalf("live-room switch order = %v", got)
+	}
+	status, statusErr := manager.Status(context.Background(), 7)
+	if statusErr != nil || status.RoomID != "84" || status.SessionID != 2 {
+		t.Fatalf("switched status = %#v, %v", status, statusErr)
+	}
+}
+
+func TestManagerRejectsRoomEventWithoutExactlyOnePayload(t *testing.T) {
+	manager, err := NewManager(Dependencies{Sessions: &orderedSessions{enabled: true, log: &operationLog{}}, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(&operationLog{}, nil)}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	transition := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, LeaseEpoch: 1}
+	references := roomwatcher.RoomReferencesChanged{RoomID: "42", AccountIDs: []int64{7}}
+	for _, event := range []roomwatcher.Event{
+		{Sequence: 1},
+		{Sequence: 1, RoomStateChanged: &transition, RoomReferencesChanged: &references},
+		{Sequence: 1, RoomReferencesChanged: &roomwatcher.RoomReferencesChanged{RoomID: "42", AccountIDs: []int64{7, 7}}},
+		{Sequence: 1, RoomReferencesChanged: &roomwatcher.RoomReferencesChanged{RoomID: "42", AccountIDs: []int64{8, 7}}},
+	} {
+		if err := manager.ApplyRoomEvent(context.Background(), event); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("ApplyRoomEvent(%#v) = %v, want invalid input", event, err)
+		}
+	}
+}
+
+func referencesEvent(sequence uint64, roomID string, accountIDs ...int64) roomwatcher.Event {
+	return roomwatcher.Event{Sequence: sequence, RoomReferencesChanged: &roomwatcher.RoomReferencesChanged{RoomID: roomID, AccountIDs: accountIDs}}
+}
+
+func stateEvent(sequence uint64, transition roomwatcher.Transition) roomwatcher.Event {
+	return roomwatcher.Event{Sequence: sequence, RoomStateChanged: &transition}
+}
+
 func TestManagerAppliesRoomTransitionsAcrossGraceAndOffline(t *testing.T) {
 	log := &operationLog{}
 	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
@@ -118,7 +261,54 @@ func TestManagerSetRoomPersistsSelectionWithoutReplacingLiveExecution(t *testing
 	}
 }
 
-func TestManagerRejectsStaleRoomTransitionEpochAndIgnoresDuplicateSequence(t *testing.T) {
+// This test fails if SetRoom overwrites the execution's captured F1 fence with
+// a newer F2 claim before detecting that the active session is stale.
+func TestSetRoomFenceMismatchDoesNotOverwriteActiveOwner(t *testing.T) {
+	log := &operationLog{}
+	ends := &fenceMismatchSessions{
+		transitionSessions: transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, broadcasts: map[string]int64{"42": 99}},
+		endStarted:         make(chan struct{}),
+		allowEnd:           make(chan struct{}),
+	}
+	defer close(ends.allowEnd)
+	manager, err := NewManager(Dependencies{Sessions: ends, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42", "84": "84"})}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	if err := manager.ApplyRoomEvent(context.Background(), referencesEvent(1, "42", 7)); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ApplyRoomEvent(context.Background(), stateEvent(2, roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, LeaseEpoch: 1})); err != nil {
+		t.Fatal(err)
+	}
+	account, accountErr := manager.accountExisting(7)
+	if accountErr != nil {
+		t.Fatal(accountErr)
+	}
+	account.mu.Lock()
+	fenceOne := account.owner
+	account.mu.Unlock()
+	ends.mu.Lock()
+	ends.owner = OwnerFence{AccountID: 7, Token: fenceOne.Token, Epoch: fenceOne.Epoch + 1}
+	ends.mu.Unlock()
+	if err := manager.SetRoom(context.Background(), 7, "84"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("SetRoom fence mismatch = %v, want unavailable", err)
+	}
+	select {
+	case <-ends.endStarted:
+	case <-time.After(time.Second):
+		t.Fatal("stale active cleanup did not start")
+	}
+	account.mu.Lock()
+	gotOwner := account.owner
+	account.mu.Unlock()
+	if gotOwner != fenceOne {
+		t.Fatalf("account owner = %#v, want captured F1 %#v while F2 cleanup is pending", gotOwner, fenceOne)
+	}
+}
+
+func TestManagerRoomEventRejectsStaleEpochAndIgnoresDuplicateSequence(t *testing.T) {
 	log := &operationLog{}
 	sessions := &transitionSessions{orderedSessions: &orderedSessions{enabled: true, log: log}, accounts: map[string][]int64{"42": {7}}, broadcasts: map[string]int64{"42": 99}}
 	manager, err := NewManager(Dependencies{Sessions: sessions, Configuration: fakeConfiguration{}, Migration: fakeMigration{}, RoomSources: newOrderedRoomSources(log, map[string]string{"42": "42"})}, Options{})
@@ -126,16 +316,19 @@ func TestManagerRejectsStaleRoomTransitionEpochAndIgnoresDuplicateSequence(t *te
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
-	live := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, Sequence: 1, LeaseEpoch: 3}
-	if err := manager.ApplyRoomTransition(context.Background(), live); err != nil {
+	if err := manager.ApplyRoomEvent(context.Background(), referencesEvent(1, "42", 7)); err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.ApplyRoomTransition(context.Background(), live); err != nil {
-		t.Fatalf("duplicate transition = %v", err)
+	live := stateEvent(2, roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateOffline, To: roomwatcher.StateLive, ConfirmedAt: time.Unix(100, 0), NewBroadcast: true, LeaseEpoch: 3})
+	if err := manager.ApplyRoomEvent(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ApplyRoomEvent(context.Background(), live); err != nil {
+		t.Fatalf("duplicate event = %v", err)
 	}
 	graceUntil := time.Unix(800, 0)
-	staleEpoch := roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateLive, To: roomwatcher.StateGrace, ConfirmedAt: time.Unix(200, 0), GraceUntil: &graceUntil, Sequence: 2, LeaseEpoch: 3}
-	if err := manager.ApplyRoomTransition(context.Background(), staleEpoch); !errors.Is(err, ErrUnavailable) {
+	staleEpoch := stateEvent(3, roomwatcher.Transition{RoomID: "42", From: roomwatcher.StateLive, To: roomwatcher.StateGrace, ConfirmedAt: time.Unix(200, 0), GraceUntil: &graceUntil, LeaseEpoch: 3})
+	if err := manager.ApplyRoomEvent(context.Background(), staleEpoch); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("stale epoch = %v, want unavailable", err)
 	}
 	if sessions.startedCount() != 1 {
@@ -1458,6 +1651,23 @@ type transitionSessions struct {
 	accounts      map[string][]int64
 	broadcasts    map[string]int64
 	startFailures map[int64]int
+}
+
+type fenceMismatchSessions struct {
+	transitionSessions
+	endStarted chan struct{}
+	allowEnd   chan struct{}
+	once       sync.Once
+}
+
+func (sessions *fenceMismatchSessions) EndSession(ctx context.Context, command EndSessionCommand) error {
+	sessions.once.Do(func() { close(sessions.endStarted) })
+	select {
+	case <-sessions.allowEnd:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return sessions.transitionSessions.EndSession(ctx, command)
 }
 
 type sequencedShutdownEndSessions struct {

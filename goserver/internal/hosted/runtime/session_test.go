@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
-	"slices"
 	"testing"
 	"time"
 
@@ -173,23 +172,6 @@ func TestSessionRepositoryReconcileRejectsCrossAccountCommandBeforeDatabase(t *t
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestSessionRepositoryListsOnlyEnabledAccountsForCanonicalRoom(t *testing.T) {
-	database, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT r.account_id FROM account_runtime_rooms AS r JOIN streamer_accounts AS a ON a.id = r.account_id AND a.disabled_at IS NULL WHERE r.room_id = ? ORDER BY r.account_id")).
-		WithArgs("42").WillReturnRows(sqlmock.NewRows([]string{"account_id"}).AddRow(int64(7)).AddRow(int64(8)))
-	accounts, err := NewSessionRepository(database).EnabledAccountsForRoom(context.Background(), "42")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(accounts, []int64{7, 8}) {
-		t.Fatalf("accounts = %v, want [7 8]", accounts)
 	}
 }
 
