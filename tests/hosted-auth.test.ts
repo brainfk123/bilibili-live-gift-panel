@@ -1,11 +1,38 @@
 import { describe, expect, it, vi } from 'vitest';
 import { HostedAPI, HostedAPIError } from '../src/hosted/api';
-import { createAuthFlow, mountAuthView } from '../src/hosted/auth';
+import { createAuthController, createAuthFlow, mountAuthView } from '../src/hosted/auth';
+import { createBiliChallengePoller, type BiliChallengeTimerPort } from '../src/hosted/bili-challenge-poller';
 import { createAdminRecoveryFlow } from '../src/hosted/admin';
 import { createHostedViewHost } from '../src/hosted/shell';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+}
+
+class AuthControlledTimers implements BiliChallengeTimerPort {
+  private clock = 0;
+  private nextID = 1;
+  private readonly scheduled = new Map<number, { callback: () => void; dueAt: number }>();
+
+  setTimeout(callback: () => void, milliseconds: number): number {
+    const id = this.nextID++;
+    this.scheduled.set(id, { callback, dueAt: this.clock + milliseconds });
+    return id;
+  }
+
+  clearTimeout(id: number): void { this.scheduled.delete(id); }
+  now(): number { return this.clock; }
+  count(): number { return this.scheduled.size; }
+
+  async fireNext(): Promise<void> {
+    const next = [...this.scheduled.entries()].sort((left, right) => left[1].dueAt - right[1].dueAt)[0];
+    if (!next) throw new Error('No controlled timer is scheduled.');
+    const [id, task] = next;
+    this.scheduled.delete(id);
+    this.clock = task.dueAt;
+    task.callback();
+    for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+  }
 }
 
 describe('HostedAPI authentication contract', () => {
@@ -207,10 +234,11 @@ describe('Bilibili authentication lifecycle', () => {
     const root = new Element('div', document) as unknown as HTMLElement;
     const cancel = vi.fn(async () => undefined);
     const onExit = vi.fn();
+    const timers = new AuthControlledTimers();
     const mounted = mountAuthView(root, {
       beginLogin: vi.fn(async () => ({ challengeId: 'secret-challenge', qrImage: 'https://qr.invalid/secret', expiresAt: '2030-01-01T00:00:00Z' })),
       pollLogin: vi.fn(async () => ({ status: 'pending' as const, expiresAt: '2030-01-01T00:00:00Z' })), createSession: vi.fn(), cancelLogin: cancel, logout: vi.fn(async () => undefined),
-    }, { onSignedIn: vi.fn(), onRegistrationRequired: vi.fn(), onExit }, { setInterval: () => 1, clearInterval: vi.fn() });
+    }, { onSignedIn: vi.fn(), onRegistrationRequired: vi.fn(), onExit }, timers);
     await mounted.ready;
     expect(JSON.stringify(root)).toContain('https://qr.invalid/secret');
     const panel = (root as unknown as Element).children[0];
@@ -221,11 +249,14 @@ describe('Bilibili authentication lifecycle', () => {
     expect(JSON.stringify(root)).not.toContain('qr.invalid/secret');
   });
 
-  it('polls pending then creates a site session and forgets the terminal challenge', async () => {
+  it('polls pending and scanned then creates a site session and forgets the terminal challenge', async () => {
     const cancel = vi.fn(async () => undefined);
     const api = {
       beginLogin: vi.fn(async () => ({ challengeId: 'challenge', qrImage: 'https://qr.invalid/x', expiresAt: '2030-01-01T00:00:00Z' })),
-      pollLogin: vi.fn().mockResolvedValueOnce({ status: 'pending', expiresAt: '2030-01-01T00:00:00Z' }).mockResolvedValueOnce({ status: 'verified', expiresAt: '2030-01-01T00:00:00Z' }),
+      pollLogin: vi.fn()
+        .mockResolvedValueOnce({ status: 'pending', expiresAt: '2030-01-01T00:00:00Z' })
+        .mockResolvedValueOnce({ status: 'scanned', expiresAt: '2030-01-01T00:00:00Z' })
+        .mockResolvedValueOnce({ status: 'verified', expiresAt: '2030-01-01T00:00:00Z' }),
       createSession: vi.fn(async () => undefined), cancelLogin: cancel, logout: vi.fn(async () => undefined),
     };
     const statuses: string[] = [];
@@ -234,11 +265,87 @@ describe('Bilibili authentication lifecycle', () => {
     await flow.start();
     await flow.poll();
     await flow.poll();
+    await flow.poll();
     await flow.dispose();
 
-    expect(statuses).toEqual(['pending', 'pending', 'verified']);
+    expect(statuses).toEqual(['pending', 'pending', 'scanned', 'verified']);
     expect(api.createSession).toHaveBeenCalledWith('challenge');
     expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it('integrates ordinary authentication with the shared single-timer poller', async () => {
+    const timers = new AuthControlledTimers();
+    const statuses: string[] = [];
+    const signedIn = vi.fn();
+    const flow = createAuthFlow({
+      beginLogin: vi.fn(async () => ({ challengeId: 'challenge', qrImage: 'qr', expiresAt: '2030-01-01T00:00:00Z' })),
+      pollLogin: vi.fn()
+        .mockResolvedValueOnce({ status: 'scanned', expiresAt: '2030-01-01T00:00:00Z' })
+        .mockResolvedValueOnce({ status: 'verified', expiresAt: '2030-01-01T00:00:00Z' }),
+      createSession: vi.fn(async () => undefined),
+      cancelLogin: vi.fn(async () => undefined),
+      logout: vi.fn(async () => undefined),
+    }, {
+      onStatus: (status) => statuses.push(status),
+      onSignedIn: signedIn,
+      onRegistrationRequired: vi.fn(),
+    });
+    const controller = createAuthController(
+      flow,
+      (port, render) => createBiliChallengePoller(port, timers, render),
+      vi.fn(),
+    );
+
+    await controller.start();
+    expect(timers.count()).toBe(1);
+    await timers.fireNext();
+    expect(statuses).toEqual(['pending', 'scanned']);
+    expect(timers.count()).toBe(1);
+    await timers.fireNext();
+
+    expect(statuses).toEqual(['pending', 'scanned', 'verified']);
+    expect(signedIn).toHaveBeenCalledTimes(1);
+    expect(timers.count()).toBe(0);
+    await controller.dispose();
+  });
+
+  it('starts a fresh poller lifecycle when an expired login is regenerated', async () => {
+    const timers = new AuthControlledTimers();
+    const statuses: string[] = [];
+    let challengeNumber = 0;
+    const flow = createAuthFlow({
+      beginLogin: vi.fn(async () => ({
+        challengeId: `challenge-${++challengeNumber}`,
+        qrImage: 'qr',
+        expiresAt: '2030-01-01T00:00:00Z',
+      })),
+      pollLogin: vi.fn()
+        .mockResolvedValueOnce({ status: 'expired' })
+        .mockResolvedValueOnce({ status: 'scanned', expiresAt: '2030-01-01T00:00:00Z' }),
+      createSession: vi.fn(async () => undefined),
+      cancelLogin: vi.fn(async () => undefined),
+      logout: vi.fn(async () => undefined),
+    }, {
+      onStatus: (status) => statuses.push(status),
+      onSignedIn: vi.fn(),
+      onRegistrationRequired: vi.fn(),
+    });
+    const controller = createAuthController(
+      flow,
+      (port, render) => createBiliChallengePoller(port, timers, render),
+      vi.fn(),
+    );
+
+    await controller.start();
+    await timers.fireNext();
+    expect(timers.count()).toBe(0);
+
+    await controller.start();
+    expect(timers.count()).toBe(1);
+    await timers.fireNext();
+
+    expect(statuses).toEqual(['pending', 'expired', 'pending', 'scanned']);
+    await controller.dispose();
   });
 
   it('passes a one-shot registration intent only through the registration callback', async () => {
