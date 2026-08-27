@@ -516,6 +516,7 @@ func (runtime *RoomRuntime) Wait(ctx context.Context) error {
 // Dependencies contains the hosted HTTP application's external services.
 type Dependencies struct {
 	DB            healthChecker
+	Metrics       MetricsSnapshotFunc
 	Auth          http.Handler
 	Admin         http.Handler
 	AdminConsole  http.Handler
@@ -700,6 +701,9 @@ func New(dependencies Dependencies) http.Handler {
 			Status string `json:"status"`
 		}{Status: status})
 	})
+	if dependencies.Metrics != nil {
+		mux.Handle("/internal/metrics", internalMetricsHandler(dependencies.Metrics))
+	}
 	mux.HandleFunc("/api/bootstrap", func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Cache-Control", "no-store")
 		response.Header().Set("Content-Type", "application/json")

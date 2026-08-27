@@ -224,7 +224,7 @@ func TestStaticCompositionDoesNotStealOBSOrAPIRoutes(t *testing.T) {
 	static := statusHandler(http.StatusNonAuthoritativeInfo)
 	obs := statusHandler(http.StatusTeapot)
 	handler := composeHostedHTTPWithRuntimeOBSAndStatic(
-		healthyHostedDatabase{}, statusHandler(http.StatusAccepted), statusHandler(http.StatusAccepted),
+		healthyHostedDatabase{}, nil, statusHandler(http.StatusAccepted), statusHandler(http.StatusAccepted),
 		statusHandler(http.StatusAccepted), nil, nil, nil, nil, obs, nil, nil, static, "runtime-csrf",
 	)
 	publicID := strings.Repeat("A", 43)
@@ -248,6 +248,43 @@ func TestStaticCompositionDoesNotStealOBSOrAPIRoutes(t *testing.T) {
 		}
 	}
 }
+
+func TestProductionMetricsSnapshotCombinesOnlyRoomAndGatewayAggregates(t *testing.T) {
+	metrics := newProductionMetricsSnapshot(
+		staticRoomMetricsSource{status: app.RoomRuntimeStatus{WatchedRooms: 7, TransitionFailures: 9}},
+		staticBiliMetricsSource{status: biligateway.Status{CredentialVersion: 83, EgressOpen: true}},
+	)
+	handler := composeHostedHTTPWithRuntimeOBSAndStatic(
+		healthyHostedDatabase{}, metrics, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "runtime-csrf",
+	)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/internal/metrics", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("metrics status=%d body=%q", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, required := range []string{
+		"hosted_bilibili_breaker_open 1\n",
+		"hosted_room_watched 7\n",
+		"hosted_room_transition_failures_total 9\n",
+	} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("metrics body missing %q:\n%s", required, body)
+		}
+	}
+	if strings.Contains(body, "83") || strings.Contains(body, "credential") {
+		t.Fatalf("metrics body exposed credential metadata: %q", body)
+	}
+}
+
+type staticRoomMetricsSource struct{ status app.RoomRuntimeStatus }
+
+func (source staticRoomMetricsSource) Status() app.RoomRuntimeStatus { return source.status }
+
+type staticBiliMetricsSource struct{ status biligateway.Status }
+
+func (source staticBiliMetricsSource) Status() biligateway.Status { return source.status }
 
 func TestProductionHTTPServerContextsFollowProcessShutdown(t *testing.T) {
 	processContext, cancel := context.WithCancel(context.Background())
