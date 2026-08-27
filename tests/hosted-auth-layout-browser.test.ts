@@ -345,6 +345,34 @@ describe('ordinary Hosted Bilibili login layout in real Chromium', () => {
     await page.close();
   });
 
+  it('opens same-device verification in a separate page while the original challenge keeps polling', async () => {
+    const { page, consoleErrors } = await openHarness(browser, baseURL, { width: 390, height: 844 });
+    await mountState(page, 'pending');
+    const mobileLink = page.getByRole('link', { name: '在本机打开 B 站确认' });
+
+    expect(await mobileLink.getAttribute('target')).toBe('_blank');
+    expect((await mobileLink.getAttribute('rel'))?.split(/\s+/).sort()).toEqual(['noopener', 'noreferrer']);
+
+    await page.context().route(verificationUrl, async (route) => {
+      await route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>Bilibili confirmation</title>' });
+    });
+    const popupPromise = page.waitForEvent('popup');
+    await mobileLink.click();
+    const popup = await popupPromise;
+    await popup.waitForLoadState('domcontentloaded');
+
+    expect(page.url()).toBe(`${baseURL}/__hosted-auth-layout-test`);
+    expect(await page.locator('.hosted-auth-status').textContent()).toBe('请使用 B 站客户端扫码');
+    expect(await popup.evaluate(() => window.opener === null)).toBe(true);
+    await page.evaluate(() => window.__authHarness.fireNext());
+    expect(await page.evaluate(() => window.__authHarness.snapshot().pollCalls)).toBe(1);
+    expect(consoleErrors).toEqual([]);
+
+    await popup.close();
+    await page.evaluate(() => window.__authHarness.cleanup());
+    await page.close();
+  });
+
   it('shows real button and same-device-link interaction feedback and preserves reduced-motion state', async () => {
     const { page, consoleErrors } = await openHarness(browser, baseURL, { width: 390, height: 844 });
     await mountState(page, 'fatal');

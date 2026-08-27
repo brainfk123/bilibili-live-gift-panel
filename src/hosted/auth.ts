@@ -49,6 +49,8 @@ export function mountAuthView(
   const placeholder = document.createElement('div'); placeholder.className = 'hosted-auth-qr-placeholder';
   qrFrame.append(qr, placeholder);
   const mobileLink = document.createElement('a'); mobileLink.className = 'hosted-auth-mobile-link'; mobileLink.textContent = '在本机打开 B 站确认'; mobileLink.hidden = true;
+  mobileLink.setAttribute('target', '_blank');
+  mobileLink.setAttribute('rel', 'noopener noreferrer');
   const actions = document.createElement('div'); actions.className = 'hosted-auth-actions';
   const primary = document.createElement('button'); primary.type = 'button'; primary.dataset.variant = 'primary';
   const cancel = document.createElement('button'); cancel.type = 'button'; cancel.dataset.variant = 'secondary'; cancel.textContent = '取消';
