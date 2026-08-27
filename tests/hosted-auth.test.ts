@@ -651,6 +651,30 @@ describe('Bilibili authentication lifecycle', () => {
     expect(cancelLogin).toHaveBeenNthCalledWith(2, challenge().challengeId);
   });
 
+  it('keeps an ordinary auth disposer reachable through the root host after cleanup failure', async () => {
+    const cancelLogin = vi.fn()
+      .mockRejectedValueOnce(new Error('RAW ROOT AUTH DISPOSE secret-challenge-1'))
+      .mockResolvedValue(undefined);
+    const { root } = authDOM();
+    const host = createHostedViewHost();
+    let mounted!: ReturnType<typeof mountAuthView>;
+    await host.replace(() => {
+      mounted = mountAuthView(root as unknown as HTMLElement, authAPI({ cancelLogin }), {
+        onSignedIn: vi.fn(), onRegistrationRequired: vi.fn(), onExit: vi.fn(),
+      }, new AuthControlledTimers());
+      return mounted;
+    });
+    await mounted.ready;
+
+    await expect(host.dispose()).rejects.toMatchObject({ code: 'operation_failed' });
+    await host.dispose();
+
+    expect(cancelLogin).toHaveBeenCalledTimes(2);
+    expect(cancelLogin).toHaveBeenNthCalledWith(1, challenge().challengeId);
+    expect(cancelLogin).toHaveBeenNthCalledWith(2, challenge().challengeId);
+    expect(root.children).toHaveLength(0);
+  });
+
   it('joins concurrent disposal with late challenge cleanup without duplicate DELETE requests', async () => {
     let releaseBegin!: (value: ReturnType<typeof challenge>) => void;
     let releaseCleanup!: () => void;

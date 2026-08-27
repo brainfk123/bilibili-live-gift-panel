@@ -23,23 +23,23 @@ export function createHostedViewHost() {
     transition = scheduled.catch(() => undefined);
     return scheduled;
   };
+  const disposeCurrent = async (): Promise<void> => {
+    const previous = current;
+    if (!previous) return;
+    await previous.dispose();
+    if (current === previous) current = undefined;
+  };
   return Object.freeze({
     replace(mount: () => HostedView): Promise<void> {
       const requested = ++generation;
       return schedule(async () => {
-        const previous = current;
-        current = undefined;
-        await previous?.dispose();
+        await disposeCurrent();
         if (requested === generation) current = mount();
       });
     },
     dispose(): Promise<void> {
       ++generation;
-      return schedule(async () => {
-        const previous = current;
-        current = undefined;
-        await previous?.dispose();
-      });
+      return schedule(disposeCurrent);
     },
   });
 }

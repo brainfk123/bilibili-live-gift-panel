@@ -6,6 +6,7 @@ import { mountAccountList } from '../src/hosted/admin/accounts/list';
 import { mountBiliServiceView } from '../src/hosted/admin/bili-service';
 import { mountAdminInvitationView } from '../src/hosted/admin/invitations/view';
 import { HostedAPIError } from '../src/hosted/api';
+import { createHostedViewHost } from '../src/hosted/shell';
 
 class Element {
   children: Element[] = [];
@@ -394,6 +395,41 @@ describe('administrator section lifetime fence', () => {
 
     expect(api.cancelBiliServiceChallenge).toHaveBeenCalledTimes(2);
     expect(api.cancelBiliServiceChallenge).toHaveBeenNthCalledWith(2, 'composition-retry-private');
+    expect(root.children).toHaveLength(0);
+  });
+
+  it('keeps the administrator Bilibili disposer reachable through the root host after cleanup failure', async () => {
+    const api = {
+      adminSession: vi.fn(async () => undefined),
+      adminOverview: vi.fn(async () => ({totalAccounts:0,activeAccounts:0,disabledAccounts:0,missingRooms:0,missingObs:0,attention:[],recentEvents:[]})),
+      biliServiceStatus: vi.fn(async () => ({version:0,health:'missing' as const})),
+      checkBiliService: vi.fn(),
+      beginBiliServiceChallenge: vi.fn(async () => ({challengeId:'root-admin-private',qrImage:'data:image/png;base64,qr',expiresAt:'2030-01-01T00:05:00Z'})),
+      cancelBiliServiceChallenge: vi.fn()
+        .mockRejectedValueOnce(new Error('RAW ROOT ADMIN DISPOSE root-admin-private'))
+        .mockResolvedValue(undefined),
+      replaceBiliServiceCredential: vi.fn(),
+      authorizeAdminOperation: vi.fn(),
+    };
+    const document: DocumentLike = {
+      createElement: (tag) => new Element(tag, document),
+      createTextNode: (text) => { const node = new Element('#text', document); node.textContent = text; return node; },
+    };
+    const root = new Element('div', document);
+    const host = createHostedViewHost();
+    await host.replace(() => mountAdminView(root as unknown as HTMLElement, api as unknown as Parameters<typeof mountAdminView>[1]));
+    await vi.waitFor(() => expect(button(root, 'B站服务账号')).toBeDefined());
+    button(root, 'B站服务账号').listeners.get('click')?.();
+    await vi.waitFor(() => expect(button(root, '更换服务账号')).toBeDefined());
+    button(root, '更换服务账号').listeners.get('click')?.();
+    await vi.waitFor(() => expect(descendants(root).some((element) => element.tagName === 'img')).toBe(true));
+
+    await expect(host.dispose()).rejects.toMatchObject({code:'operation_failed'});
+    await host.dispose();
+
+    expect(api.cancelBiliServiceChallenge).toHaveBeenCalledTimes(2);
+    expect(api.cancelBiliServiceChallenge).toHaveBeenNthCalledWith(1, 'root-admin-private');
+    expect(api.cancelBiliServiceChallenge).toHaveBeenNthCalledWith(2, 'root-admin-private');
     expect(root.children).toHaveLength(0);
   });
 

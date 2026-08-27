@@ -17,6 +17,7 @@ if (!(root instanceof HTMLElement)) {
 
 const viewHost = createHostedViewHost();
 const applicationLifecycle = createHostedApplicationLifecycle();
+const observeViewOperation = (operation: Promise<void>): void => { void operation.catch(() => undefined); };
 let runtimePresence: HostedRuntimePresence | undefined;
 const ensureRuntimePresence = (): HostedRuntimePresence => {
   runtimePresence ??= createHostedRuntimePresence({
@@ -35,33 +36,33 @@ const mountAccountView = (api: HostedAPI): HostedView => {
   const status = document.createElement('p'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
   const configuration = document.createElement('button'); configuration.type = 'button'; configuration.textContent = '在线配置'; configuration.addEventListener('click', () => showConfiguration(api));
   const migration = document.createElement('button'); migration.type = 'button'; migration.textContent = '迁移本地配置'; migration.addEventListener('click', () => showMigration(api));
-  const invitations = document.createElement('button'); invitations.type = 'button'; invitations.textContent = '我的邀请码'; invitations.addEventListener('click', () => { void viewHost.replace(() => mountInvitationView(root, api, undefined, () => returnToAccount(api), () => returnToSignedOut(api))); });
+  const invitations = document.createElement('button'); invitations.type = 'button'; invitations.textContent = '我的邀请码'; invitations.addEventListener('click', () => { observeViewOperation(viewHost.replace(() => mountInvitationView(root, api, undefined, () => returnToAccount(api), () => returnToSignedOut(api)))); });
   const room = document.createElement('div');
   const roomView = mountRoomControls(room, api, ensureRuntimePresence());
   const logout = document.createElement('button'); logout.type = 'button'; logout.textContent = '退出登录'; logout.addEventListener('click', () => { void api.logout().then(() => returnToSignedOut(api)).catch(() => applicationLifecycle.run(() => { status.textContent = '退出失败，请稍后重试'; })); });
   panel.append(title, status, room, configuration, migration, invitations, logout); root.replaceChildren(panel);
   return { dispose: () => { roomView.dispose(); root.replaceChildren(); } };
 };
-const showAccount = (api: HostedAPI): void => { void viewHost.replace(() => mountAccountView(api)); };
-const showConfiguration = (api: HostedAPI): void => { void viewHost.replace(() => mountConfigurationView(root, api, { onMigration: () => showMigration(api), onExit: () => showAccount(api) })); };
-const showMigration = (api: HostedAPI): void => { void viewHost.replace(() => mountMigrationView(root, api, { onConfiguration: () => showConfiguration(api) })); };
+const showAccount = (api: HostedAPI): void => { observeViewOperation(viewHost.replace(() => mountAccountView(api))); };
+const showConfiguration = (api: HostedAPI): void => { observeViewOperation(viewHost.replace(() => mountConfigurationView(root, api, { onMigration: () => showMigration(api), onExit: () => showAccount(api) }))); };
+const showMigration = (api: HostedAPI): void => { observeViewOperation(viewHost.replace(() => mountMigrationView(root, api, { onConfiguration: () => showConfiguration(api) }))); };
 const mountShell = (api: HostedAPI, serviceStatus: HostedSession['serviceStatus']): HostedView => {
   renderHostedShell(root, {
     serviceStatus,
-    onLogin: () => { void viewHost.replace(() => mountAuthView(root, api, {
+    onLogin: () => { observeViewOperation(viewHost.replace(() => mountAuthView(root, api, {
         onSignedIn: () => returnToAccount(api),
-        onRegistrationRequired: (intent) => { applicationLifecycle.run(() => { void viewHost.replace(() => mountInvitationView(root, api, intent, () => returnToAccount(api))); }); },
+        onRegistrationRequired: (intent) => { applicationLifecycle.run(() => { observeViewOperation(viewHost.replace(() => mountInvitationView(root, api, intent, () => returnToAccount(api)))); }); },
         onExit: () => returnToSignedOut(api),
-      })); },
+      }))); },
   });
   return { dispose: () => { root.replaceChildren(); } };
 };
-const showAdmin = (api: HostedAPI): void => { disposeRuntimePresence(); void viewHost.replace(() => mountAdminView(root, api)); };
+const showAdmin = (api: HostedAPI): void => { disposeRuntimePresence(); observeViewOperation(viewHost.replace(() => mountAdminView(root, api))); };
 const showSignedOut = (api: HostedAPI, serviceStatus: HostedSession['serviceStatus']): void => {
   if (isAdminEntryHash(window.location.hash)) showAdmin(api);
   else showShell(api, serviceStatus);
 };
-const showShell = (api: HostedAPI, serviceStatus: HostedSession['serviceStatus']): void => { disposeRuntimePresence(); void viewHost.replace(() => mountShell(api, serviceStatus)); };
+const showShell = (api: HostedAPI, serviceStatus: HostedSession['serviceStatus']): void => { disposeRuntimePresence(); observeViewOperation(viewHost.replace(() => mountShell(api, serviceStatus))); };
 const returnToAccount = (api: HostedAPI): void => { applicationLifecycle.run(() => showAccount(api)); };
 const returnToSignedOut = (api: HostedAPI): void => { applicationLifecycle.run(() => showSignedOut(api, 'ready')); };
 
@@ -78,4 +79,4 @@ void HostedAPI.connect().then(async (api) => {
   applicationLifecycle.run(() => renderHostedShell(root, { serviceStatus: 'unavailable', onLogin: () => undefined }));
 });
 
-window.addEventListener('pagehide', () => { applicationLifecycle.dispose(); disposeRuntimePresence(); void viewHost.dispose(); }, { once: true });
+window.addEventListener('pagehide', () => { applicationLifecycle.dispose(); disposeRuntimePresence(); observeViewOperation(viewHost.dispose()); }, { once: true });
