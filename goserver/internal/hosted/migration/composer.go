@@ -317,21 +317,26 @@ func resourcesForUnit(definition configuration.Definition, runtime configuration
 	}
 	for _, value := range definition.Rules {
 		if containsString(unit.RuleIDs, value.ID) {
+			count, present := runtime.RuleLimits.AppliedCounts[value.ID]
 			result = append(result, unitResource{kind: "rule", id: value.ID, value: struct {
 				Definition gameplay.Rule
-				LocalDate  string
 				Count      int
-			}{value, runtime.RuleLimits.LocalDate, runtime.RuleLimits.AppliedCounts[value.ID]}})
+				Present    bool
+			}{value, count, present}})
 		}
 	}
 	for _, value := range definition.TimerRules {
 		if containsString(unit.TimerRuleIDs, value.ID) {
+			count, present := runtime.RuleLimits.AppliedCounts[value.ID]
 			result = append(result, unitResource{kind: "timer-rule", id: value.ID, value: struct {
 				Definition gameplay.TimerRule
-				LocalDate  string
 				Count      int
-			}{value, runtime.RuleLimits.LocalDate, runtime.RuleLimits.AppliedCounts[value.ID]}})
+				Present    bool
+			}{value, count, present}})
 		}
+	}
+	if len(unit.RuleIDs) != 0 || len(unit.TimerRuleIDs) != 0 {
+		result = append(result, unitResource{kind: "rule-limits-local-date", id: "singleton", value: runtime.RuleLimits.LocalDate})
 	}
 	for _, value := range definition.FormulaPresets {
 		if containsString(unit.FormulaPresetIDs, value.ID) {
@@ -557,7 +562,7 @@ func (assembly *configurationAssembly) add(definition configuration.Definition, 
 			assembly.gifts[value.ID] = value
 		}
 	}
-	if runtime.RuleLimits.LocalDate != "" {
+	if (len(unit.RuleIDs) != 0 || len(unit.TimerRuleIDs) != 0) && runtime.RuleLimits.LocalDate != "" {
 		assembly.limits.LocalDate = runtime.RuleLimits.LocalDate
 	}
 	if unit.Kind == "simple-play" && definition.SimplePlay != nil {

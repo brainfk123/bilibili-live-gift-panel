@@ -226,6 +226,51 @@ func TestComposeSelectionAllowsIdenticalCrossSourceSharedDependency(t *testing.T
 	}
 }
 
+func TestComposeSelectionDistinguishesMissingAndExplicitZeroRuleLimitCount(t *testing.T) {
+	hostedDefinition, hostedRuntime := activityConfiguration("host", "Hosted activity", "Shared", 1)
+	importDefinition, importRuntime := activityConfiguration("import", "Imported activity", "Shared", 1)
+	sharedRule := gameplay.Rule{ID: "shared-rule", AttributeID: "shared", Formula: "1"}
+	hostedDefinition.Rules = []gameplay.Rule{sharedRule}
+	importDefinition.Rules = []gameplay.Rule{sharedRule}
+	hostedRuntime.RuleLimits = gameplay.RuleLimitState{LocalDate: "2026-08-29", AppliedCounts: map[string]int{}}
+	importRuntime.RuleLimits = gameplay.RuleLimitState{LocalDate: "2026-08-29", AppliedCounts: map[string]int{"shared-rule": 0}}
+	imported := migrationEnvelope(importDefinition, importRuntime)
+
+	candidate, err := composeCandidate(imported, hostedDefinition, hostedRuntime, completeCapabilities(), SelectionCommand{UnitIDs: []string{"activity:import"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := SelectionConflict{ID: "resource:rule:shared-rule", ImportedUnitIDs: []string{"activity:import"}, HostedUnitIDs: []string{"activity:host"}}
+	if candidate.Ready || !reflect.DeepEqual(candidate.Conflicts, []SelectionConflict{want}) {
+		t.Fatalf("rule-limit presence candidate=%#v want=%#v", candidate, want)
+	}
+}
+
+func TestComposeSelectionTreatsRuleLimitLocalDateAsSingletonAcrossDifferentRuleIDs(t *testing.T) {
+	hostedDefinition, hostedRuntime := activityConfiguration("host", "Hosted activity", "Hosted", 1)
+	hostedDefinition.Attributes[0].ID = "hosted"
+	hostedDefinition.Activities[0].AttributeIDs = []string{"hosted"}
+	hostedDefinition.Rules = []gameplay.Rule{{ID: "hosted-rule", AttributeID: "hosted", Formula: "1"}}
+	hostedRuntime.AttributeValues = map[string]float64{"hosted": 1}
+	hostedRuntime.RuleLimits = gameplay.RuleLimitState{LocalDate: "2026-08-28", AppliedCounts: map[string]int{"hosted-rule": 1}}
+	importDefinition, importRuntime := activityConfiguration("import", "Imported activity", "Imported", 2)
+	importDefinition.Attributes[0].ID = "imported"
+	importDefinition.Activities[0].AttributeIDs = []string{"imported"}
+	importDefinition.Rules = []gameplay.Rule{{ID: "imported-rule", AttributeID: "imported", Formula: "2"}}
+	importRuntime.AttributeValues = map[string]float64{"imported": 2}
+	importRuntime.RuleLimits = gameplay.RuleLimitState{LocalDate: "2026-08-29", AppliedCounts: map[string]int{"imported-rule": 1}}
+	imported := migrationEnvelope(importDefinition, importRuntime)
+
+	candidate, err := composeCandidate(imported, hostedDefinition, hostedRuntime, completeCapabilities(), SelectionCommand{UnitIDs: []string{"activity:import"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := SelectionConflict{ID: "resource:rule-limits-local-date:singleton", ImportedUnitIDs: []string{"activity:import"}, HostedUnitIDs: []string{"activity:host"}}
+	if candidate.Ready || !reflect.DeepEqual(candidate.Conflicts, []SelectionConflict{want}) {
+		t.Fatalf("local-date singleton candidate=%#v want=%#v", candidate, want)
+	}
+}
+
 func TestConflictKeepBothUsesDeterministicUnoccupiedSuggestedName(t *testing.T) {
 	hostedDefinition, hostedRuntime := attributeConfiguration(
 		[]configuration.AttributeDefinition{{ID: "online", Name: "Health"}, {ID: "occupied", Name: "Health（从 EXE 导入）"}},

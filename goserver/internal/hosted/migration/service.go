@@ -439,6 +439,55 @@ func freshCanonical(definition configuration.Definition, runtime configuration.R
 	}
 	return definition, runtime, canonical, hash, nil
 }
+
+type frozenCandidate struct {
+	Definition       configuration.Definition
+	Runtime          configuration.RuntimeState
+	Hash             [sha256.Size]byte
+	SealedDefinition []byte
+	ActiveDefinition []byte
+	RuntimeJSON      []byte
+}
+
+func freezeCandidate(candidate ComposeCandidate) (frozenCandidate, error) {
+	if !candidate.Ready || candidate.Definition.MigrationHash == "" {
+		return frozenCandidate{}, ErrConflict
+	}
+	definition, runtime, _, hash, err := freshCanonical(candidate.Definition, candidate.Runtime)
+	if err != nil || hash != candidate.Hash {
+		return frozenCandidate{}, ErrConflict
+	}
+	sealedDefinition, err := json.Marshal(definition)
+	if err != nil {
+		return frozenCandidate{}, ErrConflict
+	}
+	activeDefinition := definition
+	activeDefinition.MigrationHash = ""
+	activeDefinitionJSON, err := json.Marshal(activeDefinition)
+	if err != nil {
+		return frozenCandidate{}, ErrConflict
+	}
+	runtimeJSON, err := json.Marshal(runtime)
+	if err != nil {
+		return frozenCandidate{}, ErrConflict
+	}
+	return frozenCandidate{Definition: definition, Runtime: runtime, Hash: hash, SealedDefinition: sealedDefinition, ActiveDefinition: activeDefinitionJSON, RuntimeJSON: runtimeJSON}, nil
+}
+
+func freezePersistedCandidate(definitionJSON, runtimeJSON []byte) (frozenCandidate, error) {
+	var definition configuration.Definition
+	var runtime configuration.RuntimeState
+	if len(definitionJSON) == 0 || len(runtimeJSON) == 0 || json.Unmarshal(definitionJSON, &definition) != nil || json.Unmarshal(runtimeJSON, &runtime) != nil || len(definition.MigrationHash) != sha256.Size*2 {
+		return frozenCandidate{}, ErrConflict
+	}
+	rawHash, err := hex.DecodeString(definition.MigrationHash)
+	if err != nil || len(rawHash) != sha256.Size || hex.EncodeToString(rawHash) != definition.MigrationHash {
+		return frozenCandidate{}, ErrConflict
+	}
+	var hash [sha256.Size]byte
+	copy(hash[:], rawHash)
+	return freezeCandidate(ComposeCandidate{Definition: definition, Runtime: runtime, Ready: true, Hash: hash})
+}
 func countDefinition(definition configuration.Definition) Counts {
 	result := Counts{Attributes: len(definition.Attributes), Rules: len(definition.Rules), Activities: len(definition.Activities), GiftTargetPanels: len(definition.GiftTargetPanels)}
 	for _, panel := range definition.GiftTargetPanels {
@@ -904,6 +953,15 @@ func (repository *sqlRepository) apply(ctx context.Context, command applyCommand
 	if pendingOnly && job.Status != jobPending || !pendingOnly && job.Status != jobPreviewed {
 		return storedJob{}, ErrConflict
 	}
+	var frozen frozenCandidate
+	if pendingOnly {
+		frozen, err = freezePersistedCandidate(job.definition, job.runtime)
+	} else {
+		frozen, err = freezeCandidate(command.Candidate)
+	}
+	if err != nil {
+		return storedJob{}, err
+	}
 	baseVersion, baseRevision, err := loadLifecycleBase(ctx, transaction, command.AccountID, command.JobID)
 	if err != nil {
 		return storedJob{}, err
@@ -915,21 +973,7 @@ func (repository *sqlRepository) apply(ctx context.Context, command applyCommand
 	err = transaction.QueryRowContext(ctx, lifecycleOpenSessionQuery, command.AccountID).Scan(&sessionID)
 	if err == nil {
 		if !pendingOnly && job.Status == jobPreviewed {
-			query := "UPDATE migration_jobs SET status = 'pending', keep_room_suggestion = ? WHERE id = ? AND account_id = ? AND status = 'previewed'"
-			arguments := []any{command.KeepRoomSuggestion, command.JobID, command.AccountID}
-			if command.Candidate.Ready {
-				definitionJSON, marshalErr := json.Marshal(command.Candidate.Definition)
-				if marshalErr != nil {
-					return storedJob{}, ErrUnavailable
-				}
-				runtimeJSON, marshalErr := json.Marshal(command.Candidate.Runtime)
-				if marshalErr != nil {
-					return storedJob{}, ErrUnavailable
-				}
-				query = "UPDATE migration_jobs SET status = 'pending', keep_room_suggestion = ?, definition_json = ?, runtime_json = ? WHERE id = ? AND account_id = ? AND status = 'previewed'"
-				arguments = []any{command.KeepRoomSuggestion, definitionJSON, runtimeJSON, command.JobID, command.AccountID}
-			}
-			result, updateErr := transaction.ExecContext(ctx, query, arguments...)
+			result, updateErr := transaction.ExecContext(ctx, "UPDATE migration_jobs SET status = 'pending', keep_room_suggestion = ?, definition_json = ?, runtime_json = ? WHERE id = ? AND account_id = ? AND status = 'previewed'", command.KeepRoomSuggestion, frozen.SealedDefinition, frozen.RuntimeJSON, command.JobID, command.AccountID)
 			if updateErr != nil || !exactlyOne(result) {
 				return storedJob{}, ErrUnavailable
 			}
@@ -944,7 +988,7 @@ func (repository *sqlRepository) apply(ctx context.Context, command applyCommand
 	if !errors.Is(err, sql.ErrNoRows) {
 		return storedJob{}, ErrUnavailable
 	}
-	result, err := applyLockedMigration(ctx, transaction, command, job, activeID, currentRevision, currentRuntime, now)
+	result, err := applyLockedMigration(ctx, transaction, command, job, frozen, activeID, currentRevision, currentRuntime, now)
 	if err != nil {
 		return storedJob{}, err
 	}
@@ -1180,24 +1224,12 @@ func setExpired(ctx context.Context, transaction *sql.Tx, accountID, jobID int64
 	return nil
 }
 
-func applyLockedMigration(ctx context.Context, transaction *sql.Tx, command applyCommand, job lockedJob, activeID sql.NullInt64, currentRevision uint64, currentRuntime []byte, now time.Time) (storedJob, error) {
-	definitionJSON, runtimeJSON := job.definition, job.runtime
-	if command.Candidate.Ready {
-		var err error
-		definitionJSON, err = json.Marshal(command.Candidate.Definition)
-		if err != nil {
-			return storedJob{}, ErrUnavailable
-		}
-		runtimeJSON, err = json.Marshal(command.Candidate.Runtime)
-		if err != nil {
-			return storedJob{}, ErrUnavailable
-		}
-	}
+func applyLockedMigration(ctx context.Context, transaction *sql.Tx, command applyCommand, job lockedJob, frozen frozenCandidate, activeID sql.NullInt64, currentRevision uint64, currentRuntime []byte, now time.Time) (storedJob, error) {
 	var number uint64
 	if err := transaction.QueryRowContext(ctx, lifecycleNextVersionQuery, command.AccountID).Scan(&number); err != nil || number == 0 {
 		return storedJob{}, ErrUnavailable
 	}
-	result, err := transaction.ExecContext(ctx, lifecycleInsertVersionQuery, command.AccountID, number, definitionJSON, "migration", now)
+	result, err := transaction.ExecContext(ctx, lifecycleInsertVersionQuery, command.AccountID, number, frozen.ActiveDefinition, "migration", now)
 	if err != nil {
 		return storedJob{}, ErrUnavailable
 	}
@@ -1209,7 +1241,7 @@ func applyLockedMigration(ctx context.Context, transaction *sql.Tx, command appl
 	if nextRevision == 0 {
 		return storedJob{}, ErrUnavailable
 	}
-	result, err = transaction.ExecContext(ctx, lifecycleUpsertRuntimeQuery, command.AccountID, versionID, nextRevision, runtimeJSON, now)
+	result, err = transaction.ExecContext(ctx, lifecycleUpsertRuntimeQuery, command.AccountID, versionID, nextRevision, frozen.RuntimeJSON, now)
 	if err != nil || !oneOrTwoMigrationRows(result) {
 		return storedJob{}, ErrUnavailable
 	}
