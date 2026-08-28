@@ -2148,6 +2148,49 @@ describe('single-page configuration rendering', () => {
     expect(root.querySelector('.program-settings-dialog')).toBeNull();
   });
 
+  it('summarizes complete gameplay units before exporting an online migration', async () => {
+    const configured = defaultState();
+    configured.attributes = [
+      { id: 'score', name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '分' },
+      { id: 'bonus', name: '加成', value: 2, unit: 'none', format: 'number', decimals: 0, suffix: '倍' },
+    ];
+    configured.giftKpiPanels = [{
+      id: 'goal', name: '礼物目标', layout: 'stack',
+      items: [{ giftId: 1, giftName: '目标礼物', imageUrl: '', target: 10, received: 0, barStyle: 'progress' }],
+      appearance: { themeId: 'minimal', fontSize: 30, accentColor: '#123456', showConnection: false, align: 'left', panelOpacity: 80 },
+    }];
+    configured.giftCatalog = [{ id: 1, name: '目标礼物', price: 100, coinType: 'gold', imgBasic: '' }];
+    await saveState(configured);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    (root.querySelector('.program-settings-toggle') as TestElement | null)?.onclick?.();
+
+    const note = root.querySelector('.migration-export-note') as TestElement;
+    expect(textOf(note)).toContain('将导出 3 个完整玩法');
+    expect(textOf(note)).toContain('由在线版按完整玩法选择导入');
+    expect(textOf(note)).toContain('不包含登录信息或观众历史');
+  });
+
+  it('keeps program settings usable when legacy IDs make online migration unavailable', async () => {
+    const configured = defaultState();
+    configured.attributes = [
+      { id: 'duplicate', name: '第一项', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      { id: 'duplicate', name: '第二项', value: 2, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+    ];
+    await saveState(configured);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    expect(() => (root.querySelector('.program-settings-toggle') as TestElement | null)?.onclick?.()).not.toThrow();
+
+    expect(root.querySelector('.program-settings-dialog')).not.toBeNull();
+    const migrationButton = findByText(root, '迁移到在线版') as TestElement & { disabled?: boolean };
+    expect(migrationButton.disabled).toBe(true);
+    expect(textOf(root.querySelector('.migration-export-note') as TestElement)).toContain('迁移数据包含重复的稳定 ID');
+    expect(findByText(root, '导出配置')).toBeDefined();
+  });
+
   it('shows automatic update status and supports a manual update check', async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);

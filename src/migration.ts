@@ -17,21 +17,37 @@ import {
   type TemplateParameterDefinition,
   type TemplateParameterValue,
 } from './gameplay-templates';
+import { deriveGameplayUnits, type GameplayDependencyDeclaration } from './migration-gameplay-units';
 
 const CONFIG_SCHEMA_VERSION = 5;
+const MAX_ONLINE_MIGRATION_BYTES = 2 * 1024 * 1024;
 
 type Appearance = Pick<DisplayAppearance, 'themeId' | 'fontSize' | 'accentColor' | 'showConnection' | 'align' | 'panelOpacity'>;
 
-export interface OnlineMigrationV1 {
+export interface OnlineMigrationV2 {
   kind: 'gift-panel-online-migration';
-  migrationVersion: 1;
+  migrationVersion: 2;
   source: { appVersion: string; configSchemaVersion: number };
   exportedAt: string;
   payload: {
     roomSuggestion: string | null;
+    generalSettings: { configurationMode: Settings['configExperience'] };
     definition: OnlineMigrationDefinition;
     runtime: OnlineMigrationRuntime;
+    cropPresets: OnlineMigrationCropPreset[];
+    rejectedCropPresets: OnlineMigrationRejectedCropPreset[];
+    dependencyDeclaration: GameplayDependencyDeclaration;
   };
+}
+
+export interface OnlineMigrationCropPreset {
+  id: string;
+  crop: { x: number; y: number; width: number; height: number };
+}
+
+export interface OnlineMigrationRejectedCropPreset {
+  reason: 'unstable_identity' | 'unreferenced_identity' | 'invalid_crop';
+  count: number;
 }
 
 export interface OnlineMigrationDownloadAdapter {
@@ -118,6 +134,7 @@ export interface OnlineMigrationDefinition {
     name: string;
     price: number;
     coinType: GiftInfo['coinType'];
+    effectId?: number;
     blindBoxParentId?: number;
     blindBoxParentName?: string;
     blindBoxParentPrice?: number;
@@ -179,7 +196,7 @@ const UNSAFE_RESOURCE_SCHEMES = new Set([
 ]);
 
 export function onlineMigrationFilename(exportedAt: Date): string {
-  return `gift-panel-migration-v1-${exportedAt.toISOString().slice(0, 10)}.json`;
+  return `gift-panel-migration-v2-${exportedAt.toISOString().slice(0, 10)}.json`;
 }
 
 export function downloadOnlineMigration(
@@ -189,6 +206,9 @@ export function downloadOnlineMigration(
   adapter: OnlineMigrationDownloadAdapter,
 ): void {
   const content = JSON.stringify(createOnlineMigration(state, appVersion, exportedAt), null, 2);
+  if (new TextEncoder().encode(content).byteLength > MAX_ONLINE_MIGRATION_BYTES) {
+    throw new Error('迁移文件超过 2 MiB，请减少玩法内容后重试。');
+  }
   let url: string | undefined;
   try {
     url = adapter.createObjectURL(adapter.createBlob(content));
@@ -203,7 +223,7 @@ export function downloadOnlineMigration(
  * allowlist projection rather than a local backup: nothing in the result is
  * a reference to the mutable desktop state.
  */
-export function createOnlineMigration(state: AppState, appVersion: string, exportedAt: Date): OnlineMigrationV1 {
+export function createOnlineMigration(state: AppState, appVersion: string, exportedAt: Date): OnlineMigrationV2 {
   const attributeIDs = new Map<string, string>();
   const attributes = state.attributes.map((attribute, index) => {
     const id = attributeID(attribute, index);
@@ -213,69 +233,78 @@ export function createOnlineMigration(state: AppState, appVersion: string, expor
   const idForName = (name: string): string => attributeIDs.get(name) ?? name;
   const simplePlay = state.simplePlay ? exportSimplePlay(state.simplePlay) : undefined;
   const referencedGiftIDs = collectReferencedGiftIDs(state, simplePlay);
+  const definition: OnlineMigrationDefinition = {
+    appearance: exportSettingsAppearance(state.settings),
+    attributes,
+    displayScenes: state.displayScenes.map((scene) => ({
+      id: scene.id,
+      name: scene.name,
+      attributeIds: scene.attributeNames.map(idForName),
+      layout: scene.layout,
+      themeId: scene.themeId,
+      ...(scene.appearance ? { appearance: exportAppearance(scene.appearance) } : {}),
+    })),
+    blindBoxDisplay: exportAppearance(state.blindBoxDisplay),
+    giftTargetPanels: state.giftKpiPanels.map((panel) => exportGiftTargetPanel(panel)),
+    activities: state.activities.map((activity) => exportActivityDefinition(activity, idForName)),
+    rules: state.rules.map((rule) => ({
+      id: rule.id,
+      giftId: rule.giftId,
+      attributeId: idForName(rule.attributeName),
+      ...(rule.formulaName === undefined ? {} : { formulaName: rule.formulaName }),
+      ...(rule.condition === undefined ? {} : { condition: rule.condition }),
+      formula: rule.formula,
+      ...(rule.enabled === undefined ? {} : { enabled: rule.enabled }),
+      ...(rule.matchGiftIds === undefined ? {} : { matchGiftIds: [...rule.matchGiftIds] }),
+      ...(rule.minPrice === undefined ? {} : { minPrice: rule.minPrice }),
+      ...(rule.cap === undefined ? {} : { cap: rule.cap }),
+      ...(rule.dailyLimit === undefined ? {} : { dailyLimit: rule.dailyLimit }),
+    })),
+    timerRules: state.timerRules.map((rule) => ({
+      id: rule.id,
+      attributeId: idForName(rule.attributeName),
+      formulaName: rule.formulaName,
+      intervalSeconds: rule.intervalSeconds,
+      ...(rule.condition === undefined ? {} : { condition: rule.condition }),
+      formula: rule.formula,
+      enabled: rule.enabled,
+    })),
+    formulaPresets: state.formulaPresets.map((preset) => ({
+      id: preset.id,
+      name: preset.name,
+      context: preset.context,
+      formula: preset.formula,
+      attributeId: idForName(preset.sourceAttributeName),
+    })),
+    ...(simplePlay ? { simplePlay } : {}),
+    gifts: state.giftCatalog
+      .filter((gift) => referencedGiftIDs.has(gift.id))
+      .map(exportGift)
+      .sort((left, right) => left.id - right.id),
+  };
+  const runtime: OnlineMigrationRuntime = {
+    attributeValues: Object.fromEntries(state.attributes.map((attribute, index) => [attributeID(attribute, index), attribute.value])),
+    giftTargetReceived: state.giftKpiPanels.flatMap((panel) => panel.items.map((item) => ({ panelId: panel.id, giftId: item.giftId, received: item.received }))),
+    activities: state.activities.map((activity) => exportActivityRuntime(activity, idForName)),
+    ruleLimits: exportRuleLimits(state, exportedAt),
+  };
+  assertUniqueStableIDs(definition);
+  assertOwnedGameplayContent(definition);
+  const cropProjection = exportCropPresets(state.settings.giftClipCrops, definition.gifts);
 
   return {
     kind: 'gift-panel-online-migration',
-    migrationVersion: 1,
+    migrationVersion: 2,
     source: { appVersion, configSchemaVersion: CONFIG_SCHEMA_VERSION },
     exportedAt: exportedAt.toISOString(),
     payload: {
       roomSuggestion: state.roomId.trim() || null,
-      definition: {
-        appearance: exportSettingsAppearance(state.settings),
-        attributes,
-        displayScenes: state.displayScenes.map((scene) => ({
-          id: scene.id,
-          name: scene.name,
-          attributeIds: scene.attributeNames.map(idForName),
-          layout: scene.layout,
-          themeId: scene.themeId,
-          ...(scene.appearance ? { appearance: exportAppearance(scene.appearance) } : {}),
-        })),
-        blindBoxDisplay: exportAppearance(state.blindBoxDisplay),
-        giftTargetPanels: state.giftKpiPanels.map((panel) => exportGiftTargetPanel(panel)),
-        activities: state.activities.map((activity) => exportActivityDefinition(activity, idForName)),
-        rules: state.rules.map((rule) => ({
-          id: rule.id,
-          giftId: rule.giftId,
-          attributeId: idForName(rule.attributeName),
-          ...(rule.formulaName === undefined ? {} : { formulaName: rule.formulaName }),
-          ...(rule.condition === undefined ? {} : { condition: rule.condition }),
-          formula: rule.formula,
-          ...(rule.enabled === undefined ? {} : { enabled: rule.enabled }),
-          ...(rule.matchGiftIds === undefined ? {} : { matchGiftIds: [...rule.matchGiftIds] }),
-          ...(rule.minPrice === undefined ? {} : { minPrice: rule.minPrice }),
-          ...(rule.cap === undefined ? {} : { cap: rule.cap }),
-          ...(rule.dailyLimit === undefined ? {} : { dailyLimit: rule.dailyLimit }),
-        })),
-        timerRules: state.timerRules.map((rule) => ({
-          id: rule.id,
-          attributeId: idForName(rule.attributeName),
-          formulaName: rule.formulaName,
-          intervalSeconds: rule.intervalSeconds,
-          ...(rule.condition === undefined ? {} : { condition: rule.condition }),
-          formula: rule.formula,
-          enabled: rule.enabled,
-        })),
-        formulaPresets: state.formulaPresets.map((preset) => ({
-          id: preset.id,
-          name: preset.name,
-          context: preset.context,
-          formula: preset.formula,
-          attributeId: idForName(preset.sourceAttributeName),
-        })),
-        ...(simplePlay ? { simplePlay } : {}),
-        gifts: state.giftCatalog
-          .filter((gift) => referencedGiftIDs.has(gift.id))
-          .map(exportGift)
-          .sort((left, right) => left.id - right.id),
-      },
-      runtime: {
-        attributeValues: Object.fromEntries(state.attributes.map((attribute, index) => [attributeID(attribute, index), attribute.value])),
-        giftTargetReceived: state.giftKpiPanels.flatMap((panel) => panel.items.map((item) => ({ panelId: panel.id, giftId: item.giftId, received: item.received }))),
-        activities: state.activities.map((activity) => exportActivityRuntime(activity, idForName)),
-        ruleLimits: exportRuleLimits(state, exportedAt),
-      },
+      generalSettings: { configurationMode: state.settings.configExperience },
+      definition,
+      runtime,
+      cropPresets: cropProjection.accepted,
+      rejectedCropPresets: cropProjection.rejected,
+      dependencyDeclaration: deriveGameplayUnits({ definition, runtime, cropPresets: cropProjection.accepted }),
     },
   };
 }
@@ -601,8 +630,88 @@ function exportGift(gift: GiftInfo): OnlineMigrationDefinition['gifts'][number] 
     name: gift.name,
     price: gift.price,
     coinType: gift.coinType,
+    ...(gift.effectId === undefined ? {} : { effectId: gift.effectId }),
     ...(gift.blindBoxParentId === undefined ? {} : { blindBoxParentId: gift.blindBoxParentId }),
     ...(gift.blindBoxParentName === undefined ? {} : { blindBoxParentName: gift.blindBoxParentName }),
     ...(gift.blindBoxParentPrice === undefined ? {} : { blindBoxParentPrice: gift.blindBoxParentPrice }),
   };
+}
+
+function exportCropPresets(
+  crops: Settings['giftClipCrops'],
+  gifts: OnlineMigrationDefinition['gifts'],
+): {
+  accepted: OnlineMigrationCropPreset[];
+  rejected: OnlineMigrationRejectedCropPreset[];
+} {
+  const accepted: OnlineMigrationCropPreset[] = [];
+  const rejectedCounts = new Map<OnlineMigrationRejectedCropPreset['reason'], number>();
+  const giftIDs = new Set(gifts.map((gift) => gift.id));
+  const effectIDs = new Set(gifts.flatMap((gift) => gift.effectId === undefined ? [] : [gift.effectId]));
+  for (const [id, crop] of Object.entries(crops).sort(([left], [right]) => left.localeCompare(right))) {
+    const stableIdentity = /^(gift|effect):([1-9]\d*)$/.exec(id);
+    const referenced = stableIdentity
+      ? (stableIdentity[1] === 'gift' ? giftIDs : effectIDs).has(Number(stableIdentity[2]))
+      : false;
+    const reason: OnlineMigrationRejectedCropPreset['reason'] | undefined = !stableIdentity
+      ? 'unstable_identity'
+      : !referenced
+        ? 'unreferenced_identity'
+        : validCrop(crop) ? undefined : 'invalid_crop';
+    if (reason) {
+      rejectedCounts.set(reason, (rejectedCounts.get(reason) ?? 0) + 1);
+      continue;
+    }
+    accepted.push({ id, crop: { x: crop.x, y: crop.y, width: crop.width, height: crop.height } });
+  }
+  const reasonOrder: OnlineMigrationRejectedCropPreset['reason'][] = ['unstable_identity', 'unreferenced_identity', 'invalid_crop'];
+  return {
+    accepted,
+    rejected: reasonOrder.flatMap((reason) => {
+      const count = rejectedCounts.get(reason);
+      return count ? [{ reason, count }] : [];
+    }),
+  };
+}
+
+function assertUniqueStableIDs(definition: OnlineMigrationDefinition): void {
+  const collections: Array<[string, Iterable<string | number>]> = [
+    ['属性', definition.attributes.map((item) => item.id)],
+    ['展示场景', definition.displayScenes.map((item) => item.id)],
+    ['礼物目标', definition.giftTargetPanels.map((item) => item.id)],
+    ['活动', definition.activities.map((item) => item.id)],
+    ['礼物规则', definition.rules.map((item) => item.id)],
+    ['定时规则', definition.timerRules.map((item) => item.id)],
+    ['公式预设', definition.formulaPresets.map((item) => item.id)],
+    ['礼物', definition.gifts.map((item) => item.id)],
+  ];
+  for (const [label, values] of collections) {
+    const seen = new Set<string>();
+    for (const value of values) {
+      const id = String(value).trim();
+      if (!id || seen.has(id)) throw new Error(`迁移数据包含重复的稳定 ID（${label}）。`);
+      seen.add(id);
+    }
+  }
+}
+
+function assertOwnedGameplayContent(definition: OnlineMigrationDefinition): void {
+  const attributeIDs = new Set(definition.attributes.map((attribute) => attribute.id));
+  const orphaned = [
+    ...definition.rules.filter((rule) => !attributeIDs.has(rule.attributeId)).map((rule) => `rule:${rule.id}`),
+    ...definition.timerRules.filter((rule) => !attributeIDs.has(rule.attributeId)).map((rule) => `timer:${rule.id}`),
+    ...definition.formulaPresets.filter((preset) => !attributeIDs.has(preset.attributeId)).map((preset) => `preset:${preset.id}`),
+    ...(definition.simplePlay && !attributeIDs.has(definition.simplePlay.attributeId) ? ['simple-play'] : []),
+  ];
+  if (orphaned.length > 0) throw new Error('迁移数据包含不属于任何玩法的内容，请先在本地删除失效规则后重试。');
+}
+
+function validCrop(crop: Settings['giftClipCrops'][string]): boolean {
+  return [crop.x, crop.y, crop.width, crop.height].every(Number.isFinite)
+    && crop.x >= 0
+    && crop.y >= 0
+    && crop.width > 0
+    && crop.height > 0
+    && crop.x + crop.width <= 1
+    && crop.y + crop.height <= 1;
 }

@@ -2,9 +2,18 @@ import { describe, expect, it, vi } from 'vitest';
 import { defaultState } from '../src/storage';
 import { createOnlineMigration, downloadOnlineMigration, onlineMigrationFilename } from '../src/migration';
 
+function stateWithSimplePlayAttributes(): ReturnType<typeof defaultState> {
+  const state = defaultState();
+  state.attributes = [
+    { id: 'score', name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '分' },
+    { id: 'time', name: '时间', value: 0, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' },
+  ];
+  return state;
+}
+
 describe('online migration exporter', () => {
   it('uses a deterministic versioned local migration filename', () => {
-    expect(onlineMigrationFilename(new Date('2026-08-16T23:59:59.999Z'))).toBe('gift-panel-migration-v1-2026-08-16.json');
+    expect(onlineMigrationFilename(new Date('2026-08-16T23:59:59.999Z'))).toBe('gift-panel-migration-v2-2026-08-16.json');
   });
 
   it('exports a detached allowlisted package without local, viewer, or remote-resource data', () => {
@@ -53,7 +62,7 @@ describe('online migration exporter', () => {
     const text = JSON.stringify(migration);
 
     expect(migration).toMatchObject({
-      kind: 'gift-panel-online-migration', migrationVersion: 1,
+      kind: 'gift-panel-online-migration', migrationVersion: 2,
       source: { appVersion: '0.4.4', configSchemaVersion: 5 }, exportedAt: '2026-08-16T00:00:00.000Z',
       payload: {
         roomSuggestion: '31567150',
@@ -88,8 +97,176 @@ describe('online migration exporter', () => {
     expect(migration.payload.roomSuggestion).toBeNull();
   });
 
-  it('exports only validated template parameters from a simple play', () => {
+  it('declares complete gameplay units and links units that share an attribute', () => {
     const state = defaultState();
+    state.attributes = [
+      { id: 'score', name: '积分', value: 12, unit: 'none', format: 'number', decimals: 0, suffix: '分' },
+      { id: 'team', name: '队伍', value: 2, unit: 'none', format: 'number', decimals: 0, suffix: '队' },
+      { id: 'bonus', name: '加成', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '倍' },
+    ];
+    state.simplePlay = {
+      version: 1,
+      templateId: 'counter',
+      templateVersion: 1,
+      attributeId: 'score',
+      parameters: { name: '计分玩法', suffix: '分', amount: 1, cap: 0, broadcastMessage: '继续加油' },
+      gifts: { count: [1] },
+      managedFingerprint: 'stable-play',
+    };
+    state.activities = [{
+      id: 'duel', name: '对战活动', attributeNames: ['积分', '队伍'], sceneId: 'duel-scene', status: 'active',
+      resultMode: 'highest', gateRules: true, initialValues: { 积分: 0, 队伍: 0 }, milestones: [],
+    }];
+    state.displayScenes = [{ id: 'duel-scene', name: '对战面板', attributeNames: ['积分', '队伍'], layout: 'versus', themeId: 'neon' }];
+    state.giftKpiPanels = [{
+      id: 'goal', name: '礼物目标', layout: 'grid',
+      items: [{ giftId: 2, giftName: '目标礼物', imageUrl: '', target: 10, received: 3, barStyle: 'progress' }],
+      appearance: { themeId: 'glass', fontSize: 30, accentColor: '#123456', showConnection: false, align: 'center', panelOpacity: 80 },
+    }];
+    state.rules = [{ id: 'score-rule', giftId: 1, attributeName: '积分', formula: '积分+1' }];
+    state.giftCatalog = [
+      { id: 1, name: '计分礼物', price: 100, coinType: 'gold', imgBasic: '' },
+      { id: 2, name: '目标礼物', price: 200, coinType: 'gold', imgBasic: '' },
+    ];
+
+    const migration = createOnlineMigration(state, '0.4.7', new Date('2026-08-25T00:00:00.000Z'));
+
+    expect(migration.payload.dependencyDeclaration).toMatchObject({
+      algorithmVersion: 1,
+      units: [
+        { id: 'activity:duel', kind: 'activity', name: '对战活动', attributeIds: ['score', 'team'] },
+        { id: 'attribute:bonus', kind: 'attribute', name: '加成', attributeIds: ['bonus'] },
+        { id: 'gift-target:goal', kind: 'gift-target', name: '礼物目标', giftTargetPanelIds: ['goal'] },
+        { id: 'simple-play:score', kind: 'simple-play', name: '计分玩法', attributeIds: ['score'] },
+      ],
+      groups: [{
+        unitIds: ['activity:duel', 'simple-play:score'],
+        reasons: [{ kind: 'shared-attribute', referenceId: 'score' }],
+      }],
+    });
+  });
+
+  it('exports only stable gift or effect crop identities and reports rejected presets without their keys', () => {
+    const state = defaultState();
+    state.settings.configExperience = 'simple';
+    state.attributes = [{ id: 'score', name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '分' }];
+    state.rules = [{ id: 'score-rule', giftId: 1, attributeName: '积分', formula: '积分+1' }];
+    state.giftCatalog = [{ id: 1, name: '计分礼物', price: 100, coinType: 'gold', imgBasic: '', effectId: 9 }];
+    state.settings.giftClipCrops = {
+      'gift:1': { x: 0.1, y: 0.2, width: 0.3, height: 0.4 },
+      'effect:9': { x: 0, y: 0, width: 1, height: 1 },
+      'media:deadbeef': { x: 0, y: 0, width: 1, height: 1 },
+      'legacy-local-key': { x: 0, y: 0, width: 1, height: 1 },
+      'gift:99': { x: 0, y: 0, width: 1, height: 1 },
+      'effect:77': { x: 0, y: 0, width: 1, height: 1 },
+    };
+
+    const migration = createOnlineMigration(state, '0.4.7', new Date('2026-08-25T00:00:00.000Z'));
+    const text = JSON.stringify(migration);
+
+    expect(migration.payload.generalSettings).toEqual({ configurationMode: 'simple' });
+    expect(migration.payload.cropPresets).toEqual([
+      { id: 'effect:9', crop: { x: 0, y: 0, width: 1, height: 1 } },
+      { id: 'gift:1', crop: { x: 0.1, y: 0.2, width: 0.3, height: 0.4 } },
+    ]);
+    expect(migration.payload.rejectedCropPresets).toEqual([
+      { reason: 'unstable_identity', count: 2 },
+      { reason: 'unreferenced_identity', count: 2 },
+    ]);
+    expect(migration.payload.dependencyDeclaration.units[0]?.cropPresetIds).toEqual(['effect:9', 'gift:1']);
+    expect(text).not.toContain('media:deadbeef');
+    expect(text).not.toContain('legacy-local-key');
+    expect(text).not.toContain('gift:99');
+    expect(text).not.toContain('effect:77');
+  });
+
+  it.each([
+    ['attribute', (state: ReturnType<typeof defaultState>) => {
+      state.attributes = [
+        { id: 'duplicate', name: '第一项', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+        { id: 'duplicate', name: '第二项', value: 2, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      ];
+    }],
+    ['rule', (state: ReturnType<typeof defaultState>) => {
+      state.attributes = [{ id: 'score', name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' }];
+      state.rules = [
+        { id: 'duplicate', giftId: 1, attributeName: '积分', formula: '积分+1' },
+        { id: 'duplicate', giftId: 2, attributeName: '积分', formula: '积分+2' },
+      ];
+    }],
+    ['activity', (state: ReturnType<typeof defaultState>) => {
+      state.attributes = [{ id: 'score', name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' }];
+      state.activities = [
+        { id: 'duplicate', name: '活动一', attributeNames: ['积分'], status: 'not_started', resultMode: 'none', gateRules: false, initialValues: { 积分: 0 }, milestones: [] },
+        { id: 'duplicate', name: '活动二', attributeNames: ['积分'], status: 'not_started', resultMode: 'none', gateRules: false, initialValues: { 积分: 0 }, milestones: [] },
+      ];
+    }],
+    ['gift target', (state: ReturnType<typeof defaultState>) => {
+      const appearance = { themeId: 'minimal' as const, fontSize: 30, accentColor: '#123456', showConnection: false, align: 'left' as const, panelOpacity: 80 };
+      state.giftKpiPanels = [
+        { id: 'duplicate', name: '目标一', layout: 'stack', items: [], appearance },
+        { id: 'duplicate', name: '目标二', layout: 'stack', items: [], appearance },
+      ];
+    }],
+  ] as const)('rejects duplicate stable IDs for %s entries', (_label, arrange) => {
+    const state = defaultState();
+    arrange(state);
+
+    expect(() => createOnlineMigration(state, '0.4.7', new Date('2026-08-25T00:00:00.000Z')))
+      .toThrow('迁移数据包含重复的稳定 ID');
+  });
+
+  it.each([
+    ['gift rule', (state: ReturnType<typeof defaultState>) => {
+      state.rules = [{ id: 'orphan', giftId: 1, attributeName: '不存在', formula: '不存在+1' }];
+    }],
+    ['timer rule', (state: ReturnType<typeof defaultState>) => {
+      state.timerRules = [{ id: 'orphan', attributeName: '不存在', formulaName: '定时', intervalSeconds: 60, formula: '不存在+1', enabled: true }];
+    }],
+    ['formula preset', (state: ReturnType<typeof defaultState>) => {
+      state.formulaPresets = [{ id: 'orphan', name: '孤立预设', context: 'gift', formula: '不存在+1', sourceAttributeName: '不存在' }];
+    }],
+  ] as const)('rejects exported %s entries that do not belong to any gameplay', (_label, arrange) => {
+    const state = defaultState();
+    arrange(state);
+
+    expect(() => createOnlineMigration(state, '0.4.7', new Date('2026-08-25T00:00:00.000Z')))
+      .toThrow('迁移数据包含不属于任何玩法的内容');
+  });
+
+  it('rejects a simple play whose stable attribute no longer exists', () => {
+    const state = defaultState();
+    state.simplePlay = {
+      version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'removed', gifts: { count: [1] }, managedFingerprint: 'safe',
+      parameters: { name: '计数器', suffix: '次', amount: 1, cap: 0, broadcastMessage: '继续加油' },
+    };
+
+    expect(() => createOnlineMigration(state, '0.4.7', new Date('2026-08-25T00:00:00.000Z')))
+      .toThrow('迁移数据包含不属于任何玩法的内容');
+  });
+
+  it('rejects a migration above 2 MiB before creating a download blob', () => {
+    const state = defaultState();
+    state.attributes = [{
+      id: 'huge', name: '超大玩法', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '',
+      broadcastMessage: 'x'.repeat(2 * 1024 * 1024),
+    }];
+    const adapter = {
+      createBlob: vi.fn(() => ({} as Blob)),
+      createObjectURL: vi.fn(() => 'blob:should-not-exist'),
+      click: vi.fn(),
+      revokeObjectURL: vi.fn(),
+    };
+
+    expect(() => downloadOnlineMigration(state, '0.4.7', new Date('2026-08-25T00:00:00.000Z'), adapter))
+      .toThrow('迁移文件超过 2 MiB');
+    expect(adapter.createBlob).not.toHaveBeenCalled();
+    expect(adapter.createObjectURL).not.toHaveBeenCalled();
+    expect(adapter.click).not.toHaveBeenCalled();
+  });
+
+  it('exports only validated template parameters from a simple play', () => {
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
       parameters: {
@@ -116,7 +293,7 @@ describe('online migration exporter', () => {
     'javascript:blocked()',
     'blob:blocked',
   ])('fails closed for unsafe simple-play text parameters: %s', (unsafeValue) => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: {}, managedFingerprint: 'safe',
       parameters: { name: unsafeValue, amount: 1 },
@@ -130,6 +307,7 @@ describe('online migration exporter', () => {
 
   it('exports only current-day non-negative counters for configured rules', () => {
     const state = defaultState();
+    state.attributes = [{ id: 'score', name: '积分', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '分' }];
     state.rules = [
       { id: 'rule-limited', giftId: 1, attributeName: '积分', formula: '积分+1', dailyLimit: 10 },
       { id: 'rule-zero', giftId: 2, attributeName: '积分', formula: '积分+1' },
@@ -169,7 +347,7 @@ describe('online migration exporter', () => {
   });
 
   it('keeps ordinary punctuation in validated text parameters', () => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
       parameters: { name: 'PK: 红队', suffix: '次', amount: 1, cap: 0, broadcastMessage: 'HP:剩余' },
@@ -181,7 +359,7 @@ describe('online migration exporter', () => {
   });
 
   it('fails closed when a current template text parameter contains a resource reference', () => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
       parameters: { name: '计数器', suffix: '次', amount: 1, cap: 0, broadcastMessage: '正文 https://assets.invalid/image.png' },
@@ -194,7 +372,7 @@ describe('online migration exporter', () => {
   });
 
   it('preserves the explicit overtime v1 legacy shape without v2 actions', () => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'overtime', templateVersion: 1, attributeId: 'time', gifts: { overtime: [1] }, managedFingerprint: 'safe',
       parameters: { name: '加班时间', minutesPerYuan: 60, maxHours: 24, broadcastMessage: '继续加油' },
@@ -212,7 +390,7 @@ describe('online migration exporter', () => {
   });
 
   it('omits unknown template versions rather than exporting a partial simple play', () => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 2, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
       parameters: { name: '计数器', suffix: '次', amount: 1, cap: 0, broadcastMessage: '继续加油' },
@@ -222,7 +400,7 @@ describe('online migration exporter', () => {
   });
 
   it('exports only current template gift slots and removes non-overtime actions from references', () => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', managedFingerprint: 'safe',
       parameters: { name: '计数器', suffix: '次', amount: 1, cap: 0, broadcastMessage: '继续加油' },
@@ -242,7 +420,7 @@ describe('online migration exporter', () => {
   });
 
   it('limits overtime v2 actions to unique configured gifts with valid operations', () => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'overtime', templateVersion: 2, attributeId: 'time', managedFingerprint: 'safe',
       parameters: { name: '加班时间', maxSeconds: 3600, broadcastMessage: '继续加油' },
@@ -270,7 +448,7 @@ describe('online migration exporter', () => {
   });
 
   it('completes omitted current template parameters from their live defaults', () => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
       parameters: { name: '计数器', suffix: '次', amount: 2, cap: 9 },
@@ -284,7 +462,7 @@ describe('online migration exporter', () => {
   });
 
   it('does not replace explicit invalid current values with defaults', () => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
       parameters: { name: '', suffix: '次', amount: -1, cap: 0 },
@@ -294,7 +472,7 @@ describe('online migration exporter', () => {
   });
 
   it('completes omitted legacy overtime v1 parameters from historical defaults', () => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'overtime', templateVersion: 1, attributeId: 'time', gifts: { overtime: [1] }, managedFingerprint: 'safe',
       parameters: {},
@@ -308,7 +486,7 @@ describe('online migration exporter', () => {
   });
 
   it('does not replace an explicit invalid legacy overtime v1 value with its default', () => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'overtime', templateVersion: 1, attributeId: 'time', gifts: { overtime: [1] }, managedFingerprint: 'safe',
       parameters: { minutesPerYuan: 0 },
@@ -333,7 +511,7 @@ describe('online migration exporter', () => {
     '正文 .\\private\\secret',
     'HP:https://assets.invalid/image.png',
   ])('fails closed for a resource reference with an arbitrary scheme or path: %s', (unsafeValue) => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
       parameters: { name: 'PK: 红队', suffix: '次', amount: 1, cap: 0, broadcastMessage: unsafeValue },
@@ -343,7 +521,7 @@ describe('online migration exporter', () => {
   });
 
   it.each(['Score: 10', 'Boss: 红队'])('preserves an ordinary ASCII label followed by whitespace: %s', (label) => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
       parameters: { name: label, suffix: '次', amount: 1, cap: 0, broadcastMessage: '继续加油' },
@@ -359,7 +537,7 @@ describe('online migration exporter', () => {
     'HP:https://assets.invalid/image.png',
     '说明=[/private/secret]',
   ])('still rejects a resource reference following an allowed label or punctuation boundary: %s', (unsafeValue) => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
       parameters: { name: 'PK: 红队', suffix: '次', amount: 1, cap: 0, broadcastMessage: unsafeValue },
@@ -377,7 +555,7 @@ describe('online migration exporter', () => {
     '正文 javascript: alert(1)',
     '正文 vbscript: msgbox',
   ])('rejects a known dangerous scheme even when its colon is followed by whitespace: %s', (unsafeValue) => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
       parameters: { name: '计数器', suffix: '次', amount: 1, cap: 0, broadcastMessage: unsafeValue },
@@ -391,7 +569,7 @@ describe('online migration exporter', () => {
     '提示，../private',
     '值{\\private}',
   ])('rejects path syntax regardless of its preceding character: %s', (unsafeValue) => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
       parameters: { name: 'PK: 红队', suffix: '次', amount: 1, cap: 0, broadcastMessage: unsafeValue },
@@ -401,7 +579,7 @@ describe('online migration exporter', () => {
   });
 
   it.each(['比分 10/20', 'A/B 对战'])('preserves an ordinary slash that is not a path start: %s', (label) => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
       parameters: { name: label, suffix: '次', amount: 1, cap: 0, broadcastMessage: '继续加油' },
@@ -417,7 +595,7 @@ describe('online migration exporter', () => {
     'PK:/private',
     '说明，\\私密\\文件',
   ])('rejects Unicode-aware path starts: %s', (unsafeValue) => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'counter', templateVersion: 1, attributeId: 'score', gifts: { count: [1] }, managedFingerprint: 'safe',
       parameters: { name: 'PK: 红队', suffix: '次', amount: 1, cap: 0, broadcastMessage: unsafeValue },
@@ -430,7 +608,7 @@ describe('online migration exporter', () => {
     { parameters: { name: '', maxSeconds: 3600, broadcastMessage: '继续加油' }, label: 'an empty required text parameter' },
     { parameters: { name: '加班时间', maxSeconds: 1.5, broadcastMessage: '继续加油' }, label: 'a non-integer v2 maxSeconds value' },
   ])('fails closed for $label', ({ parameters }) => {
-    const state = defaultState();
+    const state = stateWithSimplePlayAttributes();
     state.simplePlay = {
       version: 1, templateId: 'overtime', templateVersion: 2, attributeId: 'time', gifts: { overtime: [1] }, managedFingerprint: 'safe',
       parameters,

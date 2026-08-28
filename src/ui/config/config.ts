@@ -1,6 +1,6 @@
 import { AppState, Attribute, AttributeDisplay, AttributeValueMapping, DisplayAppearance, DisplayScene, DisplaySceneLayout, DisplayThemeId, FormulaPresetContext, GiftInfo, GiftKpiBarStyle, GiftKpiLayout, GiftKpiPanel, GiftReceipt, GiftRule, MAX_GIFT_RECEIPTS, TimerRule, TutorialLesson, ViewerContribution } from '../../types';
 import { clearRoomScopedRecords, commitAuthoritativeStateMutation, consumeConfigMigrationRequired, createConfigBackup, loadState, mergeConfigBackup, refreshStateFromServer, resetState, saveState, saveStateFieldTransaction } from '../../storage';
-import { downloadOnlineMigration } from '../../migration';
+import { createOnlineMigration, downloadOnlineMigration } from '../../migration';
 import packageInfo from '../../../package.json';
 import { applyFormulaPreset, replaceFormulaVariable, saveFormulaPreset } from '../../formula-presets';
 import { bindFloatingDetailCard, el, fieldControl, inputField, setFloatingDetailGuideExpanded, toast } from '../common';
@@ -5346,8 +5346,8 @@ export function mountConfig(root: HTMLElement): void {
           },
           revokeObjectURL: (url) => URL.revokeObjectURL(url),
         });
-      } catch {
-        toast('迁移文件下载失败，请重试。', root);
+      } catch (error) {
+        toast(error instanceof Error ? error.message : '迁移文件下载失败，请重试。', root);
       }
     };
     const importInput = el('input', { type: 'file', accept: '.json' }) as HTMLInputElement;
@@ -5405,9 +5405,29 @@ export function mountConfig(root: HTMLElement): void {
         alert('恢复默认失败，请重试或先导出运行日志。');
       }
     };
+    let migrationNote: string;
+    try {
+      const migrationSummary = createOnlineMigration(state, packageInfo.version, new Date());
+      const migrationUnits = migrationSummary.payload.dependencyDeclaration.units.length;
+      const migrationGroups = migrationSummary.payload.dependencyDeclaration.groups.length;
+      const acceptedCrops = migrationSummary.payload.cropPresets.length;
+      const rejectedCrops = migrationSummary.payload.rejectedCropPresets.reduce((count, item) => count + item.count, 0);
+      const migrationGroupCopy = migrationGroups > 0 ? `，其中 ${migrationGroups} 组需要一起迁移` : '';
+      const migrationCropCopy = acceptedCrops > 0 || rejectedCrops > 0
+        ? `；包含 ${acceptedCrops} 个可重新关联的剪裁预设，忽略 ${rejectedCrops} 个无法迁移的预设`
+        : '';
+      migrationNote = `将导出 ${migrationUnits} 个完整玩法${migrationGroupCopy}${migrationCropCopy}，由在线版按完整玩法选择导入。文件只会下载到本地；本地数据保持不变，不包含登录信息或观众历史。`;
+    } catch (error) {
+      migrationButton.disabled = true;
+      const reason = error instanceof Error ? error.message : '当前配置无法生成迁移文件。';
+      migrationNote = `${reason}可先导出配置备份，修复无效玩法后再试。`;
+    }
     dataCard.append(
       el('div', { class: 'data-actions' }, [exportButton, migrationButton, importButton, diagnosticLogLink, importInput, resetButton]),
-      el('small', { class: 'advanced-copy migration-export-note', text: '迁移文件只会下载到本地；本地数据保持不变，文件不包含登录信息或观众历史。' }),
+      el('small', {
+        class: 'advanced-copy migration-export-note',
+        text: migrationNote,
+      }),
       el('small', { class: 'advanced-copy diagnostic-log-note', text: '运行日志包含连接状态、礼物 ID、发送者 UID 和盲盒识别结果，不包含 Cookie 或登录凭据。' }),
     );
 
