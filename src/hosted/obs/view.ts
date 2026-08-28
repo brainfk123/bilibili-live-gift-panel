@@ -1,6 +1,6 @@
 import { getDisplayTheme } from '../../display-themes';
 import { formatNumber } from '../../format';
-import type { OBSOutputSelector } from './main';
+import type { OBSOutputSelector } from './selector';
 
 export interface OBSViewerRow {
   uid: number;

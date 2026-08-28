@@ -14,6 +14,7 @@ import (
 
 	"bilibili-live-gift-panel/internal/gameplay"
 	"bilibili-live-gift-panel/internal/hosted/configuration"
+	"bilibili-live-gift-panel/internal/hosted/obsselector"
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
@@ -466,10 +467,28 @@ func TestSQLRepositoryHistoryIsAccountScopedOrderedAndBounded(t *testing.T) {
 	applied := created.Add(time.Minute)
 	expires := created.Add(24 * time.Hour)
 	rollback := applied.Add(7 * 24 * time.Hour)
-	mock.ExpectQuery(regexp.QuoteMeta(historyQuery)).WithArgs(int64(7), created, historyLimit).WillReturnRows(sqlmock.NewRows([]string{"id", "status", "created_at", "applied_at", "expires_at", "rollback_expires_at"}).AddRow(9, jobPending, created, nil, expires, nil).AddRow(8, jobApplied, created.Add(-time.Hour), applied, nil, rollback))
+	const expectedHistoryQuery = "SELECT id, status, created_at, applied_at, expires_at, rollback_expires_at FROM migration_jobs WHERE account_id = ? AND ((status = 'pending' AND expires_at > ?) OR (status = 'applied' AND rollback_expires_at > ?)) ORDER BY created_at DESC, id DESC LIMIT ?"
+	mock.ExpectQuery(regexp.QuoteMeta(expectedHistoryQuery)).WithArgs(int64(7), created, created, historyLimit).WillReturnRows(sqlmock.NewRows([]string{"id", "status", "created_at", "applied_at", "expires_at", "rollback_expires_at"}).AddRow(9, jobPending, created, nil, expires, nil).AddRow(8, jobApplied, created.Add(-time.Hour), applied, nil, rollback))
 	jobs, err := NewService(NewRepository(database), func() time.Time { return created }).History(context.Background(), 7)
 	if err != nil || len(jobs) != 2 || jobs[0].ID != 9 || jobs[1].ID != 8 || jobs[1].AppliedAt == nil || jobs[1].RollbackExpiresAt == nil {
 		t.Fatalf("jobs=%#v error=%v", jobs, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceHistoryRejectsAnExpiredPendingRowFromRepository(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC)
+	const expectedHistoryQuery = "SELECT id, status, created_at, applied_at, expires_at, rollback_expires_at FROM migration_jobs WHERE account_id = ? AND ((status = 'pending' AND expires_at > ?) OR (status = 'applied' AND rollback_expires_at > ?)) ORDER BY created_at DESC, id DESC LIMIT ?"
+	mock.ExpectQuery(regexp.QuoteMeta(expectedHistoryQuery)).WithArgs(int64(7), now, now, historyLimit).WillReturnRows(sqlmock.NewRows([]string{"id", "status", "created_at", "applied_at", "expires_at", "rollback_expires_at"}).AddRow(9, jobPending, now.Add(-time.Hour), nil, now, nil))
+	if _, err := NewService(NewRepository(database), func() time.Time { return now }).History(context.Background(), 7); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("History() error=%v, want unavailable", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -485,7 +504,12 @@ func TestServiceOBSOutputsUseAppliedAccountOwnedCandidateAndSkipEmptyScenes(t *t
 	service := NewService(repository, time.Now)
 
 	outputs, err := service.OBSOutputs(context.Background(), 7, 19)
-	want := []OBSOutput{{Selector: "attribute:bonus", Name: "加成"}, {Selector: "attribute:score", Name: "积分"}, {Selector: "gift-target:goals", Name: "礼物目标"}, {Selector: "scene:main:score,bonus", Name: "主场景"}}
+	want := []OBSOutput{
+		{Selector: obsselector.Selector{Kind: "attribute", ID: "bonus"}, Name: "加成"},
+		{Selector: obsselector.Selector{Kind: "attribute", ID: "score"}, Name: "积分"},
+		{Selector: obsselector.Selector{Kind: "gift-target", ID: "goals"}, Name: "礼物目标"},
+		{Selector: obsselector.Selector{Kind: "scene", ID: "main", Attributes: []string{"score", "bonus"}}, Name: "主场景"},
+	}
 	if err != nil || !reflect.DeepEqual(outputs, want) {
 		t.Fatalf("OBSOutputs()=%#v error=%v, want %#v", outputs, err, want)
 	}

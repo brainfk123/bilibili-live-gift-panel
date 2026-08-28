@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"bilibili-live-gift-panel/internal/hosted/identity"
+	"bilibili-live-gift-panel/internal/hosted/obsselector"
 )
 
 func TestHTTPApplyAuthorizesOwnerBeforeConsumingProof(t *testing.T) {
@@ -136,7 +138,7 @@ func TestHTTPHistoryIsAuthenticatedBoundedAndPrivacySafe(t *testing.T) {
 }
 
 func TestHTTPAppliedMigrationIssuesRealOutputLinksAndProofGatesReissue(t *testing.T) {
-	service := &httpMigrationService{job: Job{ID: 9, Status: jobPreviewed}, selectionPreview: Preview{ID: 9, CanConfirm: true}, obsOutputs: []OBSOutput{{Selector: "attribute:score", Name: "积分"}}}
+	service := &httpMigrationService{job: Job{ID: 9, Status: jobPreviewed}, selectionPreview: Preview{ID: 9, CanConfirm: true}, obsOutputs: []OBSOutput{{Selector: obsselector.Selector{Kind: "attribute", ID: "score"}, Name: "积分"}}}
 	proof := &httpProof{}
 	issued := 0
 	handler, err := NewHTTPHandler(service, proof, HTTPOptions{AllowedOrigin: "https://hosted.example", CSRFToken: "csrf", Limiter: allowAllLimiter{}, ClientIP: identity.DirectClientIP, Authenticate: testAuthenticate(), AccountID: func(context.Context) (int64, bool) { return 7, true }, IssueOBS: func(context.Context, int64) (string, error) {
@@ -149,7 +151,7 @@ func TestHTTPAppliedMigrationIssuesRealOutputLinksAndProofGatesReissue(t *testin
 	apply := migrationRequest(http.MethodPost, "/api/migrations/9/apply", `{"challengeId":"proof","selection":{"unitIds":[],"includeGeneralSettings":false,"includeRoomSuggestion":false}}`)
 	applyResponse := httptest.NewRecorder()
 	handler.ServeHTTP(applyResponse, apply)
-	if applyResponse.Code != http.StatusOK || !strings.Contains(applyResponse.Body.String(), `"url":"https://hosted.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=attribute%3Ascore#token=secret"`) || issued != 1 || proof.calls != 1 {
+	if applyResponse.Code != http.StatusOK || !strings.Contains(applyResponse.Body.String(), `"url":"https://hosted.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=eyJraW5kIjoiYXR0cmlidXRlIiwiaWQiOiJzY29yZSJ9#token=secret"`) || !strings.Contains(applyResponse.Body.String(), `"outputId":"eyJraW5kIjoiYXR0cmlidXRlIiwiaWQiOiJzY29yZSJ9"`) || issued != 1 || proof.calls != 1 {
 		t.Fatalf("apply status=%d issued=%d proof=%d body=%s", applyResponse.Code, issued, proof.calls, applyResponse.Body.String())
 	}
 	reissue := migrationRequest(http.MethodPost, "/api/migrations/9/obs-links", `{"challengeId":"proof-2"}`)
@@ -167,7 +169,7 @@ func TestHTTPAppliedMigrationIssuesRealOutputLinksAndProofGatesReissue(t *testin
 }
 
 func TestHTTPAppliedMigrationRejectsCrossOriginOBSBaseWithoutUndoingApply(t *testing.T) {
-	service := &httpMigrationService{job: Job{ID: 9, Status: jobPreviewed}, selectionPreview: Preview{ID: 9, CanConfirm: true}, obsOutputs: []OBSOutput{{Selector: "attribute:score", Name: "积分"}}}
+	service := &httpMigrationService{job: Job{ID: 9, Status: jobPreviewed}, selectionPreview: Preview{ID: 9, CanConfirm: true}, obsOutputs: []OBSOutput{{Selector: obsselector.Selector{Kind: "attribute", ID: "score"}, Name: "积分"}}}
 	handler, err := NewHTTPHandler(service, &httpProof{}, HTTPOptions{AllowedOrigin: "https://hosted.example", CSRFToken: "csrf", Limiter: allowAllLimiter{}, ClientIP: identity.DirectClientIP, Authenticate: testAuthenticate(), AccountID: func(context.Context) (int64, bool) { return 7, true }, IssueOBS: func(context.Context, int64) (string, error) {
 		return "https://attacker.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA#token=secret", nil
 	}})
@@ -178,6 +180,53 @@ func TestHTTPAppliedMigrationRejectsCrossOriginOBSBaseWithoutUndoingApply(t *tes
 	handler.ServeHTTP(response, migrationRequest(http.MethodPost, "/api/migrations/9/apply", `{"challengeId":"proof","selection":{"unitIds":[],"includeGeneralSettings":false,"includeRoomSuggestion":false}}`))
 	if response.Code != http.StatusOK || service.job.Status != jobApplied || !strings.Contains(response.Body.String(), `"obsReissueRequired":true`) || strings.Contains(response.Body.String(), "attacker.example") {
 		t.Fatalf("status=%d job=%#v body=%s", response.Code, service.job, response.Body.String())
+	}
+}
+
+func TestHTTPValidatesCompleteOBSOutputSetBeforeCredentialRotation(t *testing.T) {
+	service := &httpMigrationService{
+		job: Job{ID: 9, Status: jobPreviewed}, selectionPreview: Preview{ID: 9, CanConfirm: true},
+		obsOutputs: []OBSOutput{
+			{Selector: obsselector.Selector{Kind: "attribute", ID: "合法:积分🔥"}, Name: "合法输出"},
+			{Selector: obsselector.Selector{Kind: "scene", ID: "重复", Attributes: []string{"积分", "积分"}}, Name: "非法场景"},
+		},
+	}
+	issued := 0
+	handler, err := NewHTTPHandler(service, &httpProof{}, HTTPOptions{AllowedOrigin: "https://hosted.example", CSRFToken: "csrf", Limiter: allowAllLimiter{}, ClientIP: identity.DirectClientIP, Authenticate: testAuthenticate(), AccountID: func(context.Context) (int64, bool) { return 7, true }, IssueOBS: func(context.Context, int64) (string, error) {
+		issued++
+		return "https://hosted.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA#token=secret", nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, migrationRequest(http.MethodPost, "/api/migrations/9/apply", `{"challengeId":"proof","selection":{"unitIds":[],"includeGeneralSettings":false,"includeRoomSuggestion":false}}`))
+	if response.Code != http.StatusOK || service.job.Status != jobApplied || issued != 0 || !strings.Contains(response.Body.String(), `"obsReissueRequired":true`) || strings.Contains(response.Body.String(), "obsLinks") {
+		t.Fatalf("status=%d job=%#v issued=%d body=%s", response.Code, service.job, issued, response.Body.String())
+	}
+}
+
+func TestHTTPOversizeOBSOutputDoesNotRotateCredential(t *testing.T) {
+	attributes := make([]string, 200)
+	for index := range attributes {
+		attributes[index] = strconv.Itoa(index) + strings.Repeat("界", 100)
+	}
+	service := &httpMigrationService{
+		job: Job{ID: 9, Status: jobPreviewed}, selectionPreview: Preview{ID: 9, CanConfirm: true},
+		obsOutputs: []OBSOutput{{Selector: obsselector.Selector{Kind: "scene", ID: "二百属性场景", Attributes: attributes}, Name: "过长输出"}},
+	}
+	issued := 0
+	handler, err := NewHTTPHandler(service, &httpProof{}, HTTPOptions{AllowedOrigin: "https://hosted.example", CSRFToken: "csrf", Limiter: allowAllLimiter{}, ClientIP: identity.DirectClientIP, Authenticate: testAuthenticate(), AccountID: func(context.Context) (int64, bool) { return 7, true }, IssueOBS: func(context.Context, int64) (string, error) {
+		issued++
+		return "https://hosted.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA#token=secret", nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, migrationRequest(http.MethodPost, "/api/migrations/9/apply", `{"challengeId":"proof","selection":{"unitIds":[],"includeGeneralSettings":false,"includeRoomSuggestion":false}}`))
+	if response.Code != http.StatusOK || issued != 0 || !strings.Contains(response.Body.String(), `"obsReissueRequired":true`) {
+		t.Fatalf("status=%d issued=%d body=%s", response.Code, issued, response.Body.String())
 	}
 }
 

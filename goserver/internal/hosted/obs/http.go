@@ -12,13 +12,13 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"bilibili-live-gift-panel/internal/hosted/configuration"
 	"bilibili-live-gift-panel/internal/hosted/identity"
+	"bilibili-live-gift-panel/internal/hosted/obsselector"
 	hostedruntime "bilibili-live-gift-panel/internal/hosted/runtime"
 )
 
@@ -310,8 +310,6 @@ func (handler *HTTPHandler) events(response http.ResponseWriter, request *http.R
 	}
 }
 
-var obsOutputPattern = regexp.MustCompile(`^(?:attribute|gift-target):[A-Za-z0-9_-]{1,128}$|^scene:[A-Za-z0-9_-]{1,128}:[A-Za-z0-9_-]{1,128}(?:,[A-Za-z0-9_-]{1,128})*$`)
-
 func validOBSOutputQuery(values url.Values) bool {
 	if len(values) == 0 {
 		return true
@@ -320,7 +318,11 @@ func validOBSOutputQuery(values url.Values) bool {
 		return false
 	}
 	outputs, ok := values["output"]
-	return ok && len(outputs) == 1 && obsOutputPattern.MatchString(outputs[0])
+	if !ok || len(outputs) != 1 {
+		return false
+	}
+	_, err := obsselector.Decode(outputs[0])
+	return err == nil
 }
 
 func (handler *HTTPHandler) initialSnapshot(ctx context.Context, accountID int64) (hostedruntime.DisplaySnapshot, error) {

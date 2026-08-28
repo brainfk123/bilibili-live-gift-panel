@@ -72,12 +72,15 @@ export function createMigrationFlow(api: MigrationAPI, render: (state: Migration
   let proofOperation: Promise<void> | undefined;
   let obsChecklist: OBSReplacementItem[] = [];
   const controllers = new Set<AbortController>();
-  const pending = new Set<Promise<unknown>>();
+  const cleanupControllers = new Set<AbortController>();
+  const tasks = new Set<Promise<unknown>>();
+  let cleanupClosed = false;
+  let disposeOperation: Promise<void> | undefined;
   const setTimer = clock.setTimeout ?? ((callback: () => void, delay: number) => globalThis.setTimeout(callback, delay));
   const clearTimer = clock.clearTimeout ?? ((timer: unknown) => globalThis.clearTimeout(timer as number));
   let pollTimer: unknown; let pollDelay = 1_000;
-  const controller = (): AbortController => { const value = new AbortController(); controllers.add(value); return value; };
-  const tracked = <T>(operation: Promise<T>): Promise<T> => { pending.add(operation); void operation.finally(() => pending.delete(operation)).catch(() => undefined); return operation; };
+  const controller = (): AbortController => { const value = new AbortController(); if (disposed) value.abort(); else controllers.add(value); return value; };
+  const tracked = <T>(operation: Promise<T>): Promise<T> => { tasks.add(operation); void operation.finally(() => tasks.delete(operation)).catch(() => undefined); return operation; };
   const releaseController = (value: AbortController): void => { controllers.delete(value); };
   const stopPolling = (): void => { if (pollTimer !== undefined) clearTimer(pollTimer); pollTimer = undefined; pollDelay = 1_000; };
 
@@ -118,13 +121,20 @@ export function createMigrationFlow(api: MigrationAPI, render: (state: Migration
     error = cause instanceof TypeError ? '网络连接失败，请检查网络后重试' : '操作失败，请重试';
     publish();
   };
-  const bestEffortCancel = (challenge?: Challenge): void => { if (challenge) { const active = controller(); void tracked(api.cancelLogin?.(challenge.challengeId, active.signal) ?? Promise.resolve()).finally(() => releaseController(active)).catch(() => undefined); } };
-  const bestEffortJobCancel = (id: number): void => { const active = controller(); void tracked((api.cancelMigration?.(id, active.signal) ?? Promise.resolve()).then(() => undefined)).finally(() => releaseController(active)).catch(() => undefined); };
+  const enqueueCleanup = (action: (signal: AbortSignal) => Promise<unknown>): void => {
+    if (cleanupClosed) return;
+    const active = new AbortController(); cleanupControllers.add(active);
+    const operation = (async () => { if (!cleanupClosed) await action(active.signal); })();
+    void tracked(operation).finally(() => cleanupControllers.delete(active)).catch(() => undefined);
+  };
+  const bestEffortCancel = (challenge?: Challenge): void => { if (challenge && api.cancelLogin) enqueueCleanup((signal) => api.cancelLogin!(challenge.challengeId, signal)); };
+  const bestEffortJobCancel = (id: number): void => { if (api.cancelMigration) enqueueCleanup((signal) => api.cancelMigration!(id, signal)); };
   const operationConflict = (): HostedAPIError => new HostedAPIError('operation_conflict', 409);
   const discardProof = (): void => { const active = proof; proof = undefined; proofStatus = undefined; bestEffortCancel(active); };
   const ensureLive = (started: number): void => { if (disposed || started !== generation) throw new HostedAPIError('operation_failed', 0); };
   const applyJob = (value: MigrationJob): void => {
     job = clone(value);
+    if (job.status === 'applied' && !job.obsLinks?.length) job.obsReissueRequired = true;
     if (value.status !== 'pending') stopPolling();
     if (value.obsLinks) obsChecklist = value.obsLinks.map((link) => ({ ...link, replaced: obsChecklist.find((item) => item.outputId === link.outputId)?.replaced ?? false }));
   };
@@ -132,13 +142,13 @@ export function createMigrationFlow(api: MigrationAPI, render: (state: Migration
     if (disposed || job?.status !== 'pending' || pollTimer !== undefined || !api.getMigration) return;
     pollTimer = setTimer(() => { pollTimer = undefined; void pollPending(); }, delay);
   };
-  const pollPending = async (): Promise<void> => {
+  const pollPending = (): Promise<void> => tracked((async () => {
     if (disposed || job?.status !== 'pending' || operationInFlight || !api.getMigration) { if (!disposed && job?.status === 'pending') schedulePoll(pollDelay); return; }
     const id = job.id; const active = controller();
     try { const result = await tracked(api.getMigration(id, active.signal)); if (disposed || active.signal.aborted || job?.id !== id) return; applyJob(result); error = undefined; pollDelay = 1_000; publish(); if (result.status === 'pending') { schedulePoll(pollDelay); pollDelay = Math.min(8_000, pollDelay * 2); } }
     catch (cause) { if (!disposed && !active.signal.aborted && job?.status === 'pending') { fail(cause); schedulePoll(pollDelay); pollDelay = Math.min(8_000, pollDelay * 2); } }
     finally { releaseController(active); }
-  };
+  })());
   const nextProof = async (started: number, signal: AbortSignal): Promise<Challenge> => {
     if (proof) return proof;
     if (!api.beginLogin) throw new HostedAPIError('invalid_request', 400);
@@ -161,29 +171,29 @@ export function createMigrationFlow(api: MigrationAPI, render: (state: Migration
   const runProofOperation = (action: (challengeID: string, started: number, signal: AbortSignal) => Promise<void>): Promise<void> => {
     if (proofOperation || operationInFlight) return Promise.reject(operationConflict());
     const started = ++generation; const active = controller(); operationInFlight = true; error = undefined; publish();
-    const running = (async () => {
+    const running = tracked((async () => {
       try { const challengeID = await checkedProof(started, active.signal); await action(challengeID, started, active.signal); }
       catch (cause) {
         if (!(cause instanceof HostedAPIError && (cause.code === 'verification_pending' || cause.code === 'temporarily_unavailable'))) discardProof();
         if (!disposed && started === generation && !(cause instanceof HostedAPIError && cause.code === 'verification_pending')) fail(cause);
         throw cause;
       }
-    })();
+    })());
     proofOperation = running;
     void running.finally(() => { releaseController(active); if (proofOperation === running) proofOperation = undefined; if (!disposed && started === generation) { operationInFlight = false; publish(); } }).catch(() => undefined);
     return running;
   };
-  const submitSelection = async (next: MigrationSelection): Promise<void> => {
+  const submitSelection = (next: MigrationSelection): Promise<void> => tracked((async () => {
     if (disposed || operationInFlight || proofOperation) throw operationConflict();
     if (!preview || !job || job.status !== 'previewed' || !api.selectMigration || !previewAlive()) throw new HostedAPIError('invalid_request', 400);
     const started = ++generation; const active = controller(); operationInFlight = true; error = undefined; publish();
     try { const result = await tracked(api.selectMigration(preview.id, selectionCopy(next), active.signal)); ensureLive(started); preview = clone(result); replacementConfirmed = false; }
     catch (cause) { if (!disposed && started === generation) fail(cause); throw cause; }
     finally { releaseController(active); if (!disposed && started === generation) { operationInFlight = false; publish(); } }
-  };
+  })());
 
   return Object.freeze({
-    async preview(file: MigrationFile): Promise<void> {
+    preview(file: MigrationFile): Promise<void> { return tracked((async () => {
       if (proofOperation || operationInFlight) throw operationConflict();
       if (disposed || !api.previewMigration || !file.name.toLowerCase().endsWith('.json') || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > migrationFileLimit) throw new HostedAPIError('invalid_request', 400);
       const started = ++generation; const active = controller(); rawFileActive = true; operationInFlight = true; error = undefined; publish();
@@ -199,7 +209,7 @@ export function createMigrationFlow(api: MigrationAPI, render: (state: Migration
         duplicatePackage = result.reused; replacementConfirmed = false; obsChecklist = []; error = undefined;
       } catch (cause) { if (!disposed && started === generation) fail(cause); throw cause; }
       finally { raw = ''; releaseController(active); if (!disposed && started === generation) { rawFileActive = false; operationInFlight = false; publish(); if (job?.status === 'pending') schedulePoll(0); } }
-    },
+    })()); },
     acceptPreview(value: MigrationPreview): void {
       if (disposed || proofOperation || operationInFlight) return;
       generation += 1; preview = clone(value); applyJob({ id: value.id, status: 'previewed', expiresAt: value.expiresAt }); duplicatePackage = value.reused; replacementConfirmed = false; obsChecklist = []; error = undefined; publish();
@@ -239,29 +249,46 @@ export function createMigrationFlow(api: MigrationAPI, render: (state: Migration
       return runProofOperation(async (challengeID, started, signal) => { const result = await tracked(api.rollbackMigration!(id, challengeID, signal)); ensureLive(started); applyJob(result); discardProof(); error = undefined; publish(); });
     },
     reissueOBS(): Promise<void> { if (!job || job.status !== 'applied' || !api.reissueMigrationOBS) return Promise.reject(new HostedAPIError('invalid_request',400)); const id=job.id; return runProofOperation(async(challengeID,started,signal)=>{const result=await tracked(api.reissueMigrationOBS!(id,challengeID,signal));ensureLive(started);applyJob(result);discardProof();error=undefined;publish();}); },
-    async refresh(id: number): Promise<void> {
+    refresh(id: number): Promise<void> { return tracked((async () => {
       if (proofOperation || operationInFlight) throw operationConflict();
       if (disposed || !canRefresh() || !job || id !== job.id || !api.getMigration) throw new HostedAPIError('invalid_request', 400);
       const started = ++generation; const active = controller(); operationInFlight = true; error = undefined; publish();
       try { const result = await tracked(api.getMigration(id, active.signal)); ensureLive(started); applyJob(result); error = undefined; publish(); }
       catch (cause) { if (!disposed && started === generation) fail(cause); throw cause; }
       finally { releaseController(active); if (!disposed && started === generation) { operationInFlight = false; publish(); if (job?.status === 'pending') schedulePoll(pollDelay); } }
-    },
-    async cancel(): Promise<void> {
+    })()); },
+    cancel(): Promise<void> { return tracked((async () => {
       if (proofOperation || operationInFlight) throw operationConflict();
       if (disposed || !canCancel() || !job || !api.cancelMigration) throw new HostedAPIError('invalid_request', 400);
       const started = ++generation; const active = controller(); const id = job.id; operationInFlight = true; error = undefined; publish();
       try { const result = await tracked(api.cancelMigration(id, active.signal)); ensureLive(started); applyJob(result); error = undefined; publish(); }
       catch (cause) { if (!disposed && started === generation) fail(cause); throw cause; }
       finally { releaseController(active); if (!disposed && started === generation) { operationInFlight = false; publish(); } }
-    },
+    })()); },
     confirmOBSReplacement(outputID: string, value: boolean): void { const item = obsChecklist.find((candidate) => candidate.outputId === outputID); if (item) { item.replaced = value; publish(); } },
     refreshTime(): void { publish(); },
     reportFailure(cause: unknown): void { fail(cause); },
-    async dispose(): Promise<void> {
-      generation += 1; disposed = true; stopPolling(); for (const active of controllers) active.abort(); const challenge = proof; proof = undefined; proofStatus = undefined; preview = undefined; job = undefined; error = undefined; rawFileActive = false; operationInFlight = false; obsChecklist = [];
-      if (challenge && api.cancelLogin) { const cleanup = new AbortController(); const cleanupPromise = api.cancelLogin(challenge.challengeId, cleanup.signal).catch(() => undefined); const timeout = new Promise<void>((resolve) => { const timer=setTimer(()=>{cleanup.abort();resolve();}, Math.max(25, Math.min(1_000, clock.settleTimeoutMs ?? 250))); void cleanupPromise.finally(()=>{clearTimer(timer);resolve();}); }); await timeout; }
-      const settle = Promise.allSettled([...pending]).then(() => undefined); await Promise.race([settle, new Promise<void>((resolve)=>{setTimer(resolve, Math.max(25, Math.min(1_000, clock.settleTimeoutMs ?? 250)));})]);
+    dispose(): Promise<void> {
+      if (disposeOperation) return disposeOperation;
+      disposeOperation = (async () => {
+        generation += 1; disposed = true; stopPolling(); for (const active of controllers) active.abort(); controllers.clear();
+        const challenge = proof; proof = undefined; proofStatus = undefined; preview = undefined; job = undefined; error = undefined; rawFileActive = false; operationInFlight = false; obsChecklist = [];
+        bestEffortCancel(challenge);
+        const timeoutMs = Math.max(25, Math.min(1_000, clock.settleTimeoutMs ?? 250));
+        let deadlineReached = false; let deadlineTimer: unknown;
+        let reachDeadline!: () => void;
+        const deadline = new Promise<void>((resolve) => { reachDeadline = resolve; deadlineTimer = setTimer(() => { deadlineReached = true; for (const active of cleanupControllers) active.abort(); resolve(); }, timeoutMs); });
+        while (!deadlineReached) {
+          const batch = [...tasks];
+          if (batch.length === 0) { await Promise.resolve(); if (tasks.size === 0) break; continue; }
+          await Promise.race([Promise.allSettled(batch).then(() => undefined), deadline]);
+        }
+        cleanupClosed = true;
+        for (const active of cleanupControllers) active.abort(); cleanupControllers.clear();
+        if (!deadlineReached) { clearTimer(deadlineTimer); reachDeadline(); }
+        tasks.clear();
+      })();
+      return disposeOperation;
     },
   });
 }

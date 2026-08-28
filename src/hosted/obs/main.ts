@@ -1,5 +1,7 @@
 import './obs.css';
 import { parseOBSDisplaySnapshot, renderOBSSnapshot } from './view';
+import { encodeOBSOutputSelector, parseOBSOutputSelector, type OBSOutputSelector } from './selector';
+export { encodeOBSOutputSelector, parseOBSOutputSelector, type OBSOutputSelector } from './selector';
 
 const publicIDPattern = /^[A-Za-z0-9_-]{43}$/;
 type OBSFetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -26,8 +28,6 @@ export interface ParsedOBSLocation {
   cleanURL: string;
   output?: OBSOutputSelector;
 }
-
-export type OBSOutputSelector = { kind: 'attribute' | 'scene' | 'gift-target'; id: string; attributeIds: readonly string[] };
 
 export interface OBSEventSourceLike {
   close(): void;
@@ -59,17 +59,6 @@ export function parseOBSLocation(location: OBSLocation): ParsedOBSLocation | und
   return { publicID: match[1]!, token, cleanURL: `${location.pathname}${location.search}`, ...(output ? { output } : {}) };
 }
 
-export function parseOBSOutputSelector(value: string | null): OBSOutputSelector | undefined {
-  if (value === null) return undefined;
-  const simple = /^(attribute|gift-target):([A-Za-z0-9_-]{1,128})$/.exec(value);
-  if (simple) return { kind: simple[1] as 'attribute' | 'gift-target', id: simple[2]!, attributeIds: simple[1] === 'attribute' ? [simple[2]!] : [] };
-  const scene = /^scene:([A-Za-z0-9_-]{1,128}):([A-Za-z0-9_-]{1,128}(?:,[A-Za-z0-9_-]{1,128})*)$/.exec(value);
-  if (!scene) return undefined;
-  const attributeIds = scene[2]!.split(',');
-  if (new Set(attributeIds).size !== attributeIds.length) return undefined;
-  return { kind: 'scene', id: scene[1]!, attributeIds };
-}
-
 export async function startOBSPage(dependencies: OBSPageDependencies): Promise<OBSEventSourceLike> {
 	const capturedLocation: OBSLocation = {
 	  pathname: dependencies.location.pathname,
@@ -97,7 +86,8 @@ export async function startOBSPage(dependencies: OBSPageDependencies): Promise<O
       token = '';
     }
   }
-  const eventQuery = parsed.output ? `?output=${encodeURIComponent(parsed.output.kind === 'scene' ? `scene:${parsed.output.id}:${parsed.output.attributeIds.join(',')}` : `${parsed.output.kind}:${parsed.output.id}`)}` : '';
+  const encodedOutput = parsed.output ? encodeOBSOutputSelector(parsed.output) : undefined;
+  const eventQuery = encodedOutput ? `?output=${encodedOutput}` : '';
   const source = dependencies.createEventSource(`/obs/${parsed.publicID}/events${eventQuery}`);
   source.addEventListener?.('display', (event) => {
     try {

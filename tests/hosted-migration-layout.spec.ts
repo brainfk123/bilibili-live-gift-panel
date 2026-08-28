@@ -20,6 +20,7 @@ const preview = {
   selection: { unitIds: ['attribute:score'], conflictChoices: {}, includeGeneralSettings: false, includeRoomSuggestion: false },
   generalSettings: { configurationMode: 'simple' }, canConfirm: false,
 };
+const scoreSelector = 'eyJraW5kIjoiYXR0cmlidXRlIiwiaWQiOiJzY29yZSJ9';
 
 const harnessPage = `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/src/hosted/shell.css"></head><body><div id="root"></div><script type="module">
   import { mountMigrationView } from '/src/hosted/migration.ts';
@@ -35,18 +36,47 @@ const harnessPage = `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-
       beginLogin() { return Promise.resolve({ challengeId: 'proof', qrImage: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==', expiresAt: preview.expiresAt }); },
       pollLogin() { return Promise.resolve({ status: 'verified', expiresAt: preview.expiresAt }); },
       cancelLogin() { return Promise.resolve(); },
-      applyMigration() { return Promise.resolve({ id: 12, status: 'applied', rollbackExpiresAt: '2030-01-08T00:00:00Z', obsLinks: [{ outputId: 'attribute:score', name: '积分卡片', url: 'https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=attribute%3Ascore#token=one-time' }] }); },
+      applyMigration() { return Promise.resolve({ id: 12, status: 'applied', rollbackExpiresAt: '2030-01-08T00:00:00Z', ...(state === 'applied-without-links' ? {} : { obsLinks: [{ outputId: '${scoreSelector}', name: '积分卡片', url: 'https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=${scoreSelector}#token=one-time' }] }) }); },
     };
     mounted = mountMigrationView(root, api, { onConfiguration() {} });
     if (state === 'preview') mounted.flow.acceptPreview(preview);
     if (state === 'busy') void mounted.flow.preview({ name: 'private.json', size: 2, text: async () => '{}' });
     if (state === 'error') { mounted.flow.acceptPreview(preview); mounted.flow.reportFailure(new TypeError('Failed to fetch RAW')); }
-    if (state === 'applied') { const ready = { ...preview, conflicts: [], canConfirm: true }; mounted.flow.acceptPreview(ready); mounted.flow.confirmReplacement(true); await mounted.flow.apply(); }
+    if (state === 'applied' || state === 'applied-without-links') { const ready = { ...preview, conflicts: [], canConfirm: true }; mounted.flow.acceptPreview(ready); mounted.flow.confirmReplacement(true); await mounted.flow.apply(); }
   }
   window.__migrationHarness = { mount, cleanup };
 </script></body></html>`;
 
-declare global { interface Window { __migrationHarness: { mount(state: 'preview' | 'busy' | 'error' | 'applied'): Promise<void>; cleanup(): Promise<void> } } }
+const settingsRacePage = `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/src/hosted/shell.css"></head><body><div id="root"></div><script type="module">
+  import { mountMigrationSettingsView } from '/src/hosted/user/settings/migration-center.ts';
+  const root = document.querySelector('#root');
+  const historyCalls = [];
+  let mounted;
+  let beforeUnloadGuards = 0;
+  const add = window.addEventListener.bind(window);
+  const remove = window.removeEventListener.bind(window);
+  window.addEventListener = (type, listener, options) => { if (type === 'beforeunload') beforeUnloadGuards += 1; add(type, listener, options); };
+  window.removeEventListener = (type, listener, options) => { if (type === 'beforeunload') beforeUnloadGuards -= 1; remove(type, listener, options); };
+  const api = {
+    migrationHistory(signal) { return new Promise((resolve) => historyCalls.push({ resolve, signal })); },
+    getMigration(id) { return Promise.resolve({ id, status: 'rolled_back' }); },
+  };
+  window.__settingsRaceHarness = {
+    mount() { mounted = mountMigrationSettingsView(root, api, { onExit() {} }); },
+    historyCount() { return historyCalls.length; },
+    historyAborted(index) { return historyCalls[index]?.signal.aborted ?? false; },
+    resolveHistory(index, jobs) { historyCalls[index]?.resolve(jobs); },
+    guardCount() { return beforeUnloadGuards; },
+    async cleanup() { await mounted?.dispose(); mounted = undefined; },
+  };
+</script></body></html>`;
+
+declare global {
+  interface Window {
+    __migrationHarness: { mount(state: 'preview' | 'busy' | 'error' | 'applied' | 'applied-without-links'): Promise<void>; cleanup(): Promise<void> };
+    __settingsRaceHarness: { mount(): void; historyCount(): number; historyAborted(index: number): boolean; resolveHistory(index: number, jobs: unknown[]): void; guardCount(): number; cleanup(): Promise<void> };
+  }
+}
 
 let server: ViteDevServer;
 let baseURL: string;
@@ -59,6 +89,7 @@ test.beforeAll(async () => {
       configureServer(devServer) {
         devServer.middlewares.use((request, response, next) => {
           if (request.url === '/__hosted-migration-layout-test') { response.statusCode = 200; response.setHeader('Content-Type', 'text/html; charset=UTF-8'); response.end(harnessPage); return; }
+          if (request.url === '/__hosted-settings-race-test') { response.statusCode = 200; response.setHeader('Content-Type', 'text/html; charset=UTF-8'); response.end(settingsRacePage); return; }
           if (request.url === '/__hosted-account-test') { response.statusCode = 200; response.setHeader('Content-Type', 'text/html; charset=UTF-8'); response.end('<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="hosted-app"></div><script>window.EventSource=class { addEventListener(){} close(){} };</script><script type="module" src="/src/hosted/main.ts"></script></body></html>'); return; }
           if (request.url === '/api/bootstrap') { response.statusCode = 200; response.setHeader('Content-Type', 'application/json'); response.end('{"csrfToken":"csrf"}'); return; }
           if (request.url === '/api/auth/session') { response.statusCode = 200; response.setHeader('Content-Type', 'application/json'); response.end('{"authenticated":true,"accountScope":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}'); return; }
@@ -93,6 +124,11 @@ test('first-login prompt can be skipped while Settings remains a real route to t
   await page.getByRole('button', { name: '设置', exact: true }).click();
   await expect(page.getByRole('heading', { name: '设置', exact: true })).toBeVisible();
   await expect(page.getByText('可回滚的迁移')).toBeVisible();
+  await page.getByRole('button', { name: '查看并回滚' }).click();
+  await expect(page.getByRole('button', { name: '扫码重新签发 OBS 链接' })).toBeVisible();
+  await expect(page.getByText(/轮换并撤销之前的 OBS 链接/)).toBeVisible();
+  await page.getByRole('button', { name: '返回设置' }).click();
+  await expect(page.getByRole('heading', { name: '设置', exact: true })).toBeVisible();
   const settingsInteractive = await page.locator('.hosted-migration-settings button,.hosted-migration-settings input,.hosted-migration-settings select,.hosted-migration-settings a').evaluateAll((elements) => elements.map((element) => { const rect = element.getBoundingClientRect(); return { left: rect.left, right: rect.right }; }));
   for (const item of settingsInteractive) { expect(item.left).toBeGreaterThanOrEqual(0); expect(item.right).toBeLessThanOrEqual(390); }
   await page.getByRole('button', { name: '打开迁移中心' }).click();
@@ -136,7 +172,64 @@ test('styles loading, network failure, applied progress and OBS checklist with r
   await page.evaluate(() => window.__migrationHarness.mount('applied'));
   await expect(page.getByText('迁移已应用', { exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: '逐项替换 OBS 链接' })).toBeVisible();
-  await expect(page.getByRole('link', { name: /https:\/\/host\.example\/obs\/A/ })).toHaveAttribute('href', 'https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=attribute%3Ascore#token=one-time');
+  await expect(page.getByRole('link', { name: /https:\/\/host\.example\/obs\/A/ })).toHaveAttribute('href', `https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=${scoreSelector}#token=one-time`);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  await page.close();
+});
+
+test('applied jobs without in-memory OBS links expose proof-gated rotation recovery', async ({ browser }) => {
+  const page = await openHarness(browser, { width: 390, height: 844 });
+  await page.evaluate(() => window.__migrationHarness.mount('applied-without-links'));
+  await expect(page.getByText('迁移已应用', { exact: true })).toBeVisible();
+  await expect(page.getByText(/OBS 链接需重新签发/)).toBeVisible();
+  await expect(page.getByRole('button', { name: '扫码重新签发 OBS 链接' })).toBeVisible();
+  await expect(page.getByText(/轮换并撤销旧链接/)).toBeVisible();
+  await page.close();
+});
+
+test('opening migration invalidates a slow parent history response before it can replace the child', async ({ browser }) => {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  await page.goto(`${baseURL}/__hosted-settings-race-test`);
+  await page.waitForFunction(() => typeof window.__settingsRaceHarness?.mount === 'function');
+  await page.evaluate(() => window.__settingsRaceHarness.mount());
+  await expect.poll(() => page.evaluate(() => window.__settingsRaceHarness.historyCount())).toBe(1);
+  await page.getByRole('button', { name: '打开迁移中心' }).click();
+  await expect(page.getByRole('heading', { name: '从本地 EXE 迁移' })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__settingsRaceHarness.historyAborted(0))).toBe(true);
+  await page.evaluate(() => window.__settingsRaceHarness.resolveHistory(0, [{ id: 7, status: 'pending', createdAt: '2026-08-29T00:00:00Z', expiresAt: '2030-01-02T00:00:00Z' }]));
+  await expect(page.getByRole('heading', { name: '从本地 EXE 迁移' })).toBeVisible();
+  expect(await page.evaluate(() => window.__settingsRaceHarness.guardCount())).toBe(1);
+  await page.evaluate(() => window.__settingsRaceHarness.cleanup());
+  await page.close();
+});
+
+test('returning from a terminal resumed job disposes the child and refetches history', async ({ browser }) => {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  await page.goto(`${baseURL}/__hosted-settings-race-test`);
+  await page.waitForFunction(() => typeof window.__settingsRaceHarness?.mount === 'function');
+  await page.evaluate(() => window.__settingsRaceHarness.mount());
+  await expect.poll(() => page.evaluate(() => window.__settingsRaceHarness.historyCount())).toBe(1);
+  await page.evaluate(() => window.__settingsRaceHarness.resolveHistory(0, [{ id: 7, status: 'pending', createdAt: '2026-08-29T00:00:00Z', expiresAt: '2030-01-02T00:00:00Z' }]));
+  await expect(page.getByRole('button', { name: '继续查看' })).toBeVisible();
+  await page.getByRole('button', { name: '继续查看' }).click();
+  await expect(page.getByText('迁移状态：rolled_back')).toBeVisible();
+  await page.getByRole('button', { name: '返回设置' }).click();
+  await expect.poll(() => page.evaluate(() => window.__settingsRaceHarness.historyCount())).toBe(2);
+  await page.evaluate(() => window.__settingsRaceHarness.resolveHistory(1, []));
+  await expect(page.getByRole('heading', { name: '设置', exact: true })).toBeVisible();
+  await expect(page.getByText('等待应用')).toHaveCount(0);
+  expect(await page.evaluate(() => window.__settingsRaceHarness.guardCount())).toBe(0);
+  await page.close();
+});
+
+test('settings defensively hides pending history whose preview has expired', async ({ browser }) => {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  await page.goto(`${baseURL}/__hosted-settings-race-test`);
+  await page.waitForFunction(() => typeof window.__settingsRaceHarness?.mount === 'function');
+  await page.evaluate(() => window.__settingsRaceHarness.mount());
+  await expect.poll(() => page.evaluate(() => window.__settingsRaceHarness.historyCount())).toBe(1);
+  await page.evaluate(() => window.__settingsRaceHarness.resolveHistory(0, [{ id: 7, status: 'pending', createdAt: '2000-01-01T00:00:00Z', expiresAt: '2000-01-02T00:00:00Z' }]));
+  await expect(page.getByRole('heading', { name: '设置', exact: true })).toBeVisible();
+  await expect(page.getByText('等待应用')).toHaveCount(0);
   await page.close();
 });

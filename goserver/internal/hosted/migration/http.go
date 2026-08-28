@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"bilibili-live-gift-panel/internal/hosted/identity"
+	"bilibili-live-gift-panel/internal/hosted/obsselector"
 )
 
 const maxMigrationBody = 2 << 20
@@ -295,8 +296,40 @@ func (handler *HTTPHandler) reissueOBSLinks(response http.ResponseWriter, reques
 	})
 }
 
-var obsOutputSelectorPattern = regexp.MustCompile(`^(?:attribute|gift-target):[A-Za-z0-9_-]{1,128}$|^scene:[A-Za-z0-9_-]{1,128}:[A-Za-z0-9_-]{1,128}(?:,[A-Za-z0-9_-]{1,128})*$`)
 var obsCredentialPathPattern = regexp.MustCompile(`^/obs/[A-Za-z0-9_-]{43}$`)
+
+const (
+	maxOBSLinkURLLength = obsselector.MaxEncodedLength + 1024
+	maxOBSLinkSetLength = 1 << 20
+)
+
+type preparedOBSOutput struct {
+	selector string
+	name     string
+}
+
+func (handler *HTTPHandler) prepareOBSOutputs(outputs []OBSOutput) ([]preparedOBSOutput, bool) {
+	prepared := make([]preparedOBSOutput, 0, len(outputs))
+	seen := make(map[string]struct{}, len(outputs))
+	totalLength := 0
+	for _, output := range outputs {
+		selector, err := obsselector.Encode(output.Selector)
+		if err != nil {
+			return nil, false
+		}
+		if _, duplicate := seen[selector]; duplicate {
+			return nil, false
+		}
+		seen[selector] = struct{}{}
+		candidateLength := len(handler.allowedOrigin) + len("/obs/") + 43 + len("?output=") + len(selector) + len("#token=") + 512
+		if candidateLength > maxOBSLinkURLLength || totalLength > maxOBSLinkSetLength-candidateLength {
+			return nil, false
+		}
+		totalLength += candidateLength
+		prepared = append(prepared, preparedOBSOutput{selector: selector, name: output.Name})
+	}
+	return prepared, true
+}
 
 func (handler *HTTPHandler) attachOBSLinks(ctx context.Context, accountID, jobID int64, job Job) Job {
 	outputs, err := handler.service.OBSOutputs(ctx, accountID, jobID)
@@ -304,6 +337,11 @@ func (handler *HTTPHandler) attachOBSLinks(ctx context.Context, accountID, jobID
 		if err != nil {
 			job.OBSReissueRequired = true
 		}
+		return job
+	}
+	prepared, valid := handler.prepareOBSOutputs(outputs)
+	if !valid {
+		job.OBSReissueRequired = true
 		return job
 	}
 	if handler.issueOBS == nil {
@@ -327,18 +365,19 @@ func (handler *HTTPHandler) attachOBSLinks(ctx context.Context, accountID, jobID
 		job.OBSReissueRequired = true
 		return job
 	}
-	links := make([]OBSLink, 0, len(outputs))
-	for _, output := range outputs {
-		if !obsOutputSelectorPattern.MatchString(output.Selector) {
+	links := make([]OBSLink, 0, len(prepared))
+	for _, output := range prepared {
+		candidate := *parsed
+		query := url.Values{}
+		query.Set("output", output.selector)
+		candidate.RawQuery = query.Encode()
+		candidateURL := candidate.String()
+		if len(candidateURL) > maxOBSLinkURLLength {
 			job.OBSReissueRequired = true
 			job.OBSLinks = nil
 			return job
 		}
-		candidate := *parsed
-		query := url.Values{}
-		query.Set("output", output.Selector)
-		candidate.RawQuery = query.Encode()
-		links = append(links, OBSLink{OutputID: output.Selector, Name: output.Name, URL: candidate.String()})
+		links = append(links, OBSLink{OutputID: output.selector, Name: output.name, URL: candidateURL})
 	}
 	job.OBSLinks = links
 	return job

@@ -1,5 +1,6 @@
 import { GAMEPLAY_TEMPLATES, type TemplateGiftSlotDefinition, type TemplateParameterDefinition } from '../gameplay-templates';
 import { validHostedRoomID } from './room-id';
+import { maxOBSLinkURLLength, parseOBSOutputSelector } from './obs/selector';
 
 export type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -392,18 +393,10 @@ function migrationGeneralSettings(value: unknown): MigrationGeneralSettings | un
   return item && exactKeys(item, ['configurationMode']) && text(item.configurationMode) ? { configurationMode: item.configurationMode } : undefined;
 }
 
-function validMigrationOBSSelector(value: string): boolean {
-  if (/^(?:attribute|gift-target):[A-Za-z0-9_-]{1,128}$/.test(value)) return true;
-  const scene = /^scene:[A-Za-z0-9_-]{1,128}:([A-Za-z0-9_-]{1,128}(?:,[A-Za-z0-9_-]{1,128})*)$/.exec(value);
-  if (!scene) return false;
-  const attributeIDs = scene[1]!.split(',');
-  return new Set(attributeIDs).size === attributeIDs.length;
-}
-
 function migrationOBSLink(value: unknown): MigrationOBSLink | undefined {
   const item = object(value);
   if (!item || !exactKeys(item, ['outputId', 'name', 'url']) || !string(item.outputId) || !text(item.name) || !string(item.url)) return undefined;
-  try { const parsed = new URL(item.url); const query=[...parsed.searchParams.keys()]; const output=parsed.searchParams.getAll('output'); const fragment=new URLSearchParams(parsed.hash.slice(1)); const token=fragment.get('token'); const currentOrigin=typeof location==='undefined'?undefined:location.origin; if (parsed.protocol !== 'https:' || parsed.username || parsed.password || !parsed.host || !/^\/obs\/[A-Za-z0-9_-]{43}$/.test(parsed.pathname) || query.length!==1 || query[0]!=='output' || output.length!==1 || item.outputId!==output[0] || !validMigrationOBSSelector(output[0]!) || [...fragment.keys()].length!==1 || !token || token.length>512 || (currentOrigin && parsed.origin!==currentOrigin)) return undefined; }
+  try { const parsed = new URL(item.url); const query=[...parsed.searchParams.keys()]; const output=parsed.searchParams.getAll('output'); const fragment=new URLSearchParams(parsed.hash.slice(1)); const token=fragment.get('token'); const currentOrigin=typeof location==='undefined'?undefined:location.origin; if (item.url.length>maxOBSLinkURLLength || parsed.protocol !== 'https:' || parsed.username || parsed.password || !parsed.host || !/^\/obs\/[A-Za-z0-9_-]{43}$/.test(parsed.pathname) || query.length!==1 || query[0]!=='output' || output.length!==1 || item.outputId!==output[0] || !parseOBSOutputSelector(output[0]!) || [...fragment.keys()].length!==1 || !token || token.length>512 || (currentOrigin && parsed.origin!==currentOrigin)) return undefined; }
   catch { return undefined; }
   return item as unknown as MigrationOBSLink;
 }

@@ -8,11 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
 	"bilibili-live-gift-panel/internal/hosted/configuration"
+	"bilibili-live-gift-panel/internal/hosted/obsselector"
 )
 
 var (
@@ -51,7 +51,7 @@ type OBSLink struct {
 	URL      string `json:"url"`
 }
 type OBSOutput struct {
-	Selector string
+	Selector obsselector.Selector
 	Name     string
 }
 
@@ -697,7 +697,7 @@ func (service *Service) History(ctx context.Context, accountID int64) ([]History
 	}
 	result := make([]HistoryJob, len(stored))
 	for index, item := range stored {
-		if item.ID <= 0 || item.AccountID != accountID || item.CreatedAt.IsZero() || (item.Status != jobPending && (item.Status != jobApplied || !item.RollbackExpiresAt.Valid || !item.RollbackExpiresAt.Time.After(now))) {
+		if item.ID <= 0 || item.AccountID != accountID || item.CreatedAt.IsZero() || (item.Status == jobPending && (!item.ExpiresAt.Valid || !item.ExpiresAt.Time.After(now))) || (item.Status != jobPending && (item.Status != jobApplied || !item.RollbackExpiresAt.Valid || !item.RollbackExpiresAt.Time.After(now))) {
 			return nil, ErrUnavailable
 		}
 		result[index] = HistoryJob{ID: item.ID, Status: item.Status, CreatedAt: item.CreatedAt.UTC(), AppliedAt: nullableTime(item.AppliedAt), ExpiresAt: nullableTime(item.ExpiresAt), RollbackExpiresAt: nullableTime(item.RollbackExpiresAt)}
@@ -726,18 +726,23 @@ func (service *Service) OBSOutputs(ctx context.Context, accountID, jobID int64) 
 	definition := stored.Definition
 	result := make([]OBSOutput, 0, len(definition.Attributes)+len(definition.DisplayScenes)+len(definition.GiftTargetPanels))
 	for _, item := range definition.Attributes {
-		result = append(result, OBSOutput{Selector: "attribute:" + item.ID, Name: item.Name})
+		result = append(result, OBSOutput{Selector: obsselector.Selector{Kind: "attribute", ID: item.ID}, Name: item.Name})
 	}
 	for _, item := range definition.DisplayScenes {
 		if len(item.AttributeIDs) == 0 {
 			continue
 		}
-		result = append(result, OBSOutput{Selector: "scene:" + item.ID + ":" + strings.Join(item.AttributeIDs, ","), Name: item.Name})
+		result = append(result, OBSOutput{Selector: obsselector.Selector{Kind: "scene", ID: item.ID, Attributes: append([]string(nil), item.AttributeIDs...)}, Name: item.Name})
 	}
 	for _, item := range definition.GiftTargetPanels {
-		result = append(result, OBSOutput{Selector: "gift-target:" + item.ID, Name: item.Name})
+		result = append(result, OBSOutput{Selector: obsselector.Selector{Kind: "gift-target", ID: item.ID}, Name: item.Name})
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Selector < result[j].Selector })
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Selector.Kind != result[j].Selector.Kind {
+			return result[i].Selector.Kind < result[j].Selector.Kind
+		}
+		return result[i].Selector.ID < result[j].Selector.ID
+	})
 	return result, nil
 }
 
@@ -1126,13 +1131,13 @@ type lockedJob struct {
 	room             sql.NullString
 }
 
-const historyQuery = "SELECT id, status, created_at, applied_at, expires_at, rollback_expires_at FROM migration_jobs WHERE account_id = ? AND (status = 'pending' OR (status = 'applied' AND rollback_expires_at > ?)) ORDER BY created_at DESC, id DESC LIMIT ?"
+const historyQuery = "SELECT id, status, created_at, applied_at, expires_at, rollback_expires_at FROM migration_jobs WHERE account_id = ? AND ((status = 'pending' AND expires_at > ?) OR (status = 'applied' AND rollback_expires_at > ?)) ORDER BY created_at DESC, id DESC LIMIT ?"
 
 func (repository *sqlRepository) History(ctx context.Context, accountID int64, now time.Time, limit int) ([]storedHistoryJob, error) {
 	if repository == nil || repository.db == nil || accountID <= 0 || now.IsZero() || limit <= 0 || limit > historyLimit {
 		return nil, ErrInvalidInput
 	}
-	rows, err := repository.db.QueryContext(ctx, historyQuery, accountID, now.UTC(), limit)
+	rows, err := repository.db.QueryContext(ctx, historyQuery, accountID, now.UTC(), now.UTC(), limit)
 	if err != nil {
 		return nil, ErrUnavailable
 	}

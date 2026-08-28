@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { HostedAPI } from '../src/hosted/api';
-import { parseOBSLocation, postOBSToken, startOBSPage } from '../src/hosted/obs/main';
+import { encodeOBSOutputSelector, parseOBSLocation, parseOBSOutputSelector, postOBSToken, startOBSPage } from '../src/hosted/obs/main';
 import { computeOBSLayout, parseOBSDisplaySnapshot, renderOBSSnapshot, type OBSDisplaySnapshot } from '../src/hosted/obs/view';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -57,15 +57,30 @@ describe('hosted OBS fragment exchange', () => {
   });
 
   it('accepts only narrow migration output selectors and carries them to the event stream', async () => {
-    expect(parseOBSLocation({ pathname: `/obs/${publicID}`, search: '?output=scene%3Amain%3Ahp%2Ctimer', hash: '' })?.output)
-      .toEqual({ kind: 'scene', id: 'main', attributeIds: ['hp', 'timer'] });
-    expect(parseOBSLocation({ pathname: `/obs/${publicID}`, search: '?output=attribute%3Ahp&extra=1', hash: '' })).toBeUndefined();
+    const scene = 'eyJraW5kIjoic2NlbmUiLCJpZCI6IuS4u-WcuuaZrzrwn5SlIiwiYXR0cmlidXRlcyI6WyLnp6_liIY68J-UpSIsIueUn-WRveWAvC_kuIrpmZAiXX0';
+    const target = 'eyJraW5kIjoiZ2lmdC10YXJnZXQiLCJpZCI6Iuebruaghy_pmLbmrrU65LiAIn0';
+    expect(parseOBSLocation({ pathname: `/obs/${publicID}`, search: `?output=${scene}`, hash: '' })?.output)
+      .toEqual({ kind: 'scene', id: '主场景:🔥', attributeIds: ['积分:🔥', '生命值/上限'] });
+    expect(parseOBSLocation({ pathname: `/obs/${publicID}`, search: `?output=${scene}&extra=1`, hash: '' })).toBeUndefined();
     const paths: string[] = [];
     await startOBSPage({
-      location: { pathname: `/obs/${publicID}`, search: '?output=gift-target%3Agoals', hash: '' }, replaceState: () => undefined,
+      location: { pathname: `/obs/${publicID}`, search: `?output=${target}`, hash: '' }, replaceState: () => undefined,
       exchange: async () => undefined, createEventSource: (path) => { paths.push(path); return { close: () => undefined }; }, onSnapshot: () => undefined, onError: () => undefined,
     });
-    expect(paths).toEqual([`/obs/${publicID}/events?output=gift-target%3Agoals`]);
+    expect(paths).toEqual([`/obs/${publicID}/events?output=${target}`]);
+  });
+
+  it('shares canonical base64url JSON selector fixtures and rejects noncanonical or duplicate scenes', () => {
+    expect(encodeOBSOutputSelector({ kind: 'attribute', id: '积分:🔥', attributeIds: ['积分:🔥'] })).toBe('eyJraW5kIjoiYXR0cmlidXRlIiwiaWQiOiLnp6_liIY68J-UpSJ9');
+    expect(encodeOBSOutputSelector({ kind: 'gift-target', id: '目标/阶段:一', attributeIds: [] })).toBe('eyJraW5kIjoiZ2lmdC10YXJnZXQiLCJpZCI6Iuebruaghy_pmLbmrrU65LiAIn0');
+    expect(encodeOBSOutputSelector({ kind: 'scene', id: '主场景:🔥', attributeIds: ['积分:🔥', '生命值/上限'] })).toBe('eyJraW5kIjoic2NlbmUiLCJpZCI6IuS4u-WcuuaZrzrwn5SlIiwiYXR0cmlidXRlcyI6WyLnp6_liIY68J-UpSIsIueUn-WRveWAvC_kuIrpmZAiXX0');
+    expect(encodeOBSOutputSelector({ kind: 'attribute', id: '<>&\u2028"\n', attributeIds: ['<>&\u2028"\n'] })).toBe('eyJraW5kIjoiYXR0cmlidXRlIiwiaWQiOiI8PibigKhcIlxuIn0');
+    expect(parseOBSOutputSelector('eyJpZCI6InNjb3JlIiwia2luZCI6ImF0dHJpYnV0ZSJ9')).toBeUndefined();
+    expect(parseOBSOutputSelector('eyJraW5kIjoic2NlbmUiLCJpZCI6Im1haW4iLCJhdHRyaWJ1dGVzIjpbInNjb3JlIiwic2NvcmUiXX0')).toBeUndefined();
+    const long = `长:${'界'.repeat(2_000)}`;
+    expect(parseOBSOutputSelector(encodeOBSOutputSelector({ kind: 'attribute', id: long, attributeIds: [long] })!)?.id).toBe(long);
+    const oversized = 'x'.repeat(70 * 1024);
+    expect(encodeOBSOutputSelector({ kind: 'attribute', id: oversized, attributeIds: [oversized] })).toBeUndefined();
   });
 
   it('synchronously clears every non-empty fragment before validating it', async () => {

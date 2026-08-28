@@ -20,6 +20,9 @@ function json(body: unknown, status = 200): Response {
 const selection: MigrationSelection = {
   unitIds: [], conflictChoices: {}, includeGeneralSettings: false, includeRoomSuggestion: false,
 };
+const scoreSelector = 'eyJraW5kIjoiYXR0cmlidXRlIiwiaWQiOiJzY29yZSJ9';
+const bonusSelector = 'eyJraW5kIjoiYXR0cmlidXRlIiwiaWQiOiJib251cyJ9';
+const scoreSceneSelector = 'eyJraW5kIjoic2NlbmUiLCJpZCI6InNjb3JlIiwiYXR0cmlidXRlcyI6WyJzY29yZSIsImJvbnVzIl19';
 
 const preview: MigrationPreview = {
   id: 12, expiresAt: '2030-01-02T00:00:00Z', reused: false,
@@ -102,15 +105,15 @@ describe('Hosted migration API contract', () => {
   });
 
   it('accepts only HTTPS OBS replacement links returned after apply', async () => {
-    const job: MigrationJob = { id: 12, status: 'applied', rollbackExpiresAt: '2030-01-08T00:00:00Z', obsLinks: [{ outputId: 'attribute:score', name: '积分卡片', url: 'https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=attribute%3Ascore#token=one-time' }] };
+    const job: MigrationJob = { id: 12, status: 'applied', rollbackExpiresAt: '2030-01-08T00:00:00Z', obsLinks: [{ outputId: scoreSelector, name: '积分卡片', url: `https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=${scoreSelector}#token=one-time` }] };
     const api = await HostedAPI.connect(async (input) => input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : json(job));
     await expect(api.getMigration(12)).resolves.toEqual(job);
 
     for (const link of [
       { ...job.obsLinks![0], url: 'http://host.example/obs' },
-      { ...job.obsLinks![0], outputId: 'attribute:bonus' },
-      { ...job.obsLinks![0], outputId: 'scene:main:score,score', url: 'https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=scene%3Amain%3Ascore%2Cscore#token=one-time' },
-      { ...job.obsLinks![0], url: `https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=attribute%3Ascore#token=${'x'.repeat(513)}` },
+      { ...job.obsLinks![0], outputId: bonusSelector },
+      { ...job.obsLinks![0], outputId: 'eyJraW5kIjoic2NlbmUiLCJpZCI6Im1haW4iLCJhdHRyaWJ1dGVzIjpbInNjb3JlIiwic2NvcmUiXX0', url: 'https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=eyJraW5kIjoic2NlbmUiLCJpZCI6Im1haW4iLCJhdHRyaWJ1dGVzIjpbInNjb3JlIiwic2NvcmUiXX0#token=one-time' },
+      { ...job.obsLinks![0], url: `https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=${scoreSelector}#token=${'x'.repeat(513)}` },
     ]) {
       const invalid = await HostedAPI.connect(async (input) => input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : json({ ...job, obsLinks: [link] }));
       await expect(invalid.getMigration(12)).rejects.toMatchObject({ code: 'invalid_response' });
@@ -120,7 +123,7 @@ describe('Hosted migration API contract', () => {
   it('loads only the bounded history projection and sends proof-gated OBS reissue with abort signals', async () => {
     const requests: Array<[string, RequestInit | undefined]> = [];
     const history = { jobs: [{ id: 12, status: 'pending', createdAt: '2030-01-01T00:00:00Z', expiresAt: '2030-01-02T00:00:00Z' }, { id: 11, status: 'applied', createdAt: '2029-12-31T00:00:00Z', appliedAt: '2029-12-31T00:01:00Z', rollbackExpiresAt: '2030-01-07T00:01:00Z' }] };
-    const reissued: MigrationJob = { id: 11, status: 'applied', rollbackExpiresAt: '2030-01-07T00:01:00Z', obsLinks: [{ outputId: 'scene:score:score,bonus', name: '积分场景', url: 'https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=scene%3Ascore%3Ascore%2Cbonus#token=rotated' }] };
+    const reissued: MigrationJob = { id: 11, status: 'applied', rollbackExpiresAt: '2030-01-07T00:01:00Z', obsLinks: [{ outputId: scoreSceneSelector, name: '积分场景', url: `https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=${scoreSceneSelector}#token=rotated` }] };
     const api = await HostedAPI.connect(async (input, init) => {
       const path = String(input); requests.push([path, init]);
       if (path === '/api/bootstrap') return json({ csrfToken: 'csrf' });
@@ -205,7 +208,7 @@ describe('Hosted migration flow', () => {
   });
 
   it('applies the exact server-confirmed selection, reports live progress, and exposes the seven-day rollback window', async () => {
-    const applied: MigrationJob = { id: 12, status: 'applied', rollbackExpiresAt: '2030-01-08T00:00:00Z', obsLinks: [{ outputId: 'attribute:score', name: '积分', url: 'https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=attribute%3Ascore#token=a' }, { outputId: 'attribute:bonus', name: '加成', url: 'https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=attribute%3Abonus#token=b' }] };
+    const applied: MigrationJob = { id: 12, status: 'applied', rollbackExpiresAt: '2030-01-08T00:00:00Z', obsLinks: [{ outputId: scoreSelector, name: '积分', url: `https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=${scoreSelector}#token=a` }, { outputId: bonusSelector, name: '加成', url: `https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=${bonusSelector}#token=b` }] };
     const api = {
       beginLogin: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })), pollLogin: vi.fn(async () => ({ status: 'verified' as const, expiresAt: '2030-01-02T00:00:00Z' })), cancelLogin: vi.fn(async () => undefined),
       applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const, expiresAt: preview.expiresAt })), getMigration: vi.fn(async () => applied),
@@ -220,7 +223,7 @@ describe('Hosted migration flow', () => {
     await flow.refresh(12);
     expect(states.at(-1)).toEqual(expect.objectContaining({ job: applied, rollbackDaysRemaining: 7, canRollback: true, applyProgress: 'applied' }));
     expect(states.at(-1)?.obsChecklist).toEqual(applied.obsLinks?.map((item)=>({...item,replaced:false})));
-    flow.confirmOBSReplacement('attribute:score', true);
+    flow.confirmOBSReplacement(scoreSelector, true);
     expect(states.at(-1)?.obsChecklist?.[0]).toEqual(expect.objectContaining({ replaced: true }));
   });
 
@@ -246,7 +249,30 @@ describe('Hosted migration flow', () => {
     flow.resumeJob({id:12,status:'pending',expiresAt:'2030-01-02T00:00:00Z'});
     expect(timers[0]?.delay).toBe(0);timers[0]!.callback();await vi.waitFor(()=>expect(api.getMigration).toHaveBeenCalledTimes(1));
     await vi.waitFor(()=>expect(timers.at(-1)?.delay).toBe(1000));timers.at(-1)!.callback();await vi.waitFor(()=>expect(states.at(-1)?.job?.status).toBe('applied'));
-    expect(api.getMigration).toHaveBeenCalledTimes(2);await flow.dispose();
+    expect(api.getMigration).toHaveBeenCalledTimes(2);
+    expect(states.at(-1)?.job).toEqual(expect.objectContaining({ status: 'applied', obsReissueRequired: true }));
+    await flow.dispose();
+  });
+
+  it('recovers a lost applied response by exposing proof-gated OBS reissue on idempotent retry', async () => {
+    const reissued: MigrationJob = { id: 12, status: 'applied', rollbackExpiresAt: '2030-01-08T00:00:00Z', obsLinks: [{ outputId: scoreSelector, name: '积分', url: `https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=${scoreSelector}#token=rotated` }] };
+    const api = {
+      beginLogin: vi.fn(async () => ({ challengeId: 'fresh-proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })),
+      pollLogin: vi.fn(async () => ({ status: 'verified' as const, expiresAt: '2030-01-02T00:00:00Z' })),
+      cancelLogin: vi.fn(async () => undefined),
+      applyMigration: vi.fn().mockRejectedValueOnce(new TypeError('lost response')).mockResolvedValueOnce({ id: 12, status: 'applied' as const, rollbackExpiresAt: '2030-01-08T00:00:00Z' }),
+      reissueMigrationOBS: vi.fn(async () => reissued),
+    };
+    const { states, render } = collectStates();
+    const flow = createMigrationFlow(api, render, { now: () => new Date('2030-01-01T00:00:00Z') });
+    flow.acceptPreview({ ...preview, conflicts: [], selection: { ...selection, unitIds: ['attribute:score'] }, canConfirm: true });
+    flow.confirmReplacement(true);
+    await expect(flow.apply()).rejects.toBeInstanceOf(TypeError);
+    await flow.apply();
+    expect(states.at(-1)?.job).toEqual(expect.objectContaining({ status: 'applied', obsReissueRequired: true }));
+    await flow.reissueOBS();
+    expect(api.reissueMigrationOBS).toHaveBeenCalledWith(12, 'fresh-proof', expect.any(AbortSignal));
+    expect(states.at(-1)?.obsChecklist).toEqual([{ ...reissued.obsLinks![0], replaced: false }]);
   });
 
   it('aborts file and request work and bounded-awaits cleanup on dispose', async () => {
@@ -282,6 +308,63 @@ describe('Hosted migration flow', () => {
     await proofFlow.dispose();
     expect(proofSignal?.aborted).toBe(true);
     await expect(proofOperation).resolves.toBeInstanceOf(DOMException);
+  });
+
+  it('owns a signal-ignoring late login success and aborts its cleanup at the dispose deadline', async () => {
+    let resolveBegin!: (value: { challengeId: string; qrImage: string; expiresAt: string }) => void;
+    let beginSignal: AbortSignal | undefined;
+    let cleanupSignal: AbortSignal | undefined;
+    const api = {
+      beginLogin: vi.fn((signal?: AbortSignal) => { beginSignal = signal; return new Promise<{ challengeId: string; qrImage: string; expiresAt: string }>((resolve) => { resolveBegin = resolve; }); }),
+      pollLogin: vi.fn(), applyMigration: vi.fn(),
+      cancelLogin: vi.fn((_id: string, signal?: AbortSignal) => { cleanupSignal = signal; return new Promise<void>(() => undefined); }),
+    };
+    const states = collectStates();
+    const flow = createMigrationFlow(api, states.render, { now: () => new Date('2030-01-01T00:00:00Z'), settleTimeoutMs: 25 });
+    flow.acceptPreview({ ...preview, conflicts: [], selection: { ...selection, unitIds: ['attribute:score'] }, canConfirm: true });
+    flow.confirmReplacement(true);
+    const operation = flow.apply().catch((cause: unknown) => cause);
+    await vi.waitFor(() => expect(beginSignal).toBeDefined());
+    const disposing = flow.dispose();
+    expect(beginSignal?.aborted).toBe(true);
+    resolveBegin({ challengeId: 'late-proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' });
+    await vi.waitFor(() => expect(cleanupSignal).toBeDefined());
+    await disposing;
+    expect(cleanupSignal?.aborted).toBe(true);
+    await expect(operation).resolves.toMatchObject({ code: 'operation_failed' });
+    expect(states.states.some((state) => state.proof?.qrImage === 'qr')).toBe(false);
+  });
+
+  it('owns late file and preview success and bounds dynamically queued job cleanup', async () => {
+    let resolveText!: (value: string) => void;
+    let fileSignal: AbortSignal | undefined;
+    const uploadAfterFile = vi.fn();
+    const fileFlow = createMigrationFlow({ previewMigration: uploadAfterFile }, vi.fn(), { now: () => new Date(), settleTimeoutMs: 25 });
+    const fileOperation = fileFlow.preview({ name: 'package.json', size: 2, text: (signal?: AbortSignal) => { fileSignal = signal; return new Promise<string>((resolve) => { resolveText = resolve; }); } }).catch((cause: unknown) => cause);
+    await vi.waitFor(() => expect(fileSignal).toBeDefined());
+    const fileDispose = fileFlow.dispose();
+    resolveText('{}');
+    await fileDispose;
+    expect(fileSignal?.aborted).toBe(true);
+    expect(uploadAfterFile).not.toHaveBeenCalled();
+    await expect(fileOperation).resolves.toMatchObject({ code: 'operation_failed' });
+
+    let resolvePreview!: (value: MigrationPreview) => void;
+    let previewSignal: AbortSignal | undefined;
+    let cleanupSignal: AbortSignal | undefined;
+    const previewFlow = createMigrationFlow({
+      previewMigration: vi.fn((_raw: string, signal?: AbortSignal) => { previewSignal = signal; return new Promise<MigrationPreview>((resolve) => { resolvePreview = resolve; }); }),
+      cancelMigration: vi.fn((_id: number, signal?: AbortSignal) => { cleanupSignal = signal; return new Promise<MigrationJob>(() => undefined); }),
+    }, vi.fn(), { now: () => new Date(), settleTimeoutMs: 25 });
+    const previewOperation = previewFlow.preview({ name: 'package.json', size: 2, text: async () => '{}' }).catch((cause: unknown) => cause);
+    await vi.waitFor(() => expect(previewSignal).toBeDefined());
+    const previewDispose = previewFlow.dispose();
+    resolvePreview(preview);
+    await vi.waitFor(() => expect(cleanupSignal).toBeDefined());
+    await previewDispose;
+    expect(previewSignal?.aborted).toBe(true);
+    expect(cleanupSignal?.aborted).toBe(true);
+    await expect(previewOperation).resolves.toMatchObject({ code: 'operation_failed' });
   });
 });
 

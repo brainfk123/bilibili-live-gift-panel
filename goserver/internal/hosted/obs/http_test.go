@@ -175,12 +175,13 @@ func TestEventsAcceptOnlyNarrowMigrationOutputSelectors(t *testing.T) {
 		want bool
 	}{
 		{raw: "", want: true},
-		{raw: "output=attribute%3Ascore", want: true},
-		{raw: "output=scene%3Amain%3Ascore%2Cbonus", want: true},
-		{raw: "output=gift-target%3Agoals", want: true},
-		{raw: "output=scene%3Amain%3A", want: false},
-		{raw: "output=attribute%3Ascore&theme=dark", want: false},
-		{raw: "output=attribute%3Ascore&output=attribute%3Abonus", want: false},
+		{raw: "output=eyJraW5kIjoiYXR0cmlidXRlIiwiaWQiOiJzY29yZSJ9", want: true},
+		{raw: "output=eyJraW5kIjoic2NlbmUiLCJpZCI6InNjb3JlIiwiYXR0cmlidXRlcyI6WyJzY29yZSIsImJvbnVzIl19", want: true},
+		{raw: "output=eyJraW5kIjoiZ2lmdC10YXJnZXQiLCJpZCI6Iuebruaghy_pmLbmrrU65LiAIn0", want: true},
+		{raw: "output=attribute%3Ascore", want: false},
+		{raw: "output=eyJraW5kIjoic2NlbmUiLCJpZCI6Im1haW4iLCJhdHRyaWJ1dGVzIjpbInNjb3JlIiwic2NvcmUiXX0", want: false},
+		{raw: "output=eyJraW5kIjoiYXR0cmlidXRlIiwiaWQiOiJzY29yZSJ9&theme=dark", want: false},
+		{raw: "output=eyJraW5kIjoiYXR0cmlidXRlIiwiaWQiOiJzY29yZSJ9&output=eyJraW5kIjoiYXR0cmlidXRlIiwiaWQiOiJib251cyJ9", want: false},
 	} {
 		values, err := url.ParseQuery(test.raw)
 		if err != nil {
