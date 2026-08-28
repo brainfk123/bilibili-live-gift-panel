@@ -134,7 +134,6 @@ export function createMigrationFlow(api: MigrationAPI, render: (state: Migration
   const ensureLive = (started: number): void => { if (disposed || started !== generation) throw new HostedAPIError('operation_failed', 0); };
   const applyJob = (value: MigrationJob): void => {
     job = clone(value);
-    if (job.status === 'applied' && !job.obsLinks?.length) job.obsReissueRequired = true;
     if (value.status !== 'pending') stopPolling();
     if (value.obsLinks) obsChecklist = value.obsLinks.map((link) => ({ ...link, replaced: obsChecklist.find((item) => item.outputId === link.outputId)?.replaced ?? false }));
   };
@@ -229,7 +228,7 @@ export function createMigrationFlow(api: MigrationAPI, render: (state: Migration
       const unitIDs = new Set(preview.selection.unitIds); for (const id of group.unitIds) { if (selected) unitIDs.add(id); else unitIDs.delete(id); }
       return submitSelection({ ...selectionCopy(preview.selection), unitIds: preview.units.map((unit) => unit.id).filter((id) => unitIDs.has(id)), conflictChoices: {} });
     },
-    setGeneralSettingsIncluded(value: boolean): Promise<void> { if (!preview) return Promise.reject(new HostedAPIError('invalid_request', 400)); return submitSelection({ ...selectionCopy(preview.selection), includeGeneralSettings: value }); },
+    setGeneralSettingsIncluded(value: boolean): Promise<void> { if (!preview || (value && preview.generalSettingsCompatibility.status !== 'complete')) return Promise.reject(new HostedAPIError('invalid_request', 400)); return submitSelection({ ...selectionCopy(preview.selection), includeGeneralSettings: value }); },
     setRoomSuggestionIncluded(value: boolean): Promise<void> { if (!preview) return Promise.reject(new HostedAPIError('invalid_request', 400)); return submitSelection({ ...selectionCopy(preview.selection), includeRoomSuggestion: value }); },
     setConflictChoice(conflictID: string, choice: MigrationConflictChoice): Promise<void> {
       if (!preview?.conflicts.some((conflict) => conflict.id === conflictID)) return Promise.reject(new HostedAPIError('invalid_request', 400));
@@ -248,7 +247,7 @@ export function createMigrationFlow(api: MigrationAPI, render: (state: Migration
       const id = job.id;
       return runProofOperation(async (challengeID, started, signal) => { const result = await tracked(api.rollbackMigration!(id, challengeID, signal)); ensureLive(started); applyJob(result); discardProof(); error = undefined; publish(); });
     },
-    reissueOBS(): Promise<void> { if (!job || job.status !== 'applied' || !api.reissueMigrationOBS) return Promise.reject(new HostedAPIError('invalid_request',400)); const id=job.id; return runProofOperation(async(challengeID,started,signal)=>{const result=await tracked(api.reissueMigrationOBS!(id,challengeID,signal));ensureLive(started);applyJob(result);discardProof();error=undefined;publish();}); },
+    reissueOBS(): Promise<void> { if (!job || job.status !== 'applied' || !job.obsReissueAvailable || !api.reissueMigrationOBS) return Promise.reject(new HostedAPIError('invalid_request',400)); const id=job.id; return runProofOperation(async(challengeID,started,signal)=>{const result=await tracked(api.reissueMigrationOBS!(id,challengeID,signal));ensureLive(started);applyJob(result);discardProof();error=undefined;publish();}); },
     refresh(id: number): Promise<void> { return tracked((async () => {
       if (proofOperation || operationInFlight) throw operationConflict();
       if (disposed || !canRefresh() || !job || id !== job.id || !api.getMigration) throw new HostedAPIError('invalid_request', 400);
@@ -295,6 +294,7 @@ export function createMigrationFlow(api: MigrationAPI, render: (state: Migration
 
 const compatibilityLabels: Record<string, string> = {
   crop_presets_unsupported: '剪裁预设不受支持',
+  blind_box_display_unsupported: '盲盒排行榜数据暂不受 Hosted 支持',
   display_scenes_unsupported: '部分展示场景不受支持',
   formula_presets_unsupported: '公式预设不受支持',
   rules_unsupported: '礼物规则不受支持',
@@ -342,11 +342,11 @@ export function mountMigrationView(root: HTMLElement, api: MigrationAPI, callbac
       if (next.job) {
         const resumed = document.createElement('section'); resumed.className = 'hosted-migration-card hosted-migration-progress'; appendText(resumed, 'h2', next.job.status === 'pending' ? '正在恢复待应用迁移' : '迁移历史');
         appendText(resumed, 'p', next.job.status === 'pending' ? '正在自动检查直播事件边界；网络中断后会自动重试。' : `迁移状态：${next.job.status}`);
-        if (next.job.status === 'applied') appendText(resumed, 'p', next.job.obsReissueRequired ? '配置已经应用，但 OBS 链接签发失败。可重新扫码签发；这会轮换并撤销之前的 OBS 链接。' : '重新签发会轮换凭据，并立即撤销之前的 OBS 链接。', 'hosted-migration-reason');
+        if (next.job.status === 'applied') appendText(resumed, 'p', next.job.obsReissueAvailable ? next.job.obsReissueRequired ? '配置已经应用，但 OBS 链接签发失败。可重新扫码签发；这会轮换并撤销之前的 OBS 链接。' : '重新签发会轮换凭据，并立即撤销之前的 OBS 链接。' : '此配置没有可签发的 OBS 输出。', 'hosted-migration-reason');
         const resumedActions=document.createElement('div');resumedActions.className='hosted-migration-actions';
         if(next.canRefresh)resumedActions.append(button('立即检查',()=>{void flow.refresh(next.job!.id).catch(()=>undefined);},busy));
         if(next.canRollback)resumedActions.append(button(`回滚（剩余 ${next.rollbackDaysRemaining ?? 0} 天）`,()=>{void flow.rollback().catch(()=>undefined);},busy));
-        if(next.job.status==='applied')resumedActions.append(button('扫码重新签发 OBS 链接',()=>{void flow.reissueOBS().catch(()=>undefined);},busy));
+        if(next.job.status==='applied'&&next.job.obsReissueAvailable)resumedActions.append(button('扫码重新签发 OBS 链接',()=>{void flow.reissueOBS().catch(()=>undefined);},busy));
         resumed.append(resumedActions);
         if(next.proof){const proof=document.createElement('div');proof.className='hosted-migration-proof';const image=document.createElement('img');image.className='hosted-qr';image.src=next.proof.qrImage;image.alt='迁移确认 B 站二维码';proof.append(image);appendText(proof,'p',next.proofStatus==='scanned'?'已扫码，请在手机确认。':'请使用 B 站客户端扫码确认。');resumed.append(proof);}
         previewHost.append(resumed);
@@ -372,7 +372,8 @@ export function mountMigrationView(root: HTMLElement, api: MigrationAPI, callbac
     }
     for (const unit of current.units) if (!grouped.has(unit.id)) units.append(unitRow(unit));
     const independent = document.createElement('div'); independent.className = 'hosted-migration-independent';
-    const settings = document.createElement('label'); const settingsBox = document.createElement('input'); settingsBox.type = 'checkbox'; settingsBox.checked = current.selection.includeGeneralSettings; settingsBox.disabled = busy; settingsBox.addEventListener('change', () => { void flow.setGeneralSettingsIncluded(settingsBox.checked).catch(() => undefined); }); settings.append(settingsBox, document.createTextNode(` 导入通用设置（配置模式：${current.generalSettings.configurationMode || '未指定'}）`)); independent.append(settings);
+    const settings = document.createElement('label'); const settingsBox = document.createElement('input'); settingsBox.type = 'checkbox'; settingsBox.checked = current.selection.includeGeneralSettings; settingsBox.disabled = busy || current.generalSettingsCompatibility.status !== 'complete'; settingsBox.addEventListener('change', () => { void flow.setGeneralSettingsIncluded(settingsBox.checked).catch(() => undefined); }); settings.append(settingsBox, document.createTextNode(` 导入通用设置（配置模式：${current.generalSettings.configurationMode || '未指定'}）`)); for (const reason of current.generalSettingsCompatibility.reasonCodes) appendText(settings, 'span', reasonText(reason), 'hosted-migration-reason'); independent.append(settings);
+    if (current.blindBoxDisplayCompatibility) { const blindBox = document.createElement('label'); const blindBoxBox = document.createElement('input'); blindBoxBox.type = 'checkbox'; blindBoxBox.checked = current.blindBoxDisplayCompatibility.status === 'complete' && current.selection.includeGeneralSettings; blindBoxBox.disabled = true; blindBox.append(blindBoxBox, document.createTextNode(' 导入盲盒排行榜样式')); for (const reason of current.blindBoxDisplayCompatibility.reasonCodes) appendText(blindBox, 'span', reasonText(reason), 'hosted-migration-reason'); independent.append(blindBox); }
     if (current.roomSuggestion) { const room = document.createElement('label'); const roomBox = document.createElement('input'); roomBox.type = 'checkbox'; roomBox.checked = current.selection.includeRoomSuggestion; roomBox.disabled = busy; roomBox.addEventListener('change', () => { void flow.setRoomSuggestionIncluded(roomBox.checked).catch(() => undefined); }); room.append(roomBox, document.createTextNode(` 采用房间建议 ${current.roomSuggestion}（不会自动运行）`)); independent.append(room); }
     units.append(independent); previewHost.append(units);
 
@@ -386,7 +387,7 @@ export function mountMigrationView(root: HTMLElement, api: MigrationAPI, callbac
     if (next.proof) { const proof = document.createElement('div'); proof.className = 'hosted-migration-proof'; const image = document.createElement('img'); image.className = 'hosted-qr'; image.src = next.proof.qrImage; image.alt = '迁移确认 B 站二维码'; proof.append(image); appendText(proof, 'p', next.proofStatus === 'scanned' ? '已扫码，请在手机确认。' : '请使用 B 站客户端扫码确认。'); confirm.append(proof); }
     previewHost.append(confirm);
 
-    if (next.job) { const progress = document.createElement('section'); progress.className = 'hosted-migration-card hosted-migration-progress'; appendText(progress, 'h2', '迁移进度'); const labels: Record<MigrationApplyProgress, string> = { idle: '尚未开始', preview_ready: '预览已就绪', waiting_for_live_boundary: '等待直播事件边界，B站连接不会断开', applied: '迁移已应用', cancelled: '迁移已取消', rolled_back: '已创建回滚版本', expired: '迁移预览已过期' }; appendText(progress, 'p', labels[next.applyProgress]); if(next.job.obsReissueRequired)appendText(progress,'p','配置已应用，但 OBS 链接需重新签发；签发会轮换并撤销旧链接。','hosted-migration-reason'); const progressActions = document.createElement('div'); progressActions.className = 'hosted-migration-actions'; if (next.canRefresh) progressActions.append(button('刷新应用进度', () => { void flow.refresh(next.job!.id).catch(() => undefined); }, busy)); if (next.canRollback) progressActions.append(button(`回滚（剩余 ${next.rollbackDaysRemaining ?? 0} 天）`, () => { void flow.rollback().catch(() => undefined); }, busy)); if(next.job.status==='applied'&&next.job.obsReissueRequired)progressActions.append(button('扫码重新签发 OBS 链接',()=>{void flow.reissueOBS().catch(()=>undefined);},busy)); progress.append(progressActions); previewHost.append(progress); }
+    if (next.job) { const progress = document.createElement('section'); progress.className = 'hosted-migration-card hosted-migration-progress'; appendText(progress, 'h2', '迁移进度'); const labels: Record<MigrationApplyProgress, string> = { idle: '尚未开始', preview_ready: '预览已就绪', waiting_for_live_boundary: '等待直播事件边界，B站连接不会断开', applied: '迁移已应用', cancelled: '迁移已取消', rolled_back: '已创建回滚版本', expired: '迁移预览已过期' }; appendText(progress, 'p', labels[next.applyProgress]); if(next.job.obsReissueRequired)appendText(progress,'p','配置已应用，但 OBS 链接需重新签发；签发会轮换并撤销旧链接。','hosted-migration-reason'); else if(next.job.status==='applied'&&!next.job.obsReissueAvailable)appendText(progress,'p','此配置没有可签发的 OBS 输出。','hosted-migration-reason'); const progressActions = document.createElement('div'); progressActions.className = 'hosted-migration-actions'; if (next.canRefresh) progressActions.append(button('刷新应用进度', () => { void flow.refresh(next.job!.id).catch(() => undefined); }, busy)); if (next.canRollback) progressActions.append(button(`回滚（剩余 ${next.rollbackDaysRemaining ?? 0} 天）`, () => { void flow.rollback().catch(()=>undefined); }, busy)); if(next.job.status==='applied'&&next.job.obsReissueRequired&&next.job.obsReissueAvailable)progressActions.append(button('扫码重新签发 OBS 链接',()=>{void flow.reissueOBS().catch(()=>undefined);},busy)); progress.append(progressActions); previewHost.append(progress); }
     if (next.obsChecklist?.length) { const obs = document.createElement('section'); obs.className = 'hosted-migration-card hosted-migration-obs'; appendText(obs, 'h2', '逐项替换 OBS 链接'); appendText(obs, 'p', 'EXE 的 localhost 链接仍可独立使用；请在 OBS 中逐项替换为新的 HTTPS 链接。'); for (const item of next.obsChecklist) { const row = document.createElement('label'); const box = document.createElement('input'); box.type = 'checkbox'; box.checked = item.replaced; box.addEventListener('change', () => flow.confirmOBSReplacement(item.outputId, box.checked)); const copy = document.createElement('span'); appendText(copy, 'strong', item.name || item.outputId); const link = document.createElement('a'); link.href = item.url; link.textContent = item.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; copy.append(link); row.append(box, copy); obs.append(row); } previewHost.append(obs); }
   };
   const flow = createMigrationFlow(api, render); render(state);

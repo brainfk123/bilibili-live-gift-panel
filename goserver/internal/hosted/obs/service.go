@@ -26,6 +26,7 @@ var (
 	ErrAuthenticationFailed = errors.New("obs: authentication failed")
 	ErrRecentTOTPRequired   = errors.New("obs: recent totp required")
 	ErrAccountDisabled      = errors.New("obs: account disabled")
+	ErrConflict             = errors.New("obs: conflict")
 	ErrUnavailable          = errors.New("obs: unavailable")
 )
 
@@ -87,19 +88,23 @@ func (service *Service) Issue(ctx context.Context, administratorToken string, ac
 	if err := service.admin.RequireSession(ctx, administratorToken); err != nil {
 		return IssuedCredential{}, ErrAuthenticationFailed
 	}
-	return service.issueForAccount(ctx, accountID, false)
+	return service.issueForAccount(ctx, accountID, false, nil)
 }
 
-// IssueForAccount rotates the account's single active credential for an
-// already authenticated, proof-gated account operation.
-func (service *Service) IssueForAccount(ctx context.Context, accountID int64) (IssuedCredential, error) {
-	if service == nil || ctx == nil || accountID <= 0 {
+type migrationCredentialFence struct {
+	jobID, configVersionID int64
+}
+
+// IssueForMigration rotates the account credential only while the selected
+// applied migration job still owns the account's active configuration.
+func (service *Service) IssueForMigration(ctx context.Context, accountID, jobID, expectedConfigVersionID int64) (IssuedCredential, error) {
+	if service == nil || ctx == nil || accountID <= 0 || jobID <= 0 || expectedConfigVersionID <= 0 {
 		return IssuedCredential{}, ErrInvalidInput
 	}
-	return service.issueForAccount(ctx, accountID, true)
+	return service.issueForAccount(ctx, accountID, true, &migrationCredentialFence{jobID: jobID, configVersionID: expectedConfigVersionID})
 }
 
-func (service *Service) issueForAccount(ctx context.Context, accountID int64, accountActor bool) (IssuedCredential, error) {
+func (service *Service) issueForAccount(ctx context.Context, accountID int64, accountActor bool, migrationFence *migrationCredentialFence) (IssuedCredential, error) {
 	transaction, err := service.database.BeginTx(ctx, nil)
 	if err != nil {
 		return IssuedCredential{}, ErrUnavailable
@@ -131,6 +136,20 @@ func (service *Service) issueForAccount(ctx context.Context, accountID int64, ac
 	}
 	if epoch < 1 {
 		return IssuedCredential{}, ErrUnavailable
+	}
+	if migrationFence != nil {
+		const fenceQuery = "SELECT j.status, j.applied_config_version_id, active.config_version_id FROM migration_jobs AS j JOIN account_active_config AS active ON active.account_id = j.account_id WHERE j.id = ? AND j.account_id = ? FOR UPDATE"
+		var status string
+		var appliedConfigVersionID, activeConfigVersionID int64
+		if err := transaction.QueryRowContext(ctx, fenceQuery, migrationFence.jobID, accountID).Scan(&status, &appliedConfigVersionID, &activeConfigVersionID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return IssuedCredential{}, ErrConflict
+			}
+			return IssuedCredential{}, ErrUnavailable
+		}
+		if status != "applied" || appliedConfigVersionID != migrationFence.configVersionID || activeConfigVersionID != migrationFence.configVersionID {
+			return IssuedCredential{}, ErrConflict
+		}
 	}
 	if _, err := transaction.ExecContext(ctx, "UPDATE obs_sessions AS s JOIN obs_credentials AS c ON c.id = s.obs_credential_id SET s.revoked_at = ? WHERE c.account_id = ? AND s.revoked_at IS NULL", now, accountID); err != nil {
 		return IssuedCredential{}, ErrUnavailable

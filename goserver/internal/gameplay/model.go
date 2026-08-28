@@ -29,17 +29,40 @@ type Engine struct{}
 
 // Snapshot is the complete, identity-free gameplay state at one instant.
 type Snapshot struct {
-	RoomID           string            `json:"roomId"`
-	Attributes       []Attribute       `json:"attributes"`
-	DisplayScenes    []DisplayScene    `json:"displayScenes"`
-	GiftTargetPanels []GiftTargetPanel `json:"giftTargetPanels"`
-	Activities       []Activity        `json:"activities"`
-	Rules            []Rule            `json:"rules"`
-	TimerRules       []TimerRule       `json:"timerRules"`
-	FormulaPresets   []FormulaPreset   `json:"formulaPresets"`
-	SimplePlay       *SimplePlay       `json:"simplePlay,omitempty"`
-	Gifts            []GiftInfo        `json:"gifts"`
-	RuleLimits       RuleLimitState    `json:"ruleLimits"`
+	RoomID           string             `json:"roomId"`
+	Appearance       *GlobalAppearance  `json:"appearance,omitempty"`
+	Attributes       []Attribute        `json:"attributes"`
+	DisplayScenes    []DisplayScene     `json:"displayScenes"`
+	BlindBoxDisplay  *DisplayAppearance `json:"blindBoxDisplay,omitempty"`
+	GiftTargetPanels []GiftTargetPanel  `json:"giftTargetPanels"`
+	Activities       []Activity         `json:"activities"`
+	Rules            []Rule             `json:"rules"`
+	TimerRules       []TimerRule        `json:"timerRules"`
+	FormulaPresets   []FormulaPreset    `json:"formulaPresets"`
+	SimplePlay       *SimplePlay        `json:"simplePlay,omitempty"`
+	Gifts            []GiftInfo         `json:"gifts"`
+	RuleLimits       RuleLimitState     `json:"ruleLimits"`
+}
+
+// GlobalAppearance is the safe scalar subset shared by the desktop exporter
+// and Hosted. It carries no CSS, URL, asset, or other executable value.
+type GlobalAppearance struct {
+	Theme          string `json:"theme"`
+	FontSize       int    `json:"fontSize"`
+	AccentColor    string `json:"accentColor"`
+	Align          string `json:"align"`
+	PanelOpacity   int    `json:"panelOpacity"`
+	ShowConnection bool   `json:"showConnection"`
+}
+
+// DisplayAppearance is the per-output safe scalar appearance contract.
+type DisplayAppearance struct {
+	ThemeID        string `json:"themeId"`
+	FontSize       int    `json:"fontSize"`
+	AccentColor    string `json:"accentColor"`
+	ShowConnection bool   `json:"showConnection"`
+	Align          string `json:"align"`
+	PanelOpacity   int    `json:"panelOpacity"`
 }
 
 // RuleLimitState is the minimum enforcement state needed to apply per-day
@@ -63,15 +86,16 @@ type Attribute struct {
 }
 
 type Display struct {
-	Variant       string         `json:"variant"`
-	ThemeID       string         `json:"themeId,omitempty"`
-	Title         string         `json:"title,omitempty"`
-	Min           *float64       `json:"min,omitempty"`
-	Max           *float64       `json:"max,omitempty"`
-	LowThreshold  *float64       `json:"lowThreshold,omitempty"`
-	LeftLabel     string         `json:"leftLabel,omitempty"`
-	RightLabel    string         `json:"rightLabel,omitempty"`
-	ValueMappings []ValueMapping `json:"valueMappings,omitempty"`
+	Variant       string             `json:"variant"`
+	ThemeID       string             `json:"themeId,omitempty"`
+	Appearance    *DisplayAppearance `json:"appearance,omitempty"`
+	Title         string             `json:"title,omitempty"`
+	Min           *float64           `json:"min,omitempty"`
+	Max           *float64           `json:"max,omitempty"`
+	LowThreshold  *float64           `json:"lowThreshold,omitempty"`
+	LeftLabel     string             `json:"leftLabel,omitempty"`
+	RightLabel    string             `json:"rightLabel,omitempty"`
+	ValueMappings []ValueMapping     `json:"valueMappings,omitempty"`
 }
 
 type ValueMapping struct {
@@ -81,18 +105,20 @@ type ValueMapping struct {
 }
 
 type DisplayScene struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	AttributeIDs []string `json:"attributeIds"`
-	Layout       string   `json:"layout"`
-	ThemeID      string   `json:"themeId"`
+	ID           string             `json:"id"`
+	Name         string             `json:"name"`
+	AttributeIDs []string           `json:"attributeIds"`
+	Layout       string             `json:"layout"`
+	ThemeID      string             `json:"themeId"`
+	Appearance   *DisplayAppearance `json:"appearance,omitempty"`
 }
 
 type GiftTargetPanel struct {
-	ID     string           `json:"id"`
-	Name   string           `json:"name"`
-	Layout string           `json:"layout"`
-	Items  []GiftTargetItem `json:"items"`
+	ID         string             `json:"id"`
+	Name       string             `json:"name"`
+	Layout     string             `json:"layout"`
+	Items      []GiftTargetItem   `json:"items"`
+	Appearance *DisplayAppearance `json:"appearance,omitempty"`
 }
 
 type GiftTargetItem struct {

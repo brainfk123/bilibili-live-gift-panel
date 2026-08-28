@@ -11,12 +11,13 @@ import (
 // DisplaySnapshot is published only after its matching durable transaction
 // commits. Viewer rows are ephemeral and are never repository input.
 type DisplaySnapshot struct {
-	AccountID     int64                      `json:"accountId"`
-	LiveSessionID int64                      `json:"liveSessionId"`
-	Revision      uint64                     `json:"revision"`
-	Runtime       configuration.RuntimeState `json:"runtime"`
-	Effects       []gameplay.Effect          `json:"effects,omitempty"`
-	Viewers       []ViewerRow                `json:"viewers,omitempty"`
+	AccountID     int64                              `json:"accountId"`
+	LiveSessionID int64                              `json:"liveSessionId"`
+	Revision      uint64                             `json:"revision"`
+	Runtime       configuration.RuntimeState         `json:"runtime"`
+	Presentation  *configuration.DisplayPresentation `json:"presentation,omitempty"`
+	Effects       []gameplay.Effect                  `json:"effects,omitempty"`
+	Viewers       []ViewerRow                        `json:"viewers,omitempty"`
 }
 
 type SnapshotPublisher interface {

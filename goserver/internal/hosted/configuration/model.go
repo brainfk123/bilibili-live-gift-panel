@@ -37,8 +37,10 @@ type State struct {
 // Definition is the room-independent, executable part of a gameplay
 // snapshot. It deliberately contains neither current values nor asset URLs.
 type Definition struct {
+	Appearance       *GlobalAppearance           `json:"appearance,omitempty"`
 	Attributes       []AttributeDefinition       `json:"attributes"`
 	DisplayScenes    []gameplay.DisplayScene     `json:"displayScenes"`
+	BlindBoxDisplay  *DisplayAppearance          `json:"blindBoxDisplay,omitempty"`
 	GiftTargetPanels []GiftTargetPanelDefinition `json:"giftTargetPanels"`
 	Activities       []ActivityDefinition        `json:"activities"`
 	Rules            []gameplay.Rule             `json:"rules"`
@@ -50,6 +52,9 @@ type Definition struct {
 	CropPresets      []CropPreset                `json:"cropPresets,omitempty"`
 	MigrationHash    string                      `json:"migrationHash,omitempty"`
 }
+
+type GlobalAppearance = gameplay.GlobalAppearance
+type DisplayAppearance = gameplay.DisplayAppearance
 
 type GeneralSettings struct {
 	ConfigurationMode string `json:"configurationMode"`
@@ -80,10 +85,11 @@ type AttributeDefinition struct {
 }
 
 type GiftTargetPanelDefinition struct {
-	ID     string                     `json:"id"`
-	Name   string                     `json:"name"`
-	Layout string                     `json:"layout"`
-	Items  []GiftTargetItemDefinition `json:"items"`
+	ID         string                     `json:"id"`
+	Name       string                     `json:"name"`
+	Layout     string                     `json:"layout"`
+	Items      []GiftTargetItemDefinition `json:"items"`
+	Appearance *DisplayAppearance         `json:"appearance,omitempty"`
 }
 
 type GiftTargetItemDefinition struct {
@@ -176,8 +182,10 @@ func Split(snapshot gameplay.Snapshot) (Definition, RuntimeState, error) {
 	}
 
 	definition := Definition{
+		Appearance:       normalized.Appearance,
 		Attributes:       make([]AttributeDefinition, len(normalized.Attributes)),
 		DisplayScenes:    normalized.DisplayScenes,
+		BlindBoxDisplay:  normalized.BlindBoxDisplay,
 		GiftTargetPanels: make([]GiftTargetPanelDefinition, len(normalized.GiftTargetPanels)),
 		Activities:       make([]ActivityDefinition, len(normalized.Activities)),
 		Rules:            normalized.Rules,
@@ -198,7 +206,7 @@ func Split(snapshot gameplay.Snapshot) (Definition, RuntimeState, error) {
 		runtime.AttributeValues[attribute.ID] = attribute.Value
 	}
 	for panelIndex, panel := range normalized.GiftTargetPanels {
-		projected := GiftTargetPanelDefinition{ID: panel.ID, Name: panel.Name, Layout: panel.Layout, Items: make([]GiftTargetItemDefinition, len(panel.Items))}
+		projected := GiftTargetPanelDefinition{ID: panel.ID, Name: panel.Name, Layout: panel.Layout, Items: make([]GiftTargetItemDefinition, len(panel.Items)), Appearance: panel.Appearance}
 		for itemIndex, item := range panel.Items {
 			projected.Items[itemIndex] = GiftTargetItemDefinition{GiftID: item.GiftID, Name: item.Name, Target: item.Target, BarStyle: item.BarStyle}
 			runtime.GiftTargetReceived = append(runtime.GiftTargetReceived, GiftTargetRuntimeState{PanelID: panel.ID, GiftID: item.GiftID, Received: item.Received})
@@ -297,7 +305,7 @@ func Join(definition Definition, runtime RuntimeState) (gameplay.Snapshot, error
 	if err != nil {
 		return gameplay.Snapshot{}, err
 	}
-	snapshot := gameplay.Snapshot{Attributes: attributes, DisplayScenes: definition.DisplayScenes, GiftTargetPanels: panels, Activities: activities, Rules: definition.Rules, TimerRules: definition.TimerRules, FormulaPresets: definition.FormulaPresets, SimplePlay: definition.SimplePlay, Gifts: joinGifts(definition.Gifts), RuleLimits: runtime.RuleLimits}
+	snapshot := gameplay.Snapshot{Appearance: definition.Appearance, Attributes: attributes, DisplayScenes: definition.DisplayScenes, BlindBoxDisplay: definition.BlindBoxDisplay, GiftTargetPanels: panels, Activities: activities, Rules: definition.Rules, TimerRules: definition.TimerRules, FormulaPresets: definition.FormulaPresets, SimplePlay: definition.SimplePlay, Gifts: joinGifts(definition.Gifts), RuleLimits: runtime.RuleLimits}
 	return gameplay.Normalize(snapshot)
 }
 
@@ -305,7 +313,26 @@ func validateDefinition(definition Definition) error {
 	if _, _, err := normalizeDefinitionMetadata(definition); err != nil {
 		return err
 	}
+	if definition.Appearance != nil && !validGlobalAppearance(*definition.Appearance) {
+		return errors.New("invalid global appearance")
+	}
+	if definition.BlindBoxDisplay != nil && !validDisplayAppearance(*definition.BlindBoxDisplay) {
+		return errors.New("invalid blind-box appearance")
+	}
+	for _, attribute := range definition.Attributes {
+		if attribute.Display != nil && attribute.Display.Appearance != nil && !validDisplayAppearance(*attribute.Display.Appearance) {
+			return fmt.Errorf("invalid display appearance for attribute %q", attribute.ID)
+		}
+	}
+	for _, scene := range definition.DisplayScenes {
+		if scene.Appearance != nil && !validDisplayAppearance(*scene.Appearance) {
+			return fmt.Errorf("invalid display appearance for scene %q", scene.ID)
+		}
+	}
 	for _, panel := range definition.GiftTargetPanels {
+		if panel.Appearance != nil && !validDisplayAppearance(*panel.Appearance) {
+			return fmt.Errorf("invalid display appearance for gift target %q", panel.ID)
+		}
 		giftIDs := make(map[int]struct{}, len(panel.Items))
 		for _, item := range panel.Items {
 			if _, duplicate := giftIDs[item.GiftID]; duplicate {
@@ -319,6 +346,25 @@ func validateDefinition(definition Definition) error {
 
 var stableCropPresetID = regexp.MustCompile(`^(gift|effect):[1-9][0-9]*$`)
 var migrationHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var appearanceColorPattern = regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`)
+
+func validGlobalAppearance(appearance GlobalAppearance) bool {
+	return (appearance.Theme == "dark" || appearance.Theme == "light") && validAppearanceScalars(appearance.FontSize, appearance.AccentColor, appearance.Align, appearance.PanelOpacity)
+}
+
+func validDisplayAppearance(appearance DisplayAppearance) bool {
+	switch appearance.ThemeID {
+	case "minimal", "glass", "rpg", "pixel", "neon", "kawaii":
+		return validAppearanceScalars(appearance.FontSize, appearance.AccentColor, appearance.Align, appearance.PanelOpacity)
+	default:
+		return false
+	}
+}
+
+func validAppearanceScalars(fontSize int, accentColor, align string, panelOpacity int) bool {
+	return fontSize >= 24 && fontSize <= 96 && appearanceColorPattern.MatchString(accentColor) &&
+		(align == "left" || align == "center" || align == "right") && panelOpacity >= 10 && panelOpacity <= 100
+}
 
 func normalizeDefinitionMetadata(definition Definition) (*GeneralSettings, []CropPreset, error) {
 	if definition.MigrationHash != "" && !migrationHashPattern.MatchString(definition.MigrationHash) {
@@ -394,7 +440,7 @@ func joinGiftTargets(definitions []GiftTargetPanelDefinition, states []GiftTarge
 	}
 	panels := make([]gameplay.GiftTargetPanel, len(definitions))
 	for panelIndex, definition := range definitions {
-		panel := gameplay.GiftTargetPanel{ID: definition.ID, Name: definition.Name, Layout: definition.Layout, Items: make([]gameplay.GiftTargetItem, len(definition.Items))}
+		panel := gameplay.GiftTargetPanel{ID: definition.ID, Name: definition.Name, Layout: definition.Layout, Items: make([]gameplay.GiftTargetItem, len(definition.Items)), Appearance: definition.Appearance}
 		for itemIndex, item := range definition.Items {
 			panel.Items[itemIndex] = gameplay.GiftTargetItem{GiftID: item.GiftID, Name: item.Name, Target: item.Target, Received: received[giftTargetKey(definition.ID, item.GiftID)], BarStyle: item.BarStyle}
 		}

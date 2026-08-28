@@ -99,15 +99,17 @@ type wireRejectedCropPreset struct {
 	Count  int    `json:"count"`
 }
 type wireDefinition struct {
-	Attributes       []wireAttribute          `json:"attributes"`
-	DisplayScenes    []gameplay.DisplayScene  `json:"displayScenes"`
-	GiftTargetPanels []wireGiftTargetPanel    `json:"giftTargetPanels"`
-	Activities       []wireActivity           `json:"activities"`
-	Rules            []gameplay.Rule          `json:"rules"`
-	TimerRules       []gameplay.TimerRule     `json:"timerRules"`
-	FormulaPresets   []gameplay.FormulaPreset `json:"formulaPresets"`
-	SimplePlay       *wireSimplePlay          `json:"simplePlay"`
-	Gifts            []wireGiftDefinition     `json:"gifts"`
+	Appearance       *configuration.GlobalAppearance  `json:"appearance"`
+	Attributes       []wireAttribute                  `json:"attributes"`
+	DisplayScenes    []gameplay.DisplayScene          `json:"displayScenes"`
+	BlindBoxDisplay  *configuration.DisplayAppearance `json:"blindBoxDisplay"`
+	GiftTargetPanels []wireGiftTargetPanel            `json:"giftTargetPanels"`
+	Activities       []wireActivity                   `json:"activities"`
+	Rules            []gameplay.Rule                  `json:"rules"`
+	TimerRules       []gameplay.TimerRule             `json:"timerRules"`
+	FormulaPresets   []gameplay.FormulaPreset         `json:"formulaPresets"`
+	SimplePlay       *wireSimplePlay                  `json:"simplePlay"`
+	Gifts            []wireGiftDefinition             `json:"gifts"`
 }
 type wireGiftDefinition struct {
 	ID                  int     `json:"id"`
@@ -131,10 +133,11 @@ type wireAttribute struct {
 	Display          *gameplay.Display `json:"display"`
 }
 type wireGiftTargetPanel struct {
-	ID     string               `json:"id"`
-	Name   string               `json:"name"`
-	Layout string               `json:"layout"`
-	Items  []wireGiftTargetItem `json:"items"`
+	ID         string                           `json:"id"`
+	Name       string                           `json:"name"`
+	Layout     string                           `json:"layout"`
+	Items      []wireGiftTargetItem             `json:"items"`
+	Appearance *configuration.DisplayAppearance `json:"appearance"`
 }
 type wireGiftTargetItem struct {
 	GiftID   int    `json:"giftId"`
@@ -285,9 +288,23 @@ func normalizeWire(wire wireEnvelope, report *Report) (configuration.Definition,
 	for index, gift := range wire.Payload.Definition.Gifts {
 		gifts[index] = configuration.GiftDefinition{ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, BlindBoxParentID: gift.BlindBoxParentID, BlindBoxParentName: gift.BlindBoxParentName, BlindBoxParentPrice: gift.BlindBoxParentPrice}
 	}
-	definition := configuration.Definition{Attributes: make([]configuration.AttributeDefinition, len(wire.Payload.Definition.Attributes)), DisplayScenes: wire.Payload.Definition.DisplayScenes, GiftTargetPanels: make([]configuration.GiftTargetPanelDefinition, len(wire.Payload.Definition.GiftTargetPanels)), Activities: make([]configuration.ActivityDefinition, len(wire.Payload.Definition.Activities)), Rules: wire.Payload.Definition.Rules, TimerRules: wire.Payload.Definition.TimerRules, FormulaPresets: wire.Payload.Definition.FormulaPresets, Gifts: gifts}
+	definition := configuration.Definition{Attributes: make([]configuration.AttributeDefinition, len(wire.Payload.Definition.Attributes)), DisplayScenes: append([]gameplay.DisplayScene{}, wire.Payload.Definition.DisplayScenes...), GiftTargetPanels: make([]configuration.GiftTargetPanelDefinition, len(wire.Payload.Definition.GiftTargetPanels)), Activities: make([]configuration.ActivityDefinition, len(wire.Payload.Definition.Activities)), Rules: wire.Payload.Definition.Rules, TimerRules: wire.Payload.Definition.TimerRules, FormulaPresets: wire.Payload.Definition.FormulaPresets, Gifts: gifts}
+	if wire.MigrationVersion == 2 {
+		definition.Appearance = wire.Payload.Definition.Appearance
+		definition.BlindBoxDisplay = wire.Payload.Definition.BlindBoxDisplay
+	} else {
+		for index := range definition.DisplayScenes {
+			definition.DisplayScenes[index].Appearance = nil
+		}
+	}
 	for index, item := range wire.Payload.Definition.Attributes {
-		definition.Attributes[index] = configuration.AttributeDefinition{ID: item.ID, Name: item.Name, Unit: item.Unit, Format: item.Format, Decimals: item.Decimals, Suffix: item.Suffix, Color: item.Color, BroadcastMessage: item.BroadcastMessage, Display: item.Display}
+		display := item.Display
+		if display != nil && wire.MigrationVersion == 1 {
+			copy := *display
+			copy.Appearance = nil
+			display = &copy
+		}
+		definition.Attributes[index] = configuration.AttributeDefinition{ID: item.ID, Name: item.Name, Unit: item.Unit, Format: item.Format, Decimals: item.Decimals, Suffix: item.Suffix, Color: item.Color, BroadcastMessage: item.BroadcastMessage, Display: display}
 	}
 	for index, panel := range wire.Payload.Definition.GiftTargetPanels {
 		items := make([]configuration.GiftTargetItemDefinition, len(panel.Items))
@@ -295,6 +312,9 @@ func normalizeWire(wire wireEnvelope, report *Report) (configuration.Definition,
 			items[itemIndex] = configuration.GiftTargetItemDefinition{GiftID: item.GiftID, Name: item.Name, Target: item.Target, BarStyle: item.BarStyle}
 		}
 		definition.GiftTargetPanels[index] = configuration.GiftTargetPanelDefinition{ID: panel.ID, Name: panel.Name, Layout: panel.Layout, Items: items}
+		if wire.MigrationVersion == 2 {
+			definition.GiftTargetPanels[index].Appearance = panel.Appearance
+		}
 	}
 	for index, activity := range wire.Payload.Definition.Activities {
 		definition.Activities[index] = configuration.ActivityDefinition{ID: activity.ID, Name: activity.Name, AttributeIDs: activity.AttributeIDs, SceneID: activity.SceneID, ResultMode: activity.ResultMode, GateRules: activity.GateRules, InitialValues: activity.InitialValues, Milestones: activity.Milestones, GiftTimeout: activity.GiftTimeout}
@@ -841,10 +861,16 @@ type schemaNode struct {
 
 func envelopeSchema(version int) schemaNode {
 	leaf := schemaNode{}
-	display := schemaNode{fields: map[string]schemaNode{"variant": leaf, "themeId": leaf, "title": leaf, "min": leaf, "max": leaf, "lowThreshold": leaf, "leftLabel": leaf, "rightLabel": leaf, "valueMappings": {array: &schemaNode{fields: map[string]schemaNode{"value": leaf, "label": leaf, "color": leaf}}}, "appearance": {forbidden: true}}}
+	globalAppearance := schemaNode{forbidden: true}
+	displayAppearance := schemaNode{forbidden: true}
+	if version == 2 {
+		globalAppearance = schemaNode{fields: map[string]schemaNode{"theme": leaf, "fontSize": leaf, "accentColor": leaf, "align": leaf, "panelOpacity": leaf, "showConnection": leaf}}
+		displayAppearance = schemaNode{fields: map[string]schemaNode{"themeId": leaf, "fontSize": leaf, "accentColor": leaf, "showConnection": leaf, "align": leaf, "panelOpacity": leaf}}
+	}
+	display := schemaNode{fields: map[string]schemaNode{"variant": leaf, "themeId": leaf, "title": leaf, "min": leaf, "max": leaf, "lowThreshold": leaf, "leftLabel": leaf, "rightLabel": leaf, "valueMappings": {array: &schemaNode{fields: map[string]schemaNode{"value": leaf, "label": leaf, "color": leaf}}}, "appearance": displayAppearance}}
 	attribute := schemaNode{fields: map[string]schemaNode{"id": leaf, "name": leaf, "unit": leaf, "format": leaf, "decimals": leaf, "suffix": leaf, "color": leaf, "broadcastMessage": leaf, "display": display, "value": {forbidden: true}}}
 	item := schemaNode{fields: map[string]schemaNode{"giftId": leaf, "name": leaf, "target": leaf, "barStyle": leaf, "received": {forbidden: true}, "imageUrl": {forbidden: true}}}
-	panel := schemaNode{fields: map[string]schemaNode{"id": leaf, "name": leaf, "layout": leaf, "items": {array: &item}}}
+	panel := schemaNode{fields: map[string]schemaNode{"id": leaf, "name": leaf, "layout": leaf, "items": {array: &item}, "appearance": displayAppearance}}
 	milestone := schemaNode{fields: map[string]schemaNode{"id": leaf, "name": leaf, "attributeId": leaf, "comparison": leaf, "threshold": leaf, "action": leaf, "message": leaf}}
 	activity := schemaNode{fields: map[string]schemaNode{"id": leaf, "name": leaf, "attributeIds": {array: &leaf}, "sceneId": leaf, "resultMode": leaf, "gateRules": leaf, "initialValues": leaf, "milestones": {array: &milestone}, "giftTimeout": {fields: map[string]schemaNode{"seconds": leaf, "action": leaf}}}}
 	rule := schemaNode{fields: map[string]schemaNode{"id": leaf, "giftId": leaf, "attributeId": leaf, "formulaName": leaf, "condition": leaf, "formula": leaf, "enabled": leaf, "matchGiftIds": {array: &leaf}, "minPrice": leaf, "cap": leaf, "dailyLimit": leaf}}
@@ -853,7 +879,7 @@ func envelopeSchema(version int) schemaNode {
 	overtimeAction := schemaNode{fields: map[string]schemaNode{"giftId": leaf, "operation": leaf, "seconds": leaf}}
 	simplePlay := schemaNode{fields: map[string]schemaNode{"version": leaf, "templateId": leaf, "templateVersion": leaf, "attributeId": leaf, "parameters": leaf, "gifts": leaf, "overtimeGiftActions": {array: &overtimeAction}, "managedFingerprint": leaf}}
 	gift := schemaNode{fields: map[string]schemaNode{"id": leaf, "name": leaf, "price": leaf, "coinType": leaf, "effectId": leaf, "blindBoxParentId": leaf, "blindBoxParentName": leaf, "blindBoxParentPrice": leaf, "imageUrl": {forbidden: true}, "imgBasic": {forbidden: true}, "gif": {forbidden: true}, "webp": {forbidden: true}, "effectMp4": {forbidden: true}, "effectMp4Json": {forbidden: true}}}
-	definition := schemaNode{fields: map[string]schemaNode{"attributes": {array: &attribute}, "displayScenes": {array: &schemaNode{fields: map[string]schemaNode{"id": leaf, "name": leaf, "attributeIds": {array: &leaf}, "layout": leaf, "themeId": leaf, "appearance": {forbidden: true}}}}, "giftTargetPanels": {array: &panel}, "activities": {array: &activity}, "rules": {array: &rule}, "timerRules": {array: &timerRule}, "formulaPresets": {array: &preset}, "simplePlay": simplePlay, "gifts": {array: &gift}, "appearance": {forbidden: true}, "blindBoxDisplay": {forbidden: true}}}
+	definition := schemaNode{fields: map[string]schemaNode{"attributes": {array: &attribute}, "displayScenes": {array: &schemaNode{fields: map[string]schemaNode{"id": leaf, "name": leaf, "attributeIds": {array: &leaf}, "layout": leaf, "themeId": leaf, "appearance": displayAppearance}}}, "giftTargetPanels": {array: &panel}, "activities": {array: &activity}, "rules": {array: &rule}, "timerRules": {array: &timerRule}, "formulaPresets": {array: &preset}, "simplePlay": simplePlay, "gifts": {array: &gift}, "appearance": globalAppearance, "blindBoxDisplay": displayAppearance}}
 	runtimeMilestone := schemaNode{fields: map[string]schemaNode{"id": leaf, "triggeredAtMillis": leaf, "triggerValue": leaf}}
 	runtimeActivity := schemaNode{fields: map[string]schemaNode{"id": leaf, "status": leaf, "startedAtMillis": leaf, "lockedAtMillis": leaf, "settledAtMillis": leaf, "result": {fields: map[string]schemaNode{"winnerAttributeId": leaf, "values": leaf}}, "milestones": {array: &runtimeMilestone}, "giftTimeout": {fields: map[string]schemaNode{"lastGiftAtMillis": leaf, "deadlineAtMillis": leaf}}}}
 	runtime := schemaNode{fields: map[string]schemaNode{"attributeValues": leaf, "giftTargetReceived": {array: &schemaNode{fields: map[string]schemaNode{"panelId": leaf, "giftId": leaf, "received": leaf}}}, "activities": {array: &runtimeActivity}, "ruleLimits": leaf}}

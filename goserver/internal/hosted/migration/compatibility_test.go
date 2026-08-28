@@ -1,6 +1,28 @@
 package migration
 
-import "testing"
+import (
+	"testing"
+
+	"bilibili-live-gift-panel/internal/hosted/configuration"
+)
+
+func TestAssessBlindBoxDisplayCompatibilityIsIndependentFromGeneralSettings(t *testing.T) {
+	definition := configuration.Definition{BlindBoxDisplay: &configuration.DisplayAppearance{ThemeID: "kawaii", FontSize: 32, AccentColor: "#cc55ff", ShowConnection: true, Align: "center", PanelOpacity: 75}}
+
+	if general := AssessGeneralSettingsCompatibility(definition, CapabilitySet{}); general.Status != CompatibilityComplete {
+		t.Fatalf("general settings compatibility = %#v", general)
+	}
+	unsupported := AssessBlindBoxDisplayCompatibility(definition, CapabilitySet{})
+	if unsupported == nil || unsupported.Status != CompatibilityPartial || !sameStrings(unsupported.ReasonCodes, []string{"blind_box_display_unsupported"}) {
+		t.Fatalf("unsupported blind-box compatibility = %#v", unsupported)
+	}
+	if supported := AssessBlindBoxDisplayCompatibility(definition, CapabilitySet{BlindBoxDisplaySupported: true}); supported == nil || supported.Status != CompatibilityComplete {
+		t.Fatalf("supported blind-box compatibility = %#v", supported)
+	}
+	if absent := AssessBlindBoxDisplayCompatibility(configuration.Definition{}, CapabilitySet{}); absent != nil {
+		t.Fatalf("absent blind-box compatibility = %#v", absent)
+	}
+}
 
 func TestAssessCompatibilityReturnsExactStableContracts(t *testing.T) {
 	baseUnit := GameplayUnit{ID: "attribute:private-score", Kind: "attribute", Name: "private score configuration", SimplePlayTemplateID: "counter", SimplePlayTemplateVersion: 2}
@@ -22,7 +44,7 @@ func TestAssessCompatibilityReturnsExactStableContracts(t *testing.T) {
 		{"incompatible reasons take priority over partial reasons in stable order", GameplayUnit{ID: "simple-play:private-score", Kind: "simple-play", Name: "private template", RuleIDs: []string{"private-rule"}, TimerRuleIDs: []string{"private-timer"}, FormulaPresetIDs: []string{"private-preset"}, DisplaySceneIDs: []string{"private-scene"}, CropPresetIDs: []string{"gift:1"}, SimplePlayTemplateID: "counter", SimplePlayTemplateVersion: 2}, CapabilitySet{UnitKinds: map[string]bool{"simple-play": true}, SimplePlayTemplates: map[string]int{"counter": 1}}, Compatibility{Status: CompatibilityIncompatible, ReasonCodes: []string{"formula_presets_unsupported", "rules_unsupported", "simple_play_template_unsupported", "timer_rules_unsupported"}}},
 	}
 
-	allowedReasons := map[string]struct{}{"unit_kind_unsupported": {}, "rules_unsupported": {}, "timer_rules_unsupported": {}, "formula_presets_unsupported": {}, "simple_play_template_unsupported": {}, "display_scenes_unsupported": {}, "crop_presets_unsupported": {}}
+	allowedReasons := map[string]struct{}{"unit_kind_unsupported": {}, "rules_unsupported": {}, "timer_rules_unsupported": {}, "formula_presets_unsupported": {}, "simple_play_template_unsupported": {}, "display_scenes_unsupported": {}, "crop_presets_unsupported": {}, "blind_box_display_unsupported": {}}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got := AssessCompatibility(test.unit, test.capabilities)

@@ -1,6 +1,10 @@
 package migration
 
-import "sort"
+import (
+	"sort"
+
+	"bilibili-live-gift-panel/internal/hosted/configuration"
+)
 
 type CompatibilityStatus string
 
@@ -17,13 +21,29 @@ type Compatibility struct {
 
 // CapabilitySet describes hosted support without carrying a client payload.
 type CapabilitySet struct {
-	UnitKinds               map[string]bool
-	SimplePlayTemplates     map[string]int
-	RulesSupported          bool
-	TimerRulesSupported     bool
-	FormulaPresetsSupported bool
-	DisplayScenesSupported  bool
-	CropPresetsSupported    bool
+	UnitKinds                map[string]bool
+	SimplePlayTemplates      map[string]int
+	RulesSupported           bool
+	TimerRulesSupported      bool
+	FormulaPresetsSupported  bool
+	DisplayScenesSupported   bool
+	CropPresetsSupported     bool
+	BlindBoxDisplaySupported bool
+}
+
+func AssessGeneralSettingsCompatibility(configuration.Definition, CapabilitySet) Compatibility {
+	return Compatibility{Status: CompatibilityComplete}
+}
+
+func AssessBlindBoxDisplayCompatibility(definition configuration.Definition, capabilities CapabilitySet) *Compatibility {
+	if definition.BlindBoxDisplay == nil {
+		return nil
+	}
+	result := Compatibility{Status: CompatibilityComplete}
+	if !capabilities.BlindBoxDisplaySupported {
+		result = Compatibility{Status: CompatibilityPartial, ReasonCodes: []string{"blind_box_display_unsupported"}}
+	}
+	return &result
 }
 
 func AssessCompatibility(unit GameplayUnit, capabilities CapabilitySet) Compatibility {

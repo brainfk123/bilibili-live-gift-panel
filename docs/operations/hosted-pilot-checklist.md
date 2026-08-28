@@ -41,6 +41,18 @@ Fill this form during the invitation-only Hong Kong pilot. Record aggregates, ti
 - Pending migration application:
 - Rollback of the previous immutable image:
 
+## EXE migration release gate
+
+The V2-capable Hosted build is a hard prerequisite for any EXE release that exports `migrationVersion: 2`. Never publish or distribute that EXE first: a V1-only Hosted deployment rejects every V2 package.
+
+- [ ] Record the exact reviewed Hosted commit and deploy it before the EXE release
+- [ ] Render the production Nginx configuration and pass `nginx -t` on the deployment host
+- [ ] Build the Hosted image from that commit and record its immutable digest
+- [ ] Upload the checked-in `online-migration-v2-appearance.json` contract fixture and verify preview succeeds without ignored safe appearance fields
+- [ ] Apply the fixture to a disposable pilot account, confirm appearance and OBS outputs, then remove only that disposable account's test data
+- [ ] Verify the public Hosted build/version identifies the V2 decoder before publishing or distributing the EXE
+- [ ] Record the exact reviewed EXE commit only after all preceding Hosted checks pass
+
 ## Mainland-to-Hong-Kong and Bilibili stability
 
 Collect China Telecom, China Unicom, and China Mobile samples in daytime and evening. Preserve raw timestamps and aggregate percentiles. Do not invent an SLA.
@@ -66,6 +78,7 @@ Go only when every item below is true. Otherwise keep invitations capped, file a
 - [ ] RSS p95 below 80% of limit
 - [ ] Disk forecast exceeds 90 days
 - [ ] Bilibili breaker and risk events are understood and recover without aggressive retries
+- [ ] Hosted V2 decoder was deployed and verified before the V2-exporting EXE was released
 
 ## Decision
 

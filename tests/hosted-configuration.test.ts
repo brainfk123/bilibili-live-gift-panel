@@ -66,6 +66,29 @@ describe('hosted configuration contract', () => {
     await expect(api.loadConfiguration()).resolves.toEqual(realShape);
   });
 
+  it('accepts only the exact safe appearance scalars persisted by a V2 migration', async () => {
+    const appearance = {
+      ...configuration,
+      definition: {
+        ...configuration.definition,
+        appearance: { theme: 'light', fontSize: 36, accentColor: '#3366ff', align: 'left', panelOpacity: 72, showConnection: false },
+		generalSettings: { configurationMode: 'simple' },
+		cropPresets: [],
+		migrationHash: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+        attributes: [{ id: 'health', name: '生命值', unit: 'none', format: 'number', decimals: 0, suffix: ' 点', display: { variant: 'number', appearance: { themeId: 'neon', fontSize: 40, accentColor: '#ff3366', showConnection: true, align: 'center', panelOpacity: 80 } } }],
+        displayScenes: [{ id: 'main-scene', name: '主画面', attributeIds: ['health'], layout: 'focus', themeId: 'pixel', appearance: { themeId: 'pixel', fontSize: 44, accentColor: '#00cc88', showConnection: false, align: 'right', panelOpacity: 66 } }],
+        blindBoxDisplay: { themeId: 'kawaii', fontSize: 32, accentColor: '#cc55ff', showConnection: true, align: 'center', panelOpacity: 75 },
+        giftTargetPanels: [{ id: 'gift-goal', name: '礼物目标', layout: 'stack', items: [], appearance: { themeId: 'minimal', fontSize: 30, accentColor: '#ffaa00', showConnection: false, align: 'left', panelOpacity: 70 } }],
+      },
+    };
+    const connect = async (body: unknown) => HostedAPI.connect(async (input) => input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : json(body));
+    await expect((await connect(appearance)).loadConfiguration()).resolves.toEqual(appearance);
+
+    const unsafe = structuredClone(appearance);
+    (unsafe.definition.attributes[0].display.appearance as Record<string, unknown>).css = 'url(https://attacker.invalid)';
+    await expect((await connect(unsafe)).loadConfiguration()).rejects.toMatchObject({ code: 'invalid_response' });
+  });
+
   it('rejects an impossible empty definition gift timeout object', async () => {
     const malformed = { ...configuration, definition: { ...configuration.definition, activities: [{ id: 'a', name: '', attributeIds: [], resultMode: '', gateRules: false, initialValues: {}, milestones: [], giftTimeout: {} }] } };
     const api = await HostedAPI.connect(async (input) => input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : json(malformed));

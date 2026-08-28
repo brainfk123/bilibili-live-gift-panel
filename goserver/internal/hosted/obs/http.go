@@ -37,7 +37,7 @@ type httpService interface {
 
 type obsRuntime interface {
 	Status(context.Context, int64) (hostedruntime.Status, error)
-	Snapshot(context.Context, int64) (configuration.RuntimeState, error)
+	DisplayState(context.Context, int64) (configuration.RuntimeState, *configuration.DisplayPresentation, error)
 }
 
 type HTTPOptions struct {
@@ -345,11 +345,11 @@ func (handler *HTTPHandler) stableSnapshot(ctx context.Context, accountID int64,
 			initial, ok = handler.publisher.Latest(accountID)
 		}
 		if !ok || initial.AccountID != accountID || initial.LiveSessionID != before.SessionID {
-			runtimeState, snapshotErr := handler.runtime.Snapshot(ctx, accountID)
+			runtimeState, presentation, snapshotErr := handler.runtime.DisplayState(ctx, accountID)
 			if snapshotErr != nil {
 				return hostedruntime.DisplaySnapshot{}, snapshotErr
 			}
-			initial = hostedruntime.DisplaySnapshot{AccountID: accountID, LiveSessionID: before.SessionID, Runtime: runtimeState}
+			initial = hostedruntime.DisplaySnapshot{AccountID: accountID, LiveSessionID: before.SessionID, Runtime: runtimeState, Presentation: presentation}
 		}
 		after, err := handler.runtime.Status(ctx, accountID)
 		if err != nil {

@@ -40,6 +40,42 @@ func TestProcessorPublishesOnlyAfterCommit(t *testing.T) {
 	}
 }
 
+func TestProcessorPublishesOnlySafeAppearancePresentation(t *testing.T) {
+	repository := processorRepositoryFixture()
+	repository.commit = func(context.Context, configuration.RuntimeEventCommand) (configuration.RuntimeEventResult, error) {
+		return configuration.RuntimeEventResult{Revision: 2}, nil
+	}
+	repository.version.Definition.Appearance = &configuration.GlobalAppearance{Theme: "light", FontSize: 36, AccentColor: "#3366ff", Align: "left", PanelOpacity: 72}
+	repository.version.Definition.Attributes[0].Display = &gameplay.Display{Variant: "number", Appearance: &configuration.DisplayAppearance{ThemeID: "neon", FontSize: 40, AccentColor: "#ff3366", ShowConnection: true, Align: "center", PanelOpacity: 80}}
+	repository.version.Definition.DisplayScenes = []gameplay.DisplayScene{{ID: "main", AttributeIDs: []string{"score"}, Appearance: &configuration.DisplayAppearance{ThemeID: "pixel", FontSize: 44, AccentColor: "#00cc88", Align: "right", PanelOpacity: 66}}}
+	repository.version.Definition.GiftTargetPanels = []configuration.GiftTargetPanelDefinition{{ID: "goal", Appearance: &configuration.DisplayAppearance{ThemeID: "minimal", FontSize: 30, AccentColor: "#ffaa00", Align: "left", PanelOpacity: 70}}}
+	repository.version.Definition.BlindBoxDisplay = &configuration.DisplayAppearance{ThemeID: "kawaii", FontSize: 32, AccentColor: "#cc55ff", ShowConnection: true, Align: "center", PanelOpacity: 75}
+	var published DisplaySnapshot
+	processor := newProcessorForTest(t, repository, publisherFunc(func(snapshot DisplaySnapshot) { published = snapshot }))
+	if err := processor.Accept(giftEventFixture("appearance", 123, "viewer", "avatar")); err != nil {
+		t.Fatal(err)
+	}
+	want := &configuration.DisplayPresentation{
+		Appearance:            repository.version.Definition.Appearance,
+		AttributeAppearances:  map[string]configuration.DisplayAppearance{"score": *repository.version.Definition.Attributes[0].Display.Appearance},
+		SceneAppearances:      map[string]configuration.DisplayAppearance{"main": *repository.version.Definition.DisplayScenes[0].Appearance},
+		GiftTargetAppearances: map[string]configuration.DisplayAppearance{"goal": *repository.version.Definition.GiftTargetPanels[0].Appearance},
+		BlindBoxDisplay:       repository.version.Definition.BlindBoxDisplay,
+	}
+	if !reflect.DeepEqual(published.Presentation, want) {
+		t.Fatalf("published presentation = %#v, want %#v", published.Presentation, want)
+	}
+	encoded, err := json.Marshal(published.Presentation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"formula", "viewer", "avatar", "rule"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("presentation leaked %q: %s", forbidden, encoded)
+		}
+	}
+}
+
 func TestProcessorCommitFailureDoesNotPublishOrUpdateViewers(t *testing.T) {
 	repository := processorRepositoryFixture()
 	repository.commit = func(context.Context, configuration.RuntimeEventCommand) (configuration.RuntimeEventResult, error) {

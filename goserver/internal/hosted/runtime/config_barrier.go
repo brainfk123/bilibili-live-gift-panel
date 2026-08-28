@@ -539,7 +539,7 @@ func (processor *Processor) prepareConfigurationSnapshot(candidate migration.Bar
 	if processor == nil || session.ID <= 0 || firstRevision == 0 {
 		return nil, ErrInvalidInput
 	}
-	snapshot := DisplaySnapshot{AccountID: session.AccountID, LiveSessionID: session.ID, Revision: firstRevision, Runtime: candidate.Runtime, Viewers: processor.viewers.Rows()}
+	snapshot := DisplaySnapshot{AccountID: session.AccountID, LiveSessionID: session.ID, Revision: firstRevision, Runtime: candidate.Runtime, Presentation: configuration.PresentationFor(candidate.Definition), Viewers: processor.viewers.Rows()}
 	if preparer, ok := processor.publisher.(fullSnapshotPreparer); ok {
 		return preparer.PrepareFullSnapshot(snapshot)
 	}

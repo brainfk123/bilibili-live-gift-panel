@@ -78,7 +78,7 @@ export function mountMigrationSettingsView(root: HTMLElement, api: MigrationAPI,
     let child: ReturnType<typeof mountMigrationView>;
     child = mountMigrationView(root, api, { onConfiguration: () => { void returnToSettings(child); } });
     nested = child;
-    if(item)child.flow.resumeJob({id:item.id,status:item.status,...(item.expiresAt?{expiresAt:item.expiresAt}:{}),...(item.rollbackExpiresAt?{rollbackExpiresAt:item.rollbackExpiresAt}:{})});
+    if(item)child.flow.resumeJob({id:item.id,status:item.status,...(item.expiresAt?{expiresAt:item.expiresAt}:{}),...(item.rollbackExpiresAt?{rollbackExpiresAt:item.rollbackExpiresAt}:{}),...(item.obsReissueAvailable?{obsReissueAvailable:true,obsReissueRequired:true}:{})});
   };
   renderSettings();
   const ready = loadHistory();

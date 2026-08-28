@@ -636,6 +636,19 @@ func (manager *Manager) Snapshot(ctx context.Context, accountID int64) (configur
 	return state.Runtime, nil
 }
 
+// DisplayState loads one transactionally consistent active definition/state
+// pair and exposes only the presentation projection needed by OBS.
+func (manager *Manager) DisplayState(ctx context.Context, accountID int64) (configuration.RuntimeState, *configuration.DisplayPresentation, error) {
+	if manager == nil || ctx == nil || accountID <= 0 {
+		return configuration.RuntimeState{}, nil, ErrInvalidInput
+	}
+	version, state, err := manager.dependencies.Configuration.LoadActive(ctx, accountID)
+	if err != nil || version.ID <= 0 || state.ConfigVersionID != version.ID {
+		return configuration.RuntimeState{}, nil, ErrUnavailable
+	}
+	return state.Runtime, configuration.PresentationFor(version.Definition), nil
+}
+
 // ApplyRoomEvent serializes the one durable room-monitor outbox into account
 // executions. Full reference snapshots define current membership; state
 // payloads apply lifecycle behavior to that latest roster.

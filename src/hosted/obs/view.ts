@@ -20,8 +20,35 @@ export interface OBSDisplaySnapshot {
     activities: unknown[];
     ruleLimits: { localDate: string; appliedCounts: Record<string, number> };
   };
+  presentation?: OBSDisplayPresentation;
   effects?: unknown[];
   viewers?: OBSViewerRow[];
+}
+
+export interface OBSGlobalAppearance {
+  theme: 'dark' | 'light';
+  fontSize: number;
+  accentColor: string;
+  align: 'left' | 'center' | 'right';
+  panelOpacity: number;
+  showConnection: boolean;
+}
+
+export interface OBSDisplayAppearance {
+  themeId: 'minimal' | 'glass' | 'rpg' | 'pixel' | 'neon' | 'kawaii';
+  fontSize: number;
+  accentColor: string;
+  showConnection: boolean;
+  align: 'left' | 'center' | 'right';
+  panelOpacity: number;
+}
+
+export interface OBSDisplayPresentation {
+  appearance?: OBSGlobalAppearance;
+  attributeAppearances?: Record<string, OBSDisplayAppearance>;
+  sceneAppearances?: Record<string, OBSDisplayAppearance>;
+  giftTargetAppearances?: Record<string, OBSDisplayAppearance>;
+  blindBoxDisplay?: OBSDisplayAppearance;
 }
 
 export interface OBSRenderOptions {
@@ -54,7 +81,8 @@ export function computeOBSLayout(viewportWidth: number, _viewportHeight: number,
 export function renderOBSSnapshot(root: HTMLElement, snapshot: OBSDisplaySnapshot, options: OBSRenderOptions = {}): void {
   const document = root.ownerDocument;
   if (!document) throw new Error('OBS view requires a document.');
-  const theme = getDisplayTheme(options.theme);
+  const appearance = outputAppearance(snapshot.presentation, options.output);
+  const theme = getDisplayTheme(options.theme ?? (appearance && 'themeId' in appearance ? appearance.themeId : undefined));
   const allowedAttributes = options.output?.kind === 'attribute' || options.output?.kind === 'scene' ? new Set(options.output.attributeIds) : undefined;
   const attributes = Object.entries(snapshot.runtime.attributeValues ?? {}).filter(([id]) => !allowedAttributes || allowedAttributes.has(id));
   const targets = options.output?.kind === 'gift-target' ? snapshot.runtime.giftTargetReceived.filter((item) => item.panelId === options.output?.id) : [];
@@ -63,12 +91,28 @@ export function renderOBSSnapshot(root: HTMLElement, snapshot: OBSDisplaySnapsho
   root.setAttribute('data-theme', theme.id);
   root.style.setProperty('--obs-theme-accent', theme.accent);
   root.style.setProperty('--obs-theme-surface', theme.surface);
+  resetAppearance(root);
+  const colorScheme = snapshot.presentation?.appearance?.theme;
+  if (colorScheme) root.setAttribute('data-color-scheme', colorScheme);
+  if (appearance) {
+    root.setAttribute('data-align', appearance.align);
+    root.style.setProperty('--obs-theme-accent', appearance.accentColor);
+    root.style.setProperty('--obs-font-size', `${appearance.fontSize}px`);
+    root.style.setProperty('--obs-panel-opacity', `${appearance.panelOpacity}%`);
+    root.style.setProperty('--obs-align', appearance.align);
+  }
   root.style.setProperty('--obs-columns', String(layout.columns));
   root.style.setProperty('--obs-gap', `${layout.gap}px`);
   root.style.setProperty('--obs-gutter', `${layout.gutter}px`);
 
   const stage = document.createElement('main');
   stage.className = 'hosted-obs-stage';
+  if (appearance?.showConnection) {
+    const connection = document.createElement('span');
+    connection.className = 'hosted-obs-connection';
+    connection.textContent = '连接正常';
+    stage.append(connection);
+  }
   if (attributes.length === 0) {
     const empty = document.createElement('p');
     empty.className = 'hosted-obs-empty';
@@ -107,12 +151,54 @@ export function renderOBSSnapshot(root: HTMLElement, snapshot: OBSDisplaySnapsho
   root.replaceChildren(stage);
 }
 
+function outputAppearance(presentation: OBSDisplayPresentation | undefined, output: OBSOutputSelector | undefined): OBSDisplayAppearance | OBSGlobalAppearance | undefined {
+  if (!presentation) return undefined;
+  if (output?.kind === 'attribute') return presentation.attributeAppearances?.[output.id] ?? presentation.appearance;
+  if (output?.kind === 'scene') return presentation.sceneAppearances?.[output.id] ?? presentation.appearance;
+  if (output?.kind === 'gift-target') return presentation.giftTargetAppearances?.[output.id] ?? presentation.appearance;
+  return presentation.appearance;
+}
+
+function resetAppearance(root: HTMLElement): void {
+  root.removeAttribute('data-align');
+  root.removeAttribute('data-color-scheme');
+  for (const property of ['--obs-font-size', '--obs-panel-opacity', '--obs-align']) root.style.removeProperty(property);
+}
+
 export function parseOBSDisplaySnapshot(value: unknown): OBSDisplaySnapshot | undefined {
-  if (!isRecord(value) || !exactKeys(value, ['accountId', 'liveSessionId', 'revision', 'runtime'], ['effects', 'viewers'])) return undefined;
+  if (!isRecord(value) || !exactKeys(value, ['accountId', 'liveSessionId', 'revision', 'runtime'], ['presentation', 'effects', 'viewers'])) return undefined;
   if (!positiveInteger(value.accountId) || !nonnegativeInteger(value.liveSessionId) || !nonnegativeInteger(value.revision) || !runtimeState(value.runtime)) return undefined;
+  if (value.presentation !== undefined && !displayPresentation(value.presentation)) return undefined;
   if (value.effects !== undefined && (!Array.isArray(value.effects) || !value.effects.every(effectRow))) return undefined;
   if (value.viewers !== undefined && (!Array.isArray(value.viewers) || !value.viewers.every(viewerRow))) return undefined;
   return value as unknown as OBSDisplaySnapshot;
+}
+
+function displayPresentation(value: unknown): boolean {
+  if (!isRecord(value) || !exactKeys(value, [], ['appearance', 'attributeAppearances', 'sceneAppearances', 'giftTargetAppearances', 'blindBoxDisplay'])) return false;
+  if (value.appearance !== undefined && !globalAppearance(value.appearance)) return false;
+  for (const key of ['attributeAppearances', 'sceneAppearances', 'giftTargetAppearances'] as const) {
+    if (value[key] !== undefined && (!isRecord(value[key]) || !Object.values(value[key]).every(displayAppearance))) return false;
+  }
+  return value.blindBoxDisplay === undefined || displayAppearance(value.blindBoxDisplay);
+}
+
+function globalAppearance(value: unknown): value is OBSGlobalAppearance {
+  return isRecord(value) && exactKeys(value, ['theme', 'fontSize', 'accentColor', 'align', 'panelOpacity', 'showConnection'])
+    && (value.theme === 'dark' || value.theme === 'light') && appearanceScalars(value);
+}
+
+function displayAppearance(value: unknown): value is OBSDisplayAppearance {
+  return isRecord(value) && exactKeys(value, ['themeId', 'fontSize', 'accentColor', 'showConnection', 'align', 'panelOpacity'])
+    && ['minimal', 'glass', 'rpg', 'pixel', 'neon', 'kawaii'].includes(String(value.themeId)) && appearanceScalars(value);
+}
+
+function appearanceScalars(value: Record<string, unknown>): boolean {
+  return Number.isSafeInteger(value.fontSize) && Number(value.fontSize) >= 24 && Number(value.fontSize) <= 96
+    && typeof value.accentColor === 'string' && /^#[0-9a-f]{6}$/i.test(value.accentColor)
+    && (value.align === 'left' || value.align === 'center' || value.align === 'right')
+    && Number.isSafeInteger(value.panelOpacity) && Number(value.panelOpacity) >= 10 && Number(value.panelOpacity) <= 100
+    && typeof value.showConnection === 'boolean';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

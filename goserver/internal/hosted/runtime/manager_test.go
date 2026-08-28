@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"bilibili-live-gift-panel/internal/gameplay"
 	"bilibili-live-gift-panel/internal/hosted/configuration"
 	"bilibili-live-gift-panel/internal/hosted/migration"
 	"bilibili-live-gift-panel/internal/hosted/roomsource"
@@ -1307,6 +1308,22 @@ func TestManagerRevokesAdmissionImmediatelyWhenBufferedRetryLosesOwnership(t *te
 type processorManagerConfiguration struct {
 	version configuration.Version
 	state   configuration.State
+}
+
+func TestManagerDisplayStateLoadsOneActiveAppearanceProjection(t *testing.T) {
+	version := processorVersionFixture()
+	version.Definition.Attributes[0].Display = &gameplay.Display{Variant: "number", Appearance: &configuration.DisplayAppearance{ThemeID: "neon", FontSize: 40, AccentColor: "#ff3366", ShowConnection: true, Align: "center", PanelOpacity: 80}}
+	state := processorStateFixture()
+	manager := &Manager{dependencies: Dependencies{Configuration: processorManagerConfiguration{version: version, state: state}}}
+
+	runtimeState, presentation, err := manager.DisplayState(context.Background(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &configuration.DisplayPresentation{AttributeAppearances: map[string]configuration.DisplayAppearance{"score": *version.Definition.Attributes[0].Display.Appearance}}
+	if !reflect.DeepEqual(runtimeState, state.Runtime) || !reflect.DeepEqual(presentation, want) {
+		t.Fatalf("DisplayState() = %#v, %#v; want %#v, %#v", runtimeState, presentation, state.Runtime, want)
+	}
 }
 
 func (repository processorManagerConfiguration) LoadActive(context.Context, int64) (configuration.Version, configuration.State, error) {

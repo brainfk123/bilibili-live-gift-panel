@@ -18,7 +18,8 @@ const preview = {
   groups: [{ id: 'group:score', unitIds: ['attribute:bonus', 'activity:legacy'], reasons: [{ kind: 'shared-attribute', referenceId: 'bonus' }] }],
   conflicts: [{ id: 'conflict:score', importedUnitIds: ['attribute:score', 'attribute:bonus'], hostedUnitIds: ['attribute:hosted'], suggestedNames: { 'attribute:score': '积分（从 EXE 导入）' } }],
   selection: { unitIds: ['attribute:score'], conflictChoices: {}, includeGeneralSettings: false, includeRoomSuggestion: false },
-  generalSettings: { configurationMode: 'simple' }, canConfirm: false,
+  generalSettings: { configurationMode: 'simple' },
+  generalSettingsCompatibility: { status: 'complete', reasonCodes: [] }, canConfirm: false,
 };
 const scoreSelector = 'eyJraW5kIjoiYXR0cmlidXRlIiwiaWQiOiJzY29yZSJ9';
 
@@ -36,13 +37,14 @@ const harnessPage = `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-
       beginLogin() { return Promise.resolve({ challengeId: 'proof', qrImage: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==', expiresAt: preview.expiresAt }); },
       pollLogin() { return Promise.resolve({ status: 'verified', expiresAt: preview.expiresAt }); },
       cancelLogin() { return Promise.resolve(); },
-      applyMigration() { return Promise.resolve({ id: 12, status: 'applied', rollbackExpiresAt: '2030-01-08T00:00:00Z', ...(state === 'applied-without-links' ? {} : { obsLinks: [{ outputId: '${scoreSelector}', name: '积分卡片', url: 'https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=${scoreSelector}#token=one-time' }] }) }); },
+      applyMigration() { return Promise.resolve({ id: 12, status: 'applied', rollbackExpiresAt: '2030-01-08T00:00:00Z', ...(state === 'applied-without-links' ? { obsReissueAvailable: true, obsReissueRequired: true } : state === 'applied-no-outputs' ? {} : { obsReissueAvailable: true, obsLinks: [{ outputId: '${scoreSelector}', name: '积分卡片', url: 'https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=${scoreSelector}#token=one-time' }] }) }); },
     };
     mounted = mountMigrationView(root, api, { onConfiguration() {} });
     if (state === 'preview') mounted.flow.acceptPreview(preview);
+    if (state === 'unsupported-settings') mounted.flow.acceptPreview({ ...preview, blindBoxDisplayCompatibility: { status: 'partial', reasonCodes: ['blind_box_display_unsupported'] } });
     if (state === 'busy') void mounted.flow.preview({ name: 'private.json', size: 2, text: async () => '{}' });
     if (state === 'error') { mounted.flow.acceptPreview(preview); mounted.flow.reportFailure(new TypeError('Failed to fetch RAW')); }
-    if (state === 'applied' || state === 'applied-without-links') { const ready = { ...preview, conflicts: [], canConfirm: true }; mounted.flow.acceptPreview(ready); mounted.flow.confirmReplacement(true); await mounted.flow.apply(); }
+    if (state === 'applied' || state === 'applied-without-links' || state === 'applied-no-outputs') { const ready = { ...preview, conflicts: [], canConfirm: true }; mounted.flow.acceptPreview(ready); mounted.flow.confirmReplacement(true); await mounted.flow.apply(); }
   }
   window.__migrationHarness = { mount, cleanup };
 </script></body></html>`;
@@ -73,7 +75,7 @@ const settingsRacePage = `<!doctype html><html lang="zh-CN"><head><meta charset=
 
 declare global {
   interface Window {
-    __migrationHarness: { mount(state: 'preview' | 'busy' | 'error' | 'applied' | 'applied-without-links'): Promise<void>; cleanup(): Promise<void> };
+    __migrationHarness: { mount(state: 'preview' | 'unsupported-settings' | 'busy' | 'error' | 'applied' | 'applied-without-links' | 'applied-no-outputs'): Promise<void>; cleanup(): Promise<void> };
     __settingsRaceHarness: { mount(): void; historyCount(): number; historyAborted(index: number): boolean; resolveHistory(index: number, jobs: unknown[]): void; guardCount(): number; cleanup(): Promise<void> };
   }
 }
@@ -93,7 +95,7 @@ test.beforeAll(async () => {
           if (request.url === '/__hosted-account-test') { response.statusCode = 200; response.setHeader('Content-Type', 'text/html; charset=UTF-8'); response.end('<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="hosted-app"></div><script>window.EventSource=class { addEventListener(){} close(){} };</script><script type="module" src="/src/hosted/main.ts"></script></body></html>'); return; }
           if (request.url === '/api/bootstrap') { response.statusCode = 200; response.setHeader('Content-Type', 'application/json'); response.end('{"csrfToken":"csrf"}'); return; }
           if (request.url === '/api/auth/session') { response.statusCode = 200; response.setHeader('Content-Type', 'application/json'); response.end('{"authenticated":true,"accountScope":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}'); return; }
-          if (request.url === '/api/migrations') { response.statusCode = 200; response.setHeader('Content-Type', 'application/json'); response.end('{"jobs":[{"id":7,"status":"applied","createdAt":"2026-08-29T00:00:00Z","appliedAt":"2026-08-29T00:01:00Z","rollbackExpiresAt":"2030-01-08T00:00:00Z"}]}'); return; }
+          if (request.url === '/api/migrations') { response.statusCode = 200; response.setHeader('Content-Type', 'application/json'); response.end('{"jobs":[{"id":7,"status":"applied","createdAt":"2026-08-29T00:00:00Z","appliedAt":"2026-08-29T00:01:00Z","rollbackExpiresAt":"2030-01-08T00:00:00Z","obsReissueAvailable":true}]}'); return; }
           next();
         });
       },
@@ -159,6 +161,16 @@ test('renders grouped compatibility and conflict controls without desktop or pho
   }
 });
 
+test('renders unsupported blind-box settings as an explicit disabled choice', async ({ browser }) => {
+  const page = await openHarness(browser, { width: 390, height: 844 });
+  await page.evaluate(() => window.__migrationHarness.mount('unsupported-settings'));
+  await expect(page.getByText('盲盒排行榜数据暂不受 Hosted 支持（blind_box_display_unsupported）')).toBeVisible();
+  await expect(page.getByRole('checkbox', { name: /导入通用设置/ })).toBeEnabled();
+  await expect(page.getByRole('checkbox', { name: /导入盲盒排行榜样式/ })).toBeDisabled();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  await page.close();
+});
+
 test('styles loading, network failure, applied progress and OBS checklist with reduced motion', async ({ browser }) => {
   const page = await openHarness(browser, { width: 390, height: 844 });
   await page.emulateMedia({ reducedMotion: 'no-preference' });
@@ -184,6 +196,14 @@ test('applied jobs without in-memory OBS links expose proof-gated rotation recov
   await expect(page.getByText(/OBS 链接需重新签发/)).toBeVisible();
   await expect(page.getByRole('button', { name: '扫码重新签发 OBS 链接' })).toBeVisible();
   await expect(page.getByText(/轮换并撤销旧链接/)).toBeVisible();
+  await page.close();
+});
+
+test('applied jobs without OBS outputs do not expose an impossible reissue action', async ({ browser }) => {
+  const page = await openHarness(browser, { width: 390, height: 844 });
+  await page.evaluate(() => window.__migrationHarness.mount('applied-no-outputs'));
+  await expect(page.getByText('此配置没有可签发的 OBS 输出。')).toBeVisible();
+  await expect(page.getByRole('button', { name: '扫码重新签发 OBS 链接' })).toHaveCount(0);
   await page.close();
 });
 

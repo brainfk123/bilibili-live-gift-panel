@@ -188,6 +188,74 @@ describe('hosted OBS read-only rendering', () => {
 	]) expect(parseOBSDisplaySnapshot(malformed)).toBeUndefined();
   });
 
+  it('applies the migrated appearance selected for each Hosted OBS output', () => {
+    const document = new FakeDocument();
+    const snapshot: OBSDisplaySnapshot = {
+      accountId: 41,
+      liveSessionId: 70,
+      revision: 2,
+      runtime: { attributeValues: { health: 42 }, giftTargetReceived: [], activities: [], ruleLimits: { localDate: '2026-08-29', appliedCounts: {} } },
+      presentation: {
+        appearance: { theme: 'light', fontSize: 36, accentColor: '#3366ff', align: 'left', panelOpacity: 72, showConnection: false },
+        attributeAppearances: { health: { themeId: 'neon', fontSize: 40, accentColor: '#ff3366', showConnection: true, align: 'center', panelOpacity: 80 } },
+        sceneAppearances: { 'main-scene': { themeId: 'pixel', fontSize: 44, accentColor: '#00cc88', showConnection: false, align: 'right', panelOpacity: 66 } },
+        giftTargetAppearances: { 'gift-goal': { themeId: 'minimal', fontSize: 30, accentColor: '#ffaa00', showConnection: false, align: 'left', panelOpacity: 70 } },
+        blindBoxDisplay: { themeId: 'kawaii', fontSize: 32, accentColor: '#cc55ff', showConnection: true, align: 'center', panelOpacity: 75 },
+      },
+    };
+    expect(parseOBSDisplaySnapshot(snapshot)).toBeDefined();
+
+    const sceneRoot = document.createElement('div') as unknown as HTMLElement;
+    renderOBSSnapshot(sceneRoot, snapshot, { output: { kind: 'scene', id: 'main-scene', attributeIds: ['health'] } });
+    const scene = sceneRoot as unknown as FakeElement;
+    expect(scene.attributes.get('data-theme')).toBe('pixel');
+    expect(scene.attributes.get('data-align')).toBe('right');
+    expect(scene.attributes.get('style:--obs-theme-accent')).toBe('#00cc88');
+    expect(scene.attributes.get('style:--obs-font-size')).toBe('44px');
+    expect(scene.attributes.get('style:--obs-panel-opacity')).toBe('66%');
+    expect(textContent(scene)).not.toContain('连接正常');
+
+    const attributeRoot = document.createElement('div') as unknown as HTMLElement;
+    renderOBSSnapshot(attributeRoot, snapshot, { output: { kind: 'attribute', id: 'health', attributeIds: ['health'] } });
+    expect((attributeRoot as unknown as FakeElement).attributes.get('data-theme')).toBe('neon');
+    expect(textContent(attributeRoot as unknown as FakeElement)).toContain('连接正常');
+
+  });
+
+  it('clears migrated appearance when a later snapshot no longer carries presentation', () => {
+    const document = new FakeDocument();
+    const root = document.createElement('div') as unknown as HTMLElement;
+    const runtime = { attributeValues: { health: 42 }, giftTargetReceived: [], activities: [], ruleLimits: { localDate: '2026-08-29', appliedCounts: {} } };
+    renderOBSSnapshot(root, {
+      accountId: 41,
+      liveSessionId: 70,
+      revision: 2,
+      runtime,
+      presentation: {
+        appearance: { theme: 'light', fontSize: 36, accentColor: '#3366ff', align: 'right', panelOpacity: 72, showConnection: false },
+      },
+    });
+    const rendered = root as unknown as FakeElement;
+    expect(rendered.attributes.get('data-color-scheme')).toBe('light');
+    expect(rendered.attributes.get('style:--obs-font-size')).toBe('36px');
+
+    renderOBSSnapshot(root, { accountId: 41, liveSessionId: 70, revision: 3, runtime });
+
+    expect(rendered.attributes.has('data-color-scheme')).toBe(false);
+    expect(rendered.attributes.has('data-align')).toBe(false);
+    expect(rendered.attributes.has('style:--obs-font-size')).toBe(false);
+    expect(rendered.attributes.has('style:--obs-panel-opacity')).toBe(false);
+    expect(rendered.attributes.has('style:--obs-align')).toBe(false);
+  });
+
+  it('has a visible light color-scheme contract for migrated global appearance', () => {
+    const css = readFileSync(join(projectRoot, 'src/hosted/obs/obs.css'), 'utf8');
+
+    expect(css).toMatch(/#hosted-obs-app\[data-color-scheme="light"\]/);
+    expect(css).toMatch(/--obs-text-color:\s*#172033/);
+    expect(css).toMatch(/--obs-card-surface:\s*#f7f9fc/);
+  });
+
   it('filters attribute, scene, and gift-target selectors to their intended output', () => {
     const document = new FakeDocument();
     const snapshot: OBSDisplaySnapshot = { accountId: 41, liveSessionId: 70, revision: 2, runtime: { attributeValues: { hp: 10, timer: 20 }, giftTargetReceived: [{ panelId: 'goals', giftId: 1, received: 3 }, { panelId: 'other', giftId: 2, received: 9 }], activities: [], ruleLimits: { localDate: '', appliedCounts: {} } } };
@@ -228,13 +296,17 @@ describe('hosted OBS read-only rendering', () => {
 class FakeElement {
   readonly children: FakeElement[] = [];
   readonly attributes = new Map<string, string>();
-  readonly style = { setProperty: (name: string, value: string) => { this.attributes.set(`style:${name}`, value); } };
+  readonly style = {
+    setProperty: (name: string, value: string) => { this.attributes.set(`style:${name}`, value); },
+    removeProperty: (name: string) => { this.attributes.delete(`style:${name}`); },
+  };
   className = '';
   textContent = '';
   constructor(readonly tagName: string, readonly ownerDocument: FakeDocument) {}
   append(...children: FakeElement[]): void { this.children.push(...children); }
   replaceChildren(...children: FakeElement[]): void { this.children.splice(0, this.children.length, ...children); }
   setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
+  removeAttribute(name: string): void { this.attributes.delete(name); }
 }
 
 class FakeDocument {

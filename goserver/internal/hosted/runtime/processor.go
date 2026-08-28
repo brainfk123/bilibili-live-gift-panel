@@ -305,7 +305,7 @@ func (processor *Processor) applyLocked(event roomsource.Event, now time.Time) (
 		}
 	}
 	processor.viewers.Record(event.Viewer, gift)
-	snapshot := DisplaySnapshot{AccountID: processor.binding.Owner.AccountID, LiveSessionID: processor.binding.Session.ID, Revision: result.Revision, Runtime: nextRuntime, Effects: transition.Effects, Viewers: processor.viewers.Rows()}
+	snapshot := DisplaySnapshot{AccountID: processor.binding.Owner.AccountID, LiveSessionID: processor.binding.Session.ID, Revision: result.Revision, Runtime: nextRuntime, Presentation: configuration.PresentationFor(processor.definition), Effects: transition.Effects, Viewers: processor.viewers.Rows()}
 	return &snapshot, nil
 }
 

@@ -65,7 +65,6 @@ func composeCandidate(imported Envelope, hostedDefinition configuration.Definiti
 			return ComposeCandidate{}, ErrConflict
 		}
 	}
-
 	hostedUnits := DeriveUnits(hostedDefinition, hostedRuntime)
 	conflicts, conflictImports, conflictHosted := findSelectionConflicts(imported.Units, imported.Groups, hostedUnits, selected)
 	allowedChoices := make(map[string]struct{}, len(conflicts))
@@ -155,6 +154,8 @@ func composeCandidate(imported Envelope, hostedDefinition configuration.Definiti
 		}
 	}
 	definition, runtime := assembled.values()
+	definition.Appearance = cloneGlobalAppearance(hostedDefinition.Appearance)
+	definition.BlindBoxDisplay = cloneDisplayAppearance(hostedDefinition.BlindBoxDisplay)
 	if hostedDefinition.GeneralSettings != nil {
 		settings := *hostedDefinition.GeneralSettings
 		definition.GeneralSettings = &settings
@@ -165,6 +166,10 @@ func composeCandidate(imported Envelope, hostedDefinition configuration.Definiti
 			settings = *imported.Definition.GeneralSettings
 		}
 		definition.GeneralSettings = &settings
+		definition.Appearance = cloneGlobalAppearance(imported.Definition.Appearance)
+		if capabilities.BlindBoxDisplaySupported {
+			definition.BlindBoxDisplay = cloneDisplayAppearance(imported.Definition.BlindBoxDisplay)
+		}
 		result.GeneralSettings = &settings
 	}
 	importedCrops := selectedCrops(imported.CropPresets, selectedCropIDs)
@@ -186,6 +191,22 @@ func composeCandidate(imported Envelope, hostedDefinition configuration.Definiti
 		result.RoomSuggestion = imported.RoomSuggestion
 	}
 	return result, nil
+}
+
+func cloneGlobalAppearance(appearance *configuration.GlobalAppearance) *configuration.GlobalAppearance {
+	if appearance == nil {
+		return nil
+	}
+	copy := *appearance
+	return &copy
+}
+
+func cloneDisplayAppearance(appearance *configuration.DisplayAppearance) *configuration.DisplayAppearance {
+	if appearance == nil {
+		return nil
+	}
+	copy := *appearance
+	return &copy
 }
 
 func mergeCandidateCrops(hosted, imported []CropPreset, importedUnits []GameplayUnit) ([]CropPreset, *SelectionConflict) {

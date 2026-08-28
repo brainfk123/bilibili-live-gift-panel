@@ -467,11 +467,35 @@ func TestSQLRepositoryHistoryIsAccountScopedOrderedAndBounded(t *testing.T) {
 	applied := created.Add(time.Minute)
 	expires := created.Add(24 * time.Hour)
 	rollback := applied.Add(7 * 24 * time.Hour)
-	const expectedHistoryQuery = "SELECT id, status, created_at, applied_at, expires_at, rollback_expires_at FROM migration_jobs WHERE account_id = ? AND ((status = 'pending' AND expires_at > ?) OR (status = 'applied' AND rollback_expires_at > ?)) ORDER BY created_at DESC, id DESC LIMIT ?"
-	mock.ExpectQuery(regexp.QuoteMeta(expectedHistoryQuery)).WithArgs(int64(7), created, created, historyLimit).WillReturnRows(sqlmock.NewRows([]string{"id", "status", "created_at", "applied_at", "expires_at", "rollback_expires_at"}).AddRow(9, jobPending, created, nil, expires, nil).AddRow(8, jobApplied, created.Add(-time.Hour), applied, nil, rollback))
+	const expectedHistoryQuery = "SELECT j.id, j.status, j.created_at, j.applied_at, j.expires_at, j.rollback_expires_at, j.definition_json FROM migration_jobs AS j LEFT JOIN account_active_config AS active ON active.account_id = j.account_id LEFT JOIN account_config_versions AS current ON current.account_id = j.account_id AND current.id = active.config_version_id LEFT JOIN account_runtime_state AS current_state ON current_state.account_id = j.account_id AND current_state.config_version_id = active.config_version_id WHERE j.account_id = ? AND ((j.status = 'pending' AND j.expires_at > ? AND COALESCE(current.number, 0) = j.base_config_version_number AND COALESCE(current_state.revision, 0) = j.base_state_revision) OR (j.status = 'applied' AND j.rollback_expires_at > ? AND active.config_version_id = j.applied_config_version_id)) ORDER BY j.created_at DESC, j.id DESC LIMIT ?"
+	mock.ExpectQuery(regexp.QuoteMeta(expectedHistoryQuery)).WithArgs(int64(7), created, created, historyLimit).WillReturnRows(sqlmock.NewRows([]string{"id", "status", "created_at", "applied_at", "expires_at", "rollback_expires_at", "definition_json"}).AddRow(9, jobPending, created, nil, expires, nil, []byte(`{}`)).AddRow(8, jobApplied, created.Add(-time.Hour), applied, nil, rollback, []byte(`{"attributes":[{"id":"score","name":"Score"}]}`)))
 	jobs, err := NewService(NewRepository(database), func() time.Time { return created }).History(context.Background(), 7)
-	if err != nil || len(jobs) != 2 || jobs[0].ID != 9 || jobs[1].ID != 8 || jobs[1].AppliedAt == nil || jobs[1].RollbackExpiresAt == nil {
+	if err != nil || len(jobs) != 2 || jobs[0].ID != 9 || jobs[1].ID != 8 || jobs[1].AppliedAt == nil || jobs[1].RollbackExpiresAt == nil || !jobs[1].OBSReissueAvailable {
 		t.Fatalf("jobs=%#v error=%v", jobs, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryHistoryExcludesMigrationAAfterConfigurationOrMigrationBBecomesActive(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC)
+	appliedB := now.Add(-time.Minute)
+	rollbackB := now.Add(7 * 24 * time.Hour)
+	const expectedHistoryQuery = "SELECT j.id, j.status, j.created_at, j.applied_at, j.expires_at, j.rollback_expires_at, j.definition_json FROM migration_jobs AS j LEFT JOIN account_active_config AS active ON active.account_id = j.account_id LEFT JOIN account_config_versions AS current ON current.account_id = j.account_id AND current.id = active.config_version_id LEFT JOIN account_runtime_state AS current_state ON current_state.account_id = j.account_id AND current_state.config_version_id = active.config_version_id WHERE j.account_id = ? AND ((j.status = 'pending' AND j.expires_at > ? AND COALESCE(current.number, 0) = j.base_config_version_number AND COALESCE(current_state.revision, 0) = j.base_state_revision) OR (j.status = 'applied' AND j.rollback_expires_at > ? AND active.config_version_id = j.applied_config_version_id)) ORDER BY j.created_at DESC, j.id DESC LIMIT ?"
+	mock.ExpectQuery(regexp.QuoteMeta(expectedHistoryQuery)).WithArgs(int64(7), now, now, historyLimit).WillReturnRows(
+		sqlmock.NewRows([]string{"id", "status", "created_at", "applied_at", "expires_at", "rollback_expires_at", "definition_json"}).
+			AddRow(22, jobApplied, appliedB.Add(-time.Minute), appliedB, nil, rollbackB, []byte(`{"attributes":[{"id":"score","name":"Score"}]}`)),
+	)
+
+	jobs, err := NewService(NewRepository(database), func() time.Time { return now }).History(context.Background(), 7)
+	if err != nil || len(jobs) != 1 || jobs[0].ID != 22 {
+		t.Fatalf("History() jobs=%#v error=%v, want only current migration B", jobs, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -485,8 +509,8 @@ func TestServiceHistoryRejectsAnExpiredPendingRowFromRepository(t *testing.T) {
 	}
 	defer database.Close()
 	now := time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC)
-	const expectedHistoryQuery = "SELECT id, status, created_at, applied_at, expires_at, rollback_expires_at FROM migration_jobs WHERE account_id = ? AND ((status = 'pending' AND expires_at > ?) OR (status = 'applied' AND rollback_expires_at > ?)) ORDER BY created_at DESC, id DESC LIMIT ?"
-	mock.ExpectQuery(regexp.QuoteMeta(expectedHistoryQuery)).WithArgs(int64(7), now, now, historyLimit).WillReturnRows(sqlmock.NewRows([]string{"id", "status", "created_at", "applied_at", "expires_at", "rollback_expires_at"}).AddRow(9, jobPending, now.Add(-time.Hour), nil, now, nil))
+	const expectedHistoryQuery = "SELECT j.id, j.status, j.created_at, j.applied_at, j.expires_at, j.rollback_expires_at, j.definition_json FROM migration_jobs AS j LEFT JOIN account_active_config AS active ON active.account_id = j.account_id LEFT JOIN account_config_versions AS current ON current.account_id = j.account_id AND current.id = active.config_version_id LEFT JOIN account_runtime_state AS current_state ON current_state.account_id = j.account_id AND current_state.config_version_id = active.config_version_id WHERE j.account_id = ? AND ((j.status = 'pending' AND j.expires_at > ? AND COALESCE(current.number, 0) = j.base_config_version_number AND COALESCE(current_state.revision, 0) = j.base_state_revision) OR (j.status = 'applied' AND j.rollback_expires_at > ? AND active.config_version_id = j.applied_config_version_id)) ORDER BY j.created_at DESC, j.id DESC LIMIT ?"
+	mock.ExpectQuery(regexp.QuoteMeta(expectedHistoryQuery)).WithArgs(int64(7), now, now, historyLimit).WillReturnRows(sqlmock.NewRows([]string{"id", "status", "created_at", "applied_at", "expires_at", "rollback_expires_at", "definition_json"}).AddRow(9, jobPending, now.Add(-time.Hour), nil, now, nil, []byte(`{}`)))
 	if _, err := NewService(NewRepository(database), func() time.Time { return now }).History(context.Background(), 7); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("History() error=%v, want unavailable", err)
 	}
@@ -500,21 +524,21 @@ func TestServiceOBSOutputsUseAppliedAccountOwnedCandidateAndSkipEmptyScenes(t *t
 	definition.Attributes = []configuration.AttributeDefinition{{ID: "score", Name: "积分"}, {ID: "bonus", Name: "加成"}}
 	definition.DisplayScenes = []gameplay.DisplayScene{{ID: "main", Name: "主场景", AttributeIDs: []string{"score", "bonus"}}, {ID: "empty", Name: "空场景"}}
 	definition.GiftTargetPanels = []configuration.GiftTargetPanelDefinition{{ID: "goals", Name: "礼物目标"}}
-	repository := &recordingOBSOutputRepository{stored: storedAppliedDefinition{ID: 19, AccountID: 7, Status: jobApplied, Definition: definition}}
+	repository := &recordingOBSOutputRepository{stored: storedAppliedDefinition{ID: 19, AccountID: 7, ConfigVersionID: 88, Status: jobApplied, Definition: definition}}
 	service := NewService(repository, time.Now)
 
-	outputs, err := service.OBSOutputs(context.Background(), 7, 19)
+	outputs, expectedConfigVersionID, err := service.OBSOutputs(context.Background(), 7, 19)
 	want := []OBSOutput{
 		{Selector: obsselector.Selector{Kind: "attribute", ID: "bonus"}, Name: "加成"},
 		{Selector: obsselector.Selector{Kind: "attribute", ID: "score"}, Name: "积分"},
 		{Selector: obsselector.Selector{Kind: "gift-target", ID: "goals"}, Name: "礼物目标"},
 		{Selector: obsselector.Selector{Kind: "scene", ID: "main", Attributes: []string{"score", "bonus"}}, Name: "主场景"},
 	}
-	if err != nil || !reflect.DeepEqual(outputs, want) {
-		t.Fatalf("OBSOutputs()=%#v error=%v, want %#v", outputs, err, want)
+	if err != nil || expectedConfigVersionID != 88 || !reflect.DeepEqual(outputs, want) {
+		t.Fatalf("OBSOutputs()=%#v expectedConfigVersionID=%d error=%v, want %#v", outputs, expectedConfigVersionID, err, want)
 	}
 	repository.stored.AccountID = 8
-	if _, err := service.OBSOutputs(context.Background(), 7, 19); !errors.Is(err, ErrUnavailable) {
+	if _, _, err := service.OBSOutputs(context.Background(), 7, 19); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("OBSOutputs() ownership error=%v, want unavailable", err)
 	}
 }
@@ -527,11 +551,34 @@ func TestSQLRepositoryLoadsAppliedOutputDefinitionByAccountAndJob(t *testing.T) 
 	defer database.Close()
 	definition := emptyDefinition()
 	definition.Attributes = []configuration.AttributeDefinition{{ID: "score", Name: "积分"}}
-	mock.ExpectQuery(regexp.QuoteMeta(appliedDefinitionQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"id", "account_id", "status", "definition_json"}).AddRow(19, 7, jobApplied, mustJSON(t, definition)))
+	mock.ExpectQuery(regexp.QuoteMeta(appliedDefinitionQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"id", "account_id", "status", "applied_config_version_id", "definition_json"}).AddRow(19, 7, jobApplied, 88, mustJSON(t, definition)))
 
 	stored, err := NewRepository(database).(obsOutputRepository).LoadAppliedDefinition(context.Background(), 7, 19)
-	if err != nil || stored.ID != 19 || stored.AccountID != 7 || stored.Status != jobApplied || len(stored.Definition.Attributes) != 1 || stored.Definition.Attributes[0].ID != "score" {
+	if err != nil || stored.ID != 19 || stored.AccountID != 7 || stored.ConfigVersionID != 88 || stored.Status != jobApplied || len(stored.Definition.Attributes) != 1 || stored.Definition.Attributes[0].ID != "score" {
 		t.Fatalf("LoadAppliedDefinition()=%#v error=%v", stored, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceOBSOutputsCarryTheStillActiveAppliedConfigVersion(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	definition := emptyDefinition()
+	definition.Attributes = []configuration.AttributeDefinition{{ID: "score", Name: "积分"}}
+	const expectedQuery = "SELECT j.id, j.account_id, j.status, j.applied_config_version_id, v.definition_json FROM migration_jobs AS j JOIN account_active_config AS active ON active.account_id = j.account_id AND active.config_version_id = j.applied_config_version_id JOIN account_config_versions AS v ON v.account_id = j.account_id AND v.id = j.applied_config_version_id WHERE j.id = ? AND j.account_id = ?"
+	mock.ExpectQuery(regexp.QuoteMeta(expectedQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(
+		sqlmock.NewRows([]string{"id", "account_id", "status", "applied_config_version_id", "definition_json"}).AddRow(19, 7, jobApplied, 88, mustJSON(t, definition)),
+	)
+
+	service := NewService(NewRepository(database), time.Now)
+	outputs, expectedConfigVersionID, err := service.OBSOutputs(context.Background(), 7, 19)
+	if err != nil || expectedConfigVersionID != 88 || len(outputs) != 1 || outputs[0].Selector.ID != "score" {
+		t.Fatalf("OBSOutputs() outputs=%#v expectedConfigVersionID=%d error=%v", outputs, expectedConfigVersionID, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -848,6 +895,39 @@ func TestPreviewReusesPendingCandidateProjectionWithoutReinterpretingSelection(t
 	}
 	if repository.applyCalls != 0 || repository.loadJobID != 21 {
 		t.Fatalf("pending reuse writes=%d loadJob=%d", repository.applyCalls, repository.loadJobID)
+	}
+}
+
+func TestPendingProjectionSeparatesUnsupportedBlindBoxFromSupportedGeneralSettings(t *testing.T) {
+	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	definition, runtime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "score", Name: "Score"}}, map[string]float64{"score": 8})
+	definition.GeneralSettings = &configuration.GeneralSettings{ConfigurationMode: "simple"}
+	definition.BlindBoxDisplay = &configuration.DisplayAppearance{ThemeID: "kawaii", FontSize: 32, AccentColor: "#cc55ff", Align: "center", PanelOpacity: 75}
+	definition, runtime, _, hash, err := freshCanonical(definition, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition.MigrationHash = hex.EncodeToString(hash[:])
+	service := NewService(&recordingPreviewRepository{}, func() time.Time { return now })
+
+	preview, err := service.pendingProjection(7, storedComposition{
+		ID: 22, AccountID: 7, Status: jobPending, ExpiresAt: now.Add(time.Hour),
+		Imported: migrationEnvelope(definition, runtime),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.GeneralSettingsCompatibility.Status != CompatibilityComplete {
+		t.Fatalf("general settings compatibility = %#v", preview.GeneralSettingsCompatibility)
+	}
+	if preview.BlindBoxDisplayCompatibility == nil || preview.BlindBoxDisplayCompatibility.Status != CompatibilityPartial || !reflect.DeepEqual(preview.BlindBoxDisplayCompatibility.ReasonCodes, []string{"blind_box_display_unsupported"}) {
+		t.Fatalf("blind-box compatibility = %#v", preview.BlindBoxDisplayCompatibility)
+	}
+	if !preview.Selection.IncludeGeneralSettings {
+		t.Fatal("supported general settings must remain selected")
+	}
+	if !preview.CanConfirm || len(preview.Units) != 1 || !preview.Units[0].Selected {
+		t.Fatalf("supported gameplay units should remain confirmable: %#v", preview)
 	}
 }
 
@@ -1340,6 +1420,29 @@ func TestSQLRepositoryGetCommitsExpiredPreviewBeforeReturningStableStatus(t *tes
 	job, err := NewRepository(database).(lifecycleRepository).Get(context.Background(), 7, 19)
 	if err != nil || job.Status != jobExpired {
 		t.Fatalf("Get() job=%#v err=%v", job, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryGetRejectsPendingJobAfterActiveConfigurationChanges(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 29, 9, 0, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(99, 4, 7, []byte(`{"attributeValues":{"score":1}}`)))
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(jobPending, now.Add(time.Hour), 0, nil, nil, nil, nil, []byte(`{"attributes":[]}`), []byte(`{"attributeValues":{}}`), nil))
+	expectPreviewNow(mock, now)
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleBaseQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"base_config_version_number", "base_state_revision"}).AddRow(3, 6))
+	mock.ExpectRollback()
+
+	_, err = NewRepository(database).(lifecycleRepository).Get(context.Background(), 7, 19)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("Get() error=%v, want conflict", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

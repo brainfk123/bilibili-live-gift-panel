@@ -32,7 +32,7 @@ type migrationHTTPService interface {
 	Apply(context.Context, int64, int64, SelectionCommand) (Job, error)
 	Cancel(context.Context, int64, int64) (Job, error)
 	Rollback(context.Context, int64, int64) (Job, error)
-	OBSOutputs(context.Context, int64, int64) ([]OBSOutput, error)
+	OBSOutputs(context.Context, int64, int64) ([]OBSOutput, int64, error)
 }
 
 type accountProofConsumer interface {
@@ -47,7 +47,7 @@ type HTTPOptions struct {
 	ClientIP      identity.ClientIPResolver
 	Authenticate  func(http.Handler) http.Handler
 	AccountID     func(context.Context) (int64, bool)
-	IssueOBS      func(context.Context, int64) (string, error)
+	IssueOBS      func(context.Context, int64, int64, int64) (string, error)
 }
 
 type HTTPHandler struct {
@@ -58,11 +58,11 @@ type HTTPHandler struct {
 	clientIP                 identity.ClientIPResolver
 	authenticate             func(http.Handler) http.Handler
 	accountID                func(context.Context) (int64, bool)
-	issueOBS                 func(context.Context, int64) (string, error)
+	issueOBS                 func(context.Context, int64, int64, int64) (string, error)
 	mux                      *http.ServeMux
 }
 
-func (handler *HTTPHandler) SetOBSIssuer(issue func(context.Context, int64) (string, error)) error {
+func (handler *HTTPHandler) SetOBSIssuer(issue func(context.Context, int64, int64, int64) (string, error)) error {
 	if handler == nil || issue == nil {
 		return ErrInvalidInput
 	}
@@ -192,6 +192,7 @@ func (handler *HTTPHandler) get(response http.ResponseWriter, request *http.Requ
 			handler.writeServiceError(response, err)
 			return
 		}
+		job = handler.markOBSReissueState(request.Context(), accountID, jobID, job)
 		writeMigrationJSON(response, http.StatusOK, job)
 	})
 }
@@ -225,6 +226,7 @@ func (handler *HTTPHandler) apply(response http.ResponseWriter, request *http.Re
 			return
 		}
 		if job.Status == jobPending || job.Status == jobApplied {
+			job = handler.markOBSReissueState(request.Context(), accountID, jobID, job)
 			writeMigrationJSON(response, http.StatusOK, job)
 			return
 		}
@@ -283,12 +285,21 @@ func (handler *HTTPHandler) reissueOBSLinks(response http.ResponseWriter, reques
 			handler.writeServiceError(response, err)
 			return
 		}
+		prepared, expectedConfigVersionID, err := handler.prepareMigrationOBS(request.Context(), accountID, jobID)
+		if err != nil {
+			handler.writeServiceError(response, err)
+			return
+		}
+		if len(prepared) == 0 || handler.issueOBS == nil {
+			handler.writeServiceError(response, ErrUnavailable)
+			return
+		}
 		if err := handler.proofConsumer.ConsumeAccountProof(request.Context(), body.ChallengeID, accountID, 15*time.Minute); err != nil {
 			handler.writeProofError(response, err)
 			return
 		}
-		job = handler.attachOBSLinks(request.Context(), accountID, jobID, job)
-		if job.OBSReissueRequired {
+		job, err = handler.issuePreparedOBSLinks(request.Context(), accountID, jobID, expectedConfigVersionID, prepared, job)
+		if err != nil {
 			handler.writeServiceError(response, ErrUnavailable)
 			return
 		}
@@ -335,39 +346,66 @@ func (handler *HTTPHandler) prepareOBSOutputs(outputs []OBSOutput) ([]preparedOB
 	return prepared, true
 }
 
-func (handler *HTTPHandler) attachOBSLinks(ctx context.Context, accountID, jobID int64, job Job) Job {
-	outputs, err := handler.service.OBSOutputs(ctx, accountID, jobID)
-	if err != nil || len(outputs) == 0 {
-		if err != nil {
-			job.OBSReissueRequired = true
-		}
-		return job
+func (handler *HTTPHandler) prepareMigrationOBS(ctx context.Context, accountID, jobID int64) ([]preparedOBSOutput, int64, error) {
+	outputs, expectedConfigVersionID, err := handler.service.OBSOutputs(ctx, accountID, jobID)
+	if err != nil {
+		return nil, 0, err
 	}
 	prepared, valid := handler.prepareOBSOutputs(outputs)
-	if !valid {
-		job.OBSReissueRequired = true
+	if !valid || expectedConfigVersionID <= 0 {
+		return nil, 0, ErrUnavailable
+	}
+	return prepared, expectedConfigVersionID, nil
+}
+
+func (handler *HTTPHandler) markOBSReissueState(ctx context.Context, accountID, jobID int64, job Job) Job {
+	if job.Status != jobApplied {
 		return job
 	}
-	if handler.issueOBS == nil {
+	prepared, _, err := handler.prepareMigrationOBS(ctx, accountID, jobID)
+	if err == nil && len(prepared) != 0 {
+		job.OBSReissueAvailable = true
 		job.OBSReissueRequired = true
-		return job
 	}
-	base, err := handler.issueOBS(ctx, accountID)
+	return job
+}
+
+func (handler *HTTPHandler) attachOBSLinks(ctx context.Context, accountID, jobID int64, job Job) Job {
+	prepared, expectedConfigVersionID, err := handler.prepareMigrationOBS(ctx, accountID, jobID)
 	if err != nil {
 		job.OBSReissueRequired = true
 		return job
 	}
+	if len(prepared) == 0 {
+		return job
+	}
+	job.OBSReissueAvailable = true
+	if handler.issueOBS == nil {
+		job.OBSReissueRequired = true
+		return job
+	}
+	job, _ = handler.issuePreparedOBSLinks(ctx, accountID, jobID, expectedConfigVersionID, prepared, job)
+	return job
+}
+
+func (handler *HTTPHandler) issuePreparedOBSLinks(ctx context.Context, accountID, jobID, expectedConfigVersionID int64, prepared []preparedOBSOutput, job Job) (Job, error) {
+	job.OBSReissueAvailable = len(prepared) != 0
+	base, err := handler.issueOBS(ctx, accountID, jobID, expectedConfigVersionID)
+	if err != nil {
+		job.OBSReissueRequired = true
+		return job, err
+	}
 	parsed, err := url.Parse(base)
 	if err != nil || parsed == nil {
 		job.OBSReissueRequired = true
-		return job
+		return job, ErrUnavailable
 	}
 	fragment, fragmentErr := url.ParseQuery(parsed.Fragment)
 	tokens := fragment["token"]
 	origin := (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host}).String()
 	if parsed.Scheme != "https" || origin != handler.allowedOrigin || parsed.User != nil || parsed.RawPath != "" || parsed.RawQuery != "" || !obsCredentialPathPattern.MatchString(parsed.Path) || fragmentErr != nil || len(fragment) != 1 || len(tokens) != 1 || tokens[0] == "" || len(tokens[0]) > maxOBSCredentialTokenLength {
 		job.OBSReissueRequired = true
-		return job
+		return job, ErrUnavailable
 	}
 	links := make([]OBSLink, 0, len(prepared))
 	for _, output := range prepared {
@@ -379,12 +417,12 @@ func (handler *HTTPHandler) attachOBSLinks(ctx context.Context, accountID, jobID
 		if len(candidateURL) > maxOBSLinkURLLength || len(candidate.RequestURI()) > maxOBSRequestTargetLength {
 			job.OBSReissueRequired = true
 			job.OBSLinks = nil
-			return job
+			return job, ErrUnavailable
 		}
 		links = append(links, OBSLink{OutputID: output.selector, Name: output.name, URL: candidateURL})
 	}
 	job.OBSLinks = links
-	return job
+	return job, nil
 }
 
 func (handler *HTTPHandler) cancel(response http.ResponseWriter, request *http.Request) {

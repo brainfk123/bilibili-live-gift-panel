@@ -199,6 +199,9 @@ func TestEventsStreamPublisherWithoutOwningRuntimeLease(t *testing.T) {
 		acquired: make(chan struct{}),
 		status:   hostedruntime.Status{State: hostedruntime.StateActive, SessionID: 70},
 		snapshot: configuration.RuntimeState{AttributeValues: map[string]float64{"hp": 10}},
+		presentation: &configuration.DisplayPresentation{AttributeAppearances: map[string]configuration.DisplayAppearance{
+			"hp": {ThemeID: "neon", FontSize: 40, AccentColor: "#ff3366", ShowConnection: true, Align: "center", PanelOpacity: 80},
+		}},
 	}
 	service := &fakeHTTPService{authenticatedAccountID: 41}
 	response := newStreamingRecorder()
@@ -224,6 +227,9 @@ func TestEventsStreamPublisherWithoutOwningRuntimeLease(t *testing.T) {
 	body := response.String()
 	if !strings.Contains(body, "event: display\ndata: {\"accountId\":41,\"liveSessionId\":70,\"revision\":0") || !strings.Contains(body, "\"hp\":10") {
 		t.Fatalf("missing initial display snapshot: %s", body)
+	}
+	if !strings.Contains(body, `"presentation":{"attributeAppearances":{"hp":{"themeId":"neon","fontSize":40,"accentColor":"#ff3366","showConnection":true,"align":"center","panelOpacity":80}}}`) {
+		t.Fatalf("initial display omitted active appearance presentation: %s", body)
 	}
 	if !strings.Contains(body, "event: display\ndata: {\"accountId\":41,\"liveSessionId\":70,\"revision\":2") || !strings.Contains(body, "\"hp\":12") {
 		t.Fatalf("missing increment: %s", body)
@@ -758,6 +764,7 @@ type fakeOBSRuntime struct {
 	lease             fakeOBSLease
 	status            hostedruntime.Status
 	snapshot          configuration.RuntimeState
+	presentation      *configuration.DisplayPresentation
 	statusStarted     chan struct{}
 	statusRelease     chan struct{}
 	statusStartedOnce sync.Once
@@ -793,6 +800,12 @@ func (runtimeService *fakeOBSRuntime) Snapshot(context.Context, int64) (configur
 	runtimeService.snapshotMu.Lock()
 	defer runtimeService.snapshotMu.Unlock()
 	return runtimeService.snapshot, nil
+}
+
+func (runtimeService *fakeOBSRuntime) DisplayState(context.Context, int64) (configuration.RuntimeState, *configuration.DisplayPresentation, error) {
+	runtimeService.snapshotMu.Lock()
+	defer runtimeService.snapshotMu.Unlock()
+	return runtimeService.snapshot, runtimeService.presentation, nil
 }
 
 func (runtimeService *fakeOBSRuntime) SetStatus(status hostedruntime.Status) {

@@ -37,12 +37,13 @@ const (
 // Job is the privacy-safe lifecycle projection returned to migration callers.
 // It contains neither raw uploads nor normalized configuration/runtime data.
 type Job struct {
-	ID                 int64     `json:"id"`
-	Status             string    `json:"status"`
-	ExpiresAt          time.Time `json:"expiresAt,omitempty"`
-	RollbackExpiresAt  time.Time `json:"rollbackExpiresAt,omitempty"`
-	OBSLinks           []OBSLink `json:"obsLinks,omitempty"`
-	OBSReissueRequired bool      `json:"obsReissueRequired,omitempty"`
+	ID                  int64     `json:"id"`
+	Status              string    `json:"status"`
+	ExpiresAt           time.Time `json:"expiresAt,omitempty"`
+	RollbackExpiresAt   time.Time `json:"rollbackExpiresAt,omitempty"`
+	OBSLinks            []OBSLink `json:"obsLinks,omitempty"`
+	OBSReissueRequired  bool      `json:"obsReissueRequired,omitempty"`
+	OBSReissueAvailable bool      `json:"obsReissueAvailable,omitempty"`
 }
 
 type OBSLink struct {
@@ -58,12 +59,13 @@ type OBSOutput struct {
 // HistoryJob is the bounded, read-only lifecycle projection. Optional times
 // are pointers so absent database values never serialize as zero instants.
 type HistoryJob struct {
-	ID                int64      `json:"id"`
-	Status            string     `json:"status"`
-	CreatedAt         time.Time  `json:"createdAt"`
-	AppliedAt         *time.Time `json:"appliedAt,omitempty"`
-	ExpiresAt         *time.Time `json:"expiresAt,omitempty"`
-	RollbackExpiresAt *time.Time `json:"rollbackExpiresAt,omitempty"`
+	ID                  int64      `json:"id"`
+	Status              string     `json:"status"`
+	CreatedAt           time.Time  `json:"createdAt"`
+	AppliedAt           *time.Time `json:"appliedAt,omitempty"`
+	ExpiresAt           *time.Time `json:"expiresAt,omitempty"`
+	RollbackExpiresAt   *time.Time `json:"rollbackExpiresAt,omitempty"`
+	OBSReissueAvailable bool       `json:"obsReissueAvailable,omitempty"`
 }
 
 // OwnerFence is the exact cross-process runtime ownership claim authorized to
@@ -102,32 +104,35 @@ type storedJob struct {
 }
 
 type storedHistoryJob struct {
-	ID, AccountID     int64
-	Status            string
-	CreatedAt         time.Time
-	AppliedAt         sql.NullTime
-	ExpiresAt         sql.NullTime
-	RollbackExpiresAt sql.NullTime
+	ID, AccountID       int64
+	Status              string
+	CreatedAt           time.Time
+	AppliedAt           sql.NullTime
+	ExpiresAt           sql.NullTime
+	RollbackExpiresAt   sql.NullTime
+	OBSReissueAvailable bool
 }
 
 // Preview deliberately contains no account ID, normalized configuration,
 // runtime, raw upload, or canonical JSON.
 type Preview struct {
-	ID              int64               `json:"id"`
-	ExpiresAt       time.Time           `json:"expiresAt"`
-	Reused          bool                `json:"reused"`
-	Counts          Counts              `json:"counts"`
-	Warnings        []string            `json:"warnings,omitempty"`
-	Ignored         []string            `json:"ignored,omitempty"`
-	RoomSuggestion  string              `json:"roomSuggestion,omitempty"`
-	Source          Source              `json:"source"`
-	Units           []SelectionUnit     `json:"units,omitempty"`
-	Groups          []GameplayGroup     `json:"groups,omitempty"`
-	Conflicts       []SelectionConflict `json:"conflicts,omitempty"`
-	Selection       SelectionCommand    `json:"selection"`
-	GeneralSettings GeneralSettings     `json:"generalSettings"`
-	CanConfirm      bool                `json:"canConfirm"`
-	Hash            [sha256.Size]byte   `json:"-"`
+	ID                           int64               `json:"id"`
+	ExpiresAt                    time.Time           `json:"expiresAt"`
+	Reused                       bool                `json:"reused"`
+	Counts                       Counts              `json:"counts"`
+	Warnings                     []string            `json:"warnings,omitempty"`
+	Ignored                      []string            `json:"ignored,omitempty"`
+	RoomSuggestion               string              `json:"roomSuggestion,omitempty"`
+	Source                       Source              `json:"source"`
+	Units                        []SelectionUnit     `json:"units,omitempty"`
+	Groups                       []GameplayGroup     `json:"groups,omitempty"`
+	Conflicts                    []SelectionConflict `json:"conflicts,omitempty"`
+	Selection                    SelectionCommand    `json:"selection"`
+	GeneralSettings              GeneralSettings     `json:"generalSettings"`
+	GeneralSettingsCompatibility Compatibility       `json:"generalSettingsCompatibility"`
+	BlindBoxDisplayCompatibility *Compatibility      `json:"blindBoxDisplayCompatibility,omitempty"`
+	CanConfirm                   bool                `json:"canConfirm"`
+	Hash                         [sha256.Size]byte   `json:"-"`
 }
 
 type previewCommand struct {
@@ -175,9 +180,9 @@ type storedComposition struct {
 }
 
 type storedAppliedDefinition struct {
-	ID, AccountID int64
-	Status        string
-	Definition    configuration.Definition
+	ID, AccountID, ConfigVersionID int64
+	Status                         string
+	Definition                     configuration.Definition
 }
 
 // Repository is intentionally narrow: the migration package owns preview
@@ -291,7 +296,7 @@ func (service *Service) Preview(ctx context.Context, accountID int64, envelope E
 	if stored.ID <= 0 || stored.AccountID != accountID || stored.ExpiresAt.IsZero() {
 		return Preview{}, ErrUnavailable
 	}
-	preview := Preview{ID: stored.ID, ExpiresAt: stored.ExpiresAt, Reused: stored.Reused, Counts: stored.Report.Counts, Warnings: append([]string(nil), stored.Report.Warnings...), Ignored: append([]string(nil), stored.Report.Ignored...), RoomSuggestion: stored.RoomSuggestion, Source: stored.Source, Hash: stored.Hash}
+	preview := Preview{ID: stored.ID, ExpiresAt: stored.ExpiresAt, Reused: stored.Reused, Counts: stored.Report.Counts, Warnings: append([]string(nil), stored.Report.Warnings...), Ignored: append([]string(nil), stored.Report.Ignored...), RoomSuggestion: stored.RoomSuggestion, Source: stored.Source, GeneralSettingsCompatibility: AssessGeneralSettingsCompatibility(definition, service.capabilities), BlindBoxDisplayCompatibility: AssessBlindBoxDisplayCompatibility(definition, service.capabilities), Hash: stored.Hash}
 	if repository, ok := service.repository.(compositionRepository); ok && stored.Status == jobPending {
 		composition, loadErr := repository.LoadComposition(ctx, accountID, stored.ID)
 		if loadErr != nil {
@@ -324,7 +329,8 @@ func (service *Service) pendingProjection(accountID int64, composition storedCom
 	}
 	units := DeriveUnits(composition.Imported.Definition, composition.Imported.Runtime)
 	selectedUnits := make([]SelectionUnit, len(units))
-	selection := SelectionCommand{UnitIDs: make([]string, len(units)), IncludeGeneralSettings: composition.Imported.Definition.GeneralSettings != nil, IncludeRoomSuggestion: composition.KeepRoomSuggestion}
+	generalCompatibility := AssessGeneralSettingsCompatibility(composition.Imported.Definition, service.capabilities)
+	selection := SelectionCommand{UnitIDs: make([]string, len(units)), IncludeGeneralSettings: composition.Imported.Definition.GeneralSettings != nil && generalCompatibility.Status == CompatibilityComplete, IncludeRoomSuggestion: composition.KeepRoomSuggestion}
 	for index, unit := range units {
 		selection.UnitIDs[index] = unit.ID
 		selectedUnits[index] = SelectionUnit{GameplayUnit: unit, Compatibility: AssessCompatibility(unit, service.capabilities), Selected: true}
@@ -335,7 +341,7 @@ func (service *Service) pendingProjection(accountID int64, composition storedCom
 	}
 	preview := Preview{
 		ID: composition.ID, ExpiresAt: composition.ExpiresAt, Counts: countDefinition(composition.Imported.Definition), RoomSuggestion: composition.Imported.RoomSuggestion,
-		Source: composition.Imported.Source, Units: selectedUnits, Groups: ConnectedGroups(units), Selection: selection, GeneralSettings: settings, CanConfirm: true,
+		Source: composition.Imported.Source, Units: selectedUnits, Groups: ConnectedGroups(units), Selection: selection, GeneralSettings: settings, GeneralSettingsCompatibility: generalCompatibility, BlindBoxDisplayCompatibility: AssessBlindBoxDisplayCompatibility(composition.Imported.Definition, service.capabilities), CanConfirm: true,
 	}
 	if rawHash, err := hex.DecodeString(composition.Imported.Definition.MigrationHash); err == nil && len(rawHash) == sha256.Size {
 		copy(preview.Hash[:], rawHash)
@@ -361,7 +367,7 @@ func (service *Service) Select(ctx context.Context, accountID, jobID int64, sele
 		ID: composition.ID, ExpiresAt: composition.ExpiresAt, RoomSuggestion: composition.Imported.RoomSuggestion, Source: composition.Imported.Source,
 		Counts: composition.Imported.Report.Counts, Warnings: append([]string(nil), composition.Imported.Report.Warnings...), Ignored: append([]string(nil), composition.Imported.Report.Ignored...),
 		Units: units, Groups: append([]GameplayGroup(nil), composition.Imported.Groups...), Conflicts: candidate.Conflicts,
-		Selection: cloneSelection(selection), GeneralSettings: composition.Imported.GeneralSettings, CanConfirm: candidate.Ready,
+		Selection: cloneSelection(selection), GeneralSettings: composition.Imported.GeneralSettings, GeneralSettingsCompatibility: AssessGeneralSettingsCompatibility(composition.Imported.Definition, service.capabilities), BlindBoxDisplayCompatibility: AssessBlindBoxDisplayCompatibility(composition.Imported.Definition, service.capabilities), CanConfirm: candidate.Ready,
 	}, nil
 }
 
@@ -700,30 +706,33 @@ func (service *Service) History(ctx context.Context, accountID int64) ([]History
 		if item.ID <= 0 || item.AccountID != accountID || item.CreatedAt.IsZero() || (item.Status == jobPending && (!item.ExpiresAt.Valid || !item.ExpiresAt.Time.After(now))) || (item.Status != jobPending && (item.Status != jobApplied || !item.RollbackExpiresAt.Valid || !item.RollbackExpiresAt.Time.After(now))) {
 			return nil, ErrUnavailable
 		}
-		result[index] = HistoryJob{ID: item.ID, Status: item.Status, CreatedAt: item.CreatedAt.UTC(), AppliedAt: nullableTime(item.AppliedAt), ExpiresAt: nullableTime(item.ExpiresAt), RollbackExpiresAt: nullableTime(item.RollbackExpiresAt)}
+		result[index] = HistoryJob{ID: item.ID, Status: item.Status, CreatedAt: item.CreatedAt.UTC(), AppliedAt: nullableTime(item.AppliedAt), ExpiresAt: nullableTime(item.ExpiresAt), RollbackExpiresAt: nullableTime(item.RollbackExpiresAt), OBSReissueAvailable: item.OBSReissueAvailable}
 	}
 	return result, nil
 }
 
-func (service *Service) OBSOutputs(ctx context.Context, accountID, jobID int64) ([]OBSOutput, error) {
+func (service *Service) OBSOutputs(ctx context.Context, accountID, jobID int64) ([]OBSOutput, int64, error) {
 	if service == nil || accountID <= 0 || jobID <= 0 {
-		return nil, ErrInvalidInput
+		return nil, 0, ErrInvalidInput
 	}
 	repository, ok := service.repository.(obsOutputRepository)
 	if !ok {
-		return nil, ErrUnavailable
+		return nil, 0, ErrUnavailable
 	}
 	stored, err := repository.LoadAppliedDefinition(ctx, accountID, jobID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	if stored.ID != jobID || stored.AccountID != accountID {
-		return nil, ErrUnavailable
+	if stored.ID != jobID || stored.AccountID != accountID || stored.ConfigVersionID <= 0 {
+		return nil, 0, ErrUnavailable
 	}
 	if stored.Status != jobApplied {
-		return nil, ErrConflict
+		return nil, 0, ErrConflict
 	}
-	definition := stored.Definition
+	return obsOutputsForDefinition(stored.Definition), stored.ConfigVersionID, nil
+}
+
+func obsOutputsForDefinition(definition configuration.Definition) []OBSOutput {
 	result := make([]OBSOutput, 0, len(definition.Attributes)+len(definition.DisplayScenes)+len(definition.GiftTargetPanels))
 	for _, item := range definition.Attributes {
 		result = append(result, OBSOutput{Selector: obsselector.Selector{Kind: "attribute", ID: item.ID}, Name: item.Name})
@@ -743,7 +752,7 @@ func (service *Service) OBSOutputs(ctx context.Context, accountID, jobID int64) 
 		}
 		return result[i].Selector.ID < result[j].Selector.ID
 	})
-	return result, nil
+	return result
 }
 
 func nullableTime(value sql.NullTime) *time.Time {
@@ -983,7 +992,7 @@ func decodeStoredPreview(id, accountID int64, status string, expiry time.Time, r
 }
 
 const compositionQuery = "SELECT j.status, j.expires_at, j.keep_room_suggestion, j.definition_json, j.runtime_json, j.room_suggestion, j.source_app_version, j.source_schema_version, j.report_json, v.definition_json, s.runtime_json FROM migration_jobs AS j LEFT JOIN account_active_config AS active ON active.account_id = j.account_id LEFT JOIN account_config_versions AS v ON v.account_id = active.account_id AND v.id = active.config_version_id LEFT JOIN account_runtime_state AS s ON s.account_id = j.account_id AND s.config_version_id = active.config_version_id WHERE j.id = ? AND j.account_id = ?"
-const appliedDefinitionQuery = "SELECT j.id, j.account_id, j.status, v.definition_json FROM migration_jobs AS j JOIN account_config_versions AS v ON v.account_id = j.account_id AND v.id = j.applied_config_version_id WHERE j.id = ? AND j.account_id = ?"
+const appliedDefinitionQuery = "SELECT j.id, j.account_id, j.status, j.applied_config_version_id, v.definition_json FROM migration_jobs AS j JOIN account_active_config AS active ON active.account_id = j.account_id AND active.config_version_id = j.applied_config_version_id JOIN account_config_versions AS v ON v.account_id = j.account_id AND v.id = j.applied_config_version_id WHERE j.id = ? AND j.account_id = ?"
 const rollbackCandidateQuery = "SELECT j.status, v.definition_json, j.rollback_runtime_json FROM migration_jobs AS j JOIN account_config_versions AS v ON v.account_id = j.account_id AND v.id = j.rollback_config_version_id WHERE j.id = ? AND j.account_id = ?"
 
 func (repository *sqlRepository) LoadComposition(ctx context.Context, accountID, jobID int64) (storedComposition, error) {
@@ -1056,11 +1065,11 @@ func (repository *sqlRepository) LoadAppliedDefinition(ctx context.Context, acco
 	}
 	var result storedAppliedDefinition
 	var definitionJSON []byte
-	err := repository.db.QueryRowContext(ctx, appliedDefinitionQuery, jobID, accountID).Scan(&result.ID, &result.AccountID, &result.Status, &definitionJSON)
+	err := repository.db.QueryRowContext(ctx, appliedDefinitionQuery, jobID, accountID).Scan(&result.ID, &result.AccountID, &result.Status, &result.ConfigVersionID, &definitionJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storedAppliedDefinition{}, ErrNotFound
 	}
-	if err != nil || result.ID != jobID || result.AccountID != accountID || result.Status != jobApplied || len(definitionJSON) == 0 || json.Unmarshal(definitionJSON, &result.Definition) != nil {
+	if err != nil || result.ID != jobID || result.AccountID != accountID || result.Status != jobApplied || result.ConfigVersionID <= 0 || len(definitionJSON) == 0 || json.Unmarshal(definitionJSON, &result.Definition) != nil {
 		return storedAppliedDefinition{}, ErrUnavailable
 	}
 	result.Definition.MigrationHash = ""
@@ -1131,7 +1140,7 @@ type lockedJob struct {
 	room             sql.NullString
 }
 
-const historyQuery = "SELECT id, status, created_at, applied_at, expires_at, rollback_expires_at FROM migration_jobs WHERE account_id = ? AND ((status = 'pending' AND expires_at > ?) OR (status = 'applied' AND rollback_expires_at > ?)) ORDER BY created_at DESC, id DESC LIMIT ?"
+const historyQuery = "SELECT j.id, j.status, j.created_at, j.applied_at, j.expires_at, j.rollback_expires_at, j.definition_json FROM migration_jobs AS j LEFT JOIN account_active_config AS active ON active.account_id = j.account_id LEFT JOIN account_config_versions AS current ON current.account_id = j.account_id AND current.id = active.config_version_id LEFT JOIN account_runtime_state AS current_state ON current_state.account_id = j.account_id AND current_state.config_version_id = active.config_version_id WHERE j.account_id = ? AND ((j.status = 'pending' AND j.expires_at > ? AND COALESCE(current.number, 0) = j.base_config_version_number AND COALESCE(current_state.revision, 0) = j.base_state_revision) OR (j.status = 'applied' AND j.rollback_expires_at > ? AND active.config_version_id = j.applied_config_version_id)) ORDER BY j.created_at DESC, j.id DESC LIMIT ?"
 
 func (repository *sqlRepository) History(ctx context.Context, accountID int64, now time.Time, limit int) ([]storedHistoryJob, error) {
 	if repository == nil || repository.db == nil || accountID <= 0 || now.IsZero() || limit <= 0 || limit > historyLimit {
@@ -1145,9 +1154,17 @@ func (repository *sqlRepository) History(ctx context.Context, accountID int64, n
 	result := make([]storedHistoryJob, 0, limit)
 	for rows.Next() {
 		var item storedHistoryJob
+		var definitionJSON []byte
 		item.AccountID = accountID
-		if err := rows.Scan(&item.ID, &item.Status, &item.CreatedAt, &item.AppliedAt, &item.ExpiresAt, &item.RollbackExpiresAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Status, &item.CreatedAt, &item.AppliedAt, &item.ExpiresAt, &item.RollbackExpiresAt, &definitionJSON); err != nil {
 			return nil, ErrUnavailable
+		}
+		if item.Status == jobApplied {
+			var definition configuration.Definition
+			if len(definitionJSON) == 0 || json.Unmarshal(definitionJSON, &definition) != nil {
+				return nil, ErrUnavailable
+			}
+			item.OBSReissueAvailable = len(obsOutputsForDefinition(definition)) != 0
 		}
 		result = append(result, item)
 	}
@@ -1171,7 +1188,8 @@ func (repository *sqlRepository) Get(ctx context.Context, accountID, jobID int64
 			_ = transaction.Rollback()
 		}
 	}()
-	if _, _, _, _, err := loadLockedAccount(ctx, transaction, accountID); err != nil {
+	activeID, currentVersion, currentRevision, _, err := loadLockedAccount(ctx, transaction, accountID)
+	if err != nil {
 		return storedJob{}, err
 	}
 	job, err := loadLockedJob(ctx, transaction, accountID, jobID)
@@ -1192,6 +1210,18 @@ func (repository *sqlRepository) Get(ctx context.Context, accountID, jobID int64
 		committed = true
 		job.Status = jobExpired
 		return job.storedJob, nil
+	}
+	if job.Status == jobPending {
+		baseVersion, baseRevision, err := loadLifecycleBase(ctx, transaction, accountID, jobID)
+		if err != nil {
+			return storedJob{}, err
+		}
+		if currentVersion != baseVersion || currentRevision != baseRevision {
+			return storedJob{}, ErrConflict
+		}
+	}
+	if job.Status == jobApplied && (!activeID.Valid || !job.appliedConfigID.Valid || activeID.Int64 != job.appliedConfigID.Int64) {
+		return storedJob{}, ErrConflict
 	}
 	if err := transaction.Commit(); err != nil {
 		return storedJob{}, ErrUnavailable

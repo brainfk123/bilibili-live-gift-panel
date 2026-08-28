@@ -407,6 +407,6 @@ func completeCapabilities() CapabilitySet {
 	return CapabilitySet{
 		UnitKinds:           map[string]bool{"attribute": true, "activity": true, "gift-target": true, "simple-play": true},
 		SimplePlayTemplates: map[string]int{}, RulesSupported: true, TimerRulesSupported: true, FormulaPresetsSupported: true,
-		DisplayScenesSupported: true, CropPresetsSupported: true,
+		DisplayScenesSupported: true, CropPresetsSupported: true, BlindBoxDisplaySupported: true,
 	}
 }

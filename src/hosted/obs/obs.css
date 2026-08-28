@@ -8,6 +8,13 @@
 html, body, #hosted-obs-app { width: 100%; min-height: 100%; margin: 0; overflow-x: hidden; }
 body { background: transparent; color: #fff; }
 
+#hosted-obs-app[data-color-scheme="light"] {
+  --obs-text-color: #172033;
+  --obs-label-color: rgb(23 32 51 / 72%);
+  --obs-card-surface: #f7f9fc;
+  color: var(--obs-text-color);
+}
+
 .hosted-obs-stage {
   display: grid;
   grid-template-columns: repeat(var(--obs-columns, 1), minmax(0, 1fr));
@@ -15,19 +22,21 @@ body { background: transparent; color: #fff; }
   width: 100%;
   padding: var(--obs-gutter, 20px);
   overflow: hidden;
+  text-align: var(--obs-align, left);
 }
 
 .hosted-obs-card, .hosted-obs-viewers, .hosted-obs-empty, .hosted-obs-error {
   border: 1px solid color-mix(in srgb, var(--obs-theme-accent, #fb7299) 45%, transparent);
   border-radius: 18px;
-  background: color-mix(in srgb, var(--obs-theme-surface, #15171f) 78%, transparent);
+  background: color-mix(in srgb, var(--obs-card-surface, var(--obs-theme-surface, #15171f)) var(--obs-panel-opacity, 78%), transparent);
   box-shadow: 0 14px 36px rgb(0 0 0 / 28%);
   backdrop-filter: blur(14px);
 }
 
 .hosted-obs-card { display: flex; flex-direction: column; gap: 8px; padding: clamp(16px, 2vw, 28px); overflow: hidden; }
-.hosted-obs-label { color: rgb(255 255 255 / 72%); font-size: clamp(14px, 1.3vw, 20px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hosted-obs-value { color: var(--obs-theme-accent, #fb7299); font-size: clamp(30px, 5vw, 76px); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; }
+.hosted-obs-label { color: var(--obs-label-color, rgb(255 255 255 / 72%)); font-size: clamp(14px, 1.3vw, 20px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hosted-obs-value { color: var(--obs-theme-accent, #fb7299); font-size: var(--obs-font-size, clamp(30px, 5vw, 76px)); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; }
+.hosted-obs-connection { grid-column: 1 / -1; justify-self: var(--obs-align, start); color: var(--obs-theme-accent, #fb7299); font-size: 14px; }
 .hosted-obs-viewers { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 10px; padding: 14px 18px; overflow: hidden; }
 .hosted-obs-viewer { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hosted-obs-empty, .hosted-obs-error { grid-column: 1 / -1; margin: 20px; padding: 24px; text-align: center; }
