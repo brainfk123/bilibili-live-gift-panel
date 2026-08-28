@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"regexp"
 	"testing"
 	"time"
 
+	"bilibili-live-gift-panel/internal/hosted/configuration"
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
@@ -43,21 +45,227 @@ func TestPreviewRejectsRepositoryOwnershipViolation(t *testing.T) {
 }
 
 func TestServiceApplyUsesOnlyTheAuthenticatedOwnerAndKeepsSuggestionExplicit(t *testing.T) {
-	repository := &recordingLifecycleRepository{recordingPreviewRepository: recordingPreviewRepository{}, applyResult: storedJob{ID: 19, AccountID: 7, Status: jobApplied}}
+	importedDefinition, importedRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 9})
+	repository := &recordingLifecycleRepository{
+		recordingPreviewRepository: recordingPreviewRepository{}, applyResult: storedJob{ID: 19, AccountID: 7, Status: jobApplied},
+		composition: storedComposition{ID: 19, AccountID: 7, Status: jobPreviewed, ExpiresAt: time.Now().Add(time.Hour), Imported: migrationEnvelope(importedDefinition, importedRuntime), HostedDefinition: emptyDefinition(), HostedRuntime: emptyRuntime()},
+	}
 	service := NewService(repository, time.Now)
 
-	result, err := service.Apply(context.Background(), 7, 19, true)
+	selection := SelectionCommand{UnitIDs: []string{"attribute:exe"}, IncludeRoomSuggestion: true}
+	result, err := service.Apply(context.Background(), 7, 19, selection)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.ID != 19 || result.Status != "applied" {
 		t.Fatalf("Apply() = %#v", result)
 	}
-	if repository.apply.AccountID != 7 || repository.apply.JobID != 19 || !repository.apply.KeepRoomSuggestion {
+	if repository.apply.AccountID != 7 || repository.apply.JobID != 19 || !repository.apply.KeepRoomSuggestion || repository.apply.Candidate.Runtime.AttributeValues["exe"] != 9 {
 		t.Fatalf("Apply() command = %#v", repository.apply)
 	}
-	if _, err := service.Apply(context.Background(), 0, 19, false); !errors.Is(err, ErrInvalidInput) {
+	if _, err := service.Apply(context.Background(), 0, 19, selection); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("Apply() with invalid owner error = %v", err)
+	}
+}
+
+func TestSelectionPreviewUsesServerCompositionWithoutMutatingFormalConfiguration(t *testing.T) {
+	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	hostedDefinition, hostedRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "online", Name: "Health"}}, map[string]float64{"online": 2})
+	importDefinition, importRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "Health"}}, map[string]float64{"exe": 8})
+	repository := &recordingLifecycleRepository{composition: storedComposition{
+		ID: 21, AccountID: 7, Status: jobPreviewed, ExpiresAt: now.Add(time.Hour), Imported: migrationEnvelope(importDefinition, importRuntime), HostedDefinition: hostedDefinition, HostedRuntime: hostedRuntime,
+	}}
+	service := NewService(repository, func() time.Time { return now })
+
+	preview, err := service.Select(context.Background(), 7, 21, SelectionCommand{UnitIDs: []string{"attribute:exe"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.CanConfirm || len(preview.Conflicts) != 1 || preview.Conflicts[0].SuggestedNames["attribute:exe"] != "Health（从 EXE 导入）" {
+		t.Fatalf("selection preview = %#v", preview)
+	}
+	if repository.loadAccountID != 7 || repository.loadJobID != 21 || repository.applyCalls != 0 {
+		t.Fatalf("composition seam account=%d job=%d writes=%d", repository.loadAccountID, repository.loadJobID, repository.applyCalls)
+	}
+	if got := repository.composition.HostedRuntime.AttributeValues["online"]; got != 2 {
+		t.Fatalf("formal runtime mutated to %v", got)
+	}
+}
+
+func TestSelectionRejectsRepositoryOwnershipViolationAndSelectedPartialUnit(t *testing.T) {
+	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	definition, runtime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 8})
+	imported := migrationEnvelope(definition, runtime)
+	repository := &recordingLifecycleRepository{composition: storedComposition{ID: 21, AccountID: 9, Status: jobPreviewed, ExpiresAt: now.Add(time.Hour), Imported: imported, HostedDefinition: emptyDefinition(), HostedRuntime: emptyRuntime()}}
+	service := NewService(repository, func() time.Time { return now })
+	if _, err := service.Select(context.Background(), 7, 21, SelectionCommand{}); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("ownership error = %v, want unavailable", err)
+	}
+
+	repository.composition.AccountID = 7
+	repository.composition.Imported.Units[0].DisplaySceneIDs = []string{"scene"}
+	service.capabilities.DisplayScenesSupported = false
+	if _, err := service.Select(context.Background(), 7, 21, SelectionCommand{UnitIDs: []string{"attribute:exe"}}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("partial selection error = %v, want conflict", err)
+	}
+}
+
+func TestComposeApplyRequiresEveryConflictChoiceBeforeLifecycleWrite(t *testing.T) {
+	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	hostedDefinition, hostedRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "online", Name: "Health"}}, map[string]float64{"online": 2})
+	importDefinition, importRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "Health"}}, map[string]float64{"exe": 8})
+	repository := &recordingLifecycleRepository{
+		composition: storedComposition{ID: 21, AccountID: 7, Status: jobPreviewed, ExpiresAt: now.Add(time.Hour), Imported: migrationEnvelope(importDefinition, importRuntime), HostedDefinition: hostedDefinition, HostedRuntime: hostedRuntime},
+		applyResult: storedJob{ID: 21, AccountID: 7, Status: jobApplied},
+	}
+	service := NewService(repository, func() time.Time { return now })
+	selection := SelectionCommand{UnitIDs: []string{"attribute:exe"}}
+	if _, err := service.Apply(context.Background(), 7, 21, selection); !errors.Is(err, ErrConflict) || repository.applyCalls != 0 {
+		t.Fatalf("unresolved Apply() error=%v writes=%d", err, repository.applyCalls)
+	}
+	selection.ConflictChoices = map[string]ConflictChoice{"attribute:exe": ConflictReplace}
+	job, err := service.Apply(context.Background(), 7, 21, selection)
+	if err != nil || job.Status != jobApplied || repository.applyCalls != 1 {
+		t.Fatalf("resolved Apply() job=%#v error=%v writes=%d", job, err, repository.applyCalls)
+	}
+	if got, want := repository.apply.Candidate.Runtime.AttributeValues, map[string]float64{"exe": 8}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("applied candidate values=%#v want=%#v", got, want)
+	}
+}
+
+func TestSelectionHashIncludesNormalizedSettingsAndCropsButIgnoresClientDeclaration(t *testing.T) {
+	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	base := decodedEnvelope(t)
+	base.GeneralSettings = GeneralSettings{ConfigurationMode: "simple"}
+	base.CropPresets = []CropPreset{{ID: "gift:1", Crop: Crop{X: 0.1, Y: 0.2, Width: 0.3, Height: 0.4}}}
+	firstRepository := &recordingPreviewRepository{result: storedPreview{ID: 1, AccountID: 7, ExpiresAt: now.Add(time.Hour)}}
+	if _, err := NewService(firstRepository, func() time.Time { return now }).Preview(context.Background(), 7, base); err != nil {
+		t.Fatal(err)
+	}
+	clientOnly := base
+	clientOnly.ClientDeclaration = GameplayDependencyDeclaration{AlgorithmVersion: 999, Units: []GameplayUnit{{ID: "client-forged"}}}
+	secondRepository := &recordingPreviewRepository{result: storedPreview{ID: 2, AccountID: 7, ExpiresAt: now.Add(time.Hour)}}
+	if _, err := NewService(secondRepository, func() time.Time { return now }).Preview(context.Background(), 7, clientOnly); err != nil {
+		t.Fatal(err)
+	}
+	if firstRepository.command.Hash != secondRepository.command.Hash || !reflect.DeepEqual(firstRepository.command.Units, base.Units) {
+		t.Fatalf("client declaration affected authoritative preview: first=%x second=%x units=%#v", firstRepository.command.Hash, secondRepository.command.Hash, firstRepository.command.Units)
+	}
+	settingsChanged := base
+	settingsChanged.GeneralSettings.ConfigurationMode = "advanced"
+	thirdRepository := &recordingPreviewRepository{result: storedPreview{ID: 3, AccountID: 7, ExpiresAt: now.Add(time.Hour)}}
+	if _, err := NewService(thirdRepository, func() time.Time { return now }).Preview(context.Background(), 7, settingsChanged); err != nil {
+		t.Fatal(err)
+	}
+	if firstRepository.command.Hash == thirdRepository.command.Hash {
+		t.Fatal("normalized general settings were omitted from idempotency hash")
+	}
+}
+
+func TestSQLRepositorySelectionLoadIsAccountOwnedReadOnlyAndRestoresServerMetadata(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	importDefinition, importRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 8})
+	hostedDefinition, hostedRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "online", Name: "Online"}}, map[string]float64{"online": 2})
+	units := DeriveUnits(importDefinition, importRuntime)
+	metadata, err := json.Marshal(previewMetadata{Report: Report{Warnings: []string{"persisted"}}, GeneralSettings: GeneralSettings{ConfigurationMode: "advanced"}, Units: units})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(compositionQuery)).WithArgs(int64(21), int64(7)).WillReturnRows(sqlmock.NewRows([]string{
+		"status", "expires_at", "definition_json", "runtime_json", "room_suggestion", "source_app_version", "source_schema_version", "report_json", "hosted_definition_json", "hosted_runtime_json",
+	}).AddRow(jobPreviewed, now.Add(time.Hour), mustJSON(t, importDefinition), mustJSON(t, importRuntime), "12345", "0.5.0", 5, metadata, mustJSON(t, hostedDefinition), mustJSON(t, hostedRuntime)))
+
+	stored, err := NewRepository(database).(compositionRepository).LoadComposition(context.Background(), 7, 21)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ID != 21 || stored.AccountID != 7 || stored.Imported.GeneralSettings.ConfigurationMode != "advanced" || stored.Imported.RoomSuggestion != "12345" || !reflect.DeepEqual(stored.Imported.Units, units) || stored.Imported.ClientDeclaration.AlgorithmVersion != 0 {
+		t.Fatalf("stored composition = %#v", stored)
+	}
+	if stored.HostedRuntime.AttributeValues["online"] != 2 {
+		t.Fatalf("hosted runtime = %#v", stored.HostedRuntime)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositorySelectionLoadHidesAnotherAccountsPreview(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mock.ExpectQuery(regexp.QuoteMeta(compositionQuery)).WithArgs(int64(21), int64(7)).WillReturnError(sql.ErrNoRows)
+	if _, err := NewRepository(database).(compositionRepository).LoadComposition(context.Background(), 7, 21); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("LoadComposition() error=%v, want not found", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryComposeStagesFullCandidateWithoutChangingFormalConfiguration(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	definition, runtime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 8})
+	candidate := ComposeCandidate{Definition: definition, Runtime: runtime, Ready: true}
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(88, 3, 6, mustJSON(t, runtime)))
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(21), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(jobPreviewed, now.Add(time.Hour), 0, nil, nil, nil, nil, []byte(`{"attributes":[]}`), []byte(`{"attributeValues":{}}`), "12345"))
+	expectPreviewNow(mock, now)
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleBaseQuery)).WithArgs(int64(21), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"base_config_version_number", "base_state_revision"}).AddRow(3, 6))
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleOpenSessionQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(12))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE migration_jobs SET status = 'pending', keep_room_suggestion = ?, definition_json = ?, runtime_json = ? WHERE id = ? AND account_id = ? AND status = 'previewed'")).WithArgs(true, sqlmock.AnyArg(), sqlmock.AnyArg(), int64(21), int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	job, err := NewRepository(database).(lifecycleRepository).Apply(context.Background(), applyCommand{AccountID: 7, JobID: 21, KeepRoomSuggestion: true, Candidate: candidate})
+	if err != nil || job.Status != jobPending {
+		t.Fatalf("Apply() job=%#v error=%v", job, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryComposeAppliesFullCandidateInsteadOfRawImport(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	definition, runtime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}, {ID: "retained", Name: "Retained"}}, map[string]float64{"exe": 8, "retained": 2})
+	candidate := ComposeCandidate{Definition: definition, Runtime: runtime, Ready: true}
+	definitionJSON, runtimeJSON := mustJSON(t, definition), mustJSON(t, runtime)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(nil, 0, 0, nil))
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(21), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(jobPreviewed, now.Add(time.Hour), 0, nil, nil, nil, nil, []byte(`{"attributes":[{"id":"raw-only"}]}`), []byte(`{"attributeValues":{"raw-only":1}}`), nil))
+	expectPreviewNow(mock, now)
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleBaseQuery)).WithArgs(int64(21), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"base_config_version_number", "base_state_revision"}).AddRow(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleOpenSessionQuery)).WithArgs(int64(7)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleNextVersionQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"number"}).AddRow(1))
+	mock.ExpectExec(regexp.QuoteMeta(lifecycleInsertVersionQuery)).WithArgs(int64(7), uint64(1), definitionJSON, "migration", now).WillReturnResult(sqlmock.NewResult(88, 1))
+	mock.ExpectExec(regexp.QuoteMeta(lifecycleUpsertRuntimeQuery)).WithArgs(int64(7), int64(88), uint64(1), runtimeJSON, now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta(lifecycleUpsertActiveQuery)).WithArgs(int64(7), int64(88), now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE migration_jobs SET keep_room_suggestion = ?, rollback_config_version_id = ?, rollback_runtime_json = ?, rollback_expires_at = ?, applied_config_version_id = ?, status = 'applied', applied_at = ? WHERE id = ? AND account_id = ? AND status IN ('previewed', 'pending')")).WithArgs(false, nil, nil, now.Add(7*24*time.Hour), int64(88), now, int64(21), int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	job, err := NewRepository(database).(lifecycleRepository).Apply(context.Background(), applyCommand{AccountID: 7, JobID: 21, Candidate: candidate})
+	if err != nil || job.Status != jobApplied {
+		t.Fatalf("Apply() job=%#v error=%v", job, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -549,14 +757,22 @@ type recordingPreviewRepository struct {
 
 type recordingLifecycleRepository struct {
 	recordingPreviewRepository
-	apply       applyCommand
-	applyResult storedJob
-	applyErr    error
+	apply                    applyCommand
+	applyResult              storedJob
+	applyErr                 error
+	composition              storedComposition
+	loadAccountID, loadJobID int64
+	applyCalls               int
 }
 
 func (repository *recordingLifecycleRepository) Apply(_ context.Context, command applyCommand) (storedJob, error) {
 	repository.apply = command
+	repository.applyCalls++
 	return repository.applyResult, repository.applyErr
+}
+func (repository *recordingLifecycleRepository) LoadComposition(_ context.Context, accountID, jobID int64) (storedComposition, error) {
+	repository.loadAccountID, repository.loadJobID = accountID, jobID
+	return repository.composition, nil
 }
 func (repository *recordingLifecycleRepository) ApplyPendingAfterSession(context.Context, OwnerFence, int64) (storedJob, error) {
 	return storedJob{}, ErrUnavailable

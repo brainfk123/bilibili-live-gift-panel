@@ -22,7 +22,7 @@ func TestHTTPApplyAuthorizesOwnerBeforeConsumingProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/migrations/9/apply", strings.NewReader(`{"challengeId":"recent-proof","keepRoomSuggestion":true}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/migrations/9/apply", strings.NewReader(`{"challengeId":"recent-proof","selection":{"includeRoomSuggestion":true}}`))
 	request.Header.Set("Origin", "https://hosted.example")
 	request.Header.Set("X-CSRF-Token", "csrf")
 	request.Header.Set("Content-Type", "application/json")
@@ -31,7 +31,7 @@ func TestHTTPApplyAuthorizesOwnerBeforeConsumingProof(t *testing.T) {
 	if response.Code != http.StatusOK || proof.calls != 1 || service.applies != 1 {
 		t.Fatalf("status=%d proof=%d applies=%d body=%s", response.Code, proof.calls, service.applies, response.Body.String())
 	}
-	if service.gets != 1 || service.lastAccountID != 7 || !service.keepRoom {
+	if service.gets != 1 || service.selects != 1 || service.lastAccountID != 7 || !service.selection.IncludeRoomSuggestion {
 		t.Fatalf("service preauthorization/apply = %#v", service)
 	}
 }
@@ -54,7 +54,7 @@ func TestHTTPApplyRejectsMalformedBodyBeforeProofConsumption(t *testing.T) {
 	}
 }
 
-func TestHTTPApplyRequiresExplicitRoomDecisionBeforeProofConsumption(t *testing.T) {
+func TestHTTPApplyRequiresExplicitSelectionBeforeProofConsumption(t *testing.T) {
 	service := &httpMigrationService{job: Job{ID: 9, Status: jobPreviewed, ExpiresAt: time.Now().Add(time.Hour)}}
 	proof := &httpProof{}
 	handler, err := NewHTTPHandler(service, proof, HTTPOptions{AllowedOrigin: "https://hosted.example", CSRFToken: "csrf", Limiter: allowAllLimiter{}, ClientIP: identity.DirectClientIP, Authenticate: testAuthenticate(), AccountID: func(context.Context) (int64, bool) { return 7, true }})
@@ -69,6 +69,48 @@ func TestHTTPApplyRequiresExplicitRoomDecisionBeforeProofConsumption(t *testing.
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest || proof.calls != 0 || service.applies != 0 {
 		t.Fatalf("status=%d proof=%d applies=%d", response.Code, proof.calls, service.applies)
+	}
+}
+
+func TestHTTPSelectionUpdateIsAccountOwnedReadOnlyAndReturnsBlockingConflict(t *testing.T) {
+	service := &httpMigrationService{selectionPreview: Preview{ID: 9, Conflicts: []SelectionConflict{{ID: "attribute:exe"}}, CanConfirm: false}}
+	proof := &httpProof{}
+	handler, err := newMigrationHTTPTestHandler(service, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, migrationRequest(http.MethodPut, "/api/migrations/9/selection", `{"unitIds":["attribute:exe"]}`))
+	if response.Code != http.StatusOK || service.selects != 1 || service.lastAccountID != 7 || service.applies != 0 || proof.calls != 0 {
+		t.Fatalf("status=%d selects=%d account=%d applies=%d proof=%d body=%s", response.Code, service.selects, service.lastAccountID, service.applies, proof.calls, response.Body.String())
+	}
+}
+
+func TestHTTPComposeApplyRejectsUnresolvedConflictBeforeProofConsumption(t *testing.T) {
+	service := &httpMigrationService{job: Job{ID: 9, Status: jobPreviewed}, selectionPreview: Preview{ID: 9, Conflicts: []SelectionConflict{{ID: "attribute:exe"}}, CanConfirm: false}}
+	proof := &httpProof{}
+	handler, err := newMigrationHTTPTestHandler(service, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, migrationRequest(http.MethodPost, "/api/migrations/9/apply", `{"challengeId":"proof","selection":{"unitIds":["attribute:exe"]}}`))
+	if response.Code != http.StatusConflict || service.selects != 1 || service.gets != 1 || proof.calls != 0 || service.applies != 0 {
+		t.Fatalf("status=%d selects=%d gets=%d proof=%d applies=%d", response.Code, service.selects, service.gets, proof.calls, service.applies)
+	}
+}
+
+func TestHTTPComposeApplyPendingRetrySkipsSelectionAndProof(t *testing.T) {
+	service := &httpMigrationService{job: Job{ID: 9, Status: jobPending}}
+	proof := &httpProof{}
+	handler, err := newMigrationHTTPTestHandler(service, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, migrationRequest(http.MethodPost, "/api/migrations/9/apply", `{"challengeId":"proof","selection":{"unitIds":["stale-client-value"]}}`))
+	if response.Code != http.StatusOK || service.gets != 1 || service.selects != 0 || proof.calls != 0 || service.applies != 0 {
+		t.Fatalf("status=%d gets=%d selects=%d proof=%d applies=%d", response.Code, service.gets, service.selects, proof.calls, service.applies)
 	}
 }
 
@@ -160,7 +202,7 @@ func TestHTTPMutationRejectsQueryOriginAndContentTypeBeforeProof(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			request := migrationRequest(http.MethodPost, test.path, `{"challengeId":"proof","keepRoomSuggestion":false}`)
+			request := migrationRequest(http.MethodPost, test.path, `{"challengeId":"proof","selection":{}}`)
 			request.Header.Set("Origin", test.origin)
 			request.Header.Set("Content-Type", test.contentType)
 			response := httptest.NewRecorder()
@@ -193,7 +235,7 @@ func TestHTTPPreauthorizationRejectsBeforeProofConsumption(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			body := `{"challengeId":"proof","keepRoomSuggestion":false}`
+			body := `{"challengeId":"proof","selection":{}}`
 			if strings.HasSuffix(test.route, "/rollback") {
 				body = `{"challengeId":"proof"}`
 			}
@@ -275,16 +317,27 @@ func migrationRequest(method, path, body string) *http.Request {
 type httpMigrationService struct {
 	job                     Job
 	preview                 Preview
+	selectionPreview        Preview
 	gets, applies, previews int
+	selects                 int
 	cancels, rollbacks      int
 	lastAccountID           int64
-	keepRoom                bool
+	selection               SelectionCommand
 	preauthErr              error
 }
 
 func (service *httpMigrationService) Preview(context.Context, int64, Envelope) (Preview, error) {
 	service.previews++
 	return service.preview, nil
+}
+func (service *httpMigrationService) Select(_ context.Context, accountID, _ int64, selection SelectionCommand) (Preview, error) {
+	service.selects++
+	service.lastAccountID = accountID
+	service.selection = selection
+	if service.selectionPreview.ID != 0 || len(service.selectionPreview.Conflicts) != 0 {
+		return service.selectionPreview, nil
+	}
+	return Preview{ID: 9, CanConfirm: true}, nil
 }
 func (service *httpMigrationService) Get(_ context.Context, accountID, _ int64) (Job, error) {
 	service.gets++
@@ -301,10 +354,10 @@ func (service *httpMigrationService) PreauthorizeRollback(_ context.Context, acc
 	service.lastAccountID = accountID
 	return service.job, service.preauthErr
 }
-func (service *httpMigrationService) Apply(_ context.Context, accountID, _ int64, keepRoom bool) (Job, error) {
+func (service *httpMigrationService) Apply(_ context.Context, accountID, _ int64, selection SelectionCommand) (Job, error) {
 	service.applies++
 	service.lastAccountID = accountID
-	service.keepRoom = keepRoom
+	service.selection = selection
 	service.job.Status = jobApplied
 	return service.job, nil
 }

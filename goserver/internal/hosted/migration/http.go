@@ -22,10 +22,11 @@ const maxMigrationBody = 2 << 20
 
 type migrationHTTPService interface {
 	Preview(context.Context, int64, Envelope) (Preview, error)
+	Select(context.Context, int64, int64, SelectionCommand) (Preview, error)
 	Get(context.Context, int64, int64) (Job, error)
 	PreauthorizeApply(context.Context, int64, int64) (Job, error)
 	PreauthorizeRollback(context.Context, int64, int64) (Job, error)
-	Apply(context.Context, int64, int64, bool) (Job, error)
+	Apply(context.Context, int64, int64, SelectionCommand) (Job, error)
 	Cancel(context.Context, int64, int64) (Job, error)
 	Rollback(context.Context, int64, int64) (Job, error)
 }
@@ -68,11 +69,41 @@ func NewHTTPHandler(service migrationHTTPService, proof accountProofConsumer, op
 	}
 	handler := &HTTPHandler{service: service, proofConsumer: proof, allowedOrigin: options.AllowedOrigin, csrfToken: options.CSRFToken, limiter: options.Limiter, clientIP: options.ClientIP, authenticate: options.Authenticate, accountID: options.AccountID, mux: http.NewServeMux()}
 	handler.mux.HandleFunc("POST /api/migrations/preview", handler.preview)
+	handler.mux.HandleFunc("PUT /api/migrations/{id}/selection", handler.selectUnits)
 	handler.mux.HandleFunc("POST /api/migrations/{id}/apply", handler.apply)
 	handler.mux.HandleFunc("DELETE /api/migrations/{id}", handler.cancel)
 	handler.mux.HandleFunc("POST /api/migrations/{id}/rollback", handler.rollback)
 	handler.mux.HandleFunc("GET /api/migrations/{id}", handler.get)
 	return handler, nil
+}
+
+func (handler *HTTPHandler) selectUnits(response http.ResponseWriter, request *http.Request) {
+	var command SelectionCommand
+	if !handler.acceptJSONMutation(request) {
+		handler.writeRejection(response, request)
+		return
+	}
+	if !handler.allow(request, "migration_selection") {
+		writeMigrationError(response, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
+	if !decodeMigrationJSON(response, request, &command) {
+		writeMigrationError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	jobID, ok := migrationPathID(request)
+	if !ok {
+		writeMigrationError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	handler.authenticated(response, request, func(accountID int64, request *http.Request) {
+		preview, err := handler.service.Select(request.Context(), accountID, jobID, command)
+		if err != nil {
+			handler.writeServiceError(response, err)
+			return
+		}
+		writeMigrationJSON(response, http.StatusOK, preview)
+	})
 }
 
 func (handler *HTTPHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -130,8 +161,8 @@ func (handler *HTTPHandler) get(response http.ResponseWriter, request *http.Requ
 
 func (handler *HTTPHandler) apply(response http.ResponseWriter, request *http.Request) {
 	var body struct {
-		ChallengeID        string `json:"challengeId"`
-		KeepRoomSuggestion *bool  `json:"keepRoomSuggestion"`
+		ChallengeID string            `json:"challengeId"`
+		Selection   *SelectionCommand `json:"selection"`
 	}
 	if !handler.acceptJSONMutation(request) {
 		handler.writeRejection(response, request)
@@ -141,7 +172,7 @@ func (handler *HTTPHandler) apply(response http.ResponseWriter, request *http.Re
 		writeMigrationError(response, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
-	if !decodeMigrationJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 || body.KeepRoomSuggestion == nil {
+	if !decodeMigrationJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 || body.Selection == nil {
 		writeMigrationError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -160,11 +191,20 @@ func (handler *HTTPHandler) apply(response http.ResponseWriter, request *http.Re
 			writeMigrationJSON(response, http.StatusOK, job)
 			return
 		}
+		preview, err := handler.service.Select(request.Context(), accountID, jobID, *body.Selection)
+		if err != nil {
+			handler.writeServiceError(response, err)
+			return
+		}
+		if !preview.CanConfirm {
+			handler.writeServiceError(response, ErrConflict)
+			return
+		}
 		if err := handler.proofConsumer.ConsumeAccountProof(request.Context(), body.ChallengeID, accountID, 15*time.Minute); err != nil {
 			handler.writeProofError(response, err)
 			return
 		}
-		job, err = handler.service.Apply(request.Context(), accountID, jobID, *body.KeepRoomSuggestion)
+		job, err = handler.service.Apply(request.Context(), accountID, jobID, *body.Selection)
 		if err != nil {
 			handler.writeServiceError(response, err)
 			return
