@@ -11,13 +11,13 @@ const preview = {
   source: { appVersion: '0.4.7', configurationSchemaVersion: 5 },
   units: [
     { id: 'attribute:score', kind: 'attribute', name: '积分', attributeIds: ['score'], ruleIds: [], timerRuleIds: [], formulaPresetIds: [], activityIds: [], displaySceneIds: [], giftTargetPanelIds: [], giftIds: [], cropPresetIds: [], compatibility: { status: 'complete', reasonCodes: [] }, selected: true },
-    { id: 'attribute:bonus', kind: 'attribute', name: '加成', attributeIds: ['bonus'], ruleIds: [], timerRuleIds: [], formulaPresetIds: [], activityIds: [], displaySceneIds: [], giftTargetPanelIds: [], giftIds: [], cropPresetIds: [], compatibility: { status: 'complete', reasonCodes: [] }, selected: true },
+    { id: 'attribute:bonus', kind: 'attribute', name: '加成', attributeIds: ['bonus'], ruleIds: [], timerRuleIds: [], formulaPresetIds: [], activityIds: [], displaySceneIds: [], giftTargetPanelIds: [], giftIds: [], cropPresetIds: [], compatibility: { status: 'complete', reasonCodes: [] }, selected: false },
     { id: 'activity:legacy', kind: 'activity', name: '旧活动', attributeIds: [], ruleIds: [], timerRuleIds: [], formulaPresetIds: [], activityIds: ['legacy'], displaySceneIds: ['legacy-scene'], giftTargetPanelIds: [], giftIds: [], cropPresetIds: ['legacy-crop'], compatibility: { status: 'partial', reasonCodes: ['crop_presets_unsupported', 'display_scenes_unsupported'] }, selected: false },
     { id: 'timer:legacy', kind: 'timer', name: '旧定时器', attributeIds: [], ruleIds: [], timerRuleIds: ['legacy-timer'], formulaPresetIds: [], activityIds: [], displaySceneIds: [], giftTargetPanelIds: [], giftIds: [], cropPresetIds: [], compatibility: { status: 'incompatible', reasonCodes: ['timer_rules_unsupported'] }, selected: false },
   ],
-  groups: [{ id: 'group:score', unitIds: ['attribute:score', 'attribute:bonus'], reasons: [{ kind: 'shared-attribute', referenceId: 'bonus' }] }],
+  groups: [{ id: 'group:score', unitIds: ['attribute:bonus', 'activity:legacy'], reasons: [{ kind: 'shared-attribute', referenceId: 'bonus' }] }],
   conflicts: [{ id: 'conflict:score', importedUnitIds: ['attribute:score', 'attribute:bonus'], hostedUnitIds: ['attribute:hosted'], suggestedNames: { 'attribute:score': '积分（从 EXE 导入）' } }],
-  selection: { unitIds: ['attribute:score', 'attribute:bonus'], conflictChoices: {}, includeGeneralSettings: false, includeRoomSuggestion: false },
+  selection: { unitIds: ['attribute:score'], conflictChoices: {}, includeGeneralSettings: false, includeRoomSuggestion: false },
   generalSettings: { configurationMode: 'simple' }, canConfirm: false,
 };
 
@@ -35,7 +35,7 @@ const harnessPage = `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-
       beginLogin() { return Promise.resolve({ challengeId: 'proof', qrImage: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==', expiresAt: preview.expiresAt }); },
       pollLogin() { return Promise.resolve({ status: 'verified', expiresAt: preview.expiresAt }); },
       cancelLogin() { return Promise.resolve(); },
-      applyMigration() { return Promise.resolve({ id: 12, status: 'applied', rollbackExpiresAt: '2030-01-08T00:00:00Z', obsLinks: [{ outputId: 'score', name: '积分卡片', url: 'https://host.example/obs/score#token=one-time' }] }); },
+      applyMigration() { return Promise.resolve({ id: 12, status: 'applied', rollbackExpiresAt: '2030-01-08T00:00:00Z', obsLinks: [{ outputId: 'attribute:score', name: '积分卡片', url: 'https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=attribute%3Ascore#token=one-time' }] }); },
     };
     mounted = mountMigrationView(root, api, { onConfiguration() {} });
     if (state === 'preview') mounted.flow.acceptPreview(preview);
@@ -61,7 +61,8 @@ test.beforeAll(async () => {
           if (request.url === '/__hosted-migration-layout-test') { response.statusCode = 200; response.setHeader('Content-Type', 'text/html; charset=UTF-8'); response.end(harnessPage); return; }
           if (request.url === '/__hosted-account-test') { response.statusCode = 200; response.setHeader('Content-Type', 'text/html; charset=UTF-8'); response.end('<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="hosted-app"></div><script>window.EventSource=class { addEventListener(){} close(){} };</script><script type="module" src="/src/hosted/main.ts"></script></body></html>'); return; }
           if (request.url === '/api/bootstrap') { response.statusCode = 200; response.setHeader('Content-Type', 'application/json'); response.end('{"csrfToken":"csrf"}'); return; }
-          if (request.url === '/api/auth/session') { response.statusCode = 200; response.setHeader('Content-Type', 'application/json'); response.end('{"authenticated":true}'); return; }
+          if (request.url === '/api/auth/session') { response.statusCode = 200; response.setHeader('Content-Type', 'application/json'); response.end('{"authenticated":true,"accountScope":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}'); return; }
+          if (request.url === '/api/migrations') { response.statusCode = 200; response.setHeader('Content-Type', 'application/json'); response.end('{"jobs":[{"id":7,"status":"applied","createdAt":"2026-08-29T00:00:00Z","appliedAt":"2026-08-29T00:01:00Z","rollbackExpiresAt":"2030-01-08T00:00:00Z"}]}'); return; }
           next();
         });
       },
@@ -91,10 +92,13 @@ test('first-login prompt can be skipped while Settings remains a real route to t
   await expect(page.getByLabel('本地配置迁移提示')).toHaveCount(0);
   await page.getByRole('button', { name: '设置', exact: true }).click();
   await expect(page.getByRole('heading', { name: '设置', exact: true })).toBeVisible();
+  await expect(page.getByText('可回滚的迁移')).toBeVisible();
+  const settingsInteractive = await page.locator('.hosted-migration-settings button,.hosted-migration-settings input,.hosted-migration-settings select,.hosted-migration-settings a').evaluateAll((elements) => elements.map((element) => { const rect = element.getBoundingClientRect(); return { left: rect.left, right: rect.right }; }));
+  for (const item of settingsInteractive) { expect(item.left).toBeGreaterThanOrEqual(0); expect(item.right).toBeLessThanOrEqual(390); }
   await page.getByRole('button', { name: '打开迁移中心' }).click();
   await expect(page.getByRole('heading', { name: '从本地 EXE 迁移' })).toBeVisible();
   await expect(page.getByLabel('选择迁移 JSON 文件')).toBeVisible();
-  expect(await page.evaluate(() => ({ width: document.documentElement.scrollWidth, viewport: innerWidth, storage: { ...localStorage }, url: location.href }))).toEqual(expect.objectContaining({ width: 390, viewport: 390, storage: { 'hosted.migration.prompt.dismissed.v1': 'true' }, url: `${baseURL}/__hosted-account-test` }));
+  expect(await page.evaluate(() => ({ width: document.documentElement.scrollWidth, viewport: innerWidth, storage: { ...localStorage }, url: location.href }))).toEqual(expect.objectContaining({ width: 390, viewport: 390, storage: { 'hosted.migration.prompt.dismissed.v1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA': 'true' }, url: `${baseURL}/__hosted-account-test` }));
   await page.close();
 });
 
@@ -108,11 +112,13 @@ test('renders grouped compatibility and conflict controls without desktop or pho
     await expect(page.getByLabel('解决冲突 conflict:score')).toBeVisible();
     expect(await page.locator('.hosted-migration-unit[data-compatibility="partial"] input').isDisabled()).toBe(true);
     expect(await page.locator('.hosted-migration-unit[data-compatibility="incompatible"] input').isDisabled()).toBe(true);
-    const metrics = await page.evaluate(() => ({ width: document.documentElement.scrollWidth, viewport: innerWidth, actionAlignment: getComputedStyle(document.querySelector('.hosted-migration-actions')!).justifyContent, selectAppearance: getComputedStyle(document.querySelector('.hosted-migration-conflict select')!).backgroundColor, buttons: [...document.querySelectorAll<HTMLButtonElement>('.hosted-migration-center button')].map((button) => { const style = getComputedStyle(button); return { justify: style.justifyContent, left: Number.parseFloat(style.paddingLeft), right: Number.parseFloat(style.paddingRight) }; }) }));
+    expect(await page.locator('.hosted-migration-group .hosted-migration-unit[data-compatibility="complete"] input').isDisabled()).toBe(true);
+    const metrics = await page.evaluate(() => ({ width: document.documentElement.scrollWidth, viewport: innerWidth, actionAlignment: getComputedStyle(document.querySelector('.hosted-migration-actions')!).justifyContent, selectAppearance: getComputedStyle(document.querySelector('.hosted-migration-conflict select')!).backgroundColor, buttons: [...document.querySelectorAll<HTMLButtonElement>('.hosted-migration-center button')].map((button) => { const style = getComputedStyle(button); return { justify: style.justifyContent, left: Number.parseFloat(style.paddingLeft), right: Number.parseFloat(style.paddingRight) }; }), interactive:[...document.querySelectorAll<HTMLElement>('.hosted-migration-center button,.hosted-migration-center input,.hosted-migration-center select,.hosted-migration-center a')].map((element)=>{const rect=element.getBoundingClientRect();return{left:rect.left,right:rect.right}}) }));
     expect(metrics.width).toBe(metrics.viewport);
     expect(metrics.actionAlignment).toBe('flex-end');
     expect(metrics.selectAppearance).not.toBe('rgba(0, 0, 0, 0)');
     for (const item of metrics.buttons) { expect(item.justify).toBe('center'); expect(Math.abs(item.left - item.right)).toBeLessThan(1); }
+    for(const item of metrics.interactive){expect(item.left).toBeGreaterThanOrEqual(0);expect(item.right).toBeLessThanOrEqual(viewport.width);}
     await page.close();
   }
 });
@@ -130,7 +136,7 @@ test('styles loading, network failure, applied progress and OBS checklist with r
   await page.evaluate(() => window.__migrationHarness.mount('applied'));
   await expect(page.getByText('迁移已应用', { exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: '逐项替换 OBS 链接' })).toBeVisible();
-  await expect(page.getByRole('link', { name: /https:\/\/host\.example\/obs\/score/ })).toHaveAttribute('href', 'https://host.example/obs/score#token=one-time');
+  await expect(page.getByRole('link', { name: /https:\/\/host\.example\/obs\/A/ })).toHaveAttribute('href', 'https://host.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=attribute%3Ascore#token=one-time');
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
   await page.close();
 });

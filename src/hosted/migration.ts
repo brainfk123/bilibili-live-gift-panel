@@ -3,25 +3,28 @@ import {
   type Challenge,
   type MigrationConflictChoice,
   type MigrationJob,
+  type MigrationHistoryJob,
   type MigrationPreview,
   type MigrationSelection,
   type MigrationUnit,
 } from './api';
 
 export interface MigrationAPI {
-  previewMigration?(rawJSON: string): Promise<MigrationPreview>;
-  selectMigration?(id: number, selection: MigrationSelection): Promise<MigrationPreview>;
-  getMigration?(id: number): Promise<MigrationJob>;
-  applyMigration?(id: number, challengeID: string, selection: MigrationSelection): Promise<MigrationJob>;
-  cancelMigration?(id: number): Promise<MigrationJob>;
-  rollbackMigration?(id: number, challengeID: string): Promise<MigrationJob>;
-  beginLogin?(): Promise<Challenge>;
-  pollLogin?(id: string): Promise<{ status: 'pending' | 'scanned' | 'verified' | 'registration_required' | 'expired'; expiresAt?: string }>;
-  cancelLogin?(id: string): Promise<void>;
+  previewMigration?(rawJSON: string, signal?: AbortSignal): Promise<MigrationPreview>;
+  selectMigration?(id: number, selection: MigrationSelection, signal?: AbortSignal): Promise<MigrationPreview>;
+  getMigration?(id: number, signal?: AbortSignal): Promise<MigrationJob>;
+  applyMigration?(id: number, challengeID: string, selection: MigrationSelection, signal?: AbortSignal): Promise<MigrationJob>;
+  cancelMigration?(id: number, signal?: AbortSignal): Promise<MigrationJob>;
+  rollbackMigration?(id: number, challengeID: string, signal?: AbortSignal): Promise<MigrationJob>;
+  reissueMigrationOBS?(id: number, challengeID: string, signal?: AbortSignal): Promise<MigrationJob>;
+  migrationHistory?(signal?: AbortSignal): Promise<MigrationHistoryJob[]>;
+  beginLogin?(signal?: AbortSignal): Promise<Challenge>;
+  pollLogin?(id: string, signal?: AbortSignal): Promise<{ status: 'pending' | 'scanned' | 'verified' | 'registration_required' | 'expired'; expiresAt?: string }>;
+  cancelLogin?(id: string, signal?: AbortSignal): Promise<void>;
 }
 
 export const migrationFileLimit = 2 * 1024 * 1024;
-export interface MigrationFile { name: string; size: number; text(): Promise<string> }
+export interface MigrationFile { name: string; size: number; text(signal?: AbortSignal): Promise<string> }
 export interface OBSReplacementItem { outputId: string; name: string; url: string; replaced: boolean }
 export type MigrationApplyProgress = 'idle' | 'preview_ready' | 'waiting_for_live_boundary' | 'applied' | 'cancelled' | 'rolled_back' | 'expired';
 export interface MigrationViewState {
@@ -44,6 +47,8 @@ export interface MigrationViewState {
   error?: string;
 }
 
+interface MigrationFlowEnvironment { now(): Date; setTimeout?(callback: () => void, delay: number): unknown; clearTimeout?(timer: unknown): void; settleTimeoutMs?: number }
+
 const clone = <T>(value: T): T => structuredClone(value);
 const selectionCopy = (selection: MigrationSelection): MigrationSelection => ({
   unitIds: [...selection.unitIds],
@@ -52,7 +57,7 @@ const selectionCopy = (selection: MigrationSelection): MigrationSelection => ({
   includeRoomSuggestion: selection.includeRoomSuggestion,
 });
 
-export function createMigrationFlow(api: MigrationAPI, render: (state: MigrationViewState) => void, clock: { now(): Date } = { now: () => new Date() }) {
+export function createMigrationFlow(api: MigrationAPI, render: (state: MigrationViewState) => void, clock: MigrationFlowEnvironment = { now: () => new Date() }) {
   let preview: MigrationPreview | undefined;
   let job: MigrationJob | undefined;
   let proof: Challenge | undefined;
@@ -66,13 +71,23 @@ export function createMigrationFlow(api: MigrationAPI, render: (state: Migration
   let generation = 0;
   let proofOperation: Promise<void> | undefined;
   let obsChecklist: OBSReplacementItem[] = [];
+  const controllers = new Set<AbortController>();
+  const pending = new Set<Promise<unknown>>();
+  const setTimer = clock.setTimeout ?? ((callback: () => void, delay: number) => globalThis.setTimeout(callback, delay));
+  const clearTimer = clock.clearTimeout ?? ((timer: unknown) => globalThis.clearTimeout(timer as number));
+  let pollTimer: unknown; let pollDelay = 1_000;
+  const controller = (): AbortController => { const value = new AbortController(); controllers.add(value); return value; };
+  const tracked = <T>(operation: Promise<T>): Promise<T> => { pending.add(operation); void operation.finally(() => pending.delete(operation)).catch(() => undefined); return operation; };
+  const releaseController = (value: AbortController): void => { controllers.delete(value); };
+  const stopPolling = (): void => { if (pollTimer !== undefined) clearTimer(pollTimer); pollTimer = undefined; pollDelay = 1_000; };
 
   const previewHours = (): number | undefined => preview ? Math.max(0, Math.ceil((Date.parse(preview.expiresAt) - clock.now().getTime()) / 3_600_000)) : undefined;
   const rollbackDays = (): number | undefined => job?.rollbackExpiresAt ? Math.max(0, Math.ceil((Date.parse(job.rollbackExpiresAt) - clock.now().getTime()) / 86_400_000)) : undefined;
   const previewAlive = (): boolean => (previewHours() ?? 0) > 0;
+  const jobAlive = (): boolean => !job?.expiresAt || Date.parse(job.expiresAt) > clock.now().getTime();
   const canApply = (): boolean => Boolean(preview && job?.status === 'previewed' && preview.canConfirm && replacementConfirmed && previewAlive());
-  const canCancel = (): boolean => Boolean(job && (job.status === 'previewed' || job.status === 'pending') && previewAlive());
-  const canRefresh = (): boolean => Boolean(job?.status === 'pending' && previewAlive());
+  const canCancel = (): boolean => Boolean(job && (job.status === 'previewed' || job.status === 'pending') && jobAlive());
+  const canRefresh = (): boolean => Boolean(job?.status === 'pending' && jobAlive());
   const canRollback = (): boolean => job?.status === 'applied' && (rollbackDays() ?? 0) > 0;
   const progress = (): MigrationApplyProgress => {
     if (job?.status === 'pending') return 'waiting_for_live_boundary';
@@ -103,26 +118,38 @@ export function createMigrationFlow(api: MigrationAPI, render: (state: Migration
     error = cause instanceof TypeError ? '网络连接失败，请检查网络后重试' : '操作失败，请重试';
     publish();
   };
-  const bestEffortCancel = (challenge?: Challenge): void => { if (challenge) void api.cancelLogin?.(challenge.challengeId).catch(() => undefined); };
-  const bestEffortJobCancel = (id: number): void => { void api.cancelMigration?.(id).catch(() => undefined); };
+  const bestEffortCancel = (challenge?: Challenge): void => { if (challenge) { const active = controller(); void tracked(api.cancelLogin?.(challenge.challengeId, active.signal) ?? Promise.resolve()).finally(() => releaseController(active)).catch(() => undefined); } };
+  const bestEffortJobCancel = (id: number): void => { const active = controller(); void tracked((api.cancelMigration?.(id, active.signal) ?? Promise.resolve()).then(() => undefined)).finally(() => releaseController(active)).catch(() => undefined); };
   const operationConflict = (): HostedAPIError => new HostedAPIError('operation_conflict', 409);
   const discardProof = (): void => { const active = proof; proof = undefined; proofStatus = undefined; bestEffortCancel(active); };
   const ensureLive = (started: number): void => { if (disposed || started !== generation) throw new HostedAPIError('operation_failed', 0); };
   const applyJob = (value: MigrationJob): void => {
     job = clone(value);
+    if (value.status !== 'pending') stopPolling();
     if (value.obsLinks) obsChecklist = value.obsLinks.map((link) => ({ ...link, replaced: obsChecklist.find((item) => item.outputId === link.outputId)?.replaced ?? false }));
   };
-  const nextProof = async (started: number): Promise<Challenge> => {
+  const schedulePoll = (delay: number): void => {
+    if (disposed || job?.status !== 'pending' || pollTimer !== undefined || !api.getMigration) return;
+    pollTimer = setTimer(() => { pollTimer = undefined; void pollPending(); }, delay);
+  };
+  const pollPending = async (): Promise<void> => {
+    if (disposed || job?.status !== 'pending' || operationInFlight || !api.getMigration) { if (!disposed && job?.status === 'pending') schedulePoll(pollDelay); return; }
+    const id = job.id; const active = controller();
+    try { const result = await tracked(api.getMigration(id, active.signal)); if (disposed || active.signal.aborted || job?.id !== id) return; applyJob(result); error = undefined; pollDelay = 1_000; publish(); if (result.status === 'pending') { schedulePoll(pollDelay); pollDelay = Math.min(8_000, pollDelay * 2); } }
+    catch (cause) { if (!disposed && !active.signal.aborted && job?.status === 'pending') { fail(cause); schedulePoll(pollDelay); pollDelay = Math.min(8_000, pollDelay * 2); } }
+    finally { releaseController(active); }
+  };
+  const nextProof = async (started: number, signal: AbortSignal): Promise<Challenge> => {
     if (proof) return proof;
     if (!api.beginLogin) throw new HostedAPIError('invalid_request', 400);
-    const created = await api.beginLogin();
+    const created = await tracked(api.beginLogin(signal));
     if (disposed || started !== generation) { bestEffortCancel(created); throw new HostedAPIError('operation_failed', 0); }
     proof = created; publish(); return created;
   };
-  const checkedProof = async (started: number): Promise<string> => {
-    const active = await nextProof(started);
+  const checkedProof = async (started: number, signal: AbortSignal): Promise<string> => {
+    const active = await nextProof(started, signal);
     if (!api.pollLogin) throw new HostedAPIError('invalid_request', 400);
-    const result = await api.pollLogin(active.challengeId); ensureLive(started);
+    const result = await tracked(api.pollLogin(active.challengeId, signal)); ensureLive(started);
     if (result.status === 'pending' || result.status === 'scanned') {
       proofStatus = result.status;
       error = result.status === 'pending' ? '等待 B 站扫码确认，请稍后重试' : '已扫码，请在手机确认';
@@ -131,11 +158,11 @@ export function createMigrationFlow(api: MigrationAPI, render: (state: Migration
     if (result.status !== 'verified') { discardProof(); throw new HostedAPIError('proof_rejected', 401); }
     proofStatus = undefined; return active.challengeId;
   };
-  const runProofOperation = (action: (challengeID: string, started: number) => Promise<void>): Promise<void> => {
+  const runProofOperation = (action: (challengeID: string, started: number, signal: AbortSignal) => Promise<void>): Promise<void> => {
     if (proofOperation || operationInFlight) return Promise.reject(operationConflict());
-    const started = ++generation; operationInFlight = true; error = undefined; publish();
+    const started = ++generation; const active = controller(); operationInFlight = true; error = undefined; publish();
     const running = (async () => {
-      try { const challengeID = await checkedProof(started); await action(challengeID, started); }
+      try { const challengeID = await checkedProof(started, active.signal); await action(challengeID, started, active.signal); }
       catch (cause) {
         if (!(cause instanceof HostedAPIError && (cause.code === 'verification_pending' || cause.code === 'temporarily_unavailable'))) discardProof();
         if (!disposed && started === generation && !(cause instanceof HostedAPIError && cause.code === 'verification_pending')) fail(cause);
@@ -143,39 +170,41 @@ export function createMigrationFlow(api: MigrationAPI, render: (state: Migration
       }
     })();
     proofOperation = running;
-    void running.finally(() => { if (proofOperation === running) proofOperation = undefined; if (!disposed && started === generation) { operationInFlight = false; publish(); } }).catch(() => undefined);
+    void running.finally(() => { releaseController(active); if (proofOperation === running) proofOperation = undefined; if (!disposed && started === generation) { operationInFlight = false; publish(); } }).catch(() => undefined);
     return running;
   };
   const submitSelection = async (next: MigrationSelection): Promise<void> => {
     if (disposed || operationInFlight || proofOperation) throw operationConflict();
     if (!preview || !job || job.status !== 'previewed' || !api.selectMigration || !previewAlive()) throw new HostedAPIError('invalid_request', 400);
-    const started = ++generation; operationInFlight = true; error = undefined; publish();
-    try { const result = await api.selectMigration(preview.id, selectionCopy(next)); ensureLive(started); preview = clone(result); replacementConfirmed = false; }
+    const started = ++generation; const active = controller(); operationInFlight = true; error = undefined; publish();
+    try { const result = await tracked(api.selectMigration(preview.id, selectionCopy(next), active.signal)); ensureLive(started); preview = clone(result); replacementConfirmed = false; }
     catch (cause) { if (!disposed && started === generation) fail(cause); throw cause; }
-    finally { if (!disposed && started === generation) { operationInFlight = false; publish(); } }
+    finally { releaseController(active); if (!disposed && started === generation) { operationInFlight = false; publish(); } }
   };
 
   return Object.freeze({
     async preview(file: MigrationFile): Promise<void> {
       if (proofOperation || operationInFlight) throw operationConflict();
       if (disposed || !api.previewMigration || !file.name.toLowerCase().endsWith('.json') || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > migrationFileLimit) throw new HostedAPIError('invalid_request', 400);
-      const started = ++generation; rawFileActive = true; operationInFlight = true; error = undefined; publish();
+      const started = ++generation; const active = controller(); rawFileActive = true; operationInFlight = true; error = undefined; publish();
       let raw = '';
       try {
-        raw = await file.text(); ensureLive(started);
-        const result = await api.previewMigration(raw);
+        raw = await tracked(file.text(active.signal)); ensureLive(started);
+        const upload = api.previewMigration(raw, active.signal); raw = '';
+        const result = await tracked(upload);
         if (disposed || started !== generation) { if (!result.reused) bestEffortJobCancel(result.id); throw new HostedAPIError('operation_failed', 0); }
-        const authoritativeJob = result.reused ? await api.getMigration?.(result.id) : undefined; ensureLive(started);
+        const authoritativeJob = result.reused ? await tracked(api.getMigration?.(result.id, active.signal) ?? Promise.resolve(undefined)) : undefined; ensureLive(started);
         if (result.reused && !authoritativeJob) throw new HostedAPIError('invalid_request', 400);
         preview = clone(result); applyJob(authoritativeJob ?? { id: result.id, status: 'previewed', expiresAt: result.expiresAt });
         duplicatePackage = result.reused; replacementConfirmed = false; obsChecklist = []; error = undefined;
       } catch (cause) { if (!disposed && started === generation) fail(cause); throw cause; }
-      finally { raw = ''; if (!disposed && started === generation) { rawFileActive = false; operationInFlight = false; publish(); } }
+      finally { raw = ''; releaseController(active); if (!disposed && started === generation) { rawFileActive = false; operationInFlight = false; publish(); if (job?.status === 'pending') schedulePoll(0); } }
     },
     acceptPreview(value: MigrationPreview): void {
       if (disposed || proofOperation || operationInFlight) return;
       generation += 1; preview = clone(value); applyJob({ id: value.id, status: 'previewed', expiresAt: value.expiresAt }); duplicatePackage = value.reused; replacementConfirmed = false; obsChecklist = []; error = undefined; publish();
     },
+    resumeJob(value: MigrationJob): void { if (disposed || operationInFlight || proofOperation) return; generation += 1; preview = undefined; replacementConfirmed = false; duplicatePackage = false; applyJob(value); error = undefined; publish(); if (value.status === 'pending') schedulePoll(0); },
     setUnitSelected(unitID: string, selected: boolean): Promise<void> {
       const unit = preview?.units.find((candidate) => candidate.id === unitID);
       if (!preview || !unit || unit.compatibility.status !== 'complete') return Promise.reject(new HostedAPIError('invalid_request', 400));
@@ -201,35 +230,38 @@ export function createMigrationFlow(api: MigrationAPI, render: (state: Migration
       if (proofOperation || operationInFlight) return Promise.reject(operationConflict());
       if (!preview || !canApply() || !api.applyMigration) return Promise.reject(new HostedAPIError('invalid_request', 400));
       const id = preview.id; const confirmedSelection = selectionCopy(preview.selection);
-      return runProofOperation(async (challengeID, started) => { const result = await api.applyMigration!(id, challengeID, confirmedSelection); ensureLive(started); applyJob(result); discardProof(); error = undefined; publish(); });
+      return runProofOperation(async (challengeID, started, signal) => { const result = await tracked(api.applyMigration!(id, challengeID, confirmedSelection, signal)); ensureLive(started); applyJob(result); discardProof(); error = undefined; publish(); if (result.status === 'pending') schedulePoll(0); });
     },
     rollback(): Promise<void> {
       if (proofOperation || operationInFlight) return Promise.reject(operationConflict());
       if (!job || !canRollback() || !api.rollbackMigration) return Promise.reject(new HostedAPIError('invalid_request', 400));
       const id = job.id;
-      return runProofOperation(async (challengeID, started) => { const result = await api.rollbackMigration!(id, challengeID); ensureLive(started); applyJob(result); discardProof(); error = undefined; publish(); });
+      return runProofOperation(async (challengeID, started, signal) => { const result = await tracked(api.rollbackMigration!(id, challengeID, signal)); ensureLive(started); applyJob(result); discardProof(); error = undefined; publish(); });
     },
+    reissueOBS(): Promise<void> { if (!job || job.status !== 'applied' || !api.reissueMigrationOBS) return Promise.reject(new HostedAPIError('invalid_request',400)); const id=job.id; return runProofOperation(async(challengeID,started,signal)=>{const result=await tracked(api.reissueMigrationOBS!(id,challengeID,signal));ensureLive(started);applyJob(result);discardProof();error=undefined;publish();}); },
     async refresh(id: number): Promise<void> {
       if (proofOperation || operationInFlight) throw operationConflict();
       if (disposed || !canRefresh() || !job || id !== job.id || !api.getMigration) throw new HostedAPIError('invalid_request', 400);
-      const started = ++generation; operationInFlight = true; error = undefined; publish();
-      try { const result = await api.getMigration(id); ensureLive(started); applyJob(result); error = undefined; publish(); }
+      const started = ++generation; const active = controller(); operationInFlight = true; error = undefined; publish();
+      try { const result = await tracked(api.getMigration(id, active.signal)); ensureLive(started); applyJob(result); error = undefined; publish(); }
       catch (cause) { if (!disposed && started === generation) fail(cause); throw cause; }
-      finally { if (!disposed && started === generation) { operationInFlight = false; publish(); } }
+      finally { releaseController(active); if (!disposed && started === generation) { operationInFlight = false; publish(); if (job?.status === 'pending') schedulePoll(pollDelay); } }
     },
     async cancel(): Promise<void> {
       if (proofOperation || operationInFlight) throw operationConflict();
       if (disposed || !canCancel() || !job || !api.cancelMigration) throw new HostedAPIError('invalid_request', 400);
-      const started = ++generation; const id = job.id; operationInFlight = true; error = undefined; publish();
-      try { const result = await api.cancelMigration(id); ensureLive(started); applyJob(result); error = undefined; publish(); }
+      const started = ++generation; const active = controller(); const id = job.id; operationInFlight = true; error = undefined; publish();
+      try { const result = await tracked(api.cancelMigration(id, active.signal)); ensureLive(started); applyJob(result); error = undefined; publish(); }
       catch (cause) { if (!disposed && started === generation) fail(cause); throw cause; }
-      finally { if (!disposed && started === generation) { operationInFlight = false; publish(); } }
+      finally { releaseController(active); if (!disposed && started === generation) { operationInFlight = false; publish(); } }
     },
     confirmOBSReplacement(outputID: string, value: boolean): void { const item = obsChecklist.find((candidate) => candidate.outputId === outputID); if (item) { item.replaced = value; publish(); } },
     refreshTime(): void { publish(); },
     reportFailure(cause: unknown): void { fail(cause); },
     async dispose(): Promise<void> {
-      generation += 1; disposed = true; const active = proof; proof = undefined; proofStatus = undefined; preview = undefined; job = undefined; error = undefined; rawFileActive = false; operationInFlight = false; obsChecklist = []; bestEffortCancel(active);
+      generation += 1; disposed = true; stopPolling(); for (const active of controllers) active.abort(); const challenge = proof; proof = undefined; proofStatus = undefined; preview = undefined; job = undefined; error = undefined; rawFileActive = false; operationInFlight = false; obsChecklist = [];
+      if (challenge && api.cancelLogin) { const cleanup = new AbortController(); const cleanupPromise = api.cancelLogin(challenge.challengeId, cleanup.signal).catch(() => undefined); const timeout = new Promise<void>((resolve) => { const timer=setTimer(()=>{cleanup.abort();resolve();}, Math.max(25, Math.min(1_000, clock.settleTimeoutMs ?? 250))); void cleanupPromise.finally(()=>{clearTimer(timer);resolve();}); }); await timeout; }
+      const settle = Promise.allSettled([...pending]).then(() => undefined); await Promise.race([settle, new Promise<void>((resolve)=>{setTimer(resolve, Math.max(25, Math.min(1_000, clock.settleTimeoutMs ?? 250)));})]);
     },
   });
 }
@@ -263,9 +295,9 @@ export function mountMigrationView(root: HTMLElement, api: MigrationAPI, callbac
 
   const appendText = (parent: HTMLElement, tag: 'p' | 'span' | 'strong' | 'h2' | 'h3', text: string, className?: string): HTMLElement => { const element = document.createElement(tag); element.textContent = text; if (className) element.className = className; parent.append(element); return element; };
   const button = (text: string, action: () => void, disabled = false): HTMLButtonElement => { const element = document.createElement('button'); element.type = 'button'; element.textContent = text; element.disabled = disabled; element.addEventListener('click', action); return element; };
-  const unitRow = (unit: MigrationUnit): HTMLElement => {
+  const unitRow = (unit: MigrationUnit, groupBlocked = false): HTMLElement => {
     const row = document.createElement('label'); row.className = 'hosted-migration-unit'; row.dataset.compatibility = unit.compatibility.status;
-    const box = document.createElement('input'); box.type = 'checkbox'; box.checked = unit.selected; box.disabled = state.operationInFlight || unit.compatibility.status !== 'complete'; box.addEventListener('change', () => { void flow.setUnitSelected(unit.id, box.checked).catch(() => undefined); });
+    const box = document.createElement('input'); box.type = 'checkbox'; box.checked = unit.selected; box.disabled = state.operationInFlight || groupBlocked || unit.compatibility.status !== 'complete'; box.addEventListener('change', () => { void flow.setUnitSelected(unit.id, box.checked).catch(() => undefined); });
     const copy = document.createElement('span'); copy.className = 'hosted-migration-unit-copy'; appendText(copy, 'strong', unit.name || unit.id); appendText(copy, 'span', unit.compatibility.status === 'complete' ? '完全兼容' : unit.compatibility.status === 'partial' ? '部分兼容，默认不导入' : '不兼容，无法导入', 'hosted-migration-badge');
     for (const reason of unit.compatibility.reasonCodes) appendText(copy, 'span', reasonText(reason), 'hosted-migration-reason');
     row.append(box, copy); return row;
@@ -278,7 +310,22 @@ export function mountMigrationView(root: HTMLElement, api: MigrationAPI, callbac
     appendText(status, 'span', next.error ?? (busy ? '正在与服务器同步迁移预览…' : next.duplicatePackage ? '已识别重复迁移包，继续显示服务器上的上一次预览。' : '迁移预览不会改动当前在线配置。'));
     previewButton.replaceChildren(); if (next.rawFileActive) { const spinner = document.createElement('span'); spinner.className = 'hosted-migration-spinner'; spinner.setAttribute('aria-hidden', 'true'); previewButton.append(spinner, document.createTextNode('正在预览')); } else previewButton.textContent = next.preview ? '重新上传并预览' : '生成服务器预览';
     previewButton.disabled = busy; previewButton.setAttribute('aria-busy', String(next.rawFileActive)); file.disabled = busy; back.disabled = busy;
-    previewHost.replaceChildren(); if (!next.preview) return;
+    previewHost.replaceChildren();
+    if (!next.preview) {
+      if (next.job) {
+        const resumed = document.createElement('section'); resumed.className = 'hosted-migration-card hosted-migration-progress'; appendText(resumed, 'h2', next.job.status === 'pending' ? '正在恢复待应用迁移' : '迁移历史');
+        appendText(resumed, 'p', next.job.status === 'pending' ? '正在自动检查直播事件边界；网络中断后会自动重试。' : `迁移状态：${next.job.status}`);
+        if (next.job.status === 'applied') appendText(resumed, 'p', next.job.obsReissueRequired ? '配置已经应用，但 OBS 链接签发失败。可重新扫码签发；这会轮换并撤销之前的 OBS 链接。' : '重新签发会轮换凭据，并立即撤销之前的 OBS 链接。', 'hosted-migration-reason');
+        const resumedActions=document.createElement('div');resumedActions.className='hosted-migration-actions';
+        if(next.canRefresh)resumedActions.append(button('立即检查',()=>{void flow.refresh(next.job!.id).catch(()=>undefined);},busy));
+        if(next.canRollback)resumedActions.append(button(`回滚（剩余 ${next.rollbackDaysRemaining ?? 0} 天）`,()=>{void flow.rollback().catch(()=>undefined);},busy));
+        if(next.job.status==='applied')resumedActions.append(button('扫码重新签发 OBS 链接',()=>{void flow.reissueOBS().catch(()=>undefined);},busy));
+        resumed.append(resumedActions);
+        if(next.proof){const proof=document.createElement('div');proof.className='hosted-migration-proof';const image=document.createElement('img');image.className='hosted-qr';image.src=next.proof.qrImage;image.alt='迁移确认 B 站二维码';proof.append(image);appendText(proof,'p',next.proofStatus==='scanned'?'已扫码，请在手机确认。':'请使用 B 站客户端扫码确认。');resumed.append(proof);}
+        previewHost.append(resumed);
+      }
+      return;
+    }
     const current = next.preview;
     const summary = document.createElement('section'); summary.className = 'hosted-migration-card hosted-migration-summary'; appendText(summary, 'h2', '2. 检查服务器预览');
     const metrics = document.createElement('div'); metrics.className = 'hosted-migration-metrics';
@@ -290,9 +337,10 @@ export function mountMigrationView(root: HTMLElement, api: MigrationAPI, callbac
     const units = document.createElement('section'); units.className = 'hosted-migration-card'; appendText(units, 'h2', '3. 选择玩法单元'); appendText(units, 'p', '关联组会整体选择；通用设置和房间建议保持独立。');
     const grouped = new Set<string>();
     for (const group of current.groups) {
-      const card = document.createElement('fieldset'); card.className = 'hosted-migration-group'; const legend = document.createElement('legend'); const groupBox = document.createElement('input'); groupBox.type = 'checkbox'; const members = current.units.filter((unit) => group.unitIds.includes(unit.id)); groupBox.checked = members.length > 0 && members.every((unit) => unit.selected); groupBox.disabled = busy || members.some((unit) => unit.compatibility.status !== 'complete'); groupBox.addEventListener('change', () => { void flow.setGroupSelected(group.id, groupBox.checked).catch(() => undefined); }); legend.append(groupBox, document.createTextNode(' 关联玩法组')); card.append(legend);
+      const card = document.createElement('fieldset'); card.className = 'hosted-migration-group'; const legend = document.createElement('legend'); const groupBox = document.createElement('input'); groupBox.type = 'checkbox'; const members = current.units.filter((unit) => group.unitIds.includes(unit.id)); const groupBlocked = members.some((unit) => unit.compatibility.status !== 'complete'); groupBox.checked = members.length > 0 && members.every((unit) => unit.selected); groupBox.disabled = busy || groupBlocked; groupBox.addEventListener('change', () => { void flow.setGroupSelected(group.id, groupBox.checked).catch(() => undefined); }); legend.append(groupBox, document.createTextNode(' 关联玩法组')); card.append(legend);
+      if (groupBlocked) appendText(card, 'p', '此关联组包含未完全兼容内容，因此所有成员均不可选择。', 'hosted-migration-reason');
       for (const reason of group.reasons) appendText(card, 'p', `关联原因：${reason.kind} · ${reason.referenceId}`, 'hosted-migration-group-reason');
-      for (const member of members) { grouped.add(member.id); card.append(unitRow(member)); }
+      for (const member of members) { grouped.add(member.id); card.append(unitRow(member, groupBlocked)); }
       units.append(card);
     }
     for (const unit of current.units) if (!grouped.has(unit.id)) units.append(unitRow(unit));
@@ -311,7 +359,7 @@ export function mountMigrationView(root: HTMLElement, api: MigrationAPI, callbac
     if (next.proof) { const proof = document.createElement('div'); proof.className = 'hosted-migration-proof'; const image = document.createElement('img'); image.className = 'hosted-qr'; image.src = next.proof.qrImage; image.alt = '迁移确认 B 站二维码'; proof.append(image); appendText(proof, 'p', next.proofStatus === 'scanned' ? '已扫码，请在手机确认。' : '请使用 B 站客户端扫码确认。'); confirm.append(proof); }
     previewHost.append(confirm);
 
-    if (next.job) { const progress = document.createElement('section'); progress.className = 'hosted-migration-card hosted-migration-progress'; appendText(progress, 'h2', '迁移进度'); const labels: Record<MigrationApplyProgress, string> = { idle: '尚未开始', preview_ready: '预览已就绪', waiting_for_live_boundary: '等待直播事件边界，B站连接不会断开', applied: '迁移已应用', cancelled: '迁移已取消', rolled_back: '已创建回滚版本', expired: '迁移预览已过期' }; appendText(progress, 'p', labels[next.applyProgress]); const progressActions = document.createElement('div'); progressActions.className = 'hosted-migration-actions'; if (next.canRefresh) progressActions.append(button('刷新应用进度', () => { void flow.refresh(next.job!.id).catch(() => undefined); }, busy)); if (next.canRollback) progressActions.append(button(`回滚（剩余 ${next.rollbackDaysRemaining ?? 0} 天）`, () => { void flow.rollback().catch(() => undefined); }, busy)); progress.append(progressActions); previewHost.append(progress); }
+    if (next.job) { const progress = document.createElement('section'); progress.className = 'hosted-migration-card hosted-migration-progress'; appendText(progress, 'h2', '迁移进度'); const labels: Record<MigrationApplyProgress, string> = { idle: '尚未开始', preview_ready: '预览已就绪', waiting_for_live_boundary: '等待直播事件边界，B站连接不会断开', applied: '迁移已应用', cancelled: '迁移已取消', rolled_back: '已创建回滚版本', expired: '迁移预览已过期' }; appendText(progress, 'p', labels[next.applyProgress]); if(next.job.obsReissueRequired)appendText(progress,'p','配置已应用，但 OBS 链接需重新签发；签发会轮换并撤销旧链接。','hosted-migration-reason'); const progressActions = document.createElement('div'); progressActions.className = 'hosted-migration-actions'; if (next.canRefresh) progressActions.append(button('刷新应用进度', () => { void flow.refresh(next.job!.id).catch(() => undefined); }, busy)); if (next.canRollback) progressActions.append(button(`回滚（剩余 ${next.rollbackDaysRemaining ?? 0} 天）`, () => { void flow.rollback().catch(() => undefined); }, busy)); if(next.job.status==='applied'&&next.job.obsReissueRequired)progressActions.append(button('扫码重新签发 OBS 链接',()=>{void flow.reissueOBS().catch(()=>undefined);},busy)); progress.append(progressActions); previewHost.append(progress); }
     if (next.obsChecklist?.length) { const obs = document.createElement('section'); obs.className = 'hosted-migration-card hosted-migration-obs'; appendText(obs, 'h2', '逐项替换 OBS 链接'); appendText(obs, 'p', 'EXE 的 localhost 链接仍可独立使用；请在 OBS 中逐项替换为新的 HTTPS 链接。'); for (const item of next.obsChecklist) { const row = document.createElement('label'); const box = document.createElement('input'); box.type = 'checkbox'; box.checked = item.replaced; box.addEventListener('change', () => flow.confirmOBSReplacement(item.outputId, box.checked)); const copy = document.createElement('span'); appendText(copy, 'strong', item.name || item.outputId); const link = document.createElement('a'); link.href = item.url; link.textContent = item.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; copy.append(link); row.append(box, copy); obs.append(row); } previewHost.append(obs); }
   };
   const flow = createMigrationFlow(api, render); render(state);

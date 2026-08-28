@@ -736,9 +736,12 @@ func New(dependencies Dependencies) http.Handler {
 	}
 	if dependencies.Migration != nil {
 		mux.Handle("POST /api/migrations/preview", dependencies.Migration)
+		mux.Handle("GET /api/migrations", dependencies.Migration)
+		mux.Handle("PUT /api/migrations/{id}/selection", dependencies.Migration)
 		mux.Handle("POST /api/migrations/{id}/apply", dependencies.Migration)
 		mux.Handle("DELETE /api/migrations/{id}", dependencies.Migration)
 		mux.Handle("POST /api/migrations/{id}/rollback", dependencies.Migration)
+		mux.Handle("POST /api/migrations/{id}/obs-links", dependencies.Migration)
 		mux.Handle("GET /api/migrations/{id}", dependencies.Migration)
 	}
 	if dependencies.BiliService != nil {

@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -194,7 +195,7 @@ func (handler *HTTPHandler) events(response http.ResponseWriter, request *http.R
 		return
 	}
 	publicID := request.PathValue("publicID")
-	if !validPublicID(publicID) || request.URL.RawQuery != "" || request.ContentLength > 0 {
+	if !validPublicID(publicID) || !validOBSOutputQuery(request.URL.Query()) || request.ContentLength > 0 {
 		writeOBSError(response, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -307,6 +308,19 @@ func (handler *HTTPHandler) events(response http.ResponseWriter, request *http.R
 			}
 		}
 	}
+}
+
+var obsOutputPattern = regexp.MustCompile(`^(?:attribute|gift-target):[A-Za-z0-9_-]{1,128}$|^scene:[A-Za-z0-9_-]{1,128}:[A-Za-z0-9_-]{1,128}(?:,[A-Za-z0-9_-]{1,128})*$`)
+
+func validOBSOutputQuery(values url.Values) bool {
+	if len(values) == 0 {
+		return true
+	}
+	if len(values) != 1 {
+		return false
+	}
+	outputs, ok := values["output"]
+	return ok && len(outputs) == 1 && obsOutputPattern.MatchString(outputs[0])
 }
 
 func (handler *HTTPHandler) initialSnapshot(ctx context.Context, accountID int64) (hostedruntime.DisplaySnapshot, error) {

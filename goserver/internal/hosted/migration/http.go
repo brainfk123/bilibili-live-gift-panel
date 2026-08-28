@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -24,11 +25,13 @@ type migrationHTTPService interface {
 	Preview(context.Context, int64, Envelope) (Preview, error)
 	Select(context.Context, int64, int64, SelectionCommand) (Preview, error)
 	Get(context.Context, int64, int64) (Job, error)
+	History(context.Context, int64) ([]HistoryJob, error)
 	PreauthorizeApply(context.Context, int64, int64) (Job, error)
 	PreauthorizeRollback(context.Context, int64, int64) (Job, error)
 	Apply(context.Context, int64, int64, SelectionCommand) (Job, error)
 	Cancel(context.Context, int64, int64) (Job, error)
 	Rollback(context.Context, int64, int64) (Job, error)
+	OBSOutputs(context.Context, int64, int64) ([]OBSOutput, error)
 }
 
 type accountProofConsumer interface {
@@ -43,6 +46,7 @@ type HTTPOptions struct {
 	ClientIP      identity.ClientIPResolver
 	Authenticate  func(http.Handler) http.Handler
 	AccountID     func(context.Context) (int64, bool)
+	IssueOBS      func(context.Context, int64) (string, error)
 }
 
 type HTTPHandler struct {
@@ -53,7 +57,16 @@ type HTTPHandler struct {
 	clientIP                 identity.ClientIPResolver
 	authenticate             func(http.Handler) http.Handler
 	accountID                func(context.Context) (int64, bool)
+	issueOBS                 func(context.Context, int64) (string, error)
 	mux                      *http.ServeMux
+}
+
+func (handler *HTTPHandler) SetOBSIssuer(issue func(context.Context, int64) (string, error)) error {
+	if handler == nil || issue == nil {
+		return ErrInvalidInput
+	}
+	handler.issueOBS = issue
+	return nil
 }
 
 func NewHTTPHandler(service migrationHTTPService, proof accountProofConsumer, options HTTPOptions) (*HTTPHandler, error) {
@@ -67,14 +80,37 @@ func NewHTTPHandler(service migrationHTTPService, proof accountProofConsumer, op
 	if options.AccountID == nil {
 		options.AccountID = identity.AccountIDFromContext
 	}
-	handler := &HTTPHandler{service: service, proofConsumer: proof, allowedOrigin: options.AllowedOrigin, csrfToken: options.CSRFToken, limiter: options.Limiter, clientIP: options.ClientIP, authenticate: options.Authenticate, accountID: options.AccountID, mux: http.NewServeMux()}
+	handler := &HTTPHandler{service: service, proofConsumer: proof, allowedOrigin: options.AllowedOrigin, csrfToken: options.CSRFToken, limiter: options.Limiter, clientIP: options.ClientIP, authenticate: options.Authenticate, accountID: options.AccountID, issueOBS: options.IssueOBS, mux: http.NewServeMux()}
 	handler.mux.HandleFunc("POST /api/migrations/preview", handler.preview)
+	handler.mux.HandleFunc("GET /api/migrations", handler.history)
 	handler.mux.HandleFunc("PUT /api/migrations/{id}/selection", handler.selectUnits)
 	handler.mux.HandleFunc("POST /api/migrations/{id}/apply", handler.apply)
 	handler.mux.HandleFunc("DELETE /api/migrations/{id}", handler.cancel)
 	handler.mux.HandleFunc("POST /api/migrations/{id}/rollback", handler.rollback)
+	handler.mux.HandleFunc("POST /api/migrations/{id}/obs-links", handler.reissueOBSLinks)
 	handler.mux.HandleFunc("GET /api/migrations/{id}", handler.get)
 	return handler, nil
+}
+
+func (handler *HTTPHandler) history(response http.ResponseWriter, request *http.Request) {
+	if request.URL.RawQuery != "" || !emptyMigrationBody(response, request) {
+		writeMigrationError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if !handler.allow(request, "migration_history") {
+		writeMigrationError(response, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
+	handler.authenticated(response, request, func(accountID int64, request *http.Request) {
+		jobs, err := handler.service.History(request.Context(), accountID)
+		if err != nil {
+			handler.writeServiceError(response, err)
+			return
+		}
+		writeMigrationJSON(response, http.StatusOK, struct {
+			Jobs []HistoryJob `json:"jobs"`
+		}{Jobs: jobs})
+	})
 }
 
 func (handler *HTTPHandler) selectUnits(response http.ResponseWriter, request *http.Request) {
@@ -209,8 +245,103 @@ func (handler *HTTPHandler) apply(response http.ResponseWriter, request *http.Re
 			handler.writeServiceError(response, err)
 			return
 		}
+		if job.Status == jobApplied {
+			job = handler.attachOBSLinks(request.Context(), accountID, jobID, job)
+		}
 		writeMigrationJSON(response, http.StatusOK, job)
 	})
+}
+
+func (handler *HTTPHandler) reissueOBSLinks(response http.ResponseWriter, request *http.Request) {
+	var body struct {
+		ChallengeID string `json:"challengeId"`
+	}
+	if !handler.acceptJSONMutation(request) {
+		handler.writeRejection(response, request)
+		return
+	}
+	if !handler.allow(request, "migration_obs_reissue") {
+		writeMigrationError(response, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
+	if !decodeMigrationJSON(response, request, &body) || body.ChallengeID == "" || len(body.ChallengeID) > 256 {
+		writeMigrationError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	jobID, ok := migrationPathID(request)
+	if !ok {
+		writeMigrationError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	handler.authenticated(response, request, func(accountID int64, request *http.Request) {
+		job, err := handler.service.Get(request.Context(), accountID, jobID)
+		if err != nil || job.Status != jobApplied {
+			if err == nil {
+				err = ErrConflict
+			}
+			handler.writeServiceError(response, err)
+			return
+		}
+		if err := handler.proofConsumer.ConsumeAccountProof(request.Context(), body.ChallengeID, accountID, 15*time.Minute); err != nil {
+			handler.writeProofError(response, err)
+			return
+		}
+		job = handler.attachOBSLinks(request.Context(), accountID, jobID, job)
+		if job.OBSReissueRequired {
+			handler.writeServiceError(response, ErrUnavailable)
+			return
+		}
+		writeMigrationJSON(response, http.StatusOK, job)
+	})
+}
+
+var obsOutputSelectorPattern = regexp.MustCompile(`^(?:attribute|gift-target):[A-Za-z0-9_-]{1,128}$|^scene:[A-Za-z0-9_-]{1,128}:[A-Za-z0-9_-]{1,128}(?:,[A-Za-z0-9_-]{1,128})*$`)
+var obsCredentialPathPattern = regexp.MustCompile(`^/obs/[A-Za-z0-9_-]{43}$`)
+
+func (handler *HTTPHandler) attachOBSLinks(ctx context.Context, accountID, jobID int64, job Job) Job {
+	outputs, err := handler.service.OBSOutputs(ctx, accountID, jobID)
+	if err != nil || len(outputs) == 0 {
+		if err != nil {
+			job.OBSReissueRequired = true
+		}
+		return job
+	}
+	if handler.issueOBS == nil {
+		job.OBSReissueRequired = true
+		return job
+	}
+	base, err := handler.issueOBS(ctx, accountID)
+	if err != nil {
+		job.OBSReissueRequired = true
+		return job
+	}
+	parsed, err := url.Parse(base)
+	if err != nil || parsed == nil {
+		job.OBSReissueRequired = true
+		return job
+	}
+	fragment, fragmentErr := url.ParseQuery(parsed.Fragment)
+	tokens := fragment["token"]
+	origin := (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host}).String()
+	if parsed.Scheme != "https" || origin != handler.allowedOrigin || parsed.User != nil || parsed.RawPath != "" || parsed.RawQuery != "" || !obsCredentialPathPattern.MatchString(parsed.Path) || fragmentErr != nil || len(fragment) != 1 || len(tokens) != 1 || tokens[0] == "" || len(tokens[0]) > 512 {
+		job.OBSReissueRequired = true
+		return job
+	}
+	links := make([]OBSLink, 0, len(outputs))
+	for _, output := range outputs {
+		if !obsOutputSelectorPattern.MatchString(output.Selector) {
+			job.OBSReissueRequired = true
+			job.OBSLinks = nil
+			return job
+		}
+		candidate := *parsed
+		query := url.Values{}
+		query.Set("output", output.Selector)
+		candidate.RawQuery = query.Encode()
+		links = append(links, OBSLink{OutputID: output.Selector, Name: output.Name, URL: candidate.String()})
+	}
+	job.OBSLinks = links
+	return job
 }
 
 func (handler *HTTPHandler) cancel(response http.ResponseWriter, request *http.Request) {

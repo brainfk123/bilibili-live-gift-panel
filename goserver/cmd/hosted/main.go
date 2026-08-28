@@ -254,6 +254,12 @@ func run() error {
 			if err != nil {
 				return errors.New("configure hosted OBS")
 			}
+			if err := migrationHTTP.SetOBSIssuer(func(ctx context.Context, accountID int64) (string, error) {
+				issued, issueErr := obsService.IssueForAccount(ctx, accountID)
+				return issued.URL, issueErr
+			}); err != nil {
+				return errors.New("configure migration OBS issuer")
+			}
 			obsHTTP, err := hostedobs.NewHTTPHandler(obsService, hostedobs.HTTPOptions{
 				AllowedOrigin: config.AdminAllowedOrigin, CSRFToken: config.AdminCSRFToken,
 				Limiter: limiter, ClientIP: resolver, Runtime: runtimeManager, Publisher: runtimePublisher,

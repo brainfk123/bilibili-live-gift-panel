@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,10 +37,33 @@ const (
 // Job is the privacy-safe lifecycle projection returned to migration callers.
 // It contains neither raw uploads nor normalized configuration/runtime data.
 type Job struct {
-	ID                int64     `json:"id"`
-	Status            string    `json:"status"`
-	ExpiresAt         time.Time `json:"expiresAt,omitempty"`
-	RollbackExpiresAt time.Time `json:"rollbackExpiresAt,omitempty"`
+	ID                 int64     `json:"id"`
+	Status             string    `json:"status"`
+	ExpiresAt          time.Time `json:"expiresAt,omitempty"`
+	RollbackExpiresAt  time.Time `json:"rollbackExpiresAt,omitempty"`
+	OBSLinks           []OBSLink `json:"obsLinks,omitempty"`
+	OBSReissueRequired bool      `json:"obsReissueRequired,omitempty"`
+}
+
+type OBSLink struct {
+	OutputID string `json:"outputId"`
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+}
+type OBSOutput struct {
+	Selector string
+	Name     string
+}
+
+// HistoryJob is the bounded, read-only lifecycle projection. Optional times
+// are pointers so absent database values never serialize as zero instants.
+type HistoryJob struct {
+	ID                int64      `json:"id"`
+	Status            string     `json:"status"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	AppliedAt         *time.Time `json:"appliedAt,omitempty"`
+	ExpiresAt         *time.Time `json:"expiresAt,omitempty"`
+	RollbackExpiresAt *time.Time `json:"rollbackExpiresAt,omitempty"`
 }
 
 // OwnerFence is the exact cross-process runtime ownership claim authorized to
@@ -74,6 +99,15 @@ type storedJob struct {
 	Status            string
 	ExpiresAt         time.Time
 	RollbackExpiresAt time.Time
+}
+
+type storedHistoryJob struct {
+	ID, AccountID     int64
+	Status            string
+	CreatedAt         time.Time
+	AppliedAt         sql.NullTime
+	ExpiresAt         sql.NullTime
+	RollbackExpiresAt sql.NullTime
 }
 
 // Preview deliberately contains no account ID, normalized configuration,
@@ -140,6 +174,12 @@ type storedComposition struct {
 	KeepRoomSuggestion bool
 }
 
+type storedAppliedDefinition struct {
+	ID, AccountID int64
+	Status        string
+	Definition    configuration.Definition
+}
+
 // Repository is intentionally narrow: the migration package owns preview
 // transaction and quota semantics without exposing a raw-upload repository.
 type Repository interface {
@@ -158,8 +198,16 @@ type lifecycleRepository interface {
 	Get(context.Context, int64, int64) (storedJob, error)
 }
 
+type historyRepository interface {
+	History(context.Context, int64, time.Time, int) ([]storedHistoryJob, error)
+}
+
 type compositionRepository interface {
 	LoadComposition(context.Context, int64, int64) (storedComposition, error)
+}
+
+type obsOutputRepository interface {
+	LoadAppliedDefinition(context.Context, int64, int64) (storedAppliedDefinition, error)
 }
 
 type stagedApplyRepository interface {
@@ -629,6 +677,78 @@ func (service *Service) Get(ctx context.Context, accountID, jobID int64) (Job, e
 	return publicJob(stored, accountID, err)
 }
 
+const historyLimit = 20
+
+func (service *Service) History(ctx context.Context, accountID int64) ([]HistoryJob, error) {
+	if service == nil || accountID <= 0 {
+		return nil, ErrInvalidInput
+	}
+	repository, ok := service.repository.(historyRepository)
+	if !ok {
+		return nil, ErrUnavailable
+	}
+	now := service.now().UTC()
+	stored, err := repository.History(ctx, accountID, now, historyLimit)
+	if err != nil {
+		return nil, err
+	}
+	if len(stored) > historyLimit {
+		return nil, ErrUnavailable
+	}
+	result := make([]HistoryJob, len(stored))
+	for index, item := range stored {
+		if item.ID <= 0 || item.AccountID != accountID || item.CreatedAt.IsZero() || (item.Status != jobPending && (item.Status != jobApplied || !item.RollbackExpiresAt.Valid || !item.RollbackExpiresAt.Time.After(now))) {
+			return nil, ErrUnavailable
+		}
+		result[index] = HistoryJob{ID: item.ID, Status: item.Status, CreatedAt: item.CreatedAt.UTC(), AppliedAt: nullableTime(item.AppliedAt), ExpiresAt: nullableTime(item.ExpiresAt), RollbackExpiresAt: nullableTime(item.RollbackExpiresAt)}
+	}
+	return result, nil
+}
+
+func (service *Service) OBSOutputs(ctx context.Context, accountID, jobID int64) ([]OBSOutput, error) {
+	if service == nil || accountID <= 0 || jobID <= 0 {
+		return nil, ErrInvalidInput
+	}
+	repository, ok := service.repository.(obsOutputRepository)
+	if !ok {
+		return nil, ErrUnavailable
+	}
+	stored, err := repository.LoadAppliedDefinition(ctx, accountID, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if stored.ID != jobID || stored.AccountID != accountID {
+		return nil, ErrUnavailable
+	}
+	if stored.Status != jobApplied {
+		return nil, ErrConflict
+	}
+	definition := stored.Definition
+	result := make([]OBSOutput, 0, len(definition.Attributes)+len(definition.DisplayScenes)+len(definition.GiftTargetPanels))
+	for _, item := range definition.Attributes {
+		result = append(result, OBSOutput{Selector: "attribute:" + item.ID, Name: item.Name})
+	}
+	for _, item := range definition.DisplayScenes {
+		if len(item.AttributeIDs) == 0 {
+			continue
+		}
+		result = append(result, OBSOutput{Selector: "scene:" + item.ID + ":" + strings.Join(item.AttributeIDs, ","), Name: item.Name})
+	}
+	for _, item := range definition.GiftTargetPanels {
+		result = append(result, OBSOutput{Selector: "gift-target:" + item.ID, Name: item.Name})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Selector < result[j].Selector })
+	return result, nil
+}
+
+func nullableTime(value sql.NullTime) *time.Time {
+	if !value.Valid {
+		return nil
+	}
+	result := value.Time.UTC()
+	return &result
+}
+
 func publicJob(stored storedJob, accountID int64, err error) (Job, error) {
 	if err != nil {
 		return Job{}, err
@@ -858,6 +978,7 @@ func decodeStoredPreview(id, accountID int64, status string, expiry time.Time, r
 }
 
 const compositionQuery = "SELECT j.status, j.expires_at, j.keep_room_suggestion, j.definition_json, j.runtime_json, j.room_suggestion, j.source_app_version, j.source_schema_version, j.report_json, v.definition_json, s.runtime_json FROM migration_jobs AS j LEFT JOIN account_active_config AS active ON active.account_id = j.account_id LEFT JOIN account_config_versions AS v ON v.account_id = active.account_id AND v.id = active.config_version_id LEFT JOIN account_runtime_state AS s ON s.account_id = j.account_id AND s.config_version_id = active.config_version_id WHERE j.id = ? AND j.account_id = ?"
+const appliedDefinitionQuery = "SELECT j.id, j.account_id, j.status, v.definition_json FROM migration_jobs AS j JOIN account_config_versions AS v ON v.account_id = j.account_id AND v.id = j.applied_config_version_id WHERE j.id = ? AND j.account_id = ?"
 const rollbackCandidateQuery = "SELECT j.status, v.definition_json, j.rollback_runtime_json FROM migration_jobs AS j JOIN account_config_versions AS v ON v.account_id = j.account_id AND v.id = j.rollback_config_version_id WHERE j.id = ? AND j.account_id = ?"
 
 func (repository *sqlRepository) LoadComposition(ctx context.Context, accountID, jobID int64) (storedComposition, error) {
@@ -924,6 +1045,23 @@ func (repository *sqlRepository) LoadComposition(ctx context.Context, accountID,
 	return result, nil
 }
 
+func (repository *sqlRepository) LoadAppliedDefinition(ctx context.Context, accountID, jobID int64) (storedAppliedDefinition, error) {
+	if repository == nil || repository.db == nil || ctx == nil || accountID <= 0 || jobID <= 0 {
+		return storedAppliedDefinition{}, ErrInvalidInput
+	}
+	var result storedAppliedDefinition
+	var definitionJSON []byte
+	err := repository.db.QueryRowContext(ctx, appliedDefinitionQuery, jobID, accountID).Scan(&result.ID, &result.AccountID, &result.Status, &definitionJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storedAppliedDefinition{}, ErrNotFound
+	}
+	if err != nil || result.ID != jobID || result.AccountID != accountID || result.Status != jobApplied || len(definitionJSON) == 0 || json.Unmarshal(definitionJSON, &result.Definition) != nil {
+		return storedAppliedDefinition{}, ErrUnavailable
+	}
+	result.Definition.MigrationHash = ""
+	return result, nil
+}
+
 func (repository *sqlRepository) LoadRollbackCandidate(ctx context.Context, accountID, jobID int64) (configuration.Definition, configuration.RuntimeState, error) {
 	if repository == nil || repository.db == nil || ctx == nil || accountID <= 0 || jobID <= 0 {
 		return configuration.Definition{}, configuration.RuntimeState{}, ErrInvalidInput
@@ -986,6 +1124,32 @@ type lockedJob struct {
 	definition       []byte
 	runtime          []byte
 	room             sql.NullString
+}
+
+const historyQuery = "SELECT id, status, created_at, applied_at, expires_at, rollback_expires_at FROM migration_jobs WHERE account_id = ? AND (status = 'pending' OR (status = 'applied' AND rollback_expires_at > ?)) ORDER BY created_at DESC, id DESC LIMIT ?"
+
+func (repository *sqlRepository) History(ctx context.Context, accountID int64, now time.Time, limit int) ([]storedHistoryJob, error) {
+	if repository == nil || repository.db == nil || accountID <= 0 || now.IsZero() || limit <= 0 || limit > historyLimit {
+		return nil, ErrInvalidInput
+	}
+	rows, err := repository.db.QueryContext(ctx, historyQuery, accountID, now.UTC(), limit)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	defer rows.Close()
+	result := make([]storedHistoryJob, 0, limit)
+	for rows.Next() {
+		var item storedHistoryJob
+		item.AccountID = accountID
+		if err := rows.Scan(&item.ID, &item.Status, &item.CreatedAt, &item.AppliedAt, &item.ExpiresAt, &item.RollbackExpiresAt); err != nil {
+			return nil, ErrUnavailable
+		}
+		result = append(result, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, ErrUnavailable
+	}
+	return result, nil
 }
 
 func (repository *sqlRepository) Get(ctx context.Context, accountID, jobID int64) (storedJob, error) {

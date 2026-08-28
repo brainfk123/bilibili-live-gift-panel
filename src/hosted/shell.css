@@ -1787,7 +1787,6 @@ body:has(.hosted-migration-settings) {
   min-height: 100vh;
   margin: 0 auto;
   padding: 2rem 0 4rem;
-  overflow-x: clip;
   color: #172033;
   font-family: "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
 }
@@ -1871,6 +1870,14 @@ body:has(.hosted-migration-settings) {
 @keyframes hosted-migration-feedback-in { from { opacity: 0; transform: translateY(-0.25rem); } }
 
 .hosted-migration-preview { display: grid; min-width: 0; gap: 1rem; margin-top: 1rem; }
+.hosted-migration-center input,
+.hosted-migration-center select,
+.hosted-migration-center button,
+.hosted-migration-center a,
+.hosted-migration-settings input,
+.hosted-migration-settings select,
+.hosted-migration-settings button,
+.hosted-migration-settings a { max-width: 100%; box-sizing: border-box; }
 .hosted-migration-card,
 .hosted-migration-settings-card {
   min-width: 0;
@@ -1950,6 +1957,9 @@ body:has(.hosted-migration-settings) {
 }
 .hosted-migration-prompt p { margin: 0.3rem 0 0; color: #526078; line-height: 1.5; }
 .hosted-migration-prompt-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
+.hosted-migration-settings-history { display: grid; min-width: 0; gap: 0.6rem; margin-top: 1rem; }
+.hosted-migration-settings-history > article { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 0.75rem; min-width: 0; padding: 0.75rem; background:#fff; border:1px solid #d8e0ec; border-radius:0.7rem; }
+.hosted-migration-settings-history p { margin:0.2rem 0 0; overflow-wrap:anywhere; color:#637087; }
 
 @media (max-width: 720px) {
   .hosted-migration-center,
@@ -1963,6 +1973,8 @@ body:has(.hosted-migration-settings) {
   .hosted-migration-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .hosted-migration-conflict { grid-template-columns: minmax(0, 1fr); gap: 0.4rem; }
   .hosted-migration-prompt-actions { justify-content: flex-end; }
+  .hosted-migration-settings-history > article { grid-template-columns:minmax(0,1fr); }
+  .hosted-migration-settings-history button { justify-self:end; }
 }
 
 @media (max-width: 420px) {

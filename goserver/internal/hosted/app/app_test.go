@@ -980,9 +980,12 @@ func TestMigrationMethodRoutesWinOverBroaderAuthenticationPrefix(t *testing.T) {
 	handler := New(Dependencies{DB: fakeHealth{}, Auth: auth, Migration: migration})
 	for _, route := range []struct{ method, path string }{
 		{http.MethodPost, "/api/migrations/preview"},
+		{http.MethodGet, "/api/migrations"},
+		{http.MethodPut, "/api/migrations/9/selection"},
 		{http.MethodPost, "/api/migrations/9/apply"},
 		{http.MethodDelete, "/api/migrations/9"},
 		{http.MethodPost, "/api/migrations/9/rollback"},
+		{http.MethodPost, "/api/migrations/9/obs-links"},
 		{http.MethodGet, "/api/migrations/9"},
 	} {
 		response := httptest.NewRecorder()

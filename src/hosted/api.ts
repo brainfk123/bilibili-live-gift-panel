@@ -177,7 +177,9 @@ export interface MigrationJob {
   expiresAt?: string;
   rollbackExpiresAt?: string;
   obsLinks?: MigrationOBSLink[];
+  obsReissueRequired?: boolean;
 }
+export interface MigrationHistoryJob { id: number; status: MigrationJob['status']; createdAt: string; appliedAt?: string; expiresAt?: string; rollbackExpiresAt?: string }
 
 const stableErrors = new Set([
   'authentication_failed', 'authentication_required', 'invalid_request', 'operation_failed',
@@ -390,10 +392,18 @@ function migrationGeneralSettings(value: unknown): MigrationGeneralSettings | un
   return item && exactKeys(item, ['configurationMode']) && text(item.configurationMode) ? { configurationMode: item.configurationMode } : undefined;
 }
 
+function validMigrationOBSSelector(value: string): boolean {
+  if (/^(?:attribute|gift-target):[A-Za-z0-9_-]{1,128}$/.test(value)) return true;
+  const scene = /^scene:[A-Za-z0-9_-]{1,128}:([A-Za-z0-9_-]{1,128}(?:,[A-Za-z0-9_-]{1,128})*)$/.exec(value);
+  if (!scene) return false;
+  const attributeIDs = scene[1]!.split(',');
+  return new Set(attributeIDs).size === attributeIDs.length;
+}
+
 function migrationOBSLink(value: unknown): MigrationOBSLink | undefined {
   const item = object(value);
   if (!item || !exactKeys(item, ['outputId', 'name', 'url']) || !string(item.outputId) || !text(item.name) || !string(item.url)) return undefined;
-  try { const parsed = new URL(item.url); if (parsed.protocol !== 'https:' || parsed.username || parsed.password || !parsed.host) return undefined; }
+  try { const parsed = new URL(item.url); const query=[...parsed.searchParams.keys()]; const output=parsed.searchParams.getAll('output'); const fragment=new URLSearchParams(parsed.hash.slice(1)); const token=fragment.get('token'); const currentOrigin=typeof location==='undefined'?undefined:location.origin; if (parsed.protocol !== 'https:' || parsed.username || parsed.password || !parsed.host || !/^\/obs\/[A-Za-z0-9_-]{43}$/.test(parsed.pathname) || query.length!==1 || query[0]!=='output' || output.length!==1 || item.outputId!==output[0] || !validMigrationOBSSelector(output[0]!) || [...fragment.keys()].length!==1 || !token || token.length>512 || (currentOrigin && parsed.origin!==currentOrigin)) return undefined; }
   catch { return undefined; }
   return item as unknown as MigrationOBSLink;
 }
@@ -409,7 +419,7 @@ function migrationPreview(value: unknown): MigrationPreview | undefined {
 
 function migrationJob(value: unknown): MigrationJob | undefined {
   const item = object(value);
-  if (!item || !exactKeys(item, ['id', 'status'], ['expiresAt', 'rollbackExpiresAt', 'obsLinks']) || !number(item.id) || item.id === 0 || !string(item.status) || !['previewed', 'pending', 'applied', 'cancelled', 'rolled_back', 'expired'].includes(item.status) || (item.expiresAt !== undefined && !instant(item.expiresAt)) || (item.rollbackExpiresAt !== undefined && !instant(item.rollbackExpiresAt)) || (item.obsLinks !== undefined && !Array.isArray(item.obsLinks))) return undefined;
+  if (!item || !exactKeys(item, ['id', 'status'], ['expiresAt', 'rollbackExpiresAt', 'obsLinks', 'obsReissueRequired']) || !number(item.id) || item.id === 0 || !string(item.status) || !['previewed', 'pending', 'applied', 'cancelled', 'rolled_back', 'expired'].includes(item.status) || (item.expiresAt !== undefined && !instant(item.expiresAt)) || (item.rollbackExpiresAt !== undefined && !instant(item.rollbackExpiresAt)) || (item.obsLinks !== undefined && !Array.isArray(item.obsLinks)) || (item.obsReissueRequired !== undefined && typeof item.obsReissueRequired !== 'boolean')) return undefined;
   const obsLinks = (item.obsLinks ?? []).map(migrationOBSLink); if (obsLinks.some((entry) => !entry)) return undefined;
   return { ...item, ...(item.obsLinks === undefined ? {} : { obsLinks: obsLinks as MigrationOBSLink[] }) } as unknown as MigrationJob;
 }
@@ -507,7 +517,7 @@ export class HostedAPI {
     try { return await response.json(); } catch { throw new HostedAPIError('invalid_response', response.status); }
   }
 
-  private async request(path: string, method: string, expectedStatus: number | readonly number[], body?: unknown, extraHeaders:Record<string,string>={}): Promise<{ status: number; data: unknown }> {
+  private async request(path: string, method: string, expectedStatus: number | readonly number[], body?: unknown, extraHeaders:Record<string,string>={}, signal?: AbortSignal): Promise<{ status: number; data: unknown }> {
     const mutation = method !== 'GET';
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (mutation) headers['X-CSRF-Token'] = this.csrfToken;
@@ -516,6 +526,7 @@ export class HostedAPI {
     const response = await this.fetcher(path, {
       method, credentials: 'same-origin', headers,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(signal ? { signal } : {}),
     });
     const expected = Array.isArray(expectedStatus) ? expectedStatus : [expectedStatus];
     if (response.status === 204) {
@@ -534,9 +545,9 @@ export class HostedAPI {
     return { status: response.status, data };
   }
 
-  private async requestRawJSON(path: string, expectedStatus: number | readonly number[], body: string): Promise<{ status: number; data: unknown }> {
+  private async requestRawJSON(path: string, expectedStatus: number | readonly number[], body: string, signal?: AbortSignal): Promise<{ status: number; data: unknown }> {
     const response = await this.fetcher(path, {
-      method: 'POST', credentials: 'same-origin', headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': this.csrfToken }, body,
+      method: 'POST', credentials: 'same-origin', headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': this.csrfToken }, body, ...(signal ? { signal } : {}),
     });
     const data = await HostedAPI.readJSON(response);
     const errorBody = object(data);
@@ -551,18 +562,18 @@ export class HostedAPI {
     return result;
   }
 
-  async beginLogin(): Promise<Challenge> { return this.requireChallenge((await this.request('/api/auth/bili/challenges', 'POST', 201)).data); }
-  async cancelLogin(id: string): Promise<void> { await this.request(`/api/auth/bili/challenges/${encodeURIComponent(id)}`, 'DELETE', 204); }
+  async beginLogin(signal?: AbortSignal): Promise<Challenge> { return this.requireChallenge((await this.request('/api/auth/bili/challenges', 'POST', 201, undefined, {}, signal)).data); }
+  async cancelLogin(id: string, signal?: AbortSignal): Promise<void> { await this.request(`/api/auth/bili/challenges/${encodeURIComponent(id)}`, 'DELETE', 204, undefined, {}, signal); }
   async createSession(challengeId: string): Promise<void> { await this.request('/api/auth/session', 'POST', 204, { challengeId }); }
   async logout(): Promise<void> { await this.request('/api/auth/session', 'DELETE', 204); }
-  async session(): Promise<boolean> {
-    const data = object((await this.request('/api/auth/session', 'GET', 200)).data);
-    if (!data || !exactKeys(data, ['authenticated']) || data.authenticated !== true) throw new HostedAPIError('invalid_response', 200);
-    return true;
+  async session(signal?: AbortSignal): Promise<{ accountScope: string }> {
+    const data = object((await this.request('/api/auth/session', 'GET', 200, undefined, {}, signal)).data);
+    if (!data || !exactKeys(data, ['authenticated', 'accountScope']) || data.authenticated !== true || typeof data.accountScope !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(data.accountScope)) throw new HostedAPIError('invalid_response', 200);
+    return { accountScope: data.accountScope };
   }
-  async pollLogin(id: string): Promise<PollResult> {
+  async pollLogin(id: string, signal?: AbortSignal): Promise<PollResult> {
     try {
-      const response = await this.request(`/api/auth/bili/challenges/${encodeURIComponent(id)}`, 'GET', [200, 410]);
+      const response = await this.request(`/api/auth/bili/challenges/${encodeURIComponent(id)}`, 'GET', [200, 410], undefined, {}, signal);
       const data = object(response.data);
       if (!data || !string(data.status)) throw new HostedAPIError('invalid_response', 200);
       if (response.status === 410) {
@@ -616,20 +627,22 @@ export class HostedAPI {
     await this.request('/api/runtime/room', 'PUT', 204, { roomId });
   }
 
-  async previewMigration(rawJSON: string): Promise<MigrationPreview> {
-    const result = migrationPreview((await this.requestRawJSON('/api/migrations/preview', 201, rawJSON)).data);
+  async previewMigration(rawJSON: string, signal?: AbortSignal): Promise<MigrationPreview> {
+    const result = migrationPreview((await this.requestRawJSON('/api/migrations/preview', 201, rawJSON, signal)).data);
     if (!result) throw new HostedAPIError('invalid_response', 201);
     return result;
   }
-  async selectMigration(id: number, selection: MigrationSelection): Promise<MigrationPreview> {
-    const result = migrationPreview((await this.request(`/api/migrations/${id}/selection`, 'PUT', 200, selection)).data);
+  async selectMigration(id: number, selection: MigrationSelection, signal?: AbortSignal): Promise<MigrationPreview> {
+    const result = migrationPreview((await this.request(`/api/migrations/${id}/selection`, 'PUT', 200, selection, {}, signal)).data);
     if (!result) throw new HostedAPIError('invalid_response', 200);
     return result;
   }
-  async getMigration(id: number): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}`, 'GET', 200)).data); }
-  async applyMigration(id: number, challengeId: string, selection: MigrationSelection): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}/apply`, 'POST', 200, { challengeId, selection })).data); }
-  async cancelMigration(id: number): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}`, 'DELETE', 200)).data); }
-  async rollbackMigration(id: number, challengeId: string): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}/rollback`, 'POST', 200, { challengeId })).data); }
+  async getMigration(id: number, signal?: AbortSignal): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}`, 'GET', 200, undefined, {}, signal)).data); }
+  async migrationHistory(signal?: AbortSignal): Promise<MigrationHistoryJob[]> { const data = object((await this.request('/api/migrations', 'GET', 200, undefined, {}, signal)).data); if (!data || !exactKeys(data, ['jobs']) || !Array.isArray(data.jobs) || data.jobs.length > 20) throw new HostedAPIError('invalid_response', 200); const jobs = data.jobs.map((value) => { const item=object(value); if(!item||!exactKeys(item,['id','status','createdAt'],['appliedAt','expiresAt','rollbackExpiresAt'])||!number(item.id)||item.id===0||!string(item.status)||!['previewed','pending','applied','cancelled','rolled_back','expired'].includes(item.status)||!instant(item.createdAt)||!optional(item.appliedAt,instant)||!optional(item.expiresAt,instant)||!optional(item.rollbackExpiresAt,instant))return undefined; return item as unknown as MigrationHistoryJob; }); if(jobs.some((item)=>!item))throw new HostedAPIError('invalid_response',200); return jobs as MigrationHistoryJob[]; }
+  async applyMigration(id: number, challengeId: string, selection: MigrationSelection, signal?: AbortSignal): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}/apply`, 'POST', 200, { challengeId, selection }, {}, signal)).data); }
+  async cancelMigration(id: number, signal?: AbortSignal): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}`, 'DELETE', 200, undefined, {}, signal)).data); }
+  async rollbackMigration(id: number, challengeId: string, signal?: AbortSignal): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}/rollback`, 'POST', 200, { challengeId }, {}, signal)).data); }
+  async reissueMigrationOBS(id:number, challengeId:string, signal?:AbortSignal):Promise<MigrationJob>{return this.requireMigrationJob((await this.request(`/api/migrations/${id}/obs-links`,'POST',200,{challengeId},{},signal)).data)}
   private requireMigrationJob(value: unknown): MigrationJob {
     const result = migrationJob(value);
     if (!result) throw new HostedAPIError('invalid_response', 200);

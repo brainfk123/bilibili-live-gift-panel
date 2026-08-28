@@ -1,5 +1,6 @@
 import { getDisplayTheme } from '../../display-themes';
 import { formatNumber } from '../../format';
+import type { OBSOutputSelector } from './main';
 
 export interface OBSViewerRow {
   uid: number;
@@ -15,7 +16,7 @@ export interface OBSDisplaySnapshot {
   revision: number;
   runtime: {
     attributeValues: Record<string, number> | null;
-    giftTargetReceived: unknown[];
+    giftTargetReceived: Array<{ panelId: string; giftId: number; received: number }>;
     activities: unknown[];
     ruleLimits: { localDate: string; appliedCounts: Record<string, number> };
   };
@@ -27,6 +28,7 @@ export interface OBSRenderOptions {
   theme?: unknown;
   viewportWidth?: number;
   viewportHeight?: number;
+  output?: OBSOutputSelector;
 }
 
 export interface OBSLayout {
@@ -53,8 +55,11 @@ export function renderOBSSnapshot(root: HTMLElement, snapshot: OBSDisplaySnapsho
   const document = root.ownerDocument;
   if (!document) throw new Error('OBS view requires a document.');
   const theme = getDisplayTheme(options.theme);
-  const attributes = Object.entries(snapshot.runtime.attributeValues ?? {});
-  const layout = computeOBSLayout(options.viewportWidth ?? globalThis.innerWidth, options.viewportHeight ?? globalThis.innerHeight, attributes.length);
+  const allowedAttributes = options.output?.kind === 'attribute' || options.output?.kind === 'scene' ? new Set(options.output.attributeIds) : undefined;
+  const attributes = Object.entries(snapshot.runtime.attributeValues ?? {}).filter(([id]) => !allowedAttributes || allowedAttributes.has(id));
+  const targets = options.output?.kind === 'gift-target' ? snapshot.runtime.giftTargetReceived.filter((item) => item.panelId === options.output?.id) : [];
+  const itemCount = options.output?.kind === 'gift-target' ? targets.length : attributes.length;
+  const layout = computeOBSLayout(options.viewportWidth ?? globalThis.innerWidth, options.viewportHeight ?? globalThis.innerHeight, itemCount);
   root.setAttribute('data-theme', theme.id);
   root.style.setProperty('--obs-theme-accent', theme.accent);
   root.style.setProperty('--obs-theme-surface', theme.surface);
@@ -82,7 +87,13 @@ export function renderOBSSnapshot(root: HTMLElement, snapshot: OBSDisplaySnapsho
     card.append(label, number);
     stage.append(card);
   }
-  if ((snapshot.viewers?.length ?? 0) > 0) {
+  for (const target of targets) {
+    const card = document.createElement('section'); card.className = 'hosted-obs-card';
+    const label = document.createElement('span'); label.className = 'hosted-obs-label'; label.textContent = `礼物 ${target.giftId}`;
+    const number = document.createElement('strong'); number.className = 'hosted-obs-value'; number.textContent = formatNumber(target.received, 0);
+    card.append(label, number); stage.append(card);
+  }
+  if (!options.output && (snapshot.viewers?.length ?? 0) > 0) {
     const viewers = document.createElement('aside');
     viewers.className = 'hosted-obs-viewers';
     for (const viewer of snapshot.viewers ?? []) {

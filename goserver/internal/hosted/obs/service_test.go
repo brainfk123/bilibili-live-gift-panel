@@ -57,6 +57,34 @@ func TestOBSCredentialResetUsesSessionOnlyAndAudits(t *testing.T) {
 	}
 }
 
+func TestMigrationCredentialIssueUsesAccountActorWithoutAdministratorToken(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	admin := &adminAuthorizerStub{}
+	service, err := NewService(database, admin, ServiceOptions{Now: func() time.Time { return now }, Random: bytes.NewReader(bytes.Repeat([]byte{0x31}, 64)), PublicOrigin: "https://host.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT credential_epoch, disabled_at FROM streamer_accounts WHERE id = ? FOR UPDATE")).WithArgs(int64(41)).WillReturnRows(sqlmock.NewRows([]string{"credential_epoch", "disabled_at"}).AddRow(7, nil))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE obs_sessions AS s JOIN obs_credentials AS c ON c.id = s.obs_credential_id SET s.revoked_at = ? WHERE c.account_id = ? AND s.revoked_at IS NULL")).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE obs_credentials SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL")).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO obs_credentials (account_id, public_id, token_hash, credential_epoch, created_at) VALUES (?, ?, ?, ?, ?)")).WillReturnResult(sqlmock.NewResult(9, 1))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO audit_events (event_type, actor_account_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)")).WithArgs("obs_credential_reset", int64(41), int64(41), []byte("{}"), now).WillReturnResult(sqlmock.NewResult(10, 1))
+	mock.ExpectCommit()
+	issued, err := service.IssueForAccount(context.Background(), 41)
+	if err != nil || issued.URL == "" || admin.sessionToken != "" {
+		t.Fatalf("issued=%#v admin=%q error=%v", issued, admin.sessionToken, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOBSResetAuditFailureRollsBackWithoutTOTPCalls(t *testing.T) {
 	now := time.Date(2026, 8, 21, 12, 10, 0, 0, time.UTC)
 	for _, test := range []struct {

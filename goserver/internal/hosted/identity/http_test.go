@@ -367,6 +367,19 @@ func TestHTTPAuthenticationMiddlewareInjectsRepositoryAccountOnly(t *testing.T) 
 	}
 }
 
+func TestAuthenticatedSessionReturnsOnlyStableOpaqueAccountScope(t *testing.T) {
+	service := &fakeHTTPService{session: Session{AccountID: 314, ExpiresAt: time.Now().Add(time.Hour)}}
+	handler := newTestHTTPHandler(t, service, allowLimiter{})
+	request := httptest.NewRequest(http.MethodGet, "/api/auth/session", nil)
+	request.AddCookie(&http.Cookie{Name: SiteSessionCookie, Value: "site-token"})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "{\"authenticated\":true,\"accountScope\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}\n" {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	assertBodyOmitsSecrets(t, response.Body.String(), "314", "site-token", "32249588")
+}
+
 func TestHTTPMapsAuthenticationFailuresToGenericErrors(t *testing.T) {
 	service := &fakeHTTPService{pollErr: errors.New("UID 32249588 Cookie SESSDATA=secret"), loginErr: errors.New("account 99 database private")}
 	handler := newTestHTTPHandler(t, service, allowLimiter{})
@@ -655,6 +668,13 @@ type fakeHTTPService struct {
 	adminSession   string
 	adminAccountID int64
 	adminReason    string
+}
+
+func (service *fakeHTTPService) AccountScope(accountID int64) (string, error) {
+	if accountID == 314 {
+		return "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", nil
+	}
+	return "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", nil
 }
 
 func (service *fakeHTTPService) Begin(context.Context) (Challenge, error) {

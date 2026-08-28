@@ -42,6 +42,22 @@ func TestServicePollPendingKeepsChallengeAlive(t *testing.T) {
 	}
 }
 
+func TestAccountScopeIsStablePurposeSeparatedAndOpaque(t *testing.T) {
+	service, err := NewService(&memoryRepository{}, fixedServiceKeyring(t), &memoryVerifier{}, ServiceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a1, err := service.AccountScope(41)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a2, _ := service.AccountScope(41)
+	b, _ := service.AccountScope(42)
+	if a1 != a2 || a1 == b || len(a1) != 43 || strings.Contains(a1, "41") {
+		t.Fatalf("a1=%q a2=%q b=%q", a1, a2, b)
+	}
+}
+
 func TestServicePollPreservesScannedChallenge(t *testing.T) {
 	now := time.Date(2026, 8, 16, 8, 2, 0, 0, time.UTC)
 	verifier := &memoryVerifier{

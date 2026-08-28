@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -165,6 +166,29 @@ func TestServiceErrorsNeverExposeCredentialOrDatabaseDetails(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), secret) || strings.Contains(response.Body.String(), "database") {
 		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestEventsAcceptOnlyNarrowMigrationOutputSelectors(t *testing.T) {
+	for _, test := range []struct {
+		raw  string
+		want bool
+	}{
+		{raw: "", want: true},
+		{raw: "output=attribute%3Ascore", want: true},
+		{raw: "output=scene%3Amain%3Ascore%2Cbonus", want: true},
+		{raw: "output=gift-target%3Agoals", want: true},
+		{raw: "output=scene%3Amain%3A", want: false},
+		{raw: "output=attribute%3Ascore&theme=dark", want: false},
+		{raw: "output=attribute%3Ascore&output=attribute%3Abonus", want: false},
+	} {
+		values, err := url.ParseQuery(test.raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := validOBSOutputQuery(values); got != test.want {
+			t.Fatalf("validOBSOutputQuery(%q)=%v want=%v", test.raw, got, test.want)
+		}
 	}
 }
 

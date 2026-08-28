@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"bilibili-live-gift-panel/internal/gameplay"
 	"bilibili-live-gift-panel/internal/hosted/configuration"
 	"github.com/DATA-DOG/go-sqlmock"
 )
@@ -449,6 +450,64 @@ func TestSQLRepositorySelectionLoadIsAccountOwnedReadOnlyAndRestoresServerMetada
 	}
 	if stored.HostedRuntime.AttributeValues["online"] != 2 {
 		t.Fatalf("hosted runtime = %#v", stored.HostedRuntime)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryHistoryIsAccountScopedOrderedAndBounded(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	created := time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC)
+	applied := created.Add(time.Minute)
+	expires := created.Add(24 * time.Hour)
+	rollback := applied.Add(7 * 24 * time.Hour)
+	mock.ExpectQuery(regexp.QuoteMeta(historyQuery)).WithArgs(int64(7), created, historyLimit).WillReturnRows(sqlmock.NewRows([]string{"id", "status", "created_at", "applied_at", "expires_at", "rollback_expires_at"}).AddRow(9, jobPending, created, nil, expires, nil).AddRow(8, jobApplied, created.Add(-time.Hour), applied, nil, rollback))
+	jobs, err := NewService(NewRepository(database), func() time.Time { return created }).History(context.Background(), 7)
+	if err != nil || len(jobs) != 2 || jobs[0].ID != 9 || jobs[1].ID != 8 || jobs[1].AppliedAt == nil || jobs[1].RollbackExpiresAt == nil {
+		t.Fatalf("jobs=%#v error=%v", jobs, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceOBSOutputsUseAppliedAccountOwnedCandidateAndSkipEmptyScenes(t *testing.T) {
+	definition := emptyDefinition()
+	definition.Attributes = []configuration.AttributeDefinition{{ID: "score", Name: "积分"}, {ID: "bonus", Name: "加成"}}
+	definition.DisplayScenes = []gameplay.DisplayScene{{ID: "main", Name: "主场景", AttributeIDs: []string{"score", "bonus"}}, {ID: "empty", Name: "空场景"}}
+	definition.GiftTargetPanels = []configuration.GiftTargetPanelDefinition{{ID: "goals", Name: "礼物目标"}}
+	repository := &recordingOBSOutputRepository{stored: storedAppliedDefinition{ID: 19, AccountID: 7, Status: jobApplied, Definition: definition}}
+	service := NewService(repository, time.Now)
+
+	outputs, err := service.OBSOutputs(context.Background(), 7, 19)
+	want := []OBSOutput{{Selector: "attribute:bonus", Name: "加成"}, {Selector: "attribute:score", Name: "积分"}, {Selector: "gift-target:goals", Name: "礼物目标"}, {Selector: "scene:main:score,bonus", Name: "主场景"}}
+	if err != nil || !reflect.DeepEqual(outputs, want) {
+		t.Fatalf("OBSOutputs()=%#v error=%v, want %#v", outputs, err, want)
+	}
+	repository.stored.AccountID = 8
+	if _, err := service.OBSOutputs(context.Background(), 7, 19); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("OBSOutputs() ownership error=%v, want unavailable", err)
+	}
+}
+
+func TestSQLRepositoryLoadsAppliedOutputDefinitionByAccountAndJob(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	definition := emptyDefinition()
+	definition.Attributes = []configuration.AttributeDefinition{{ID: "score", Name: "积分"}}
+	mock.ExpectQuery(regexp.QuoteMeta(appliedDefinitionQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"id", "account_id", "status", "definition_json"}).AddRow(19, 7, jobApplied, mustJSON(t, definition)))
+
+	stored, err := NewRepository(database).(obsOutputRepository).LoadAppliedDefinition(context.Background(), 7, 19)
+	if err != nil || stored.ID != 19 || stored.AccountID != 7 || stored.Status != jobApplied || len(stored.Definition.Attributes) != 1 || stored.Definition.Attributes[0].ID != "score" {
+		t.Fatalf("LoadAppliedDefinition()=%#v error=%v", stored, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -1310,6 +1369,15 @@ type recordingPreviewRepository struct {
 	command previewCommand
 	result  storedPreview
 	err     error
+}
+
+type recordingOBSOutputRepository struct {
+	recordingPreviewRepository
+	stored storedAppliedDefinition
+}
+
+func (repository *recordingOBSOutputRepository) LoadAppliedDefinition(context.Context, int64, int64) (storedAppliedDefinition, error) {
+	return repository.stored, nil
 }
 
 type recordingLifecycleRepository struct {

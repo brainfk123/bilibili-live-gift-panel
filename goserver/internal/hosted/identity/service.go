@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"net/url"
 	"strconv"
@@ -226,6 +227,19 @@ func NewService(repository Repository, keys security.Keyring, verifier BiliVerif
 		onAccountDisabled: options.OnAccountDisabled,
 		challenges:        make(map[string]*serviceChallenge), registrations: make(map[[sha256.Size]byte]*registrationIntent),
 	}, nil
+}
+
+// AccountScope is a stable, purpose-separated pseudonym for client-side
+// presentation state. It is not accepted by any authentication boundary.
+func (service *Service) AccountScope(accountID int64) (string, error) {
+	if service == nil || accountID <= 0 {
+		return "", ErrInvalidInput
+	}
+	digest, err := service.keys.Lookup("account_scope", []byte(strconv.FormatInt(accountID, 10)))
+	if err != nil || len(digest) != sha256.Size {
+		return "", ErrAuthenticationFailed
+	}
+	return base64.RawURLEncoding.EncodeToString(digest), nil
 }
 
 // Begin starts a bounded QR challenge and records no Bilibili credential in the

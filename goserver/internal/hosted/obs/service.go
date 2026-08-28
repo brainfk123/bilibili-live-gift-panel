@@ -87,6 +87,19 @@ func (service *Service) Issue(ctx context.Context, administratorToken string, ac
 	if err := service.admin.RequireSession(ctx, administratorToken); err != nil {
 		return IssuedCredential{}, ErrAuthenticationFailed
 	}
+	return service.issueForAccount(ctx, accountID, false)
+}
+
+// IssueForAccount rotates the account's single active credential for an
+// already authenticated, proof-gated account operation.
+func (service *Service) IssueForAccount(ctx context.Context, accountID int64) (IssuedCredential, error) {
+	if service == nil || ctx == nil || accountID <= 0 {
+		return IssuedCredential{}, ErrInvalidInput
+	}
+	return service.issueForAccount(ctx, accountID, true)
+}
+
+func (service *Service) issueForAccount(ctx context.Context, accountID int64, accountActor bool) (IssuedCredential, error) {
 	transaction, err := service.database.BeginTx(ctx, nil)
 	if err != nil {
 		return IssuedCredential{}, ErrUnavailable
@@ -129,10 +142,17 @@ func (service *Service) Issue(ctx context.Context, administratorToken string, ac
 	if err != nil || !oneRow(result) {
 		return IssuedCredential{}, ErrUnavailable
 	}
-	result, err = transaction.ExecContext(ctx,
-		"INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)",
-		"obs_credential_reset", int64(1), accountID, []byte("{}"), now,
-	)
+	if accountActor {
+		result, err = transaction.ExecContext(ctx,
+			"INSERT INTO audit_events (event_type, actor_account_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)",
+			"obs_credential_reset", accountID, accountID, []byte("{}"), now,
+		)
+	} else {
+		result, err = transaction.ExecContext(ctx,
+			"INSERT INTO audit_events (event_type, actor_admin_identity_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)",
+			"obs_credential_reset", int64(1), accountID, []byte("{}"), now,
+		)
+	}
 	if err != nil || !oneRow(result) {
 		return IssuedCredential{}, ErrUnavailable
 	}

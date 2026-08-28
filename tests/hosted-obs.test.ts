@@ -56,6 +56,18 @@ describe('hosted OBS fragment exchange', () => {
     expect(parseOBSLocation({ pathname: `/obs/${publicID}`, search: '', hash: '#token=a&extra=b' })).toBeUndefined();
   });
 
+  it('accepts only narrow migration output selectors and carries them to the event stream', async () => {
+    expect(parseOBSLocation({ pathname: `/obs/${publicID}`, search: '?output=scene%3Amain%3Ahp%2Ctimer', hash: '' })?.output)
+      .toEqual({ kind: 'scene', id: 'main', attributeIds: ['hp', 'timer'] });
+    expect(parseOBSLocation({ pathname: `/obs/${publicID}`, search: '?output=attribute%3Ahp&extra=1', hash: '' })).toBeUndefined();
+    const paths: string[] = [];
+    await startOBSPage({
+      location: { pathname: `/obs/${publicID}`, search: '?output=gift-target%3Agoals', hash: '' }, replaceState: () => undefined,
+      exchange: async () => undefined, createEventSource: (path) => { paths.push(path); return { close: () => undefined }; }, onSnapshot: () => undefined, onError: () => undefined,
+    });
+    expect(paths).toEqual([`/obs/${publicID}/events?output=gift-target%3Agoals`]);
+  });
+
   it('synchronously clears every non-empty fragment before validating it', async () => {
 	const order: string[] = [];
 	const started = startOBSPage({
@@ -155,6 +167,21 @@ describe('hosted OBS read-only rendering', () => {
 	  { ...valid, runtime: { ...valid.runtime, ruleLimits: { localDate: '2026-08-17', appliedCounts: { rule: 'many' } } } },
 	  { ...valid, effects: [{ delta: 1, valueAfter: 2, unexpected: true }] },
 	]) expect(parseOBSDisplaySnapshot(malformed)).toBeUndefined();
+  });
+
+  it('filters attribute, scene, and gift-target selectors to their intended output', () => {
+    const document = new FakeDocument();
+    const snapshot: OBSDisplaySnapshot = { accountId: 41, liveSessionId: 70, revision: 2, runtime: { attributeValues: { hp: 10, timer: 20 }, giftTargetReceived: [{ panelId: 'goals', giftId: 1, received: 3 }, { panelId: 'other', giftId: 2, received: 9 }], activities: [], ruleLimits: { localDate: '', appliedCounts: {} } } };
+    for (const [output, included, excluded] of [
+      [{ kind: 'attribute' as const, id: 'hp', attributeIds: ['hp'] }, 'hp', 'timer'],
+      [{ kind: 'scene' as const, id: 'main', attributeIds: ['timer'] }, 'timer', 'hp'],
+      [{ kind: 'gift-target' as const, id: 'goals', attributeIds: [] }, '礼物 1', '礼物 2'],
+    ] as const) {
+      const root = document.createElement('div') as unknown as HTMLElement;
+      renderOBSSnapshot(root, snapshot, { output });
+      const rendered = textContent(root as unknown as FakeElement);
+      expect(rendered).toContain(included); expect(rendered).not.toContain(excluded);
+    }
   });
 
   it.each([

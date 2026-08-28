@@ -181,6 +181,22 @@ describe('HostedAPI authentication contract', () => {
     ]);
   });
 
+  it('accepts only the opaque account-scoped authenticated session projection', async () => {
+    const scope = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const controller = new AbortController();
+    const requests: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    const api = await HostedAPI.connect(async (input, init) => {
+      requests.push([input, init]);
+      return input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : json({ authenticated: true, accountScope: scope });
+    });
+    await expect(api.session(controller.signal)).resolves.toEqual({ accountScope: scope });
+    expect(requests[1]).toEqual(['/api/auth/session', expect.objectContaining({ method: 'GET', signal: controller.signal })]);
+    for (const body of [{ authenticated: true, accountScope: '41' }, { authenticated: true, accountScope: scope, accountId: 41 }, { authenticated: true, accountScope: scope, uid: '123' }]) {
+      const invalid = await HostedAPI.connect(async (input) => input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : json(body));
+      await expect(invalid.session()).rejects.toMatchObject({ code: 'invalid_response' });
+    }
+  });
+
   it('rejects non-JSON and shape-invalid responses without putting body data in errors or console', async () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const api = await HostedAPI.connect(async (input) => input === '/api/bootstrap'

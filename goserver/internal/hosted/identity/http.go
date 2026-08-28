@@ -46,6 +46,7 @@ type sessionService interface {
 	Login(context.Context, string) (SiteSession, error)
 	Logout(context.Context, string) error
 	RequireSession(context.Context, string) (Session, error)
+	AccountScope(int64) (string, error)
 }
 
 type accountAdminService interface {
@@ -363,10 +364,21 @@ func (handler *HTTPHandler) deleteSession(response http.ResponseWriter, request 
 	response.WriteHeader(http.StatusNoContent)
 }
 
-func (handler *HTTPHandler) getSession(response http.ResponseWriter, _ *http.Request) {
+func (handler *HTTPHandler) getSession(response http.ResponseWriter, request *http.Request) {
+	accountID, ok := AccountIDFromContext(request.Context())
+	if !ok {
+		writeHTTPError(response, http.StatusUnauthorized, "authentication_required")
+		return
+	}
+	scope, err := handler.service.AccountScope(accountID)
+	if err != nil || len(scope) != 43 {
+		writeHTTPError(response, http.StatusServiceUnavailable, "temporarily_unavailable")
+		return
+	}
 	writeHTTPJSON(response, http.StatusOK, struct {
-		Authenticated bool `json:"authenticated"`
-	}{Authenticated: true})
+		Authenticated bool   `json:"authenticated"`
+		AccountScope  string `json:"accountScope"`
+	}{Authenticated: true, AccountScope: scope})
 }
 
 type accountContextKey struct{}
