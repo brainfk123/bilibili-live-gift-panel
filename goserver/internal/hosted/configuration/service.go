@@ -77,13 +77,13 @@ func (service *Service) SaveDefinition(ctx context.Context, accountID int64, com
 	default:
 		return Version{}, State{}, err
 	}
-	// Join normalizes the detached gameplay projection and rejects mismatched
-	// runtime before storage; Split returns fresh normalized storage structs.
-	snapshot, err := Join(command.Definition, runtime)
-	if err != nil {
-		return Version{}, State{}, ErrInvalidInput
-	}
-	definition, runtime, err := Split(snapshot)
+	// Normalize canonicalizes gameplay and the definition-only migration
+	// metadata without aliasing caller-owned values.
+	candidateDefinition := command.Definition
+	// Manual edits create a new provenance; only the migration activation path
+	// may persist a migration hash.
+	candidateDefinition.MigrationHash = ""
+	definition, runtime, err := Normalize(candidateDefinition, runtime)
 	if err != nil {
 		return Version{}, State{}, ErrInvalidInput
 	}
@@ -111,11 +111,7 @@ func (service *Service) SaveState(ctx context.Context, accountID int64, command 
 	if current.Revision != command.ExpectedRevision {
 		return State{}, ErrRevisionConflict
 	}
-	snapshot, err := Join(version.Definition, command.Runtime)
-	if err != nil {
-		return State{}, ErrInvalidInput
-	}
-	_, runtime, err := Split(snapshot)
+	_, runtime, err := Normalize(version.Definition, command.Runtime)
 	if err != nil {
 		return State{}, ErrInvalidInput
 	}

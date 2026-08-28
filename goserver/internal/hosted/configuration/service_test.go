@@ -26,6 +26,41 @@ func TestServiceSaveDefinitionUsesCurrentStateRevision(t *testing.T) {
 	}
 }
 
+func TestServiceSaveDefinitionPreservesNormalizedMigrationMetadata(t *testing.T) {
+	definition, runtime, err := Split(fixtureSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition.GeneralSettings = &GeneralSettings{ConfigurationMode: "advanced"}
+	definition.CropPresets = []CropPreset{{ID: "gift:1", Crop: Crop{Width: 1, Height: 1}}}
+	repository := &serviceRepository{version: Version{ID: 31, AccountID: 7, Number: 4, Definition: definition}, state: State{AccountID: 7, ConfigVersionID: 31, Revision: 9, Runtime: runtime}}
+
+	if _, _, err := NewService(repository, time.Now).SaveDefinition(context.Background(), 7, SaveDefinitionCommand{ExpectedVersion: 4, Definition: definition}); err != nil {
+		t.Fatal(err)
+	}
+	if repository.activation.Definition.GeneralSettings == nil || repository.activation.Definition.GeneralSettings.ConfigurationMode != "advanced" || !reflect.DeepEqual(repository.activation.Definition.CropPresets, definition.CropPresets) {
+		t.Fatalf("activation metadata=%#v %#v", repository.activation.Definition.GeneralSettings, repository.activation.Definition.CropPresets)
+	}
+}
+
+func TestServiceSaveDefinitionClearsPriorMigrationHashForManualVersion(t *testing.T) {
+	definition, runtime, err := Split(fixtureSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition.MigrationHash = "0000000000000000000000000000000000000000000000000000000000000000"
+	repository := &serviceRepository{version: Version{ID: 31, AccountID: 7, Number: 4, Definition: definition}, state: State{AccountID: 7, ConfigVersionID: 31, Revision: 9, Runtime: runtime}}
+	command := definition
+	command.Attributes[0].Name = "Manually edited"
+
+	if _, _, err := NewService(repository, time.Now).SaveDefinition(context.Background(), 7, SaveDefinitionCommand{ExpectedVersion: 4, Definition: command}); err != nil {
+		t.Fatal(err)
+	}
+	if repository.activation.Definition.MigrationHash != "" {
+		t.Fatalf("manual version retained stale migration hash %q", repository.activation.Definition.MigrationHash)
+	}
+}
+
 func TestServiceRejectsStaleDefinitionBeforeWrite(t *testing.T) {
 	definition, runtime, err := Split(fixtureSnapshot())
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"time"
@@ -98,6 +99,7 @@ type previewCommand struct {
 }
 type storedPreview struct {
 	ID, AccountID  int64
+	Status         string
 	ExpiresAt      time.Time
 	Reused         bool
 	RoomSuggestion string
@@ -115,12 +117,13 @@ type previewMetadata struct {
 }
 
 type storedComposition struct {
-	ID, AccountID    int64
-	Status           string
-	ExpiresAt        time.Time
-	Imported         Envelope
-	HostedDefinition configuration.Definition
-	HostedRuntime    configuration.RuntimeState
+	ID, AccountID      int64
+	Status             string
+	ExpiresAt          time.Time
+	Imported           Envelope
+	HostedDefinition   configuration.Definition
+	HostedRuntime      configuration.RuntimeState
+	KeepRoomSuggestion bool
 }
 
 // Repository is intentionally narrow: the migration package owns preview
@@ -162,11 +165,15 @@ func (service *Service) Preview(ctx context.Context, accountID int64, envelope E
 	if service == nil || service.repository == nil || service.now == nil || accountID <= 0 {
 		return Preview{}, ErrInvalidInput
 	}
-	definition, runtime, canonical, _, err := freshCanonical(envelope.Definition, envelope.Runtime)
-	if err != nil {
-		return Preview{}, ErrInvalidInput
+	inputDefinition := envelope.Definition
+	if inputDefinition.GeneralSettings == nil && envelope.GeneralSettings.ConfigurationMode != "" {
+		settings := envelope.GeneralSettings
+		inputDefinition.GeneralSettings = &settings
 	}
-	hash, err := hashCandidate(canonical, &envelope.GeneralSettings, envelope.CropPresets)
+	if len(inputDefinition.CropPresets) == 0 && len(envelope.CropPresets) != 0 {
+		inputDefinition.CropPresets = append([]CropPreset(nil), envelope.CropPresets...)
+	}
+	definition, runtime, _, hash, err := freshCanonical(inputDefinition, envelope.Runtime)
 	if err != nil {
 		return Preview{}, ErrInvalidInput
 	}
@@ -182,6 +189,18 @@ func (service *Service) Preview(ctx context.Context, accountID int64, envelope E
 		return Preview{}, ErrUnavailable
 	}
 	preview := Preview{ID: stored.ID, ExpiresAt: stored.ExpiresAt, Reused: stored.Reused, Counts: stored.Report.Counts, Warnings: append([]string(nil), stored.Report.Warnings...), Ignored: append([]string(nil), stored.Report.Ignored...), RoomSuggestion: stored.RoomSuggestion, Source: stored.Source, Hash: stored.Hash}
+	if repository, ok := service.repository.(compositionRepository); ok && stored.Status == jobPending {
+		composition, loadErr := repository.LoadComposition(ctx, accountID, stored.ID)
+		if loadErr != nil {
+			return Preview{}, loadErr
+		}
+		selected, projectionErr := service.pendingProjection(accountID, composition)
+		if projectionErr != nil {
+			return Preview{}, projectionErr
+		}
+		selected.Reused, selected.Source, selected.Warnings, selected.Ignored = stored.Reused, stored.Source, append([]string(nil), stored.Report.Warnings...), append([]string(nil), stored.Report.Ignored...)
+		return selected, nil
+	}
 	if _, ok := service.repository.(compositionRepository); ok {
 		selected, selectErr := service.Select(ctx, accountID, stored.ID, SelectionCommand{})
 		if selectErr != nil {
@@ -189,6 +208,34 @@ func (service *Service) Preview(ctx context.Context, accountID int64, envelope E
 		}
 		selected.Reused, selected.Source, selected.Counts, selected.Warnings, selected.Ignored, selected.Hash = stored.Reused, stored.Source, stored.Report.Counts, append([]string(nil), stored.Report.Warnings...), append([]string(nil), stored.Report.Ignored...), stored.Hash
 		return selected, nil
+	}
+	return preview, nil
+}
+
+func (service *Service) pendingProjection(accountID int64, composition storedComposition) (Preview, error) {
+	if composition.AccountID != accountID || composition.ID <= 0 || composition.Status != jobPending || composition.ExpiresAt.IsZero() {
+		return Preview{}, ErrUnavailable
+	}
+	if !composition.ExpiresAt.After(service.now().UTC()) {
+		return Preview{}, ErrExpired
+	}
+	units := DeriveUnits(composition.Imported.Definition, composition.Imported.Runtime)
+	selectedUnits := make([]SelectionUnit, len(units))
+	selection := SelectionCommand{UnitIDs: make([]string, len(units)), IncludeGeneralSettings: composition.Imported.Definition.GeneralSettings != nil, IncludeRoomSuggestion: composition.KeepRoomSuggestion}
+	for index, unit := range units {
+		selection.UnitIDs[index] = unit.ID
+		selectedUnits[index] = SelectionUnit{GameplayUnit: unit, Compatibility: AssessCompatibility(unit, service.capabilities), Selected: true}
+	}
+	settings := GeneralSettings{}
+	if composition.Imported.Definition.GeneralSettings != nil {
+		settings = *composition.Imported.Definition.GeneralSettings
+	}
+	preview := Preview{
+		ID: composition.ID, ExpiresAt: composition.ExpiresAt, Counts: countDefinition(composition.Imported.Definition), RoomSuggestion: composition.Imported.RoomSuggestion,
+		Source: composition.Imported.Source, Units: selectedUnits, Groups: ConnectedGroups(units), Selection: selection, GeneralSettings: settings, CanConfirm: true,
+	}
+	if rawHash, err := hex.DecodeString(composition.Imported.Definition.MigrationHash); err == nil && len(rawHash) == sha256.Size {
+		copy(preview.Hash[:], rawHash)
 	}
 	return preview, nil
 }
@@ -370,11 +417,9 @@ func validJobStatus(status string) bool {
 }
 
 func freshCanonical(definition configuration.Definition, runtime configuration.RuntimeState) (configuration.Definition, configuration.RuntimeState, []byte, [sha256.Size]byte, error) {
-	snapshot, err := configuration.Join(definition, runtime)
-	if err != nil {
-		return configuration.Definition{}, configuration.RuntimeState{}, nil, [sha256.Size]byte{}, err
-	}
-	definition, runtime, err = configuration.Split(snapshot)
+	persistedHash := definition.MigrationHash
+	definition.MigrationHash = ""
+	definition, runtime, err := configuration.Normalize(definition, runtime)
 	if err != nil {
 		return configuration.Definition{}, configuration.RuntimeState{}, nil, [sha256.Size]byte{}, err
 	}
@@ -385,7 +430,14 @@ func freshCanonical(definition configuration.Definition, runtime configuration.R
 	if err != nil {
 		return configuration.Definition{}, configuration.RuntimeState{}, nil, [sha256.Size]byte{}, err
 	}
-	return definition, runtime, canonical, sha256.Sum256(canonical), nil
+	hash := sha256.Sum256(canonical)
+	if persistedHash != "" {
+		if persistedHash != hex.EncodeToString(hash[:]) {
+			return configuration.Definition{}, configuration.RuntimeState{}, nil, [sha256.Size]byte{}, errors.New("migration: candidate hash mismatch")
+		}
+		definition.MigrationHash = persistedHash
+	}
+	return definition, runtime, canonical, hash, nil
 }
 func countDefinition(definition configuration.Definition) Counts {
 	result := Counts{Attributes: len(definition.Attributes), Rules: len(definition.Rules), Activities: len(definition.Activities), GiftTargetPanels: len(definition.GiftTargetPanels)}
@@ -461,7 +513,7 @@ func (repository *sqlRepository) Preview(ctx context.Context, command previewCom
 	var persistedReport []byte
 	err = transaction.QueryRowContext(ctx, previewExistingQuery, command.AccountID, command.Hash[:]).Scan(&existingID, &existingStatus, &existingExpiry, &existingHash, &app, &schema, &room, &persistedReport)
 	if err == nil && existingID > 0 && (existingStatus == "previewed" || existingStatus == "pending") && existingExpiry.After(now) {
-		stored, err := decodeStoredPreview(existingID, command.AccountID, existingExpiry, true, existingHash, app, schema, room, persistedReport)
+		stored, err := decodeStoredPreview(existingID, command.AccountID, existingStatus, existingExpiry, true, existingHash, app, schema, room, persistedReport)
 		if err != nil {
 			return storedPreview{}, ErrUnavailable
 		}
@@ -502,19 +554,20 @@ func (repository *sqlRepository) Preview(ctx context.Context, command previewCom
 		return storedPreview{}, ErrUnavailable
 	}
 	committed = true
-	return storedPreview{ID: existingID, AccountID: command.AccountID, ExpiresAt: expiresAt, RoomSuggestion: command.RoomSuggestion, Source: command.Source, Hash: command.Hash, Report: report}, nil
+	return storedPreview{ID: existingID, AccountID: command.AccountID, Status: jobPreviewed, ExpiresAt: expiresAt, RoomSuggestion: command.RoomSuggestion, Source: command.Source, Hash: command.Hash, Report: report}, nil
 }
 
-func decodeStoredPreview(id, accountID int64, expiry time.Time, reused bool, hash []byte, app sql.NullString, schema sql.NullInt64, room sql.NullString, rawReport []byte) (storedPreview, error) {
+func decodeStoredPreview(id, accountID int64, status string, expiry time.Time, reused bool, hash []byte, app sql.NullString, schema sql.NullInt64, room sql.NullString, rawReport []byte) (storedPreview, error) {
 	var result storedPreview
 	var metadata previewMetadata
-	if id <= 0 || len(hash) != sha256.Size || !app.Valid || !schema.Valid || schema.Int64 < 1 || schema.Int64 > configurationSchemaVersion || json.Unmarshal(rawReport, &metadata) != nil {
+	if id <= 0 || status != jobPreviewed && status != jobPending || len(hash) != sha256.Size || !app.Valid || !schema.Valid || schema.Int64 < 1 || schema.Int64 > configurationSchemaVersion || json.Unmarshal(rawReport, &metadata) != nil {
 		return storedPreview{}, ErrUnavailable
 	}
 	result.Report = metadata.Report
 	copy(result.Hash[:], hash)
 	result.ID = id
 	result.AccountID = accountID
+	result.Status = status
 	result.ExpiresAt = expiry
 	result.Reused = reused
 	result.Source = Source{AppVersion: app.String, ConfigurationSchemaVersion: int(schema.Int64)}
@@ -524,7 +577,7 @@ func decodeStoredPreview(id, accountID int64, expiry time.Time, reused bool, has
 	return result, nil
 }
 
-const compositionQuery = "SELECT j.status, j.expires_at, j.definition_json, j.runtime_json, j.room_suggestion, j.source_app_version, j.source_schema_version, j.report_json, v.definition_json, s.runtime_json FROM migration_jobs AS j LEFT JOIN account_active_config AS active ON active.account_id = j.account_id LEFT JOIN account_config_versions AS v ON v.account_id = active.account_id AND v.id = active.config_version_id LEFT JOIN account_runtime_state AS s ON s.account_id = j.account_id AND s.config_version_id = active.config_version_id WHERE j.id = ? AND j.account_id = ?"
+const compositionQuery = "SELECT j.status, j.expires_at, j.keep_room_suggestion, j.definition_json, j.runtime_json, j.room_suggestion, j.source_app_version, j.source_schema_version, j.report_json, v.definition_json, s.runtime_json FROM migration_jobs AS j LEFT JOIN account_active_config AS active ON active.account_id = j.account_id LEFT JOIN account_config_versions AS v ON v.account_id = active.account_id AND v.id = active.config_version_id LEFT JOIN account_runtime_state AS s ON s.account_id = j.account_id AND s.config_version_id = active.config_version_id WHERE j.id = ? AND j.account_id = ?"
 
 func (repository *sqlRepository) LoadComposition(ctx context.Context, accountID, jobID int64) (storedComposition, error) {
 	if repository == nil || repository.db == nil || accountID <= 0 || jobID <= 0 {
@@ -534,14 +587,15 @@ func (repository *sqlRepository) LoadComposition(ctx context.Context, accountID,
 	var importedDefinitionJSON, importedRuntimeJSON, reportJSON []byte
 	var hostedDefinitionJSON, hostedRuntimeJSON []byte
 	var room sql.NullString
+	var keepRoom uint8
 	var source Source
 	err := repository.db.QueryRowContext(ctx, compositionQuery, jobID, accountID).Scan(
-		&result.Status, &result.ExpiresAt, &importedDefinitionJSON, &importedRuntimeJSON, &room, &source.AppVersion, &source.ConfigurationSchemaVersion, &reportJSON, &hostedDefinitionJSON, &hostedRuntimeJSON,
+		&result.Status, &result.ExpiresAt, &keepRoom, &importedDefinitionJSON, &importedRuntimeJSON, &room, &source.AppVersion, &source.ConfigurationSchemaVersion, &reportJSON, &hostedDefinitionJSON, &hostedRuntimeJSON,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storedComposition{}, ErrNotFound
 	}
-	if err != nil || !validJobStatus(result.Status) || result.ExpiresAt.IsZero() || source.AppVersion == "" || source.ConfigurationSchemaVersion < 1 || source.ConfigurationSchemaVersion > configurationSchemaVersion {
+	if err != nil || keepRoom > 1 || !validJobStatus(result.Status) || result.ExpiresAt.IsZero() || source.AppVersion == "" || source.ConfigurationSchemaVersion < 1 || source.ConfigurationSchemaVersion > configurationSchemaVersion {
 		return storedComposition{}, ErrUnavailable
 	}
 	var metadata previewMetadata
@@ -553,8 +607,17 @@ func (repository *sqlRepository) LoadComposition(ctx context.Context, accountID,
 		return storedComposition{}, ErrUnavailable
 	}
 	result.Imported.Definition, result.Imported.Runtime = definition, runtime
-	result.Imported.GeneralSettings, result.Imported.CropPresets = metadata.GeneralSettings, metadata.CropPresets
-	result.Imported.Units, result.Imported.Groups = metadata.Units, metadata.Groups
+	if result.Status == jobPending {
+		if definition.GeneralSettings != nil {
+			result.Imported.GeneralSettings = *definition.GeneralSettings
+		}
+		result.Imported.CropPresets = append([]CropPreset(nil), definition.CropPresets...)
+		result.Imported.Units = DeriveUnits(definition, runtime)
+		result.Imported.Groups = ConnectedGroups(result.Imported.Units)
+	} else {
+		result.Imported.GeneralSettings, result.Imported.CropPresets = metadata.GeneralSettings, metadata.CropPresets
+		result.Imported.Units, result.Imported.Groups = metadata.Units, metadata.Groups
+	}
 	if len(result.Imported.Units) == 0 {
 		result.Imported.Units = DeriveUnits(definition, runtime)
 		result.Imported.Groups = ConnectedGroups(result.Imported.Units)
@@ -576,6 +639,7 @@ func (repository *sqlRepository) LoadComposition(ctx context.Context, accountID,
 		}
 	}
 	result.ID, result.AccountID = jobID, accountID
+	result.KeepRoomSuggestion = keepRoom == 1
 	return result, nil
 }
 

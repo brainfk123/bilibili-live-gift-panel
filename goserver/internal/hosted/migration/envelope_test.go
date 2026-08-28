@@ -2,6 +2,7 @@ package migration
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -84,6 +85,9 @@ func TestDecodeV2RecomputesAdvisoryDependencyDeclaration(t *testing.T) {
 	if len(envelope.CropPresets) != 1 || envelope.CropPresets[0].ID != "gift:1" {
 		t.Fatalf("crop presets = %#v, want only stable referenced identity", envelope.CropPresets)
 	}
+	if envelope.Definition.GeneralSettings == nil || envelope.Definition.GeneralSettings.ConfigurationMode != "simple" || len(envelope.Definition.CropPresets) != 1 || envelope.Definition.CropPresets[0].ID != "gift:1" {
+		t.Fatalf("definition migration metadata = %#v %#v", envelope.Definition.GeneralSettings, envelope.Definition.CropPresets)
+	}
 	if strings.Contains(string(envelope.CanonicalJSON), "media:local") || strings.Contains(string(envelope.CanonicalJSON), "attribute:attacker") {
 		t.Fatalf("advisory or unstable input reached canonical payload: %s", envelope.CanonicalJSON)
 	}
@@ -96,6 +100,10 @@ func TestDecodeV1PreservesLegacyCanonicalShape(t *testing.T) {
 	}
 	if strings.Contains(string(envelope.CanonicalJSON), "generalSettings") || strings.Contains(string(envelope.CanonicalJSON), "cropPresets") {
 		t.Fatalf("V1 canonical JSON changed: %s", envelope.CanonicalJSON)
+	}
+	wantCanonical := `{"definition":{"attributes":[{"id":"health","name":"Health","unit":"","format":"number","decimals":0,"suffix":""}],"displayScenes":[],"giftTargetPanels":[],"activities":[],"rules":[],"timerRules":[],"formulaPresets":[],"gifts":[]},"runtime":{"attributeValues":{"health":1},"giftTargetReceived":[],"activities":[],"ruleLimits":{"localDate":"2026-08-16","appliedCounts":{}}}}`
+	if string(envelope.CanonicalJSON) != wantCanonical || envelope.Hash != sha256.Sum256([]byte(wantCanonical)) {
+		t.Fatalf("V1 canonical/hash changed: canonical=%s hash=%x", envelope.CanonicalJSON, envelope.Hash)
 	}
 }
 

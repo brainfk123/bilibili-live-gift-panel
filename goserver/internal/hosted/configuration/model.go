@@ -5,6 +5,9 @@ package configuration
 import (
 	"errors"
 	"fmt"
+	"math"
+	"regexp"
+	"sort"
 	"time"
 
 	"bilibili-live-gift-panel/internal/gameplay"
@@ -43,6 +46,25 @@ type Definition struct {
 	FormulaPresets   []gameplay.FormulaPreset    `json:"formulaPresets"`
 	SimplePlay       *gameplay.SimplePlay        `json:"simplePlay,omitempty"`
 	Gifts            []GiftDefinition            `json:"gifts"`
+	GeneralSettings  *GeneralSettings            `json:"generalSettings,omitempty"`
+	CropPresets      []CropPreset                `json:"cropPresets,omitempty"`
+	MigrationHash    string                      `json:"migrationHash,omitempty"`
+}
+
+type GeneralSettings struct {
+	ConfigurationMode string `json:"configurationMode"`
+}
+
+type CropPreset struct {
+	ID   string `json:"id"`
+	Crop Crop   `json:"crop"`
+}
+
+type Crop struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
 }
 
 type AttributeDefinition struct {
@@ -206,6 +228,27 @@ func Split(snapshot gameplay.Snapshot) (Definition, RuntimeState, error) {
 	return definition, runtime, nil
 }
 
+// Normalize canonicalizes gameplay through the shared engine while retaining
+// the migration metadata that deliberately lives only in Definition JSON.
+func Normalize(definition Definition, runtime RuntimeState) (Definition, RuntimeState, error) {
+	snapshot, err := Join(definition, runtime)
+	if err != nil {
+		return Definition{}, RuntimeState{}, err
+	}
+	normalizedDefinition, normalizedRuntime, err := Split(snapshot)
+	if err != nil {
+		return Definition{}, RuntimeState{}, err
+	}
+	settings, crops, err := normalizeDefinitionMetadata(definition)
+	if err != nil {
+		return Definition{}, RuntimeState{}, err
+	}
+	normalizedDefinition.GeneralSettings = settings
+	normalizedDefinition.CropPresets = crops
+	normalizedDefinition.MigrationHash = definition.MigrationHash
+	return normalizedDefinition, normalizedRuntime, nil
+}
+
 // DefaultRuntime makes the complete zero/idle state required for a newly
 // activated definition.
 func DefaultRuntime(definition Definition) RuntimeState {
@@ -259,6 +302,9 @@ func Join(definition Definition, runtime RuntimeState) (gameplay.Snapshot, error
 }
 
 func validateDefinition(definition Definition) error {
+	if _, _, err := normalizeDefinitionMetadata(definition); err != nil {
+		return err
+	}
 	for _, panel := range definition.GiftTargetPanels {
 		giftIDs := make(map[int]struct{}, len(panel.Items))
 		for _, item := range panel.Items {
@@ -269,6 +315,37 @@ func validateDefinition(definition Definition) error {
 		}
 	}
 	return nil
+}
+
+var stableCropPresetID = regexp.MustCompile(`^(gift|effect):[1-9][0-9]*$`)
+var migrationHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+func normalizeDefinitionMetadata(definition Definition) (*GeneralSettings, []CropPreset, error) {
+	if definition.MigrationHash != "" && !migrationHashPattern.MatchString(definition.MigrationHash) {
+		return nil, nil, errors.New("invalid migration hash")
+	}
+	var settings *GeneralSettings
+	if definition.GeneralSettings != nil {
+		if definition.GeneralSettings.ConfigurationMode != "simple" && definition.GeneralSettings.ConfigurationMode != "advanced" {
+			return nil, nil, errors.New("invalid configuration mode")
+		}
+		copy := *definition.GeneralSettings
+		settings = &copy
+	}
+	crops := append([]CropPreset(nil), definition.CropPresets...)
+	sort.Slice(crops, func(left, right int) bool { return crops[left].ID < crops[right].ID })
+	for index, preset := range crops {
+		if !stableCropPresetID.MatchString(preset.ID) || !validDefinitionCrop(preset.Crop) || index > 0 && crops[index-1].ID == preset.ID {
+			return nil, nil, errors.New("invalid crop preset")
+		}
+	}
+	return settings, crops, nil
+}
+
+func validDefinitionCrop(crop Crop) bool {
+	return !math.IsNaN(crop.X) && !math.IsInf(crop.X, 0) && !math.IsNaN(crop.Y) && !math.IsInf(crop.Y, 0) &&
+		!math.IsNaN(crop.Width) && !math.IsInf(crop.Width, 0) && !math.IsNaN(crop.Height) && !math.IsInf(crop.Height, 0) &&
+		crop.X >= 0 && crop.Y >= 0 && crop.Width > 0 && crop.Height > 0 && crop.X+crop.Width <= 1 && crop.Y+crop.Height <= 1
 }
 
 func joinGifts(definitions []GiftDefinition) []gameplay.GiftInfo {

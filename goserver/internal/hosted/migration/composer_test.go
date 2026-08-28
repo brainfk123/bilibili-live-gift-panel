@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"encoding/hex"
 	"errors"
 	"reflect"
 	"testing"
@@ -140,6 +141,45 @@ func TestComposeSelectionKeepsGeneralSettingsAndRoomSuggestionIndependent(t *tes
 	}
 }
 
+func TestComposeSelectionEmbedsSelectedSettingsAndStableCropsInCompleteDefinition(t *testing.T) {
+	hostedDefinition, hostedRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "hosted", Name: "Hosted"}}, map[string]float64{"hosted": 2})
+	hostedDefinition.GeneralSettings = &configuration.GeneralSettings{ConfigurationMode: "advanced"}
+	hostedDefinition.CropPresets = []configuration.CropPreset{{ID: "gift:2", Crop: configuration.Crop{Width: 1, Height: 1}}}
+	importDefinition, importRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 9})
+	importDefinition.GeneralSettings = &configuration.GeneralSettings{ConfigurationMode: "simple"}
+	importDefinition.CropPresets = []configuration.CropPreset{{ID: "gift:1", Crop: configuration.Crop{X: 0.1, Y: 0.2, Width: 0.3, Height: 0.4}}}
+	imported := migrationEnvelope(importDefinition, importRuntime)
+	imported.GeneralSettings = *importDefinition.GeneralSettings
+	imported.CropPresets = append([]CropPreset(nil), importDefinition.CropPresets...)
+	imported.Units[0].CropPresetIDs = []string{"gift:1"}
+
+	candidate, err := composeCandidate(imported, hostedDefinition, hostedRuntime, completeCapabilities(), SelectionCommand{UnitIDs: []string{"attribute:exe"}, IncludeGeneralSettings: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCrops := []configuration.CropPreset{
+		{ID: "gift:1", Crop: configuration.Crop{X: 0.1, Y: 0.2, Width: 0.3, Height: 0.4}},
+		{ID: "gift:2", Crop: configuration.Crop{Width: 1, Height: 1}},
+	}
+	if candidate.Definition.GeneralSettings == nil || candidate.Definition.GeneralSettings.ConfigurationMode != "simple" || !reflect.DeepEqual(candidate.Definition.CropPresets, wantCrops) {
+		t.Fatalf("candidate definition metadata=%#v %#v", candidate.Definition.GeneralSettings, candidate.Definition.CropPresets)
+	}
+	if candidate.GeneralSettings == nil || !reflect.DeepEqual(candidate.CropPresets, wantCrops) {
+		t.Fatalf("candidate projection metadata=%#v %#v", candidate.GeneralSettings, candidate.CropPresets)
+	}
+	if candidate.Definition.MigrationHash != hex.EncodeToString(candidate.Hash[:]) {
+		t.Fatalf("persisted migration hash=%q candidate=%x", candidate.Definition.MigrationHash, candidate.Hash)
+	}
+
+	retained, err := composeCandidate(imported, hostedDefinition, hostedRuntime, completeCapabilities(), SelectionCommand{UnitIDs: []string{"attribute:exe"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained.Definition.GeneralSettings == nil || retained.Definition.GeneralSettings.ConfigurationMode != "advanced" {
+		t.Fatalf("unselected hosted settings were not retained: %#v", retained.Definition.GeneralSettings)
+	}
+}
+
 func TestComposeSelectionRejectsSelectedPartialOrIncompatibleUnit(t *testing.T) {
 	definition, runtime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "health", Name: "Health"}}, map[string]float64{"health": 9})
 	imported := migrationEnvelope(definition, runtime)
@@ -157,6 +197,92 @@ func TestComposeSelectionRejectsSelectedPartialOrIncompatibleUnit(t *testing.T) 
 	}
 }
 
+func TestComposeSelectionBlocksDifferentCrossSourceSharedDependencyInsteadOfOverwritingHosted(t *testing.T) {
+	hostedDefinition, hostedRuntime := activityConfiguration("host", "Hosted activity", "Hosted shared", 1)
+	importDefinition, importRuntime := activityConfiguration("import", "Imported activity", "Imported shared", 9)
+	imported := migrationEnvelope(importDefinition, importRuntime)
+
+	candidate, err := composeCandidate(imported, hostedDefinition, hostedRuntime, completeCapabilities(), SelectionCommand{UnitIDs: []string{"activity:import"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := SelectionConflict{ID: "resource:attribute:shared", ImportedUnitIDs: []string{"activity:import"}, HostedUnitIDs: []string{"activity:host"}}
+	if candidate.Ready || !reflect.DeepEqual(candidate.Conflicts, []SelectionConflict{want}) {
+		t.Fatalf("shared dependency candidate=%#v want blocking conflict=%#v", candidate, want)
+	}
+}
+
+func TestComposeSelectionAllowsIdenticalCrossSourceSharedDependency(t *testing.T) {
+	hostedDefinition, hostedRuntime := activityConfiguration("host", "Hosted activity", "Shared", 1)
+	importDefinition, importRuntime := activityConfiguration("import", "Imported activity", "Shared", 1)
+	imported := migrationEnvelope(importDefinition, importRuntime)
+
+	candidate, err := composeCandidate(imported, hostedDefinition, hostedRuntime, completeCapabilities(), SelectionCommand{UnitIDs: []string{"activity:import"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !candidate.Ready || len(candidate.Definition.Attributes) != 1 || candidate.Runtime.AttributeValues["shared"] != 1 {
+		t.Fatalf("identical shared dependency candidate=%#v", candidate)
+	}
+}
+
+func TestConflictKeepBothUsesDeterministicUnoccupiedSuggestedName(t *testing.T) {
+	hostedDefinition, hostedRuntime := attributeConfiguration(
+		[]configuration.AttributeDefinition{{ID: "online", Name: "Health"}, {ID: "occupied", Name: "Health（从 EXE 导入）"}},
+		map[string]float64{"online": 1, "occupied": 2},
+	)
+	importDefinition, importRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "Health"}}, map[string]float64{"exe": 9})
+	imported := migrationEnvelope(importDefinition, importRuntime)
+	selection := SelectionCommand{UnitIDs: []string{"attribute:exe"}, ConflictChoices: map[string]ConflictChoice{"attribute:exe": ConflictKeepBoth}}
+
+	candidate, err := composeCandidate(imported, hostedDefinition, hostedRuntime, completeCapabilities(), selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := candidate.Conflicts[0].SuggestedNames["attribute:exe"]; got != "Health（从 EXE 导入 2）" {
+		t.Fatalf("suggested name=%q want deterministic free name", got)
+	}
+	if got := candidate.Definition.Attributes[0].Name; got != "Health（从 EXE 导入 2）" {
+		t.Fatalf("kept imported name=%q", got)
+	}
+}
+
+func TestConflictKeepBothIgnoresNamesFromUnselectedImportsOutsideCompleteCandidate(t *testing.T) {
+	hostedDefinition, hostedRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "online", Name: "Health"}}, map[string]float64{"online": 1})
+	importDefinition, importRuntime := attributeConfiguration(
+		[]configuration.AttributeDefinition{{ID: "exe", Name: "Health"}, {ID: "unselected", Name: "Health（从 EXE 导入）"}},
+		map[string]float64{"exe": 9, "unselected": 4},
+	)
+	imported := migrationEnvelope(importDefinition, importRuntime)
+	selection := SelectionCommand{UnitIDs: []string{"attribute:exe"}, ConflictChoices: map[string]ConflictChoice{"attribute:exe": ConflictKeepBoth}}
+
+	candidate, err := composeCandidate(imported, hostedDefinition, hostedRuntime, completeCapabilities(), selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := candidate.Conflicts[0].SuggestedNames["attribute:exe"]; got != "Health（从 EXE 导入）" {
+		t.Fatalf("suggested name=%q included an unselected import", got)
+	}
+}
+
+func TestConflictKeepBothInitializesNilSimplePlayParametersBeforeRename(t *testing.T) {
+	hostedDefinition, hostedRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "online", Name: "resource"}}, map[string]float64{"online": 1})
+	importDefinition, importRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 9})
+	importDefinition.SimplePlay = &gameplay.SimplePlay{Version: 1, TemplateID: "resource", TemplateVersion: 1, AttributeID: "exe"}
+	imported := migrationEnvelope(importDefinition, importRuntime)
+	selection := SelectionCommand{UnitIDs: []string{"simple-play:exe"}, ConflictChoices: map[string]ConflictChoice{"simple-play:exe": ConflictKeepBoth}}
+	capabilities := completeCapabilities()
+	capabilities.SimplePlayTemplates["resource"] = 1
+
+	candidate, err := composeCandidate(imported, hostedDefinition, hostedRuntime, capabilities, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !candidate.Ready || candidate.Definition.SimplePlay == nil || candidate.Definition.SimplePlay.Parameters["name"] != "resource（从 EXE 导入）" {
+		t.Fatalf("renamed simple play=%#v", candidate.Definition.SimplePlay)
+	}
+}
+
 func migrationEnvelope(definition configuration.Definition, runtime configuration.RuntimeState) Envelope {
 	return Envelope{Definition: definition, Runtime: runtime, Units: DeriveUnits(definition, runtime), Groups: ConnectedGroups(DeriveUnits(definition, runtime))}
 }
@@ -166,6 +292,17 @@ func attributeConfiguration(definition []configuration.AttributeDefinition, valu
 		AttributeValues: values, GiftTargetReceived: []configuration.GiftTargetRuntimeState{}, Activities: []configuration.ActivityRuntimeState{},
 		RuleLimits: gameplay.RuleLimitState{AppliedCounts: map[string]int{}},
 	}
+}
+
+func activityConfiguration(activityID, activityName, attributeName string, value float64) (configuration.Definition, configuration.RuntimeState) {
+	return configuration.Definition{
+			Attributes: []configuration.AttributeDefinition{{ID: "shared", Name: attributeName}},
+			Activities: []configuration.ActivityDefinition{{ID: activityID, Name: activityName, AttributeIDs: []string{"shared"}}},
+		}, configuration.RuntimeState{
+			AttributeValues: map[string]float64{"shared": value}, GiftTargetReceived: []configuration.GiftTargetRuntimeState{},
+			Activities: []configuration.ActivityRuntimeState{{ID: activityID, Status: "not_started", Milestones: []configuration.MilestoneRuntimeState{}}},
+			RuleLimits: gameplay.RuleLimitState{AppliedCounts: map[string]int{}},
+		}
 }
 
 func emptyDefinition() configuration.Definition { return configuration.Definition{} }

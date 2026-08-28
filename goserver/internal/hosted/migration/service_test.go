@@ -3,6 +3,7 @@ package migration
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -177,8 +178,8 @@ func TestSQLRepositorySelectionLoadIsAccountOwnedReadOnlyAndRestoresServerMetada
 		t.Fatal(err)
 	}
 	mock.ExpectQuery(regexp.QuoteMeta(compositionQuery)).WithArgs(int64(21), int64(7)).WillReturnRows(sqlmock.NewRows([]string{
-		"status", "expires_at", "definition_json", "runtime_json", "room_suggestion", "source_app_version", "source_schema_version", "report_json", "hosted_definition_json", "hosted_runtime_json",
-	}).AddRow(jobPreviewed, now.Add(time.Hour), mustJSON(t, importDefinition), mustJSON(t, importRuntime), "12345", "0.5.0", 5, metadata, mustJSON(t, hostedDefinition), mustJSON(t, hostedRuntime)))
+		"status", "expires_at", "keep_room_suggestion", "definition_json", "runtime_json", "room_suggestion", "source_app_version", "source_schema_version", "report_json", "hosted_definition_json", "hosted_runtime_json",
+	}).AddRow(jobPreviewed, now.Add(time.Hour), 0, mustJSON(t, importDefinition), mustJSON(t, importRuntime), "12345", "0.5.0", 5, metadata, mustJSON(t, hostedDefinition), mustJSON(t, hostedRuntime)))
 
 	stored, err := NewRepository(database).(compositionRepository).LoadComposition(context.Background(), 7, 21)
 	if err != nil {
@@ -210,6 +211,41 @@ func TestSQLRepositorySelectionLoadHidesAnotherAccountsPreview(t *testing.T) {
 	}
 }
 
+func TestSQLRepositoryRestoresPendingCandidateMetadataAndHashFromDefinition(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 29, 9, 0, 0, 0, time.UTC)
+	definition, runtime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "confirmed", Name: "Confirmed"}}, map[string]float64{"confirmed": 8})
+	definition.GeneralSettings = &configuration.GeneralSettings{ConfigurationMode: "simple"}
+	definition.CropPresets = []configuration.CropPreset{{ID: "gift:1", Crop: configuration.Crop{Width: 1, Height: 1}}}
+	definition, runtime, _, candidateHash, err := freshCanonical(definition, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition.MigrationHash = hex.EncodeToString(candidateHash[:])
+	metadata, err := json.Marshal(previewMetadata{Report: Report{}, Units: []GameplayUnit{{ID: "attribute:original"}}, GeneralSettings: GeneralSettings{ConfigurationMode: "advanced"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(compositionQuery)).WithArgs(int64(21), int64(7)).WillReturnRows(sqlmock.NewRows([]string{
+		"status", "expires_at", "keep_room_suggestion", "definition_json", "runtime_json", "room_suggestion", "source_app_version", "source_schema_version", "report_json", "hosted_definition_json", "hosted_runtime_json",
+	}).AddRow(jobPending, now.Add(time.Hour), 1, mustJSON(t, definition), mustJSON(t, runtime), "12345", "0.5.0", 5, metadata, nil, nil))
+
+	stored, err := NewRepository(database).(compositionRepository).LoadComposition(context.Background(), 7, 21)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.KeepRoomSuggestion || stored.Imported.Definition.MigrationHash != hex.EncodeToString(candidateHash[:]) || stored.Imported.GeneralSettings.ConfigurationMode != "simple" || len(stored.Imported.CropPresets) != 1 || len(stored.Imported.Units) != 1 || stored.Imported.Units[0].ID != "attribute:confirmed" {
+		t.Fatalf("restored pending candidate=%#v", stored)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSQLRepositoryComposeStagesFullCandidateWithoutChangingFormalConfiguration(t *testing.T) {
 	database, mock, err := sqlmock.New()
 	if err != nil {
@@ -218,14 +254,19 @@ func TestSQLRepositoryComposeStagesFullCandidateWithoutChangingFormalConfigurati
 	defer database.Close()
 	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
 	definition, runtime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 8})
-	candidate := ComposeCandidate{Definition: definition, Runtime: runtime, Ready: true}
+	definition.GeneralSettings = &configuration.GeneralSettings{ConfigurationMode: "simple"}
+	definition.CropPresets = []configuration.CropPreset{{ID: "gift:1", Crop: configuration.Crop{Width: 1, Height: 1}}}
+	candidateHash := [32]byte{1}
+	definition.MigrationHash = hex.EncodeToString(candidateHash[:])
+	candidate := ComposeCandidate{Definition: definition, Runtime: runtime, Ready: true, Hash: candidateHash}
+	definitionJSON, runtimeJSON := mustJSON(t, definition), mustJSON(t, runtime)
 	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(88, 3, 6, mustJSON(t, runtime)))
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(21), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(jobPreviewed, now.Add(time.Hour), 0, nil, nil, nil, nil, []byte(`{"attributes":[]}`), []byte(`{"attributeValues":{}}`), "12345"))
 	expectPreviewNow(mock, now)
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleBaseQuery)).WithArgs(int64(21), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"base_config_version_number", "base_state_revision"}).AddRow(3, 6))
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleOpenSessionQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(12))
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE migration_jobs SET status = 'pending', keep_room_suggestion = ?, definition_json = ?, runtime_json = ? WHERE id = ? AND account_id = ? AND status = 'previewed'")).WithArgs(true, sqlmock.AnyArg(), sqlmock.AnyArg(), int64(21), int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE migration_jobs SET status = 'pending', keep_room_suggestion = ?, definition_json = ?, runtime_json = ? WHERE id = ? AND account_id = ? AND status = 'previewed'")).WithArgs(true, definitionJSON, runtimeJSON, int64(21), int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	job, err := NewRepository(database).(lifecycleRepository).Apply(context.Background(), applyCommand{AccountID: 7, JobID: 21, KeepRoomSuggestion: true, Candidate: candidate})
@@ -245,7 +286,11 @@ func TestSQLRepositoryComposeAppliesFullCandidateInsteadOfRawImport(t *testing.T
 	defer database.Close()
 	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
 	definition, runtime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}, {ID: "retained", Name: "Retained"}}, map[string]float64{"exe": 8, "retained": 2})
-	candidate := ComposeCandidate{Definition: definition, Runtime: runtime, Ready: true}
+	definition.GeneralSettings = &configuration.GeneralSettings{ConfigurationMode: "advanced"}
+	definition.CropPresets = []configuration.CropPreset{{ID: "effect:9", Crop: configuration.Crop{X: 0.2, Width: 0.8, Height: 1}}}
+	candidateHash := [32]byte{2}
+	definition.MigrationHash = hex.EncodeToString(candidateHash[:])
+	candidate := ComposeCandidate{Definition: definition, Runtime: runtime, Ready: true, Hash: candidateHash}
 	definitionJSON, runtimeJSON := mustJSON(t, definition), mustJSON(t, runtime)
 	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(nil, 0, 0, nil))
@@ -295,6 +340,60 @@ func TestSQLRepositoryReusesUnexpiredHashWithoutQuotaConsumption(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryReusesPendingHashWithoutCreatingAnotherPreview(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	command := previewCommandForTest(t, now)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(previewBaseQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"number", "revision"}).AddRow(4, 9))
+	expectPreviewNow(mock, now)
+	mock.ExpectQuery(regexp.QuoteMeta(previewExistingQuery)).WithArgs(int64(7), command.Hash[:]).WillReturnRows(activePreviewRows(3, jobPending, now.Add(time.Hour), command))
+	mock.ExpectCommit()
+
+	stored, err := NewRepository(database).Preview(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ID != 3 || stored.Status != jobPending || !stored.Reused {
+		t.Fatalf("pending reuse=%#v", stored)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPreviewReusesPendingCandidateProjectionWithoutReinterpretingSelection(t *testing.T) {
+	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	definition, runtime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "confirmed", Name: "Confirmed"}}, map[string]float64{"confirmed": 8})
+	definition.GeneralSettings = &configuration.GeneralSettings{ConfigurationMode: "simple"}
+	definition.CropPresets = []configuration.CropPreset{{ID: "gift:1", Crop: configuration.Crop{Width: 1, Height: 1}}}
+	definition, runtime, _, hash, err := freshCanonical(definition, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition.MigrationHash = hex.EncodeToString(hash[:])
+	repository := &recordingLifecycleRepository{
+		recordingPreviewRepository: recordingPreviewRepository{result: storedPreview{ID: 21, AccountID: 7, Status: jobPending, ExpiresAt: now.Add(time.Hour), Reused: true}},
+		composition:                storedComposition{ID: 21, AccountID: 7, Status: jobPending, ExpiresAt: now.Add(time.Hour), Imported: migrationEnvelope(definition, runtime), KeepRoomSuggestion: true},
+	}
+	service := NewService(repository, func() time.Time { return now })
+
+	preview, err := service.Preview(context.Background(), 7, decodedEnvelope(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Reused || !preview.CanConfirm || !preview.Selection.IncludeGeneralSettings || !preview.Selection.IncludeRoomSuggestion || len(preview.Units) != 1 || !preview.Units[0].Selected || preview.Units[0].ID != "attribute:confirmed" {
+		t.Fatalf("pending projection=%#v", preview)
+	}
+	if repository.applyCalls != 0 || repository.loadJobID != 21 {
+		t.Fatalf("pending reuse writes=%d loadJob=%d", repository.applyCalls, repository.loadJobID)
 	}
 }
 
@@ -499,16 +598,22 @@ func TestSQLRepositoryAppliesPendingJobAfterSessionWithPersistedRoomDecision(t *
 	defer database.Close()
 	now := time.Date(2026, 8, 17, 10, 15, 0, 0, time.UTC)
 	fence := OwnerFence{AccountID: 7, Token: [32]byte{1, 2, 3}, Epoch: 4}
+	pendingDefinition, pendingRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 8})
+	pendingDefinition.GeneralSettings = &configuration.GeneralSettings{ConfigurationMode: "simple"}
+	pendingDefinition.CropPresets = []configuration.CropPreset{{ID: "gift:1", Crop: configuration.Crop{Width: 1, Height: 1}}}
+	pendingHash := [32]byte{3}
+	pendingDefinition.MigrationHash = hex.EncodeToString(pendingHash[:])
+	pendingDefinitionJSON, pendingRuntimeJSON := mustJSON(t, pendingDefinition), mustJSON(t, pendingRuntime)
 	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(88, 3, 6, []byte(`{"attributeValues":{"health":1}}`)))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT expires_at > UTC_TIMESTAMP(6) FROM runtime_account_owners WHERE account_id = ? AND owner_token = ? AND fencing_epoch = ? FOR UPDATE")).WithArgs(int64(7), fence.Token[:], fence.Epoch).WillReturnRows(sqlmock.NewRows([]string{"active"}).AddRow(true))
-	mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(jobPending, now.Add(time.Hour), 1, nil, nil, nil, nil, []byte(`{"attributes":[]}`), []byte(`{"attributeValues":{}}`), "12345"))
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(jobPending, now.Add(time.Hour), 1, nil, nil, nil, nil, pendingDefinitionJSON, pendingRuntimeJSON, "12345"))
 	expectPreviewNow(mock, now)
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleBaseQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"base_config_version_number", "base_state_revision"}).AddRow(3, 6))
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleOpenSessionQuery)).WithArgs(int64(7)).WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(regexp.QuoteMeta(lifecycleNextVersionQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"number"}).AddRow(4))
-	mock.ExpectExec(regexp.QuoteMeta(lifecycleInsertVersionQuery)).WithArgs(int64(7), uint64(4), sqlmock.AnyArg(), "migration", now).WillReturnResult(sqlmock.NewResult(99, 1))
-	mock.ExpectExec(regexp.QuoteMeta(lifecycleUpsertRuntimeQuery)).WithArgs(int64(7), int64(99), uint64(7), sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(regexp.QuoteMeta(lifecycleInsertVersionQuery)).WithArgs(int64(7), uint64(4), pendingDefinitionJSON, "migration", now).WillReturnResult(sqlmock.NewResult(99, 1))
+	mock.ExpectExec(regexp.QuoteMeta(lifecycleUpsertRuntimeQuery)).WithArgs(int64(7), int64(99), uint64(7), pendingRuntimeJSON, now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta(lifecycleUpsertActiveQuery)).WithArgs(int64(7), int64(99), now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO account_room_suggestions (account_id, room_id, suggested_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE room_id = VALUES(room_id), suggested_at = VALUES(suggested_at)")).WithArgs(int64(7), "12345", now).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE migration_jobs SET keep_room_suggestion = ?, rollback_config_version_id = ?, rollback_runtime_json = ?, rollback_expires_at = ?, applied_config_version_id = ?, status = 'applied', applied_at = ? WHERE id = ? AND account_id = ? AND status IN ('previewed', 'pending')")).WithArgs(true, int64(88), sqlmock.AnyArg(), now.Add(7*24*time.Hour), int64(99), now, int64(19), int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))

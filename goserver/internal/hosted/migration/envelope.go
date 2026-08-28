@@ -49,21 +49,9 @@ type Envelope struct {
 	Hash              [sha256.Size]byte
 }
 
-type GeneralSettings struct {
-	ConfigurationMode string `json:"configurationMode"`
-}
-
-type CropPreset struct {
-	ID   string `json:"id"`
-	Crop Crop   `json:"crop"`
-}
-
-type Crop struct {
-	X      float64 `json:"x"`
-	Y      float64 `json:"y"`
-	Width  float64 `json:"width"`
-	Height float64 `json:"height"`
-}
+type GeneralSettings = configuration.GeneralSettings
+type CropPreset = configuration.CropPreset
+type Crop = configuration.Crop
 
 type Source struct {
 	AppVersion                 string `json:"appVersion"`
@@ -266,6 +254,13 @@ func Decode(reader io.Reader, maxBytes int64) (Envelope, Report, error) {
 	}
 	if err != nil {
 		return Envelope{}, Report{}, ErrInvalidEnvelope
+	}
+	if wire.MigrationVersion == 2 {
+		if settings.ConfigurationMode != "" {
+			copy := settings
+			definition.GeneralSettings = &copy
+		}
+		definition.CropPresets = append([]CropPreset(nil), crops...)
 	}
 	roomSuggestion := ""
 	if wire.Payload.RoomSuggestion != nil {

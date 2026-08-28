@@ -153,6 +153,60 @@ func TestDefaultRuntimeCompletesIdleStateForDefinition(t *testing.T) {
 	}
 }
 
+func TestNormalizePreservesAndDetachesMigrationDefinitionMetadata(t *testing.T) {
+	definition, runtime, err := Split(fixtureSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition.GeneralSettings = &GeneralSettings{ConfigurationMode: "advanced"}
+	definition.CropPresets = []CropPreset{{ID: "gift:1", Crop: Crop{X: 0.1, Y: 0.2, Width: 0.3, Height: 0.4}}}
+	definition.MigrationHash = "0000000000000000000000000000000000000000000000000000000000000000"
+
+	normalized, normalizedRuntime, err := Normalize(definition, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized.GeneralSettings == nil || normalized.GeneralSettings.ConfigurationMode != "advanced" || !reflect.DeepEqual(normalized.CropPresets, definition.CropPresets) || normalized.MigrationHash != definition.MigrationHash {
+		t.Fatalf("normalized metadata=%#v %#v", normalized.GeneralSettings, normalized.CropPresets)
+	}
+	definition.GeneralSettings.ConfigurationMode = "simple"
+	definition.CropPresets[0].Crop.X = 0.9
+	if normalized.GeneralSettings.ConfigurationMode != "advanced" || normalized.CropPresets[0].Crop.X != 0.1 {
+		t.Fatalf("normalized metadata aliases input: %#v %#v", normalized.GeneralSettings, normalized.CropPresets)
+	}
+	if _, err := Join(normalized, normalizedRuntime); err != nil {
+		t.Fatalf("Join(Normalize()) error=%v", err)
+	}
+}
+
+func TestNormalizeRejectsInvalidMigrationDefinitionMetadata(t *testing.T) {
+	definition, runtime, err := Split(fixtureSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*Definition)
+	}{
+		{name: "mode", mutate: func(value *Definition) { value.GeneralSettings = &GeneralSettings{ConfigurationMode: "client-forged"} }},
+		{name: "crop bounds", mutate: func(value *Definition) {
+			value.CropPresets = []CropPreset{{ID: "gift:1", Crop: Crop{X: 0.8, Width: 0.3, Height: 1}}}
+		}},
+		{name: "duplicate crop", mutate: func(value *Definition) {
+			value.CropPresets = []CropPreset{{ID: "gift:1", Crop: Crop{Width: 1, Height: 1}}, {ID: "gift:1", Crop: Crop{Width: 1, Height: 1}}}
+		}},
+		{name: "migration hash", mutate: func(value *Definition) { value.MigrationHash = "not-a-sha256" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := definition
+			test.mutate(&candidate)
+			if _, _, err := Normalize(candidate, runtime); err == nil {
+				t.Fatal("Normalize() accepted invalid migration metadata")
+			}
+		})
+	}
+}
+
 func storageProjection(snapshot gameplay.Snapshot) gameplay.Snapshot {
 	snapshot.RoomID = ""
 	for index := range snapshot.Gifts {
