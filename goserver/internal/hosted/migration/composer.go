@@ -317,23 +317,20 @@ func resourcesForUnit(definition configuration.Definition, runtime configuration
 	}
 	for _, value := range definition.Rules {
 		if containsString(unit.RuleIDs, value.ID) {
-			count, present := runtime.RuleLimits.AppliedCounts[value.ID]
-			result = append(result, unitResource{kind: "rule", id: value.ID, value: struct {
-				Definition gameplay.Rule
-				Count      int
-				Present    bool
-			}{value, count, present}})
+			result = append(result, unitResource{kind: "rule", id: value.ID, value: value})
 		}
 	}
 	for _, value := range definition.TimerRules {
 		if containsString(unit.TimerRuleIDs, value.ID) {
-			count, present := runtime.RuleLimits.AppliedCounts[value.ID]
-			result = append(result, unitResource{kind: "timer-rule", id: value.ID, value: struct {
-				Definition gameplay.TimerRule
-				Count      int
-				Present    bool
-			}{value, count, present}})
+			result = append(result, unitResource{kind: "timer-rule", id: value.ID, value: value})
 		}
+	}
+	for _, id := range sortedUniqueStrings(append(append([]string(nil), unit.RuleIDs...), unit.TimerRuleIDs...)) {
+		count, present := runtime.RuleLimits.AppliedCounts[id]
+		result = append(result, unitResource{kind: "rule-limit-count", id: id, value: struct {
+			Count   int
+			Present bool
+		}{count, present}})
 	}
 	if len(unit.RuleIDs) != 0 || len(unit.TimerRuleIDs) != 0 {
 		result = append(result, unitResource{kind: "rule-limits-local-date", id: "singleton", value: runtime.RuleLimits.LocalDate})
@@ -539,17 +536,16 @@ func (assembly *configurationAssembly) add(definition configuration.Definition, 
 	for _, value := range definition.Rules {
 		if containsString(unit.RuleIDs, value.ID) {
 			assembly.rules[value.ID] = value
-			if count, ok := runtime.RuleLimits.AppliedCounts[value.ID]; ok {
-				assembly.limits.AppliedCounts[value.ID] = count
-			}
 		}
 	}
 	for _, value := range definition.TimerRules {
 		if containsString(unit.TimerRuleIDs, value.ID) {
 			assembly.timers[value.ID] = value
-			if count, ok := runtime.RuleLimits.AppliedCounts[value.ID]; ok {
-				assembly.limits.AppliedCounts[value.ID] = count
-			}
+		}
+	}
+	for _, id := range sortedUniqueStrings(append(append([]string(nil), unit.RuleIDs...), unit.TimerRuleIDs...)) {
+		if count, ok := runtime.RuleLimits.AppliedCounts[id]; ok {
+			assembly.limits.AppliedCounts[id] = count
 		}
 	}
 	for _, value := range definition.FormulaPresets {

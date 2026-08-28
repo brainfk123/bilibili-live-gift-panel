@@ -240,9 +240,57 @@ func TestComposeSelectionDistinguishesMissingAndExplicitZeroRuleLimitCount(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := SelectionConflict{ID: "resource:rule:shared-rule", ImportedUnitIDs: []string{"activity:import"}, HostedUnitIDs: []string{"activity:host"}}
+	want := SelectionConflict{ID: "resource:rule-limit-count:shared-rule", ImportedUnitIDs: []string{"activity:import"}, HostedUnitIDs: []string{"activity:host"}}
 	if candidate.Ready || !reflect.DeepEqual(candidate.Conflicts, []SelectionConflict{want}) {
 		t.Fatalf("rule-limit presence candidate=%#v want=%#v", candidate, want)
+	}
+}
+
+func TestComposeSelectionBlocksSharedRuleLimitCountAcrossRuleKinds(t *testing.T) {
+	tests := []struct {
+		name         string
+		hostedCounts map[string]int
+		importCounts map[string]int
+	}{
+		{name: "different values", hostedCounts: map[string]int{"x": 1}, importCounts: map[string]int{"x": 2}},
+		{name: "missing versus explicit zero", hostedCounts: map[string]int{}, importCounts: map[string]int{"x": 0}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			hostedDefinition, hostedRuntime := activityConfiguration("host", "Hosted activity", "Shared", 1)
+			hostedDefinition.Rules = []gameplay.Rule{{ID: "x", AttributeID: "shared", Formula: "1"}}
+			hostedRuntime.RuleLimits = gameplay.RuleLimitState{LocalDate: "2026-08-29", AppliedCounts: test.hostedCounts}
+			importDefinition, importRuntime := activityConfiguration("import", "Imported activity", "Shared", 1)
+			importDefinition.TimerRules = []gameplay.TimerRule{{ID: "x", AttributeID: "shared", Formula: "1", IntervalSeconds: 1}}
+			importRuntime.RuleLimits = gameplay.RuleLimitState{LocalDate: "2026-08-29", AppliedCounts: test.importCounts}
+
+			candidate, err := composeCandidate(migrationEnvelope(importDefinition, importRuntime), hostedDefinition, hostedRuntime, completeCapabilities(), SelectionCommand{UnitIDs: []string{"activity:import"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := SelectionConflict{ID: "resource:rule-limit-count:x", ImportedUnitIDs: []string{"activity:import"}, HostedUnitIDs: []string{"activity:host"}}
+			if candidate.Ready || !reflect.DeepEqual(candidate.Conflicts, []SelectionConflict{want}) {
+				t.Fatalf("cross-kind rule limit candidate=%#v want=%#v", candidate, want)
+			}
+		})
+	}
+}
+
+func TestComposeSelectionSharesIdenticalRuleLimitCountAcrossRuleKinds(t *testing.T) {
+	hostedDefinition, hostedRuntime := activityConfiguration("host", "Hosted activity", "Shared", 1)
+	hostedDefinition.Rules = []gameplay.Rule{{ID: "x", AttributeID: "shared", Formula: "1"}}
+	hostedRuntime.RuleLimits = gameplay.RuleLimitState{LocalDate: "2026-08-29", AppliedCounts: map[string]int{"x": 2}}
+	importDefinition, importRuntime := activityConfiguration("import", "Imported activity", "Shared", 1)
+	importDefinition.TimerRules = []gameplay.TimerRule{{ID: "x", AttributeID: "shared", Formula: "1", IntervalSeconds: 1}}
+	importRuntime.RuleLimits = gameplay.RuleLimitState{LocalDate: "2026-08-29", AppliedCounts: map[string]int{"x": 2}}
+
+	candidate, err := composeCandidate(migrationEnvelope(importDefinition, importRuntime), hostedDefinition, hostedRuntime, completeCapabilities(), SelectionCommand{UnitIDs: []string{"activity:import"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, present := candidate.Runtime.RuleLimits.AppliedCounts["x"]
+	if !candidate.Ready || len(candidate.Definition.Rules) != 1 || len(candidate.Definition.TimerRules) != 1 || !present || count != 2 {
+		t.Fatalf("identical cross-kind rule limit candidate=%#v", candidate)
 	}
 }
 
