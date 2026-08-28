@@ -78,6 +78,45 @@ func TestMigrationBarrierAssignsEveryGiftToExactlyOneVersion(t *testing.T) {
 	}
 }
 
+func TestMigrationBarrierOwnershipConflictBeforeMarkerReturnsWithoutDeadlockingCleanup(t *testing.T) {
+	repository := newBarrierMemoryRepository()
+	manager, active, processor := newBarrierManagerHarness(t, repository, 7)
+	processor.blockEvent("ownership-conflict", ErrOwnershipConflict)
+	sessionSink{active: active}.OnEvent(roomsource.Event{ID: "ownership-conflict", RoomID: "42", Type: "SEND_GIFT"})
+	processor.waitForBlockedEvent(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.ApplyConfigurationBarrier(ctx, 7, barrierCandidateFixture(19))
+		result <- err
+	}()
+	waitForBarrierMarker(t, active)
+	processor.releaseBlockedEvent()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, migration.ErrOwnershipConflict) {
+			t.Fatalf("ApplyConfigurationBarrier() error = %v, want migration.ErrOwnershipConflict", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("barrier remained blocked behind ownership cleanup")
+	}
+	waitForStaleCleanup(t, active.account, active)
+	lockReturned := make(chan struct{})
+	go func() {
+		active.admissionMu.Lock()
+		active.admissionMu.Unlock()
+		close(lockReturned)
+	}()
+	select {
+	case <-lockReturned:
+	case <-time.After(time.Second):
+		t.Fatal("ownership cleanup left admission permanently locked")
+	}
+}
+
 func TestMigrationBarrierFailsClosedWhenCandidateNeedsUnavailableTimerScheduler(t *testing.T) {
 	repository := newBarrierMemoryRepository()
 	manager, target, _ := newBarrierManagerHarness(t, repository, 7)
@@ -136,6 +175,81 @@ func TestMigrationBarrierSerializesConcurrentApplyWithoutRepublishingOrRewinding
 	}
 }
 
+func TestMigrationBarrierCompletedBoundaryIsIdempotentAcrossLaterSessionsWithoutRepublish(t *testing.T) {
+	for _, test := range []struct {
+		name                      string
+		persistedLiveSessionID    int64
+		persistedBroadcastID      int64
+		persistedOldConfigVersion int64
+		lastOldRevision           uint64
+		firstNewRevision          uint64
+		currentLiveSessionID      int64
+		currentBroadcastID        int64
+		currentRevision           uint64
+	}{
+		{name: "offline apply retried while later live", persistedOldConfigVersion: 0, lastOldRevision: 0, firstNewRevision: 1, currentLiveSessionID: 81, currentBroadcastID: 91, currentRevision: 3},
+		{name: "session A apply retried in session B", persistedLiveSessionID: 81, persistedBroadcastID: 91, persistedOldConfigVersion: 10, lastOldRevision: 4, firstNewRevision: 5, currentLiveSessionID: 82, currentBroadcastID: 92, currentRevision: 7},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := newBarrierMemoryRepository()
+			close(repository.allowActivation)
+			persisted := configuration.Boundary{
+				AccountID: 7, MigrationJobID: 19, Operation: configuration.BarrierMigrationApply,
+				OldConfigVersionID: test.persistedOldConfigVersion, NewConfigVersionID: 11,
+				LiveSessionID: test.persistedLiveSessionID, BroadcastSessionID: test.persistedBroadcastID,
+				LastOldRevision: test.lastOldRevision, FirstNewRevision: test.firstNewRevision,
+				AppliedAt: time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC),
+			}
+			repository.setBoundary(persisted)
+			manager, active, processor := newBarrierManagerHarness(t, repository, 7)
+			active.session.ID = test.currentLiveSessionID
+			active.session.BroadcastSessionID = test.currentBroadcastID
+			active.session.ConfigVersionID = 11
+			processor.mu.Lock()
+			processor.version = 11
+			processor.revision = test.currentRevision
+			processor.mu.Unlock()
+
+			got, err := manager.ApplyConfigurationBarrier(context.Background(), 7, barrierCandidateFixture(19))
+			if err != nil {
+				t.Fatalf("cross-session retry error = %v", err)
+			}
+			if got != persisted {
+				t.Fatalf("cross-session retry boundary = %#v, want persisted %#v", got, persisted)
+			}
+			if snapshots := processor.publishedSnapshots(); len(snapshots) != 0 {
+				t.Fatalf("cross-session idempotent retry republished snapshots: %#v", snapshots)
+			}
+			if active.session.ID != test.currentLiveSessionID || active.session.BroadcastSessionID != test.currentBroadcastID || active.subscription.(*barrierSubscription).cancelCount() != 0 {
+				t.Fatalf("cross-session retry changed current session: %#v", active.session)
+			}
+		})
+	}
+}
+
+func TestMigrationBarrierOldEdgeCannotReconcileBoundaryFromDifferentSession(t *testing.T) {
+	repository := newBarrierMemoryRepository()
+	close(repository.allowActivation)
+	repository.setBoundary(configuration.Boundary{
+		AccountID: 7, MigrationJobID: 19, Operation: configuration.BarrierMigrationApply,
+		OldConfigVersionID: 10, NewConfigVersionID: 11,
+		LiveSessionID: 81, BroadcastSessionID: 91,
+		LastOldRevision: 3, FirstNewRevision: 4,
+		AppliedAt: time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC),
+	})
+	manager, active, processor := newBarrierManagerHarness(t, repository, 7)
+	active.session.ID = 82
+	active.session.BroadcastSessionID = 92
+
+	if _, err := manager.ApplyConfigurationBarrier(context.Background(), 7, barrierCandidateFixture(19)); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("old-edge cross-session reconciliation error = %v, want ErrUnavailable", err)
+	}
+	if snapshots := processor.publishedSnapshots(); len(snapshots) != 0 {
+		t.Fatalf("rejected cross-session reconciliation published snapshots: %#v", snapshots)
+	}
+	assertBarrierFailureRecovered(t, active, processor, "after-cross-session-rejection")
+}
+
 func TestMigrationBarrierCancellationAndFailuresAlwaysReopenAdmissionWithoutPartialSwitch(t *testing.T) {
 	t.Run("context cancellation during activation", func(t *testing.T) {
 		repository := newBarrierMemoryRepository()
@@ -188,6 +302,42 @@ func TestMigrationBarrierCancellationAndFailuresAlwaysReopenAdmissionWithoutPart
 		}
 		assertBarrierFailureRecovered(t, active, processor, "after-snapshot-failure")
 	})
+}
+
+func TestMigrationBarrierUnresolvedCommitFailsClosedUntilRetryReconciles(t *testing.T) {
+	repository := newBarrierMemoryRepository()
+	repository.setActivationError(configuration.ErrCommitUncertain)
+	close(repository.allowActivation)
+	manager, active, processor := newBarrierManagerHarness(t, repository, 7)
+
+	if _, err := manager.ApplyConfigurationBarrier(context.Background(), 7, barrierCandidateFixture(19)); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("unresolved barrier error = %v, want ErrUnavailable", err)
+	}
+	status, err := manager.Status(context.Background(), 7)
+	if err != nil || !status.Degraded {
+		t.Fatalf("fail-closed status = %#v, %v", status, err)
+	}
+	sessionSink{active: active}.OnEvent(roomsource.Event{ID: "while-commit-uncertain", RoomID: "42", Type: "SEND_GIFT"})
+	select {
+	case id := <-processor.accepted:
+		t.Fatalf("event %q entered the old processor while commit was uncertain", id)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	repository.setActivationError(nil)
+	boundary, err := manager.ApplyConfigurationBarrier(context.Background(), 7, barrierCandidateFixture(19))
+	if err != nil {
+		t.Fatalf("reconciliation retry error = %v", err)
+	}
+	sessionSink{active: active}.OnEvent(roomsource.Event{ID: "after-reconciliation", RoomID: "42", Type: "SEND_GIFT"})
+	processor.waitForGift(t, "after-reconciliation")
+	if got := processor.versionFor("after-reconciliation"); got != boundary.NewConfigVersionID {
+		t.Fatalf("gift after reconciliation used version %d, want %d", got, boundary.NewConfigVersionID)
+	}
+	status, err = manager.Status(context.Background(), 7)
+	if err != nil || status.Degraded {
+		t.Fatalf("reconciled status = %#v, %v", status, err)
+	}
 }
 
 func TestMigrationBarrierContextCancelsWhileWaitingForConcurrentAccountGate(t *testing.T) {
@@ -373,6 +523,18 @@ func (repository *barrierMemoryRepository) activationCount() int {
 	return repository.activations
 }
 
+func (repository *barrierMemoryRepository) setActivationError(err error) {
+	repository.mu.Lock()
+	repository.activationErr = err
+	repository.mu.Unlock()
+}
+
+func (repository *barrierMemoryRepository) setBoundary(boundary configuration.Boundary) {
+	repository.mu.Lock()
+	repository.boundary = &boundary
+	repository.mu.Unlock()
+}
+
 type barrierRecordingProcessor struct {
 	mu                 sync.Mutex
 	version            int64
@@ -381,6 +543,12 @@ type barrierRecordingProcessor struct {
 	accepted           chan string
 	snapshots          []DisplaySnapshot
 	prepareSnapshotErr error
+	blockedEventID     string
+	blockedEventErr    error
+	blockedEventStart  chan struct{}
+	blockedEventAllow  chan struct{}
+	blockedStartOnce   sync.Once
+	blockedAllowOnce   sync.Once
 }
 
 func newBarrierRecordingProcessor(version int64, revision uint64) *barrierRecordingProcessor {
@@ -389,11 +557,48 @@ func newBarrierRecordingProcessor(version int64, revision uint64) *barrierRecord
 
 func (processor *barrierRecordingProcessor) Accept(event roomsource.Event) error {
 	processor.mu.Lock()
+	blocked := event.ID == processor.blockedEventID && processor.blockedEventStart != nil && processor.blockedEventAllow != nil
+	blockedStart, blockedAllow, blockedErr := processor.blockedEventStart, processor.blockedEventAllow, processor.blockedEventErr
+	processor.mu.Unlock()
+	if blocked {
+		processor.blockedStartOnce.Do(func() { close(blockedStart) })
+		<-blockedAllow
+		return blockedErr
+	}
+	processor.mu.Lock()
 	processor.versions[event.ID] = processor.version
 	processor.revision++
 	processor.mu.Unlock()
 	processor.accepted <- event.ID
 	return nil
+}
+
+func (processor *barrierRecordingProcessor) blockEvent(eventID string, err error) {
+	processor.mu.Lock()
+	defer processor.mu.Unlock()
+	processor.blockedEventID = eventID
+	processor.blockedEventErr = err
+	processor.blockedEventStart = make(chan struct{})
+	processor.blockedEventAllow = make(chan struct{})
+}
+
+func (processor *barrierRecordingProcessor) waitForBlockedEvent(t *testing.T) {
+	t.Helper()
+	processor.mu.Lock()
+	started := processor.blockedEventStart
+	processor.mu.Unlock()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("blocked event did not reach processor")
+	}
+}
+
+func (processor *barrierRecordingProcessor) releaseBlockedEvent() {
+	processor.mu.Lock()
+	allow := processor.blockedEventAllow
+	processor.mu.Unlock()
+	processor.blockedAllowOnce.Do(func() { close(allow) })
 }
 
 func (*barrierRecordingProcessor) Close(context.Context) error { return nil }
@@ -495,7 +700,15 @@ func (subscription *barrierSubscription) cancelCount() int {
 
 func newBarrierManagerHarness(t *testing.T, repository *barrierMemoryRepository, accountID int64) (*Manager, *activeSession, *barrierRecordingProcessor) {
 	t.Helper()
-	manager := &Manager{dependencies: Dependencies{Configuration: repository}, accounts: make(map[int64]*accountRuntime), now: func() time.Time { return time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC) }}
+	manager := &Manager{
+		dependencies:          Dependencies{Sessions: newMemorySessionRepository(), Configuration: repository},
+		accounts:              make(map[int64]*accountRuntime),
+		roomTransitions:       make(map[string]roomTransitionState),
+		ownershipControl:      context.Background(),
+		ownerOperationTimeout: time.Second,
+		newTimer:              newSystemTimer,
+		now:                   func() time.Time { return time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC) },
+	}
 	_, active, processor := addBarrierAccount(t, manager, accountID)
 	return manager, active, processor
 }
@@ -525,4 +738,38 @@ func addBarrierAccount(t *testing.T, manager *Manager, accountID int64) (*accoun
 		<-active.workerDone
 	})
 	return account, active, processor
+}
+
+func waitForBarrierMarker(t *testing.T, active *activeSession) {
+	t.Helper()
+	managed, ok := active.processor.(*managedConfigurationBarrierProcessor)
+	if !ok {
+		t.Fatal("active processor is not barrier-managed")
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		managed.mu.Lock()
+		count := len(managed.markers)
+		managed.mu.Unlock()
+		if count != 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("barrier marker was not queued")
+}
+
+func waitForStaleCleanup(t *testing.T, account *accountRuntime, active *activeSession) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		account.mu.Lock()
+		clean := !account.stale && account.current != active && account.transitionPending != active && account.staleDone == nil
+		account.mu.Unlock()
+		if clean {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("stale ownership cleanup did not complete")
 }

@@ -15,10 +15,11 @@ import (
 )
 
 var (
-	ErrInvalidInput = errors.New("configuration: invalid input")
-	ErrNotFound     = errors.New("configuration: not found")
-	ErrUnavailable  = errors.New("configuration: repository unavailable")
-	ErrOwnership    = errors.New("configuration: runtime ownership conflict")
+	ErrInvalidInput    = errors.New("configuration: invalid input")
+	ErrNotFound        = errors.New("configuration: not found")
+	ErrUnavailable     = errors.New("configuration: repository unavailable")
+	ErrOwnership       = errors.New("configuration: runtime ownership conflict")
+	ErrCommitUncertain = errors.New("configuration: barrier commit outcome uncertain")
 )
 
 // Repository owns the durable configuration state for hosted accounts.
@@ -533,6 +534,7 @@ const barrierRollbackDefinitionQuery = "SELECT definition_json FROM account_conf
 const barrierRollbackJobQuery = "UPDATE migration_jobs SET status = 'rolled_back', rolled_back_at = ? WHERE id = ? AND account_id = ? AND status = 'applied'"
 const barrierInsertAuditQuery = "INSERT INTO audit_events (event_type, actor_account_id, target_account_id, event_data, created_at) VALUES (?, ?, ?, ?, ?)"
 const barrierBoundaryQuery = "SELECT event_data FROM audit_events WHERE event_type = 'configuration_barrier' AND target_account_id = ? AND JSON_UNQUOTE(JSON_EXTRACT(event_data, '$.operation')) = ? AND JSON_EXTRACT(event_data, '$.migrationJobId') = ? ORDER BY id DESC LIMIT 1"
+const barrierCommitVerificationStateQuery = "SELECT j.status, active.config_version_id, COALESCE(s.revision, 0) FROM migration_jobs AS j LEFT JOIN account_active_config AS active ON active.account_id = j.account_id LEFT JOIN account_runtime_state AS s ON s.account_id = j.account_id AND s.config_version_id = active.config_version_id WHERE j.id = ? AND j.account_id = ?"
 
 type lockedBarrierJob struct {
 	status                  string
@@ -689,6 +691,31 @@ func (repository *sqlRepository) ActivateBarrier(ctx context.Context, command Ba
 	if err := transaction.QueryRowContext(ctx, barrierNextVersionQuery, command.AccountID).Scan(&number); err != nil || number == 0 {
 		return Boundary{}, ErrUnavailable
 	}
+	var emptyRollbackVersionID int64
+	var emptyRollbackRuntimeJSON []byte
+	if command.Operation == BarrierMigrationApply && !activeID.Valid {
+		emptyDefinition, emptyRuntime, err := Normalize(Definition{}, DefaultRuntime(Definition{}))
+		if err != nil {
+			return Boundary{}, ErrUnavailable
+		}
+		emptyDefinitionJSON, err := marshalDefinition(emptyDefinition)
+		if err != nil {
+			return Boundary{}, ErrUnavailable
+		}
+		emptyRollbackRuntimeJSON, err = marshalRuntime(emptyRuntime)
+		if err != nil {
+			return Boundary{}, ErrUnavailable
+		}
+		result, err := transaction.ExecContext(ctx, barrierInsertVersionQuery, command.AccountID, number, emptyDefinitionJSON, "migration", command.At)
+		if err != nil {
+			return Boundary{}, ErrUnavailable
+		}
+		emptyRollbackVersionID, err = result.LastInsertId()
+		if err != nil || emptyRollbackVersionID <= 0 || !oneRow(result) || number == ^uint64(0) {
+			return Boundary{}, ErrUnavailable
+		}
+		number++
+	}
 	result, err := transaction.ExecContext(ctx, barrierInsertVersionQuery, command.AccountID, number, definitionJSON, source, command.At)
 	if err != nil {
 		return Boundary{}, ErrUnavailable
@@ -722,6 +749,9 @@ func (repository *sqlRepository) ActivateBarrier(ctx context.Context, command Ba
 		if activeID.Valid {
 			rollbackVersion = activeID.Int64
 			rollbackRuntime = currentRuntimeJSON
+		} else if emptyRollbackVersionID > 0 {
+			rollbackVersion = emptyRollbackVersionID
+			rollbackRuntime = emptyRollbackRuntimeJSON
 		}
 		result, err = transaction.ExecContext(ctx, barrierApplyJobQuery, rollbackVersion, rollbackRuntime, rollbackExpiresAt, versionID, command.At, command.MigrationJobID, command.AccountID)
 	} else {
@@ -744,10 +774,45 @@ func (repository *sqlRepository) ActivateBarrier(ctx context.Context, command Ba
 		return Boundary{}, ErrUnavailable
 	}
 	if err := transaction.Commit(); err != nil {
-		return Boundary{}, ErrUnavailable
+		committed = true
+		if verified, ok := repository.verifyCommittedBarrier(command, boundary); ok {
+			return verified, nil
+		}
+		return Boundary{}, ErrCommitUncertain
 	}
 	committed = true
 	return boundary, nil
+}
+
+func (repository *sqlRepository) verifyCommittedBarrier(command BarrierCommand, expected Boundary) (Boundary, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var status string
+	var activeID sql.NullInt64
+	var revision uint64
+	if err := repository.db.QueryRowContext(ctx, barrierCommitVerificationStateQuery, command.MigrationJobID, command.AccountID).Scan(&status, &activeID, &revision); err != nil {
+		return Boundary{}, false
+	}
+	wantStatus := "applied"
+	if command.Operation == BarrierMigrationRollback {
+		wantStatus = "rolled_back"
+	}
+	if status != wantStatus || !activeID.Valid || activeID.Int64 != expected.NewConfigVersionID || revision < expected.FirstNewRevision {
+		return Boundary{}, false
+	}
+	var encoded []byte
+	if err := repository.db.QueryRowContext(ctx, barrierBoundaryQuery, command.AccountID, string(command.Operation), command.MigrationJobID).Scan(&encoded); err != nil {
+		return Boundary{}, false
+	}
+	var boundary Boundary
+	if json.Unmarshal(encoded, &boundary) != nil || !sameBoundary(boundary, expected) {
+		return Boundary{}, false
+	}
+	return boundary, true
+}
+
+func sameBoundary(left, right Boundary) bool {
+	return left.AccountID == right.AccountID && left.MigrationJobID == right.MigrationJobID && left.Operation == right.Operation && left.OldConfigVersionID == right.OldConfigVersionID && left.NewConfigVersionID == right.NewConfigVersionID && left.BroadcastSessionID == right.BroadcastSessionID && left.LiveSessionID == right.LiveSessionID && left.LastOldRevision == right.LastOldRevision && left.FirstNewRevision == right.FirstNewRevision && left.AppliedAt.Equal(right.AppliedAt)
 }
 
 func loadPersistedBoundary(ctx context.Context, transaction *sql.Tx, command BarrierCommand, activeID sql.NullInt64, currentRevision uint64) (Boundary, error) {
@@ -759,9 +824,8 @@ func loadPersistedBoundary(ctx context.Context, transaction *sql.Tx, command Bar
 	if json.Unmarshal(encoded, &boundary) != nil || boundary.AccountID != command.AccountID || boundary.MigrationJobID != command.MigrationJobID || boundary.Operation != command.Operation || boundary.NewConfigVersionID <= 0 || !activeID.Valid || activeID.Int64 != boundary.NewConfigVersionID || boundary.FirstNewRevision == 0 || boundary.FirstNewRevision != boundary.LastOldRevision+1 || currentRevision < boundary.FirstNewRevision || boundary.AppliedAt.IsZero() {
 		return Boundary{}, ErrUnavailable
 	}
-	if command.LiveSessionID != 0 && (boundary.LiveSessionID != command.LiveSessionID || boundary.BroadcastSessionID != command.BroadcastSessionID) {
-		return Boundary{}, ErrUnavailable
-	}
+	// Session metadata describes the original durable cut. A later idempotent
+	// retry must return it unchanged even when the current session is newer.
 	return boundary, nil
 }
 

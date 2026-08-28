@@ -108,10 +108,11 @@ func (factory *ConfigurationBarrierProcessorFactory) New(ctx context.Context, ow
 }
 
 type managedConfigurationBarrierProcessor struct {
-	delegate configurationBarrierDelegate
-	mu       sync.Mutex
-	next     uint64
-	markers  map[string]chan struct{}
+	delegate  configurationBarrierDelegate
+	mu        sync.Mutex
+	next      uint64
+	markers   map[string]chan struct{}
+	reconcile bool
 }
 
 func newManagedConfigurationBarrierProcessor(delegate configurationBarrierDelegate) *managedConfigurationBarrierProcessor {
@@ -152,7 +153,7 @@ func (processor *managedConfigurationBarrierProcessor) FinalizeSession() {
 	}
 }
 
-func (processor *managedConfigurationBarrierProcessor) drain(ctx context.Context, events chan<- roomsource.Event, roomID string) error {
+func (processor *managedConfigurationBarrierProcessor) drain(ctx context.Context, events chan<- roomsource.Event, workerDone <-chan struct{}, roomID string) error {
 	processor.mu.Lock()
 	processor.next++
 	if processor.next == 0 {
@@ -166,6 +167,9 @@ func (processor *managedConfigurationBarrierProcessor) drain(ctx context.Context
 	marker := roomsource.Event{ID: markerID, RoomID: roomID, Type: configurationBarrierMarkerType}
 	select {
 	case events <- marker:
+	case <-workerDone:
+		processor.removeMarker(markerID)
+		return migration.ErrOwnershipConflict
 	case <-ctx.Done():
 		processor.removeMarker(markerID)
 		return ctx.Err()
@@ -173,6 +177,9 @@ func (processor *managedConfigurationBarrierProcessor) drain(ctx context.Context
 	select {
 	case <-done:
 		return nil
+	case <-workerDone:
+		processor.removeMarker(markerID)
+		return migration.ErrOwnershipConflict
 	case <-ctx.Done():
 		processor.removeMarker(markerID)
 		return ctx.Err()
@@ -183,6 +190,26 @@ func (processor *managedConfigurationBarrierProcessor) removeMarker(markerID str
 	processor.mu.Lock()
 	delete(processor.markers, markerID)
 	processor.mu.Unlock()
+}
+
+func (processor *managedConfigurationBarrierProcessor) requireReconciliation() {
+	processor.mu.Lock()
+	processor.reconcile = true
+	processor.mu.Unlock()
+}
+
+func (processor *managedConfigurationBarrierProcessor) reconciliationRequired() bool {
+	processor.mu.Lock()
+	defer processor.mu.Unlock()
+	return processor.reconcile
+}
+
+func (processor *managedConfigurationBarrierProcessor) clearReconciliation() bool {
+	processor.mu.Lock()
+	defer processor.mu.Unlock()
+	wasRequired := processor.reconcile
+	processor.reconcile = false
+	return wasRequired
 }
 
 func (processor *managedConfigurationBarrierProcessor) prepareTimers(ctx context.Context, command TimerRebuildCommand) (PreparedTimers, error) {
@@ -262,14 +289,17 @@ func (manager *Manager) ApplyConfigurationBarrier(ctx context.Context, accountID
 		return Boundary{}, err
 	}
 	defer active.admissionMu.Unlock()
-	if !active.admitting || !active.workerStarted || active.eventsClosed || active.drained || active.processorClosed || active.processor == nil || active.session.AccountID != accountID || active.session.ID <= 0 || active.session.BroadcastSessionID <= 0 {
+	if !active.workerStarted || active.eventsClosed || active.drained || active.processorClosed || active.processor == nil || active.session.AccountID != accountID || active.session.ID <= 0 || active.session.BroadcastSessionID <= 0 {
 		return Boundary{}, ErrUnavailable
 	}
 	processor, ok := active.processor.(*managedConfigurationBarrierProcessor)
 	if !ok || processor.delegate == nil {
 		return Boundary{}, ErrUnavailable
 	}
-	if err := processor.drain(ctx, active.events, active.session.RoomID); err != nil {
+	if !active.admitting && !processor.reconciliationRequired() {
+		return Boundary{}, ErrUnavailable
+	}
+	if err := processor.drain(ctx, active.events, active.workerDone, active.session.RoomID); err != nil {
 		return Boundary{}, err
 	}
 	state, err := processor.delegate.configurationBarrierState(ctx)
@@ -308,9 +338,14 @@ func (manager *Manager) ApplyConfigurationBarrier(ctx context.Context, accountID
 	if err != nil {
 		preparedSnapshot.Abort()
 		preparedTimers.Abort()
+		if errors.Is(err, configuration.ErrCommitUncertain) {
+			processor.requireReconciliation()
+			active.admitting = false
+			account.markDegraded()
+		}
 		return Boundary{}, barrierRuntimeError(ctx, err)
 	}
-	if boundary.AccountID != accountID || boundary.MigrationJobID != candidate.JobID || boundary.Operation != candidate.Operation || boundary.LiveSessionID != active.session.ID || boundary.BroadcastSessionID != active.session.BroadcastSessionID || boundary.NewConfigVersionID <= 0 || boundary.FirstNewRevision == 0 || boundary.FirstNewRevision != boundary.LastOldRevision+1 {
+	if boundary.AccountID != accountID || boundary.MigrationJobID != candidate.JobID || boundary.Operation != candidate.Operation || boundary.NewConfigVersionID <= 0 || boundary.FirstNewRevision == 0 || boundary.FirstNewRevision != boundary.LastOldRevision+1 {
 		preparedSnapshot.Abort()
 		preparedTimers.Abort()
 		return Boundary{}, ErrUnavailable
@@ -323,7 +358,13 @@ func (manager *Manager) ApplyConfigurationBarrier(ctx context.Context, accountID
 		}
 		preparedSnapshot.Abort()
 		preparedTimers.Abort()
+		recoverConfigurationAdmission(account, active, processor)
 		return boundary, nil
+	}
+	if boundary.LiveSessionID != active.session.ID || boundary.BroadcastSessionID != active.session.BroadcastSessionID {
+		preparedSnapshot.Abort()
+		preparedTimers.Abort()
+		return Boundary{}, ErrUnavailable
 	}
 	if boundary.OldConfigVersionID != state.ConfigVersionID || boundary.LastOldRevision != state.Revision {
 		preparedSnapshot.Abort()
@@ -334,7 +375,21 @@ func (manager *Manager) ApplyConfigurationBarrier(ctx context.Context, accountID
 	active.session.ConfigVersionID = boundary.NewConfigVersionID
 	preparedTimers.Activate()
 	preparedSnapshot.Publish()
+	recoverConfigurationAdmission(account, active, processor)
 	return boundary, nil
+}
+
+func recoverConfigurationAdmission(account *accountRuntime, active *activeSession, processor *managedConfigurationBarrierProcessor) {
+	if !processor.clearReconciliation() {
+		return
+	}
+	active.admitting = true
+	status := processor.Status()
+	account.mu.Lock()
+	if !status.Degraded && !account.sourceDegraded {
+		account.degraded = false
+	}
+	account.mu.Unlock()
 }
 
 // ApplyPendingConfigurationBarrier is called only while the runtime room

@@ -361,6 +361,61 @@ func TestRepositoryActivateBarrierPersistsBoundaryAndRollbackMaterialAtomically(
 	assertSQLMock(t, mock)
 }
 
+func TestRepositoryActivateBarrierEmptyAccountCreatesRollbackBaseWithoutChangingInitialBoundary(t *testing.T) {
+	repository, mock, closeDB := newMockRepository(t)
+	defer closeDB()
+	now := time.Date(2026, 8, 29, 12, 10, 0, 0, time.UTC)
+	definition, runtime, err := Split(fixtureSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition.MigrationHash = ""
+	canonical, _ := json.Marshal(struct {
+		Definition Definition   `json:"definition"`
+		Runtime    RuntimeState `json:"runtime"`
+	}{definition, runtime})
+	seal := sha256.Sum256(canonical)
+	staged := definition
+	staged.MigrationHash = hex.EncodeToString(seal[:])
+	stagedJSON, _ := json.Marshal(staged)
+	runtimeJSON, _ := json.Marshal(runtime)
+	emptyDefinition, emptyRuntime, err := Normalize(Definition{}, DefaultRuntime(Definition{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyDefinitionJSON, _ := json.Marshal(emptyDefinition)
+	emptyRuntimeJSON, _ := json.Marshal(emptyRuntime)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(barrierAccountQuery)).WithArgs(int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(nil, uint64(0), uint64(0), nil))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierJobQuery)).WithArgs(int64(19), int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "base_config_version_number", "base_state_revision", "keep_room_suggestion", "definition_json", "runtime_json", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "room_suggestion"}).
+			AddRow("pending", now.Add(time.Hour), uint64(0), uint64(0), uint8(0), stagedJSON, runtimeJSON, nil, nil, nil, nil, nil))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierNowQuery)).WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(now))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierNextVersionQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"number"}).AddRow(uint64(1)))
+	mock.ExpectExec(regexp.QuoteMeta(barrierInsertVersionQuery)).WithArgs(int64(7), uint64(1), emptyDefinitionJSON, "migration", now).WillReturnResult(sqlmock.NewResult(50, 1))
+	mock.ExpectExec(regexp.QuoteMeta(barrierInsertVersionQuery)).WithArgs(int64(7), uint64(2), jsonWithoutMigrationHash{}, "migration", now).WillReturnResult(sqlmock.NewResult(51, 1))
+	mock.ExpectExec(regexp.QuoteMeta(barrierUpsertRuntimeQuery)).WithArgs(int64(7), int64(51), uint64(1), sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(barrierUpsertActiveQuery)).WithArgs(int64(7), int64(51), now).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(barrierApplyJobQuery)).WithArgs(int64(50), emptyRuntimeJSON, now.Add(7*24*time.Hour), int64(51), now, int64(19), int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))
+	want := Boundary{AccountID: 7, MigrationJobID: 19, Operation: BarrierMigrationApply, OldConfigVersionID: 0, NewConfigVersionID: 51, LastOldRevision: 0, FirstNewRevision: 1, AppliedAt: now}
+	mock.ExpectExec(regexp.QuoteMeta(barrierInsertAuditQuery)).WithArgs("configuration_barrier", int64(7), int64(7), boundaryJSONMatcher{want: want}, now).WillReturnResult(sqlmock.NewResult(104, 1))
+	mock.ExpectCommit()
+
+	got, err := repository.ActivateBarrier(context.Background(), BarrierCommand{
+		AccountID: 7, ExpectedConfigVersionID: 0, ExpectedVersion: 0, ExpectedRevision: 0,
+		Definition: definition, Runtime: runtime, Operation: BarrierMigrationApply, MigrationJobID: 19, IntegritySeal: seal, At: now,
+	})
+	if err != nil {
+		t.Fatalf("ActivateBarrier(empty account) error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("ActivateBarrier(empty account) = %#v, want %#v", got, want)
+	}
+	assertSQLMock(t, mock)
+}
+
 func TestRepositoryActivateBarrierRollbackCreatesNewVersionWithoutChangingHistory(t *testing.T) {
 	repository, mock, closeDB := newMockRepository(t)
 	defer closeDB()
@@ -403,6 +458,48 @@ func TestRepositoryActivateBarrierRollbackCreatesNewVersionWithoutChangingHistor
 	}
 	if got != want {
 		t.Fatalf("ActivateBarrier(rollback) = %#v, want %#v", got, want)
+	}
+	assertSQLMock(t, mock)
+}
+
+func TestRepositoryActivateBarrierRollbackToEmptyBootstrapCreatesNewVersion(t *testing.T) {
+	repository, mock, closeDB := newMockRepository(t)
+	defer closeDB()
+	now := time.Date(2026, 8, 29, 12, 18, 0, 0, time.UTC)
+	emptyDefinition, emptyRuntime, err := Normalize(Definition{}, DefaultRuntime(Definition{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyDefinitionJSON, _ := json.Marshal(emptyDefinition)
+	emptyRuntimeJSON, _ := json.Marshal(emptyRuntime)
+	currentRuntimeJSON := []byte(`{"attributeValues":{"exe":9},"giftTargetReceived":[],"activities":[]}`)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(barrierAccountQuery)).WithArgs(int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(int64(51), uint64(2), uint64(1), currentRuntimeJSON))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierJobQuery)).WithArgs(int64(19), int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "base_config_version_number", "base_state_revision", "keep_room_suggestion", "definition_json", "runtime_json", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "room_suggestion"}).
+			AddRow("applied", now.Add(time.Hour), uint64(0), uint64(0), uint8(0), []byte(`{"attributes":[]}`), currentRuntimeJSON, int64(50), emptyRuntimeJSON, now.Add(7*24*time.Hour), int64(51), nil))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierNowQuery)).WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(now))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierRollbackDefinitionQuery)).WithArgs(int64(7), int64(50)).WillReturnRows(sqlmock.NewRows([]string{"definition_json"}).AddRow(emptyDefinitionJSON))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierNextVersionQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"number"}).AddRow(uint64(3)))
+	mock.ExpectExec(regexp.QuoteMeta(barrierInsertVersionQuery)).WithArgs(int64(7), uint64(3), emptyDefinitionJSON, "rollback", now).WillReturnResult(sqlmock.NewResult(52, 1))
+	mock.ExpectExec(regexp.QuoteMeta(barrierUpsertRuntimeQuery)).WithArgs(int64(7), int64(52), uint64(2), emptyRuntimeJSON, now).WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(regexp.QuoteMeta(barrierUpsertActiveQuery)).WithArgs(int64(7), int64(52), now).WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(regexp.QuoteMeta(barrierRollbackJobQuery)).WithArgs(now, int64(19), int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))
+	want := Boundary{AccountID: 7, MigrationJobID: 19, Operation: BarrierMigrationRollback, OldConfigVersionID: 51, NewConfigVersionID: 52, LastOldRevision: 1, FirstNewRevision: 2, AppliedAt: now}
+	mock.ExpectExec(regexp.QuoteMeta(barrierInsertAuditQuery)).WithArgs("configuration_barrier", int64(7), int64(7), boundaryJSONMatcher{want: want}, now).WillReturnResult(sqlmock.NewResult(105, 1))
+	mock.ExpectCommit()
+
+	got, err := repository.ActivateBarrier(context.Background(), BarrierCommand{
+		AccountID: 7, ExpectedConfigVersionID: 51, ExpectedVersion: 2, ExpectedRevision: 1,
+		Definition: emptyDefinition, Runtime: emptyRuntime, Operation: BarrierMigrationRollback, MigrationJobID: 19, At: now,
+	})
+	if err != nil {
+		t.Fatalf("ActivateBarrier(empty rollback) error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("ActivateBarrier(empty rollback) = %#v, want %#v", got, want)
 	}
 	assertSQLMock(t, mock)
 }
@@ -454,6 +551,53 @@ func TestRepositoryActivateBarrierReturnsPersistedBoundaryForCompletedOperation(
 	assertSQLMock(t, mock)
 }
 
+func TestRepositoryActivateBarrierReturnsOriginalBoundaryAcrossLaterSession(t *testing.T) {
+	repository, mock, closeDB := newMockRepository(t)
+	defer closeDB()
+	now := time.Date(2026, 8, 29, 12, 32, 0, 0, time.UTC)
+	definition, runtime, err := Split(fixtureSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition.MigrationHash = ""
+	canonical, _ := json.Marshal(struct {
+		Definition Definition   `json:"definition"`
+		Runtime    RuntimeState `json:"runtime"`
+	}{definition, runtime})
+	seal := sha256.Sum256(canonical)
+	staged := definition
+	staged.MigrationHash = hex.EncodeToString(seal[:])
+	stagedJSON, _ := json.Marshal(staged)
+	runtimeJSON, _ := json.Marshal(runtime)
+	owner := [32]byte{3, 2}
+	want := Boundary{AccountID: 7, MigrationJobID: 19, Operation: BarrierMigrationApply, OldConfigVersionID: 50, NewConfigVersionID: 51, BroadcastSessionID: 91, LiveSessionID: 81, LastOldRevision: 4, FirstNewRevision: 5, AppliedAt: now.Add(-time.Minute)}
+	wantJSON, _ := json.Marshal(want)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(barrierAccountQuery)).WithArgs(int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(int64(51), uint64(3), uint64(7), runtimeJSON))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierOwnerQuery)).WithArgs(int64(7), owner[:], uint64(10)).WillReturnRows(sqlmock.NewRows([]string{"active"}).AddRow(true))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierJobQuery)).WithArgs(int64(19), int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "base_config_version_number", "base_state_revision", "keep_room_suggestion", "definition_json", "runtime_json", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "room_suggestion"}).
+			AddRow("applied", now.Add(time.Hour), uint64(2), uint64(4), uint8(0), stagedJSON, runtimeJSON, int64(50), runtimeJSON, now.Add(7*24*time.Hour), int64(51), nil))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierNowQuery)).WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(now))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierBoundaryQuery)).WithArgs(int64(7), string(BarrierMigrationApply), int64(19)).WillReturnRows(sqlmock.NewRows([]string{"event_data"}).AddRow(wantJSON))
+	mock.ExpectCommit()
+
+	got, err := repository.ActivateBarrier(context.Background(), BarrierCommand{
+		AccountID: 7, ExpectedConfigVersionID: 51, ExpectedVersion: 3, ExpectedRevision: 7,
+		Definition: definition, Runtime: runtime, Operation: BarrierMigrationApply, MigrationJobID: 19, IntegritySeal: seal,
+		OwnerToken: owner, OwnerEpoch: 10, LiveSessionID: 82, BroadcastSessionID: 92, At: now,
+	})
+	if err != nil {
+		t.Fatalf("cross-session idempotent ActivateBarrier() error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("cross-session idempotent ActivateBarrier() = %#v, want original %#v", got, want)
+	}
+	assertSQLMock(t, mock)
+}
+
 func TestRepositoryActivateBarrierRecoversPersistedBoundaryAfterAmbiguousCommit(t *testing.T) {
 	repository, mock, closeDB := newMockRepository(t)
 	defer closeDB()
@@ -497,6 +641,40 @@ func TestRepositoryActivateBarrierRecoversPersistedBoundaryAfterAmbiguousCommit(
 	}
 	if got != want {
 		t.Fatalf("ambiguous-commit recovery = %#v, want %#v", got, want)
+	}
+	assertSQLMock(t, mock)
+}
+
+func TestRepositoryActivateBarrierVerifiesDurableBoundaryAfterCommitReturnsAmbiguousError(t *testing.T) {
+	repository, mock, closeDB := newMockRepository(t)
+	defer closeDB()
+	command, want := expectAmbiguousBarrierApply(t, mock)
+	wantJSON, _ := json.Marshal(want)
+	mock.ExpectQuery(regexp.QuoteMeta(barrierCommitVerificationStateQueryForTest)).WithArgs(int64(19), int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"status", "config_version_id", "revision"}).AddRow("applied", int64(51), uint64(5)))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierBoundaryQuery)).WithArgs(int64(7), string(BarrierMigrationApply), int64(19)).
+		WillReturnRows(sqlmock.NewRows([]string{"event_data"}).AddRow(wantJSON))
+
+	got, err := repository.ActivateBarrier(context.Background(), command)
+	if err != nil {
+		t.Fatalf("ActivateBarrier(ambiguous commit) error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("ActivateBarrier(ambiguous commit) = %#v, want %#v", got, want)
+	}
+	assertSQLMock(t, mock)
+}
+
+func TestRepositoryActivateBarrierReturnsCommitUncertainWhenFreshVerificationCannotResolve(t *testing.T) {
+	repository, mock, closeDB := newMockRepository(t)
+	defer closeDB()
+	command, _ := expectAmbiguousBarrierApply(t, mock)
+	mock.ExpectQuery(regexp.QuoteMeta(barrierCommitVerificationStateQueryForTest)).WithArgs(int64(19), int64(7)).
+		WillReturnError(errors.New("verification unavailable"))
+
+	_, err := repository.ActivateBarrier(context.Background(), command)
+	if !errors.Is(err, ErrCommitUncertain) {
+		t.Fatalf("ActivateBarrier(unresolved commit) error = %v, want ErrCommitUncertain", err)
 	}
 	assertSQLMock(t, mock)
 }
@@ -798,6 +976,54 @@ func TestRepositoryUpsertRoomSuggestionAcceptsSameValueNoop(t *testing.T) {
 		t.Fatalf("UpsertRoomSuggestion() error = %v", err)
 	}
 	assertSQLMock(t, mock)
+}
+
+const barrierCommitVerificationStateQueryForTest = "SELECT j.status, active.config_version_id, COALESCE(s.revision, 0) FROM migration_jobs AS j LEFT JOIN account_active_config AS active ON active.account_id = j.account_id LEFT JOIN account_runtime_state AS s ON s.account_id = j.account_id AND s.config_version_id = active.config_version_id WHERE j.id = ? AND j.account_id = ?"
+
+func expectAmbiguousBarrierApply(t *testing.T, mock sqlmock.Sqlmock) (BarrierCommand, Boundary) {
+	t.Helper()
+	now := time.Date(2026, 8, 29, 13, 0, 0, 0, time.UTC)
+	definition, runtime, err := Split(fixtureSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition.MigrationHash = ""
+	canonical, err := json.Marshal(struct {
+		Definition Definition   `json:"definition"`
+		Runtime    RuntimeState `json:"runtime"`
+	}{definition, runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seal := sha256.Sum256(canonical)
+	staged := definition
+	staged.MigrationHash = hex.EncodeToString(seal[:])
+	stagedJSON, _ := json.Marshal(staged)
+	runtimeJSON, _ := json.Marshal(runtime)
+	owner := [32]byte{8}
+	want := Boundary{AccountID: 7, MigrationJobID: 19, Operation: BarrierMigrationApply, OldConfigVersionID: 50, NewConfigVersionID: 51, BroadcastSessionID: 91, LiveSessionID: 81, LastOldRevision: 4, FirstNewRevision: 5, AppliedAt: now}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(barrierAccountQuery)).WithArgs(int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(int64(50), uint64(2), uint64(4), runtimeJSON))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierOwnerQuery)).WithArgs(int64(7), owner[:], uint64(9)).WillReturnRows(sqlmock.NewRows([]string{"active"}).AddRow(true))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierJobQuery)).WithArgs(int64(19), int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "base_config_version_number", "base_state_revision", "keep_room_suggestion", "definition_json", "runtime_json", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "room_suggestion"}).
+			AddRow("pending", now.Add(time.Hour), uint64(2), uint64(4), uint8(0), stagedJSON, runtimeJSON, nil, nil, nil, nil, nil))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierNowQuery)).WillReturnRows(sqlmock.NewRows([]string{"now"}).AddRow(now))
+	mock.ExpectQuery(regexp.QuoteMeta(barrierNextVersionQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"number"}).AddRow(uint64(3)))
+	mock.ExpectExec(regexp.QuoteMeta(barrierInsertVersionQuery)).WithArgs(int64(7), uint64(3), jsonWithoutMigrationHash{}, "migration", now).WillReturnResult(sqlmock.NewResult(51, 1))
+	mock.ExpectExec(regexp.QuoteMeta(barrierUpsertRuntimeQuery)).WithArgs(int64(7), int64(51), uint64(5), sqlmock.AnyArg(), now).WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(regexp.QuoteMeta(barrierUpsertActiveQuery)).WithArgs(int64(7), int64(51), now).WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(regexp.QuoteMeta(barrierApplyJobQuery)).WithArgs(int64(50), sqlmock.AnyArg(), now.Add(7*24*time.Hour), int64(51), now, int64(19), int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(barrierInsertAuditQuery)).WithArgs("configuration_barrier", int64(7), int64(7), boundaryJSONMatcher{want: want}, now).WillReturnResult(sqlmock.NewResult(103, 1))
+	mock.ExpectCommit().WillReturnError(errors.New("ambiguous commit"))
+
+	return BarrierCommand{
+		AccountID: 7, ExpectedConfigVersionID: 50, ExpectedVersion: 2, ExpectedRevision: 4,
+		Definition: definition, Runtime: runtime, Operation: BarrierMigrationApply, MigrationJobID: 19, IntegritySeal: seal,
+		OwnerToken: owner, OwnerEpoch: 9, LiveSessionID: 81, BroadcastSessionID: 91, At: now,
+	}, want
 }
 
 func newMockRepository(t *testing.T) (*sqlRepository, sqlmock.Sqlmock, func()) {

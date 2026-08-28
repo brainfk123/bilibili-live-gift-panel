@@ -364,7 +364,7 @@ func (service *Service) Apply(ctx context.Context, accountID, jobID int64, selec
 			return Job{}, ErrUnavailable
 		}
 		if staged.Status == jobApplied {
-			return publicJob(staged, accountID, nil)
+			return service.applyPersistedBarrier(ctx, accountID, jobID, barrier)
 		}
 		if staged.Status != jobPending {
 			return Job{}, ErrUnavailable

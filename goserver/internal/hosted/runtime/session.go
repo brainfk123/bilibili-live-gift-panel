@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 
 	"bilibili-live-gift-panel/internal/hosted/roomsource"
@@ -984,10 +985,13 @@ func (sink sessionSink) OnError(error) {
 }
 
 func (active *activeSession) run(manager *Manager, account *accountRuntime) {
-	defer close(active.workerDone)
+	var workerDoneOnce sync.Once
+	signalWorkerDone := func() { workerDoneOnce.Do(func() { close(active.workerDone) }) }
+	defer signalWorkerDone()
 	for event := range active.events {
 		if err := active.processor.Accept(event); err != nil {
 			if errors.Is(err, ErrOwnershipConflict) {
+				signalWorkerDone()
 				manager.handleProcessOwnershipConflict(account, active)
 				return
 			}

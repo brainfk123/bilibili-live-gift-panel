@@ -109,6 +109,30 @@ func TestServiceLiveMigrationStagesFrozenCandidateThenUsesBarrier(t *testing.T) 
 	}
 }
 
+func TestServiceStageApplyAlreadyAppliedStillReconcilesThroughBarrier(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 2, 0, 0, time.UTC)
+	importedDefinition, importedRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 9})
+	repository := &recordingLifecycleRepository{
+		composition:             storedComposition{ID: 19, AccountID: 7, Status: jobPreviewed, ExpiresAt: now.Add(time.Hour), Imported: migrationEnvelope(importedDefinition, importedRuntime), HostedDefinition: emptyDefinition(), HostedRuntime: emptyRuntime()},
+		preauthorizeApplyResult: storedJob{ID: 19, AccountID: 7, Status: jobPreviewed},
+		stageResult:             storedJob{ID: 19, AccountID: 7, Status: jobApplied},
+		getResult:               storedJob{ID: 19, AccountID: 7, Status: jobApplied, RollbackExpiresAt: now.Add(7 * 24 * time.Hour)},
+	}
+	barrier := &recordingConfigurationBarrier{boundary: configuration.Boundary{AccountID: 7, MigrationJobID: 19, Operation: configuration.BarrierMigrationApply, OldConfigVersionID: 10, NewConfigVersionID: 11, LastOldRevision: 4, FirstNewRevision: 5, AppliedAt: now}}
+	service := NewService(repository, func() time.Time { return now })
+	if err := service.SetConfigurationBarrier(barrier); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := service.Apply(context.Background(), 7, 19, SelectionCommand{UnitIDs: []string{"attribute:exe"}})
+	if err != nil {
+		t.Fatalf("Apply(already staged) error = %v", err)
+	}
+	if job.Status != jobApplied || barrier.calls != 1 {
+		t.Fatalf("Apply(already staged) job=%#v barrierCalls=%d", job, barrier.calls)
+	}
+}
+
 func TestServicePreauthorizeApplyResumesPersistedPendingBarrier(t *testing.T) {
 	now := time.Date(2026, 8, 29, 12, 5, 0, 0, time.UTC)
 	definition, runtime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 9})
@@ -200,6 +224,59 @@ func TestServiceRollbackUsesTheSameLiveBarrierAndCreatesANewVersion(t *testing.T
 	}
 	if job.Status != jobRolledBack || barrier.calls != 1 || barrier.candidate.Operation != configuration.BarrierMigrationRollback || barrier.candidate.Definition.MigrationHash != "" || barrier.candidate.Runtime.AttributeValues["hosted"] != 3 {
 		t.Fatalf("rollback job=%#v candidate=%#v calls=%d", job, barrier.candidate, barrier.calls)
+	}
+}
+
+func TestServiceEmptyAccountApplyCanRollbackThroughOfflineAndLiveBarrier(t *testing.T) {
+	for _, test := range []struct {
+		name               string
+		liveSessionID      int64
+		broadcastSessionID int64
+	}{
+		{name: "offline"},
+		{name: "live", liveSessionID: 81, broadcastSessionID: 91},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Date(2026, 8, 29, 12, 20, 0, 0, time.UTC)
+			importedDefinition, importedRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 9})
+			repository := &recordingLifecycleRepository{
+				composition:             storedComposition{ID: 19, AccountID: 7, Status: jobPreviewed, ExpiresAt: now.Add(time.Hour), Imported: migrationEnvelope(importedDefinition, importedRuntime), HostedDefinition: emptyDefinition(), HostedRuntime: emptyRuntime()},
+				preauthorizeApplyResult: storedJob{ID: 19, AccountID: 7, Status: jobPreviewed},
+				stageResult:             storedJob{ID: 19, AccountID: 7, Status: jobPending},
+				getResult:               storedJob{ID: 19, AccountID: 7, Status: jobApplied, RollbackExpiresAt: now.Add(7 * 24 * time.Hour)},
+			}
+			barrier := &recordingConfigurationBarrier{boundary: configuration.Boundary{
+				AccountID: 7, MigrationJobID: 19, Operation: configuration.BarrierMigrationApply,
+				OldConfigVersionID: 0, NewConfigVersionID: 51, LiveSessionID: test.liveSessionID, BroadcastSessionID: test.broadcastSessionID,
+				LastOldRevision: 0, FirstNewRevision: 1, AppliedAt: now,
+			}}
+			service := NewService(repository, func() time.Time { return now })
+			if err := service.SetConfigurationBarrier(barrier); err != nil {
+				t.Fatal(err)
+			}
+
+			applied, err := service.Apply(context.Background(), 7, 19, SelectionCommand{UnitIDs: []string{"attribute:exe"}})
+			if err != nil || applied.Status != jobApplied || barrier.candidate.Operation != configuration.BarrierMigrationApply {
+				t.Fatalf("empty apply job=%#v candidate=%#v error=%v", applied, barrier.candidate, err)
+			}
+			repository.preauthorizeRollbackResult = storedJob{ID: 19, AccountID: 7, Status: jobApplied, RollbackExpiresAt: now.Add(7 * 24 * time.Hour)}
+			repository.rollbackDefinition = emptyDefinition()
+			repository.rollbackRuntime = emptyRuntime()
+			repository.getResult = storedJob{ID: 19, AccountID: 7, Status: jobRolledBack, RollbackExpiresAt: now.Add(7 * 24 * time.Hour)}
+			barrier.boundary = configuration.Boundary{
+				AccountID: 7, MigrationJobID: 19, Operation: configuration.BarrierMigrationRollback,
+				OldConfigVersionID: 51, NewConfigVersionID: 52, LiveSessionID: test.liveSessionID, BroadcastSessionID: test.broadcastSessionID,
+				LastOldRevision: 1, FirstNewRevision: 2, AppliedAt: now.Add(time.Minute),
+			}
+
+			rolledBack, err := service.Rollback(context.Background(), 7, 19)
+			if err != nil || rolledBack.Status != jobRolledBack || barrier.candidate.Operation != configuration.BarrierMigrationRollback || len(barrier.candidate.Definition.Attributes) != 0 || len(barrier.candidate.Runtime.AttributeValues) != 0 {
+				t.Fatalf("empty rollback job=%#v candidate=%#v error=%v", rolledBack, barrier.candidate, err)
+			}
+			if barrier.calls != 2 {
+				t.Fatalf("barrier calls = %d, want apply + rollback", barrier.calls)
+			}
+		})
 	}
 }
 
