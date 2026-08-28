@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 
 	"bilibili-live-gift-panel/internal/hosted/configuration"
@@ -53,6 +54,19 @@ type applyCommand struct {
 	JobID              int64
 	KeepRoomSuggestion bool
 	Candidate          ComposeCandidate
+}
+
+// BarrierCandidate is the frozen, complete candidate handed to the live
+// runtime after the migration repository has sealed it. Definition is the
+// activation form and therefore never carries MigrationHash itself.
+type BarrierCandidate struct {
+	JobID              int64
+	Definition         configuration.Definition
+	Runtime            configuration.RuntimeState
+	Operation          configuration.BarrierOperation
+	IntegritySeal      [sha256.Size]byte
+	KeepRoomSuggestion bool
+	RoomSuggestion     string
 }
 
 type storedJob struct {
@@ -148,10 +162,32 @@ type compositionRepository interface {
 	LoadComposition(context.Context, int64, int64) (storedComposition, error)
 }
 
+type stagedApplyRepository interface {
+	StageApply(context.Context, applyCommand) (storedJob, error)
+}
+
+type rollbackCandidateRepository interface {
+	LoadRollbackCandidate(context.Context, int64, int64) (configuration.Definition, configuration.RuntimeState, error)
+}
+
+// ConfigurationBarrier is implemented by the Hosted runtime manager and is
+// injected only after both sides of production composition exist.
+type ConfigurationBarrier interface {
+	ApplyConfigurationBarrier(context.Context, int64, BarrierCandidate) (configuration.Boundary, error)
+}
+
+// pendingConfigurationBarrier is the owner-fenced no-session path used while
+// runtime already holds the account operation gate during a room transition.
+type pendingConfigurationBarrier interface {
+	ApplyPendingConfigurationBarrier(context.Context, OwnerFence, BarrierCandidate) (configuration.Boundary, error)
+}
+
 type Service struct {
 	repository   Repository
 	now          func() time.Time
 	capabilities CapabilitySet
+	barrierMu    sync.RWMutex
+	barrier      ConfigurationBarrier
 }
 
 func NewService(repository Repository, now func() time.Time) *Service {
@@ -159,6 +195,25 @@ func NewService(repository Repository, now func() time.Time) *Service {
 		now = time.Now
 	}
 	return &Service{repository: repository, now: now, capabilities: hostedMigrationCapabilities()}
+}
+
+func (service *Service) SetConfigurationBarrier(barrier ConfigurationBarrier) error {
+	if service == nil || barrier == nil {
+		return ErrInvalidInput
+	}
+	service.barrierMu.Lock()
+	service.barrier = barrier
+	service.barrierMu.Unlock()
+	return nil
+}
+
+func (service *Service) configurationBarrier() ConfigurationBarrier {
+	if service == nil {
+		return nil
+	}
+	service.barrierMu.RLock()
+	defer service.barrierMu.RUnlock()
+	return service.barrier
 }
 
 func (service *Service) Preview(ctx context.Context, accountID int64, envelope Envelope) (Preview, error) {
@@ -270,12 +325,51 @@ func (service *Service) Apply(ctx context.Context, accountID, jobID int64, selec
 	if !ok {
 		return Job{}, ErrUnavailable
 	}
+	barrier := service.configurationBarrier()
+	if barrier != nil {
+		preauthorized, err := repository.PreauthorizeApply(ctx, accountID, jobID)
+		if err != nil {
+			return Job{}, err
+		}
+		if preauthorized.ID != jobID || preauthorized.AccountID != accountID {
+			return Job{}, ErrUnavailable
+		}
+		switch preauthorized.Status {
+		case jobApplied:
+			return service.applyPersistedBarrier(ctx, accountID, jobID, barrier)
+		case jobPending:
+			return service.applyPersistedBarrier(ctx, accountID, jobID, barrier)
+		case jobPreviewed:
+		default:
+			return Job{}, ErrConflict
+		}
+	}
 	_, candidate, err := service.loadCandidate(ctx, accountID, jobID, selection)
 	if err != nil {
 		return Job{}, err
 	}
 	if !candidate.Ready {
 		return Job{}, ErrConflict
+	}
+	if barrier != nil {
+		stager, ok := service.repository.(stagedApplyRepository)
+		if !ok {
+			return Job{}, ErrUnavailable
+		}
+		staged, stageErr := stager.StageApply(ctx, applyCommand{AccountID: accountID, JobID: jobID, KeepRoomSuggestion: selection.IncludeRoomSuggestion, Candidate: candidate})
+		if stageErr != nil {
+			return Job{}, stageErr
+		}
+		if staged.ID != jobID || staged.AccountID != accountID {
+			return Job{}, ErrUnavailable
+		}
+		if staged.Status == jobApplied {
+			return publicJob(staged, accountID, nil)
+		}
+		if staged.Status != jobPending {
+			return Job{}, ErrUnavailable
+		}
+		return service.applyPersistedBarrier(ctx, accountID, jobID, barrier)
 	}
 	stored, err := repository.Apply(ctx, applyCommand{AccountID: accountID, JobID: jobID, KeepRoomSuggestion: selection.IncludeRoomSuggestion, Candidate: candidate})
 	return publicJob(stored, accountID, err)
@@ -321,7 +415,7 @@ func hostedMigrationCapabilities() CapabilitySet {
 		SimplePlayTemplates: map[string]int{
 			"overtime": 2, "countdown": 1, "counter": 1, "goal": 1, "boss": 1, "resource": 1, "tug": 1,
 			"team-duel": 1, "gift-vote": 1, "combo": 1, "milestone": 1, "random-event": 1,
-		}, RulesSupported: true, TimerRulesSupported: true,
+		}, RulesSupported: true, TimerRulesSupported: false,
 		FormulaPresetsSupported: true, DisplayScenesSupported: true, CropPresetsSupported: true,
 	}
 }
@@ -335,7 +429,66 @@ func (service *Service) PreauthorizeApply(ctx context.Context, accountID, jobID 
 		return Job{}, ErrUnavailable
 	}
 	stored, err := repository.PreauthorizeApply(ctx, accountID, jobID)
+	if err != nil {
+		return Job{}, err
+	}
+	if stored.ID != jobID || stored.AccountID != accountID {
+		return Job{}, ErrUnavailable
+	}
+	barrier := service.configurationBarrier()
+	if barrier != nil && (stored.Status == jobPending || stored.Status == jobApplied) {
+		return service.applyPersistedBarrier(ctx, accountID, jobID, barrier)
+	}
+	return publicJob(stored, accountID, nil)
+}
+
+func (service *Service) applyPersistedBarrier(ctx context.Context, accountID, jobID int64, barrier ConfigurationBarrier) (Job, error) {
+	candidate, err := service.persistedBarrierCandidate(ctx, accountID, jobID)
+	if err != nil {
+		return Job{}, err
+	}
+	boundary, err := barrier.ApplyConfigurationBarrier(ctx, accountID, candidate)
+	if err != nil {
+		return Job{}, err
+	}
+	if boundary.AccountID != accountID || boundary.MigrationJobID != jobID || boundary.Operation != configuration.BarrierMigrationApply || boundary.NewConfigVersionID <= 0 || boundary.FirstNewRevision == 0 || boundary.FirstNewRevision != boundary.LastOldRevision+1 {
+		return Job{}, ErrUnavailable
+	}
+	repository, ok := service.repository.(lifecycleRepository)
+	if !ok {
+		return Job{}, ErrUnavailable
+	}
+	stored, err := repository.Get(ctx, accountID, jobID)
 	return publicJob(stored, accountID, err)
+}
+
+func (service *Service) persistedBarrierCandidate(ctx context.Context, accountID, jobID int64) (BarrierCandidate, error) {
+	repository, ok := service.repository.(compositionRepository)
+	if !ok {
+		return BarrierCandidate{}, ErrUnavailable
+	}
+	composition, err := repository.LoadComposition(ctx, accountID, jobID)
+	if err != nil {
+		return BarrierCandidate{}, err
+	}
+	if composition.ID != jobID || composition.AccountID != accountID || composition.Status != jobPending && composition.Status != jobApplied || composition.ExpiresAt.IsZero() {
+		return BarrierCandidate{}, ErrUnavailable
+	}
+	definition, runtime, _, hash, err := freshCanonical(composition.Imported.Definition, composition.Imported.Runtime)
+	if err != nil {
+		return BarrierCandidate{}, ErrConflict
+	}
+	frozen, err := freezeCandidate(ComposeCandidate{Definition: definition, Runtime: runtime, Ready: true, Hash: hash})
+	if err != nil {
+		return BarrierCandidate{}, err
+	}
+	activeDefinition := frozen.Definition
+	activeDefinition.MigrationHash = ""
+	candidate := BarrierCandidate{JobID: jobID, Definition: activeDefinition, Runtime: frozen.Runtime, Operation: configuration.BarrierMigrationApply, IntegritySeal: frozen.Hash, KeepRoomSuggestion: composition.KeepRoomSuggestion}
+	if composition.KeepRoomSuggestion {
+		candidate.RoomSuggestion = composition.Imported.RoomSuggestion
+	}
+	return candidate, nil
 }
 
 func (service *Service) PreauthorizeRollback(ctx context.Context, accountID, jobID int64) (Job, error) {
@@ -347,6 +500,15 @@ func (service *Service) PreauthorizeRollback(ctx context.Context, accountID, job
 		return Job{}, ErrUnavailable
 	}
 	stored, err := repository.PreauthorizeRollback(ctx, accountID, jobID)
+	if err != nil {
+		return Job{}, err
+	}
+	if stored.ID != jobID || stored.AccountID != accountID {
+		return Job{}, ErrUnavailable
+	}
+	if barrier := service.configurationBarrier(); barrier != nil && stored.Status == jobRolledBack {
+		return service.applyPersistedRollbackBarrier(ctx, accountID, jobID, barrier)
+	}
 	return publicJob(stored, accountID, err)
 }
 
@@ -357,6 +519,32 @@ func (service *Service) ApplyPendingAfterSession(ctx context.Context, owner Owne
 	repository, ok := service.repository.(lifecycleRepository)
 	if !ok {
 		return Job{}, ErrUnavailable
+	}
+	if barrier := service.configurationBarrier(); barrier != nil {
+		pendingBarrier, ok := barrier.(pendingConfigurationBarrier)
+		if !ok {
+			return Job{}, ErrUnavailable
+		}
+		preauthorized, err := repository.PreauthorizeApply(ctx, owner.AccountID, jobID)
+		if err != nil {
+			return Job{}, err
+		}
+		if preauthorized.ID != jobID || preauthorized.AccountID != owner.AccountID || preauthorized.Status != jobPending && preauthorized.Status != jobApplied {
+			return Job{}, ErrUnavailable
+		}
+		candidate, err := service.persistedBarrierCandidate(ctx, owner.AccountID, jobID)
+		if err != nil {
+			return Job{}, err
+		}
+		boundary, err := pendingBarrier.ApplyPendingConfigurationBarrier(ctx, owner, candidate)
+		if err != nil {
+			return Job{}, err
+		}
+		if boundary.AccountID != owner.AccountID || boundary.MigrationJobID != jobID || boundary.Operation != configuration.BarrierMigrationApply || boundary.NewConfigVersionID <= 0 || boundary.FirstNewRevision == 0 || boundary.FirstNewRevision != boundary.LastOldRevision+1 {
+			return Job{}, ErrUnavailable
+		}
+		stored, err := repository.Get(ctx, owner.AccountID, jobID)
+		return publicJob(stored, owner.AccountID, err)
 	}
 	stored, err := repository.ApplyPendingAfterSession(ctx, owner, jobID)
 	return publicJob(stored, owner.AccountID, err)
@@ -382,7 +570,50 @@ func (service *Service) Rollback(ctx context.Context, accountID, jobID int64) (J
 	if !ok {
 		return Job{}, ErrUnavailable
 	}
+	barrier := service.configurationBarrier()
+	if barrier != nil {
+		preauthorized, err := repository.PreauthorizeRollback(ctx, accountID, jobID)
+		if err != nil {
+			return Job{}, err
+		}
+		if preauthorized.ID != jobID || preauthorized.AccountID != accountID {
+			return Job{}, ErrUnavailable
+		}
+		if preauthorized.Status != jobApplied && preauthorized.Status != jobRolledBack {
+			return Job{}, ErrConflict
+		}
+		return service.applyPersistedRollbackBarrier(ctx, accountID, jobID, barrier)
+	}
 	stored, err := repository.Rollback(ctx, accountID, jobID)
+	return publicJob(stored, accountID, err)
+}
+
+func (service *Service) applyPersistedRollbackBarrier(ctx context.Context, accountID, jobID int64, barrier ConfigurationBarrier) (Job, error) {
+	loader, ok := service.repository.(rollbackCandidateRepository)
+	if !ok {
+		return Job{}, ErrUnavailable
+	}
+	definition, runtime, err := loader.LoadRollbackCandidate(ctx, accountID, jobID)
+	if err != nil {
+		return Job{}, err
+	}
+	definition.MigrationHash = ""
+	definition, runtime, err = configuration.Normalize(definition, runtime)
+	if err != nil {
+		return Job{}, ErrConflict
+	}
+	boundary, err := barrier.ApplyConfigurationBarrier(ctx, accountID, BarrierCandidate{JobID: jobID, Definition: definition, Runtime: runtime, Operation: configuration.BarrierMigrationRollback})
+	if err != nil {
+		return Job{}, err
+	}
+	if boundary.AccountID != accountID || boundary.MigrationJobID != jobID || boundary.Operation != configuration.BarrierMigrationRollback || boundary.NewConfigVersionID <= 0 || boundary.FirstNewRevision == 0 || boundary.FirstNewRevision != boundary.LastOldRevision+1 {
+		return Job{}, ErrUnavailable
+	}
+	repository, ok := service.repository.(lifecycleRepository)
+	if !ok {
+		return Job{}, ErrUnavailable
+	}
+	stored, err := repository.Get(ctx, accountID, jobID)
 	return publicJob(stored, accountID, err)
 }
 
@@ -627,6 +858,7 @@ func decodeStoredPreview(id, accountID int64, status string, expiry time.Time, r
 }
 
 const compositionQuery = "SELECT j.status, j.expires_at, j.keep_room_suggestion, j.definition_json, j.runtime_json, j.room_suggestion, j.source_app_version, j.source_schema_version, j.report_json, v.definition_json, s.runtime_json FROM migration_jobs AS j LEFT JOIN account_active_config AS active ON active.account_id = j.account_id LEFT JOIN account_config_versions AS v ON v.account_id = active.account_id AND v.id = active.config_version_id LEFT JOIN account_runtime_state AS s ON s.account_id = j.account_id AND s.config_version_id = active.config_version_id WHERE j.id = ? AND j.account_id = ?"
+const rollbackCandidateQuery = "SELECT j.status, v.definition_json, j.rollback_runtime_json FROM migration_jobs AS j JOIN account_config_versions AS v ON v.account_id = j.account_id AND v.id = j.rollback_config_version_id WHERE j.id = ? AND j.account_id = ?"
 
 func (repository *sqlRepository) LoadComposition(ctx context.Context, accountID, jobID int64) (storedComposition, error) {
 	if repository == nil || repository.db == nil || accountID <= 0 || jobID <= 0 {
@@ -692,6 +924,32 @@ func (repository *sqlRepository) LoadComposition(ctx context.Context, accountID,
 	return result, nil
 }
 
+func (repository *sqlRepository) LoadRollbackCandidate(ctx context.Context, accountID, jobID int64) (configuration.Definition, configuration.RuntimeState, error) {
+	if repository == nil || repository.db == nil || ctx == nil || accountID <= 0 || jobID <= 0 {
+		return configuration.Definition{}, configuration.RuntimeState{}, ErrInvalidInput
+	}
+	var status string
+	var definitionJSON, runtimeJSON []byte
+	err := repository.db.QueryRowContext(ctx, rollbackCandidateQuery, jobID, accountID).Scan(&status, &definitionJSON, &runtimeJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return configuration.Definition{}, configuration.RuntimeState{}, ErrNotFound
+	}
+	if err != nil || status != jobApplied && status != jobRolledBack || len(definitionJSON) == 0 || len(runtimeJSON) == 0 {
+		return configuration.Definition{}, configuration.RuntimeState{}, ErrUnavailable
+	}
+	var definition configuration.Definition
+	var runtime configuration.RuntimeState
+	if json.Unmarshal(definitionJSON, &definition) != nil || json.Unmarshal(runtimeJSON, &runtime) != nil {
+		return configuration.Definition{}, configuration.RuntimeState{}, ErrUnavailable
+	}
+	definition.MigrationHash = ""
+	definition, runtime, err = configuration.Normalize(definition, runtime)
+	if err != nil {
+		return configuration.Definition{}, configuration.RuntimeState{}, ErrUnavailable
+	}
+	return definition, runtime, nil
+}
+
 func blankRuntime() configuration.RuntimeState {
 	return configuration.RuntimeState{AttributeValues: map[string]float64{}, GiftTargetReceived: []configuration.GiftTargetRuntimeState{}, Activities: []configuration.ActivityRuntimeState{}}
 }
@@ -717,6 +975,7 @@ const lifecycleNextVersionQuery = "SELECT COALESCE(MAX(number), 0) + 1 FROM acco
 const lifecycleInsertVersionQuery = "INSERT INTO account_config_versions (account_id, number, definition_json, source, created_at) VALUES (?, ?, ?, ?, ?)"
 const lifecycleUpsertRuntimeQuery = "INSERT INTO account_runtime_state (account_id, config_version_id, revision, runtime_json, updated_at) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE config_version_id = VALUES(config_version_id), revision = VALUES(revision), runtime_json = VALUES(runtime_json), updated_at = VALUES(updated_at)"
 const lifecycleUpsertActiveQuery = "INSERT INTO account_active_config (account_id, config_version_id, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE config_version_id = VALUES(config_version_id), updated_at = VALUES(updated_at)"
+const stageApplyQuery = "UPDATE migration_jobs SET status = 'pending', keep_room_suggestion = ?, definition_json = ?, runtime_json = ? WHERE id = ? AND account_id = ? AND status = 'previewed'"
 
 type lockedJob struct {
 	storedJob
@@ -878,12 +1137,6 @@ func (repository *sqlRepository) PreauthorizeRollback(ctx context.Context, accou
 	if !activeID.Valid || revision == 0 || !job.appliedConfigID.Valid || activeID.Int64 != job.appliedConfigID.Int64 {
 		return storedJob{}, ErrConflict
 	}
-	var sessionID int64
-	if err := transaction.QueryRowContext(ctx, lifecycleOpenSessionQuery, accountID).Scan(&sessionID); err == nil {
-		return storedJob{}, ErrConflict
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return storedJob{}, ErrUnavailable
-	}
 	if err := transaction.Commit(); err != nil {
 		return storedJob{}, ErrUnavailable
 	}
@@ -893,6 +1146,75 @@ func (repository *sqlRepository) PreauthorizeRollback(ctx context.Context, accou
 
 func (repository *sqlRepository) Apply(ctx context.Context, command applyCommand) (storedJob, error) {
 	return repository.apply(ctx, command, false, OwnerFence{})
+}
+
+func (repository *sqlRepository) StageApply(ctx context.Context, command applyCommand) (storedJob, error) {
+	if repository == nil || repository.db == nil || ctx == nil || command.AccountID <= 0 || command.JobID <= 0 {
+		return storedJob{}, ErrInvalidInput
+	}
+	transaction, err := repository.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storedJob{}, ErrUnavailable
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = transaction.Rollback()
+		}
+	}()
+	_, currentVersion, currentRevision, _, err := loadLockedAccount(ctx, transaction, command.AccountID)
+	if err != nil {
+		return storedJob{}, err
+	}
+	job, err := loadLockedJob(ctx, transaction, command.AccountID, command.JobID)
+	if err != nil {
+		return storedJob{}, err
+	}
+	now, err := databaseUTCNow(ctx, transaction)
+	if err != nil {
+		return storedJob{}, err
+	}
+	if (job.Status == jobPreviewed || job.Status == jobPending) && !job.ExpiresAt.After(now) {
+		if err := setExpired(ctx, transaction, command.AccountID, command.JobID, now); err != nil {
+			return storedJob{}, err
+		}
+		if err := transaction.Commit(); err != nil {
+			return storedJob{}, ErrUnavailable
+		}
+		committed = true
+		return storedJob{}, ErrExpired
+	}
+	if job.Status == jobApplied || job.Status == jobPending {
+		if err := transaction.Commit(); err != nil {
+			return storedJob{}, ErrUnavailable
+		}
+		committed = true
+		return job.storedJob, nil
+	}
+	if job.Status != jobPreviewed {
+		return storedJob{}, ErrConflict
+	}
+	frozen, err := freezeCandidate(command.Candidate)
+	if err != nil {
+		return storedJob{}, err
+	}
+	baseVersion, baseRevision, err := loadLifecycleBase(ctx, transaction, command.AccountID, command.JobID)
+	if err != nil {
+		return storedJob{}, err
+	}
+	if currentVersion != baseVersion || currentRevision != baseRevision {
+		return storedJob{}, ErrConflict
+	}
+	result, err := transaction.ExecContext(ctx, stageApplyQuery, command.KeepRoomSuggestion, frozen.SealedDefinition, frozen.RuntimeJSON, command.JobID, command.AccountID)
+	if err != nil || !exactlyOne(result) {
+		return storedJob{}, ErrUnavailable
+	}
+	if err := transaction.Commit(); err != nil {
+		return storedJob{}, ErrUnavailable
+	}
+	committed = true
+	job.Status = jobPending
+	return job.storedJob, nil
 }
 
 func (repository *sqlRepository) ApplyPendingAfterSession(ctx context.Context, owner OwnerFence, jobID int64) (storedJob, error) {

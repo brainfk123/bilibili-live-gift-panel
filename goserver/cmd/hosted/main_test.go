@@ -34,6 +34,36 @@ import (
 
 const recoveryArchiveFixture = "R1BSQQEQDCAAAIAAAAAACAAAAAEAAAEdsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy/OsZfWF1Ni/wJbLtaXhn3L2O7UBZh/umY584J8IxZQ+GUUnl/8Nh+dwlW3G4KjyUbDlP2vFi3PsyML32ProgId7mHDRyuhqypPGF36mEh81bubIw9oUqbRDCLXlH7+vOA4AGOfANiolmP1ODOAo65GMpTEd6XzXrCs1Lggs3Suw7aP3Rl6Uc3vxoiHvMtVTqU0qrLPlOfzrZrQNOA573Wn473x7Fw6asWQ56+8jRwCJEiZ9JudESX7gu2uLbcRUC5NZWg+49dRWCzZ3G5aYMZm80zWBlER9ZJUoEgz2pN8ZNf1m5q8uu0y4Oz+2oKpitpoUpNLvbAxa15gNiyuQGG5xQ11uUnhX3gTI7GYQthIpy9/koeG3cr45a8uCQQ=="
 
+func TestBindMigrationConfigurationBarrierUsesExactProductionManager(t *testing.T) {
+	manager := &hostedruntime.Manager{}
+	binder := &recordingMigrationBarrierBinder{}
+
+	if err := bindMigrationConfigurationBarrier(binder, manager); err != nil {
+		t.Fatal(err)
+	}
+	if binder.barrier != manager || binder.calls != 1 {
+		t.Fatalf("bound barrier=%#v calls=%d, want exact manager once", binder.barrier, binder.calls)
+	}
+
+	wantErr := errors.New("bind failed")
+	binder.err = wantErr
+	if err := bindMigrationConfigurationBarrier(binder, manager); !errors.Is(err, wantErr) {
+		t.Fatalf("bind error = %v, want %v", err, wantErr)
+	}
+}
+
+type recordingMigrationBarrierBinder struct {
+	barrier migration.ConfigurationBarrier
+	err     error
+	calls   int
+}
+
+func (binder *recordingMigrationBarrierBinder) SetConfigurationBarrier(barrier migration.ConfigurationBarrier) error {
+	binder.calls++
+	binder.barrier = barrier
+	return binder.err
+}
+
 func TestNewHTTPServerConfiguresHostedTimeouts(t *testing.T) {
 	handler := http.NewServeMux()
 	server := newHTTPServer("127.0.0.1:12500", handler)

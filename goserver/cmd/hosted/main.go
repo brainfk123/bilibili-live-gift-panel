@@ -43,6 +43,17 @@ const (
 	hostedLogMaxBytes = 256 * 1024 * 1024
 )
 
+type migrationConfigurationBarrierBinder interface {
+	SetConfigurationBarrier(migration.ConfigurationBarrier) error
+}
+
+func bindMigrationConfigurationBarrier(binder migrationConfigurationBarrierBinder, barrier migration.ConfigurationBarrier) error {
+	if binder == nil || barrier == nil {
+		return errors.New("invalid migration configuration barrier")
+	}
+	return binder.SetConfigurationBarrier(barrier)
+}
+
 const (
 	biliRoomInfoEndpoint    = "https://api.live.bilibili.com/room/v1/Room/room_init"
 	biliGiftCatalogEndpoint = "https://api.live.bilibili.com/xlive/web-room/v1/giftPanel/giftConfig"
@@ -213,13 +224,22 @@ func run() error {
 			roomSources.Close()
 			return errors.New("configure hosted runtime processor")
 		}
+		barrierProcessorFactory, err := hostedruntime.NewConfigurationBarrierProcessorFactory(runtimeProcessorFactory)
+		if err != nil {
+			roomSources.Close()
+			return errors.New("configure hosted runtime migration barrier")
+		}
 		runtimeManager, err := hostedruntime.NewManager(hostedruntime.Dependencies{
 			Sessions: hostedruntime.NewSessionRepository(store.Database()), Configuration: configurationRepository,
 			Migration: migrationService, RoomSources: roomSources,
-		}, hostedruntime.Options{ProcessorFactory: runtimeProcessorFactory})
+		}, hostedruntime.Options{ProcessorFactory: barrierProcessorFactory})
 		if err != nil {
 			roomSources.Close()
 			return errors.New("configure hosted runtime")
+		}
+		if err := bindMigrationConfigurationBarrier(migrationService, runtimeManager); err != nil {
+			roomSources.Close()
+			return errors.New("configure hosted migration barrier")
 		}
 		runtimeOwner.Store(runtimeManager)
 		return withProductionRuntimeLifecycle(processContext, shutdownTimeout, runtimeManager, func() { runtimeOwner.Store(nil) }, func(runtimeLifecycle *productionRuntimeLifecycle) error {

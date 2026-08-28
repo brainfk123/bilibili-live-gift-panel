@@ -70,6 +70,187 @@ func TestServiceApplyUsesOnlyTheAuthenticatedOwnerAndKeepsSuggestionExplicit(t *
 	}
 }
 
+func TestHostedMigrationCapabilitiesRejectTimerRuleUnitsUntilSchedulerExists(t *testing.T) {
+	unit := GameplayUnit{ID: "attribute:clock", Kind: "attribute", TimerRuleIDs: []string{"tick"}}
+
+	compatibility := AssessCompatibility(unit, hostedMigrationCapabilities())
+
+	if compatibility.Status != CompatibilityIncompatible || !reflect.DeepEqual(compatibility.ReasonCodes, []string{"timer_rules_unsupported"}) {
+		t.Fatalf("timer compatibility = %#v, want timer_rules_unsupported", compatibility)
+	}
+}
+
+func TestServiceLiveMigrationStagesFrozenCandidateThenUsesBarrier(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	importedDefinition, importedRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 9})
+	repository := &recordingLifecycleRepository{
+		composition:             storedComposition{ID: 19, AccountID: 7, Status: jobPreviewed, ExpiresAt: now.Add(time.Hour), Imported: migrationEnvelope(importedDefinition, importedRuntime), HostedDefinition: emptyDefinition(), HostedRuntime: emptyRuntime()},
+		preauthorizeApplyResult: storedJob{ID: 19, AccountID: 7, Status: jobPreviewed},
+		stageResult:             storedJob{ID: 19, AccountID: 7, Status: jobPending}, getResult: storedJob{ID: 19, AccountID: 7, Status: jobApplied, RollbackExpiresAt: now.Add(7 * 24 * time.Hour)},
+	}
+	barrier := &recordingConfigurationBarrier{boundary: configuration.Boundary{AccountID: 7, MigrationJobID: 19, Operation: configuration.BarrierMigrationApply, OldConfigVersionID: 10, NewConfigVersionID: 11, LastOldRevision: 4, FirstNewRevision: 5, AppliedAt: now}}
+	service := NewService(repository, func() time.Time { return now })
+	if err := service.SetConfigurationBarrier(barrier); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := service.Apply(context.Background(), 7, 19, SelectionCommand{UnitIDs: []string{"attribute:exe"}, IncludeRoomSuggestion: true})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if job.Status != jobApplied || repository.stageCalls != 1 || barrier.calls != 1 {
+		t.Fatalf("job=%#v stageCalls=%d barrierCalls=%d", job, repository.stageCalls, barrier.calls)
+	}
+	if repository.stage.AccountID != 7 || repository.stage.JobID != 19 || !repository.stage.KeepRoomSuggestion {
+		t.Fatalf("stage command = %#v", repository.stage)
+	}
+	if barrier.candidate.Definition.MigrationHash != "" || barrier.candidate.IntegritySeal == ([sha256.Size]byte{}) || barrier.candidate.Runtime.AttributeValues["exe"] != 9 || barrier.candidate.Operation != configuration.BarrierMigrationApply {
+		t.Fatalf("barrier candidate = %#v", barrier.candidate)
+	}
+}
+
+func TestServicePreauthorizeApplyResumesPersistedPendingBarrier(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 5, 0, 0, time.UTC)
+	definition, runtime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 9})
+	sealed := sealedCandidateForTest(t, definition, runtime)
+	repository := &recordingLifecycleRepository{
+		composition:             storedComposition{ID: 19, AccountID: 7, Status: jobPending, ExpiresAt: now.Add(time.Hour), Imported: migrationEnvelope(sealed.Definition, sealed.Runtime), KeepRoomSuggestion: true},
+		preauthorizeApplyResult: storedJob{ID: 19, AccountID: 7, Status: jobPending}, getResult: storedJob{ID: 19, AccountID: 7, Status: jobApplied, RollbackExpiresAt: now.Add(7 * 24 * time.Hour)},
+	}
+	barrier := &recordingConfigurationBarrier{boundary: configuration.Boundary{AccountID: 7, MigrationJobID: 19, Operation: configuration.BarrierMigrationApply, OldConfigVersionID: 10, NewConfigVersionID: 11, LastOldRevision: 4, FirstNewRevision: 5, AppliedAt: now}}
+	service := NewService(repository, func() time.Time { return now })
+	if err := service.SetConfigurationBarrier(barrier); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := service.PreauthorizeApply(context.Background(), 7, 19)
+	if err != nil {
+		t.Fatalf("PreauthorizeApply() error = %v", err)
+	}
+	if job.Status != jobApplied || barrier.calls != 1 || barrier.candidate.IntegritySeal != sealed.Hash {
+		t.Fatalf("resume job=%#v barrier=%#v", job, barrier)
+	}
+}
+
+func TestServicePreauthorizeApplyReconcilesAnAlreadyAppliedBarrier(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 6, 0, 0, time.UTC)
+	definition, runtime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 9})
+	sealed := sealedCandidateForTest(t, definition, runtime)
+	repository := &recordingLifecycleRepository{
+		composition:             storedComposition{ID: 19, AccountID: 7, Status: jobApplied, ExpiresAt: now.Add(time.Hour), Imported: migrationEnvelope(sealed.Definition, sealed.Runtime)},
+		preauthorizeApplyResult: storedJob{ID: 19, AccountID: 7, Status: jobApplied},
+		getResult:               storedJob{ID: 19, AccountID: 7, Status: jobApplied, RollbackExpiresAt: now.Add(7 * 24 * time.Hour)},
+	}
+	barrier := &recordingConfigurationBarrier{boundary: configuration.Boundary{AccountID: 7, MigrationJobID: 19, Operation: configuration.BarrierMigrationApply, OldConfigVersionID: 10, NewConfigVersionID: 11, LastOldRevision: 4, FirstNewRevision: 5, AppliedAt: now}}
+	service := NewService(repository, func() time.Time { return now })
+	if err := service.SetConfigurationBarrier(barrier); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := service.PreauthorizeApply(context.Background(), 7, 19)
+	if err != nil {
+		t.Fatalf("PreauthorizeApply(applied) error = %v", err)
+	}
+	if job.Status != jobApplied || barrier.calls != 1 || barrier.candidate.IntegritySeal != sealed.Hash {
+		t.Fatalf("applied reconciliation job=%#v barrier=%#v", job, barrier)
+	}
+}
+
+func TestServiceApplyResumesPendingBeforeReinterpretingConcurrentSelection(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 7, 0, 0, time.UTC)
+	definition, runtime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 9})
+	sealed := sealedCandidateForTest(t, definition, runtime)
+	repository := &recordingLifecycleRepository{
+		composition:             storedComposition{ID: 19, AccountID: 7, Status: jobPending, ExpiresAt: now.Add(time.Hour), Imported: migrationEnvelope(sealed.Definition, sealed.Runtime)},
+		preauthorizeApplyResult: storedJob{ID: 19, AccountID: 7, Status: jobPending},
+		getResult:               storedJob{ID: 19, AccountID: 7, Status: jobApplied, RollbackExpiresAt: now.Add(7 * 24 * time.Hour)},
+	}
+	barrier := &recordingConfigurationBarrier{boundary: configuration.Boundary{AccountID: 7, MigrationJobID: 19, Operation: configuration.BarrierMigrationApply, OldConfigVersionID: 10, NewConfigVersionID: 11, LastOldRevision: 4, FirstNewRevision: 5, AppliedAt: now}}
+	service := NewService(repository, func() time.Time { return now })
+	if err := service.SetConfigurationBarrier(barrier); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := service.Apply(context.Background(), 7, 19, SelectionCommand{UnitIDs: []string{"stale-client-selection"}})
+	if err != nil {
+		t.Fatalf("Apply(pending) error = %v", err)
+	}
+	if job.Status != jobApplied || barrier.calls != 1 || repository.stageCalls != 0 {
+		t.Fatalf("pending apply job=%#v barrierCalls=%d stageCalls=%d", job, barrier.calls, repository.stageCalls)
+	}
+}
+
+func TestServiceRollbackUsesTheSameLiveBarrierAndCreatesANewVersion(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 10, 0, 0, time.UTC)
+	rollbackDefinition, rollbackRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "hosted", Name: "Hosted"}}, map[string]float64{"hosted": 3})
+	repository := &recordingLifecycleRepository{
+		preauthorizeRollbackResult: storedJob{ID: 19, AccountID: 7, Status: jobApplied, RollbackExpiresAt: now.Add(7 * 24 * time.Hour)},
+		rollbackDefinition:         rollbackDefinition, rollbackRuntime: rollbackRuntime,
+		getResult: storedJob{ID: 19, AccountID: 7, Status: jobRolledBack, RollbackExpiresAt: now.Add(7 * 24 * time.Hour)},
+	}
+	barrier := &recordingConfigurationBarrier{boundary: configuration.Boundary{AccountID: 7, MigrationJobID: 19, Operation: configuration.BarrierMigrationRollback, OldConfigVersionID: 11, NewConfigVersionID: 12, LastOldRevision: 5, FirstNewRevision: 6, AppliedAt: now}}
+	service := NewService(repository, func() time.Time { return now })
+	if err := service.SetConfigurationBarrier(barrier); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := service.Rollback(context.Background(), 7, 19)
+	if err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+	if job.Status != jobRolledBack || barrier.calls != 1 || barrier.candidate.Operation != configuration.BarrierMigrationRollback || barrier.candidate.Definition.MigrationHash != "" || barrier.candidate.Runtime.AttributeValues["hosted"] != 3 {
+		t.Fatalf("rollback job=%#v candidate=%#v calls=%d", job, barrier.candidate, barrier.calls)
+	}
+}
+
+func TestServicePreauthorizeRollbackReconcilesAnAlreadyRolledBackBarrier(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 11, 0, 0, time.UTC)
+	rollbackDefinition, rollbackRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "hosted", Name: "Hosted"}}, map[string]float64{"hosted": 3})
+	repository := &recordingLifecycleRepository{
+		preauthorizeRollbackResult: storedJob{ID: 19, AccountID: 7, Status: jobRolledBack, RollbackExpiresAt: now.Add(7 * 24 * time.Hour)},
+		rollbackDefinition:         rollbackDefinition, rollbackRuntime: rollbackRuntime,
+		getResult: storedJob{ID: 19, AccountID: 7, Status: jobRolledBack, RollbackExpiresAt: now.Add(7 * 24 * time.Hour)},
+	}
+	barrier := &recordingConfigurationBarrier{boundary: configuration.Boundary{AccountID: 7, MigrationJobID: 19, Operation: configuration.BarrierMigrationRollback, OldConfigVersionID: 11, NewConfigVersionID: 12, LastOldRevision: 5, FirstNewRevision: 6, AppliedAt: now}}
+	service := NewService(repository, func() time.Time { return now })
+	if err := service.SetConfigurationBarrier(barrier); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := service.PreauthorizeRollback(context.Background(), 7, 19)
+	if err != nil {
+		t.Fatalf("PreauthorizeRollback(rolled_back) error = %v", err)
+	}
+	if job.Status != jobRolledBack || barrier.calls != 1 || barrier.candidate.Operation != configuration.BarrierMigrationRollback {
+		t.Fatalf("rollback reconciliation job=%#v barrier=%#v", job, barrier)
+	}
+}
+
+func TestServiceApplyPendingAfterSessionUsesTheOwnedConfigurationBarrier(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 12, 0, 0, time.UTC)
+	definition, runtime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "exe", Name: "EXE"}}, map[string]float64{"exe": 9})
+	sealed := sealedCandidateForTest(t, definition, runtime)
+	repository := &recordingLifecycleRepository{
+		composition:             storedComposition{ID: 19, AccountID: 7, Status: jobPending, ExpiresAt: now.Add(time.Hour), Imported: migrationEnvelope(sealed.Definition, sealed.Runtime)},
+		preauthorizeApplyResult: storedJob{ID: 19, AccountID: 7, Status: jobPending},
+		getResult:               storedJob{ID: 19, AccountID: 7, Status: jobApplied, RollbackExpiresAt: now.Add(7 * 24 * time.Hour)},
+	}
+	barrier := &recordingConfigurationBarrier{boundary: configuration.Boundary{AccountID: 7, MigrationJobID: 19, Operation: configuration.BarrierMigrationApply, OldConfigVersionID: 10, NewConfigVersionID: 11, LastOldRevision: 4, FirstNewRevision: 5, AppliedAt: now}}
+	service := NewService(repository, func() time.Time { return now })
+	if err := service.SetConfigurationBarrier(barrier); err != nil {
+		t.Fatal(err)
+	}
+	owner := OwnerFence{AccountID: 7, Token: [32]byte{1}, Epoch: 2}
+
+	job, err := service.ApplyPendingAfterSession(context.Background(), owner, 19)
+	if err != nil {
+		t.Fatalf("ApplyPendingAfterSession() error = %v", err)
+	}
+	if job.Status != jobApplied || barrier.pendingCalls != 1 || barrier.pendingOwner != owner || barrier.candidate.IntegritySeal != sealed.Hash {
+		t.Fatalf("pending barrier job=%#v barrier=%#v", job, barrier)
+	}
+}
+
 func TestSelectionPreviewUsesServerCompositionWithoutMutatingFormalConfiguration(t *testing.T) {
 	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
 	hostedDefinition, hostedRuntime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "online", Name: "Health"}}, map[string]float64{"online": 2})
@@ -705,6 +886,38 @@ func TestSQLRepositoryStagesLiveSessionWithoutChangingConfiguration(t *testing.T
 	}
 }
 
+func TestSQLRepositoryStageApplyFreezesCandidateWithoutTouchingConfiguration(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	candidate := sealedCandidateForTest(t, emptyDefinition(), emptyRuntime())
+	frozen, err := freezeCandidate(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(88, 3, 6, []byte(`{"attributeValues":{"health":1}}`)))
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(jobPreviewed, now.Add(time.Hour), 0, nil, nil, nil, nil, []byte(`{"attributes":[]}`), []byte(`{"attributeValues":{}}`), "12345"))
+	expectPreviewNow(mock, now)
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleBaseQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"base_config_version_number", "base_state_revision"}).AddRow(3, 6))
+	mock.ExpectExec(regexp.QuoteMeta(stageApplyQuery)).WithArgs(true, frozen.SealedDefinition, frozen.RuntimeJSON, int64(19), int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	job, err := NewRepository(database).(stagedApplyRepository).StageApply(context.Background(), applyCommand{AccountID: 7, JobID: 19, KeepRoomSuggestion: true, Candidate: candidate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != jobPending {
+		t.Fatalf("StageApply() = %#v", job)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSQLRepositoryAppliesPendingJobAfterSessionWithPersistedRoomDecision(t *testing.T) {
 	database, mock, err := sqlmock.New()
 	if err != nil {
@@ -770,6 +983,53 @@ func TestSQLRepositoryRollbackRestoresSavedStateOnlyWhenAppliedVersionIsCurrent(
 	}
 	if job.Status != jobRolledBack {
 		t.Fatalf("job = %#v", job)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryLoadsRollbackCandidateWithoutChangingHistory(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	definition, runtime := attributeConfiguration([]configuration.AttributeDefinition{{ID: "hosted", Name: "Hosted"}}, map[string]float64{"hosted": 3})
+	mock.ExpectQuery(regexp.QuoteMeta(rollbackCandidateQuery)).WithArgs(int64(19), int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"status", "definition_json", "rollback_runtime_json"}).AddRow(jobApplied, mustJSON(t, definition), mustJSON(t, runtime)))
+
+	gotDefinition, gotRuntime, err := NewRepository(database).(rollbackCandidateRepository).LoadRollbackCandidate(context.Background(), 7, 19)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotDefinition.Attributes[0].ID != "hosted" || gotRuntime.AttributeValues["hosted"] != 3 {
+		t.Fatalf("rollback candidate = %#v %#v", gotDefinition, gotRuntime)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLRepositoryPreauthorizeRollbackAllowsOpenSessionForLiveBarrier(t *testing.T) {
+	database, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 8, 29, 12, 20, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleAccountQuery)).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"config_version_id", "number", "revision", "runtime_json"}).AddRow(88, 4, 8, []byte(`{"attributeValues":{"health":5}}`)))
+	mock.ExpectQuery(regexp.QuoteMeta(lifecycleJobQuery)).WithArgs(int64(19), int64(7)).WillReturnRows(sqlmock.NewRows([]string{"status", "expires_at", "keep_room_suggestion", "rollback_config_version_id", "rollback_runtime_json", "rollback_expires_at", "applied_config_version_id", "definition_json", "runtime_json", "room_suggestion"}).AddRow(jobApplied, now.Add(time.Hour), 0, 77, []byte(`{"attributeValues":{"health":1}}`), now.Add(7*24*time.Hour), 88, []byte(`{"attributes":[]}`), []byte(`{"attributeValues":{"health":5}}`), nil))
+	expectPreviewNow(mock, now)
+	mock.ExpectCommit()
+
+	job, err := NewRepository(database).(lifecycleRepository).PreauthorizeRollback(context.Background(), 7, 19)
+	if err != nil {
+		t.Fatalf("PreauthorizeRollback() error = %v", err)
+	}
+	if job.Status != jobApplied {
+		t.Fatalf("PreauthorizeRollback() = %#v", job)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -977,12 +1237,20 @@ type recordingPreviewRepository struct {
 
 type recordingLifecycleRepository struct {
 	recordingPreviewRepository
-	apply                    applyCommand
-	applyResult              storedJob
-	applyErr                 error
-	composition              storedComposition
-	loadAccountID, loadJobID int64
-	applyCalls               int
+	apply                      applyCommand
+	applyResult                storedJob
+	applyErr                   error
+	composition                storedComposition
+	loadAccountID, loadJobID   int64
+	applyCalls                 int
+	stage                      applyCommand
+	stageResult                storedJob
+	stageCalls                 int
+	getResult                  storedJob
+	preauthorizeApplyResult    storedJob
+	preauthorizeRollbackResult storedJob
+	rollbackDefinition         configuration.Definition
+	rollbackRuntime            configuration.RuntimeState
 }
 
 func (repository *recordingLifecycleRepository) Apply(_ context.Context, command applyCommand) (storedJob, error) {
@@ -994,14 +1262,38 @@ func (repository *recordingLifecycleRepository) LoadComposition(_ context.Contex
 	repository.loadAccountID, repository.loadJobID = accountID, jobID
 	return repository.composition, nil
 }
+func (repository *recordingLifecycleRepository) StageApply(_ context.Context, command applyCommand) (storedJob, error) {
+	repository.stage, repository.stageCalls = command, repository.stageCalls+1
+	frozen, err := freezeCandidate(command.Candidate)
+	if err != nil {
+		return storedJob{}, err
+	}
+	repository.composition.Status = jobPending
+	repository.composition.KeepRoomSuggestion = command.KeepRoomSuggestion
+	repository.composition.Imported.Definition = frozen.Definition
+	repository.composition.Imported.Runtime = frozen.Runtime
+	return repository.stageResult, nil
+}
 func (repository *recordingLifecycleRepository) ApplyPendingAfterSession(context.Context, OwnerFence, int64) (storedJob, error) {
 	return storedJob{}, ErrUnavailable
 }
 func (repository *recordingLifecycleRepository) PreauthorizeApply(context.Context, int64, int64) (storedJob, error) {
+	if repository.preauthorizeApplyResult.ID != 0 {
+		return repository.preauthorizeApplyResult, nil
+	}
 	return storedJob{}, ErrUnavailable
 }
 func (repository *recordingLifecycleRepository) PreauthorizeRollback(context.Context, int64, int64) (storedJob, error) {
+	if repository.preauthorizeRollbackResult.ID != 0 {
+		return repository.preauthorizeRollbackResult, nil
+	}
 	return storedJob{}, ErrUnavailable
+}
+func (repository *recordingLifecycleRepository) LoadRollbackCandidate(context.Context, int64, int64) (configuration.Definition, configuration.RuntimeState, error) {
+	if repository.rollbackDefinition.Attributes != nil || repository.rollbackRuntime.AttributeValues != nil {
+		return repository.rollbackDefinition, repository.rollbackRuntime, nil
+	}
+	return configuration.Definition{}, configuration.RuntimeState{}, ErrUnavailable
 }
 func (repository *recordingLifecycleRepository) Cancel(context.Context, int64, int64) (storedJob, error) {
 	return storedJob{}, ErrUnavailable
@@ -1010,7 +1302,32 @@ func (repository *recordingLifecycleRepository) Rollback(context.Context, int64,
 	return storedJob{}, ErrUnavailable
 }
 func (repository *recordingLifecycleRepository) Get(context.Context, int64, int64) (storedJob, error) {
+	if repository.getResult.ID != 0 {
+		return repository.getResult, nil
+	}
 	return storedJob{}, ErrUnavailable
+}
+
+type recordingConfigurationBarrier struct {
+	candidate    BarrierCandidate
+	boundary     configuration.Boundary
+	err          error
+	calls        int
+	pendingCalls int
+	pendingOwner OwnerFence
+}
+
+func (barrier *recordingConfigurationBarrier) ApplyConfigurationBarrier(_ context.Context, _ int64, candidate BarrierCandidate) (configuration.Boundary, error) {
+	barrier.calls++
+	barrier.candidate = candidate
+	return barrier.boundary, barrier.err
+}
+
+func (barrier *recordingConfigurationBarrier) ApplyPendingConfigurationBarrier(_ context.Context, owner OwnerFence, candidate BarrierCandidate) (configuration.Boundary, error) {
+	barrier.pendingCalls++
+	barrier.pendingOwner = owner
+	barrier.candidate = candidate
+	return barrier.boundary, barrier.err
 }
 
 func (repository *recordingPreviewRepository) Preview(_ context.Context, command previewCommand) (storedPreview, error) {
