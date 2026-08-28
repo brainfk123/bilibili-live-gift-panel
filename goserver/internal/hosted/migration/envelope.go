@@ -34,14 +34,35 @@ var ErrInvalidEnvelope = errors.New("migration: invalid envelope")
 // only byte representation retained long enough to calculate Hash; callers
 // must persist Definition and Runtime instead.
 type Envelope struct {
-	Definition     configuration.Definition
-	Runtime        configuration.RuntimeState
-	RoomSuggestion string
-	Source         Source
-	Counts         Counts
-	Report         Report
-	CanonicalJSON  []byte
-	Hash           [sha256.Size]byte
+	Definition        configuration.Definition
+	Runtime           configuration.RuntimeState
+	RoomSuggestion    string
+	GeneralSettings   GeneralSettings
+	CropPresets       []CropPreset
+	Units             []GameplayUnit
+	Groups            []GameplayGroup
+	ClientDeclaration GameplayDependencyDeclaration
+	Source            Source
+	Counts            Counts
+	Report            Report
+	CanonicalJSON     []byte
+	Hash              [sha256.Size]byte
+}
+
+type GeneralSettings struct {
+	ConfigurationMode string `json:"configurationMode"`
+}
+
+type CropPreset struct {
+	ID   string `json:"id"`
+	Crop Crop   `json:"crop"`
+}
+
+type Crop struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
 }
 
 type Source struct {
@@ -77,20 +98,38 @@ type wireSource struct {
 	ConfigurationSchemaVersion int    `json:"configSchemaVersion"`
 }
 type wirePayload struct {
-	RoomSuggestion *string        `json:"roomSuggestion"`
-	Definition     wireDefinition `json:"definition"`
-	Runtime        wireRuntime    `json:"runtime"`
+	RoomSuggestion        *string                       `json:"roomSuggestion"`
+	GeneralSettings       GeneralSettings               `json:"generalSettings"`
+	CropPresets           []CropPreset                  `json:"cropPresets"`
+	RejectedCropPresets   []wireRejectedCropPreset      `json:"rejectedCropPresets"`
+	DependencyDeclaration GameplayDependencyDeclaration `json:"dependencyDeclaration"`
+	Definition            wireDefinition                `json:"definition"`
+	Runtime               wireRuntime                   `json:"runtime"`
+}
+type wireRejectedCropPreset struct {
+	Reason string `json:"reason"`
+	Count  int    `json:"count"`
 }
 type wireDefinition struct {
-	Attributes       []wireAttribute                `json:"attributes"`
-	DisplayScenes    []gameplay.DisplayScene        `json:"displayScenes"`
-	GiftTargetPanels []wireGiftTargetPanel          `json:"giftTargetPanels"`
-	Activities       []wireActivity                 `json:"activities"`
-	Rules            []gameplay.Rule                `json:"rules"`
-	TimerRules       []gameplay.TimerRule           `json:"timerRules"`
-	FormulaPresets   []gameplay.FormulaPreset       `json:"formulaPresets"`
-	SimplePlay       *wireSimplePlay                `json:"simplePlay"`
-	Gifts            []configuration.GiftDefinition `json:"gifts"`
+	Attributes       []wireAttribute          `json:"attributes"`
+	DisplayScenes    []gameplay.DisplayScene  `json:"displayScenes"`
+	GiftTargetPanels []wireGiftTargetPanel    `json:"giftTargetPanels"`
+	Activities       []wireActivity           `json:"activities"`
+	Rules            []gameplay.Rule          `json:"rules"`
+	TimerRules       []gameplay.TimerRule     `json:"timerRules"`
+	FormulaPresets   []gameplay.FormulaPreset `json:"formulaPresets"`
+	SimplePlay       *wireSimplePlay          `json:"simplePlay"`
+	Gifts            []wireGiftDefinition     `json:"gifts"`
+}
+type wireGiftDefinition struct {
+	ID                  int     `json:"id"`
+	Name                string  `json:"name"`
+	Price               float64 `json:"price"`
+	CoinType            string  `json:"coinType"`
+	EffectID            *int    `json:"effectId"`
+	BlindBoxParentID    int     `json:"blindBoxParentId,omitempty"`
+	BlindBoxParentName  string  `json:"blindBoxParentName,omitempty"`
+	BlindBoxParentPrice float64 `json:"blindBoxParentPrice,omitempty"`
 }
 type wireAttribute struct {
 	ID               string            `json:"id"`
@@ -180,11 +219,14 @@ func Decode(reader io.Reader, maxBytes int64) (Envelope, Report, error) {
 	}
 
 	report := Report{}
-	scanNode(raw, "", envelopeSchema(), &report)
 	var wire wireEnvelope
-	if err := json.Unmarshal(raw, &wire); err != nil || wire.Kind != "gift-panel-online-migration" || wire.MigrationVersion != 1 || wire.ExportedAt == "" || wire.Source.AppVersion == "" || wire.Source.ConfigurationSchemaVersion < 1 || wire.Source.ConfigurationSchemaVersion > configurationSchemaVersion {
+	if err := json.Unmarshal(raw, &wire); err != nil || wire.Kind != "gift-panel-online-migration" || wire.ExportedAt == "" || wire.Source.AppVersion == "" || wire.Source.ConfigurationSchemaVersion < 1 || wire.Source.ConfigurationSchemaVersion > configurationSchemaVersion {
 		return Envelope{}, Report{}, ErrInvalidEnvelope
 	}
+	if wire.MigrationVersion != 1 && wire.MigrationVersion != 2 {
+		return Envelope{}, Report{}, ErrInvalidEnvelope
+	}
+	scanNode(raw, "", envelopeSchema(wire.MigrationVersion), &report)
 	if err := validateWire(wire); err != nil {
 		return Envelope{}, Report{}, ErrInvalidEnvelope
 	}
@@ -192,10 +234,36 @@ func Decode(reader io.Reader, maxBytes int64) (Envelope, Report, error) {
 	if err != nil {
 		return Envelope{}, Report{}, ErrInvalidEnvelope
 	}
-	canonical, err := json.Marshal(struct {
-		Definition configuration.Definition   `json:"definition"`
-		Runtime    configuration.RuntimeState `json:"runtime"`
-	}{definition, runtime})
+	settings := GeneralSettings{}
+	crops := []CropPreset(nil)
+	clientDeclaration := GameplayDependencyDeclaration{}
+	units := DeriveUnits(definition, runtime)
+	if wire.MigrationVersion == 2 {
+		if err := validateV2Payload(payload); err != nil {
+			return Envelope{}, Report{}, ErrInvalidEnvelope
+		}
+		settings = normalizeGeneralSettings(wire.Payload.GeneralSettings)
+		effectIDs := effectIDsByGift(wire.Payload.Definition.Gifts)
+		crops = normalizeCropPresets(wire.Payload.CropPresets, definition.Gifts, effectIDs, &report)
+		units = deriveUnits(definition, runtime, crops, effectIDs)
+		clientDeclaration = normalizeClientDeclaration(wire.Payload.DependencyDeclaration)
+		report.Warnings = append(report.Warnings, "玩法关系已由服务器重新整理")
+	}
+	groups := ConnectedGroups(units)
+	var canonical []byte
+	if wire.MigrationVersion == 1 {
+		canonical, err = json.Marshal(struct {
+			Definition configuration.Definition   `json:"definition"`
+			Runtime    configuration.RuntimeState `json:"runtime"`
+		}{definition, runtime})
+	} else {
+		canonical, err = json.Marshal(struct {
+			Definition      configuration.Definition   `json:"definition"`
+			Runtime         configuration.RuntimeState `json:"runtime"`
+			GeneralSettings GeneralSettings            `json:"generalSettings"`
+			CropPresets     []CropPreset               `json:"cropPresets"`
+		}{definition, runtime, settings, crops})
+	}
 	if err != nil {
 		return Envelope{}, Report{}, ErrInvalidEnvelope
 	}
@@ -205,7 +273,7 @@ func Decode(reader io.Reader, maxBytes int64) (Envelope, Report, error) {
 	}
 	report.Counts = countWire(wire.Payload.Definition)
 	report.finalize()
-	return Envelope{Definition: definition, Runtime: runtime, RoomSuggestion: roomSuggestion, Source: Source{AppVersion: wire.Source.AppVersion, ConfigurationSchemaVersion: wire.Source.ConfigurationSchemaVersion}, Counts: report.Counts, Report: report, CanonicalJSON: canonical, Hash: sha256.Sum256(canonical)}, report, nil
+	return Envelope{Definition: definition, Runtime: runtime, RoomSuggestion: roomSuggestion, GeneralSettings: settings, CropPresets: crops, Units: units, Groups: groups, ClientDeclaration: clientDeclaration, Source: Source{AppVersion: wire.Source.AppVersion, ConfigurationSchemaVersion: wire.Source.ConfigurationSchemaVersion}, Counts: report.Counts, Report: report, CanonicalJSON: canonical, Hash: sha256.Sum256(canonical)}, report, nil
 }
 
 func requiredObject(object map[string]json.RawMessage, key string) bool {
@@ -218,7 +286,11 @@ func requiredObject(object map[string]json.RawMessage, key string) bool {
 }
 
 func normalizeWire(wire wireEnvelope, report *Report) (configuration.Definition, configuration.RuntimeState, error) {
-	definition := configuration.Definition{Attributes: make([]configuration.AttributeDefinition, len(wire.Payload.Definition.Attributes)), DisplayScenes: wire.Payload.Definition.DisplayScenes, GiftTargetPanels: make([]configuration.GiftTargetPanelDefinition, len(wire.Payload.Definition.GiftTargetPanels)), Activities: make([]configuration.ActivityDefinition, len(wire.Payload.Definition.Activities)), Rules: wire.Payload.Definition.Rules, TimerRules: wire.Payload.Definition.TimerRules, FormulaPresets: wire.Payload.Definition.FormulaPresets, Gifts: wire.Payload.Definition.Gifts}
+	gifts := make([]configuration.GiftDefinition, len(wire.Payload.Definition.Gifts))
+	for index, gift := range wire.Payload.Definition.Gifts {
+		gifts[index] = configuration.GiftDefinition{ID: gift.ID, Name: gift.Name, Price: gift.Price, CoinType: gift.CoinType, BlindBoxParentID: gift.BlindBoxParentID, BlindBoxParentName: gift.BlindBoxParentName, BlindBoxParentPrice: gift.BlindBoxParentPrice}
+	}
+	definition := configuration.Definition{Attributes: make([]configuration.AttributeDefinition, len(wire.Payload.Definition.Attributes)), DisplayScenes: wire.Payload.Definition.DisplayScenes, GiftTargetPanels: make([]configuration.GiftTargetPanelDefinition, len(wire.Payload.Definition.GiftTargetPanels)), Activities: make([]configuration.ActivityDefinition, len(wire.Payload.Definition.Activities)), Rules: wire.Payload.Definition.Rules, TimerRules: wire.Payload.Definition.TimerRules, FormulaPresets: wire.Payload.Definition.FormulaPresets, Gifts: gifts}
 	for index, item := range wire.Payload.Definition.Attributes {
 		definition.Attributes[index] = configuration.AttributeDefinition{ID: item.ID, Name: item.Name, Unit: item.Unit, Format: item.Format, Decimals: item.Decimals, Suffix: item.Suffix, Color: item.Color, BroadcastMessage: item.BroadcastMessage, Display: item.Display}
 	}
@@ -570,6 +642,167 @@ func countWire(definition wireDefinition) Counts {
 	return counts
 }
 
+func validateV2Payload(payload map[string]json.RawMessage) error {
+	for _, key := range []string{"generalSettings", "cropPresets", "rejectedCropPresets", "dependencyDeclaration"} {
+		if _, exists := payload[key]; !exists {
+			return ErrInvalidEnvelope
+		}
+	}
+	var settings map[string]json.RawMessage
+	if json.Unmarshal(payload["generalSettings"], &settings) != nil || settings == nil {
+		return ErrInvalidEnvelope
+	}
+	var crops []json.RawMessage
+	if json.Unmarshal(payload["cropPresets"], &crops) != nil {
+		return ErrInvalidEnvelope
+	}
+	var rejected []json.RawMessage
+	if json.Unmarshal(payload["rejectedCropPresets"], &rejected) != nil {
+		return ErrInvalidEnvelope
+	}
+	return nil
+}
+
+func normalizeGeneralSettings(settings GeneralSettings) GeneralSettings {
+	if settings.ConfigurationMode != "simple" && settings.ConfigurationMode != "advanced" {
+		return GeneralSettings{}
+	}
+	return settings
+}
+
+var stableCropIdentity = regexp.MustCompile(`^(gift|effect):([1-9][0-9]*)$`)
+
+func effectIDsByGift(gifts []wireGiftDefinition) map[int]int {
+	result := make(map[int]int, len(gifts))
+	for _, gift := range gifts {
+		if gift.EffectID != nil && *gift.EffectID > 0 {
+			result[gift.ID] = *gift.EffectID
+		}
+	}
+	return result
+}
+
+func normalizeCropPresets(crops []CropPreset, gifts []configuration.GiftDefinition, effectIDs map[int]int, report *Report) []CropPreset {
+	knownGifts, knownEffects := make(map[int]struct{}, len(gifts)), make(map[int]struct{}, len(effectIDs))
+	for _, gift := range gifts {
+		knownGifts[gift.ID] = struct{}{}
+	}
+	for _, effectID := range effectIDs {
+		knownEffects[effectID] = struct{}{}
+	}
+	accepted := make([]CropPreset, 0, len(crops))
+	for index, preset := range crops {
+		match := stableCropIdentity.FindStringSubmatch(preset.ID)
+		identity, _ := strconv.Atoi(func() string {
+			if len(match) == 3 {
+				return match[2]
+			}
+			return "0"
+		}())
+		_, giftExists := knownGifts[identity]
+		_, effectExists := knownEffects[identity]
+		if len(match) != 3 || (match[1] == "gift" && !giftExists) || (match[1] == "effect" && !effectExists) || !validCrop(preset.Crop) {
+			reportIgnored(report, "/payload/cropPresets/"+strconv.Itoa(index))
+			continue
+		}
+		accepted = append(accepted, CropPreset{ID: preset.ID, Crop: preset.Crop})
+	}
+	sort.Slice(accepted, func(left, right int) bool { return compareCodeUnits(accepted[left].ID, accepted[right].ID) < 0 })
+	return accepted
+}
+
+func validCrop(crop Crop) bool {
+	return !math.IsNaN(crop.X) && !math.IsInf(crop.X, 0) && !math.IsNaN(crop.Y) && !math.IsInf(crop.Y, 0) && !math.IsNaN(crop.Width) && !math.IsInf(crop.Width, 0) && !math.IsNaN(crop.Height) && !math.IsInf(crop.Height, 0) && crop.X >= 0 && crop.Y >= 0 && crop.Width > 0 && crop.Height > 0 && crop.X+crop.Width <= 1 && crop.Y+crop.Height <= 1
+}
+
+func cropBelongsToUnit(id string, giftIDs map[int]struct{}, effectIDs map[int]int) bool {
+	match := stableCropIdentity.FindStringSubmatch(id)
+	if len(match) != 3 {
+		return false
+	}
+	value, _ := strconv.Atoi(match[2])
+	if match[1] == "gift" {
+		_, exists := giftIDs[value]
+		return exists
+	}
+	for giftID := range giftIDs {
+		if effectIDs[giftID] == value {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeClientDeclaration(declaration GameplayDependencyDeclaration) GameplayDependencyDeclaration {
+	if declaration.AlgorithmVersion != gameplayDependencyAlgorithmVersion {
+		return GameplayDependencyDeclaration{}
+	}
+	result := GameplayDependencyDeclaration{AlgorithmVersion: gameplayDependencyAlgorithmVersion, Units: make([]GameplayUnit, 0, len(declaration.Units)), Groups: make([]GameplayGroup, 0, len(declaration.Groups))}
+	for _, unit := range declaration.Units {
+		if !validDeclaredUnitID(unit.ID) || !validUnitKind(unit.Kind) {
+			continue
+		}
+		result.Units = append(result.Units, GameplayUnit{ID: unit.ID, Kind: unit.Kind, AttributeIDs: stableStrings(unit.AttributeIDs), RuleIDs: stableStrings(unit.RuleIDs), TimerRuleIDs: stableStrings(unit.TimerRuleIDs), FormulaPresetIDs: stableStrings(unit.FormulaPresetIDs), ActivityIDs: stableStrings(unit.ActivityIDs), DisplaySceneIDs: stableStrings(unit.DisplaySceneIDs), GiftTargetPanelIDs: stableStrings(unit.GiftTargetPanelIDs), GiftIDs: sortedPositiveInts(unit.GiftIDs), CropPresetIDs: stableCropStrings(unit.CropPresetIDs)})
+	}
+	sort.Slice(result.Units, func(left, right int) bool { return compareCodeUnits(result.Units[left].ID, result.Units[right].ID) < 0 })
+	for _, group := range declaration.Groups {
+		if !strings.HasPrefix(group.ID, "group:") {
+			continue
+		}
+		ids := make([]string, 0, len(group.UnitIDs))
+		for _, id := range group.UnitIDs {
+			if validDeclaredUnitID(id) {
+				ids = append(ids, id)
+			}
+		}
+		if len(ids) < 2 {
+			continue
+		}
+		reasons := make([]GameplayGroupReason, 0, len(group.Reasons))
+		for _, reason := range group.Reasons {
+			if (reason.Kind == "shared-attribute" || reason.Kind == "shared-scene" || reason.Kind == "shared-crop-preset") && strings.TrimSpace(reason.ReferenceID) != "" {
+				reasons = append(reasons, GameplayGroupReason{Kind: reason.Kind, ReferenceID: reason.ReferenceID})
+			}
+		}
+		result.Groups = append(result.Groups, GameplayGroup{ID: group.ID, UnitIDs: sortedUniqueStrings(ids), Reasons: reasons})
+	}
+	return result
+}
+
+func validDeclaredUnitID(id string) bool {
+	return strings.HasPrefix(id, "simple-play:") || strings.HasPrefix(id, "activity:") || strings.HasPrefix(id, "attribute:") || strings.HasPrefix(id, "gift-target:")
+}
+func validUnitKind(kind string) bool {
+	return kind == "simple-play" || kind == "activity" || kind == "attribute" || kind == "gift-target"
+}
+func stableStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" && utf8.RuneCountInString(value) <= maximumStringRunes {
+			result = append(result, value)
+		}
+	}
+	return sortedUniqueStrings(result)
+}
+func stableCropStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if stableCropIdentity.MatchString(value) {
+			result = append(result, value)
+		}
+	}
+	return sortedUniqueStrings(result)
+}
+func sortedPositiveInts(values []int) []int {
+	seen := map[int]struct{}{}
+	for _, value := range values {
+		if value > 0 {
+			seen[value] = struct{}{}
+		}
+	}
+	return sortedIntSet(seen)
+}
+
 func validateJSONTokens(raw []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
@@ -611,7 +844,7 @@ type schemaNode struct {
 	forbidden bool
 }
 
-func envelopeSchema() schemaNode {
+func envelopeSchema(version int) schemaNode {
 	leaf := schemaNode{}
 	display := schemaNode{fields: map[string]schemaNode{"variant": leaf, "themeId": leaf, "title": leaf, "min": leaf, "max": leaf, "lowThreshold": leaf, "leftLabel": leaf, "rightLabel": leaf, "valueMappings": {array: &schemaNode{fields: map[string]schemaNode{"value": leaf, "label": leaf, "color": leaf}}}, "appearance": {forbidden: true}}}
 	attribute := schemaNode{fields: map[string]schemaNode{"id": leaf, "name": leaf, "unit": leaf, "format": leaf, "decimals": leaf, "suffix": leaf, "color": leaf, "broadcastMessage": leaf, "display": display, "value": {forbidden: true}}}
@@ -624,12 +857,22 @@ func envelopeSchema() schemaNode {
 	preset := schemaNode{fields: map[string]schemaNode{"id": leaf, "name": leaf, "context": leaf, "formula": leaf, "attributeId": leaf}}
 	overtimeAction := schemaNode{fields: map[string]schemaNode{"giftId": leaf, "operation": leaf, "seconds": leaf}}
 	simplePlay := schemaNode{fields: map[string]schemaNode{"version": leaf, "templateId": leaf, "templateVersion": leaf, "attributeId": leaf, "parameters": leaf, "gifts": leaf, "overtimeGiftActions": {array: &overtimeAction}, "managedFingerprint": leaf}}
-	gift := schemaNode{fields: map[string]schemaNode{"id": leaf, "name": leaf, "price": leaf, "coinType": leaf, "blindBoxParentId": leaf, "blindBoxParentName": leaf, "blindBoxParentPrice": leaf, "imageUrl": {forbidden: true}, "imgBasic": {forbidden: true}, "gif": {forbidden: true}, "webp": {forbidden: true}, "effectMp4": {forbidden: true}, "effectMp4Json": {forbidden: true}}}
+	gift := schemaNode{fields: map[string]schemaNode{"id": leaf, "name": leaf, "price": leaf, "coinType": leaf, "effectId": leaf, "blindBoxParentId": leaf, "blindBoxParentName": leaf, "blindBoxParentPrice": leaf, "imageUrl": {forbidden: true}, "imgBasic": {forbidden: true}, "gif": {forbidden: true}, "webp": {forbidden: true}, "effectMp4": {forbidden: true}, "effectMp4Json": {forbidden: true}}}
 	definition := schemaNode{fields: map[string]schemaNode{"attributes": {array: &attribute}, "displayScenes": {array: &schemaNode{fields: map[string]schemaNode{"id": leaf, "name": leaf, "attributeIds": {array: &leaf}, "layout": leaf, "themeId": leaf, "appearance": {forbidden: true}}}}, "giftTargetPanels": {array: &panel}, "activities": {array: &activity}, "rules": {array: &rule}, "timerRules": {array: &timerRule}, "formulaPresets": {array: &preset}, "simplePlay": simplePlay, "gifts": {array: &gift}, "appearance": {forbidden: true}, "blindBoxDisplay": {forbidden: true}}}
 	runtimeMilestone := schemaNode{fields: map[string]schemaNode{"id": leaf, "triggeredAtMillis": leaf, "triggerValue": leaf}}
 	runtimeActivity := schemaNode{fields: map[string]schemaNode{"id": leaf, "status": leaf, "startedAtMillis": leaf, "lockedAtMillis": leaf, "settledAtMillis": leaf, "result": {fields: map[string]schemaNode{"winnerAttributeId": leaf, "values": leaf}}, "milestones": {array: &runtimeMilestone}, "giftTimeout": {fields: map[string]schemaNode{"lastGiftAtMillis": leaf, "deadlineAtMillis": leaf}}}}
 	runtime := schemaNode{fields: map[string]schemaNode{"attributeValues": leaf, "giftTargetReceived": {array: &schemaNode{fields: map[string]schemaNode{"panelId": leaf, "giftId": leaf, "received": leaf}}}, "activities": {array: &runtimeActivity}, "ruleLimits": leaf}}
-	return schemaNode{fields: map[string]schemaNode{"kind": leaf, "migrationVersion": leaf, "source": {fields: map[string]schemaNode{"appVersion": leaf, "configSchemaVersion": leaf}}, "exportedAt": leaf, "payload": {fields: map[string]schemaNode{"roomSuggestion": leaf, "definition": definition, "runtime": runtime}}}}
+	payload := schemaNode{fields: map[string]schemaNode{"roomSuggestion": leaf, "definition": definition, "runtime": runtime}}
+	if version == 2 {
+		crop := schemaNode{fields: map[string]schemaNode{"id": leaf, "crop": {fields: map[string]schemaNode{"x": leaf, "y": leaf, "width": leaf, "height": leaf}}}}
+		declarationUnit := schemaNode{fields: map[string]schemaNode{"id": leaf, "kind": leaf, "name": leaf, "attributeIds": {array: &leaf}, "ruleIds": {array: &leaf}, "timerRuleIds": {array: &leaf}, "formulaPresetIds": {array: &leaf}, "activityIds": {array: &leaf}, "displaySceneIds": {array: &leaf}, "giftTargetPanelIds": {array: &leaf}, "giftIds": {array: &leaf}, "cropPresetIds": {array: &leaf}}}
+		declarationGroup := schemaNode{fields: map[string]schemaNode{"id": leaf, "unitIds": {array: &leaf}, "reasons": {array: &schemaNode{fields: map[string]schemaNode{"kind": leaf, "referenceId": leaf}}}}}
+		payload.fields["generalSettings"] = schemaNode{fields: map[string]schemaNode{"configurationMode": leaf}}
+		payload.fields["cropPresets"] = schemaNode{array: &crop}
+		payload.fields["rejectedCropPresets"] = schemaNode{array: &schemaNode{fields: map[string]schemaNode{"reason": leaf, "count": leaf}}}
+		payload.fields["dependencyDeclaration"] = schemaNode{fields: map[string]schemaNode{"algorithmVersion": leaf, "units": {array: &declarationUnit}, "groups": {array: &declarationGroup}}}
+	}
+	return schemaNode{fields: map[string]schemaNode{"kind": leaf, "migrationVersion": leaf, "source": {fields: map[string]schemaNode{"appVersion": leaf, "configSchemaVersion": leaf}}, "exportedAt": leaf, "payload": payload}}
 }
 func scanNode(raw []byte, pointer string, schema schemaNode, report *Report) {
 	if schema.forbidden {

@@ -14,7 +14,7 @@ func TestDecodeRejectsInvalidEnvelopeBoundaries(t *testing.T) {
 		mutate func(map[string]any)
 	}{
 		{"wrong kind", func(document map[string]any) { document["kind"] = "backup" }},
-		{"wrong migration version", func(document map[string]any) { document["migrationVersion"] = 2 }},
+		{"unknown migration version", func(document map[string]any) { document["migrationVersion"] = 3 }},
 		{"newer configuration schema", func(document map[string]any) { document["source"].(map[string]any)["configSchemaVersion"] = 6 }},
 		{"too many attributes", func(document map[string]any) {
 			document["payload"].(map[string]any)["definition"].(map[string]any)["attributes"] = repeat(attributeWire(), 201)
@@ -44,6 +44,58 @@ func TestDecodeRejectsInvalidEnvelopeBoundaries(t *testing.T) {
 				t.Fatal("Decode accepted an invalid migration envelope")
 			}
 		})
+	}
+}
+
+func TestDecodeV2RecomputesAdvisoryDependencyDeclaration(t *testing.T) {
+	document := validEnvelopeWire()
+	document["migrationVersion"] = 2
+	payload := document["payload"].(map[string]any)
+	payload["generalSettings"] = map[string]any{"configurationMode": "simple"}
+	payload["cropPresets"] = []any{
+		map[string]any{"id": "gift:1", "crop": map[string]any{"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4}},
+		map[string]any{"id": "media:local", "crop": map[string]any{"x": 0, "y": 0, "width": 1, "height": 1}},
+	}
+	payload["rejectedCropPresets"] = []any{map[string]any{"reason": "unstable_identity", "count": 1}}
+	payload["dependencyDeclaration"] = map[string]any{
+		"algorithmVersion": 1,
+		"units":            []any{map[string]any{"id": "attribute:attacker", "kind": "attribute", "name": "attacker"}},
+		"groups":           []any{},
+	}
+	definition := payload["definition"].(map[string]any)
+	definition["gifts"] = []any{map[string]any{"id": 1, "name": "gift", "price": 1, "coinType": "gold", "effectId": 9}}
+
+	envelope, _, err := Decode(jsonReader(t, document), 2<<20)
+	if err != nil {
+		t.Fatalf("Decode V2: %v", err)
+	}
+	if len(envelope.Units) != 1 || envelope.Units[0].ID != "attribute:health" {
+		t.Fatalf("server units = %#v, want normalized attribute unit", envelope.Units)
+	}
+	if len(envelope.ClientDeclaration.Units) != 1 || envelope.ClientDeclaration.Units[0].ID != "attribute:attacker" {
+		t.Fatalf("client declaration was not preserved as advisory: %#v", envelope.ClientDeclaration)
+	}
+	if !contains(envelope.Report.Warnings, "玩法关系已由服务器重新整理") {
+		t.Fatalf("warnings = %#v, want server normalization warning", envelope.Report.Warnings)
+	}
+	if envelope.GeneralSettings.ConfigurationMode != "simple" {
+		t.Fatalf("configuration mode = %q, want simple", envelope.GeneralSettings.ConfigurationMode)
+	}
+	if len(envelope.CropPresets) != 1 || envelope.CropPresets[0].ID != "gift:1" {
+		t.Fatalf("crop presets = %#v, want only stable referenced identity", envelope.CropPresets)
+	}
+	if strings.Contains(string(envelope.CanonicalJSON), "media:local") || strings.Contains(string(envelope.CanonicalJSON), "attribute:attacker") {
+		t.Fatalf("advisory or unstable input reached canonical payload: %s", envelope.CanonicalJSON)
+	}
+}
+
+func TestDecodeV1PreservesLegacyCanonicalShape(t *testing.T) {
+	envelope, _, err := Decode(jsonReader(t, validEnvelopeWire()), 2<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(envelope.CanonicalJSON), "generalSettings") || strings.Contains(string(envelope.CanonicalJSON), "cropPresets") {
+		t.Fatalf("V1 canonical JSON changed: %s", envelope.CanonicalJSON)
 	}
 }
 
@@ -162,11 +214,17 @@ func TestPreviewDTOUsesCamelCaseCountsAndSourceFields(t *testing.T) {
 	counts := value["counts"].(map[string]any)
 	source := value["source"].(map[string]any)
 	for _, key := range []string{"attributes", "rules", "activities", "giftTargetPanels", "giftTargetItems"} {
-		if _, ok := counts[key]; !ok { t.Fatalf("missing camelCase count %q: %s", key, encoded) }
+		if _, ok := counts[key]; !ok {
+			t.Fatalf("missing camelCase count %q: %s", key, encoded)
+		}
 	}
-	if source["appVersion"] != "0.4.4" || source["configurationSchemaVersion"] != float64(5) { t.Fatalf("wrong source DTO: %s", encoded) }
+	if source["appVersion"] != "0.4.4" || source["configurationSchemaVersion"] != float64(5) {
+		t.Fatalf("wrong source DTO: %s", encoded)
+	}
 	for _, forbidden := range []string{"Attributes", "GiftTargetPanels", "AppVersion", "ConfigurationSchemaVersion"} {
-		if strings.Contains(string(encoded), "\""+forbidden+"\"") { t.Fatalf("legacy Go field leaked: %s", encoded) }
+		if strings.Contains(string(encoded), "\""+forbidden+"\"") {
+			t.Fatalf("legacy Go field leaked: %s", encoded)
+		}
 	}
 }
 
