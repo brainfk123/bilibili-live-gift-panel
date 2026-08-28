@@ -117,6 +117,43 @@ export interface MigrationSource {
   configurationSchemaVersion: number;
 }
 
+export type MigrationCompatibilityStatus = 'complete' | 'partial' | 'incompatible';
+export type MigrationConflictChoice = 'replace' | 'keep_both' | 'skip';
+
+export interface MigrationCompatibility {
+  status: MigrationCompatibilityStatus;
+  reasonCodes: string[];
+}
+
+export interface MigrationUnit {
+  id: string;
+  kind: string;
+  name: string;
+  attributeIds: string[];
+  ruleIds: string[];
+  timerRuleIds: string[];
+  formulaPresetIds: string[];
+  activityIds: string[];
+  displaySceneIds: string[];
+  giftTargetPanelIds: string[];
+  giftIds: number[];
+  cropPresetIds: string[];
+  compatibility: MigrationCompatibility;
+  selected: boolean;
+}
+
+export interface MigrationGroupReason { kind: string; referenceId: string }
+export interface MigrationGroup { id: string; unitIds: string[]; reasons: MigrationGroupReason[] }
+export interface MigrationConflict { id: string; importedUnitIds: string[]; hostedUnitIds: string[]; suggestedNames: Record<string, string> }
+export interface MigrationSelection {
+  unitIds: string[];
+  conflictChoices: Record<string, MigrationConflictChoice>;
+  includeGeneralSettings: boolean;
+  includeRoomSuggestion: boolean;
+}
+export interface MigrationGeneralSettings { configurationMode: string }
+export interface MigrationOBSLink { outputId: string; name: string; url: string }
+
 export interface MigrationPreview {
   id: number;
   expiresAt: string;
@@ -126,6 +163,12 @@ export interface MigrationPreview {
   ignored?: string[];
   roomSuggestion?: string;
   source: MigrationSource;
+  units: MigrationUnit[];
+  groups: MigrationGroup[];
+  conflicts: MigrationConflict[];
+  selection: MigrationSelection;
+  generalSettings: MigrationGeneralSettings;
+  canConfirm: boolean;
 }
 
 export interface MigrationJob {
@@ -133,6 +176,7 @@ export interface MigrationJob {
   status: 'previewed' | 'pending' | 'applied' | 'cancelled' | 'rolled_back' | 'expired';
   expiresAt?: string;
   rollbackExpiresAt?: string;
+  obsLinks?: MigrationOBSLink[];
 }
 
 const stableErrors = new Set([
@@ -307,17 +351,67 @@ function migrationSource(value: unknown): MigrationSource | undefined {
     ? item as unknown as MigrationSource : undefined;
 }
 
+const safeMapKeys = (value: Record<string, unknown>): boolean => Object.keys(value).every((key) => key !== '__proto__' && key !== 'prototype' && key !== 'constructor');
+
+function migrationCompatibility(value: unknown): MigrationCompatibility | undefined {
+  const item = object(value);
+  if (!item || !exactKeys(item, ['status'], ['reasonCodes']) || !['complete', 'partial', 'incompatible'].includes(String(item.status)) || (item.reasonCodes !== undefined && !nonEmptyStringArray(item.reasonCodes))) return undefined;
+  return { status: item.status as MigrationCompatibilityStatus, reasonCodes: item.reasonCodes ? [...item.reasonCodes as string[]] : [] };
+}
+
+function migrationUnit(value: unknown): MigrationUnit | undefined {
+  const item = object(value); const compatibility = migrationCompatibility(item?.compatibility);
+  const required = ['id', 'kind', 'name', 'attributeIds', 'ruleIds', 'timerRuleIds', 'formulaPresetIds', 'activityIds', 'displaySceneIds', 'giftTargetPanelIds', 'giftIds', 'cropPresetIds', 'compatibility', 'selected'];
+  if (!item || !exactKeys(item, required) || !string(item.id) || !string(item.kind) || !text(item.name) || !strings(item.attributeIds) || !strings(item.ruleIds) || !strings(item.timerRuleIds) || !strings(item.formulaPresetIds) || !strings(item.activityIds) || !strings(item.displaySceneIds) || !strings(item.giftTargetPanelIds) || !integers(item.giftIds) || !strings(item.cropPresetIds) || !compatibility || typeof item.selected !== 'boolean') return undefined;
+  return { ...item, compatibility } as unknown as MigrationUnit;
+}
+
+function migrationGroup(value: unknown): MigrationGroup | undefined {
+  const item = object(value);
+  if (!item || !exactKeys(item, ['id', 'unitIds', 'reasons']) || !string(item.id) || !strings(item.unitIds) || !Array.isArray(item.reasons)) return undefined;
+  const reasons = item.reasons.map((value) => { const reason = object(value); return reason && exactKeys(reason, ['kind', 'referenceId']) && string(reason.kind) && string(reason.referenceId) ? reason as unknown as MigrationGroupReason : undefined; });
+  return reasons.some((reason) => !reason) ? undefined : { id: item.id, unitIds: [...item.unitIds], reasons: reasons as MigrationGroupReason[] };
+}
+
+function migrationSelection(value: unknown): MigrationSelection | undefined {
+  const item = object(value); const choices = object(item?.conflictChoices ?? {}); const unitIDs = item?.unitIds === null ? [] : item?.unitIds;
+  if (!item || !exactKeys(item, ['unitIds', 'includeGeneralSettings', 'includeRoomSuggestion'], ['conflictChoices']) || !strings(unitIDs) || !choices || !safeMapKeys(choices) || !Object.values(choices).every((choice) => choice === 'replace' || choice === 'keep_both' || choice === 'skip') || typeof item.includeGeneralSettings !== 'boolean' || typeof item.includeRoomSuggestion !== 'boolean') return undefined;
+  return { unitIds: [...unitIDs], conflictChoices: { ...choices } as Record<string, MigrationConflictChoice>, includeGeneralSettings: item.includeGeneralSettings, includeRoomSuggestion: item.includeRoomSuggestion };
+}
+
+function migrationConflict(value: unknown): MigrationConflict | undefined {
+  const item = object(value); const names = object(item?.suggestedNames ?? {});
+  if (!item || !exactKeys(item, ['id', 'importedUnitIds', 'hostedUnitIds'], ['suggestedNames']) || !string(item.id) || !strings(item.importedUnitIds) || !strings(item.hostedUnitIds) || !names || !safeMapKeys(names) || !Object.values(names).every(text)) return undefined;
+  return { id: item.id, importedUnitIds: [...item.importedUnitIds], hostedUnitIds: [...item.hostedUnitIds], suggestedNames: { ...names } as Record<string, string> };
+}
+
+function migrationGeneralSettings(value: unknown): MigrationGeneralSettings | undefined {
+  const item = object(value);
+  return item && exactKeys(item, ['configurationMode']) && text(item.configurationMode) ? { configurationMode: item.configurationMode } : undefined;
+}
+
+function migrationOBSLink(value: unknown): MigrationOBSLink | undefined {
+  const item = object(value);
+  if (!item || !exactKeys(item, ['outputId', 'name', 'url']) || !string(item.outputId) || !text(item.name) || !string(item.url)) return undefined;
+  try { const parsed = new URL(item.url); if (parsed.protocol !== 'https:' || parsed.username || parsed.password || !parsed.host) return undefined; }
+  catch { return undefined; }
+  return item as unknown as MigrationOBSLink;
+}
+
 function migrationPreview(value: unknown): MigrationPreview | undefined {
   const item = object(value);
-  const counts = migrationCounts(item?.counts); const source = migrationSource(item?.source);
-  if (!item || !exactKeys(item, ['id', 'expiresAt', 'reused', 'counts', 'source'], ['warnings', 'ignored', 'roomSuggestion']) || !number(item.id) || item.id === 0 || !instant(item.expiresAt) || typeof item.reused !== 'boolean' || !counts || !source || (item.warnings !== undefined && !nonEmptyStringArray(item.warnings)) || (item.ignored !== undefined && !nonEmptyStringArray(item.ignored)) || (item.roomSuggestion !== undefined && !string(item.roomSuggestion))) return undefined;
-  return { id: item.id, expiresAt: item.expiresAt, reused: item.reused, counts, source, ...(item.warnings ? { warnings: item.warnings } : {}), ...(item.ignored ? { ignored: item.ignored } : {}), ...(item.roomSuggestion ? { roomSuggestion: item.roomSuggestion } : {}) };
+  const counts = migrationCounts(item?.counts); const source = migrationSource(item?.source); const selection = migrationSelection(item?.selection); const generalSettings = migrationGeneralSettings(item?.generalSettings);
+  if (!item || !exactKeys(item, ['id', 'expiresAt', 'reused', 'counts', 'source', 'selection', 'generalSettings', 'canConfirm'], ['warnings', 'ignored', 'roomSuggestion', 'units', 'groups', 'conflicts']) || !number(item.id) || item.id === 0 || !instant(item.expiresAt) || typeof item.reused !== 'boolean' || !counts || !source || !selection || !generalSettings || typeof item.canConfirm !== 'boolean' || (item.warnings !== undefined && !nonEmptyStringArray(item.warnings)) || (item.ignored !== undefined && !nonEmptyStringArray(item.ignored)) || (item.roomSuggestion !== undefined && !string(item.roomSuggestion)) || (item.units !== undefined && !Array.isArray(item.units)) || (item.groups !== undefined && !Array.isArray(item.groups)) || (item.conflicts !== undefined && !Array.isArray(item.conflicts))) return undefined;
+  const units = (item.units ?? []).map(migrationUnit); const groups = (item.groups ?? []).map(migrationGroup); const conflicts = (item.conflicts ?? []).map(migrationConflict);
+  if (units.some((entry) => !entry) || groups.some((entry) => !entry) || conflicts.some((entry) => !entry)) return undefined;
+  return { id: item.id, expiresAt: item.expiresAt, reused: item.reused, counts, source, units: units as MigrationUnit[], groups: groups as MigrationGroup[], conflicts: conflicts as MigrationConflict[], selection, generalSettings, canConfirm: item.canConfirm, ...(item.warnings ? { warnings: item.warnings } : {}), ...(item.ignored ? { ignored: item.ignored } : {}), ...(item.roomSuggestion ? { roomSuggestion: item.roomSuggestion } : {}) };
 }
 
 function migrationJob(value: unknown): MigrationJob | undefined {
   const item = object(value);
-  if (!item || !exactKeys(item, ['id', 'status'], ['expiresAt', 'rollbackExpiresAt']) || !number(item.id) || item.id === 0 || !string(item.status) || !['previewed', 'pending', 'applied', 'cancelled', 'rolled_back', 'expired'].includes(item.status) || (item.expiresAt !== undefined && !instant(item.expiresAt)) || (item.rollbackExpiresAt !== undefined && !instant(item.rollbackExpiresAt))) return undefined;
-  return item as unknown as MigrationJob;
+  if (!item || !exactKeys(item, ['id', 'status'], ['expiresAt', 'rollbackExpiresAt', 'obsLinks']) || !number(item.id) || item.id === 0 || !string(item.status) || !['previewed', 'pending', 'applied', 'cancelled', 'rolled_back', 'expired'].includes(item.status) || (item.expiresAt !== undefined && !instant(item.expiresAt)) || (item.rollbackExpiresAt !== undefined && !instant(item.rollbackExpiresAt)) || (item.obsLinks !== undefined && !Array.isArray(item.obsLinks))) return undefined;
+  const obsLinks = (item.obsLinks ?? []).map(migrationOBSLink); if (obsLinks.some((entry) => !entry)) return undefined;
+  return { ...item, ...(item.obsLinks === undefined ? {} : { obsLinks: obsLinks as MigrationOBSLink[] }) } as unknown as MigrationJob;
 }
 
 function challenge(value: unknown): Challenge | undefined {
@@ -527,8 +621,13 @@ export class HostedAPI {
     if (!result) throw new HostedAPIError('invalid_response', 201);
     return result;
   }
+  async selectMigration(id: number, selection: MigrationSelection): Promise<MigrationPreview> {
+    const result = migrationPreview((await this.request(`/api/migrations/${id}/selection`, 'PUT', 200, selection)).data);
+    if (!result) throw new HostedAPIError('invalid_response', 200);
+    return result;
+  }
   async getMigration(id: number): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}`, 'GET', 200)).data); }
-  async applyMigration(id: number, challengeId: string, keepRoomSuggestion: boolean): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}/apply`, 'POST', 200, { challengeId, keepRoomSuggestion })).data); }
+  async applyMigration(id: number, challengeId: string, selection: MigrationSelection): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}/apply`, 'POST', 200, { challengeId, selection })).data); }
   async cancelMigration(id: number): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}`, 'DELETE', 200)).data); }
   async rollbackMigration(id: number, challengeId: string): Promise<MigrationJob> { return this.requireMigrationJob((await this.request(`/api/migrations/${id}/rollback`, 'POST', 200, { challengeId })).data); }
   private requireMigrationJob(value: unknown): MigrationJob {

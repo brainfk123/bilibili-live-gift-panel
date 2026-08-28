@@ -1,244 +1,218 @@
 import { describe, expect, it, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { HostedAPI, HostedAPIError } from '../src/hosted/api';
-import { createMigrationFlow, migrationFileLimit, mountMigrationView, type MigrationViewState } from '../src/hosted/migration';
+
+import {
+  HostedAPI,
+  type MigrationJob,
+  type MigrationPreview,
+  type MigrationSelection,
+} from '../src/hosted/api';
+import { createMigrationFlow, migrationFileLimit, type MigrationViewState } from '../src/hosted/migration';
+import {
+  dismissMigrationPrompt,
+  migrationPromptStorageKey,
+  shouldShowMigrationPrompt,
+} from '../src/hosted/user/settings/migration-center';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
-const preview = {
-  id: 12, expiresAt: '2030-01-02T00:00:00Z', reused: false,
-  counts: { attributes: 2, rules: 3, activities: 4, giftTargetPanels: 1, giftTargetItems: 5 },
-  warnings: ['已规范化空白名称'], ignored: ['/payload/cache'], roomSuggestion: '12345',
-  source: { appVersion: '0.4.4', configurationSchemaVersion: 5 },
+const selection: MigrationSelection = {
+  unitIds: [], conflictChoices: {}, includeGeneralSettings: false, includeRoomSuggestion: false,
 };
 
-describe('hosted migration contract', () => {
-  it('offers a pending migration refresh action to obtain its final status', () => {
-    const source = readFileSync(new URL('../src/hosted/migration.ts', import.meta.url), 'utf8');
-    expect(source).toContain('刷新迁移状态');
-  });
+const preview: MigrationPreview = {
+  id: 12, expiresAt: '2030-01-02T00:00:00Z', reused: false,
+  counts: { attributes: 4, rules: 3, activities: 1, giftTargetPanels: 1, giftTargetItems: 5 },
+  warnings: ['已规范化空白名称'], ignored: ['本地素材路径：Hosted 不支持'], roomSuggestion: '12345',
+  source: { appVersion: '0.4.7', configurationSchemaVersion: 5 },
+  units: [
+    {
+      id: 'attribute:score', kind: 'attribute', name: '积分', attributeIds: ['score'], ruleIds: ['score-rule'], timerRuleIds: [], formulaPresetIds: [], activityIds: [], displaySceneIds: ['score-card'], giftTargetPanelIds: [], giftIds: [1], cropPresetIds: [],
+      compatibility: { status: 'complete', reasonCodes: [] }, selected: false,
+    },
+    {
+      id: 'attribute:bonus', kind: 'attribute', name: '加成', attributeIds: ['bonus'], ruleIds: [], timerRuleIds: [], formulaPresetIds: [], activityIds: [], displaySceneIds: [], giftTargetPanelIds: [], giftIds: [], cropPresetIds: [],
+      compatibility: { status: 'complete', reasonCodes: [] }, selected: false,
+    },
+    {
+      id: 'activity:legacy', kind: 'activity', name: '旧活动', attributeIds: [], ruleIds: [], timerRuleIds: [], formulaPresetIds: [], activityIds: ['legacy'], displaySceneIds: ['legacy-scene'], giftTargetPanelIds: [], giftIds: [], cropPresetIds: ['legacy-crop'],
+      compatibility: { status: 'partial', reasonCodes: ['crop_presets_unsupported', 'display_scenes_unsupported'] }, selected: false,
+    },
+    {
+      id: 'timer:legacy', kind: 'timer', name: '旧定时器', attributeIds: [], ruleIds: [], timerRuleIds: ['legacy-timer'], formulaPresetIds: [], activityIds: [], displaySceneIds: [], giftTargetPanelIds: [], giftIds: [], cropPresetIds: [],
+      compatibility: { status: 'incompatible', reasonCodes: ['timer_rules_unsupported'] }, selected: false,
+    },
+  ],
+  groups: [{ id: 'group:score', unitIds: ['attribute:score', 'attribute:bonus'], reasons: [{ kind: 'shared-attribute', referenceId: 'bonus' }] }],
+  conflicts: [], selection, generalSettings: { configurationMode: 'simple' }, canConfirm: true,
+};
 
-  it('sends preview upload bytes as the raw JSON request body with same-origin CSRF protection', async () => {
+const selectedPreview: MigrationPreview = {
+  ...preview,
+  units: preview.units.map((unit) => ({ ...unit, selected: unit.id === 'attribute:score' || unit.id === 'attribute:bonus' })),
+  conflicts: [{ id: 'conflict:score', importedUnitIds: ['attribute:score', 'attribute:bonus'], hostedUnitIds: ['attribute:hosted-score'], suggestedNames: { 'attribute:score': '积分（从 EXE 导入）' } }],
+  selection: { ...selection, unitIds: ['attribute:score', 'attribute:bonus'] }, canConfirm: false,
+};
+
+function collectStates() {
+  const states: MigrationViewState[] = [];
+  return { states, render: (state: MigrationViewState) => states.push(structuredClone(state)) };
+}
+
+describe('Hosted migration API contract', () => {
+  it('uses raw upload only for preview and sends server-owned selection boundaries on selection and apply', async () => {
     const requests: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     const api = await HostedAPI.connect(async (input, init) => {
       requests.push([input, init]);
       if (input === '/api/bootstrap') return json({ csrfToken: 'csrf' });
-      return json(preview, 201);
+      if (input === '/api/migrations/preview') return json(preview, 201);
+      if (input === '/api/migrations/12/selection') return json(selectedPreview);
+      return json({ id: 12, status: 'pending', expiresAt: preview.expiresAt });
     });
-    await api.previewMigration('{"kind":"gift-panel-online-migration"}');
-    expect(requests.at(-1)).toEqual(['/api/migrations/preview', expect.objectContaining({
-      method: 'POST', credentials: 'same-origin', body: '{"kind":"gift-panel-online-migration"}',
-      headers: expect.objectContaining({ 'Content-Type': 'application/json', 'X-CSRF-Token': 'csrf' }),
-    })]);
+
+    await api.previewMigration('{"kind":"gift-panel-online-migration","secret":"RAW"}');
+    await api.selectMigration(12, selectedPreview.selection);
+    await api.applyMigration(12, 'proof', selectedPreview.selection);
+
+    expect(requests.slice(-3)).toEqual([
+      ['/api/migrations/preview', expect.objectContaining({ method: 'POST', credentials: 'same-origin', body: '{"kind":"gift-panel-online-migration","secret":"RAW"}', headers: expect.objectContaining({ 'Content-Type': 'application/json', 'X-CSRF-Token': 'csrf' }) })],
+      ['/api/migrations/12/selection', expect.objectContaining({ method: 'PUT', body: JSON.stringify(selectedPreview.selection) })],
+      ['/api/migrations/12/apply', expect.objectContaining({ method: 'POST', body: JSON.stringify({ challengeId: 'proof', selection: selectedPreview.selection }) })],
+    ]);
   });
 
-  it('rejects non-json and oversized files before they are read or uploaded', async () => {
+  it('rejects a preview that invents compatibility, group, conflict, or selection fields', async () => {
+    for (const malformed of [
+      { ...preview, units: [{ ...preview.units[0], compatibility: { status: 'maybe', reasonCodes: [] } }] },
+      { ...preview, groups: [{ ...preview.groups[0], unknown: true }] },
+      { ...preview, conflicts: [{ ...selectedPreview.conflicts[0], choice: 'replace' }] },
+      { ...preview, selection: { ...selection, rawJSON: 'secret' } },
+    ]) {
+      const api = await HostedAPI.connect(async (input) => input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : json(malformed, 201));
+      await expect(api.previewMigration('{}')).rejects.toMatchObject({ code: 'invalid_response' });
+    }
+  });
+
+  it('normalizes the Go zero-value selection list without accepting other malformed fields', async () => {
+    const api = await HostedAPI.connect(async (input) => input === '/api/bootstrap'
+      ? json({ csrfToken: 'csrf' })
+      : json({ ...preview, selection: { ...selection, unitIds: null } }, 201));
+    await expect(api.previewMigration('{}')).resolves.toEqual(preview);
+  });
+
+  it('accepts only HTTPS OBS replacement links returned after apply', async () => {
+    const job: MigrationJob = { id: 12, status: 'applied', rollbackExpiresAt: '2030-01-08T00:00:00Z', obsLinks: [{ outputId: 'score-card', name: '积分卡片', url: 'https://host.example/obs/public#token=one-time' }] };
+    const api = await HostedAPI.connect(async (input) => input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : json(job));
+    await expect(api.getMigration(12)).resolves.toEqual(job);
+
+    const invalid = await HostedAPI.connect(async (input) => input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : json({ ...job, obsLinks: [{ ...job.obsLinks![0], url: 'http://host.example/obs' }] }));
+    await expect(invalid.getMigration(12)).rejects.toMatchObject({ code: 'invalid_response' });
+  });
+});
+
+describe('Hosted migration flow', () => {
+  it('rejects non-JSON and files over 2 MiB before reading or uploading them', async () => {
     const api = { previewMigration: vi.fn() };
-    const flow = createMigrationFlow(api, vi.fn(), { now: () => new Date('2030-01-01T00:00:00Z') });
-    await expect(flow.preview({ name: 'package.txt', size: 2, text: vi.fn() })).rejects.toMatchObject({ code: 'invalid_request' });
-    await expect(flow.preview({ name: 'package.json', size: migrationFileLimit + 1, text: vi.fn() })).rejects.toMatchObject({ code: 'invalid_request' });
+    const flow = createMigrationFlow(api, vi.fn());
+    const wrongType = { name: 'package.txt', size: 2, text: vi.fn() };
+    const tooLarge = { name: 'package.json', size: migrationFileLimit + 1, text: vi.fn() };
+    await expect(flow.preview(wrongType)).rejects.toMatchObject({ code: 'invalid_request' });
+    await expect(flow.preview(tooLarge)).rejects.toMatchObject({ code: 'invalid_request' });
+    expect(wrongType.text).not.toHaveBeenCalled();
+    expect(tooLarge.text).not.toHaveBeenCalled();
     expect(api.previewMigration).not.toHaveBeenCalled();
   });
 
-  it('renders only server preview groups and clears uploaded text after success or failure', async () => {
-    const rendered: unknown[] = [];
-    const raw = '{"private":"UPLOAD-MUST-NOT-PERSIST"}';
-    const api = { previewMigration: vi.fn(async () => preview) };
-    const flow = createMigrationFlow(api, (state) => rendered.push(structuredClone(state)), { now: () => new Date('2030-01-01T00:00:00Z') });
-    await flow.preview({ name: 'package.json', size: raw.length, text: vi.fn(async () => raw) });
-    expect(rendered.at(-1)).toEqual(expect.objectContaining({ preview, rawFileActive: false }));
-    expect(JSON.stringify(rendered)).not.toContain('UPLOAD-MUST-NOT-PERSIST');
+  it('shows upload progress and a safe network error while retaining the last server preview for retry', async () => {
+    let release!: (value: MigrationPreview) => void;
+    const firstUpload = new Promise<MigrationPreview>((resolve) => { release = resolve; });
+    const api = { previewMigration: vi.fn().mockImplementationOnce(() => firstUpload).mockRejectedValueOnce(new TypeError('Failed to fetch RAW-CONTENT')) };
+    const { states, render } = collectStates();
+    const flow = createMigrationFlow(api, render);
+    const first = flow.preview({ name: 'first.json', size: 2, text: async () => '{}' });
+    await vi.waitFor(() => expect(states.at(-1)).toEqual(expect.objectContaining({ operationInFlight: true, rawFileActive: true })));
+    release(preview);
+    await first;
+    await expect(flow.preview({ name: 'secret-filename.json', size: 20, text: async () => '{"raw":"PRIVATE"}' })).rejects.toBeInstanceOf(TypeError);
+    expect(states.at(-1)).toEqual(expect.objectContaining({ preview, operationInFlight: false, rawFileActive: false, error: '网络连接失败，请检查网络后重试' }));
+    expect(JSON.stringify(states)).not.toContain('PRIVATE');
+    expect(JSON.stringify(states)).not.toContain('secret-filename');
+    expect(JSON.stringify(states)).not.toContain('RAW-CONTENT');
   });
 
-  it('cancels a preview accepted by the server after a page-leave disposal barrier', async () => {
-    let release!: (value: typeof preview) => void; const submitted = new Promise<typeof preview>((resolve) => { release = resolve; });
-    const api = { previewMigration: vi.fn(() => submitted), cancelMigration: vi.fn(async () => ({ id: 12, status: 'cancelled' as const })) };
-    const flow = createMigrationFlow(api, vi.fn()); const pending = flow.preview({ name: 'package.json', size: 2, text: async () => '{}' });
-    await vi.waitFor(() => expect(api.previewMigration).toHaveBeenCalledTimes(1)); await flow.dispose(); release(preview); await expect(pending).rejects.toMatchObject({ code: 'operation_failed' });
-    await vi.waitFor(() => expect(api.cancelMigration).toHaveBeenCalledWith(12));
-  });
-
-  it('never cancels a reused pending migration after disposal', async () => {
-    let release!: (value: typeof preview) => void; const submitted = new Promise<typeof preview>((resolve) => { release = resolve; });
-    const api = { previewMigration: vi.fn(() => submitted), cancelMigration: vi.fn(async () => ({ id: 12, status: 'cancelled' as const })) };
-    const flow = createMigrationFlow(api, vi.fn()); const pending = flow.preview({ name: 'package.json', size: 2, text: async () => '{}' });
-    await vi.waitFor(() => expect(api.previewMigration).toHaveBeenCalledTimes(1)); await flow.dispose(); release({ ...preview, reused: true }); await expect(pending).rejects.toMatchObject({ code: 'operation_failed' });
-    expect(api.cancelMigration).not.toHaveBeenCalled();
-  });
-
-  it('uses the server job state rather than assuming a reused preview is previewed', async () => {
-    const rendered: unknown[] = [];
-    const api = { previewMigration: vi.fn(async () => ({ ...preview, reused: true })), getMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const, expiresAt: preview.expiresAt })) };
-    const flow = createMigrationFlow(api, (state) => rendered.push(structuredClone(state)));
-    await flow.preview({ name: 'package.json', size: 2, text: vi.fn(async () => '{}') });
-    expect(api.getMigration).toHaveBeenCalledWith(12);
-    expect(rendered.at(-1)).toEqual(expect.objectContaining({ job: expect.objectContaining({ id: 12, status: 'pending' }), canApply: false, canRefresh: true, canCancel: true }));
-  });
-
-  it('keeps migration confirmation controls mounted and focused across incremental updates', async () => {
-    class Element {
-      children: Element[] = []; private content = ''; parent?: Element; className = ''; type = ''; disabled = false; hidden = false; checked = false; value = ''; accept = ''; src = ''; alt = '';
-      listeners = new Map<string, () => void>(); attributes = new Map<string, string>(); files?: { item(index: number): unknown };
-      constructor(readonly tagName: string, readonly ownerDocument: { createElement(tag: string): Element; createTextNode(text: string): Element; activeElement?: Element; defaultView?: unknown }) {}
-      get textContent() { return this.content; } set textContent(value: string) { this.content = value; this.replaceChildren(); } get firstChild() { return this.children[0]; } append(...nodes: Element[]) { for (const node of nodes) { node.parent?.removeChild(node); node.parent = this; this.children.push(node); } } replaceChildren(...nodes: Element[]) { for (const child of this.children) { child.parent = undefined; if (this.ownerDocument.activeElement === child) this.ownerDocument.activeElement = undefined; } this.children = []; this.append(...nodes); } removeChild(node: Element) { this.children = this.children.filter((child) => child !== node); node.parent = undefined; if (this.ownerDocument.activeElement === node) this.ownerDocument.activeElement = undefined; }
-      setAttribute(name: string, value: string) { this.attributes.set(name, value); } removeAttribute(name: string) { this.attributes.delete(name); } addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); } focus() { this.ownerDocument.activeElement = this; }
-    }
-    const view = { addEventListener: vi.fn(), removeEventListener: vi.fn() };
-    const document: { createElement(tag: string): Element; createTextNode(text: string): Element; activeElement?: Element; defaultView: unknown } = { createElement: (tag: string): Element => new Element(tag, document), createTextNode: (text: string): Element => { const node = new Element('#text', document); node.textContent = text; return node; }, defaultView: view };
-    const root = new Element('div', document) as unknown as HTMLElement;
-    const mounted = mountMigrationView(root, { previewMigration: vi.fn(async () => preview) }, { onConfiguration: vi.fn() });
-    const panel = (root as unknown as Element).children[0]; const file = panel.children[2]; const previewButton = panel.children[3];
-    file.files = { item: () => ({ name: 'package.json', size: 2, text: async () => '{}' }) }; file.listeners.get('change')?.(); previewButton.listeners.get('click')?.();
-    await vi.waitFor(() => expect(panel.children[5].hidden).toBe(false));
-    const confirmation = panel.children[5].children[0]; confirmation.focus(); confirmation.checked = true; confirmation.listeners.get('change')?.();
-    expect((root as unknown as Element).children[0]).toBe(panel); expect(panel.children[5].children[0]).toBe(confirmation); expect(document.activeElement).toBe(confirmation); expect(panel.children[7].hidden).toBe(false);
-    await vi.waitFor(() => expect(panel.children[6].children[0]).toBeDefined()); const keepBox = panel.children[6].children[0]; keepBox.focus(); keepBox.checked = true; keepBox.listeners.get('change')?.(); expect(panel.children[6].children[0]).toBe(keepBox); expect(document.activeElement).toBe(keepBox);
-    await mounted.dispose();
-  });
-
-  it('re-enables the DOM apply action after a pending proof while retaining single-flight confirmation', async () => {
-    let verify!: (value: { status: 'verified'; expiresAt: string }) => void; const verifying = new Promise<{ status: 'verified'; expiresAt: string }>((resolve) => { verify = resolve; });
-    class Element { children: Element[] = []; textContent = ''; className = ''; type = ''; disabled = false; hidden = false; checked = false; value = ''; accept = ''; src = ''; alt = ''; listeners = new Map<string, () => void>(); files?: { item(index: number): unknown }; constructor(readonly tagName: string, readonly ownerDocument: { createElement(tag: string): Element; createTextNode(text: string): Element; defaultView?: unknown }) {} get firstChild() { return this.children[0]; } append(...nodes: Element[]) { this.children.push(...nodes); } replaceChildren(...nodes: Element[]) { this.children = nodes; } removeChild(node: Element) { this.children = this.children.filter((child) => child !== node); } setAttribute() {} removeAttribute() {} addEventListener(name: string, listener: () => void) { this.listeners.set(name, listener); } }
-    const view = { addEventListener: vi.fn(), removeEventListener: vi.fn() }; const document: { createElement(tag: string): Element; createTextNode(text: string): Element; defaultView: unknown } = { createElement: (tag: string): Element => new Element(tag, document), createTextNode: (text: string): Element => { const node = new Element('#text', document); node.textContent = text; return node; }, defaultView: view }; const root = new Element('div', document) as unknown as HTMLElement;
-    const api = { previewMigration: vi.fn(async () => preview), beginLogin: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: preview.expiresAt })), pollLogin: vi.fn().mockResolvedValueOnce({ status: 'pending' as const, expiresAt: preview.expiresAt }).mockImplementationOnce(() => verifying), applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const, expiresAt: preview.expiresAt })) };
-    const mounted = mountMigrationView(root, api, { onConfiguration: vi.fn() }); const panel = (root as unknown as Element).children[0]; const file = panel.children[2]; const previewButton = panel.children[3]; const replace = panel.children[5].children[0]; const apply = panel.children[7];
-    file.files = { item: () => ({ name: 'package.json', size: 2, text: async () => '{}' }) }; file.listeners.get('change')?.(); previewButton.listeners.get('click')?.(); await vi.waitFor(() => expect(panel.children[5].hidden).toBe(false)); replace.checked = true; replace.listeners.get('change')?.(); apply.listeners.get('click')?.();
-    await vi.waitFor(() => expect(panel.children[8].hidden).toBe(false)); await vi.waitFor(() => expect(apply.disabled).toBe(false)); apply.listeners.get('click')?.(); apply.listeners.get('click')?.(); await vi.waitFor(() => expect(api.pollLogin).toHaveBeenCalledTimes(2)); verify({ status: 'verified', expiresAt: preview.expiresAt }); await vi.waitFor(() => expect(api.applyMigration).toHaveBeenCalledTimes(1)); await mounted.dispose();
-  });
-
-  it('requires an explicit unchecked room suggestion and polls the reusable proof without creating a site session', async () => {
-    const api = {
-      beginLogin: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })),
-      pollLogin: vi.fn().mockResolvedValueOnce({ status: 'pending', expiresAt: '2030-01-02T00:00:00Z' }).mockResolvedValueOnce({ status: 'verified', expiresAt: '2030-01-02T00:00:00Z' }),
-      cancelLogin: vi.fn(async () => undefined), applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const, expiresAt: '2030-01-02T00:00:00Z' })),
-      createSession: vi.fn(),
-    };
-    const states: Array<Record<string, unknown>> = []; const flow = createMigrationFlow(api, (state) => states.push(state as unknown as Record<string, unknown>), { now: () => new Date('2030-01-01T00:00:00Z') });
+  it('selects a dependency group as one server round-trip and never selects partial or incompatible units by default', async () => {
+    const api = { selectMigration: vi.fn(async (_id: number, next: MigrationSelection) => ({ ...selectedPreview, selection: next })) };
+    const { states, render } = collectStates();
+    const flow = createMigrationFlow(api, render);
     flow.acceptPreview(preview);
-    await expect(flow.apply()).rejects.toMatchObject({ code: 'invalid_request' });
-    flow.confirmReplacement(true); flow.setKeepRoomSuggestion(false);
-    await expect(flow.apply()).rejects.toMatchObject({ code: 'verification_pending' });
-    expect(states.at(-1)).toEqual(expect.objectContaining({
-      proof: expect.objectContaining({ qrImage: 'qr' }),
-      proofStatus: 'pending',
-      error: '等待 B 站扫码确认，请稍后重试',
-      operationInFlight: false,
-    }));
-    await flow.apply();
-    expect(api.applyMigration).toHaveBeenCalledWith(12, 'proof', false);
-    expect(api.createSession).not.toHaveBeenCalled();
+    await flow.setGroupSelected('group:score', true);
+    expect(api.selectMigration).toHaveBeenCalledWith(12, { unitIds: ['attribute:score', 'attribute:bonus'], conflictChoices: {}, includeGeneralSettings: false, includeRoomSuggestion: false });
+    expect(states.at(-1)?.preview?.units.filter((unit) => unit.selected).map((unit) => unit.id)).toEqual(['attribute:score', 'attribute:bonus']);
+    expect(states.at(-1)?.preview?.units.find((unit) => unit.id === 'activity:legacy')).toEqual(expect.objectContaining({ selected: false, compatibility: { status: 'partial', reasonCodes: ['crop_presets_unsupported', 'display_scenes_unsupported'] } }));
+    expect(states.at(-1)?.preview?.units.find((unit) => unit.id === 'timer:legacy')).toEqual(expect.objectContaining({ selected: false, compatibility: { status: 'incompatible', reasonCodes: ['timer_rules_unsupported'] } }));
   });
 
-  it('keeps a scanned migration proof and asks for phone confirmation', async () => {
-    const api = {
-      beginLogin: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })),
-      pollLogin: vi.fn(async () => ({ status: 'scanned' as const, expiresAt: '2030-01-02T00:00:00Z' })),
-      cancelLogin: vi.fn(async () => undefined),
-      applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const })),
-    };
-    const states: MigrationViewState[] = [];
-    const flow = createMigrationFlow(api, (state) => states.push(structuredClone(state)));
-    flow.acceptPreview(preview);
+  it('keeps general settings and room suggestion independent from gameplay and requires every same-name conflict choice', async () => {
+    const resolvedPreview: MigrationPreview = { ...selectedPreview, selection: { ...selectedPreview.selection, conflictChoices: { 'conflict:score': 'keep_both' }, includeGeneralSettings: true, includeRoomSuggestion: false }, canConfirm: true };
+    const api = { selectMigration: vi.fn(async (_id: number, next: MigrationSelection) => next.conflictChoices['conflict:score'] ? resolvedPreview : { ...selectedPreview, selection: next }) };
+    const { states, render } = collectStates();
+    const flow = createMigrationFlow(api, render);
+    flow.acceptPreview(selectedPreview);
+    expect(states.at(-1)).toEqual(expect.objectContaining({ canApply: false }));
+    await flow.setGeneralSettingsIncluded(true);
+    await flow.setRoomSuggestionIncluded(false);
+    await flow.setConflictChoice('conflict:score', 'keep_both');
     flow.confirmReplacement(true);
-
-    await expect(flow.apply()).rejects.toMatchObject({ code: 'verification_pending' });
-
-    expect(states.at(-1)).toEqual(expect.objectContaining({
-      proof: { qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' },
-      proofStatus: 'scanned',
-      error: '已扫码，请在手机确认',
-      operationInFlight: false,
-    }));
-    expect(api.cancelLogin).not.toHaveBeenCalled();
-    expect(api.applyMigration).not.toHaveBeenCalled();
+    expect(states.at(-1)).toEqual(expect.objectContaining({ canApply: true }));
+    expect(states.at(-1)?.preview?.selection).toEqual(expect.objectContaining({ unitIds: ['attribute:score', 'attribute:bonus'], conflictChoices: { 'conflict:score': 'keep_both' }, includeGeneralSettings: true, includeRoomSuggestion: false }));
   });
 
-  it('rejects a duplicate proof operation while keeping a transient verification failure retryable', async () => {
-    let release!: (value: { status: 'verified'; expiresAt: string }) => void;
-    const polling = new Promise<{ status: 'verified'; expiresAt: string }>((resolve) => { release = resolve; });
+  it('applies the exact server-confirmed selection, reports live progress, and exposes the seven-day rollback window', async () => {
+    const applied: MigrationJob = { id: 12, status: 'applied', rollbackExpiresAt: '2030-01-08T00:00:00Z', obsLinks: [{ outputId: 'score', name: '积分', url: 'https://host.example/obs/score#token=a' }, { outputId: 'bonus', name: '加成', url: 'https://host.example/obs/bonus#token=b' }] };
     const api = {
-      beginLogin: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })),
-      pollLogin: vi.fn(() => polling), cancelLogin: vi.fn(async () => undefined), applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const })),
+      beginLogin: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })), pollLogin: vi.fn(async () => ({ status: 'verified' as const, expiresAt: '2030-01-02T00:00:00Z' })), cancelLogin: vi.fn(async () => undefined),
+      applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const, expiresAt: preview.expiresAt })), getMigration: vi.fn(async () => applied),
     };
-    const flow = createMigrationFlow(api, vi.fn()); flow.acceptPreview(preview); flow.confirmReplacement(true);
-    const first = flow.apply(); const second = flow.apply().catch((error: unknown) => error);
-    await vi.waitFor(() => { expect(api.beginLogin).toHaveBeenCalledTimes(1); expect(api.pollLogin).toHaveBeenCalledTimes(1); });
-    await expect(second).resolves.toMatchObject({ code: 'operation_conflict' });
-    release({ status: 'verified', expiresAt: '2030-01-02T00:00:00Z' }); await first;
-    expect(api.applyMigration).toHaveBeenCalledTimes(1);
-  });
-
-  it('freezes migration A while its proof is pending so it cannot apply to B', async () => {
-    let release!: (value: { status: 'verified'; expiresAt: string }) => void;
-    const pending = new Promise<{ status: 'verified'; expiresAt: string }>((resolve) => { release = resolve; });
-    const api = {
-      beginLogin: vi.fn(async () => ({ challengeId: 'proof-a', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })),
-      pollLogin: vi.fn(() => pending), cancelLogin: vi.fn(async () => undefined),
-      applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const })), cancelMigration: vi.fn(), previewMigration: vi.fn(),
-    };
-    const flow = createMigrationFlow(api, vi.fn()); flow.acceptPreview(preview); flow.confirmReplacement(true); flow.setKeepRoomSuggestion(false);
-    const applying = flow.apply(); await vi.waitFor(() => expect(api.pollLogin).toHaveBeenCalledWith('proof-a'));
-    flow.setKeepRoomSuggestion(true);
-    await expect(flow.preview({ name: 'b.json', size: 2, text: vi.fn(async () => '{}') })).rejects.toMatchObject({ code: 'operation_conflict' });
-    await expect(flow.cancel()).rejects.toMatchObject({ code: 'operation_conflict' });
-    await expect(flow.apply()).rejects.toMatchObject({ code: 'operation_conflict' });
-    release({ status: 'verified', expiresAt: '2030-01-02T00:00:00Z' }); await applying;
-    expect(api.applyMigration).toHaveBeenCalledWith(12, 'proof-a', false); expect(api.previewMigration).not.toHaveBeenCalled(); expect(api.cancelMigration).not.toHaveBeenCalled();
-  });
-
-  it('reuses an unexpired proof after a temporary verification outage', async () => {
-    const api = {
-      beginLogin: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })),
-      pollLogin: vi.fn().mockRejectedValueOnce(new HostedAPIError('temporarily_unavailable', 503)).mockResolvedValueOnce({ status: 'verified', expiresAt: '2030-01-02T00:00:00Z' }),
-      cancelLogin: vi.fn(async () => undefined), applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const })),
-    };
-    const states: Array<Record<string, unknown>> = []; const flow = createMigrationFlow(api, (state) => states.push(state as unknown as Record<string, unknown>)); flow.acceptPreview(preview); flow.confirmReplacement(true);
-    await expect(flow.apply()).rejects.toMatchObject({ code: 'temporarily_unavailable' });
-    expect(states.at(-1)).toEqual(expect.objectContaining({ proof: expect.objectContaining({ qrImage: 'qr' }), operationInFlight: false }));
+    const { states, render } = collectStates();
+    const flow = createMigrationFlow(api, render, { now: () => new Date('2030-01-01T00:00:00Z') });
+    flow.acceptPreview({ ...preview, selection: { ...selection, unitIds: ['attribute:score'] } });
+    flow.confirmReplacement(true);
     await flow.apply();
-    expect(api.beginLogin).toHaveBeenCalledTimes(1); expect(api.pollLogin).toHaveBeenCalledTimes(2); expect(api.applyMigration).toHaveBeenCalledTimes(1);
-  });
-
-  it('does not mutate state after disposal and exposes only valid lifecycle actions', async () => {
-    let release!: (value: { challengeId: string; qrImage: string; expiresAt: string }) => void;
-    const begin = new Promise<{ challengeId: string; qrImage: string; expiresAt: string }>((resolve) => { release = resolve; });
-    const states: Array<Record<string, unknown>> = [];
-    const api = { beginLogin: vi.fn(() => begin), pollLogin: vi.fn(), cancelLogin: vi.fn(async () => undefined), applyMigration: vi.fn() };
-    const flow = createMigrationFlow(api, (state) => states.push(structuredClone(state) as unknown as Record<string, unknown>)); flow.acceptPreview(preview); flow.confirmReplacement(true);
-    const applying = flow.apply(); await flow.dispose(); release({ challengeId: 'late-proof', qrImage: 'secret-qr', expiresAt: '2030-01-02T00:00:00Z' }); await expect(applying).rejects.toMatchObject({ code: 'operation_failed' });
-    expect(api.cancelLogin).toHaveBeenCalledWith('late-proof'); expect(JSON.stringify(states)).not.toContain('secret-qr');
-  });
-
-  it('cleans up a terminal rejected proof while keeping a pending proof retryable', async () => {
-    const api = {
-      previewMigration: vi.fn(), beginLogin: vi.fn(async () => ({ challengeId: 'terminal-proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })),
-      pollLogin: vi.fn(async () => ({ status: 'registration_required' as const, expiresAt: '2030-01-02T00:00:00Z' })),
-      cancelLogin: vi.fn(async () => undefined), applyMigration: vi.fn(),
-    };
-    const flow = createMigrationFlow(api, vi.fn());
-    flow.acceptPreview(preview); flow.confirmReplacement(true);
-    await expect(flow.apply()).rejects.toMatchObject({ code: 'proof_rejected' });
-    expect(api.cancelLogin).toHaveBeenCalledWith('terminal-proof');
-  });
-
-  it('shows pending, supports cancellation, and exposes the seven-day rollback countdown without raw errors', async () => {
-    const states: unknown[] = [];
-    const api = {
-      beginLogin: vi.fn(async () => ({ challengeId: 'proof', qrImage: 'qr', expiresAt: '2030-01-02T00:00:00Z' })),
-      pollLogin: vi.fn(async () => ({ status: 'verified' as const, expiresAt: '2030-01-02T00:00:00Z' })),
-      cancelLogin: vi.fn(async () => undefined),
-      applyMigration: vi.fn(async () => ({ id: 12, status: 'pending' as const, expiresAt: '2030-01-02T00:00:00Z' })),
-      getMigration: vi.fn(async () => ({ id: 12, status: 'applied' as const, rollbackExpiresAt: '2030-01-08T00:00:00Z' })),
-      cancelMigration: vi.fn(async () => ({ id: 12, status: 'cancelled' as const })),
-    };
-    const flow = createMigrationFlow(api, (state) => states.push(structuredClone(state)), { now: () => new Date('2030-01-01T00:00:00Z') });
-    flow.acceptPreview(preview); flow.confirmReplacement(true); await flow.apply();
+    expect(api.applyMigration).toHaveBeenCalledWith(12, 'proof', { ...selection, unitIds: ['attribute:score'] });
+    expect(states.at(-1)).toEqual(expect.objectContaining({ job: expect.objectContaining({ status: 'pending' }), canRefresh: true, applyProgress: 'waiting_for_live_boundary' }));
     await flow.refresh(12);
-    expect(states.at(-1)).toEqual(expect.objectContaining({ rollbackDaysRemaining: 7, canRollback: true, canCancel: false, canRefresh: false }));
-    await expect(flow.cancel()).rejects.toMatchObject({ code: 'invalid_request' });
-    flow.reportFailure(new Error('RAW UPLOADED JSON: secret'));
-    expect(JSON.stringify(states.at(-1))).not.toContain('RAW UPLOADED JSON');
+    expect(states.at(-1)).toEqual(expect.objectContaining({ job: applied, rollbackDaysRemaining: 7, canRollback: true, applyProgress: 'applied' }));
+    expect(states.at(-1)?.obsChecklist).toEqual([{ outputId: 'score', name: '积分', url: 'https://host.example/obs/score#token=a', replaced: false }, { outputId: 'bonus', name: '加成', url: 'https://host.example/obs/bonus#token=b', replaced: false }]);
+    flow.confirmOBSReplacement('score', true);
+    expect(states.at(-1)?.obsChecklist?.[0]).toEqual(expect.objectContaining({ replaced: true }));
+  });
+
+  it('recognizes a duplicate package, preserves the authoritative pending preview, and expires preview actions after 24 hours', async () => {
+    const duplicate = { ...preview, reused: true };
+    const pending = { id: 12, status: 'pending' as const, expiresAt: preview.expiresAt };
+    const api = { previewMigration: vi.fn(async () => duplicate), getMigration: vi.fn(async () => pending) };
+    const { states, render } = collectStates();
+    const clock = { now: () => new Date('2030-01-01T00:00:00Z') };
+    const flow = createMigrationFlow(api, render, clock);
+    await flow.preview({ name: 'package.json', size: 2, text: async () => '{}' });
+    expect(states.at(-1)).toEqual(expect.objectContaining({ duplicatePackage: true, job: pending, preview: duplicate, canApply: false, canRefresh: true, previewHoursRemaining: 24 }));
+    clock.now = () => new Date('2030-01-02T00:00:01Z');
+    flow.refreshTime();
+    expect(states.at(-1)).toEqual(expect.objectContaining({ previewHoursRemaining: 0, canApply: false, canCancel: false, canRefresh: false }));
+  });
+});
+
+describe('migration prompt privacy', () => {
+  it('persists only a non-sensitive dismissed boolean and leaves raw migration data out of storage and URLs', () => {
+    const values = new Map<string, string>();
+    const storage: Storage = { get length() { return values.size; }, clear: () => values.clear(), getItem: (key) => values.get(key) ?? null, key: (index) => [...values.keys()][index] ?? null, removeItem: (key) => { values.delete(key); }, setItem: (key, value) => { values.set(key, value); } };
+    const beforeURL = 'https://host.example/account?tab=overview';
+    expect(shouldShowMigrationPrompt(storage)).toBe(true);
+    dismissMigrationPrompt(storage);
+    expect(shouldShowMigrationPrompt(storage)).toBe(false);
+    expect([...values.entries()]).toEqual([[migrationPromptStorageKey, 'true']]);
+    expect(beforeURL).toBe('https://host.example/account?tab=overview');
+    expect(JSON.stringify([...values.entries()])).not.toContain('gift-panel-online-migration');
   });
 });

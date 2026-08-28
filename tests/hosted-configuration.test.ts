@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
 import { HostedAPI, HostedAPIError } from '../src/hosted/api';
 import { createConfigurationFlow, mountConfigurationView } from '../src/hosted/configuration';
 import { GAMEPLAY_TEMPLATES } from '../src/gameplay-templates';
@@ -16,12 +15,6 @@ const configuration = {
 };
 
 describe('hosted configuration contract', () => {
-  it('adds signed-in navigation to configuration and migration views', () => {
-    const main = readFileSync(new URL('../src/hosted/main.ts', import.meta.url), 'utf8');
-    expect(main).toContain('mountConfigurationView');
-    expect(main).toContain('mountMigrationView');
-  });
-
   it('uses exact configuration DTOs and sends optimistic version and revision values', async () => {
     const requests: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     const api = await HostedAPI.connect(async (input, init) => {

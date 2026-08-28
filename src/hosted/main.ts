@@ -4,10 +4,10 @@ import { mountAdminView } from './admin';
 import { mountAuthView } from './auth';
 import { mountConfigurationView } from './configuration';
 import { mountInvitationView } from './invitations';
-import { mountMigrationView } from './migration';
 import { mountRoomControls } from './room';
 import { createHostedApplicationLifecycle, createHostedRuntimePresence, type HostedRuntimePresence } from './runtime';
 import { createHostedViewHost, isAdminEntryHash, renderHostedShell, type HostedSession, type HostedView } from './shell';
+import { mountMigrationPrompt, mountMigrationSettingsView } from './user/settings/migration-center';
 
 const root = document.getElementById('hosted-app');
 
@@ -34,18 +34,20 @@ const mountAccountView = (api: HostedAPI): HostedView => {
   const panel = document.createElement('main'); panel.className = 'hosted-shell hosted-panel';
   const title = document.createElement('h1'); title.textContent = '主播账号';
   const status = document.createElement('p'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+  const prompt = document.createElement('div'); let storage: Storage | undefined; try { storage = document.defaultView?.localStorage; } catch { storage = undefined; }
+  const promptView = mountMigrationPrompt(prompt, storage, { onOpen: () => showSettings(api) });
   const configuration = document.createElement('button'); configuration.type = 'button'; configuration.textContent = '在线配置'; configuration.addEventListener('click', () => showConfiguration(api));
-  const migration = document.createElement('button'); migration.type = 'button'; migration.textContent = '迁移本地配置'; migration.addEventListener('click', () => showMigration(api));
+  const settings = document.createElement('button'); settings.type = 'button'; settings.textContent = '设置'; settings.addEventListener('click', () => showSettings(api));
   const invitations = document.createElement('button'); invitations.type = 'button'; invitations.textContent = '我的邀请码'; invitations.addEventListener('click', () => { observeViewOperation(viewHost.replace(() => mountInvitationView(root, api, undefined, () => returnToAccount(api), () => returnToSignedOut(api)))); });
   const room = document.createElement('div');
   const roomView = mountRoomControls(room, api, ensureRuntimePresence());
   const logout = document.createElement('button'); logout.type = 'button'; logout.textContent = '退出登录'; logout.addEventListener('click', () => { void api.logout().then(() => returnToSignedOut(api)).catch(() => applicationLifecycle.run(() => { status.textContent = '退出失败，请稍后重试'; })); });
-  panel.append(title, status, room, configuration, migration, invitations, logout); root.replaceChildren(panel);
-  return { dispose: () => { roomView.dispose(); root.replaceChildren(); } };
+  panel.append(title, status, prompt, room, configuration, settings, invitations, logout); root.replaceChildren(panel);
+  return { dispose: () => { promptView.dispose(); roomView.dispose(); root.replaceChildren(); } };
 };
 const showAccount = (api: HostedAPI): void => { observeViewOperation(viewHost.replace(() => mountAccountView(api))); };
-const showConfiguration = (api: HostedAPI): void => { observeViewOperation(viewHost.replace(() => mountConfigurationView(root, api, { onMigration: () => showMigration(api), onExit: () => showAccount(api) }))); };
-const showMigration = (api: HostedAPI): void => { observeViewOperation(viewHost.replace(() => mountMigrationView(root, api, { onConfiguration: () => showConfiguration(api) }))); };
+const showConfiguration = (api: HostedAPI): void => { observeViewOperation(viewHost.replace(() => mountConfigurationView(root, api, { onMigration: () => showSettings(api), onExit: () => showAccount(api) }))); };
+const showSettings = (api: HostedAPI): void => { observeViewOperation(viewHost.replace(() => mountMigrationSettingsView(root, api, { onExit: () => showAccount(api) }))); };
 const mountShell = (api: HostedAPI, serviceStatus: HostedSession['serviceStatus']): HostedView => {
   renderHostedShell(root, {
     serviceStatus,
