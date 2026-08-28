@@ -219,14 +219,33 @@ export function downloadOnlineMigration(
 }
 
 /**
+ * Gives pre-ID configurations durable identities before they are persisted
+ * and exported. Calling this again is intentionally a no-op so reordering or
+ * inserting attributes cannot change an existing gameplay identity.
+ */
+export function ensureOnlineMigrationAttributeIds(state: AppState): boolean {
+  const used = new Set(state.attributes.flatMap((attribute) => {
+    const id = attribute.id?.trim();
+    return id ? [id] : [];
+  }));
+  let changed = false;
+  for (const attribute of state.attributes) {
+    if (attribute.id?.trim()) continue;
+    attribute.id = createOnlineMigrationAttributeId(used);
+    changed = true;
+  }
+  return changed;
+}
+
+/**
  * Creates a safe, standalone migration envelope. This is deliberately an
  * allowlist projection rather than a local backup: nothing in the result is
  * a reference to the mutable desktop state.
  */
 export function createOnlineMigration(state: AppState, appVersion: string, exportedAt: Date): OnlineMigrationV2 {
   const attributeIDs = new Map<string, string>();
-  const attributes = state.attributes.map((attribute, index) => {
-    const id = attributeID(attribute, index);
+  const attributes = state.attributes.map((attribute) => {
+    const id = attributeID(attribute);
     if (!attributeIDs.has(attribute.name)) attributeIDs.set(attribute.name, id);
     return exportAttribute(attribute, id);
   });
@@ -283,7 +302,7 @@ export function createOnlineMigration(state: AppState, appVersion: string, expor
       .sort((left, right) => left.id - right.id),
   };
   const runtime: OnlineMigrationRuntime = {
-    attributeValues: Object.fromEntries(state.attributes.map((attribute, index) => [attributeID(attribute, index), attribute.value])),
+    attributeValues: Object.fromEntries(state.attributes.map((attribute) => [attributeID(attribute), attribute.value])),
     giftTargetReceived: state.giftKpiPanels.flatMap((panel) => panel.items.map((item) => ({ panelId: panel.id, giftId: item.giftId, received: item.received }))),
     activities: state.activities.map((activity) => exportActivityRuntime(activity, idForName)),
     ruleLimits: exportRuleLimits(state, exportedAt),
@@ -309,8 +328,22 @@ export function createOnlineMigration(state: AppState, appVersion: string, expor
   };
 }
 
-function attributeID(attribute: Attribute, index: number): string {
-  return attribute.id?.trim() || `legacy-attribute-${index + 1}`;
+function attributeID(attribute: Attribute): string {
+  const id = attribute.id?.trim();
+  if (!id) throw new Error('旧版属性尚未完成稳定 ID 保存，请稍后重试。');
+  return id;
+}
+
+function createOnlineMigrationAttributeId(used: Set<string>): string {
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const uuid = globalThis.crypto?.randomUUID?.();
+    const token = uuid ?? `${Date.now()}-${Math.random().toString(36).slice(2, 11)}-${attempt}`;
+    const candidate = `attribute-${token}`;
+    if (used.has(candidate)) continue;
+    used.add(candidate);
+    return candidate;
+  }
+  throw new Error('无法为旧版属性生成稳定 ID，请重试。');
 }
 
 function exportSettingsAppearance(settings: Settings): OnlineMigrationDefinition['appearance'] {

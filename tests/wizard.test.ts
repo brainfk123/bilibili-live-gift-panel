@@ -2191,6 +2191,22 @@ describe('single-page configuration rendering', () => {
     expect(findByText(root, '导出配置')).toBeDefined();
   });
 
+  it('keeps migration enabled while an ID-less legacy configuration awaits first-export persistence', async () => {
+    const configured = defaultState();
+    configured.attributes = [
+      { name: '旧属性', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+    ];
+    await saveState(configured);
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    (root.querySelector('.program-settings-toggle') as TestElement | null)?.onclick?.();
+
+    const migrationButton = findByText(root, '迁移到在线版') as TestElement & { disabled?: boolean };
+    expect(migrationButton.disabled).not.toBe(true);
+    expect(textOf(root.querySelector('.migration-export-note') as TestElement)).toContain('先为旧版属性生成并保存稳定 ID');
+  });
+
   it('shows automatic update status and supports a manual update check', async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);

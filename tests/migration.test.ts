@@ -1,6 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { defaultState } from '../src/storage';
-import { createOnlineMigration, downloadOnlineMigration, onlineMigrationFilename } from '../src/migration';
+import { createOnlineMigration, downloadOnlineMigration, ensureOnlineMigrationAttributeIds, onlineMigrationFilename } from '../src/migration';
 
 function stateWithSimplePlayAttributes(): ReturnType<typeof defaultState> {
   const state = defaultState();
@@ -11,7 +12,98 @@ function stateWithSimplePlayAttributes(): ReturnType<typeof defaultState> {
   return state;
 }
 
+function exporterV2AppearanceState(): ReturnType<typeof defaultState> {
+  const state = defaultState();
+  state.roomId = '12345';
+  Object.assign(state.settings, {
+    theme: 'light', fontSize: 36, accentColor: '#3366ff', align: 'left',
+    panelOpacity: 72, showConnection: false, configExperience: 'simple',
+  });
+  state.attributes = [{
+    id: 'health', name: '生命值', value: 42, unit: 'none', format: 'number', decimals: 0, suffix: ' 点',
+    display: {
+      variant: 'number', title: '当前生命值', themeId: 'neon',
+      appearance: { themeId: 'neon', fontSize: 40, accentColor: '#ff3366', showConnection: true, align: 'center', panelOpacity: 80 },
+    },
+  }];
+  state.displayScenes = [{
+    id: 'main-scene', name: '主画面', attributeNames: ['生命值'], layout: 'focus', themeId: 'pixel',
+    appearance: { themeId: 'pixel', fontSize: 44, accentColor: '#00cc88', showConnection: false, align: 'right', panelOpacity: 66 },
+  }];
+  state.blindBoxDisplay = {
+    themeId: 'kawaii', fontSize: 32, accentColor: '#cc55ff', showConnection: true, align: 'center', panelOpacity: 75, viewerSlots: 5,
+  };
+  state.giftKpiPanels = [{
+    id: 'gift-goal', name: '礼物目标', layout: 'stack', items: [],
+    appearance: { themeId: 'minimal', fontSize: 30, accentColor: '#ffaa00', showConnection: false, align: 'left', panelOpacity: 70 },
+  }];
+  return state;
+}
+
 describe('online migration exporter', () => {
+  it('matches the exact V2 appearance fixture consumed by Hosted', () => {
+    const fixture = JSON.parse(readFileSync(
+      new URL('./fixtures/online-migration-v2-appearance.json', import.meta.url),
+      'utf8',
+    )) as unknown;
+
+    expect(createOnlineMigration(exporterV2AppearanceState(), '0.4.8', new Date('2026-08-29T00:00:00.000Z')))
+      .toEqual(fixture);
+  });
+
+  it('requires persisted attribute IDs instead of deriving identity from list position', () => {
+    const state = defaultState();
+    state.attributes = [
+      { name: '旧属性', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+    ];
+
+    expect(() => createOnlineMigration(state, '0.4.7', new Date('2026-08-25T00:00:00.000Z')))
+      .toThrow('旧版属性尚未完成稳定 ID 保存');
+  });
+
+  it('assigns unique durable IDs to legacy attributes once before persistence', () => {
+    const state = defaultState();
+    state.attributes = [
+      { id: 'attribute-existing', name: '已有', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      { name: '旧属性', value: 2, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+    ];
+
+    expect(ensureOnlineMigrationAttributeIds(state)).toBe(true);
+    const assigned = state.attributes[1].id;
+    expect(assigned).toMatch(/^attribute-/);
+    expect(assigned).not.toBe('attribute-existing');
+    expect(ensureOnlineMigrationAttributeIds(state)).toBe(false);
+    expect(state.attributes[1].id).toBe(assigned);
+  });
+
+  it('keeps gameplay identity stable after persisted legacy attributes are reordered or preceded by a new attribute', () => {
+    const exportedAt = new Date('2026-08-25T00:00:00.000Z');
+    const state = defaultState();
+    state.attributes = [
+      { id: 'attribute-legacy-score', name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      { id: 'attribute-legacy-time', name: '时间', value: 60, unit: 'seconds', format: 'hhmmss', decimals: 0, suffix: '' },
+    ];
+    const first = createOnlineMigration(state, '0.4.7', exportedAt);
+    state.attributes = [
+      { id: 'attribute-new', name: '新增', value: 0, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      state.attributes[1],
+      state.attributes[0],
+    ];
+    const second = createOnlineMigration(state, '0.4.7', exportedAt);
+
+    expect(first.payload.definition.attributes.map((attribute) => attribute.id)).toEqual([
+      'attribute-legacy-score', 'attribute-legacy-time',
+    ]);
+    expect(second.payload.definition.attributes.map((attribute) => attribute.id)).toEqual([
+      'attribute-new', 'attribute-legacy-time', 'attribute-legacy-score',
+    ]);
+    expect(second.payload.dependencyDeclaration.units.map((unit) => unit.id)).toEqual([
+      'attribute:attribute-legacy-score',
+      'attribute:attribute-legacy-time',
+      'attribute:attribute-new',
+    ]);
+  });
+
   it('uses a deterministic versioned local migration filename', () => {
     expect(onlineMigrationFilename(new Date('2026-08-16T23:59:59.999Z'))).toBe('gift-panel-migration-v2-2026-08-16.json');
   });
