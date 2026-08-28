@@ -1,6 +1,6 @@
 import { GAMEPLAY_TEMPLATES, type TemplateGiftSlotDefinition, type TemplateParameterDefinition } from '../gameplay-templates';
 import { validHostedRoomID } from './room-id';
-import { maxOBSLinkURLLength, parseOBSOutputSelector } from './obs/selector';
+import { maxOBSLinkURLLength, maxOBSRequestTargetLength, parseOBSOutputSelector } from './obs/selector';
 
 export type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -396,7 +396,7 @@ function migrationGeneralSettings(value: unknown): MigrationGeneralSettings | un
 function migrationOBSLink(value: unknown): MigrationOBSLink | undefined {
   const item = object(value);
   if (!item || !exactKeys(item, ['outputId', 'name', 'url']) || !string(item.outputId) || !text(item.name) || !string(item.url)) return undefined;
-  try { const parsed = new URL(item.url); const query=[...parsed.searchParams.keys()]; const output=parsed.searchParams.getAll('output'); const fragment=new URLSearchParams(parsed.hash.slice(1)); const token=fragment.get('token'); const currentOrigin=typeof location==='undefined'?undefined:location.origin; if (item.url.length>maxOBSLinkURLLength || parsed.protocol !== 'https:' || parsed.username || parsed.password || !parsed.host || !/^\/obs\/[A-Za-z0-9_-]{43}$/.test(parsed.pathname) || query.length!==1 || query[0]!=='output' || output.length!==1 || item.outputId!==output[0] || !parseOBSOutputSelector(output[0]!) || [...fragment.keys()].length!==1 || !token || token.length>512 || (currentOrigin && parsed.origin!==currentOrigin)) return undefined; }
+  try { const parsed = new URL(item.url); const query=[...parsed.searchParams.keys()]; const output=parsed.searchParams.getAll('output'); const fragment=new URLSearchParams(parsed.hash.slice(1)); const token=fragment.get('token'); const currentOrigin=typeof location==='undefined'?undefined:location.origin; if (item.url.length>maxOBSLinkURLLength || parsed.pathname.length+parsed.search.length>maxOBSRequestTargetLength || parsed.protocol !== 'https:' || parsed.username || parsed.password || !parsed.host || !/^\/obs\/[A-Za-z0-9_-]{43}$/.test(parsed.pathname) || query.length!==1 || query[0]!=='output' || output.length!==1 || item.outputId!==output[0] || !parseOBSOutputSelector(output[0]!) || [...fragment.keys()].length!==1 || !token || token.length>512 || (currentOrigin && parsed.origin!==currentOrigin)) return undefined; }
   catch { return undefined; }
   return item as unknown as MigrationOBSLink;
 }

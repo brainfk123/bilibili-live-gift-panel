@@ -8,9 +8,9 @@ import (
 	"unicode/utf8"
 )
 
-// MaxEncodedLength keeps the selector request target well below net/http's
-// default header budget while still accommodating every valid 4096-rune ID.
-const MaxEncodedLength = 64 << 10
+// MaxEncodedLength leaves room for the fixed OBS route and HTTP request-line
+// framing inside the production edge's 64 KiB single-buffer budget.
+const MaxEncodedLength = 60 << 10
 
 var ErrInvalid = errors.New("obs selector: invalid")
 

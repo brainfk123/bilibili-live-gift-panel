@@ -760,6 +760,18 @@ describe('hosted single-host deployment contract', () => {
     expect(https).toContain('add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;');
   });
 
+  it('renders a 64 KiB Nginx request-line buffer matching the emitted OBS URL budget', () => {
+    const rendered = readProjectFile('deploy/hosted/nginx.conf.template')
+      .replaceAll('{{ONLINE_DOMAIN}}', 'hosted.example.invalid')
+      .replaceAll('{{TLS_CERTIFICATE}}', '/etc/ssl/hosted/fullchain.pem')
+      .replaceAll('{{TLS_CERTIFICATE_KEY}}', '/etc/ssl/hosted/privkey.pem');
+    const directive = rendered.match(/\blarge_client_header_buffers\s+(\d+)\s+(\d+)k\s*;/);
+    expect(directive?.slice(1)).toEqual(['4', '64']);
+    const singleBufferBytes = Number(directive?.[2]) * 1024;
+    expect(64 * 1024).toBeLessThanOrEqual(singleBufferBytes);
+    expect(64 * 1024 + 1).toBeGreaterThan(singleBufferBytes);
+  });
+
   it('keeps private endpoints private and disables buffering only on exact SSE routes', () => {
     if (!existsSync(resolve(projectRoot, 'deploy/hosted/nginx.conf.template'))) return;
     const config = readProjectFile('deploy/hosted/nginx.conf.template');

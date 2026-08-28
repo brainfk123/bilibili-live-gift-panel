@@ -7,6 +7,7 @@ import {
   type MigrationSelection,
 } from '../src/hosted/api';
 import { createMigrationFlow, migrationFileLimit, type MigrationViewState } from '../src/hosted/migration';
+import { encodeOBSOutputSelector } from '../src/hosted/obs/selector';
 import {
   dismissMigrationPrompt,
   migrationPromptStorageKey,
@@ -118,6 +119,22 @@ describe('Hosted migration API contract', () => {
       const invalid = await HostedAPI.connect(async (input) => input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : json({ ...job, obsLinks: [link] }));
       await expect(invalid.getMigration(12)).rejects.toMatchObject({ code: 'invalid_response' });
     }
+  });
+
+  it('accepts an exact 64 KiB OBS URL and rejects one byte more', async () => {
+    const id = 'x'.repeat(46_052);
+    const outputId = encodeOBSOutputSelector({ kind: 'attribute', id, attributeIds: [id] })!;
+    const token = 's'.repeat(512);
+    const link = (hostRunes: number) => `https://${'a'.repeat(hostRunes)}.example/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA?output=${outputId}#token=${token}`;
+    const exactURL = link(3_505);
+    const aboveURL = link(3_506);
+    expect(exactURL).toHaveLength(64 * 1024);
+    expect(aboveURL).toHaveLength(64 * 1024 + 1);
+    const exactJob: MigrationJob = { id: 12, status: 'applied', obsLinks: [{ outputId, name: '边界输出', url: exactURL }] };
+    const exact = await HostedAPI.connect(async (input) => input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : json(exactJob));
+    await expect(exact.getMigration(12)).resolves.toEqual(exactJob);
+    const above = await HostedAPI.connect(async (input) => input === '/api/bootstrap' ? json({ csrfToken: 'csrf' }) : json({ ...exactJob, obsLinks: [{ ...exactJob.obsLinks![0], url: aboveURL }] }));
+    await expect(above.getMigration(12)).rejects.toMatchObject({ code: 'invalid_response' });
   });
 
   it('loads only the bounded history projection and sends proof-gated OBS reissue with abort signals', async () => {

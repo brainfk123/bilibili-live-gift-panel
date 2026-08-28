@@ -8,6 +8,7 @@ events {
 
 http {
     server_tokens off;
+    large_client_header_buffers 4 64k;
 
     upstream hosted_app {
         server 127.0.0.1:12500;

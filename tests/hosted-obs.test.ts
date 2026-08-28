@@ -81,6 +81,10 @@ describe('hosted OBS fragment exchange', () => {
     expect(parseOBSOutputSelector(encodeOBSOutputSelector({ kind: 'attribute', id: long, attributeIds: [long] })!)?.id).toBe(long);
     const oversized = 'x'.repeat(70 * 1024);
     expect(encodeOBSOutputSelector({ kind: 'attribute', id: oversized, attributeIds: [oversized] })).toBeUndefined();
+    const boundary = 'x'.repeat(46_052);
+    expect(encodeOBSOutputSelector({ kind: 'attribute', id: boundary, attributeIds: [boundary] })).toHaveLength(60 * 1024);
+    const aboveBoundary = `${boundary}x`;
+    expect(encodeOBSOutputSelector({ kind: 'attribute', id: aboveBoundary, attributeIds: [aboveBoundary] })).toBeUndefined();
   });
 
   it('synchronously clears every non-empty fragment before validating it', async () => {

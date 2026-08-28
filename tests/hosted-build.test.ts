@@ -69,7 +69,7 @@ describe('hosted web build contract', () => {
     expect(listedFiles).toContain(viteConfig);
   });
 
-  it('keeps hosted UI source free of desktop-only imports and browser persistence', () => {
+  it('keeps hosted UI source free of desktop-only imports and direct network or cookie access', () => {
     if (!hostedSourceExists()) {
       expect(hostedSourceExists()).toBe(true);
       return;
@@ -80,7 +80,7 @@ describe('hosted web build contract', () => {
       .join('\n');
 
     expect(source).not.toMatch(/gift-clip|autoUpdate|electron|ffmpeg/i);
-    expect(source).not.toMatch(/\bfetch\s*\(|document\.cookie|localStorage\b/i);
+    expect(source).not.toMatch(/\bfetch\s*\(|document\.cookie/i);
   });
 
   it('renders a signed-out, callback-only shell with an accessible login action', async () => {

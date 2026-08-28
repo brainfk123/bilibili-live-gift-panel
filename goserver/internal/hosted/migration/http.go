@@ -299,8 +299,11 @@ func (handler *HTTPHandler) reissueOBSLinks(response http.ResponseWriter, reques
 var obsCredentialPathPattern = regexp.MustCompile(`^/obs/[A-Za-z0-9_-]{43}$`)
 
 const (
-	maxOBSLinkURLLength = obsselector.MaxEncodedLength + 1024
-	maxOBSLinkSetLength = 1 << 20
+	maxOBSLinkURLLength           = 64 << 10
+	maxOBSRequestTargetLength     = 64 << 10
+	maxOBSLinkSetLength           = 1 << 20
+	maxOBSCredentialTokenLength   = 512
+	obsCredentialFragmentOverhead = len("#token=")
 )
 
 type preparedOBSOutput struct {
@@ -321,8 +324,9 @@ func (handler *HTTPHandler) prepareOBSOutputs(outputs []OBSOutput) ([]preparedOB
 			return nil, false
 		}
 		seen[selector] = struct{}{}
-		candidateLength := len(handler.allowedOrigin) + len("/obs/") + 43 + len("?output=") + len(selector) + len("#token=") + 512
-		if candidateLength > maxOBSLinkURLLength || totalLength > maxOBSLinkSetLength-candidateLength {
+		requestTargetLength := len("/obs/") + 43 + len("?output=") + len(selector)
+		candidateLength := len(handler.allowedOrigin) + requestTargetLength + obsCredentialFragmentOverhead + maxOBSCredentialTokenLength
+		if requestTargetLength > maxOBSRequestTargetLength || candidateLength > maxOBSLinkURLLength || totalLength > maxOBSLinkSetLength-candidateLength {
 			return nil, false
 		}
 		totalLength += candidateLength
@@ -361,7 +365,7 @@ func (handler *HTTPHandler) attachOBSLinks(ctx context.Context, accountID, jobID
 	fragment, fragmentErr := url.ParseQuery(parsed.Fragment)
 	tokens := fragment["token"]
 	origin := (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host}).String()
-	if parsed.Scheme != "https" || origin != handler.allowedOrigin || parsed.User != nil || parsed.RawPath != "" || parsed.RawQuery != "" || !obsCredentialPathPattern.MatchString(parsed.Path) || fragmentErr != nil || len(fragment) != 1 || len(tokens) != 1 || tokens[0] == "" || len(tokens[0]) > 512 {
+	if parsed.Scheme != "https" || origin != handler.allowedOrigin || parsed.User != nil || parsed.RawPath != "" || parsed.RawQuery != "" || !obsCredentialPathPattern.MatchString(parsed.Path) || fragmentErr != nil || len(fragment) != 1 || len(tokens) != 1 || tokens[0] == "" || len(tokens[0]) > maxOBSCredentialTokenLength {
 		job.OBSReissueRequired = true
 		return job
 	}
@@ -372,7 +376,7 @@ func (handler *HTTPHandler) attachOBSLinks(ctx context.Context, accountID, jobID
 		query.Set("output", output.selector)
 		candidate.RawQuery = query.Encode()
 		candidateURL := candidate.String()
-		if len(candidateURL) > maxOBSLinkURLLength {
+		if len(candidateURL) > maxOBSLinkURLLength || len(candidate.RequestURI()) > maxOBSRequestTargetLength {
 			job.OBSReissueRequired = true
 			job.OBSLinks = nil
 			return job

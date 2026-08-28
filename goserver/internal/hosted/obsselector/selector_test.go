@@ -61,3 +61,14 @@ func TestCanonicalSelectorRejectsDuplicateMalformedAndOversizeValues(t *testing.
 		}
 	}
 }
+
+func TestCanonicalSelectorAccepts60KiBBoundaryAndRejectsOneByteMore(t *testing.T) {
+	const boundaryIDLength = 46_052
+	encoded, err := Encode(Selector{Kind: "attribute", ID: strings.Repeat("x", boundaryIDLength)})
+	if err != nil || len(encoded) != 60*1024 {
+		t.Fatalf("boundary Encode() length=%d error=%v", len(encoded), err)
+	}
+	if _, err := Encode(Selector{Kind: "attribute", ID: strings.Repeat("x", boundaryIDLength+1)}); err == nil {
+		t.Fatal("Encode() accepted a selector above the 60 KiB boundary")
+	}
+}

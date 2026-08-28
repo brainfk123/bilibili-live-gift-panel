@@ -230,6 +230,53 @@ func TestHTTPOversizeOBSOutputDoesNotRotateCredential(t *testing.T) {
 	}
 }
 
+func TestHTTPEnforces64KiBOBSLinkBoundaryBeforeCredentialRotation(t *testing.T) {
+	const boundaryIDLength = 46_052
+	for _, test := range []struct {
+		name       string
+		hostRunes  int
+		wantIssued int
+		wantLength int
+	}{
+		{name: "exact boundary", hostRunes: 3_505, wantIssued: 1, wantLength: 64 * 1024},
+		{name: "one byte above", hostRunes: 3_506, wantIssued: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			origin := "https://" + strings.Repeat("a", test.hostRunes) + ".example"
+			service := &httpMigrationService{
+				job: Job{ID: 9, Status: jobPreviewed}, selectionPreview: Preview{ID: 9, CanConfirm: true},
+				obsOutputs: []OBSOutput{{Selector: obsselector.Selector{Kind: "attribute", ID: strings.Repeat("x", boundaryIDLength)}, Name: "边界输出"}},
+			}
+			issued := 0
+			handler, err := NewHTTPHandler(service, &httpProof{}, HTTPOptions{AllowedOrigin: origin, CSRFToken: "csrf", Limiter: allowAllLimiter{}, ClientIP: identity.DirectClientIP, Authenticate: testAuthenticate(), AccountID: func(context.Context) (int64, bool) { return 7, true }, IssueOBS: func(context.Context, int64) (string, error) {
+				issued++
+				return origin + "/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA#token=" + strings.Repeat("s", 512), nil
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := migrationRequest(http.MethodPost, "/api/migrations/9/apply", `{"challengeId":"proof","selection":{"unitIds":[],"includeGeneralSettings":false,"includeRoomSuggestion":false}}`)
+			request.Header.Set("Origin", origin)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			var result Job
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != http.StatusOK || issued != test.wantIssued {
+				t.Fatalf("status=%d issued=%d want=%d body=%s", response.Code, issued, test.wantIssued, response.Body.String())
+			}
+			if test.wantIssued == 0 {
+				if !result.OBSReissueRequired || len(result.OBSLinks) != 0 {
+					t.Fatalf("result=%#v", result)
+				}
+			} else if len(result.OBSLinks) != 1 || len(result.OBSLinks[0].URL) != test.wantLength {
+				t.Fatalf("links=%#v", result.OBSLinks)
+			}
+		})
+	}
+}
+
 func TestHTTPPreviewUsesRawJSONAndRejectsMultipart(t *testing.T) {
 	service := &httpMigrationService{preview: Preview{ID: 9, ExpiresAt: time.Now().Add(time.Hour)}}
 	handler, err := newMigrationHTTPTestHandler(service, &httpProof{})

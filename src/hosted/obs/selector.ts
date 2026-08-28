@@ -1,5 +1,6 @@
-export const maxOBSSelectorEncodedLength = 64 * 1024;
-export const maxOBSLinkURLLength = maxOBSSelectorEncodedLength + 1024;
+export const maxOBSSelectorEncodedLength = 60 * 1024;
+export const maxOBSLinkURLLength = 64 * 1024;
+export const maxOBSRequestTargetLength = 64 * 1024;
 
 export type OBSOutputSelector = { kind: 'attribute' | 'scene' | 'gift-target'; id: string; attributeIds: readonly string[] };
 
