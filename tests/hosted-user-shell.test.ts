@@ -149,6 +149,29 @@ describe('Hosted user workspace shell', () => {
     expect(overviewDisposals).toBe(1);
   });
 
+  it('does not retry a workspace disposer that rejected', async () => {
+    const { root } = dom();
+    const failure = new Error('dispose failed');
+    let overviewDisposals = 0;
+    const mounts: string[] = [];
+    const shell = createHostedUserShell(root as unknown as HTMLElement, {
+      initialPage: 'overview', experience: 'simple', configurationId: 'config-1',
+      mount: (page) => {
+        mounts.push(page);
+        return page === 'overview'
+          ? { dispose: async () => { overviewDisposals += 1; throw failure; } }
+          : { dispose() {} };
+      },
+    });
+
+    await expect(shell.navigate('attributes')).rejects.toBe(failure);
+    await expect(shell.navigate('activities')).resolves.toBeUndefined();
+
+    expect(overviewDisposals).toBe(1);
+    expect(mounts).toEqual(['overview', 'activities']);
+    await shell.dispose();
+  });
+
   it('serializes page changes while simple and advanced modes keep one configuration identity', async () => {
     const { root } = dom();
     const events: string[] = [];

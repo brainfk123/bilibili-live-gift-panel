@@ -110,8 +110,8 @@ export function createHostedUserShell(root: HTMLElement, options: HostedUserShel
   const disposeCurrent = async (): Promise<void> => {
     const previous = currentView;
     if (!previous) return;
+    currentView = undefined;
     await previous.dispose();
-    if (currentView === previous) currentView = undefined;
   };
 
   const navigateTo = (page: HostedUserPage, publish: boolean): Promise<void> => {
