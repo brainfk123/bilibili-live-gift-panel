@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   REQUIRED_COMPONENT_ASSETS,
   buildChecksumManifest,
+  prepareComponentAssets,
   writePreparedComponentAssets,
   verifyChecksumManifest,
   verifyComponentMetadata,
@@ -25,6 +28,62 @@ function temporaryRoot() {
 }
 
 describe('FFmpeg component assets', () => {
+  it('refuses to resolve a publishable component identity without an expected signer', () => {
+    const projectRoot = fileURLToPath(new URL('..', import.meta.url));
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('../scripts/ffmpeg-component-assets.mjs', import.meta.url)), 'identity'], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      env: { ...process.env, EVSIGN_EXPECTED_SUBJECT: '' },
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toContain('EVSIGN_EXPECTED_SUBJECT');
+  });
+
+  it('rejects mismatched signed metadata before preparing publishable component assets', async () => {
+    const root = temporaryRoot();
+    for (const relative of [
+      'third_party/ffmpeg/configure.flags',
+      'third_party/ffmpeg/toolchain-lock.json',
+      'third_party/ffmpeg/NOTICE.md',
+      'third_party/ffmpeg/COPYING.LGPLv2.1',
+    ]) {
+      const target = join(root, relative);
+      mkdirSync(dirname(target), { recursive: true });
+      copyFileSync(fileURLToPath(new URL(`../${relative}`, import.meta.url)), target);
+    }
+    const manifest = {
+      schema: 1,
+      component_fingerprint: '0'.repeat(64),
+      descriptor: 'wrong identity\n',
+      descriptor_sha256: '0'.repeat(64),
+      authenticode: true,
+      signer_subject: 'CN=Wrong',
+      source_release_commit: '1'.repeat(40),
+      component_gate: 'gate\n',
+    };
+    const sources = new Map([
+      ['goserver/ffmpeg/ffmpeg.zip', Buffer.from('zip')],
+      ['goserver/ffmpeg/manifest.json', Buffer.from(JSON.stringify(manifest))],
+      ['dist/gift-clip-test-tools.zip', Buffer.from('tools')],
+      ['dist/ffmpeg-source/ffmpeg-9.0.tar.xz', Buffer.from('source')],
+      ['dist/ffmpeg-source/ffmpeg-9.0.tar.xz.asc', Buffer.from('signature')],
+      ['dist/ffmpeg-build-config.txt', Buffer.from('config')],
+      ['dist/ffmpeg-component-gate.txt', Buffer.from('gate\n')],
+    ]);
+    for (const [relative, bytes] of sources) {
+      const target = join(root, relative);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, bytes);
+    }
+
+    await expect(prepareComponentAssets({
+      projectRoot: root,
+      outputDirectory: join(root, 'dist', 'component'),
+      expectedSigner: 'CN=Expected',
+    })).rejects.toThrow(/identity|signer/);
+  });
+
   it('writes the exact canonical bytes used by the checksum manifest', async () => {
     const root = temporaryRoot();
     const files = new Map(REQUIRED_COMPONENT_ASSETS.map((name) => [name, Buffer.from(`asset:${name}`)]));

@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Do not mutate or move the `v0.4.6` tag, and do not claim its failed historical run used this workflow.
-- Component tags use `ffmpeg-component-v1-<64 lowercase hex fingerprint>` and never match the application `vMAJOR.MINOR.PATCH` trigger.
+- Component tags use `ffmpeg-component-v2-<64 lowercase hex fingerprint>` and never match the application `vMAJOR.MINOR.PATCH` trigger. Descriptor schema 2 binds `signer_subject_sha256`; legacy v1 components remain immutable but are never reused by v2.
 - Only an exact GitHub 404 is a cache miss; every other lookup or validation failure stops the release.
 - Existing component Releases are immutable: no `--clobber`, overwrite, silent repair, or automatic deletion.
 - A cache hit skips MSYS2 setup, FFmpeg compilation, and inner FFmpeg signing.
@@ -37,8 +37,8 @@
 
 **Interfaces:**
 - Produces: `loadFFmpegPolicy(root: string): Promise<FFmpegPolicy>`.
-- Produces: `serializeFFmpegDescriptor(policy: FFmpegPolicy): Buffer`.
-- Produces: `ffmpegComponentIdentity(policy: FFmpegPolicy): { descriptor: Buffer; descriptorSha256: string; fingerprint: string; tag: string }`.
+- Produces: `serializeFFmpegDescriptor(policy: FFmpegPolicy, signerSubject: string): Buffer`.
+- Produces: `ffmpegComponentIdentity(policy: FFmpegPolicy, signerSubject: string): { descriptor: Buffer; descriptorSha256: string; fingerprint: string; tag: string }`.
 - Produces: `componentGateRecord(policy: FFmpegPolicy, binary: Buffer): Buffer` for the existing binary-bound gate.
 - Produces CLI command: `node scripts/ffmpeg-policy.mjs --self-test`, using synthetic policy fixtures only.
 - Consumes: `third_party/ffmpeg/configure.flags`, `third_party/ffmpeg/toolchain-lock.json`, and the existing FFmpeg 9.0 source/component policy currently embedded in `verify-ffmpeg.mjs`.
@@ -59,17 +59,19 @@ const fixture = {
   infrastructure: ['D3D11VA', 'MEDIAFOUNDATION'],
 };
 
-expect(serializeFFmpegDescriptor(fixture).toString('utf8')).toBe(
-  'schema=1\nffmpeg_version=9.0\n' +
+const expectedSigner = 'CN=Release Test';
+expect(serializeFFmpegDescriptor(fixture, expectedSigner).toString('utf8')).toBe(
+  'schema=2\nffmpeg_version=9.0\n' +
   `source_sha256=${'a'.repeat(64)}\nsource_date_epoch=123\n` +
   `configure_sha256=${'b'.repeat(64)}\n` +
   `toolchain_lock_sha256=${'c'.repeat(64)}\n` +
+  'signer_subject_sha256=bbc8caef63880ad52a5a71f7c0e1b7d9fbde18719e0265c1cedeaac6c8cf121b\n' +
   '[components]\nA\nB\n[infrastructure]\nD3D11VA\nMEDIAFOUNDATION\n',
 );
-expect(ffmpegComponentIdentity(fixture).fingerprint)
-  .toBe('256712f90a56797f830e67e698d3c49c4b0e1cb47299de80f062f9aef0e5b81c');
-expect(ffmpegComponentIdentity(fixture).tag)
-  .toBe('ffmpeg-component-v1-256712f90a56797f830e67e698d3c49c4b0e1cb47299de80f062f9aef0e5b81c');
+expect(ffmpegComponentIdentity(fixture, expectedSigner).fingerprint)
+  .toBe('83802c2b1499c904a4ffcf771845875e9c7c6513e02cf8381a7b6aa3d76c3a50');
+expect(ffmpegComponentIdentity(fixture, expectedSigner).tag)
+  .toBe('ffmpeg-component-v2-83802c2b1499c904a4ffcf771845875e9c7c6513e02cf8381a7b6aa3d76c3a50');
 ```
 
 Also mutate each descriptor field independently and assert that its fingerprint changes, while application version and commit are absent from `FFmpegPolicy`.
@@ -88,8 +90,8 @@ Expose these exact declarations from `scripts/ffmpeg-policy.d.mts`:
 
 ```ts
 export function loadFFmpegPolicy(root: string): Promise<FFmpegPolicy>;
-export function serializeFFmpegDescriptor(policy: FFmpegPolicy): Buffer;
-export function ffmpegComponentIdentity(policy: FFmpegPolicy): {
+export function serializeFFmpegDescriptor(policy: FFmpegPolicy, signerSubject: string): Buffer;
+export function ffmpegComponentIdentity(policy: FFmpegPolicy, signerSubject: string): {
   descriptor: Buffer;
   descriptorSha256: string;
   fingerprint: string;
@@ -232,7 +234,7 @@ git commit -m "feat: bind FFmpeg payload to component identity"
 **Interfaces:**
 - Consumes: Task 1 identity and Task 2 strict payload pair.
 - Produces: `REQUIRED_COMPONENT_ASSETS` in this exact order: `ffmpeg.zip`, `manifest.json`, `gift-clip-test-tools.zip`, `ffmpeg-9.0.tar.xz`, `ffmpeg-9.0.tar.xz.asc`, `ffmpeg-build-config.txt`, `ffmpeg-component-gate.txt`, `toolchain-lock.json`, `NOTICE.md`, `COPYING.LGPLv2.1`.
-- Produces: `prepareComponentAssets({ root, outputDirectory }): Promise<ComponentIdentity>`.
+- Produces: `prepareComponentAssets({ root, outputDirectory, expectedSigner }): Promise<ComponentIdentity>`.
 - Produces: `verifyComponentAssets({ root, inputDirectory, expectedSigner }): Promise<ComponentIdentity>`.
 - Produces CLI commands: `identity`, `prepare`, `verify`, and `install`.
 
@@ -253,7 +255,7 @@ Expected: FAIL because the component asset module does not exist.
 `identity` prints one compact JSON object to stdout:
 
 ```json
-{"schema":1,"fingerprint":"<64 lowercase hex>","tag":"ffmpeg-component-v1-<64 lowercase hex>"}
+{"schema":2,"fingerprint":"<64 lowercase hex>","tag":"ffmpeg-component-v2-<64 lowercase hex>"}
 ```
 
 `prepare` copies regular files only, rejects links and unexpected source shapes, writes `SHA256SUMS.txt` last, and never includes credentials or application-version metadata.

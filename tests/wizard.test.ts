@@ -2303,7 +2303,7 @@ describe('single-page configuration rendering', () => {
     expect(textOf(dialog!)).not.toContain('训练中心');
     (root.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
 
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.8'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.9'));
     expect(root.querySelector('.changelog-dialog')).toBeNull();
   });
 
@@ -2344,7 +2344,7 @@ describe('single-page configuration rendering', () => {
         return Response.json({
           code: 0,
           update: {
-            state: 'up-to-date', currentVersion: '0.4.8', latestVersion: '0.4.8',
+            state: 'up-to-date', currentVersion: '0.4.9', latestVersion: '0.4.9',
             message: '当前已经是最新版本。', autoUpdate: true, restartRequired: false,
           },
         });
@@ -2362,7 +2362,7 @@ describe('single-page configuration rendering', () => {
     mountConfig(firstRoot as unknown as HTMLElement);
     await vi.waitFor(() => expect(firstRoot.querySelector('.changelog-dialog')).not.toBeNull());
     (firstRoot.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.8'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.9'));
 
     const secondRoot = new TestElement('div');
     mountConfig(secondRoot as unknown as HTMLElement);

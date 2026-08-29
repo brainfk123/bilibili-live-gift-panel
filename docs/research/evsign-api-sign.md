@@ -171,6 +171,6 @@ jobs:
 
 EV Sign 公开 API 文档没有幂等键或签名任务查询接口。因此服务端已经完成、客户端却丢失响应时，重试可能产生额外签名记录；客户端只能保证本地产物原子性，不能宣称服务端 exactly-once。
 
-固定 FFmpeg 采用不可变组件 Release：标签为 `ffmpeg-component-v1-<64位指纹>`。指纹覆盖源码、SOURCE_DATE_EPOCH、configure、工具链锁和组件策略。缓存命中时跳过 MSYS2、FFmpeg 编译和内层签名；下载的所有组件资产必须先通过 GitHub artifact attestation、SHA-256 闭包、严格 manifest、组件门禁、Authenticode 精确签名者和真实 FFmpeg 运行面验证。
+固定 FFmpeg 采用不可变组件 Release：当前标签为 `ffmpeg-component-v2-<64位指纹>`。v2 指纹覆盖源码、SOURCE_DATE_EPOCH、configure、工具链锁、组件策略以及完整预期 Authenticode Subject 的 SHA-256；更换签名证书主体必然产生新的组件标签和缓存未命中。缓存命中时跳过 MSYS2、FFmpeg 编译和内层签名；下载的所有组件资产必须先通过 GitHub artifact attestation、SHA-256 闭包、严格 manifest、组件门禁、Authenticode 精确签名者和真实 FFmpeg 运行面验证。旧 `ffmpeg-component-v1-*` 组件保持不可变，仅用于历史审计，不会被 v2 工作流复用。
 
 组件 Release 不允许覆盖或 `--clobber`。已存在但不完整、校验失败或证明失败时，发布立即停止并要求人工恢复；不得静默改走重新构建。只有 GitHub API 对精确组件标签返回 404 才能进入首次构建/签名路径。

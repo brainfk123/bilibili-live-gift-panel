@@ -22,13 +22,13 @@ else await main();
 
 async function main() {
   const policy = await loadFFmpegPolicy(root);
-  const identity = ffmpegComponentIdentity(policy);
   const payloadOnly = process.argv.includes('--payload-only');
   const payloadDirectoryArgument = readArgument('--payload-directory');
   const payloadDirectory = payloadDirectoryArgument ? resolve(payloadDirectoryArgument) : join(root, 'goserver', 'ffmpeg');
   const buildConfigArgument = readArgument('--build-config');
   const expectedBuildConfig = buildConfigArgument ? await readFile(resolve(buildConfigArgument), 'utf8') : undefined;
   const manifest = parseManifest(await readFile(join(payloadDirectory, 'manifest.json'), 'utf8'));
+  const identity = ffmpegComponentIdentity(policy, manifest.signer_subject);
   const archive = await readFile(join(payloadDirectory, 'ffmpeg.zip'));
   validateManifest(manifest, archive, identity);
   if (archive.length > warningSize) console.warn(`WARNING: FFmpeg ZIP exceeds the ${warningSize}-byte target: ${archive.length}`);
@@ -255,7 +255,7 @@ function assert(condition, message) { if (!condition) throw new Error(message); 
 
 async function runSelfTests() {
   const policy = await loadFFmpegPolicy(root);
-  const identity = ffmpegComponentIdentity(policy);
+  const identity = ffmpegComponentIdentity(policy, '');
   const lockFixture = JSON.parse(await readFile(join(root, 'third_party', 'ffmpeg', 'toolchain-lock.json'), 'utf8'));
   validateToolchainLock(lockFixture);
   const crlfFixture = JSON.parse(JSON.stringify(lockFixture, null, 2).replaceAll('\n', '\r\n'));

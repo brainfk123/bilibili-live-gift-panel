@@ -275,6 +275,12 @@ describe('release workflow supply-chain contract', () => {
       expect(steps[index]?.if).toContain("env.FFMPEG_COMPONENT_EXISTS != 'true'");
     }
     expect(steps[downloadHit]?.if).toContain("env.FFMPEG_COMPONENT_EXISTS == 'true'");
+    expect(steps[identity]?.env?.EVSIGN_EXPECTED_SUBJECT)
+      .toBe('${{ vars.EVSIGN_EXPECTED_SUBJECT }}');
+    expect(steps[identity]?.run).toContain('$identity.schema -ne 2');
+    expect(steps[identity]?.run).toContain('ffmpeg-component-v2-$($identity.fingerprint)');
+    expect(steps[packageComponent]?.env?.EVSIGN_EXPECTED_SUBJECT)
+      .toBe('${{ vars.EVSIGN_EXPECTED_SUBJECT }}');
     expect(steps[install]?.run).toContain('scripts/ffmpeg-component-assets.mjs install');
     expect(steps[install]?.run).toContain('verify-metadata');
     expect(steps[downloadPublished]?.run).toContain('Invoke-RestMethod');

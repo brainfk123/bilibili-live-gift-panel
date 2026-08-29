@@ -30,11 +30,12 @@ This design applies to releases after v0.4.6. It does not mutate the v0.4.6 tag 
 
 A deterministic component descriptor shall be generated from the canonical build inputs already enforced by the FFmpeg component gate:
 
-- descriptor schema version, initially `1`;
+- descriptor schema version, currently `2`;
 - exact FFmpeg version and pinned source SHA-256;
 - `SOURCE_DATE_EPOCH`;
 - SHA-256 of canonical `configure.flags` content;
 - SHA-256 of the canonical toolchain lock;
+- SHA-256 of the complete exact expected Authenticode signer Subject;
 - the exact expected component and infrastructure sets.
 
 The component fingerprint is the lowercase SHA-256 of the canonical UTF-8 descriptor. Canonical serialization uses fixed field order, LF line endings, no insignificant whitespace, and a final newline.
@@ -42,7 +43,7 @@ The component fingerprint is the lowercase SHA-256 of the canonical UTF-8 descri
 The GitHub tag and Release name are:
 
 ```text
-ffmpeg-component-v1-<64-character-component-fingerprint>
+ffmpeg-component-v2-<64-character-component-fingerprint>
 ```
 
 The application release workflow only triggers for `vMAJOR.MINOR.PATCH`, so creating a component tag does not recursively start an application release.
@@ -231,6 +232,6 @@ Change one canonical FFmpeg build input in an isolated test fixture:
 
 ## Operational notes
 
-Component Releases will be visible alongside application Releases. Their `ffmpeg-component-v1-` prefix distinguishes them from user-facing `vMAJOR.MINOR.PATCH` releases. They are supply-chain records and must not be edited or deleted during routine cleanup.
+Component Releases will be visible alongside application Releases. Their current `ffmpeg-component-v2-` prefix distinguishes them from user-facing `vMAJOR.MINOR.PATCH` releases. Descriptor schema 2 includes `signer_subject_sha256`, so a signer change cannot reuse the previous component. Legacy `ffmpeg-component-v1-` Releases remain immutable historical supply-chain records but are never reused by v2. Component Releases must not be edited or deleted during routine cleanup.
 
 The v0.4.6 failure remains a separate recovery action. Its tagged workflow cannot benefit from this future component cache, and rerunning its monolithic failed job will rebuild and re-sign FFmpeg once more.

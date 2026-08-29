@@ -110,13 +110,18 @@ export function verifyPinnedSourceAssets(archive, signature, policy) {
   if (sha256(signature) !== policy.sourceSignatureSha256) throw new Error('FFmpeg detached signature does not match the pinned SHA-256.');
 }
 
-export async function prepareComponentAssets({ projectRoot = root, outputDirectory }) {
+export async function prepareComponentAssets({ projectRoot = root, outputDirectory, expectedSigner }) {
   const sources = componentSourcePaths(projectRoot);
   assertContainedDirectory(resolve(projectRoot, 'dist'), outputDirectory, 'FFmpeg component output');
+  const manifestPath = sources.get('manifest.json');
+  const manifestInfo = await lstat(manifestPath);
+  if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink()) throw new Error('FFmpeg component source manifest.json is not a regular file.');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  const identity = ffmpegComponentIdentity(await loadFFmpegPolicy(projectRoot), expectedSigner);
+  verifyComponentMetadata(manifest, identity, expectedSigner);
   await rm(outputDirectory, { recursive: true, force: true });
   await mkdir(outputDirectory, { recursive: true });
   const files = new Map();
-  const manifest = JSON.parse(await readFile(sources.get('manifest.json'), 'utf8'));
   for (const name of REQUIRED_COMPONENT_ASSETS) {
     const source = sources.get(name);
     const info = await lstat(source);
@@ -125,13 +130,13 @@ export async function prepareComponentAssets({ projectRoot = root, outputDirecto
     files.set(name, bytes);
   }
   await writePreparedComponentAssets(outputDirectory, files);
-  return ffmpegComponentIdentity(await loadFFmpegPolicy(projectRoot));
+  return identity;
 }
 
 export async function verifyComponentAssets({ projectRoot = root, inputDirectory, expectedSigner, verifyPayload = verifyPayloadDirectory }) {
   await verifyChecksumManifest(inputDirectory);
   const policy = await loadFFmpegPolicy(projectRoot);
-  const identity = ffmpegComponentIdentity(policy);
+  const identity = ffmpegComponentIdentity(policy, expectedSigner);
   let manifest;
   try { manifest = JSON.parse(await readFile(join(inputDirectory, 'manifest.json'), 'utf8')); }
   catch { throw new Error('FFmpeg component manifest is malformed.'); }
@@ -212,13 +217,14 @@ function stringArgument(name) {
 
 async function main() {
   const command = process.argv[2];
+  const expectedSigner = process.env.EVSIGN_EXPECTED_SUBJECT?.trim() || '';
   if (command === 'identity') {
-    const identity = ffmpegComponentIdentity(await loadFFmpegPolicy(root));
-    process.stdout.write(`${JSON.stringify({ schema: 1, fingerprint: identity.fingerprint, tag: identity.tag })}\n`);
+    if (!expectedSigner) throw new Error('EVSIGN_EXPECTED_SUBJECT is required to resolve a signed FFmpeg component identity.');
+    const identity = ffmpegComponentIdentity(await loadFFmpegPolicy(root), expectedSigner);
+    process.stdout.write(`${JSON.stringify({ schema: 2, fingerprint: identity.fingerprint, tag: identity.tag })}\n`);
     return;
   }
-  const expectedSigner = process.env.EVSIGN_EXPECTED_SUBJECT?.trim() || '';
-  if (command === 'prepare') await prepareComponentAssets({ outputDirectory: argument('--output') });
+  if (command === 'prepare') await prepareComponentAssets({ outputDirectory: argument('--output'), expectedSigner });
   else if (command === 'verify') await verifyComponentAssets({ inputDirectory: argument('--input'), expectedSigner });
   else if (command === 'install') await installComponentAssets({ inputDirectory: argument('--input'), expectedSigner });
   else if (command === 'verify-metadata') await verifyGitHubReleaseMetadata(JSON.parse(await readFile(argument('--metadata'), 'utf8')), argument('--input'), stringArgument('--tag'));

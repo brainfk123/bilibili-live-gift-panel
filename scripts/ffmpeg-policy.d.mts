@@ -30,8 +30,8 @@ export interface FFmpegPolicy {
 export const FFMPEG_SOURCE_SIGNATURE_SHA256: string;
 
 export function loadFFmpegPolicy(root: string): Promise<FFmpegPolicy>;
-export function serializeFFmpegDescriptor(policy: FFmpegPolicy): Buffer;
-export function ffmpegComponentIdentity(policy: FFmpegPolicy): {
+export function serializeFFmpegDescriptor(policy: FFmpegPolicy, signerSubject: string): Buffer;
+export function ffmpegComponentIdentity(policy: FFmpegPolicy, signerSubject: string): {
   descriptor: Buffer;
   descriptorSha256: string;
   fingerprint: string;

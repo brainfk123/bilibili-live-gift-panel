@@ -50,7 +50,7 @@ export async function loadFFmpegPolicy(root) {
   };
 }
 
-export function serializeFFmpegDescriptor(policy) {
+export function serializeFFmpegDescriptor(policy, signerSubject) {
   assert(policy?.schema === 1, 'FFmpeg descriptor schema is invalid.');
   assert(/^\d+\.\d+$/.test(policy.version), 'FFmpeg version is invalid.');
   assertHash(policy.sourceSha256, 'source SHA-256');
@@ -59,13 +59,15 @@ export function serializeFFmpegDescriptor(policy) {
   assertHash(policy.toolchainLockSha256, 'toolchain lock SHA-256');
   validateCanonicalList(policy.components, 'components');
   validateCanonicalList(policy.infrastructure, 'infrastructure');
+  assert(typeof signerSubject === 'string' && !/[\r\n]/.test(signerSubject) && Buffer.byteLength(signerSubject, 'utf8') <= 4096, 'FFmpeg signer subject is invalid.');
   const descriptor = Buffer.from([
-    `schema=${policy.schema}`,
+    'schema=2',
     `ffmpeg_version=${policy.version}`,
     `source_sha256=${policy.sourceSha256}`,
     `source_date_epoch=${policy.sourceDateEpoch}`,
     `configure_sha256=${policy.configureSha256}`,
     `toolchain_lock_sha256=${policy.toolchainLockSha256}`,
+    `signer_subject_sha256=${sha256(Buffer.from(signerSubject, 'utf8'))}`,
     '[components]', ...policy.components,
     '[infrastructure]', ...policy.infrastructure,
     '',
@@ -74,14 +76,14 @@ export function serializeFFmpegDescriptor(policy) {
   return descriptor;
 }
 
-export function ffmpegComponentIdentity(policy) {
-  const descriptor = serializeFFmpegDescriptor(policy);
+export function ffmpegComponentIdentity(policy, signerSubject) {
+  const descriptor = serializeFFmpegDescriptor(policy, signerSubject);
   const fingerprint = sha256(descriptor);
   return {
     descriptor,
     descriptorSha256: fingerprint,
     fingerprint,
-    tag: `ffmpeg-component-v1-${fingerprint}`,
+    tag: `ffmpeg-component-v2-${fingerprint}`,
   };
 }
 
@@ -176,9 +178,9 @@ function assert(condition, message) {
 async function runSelfTests() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   const policy = await loadFFmpegPolicy(root);
-  const identity = ffmpegComponentIdentity(policy);
-  assert(/^ffmpeg-component-v1-[0-9a-f]{64}$/.test(identity.tag), 'FFmpeg component tag is malformed.');
-  assert(identity.descriptor.equals(serializeFFmpegDescriptor(policy)), 'FFmpeg descriptor is unstable.');
+  const identity = ffmpegComponentIdentity(policy, '');
+  assert(/^ffmpeg-component-v2-[0-9a-f]{64}$/.test(identity.tag), 'FFmpeg component tag is malformed.');
+  assert(identity.descriptor.equals(serializeFFmpegDescriptor(policy, '')), 'FFmpeg descriptor is unstable.');
   console.log(`FFmpeg policy self-tests passed (${identity.tag}).`);
 }
 

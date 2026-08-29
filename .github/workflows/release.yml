@@ -150,11 +150,13 @@ jobs:
       - name: Resolve FFmpeg component identity
         if: env.RELEASE_EXISTS != 'true'
         shell: pwsh
+        env:
+          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
         run: |
           $identityJSON = node scripts/ffmpeg-component-assets.mjs identity
           if ($LASTEXITCODE -ne 0) { throw "FFmpeg component identity resolution failed" }
           $identity = $identityJSON | ConvertFrom-Json
-          if ($identity.schema -ne 1 -or [string]$identity.fingerprint -cnotmatch '^[0-9a-f]{64}$' -or [string]$identity.tag -cne "ffmpeg-component-v1-$($identity.fingerprint)") {
+          if ($identity.schema -ne 2 -or [string]$identity.fingerprint -cnotmatch '^[0-9a-f]{64}$' -or [string]$identity.tag -cne "ffmpeg-component-v2-$($identity.fingerprint)") {
             throw "FFmpeg component identity output is invalid"
           }
           "FFMPEG_COMPONENT_FINGERPRINT=$($identity.fingerprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -266,6 +268,8 @@ jobs:
       - name: Package signed FFmpeg component
         if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
         shell: pwsh
+        env:
+          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
         run: |
           Compress-Archive -LiteralPath dist/gift-clip-test-tools/ffmpeg.exe,dist/gift-clip-test-tools/ffprobe.exe,dist/gift-clip-test-tools/manifest.json -DestinationPath dist/gift-clip-test-tools.zip -CompressionLevel Optimal
           node scripts/ffmpeg-component-assets.mjs prepare --output dist/ffmpeg-component-publish

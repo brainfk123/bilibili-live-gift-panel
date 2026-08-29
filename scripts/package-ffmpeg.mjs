@@ -42,13 +42,13 @@ async function main() {
   }
   if (authenticode) await verifyAuthenticode(binary);
   componentGate = bindBuildRecordToBinary(componentGate, binary, authenticode);
-  const identity = ffmpegComponentIdentity(await loadFFmpegPolicy(root));
+  const signerSubject = authenticode ? process.env.EVSIGN_EXPECTED_SUBJECT?.trim() || '' : '';
+  const identity = ffmpegComponentIdentity(await loadFFmpegPolicy(root), signerSubject);
 
   const sha256 = createHash('sha256').update(binary).digest('hex');
   const archive = writeSingleFileZip('ffmpeg.exe', binary);
   if (archive.length > maximumSize) throw new Error(`FFmpeg ZIP is ${archive.length} bytes; hard limit is ${maximumSize} bytes.`);
   if (archive.length > warningSize) console.warn(`WARNING: FFmpeg ZIP is ${archive.length} bytes, above the ${warningSize}-byte target.`);
-  const signerSubject = authenticode ? process.env.EVSIGN_EXPECTED_SUBJECT?.trim() || '' : '';
   const sourceReleaseCommit = authenticode ? process.env.APP_COMMIT?.trim() || '' : '0'.repeat(40);
   const manifest = buildPackageManifest({ identity, binary, archive, componentGate, authenticode, signerSubject, sourceReleaseCommit });
   await mkdir(outputDirectory, { recursive: true });
