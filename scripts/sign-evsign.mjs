@@ -52,14 +52,15 @@ export function resolveEVSignSignerProfile(environment = process.env) {
       throw new Error('EVSign signer profile contains missing or unknown properties.');
     }
     const { name, cert, subject } = profile;
+    const normalizedCert = cert === null ? '' : cert;
     if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) {
       throw new Error('EVSign signer profile name is invalid.');
     }
     if (names.has(name)) throw new Error('EVSign signer profile name is duplicated.');
     names.add(name);
-    validateProfileValue('cert', cert, 1024, true);
+    validateProfileValue('cert', normalizedCert, 1024, true);
     validateProfileValue('subject', subject, 4096, false);
-    if (name === activeProfile) selected = { schema: 1, source: 'profiles', profile: name, cert, subject };
+    if (name === activeProfile) selected = { schema: 1, source: 'profiles', profile: name, cert: normalizedCert, subject };
   }
   if (!selected) throw new Error('The active EVSign signer profile does not exist.');
   return selected;

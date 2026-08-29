@@ -120,6 +120,21 @@ describe('EV Sign signer profile resolution', () => {
     });
   });
 
+  it('normalizes a provider-default profile into an omitted certificate selector', () => {
+    expect(resolveProfile()({
+      EVSIGN_ACTIVE_PROFILE: 'naisnet',
+      EVSIGN_SIGNER_PROFILES_JSON: JSON.stringify([
+        { name: 'naisnet', cert: null, subject: 'CN=NaisNet' },
+      ]),
+    })).toEqual({
+      schema: 1,
+      source: 'profiles',
+      profile: 'naisnet',
+      cert: '',
+      subject: 'CN=NaisNet',
+    });
+  });
+
   it('keeps the exact legacy pair when no profile configuration exists', () => {
     expect(resolveProfile()({
       EVSIGN_CERT: 'legacy-cert',
@@ -130,6 +145,18 @@ describe('EV Sign signer profile resolution', () => {
       profile: 'legacy',
       cert: 'legacy-cert',
       subject: 'CN=Legacy',
+    });
+  });
+
+  it('uses the provider default certificate when legacy configuration omits EVSIGN_CERT', () => {
+    expect(resolveProfile()({
+      EVSIGN_EXPECTED_SUBJECT: 'CN=NaisNet',
+    })).toEqual({
+      schema: 1,
+      source: 'legacy',
+      profile: 'legacy',
+      cert: '',
+      subject: 'CN=NaisNet',
     });
   });
 

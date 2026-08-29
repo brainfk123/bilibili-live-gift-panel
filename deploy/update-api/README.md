@@ -6,18 +6,18 @@ This deployment serves private COS release metadata through the API only. Keep t
 
 Preferred GitHub Actions variables: `UPDATE_API_BASE_URL`, `EVSIGN_ACTIVE_PROFILE`, `EVSIGN_SIGNER_PROFILES_JSON`.
 
-`EVSIGN_SIGNER_PROFILES_JSON` is a JSON array of 1 to 16 exact signer profiles. Each profile has only `name`, `cert`, and `subject`; `cert` may be empty only when the reviewed EVSign account default is intended, while `subject` must be the complete reviewed Authenticode Subject. Example:
+`EVSIGN_SIGNER_PROFILES_JSON` is a JSON array of 1 to 16 exact signer profiles. Each profile has only `name`, `cert`, and `subject`. Set `cert` to `null` when the reviewed EVSign account default is intended; an empty string remains accepted for compatibility. Set `cert` to a non-empty string only for a provider-issued certificate selector. `subject` must always be the complete reviewed Authenticode Subject. Example:
 
 ```json
 [
-  {"name":"current","cert":"reviewed-certificate-selector","subject":"CN=Reviewed Current Signer, O=Reviewed Organization, C=CN"},
+  {"name":"current","cert":null,"subject":"CN=Reviewed Current Signer, O=Reviewed Organization, C=CN"},
   {"name":"next","cert":"reviewed-next-certificate-selector","subject":"CN=Reviewed Next Signer, O=Reviewed Organization, C=CN"}
 ]
 ```
 
-Changing `EVSIGN_ACTIVE_PROFILE` switches the certificate selector and exact Subject together. The workflow resolves that pair once and uses it for the signed FFmpeg component identity, inner signature, embedded application publisher, outer signature, and published-asset verification. An unknown profile, malformed JSON, duplicate name, or actual signer mismatch fails closed; never add a signer only because an unexpected release failed.
+Changing `EVSIGN_ACTIVE_PROFILE` switches the certificate selection mode and exact Subject together. The workflow resolves that pair once and uses it for the signed FFmpeg component identity, inner signature, embedded application publisher, outer signature, and published-asset verification. An unknown profile, malformed JSON, duplicate name, or actual signer mismatch fails closed; never add a signer only because an unexpected release failed.
 
-Legacy fallback variables: `EVSIGN_CERT`, `EVSIGN_EXPECTED_SUBJECT`. They remain supported only when both profile variables are absent. Do not configure only one profile variable; when both profile variables exist, the selected profile is authoritative and the legacy values are ignored.
+Legacy fallback variables: required `EVSIGN_EXPECTED_SUBJECT` and optional `EVSIGN_CERT`. When `EVSIGN_CERT` is absent, EVSign uses the provider default certificate and the workflow still verifies the exact expected Subject after signing. The fallback remains supported only when both profile variables are absent. Do not configure only one profile variable; when both profile variables exist, the selected profile is authoritative and the legacy values are ignored.
 
 GitHub Actions secrets: `EVSIGN_KEY`, `EVSIGN_PASSWORD`.
 
