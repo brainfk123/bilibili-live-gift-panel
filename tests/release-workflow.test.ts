@@ -275,12 +275,10 @@ describe('release workflow supply-chain contract', () => {
       expect(steps[index]?.if).toContain("env.FFMPEG_COMPONENT_EXISTS != 'true'");
     }
     expect(steps[downloadHit]?.if).toContain("env.FFMPEG_COMPONENT_EXISTS == 'true'");
-    expect(steps[identity]?.env?.EVSIGN_EXPECTED_SUBJECT)
-      .toBe('${{ vars.EVSIGN_EXPECTED_SUBJECT }}');
+    expect(steps[identity]?.env).toBeUndefined();
     expect(steps[identity]?.run).toContain('$identity.schema -ne 2');
     expect(steps[identity]?.run).toContain('ffmpeg-component-v2-$($identity.fingerprint)');
-    expect(steps[packageComponent]?.env?.EVSIGN_EXPECTED_SUBJECT)
-      .toBe('${{ vars.EVSIGN_EXPECTED_SUBJECT }}');
+    expect(steps[packageComponent]?.env).toBeUndefined();
     expect(steps[install]?.run).toContain('scripts/ffmpeg-component-assets.mjs install');
     expect(steps[install]?.run).toContain('verify-metadata');
     expect(steps[downloadPublished]?.run).toContain('Invoke-RestMethod');
@@ -294,6 +292,39 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[publish]?.run).toContain('Invoke-RestMethod');
   });
 
+  it('resolves one signer profile before component identity and exports one canonical signing pair', () => {
+    const { steps } = releaseWorkflow();
+    const resolveSigner = stepIndex(steps, 'Resolve EVSign signer profile');
+    const identity = stepIndex(steps, 'Resolve FFmpeg component identity');
+    const signInner = stepIndex(steps, 'Sign and verify inner FFmpeg');
+    const buildOuter = stepIndex(steps, 'Build release executable');
+    const signOuter = stepIndex(steps, 'Prepare and sign release executable');
+    const validate = stepIndex(steps, 'Validate published release assets');
+
+    expect(resolveSigner).toBeLessThan(identity);
+    expect(steps[resolveSigner]?.env).toEqual({
+      EVSIGN_ACTIVE_PROFILE: '${{ vars.EVSIGN_ACTIVE_PROFILE }}',
+      EVSIGN_SIGNER_PROFILES_JSON: '${{ vars.EVSIGN_SIGNER_PROFILES_JSON }}',
+      EVSIGN_CERT: '${{ vars.EVSIGN_CERT }}',
+      EVSIGN_EXPECTED_SUBJECT: '${{ vars.EVSIGN_EXPECTED_SUBJECT }}',
+    });
+    expect(steps[resolveSigner]?.run).toContain('node scripts/sign-evsign.mjs --resolve-profile');
+    expect(steps[resolveSigner]?.run).toContain('$profile.schema -ne 1');
+    expect(steps[resolveSigner]?.run).toContain('EVSIGN_CERT=$($profile.cert)');
+    expect(steps[resolveSigner]?.run).toContain('EVSIGN_EXPECTED_SUBJECT=$($profile.subject)');
+    expect(steps[resolveSigner]?.run).toContain('APP_UPDATE_PUBLISHER=$($profile.subject)');
+    for (const [index, step] of steps.entries()) {
+      if (index === resolveSigner) continue;
+      expect(Object.values(step.env ?? {})).not.toContain('${{ vars.EVSIGN_CERT }}');
+      expect(Object.values(step.env ?? {})).not.toContain('${{ vars.EVSIGN_EXPECTED_SUBJECT }}');
+    }
+    for (const index of [identity, signInner, buildOuter, signOuter, validate]) {
+      expect(steps[index]?.env ?? {}).not.toHaveProperty('EVSIGN_CERT');
+      expect(steps[index]?.env ?? {}).not.toHaveProperty('EVSIGN_EXPECTED_SUBJECT');
+    }
+    expect(steps[buildOuter]?.env).not.toHaveProperty('APP_UPDATE_PUBLISHER');
+  });
+
   it('gates release publication on update tooling tests and the expected signer subject', () => {
     const { steps } = releaseWorkflow();
     const testUpdateApi = stepIndex(steps, 'Test domestic update tooling');
@@ -304,8 +335,7 @@ describe('release workflow supply-chain contract', () => {
       .toBe('go -C updateapi test ./... -race -count=1');
     expect(testUpdateApi).toBeLessThan(githubRelease);
     expect(signOuter).toBeLessThan(githubRelease);
-    expect(steps[signOuter]?.env?.EVSIGN_EXPECTED_SUBJECT)
-      .toBe('${{ vars.EVSIGN_EXPECTED_SUBJECT }}');
+    expect(steps[signOuter]?.env).not.toHaveProperty('EVSIGN_EXPECTED_SUBJECT');
     expect(steps[signOuter]?.run).toContain(
       '$signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid',
     );
@@ -329,9 +359,9 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[build]?.env).toMatchObject({
       APP_COMMIT: '${{ env.RELEASE_COMMIT }}',
       APP_UPDATE_API_URL: '${{ vars.UPDATE_API_BASE_URL }}',
-      APP_UPDATE_PUBLISHER: '${{ vars.EVSIGN_EXPECTED_SUBJECT }}',
-      EVSIGN_EXPECTED_SUBJECT: '${{ vars.EVSIGN_EXPECTED_SUBJECT }}',
     });
+    expect(steps[build]?.env).not.toHaveProperty('APP_UPDATE_PUBLISHER');
+    expect(steps[build]?.env).not.toHaveProperty('EVSIGN_EXPECTED_SUBJECT');
     expect(build).toBeLessThan(prepareCli);
     expect(prepareCli).toBeLessThan(sign);
     expect(steps[prepareCli]?.run).toContain('https://mc.evsign.cn/evsign-client-cli-windows-latest');

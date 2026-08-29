@@ -107,6 +107,25 @@ jobs:
           go-version-file: updateapi/go.mod
           cache-dependency-path: updateapi/go.sum
 
+      - name: Resolve EVSign signer profile
+        shell: pwsh
+        env:
+          EVSIGN_ACTIVE_PROFILE: ${{ vars.EVSIGN_ACTIVE_PROFILE }}
+          EVSIGN_SIGNER_PROFILES_JSON: ${{ vars.EVSIGN_SIGNER_PROFILES_JSON }}
+          EVSIGN_CERT: ${{ vars.EVSIGN_CERT }}
+          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
+        run: |
+          $profileJSON = node scripts/sign-evsign.mjs --resolve-profile
+          if ($LASTEXITCODE -ne 0) { throw "EVSign signer profile resolution failed" }
+          $profile = $profileJSON | ConvertFrom-Json
+          if ($profile.schema -ne 1 -or [string]::IsNullOrWhiteSpace([string]$profile.profile) -or [string]::IsNullOrWhiteSpace([string]$profile.subject)) {
+            throw "EVSign signer profile output is invalid"
+          }
+          "EVSIGN_CERT=$($profile.cert)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "EVSIGN_EXPECTED_SUBJECT=$($profile.subject)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "APP_UPDATE_PUBLISHER=$($profile.subject)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Resolved EVSign signer profile '$($profile.profile)' from '$($profile.source)' configuration."
+
       - name: Test domestic update tooling
         env:
           GOWORK: 'off'
@@ -150,8 +169,6 @@ jobs:
       - name: Resolve FFmpeg component identity
         if: env.RELEASE_EXISTS != 'true'
         shell: pwsh
-        env:
-          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
         run: |
           $identityJSON = node scripts/ffmpeg-component-assets.mjs identity
           if ($LASTEXITCODE -ne 0) { throw "FFmpeg component identity resolution failed" }
@@ -231,8 +248,6 @@ jobs:
         env:
           EVSIGN_KEY: ${{ secrets.EVSIGN_KEY }}
           EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
-          EVSIGN_CERT: ${{ vars.EVSIGN_CERT }}
-          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
         run: |
           node scripts/sign-evsign.mjs dist/ffmpeg/ffmpeg.exe
           if ($LASTEXITCODE -ne 0) {
@@ -254,7 +269,6 @@ jobs:
           FFMPEG_AUTHENTICODE: 'true'
           APP_VERSION: ${{ env.RELEASE_TAG }}
           APP_COMMIT: ${{ env.RELEASE_COMMIT }}
-          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
         run: |
           node scripts/package-ffmpeg.mjs --input dist/ffmpeg/ffmpeg.exe
           if ($LASTEXITCODE -ne 0) {
@@ -268,8 +282,6 @@ jobs:
       - name: Package signed FFmpeg component
         if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
         shell: pwsh
-        env:
-          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
         run: |
           Compress-Archive -LiteralPath dist/gift-clip-test-tools/ffmpeg.exe,dist/gift-clip-test-tools/ffprobe.exe,dist/gift-clip-test-tools/manifest.json -DestinationPath dist/gift-clip-test-tools.zip -CompressionLevel Optimal
           node scripts/ffmpeg-component-assets.mjs prepare --output dist/ffmpeg-component-publish
@@ -337,7 +349,6 @@ jobs:
         if: env.RELEASE_EXISTS != 'true'
         shell: pwsh
         env:
-          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
           GH_TOKEN: ${{ github.token }}
         run: |
           $componentDirectory = if ($env:FFMPEG_COMPONENT_EXISTS -eq 'true') { 'dist/ffmpeg-component-download' } else { 'dist/ffmpeg-component-published' }
@@ -366,8 +377,6 @@ jobs:
           APP_VERSION: ${{ env.RELEASE_TAG }}
           APP_COMMIT: ${{ env.RELEASE_COMMIT }}
           APP_UPDATE_API_URL: ${{ vars.UPDATE_API_BASE_URL }}
-          APP_UPDATE_PUBLISHER: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
-          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
 
       - name: Run backend tests
         if: env.RELEASE_EXISTS != 'true'
@@ -398,8 +407,6 @@ jobs:
         env:
           EVSIGN_KEY: ${{ secrets.EVSIGN_KEY }}
           EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
-          EVSIGN_CERT: ${{ vars.EVSIGN_CERT }}
-          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
           EVSIGN_CLI_PATH: ${{ runner.temp }}\evsign-client-1.0.1.exe
         run: |
           Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.exe
@@ -542,8 +549,6 @@ jobs:
 
       - name: Validate published release assets
         shell: pwsh
-        env:
-          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
         run: |
           foreach ($path in @('dist/gift-panel-windows-x64.exe', 'dist/gift-panel-windows-x64.exe.sha256', 'dist/gift-panel-update.json', 'dist/gift-panel-changelog.json')) {
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {

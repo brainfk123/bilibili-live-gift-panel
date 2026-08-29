@@ -863,8 +863,10 @@ useradd() { ACCOUNT_CREATED=1; printf 'useradd\\n' >> "$ACCOUNT_LOG"; }
       expect(readme).not.toMatch(forbidden);
     }
     expect(readme).toContain(
-      'GitHub Actions variables: `UPDATE_API_BASE_URL`, `EVSIGN_CERT`, `EVSIGN_EXPECTED_SUBJECT`.',
+      'Preferred GitHub Actions variables: `UPDATE_API_BASE_URL`, `EVSIGN_ACTIVE_PROFILE`, `EVSIGN_SIGNER_PROFILES_JSON`.',
     );
+    expect(readme).toContain('Legacy fallback variables: `EVSIGN_CERT`, `EVSIGN_EXPECTED_SUBJECT`.');
+    expect(readme).toContain('Changing `EVSIGN_ACTIVE_PROFILE` switches the certificate selector and exact Subject together.');
     expect(readme).toContain('GitHub Actions secrets: `EVSIGN_KEY`, `EVSIGN_PASSWORD`.');
     expect(readme).toContain('every five minutes');
     expect(readme).toContain('lighthouse-cos-publisher');

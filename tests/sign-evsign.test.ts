@@ -1,7 +1,9 @@
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import * as evsign from '../scripts/sign-evsign.mjs';
 import { signFileWithRetry } from '../scripts/sign-evsign.mjs';
 
 const roots: string[] = [];
@@ -84,5 +86,87 @@ describe('EV Sign retry orchestration', () => {
     })).rejects.toThrow(/empty/);
     expect(attempts).toBe(1);
     expect(readFileSync(outputPath, 'utf8')).toBe('old-output');
+  });
+});
+
+describe('EV Sign signer profile resolution', () => {
+  const resolveProfile = () => (evsign as typeof evsign & {
+    resolveEVSignSignerProfile: (environment: Record<string, string | undefined>) => {
+      schema: number;
+      source: string;
+      profile: string;
+      cert: string;
+      subject: string;
+    };
+  }).resolveEVSignSignerProfile;
+
+  it('selects the active profile as one atomic certificate and subject pair', () => {
+    const result = resolveProfile()({
+      EVSIGN_ACTIVE_PROFILE: 'naisnet',
+      EVSIGN_SIGNER_PROFILES_JSON: JSON.stringify([
+        { name: 'rushrush', cert: 'cert-old', subject: 'CN=RushRush' },
+        { name: 'naisnet', cert: 'cert-new', subject: 'CN=NaisNet' },
+      ]),
+      EVSIGN_CERT: 'stale-cert',
+      EVSIGN_EXPECTED_SUBJECT: 'CN=Stale',
+    });
+
+    expect(result).toEqual({
+      schema: 1,
+      source: 'profiles',
+      profile: 'naisnet',
+      cert: 'cert-new',
+      subject: 'CN=NaisNet',
+    });
+  });
+
+  it('keeps the exact legacy pair when no profile configuration exists', () => {
+    expect(resolveProfile()({
+      EVSIGN_CERT: 'legacy-cert',
+      EVSIGN_EXPECTED_SUBJECT: 'CN=Legacy',
+    })).toEqual({
+      schema: 1,
+      source: 'legacy',
+      profile: 'legacy',
+      cert: 'legacy-cert',
+      subject: 'CN=Legacy',
+    });
+  });
+
+  it('emits the selected profile as strict JSON for the release workflow', () => {
+    const result = spawnSync(process.execPath, [resolve('scripts/sign-evsign.mjs'), '--resolve-profile'], {
+      cwd: resolve('.'),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        EVSIGN_ACTIVE_PROFILE: 'naisnet',
+        EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":"cert-new","subject":"CN=NaisNet"}]',
+        EVSIGN_CERT: '',
+        EVSIGN_EXPECTED_SUBJECT: '',
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      schema: 1,
+      source: 'profiles',
+      profile: 'naisnet',
+      cert: 'cert-new',
+      subject: 'CN=NaisNet',
+    });
+  });
+
+  it.each([
+    ['unknown active profile', { EVSIGN_ACTIVE_PROFILE: 'missing', EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":"","subject":"CN=NaisNet"}]' }, /active EVSign signer profile does not exist/],
+    ['profiles without an active name', { EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":"","subject":"CN=NaisNet"}]' }, /must be configured together/],
+    ['active name without profiles', { EVSIGN_ACTIVE_PROFILE: 'naisnet', EVSIGN_EXPECTED_SUBJECT: 'CN=Legacy' }, /must be configured together/],
+    ['duplicate profile names', { EVSIGN_ACTIVE_PROFILE: 'naisnet', EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":"a","subject":"CN=A"},{"name":"naisnet","cert":"b","subject":"CN=B"}]' }, /profile name is duplicated/],
+    ['unknown profile property', { EVSIGN_ACTIVE_PROFILE: 'naisnet', EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":"","subject":"CN=NaisNet","acceptAny":true}]' }, /unknown properties/],
+    ['subject containing a newline', { EVSIGN_ACTIVE_PROFILE: 'naisnet', EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":"","subject":"CN=NaisNet\\nO=Injected"}]' }, /subject is invalid/],
+    ['certificate selector with surrounding whitespace', { EVSIGN_ACTIVE_PROFILE: 'naisnet', EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":" cert-new ","subject":"CN=NaisNet"}]' }, /cert is invalid/],
+    ['subject with surrounding whitespace', { EVSIGN_ACTIVE_PROFILE: 'naisnet', EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":"","subject":" CN=NaisNet "}]' }, /subject is invalid/],
+    ['missing legacy subject', { EVSIGN_CERT: 'legacy-cert' }, /EVSIGN_EXPECTED_SUBJECT is required/],
+  ])('rejects %s', (_label, environment, expected) => {
+    expect(() => resolveProfile()(environment)).toThrow(expected);
   });
 });

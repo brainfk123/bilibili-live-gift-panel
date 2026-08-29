@@ -9,6 +9,67 @@ const DEFAULT_ATTEMPT_TIMEOUT_MS = 600_000;
 const DEFAULT_RETRY_DELAYS_MS = Object.freeze([15_000, 45_000]);
 const SIGNATURE_GROWTH_LIMIT = 4 * 1024 * 1024;
 const RETRYABLE_NETWORK_CODES = new Set(['ECONNABORTED', 'ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETDOWN', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'ETIMEDOUT']);
+const SIGNER_PROFILE_KEYS = new Set(['name', 'cert', 'subject']);
+
+export function resolveEVSignSignerProfile(environment = process.env) {
+  const profilesJSON = environment.EVSIGN_SIGNER_PROFILES_JSON?.trim() || '';
+  const activeProfile = environment.EVSIGN_ACTIVE_PROFILE?.trim() || '';
+  if ((profilesJSON === '') !== (activeProfile === '')) {
+    throw new Error('EVSIGN_SIGNER_PROFILES_JSON and EVSIGN_ACTIVE_PROFILE must be configured together.');
+  }
+
+  if (!profilesJSON) {
+    const cert = environment.EVSIGN_CERT?.trim() || '';
+    const subject = environment.EVSIGN_EXPECTED_SUBJECT?.trim() || '';
+    if (!subject) throw new Error('EVSIGN_EXPECTED_SUBJECT is required when signer profiles are not configured.');
+    validateProfileValue('cert', cert, 1024, true);
+    validateProfileValue('subject', subject, 4096, false);
+    return { schema: 1, source: 'legacy', profile: 'legacy', cert, subject };
+  }
+
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(activeProfile)) {
+    throw new Error('EVSIGN_ACTIVE_PROFILE is invalid.');
+  }
+
+  let profiles;
+  try {
+    profiles = JSON.parse(profilesJSON);
+  } catch {
+    throw new Error('EVSIGN_SIGNER_PROFILES_JSON is not valid JSON.');
+  }
+  if (!Array.isArray(profiles) || profiles.length < 1 || profiles.length > 16) {
+    throw new Error('EVSIGN_SIGNER_PROFILES_JSON must contain an array of 1 to 16 profiles.');
+  }
+
+  const names = new Set();
+  let selected;
+  for (const profile of profiles) {
+    if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
+      throw new Error('Each EVSign signer profile must be an object.');
+    }
+    const keys = Object.keys(profile);
+    if (keys.some((key) => !SIGNER_PROFILE_KEYS.has(key)) || keys.length !== SIGNER_PROFILE_KEYS.size) {
+      throw new Error('EVSign signer profile contains missing or unknown properties.');
+    }
+    const { name, cert, subject } = profile;
+    if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) {
+      throw new Error('EVSign signer profile name is invalid.');
+    }
+    if (names.has(name)) throw new Error('EVSign signer profile name is duplicated.');
+    names.add(name);
+    validateProfileValue('cert', cert, 1024, true);
+    validateProfileValue('subject', subject, 4096, false);
+    if (name === activeProfile) selected = { schema: 1, source: 'profiles', profile: name, cert, subject };
+  }
+  if (!selected) throw new Error('The active EVSign signer profile does not exist.');
+  return selected;
+}
+
+function validateProfileValue(name, value, maximumBytes, allowEmpty) {
+  if (typeof value !== 'string' || value !== value.trim() || (!allowEmpty && value.length === 0) || /[\r\n]/.test(value) || Buffer.byteLength(value, 'utf8') > maximumBytes) {
+    throw new Error(`EVSign signer profile ${name} is invalid.`);
+  }
+}
 
 export async function requestSignedBytes(source, { endpoint, headers, attemptTimeoutMs, maximumResponseBytes }) {
   const url = new URL(endpoint);
@@ -138,6 +199,11 @@ function readRetryDelays() {
 
 async function main() {
   const [inputArg, outputArg = inputArg] = process.argv.slice(2);
+  if (inputArg === '--resolve-profile') {
+    if (process.argv.length !== 3) throw new Error('Usage: node scripts/sign-evsign.mjs --resolve-profile');
+    console.log(JSON.stringify(resolveEVSignSignerProfile(process.env)));
+    return;
+  }
   if (!inputArg) throw new Error('Usage: node scripts/sign-evsign.mjs <input.exe> [output.exe]');
   const key = process.env.EVSIGN_KEY?.trim();
   if (!key) throw new Error('EVSIGN_KEY is required. Store the EV Sign license UUID in GitHub Actions Secrets.');
