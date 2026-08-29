@@ -42,6 +42,15 @@ type Config struct {
 	Lifetime         time.Duration
 	PollInterval     time.Duration
 	EncodeQR         func(string) (string, error)
+	Diagnostic       func(DiagnosticEvent)
+}
+
+// DiagnosticEvent reports only a fixed reason and numeric upstream states.
+// It must never contain a challenge ID, QR key, URL, Cookie, UID, or account ID.
+type DiagnosticEvent struct {
+	Reason       string
+	UpstreamCode int
+	StageCode    int
 }
 
 type pendingChallenge struct {
@@ -72,6 +81,7 @@ type Adapter struct {
 	lifetime         time.Duration
 	pollInterval     time.Duration
 	encodeQR         func(string) (string, error)
+	diagnostic       func(DiagnosticEvent)
 
 	mu         sync.Mutex
 	closed     bool
@@ -121,7 +131,7 @@ func New(config Config) (*Adapter, error) {
 	}
 	return &Adapter{
 		client: config.Client, generateEndpoint: config.GenerateEndpoint, pollEndpoint: config.PollEndpoint, navEndpoint: config.NavEndpoint,
-		now: config.Now, lifetime: config.Lifetime, pollInterval: config.PollInterval, encodeQR: config.EncodeQR,
+		now: config.Now, lifetime: config.Lifetime, pollInterval: config.PollInterval, encodeQR: config.EncodeQR, diagnostic: config.Diagnostic,
 		challenges: make(map[string]*pendingChallenge),
 	}, nil
 }
@@ -245,6 +255,7 @@ func (adapter *Adapter) poll(ctx context.Context, challengeID string, retainCred
 		return identity.VerificationPoll{}, err
 	}
 	if payload.Code != 0 {
+		adapter.reportDiagnostic(DiagnosticEvent{Reason: "poll_envelope_rejected", UpstreamCode: payload.Code, StageCode: payload.Data.Code})
 		adapter.Forget(challengeID)
 		return identity.VerificationPoll{}, identity.ErrVerificationFailed
 	}
@@ -261,6 +272,7 @@ func (adapter *Adapter) poll(ctx context.Context, challengeID string, retainCred
 	case 0:
 		cookies, ok := loginCookies(response, payload.Data.URL)
 		if !ok {
+			adapter.reportDiagnostic(DiagnosticEvent{Reason: "verified_session_missing", UpstreamCode: payload.Code, StageCode: payload.Data.Code})
 			adapter.Forget(challengeID)
 			return identity.VerificationPoll{}, identity.ErrVerificationFailed
 		}
@@ -313,8 +325,15 @@ func (adapter *Adapter) poll(ctx context.Context, challengeID string, retainCred
 		}
 		return identity.VerificationPoll{Stage: identity.VerificationVerified, Verification: identity.Verification{UID: uid, CompletedAt: adapter.now()}}, nil
 	default:
+		adapter.reportDiagnostic(DiagnosticEvent{Reason: "poll_stage_rejected", UpstreamCode: payload.Code, StageCode: payload.Data.Code})
 		adapter.Forget(challengeID)
 		return identity.VerificationPoll{}, identity.ErrVerificationFailed
+	}
+}
+
+func (adapter *Adapter) reportDiagnostic(event DiagnosticEvent) {
+	if adapter != nil && adapter.diagnostic != nil {
+		adapter.diagnostic(event)
 	}
 }
 
@@ -444,6 +463,7 @@ func (adapter *Adapter) fetchUID(ctx context.Context, cookies map[string]string)
 		return "", err
 	}
 	if payload.Code != 0 || !payload.Data.IsLogin || payload.Data.MID <= 0 {
+		adapter.reportDiagnostic(DiagnosticEvent{Reason: "identity_lookup_rejected", UpstreamCode: payload.Code, StageCode: 0})
 		return "", identity.ErrVerificationFailed
 	}
 	return strconv.FormatInt(payload.Data.MID, 10), nil

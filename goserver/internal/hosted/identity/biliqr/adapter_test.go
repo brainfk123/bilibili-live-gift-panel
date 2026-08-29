@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -741,6 +742,114 @@ func TestAdapterTerminalBilibiliResultsAlwaysForgetSecrets(t *testing.T) {
 			}
 			if _, err := adapter.Poll(context.Background(), challenge.ID); !errors.Is(err, identity.ErrChallengeNotFound) {
 				t.Fatalf("terminal challenge remained in memory: %v", err)
+			}
+		})
+	}
+}
+
+func TestAdapterReportsSafeReasonWhenVerifiedPollHasNoSession(t *testing.T) {
+	const privateKey = "private-diagnostic-key"
+	var diagnostics []DiagnosticEvent
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/generate":
+			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": testVerificationURL(privateKey), "qrcode_key": privateKey}})
+		case "/poll":
+			writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"code": 0, "url": "https://example.test/callback?sid=private-callback"}})
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+
+	adapter, err := New(Config{
+		Client: server.Client(), GenerateEndpoint: server.URL + "/generate", PollEndpoint: server.URL + "/poll", NavEndpoint: server.URL + "/nav",
+		EncodeQR:   func(string) (string, error) { return "qr", nil },
+		Diagnostic: func(event DiagnosticEvent) { diagnostics = append(diagnostics, event) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := adapter.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Poll(context.Background(), challenge.ID); !errors.Is(err, identity.ErrVerificationFailed) {
+		t.Fatalf("Poll() error = %v, want verification failed", err)
+	}
+	want := []DiagnosticEvent{{Reason: "verified_session_missing", UpstreamCode: 0, StageCode: 0}}
+	if !reflect.DeepEqual(diagnostics, want) {
+		t.Fatalf("diagnostics = %#v, want %#v", diagnostics, want)
+	}
+	encoded, err := json.Marshal(diagnostics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{privateKey, "private-callback", "qrcode_key", "SESSDATA"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("diagnostic exposed private value or credential field %q", forbidden)
+		}
+	}
+}
+
+func TestAdapterReportsSafeReasonsForOtherTerminalBilibiliResponses(t *testing.T) {
+	tests := []struct {
+		name      string
+		poll      map[string]any
+		setCookie bool
+		nav       map[string]any
+		want      DiagnosticEvent
+	}{
+		{
+			name: "upstream envelope rejected", poll: map[string]any{"code": -352, "data": map[string]any{"code": 0}},
+			want: DiagnosticEvent{Reason: "poll_envelope_rejected", UpstreamCode: -352, StageCode: 0},
+		},
+		{
+			name: "unknown poll stage", poll: map[string]any{"code": 0, "data": map[string]any{"code": 86095}},
+			want: DiagnosticEvent{Reason: "poll_stage_rejected", UpstreamCode: 0, StageCode: 86095},
+		},
+		{
+			name: "identity lookup rejected", poll: map[string]any{"code": 0, "data": map[string]any{"code": 0, "url": "https://example.test/"}},
+			setCookie: true, nav: map[string]any{"code": -101, "data": map[string]any{"isLogin": false, "mid": 0}},
+			want: DiagnosticEvent{Reason: "identity_lookup_rejected", UpstreamCode: -101, StageCode: 0},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var diagnostics []DiagnosticEvent
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/generate":
+					writeAdapterJSON(response, map[string]any{"code": 0, "data": map[string]any{"url": testVerificationURL("private-key"), "qrcode_key": "private-key"}})
+				case "/poll":
+					if test.setCookie {
+						http.SetCookie(response, &http.Cookie{Name: "SESSDATA", Value: "private-session"})
+					}
+					writeAdapterJSON(response, test.poll)
+				case "/nav":
+					writeAdapterJSON(response, test.nav)
+				default:
+					http.NotFound(response, request)
+				}
+			}))
+			defer server.Close()
+			adapter, err := New(Config{
+				Client: server.Client(), GenerateEndpoint: server.URL + "/generate", PollEndpoint: server.URL + "/poll", NavEndpoint: server.URL + "/nav",
+				EncodeQR:   func(string) (string, error) { return "qr", nil },
+				Diagnostic: func(event DiagnosticEvent) { diagnostics = append(diagnostics, event) },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			challenge, err := adapter.Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := adapter.Poll(context.Background(), challenge.ID); !errors.Is(err, identity.ErrVerificationFailed) {
+				t.Fatalf("Poll() error = %v, want verification failed", err)
+			}
+			if !reflect.DeepEqual(diagnostics, []DiagnosticEvent{test.want}) {
+				t.Fatalf("diagnostics = %#v, want %#v", diagnostics, []DiagnosticEvent{test.want})
 			}
 		})
 	}

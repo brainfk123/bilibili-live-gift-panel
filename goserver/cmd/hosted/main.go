@@ -133,7 +133,13 @@ func run() error {
 	if err != nil {
 		return errors.New("configure administrator identity")
 	}
-	verifier, err := biliqr.New(biliqr.Config{})
+	verifier, err := biliqr.New(biliqr.Config{Diagnostic: func(event biliqr.DiagnosticEvent) {
+		slog.Warn("hosted Bilibili QR verification rejected",
+			"reason", event.Reason,
+			"upstream_code", event.UpstreamCode,
+			"stage_code", event.StageCode,
+		)
+	}})
 	if err != nil {
 		return errors.New("configure Bilibili verification")
 	}
