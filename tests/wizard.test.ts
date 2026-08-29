@@ -2297,13 +2297,13 @@ describe('single-page configuration rendering', () => {
     const dialog = root.querySelector('.changelog-dialog');
     expect(dialog).not.toBeNull();
     expect(textOf(dialog!)).toContain('这次更新了什么？');
-    expect(textOf(dialog!)).toContain('自动更新体验优化');
-    expect(textOf(dialog!)).toContain('更新下载现在会显示真实进度；校验完成后提供 3 秒安装倒计时和立即安装按钮，替换程序期间页面会持续提示并自动重连。');
+    expect(textOf(dialog!)).toContain('新增在线迁移导出');
+    expect(textOf(dialog!)).toContain('现在可以从“配置与数据”导出在线迁移文件；导出内容会按完整玩法计算依赖，并仅包含可迁移配置、当前状态与稳定剪裁预设，不包含登录信息、观众记录、历史礼物或本地素材。');
     expect(root.querySelectorAll('.changelog-visual')).toHaveLength(0);
     expect(textOf(dialog!)).not.toContain('训练中心');
     (root.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
 
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.7'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.8'));
     expect(root.querySelector('.changelog-dialog')).toBeNull();
   });
 
@@ -2344,7 +2344,7 @@ describe('single-page configuration rendering', () => {
         return Response.json({
           code: 0,
           update: {
-            state: 'up-to-date', currentVersion: '0.4.7', latestVersion: '0.4.7',
+            state: 'up-to-date', currentVersion: '0.4.8', latestVersion: '0.4.8',
             message: '当前已经是最新版本。', autoUpdate: true, restartRequired: false,
           },
         });
@@ -2362,7 +2362,7 @@ describe('single-page configuration rendering', () => {
     mountConfig(firstRoot as unknown as HTMLElement);
     await vi.waitFor(() => expect(firstRoot.querySelector('.changelog-dialog')).not.toBeNull());
     (firstRoot.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.7'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.8'));
 
     const secondRoot = new TestElement('div');
     mountConfig(secondRoot as unknown as HTMLElement);
