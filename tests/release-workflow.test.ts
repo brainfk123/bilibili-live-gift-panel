@@ -307,6 +307,9 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[signOuter]?.run).toContain(
       '$signature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT',
     );
+    expect(steps[signOuter]?.run).toContain(
+      'Actual signer: $($signature.SignerCertificate.Subject)',
+    );
   });
 
   it('builds domestic update identity into the signed executable and ends at a validated GitHub Release', () => {

@@ -409,7 +409,7 @@ jobs:
             throw "Authenticode signer certificate is missing"
           }
           if ($signature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT) {
-            throw "Authenticode signer subject does not match EVSIGN_EXPECTED_SUBJECT"
+            throw "Authenticode signer subject does not match EVSIGN_EXPECTED_SUBJECT. Actual signer: $($signature.SignerCertificate.Subject)"
           }
           Write-Host 'Verified outer application Authenticode signature.'
 
