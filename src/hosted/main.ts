@@ -81,4 +81,9 @@ void HostedAPI.connect().then(async (api) => {
   applicationLifecycle.run(() => renderHostedShell(root, { serviceStatus: 'unavailable', onLogin: () => undefined }));
 });
 
-window.addEventListener('pagehide', () => { applicationLifecycle.dispose(); disposeRuntimePresence(); observeViewOperation(viewHost.dispose()); }, { once: true });
+window.addEventListener('pagehide', (event) => {
+  if (event.persisted) return;
+  applicationLifecycle.dispose();
+  disposeRuntimePresence();
+  observeViewOperation(viewHost.dispose());
+});

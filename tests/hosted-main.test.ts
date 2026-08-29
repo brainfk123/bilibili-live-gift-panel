@@ -6,8 +6,27 @@ const harness = vi.hoisted(() => ({
   dispose: vi.fn(),
   renderShell: vi.fn(),
   lifecycleDispose: vi.fn(),
-  listeners: new Map<string, () => void>(),
+  listeners: new Map<string, (event?: { persisted?: boolean }) => void>(),
+  listenerOptions: new Map<string, { once?: boolean } | undefined>(),
 }));
+
+const registerListener = (
+  type: string,
+  listener: (event?: { persisted?: boolean }) => void,
+  options?: { once?: boolean },
+): void => {
+  harness.listeners.set(type, listener);
+  harness.listenerOptions.set(type, options);
+};
+
+const dispatch = (type: string, event?: { persisted?: boolean }): void => {
+  const listener = harness.listeners.get(type);
+  if (harness.listenerOptions.get(type)?.once) {
+    harness.listeners.delete(type);
+    harness.listenerOptions.delete(type);
+  }
+  listener?.(event);
+};
 
 vi.mock('../src/hosted/api', () => ({
   HostedAPI: { connect: harness.connect },
@@ -69,6 +88,7 @@ describe('Hosted production root operations', () => {
     harness.renderShell.mockReset();
     harness.lifecycleDispose.mockReset();
     harness.listeners.clear();
+    harness.listenerOptions.clear();
   });
 
   afterEach(() => {
@@ -92,14 +112,14 @@ describe('Hosted production root operations', () => {
     vi.stubGlobal('document', { getElementById: () => root });
     vi.stubGlobal('window', {
       location: { hash: '' },
-      addEventListener: (type: string, listener: () => void) => { harness.listeners.set(type, listener); },
+      addEventListener: registerListener,
       setTimeout,
       clearTimeout,
     });
 
     await import('../src/hosted/main');
     await vi.waitFor(() => expect(harness.replace).toHaveBeenCalledTimes(1));
-    harness.listeners.get('pagehide')?.();
+    dispatch('pagehide', { persisted: false });
     await vi.waitFor(() => expect(harness.dispose).toHaveBeenCalledTimes(1));
 
     expect([navigation.catchCalls(), pagehide.catchCalls()]).toEqual([1, 1]);
@@ -114,5 +134,33 @@ describe('Hosted production root operations', () => {
     expect(consoleWarn).not.toHaveBeenCalled();
     expect(JSON.stringify(root)).not.toContain(navigationFailure.message);
     expect(JSON.stringify(root)).not.toContain(pagehideFailure.message);
+  });
+
+  it('keeps the active login view through cached navigation and cleans up on permanent departure', async () => {
+    const root = new MainRoot();
+    const api = { session: vi.fn(async () => undefined) };
+    harness.connect.mockResolvedValue(api);
+    harness.replace.mockResolvedValue(undefined);
+    harness.dispose.mockResolvedValue(undefined);
+    vi.stubGlobal('HTMLElement', MainRoot);
+    vi.stubGlobal('document', { getElementById: () => root });
+    vi.stubGlobal('window', {
+      location: { hash: '' },
+      addEventListener: registerListener,
+      setTimeout,
+      clearTimeout,
+    });
+
+    await import('../src/hosted/main');
+    await vi.waitFor(() => expect(harness.replace).toHaveBeenCalledTimes(1));
+    dispatch('pagehide', { persisted: true });
+
+    expect(harness.dispose).not.toHaveBeenCalled();
+    expect(harness.lifecycleDispose).not.toHaveBeenCalled();
+
+    dispatch('pagehide', { persisted: false });
+
+    expect(harness.dispose).toHaveBeenCalledTimes(1);
+    expect(harness.lifecycleDispose).toHaveBeenCalledTimes(1);
   });
 });
