@@ -334,6 +334,21 @@ describe('release workflow supply-chain contract', () => {
     expect(validate).toBe(steps.length - 1);
   });
 
+  it('prepares the release test workspace and pinned browser before running tests', () => {
+    const { steps } = releaseWorkflow();
+    const installDependencies = stepIndex(steps, 'Install dependencies');
+    const prepareBrowser = stepIndex(steps, 'Install pinned Playwright Chromium for release E2E');
+    const runTests = stepIndex(steps, 'Run tests');
+
+    expect(installDependencies).toBeLessThan(prepareBrowser);
+    expect(prepareBrowser).toBeLessThan(runTests);
+    expect(steps[prepareBrowser]?.if).toBe("env.RELEASE_EXISTS != 'true'");
+    expect(steps[prepareBrowser]?.run).toContain(
+      'New-Item -ItemType Directory -Force -Path .cache',
+    );
+    expect(steps[prepareBrowser]?.run).toContain('npm exec -- playwright install chromium');
+  });
+
   it('reuses complete existing GitHub assets without rebuilding, resigning, or clobbering', () => {
     const { steps } = releaseWorkflow();
     const inspect = stepIndex(steps, 'Inspect existing GitHub release');

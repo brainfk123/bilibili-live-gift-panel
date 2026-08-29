@@ -124,6 +124,13 @@ jobs:
         if: env.RELEASE_EXISTS != 'true'
         run: npm ci
 
+      - name: Install pinned Playwright Chromium for release E2E
+        if: env.RELEASE_EXISTS != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .cache | Out-Null
+          npm exec -- playwright install chromium
+
       - name: Run tests
         if: env.RELEASE_EXISTS != 'true'
         run: npm test -- --reporter=dot
@@ -405,10 +412,6 @@ jobs:
             throw "Authenticode signer subject does not match EVSIGN_EXPECTED_SUBJECT"
           }
           Write-Host 'Verified outer application Authenticode signature.'
-
-      - name: Install pinned Playwright Chromium for release E2E
-        if: env.RELEASE_EXISTS != 'true'
-        run: npm exec -- playwright install chromium
 
       - name: Verify deterministic gift clip exports from signed package chain
         if: env.RELEASE_EXISTS != 'true'
