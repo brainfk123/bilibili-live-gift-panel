@@ -350,6 +350,7 @@ describe('release workflow supply-chain contract', () => {
       'New-Item -ItemType Directory -Force -Path .cache',
     );
     expect(steps[prepareBrowser]?.run).toContain('npm exec -- playwright install chromium');
+    expect(steps[runTests]?.run).toBe('npm test -- --reporter=dot --maxWorkers=2');
   });
 
   it('reuses complete existing GitHub assets without rebuilding, resigning, or clobbering', () => {

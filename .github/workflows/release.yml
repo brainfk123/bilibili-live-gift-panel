@@ -133,7 +133,7 @@ jobs:
 
       - name: Run tests
         if: env.RELEASE_EXISTS != 'true'
-        run: npm test -- --reporter=dot
+        run: npm test -- --reporter=dot --maxWorkers=2
 
       - name: Type check
         if: env.RELEASE_EXISTS != 'true'
