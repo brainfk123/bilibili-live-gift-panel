@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { HOSTED_USER_PAGES, parseHostedUserPage, hostedUserPageSearch } from '../src/hosted/user/routes';
 import { createHostedUserShell, renderHostedUserPageState } from '../src/hosted/user/shell';
+import { HOSTED_USER_SETTINGS_SECTIONS } from '../src/hosted/user/settings/migration-center';
 
 class Element {
   children: Element[] = [];
@@ -53,9 +54,101 @@ describe('Hosted user workspace routes', () => {
     expect(parseHostedUserPage('?workspace=')).toBe('overview');
     expect(hostedUserPageSearch('?source=login&workspace=overview', 'obs')).toBe('?source=login&workspace=obs');
   });
+
+  it('keeps account, devices, retention and migration under settings', () => {
+    expect(HOSTED_USER_SETTINGS_SECTIONS.map((section) => section.label)).toEqual([
+      '账号', '已登录设备', '数据保留', '迁移中心',
+    ]);
+  });
 });
 
 describe('Hosted user workspace shell', () => {
+  it('hydrates the authoritative mode without publishing a write and enables explicit toggles after loading', () => {
+    const { root } = dom();
+    const modeChanges = vi.fn();
+    const shell = createHostedUserShell(root as unknown as HTMLElement, {
+      initialPage: 'overview', experience: 'simple', experiencePending: true, configurationId: 'config-1',
+      onExperienceChange: modeChanges,
+      mount: () => ({ dispose() {} }),
+    });
+    const experienceButton = descendants(root).find((element) => element.className === 'hosted-user-experience')!;
+
+    expect(experienceButton.disabled).toBe(true);
+    shell.syncExperience('advanced');
+    expect(modeChanges).not.toHaveBeenCalled();
+    expect(root.children[0]!.dataset.experience).toBe('advanced');
+    shell.setExperiencePending(false);
+    expect(experienceButton.disabled).toBe(false);
+    shell.setExperience('simple');
+    expect(modeChanges).toHaveBeenCalledWith('simple');
+    void shell.dispose();
+  });
+
+  it('synchronizes browser history without publishing a new history entry', async () => {
+    const { root } = dom();
+    const pageChanges = vi.fn();
+    const shell = createHostedUserShell(root as unknown as HTMLElement, {
+      initialPage: 'overview', experience: 'simple', configurationId: 'config-1',
+      onPageChange: pageChanges,
+      mount: () => ({ dispose() {} }),
+    });
+
+    await shell.syncPage('data');
+
+    expect(shell.activePage()).toBe('data');
+    expect(pageChanges).not.toHaveBeenCalled();
+    await shell.dispose();
+  });
+
+  it('disposes each workspace exactly once during rapid navigation', async () => {
+    const { root } = dom();
+    let releaseOverview!: () => void;
+    const overviewGate = new Promise<void>((resolve) => { releaseOverview = resolve; });
+    let overviewDisposals = 0;
+    const mounts: string[] = [];
+    const shell = createHostedUserShell(root as unknown as HTMLElement, {
+      initialPage: 'overview', experience: 'simple', configurationId: 'config-1',
+      mount: (page) => {
+        mounts.push(page);
+        if (page !== 'overview') return { dispose() {} };
+        return { dispose: () => {
+          overviewDisposals += 1;
+          return overviewGate;
+        } };
+      },
+    });
+
+    const attributes = shell.navigate('attributes');
+    const activities = shell.navigate('activities');
+    releaseOverview();
+    await Promise.all([attributes, activities]);
+
+    expect(overviewDisposals).toBe(1);
+    expect(mounts).toEqual(['overview', 'activities']);
+    await shell.dispose();
+  });
+
+  it('does not dispose the active workspace twice when the shell closes during navigation', async () => {
+    const { root } = dom();
+    let releaseOverview!: () => void;
+    const overviewGate = new Promise<void>((resolve) => { releaseOverview = resolve; });
+    let overviewDisposals = 0;
+    const shell = createHostedUserShell(root as unknown as HTMLElement, {
+      initialPage: 'overview', experience: 'simple', configurationId: 'config-1',
+      mount: () => ({ dispose: () => {
+        overviewDisposals += 1;
+        return overviewGate;
+      } }),
+    });
+
+    const navigating = shell.navigate('attributes');
+    const disposing = shell.dispose();
+    releaseOverview();
+    await Promise.all([navigating, disposing]);
+
+    expect(overviewDisposals).toBe(1);
+  });
+
   it('serializes page changes while simple and advanced modes keep one configuration identity', async () => {
     const { root } = dom();
     const events: string[] = [];

@@ -111,12 +111,25 @@ describe('Hosted production root operations', () => {
 
   it('mounts the six-workspace account shell from URL state and publishes page navigation', async () => {
     const root = new MainRoot();
-    const api = { session: vi.fn(async () => ({ accountScope: 'account-scope-7' })), logout: vi.fn() };
+    const api = {
+      session: vi.fn(async () => ({ accountScope: 'account-scope-7' })),
+      logout: vi.fn(),
+      loadConfiguration: vi.fn(async () => ({
+        version: 4,
+        revision: 9,
+        definition: { marker: 'preserved', generalSettings: { configurationMode: 'advanced' } },
+        runtime: { marker: 'runtime' },
+      })),
+      saveConfigurationDefinition: vi.fn(async () => ({ version: 5, revision: 10 })),
+    };
     const history = { pushState: vi.fn() };
+    const shellHandle = {
+      dispose: vi.fn(), announce: vi.fn(), syncExperience: vi.fn(), setExperiencePending: vi.fn(), syncPage: vi.fn(async () => undefined),
+    };
     harness.connect.mockResolvedValue(api);
     harness.replace.mockImplementation(async (mount: () => unknown) => { mount(); });
     harness.dispose.mockResolvedValue(undefined);
-    harness.createUserShell.mockReturnValue({ dispose: vi.fn(), announce: vi.fn() });
+    harness.createUserShell.mockReturnValue(shellHandle);
     harness.parseUserPage.mockReturnValue('obs');
     vi.stubGlobal('HTMLElement', MainRoot);
     vi.stubGlobal('document', { getElementById: () => root });
@@ -133,17 +146,27 @@ describe('Hosted production root operations', () => {
     const options = harness.createUserShell.mock.calls[0]![1] as {
       initialPage: string;
       experience: string;
+      experiencePending: boolean;
       configurationId: string;
       onPageChange(page: string): void;
+      onExperienceChange(experience: string): void;
     };
-    expect(options).toMatchObject({ initialPage: 'obs', experience: 'simple', configurationId: 'account-scope-7' });
+    expect(options).toMatchObject({ initialPage: 'obs', experience: 'simple', experiencePending: true, configurationId: 'account-scope-7' });
+    await vi.waitFor(() => expect(shellHandle.syncExperience).toHaveBeenCalledWith('advanced'));
+    expect(shellHandle.setExperiencePending).toHaveBeenCalledWith(false);
+    options.onExperienceChange('simple');
+    await vi.waitFor(() => expect(api.saveConfigurationDefinition).toHaveBeenCalledWith(4, {
+      marker: 'preserved', generalSettings: { configurationMode: 'simple' },
+    }));
     options.onPageChange('data');
     expect(harness.pageSearch).toHaveBeenCalledWith('?workspace=obs', 'data');
     expect(history.pushState).toHaveBeenCalledWith(null, '', '/hosted?workspace=data');
 
+    harness.parseUserPage.mockReturnValue('activities');
     dispatch('popstate');
-    await vi.waitFor(() => expect(harness.createUserShell).toHaveBeenCalledTimes(2));
-    expect(api.session).toHaveBeenCalledTimes(2);
+    expect(shellHandle.syncPage).toHaveBeenCalledWith('activities');
+    expect(harness.createUserShell).toHaveBeenCalledTimes(1);
+    expect(api.session).toHaveBeenCalledTimes(1);
   });
 
   afterEach(() => {

@@ -249,8 +249,10 @@ describe('hosted room selection', () => {
 
   it('routes invitation logout through the guarded signed-out transition', () => {
     const main = readFileSync(new URL('../src/hosted/main.ts', import.meta.url), 'utf8');
-    expect(main).toContain('const returnToAccount = (api: HostedAPI): void => { void api.session().then(({ accountScope }) => applicationLifecycle.run(() => showAccount(api, accountScope))).catch(() => returnToSignedOut(api)); };');
-    expect(main).toContain("const returnToSignedOut = (api: HostedAPI): void => { applicationLifecycle.run(() => showSignedOut(api, 'ready')); };");
+    expect(main).toContain('const requested = ++sessionRequestGeneration;');
+    expect(main).toContain('if (requested === sessionRequestGeneration) applicationLifecycle.run(() => showAccount(api, accountScope));');
+    expect(main).toContain('sessionRequestGeneration += 1;');
+    expect(main).toContain('authenticatedAccountScope = undefined;');
     expect(main).toMatch(/mountInvitationView\(root, api, undefined, \(\) => returnToAccount\(api\), \(\) => returnToSignedOut\(api\)\)/);
     expect(main).toMatch(/mountInvitationView\(root, api, intent, \(\) => returnToAccount\(api\)\)/);
     expect(main).not.toContain('onSignedIn: () => showAccount(api)');

@@ -1890,6 +1890,7 @@ body:has(.hosted-migration-settings) {
 }
 .hosted-migration-card > p,
 .hosted-migration-settings-card p { margin: 0.45rem 0 1rem; color: #637087; line-height: 1.55; }
+.hosted-migration-settings-card + .hosted-migration-settings-card { margin-top: 1rem; }
 .hosted-migration-upload,
 .hosted-migration-settings-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 1rem; }
 .hosted-migration-upload-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.65rem; min-width: 0; }

@@ -9,6 +9,7 @@ export type HostedUserPageStateKind = 'loading' | 'empty' | 'error';
 export interface HostedUserShellOptions {
   readonly initialPage: HostedUserPage;
   readonly experience: HostedUserExperience;
+  readonly experiencePending?: boolean;
   readonly configurationId: string;
   readonly mount: (page: HostedUserPage, host: HTMLElement, navigate: (page: HostedUserPage) => void) => HostedView;
   readonly onPageChange?: (page: HostedUserPage) => void;
@@ -106,19 +107,28 @@ export function createHostedUserShell(root: HTMLElement, options: HostedUserShel
     currentView = options.mount(page, content, (target) => { void navigate(target); });
   };
 
-  const navigate = (page: HostedUserPage): Promise<void> => {
+  const disposeCurrent = async (): Promise<void> => {
+    const previous = currentView;
+    if (!previous) return;
+    await previous.dispose();
+    if (currentView === previous) currentView = undefined;
+  };
+
+  const navigateTo = (page: HostedUserPage, publish: boolean): Promise<void> => {
     if (disposed || page === currentPage) return transition;
     currentPage = page;
     updatePage(page);
-    options.onPageChange?.(page);
+    if (publish) options.onPageChange?.(page);
     const operation = async (): Promise<void> => {
-      await currentView?.dispose();
+      await disposeCurrent();
       if (!disposed && currentPage === page) mountPage(page);
     };
     const scheduled = transition.then(operation, operation);
     transition = scheduled.catch(() => undefined);
     return scheduled;
   };
+  const navigate = (page: HostedUserPage): Promise<void> => navigateTo(page, true);
+  const syncPage = (page: HostedUserPage): Promise<void> => navigateTo(page, false);
 
   for (const page of HOSTED_USER_PAGES) {
     const button = actionButton(document, page.label, () => { void navigate(page.id); });
@@ -129,29 +139,38 @@ export function createHostedUserShell(root: HTMLElement, options: HostedUserShel
     buttons.set(page.id, button);
   }
 
-  const setExperience = (next: HostedUserExperience): void => {
+  const applyExperience = (next: HostedUserExperience, publish: boolean): void => {
     frame.dataset.experience = next;
     experience.textContent = next === 'simple' ? '完整模式' : '简单模式';
     experience.setAttribute('aria-label', next === 'simple' ? '切换到完整模式' : '切换到简单模式');
     experience.setAttribute('aria-pressed', next === 'advanced' ? 'true' : 'false');
-    options.onExperienceChange?.(next);
+    if (publish) options.onExperienceChange?.(next);
+  };
+  const setExperience = (next: HostedUserExperience): void => { applyExperience(next, true); };
+  const syncExperience = (next: HostedUserExperience): void => { applyExperience(next, false); };
+  const setExperiencePending = (pending: boolean): void => {
+    experience.disabled = pending;
+    experience.setAttribute('aria-busy', pending ? 'true' : 'false');
   };
 
-  setExperience(options.experience);
+  syncExperience(options.experience);
+  setExperiencePending(options.experiencePending ?? false);
   updatePage(currentPage);
   mountPage(currentPage);
 
   return Object.freeze({
     navigate,
+    syncPage,
     setExperience,
+    syncExperience,
+    setExperiencePending,
     activeConfigurationId: () => options.configurationId,
     activePage: () => currentPage,
     announce(message: string): void { notice.textContent = message; },
     async dispose(): Promise<void> {
       disposed = true;
       await transition;
-      await currentView?.dispose();
-      currentView = undefined;
+      await disposeCurrent();
       root.replaceChildren();
     },
   });

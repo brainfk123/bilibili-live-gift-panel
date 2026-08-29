@@ -1,6 +1,13 @@
 import { mountMigrationView, type MigrationAPI } from '../../migration';
 import type { MigrationHistoryJob } from '../../api';
 
+export const HOSTED_USER_SETTINGS_SECTIONS = Object.freeze([
+  { id: 'account', label: '账号', description: 'B站身份与 Hosted 账号资料管理将在后续功能中接入。' },
+  { id: 'devices', label: '已登录设备', description: '设备列表与会话撤销将在后续功能中接入。' },
+  { id: 'retention', label: '数据保留', description: '默认保留 180 天；30、90、180、365 天选项将在数据中心接入时开放。' },
+  { id: 'migration', label: '迁移中心', description: '上传迁移包、选择玩法、解决冲突，并查看应用历史与 7 天回滚入口。' },
+] as const);
+
 export const migrationPromptStorageKey = (accountScope: string): string => `hosted.migration.prompt.dismissed.v1.${accountScope}`;
 
 interface PromptStorage { getItem(key: string): string | null; setItem(key: string, value: string): void }
@@ -44,10 +51,16 @@ export function mountMigrationSettingsView(root: HTMLElement, api: MigrationAPI,
     const page = document.createElement('main'); page.className = 'hosted-migration-settings';
     const header = document.createElement('header'); header.className = 'hosted-migration-header';
     const title = document.createElement('h1'); title.textContent = '设置'; const back = document.createElement('button'); back.type = 'button'; back.textContent = '返回账号'; back.addEventListener('click', callbacks.onExit); header.append(title, back);
-    const card = document.createElement('section'); card.className = 'hosted-migration-settings-card';
-    const copy = document.createElement('div'); const heading = document.createElement('h2'); heading.textContent = '从本地 EXE 迁移'; const description = document.createElement('p'); description.textContent = '上传迁移包、选择玩法、解决冲突，并查看应用历史与 7 天回滚入口。'; copy.append(heading, description);
+    for (const section of HOSTED_USER_SETTINGS_SECTIONS.slice(0, 3)) {
+      const card = document.createElement('section'); card.className = 'hosted-migration-settings-card'; card.dataset.section = section.id;
+      const copy = document.createElement('div'); const heading = document.createElement('h2'); heading.textContent = section.label; const description = document.createElement('p'); description.textContent = section.description; copy.append(heading, description);
+      card.append(copy); page.append(card);
+    }
+    const migrationSection = HOSTED_USER_SETTINGS_SECTIONS[3];
+    const card = document.createElement('section'); card.className = 'hosted-migration-settings-card'; card.dataset.section = migrationSection.id;
+    const copy = document.createElement('div'); const heading = document.createElement('h2'); heading.textContent = migrationSection.label; const description = document.createElement('p'); description.textContent = migrationSection.description; copy.append(heading, description);
     const open = document.createElement('button'); open.type = 'button'; open.textContent = '打开迁移中心'; open.addEventListener('click', () => { void openJob(); });
-    card.append(copy, open); page.append(header, card); root.replaceChildren(page);
+    card.append(copy, open); page.append(card); page.prepend(header); root.replaceChildren(page);
     const recoverable=history.filter((item)=>item.status==='pending'&&Boolean(item.expiresAt)&&Date.parse(item.expiresAt!)>Date.now()||item.status==='applied'&&Boolean(item.rollbackExpiresAt)&&Date.parse(item.rollbackExpiresAt!)>Date.now());
     if(recoverable.length){const list=document.createElement('section');list.className='hosted-migration-settings-history';const heading=document.createElement('h2');heading.textContent='可继续的迁移';list.append(heading);for(const item of recoverable){const row=document.createElement('article');const text=document.createElement('div');const title=document.createElement('strong');title.textContent=item.status==='pending'?'等待应用':'可回滚的迁移';const detail=document.createElement('p');detail.textContent=`任务 ${item.id} · ${item.createdAt}`;text.append(title,detail);const action=document.createElement('button');action.type='button';action.textContent=item.status==='pending'?'继续查看':'查看并回滚';action.addEventListener('click',()=>{void openJob(item);});row.append(text,action);list.append(row);}page.append(list);}
   };
