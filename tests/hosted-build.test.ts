@@ -13,6 +13,9 @@ const hostedFiles = [
   'src/hosted/main.ts',
   'src/hosted/shell.ts',
   'src/hosted/shell.css',
+  'src/hosted/user/routes.ts',
+  'src/hosted/user/shell.ts',
+  'src/hosted/user/shell.css',
   'src/hosted/obs/main.ts',
   'src/hosted/obs/view.ts',
   'src/hosted/obs/obs.css',
@@ -75,7 +78,12 @@ describe('hosted web build contract', () => {
       return;
     }
 
-    const source = ['src/hosted/main.ts', 'src/hosted/shell.ts']
+    const source = [
+      'src/hosted/main.ts',
+      'src/hosted/shell.ts',
+      'src/hosted/user/routes.ts',
+      'src/hosted/user/shell.ts',
+    ]
       .map((file) => readFileSync(join(projectRoot, file), 'utf8'))
       .join('\n');
 

@@ -5,6 +5,9 @@ const harness = vi.hoisted(() => ({
   replace: vi.fn(),
   dispose: vi.fn(),
   renderShell: vi.fn(),
+  createUserShell: vi.fn(),
+  parseUserPage: vi.fn(() => 'overview'),
+  pageSearch: vi.fn((_search: string, page: string) => `?workspace=${page}`),
   lifecycleDispose: vi.fn(),
   listeners: new Map<string, (event?: { persisted?: boolean }) => void>(),
   listenerOptions: new Map<string, { once?: boolean } | undefined>(),
@@ -50,6 +53,18 @@ vi.mock('../src/hosted/configuration', () => ({ mountConfigurationView: vi.fn() 
 vi.mock('../src/hosted/invitations', () => ({ mountInvitationView: vi.fn() }));
 vi.mock('../src/hosted/migration', () => ({ mountMigrationView: vi.fn() }));
 vi.mock('../src/hosted/room', () => ({ mountRoomControls: vi.fn() }));
+vi.mock('../src/hosted/user/shell', () => ({
+  createHostedUserShell: harness.createUserShell,
+  renderHostedUserPageState: vi.fn(),
+}));
+vi.mock('../src/hosted/user/routes', () => ({
+  parseHostedUserPage: harness.parseUserPage,
+  hostedUserPageSearch: harness.pageSearch,
+}));
+vi.mock('../src/hosted/user/settings/migration-center', () => ({
+  mountMigrationPrompt: vi.fn(() => ({ dispose() {} })),
+  mountMigrationSettingsView: vi.fn(),
+}));
 
 class MainRoot {
   textContent = '';
@@ -86,9 +101,49 @@ describe('Hosted production root operations', () => {
     harness.replace.mockReset();
     harness.dispose.mockReset();
     harness.renderShell.mockReset();
+    harness.createUserShell.mockReset();
+    harness.parseUserPage.mockReset().mockReturnValue('overview');
+    harness.pageSearch.mockReset().mockImplementation((_search: string, page: string) => `?workspace=${page}`);
     harness.lifecycleDispose.mockReset();
     harness.listeners.clear();
     harness.listenerOptions.clear();
+  });
+
+  it('mounts the six-workspace account shell from URL state and publishes page navigation', async () => {
+    const root = new MainRoot();
+    const api = { session: vi.fn(async () => ({ accountScope: 'account-scope-7' })), logout: vi.fn() };
+    const history = { pushState: vi.fn() };
+    harness.connect.mockResolvedValue(api);
+    harness.replace.mockImplementation(async (mount: () => unknown) => { mount(); });
+    harness.dispose.mockResolvedValue(undefined);
+    harness.createUserShell.mockReturnValue({ dispose: vi.fn(), announce: vi.fn() });
+    harness.parseUserPage.mockReturnValue('obs');
+    vi.stubGlobal('HTMLElement', MainRoot);
+    vi.stubGlobal('document', { getElementById: () => root });
+    vi.stubGlobal('window', {
+      location: { hash: '', search: '?workspace=obs', pathname: '/hosted' },
+      history,
+      addEventListener: registerListener,
+      setTimeout,
+      clearTimeout,
+    });
+
+    await import('../src/hosted/main');
+    await vi.waitFor(() => expect(harness.createUserShell).toHaveBeenCalledTimes(1));
+    const options = harness.createUserShell.mock.calls[0]![1] as {
+      initialPage: string;
+      experience: string;
+      configurationId: string;
+      onPageChange(page: string): void;
+    };
+    expect(options).toMatchObject({ initialPage: 'obs', experience: 'simple', configurationId: 'account-scope-7' });
+    options.onPageChange('data');
+    expect(harness.pageSearch).toHaveBeenCalledWith('?workspace=obs', 'data');
+    expect(history.pushState).toHaveBeenCalledWith(null, '', '/hosted?workspace=data');
+
+    dispatch('popstate');
+    await vi.waitFor(() => expect(harness.createUserShell).toHaveBeenCalledTimes(2));
+    expect(api.session).toHaveBeenCalledTimes(2);
   });
 
   afterEach(() => {
