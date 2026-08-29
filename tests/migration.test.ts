@@ -108,6 +108,33 @@ describe('online migration exporter', () => {
     expect(onlineMigrationFilename(new Date('2026-08-16T23:59:59.999Z'))).toBe('gift-panel-migration-v2-2026-08-16.json');
   });
 
+  it('orders exported maps by UTF-16 code units instead of the host locale', () => {
+    const state = defaultState();
+    state.attributes = [
+      { id: 'z', name: 'z', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+      { id: 'ä', name: 'ä', value: 2, unit: 'none', format: 'number', decimals: 0, suffix: '' },
+    ];
+    state.activities = [{
+      id: 'activity', name: '活动', attributeNames: ['ä', 'z'], status: 'settled', resultMode: 'highest', gateRules: false,
+      initialValues: { ä: 2, z: 1 }, milestones: [], result: { winnerAttributeName: 'z', values: { ä: 4, z: 3 } },
+    }];
+    state.rules = [
+      { id: 'ä-rule', giftId: 1, attributeName: 'ä', formula: 'ä+1' },
+      { id: 'z-rule', giftId: 2, attributeName: 'z', formula: 'z+1' },
+    ];
+    state.stats = {
+      'ä-day': { date: '2026-08-25', giftTotals: {}, ruleTriggers: { 'ä-rule': 99, 'z-rule': 99 } },
+      'z-day': { date: '2026-08-25', giftTotals: {}, ruleTriggers: { 'ä-rule': 2, 'z-rule': 1 } },
+    };
+
+    const migration = createOnlineMigration(state, '0.4.7', new Date(2026, 7, 25, 12));
+
+    expect(Object.keys(migration.payload.definition.activities[0]!.initialValues)).toEqual(['z', 'ä']);
+    expect(Object.keys(migration.payload.runtime.activities[0]!.result!.values)).toEqual(['z', 'ä']);
+    expect(migration.payload.runtime.ruleLimits.appliedCounts).toEqual({ 'z-rule': 1, 'ä-rule': 2 });
+    expect(Object.keys(migration.payload.runtime.ruleLimits.appliedCounts)).toEqual(['z-rule', 'ä-rule']);
+  });
+
   it('exports a detached allowlisted package without local, viewer, or remote-resource data', () => {
     const state = defaultState();
     state.roomId = '31567150';
@@ -242,11 +269,15 @@ describe('online migration exporter', () => {
     const state = defaultState();
     state.settings.configExperience = 'simple';
     state.attributes = [{ id: 'score', name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '分' }];
-    state.rules = [{ id: 'score-rule', giftId: 1, attributeName: '积分', formula: '积分+1' }];
-    state.giftCatalog = [{ id: 1, name: '计分礼物', price: 100, coinType: 'gold', imgBasic: '', effectId: 9 }];
+    state.rules = [{ id: 'score-rule', giftId: 1, attributeName: '积分', formula: '积分+1', matchGiftIds: [2] }];
+    state.giftCatalog = [
+      { id: 1, name: '计分礼物', price: 100, coinType: 'gold', imgBasic: '', effectId: 9 },
+      { id: 2, name: '无效剪裁礼物', price: 100, coinType: 'gold', imgBasic: '' },
+    ];
     state.settings.giftClipCrops = {
       'gift:1': { x: 0.1, y: 0.2, width: 0.3, height: 0.4 },
       'effect:9': { x: 0, y: 0, width: 1, height: 1 },
+      'gift:2': { x: 0, y: 0, width: 0, height: 1 },
       'media:deadbeef': { x: 0, y: 0, width: 1, height: 1 },
       'legacy-local-key': { x: 0, y: 0, width: 1, height: 1 },
       'gift:99': { x: 0, y: 0, width: 1, height: 1 },
@@ -264,12 +295,14 @@ describe('online migration exporter', () => {
     expect(migration.payload.rejectedCropPresets).toEqual([
       { reason: 'unstable_identity', count: 2 },
       { reason: 'unreferenced_identity', count: 2 },
+      { reason: 'invalid_crop', count: 1 },
     ]);
     expect(migration.payload.dependencyDeclaration.units[0]?.cropPresetIds).toEqual(['effect:9', 'gift:1']);
     expect(text).not.toContain('media:deadbeef');
     expect(text).not.toContain('legacy-local-key');
     expect(text).not.toContain('gift:99');
     expect(text).not.toContain('effect:77');
+    expect(text).not.toContain('"gift:2"');
   });
 
   it.each([
@@ -319,6 +352,52 @@ describe('online migration exporter', () => {
       state.formulaPresets = [{ id: 'orphan', name: '孤立预设', context: 'gift', formula: '不存在+1', sourceAttributeName: '不存在' }];
     }],
   ] as const)('rejects exported %s entries that do not belong to any gameplay', (_label, arrange) => {
+    const state = defaultState();
+    arrange(state);
+
+    expect(() => createOnlineMigration(state, '0.4.7', new Date('2026-08-25T00:00:00.000Z')))
+      .toThrow('迁移数据包含不属于任何玩法的内容');
+  });
+
+  it.each([
+    ['display scene attribute', (state: ReturnType<typeof defaultState>) => {
+      state.attributes = [{ id: 'score', name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' }];
+      state.displayScenes = [{ id: 'scene', name: '场景', attributeNames: ['已删除'], layout: 'focus', themeId: 'minimal' }];
+    }],
+    ['activity attribute', (state: ReturnType<typeof defaultState>) => {
+      state.attributes = [{ id: 'score', name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' }];
+      state.activities = [{ id: 'activity', name: '活动', attributeNames: ['已删除'], status: 'not_started', resultMode: 'none', gateRules: false, initialValues: {}, milestones: [] }];
+    }],
+    ['activity initial value', (state: ReturnType<typeof defaultState>) => {
+      state.attributes = [{ id: 'score', name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' }];
+      state.activities = [{ id: 'activity', name: '活动', attributeNames: ['积分'], status: 'not_started', resultMode: 'none', gateRules: false, initialValues: { 已删除: 0 }, milestones: [] }];
+    }],
+    ['activity milestone', (state: ReturnType<typeof defaultState>) => {
+      state.attributes = [{ id: 'score', name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' }];
+      state.activities = [{
+        id: 'activity', name: '活动', attributeNames: ['积分'], status: 'not_started', resultMode: 'none', gateRules: false, initialValues: { 积分: 0 },
+        milestones: [{ id: 'milestone', name: '阶段', attributeName: '已删除', comparison: 'gte', threshold: 1, action: 'announce', message: '完成' }],
+      }];
+    }],
+    ['activity scene', (state: ReturnType<typeof defaultState>) => {
+      state.attributes = [{ id: 'score', name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' }];
+      state.activities = [{ id: 'activity', name: '活动', attributeNames: ['积分'], sceneId: 'removed-scene', status: 'not_started', resultMode: 'none', gateRules: false, initialValues: { 积分: 0 }, milestones: [] }];
+    }],
+    ['activity winner', (state: ReturnType<typeof defaultState>) => {
+      state.attributes = [{ id: 'score', name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' }];
+      state.activities = [{
+        id: 'activity', name: '活动', attributeNames: ['积分'], status: 'settled', resultMode: 'highest', gateRules: false, initialValues: { 积分: 0 }, milestones: [],
+        result: { winnerAttributeName: '已删除', values: { 积分: 1 } },
+      }];
+    }],
+    ['activity result value', (state: ReturnType<typeof defaultState>) => {
+      state.attributes = [{ id: 'score', name: '积分', value: 1, unit: 'none', format: 'number', decimals: 0, suffix: '' }];
+      state.activities = [{
+        id: 'activity', name: '活动', attributeNames: ['积分'], status: 'settled', resultMode: 'highest', gateRules: false, initialValues: { 积分: 0 }, milestones: [],
+        result: { winnerAttributeName: '积分', values: { 已删除: 1 } },
+      }];
+    }],
+  ] as const)('rejects stale %s references instead of exporting raw local names', (_label, arrange) => {
     const state = defaultState();
     arrange(state);
 

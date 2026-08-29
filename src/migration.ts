@@ -17,7 +17,7 @@ import {
   type TemplateParameterDefinition,
   type TemplateParameterValue,
 } from './gameplay-templates';
-import { deriveGameplayUnits, type GameplayDependencyDeclaration } from './migration-gameplay-units';
+import { compareCodeUnits, deriveGameplayUnits, type GameplayDependencyDeclaration } from './migration-gameplay-units';
 
 const CONFIG_SCHEMA_VERSION = 5;
 const MAX_ONLINE_MIGRATION_BYTES = 2 * 1024 * 1024;
@@ -308,7 +308,7 @@ export function createOnlineMigration(state: AppState, appVersion: string, expor
     ruleLimits: exportRuleLimits(state, exportedAt),
   };
   assertUniqueStableIDs(definition);
-  assertOwnedGameplayContent(definition);
+  assertOwnedGameplayContent(definition, runtime);
   const cropProjection = exportCropPresets(state.settings.giftClipCrops, definition.gifts);
 
   return {
@@ -464,8 +464,8 @@ function exportActivityRuntime(activity: ActivitySession, idForName: (name: stri
 
 function remapNumberRecord(record: Record<string, number>, idForName: (name: string) => string): Record<string, number> {
   return Object.fromEntries(Object.entries(record)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([name, value]) => [idForName(name), value]));
+    .map(([name, value]) => [idForName(name), value] as const)
+    .sort(([left], [right]) => compareCodeUnits(left, right)));
 }
 
 function exportSimplePlay(simplePlay: SimplePlay): OnlineSimplePlay | undefined {
@@ -632,11 +632,11 @@ function exportRuleLimits(state: AppState, exportedAt: Date): OnlineMigrationRun
   const localDate = localDateString(exportedAt);
   const day = Object.entries(state.stats)
     .filter(([, candidate]) => candidate.date === localDate)
-    .sort(([left], [right]) => left.localeCompare(right))[0]?.[1];
+    .sort(([left], [right]) => compareCodeUnits(left, right))[0]?.[1];
   const currentRuleIDs = new Set(state.rules.map((rule) => rule.id));
   const appliedCounts = Object.fromEntries(Object.entries(day?.ruleTriggers ?? {})
     .filter(([ruleID, count]) => currentRuleIDs.has(ruleID) && Number.isInteger(count) && count >= 0)
-    .sort(([left], [right]) => left.localeCompare(right)));
+    .sort(([left], [right]) => compareCodeUnits(left, right)));
   return { localDate, appliedCounts };
 }
 
@@ -681,7 +681,7 @@ function exportCropPresets(
   const rejectedCounts = new Map<OnlineMigrationRejectedCropPreset['reason'], number>();
   const giftIDs = new Set(gifts.map((gift) => gift.id));
   const effectIDs = new Set(gifts.flatMap((gift) => gift.effectId === undefined ? [] : [gift.effectId]));
-  for (const [id, crop] of Object.entries(crops).sort(([left], [right]) => left.localeCompare(right))) {
+  for (const [id, crop] of Object.entries(crops).sort(([left], [right]) => compareCodeUnits(left, right))) {
     const stableIdentity = /^(gift|effect):([1-9]\d*)$/.exec(id);
     const referenced = stableIdentity
       ? (stableIdentity[1] === 'gift' ? giftIDs : effectIDs).has(Number(stableIdentity[2]))
@@ -728,12 +728,28 @@ function assertUniqueStableIDs(definition: OnlineMigrationDefinition): void {
   }
 }
 
-function assertOwnedGameplayContent(definition: OnlineMigrationDefinition): void {
+function assertOwnedGameplayContent(definition: OnlineMigrationDefinition, runtime: OnlineMigrationRuntime): void {
   const attributeIDs = new Set(definition.attributes.map((attribute) => attribute.id));
+  const sceneIDs = new Set(definition.displayScenes.map((scene) => scene.id));
+  const activityIDs = new Set(definition.activities.map((activity) => activity.id));
   const orphaned = [
     ...definition.rules.filter((rule) => !attributeIDs.has(rule.attributeId)).map((rule) => `rule:${rule.id}`),
     ...definition.timerRules.filter((rule) => !attributeIDs.has(rule.attributeId)).map((rule) => `timer:${rule.id}`),
     ...definition.formulaPresets.filter((preset) => !attributeIDs.has(preset.attributeId)).map((preset) => `preset:${preset.id}`),
+    ...definition.displayScenes
+      .filter((scene) => scene.attributeIds.some((attributeID) => !attributeIDs.has(attributeID)))
+      .map((scene) => `scene:${scene.id}`),
+    ...definition.activities
+      .filter((activity) => activity.attributeIds.some((attributeID) => !attributeIDs.has(attributeID))
+        || Object.keys(activity.initialValues).some((attributeID) => !attributeIDs.has(attributeID))
+        || activity.milestones.some((milestone) => !attributeIDs.has(milestone.attributeId))
+        || (activity.sceneId !== undefined && !sceneIDs.has(activity.sceneId)))
+      .map((activity) => `activity:${activity.id}`),
+    ...runtime.activities
+      .filter((activity) => !activityIDs.has(activity.id)
+        || (activity.result?.winnerAttributeId !== undefined && !attributeIDs.has(activity.result.winnerAttributeId))
+        || Object.keys(activity.result?.values ?? {}).some((attributeID) => !attributeIDs.has(attributeID)))
+      .map((activity) => `activity-runtime:${activity.id}`),
     ...(definition.simplePlay && !attributeIDs.has(definition.simplePlay.attributeId) ? ['simple-play'] : []),
   ];
   if (orphaned.length > 0) throw new Error('迁移数据包含不属于任何玩法的内容，请先在本地删除失效规则后重试。');
