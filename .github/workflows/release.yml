@@ -33,6 +33,9 @@ jobs:
           if ($env:RELEASE_TAG -cnotmatch '^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$') {
             throw "Release tag must use canonical vMAJOR.MINOR.PATCH syntax"
           }
+          $releaseVersion = [Version]$env:RELEASE_TAG.Substring(1)
+          $standaloneFFmpeg = $releaseVersion -ge [Version]'0.4.10'
+          "RELEASE_STANDALONE_FFMPEG=$($standaloneFFmpeg.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Check out release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -88,7 +91,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           gh release download $env:RELEASE_TAG --dir dist --pattern gift-panel-windows-x64.exe --pattern gift-panel-windows-x64.exe.sha256 --pattern gift-panel-update.json --pattern gift-panel-changelog.json
           if ($LASTEXITCODE -ne 0) { throw "Existing GitHub Release assets could not be downloaded. Manual recovery required." }
-          foreach ($path in @('dist/gift-panel-windows-x64.exe', 'dist/gift-panel-windows-x64.exe.sha256', 'dist/gift-panel-update.json', 'dist/gift-panel-changelog.json')) {
+          $requiredPaths = @('dist/gift-panel-windows-x64.exe', 'dist/gift-panel-windows-x64.exe.sha256', 'dist/gift-panel-update.json', 'dist/gift-panel-changelog.json')
+          if ($env:RELEASE_STANDALONE_FFMPEG -eq 'true') {
+            gh release download $env:RELEASE_TAG --dir dist --pattern ffmpeg-windows-x64.exe --pattern ffmpeg-windows-x64.exe.sha256
+            if ($LASTEXITCODE -ne 0) { throw "Existing GitHub Release standalone FFmpeg assets could not be downloaded. Manual recovery required." }
+            $requiredPaths += @('dist/ffmpeg-windows-x64.exe', 'dist/ffmpeg-windows-x64.exe.sha256')
+          }
+          foreach ($path in $requiredPaths) {
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
               throw "Existing GitHub Release is missing required assets. Manual recovery required."
             }
@@ -167,7 +176,7 @@ jobs:
         run: npm run prepare:go-assets
 
       - name: Resolve FFmpeg component identity
-        if: env.RELEASE_EXISTS != 'true'
+        if: env.RELEASE_EXISTS != 'true' || env.RELEASE_STANDALONE_FFMPEG == 'true'
         shell: pwsh
         run: |
           $identityJSON = node scripts/ffmpeg-component-assets.mjs identity
@@ -180,7 +189,7 @@ jobs:
           "FFMPEG_COMPONENT_TAG=$($identity.tag)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Inspect signed FFmpeg component
-        if: env.RELEASE_EXISTS != 'true'
+        if: env.RELEASE_EXISTS != 'true' || env.RELEASE_STANDALONE_FFMPEG == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -191,6 +200,9 @@ jobs:
             $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$encodedTag" -Headers $headers
           } catch {
             if ($_.Exception.Response.StatusCode -eq [Net.HttpStatusCode]::NotFound) {
+              if ($env:RELEASE_EXISTS -eq 'true' -and $env:RELEASE_STANDALONE_FFMPEG -eq 'true') {
+                throw "Existing Release repair requires its immutable signed FFmpeg component. Manual recovery required."
+              }
               'FFMPEG_COMPONENT_EXISTS=false' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
               exit 0
             }
@@ -209,7 +221,7 @@ jobs:
           'FFMPEG_COMPONENT_EXISTS=true' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Download signed FFmpeg component
-        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS == 'true'
+        if: env.FFMPEG_COMPONENT_EXISTS == 'true' && (env.RELEASE_EXISTS != 'true' || env.RELEASE_STANDALONE_FFMPEG == 'true')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -217,6 +229,23 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist/ffmpeg-component-download | Out-Null
           gh release download $env:FFMPEG_COMPONENT_TAG --dir dist/ffmpeg-component-download --pattern ffmpeg.zip --pattern manifest.json --pattern gift-clip-test-tools.zip --pattern ffmpeg-9.0.tar.xz --pattern ffmpeg-9.0.tar.xz.asc --pattern ffmpeg-build-config.txt --pattern ffmpeg-component-gate.txt --pattern toolchain-lock.json --pattern NOTICE.md --pattern COPYING.LGPLv2.1 --pattern SHA256SUMS.txt
           if ($LASTEXITCODE -ne 0) { throw "Signed FFmpeg component download failed" }
+
+      - name: Verify standalone FFmpeg repair component
+        if: env.RELEASE_EXISTS == 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $componentDirectory = 'dist/ffmpeg-component-download'
+          node scripts/ffmpeg-component-assets.mjs verify-metadata --metadata dist/ffmpeg-component-release.json --input $componentDirectory --tag $env:FFMPEG_COMPONENT_TAG
+          if ($LASTEXITCODE -ne 0) { throw "Repair FFmpeg component GitHub metadata or digest verification failed" }
+          foreach ($asset in Get-ChildItem -LiteralPath $componentDirectory -File) {
+            gh attestation verify $asset.FullName --repo $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw "Repair FFmpeg component attestation verification failed for $($asset.Name)" }
+          }
+          node scripts/ffmpeg-component-assets.mjs verify --input $componentDirectory
+          if ($LASTEXITCODE -ne 0) { throw "Repair signed FFmpeg component verification failed" }
+          Copy-Item -LiteralPath "$componentDirectory/manifest.json" -Destination dist/standalone-component-manifest.json
 
       - name: Set up MSYS2 host environment
         if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
@@ -369,6 +398,34 @@ jobs:
           Expand-Archive -LiteralPath "$componentDirectory/gift-clip-test-tools.zip" -DestinationPath dist/gift-clip-test-tools
           node scripts/gift-clip-test-tools.mjs | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Cached gift clip test tools failed verification" }
+
+      - name: Prepare standalone FFmpeg release asset
+        if: env.RELEASE_EXISTS != 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'
+        shell: pwsh
+        run: |
+          $componentDirectory = if ($env:FFMPEG_COMPONENT_EXISTS -eq 'true') { 'dist/ffmpeg-component-download' } else { 'dist/ffmpeg-component-published' }
+          $standaloneDirectory = 'dist/standalone-ffmpeg'
+          New-Item -ItemType Directory -Force -Path $standaloneDirectory | Out-Null
+          Expand-Archive -LiteralPath "$componentDirectory/ffmpeg.zip" -DestinationPath $standaloneDirectory
+          $source = Join-Path $standaloneDirectory 'ffmpeg.exe'
+          $destination = 'dist/ffmpeg-windows-x64.exe'
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw 'Signed FFmpeg component does not contain ffmpeg.exe' }
+          Copy-Item -LiteralPath $source -Destination $destination
+
+          $componentManifest = Get-Content -LiteralPath "$componentDirectory/manifest.json" -Raw | ConvertFrom-Json
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash.ToLowerInvariant()
+          $size = (Get-Item -LiteralPath $destination).Length
+          $signature = Get-AuthenticodeSignature -LiteralPath $destination
+          if ($componentManifest.authenticode -ne $true -or $componentManifest.sha256 -cne $hash -or [int64]$componentManifest.size -ne $size) {
+            throw 'Standalone FFmpeg does not match the verified component manifest.'
+          }
+          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or $null -eq $signature.SignerCertificate) {
+            throw 'Standalone FFmpeg Authenticode signature is invalid.'
+          }
+          if ($signature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT) {
+            throw 'Standalone FFmpeg signer does not match EVSIGN_EXPECTED_SUBJECT.'
+          }
+          "$hash  ffmpeg-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/ffmpeg-windows-x64.exe.sha256
 
       - name: Build release executable
         if: env.RELEASE_EXISTS != 'true'
@@ -523,6 +580,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "GitHub Release draft creation failed" }
           gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/gift-panel-changelog.json dist/ffmpeg-source/ffmpeg-9.0.tar.xz dist/ffmpeg-source/ffmpeg-9.0.tar.xz.asc dist/ffmpeg-build-config.txt dist/ffmpeg-component-gate.txt third_party/ffmpeg/toolchain-lock.json third_party/ffmpeg/NOTICE.md third_party/ffmpeg/COPYING.LGPLv2.1
           if ($LASTEXITCODE -ne 0) { throw "GitHub Release asset upload failed; draft retained for manual recovery" }
+          if ($env:RELEASE_STANDALONE_FFMPEG -eq 'true') {
+            gh release upload $env:RELEASE_TAG dist/ffmpeg-windows-x64.exe dist/ffmpeg-windows-x64.exe.sha256
+            if ($LASTEXITCODE -ne 0) { throw "Standalone FFmpeg asset upload failed; draft retained for manual recovery" }
+          }
           gh release edit $env:RELEASE_TAG --draft=false --latest
           if ($LASTEXITCODE -ne 0) { throw "GitHub Release publication failed; manual recovery required" }
 
@@ -547,12 +608,51 @@ jobs:
             throw "Published GitHub Release publication timestamp is invalid; manual recovery required"
           }
 
+      - name: Redownload published standalone FFmpeg
+        if: env.RELEASE_EXISTS != 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Remove-Item -LiteralPath dist/ffmpeg-windows-x64.exe,dist/ffmpeg-windows-x64.exe.sha256 -Force
+          gh release download $env:RELEASE_TAG --dir dist --pattern ffmpeg-windows-x64.exe --pattern ffmpeg-windows-x64.exe.sha256
+          if ($LASTEXITCODE -ne 0) { throw "Published standalone FFmpeg assets could not be redownloaded. Manual recovery required." }
+
       - name: Validate published release assets
         shell: pwsh
         run: |
-          foreach ($path in @('dist/gift-panel-windows-x64.exe', 'dist/gift-panel-windows-x64.exe.sha256', 'dist/gift-panel-update.json', 'dist/gift-panel-changelog.json')) {
+          $requiredPaths = @('dist/gift-panel-windows-x64.exe', 'dist/gift-panel-windows-x64.exe.sha256', 'dist/gift-panel-update.json', 'dist/gift-panel-changelog.json')
+          if ($env:RELEASE_STANDALONE_FFMPEG -eq 'true') {
+            $requiredPaths += @('dist/ffmpeg-windows-x64.exe', 'dist/ffmpeg-windows-x64.exe.sha256')
+          }
+          foreach ($path in $requiredPaths) {
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
               throw "Published GitHub Release is missing required assets. Manual recovery required."
+            }
+          }
+          if ($env:RELEASE_STANDALONE_FFMPEG -eq 'true') {
+            $ffmpegSignature = Get-AuthenticodeSignature -LiteralPath dist/ffmpeg-windows-x64.exe
+            if ($ffmpegSignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or $null -eq $ffmpegSignature.SignerCertificate) {
+              throw "Published standalone FFmpeg Authenticode signature is invalid. Manual recovery required."
+            }
+            if ($ffmpegSignature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT) {
+              throw "Published standalone FFmpeg signer does not match EVSIGN_EXPECTED_SUBJECT. Manual recovery required."
+            }
+            $ffmpegChecksum = Get-Content -LiteralPath dist/ffmpeg-windows-x64.exe.sha256 -Raw
+            if ($ffmpegChecksum -cmatch '^(?<digest>[0-9a-fA-F]{64})\s+ffmpeg-windows-x64\.exe\s*$') {
+              $expectedFFmpegHash = $Matches.digest
+            } else {
+              throw "Published standalone FFmpeg checksum is malformed. Manual recovery required."
+            }
+            $actualFFmpegHash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist/ffmpeg-windows-x64.exe).Hash
+            if (-not [String]::Equals($actualFFmpegHash, $expectedFFmpegHash, [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Published standalone FFmpeg does not match its checksum. Manual recovery required."
+            }
+            $componentManifestPath = if ($env:RELEASE_EXISTS -eq 'true') { 'dist/standalone-component-manifest.json' } else { 'goserver/ffmpeg/manifest.json' }
+            $componentManifest = Get-Content -LiteralPath $componentManifestPath -Raw | ConvertFrom-Json
+            $ffmpegSize = (Get-Item -LiteralPath dist/ffmpeg-windows-x64.exe).Length
+            if ($componentManifest.version -cne '9.0' -or $componentManifest.authenticode -ne $true -or $componentManifest.sha256 -cne $actualFFmpegHash.ToLowerInvariant() -or [int64]$componentManifest.size -ne $ffmpegSize) {
+              throw "Published standalone FFmpeg does not match the verified signed component manifest. Manual recovery required."
             }
           }
           $signature = Get-AuthenticodeSignature -LiteralPath dist/gift-panel-windows-x64.exe

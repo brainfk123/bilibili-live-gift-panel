@@ -66,6 +66,7 @@ function publishedManifestFixture(): Record<string, unknown> {
 function runPublishedReleaseValidation(
   manifest: unknown,
   manifestJSON = JSON.stringify(manifest),
+  standalone?: { checksum?: string; componentHash?: string },
 ) {
   const temporaryRoot = mkdtempSync(join(tmpdir(), 'gift-panel-release-validation-'));
   try {
@@ -77,6 +78,19 @@ function runPublishedReleaseValidation(
     writeFileSync(join(dist, 'gift-panel-windows-x64.exe.sha256'), `${digest}  gift-panel-windows-x64.exe`);
     writeFileSync(join(dist, 'gift-panel-update.json'), manifestJSON);
     writeFileSync(join(dist, 'gift-panel-changelog.json'), '{"schemaVersion":1,"releases":[{}]}');
+    if (standalone) {
+      const ffmpeg = Buffer.from('signed-ffmpeg-fixture');
+      const ffmpegDigest = createHash('sha256').update(ffmpeg).digest('hex');
+      writeFileSync(join(dist, 'ffmpeg-windows-x64.exe'), ffmpeg);
+      writeFileSync(
+        join(dist, 'ffmpeg-windows-x64.exe.sha256'),
+        standalone.checksum ?? `${ffmpegDigest}  ffmpeg-windows-x64.exe`,
+      );
+      writeFileSync(join(dist, 'standalone-component-manifest.json'), JSON.stringify({
+        version: '9.0', authenticode: true, size: ffmpeg.length,
+        sha256: standalone.componentHash ?? ffmpegDigest,
+      }));
+    }
 
     const { steps } = releaseWorkflow();
     const validation = steps[stepIndex(steps, 'Validate published release assets')]?.run;
@@ -100,6 +114,8 @@ ${validation}
         EVSIGN_EXPECTED_SUBJECT: 'CN=Release Test',
         GITHUB_REPOSITORY: 'example/repository',
         RELEASE_TAG: 'v1.2.3',
+        RELEASE_EXISTS: 'true',
+        RELEASE_STANDALONE_FFMPEG: standalone ? 'true' : 'false',
       },
       input: script,
       timeout: 30_000,
@@ -292,6 +308,50 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[publish]?.run).toContain('Invoke-RestMethod');
   });
 
+  it('publishes a separately downloadable signed FFmpeg from v0.4.10 without changing the updater manifest', () => {
+    const { steps } = releaseWorkflow();
+    const validateTag = stepIndex(steps, 'Validate release tag');
+    const installComponent = stepIndex(steps, 'Verify and install signed FFmpeg component');
+    const prepareStandalone = stepIndex(steps, 'Prepare standalone FFmpeg release asset');
+    const prepareRelease = stepIndex(steps, 'Prepare release assets');
+    const createRelease = stepIndex(steps, 'Create GitHub release');
+    const redownloadStandalone = stepIndex(steps, 'Redownload published standalone FFmpeg');
+    const verifyRepairComponent = stepIndex(steps, 'Verify standalone FFmpeg repair component');
+    const validatePublished = stepIndex(steps, 'Validate published release assets');
+    const downloadExisting = stepIndex(steps, 'Download existing release assets');
+
+    expect(steps[validateTag]?.run).toContain("[Version]'0.4.10'");
+    expect(steps[validateTag]?.run).toContain('RELEASE_STANDALONE_FFMPEG');
+    expect(installComponent).toBeLessThan(prepareStandalone);
+    expect(prepareStandalone).toBeLessThan(createRelease);
+    expect(createRelease).toBeLessThan(redownloadStandalone);
+    expect(redownloadStandalone).toBeLessThan(validatePublished);
+    expect(steps[prepareStandalone]?.if).toBe("env.RELEASE_EXISTS != 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'");
+    expect(steps[prepareStandalone]?.run).toContain('$componentDirectory/ffmpeg.zip');
+    expect(steps[prepareStandalone]?.run).toContain('dist/ffmpeg-windows-x64.exe');
+    expect(steps[prepareStandalone]?.run).toContain('dist/ffmpeg-windows-x64.exe.sha256');
+    expect(steps[prepareStandalone]?.run).toContain('Get-AuthenticodeSignature');
+    expect(steps[prepareStandalone]?.run).toContain('$componentManifest.sha256');
+    expect(steps[prepareStandalone]?.run).toContain('$env:EVSIGN_EXPECTED_SUBJECT');
+    expect(steps[createRelease]?.run).toContain('dist/ffmpeg-windows-x64.exe');
+    expect(steps[createRelease]?.run).toContain('dist/ffmpeg-windows-x64.exe.sha256');
+    expect(steps[redownloadStandalone]?.if).toBe("env.RELEASE_EXISTS != 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'");
+    expect(steps[redownloadStandalone]?.run).toContain('--pattern ffmpeg-windows-x64.exe');
+    expect(steps[downloadExisting]?.run).toContain("$env:RELEASE_STANDALONE_FFMPEG -eq 'true'");
+    expect(steps[downloadExisting]?.run).toContain('--pattern ffmpeg-windows-x64.exe');
+    expect(steps[verifyRepairComponent]?.if).toBe("env.RELEASE_EXISTS == 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'");
+    expect(steps[verifyRepairComponent]?.run).toContain('verify-metadata');
+    expect(steps[verifyRepairComponent]?.run).toContain('gh attestation verify');
+    expect(steps[verifyRepairComponent]?.run).toContain('standalone-component-manifest.json');
+    expect(steps[validatePublished]?.run).toContain('Get-AuthenticodeSignature -LiteralPath dist/ffmpeg-windows-x64.exe');
+    expect(steps[validatePublished]?.run).toContain('ffmpeg-windows-x64.exe.sha256');
+    expect(steps[validatePublished]?.run).toContain('$componentManifest.sha256');
+    expect(steps[validatePublished]?.run).toContain("'dist/standalone-component-manifest.json'");
+    expect(steps[prepareRelease]?.run).not.toContain('name = "ffmpeg-windows-x64.exe"');
+    expect(steps[prepareRelease]?.run).toContain('assets = @(');
+    expect(steps[prepareRelease]?.run).toContain('name = "gift-panel-windows-x64.exe"');
+  });
+
   it('resolves one signer profile before component identity and exports one canonical signing pair', () => {
     const { steps } = releaseWorkflow();
     const resolveSigner = stepIndex(steps, 'Resolve EVSign signer profile');
@@ -465,6 +525,30 @@ describe('release workflow supply-chain contract', () => {
     const result = runPublishedReleaseValidation(publishedManifestFixture());
 
     expect(result.status, result.stderr).toBe(0);
+  });
+
+  it('validates a separately downloadable signed FFmpeg during release repair', () => {
+    const result = runPublishedReleaseValidation(publishedManifestFixture(), undefined, {});
+
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  it('rejects a standalone FFmpeg whose checksum does not match', () => {
+    const result = runPublishedReleaseValidation(publishedManifestFixture(), undefined, {
+      checksum: `${'0'.repeat(64)}  ffmpeg-windows-x64.exe`,
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('Published standalone FFmpeg does not match its checksum');
+  });
+
+  it('rejects a self-consistent standalone FFmpeg that differs from the fixed component manifest', () => {
+    const result = runPublishedReleaseValidation(publishedManifestFixture(), undefined, {
+      componentHash: '0'.repeat(64),
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('does not match the verified signed component manifest');
   });
 
   const malformedManifestCases: Array<{
