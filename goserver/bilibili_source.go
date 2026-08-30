@@ -481,6 +481,10 @@ func parseBiliGiftEventsWithDiagnostic(body []byte) ([]giftEvent, string, bool, 
 		diagnostic.GiftNameKind = biliJSONObjectFieldKind(dataObject, "giftName")
 		return gifts, reason, ok, diagnostic
 	}
+	if _, exists := dataObject["pb"]; exists {
+		diagnostic.ParseStage = "protobuf_decode"
+		return gifts, reason, ok, diagnostic
+	}
 	giftList, exists := dataObject["gift_list"]
 	if !exists {
 		diagnostic.ParseStage = "gift_list_missing"
@@ -766,6 +770,7 @@ func parseLegacyBiliGiftData(raw json.RawMessage) (giftEvent, string, bool) {
 
 func parseBiliGiftV2Data(raw json.RawMessage) ([]giftEvent, string, bool) {
 	var data struct {
+		Protobuf   string  `json:"pb"`
 		UID        biliUID `json:"uid"`
 		Uname      string  `json:"uname"`
 		Face       string  `json:"face"`
@@ -797,7 +802,13 @@ func parseBiliGiftV2Data(raw json.RawMessage) ([]giftEvent, string, bool) {
 			} `json:"gift_info"`
 		} `json:"gift_list"`
 	}
-	if json.Unmarshal(raw, &data) != nil || len(data.GiftList) == 0 {
+	if json.Unmarshal(raw, &data) != nil {
+		return nil, "malformed_gift_data", false
+	}
+	if len(data.GiftList) == 0 {
+		if protobuf := strings.TrimSpace(data.Protobuf); protobuf != "" {
+			return parseBiliGiftV2Protobuf(protobuf)
+		}
 		return nil, "malformed_gift_data", false
 	}
 	uid := int64(data.UID)
