@@ -1,4 +1,5 @@
 import type { OvertimeGiftOperation } from './types';
+import { formatDurationZh } from './duration';
 
 export type QuickGiftOperation =
   | OvertimeGiftOperation
@@ -170,6 +171,16 @@ export function buildOvertimeGiftFormula(
   maximum?: number,
 ): string {
   return buildQuickGiftFormula({ operation, amount: seconds, maximum }, attributeName) ?? '0';
+}
+
+export function overtimeGiftActionName(operation: OvertimeGiftOperation, seconds = 60): string {
+  switch (operation) {
+    case 'add': return `增加 ${formatDurationZh(seconds)}`;
+    case 'subtract': return `减少 ${formatDurationZh(seconds)}`;
+    case 'double': return '时间翻倍';
+    case 'halve': return '时间减半';
+    case 'reset': return '时间清零';
+  }
 }
 
 export function quickGiftOperationLabel(operation: QuickGiftOperation, attributeName: string): string {

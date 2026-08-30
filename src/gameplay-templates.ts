@@ -9,7 +9,7 @@ import type {
   OvertimeGiftOperation,
   TimerRule,
 } from './types';
-import { buildOvertimeGiftFormula } from './gift-rule-operations';
+import { buildOvertimeGiftFormula, overtimeGiftActionName } from './gift-rule-operations';
 import { formatDurationZh } from './duration';
 
 export type GameplayTemplateCategory = 'timer' | 'goal' | 'challenge' | 'survival' | 'versus';
@@ -191,16 +191,6 @@ function overtimeActionForGift(input: GameplayTemplateInput, giftId: number): Ov
   return { giftId, operation: candidate.operation, seconds: Number.isInteger(seconds) && seconds > 0 ? seconds : 60 };
 }
 
-function overtimeActionName(action: OvertimeGiftAction): string {
-  switch (action.operation) {
-    case 'add': return `增加 ${formatDurationZh(action.seconds ?? 60)}`;
-    case 'subtract': return `减少 ${formatDurationZh(action.seconds ?? 60)}`;
-    case 'double': return '时间翻倍';
-    case 'halve': return '时间减半';
-    case 'reset': return '时间清零';
-  }
-}
-
 const TEMPLATES: readonly GameplayTemplateDefinition[] = [
   {
     id: 'overtime', version: 2, category: 'timer', title: '加班机', difficulty: '简单', preview: 'timer',
@@ -222,7 +212,7 @@ const TEMPLATES: readonly GameplayTemplateDefinition[] = [
           id: ids.next('rule'),
           giftId: gift.id,
           attributeName: name,
-          formulaName: `${gift.name}·${overtimeActionName(action)}`,
+          formulaName: `${gift.name}·${overtimeGiftActionName(action.operation, action.seconds ?? 60)}`,
           formula: buildOvertimeGiftFormula(action.operation, name, action.seconds ?? 60, maximum > 0 ? maximum : undefined),
           enabled: true,
         } satisfies GiftRule;

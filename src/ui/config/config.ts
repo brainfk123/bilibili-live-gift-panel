@@ -78,6 +78,7 @@ import type { AttributeEditLeaseHealth, AttributeEditLeaseSession } from './attr
 import {
   buildQuickGiftFormula,
   detectQuickGiftRule,
+  overtimeGiftActionName,
   QUICK_GIFT_OPERATION_GROUPS,
   quickGiftOperationLabel,
   quickGiftOperationSupportsMaximum,
@@ -4102,6 +4103,7 @@ export function mountConfig(root: HTMLElement): void {
         maximumUnit.textContent = formatSelect.value === 'hhmmss' ? '秒' : '单位';
       };
       const syncQuickRule = (): void => {
+        const previousDraft = item.quickDraft;
         const operation = operationSelect.value as QuickGiftOperation;
         const amount = Number(amountInput.value);
         const maximum = maximumInput.value.trim() === '' ? Number.NaN : Number(maximumInput.value);
@@ -4120,6 +4122,33 @@ export function mountConfig(root: HTMLElement): void {
             ...(optionalMaximum === undefined ? {} : { maximum: optionalMaximum }),
           };
         item.quickDraft = draft;
+        const overtimeRuleName = (
+          candidate: QuickGiftRuleDraft | undefined,
+        ): string | null => {
+          if (formatSelect.value !== 'hhmmss' || !candidate) return null;
+          switch (candidate.operation) {
+            case 'add':
+            case 'subtract':
+            case 'double':
+            case 'halve':
+            case 'reset': {
+              const seconds = 'amount' in candidate ? candidate.amount : 60;
+              return `${item.gift.name}·${overtimeGiftActionName(candidate.operation, seconds)}`;
+            }
+            default:
+              return null;
+          }
+        };
+        const previousAutomaticName = overtimeRuleName(previousDraft);
+        const nextAutomaticName = overtimeRuleName(draft);
+        if (
+          original?.createdFromTemplateId === 'overtime'
+          && nextAutomaticName
+          && item.formulaName.trim() === previousAutomaticName
+        ) {
+          item.formulaName = nextAutomaticName;
+          formulaNameInput.value = nextAutomaticName;
+        }
         const targetName = nameInput.value.trim() || originalName || '属性';
         const error = validateQuickGiftRuleDraft(draft);
         quickRuleError.textContent = error ?? '';

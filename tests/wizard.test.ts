@@ -2922,6 +2922,63 @@ describe('single-page configuration rendering', () => {
     expect(formula.value).toBe('MIN(加班时间+60,3600)');
   });
 
+  it('refreshes an overtime template rule name after changing its saved duration', async () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.attributes[0].createdFromTemplateId = 'overtime';
+    configured.attributes[0].createdFromTemplateVersion = 2;
+    configured.rules = [{
+      id: 'r-overtime-duration', giftId: gift.id, attributeName: '加班时间',
+      formulaName: `${gift.name}·增加 1分`, formula: '加班时间+60', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    await openExistingAttributeEditor(root);
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const amount = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '变化数值') as TestElement & { oninput?: () => void };
+    amount.value = '300';
+    amount.oninput?.();
+    findByText(root, '保存修改')?.onclick?.();
+
+    await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+    expect(loadState().rules[0]).toMatchObject({
+      formula: '加班时间+300',
+      formulaName: `${gift.name}·增加 5分`,
+    });
+    expect(textOf(root.querySelector('.attribute-gift-copy') as TestElement)).toContain(`${gift.name}·增加 5分`);
+  });
+
+  it('preserves a user-authored rule name that resembles an overtime template name', async () => {
+    const gift = builtinCatalog[0];
+    const configured = state('88888888');
+    configured.rules = [{
+      id: 'r-custom-duration', giftId: gift.id, attributeName: '加班时间',
+      formulaName: `${gift.name}·增加 1分`, formula: '加班时间+60', enabled: true,
+    }];
+    storage.set('bilibili-live-gift-panel-v1', JSON.stringify(configured));
+    const root = new TestElement('div');
+    mountConfig(root as unknown as HTMLElement);
+
+    await openExistingAttributeEditor(root);
+    root.querySelectorAll('.attribute-workbench-tab')
+      .find((tab) => textOf(tab).includes('礼物规则'))?.onclick?.();
+    const amount = root.querySelectorAll('input')
+      .find((input) => input.dataset.fieldLabel === '变化数值') as TestElement & { oninput?: () => void };
+    amount.value = '300';
+    amount.oninput?.();
+    findByText(root, '保存修改')?.onclick?.();
+
+    await vi.waitFor(() => expect(root.querySelector('.attribute-overlay')).toBeNull());
+    expect(loadState().rules[0]).toMatchObject({
+      formula: '加班时间+300',
+      formulaName: `${gift.name}·增加 1分`,
+    });
+  });
+
   it('edits an existing rule with a signed random range', async () => {
     const gift = builtinCatalog[0];
     const configured = state('88888888');
