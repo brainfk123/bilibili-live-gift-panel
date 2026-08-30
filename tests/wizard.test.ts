@@ -2297,13 +2297,13 @@ describe('single-page configuration rendering', () => {
     const dialog = root.querySelector('.changelog-dialog');
     expect(dialog).not.toBeNull();
     expect(textOf(dialog!)).toContain('这次更新了什么？');
-    expect(textOf(dialog!)).toContain('新增在线迁移导出');
-    expect(textOf(dialog!)).toContain('现在可以从“配置与数据”导出在线迁移文件；导出内容会按完整玩法计算依赖，并仅包含可迁移配置、当前状态与稳定剪裁预设，不包含登录信息、观众记录、历史礼物或本地素材。');
+    expect(textOf(dialog!)).toContain('增强礼物诊断与加班机摘要');
+    expect(textOf(dialog!)).toContain('普通礼物解析失败时，运行日志会记录脱敏后的命令、失败阶段和字段类型，便于继续定位 B 站消息变化；同时修正加班机调整时长后规则卡片仍显示旧分钟数的问题。日志不会记录 UID、昵称、消息内容或原始礼物数据。');
     expect(root.querySelectorAll('.changelog-visual')).toHaveLength(0);
     expect(textOf(dialog!)).not.toContain('训练中心');
     (root.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
 
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.9'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.10'));
     expect(root.querySelector('.changelog-dialog')).toBeNull();
   });
 
@@ -2344,7 +2344,7 @@ describe('single-page configuration rendering', () => {
         return Response.json({
           code: 0,
           update: {
-            state: 'up-to-date', currentVersion: '0.4.9', latestVersion: '0.4.9',
+            state: 'up-to-date', currentVersion: '0.4.10', latestVersion: '0.4.10',
             message: '当前已经是最新版本。', autoUpdate: true, restartRequired: false,
           },
         });
@@ -2362,7 +2362,7 @@ describe('single-page configuration rendering', () => {
     mountConfig(firstRoot as unknown as HTMLElement);
     await vi.waitFor(() => expect(firstRoot.querySelector('.changelog-dialog')).not.toBeNull());
     (firstRoot.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.9'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.10'));
 
     const secondRoot = new TestElement('div');
     mountConfig(secondRoot as unknown as HTMLElement);
