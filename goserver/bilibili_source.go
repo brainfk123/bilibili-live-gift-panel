@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -248,7 +249,7 @@ func (source *bilibiliGiftSource) runSocket(ctx context.Context, connection bili
 				}
 			}
 			for _, body := range bodies {
-				gifts, reason, giftOK := parseBiliGiftEventsDetailed(body)
+				gifts, reason, giftOK, parseDiagnostic := parseBiliGiftEventsWithDiagnostic(body)
 				if giftOK {
 					if callbacks.onGift != nil {
 						for _, gift := range gifts {
@@ -266,7 +267,9 @@ func (source *bilibiliGiftSource) runSocket(ctx context.Context, connection bili
 				if reason == "ignored_command" {
 					source.recordIgnoredMessage(ignoredBiliCommandCategory(body))
 				} else {
-					source.recordDiagnostic("bili_parse_failed", "reason", reason)
+					fields := []any{"reason", reason}
+					fields = append(fields, parseDiagnostic.fields()...)
+					source.recordDiagnostic("bili_parse_failed", fields...)
 				}
 			}
 		}
@@ -381,6 +384,295 @@ func parseBiliGiftEventsDetailed(body []byte) ([]giftEvent, string, bool) {
 		return parseBiliGiftV2Data(envelope.Data)
 	default:
 		return nil, "ignored_command", false
+	}
+}
+
+type biliGiftParseDiagnostic struct {
+	GiftCommand            string
+	ParseStage             string
+	PayloadBytes           int
+	DataKind               string
+	DataFieldCount         int
+	GiftListKind           string
+	GiftListCount          int
+	GiftIDKind             string
+	GiftNameKind           string
+	MissingGiftIDCount     int
+	MissingGiftNameCount   int
+	InspectedGiftItemCount int
+	StructureTruncated     bool
+	SchemaHash             string
+}
+
+func (diagnostic biliGiftParseDiagnostic) fields() []any {
+	if diagnostic.ParseStage == "" {
+		return nil
+	}
+	return []any{
+		"gift_command", diagnostic.GiftCommand,
+		"parse_stage", diagnostic.ParseStage,
+		"payload_bytes", diagnostic.PayloadBytes,
+		"data_kind", diagnostic.DataKind,
+		"data_field_count", diagnostic.DataFieldCount,
+		"gift_list_kind", diagnostic.GiftListKind,
+		"gift_list_count", diagnostic.GiftListCount,
+		"gift_id_kind", diagnostic.GiftIDKind,
+		"gift_name_kind", diagnostic.GiftNameKind,
+		"missing_gift_id_count", diagnostic.MissingGiftIDCount,
+		"missing_gift_name_count", diagnostic.MissingGiftNameCount,
+		"inspected_gift_item_count", diagnostic.InspectedGiftItemCount,
+		"structure_truncated", diagnostic.StructureTruncated,
+		"schema_hash", diagnostic.SchemaHash,
+	}
+}
+
+func parseBiliGiftEventsWithDiagnostic(body []byte) ([]giftEvent, string, bool, biliGiftParseDiagnostic) {
+	gifts, reason, ok := parseBiliGiftEventsDetailed(body)
+	if ok || reason != "malformed_gift_data" {
+		return gifts, reason, ok, biliGiftParseDiagnostic{}
+	}
+	if len(body) > biliDiagnosticMaxPayloadBytes {
+		return gifts, reason, ok, biliGiftParseDiagnostic{
+			ParseStage: "payload_too_large", PayloadBytes: len(body), DataKind: "invalid",
+			GiftListKind: "missing", GiftIDKind: "missing", GiftNameKind: "missing",
+			StructureTruncated: true, SchemaHash: diagnosticHash("payload_too_large"),
+		}
+	}
+	var envelope struct {
+		Command string          `json:"cmd"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return gifts, reason, ok, biliGiftParseDiagnostic{}
+	}
+	giftCommand := ""
+	switch envelope.Command {
+	case "SEND_GIFT":
+		giftCommand = "send_gift"
+	case "SEND_GIFT_V2":
+		giftCommand = "send_gift_v2"
+	default:
+		return gifts, reason, ok, biliGiftParseDiagnostic{}
+	}
+	diagnostic := biliGiftParseDiagnostic{
+		GiftCommand: giftCommand, PayloadBytes: len(body), GiftListKind: "missing",
+		GiftIDKind: "missing", GiftNameKind: "missing",
+	}
+	var data any
+	if json.Unmarshal(envelope.Data, &data) != nil {
+		diagnostic.ParseStage = "data_decode"
+		diagnostic.DataKind = "invalid"
+		diagnostic.SchemaHash = diagnosticHash("invalid")
+		return gifts, reason, ok, diagnostic
+	}
+	diagnostic.DataKind = biliJSONKind(data)
+	shape, shapeTruncated := biliJSONStructuralShapeDetails(data)
+	diagnostic.SchemaHash = diagnosticHash(shape)
+	diagnostic.StructureTruncated = shapeTruncated
+	dataObject, isObject := data.(map[string]any)
+	if !isObject {
+		diagnostic.ParseStage = "data_type"
+		return gifts, reason, ok, diagnostic
+	}
+	diagnostic.DataFieldCount = len(dataObject)
+	if envelope.Command == "SEND_GIFT" {
+		diagnostic.ParseStage = "data_decode"
+		diagnostic.GiftIDKind = biliJSONObjectFieldKind(dataObject, "giftId")
+		diagnostic.GiftNameKind = biliJSONObjectFieldKind(dataObject, "giftName")
+		return gifts, reason, ok, diagnostic
+	}
+	giftList, exists := dataObject["gift_list"]
+	if !exists {
+		diagnostic.ParseStage = "gift_list_missing"
+		return gifts, reason, ok, diagnostic
+	}
+	diagnostic.GiftListKind = biliJSONKind(giftList)
+	items, isArray := giftList.([]any)
+	if !isArray {
+		diagnostic.ParseStage = "gift_list_type"
+		return gifts, reason, ok, diagnostic
+	}
+	diagnostic.GiftListCount = len(items)
+	if len(items) == 0 {
+		diagnostic.ParseStage = "gift_list_empty"
+		return gifts, reason, ok, diagnostic
+	}
+	idKinds := make(map[string]bool)
+	nameKinds := make(map[string]bool)
+	itemTypeInvalid := false
+	idTypeInvalid := false
+	nameTypeInvalid := false
+	inspectionLimit := minInt(len(items), biliDiagnosticMaxGiftItems)
+	diagnostic.InspectedGiftItemCount = inspectionLimit
+	if inspectionLimit < len(items) {
+		diagnostic.StructureTruncated = true
+	}
+	for _, item := range items[:inspectionLimit] {
+		object, itemIsObject := item.(map[string]any)
+		if !itemIsObject {
+			itemTypeInvalid = true
+			continue
+		}
+		giftID, hasGiftID := object["gift_id"]
+		if !hasGiftID {
+			diagnostic.MissingGiftIDCount++
+			idKinds["missing"] = true
+		} else {
+			kind := biliJSONKind(giftID)
+			idKinds[kind] = true
+			if kind != "number" {
+				idTypeInvalid = true
+			}
+		}
+		giftName, hasGiftName := object["gift_name"]
+		if !hasGiftName {
+			diagnostic.MissingGiftNameCount++
+			nameKinds["missing"] = true
+		} else {
+			kind := biliJSONKind(giftName)
+			nameKinds[kind] = true
+			if kind != "string" {
+				nameTypeInvalid = true
+			} else if strings.TrimSpace(giftName.(string)) == "" {
+				diagnostic.MissingGiftNameCount++
+			}
+		}
+	}
+	diagnostic.GiftIDKind = biliJSONKindSummary(idKinds)
+	diagnostic.GiftNameKind = biliJSONKindSummary(nameKinds)
+	switch {
+	case itemTypeInvalid:
+		diagnostic.ParseStage = "gift_item_type"
+	case idTypeInvalid:
+		diagnostic.ParseStage = "gift_item_id_type"
+	case diagnostic.MissingGiftIDCount > 0:
+		diagnostic.ParseStage = "gift_item_missing_id"
+	case nameTypeInvalid:
+		diagnostic.ParseStage = "gift_item_name_type"
+	case diagnostic.MissingGiftNameCount > 0:
+		diagnostic.ParseStage = "gift_item_missing_name"
+	default:
+		diagnostic.ParseStage = "data_decode"
+	}
+	return gifts, reason, ok, diagnostic
+}
+
+func biliJSONKind(value any) string {
+	switch value.(type) {
+	case nil:
+		return "null"
+	case map[string]any:
+		return "object"
+	case []any:
+		return "array"
+	case string:
+		return "string"
+	case float64, json.Number:
+		return "number"
+	case bool:
+		return "boolean"
+	default:
+		return "invalid"
+	}
+}
+
+func biliJSONKindSummary(kinds map[string]bool) string {
+	if len(kinds) == 0 {
+		return "missing"
+	}
+	if len(kinds) > 1 {
+		return "mixed"
+	}
+	for kind := range kinds {
+		return kind
+	}
+	return "missing"
+}
+
+func biliJSONObjectFieldKind(object map[string]any, key string) string {
+	value, exists := object[key]
+	if !exists {
+		return "missing"
+	}
+	return biliJSONKind(value)
+}
+
+var biliDiagnosticShapeKeys = []string{
+	"blind_gift", "blind_gift_id", "blind_gift_name", "blind_gift_price", "coin_type", "face",
+	"giftId", "giftName", "gift_id", "gift_info", "gift_list", "gift_name", "gift_num", "gift_price",
+	"guard_level", "medal_info", "num", "price", "sender_uinfo", "tid", "timestamp", "total_coin", "uid", "uname",
+}
+
+const (
+	biliDiagnosticMaxPayloadBytes = 256 * 1024
+	biliDiagnosticMaxGiftItems    = 32
+	biliDiagnosticShapeMaxDepth   = 4
+	biliDiagnosticShapeMaxItems   = 8
+	biliDiagnosticShapeMaxNodes   = 128
+)
+
+func biliJSONStructuralShape(value any) string {
+	shape, _ := biliJSONStructuralShapeDetails(value)
+	return shape
+}
+
+type biliJSONShapeBudget struct {
+	remaining int
+	truncated bool
+}
+
+func biliJSONStructuralShapeDetails(value any) (string, bool) {
+	budget := biliJSONShapeBudget{remaining: biliDiagnosticShapeMaxNodes}
+	shape := biliJSONStructuralShapeAt(value, 0, &budget)
+	return shape, budget.truncated
+}
+
+func biliJSONStructuralShapeAt(value any, depth int, budget *biliJSONShapeBudget) string {
+	if budget.remaining <= 0 {
+		budget.truncated = true
+		return "limit"
+	}
+	budget.remaining--
+	if depth >= biliDiagnosticShapeMaxDepth {
+		if object, ok := value.(map[string]any); ok && len(object) > 0 {
+			budget.truncated = true
+		}
+		if items, ok := value.([]any); ok && len(items) > 0 {
+			budget.truncated = true
+		}
+		return biliJSONKind(value)
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		entries := make([]string, 0, len(biliDiagnosticShapeKeys)+1)
+		knownCount := 0
+		for _, key := range biliDiagnosticShapeKeys {
+			child, exists := typed[key]
+			if !exists {
+				continue
+			}
+			knownCount++
+			entries = append(entries, key+":"+biliJSONStructuralShapeAt(child, depth+1, budget))
+		}
+		if unknownCount := len(typed) - knownCount; unknownCount > 0 {
+			entries = append(entries, fmt.Sprintf("?:*%d", unknownCount))
+		}
+		sort.Strings(entries)
+		return "{" + strings.Join(entries, ",") + "}"
+	case []any:
+		limit := minInt(len(typed), biliDiagnosticShapeMaxItems)
+		shapes := make([]string, 0, limit+1)
+		for _, child := range typed[:limit] {
+			shapes = append(shapes, biliJSONStructuralShapeAt(child, depth+1, budget))
+		}
+		if omitted := len(typed) - limit; omitted > 0 {
+			budget.truncated = true
+			shapes = append(shapes, fmt.Sprintf("+%d", omitted))
+		}
+		sort.Strings(shapes)
+		return "[" + strconv.Itoa(len(typed)) + ":" + strings.Join(shapes, ",") + "]"
+	default:
+		return biliJSONKind(value)
 	}
 }
 

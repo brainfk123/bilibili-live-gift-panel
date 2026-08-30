@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,6 +153,49 @@ func TestBilibiliDiagnosticsRecordsSafeParseOutcomes(t *testing.T) {
 	}
 }
 
+func TestBilibiliDiagnosticsDescribeV2GiftListTypeWithoutPayloadValues(t *testing.T) {
+	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte(`{"cmd":"SEND_GIFT_V2","data":{"uid":"987654321","uname":"private-viewer","message":"private-message","token":"private-token","gift_list":{"璀璨宝盒":"喜欢你"},"提督一号":"bilibili星球"}}`)
+	frame := encodeBiliPacket(biliOpMessage, payload)
+	socket := &fakeBiliSocket{reads: [][]byte{frame}, readErr: errors.New("stop")}
+
+	err = (&bilibiliGiftSource{diagnostics: logger, heartbeatInterval: time.Hour}).runSocket(
+		context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{},
+	)
+	if err == nil {
+		t.Fatal("runSocket returned nil after fixture exhaustion")
+	}
+
+	export := string(logger.exportBytes())
+	for _, expected := range []string{
+		"bili_parse_failed",
+		`reason="malformed_gift_data"`,
+		`gift_command="send_gift_v2"`,
+		`parse_stage="gift_list_type"`,
+		"payload_bytes=",
+		`data_kind="object"`,
+		"data_field_count=6",
+		`gift_list_kind="object"`,
+		"gift_list_count=0",
+		`schema_hash="`,
+	} {
+		if !strings.Contains(export, expected) {
+			t.Fatalf("diagnostic export missing %q: %s", expected, export)
+		}
+	}
+	for _, secret := range []string{
+		"987654321", "private-viewer", "private-message", "private-token",
+		"璀璨宝盒", "喜欢你", "提督一号", "bilibili星球",
+	} {
+		if strings.Contains(export, secret) {
+			t.Fatalf("diagnostic export leaked %q: %s", secret, export)
+		}
+	}
+}
+
 func TestDiagnosticHashIsShortAndStable(t *testing.T) {
 	if got, want := diagnosticHash("abc"), "ba7816bf8f01"; got != want {
 		t.Fatalf("diagnosticHash(abc) = %q, want %q", got, want)
@@ -162,6 +206,162 @@ func TestParseBiliGiftDetailedCategorizesMalformedGiftData(t *testing.T) {
 	gift, reason, ok := parseBiliGiftDetailed([]byte(`{"cmd":"SEND_GIFT","data":{"giftId":"not-an-integer"}}`))
 	if ok || reason != "malformed_gift_data" || gift != (giftEvent{}) {
 		t.Fatalf("detailed malformed gift result = %#v, %q, %v", gift, reason, ok)
+	}
+}
+
+func TestBiliGiftParseDiagnosticsClassifyV2FailureStages(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want map[string]any
+	}{
+		{
+			name: "missing gift list",
+			body: `{"cmd":"SEND_GIFT_V2","data":{"uid":"987654321"}}`,
+			want: map[string]any{"parse_stage": "gift_list_missing", "gift_list_kind": "missing", "gift_list_count": 0},
+		},
+		{
+			name: "empty gift list",
+			body: `{"cmd":"SEND_GIFT_V2","data":{"gift_list":[]}}`,
+			want: map[string]any{"parse_stage": "gift_list_empty", "gift_list_kind": "array", "gift_list_count": 0},
+		},
+		{
+			name: "string gift id",
+			body: `{"cmd":"SEND_GIFT_V2","data":{"gift_list":[{"gift_id":"35801","gift_name":"private-gift"}]}}`,
+			want: map[string]any{
+				"parse_stage": "gift_item_id_type", "gift_list_kind": "array", "gift_list_count": 1,
+				"gift_id_kind": "string", "gift_name_kind": "string", "missing_gift_id_count": 0, "missing_gift_name_count": 0,
+			},
+		},
+		{
+			name: "missing gift name",
+			body: `{"cmd":"SEND_GIFT_V2","data":{"gift_list":[{"gift_id":35801}]}}`,
+			want: map[string]any{
+				"parse_stage": "gift_item_missing_name", "gift_list_kind": "array", "gift_list_count": 1,
+				"gift_id_kind": "number", "gift_name_kind": "missing", "missing_gift_id_count": 0, "missing_gift_name_count": 1,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, reason, ok, diagnostic := parseBiliGiftEventsWithDiagnostic([]byte(test.body))
+			if ok || reason != "malformed_gift_data" {
+				t.Fatalf("parse result = reason %q, ok %v", reason, ok)
+			}
+			fields := diagnostic.fields()
+			actual := make(map[string]any, len(fields)/2)
+			for index := 0; index+1 < len(fields); index += 2 {
+				actual[fields[index].(string)] = fields[index+1]
+			}
+			for key, want := range test.want {
+				if got := actual[key]; got != want {
+					t.Fatalf("diagnostic %s = %#v, want %#v (all %#v)", key, got, want, actual)
+				}
+			}
+			if hash, _ := actual["schema_hash"].(string); !isDiagnosticHash(hash) {
+				t.Fatalf("schema_hash = %#v, want a safe diagnostic hash", actual["schema_hash"])
+			}
+		})
+	}
+}
+
+func TestBiliGiftParseDiagnosticsClassifyLegacyDecodeFailure(t *testing.T) {
+	body := []byte(`{"cmd":"SEND_GIFT","data":{"giftId":"35801","giftName":"喜欢你","uid":"987654321","uname":"private-viewer"}}`)
+	_, reason, ok, diagnostic := parseBiliGiftEventsWithDiagnostic(body)
+	if ok || reason != "malformed_gift_data" {
+		t.Fatalf("parse result = reason %q, ok %v", reason, ok)
+	}
+	fields := diagnostic.fields()
+	actual := make(map[string]any, len(fields)/2)
+	for index := 0; index+1 < len(fields); index += 2 {
+		actual[fields[index].(string)] = fields[index+1]
+	}
+	for key, want := range map[string]any{
+		"gift_command": "send_gift", "parse_stage": "data_decode", "data_kind": "object",
+		"gift_list_kind": "missing", "gift_id_kind": "string", "gift_name_kind": "string",
+	} {
+		if got := actual[key]; got != want {
+			t.Fatalf("diagnostic %s = %#v, want %#v (all %#v)", key, got, want, actual)
+		}
+	}
+	for _, secret := range []string{"35801", "喜欢你", "987654321", "private-viewer"} {
+		if strings.Contains(fmt.Sprint(actual), secret) {
+			t.Fatalf("diagnostic fields leaked %q: %#v", secret, actual)
+		}
+	}
+}
+
+func TestBiliGiftParseDiagnosticsBoundAdditionalInspection(t *testing.T) {
+	items := make([]map[string]any, 100)
+	for index := range items {
+		items[index] = map[string]any{"gift_id": "35801", "gift_name": "private-gift"}
+	}
+	body, err := json.Marshal(map[string]any{"cmd": "SEND_GIFT_V2", "data": map[string]any{"gift_list": items}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, reason, ok, diagnostic := parseBiliGiftEventsWithDiagnostic(body)
+	if ok || reason != "malformed_gift_data" {
+		t.Fatalf("parse result = reason %q, ok %v", reason, ok)
+	}
+	fields := diagnostic.fields()
+	actual := make(map[string]any, len(fields)/2)
+	for index := 0; index+1 < len(fields); index += 2 {
+		actual[fields[index].(string)] = fields[index+1]
+	}
+	for key, want := range map[string]any{
+		"gift_list_count": 100, "inspected_gift_item_count": 32,
+		"structure_truncated": true, "parse_stage": "gift_item_id_type",
+	} {
+		if got := actual[key]; got != want {
+			t.Fatalf("diagnostic %s = %#v, want %#v (all %#v)", key, got, want, actual)
+		}
+	}
+}
+
+func TestBiliGiftParseDiagnosticsSkipOversizedPayloadStructure(t *testing.T) {
+	body, err := json.Marshal(map[string]any{
+		"cmd":  "SEND_GIFT_V2",
+		"data": map[string]any{"padding": strings.Repeat("private-value", 30_000)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, reason, ok, diagnostic := parseBiliGiftEventsWithDiagnostic(body)
+	if ok || reason != "malformed_gift_data" {
+		t.Fatalf("parse result = reason %q, ok %v", reason, ok)
+	}
+	fields := diagnostic.fields()
+	actual := make(map[string]any, len(fields)/2)
+	for index := 0; index+1 < len(fields); index += 2 {
+		actual[fields[index].(string)] = fields[index+1]
+	}
+	if actual["parse_stage"] != "payload_too_large" || actual["structure_truncated"] != true {
+		t.Fatalf("oversized diagnostic = %#v", actual)
+	}
+	if strings.Contains(fmt.Sprint(actual), "private-value") {
+		t.Fatalf("oversized diagnostic leaked a payload value: %#v", actual)
+	}
+}
+
+func TestBiliJSONStructuralShapeBoundsUntrustedWidthAndDepth(t *testing.T) {
+	wide := make(map[string]any, 2_000)
+	for index := range 2_000 {
+		wide[fmt.Sprintf("private-viewer-%04d", index)] = "private-value"
+	}
+	var deep any = wide
+	for range 100 {
+		deep = map[string]any{"gift_info": deep}
+	}
+
+	shape := biliJSONStructuralShape(deep)
+	if len(shape) > 1_024 {
+		t.Fatalf("structural shape length = %d, want at most 1024", len(shape))
+	}
+	for _, secret := range []string{"private-viewer", "private-value"} {
+		if strings.Contains(shape, secret) {
+			t.Fatalf("structural shape leaked %q: %s", secret, shape)
+		}
 	}
 }
 

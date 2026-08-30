@@ -169,38 +169,55 @@ var diagnosticFieldOrder = []string{
 	"accept_write_ms", "inbox_depth", "oldest_pending_age_ms", "attempts", "duration_ms", "blind_source", "blind_cost", "blind_value", "blind_priced",
 	"mapped_children", "port", "version",
 	"protocol_version", "decoded_packet_count", "ignored_command_category",
+	"gift_command", "parse_stage", "payload_bytes", "data_kind", "data_field_count", "gift_list_kind", "gift_list_count",
+	"gift_id_kind", "gift_name_kind", "missing_gift_id_count", "missing_gift_name_count", "inspected_gift_item_count",
+	"structure_truncated", "schema_hash",
 }
 
 var diagnosticFieldSpecs = map[string]diagnosticFieldSpec{
-	"gift_id":                  validateDiagnosticNonNegativeInteger,
-	"blind_parent_id":          validateDiagnosticNonNegativeInteger,
-	"count":                    validateDiagnosticNonNegativeInteger,
-	"timestamp":                validateDiagnosticNonNegativeInteger,
-	"rnd_hash":                 validateDiagnosticHash,
-	"reason":                   validateDiagnosticReason,
-	"state":                    validateDiagnosticState,
-	"room_id":                  validateDiagnosticRoomID,
-	"error_kind":               validateDiagnosticErrorKind,
-	"source_duplicate":         validateDiagnosticBoolean,
-	"accept_write_ms":          validateDiagnosticNonNegativeInteger,
-	"inbox_depth":              validateDiagnosticNonNegativeInteger,
-	"oldest_pending_age_ms":    validateDiagnosticNonNegativeInteger,
-	"attempts":                 validateDiagnosticNonNegativeInteger,
-	"duration_ms":              validateDiagnosticNonNegativeInteger,
-	"blind_source":             validateDiagnosticBlindSource,
-	"blind_cost":               validateDiagnosticAmount,
-	"blind_value":              validateDiagnosticAmount,
-	"blind_priced":             validateDiagnosticBoolean,
-	"mapped_children":          validateDiagnosticNonNegativeInteger,
-	"port":                     validateDiagnosticPort,
-	"version":                  validateDiagnosticVersion,
-	"task_id":                  validateDiagnosticTaskID,
-	"phase":                    validateDiagnosticPhase,
-	"exit_class":               validateDiagnosticExitClass,
-	"mode":                     validateDiagnosticMode,
-	"protocol_version":         validateDiagnosticProtocolVersion,
-	"decoded_packet_count":     validateDiagnosticNonNegativeInteger,
-	"ignored_command_category": validateDiagnosticIgnoredCommandCategory,
+	"gift_id":                   validateDiagnosticNonNegativeInteger,
+	"blind_parent_id":           validateDiagnosticNonNegativeInteger,
+	"count":                     validateDiagnosticNonNegativeInteger,
+	"timestamp":                 validateDiagnosticNonNegativeInteger,
+	"rnd_hash":                  validateDiagnosticHash,
+	"reason":                    validateDiagnosticReason,
+	"state":                     validateDiagnosticState,
+	"room_id":                   validateDiagnosticRoomID,
+	"error_kind":                validateDiagnosticErrorKind,
+	"source_duplicate":          validateDiagnosticBoolean,
+	"accept_write_ms":           validateDiagnosticNonNegativeInteger,
+	"inbox_depth":               validateDiagnosticNonNegativeInteger,
+	"oldest_pending_age_ms":     validateDiagnosticNonNegativeInteger,
+	"attempts":                  validateDiagnosticNonNegativeInteger,
+	"duration_ms":               validateDiagnosticNonNegativeInteger,
+	"blind_source":              validateDiagnosticBlindSource,
+	"blind_cost":                validateDiagnosticAmount,
+	"blind_value":               validateDiagnosticAmount,
+	"blind_priced":              validateDiagnosticBoolean,
+	"mapped_children":           validateDiagnosticNonNegativeInteger,
+	"port":                      validateDiagnosticPort,
+	"version":                   validateDiagnosticVersion,
+	"task_id":                   validateDiagnosticTaskID,
+	"phase":                     validateDiagnosticPhase,
+	"exit_class":                validateDiagnosticExitClass,
+	"mode":                      validateDiagnosticMode,
+	"protocol_version":          validateDiagnosticProtocolVersion,
+	"decoded_packet_count":      validateDiagnosticNonNegativeInteger,
+	"ignored_command_category":  validateDiagnosticIgnoredCommandCategory,
+	"gift_command":              validateDiagnosticGiftCommand,
+	"parse_stage":               validateDiagnosticParseStage,
+	"payload_bytes":             validateDiagnosticNonNegativeInteger,
+	"data_kind":                 validateDiagnosticJSONKind,
+	"data_field_count":          validateDiagnosticNonNegativeInteger,
+	"gift_list_kind":            validateDiagnosticJSONKind,
+	"gift_list_count":           validateDiagnosticNonNegativeInteger,
+	"gift_id_kind":              validateDiagnosticJSONKind,
+	"gift_name_kind":            validateDiagnosticJSONKind,
+	"missing_gift_id_count":     validateDiagnosticNonNegativeInteger,
+	"missing_gift_name_count":   validateDiagnosticNonNegativeInteger,
+	"inspected_gift_item_count": validateDiagnosticNonNegativeInteger,
+	"structure_truncated":       validateDiagnosticBoolean,
+	"schema_hash":               validateDiagnosticHash,
 }
 
 var diagnosticVersionPattern = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$`)
@@ -260,6 +277,46 @@ func validateDiagnosticIgnoredCommandCategory(value any) (any, bool) {
 	}
 	switch text {
 	case "combo_send", "batch_combo_send", "other":
+		return text, true
+	default:
+		return nil, false
+	}
+}
+
+func validateDiagnosticGiftCommand(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok {
+		return nil, false
+	}
+	switch text {
+	case "send_gift", "send_gift_v2":
+		return text, true
+	default:
+		return nil, false
+	}
+}
+
+func validateDiagnosticParseStage(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok {
+		return nil, false
+	}
+	switch text {
+	case "payload_too_large", "data_decode", "data_type", "gift_list_missing", "gift_list_type", "gift_list_empty", "gift_item_type",
+		"gift_item_missing_id", "gift_item_id_type", "gift_item_missing_name", "gift_item_name_type":
+		return text, true
+	default:
+		return nil, false
+	}
+}
+
+func validateDiagnosticJSONKind(value any) (any, bool) {
+	text, ok := value.(string)
+	if !ok {
+		return nil, false
+	}
+	switch text {
+	case "missing", "null", "object", "array", "string", "number", "boolean", "mixed", "invalid":
 		return text, true
 	default:
 		return nil, false
