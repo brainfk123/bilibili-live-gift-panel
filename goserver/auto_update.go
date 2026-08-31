@@ -113,6 +113,7 @@ var (
 	pendingUpdateVerifierForBuild         = defaultPendingUpdateVerifier
 	writePendingEnrollmentFloorAtomically = writeFileAtomically
 	writePendingMetadataAtomically        = writeFileAtomically
+	removeUpdateHelperArtifact            = os.Remove
 )
 
 type updateStatus struct {
@@ -1831,6 +1832,15 @@ func runUpdateHelper(args []string) (bool, error) {
 		return true, errors.New("解析更新状态失败")
 	}
 	if err := applyPendingUpdate(pending, waitPID); err != nil {
+		resultErr := boundedUpdateResult(err, "update_apply_failed")
+		if pendingFailureRequiresRedownload(resultErr) {
+			cleanupErr := cleanupDefinitiveUpdateHelper(args[2], pending)
+			logPendingUpdateDiagnostic(pending, "应用待安装更新诊断", resultErr, resultErr.Error())
+			if cleanupErr != nil {
+				logPendingUpdateDiagnostic(pending, "确定性更新失败后的清理诊断", cleanupErr, "artifact_cleanup_failed")
+			}
+			return true, resultErr
+		}
 		logPendingUpdateDiagnostic(pending, "应用待安装更新诊断", err, "update_apply_failed")
 		return true, errors.New("应用待安装更新失败")
 	}
@@ -1848,6 +1858,14 @@ func runUpdateHelper(args []string) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+func cleanupDefinitiveUpdateHelper(metadataPath string, pending pendingUpdate) error {
+	var cleanupErr error
+	for _, path := range []string{metadataPath, pending.TargetPath + ".new", pending.PendingPath} {
+		cleanupErr = errors.Join(cleanupErr, removeUpdateArtifactWith(removeUpdateHelperArtifact, path))
+	}
+	return cleanupErr
 }
 
 func startVerifiedUpdatedExecutable(pending pendingUpdate) error {

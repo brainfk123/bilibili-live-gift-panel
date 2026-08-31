@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -367,9 +368,7 @@ func TestLaunchUpdateInstallerRevalidatesPendingAfterStaleCleanup(t *testing.T) 
 	})
 
 	err := launchUpdateInstaller(updater.metadataPath(), 1234, false)
-	if err == nil || !strings.Contains(err.Error(), "安全校验") {
-		t.Fatalf("error = %v, want final pending verification failure", err)
-	}
+	assertUpdateCode(t, err, "artifact_verification_failed")
 	if started {
 		t.Fatal("tampered pending executable must not start")
 	}
@@ -600,6 +599,143 @@ func TestEnrollmentContextChangeBeforeWindowsLaunchClearsPending(t *testing.T) {
 	for _, path := range []string{filepath.Join(fixture.UpdatesDir, "gift-panel-pending.exe"), filepath.Join(fixture.UpdatesDir, "pending-update.json")} {
 		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 			t.Fatalf("context-changed pending survived at %q: %v", path, statErr)
+		}
+	}
+}
+
+func TestEnrollmentWindowsLaunchArtifactFailureClearsPending(t *testing.T) {
+	for _, failAt := range []int{1, 2} {
+		t.Run(fmt.Sprintf("check_%d", failAt), func(t *testing.T) {
+			fixture := newDurablePolicyPendingFixture(t, testTrustNow.Add(time.Hour))
+			previousResolver := pendingUpdateVerifierForBuild
+			calls := 0
+			pendingUpdateVerifierForBuild = func(pendingUpdate) (func(string) error, error) {
+				return func(string) error {
+					calls++
+					if calls == failAt {
+						return updateResultError("artifact_verification_failed")
+					}
+					return nil
+				}, nil
+			}
+			t.Cleanup(func() { pendingUpdateVerifierForBuild = previousResolver })
+			fixture.Updater.launchInstaller = launchUpdateInstaller
+
+			err := fixture.Updater.InstallOnExit(false)
+			assertUpdateCode(t, err, "artifact_verification_failed")
+			if fixture.Updater.HasPending() {
+				t.Fatal("launch-time artifact failure retained in-memory pending")
+			}
+			for _, path := range []string{filepath.Join(fixture.UpdatesDir, "gift-panel-pending.exe"), filepath.Join(fixture.UpdatesDir, "pending-update.json")} {
+				if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+					t.Fatalf("launch-time artifact failure left %q: %v", path, statErr)
+				}
+			}
+			if _, statErr := os.Stat(pendingUpdateEnrollmentFloorPath(filepath.Join(fixture.UpdatesDir, "pending-update.json"))); statErr != nil {
+				t.Fatalf("launch cleanup removed enrollment floor: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestEnrollmentHelperDefinitiveTrustFailureClearsPending(t *testing.T) {
+	tests := []struct {
+		name     string
+		context  bool
+		failAt   int
+		wantCode string
+	}{
+		{name: "context resolver", context: true, wantCode: "pending_policy_context_changed"},
+		{name: "source verification", failAt: 1, wantCode: "artifact_verification_failed"},
+		{name: "new verification", failAt: 2, wantCode: "artifact_verification_failed"},
+		{name: "final verification", failAt: 3, wantCode: "artifact_verification_failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			pending, metadataPath := writeWindowsEnrollmentPending(t, root)
+			previousApply := applyPendingUpdate
+			previousResolver := pendingUpdateVerifierForBuild
+			applyPendingUpdate = func(got pendingUpdate, waitPID int) error {
+				return replaceDownloadedExecutable(got.PendingPath, got, waitPID)
+			}
+			calls := 0
+			pendingUpdateVerifierForBuild = func(pendingUpdate) (func(string) error, error) {
+				if test.context {
+					return nil, updateResultError("pending_policy_context_changed")
+				}
+				return func(string) error {
+					calls++
+					if calls == test.failAt {
+						return updateResultError("artifact_verification_failed")
+					}
+					return nil
+				}, nil
+			}
+			t.Cleanup(func() {
+				applyPendingUpdate = previousApply
+				pendingUpdateVerifierForBuild = previousResolver
+			})
+
+			var helperErr error
+			diagnostics := captureAutoUpdateStderr(t, func() {
+				_, helperErr = runUpdateHelper([]string{"--apply-update", "--state", metadataPath, "2147483647"})
+			})
+			assertUpdateCode(t, helperErr, test.wantCode)
+			if !strings.Contains(diagnostics, "update_result="+test.wantCode) {
+				t.Fatalf("helper diagnostics = %q, want primary code %q", diagnostics, test.wantCode)
+			}
+			for _, path := range []string{pending.PendingPath, metadataPath, pending.TargetPath + ".new"} {
+				if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+					t.Fatalf("definitive helper failure left stale path %q: %v", path, statErr)
+				}
+			}
+			if _, statErr := os.Stat(pendingUpdateEnrollmentFloorPath(metadataPath)); statErr != nil {
+				t.Fatalf("helper cleanup removed enrollment floor: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestEnrollmentHelperCleanupFailureKeepsPrimaryTrustCode(t *testing.T) {
+	root := t.TempDir()
+	_, metadataPath := writeWindowsEnrollmentPending(t, root)
+	previousApply := applyPendingUpdate
+	previousRemove := removeUpdateHelperArtifact
+	applyPendingUpdate = func(pendingUpdate, int) error { return updateResultError("pending_policy_context_changed") }
+	removeUpdateHelperArtifact = func(string) error { return errors.New(`recognizable C:\Users\private-user\cleanup failure`) }
+	t.Cleanup(func() {
+		applyPendingUpdate = previousApply
+		removeUpdateHelperArtifact = previousRemove
+	})
+	var helperErr error
+	diagnostics := captureAutoUpdateStderr(t, func() {
+		_, helperErr = runUpdateHelper([]string{"--apply-update", "--state", metadataPath, "2147483647"})
+	})
+	assertUpdateCode(t, helperErr, "pending_policy_context_changed")
+	if strings.Contains(diagnostics, "recognizable") || strings.Contains(diagnostics, "private-user") {
+		t.Fatalf("helper cleanup diagnostics leaked sensitive error: %q", diagnostics)
+	}
+	for _, code := range []string{"pending_policy_context_changed", "artifact_cleanup_failed"} {
+		if !strings.Contains(diagnostics, "update_result="+code) {
+			t.Fatalf("helper cleanup diagnostics = %q, want %s", diagnostics, code)
+		}
+	}
+}
+
+func TestEnrollmentHelperTransientApplyFailureRetainsPending(t *testing.T) {
+	root := t.TempDir()
+	pending, metadataPath := writeWindowsEnrollmentPending(t, root)
+	previousApply := applyPendingUpdate
+	applyPendingUpdate = func(pendingUpdate, int) error { return errors.New("transient filesystem failure") }
+	t.Cleanup(func() { applyPendingUpdate = previousApply })
+	_, helperErr := runUpdateHelper([]string{"--apply-update", "--state", metadataPath, "2147483647"})
+	if helperErr == nil || helperErr.Error() != "应用待安装更新失败" {
+		t.Fatalf("transient helper error = %v", helperErr)
+	}
+	for _, path := range []string{pending.PendingPath, metadataPath} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("transient helper failure removed retryable path %q: %v", path, statErr)
 		}
 	}
 }
@@ -883,9 +1019,7 @@ func TestReplaceDownloadedExecutableRevalidatesFinalTargetAfterRename(t *testing
 	t.Cleanup(func() { renameWindowsUpdateFile = previousRename })
 
 	err := replaceDownloadedExecutable(pendingPath, pending, 2147483647)
-	if err == nil || !strings.Contains(err.Error(), "安全校验") {
-		t.Fatalf("error = %v, want final target verification failure", err)
-	}
+	assertUpdateCode(t, err, "artifact_verification_failed")
 	restored, readErr := os.ReadFile(targetPath)
 	if readErr != nil || string(restored) != string(oldBinary) {
 		t.Fatalf("restored target = %q, err = %v", restored, readErr)
