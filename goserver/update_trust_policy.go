@@ -133,7 +133,10 @@ func (p verifiedUpdateTrustPolicy) Authorize(input updateArtifactIdentity) error
 	if p.Epoch == 0 || p.ExpiresAt.IsZero() || !p.ExpiresAt.After(time.Now().UTC()) {
 		return policyError("policy_expired")
 	}
-	inputTag := strings.TrimSpace(input.Tag)
+	if !canonicalPolicyTag.MatchString(input.Tag) {
+		return policyError("publisher_not_authorized")
+	}
+	inputTag := input.Tag
 	inputHash := strings.ToLower(strings.TrimSpace(input.SHA256))
 	certificate := normalizeUpdateCertificateIdentity(input.Certificate)
 	for _, rule := range p.Rules {
@@ -170,6 +173,7 @@ func validatePublisherPolicy(signed publisherPolicySigned, signatures []publishe
 		return policyError("policy_expired")
 	}
 	ids := make(map[string]struct{}, len(signed.Publishers))
+	tagScopes := make(map[publisherPolicyTagScope]struct{})
 	for _, rule := range signed.Publishers {
 		if _, exists := ids[rule.ID]; exists {
 			return policyError("policy_invalid")
@@ -178,11 +182,28 @@ func validatePublisherPolicy(signed publisherPolicySigned, signatures []publishe
 		if err := validatePublisherRule(rule); err != nil {
 			return err
 		}
+		for _, tag := range rule.AllowedTags {
+			scope := publisherPolicyTagScope{
+				country: rule.Country, organization: rule.Organization, organizationID: rule.OrganizationID, channel: rule.AllowedChannel, tag: tag,
+			}
+			if _, exists := tagScopes[scope]; exists {
+				return policyError("policy_invalid")
+			}
+			tagScopes[scope] = struct{}{}
+		}
 	}
 	return nil
 }
 
-var canonicalPolicyTag = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$`)
+type publisherPolicyTagScope struct {
+	country        string
+	organization   string
+	organizationID string
+	channel        updateChannel
+	tag            string
+}
+
+var canonicalPolicyTag = regexp.MustCompile(`^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$`)
 var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func validatePublisherRule(rule updatePublisherRule) error {

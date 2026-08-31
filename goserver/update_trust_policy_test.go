@@ -25,6 +25,7 @@ func TestPublisherPolicyAuthorize(t *testing.T) {
 		{"exact bridge", updateArtifactIdentity{Tag: "v0.4.11", Channel: updateChannelLegacyRushRush, Certificate: updateCertificateIdentity{Country: "CN", Organization: "RushRush Network Technology Ltd", OrganizationID: "91450900MADM3GLG5P"}}, ""},
 		{"RushRush cannot sign stable", updateArtifactIdentity{Tag: "v0.4.11", Channel: updateChannelStable, Certificate: updateCertificateIdentity{Country: "CN", Organization: "RushRush Network Technology Ltd", OrganizationID: "91450900MADM3GLG5P"}}, "publisher_not_authorized"},
 		{"RushRush tag is exact", updateArtifactIdentity{Tag: "v0.4.12", Channel: updateChannelLegacyRushRush, Certificate: updateCertificateIdentity{Country: "CN", Organization: "RushRush Network Technology Ltd", OrganizationID: "91450900MADM3GLG5P"}}, "publisher_not_authorized"},
+		{"artifact tag whitespace is not canonical", updateArtifactIdentity{Tag: " v0.4.12 ", Channel: updateChannelStable, Certificate: updateCertificateIdentity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"}}, "publisher_not_authorized"},
 		{"organization ID is exact", updateArtifactIdentity{Tag: "v0.4.12", Channel: updateChannelStable, Certificate: updateCertificateIdentity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "different"}}, "publisher_not_authorized"},
 	}
 	for _, tt := range tests {
@@ -49,6 +50,12 @@ func TestPublisherPolicyRejectsInvalidDocuments(t *testing.T) {
 		{"zero epoch", strings.Replace(valid, "\"epoch\":1", "\"epoch\":0", 1), pinnedPolicyTime, "policy_invalid"},
 		{"timestamp lacks UTC form", strings.Replace(valid, "2030-01-01T00:00:00Z", "2030-01-01T08:00:00+08:00", 1), pinnedPolicyTime, "policy_invalid"},
 		{"noncanonical tag", strings.Replace(valid, "v0.4.12", "0.4.12", 1), pinnedPolicyTime, "policy_invalid"},
+		{"trailing prerelease separator", strings.Replace(valid, "v0.4.12", "v0.4.12-", 1), pinnedPolicyTime, "policy_invalid"},
+		{"trailing build separator", strings.Replace(valid, "v0.4.12", "v0.4.12+", 1), pinnedPolicyTime, "policy_invalid"},
+		{"leading zero major", strings.Replace(valid, "v0.4.12", "v00.4.12", 1), pinnedPolicyTime, "policy_invalid"},
+		{"leading zero minor", strings.Replace(valid, "v0.4.12", "v0.04.12", 1), pinnedPolicyTime, "policy_invalid"},
+		{"leading zero patch", strings.Replace(valid, "v0.4.12", "v0.4.012", 1), pinnedPolicyTime, "policy_invalid"},
+		{"conflicting publisher scope", conflictingPublisherPolicyFixture(), pinnedPolicyTime, "policy_invalid"},
 		{"expired policy", valid, time.Date(2031, 1, 1, 0, 0, 0, 0, time.UTC), "policy_expired"},
 	}
 	for _, tt := range tests {
@@ -57,6 +64,10 @@ func TestPublisherPolicyRejectsInvalidDocuments(t *testing.T) {
 			assertErrorCode(t, err, tt.want)
 		})
 	}
+}
+
+func conflictingPublisherPolicyFixture() string {
+	return `{"signed":{"epoch":1,"expiresAt":"2030-01-01T00:00:00Z","publishers":[{"id":"naisnet-primary","role":"primary","country":"CN","organization":"NaisNet Technology Co., Ltd.","organizationId":"91210103MA7CJ3C094","allowedChannel":"stable","allowedTags":["v0.4.12"]},{"id":"naisnet-conflicting-hash","role":"primary","country":"CN","organization":"NaisNet Technology Co., Ltd.","organizationId":"91210103MA7CJ3C094","allowedChannel":"stable","allowedTags":["v0.4.12"],"manifestSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]},"signatures":[{"algorithm":"ecdsa-p256-sha256","signature":"AA=="}]}`
 }
 
 func TestCanonicalSignedPolicy(t *testing.T) {
