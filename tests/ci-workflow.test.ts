@@ -71,6 +71,7 @@ describe('mainline CI workflow', () => {
       windows_level: '${{ steps.scope.outputs.windows_level }}',
       run_windows: '${{ steps.scope.outputs.run_windows }}',
       run_mysql: '${{ steps.scope.outputs.run_mysql }}',
+      reasons_json: '${{ steps.scope.outputs.reasons_json }}',
     });
     expect(scope?.steps?.find((step) => step.uses?.startsWith('actions/checkout@'))?.with)
       .toMatchObject({ 'fetch-depth': 0, 'persist-credentials': false });
@@ -145,9 +146,20 @@ describe('mainline CI workflow', () => {
     });
     expect(windows?.steps?.find((step) => step.run === 'npm run smoke:windows-exe')?.env)
       .toEqual({ GIFT_PANEL_CI_SMOKE: 'true' });
+    const closureIndex = windows?.steps?.findIndex((step) => step.name === 'Verify Windows artifact closure') ?? -1;
+    const uploadIndex = windows?.steps?.findIndex((step) => step.uses?.startsWith('actions/upload-artifact@')) ?? -1;
+    const smokeIndex = windows?.steps?.findIndex((step) => step.run === 'npm run smoke:windows-exe') ?? -1;
+    expect(closureIndex).toBeGreaterThan(smokeIndex);
+    expect(uploadIndex).toBeGreaterThan(closureIndex);
+    const closure = windows?.steps?.[closureIndex];
+    expect(closure?.if).toBe('success()');
+    expect(closure?.run?.match(/'dist\/[^']+'/g)).toEqual([
+      "'dist/gift-panel.exe'",
+      "'dist/ci-smoke-evidence.json'",
+    ]);
     const upload = windows?.steps?.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
     expect(upload).toMatchObject({
-      if: 'always()',
+      if: 'success()',
       with: {
         name: 'windows-compat-${{ github.sha }}',
         path: 'dist/gift-panel.exe\ndist/ci-smoke-evidence.json\n',

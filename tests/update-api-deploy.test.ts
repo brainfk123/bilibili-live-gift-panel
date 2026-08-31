@@ -3,6 +3,7 @@ import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSyn
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
+import { resolveBashBinary, resolveValidatedBashBinary, validateBashVersion } from './bash-test-runtime';
 
 function deploymentAsset(name: string): string {
   return readFileSync(new URL(`../deploy/update-api/${name}`, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
@@ -58,28 +59,25 @@ function posixPath(path: string): string {
   return path.replaceAll('\\', '/').replace(/^([A-Za-z]):/, (_match, drive: string) => `/${drive.toLowerCase()}`);
 }
 
-function resolveBashBinary(platform: NodeJS.Platform, environment: NodeJS.ProcessEnv, pathExists: (path: string) => boolean = existsSync): string {
-  if (environment.BASH_BIN) return environment.BASH_BIN;
-  if (platform === 'darwin') return '/bin/bash';
-  if (platform !== 'win32') return '/usr/bin/bash';
-  const candidates = [
-    'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
-    'C:\\Program Files\\Git\\bin\\bash.exe',
-  ];
-  const binary = candidates.find(pathExists);
-  if (!binary) throw new Error('Git Bash was not found; set BASH_BIN explicitly.');
-  return binary;
-}
-
 describe('deployment Bash selection', () => {
   it('uses the exact Linux Bash path without probing Windows candidates', () => {
     expect(resolveBashBinary('linux', {}, () => { throw new Error('should not probe Git Bash on Linux'); }))
       .toBe('/usr/bin/bash');
   });
 
-  it('uses the exact macOS Bash path without probing Windows candidates', () => {
-    expect(resolveBashBinary('darwin', {}, () => { throw new Error('should not probe Git Bash on macOS'); }))
-      .toBe('/bin/bash');
+  it('uses Apple Silicon Homebrew Bash on macOS', () => {
+    expect(resolveBashBinary('darwin', {}, (candidate) => candidate === '/opt/homebrew/bin/bash'))
+      .toBe('/opt/homebrew/bin/bash');
+  });
+
+  it('uses Intel Homebrew Bash when the Apple Silicon location is absent', () => {
+    expect(resolveBashBinary('darwin', {}, (candidate) => candidate === '/usr/local/bin/bash'))
+      .toBe('/usr/local/bin/bash');
+  });
+
+  it('does not fall back to stock macOS Bash when Homebrew Bash is missing', () => {
+    expect(() => resolveBashBinary('darwin', {}, () => false))
+      .toThrow('Homebrew Bash 4.2+ was not found');
   });
 
   it.each([
@@ -93,11 +91,34 @@ describe('deployment Bash selection', () => {
     expect(resolveBashBinary('win32', { BASH_BIN: 'D:\\tools\\bash.exe' }, () => { throw new Error('should not probe an override'); }))
       .toBe('D:\\tools\\bash.exe');
   });
+
+  it('accepts Bash 4.2 and validates the selected executable', () => {
+    const calls: string[] = [];
+    expect(resolveValidatedBashBinary('linux', {}, () => true, (binary) => {
+      calls.push(binary);
+      return { status: 0, stdout: 'GNU bash, version 4.2.0(1)-release' };
+    })).toBe('/usr/bin/bash');
+    expect(calls).toEqual(['/usr/bin/bash']);
+  });
+
+  it('rejects Bash older than 4.2 with a clear error', () => {
+    expect(() => validateBashVersion('/legacy/bash', () => ({
+      status: 0,
+      stdout: 'GNU bash, version 4.1.17(1)-release',
+    }))).toThrow('Bash 4.2 or newer is required');
+  });
+
+  it('rejects an executable whose Bash version cannot be read', () => {
+    expect(() => validateBashVersion('/broken/bash', () => ({
+      status: 1,
+      stderr: 'not a Bash executable',
+    }))).toThrow('Could not validate Bash version');
+  });
 });
 
 function runBash(script: string, cwd: string, environment: NodeJS.ProcessEnv = {}): SpawnSyncReturns<string> {
   const env = { ...process.env, ...environment };
-  const binary = resolveBashBinary(process.platform, env);
+  const binary = resolveValidatedBashBinary(process.platform, env);
   if (process.platform === 'win32' && !environment.BASH_BIN && existsSync('C:\\Program Files\\Git\\usr\\bin')) {
     env.PATH = `C:\\Program Files\\Git\\usr\\bin${env.PATH ? `;${env.PATH}` : ''}`;
   }
