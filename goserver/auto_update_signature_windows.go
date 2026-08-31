@@ -59,8 +59,11 @@ func (output *boundedAuthenticodeOutput) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func verifyAuthenticodePublisher(path, expectedSubject string) error {
-	return verifyAuthenticodePublisherWithRunner(path, expectedSubject, runAuthenticodePowerShell)
+// verifyAuthenticodePublisher is retained only for pre-enrollment historical
+// builds. Enrollment updater candidates use inspectAuthenticode and the signed
+// policy authorization path in auto_update.go instead.
+func verifyAuthenticodePublisher(path, expectedPublisher string) error {
+	return verifyAuthenticodePublisherWithRunner(path, expectedPublisher, runAuthenticodePowerShell)
 }
 
 func inspectAuthenticode(path string) (inspectedUpdateCertificate, error) {

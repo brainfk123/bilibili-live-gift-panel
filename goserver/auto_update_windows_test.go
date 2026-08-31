@@ -373,6 +373,74 @@ func TestLaunchUpdateInstallerRevalidatesPendingAfterStaleCleanup(t *testing.T) 
 	}
 }
 
+func TestEnrollmentInstallerAndReplaceUsePolicyVerifierForAllFiveChecks(t *testing.T) {
+	root := t.TempDir()
+	updatesDir := filepath.Join(root, "updates")
+	if err := os.MkdirAll(updatesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binary := []byte("policy-authorized enrollment executable")
+	pendingPath := filepath.Join(updatesDir, "gift-panel-pending.exe")
+	targetPath := filepath.Join(root, "gift-panel.exe")
+	if err := os.WriteFile(pendingPath, binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, []byte("previous executable"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(binary)
+	pending := pendingUpdate{
+		Version: "0.4.12", Tag: "v0.4.12", Channel: updateChannelStable,
+		Size: int64(len(binary)), SHA256: hex.EncodeToString(digest[:]), PendingPath: pendingPath, TargetPath: targetPath,
+	}
+	writer := &autoUpdater{updatesDir: updatesDir}
+	if err := writer.writePendingMetadata(pending); err != nil {
+		t.Fatal(err)
+	}
+
+	previousResolver := pendingUpdateVerifierForBuild
+	previousStart := startUpdateInstallerExecutable
+	previousVersion, previousPublisher := appVersion, updateExpectedPublisherHex
+	resolverCalls := 0
+	verifiedPaths := make([]string, 0, 5)
+	pendingUpdateVerifierForBuild = func(got pendingUpdate) (func(string) error, error) {
+		resolverCalls++
+		if got.Tag != pending.Tag || got.Channel != pending.Channel || got.SHA256 != pending.SHA256 {
+			t.Fatalf("policy verifier candidate = %#v, want tag/channel/hash from pending metadata", got)
+		}
+		return func(path string) error {
+			verifiedPaths = append(verifiedPaths, filepath.Clean(path))
+			return nil
+		}, nil
+	}
+	startUpdateInstallerExecutable = func(string, ...string) error { return nil }
+	appVersion, updateExpectedPublisherHex = "0.4.12", ""
+	t.Cleanup(func() {
+		pendingUpdateVerifierForBuild = previousResolver
+		startUpdateInstallerExecutable = previousStart
+		appVersion, updateExpectedPublisherHex = previousVersion, previousPublisher
+	})
+
+	if err := launchUpdateInstaller(writer.metadataPath(), 1234, false); err != nil {
+		t.Fatalf("launchUpdateInstaller rejected policy enrollment: %v", err)
+	}
+	if err := replaceDownloadedExecutable(pendingPath, pending, 2147483647); err != nil {
+		t.Fatalf("replaceDownloadedExecutable rejected policy enrollment: %v", err)
+	}
+	if resolverCalls != 2 {
+		t.Fatalf("policy verifier resolutions = %d, want once per launch/replace phase", resolverCalls)
+	}
+	wantPaths := []string{pendingPath, pendingPath, pendingPath, targetPath + ".new", targetPath}
+	if len(verifiedPaths) != len(wantPaths) {
+		t.Fatalf("policy verification paths = %#v, want five checks", verifiedPaths)
+	}
+	for index := range wantPaths {
+		if verifiedPaths[index] != filepath.Clean(wantPaths[index]) {
+			t.Fatalf("policy verification path %d = %q, want %q", index, verifiedPaths[index], filepath.Clean(wantPaths[index]))
+		}
+	}
+}
+
 func TestReplaceDownloadedExecutableKeepsBackupUntilNextStart(t *testing.T) {
 	root := t.TempDir()
 	pendingPath := filepath.Join(root, "updates", "gift-panel-pending.exe")
