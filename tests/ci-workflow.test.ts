@@ -93,12 +93,20 @@ describe('mainline CI workflow', () => {
     expect(commands(jobs.hosted)).toEqual(expect.arrayContaining([
       'npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2',
       'npm run typecheck',
+      'npm run build:ui',
+      'npm run prepare:go-assets',
       'npm run build:hosted',
       'go -C goserver test ./... -race -count=1',
       'go -C goserver vet ./...',
       'npm run test:update-api',
       'go -C goserver build -trimpath -o "${{ runner.temp }}/gift-panel-hosted" ./cmd/hosted',
     ]));
+    const hostedCommands = commands(jobs.hosted);
+    const hostedGoTest = hostedCommands.indexOf('go -C goserver test ./... -race -count=1');
+    for (const command of ['npm run build:ui', 'npm run prepare:go-assets', 'npm run build:hosted']) {
+      expect(hostedCommands.indexOf(command), `${command} must prepare Hosted Go test`).toBeLessThan(hostedGoTest);
+    }
+    expect(hostedCommands.indexOf('npm run build:ui')).toBeLessThan(hostedCommands.indexOf('npm run prepare:go-assets'));
     expect(jobs['hosted-mysql']?.needs).toEqual(['scope', 'hosted']);
     expect(jobs['hosted-mysql']?.if).toContain("needs.scope.outputs.run_mysql == 'true'");
     expect(commands(jobs['hosted-mysql'])).toContain('npm run test:hosted-mysql');
@@ -111,9 +119,17 @@ describe('mainline CI workflow', () => {
     expect(windows?.if).toBe("needs.scope.outputs.run_windows == 'true'");
     expect(commands(windows)).toEqual(expect.arrayContaining([
       'npm run build:ui',
+      'npm run prepare:go-assets',
+      'go -C goserver test ./... -race -count=1',
       'npm run build:exe',
       'npm run smoke:windows-exe',
     ]));
+    const windowsCommands = commands(windows);
+    expect(windowsCommands.filter((command) => command === 'npm run build:ui')).toHaveLength(1);
+    expect(windowsCommands.indexOf('npm run build:ui')).toBeLessThan(windowsCommands.indexOf('npm run prepare:go-assets'));
+    expect(windowsCommands.indexOf('npm run prepare:go-assets')).toBeLessThan(windowsCommands.indexOf('go -C goserver test ./... -race -count=1'));
+    expect(windowsCommands.indexOf('go -C goserver test ./... -race -count=1')).toBeLessThan(windowsCommands.indexOf('npm run build:exe'));
+    expect(windowsCommands.indexOf('npm run build:exe')).toBeLessThan(windowsCommands.indexOf('npm run smoke:windows-exe'));
     const build = windows?.steps?.find((step) => step.name === 'Build unsigned CI executable');
     expect(build?.env).toEqual({
       APP_BUILD_PROFILE: 'ci-windows-smoke',

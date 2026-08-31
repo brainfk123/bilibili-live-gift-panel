@@ -58,6 +58,8 @@ jobs:
       - run: npm exec -- playwright install --with-deps chromium
       - run: npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2
       - run: npm run typecheck
+      - run: npm run build:ui
+      - run: npm run prepare:go-assets
       - run: npm run build:hosted
       - run: go -C goserver test ./... -race -count=1
       - run: go -C goserver vet ./...
@@ -102,8 +104,9 @@ jobs:
       - run: npm ci
       - run: npm exec -- playwright install chromium
       - run: npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2
-      - run: go -C goserver test ./... -race -count=1
       - run: npm run build:ui
+      - run: npm run prepare:go-assets
+      - run: go -C goserver test ./... -race -count=1
       - name: Build unsigned CI executable
         env:
           APP_BUILD_PROFILE: ci-windows-smoke
