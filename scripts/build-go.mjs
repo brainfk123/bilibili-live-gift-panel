@@ -1,5 +1,5 @@
 import { createHash, createPublicKey } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
@@ -58,6 +58,20 @@ function resolveUpdateTrust(environment) {
   };
 }
 
+function relaySanitizedGoOutput(result, trustInputs) {
+  const redact = (value) => {
+    let output = value || '';
+    for (const input of [trustInputs?.rootSPKIBase64, trustInputs?.bootstrapPolicyBase64]) {
+      if (input) output = output.split(input).join('[redacted update trust input]');
+    }
+    return output;
+  };
+  const stdout = redact(result.stdout);
+  const stderr = redact(result.stderr);
+  if (stdout) process.stdout.write(stdout);
+  if (stderr) process.stderr.write(stderr);
+}
+
 export async function resolveGoLdflags(environment = process.env) {
   const appVersion = (environment.APP_VERSION || 'dev').replace(/^v/, '');
   const appCommit = environment.APP_COMMIT || 'local';
@@ -78,6 +92,10 @@ export async function resolveGoLdflags(environment = process.env) {
     appVersion,
     appCommit,
     trustDigests: updateTrust.trustDigests,
+    trustInputs: updateTrust.trustDigests ? {
+      rootSPKIBase64: updateTrust.rootSPKIBase64,
+      bootstrapPolicyBase64: updateTrust.bootstrapPolicyBase64,
+    } : null,
     ldflags: `-s -w -H windowsgui -X main.appVersion=${appVersion} -X main.appCommit=${appCommit} -X main.updateAPIBaseURLHex=${updateAPIBaseURLHex} -X main.updateExpectedPublisherHex=${updateExpectedPublisherHex} -X main.updateTrustRootSPKIBase64=${updateTrust.rootSPKIBase64} -X main.updateTrustBootstrapPolicyBase64=${updateTrust.bootstrapPolicyBase64}`,
   };
 }
@@ -119,16 +137,17 @@ async function runBuild() {
   let built = false;
   let lastError;
   for (const go of candidates) {
-    try {
-      execFileSync(go, ['build', '-ldflags', build.ldflags, '-o', out, '.'], {
-        cwd: join(root, 'goserver'),
-        stdio: 'inherit',
-      });
+    const result = spawnSync(go, ['build', '-ldflags', build.ldflags, '-o', out, '.'], {
+      cwd: join(root, 'goserver'),
+      encoding: 'utf8',
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    relaySanitizedGoOutput(result, build.trustInputs);
+    if (!result.error && result.status === 0) {
       built = true;
       break;
-    } catch (error) {
-      lastError = error;
     }
+    lastError = result;
   }
   if (!built) {
     const status = Number.isInteger(lastError?.status) ? ` (exit ${lastError.status})` : '';

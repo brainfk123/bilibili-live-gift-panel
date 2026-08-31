@@ -94,7 +94,8 @@ describe('build-go update trust configuration', () => {
     });
   });
 
-  it('does not print Base64 public inputs when Go fails after trust enrollment', () => {
+  it('does not print Base64 public inputs in Go trace output', () => {
+    const recognizablePolicyBase64 = Buffer.from('task3-fix1-recognizable-bootstrap-policy', 'utf8').toString('base64');
     const result = spawnSync(process.execPath, [fileURLToPath(new URL('../scripts/build-go.mjs', import.meta.url))], {
       cwd: fileURLToPath(new URL('..', import.meta.url)),
       encoding: 'utf8',
@@ -102,16 +103,18 @@ describe('build-go update trust configuration', () => {
         ...process.env,
         APP_UPDATE_TRUST_REQUIRED: '1',
         APP_UPDATE_TRUST_ROOT_SPKI_B64: testTrustRootSPKIBase64,
-        APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: testTrustBootstrapPolicyBase64,
-        GOFLAGS: '-this-forces-a-safe-build-failure',
+        APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: recognizablePolicyBase64,
+        GOFLAGS: '-x -buildvcs=false',
+        GOCACHE: fileURLToPath(new URL('../.cache/go-build', import.meta.url)),
       },
     });
 
     const output = `${result.stdout}${result.stderr}`;
-    expect(result.status).not.toBe(0);
+    expect(result.status).toBe(0);
     expect(output).toContain(createHash('sha256').update(Buffer.from(testTrustRootSPKIBase64, 'base64')).digest('hex'));
     expect(output).not.toContain(testTrustRootSPKIBase64);
-    expect(output).not.toContain(testTrustBootstrapPolicyBase64);
+    expect(output).not.toContain(recognizablePolicyBase64);
+    expect(output).toContain('WORK=');
   }, 15_000);
 
   it('does not require trust material for ordinary local builds', async () => {
