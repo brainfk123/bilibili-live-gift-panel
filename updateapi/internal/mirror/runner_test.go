@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +20,60 @@ import (
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/publish"
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/release"
 )
+
+func TestRunnerRejectsMalformedHTTP200ResponseETagWithoutSideEffects(t *testing.T) {
+	methods := []struct {
+		name    string
+		path    string
+		tag     string
+		options RunOptions
+	}{
+		{
+			name:    "latest",
+			path:    "/repos/brainfk123/bilibili-live-gift-panel/releases/latest",
+			tag:     testTag,
+			options: RunOptions{Channel: release.ChannelStable},
+		},
+		{
+			name:    "by tag",
+			path:    "/repos/brainfk123/bilibili-live-gift-panel/releases/tags/v0.4.11",
+			tag:     "v0.4.11",
+			options: RunOptions{Channel: release.ChannelLegacyRushRush, Tag: "v0.4.11"},
+		},
+	}
+
+	for _, method := range methods {
+		for _, etag := range conditionalResponseETagCases() {
+			if etag.valid {
+				continue
+			}
+			t.Run(method.name+"/"+etag.name, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+					if request.URL.Path != method.path {
+						t.Fatalf("path = %q, want %q", request.URL.Path, method.path)
+					}
+					writer.Header().Set("ETag", etag.value)
+					writeReleaseJSON(t, writer, validReleaseJSONForTag(method.tag))
+				}))
+				defer server.Close()
+
+				fixture := newRunnerFixture(t)
+				runner := fixture.runner()
+				runner.Source = newGitHubReleaseSource(server.Client(), server.URL)
+				result, err := runner.Run(context.Background(), method.options)
+				if err == nil || StageOf(err) != StageDiscovery {
+					t.Fatalf("Run() result=%+v error=%v stage=%q", result, err, StageOf(err))
+				}
+				if result.Tag != "" || result.NotModified || result.Outcome != "" || len(fixture.fetcher.specs) != 0 || fixture.factoryCalls != 0 || fixture.publisher.calls != 0 || fixture.state.saveCalls != 0 {
+					t.Fatalf("rejected response side effects: result=%+v downloads=%d factory=%d publishes=%d saves=%d", result, len(fixture.fetcher.specs), fixture.factoryCalls, fixture.publisher.calls, fixture.state.saveCalls)
+				}
+				if strings.TrimSpace(etag.value) != "" && strings.Contains(err.Error(), etag.value) {
+					t.Fatalf("runner error leaked response ETag: %v", err)
+				}
+			})
+		}
+	}
+}
 
 func TestRunnerBridgeDiscoveryUsesByTagAndForwardsLegacyChannel(t *testing.T) {
 	fixture := newRunnerFixture(t)
