@@ -16,7 +16,7 @@ const takeoverVersion = '0.0.1';
 
 const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 
-async function fetchBeforeDeadline(fetchImpl, input, init, deadline) {
+async function fetchBeforeDeadline(fetchImpl, input, init, deadline, consume = (response) => response) {
   const remaining = deadline - Date.now();
   if (remaining <= 0) throw new Error('Windows EXE smoke request timed out');
   const controller = new AbortController();
@@ -28,7 +28,8 @@ async function fetchBeforeDeadline(fetchImpl, input, init, deadline) {
         reject(new Error('Windows EXE smoke request timed out'));
       }, remaining);
     });
-    return await Promise.race([fetchImpl(input, { ...init, signal: controller.signal }), timedOut]);
+    const request = Promise.resolve(fetchImpl(input, { ...init, signal: controller.signal })).then(consume);
+    return await Promise.race([request, timedOut]);
   } finally {
     clearTimeout(timeout);
   }
@@ -39,12 +40,12 @@ export async function probePanel(fetchImpl, ports, deadline) {
   while (Date.now() < deadline) {
     for (const port of ports) {
       try {
-        const response = await fetchBeforeDeadline(fetchImpl, 'http://127.0.0.1:' + port + '/health', { redirect: 'error' }, deadline);
-        if (response.status !== 200) {
-          lastFailure = 'status ' + response.status;
+        const healthResponse = await fetchBeforeDeadline(fetchImpl, 'http://127.0.0.1:' + port + '/health', { redirect: 'error' }, deadline, async (response) => ({ response, health: response.status === 200 ? await response.json() : undefined }));
+        if (healthResponse.response.status !== 200) {
+          lastFailure = 'status ' + healthResponse.response.status;
           continue;
         }
-        const health = await response.json();
+        const health = healthResponse.health;
         if (health?.name !== panelName) throw new Error('Windows EXE smoke health endpoint belongs to a foreign panel');
         if (typeof health.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(health.version)) {
           throw new Error('Windows EXE smoke health endpoint returned an invalid stable version');
@@ -71,11 +72,12 @@ export async function requestGracefulExit(fetchImpl, port, requestedTakeoverVers
 export async function validatePanelRoutes(fetchImpl, port, deadline = Date.now() + 10_000) {
   const passed = [];
   for (const [name, path, contentType] of expectedRoutes) {
-    const response = await fetchBeforeDeadline(fetchImpl, 'http://127.0.0.1:' + port + path, { redirect: 'error' }, deadline);
-    if (response.status !== 200 || !response.headers.get('content-type')?.toLowerCase().startsWith(contentType)) {
-      throw new Error('Windows EXE smoke route ' + name + ' failed');
-    }
-    await response.arrayBuffer();
+    await fetchBeforeDeadline(fetchImpl, 'http://127.0.0.1:' + port + path, { redirect: 'error' }, deadline, async (response) => {
+      if (response.status !== 200 || !response.headers.get('content-type')?.toLowerCase().startsWith(contentType)) {
+        throw new Error('Windows EXE smoke route ' + name + ' failed');
+      }
+      await response.arrayBuffer();
+    });
     passed.push(name);
   }
   return passed;
@@ -91,13 +93,14 @@ async function waitForChildExit(child, deadline) {
 }
 
 async function cleanUpChild(child, deadline) {
-  if (!child || childExited(child)) return;
+  if (!child || childExited(child)) return true;
   try {
     child.kill();
   } catch {
     // Cleanup must continue even when the process handle is already invalid.
   }
   await waitForChildExit(child, deadline).catch(() => undefined);
+  return childExited(child);
 }
 
 export async function smokeWindowsExecutable(options = {}) {
@@ -156,11 +159,12 @@ export async function smokeWindowsExecutable(options = {}) {
     await writeFile(evidencePath, JSON.stringify(evidence) + '\n', 'utf8');
     return evidence;
   } finally {
-    removeChildErrorListener?.();
+    let childStopped = true;
     try {
-      await cleanUpChild(child, Date.now() + exitTimeoutMs);
+      childStopped = await cleanUpChild(child, Date.now() + exitTimeoutMs);
     } finally {
       await removeTemporaryDirectory(temporaryLocalAppData);
+      if (childStopped) removeChildErrorListener?.();
     }
   }
 }

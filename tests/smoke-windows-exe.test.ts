@@ -62,6 +62,52 @@ it('aborts never-settling health, route, and takeover requests at their deadline
   await expect(within(requestGracefulExit(neverFetch, 12450, '0.0.1', Date.now() + 20))).rejects.toThrow('request timed out');
 });
 
+it('bounds a health body that stalls after headers and still cleans up', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'windows-smoke-stalled-health-body-'));
+  let aborted = false;
+  let removed = false;
+  const child = { exitCode: null as number | null, kill: () => { child.exitCode = 1; return true; }, once: () => undefined };
+  const stalledHealth = {
+    status: 200,
+    headers: new Headers({ 'content-type': 'application/json' }),
+    json: () => new Promise(() => undefined),
+  } as unknown as Response;
+  try {
+    await expect(within(smokeWindowsExecutable({
+      platform: 'win32', cwd: root, executablePath: join(root, 'gift-panel.exe'),
+      createTemporaryDirectory: async () => { const path = join(root, 'LOCALAPPDATA'); await mkdir(path); return path; },
+      removeTemporaryDirectory: async () => { removed = true; },
+      spawnImpl: () => child,
+      fetchImpl: async (_input, init) => { init?.signal?.addEventListener('abort', () => { aborted = true; }); return stalledHealth; },
+      readinessTimeoutMs: 20, exitTimeoutMs: 1, pollIntervalMs: 1,
+    }))).rejects.toThrow('request timed out');
+    expect(aborted).toBe(true);
+    expect(removed).toBe(true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it('consumes a child error emitted after cleanup times out', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'windows-smoke-late-child-error-'));
+  const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, kill: () => {
+    setTimeout(() => child.emit('error', new Error('late synthetic error')), 10);
+    return true;
+  } });
+  try {
+    await expect(smokeWindowsExecutable({
+      platform: 'win32', cwd: root, executablePath: join(root, 'gift-panel.exe'),
+      createTemporaryDirectory: async () => { const path = join(root, 'LOCALAPPDATA'); await mkdir(path); return path; },
+      spawnImpl: () => child,
+      fetchImpl: async () => new Response('{"name":"bilibili-live-gift-panel","version":"0.0.1"}'),
+      readinessTimeoutMs: 50, exitTimeoutMs: 1, pollIntervalMs: 1,
+    })).rejects.toThrow('expected version 0.0.0');
+    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 20));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 it('turns an emitted spawn error into a controlled smoke failure', async () => {
   const root = await mkdtemp(join(tmpdir(), 'windows-smoke-spawn-error-'));
   const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, kill: () => true });
