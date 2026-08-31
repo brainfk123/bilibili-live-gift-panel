@@ -35,14 +35,14 @@ Windows x64 只在需要验证真实目标行为时运行：例如 Windows 专�
 
 ## Downloading and reproducing a Windows failure
 
-从 CI 下载失败 job 的构建产物，在隔离的 Windows 检查环境中复现。反馈必须包含：
+先记录失败 job 的日志、commit SHA、runner 镜像和失败命令。仅当 artifact 成功上传时才下载构建产物并核对其 SHA-256，再在隔离的 Windows 检查环境中复现。反馈必须包含：
 
 - 触发构建的 commit SHA；
 - Windows runner 镜像（或真实机器的 Windows 版本、架构）；
-- 相关 artifact 的 SHA-256；
+- 相关 artifact 的 SHA-256（仅当 artifact 成功上传时）；
 - 失败测试/命令及完整错误证据；
 - 已覆盖与未覆盖的边界（尤其是 ARM、x64、驱动和硬件编码）；
-- 重跑结果（通过、仍失败或未能复现）。
+- 重跑结果（通过、仍失败或未能复现）；无 artifact 时，必须在干净 Windows x64 或 CI 中重新运行失败命令复现，不能假设存在可下载的 artifact。
 
 修复在 Mac checkout 中完成，提交后由 CI 重新构建、重新上传和复验；不要在 VM 或下载的 artifact 中直接编辑代码。无法复现时也要回传上述证据，而不是只报告“本地正常”。
 
@@ -58,7 +58,7 @@ ARM snapshot 的结果**不作为 x64 驱动、显卡或硬件编码证据**。�
 
 ## EXE release remains separate
 
-本工作流不发布或签名 EXE。版本标签、Authenticode、FFmpeg 资产、GitHub Release 和自动更新以 [README 的发布与自动更新说明](../../README.md#发布与自动更新) 及其链接的发布工作流为唯一依据；Hosted 服务器操作以[国内更新 API 部署说明](../../deploy/update-api/README.md)为准。
+本工作流不发布或签名 EXE。版本标签、Authenticode、FFmpeg 资产、GitHub Release 和自动更新以 [README 的发布与自动更新说明](../../README.md#发布与自动更新) 及其链接的发布工作流为唯一依据；Hosted 服务器操作以 [Hosted 部署 runbook](../../deploy/hosted/README.md) 为准。EXE 更新基础设施（而非 Hosted 部署）另见[更新 API 部署说明](../../deploy/update-api/README.md)。
 
 ## Retirement-stage changes
 
