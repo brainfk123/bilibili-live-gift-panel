@@ -974,6 +974,95 @@ func TestInstallOnExitDiscardsLegacyPendingWhenEnrollmentFloorRecheckFails(t *te
 	}
 }
 
+func TestInstallOnExitClassifiesDeletedEnrollmentFloorRecreationFailureAsInvalid(t *testing.T) {
+	const sensitive = `recognizable-floor-recreate C:\Users\private-user\pending-update-enrollment-floor.json`
+	binary := []byte("legacy pending deleted enrollment floor")
+	digest := sha256.Sum256(binary)
+	rule := stableTestRule("naisnet-primary", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094")
+	rule.ManifestSHA256 = hex.EncodeToString(digest[:])
+	updater, _, _ := newPolicyUpdater(t, policyUpdaterFixture{
+		CurrentVersion: "0.4.11", Tag: "v0.4.12", ChannelHeaders: []string{string(updateChannelStable)}, Binary: binary,
+		Certificate: updateCertificateIdentity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"},
+		Rules:       []updatePublisherRule{rule},
+	})
+	assertUpdateCode(t, updater.checkAndDownload(context.Background(), true), "")
+
+	pendingPath := filepath.Join(updater.updatesDir, "gift-panel-pending.exe")
+	metadataPath := updater.metadataPath()
+	floorPath := pendingUpdateEnrollmentFloorPath(metadataPath)
+	legacy := pendingUpdate{
+		Version: updater.pending.Version, Size: updater.pending.Size, SHA256: updater.pending.SHA256,
+		PendingPath: pendingPath, TargetPath: updater.executablePath,
+	}
+	metadata, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadataPath, append(metadata, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(floorPath); err != nil {
+		t.Fatal(err)
+	}
+	updater.pending = &legacy
+	paths := []string{pendingPath, metadataPath, updater.executablePath + ".old", updater.executablePath + ".new"}
+	for _, path := range paths[2:] {
+		if err := os.WriteFile(path, []byte("stale installer transaction"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	previousMetadataWrite := writePendingMetadataAtomically
+	previousFloorWrite := writePendingEnrollmentFloorAtomically
+	writePendingMetadataAtomically = func(path string, data []byte) error {
+		if err := previousMetadataWrite(path, data); err != nil {
+			return err
+		}
+		if err := os.Remove(floorPath); err != nil {
+			return err
+		}
+		writePendingEnrollmentFloorAtomically = func(string, []byte) error { return errors.New(sensitive) }
+		return nil
+	}
+	t.Cleanup(func() {
+		writePendingMetadataAtomically = previousMetadataWrite
+		writePendingEnrollmentFloorAtomically = previousFloorWrite
+	})
+	updater.launchInstaller = func(string, int, bool) error {
+		t.Fatal("deleted enrollment floor recreation failure launched installer")
+		return nil
+	}
+
+	var installErr error
+	diagnostics := captureAutoUpdateStderr(t, func() { installErr = updater.InstallOnExit(false) })
+	assertUpdateCode(t, installErr, "pending_enrollment_floor_invalid")
+	if strings.Contains(diagnostics, "recognizable-floor-recreate") || strings.Contains(diagnostics, "private-user") ||
+		strings.Contains(installErr.Error(), "recognizable-floor-recreate") || strings.Contains(installErr.Error(), "private-user") {
+		t.Fatalf("deleted enrollment floor failure leaked sensitive detail: diagnostics=%q error=%v", diagnostics, installErr)
+	}
+	if !strings.Contains(diagnostics, "update_result=pending_enrollment_floor_invalid") {
+		t.Fatalf("deleted enrollment floor diagnostics = %q", diagnostics)
+	}
+	if updater.HasPending() {
+		t.Fatal("deleted enrollment floor failure retained in-memory pending")
+	}
+	for _, path := range paths {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("deleted enrollment floor failure left %q: %v", path, err)
+		}
+	}
+
+	writePendingMetadataAtomically = previousMetadataWrite
+	writePendingEnrollmentFloorAtomically = previousFloorWrite
+	assertUpdateCode(t, updater.checkAndDownload(context.Background(), true), "")
+	if !updater.HasPending() || updater.Status().State != "ready" {
+		t.Fatalf("redownload state = status %#v, pending %v; want ready", updater.Status(), updater.HasPending())
+	}
+	if _, err := os.Stat(floorPath); err != nil {
+		t.Fatalf("redownload did not recreate enrollment floor: %v", err)
+	}
+}
+
 func TestValidatedLegacyPreLaunchFailureKeepsRetryStateWhenArtifactLocked(t *testing.T) {
 	for _, provenance := range []string{pendingVerificationLegacyMigrated, pendingVerificationLegacyCompatibility} {
 		t.Run(provenance, func(t *testing.T) {

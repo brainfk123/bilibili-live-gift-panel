@@ -656,7 +656,7 @@ func (updater *autoUpdater) InstallOnExit(restart bool) error {
 	if pending.Verification.Provenance == pendingVerificationLegacyMigrated || pending.Verification.Provenance == pendingVerificationLegacyCompatibility {
 		if updater.trustStore != nil {
 			if err := ensurePendingUpdateEnrollmentFloor(updater.metadataPath()); err != nil {
-				return updater.discardPendingUpdateAfterDefinitiveFailure(*pending, err, "pending_enrollment_floor_invalid")
+				return updater.discardPendingUpdateAfterDefinitiveFailure(*pending, updateResultError("pending_enrollment_floor_invalid"), "pending_enrollment_floor_invalid")
 			}
 		}
 		pending.legacyDiagnosticsApproved = true

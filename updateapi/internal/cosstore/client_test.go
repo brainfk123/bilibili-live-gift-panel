@@ -203,6 +203,53 @@ func TestGetAuthorizesReadAndReturnsETag(t *testing.T) {
 	}
 }
 
+func TestGetReadAllowlistAcceptsOnlyUpdateDiscoveryAndImmutableReleaseKeys(t *testing.T) {
+	requested := make(chan string, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requested <- strings.TrimPrefix(request.URL.Path, "/")
+		_, _ = writer.Write([]byte("allowed"))
+	}))
+	defer server.Close()
+	store := newStore(t, server, time.Second)
+
+	allowed := []string{
+		"channels/stable/latest.json",
+		"channels/legacy-rushrush/latest.json",
+		"trust/publisher/latest.json",
+		"releases/v0.4.12/gift-panel-windows-x64.exe",
+	}
+	for _, key := range allowed {
+		body, _, err := store.Get(context.Background(), key, 64)
+		if err != nil {
+			t.Fatalf("Get(%q) error = %v, want allowed", key, err)
+		}
+		if string(body) != "allowed" {
+			t.Fatalf("Get(%q) body = %q", key, body)
+		}
+		if got := <-requested; got != key {
+			t.Fatalf("requested key = %q, want %q", got, key)
+		}
+	}
+
+	for _, key := range []string{
+		"channels/beta/latest.json",
+		"channels/legacy-rushrush/other.json",
+		"trust/publisher/epochs/00000001.json",
+		"trust/publisher/other.json",
+		"trust/other/latest.json",
+		"releases/../private/credentials.json",
+	} {
+		if _, _, err := store.Get(context.Background(), key, 64); err == nil {
+			t.Fatalf("Get(%q) error = nil, want allowlist rejection", key)
+		}
+	}
+	select {
+	case key := <-requested:
+		t.Fatalf("rejected key reached COS adapter: %q", key)
+	default:
+	}
+}
+
 func TestGetRejectsBodyLargerThanLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		_, _ = writer.Write([]byte("five!"))

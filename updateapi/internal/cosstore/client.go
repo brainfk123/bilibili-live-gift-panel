@@ -15,9 +15,11 @@ import (
 )
 
 const (
-	defaultTimeout   = 10 * time.Second
-	presignTTL       = 10 * time.Minute
-	stableChannelKey = "channels/stable/latest.json"
+	defaultTimeout           = 10 * time.Second
+	presignTTL               = 10 * time.Minute
+	stableChannelKey         = "channels/stable/latest.json"
+	legacyRushRushChannelKey = "channels/legacy-rushrush/latest.json"
+	publisherPolicyKey       = "trust/publisher/latest.json"
 )
 
 // ErrNotFound indicates that COS did not contain the requested object.
@@ -193,7 +195,7 @@ func (client *Client) PresignGet(ctx context.Context, key string, ttl time.Durat
 }
 
 func isAllowedReadKey(key string) bool {
-	return key == stableChannelKey || isReleaseKey(key)
+	return key == stableChannelKey || key == legacyRushRushChannelKey || key == publisherPolicyKey || isReleaseKey(key)
 }
 
 func isReleaseKey(key string) bool {

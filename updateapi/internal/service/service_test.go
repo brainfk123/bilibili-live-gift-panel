@@ -326,6 +326,183 @@ func TestPublisherPolicyRejectsOversizedEnvelope(t *testing.T) {
 	}
 }
 
+func TestChannelRefreshesDoNotBlockEachOther(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		blockedChannel release.Channel
+		blockedKey     string
+		freeChannel    release.Channel
+		stale          bool
+	}{
+		{name: "legacy cold does not block stable cold", blockedChannel: release.ChannelLegacyRushRush, blockedKey: "channels/legacy-rushrush/latest.json", freeChannel: release.ChannelStable},
+		{name: "stable cold does not block legacy cold", blockedChannel: release.ChannelStable, blockedKey: "channels/stable/latest.json", freeChannel: release.ChannelLegacyRushRush},
+		{name: "legacy stale does not block stable stale", blockedChannel: release.ChannelLegacyRushRush, blockedKey: "channels/legacy-rushrush/latest.json", freeChannel: release.ChannelStable, stale: true},
+		{name: "stable stale does not block legacy stale", blockedChannel: release.ChannelStable, blockedKey: "channels/stable/latest.json", freeChannel: release.ChannelLegacyRushRush, stale: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clock := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+			blockedKey := test.blockedKey
+			if test.stale {
+				blockedKey = ""
+			}
+			store := newBlockingStore(validManifest(t), blockedKey)
+			defer store.unblock()
+			sut := service.New(store, func() time.Time { return clock })
+			if test.stale {
+				if _, err := sut.Latest(context.Background(), release.ChannelStable); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := sut.Latest(context.Background(), release.ChannelLegacyRushRush); err != nil {
+					t.Fatal(err)
+				}
+				clock = clock.Add(61 * time.Second)
+				store.blockedKey = test.blockedKey
+			}
+			blockedDone := make(chan error, 1)
+			go func() {
+				_, err := sut.Latest(context.Background(), test.blockedChannel)
+				blockedDone <- err
+			}()
+			select {
+			case <-store.started:
+			case <-time.After(time.Second):
+				t.Fatal("blocked channel read did not start")
+			}
+
+			freeDone := make(chan error, 1)
+			go func() {
+				_, err := sut.Latest(context.Background(), test.freeChannel)
+				freeDone <- err
+			}()
+			select {
+			case err := <-freeDone:
+				if err != nil {
+					t.Fatalf("independent channel refresh: %v", err)
+				}
+			case <-time.After(500 * time.Millisecond):
+				t.Fatal("independent channel refresh waited for blocked channel")
+			}
+
+			store.unblock()
+			if err := <-blockedDone; err != nil {
+				t.Fatalf("blocked channel after release: %v", err)
+			}
+		})
+	}
+}
+
+func TestSameChannelColdRefreshRemainsSingleflight(t *testing.T) {
+	store := newBlockingStore(validManifest(t), "channels/stable/latest.json")
+	defer store.unblock()
+	sut := service.New(store, time.Now)
+	const callers = 12
+	done := make(chan error, callers)
+	for range callers {
+		go func() {
+			_, err := sut.Latest(context.Background(), release.ChannelStable)
+			done <- err
+		}()
+	}
+	select {
+	case <-store.started:
+	case <-time.After(time.Second):
+		t.Fatal("stable channel read did not start")
+	}
+	store.unblock()
+	for range callers {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := store.getCount("channels/stable/latest.json"); got != 1 {
+		t.Fatalf("stable pointer reads = %d, want one singleflight read", got)
+	}
+}
+
+func TestPublisherPolicyDoesNotWaitForBlockedChannelRefresh(t *testing.T) {
+	store := newBlockingStore(validManifest(t), "channels/stable/latest.json")
+	defer store.unblock()
+	sut := service.New(store, time.Now)
+	channelDone := make(chan error, 1)
+	go func() {
+		_, err := sut.Latest(context.Background(), release.ChannelStable)
+		channelDone <- err
+	}()
+	select {
+	case <-store.started:
+	case <-time.After(time.Second):
+		t.Fatal("stable channel read did not start")
+	}
+
+	policyDone := make(chan error, 1)
+	go func() {
+		_, err := sut.PublisherPolicy(context.Background())
+		policyDone <- err
+	}()
+	select {
+	case err := <-policyDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("publisher policy read waited for blocked channel")
+	}
+	store.unblock()
+	if err := <-channelDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+type blockingStore struct {
+	manifest    []byte
+	blockedKey  string
+	started     chan struct{}
+	release     chan struct{}
+	startOnce   sync.Once
+	releaseOnce sync.Once
+	mu          sync.Mutex
+	gets        map[string]int
+}
+
+func newBlockingStore(manifest []byte, blockedKey string) *blockingStore {
+	return &blockingStore{
+		manifest: append([]byte(nil), manifest...), blockedKey: blockedKey,
+		started: make(chan struct{}), release: make(chan struct{}), gets: make(map[string]int),
+	}
+}
+
+func (store *blockingStore) Get(ctx context.Context, key string, _ int64) ([]byte, string, error) {
+	store.mu.Lock()
+	store.gets[key]++
+	store.mu.Unlock()
+	if key == store.blockedKey {
+		store.startOnce.Do(func() { close(store.started) })
+		select {
+		case <-store.release:
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		}
+	}
+	if key == "trust/publisher/latest.json" {
+		return []byte(`{"signed":{},"signatures":[]}`), "policy-etag", nil
+	}
+	return append([]byte(nil), store.manifest...), "manifest-etag", nil
+}
+
+func (store *blockingStore) PresignGet(context.Context, string, time.Duration) (string, error) {
+	return "https://cos.example.invalid/signed", nil
+}
+
+func (store *blockingStore) unblock() {
+	store.releaseOnce.Do(func() { close(store.release) })
+}
+
+func (store *blockingStore) getCount(key string) int {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.gets[key]
+}
+
 func TestChangelogReturnsBodyAndUpstreamETag(t *testing.T) {
 	manifest := validManifest(t)
 	changelog := []byte(`{"schemaVersion":1,"releases":[{"version":"0.4.4"}]}`)

@@ -75,7 +75,7 @@ type Service struct {
 	cacheMu sync.RWMutex
 	cache   map[release.Channel]manifestCache
 
-	refreshMu sync.Mutex
+	refreshMu map[release.Channel]*sync.Mutex
 }
 
 type manifestCache struct {
@@ -88,7 +88,15 @@ func New(store Store, now func() time.Time) *Service {
 	if now == nil {
 		now = time.Now
 	}
-	return &Service{store: store, now: now, cache: make(map[release.Channel]manifestCache)}
+	return &Service{
+		store: store,
+		now:   now,
+		cache: make(map[release.Channel]manifestCache),
+		refreshMu: map[release.Channel]*sync.Mutex{
+			release.ChannelStable:         {},
+			release.ChannelLegacyRushRush: {},
+		},
+	}
 }
 
 func (service *Service) Latest(ctx context.Context, channel release.Channel) (release.PublicRelease, error) {
@@ -145,8 +153,9 @@ func (service *Service) manifest(ctx context.Context, channel release.Channel) (
 		return manifest, nil
 	}
 
-	service.refreshMu.Lock()
-	defer service.refreshMu.Unlock()
+	refreshMu := service.refreshMu[channel]
+	refreshMu.Lock()
+	defer refreshMu.Unlock()
 
 	now = service.now()
 	if manifest, ok := service.freshManifest(channel, now); ok {
