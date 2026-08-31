@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -48,6 +49,16 @@ it('rejects an unexpected route status and exit status', async () => {
   const fetchWithRejectedExit: typeof fetch = async () => new Response('', { status: 200 });
   await expect(validatePanelRoutes(fetchWithBrokenRoute, 12450)).rejects.toThrow('config');
   await expect(requestGracefulExit(fetchWithRejectedExit, 12450, '0.0.1')).rejects.toThrow('200');
+});
+
+it('accepts an empty first-run config response', async () => {
+  const firstRunFetch: typeof fetch = async (input) => {
+    const path = new URL(String(input)).pathname + new URL(String(input)).search;
+    if (path === '/api/config') return new Response(null, { status: 204 });
+    return new Response('<!doctype html>', { headers: { 'content-type': 'text/html' } });
+  };
+  await expect(validatePanelRoutes(firstRunFetch, 12450))
+    .resolves.toEqual(['config', 'display', 'api-config']);
 });
 
 it('times out instead of accepting an unavailable port', async () => {
@@ -209,9 +220,20 @@ it('writes allowlisted evidence only', async () => {
     ['/api/instance/exit', new Response('', { status: 202 })],
   ]);
   try {
+    const temporaryAppData = join(root, 'app-data');
     const evidence = await smokeWindowsExecutable({
       platform: 'win32', cwd: root, executablePath: join(root, 'gift-panel.exe'),
-      createTemporaryDirectory: async () => { const path = join(root, 'LOCALAPPDATA'); await mkdir(path); return path; }, spawnImpl: () => child,
+      createTemporaryDirectory: async () => { await mkdir(temporaryAppData); return temporaryAppData; },
+      spawnImpl: (_command, _args, options) => {
+        expect(options.env?.APPDATA).toBe(temporaryAppData);
+        expect(options.env?.GIFT_PANEL_CI_SMOKE).toBe('true');
+        expect(options.env?.LOCALAPPDATA).toBe(temporaryAppData);
+        expect(readFileSync(
+          join(temporaryAppData, 'BilibiliLiveGiftPanel', 'updates', 'installed-update.json'),
+          'utf8',
+        )).toBe('{"version":"0.0.0"}\n');
+        return child;
+      },
       fetchImpl: async (input) => {
         const path = new URL(String(input)).pathname + new URL(String(input)).search;
         if (path === '/api/instance/exit') child.exitCode = 0;
@@ -222,6 +244,8 @@ it('writes allowlisted evidence only', async () => {
     });
     expect(evidence).toEqual(expect.objectContaining({ schema: 1, version: '0.0.0', port: 12450, routes: ['config', 'display', 'api-config'] }));
     const contents = await readFile(evidencePath, 'utf8');
+    expect(contents).not.toContain(root);
+    expect(contents).not.toContain(temporaryAppData);
     for (const forbidden of ['cookie', 'token', 'uid', 'nickname', 'LOCALAPPDATA', '<html>', 'secret']) expect(contents.toLowerCase()).not.toContain(forbidden.toLowerCase());
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -73,7 +73,10 @@ export async function validatePanelRoutes(fetchImpl, port, deadline = Date.now()
   const passed = [];
   for (const [name, path, contentType] of expectedRoutes) {
     await fetchBeforeDeadline(fetchImpl, 'http://127.0.0.1:' + port + path, { redirect: 'error' }, deadline, async (response) => {
-      if (response.status !== 200 || !response.headers.get('content-type')?.toLowerCase().startsWith(contentType)) {
+      const emptyFirstRunConfig = name === 'api-config' && response.status === 204;
+      const typedSuccess = response.status === 200
+        && response.headers.get('content-type')?.toLowerCase().startsWith(contentType);
+      if (!emptyFirstRunConfig && !typedSuccess) {
         throw new Error('Windows EXE smoke route ' + name + ' failed');
       }
       await response.arrayBuffer();
@@ -120,15 +123,27 @@ export async function smokeWindowsExecutable(options = {}) {
   const requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
   const removeTemporaryDirectory = options.removeTemporaryDirectory ?? ((path) => rm(path, { recursive: true, force: true }));
   const startedAt = new Date().toISOString();
-  const temporaryLocalAppData = await createTemporaryDirectory();
+  const temporaryAppData = await createTemporaryDirectory();
   let child;
   let removeChildErrorListener;
 
   try {
+    const installedMarkerDirectory = join(temporaryAppData, 'BilibiliLiveGiftPanel', 'updates');
+    await mkdir(installedMarkerDirectory, { recursive: true });
+    await writeFile(
+      join(installedMarkerDirectory, 'installed-update.json'),
+      '{"version":"0.0.0"}\n',
+      { encoding: 'utf8', flag: 'wx' },
+    );
     child = spawnImpl(executablePath, [], {
       cwd,
       windowsHide: true,
-      env: { ...process.env, LOCALAPPDATA: temporaryLocalAppData },
+      env: {
+        ...process.env,
+        APPDATA: temporaryAppData,
+        GIFT_PANEL_CI_SMOKE: 'true',
+        LOCALAPPDATA: temporaryAppData,
+      },
     });
     let rejectChildError;
     const childFailure = new Promise((_, reject) => { rejectChildError = reject; });
@@ -163,7 +178,7 @@ export async function smokeWindowsExecutable(options = {}) {
     try {
       childStopped = await cleanUpChild(child, Date.now() + exitTimeoutMs);
     } finally {
-      await removeTemporaryDirectory(temporaryLocalAppData);
+      await removeTemporaryDirectory(temporaryAppData);
       if (childStopped) removeChildErrorListener?.();
     }
   }

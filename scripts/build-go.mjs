@@ -2,22 +2,23 @@ import { existsSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { resolveBuildGoPolicy } from './build-go-policy.mjs';
 import { mirrorUiAssets } from './ui-assets.mjs';
 import { resolveUpdateAPIBaseURLHex } from './update-api-build-config.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const appVersion = (process.env.APP_VERSION || 'dev').replace(/^v/, '');
-const appCommit = process.env.APP_COMMIT || 'local';
+const buildPolicy = resolveBuildGoPolicy(process.env);
+const { appVersion, appCommit, updateAPIURL, updatePublisher } = buildPolicy;
 for (const [label, value] of [['APP_VERSION', appVersion], ['APP_COMMIT', appCommit]]) {
   if (!/^[0-9A-Za-z.+-]+$/.test(value)) throw new Error(`${label} contains unsupported characters`);
 }
-const updateAPIBaseURLHex = resolveUpdateAPIBaseURLHex(appVersion, process.env.APP_UPDATE_API_URL);
-const updateExpectedPublisher = (process.env.APP_UPDATE_PUBLISHER || '').trim();
-if (appVersion !== 'dev' && !updateExpectedPublisher) {
+const updateAPIBaseURLHex = resolveUpdateAPIBaseURLHex(appVersion, updateAPIURL);
+const updateExpectedPublisher = updatePublisher;
+if (buildPolicy.requireAuthenticode && !updateExpectedPublisher) {
   throw new Error('Release build requires APP_UPDATE_PUBLISHER.');
 }
 const updateExpectedPublisherHex = Buffer.from(updateExpectedPublisher, 'utf8').toString('hex');
-if (appVersion !== 'dev') {
+if (buildPolicy.requireAuthenticode) {
   const manifestPath = join(root, 'goserver', 'ffmpeg', 'manifest.json');
   let manifest;
   try {
@@ -29,10 +30,10 @@ if (appVersion !== 'dev') {
     throw new Error('Release build requires an Authenticode-signed embedded FFmpeg payload.');
   }
 }
-execFileSync(process.execPath, [join(root, 'scripts', 'verify-ffmpeg.mjs'), ...(appVersion === 'dev' ? ['--payload-only'] : [])], {
+execFileSync(process.execPath, [join(root, 'scripts', 'verify-ffmpeg.mjs'), ...(buildPolicy.verifyPayloadOnly ? ['--payload-only'] : [])], {
   cwd: root,
   stdio: 'inherit',
-  env: process.env,
+  env: { ...process.env, APP_VERSION: buildPolicy.verificationAppVersion },
 });
 const resource = join(root, 'goserver', 'rsrc_windows_amd64.syso');
 if (!existsSync(resource)) {

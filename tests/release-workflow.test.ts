@@ -28,6 +28,7 @@ function releaseWorkflow() {
 
   const workflow = document.toJS() as {
     concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
+    on?: Record<string, unknown>;
     jobs?: {
       release?: {
         env?: Record<string, string>;
@@ -39,7 +40,7 @@ function releaseWorkflow() {
   const release = workflow.jobs?.release;
   const steps = release?.steps;
   expect(Array.isArray(steps)).toBe(true);
-  return { concurrency: workflow.concurrency, document, release, source, steps: steps ?? [] };
+  return { concurrency: workflow.concurrency, document, release, source, steps: steps ?? [], trigger: workflow.on };
 }
 
 function stepIndex(steps: ReleaseStep[], name: string): number {
@@ -145,6 +146,20 @@ describe('release workflow supply-chain contract', () => {
       group: 'gift-panel-production-release',
       'cancel-in-progress': false,
     });
+  });
+
+  it('remains an isolated, protected publication workflow outside pull requests', () => {
+    const { release, steps, trigger } = releaseWorkflow();
+    const sign = stepIndex(steps, 'Prepare and sign release executable');
+    const publish = stepIndex(steps, 'Create GitHub release');
+
+    expect(Object.keys(trigger ?? {}).sort()).toEqual(['push', 'workflow_dispatch']);
+    expect(trigger?.push).toEqual({ tags: ['v*.*.*'] });
+    expect(trigger?.workflow_dispatch).toBeDefined();
+    expect(trigger).not.toHaveProperty('pull_request');
+    expect(release?.environment).toBe('release');
+    expect(sign).toBeLessThan(publish);
+    expect(steps[sign]?.run).toContain('Get-AuthenticodeSignature');
   });
 
   it('validates a canonical tag before an exact non-credentialed checkout', () => {
