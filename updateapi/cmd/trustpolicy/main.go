@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -21,7 +20,7 @@ const maxCandidateBytes = 256 << 10
 var environmentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type environmentLookup func(string) (string, bool)
-type signerFactory func(region, expectedSPKISHA256 string) (trustpolicy.Signer, error)
+type signerFactory func(region, expectedSPKISHA256, providerMode string) (trustpolicy.Signer, error)
 
 type commandError string
 
@@ -63,6 +62,9 @@ func run(ctx context.Context, args []string, lookup environmentLookup, factory s
 	flags.StringVar(&expectedSPKIEnvironment, "expected-spki-sha256-env", "", "environment variable containing reviewed SPKI SHA-256")
 	flags.StringVar(&policyPath, "output", "", "create-only signed policy output")
 	flags.StringVar(&auditPath, "audit-output", "", "create-only audit output")
+	if hasRepeatedRegisteredFlag(args[1:], flags) {
+		return errCommand
+	}
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || !allRequiredFlagsPresent(flags) ||
 		region != "ap-shanghai" || !environmentName.MatchString(keyIDEnvironment) || !environmentName.MatchString(expectedSPKIEnvironment) ||
 		keyIDEnvironment == expectedSPKIEnvironment {
@@ -72,7 +74,8 @@ func run(ctx context.Context, args []string, lookup environmentLookup, factory s
 	if err != nil {
 		return errCommand
 	}
-	if err := preflightCreateOnly(policyAbsolute, auditAbsolute); err != nil {
+	bundlePaths, err := validateOutputBundlePaths(policyAbsolute, auditAbsolute)
+	if err != nil || recoverOwnedStaging(bundlePaths) != nil {
 		return errCommand
 	}
 
@@ -87,8 +90,9 @@ func run(ctx context.Context, args []string, lookup environmentLookup, factory s
 	}
 	keyID, keyIDOK := lookup(keyIDEnvironment)
 	expectedSPKI, expectedSPKIOK := lookup(expectedSPKIEnvironment)
+	providerMode, providerModeOK := lookup("GIFT_PANEL_KMS_PROVIDER_MODE")
 	actor, actorOK := lookup("GITHUB_ACTOR")
-	if !keyIDOK || !expectedSPKIOK || !actorOK {
+	if !keyIDOK || !expectedSPKIOK || !providerModeOK || !trustpolicy.ValidKMSProviderMode(providerMode) || !actorOK {
 		return errCommand
 	}
 	options := trustpolicy.SignOptions{
@@ -101,7 +105,7 @@ func run(ctx context.Context, args []string, lookup environmentLookup, factory s
 	if err := trustpolicy.ValidateSignOptions(candidate, options); err != nil {
 		return errCommand
 	}
-	signer, err := factory(region, expectedSPKI)
+	signer, err := factory(region, expectedSPKI, providerMode)
 	if err != nil || signer == nil {
 		return errCommand
 	}
@@ -113,11 +117,38 @@ func run(ctx context.Context, args []string, lookup environmentLookup, factory s
 	if err != nil {
 		return errCommand
 	}
-	if err := writeCreateOnlyPair(policyAbsolute, signed.Policy, auditAbsolute, auditBytes); err != nil {
+	if err := writeOutputBundle(policyAbsolute, signed.Policy, auditAbsolute, auditBytes, bundleHooks{}); err != nil {
 		return errCommand
 	}
 	_, _ = fmt.Fprintln(output, "publisher policy signed")
 	return nil
+}
+
+func hasRepeatedRegisteredFlag(args []string, flags *flag.FlagSet) bool {
+	seen := make(map[string]struct{})
+	for index := 0; index < len(args); index++ {
+		token := args[index]
+		if token == "--" {
+			break
+		}
+		if len(token) < 2 || token[0] != '-' {
+			continue
+		}
+		nameAndValue := strings.TrimPrefix(token, "-")
+		nameAndValue = strings.TrimPrefix(nameAndValue, "-")
+		name, _, hasEquals := strings.Cut(nameAndValue, "=")
+		if name == "" || flags.Lookup(name) == nil {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			return true
+		}
+		seen[name] = struct{}{}
+		if !hasEquals {
+			index++
+		}
+	}
+	return false
 }
 
 func allRequiredFlagsPresent(flags *flag.FlagSet) bool {
@@ -139,35 +170,28 @@ func validatePaths(candidatePath, policyPath, auditPath string) (string, string,
 	if err != nil {
 		return "", "", "", errCommand
 	}
-	policyAbsolute, err := filepath.Abs(policyPath)
+	candidateAbsolute = filepath.Clean(candidateAbsolute)
+	candidateInfo, err := os.Lstat(candidateAbsolute)
+	if err != nil || !candidateInfo.Mode().IsRegular() || candidateInfo.Mode()&os.ModeSymlink != 0 {
+		return "", "", "", errCommand
+	}
+	resolvedCandidate, err := filepath.EvalSymlinks(candidateAbsolute)
 	if err != nil {
 		return "", "", "", errCommand
 	}
-	auditAbsolute, err := filepath.Abs(auditPath)
-	if err != nil {
+	resolvedCandidate, err = filepath.Abs(resolvedCandidate)
+	if err != nil || !samePath(candidateAbsolute, resolvedCandidate) {
 		return "", "", "", errCommand
 	}
-	if samePath(candidateAbsolute, policyAbsolute) || samePath(candidateAbsolute, auditAbsolute) || samePath(policyAbsolute, auditAbsolute) {
+	bundlePaths, err := validateOutputBundlePaths(policyPath, auditPath)
+	if err != nil || samePath(candidateAbsolute, bundlePaths.policy) || samePath(candidateAbsolute, bundlePaths.audit) {
 		return "", "", "", errCommand
 	}
-	return candidateAbsolute, policyAbsolute, auditAbsolute, nil
+	return candidateAbsolute, bundlePaths.policy, bundlePaths.audit, nil
 }
 
 func samePath(left, right string) bool {
 	return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
-}
-
-func preflightCreateOnly(paths ...string) error {
-	for _, path := range paths {
-		if _, err := os.Lstat(path); err == nil || !errors.Is(err, os.ErrNotExist) {
-			return errCommand
-		}
-		parent, err := os.Stat(filepath.Dir(path))
-		if err != nil || !parent.IsDir() {
-			return errCommand
-		}
-	}
-	return nil
 }
 
 func readBoundedFile(path string, maximum int64) ([]byte, error) {
@@ -185,54 +209,4 @@ func readBoundedFile(path string, maximum int64) ([]byte, error) {
 		return nil, errCommand
 	}
 	return data, nil
-}
-
-func writeCreateOnlyPair(policyPath string, policy []byte, auditPath string, audit []byte) error {
-	policyTemporary, err := stagePrivateFile(policyPath, policy)
-	if err != nil {
-		return errCommand
-	}
-	defer os.Remove(policyTemporary)
-	auditTemporary, err := stagePrivateFile(auditPath, audit)
-	if err != nil {
-		return errCommand
-	}
-	defer os.Remove(auditTemporary)
-	if err := os.Link(policyTemporary, policyPath); err != nil {
-		return errCommand
-	}
-	if err := os.Link(auditTemporary, auditPath); err != nil {
-		_ = os.Remove(policyPath)
-		return errCommand
-	}
-	return nil
-}
-
-func stagePrivateFile(target string, data []byte) (string, error) {
-	file, err := os.CreateTemp(filepath.Dir(target), ".trustpolicy-*")
-	if err != nil {
-		return "", errCommand
-	}
-	name := file.Name()
-	keep := false
-	defer func() {
-		if !keep {
-			file.Close()
-			os.Remove(name)
-		}
-	}()
-	if err := file.Chmod(0o600); err != nil {
-		return "", errCommand
-	}
-	if _, err := file.Write(data); err != nil {
-		return "", errCommand
-	}
-	if err := file.Sync(); err != nil {
-		return "", errCommand
-	}
-	if err := file.Close(); err != nil {
-		return "", errCommand
-	}
-	keep = true
-	return name, nil
 }

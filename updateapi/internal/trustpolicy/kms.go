@@ -8,6 +8,8 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"math/big"
+	"os"
+	"strings"
 
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
@@ -15,6 +17,12 @@ import (
 )
 
 const kmsRegion = "ap-shanghai"
+
+const (
+	kmsProviderEnvironmentSession = "environment-session"
+	kmsProviderTKEOIDC            = "tke-oidc"
+	kmsProviderCVMRole            = "cvm-role"
+)
 
 type kmsAPI interface {
 	GetPublicKeyWithContext(context.Context, *kms.GetPublicKeyRequest) (*kms.GetPublicKeyResponse, error)
@@ -28,6 +36,17 @@ type KMSSigner struct {
 	expectedSPKISHA256 string
 }
 
+type kmsProviderFactories struct {
+	environmentSession func() (common.Provider, error)
+	tkeOIDC            func() (common.Provider, error)
+	cvmRole            func() (common.Provider, error)
+	newClient          func(common.CredentialIface, string) (kmsAPI, error)
+}
+
+type environmentSessionProvider struct {
+	lookup func(string) (string, bool)
+}
+
 // NewKMSSigner constructs a testable adapter around a Tencent KMS client.
 func NewKMSSigner(client kmsAPI, expectedSPKISHA256 string) (*KMSSigner, error) {
 	if client == nil || !sha256Hex.MatchString(expectedSPKISHA256) {
@@ -36,26 +55,81 @@ func NewKMSSigner(client kmsAPI, expectedSPKISHA256 string) (*KMSSigner, error) 
 	return &KMSSigner{client: client, expectedSPKISHA256: expectedSPKISHA256}, nil
 }
 
-// NewTencentKMSSigner obtains only SDK-managed short-lived credentials. It
-// deliberately excludes static SDK environment/profile providers.
-func NewTencentKMSSigner(region, expectedSPKISHA256 string) (Signer, error) {
-	if region != kmsRegion || !sha256Hex.MatchString(expectedSPKISHA256) {
+// ValidKMSProviderMode reports whether mode is one closed, reviewed
+// short-lived credential source.
+func ValidKMSProviderMode(mode string) bool {
+	return mode == kmsProviderEnvironmentSession || mode == kmsProviderTKEOIDC || mode == kmsProviderCVMRole
+}
+
+// NewTencentKMSSigner selects exactly one explicit SDK-managed short-lived
+// credential source. It never falls through to ambient SDK providers.
+func NewTencentKMSSigner(region, expectedSPKISHA256, mode string) (Signer, error) {
+	return newTencentKMSSignerWithProviders(region, expectedSPKISHA256, mode, kmsProviderFactories{
+		environmentSession: func() (common.Provider, error) {
+			return newEnvironmentSessionProvider(os.LookupEnv), nil
+		},
+		tkeOIDC: func() (common.Provider, error) {
+			return common.DefaultTkeOIDCRoleArnProvider()
+		},
+		cvmRole: func() (common.Provider, error) {
+			return common.DefaultCvmRoleProvider(), nil
+		},
+		newClient: func(credential common.CredentialIface, region string) (kmsAPI, error) {
+			return kms.NewClient(credential, region, profile.NewClientProfile())
+		},
+	})
+}
+
+func newTencentKMSSignerWithProviders(region, expectedSPKISHA256, mode string, factories kmsProviderFactories) (Signer, error) {
+	if region != kmsRegion || !sha256Hex.MatchString(expectedSPKISHA256) || !ValidKMSProviderMode(mode) || factories.newClient == nil {
 		return nil, errReviewedInput
 	}
-	providers := make([]common.Provider, 0, 2)
-	if tkeProvider, err := common.DefaultTkeOIDCRoleArnProvider(); err == nil {
-		providers = append(providers, tkeProvider)
+	var factory func() (common.Provider, error)
+	switch mode {
+	case kmsProviderEnvironmentSession:
+		factory = factories.environmentSession
+	case kmsProviderTKEOIDC:
+		factory = factories.tkeOIDC
+	case kmsProviderCVMRole:
+		factory = factories.cvmRole
 	}
-	providers = append(providers, common.DefaultCvmRoleProvider())
-	credential, err := common.NewProviderChain(providers).GetCredential()
-	if err != nil || credential == nil || credential.GetToken() == "" {
+	if factory == nil {
 		return nil, errReviewedInput
 	}
-	client, err := kms.NewClient(credential, region, profile.NewClientProfile())
+	provider, err := factory()
+	if err != nil || provider == nil {
+		return nil, errReviewedInput
+	}
+	credential, err := common.NewProviderChain([]common.Provider{provider}).GetCredential()
+	if err != nil || credential == nil {
+		return nil, errReviewedInput
+	}
+	_, _, token := credential.GetCredential()
+	if strings.TrimSpace(token) == "" {
+		return nil, errReviewedInput
+	}
+	client, err := factories.newClient(credential, region)
 	if err != nil || client == nil {
 		return nil, errReviewedInput
 	}
 	return NewKMSSigner(client, expectedSPKISHA256)
+}
+
+func newEnvironmentSessionProvider(lookup func(string) (string, bool)) common.Provider {
+	return &environmentSessionProvider{lookup: lookup}
+}
+
+func (provider *environmentSessionProvider) GetCredential() (common.CredentialIface, error) {
+	if provider == nil || provider.lookup == nil {
+		return nil, errReviewedInput
+	}
+	secretID, idOK := provider.lookup("TENCENTCLOUD_SECRET_ID")
+	secretKey, keyOK := provider.lookup("TENCENTCLOUD_SECRET_KEY")
+	token, tokenOK := provider.lookup("TENCENTCLOUD_SESSION_TOKEN")
+	if !idOK || !keyOK || !tokenOK || strings.TrimSpace(secretID) == "" || strings.TrimSpace(secretKey) == "" || strings.TrimSpace(token) == "" {
+		return nil, errReviewedInput
+	}
+	return common.NewTokenCredential(secretID, secretKey, token), nil
 }
 
 func (signer *KMSSigner) PublicKey(ctx context.Context, keyID string) ([]byte, string, error) {

@@ -25,6 +25,7 @@ import (
 const (
 	maxCandidateBytes = 256 << 10
 	maxCandidateDepth = 16
+	maxPolicyBytes    = 256 << 10
 	clientAlgorithm   = "ecdsa-p256-sha256"
 
 	stableChannel = "stable"
@@ -116,6 +117,7 @@ const (
 	errSigning           safeError = "KMS signing failed"
 	errSignatureInvalid  safeError = "KMS signature verification failed"
 	errCanonicalEncoding safeError = "publisher policy encoding failed"
+	errPolicySize        safeError = "publisher policy size is invalid"
 )
 
 // ParseCandidate rejects envelopes and ambiguous JSON before returning the
@@ -195,6 +197,9 @@ func Sign(ctx context.Context, signer Signer, candidate Candidate, options SignO
 	policy = append(policy, `,"signatures":`...)
 	policy = append(policy, signatures...)
 	policy = append(policy, '}')
+	if len(policy) > maxPolicyBytes {
+		return Output{}, Audit{}, errPolicySize
+	}
 	policyDigest := sha256.Sum256(policy)
 	audit := Audit{
 		KeyID:        options.KeyID,

@@ -175,6 +175,43 @@ func TestSignPolicyAllowsGitHubBotActor(t *testing.T) {
 	}
 }
 
+func TestSignPolicyRejectsCompleteEnvelopeAboveClientMaximum(t *testing.T) {
+	candidate := mustParseCandidate(t)
+	candidate.Publishers = candidate.Publishers[:1]
+	candidate.Publishers[0].AllowedTags = []string{"v1.0.0+a"}
+	base, err := CanonicalSigned(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	padding := maxCandidateBytes - len(base) - 32
+	if padding <= 0 {
+		t.Fatalf("test candidate base unexpectedly large: %d", len(base))
+	}
+	candidate.Publishers[0].AllowedTags[0] += strings.Repeat("a", padding)
+	canonical, err := CanonicalSigned(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(canonical) != maxCandidateBytes-32 {
+		t.Fatalf("canonical signed size = %d, want %d", len(canonical), maxCandidateBytes-32)
+	}
+	parsed, err := ParseCandidate(canonical, CandidateOptions{ExpectedPreviousEpoch: 0, Now: candidateValidationTime})
+	if err != nil {
+		t.Fatalf("near-boundary signed object was rejected before envelope construction: %v", err)
+	}
+	fake := newFakeKMSSigner(t)
+	output, audit, err := Sign(context.Background(), fake, parsed, validSignOptions(fake, fake.SPKISHA256))
+	if err == nil {
+		if len(output.Policy) <= maxCandidateBytes {
+			t.Fatalf("test did not cross complete-envelope boundary: signed=%d envelope=%d", len(canonical), len(output.Policy))
+		}
+		t.Fatalf("Sign() accepted complete envelope of %d bytes above client maximum", len(output.Policy))
+	}
+	if len(output.Policy) != 0 || len(output.CanonicalSigned) != 0 || audit != (Audit{}) {
+		t.Fatalf("oversized envelope returned output or audit: output=%d/%d audit=%+v", len(output.Policy), len(output.CanonicalSigned), audit)
+	}
+}
+
 func TestKMSSignerUsesReviewedGetPublicKeyAndDigestRequests(t *testing.T) {
 	private, der, expectedDigest := kmsTestKey(t, elliptic.P256())
 	client := &fakeKMSClient{
@@ -292,6 +329,144 @@ func TestKMSSignerRedactsProviderErrors(t *testing.T) {
 	}
 }
 
+func TestKMSSignerSelectsExactlyReviewedCredentialProviderMode(t *testing.T) {
+	_, _, expectedDigest := kmsTestKey(t, elliptic.P256())
+	for _, mode := range []string{"environment-session", "tke-oidc", "cvm-role"} {
+		t.Run(mode, func(t *testing.T) {
+			calls := map[string]int{}
+			provider := &fakeCredentialProvider{credential: common.NewTokenCredential("temporary-id", "temporary-key", "temporary-token")}
+			factories := kmsProviderFactories{
+				environmentSession: func() (common.Provider, error) { calls["environment-session"]++; return provider, nil },
+				tkeOIDC:            func() (common.Provider, error) { calls["tke-oidc"]++; return provider, nil },
+				cvmRole:            func() (common.Provider, error) { calls["cvm-role"]++; return provider, nil },
+				newClient: func(credential common.CredentialIface, region string) (kmsAPI, error) {
+					calls["client"]++
+					if region != "ap-shanghai" || credential.GetToken() != "temporary-token" {
+						t.Fatal("client received wrong region or non-session credential")
+					}
+					return &fakeKMSClient{}, nil
+				},
+			}
+			if _, err := newTencentKMSSignerWithProviders("ap-shanghai", expectedDigest, mode, factories); err != nil {
+				t.Fatal(err)
+			}
+			for _, candidate := range []string{"environment-session", "tke-oidc", "cvm-role"} {
+				want := 0
+				if candidate == mode {
+					want = 1
+				}
+				if calls[candidate] != want {
+					t.Fatalf("provider %s calls = %d, want %d", candidate, calls[candidate], want)
+				}
+			}
+			if calls["client"] != 1 || provider.calls != 1 {
+				t.Fatalf("client/provider calls = %d/%d, want 1/1", calls["client"], provider.calls)
+			}
+		})
+	}
+}
+
+func TestKMSSignerProviderModeFailureNeverFallsThrough(t *testing.T) {
+	_, _, expectedDigest := kmsTestKey(t, elliptic.P256())
+	for _, mode := range []string{"", "ambient", "environment-session", "tke-oidc", "cvm-role"} {
+		t.Run(mode, func(t *testing.T) {
+			calls := map[string]int{}
+			secret := "provider-secret-must-not-leak"
+			factories := kmsProviderFactories{
+				environmentSession: func() (common.Provider, error) { calls["environment-session"]++; return nil, errors.New(secret) },
+				tkeOIDC:            func() (common.Provider, error) { calls["tke-oidc"]++; return nil, errors.New(secret) },
+				cvmRole:            func() (common.Provider, error) { calls["cvm-role"]++; return nil, errors.New(secret) },
+				newClient: func(common.CredentialIface, string) (kmsAPI, error) {
+					calls["client"]++
+					return &fakeKMSClient{}, nil
+				},
+			}
+			_, err := newTencentKMSSignerWithProviders("ap-shanghai", expectedDigest, mode, factories)
+			if err == nil {
+				t.Fatal("provider selection error = nil")
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("provider error leaked detail: %q", err)
+			}
+			selectedCalls := calls["environment-session"] + calls["tke-oidc"] + calls["cvm-role"]
+			if mode == "" || mode == "ambient" {
+				if selectedCalls != 0 {
+					t.Fatalf("invalid mode selected %d providers", selectedCalls)
+				}
+			} else if selectedCalls != 1 {
+				t.Fatalf("selected provider failure fell through: calls=%v", calls)
+			}
+			if calls["client"] != 0 {
+				t.Fatal("client constructed after provider failure")
+			}
+		})
+	}
+}
+
+func TestKMSSignerRejectsSelectedCredentialWithoutSessionToken(t *testing.T) {
+	_, _, expectedDigest := kmsTestKey(t, elliptic.P256())
+	provider := &fakeCredentialProvider{credential: common.NewCredential("long-lived-id", "long-lived-key")}
+	clientCalls := 0
+	_, err := newTencentKMSSignerWithProviders("ap-shanghai", expectedDigest, "cvm-role", kmsProviderFactories{
+		cvmRole: func() (common.Provider, error) { return provider, nil },
+		newClient: func(common.CredentialIface, string) (kmsAPI, error) {
+			clientCalls++
+			return &fakeKMSClient{}, nil
+		},
+	})
+	if err == nil {
+		t.Fatal("constructor accepted selected credential without STS token")
+	}
+	if clientCalls != 0 {
+		t.Fatal("client constructed with non-session credential")
+	}
+}
+
+func TestKMSSignerEnvironmentSessionRequiresAllTemporaryValues(t *testing.T) {
+	const secretID = "temporary-secret-id"
+	const secretKey = "temporary-secret-key"
+	const token = "temporary-sts-token"
+	for _, missing := range []string{"", "TENCENTCLOUD_SECRET_ID", "TENCENTCLOUD_SECRET_KEY", "TENCENTCLOUD_SESSION_TOKEN"} {
+		name := missing
+		if name == "" {
+			name = "complete"
+		}
+		t.Run(name, func(t *testing.T) {
+			values := map[string]string{
+				"TENCENTCLOUD_SECRET_ID":     secretID,
+				"TENCENTCLOUD_SECRET_KEY":    secretKey,
+				"TENCENTCLOUD_SESSION_TOKEN": token,
+			}
+			if missing != "" {
+				values[missing] = ""
+			}
+			provider := newEnvironmentSessionProvider(func(name string) (string, bool) {
+				value, ok := values[name]
+				return value, ok
+			})
+			credential, err := provider.GetCredential()
+			if missing != "" {
+				if err == nil {
+					t.Fatal("environment session accepted missing temporary value")
+				}
+				for _, secret := range []string{secretID, secretKey, token} {
+					if strings.Contains(err.Error(), secret) {
+						t.Fatalf("environment provider error leaked temporary value: %q", err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotID, gotKey, gotToken := credential.GetCredential()
+			if gotID != secretID || gotKey != secretKey || gotToken != token {
+				t.Fatal("environment provider did not preserve the complete temporary session")
+			}
+		})
+	}
+}
+
 func validSignOptions(fake *fakeKMSSigner, expectedDigest string) SignOptions {
 	return SignOptions{
 		KeyID:                 "kms-key-id",
@@ -332,6 +507,17 @@ type fakeKMSClient struct {
 	signErr        error
 	sign           func(*kms.SignByAsymmetricKeyRequest) (*kms.SignByAsymmetricKeyResponse, error)
 	signCalls      int
+}
+
+type fakeCredentialProvider struct {
+	credential common.CredentialIface
+	err        error
+	calls      int
+}
+
+func (provider *fakeCredentialProvider) GetCredential() (common.CredentialIface, error) {
+	provider.calls++
+	return provider.credential, provider.err
 }
 
 func (client *fakeKMSClient) GetPublicKeyWithContext(_ context.Context, request *kms.GetPublicKeyRequest) (*kms.GetPublicKeyResponse, error) {
