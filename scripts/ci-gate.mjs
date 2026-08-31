@@ -2,11 +2,17 @@ import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 
 const allowedResults = new Set(['success', 'failure', 'cancelled', 'skipped']);
+const allowedWindowsLevels = new Set(['skip', 'shared', 'desktop', 'desktop-high-risk']);
 
 export function evaluateGate(input) {
   const failures = [];
   for (const name of ['scope', 'hosted', 'mysql', 'windows']) {
     if (!allowedResults.has(input[name])) failures.push(name + ':invalid-result');
+  }
+  if (!allowedWindowsLevels.has(input.windowsLevel)) {
+    failures.push('windows-level:invalid');
+  } else if (input.expectWindows !== (input.windowsLevel !== 'skip')) {
+    failures.push('windows-level:inconsistent');
   }
   if (input.scope !== 'success') failures.push('scope:' + input.scope);
   if (input.hosted !== 'success') failures.push('hosted:' + input.hosted);
@@ -22,6 +28,7 @@ if (isMain) {
     hosted: process.env.CI_HOSTED_RESULT,
     mysql: process.env.CI_MYSQL_RESULT,
     windows: process.env.CI_WINDOWS_RESULT,
+    windowsLevel: process.env.CI_WINDOWS_LEVEL,
     expectMySQL: process.env.CI_EXPECT_MYSQL === 'true',
     expectWindows: process.env.CI_EXPECT_WINDOWS === 'true',
   };

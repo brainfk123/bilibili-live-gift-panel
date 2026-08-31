@@ -155,6 +155,7 @@ describe('mainline CI workflow', () => {
       CI_HOSTED_RESULT: '${{ needs.hosted.result }}',
       CI_MYSQL_RESULT: '${{ needs.hosted-mysql.result }}',
       CI_WINDOWS_RESULT: '${{ needs.windows-compat.result }}',
+      CI_WINDOWS_LEVEL: '${{ needs.scope.outputs.windows_level }}',
       CI_EXPECT_MYSQL: '${{ needs.scope.outputs.run_mysql }}',
       CI_EXPECT_WINDOWS: '${{ needs.scope.outputs.run_windows }}',
     });
