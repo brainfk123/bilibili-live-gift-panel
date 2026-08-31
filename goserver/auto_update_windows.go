@@ -3,7 +3,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,7 +24,6 @@ var (
 	removeWindowsUpdateFile        = os.Remove
 	startUpdateInstallerExecutable = startDetachedExecutable
 	renameWindowsUpdateFile        = renameUpdateFile
-	pendingUpdateVerifierForBuild  = defaultPendingUpdateVerifier
 )
 
 func isAutoUpdateSupported() bool {
@@ -33,12 +31,8 @@ func isAutoUpdateSupported() bool {
 }
 
 func launchUpdateInstaller(metadataPath string, waitPID int, restart bool) error {
-	data, err := os.ReadFile(metadataPath)
+	pending, err := readPendingUpdateMetadata(metadataPath)
 	if err != nil {
-		return err
-	}
-	var pending pendingUpdate
-	if err := json.Unmarshal(data, &pending); err != nil {
 		return err
 	}
 	verifier, err := pendingUpdateVerifierForBuild(pending)
@@ -47,17 +41,17 @@ func launchUpdateInstaller(metadataPath string, waitPID int, restart bool) error
 		return errors.New("待安装更新安全校验失败")
 	}
 	if err := verifyPendingExecutable(pending, verifier); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "启动更新替换器前安全校验诊断：%v\n", err)
+		logPendingUpdateDiagnostic(pending, "启动更新替换器前安全校验诊断", err, "artifact_verification_failed")
 		return errors.New("待安装更新安全校验失败")
 	}
 	for _, path := range []string{pending.TargetPath + ".old", pending.TargetPath + ".new"} {
 		if err := removeUpdateArtifactWith(removeWindowsUpdateFile, path); err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "启动更新替换器前残留文件清理诊断：%v\n", err)
+			logPendingUpdateDiagnostic(pending, "启动更新替换器前残留文件清理诊断", err, "artifact_cleanup_failed")
 			return errors.New("待安装更新清理失败")
 		}
 	}
 	if err := verifyPendingExecutable(pending, verifier); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "启动更新替换器最终安全校验诊断：%v\n", err)
+		logPendingUpdateDiagnostic(pending, "启动更新替换器最终安全校验诊断", err, "artifact_verification_failed")
 		return errors.New("待安装更新安全校验失败")
 	}
 	args := []string{"--apply-update", "--state", metadataPath, strconv.Itoa(waitPID)}
@@ -103,7 +97,7 @@ func replaceDownloadedExecutable(self string, pending pendingUpdate, waitPID int
 		return errors.New("待安装文件安全校验失败")
 	}
 	if err := verifyPendingExecutable(pending, verifier); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "更新替换器源文件安全校验诊断：%v\n", err)
+		logPendingUpdateDiagnostic(pending, "更新替换器源文件安全校验诊断", err, "artifact_verification_failed")
 		return errors.New("待安装文件安全校验失败")
 	}
 	waitForWindowsProcess(waitPID)
@@ -122,7 +116,7 @@ func replaceDownloadedExecutable(self string, pending pendingUpdate, waitPID int
 	newPending := pending
 	newPending.PendingPath = newPath
 	if err := verifyPendingExecutable(newPending, verifier); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "新版本落盘安全校验诊断：%v\n", err)
+		logPendingUpdateDiagnostic(pending, "新版本落盘安全校验诊断", err, "artifact_verification_failed")
 		verificationErr := errors.New("新版本落盘安全校验失败")
 		return errors.Join(verificationErr, removeUpdateArtifactWith(removeWindowsUpdateFile, newPath))
 	}
@@ -140,14 +134,14 @@ func replaceDownloadedExecutable(self string, pending pendingUpdate, waitPID int
 	finalTarget := pending
 	finalTarget.PendingPath = targetPath
 	if err := verifyPendingExecutable(finalTarget, verifier); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "最终更新目标安全校验诊断：%v\n", err)
+		logPendingUpdateDiagnostic(pending, "最终更新目标安全校验诊断", err, "artifact_verification_failed")
 		removeErr := removeUpdateArtifactWith(removeWindowsUpdateFile, targetPath)
 		var restoreErr error
 		if removeErr == nil {
 			restoreErr = renameWindowsUpdateFile(backupPath, targetPath)
 		}
 		if removeErr != nil || restoreErr != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "最终更新目标校验失败后的恢复诊断：%v\n", errors.Join(removeErr, restoreErr))
+			logPendingUpdateDiagnostic(pending, "最终更新目标校验失败后的恢复诊断", errors.Join(removeErr, restoreErr), "rollback_failed")
 			return errors.New("最终更新目标安全校验失败且恢复失败")
 		}
 		return errors.New("最终更新目标安全校验失败，已恢复旧版本")

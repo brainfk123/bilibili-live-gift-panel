@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -1017,7 +1018,7 @@ func TestUpdaterPolicyEnrollmentRequiresValidEmbeddedTrust(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			updateTrustRootSPKIBase64, updateTrustBootstrapPolicyBase64 = test.root, test.policy
-			store, sources, err := defaultEmbeddedUpdateTrust(t.TempDir(), testTrustNow)
+			store, sources, err := defaultEmbeddedUpdateTrust(t.TempDir(), func() time.Time { return testTrustNow })
 			if (store != nil) != test.wantEnabled {
 				t.Fatalf("trust store enabled = %v, want %v", store != nil, test.wantEnabled)
 			}
@@ -1031,6 +1032,324 @@ func TestUpdaterPolicyEnrollmentRequiresValidEmbeddedTrust(t *testing.T) {
 				t.Fatalf("historical trust sources = %#v, want none", sources)
 			}
 		})
+	}
+}
+
+func TestUpdaterDefaultEnrollmentClockAdvancesIntoExpiredFallback(t *testing.T) {
+	originalRoot, originalPolicy := updateTrustRootSPKIBase64, updateTrustBootstrapPolicyBase64
+	t.Cleanup(func() {
+		updateTrustRootSPKIBase64, updateTrustBootstrapPolicyBase64 = originalRoot, originalPolicy
+	})
+	updateTrustRootSPKIBase64 = base64.StdEncoding.EncodeToString(readFixture(t, "root-epoch-1-spki.der"))
+	updateTrustBootstrapPolicyBase64 = base64.StdEncoding.EncodeToString(readFixture(t, "policy-epoch-1.json"))
+	now := testTrustNow
+	clock := func() time.Time { return now }
+	store, _, err := defaultEmbeddedUpdateTrust(t.TempDir(), clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updater := newAutoUpdater(autoUpdaterOptions{
+		CurrentVersion: "0.4.12", TrustStore: store, Now: clock,
+		ReleaseSources: []updateReleaseSource{{Name: "GitHub", URL: "https://example.invalid/release", GitHub: true}},
+	})
+	current, err := updater.resolveUpdateTrustPolicy(context.Background())
+	if err != nil || current.Mode != updateTrustModeCurrent {
+		t.Fatalf("current resolution = mode %q, error %v", current.Mode, err)
+	}
+
+	now = time.Date(2031, 1, 1, 0, 0, 0, 0, time.UTC)
+	expired, err := updater.resolveUpdateTrustPolicy(context.Background())
+	if err != nil || expired.Mode != updateTrustModeExpiredIdentityFallback {
+		t.Fatalf("post-expiry resolution = mode %q, error %v, want explicit fallback", expired.Mode, err)
+	}
+}
+
+func TestUpdaterEnrollmentPendingVerificationBindingDeletionFailsClosed(t *testing.T) {
+	github := false
+	pending := pendingUpdate{
+		SchemaVersion: pendingUpdateSchemaVersion,
+		Version:       "0.4.12",
+		Size:          123,
+		SHA256:        strings.Repeat("a", 64),
+		PendingPath:   `C:\Users\recognizable-secret\gift-panel-pending.exe`,
+		TargetPath:    `C:\Program Files\GiftPanel\gift-panel.exe`,
+		Verification: pendingUpdateVerification{
+			Provenance: pendingVerificationSignedPolicy,
+			SourceName: "domestic", SourceURLSHA256: strings.Repeat("b", 64), SourceGitHub: &github,
+			Tag: "v0.4.12", Channel: updateChannelStable, ArtifactSHA256: strings.Repeat("a", 64),
+			PolicyEpoch: 7, PolicySHA256: strings.Repeat("c", 64), PolicyMode: updateTrustModeCurrent,
+		},
+	}
+	data, err := json.Marshal(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutations := []struct {
+		name string
+		edit func(map[string]any)
+	}{
+		{name: "complete binding deleted", edit: func(document map[string]any) { delete(document, "verification") }},
+		{name: "provenance deleted", edit: func(document map[string]any) { delete(document["verification"].(map[string]any), "provenance") }},
+		{name: "tag and channel deleted", edit: func(document map[string]any) {
+			delete(document["verification"].(map[string]any), "tag")
+			delete(document["verification"].(map[string]any), "channel")
+		}},
+		{name: "tag deleted", edit: func(document map[string]any) { delete(document["verification"].(map[string]any), "tag") }},
+		{name: "channel deleted", edit: func(document map[string]any) { delete(document["verification"].(map[string]any), "channel") }},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			var document map[string]any
+			if err := json.Unmarshal(data, &document); err != nil {
+				t.Fatal(err)
+			}
+			mutation.edit(document)
+			tampered, err := json.Marshal(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = decodePendingUpdateMetadata(tampered)
+			assertUpdateCode(t, err, "pending_verification_invalid")
+		})
+	}
+}
+
+func TestUpdaterLegacyPendingMetadataMigratesOnceToExplicitProvenance(t *testing.T) {
+	legacy := []byte(`{"version":"1.1.0","size":12,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","pendingPath":"C:\\updates\\gift-panel-pending.exe","targetPath":"C:\\gift-panel.exe"}`)
+	pending, migrated, err := decodePendingUpdateMetadata(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !migrated || pending.SchemaVersion != pendingUpdateSchemaVersion || pending.Verification.Provenance != pendingVerificationLegacyMigrated {
+		t.Fatalf("legacy migration = migrated %v, schema %d, verification %#v", migrated, pending.SchemaVersion, pending.Verification)
+	}
+	migratedBytes, err := json.Marshal(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(migratedBytes, &document); err != nil {
+		t.Fatal(err)
+	}
+	delete(document, "verification")
+	tampered, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = decodePendingUpdateMetadata(tampered)
+	assertUpdateCode(t, err, "pending_verification_invalid")
+}
+
+func TestUpdaterPendingPolicyContextRejectsPolicyOrModeSubstitution(t *testing.T) {
+	candidate := updateReleaseCandidate{
+		Source:  updateReleaseSource{Name: "domestic", URL: "https://updates.example.invalid/release?token=recognizable-secret"},
+		Release: githubRelease{TagName: "v0.4.12"}, Version: "0.4.12", Channel: updateChannelStable,
+	}
+	artifactSHA := strings.Repeat("a", 64)
+	original := resolvedUpdateTrustPolicy{
+		Policy: verifiedUpdateTrustPolicy{Epoch: 7, SignedRaw: []byte(`{"epoch":7}`)},
+		Mode:   updateTrustModeCurrent,
+	}
+	verification, err := pendingVerificationForCandidate(candidate, artifactSHA, original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(verification.SourceURLSHA256, "recognizable-secret") {
+		t.Fatalf("source fingerprint leaked URL query: %#v", verification)
+	}
+	tests := []struct {
+		name     string
+		resolved resolvedUpdateTrustPolicy
+	}{
+		{name: "higher epoch", resolved: resolvedUpdateTrustPolicy{Policy: verifiedUpdateTrustPolicy{Epoch: 8, SignedRaw: []byte(`{"epoch":8}`)}, Mode: updateTrustModeCurrent}},
+		{name: "same epoch different policy", resolved: resolvedUpdateTrustPolicy{Policy: verifiedUpdateTrustPolicy{Epoch: 7, SignedRaw: []byte(`{"epoch":7,"changed":true}`)}, Mode: updateTrustModeCurrent}},
+		{name: "expiry transition changes mode", resolved: resolvedUpdateTrustPolicy{Policy: original.Policy, Mode: updateTrustModeExpiredIdentityFallback}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertUpdateCode(t, verifyPendingResolvedPolicyContext(verification, test.resolved), "pending_policy_context_changed")
+		})
+	}
+	assertUpdateCode(t, verifyPendingResolvedPolicyContext(verification, original), "")
+}
+
+func TestUpdaterSameVersionCandidatesPersistIndependentSourceContext(t *testing.T) {
+	policy := resolvedUpdateTrustPolicy{Policy: verifiedUpdateTrustPolicy{Epoch: 3, SignedRaw: []byte(`{"epoch":3}`)}, Mode: updateTrustModeCurrent}
+	first := updateReleaseCandidate{Source: updateReleaseSource{Name: "domestic-a", URL: "https://a.example.invalid/release"}, Release: githubRelease{TagName: "v0.4.12"}, Version: "0.4.12", Channel: updateChannelStable}
+	second := updateReleaseCandidate{Source: updateReleaseSource{Name: "domestic-b", URL: "https://b.example.invalid/release"}, Release: githubRelease{TagName: "v0.4.12"}, Version: "0.4.12", Channel: updateChannelStable}
+	firstContext, err := pendingVerificationForCandidate(first, strings.Repeat("a", 64), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondContext, err := pendingVerificationForCandidate(second, strings.Repeat("a", 64), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstContext.SourceName == secondContext.SourceName || firstContext.SourceURLSHA256 == secondContext.SourceURLSHA256 {
+		t.Fatalf("same-version source contexts were transferred: first=%#v second=%#v", firstContext, secondContext)
+	}
+}
+
+func TestUpdaterPendingPolicyCacheChangeRequiresRedownload(t *testing.T) {
+	fixture := newDurablePolicyPendingFixture(t, testTrustNow.Add(time.Hour))
+	higher := signedTestTrustPolicy(t, fixture.Key, 2, testTrustNow.AddDate(1, 0, 0), fixture.Rule)
+	seedTestTrustCache(t, fixture.Store.CacheDir, higher, 2, []updateCertificateIdentity{fixture.Identity})
+
+	err := fixture.Updater.InstallOnExit(false)
+	if err == nil {
+		t.Fatal("InstallOnExit accepted pending artifact under a different cached policy")
+	}
+	if fixture.Launched() || fixture.Updater.HasPending() {
+		t.Fatalf("rotated policy result = launched %v, pending %v; want re-download", fixture.Launched(), fixture.Updater.HasPending())
+	}
+}
+
+func TestUpdaterPendingPolicyExpiryTransitionRequiresRedownload(t *testing.T) {
+	fixture := newDurablePolicyPendingFixture(t, testTrustNow.Add(time.Hour))
+	fixture.SetNow(testTrustNow.Add(2 * time.Hour))
+
+	err := fixture.Updater.InstallOnExit(false)
+	if err == nil {
+		t.Fatal("InstallOnExit accepted a current-mode pending artifact after policy entered expiry fallback")
+	}
+	if fixture.Launched() || fixture.Updater.HasPending() {
+		t.Fatalf("expiry transition result = launched %v, pending %v; want re-download", fixture.Launched(), fixture.Updater.HasPending())
+	}
+}
+
+func TestUpdaterPendingPolicyContextSurvivesRestartWithoutSubstitution(t *testing.T) {
+	fixture := newDurablePolicyPendingFixture(t, testTrustNow.Add(time.Hour))
+	restartedStore := &updateTrustStore{Root: &fixture.Key.PublicKey, EmbeddedPolicy: fixture.Policy, CacheDir: fixture.Store.CacheDir}
+	restarted := newAutoUpdater(autoUpdaterOptions{
+		CurrentVersion: "0.4.11", ExecutablePath: fixture.TargetPath, UpdatesDir: fixture.UpdatesDir,
+		ReleaseSources: []updateReleaseSource{fixture.Source}, AssetName: updateAssetName,
+		TrustStore: restartedStore, Now: func() time.Time { return testTrustNow },
+		InspectAuthenticode: func(string) (inspectedUpdateCertificate, error) {
+			return inspectedUpdateCertificate{LegalIdentity: fixture.Identity}, nil
+		},
+		VerifyExecutable: func(string) error { return errors.New("legacy verifier must not run for restarted enrollment pending") },
+	})
+	if status := restarted.Status(); status.State != "ready" || !restarted.HasPending() {
+		t.Fatalf("restarted status = %#v, pending %v; want exact-context ready", status, restarted.HasPending())
+	}
+}
+
+func TestUpdaterPendingPolicyMetadataTamperRequiresRedownload(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "source fingerprint", field: "sourceUrlSha256", value: strings.Repeat("d", 64)},
+		{name: "policy fingerprint", field: "policySha256", value: strings.Repeat("d", 64)},
+		{name: "artifact fingerprint", field: "artifactSha256", value: strings.Repeat("d", 64)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newDurablePolicyPendingFixture(t, testTrustNow.Add(time.Hour))
+			metadataPath := filepath.Join(fixture.UpdatesDir, "pending-update.json")
+			data, err := os.ReadFile(metadataPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document map[string]any
+			if err := json.Unmarshal(data, &document); err != nil {
+				t.Fatal(err)
+			}
+			document["verification"].(map[string]any)[test.field] = test.value
+			tampered, err := json.Marshal(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(metadataPath, tampered, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			restartedStore := &updateTrustStore{Root: &fixture.Key.PublicKey, EmbeddedPolicy: fixture.Policy, CacheDir: fixture.Store.CacheDir}
+			restarted := newAutoUpdater(autoUpdaterOptions{
+				CurrentVersion: "0.4.11", ExecutablePath: fixture.TargetPath, UpdatesDir: fixture.UpdatesDir,
+				ReleaseSources: []updateReleaseSource{fixture.Source}, AssetName: updateAssetName,
+				TrustStore: restartedStore, Now: func() time.Time { return testTrustNow },
+				InspectAuthenticode: func(string) (inspectedUpdateCertificate, error) {
+					return inspectedUpdateCertificate{LegalIdentity: fixture.Identity}, nil
+				},
+			})
+			if restarted.HasPending() || restarted.Status().State == "ready" {
+				t.Fatalf("tampered pending survived restart: status=%#v", restarted.Status())
+			}
+		})
+	}
+}
+
+type durablePolicyPendingFixture struct {
+	Updater    *autoUpdater
+	Store      *updateTrustStore
+	Key        *ecdsa.PrivateKey
+	Policy     []byte
+	Rule       updatePublisherRule
+	Identity   updateCertificateIdentity
+	Source     updateReleaseSource
+	UpdatesDir string
+	TargetPath string
+	SetNow     func(time.Time)
+	Launched   func() bool
+}
+
+func newDurablePolicyPendingFixture(t testing.TB, expiresAt time.Time) durablePolicyPendingFixture {
+	t.Helper()
+	binary := []byte("durable policy pending executable")
+	digest := sha256.Sum256(binary)
+	artifactSHA := hex.EncodeToString(digest[:])
+	identity := updateCertificateIdentity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"}
+	rule := stableTestRule("naisnet-primary", identity.Organization, identity.OrganizationID)
+	rule.ManifestSHA256 = artifactSHA
+	key := newTestTrustKey(t)
+	policy := signedTestTrustPolicy(t, key, 1, expiresAt, rule)
+	root := t.TempDir()
+	updatesDir := filepath.Join(root, "updates")
+	pendingPath := filepath.Join(updatesDir, "gift-panel-pending.exe")
+	targetPath := filepath.Join(root, "gift-panel.exe")
+	if err := os.MkdirAll(updatesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pendingPath, binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := testTrustNow
+	clock := func() time.Time { return now }
+	source := updateReleaseSource{Name: "domestic", URL: "https://updates.example.invalid/release"}
+	store := &updateTrustStore{Root: &key.PublicKey, EmbeddedPolicy: policy, CacheDir: filepath.Join(updatesDir, "update-trust"), Now: clock}
+	launched := false
+	updater := newAutoUpdater(autoUpdaterOptions{
+		CurrentVersion: "0.4.11", ExecutablePath: targetPath, UpdatesDir: updatesDir,
+		ReleaseSources: []updateReleaseSource{source}, AssetName: updateAssetName,
+		TrustStore: store, Now: clock,
+		InspectAuthenticode: func(string) (inspectedUpdateCertificate, error) {
+			return inspectedUpdateCertificate{LegalIdentity: identity}, nil
+		},
+		VerifyExecutable: func(string) error { return errors.New("legacy verifier must not run") },
+		LaunchInstaller:  func(string, int, bool) error { launched = true; return nil },
+	})
+	resolved, err := updater.resolveUpdateTrustPolicy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := updateReleaseCandidate{Source: source, Release: githubRelease{TagName: "v0.4.12"}, Version: "0.4.12", Channel: updateChannelStable}
+	verification, err := pendingVerificationForCandidate(candidate, artifactSHA, resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := pendingUpdate{
+		SchemaVersion: pendingUpdateSchemaVersion, Version: "0.4.12", Size: int64(len(binary)), SHA256: artifactSHA,
+		PendingPath: pendingPath, TargetPath: targetPath, Verification: verification,
+	}
+	if err := updater.writePendingMetadata(pending); err != nil {
+		t.Fatal(err)
+	}
+	updater.pending = &pending
+	return durablePolicyPendingFixture{
+		Updater: updater, Store: store, Key: key, Policy: policy, Rule: rule, Identity: identity, Source: source,
+		UpdatesDir: updatesDir, TargetPath: targetPath,
+		SetNow: func(value time.Time) { now = value }, Launched: func() bool { return launched },
 	}
 }
 
