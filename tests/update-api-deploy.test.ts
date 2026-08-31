@@ -60,6 +60,7 @@ function posixPath(path: string): string {
 
 function resolveBashBinary(platform: NodeJS.Platform, environment: NodeJS.ProcessEnv, pathExists: (path: string) => boolean = existsSync): string {
   if (environment.BASH_BIN) return environment.BASH_BIN;
+  if (platform === 'darwin') return '/bin/bash';
   if (platform !== 'win32') return '/usr/bin/bash';
   const candidates = [
     'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
@@ -74,6 +75,11 @@ describe('deployment Bash selection', () => {
   it('uses the exact Linux Bash path without probing Windows candidates', () => {
     expect(resolveBashBinary('linux', {}, () => { throw new Error('should not probe Git Bash on Linux'); }))
       .toBe('/usr/bin/bash');
+  });
+
+  it('uses the exact macOS Bash path without probing Windows candidates', () => {
+    expect(resolveBashBinary('darwin', {}, () => { throw new Error('should not probe Git Bash on macOS'); }))
+      .toBe('/bin/bash');
   });
 
   it.each([
