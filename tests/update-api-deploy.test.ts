@@ -58,11 +58,47 @@ function posixPath(path: string): string {
   return path.replaceAll('\\', '/').replace(/^([A-Za-z]):/, (_match, drive: string) => `/${drive.toLowerCase()}`);
 }
 
+function resolveBashBinary(platform: NodeJS.Platform, environment: NodeJS.ProcessEnv, pathExists: (path: string) => boolean = existsSync): string {
+  if (environment.BASH_BIN) return environment.BASH_BIN;
+  if (platform !== 'win32') return '/usr/bin/bash';
+  const candidates = [
+    'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+    'C:\\Program Files\\Git\\bin\\bash.exe',
+  ];
+  const binary = candidates.find(pathExists);
+  if (!binary) throw new Error('Git Bash was not found; set BASH_BIN explicitly.');
+  return binary;
+}
+
+describe('deployment Bash selection', () => {
+  it('uses the exact Linux Bash path without probing Windows candidates', () => {
+    expect(resolveBashBinary('linux', {}, () => { throw new Error('should not probe Git Bash on Linux'); }))
+      .toBe('/usr/bin/bash');
+  });
+
+  it.each([
+    ['preferred usr path', 'C:\\Program Files\\Git\\usr\\bin\\bash.exe'],
+    ['legacy bin path when usr is absent', 'C:\\Program Files\\Git\\bin\\bash.exe'],
+  ])('uses the existing Windows Git Bash %s', (_name, available) => {
+    expect(resolveBashBinary('win32', {}, (candidate) => candidate === available)).toBe(available);
+  });
+
+  it('honors an explicit BASH_BIN override without probing defaults', () => {
+    expect(resolveBashBinary('win32', { BASH_BIN: 'D:\\tools\\bash.exe' }, () => { throw new Error('should not probe an override'); }))
+      .toBe('D:\\tools\\bash.exe');
+  });
+});
+
 function runBash(script: string, cwd: string, environment: NodeJS.ProcessEnv = {}): SpawnSyncReturns<string> {
-  return spawnSync('C:\\Program Files\\Git\\bin\\bash.exe', ['-c', script], {
+  const env = { ...process.env, ...environment };
+  const binary = resolveBashBinary(process.platform, env);
+  if (process.platform === 'win32' && !environment.BASH_BIN && existsSync('C:\\Program Files\\Git\\usr\\bin')) {
+    env.PATH = `C:\\Program Files\\Git\\usr\\bin${env.PATH ? `;${env.PATH}` : ''}`;
+  }
+  return spawnSync(binary, ['-c', script], {
     cwd,
     encoding: 'utf8',
-    env: { ...process.env, ...environment },
+    env,
   });
 }
 
