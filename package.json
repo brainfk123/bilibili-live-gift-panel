@@ -31,7 +31,9 @@
     "test:hosted": "vitest run tests/hosted-build.test.ts",
     "test:windows-smoke": "vitest run tests/smoke-windows-exe.test.ts",
     "smoke:windows-exe": "node scripts/smoke-windows-exe.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:ui-parity-contract": "vitest run tests/ui-parity-requirements.test.ts",
+    "validate:ui-parity": "node scripts/validate-ui-parity-requirements.mjs acceptance/exe-hosted-ui/requirements.json"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
