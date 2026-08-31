@@ -95,18 +95,22 @@ describe('mainline CI workflow', () => {
       'npm run typecheck',
       'npm run build:ui',
       'npm run prepare:go-assets',
+      'npm run verify:go-linux-compile',
       'npm run build:hosted',
-      'go -C goserver test ./... -race -count=1',
-      'go -C goserver vet ./...',
+      'go -C goserver test -race -count=1 ./cmd/hosted ./internal/...',
+      'go -C goserver vet ./cmd/hosted ./internal/...',
       'npm run test:update-api',
       'go -C goserver build -trimpath -o "${{ runner.temp }}/gift-panel-hosted" ./cmd/hosted',
     ]));
     const hostedCommands = commands(jobs.hosted);
-    const hostedGoTest = hostedCommands.indexOf('go -C goserver test ./... -race -count=1');
-    for (const command of ['npm run build:ui', 'npm run prepare:go-assets', 'npm run build:hosted']) {
+    const hostedGoTest = hostedCommands.indexOf('go -C goserver test -race -count=1 ./cmd/hosted ./internal/...');
+    expect(hostedCommands).not.toContain('go -C goserver test ./... -race -count=1');
+    for (const command of ['npm run build:ui', 'npm run prepare:go-assets', 'npm run verify:go-linux-compile', 'npm run build:hosted']) {
       expect(hostedCommands.indexOf(command), `${command} must prepare Hosted Go test`).toBeLessThan(hostedGoTest);
     }
     expect(hostedCommands.indexOf('npm run build:ui')).toBeLessThan(hostedCommands.indexOf('npm run prepare:go-assets'));
+    expect(hostedCommands.indexOf('npm run prepare:go-assets')).toBeLessThan(hostedCommands.indexOf('npm run verify:go-linux-compile'));
+    expect(hostedCommands.indexOf('npm run verify:go-linux-compile')).toBeLessThan(hostedGoTest);
     expect(jobs['hosted-mysql']?.needs).toEqual(['scope', 'hosted']);
     expect(jobs['hosted-mysql']?.if).toContain("needs.scope.outputs.run_mysql == 'true'");
     expect(commands(jobs['hosted-mysql'])).toContain('npm run test:hosted-mysql');
