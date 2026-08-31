@@ -53,10 +53,10 @@ As of 2026-08-30:
 : The transitional channel at `channels/legacy-rushrush/latest.json`, allowed to serve only the exact RushRush bridge release.
 
 **Enrollment client**
-: v0.4.11 or later client that embeds the rotation-root public key, sends its canonical version to the domestic API, and verifies publisher policy.
+: The v0.4.12 NaisNet client or v0.4.11 bridge client that embeds the rotation-root public key and verifies publisher policy. Both already send their canonical version through the existing User-Agent contract.
 
 **Bridge client**
-: The exact v0.4.12 RushRush-signed transitional client that v0.4.7 accepts. It becomes an enrollment client immediately after installation and trusts future NaisNet artifacts only through signed publisher policy.
+: The exact v0.4.11 RushRush-signed transitional client that v0.4.7 accepts. It becomes an enrollment client immediately after installation and trusts future NaisNet artifacts only through signed publisher policy.
 
 ## Security invariants
 
@@ -68,7 +68,7 @@ As of 2026-08-30:
 6. The application server, update API, COS publisher, and ordinary Release workflow have no KMS signing permission.
 7. Policy epochs and root epochs are monotonic. Published epoch objects are immutable and never replaced.
 8. A client never accepts a policy epoch or root epoch lower than the highest it has persisted.
-9. RushRush is authorized only for exact bridge tag `v0.4.12` on `legacy-rushrush`; it can never sign stable artifacts.
+9. RushRush is authorized only for exact bridge tag `v0.4.11` on `legacy-rushrush`; it can never sign stable artifacts.
 10. Existing Git tags and Releases are immutable. Recovery is forward-only through a higher version or higher policy epoch.
 
 ## Rotation root
@@ -122,7 +122,7 @@ The wire document is a strict envelope:
         "organizationId": "91450900MADM3GLG5P",
         "role": "bridge",
         "allowedChannel": "legacy-rushrush",
-        "allowedTags": ["v0.4.12"],
+        "allowedTags": ["v0.4.11"],
         "validUntil": "2027-03-01T00:00:00Z"
       }
     ]
@@ -196,21 +196,23 @@ Root-key rotation uses separate strict root metadata. `rootEpoch+1` contains the
 
 ## Version-aware channel selection
 
-Enrollment clients send:
+Every released updater from v0.4.7 onward already sends:
 
 ```text
-X-Gift-Panel-Version: 0.4.11
+User-Agent: bilibili-live-gift-panel/0.4.7
 ```
 
-The header contains only a canonical public application version.
+The domestic API uses this existing public version signal. No new enrollment header is required for the immediate migration. Future clients may add an explicit version header only as a separately designed defense-in-depth change; it is not part of this bridge.
 
 Domestic API routing:
 
-- missing header: legacy channel while legacy migration is active;
-- canonical version lower than `0.4.11`: legacy channel;
-- canonical version at or above `0.4.11`: stable channel;
-- malformed, duplicate, oversized, prerelease, or otherwise noncanonical header: HTTP 400;
-- response includes `Vary: X-Gift-Panel-Version` and remains `private, no-store`.
+- exact reviewed legacy version `0.4.7`: legacy channel while legacy migration is active;
+- exact bridge version `0.4.11`: stable channel;
+- reviewed NaisNet versions `0.4.9`, `0.4.10`, `0.4.12`, and later canonical stable versions: stable channel;
+- missing, duplicate, malformed, oversized, prerelease, development, or unrecognized User-Agent version: HTTP 400;
+- response includes `Vary: User-Agent` and remains `private, no-store`.
+
+Routing is an explicit allowlist, not a numeric less-than shortcut. Adding another legacy version requires independent evidence of its embedded signer and User-Agent behavior, a design amendment, and tests.
 
 The API may log only aggregated version buckets and stable outcome codes. It must not add IPs, machine identifiers, Bilibili identities, cookies, tokens, or signed download URLs to application logs.
 
@@ -221,11 +223,22 @@ Storage pointers are independent:
 
 The stable publisher cannot write the legacy pointer. The bridge publisher cannot write the stable pointer. Both immutable release prefixes and both pointer permissions are separately scoped in CAM.
 
-## Three-stage migration
+## Two-release migration
 
-### Stage 1: v0.4.11 enrollment release
+### Stage 1: trust and routing preparation
 
-v0.4.11 is an ordinary NaisNet Release and GitHub latest.
+Before publishing either migration artifact:
+
+- provision the KMS rotation root and independently review its SPKI SHA-256;
+- sign and publish epoch 1 policy;
+- deploy strict User-Agent channel selection while leaving the legacy pointer absent;
+- verify v0.4.7, v0.4.9, and v0.4.10 route decisions against captured real requests;
+- verify missing, malformed, duplicate, and unrecognized versions fail closed;
+- verify stable behavior is unchanged while legacy remains inactive.
+
+### Stage 2: v0.4.12 NaisNet convergence release
+
+v0.4.12 is an ordinary NaisNet Release, GitHub latest, and stable release.
 
 It adds:
 
@@ -233,24 +246,23 @@ It adds:
 - embedded epoch 1 policy;
 - strict policy verification and cache;
 - structured certificate identity matching;
-- version request header;
 - version-aware update status diagnostics.
 
 Gates:
 
-- real v0.4.10 to v0.4.11 update succeeds from domestic and GitHub;
+- real v0.4.9 and v0.4.10 to v0.4.12 updates succeed from domestic and GitHub;
 - same NaisNet organization identity with a different leaf thumbprint passes;
 - different organization ID fails despite Authenticode `Valid`;
-- API receives and validates the version header;
+- API parses the existing User-Agent versions and routes them to stable;
 - policy rollback, expiry, malformed JSON, bad KMS signature, and interrupted cache write tests pass;
 - observe production for at least seven days;
-- legacy routing stays inactive throughout Stage 1.
+- legacy routing stays inactive throughout Stage 2.
 
-### Stage 2: v0.4.12 RushRush bridge
+### Stage 3: v0.4.11 RushRush bridge
 
-v0.4.12 uses a separate Bridge Release workflow:
+v0.4.11 uses a separate Bridge Release workflow and is published only after the v0.4.12 stable observation gate passes:
 
-- exact tag `v0.4.12`;
+- exact tag `v0.4.11`;
 - GitHub Release `latest=false`;
 - outer EXE signed by the reviewed RushRush certificate;
 - embedded application update publisher determined by KMS policy, with NaisNet stable authorized;
@@ -262,24 +274,13 @@ v0.4.12 uses a separate Bridge Release workflow:
 Before activation:
 
 - real public v0.4.7 automatically downloads and accepts the domestic RushRush bridge;
-- real unversioned NaisNet client rejects the domestic RushRush bridge and successfully falls back to GitHub latest v0.4.11;
-- v0.4.11 versioned client continues receiving stable v0.4.11 and never the legacy route;
+- real public v0.4.7 installs v0.4.11, restarts with User-Agent `0.4.11`, routes to stable, and then automatically installs NaisNet v0.4.12;
+- v0.4.9 and v0.4.10 route directly to stable v0.4.12 and never receive the bridge;
 - RushRush signed for another tag, stable channel, altered hash, or expired bridge authorization is rejected;
-- observe for at least seven days after legacy pointer activation.
+- domestic and GitHub hashes, signatures, manifests, and changelog match their reviewed releases;
+- observe for at least seven days after legacy pointer activation before evaluating retirement.
 
-### Stage 3: v0.4.13 NaisNet convergence release
-
-v0.4.13 is an ordinary NaisNet GitHub latest and stable release.
-
-Acceptance requires:
-
-- real v0.4.11 to v0.4.13 automatic update;
-- real v0.4.12 bridge to v0.4.13 automatic update;
-- both paths select the same highest policy epoch and NaisNet legal identity;
-- domestic and GitHub hashes, signatures, manifests, and changelog match their reviewed release;
-- observe for at least seven days before evaluating legacy-channel retirement.
-
-The v0.4.12 bridge Release and immutable COS objects remain available during the support window. Retirement is a separate design and approval; it is not part of convergence publication.
+The v0.4.11 bridge Release and immutable COS objects remain available during the support window. Retirement is a separate design and approval; it is not part of convergence publication.
 
 ## Workflow separation
 
@@ -293,7 +294,7 @@ The v0.4.12 bridge Release and immutable COS objects remain available during the
 
 ### Bridge Release workflow
 
-- hard-codes exact allowed tag `v0.4.12`;
+- hard-codes exact allowed tag `v0.4.11`;
 - resolves the reviewed RushRush artifact signer separately from the future NaisNet update trust;
 - verifies the final outer signature is RushRush;
 - verifies application-embedded policy root and baseline policy authorize future NaisNet stable updates;
@@ -316,8 +317,8 @@ The v0.4.12 bridge Release and immutable COS objects remain available during the
 **Bad policy epoch**
 : Never overwrite or delete it. Publish a higher corrective epoch. Clients that accepted the bad epoch cannot safely downgrade.
 
-**v0.4.11 failure**
-: Do not activate legacy. Keep stable on the last reviewed version for clients that have not upgraded, and publish a higher forward fix for upgraded clients.
+**v0.4.12 failure**
+: Do not publish or activate the bridge. Keep stable on the last reviewed NaisNet version for clients that have not upgraded, and publish a higher forward fix for upgraded clients.
 
 **Bridge build or validation failure**
 : Do not create or advance the legacy pointer. Stable, GitHub latest, and NaisNet clients remain unchanged.
@@ -325,7 +326,7 @@ The v0.4.12 bridge Release and immutable COS objects remain available during the
 **Bridge activation failure**
 : Restore the reviewed previous legacy pointer or leave it absent. Never modify stable as part of bridge rollback.
 
-**v0.4.13 failure**
+**Post-bridge NaisNet failure**
 : Restore the stable pointer only to protect clients that have not upgraded. Already upgraded clients require a higher forward-fix version; the updater never downgrades.
 
 **Policy source unavailable**
@@ -372,7 +373,7 @@ Forbidden data:
 
 ### Integration tests
 
-- update API missing, valid, duplicate, malformed, and boundary version headers;
+- update API exact v0.4.7, bridge v0.4.11, NaisNet versions, missing, duplicate, malformed, and unknown User-Agent values;
 - independent stable and legacy repositories and CAM-equivalent write seams;
 - domestic policy stale while GitHub policy is newer, and the reverse;
 - domestic RushRush verification failure followed by GitHub NaisNet success;
@@ -382,10 +383,10 @@ Forbidden data:
 
 ### Packaged Windows acceptance
 
-- v0.4.10 to v0.4.11;
-- public v0.4.7 to v0.4.12 bridge through domestic API;
-- unversioned NaisNet client rejects bridge and falls back to GitHub v0.4.11;
-- v0.4.11 and v0.4.12 both converge to v0.4.13;
+- v0.4.9 and v0.4.10 to NaisNet v0.4.12;
+- public v0.4.7 to RushRush v0.4.11 bridge through domestic API;
+- v0.4.11 bridge restarts, routes to stable, and converges to NaisNet v0.4.12;
+- v0.4.9 and v0.4.10 never receive the legacy bridge;
 - actual Authenticode chain, legal identity, SHA-256, policy epoch, root key ID, tag, GitHub latest flag, and COS channel pointer recorded;
 - no signed URL query or credential appears in evidence.
 
@@ -397,11 +398,10 @@ The following remain separate external mutations, each requiring action-time con
 2. sign epoch 1 policy;
 3. publish or advance a trust-policy pointer;
 4. deploy version-aware API routing;
-5. push/tag/publish v0.4.11;
-6. push/tag/publish the v0.4.12 bridge;
+5. push/tag/publish NaisNet v0.4.12;
+6. push/tag/publish the RushRush v0.4.11 bridge;
 7. advance `legacy-rushrush`;
-8. push/tag/publish v0.4.13;
-9. retire any legacy route, certificate, key, Release, COS object, or credential.
+8. retire any legacy route, certificate, key, Release, COS object, or credential.
 
 No implementation or rollout step inherits authorization from approval of this design.
 
