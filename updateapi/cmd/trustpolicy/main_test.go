@@ -252,102 +252,44 @@ func TestKMSSignerCLIRequiresExplicitProviderModeBeforeFactory(t *testing.T) {
 	}
 }
 
-func TestOutputBundleUsesUniquePrivateStagesAndIgnoresQuarantine(t *testing.T) {
-	base := t.TempDir()
-	bundlePath := filepath.Join(base, "bundle")
+func TestOutputBundleWritesCommitMarkerLastAndReaderValidates(t *testing.T) {
+	policy, audit := testBundlePayload(t, "marker-test")
+	bundlePath := filepath.Join(t.TempDir(), "bundle")
 	policyPath := filepath.Join(bundlePath, "policy.json")
 	auditPath := filepath.Join(bundlePath, "audit.json")
-	quarantine := filepath.Join(base, ".bundle.trustpolicy-staging-"+strings.Repeat("f", 64))
-	if err := os.Mkdir(quarantine, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	foreign := filepath.Join(quarantine, "foreign.txt")
-	if err := os.WriteFile(foreign, []byte("preserve"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	stages := make([]string, 0, 2)
-	for range 2 {
-		err := writeOutputBundle(policyPath, []byte("policy"), auditPath, []byte("audit"), bundleHooks{
-			checkpoint: func(checkpoint bundleCheckpoint, stage string) error {
-				if checkpoint == bundleAfterCreateStaging {
-					stages = append(stages, stage)
-					return errors.New("stop before commit")
-				}
-				return nil
-			},
-		})
-		if err == nil {
-			t.Fatal("injected staging failure was accepted")
-		}
-	}
-	if len(stages) != 2 || samePath(stages[0], stages[1]) {
-		t.Fatalf("staging paths are not unique: %v", stages)
-	}
-	for _, stage := range stages {
-		if filepath.Dir(stage) != base || !validStagingBasename(filepath.Base(stage), "bundle") {
-			t.Fatal("staging directory is not a same-parent cryptographic name")
-		}
-		assertPathAbsent(t, stage)
-	}
-	if err := writeOutputBundle(policyPath, []byte("policy"), auditPath, []byte("audit"), bundleHooks{}); err != nil {
-		t.Fatal(err)
-	}
-	assertCompleteBundle(t, policyPath, auditPath)
-	if got, err := os.ReadFile(foreign); err != nil || string(got) != "preserve" {
-		t.Fatalf("quarantined foreign staging changed: %q, %v", got, err)
-	}
-}
-
-func TestOutputBundleRandomCollisionDoesNotAdoptOrDeleteForeignStage(t *testing.T) {
-	base := t.TempDir()
-	bundlePath := filepath.Join(base, "bundle")
-	policyPath := filepath.Join(bundlePath, "policy.json")
-	auditPath := filepath.Join(bundlePath, "audit.json")
-	collidingToken := bytes.Repeat([]byte{0xaa}, 32)
-	nextToken := bytes.Repeat([]byte{0xbb}, 32)
-	foreignStage := filepath.Join(base, ".bundle.trustpolicy-staging-"+hex.EncodeToString(collidingToken))
-	if err := os.Mkdir(foreignStage, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	foreignFile := filepath.Join(foreignStage, "foreign.txt")
-	if err := os.WriteFile(foreignFile, []byte("preserve"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var stage string
-	err := writeOutputBundle(policyPath, []byte("policy"), auditPath, []byte("audit"), bundleHooks{
-		entropy: bytes.NewReader(append(collidingToken, nextToken...)),
-		checkpoint: func(checkpoint bundleCheckpoint, currentStage string) error {
-			if checkpoint == bundleAfterCreateStaging {
-				stage = currentStage
-				return errors.New("stop")
-			}
+	var checkpoints []bundleCheckpoint
+	if err := writeOutputBundle(policyPath, policy, auditPath, audit, bundleHooks{
+		checkpoint: func(checkpoint bundleCheckpoint, _ string) error {
+			checkpoints = append(checkpoints, checkpoint)
 			return nil
 		},
-	})
-	if err == nil {
-		t.Fatal("injected failure was accepted")
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.HasSuffix(stage, hex.EncodeToString(nextToken)) {
-		t.Fatal("random collision did not advance to a new owner token")
+	wantOrder := bundleTestCheckpoints()
+	if !reflect.DeepEqual(checkpoints, wantOrder) {
+		t.Fatalf("checkpoint order = %v, want %v", checkpoints, wantOrder)
 	}
-	assertPathAbsent(t, stage)
-	if got, err := os.ReadFile(foreignFile); err != nil || string(got) != "preserve" {
-		t.Fatalf("colliding foreign staging changed: %q, %v", got, err)
+	committed, err := readCommittedBundle(policyPath, auditPath)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if !bytes.Equal(committed.Policy, policy) || !bytes.Equal(committed.Audit, audit) {
+		t.Fatal("reader did not return the committed pair")
+	}
+	assertCommittedBundleEntries(t, bundlePath, "policy.json", "audit.json")
 }
 
-func TestOutputBundleInjectedFailuresAreAllOrNothing(t *testing.T) {
+func TestOutputBundleCheckpointFailuresPreservePhysicalPartialAndLogicalCommit(t *testing.T) {
 	for _, checkpoint := range bundleTestCheckpoints() {
 		t.Run(string(checkpoint), func(t *testing.T) {
-			base := t.TempDir()
-			bundlePath := filepath.Join(base, "bundle")
+			policy, audit := testBundlePayload(t, string(checkpoint))
+			bundlePath := filepath.Join(t.TempDir(), "bundle")
 			policyPath := filepath.Join(bundlePath, "policy.json")
 			auditPath := filepath.Join(bundlePath, "audit.json")
-			stage := ""
 			reached := false
-			err := writeOutputBundle(policyPath, []byte("policy"), auditPath, []byte("audit"), bundleHooks{
-				checkpoint: func(got bundleCheckpoint, currentStage string) error {
-					stage = currentStage
+			err := writeOutputBundle(policyPath, policy, auditPath, audit, bundleHooks{
+				checkpoint: func(got bundleCheckpoint, _ string) error {
 					if got == checkpoint {
 						reached = true
 						return errors.New("injected failure")
@@ -356,20 +298,26 @@ func TestOutputBundleInjectedFailuresAreAllOrNothing(t *testing.T) {
 				},
 			})
 			if err == nil || !reached {
-				t.Fatalf("injected checkpoint was not enforced: reached=%v error=%v", reached, err)
+				t.Fatalf("checkpoint failure not enforced: reached=%v error=%v", reached, err)
 			}
+			if _, statErr := os.Lstat(bundlePath); statErr != nil {
+				t.Fatalf("owned final directory was deleted: %v", statErr)
+			}
+			committed, readErr := readCommittedBundle(policyPath, auditPath)
 			if checkpoint.beforeCommit() {
-				assertPathAbsent(t, bundlePath)
-				assertPathAbsent(t, stage)
+				if readErr == nil || len(committed.Policy) != 0 || len(committed.Audit) != 0 {
+					t.Fatal("pre-marker physical partial was exposed as committed")
+				}
 				return
 			}
-			assertCompleteBundle(t, policyPath, auditPath)
-			assertPathAbsent(t, stage)
+			if readErr != nil || !bytes.Equal(committed.Policy, policy) || !bytes.Equal(committed.Audit, audit) {
+				t.Fatalf("post-marker bundle did not validate: %v", readErr)
+			}
 		})
 	}
 }
 
-func TestOutputBundleCrashQuarantinesPreCommitStageAndNextRunIgnoresIt(t *testing.T) {
+func TestOutputBundleCrashLeavesUncommittedFinalOrValidatedCommit(t *testing.T) {
 	for _, checkpoint := range bundleTestCheckpoints() {
 		t.Run(string(checkpoint), func(t *testing.T) {
 			base := t.TempDir()
@@ -377,26 +325,36 @@ func TestOutputBundleCrashQuarantinesPreCommitStageAndNextRunIgnoresIt(t *testin
 			policyPath := filepath.Join(bundlePath, "policy.json")
 			auditPath := filepath.Join(bundlePath, "audit.json")
 			runBundleCrashHelper(t, checkpoint, policyPath, auditPath)
-			stages := listBundleStages(t, base, "bundle")
+			before := snapshotBundlePath(t, bundlePath)
+			committed, readErr := readCommittedBundle(policyPath, auditPath)
 			if checkpoint.beforeCommit() {
-				assertPathAbsent(t, bundlePath)
-				if len(stages) != 1 {
-					t.Fatalf("pre-commit crash stages = %v, want one quarantine", stages)
+				if readErr == nil || len(committed.Policy) != 0 {
+					t.Fatal("pre-marker crash exposed trusted bytes")
 				}
-				before := snapshotQuarantine(t, stages[0])
-				if err := writeOutputBundle(policyPath, []byte("policy"), auditPath, []byte("audit"), bundleHooks{}); err != nil {
-					t.Fatalf("next invocation was blocked by quarantine: %v", err)
+				policy, audit := testBundlePayload(t, "same-path-retry")
+				if err := writeOutputBundle(policyPath, policy, auditPath, audit, bundleHooks{}); err == nil {
+					t.Fatal("same-path retry reused an uncommitted final directory")
 				}
-				assertCompleteBundle(t, policyPath, auditPath)
-				after := snapshotQuarantine(t, stages[0])
-				if !reflect.DeepEqual(before, after) {
-					t.Fatal("next invocation adopted or modified quarantined staging")
+				afterRetry := snapshotBundlePath(t, bundlePath)
+				if !reflect.DeepEqual(before, afterRetry) {
+					t.Fatal("same-path retry modified physical partial")
+				}
+				newBundle := filepath.Join(base, "bundle-next")
+				newPolicy := filepath.Join(newBundle, "policy.json")
+				newAudit := filepath.Join(newBundle, "audit.json")
+				if err := writeOutputBundle(newPolicy, policy, newAudit, audit, bundleHooks{}); err != nil {
+					t.Fatalf("new final path was blocked by old partial: %v", err)
+				}
+				if _, err := readCommittedBundle(newPolicy, newAudit); err != nil {
+					t.Fatalf("new path did not commit: %v", err)
+				}
+				if !reflect.DeepEqual(before, snapshotBundlePath(t, bundlePath)) {
+					t.Fatal("new-path invocation modified old partial")
 				}
 				return
 			}
-			assertCompleteBundle(t, policyPath, auditPath)
-			if len(stages) != 0 {
-				t.Fatalf("post-commit crash left staging: %v", stages)
+			if readErr != nil || len(committed.Policy) == 0 || len(committed.Audit) == 0 {
+				t.Fatalf("post-marker crash did not leave a validated commit: %v", readErr)
 			}
 		})
 	}
@@ -406,10 +364,11 @@ func TestOutputBundleCrashHelper(t *testing.T) {
 	if os.Getenv("TRUSTPOLICY_CRASH_HELPER") != "1" {
 		t.Skip("helper subprocess only")
 	}
+	policy, audit := testBundlePayload(t, "crash-helper")
 	checkpoint := bundleCheckpoint(os.Getenv("TRUSTPOLICY_CRASH_CHECKPOINT"))
 	err := writeOutputBundle(
-		os.Getenv("TRUSTPOLICY_CRASH_POLICY"), []byte("policy"),
-		os.Getenv("TRUSTPOLICY_CRASH_AUDIT"), []byte("audit"),
+		os.Getenv("TRUSTPOLICY_CRASH_POLICY"), policy,
+		os.Getenv("TRUSTPOLICY_CRASH_AUDIT"), audit,
 		bundleHooks{checkpoint: func(got bundleCheckpoint, _ string) error {
 			if got == checkpoint {
 				os.Exit(86)
@@ -423,197 +382,213 @@ func TestOutputBundleCrashHelper(t *testing.T) {
 	os.Exit(0)
 }
 
-func TestOutputBundleCleanupPreservesReplacedStageOnIdentityMismatch(t *testing.T) {
-	base := t.TempDir()
-	bundlePath := filepath.Join(base, "bundle")
+func TestOutputBundleExistingFinalAlwaysFailsWithoutMutation(t *testing.T) {
+	for _, state := range []string{"empty", "partial", "complete", "symlink"} {
+		t.Run(state, func(t *testing.T) {
+			base := t.TempDir()
+			bundlePath := filepath.Join(base, "bundle")
+			policyPath := filepath.Join(bundlePath, "policy.json")
+			auditPath := filepath.Join(bundlePath, "audit.json")
+			policy, audit := testBundlePayload(t, state)
+			switch state {
+			case "empty":
+				if err := createPrivateDirectory(bundlePath); err != nil {
+					t.Fatal(err)
+				}
+			case "partial":
+				if err := createPrivateDirectory(bundlePath); err != nil {
+					t.Fatal(err)
+				}
+				if err := writePrivateBundleFile(policyPath, policy); err != nil {
+					t.Fatal(err)
+				}
+			case "complete":
+				if err := writeOutputBundle(policyPath, policy, auditPath, audit, bundleHooks{}); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				target := filepath.Join(base, "target")
+				if err := os.Mkdir(target, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, bundlePath); err != nil {
+					t.Skip("symlink creation is not permitted")
+				}
+			}
+			before := snapshotBundlePath(t, bundlePath)
+			if err := writeOutputBundle(policyPath, policy, auditPath, audit, bundleHooks{}); err == nil {
+				t.Fatal("existing final directory was reused or replaced")
+			}
+			if !reflect.DeepEqual(before, snapshotBundlePath(t, bundlePath)) {
+				t.Fatal("existing final directory changed")
+			}
+		})
+	}
+}
+
+func TestReadCommittedBundleRejectsMarkerContentAndEntryMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(t *testing.T, bundlePath, policyPath, auditPath string)
+	}{
+		{name: "missing marker", mutate: func(t *testing.T, bundlePath, _, _ string) {
+			t.Helper()
+			mustRemove(t, filepath.Join(bundlePath, trustpolicy.BundleCommitFileName))
+		}},
+		{name: "corrupt marker", mutate: func(t *testing.T, bundlePath, _, _ string) {
+			t.Helper()
+			mustOverwrite(t, filepath.Join(bundlePath, trustpolicy.BundleCommitFileName), []byte(`{}`))
+		}},
+		{name: "extra entry", mutate: func(t *testing.T, bundlePath, _, _ string) {
+			t.Helper()
+			mustOverwrite(t, filepath.Join(bundlePath, "extra.txt"), []byte("extra"))
+		}},
+		{name: "policy substitution", mutate: func(t *testing.T, _, policyPath, _ string) { t.Helper(); mustOverwrite(t, policyPath, []byte(`{}`)) }},
+		{name: "audit substitution", mutate: func(t *testing.T, _, _, auditPath string) { t.Helper(); mustOverwrite(t, auditPath, []byte(`{}`)) }},
+		{name: "marker trailing JSON", mutate: func(t *testing.T, bundlePath, _, _ string) {
+			t.Helper()
+			marker := mustRead(t, filepath.Join(bundlePath, trustpolicy.BundleCommitFileName))
+			mustOverwrite(t, filepath.Join(bundlePath, trustpolicy.BundleCommitFileName), append(marker, []byte(`{}`)...))
+		}},
+		{name: "marker unknown field", mutate: func(t *testing.T, bundlePath, _, _ string) {
+			t.Helper()
+			marker := mustRead(t, filepath.Join(bundlePath, trustpolicy.BundleCommitFileName))
+			mustOverwrite(t, filepath.Join(bundlePath, trustpolicy.BundleCommitFileName), bytes.Replace(marker, []byte(`{"schemaVersion":1`), []byte(`{"schemaVersion":1,"unknown":true`), 1))
+		}},
+		{name: "marker duplicate field", mutate: func(t *testing.T, bundlePath, _, _ string) {
+			t.Helper()
+			marker := mustRead(t, filepath.Join(bundlePath, trustpolicy.BundleCommitFileName))
+			mustOverwrite(t, filepath.Join(bundlePath, trustpolicy.BundleCommitFileName), bytes.Replace(marker, []byte(`{"schemaVersion":1`), []byte(`{"schemaVersion":1,"schemaVersion":1`), 1))
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			policy, audit := testBundlePayload(t, test.name)
+			bundlePath := filepath.Join(t.TempDir(), "bundle")
+			policyPath := filepath.Join(bundlePath, "policy.json")
+			auditPath := filepath.Join(bundlePath, "audit.json")
+			if err := writeOutputBundle(policyPath, policy, auditPath, audit, bundleHooks{}); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(t, bundlePath, policyPath, auditPath)
+			committed, err := readCommittedBundle(policyPath, auditPath)
+			if err == nil || len(committed.Policy) != 0 || len(committed.Audit) != 0 {
+				t.Fatal("mutated bundle exposed trusted bytes")
+			}
+			if err.Error() != errCommand.Error() {
+				t.Fatalf("reader error leaked detail: %q", err)
+			}
+		})
+	}
+}
+
+func TestReadCommittedBundleRejectsSelfConsistentMalformedPolicyOrAudit(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		policy []byte
+		audit  []byte
+	}{
+		{name: "malformed policy", policy: []byte(`{}`), audit: []byte(`{}`)},
+		{name: "malformed audit", policy: testBundlePayloadPolicy(t), audit: []byte(`{}`)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bundlePath := filepath.Join(t.TempDir(), "bundle")
+			policyPath := filepath.Join(bundlePath, "policy.json")
+			auditPath := filepath.Join(bundlePath, "audit.json")
+			if err := writeOutputBundle(policyPath, test.policy, auditPath, test.audit, bundleHooks{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readCommittedBundle(policyPath, auditPath); err == nil {
+				t.Fatal("self-consistent malformed committed files were accepted")
+			}
+		})
+	}
+}
+
+func TestReadCommittedBundleRejectsSymlinkSubstitution(t *testing.T) {
+	policy, audit := testBundlePayload(t, "symlink-substitution")
+	bundlePath := filepath.Join(t.TempDir(), "bundle")
 	policyPath := filepath.Join(bundlePath, "policy.json")
 	auditPath := filepath.Join(bundlePath, "audit.json")
-	original := ""
-	replacement := ""
-	err := writeOutputBundle(policyPath, []byte("policy"), auditPath, []byte("audit"), bundleHooks{
-		checkpoint: func(checkpoint bundleCheckpoint, stage string) error {
-			if checkpoint != bundleAfterWritePolicy {
-				return nil
-			}
-			original = stage + ".quarantine"
-			replacement = stage
-			if err := os.Rename(stage, original); err != nil {
-				return err
-			}
-			if err := createPrivateDirectory(replacement); err != nil {
-				return err
-			}
-			return errors.New("trigger cleanup")
-		},
-	})
-	if err == nil {
-		t.Fatal("replacement race was accepted")
+	if err := writeOutputBundle(policyPath, policy, auditPath, audit, bundleHooks{}); err != nil {
+		t.Fatal(err)
 	}
-	if info, statErr := os.Lstat(original); statErr != nil || !info.IsDir() {
-		t.Fatalf("original moved stage changed: %v", statErr)
+	relocated := filepath.Join(filepath.Dir(bundlePath), "relocated-policy.json")
+	if err := os.Rename(policyPath, relocated); err != nil {
+		t.Fatal(err)
 	}
-	if info, statErr := os.Lstat(replacement); statErr != nil || !info.IsDir() {
-		t.Fatalf("foreign replacement stage was removed: %v", statErr)
+	if err := os.Symlink(relocated, policyPath); err != nil {
+		t.Skip("symlink creation is not permitted")
 	}
-	assertPathAbsent(t, bundlePath)
+	committed, err := readCommittedBundle(policyPath, auditPath)
+	if err == nil || len(committed.Policy) != 0 || len(committed.Audit) != 0 {
+		t.Fatal("symlink-substituted policy was exposed")
+	}
 }
 
-func TestOutputBundleCleanupRechecksIdentityAfterCleanupRace(t *testing.T) {
-	base := t.TempDir()
-	bundlePath := filepath.Join(base, "bundle")
+func TestOutputBundleConcurrentSamePathHasOneOwnerWithoutDeadlock(t *testing.T) {
+	policyA, auditA := testBundlePayload(t, "concurrent-a")
+	policyB, auditB := testBundlePayload(t, "concurrent-b")
+	bundlePath := filepath.Join(t.TempDir(), "bundle")
 	policyPath := filepath.Join(bundlePath, "policy.json")
 	auditPath := filepath.Join(bundlePath, "audit.json")
-	stage := ""
-	replaced := false
-	err := writeOutputBundle(policyPath, []byte("policy"), auditPath, []byte("audit"), bundleHooks{
-		checkpoint: func(checkpoint bundleCheckpoint, currentStage string) error {
-			stage = currentStage
-			if checkpoint == bundleAfterWriteAudit {
-				return errors.New("trigger cleanup")
-			}
-			return nil
-		},
-		beforeCleanupRemove: func(index int) error {
-			if index != 0 || replaced {
-				return nil
-			}
-			replaced = true
-			if err := os.Rename(stage, stage+".original"); err != nil {
-				return err
-			}
-			if err := createPrivateDirectory(stage); err != nil {
-				return err
-			}
-			if err := writePrivateBundleFile(filepath.Join(stage, "policy.json"), []byte("foreign-policy")); err != nil {
-				return err
-			}
-			return writePrivateBundleFile(filepath.Join(stage, "audit.json"), []byte("foreign-audit"))
-		},
-	})
-	if err == nil || !replaced {
-		t.Fatalf("cleanup replacement race was not exercised: replaced=%v error=%v", replaced, err)
-	}
-	if got, err := os.ReadFile(filepath.Join(stage, "policy.json")); err != nil || string(got) != "foreign-policy" {
-		t.Fatalf("cleanup changed foreign policy: %q, %v", got, err)
-	}
-	if got, err := os.ReadFile(filepath.Join(stage, "audit.json")); err != nil || string(got) != "foreign-audit" {
-		t.Fatalf("cleanup changed foreign audit: %q, %v", got, err)
-	}
-	assertPathAbsent(t, bundlePath)
-}
-
-func TestOutputBundleCleanupRequiresMatchingOwnerToken(t *testing.T) {
-	base := t.TempDir()
-	paths, err := validateOutputBundlePaths(filepath.Join(base, "bundle", "policy.json"), filepath.Join(base, "bundle", "audit.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var token [stagingTokenBytes]byte
-	copy(token[:], bytes.Repeat([]byte{0x42}, stagingTokenBytes))
-	stage := stagingPathForToken(paths, token)
-	if err := createPrivateDirectory(stage); err != nil {
-		t.Fatal(err)
-	}
-	identity, err := readBundleFileIdentity(stage)
-	if err != nil {
-		t.Fatal(err)
-	}
-	claim := stagingClaim{paths: paths, path: stage, token: token, identity: identity}
-	claim.token[0] ^= 0xff
-	if err := cleanupStagingClaim(claim, bundleHooks{}); err == nil {
-		t.Fatal("cleanup accepted a mismatched owner token")
-	}
-	if info, err := os.Lstat(stage); err != nil || !info.IsDir() {
-		t.Fatalf("token-mismatched staging was removed: %v", err)
-	}
-}
-
-func TestOutputBundleFailureDoesNotExposeStagingIdentity(t *testing.T) {
-	base := t.TempDir()
-	bundlePath := filepath.Join(base, "bundle")
-	stage := ""
-	err := writeOutputBundle(filepath.Join(bundlePath, "policy.json"), []byte("policy-secret"), filepath.Join(bundlePath, "audit.json"), []byte("audit-secret"), bundleHooks{
-		checkpoint: func(checkpoint bundleCheckpoint, currentStage string) error {
-			stage = currentStage
-			if checkpoint == bundleAfterCreateStaging {
-				return errors.New("provider detail " + currentStage)
-			}
-			return nil
-		},
-	})
-	if err == nil {
-		t.Fatal("injected failure was accepted")
-	}
-	for _, value := range []string{stage, filepath.Base(stage), "policy-secret", "audit-secret"} {
-		if value != "" && strings.Contains(err.Error(), value) {
-			t.Fatalf("bundle error leaked private value: %q", err)
-		}
-	}
-}
-
-func TestOutputBundlePartialCleanupInterruptionLeavesQuarantineAndDoesNotBlockNextRun(t *testing.T) {
-	base := t.TempDir()
-	bundlePath := filepath.Join(base, "bundle")
-	policyPath := filepath.Join(bundlePath, "policy.json")
-	auditPath := filepath.Join(bundlePath, "audit.json")
-	stage := ""
-	err := writeOutputBundle(policyPath, []byte("policy"), auditPath, []byte("audit"), bundleHooks{
-		checkpoint: func(checkpoint bundleCheckpoint, currentStage string) error {
-			stage = currentStage
-			if checkpoint == bundleAfterWriteAudit {
-				return errors.New("trigger cleanup")
-			}
-			return nil
-		},
-		beforeCleanupRemove: func(index int) error {
-			if index == 1 {
-				return errors.New("cleanup interrupted")
-			}
-			return nil
-		},
-	})
-	if err == nil {
-		t.Fatal("partial cleanup interruption was accepted")
-	}
-	before := snapshotQuarantine(t, stage)
-	if err := writeOutputBundle(policyPath, []byte("policy"), auditPath, []byte("audit"), bundleHooks{}); err != nil {
-		t.Fatalf("next invocation was blocked by partial quarantine: %v", err)
-	}
-	assertCompleteBundle(t, policyPath, auditPath)
-	after := snapshotQuarantine(t, stage)
-	if !reflect.DeepEqual(before, after) {
-		t.Fatal("next invocation modified partial quarantine")
-	}
-}
-
-func TestOutputBundleConcurrentInvocationsCommitExactlyOneCompletePair(t *testing.T) {
-	base := t.TempDir()
-	bundlePath := filepath.Join(base, "bundle")
-	policyPath := filepath.Join(bundlePath, "policy.json")
-	auditPath := filepath.Join(bundlePath, "audit.json")
-	foreignStage := filepath.Join(base, ".bundle.trustpolicy-staging-"+strings.Repeat("f", 64))
-	if err := os.Mkdir(foreignStage, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	foreignFile := filepath.Join(foreignStage, "foreign.txt")
-	if err := os.WriteFile(foreignFile, []byte("preserve"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ready := make(chan struct{}, 2)
-	release := make(chan struct{})
-	stages := make(chan string, 2)
+	start := make(chan struct{})
+	ownerCreated := make(chan struct{}, 1)
+	releaseOwner := make(chan struct{})
+	var releaseOwnerOnce sync.Once
+	releaseOwnerNow := func() { releaseOwnerOnce.Do(func() { close(releaseOwner) }) }
+	defer releaseOwnerNow()
 	results := make(chan error, 2)
-	var start sync.WaitGroup
-	start.Add(2)
-	for _, pair := range [][2]string{{"policy-a", "audit-a"}, {"policy-b", "audit-b"}} {
+	for _, pair := range [][2][]byte{{policyA, auditA}, {policyB, auditB}} {
 		pair := pair
 		go func() {
-			start.Done()
-			start.Wait()
-			results <- writeOutputBundle(policyPath, []byte(pair[0]), auditPath, []byte(pair[1]), bundleHooks{
-				checkpoint: func(checkpoint bundleCheckpoint, stage string) error {
-					if checkpoint == bundleAfterSyncStaging {
-						stages <- stage
+			<-start
+			results <- writeOutputBundle(policyPath, pair[0], auditPath, pair[1], bundleHooks{
+				checkpoint: func(checkpoint bundleCheckpoint, _ string) error {
+					if checkpoint == bundleAfterCreateDirectory {
+						ownerCreated <- struct{}{}
+						<-releaseOwner
+					}
+					return nil
+				},
+			})
+		}()
+	}
+	close(start)
+	waitSignal(t, ownerCreated, "winner did not acquire directory")
+	loserErr := waitResult(t, results, "loser did not return while winner was paused")
+	if loserErr == nil {
+		t.Fatal("concurrent loser unexpectedly succeeded")
+	}
+	releaseOwnerNow()
+	if winnerErr := waitResult(t, results, "winner did not finish"); winnerErr != nil {
+		t.Fatalf("concurrent winner failed: %v", winnerErr)
+	}
+	committed, err := readCommittedBundle(policyPath, auditPath)
+	if err != nil || !((bytes.Equal(committed.Policy, policyA) && bytes.Equal(committed.Audit, auditA)) || (bytes.Equal(committed.Policy, policyB) && bytes.Equal(committed.Audit, auditB))) {
+		t.Fatalf("concurrent final is missing or mixed: %v", err)
+	}
+}
+
+func TestOutputBundleConcurrentDifferentPathsProceedIndependently(t *testing.T) {
+	base := t.TempDir()
+	ready := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseNow := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseNow()
+	results := make(chan error, 2)
+	paths := make([][2]string, 0, 2)
+	for _, name := range []string{"bundle-a", "bundle-b"} {
+		bundlePath := filepath.Join(base, name)
+		policyPath := filepath.Join(bundlePath, "policy.json")
+		auditPath := filepath.Join(bundlePath, "audit.json")
+		paths = append(paths, [2]string{policyPath, auditPath})
+		policy, audit := testBundlePayload(t, name)
+		go func() {
+			results <- writeOutputBundle(policyPath, policy, auditPath, audit, bundleHooks{
+				checkpoint: func(checkpoint bundleCheckpoint, _ string) error {
+					if checkpoint == bundleAfterCreateDirectory {
 						ready <- struct{}{}
 						<-release
 					}
@@ -622,91 +597,30 @@ func TestOutputBundleConcurrentInvocationsCommitExactlyOneCompletePair(t *testin
 			})
 		}()
 	}
-	<-ready
-	<-ready
-	close(release)
-	firstErr := <-results
-	secondErr := <-results
-	if (firstErr == nil) == (secondErr == nil) {
-		t.Fatalf("concurrent results = %v/%v, want exactly one winner", firstErr, secondErr)
+	waitSignal(t, ready, "first independent owner not ready")
+	waitSignal(t, ready, "second independent owner not ready")
+	releaseNow()
+	if err := waitResult(t, results, "first independent result missing"); err != nil {
+		t.Fatal(err)
 	}
-	firstStage := <-stages
-	secondStage := <-stages
-	if samePath(firstStage, secondStage) {
-		t.Fatal("concurrent invocations shared a staging directory")
+	if err := waitResult(t, results, "second independent result missing"); err != nil {
+		t.Fatal(err)
 	}
-	assertPathAbsent(t, firstStage)
-	assertPathAbsent(t, secondStage)
-	policy, policyErr := os.ReadFile(policyPath)
-	audit, auditErr := os.ReadFile(auditPath)
-	if policyErr != nil || auditErr != nil || !((string(policy) == "policy-a" && string(audit) == "audit-a") || (string(policy) == "policy-b" && string(audit) == "audit-b")) {
-		t.Fatalf("concurrent winner pair is mixed or incomplete: %q/%q errors=%v/%v", policy, audit, policyErr, auditErr)
-	}
-	assertOnlyPolicyAuditEntries(t, policyPath, auditPath)
-	if got, err := os.ReadFile(foreignFile); err != nil || string(got) != "preserve" {
-		t.Fatalf("concurrent loser or winner changed foreign quarantine: %q, %v", got, err)
-	}
-}
-
-func TestOutputBundleFinalReplacementRacePreservesForeignTarget(t *testing.T) {
-	for _, target := range []string{"directory", "symlink"} {
-		t.Run(target, func(t *testing.T) {
-			base := t.TempDir()
-			bundlePath := filepath.Join(base, "bundle")
-			policyPath := filepath.Join(bundlePath, "policy.json")
-			auditPath := filepath.Join(bundlePath, "audit.json")
-			foreignTarget := filepath.Join(base, "foreign-target")
-			if target == "symlink" {
-				if err := os.Mkdir(foreignTarget, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				probe := filepath.Join(base, "symlink-probe")
-				if err := os.Symlink(foreignTarget, probe); err != nil {
-					t.Skip("symlink creation is not permitted")
-				}
-				if err := os.Remove(probe); err != nil {
-					t.Fatal(err)
-				}
-			}
-			stage := ""
-			err := writeOutputBundle(policyPath, []byte("policy"), auditPath, []byte("audit"), bundleHooks{
-				checkpoint: func(checkpoint bundleCheckpoint, currentStage string) error {
-					stage = currentStage
-					if checkpoint != bundleAfterSyncStaging {
-						return nil
-					}
-					if target == "directory" {
-						return os.Mkdir(bundlePath, 0o700)
-					}
-					return os.Symlink(foreignTarget, bundlePath)
-				},
-			})
-			if err == nil {
-				t.Fatal("no-replace commit overwrote a raced final target")
-			}
-			assertPathAbsent(t, stage)
-			info, statErr := os.Lstat(bundlePath)
-			if statErr != nil {
-				t.Fatalf("foreign final target was removed: %v", statErr)
-			}
-			if target == "directory" && !info.IsDir() {
-				t.Fatal("foreign empty directory was replaced")
-			}
-			if target == "symlink" && info.Mode()&os.ModeSymlink == 0 {
-				t.Fatal("foreign symlink was replaced")
-			}
-		})
+	for _, pair := range paths {
+		if _, err := readCommittedBundle(pair[0], pair[1]); err != nil {
+			t.Fatalf("independent path did not commit: %v", err)
+		}
 	}
 }
 
 func bundleTestCheckpoints() []bundleCheckpoint {
 	return []bundleCheckpoint{
-		bundleAfterCreateStaging,
+		bundleAfterCreateDirectory,
 		bundleAfterWritePolicy,
 		bundleAfterWriteAudit,
-		bundleAfterSyncStaging,
-		bundleAfterCommit,
-		bundleAfterVerifyFinal,
+		bundleAfterSyncDataDirectory,
+		bundleAfterWriteCommitMarker,
+		bundleAfterSyncCommittedDirectory,
 		bundleAfterSyncParent,
 	}
 }
@@ -727,52 +641,31 @@ func runBundleCrashHelper(t testing.TB, checkpoint bundleCheckpoint, policyPath,
 	}
 }
 
-func validStagingBasename(name, bundleName string) bool {
-	prefix := "." + bundleName + ".trustpolicy-staging-"
-	if !strings.HasPrefix(name, prefix) {
-		return false
-	}
-	token := strings.TrimPrefix(name, prefix)
-	decoded, err := hex.DecodeString(token)
-	return err == nil && len(decoded) == 32 && strings.ToLower(token) == token
+type bundlePathSnapshot struct {
+	mode    os.FileMode
+	target  string
+	entries map[string]string
 }
 
-func listBundleStages(t testing.TB, parent, bundleName string) []string {
+func snapshotBundlePath(t testing.TB, path string) bundlePathSnapshot {
 	t.Helper()
-	entries, err := os.ReadDir(parent)
+	info, err := os.Lstat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	prefix := "." + bundleName + ".trustpolicy-staging-"
-	var result []string
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), prefix) {
-			result = append(result, filepath.Join(parent, entry.Name()))
+	snapshot := bundlePathSnapshot{mode: info.Mode(), entries: make(map[string]string)}
+	if info.Mode()&os.ModeSymlink != 0 {
+		snapshot.target, err = os.Readlink(path)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	return result
-}
-
-type quarantineSnapshot struct {
-	identity bundleFileIdentity
-	entries  map[string]string
-}
-
-func snapshotQuarantine(t testing.TB, path string) quarantineSnapshot {
-	t.Helper()
-	identity, err := readBundleFileIdentity(path)
-	if err != nil {
-		t.Fatal(err)
+		return snapshot
 	}
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot := quarantineSnapshot{identity: identity, entries: make(map[string]string, len(entries))}
 	for _, entry := range entries {
-		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
-			t.Fatalf("quarantine contains unsafe entry %q", entry.Name())
-		}
 		data, err := os.ReadFile(filepath.Join(path, entry.Name()))
 		if err != nil {
 			t.Fatal(err)
@@ -780,6 +673,104 @@ func snapshotQuarantine(t testing.TB, path string) quarantineSnapshot {
 		snapshot.entries[entry.Name()] = string(data)
 	}
 	return snapshot
+}
+
+func testBundlePayload(t testing.TB, label string) ([]byte, []byte) {
+	t.Helper()
+	candidateBytes, err := os.ReadFile(filepath.Join("..", "..", "testdata", "trustpolicy", "epoch-1-candidate.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := trustpolicy.ParseCandidate(candidateBytes, trustpolicy.CandidateOptions{
+		ExpectedPreviousEpoch: 0,
+		Now:                   time.Date(2029, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer := newCommandSigner(t)
+	labelDigest := sha256.Sum256([]byte(label))
+	signed, audit, err := trustpolicy.Sign(context.Background(), signer, candidate, trustpolicy.SignOptions{
+		KeyID:                 "kms-key-id",
+		ExpectedPreviousEpoch: 0,
+		ExpectedSPKISHA256:    signer.digest,
+		Now:                   time.Date(2029, 1, 2, 3, 4, 5, 0, time.UTC),
+		CIActor:               "bundle-" + hex.EncodeToString(labelDigest[:4]),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditBytes, err := json.Marshal(audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signed.Policy, auditBytes
+}
+
+func testBundlePayloadPolicy(t testing.TB) []byte {
+	t.Helper()
+	policy, _ := testBundlePayload(t, "policy-only")
+	return policy
+}
+
+func assertCommittedBundleEntries(t testing.TB, bundlePath, policyName, auditName string) {
+	t.Helper()
+	entries, err := os.ReadDir(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{policyName: true, auditName: true, trustpolicy.BundleCommitFileName: true}
+	if len(entries) != len(want) {
+		t.Fatalf("bundle entries = %v, want exact committed triplet", entries)
+	}
+	for _, entry := range entries {
+		if !want[entry.Name()] || entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			t.Fatalf("unexpected committed entry: %v", entry)
+		}
+	}
+}
+
+func mustRead(t testing.TB, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func mustOverwrite(t testing.TB, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustRemove(t testing.TB, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitSignal(t testing.TB, channel <-chan struct{}, message string) {
+	t.Helper()
+	select {
+	case <-channel:
+	case <-time.After(5 * time.Second):
+		t.Fatal(message)
+	}
+}
+
+func waitResult(t testing.TB, channel <-chan error, message string) error {
+	t.Helper()
+	select {
+	case err := <-channel:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatal(message)
+		return errCommand
+	}
 }
 
 func commandEnvironment(digest string) environmentLookup {
@@ -799,24 +790,6 @@ func assertPathAbsent(t testing.TB, path string) {
 	t.Helper()
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("path %q exists or could not be checked: %v", path, err)
-	}
-}
-
-func assertCompleteBundle(t testing.TB, policyPath, auditPath string) {
-	t.Helper()
-	policy, policyErr := os.ReadFile(policyPath)
-	audit, auditErr := os.ReadFile(auditPath)
-	if policyErr != nil || auditErr != nil || string(policy) != "policy" || string(audit) != "audit" {
-		t.Fatalf("bundle is not complete: policy=%q/%v audit=%q/%v", policy, policyErr, audit, auditErr)
-	}
-	assertOnlyPolicyAuditEntries(t, policyPath, auditPath)
-}
-
-func assertOnlyPolicyAuditEntries(t testing.TB, policyPath, auditPath string) {
-	t.Helper()
-	entries, err := os.ReadDir(filepath.Dir(policyPath))
-	if err != nil || len(entries) != 2 || entries[0].Name() != filepath.Base(auditPath) || entries[1].Name() != filepath.Base(policyPath) {
-		t.Fatalf("bundle contains entries beyond the policy/audit pair: entries=%v error=%v", entries, err)
 	}
 }
 

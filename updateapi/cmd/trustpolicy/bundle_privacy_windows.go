@@ -72,13 +72,9 @@ func createPrivateDirectory(path string) error {
 	createErr := createWindowsBundleDirectory(path, &attributes)
 	releaseErr := localFreeBundlePointer(descriptor)
 	if createErr != nil || releaseErr != nil {
-		if createErr == nil {
-			_ = os.Remove(path)
-		}
 		return errCommand
 	}
 	if err := verifyPrivateDirectory(path); err != nil {
-		_ = os.Remove(path)
 		return errCommand
 	}
 	return nil
@@ -173,16 +169,32 @@ func readBundleFileIdentity(path string) (bundleFileIdentity, error) {
 	if err != nil {
 		return bundleFileIdentity{}, errCommand
 	}
-	var information syscall.ByHandleFileInformation
-	identityErr := syscall.GetFileInformationByHandle(syscall.Handle(directory.Fd()), &information)
+	identity, identityErr := readOpenBundleFileIdentity(directory)
 	closeErr := directory.Close()
 	if identityErr != nil || closeErr != nil {
+		return bundleFileIdentity{}, errCommand
+	}
+	return identity, nil
+}
+
+func readOpenBundleFileIdentity(file *os.File) (bundleFileIdentity, error) {
+	var information syscall.ByHandleFileInformation
+	if err := syscall.GetFileInformationByHandle(syscall.Handle(file.Fd()), &information); err != nil {
 		return bundleFileIdentity{}, errCommand
 	}
 	return bundleFileIdentity{
 		volume: uint64(information.VolumeSerialNumber),
 		file:   uint64(information.FileIndexHigh)<<32 | uint64(information.FileIndexLow),
 	}, nil
+}
+
+func bundlePathIsReparsePoint(path string) bool {
+	pointer, err := syscall.UTF16PtrFromString(windowsBundlePath(path))
+	if err != nil {
+		return true
+	}
+	attributes, err := syscall.GetFileAttributes(pointer)
+	return err != nil || attributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 func currentBundleUserSID() (string, error) {

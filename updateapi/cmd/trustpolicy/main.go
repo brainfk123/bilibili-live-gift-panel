@@ -119,6 +119,9 @@ func run(ctx context.Context, args []string, lookup environmentLookup, factory s
 	if err := writeOutputBundle(policyAbsolute, signed.Policy, auditAbsolute, auditBytes, bundleHooks{}); err != nil {
 		return errCommand
 	}
+	if _, err := readCommittedBundle(policyAbsolute, auditAbsolute); err != nil {
+		return errCommand
+	}
 	_, _ = fmt.Fprintln(output, "publisher policy signed")
 	return nil
 }

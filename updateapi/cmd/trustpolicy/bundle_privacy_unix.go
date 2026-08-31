@@ -12,11 +12,9 @@ func createPrivateDirectory(path string) error {
 		return errCommand
 	}
 	if err := os.Chmod(path, 0o700); err != nil {
-		_ = os.Remove(path)
 		return errCommand
 	}
 	if err := verifyPrivateDirectory(path); err != nil {
-		_ = os.Remove(path)
 		return errCommand
 	}
 	return nil
@@ -39,11 +37,30 @@ func readBundleFileIdentity(path string) (bundleFileIdentity, error) {
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
 		return bundleFileIdentity{}, errCommand
 	}
+	file, err := os.Open(path)
+	if err != nil {
+		return bundleFileIdentity{}, errCommand
+	}
+	identity, identityErr := readOpenBundleFileIdentity(file)
+	closeErr := file.Close()
+	if identityErr != nil || closeErr != nil {
+		return bundleFileIdentity{}, errCommand
+	}
+	return identity, nil
+}
+
+func readOpenBundleFileIdentity(file *os.File) (bundleFileIdentity, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return bundleFileIdentity{}, errCommand
+	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return bundleFileIdentity{}, errCommand
 	}
 	return bundleFileIdentity{volume: uint64(stat.Dev), file: uint64(stat.Ino)}, nil
 }
+
+func bundlePathIsReparsePoint(string) bool { return false }
 
 func isUnsupportedBundleDirectorySyncError(error) bool { return false }
