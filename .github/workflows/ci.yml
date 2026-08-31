@@ -60,9 +60,10 @@ jobs:
       - run: npm run typecheck
       - run: npm run build:ui
       - run: npm run prepare:go-assets
+      - run: npm run verify:go-linux-compile
       - run: npm run build:hosted
-      - run: go -C goserver test ./... -race -count=1
-      - run: go -C goserver vet ./...
+      - run: go -C goserver test -race -count=1 ./cmd/hosted ./internal/...
+      - run: go -C goserver vet ./cmd/hosted ./internal/...
       - run: npm run test:update-api
       - run: go -C goserver build -trimpath -o "${{ runner.temp }}/gift-panel-hosted" ./cmd/hosted
 
