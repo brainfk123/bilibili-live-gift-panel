@@ -37,7 +37,7 @@ func TestRunnerBridgeDiscoveryUsesByTagAndForwardsLegacyChannel(t *testing.T) {
 	}
 }
 
-func TestRunnerChannelNeverConsumesOtherChannelStateETag(t *testing.T) {
+func TestRunnerChannelNeverAccepts304FromOtherChannelState(t *testing.T) {
 	tests := []struct {
 		name    string
 		options RunOptions
@@ -54,10 +54,10 @@ func TestRunnerChannelNeverConsumesOtherChannelStateETag(t *testing.T) {
 			fixture.state.loaded.Tag = test.prior
 
 			result, err := fixture.runner().Run(context.Background(), test.options)
-			if err != nil {
-				t.Fatal(err)
+			if err == nil || StageOf(err) != StageDiscovery {
+				t.Fatalf("cross-channel 304 result=%+v error=%v stage=%q", result, err, StageOf(err))
 			}
-			if fixture.source.etag != "" || !result.StateInvalid {
+			if fixture.source.etag != "" || result.NotModified {
 				t.Fatalf("cross-channel discovery ETag=%q result=%+v", fixture.source.etag, result)
 			}
 		})
@@ -81,24 +81,53 @@ func TestRunnerRejectsCrossChannelOptionsBeforeStateOrDiscovery(t *testing.T) {
 	}
 }
 
-// Mutation caught: forwarding an untrusted ETag after corrupt state, or doing work after a 304 response.
-func TestRunnerTreatsCorruptStateAsEmptyCacheAndStopsOnNotModified(t *testing.T) {
+// Mutation caught: treating a 304 without a valid conditional state as success can permanently suppress repair.
+func TestRunnerRejects304AfterDiscardingCorruptStateAndAllowsRetry(t *testing.T) {
 	fixture := newRunnerFixture(t)
 	fixture.state.loadErr = fmt.Errorf("%w: unsafe path C:/secret/state.json", ErrInvalidState)
 	fixture.source.result = LatestResult{NotModified: true}
 
 	result, err := fixture.runner().Run(context.Background(), RunOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result.NotModified || !result.StateInvalid {
-		t.Fatalf("Run() result = %+v, want not-modified with invalid-state signal", result)
+	if err == nil || StageOf(err) != StageDiscovery {
+		t.Fatalf("Run() result=%+v error=%v stage=%q, want failed closed discovery", result, err, StageOf(err))
 	}
 	if fixture.source.etag != "" {
 		t.Fatalf("Latest() ETag = %q, want empty after invalid state", fixture.source.etag)
 	}
 	if len(fixture.fetcher.specs) != 0 || fixture.factoryCalls != 0 || fixture.state.saveCalls != 0 {
-		t.Fatalf("304 side effects: downloads=%d factory=%d saves=%d", len(fixture.fetcher.specs), fixture.factoryCalls, fixture.state.saveCalls)
+		t.Fatalf("rejected 304 side effects: downloads=%d factory=%d saves=%d", len(fixture.fetcher.specs), fixture.factoryCalls, fixture.state.saveCalls)
+	}
+
+	fixture.source.result = LatestResult{ETag: `"release-etag"`, Release: fixture.release}
+	retry, err := fixture.runner().Run(context.Background(), RunOptions{})
+	if err != nil {
+		t.Fatalf("retry after rejected 304: %v", err)
+	}
+	if !retry.StateInvalid || retry.NotModified || fixture.publisher.calls != 1 || fixture.state.saveCalls != 1 {
+		t.Fatalf("retry result=%+v publishes=%d saves=%d", retry, fixture.publisher.calls, fixture.state.saveCalls)
+	}
+}
+
+func TestRunnerRejects304WithoutMatchingPriorStateForLatestAndByTag(t *testing.T) {
+	tests := []struct {
+		name    string
+		options RunOptions
+	}{
+		{name: "latest without state", options: RunOptions{Channel: release.ChannelStable}},
+		{name: "by tag without state", options: RunOptions{Channel: release.ChannelLegacyRushRush, Tag: "v0.4.11"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRunnerFixture(t)
+			fixture.source.result = LatestResult{NotModified: true}
+			result, err := fixture.runner().Run(context.Background(), test.options)
+			if err == nil || StageOf(err) != StageDiscovery || result.NotModified {
+				t.Fatalf("Run() result=%+v error=%v stage=%q", result, err, StageOf(err))
+			}
+			if fixture.source.etag != "" {
+				t.Fatalf("discovery ETag = %q, want empty", fixture.source.etag)
+			}
+		})
 	}
 }
 

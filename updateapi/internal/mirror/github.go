@@ -115,6 +115,9 @@ func (source *GitHubReleaseSource) get(ctx context.Context, endpoint, etag strin
 	defer response.Body.Close()
 
 	if response.StatusCode == http.StatusNotModified {
+		if etag == "" {
+			return LatestResult{}, errors.New("GitHub returned not modified without a conditional ETag")
+		}
 		return LatestResult{NotModified: true}, nil
 	}
 	if response.StatusCode != http.StatusOK {

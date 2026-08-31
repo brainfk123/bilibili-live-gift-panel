@@ -144,6 +144,9 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunRe
 		return RunResult{StateInvalid: stateInvalid}, runnerFailure(StageDiscovery, "", err)
 	}
 	if latest.NotModified {
+		if prior.ETag == "" {
+			return RunResult{StateInvalid: stateInvalid}, runnerFailure(StageDiscovery, "", errors.New("not-modified discovery has no matching prior state"))
+		}
 		return RunResult{NotModified: true, StateInvalid: stateInvalid}, nil
 	}
 

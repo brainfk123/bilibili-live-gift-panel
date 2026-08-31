@@ -253,7 +253,7 @@ func TestLatestReadsOnlySelectedChannelPointer(t *testing.T) {
 			if key != "channels/legacy-rushrush/latest.json" || maxBytes != 64<<10 {
 				t.Fatalf("Get(%q, %d), want legacy pointer and 64 KiB", key, maxBytes)
 			}
-			return validManifest(t), "legacy-etag", nil
+			return validManifestForChannel(t, release.ChannelLegacyRushRush, "v0.4.11"), "legacy-etag", nil
 		},
 		presign: func(string, time.Duration) (string, error) { return "https://cos.example.invalid/legacy", nil },
 	}
@@ -262,8 +262,59 @@ func TestLatestReadsOnlySelectedChannelPointer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.TagName != "v0.4.4" || len(store.gets) != 1 {
+	if got.TagName != "v0.4.11" || len(store.gets) != 1 {
 		t.Fatalf("Latest() = %#v, reads=%#v", got, store.gets)
+	}
+}
+
+func TestLatestRejectsAndDoesNotCachePointerManifestForAnotherChannel(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested release.Channel
+		body      func(*testing.T) []byte
+	}{
+		{
+			name:      "schema 1 stable under legacy pointer",
+			requested: release.ChannelLegacyRushRush,
+			body:      validManifest,
+		},
+		{
+			name:      "schema 2 legacy under stable pointer",
+			requested: release.ChannelStable,
+			body: func(t *testing.T) []byte {
+				return validManifestForChannel(t, release.ChannelLegacyRushRush, "v0.4.11")
+			},
+		},
+		{
+			name:      "schema 2 stable under legacy pointer",
+			requested: release.ChannelLegacyRushRush,
+			body: func(t *testing.T) []byte {
+				return validManifestForChannel(t, release.ChannelStable, "v1.2.3")
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := test.body(t)
+			store := &fakeStore{
+				get: func(string, int64) ([]byte, string, error) { return body, "etag", nil },
+				presign: func(string, time.Duration) (string, error) {
+					t.Fatal("wrong-channel manifest reached download signing")
+					return "", nil
+				},
+			}
+			sut := service.New(store, time.Now)
+			for attempt := 0; attempt < 2; attempt++ {
+				_, err := sut.Latest(context.Background(), test.requested)
+				if !errors.Is(err, service.ErrReleaseInvalid) || service.InvalidReason(err) != "manifest_channel" {
+					t.Fatalf("attempt %d error=%v reason=%q", attempt, err, service.InvalidReason(err))
+				}
+			}
+			if len(store.gets) != 2 {
+				t.Fatalf("storage reads=%d, want 2 rejected uncached reads", len(store.gets))
+			}
+		})
 	}
 }
 
@@ -345,7 +396,11 @@ func TestChannelRefreshesDoNotBlockEachOther(t *testing.T) {
 			if test.stale {
 				blockedKey = ""
 			}
-			store := newBlockingStore(validManifest(t), blockedKey)
+			store := newChannelBlockingStore(
+				validManifest(t),
+				validManifestForChannel(t, release.ChannelLegacyRushRush, "v0.4.11"),
+				blockedKey,
+			)
 			defer store.unblock()
 			sut := service.New(store, func() time.Time { return clock })
 			if test.stale {
@@ -454,7 +509,7 @@ func TestPublisherPolicyDoesNotWaitForBlockedChannelRefresh(t *testing.T) {
 }
 
 type blockingStore struct {
-	manifest    []byte
+	manifests   map[string][]byte
 	blockedKey  string
 	started     chan struct{}
 	release     chan struct{}
@@ -465,9 +520,17 @@ type blockingStore struct {
 }
 
 func newBlockingStore(manifest []byte, blockedKey string) *blockingStore {
+	return newChannelBlockingStore(manifest, nil, blockedKey)
+}
+
+func newChannelBlockingStore(stable, legacy []byte, blockedKey string) *blockingStore {
 	return &blockingStore{
-		manifest: append([]byte(nil), manifest...), blockedKey: blockedKey,
-		started: make(chan struct{}), release: make(chan struct{}), gets: make(map[string]int),
+		manifests: map[string][]byte{
+			"channels/stable/latest.json":          append([]byte(nil), stable...),
+			"channels/legacy-rushrush/latest.json": append([]byte(nil), legacy...),
+		},
+		blockedKey: blockedKey,
+		started:    make(chan struct{}), release: make(chan struct{}), gets: make(map[string]int),
 	}
 }
 
@@ -486,7 +549,7 @@ func (store *blockingStore) Get(ctx context.Context, key string, _ int64) ([]byt
 	if key == "trust/publisher/latest.json" {
 		return []byte(`{"signed":{},"signatures":[]}`), "policy-etag", nil
 	}
-	return append([]byte(nil), store.manifest...), "manifest-etag", nil
+	return append([]byte(nil), store.manifests[key]...), "manifest-etag", nil
 }
 
 func (store *blockingStore) PresignGet(context.Context, string, time.Duration) (string, error) {
@@ -576,6 +639,27 @@ func validManifest(t *testing.T) []byte {
 			SHA256:    strings.Repeat("a", 64),
 		},
 		ChangelogObjectKey: "releases/v0.4.4/gift-panel-changelog.json",
+	})
+	if err != nil {
+		t.Fatal(fmt.Errorf("marshal manifest: %w", err))
+	}
+	return body
+}
+
+func validManifestForChannel(t *testing.T, channel release.Channel, tag string) []byte {
+	t.Helper()
+	body, err := json.Marshal(release.ChannelManifest{
+		SchemaVersion: 2,
+		Channel:       channel,
+		TagName:       tag,
+		PublishedAt:   "2026-08-14T12:00:00Z",
+		Asset: release.AssetManifest{
+			Name:      "gift-panel-windows-x64.exe",
+			ObjectKey: "releases/" + tag + "/gift-panel-windows-x64.exe",
+			Size:      12345678,
+			SHA256:    strings.Repeat("a", 64),
+		},
+		ChangelogObjectKey: "releases/" + tag + "/gift-panel-changelog.json",
 	})
 	if err != nil {
 		t.Fatal(fmt.Errorf("marshal manifest: %w", err))

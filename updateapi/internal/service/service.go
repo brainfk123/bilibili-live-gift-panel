@@ -183,6 +183,12 @@ func (service *Service) manifest(ctx context.Context, channel release.Channel) (
 		}
 		return release.ChannelManifest{}, releaseInvalid(string(release.ValidationCodeOf(err)), err)
 	}
+	if err := manifest.ValidateForChannel(channel); err != nil {
+		if cached, ok := service.lastValidManifest(channel); ok {
+			return cached, nil
+		}
+		return release.ChannelManifest{}, releaseInvalid(string(release.ValidationCodeOf(err)), err)
+	}
 
 	service.cacheMu.Lock()
 	service.cache[channel] = manifestCache{manifest: manifest, fetchedAt: now, valid: true}

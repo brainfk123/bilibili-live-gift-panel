@@ -135,6 +135,36 @@ func TestGitHubReleaseSourceByTag304ReturnsNoMetadata(t *testing.T) {
 	}
 }
 
+func TestGitHubReleaseSourceRejects304WithoutConditionalETag(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("If-None-Match") != "" {
+			t.Fatalf("unexpected If-None-Match = %q", request.Header.Get("If-None-Match"))
+		}
+		writer.WriteHeader(http.StatusNotModified)
+	}))
+	defer server.Close()
+
+	tests := []struct {
+		name string
+		call func(*GitHubReleaseSource) (LatestResult, error)
+	}{
+		{name: "latest", call: func(source *GitHubReleaseSource) (LatestResult, error) {
+			return source.Latest(context.Background(), "")
+		}},
+		{name: "by tag", call: func(source *GitHubReleaseSource) (LatestResult, error) {
+			return source.ByTag(context.Background(), "v0.4.11", "")
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := test.call(newGitHubReleaseSource(server.Client(), server.URL))
+			if err == nil {
+				t.Fatalf("304 without ETag returned success: %#v", result)
+			}
+		})
+	}
+}
+
 func TestGitHubReleaseSourceLatestRejectsUntrustedRelease(t *testing.T) {
 	tests := []struct {
 		name   string
