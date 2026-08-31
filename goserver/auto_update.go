@@ -645,28 +645,14 @@ func (updater *autoUpdater) InstallOnExit(restart bool) error {
 	if pending == nil {
 		return nil
 	}
-	normalized, migrated, metadataErr := normalizePendingUpdateMetadata(*pending)
-	if metadataErr == nil && migrated {
-		metadataErr = updater.writePendingMetadata(normalized)
-	}
+	validated, metadataErr := readPendingUpdateMetadata(updater.metadataPath(), updater.trustStore != nil)
 	if metadataErr != nil {
-		resultErr := boundedUpdateResult(metadataErr, "pending_verification_invalid")
-		logUpdateResult(resultErr)
-		if cleanupErr := updater.cleanupPendingUpdate(*pending); cleanupErr != nil {
-			logUpdateResult(updateResultError("artifact_cleanup_failed"))
-			return updateResultError("artifact_cleanup_failed")
-		}
-		updater.mu.Lock()
-		updater.pending = nil
-		updater.mu.Unlock()
-		return resultErr
+		return updater.discardPendingUpdateAfterDefinitiveFailure(*pending, metadataErr, "pending_verification_invalid")
 	}
-	if migrated {
-		pending = &normalized
-		updater.mu.Lock()
-		updater.pending = pending
-		updater.mu.Unlock()
-	}
+	pending = &validated
+	updater.mu.Lock()
+	updater.pending = pending
+	updater.mu.Unlock()
 	if pending.Verification.Provenance == pendingVerificationLegacyMigrated || pending.Verification.Provenance == pendingVerificationLegacyCompatibility {
 		if updater.trustStore != nil {
 			if err := ensurePendingUpdateEnrollmentFloor(updater.metadataPath()); err != nil {
@@ -685,20 +671,23 @@ func (updater *autoUpdater) InstallOnExit(restart bool) error {
 		verificationErr = verifyPendingExecutable(*pending, verifyExecutable)
 	}
 	if verificationErr != nil {
-		logPendingUpdateDiagnostic(*pending, "待安装更新执行前安全校验失败", verificationErr, "artifact_verification_failed")
-		cleanupErr := updater.cleanupPendingUpdateForRetry(*pending)
-		if !errors.Is(cleanupErr, errPendingExecutableCleanup) {
-			updater.mu.Lock()
-			updater.pending = nil
-			updater.mu.Unlock()
+		if pendingAllowsRetryPreservingCleanup(*pending) {
+			logPendingUpdateDiagnostic(*pending, "待安装更新执行前安全校验失败", verificationErr, "artifact_verification_failed")
+			cleanupErr := updater.cleanupPendingUpdateForRetry(*pending)
+			if !errors.Is(cleanupErr, errPendingExecutableCleanup) {
+				updater.mu.Lock()
+				updater.pending = nil
+				updater.mu.Unlock()
+			}
+			if cleanupErr != nil {
+				logPendingUpdateDiagnostic(*pending, "待安装更新拒绝后清理失败", cleanupErr, "artifact_cleanup_failed")
+				updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
+				return errors.New("待安装更新清理失败，已拒绝执行")
+			}
+			updater.setStatus("error", pending.Version, "待安装更新安全校验失败，已拒绝执行。", 0, false)
+			return errors.New("待安装更新安全校验失败，已拒绝执行")
 		}
-		if cleanupErr != nil {
-			logPendingUpdateDiagnostic(*pending, "待安装更新拒绝后清理失败", cleanupErr, "artifact_cleanup_failed")
-			updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
-			return errors.New("待安装更新清理失败，已拒绝执行")
-		}
-		updater.setStatus("error", pending.Version, "待安装更新安全校验失败，已拒绝执行。", 0, false)
-		return errors.New("待安装更新安全校验失败，已拒绝执行")
+		return updater.discardPendingUpdateAfterDefinitiveFailure(*pending, verificationErr, "artifact_verification_failed")
 	}
 	if err := updater.preparePendingInstall(); err != nil {
 		logPendingUpdateDiagnostic(*pending, "启动更新替换器前残留文件清理失败", err, "artifact_cleanup_failed")
@@ -729,6 +718,29 @@ func (updater *autoUpdater) InstallOnExit(restart bool) error {
 		return errors.New("启动更新替换器失败")
 	}
 	return nil
+}
+
+func pendingAllowsRetryPreservingCleanup(pending pendingUpdate) bool {
+	if !pending.legacyDiagnosticsApproved || pending.SchemaVersion != pendingUpdateSchemaVersion {
+		return false
+	}
+	return pending.Verification.Provenance == pendingVerificationLegacyMigrated || pending.Verification.Provenance == pendingVerificationLegacyCompatibility
+}
+
+func (updater *autoUpdater) discardPendingUpdateAfterDefinitiveFailure(pending pendingUpdate, primary error, fallback string) error {
+	resultErr := boundedUpdateResult(primary, fallback)
+	cleanupErr := updater.cleanupPendingUpdate(pending)
+	updater.mu.Lock()
+	updater.pending = nil
+	updater.mu.Unlock()
+	logUpdateResult(resultErr)
+	if cleanupErr != nil {
+		logUpdateResult(updateResultError("artifact_cleanup_failed"))
+		updater.setStatus("error", pending.Version, "待安装更新安全校验失败，需要重新下载；残留文件清理失败。", 0, false)
+		return resultErr
+	}
+	updater.setStatus("error", pending.Version, "待安装更新安全校验失败，需要重新下载。", 0, false)
+	return resultErr
 }
 
 func (updater *autoUpdater) preparePendingInstall() error {
