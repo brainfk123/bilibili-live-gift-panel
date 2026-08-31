@@ -26,12 +26,6 @@ const (
 	updateChannelLegacyRushRush updateChannel = "legacy-rushrush"
 )
 
-type updateCertificateIdentity struct {
-	Country        string
-	Organization   string
-	OrganizationID string
-}
-
 type updateArtifactIdentity struct {
 	Tag         string
 	Channel     updateChannel

@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,15 +19,15 @@ import (
 	"time"
 )
 
-const authenticodePowerShellScript = `& { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $signature = Get-AuthenticodeSignature -LiteralPath $args[0]; $subject = ''; if ($null -ne $signature.SignerCertificate) { $subject = $signature.SignerCertificate.Subject }; [pscustomobject]@{status=$signature.Status.ToString();subject=$subject} | ConvertTo-Json -Compress }`
+const authenticodePowerShellScript = `& { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $signature = Get-AuthenticodeSignature -LiteralPath $args[0]; [pscustomobject]@{status=[string]$signature.Status;certificateDerBase64=if ($null -eq $signature.SignerCertificate) { "" } else { [Convert]::ToBase64String($signature.SignerCertificate.RawData) }} | ConvertTo-Json -Compress }`
 const authenticodeVerificationTimeout = 30 * time.Second
 const authenticodeOutputMaxBytes = 16 << 10
 
-type authenticodeCommandRunner func(context.Context, string, ...string) ([]byte, error)
+type powershellRunner func(string) ([]byte, error)
 
-type authenticodeQueryResult struct {
-	Status  string `json:"status"`
-	Subject string `json:"subject"`
+type authenticodeInspection struct {
+	Status               string `json:"status"`
+	CertificateDERBase64 string `json:"certificateDerBase64"`
 }
 
 type boundedAuthenticodeOutput struct {
@@ -54,13 +55,29 @@ func (output *boundedAuthenticodeOutput) Write(data []byte) (int, error) {
 }
 
 func verifyAuthenticodePublisher(path, expectedSubject string) error {
+	_ = path
+	_ = expectedSubject
+	return errors.New("旧版发布者 Subject 比对已停用：需要结构化签名策略授权")
+}
+
+func inspectAuthenticode(path string) (inspectedUpdateCertificate, error) {
 	powershell, err := systemWindowsPowerShellPath()
 	if err != nil {
-		return err
+		return inspectedUpdateCertificate{}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), authenticodeVerificationTimeout)
 	defer cancel()
-	return verifyAuthenticodePublisherWithRunner(ctx, path, expectedSubject, powershell, runAuthenticodeCommand)
+	return inspectAuthenticodeWithRunner(path, func(path string) ([]byte, error) {
+		return runAuthenticodeCommand(
+			ctx,
+			powershell,
+			"-NoProfile",
+			"-NonInteractive",
+			"-ExecutionPolicy", "Bypass",
+			"-Command", authenticodePowerShellScript,
+			path,
+		)
+	})
 }
 
 func systemWindowsPowerShellPath() (string, error) {
@@ -79,44 +96,34 @@ func systemWindowsPowerShellPath() (string, error) {
 	return powershell, nil
 }
 
-func verifyAuthenticodePublisherWithRunner(ctx context.Context, path, expectedSubject, powershell string, runner authenticodeCommandRunner) error {
-	if expectedSubject == "" {
-		return errors.New("预期 Authenticode 发布者为空")
-	}
-	output, err := runner(
-		ctx,
-		powershell,
-		"-NoProfile",
-		"-NonInteractive",
-		"-ExecutionPolicy", "Bypass",
-		"-Command", authenticodePowerShellScript,
-		path,
-	)
+func inspectAuthenticodeWithRunner(path string, run powershellRunner) (inspectedUpdateCertificate, error) {
+	output, err := run(path)
 	if err != nil {
-		return fmt.Errorf("执行 Authenticode 验证失败：%w", err)
+		return inspectedUpdateCertificate{}, fmt.Errorf("执行 Authenticode 验证失败：%w", err)
 	}
 	output = bytes.TrimSpace(output)
 	output = bytes.TrimPrefix(output, []byte{0xef, 0xbb, 0xbf})
 	decoder := json.NewDecoder(bytes.NewReader(output))
 	decoder.DisallowUnknownFields()
-	var result authenticodeQueryResult
+	var result authenticodeInspection
 	if err := decoder.Decode(&result); err != nil {
-		return fmt.Errorf("解析 Authenticode JSON 失败：%w", err)
+		return inspectedUpdateCertificate{}, fmt.Errorf("解析 Authenticode JSON 失败：%w", err)
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return errors.New("解析 Authenticode JSON 失败：包含额外数据")
+		return inspectedUpdateCertificate{}, errors.New("解析 Authenticode JSON 失败：包含额外数据")
 	}
 	if result.Status != "Valid" {
-		return fmt.Errorf("Authenticode 签名状态为 %q，预期 Valid", result.Status)
+		return inspectedUpdateCertificate{}, fmt.Errorf("Authenticode 签名状态为 %q，预期 Valid", result.Status)
 	}
-	if result.Subject == "" {
-		return errors.New("Authenticode 签名缺少发布者证书")
+	if result.CertificateDERBase64 == "" {
+		return inspectedUpdateCertificate{}, errors.New("Authenticode 签名缺少发布者证书")
 	}
-	if result.Subject != expectedSubject {
-		return fmt.Errorf("Authenticode 发布者不匹配：得到 %q", result.Subject)
+	der, err := base64.StdEncoding.Strict().DecodeString(result.CertificateDERBase64)
+	if err != nil {
+		return inspectedUpdateCertificate{}, fmt.Errorf("解析 Authenticode 证书 Base64 失败：%w", err)
 	}
-	return nil
+	return parseUpdateSigningCertificate(der)
 }
 
 func newAuthenticodeCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
