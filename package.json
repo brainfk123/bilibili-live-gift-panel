@@ -26,6 +26,8 @@
     "test": "vitest run",
     "test:ci-scope": "vitest run tests/ci-scope.test.ts",
     "ci:scope": "node scripts/ci-scope.mjs",
+    "test:ci-gate": "vitest run tests/ci-gate.test.ts",
+    "ci:gate": "node scripts/ci-gate.mjs",
     "test:hosted": "vitest run tests/hosted-build.test.ts",
     "typecheck": "tsc --noEmit"
   },
