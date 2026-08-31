@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -24,6 +23,7 @@ const (
 	maxUpdateTrustCacheBytes = 512 << 10
 	maxUpdateTrustSources    = 4
 	maxUpdateTrustSourceURL  = 4096
+	maxUpdateTrustSourceWait = 15 * time.Second
 )
 
 type updateTrustSource struct {
@@ -38,7 +38,7 @@ type updateTrustStore struct {
 	Client         *http.Client
 	Now            func() time.Time
 	Rename         func(string, string) error
-	mu             sync.Mutex
+	SourceTimeout  time.Duration
 }
 
 type updateTrustPolicyMode string
@@ -115,11 +115,17 @@ const (
 )
 
 func (s *updateTrustStore) Resolve(ctx context.Context, sources ...updateTrustSource) (resolvedUpdateTrustPolicy, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if len(sources) > maxUpdateTrustSources {
 		return resolvedUpdateTrustPolicy{}, policyError("policy_sources_invalid")
 	}
+	if strings.TrimSpace(s.CacheDir) == "" {
+		return resolvedUpdateTrustPolicy{}, policyError("policy_cache_unavailable")
+	}
+	cacheLock, err := acquireUpdateTrustCacheLock(ctx, s.CacheDir)
+	if err != nil {
+		return resolvedUpdateTrustPolicy{}, err
+	}
+	defer cacheLock.Release()
 	now := time.Now().UTC()
 	if s.Now != nil {
 		now = s.Now().UTC()
@@ -130,6 +136,9 @@ func (s *updateTrustStore) Resolve(ctx context.Context, sources ...updateTrustSo
 	}
 
 	cache, cacheState := s.loadCache()
+	if cacheState == updateTrustCacheCorrupt {
+		return resolvedUpdateTrustPolicy{}, policyError("policy_cache_corrupt")
+	}
 	selected := embedded
 	selectedBytes := bytes.Clone(s.EmbeddedPolicy)
 	selectedFromCache := false
@@ -147,29 +156,31 @@ func (s *updateTrustStore) Resolve(ctx context.Context, sources ...updateTrustSo
 		}
 	}
 
-	// A corrupt or partial cache has lost the durable rollback floor. Keep the
-	// immutable embedded baseline usable, but never overwrite the cache or let a
-	// network response guess what the lost highest epoch was.
-	if cacheState != updateTrustCacheCorrupt {
-		client := s.Client
-		if client == nil {
-			client = newUpdateHTTPClient(15 * time.Second)
+	client := s.Client
+	if client == nil {
+		client = newUpdateHTTPClient(maxUpdateTrustSourceWait)
+	}
+	sourceTimeout := s.SourceTimeout
+	if sourceTimeout <= 0 || sourceTimeout > maxUpdateTrustSourceWait {
+		sourceTimeout = maxUpdateTrustSourceWait
+	}
+	for _, source := range sources {
+		data, fetchErr := fetchUpdateTrustPolicy(ctx, client, source, sourceTimeout)
+		if fetchErr != nil {
+			if err := ctx.Err(); err != nil {
+				return resolvedUpdateTrustPolicy{}, err
+			}
+			continue
 		}
-		for _, source := range sources {
-			data, fetchErr := fetchUpdateTrustPolicy(ctx, client, source)
-			if fetchErr != nil {
-				continue
-			}
-			policy, verifyErr := parseAndVerifyUpdateTrustPolicy(data, s.Root, now)
-			if verifyErr != nil || policy.Epoch < highestAcceptedEpoch {
-				continue
-			}
-			if policy.Epoch > selected.Epoch {
-				selected = policy
-				selectedBytes = data
-				selectedFromCache = false
-				needsPersist = true
-			}
+		policy, verifyErr := parseAndVerifyUpdateTrustPolicy(data, s.Root, now)
+		if verifyErr != nil || policy.Epoch < highestAcceptedEpoch {
+			continue
+		}
+		if policy.Epoch > selected.Epoch {
+			selected = policy
+			selectedBytes = data
+			selectedFromCache = false
+			needsPersist = true
 		}
 	}
 
@@ -189,7 +200,7 @@ func (s *updateTrustStore) Resolve(ctx context.Context, sources ...updateTrustSo
 	if selectedFromCache {
 		frozen = append([]updateCertificateIdentity(nil), cache.envelope.FrozenIdentities...)
 	}
-	if needsPersist && cacheState != updateTrustCacheCorrupt {
+	if needsPersist {
 		if err := s.persistCache(selectedBytes, selected, frozen); err != nil {
 			return resolvedUpdateTrustPolicy{}, err
 		}
@@ -197,11 +208,26 @@ func (s *updateTrustStore) Resolve(ctx context.Context, sources ...updateTrustSo
 	return resolvedUpdateTrustPolicy{Policy: selected, Mode: updateTrustModeCurrent, FrozenIdentities: frozen, resolvedAt: now}, nil
 }
 
-func fetchUpdateTrustPolicy(ctx context.Context, client *http.Client, source updateTrustSource) ([]byte, error) {
+func updateTrustCacheLockID(cacheDir string) (string, error) {
+	absolute, err := filepath.Abs(cacheDir)
+	if err != nil {
+		return "", policyError("policy_cache_lock_unavailable")
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(absolute); resolveErr == nil {
+		absolute = resolved
+	}
+	normalized := normalizeUpdateTrustCacheLockPath(absolute)
+	digest := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func fetchUpdateTrustPolicy(ctx context.Context, client *http.Client, source updateTrustSource, timeout time.Duration) ([]byte, error) {
 	if strings.TrimSpace(source.URL) == "" || len(source.URL) > maxUpdateTrustSourceURL {
 		return nil, policyError("policy_source_invalid")
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source.URL, nil)
+	requestContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, source.URL, nil)
 	if err != nil {
 		return nil, policyError("policy_source_invalid")
 	}

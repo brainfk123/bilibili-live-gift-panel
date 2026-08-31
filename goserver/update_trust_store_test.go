@@ -114,6 +114,70 @@ func TestTrustStoreVerifiesSourcesIndependentlyAndBoundsBodies(t *testing.T) {
 	}
 }
 
+func TestTrustStoreEnforcesPerSourceTimeoutForInjectedClient(t *testing.T) {
+	key := newTestTrustKey(t)
+	embedded := signedTestTrustPolicy(t, key, 1, testTrustNow.Add(-time.Hour), stableTestRule("epoch-1", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094"))
+	requestCanceled := make(chan struct{}, 1)
+	emergencyRelease := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		select {
+		case <-request.Context().Done():
+			requestCanceled <- struct{}{}
+		case <-emergencyRelease:
+		}
+	}))
+	t.Cleanup(server.Close)
+	if server.Client().Timeout != 0 {
+		t.Fatalf("test client timeout = %s, want zero", server.Client().Timeout)
+	}
+	store := newTestTrustStore(t, &key.PublicKey, embedded, testTrustNow)
+	store.Client = server.Client()
+	store.SourceTimeout = 50 * time.Millisecond
+	type resolveResult struct {
+		err error
+	}
+	done := make(chan resolveResult, 1)
+	go func() {
+		_, err := store.Resolve(context.Background(), updateTrustSource{Name: "domestic", URL: server.URL})
+		done <- resolveResult{err: err}
+	}()
+
+	var result resolveResult
+	select {
+	case result = <-done:
+		close(emergencyRelease)
+	case <-time.After(250 * time.Millisecond):
+		close(emergencyRelease)
+		result = <-done
+		t.Fatalf("Background Resolve remained blocked until transport release: %v", result.err)
+	}
+	assertErrorCode(t, result.err, "policy_unavailable")
+	select {
+	case <-requestCanceled:
+	default:
+		t.Fatal("per-source deadline did not cancel the real HTTP request")
+	}
+}
+
+func TestTrustStoreParentDeadlineWinsOverPerSourceTimeout(t *testing.T) {
+	key := newTestTrustKey(t)
+	embedded := signedTestTrustPolicy(t, key, 1, testTrustNow.Add(-time.Hour), stableTestRule("epoch-1", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094"))
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+	store := newTestTrustStore(t, &key.PublicKey, embedded, testTrustNow)
+	store.Client = server.Client()
+	store.SourceTimeout = time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := store.Resolve(ctx, updateTrustSource{Name: "domestic", URL: server.URL})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Resolve error = %v, want parent context deadline", err)
+	}
+}
+
 func TestTrustStoreUsesValidCacheWhenSourcesOffline(t *testing.T) {
 	key := newTestTrustKey(t)
 	embedded := signedTestTrustPolicy(t, key, 1, testTrustNow.AddDate(1, 0, 0), stableTestRule("epoch-1", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094"))
@@ -207,7 +271,7 @@ func TestTrustStoreRejectsLowerEpochRollbackAfterRestart(t *testing.T) {
 	}
 }
 
-func TestTrustStoreConcurrentResolveNeverLetsLowerEpochOverwriteHigher(t *testing.T) {
+func TestTrustStoreIndependentInstancesNeverLetLowerEpochOverwriteHigher(t *testing.T) {
 	key := newTestTrustKey(t)
 	embedded := signedTestTrustPolicy(t, key, 1, testTrustNow.AddDate(1, 0, 0), stableTestRule("epoch-1", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094"))
 	epoch3 := signedTestTrustPolicy(t, key, 3, testTrustNow.AddDate(1, 0, 0), stableTestRule("epoch-3", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094"))
@@ -227,8 +291,9 @@ func TestTrustStoreConcurrentResolveNeverLetsLowerEpochOverwriteHigher(t *testin
 		}
 	}))
 	t.Cleanup(server.Close)
-	store := newTestTrustStore(t, &key.PublicKey, embedded, testTrustNow)
-	store.Client = server.Client()
+	cacheDir := t.TempDir()
+	lowerStore := &updateTrustStore{Root: &key.PublicKey, EmbeddedPolicy: embedded, CacheDir: cacheDir, Client: server.Client(), Now: func() time.Time { return testTrustNow }}
+	higherStore := &updateTrustStore{Root: &key.PublicKey, EmbeddedPolicy: embedded, CacheDir: cacheDir, Client: server.Client(), Now: func() time.Time { return testTrustNow }}
 	type result struct {
 		policy resolvedUpdateTrustPolicy
 		err    error
@@ -236,12 +301,12 @@ func TestTrustStoreConcurrentResolveNeverLetsLowerEpochOverwriteHigher(t *testin
 	lowerDone := make(chan result, 1)
 	higherDone := make(chan result, 1)
 	go func() {
-		policy, err := store.Resolve(context.Background(), updateTrustSource{Name: "domestic", URL: server.URL + "/epoch-3"})
+		policy, err := lowerStore.Resolve(context.Background(), updateTrustSource{Name: "domestic", URL: server.URL + "/epoch-3"})
 		lowerDone <- result{policy: policy, err: err}
 	}()
 	<-lowerStarted
 	go func() {
-		policy, err := store.Resolve(context.Background(), updateTrustSource{Name: "github", URL: server.URL + "/epoch-4"})
+		policy, err := higherStore.Resolve(context.Background(), updateTrustSource{Name: "github", URL: server.URL + "/epoch-4"})
 		higherDone <- result{policy: policy, err: err}
 	}()
 
@@ -265,8 +330,42 @@ func TestTrustStoreConcurrentResolveNeverLetsLowerEpochOverwriteHigher(t *testin
 	if higher.err != nil {
 		t.Fatalf("higher concurrent Resolve error = %v", higher.err)
 	}
-	if cache := readTestTrustCache(t, store.CacheDir); cache.HighestEpoch != 4 {
+	if cache := readTestTrustCache(t, cacheDir); cache.HighestEpoch != 4 {
 		t.Fatalf("concurrent persisted highest epoch = %d, want 4", cache.HighestEpoch)
+	}
+}
+
+func TestTrustStoreSharedCacheLockHonorsContextDeadline(t *testing.T) {
+	key := newTestTrustKey(t)
+	embedded := signedTestTrustPolicy(t, key, 1, testTrustNow.AddDate(1, 0, 0), stableTestRule("epoch-1", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094"))
+	epoch2 := signedTestTrustPolicy(t, key, 2, testTrustNow.AddDate(1, 0, 0), stableTestRule("epoch-2", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094"))
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		_, _ = response.Write(epoch2)
+	}))
+	t.Cleanup(server.Close)
+	cacheDir := t.TempDir()
+	holder := &updateTrustStore{Root: &key.PublicKey, EmbeddedPolicy: embedded, CacheDir: cacheDir, Client: server.Client(), Now: func() time.Time { return testTrustNow }}
+	waiter := &updateTrustStore{Root: &key.PublicKey, EmbeddedPolicy: embedded, CacheDir: cacheDir, Now: func() time.Time { return testTrustNow }}
+	holderDone := make(chan error, 1)
+	go func() {
+		_, err := holder.Resolve(context.Background(), updateTrustSource{Name: "domestic", URL: server.URL})
+		holderDone <- err
+	}()
+	<-requestStarted
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, waitErr := waiter.Resolve(ctx)
+	close(releaseRequest)
+	if holderErr := <-holderDone; holderErr != nil {
+		t.Fatalf("lock holder Resolve error = %v", holderErr)
+	}
+	if !errors.Is(waitErr, context.DeadlineExceeded) {
+		t.Fatalf("waiting Resolve error = %v, want context deadline", waitErr)
 	}
 }
 
@@ -289,48 +388,54 @@ func TestTrustStoreReplacesLowerCachedEpochWithEmbeddedBaseline(t *testing.T) {
 	}
 }
 
-func TestTrustStoreCorruptCacheFallsBackToEmbeddedWithoutOverwriting(t *testing.T) {
-	key := newTestTrustKey(t)
-	embedded := signedTestTrustPolicy(t, key, 1, testTrustNow.AddDate(1, 0, 0), stableTestRule("epoch-1", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094"))
-	store := newTestTrustStore(t, &key.PublicKey, embedded, testTrustNow)
-	corrupt := []byte(`{"version":1,"highestEpoch":9`)
-	if err := os.WriteFile(filepath.Join(store.CacheDir, updateTrustCacheFilename), corrupt, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store.Client = offlineTrustClient()
-
-	got, err := store.Resolve(context.Background(), updateTrustSource{Name: "domestic", URL: "https://offline.invalid/policy"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Mode != updateTrustModeCurrent || got.Policy.Epoch != 1 {
-		t.Fatalf("resolved mode/epoch = %s/%d, want embedded current/1", got.Mode, got.Policy.Epoch)
-	}
-	if after := readTestTrustCacheBytes(t, store.CacheDir); !bytes.Equal(after, corrupt) {
-		t.Fatal("corrupt cache was overwritten, erasing evidence of the unknown persisted epoch")
-	}
-}
-
-func TestTrustStoreDuplicateCacheFieldsAreCorrupt(t *testing.T) {
+func TestTrustStorePresentCorruptCacheFailsClosedAndPreservesEvidence(t *testing.T) {
 	key := newTestTrustKey(t)
 	embedded := signedTestTrustPolicy(t, key, 1, testTrustNow.AddDate(1, 0, 0), stableTestRule("epoch-1", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094"))
 	cached := signedTestTrustPolicy(t, key, 2, testTrustNow.AddDate(1, 0, 0), stableTestRule("epoch-2", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094"))
-	store := newTestTrustStore(t, &key.PublicKey, embedded, testTrustNow)
-	seedTestTrustCache(t, store.CacheDir, cached, 2, []updateCertificateIdentity{{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"}})
-	duplicated := bytes.Replace(readTestTrustCacheBytes(t, store.CacheDir), []byte(`"version":1`), []byte(`"version":1,"version":1`), 1)
-	if err := os.WriteFile(filepath.Join(store.CacheDir, updateTrustCacheFilename), duplicated, 0o600); err != nil {
+	seedDir := t.TempDir()
+	seedTestTrustCache(t, seedDir, cached, 2, []updateCertificateIdentity{{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"}})
+	valid := readTestTrustCacheBytes(t, seedDir)
+	var invalidHash testTrustCacheEnvelope
+	if err := json.Unmarshal(valid, &invalidHash); err != nil {
 		t.Fatal(err)
 	}
-
-	got, err := store.Resolve(context.Background())
+	invalidHash.PolicySHA256 = strings.Repeat("0", 64)
+	invalidHashBytes, err := json.Marshal(invalidHash)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Policy.Epoch != 1 {
-		t.Fatalf("duplicate-field cache resolved epoch = %d, want embedded epoch 1", got.Policy.Epoch)
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{name: "partial", data: []byte(`{"version":1,"highestEpoch":9`)},
+		{name: "hash invalid", data: invalidHashBytes},
+		{name: "duplicate", data: bytes.Replace(valid, []byte(`"version":1`), []byte(`"version":1,"version":1`), 1)},
 	}
-	if after := readTestTrustCacheBytes(t, store.CacheDir); !bytes.Equal(after, duplicated) {
-		t.Fatal("duplicate-field cache was overwritten")
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			store := newTestTrustStore(t, &key.PublicKey, embedded, testTrustNow)
+			if err := os.WriteFile(filepath.Join(store.CacheDir, updateTrustCacheFilename), test.data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			requests := 0
+			store.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				requests++
+				return nil, errors.New("network must not be used")
+			})}
+
+			got, err := store.Resolve(context.Background(), updateTrustSource{Name: "domestic", URL: "https://updates.invalid/policy?token=secret"})
+			assertErrorCode(t, err, "policy_cache_corrupt")
+			if got.Policy.Epoch != 0 {
+				t.Fatalf("corrupt cache authorized embedded epoch %d", got.Policy.Epoch)
+			}
+			if requests != 0 {
+				t.Fatalf("corrupt cache made %d network requests, want 0", requests)
+			}
+			if after := readTestTrustCacheBytes(t, store.CacheDir); !bytes.Equal(after, test.data) {
+				t.Fatal("corrupt cache evidence was changed")
+			}
+		})
 	}
 }
 
@@ -370,8 +475,17 @@ func TestAtomicTrustCacheInterruptedBeforeRenamePreservesPreviousCache(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != updateTrustCacheFilename {
-		t.Fatalf("cache directory entries = %#v, want only committed cache", entries)
+	committedCache := false
+	for _, entry := range entries {
+		if entry.Name() == updateTrustCacheFilename {
+			committedCache = true
+		}
+		if strings.HasSuffix(entry.Name(), ".tmp") {
+			t.Fatalf("interrupted write left temporary cache %q", entry.Name())
+		}
+	}
+	if !committedCache {
+		t.Fatalf("cache directory entries = %#v, want committed cache", entries)
 	}
 
 	restarted := newTestTrustStore(t, &key.PublicKey, embedded, testTrustNow)
