@@ -75,6 +75,47 @@ func TestRunnerRejectsMalformedHTTP200ResponseETagWithoutSideEffects(t *testing.
 	}
 }
 
+func TestRunnerFailsClosedOnRawControlCharacterHTTP200ResponseETagWithoutSideEffects(t *testing.T) {
+	methods := []struct {
+		name    string
+		path    string
+		tag     string
+		options RunOptions
+	}{
+		{
+			name:    "stable latest",
+			path:    "/repos/brainfk123/bilibili-live-gift-panel/releases/latest",
+			tag:     testTag,
+			options: RunOptions{Channel: release.ChannelStable},
+		},
+		{
+			name:    "legacy by tag",
+			path:    "/repos/brainfk123/bilibili-live-gift-panel/releases/tags/v0.4.11",
+			tag:     "v0.4.11",
+			options: RunOptions{Channel: release.ChannelLegacyRushRush, Tag: "v0.4.11"},
+		},
+	}
+
+	for _, method := range methods {
+		t.Run(method.name, func(t *testing.T) {
+			server, waitForResponse := newRawHTTPResponseFixture(t, method.path, rawReleaseHTTPResponse(t, method.tag, rawMalformedResponseETag))
+			fixture := newRunnerFixture(t)
+			runner := fixture.runner()
+			runner.Source = newGitHubReleaseSource(server.Client(), server.URL)
+
+			result, err := runner.Run(context.Background(), method.options)
+			waitForResponse()
+			if err == nil || StageOf(err) != StageDiscovery {
+				t.Fatalf("Run() result=%+v error=%v stage=%q, want fail-closed discovery", result, err, StageOf(err))
+			}
+			if result != (RunResult{}) || len(fixture.fetcher.specs) != 0 || fixture.factoryCalls != 0 || fixture.publisher.calls != 0 || fixture.state.saveCalls != 0 {
+				t.Fatalf("raw malformed response side effects: result=%+v downloads=%d factory=%d publishes=%d saves=%d", result, len(fixture.fetcher.specs), fixture.factoryCalls, fixture.publisher.calls, fixture.state.saveCalls)
+			}
+			assertRawMalformedETagNotExposed(t, err)
+		})
+	}
+}
+
 func TestRunnerBridgeDiscoveryUsesByTagAndForwardsLegacyChannel(t *testing.T) {
 	fixture := newRunnerFixture(t)
 	fixture.source.result = LatestResult{NotModified: true}
