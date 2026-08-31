@@ -22,6 +22,8 @@ go test ./...
 
 `npm run build` 会构建前端并编译本地服务，产物为 `dist/gift-panel.exe`。EXE 已内嵌前端页面和代理服务，主播电脑不需要安装 Node.js 或 Go。
 
+Mac 开发、Hosted 优先日常循环、CI 失败复现以及 Windows ARM/x64 验收边界见 [Mac 与 Windows 兼容性工作流](docs/development/mac-hosted-workflow.md)。
+
 ## 礼物动画回放
 
 送礼记录中的 GIF、动态 WebP 和完整礼物特效都可以剪裁并导出为固定 30 FPS 的 H.264 MP4。输入素材不必预先转换成 30 FPS：程序会根据 GIF、WebP 或特效视频自身的帧时间进行采样，保持两秒素材等时间轴上的动作顺序。
