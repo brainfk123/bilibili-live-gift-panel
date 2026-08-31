@@ -24,6 +24,8 @@ go test ./...
 
 Mac 开发、Hosted 优先日常循环、CI 失败复现以及 Windows ARM/x64 验收边界见 [Mac 与 Windows 兼容性工作流](docs/development/mac-hosted-workflow.md)。
 
+EXE 退役必须按 [EXE 退役证据清单](docs/operations/exe-retirement-checklist.md) 逐阶段验收；TypeScript exporter v2 与 Hosted decoder compatibility 需先由 gameplay-unit migration 证据证明，不能仅凭 CI 进入 Stage B。
+
 ## 礼物动画回放
 
 送礼记录中的 GIF、动态 WebP 和完整礼物特效都可以剪裁并导出为固定 30 FPS 的 H.264 MP4。输入素材不必预先转换成 30 FPS：程序会根据 GIF、WebP 或特效视频自身的帧时间进行采样，保持两秒素材等时间轴上的动作顺序。
