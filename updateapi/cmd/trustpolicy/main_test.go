@@ -22,11 +22,12 @@ import (
 	"time"
 
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/trustpolicy"
+	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/trustpolicy/bundlefs"
 )
 
 func TestKMSSignerCLIWritesCreateOnlyPrivateOutputs(t *testing.T) {
 	fake := newCommandSigner(t)
-	directory := t.TempDir()
+	directory := newPrivateTestBase(t)
 	bundlePath := filepath.Join(directory, "signed-policy-bundle")
 	policyPath := filepath.Join(bundlePath, "policy.json")
 	auditPath := filepath.Join(bundlePath, "audit.json")
@@ -84,7 +85,7 @@ func TestKMSSignerCLIWritesCreateOnlyPrivateOutputs(t *testing.T) {
 }
 
 func TestKMSSignerCLIRefusesOverwriteBeforeSignerConstruction(t *testing.T) {
-	directory := t.TempDir()
+	directory := newPrivateTestBase(t)
 	bundlePath := filepath.Join(directory, "signed-policy-bundle")
 	if err := os.Mkdir(bundlePath, 0o700); err != nil {
 		t.Fatal(err)
@@ -120,7 +121,7 @@ func TestKMSSignerCLIRefusesOverwriteBeforeSignerConstruction(t *testing.T) {
 }
 
 func TestKMSSignerCLIRedactsEnvironmentAndProviderErrors(t *testing.T) {
-	directory := t.TempDir()
+	directory := newPrivateTestBase(t)
 	bundlePath := filepath.Join(directory, "signed-policy-bundle")
 	policyPath := filepath.Join(bundlePath, "policy.json")
 	auditPath := filepath.Join(bundlePath, "audit.json")
@@ -143,7 +144,7 @@ func TestKMSSignerCLIRedactsEnvironmentAndProviderErrors(t *testing.T) {
 }
 
 func TestKMSSignerCLIRejectsUnsafeEnvironmentBeforeSignerConstruction(t *testing.T) {
-	directory := t.TempDir()
+	directory := newPrivateTestBase(t)
 	candidatePath := filepath.Join("..", "..", "testdata", "trustpolicy", "epoch-1-candidate.json")
 	for _, test := range []struct {
 		name   string
@@ -177,7 +178,7 @@ func TestKMSSignerCLIRejectsUnsafeEnvironmentBeforeSignerConstruction(t *testing
 
 func TestKMSSignerCLIRejectsCrossParentExistingParentAndSymlinkBeforeSignerConstruction(t *testing.T) {
 	candidatePath := filepath.Join("..", "..", "testdata", "trustpolicy", "epoch-1-candidate.json")
-	base := t.TempDir()
+	base := newPrivateTestBase(t)
 	existingBundle := filepath.Join(base, "existing-bundle")
 	if err := os.Mkdir(existingBundle, 0o700); err != nil {
 		t.Fatal(err)
@@ -227,7 +228,7 @@ func TestKMSSignerCLIRequiresExplicitProviderModeBeforeFactory(t *testing.T) {
 			name = "missing"
 		}
 		t.Run(name, func(t *testing.T) {
-			bundlePath := filepath.Join(t.TempDir(), "bundle")
+			bundlePath := filepath.Join(newPrivateTestBase(t), "bundle")
 			values := map[string]string{
 				"REVIEWED_KMS_KEY_ID":          "kms-key-id",
 				"REVIEWED_KMS_SPKI_SHA256":     strings.Repeat("a", 64),
@@ -252,9 +253,28 @@ func TestKMSSignerCLIRequiresExplicitProviderModeBeforeFactory(t *testing.T) {
 	}
 }
 
+func TestKMSSignerCLIRejectsUntrustedWritableParentBeforeFactory(t *testing.T) {
+	parent := newPrivateTestBase(t)
+	makeCLIParentUntrustedWritable(t, parent)
+	bundlePath := filepath.Join(parent, "bundle")
+	candidatePath := filepath.Join("..", "..", "testdata", "trustpolicy", "epoch-1-candidate.json")
+	called := false
+	err := run(context.Background(), validCommandArgs(candidatePath, filepath.Join(bundlePath, "policy.json"), filepath.Join(bundlePath, "audit.json")), commandEnvironment(strings.Repeat("a", 64)), func(string, string, string) (trustpolicy.Signer, error) {
+		called = true
+		return nil, errors.New("must not construct signer")
+	}, ioDiscard{}, time.Now)
+	if err == nil {
+		t.Fatal("run() accepted a parent writable by untrusted principals")
+	}
+	if called {
+		t.Fatal("run() constructed signer before protected-parent preflight")
+	}
+	assertPathAbsent(t, bundlePath)
+}
+
 func TestOutputBundleWritesCommitMarkerLastAndReaderValidates(t *testing.T) {
 	policy, audit := testBundlePayload(t, "marker-test")
-	bundlePath := filepath.Join(t.TempDir(), "bundle")
+	bundlePath := filepath.Join(newPrivateTestBase(t), "bundle")
 	policyPath := filepath.Join(bundlePath, "policy.json")
 	auditPath := filepath.Join(bundlePath, "audit.json")
 	var checkpoints []bundleCheckpoint
@@ -284,7 +304,7 @@ func TestOutputBundleCheckpointFailuresPreservePhysicalPartialAndLogicalCommit(t
 	for _, checkpoint := range bundleTestCheckpoints() {
 		t.Run(string(checkpoint), func(t *testing.T) {
 			policy, audit := testBundlePayload(t, string(checkpoint))
-			bundlePath := filepath.Join(t.TempDir(), "bundle")
+			bundlePath := filepath.Join(newPrivateTestBase(t), "bundle")
 			policyPath := filepath.Join(bundlePath, "policy.json")
 			auditPath := filepath.Join(bundlePath, "audit.json")
 			reached := false
@@ -304,7 +324,7 @@ func TestOutputBundleCheckpointFailuresPreservePhysicalPartialAndLogicalCommit(t
 				t.Fatalf("owned final directory was deleted: %v", statErr)
 			}
 			committed, readErr := readCommittedBundle(policyPath, auditPath)
-			if checkpoint.beforeCommit() {
+			if checkpoint.markerAbsent() {
 				if readErr == nil || len(committed.Policy) != 0 || len(committed.Audit) != 0 {
 					t.Fatal("pre-marker physical partial was exposed as committed")
 				}
@@ -320,14 +340,14 @@ func TestOutputBundleCheckpointFailuresPreservePhysicalPartialAndLogicalCommit(t
 func TestOutputBundleCrashLeavesUncommittedFinalOrValidatedCommit(t *testing.T) {
 	for _, checkpoint := range bundleTestCheckpoints() {
 		t.Run(string(checkpoint), func(t *testing.T) {
-			base := t.TempDir()
+			base := newPrivateTestBase(t)
 			bundlePath := filepath.Join(base, "bundle")
 			policyPath := filepath.Join(bundlePath, "policy.json")
 			auditPath := filepath.Join(bundlePath, "audit.json")
 			runBundleCrashHelper(t, checkpoint, policyPath, auditPath)
 			before := snapshotBundlePath(t, bundlePath)
 			committed, readErr := readCommittedBundle(policyPath, auditPath)
-			if checkpoint.beforeCommit() {
+			if checkpoint.markerAbsent() {
 				if readErr == nil || len(committed.Policy) != 0 {
 					t.Fatal("pre-marker crash exposed trusted bytes")
 				}
@@ -385,21 +405,21 @@ func TestOutputBundleCrashHelper(t *testing.T) {
 func TestOutputBundleExistingFinalAlwaysFailsWithoutMutation(t *testing.T) {
 	for _, state := range []string{"empty", "partial", "complete", "symlink"} {
 		t.Run(state, func(t *testing.T) {
-			base := t.TempDir()
+			base := newPrivateTestBase(t)
 			bundlePath := filepath.Join(base, "bundle")
 			policyPath := filepath.Join(bundlePath, "policy.json")
 			auditPath := filepath.Join(bundlePath, "audit.json")
 			policy, audit := testBundlePayload(t, state)
 			switch state {
 			case "empty":
-				if err := createPrivateDirectory(bundlePath); err != nil {
+				if err := bundlefs.CreatePrivateDirectory(bundlePath); err != nil {
 					t.Fatal(err)
 				}
 			case "partial":
-				if err := createPrivateDirectory(bundlePath); err != nil {
+				if err := bundlefs.CreatePrivateDirectory(bundlePath); err != nil {
 					t.Fatal(err)
 				}
-				if err := writePrivateBundleFile(policyPath, policy); err != nil {
+				if err := os.WriteFile(policyPath, policy, 0o600); err != nil {
 					t.Fatal(err)
 				}
 			case "complete":
@@ -464,7 +484,7 @@ func TestReadCommittedBundleRejectsMarkerContentAndEntryMutation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			policy, audit := testBundlePayload(t, test.name)
-			bundlePath := filepath.Join(t.TempDir(), "bundle")
+			bundlePath := filepath.Join(newPrivateTestBase(t), "bundle")
 			policyPath := filepath.Join(bundlePath, "policy.json")
 			auditPath := filepath.Join(bundlePath, "audit.json")
 			if err := writeOutputBundle(policyPath, policy, auditPath, audit, bundleHooks{}); err != nil {
@@ -492,7 +512,7 @@ func TestReadCommittedBundleRejectsSelfConsistentMalformedPolicyOrAudit(t *testi
 		{name: "malformed audit", policy: testBundlePayloadPolicy(t), audit: []byte(`{}`)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			bundlePath := filepath.Join(t.TempDir(), "bundle")
+			bundlePath := filepath.Join(newPrivateTestBase(t), "bundle")
 			policyPath := filepath.Join(bundlePath, "policy.json")
 			auditPath := filepath.Join(bundlePath, "audit.json")
 			if err := writeOutputBundle(policyPath, test.policy, auditPath, test.audit, bundleHooks{}); err != nil {
@@ -507,7 +527,7 @@ func TestReadCommittedBundleRejectsSelfConsistentMalformedPolicyOrAudit(t *testi
 
 func TestReadCommittedBundleRejectsSymlinkSubstitution(t *testing.T) {
 	policy, audit := testBundlePayload(t, "symlink-substitution")
-	bundlePath := filepath.Join(t.TempDir(), "bundle")
+	bundlePath := filepath.Join(newPrivateTestBase(t), "bundle")
 	policyPath := filepath.Join(bundlePath, "policy.json")
 	auditPath := filepath.Join(bundlePath, "audit.json")
 	if err := writeOutputBundle(policyPath, policy, auditPath, audit, bundleHooks{}); err != nil {
@@ -529,7 +549,7 @@ func TestReadCommittedBundleRejectsSymlinkSubstitution(t *testing.T) {
 func TestOutputBundleConcurrentSamePathHasOneOwnerWithoutDeadlock(t *testing.T) {
 	policyA, auditA := testBundlePayload(t, "concurrent-a")
 	policyB, auditB := testBundlePayload(t, "concurrent-b")
-	bundlePath := filepath.Join(t.TempDir(), "bundle")
+	bundlePath := filepath.Join(newPrivateTestBase(t), "bundle")
 	policyPath := filepath.Join(bundlePath, "policy.json")
 	auditPath := filepath.Join(bundlePath, "audit.json")
 	start := make(chan struct{})
@@ -571,7 +591,7 @@ func TestOutputBundleConcurrentSamePathHasOneOwnerWithoutDeadlock(t *testing.T) 
 }
 
 func TestOutputBundleConcurrentDifferentPathsProceedIndependently(t *testing.T) {
-	base := t.TempDir()
+	base := newPrivateTestBase(t)
 	ready := make(chan struct{}, 2)
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -619,9 +639,18 @@ func bundleTestCheckpoints() []bundleCheckpoint {
 		bundleAfterWritePolicy,
 		bundleAfterWriteAudit,
 		bundleAfterSyncDataDirectory,
+		bundleAfterSyncParent,
 		bundleAfterWriteCommitMarker,
 		bundleAfterSyncCommittedDirectory,
-		bundleAfterSyncParent,
+	}
+}
+
+func TestOutputBundleOnlyFinalDirectorySyncCheckpointIsDurablyCommitted(t *testing.T) {
+	for _, checkpoint := range bundleTestCheckpoints() {
+		want := checkpoint == bundleAfterSyncCommittedDirectory
+		if checkpoint.durablyCommitted() != want {
+			t.Fatalf("checkpoint %q durable=%v, want %v", checkpoint, checkpoint.durablyCommitted(), want)
+		}
 	}
 }
 
@@ -793,6 +822,15 @@ func assertPathAbsent(t testing.TB, path string) {
 	}
 }
 
+func newPrivateTestBase(t testing.TB) string {
+	t.Helper()
+	base := filepath.Join(t.TempDir(), "private-parent")
+	if err := bundlefs.CreatePrivateDirectory(base); err != nil {
+		t.Fatal(err)
+	}
+	return base
+}
+
 func TestKMSSignerCLIRejectsSecretValueFlagsInSubprocess(t *testing.T) {
 	directory := t.TempDir()
 	binary := filepath.Join(directory, "trustpolicy.exe")
@@ -831,7 +869,7 @@ func TestKMSSignerCLIRejectsEveryRepeatedRegisteredFlagBeforeFactory(t *testing.
 			}
 			t.Run(flagName+"/"+form, func(t *testing.T) {
 				fake := newCommandSigner(t)
-				bundlePath := filepath.Join(t.TempDir(), "bundle")
+				bundlePath := filepath.Join(newPrivateTestBase(t), "bundle")
 				policyPath := filepath.Join(bundlePath, "policy.json")
 				auditPath := filepath.Join(bundlePath, "audit.json")
 				args := validCommandArgs(candidatePath, policyPath, auditPath)

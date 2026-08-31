@@ -1,11 +1,11 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/trustpolicy"
+	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/trustpolicy/bundlefs"
 )
 
 type bundleCheckpoint string
@@ -15,18 +15,22 @@ const (
 	bundleAfterWritePolicy            bundleCheckpoint = "after-write-policy"
 	bundleAfterWriteAudit             bundleCheckpoint = "after-write-audit"
 	bundleAfterSyncDataDirectory      bundleCheckpoint = "after-sync-data-directory"
+	bundleAfterSyncParent             bundleCheckpoint = "after-sync-parent"
 	bundleAfterWriteCommitMarker      bundleCheckpoint = "after-write-commit-marker"
 	bundleAfterSyncCommittedDirectory bundleCheckpoint = "after-sync-committed-directory"
-	bundleAfterSyncParent             bundleCheckpoint = "after-sync-parent"
 )
 
-func (checkpoint bundleCheckpoint) beforeCommit() bool {
+func (checkpoint bundleCheckpoint) markerAbsent() bool {
 	switch checkpoint {
-	case bundleAfterCreateDirectory, bundleAfterWritePolicy, bundleAfterWriteAudit, bundleAfterSyncDataDirectory:
+	case bundleAfterCreateDirectory, bundleAfterWritePolicy, bundleAfterWriteAudit, bundleAfterSyncDataDirectory, bundleAfterSyncParent:
 		return true
 	default:
 		return false
 	}
+}
+
+func (checkpoint bundleCheckpoint) durablyCommitted() bool {
+	return checkpoint == bundleAfterSyncCommittedDirectory
 }
 
 type bundleHooks struct {
@@ -65,7 +69,7 @@ func resolveOutputBundlePaths(policyPath, auditPath string) (outputBundlePaths, 
 	policyName := filepath.Base(policy)
 	auditName := filepath.Base(audit)
 	if samePath(policy, audit) || !samePath(policyParent, auditParent) || policyName == "." || auditName == "." ||
-		policyName == trustpolicy.BundleCommitFileName || auditName == trustpolicy.BundleCommitFileName {
+		samePath(policyName, trustpolicy.BundleCommitFileName) || samePath(auditName, trustpolicy.BundleCommitFileName) {
 		return outputBundlePaths{}, errCommand
 	}
 	parent := filepath.Dir(policyParent)
@@ -83,109 +87,54 @@ func resolveOutputBundlePaths(policyPath, auditPath string) (outputBundlePaths, 
 }
 
 func validateOutputBundlePaths(policyPath, auditPath string) (outputBundlePaths, error) {
-	paths, err := resolveOutputBundlePaths(policyPath, auditPath)
+	policy, audit, err := bundlefs.ValidateOutputPaths(policyPath, auditPath)
 	if err != nil {
 		return outputBundlePaths{}, errCommand
 	}
-	if _, err := os.Lstat(paths.final); err == nil || !errors.Is(err, os.ErrNotExist) {
+	paths, err := resolveOutputBundlePaths(policy, audit)
+	if err != nil {
 		return outputBundlePaths{}, errCommand
 	}
 	return paths, nil
 }
 
 func writeOutputBundle(policyPath string, policy []byte, auditPath string, audit []byte, hooks bundleHooks) error {
-	paths, err := validateOutputBundlePaths(policyPath, auditPath)
+	paths, err := resolveOutputBundlePaths(policyPath, auditPath)
 	if err != nil {
 		return errCommand
 	}
-	if err := createPrivateDirectory(paths.final); err != nil {
-		return errCommand
-	}
-	if err := hooks.reach(bundleAfterCreateDirectory, paths.final); err != nil {
-		return errCommand
-	}
-	if err := writePrivateBundleFile(paths.policy, policy); err != nil {
-		return errCommand
-	}
-	if err := hooks.reach(bundleAfterWritePolicy, paths.final); err != nil {
-		return errCommand
-	}
-	if err := writePrivateBundleFile(paths.audit, audit); err != nil {
-		return errCommand
-	}
-	if err := hooks.reach(bundleAfterWriteAudit, paths.final); err != nil {
-		return errCommand
-	}
-	if err := syncBundleDirectory(paths.final); err != nil {
-		return errCommand
-	}
-	if err := hooks.reach(bundleAfterSyncDataDirectory, paths.final); err != nil {
-		return errCommand
-	}
-	marker, err := trustpolicy.BuildBundleCommit(paths.policyName, policy, paths.auditName, audit)
+	err = bundlefs.WriteCommittedBundleWithHooks(paths.policy, policy, paths.audit, audit, bundlefs.WriteHooks{
+		Checkpoint: func(checkpoint bundlefs.WriteCheckpoint) error {
+			mapped, ok := mapBundleCheckpoint(checkpoint)
+			if !ok {
+				return nil
+			}
+			return hooks.reach(mapped, paths.final)
+		},
+	})
 	if err != nil {
-		return errCommand
-	}
-	if err := writePrivateBundleFile(filepath.Join(paths.final, trustpolicy.BundleCommitFileName), marker); err != nil {
-		return errCommand
-	}
-	if err := hooks.reach(bundleAfterWriteCommitMarker, paths.final); err != nil {
-		return errCommand
-	}
-	if err := syncBundleDirectory(paths.final); err != nil {
-		return errCommand
-	}
-	if err := hooks.reach(bundleAfterSyncCommittedDirectory, paths.final); err != nil {
-		return errCommand
-	}
-	if err := syncBundleDirectory(paths.parent); err != nil {
-		return errCommand
-	}
-	if err := hooks.reach(bundleAfterSyncParent, paths.final); err != nil {
 		return errCommand
 	}
 	return nil
 }
 
-func writePrivateBundleFile(path string, data []byte) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return errCommand
+func mapBundleCheckpoint(checkpoint bundlefs.WriteCheckpoint) (bundleCheckpoint, bool) {
+	switch checkpoint {
+	case bundlefs.WriteAfterDirectoryAcquired:
+		return bundleAfterCreateDirectory, true
+	case bundlefs.WriteAfterPolicySynced:
+		return bundleAfterWritePolicy, true
+	case bundlefs.WriteAfterAuditSynced:
+		return bundleAfterWriteAudit, true
+	case bundlefs.WriteAfterDataDirectorySynced:
+		return bundleAfterSyncDataDirectory, true
+	case bundlefs.WriteAfterParentSynced:
+		return bundleAfterSyncParent, true
+	case bundlefs.WriteAfterCommitSynced:
+		return bundleAfterWriteCommitMarker, true
+	case bundlefs.WriteAfterCommittedDirectorySynced:
+		return bundleAfterSyncCommittedDirectory, true
+	default:
+		return "", false
 	}
-	closed := false
-	defer func() {
-		if !closed {
-			_ = file.Close()
-		}
-	}()
-	if err := file.Chmod(0o600); err != nil {
-		return errCommand
-	}
-	if _, err := file.Write(data); err != nil {
-		return errCommand
-	}
-	if err := file.Sync(); err != nil {
-		return errCommand
-	}
-	if err := file.Close(); err != nil {
-		return errCommand
-	}
-	closed = true
-	return nil
-}
-
-func syncBundleDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return errCommand
-	}
-	syncErr := directory.Sync()
-	closeErr := directory.Close()
-	if syncErr != nil && !isUnsupportedBundleDirectorySyncError(syncErr) {
-		return errCommand
-	}
-	if closeErr != nil {
-		return errCommand
-	}
-	return nil
 }
