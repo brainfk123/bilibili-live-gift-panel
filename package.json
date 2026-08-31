@@ -24,6 +24,8 @@
     "test:hosted-mysql": "node scripts/test-hosted-mysql.mjs",
     "build:update-api": "node scripts/build-update-api.mjs",
     "test": "vitest run",
+    "test:ci-scope": "vitest run tests/ci-scope.test.ts",
+    "ci:scope": "node scripts/ci-scope.mjs",
     "test:hosted": "vitest run tests/hosted-build.test.ts",
     "typecheck": "tsc --noEmit"
   },
