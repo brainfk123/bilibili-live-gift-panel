@@ -55,6 +55,11 @@ func TestPublisherPolicyRejectsInvalidDocuments(t *testing.T) {
 		{"leading zero major", strings.Replace(valid, "v0.4.12", "v00.4.12", 1), pinnedPolicyTime, "policy_invalid"},
 		{"leading zero minor", strings.Replace(valid, "v0.4.12", "v0.04.12", 1), pinnedPolicyTime, "policy_invalid"},
 		{"leading zero patch", strings.Replace(valid, "v0.4.12", "v0.4.012", 1), pinnedPolicyTime, "policy_invalid"},
+		{"leading zero numeric prerelease", strings.Replace(valid, "v0.4.12", "v1.2.3-01", 1), pinnedPolicyTime, "policy_invalid"},
+		{"leading zero numeric prerelease segment", strings.Replace(valid, "v0.4.12", "v1.2.3-1.02", 1), pinnedPolicyTime, "policy_invalid"},
+		{"zero numeric prerelease is valid", strings.Replace(valid, "v0.4.12", "v1.2.3-0", 1), pinnedPolicyTime, "policy_signature_invalid"},
+		{"nonzero numeric prerelease is valid", strings.Replace(valid, "v0.4.12", "v1.2.3-1", 1), pinnedPolicyTime, "policy_signature_invalid"},
+		{"build metadata leading zero is valid", strings.Replace(valid, "v0.4.12", "v1.2.3+001", 1), pinnedPolicyTime, "policy_signature_invalid"},
 		{"conflicting publisher scope", conflictingPublisherPolicyFixture(), pinnedPolicyTime, "policy_invalid"},
 		{"expired policy", valid, time.Date(2031, 1, 1, 0, 0, 0, 0, time.UTC), "policy_expired"},
 	}

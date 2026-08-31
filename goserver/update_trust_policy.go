@@ -203,7 +203,9 @@ type publisherPolicyTagScope struct {
 	tag            string
 }
 
-var canonicalPolicyTag = regexp.MustCompile(`^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$`)
+const canonicalNumericPrereleaseIdentifier = `(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)`
+
+var canonicalPolicyTag = regexp.MustCompile(`^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-` + canonicalNumericPrereleaseIdentifier + `(?:\.` + canonicalNumericPrereleaseIdentifier + `)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
 var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func validatePublisherRule(rule updatePublisherRule) error {
