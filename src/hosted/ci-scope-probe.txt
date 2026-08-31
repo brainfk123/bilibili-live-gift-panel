@@ -1,0 +1,1 @@
+CI scope probe: hosted-only.
