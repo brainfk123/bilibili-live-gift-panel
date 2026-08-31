@@ -1280,6 +1280,184 @@ func TestUpdaterPendingPolicyMetadataTamperRequiresRedownload(t *testing.T) {
 	}
 }
 
+func TestUpdaterEnrollmentFloorRejectsCombinedSchemaAndVerificationDeletion(t *testing.T) {
+	mutations := []struct {
+		name string
+		edit func(map[string]any)
+	}{
+		{name: "schema and entire verification", edit: func(document map[string]any) {
+			delete(document, "schemaVersion")
+			delete(document, "verification")
+		}},
+		{name: "schema and provenance only", edit: func(document map[string]any) {
+			delete(document, "schemaVersion")
+			delete(document["verification"].(map[string]any), "provenance")
+		}},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			fixture := newDurablePolicyPendingFixture(t, testTrustNow.Add(time.Hour))
+			metadataPath := filepath.Join(fixture.UpdatesDir, "pending-update.json")
+			if _, err := os.Stat(pendingUpdateEnrollmentFloorPath(metadataPath)); err != nil {
+				t.Fatalf("durable enrollment floor missing before tamper: %v", err)
+			}
+			data, err := os.ReadFile(metadataPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document map[string]any
+			if err := json.Unmarshal(data, &document); err != nil {
+				t.Fatal(err)
+			}
+			mutation.edit(document)
+			tampered, err := json.Marshal(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(metadataPath, tampered, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			restarted := restartDurablePolicyPendingFixture(t, fixture)
+			if restarted.HasPending() || restarted.Status().State == "ready" {
+				t.Fatalf("combined deletion reset enrollment floor: status=%#v", restarted.Status())
+			}
+			if _, err := os.Stat(metadataPath); !os.IsNotExist(err) {
+				t.Fatalf("stale metadata survived combined deletion: %v", err)
+			}
+		})
+	}
+}
+
+func TestUpdaterEnrollmentFloorMigrationInterruptionFailsClosed(t *testing.T) {
+	tests := []struct {
+		name       string
+		failMarker bool
+	}{
+		{name: "floor write fails", failMarker: true},
+		{name: "metadata migration fails after floor", failMarker: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			updatesDir := filepath.Join(root, "updates")
+			if err := os.MkdirAll(updatesDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			binary := []byte("genuine pre-enrollment pending")
+			pendingPath := filepath.Join(updatesDir, "gift-panel-pending.exe")
+			targetPath := filepath.Join(root, "gift-panel.exe")
+			if err := os.WriteFile(pendingPath, binary, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			digest := sha256.Sum256(binary)
+			legacy := pendingUpdate{Version: "1.1.0", Size: int64(len(binary)), SHA256: hex.EncodeToString(digest[:]), PendingPath: pendingPath, TargetPath: targetPath}
+			legacyBytes, err := json.Marshal(legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadataPath := filepath.Join(updatesDir, "pending-update.json")
+			if err := os.WriteFile(metadataPath, legacyBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			previousFloorWrite := writePendingEnrollmentFloorAtomically
+			previousMetadataWrite := writePendingMetadataAtomically
+			if test.failMarker {
+				writePendingEnrollmentFloorAtomically = func(string, []byte) error { return errors.New(`recognizable C:\Users\private-user\floor write`) }
+			} else {
+				writePendingMetadataAtomically = func(string, []byte) error { return errors.New(`recognizable C:\Users\private-user\metadata write`) }
+			}
+			t.Cleanup(func() {
+				writePendingEnrollmentFloorAtomically = previousFloorWrite
+				writePendingMetadataAtomically = previousMetadataWrite
+			})
+			store := &updateTrustStore{Root: testRootPublicKey(t), EmbeddedPolicy: readFixture(t, "policy-epoch-1.json"), CacheDir: filepath.Join(updatesDir, "update-trust")}
+			updater := newAutoUpdater(autoUpdaterOptions{
+				CurrentVersion: "1.0.0", ExecutablePath: targetPath, UpdatesDir: updatesDir,
+				ReleaseSources: []updateReleaseSource{{Name: "GitHub", URL: updateGitHubReleaseURL, GitHub: true}},
+				TrustStore:     store, Now: func() time.Time { return testTrustNow },
+			})
+			if updater.HasPending() || updater.Status().State == "ready" {
+				t.Fatalf("interrupted migration remained retryable: status=%#v", updater.Status())
+			}
+			for _, path := range []string{pendingPath, metadataPath} {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("interrupted migration artifact survived at %q: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
+func TestUpdaterEnrollmentFloorInstallMigrationFailureClearsPending(t *testing.T) {
+	root := t.TempDir()
+	updatesDir := filepath.Join(root, "updates")
+	if err := os.MkdirAll(updatesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binary := []byte("in-memory genuine pre-enrollment pending")
+	pendingPath := filepath.Join(updatesDir, "gift-panel-pending.exe")
+	targetPath := filepath.Join(root, "gift-panel.exe")
+	if err := os.WriteFile(pendingPath, binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(binary)
+	pending := pendingUpdate{Version: "1.1.0", Size: int64(len(binary)), SHA256: hex.EncodeToString(digest[:]), PendingPath: pendingPath, TargetPath: targetPath}
+	metadata, err := json.Marshal(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := filepath.Join(updatesDir, "pending-update.json")
+	if err := os.WriteFile(metadataPath, metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &updateTrustStore{Root: testRootPublicKey(t), EmbeddedPolicy: readFixture(t, "policy-epoch-1.json"), CacheDir: filepath.Join(updatesDir, "update-trust")}
+	updater := newAutoUpdater(autoUpdaterOptions{
+		CurrentVersion: "1.0.0", ExecutablePath: targetPath, UpdatesDir: updatesDir,
+		ReleaseSources: []updateReleaseSource{{Name: "GitHub", URL: updateGitHubReleaseURL, GitHub: true}},
+		TrustStore:     store, Now: func() time.Time { return testTrustNow },
+	})
+	// Recreate the genuine pre-enrollment in-memory state after constructor restore
+	// so this test exercises the InstallOnExit migration boundary itself.
+	if err := os.WriteFile(pendingPath, binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadataPath, metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(pendingUpdateEnrollmentFloorPath(metadataPath)); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	updater.pending = &pending
+	previousFloorWrite := writePendingEnrollmentFloorAtomically
+	writePendingEnrollmentFloorAtomically = func(string, []byte) error { return errors.New("floor unavailable") }
+	t.Cleanup(func() { writePendingEnrollmentFloorAtomically = previousFloorWrite })
+
+	if err := updater.InstallOnExit(false); err == nil {
+		t.Fatal("InstallOnExit accepted interrupted enrollment-floor migration")
+	}
+	if updater.HasPending() {
+		t.Fatal("InstallOnExit retained pending after enrollment-floor migration failure")
+	}
+	for _, path := range []string{pendingPath, metadataPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("InstallOnExit migration failure left %q: %v", path, err)
+		}
+	}
+}
+
+func restartDurablePolicyPendingFixture(t testing.TB, fixture durablePolicyPendingFixture) *autoUpdater {
+	t.Helper()
+	restartedStore := &updateTrustStore{Root: &fixture.Key.PublicKey, EmbeddedPolicy: fixture.Policy, CacheDir: fixture.Store.CacheDir}
+	return newAutoUpdater(autoUpdaterOptions{
+		CurrentVersion: "0.4.11", ExecutablePath: fixture.TargetPath, UpdatesDir: fixture.UpdatesDir,
+		ReleaseSources: []updateReleaseSource{fixture.Source}, AssetName: updateAssetName,
+		TrustStore: restartedStore, Now: func() time.Time { return testTrustNow },
+		InspectAuthenticode: func(string) (inspectedUpdateCertificate, error) {
+			return inspectedUpdateCertificate{LegalIdentity: fixture.Identity}, nil
+		},
+	})
+}
+
 type durablePolicyPendingFixture struct {
 	Updater    *autoUpdater
 	Store      *updateTrustStore

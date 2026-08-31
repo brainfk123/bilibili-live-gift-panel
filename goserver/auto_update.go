@@ -47,6 +47,18 @@ func boundedUpdateResult(err error, fallback string) error {
 	return updateResultError(fallback)
 }
 
+func pendingFailureRequiresRedownload(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch boundedUpdateResult(err, "").Error() {
+	case "pending_policy_context_changed", "pending_verification_invalid", "pending_metadata_invalid", "pending_metadata_unavailable", "pending_enrollment_floor_invalid", "artifact_verification_failed":
+		return true
+	default:
+		return false
+	}
+}
+
 func logUpdateResult(err error) {
 	if err == nil {
 		return
@@ -59,29 +71,33 @@ func pendingUsesSignedPolicy(pending pendingUpdate) bool {
 }
 
 func logPendingUpdateDiagnostic(pending pendingUpdate, legacyPrefix string, err error, enrollmentCode string) {
-	if pendingUsesSignedPolicy(pending) {
-		logUpdateResult(boundedUpdateResult(err, enrollmentCode))
+	if pending.legacyDiagnosticsApproved && pending.SchemaVersion == pendingUpdateSchemaVersion &&
+		(pending.Verification.Provenance == pendingVerificationLegacyMigrated || pending.Verification.Provenance == pendingVerificationLegacyCompatibility) {
+		_, _ = fmt.Fprintf(os.Stderr, "%s：%v\n", legacyPrefix, err)
 		return
 	}
-	_, _ = fmt.Fprintf(os.Stderr, "%s：%v\n", legacyPrefix, err)
+	logUpdateResult(boundedUpdateResult(err, enrollmentCode))
 }
 
 const (
-	updateGitHubReleaseURL     = "https://github.com/brainfk123/bilibili-live-gift-panel/releases/latest/download/gift-panel-update.json"
-	updateGitHubTrustURL       = "https://raw.githubusercontent.com/brainfk123/bilibili-live-gift-panel/publisher-trust/gift-panel-publisher-policy.json"
-	updateReleaseURL           = updateGitHubReleaseURL
-	updateAssetName            = "gift-panel-windows-x64.exe"
-	updateMaxBytes             = int64(256 << 20)
-	updateCheckPeriod          = 6 * time.Hour
-	updateSourceTimeout        = 20 * time.Second
-	updateVerifyNoticeWait     = 300 * time.Millisecond
-	updateInstallCountdown     = 3 * time.Second
-	updateChecksumMaxBytes     = int64(4096)
-	updateInstalledMarker      = "installed-update.json"
-	updateCleanupAttempts      = 3
-	updateCleanupRetryWait     = 10 * time.Millisecond
-	pendingUpdateSchemaVersion = 2
+	updateGitHubReleaseURL               = "https://github.com/brainfk123/bilibili-live-gift-panel/releases/latest/download/gift-panel-update.json"
+	updateGitHubTrustURL                 = "https://raw.githubusercontent.com/brainfk123/bilibili-live-gift-panel/publisher-trust/gift-panel-publisher-policy.json"
+	updateReleaseURL                     = updateGitHubReleaseURL
+	updateAssetName                      = "gift-panel-windows-x64.exe"
+	updateMaxBytes                       = int64(256 << 20)
+	updateCheckPeriod                    = 6 * time.Hour
+	updateSourceTimeout                  = 20 * time.Second
+	updateVerifyNoticeWait               = 300 * time.Millisecond
+	updateInstallCountdown               = 3 * time.Second
+	updateChecksumMaxBytes               = int64(4096)
+	updateInstalledMarker                = "installed-update.json"
+	updateCleanupAttempts                = 3
+	updateCleanupRetryWait               = 10 * time.Millisecond
+	pendingUpdateSchemaVersion           = 2
+	pendingUpdateEnrollmentFloorFilename = "pending-update-enrollment-floor.json"
 )
+
+var pendingUpdateEnrollmentFloorBytes = []byte("{\"schemaVersion\":2,\"enrollmentRequired\":true}\n")
 
 const (
 	pendingVerificationLegacyMigrated      = "legacy-migrated"
@@ -90,11 +106,13 @@ const (
 )
 
 var (
-	errUpdateArtifactCleanup      = errors.New("更新文件清理失败")
-	errPendingExecutableCleanup   = errors.New("待安装更新可执行文件清理失败")
-	startUpdatedTargetExecutable  = startDetachedExecutable
-	applyPendingUpdate            = applyDownloadedUpdate
-	pendingUpdateVerifierForBuild = defaultPendingUpdateVerifier
+	errUpdateArtifactCleanup              = errors.New("更新文件清理失败")
+	errPendingExecutableCleanup           = errors.New("待安装更新可执行文件清理失败")
+	startUpdatedTargetExecutable          = startDetachedExecutable
+	applyPendingUpdate                    = applyDownloadedUpdate
+	pendingUpdateVerifierForBuild         = defaultPendingUpdateVerifier
+	writePendingEnrollmentFloorAtomically = writeFileAtomically
+	writePendingMetadataAtomically        = writeFileAtomically
 )
 
 type updateStatus struct {
@@ -125,15 +143,16 @@ type githubAsset struct {
 }
 
 type pendingUpdate struct {
-	SchemaVersion int                       `json:"schemaVersion"`
-	Version       string                    `json:"version"`
-	Tag           string                    `json:"tag,omitempty"`
-	Channel       updateChannel             `json:"channel,omitempty"`
-	Size          int64                     `json:"size"`
-	SHA256        string                    `json:"sha256"`
-	PendingPath   string                    `json:"pendingPath"`
-	TargetPath    string                    `json:"targetPath"`
-	Verification  pendingUpdateVerification `json:"verification"`
+	SchemaVersion             int                       `json:"schemaVersion"`
+	Version                   string                    `json:"version"`
+	Tag                       string                    `json:"tag,omitempty"`
+	Channel                   updateChannel             `json:"channel,omitempty"`
+	Size                      int64                     `json:"size"`
+	SHA256                    string                    `json:"sha256"`
+	PendingPath               string                    `json:"pendingPath"`
+	TargetPath                string                    `json:"targetPath"`
+	Verification              pendingUpdateVerification `json:"verification"`
+	legacyDiagnosticsApproved bool
 }
 
 type pendingUpdateVerification struct {
@@ -349,6 +368,10 @@ func defaultEmbeddedUpdateTrust(cacheDir string, now func() time.Time) (*updateT
 		return &updateTrustStore{Root: root, EmbeddedPolicy: policy, CacheDir: cacheDir, Now: now}, sources, policyError("policy_embedded_invalid")
 	}
 	return &updateTrustStore{Root: root, EmbeddedPolicy: policy, CacheDir: cacheDir, Now: now}, sources, nil
+}
+
+func embeddedUpdateTrustConfigured() bool {
+	return strings.TrimSpace(updateTrustRootSPKIBase64) != "" || strings.TrimSpace(updateTrustBootstrapPolicyBase64) != ""
 }
 
 func defaultUpdateTrustSources() []updateTrustSource {
@@ -622,15 +645,35 @@ func (updater *autoUpdater) InstallOnExit(restart bool) error {
 		return nil
 	}
 	normalized, migrated, metadataErr := normalizePendingUpdateMetadata(*pending)
-	if metadataErr != nil || migrated && updater.writePendingMetadata(normalized) != nil {
-		logUpdateResult(updateResultError("pending_verification_invalid"))
-		return errors.New("待安装更新验证上下文无效")
+	if metadataErr == nil && migrated {
+		metadataErr = updater.writePendingMetadata(normalized)
+	}
+	if metadataErr != nil {
+		resultErr := boundedUpdateResult(metadataErr, "pending_verification_invalid")
+		logUpdateResult(resultErr)
+		if cleanupErr := updater.cleanupPendingUpdate(*pending); cleanupErr != nil {
+			logUpdateResult(updateResultError("artifact_cleanup_failed"))
+			return updateResultError("artifact_cleanup_failed")
+		}
+		updater.mu.Lock()
+		updater.pending = nil
+		updater.mu.Unlock()
+		return resultErr
 	}
 	if migrated {
 		pending = &normalized
 		updater.mu.Lock()
 		updater.pending = pending
 		updater.mu.Unlock()
+	}
+	if pending.Verification.Provenance == pendingVerificationLegacyMigrated || pending.Verification.Provenance == pendingVerificationLegacyCompatibility {
+		if updater.trustStore != nil {
+			if err := ensurePendingUpdateEnrollmentFloor(updater.metadataPath()); err != nil {
+				logUpdateResult(err)
+				return errors.New("待安装更新验证上下文无效")
+			}
+		}
+		pending.legacyDiagnosticsApproved = true
 	}
 	// This revalidation narrows accidental replacement and ordinary tampering windows.
 	// A malicious process running as the same user can still race path-based checks;
@@ -641,11 +684,7 @@ func (updater *autoUpdater) InstallOnExit(restart bool) error {
 		verificationErr = verifyPendingExecutable(*pending, verifyExecutable)
 	}
 	if verificationErr != nil {
-		if pending.Verification.Provenance == pendingVerificationSignedPolicy {
-			logUpdateResult(boundedUpdateResult(verificationErr, "artifact_verification_failed"))
-		} else {
-			_, _ = fmt.Fprintf(os.Stderr, "待安装更新执行前安全校验失败：%v\n", verificationErr)
-		}
+		logPendingUpdateDiagnostic(*pending, "待安装更新执行前安全校验失败", verificationErr, "artifact_verification_failed")
 		cleanupErr := updater.cleanupPendingUpdate(*pending)
 		if !errors.Is(cleanupErr, errPendingExecutableCleanup) {
 			updater.mu.Lock()
@@ -670,6 +709,21 @@ func (updater *autoUpdater) InstallOnExit(restart bool) error {
 	}
 	metadataPath := updater.metadataPath()
 	if err := updater.launchInstaller(metadataPath, os.Getpid(), restart); err != nil {
+		resultErr := boundedUpdateResult(err, "installer_launch_failed")
+		if pendingFailureRequiresRedownload(resultErr) {
+			cleanupErr := updater.cleanupPendingUpdate(*pending)
+			if cleanupErr != nil {
+				logPendingUpdateDiagnostic(*pending, "更新验证上下文变化后的清理诊断", cleanupErr, "artifact_cleanup_failed")
+				updater.setStatus("error", pending.Version, "更新验证上下文已变化，待安装文件清理失败。", 0, false)
+				return updateResultError("artifact_cleanup_failed")
+			}
+			updater.mu.Lock()
+			updater.pending = nil
+			updater.mu.Unlock()
+			updater.setStatus("error", pending.Version, "更新验证上下文已变化，需要重新下载。", 0, false)
+			logUpdateResult(resultErr)
+			return resultErr
+		}
 		logPendingUpdateDiagnostic(*pending, "启动更新替换器诊断", err, "installer_launch_failed")
 		return errors.New("启动更新替换器失败")
 	}
@@ -1429,17 +1483,23 @@ func writeInstalledUpdateMarker(metadataPath, version string) error {
 
 func (updater *autoUpdater) writePendingMetadata(pending pendingUpdate) error {
 	var err error
-	pending, _, err = normalizePendingUpdateMetadata(pending)
+	pending, migrated, err := normalizePendingUpdateMetadata(pending)
 	if err != nil {
 		return err
+	}
+	requiresFloor := pendingUsesSignedPolicy(pending) || updater.trustStore != nil && (migrated || pending.Verification.Provenance == pendingVerificationLegacyMigrated || pending.Verification.Provenance == pendingVerificationLegacyCompatibility)
+	if requiresFloor {
+		if err := ensurePendingUpdateEnrollmentFloor(updater.metadataPath()); err != nil {
+			return err
+		}
 	}
 	data, err := json.MarshalIndent(pending, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	if err := writeFileAtomically(updater.metadataPath(), data); err != nil {
-		return fmt.Errorf("保存更新状态失败：%w", err)
+	if err := writePendingMetadataAtomically(updater.metadataPath(), data); err != nil {
+		return updateResultError("pending_metadata_write_failed")
 	}
 	return nil
 }
@@ -1458,14 +1518,64 @@ func decodePendingUpdateMetadata(data []byte) (pendingUpdate, bool, error) {
 	return normalizePendingUpdateMetadata(pending)
 }
 
-func readPendingUpdateMetadata(path string) (pendingUpdate, error) {
+func pendingUpdateEnrollmentFloorPath(metadataPath string) string {
+	return filepath.Join(filepath.Dir(metadataPath), pendingUpdateEnrollmentFloorFilename)
+}
+
+func readPendingUpdateEnrollmentFloor(metadataPath string) (bool, error) {
+	data, err := os.ReadFile(pendingUpdateEnrollmentFloorPath(metadataPath))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil || string(data) != string(pendingUpdateEnrollmentFloorBytes) {
+		return false, updateResultError("pending_enrollment_floor_invalid")
+	}
+	return true, nil
+}
+
+func ensurePendingUpdateEnrollmentFloor(metadataPath string) error {
+	exists, err := readPendingUpdateEnrollmentFloor(metadataPath)
+	if err != nil || exists {
+		return err
+	}
+	if err := writePendingEnrollmentFloorAtomically(pendingUpdateEnrollmentFloorPath(metadataPath), pendingUpdateEnrollmentFloorBytes); err != nil {
+		return updateResultError("pending_enrollment_floor_write_failed")
+	}
+	exists, err = readPendingUpdateEnrollmentFloor(metadataPath)
+	if err != nil || !exists {
+		return updateResultError("pending_enrollment_floor_write_failed")
+	}
+	return nil
+}
+
+func readPendingUpdateMetadata(path string, enrollmentRequired bool) (pendingUpdate, error) {
+	floorExists, err := readPendingUpdateEnrollmentFloor(path)
+	if err != nil {
+		return pendingUpdate{}, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return pendingUpdate{}, updateResultError("pending_metadata_unavailable")
 	}
+	var schema struct {
+		SchemaVersion int `json:"schemaVersion"`
+	}
+	if err := json.Unmarshal(data, &schema); err != nil {
+		return pendingUpdate{}, updateResultError("pending_metadata_invalid")
+	}
+	if schema.SchemaVersion == 0 && floorExists {
+		return pendingUpdate{}, updateResultError("pending_verification_invalid")
+	}
 	pending, migrated, err := decodePendingUpdateMetadata(data)
 	if err != nil {
 		return pendingUpdate{}, err
+	}
+	requiresFloor := enrollmentRequired || pendingUsesSignedPolicy(pending)
+	if requiresFloor && !floorExists {
+		if err := ensurePendingUpdateEnrollmentFloor(path); err != nil {
+			return pendingUpdate{}, err
+		}
+		floorExists = true
 	}
 	if migrated {
 		encoded, err := json.MarshalIndent(pending, "", "  ")
@@ -1473,9 +1583,15 @@ func readPendingUpdateMetadata(path string) (pendingUpdate, error) {
 			return pendingUpdate{}, updateResultError("pending_metadata_invalid")
 		}
 		encoded = append(encoded, '\n')
-		if err := writeFileAtomically(path, encoded); err != nil {
+		if enrollmentRequired && !floorExists {
+			return pendingUpdate{}, updateResultError("pending_enrollment_floor_write_failed")
+		}
+		if err := writePendingMetadataAtomically(path, encoded); err != nil {
 			return pendingUpdate{}, updateResultError("pending_metadata_migration_failed")
 		}
+	}
+	if pending.Verification.Provenance == pendingVerificationLegacyMigrated || pending.Verification.Provenance == pendingVerificationLegacyCompatibility {
+		pending.legacyDiagnosticsApproved = true
 	}
 	return pending, nil
 }
@@ -1526,20 +1642,14 @@ func validatePendingUpdateVerification(pending pendingUpdate) error {
 }
 
 func (updater *autoUpdater) restorePendingUpdate() {
-	data, err := os.ReadFile(updater.metadataPath())
-	if err != nil {
+	if _, err := os.Stat(updater.metadataPath()); errors.Is(err, os.ErrNotExist) {
 		return
 	}
-	pending, migrated, decodeErr := decodePendingUpdateMetadata(data)
+	pending, decodeErr := readPendingUpdateMetadata(updater.metadataPath(), updater.trustStore != nil)
 	if decodeErr != nil || pending.PendingPath != filepath.Join(updater.updatesDir, "gift-panel-pending.exe") || pending.TargetPath != updater.executablePath {
+		logPendingUpdateDiagnostic(pending, "恢复待安装更新元数据诊断", decodeErr, "pending_metadata_invalid")
 		updater.cleanupRestoredPending(pending)
 		return
-	}
-	if migrated {
-		if err := updater.writePendingMetadata(pending); err != nil {
-			updater.cleanupRestoredPending(pending)
-			return
-		}
 	}
 	comparison, versionErr := compareStableVersions(pending.Version, updater.currentVersion)
 	if versionErr != nil || comparison <= 0 {
@@ -1551,11 +1661,7 @@ func (updater *autoUpdater) restorePendingUpdate() {
 		verificationErr = verifyPendingExecutable(pending, verifier)
 	}
 	if verificationErr != nil {
-		if pendingUsesSignedPolicy(pending) {
-			logUpdateResult(boundedUpdateResult(verificationErr, "artifact_verification_failed"))
-		} else {
-			_, _ = fmt.Fprintf(os.Stderr, "恢复待安装更新安全校验诊断：%v\n", verificationErr)
-		}
+		logPendingUpdateDiagnostic(pending, "恢复待安装更新安全校验诊断", verificationErr, "artifact_verification_failed")
 		if cleanupErr := updater.cleanupPendingUpdate(pending); cleanupErr != nil {
 			logUpdateResult(updateResultError("artifact_cleanup_failed"))
 			updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
@@ -1716,7 +1822,7 @@ func runUpdateHelper(args []string) (bool, error) {
 	if err != nil || waitPID <= 0 {
 		return true, errors.New("更新等待进程无效")
 	}
-	pending, err := readPendingUpdateMetadata(args[2])
+	pending, err := readPendingUpdateMetadata(args[2], embeddedUpdateTrustConfigured())
 	if err != nil {
 		logUpdateResult(boundedUpdateResult(err, "pending_metadata_invalid"))
 		if err.Error() == "pending_metadata_unavailable" {

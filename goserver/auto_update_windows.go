@@ -31,14 +31,15 @@ func isAutoUpdateSupported() bool {
 }
 
 func launchUpdateInstaller(metadataPath string, waitPID int, restart bool) error {
-	pending, err := readPendingUpdateMetadata(metadataPath)
+	pending, err := readPendingUpdateMetadata(metadataPath, embeddedUpdateTrustConfigured())
 	if err != nil {
 		return err
 	}
 	verifier, err := pendingUpdateVerifierForBuild(pending)
 	if err != nil {
-		logUpdateResult(boundedUpdateResult(err, "artifact_verification_failed"))
-		return errors.New("待安装更新安全校验失败")
+		resultErr := boundedUpdateResult(err, "artifact_verification_failed")
+		logUpdateResult(resultErr)
+		return resultErr
 	}
 	if err := verifyPendingExecutable(pending, verifier); err != nil {
 		logPendingUpdateDiagnostic(pending, "启动更新替换器前安全校验诊断", err, "artifact_verification_failed")
@@ -93,8 +94,9 @@ func replaceDownloadedExecutable(self string, pending pendingUpdate, waitPID int
 	}
 	verifier, err := pendingUpdateVerifierForBuild(pending)
 	if err != nil {
-		logUpdateResult(boundedUpdateResult(err, "artifact_verification_failed"))
-		return errors.New("待安装文件安全校验失败")
+		resultErr := boundedUpdateResult(err, "artifact_verification_failed")
+		logUpdateResult(resultErr)
+		return resultErr
 	}
 	if err := verifyPendingExecutable(pending, verifier); err != nil {
 		logPendingUpdateDiagnostic(pending, "更新替换器源文件安全校验诊断", err, "artifact_verification_failed")

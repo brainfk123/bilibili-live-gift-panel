@@ -5,6 +5,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -582,6 +583,143 @@ func TestEnrollmentInstallHelperAndRestartDiagnosticsAreBounded(t *testing.T) {
 	})
 }
 
+func TestEnrollmentContextChangeBeforeWindowsLaunchClearsPending(t *testing.T) {
+	fixture := newDurablePolicyPendingFixture(t, testTrustNow.Add(time.Hour))
+	previousResolver := pendingUpdateVerifierForBuild
+	pendingUpdateVerifierForBuild = func(pendingUpdate) (func(string) error, error) {
+		return nil, updateResultError("pending_policy_context_changed")
+	}
+	t.Cleanup(func() { pendingUpdateVerifierForBuild = previousResolver })
+	fixture.Updater.launchInstaller = launchUpdateInstaller
+
+	err := fixture.Updater.InstallOnExit(false)
+	assertUpdateCode(t, err, "pending_policy_context_changed")
+	if fixture.Updater.HasPending() {
+		t.Fatal("context-changed pending remained in memory")
+	}
+	for _, path := range []string{filepath.Join(fixture.UpdatesDir, "gift-panel-pending.exe"), filepath.Join(fixture.UpdatesDir, "pending-update.json")} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("context-changed pending survived at %q: %v", path, statErr)
+		}
+	}
+}
+
+func TestEnrollmentTransientInstallerLaunchFailureRetainsPending(t *testing.T) {
+	fixture := newDurablePolicyPendingFixture(t, testTrustNow.Add(time.Hour))
+	fixture.Updater.launchInstaller = func(string, int, bool) error { return errors.New("transient CreateProcess failure") }
+	if err := fixture.Updater.InstallOnExit(false); err == nil {
+		t.Fatal("transient installer launch failure was accepted")
+	}
+	if !fixture.Updater.HasPending() {
+		t.Fatal("transient installer launch failure discarded retryable pending state")
+	}
+	for _, path := range []string{filepath.Join(fixture.UpdatesDir, "gift-panel-pending.exe"), filepath.Join(fixture.UpdatesDir, "pending-update.json")} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("retryable pending missing at %q: %v", path, statErr)
+		}
+	}
+}
+
+func TestUnknownAndCorruptPendingDiagnosticsDefaultBounded(t *testing.T) {
+	const sensitive = `recognizable-secret C:\Users\private-user\pending.exe`
+	t.Run("zero pending helper", func(t *testing.T) {
+		diagnostics := captureAutoUpdateStderr(t, func() {
+			logPendingUpdateDiagnostic(pendingUpdate{}, "unknown pending", errors.New(sensitive), "artifact_cleanup_failed")
+		})
+		assertBoundedEnrollmentDiagnostics(t, diagnostics, sensitive, "artifact_cleanup_failed")
+	})
+
+	t.Run("restore decode and cleanup", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "private-user")
+		updatesDir := filepath.Join(root, "updates")
+		if err := os.MkdirAll(updatesDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(updatesDir, "pending-update.json"), []byte(`{"schemaVersion":2,"verification":`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(updatesDir, "gift-panel-pending.exe"), []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		diagnostics := captureAutoUpdateStderr(t, func() {
+			_ = newAutoUpdater(autoUpdaterOptions{
+				CurrentVersion: "0.4.11", ExecutablePath: filepath.Join(root, "gift-panel.exe"), UpdatesDir: updatesDir,
+				ReleaseSources: []updateReleaseSource{{Name: "GitHub", URL: updateGitHubReleaseURL, GitHub: true}},
+				RemoveFile:     func(string) error { return errors.New(sensitive) },
+			})
+		})
+		if strings.Contains(diagnostics, "recognizable-secret") || strings.Contains(diagnostics, "private-user") {
+			t.Fatalf("corrupt restore diagnostics leaked sensitive data: %q", diagnostics)
+		}
+		for _, code := range []string{"pending_metadata_invalid", "artifact_cleanup_failed"} {
+			if !strings.Contains(diagnostics, "update_result="+code) {
+				t.Fatalf("corrupt restore diagnostics = %q, want %s", diagnostics, code)
+			}
+		}
+	})
+
+	t.Run("helper corrupt floor", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "private-user")
+		updatesDir := filepath.Join(root, "updates")
+		if err := os.MkdirAll(updatesDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		metadataPath := filepath.Join(updatesDir, "pending-update.json")
+		if err := os.WriteFile(metadataPath, []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(pendingUpdateEnrollmentFloorPath(metadataPath), []byte("corrupt recognizable-secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var helperErr error
+		diagnostics := captureAutoUpdateStderr(t, func() {
+			_, helperErr = runUpdateHelper([]string{"--apply-update", "--state", metadataPath, "2147483647"})
+		})
+		if helperErr == nil || strings.Contains(diagnostics, "recognizable-secret") || strings.Contains(diagnostics, "private-user") || !strings.Contains(diagnostics, "update_result=pending_enrollment_floor_invalid") {
+			t.Fatalf("corrupt floor result = error %v, diagnostics %q", helperErr, diagnostics)
+		}
+	})
+
+	t.Run("combined deletion cleanup", func(t *testing.T) {
+		fixture := newDurablePolicyPendingFixture(t, testTrustNow.Add(time.Hour))
+		metadataPath := filepath.Join(fixture.UpdatesDir, "pending-update.json")
+		data, err := os.ReadFile(metadataPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document map[string]any
+		if err := json.Unmarshal(data, &document); err != nil {
+			t.Fatal(err)
+		}
+		delete(document, "schemaVersion")
+		delete(document, "verification")
+		tampered, err := json.Marshal(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(metadataPath, tampered, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		diagnostics := captureAutoUpdateStderr(t, func() {
+			_ = newAutoUpdater(autoUpdaterOptions{
+				CurrentVersion: "0.4.11", ExecutablePath: fixture.TargetPath, UpdatesDir: fixture.UpdatesDir,
+				ReleaseSources: []updateReleaseSource{fixture.Source}, AssetName: updateAssetName,
+				TrustStore: &updateTrustStore{Root: &fixture.Key.PublicKey, EmbeddedPolicy: fixture.Policy, CacheDir: fixture.Store.CacheDir},
+				Now:        func() time.Time { return testTrustNow },
+				RemoveFile: func(string) error { return errors.New(sensitive) },
+			})
+		})
+		if strings.Contains(diagnostics, "recognizable-secret") || strings.Contains(diagnostics, "private-user") {
+			t.Fatalf("combined deletion diagnostics leaked sensitive data: %q", diagnostics)
+		}
+		for _, code := range []string{"pending_verification_invalid", "artifact_cleanup_failed"} {
+			if !strings.Contains(diagnostics, "update_result="+code) {
+				t.Fatalf("combined deletion diagnostics = %q, want %s", diagnostics, code)
+			}
+		}
+	})
+}
+
 func writeWindowsEnrollmentPending(t testing.TB, root string) (pendingUpdate, string) {
 	t.Helper()
 	updatesDir := filepath.Join(root, "updates")
@@ -786,7 +924,7 @@ func TestStartVerifiedUpdatedExecutableRejectsTamperedTarget(t *testing.T) {
 	}
 }
 
-func TestStartVerifiedUpdatedExecutableLogsStartDetailButReturnsGenericError(t *testing.T) {
+func TestStartVerifiedUpdatedExecutableBoundsUnknownPendingStartError(t *testing.T) {
 	root := t.TempDir()
 	targetPath := filepath.Join(root, "gift-panel.exe")
 	binary := []byte("verified final executable")
@@ -811,8 +949,8 @@ func TestStartVerifiedUpdatedExecutableLogsStartDetailButReturnsGenericError(t *
 	if strings.Contains(startErr.Error(), "CreateProcess") || strings.Contains(startErr.Error(), "sensitive") {
 		t.Fatalf("user-visible error leaked restart diagnostic: %v", startErr)
 	}
-	if !strings.Contains(diagnostics, "CreateProcess") || !strings.Contains(diagnostics, "sensitive") {
-		t.Fatalf("diagnostics = %q, want raw restart cause", diagnostics)
+	if strings.Contains(diagnostics, "CreateProcess") || strings.Contains(diagnostics, "sensitive") || !strings.Contains(diagnostics, "update_result=restart_launch_failed") {
+		t.Fatalf("unknown pending restart diagnostics were not bounded: %q", diagnostics)
 	}
 }
 
