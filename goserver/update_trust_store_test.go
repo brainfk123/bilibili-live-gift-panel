@@ -136,27 +136,41 @@ func TestTrustStoreEnforcesPerSourceTimeoutForInjectedClient(t *testing.T) {
 	type resolveResult struct {
 		err error
 	}
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
 	done := make(chan resolveResult, 1)
 	go func() {
-		_, err := store.Resolve(context.Background(), updateTrustSource{Name: "domestic", URL: server.URL})
+		_, err := store.Resolve(parent, updateTrustSource{Name: "domestic", URL: server.URL})
 		done <- resolveResult{err: err}
 	}()
 
 	var result resolveResult
-	select {
-	case result = <-done:
-		close(emergencyRelease)
-	case <-time.After(250 * time.Millisecond):
-		close(emergencyRelease)
-		result = <-done
-		t.Fatalf("Background Resolve remained blocked until transport release: %v", result.err)
+	resolveDone := false
+	serverCanceled := false
+	hardCap := time.NewTimer(250 * time.Millisecond)
+	defer hardCap.Stop()
+	for !resolveDone || !serverCanceled {
+		select {
+		case result = <-done:
+			resolveDone = true
+			done = nil
+		case <-requestCanceled:
+			serverCanceled = true
+			requestCanceled = nil
+		case <-hardCap.C:
+			cancelParent()
+			close(emergencyRelease)
+			if !resolveDone {
+				select {
+				case result = <-done:
+				case <-time.After(250 * time.Millisecond):
+					t.Fatal("timed out recovering Resolve after emergency handler release")
+				}
+			}
+			t.Fatalf("per-source cancellation did not complete before hard cap: resolveDone=%t serverCanceled=%t error=%v", resolveDone, serverCanceled, result.err)
+		}
 	}
 	assertErrorCode(t, result.err, "policy_unavailable")
-	select {
-	case <-requestCanceled:
-	default:
-		t.Fatal("per-source deadline did not cancel the real HTTP request")
-	}
 }
 
 func TestTrustStoreParentDeadlineWinsOverPerSourceTimeout(t *testing.T) {
