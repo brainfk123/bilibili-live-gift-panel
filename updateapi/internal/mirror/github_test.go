@@ -135,33 +135,55 @@ func TestGitHubReleaseSourceByTag304ReturnsNoMetadata(t *testing.T) {
 	}
 }
 
-func TestGitHubReleaseSourceRejects304WithoutConditionalETag(t *testing.T) {
+func TestGitHubReleaseSourceRequiresStrictConditionalETagFor304(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Header.Get("If-None-Match") != "" {
-			t.Fatalf("unexpected If-None-Match = %q", request.Header.Get("If-None-Match"))
-		}
 		writer.WriteHeader(http.StatusNotModified)
 	}))
 	defer server.Close()
 
-	tests := []struct {
-		name string
-		call func(*GitHubReleaseSource) (LatestResult, error)
+	values := []struct {
+		name    string
+		etag    string
+		wantErr bool
 	}{
-		{name: "latest", call: func(source *GitHubReleaseSource) (LatestResult, error) {
-			return source.Latest(context.Background(), "")
+		{name: "missing", etag: "", wantErr: true},
+		{name: "whitespace", etag: "   ", wantErr: true},
+		{name: "bare token", etag: "opaque-token", wantErr: true},
+		{name: "unterminated quote", etag: `"unterminated`, wantErr: true},
+		{name: "invalid weak form", etag: `W/opaque-token`, wantErr: true},
+		{name: "control character", etag: "\"bad\x01value\"", wantErr: true},
+		{name: "strong", etag: `"strong"`},
+		{name: "weak", etag: `W/"weak"`},
+	}
+	methods := []struct {
+		name string
+		call func(*GitHubReleaseSource, string) (LatestResult, error)
+	}{
+		{name: "latest", call: func(source *GitHubReleaseSource, etag string) (LatestResult, error) {
+			return source.Latest(context.Background(), etag)
 		}},
-		{name: "by tag", call: func(source *GitHubReleaseSource) (LatestResult, error) {
-			return source.ByTag(context.Background(), "v0.4.11", "")
+		{name: "by tag", call: func(source *GitHubReleaseSource, etag string) (LatestResult, error) {
+			return source.ByTag(context.Background(), "v0.4.11", etag)
 		}},
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			result, err := test.call(newGitHubReleaseSource(server.Client(), server.URL))
-			if err == nil {
-				t.Fatalf("304 without ETag returned success: %#v", result)
-			}
-		})
+	for _, method := range methods {
+		for _, value := range values {
+			t.Run(method.name+"/"+value.name, func(t *testing.T) {
+				result, err := method.call(newGitHubReleaseSource(server.Client(), server.URL), value.etag)
+				if value.wantErr {
+					if err == nil {
+						t.Fatalf("304 with invalid ETag returned success: %#v", result)
+					}
+					if value.etag != "" && strings.Contains(err.Error(), value.etag) {
+						t.Fatalf("error leaked ETag content: %v", err)
+					}
+					return
+				}
+				if err != nil || !result.NotModified {
+					t.Fatalf("304 with valid ETag result=%#v error=%v", result, err)
+				}
+			})
+		}
 	}
 }
 

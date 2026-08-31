@@ -131,6 +131,78 @@ func TestRunnerRejects304WithoutMatchingPriorStateForLatestAndByTag(t *testing.T
 	}
 }
 
+func TestRunnerRequiresStrictConditionalETagBeforePassingOrAccepting304(t *testing.T) {
+	values := []struct {
+		name    string
+		etag    string
+		wantErr bool
+	}{
+		{name: "whitespace", etag: "   ", wantErr: true},
+		{name: "bare token", etag: "opaque-token", wantErr: true},
+		{name: "unterminated quote", etag: `"unterminated`, wantErr: true},
+		{name: "invalid weak form", etag: `W/opaque-token`, wantErr: true},
+		{name: "control character", etag: "\"bad\x01value\"", wantErr: true},
+		{name: "strong", etag: `"strong"`},
+		{name: "weak", etag: `W/"weak"`},
+	}
+	channels := []struct {
+		name     string
+		options  RunOptions
+		stateTag string
+	}{
+		{name: "latest", options: RunOptions{Channel: release.ChannelStable}, stateTag: "v1.2.3"},
+		{name: "by tag", options: RunOptions{Channel: release.ChannelLegacyRushRush, Tag: "v0.4.11"}, stateTag: "v0.4.11"},
+	}
+	for _, channel := range channels {
+		for _, value := range values {
+			t.Run(channel.name+"/"+value.name, func(t *testing.T) {
+				fixture := newRunnerFixture(t)
+				fixture.state.loaded = validRunnerMirrorState(fixture)
+				fixture.state.loaded.Tag = channel.stateTag
+				fixture.state.loaded.ETag = value.etag
+				fixture.source.result = LatestResult{NotModified: true}
+
+				result, err := fixture.runner().Run(context.Background(), channel.options)
+				if value.wantErr {
+					if err == nil || StageOf(err) != StageDiscovery || result.NotModified || !result.StateInvalid {
+						t.Fatalf("invalid state result=%+v error=%v stage=%q", result, err, StageOf(err))
+					}
+					if fixture.source.etag != "" || fixture.publisher.calls != 0 || fixture.state.saveCalls != 0 {
+						t.Fatalf("invalid ETag side effects: source ETag=%q publishes=%d saves=%d", fixture.source.etag, fixture.publisher.calls, fixture.state.saveCalls)
+					}
+					return
+				}
+				if err != nil || !result.NotModified || result.StateInvalid || fixture.source.etag != value.etag {
+					t.Fatalf("valid state result=%+v error=%v source ETag=%q", result, err, fixture.source.etag)
+				}
+			})
+		}
+	}
+}
+
+func TestRunnerInvalidETagStateAllowsLaterFullRepair(t *testing.T) {
+	fixture := newRunnerFixture(t)
+	fixture.state.loaded = validRunnerMirrorState(fixture)
+	fixture.state.loaded.ETag = "opaque-token"
+	fixture.source.result = LatestResult{NotModified: true}
+
+	if result, err := fixture.runner().Run(context.Background(), RunOptions{Channel: release.ChannelStable}); err == nil || result.NotModified {
+		t.Fatalf("invalid-state 304 result=%+v error=%v", result, err)
+	}
+	if fixture.publisher.calls != 0 || fixture.state.saveCalls != 0 {
+		t.Fatalf("rejected 304 publishes=%d saves=%d", fixture.publisher.calls, fixture.state.saveCalls)
+	}
+
+	fixture.source.result = LatestResult{ETag: `"repaired"`, Release: fixture.release}
+	result, err := fixture.runner().Run(context.Background(), RunOptions{Channel: release.ChannelStable})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.StateInvalid || result.NotModified || fixture.publisher.calls != 1 || fixture.state.saveCalls != 1 || fixture.state.saved.ETag != `"repaired"` {
+		t.Fatalf("repair result=%+v publishes=%d saves=%d saved ETag=%q", result, fixture.publisher.calls, fixture.state.saveCalls, fixture.state.saved.ETag)
+	}
+}
+
 func TestRunnerRecoversCorruptFileStateThenUsesSavedETagWithoutRepublishing(t *testing.T) {
 	// Mutation caught: treating corrupt state as a cache miss only during Load still leaves Save permanently blocked.
 	fixture := newRunnerFixture(t)

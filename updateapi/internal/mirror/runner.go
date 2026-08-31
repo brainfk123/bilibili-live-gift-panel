@@ -129,9 +129,14 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunRe
 		stateInvalid = true
 	} else if err != nil {
 		return RunResult{}, runnerFailure(StageState, "", err)
-	} else if !stateBelongsToChannel(options.Channel, prior) {
-		prior = MirrorState{}
-		stateInvalid = true
+	} else if prior != (MirrorState{}) {
+		validated, validationErr := canonicalMirrorState(prior)
+		if validationErr != nil || !stateBelongsToChannel(options.Channel, validated) {
+			prior = MirrorState{}
+			stateInvalid = true
+		} else {
+			prior = validated
+		}
 	}
 
 	var latest LatestResult
