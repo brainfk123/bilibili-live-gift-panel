@@ -24,6 +24,9 @@ it('keeps every EXE retirement stage structurally evidence-gated and initially u
 it('keeps Stage B gated on migration, parity, pilot, and rollback evidence', () => {
   const block = stageBlock('B: closed-pilot-and-voluntary-migration');
   for (const gate of ['TypeScript exporter v2', 'Hosted decoder compatibility', 'media parity', 'EXE-versus-Hosted screenshots', 'migration export', 'preview', 'apply', 'seven-day rollback']) expect(block).toContain(gate);
+  expect(block).toContain('No entry is allowed');
+  expect(block).toContain('production evidence');
+  expect(block).toContain('No new EXE product capabilities.');
 });
 
 it('keeps Stage C and D support and provenance gates explicit', () => {
