@@ -16,12 +16,30 @@ const takeoverVersion = '0.0.1';
 
 const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 
+async function fetchBeforeDeadline(fetchImpl, input, init, deadline) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new Error('Windows EXE smoke request timed out');
+  const controller = new AbortController();
+  let timeout;
+  try {
+    const timedOut = new Promise((_, reject) => {
+      timeout = setTimeout(() => {
+        controller.abort();
+        reject(new Error('Windows EXE smoke request timed out'));
+      }, remaining);
+    });
+    return await Promise.race([fetchImpl(input, { ...init, signal: controller.signal }), timedOut]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function probePanel(fetchImpl, ports, deadline) {
   let lastFailure = 'unavailable';
   while (Date.now() < deadline) {
     for (const port of ports) {
       try {
-        const response = await fetchImpl('http://127.0.0.1:' + port + '/health', { redirect: 'error' });
+        const response = await fetchBeforeDeadline(fetchImpl, 'http://127.0.0.1:' + port + '/health', { redirect: 'error' }, deadline);
         if (response.status !== 200) {
           lastFailure = 'status ' + response.status;
           continue;
@@ -42,18 +60,18 @@ export async function probePanel(fetchImpl, ports, deadline) {
   throw new Error('Windows EXE smoke readiness timed out: ' + lastFailure);
 }
 
-export async function requestGracefulExit(fetchImpl, port, requestedTakeoverVersion) {
-  const response = await fetchImpl('http://127.0.0.1:' + port + '/api/instance/exit', {
+export async function requestGracefulExit(fetchImpl, port, requestedTakeoverVersion, deadline = Date.now() + 10_000) {
+  const response = await fetchBeforeDeadline(fetchImpl, 'http://127.0.0.1:' + port + '/api/instance/exit', {
     method: 'POST',
     headers: { 'X-Bilibili-Panel-Takeover': requestedTakeoverVersion },
-  });
+  }, deadline);
   if (response.status !== 202) throw new Error('Windows EXE smoke exit failed with status ' + response.status);
 }
 
-export async function validatePanelRoutes(fetchImpl, port) {
+export async function validatePanelRoutes(fetchImpl, port, deadline = Date.now() + 10_000) {
   const passed = [];
   for (const [name, path, contentType] of expectedRoutes) {
-    const response = await fetchImpl('http://127.0.0.1:' + port + path, { redirect: 'error' });
+    const response = await fetchBeforeDeadline(fetchImpl, 'http://127.0.0.1:' + port + path, { redirect: 'error' }, deadline);
     if (response.status !== 200 || !response.headers.get('content-type')?.toLowerCase().startsWith(contentType)) {
       throw new Error('Windows EXE smoke route ' + name + ' failed');
     }
@@ -72,6 +90,16 @@ async function waitForChildExit(child, deadline) {
   if (!childExited(child)) throw new Error('Windows EXE smoke child did not exit within timeout');
 }
 
+async function cleanUpChild(child, deadline) {
+  if (!child || childExited(child)) return;
+  try {
+    child.kill();
+  } catch {
+    // Cleanup must continue even when the process handle is already invalid.
+  }
+  await waitForChildExit(child, deadline).catch(() => undefined);
+}
+
 export async function smokeWindowsExecutable(options = {}) {
   const platform = options.platform ?? process.platform;
   if (platform !== 'win32') throw new Error('Windows EXE smoke can only run on Windows');
@@ -86,9 +114,12 @@ export async function smokeWindowsExecutable(options = {}) {
   const readinessTimeoutMs = options.readinessTimeoutMs ?? 30_000;
   const exitTimeoutMs = options.exitTimeoutMs ?? 10_000;
   const pollIntervalMs = options.pollIntervalMs ?? 100;
+  const requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
+  const removeTemporaryDirectory = options.removeTemporaryDirectory ?? ((path) => rm(path, { recursive: true, force: true }));
   const startedAt = new Date().toISOString();
   const temporaryLocalAppData = await createTemporaryDirectory();
   let child;
+  let removeChildErrorListener;
 
   try {
     child = spawnImpl(executablePath, [], {
@@ -96,30 +127,41 @@ export async function smokeWindowsExecutable(options = {}) {
       windowsHide: true,
       env: { ...process.env, LOCALAPPDATA: temporaryLocalAppData },
     });
+    let rejectChildError;
+    const childFailure = new Promise((_, reject) => { rejectChildError = reject; });
+    const onChildError = (error) => rejectChildError(new Error('Windows EXE smoke child failed: ' + (error instanceof Error ? error.message : String(error))));
+    child.once?.('error', onChildError);
+    removeChildErrorListener = () => child.removeListener?.('error', onChildError);
+    const withChildFailure = (operation) => Promise.race([operation, childFailure]);
     const deadline = Date.now() + readinessTimeoutMs;
     let probe;
     while (true) {
       if (childExited(child)) throw new Error('Windows EXE smoke child exited before readiness');
       try {
-        probe = await probePanel(fetchImpl, ports(), Math.min(deadline, Date.now() + pollIntervalMs));
+        probe = await withChildFailure(probePanel(fetchImpl, ports(), Math.min(deadline, Date.now() + pollIntervalMs)));
         break;
       } catch (error) {
         if (error instanceof Error && error.message.includes('foreign panel')) throw error;
+        if (error instanceof Error && error.message.startsWith('Windows EXE smoke child failed:')) throw error;
         if (Date.now() >= deadline) throw error;
       }
     }
     if (probe.version !== testVersion) throw new Error('Windows EXE smoke expected version ' + testVersion + ' but received ' + probe.version);
-    const routes = await validatePanelRoutes(fetchImpl, probe.port);
+    const routes = await withChildFailure(validatePanelRoutes(fetchImpl, probe.port, Date.now() + requestTimeoutMs));
     const sha256 = createHash('sha256').update(await readExecutable(executablePath)).digest('hex');
-    await requestGracefulExit(fetchImpl, probe.port, takeoverVersion);
-    await waitForChildExit(child, Date.now() + exitTimeoutMs);
+    await withChildFailure(requestGracefulExit(fetchImpl, probe.port, takeoverVersion, Date.now() + requestTimeoutMs));
+    await withChildFailure(waitForChildExit(child, Date.now() + exitTimeoutMs));
     const evidence = { schema: 1, version: probe.version, port: probe.port, routes, sha256, startedAt, completedAt: new Date().toISOString() };
     await mkdir(dirname(evidencePath), { recursive: true });
     await writeFile(evidencePath, JSON.stringify(evidence) + '\n', 'utf8');
     return evidence;
   } finally {
-    if (child && !childExited(child)) child.kill();
-    await rm(temporaryLocalAppData, { recursive: true, force: true });
+    removeChildErrorListener?.();
+    try {
+      await cleanUpChild(child, Date.now() + exitTimeoutMs);
+    } finally {
+      await removeTemporaryDirectory(temporaryLocalAppData);
+    }
   }
 }
 

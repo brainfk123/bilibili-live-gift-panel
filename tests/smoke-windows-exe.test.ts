@@ -1,9 +1,14 @@
 import { createServer } from 'node:http';
+import { EventEmitter } from 'node:events';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
 import { probePanel, requestGracefulExit, smokeWindowsExecutable, validatePanelRoutes } from '../scripts/smoke-windows-exe.mjs';
+
+function within<T>(promise: Promise<T>, milliseconds = 100): Promise<T> {
+  return Promise.race([promise, new Promise<T>((_resolve, reject) => setTimeout(() => reject(new Error('test deadline exceeded')), milliseconds))]);
+}
 
 it('probes pages, config API, and graceful takeover exit', async () => {
   let exited = false;
@@ -50,6 +55,69 @@ it('times out instead of accepting an unavailable port', async () => {
   await expect(probePanel(unavailableFetch, [12450], Date.now() + 20)).rejects.toThrow('timed out');
 });
 
+it('aborts never-settling health, route, and takeover requests at their deadlines', async () => {
+  const neverFetch: typeof fetch = () => new Promise<Response>(() => undefined);
+  await expect(within(probePanel(neverFetch, [12450], Date.now() + 20))).rejects.toThrow('request timed out');
+  await expect(within(validatePanelRoutes(neverFetch, 12450, Date.now() + 20))).rejects.toThrow('request timed out');
+  await expect(within(requestGracefulExit(neverFetch, 12450, '0.0.1', Date.now() + 20))).rejects.toThrow('request timed out');
+});
+
+it('turns an emitted spawn error into a controlled smoke failure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'windows-smoke-spawn-error-'));
+  const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, kill: () => true });
+  try {
+    await expect(smokeWindowsExecutable({
+      platform: 'win32', cwd: root, executablePath: join(root, 'gift-panel.exe'),
+      createTemporaryDirectory: async () => { const path = join(root, 'LOCALAPPDATA'); await mkdir(path); return path; },
+      spawnImpl: () => { setTimeout(() => child.emit('error', new Error('synthetic spawn error')), 1); return child; },
+      fetchImpl: () => new Promise<Response>(() => undefined),
+      readinessTimeoutMs: 50, exitTimeoutMs: 1, requestTimeoutMs: 50,
+    })).rejects.toThrow('child failed: synthetic spawn error');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it('waits for delayed forced cleanup before removing LOCALAPPDATA', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'windows-smoke-delayed-cleanup-'));
+  const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, kill: () => {
+    setTimeout(() => { child.exitCode = 1; child.emit('close', 1); }, 5);
+    return true;
+  } });
+  let closed = false;
+  child.once('close', () => { closed = true; });
+  try {
+    await expect(smokeWindowsExecutable({
+      platform: 'win32', cwd: root, executablePath: join(root, 'gift-panel.exe'),
+      createTemporaryDirectory: async () => { const path = join(root, 'LOCALAPPDATA'); await mkdir(path); return path; },
+      removeTemporaryDirectory: async () => expect(closed).toBe(true),
+      spawnImpl: () => child,
+      fetchImpl: async () => new Response('{"name":"bilibili-live-gift-panel","version":"0.0.1"}'),
+      readinessTimeoutMs: 50, exitTimeoutMs: 50, pollIntervalMs: 1,
+    })).rejects.toThrow('expected version 0.0.0');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it('removes LOCALAPPDATA when forced child termination fails', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'windows-smoke-failed-cleanup-'));
+  let removed = false;
+  try {
+    await expect(smokeWindowsExecutable({
+      platform: 'win32', cwd: root, executablePath: join(root, 'gift-panel.exe'),
+      createTemporaryDirectory: async () => { const path = join(root, 'LOCALAPPDATA'); await mkdir(path); return path; },
+      removeTemporaryDirectory: async () => { removed = true; },
+      spawnImpl: () => ({ exitCode: null, kill: () => { throw new Error('synthetic kill failure'); }, once: () => undefined }),
+      fetchImpl: async () => new Response('{"name":"bilibili-live-gift-panel","version":"0.0.1"}'),
+      readinessTimeoutMs: 50, exitTimeoutMs: 1, pollIntervalMs: 1,
+    })).rejects.toThrow('expected version 0.0.0');
+    expect(removed).toBe(true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 it('rejects a child that exits before readiness', async () => {
   const root = await mkdtemp(join(tmpdir(), 'windows-smoke-child-exit-'));
   try {
@@ -76,7 +144,7 @@ it('rejects a ready panel built with a version other than 0.0.0', async () => {
       createTemporaryDirectory: async () => { const path = join(root, 'LOCALAPPDATA'); await mkdir(path); return path; },
       spawnImpl: () => ({ exitCode: null, kill: () => true }),
       fetchImpl: async () => new Response('{"name":"bilibili-live-gift-panel","version":"0.0.1"}'),
-      readinessTimeoutMs: 50, pollIntervalMs: 1,
+      readinessTimeoutMs: 50, exitTimeoutMs: 1, pollIntervalMs: 1,
     })).rejects.toThrow('expected version 0.0.0');
   } finally {
     await rm(root, { recursive: true, force: true });
