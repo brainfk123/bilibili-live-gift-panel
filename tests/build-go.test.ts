@@ -1,6 +1,18 @@
 import { Buffer } from 'node:buffer';
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { resolveGoLdflags } from '../scripts/build-go.mjs';
 import { resolveUpdateAPIBaseURLHex } from '../scripts/update-api-build-config.mjs';
+
+const testTrustRootSPKIBase64 = readFileSync(
+  new URL('../goserver/testdata/update-trust/root-epoch-1-spki.der', import.meta.url),
+).toString('base64');
+const testTrustBootstrapPolicyBase64 = readFileSync(
+  new URL('../goserver/testdata/update-trust/policy-epoch-1.json', import.meta.url),
+).toString('base64');
 
 describe('build-go update API configuration', () => {
   it('allows a blank update API URL only for development builds', () => {
@@ -42,5 +54,79 @@ describe('build-go update API configuration', () => {
     ['compressed IPv6 host', 'https://[::1]'],
   ])('rejects %s', (_label, value) => {
     expect(() => resolveUpdateAPIBaseURLHex('dev', value)).toThrow(/APP_UPDATE_API_URL/);
+  });
+});
+
+describe('build-go update trust configuration', () => {
+  it('rejects a trust-enabled release without root and bootstrap policy', async () => {
+    await expect(resolveGoLdflags({
+      APP_UPDATE_TRUST_REQUIRED: '1',
+      APP_UPDATE_TRUST_ROOT_SPKI_B64: '',
+      APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: '',
+    })).rejects.toThrow('update trust root and bootstrap policy are required');
+  });
+
+  it('rejects invalid trust public inputs before invoking Go', async () => {
+    await expect(resolveGoLdflags({
+      APP_UPDATE_TRUST_REQUIRED: '1',
+      APP_UPDATE_TRUST_ROOT_SPKI_B64: 'not base64',
+      APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: testTrustBootstrapPolicyBase64,
+    })).rejects.toThrow('APP_UPDATE_TRUST_ROOT_SPKI_B64 must be canonical Base64 P-256 SPKI');
+    await expect(resolveGoLdflags({
+      APP_UPDATE_TRUST_REQUIRED: '1',
+      APP_UPDATE_TRUST_ROOT_SPKI_B64: testTrustRootSPKIBase64,
+      APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: 'not base64',
+    })).rejects.toThrow('APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64 must be canonical Base64');
+  });
+
+  it('embeds valid test-only trust values with decoded SHA-256 audit material', async () => {
+    const resolved = await resolveGoLdflags({
+      APP_UPDATE_TRUST_REQUIRED: '1',
+      APP_UPDATE_TRUST_ROOT_SPKI_B64: testTrustRootSPKIBase64,
+      APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: testTrustBootstrapPolicyBase64,
+    });
+
+    expect(resolved.ldflags).toContain(`-X main.updateTrustRootSPKIBase64=${testTrustRootSPKIBase64}`);
+    expect(resolved.ldflags).toContain(`-X main.updateTrustBootstrapPolicyBase64=${testTrustBootstrapPolicyBase64}`);
+    expect(resolved.trustDigests).toEqual({
+      rootSPKISHA256: createHash('sha256').update(Buffer.from(testTrustRootSPKIBase64, 'base64')).digest('hex'),
+      bootstrapPolicySHA256: createHash('sha256').update(Buffer.from(testTrustBootstrapPolicyBase64, 'base64')).digest('hex'),
+    });
+  });
+
+  it('does not print Base64 public inputs when Go fails after trust enrollment', () => {
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('../scripts/build-go.mjs', import.meta.url))], {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        APP_UPDATE_TRUST_REQUIRED: '1',
+        APP_UPDATE_TRUST_ROOT_SPKI_B64: testTrustRootSPKIBase64,
+        APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: testTrustBootstrapPolicyBase64,
+        GOFLAGS: '-this-forces-a-safe-build-failure',
+      },
+    });
+
+    const output = `${result.stdout}${result.stderr}`;
+    expect(result.status).not.toBe(0);
+    expect(output).toContain(createHash('sha256').update(Buffer.from(testTrustRootSPKIBase64, 'base64')).digest('hex'));
+    expect(output).not.toContain(testTrustRootSPKIBase64);
+    expect(output).not.toContain(testTrustBootstrapPolicyBase64);
+  }, 15_000);
+
+  it('does not require trust material for ordinary local builds', async () => {
+    const resolved = await resolveGoLdflags({});
+
+    expect(resolved.trustDigests).toBeNull();
+    expect(resolved.ldflags).toContain('-X main.updateTrustRootSPKIBase64=');
+    expect(resolved.ldflags).toContain('-X main.updateTrustBootstrapPolicyBase64=');
+  });
+
+  it('rejects unreviewed release publishers before compilation', async () => {
+    await expect(resolveGoLdflags({
+      APP_VERSION: '1.2.3',
+      APP_UPDATE_API_URL: 'https://updates.example.test',
+      APP_UPDATE_PUBLISHER: 'Unreviewed Publisher',
+    })).rejects.toThrow('APP_UPDATE_PUBLISHER is not a reviewed update publisher');
   });
 });
